@@ -50,12 +50,12 @@ shared_thread thread_pool::get(int type) {
 	if (pool_size > 0) {
 		tmp = this->_pool.top();
 		this->_pool.pop();
-		log_debug("thread object from pool (id=%d)", tmp->get_id());
+		log_debug("thread object from pool (id=%u)", tmp->get_id());
 	}
 	pthread_rwlock_unlock(&this->_mutex_pool);
 	if (pool_size <= 0) {
 		tmp = this->_create_thread();
-		log_debug("new thread object (id=%d)", tmp->get_id());
+		log_debug("new thread object (id=%u)", tmp->get_id());
 	}
 	tmp->setup(type);
 
@@ -95,9 +95,9 @@ int thread_pool::clean(thread* t, bool& is_pool) {
 
 	shared_thread tmp;
 	pthread_rwlock_wrlock(&this->_mutex_global_map);
-	log_debug("removing thread object from global map (type=%d, id=%d)", type, id);
+	log_debug("removing thread object from global map (type=%d, id=%u)", type, id);
 	if (this->_global_map[type].count(id) == 0) {
-		log_warning("specified id not found it global map (type=%d, id=%d)", type, id);
+		log_warning("specified id not found it global map (type=%d, id=%u)", type, id);
 		is_pool = false;
 		pthread_rwlock_unlock(&this->_mutex_global_map);
 		return 0;
@@ -108,7 +108,7 @@ int thread_pool::clean(thread* t, bool& is_pool) {
 
 	pthread_rwlock_wrlock(&this->_mutex_pool);
 	if (this->_pool.size() < this->get_max_pool_size()) {
-		log_debug("adding thread object to pool (id=%d)", id);
+		log_debug("adding thread object to pool (id=%u)", id);
 		this->_pool.push(tmp);
 		is_pool = true;
 	} else {

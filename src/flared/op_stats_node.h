@@ -1,0 +1,37 @@
+/**
+ *	op_stats_node.h
+ *
+ *	@author	Masaki Fujimoto <fujimoto@php.net>
+ *
+ *	$Id$
+ */
+#ifndef __OP_STATS_NODE_H__
+#define __OP_STATS_NODE_H__
+
+#include <sstream>
+
+#include "op_stats.h"
+
+namespace gree {
+namespace flare {
+
+/**
+ *	opcode class (stats)
+ */
+class op_stats_node : public op_stats {
+protected:
+
+public:
+	op_stats_node(shared_connection c);
+	virtual ~op_stats_node();
+
+protected:
+	virtual int _parse_server_parameter();
+	virtual int _run_server();
+};
+
+}	// namespace flare
+}	// namespace gree
+
+#endif // __OP_STATS_NODE_H__
+// vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

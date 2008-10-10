@@ -1,0 +1,12 @@
+Source: tokyocabinet
+Priority: extra
+Maintainer: Masaki Fujimoto <fujimoto@php.net>
+Build-Depends: debhelper (>= 5), autotools-dev
+Standards-Version: 3.7.2
+Section: libs
+
+Package: tokyocabinet-dev
+Section: libdevel
+Architecture: any
+Depends:
+Description: high performance DBM library

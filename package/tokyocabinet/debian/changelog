@@ -1,0 +1,12 @@
+tokyocabinet (1.2.12-1) unstable; urgency=low
+
+  * 1.2.12
+
+ -- fujimoto <fujimoto@php.net>  Sun, 20 Jul 2008 22:34:36 +0900
+
+tokyocabinet (1.2.6-1) unstable; urgency=low
+
+  * Initial release
+
+ -- Masaki Fujimoto <fujimoto@php.net>  Sun, 25 May 2008 21:33:05 +0900
+

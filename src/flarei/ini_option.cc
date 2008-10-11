@@ -25,10 +25,10 @@ ini_option::ini_option():
 		_daemonize(false),
 		_data_dir(""),
 		_log_facility(""),
-		_max_connection(ini_option::default_max_connection),
+		_max_connection(default_max_connection),
 		_server_name(""),
-		_server_port(ini_option::default_server_port),
-		_thread_pool_size(ini_option::default_thread_pool_size) {
+		_server_port(default_server_port),
+		_thread_pool_size(default_thread_pool_size) {
 }
 
 /**

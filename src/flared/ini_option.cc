@@ -24,11 +24,13 @@ ini_option::ini_option():
 		_config_path(""),
 		_daemonize(false),
 		_data_dir(""),
+		_index_server_name(""),
+		_index_server_port(default_index_server_port),
 		_log_facility(""),
-		_max_connection(ini_option::default_max_connection),
+		_max_connection(default_max_connection),
 		_server_name(""),
-		_server_port(ini_option::default_server_port),
-		_thread_pool_size(ini_option::default_thread_pool_size) {
+		_server_port(default_server_port),
+		_thread_pool_size(default_thread_pool_size) {
 }
 
 /**
@@ -116,6 +118,18 @@ int ini_option::load() {
 		if (this->_data_dir.empty()) {
 			cout << "option [data-dir] is required" << endl;
 			throw -1;
+		}
+
+		if (opt_var_map.count("index-server-name")) {
+			this->_index_server_name = opt_var_map["index-server-name"].as<string>();
+		}
+		if (this->_index_server_name.empty()) {
+			cout << "option [index-server-name] is required" << endl;
+			throw -1;
+		}
+
+		if (opt_var_map.count("index-server-port")) {
+			this->_server_port = opt_var_map["index-server-port"].as<int>();
 		}
 
 		if (opt_var_map.count("log-facility")) {
@@ -239,6 +253,8 @@ int ini_option::_setup_config_option(program_options::options_description& optio
 	option.add_options()
 		("daemonize",																							"run as daemon")
 		("data-dir",					program_options::value<string>(), 	"data directory")
+		("index-server-name",	program_options::value<string>(), 	"index server name")
+		("index-server-port",	program_options::value<int>(),		 	"index server port")
 		("log-facility",			program_options::value<string>(), 	"log facility (dynamic)")
 		("max-connection",		program_options::value<int>(),			"max concurrent connections to accept (dynamic)")
 		("server-name",				program_options::value<string>(),		"my server name")

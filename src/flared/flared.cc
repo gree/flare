@@ -105,13 +105,15 @@ int flared::startup(int argc, char **argv) {
 	log_notice("%s version %s - system logger started", this->_ident.c_str(), PACKAGE_VERSION);
 
 	log_notice("application startup in progress...", 0);
-	log_notice("  config_path:      %s", ini_option_object().get_config_path().c_str());
-	log_notice("  daemonize:        %s", ini_option_object().is_daemonize() ? "true" : "false");
-	log_notice("  data_dir:         %s", ini_option_object().get_data_dir().c_str());
-	log_notice("  max_connection:   %d", ini_option_object().get_max_connection());
-	log_notice("  server_name:      %s", ini_option_object().get_server_name().c_str());
-	log_notice("  server_port:      %d", ini_option_object().get_server_port());
-	log_notice("  thread_pool_size: %d", ini_option_object().get_thread_pool_size());
+	log_notice("  config_path:       %s", ini_option_object().get_config_path().c_str());
+	log_notice("  daemonize:         %s", ini_option_object().is_daemonize() ? "true" : "false");
+	log_notice("  data_dir:          %s", ini_option_object().get_data_dir().c_str());
+	log_notice("  index_server_name: %s", ini_option_object().get_index_server_name().c_str());
+	log_notice("  index_server_port: %d", ini_option_object().get_index_server_port());
+	log_notice("  max_connection:    %d", ini_option_object().get_max_connection());
+	log_notice("  server_name:       %s", ini_option_object().get_server_name().c_str());
+	log_notice("  server_port:       %d", ini_option_object().get_server_port());
+	log_notice("  thread_pool_size:  %d", ini_option_object().get_thread_pool_size());
 
 	// startup procs
 	if (this->_set_resource_limit() < 0) {

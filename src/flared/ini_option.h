@@ -26,6 +26,8 @@ private:
 	string			_config_path;
 	bool				_daemonize;
 	string			_data_dir;
+	string			_index_server_name;
+	int					_index_server_port;
 	string			_log_facility;
 	uint32_t		_max_connection;
 	string			_server_name;
@@ -33,6 +35,7 @@ private:
 	int					_thread_pool_size;
 	
 public:
+	static const int default_index_server_port = 12120;
 	static const uint32_t default_max_connection = 128;
 	static const int default_server_port = 12121;
 	static const int default_thread_pool_size = 5;
@@ -48,6 +51,8 @@ public:
 	string get_config_path() { return this->_config_path; };
 	bool is_daemonize() { return this->_daemonize; };
 	string get_data_dir() { return this->_data_dir; };
+	string get_index_server_name() { return this->_index_server_name; };
+	int get_index_server_port() { return this->_index_server_port; };
 	string get_log_facility() { return this->_log_facility; };
 	uint32_t get_max_connection() { return this->_max_connection; };
 	string get_server_name() { return this->_server_name; };

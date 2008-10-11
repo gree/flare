@@ -49,16 +49,14 @@ int op_kill::_parse_server_parameter() {
 		return -1;
 	}
 
-	pthread_t id;
 	try {
-		id = lexical_cast<pthread_t>(q);
+		this->_id = lexical_cast<uint32_t>(q);
+		log_debug("storing id [%u]", this->_id);
 	} catch (bad_lexical_cast e) {
-		log_debug("invalid digit found", 0);
+		log_debug("invalid thead id (id=%s)", q);
 		_delete_(p);
 		return -1;
 	}
-	log_debug("storing thread id=%u", id);
-	this->_id = id;
 
 	// no extra parameter allowed
 	util::next_word(p+n, q, sizeof(q));

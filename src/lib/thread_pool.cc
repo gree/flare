@@ -20,6 +20,7 @@ namespace flare {
  *	ctor for thread_pool
  */
 thread_pool::thread_pool(thread_pool::pool::size_type max_pool_size):
+		_index(1),
 		_max_pool_size(max_pool_size) {
 	this->_global_map.clear();
 
@@ -50,14 +51,17 @@ shared_thread thread_pool::get(int type) {
 	if (pool_size > 0) {
 		tmp = this->_pool.top();
 		this->_pool.pop();
-		log_debug("thread object from pool (id=%u)", tmp->get_id());
+		log_debug("thread object from pool (thread_id=%u)", tmp->get_thread_id());
 	}
 	pthread_rwlock_unlock(&this->_mutex_pool);
 	if (pool_size <= 0) {
 		tmp = this->_create_thread();
-		log_debug("new thread object (id=%u)", tmp->get_id());
+		log_debug("new thread object (thread_id=%u)", tmp->get_thread_id());
 	}
-	tmp->setup(type);
+	
+	uint32_t id;
+	ATOMIC_ADD(&this->_index, 1, id);
+	tmp->setup(type, id);
 
 	pthread_rwlock_wrlock(&this->_mutex_global_map);
 	log_debug("adding thread object to global map (type=%d)", type);
@@ -70,7 +74,7 @@ shared_thread thread_pool::get(int type) {
 /**
  *	get active thread object from map
  */
-int thread_pool::get_active(pthread_t id, shared_thread& t) {
+int thread_pool::get_active(uint32_t id, shared_thread& t) {
 	int r = -1;
 	pthread_rwlock_rdlock(&this->_mutex_global_map);
 	for (global_map::iterator it = this->_global_map.begin(); it != this->_global_map.end(); it++) {
@@ -90,14 +94,15 @@ int thread_pool::get_active(pthread_t id, shared_thread& t) {
  *	clean up thread activity
  */
 int thread_pool::clean(thread* t, bool& is_pool) {
-	pthread_t id = t->get_id();
+	uint32_t id = t->get_id();
+	pthread_t thread_id = t->get_thread_id();
 	int type = t->get_type();
 
 	shared_thread tmp;
 	pthread_rwlock_wrlock(&this->_mutex_global_map);
-	log_debug("removing thread object from global map (type=%d, id=%u)", type, id);
+	log_debug("removing thread object from global map (type=%d, id=%u, thread_id=%u)", type, id, thread_id);
 	if (this->_global_map[type].count(id) == 0) {
-		log_warning("specified id not found it global map (type=%d, id=%u)", type, id);
+		log_warning("specified id not found it global map (type=%d, id=%u, thread_id=%u)", type, id, thread_id);
 		is_pool = false;
 		pthread_rwlock_unlock(&this->_mutex_global_map);
 		return 0;

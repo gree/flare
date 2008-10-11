@@ -12,12 +12,14 @@ AC_PROG_CXX
 AC_PROG_CC
 AC_PROG_RANLIB
 
+AC_LANG(C++)
+
 # Checks for libraries.
 AC_ARG_WITH(boost,
 	[  --with-boost            boost libraries],
 	[CXXFLAGS="${CXXFLAGS} -I${withval}/include" LDFLAGS="${LDFLAGS} -L${withval}/lib"])
-AC_CHECK_LIB(boost_program_options, main, [], [echo "libboost_program_options not found"; exit 1])
-AC_CHECK_LIB(boost_regex, main, [], [echo "libboost_regex not found"; exit 1])
+AC_CHECK_LIB(boost_program_options, main, [], [AC_CHECK_LIB(boost_program_options-mt, main, [], [AC_MSG_ERROR(boost_program_options not found)])])
+AC_CHECK_LIB(boost_regex, main, [], [AC_CHECK_LIB(boost_regex-mt, main, [], [AC_MSG_ERROR(boost_regex not found)])])
 
 AC_CHECK_LIB(pthread, pthread_create, [], [echo "libpthread not found"; exit 1])
 
@@ -33,6 +35,17 @@ AC_CHECK_HEADER(pthread.h, [], [echo "pthread.h not found"; exit1])
 # Checks for typedefs, structures, and compiler characteristics.
 
 # Checks for library functions.
+AC_CHECK_FUNC(gethostbyname_r, [AC_DEFINE([HAVE_GETHOSTBYNAME_R], [], [have gethostbyname_r() or not])])
+
+AC_MSG_CHECKING(for gnu specific strerror_r)
+AC_TRY_COMPILE([
+#include <string.h>
+#include <stdlib.h>
+], [char* p = malloc(16); char* q = strerror_r(0, p, sizeof(16));], ac_strerror_r=yes, ac_strerror_r=no);
+AC_MSG_RESULT($ac_strerror_r)
+if test $ac_strerror_r = yes; then
+	AC_DEFINE([HAVE_GNU_STRERROR_R], [], [have gnu specific strerror_r()])
+fi
 
 # And others
 
@@ -54,16 +67,7 @@ else
 fi
 
 #   pthread options
-case $host_os in
-	linux-gnu)
-		echo "setting thread flags...-pthread"
-		PTHREAD_DEFS="-pthread -D_REENTRANT -D_THREAD_SAFE"
-		;;
-	*)
-		echo "host_os [$host_os] is not yet supported"
-		exit 1;
-		;;
-esac
+PTHREAD_DEFS="-pthread -D_REENTRANT -D_THREAD_SAFE"
 
 FLARE_CXXFLAGS="$DEBUG_DEFS $PTHREAD_DEFS"
 FLARE_LDFLAGS=""

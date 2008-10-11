@@ -25,7 +25,7 @@ namespace flare {
 class op_kill : public op {
 protected:
 	thread_pool*				_thread_pool;
-	pthread_t						_id;
+	uint32_t						_id;
 
 public:
 	op_kill(shared_connection c, thread_pool* tp);

@@ -64,20 +64,18 @@ int connection::open(string host, int port) {
 		return -1;
 	}
 
-	struct hostent he;
-	struct hostent* he_result;
-	char he_buf[2048];
-	int he_errno;
-	if (gethostbyname_r(host.c_str(), &he, he_buf, sizeof(he_buf), &he_result, &he_errno) < 0) {
-		log_err("gethostbyname_r() failed: %s (%d)", util::strerror(he_errno), he_errno);
-		this->_errno = errno;
-		return -1;
-	}
-
 	memset(&this->_addr, 0, sizeof(this->_addr));
 	this->_addr.sin_family = AF_INET;
 	this->_addr.sin_port = htons(port);
+
+	struct hostent he;
+	int he_errno;
+	if (util::gethostbyname(host.c_str(), &he, &he_errno) < 0) {
+		this->_errno = he_errno;
+		return -1;
+	}
 	memcpy(&this->_addr.sin_addr, he.h_addr, he.h_length);
+
 	int i;
 	for (i = 0; i < connection::connect_retry_limit; i++) {
 		if (connect(this->_sock, (struct sockaddr*)&this->_addr, sizeof(this->_addr)) < 0) {

@@ -41,7 +41,7 @@ AC_MSG_CHECKING(for gnu specific strerror_r)
 AC_TRY_COMPILE([
 #include <string.h>
 #include <stdlib.h>
-], [char* p = malloc(16); char* q = strerror_r(0, p, sizeof(16));], ac_strerror_r=yes, ac_strerror_r=no);
+], [char* p = (char*)malloc(16); char* q = strerror_r(0, p, sizeof(16));], ac_strerror_r=yes, ac_strerror_r=no);
 AC_MSG_RESULT($ac_strerror_r)
 if test $ac_strerror_r = yes; then
 	AC_DEFINE([HAVE_GNU_STRERROR_R], [], [have gnu specific strerror_r()])

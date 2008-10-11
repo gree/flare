@@ -85,8 +85,8 @@ int op_stats::_send_stats(thread_pool* tp) {
 	rusage usage = stats_object->get_rusage();
 	char usage_user[BUFSIZ];
 	char usage_system[BUFSIZ];
-	snprintf(usage_user, sizeof(usage_user), "%ld.%06d", usage.ru_utime.tv_sec, usage.ru_utime.tv_usec);
-	snprintf(usage_system, sizeof(usage_user), "%ld.%06d", usage.ru_stime.tv_sec, usage.ru_stime.tv_usec);
+	snprintf(usage_user, sizeof(usage_user), "%ld.%06ld", usage.ru_utime.tv_sec, usage.ru_utime.tv_usec);
+	snprintf(usage_system, sizeof(usage_user), "%ld.%06ld", usage.ru_stime.tv_sec, usage.ru_stime.tv_usec);
 
 	s << "STAT " << "pid " << stats_object->get_pid() << line_delimiter;
 	s << "STAT " << "uptime " << stats_object->get_uptime() << line_delimiter;

@@ -8,4 +8,4 @@
 datarootdir = @datarootdir@
 
 # subdirs
-SUBDIRS = lib flarem flared
+SUBDIRS = lib flared flarei

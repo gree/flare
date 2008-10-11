@@ -1,25 +1,25 @@
 /**
- *	flarem.h
+ *	flarei.h
  *
  *	@author	Masaki Fujimoto <fujimoto@php.net>
  *
  *	$Id$
  */
-#ifndef	__FLAREM_H__
-#define	__FLAREM_H__
+#ifndef	__FLAREI_H__
+#define	__FLAREI_H__
 
 #include "app.h"
 #include "handler_request.h"
 #include "ini_option.h"
-#include "stats_manager.h"
+#include "stats_index.h"
 
 namespace gree {
 namespace flare {
 
 /**
- *	flarem application class
+ *	flarei application class
  */
-class flarem : public app {
+class flarei : public app {
 public:
 	enum 					thread_type {
 		thread_type_request,
@@ -28,10 +28,11 @@ public:
 private:
 	server*				_server;
 	thread_pool*	_thread_pool;
+	cluster*			_cluster;
 
 public:
-	flarem();
-	~flarem();
+	flarei();
+	~flarei();
 
 	int startup(int argc, char** argv);
 	int run();
@@ -51,5 +52,5 @@ private:
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __FLAREM_H__
+#endif	// __FLAREI_H__
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

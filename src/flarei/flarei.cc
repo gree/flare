@@ -1,13 +1,13 @@
 /**
- *	flarem.cc
+ *	flarei.cc
  *
- *	implementation of gree::flare::flarem (and some other global stuffs)
+ *	implementation of gree::flare::flarei (and some other global stuffs)
  *
  *	@author	Masaki Fujimoto <fujimoto@php.net>
  *
  *	$Id$
  */
-#include "flarem.h"
+#include "flarei.h"
 
 namespace gree {
 namespace flare {
@@ -22,7 +22,7 @@ void sa_term_handler(int sig) {
 	}
 	log_notice("received signal [%s] -> requesting shutdown", sig == SIGTERM ? "SIGTERM" : "SIGINT");
 
-	singleton<flarem>::instance().request_shutdown();
+	singleton<flarei>::instance().request_shutdown();
 
 	return;
 }
@@ -36,7 +36,7 @@ void sa_hup_handler(int sig) {
 	}
 	log_notice("received signal [SIGHUP] -> reloading", 0);
 
-	singleton<flarem>::instance().reload();
+	singleton<flarei>::instance().reload();
 
 	return;
 }
@@ -53,22 +53,26 @@ void sa_usr1_handler(int sig) {
 
 // {{{ ctor/dtor
 /**
- *	ctor for flarem
+ *	ctor for flarei
  */
-flarem::flarem():
+flarei::flarei():
 	_server(NULL),
-	_thread_pool(NULL) {
+	_thread_pool(NULL),
+	_cluster(NULL) {
 }
 
 /**
- *	dtor for flarem
+ *	dtor for flarei
  */
-flarem::~flarem() {
+flarei::~flarei() {
 	if (this->_server != NULL) {
 		_delete_(this->_server);
 	}
 	if (this->_thread_pool != NULL) {
 		_delete_(this->_thread_pool);
+	}
+	if (this->_cluster != NULL) {
+		_delete_(this->_cluster);
 	}
 	if (stats_object != NULL) {
 		_delete_(stats_object);
@@ -86,16 +90,16 @@ flarem::~flarem() {
 
 // {{{ public methods
 /**
- *	flarem application startup procs
+ *	flarei application startup procs
  */
-int flarem::startup(int argc, char **argv) {
+int flarei::startup(int argc, char **argv) {
 	ini_option_object().set_args(argc, argv);
 	if (ini_option_object().load() < 0) {
 		return -1;
 	}
 
 	singleton<logger>::instance().open(this->_ident, ini_option_object().get_log_facility());
-	stats_object = new stats_manager();
+	stats_object = new stats_index();
 	stats_object->startup();
 
 	log_notice("%s version %s - system logger started", this->_ident.c_str(), PACKAGE_VERSION);
@@ -132,6 +136,11 @@ int flarem::startup(int argc, char **argv) {
 
 	this->_thread_pool = _new_ thread_pool(ini_option_object().get_thread_pool_size());
 
+	this->_cluster = _new_ cluster(this->_thread_pool);
+	if (this->_cluster->startup_index() < 0) {
+		return -1;
+	}
+
 	if (this->_set_pid() < 0) {
 		return -1;
 	}
@@ -140,9 +149,9 @@ int flarem::startup(int argc, char **argv) {
 }
 
 /**
- *	flarem application running loop
+ *	flarei application running loop
  */
-int flarem::run() {
+int flarei::run() {
 	log_notice("entering running loop", 0);
 
 	for (;;) {
@@ -173,9 +182,9 @@ int flarem::run() {
 }
 
 /**
- *	flarem application reload procs
+ *	flarei application reload procs
  */
-int flarem::reload() {
+int flarei::reload() {
 	if (ini_option_object().reload() < 0) {
 		log_notice("invalid config file -> skip reloading", 0);
 		return -1;
@@ -195,9 +204,9 @@ int flarem::reload() {
 }
 
 /**
- *	flarem application shutdown procs
+ *	flarei application shutdown procs
  */
-int flarem::shutdown() {
+int flarei::shutdown() {
 	log_notice("shutting down active, and pool threads...", 0);
 	this->_thread_pool->shutdown();
 	log_notice("all threads are successfully shutdown", 0);
@@ -212,7 +221,7 @@ int flarem::shutdown() {
 // }}}
 
 // {{{ protected methods
-string flarem::_get_pid_path() {
+string flarei::_get_pid_path() {
 	return ini_option_object().get_data_dir() + "/" + this->_ident + ".pid";
 };
 // }}}
@@ -221,7 +230,7 @@ string flarem::_get_pid_path() {
 /**
  *	set resource limit
  */
-int flarem::_set_resource_limit() {
+int flarei::_set_resource_limit() {
 	struct rlimit rl;
 	if (getrlimit(RLIMIT_NOFILE, &rl) < 0) {
 		log_err("getrlimit() failed: %s (%d)", util::strerror(errno), errno);
@@ -247,7 +256,7 @@ int flarem::_set_resource_limit() {
 /**
  *	setup signal handler(s)
  */
-int flarem::_set_signal_handler() {
+int flarei::_set_signal_handler() {
 	struct sigaction sa;
 
 	// SIGTERM/SIGINT
@@ -302,8 +311,8 @@ int flarem::_set_signal_handler() {
 
 // {{{ ::main (entry point)
 int main(int argc, char **argv) {
-	gree::flare::flarem& f = gree::flare::singleton<gree::flare::flarem>::instance();
-	f.set_ident("flarem");
+	gree::flare::flarei& f = gree::flare::singleton<gree::flare::flarei>::instance();
+	f.set_ident("flarei");
 
 	if (f.startup(argc, argv) < 0) {
 		return -1;

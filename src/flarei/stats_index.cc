@@ -1,29 +1,29 @@
 /**
- *	stats_manager.cc
+ *	stats_index.cc
  *	
- *	implementation of gree::flare::stats_manager
+ *	implementation of gree::flare::stats_index
  *
  *	@author	Masaki Fujimoto <fujimoto@php.net>
  *	
  *	$Id$
  */
-#include "flarem.h"
-#include "stats_manager.h"
+#include "flarei.h"
+#include "stats_index.h"
 
 namespace gree {
 namespace flare {
 
 // {{{ ctor/dtor
 /**
- *	ctor for stats_manager
+ *	ctor for stats_index
  */
-stats_manager::stats_manager() {
+stats_index::stats_index() {
 }
 
 /**
- *	dtor for stats_manager
+ *	dtor for stats_index
  */
-stats_manager::~stats_manager() {
+stats_index::~stats_index() {
 }
 // }}}
 
@@ -31,8 +31,8 @@ stats_manager::~stats_manager() {
 // }}}
 
 // {{{ public methods
-uint32_t stats_manager::get_curr_connections(thread_pool* tp) {
-	return tp->get_thread_size(flarem::thread_type_request);
+uint32_t stats_index::get_curr_connections(thread_pool* tp) {
+	return tp->get_thread_size(flarei::thread_type_request);
 }
 // }}}
 

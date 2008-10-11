@@ -9,8 +9,8 @@
 #define __HANDLER_REQUEST_H__
 
 #include "app.h"
-#include "op_parser_binary_manager.h"
-#include "op_parser_text_manager.h"
+#include "op_parser_binary_index.h"
+#include "op_parser_text_index.h"
 
 namespace gree {
 namespace flare {

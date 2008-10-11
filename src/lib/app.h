@@ -45,6 +45,7 @@
 #include "stats.h"
 #include "thread_pool.h"
 #include "op.h"
+#include "cluster.h"
 
 using namespace std;
 using namespace boost;

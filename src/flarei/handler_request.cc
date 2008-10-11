@@ -42,7 +42,7 @@ int handler_request::run() {
 		this->_thread->set_state("wait");
 		this->_thread->set_op("");
 
-		op* p = op_parser::parse_server<op_parser_binary_manager, op_parser_text_manager>(this->_connection);
+		op* p = op_parser::parse_server<op_parser_binary_index, op_parser_text_index>(this->_connection);
 		if (p == NULL) {
 			this->_thread->set_state("shutdown");
 			if (this->_thread->is_shutdown_request()) {

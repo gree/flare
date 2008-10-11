@@ -11,6 +11,7 @@ noinst_LIBRARIES = libflare.a
 DEFS = -Wall $(FLARE_CXXFLAGS)
 libflare_a_SOURCES = \
 	app.h app.cc \
+	cluster.h cluster.cc \
 	connection.h connection.cc \
 	ini.h ini.cc \
 	logger.h logger.cc \

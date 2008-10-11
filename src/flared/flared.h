@@ -28,6 +28,7 @@ public:
 private:
 	server*				_server;
 	thread_pool*	_thread_pool;
+	cluster*			_cluster;
 
 public:
 	flared();

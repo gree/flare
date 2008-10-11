@@ -1,30 +1,30 @@
 /**
- *	op_stats_manager.cc
+ *	op_stats_index.cc
  *	
- *	implementation of gree::flare::op_stats_manager
+ *	implementation of gree::flare::op_stats_index
  *
  *	@author	Masaki Fujimoto <fujimoto@php.net>
  *	
  *	$Id$
  */
-#include "flarem.h"
-#include "op_stats_manager.h"
+#include "flarei.h"
+#include "op_stats_index.h"
 
 namespace gree {
 namespace flare {
 
 // {{{ ctor/dtor
 /**
- *	ctor for op_stats_manager
+ *	ctor for op_stats_index
  */
-op_stats_manager::op_stats_manager(shared_connection c):
+op_stats_index::op_stats_index(shared_connection c):
 		op_stats(c) {
 }
 
 /**
- *	dtor for op_stats_manager
+ *	dtor for op_stats_index
  */
-op_stats_manager::~op_stats_manager() {
+op_stats_index::~op_stats_index() {
 }
 // }}}
 
@@ -35,13 +35,13 @@ op_stats_manager::~op_stats_manager() {
 // }}}
 
 // {{{ protected methods
-int op_stats_manager::_parse_server_parameter() {
+int op_stats_index::_parse_server_parameter() {
 	int r = op_stats::_parse_server_parameter();
 
 	return r;
 }
 
-int op_stats_manager::_run_server() {
+int op_stats_index::_run_server() {
 	switch (this->_stats_type) {
 	case stats_type_items:
 		this->_send_stats_items();
@@ -53,13 +53,13 @@ int op_stats_manager::_run_server() {
 		this->_send_stats_sizes();
 		break;
 	case stats_type_threads:
-		this->_send_stats_threads(singleton<flarem>::instance().get_thread_pool());
+		this->_send_stats_threads(singleton<flarei>::instance().get_thread_pool());
 		break;
 	case stats_type_threads_request:
-		this->_send_stats_threads(singleton<flarem>::instance().get_thread_pool(), flarem::thread_type_request);
+		this->_send_stats_threads(singleton<flarei>::instance().get_thread_pool(), flarei::thread_type_request);
 		break;
 	default:
-		this->_send_stats(singleton<flarem>::instance().get_thread_pool());
+		this->_send_stats(singleton<flarei>::instance().get_thread_pool());
 		break;
 	}
 	this->_send_end();

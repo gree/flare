@@ -16,7 +16,7 @@ namespace flare {
 #define	ini_option_object()			singleton<ini_option>::instance()
 
 /**
- *	flarem global configuration class
+ *	flarei global configuration class
  */
 class ini_option : public ini {
 private:

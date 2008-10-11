@@ -1,29 +1,29 @@
 /**
- *	op_parser_binary_manager.cc
+ *	op_parser_binary_index.cc
  *	
- *	implementation of gree::flare::op_parser_binary_manager
+ *	implementation of gree::flare::op_parser_binary_index
  *
  *	@author	Masaki Fujimoto <fujimoto@php.net>
  *	
  *	$Id$
  */
-#include "op_parser_binary_manager.h"
+#include "op_parser_binary_index.h"
 
 namespace gree {
 namespace flare {
 
 // {{{ ctor/dtor
 /**
- *	ctor for op_parser_binary_manager
+ *	ctor for op_parser_binary_index
  */
-op_parser_binary_manager::op_parser_binary_manager(shared_connection c):
+op_parser_binary_index::op_parser_binary_index(shared_connection c):
 		op_parser_binary(c) {
 }
 
 /**
- *	dtor for op_parser_binary_manager
+ *	dtor for op_parser_binary_index
  */
-op_parser_binary_manager::~op_parser_binary_manager() {
+op_parser_binary_index::~op_parser_binary_index() {
 }
 // }}}
 

@@ -57,7 +57,8 @@ void sa_usr1_handler(int sig) {
  */
 flared::flared():
 	_server(NULL),
-	_thread_pool(NULL) {
+	_thread_pool(NULL),
+	_cluster(NULL) {
 }
 
 /**
@@ -69,6 +70,9 @@ flared::~flared() {
 	}
 	if (this->_thread_pool != NULL) {
 		_delete_(this->_thread_pool);
+	}
+	if (this->_cluster != NULL) {
+		_delete_(this->_cluster);
 	}
 	if (stats_object != NULL) {
 		_delete_(stats_object);
@@ -131,6 +135,11 @@ int flared::startup(int argc, char **argv) {
 	}
 
 	this->_thread_pool = _new_ thread_pool(ini_option_object().get_thread_pool_size());
+
+	this->_cluster = _new_ cluster(this->_thread_pool);
+	if (this->_cluster->startup_node() < 0) {
+		return -1;
+	}
 
 	if (this->_set_pid() < 0) {
 		return -1;

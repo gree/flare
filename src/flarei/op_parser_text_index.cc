@@ -1,30 +1,30 @@
 /**
- *	op_parser_text_manager.cc
+ *	op_parser_text_index.cc
  *	
- *	implementation of gree::flare::op_parser_text_manager
+ *	implementation of gree::flare::op_parser_text_index
  *
  *	@author	Masaki Fujimoto <fujimoto@php.net>
  *	
  *	$Id$
  */
-#include "flarem.h"
-#include "op_parser_text_manager.h"
+#include "flarei.h"
+#include "op_parser_text_index.h"
 
 namespace gree {
 namespace flare {
 
 // {{{ ctor/dtor
 /**
- *	ctor for op_parser_text_manager
+ *	ctor for op_parser_text_index
  */
-op_parser_text_manager::op_parser_text_manager(shared_connection c):
+op_parser_text_index::op_parser_text_index(shared_connection c):
 		op_parser_text(c) {
 }
 
 /**
- *	dtor for op_parser_text_manager
+ *	dtor for op_parser_text_index
  */
-op_parser_text_manager::~op_parser_text_manager() {
+op_parser_text_index::~op_parser_text_index() {
 }
 // }}}
 
@@ -38,14 +38,14 @@ op_parser_text_manager::~op_parser_text_manager() {
 /**
  *	determine op
  */
-op* op_parser_text_manager::_determine_op(const char* first, const char* buf) {
+op* op_parser_text_index::_determine_op(const char* first, const char* buf) {
 	op* r = NULL;
 	if (strcmp(first, "ping") == 0) {
 		r = static_cast<op*>(_new_ op_ping(this->_connection)); 
 	} else if (strcmp(first, "stats") == 0) {
-		r = static_cast<op*>(_new_ op_stats_manager(this->_connection)); 
+		r = static_cast<op*>(_new_ op_stats_index(this->_connection)); 
 	} else if (strcmp(first, "kill") == 0) {
-		r = static_cast<op*>(_new_ op_kill(this->_connection, singleton<flarem>::instance().get_thread_pool())); 
+		r = static_cast<op*>(_new_ op_kill(this->_connection, singleton<flarei>::instance().get_thread_pool())); 
 	} else if (strcmp(first, "quit") == 0) {
 		r = static_cast<op*>(_new_ op_quit(this->_connection)); 
 	} else if (strcmp(first, "version") == 0) {

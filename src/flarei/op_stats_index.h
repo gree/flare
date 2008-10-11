@@ -1,12 +1,12 @@
 /**
- *	op_stats_manager.h
+ *	op_stats_index.h
  *
  *	@author	Masaki Fujimoto <fujimoto@php.net>
  *
  *	$Id$
  */
-#ifndef __OP_STATS_MANAGER_H__
-#define __OP_STATS_MANAGER_H__
+#ifndef __OP_STATS_INDEX_H__
+#define __OP_STATS_INDEX_H__
 
 #include <sstream>
 
@@ -16,14 +16,14 @@ namespace gree {
 namespace flare {
 
 /**
- *	opcode text parser for manager application
+ *	opcode text parser for index application
  */
-class op_stats_manager : public op_stats {
+class op_stats_index : public op_stats {
 protected:
 
 public:
-	op_stats_manager(shared_connection c);
-	virtual ~op_stats_manager();
+	op_stats_index(shared_connection c);
+	virtual ~op_stats_index();
 
 protected:
 	virtual int _parse_server_parameter();
@@ -33,5 +33,5 @@ protected:
 }	// namespace flare
 }	// namespace gree
 
-#endif // __OP_STATS_MANAGER_H__
+#endif // __OP_STATS_INDEX_H__
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

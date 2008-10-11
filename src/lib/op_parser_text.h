@@ -29,7 +29,7 @@ public:
 	virtual op* parse_server();
 
 protected:
-	virtual op* _determine_op(const char* first, const char* buf) = 0;
+	virtual op* _determine_op(const char* first, const char* buf, int& consume) = 0;
 };
 
 }	// namespace flare

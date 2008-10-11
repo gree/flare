@@ -59,7 +59,7 @@ extern const char* const line_delimiter;
 class util {
 public:
 	static const char* strerror(int e);
-	static int gethostbyname(const char *name, struct hostent* he, int* h_errno);
+	static int gethostbyname(const char *name, struct hostent* he, int* he_errno);
 	static int inet_ntoa(struct in_addr in, char* dst);
 	static int get_fqdn(string& fqdn);
 	static uint32_t next_word(const char* src, char* dst, uint32_t dst_len);

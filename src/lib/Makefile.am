@@ -20,6 +20,7 @@ libflare_a_SOURCES = \
 	op.cc op.h \
 	op_error.h op_error.cc \
 	op_kill.h op_kill.cc \
+	op_node_add.h op_node_add.cc \
 	op_parser.h op_parser.cc\
 	op_parser_binary.h op_parser_binary.cc \
 	op_parser_text.h op_parser_text.cc \

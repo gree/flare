@@ -44,6 +44,7 @@ public:
 	virtual ~op();
 
 	virtual int run_server();
+	virtual int run_client();
 
 	int set_thread(shared_thread t) { this->_thread = t; return 0; };
 	string get_ident() { return this->_ident; };
@@ -52,6 +53,8 @@ public:
 protected:
 	virtual int _parse_server_parameter();
 	virtual int _run_server();
+	virtual int _run_client();
+	virtual int _parse_client_parameter();
 
 	int _send_ok();
 	int _send_end();

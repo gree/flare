@@ -38,7 +38,7 @@ op_parser_text_node::~op_parser_text_node() {
 /**
  *	determine op
  */
-op* op_parser_text_node::_determine_op(const char* first, const char* buf) {
+op* op_parser_text_node::_determine_op(const char* first, const char* buf, int& consume) {
 	op* r = NULL;
 	if (strcmp(first, "ping") == 0) {
 		r = static_cast<op*>(_new_ op_ping(this->_connection)); 

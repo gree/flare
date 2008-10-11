@@ -25,7 +25,7 @@ public:
 	virtual ~op_parser_text_index();
 
 protected:
-	virtual op* _determine_op(const char* first, const char* buf);
+	virtual op* _determine_op(const char* first, const char* buf, int& consume);
 };
 
 }	// namespace flare

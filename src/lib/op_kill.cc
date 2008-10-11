@@ -42,28 +42,30 @@ int op_kill::_parse_server_parameter() {
 	}
 
 	char q[1024];
-	int n = util::next_digit(p, q, sizeof(q));
-	if (q[0] == '\0') {
-		log_debug("no digit found", 0);
-		_delete_(p);
-		return -1;
-	}
-
 	try {
-		this->_id = lexical_cast<uint32_t>(q);
-		log_debug("storing id [%u]", this->_id);
-	} catch (bad_lexical_cast e) {
-		log_debug("invalid thead id (id=%s)", q);
-		_delete_(p);
-		return -1;
-	}
+		int n = util::next_digit(p, q, sizeof(q));
+		if (q[0] == '\0') {
+			log_debug("no thread id found", 0);
+			throw -1;
+		}
 
-	// no extra parameter allowed
-	util::next_word(p+n, q, sizeof(q));
-	if (q[0]) {
-		log_debug("bogus string(s) found [%s] -> error", q);
+		try {
+			this->_id = lexical_cast<uint32_t>(q);
+			log_debug("storing id [%u]", this->_id);
+		} catch (bad_lexical_cast e) {
+			log_debug("invalid thead id (id=%s)", q);
+			throw -1;
+		}
+
+		// no extra parameter allowed
+		util::next_word(p+n, q, sizeof(q));
+		if (q[0]) {
+			log_debug("bogus string(s) found [%s] -> error", q);
+			throw -1;
+		}
+	} catch (int e) {
 		_delete_(p);
-		return -1;
+		return e;
 	}
 
 	_delete_(p);

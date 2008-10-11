@@ -42,8 +42,20 @@ int op::run_server() {
 		this->_send_error();
 		return -1;
 	}
+
 	this->_thread->set_state("execute");
 	return this->_run_server();
+}
+
+/**
+ *	send client request
+ */
+int op::run_client() {
+	if (this->_run_client() < 0) {
+		return -1;
+	}
+
+	return this->_parse_client_parameter();
 }
 // }}}
 
@@ -59,6 +71,20 @@ int op::_parse_server_parameter() {
  *	process server request
  */
 int op::_run_server() {
+	return 0;
+}
+
+/**
+ *	send client request
+ */
+int op::_run_client() {
+	return 0;
+}
+
+/**
+ *	parse server response
+ */
+int op::_parse_client_parameter() {
 	return 0;
 }
 

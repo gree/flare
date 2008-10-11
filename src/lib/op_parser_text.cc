@@ -44,7 +44,7 @@ op* op_parser_text::parse_server() {
 	log_debug("get first word (s=%s consume=%d)", first, consume);
 
 	// optimized order:)
-	op* r = this->_determine_op(first, buf+consume);
+	op* r = this->_determine_op(first, buf, consume);
 
 	this->_connection->push_back(buf+consume, buf_len-consume);
 	_delete_(buf);

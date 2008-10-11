@@ -38,12 +38,21 @@ op_parser_text_index::~op_parser_text_index() {
 /**
  *	determine op
  */
-op* op_parser_text_index::_determine_op(const char* first, const char* buf) {
+op* op_parser_text_index::_determine_op(const char* first, const char* buf, int& consume) {
 	op* r = NULL;
 	if (strcmp(first, "ping") == 0) {
 		r = static_cast<op*>(_new_ op_ping(this->_connection)); 
 	} else if (strcmp(first, "stats") == 0) {
 		r = static_cast<op*>(_new_ op_stats_index(this->_connection)); 
+	} else if (strcmp(first, "node") == 0) {
+		char second[BUFSIZ];
+		consume += util::next_word(buf+consume, second, sizeof(second));
+		log_debug("get second word (s=%s consume=%d)", first, consume); 
+		if (strcmp(second, "add") == 0) {
+			r = static_cast<op*>(_new_ op_node_add(this->_connection, singleton<flarei>::instance().get_cluster())); 
+		} else {
+			r = static_cast<op*>(_new_ op_error(this->_connection)); 
+		}
 	} else if (strcmp(first, "kill") == 0) {
 		r = static_cast<op*>(_new_ op_kill(this->_connection, singleton<flarei>::instance().get_thread_pool())); 
 	} else if (strcmp(first, "quit") == 0) {

@@ -40,6 +40,7 @@ public:
 	int shutdown();
 
 	thread_pool* get_thread_pool() { return this->_thread_pool; };
+	cluster* get_cluster() { return this->_cluster; };
 
 protected:
 	string _get_pid_path();

@@ -68,6 +68,7 @@ void* thread_run(void* p) {
 thread::thread(thread_pool* t):
 		_thread_pool(t),
 		_id(0),
+		_thread_id(0),
 		_trigger(false),
 		_shutdown(false),
 		_shutdown_request(shutdown_request_none),
@@ -75,6 +76,7 @@ thread::thread(thread_pool* t):
 		_thread_handler(NULL),
 		_is_delete_thread_handler(false) {
 	this->_info.id = 0;
+	this->_info.thread_id = 0;
 	this->_info.type = 0;
 	this->_info.peer_name = "";
 	this->_info.peer_port = 0;
@@ -112,18 +114,18 @@ thread::~thread() {
 int thread::startup(weak_thread myself) {
 	this->_myself = myself;
 
-	pthread_t id;
+	pthread_t thread_id;
 	pthread_attr_t thr_attr;
 	pthread_attr_init(&thr_attr);
 	pthread_attr_setdetachstate(&thr_attr, PTHREAD_CREATE_DETACHED);
-	if (pthread_create(&id, &thr_attr, thread_run, (void*)this) < 0) {
+	if (pthread_create(&thread_id, &thr_attr, thread_run, (void*)this) < 0) {
 		log_err("pthread_create() failed: %s", strerror(errno), errno);
 		return -1;
 	}
-	this->_id = id;
-	this->_info.id = id;
+	this->_thread_id = thread_id;
+	this->_info.thread_id = thread_id;
 
-	log_debug("thread created (id=%u)", this->_id);
+	log_debug("thread created (thread_id=%u)", this->_thread_id);
 
 	return 0;
 }
@@ -131,7 +133,10 @@ int thread::startup(weak_thread myself) {
 /**
  *	setup proc for each execution
  */
-int thread::setup(int type) {
+int thread::setup(int type, uint32_t id) {
+	this->_id = id;
+
+	this->_info.id = id;
 	this->_info.type = type;
 	this->_info.timestamp = time(NULL);
 	this->_info.state = "setup";
@@ -165,7 +170,7 @@ int thread::wait() {
  *	(should be called from parent thread)
  */
 int thread::trigger(thread_handler* th, bool is_delete) {
-	log_debug("sending trigger signal (id=%u)", this->_id);
+	log_debug("sending trigger signal (thread_id=%u)", this->_thread_id);
 
 	if (th != NULL) {
 		this->_thread_handler = th;
@@ -220,6 +225,12 @@ int thread::clean(bool& is_pool) {
 		this->_shutdown_request = shutdown_request_none;
 	}
 
+	int r = this->_thread_pool->clean(this, is_pool);
+
+	// we should clean id *after* we clean up thread pool issue
+	this->_id = 0;
+
+	this->_info.id = 0;
 	this->_info.type = 0;
 	this->_info.peer_name = "";
 	this->_info.peer_port = 0;
@@ -227,21 +238,22 @@ int thread::clean(bool& is_pool) {
 	this->_info.timestamp = 0;
 	this->_info.state = "";
 	this->_info.info = "";
-	return this->_thread_pool->clean(this, is_pool);
+
+	return r;
 }
 
 /**
  *	shutdown thread
  */
 int thread::shutdown(bool graceful, bool async) {
-	log_info("shutting down thread (id=%u, running=%d, graceful=%d, async=%d)", this->_id, this->_running, graceful, async);
+	log_info("shutting down thread (thread_id=%u, running=%d, graceful=%d, async=%d)", this->_thread_id, this->_running, graceful, async);
 
 	this->_shutdown_request = graceful ? shutdown_request_graceful : shutdown_request_force;
 	this->trigger(NULL);
 
 	if (this->_running) {
-		log_debug("sending SIGUSR1 to %u", this->_id);
-		pthread_kill(this->_id, SIGUSR1);
+		log_debug("sending SIGUSR1 to %u", this->_thread_id);
+		pthread_kill(this->_thread_id, SIGUSR1);
 	}
 
 	if (async) {
@@ -254,7 +266,7 @@ int thread::shutdown(bool graceful, bool async) {
 		// shutdown flag is already set -> skip waiting
 		log_debug("thread is now exiting -> skip waiting", 0);
 	} else {
-		log_debug("waiting for thread to exit (id=%u, timeout=%d)", this->_id, thread::shutdown_timeout);
+		log_debug("waiting for thread to exit (thread_id=%u, timeout=%d)", this->_thread_id, thread::shutdown_timeout);
 		struct timeval now;
 		struct timespec timeout;
 		gettimeofday(&now, NULL);
@@ -262,9 +274,9 @@ int thread::shutdown(bool graceful, bool async) {
 		timeout.tv_nsec = now.tv_usec * 1000;
 		int r = pthread_cond_timedwait(&this->_cond_shutdown, &this->_mutex_shutdown, &timeout);
 		if (r == ETIMEDOUT) {
-			log_warning("thread shutdown timeout (id=%u, timeout=%d)", this->_id, thread::shutdown_timeout);
+			log_warning("thread shutdown timeout (thread_id=%u, timeout=%d)", this->_thread_id, thread::shutdown_timeout);
 		} else {
-			log_debug("thread seems to be exiting (id=%u)", this->_id);
+			log_debug("thread seems to be exiting (thread_id=%u)", this->_thread_id);
 		}
 	}
 	pthread_mutex_unlock(&this->_mutex_shutdown);
@@ -276,7 +288,7 @@ int thread::shutdown(bool graceful, bool async) {
  *	notify current thread is shutting down
  */
 int thread::notify_shutdown() {
-	log_debug("thread is shutting down (id=%u)", this->_id);
+	log_debug("thread is shutting down (thread_id=%u)", this->_thread_id);
 	pthread_mutex_lock(&this->_mutex_shutdown);
 	this->_shutdown = true;
 	pthread_mutex_unlock(&this->_mutex_shutdown);

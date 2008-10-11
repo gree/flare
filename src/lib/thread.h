@@ -42,7 +42,8 @@ typedef class thread_handler	thread_handler;
 class thread {
 public:
 	typedef struct				_thread_info {
-		pthread_t						id;
+		uint32_t						id;
+		pthread_t						thread_id;
 		int									type;
 		string							peer_name;
 		int									peer_port;
@@ -64,7 +65,8 @@ private:
 	thread_pool*					_thread_pool;
 	weak_thread						_myself;
 
-	pthread_t							_id;
+	uint32_t							_id;
+	pthread_t							_thread_id;
 	thread_info						_info;
 
 	pthread_mutex_t				_mutex_trigger;
@@ -86,7 +88,7 @@ public:
 	virtual ~thread();
 
 	int startup(weak_thread myself);
-	int setup(int type);
+	int setup(int type, uint32_t id);
 	int trigger(thread_handler* th, bool is_delete = true);
 	int wait();
 	int run();
@@ -94,7 +96,8 @@ public:
 	int shutdown(bool graceful = false, bool async = false);
 	int notify_shutdown();
 
-	pthread_t get_id() { return this->_id; };
+	uint32_t get_id() { return this->_id; };
+	pthread_t get_thread_id() { return this->_thread_id; };
 	int get_type() { return this->_info.type; };
 	int set_peer(string host, int port) { this->_info.peer_name = host; this->_info.peer_port = port; return 0; };
 	int set_op(string op) { this->_info.op = op; return 0; };

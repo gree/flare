@@ -69,7 +69,7 @@ int logger::close() {
  */
 void logger::emerg(const char* file, const int line, const char* func, const char *format, ...) {
 	ostringstream s;
-	s << "[" << pthread_self() << "][EMG][" << file << ":" << line << "-" << func << "] ";
+	s << "[" << (uint32_t)pthread_self() << "][EMG][" << file << ":" << line << "-" << func << "] ";
 
 	char buf[1024];
 	va_list op;
@@ -85,7 +85,7 @@ void logger::emerg(const char* file, const int line, const char* func, const cha
  */
 void logger::alert(const char* file, const int line, const char* func, const char *format, ...) {
 	ostringstream s;
-	s << "[" << pthread_self() << "][ALT][" << file << ":" << line << "-" << func << "] ";
+	s << "[" << (uint32_t)pthread_self() << "][ALT][" << file << ":" << line << "-" << func << "] ";
 
 	char buf[1024];
 	va_list op;
@@ -101,7 +101,7 @@ void logger::alert(const char* file, const int line, const char* func, const cha
  */
 void logger::crit(const char* file, const int line, const char* func, const char *format, ...) {
 	ostringstream s;
-	s << "[" << pthread_self() << "][CRT][" << file << ":" << line << "-" << func << "] ";
+	s << "[" << (uint32_t)pthread_self() << "][CRT][" << file << ":" << line << "-" << func << "] ";
 
 	char buf[1024];
 	va_list op;
@@ -117,7 +117,7 @@ void logger::crit(const char* file, const int line, const char* func, const char
  */
 void logger::err(const char* file, const int line, const char* func, const char *format, ...) {
 	ostringstream s;
-	s << "[" << pthread_self() << "][ERR][" << file << ":" << line << "-" << func << "] ";
+	s << "[" << (uint32_t)pthread_self() << "][ERR][" << file << ":" << line << "-" << func << "] ";
 
 	char buf[1024];
 	va_list op;
@@ -133,7 +133,7 @@ void logger::err(const char* file, const int line, const char* func, const char 
  */
 void logger::warning(const char* file, const int line, const char* func, const char *format, ...) {
 	ostringstream s;
-	s << "[" << pthread_self() << "][WRN][" << file << ":" << line << "-" << func << "] ";
+	s << "[" << (uint32_t)pthread_self() << "][WRN][" << file << ":" << line << "-" << func << "] ";
 
 	char buf[1024];
 	va_list op;
@@ -149,7 +149,7 @@ void logger::warning(const char* file, const int line, const char* func, const c
  */
 void logger::notice(const char* file, const int line, const char* func, const char *format, ...) {
 	ostringstream s;
-	s << "[" << pthread_self() << "][NTC][" << file << ":" << line << "-" << func << "] ";
+	s << "[" << (uint32_t)pthread_self() << "][NTC][" << file << ":" << line << "-" << func << "] ";
 
 	char buf[1024];
 	va_list op;
@@ -165,7 +165,7 @@ void logger::notice(const char* file, const int line, const char* func, const ch
  */
 void logger::info(const char* file, const int line, const char* func, const char *format, ...) {
 	ostringstream s;
-	s << "[" << pthread_self() << "][INF][" << file << ":" << line << "-" << func << "] ";
+	s << "[" << (uint32_t)pthread_self() << "][INF][" << file << ":" << line << "-" << func << "] ";
 
 	char buf[1024];
 	va_list op;
@@ -181,7 +181,7 @@ void logger::info(const char* file, const int line, const char* func, const char
  */
 void logger::debug(const char* file, const int line, const char* func, const char *format, ...) {
 	ostringstream s;
-	s << "[" << pthread_self() << "][DBG][" << file << ":" << line << "-" << func << "] ";
+	s << "[" << (uint32_t)pthread_self() << "][DBG][" << file << ":" << line << "-" << func << "] ";
 
 	char buf[1024];
 	va_list op;

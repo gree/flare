@@ -1,5 +1,11 @@
 /* src/config.h.in.  Generated from configure.ac by autoheader.  */
 
+/* have gethostbyname_r() or not */
+#undef HAVE_GETHOSTBYNAME_R
+
+/* have gnu specific strerror_r() */
+#undef HAVE_GNU_STRERROR_R
+
 /* Define to 1 if you have the <inttypes.h> header file. */
 #undef HAVE_INTTYPES_H
 
@@ -7,8 +13,15 @@
    (-lboost_program_options). */
 #undef HAVE_LIBBOOST_PROGRAM_OPTIONS
 
+/* Define to 1 if you have the `boost_program_options-mt' library
+   (-lboost_program_options-mt). */
+#undef HAVE_LIBBOOST_PROGRAM_OPTIONS_MT
+
 /* Define to 1 if you have the `boost_regex' library (-lboost_regex). */
 #undef HAVE_LIBBOOST_REGEX
+
+/* Define to 1 if you have the `boost_regex-mt' library (-lboost_regex-mt). */
+#undef HAVE_LIBBOOST_REGEX_MT
 
 /* Define to 1 if you have the `pthread' library (-lpthread). */
 #undef HAVE_LIBPTHREAD

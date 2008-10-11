@@ -25,10 +25,11 @@ namespace flare {
  */
 class thread_pool {
 protected:
-	typedef	map<pthread_t, shared_thread>		local_map;
+	typedef	map<uint32_t, shared_thread>		local_map;
 	typedef	map<int, local_map>							global_map;
 	typedef	stack<shared_thread>						pool;
 
+	uint32_t					_index;
 	global_map				_global_map;
 	pool							_pool;
 
@@ -42,7 +43,7 @@ public:
 	virtual ~thread_pool();
 
 	shared_thread get(int type);
-	int get_active(pthread_t id, shared_thread& t);
+	int get_active(uint32_t id, shared_thread& t);
 	int clean(thread* t, bool& is_pool);
 	int shutdown();
 

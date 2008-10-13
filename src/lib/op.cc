@@ -145,8 +145,6 @@ int op::_send_request(const char* request) {
 // {{{ private methods
 // }}}
 
-// }}}
-
 }	// namespace flare
 }	// namespace gree
 

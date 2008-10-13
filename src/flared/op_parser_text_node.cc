@@ -63,5 +63,5 @@ op* op_parser_text_node::_determine_op(const char* first, const char* buf, int& 
 
 }	// namespace flare
 }	// namespace gree
-// vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent
 
+// vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

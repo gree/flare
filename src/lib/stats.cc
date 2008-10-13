@@ -12,9 +12,6 @@
 namespace gree {
 namespace flare {
 
-// {{{ global functions
-// }}}
-
 // {{{ ctor/dtor
 /**
  *	ctor for stats
@@ -155,8 +152,6 @@ uint32_t stats::get_pool_threads(thread_pool* th) {
 // }}}
 
 // {{{ private methods
-// }}}
-
 // }}}
 
 }	// namespace flare

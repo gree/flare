@@ -55,8 +55,6 @@ int op_error::_run_server() {
 // {{{ private methods
 // }}}
 
-// }}}
-
 }	// namespace flare
 }	// namespace gree
 

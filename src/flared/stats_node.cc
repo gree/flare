@@ -44,5 +44,5 @@ uint32_t stats_node::get_curr_connections(thread_pool* tp) {
 
 }	// namespace flare
 }	// namespace gree
-// vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent
 
+// vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

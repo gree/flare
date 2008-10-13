@@ -115,8 +115,6 @@ int op_node_add::_parse_client_parameter() {
 // {{{ private methods
 // }}}
 
-// }}}
-
 }	// namespace flare
 }	// namespace gree
 

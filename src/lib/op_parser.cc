@@ -39,8 +39,6 @@ op_parser::~op_parser() {
 // {{{ private methods
 // }}}
 
-// }}}
-
 }	// namespace flare
 }	// namespace gree
 

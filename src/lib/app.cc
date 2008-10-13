@@ -169,8 +169,6 @@ string app::_get_pid_path() {
 // {{{ private methods
 // }}}
 
-// }}}
-
 }	// namespace flare
 }	// namespace gree
 

@@ -59,8 +59,6 @@ op* op_parser_text::parse_server() {
 // {{{ private methods
 // }}}
 
-// }}}
-
 }	// namespace flare
 }	// namespace gree
 

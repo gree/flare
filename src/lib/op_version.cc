@@ -66,8 +66,6 @@ int op_version::_run_server() {
 // {{{ private methods
 // }}}
 
-// }}}
-
 }	// namespace flare
 }	// namespace gree
 

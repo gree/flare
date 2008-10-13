@@ -197,4 +197,5 @@ template<class T> vector<T> util::vector_split(string s, string sep) {
 
 }	// namespace flare
 }	// namespace gree
+
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

@@ -75,6 +75,8 @@ int cluster::startup_node(string index_server_name, int index_server_port) {
 	}
 	
 	// set state and other nodes
+	
+	_delete_(p);
 
 	return 0;
 }
@@ -132,8 +134,6 @@ int cluster::add_node(string node_server_name, int node_server_port) {
 // }}}
 
 // {{{ private methods
-// }}}
-
 // }}}
 
 }	// namespace flare

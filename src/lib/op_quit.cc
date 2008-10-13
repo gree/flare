@@ -65,8 +65,6 @@ int op_quit::_run_server() {
 // {{{ private methods
 // }}}
 
-// }}}
-
 }	// namespace flare
 }	// namespace gree
 

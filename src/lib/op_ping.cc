@@ -64,8 +64,6 @@ int op_ping::_run_server() {
 // {{{ private methods
 // }}}
 
-// }}}
-
 }	// namespace flare
 }	// namespace gree
 

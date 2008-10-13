@@ -75,4 +75,5 @@ int net::close() {
 
 }	// namespace flare
 }	// namespace gree
+
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

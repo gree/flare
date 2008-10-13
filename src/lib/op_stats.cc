@@ -167,8 +167,6 @@ int op_stats::_send_stats_threads(thread_pool* tp, int type) {
 // {{{ private methods
 // }}}
 
-// }}}
-
 }	// namespace flare
 }	// namespace gree
 

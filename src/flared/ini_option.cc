@@ -267,4 +267,5 @@ int ini_option::_setup_config_option(program_options::options_description& optio
 
 }	// namespace flare
 }	// namespace gree
+
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

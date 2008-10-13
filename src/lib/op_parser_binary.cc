@@ -42,8 +42,6 @@ op* op_parser_binary::parse_server() {
 // {{{ private methods
 // }}}
 
-// }}}
-
 }	// namespace flare
 }	// namespace gree
 

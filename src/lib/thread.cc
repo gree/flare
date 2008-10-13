@@ -305,8 +305,6 @@ int thread::notify_shutdown() {
 // {{{ private methods
 // }}}
 
-// }}}
-
 }	// namespace flare
 }	// namespace gree
 

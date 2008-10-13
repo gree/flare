@@ -12,9 +12,6 @@
 namespace gree {
 namespace flare {
 
-// {{{ global functions
-// }}}
-
 // {{{ ctor/dtor
 /**
  *	ctor for thread_pool
@@ -247,8 +244,6 @@ shared_thread thread_pool::_create_thread() {
 // }}}
 
 // {{{ private methods
-// }}}
-
 // }}}
 
 }	// namespace flare

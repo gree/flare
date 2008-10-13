@@ -418,4 +418,5 @@ int connection::_add_read_buf(char* p, int len) {
 
 }	// namespace flare
 }	// namespace gree
+
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

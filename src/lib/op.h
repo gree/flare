@@ -59,6 +59,7 @@ protected:
 	int _send_ok();
 	int _send_end();
 	int _send_error(error_type t = error_type_generic, const char* m = NULL);
+	int _send_request(const char* request);
 };
 
 }	// namespace flare

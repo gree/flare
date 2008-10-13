@@ -91,16 +91,20 @@ int op_node_add::_parse_server_parameter() {
 }
 
 int op_node_add::_run_server() {
-	this->_send_end();
+	if (this->_cluster->add_node(this->_node_server_name, this->_node_server_port) < 0) {
+		this->_send_error(error_type_server, "failed to add node");
+		return -1;
+	}
 
-	return 0;
+	// get updated node info and tell it to new node
+
+	return this->_send_end();
 }
 
 int op_node_add::_run_client() {
 	char request[BUFSIZ];
-	snprintf(request, sizeof(request), "node add %s %d", this->_cluster->get_index_server_name().c_str(), this->_cluster->get_index_server_port());
-	return 0;
-	// return this->_send_request(request);
+	snprintf(request, sizeof(request), "node add %s %d", this->_cluster->get_server_name().c_str(), this->_cluster->get_server_port());
+	return this->_send_request(request);
 }
 
 int op_node_add::_parse_client_parameter() {

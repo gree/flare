@@ -113,7 +113,7 @@ int thread_pool::clean(thread* t, bool& is_pool) {
 
 	pthread_rwlock_wrlock(&this->_mutex_pool);
 	if (this->_pool.size() < this->get_max_pool_size()) {
-		log_debug("adding thread object to pool (id=%u)", id);
+		log_debug("adding thread object to pool (thread_id=%u)", thread_id);
 		this->_pool.push(tmp);
 		is_pool = true;
 	} else {

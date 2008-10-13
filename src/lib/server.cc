@@ -127,7 +127,7 @@ vector<shared_connection> server::wait() {
 		::close(sock);	// try
 		return connection_list;
 	}
-	log_debug("socket accepted (fd=%d remote=%s)", sock, inet_ntoa(addr_remote.sin_addr));
+	log_info("socket accepted (fd=%d remote=%s)", sock, inet_ntoa(addr_remote.sin_addr));
 	shared_connection c;
 	try {
 		c = shared_connection(new connection(sock, addr_remote));

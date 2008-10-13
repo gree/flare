@@ -136,7 +136,7 @@ int flarei::startup(int argc, char **argv) {
 
 	this->_thread_pool = _new_ thread_pool(ini_option_object().get_thread_pool_size());
 
-	this->_cluster = _new_ cluster(this->_thread_pool);
+	this->_cluster = _new_ cluster(this->_thread_pool, ini_option_object().get_server_name(), ini_option_object().get_server_port());
 	if (this->_cluster->startup_index() < 0) {
 		return -1;
 	}

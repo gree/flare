@@ -130,6 +130,16 @@ int op::_send_error(error_type t, const char* m) {
 		return this->_connection->writeline(r);
 	}
 }
+
+/**
+ *	send request
+ */
+int op::_send_request(const char* request) {
+	// add proxy identifier if we need
+	
+	log_info("sending request [%s] (host=%s, port=%d)", request, this->_connection->get_host().c_str(), this->_connection->get_port());
+	return this->_connection->writeline(request);
+}
 // }}}
 
 // {{{ private methods

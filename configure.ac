@@ -77,7 +77,7 @@ AC_SUBST(FLARE_LDFLAGS)
 
 # Outputs
 AC_CONFIG_FILES([Makefile \
-    src/Makefile \
+	src/Makefile \
 	src/lib/Makefile \
 	src/flared/Makefile \
 	src/flarei/Makefile])

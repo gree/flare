@@ -72,6 +72,7 @@ int connection::open(string host, int port) {
 	int he_errno;
 	if (util::gethostbyname(host.c_str(), &he, &he_errno) < 0) {
 		this->_errno = he_errno;
+		this->close();
 		return -1;
 	}
 	memcpy(&this->_addr.sin_addr, he.h_addr, he.h_length);
@@ -88,6 +89,7 @@ int connection::open(string host, int port) {
 	if (i == connection::connect_retry_limit) {
 		log_err("connect() failed", -1);
 		this->_errno = errno;
+		this->close();
 		return -1;
 	}
 

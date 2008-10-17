@@ -9,7 +9,7 @@
 #define	__THREAD_H__
 
 #include <map>
-#include <vector>
+#include <queue>
 
 #include <boost/shared_ptr.hpp>
 #include <boost/weak_ptr.hpp>
@@ -22,6 +22,7 @@
 #include "logger.h"
 #include "mm.h"
 #include "util.h"
+#include "thread_queue.h"
 
 using namespace std;
 using namespace boost;
@@ -83,6 +84,10 @@ private:
 	thread_handler*				_thread_handler;
 	bool									_is_delete_thread_handler;
 
+	queue<shared_thread_queue>	_thread_queue;
+	pthread_mutex_t							_mutex_queue;
+	pthread_cond_t							_cond_queue;
+
 public:
 	thread(thread_pool* t);
 	virtual ~thread();
@@ -95,6 +100,9 @@ public:
 	int clean(bool& is_pool);
 	int shutdown(bool graceful = false, bool async = false);
 	int notify_shutdown();
+
+	int dequeue(shared_thread_queue& q, int timeout);
+	int enqueue(shared_thread_queue q);
 
 	uint32_t get_id() { return this->_id; };
 	pthread_t get_thread_id() { return this->_thread_id; };

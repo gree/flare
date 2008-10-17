@@ -8,8 +8,9 @@
 #ifndef	__THREAD_POOL_H__
 #define	__THREAD_POOL_H__
 
-#include <vector>
+#include <map>
 #include <stack>
+#include <vector>
 
 #include "thread.h"
 #include "thread_handler.h"
@@ -24,11 +25,16 @@ namespace flare {
  *	thread pooling class
  */
 class thread_pool {
-protected:
+public:
+	enum							thread_type {
+		thread_type_request = 1,
+	};
+
 	typedef	map<uint32_t, shared_thread>		local_map;
 	typedef	map<int, local_map>							global_map;
 	typedef	stack<shared_thread>						pool;
 
+protected:
 	uint32_t					_index;
 	global_map				_global_map;
 	pool							_pool;
@@ -44,6 +50,7 @@ public:
 
 	shared_thread get(int type);
 	int get_active(uint32_t id, shared_thread& t);
+	local_map get_active(int type);
 	int clean(thread* t, bool& is_pool);
 	int shutdown();
 

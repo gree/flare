@@ -62,6 +62,8 @@ int op_stats::_parse_server_parameter() {
 		} else {
 			this->_stats_type = stats_type_error;
 		}
+	} else if (strcmp(q, "nodes") == 0) {
+		this->_stats_type = stats_type_nodes;
 	} else {
 		this->_stats_type = stats_type_error;
 	}
@@ -160,6 +162,23 @@ int op_stats::_send_stats_threads(thread_pool* tp, int type) {
 	}
 	this->_connection->write(s.str().c_str(), s.str().size());
 	
+	return 0;
+}
+
+int op_stats::_send_stats_nodes(cluster* cl) {
+	ostringstream s;
+
+	vector<cluster::node> v = cl->get_node_info();
+	for (vector<cluster::node>::iterator it = v.begin(); it != v.end(); it++) {
+		string node_key = cl->to_node_key(it->node_server_name, it->node_server_port);
+		s << "STAT " << node_key << ":role " << it->node_role << line_delimiter;
+		s << "STAT " << node_key << ":state " << it->node_state << line_delimiter;
+		s << "STAT " << node_key << ":parition " << it->node_partition << line_delimiter;
+		s << "STAT " << node_key << ":balance " << it->node_balance << line_delimiter;
+		s << "STAT " << node_key << ":thread_type " << it->node_thread_type << line_delimiter;
+	}
+	this->_connection->write(s.str().c_str(), s.str().size());
+
 	return 0;
 }
 // }}}

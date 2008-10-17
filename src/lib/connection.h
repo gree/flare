@@ -30,7 +30,7 @@ protected:
 
 public:
 	static const int connect_retry_limit = 8;
-	static const int connect_retry_wait = 100*1000;		// usec
+	static const int connect_retry_wait = 500*1000;		// usec
 	static const int read_timeout = 10*60*1000;				// msec
 
 	connection();

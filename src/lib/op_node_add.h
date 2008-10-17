@@ -28,14 +28,16 @@ protected:
 	int				_node_server_port;
 
 public:
-	op_node_add(shared_connection c, cluster* p);
+	op_node_add(shared_connection c, cluster* cl);
 	virtual ~op_node_add();
+
+	virtual int run_client(vector<cluster::node>& v);
 
 protected:
 	virtual int _parse_server_parameter();
 	virtual int _run_server();
 	virtual int _run_client();
-	virtual int _parse_client_parameter();
+	virtual int _parse_client_parameter(vector<cluster::node>& v);
 };
 
 }	// namespace flare

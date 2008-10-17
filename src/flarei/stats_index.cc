@@ -32,7 +32,7 @@ stats_index::~stats_index() {
 
 // {{{ public methods
 uint32_t stats_index::get_curr_connections(thread_pool* tp) {
-	return tp->get_thread_size(flarei::thread_type_request);
+	return tp->get_thread_size(thread_pool::thread_type_request);
 }
 // }}}
 

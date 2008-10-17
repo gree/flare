@@ -20,11 +20,6 @@ namespace flare {
  *	flared application class
  */
 class flared : public app {
-public:
-	enum					thread_type {
-		thread_type_request,
-	};
-
 private:
 	server*				_server;
 	thread_pool*	_thread_pool;

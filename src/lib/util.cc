@@ -148,7 +148,7 @@ uint32_t util::next_digit(const char* src, char* dst, uint32_t dst_len) {
 	while (*p && *p == ' ') {
 		p++;
 	}
-	while (*p && isdigit(*p) && *p != '\n' && static_cast<uint32_t>(p-src) < dst_len) {
+	while (*p && (isdigit(*p) || *p == '-') && *p != '\n' && static_cast<uint32_t>(p-src) < dst_len) {
 		*q++ = *p++;
 	}
 	*q = '\0';

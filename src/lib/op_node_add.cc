@@ -16,9 +16,9 @@ namespace flare {
 /**
  *	ctor for op_node_add
  */
-op_node_add::op_node_add(shared_connection c, cluster* p):
+op_node_add::op_node_add(shared_connection c, cluster* cl):
 		op(c, "node_add"),
-		_cluster(p),
+		_cluster(cl),
 		_node_server_name(""),
 		_node_server_port(0) {
 }
@@ -34,6 +34,16 @@ op_node_add::~op_node_add() {
 // }}}
 
 // {{{ public methods
+/**
+ *	send client request
+ */
+int op_node_add::run_client(vector<cluster::node>& v) {
+	if (this->_run_client() < 0) {
+		return -1;
+	}
+
+	return this->_parse_client_parameter(v);
+}
 // }}}
 
 // {{{ protected methods
@@ -96,7 +106,15 @@ int op_node_add::_run_server() {
 		return -1;
 	}
 
-	// get updated node info and tell it to new node
+	vector<cluster::node> v = this->_cluster->get_node_info();
+	
+	ostringstream s;
+	for (vector<cluster::node>::iterator it = v.begin(); it != v.end(); it++) {
+		char buf[BUFSIZ];
+		snprintf(buf, sizeof(buf), "NODE %s %d %d %d %d %d %d", it->node_server_name.c_str(), it->node_server_port, it->node_role, it->node_state, it->node_partition, it->node_balance, it->node_thread_type);
+		s << buf << line_delimiter;
+	}
+	this->_connection->write(s.str().c_str(), s.str().size());
 
 	return this->_send_end();
 }
@@ -107,7 +125,31 @@ int op_node_add::_run_client() {
 	return this->_send_request(request);
 }
 
-int op_node_add::_parse_client_parameter() {
+int op_node_add::_parse_client_parameter(vector<cluster::node>& v) {
+	v.clear();
+
+	for (;;) {
+		char* p;
+		if (this->_connection->readline(&p) < 0) {
+			log_err("something is going wrong while node add request", 0);
+			return -1;
+		}
+		if (strcmp(p, "END\n") == 0) {
+			break;
+		}
+
+		cluster::node n;
+		if (n.parse(p) < 0) {
+			_delete_(p);
+			return -1;
+		}
+
+		log_debug("node: server_name[%s] server_port[%d] role[%d] state[%d] partition[%d] balance[%d] thread_type[%d]", n.node_server_name.c_str(), n.node_server_port, n.node_role, n.node_state, n.node_partition, n.node_balance, n.node_thread_type);
+		v.push_back(n);
+
+		_delete_(p);
+	}
+
 	return 0;
 }
 // }}}

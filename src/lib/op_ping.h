@@ -29,6 +29,8 @@ public:
 protected:
 	virtual int _parse_server_parameter();
 	virtual int _run_server();
+	virtual int _run_client();
+	virtual int _parse_client_parameter();
 };
 
 }	// namespace flare

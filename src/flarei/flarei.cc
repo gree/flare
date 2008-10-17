@@ -109,6 +109,7 @@ int flarei::startup(int argc, char **argv) {
 	log_notice("  daemonize:        %s", ini_option_object().is_daemonize() ? "true" : "false");
 	log_notice("  data_dir:         %s", ini_option_object().get_data_dir().c_str());
 	log_notice("  max_connection:   %d", ini_option_object().get_max_connection());
+	log_notice("  monitor_interval: %d", ini_option_object().get_monitor_interval());
 	log_notice("  server_name:      %s", ini_option_object().get_server_name().c_str());
 	log_notice("  server_port:      %d", ini_option_object().get_server_port());
 	log_notice("  thread_pool_size: %d", ini_option_object().get_thread_pool_size());
@@ -136,7 +137,8 @@ int flarei::startup(int argc, char **argv) {
 
 	this->_thread_pool = _new_ thread_pool(ini_option_object().get_thread_pool_size());
 
-	this->_cluster = _new_ cluster(this->_thread_pool, ini_option_object().get_server_name(), ini_option_object().get_server_port());
+	this->_cluster = _new_ cluster(this->_thread_pool, ini_option_object().get_data_dir(), ini_option_object().get_server_name(), ini_option_object().get_server_port());
+	this->_cluster->set_monitor_interval(ini_option_object().get_monitor_interval());
 	if (this->_cluster->startup_index() < 0) {
 		return -1;
 	}
@@ -165,14 +167,14 @@ int flarei::run() {
 		for (it = connection_list.begin(); it != connection_list.end(); it++) {
 			shared_connection c = *it;
 
-			if (this->_thread_pool->get_thread_size(thread_type_request) >= ini_option_object().get_max_connection()) {
+			if (this->_thread_pool->get_thread_size(thread_pool::thread_type_request) >= ini_option_object().get_max_connection()) {
 				log_warning("too many connection [%d] -> closing socket and continue", ini_option_object().get_max_connection());
 				continue;
 			}
 
 			stats_object->increment_total_connections();
 
-			shared_thread t = this->_thread_pool->get(thread_type_request);
+			shared_thread t = this->_thread_pool->get(thread_pool::thread_type_request);
 			handler_request* h = _new_ handler_request(t, c);
 			t->trigger(h);
 		}
@@ -195,6 +197,9 @@ int flarei::reload() {
 	singleton<logger>::instance().close();
 	singleton<logger>::instance().open(this->_ident, ini_option_object().get_log_facility());
 
+	// monitor_interval
+	this->_cluster->set_monitor_interval(ini_option_object().get_monitor_interval());
+
 	// thread_pool_size
 	this->_thread_pool->set_max_pool_size(ini_option_object().get_thread_pool_size());
 
@@ -210,9 +215,6 @@ int flarei::shutdown() {
 	log_notice("shutting down active, and pool threads...", 0);
 	this->_thread_pool->shutdown();
 	log_notice("all threads are successfully shutdown", 0);
-
-	log_info("waiting for 1 sec for safe", 0);
-	sleep(1);
 
 	this->_clear_pid();
 

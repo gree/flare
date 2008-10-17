@@ -138,7 +138,7 @@ int flared::startup(int argc, char **argv) {
 
 	this->_thread_pool = _new_ thread_pool(ini_option_object().get_thread_pool_size());
 
-	this->_cluster = _new_ cluster(this->_thread_pool, ini_option_object().get_server_name(), ini_option_object().get_server_port());
+	this->_cluster = _new_ cluster(this->_thread_pool, ini_option_object().get_data_dir(), ini_option_object().get_server_name(), ini_option_object().get_server_port());
 	if (this->_cluster->startup_node(ini_option_object().get_index_server_name(), ini_option_object().get_index_server_port()) < 0) {
 		return -1;
 	}
@@ -167,14 +167,14 @@ int flared::run() {
 		for (it = connection_list.begin(); it != connection_list.end(); it++) {
 			shared_connection c = *it;
 
-			if (this->_thread_pool->get_thread_size(thread_type_request) >= ini_option_object().get_max_connection()) {
+			if (this->_thread_pool->get_thread_size(thread_pool::thread_type_request) >= ini_option_object().get_max_connection()) {
 				log_warning("too many connection [%d] -> closing socket and continue", ini_option_object().get_max_connection());
 				continue;
 			}
 
 			stats_object->increment_total_connections();
 
-			shared_thread t = this->_thread_pool->get(thread_type_request);
+			shared_thread t = this->_thread_pool->get(thread_pool::thread_type_request);
 			handler_request* h = _new_ handler_request(t, c);
 			t->trigger(h);
 		}
@@ -212,9 +212,6 @@ int flared::shutdown() {
 	log_notice("shutting down active, and pool threads...", 0);
 	this->_thread_pool->shutdown();
 	log_notice("all threads are successfully shutdown", 0);
-
-	log_info("waiting for 1 sec for safe", 0);
-	sleep(1);
 
 	this->_clear_pid();
 

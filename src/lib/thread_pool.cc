@@ -69,7 +69,7 @@ shared_thread thread_pool::get(int type) {
 }
 
 /**
- *	get active thread object from map
+ *	get active thread object from map by id
  */
 int thread_pool::get_active(uint32_t id, shared_thread& t) {
 	int r = -1;
@@ -85,6 +85,21 @@ int thread_pool::get_active(uint32_t id, shared_thread& t) {
 	pthread_rwlock_unlock(&this->_mutex_global_map);
 
 	return r;
+}
+
+/**
+ *	get active threads object from map by type
+ */
+thread_pool::local_map thread_pool::get_active(int type) {
+	local_map m;
+
+	pthread_rwlock_rdlock(&this->_mutex_global_map);
+	if (this->_global_map.count(type) > 0) {
+		m = this->_global_map[type];
+	}
+	pthread_rwlock_unlock(&this->_mutex_global_map);
+
+	return m;
 }
 
 /**

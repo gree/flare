@@ -56,7 +56,10 @@ int op_stats_index::_run_server() {
 		this->_send_stats_threads(singleton<flarei>::instance().get_thread_pool());
 		break;
 	case stats_type_threads_request:
-		this->_send_stats_threads(singleton<flarei>::instance().get_thread_pool(), flarei::thread_type_request);
+		this->_send_stats_threads(singleton<flarei>::instance().get_thread_pool(), thread_pool::thread_type_request);
+		break;
+	case stats_type_nodes:
+		this->_send_stats_nodes(singleton<flarei>::instance().get_cluster());
 		break;
 	default:
 		this->_send_stats(singleton<flarei>::instance().get_thread_pool());

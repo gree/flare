@@ -20,6 +20,7 @@ AC_ARG_WITH(boost,
 	[CXXFLAGS="${CXXFLAGS} -I${withval}/include" LDFLAGS="${LDFLAGS} -L${withval}/lib"])
 AC_CHECK_LIB(boost_program_options, main, [], [AC_CHECK_LIB(boost_program_options-mt, main, [], [AC_MSG_ERROR(boost_program_options not found)])])
 AC_CHECK_LIB(boost_regex, main, [], [AC_CHECK_LIB(boost_regex-mt, main, [], [AC_MSG_ERROR(boost_regex not found)])])
+AC_CHECK_LIB(boost_serialization, main, [], [AC_CHECK_LIB(boost_serialization-mt, main, [], [AC_MSG_ERROR(boost_serialization not found)])])
 
 AC_CHECK_LIB(pthread, pthread_create, [], [echo "libpthread not found"; exit 1])
 

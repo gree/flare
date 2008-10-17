@@ -28,12 +28,14 @@ private:
 	string			_data_dir;
 	string			_log_facility;
 	uint32_t		_max_connection;
+	int					_monitor_interval;
 	string			_server_name;
 	int					_server_port;
 	int					_thread_pool_size;
 	
 public:
 	static const uint32_t default_max_connection = 128;
+	static const int default_monitor_interval = 5;
 	static const int default_server_port = 12120;
 	static const int default_thread_pool_size = 5;
 
@@ -50,6 +52,7 @@ public:
 	string get_data_dir() { return this->_data_dir; };
 	string get_log_facility() { return this->_log_facility; };
 	uint32_t get_max_connection() { return this->_max_connection; };
+	int get_monitor_interval() { return this->_monitor_interval; };
 	string get_server_name() { return this->_server_name; };
 	int get_server_port() { return this->_server_port; };
 	int get_thread_pool_size() { return this->_thread_pool_size; };

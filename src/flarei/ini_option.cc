@@ -26,6 +26,7 @@ ini_option::ini_option():
 		_data_dir(""),
 		_log_facility(""),
 		_max_connection(default_max_connection),
+		_monitor_interval(default_monitor_interval),
 		_server_name(""),
 		_server_port(default_server_port),
 		_thread_pool_size(default_thread_pool_size) {
@@ -126,6 +127,10 @@ int ini_option::load() {
 			this->_max_connection = opt_var_map["max-connection"].as<int>();
 		}
 
+		if (opt_var_map.count("monitor-interval")) {
+			this->_monitor_interval = opt_var_map["monitor-interval"].as<int>();
+		}
+
 		if (opt_var_map.count("server-name")) {
 			this->_server_name = opt_var_map["server-name"].as<string>();
 		} else {
@@ -201,6 +206,11 @@ int ini_option::reload() {
 			this->_max_connection = opt_var_map["max-connection"].as<int>();
 		}
 
+		if (opt_var_map.count("monitor-interval")) {
+			log_info("  monitor_interval: %d -> %d", this->_monitor_interval, opt_var_map["monitor-interval"].as<int>());
+			this->_monitor_interval = opt_var_map["monitor-interval"].as<int>();
+		}
+
 		if (opt_var_map.count("thread-pool-size")) {
 			log_info("  thread_pool_size: %d -> %d", this->_thread_pool_size, opt_var_map["thread-pool-size"].as<int>());
 			this->_thread_pool_size = opt_var_map["thread-pool-size"].as<int>();
@@ -241,6 +251,7 @@ int ini_option::_setup_config_option(program_options::options_description& optio
 		("data-dir",					program_options::value<string>(), 	"data directory")
 		("log-facility",			program_options::value<string>(), 	"log facility (dynamic)")
 		("max-connection",		program_options::value<int>(),			"max concurrent connections to accept (dynamic)")
+		("monitor-interval",	program_options::value<int>(),			"node server monitoring interval (sec) (dynamic)")
 		("server-name",				program_options::value<string>(),		"my server name")
 		("server-port",				program_options::value<int>(),			"my server port")
 		("thread-pool-size",	program_options::value<int>(),			"thread pool size (dynamic)");

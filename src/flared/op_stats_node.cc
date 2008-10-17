@@ -56,7 +56,10 @@ int op_stats_node::_run_server() {
 		this->_send_stats_threads(singleton<flared>::instance().get_thread_pool());
 		break;
 	case stats_type_threads_request:
-		this->_send_stats_threads(singleton<flared>::instance().get_thread_pool(), flared::thread_type_request);
+		this->_send_stats_threads(singleton<flared>::instance().get_thread_pool(), thread_pool::thread_type_request);
+		break;
+	case stats_type_nodes:
+		this->_send_stats_nodes(singleton<flared>::instance().get_cluster());
 		break;
 	default:
 		this->_send_stats(singleton<flared>::instance().get_thread_pool());

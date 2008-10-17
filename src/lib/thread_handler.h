@@ -8,6 +8,8 @@
 #ifndef	__THREAD_HANDLER_H__
 #define	__THREAD_HANDLER_H__
 
+#include "thread.h"
+
 using namespace std;
 using namespace boost;
 

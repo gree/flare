@@ -10,8 +10,17 @@
 
 #include <map>
 #include <vector>
+#include <fstream>
 
+#include <boost/archive/text_oarchive.hpp>
+#include <boost/archive/text_iarchive.hpp>
+#include <boost/serialization/map.hpp>
+#include <boost/serialization/string.hpp>
 #include <boost/lexical_cast.hpp>
+
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include "connection.h"
 #include "thread_pool.h"
@@ -32,60 +41,95 @@ public:
 		type_node,
 	};
 
+	enum							role {
+		role_master,
+		role_slave,
+		role_proxy,
+	};
+
 	enum							state {
-		state_master,
-		state_slave,
-		state_proxy,
+		state_active,
+		state_prepare,
+		state_down,
 	};
 
 	typedef struct		_node {
 		string					node_server_name;
 		int							node_server_port;
+		role						node_role;
 		state						node_state;
+		int							node_partition;
+		int							node_balance;
 		int							node_thread_type;
+
+		int parse(const char* p);
+
+	private:
+		friend class serialization::access;
+		template<class T> void serialize(T& ar, uint32_t version) {
+			ar & node_server_name;
+			ar & node_server_port;
+			ar & node_role;
+			ar & node_state;
+			ar & node_partition;
+			ar & node_balance;
+			ar & node_thread_type;
+		};
 	} node;
 
+	typedef struct		_partition_node {
+		string					node_key;
+		int							node_balance;
+	} partition_node;
+
 	typedef struct		_partition {
-		string					master;
-		vector<string>	slave;
+		partition_node					master;
+		vector<partition_node>	slave;
 	} partition;
 	
 	typedef map<string, node>		node_map;
-	typedef map<string, int>		node_thread_type_map;
 	typedef map<int, partition>	node_partition_map;
 
-	static const int	default_thread_type_index = 16;
+	static const int	default_thread_type = 16;
 
 protected:
-	thread_pool*			_thread_pool;
-	type							_type;
-	state							_state;
-	string						_server_name;
-	int								_server_port;
-	int								_thread_type_index;
+	thread_pool*					_thread_pool;
+	type									_type;
+	string								_data_dir;
+	pthread_mutex_t				_mutex_serialization;
 
 	node_map							_node_map;
-	node_thread_type_map	_node_thread_type_map;
 	node_partition_map		_node_partition_map;
+	node_partition_map		_node_partition_prepare_map;
 	pthread_rwlock_t			_mutex_node_map;
-	pthread_rwlock_t			_mutex_node_thread_type_map;
 	pthread_rwlock_t			_mutex_node_partition_map;
 
-	// map
+	string								_node_key;
+	string								_server_name;
+	int										_server_port;
 
-	// node
-	string						_index_server_name;
-	int								_index_server_port;
+	// [index]
+	int										_monitor_interval;
+	int										_thread_type;
+
+	// [node]
+	string								_index_server_name;
+	int										_index_server_port;
 
 public:
-	cluster(thread_pool* tp, string server_name, int server_port);
+	cluster(thread_pool* tp, string data_dir, string server_name, int server_port);
 	virtual ~cluster();
 
 	int startup_index();
 	int startup_node(string index_server_name, int index_server_port);
+	int reconstruct_node(vector<node> v);
 
 	int add_node(string node_server_name, int node_server_port);
+	int down_node(string node_server_name, int node_server_port);
 
+	vector<node> get_node_info();
+
+	int set_monitor_interval(int monitor_interval);
 	string get_server_name() { return this->_server_name; };
 	int get_server_port() { return this->_server_port; };
 	string get_index_server_name() { return this->_index_server_name; };
@@ -109,6 +153,11 @@ public:
 		}
 		return 0;
 	}
+
+protected:
+	int _broadcast(shared_thread_queue q, bool sync = false);
+	int _save();
+	int _load();
 };
 
 }	// namespace flare

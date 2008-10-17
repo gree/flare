@@ -59,6 +59,24 @@ int op_ping::_run_server() {
 
 	return 0;
 }
+
+int op_ping::_run_client() {
+	char request[BUFSIZ];
+	snprintf(request, sizeof(request), "ping");
+
+	return this->_send_request(request);
+}
+
+int op_ping::_parse_client_parameter() {
+	char *p;
+	if (this->_connection->readline(&p) < 0) {
+		return -1;
+	}
+	int r = (strcmp(p, "OK\n") == 0) ? 0 : -1;
+	_delete_(p);
+
+	return r;
+}
 // }}}
 
 // {{{ private methods

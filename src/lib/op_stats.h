@@ -33,6 +33,7 @@ protected:
 		stats_type_sizes,
 		stats_type_threads,
 		stats_type_threads_request,
+		stats_type_nodes,
 	};
 
 	stats_type	_stats_type;
@@ -51,6 +52,7 @@ protected:
 	virtual int _send_stats_sizes();
 	virtual int _send_stats_threads(thread_pool* tp);
 	virtual int _send_stats_threads(thread_pool* tp, int type);
+	virtual int _send_stats_nodes(cluster* cl);
 };
 
 }	// namespace flare

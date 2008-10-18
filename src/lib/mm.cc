@@ -10,14 +10,14 @@
 #include "mm.h"
 
 #ifdef MM_ALLOCATION_CHECK
-void* operator new(uint32_t size, const char* file, int line) {
+void* operator new(size_t size, const char* file, int line) {
 	void* p = (void*)malloc(size);
 	gree::flare::mm::add_alloc_list(p, size, file, line);
 
 	return p;
 }
 
-void* operator new [](uint32_t size, const char* file, int line) {
+void* operator new [](size_t size, const char* file, int line) {
 	void* p = (void*)malloc(size);
 	gree::flare::mm::add_alloc_list(p, size, file, line);
 

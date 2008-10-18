@@ -135,6 +135,7 @@ int op_node_add::_parse_client_parameter(vector<cluster::node>& v) {
 			return -1;
 		}
 		if (strcmp(p, "END\n") == 0) {
+			_delete_(p);
 			break;
 		}
 

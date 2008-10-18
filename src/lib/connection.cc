@@ -242,7 +242,7 @@ int connection::readline(char** p) {
 	}
 
 	*p = r;
-	log_debug("p=%s len=%d", *p, r_len);
+	log_debug("p=[%s] len=%d", *p, r_len);
 
 	return r_len;
 }
@@ -349,6 +349,7 @@ int connection::write(const char* p, int bufsiz) {
  */
 int connection::writeline(const char* p) {
 	int len = strlen(p);
+	log_debug("p=[%s] len=%d", p, len);
 	char* q = _new_ char[len+3];
 	memcpy(q, p, len);
 	memcpy(q+len, line_delimiter, 3);

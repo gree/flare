@@ -32,8 +32,10 @@ app::app():
  *	dtor for app
  */
 app::~app() {
-	_delete_(stats_object);
-	stats_object = NULL;
+	if (stats_object != NULL) {
+		_delete_(stats_object);
+		stats_object = NULL;
+	}
 }
 // }}}
 

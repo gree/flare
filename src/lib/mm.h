@@ -16,8 +16,8 @@
 
 using namespace std;
 
-void* operator new(uint32_t size, const char* file, int line);
-void* operator new [](uint32_t size, const char* file, int line);
+void* operator new(size_t size, const char* file, int line);
+void* operator new [](size_t size, const char* file, int line);
 
 namespace gree {
 namespace flare {

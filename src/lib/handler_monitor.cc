@@ -45,7 +45,7 @@ int handler_monitor::run() {
 	this->_thread->set_peer(this->_node_server_name, this->_node_server_port);
 	this->_thread->set_state("connect");
 
-	shared_connection c(_new_ connection());
+	shared_connection c(new connection());
 	this->_connection = c;
 	if (c->open(this->_node_server_name, this->_node_server_port) < 0) {
 		log_err("failed to connect to node server [name=%s, port=%d] -> dispatch node down event and continue monitoring", this->_node_server_name.c_str(), this->_node_server_port);

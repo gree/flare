@@ -135,6 +135,10 @@ int cluster::startup_index() {
 		log_err("failed to load serialized vars", 0);
 		return -1;
 	}
+	if (this->reconstruct_node(this->get_node_info()) < 0) {
+		log_err("failed to reconstruct node map", 0);
+		return -1;
+	}
 
 	// monitoring threads
 	for (node_map::iterator it = this->_node_map.begin(); it != this->_node_map.end(); it++) {
@@ -157,7 +161,7 @@ int cluster::startup_node(string index_server_name, int index_server_port) {
 
 	log_notice("setting up cluster node... (type=%d, index_server_name=%s, index_server_port=%d)", this->_type, this->_index_server_name.c_str(), this->_index_server_port);
 
-	shared_connection c(_new_ connection());
+	shared_connection c(new connection());
 	if (c->open(this->_index_server_name, this->_index_server_port) < 0) {
 		log_err("failed to connect to index server", 0);
 		return -1;
@@ -431,7 +435,7 @@ int cluster::add_node(string node_server_name, int node_server_port) {
 	}
 
 	// notify other nodes
-	shared_queue_node_sync q(_new_ queue_node_sync(this));
+	shared_queue_node_sync q(new queue_node_sync(this));
 	this->_broadcast(q);
 	
 	return 0;
@@ -451,7 +455,7 @@ int cluster::set_monitor_interval(int monitor_interval) {
 	this->_monitor_interval = monitor_interval;
 
 	// notify to current threads
-	shared_queue_update_monitor_interval q(_new_ queue_update_monitor_interval(this->_monitor_interval));
+	shared_queue_update_monitor_interval q(new queue_update_monitor_interval(this->_monitor_interval));
 	this->_broadcast(q, true);
 
 	return 0;

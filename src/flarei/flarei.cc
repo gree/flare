@@ -99,7 +99,7 @@ int flarei::startup(int argc, char **argv) {
 	}
 
 	singleton<logger>::instance().open(this->_ident, ini_option_object().get_log_facility());
-	stats_object = new stats_index();
+	stats_object = _new_ stats_index();
 	stats_object->startup();
 
 	log_notice("%s version %s - system logger started", this->_ident.c_str(), PACKAGE_VERSION);

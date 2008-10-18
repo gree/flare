@@ -80,6 +80,7 @@ int op_node_sync::_run_server() {
 		}
 
 		if (strcmp(p, "END\n") == 0) {
+			_delete_(p);
 			break;
 		}
 

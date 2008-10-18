@@ -495,11 +495,13 @@ int cluster::_broadcast(shared_thread_queue q, bool sync) {
  */
 int cluster::_save() {
 	string path = this->_data_dir + "/cluster_node.txt";
-	string path_tmp = path + "." + lexical_cast<string>(static_cast<uint32_t>(pthread_self()));
+	string path_tmp = path + ".tmp";
 
+	pthread_mutex_lock(&this->_mutex_serialization);
 	ofstream ofs(path_tmp.c_str());
 	if (ofs.fail()) {
 		log_err("creating serialization file failed -> daemon restart will cause serious problem (path=%s)", path_tmp.c_str());
+		pthread_mutex_unlock(&this->_mutex_serialization);
 		return -1;
 	}
 
@@ -509,7 +511,6 @@ int cluster::_save() {
 
 	ofs.close();
 
-	pthread_mutex_lock(&this->_mutex_serialization);
 	if (unlink(path.c_str()) < 0 && errno != ENOENT) {
 		pthread_mutex_unlock(&this->_mutex_serialization);
 		log_err("unlink() for current serialization file failed (%s)", util::strerror(errno));

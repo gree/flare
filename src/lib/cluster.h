@@ -126,6 +126,7 @@ public:
 
 	int add_node(string node_server_name, int node_server_port);
 	int down_node(string node_server_name, int node_server_port);
+	int up_node(string node_server_name, int node_server_port);
 
 	vector<node> get_node_info();
 

@@ -445,6 +445,21 @@ int cluster::add_node(string node_server_name, int node_server_port) {
  *	[index] node down event handler
  */
 int cluster::down_node(string node_server_name, int node_server_port) {
+	string node_key = this->to_node_key(node_server_name, node_server_port);
+
+	pthread_rwlock_wrlock(&this->_mutex_node_map);
+	try {
+	} catch (int e) {
+	}
+
+	pthread_rwlock_unlock(&this->_mutex_node_map);
+	return 0;
+}
+
+/**
+ *	[index] node up event handler
+ */
+int cluster::up_node(string node_server_name, int node_server_port) {
 	return 0;
 }
 

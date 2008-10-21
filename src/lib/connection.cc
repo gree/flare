@@ -131,7 +131,8 @@ int connection::read(char** p) {
 	}
 	if (n < 0) {
 		if (errno != EINTR) {
-			log_err("select() failed: %s (%d)", util::strerror(errno), errno);
+			log_err("select() failed: %s (%d) -> closing socket", util::strerror(errno), errno);
+			this->close();
 		} else {
 			log_notice("select() failed: %s (%d)", util::strerror(errno), errno);
 		}
@@ -146,7 +147,8 @@ int connection::read(char** p) {
 
 	int bufsiz;
 	if (::ioctl(this->_sock, FIONREAD, &bufsiz)) {
-		log_err("ioctl() failed: %s (%d)", util::strerror(errno), errno);
+		log_err("ioctl() failed: %s (%d) -> closing socket", util::strerror(errno), errno);
+		this->close();
 		this->_errno = errno;
 		return -1;
 	}
@@ -155,9 +157,10 @@ int connection::read(char** p) {
 	int len = ::read(this->_sock, *p, bufsiz);
 	if (len == 0) {
 		// peer seems to close connection
-		log_info("peer seems to close connection (read 0 byte)", 0);
+		log_info("peer seems to close connection (read 0 byte) -> closing socket", 0);
 		_delete_(*p);
 		*p = NULL;
+		this->close();
 		this->_errno = -2;
 		return -2;
 	} else if (len == bufsiz) {
@@ -171,6 +174,8 @@ int connection::read(char** p) {
 		} else if (errno == EINTR) {
 			return 0;
 		}
+		log_err("-> closing socket", 0);
+		this->close();
 		return -1;
 	} else if (len < bufsiz) {
 		// something wrong but worth continuing
@@ -330,13 +335,15 @@ int connection::write(const char* p, int bufsiz) {
 		if (errno == EAGAIN || errno == EINTR) {
 			return 0;
 		}
+		log_err("-> closing socket", 0);
+		this->close();
 		this->_errno = errno;
 		return -1;
 	}
 	if (len == bufsiz) {
 		log_debug("write %d bytes", len);
 	} else {
-		log_info("expect %d bytes but read %d byes -> continue processing", bufsiz, len);
+		log_info("expect %d bytes but write %d byes -> continue processing", bufsiz, len);
 	}
 
 	stats_object->add_bytes_written(len);

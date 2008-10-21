@@ -106,7 +106,7 @@ int op_node_add::_run_server() {
 		return -1;
 	}
 
-	vector<cluster::node> v = this->_cluster->get_node_info();
+	vector<cluster::node> v = this->_cluster->get_node();
 	
 	ostringstream s;
 	for (vector<cluster::node>::iterator it = v.begin(); it != v.end(); it++) {

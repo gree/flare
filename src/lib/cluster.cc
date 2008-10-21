@@ -11,7 +11,7 @@
 #include "handler_monitor.h"
 #include "op_node_add.h"
 #include "queue_node_sync.h"
-#include "queue_update_monitor_interval.h"
+#include "queue_update_monitor_option.h"
 
 namespace gree {
 namespace flare {
@@ -28,6 +28,7 @@ cluster::cluster(thread_pool* tp, string data_dir, string server_name, int serve
 		_data_dir(data_dir),
 		_server_name(server_name),
 		_server_port(server_port),
+		_monitor_threshold(0),
 		_monitor_interval(0),
 		_thread_type(default_thread_type),
 		_index_server_name(""),
@@ -132,11 +133,11 @@ int cluster::startup_index() {
 
 	// load
 	if (this->_load() < 0) {
-		log_err("failed to load serialized vars", 0);
+		log_err("failed to load serialized vars (node map, etc)", 0);
 		return -1;
 	}
-	if (this->reconstruct_node(this->get_node_info()) < 0) {
-		log_err("failed to reconstruct node map", 0);
+	if (this->_reconstruct_node_partition() < 0) {
+		log_err("failed to reconstruct node partition map", 0);
 		return -1;
 	}
 
@@ -144,6 +145,7 @@ int cluster::startup_index() {
 	for (node_map::iterator it = this->_node_map.begin(); it != this->_node_map.end(); it++) {
 		shared_thread t = this->_thread_pool->get(it->second.node_thread_type);
 		handler_monitor* h = _new_ handler_monitor(t, this, it->second.node_server_name, it->second.node_server_port);
+		h->set_monitor_threshold(this->_monitor_threshold);
 		h->set_monitor_interval(this->_monitor_interval);
 		t->trigger(h);
 	}
@@ -194,11 +196,9 @@ int cluster::reconstruct_node(vector<node> v) {
 	pthread_rwlock_wrlock(&this->_mutex_node_map);
 	pthread_rwlock_wrlock(&this->_mutex_node_partition_map);
 
-	log_notice("reconstructing node map and node partition map... (%d entries)", v.size());
+	log_notice("reconstructing node map... (%d entries)", v.size());
 
 	node_map nm;
-	node_partition_map npm;
-	node_partition_map nppm;
 
 	for (vector<node>::iterator it = v.begin(); it != v.end(); it++) {
 		string node_key = this->to_node_key(it->node_server_name, it->node_server_port);
@@ -230,71 +230,6 @@ int cluster::reconstruct_node(vector<node> v) {
 			this->_node_map.erase(node_key);
 		}
 		nm[node_key] = *it;
-
-		// node parition map (master)
-		try {
-			if (it->node_role == role_master) {
-				if (it->node_partition < 0) {
-					throw "node partition is inconsistent";
-				}
-
-				if (it->node_state == state_active) {
-					if (npm[it->node_partition].master.node_key.empty() == false) {
-						throw "master is already set, cannot overwrite";
-					}
-					npm[it->node_partition].master.node_key = node_key;
-					npm[it->node_partition].master.node_balance = it->node_balance;
-				} else if (it->node_state == state_prepare) {
-					if (nppm[it->node_partition].master.node_key.empty() == false) {
-						throw "master (prepare) is already set, cannot overwrite";
-					}
-					nppm[it->node_partition].master.node_key = node_key;
-					nppm[it->node_partition].master.node_balance = it->node_balance;
-				}
-			}
-		} catch (string e) {
-			log_err("%s [node_key=%s, state=%d, role=%d, partition=%d]", e.c_str(), node_key.c_str(), it->node_state, it->node_role, it->node_partition);
-		}
-	}
-
-	// node partition map (slave)
-	for (vector<node>::iterator it = v.begin(); it != v.end(); it++) {
-		if (it->node_role != role_slave || it->node_state == state_down) {
-			continue;
-		}
-
-		string node_key = this->to_node_key(it->node_server_name, it->node_server_port);
-		try {
-			if (it->node_partition < 0) {
-				throw "node partition is inconsistent";
-			}
-
-			if (it->node_state == state_active) {
-				if (npm.count(it->node_partition) == 0) {
-					throw "no active master for this slave";
-				}
-				
-				partition_node pn;
-				pn.node_key = node_key;
-				pn.node_balance = it->node_balance;
-				npm[it->node_partition].slave.push_back(pn);
-			} else if (it->node_state == state_prepare) {
-				if (npm.count(it->node_partition) == 0 && nppm.count(it->node_partition) == 0) {
-					throw "no active or prepare master for this slave";
-				}
-
-				partition_node pn;
-				pn.node_key = node_key;
-				pn.node_balance = it->node_balance;
-				if (npm.count(it->node_partition) > 0) {
-					npm[it->node_partition].slave.push_back(pn);
-				} else {
-					nppm[it->node_partition].slave.push_back(pn);
-				}
-			}
-		} catch (string e) {
-			log_err("%s [node_key=%s, state=%d, role=%d, partition=%d]", e.c_str(), node_key.c_str(), it->node_state, it->node_role, it->node_partition);
-		}
 	}
 
 	// check out removed nodes
@@ -303,56 +238,9 @@ int cluster::reconstruct_node(vector<node> v) {
 		this->_node_map.erase(it->first);
 	}
 
-	// check and log node partition map consistency
-	int n = 0;
-	log_notice("node partition map:", 0);
-	for (node_partition_map::iterator it = npm.begin(); it != npm.end(); it++) {
-		if (it->first > n) {
-			n = it->first;
-		}
-		log_notice("%d: master (node_key=%s, node_balance=%d)", it->first, it->second.master.node_key.c_str(), it->second.master.node_balance);
-
-		int m = 0;
-		for (vector<partition_node>::iterator it_slave = it->second.slave.begin(); it_slave != it->second.slave.end(); it_slave++) {
-			log_notice("%d: slave[%d] (node_key=%s, node_balance=%d)", it->first, m, it_slave->node_key.c_str(), it_slave->node_balance);
-			m++;
-		}
-	}
-	if (npm.size() > 0 && (n+1) != static_cast<int>(npm.size())) {
-		log_err("possibly missing partition (parition=%d, size=%d)", n, npm.size());
-		pthread_rwlock_unlock(&this->_mutex_node_partition_map);
-		pthread_rwlock_unlock(&this->_mutex_node_map);
-		return -1;
-	}
-
-	n = 0;
-	log_notice("node partition map (prepare):", 0);
-	if (nppm.size() > 1) {
-		log_err("more than 1 partition prepare map -> some thing is seriously going wrong", 0);
-		pthread_rwlock_unlock(&this->_mutex_node_partition_map);
-		pthread_rwlock_unlock(&this->_mutex_node_map);
-		return -1;
-	}
-
-	for (node_partition_map::iterator it = nppm.begin(); it != nppm.end(); it++) {
-		if (it->first != static_cast<int>(npm.size())) {
-			log_err("invalid partition [%d] for partition prepare map -> some thing is seriously going wrong", it->first);
-			pthread_rwlock_unlock(&this->_mutex_node_partition_map);
-			pthread_rwlock_unlock(&this->_mutex_node_map);
-			return -1;
-		}
-		log_notice("%d(prepare): master (node_key=%s, node_balance=%d)", it->first, it->second.master.node_key.c_str(), it->second.master.node_balance);
-
-		int m = 0;
-		for (vector<partition_node>::iterator it_slave = it->second.slave.begin(); it_slave != it->second.slave.end(); it_slave++) {
-			log_notice("%d(prepare): slave[%d] (node_key=%s, node_balance=%d)", it->first, m, it_slave->node_key.c_str(), it_slave->node_balance);
-			m++;
-		}
-	}
-
 	this->_node_map = nm;
-	this->_node_partition_map = npm;
-	this->_node_partition_prepare_map = nppm;
+
+	this->_reconstruct_node_partition(false);
 
 	pthread_rwlock_unlock(&this->_mutex_node_partition_map);
 	pthread_rwlock_unlock(&this->_mutex_node_map);
@@ -363,7 +251,7 @@ int cluster::reconstruct_node(vector<node> v) {
 /**
  *	get node info vector
  */
-vector<cluster::node> cluster::get_node_info() {
+vector<cluster::node> cluster::get_node() {
 	vector<node> v;
 
 	pthread_rwlock_rdlock(&this->_mutex_node_map);
@@ -430,6 +318,7 @@ int cluster::add_node(string node_server_name, int node_server_port) {
 	if (replace == false) {
 		shared_thread t = this->_thread_pool->get(thread_type);
 		handler_monitor* h = _new_ handler_monitor(t, this, node_server_name, node_server_port);
+		h->set_monitor_threshold(this->_monitor_threshold);
 		h->set_monitor_interval(this->_monitor_interval);
 		t->trigger(h);
 	}
@@ -447,12 +336,84 @@ int cluster::add_node(string node_server_name, int node_server_port) {
 int cluster::down_node(string node_server_name, int node_server_port) {
 	string node_key = this->to_node_key(node_server_name, node_server_port);
 
+	log_notice("handling node down event [node_key=%s]", node_key.c_str());
+
 	pthread_rwlock_wrlock(&this->_mutex_node_map);
+	pthread_rwlock_wrlock(&this->_mutex_node_partition_map);
+
 	try {
+		if (this->_node_map.count(node_key) == 0) {
+			log_warning("no such node (node_key=%s)", node_key.c_str());
+			throw -1;
+		}
+		if (this->_node_map[node_key].node_state == state_down) {
+			log_notice("node is already down (node_key=%s)", node_key.c_str());
+			throw 0;
+		}
+
+		node& n = this->_node_map[node_key];
+		bool preserve = false;
+		if (n.node_role == role_master) {
+			if (n.node_state == state_active) {
+				log_err("master node down -> finding an active slave and shift its role to master", 0);
+				if (this->_node_partition_map[n.node_partition].slave.size() == 0) {
+					log_err("no slave for this partition (partition=%d) -> all requests for this partition will fail!", n.node_partition);
+					preserve = true;		// leave role as master to keep partition count (*important*)
+				} else {
+					string failover_node_key;
+					int balance = 0;
+					for (vector<partition_node>::iterator it = this->_node_partition_map[n.node_partition].slave.begin(); it != this->_node_partition_map[n.node_partition].slave.end(); it++) {
+						if (this->_node_map[it->node_key].node_state == state_active && failover_node_key.empty() == false) {
+							failover_node_key = it->node_key;
+						}
+						balance += it->node_balance;
+					}
+
+					if (failover_node_key.empty()) {
+						log_err("no active slave:( -> all requests for this partition will fail!", 0);
+						preserve = true;		// leave role as master to keep partition count (*important*)
+					} else {
+						// shift target slave role to master
+						this->_node_map[failover_node_key].node_role = role_master;
+						if (balance == 0) {
+							this->_node_map[failover_node_key].node_balance++;
+						}
+						log_notice("found new master node (node_key=%s, partition=%d, balance=%d)", failover_node_key.c_str(), n.node_partition, this->_node_map[failover_node_key].node_balance);
+					}
+				}
+			} else if (n.node_state == state_prepare) {
+				log_err("master node (prepare) down -> clearing all preparing nodes in this partition (partition=%d)", n.node_partition);
+
+				for (vector<partition_node>::iterator it = this->_node_partition_prepare_map[n.node_partition].slave.begin(); it != this->_node_partition_prepare_map[n.node_partition].slave.end(); it++) {
+					log_debug("  -> node_key: %s", it->node_key.c_str());
+					this->_node_map[it->node_key].node_role = role_proxy;
+					this->_node_map[it->node_key].node_partition = -1;
+				}
+			}
+		}
+
+		log_notice("setting node state to down (and clearing role, etc)", 0);
+		n.node_state = state_down;
+		if (preserve == false) {
+			n.node_role = role_proxy;
+			n.node_partition = -1;
+			n.node_balance = 0;
+		}
 	} catch (int e) {
+		pthread_rwlock_unlock(&this->_mutex_node_partition_map);
+		pthread_rwlock_unlock(&this->_mutex_node_map);
+		return e;
 	}
 
+	this->_reconstruct_node_partition(false);
+
+	pthread_rwlock_unlock(&this->_mutex_node_partition_map);
 	pthread_rwlock_unlock(&this->_mutex_node_map);
+
+	// notify
+	shared_queue_node_sync q(new queue_node_sync(this));
+	this->_broadcast(q);
+
 	return 0;
 }
 
@@ -460,6 +421,39 @@ int cluster::down_node(string node_server_name, int node_server_port) {
  *	[index] node up event handler
  */
 int cluster::up_node(string node_server_name, int node_server_port) {
+	string node_key = this->to_node_key(node_server_name, node_server_port);
+
+	log_notice("handling node up event [node_key=%s]", node_key.c_str());
+
+	pthread_rwlock_wrlock(&this->_mutex_node_map);
+	pthread_rwlock_wrlock(&this->_mutex_node_partition_map);
+
+	// in any case, state -> active will do
+	// role should be proxy or (preserved) master
+	this->_node_map[node_key].node_state = state_active;
+
+	this->_reconstruct_node_partition(false);
+
+	pthread_rwlock_unlock(&this->_mutex_node_partition_map);
+	pthread_rwlock_unlock(&this->_mutex_node_map);
+
+	// notify
+	shared_queue_node_sync q(new queue_node_sync(this));
+	this->_broadcast(q);
+
+	return 0;
+}
+
+/**
+ *	[index] set node server monitoring threshold
+ */
+int cluster::set_monitor_threshold(int monitor_threshold) {
+	this->_monitor_threshold = monitor_threshold;
+
+	// notify current threads
+	shared_queue_update_monitor_option q(new queue_update_monitor_option(this->_monitor_threshold, this->_monitor_interval));
+	this->_broadcast(q, true);
+
 	return 0;
 }
 
@@ -469,8 +463,8 @@ int cluster::up_node(string node_server_name, int node_server_port) {
 int cluster::set_monitor_interval(int monitor_interval) {
 	this->_monitor_interval = monitor_interval;
 
-	// notify to current threads
-	shared_queue_update_monitor_interval q(new queue_update_monitor_interval(this->_monitor_interval));
+	// notify current threads
+	shared_queue_update_monitor_option q(new queue_update_monitor_option(this->_monitor_threshold, this->_monitor_interval));
 	this->_broadcast(q, true);
 
 	return 0;
@@ -573,6 +567,171 @@ int cluster::_load() {
 	pthread_mutex_unlock(&this->_mutex_serialization);
 
 	return 0;
+}
+
+/**
+ *	reconstruct node partition map from current node map
+ */
+int cluster::_reconstruct_node_partition(bool lock) {
+	int r = 0;
+
+	if (lock) {
+		pthread_rwlock_rdlock(&this->_mutex_node_map);
+		pthread_rwlock_wrlock(&this->_mutex_node_partition_map);
+	}
+
+	log_notice("reconstructing node partition map... (from %d entries in node map)", this->_node_map.size());
+
+	node_partition_map npm;
+	node_partition_map nppm;
+
+	for (node_map::iterator it = this->_node_map.begin(); it != this->_node_map.end(); it++) {
+		// master (1st path)
+		node& n = it->second;
+		if (n.node_role != role_master) {
+			continue;
+		}
+		if (n.node_state == state_down) {
+			// this means that we should preserve this partition (even if it's empty)
+			npm[n.node_partition].master.node_key = "";
+			npm[n.node_partition].master.node_balance = 0;
+			log_notice("role is master but state is down -> preserve as empty partition (node_key=%s, partition=%d)", it->first.c_str(), n.node_partition);
+			continue;
+		}
+
+		string node_key = it->first;
+		log_debug("node_key: %s%s", node_key.c_str(), node_key == this->_node_key ? " (myself)" : "");
+
+		try {
+			if (n.node_partition < 0) {
+				throw "node partition is inconsistent (role=master but have no partition)";
+			}
+
+			if (n.node_state == state_active) {
+				if (npm[n.node_partition].master.node_key.empty() == false) {
+					throw "master is already set, cannot overwrite";
+				}
+				npm[n.node_partition].master.node_key = node_key;
+				npm[n.node_partition].master.node_balance = n.node_balance;
+
+				log_debug("master node added (node_key=%s, parition=%d, balance=%d)", node_key.c_str(), n.node_partition, n.node_balance);
+			} else if (n.node_state == state_prepare) {
+				if (nppm[n.node_partition].master.node_key.empty() == false) {
+					throw "master (prepare) is already set, cannot overwrite";
+				}
+				nppm[n.node_partition].master.node_key = node_key;
+				nppm[n.node_partition].master.node_balance = 0;		// should be always 0 for safe
+
+				log_debug("master (prepare) node added (node_key=%s, parition=%d, balance=%d)", node_key.c_str(), n.node_partition, n.node_balance);
+			}
+		} catch (string e) {
+			log_err("%s [node_key=%s, state=%d, role=%d, partition=%d]", e.c_str(), node_key.c_str(), n.node_state, n.node_role, n.node_partition);
+			r = -1;
+		}
+	}
+
+	for (node_map::iterator it = this->_node_map.begin(); it != this->_node_map.end(); it++) {
+		// slave (2nd path)
+		node& n = it->second;
+		if (n.node_role != role_slave || n.node_state == state_down) {
+			continue;
+		}
+
+		string node_key = it->first;
+		try {
+			if (n.node_partition < 0) {
+				throw "node partition is inconsistent (role=slave but have no partition)";
+			}
+
+			if (n.node_state == state_active) {
+				if (npm.count(n.node_partition) == 0) {
+					throw "no active master for this slave";
+				}
+				
+				partition_node pn;
+				pn.node_key = node_key;
+				pn.node_balance = n.node_balance;
+				npm[n.node_partition].slave.push_back(pn);
+			} else if (n.node_state == state_prepare) {
+				if (npm.count(n.node_partition) == 0 && nppm.count(n.node_partition) == 0) {
+					throw "no active or prepare master for this slave";
+				}
+
+				partition_node pn;
+				pn.node_key = node_key;
+				pn.node_balance = 0;		// should be always 0 for safe
+				if (npm.count(n.node_partition) > 0) {
+					npm[n.node_partition].slave.push_back(pn);
+				} else {
+					nppm[n.node_partition].slave.push_back(pn);
+				}
+			}
+		} catch (string e) {
+			log_err("%s [node_key=%s, state=%d, role=%d, partition=%d]", e.c_str(), node_key.c_str(), n.node_state, n.node_role, n.node_partition);
+			r = -1;
+		}
+	}
+
+	// check and log node partition map consistency
+	try {
+		int n = 0;
+		log_notice("node partition map:", 0);
+		for (node_partition_map::iterator it = npm.begin(); it != npm.end(); it++) {
+			if (it->first > n) {
+				n = it->first;
+			}
+			log_notice("%d: master (node_key=%s, node_balance=%d)", it->first, it->second.master.node_key.c_str(), it->second.master.node_balance);
+
+			int m = 0;
+			for (vector<partition_node>::iterator it_slave = it->second.slave.begin(); it_slave != it->second.slave.end(); it_slave++) {
+				log_notice("%d: slave[%d] (node_key=%s, node_balance=%d)", it->first, m, it_slave->node_key.c_str(), it_slave->node_balance);
+				m++;
+			}
+		}
+		if (npm.size() > 0 && (n+1) != static_cast<int>(npm.size())) {
+			log_err("possibly missing partition (parition=%d, size=%d)", n, npm.size());
+			throw -1;
+		}
+
+		n = 0;
+		log_notice("node partition map (prepare):", 0);
+		if (nppm.size() > 1) {
+			log_err("more than 1 partition prepare map -> some thing is seriously going wrong", 0);
+			throw -1;
+		}
+
+		for (node_partition_map::iterator it = nppm.begin(); it != nppm.end(); it++) {
+			if (it->first != static_cast<int>(npm.size())) {
+				// allow only 1 and next partition
+				log_err("invalid partition [%d] for partition prepare map -> some thing is seriously going wrong", it->first);
+				throw -1;
+			}
+
+			log_notice("%d(prepare): master (node_key=%s, node_balance=%d)", it->first, it->second.master.node_key.c_str(), it->second.master.node_balance);
+
+			int m = 0;
+			for (vector<partition_node>::iterator it_slave = it->second.slave.begin(); it_slave != it->second.slave.end(); it_slave++) {
+				log_notice("%d(prepare): slave[%d] (node_key=%s, node_balance=%d)", it->first, m, it_slave->node_key.c_str(), it_slave->node_balance);
+				m++;
+			}
+		}
+	} catch (int e) {
+		if (lock) {
+			pthread_rwlock_unlock(&this->_mutex_node_partition_map);
+			pthread_rwlock_unlock(&this->_mutex_node_map);
+		}
+		return -1;
+	}
+
+	this->_node_partition_map = npm;
+	this->_node_partition_prepare_map = nppm;
+
+	if (lock) {
+		pthread_rwlock_unlock(&this->_mutex_node_partition_map);
+		pthread_rwlock_unlock(&this->_mutex_node_map);
+	}
+
+	return r;
 }
 // }}}
 

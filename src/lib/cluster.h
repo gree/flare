@@ -109,6 +109,7 @@ protected:
 	int										_server_port;
 
 	// [index]
+	int										_monitor_threshold;
 	int										_monitor_interval;
 	int										_thread_type;
 
@@ -128,8 +129,25 @@ public:
 	int down_node(string node_server_name, int node_server_port);
 	int up_node(string node_server_name, int node_server_port);
 
-	vector<node> get_node_info();
+	inline node get_node(string node_key) {
+		node n;
+		pthread_rwlock_rdlock(&this->_mutex_node_map);
+		if (this->_node_map.count(node_key) > 0) {
+			n = this->_node_map[node_key];
+		} else {
+			n.node_server_name = "";
+			n.node_server_port = 0;
+		}
+		pthread_rwlock_unlock(&this->_mutex_node_map);
 
+		return n;
+	};
+	inline node get_node(string node_server_name, int node_server_port) {
+		return this->get_node(this->to_node_key(node_server_name, node_server_port));
+	}
+	vector<node> get_node();
+
+	int set_monitor_threshold(int monitor_threshold);
 	int set_monitor_interval(int monitor_interval);
 	string get_server_name() { return this->_server_name; };
 	int get_server_port() { return this->_server_port; };
@@ -159,6 +177,7 @@ protected:
 	int _broadcast(shared_thread_queue q, bool sync = false);
 	int _save();
 	int _load();
+	int _reconstruct_node_partition(bool lock = true);
 };
 
 }	// namespace flare

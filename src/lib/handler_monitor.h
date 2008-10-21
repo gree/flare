@@ -31,7 +31,9 @@ protected:
 	shared_connection		_connection;
 	string							_node_server_name;
 	int									_node_server_port;
+	int									_monitor_threshold;
 	int									_monitor_interval;
+	int									_down_state;
 
 public:
 	handler_monitor(shared_thread t, cluster* cl, string node_server_name, int node_server_port);
@@ -39,11 +41,15 @@ public:
 
 	virtual int run();
 
+	int set_monitor_threshold(int monitor_threshold) { this->_monitor_threshold = monitor_threshold; return 0; };
 	int set_monitor_interval(int monitor_interval) { this->_monitor_interval = monitor_interval; return 0; };
 
 protected:
 	int _process_monitor();
 	int _process_queue(shared_thread_queue q);
+
+	int _down();
+	int _up();
 };
 
 }	// namespace flare

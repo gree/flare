@@ -20,7 +20,7 @@ namespace flare {
 queue_node_sync::queue_node_sync(cluster* cl):
 		thread_queue("node_sync"),
 		_cluster(cl) {
-	this->_node_vector = this->_cluster->get_node_info();
+	this->_node_vector = this->_cluster->get_node();
 }
 
 /**

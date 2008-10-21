@@ -168,7 +168,7 @@ int op_stats::_send_stats_threads(thread_pool* tp, int type) {
 int op_stats::_send_stats_nodes(cluster* cl) {
 	ostringstream s;
 
-	vector<cluster::node> v = cl->get_node_info();
+	vector<cluster::node> v = cl->get_node();
 	for (vector<cluster::node>::iterator it = v.begin(); it != v.end(); it++) {
 		string node_key = cl->to_node_key(it->node_server_name, it->node_server_port);
 		s << "STAT " << node_key << ":role " << it->node_role << line_delimiter;

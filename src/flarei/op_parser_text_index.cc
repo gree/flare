@@ -47,7 +47,7 @@ op* op_parser_text_index::_determine_op(const char* first, const char* buf, int&
 	} else if (strcmp(first, "node") == 0) {
 		char second[BUFSIZ];
 		consume += util::next_word(buf+consume, second, sizeof(second));
-		log_debug("get second word (s=%s consume=%d)", first, consume); 
+		log_debug("get second word (s=%s consume=%d)", second, consume); 
 		if (strcmp(second, "add") == 0) {
 			r = static_cast<op*>(_new_ op_node_add(this->_connection, singleton<flarei>::instance().get_cluster())); 
 		} else {

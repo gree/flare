@@ -33,7 +33,7 @@ libflare_a_SOURCES = \
 	op_stats.h op_stats.cc \
 	op_version.h op_version.cc \
 	queue_node_sync.h queue_node_sync.cc \
-	queue_update_monitor_interval.h queue_update_monitor_interval.cc \
+	queue_update_monitor_option.h queue_update_monitor_option.cc \
 	server.h server.cc \
 	stats.h stats.cc \
 	util.h util.cc \

@@ -128,6 +128,7 @@ public:
 	int add_node(string node_server_name, int node_server_port);
 	int down_node(string node_server_name, int node_server_port);
 	int up_node(string node_server_name, int node_server_port);
+	int set_node_role(string node_server_name, int node_server_port, role node_role, int node_balance, int node_partition);
 
 	inline node get_node(string node_key) {
 		node n;
@@ -173,11 +174,64 @@ public:
 		return 0;
 	}
 
+	static inline int role_cast(string s, role& r) {
+		if (s == "master") {
+			r = role_master;
+		} else if (s == "slave") {
+			r = role_slave;
+		} else if (s == "proxy") {
+			r = role_proxy;
+		} else {
+			return -1;
+		}
+		return 0;
+	}
+
+	static inline string role_cast(role r) {
+		switch (r) {
+		case role_master:
+			return "master";
+		case role_slave:
+			return "slave";
+		case role_proxy:
+			return "proxy";
+		}
+		return "";
+	}
+
+	static inline int state_cast(string s, state& t) {
+		if (s == "active") {
+			t = state_active;
+		} else if (s == "prepare") {
+			t = state_prepare;
+		} else if (s == "down") {
+			t = state_down;
+		} else {
+			return -1;
+		}
+		return 0;
+	}
+
+	static inline string state_cast(state t) {
+		switch (t) {
+		case state_active:
+			return "active";
+		case state_prepare:
+			return "prepare";
+		case state_down:
+			return "down";
+		}
+		return "";
+	}
+
 protected:
 	int _broadcast(shared_thread_queue q, bool sync = false);
 	int _save();
 	int _load();
 	int _reconstruct_node_partition(bool lock = true);
+	int _check_node_balance(string node_key, int node_balance);
+	int _check_node_partition(int node_partition, bool& preparing);
+	int _check_node_partition_for_new(int node_partition, bool& preparing);
 };
 
 }	// namespace flare

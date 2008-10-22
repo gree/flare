@@ -294,18 +294,22 @@ int cluster::add_node(string node_server_name, int node_server_port) {
 			this->_thread_type++;
 		}
 
-		// initial node setup
-		node n;
-		n.node_server_name = node_server_name;
-		n.node_server_port = node_server_port;
-		n.node_role = role_proxy;
-		n.node_state = state_active;
-		n.node_partition = -1;
-		n.node_balance = 0;
-		n.node_thread_type = thread_type;
-		this->_node_map[node_key] = n;
+		if (replace == false) {
+			// initial node setup
+			node n;
+			n.node_server_name = node_server_name;
+			n.node_server_port = node_server_port;
+			n.node_role = role_proxy;
+			n.node_state = state_active;
+			n.node_partition = -1;
+			n.node_balance = 0;
+			n.node_thread_type = thread_type;
+			this->_node_map[node_key] = n;
+			log_debug("node is [%s] added to node map (state=%d, thread_type=%d)", node_key.c_str(), n.node_state, n.node_thread_type, replace);
+		} else {
+			log_debug("node is already in node map (perhaps node is restarting) (state=%d, thread_type=%d", this->_node_map[node_key].node_state, this->_node_map[node_key].node_thread_type);
+		}
 
-		log_debug("node is [%s] added to node map (state=%d, thread_type=%d)", node_key.c_str(), n.node_state, n.node_thread_type);
 	} catch (int e) {
 		pthread_rwlock_unlock(&this->_mutex_node_map);
 		return e;
@@ -431,6 +435,174 @@ int cluster::up_node(string node_server_name, int node_server_port) {
 	// in any case, state -> active will do
 	// role should be proxy or (preserved) master
 	this->_node_map[node_key].node_state = state_active;
+
+	this->_reconstruct_node_partition(false);
+
+	pthread_rwlock_unlock(&this->_mutex_node_partition_map);
+	pthread_rwlock_unlock(&this->_mutex_node_map);
+
+	// notify
+	shared_queue_node_sync q(new queue_node_sync(this));
+	this->_broadcast(q);
+
+	return 0;
+}
+
+/**
+ *	[index] set node role
+ *
+ *	node_partition is (currently) only available in case of [role=proxy, state=active] -> [role=master|slave]
+ *	
+ *	@todo	too long, too complicated -> refactoring
+ */
+int cluster::set_node_role(string node_server_name, int node_server_port, role node_role, int node_balance, int node_partition) {
+	string node_key = this->to_node_key(node_server_name, node_server_port);
+
+	log_notice("set node role (node_key=%s, node_role=%d, node_balance=%d, node_partition=%d)", node_key.c_str(), node_role, node_balance, node_partition);
+
+	pthread_rwlock_wrlock(&this->_mutex_node_map);
+	pthread_rwlock_wrlock(&this->_mutex_node_partition_map);
+
+	try {
+		if (this->_node_map.count(node_key) == 0) {
+			log_warning("no such node (node_key=%s)", node_key.c_str());
+			throw -1;
+		}
+
+		node& n = this->_node_map[node_key];
+
+		// state=down -> nothing to do
+		if (n.node_state == state_down) {
+			log_notice("failed to set node role [role=*, state=down] -> [role=*] not allowed", 0);
+			throw -1;
+		}
+
+		// state=prepare
+		if (n.node_state == state_prepare) {
+			// role=master
+			if (n.node_role == role_master) {
+				if (node_role == role_master) {
+					if (this->_check_node_balance(node_key, node_balance) < 0) {
+						throw -1;
+					}
+					n.node_balance = node_balance;
+					log_notice("setting node balance [node_key=%s, node_balance=%d -> %d]", node_key.c_str(), n.node_balance, node_balance);
+				} else {
+					log_notice("failed to set node role [role=master, state=prepare] -> [role=slave|proxy] not allowed", 0);
+					throw -1;
+				}
+			// role=slave
+			} else if (n.node_role == role_slave) {
+				if (node_role == role_master) {
+					log_notice("failed to set node role [role=slave, state=prepare] -> [role=master] not allowed", 0);
+					throw -1;
+				} else if (node_role == role_slave) {
+					bool preparing = false;
+					if (this->_check_node_partition(n.node_partition, preparing) < 0) {
+						throw -1;
+					}
+					if (preparing == false) {
+						log_notice("updating node_balance is allowed only when master is also preparing (otherwise, it should always be 0)", 0);
+						throw -1;
+					}
+					if (this->_check_node_balance(node_key, node_balance) < 0) {
+						throw -1;
+					}
+					n.node_balance = node_balance;
+					log_notice("setting node balance [node_key=%s, node_balance=%d -> %d]", node_key.c_str(), n.node_balance, node_balance);
+				} else if (node_role == role_proxy) {
+					if (this->_check_node_balance(node_key, 0) < 0) {
+						throw -1;
+					}
+					n.node_role = node_role;
+					n.node_state = state_active;
+					n.node_balance = 0;
+					n.node_partition = -1;
+					log_notice("setting node role [role=slave, state=prepare] -> [role=proxy, state=active]", 0);
+				}
+			} else if (n.node_role == role_proxy) {
+				n.node_state = state_active;
+				log_notice("setting node role [role=proxy, state=prepare] -> something inconsistent -> shift state to active", 0);
+			}
+		}
+
+		// state=active
+		if (n.node_state == state_active) {
+			// role=master
+			if (n.node_role == role_master) {
+				if (node_role == role_master) {
+					if (this->_check_node_balance(node_key, node_balance) < 0) {
+						throw -1;
+					}
+					n.node_balance = node_balance;
+					log_notice("setting node balance [node_key=%s, node_balance=%d -> %d]", node_key.c_str(), n.node_balance, node_balance);
+				} else {
+					log_notice("failed to set node role [role=master, state=active] -> [role=slave|proxy] not allowed", 0);
+					throw -1;
+				}
+			// role=slave
+			} else if (n.node_role == role_slave) {
+				if (node_role == role_master) {
+					log_notice("failed to set node role [role=slave, state=active] -> [role=master] not allowed", 0);
+					throw -1;
+				} else if (node_role == role_slave) {
+					if (this->_check_node_balance(node_key, node_balance) < 0) {
+						throw -1;
+					}
+					n.node_balance = node_balance;
+					log_notice("setting node balance [node_key=%s, node_balance=%d -> %d]", node_key.c_str(), n.node_balance, node_balance);
+				} else if (node_role == role_proxy) {
+					if (this->_check_node_balance(node_key, 0) < 0) {
+						throw -1;
+					}
+					n.node_role = node_role;
+					n.node_state = state_active;
+					n.node_balance = 0;
+					n.node_partition = -1;
+					log_notice("setting node role [role=slave, state=active] -> [role=proxy, state=active]", 0);
+				}
+			// role=proxy
+			} else if (n.node_role == role_proxy) {
+				if (node_role == role_master) {
+					// only new (next) partition is allowed
+					bool preparing = false;
+					if (this->_check_node_partition_for_new(node_partition, preparing) < 0) {
+						throw -1;
+					}
+					if (node_balance <= 0) {
+						log_notice("node_balance should be positive when adding new master node (node_balance=%d)", node_balance);
+						throw -1;
+					}
+					n.node_role = node_role;
+					// first partition (== 0) can start as active
+					n.node_state = preparing ? (node_partition == 0 ? state_active : state_prepare) : state_active;
+					n.node_balance = node_balance;
+					n.node_partition = node_partition;
+					log_notice("setting node role [role=proxy, state=active] -> [role=master, state=%s]", cluster::state_cast(n.node_state).c_str());
+				} else if (node_role == role_slave) {
+					bool preparing = false;
+					if (this->_check_node_partition(node_partition, preparing) < 0) {
+						throw -1;
+					}
+					if (preparing && node_balance < 0) {
+						log_info("node_balance is set to 0 (given node_balance=%d)", node_balance);
+						node_balance = 0;
+					}
+					n.node_role = node_role;
+					n.node_state = state_prepare;
+					n.node_balance = preparing ? node_balance : 0;
+					n.node_partition = node_partition;
+					log_notice("setting node role [role=proxy, state=active] -> [role=slave, state=prepare]", 0);
+				} else if (node_role == role_proxy) {
+					// nothing to do
+				}
+			}
+		}
+	} catch (int e) {
+		pthread_rwlock_unlock(&this->_mutex_node_partition_map);
+		pthread_rwlock_unlock(&this->_mutex_node_map);
+		return e;
+	}
 
 	this->_reconstruct_node_partition(false);
 
@@ -593,10 +765,12 @@ int cluster::_reconstruct_node_partition(bool lock) {
 		}
 		if (n.node_state == state_down) {
 			// this means that we should preserve this partition (even if it's empty)
-			npm[n.node_partition].master.node_key = "";
-			npm[n.node_partition].master.node_balance = 0;
-			log_notice("role is master but state is down -> preserve as empty partition (node_key=%s, partition=%d)", it->first.c_str(), n.node_partition);
-			continue;
+			if (npm[n.node_partition].master.node_key.empty()) {
+				npm[n.node_partition].master.node_key = "";
+				npm[n.node_partition].master.node_balance = 0;
+				log_notice("role is master but state is down -> preserve as empty partition (node_key=%s, partition=%d)", it->first.c_str(), n.node_partition);
+				continue;
+			}
 		}
 
 		string node_key = it->first;
@@ -614,18 +788,18 @@ int cluster::_reconstruct_node_partition(bool lock) {
 				npm[n.node_partition].master.node_key = node_key;
 				npm[n.node_partition].master.node_balance = n.node_balance;
 
-				log_debug("master node added (node_key=%s, parition=%d, balance=%d)", node_key.c_str(), n.node_partition, n.node_balance);
+				log_debug("master node added (node_key=%s, partition=%d, balance=%d)", node_key.c_str(), n.node_partition, n.node_balance);
 			} else if (n.node_state == state_prepare) {
 				if (nppm[n.node_partition].master.node_key.empty() == false) {
 					throw "master (prepare) is already set, cannot overwrite";
 				}
 				nppm[n.node_partition].master.node_key = node_key;
-				nppm[n.node_partition].master.node_balance = 0;		// should be always 0 for safe
+				nppm[n.node_partition].master.node_balance = n.node_balance;
 
-				log_debug("master (prepare) node added (node_key=%s, parition=%d, balance=%d)", node_key.c_str(), n.node_partition, n.node_balance);
+				log_debug("master (prepare) node added (node_key=%s, partition=%d, balance=%d)", node_key.c_str(), n.node_partition, n.node_balance);
 			}
-		} catch (string e) {
-			log_err("%s [node_key=%s, state=%d, role=%d, partition=%d]", e.c_str(), node_key.c_str(), n.node_state, n.node_role, n.node_partition);
+		} catch (const char* e) {
+			log_err("%s [node_key=%s, state=%d, role=%d, partition=%d]", e, node_key.c_str(), n.node_state, n.node_role, n.node_partition);
 			r = -1;
 		}
 	}
@@ -689,7 +863,7 @@ int cluster::_reconstruct_node_partition(bool lock) {
 			}
 		}
 		if (npm.size() > 0 && (n+1) != static_cast<int>(npm.size())) {
-			log_err("possibly missing partition (parition=%d, size=%d)", n, npm.size());
+			log_err("possibly missing partition (partition=%d, size=%d)", n, npm.size());
 			throw -1;
 		}
 
@@ -732,6 +906,104 @@ int cluster::_reconstruct_node_partition(bool lock) {
 	}
 
 	return r;
+}
+
+/**
+ *	check if node balance is valid
+ *
+ *	caller *should* lock node_map in advance
+ */
+int cluster::_check_node_balance(string node_key, int node_balance) {
+	int n = 0;
+	if (node_balance < 0) {
+		log_warning("node_balance is negative (node_key=%s, node_balance=%d)", node_key.c_str(), node_balance);
+		return -1;
+	}
+	if (this->_node_map.count(node_key) == 0) {
+		log_warning("no such node (node_key=%s)", node_key.c_str());
+		return -1;
+	}
+	int node_partition = this->_node_map[node_key].node_partition;
+	if (node_partition < 0) {
+		log_warning("node_partition is invalid -> cannot check (node_partition=%d)", node_partition);
+		return -1;
+	}
+
+	for (node_map::iterator it = this->_node_map.begin(); it != this->_node_map.end(); it++) {
+		if (it->first == node_key) {
+			n += node_balance;
+		} else if (it->second.node_partition == node_partition) {
+			n += it->second.node_partition;
+		}
+	}
+
+	if (n == 0) {
+		log_warning("node_balance is invalid (this will cause zero-sum-balance) (node_key=%s, node_partition=%d, node_balance=%d)", node_key.c_str(), node_partition, node_balance);
+		return -1;
+	}
+
+	return 0;
+}
+
+/**
+ *	check if given node partition is valid for new slave
+ *
+ *	caller *should* lock node_map in advance
+ */
+int cluster::_check_node_partition(int node_partition, bool& preparing) {
+	if (node_partition < 0) {
+		log_warning("node_partition is negative (node_partition=%d)", node_partition);
+		return -1;
+	}
+
+	for (node_map::iterator it = this->_node_map.begin(); it != this->_node_map.end(); it++) {
+		if (it->second.node_role != role_master || it->second.node_state == state_down) {
+			continue;
+		}
+		if (it->second.node_partition == node_partition) {
+			preparing = it->second.node_state == state_active ? false : true;
+			return 0;
+		}
+	}
+
+	return -1;
+}
+
+/**
+ *	check if given node partition is valid for new partition
+ *
+ *	caller *should* lock node_map in advance
+ */
+int cluster::_check_node_partition_for_new(int node_partition, bool& preparing) {
+	if (node_partition > static_cast<int>(this->_node_partition_map.size()) || node_partition < 0) {
+		log_warning("node_partition should be %d or less than it, and positive (given node_partition=%d) (currently only next partition or replacing down master node is allowed)", this->_node_partition_map.size(), node_partition);
+		return -1;
+	}
+
+	if (node_partition == static_cast<int>(this->_node_partition_map.size())) {
+		// see if we already have one
+		for (node_map::iterator it = this->_node_map.begin(); it != this->_node_map.end(); it++) {
+			if (it->second.node_role == role_master && it->second.node_partition == node_partition) {
+				log_warning("already have same node partition (node_key=%s, node_state=%d, node_partition=%d)", it->first.c_str(), node_partition, it->second.node_state);
+				return -1;
+			}
+		}
+		preparing = true;
+	} else {
+		for (node_map::iterator it = this->_node_map.begin(); it != this->_node_map.end(); it++) {
+			if (it->second.node_role == role_master && it->second.node_partition == node_partition) {
+				if (it->second.node_state == state_down) {
+					log_notice("already have same node partition but state is down -> replacable (node_key=%s, node_state=%d, node_partition=%d)", it->first.c_str(), node_partition, it->second.node_state);
+				} else {
+					log_warning("already have same node partition (node_key=%s, node_state=%d, node_partition=%d)", it->first.c_str(), node_partition, it->second.node_state);
+					return -1;
+				}
+			}
+		}
+		preparing = false;
+	}
+
+	return 0;
 }
 // }}}
 

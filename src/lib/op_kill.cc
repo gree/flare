@@ -83,8 +83,8 @@ int op_kill::_run_server() {
 		return -1;
 	}
 
-	t->shutdown(true, true);
 	t->set_state("killed");
+	t->shutdown(true, true);
 
 	this->_send_ok();
 	

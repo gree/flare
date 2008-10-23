@@ -24,6 +24,7 @@ libflare_a_SOURCES = \
 	op_error.h op_error.cc \
 	op_kill.h op_kill.cc \
 	op_node_add.h op_node_add.cc \
+	op_node_remove.h op_node_remove.cc \
 	op_node_role.h op_node_role.cc \
 	op_node_state.h op_node_state.cc \
 	op_node_sync.h op_node_sync.cc \

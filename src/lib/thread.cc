@@ -48,6 +48,7 @@ void* thread_run(void* p) {
 			}
 		} catch (thread::shutdown_request e) {
 			if (e == thread::shutdown_request_graceful) {
+				t->notify_shutdown();
 				t->clean(is_pool);
 			} else {
 				break;

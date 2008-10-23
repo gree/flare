@@ -478,6 +478,70 @@ int cluster::up_node(string node_server_name, int node_server_port) {
 }
 
 /**
+ *	[index] remove node from map
+ *
+ *	removing node is only available when node is down and not preserved
+ */
+int cluster::remove_node(string node_server_name, int node_server_port) {
+	string node_key = this->to_node_key(node_server_name, node_server_port);
+
+	log_notice("removing node [node_key=%s]", node_key.c_str());
+
+	pthread_rwlock_wrlock(&this->_mutex_node_map);
+	pthread_rwlock_wrlock(&this->_mutex_node_partition_map);
+
+	try {
+		node& n = this->_node_map[node_key];
+
+		// see if node is really down and removable
+		if (n.node_state != state_down) {
+			log_warning("cannot remove active or preparing node (node_key=%s, node_stae=%s, node_role=%s)", node_key.c_str(), cluster::state_cast(n.node_state).c_str(), cluster::role_cast(n.node_role).c_str());
+			throw -1;
+		}
+		bool need_preserving = true;
+		if (n.node_role == role_master) {
+			for (node_map::iterator it = this->_node_map.begin(); it != this->_node_map.end(); it++) {
+				if (it->first == node_key) {
+					continue;
+				}
+				if (it->second.node_partition == n.node_partition && it->second.node_state != state_down) {
+					need_preserving = false;
+					break;
+				}
+			}
+			if (need_preserving) {
+				log_warning("cannot remove preserved node (node_key=%s, node_stae=%s, node_role=%s)", node_key.c_str(), cluster::state_cast(n.node_state).c_str(), cluster::role_cast(n.node_role).c_str());
+				throw -1;
+			}
+		}
+
+		// remove a node
+		thread_pool::local_map m = this->_thread_pool->get_active(n.node_thread_type);
+		for (thread_pool::local_map::iterator it = m.begin(); it != m.end(); it++) {
+			log_notice("killing monitoring thread(s)... (node_thread_type=%d, thread_id=%d)", n.node_thread_type, it->second->get_id());
+			it->second->set_state("killed");
+			it->second->shutdown(true, false);
+		}
+		this->_node_map.erase(node_key);
+	} catch (int e) {
+		pthread_rwlock_unlock(&this->_mutex_node_partition_map);
+		pthread_rwlock_unlock(&this->_mutex_node_map);
+		return e;
+	}
+
+	this->_reconstruct_node_partition(false);
+
+	pthread_rwlock_unlock(&this->_mutex_node_partition_map);
+	pthread_rwlock_unlock(&this->_mutex_node_map);
+
+	// notify
+	shared_queue_node_sync q(new queue_node_sync(this));
+	this->_broadcast(q);
+
+	return 0;
+}
+
+/**
  *	[index] set node role
  *
  *	node_partition is (currently) only available in case of [role=proxy, state=active] -> [role=master|slave]

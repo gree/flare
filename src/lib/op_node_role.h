@@ -34,12 +34,12 @@ public:
 	op_node_role(shared_connection c, cluster* cl);
 	virtual ~op_node_role();
 
-	virtual int run_client(string node_server_name, int node_server_port, cluster::role node_role, int node_balance);
+	virtual int run_client(string node_server_name, int node_server_port, cluster::role node_role, int node_balance, int node_partition);
 
 protected:
 	virtual int _parse_server_parameter();
 	virtual int _run_server();
-	virtual int _run_client(string node_server_name, int node_server_port, cluster::role node_role, int node_balance);
+	virtual int _run_client(string node_server_name, int node_server_port, cluster::role node_role, int node_balance, int node_partition);
 	virtual int _parse_client_parameter();
 };
 

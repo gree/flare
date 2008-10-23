@@ -73,6 +73,14 @@ int handler_monitor::run() {
 			break;
 		}
 
+		// sync w/ node_map for safe
+		cluster::node n = this->_cluster->get_node(this->_node_server_name, this->_node_server_port); // for safe
+		if (n.node_state == cluster::state_down) {
+			this->_down_state = this->_monitor_threshold;
+		} else {
+			this->_down_state = 0;
+		}
+
 		if (r == ETIMEDOUT) {
 			log_debug("dequeue timed out -> sending ping to node server (%s:%d)", this->_node_server_name.c_str(), this->_node_server_port);
 			if (this->_process_monitor() < 0) {
@@ -120,15 +128,13 @@ int handler_monitor::_process_queue(shared_thread_queue q) {
 	this->_thread->set_state("execute");
 	this->_thread->set_op(q->get_ident());
 
-	cluster::node n = this->_cluster->get_node(this->_node_server_name, this->_node_server_port); // for safe
-
 	if (q->get_ident() == "update_monitor_option") {
 		shared_queue_update_monitor_option r = shared_dynamic_cast<queue_update_monitor_option, thread_queue>(q);
 		log_debug("updating monitor option [threshold: %d -> %d, interval:%d -> %d]", this->_monitor_threshold, r->get_monitor_threshold(), this->_monitor_interval, r->get_monitor_interval());
 		this->_monitor_threshold = r->get_monitor_threshold();
 		this->_monitor_interval = r->get_monitor_interval();
 	} else if (q->get_ident() == "node_sync") {
-		if (n.node_state == cluster::state_down) {
+		if (this->_down_state >= this->_monitor_threshold) {
 			log_info("node seems already down -> skip processing queue (node_server_name=%s, node_server_port=%d, ident=%s)", this->_node_server_name.c_str(), this->_node_server_port, q->get_ident().c_str());
 			return -1;
 		}

@@ -1,3 +1,9 @@
+tokyocabinet (1.2.13-1) unstable; urgency=low
+
+  * 1.2.13
+
+ -- fujimoto <fujimoto@php.net>  Wed, 22 Oct 2008 14:32:09 +0900
+
 tokyocabinet (1.2.12-1) unstable; urgency=low
 
   * 1.2.12

@@ -129,6 +129,7 @@ public:
 	int down_node(string node_server_name, int node_server_port);
 	int up_node(string node_server_name, int node_server_port);
 	int set_node_role(string node_server_name, int node_server_port, role node_role, int node_balance, int node_partition);
+	int set_node_state(string node_server_name, int node_server_port, state node_state);
 
 	inline node get_node(string node_key) {
 		node n;

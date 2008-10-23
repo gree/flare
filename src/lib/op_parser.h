@@ -13,6 +13,7 @@
 #include "op_kill.h"
 #include "op_node_add.h"
 #include "op_node_role.h"
+#include "op_node_state.h"
 #include "op_node_sync.h"
 #include "op_ping.h"
 #include "op_quit.h"

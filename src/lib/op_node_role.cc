@@ -40,8 +40,8 @@ op_node_role::~op_node_role() {
 /**
  *	send client request
  */
-int op_node_role::run_client(string node_server_name, int node_server_port, cluster::role node_role, int node_balance) {
-	if (this->_run_client(node_server_name, node_server_port, node_role, node_server_port) < 0) {
+int op_node_role::run_client(string node_server_name, int node_server_port, cluster::role node_role, int node_balance, int node_partition) {
+	if (this->_run_client(node_server_name, node_server_port, node_role, node_balance, node_partition) < 0) {
 		return -1;
 	}
 
@@ -143,7 +143,7 @@ int op_node_role::_run_server() {
 	return this->_send_ok();
 }
 
-int op_node_role::_run_client(string node_server_name, int node_server_port, cluster::role node_role, int node_balance) {
+int op_node_role::_run_client(string node_server_name, int node_server_port, cluster::role node_role, int node_balance, int node_partition) {
 	log_err("not yet implemented:(", 0);
 
 	return 0;

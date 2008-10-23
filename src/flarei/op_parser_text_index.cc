@@ -52,6 +52,8 @@ op* op_parser_text_index::_determine_op(const char* first, const char* buf, int&
 			r = static_cast<op*>(_new_ op_node_add(this->_connection, singleton<flarei>::instance().get_cluster())); 
 		} else if (strcmp(second, "role") == 0) {
 			r = static_cast<op*>(_new_ op_node_role(this->_connection, singleton<flarei>::instance().get_cluster())); 
+		} else if (strcmp(second, "state") == 0) {
+			r = static_cast<op*>(_new_ op_node_state(this->_connection, singleton<flarei>::instance().get_cluster())); 
 		} else {
 			r = static_cast<op*>(_new_ op_error(this->_connection)); 
 		}

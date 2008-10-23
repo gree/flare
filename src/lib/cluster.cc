@@ -391,6 +391,7 @@ int cluster::down_node(string node_server_name, int node_server_port) {
 				for (vector<partition_node>::iterator it = this->_node_partition_prepare_map[n.node_partition].slave.begin(); it != this->_node_partition_prepare_map[n.node_partition].slave.end(); it++) {
 					log_debug("  -> node_key: %s", it->node_key.c_str());
 					this->_node_map[it->node_key].node_role = role_proxy;
+					this->_node_map[it->node_key].node_state = state_active;
 					this->_node_map[it->node_key].node_partition = -1;
 				}
 			}
@@ -432,9 +433,37 @@ int cluster::up_node(string node_server_name, int node_server_port) {
 	pthread_rwlock_wrlock(&this->_mutex_node_map);
 	pthread_rwlock_wrlock(&this->_mutex_node_partition_map);
 
-	// in any case, state -> active will do
-	// role should be proxy or (preserved) master
-	this->_node_map[node_key].node_state = state_active;
+	try {
+		node& n = this->_node_map[node_key];
+		if (n.node_state != state_down ) {
+			log_notice("node is already up/prepare (node_key=%s, node_state=%s)", node_key.c_str(), cluster::state_cast(n.node_state).c_str());
+			throw 0;
+		}
+
+		if (n.node_role == role_master) {
+			for (node_map::iterator it = this->_node_map.begin(); it != this->_node_map.end(); it++) {
+				if (it->first == node_key) {
+					continue;
+				}
+				if (it->second.node_partition == n.node_partition && it->second.node_state != state_down) {
+					log_warning("preserved master node is up, but already have another master -> role is set to proxy (node_key=%s, node_partition=%d, node_state=%s)", it->first.c_str(), it->second.node_partition, cluster::state_cast(it->second.node_state).c_str());
+					n.node_role = role_proxy;
+					n.node_partition = -1;
+					n.node_balance = 0;
+				}
+			}
+		} else {
+			log_notice("node role is set to proxy for safe...", 0);
+			n.node_role = role_proxy;
+			n.node_partition = -1;
+		}
+
+		this->_node_map[node_key].node_state = state_active;
+	} catch (int e) {
+		pthread_rwlock_unlock(&this->_mutex_node_partition_map);
+		pthread_rwlock_unlock(&this->_mutex_node_map);
+		return e;
+	}
 
 	this->_reconstruct_node_partition(false);
 
@@ -612,6 +641,27 @@ int cluster::set_node_role(string node_server_name, int node_server_port, role n
 	// notify
 	shared_queue_node_sync q(new queue_node_sync(this));
 	this->_broadcast(q);
+
+	return 0;
+}
+
+/**
+ *	[index] set node state
+ */
+int cluster::set_node_state(string node_server_name, int node_server_port, state node_state) {
+	string node_key = this->to_node_key(node_server_name, node_server_port);
+
+	log_notice("set node state (node_key=%s, node_state=%d)", node_key.c_str(), node_state);
+	if (node_state == state_prepare) {
+		log_warning("currently (force) state shift to prepare is not yet supported", 0);
+		return -1;
+	}
+
+	if (node_state == state_down) {
+		return this->down_node(node_server_name, node_server_port);
+	} else if (node_state == state_active) {
+		return this->up_node(node_server_name, node_server_port);
+	}
 
 	return 0;
 }

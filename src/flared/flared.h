@@ -24,6 +24,7 @@ private:
 	server*				_server;
 	thread_pool*	_thread_pool;
 	cluster*			_cluster;
+	storage*			_storage;
 
 public:
 	flared();
@@ -36,6 +37,7 @@ public:
 
 	thread_pool* get_thread_pool() { return this->_thread_pool; };
 	cluster* get_cluster() { return this->_cluster; };
+	storage* get_storage() { return this->_storage; };
 
 protected:
 	string _get_pid_path();

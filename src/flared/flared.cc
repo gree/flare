@@ -56,15 +56,19 @@ void sa_usr1_handler(int sig) {
  *	ctor for flared
  */
 flared::flared():
-	_server(NULL),
-	_thread_pool(NULL),
-	_cluster(NULL) {
+		_server(NULL),
+		_thread_pool(NULL),
+		_cluster(NULL),
+		_storage(NULL) {
 }
 
 /**
  *	dtor for flared
  */
 flared::~flared() {
+	if (this->_storage != NULL) {
+		_delete_(this->_storage);
+	}
 	if (this->_server != NULL) {
 		_delete_(this->_server);
 	}
@@ -111,8 +115,10 @@ int flared::startup(int argc, char **argv) {
 	log_notice("  index_server_name: %s", ini_option_object().get_index_server_name().c_str());
 	log_notice("  index_server_port: %d", ini_option_object().get_index_server_port());
 	log_notice("  max_connection:    %d", ini_option_object().get_max_connection());
+	log_notice("  proxy_concurrency: %d", ini_option_object().get_proxy_concurrency());
 	log_notice("  server_name:       %s", ini_option_object().get_server_name().c_str());
 	log_notice("  server_port:       %d", ini_option_object().get_server_port());
+	log_notice("  storage_type:      %s", ini_option_object().get_storage_type().c_str());
 	log_notice("  thread_pool_size:  %d", ini_option_object().get_thread_pool_size());
 
 	// startup procs
@@ -140,6 +146,20 @@ int flared::startup(int argc, char **argv) {
 
 	this->_cluster = _new_ cluster(this->_thread_pool, ini_option_object().get_data_dir(), ini_option_object().get_server_name(), ini_option_object().get_server_port());
 	if (this->_cluster->startup_node(ini_option_object().get_index_server_name(), ini_option_object().get_index_server_port()) < 0) {
+		return -1;
+	}
+
+	storage::type t;
+	storage::type_cast(ini_option_object().get_storage_type(), t);
+	switch (t) {
+	case storage::type_tch:
+		this->_storage = _new_ storage_tch(ini_option_object().get_data_dir());
+		break;
+	default:
+		log_err("unknown storage type [%s]", ini_option_object().get_storage_type().c_str());
+		return -1;
+	}
+	if (this->_storage->open() < 0) {
 		return -1;
 	}
 
@@ -196,6 +216,8 @@ int flared::reload() {
 	log_notice("re-opening syslog...", 0);
 	singleton<logger>::instance().close();
 	singleton<logger>::instance().open(this->_ident, ini_option_object().get_log_facility());
+	
+	// proxy_concurrency
 
 	// thread_pool_size
 	this->_thread_pool->set_max_pool_size(ini_option_object().get_thread_pool_size());
@@ -212,6 +234,9 @@ int flared::shutdown() {
 	log_notice("shutting down active, and pool threads...", 0);
 	this->_thread_pool->shutdown();
 	log_notice("all threads are successfully shutdown", 0);
+
+	log_notice("closing storage...", 0);
+	this->_storage->close();
 
 	this->_clear_pid();
 

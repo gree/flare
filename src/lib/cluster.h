@@ -31,6 +31,8 @@ using namespace boost;
 namespace gree {
 namespace flare {
 
+typedef class op_set op_set;
+
 /**
  *	cluster class
  */
@@ -51,6 +53,12 @@ public:
 		state_active,
 		state_prepare,
 		state_down,
+	};
+
+	enum							proxy_request {
+		proxy_request_error_partition = -1,
+		proxy_request_continue = 1,
+		proxy_request_complete,
 	};
 
 	typedef struct		_node {
@@ -123,7 +131,6 @@ public:
 
 	int startup_index();
 	int startup_node(string index_server_name, int index_server_port);
-	int reconstruct_node(vector<node> v);
 
 	int add_node(string node_server_name, int node_server_port);
 	int down_node(string node_server_name, int node_server_port);
@@ -131,6 +138,9 @@ public:
 	int remove_node(string node_server_name, int node_server_port);
 	int set_node_role(string node_server_name, int node_server_port, role node_role, int node_balance, int node_partition);
 	int set_node_state(string node_server_name, int node_server_port, state node_state);
+	int reconstruct_node(vector<node> v);
+
+	proxy_request pre_proxy_write(op_set* op);
 
 	inline node get_node(string node_key) {
 		node n;
@@ -234,6 +244,9 @@ protected:
 	int _check_node_balance(string node_key, int node_balance);
 	int _check_node_partition(int node_partition, bool& preparing);
 	int _check_node_partition_for_new(int node_partition, bool& preparing);
+	int _determine_partition(string key, partition& p);
+	string _get_partition_key(string key);
+	inline int _get_partition_hash(string key) { const char* p = key.c_str(); int n = 0; while (*p) { n += static_cast<int>(*p); p++; } return n; };
 };
 
 }	// namespace flare

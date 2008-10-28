@@ -12,6 +12,7 @@
 #include <sstream>
 
 #include <boost/lexical_cast.hpp>
+#include <boost/shared_ptr.hpp>
 #include <boost/tokenizer.hpp>
 
 #include <ctype.h>
@@ -52,6 +53,7 @@ typedef unsigned char uint8_t;
 #endif // HAVE_STDINT_H
 
 extern const char* const line_delimiter;
+typedef shared_ptr<uint8_t> shared_byte;
 
 /**
  *	utility class (misc methods)
@@ -64,8 +66,32 @@ public:
 	static int get_fqdn(string& fqdn);
 	static uint32_t next_word(const char* src, char* dst, uint32_t dst_len);
 	static uint32_t next_digit(const char* src, char* dst, uint32_t dst_len);
-	template<class T> static string vector_join(vector<T> list, string glue);
-	template<class T> static vector<T> vector_split(string s, string sep);
+
+	template<class T> static string vector_join(vector<T> list, string glue) {
+		ostringstream sout;
+		typename vector<T>::iterator it;
+		for (it = list.begin(); it != list.end(); it++) {
+			if (sout.tellp() > 0) {
+				sout << glue;
+			}
+			sout << *it;
+		}
+
+		return sout.str();
+	};
+
+	template<class T> static vector<T> vector_split(string s, string sep) {
+		vector<T> r;
+
+		typedef boost::tokenizer<boost::char_separator<char> > tokenizer;
+		boost::char_separator<char> separator(sep.c_str());
+		tokenizer token_list(s, separator);
+		for (tokenizer::iterator it = token_list.begin(); it != token_list.end(); it++) {
+			r.push_back(lexical_cast<T>(*it));
+		}
+
+		return r;
+	};
 };
 
 }	// namespace flare

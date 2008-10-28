@@ -33,15 +33,18 @@ libflare_a_SOURCES = \
 	op_parser_text.h op_parser_text.cc \
 	op_ping.h op_ping.cc \
 	op_quit.h op_quit.cc \
+	op_set.h op_set.cc \
 	op_stats.h op_stats.cc \
 	op_version.h op_version.cc \
 	queue_node_sync.h queue_node_sync.cc \
 	queue_update_monitor_option.h queue_update_monitor_option.cc \
 	server.h server.cc \
+	singleton.h \
 	stats.h stats.cc \
+	storage.h storage.cc \
+	storage_tch.h storage_tch.cc \
 	util.h util.cc \
 	thread.h thread.cc \
 	thread_handler.h \
 	thread_pool.h thread_pool.cc \
-	thread_queue.h thread_queue.cc \
-	singleton.h
+	thread_queue.h thread_queue.cc

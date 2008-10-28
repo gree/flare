@@ -76,7 +76,7 @@ int server::listen(int port) {
 		return -1;
 	}
 
-	log_info("server socket is ready for accept (port: %d)", this->_port);
+	log_info("server socket is ready to accept (port: %d)", this->_port);
 
 	return 0;
 }

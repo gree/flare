@@ -37,6 +37,8 @@ protected:
 	shared_connection			_connection;
 	shared_thread					_thread;
 	string								_ident;
+	vector<string>				_proxy;
+	bool									_proxy_request;
 	bool									_shutdown_request;
 
 public:
@@ -46,8 +48,10 @@ public:
 	virtual int run_server();
 	virtual int run_client();
 
+	int set_proxy(string proxy);
 	int set_thread(shared_thread t) { this->_thread = t; return 0; };
 	string get_ident() { return this->_ident; };
+	int is_proxy_request() { return this->_proxy_request; };
 	bool is_shutdown_request() { return this->_shutdown_request; };
 
 protected:

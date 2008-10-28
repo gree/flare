@@ -10,6 +10,7 @@
 #include "cluster.h"
 #include "handler_monitor.h"
 #include "op_node_add.h"
+#include "op_set.h"
 #include "queue_node_sync.h"
 #include "queue_update_monitor_option.h"
 
@@ -185,65 +186,6 @@ int cluster::startup_node(string index_server_name, int index_server_port) {
 	}
 	
 	_delete_(p);
-
-	return 0;
-}
-
-/**
- *	reconstruct all node map
- */
-int cluster::reconstruct_node(vector<node> v) {
-	pthread_rwlock_wrlock(&this->_mutex_node_map);
-	pthread_rwlock_wrlock(&this->_mutex_node_partition_map);
-
-	log_notice("reconstructing node map... (%d entries)", v.size());
-
-	node_map nm;
-
-	for (vector<node>::iterator it = v.begin(); it != v.end(); it++) {
-		string node_key = this->to_node_key(it->node_server_name, it->node_server_port);
-		log_debug("node_key: %s%s", node_key.c_str(), node_key == this->_node_key ? " (myself)" : "");
-
-		if (this->_node_map.count(node_key) == 0) {
-			log_debug("-> new node", 0);
-		} else {
-			log_debug("-> existing node", 0);
-			if (node_key == this->_node_key) {
-				// myself
-				if (it->node_role != this->_node_map[node_key].node_role) {
-					log_notice("update: node_role (%d -> %d)", it->node_role, this->_node_map[node_key].node_role);
-				}
-				if (it->node_state != this->_node_map[node_key].node_state) {
-					log_notice("update: node_state (%d -> %d)", it->node_state, this->_node_map[node_key].node_state);
-				}
-				if (it->node_partition != this->_node_map[node_key].node_partition) {
-					log_notice("update: node_partition (%d -> %d)", it->node_partition, this->_node_map[node_key].node_partition);
-				}
-				if (it->node_balance != this->_node_map[node_key].node_balance) {
-					log_notice("update: node_balance (%d -> %d)", it->node_balance, this->_node_map[node_key].node_balance);
-				}
-				if (it->node_thread_type != this->_node_map[node_key].node_thread_type) {
-					// this should not happen
-					log_warning("update: node_thread_type (%d -> %d)", it->node_thread_type, this->_node_map[node_key].node_thread_type);
-				}
-			}
-			this->_node_map.erase(node_key);
-		}
-		nm[node_key] = *it;
-	}
-
-	// check out removed nodes
-	for (node_map::iterator it = this->_node_map.begin(); it != this->_node_map.end(); it++) {
-		log_debug("detecting removed node [node_key=%s]", it->first.c_str());
-		this->_node_map.erase(it->first);
-	}
-
-	this->_node_map = nm;
-
-	this->_reconstruct_node_partition(false);
-
-	pthread_rwlock_unlock(&this->_mutex_node_partition_map);
-	pthread_rwlock_unlock(&this->_mutex_node_map);
 
 	return 0;
 }
@@ -731,6 +673,65 @@ int cluster::set_node_state(string node_server_name, int node_server_port, state
 }
 
 /**
+ *	reconstruct all node map
+ */
+int cluster::reconstruct_node(vector<node> v) {
+	pthread_rwlock_wrlock(&this->_mutex_node_map);
+	pthread_rwlock_wrlock(&this->_mutex_node_partition_map);
+
+	log_notice("reconstructing node map... (%d entries)", v.size());
+
+	node_map nm;
+
+	for (vector<node>::iterator it = v.begin(); it != v.end(); it++) {
+		string node_key = this->to_node_key(it->node_server_name, it->node_server_port);
+		log_debug("node_key: %s%s", node_key.c_str(), node_key == this->_node_key ? " (myself)" : "");
+
+		if (this->_node_map.count(node_key) == 0) {
+			log_debug("-> new node", 0);
+		} else {
+			log_debug("-> existing node", 0);
+			if (node_key == this->_node_key) {
+				// myself
+				if (it->node_role != this->_node_map[node_key].node_role) {
+					log_notice("update: node_role (%d -> %d)", it->node_role, this->_node_map[node_key].node_role);
+				}
+				if (it->node_state != this->_node_map[node_key].node_state) {
+					log_notice("update: node_state (%d -> %d)", it->node_state, this->_node_map[node_key].node_state);
+				}
+				if (it->node_partition != this->_node_map[node_key].node_partition) {
+					log_notice("update: node_partition (%d -> %d)", it->node_partition, this->_node_map[node_key].node_partition);
+				}
+				if (it->node_balance != this->_node_map[node_key].node_balance) {
+					log_notice("update: node_balance (%d -> %d)", it->node_balance, this->_node_map[node_key].node_balance);
+				}
+				if (it->node_thread_type != this->_node_map[node_key].node_thread_type) {
+					// this should not happen
+					log_warning("update: node_thread_type (%d -> %d)", it->node_thread_type, this->_node_map[node_key].node_thread_type);
+				}
+			}
+			this->_node_map.erase(node_key);
+		}
+		nm[node_key] = *it;
+	}
+
+	// check out removed nodes
+	for (node_map::iterator it = this->_node_map.begin(); it != this->_node_map.end(); it++) {
+		log_debug("detecting removed node [node_key=%s]", it->first.c_str());
+		this->_node_map.erase(it->first);
+	}
+
+	this->_node_map = nm;
+
+	this->_reconstruct_node_partition(false);
+
+	pthread_rwlock_unlock(&this->_mutex_node_partition_map);
+	pthread_rwlock_unlock(&this->_mutex_node_map);
+
+	return 0;
+}
+
+/**
  *	[index] set node server monitoring threshold
  */
 int cluster::set_monitor_threshold(int monitor_threshold) {
@@ -755,6 +756,38 @@ int cluster::set_monitor_interval(int monitor_interval) {
 
 	return 0;
 }
+
+/**
+ *	[node] pre proxy for writing ops (set, add, replace, append, prepend, cas, incr, decr)
+ */
+cluster::proxy_request cluster::pre_proxy_write(op_set* op) {
+	storage::entry e = op->get_entry();
+
+	partition p;
+	int n = this->_determine_partition(e.key, p);
+	if (n < 0) {
+		// perhaps no partition available
+		return proxy_request_error_partition;
+	}
+
+	if (p.master.node_key == this->_node_key) {
+		// should be write at this node
+		return proxy_request_continue;
+	}
+
+	if (op->is_proxy_request()) {
+		for (vector<partition_node>::iterator it = p.slave.begin(); it != p.slave.end(); it++) {
+			if (it->node_key == this->_node_key) {
+				// should be write at this node
+				return proxy_request_continue;
+			}
+		}
+	}
+
+	// proxy request to master
+	
+	return proxy_request_complete;
+}
 // }}}
 
 // {{{ protected methods
@@ -778,6 +811,9 @@ int cluster::_broadcast(shared_thread_queue q, bool sync) {
 				q->sync_ref();
 			}
 			log_debug("  -> enqueue (id=%d)", it_local->first);
+
+			// only 1 queue for each node
+			break;
 		}
 	}
 	pthread_rwlock_unlock(&this->_mutex_node_map);
@@ -1118,6 +1154,50 @@ int cluster::_check_node_partition_for_new(int node_partition, bool& preparing) 
 	}
 
 	return 0;
+}
+
+int cluster::_determine_partition(string key, partition& p) {
+	pthread_rwlock_rdlock(&this->_mutex_node_partition_map);
+	int n;
+	try {
+		if (this->_node_partition_map.size() <= 0) {
+			log_warning("no partition is available", 0);
+			throw -1;
+		}
+
+		key = this->_get_partition_key(key);
+		n = this->_get_partition_hash(key) % this->_node_partition_map.size();
+		log_debug("determined partition (key=%s, n=%d)", key.c_str(), n);
+
+		if (this->_node_partition_map.count(n) == 0) {
+			log_err("have no partition map for this key (key=%s, n=%d, size=%d)", key.c_str(), n, this->_node_partition_map.size());
+			throw -1;
+		}
+	} catch (int e) {
+		pthread_rwlock_unlock(&this->_mutex_node_partition_map);
+		return e;
+	}
+
+	p = this->_node_partition_map[n];
+	pthread_rwlock_unlock(&this->_mutex_node_partition_map);
+
+	return n;
+}
+
+string cluster::_get_partition_key(string key) {
+	string::size_type m = key.find_first_of("{{");
+	if (m == string::npos) {
+		return key;
+	}
+	string::size_type n = key.find_first_of("}}", m+1);
+	if (n == string::npos) {
+		return key;
+	}
+
+	string s = key.substr(m+2, n-m-2);
+	log_debug("found partition key (key=%s, partition_key=%s)", key.c_str(), s.c_str());
+
+	return s;
 }
 // }}}
 

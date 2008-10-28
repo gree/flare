@@ -38,15 +38,34 @@ op* op_parser_text::parse_server() {
 		return NULL;
 	}
 
+	// see if proxy request or not
+	// TODO: loop check
+	int consume = 0;
+	char* proxy = NULL;
+	if (buf[0] == '<') {
+		char* p = strchr(buf, '>');
+		if (p != NULL) {
+			consume = p-buf+1;
+			proxy = _new_ char[p-buf];
+			strncpy(proxy, buf+1, p-buf-1);
+			proxy[p-buf-1] = '\0';
+		}
+	}
+
 	// first string
 	char first[1024];
-	int consume = util::next_word(buf, first, sizeof(first));
+	consume += util::next_word(buf+consume, first, sizeof(first));
 	log_debug("get first word (s=%s consume=%d)", first, consume);
 
-	// optimized order:)
 	op* r = this->_determine_op(first, buf, consume);
+	if (proxy != NULL) {
+		r->set_proxy(proxy);
+	}
 
 	this->_connection->push_back(buf+consume, buf_len-consume);
+	if (proxy != NULL) {
+		_delete_(proxy);
+	}
 	_delete_(buf);
 
 	return r;

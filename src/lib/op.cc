@@ -19,6 +19,7 @@ namespace flare {
 op::op(shared_connection c, string ident):
 		_connection(c),
 		_ident(ident),
+		_proxy_request(false),
 		_shutdown_request(false) {
 }
 
@@ -56,6 +57,18 @@ int op::run_client() {
 	}
 
 	return this->_parse_client_parameter();
+}
+
+/**
+ *	set proxied node list
+ */
+int op::set_proxy(string proxy) {
+	this->_proxy = util::vector_split<string>(proxy, ",");
+	this->_proxy_request = true;
+
+	log_debug("seems to be proxy request -> storing proxied node list (proxy=%s, n=%d)", proxy.c_str(), this->_proxy.size());
+
+	return 0;
 }
 // }}}
 

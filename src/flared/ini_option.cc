@@ -28,8 +28,10 @@ ini_option::ini_option():
 		_index_server_port(default_index_server_port),
 		_log_facility(""),
 		_max_connection(default_max_connection),
+		_proxy_concurrency(default_proxy_concurrency),
 		_server_name(""),
 		_server_port(default_server_port),
+		_storage_type(""),
 		_thread_pool_size(default_thread_pool_size) {
 }
 
@@ -140,6 +142,10 @@ int ini_option::load() {
 			this->_max_connection = opt_var_map["max-connection"].as<int>();
 		}
 
+		if (opt_var_map.count("proxy-concurrency")) {
+			this->_proxy_concurrency = opt_var_map["proxy-concurrency"].as<int>();
+		}
+
 		if (opt_var_map.count("server-name")) {
 			this->_server_name = opt_var_map["server-name"].as<string>();
 		} else {
@@ -148,6 +154,17 @@ int ini_option::load() {
 
 		if (opt_var_map.count("server-port")) {
 			this->_server_port = opt_var_map["server-port"].as<int>();
+		}
+
+		if (opt_var_map.count("storage-type")) {
+			storage::type t;
+			if (storage::type_cast(opt_var_map["storage-type"].as<string>(), t) < 0) {
+				cout << "unknown storage type [" << opt_var_map["storage-type"].as<string>() << "]" << endl;
+				throw -1;
+			}
+			this->_storage_type = opt_var_map["storage-type"].as<string>();
+		} else {
+			this->_storage_type = storage::type_cast(storage::type_tch);
 		}
 
 		if (opt_var_map.count("thread-pool-size")) {
@@ -206,17 +223,22 @@ int ini_option::reload() {
 
 	try {
 		if (opt_var_map.count("log-facility")) {
-			log_info("  log_facility:     %s -> %s", this->_log_facility.c_str(), opt_var_map["log-facility"].as<string>().c_str());
+			log_info("  log_facility:      %s -> %s", this->_log_facility.c_str(), opt_var_map["log-facility"].as<string>().c_str());
 			this->_log_facility = opt_var_map["log-facility"].as<string>();
 		}
 
 		if (opt_var_map.count("max-connection")) {
-			log_info("  max_connection:   %d -> %d", this->_max_connection, opt_var_map["max-connection"].as<int>());
+			log_info("  max_connection:    %d -> %d", this->_max_connection, opt_var_map["max-connection"].as<int>());
 			this->_max_connection = opt_var_map["max-connection"].as<int>();
 		}
 
+		if (opt_var_map.count("proxy-concurrency")) {
+			log_info("  proxy_concurrency: %d -> %d", this->_proxy_concurrency, opt_var_map["proxy-concurrency"].as<int>());
+			this->_proxy_concurrency = opt_var_map["proxy-concurrency"].as<int>();
+		}
+
 		if (opt_var_map.count("thread-pool-size")) {
-			log_info("  thread_pool_size: %d -> %d", this->_thread_pool_size, opt_var_map["thread-pool-size"].as<int>());
+			log_info("  thread_pool_size:  %d -> %d", this->_thread_pool_size, opt_var_map["thread-pool-size"].as<int>());
 			this->_thread_pool_size = opt_var_map["thread-pool-size"].as<int>();
 		}
 	} catch (int e) {
@@ -257,8 +279,10 @@ int ini_option::_setup_config_option(program_options::options_description& optio
 		("index-server-port",	program_options::value<int>(),		 	"index server port")
 		("log-facility",			program_options::value<string>(), 	"log facility (dynamic)")
 		("max-connection",		program_options::value<int>(),			"max concurrent connections to accept (dynamic)")
+		("proxy-concurrency",	program_options::value<int>(),			"proxy request concurrency for each node (dynamic)")
 		("server-name",				program_options::value<string>(),		"my server name")
 		("server-port",				program_options::value<int>(),			"my server port")
+		("storage-type",			program_options::value<string>(),		"storage type (tch:tokyo cabinet hash database)")
 		("thread-pool-size",	program_options::value<int>(),			"thread pool size (dynamic)");
 
 	return 0;

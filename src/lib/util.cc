@@ -155,38 +155,6 @@ uint32_t util::next_digit(const char* src, char* dst, uint32_t dst_len) {
 
 	return p-src;
 }
-
-/**
- *	join vector<T>
- */
-template<class T> string util::vector_join(vector<T> list, string glue) {
-	ostringstream sout;
-	typename vector<T>::iterator it;
-	for (it = list.begin(); it != list.end(); it++) {
-		if (sout.tellp() > 0) {
-			sout << glue;
-		}
-		sout << *it;
-	}
-
-	return sout.str();
-}
-
-/**
- *	split string
- */
-template<class T> vector<T> util::vector_split(string s, string sep) {
-	vector<T> r;
-
-	typedef boost::tokenizer<boost::char_separator<char> > tokenizer;
-	boost::char_separator<char> separator(sep.c_str());
-	tokenizer token_list(s, separator);
-	for (tokenizer::iterator it = token_list.begin(); it != token_list.end(); it++) {
-		r.push_back(lexical_cast<T>(*it));
-	}
-
-	return r;
-}
 // }}}
 
 // {{{ protected methods

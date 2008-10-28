@@ -46,6 +46,8 @@
 #include "thread_pool.h"
 #include "op.h"
 #include "cluster.h"
+#include "storage.h"
+#include "storage_tch.h"
 
 using namespace std;
 using namespace boost;

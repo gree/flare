@@ -56,9 +56,9 @@ void sa_usr1_handler(int sig) {
  *	ctor for flarei
  */
 flarei::flarei():
-	_server(NULL),
-	_thread_pool(NULL),
-	_cluster(NULL) {
+		_server(NULL),
+		_thread_pool(NULL),
+		_cluster(NULL) {
 }
 
 /**

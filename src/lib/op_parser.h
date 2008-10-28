@@ -18,6 +18,7 @@
 #include "op_node_sync.h"
 #include "op_ping.h"
 #include "op_quit.h"
+#include "op_set.h"
 #include "op_stats.h"
 #include "op_version.h"
 

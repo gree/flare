@@ -44,6 +44,9 @@ public:
 
 	virtual int open();
 	virtual int close();
+	virtual int set(entry& e, result& r, int b = 0);
+	virtual int get(entry& e, result& r, int b = 0);
+	virtual int remove(entry& e, result& r, int b = 0);
 
 	virtual type get_type() { return this->_type; };
 };

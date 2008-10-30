@@ -764,7 +764,7 @@ cluster::proxy_request cluster::pre_proxy_write(op_set* op) {
 	storage::entry e = op->get_entry();
 
 	partition p;
-	int n = this->_determine_partition(e.key, p);
+	int n = this->_determine_partition(e, p);
 	if (n < 0) {
 		// perhaps no partition available
 		return proxy_request_error_partition;
@@ -1156,7 +1156,7 @@ int cluster::_check_node_partition_for_new(int node_partition, bool& preparing) 
 	return 0;
 }
 
-int cluster::_determine_partition(string key, partition& p) {
+int cluster::_determine_partition(storage::entry& e, partition& p) {
 	pthread_rwlock_rdlock(&this->_mutex_node_partition_map);
 	int n;
 	try {
@@ -1165,17 +1165,17 @@ int cluster::_determine_partition(string key, partition& p) {
 			throw -1;
 		}
 
-		key = this->_get_partition_key(key);
-		n = this->_get_partition_hash(key) % this->_node_partition_map.size();
+		string key = this->_get_partition_key(e.key);
+		n = storage::entry::get_key_hash(key) % this->_node_partition_map.size();
 		log_debug("determined partition (key=%s, n=%d)", key.c_str(), n);
 
 		if (this->_node_partition_map.count(n) == 0) {
 			log_err("have no partition map for this key (key=%s, n=%d, size=%d)", key.c_str(), n, this->_node_partition_map.size());
 			throw -1;
 		}
-	} catch (int e) {
+	} catch (int error) {
 		pthread_rwlock_unlock(&this->_mutex_node_partition_map);
-		return e;
+		return error;
 	}
 
 	p = this->_node_partition_map[n];

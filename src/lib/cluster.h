@@ -23,6 +23,7 @@
 #include <unistd.h>
 
 #include "connection.h"
+#include "storage.h"
 #include "thread_pool.h"
 
 using namespace std;
@@ -244,9 +245,8 @@ protected:
 	int _check_node_balance(string node_key, int node_balance);
 	int _check_node_partition(int node_partition, bool& preparing);
 	int _check_node_partition_for_new(int node_partition, bool& preparing);
-	int _determine_partition(string key, partition& p);
+	int _determine_partition(storage::entry& e, partition& p);
 	string _get_partition_key(string key);
-	inline int _get_partition_hash(string key) { const char* p = key.c_str(); int n = 0; while (*p) { n += static_cast<int>(*p); p++; } return n; };
 };
 
 }	// namespace flare

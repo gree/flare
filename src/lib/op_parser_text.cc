@@ -39,7 +39,6 @@ op* op_parser_text::parse_server() {
 	}
 
 	// see if proxy request or not
-	// TODO: loop check
 	int consume = 0;
 	char* proxy = NULL;
 	if (buf[0] == '<') {
@@ -58,12 +57,9 @@ op* op_parser_text::parse_server() {
 	log_debug("get first word (s=%s consume=%d)", first, consume);
 
 	op* r = this->_determine_op(first, buf, consume);
-	if (proxy != NULL) {
-		r->set_proxy(proxy);
-	}
-
 	this->_connection->push_back(buf+consume, buf_len-consume);
 	if (proxy != NULL) {
+		r->set_proxy(proxy);
 		_delete_(proxy);
 	}
 	_delete_(buf);

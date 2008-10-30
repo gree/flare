@@ -154,18 +154,23 @@ int op_set::_parse_server_parameter() {
 
 int op_set::_run_server() {
 	// pre-proxy (proxy if node is not in request-partition)
-	cluster::proxy_request r = this->_cluster->pre_proxy_write(this);
-	if (r == cluster::proxy_request_complete) {
-		// TBD
-	} else if (r == cluster::proxy_request_error_partition) {
+	cluster::proxy_request r_proxy = this->_cluster->pre_proxy_write(this);
+	if (r_proxy == cluster::proxy_request_complete) {
+		return 0;
+	} else if (r_proxy == cluster::proxy_request_error_partition) {
 		return this->_send_error(error_type_server, "no partition available");
 	}
 
 	// storage i/o
+	storage::result r_storage;
+	if (this->_storage->set(this->_entry, r_storage) < 0) {
+		return this->_send_error(error_type_server, "i/o error");
+	}
 	
 	// post-proxy (notify updates to slaves if we need)
-
-	return 0;
+	
+	string s = storage::result_cast(r_storage);
+	return this->_connection->writeline(s.c_str());
 }
 
 int op_set::_run_client() {

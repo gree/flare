@@ -115,6 +115,7 @@ int flared::startup(int argc, char **argv) {
 	log_notice("  index_server_name: %s", ini_option_object().get_index_server_name().c_str());
 	log_notice("  index_server_port: %d", ini_option_object().get_index_server_port());
 	log_notice("  max_connection:    %d", ini_option_object().get_max_connection());
+	log_notice("  mutex_slot:        %d", ini_option_object().get_mutex_slot());
 	log_notice("  proxy_concurrency: %d", ini_option_object().get_proxy_concurrency());
 	log_notice("  server_name:       %s", ini_option_object().get_server_name().c_str());
 	log_notice("  server_port:       %d", ini_option_object().get_server_port());
@@ -153,7 +154,7 @@ int flared::startup(int argc, char **argv) {
 	storage::type_cast(ini_option_object().get_storage_type(), t);
 	switch (t) {
 	case storage::type_tch:
-		this->_storage = _new_ storage_tch(ini_option_object().get_data_dir());
+		this->_storage = _new_ storage_tch(ini_option_object().get_data_dir(), ini_option_object().get_mutex_slot());
 		break;
 	default:
 		log_err("unknown storage type [%s]", ini_option_object().get_storage_type().c_str());

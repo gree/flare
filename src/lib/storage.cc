@@ -19,19 +19,30 @@ namespace flare {
 /**
  *	ctor for storage
  */
-storage::storage(string data_dir):
+storage::storage(string data_dir, int mutex_slot_size):
 		_open(false),
-		_data_dir(data_dir) {
+		_data_dir(data_dir),
+		_mutex_slot_size(mutex_slot_size),
+		_mutex_slot(NULL),
+		_data_version_cache_map(NULL) {
+	this->_mutex_slot = _new_ pthread_rwlock_t[mutex_slot_size];
 	int i;
-	for (i = 0; i < mutex_slot; i++) {
+	for (i = 0; i < this->_mutex_slot_size; i++) {
 		pthread_rwlock_init(&this->_mutex_slot[i], NULL);
 	}
+
+	this->_data_version_cache_map = tcmapnew();
 }
 
 /**
  *	dtor for storage
  */
 storage::~storage() {
+	_delete_(this->_mutex_slot);
+
+	if (this->_data_version_cache_map) {
+		tcmapdel(this->_data_version_cache_map);
+	}
 }
 // }}}
 
@@ -61,14 +72,6 @@ int storage::_unserialize_header(const uint8_t* data, int data_len, entry& e) {
 	memcpy(&e.expire, data+offset, sizeof(e.expire));
 	offset += sizeof(e.expire);
 	
-	// version
-	if (static_cast<int>(offset + sizeof(e.version)) > data_len) {
-		log_warning("data is smaller than expected header size (member=version, data_len=%d, offset=%d, size=%d)", data_len, offset, sizeof(e.version));
-		return -1;
-	}
-	memcpy(&e.version, data+offset, sizeof(e.version));
-	offset += sizeof(e.version);
-	
 	// size
 	if (static_cast<int>(offset + sizeof(e.size)) > data_len) {
 		log_warning("data is smaller than expected header size (member=size, data_len=%d, offset=%d, size=%d)", data_len, offset, sizeof(e.size));
@@ -77,9 +80,41 @@ int storage::_unserialize_header(const uint8_t* data, int data_len, entry& e) {
 	memcpy(&e.size, data+offset, sizeof(e.size));
 	offset += sizeof(e.size);
 
+	// version
+	if (static_cast<int>(offset + sizeof(e.version)) > data_len) {
+		log_warning("data is smaller than expected header size (member=version, data_len=%d, offset=%d, size=%d)", data_len, offset, sizeof(e.version));
+		return -1;
+	}
+	memcpy(&e.version, data+offset, sizeof(e.version));
+	offset += sizeof(e.version);
+	
 	log_debug("header: flag=%d, expire=%d, version=%u, size=%u", e.flag, e.expire, e.version, e.size);
 
 	return offset;
+}
+
+int storage::_gc_data_version_cache(int lifetime) {
+	log_debug("gc for data version cache (lifetime=%d)", lifetime);
+
+	time_t t_limit = time(NULL) - lifetime;
+	tcmapiterinit(this->_data_version_cache_map);
+	int key_len;
+	char* key;
+	while ((key = (char*)tcmapiternext(this->_data_version_cache_map, &key_len)) != NULL) {
+		int tmp_len;
+		uint8_t* tmp = (uint8_t*)tcmapget(this->_data_version_cache_map, key, key_len, &tmp_len);
+		if (tmp == NULL) {
+			continue;
+		}
+
+		time_t t = *(reinterpret_cast<time_t*>(tmp+sizeof(uint64_t)));
+		if (t < t_limit) {
+			log_debug("clearing expired data version cache (key=%s, t=%d)", key, t);
+			tcmapout(this->_data_version_cache_map, key, key_len);
+		}
+	}
+
+	return 0;
 }
 // }}}
 

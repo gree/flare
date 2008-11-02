@@ -31,6 +31,7 @@ private:
 	int					_index_server_port;
 	string			_log_facility;
 	uint32_t		_max_connection;
+	int					_mutex_slot;
 	int					_proxy_concurrency;
 	string			_server_name;
 	int					_server_port;
@@ -40,6 +41,7 @@ private:
 public:
 	static const int default_index_server_port = 12120;
 	static const uint32_t default_max_connection = 128;
+	static const int default_mutex_slot = 64;
 	static const int default_proxy_concurrency = 2;
 	static const int default_server_port = 12121;
 	static const int default_thread_pool_size = 5;
@@ -59,6 +61,7 @@ public:
 	int get_index_server_port() { return this->_index_server_port; };
 	string get_log_facility() { return this->_log_facility; };
 	uint32_t get_max_connection() { return this->_max_connection; };
+	int get_mutex_slot() { return this->_mutex_slot; };
 	int get_proxy_concurrency() { return this->_proxy_concurrency; };
 	string get_server_name() { return this->_server_name; };
 	int get_server_port() { return this->_server_port; };

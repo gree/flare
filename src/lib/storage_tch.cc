@@ -19,8 +19,8 @@ namespace flare {
 /**
  *	ctor for storage_tch
  */
-storage_tch::storage_tch(string data_dir):
-		storage(data_dir) {
+storage_tch::storage_tch(string data_dir, int mutex_slot_size):
+		storage(data_dir, mutex_slot_size) {
 	this->_data_path = this->_data_dir + "/flare.hdb";
 
 	this->_db = tchdbnew();
@@ -81,17 +81,53 @@ int storage_tch::close() {
 }
 
 int storage_tch::set(entry& e, result& r, int b) {
-	int mutex_index = e.get_key_hash() % storage::mutex_slot;
-	try {
-		pthread_rwlock_wrlock(&this->_mutex_slot[mutex_index]);
+	log_info("setting data (key=%s)", e.key.c_str());
+	int mutex_index = 0;
 
-		// version
+	if ((b & behavior_skip_lock) == 0) {
+		mutex_index = e.get_key_hash() % this->_mutex_slot_size;
+	}
+
+	try {
+		if ((b & behavior_skip_lock) == 0) {
+			pthread_rwlock_wrlock(&this->_mutex_slot[mutex_index]);
+		}
+
+		if ((b & behavior_skip_version) == 0 && e.version != 0) {
+			uint64_t version = this->_get_version(e.key);
+			if (e.version < version) {
+				log_info("specified version is older than current version -> skip setting (current=%u, specified=%u)", version, e.version);
+				r = result_not_stored;
+				throw 0;
+			}
+		}
+
+		if (e.option & option_noreply) {
+			if (tchdbputasync(this->_db, e.key.c_str(), e.key.size(), e.data.get(), e.size) == true) {
+				r = result_stored;
+			} else {
+				int ecode = tchdbecode(this->_db);
+				log_err("tchdbputasync() failed: %s (%d)", tchdberrmsg(ecode), ecode);
+				throw -1;
+			}
+		} else {
+			if (tchdbput(this->_db, e.key.c_str(), e.key.size(), e.data.get(), e.size) == true) {
+				r = result_stored;
+			} else {
+				int ecode = tchdbecode(this->_db);
+				log_err("tchdbputasync() failed: %s (%d)", tchdberrmsg(ecode), ecode);
+				throw -1;
+			}
+		}
 	} catch (int error) {
+		if ((b & behavior_skip_lock) == 0) {
+			pthread_rwlock_unlock(&this->_mutex_slot[mutex_index]);
+		}
+		return error;
+	}
+	if ((b & behavior_skip_lock) == 0) {
 		pthread_rwlock_unlock(&this->_mutex_slot[mutex_index]);
 	}
-	pthread_rwlock_unlock(&this->_mutex_slot[mutex_index]);
-
-	r = result_stored;
 
 	return 0;
 }
@@ -104,7 +140,7 @@ int storage_tch::get(entry& e, result& r, int b) {
 	bool remove_request = false;
 
 	if ((b & behavior_skip_lock) == 0) {
-		mutex_index = e.get_key_hash() % storage::mutex_slot;
+		mutex_index = e.get_key_hash() % this->_mutex_slot_size;
 	}
 
 	try {
@@ -149,7 +185,6 @@ int storage_tch::get(entry& e, result& r, int b) {
 			pthread_rwlock_unlock(&this->_mutex_slot[mutex_index]);
 		}
 
-		// TODO: async (lock interval can be accepted because of version control)
 		if (remove_request) {
 			result r_remove;
 			this->remove(e, r_remove);		// do not care about result here
@@ -165,11 +200,66 @@ int storage_tch::get(entry& e, result& r, int b) {
 }
 
 int storage_tch::remove(entry& e, result& r, int b) {
+	log_info("removing data (key=%s)", e.key.c_str());
+	int mutex_index = 0;
+
+	if ((b & behavior_skip_lock) == 0) {
+		mutex_index = e.get_key_hash() % this->_mutex_slot_size;
+	}
+
+	try {
+		if ((b & behavior_skip_lock) == 0) {
+			pthread_rwlock_wrlock(&this->_mutex_slot[mutex_index]);
+		}
+
+		if ((b & behavior_skip_version) == 0 && e.version != 0) {
+			uint64_t version = this->_get_version(e.key);
+			if (e.version < version) {
+				log_info("specified version is older than current version -> skip removing (current=%u, specified=%u)", version, e.version);
+				r = result_not_found;
+				throw 0;
+			}
+		}
+
+		if (tchdbout(this->_db, e.key.c_str(), e.key.size()) == true) {
+			r = result_deleted;
+		} else {
+			r = result_not_found;
+		}
+	} catch (int error) {
+		if ((b & behavior_skip_lock) == 0) {
+			pthread_rwlock_unlock(&this->_mutex_slot[mutex_index]);
+		}
+		return error;
+	}
+	if ((b & behavior_skip_lock) == 0) {
+		pthread_rwlock_unlock(&this->_mutex_slot[mutex_index]);
+	}
+
 	return 0;
 }
 // }}}
 
 // {{{ protected methods
+uint64_t storage_tch::_get_version(string key) {
+	uint8_t tmp_data[storage::entry::header_size];
+	int tmp_len = tchdbget3(this->_db, key.c_str(), key.size(), tmp_data, storage::entry::header_size);
+	if (tmp_len < 0) {
+		// if not found, check data version cache
+		return this->_get_data_version_cache(key);
+	}
+
+	entry e;
+	int offset = this->_unserialize_header(tmp_data, tmp_len, e);
+	if (offset < 0) {
+		log_err("failed to unserialize header (data is corrupted) (tmp_len=%d)", tmp_len);
+		return 0;
+	}
+
+	log_debug("current version (key=%s, version=%u)", key.c_str(), e.version);
+
+	return e.version;
+}
 // }}}
 
 // {{{ private methods

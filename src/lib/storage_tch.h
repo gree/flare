@@ -39,7 +39,7 @@ protected:
 	TCHDB*						_db;
 
 public:
-	storage_tch(string data_dir);
+	storage_tch(string data_dir, int mutex_slot_size);
 	virtual ~storage_tch();
 
 	virtual int open();
@@ -49,6 +49,9 @@ public:
 	virtual int remove(entry& e, result& r, int b = 0);
 
 	virtual type get_type() { return this->_type; };
+
+protected:
+	virtual uint64_t _get_version(string key);
 };
 
 }	// namespace flare

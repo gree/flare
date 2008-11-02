@@ -10,6 +10,8 @@
 
 #include <boost/shared_ptr.hpp>
 
+#include "tcutil.h"
+
 #include "logger.h"
 #include "mm.h"
 #include "util.h"
@@ -32,6 +34,7 @@ public:
 	enum									behavior {
 		behavior_skip_lock = 0x01,
 		behavior_skip_timestamp = 0x01 << 1,
+		behavior_skip_version = 0x01 << 2,
 	};
 	
 	enum									result {
@@ -56,6 +59,8 @@ public:
 		uint64_t						version;
 		uint32_t						option;
 		shared_byte					data;
+
+		static const int		header_size = sizeof(uint32_t) + sizeof(time_t) + sizeof(uint64_t) + sizeof(uint64_t);
 
 		_entry() { flag = expire = size = version = option = 0; key_hash = -1; };
 
@@ -83,16 +88,16 @@ public:
 		}
 	} entry;
 
-	static const int			mutex_slot = 64;
-
 protected:
 	bool									_open;
 	string								_data_dir;
 	string								_data_path;
-	pthread_rwlock_t			_mutex_slot[mutex_slot];
+	int										_mutex_slot_size;
+	pthread_rwlock_t*			_mutex_slot;
+	TCMAP*								_data_version_cache_map;
 
 public:
-	storage(string data_dir);
+	storage(string data_dir, int mutex_slot_size);
 	virtual ~storage();
 
 	virtual int open() = 0;
@@ -175,7 +180,36 @@ public:
 	};
 
 protected:
+	virtual uint64_t _get_version(string key) = 0;
 	virtual int _unserialize_header(const uint8_t* data, int data_len, entry& e);
+
+	inline int _set_data_version_cache(string key, uint64_t version) {
+		uint8_t tmp[sizeof(uint64_t) + sizeof(time_t)];
+		uint64_t* p;
+		time_t* q;
+
+		p = reinterpret_cast<uint64_t*>(tmp);
+		*p = version;
+		q = reinterpret_cast<time_t*>(tmp+sizeof(uint64_t));
+		*q = time(NULL);
+
+		tcmapput(this->_data_version_cache_map, key.c_str(), key.size(), tmp, sizeof(tmp));
+
+		return 0;
+	};
+
+	inline uint64_t _get_data_version_cache(string key) {
+		int tmp_len;
+		uint8_t* tmp = (uint8_t*)tcmapget(this->_data_version_cache_map, key.c_str(), key.size(), &tmp_len);
+		if (tmp == NULL) {
+			return 0;
+		}
+		log_debug("current version cache (key=%s, version=%u)", key.c_str(), *(reinterpret_cast<uint64_t*>(tmp)));
+
+		return *(reinterpret_cast<uint64_t*>(tmp));
+	};
+
+	int _gc_data_version_cache(int lifetime);
 };
 
 }	// namespace flare

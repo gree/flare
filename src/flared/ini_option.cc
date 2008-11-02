@@ -28,6 +28,7 @@ ini_option::ini_option():
 		_index_server_port(default_index_server_port),
 		_log_facility(""),
 		_max_connection(default_max_connection),
+		_mutex_slot(default_mutex_slot),
 		_proxy_concurrency(default_proxy_concurrency),
 		_server_name(""),
 		_server_port(default_server_port),
@@ -140,6 +141,10 @@ int ini_option::load() {
 
 		if (opt_var_map.count("max-connection")) {
 			this->_max_connection = opt_var_map["max-connection"].as<int>();
+		}
+
+		if (opt_var_map.count("mutex-slot")) {
+			this->_mutex_slot = opt_var_map["mutex-slot"].as<int>();
 		}
 
 		if (opt_var_map.count("proxy-concurrency")) {
@@ -279,6 +284,7 @@ int ini_option::_setup_config_option(program_options::options_description& optio
 		("index-server-port",	program_options::value<int>(),		 	"index server port")
 		("log-facility",			program_options::value<string>(), 	"log facility (dynamic)")
 		("max-connection",		program_options::value<int>(),			"max concurrent connections to accept (dynamic)")
+		("mutex-slot",				program_options::value<int>(),			"mutex slot size for storage I/O")
 		("proxy-concurrency",	program_options::value<int>(),			"proxy request concurrency for each node (dynamic)")
 		("server-name",				program_options::value<string>(),		"my server name")
 		("server-port",				program_options::value<int>(),			"my server port")

@@ -145,6 +145,10 @@ int flarei::startup(int argc, char **argv) {
 		return -1;
 	}
 
+	shared_thread th = this->_thread_pool->get(thread_pool::thread_type_alarm);
+	handler_alarm* h = _new_ handler_alarm(th);
+	th->trigger(h);
+
 	if (this->_set_pid() < 0) {
 		return -1;
 	}

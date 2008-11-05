@@ -178,7 +178,10 @@ int op_set::_run_server() {
 	
 	// post-proxy (notify updates to slaves if we need)
 	
-	return this->_send_result(static_cast<result>(r_storage));
+	if ((this->_entry.option & storage::option_noreply) == 0) {
+		return this->_send_result(static_cast<result>(r_storage));
+	}
+	return 0;
 }
 
 int op_set::_run_client(storage::entry& e) {

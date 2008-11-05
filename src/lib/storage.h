@@ -198,21 +198,7 @@ protected:
 	virtual uint64_t _get_version(string key) = 0;
 	virtual int _serialize_header(entry& e, uint8_t* data);
 	virtual int _unserialize_header(const uint8_t* data, int data_len, entry& e);
-
-	inline int _set_data_version_cache(string key, uint64_t version) {
-		uint8_t tmp[sizeof(uint64_t) + sizeof(time_t)];
-		uint64_t* p;
-		time_t* q;
-
-		p = reinterpret_cast<uint64_t*>(tmp);
-		*p = version;
-		q = reinterpret_cast<time_t*>(tmp+sizeof(uint64_t));
-		*q = time(NULL);
-
-		tcmapput(this->_data_version_cache_map, key.c_str(), key.size(), tmp, sizeof(tmp));
-
-		return 0;
-	};
+	int _set_data_version_cache(string key, uint64_t version);
 
 	inline uint64_t _get_data_version_cache(string key) {
 		int tmp_len;

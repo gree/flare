@@ -7,6 +7,7 @@
  *
  *	$Id$
  */
+#include "app.h"
 #include "storage.h"
 
 namespace gree {
@@ -115,10 +116,25 @@ int storage::_unserialize_header(const uint8_t* data, int data_len, entry& e) {
 	return offset;
 }
 
+inline int storage::_set_data_version_cache(string key, uint64_t version) {
+	uint8_t tmp[sizeof(uint64_t) + sizeof(time_t)];
+	uint64_t* p;
+	time_t* q;
+
+	p = reinterpret_cast<uint64_t*>(tmp);
+	*p = version;
+	q = reinterpret_cast<time_t*>(tmp+sizeof(uint64_t));
+	*q = stats_object->get_timestamp();
+
+	tcmapput(this->_data_version_cache_map, key.c_str(), key.size(), tmp, sizeof(tmp));
+
+	return 0;
+};
+
 int storage::_gc_data_version_cache(int lifetime) {
 	log_debug("gc for data version cache (lifetime=%d)", lifetime);
 
-	time_t t_limit = time(NULL) - lifetime;
+	time_t t_limit = stats_object->get_timestamp() - lifetime;
 	tcmapiterinit(this->_data_version_cache_map);
 	int key_len;
 	char* key;

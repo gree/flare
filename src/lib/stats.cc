@@ -17,7 +17,7 @@ namespace flare {
  *	ctor for stats
  */
 stats::stats():
-		_timestamp(0),
+		_start_timestamp(0),
 		_total_connections(0),
 		_cmd_get(0),
 		_cmd_set(0),
@@ -42,7 +42,7 @@ stats::~stats() {
  *	startup procs
  */
 int stats::startup() {
-	this->_timestamp = time(NULL);
+	this->_start_timestamp = time(NULL);
 
 	return 0;
 }
@@ -58,14 +58,26 @@ pid_t stats::get_pid() {
  *	get process uptime
  */
 time_t stats::get_uptime() {
-	return time(NULL) - this->_timestamp;
+	return this->_current_timestamp - this->_start_timestamp;
 }
 
 /**
  *	get current timestamp
  */
 time_t stats::get_timestamp() {
-	return time(NULL);
+	return this->_current_timestamp;
+}
+
+/**
+ *	update current timestamp
+ */
+int stats::update_timestamp(time_t t) {
+	if (t == 0) {
+		this->_current_timestamp = time(NULL);
+	} else {
+		this->_current_timestamp = t;
+	}
+	return 0;
 }
 
 const char* stats::get_version() {

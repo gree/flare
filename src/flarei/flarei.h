@@ -9,6 +9,7 @@
 #define	__FLAREI_H__
 
 #include "app.h"
+#include "handler_alarm.h"
 #include "handler_request.h"
 #include "ini_option.h"
 #include "stats_index.h"

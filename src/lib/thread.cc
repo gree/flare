@@ -7,6 +7,7 @@
  *
  *	$Id$
  */
+#include "app.h"
 #include "thread.h"
 #include "thread_pool.h"
 #include "thread_handler.h"
@@ -152,7 +153,7 @@ int thread::setup(int type, uint32_t id) {
 
 	this->_info.id = id;
 	this->_info.type = type;
-	this->_info.timestamp = time(NULL);
+	this->_info.timestamp = stats_object->get_timestamp();
 	this->_info.state = "setup";
 	
 	return 0;

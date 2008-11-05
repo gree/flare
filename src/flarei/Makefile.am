@@ -17,6 +17,7 @@ flarei_CPPFLAGS = -I../lib
 flarei_SOURCES = \
 	flarei.h flarei.cc \
 	ini_option.h ini_option.cc \
+	handler_alarm.h handler_alarm.cc \
 	handler_request.h handler_request.cc \
 	op_parser_binary_index.h op_parser_binary_index.cc \
 	op_parser_text_index.h op_parser_text_index.cc \

@@ -30,7 +30,8 @@ namespace flare {
  */
 class stats {
 protected:
-	time_t			_timestamp;
+	time_t			_start_timestamp;
+	time_t			_current_timestamp;
 	uint32_t		_total_connections;
 	uint32_t		_cmd_get;
 	uint32_t		_cmd_set;
@@ -56,6 +57,7 @@ public:
 	pid_t get_pid();
 	time_t get_uptime();
 	time_t get_timestamp();
+	int update_timestamp(time_t t = 0);
 	const char* get_version();
 	int get_pointer_size();
 	struct rusage get_rusage();

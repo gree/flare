@@ -7,6 +7,7 @@
  *
  *	$Id$
  */
+#include "app.h"
 #include "storage_tch.h"
 
 namespace gree {
@@ -178,7 +179,7 @@ int storage_tch::get(entry& e, result& r, int b) {
 		}
 
 		if ((b & behavior_skip_timestamp) == 0) {
-			if (e.expire > 0 && e.expire < time(NULL)) {
+			if (e.expire > 0 && e.expire < stats_object->get_timestamp()) {
 				log_info("data expired [expire=%d] -> remove requesting", e.expire);
 				remove_request = true;
 				throw 0;

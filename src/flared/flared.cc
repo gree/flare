@@ -165,6 +165,11 @@ int flared::startup(int argc, char **argv) {
 		return -1;
 	}
 
+	// creating alarm thread in advance
+	shared_thread th = this->_thread_pool->get(thread_pool::thread_type_alarm);
+	handler_alarm* h = _new_ handler_alarm(th);
+	th->trigger(h);
+
 	if (this->_set_pid() < 0) {
 		return -1;
 	}

@@ -7,6 +7,7 @@
  *	
  *	$Id$
  */
+#include "app.h"
 #include "util.h"
 
 namespace gree {
@@ -154,6 +155,19 @@ uint32_t util::next_digit(const char* src, char* dst, uint32_t dst_len) {
 	*q = '\0';
 
 	return p-src;
+}
+
+/**
+ *	get realtime(?) (from memcached...)
+ */
+time_t util::realtime(time_t t) {
+	if (t == 0) {
+		return 0;
+	}
+	if (t <= util::max_realtime_delta) {
+		return t + stats_object->get_timestamp();
+	}
+	return t;
 }
 // }}}
 

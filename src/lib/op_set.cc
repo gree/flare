@@ -88,7 +88,7 @@ int op_set::_parse_server_parameter() {
 			throw -1;
 		}
 		try {
-			this->_entry.expire = lexical_cast<time_t>(q);
+			this->_entry.expire = util::realtime(lexical_cast<time_t>(q));
 			log_debug("storing expire [%u]", this->_entry.expire);
 		} catch (bad_lexical_cast e) {
 			log_debug("invalid expire (expire=%s)", q);

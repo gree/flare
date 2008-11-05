@@ -398,6 +398,14 @@ int thread::enqueue(shared_thread_queue q) {
 
 	return 0;
 }
+
+thread::thread_info thread::get_thread_info() {
+	pthread_mutex_lock(&this->_mutex_queue);
+	this->_info.queue_size = this->_thread_queue.size();
+	pthread_mutex_unlock(&this->_mutex_queue);
+
+	return this->_info;
+}
 // }}}
 
 // {{{ protected methods

@@ -52,6 +52,7 @@ public:
 		time_t							timestamp;
 		string							state;
 		string							info;
+		uint32_t						queue_size;
 	} thread_info;
 
 	enum									shutdown_request {
@@ -105,6 +106,7 @@ public:
 
 	int dequeue(shared_thread_queue& q, int timeout);
 	int enqueue(shared_thread_queue q);
+	thread_info get_thread_info();
 
 	uint32_t get_id() { return this->_id; };
 	pthread_t get_thread_id() { return this->_thread_id; };
@@ -113,8 +115,6 @@ public:
 	int set_op(string op) { this->_info.op = op; return 0; };
 	string get_state() { return this->_info.state; };
 	int set_state(string state) { log_debug("%s -> %s", this->_info.state.c_str(), state.c_str()); this->_info.state = state; return 0; };
-	int set_info(string info) { this->_info.info = info; return 0; };
-	thread_info get_thread_info() { return this->_info; };
 	bool is_running() { return this->_running; };
 	shutdown_request is_shutdown_request() { return this->_shutdown_request; };
 	shared_thread get_shared_thread() { return this->_myself.lock(); };

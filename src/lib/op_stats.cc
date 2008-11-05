@@ -139,9 +139,10 @@ int op_stats::_send_stats_threads(thread_pool* tp) {
 		s << "STAT " << it->id << ":type " << it->type << line_delimiter;
 		s << "STAT " << it->id << ":peer " << it->peer_name << ":" << it->peer_port << line_delimiter;
 		s << "STAT " << it->id << ":op " << it->op << line_delimiter;
-		s << "STAT " << it->id << ":uptime " << (time(NULL) - it->timestamp) << line_delimiter;
+		s << "STAT " << it->id << ":uptime " << (stats_object->get_timestamp() - it->timestamp) << line_delimiter;
 		s << "STAT " << it->id << ":state " << it->state << line_delimiter;
 		s << "STAT " << it->id << ":info " << it->info << line_delimiter;
+		s << "STAT " << it->id << ":queue " << it->queue_size << line_delimiter;
 	}
 	this->_connection->write(s.str().c_str(), s.str().size());
 	
@@ -156,9 +157,10 @@ int op_stats::_send_stats_threads(thread_pool* tp, int type) {
 		s << "STAT " << it->id << ":type " << it->type << line_delimiter;
 		s << "STAT " << it->id << ":peer " << it->peer_name << ":" << it->peer_port << line_delimiter;
 		s << "STAT " << it->id << ":op " << it->op << line_delimiter;
-		s << "STAT " << it->id << ":uptime " << (time(NULL) - it->timestamp) << line_delimiter;
+		s << "STAT " << it->id << ":uptime " << (stats_object->get_timestamp() - it->timestamp) << line_delimiter;
 		s << "STAT " << it->id << ":state " << it->state << line_delimiter;
 		s << "STAT " << it->id << ":info " << it->info << line_delimiter;
+		s << "STAT " << it->id << ":queue " << it->queue_size << line_delimiter;
 	}
 	this->_connection->write(s.str().c_str(), s.str().size());
 	

@@ -136,11 +136,11 @@ int op_node_role::_parse_server_parameter() {
 
 int op_node_role::_run_server() {
 	if (this->_cluster->set_node_role(this->_node_server_name, this->_node_server_port, this->_node_role, this->_node_balance, this->_node_partition) < 0) {
-		this->_send_error(error_type_server, "failed to set role (and balance)");
+		this->_send_result(result_server_error, "failed to set role (and balance)");
 		return -1;
 	}
 
-	return this->_send_ok();
+	return this->_send_result(result_ok);
 }
 
 int op_node_role::_run_client(string node_server_name, int node_server_port, cluster::role node_role, int node_balance, int node_partition) {

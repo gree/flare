@@ -28,17 +28,20 @@ namespace flare {
 class storage {
 public:
 	enum 									option {
+		option_none				= 0,
 		option_noreply		= 0x01,
+		option_sync				= 0x01 << 1,
 	};
 
 	enum									behavior {
-		behavior_skip_lock = 0x01,
+		behavior_skip_lock 			= 0x01,
 		behavior_skip_timestamp = 0x01 << 1,
-		behavior_skip_version = 0x01 << 2,
+		behavior_skip_version 	= 0x01 << 2,
 	};
 	
 	enum									result {
-		result_stored,
+		result_none						= 0,
+		result_stored					= 16,
 		result_not_stored,
 		result_exists,
 		result_not_found,
@@ -109,8 +112,12 @@ public:
 	virtual type get_type() = 0;
 
 	static inline int option_cast(string s, option& r) {
-		if (s == "noreply") {
+		if (s == "") {
+			r = option_none;
+		} else if (s == "noreply") {
 			r = option_noreply;
+		} else if (s == "sync") {
+			r = option_sync;
 		} else {
 			return -1;
 		}
@@ -119,14 +126,20 @@ public:
 
 	static inline string option_cast(option r) {
 		switch (r) {
+		case option_none:
+			return "";
 		case option_noreply:
 			return "noreply";
+		case option_sync:
+			return "sync";
 		}
 		return "";
 	};
 
 	static inline int result_cast(string s, result& r) {
-		if (s == "STORED") {
+		if (s == "") {
+			r = result_none;
+		} else if (s == "STORED") {
 			r = result_stored;
 		} else if (s == "NOT_STORED") {
 			r = result_not_stored;
@@ -146,6 +159,8 @@ public:
 
 	static inline string result_cast(result r) {
 		switch (r) {
+		case result_none:
+			return "";
 		case result_stored:
 			return "STORED";
 		case result_not_stored:
@@ -181,6 +196,7 @@ public:
 
 protected:
 	virtual uint64_t _get_version(string key) = 0;
+	virtual int _serialize_header(entry& e, uint8_t* data);
 	virtual int _unserialize_header(const uint8_t* data, int data_len, entry& e);
 
 	inline int _set_data_version_cache(string key, uint64_t version) {

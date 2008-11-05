@@ -146,6 +146,7 @@ int flared::startup(int argc, char **argv) {
 	this->_thread_pool = _new_ thread_pool(ini_option_object().get_thread_pool_size());
 
 	this->_cluster = _new_ cluster(this->_thread_pool, ini_option_object().get_data_dir(), ini_option_object().get_server_name(), ini_option_object().get_server_port());
+	this->_cluster->set_proxy_concurrency(ini_option_object().get_proxy_concurrency());
 	if (this->_cluster->startup_node(ini_option_object().get_index_server_name(), ini_option_object().get_index_server_port()) < 0) {
 		return -1;
 	}
@@ -218,8 +219,6 @@ int flared::reload() {
 	singleton<logger>::instance().close();
 	singleton<logger>::instance().open(this->_ident, ini_option_object().get_log_facility());
 	
-	// proxy_concurrency
-
 	// thread_pool_size
 	this->_thread_pool->set_max_pool_size(ini_option_object().get_thread_pool_size());
 

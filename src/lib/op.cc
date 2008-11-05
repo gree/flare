@@ -20,7 +20,9 @@ op::op(shared_connection c, string ident):
 		_connection(c),
 		_ident(ident),
 		_proxy_request(false),
-		_shutdown_request(false) {
+		_shutdown_request(false),
+		_result(result_none),
+		_result_message("") {
 }
 
 /**
@@ -40,7 +42,7 @@ op::~op() {
 int op::run_server() {
 	this->_thread->set_state("parse");
 	if (this->_parse_server_parameter() < 0) {
-		this->_send_error();
+		this->_send_result(result_error);
 		return -1;
 	}
 
@@ -102,45 +104,42 @@ int op::_parse_client_parameter() {
 }
 
 /**
- *	send OK response
+ *	parse server response line ('\n' terminated)
  */
-int op::_send_ok() {
-	log_debug("> OK", 0);
-	return this->_connection->writeline("OK");
-}
-
-/**
- *	send END response
- */
-int op::_send_end() {
-	log_debug("> END", 0);
-	return this->_connection->writeline("END");
-}
-
-/**
- *	send ERROR response
- */
-int op::_send_error(error_type t, const char* m) {
-	const char* r = "ERROR";
-	switch (t) {
-	case error_type_generic:
-		r = "ERROR";
-		break;
-	case error_type_client:
-		r = "CLIENT_ERROR";
-		break;
-	case error_type_server:
-		r = "SERVER_ERROR";
-		break;
+int op::_parse_response(const char* p, result& r, string& r_message) {
+	char q[BUFSIZ];
+	int n = util::next_word(p, q, sizeof(q));
+	if (op::result_cast(q, r) < 0) {
+		log_warning("unknown response (p=%s)", p);
+		return -1;
 	}
-	log_debug("> %s", r);
 
-	if (m) {
+	while (*(p+n) == ' ') {
+		n++;
+	}
+
+	// skip '\n';
+	if (*(p+n)) {
+		string s(p+n, strlen(p+n)-1);
+		r_message = s;
+	}
+
+	log_debug("(result=%s, message=%s)", result_cast(r).c_str(), r_message.c_str());
+
+	return 0;
+}
+
+/**
+ *	send result code
+ */
+int op::_send_result(result r, const char* message) {
+	log_debug("sending result (result=%s, message=%s)", op::result_cast(r).c_str(), message ? message : "");
+	if (message != NULL) {
 		ostringstream s;
-		s << r << " " << m;
+		s << op::result_cast(r) << " " << message;
 		return this->_connection->writeline(s.str().c_str());
 	} else {
-		return this->_connection->writeline(r);
+		return this->_connection->writeline(op::result_cast(r).c_str());
 	}
 }
 

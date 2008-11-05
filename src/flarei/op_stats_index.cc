@@ -65,7 +65,7 @@ int op_stats_index::_run_server() {
 		this->_send_stats(singleton<flarei>::instance().get_thread_pool());
 		break;
 	}
-	this->_send_end();
+	this->_send_result(result_end);
 
 	return 0;
 }

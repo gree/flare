@@ -329,26 +329,35 @@ int connection::push_back(char* p, int bufsiz) {
 int connection::write(const char* p, int bufsiz) {
 	this->_errno = 0;
 
-	int len = ::write(this->_sock, p, bufsiz);
-	if (len < 0) {
-		log_err("write() failed: %s (%d)", util::strerror(errno), errno);
-		if (errno == EAGAIN || errno == EINTR) {
-			return 0;
+	int written = 0;
+	int i, len;
+	for (i = 0; i < connection::write_retry_limit; i++) {
+		len = ::write(this->_sock, p+written, bufsiz-written);
+		if (len < 0) {
+			log_err("write() failed: %s (%d)", util::strerror(errno), errno);
+			if (errno == EAGAIN || errno == EINTR) {
+				usleep(connection::write_retry_wait);
+				continue;
+			}
+			log_err("-> closing socket", 0);
+			this->close();
+			this->_errno = errno;
+			return -1;
 		}
-		log_err("-> closing socket", 0);
-		this->close();
-		this->_errno = errno;
-		return -1;
+		written += len;
+		if (written == bufsiz) {
+			log_debug("write %d bytes", len);
+			break;
+		} else {
+			log_info("expect %d bytes but write %d byes -> continue processing", bufsiz, len);
+		}
+		stats_object->add_bytes_written(len);
 	}
-	if (len == bufsiz) {
-		log_debug("write %d bytes", len);
-	} else {
-		log_info("expect %d bytes but write %d byes -> continue processing", bufsiz, len);
+	if (i == connection::write_retry_limit) {
+		return len >= 0 ? written : -1;
 	}
 
-	stats_object->add_bytes_written(len);
-
-	return len;
+	return written;
 }
 
 /**

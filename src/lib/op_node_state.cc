@@ -117,11 +117,11 @@ int op_node_state::_parse_server_parameter() {
 
 int op_node_state::_run_server() {
 	if (this->_cluster->set_node_state(this->_node_server_name, this->_node_server_port, this->_node_state) < 0) {
-		this->_send_error(error_type_server, "failed to set state");
+		this->_send_result(result_server_error, "failed to set state");
 		return -1;
 	}
 
-	return this->_send_ok();
+	return this->_send_result(result_ok);
 }
 
 int op_node_state::_run_client(string node_server_name, int node_server_port, cluster::state node_state) {

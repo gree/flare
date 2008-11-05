@@ -55,7 +55,7 @@ int op_ping::_parse_server_parameter() {
 }
 
 int op_ping::_run_server() {
-	this->_send_ok();
+	this->_send_result(result_ok);
 
 	return 0;
 }

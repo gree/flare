@@ -53,6 +53,28 @@ storage::~storage() {
 // }}}
 
 // {{{ protected methods
+int storage::_serialize_header(entry& e, uint8_t* data) {
+	int offset = 0;
+
+	// flag
+	memcpy(data+offset, &e.flag, sizeof(e.flag));
+	offset += sizeof(e.flag);
+
+	// expire
+	memcpy(data+offset, &e.expire, sizeof(e.expire));
+	offset += sizeof(e.expire);
+
+	// size
+	memcpy(data+offset, &e.size, sizeof(e.size));
+	offset += sizeof(e.size);
+	
+	// version
+	memcpy(data+offset, &e.version, sizeof(e.version));
+	offset += sizeof(e.version);
+
+	return 0;
+}
+
 int storage::_unserialize_header(const uint8_t* data, int data_len, entry& e) {
 	int offset = 0;
 

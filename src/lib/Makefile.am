@@ -16,6 +16,7 @@ libflare_a_SOURCES = \
 	cluster.h cluster.cc \
 	connection.h connection.cc \
 	handler_monitor.h handler_monitor.cc \
+	handler_proxy.h handler_proxy.cc \
 	ini.h ini.cc \
 	logger.h logger.cc \
 	mm.h mm.cc \
@@ -37,6 +38,7 @@ libflare_a_SOURCES = \
 	op_stats.h op_stats.cc \
 	op_version.h op_version.cc \
 	queue_node_sync.h queue_node_sync.cc \
+	queue_proxy_write.h queue_proxy_write.cc \
 	queue_update_monitor_option.h queue_update_monitor_option.cc \
 	server.h server.cc \
 	singleton.h \

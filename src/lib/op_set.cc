@@ -8,6 +8,7 @@
  *	$Id$
  */
 #include "op_set.h"
+#include "queue_proxy_write.h"
 
 namespace gree {
 namespace flare {
@@ -36,12 +37,12 @@ op_set::~op_set() {
 /**
  *	send client request
  */
-int op_set::run_client() {
-	if (this->_run_client() < 0) {
+int op_set::run_client(storage::entry& e) {
+	if (this->_run_client(e) < 0) {
 		return -1;
 	}
 
-	return this->_parse_client_parameter();
+	return this->_parse_client_parameter(e);
 }
 // }}}
 
@@ -123,7 +124,7 @@ int op_set::_parse_server_parameter() {
 		// option
 		n += util::next_word(p+n, q, sizeof(q));
 		while (q[0]) {
-			storage::option r;
+			storage::option r = storage::option_none;
 			if (storage::option_cast(q, r) < 0) {
 				log_debug("unknown option [%s] (cast failed)", q);
 				throw -1;
@@ -153,31 +154,77 @@ int op_set::_parse_server_parameter() {
 }
 
 int op_set::_run_server() {
-	// pre-proxy (proxy if node is not in request-partition)
-	cluster::proxy_request r_proxy = this->_cluster->pre_proxy_write(this);
+	// pre-proxy (proxy if node is not master in request-partition)
+	shared_queue_proxy_write q;
+	cluster::proxy_request r_proxy = this->_cluster->pre_proxy_write(this, q);
 	if (r_proxy == cluster::proxy_request_complete) {
+		if (q->is_success() == false) {
+			this->_send_result(result_server_error, "proxy error");
+		} else {
+			this->_send_result(q->get_result(), q->get_result_message().c_str());
+		}
 		return 0;
+	} else if (r_proxy == cluster::proxy_request_error_enqueue) {
+		return this->_send_result(result_server_error, "proxy failure");
 	} else if (r_proxy == cluster::proxy_request_error_partition) {
-		return this->_send_error(error_type_server, "no partition available");
+		return this->_send_result(result_server_error, "no partition available");
 	}
 
 	// storage i/o
 	storage::result r_storage;
 	if (this->_storage->set(this->_entry, r_storage) < 0) {
-		return this->_send_error(error_type_server, "i/o error");
+		return this->_send_result(result_server_error, "i/o error");
 	}
 	
 	// post-proxy (notify updates to slaves if we need)
 	
-	string s = storage::result_cast(r_storage);
-	return this->_connection->writeline(s.c_str());
+	return this->_send_result(static_cast<result>(r_storage));
 }
 
-int op_set::_run_client() {
+int op_set::_run_client(storage::entry& e) {
+	int request_len = e.key.size() + e.size + BUFSIZ;
+	char* request = _new_ char[request_len];
+	int offset = snprintf(request, request_len, "set %s %u %ld %llu", e.key.c_str(), e.flag, e.expire, e.size);
+	if (e.version > 0) {
+		offset += snprintf(request+offset, request_len-offset, " %llu", e.version);
+	}
+	if (e.option & storage::option_noreply) {
+		offset += snprintf(request+offset, request_len-offset, " %s", storage::option_cast(storage::option_noreply).c_str());
+	}
+	if (e.option & storage::option_sync) {
+		offset += snprintf(request+offset, request_len-offset, " %s", storage::option_cast(storage::option_sync).c_str());
+	}
+	offset += snprintf(request+offset, request_len-offset, line_delimiter);
+	memcpy(request+offset, e.data.get(), e.size);
+	offset += e.size;
+	offset += snprintf(request+offset, request_len-offset, line_delimiter);
+	if (this->_connection->write(request, offset) < 0) {
+		_delete_(request);
+		return -1;
+	}
+	_delete_(request);
+
 	return 0;
 }
 
-int op_set::_parse_client_parameter() {
+int op_set::_parse_client_parameter(storage::entry& e) {
+	if (e.option & storage::option_noreply) {
+		this->_result = result_none;
+		return 0;
+	}
+
+	char* p;
+	if (this->_connection->readline(&p) < 0) {
+		return -1;
+	}
+
+	if (this->_parse_response(p, this->_result, this->_result_message) < 0) {
+		_delete_(p);
+		return -1;
+	}
+
+	_delete_(p);
+
 	return 0;
 }
 // }}}

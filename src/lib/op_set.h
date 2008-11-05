@@ -26,20 +26,22 @@ protected:
 	cluster*					_cluster;
 	storage*					_storage;
 	storage::entry		_entry;
+	storage::result		_r_storage;
 
 public:
 	op_set(shared_connection c, cluster* cl, storage* st);
 	virtual ~op_set();
 
-	virtual int run_client();
+	virtual int run_client(storage::entry& e);
 
-	virtual storage::entry get_entry() { return this->_entry; };
+	storage* get_storage() { return this->_storage; };
+	storage::entry& get_entry() { return this->_entry; };
 
 protected:
 	virtual int _parse_server_parameter();
 	virtual int _run_server();
-	virtual int _run_client();
-	virtual int _parse_client_parameter();
+	virtual int _run_client(storage::entry& e);
+	virtual int _parse_client_parameter(storage::entry& e);
 };
 
 }	// namespace flare

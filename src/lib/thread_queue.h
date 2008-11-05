@@ -32,11 +32,11 @@ typedef shared_ptr<thread_queue> shared_thread_queue;
 class thread_queue {
 protected:
 	string							_ident;
-
 	bool								_sync;
 	pthread_mutex_t			_mutex_sync;
 	pthread_cond_t			_cond_sync;
 	int									_sync_ref_count;
+	bool								_success;
 
 public:
 	thread_queue();
@@ -50,6 +50,7 @@ public:
 	int sync_unref();
 
 	virtual string get_ident() { return this->_ident; };
+	bool is_success() { return this->_success; };
 };
 
 }	// namespace flare

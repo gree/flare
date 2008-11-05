@@ -46,7 +46,7 @@ int op_error::_parse_server_parameter() {
 }
 
 int op_error::_run_server() {
-	this->_send_error();
+	this->_send_result(result_error);
 
 	return 0;
 }

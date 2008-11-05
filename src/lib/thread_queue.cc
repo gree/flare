@@ -28,7 +28,8 @@ thread_queue::thread_queue():
 thread_queue::thread_queue(string ident):
 		_ident(ident),
 		_sync(false),
-		_sync_ref_count(0) {
+		_sync_ref_count(0),
+		_success(false) {
 }
 
 /**
@@ -43,6 +44,8 @@ thread_queue::~thread_queue() {
 
 // {{{ public methods
 int thread_queue::run(shared_connection c) {
+	this->_success = true;
+
 	return 0;
 }
 

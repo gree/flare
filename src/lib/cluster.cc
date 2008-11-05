@@ -9,9 +9,11 @@
  */
 #include "cluster.h"
 #include "handler_monitor.h"
+#include "handler_proxy.h"
 #include "op_node_add.h"
 #include "op_set.h"
 #include "queue_node_sync.h"
+#include "queue_proxy_write.h"
 #include "queue_update_monitor_option.h"
 
 namespace gree {
@@ -33,7 +35,8 @@ cluster::cluster(thread_pool* tp, string data_dir, string server_name, int serve
 		_monitor_interval(0),
 		_thread_type(default_thread_type),
 		_index_server_name(""),
-		_index_server_port(0) {
+		_index_server_port(0),
+		_proxy_concurrency(0) {
 	this->_node_key = this->to_node_key(server_name, server_port);
 	pthread_mutex_init(&this->_mutex_serialization, NULL);
 	pthread_rwlock_init(&this->_mutex_node_map, NULL);
@@ -760,7 +763,7 @@ int cluster::set_monitor_interval(int monitor_interval) {
 /**
  *	[node] pre proxy for writing ops (set, add, replace, append, prepend, cas, incr, decr)
  */
-cluster::proxy_request cluster::pre_proxy_write(op_set* op) {
+cluster::proxy_request cluster::pre_proxy_write(op_set* op, shared_queue_proxy_write& q_result) {
 	storage::entry e = op->get_entry();
 
 	partition p;
@@ -785,12 +788,34 @@ cluster::proxy_request cluster::pre_proxy_write(op_set* op) {
 	}
 
 	// proxy request to master
+	shared_queue_proxy_write q(new queue_proxy_write(this, op->get_storage(), e, op->get_ident()));
+	if (this->_enqueue(q, p.master.node_key, e.get_key_hash(), true) < 0) {
+		return proxy_request_error_enqueue;
+	}
+	q->sync();
+	q_result = q;
 	
 	return proxy_request_complete;
 }
 // }}}
 
 // {{{ protected methods
+int cluster::_enqueue(shared_thread_queue q, string node_key, int key_hash, bool sync) {
+	log_debug("enqueue (ident=%s, node_key=%s, key_hash=%d)", q->get_ident().c_str(), node_key.c_str(), key_hash);
+
+	shared_thread t;
+	if (this->_get_proxy_thread(node_key, key_hash, t) < 0) {
+		return -1;
+	}
+
+	t->enqueue(q);
+	if (sync) {
+		q->sync_ref();
+	}
+
+	return 0;
+}
+
 /**
  *	broadcast thread_queue to all node servers
  *	
@@ -1198,6 +1223,44 @@ string cluster::_get_partition_key(string key) {
 	log_debug("found partition key (key=%s, partition_key=%s)", key.c_str(), s.c_str());
 
 	return s;
+}
+
+int cluster::_get_proxy_thread(string node_key, int key_hash, shared_thread& t) {
+	int thread_type = 0;
+	pthread_rwlock_rdlock(&this->_mutex_node_map);
+	if (this->_node_map.count(node_key) == 0) {
+		pthread_rwlock_unlock(&this->_mutex_node_map);
+		log_warning("no such node (node_key=%s)", node_key.c_str());
+		return -1;
+	}
+	thread_type = this->_node_map[node_key].node_thread_type;
+	pthread_rwlock_unlock(&this->_mutex_node_map);
+
+	thread_pool::local_map m = this->_thread_pool->get_active(thread_type);
+	if (static_cast<int>(m.size()) < this->_proxy_concurrency) {
+		int i;
+		for (i = 0; i < this->_proxy_concurrency - static_cast<int>(m.size()); i++) {
+			shared_thread tmp = this->_thread_pool->get(thread_type);
+			string node_server_name;
+			int node_server_port = 0;
+			this->from_node_key(node_key, node_server_name, node_server_port);
+			handler_proxy* h = _new_ handler_proxy(tmp, this, node_server_name, node_server_port);
+			tmp->trigger(h, true, false);
+		}
+		m = this->_thread_pool->get_active(thread_type);
+	}
+
+	int index = key_hash % m.size();
+	int i = 0;
+	for (thread_pool::local_map::iterator it = m.begin(); it != m.end(); it++) {
+		if (i == index) {
+			t = it->second;
+			return 0;
+		}
+		i++;
+	}
+
+	return -1;
 }
 // }}}
 

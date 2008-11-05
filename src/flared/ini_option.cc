@@ -237,11 +237,6 @@ int ini_option::reload() {
 			this->_max_connection = opt_var_map["max-connection"].as<int>();
 		}
 
-		if (opt_var_map.count("proxy-concurrency")) {
-			log_info("  proxy_concurrency: %d -> %d", this->_proxy_concurrency, opt_var_map["proxy-concurrency"].as<int>());
-			this->_proxy_concurrency = opt_var_map["proxy-concurrency"].as<int>();
-		}
-
 		if (opt_var_map.count("thread-pool-size")) {
 			log_info("  thread_pool_size:  %d -> %d", this->_thread_pool_size, opt_var_map["thread-pool-size"].as<int>());
 			this->_thread_pool_size = opt_var_map["thread-pool-size"].as<int>();
@@ -285,7 +280,7 @@ int ini_option::_setup_config_option(program_options::options_description& optio
 		("log-facility",			program_options::value<string>(), 	"log facility (dynamic)")
 		("max-connection",		program_options::value<int>(),			"max concurrent connections to accept (dynamic)")
 		("mutex-slot",				program_options::value<int>(),			"mutex slot size for storage I/O")
-		("proxy-concurrency",	program_options::value<int>(),			"proxy request concurrency for each node (dynamic)")
+		("proxy-concurrency",	program_options::value<int>(),			"proxy request concurrency for each node")
 		("server-name",				program_options::value<string>(),		"my server name")
 		("server-port",				program_options::value<int>(),			"my server port")
 		("storage-type",			program_options::value<string>(),		"storage type (tch:tokyo cabinet hash database)")

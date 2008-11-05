@@ -102,7 +102,7 @@ int op_node_add::_parse_server_parameter() {
 
 int op_node_add::_run_server() {
 	if (this->_cluster->add_node(this->_node_server_name, this->_node_server_port) < 0) {
-		this->_send_error(error_type_server, "failed to add node");
+		this->_send_result(result_server_error, "failed to add node");
 		return -1;
 	}
 
@@ -116,7 +116,7 @@ int op_node_add::_run_server() {
 	}
 	this->_connection->write(s.str().c_str(), s.str().size());
 
-	return this->_send_end();
+	return this->_send_result(result_end);
 }
 
 int op_node_add::_run_client() {

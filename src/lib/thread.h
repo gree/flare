@@ -79,6 +79,8 @@ private:
 	bool									_shutdown;
 	shutdown_request			_shutdown_request;
 
+	pthread_mutex_t				_mutex_running;
+	pthread_cond_t				_cond_running;
 	bool									_running;
 
 	thread_handler*				_thread_handler;
@@ -94,7 +96,7 @@ public:
 
 	int startup(weak_thread myself);
 	int setup(int type, uint32_t id);
-	int trigger(thread_handler* th, bool is_delete = true);
+	int trigger(thread_handler* th, bool request_delete = true, bool async = true);
 	int wait();
 	int run();
 	int clean(bool& is_pool);

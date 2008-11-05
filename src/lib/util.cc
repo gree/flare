@@ -126,7 +126,7 @@ uint32_t util::next_word(const char* src, char* dst, uint32_t dst_len) {
 	char *q = dst;
 
 	// sync w/ memcached behavior (cannot use isspace() here because memcached does not recognize '\t' and other space chars as ws)
-	while (*p && *p == ' ') {
+	while (*p == ' ') {
 		p++;
 	}
 	while (*p && *p != ' ' && *p != '\n' && static_cast<uint32_t>(p-src) < dst_len) {
@@ -145,7 +145,7 @@ uint32_t util::next_digit(const char* src, char* dst, uint32_t dst_len) {
 	char *q = dst;
 
 	// sync w/ memcached behavior (cannot use isspace() here because memcached does not recognize '\t' and other space chars as ws)
-	while (*p && *p == ' ') {
+	while (*p == ' ') {
 		p++;
 	}
 	while (*p && (isdigit(*p) || *p == '-') && *p != '\n' && static_cast<uint32_t>(p-src) < dst_len) {

@@ -32,12 +32,15 @@ public:
 	static const int connect_retry_limit = 8;
 	static const int connect_retry_wait = 500*1000;		// usec
 	static const int read_timeout = 10*60*1000;				// msec
+	static const int write_retry_limit = 8;
+	static const int write_retry_wait = 500*1000;			// usec
 
 	connection();
 	connection(int sock, struct sockaddr_in addr);
 	virtual ~connection();
 
 	int open(string host, int port);
+	int open() { return this->open(this->_host, this->_port); };
 	int read(char** p);
 	int readline(char** p);
 	int readsize(int expect_len, char** p);

@@ -65,7 +65,7 @@ int op_stats_node::_run_server() {
 		this->_send_stats(singleton<flared>::instance().get_thread_pool());
 		break;
 	}
-	this->_send_end();
+	this->_send_result(result_end);
 
 	return 0;
 }

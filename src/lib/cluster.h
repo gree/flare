@@ -34,6 +34,9 @@ namespace flare {
 
 typedef class op_set op_set;
 
+typedef class queue_proxy_write queue_proxy_write;
+typedef shared_ptr<queue_proxy_write> shared_queue_proxy_write;
+
 /**
  *	cluster class
  */
@@ -57,7 +60,8 @@ public:
 	};
 
 	enum							proxy_request {
-		proxy_request_error_partition = -1,
+		proxy_request_error_partition = -2,
+		proxy_request_error_enqueue = -1,
 		proxy_request_continue = 1,
 		proxy_request_complete,
 	};
@@ -125,6 +129,7 @@ protected:
 	// [node]
 	string								_index_server_name;
 	int										_index_server_port;
+	int										_proxy_concurrency;
 
 public:
 	cluster(thread_pool* tp, string data_dir, string server_name, int server_port);
@@ -141,7 +146,7 @@ public:
 	int set_node_state(string node_server_name, int node_server_port, state node_state);
 	int reconstruct_node(vector<node> v);
 
-	proxy_request pre_proxy_write(op_set* op);
+	proxy_request pre_proxy_write(op_set* op, shared_queue_proxy_write& q);
 
 	inline node get_node(string node_key) {
 		node n;
@@ -163,6 +168,7 @@ public:
 
 	int set_monitor_threshold(int monitor_threshold);
 	int set_monitor_interval(int monitor_interval);
+	int set_proxy_concurrency(int proxy_concurrency) { this->_proxy_concurrency = proxy_concurrency; return 0; };
 	string get_server_name() { return this->_server_name; };
 	int get_server_port() { return this->_server_port; };
 	string get_index_server_name() { return this->_index_server_name; };
@@ -238,6 +244,7 @@ public:
 	}
 
 protected:
+	int _enqueue(shared_thread_queue q, string node_key, int key_hash, bool sync = false);
 	int _broadcast(shared_thread_queue q, bool sync = false);
 	int _save();
 	int _load();
@@ -247,6 +254,7 @@ protected:
 	int _check_node_partition_for_new(int node_partition, bool& preparing);
 	int _determine_partition(storage::entry& e, partition& p);
 	string _get_partition_key(string key);
+	int _get_proxy_thread(string node_key, int key_hash, shared_thread& t);
 };
 
 }	// namespace flare

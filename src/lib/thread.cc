@@ -91,6 +91,8 @@ thread::thread(thread_pool* t):
 	pthread_cond_init(&this->_cond_shutdown, NULL);
 	pthread_mutex_init(&this->_mutex_queue, NULL);
 	pthread_cond_init(&this->_cond_queue, NULL);
+	pthread_mutex_init(&this->_mutex_running, NULL);
+	pthread_cond_init(&this->_cond_running, NULL);
 }
 
 /**
@@ -181,12 +183,12 @@ int thread::wait() {
  *
  *	(should be called from parent thread)
  */
-int thread::trigger(thread_handler* th, bool is_delete) {
+int thread::trigger(thread_handler* th, bool request_delete, bool async) {
 	log_debug("sending trigger signal (thread_id=%u)", this->_thread_id);
 
 	if (th != NULL) {
 		this->_thread_handler = th;
-		this->_is_delete_thread_handler = is_delete;
+		this->_is_delete_thread_handler = request_delete;
 	}
 	
 	pthread_mutex_lock(&this->_mutex_trigger);
@@ -195,6 +197,14 @@ int thread::trigger(thread_handler* th, bool is_delete) {
 	pthread_mutex_unlock(&this->_mutex_trigger);
 
 	pthread_cond_signal(&this->_cond_trigger);
+
+	if (async == false) {
+		pthread_mutex_lock(&this->_mutex_running);
+		if (this->_running == false) {
+			pthread_cond_wait(&this->_cond_running, &this->_mutex_running);
+		}
+		pthread_mutex_unlock(&this->_mutex_running);
+	}
 
 	return 0;
 }
@@ -210,7 +220,10 @@ int thread::run() {
 		return -1;
 	}
 
+	pthread_mutex_lock(&this->_mutex_running);
 	this->_running = true;
+	pthread_mutex_unlock(&this->_mutex_running);
+	pthread_cond_signal(&this->_cond_running);
 	log_debug("setting running flag=%d", this->_running);
 
 	this->_thread_handler->run();

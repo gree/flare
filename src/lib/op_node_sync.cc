@@ -75,7 +75,7 @@ int op_node_sync::_run_server() {
 		char* p;
 		if (this->_connection->readline(&p) < 0) {
 			log_err("something is going wrong while node sync request", 0);
-			this->_send_error(error_type_client, "format error");
+			this->_send_result(result_client_error, "format error");
 			return -1;
 		}
 
@@ -86,7 +86,7 @@ int op_node_sync::_run_server() {
 
 		cluster::node n;
 		if (n.parse(p) < 0) {
-			this->_send_error(error_type_client, "format error");
+			this->_send_result(result_client_error, "format error");
 			_delete_(p);
 			return -1;
 		}
@@ -98,11 +98,11 @@ int op_node_sync::_run_server() {
 	}
 
 	if (this->_cluster->reconstruct_node(v) < 0) {
-		this->_send_error(error_type_server, "node sync error");
+		this->_send_result(result_server_error, "node sync error");
 		return -1;
 	}
 
-	return this->_send_ok();
+	return this->_send_result(result_ok);
 }
 
 int op_node_sync::_run_client(vector<cluster::node>& v) {
@@ -120,7 +120,7 @@ int op_node_sync::_run_client(vector<cluster::node>& v) {
 	}
 	this->_connection->write(s.str().c_str(), s.str().size());
 
-	return this->_send_end();
+	return this->_send_result(result_end);
 }
 
 int op_node_sync::_parse_client_parameter() {

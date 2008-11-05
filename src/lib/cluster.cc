@@ -690,21 +690,24 @@ int cluster::reconstruct_node(vector<node> v) {
 		string node_key = this->to_node_key(it->node_server_name, it->node_server_port);
 		log_debug("node_key: %s%s", node_key.c_str(), node_key == this->_node_key ? " (myself)" : "");
 
-		if (this->_node_map.count(node_key) == 0) {
-			log_debug("-> new node", 0);
-		} else {
-			log_debug("-> existing node", 0);
-			if (node_key == this->_node_key) {
-				// myself
-				if (it->node_role != this->_node_map[node_key].node_role) {
-					log_notice("update: node_role (%d -> %d)", it->node_role, this->_node_map[node_key].node_role);
-				}
+		if (this->_type == type_node) {
+			if (this->_node_map.count(node_key) == 0) {
+				// in this case, logically we do not have to handle anything
+				// - myself -> should be role=proxy
+				// - others -> this node does not have to care about anything
+				log_debug("-> new node", 0);
+			} else {
+				log_debug("-> existing node", 0);
 				if (it->node_state != this->_node_map[node_key].node_state) {
 					log_notice("update: node_state (%d -> %d)", it->node_state, this->_node_map[node_key].node_state);
+				}
+				if (it->node_role != this->_node_map[node_key].node_role) {
+					log_notice("update: node_role (%d -> %d)", it->node_role, this->_node_map[node_key].node_role);
 				}
 				if (it->node_partition != this->_node_map[node_key].node_partition) {
 					log_notice("update: node_partition (%d -> %d)", it->node_partition, this->_node_map[node_key].node_partition);
 				}
+
 				if (it->node_balance != this->_node_map[node_key].node_balance) {
 					log_notice("update: node_balance (%d -> %d)", it->node_balance, this->_node_map[node_key].node_balance);
 				}
@@ -712,8 +715,8 @@ int cluster::reconstruct_node(vector<node> v) {
 					// this should not happen
 					log_warning("update: node_thread_type (%d -> %d)", it->node_thread_type, this->_node_map[node_key].node_thread_type);
 				}
+				this->_node_map.erase(node_key);
 			}
-			this->_node_map.erase(node_key);
 		}
 		nm[node_key] = *it;
 	}
@@ -789,7 +792,9 @@ cluster::proxy_request cluster::pre_proxy_write(op_set* op, shared_queue_proxy_w
 
 	// proxy request to master
 	bool sync = (e.option & storage::option_noreply) ? false : true;
-	shared_queue_proxy_write q(new queue_proxy_write(this, op->get_storage(), e, op->get_ident()));
+	vector<string> proxy = op->get_proxy();
+	proxy.push_back(this->_node_key);
+	shared_queue_proxy_write q(new queue_proxy_write(this, op->get_storage(), proxy, e, op->get_ident()));
 	if (this->_enqueue(q, p.master.node_key, e.get_key_hash_value(storage::hash_algorithm_bitshift), sync) < 0) {
 		return proxy_request_error_enqueue;
 	}

@@ -152,6 +152,17 @@ int op::_send_request(const char* request) {
 	log_info("sending request [%s] (host=%s, port=%d)", request, this->_connection->get_host().c_str(), this->_connection->get_port());
 	return this->_connection->writeline(request);
 }
+
+string op::_get_proxy_ident() {
+	if (this->_proxy.size() == 0) {
+		return "";
+	}
+	string proxy_ident = "<";
+	proxy_ident += util::vector_join<string>(this->_proxy, ",");
+	proxy_ident += ">";
+
+	return proxy_ident;
+}
 // }}}
 
 // {{{ private methods

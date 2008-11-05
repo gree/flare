@@ -63,7 +63,9 @@ public:
 	virtual int run_server();
 	virtual int run_client();
 
+	vector<string> get_proxy() { return this->_proxy; };
 	int set_proxy(string proxy);
+	int set_proxy(vector<string> proxy) { this->_proxy = proxy; return 0; };
 	int set_thread(shared_thread t) { this->_thread = t; return 0; };
 	string get_ident() { return this->_ident; };
 	int is_proxy_request() { return this->_proxy_request; };
@@ -141,6 +143,8 @@ protected:
 
 	int _send_result(result r, const char* message = NULL);
 	int _send_request(const char* request);
+
+	string _get_proxy_ident();
 };
 
 }	// namespace flare

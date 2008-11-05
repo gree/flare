@@ -187,9 +187,10 @@ int op_set::_run_server() {
 }
 
 int op_set::_run_client(storage::entry& e) {
-	int request_len = e.key.size() + e.size + BUFSIZ;
+	string proxy_ident = this->_get_proxy_ident();
+	int request_len = proxy_ident.size() + e.key.size() + e.size + BUFSIZ;
 	char* request = _new_ char[request_len];
-	int offset = snprintf(request, request_len, "set %s %u %ld %llu", e.key.c_str(), e.flag, e.expire, e.size);
+	int offset = snprintf(request, request_len, "%sset %s %u %ld %llu", proxy_ident.c_str(), e.key.c_str(), e.flag, e.expire, e.size);
 	if (e.version > 0) {
 		offset += snprintf(request+offset, request_len-offset, " %llu", e.version);
 	}

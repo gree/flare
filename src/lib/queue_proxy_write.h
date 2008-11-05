@@ -29,6 +29,7 @@ class queue_proxy_write : public thread_queue {
 protected:
 	cluster*								_cluster;
 	storage*								_storage;
+	vector<string>					_proxy;
 	storage::entry					_entry;
 	string									_op_ident;
 	op::result							_result;
@@ -37,7 +38,7 @@ protected:
 public:
 	static const int max_retry = 4;
 
-	queue_proxy_write(cluster* cl, storage* st, storage::entry entry, string op_ident);
+	queue_proxy_write(cluster* cl, storage* st, vector<string> proxy, storage::entry entry, string op_ident);
 	virtual ~queue_proxy_write();
 
 	virtual int run(shared_connection c);

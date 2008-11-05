@@ -17,10 +17,11 @@ namespace flare {
 /**
  *	ctor for queue_proxy_write
  */
-queue_proxy_write::queue_proxy_write(cluster* cl, storage* st, storage::entry entry, string op_ident):
+queue_proxy_write::queue_proxy_write(cluster* cl, storage* st, vector<string> proxy, storage::entry entry, string op_ident):
 		thread_queue("proxy_write"),
 		_cluster(cl),
 		_storage(st),
+		_proxy(proxy),
 		_entry(entry),
 		_op_ident(op_ident),
 		_result(op::result_none),
@@ -45,6 +46,7 @@ int queue_proxy_write::run(shared_connection c) {
 	if (p == NULL) {
 		return -1;
 	}
+	p->set_proxy(this->_proxy);
 
 	int retry = queue_proxy_write::max_retry;
 	while (retry > 0) {

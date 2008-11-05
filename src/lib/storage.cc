@@ -116,7 +116,7 @@ int storage::_unserialize_header(const uint8_t* data, int data_len, entry& e) {
 	return offset;
 }
 
-inline int storage::_set_data_version_cache(string key, uint64_t version) {
+int storage::_set_data_version_cache(string key, uint64_t version) {
 	uint8_t tmp[sizeof(uint64_t) + sizeof(time_t)];
 	uint64_t* p;
 	time_t* q;

@@ -35,9 +35,15 @@ handler_alarm::~handler_alarm() {
  *	run thread proc
  */
 int handler_alarm::run() {
+	this->_thread->set_state("wait");
+	this->_thread->set_op("");
+
 	for (;;) {
-		this->_thread->set_state("wait");
-		this->_thread->set_op("");
+
+		if (this->_thread->is_shutdown_request()) {
+			log_info("thread shutdown request -> breaking loop", 0);
+			break;
+		}
 
 		stats_object->update_timestamp();
 

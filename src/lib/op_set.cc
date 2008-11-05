@@ -158,12 +158,14 @@ int op_set::_run_server() {
 	shared_queue_proxy_write q;
 	cluster::proxy_request r_proxy = this->_cluster->pre_proxy_write(this, q);
 	if (r_proxy == cluster::proxy_request_complete) {
-		if (q->is_success() == false) {
-			this->_send_result(result_server_error, "proxy error");
+		if (this->_entry.option & storage::option_noreply) {
+			// we should not access variable "q"
+			return 0;
+		} else if (q->is_success() == false) {
+			return this->_send_result(result_server_error, "proxy error");
 		} else {
-			this->_send_result(q->get_result(), q->get_result_message().c_str());
+			return this->_send_result(q->get_result(), q->get_result_message().c_str());
 		}
-		return 0;
 	} else if (r_proxy == cluster::proxy_request_error_enqueue) {
 		return this->_send_result(result_server_error, "proxy failure");
 	} else if (r_proxy == cluster::proxy_request_error_partition) {

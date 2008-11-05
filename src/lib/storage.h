@@ -53,9 +53,13 @@ public:
 		type_tch,
 	};
 
+	enum									hash_algorithm {
+		hash_algorithm_simple = 0,
+		hash_algorithm_bitshift,
+	};
+
 	typedef struct 				_entry {
 		string							key;
-		int									key_hash;
 		uint32_t						flag;
 		time_t							expire;
 		uint64_t						size;
@@ -65,29 +69,26 @@ public:
 
 		static const int		header_size = sizeof(uint32_t) + sizeof(time_t) + sizeof(uint64_t) + sizeof(uint64_t);
 
-		_entry() { flag = expire = size = version = option = 0; key_hash = -1; };
+		_entry() { flag = expire = size = version = option = 0; };
 
-		inline int get_key_hash() {
-			if (this->key_hash >= 0) {
-				return this->key_hash;
-			}
+		inline int get_key_hash_value(hash_algorithm h = hash_algorithm_simple) {
+			int r = 0;
 			const char* p = this->key.c_str();
-			this->key_hash = 0;
-			while (*p) {
-				this->key_hash += static_cast<int>(*p);
-				p++;
+			switch (h) {
+			case hash_algorithm_simple:
+				while (*p) {
+					r += static_cast<int>(*p);
+					p++;
+				}
+				break;
+			case hash_algorithm_bitshift:
+				r = 19790217;
+				while (*p) {
+					r = (r << 5) + (r << 2) + r + static_cast<int>(*p);
+					p++;
+				}
 			}
-			return this->key_hash;
-		}
-
-		static inline int get_key_hash(string key) {
-			const char* p = key.c_str();
-			int n = 0;
-			while (*p) {
-				n += static_cast<int>(*p);
-				p++;
-			}
-			return n;
+			return r;
 		}
 	} entry;
 

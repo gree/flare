@@ -86,7 +86,7 @@ int storage_tch::set(entry& e, result& r, int b) {
 	int mutex_index = 0;
 
 	if ((b & behavior_skip_lock) == 0) {
-		mutex_index = e.get_key_hash() % this->_mutex_slot_size;
+		mutex_index = e.get_key_hash_value(hash_algorithm_bitshift) % this->_mutex_slot_size;
 	}
 
 	uint8_t* p = NULL;
@@ -153,7 +153,7 @@ int storage_tch::get(entry& e, result& r, int b) {
 	bool remove_request = false;
 
 	if ((b & behavior_skip_lock) == 0) {
-		mutex_index = e.get_key_hash() % this->_mutex_slot_size;
+		mutex_index = e.get_key_hash_value(hash_algorithm_bitshift) % this->_mutex_slot_size;
 	}
 
 	try {
@@ -217,7 +217,7 @@ int storage_tch::remove(entry& e, result& r, int b) {
 	int mutex_index = 0;
 
 	if ((b & behavior_skip_lock) == 0) {
-		mutex_index = e.get_key_hash() % this->_mutex_slot_size;
+		mutex_index = e.get_key_hash_value(hash_algorithm_bitshift) % this->_mutex_slot_size;
 	}
 
 	try {

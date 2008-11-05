@@ -764,7 +764,7 @@ int cluster::set_monitor_interval(int monitor_interval) {
  *	[node] pre proxy for writing ops (set, add, replace, append, prepend, cas, incr, decr)
  */
 cluster::proxy_request cluster::pre_proxy_write(op_set* op, shared_queue_proxy_write& q_result) {
-	storage::entry e = op->get_entry();
+	storage::entry& e = op->get_entry();
 
 	partition p;
 	int n = this->_determine_partition(e, p);
@@ -788,12 +788,15 @@ cluster::proxy_request cluster::pre_proxy_write(op_set* op, shared_queue_proxy_w
 	}
 
 	// proxy request to master
+	bool sync = (e.option & storage::option_noreply) ? false : true;
 	shared_queue_proxy_write q(new queue_proxy_write(this, op->get_storage(), e, op->get_ident()));
-	if (this->_enqueue(q, p.master.node_key, e.get_key_hash(), true) < 0) {
+	if (this->_enqueue(q, p.master.node_key, e.get_key_hash_value(storage::hash_algorithm_bitshift), sync) < 0) {
 		return proxy_request_error_enqueue;
 	}
-	q->sync();
-	q_result = q;
+	if (sync) {
+		q->sync();
+		q_result = q;
+	}
 	
 	return proxy_request_complete;
 }
@@ -1190,12 +1193,11 @@ int cluster::_determine_partition(storage::entry& e, partition& p) {
 			throw -1;
 		}
 
-		string key = this->_get_partition_key(e.key);
-		n = storage::entry::get_key_hash(key) % this->_node_partition_map.size();
-		log_debug("determined partition (key=%s, n=%d)", key.c_str(), n);
+		n = e.get_key_hash_value() % this->_node_partition_map.size();
+		log_debug("determined partition (key=%s, n=%d)", e.key.c_str(), n);
 
 		if (this->_node_partition_map.count(n) == 0) {
-			log_err("have no partition map for this key (key=%s, n=%d, size=%d)", key.c_str(), n, this->_node_partition_map.size());
+			log_err("have no partition map for this key (key=%s, n=%d, size=%d)", e.key.c_str(), n, this->_node_partition_map.size());
 			throw -1;
 		}
 	} catch (int error) {

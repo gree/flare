@@ -35,6 +35,7 @@ libflare_a_SOURCES = \
 	op_parser_binary.h op_parser_binary.cc \
 	op_parser_text.h op_parser_text.cc \
 	op_ping.h op_ping.cc \
+	op_proxy_write.h op_proxy_write.cc \
 	op_quit.h op_quit.cc \
 	op_set.h op_set.cc \
 	op_stats.h op_stats.cc \

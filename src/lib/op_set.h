@@ -8,9 +8,7 @@
 #ifndef	__OP_SET_H__
 #define	__OP_SET_H__
 
-#include "op.h"
-#include "cluster.h"
-#include "storage.h"
+#include "op_proxy_write.h"
 
 using namespace std;
 using namespace boost;
@@ -21,19 +19,12 @@ namespace flare {
 /**
  *	opcode class (set)
  */
-class op_set : public op {
+class op_set : public op_proxy_write {
 protected:
-	cluster*					_cluster;
-	storage*					_storage;
-	storage::entry		_entry;
 
 public:
 	op_set(shared_connection c, cluster* cl, storage* st);
 	virtual ~op_set();
-
-	virtual int run_client(storage::entry& e);
-
-	storage::entry& get_entry() { return this->_entry; };
 
 protected:
 	virtual int _parse_server_parameter();

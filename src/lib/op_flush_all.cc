@@ -142,7 +142,6 @@ int op_flush_all::_parse_client_parameter(storage::option option) {
 		_delete_(p);
 		return -1;
 	}
-
 	_delete_(p);
 
 	return 0;

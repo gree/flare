@@ -18,9 +18,7 @@ namespace flare {
  *	ctor for op_set
  */
 op_set::op_set(shared_connection c, cluster* cl, storage* st):
-		op(c, "set"),
-		_cluster(cl),
-		_storage(st) {
+		op_proxy_write(c, "set", cl, st) {
 }
 
 /**
@@ -34,16 +32,6 @@ op_set::~op_set() {
 // }}}
 
 // {{{ public methods
-/**
- *	send client request
- */
-int op_set::run_client(storage::entry& e) {
-	if (this->_run_client(e) < 0) {
-		return -1;
-	}
-
-	return this->_parse_client_parameter(e);
-}
 // }}}
 
 // {{{ protected methods
@@ -105,6 +93,7 @@ int op_set::_run_server() {
 	if ((this->_entry.option & storage::option_noreply) == 0) {
 		return this->_send_result(static_cast<result>(r_storage));
 	}
+
 	return 0;
 }
 
@@ -150,7 +139,6 @@ int op_set::_parse_client_parameter(storage::entry& e) {
 		_delete_(p);
 		return -1;
 	}
-
 	_delete_(p);
 
 	return 0;

@@ -1,0 +1,49 @@
+/**
+ *	op_proxy_write.h
+ *
+ *	@author	Masaki Fujimoto <fujimoto@php.net>
+ *
+ *	$Id$
+ */
+#ifndef	__OP_PROXY_WRITE_H__
+#define	__OP_PROXY_WRITE_H__
+
+#include "op.h"
+#include "cluster.h"
+#include "storage.h"
+
+using namespace std;
+using namespace boost;
+
+namespace gree {
+namespace flare {
+
+/**
+ *	opcode class (proxy_write)
+ */
+class op_proxy_write : public op {
+protected:
+	cluster*					_cluster;
+	storage*					_storage;
+	storage::entry		_entry;
+
+public:
+	op_proxy_write(shared_connection c, string ident, cluster* cl, storage* st);
+	virtual ~op_proxy_write();
+
+	virtual int run_client(storage::entry& e);
+
+	storage::entry& get_entry() { return this->_entry; };
+
+protected:
+	virtual int _parse_server_parameter();
+	virtual int _run_server();
+	virtual int _run_client(storage::entry& e);
+	virtual int _parse_client_parameter(storage::entry& e);
+};
+
+}	// namespace flare
+}	// namespace gree
+
+#endif	// __OP_PROXY_WRITE_H__
+// vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

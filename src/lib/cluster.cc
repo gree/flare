@@ -11,7 +11,7 @@
 #include "handler_monitor.h"
 #include "handler_proxy.h"
 #include "op_node_add.h"
-#include "op_set.h"
+#include "op_proxy_write.h"
 #include "queue_node_sync.h"
 #include "queue_proxy_write.h"
 #include "queue_update_monitor_option.h"
@@ -764,7 +764,7 @@ int cluster::set_monitor_interval(int monitor_interval) {
 /**
  *	[node] pre proxy for writing ops (set, add, replace, append, prepend, cas, incr, decr)
  */
-cluster::proxy_request cluster::pre_proxy_write(op_set* op, shared_queue_proxy_write& q_result) {
+cluster::proxy_request cluster::pre_proxy_write(op_proxy_write* op, shared_queue_proxy_write& q_result) {
 	storage::entry& e = op->get_entry();
 
 	partition p;

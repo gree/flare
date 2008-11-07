@@ -8,6 +8,7 @@
  *	$Id$
  */
 #include "queue_proxy_write.h"
+#include "op_proxy_write.h"
 #include "op_set.h"
 
 namespace gree {
@@ -42,7 +43,7 @@ queue_proxy_write::~queue_proxy_write() {
 int queue_proxy_write::run(shared_connection c) {
 	log_debug("proxy request (write) (host=%s, port=%d, op=%s, key=%s, version=%u)", c->get_host().c_str(), c->get_port(), this->_op_ident.c_str(), this->_entry.key.c_str(), this->_entry.version);
 
-	op_set* p = this->_get_op(this->_op_ident, c);
+	op_proxy_write* p = this->_get_op(this->_op_ident, c);
 	if (p == NULL) {
 		return -1;
 	}
@@ -74,7 +75,7 @@ int queue_proxy_write::run(shared_connection c) {
 // }}}
 
 // {{{ protected methods
-op_set* queue_proxy_write::_get_op(string op_ident, shared_connection c) {
+op_proxy_write* queue_proxy_write::_get_op(string op_ident, shared_connection c) {
 	if (op_ident == "set") {
 		return _new_ op_set(c, this->_cluster, this->_storage);
 	}

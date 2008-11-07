@@ -46,7 +46,7 @@ public:
 	string get_result_message() { return this->_result_message; };
 
 protected:
-	op_set* _get_op(string op_ident, shared_connection c);
+	op_proxy_write* _get_op(string op_ident, shared_connection c);
 };
 
 }	// namespace flare

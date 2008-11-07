@@ -32,7 +32,7 @@ using namespace boost;
 namespace gree {
 namespace flare {
 
-typedef class op_set op_set;
+typedef class op_proxy_write op_proxy_write;
 
 typedef class queue_proxy_write queue_proxy_write;
 typedef shared_ptr<queue_proxy_write> shared_queue_proxy_write;
@@ -149,7 +149,7 @@ public:
 
 	int set_storage(storage* st) { this->_storage = st; return 0; };
 
-	proxy_request pre_proxy_write(op_set* op, shared_queue_proxy_write& q);
+	proxy_request pre_proxy_write(op_proxy_write* op, shared_queue_proxy_write& q);
 
 	inline node get_node(string node_key) {
 		node n;

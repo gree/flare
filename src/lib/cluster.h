@@ -107,6 +107,7 @@ public:
 
 protected:
 	thread_pool*					_thread_pool;
+	storage*							_storage;
 	type									_type;
 	string								_data_dir;
 	pthread_mutex_t				_mutex_serialization;
@@ -145,6 +146,8 @@ public:
 	int set_node_role(string node_server_name, int node_server_port, role node_role, int node_balance, int node_partition);
 	int set_node_state(string node_server_name, int node_server_port, state node_state);
 	int reconstruct_node(vector<node> v);
+
+	int set_storage(storage* st) { this->_storage = st; return 0; };
 
 	proxy_request pre_proxy_write(op_set* op, shared_queue_proxy_write& q);
 
@@ -244,6 +247,8 @@ public:
 	}
 
 protected:
+	int _shift_node_state(string node_key, state old_state, state new_state);
+	int _shift_node_role(string node_key, role old_role, int old_partition, role new_role, int new_partition);
 	int _enqueue(shared_thread_queue q, string node_key, int key_hash, bool sync = false);
 	int _broadcast(shared_thread_queue q, bool sync = false);
 	int _save();

@@ -164,6 +164,7 @@ int flared::startup(int argc, char **argv) {
 	if (this->_storage->open() < 0) {
 		return -1;
 	}
+	this->_cluster->set_storage(this->_storage);
 
 	// creating alarm thread in advance
 	shared_thread th = this->_thread_pool->get(thread_pool::thread_type_alarm);

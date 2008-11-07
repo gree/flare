@@ -21,7 +21,8 @@ namespace flare {
  *	ctor for storage_tch
  */
 storage_tch::storage_tch(string data_dir, int mutex_slot_size):
-		storage(data_dir, mutex_slot_size) {
+		storage(data_dir, mutex_slot_size),
+		_iter_lock(0) {
 	this->_data_path = this->_data_dir + "/flare.hdb";
 
 	this->_db = tchdbnew();
@@ -97,14 +98,16 @@ int storage_tch::set(entry& e, result& r, int b) {
 
 		uint64_t version = this->_get_version(e.key);
 		if ((b & behavior_skip_version) == 0 && e.version != 0) {
-			if (e.version < version) {
-				log_info("specified version is older than current version -> skip setting (current=%u, specified=%u)", version, e.version);
+			if (e.version <= version) {
+				log_info("specified version is older than (or equal to) current version -> skip setting (current=%u, specified=%u)", version, e.version);
 				r = result_not_stored;
 				throw 0;
 			}
 		}
 
-		e.version = version+1;
+		if (e.version == 0) {
+			e.version = version+1;
+		}
 		p = _new_ uint8_t[storage::entry::header_size + e.size];
 		this->_serialize_header(e, p);
 		memcpy(p+storage::entry::header_size, e.data.get(), e.size);
@@ -237,6 +240,9 @@ int storage_tch::remove(entry& e, result& r, int b) {
 		uint8_t tmp_data;
 		int tmp_len = tchdbget3(this->_db, e.key.c_str(), e.key.size(), &tmp_data, 1);
 		if (tmp_len < 0) {
+			if (e.version != 0 && e.version > version) {
+				this->_set_data_version_cache(e.key, e.version);
+			}
 			r = result_not_found;
 			throw 0;
 		}
@@ -248,7 +254,8 @@ int storage_tch::remove(entry& e, result& r, int b) {
 			log_err("tchdbout() failed: %s (%d)", tchdberrmsg(ecode), ecode);
 			throw -1;
 		}
-		this->_set_data_version_cache(e.key, version+1);
+		e.version = version+1;
+		this->_set_data_version_cache(e.key, e.version);
 	} catch (int error) {
 		if ((b & behavior_skip_lock) == 0) {
 			pthread_rwlock_unlock(&this->_mutex_slot[mutex_index]);
@@ -258,6 +265,65 @@ int storage_tch::remove(entry& e, result& r, int b) {
 	if ((b & behavior_skip_lock) == 0) {
 		pthread_rwlock_unlock(&this->_mutex_slot[mutex_index]);
 	}
+
+	return 0;
+}
+
+int storage_tch::truncate(int b) {
+	log_info("truncating all data", 0);
+
+	int i;
+	if ((b & behavior_skip_lock) == 0) {
+		for (i = 0; i < this->_mutex_slot_size; i++) {
+			pthread_rwlock_wrlock(&this->_mutex_slot[i]);
+		}
+	}
+
+	int r = 0;
+	if (tchdbvanish(this->_db) == false) {
+			int ecode = tchdbecode(this->_db);
+			log_err("tchdbvanish() failed: %s (%d)", tchdberrmsg(ecode), ecode);
+			r = -1;
+	}
+
+	if ((b & behavior_skip_lock) == 0) {
+		for (i = 0; i < this->_mutex_slot_size; i++) {
+			pthread_rwlock_unlock(&this->_mutex_slot[i]);
+		}
+	}
+
+	return r;
+}
+
+int storage_tch::iter_begin() {
+	if (this->_iter_lock > 0) {
+		return -1;
+	}
+
+	if (tchdbiterinit(this->_db) == false) {
+		int ecode = tchdbecode(this->_db);
+		log_err("tchdbiterinit() failed: %s (%d)", tchdberrmsg(ecode), ecode);
+		return -1;
+	}
+
+	return 0;
+}
+
+int storage_tch::iter_next(string& key) {
+	int len = 0;
+	char* p = static_cast<char*>(tchdbiternext(this->_db, &len));
+	if (p == NULL) {
+		// end of iteration
+		return -1;
+	}
+	key = p;
+	free(p);
+
+	return 0;
+}
+
+int storage_tch::iter_end() {
+	this->_iter_lock = 0;
 
 	return 0;
 }

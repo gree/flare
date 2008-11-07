@@ -28,6 +28,7 @@ namespace flare {
  */
 cluster::cluster(thread_pool* tp, string data_dir, string server_name, int server_port):
 		_thread_pool(tp),
+		_storage(NULL),
 		_data_dir(data_dir),
 		_server_name(server_name),
 		_server_port(server_port),
@@ -122,7 +123,7 @@ int cluster::node::parse(const char* p) {
 		}
 		this->node_thread_type = lexical_cast<int>(q);
 	} catch (bad_lexical_cast e) {
-		log_warning("bad digit [%s]", e.what());
+		log_warning("invalid digit [%s]", e.what());
 		return -1;
 	}
 
@@ -699,21 +700,18 @@ int cluster::reconstruct_node(vector<node> v) {
 			} else {
 				log_debug("-> existing node", 0);
 				if (it->node_state != this->_node_map[node_key].node_state) {
-					log_notice("update: node_state (%d -> %d)", it->node_state, this->_node_map[node_key].node_state);
+					this->_shift_node_state(node_key, this->_node_map[node_key].node_state, it->node_state);
 				}
-				if (it->node_role != this->_node_map[node_key].node_role) {
-					log_notice("update: node_role (%d -> %d)", it->node_role, this->_node_map[node_key].node_role);
-				}
-				if (it->node_partition != this->_node_map[node_key].node_partition) {
-					log_notice("update: node_partition (%d -> %d)", it->node_partition, this->_node_map[node_key].node_partition);
+				if (it->node_role != this->_node_map[node_key].node_role || it->node_partition != this->_node_map[node_key].node_partition) {
+					this->_shift_node_role(node_key, this->_node_map[node_key].node_role, this->_node_map[node_key].node_partition, it->node_role, it->node_partition);
 				}
 
 				if (it->node_balance != this->_node_map[node_key].node_balance) {
-					log_notice("update: node_balance (%d -> %d)", it->node_balance, this->_node_map[node_key].node_balance);
+					log_notice("update: node_balance (%d -> %d)", this->_node_map[node_key].node_balance, it->node_balance);
 				}
 				if (it->node_thread_type != this->_node_map[node_key].node_thread_type) {
 					// this should not happen
-					log_warning("update: node_thread_type (%d -> %d)", it->node_thread_type, this->_node_map[node_key].node_thread_type);
+					log_err("update: node_thread_type (%d -> %d)", this->_node_map[node_key].node_thread_type, it->node_thread_type);
 				}
 				this->_node_map.erase(node_key);
 			}
@@ -794,7 +792,7 @@ cluster::proxy_request cluster::pre_proxy_write(op_set* op, shared_queue_proxy_w
 	bool sync = (e.option & storage::option_noreply) ? false : true;
 	vector<string> proxy = op->get_proxy();
 	proxy.push_back(this->_node_key);
-	shared_queue_proxy_write q(new queue_proxy_write(this, op->get_storage(), proxy, e, op->get_ident()));
+	shared_queue_proxy_write q(new queue_proxy_write(this, this->_storage, proxy, e, op->get_ident()));
 	if (this->_enqueue(q, p.master.node_key, e.get_key_hash_value(storage::hash_algorithm_bitshift), sync) < 0) {
 		return proxy_request_error_enqueue;
 	}
@@ -808,6 +806,48 @@ cluster::proxy_request cluster::pre_proxy_write(op_set* op, shared_queue_proxy_w
 // }}}
 
 // {{{ protected methods
+/**
+ *	[node] shift node state
+ *
+ *	assumes that node_map and node_partition_map is alreadby write locked
+ */
+int cluster::_shift_node_state(string node_key, state old_state, state new_state) {
+	log_notice("shifting node_state (node_key=%s, old_state=%d, new_state=%d)", node_key.c_str(), old_state, new_state);
+
+	if (node_key == this->_node_key) {
+		// nothing to do?
+	} else {
+		// TODO: queue failover if we need
+	}
+
+	return 0;
+}
+
+/**
+ *	[node] shift node role (and partition)
+ *
+ *	assumes that node_map and node_partition_map is alreadby write locked
+ */
+int cluster::_shift_node_role(string node_key, role old_role, int old_partition, role new_role, int new_partition) {
+	log_notice("shifting node_role (node_key=%s, old_role=%d, old_partition=%d, new_role=%d, new_partition=%d)", node_key.c_str(), old_role, old_partition, new_role, new_partition);
+
+	if (node_key != this->_node_key) {
+		// we do not have to care about other nodes (maybe?)
+		return 0;
+	}
+	if (new_role == role_proxy) {
+		// we do not have to care about anything in this case, too (maybe?)
+		return 0;
+	}
+
+	// proxy -> slave or master: requesting reconstruction
+	// we intentionally do not truncate current database here (for safe)
+	// if user *really* want to reconstruct database, they can use "flush_all" op
+	log_debug("creating reconstruction thread(s)... (type=%s)", cluster::role_cast(new_role).c_str());
+
+	return 0;
+}
+
 int cluster::_enqueue(shared_thread_queue q, string node_key, int key_hash, bool sync) {
 	log_debug("enqueue (ident=%s, node_key=%s, key_hash=%d)", q->get_ident().c_str(), node_key.c_str(), key_hash);
 

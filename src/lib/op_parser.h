@@ -9,7 +9,9 @@
 #define	__OP_PARSER_H__
 
 #include "op.h"
+#include "op_dump.h"
 #include "op_error.h"
+#include "op_flush_all.h"
 #include "op_kill.h"
 #include "op_node_add.h"
 #include "op_node_remove.h"

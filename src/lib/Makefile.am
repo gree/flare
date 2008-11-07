@@ -22,7 +22,9 @@ libflare_a_SOURCES = \
 	mm.h mm.cc \
 	net.h net.cc \
 	op.cc op.h \
+	op_dump.h op_dump.cc \
 	op_error.h op_error.cc \
+	op_flush_all.h op_flush_all.cc \
 	op_kill.h op_kill.cc \
 	op_node_add.h op_node_add.cc \
 	op_node_remove.h op_node_remove.cc \

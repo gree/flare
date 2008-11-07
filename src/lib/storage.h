@@ -58,6 +58,11 @@ public:
 		hash_algorithm_bitshift,
 	};
 
+	enum									parse_type {
+		parse_type_set,
+		parse_type_get,
+	};
+
 	typedef struct 				_entry {
 		string							key;
 		uint32_t						flag;
@@ -71,9 +76,8 @@ public:
 
 		_entry() { flag = expire = size = version = option = 0; };
 
-		inline int get_key_hash_value(hash_algorithm h = hash_algorithm_simple) {
+		inline int get_key_hash_value(const char* p, hash_algorithm h = hash_algorithm_simple) {
 			int r = 0;
-			const char* p = this->key.c_str();
 			switch (h) {
 			case hash_algorithm_simple:
 				while (*p) {
@@ -88,7 +92,93 @@ public:
 					p++;
 				}
 			}
+			if (r < 0) {
+				r *= -1;
+			}
 			return r;
+		}
+
+		inline int get_key_hash_value(hash_algorithm h = hash_algorithm_simple) {
+			return this->get_key_hash_value(this->key.c_str(), h);
+		}
+
+		int parse(const char* p, parse_type t) {
+			char q[BUFSIZ];
+			try {
+				int n = util::next_word(p, q, sizeof(q));
+				if (q[0] == '\0') {
+					log_debug("key not found", 0);
+					return -1;
+				}
+				this->key = q;
+				log_debug("storing key [%s]", this->key.c_str());
+
+				// flag
+				n += util::next_digit(p+n, q, sizeof(q));
+				if (q[0] == '\0') {
+					log_debug("no flag found", 0);
+					return -1;
+				}
+				this->flag = lexical_cast<uint32_t>(q);
+				log_debug("storing flag [%u]", this->flag);
+				
+				if (t == parse_type_set) {
+					// expire
+					n += util::next_digit(p+n, q, sizeof(q));
+					if (q[0] == '\0') {
+						log_debug("no expire found", 0);
+						return -1;
+					}
+					this->expire = util::realtime(lexical_cast<time_t>(q));
+					log_debug("storing expire [%ld]", this->expire);
+				}
+
+				// size
+				n += util::next_digit(p+n, q, sizeof(q));
+				if (q[0] == '\0') {
+					log_debug("no size found", 0);
+					return -1;
+				}
+				this->size = lexical_cast<uint64_t>(q);
+				log_debug("storing size [%u]", this->size);
+
+				// version (if we have)
+				n += util::next_digit(p+n, q, sizeof(q));
+				if (q[0]) {
+					this->version = lexical_cast<uint64_t>(q);
+					log_debug("storing version [%u]", this->version);
+				}
+
+				if (t == parse_type_get) {
+					// expire (if we have)
+					n += util::next_digit(p+n, q, sizeof(q));
+					if (q[0]) {
+						this->expire = util::realtime(lexical_cast<time_t>(q));
+						log_debug("storing expire [%ld]", this->expire);
+					}
+				}
+
+				if (t == parse_type_set) {
+					// option
+					n += util::next_word(p+n, q, sizeof(q));
+					while (q[0]) {
+						storage::option r = storage::option_none;
+						if (storage::option_cast(q, r) < 0) {
+							log_debug("unknown option [%s] (cast failed)", q);
+							return -1;
+						}
+						this->option |= r;
+						log_debug("storing option [%s -> %d]", q, r);
+
+						n += util::next_word(p+n, q, sizeof(q));
+					}
+				}
+			} catch (bad_lexical_cast e) {
+				log_debug("invalid digit [%s]", e.what());
+				return -1;
+			}
+
+			return 0;
 		}
 	} entry;
 
@@ -109,6 +199,10 @@ public:
 	virtual int set(entry& e, result& r, int b = 0) = 0;
 	virtual int get(entry& e, result& r, int b = 0) = 0;
 	virtual int remove(entry& e, result& r, int b = 0) = 0;
+	virtual int truncate(int b = 0) = 0;
+	virtual int iter_begin() = 0;
+	virtual int iter_next(string& key) = 0;
+	virtual int iter_end() = 0;
 
 	virtual type get_type() = 0;
 

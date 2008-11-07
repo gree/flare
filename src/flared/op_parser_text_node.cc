@@ -55,6 +55,10 @@ op* op_parser_text_node::_determine_op(const char* first, const char* buf, int& 
 		} else {
 			r = static_cast<op*>(_new_ op_error(this->_connection));
 		} 
+	} else if (strcmp(first, "dump") == 0) {
+		r = static_cast<op*>(_new_ op_dump(this->_connection, singleton<flared>::instance().get_cluster(), singleton<flared>::instance().get_storage()));
+	} else if (strcmp(first, "flush_all") == 0) {
+		r = static_cast<op*>(_new_ op_flush_all(this->_connection, singleton<flared>::instance().get_storage()));
 	} else if (strcmp(first, "kill") == 0) {
 		r = static_cast<op*>(_new_ op_kill(this->_connection, singleton<flared>::instance().get_thread_pool())); 
 	} else if (strcmp(first, "quit") == 0) {

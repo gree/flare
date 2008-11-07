@@ -37,6 +37,7 @@ protected:
 
 	string						_data_path;
 	TCHDB*						_db;
+	time_t						_iter_lock;
 
 public:
 	storage_tch(string data_dir, int mutex_slot_size);
@@ -47,6 +48,10 @@ public:
 	virtual int set(entry& e, result& r, int b = 0);
 	virtual int get(entry& e, result& r, int b = 0);
 	virtual int remove(entry& e, result& r, int b = 0);
+	virtual int truncate(int b = 0);
+	virtual int iter_begin();
+	virtual int iter_next(string& key);
+	virtual int iter_end();
 
 	virtual type get_type() { return this->_type; };
 

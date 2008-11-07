@@ -56,87 +56,9 @@ int op_set::_parse_server_parameter() {
 		return -1;
 	}
 
-	char q[BUFSIZ];
-	try {
-		// key
-		int n = util::next_word(p, q, sizeof(q));
-		if (q[0] == '\0') {
-			log_debug("no key found", 0);
-			throw -1;
-		}
-		this->_entry.key = q;
-		log_debug("storing key [%s]", this->_entry.key.c_str());
-
-		// flag
-		n += util::next_digit(p+n, q, sizeof(q));
-		if (q[0] == '\0') {
-			log_debug("no flag found", 0);
-			throw -1;
-		}
-		try {
-			this->_entry.flag = lexical_cast<uint32_t>(q);
-			log_debug("storing flag [%u]", this->_entry.flag);
-		} catch (bad_lexical_cast e) {
-			log_debug("invalid flag (flag=%s)", q);
-			throw -1;
-		}
-		
-		// expire
-		n += util::next_digit(p+n, q, sizeof(q));
-		if (q[0] == '\0') {
-			log_debug("no expire found", 0);
-			throw -1;
-		}
-		try {
-			this->_entry.expire = util::realtime(lexical_cast<time_t>(q));
-			log_debug("storing expire [%u]", this->_entry.expire);
-		} catch (bad_lexical_cast e) {
-			log_debug("invalid expire (expire=%s)", q);
-			throw -1;
-		}
-
-		// size
-		n += util::next_digit(p+n, q, sizeof(q));
-		if (q[0] == '\0') {
-			log_debug("no size found", 0);
-			throw -1;
-		}
-		try {
-			this->_entry.size = lexical_cast<uint64_t>(q);
-			log_debug("storing size [%u]", this->_entry.size);
-		} catch (bad_lexical_cast e) {
-			log_debug("invalid size (size=%s)", q);
-			throw -1;
-		}
-
-		// version (if we have)
-		n += util::next_digit(p+n, q, sizeof(q));
-		if (q[0]) {
-			try {
-				this->_entry.version = lexical_cast<uint64_t>(q);
-				log_debug("storing version [%u]", this->_entry.version);
-			} catch (bad_lexical_cast e) {
-				log_debug("invalid version (version=%s)", q);
-				throw -1;
-			}
-		}
-
-		// option
-		n += util::next_word(p+n, q, sizeof(q));
-		while (q[0]) {
-			storage::option r = storage::option_none;
-			if (storage::option_cast(q, r) < 0) {
-				log_debug("unknown option [%s] (cast failed)", q);
-				throw -1;
-			}
-			this->_entry.option |= r;
-			log_debug("storing option [%s -> %d]", q, r);
-
-			n += util::next_word(p+n, q, sizeof(q));
-		}
-	} catch (int e) {
+	if (this->_entry.parse(p, storage::parse_type_set) < 0) {
 		_delete_(p);
-		return e;
+		return -1;
 	}
 	_delete_(p);
 

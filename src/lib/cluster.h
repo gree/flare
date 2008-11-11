@@ -156,7 +156,7 @@ public:
 
 	int add_node(string node_server_name, int node_server_port);
 	int down_node(string node_server_name, int node_server_port);
-	int up_node(string node_server_name, int node_server_port);
+	int up_node(string node_server_name, int node_server_port, bool force = true);
 	int remove_node(string node_server_name, int node_server_port);
 	int set_node_role(string node_server_name, int node_server_port, role node_role, int node_balance, int node_partition);
 	int set_node_state(string node_server_name, int node_server_port, state node_state);
@@ -164,6 +164,8 @@ public:
 
 	int set_storage(storage* st) { this->_storage = st; return 0; };
 
+	int activate_node();
+	int deactivate_node();
 	proxy_request pre_proxy_write(op_proxy_write* op, shared_queue_proxy_write& q);
 
 	inline node get_node(string node_key) {

@@ -12,6 +12,8 @@
 #include "handler_proxy.h"
 #include "handler_reconstruction.h"
 #include "op_node_add.h"
+#include "op_node_role.h"
+#include "op_node_state.h"
 #include "op_proxy_write.h"
 #include "queue_node_sync.h"
 #include "queue_proxy_write.h"
@@ -339,6 +341,7 @@ int cluster::down_node(string node_server_name, int node_server_port) {
 					log_debug("  -> node_key: %s", it->node_key.c_str());
 					this->_node_map[it->node_key].node_role = role_proxy;
 					this->_node_map[it->node_key].node_state = state_active;
+					this->_node_map[it->node_key].node_balance = 0;
 					this->_node_map[it->node_key].node_partition = -1;
 				}
 			}
@@ -372,7 +375,7 @@ int cluster::down_node(string node_server_name, int node_server_port) {
 /**
  *	[index] node up event handler
  */
-int cluster::up_node(string node_server_name, int node_server_port) {
+int cluster::up_node(string node_server_name, int node_server_port, bool force) {
 	string node_key = this->to_node_key(node_server_name, node_server_port);
 
 	log_notice("handling node up event [node_key=%s]", node_key.c_str());
@@ -382,27 +385,31 @@ int cluster::up_node(string node_server_name, int node_server_port) {
 
 	try {
 		node& n = this->_node_map[node_key];
-		if (n.node_state != state_down ) {
-			log_notice("node is already up/prepare (node_key=%s, node_state=%s)", node_key.c_str(), cluster::state_cast(n.node_state).c_str());
+		if (n.node_state == state_active || (force == false && n.node_state == state_prepare)) {
+			log_notice("node is already active/prepare (node_key=%s, node_state=%s)", node_key.c_str(), cluster::state_cast(n.node_state).c_str());
 			throw 0;
 		}
 
-		if (n.node_role == role_master) {
-			for (node_map::iterator it = this->_node_map.begin(); it != this->_node_map.end(); it++) {
-				if (it->first == node_key) {
-					continue;
-				}
-				if (it->second.node_partition == n.node_partition && it->second.node_state != state_down) {
-					log_warning("preserved master node is up, but already have another master -> role is set to proxy (node_key=%s, node_partition=%d, node_state=%s)", it->first.c_str(), it->second.node_partition, cluster::state_cast(it->second.node_state).c_str());
-					n.node_role = role_proxy;
-					n.node_partition = -1;
-					n.node_balance = 0;
-				}
-			}
+		if (n.node_state == state_prepare) {
+			// just shift state to active
 		} else {
-			log_notice("node role is set to proxy for safe...", 0);
-			n.node_role = role_proxy;
-			n.node_partition = -1;
+			if (n.node_role == role_master) {
+				for (node_map::iterator it = this->_node_map.begin(); it != this->_node_map.end(); it++) {
+					if (it->first == node_key) {
+						continue;
+					}
+					if (it->second.node_partition == n.node_partition && it->second.node_state != state_down) {
+						log_warning("preserved master node is up, but already have another master -> role is set to proxy (node_key=%s, node_partition=%d, node_state=%s)", it->first.c_str(), it->second.node_partition, cluster::state_cast(it->second.node_state).c_str());
+						n.node_role = role_proxy;
+						n.node_partition = -1;
+						n.node_balance = 0;
+					}
+				}
+			} else {
+				log_notice("node role is set to proxy for safe...", 0);
+				n.node_role = role_proxy;
+				n.node_partition = -1;
+			}
 		}
 
 		this->_node_map[node_key].node_state = state_active;
@@ -527,9 +534,23 @@ int cluster::set_node_role(string node_server_name, int node_server_port, role n
 					}
 					n.node_balance = node_balance;
 					log_notice("setting node balance [node_key=%s, node_balance=%d -> %d]", node_key.c_str(), n.node_balance, node_balance);
-				} else {
-					log_notice("failed to set node role [role=master, state=prepare] -> [role=slave|proxy] not allowed", 0);
+				} else if (node_role == role_slave) {
+					log_notice("failed to set node role [role=master, state=prepare] -> [role=slave] not allowed", 0);
 					throw -1;
+				} else if (node_role == role_proxy) {
+					log_notice("clearing all slave nodes (partition=%d)", n.node_partition);
+					for (vector<partition_node>::iterator it = this->_node_partition_prepare_map[n.node_partition].slave.begin(); it != this->_node_partition_prepare_map[n.node_partition].slave.end(); it++) {
+						log_notice("  -> node_key: %s", it->node_key.c_str());
+						this->_node_map[it->node_key].node_role = role_proxy;
+						this->_node_map[it->node_key].node_state = state_active;
+						this->_node_map[it->node_key].node_balance = 0;
+						this->_node_map[it->node_key].node_partition = -1;
+					}
+					n.node_role = node_role;
+					n.node_state = state_active;
+					n.node_balance = 0;
+					n.node_partition = -1;
+					log_notice("setting node role [role=master, state=prepare] -> [role=proxy, state=active]", 0);
 				}
 			// role=slave
 			} else if (n.node_role == role_slave) {
@@ -551,9 +572,7 @@ int cluster::set_node_role(string node_server_name, int node_server_port, role n
 					n.node_balance = node_balance;
 					log_notice("setting node balance [node_key=%s, node_balance=%d -> %d]", node_key.c_str(), n.node_balance, node_balance);
 				} else if (node_role == role_proxy) {
-					if (this->_check_node_balance(node_key, 0) < 0) {
-						throw -1;
-					}
+					// we do not have to check node balance here (<- state=prepare)
 					n.node_role = node_role;
 					n.node_state = state_active;
 					n.node_balance = 0;
@@ -671,7 +690,7 @@ int cluster::set_node_state(string node_server_name, int node_server_port, state
 	if (node_state == state_down) {
 		return this->down_node(node_server_name, node_server_port);
 	} else if (node_state == state_active) {
-		return this->up_node(node_server_name, node_server_port);
+		return this->up_node(node_server_name, node_server_port, true);		// force mode (allow preparing nodes to shift to active)
 	}
 
 	return 0;
@@ -780,6 +799,48 @@ int cluster::set_monitor_interval(int monitor_interval) {
 }
 
 /**
+ *	[node] activate node (prepare -> active)
+ */
+int cluster::activate_node() {
+	shared_connection c(new connection());
+	if (c->open(this->_index_server_name, this->_index_server_port) < 0) {
+		log_err("failed to connect to index server", 0);
+		return -1;
+	}
+
+	op_node_state* p = _new_ op_node_state(c, this);
+	if (p->run_client(this->_server_name, this->_server_port, state_active) < 0 || p->get_result() != op::result_ok) {
+		log_err("failed to activate node", 0);
+		_delete_(p);
+		return -1;
+	}
+	_delete_(p);
+
+	return 0;
+}
+
+/**
+ *	[node] deactivate node (* -> proxy)
+ */
+int cluster::deactivate_node() {
+	shared_connection c(new connection());
+	if (c->open(this->_index_server_name, this->_index_server_port) < 0) {
+		log_err("failed to connect to index server", 0);
+		return -1;
+	}
+
+	op_node_role* p = _new_ op_node_role(c, this);
+	if (p->run_client(this->_server_name, this->_server_port, role_proxy, 0, -1) < 0 || p->get_result() != op::result_ok) {
+		log_err("failed to deactivate node", 0);
+		_delete_(p);
+		return -1;
+	}
+	_delete_(p);
+
+	return 0;
+}
+
+/**
  *	[node] pre proxy for writing ops (set, add, replace, append, prepend, cas, incr, decr)
  */
 cluster::proxy_request cluster::pre_proxy_write(op_proxy_write* op, shared_queue_proxy_write& q_result) {
@@ -874,7 +935,8 @@ int cluster::_shift_node_role(string node_key, role old_role, int old_partition,
 			log_debug("determined reconstruction source node (type=prepare master_node_key=%s)", master_node_key.c_str());
 			partition_size += this->_node_partition_prepare_map.size();
 		} else {
-			log_err("could not find reconstruction source node (node_key=%s, new_role=%s, new_partition=%d)", node_key.c_str(), cluster::role_cast(new_role).c_str(), new_partition);
+			log_err("could not find reconstruction source node (node_key=%s, new_role=%s, new_partition=%d) -> deactivating node", node_key.c_str(), cluster::role_cast(new_role).c_str(), new_partition);
+			this->deactivate_node();
 			return -1;
 		}
 		
@@ -1081,28 +1143,21 @@ int cluster::_reconstruct_node_partition(bool lock) {
 				throw "node partition is inconsistent (role=slave but have no partition)";
 			}
 
+			partition_node pn;
 			if (n.node_state == state_active) {
-				if (npm.count(n.node_partition) == 0) {
-					throw "no active master for this slave";
-				}
-				
-				partition_node pn;
 				pn.node_key = node_key;
 				pn.node_balance = n.node_balance;
-				npm[n.node_partition].slave.push_back(pn);
-			} else if (n.node_state == state_prepare) {
-				if (npm.count(n.node_partition) == 0 && nppm.count(n.node_partition) == 0) {
-					throw "no active or prepare master for this slave";
-				}
-
-				partition_node pn;
+			} else {
 				pn.node_key = node_key;
 				pn.node_balance = 0;		// should be always 0 for safe
-				if (npm.count(n.node_partition) > 0) {
-					npm[n.node_partition].slave.push_back(pn);
-				} else {
+			}
+
+			if (npm.count(n.node_partition) > 0) {
+				npm[n.node_partition].slave.push_back(pn);
+			} else if (nppm.count(n.node_partition) > 0) {
 					nppm[n.node_partition].slave.push_back(pn);
-				}
+			} else {
+				throw "no node partition for this slave";
 			}
 		} catch (string e) {
 			log_err("%s [node_key=%s, state=%d, role=%d, partition=%d]", e.c_str(), node_key.c_str(), n.node_state, n.node_role, n.node_partition);

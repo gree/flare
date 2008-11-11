@@ -125,12 +125,24 @@ int op_node_state::_run_server() {
 }
 
 int op_node_state::_run_client(string node_server_name, int node_server_port, cluster::state node_state) {
-	log_err("not yet implemented:(", 0);
+	char request[BUFSIZ];
+	snprintf(request, sizeof(request), "node state %s %d %s", node_server_name.c_str(), node_server_port, cluster::state_cast(node_state).c_str());
 
-	return 0;
+	return this->_send_request(request);
 }
 
 int op_node_state::_parse_client_parameter() {
+	char* p;
+	if (this->_connection->readline(&p) < 0) {
+		return -1;
+	}
+
+	if (this->_parse_response(p, this->_result, this->_result_message) < 0) {
+		_delete_(p);
+		return -1;
+	}
+	_delete_(p);
+
 	return 0;
 }
 // }}}

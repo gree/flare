@@ -48,7 +48,8 @@ int handler_reconstruction::run() {
 	shared_connection c(new connection());
 	this->_connection = c;
 	if (c->open(this->_node_server_name, this->_node_server_port) < 0) {
-		log_err("failed to connect to node server [name=%s, port=%d]", this->_node_server_name.c_str(), this->_node_server_port);
+		log_err("failed to connect to node server (name=%s, port=%d) -> deactivating node", this->_node_server_name.c_str(), this->_node_server_port);
+		this->_cluster->deactivate_node();
 		return -1;
 	}
 
@@ -59,12 +60,15 @@ int handler_reconstruction::run() {
 	this->_thread->set_op(p->get_ident());
 
 	if (p->run_client(0, this->_partition, this->_partition_size) < 0) {
+		_delete_(p);
+		this->_cluster->deactivate_node();
 		return -1;
 	}
 
 	_delete_(p);
 
 	// node activation
+	this->_cluster->activate_node();
 
 	return 0;
 }

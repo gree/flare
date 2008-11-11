@@ -144,12 +144,26 @@ int op_node_role::_run_server() {
 }
 
 int op_node_role::_run_client(string node_server_name, int node_server_port, cluster::role node_role, int node_balance, int node_partition) {
-	log_err("not yet implemented:(", 0);
+	char request[BUFSIZ];
+	snprintf(request, sizeof(request), "node role %s %d %s %d %d", node_server_name.c_str(), node_server_port, cluster::role_cast(node_role).c_str(), node_balance, node_partition);
+
+	return this->_send_request(request);
 
 	return 0;
 }
 
 int op_node_role::_parse_client_parameter() {
+	char* p;
+	if (this->_connection->readline(&p) < 0) {
+		return -1;
+	}
+
+	if (this->_parse_response(p, this->_result, this->_result_message) < 0) {
+		_delete_(p);
+		return -1;
+	}
+	_delete_(p);
+
 	return 0;
 }
 // }}}

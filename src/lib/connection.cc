@@ -105,6 +105,11 @@ int connection::open(string host, int port) {
  *	- caller should delete *p if this method is successfully done (returned > 0)
  */
 int connection::read(char** p) {
+	if (this->_sock < 0) {
+		log_warning("connection seems to be already closed (sock=%d)", this->_sock);
+		return -1;
+	}
+
 	this->_errno = 0;
 
 	if (this->_read_buf_len > 0) {
@@ -327,6 +332,11 @@ int connection::push_back(char* p, int bufsiz) {
  *	write data to peer
  */
 int connection::write(const char* p, int bufsiz) {
+	if (this->_sock < 0) {
+		log_warning("connection seems to be already closed (sock=%d)", this->_sock);
+		return -1;
+	}
+
 	this->_errno = 0;
 
 	int written = 0;

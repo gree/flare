@@ -1,0 +1,82 @@
+/**
+ *	handler_reconstruction.cc
+ e
+ *	implementation of gree::flare::handler_reconstruction
+ *
+ *	@author	Masaki Fujimoto <fujimoto@php.net>
+ *
+ *	$Id$
+ */
+#include "handler_reconstruction.h"
+#include "op_dump.h"
+
+namespace gree {
+namespace flare {
+
+// {{{ global functions
+// }}}
+
+// {{{ ctor/dtor
+/**
+ *	ctor for handler_reconstruction
+ */
+handler_reconstruction::handler_reconstruction(shared_thread t, cluster* cl, storage* st, string node_server_name, int node_server_port, int partition, int partition_size):
+		thread_handler(t),
+		_cluster(cl),
+		_storage(st),
+		_node_server_name(node_server_name),
+		_node_server_port(node_server_port),
+		_partition(partition),
+		_partition_size(partition_size) {
+}
+
+/**
+ *	dtor for handler_reconstruction
+ */
+handler_reconstruction::~handler_reconstruction() {
+}
+// }}}
+
+// {{{ operator overloads
+// }}}
+
+// {{{ public methods
+int handler_reconstruction::run() {
+	this->_thread->set_peer(this->_node_server_name, this->_node_server_port);
+	this->_thread->set_state("connect");
+
+	shared_connection c(new connection());
+	this->_connection = c;
+	if (c->open(this->_node_server_name, this->_node_server_port) < 0) {
+		log_err("failed to connect to node server [name=%s, port=%d]", this->_node_server_name.c_str(), this->_node_server_port);
+		return -1;
+	}
+
+	op_dump* p = _new_ op_dump(c, this->_cluster, this->_storage);
+
+	p->set_thread(this->_thread);
+	this->_thread->set_state("execute");
+	this->_thread->set_op(p->get_ident());
+
+	if (p->run_client(0, this->_partition, this->_partition_size) < 0) {
+		return -1;
+	}
+
+	_delete_(p);
+
+	// node activation
+
+	return 0;
+}
+// }}}
+
+// {{{ protected methods
+// }}}
+
+// {{{ private methods
+// }}}
+
+}	// namespace flare
+}	// namespace gree
+
+// vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

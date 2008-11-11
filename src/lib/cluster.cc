@@ -10,6 +10,7 @@
 #include "cluster.h"
 #include "handler_monitor.h"
 #include "handler_proxy.h"
+#include "handler_reconstruction.h"
 #include "op_node_add.h"
 #include "op_proxy_write.h"
 #include "queue_node_sync.h"
@@ -680,6 +681,9 @@ int cluster::set_node_state(string node_server_name, int node_server_port, state
  *	reconstruct all node map
  */
 int cluster::reconstruct_node(vector<node> v) {
+	stack<node_shift_state> shift_state_stack;
+	stack<node_shift_role> shift_role_stack;
+
 	pthread_rwlock_wrlock(&this->_mutex_node_map);
 	pthread_rwlock_wrlock(&this->_mutex_node_partition_map);
 
@@ -700,10 +704,12 @@ int cluster::reconstruct_node(vector<node> v) {
 			} else {
 				log_debug("-> existing node", 0);
 				if (it->node_state != this->_node_map[node_key].node_state) {
-					this->_shift_node_state(node_key, this->_node_map[node_key].node_state, it->node_state);
+					node_shift_state tmp = { node_key, this->_node_map[node_key].node_state, it->node_state};
+					shift_state_stack.push(tmp);
 				}
 				if (it->node_role != this->_node_map[node_key].node_role || it->node_partition != this->_node_map[node_key].node_partition) {
-					this->_shift_node_role(node_key, this->_node_map[node_key].node_role, this->_node_map[node_key].node_partition, it->node_role, it->node_partition);
+					node_shift_role tmp = {node_key, this->_node_map[node_key].node_role, this->_node_map[node_key].node_partition, it->node_role, it->node_partition};
+					shift_role_stack.push(tmp);
 				}
 
 				if (it->node_balance != this->_node_map[node_key].node_balance) {
@@ -728,6 +734,18 @@ int cluster::reconstruct_node(vector<node> v) {
 	this->_node_map = nm;
 
 	this->_reconstruct_node_partition(false);
+
+	while (shift_state_stack.size() > 0) {
+		node_shift_state tmp = shift_state_stack.top();
+		this->_shift_node_state(tmp.node_key, tmp.old_state, tmp.new_state);
+		shift_state_stack.pop();
+	}
+
+	while (shift_role_stack.size() > 0) {
+		node_shift_role tmp = shift_role_stack.top();
+		this->_shift_node_role(tmp.node_key, tmp.old_role, tmp.old_partition, tmp.new_role, tmp.new_partition);
+		shift_role_stack.pop();
+	}
 
 	pthread_rwlock_unlock(&this->_mutex_node_partition_map);
 	pthread_rwlock_unlock(&this->_mutex_node_map);
@@ -844,6 +862,29 @@ int cluster::_shift_node_role(string node_key, role old_role, int old_partition,
 	// we intentionally do not truncate current database here (for safe)
 	// if user *really* want to reconstruct database, they can use "flush_all" op
 	log_debug("creating reconstruction thread(s)... (type=%s)", cluster::role_cast(new_role).c_str());
+	if (new_role == role_master) {
+	} else {
+		string master_node_key = "";
+		int partition_size = this->_node_partition_map.size();
+		if (this->_node_partition_map.count(new_partition) > 0) {
+			master_node_key = this->_node_partition_map[new_partition].master.node_key;
+			log_debug("determined reconstruction source node (type=active master_node_key=%s)", master_node_key.c_str());
+		} else if (this->_node_partition_prepare_map.count(new_partition) > 0) {
+			master_node_key = this->_node_partition_prepare_map[new_partition].master.node_key;
+			log_debug("determined reconstruction source node (type=prepare master_node_key=%s)", master_node_key.c_str());
+			partition_size += this->_node_partition_prepare_map.size();
+		} else {
+			log_err("could not find reconstruction source node (node_key=%s, new_role=%s, new_partition=%d)", node_key.c_str(), cluster::role_cast(new_role).c_str(), new_partition);
+			return -1;
+		}
+		
+		shared_thread t = this->_thread_pool->get(thread_pool::thread_type_reconstruction);
+		string node_server_name;
+		int node_server_port = 0;
+		this->from_node_key(master_node_key, node_server_name, node_server_port);
+		handler_reconstruction* h = _new_ handler_reconstruction(t, this, this->_storage, node_server_name, node_server_port, new_partition, partition_size);
+		t->trigger(h);
+	}
 
 	return 0;
 }

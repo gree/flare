@@ -8,9 +8,10 @@
 #ifndef	__CLUSTER_H__
 #define	__CLUSTER_H__
 
-#include <map>
-#include <vector>
 #include <fstream>
+#include <map>
+#include <stack>
+#include <vector>
 
 #include <boost/archive/text_oarchive.hpp>
 #include <boost/archive/text_iarchive.hpp>
@@ -99,6 +100,20 @@ public:
 		partition_node					master;
 		vector<partition_node>	slave;
 	} partition;
+
+	typedef struct _node_shift_state {
+		string node_key;
+		state old_state;
+		state new_state;
+	} node_shift_state;
+
+	typedef struct _node_shift_role {
+		string node_key;
+		role old_role;
+		int old_partition;
+		role new_role;
+		int new_partition;
+	} node_shift_role;
 	
 	typedef map<string, node>		node_map;
 	typedef map<int, partition>	node_partition_map;

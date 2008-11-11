@@ -49,6 +49,7 @@ public:
 protected:
 	shared_connection			_connection;
 	shared_thread					_thread;
+	bool									_thread_available;
 	string								_ident;
 	vector<string>				_proxy;
 	bool									_proxy_request;
@@ -66,7 +67,7 @@ public:
 	vector<string> get_proxy() { return this->_proxy; };
 	int set_proxy(string proxy);
 	int set_proxy(vector<string> proxy) { this->_proxy = proxy; return 0; };
-	int set_thread(shared_thread t) { this->_thread = t; return 0; };
+	int set_thread(shared_thread t) { this->_thread = t; this->_thread_available = true; return 0; };
 	string get_ident() { return this->_ident; };
 	int is_proxy_request() { return this->_proxy_request; };
 	bool is_shutdown_request() { return this->_shutdown_request; };

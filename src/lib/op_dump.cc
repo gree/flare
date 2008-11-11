@@ -177,9 +177,25 @@ int op_dump::_run_client(int wait, int partition, int partition_size) {
 
 int op_dump::_parse_client_parameter() {
 	for (;;) {
+		if (this->_thread_available && this->_thread->is_shutdown_request()) {
+			log_info("thread shutdown request -> breaking loop", 0);
+			break;
+		}
+
 		char* p;
 		if (this->_connection->readline(&p) < 0) {
 			return -1;
+		}
+
+		if (this->_thread_available && this->_thread->is_shutdown_request()) {
+			log_info("thread shutdown request -> breaking loop", 0);
+			_delete_(p);
+			break;
+		}
+
+		if (strcmp(p, "END\n") == 0) {
+			_delete_(p);
+			break;
 		}
 
 		char q[BUFSIZ];

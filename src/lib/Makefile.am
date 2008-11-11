@@ -17,6 +17,7 @@ libflare_a_SOURCES = \
 	connection.h connection.cc \
 	handler_monitor.h handler_monitor.cc \
 	handler_proxy.h handler_proxy.cc \
+	handler_reconstruction.h handler_reconstruction.cc \
 	ini.h ini.cc \
 	logger.h logger.cc \
 	mm.h mm.cc \

@@ -29,6 +29,7 @@ public:
 	enum							thread_type {
 		thread_type_request = 1,
 		thread_type_alarm,
+		thread_type_reconstruction,
 	};
 
 	typedef	map<uint32_t, shared_thread>		local_map;

@@ -18,6 +18,7 @@ namespace flare {
  */
 op::op(shared_connection c, string ident):
 		_connection(c),
+		_thread_available(false),
 		_ident(ident),
 		_proxy_request(false),
 		_shutdown_request(false),

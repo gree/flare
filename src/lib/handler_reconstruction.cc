@@ -20,14 +20,15 @@ namespace flare {
 /**
  *	ctor for handler_reconstruction
  */
-handler_reconstruction::handler_reconstruction(shared_thread t, cluster* cl, storage* st, string node_server_name, int node_server_port, int partition, int partition_size):
+handler_reconstruction::handler_reconstruction(shared_thread t, cluster* cl, storage* st, string node_server_name, int node_server_port, int partition, int partition_size, cluster::role r):
 		thread_handler(t),
 		_cluster(cl),
 		_storage(st),
 		_node_server_name(node_server_name),
 		_node_server_port(node_server_port),
 		_partition(partition),
-		_partition_size(partition_size) {
+		_partition_size(partition_size),
+		_role(r) {
 }
 
 /**
@@ -67,8 +68,10 @@ int handler_reconstruction::run() {
 
 	_delete_(p);
 
-	// node activation
-	this->_cluster->activate_node();
+	// node activation (slave only)
+	if (this->_role == cluster::role_slave) {
+		this->_cluster->activate_node();
+	}
 
 	return 0;
 }

@@ -924,6 +924,22 @@ int cluster::_shift_node_role(string node_key, role old_role, int old_partition,
 	// if user *really* want to reconstruct database, they can use "flush_all" op
 	log_debug("creating reconstruction thread(s)... (type=%s)", cluster::role_cast(new_role).c_str());
 	if (new_role == role_master) {
+		int partition_size = this->_node_partition_map.size() + this->_node_partition_prepare_map.size();
+		log_debug("partition_size: %d", partition_size);
+		for (node_map::iterator it = this->_node_map.begin(); it != this->_node_map.end(); it++) {
+			log_debug("node_key: %s, node_role=%s, node_state=%s", it->first.c_str(), cluster::role_cast(it->second.node_role).c_str(), cluster::state_cast(it->second.node_state).c_str());
+			if (it->first == node_key || it->second.node_role != role_master || it->second.node_state != state_active) {
+				continue;
+			}
+			log_debug("determined reconstruction source node (node_key=%s, partition=%d, new_role=%s, new_partition=%d)", it->first.c_str(), it->second.node_partition, cluster::role_cast(new_role).c_str(), new_partition);
+
+			shared_thread t = this->_thread_pool->get(thread_pool::thread_type_reconstruction);
+			string node_server_name;
+			int node_server_port = 0;
+			this->from_node_key(it->first, node_server_name, node_server_port);
+			handler_reconstruction* h = _new_ handler_reconstruction(t, this, this->_storage, node_server_name, node_server_port, new_partition, partition_size, new_role);
+			t->trigger(h);
+		}
 	} else {
 		string master_node_key = "";
 		int partition_size = this->_node_partition_map.size();
@@ -944,7 +960,7 @@ int cluster::_shift_node_role(string node_key, role old_role, int old_partition,
 		string node_server_name;
 		int node_server_port = 0;
 		this->from_node_key(master_node_key, node_server_name, node_server_port);
-		handler_reconstruction* h = _new_ handler_reconstruction(t, this, this->_storage, node_server_name, node_server_port, new_partition, partition_size);
+		handler_reconstruction* h = _new_ handler_reconstruction(t, this, this->_storage, node_server_name, node_server_port, new_partition, partition_size, new_role);
 		t->trigger(h);
 	}
 

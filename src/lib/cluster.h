@@ -167,6 +167,7 @@ public:
 	int activate_node();
 	int deactivate_node();
 	proxy_request pre_proxy_write(op_proxy_write* op, shared_queue_proxy_write& q);
+	proxy_request post_proxy_write(op_proxy_write* op, bool sync = false);
 
 	inline node get_node(string node_key) {
 		node n;
@@ -274,7 +275,7 @@ protected:
 	int _check_node_balance(string node_key, int node_balance);
 	int _check_node_partition(int node_partition, bool& preparing);
 	int _check_node_partition_for_new(int node_partition, bool& preparing);
-	int _determine_partition(storage::entry& e, partition& p);
+	int _determine_partition(storage::entry& e, partition& p, bool include_prepare, bool& is_preprare);
 	string _get_partition_key(string key);
 	int _get_proxy_thread(string node_key, int key_hash, shared_thread& t);
 };

@@ -22,7 +22,6 @@ server::server():
 
 /**
  *	dtor for server
- *	@access	public
  */
 server::~server() {
 }

@@ -74,11 +74,9 @@ int handler_monitor::run() {
 		}
 
 		// sync w/ node_map for safe
-		cluster::node n = this->_cluster->get_node(this->_node_server_name, this->_node_server_port); // for safe
+		cluster::node n = this->_cluster->get_node(this->_node_server_name, this->_node_server_port);
 		if (n.node_state == cluster::state_down) {
 			this->_down_state = this->_monitor_threshold;
-		} else {
-			this->_down_state = 0;
 		}
 
 		if (r == ETIMEDOUT) {

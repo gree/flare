@@ -846,20 +846,25 @@ int cluster::deactivate_node() {
 cluster::proxy_request cluster::pre_proxy_write(op_proxy_write* op, shared_queue_proxy_write& q_result) {
 	storage::entry& e = op->get_entry();
 
-	partition p;
-	int n = this->_determine_partition(e, p);
+	partition p, p_prepare;
+	bool is_prepare;
+	int n = 0;
+	int n_prepare = 0;
+	n = this->_determine_partition(e, p, false, is_prepare);
 	if (n < 0) {
 		// perhaps no partition available
 		return proxy_request_error_partition;
 	}
+	n_prepare = this->_determine_partition(e, p_prepare, true, is_prepare);
 
-	if (p.master.node_key == this->_node_key) {
+	if (p.master.node_key == this->_node_key || (op->is_proxy_request() && is_prepare && p_prepare.master.node_key == this->_node_key)) {
 		// should be write at this node
 		return proxy_request_continue;
 	}
 
 	if (op->is_proxy_request()) {
-		for (vector<partition_node>::iterator it = p.slave.begin(); it != p.slave.end(); it++) {
+		partition& p_tmp = is_prepare ? p_prepare : p;
+		for (vector<partition_node>::iterator it = p_tmp.slave.begin(); it != p_tmp.slave.end(); it++) {
 			if (it->node_key == this->_node_key) {
 				// should be write at this node
 				return proxy_request_continue;
@@ -880,6 +885,58 @@ cluster::proxy_request cluster::pre_proxy_write(op_proxy_write* op, shared_queue
 		q_result = q;
 	}
 	
+	return proxy_request_complete;
+}
+
+/**
+ *	[node] post proxy for writing ops
+ */
+cluster::proxy_request cluster::post_proxy_write(op_proxy_write* op, bool sync) {
+	storage::entry& e = op->get_entry();
+
+	partition p, p_prepare;
+	bool is_prepare;
+	int n = 0;
+	int n_prepare = 0;
+	n = this->_determine_partition(e, p, false, is_prepare);
+	if (n < 0) {
+		// perhaps no partition available
+		return proxy_request_error_partition;
+	}
+	n_prepare = this->_determine_partition(e, p_prepare, true, is_prepare);
+
+	if (p.master.node_key != this->_node_key && (op->is_proxy_request() == false || is_prepare == false || p_prepare.master.node_key != this->_node_key)) {
+		// nothing to do
+		return proxy_request_complete;
+	}
+
+	int key_hash_value = e.get_key_hash_value(storage::hash_algorithm_bitshift);
+	vector<string> proxy = op->get_proxy();
+	proxy.push_back(this->_node_key);
+	shared_queue_proxy_write q(new queue_proxy_write(this, this->_storage, proxy, e, op->get_ident()));
+
+	partition& p_tmp = is_prepare ? p_prepare : p;
+	for (vector<partition_node>::iterator it = p_tmp.slave.begin(); it != p_tmp.slave.end(); it++) {
+		// proxy request to slave
+		log_debug("proxy request to slave (node_key=%s, ident=%s)", it->node_key.c_str(), op->get_ident().c_str());
+		if (this->_enqueue(q, it->node_key, key_hash_value, sync) < 0) {
+			log_warning("enqueue failed (node_key=%s) -> continue processing", it->node_key.c_str());
+			continue;
+		}
+	}
+	if (sync) {
+		q->sync();
+	}
+
+	// proxy to preparing master (if we need)
+	if (is_prepare && p.master.node_key == this->_node_key) {
+		log_debug("proxy request to preparing master (node_key=%s, ident=%s)", p_prepare.master.node_key.c_str(), op->get_ident().c_str());
+		if (this->_enqueue(q, p_prepare.master.node_key, key_hash_value, sync) < 0) {
+			log_warning("enqueue failed (node_key=%s) -> continue processing", p_prepare.master.node_key.c_str());
+			// no follow up...?
+		}
+	}
+
 	return proxy_request_complete;
 }
 // }}}
@@ -1341,28 +1398,41 @@ int cluster::_check_node_partition_for_new(int node_partition, bool& preparing) 
 	return 0;
 }
 
-int cluster::_determine_partition(storage::entry& e, partition& p) {
+int cluster::_determine_partition(storage::entry& e, partition& p, bool check_prepare, bool& is_prepare) {
 	pthread_rwlock_rdlock(&this->_mutex_node_partition_map);
 	int n;
+	is_prepare = false;
 	try {
 		if (this->_node_partition_map.size() <= 0) {
 			log_warning("no partition is available", 0);
 			throw -1;
 		}
 
-		n = e.get_key_hash_value() % this->_node_partition_map.size();
+		int partition_size = this->_node_partition_map.size();
+		if (check_prepare) {
+			partition_size += this->_node_partition_prepare_map.size();
+		}
+		n = e.get_key_hash_value() % partition_size;
 		log_debug("determined partition (key=%s, n=%d)", e.key.c_str(), n);
 
-		if (this->_node_partition_map.count(n) == 0) {
-			log_err("have no partition map for this key (key=%s, n=%d, size=%d)", e.key.c_str(), n, this->_node_partition_map.size());
-			throw -1;
+		if (check_prepare) {
+			if (this->_node_partition_prepare_map.count(n) > 0) {
+				is_prepare = true;
+				p = this->_node_partition_prepare_map[n];
+			}
+		}
+
+		if (is_prepare == false) {
+			if (this->_node_partition_map.count(n) == 0) {
+				log_err("have no partition map for this key (key=%s, n=%d, size=%d)", e.key.c_str(), n, this->_node_partition_map.size());
+				throw -1;
+			}
+			p = this->_node_partition_map[n];
 		}
 	} catch (int error) {
 		pthread_rwlock_unlock(&this->_mutex_node_partition_map);
 		return error;
 	}
-
-	p = this->_node_partition_map[n];
 	pthread_rwlock_unlock(&this->_mutex_node_partition_map);
 
 	return n;

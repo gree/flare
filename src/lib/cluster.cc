@@ -313,10 +313,10 @@ int cluster::down_node(string node_server_name, int node_server_port) {
 					log_err("no slave for this partition (partition=%d) -> all requests for this partition will fail!", n.node_partition);
 					preserve = true;		// leave role as master to keep partition count (*important*)
 				} else {
-					string failover_node_key;
+					string failover_node_key = "";
 					int balance = 0;
 					for (vector<partition_node>::iterator it = this->_node_partition_map[n.node_partition].slave.begin(); it != this->_node_partition_map[n.node_partition].slave.end(); it++) {
-						if (this->_node_map[it->node_key].node_state == state_active && failover_node_key.empty() == false) {
+						if (this->_node_map[it->node_key].node_state == state_active && failover_node_key.empty()) {
 							failover_node_key = it->node_key;
 						}
 						balance += it->node_balance;

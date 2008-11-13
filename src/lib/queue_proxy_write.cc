@@ -9,6 +9,7 @@
  */
 #include "queue_proxy_write.h"
 #include "op_proxy_write.h"
+#include "op_delete.h"
 #include "op_set.h"
 
 namespace gree {
@@ -78,6 +79,8 @@ int queue_proxy_write::run(shared_connection c) {
 op_proxy_write* queue_proxy_write::_get_op(string op_ident, shared_connection c) {
 	if (op_ident == "set") {
 		return _new_ op_set(c, this->_cluster, this->_storage);
+	} else if (op_ident == "delete") {
+		return _new_ op_delete(c, this->_cluster, this->_storage);
 	}
 	log_warning("unknown op (ident=%s)", op_ident.c_str());
 

@@ -61,6 +61,7 @@ public:
 	enum									parse_type {
 		parse_type_set,
 		parse_type_get,
+		parse_type_delete,
 	};
 
 	enum									response_type {
@@ -113,6 +114,7 @@ public:
 		int parse(const char* p, parse_type t) {
 			char q[BUFSIZ];
 			try {
+				// key
 				int n = util::next_word(p, q, sizeof(q));
 				if (q[0] == '\0') {
 					log_debug("key not found", 0);
@@ -121,34 +123,41 @@ public:
 				this->key = q;
 				log_debug("storing key [%s]", this->key.c_str());
 
-				// flag
-				n += util::next_digit(p+n, q, sizeof(q));
-				if (q[0] == '\0') {
-					log_debug("no flag found", 0);
-					return -1;
+				if (t == parse_type_set || t == parse_type_get) {
+					// flag
+					n += util::next_digit(p+n, q, sizeof(q));
+					if (q[0] == '\0') {
+						log_debug("no flag found", 0);
+						return -1;
+					}
+					this->flag = lexical_cast<uint32_t>(q);
+					log_debug("storing flag [%u]", this->flag);
 				}
-				this->flag = lexical_cast<uint32_t>(q);
-				log_debug("storing flag [%u]", this->flag);
 				
-				if (t == parse_type_set) {
+				if (t == parse_type_set || t == parse_type_delete) {
 					// expire
 					n += util::next_digit(p+n, q, sizeof(q));
 					if (q[0] == '\0') {
-						log_debug("no expire found", 0);
-						return -1;
+						if (t == parse_type_set) {
+							log_debug("no expire found", 0);
+							return -1;
+						}
+					} else {
+						this->expire = util::realtime(lexical_cast<time_t>(q));
+						log_debug("storing expire [%ld]", this->expire);
 					}
-					this->expire = util::realtime(lexical_cast<time_t>(q));
-					log_debug("storing expire [%ld]", this->expire);
 				}
 
-				// size
-				n += util::next_digit(p+n, q, sizeof(q));
-				if (q[0] == '\0') {
-					log_debug("no size found", 0);
-					return -1;
+				if (t == parse_type_set || t == parse_type_get) {
+					// size
+					n += util::next_digit(p+n, q, sizeof(q));
+					if (q[0] == '\0') {
+						log_debug("no size found", 0);
+						return -1;
+					}
+					this->size = lexical_cast<uint64_t>(q);
+					log_debug("storing size [%u]", this->size);
 				}
-				this->size = lexical_cast<uint64_t>(q);
-				log_debug("storing size [%u]", this->size);
 
 				// version (if we have)
 				n += util::next_digit(p+n, q, sizeof(q));
@@ -166,7 +175,7 @@ public:
 					}
 				}
 
-				if (t == parse_type_set) {
+				if (t == parse_type_set || t == parse_type_delete) {
 					// option
 					n += util::next_word(p+n, q, sizeof(q));
 					while (q[0]) {
@@ -320,7 +329,7 @@ protected:
 	virtual uint64_t _get_version(string key) = 0;
 	virtual int _serialize_header(entry& e, uint8_t* data);
 	virtual int _unserialize_header(const uint8_t* data, int data_len, entry& e);
-	int _set_data_version_cache(string key, uint64_t version);
+	int _set_data_version_cache(string key, uint64_t version, time_t expire);
 
 	inline uint64_t _get_data_version_cache(string key) {
 		int tmp_len;

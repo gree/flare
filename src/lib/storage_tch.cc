@@ -232,8 +232,8 @@ int storage_tch::remove(entry& e, result& r, int b) {
 
 		uint64_t version = this->_get_version(e.key);
 		if ((b & behavior_skip_version) == 0 && e.version != 0) {
-			if (e.version < version) {
-				log_info("specified version is older than current version -> skip removing (current=%u, specified=%u)", version, e.version);
+			if (e.version <= version) {
+				log_info("specified version is older than (or equal to) current version -> skip removing (current=%u, specified=%u)", version, e.version);
 				r = result_not_found;
 				throw 0;
 			}
@@ -243,7 +243,7 @@ int storage_tch::remove(entry& e, result& r, int b) {
 		int tmp_len = tchdbget3(this->_db, e.key.c_str(), e.key.size(), &tmp_data, 1);
 		if (tmp_len < 0) {
 			if (e.version != 0 && e.version > version) {
-				this->_set_data_version_cache(e.key, e.version);
+				this->_set_data_version_cache(e.key, e.version, e.expire);
 			}
 			r = result_not_found;
 			throw 0;
@@ -257,7 +257,7 @@ int storage_tch::remove(entry& e, result& r, int b) {
 			throw -1;
 		}
 		e.version = version+1;
-		this->_set_data_version_cache(e.key, e.version);
+		this->_set_data_version_cache(e.key, e.version, e.expire);
 	} catch (int error) {
 		if ((b & behavior_skip_lock) == 0) {
 			pthread_rwlock_unlock(&this->_mutex_slot[mutex_index]);

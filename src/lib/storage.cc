@@ -116,7 +116,7 @@ int storage::_unserialize_header(const uint8_t* data, int data_len, entry& e) {
 	return offset;
 }
 
-int storage::_set_data_version_cache(string key, uint64_t version) {
+int storage::_set_data_version_cache(string key, uint64_t version, time_t expire) {
 	uint8_t tmp[sizeof(uint64_t) + sizeof(time_t)];
 	uint64_t* p;
 	time_t* q;
@@ -124,7 +124,7 @@ int storage::_set_data_version_cache(string key, uint64_t version) {
 	p = reinterpret_cast<uint64_t*>(tmp);
 	*p = version;
 	q = reinterpret_cast<time_t*>(tmp+sizeof(uint64_t));
-	*q = stats_object->get_timestamp();
+	*q = expire == 0 ? stats_object->get_timestamp() : expire;
 
 	tcmapput(this->_data_version_cache_map, key.c_str(), key.size(), tmp, sizeof(tmp));
 

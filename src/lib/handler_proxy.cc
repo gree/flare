@@ -8,6 +8,7 @@
  *	$Id$
  */
 #include "handler_proxy.h"
+#include "queue_proxy_read.h"
 #include "queue_proxy_write.h"
 
 namespace gree {
@@ -85,7 +86,10 @@ int handler_proxy::_process_queue(shared_thread_queue q) {
 	this->_thread->set_state("execute");
 	this->_thread->set_op(q->get_ident());
 
-	if (q->get_ident() == "proxy_write") {
+	if (q->get_ident() == "proxy_read") {
+		shared_queue_proxy_read r = shared_dynamic_cast<queue_proxy_read, thread_queue>(q);
+		return r->run(this->_connection);
+	} else if (q->get_ident() == "proxy_write") {
 		shared_queue_proxy_write r = shared_dynamic_cast<queue_proxy_write, thread_queue>(q);
 		return r->run(this->_connection);
 	} else {

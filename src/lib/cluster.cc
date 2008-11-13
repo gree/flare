@@ -14,8 +14,10 @@
 #include "op_node_add.h"
 #include "op_node_role.h"
 #include "op_node_state.h"
+#include "op_proxy_read.h"
 #include "op_proxy_write.h"
 #include "queue_node_sync.h"
+#include "queue_proxy_read.h"
 #include "queue_proxy_write.h"
 #include "queue_update_monitor_option.h"
 
@@ -841,21 +843,63 @@ int cluster::deactivate_node() {
 }
 
 /**
+ *	[node] pre proxy for reading ops (get, gets)
+ *
+ *	@todo fix performance issue
+ */
+cluster::proxy_request cluster::pre_proxy_read(op_proxy_read* op, storage::entry& e, shared_queue_proxy_read& q_result) {
+	partition p;
+	bool dummy;
+	int n = this->_determine_partition(e, p, false, dummy);
+	if (n < 0) {
+		// perhaps no partition available
+		return proxy_request_error_partition;
+	}
+
+	if (p.master.node_key == this->_node_key) {
+		return proxy_request_continue;
+	}
+	for (vector<partition_node>::iterator it = p.slave.begin(); it != p.slave.end(); it++) {
+		if (it->node_key == this->_node_key) {
+			return proxy_request_continue;
+		}
+	}
+
+	// select one (rand() will do)
+	if (p.balance.size() == 0) {
+		log_err("no node is available for this partition (all balance is set to 0)", 0);
+		return proxy_request_error_partition;
+	}
+	string node_key = p.balance[rand() % p.balance.size()];
+	log_debug("selected proxy node (node_key=%s)", node_key.c_str());
+
+	vector<string> proxy = op->get_proxy();
+	proxy.push_back(this->_node_key);
+	shared_queue_proxy_read q(new queue_proxy_read(this, this->_storage, proxy, e, op->get_ident()));
+	if (this->_enqueue(q, node_key, e.get_key_hash_value(storage::hash_algorithm_bitshift), true) < 0) {
+		return proxy_request_error_enqueue;
+	}
+	q_result = q;
+	
+	return proxy_request_complete;
+}
+
+/**
  *	[node] pre proxy for writing ops (set, add, replace, append, prepend, cas, incr, decr)
+ *
+ *	@todo fix performance issue
  */
 cluster::proxy_request cluster::pre_proxy_write(op_proxy_write* op, shared_queue_proxy_write& q_result) {
 	storage::entry& e = op->get_entry();
 
 	partition p, p_prepare;
 	bool is_prepare;
-	int n = 0;
-	int n_prepare = 0;
-	n = this->_determine_partition(e, p, false, is_prepare);
+	int n = this->_determine_partition(e, p, false, is_prepare);
 	if (n < 0) {
 		// perhaps no partition available
 		return proxy_request_error_partition;
 	}
-	n_prepare = this->_determine_partition(e, p_prepare, true, is_prepare);
+	this->_determine_partition(e, p_prepare, true, is_prepare);
 
 	if (p.master.node_key == this->_node_key || (op->is_proxy_request() && is_prepare && p_prepare.master.node_key == this->_node_key)) {
 		// should be write at this node
@@ -864,11 +908,8 @@ cluster::proxy_request cluster::pre_proxy_write(op_proxy_write* op, shared_queue
 
 	if (op->is_proxy_request()) {
 		partition& p_tmp = is_prepare ? p_prepare : p;
-		for (vector<partition_node>::iterator it = p_tmp.slave.begin(); it != p_tmp.slave.end(); it++) {
-			if (it->node_key == this->_node_key) {
-				// should be write at this node
-				return proxy_request_continue;
-			}
+		if (p_tmp.index.count(this->_node_key) > 0) {
+			return proxy_request_continue;
 		}
 	}
 
@@ -1187,6 +1228,11 @@ int cluster::_reconstruct_node_partition(bool lock) {
 				npm[n.node_partition].master.node_key = node_key;
 				npm[n.node_partition].master.node_balance = n.node_balance;
 
+				for (int i = 0; i < n.node_balance; i++) {
+					npm[n.node_partition].balance.push_back(node_key);
+				}
+				npm[n.node_partition].index[node_key] = true;
+
 				log_debug("master node added (node_key=%s, partition=%d, balance=%d)", node_key.c_str(), n.node_partition, n.node_balance);
 			} else if (n.node_state == state_prepare) {
 				if (nppm[n.node_partition].master.node_key.empty() == false) {
@@ -1227,6 +1273,10 @@ int cluster::_reconstruct_node_partition(bool lock) {
 
 			if (npm.count(n.node_partition) > 0) {
 				npm[n.node_partition].slave.push_back(pn);
+				for (int i = 0; i < pn.node_balance; i++) {
+					npm[n.node_partition].balance.push_back(node_key);
+				}
+				npm[n.node_partition].index[node_key] = true;
 			} else if (nppm.count(n.node_partition) > 0) {
 					nppm[n.node_partition].slave.push_back(pn);
 			} else {

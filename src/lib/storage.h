@@ -63,6 +63,12 @@ public:
 		parse_type_get,
 	};
 
+	enum									response_type {
+		response_type_get,
+		response_type_gets,
+		response_type_dump,
+	};
+
 	typedef struct 				_entry {
 		string							key;
 		uint32_t						flag;
@@ -75,6 +81,8 @@ public:
 		static const int		header_size = sizeof(uint32_t) + sizeof(time_t) + sizeof(uint64_t) + sizeof(uint64_t);
 
 		_entry() { flag = expire = size = version = option = 0; };
+
+		bool is_data_available() { return this->data.get() != NULL; };
 
 		inline int get_key_hash_value(const char* p, hash_algorithm h = hash_algorithm_simple) {
 			int r = 0;
@@ -177,6 +185,25 @@ public:
 				log_debug("invalid digit [%s]", e.what());
 				return -1;
 			}
+
+			return 0;
+		}
+
+		inline int response(char** p, int& len, response_type t) {
+			int response_len = this->size + this->key.size() + BUFSIZ;
+			*p = _new_ char[response_len];
+			len = snprintf(*p, response_len, "VALUE %s %u %llu", this->key.c_str(), this->flag, this->size);
+			if (t == response_type_gets || t == response_type_dump) {
+				len += snprintf((*p)+len, response_len-len, " %llu", this->version);
+			}
+			if (t == response_type_dump) {
+				len += snprintf((*p)+len, response_len-len, " %ld", this->expire);
+			}
+			len += snprintf((*p)+len, response_len-len, "%s", line_delimiter);
+
+			memcpy((*p)+len, this->data.get(), this->size);
+			len += this->size;
+			len += snprintf((*p)+len, response_len-len, "%s", line_delimiter);
 
 			return 0;
 		}

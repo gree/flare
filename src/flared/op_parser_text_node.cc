@@ -40,10 +40,14 @@ op_parser_text_node::~op_parser_text_node() {
  */
 op* op_parser_text_node::_determine_op(const char* first, const char* buf, int& consume) {
 	op* r = NULL;
-	if (strcmp(first, "ping") == 0) {
-		r = static_cast<op*>(_new_ op_ping(this->_connection)); 
+	if (strcmp(first, "get") == 0) {
+		r = static_cast<op*>(_new_ op_get(this->_connection, singleton<flared>::instance().get_cluster(), singleton<flared>::instance().get_storage())); 
 	} else if (strcmp(first, "set") == 0) {
 		r = static_cast<op*>(_new_ op_set(this->_connection, singleton<flared>::instance().get_cluster(), singleton<flared>::instance().get_storage())); 
+	} else if (strcmp(first, "gets") == 0) {
+		r = static_cast<op*>(_new_ op_gets(this->_connection, singleton<flared>::instance().get_cluster(), singleton<flared>::instance().get_storage())); 
+	} else if (strcmp(first, "ping") == 0) {
+		r = static_cast<op*>(_new_ op_ping(this->_connection)); 
 	} else if (strcmp(first, "stats") == 0) {
 		r = static_cast<op*>(_new_ op_stats_node(this->_connection)); 
   } else if (strcmp(first, "node") == 0) {

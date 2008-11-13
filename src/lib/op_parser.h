@@ -12,6 +12,8 @@
 #include "op_dump.h"
 #include "op_error.h"
 #include "op_flush_all.h"
+#include "op_get.h"
+#include "op_gets.h"
 #include "op_kill.h"
 #include "op_node_add.h"
 #include "op_node_remove.h"

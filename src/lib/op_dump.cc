@@ -145,16 +145,19 @@ int op_dump::_run_server() {
 		if (this->_storage->get(e, r) < 0) {
 			log_err("skipping entry [get() error] (key=%s)", e.key.c_str());
 			continue;
+		} else if (r == storage::result_not_found) {
+			log_info("skipping entry [key not found (perhaps expired)] (key=%s)", e.key.c_str());
+			continue;
 		}
 
-		int response_len = e.key.size() + e.size + BUFSIZ;
-		char* response = _new_ char[response_len];
-		int offset = snprintf(response, response_len, "VALUE %s %u %llu %llu %ld%s", e.key.c_str(), e.flag, e.size, e.version, e.expire, line_delimiter);
-		memcpy(response+offset, e.data.get(), e.size);
-		offset += e.size;
-		offset += snprintf(response+offset, response_len-offset, line_delimiter);
-		this->_connection->write(response, offset);
+		char *response;
+		int response_len;
+		e.response(&response, response_len, storage::response_type_dump);
+		int n = this->_connection->write(response, response_len);
 		_delete_(response);
+		if (n < 0) {
+			break;
+		}
 
 		// wait
 		if (this->_wait > 0) {

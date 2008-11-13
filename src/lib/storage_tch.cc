@@ -184,6 +184,7 @@ int storage_tch::get(entry& e, result& r, int b) {
 		if ((b & behavior_skip_timestamp) == 0) {
 			if (e.expire > 0 && e.expire < stats_object->get_timestamp()) {
 				log_info("data expired [expire=%d] -> remove requesting", e.expire);
+				r = result_not_found;
 				remove_request = true;
 				throw 0;
 			}
@@ -211,6 +212,7 @@ int storage_tch::get(entry& e, result& r, int b) {
 	if ((b & behavior_skip_lock) == 0) {
 		pthread_rwlock_unlock(&this->_mutex_slot[mutex_index]);
 	}
+	r = result_none;
 
 	return 0;
 }

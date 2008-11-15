@@ -299,10 +299,12 @@ int storage_tch::truncate(int b) {
 
 	int r = 0;
 	if (tchdbvanish(this->_db) == false) {
-			int ecode = tchdbecode(this->_db);
-			log_err("tchdbvanish() failed: %s (%d)", tchdberrmsg(ecode), ecode);
-			r = -1;
+		int ecode = tchdbecode(this->_db);
+		log_err("tchdbvanish() failed: %s (%d)", tchdberrmsg(ecode), ecode);
+		r = -1;
 	}
+
+	this->_clear_header_cache();
 
 	if ((b & behavior_skip_lock) == 0) {
 		for (i = 0; i < this->_mutex_slot_size; i++) {

@@ -349,6 +349,11 @@ protected:
 	};
 
 	int _gc_header_cache(int lifetime);
+	int _clear_header_cache() {
+		tcmapdel(this->_header_cache_map);
+		this->_header_cache_map = tcmapnew();
+		return 0;
+	};
 };
 
 }	// namespace flare

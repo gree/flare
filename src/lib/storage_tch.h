@@ -56,7 +56,7 @@ public:
 	virtual type get_type() { return this->_type; };
 
 protected:
-	virtual uint64_t _get_version(string key);
+	virtual int _get_header(string key, entry& e);
 };
 
 }	// namespace flare

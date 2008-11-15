@@ -79,7 +79,9 @@ int op_delete::_run_server() {
 	}
 	
 	// post-proxy (notify updates to slaves if we need)
-	r_proxy = this->_cluster->post_proxy_write(this, (this->_entry.option & storage::option_sync));
+	if (r_storage == storage::result_deleted) {
+		r_proxy = this->_cluster->post_proxy_write(this, (this->_entry.option & storage::option_sync));
+	}
 	
 	if ((this->_entry.option & storage::option_noreply) == 0) {
 		return this->_send_result(static_cast<result>(r_storage));

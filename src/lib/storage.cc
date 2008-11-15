@@ -25,14 +25,14 @@ storage::storage(string data_dir, int mutex_slot_size):
 		_data_dir(data_dir),
 		_mutex_slot_size(mutex_slot_size),
 		_mutex_slot(NULL),
-		_data_version_cache_map(NULL) {
+		_header_cache_map(NULL) {
 	this->_mutex_slot = _new_ pthread_rwlock_t[mutex_slot_size];
 	int i;
 	for (i = 0; i < this->_mutex_slot_size; i++) {
 		pthread_rwlock_init(&this->_mutex_slot[i], NULL);
 	}
 
-	this->_data_version_cache_map = tcmapnew();
+	this->_header_cache_map = tcmapnew();
 }
 
 /**
@@ -41,8 +41,8 @@ storage::storage(string data_dir, int mutex_slot_size):
 storage::~storage() {
 	_delete_(this->_mutex_slot);
 
-	if (this->_data_version_cache_map) {
-		tcmapdel(this->_data_version_cache_map);
+	if (this->_header_cache_map) {
+		tcmapdel(this->_header_cache_map);
 	}
 }
 // }}}
@@ -111,44 +111,45 @@ int storage::_unserialize_header(const uint8_t* data, int data_len, entry& e) {
 	memcpy(&e.version, data+offset, sizeof(e.version));
 	offset += sizeof(e.version);
 	
-	log_debug("header: flag=%d, expire=%d, version=%u, size=%u", e.flag, e.expire, e.version, e.size);
+	log_debug("unserialized (flag=%d, expire=%d, size=%llu, version=%llu)", e.flag, e.expire, e.size, e.version);
 
 	return offset;
 }
 
-int storage::_set_data_version_cache(string key, uint64_t version, time_t expire) {
-	uint8_t tmp[sizeof(uint64_t) + sizeof(time_t)];
-	uint64_t* p;
-	time_t* q;
+int storage::_set_header_cache(string key, entry& e) {
+	log_debug("set header into cache (key=%s, expire=%ld, version=%llu)", key.c_str(), e.expire, e.version);
+	uint8_t tmp[sizeof(time_t) + sizeof(uint64_t)];
+	time_t* p;
+	uint64_t* q;
 
-	p = reinterpret_cast<uint64_t*>(tmp);
-	*p = version;
-	q = reinterpret_cast<time_t*>(tmp+sizeof(uint64_t));
-	*q = expire == 0 ? stats_object->get_timestamp() : expire;
+	p = reinterpret_cast<time_t*>(tmp);
+	*p = e.expire == 0 ? stats_object->get_timestamp() : e.expire;
+	q = reinterpret_cast<uint64_t*>(tmp+sizeof(time_t));
+	*q = e.version;
 
-	tcmapput(this->_data_version_cache_map, key.c_str(), key.size(), tmp, sizeof(tmp));
+	tcmapput(this->_header_cache_map, key.c_str(), key.size(), tmp, sizeof(tmp));
 
 	return 0;
 };
 
-int storage::_gc_data_version_cache(int lifetime) {
-	log_debug("gc for data version cache (lifetime=%d)", lifetime);
+int storage::_gc_header_cache(int lifetime) {
+	log_debug("gc header cache (lifetime=%d)", lifetime);
 
 	time_t t_limit = stats_object->get_timestamp() - lifetime;
-	tcmapiterinit(this->_data_version_cache_map);
+	tcmapiterinit(this->_header_cache_map);
 	int key_len;
 	char* key;
-	while ((key = (char*)tcmapiternext(this->_data_version_cache_map, &key_len)) != NULL) {
+	while ((key = (char*)tcmapiternext(this->_header_cache_map, &key_len)) != NULL) {
 		int tmp_len;
-		uint8_t* tmp = (uint8_t*)tcmapget(this->_data_version_cache_map, key, key_len, &tmp_len);
+		uint8_t* tmp = (uint8_t*)tcmapget(this->_header_cache_map, key, key_len, &tmp_len);
 		if (tmp == NULL) {
 			continue;
 		}
 
-		time_t t = *(reinterpret_cast<time_t*>(tmp+sizeof(uint64_t)));
+		time_t t = *(reinterpret_cast<time_t*>(tmp));
 		if (t < t_limit) {
 			log_debug("clearing expired data version cache (key=%s, t=%d)", key, t);
-			tcmapout(this->_data_version_cache_map, key, key_len);
+			tcmapout(this->_header_cache_map, key, key_len);
 		}
 	}
 

@@ -37,6 +37,7 @@ public:
 		behavior_skip_lock 			= 0x01,
 		behavior_skip_timestamp = 0x01 << 1,
 		behavior_skip_version 	= 0x01 << 2,
+		behavior_version_equal	= 0x01 << 3,
 	};
 	
 	enum									result {
@@ -224,7 +225,7 @@ protected:
 	string								_data_path;
 	int										_mutex_slot_size;
 	pthread_rwlock_t*			_mutex_slot;
-	TCMAP*								_data_version_cache_map;
+	TCMAP*								_header_cache_map;
 
 public:
 	storage(string data_dir, int mutex_slot_size);
@@ -326,23 +327,28 @@ public:
 	};
 
 protected:
-	virtual uint64_t _get_version(string key) = 0;
 	virtual int _serialize_header(entry& e, uint8_t* data);
 	virtual int _unserialize_header(const uint8_t* data, int data_len, entry& e);
-	int _set_data_version_cache(string key, uint64_t version, time_t expire);
+	virtual int _get_header(string key, entry& e) = 0;
+	int _set_header_cache(string key, entry& e);
 
-	inline uint64_t _get_data_version_cache(string key) {
+	inline int _get_header_cache(string key, entry& e) {
+		log_debug("get header from cache (key=%s)", key.c_str());
 		int tmp_len;
-		uint8_t* tmp = (uint8_t*)tcmapget(this->_data_version_cache_map, key.c_str(), key.size(), &tmp_len);
+		uint8_t* tmp = (uint8_t*)tcmapget(this->_header_cache_map, key.c_str(), key.size(), &tmp_len);
 		if (tmp == NULL) {
+			log_debug("no header in cache (key=%s)", key.c_str());
 			return 0;
 		}
-		log_debug("current version cache (key=%s, version=%u)", key.c_str(), *(reinterpret_cast<uint64_t*>(tmp)));
 
-		return *(reinterpret_cast<uint64_t*>(tmp));
+		e.expire = *(reinterpret_cast<time_t*>(tmp));
+		e.version = *(reinterpret_cast<uint64_t*>(tmp+sizeof(time_t)));
+		log_debug("header from cache (key=%s, expire=%ld, version=%llu)", key.c_str(), e.expire, e.version);
+
+		return 0;
 	};
 
-	int _gc_data_version_cache(int lifetime);
+	int _gc_header_cache(int lifetime);
 };
 
 }	// namespace flare

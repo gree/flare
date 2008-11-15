@@ -83,7 +83,7 @@ int storage_tch::close() {
 }
 
 int storage_tch::set(entry& e, result& r, int b) {
-	log_info("setting data (key=%s)", e.key.c_str());
+	log_info("set (key=%s, flag=%d, expire=%ld, size=%llu, version=%llu", e.key.c_str(), e.flag, e.expire, e.size, e.version);
 	int mutex_index = 0;
 
 	if ((b & behavior_skip_lock) == 0) {
@@ -96,24 +96,27 @@ int storage_tch::set(entry& e, result& r, int b) {
 			pthread_rwlock_wrlock(&this->_mutex_slot[mutex_index]);
 		}
 
-		uint64_t version = this->_get_version(e.key);
+		entry e_current;
+		this->_get_header(e.key, e_current);
 		if ((b & behavior_skip_version) == 0 && e.version != 0) {
-			if (e.version <= version) {
-				log_info("specified version is older than (or equal to) current version -> skip setting (current=%u, specified=%u)", version, e.version);
+			if (e.version <= e_current.version) {
+				log_info("specified version is older than (or equal to) current version -> skip setting (current=%u, specified=%u)", e_current.version, e.version);
 				r = result_not_stored;
 				throw 0;
 			}
 		}
 
 		if (e.version == 0) {
-			e.version = version+1;
+			e.version = e_current.version+1;
+			log_debug("updating version (version=%llu)", e.version);
 		}
-		p = _new_ uint8_t[storage::entry::header_size + e.size];
+		p = _new_ uint8_t[entry::header_size + e.size];
 		this->_serialize_header(e, p);
-		memcpy(p+storage::entry::header_size, e.data.get(), e.size);
+		memcpy(p+entry::header_size, e.data.get(), e.size);
 
 		if (e.option & option_noreply) {
-			if (tchdbputasync(this->_db, e.key.c_str(), e.key.size(), p, storage::entry::header_size + e.size) == true) {
+			if (tchdbputasync(this->_db, e.key.c_str(), e.key.size(), p, entry::header_size + e.size) == true) {
+				log_debug("stored data [async] (key=%s, size=%llu)", e.key.c_str(), entry::header_size + e.size);
 				r = result_stored;
 			} else {
 				int ecode = tchdbecode(this->_db);
@@ -121,11 +124,12 @@ int storage_tch::set(entry& e, result& r, int b) {
 				throw -1;
 			}
 		} else {
-			if (tchdbput(this->_db, e.key.c_str(), e.key.size(), p, storage::entry::header_size + e.size) == true) {
+			if (tchdbput(this->_db, e.key.c_str(), e.key.size(), p, entry::header_size + e.size) == true) {
+				log_debug("stored data [sync] (key=%s, size=%llu)", e.key.c_str(), entry::header_size + e.size);
 				r = result_stored;
 			} else {
 				int ecode = tchdbecode(this->_db);
-				log_err("tchdbputasync() failed: %s (%d)", tchdberrmsg(ecode), ecode);
+				log_err("tchdbput() failed: %s (%d)", tchdberrmsg(ecode), ecode);
 				throw -1;
 			}
 		}
@@ -149,7 +153,7 @@ int storage_tch::set(entry& e, result& r, int b) {
 }
 
 int storage_tch::get(entry& e, result& r, int b) {
-	log_info("retrieving data (key=%s)", e.key.c_str());
+	log_info("get (key=%s)", e.key.c_str());
 	int mutex_index = 0;
 	uint8_t* tmp_data = NULL;
 	int tmp_len = 0;
@@ -204,7 +208,7 @@ int storage_tch::get(entry& e, result& r, int b) {
 
 		if (remove_request) {
 			result r_remove;
-			this->remove(e, r_remove);		// do not care about result here
+			this->remove(e, r_remove, behavior_version_equal);		// do not care about result here
 		}
 
 		return error;
@@ -218,7 +222,7 @@ int storage_tch::get(entry& e, result& r, int b) {
 }
 
 int storage_tch::remove(entry& e, result& r, int b) {
-	log_info("removing data (key=%s)", e.key.c_str());
+	log_info("remove (key=%s, expire=%ld, version=%llu)", e.key.c_str(), e.expire, e.version);
 	int mutex_index = 0;
 
 	if ((b & behavior_skip_lock) == 0) {
@@ -230,34 +234,46 @@ int storage_tch::remove(entry& e, result& r, int b) {
 			pthread_rwlock_wrlock(&this->_mutex_slot[mutex_index]);
 		}
 
-		uint64_t version = this->_get_version(e.key);
+		entry e_current;
+		int e_current_exists = this->_get_header(e.key, e_current);
 		if ((b & behavior_skip_version) == 0 && e.version != 0) {
-			if (e.version <= version) {
-				log_info("specified version is older than (or equal to) current version -> skip removing (current=%u, specified=%u)", version, e.version);
+			if (e.version <= e_current.version && ((b & behavior_version_equal) != 0 && e.version != e_current.version)) {
+				log_info("specified version is older than (or equal to) current version -> skip removing (current=%u, specified=%u)", e_current.version, e.version);
 				r = result_not_found;
 				throw 0;
 			}
 		}
 
-		uint8_t tmp_data;
-		int tmp_len = tchdbget3(this->_db, e.key.c_str(), e.key.size(), &tmp_data, 1);
-		if (tmp_len < 0) {
-			if (e.version != 0 && e.version > version) {
-				this->_set_data_version_cache(e.key, e.version, e.expire);
+		if (e_current_exists < 0) {
+			log_debug("data not found in database -> skip removing and updating header cache if we need", 0);
+			if (e.version != 0) {
+				this->_set_header_cache(e.key, e);
 			}
 			r = result_not_found;
 			throw 0;
 		}
 
+		bool expired = false;
+		if ((b & behavior_skip_timestamp) == 0 && e_current.expire > 0 && e_current.expire < stats_object->get_timestamp()) {
+			log_info("data expired [expire=%d] -> result is NOT_FOUND but continue processing", e_current.expire);
+			expired = true;
+		}
+
 		if (tchdbout(this->_db, e.key.c_str(), e.key.size()) == true) {
-			r = result_deleted;
+			r = expired ? result_not_found : result_deleted;
+			log_debug("removed data (key=%s)", e.key.c_str());
 		} else {
 			int ecode = tchdbecode(this->_db);
 			log_err("tchdbout() failed: %s (%d)", tchdberrmsg(ecode), ecode);
 			throw -1;
 		}
-		e.version = version+1;
-		this->_set_data_version_cache(e.key, e.version, e.expire);
+		if (expired == false) {
+			if (e.version == 0) {
+				e.version = e_current.version+1;
+				log_debug("updating version (version=%llu)", e.version);
+			}
+			this->_set_header_cache(e.key, e);
+		}
 	} catch (int error) {
 		if ((b & behavior_skip_lock) == 0) {
 			pthread_rwlock_unlock(&this->_mutex_slot[mutex_index]);
@@ -332,24 +348,26 @@ int storage_tch::iter_end() {
 // }}}
 
 // {{{ protected methods
-uint64_t storage_tch::_get_version(string key) {
-	uint8_t tmp_data[storage::entry::header_size];
-	int tmp_len = tchdbget3(this->_db, key.c_str(), key.size(), tmp_data, storage::entry::header_size);
+int storage_tch::_get_header(string key, entry& e) {
+	log_debug("get header from database (key=%s)", e.key.c_str());
+	uint8_t tmp_data[entry::header_size];
+	int tmp_len = tchdbget3(this->_db, key.c_str(), key.size(), tmp_data, entry::header_size);
 	if (tmp_len < 0) {
 		// if not found, check data version cache
-		return this->_get_data_version_cache(key);
+		log_debug("header not found in database -> checking cache", 0);
+		this->_get_header_cache(key, e);
+		return -1;
 	}
 
-	entry e;
 	int offset = this->_unserialize_header(tmp_data, tmp_len, e);
 	if (offset < 0) {
 		log_err("failed to unserialize header (data is corrupted) (tmp_len=%d)", tmp_len);
-		return 0;
+		return -1;
 	}
 
-	log_debug("current version (key=%s, version=%u)", key.c_str(), e.version);
+	log_debug("current header from database (key=%s, flag=%u, version=%llu, expire=%ld, size=%llu)", key.c_str(), e.flag, e.version, e.expire, e.size);
 
-	return e.version;
+	return 0;
 }
 // }}}
 

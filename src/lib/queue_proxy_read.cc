@@ -10,6 +10,7 @@
 #include "queue_proxy_read.h"
 #include "op_proxy_read.h"
 #include "op_get.h"
+#include "op_gets.h"
 
 namespace gree {
 namespace flare {
@@ -78,6 +79,8 @@ int queue_proxy_read::run(shared_connection c) {
 op_proxy_read* queue_proxy_read::_get_op(string op_ident, shared_connection c) {
 	if (op_ident == "get") {
 		return _new_ op_get(c, this->_cluster, this->_storage);
+	} else if (op_ident == "gets") {
+		return _new_ op_gets(c, this->_cluster, this->_storage);
 	}
 	log_warning("unknown op (ident=%s)", op_ident.c_str());
 

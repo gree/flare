@@ -142,7 +142,7 @@ int op_get::_run_server() {
 int op_get::_run_client(storage::entry& e) {
 	int request_len = e.key.size() + BUFSIZ;
 	char* request = _new_ char[request_len];
-	snprintf(request, request_len, "get %s", e.key.c_str());
+	snprintf(request, request_len, "%s %s", this->get_ident().c_str(), e.key.c_str());
 	int r = this->_send_request(request);
 	_delete_(request);
 
@@ -156,7 +156,7 @@ int op_get::_run_client(list<storage::entry>& e) {
 	}
 
 	ostringstream s;
-	s << "get";
+	s << this->get_ident();
 	for (list<storage::entry>::iterator it = e.begin(); it != e.end(); it++) {
 		s << " " << it->key;
 	}

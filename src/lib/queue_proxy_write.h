@@ -35,6 +35,7 @@ protected:
 	op::result							_result;
 	string									_result_message;
 	bool										_post_proxy;
+	uint64_t								_generic_value;
 
 public:
 	static const int max_retry = 4;
@@ -47,6 +48,8 @@ public:
 	string get_result_message() { return this->_result_message; };
 	int set_post_proxy(bool post_proxy) { this->_post_proxy = post_proxy; return 0; };
 	bool is_post_proxy() { return this->_post_proxy; };
+	int set_generic_value(uint64_t generic_value) { this->_generic_value = generic_value; return 0; };
+	uint64_t get_generic_value() { return this->_generic_value; };
 
 protected:
 	op_proxy_write* _get_op(string op_ident, shared_connection c);

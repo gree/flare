@@ -25,12 +25,14 @@ libflare_a_SOURCES = \
 	op.cc op.h \
 	op_add.h op_add.cc \
 	op_cas.h op_cas.cc \
+	op_decr.h op_decr.cc \
 	op_delete.h op_delete.cc \
 	op_dump.h op_dump.cc \
 	op_error.h op_error.cc \
 	op_flush_all.h op_flush_all.cc \
 	op_get.h op_get.cc \
 	op_gets.h op_gets.cc \
+	op_incr.h op_incr.cc \
 	op_kill.h op_kill.cc \
 	op_node_add.h op_node_add.cc \
 	op_node_remove.h op_node_remove.cc \

@@ -173,7 +173,7 @@ public:
 	int activate_node();
 	int deactivate_node();
 	proxy_request pre_proxy_read(op_proxy_read* op, storage::entry& e, shared_queue_proxy_read& q);
-	proxy_request pre_proxy_write(op_proxy_write* op, shared_queue_proxy_write& q);
+	proxy_request pre_proxy_write(op_proxy_write* op, shared_queue_proxy_write& q, uint64_t generic_value = 0);
 	proxy_request post_proxy_write(op_proxy_write* op, bool sync = false);
 
 	inline node get_node(string node_key) {

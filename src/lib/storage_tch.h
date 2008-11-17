@@ -46,6 +46,7 @@ public:
 	virtual int open();
 	virtual int close();
 	virtual int set(entry& e, result& r, int b = 0);
+	virtual int incr(entry& e, uint64_t value, result& r, bool increment, int b = 0);
 	virtual int get(entry& e, result& r, int b = 0);
 	virtual int remove(entry& e, result& r, int b = 0);
 	virtual int truncate(int b = 0);

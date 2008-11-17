@@ -889,7 +889,7 @@ cluster::proxy_request cluster::pre_proxy_read(op_proxy_read* op, storage::entry
  *
  *	@todo fix performance issue
  */
-cluster::proxy_request cluster::pre_proxy_write(op_proxy_write* op, shared_queue_proxy_write& q_result) {
+cluster::proxy_request cluster::pre_proxy_write(op_proxy_write* op, shared_queue_proxy_write& q_result, uint64_t generic_value) {
 	storage::entry& e = op->get_entry();
 
 	partition p, p_prepare;
@@ -918,6 +918,7 @@ cluster::proxy_request cluster::pre_proxy_write(op_proxy_write* op, shared_queue
 	vector<string> proxy = op->get_proxy();
 	proxy.push_back(this->_node_key);
 	shared_queue_proxy_write q(new queue_proxy_write(this, this->_storage, proxy, e, op->get_ident()));
+	q->set_generic_value(generic_value);
 	if (this->_enqueue(shared_static_cast<thread_queue, queue_proxy_write>(q), p.master.node_key, e.get_key_hash_value(storage::hash_algorithm_bitshift), sync) < 0) {
 		return proxy_request_error_enqueue;
 	}

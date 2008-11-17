@@ -20,6 +20,15 @@ namespace flare {
  */
 op_set::op_set(shared_connection c, cluster* cl, storage* st):
 		op_proxy_write(c, "set", cl, st) {
+	this->_behavior = 0;
+}
+
+/**
+ *	ctor for op_set
+ */
+op_set::op_set(shared_connection c, string ident, cluster* cl, storage* st):
+		op_proxy_write(c, ident, cl, st) {
+	this->_behavior = 0;
 }
 
 /**
@@ -87,7 +96,7 @@ int op_set::_run_server() {
 
 	// storage i/o
 	storage::result r_storage;
-	if (this->_storage->set(this->_entry, r_storage) < 0) {
+	if (this->_storage->set(this->_entry, r_storage, this->_behavior) < 0) {
 		return this->_send_result(result_server_error, "i/o error");
 	}
 	if (r_storage == storage::result_stored) {
@@ -108,7 +117,7 @@ int op_set::_run_client(storage::entry& e) {
 	string proxy_ident = this->_get_proxy_ident();
 	int request_len = proxy_ident.size() + e.key.size() + e.size + BUFSIZ;
 	char* request = _new_ char[request_len];
-	int offset = snprintf(request, request_len, "%sset %s %u %ld %llu", proxy_ident.c_str(), e.key.c_str(), e.flag, e.expire, e.size);
+	int offset = snprintf(request, request_len, "%s%s %s %u %ld %llu", proxy_ident.c_str(), this->get_ident().c_str(), e.key.c_str(), e.flag, e.expire, e.size);
 	if (e.version > 0) {
 		offset += snprintf(request+offset, request_len-offset, " %llu", e.version);
 	}

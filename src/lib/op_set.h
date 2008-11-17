@@ -21,9 +21,11 @@ namespace flare {
  */
 class op_set : public op_proxy_write {
 protected:
+	int			_behavior;
 
 public:
 	op_set(shared_connection c, cluster* cl, storage* st);
+	op_set(shared_connection c, string ident, cluster* cl, storage* st);
 	virtual ~op_set();
 
 protected:

@@ -97,7 +97,15 @@ int storage_tch::set(entry& e, result& r, int b) {
 		}
 
 		entry e_current;
-		this->_get_header(e.key, e_current);
+		int e_current_exists = this->_get_header(e.key, e_current);
+		
+		// check for "add"
+		if ((b & behavior_add) != 0 && e_current_exists == 0) {
+			log_debug("behavior=add and data exists -> skip setting", 0);
+			r = result_not_stored;
+			throw 0;
+		}
+
 		if ((b & behavior_skip_version) == 0 && e.version != 0) {
 			if (e.version <= e_current.version) {
 				log_info("specified version is older than (or equal to) current version -> skip setting (current=%u, specified=%u)", e_current.version, e.version);

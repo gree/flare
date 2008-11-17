@@ -955,6 +955,7 @@ cluster::proxy_request cluster::post_proxy_write(op_proxy_write* op, bool sync) 
 	vector<string> proxy = op->get_proxy();
 	proxy.push_back(this->_node_key);
 	shared_queue_proxy_write q(new queue_proxy_write(this, this->_storage, proxy, e, op->get_ident()));
+	q->set_post_proxy(true);
 
 	partition& p_tmp = is_prepare ? p_prepare : p;
 	for (vector<partition_node>::iterator it = p_tmp.slave.begin(); it != p_tmp.slave.end(); it++) {

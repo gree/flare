@@ -9,6 +9,7 @@
  */
 #include "queue_proxy_write.h"
 #include "op_proxy_write.h"
+#include "op_add.h"
 #include "op_delete.h"
 #include "op_set.h"
 
@@ -27,7 +28,8 @@ queue_proxy_write::queue_proxy_write(cluster* cl, storage* st, vector<string> pr
 		_entry(entry),
 		_op_ident(op_ident),
 		_result(op::result_none),
-		_result_message("") {
+		_result_message(""),
+		_post_proxy(false) {
 }
 
 /**
@@ -79,6 +81,12 @@ int queue_proxy_write::run(shared_connection c) {
 op_proxy_write* queue_proxy_write::_get_op(string op_ident, shared_connection c) {
 	if (op_ident == "set") {
 		return _new_ op_set(c, this->_cluster, this->_storage);
+	} else if (op_ident == "add") {
+		if (this->is_post_proxy()) {
+			return _new_ op_set(c, this->_cluster, this->_storage);
+		} else {
+			return _new_ op_add(c, this->_cluster, this->_storage);
+		}
 	} else if (op_ident == "delete") {
 		return _new_ op_delete(c, this->_cluster, this->_storage);
 	}

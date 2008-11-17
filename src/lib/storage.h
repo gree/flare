@@ -38,6 +38,8 @@ public:
 		behavior_skip_timestamp = 0x01 << 1,
 		behavior_skip_version 	= 0x01 << 2,
 		behavior_version_equal	= 0x01 << 3,
+		behavior_add						= 0x01 << 4,
+		behavior_replace				= 0x02 << 5,
 	};
 	
 	enum									result {

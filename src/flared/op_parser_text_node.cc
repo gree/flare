@@ -44,6 +44,8 @@ op* op_parser_text_node::_determine_op(const char* first, const char* buf, int& 
 		r = static_cast<op*>(_new_ op_get(this->_connection, singleton<flared>::instance().get_cluster(), singleton<flared>::instance().get_storage())); 
 	} else if (strcmp(first, "set") == 0) {
 		r = static_cast<op*>(_new_ op_set(this->_connection, singleton<flared>::instance().get_cluster(), singleton<flared>::instance().get_storage())); 
+	} else if (strcmp(first, "add") == 0) {
+		r = static_cast<op*>(_new_ op_add(this->_connection, singleton<flared>::instance().get_cluster(), singleton<flared>::instance().get_storage())); 
 	} else if (strcmp(first, "delete") == 0) {
 		r = static_cast<op*>(_new_ op_delete(this->_connection, singleton<flared>::instance().get_cluster(), singleton<flared>::instance().get_storage())); 
 	} else if (strcmp(first, "gets") == 0) {

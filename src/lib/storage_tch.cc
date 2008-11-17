@@ -106,6 +106,13 @@ int storage_tch::set(entry& e, result& r, int b) {
 			throw 0;
 		}
 
+		// check for "replace"
+		if ((b & behavior_replace) != 0 && e_current_exists != 0) {
+			log_debug("behavior=replace and data not found -> skip setting", 0);
+			r = result_not_stored;
+			throw 0;
+		}
+
 		if ((b & behavior_skip_version) == 0 && e.version != 0) {
 			if (e.version <= e_current.version) {
 				log_info("specified version is older than (or equal to) current version -> skip setting (current=%u, specified=%u)", e_current.version, e.version);

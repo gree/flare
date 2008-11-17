@@ -43,6 +43,7 @@ libflare_a_SOURCES = \
 	op_proxy_read.h op_proxy_read.cc \
 	op_proxy_write.h op_proxy_write.cc \
 	op_quit.h op_quit.cc \
+	op_replace.h op_replace.cc \
 	op_set.h op_set.cc \
 	op_stats.h op_stats.cc \
 	op_version.h op_version.cc \

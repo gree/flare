@@ -1,30 +1,30 @@
 /**
- *	op_add.cc
+ *	op_replace.cc
  *
- *	implementation of gree::flare::op_add
+ *	implementation of gree::flare::op_replace
  *
  *	@author	Masaki Fujimoto <fujimoto@php.net>
  *
  *	$Id$
  */
-#include "op_add.h"
+#include "op_replace.h"
 
 namespace gree {
 namespace flare {
 
 // {{{ ctor/dtor
 /**
- *	ctor for op_add
+ *	ctor for op_replace
  */
-op_add::op_add(shared_connection c, cluster* cl, storage* st):
-		op_set(c, "add", cl, st) {
-	this->_behavior = storage::behavior_add;
+op_replace::op_replace(shared_connection c, cluster* cl, storage* st):
+		op_set(c, "replace", cl, st) {
+	this->_behavior = storage::behavior_replace;
 }
 
 /**
- *	dtor for op_add
+ *	dtor for op_replace
  */
-op_add::~op_add() {
+op_replace::~op_replace() {
 }
 // }}}
 

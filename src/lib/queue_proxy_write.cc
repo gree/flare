@@ -12,6 +12,7 @@
 #include "op_add.h"
 #include "op_delete.h"
 #include "op_set.h"
+#include "op_replace.h"
 
 namespace gree {
 namespace flare {
@@ -86,6 +87,12 @@ op_proxy_write* queue_proxy_write::_get_op(string op_ident, shared_connection c)
 			return _new_ op_set(c, this->_cluster, this->_storage);
 		} else {
 			return _new_ op_add(c, this->_cluster, this->_storage);
+		}
+	} else if (op_ident == "replace") {
+		if (this->is_post_proxy()) {
+			return _new_ op_set(c, this->_cluster, this->_storage);
+		} else {
+			return _new_ op_replace(c, this->_cluster, this->_storage);
 		}
 	} else if (op_ident == "delete") {
 		return _new_ op_delete(c, this->_cluster, this->_storage);

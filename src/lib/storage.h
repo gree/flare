@@ -39,7 +39,8 @@ public:
 		behavior_skip_version 	= 0x01 << 2,
 		behavior_version_equal	= 0x01 << 3,
 		behavior_add						= 0x01 << 4,
-		behavior_replace				= 0x02 << 5,
+		behavior_replace				= 0x01 << 5,
+		behavior_cas						= 0x01 << 6,
 	};
 	
 	enum									result {
@@ -63,6 +64,7 @@ public:
 
 	enum									parse_type {
 		parse_type_set,
+		parse_type_cas,
 		parse_type_get,
 		parse_type_delete,
 	};
@@ -126,7 +128,7 @@ public:
 				this->key = q;
 				log_debug("storing key [%s]", this->key.c_str());
 
-				if (t == parse_type_set || t == parse_type_get) {
+				if (t != parse_type_delete) {
 					// flag
 					n += util::next_digit(p+n, q, sizeof(q));
 					if (q[0] == '\0') {
@@ -137,7 +139,7 @@ public:
 					log_debug("storing flag [%u]", this->flag);
 				}
 				
-				if (t == parse_type_set || t == parse_type_delete) {
+				if (t != parse_type_get) {
 					// expire
 					n += util::next_digit(p+n, q, sizeof(q));
 					if (q[0] == '\0') {
@@ -151,7 +153,7 @@ public:
 					}
 				}
 
-				if (t == parse_type_set || t == parse_type_get) {
+				if (t != parse_type_delete) {
 					// size
 					n += util::next_digit(p+n, q, sizeof(q));
 					if (q[0] == '\0') {
@@ -167,6 +169,9 @@ public:
 				if (q[0]) {
 					this->version = lexical_cast<uint64_t>(q);
 					log_debug("storing version [%u]", this->version);
+				} else if (t == parse_type_cas) {
+					log_debug("no version found", 0);
+					return -1;
 				}
 
 				if (t == parse_type_get) {
@@ -178,7 +183,7 @@ public:
 					}
 				}
 
-				if (t == parse_type_set || t == parse_type_delete) {
+				if (t != parse_type_get) {
 					// option
 					n += util::next_word(p+n, q, sizeof(q));
 					while (q[0]) {

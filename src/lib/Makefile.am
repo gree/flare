@@ -24,6 +24,7 @@ libflare_a_SOURCES = \
 	net.h net.cc \
 	op.cc op.h \
 	op_add.h op_add.cc \
+	op_cas.h op_cas.cc \
 	op_delete.h op_delete.cc \
 	op_dump.h op_dump.cc \
 	op_error.h op_error.cc \

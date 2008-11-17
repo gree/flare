@@ -54,7 +54,7 @@ int op_set::_parse_server_parameter() {
 		return -1;
 	}
 
-	if (this->_entry.parse(p, storage::parse_type_set) < 0) {
+	if (this->_entry.parse(p, this->get_ident() == "cas" ? storage::parse_type_cas : storage::parse_type_set) < 0) {
 		_delete_(p);
 		return -1;
 	}
@@ -101,10 +101,9 @@ int op_set::_run_server() {
 	}
 	if (r_storage == storage::result_stored) {
 		stats_object->increment_total_items();
+		// post-proxy (notify updates to slaves if we need)
+		r_proxy = this->_cluster->post_proxy_write(this, (this->_entry.option & storage::option_sync));
 	}
-	
-	// post-proxy (notify updates to slaves if we need)
-	r_proxy = this->_cluster->post_proxy_write(this, (this->_entry.option & storage::option_sync));
 	
 	if ((this->_entry.option & storage::option_noreply) == 0) {
 		return this->_send_result(static_cast<result>(r_storage));
@@ -118,7 +117,7 @@ int op_set::_run_client(storage::entry& e) {
 	int request_len = proxy_ident.size() + e.key.size() + e.size + BUFSIZ;
 	char* request = _new_ char[request_len];
 	int offset = snprintf(request, request_len, "%s%s %s %u %ld %llu", proxy_ident.c_str(), this->get_ident().c_str(), e.key.c_str(), e.flag, e.expire, e.size);
-	if (e.version > 0) {
+	if (e.version > 0 || this->get_ident() == "cas") {
 		offset += snprintf(request+offset, request_len-offset, " %llu", e.version);
 	}
 	if (e.option & storage::option_noreply) {

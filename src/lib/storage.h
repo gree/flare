@@ -240,6 +240,8 @@ public:
 	virtual int iter_begin() = 0;
 	virtual int iter_next(string& key) = 0;
 	virtual int iter_end() = 0;
+	virtual uint32_t count() = 0;
+	virtual uint64_t size() = 0;
 
 	virtual type get_type() = 0;
 

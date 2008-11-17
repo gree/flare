@@ -347,6 +347,14 @@ int storage_tch::iter_end() {
 
 	return 0;
 }
+
+uint32_t storage_tch::count() {
+	return tchdbrnum(this->_db);
+}
+
+uint64_t storage_tch::size() {
+	return tchdbfsiz(this->_db);
+}
 // }}}
 
 // {{{ protected methods

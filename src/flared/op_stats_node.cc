@@ -62,7 +62,7 @@ int op_stats_node::_run_server() {
 		this->_send_stats_nodes(singleton<flared>::instance().get_cluster());
 		break;
 	default:
-		this->_send_stats(singleton<flared>::instance().get_thread_pool());
+		this->_send_stats(singleton<flared>::instance().get_thread_pool(), singleton<flared>::instance().get_storage());
 		break;
 	}
 	this->_send_result(result_end);

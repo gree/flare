@@ -52,6 +52,8 @@ public:
 	virtual int iter_begin();
 	virtual int iter_next(string& key);
 	virtual int iter_end();
+	virtual uint32_t count();
+	virtual uint64_t size();
 
 	virtual type get_type() { return this->_type; };
 

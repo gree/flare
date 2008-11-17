@@ -7,6 +7,7 @@
  *
  *	$Id$
  */
+#include "app.h"
 #include "op_get.h"
 #include "queue_proxy_read.h"
 
@@ -80,6 +81,8 @@ int op_get::_run_server() {
 	map<string, storage::result> r_map;
 
 	for (list<storage::entry>::iterator it = this->_entry_list.begin(); it != this->_entry_list.end(); it++) {
+		stats_object->increment_cmd_get();
+
 		shared_queue_proxy_read q;
 		cluster::proxy_request r_proxy = this->_cluster->pre_proxy_read(this, *it, q);
 		if (r_proxy == cluster::proxy_request_complete) {
@@ -111,18 +114,22 @@ int op_get::_run_server() {
 			q->sync();
 			storage::entry& e = q->get_entry();
 			if (e.is_data_available() == false) {
+				stats_object->increment_misses();
 				continue;
 			}
 			e.response(&response, response_len, this->_append_version ? storage::response_type_gets : storage::response_type_get);
 		} else if (r_map.count(it->key) == 0) {
+			stats_object->increment_misses();
 			log_warning("result map is inconsistent (key=%s)", it->key.c_str());
 			continue;
 		} else if (r_map[it->key] == storage::result_not_found) {
+			stats_object->increment_misses();
 			continue;
 		} else {
 			it->response(&response, response_len, this->_append_version ? storage::response_type_gets : storage::response_type_get);
 		}
 
+		stats_object->increment_hits();
 		this->_connection->write(response, response_len, true);
 		_delete_(response);
 	}

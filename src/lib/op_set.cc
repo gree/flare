@@ -7,6 +7,7 @@
  *
  *	$Id$
  */
+#include "app.h"
 #include "op_set.h"
 #include "queue_proxy_write.h"
 
@@ -64,6 +65,8 @@ int op_set::_parse_server_parameter() {
 }
 
 int op_set::_run_server() {
+	stats_object->increment_cmd_set();
+
 	// pre-proxy (proxy if node is not master in request-partition)
 	shared_queue_proxy_write q;
 	cluster::proxy_request r_proxy = this->_cluster->pre_proxy_write(this, q);
@@ -86,6 +89,9 @@ int op_set::_run_server() {
 	storage::result r_storage;
 	if (this->_storage->set(this->_entry, r_storage) < 0) {
 		return this->_send_result(result_server_error, "i/o error");
+	}
+	if (r_storage == storage::result_stored) {
+		stats_object->increment_total_items();
 	}
 	
 	// post-proxy (notify updates to slaves if we need)

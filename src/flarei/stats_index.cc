@@ -17,7 +17,8 @@ namespace flare {
 /**
  *	ctor for stats_index
  */
-stats_index::stats_index() {
+stats_index::stats_index():
+		stats::stats() {
 }
 
 /**

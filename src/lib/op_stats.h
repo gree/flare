@@ -12,6 +12,7 @@
 #include <string>
 
 #include "op.h"
+#include "storage.h"
 #include "thread_pool.h"
 
 using namespace std;
@@ -46,7 +47,7 @@ protected:
 	virtual int _parse_server_parameter();
 	virtual int _run_server();
 
-	virtual int _send_stats(thread_pool* tp);
+	virtual int _send_stats(thread_pool* tp, storage* st);
 	virtual int _send_stats_items();
 	virtual int _send_stats_slabs();
 	virtual int _send_stats_sizes();

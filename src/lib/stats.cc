@@ -18,6 +18,7 @@ namespace flare {
  */
 stats::stats():
 		_start_timestamp(0),
+		_total_items(0),
 		_total_connections(0),
 		_cmd_get(0),
 		_cmd_set(0),
@@ -95,16 +96,16 @@ struct rusage stats::get_rusage() {
 	return usage;
 }
 
-uint32_t stats::get_curr_items() {
-	return 0;
+uint32_t stats::get_curr_items(storage* st) {
+	return st ? st->count() : 0;
 }
 
 uint32_t stats::get_total_items() {
-	return 0;
+	return this->_total_items;
 }
 
-uint32_t stats::get_bytes() {
-	return 0;
+uint64_t stats::get_bytes(storage* st) {
+	return st ? st->size() : 0;
 }
 
 uint32_t stats::get_curr_connections(thread_pool* tp) {
@@ -119,31 +120,31 @@ uint32_t stats::get_connection_structures() {
 	return 0;
 }
 
-uint64_t stats::get_cmd_get() {
+unsigned int stats::get_cmd_get() {
 	return this->_cmd_get;
 }
 
-uint64_t stats::get_cmd_set() {
+unsigned int stats::get_cmd_set() {
 	return this->_cmd_set;
 }
 
-uint64_t stats::get_hits() {
+unsigned int stats::get_hits() {
 	return this->_hits;
 }
 
-uint64_t stats::get_misses() {
+unsigned int stats::get_misses() {
 	return this->_misses;
 }
 
-uint64_t stats::get_evictions() {
+unsigned int stats::get_evictions() {
 	return 0;
 }
 
-uint64_t stats::get_bytes_read() {
+unsigned int stats::get_bytes_read() {
 	return this->_bytes_read;
 }
 
-uint64_t stats::get_bytes_written() {
+unsigned int stats::get_bytes_written() {
 	return this->_bytes_written;
 }
 

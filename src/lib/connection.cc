@@ -364,12 +364,12 @@ int connection::write(const char* p, int bufsiz, bool buffered) {
 	for (i = 0; i < connection::write_retry_limit; i++) {
 		len = ::write(this->_sock, p+written, bufsiz-written);
 		if (len < 0) {
-			log_err("write() failed: %s (%d)", util::strerror(errno), errno);
 			if (errno == EAGAIN || errno == EINTR) {
+				log_notice("write() failed: %s (%d)", util::strerror(errno), errno);
 				usleep(connection::write_retry_wait);
 				continue;
 			}
-			log_err("-> closing socket", 0);
+			log_err("write() failed: %s (%d) -> closing socket", util::strerror(errno), errno);
 			this->close();
 			this->_errno = errno;
 
@@ -382,14 +382,14 @@ int connection::write(const char* p, int bufsiz, bool buffered) {
 
 			return -1;
 		}
+		stats_object->add_bytes_written(len);
 		written += len;
-		if (written == bufsiz) {
+		if (written >= bufsiz) {
 			log_debug("write %d bytes", len);
 			break;
 		} else {
 			log_info("expect %d bytes but write %d byes -> continue processing", bufsiz, len);
 		}
-		stats_object->add_bytes_written(len);
 	}
 	if (i == connection::write_retry_limit) {
 		return len >= 0 ? written : -1;

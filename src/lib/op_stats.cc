@@ -81,7 +81,7 @@ int op_stats::_run_server() {
 	return 0;
 }
 
-int op_stats::_send_stats(thread_pool* tp) {
+int op_stats::_send_stats(thread_pool* tp, storage* st) {
 	ostringstream s;
 
 	rusage usage = stats_object->get_rusage();
@@ -97,9 +97,9 @@ int op_stats::_send_stats(thread_pool* tp) {
 	s << "STAT " << "pointer_size " << stats_object->get_pointer_size() << line_delimiter;
 	s << "STAT " << "rusage_user " << usage_user << line_delimiter;
 	s << "STAT " << "rusage_system " << usage_system << line_delimiter;
-	s << "STAT " << "curr_items " << stats_object->get_curr_items() << line_delimiter;
-	s << "STAT " << "total_items " << stats_object->get_bytes() << line_delimiter;
-	s << "STAT " << "bytes " << stats_object->get_total_items() << line_delimiter;
+	s << "STAT " << "curr_items " << stats_object->get_curr_items(st) << line_delimiter;
+	s << "STAT " << "total_items " << stats_object->get_total_items() << line_delimiter;
+	s << "STAT " << "bytes " << stats_object->get_bytes(st) << line_delimiter;
 	s << "STAT " << "curr_connections " << stats_object->get_curr_connections(tp) << line_delimiter;
 	s << "STAT " << "total_connections " << stats_object->get_total_connections() << line_delimiter;
 	s << "STAT " << "connection_structures " << stats_object->get_connection_structures() << line_delimiter;

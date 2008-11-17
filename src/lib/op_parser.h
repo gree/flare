@@ -28,6 +28,7 @@
 #include "op_replace.h"
 #include "op_set.h"
 #include "op_stats.h"
+#include "op_verbosity.h"
 #include "op_version.h"
 
 using namespace std;

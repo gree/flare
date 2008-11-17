@@ -75,6 +75,8 @@ op* op_parser_text_node::_determine_op(const char* first, const char* buf, int& 
 		r = static_cast<op*>(_new_ op_kill(this->_connection, singleton<flared>::instance().get_thread_pool())); 
 	} else if (strcmp(first, "quit") == 0) {
 		r = static_cast<op*>(_new_ op_quit(this->_connection)); 
+	} else if (strcmp(first, "verbosity") == 0) {
+		r = static_cast<op*>(_new_ op_verbosity(this->_connection)); 
 	} else if (strcmp(first, "version") == 0) {
 		r = static_cast<op*>(_new_ op_version(this->_connection)); 
 	} else {

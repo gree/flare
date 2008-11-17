@@ -105,7 +105,7 @@ public:
 	int notify_shutdown();
 
 	int dequeue(shared_thread_queue& q, int timeout);
-	int enqueue(shared_thread_queue q);
+	int enqueue(shared_thread_queue& q);
 	thread_info get_thread_info();
 
 	uint32_t get_id() { return this->_id; };

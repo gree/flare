@@ -21,7 +21,10 @@ connection::connection():
 		_host(""),
 		_port(-1),
 		_read_buf(NULL),
-		_read_buf_len(0) {
+		_read_buf_len(0),
+		_write_buf(NULL),
+		_write_buf_len(0),
+		_write_buf_chunk_size(0) {
 }
 
 /**
@@ -33,7 +36,10 @@ connection::connection(int sock, struct sockaddr_in addr):
 		_host(""),
 		_port(-1),
 		_read_buf(NULL),
-		_read_buf_len(0) {
+		_read_buf_len(0),
+		_write_buf(NULL),
+		_write_buf_len(0),
+		_write_buf_chunk_size(0) {
 }
 
 /**
@@ -42,6 +48,9 @@ connection::connection(int sock, struct sockaddr_in addr):
 connection::~connection() {
 	if (this->_read_buf) {
 		_delete_(this->_read_buf);
+	}
+	if (this->_write_buf) {
+		_delete_(this->_write_buf);
 	}
 }
 // }}}
@@ -331,10 +340,21 @@ int connection::push_back(char* p, int bufsiz) {
 /**
  *	write data to peer
  */
-int connection::write(const char* p, int bufsiz) {
+int connection::write(const char* p, int bufsiz, bool buffered) {
 	if (this->_sock < 0) {
 		log_warning("connection seems to be already closed (sock=%d)", this->_sock);
 		return -1;
+	}
+
+	if (buffered) {
+		this->_add_write_buf(p, bufsiz);
+		return bufsiz;
+	}
+
+	if (this->_write_buf != NULL) {
+		this->_add_write_buf(p, bufsiz);
+		p = this->_write_buf;
+		bufsiz = this->_write_buf_len;
 	}
 
 	this->_errno = 0;
@@ -352,6 +372,14 @@ int connection::write(const char* p, int bufsiz) {
 			log_err("-> closing socket", 0);
 			this->close();
 			this->_errno = errno;
+
+			// delete buffer...anyway
+			if (this->_write_buf != NULL) {
+				_delete_(this->_write_buf);
+				this->_write_buf = NULL;
+				this->_write_buf_len = this->_write_buf_chunk_size = 0;
+			}
+
 			return -1;
 		}
 		written += len;
@@ -365,6 +393,11 @@ int connection::write(const char* p, int bufsiz) {
 	}
 	if (i == connection::write_retry_limit) {
 		return len >= 0 ? written : -1;
+	}
+	if (this->_write_buf != NULL) {
+		_delete_(this->_write_buf);
+		this->_write_buf = NULL;
+		this->_write_buf_len = this->_write_buf_chunk_size = 0;
 	}
 
 	return written;
@@ -428,8 +461,6 @@ int connection::get_port() {
 // {{{ private methods
 /**
  *	append data to internal read buffer
- *
- *	- ring buffer make me faster:)
  */
 int connection::_add_read_buf(char* p, int len) {
 	char* tmp = _new_ char[this->_read_buf_len+len];
@@ -442,6 +473,27 @@ int connection::_add_read_buf(char* p, int len) {
 	this->_read_buf = tmp;
 
 	return this->_read_buf_len;
+}
+
+/**
+ *	append data to internal write buffer
+ */
+int connection::_add_write_buf(const char* p, int len) {
+	uint32_t new_chunk_size = (this->_write_buf_len + len) / connection::chunk_size + 1;
+	log_debug("adding to internal write buffer (current_len=%d, current_chunk_size=%d, write_len=%d, new_chunk_size=%d)", this->_write_buf_len, this->_write_buf_chunk_size, len, new_chunk_size);
+	if (new_chunk_size > this->_write_buf_chunk_size) {
+		char* tmp = _new_ char[new_chunk_size * connection::chunk_size];
+		if (this->_write_buf != NULL) {
+			memcpy(tmp, this->_write_buf, this->_write_buf_len);
+			_delete_(this->_write_buf);
+		}
+		this->_write_buf = tmp;
+	}
+	memcpy(this->_write_buf+this->_write_buf_len, p, len);
+	this->_write_buf_len += len;
+	this->_write_buf_chunk_size = new_chunk_size;
+
+	return this->_write_buf_len;
 }
 // }}}
 

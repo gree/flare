@@ -61,14 +61,17 @@ int handler_proxy::run() {
 
 		// dequeue
 		shared_thread_queue q;
-		this->_thread->dequeue(q, 0);
+		if (this->_thread->dequeue(q, 0) < 0) {
+			// FIXME: check if we can safely ignore this...
+			log_info("dequeued but no queue is available (something is inconsistent?", 0);
+			continue;
+		}
 		if (this->_thread->is_shutdown_request()) {
 			log_info("thread shutdown request -> breaking loop", 0); 
 			this->_thread->set_state("shutdown");
 			break;
 		}
 
-		// sync w/ node_map for safe
 		this->_process_queue(q);
 
 		// failover if we need

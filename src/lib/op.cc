@@ -135,7 +135,7 @@ int op::_parse_response(const char* p, result& r, string& r_message) {
  */
 int op::_send_result(result r, const char* message) {
 	log_debug("sending result (result=%s, message=%s)", op::result_cast(r).c_str(), message ? message : "");
-	if (message != NULL) {
+	if (message != NULL && *message != '\0') {
 		ostringstream s;
 		s << op::result_cast(r) << " " << message;
 		return this->_connection->writeline(s.str().c_str());

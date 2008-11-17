@@ -385,7 +385,7 @@ int thread::dequeue(shared_thread_queue& q, int timeout) {
 /**
  *	enqueue to current thread queue
  */
-int thread::enqueue(shared_thread_queue q) {
+int thread::enqueue(shared_thread_queue& q) {
 	if (this->_running == false) {
 		log_warning("trying to enqueue to inactive thread [id=%u, thread_id=%u, ident=%s]", this->_id, this->_thread_id, q->get_ident().c_str());
 		return -1;
@@ -395,6 +395,7 @@ int thread::enqueue(shared_thread_queue q) {
 	this->_thread_queue.push(q);
 	pthread_mutex_unlock(&this->_mutex_queue);
 	pthread_cond_signal(&this->_cond_queue);
+	log_debug("pushed queue and signal sent (ident=%s)", q->get_ident().c_str());
 
 	return 0;
 }

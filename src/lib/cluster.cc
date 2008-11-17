@@ -876,7 +876,7 @@ cluster::proxy_request cluster::pre_proxy_read(op_proxy_read* op, storage::entry
 	vector<string> proxy = op->get_proxy();
 	proxy.push_back(this->_node_key);
 	shared_queue_proxy_read q(new queue_proxy_read(this, this->_storage, proxy, e, op->get_ident()));
-	if (this->_enqueue(q, node_key, e.get_key_hash_value(storage::hash_algorithm_bitshift), true) < 0) {
+	if (this->_enqueue(shared_static_cast<thread_queue, queue_proxy_read>(q), node_key, e.get_key_hash_value(storage::hash_algorithm_bitshift), true) < 0) {
 		return proxy_request_error_enqueue;
 	}
 	q_result = q;
@@ -918,7 +918,7 @@ cluster::proxy_request cluster::pre_proxy_write(op_proxy_write* op, shared_queue
 	vector<string> proxy = op->get_proxy();
 	proxy.push_back(this->_node_key);
 	shared_queue_proxy_write q(new queue_proxy_write(this, this->_storage, proxy, e, op->get_ident()));
-	if (this->_enqueue(q, p.master.node_key, e.get_key_hash_value(storage::hash_algorithm_bitshift), sync) < 0) {
+	if (this->_enqueue(shared_static_cast<thread_queue, queue_proxy_write>(q), p.master.node_key, e.get_key_hash_value(storage::hash_algorithm_bitshift), sync) < 0) {
 		return proxy_request_error_enqueue;
 	}
 	if (sync) {
@@ -1073,9 +1073,15 @@ int cluster::_enqueue(shared_thread_queue q, string node_key, int key_hash, bool
 		return -1;
 	}
 
-	t->enqueue(q);
 	if (sync) {
 		q->sync_ref();
+	}
+	if (t->enqueue(q) < 0) {
+		log_warning("enqueue failed (perhaps thread is now exiting?)", 0);
+		if (sync) {
+			q->sync_unref();
+		}
+		return -1;
 	}
 
 	return 0;
@@ -1093,12 +1099,15 @@ int cluster::_broadcast(shared_thread_queue q, bool sync) {
 	for (node_map::iterator it = this->_node_map.begin(); it != this->_node_map.end(); it++) {
 		thread_pool::local_map m = this->_thread_pool->get_active(it->second.node_thread_type);
 		for (thread_pool::local_map::iterator it_local = m.begin(); it_local != m.end(); it_local++) {
-			if (it_local->second->enqueue(q) < 0) {
-				log_warning("enqueue failed (perhaps thread is now exiting?)", 0);
-				continue;
-			}
 			if (sync) {
 				q->sync_ref();
+			}
+			if (it_local->second->enqueue(q) < 0) {
+				log_warning("enqueue failed (perhaps thread is now exiting?)", 0);
+				if (sync) {
+					q->sync_unref();
+				}
+				continue;
 			}
 			log_debug("  -> enqueue (id=%d)", it_local->first);
 

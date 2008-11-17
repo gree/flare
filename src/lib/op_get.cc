@@ -123,7 +123,7 @@ int op_get::_run_server() {
 			it->response(&response, response_len, this->_append_version ? storage::response_type_gets : storage::response_type_get);
 		}
 
-		this->_connection->write(response, response_len);
+		this->_connection->write(response, response_len, true);
 		_delete_(response);
 	}
 

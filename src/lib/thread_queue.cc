@@ -96,9 +96,10 @@ int thread_queue::sync_unref() {
 		return 0;
 	}
 
+	volatile bool flag;
 	pthread_mutex_lock(&this->_mutex_sync);
 	this->_sync_ref_count--;
-	bool flag = this->_sync_ref_count == 0 ? true : false;
+	flag = this->_sync_ref_count == 0 ? true : false;
 	log_debug("sync ref count-- (%d)%s", this->_sync_ref_count, this->_sync_ref_count == 0 ? " (-> sending signal)" : "");
 	pthread_mutex_unlock(&this->_mutex_sync);
 

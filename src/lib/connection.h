@@ -26,6 +26,9 @@ protected:
 	int									_port;
 	char*								_read_buf;
 	uint32_t						_read_buf_len;
+	char*								_write_buf;
+	uint32_t						_write_buf_len;
+	uint32_t						_write_buf_chunk_size;
 	int									_errno;
 
 public:
@@ -34,6 +37,7 @@ public:
 	static const int read_timeout = 10*60*1000;				// msec
 	static const int write_retry_limit = 8;
 	static const int write_retry_wait = 500*1000;			// usec
+	static const int chunk_size = 8192;
 
 	connection();
 	connection(int sock, struct sockaddr_in addr);
@@ -45,7 +49,7 @@ public:
 	int readline(char** p);
 	int readsize(int expect_len, char** p);
 	int push_back(char* p, int bufsiz);
-	int write(const char *p, int bufsiz);
+	int write(const char *p, int bufsiz, bool buffered = false);
 	int writeline(const char* p);
 	int get_errno() { return this->_errno; };
 	bool is_error() { return this->_errno != 0 ? true : false; };
@@ -54,6 +58,7 @@ public:
 
 private:
 	int _add_read_buf(char* p, int len);
+	int _add_write_buf(const char* p, int len);
 };
 
 }	// namespace flare

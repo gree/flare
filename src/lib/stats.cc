@@ -18,6 +18,7 @@ namespace flare {
  */
 stats::stats():
 		_start_timestamp(0),
+		_current_timestamp(0),
 		_total_items(0),
 		_total_connections(0),
 		_cmd_get(0),

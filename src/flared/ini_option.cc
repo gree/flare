@@ -132,7 +132,7 @@ int ini_option::load() {
 		}
 
 		if (opt_var_map.count("index-server-port")) {
-			this->_server_port = opt_var_map["index-server-port"].as<int>();
+			this->_index_server_port = opt_var_map["index-server-port"].as<int>();
 		}
 
 		if (opt_var_map.count("log-facility")) {

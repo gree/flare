@@ -12,6 +12,8 @@ NAME_INDEX=$DESC_INDEX
 NAME_NODE=$DESC_NODE
 CONF_INDEX=/etc/flarei.conf
 CONF_NODE=/etc/flared.conf
+DATA_INDEX=/tmp
+DATA_NODE=/tmp
 
 test -x $DAEMON_INDEX || exit 0
 test -x $DAEMON_NODE || exit 0
@@ -27,11 +29,12 @@ case "$1" in
   start)
 	echo -n "Starting $DESC: "
 	if [ $RUN_INDEX = "yes" ]; then
-		start-stop-daemon --start --quiet --pidfile /var/run/$NAME_INDEX.pid --exec $DAEMON_INDEX -- -f $CONF_INDEX
+		start-stop-daemon --start --quiet --pidfile $DATA_INDEX/$NAME_INDEX.pid --exec $DAEMON_INDEX -- -f $CONF_INDEX --daemonize
 		echo -n "$NAME_INDEX "
 	fi
+	sleep 1
 	if [ $RUN_NODE = "yes" ]; then
-		start-stop-daemon --start --quiet --pidfile /var/run/$NAME_NODE.pid --exec $DAEMON_NODE -- -f $CONF_NODE
+		start-stop-daemon --start --quiet --pidfile $DATA_NODE/$NAME_NODE.pid --exec $DAEMON_NODE -- -f $CONF_NODE --daemonize
 		echo -n "$NAME_NODE "
 	fi
 	echo ""
@@ -39,7 +42,7 @@ case "$1" in
   start-index)
 	echo -n "Starting $DESC_INDEX: "
 	if [ $RUN_INDEX = "yes" ]; then
-		start-stop-daemon --start --quiet --pidfile /var/run/$NAME_INDEX.pid --exec $DAEMON_INDEX -- -f $CONF_INDEX
+		start-stop-daemon --start --quiet --pidfile $DATA_INDEX/$NAME_INDEX.pid --exec $DAEMON_INDEX -- -f $CONF_INDEX --daemonize
 		echo "$NAME_INDEX."
 	else
 		echo "disabled (skip starting)."
@@ -48,7 +51,7 @@ case "$1" in
   start-node)
 	echo -n "Starting $DESC_NODE: "
 	if [ $RUN_NODE = "yes" ]; then
-		start-stop-daemon --start --quiet --pidfile /var/run/$NAME_NODE.pid --exec $DAEMON_NODE -- -f $CONF_NODE
+		start-stop-daemon --start --quiet --pidfile $DATA_NODE/$NAME_NODE.pid --exec $DAEMON_NODE -- -f $CONF_NODE --daemonize
 		echo "$NAME_NODE."
 	else
 		echo "disabled (skip starting)."
@@ -57,11 +60,12 @@ case "$1" in
   stop)
 	echo -n "Stopping $DESC: "
 	if [ $RUN_INDEX = "yes" ]; then
-		start-stop-daemon --stop --quiet --pidfile /var/run/$NAME_INDEX.pid --exec $DAEMON_INDEX
+		start-stop-daemon --stop --quiet --pidfile $DATA_INDEX/$NAME_INDEX.pid --exec $DAEMON_INDEX
 		echo -n "$NAME_INDEX "
 	fi
+	sleep 1
 	if [ $RUN_NODE = "yes" ]; then
-		start-stop-daemon --stop --quiet --pidfile /var/run/$NAME_NODE.pid --exec $DAEMON_NODE
+		start-stop-daemon --stop --quiet --pidfile $DATA_NODE/$NAME_NODE.pid --exec $DAEMON_NODE
 		echo -n "$NAME_NODE "
 	fi
 	echo ""
@@ -69,7 +73,7 @@ case "$1" in
   stop-index)
 	echo -n "Stopping $DESC_INDEX: "
 	if [ $RUN_INDEX = "yes" ]; then
-		start-stop-daemon --stop --quiet --pidfile /var/run/$NAME_INDEX.pid --exec $DAEMON_INDEX
+		start-stop-daemon --stop --quiet --pidfile $DATA_INDEX/$NAME_INDEX.pid --exec $DAEMON_INDEX
 		echo "$NAME_INDEX."
 	else
 		echo "disabled (skip stopping)."
@@ -78,7 +82,7 @@ case "$1" in
   stop-node)
 	echo -n "Stopping $DESC_NODE: "
 	if [ $RUN_NODE = "yes" ]; then
-		start-stop-daemon --stop --quiet --pidfile /var/run/$NAME_NODE.pid --exec $DAEMON_NODE
+		start-stop-daemon --stop --quiet --pidfile $DATA_NODE/$NAME_NODE.pid --exec $DAEMON_NODE
 		echo "$NAME_NODE."
 	else
 		echo "disabled (skip stopping)."
@@ -87,37 +91,38 @@ case "$1" in
   reload)
 	if [ $RUN_INDEX = "yes" ]; then
 		echo "Reloading $DESC_INDEX configuration files."
-		start-stop-daemon --stop --signal 1 --quiet --pidfile /var/run/$NAME_INDEX.pid --exec $DAEMON
+		start-stop-daemon --stop --signal 1 --quiet --pidfile $DATA_INDEX/$NAME_INDEX.pid --exec $DAEMON
 	fi
 	if [ $RUN_NODE = "yes" ]; then
 		echo "Reloading $DESC_NODE configuration files."
-		start-stop-daemon --stop --signal 1 --quiet --pidfile /var/run/$NAME_NODE.pid --exec $DAEMON
+		start-stop-daemon --stop --signal 1 --quiet --pidfile $DATA_NODE/$NAME_NODE.pid --exec $DAEMON
 	fi
   	;;
   reload-index)
 	if [ $RUN_INDEX = "yes" ]; then
 		echo "Reloading $DESC_INDEX configuration files."
-		start-stop-daemon --stop --signal 1 --quiet --pidfile /var/run/$NAME_INDEX.pid --exec $DAEMON
+		start-stop-daemon --stop --signal 1 --quiet --pidfile $DATA_INDEX/$NAME_INDEX.pid --exec $DAEMON
 	fi
 	;;
   reload-node)
 	if [ $RUN_NODE = "yes" ]; then
 		echo "Reloading $DESC_NODE configuration files."
-		start-stop-daemon --stop --signal 1 --quiet --pidfile /var/run/$NAME_NODE.pid --exec $DAEMON
+		start-stop-daemon --stop --signal 1 --quiet --pidfile $DATA_NODE/$NAME_NODE.pid --exec $DAEMON
 	fi
 	;;
   restart)
     echo -n "Restarting $DESC: "
 	if [ $RUN_INDEX = "yes" ]; then
-		start-stop-daemon --stop --quiet --pidfile /var/run/$NAME_INDEX.pid --exec $DAEMON_INDEX
+		start-stop-daemon --stop --quiet --pidfile $DATA_INDEX/$NAME_INDEX.pid --exec $DAEMON_INDEX
 		sleep 1
-		start-stop-daemon --start --quiet --pidfile /var/run/$NAME_INDEX.pid --exec $DAEMON_INDEX -- -f $CONF_INDEX
+		start-stop-daemon --start --quiet --pidfile $DATA_INDEX/$NAME_INDEX.pid --exec $DAEMON_INDEX -- -f $CONF_INDEX --daemonize
 		echo -n "$NAME_INDEX "
 	fi
+	sleep 1
 	if [ $RUN_NODE = "yes" ]; then
-		start-stop-daemon --stop --quiet --pidfile /var/run/$NAME_NODE.pid --exec $DAEMON_NODE
+		start-stop-daemon --stop --quiet --pidfile $DATA_NODE/$NAME_NODE.pid --exec $DAEMON_NODE
 		sleep 1
-		start-stop-daemon --start --quiet --pidfile /var/run/$NAME_NODE.pid --exec $DAEMON_NODE -- -f $CONF_NODE
+		start-stop-daemon --start --quiet --pidfile $DATA_NODE/$NAME_NODE.pid --exec $DAEMON_NODE -- -f $CONF_NODE --daemonize
 		echo -n "$NAME_NODE "
 	fi
 	echo ""
@@ -125,9 +130,9 @@ case "$1" in
   restart-index)
     echo -n "Restarting $DESC_INDEX: "
 	if [ $RUN_INDEX = "yes" ]; then
-		start-stop-daemon --stop --quiet --pidfile /var/run/$NAME_INDEX.pid --exec $DAEMON_INDEX
+		start-stop-daemon --stop --quiet --pidfile $DATA_INDEX/$NAME_INDEX.pid --exec $DAEMON_INDEX
 		sleep 1
-		start-stop-daemon --start --quiet --pidfile /var/run/$NAME_INDEX.pid --exec $DAEMON_INDEX -- -f $CONF_INDEX
+		start-stop-daemon --start --quiet --pidfile $DATA_INDEX/$NAME_INDEX.pid --exec $DAEMON_INDEX -- -f $CONF_INDEX --daemonize
 		echo "$NAME_INDEX."
 	else
 		echo "disable (skip restarting)."
@@ -136,9 +141,9 @@ case "$1" in
   restart-node)
     echo -n "Restarting $DESC_NODE: "
 	if [ $RUN_NODE = "yes" ]; then
-		start-stop-daemon --stop --quiet --pidfile /var/run/$NAME_NODE.pid --exec $DAEMON_NODE
+		start-stop-daemon --stop --quiet --pidfile $DATA_NODE/$NAME_NODE.pid --exec $DAEMON_NODE
 		sleep 1
-		start-stop-daemon --start --quiet --pidfile /var/run/$NAME_NODE.pid --exec $DAEMON_NODE -- -f $CONF_NODE
+		start-stop-daemon --start --quiet --pidfile $DATA_NODE/$NAME_NODE.pid --exec $DAEMON_NODE -- -f $CONF_NODE --daemonize
 		echo "$NAME_NODE."
 	else
 		echo "disable (skip restarting)."

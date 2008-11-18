@@ -1130,7 +1130,7 @@ int cluster::_broadcast(shared_thread_queue q, bool sync) {
  *	save node variables
  */
 int cluster::_save() {
-	string path = this->_data_dir + "/cluster_node.txt";
+	string path = this->_data_dir + "/flare.slz";
 	string path_tmp = path + ".tmp";
 
 	pthread_mutex_lock(&this->_mutex_serialization);
@@ -1166,7 +1166,7 @@ int cluster::_save() {
  *	load node variables
  */
 int cluster::_load() {
-	string path = this->_data_dir + "/cluster_node.txt";
+	string path = this->_data_dir + "/flare.slz";
 
 	pthread_mutex_lock(&this->_mutex_serialization);
 	ifstream ifs(path.c_str());

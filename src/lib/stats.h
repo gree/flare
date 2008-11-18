@@ -33,8 +33,8 @@ class stats {
 protected:
 	time_t				_start_timestamp;
 	time_t				_current_timestamp;
-	uint32_t			_total_items;
-	uint32_t			_total_connections;
+	unsigned int	_total_items;
+	unsigned int	_total_connections;
 	unsigned int	_cmd_get;
 	unsigned int	_cmd_set;
 	unsigned int	_hits;
@@ -65,10 +65,10 @@ public:
 	int get_pointer_size();
 	struct rusage get_rusage();
 	virtual uint32_t get_curr_items(storage* st);
-	virtual uint32_t get_total_items();
+	virtual unsigned int get_total_items();
 	virtual uint64_t get_bytes(storage* st);
 	virtual uint32_t get_curr_connections(thread_pool* tp);
-	uint32_t get_total_connections();
+	unsigned int get_total_connections();
 	uint32_t get_connection_structures();
 	unsigned int get_cmd_get();
 	unsigned int get_cmd_set();

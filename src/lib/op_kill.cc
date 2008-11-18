@@ -50,7 +50,7 @@ int op_kill::_parse_server_parameter() {
 		}
 
 		try {
-			this->_id = lexical_cast<uint32_t>(q);
+			this->_id = lexical_cast<unsigned int>(q);
 			log_debug("storing id [%u]", this->_id);
 		} catch (bad_lexical_cast e) {
 			log_debug("invalid thead id (id=%s)", q);

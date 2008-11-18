@@ -96,7 +96,7 @@ int op_delete::_run_client(storage::entry& e) {
 	char* request = _new_ char[request_len];
 	int offset = snprintf(request, request_len, "%sdelete %s %ld", proxy_ident.c_str(), e.key.c_str(), e.expire);
 	if (e.version > 0) {
-		offset += snprintf(request+offset, request_len-offset, " %llu", e.version);
+		offset += snprintf(request+offset, request_len-offset, " %llu", static_cast<unsigned long long>(e.version));
 	}
 	if (e.option & storage::option_noreply) {
 		offset += snprintf(request+offset, request_len-offset, " %s", storage::option_cast(storage::option_noreply).c_str());

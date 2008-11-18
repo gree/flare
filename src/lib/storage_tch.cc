@@ -270,7 +270,7 @@ int storage_tch::incr(entry& e, uint64_t value, result& r, bool increment, int b
 
 		// data
 		char buf[64];
-		int buf_len = snprintf(buf, sizeof(buf), "%llu", m);
+		int buf_len = snprintf(buf, sizeof(buf), "%llu", static_cast<unsigned long long>(m));
 
 		e.flag = e_current.flag;
 		e.expire = e_current.expire;

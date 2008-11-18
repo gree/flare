@@ -154,7 +154,7 @@ int op_incr::_run_client(storage::entry& e) {
 	string proxy_ident = this->_get_proxy_ident();
 	int request_len = proxy_ident.size() + e.key.size() + BUFSIZ;
 	char* request = _new_ char[request_len];
-	int offset = snprintf(request, request_len, "%s%s %s %llu", proxy_ident.c_str(), this->get_ident().c_str(), e.key.c_str(), this->_value);
+	int offset = snprintf(request, request_len, "%s%s %s %llu", proxy_ident.c_str(), this->get_ident().c_str(), e.key.c_str(), static_cast<unsigned long long>(this->_value));
 	if (e.option & storage::option_noreply) {
 		offset += snprintf(request+offset, request_len-offset, " %s", storage::option_cast(storage::option_noreply).c_str());
 	}

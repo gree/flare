@@ -101,7 +101,7 @@ uint32_t stats::get_curr_items(storage* st) {
 	return st ? st->count() : 0;
 }
 
-uint32_t stats::get_total_items() {
+unsigned int stats::get_total_items() {
 	return this->_total_items;
 }
 
@@ -113,7 +113,7 @@ uint32_t stats::get_curr_connections(thread_pool* tp) {
 	return 0;
 }
 
-uint32_t stats::get_total_connections() {
+unsigned int stats::get_total_connections() {
 	return this->_total_connections;
 }
 

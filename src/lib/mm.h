@@ -44,7 +44,7 @@ private:
 		bool					flag;
 	} alloc_info;
 
-	typedef map<uint32_t, alloc_info> alloc_list_t;
+	typedef map<unsigned int, alloc_info> alloc_list_t;
 
 	static alloc_list_t alloc_list;
 

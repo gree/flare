@@ -116,9 +116,9 @@ int op_set::_run_client(storage::entry& e) {
 	string proxy_ident = this->_get_proxy_ident();
 	int request_len = proxy_ident.size() + e.key.size() + e.size + BUFSIZ;
 	char* request = _new_ char[request_len];
-	int offset = snprintf(request, request_len, "%s%s %s %u %ld %llu", proxy_ident.c_str(), this->get_ident().c_str(), e.key.c_str(), e.flag, e.expire, e.size);
+	int offset = snprintf(request, request_len, "%s%s %s %u %ld %llu", proxy_ident.c_str(), this->get_ident().c_str(), e.key.c_str(), e.flag, e.expire, static_cast<unsigned long long>(e.size));
 	if (e.version > 0 || this->get_ident() == "cas") {
-		offset += snprintf(request+offset, request_len-offset, " %llu", e.version);
+		offset += snprintf(request+offset, request_len-offset, " %llu", static_cast<unsigned long long>(e.version));
 	}
 	if (e.option & storage::option_noreply) {
 		offset += snprintf(request+offset, request_len-offset, " %s", storage::option_cast(storage::option_noreply).c_str());

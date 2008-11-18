@@ -122,7 +122,7 @@ int util::get_fqdn(string& fqdn) {
 /**
  *	get next word from buffer
  */
-uint32_t util::next_word(const char* src, char* dst, uint32_t dst_len) {
+unsigned int util::next_word(const char* src, char* dst, unsigned int dst_len) {
 	const char *p = src;
 	char *q = dst;
 
@@ -130,7 +130,7 @@ uint32_t util::next_word(const char* src, char* dst, uint32_t dst_len) {
 	while (*p == ' ') {
 		p++;
 	}
-	while (*p && *p != ' ' && *p != '\n' && static_cast<uint32_t>(p-src) < dst_len) {
+	while (*p && *p != ' ' && *p != '\n' && static_cast<unsigned int>(p-src) < dst_len) {
 		*q++ = *p++;
 	}
 	*q = '\0';
@@ -141,7 +141,7 @@ uint32_t util::next_word(const char* src, char* dst, uint32_t dst_len) {
 /**
  *	get next digit(s) from buffer
  */
-uint32_t util::next_digit(const char* src, char* dst, uint32_t dst_len) {
+unsigned int util::next_digit(const char* src, char* dst, unsigned int dst_len) {
 	const char *p = src;
 	char *q = dst;
 
@@ -149,7 +149,7 @@ uint32_t util::next_digit(const char* src, char* dst, uint32_t dst_len) {
 	while (*p == ' ') {
 		p++;
 	}
-	while (*p && (isdigit(*p) || *p == '-') && *p != '\n' && static_cast<uint32_t>(p-src) < dst_len) {
+	while (*p && (isdigit(*p) || *p == '-') && *p != '\n' && static_cast<unsigned int>(p-src) < dst_len) {
 		*q++ = *p++;
 	}
 	*q = '\0';

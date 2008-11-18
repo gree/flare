@@ -31,9 +31,9 @@ mm::alloc_list_t mm::alloc_list;
 
 int mm::add_alloc_list(const void* addr, uint32_t size, const char* file, int line) {
 	alloc_info al;
-	if (alloc_list.find((uint32_t)addr) != alloc_list.end()) {
+	if (alloc_list.find((unsigned int)addr) != alloc_list.end()) {
 	} else {
-		alloc_info al = alloc_list[(uint32_t)addr];
+		alloc_info al = alloc_list[(unsigned int)addr];
 		if (al.flag) {
 			// double new?
 			char log_path[1024];
@@ -50,13 +50,13 @@ int mm::add_alloc_list(const void* addr, uint32_t size, const char* file, int li
 	al.file_free[0] = '\0';
 	al.line_free = -1;
 	al.flag = true;
-	alloc_list[(uint32_t)addr] = al;
+	alloc_list[(unsigned int)addr] = al;
 
 	return 0;
 }
 
 int mm::remove_alloc_list(const void* addr, const char* file, int line) {
-	if (alloc_list.find((uint32_t)addr) == alloc_list.end()) {
+	if (alloc_list.find((unsigned int)addr) == alloc_list.end()) {
 		// non-alloc free
 		char log_path[1024];
 		snprintf(log_path, sizeof(log_path), "%s/alloc_nf.%d.%d.txt", mm_const::dump_dir.c_str(), getpid(), (int)pthread_self());
@@ -64,18 +64,18 @@ int mm::remove_alloc_list(const void* addr, const char* file, int line) {
 		fprintf(fp, "%s:%d:%p\n", file, line, addr);
 		fclose(fp);
 	} else {
-		if (alloc_list[(uint32_t)addr].flag == false) {
+		if (alloc_list[(unsigned int)addr].flag == false) {
 			// double free
-			alloc_info al = alloc_list[(uint32_t)addr];
+			alloc_info al = alloc_list[(unsigned int)addr];
 			char log_path[1024];
 			snprintf(log_path, sizeof(log_path), "/var/tmp/alloc_nf.%d.%d.txt", getpid(), (int)pthread_self());
 			FILE* fp = fopen(log_path, "a");
 			fprintf(fp, "%s:%d -> %s:%d -> %s:%d:%p\n", al.file, al.line, al.file_free, al.line_free, file, line, addr);
 			fclose(fp);
 		}
-		strncpy(alloc_list[(uint32_t)addr].file_free, file, sizeof(alloc_list[(uint32_t)addr].file_free));
-		alloc_list[(uint32_t)addr].line_free = line;
-		alloc_list[(uint32_t)addr].flag = false;
+		strncpy(alloc_list[(unsigned int)addr].file_free, file, sizeof(alloc_list[(unsigned int)addr].file_free));
+		alloc_list[(unsigned int)addr].line_free = line;
+		alloc_list[(unsigned int)addr].flag = false;
 	}
 	return 0;
 }
@@ -85,7 +85,7 @@ int mm::dump_alloc_list() {
 	snprintf(log_path, sizeof(log_path), "%s/alloc_leak.%d.%d.txt", mm_const::dump_dir.c_str(), getpid(), (int)pthread_self());
 	FILE* fp = fopen(log_path, "a");
 
-	map<uint32_t, alloc_info>::iterator it;
+	map<unsigned int, alloc_info>::iterator it;
 	for (it = alloc_list.begin(); it != alloc_list.end(); it++) {
 		if (it->second.flag == false) {
 			continue;

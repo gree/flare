@@ -148,7 +148,7 @@ int thread::startup(weak_thread myself) {
 /**
  *	setup proc for each execution
  */
-int thread::setup(int type, uint32_t id) {
+int thread::setup(int type, unsigned int id) {
 	this->_id = id;
 
 	this->_info.id = id;

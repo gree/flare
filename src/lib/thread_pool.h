@@ -32,12 +32,12 @@ public:
 		thread_type_reconstruction,
 	};
 
-	typedef	map<uint32_t, shared_thread>		local_map;
-	typedef	map<int, local_map>							global_map;
-	typedef	stack<shared_thread>						pool;
+	typedef	map<unsigned int, shared_thread>	local_map;
+	typedef	map<int, local_map>								global_map;
+	typedef	stack<shared_thread>							pool;
 
 protected:
-	uint32_t					_index;
+	unsigned int			_index;
 	global_map				_global_map;
 	pool							_pool;
 
@@ -51,7 +51,7 @@ public:
 	virtual ~thread_pool();
 
 	shared_thread get(int type);
-	int get_active(uint32_t id, shared_thread& t);
+	int get_active(unsigned int id, shared_thread& t);
 	local_map get_active(int type);
 	int clean(thread* t, bool& is_pool);
 	int shutdown();

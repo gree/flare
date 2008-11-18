@@ -43,7 +43,7 @@ typedef class thread_handler	thread_handler;
 class thread {
 public:
 	typedef struct				_thread_info {
-		uint32_t						id;
+		unsigned int				id;
 		pthread_t						thread_id;
 		int									type;
 		string							peer_name;
@@ -67,7 +67,7 @@ private:
 	thread_pool*					_thread_pool;
 	weak_thread						_myself;
 
-	uint32_t							_id;
+	unsigned int					_id;
 	pthread_t							_thread_id;
 	thread_info						_info;
 
@@ -96,7 +96,7 @@ public:
 	virtual ~thread();
 
 	int startup(weak_thread myself);
-	int setup(int type, uint32_t id);
+	int setup(int type, unsigned int id);
 	int trigger(thread_handler* th, bool request_delete = true, bool async = true);
 	int wait();
 	int run();
@@ -108,7 +108,7 @@ public:
 	int enqueue(shared_thread_queue& q);
 	thread_info get_thread_info();
 
-	uint32_t get_id() { return this->_id; };
+	unsigned int get_id() { return this->_id; };
 	pthread_t get_thread_id() { return this->_thread_id; };
 	int get_type() { return this->_info.type; };
 	int set_peer(string host, int port) { this->_info.peer_name = host; this->_info.peer_port = port; return 0; };

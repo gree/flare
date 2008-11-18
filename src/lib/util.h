@@ -66,8 +66,8 @@ public:
 	static int gethostbyname(const char *name, struct hostent* he, int* he_errno);
 	static int inet_ntoa(struct in_addr in, char* dst);
 	static int get_fqdn(string& fqdn);
-	static uint32_t next_word(const char* src, char* dst, uint32_t dst_len);
-	static uint32_t next_digit(const char* src, char* dst, uint32_t dst_len);
+	static unsigned int next_word(const char* src, char* dst, unsigned int dst_len);
+	static unsigned int next_digit(const char* src, char* dst, unsigned int dst_len);
 	static time_t realtime(time_t t);
 
 	template<class T> static string vector_join(vector<T> list, string glue) {

@@ -56,7 +56,7 @@ shared_thread thread_pool::get(int type) {
 		log_debug("new thread object (thread_id=%u)", tmp->get_thread_id());
 	}
 	
-	uint32_t id;
+	unsigned int id;
 	ATOMIC_ADD(&this->_index, 1, id);
 	tmp->setup(type, id);
 
@@ -71,7 +71,7 @@ shared_thread thread_pool::get(int type) {
 /**
  *	get active thread object from map by id
  */
-int thread_pool::get_active(uint32_t id, shared_thread& t) {
+int thread_pool::get_active(unsigned int id, shared_thread& t) {
 	int r = -1;
 	pthread_rwlock_rdlock(&this->_mutex_global_map);
 	for (global_map::iterator it = this->_global_map.begin(); it != this->_global_map.end(); it++) {
@@ -106,7 +106,7 @@ thread_pool::local_map thread_pool::get_active(int type) {
  *	clean up thread activity
  */
 int thread_pool::clean(thread* t, bool& is_pool) {
-	uint32_t id = t->get_id();
+	unsigned int id = t->get_id();
 	pthread_t thread_id = t->get_thread_id();
 	int type = t->get_type();
 
@@ -114,7 +114,7 @@ int thread_pool::clean(thread* t, bool& is_pool) {
 	pthread_rwlock_wrlock(&this->_mutex_global_map);
 	log_debug("removing thread object from global map (type=%d, id=%u, thread_id=%u)", type, id, thread_id);
 	if (this->_global_map[type].count(id) == 0) {
-		log_warning("specified id not found it global map (type=%d, id=%u, thread_id=%u)", type, id, thread_id);
+		log_warning("specified id not found in global map (type=%d, id=%u, thread_id=%u)", type, id, thread_id);
 		is_pool = false;
 		pthread_rwlock_unlock(&this->_mutex_global_map);
 		return 0;
@@ -147,10 +147,10 @@ int thread_pool::shutdown() {
 		log_debug("shutting down active threads (type=%d, n=%d)", it->first, it->second.size());
 		for (local_map::iterator it_local = it->second.begin(); it_local != it->second.end(); it_local++) {
 			it_local->second->shutdown();
-			this->_global_map[it->first].erase(it_local->first);
 		}
-		this->_global_map.erase(it->first);
+		this->_global_map[it->first].clear();
 	}
+	this->_global_map.clear();
 	pthread_rwlock_unlock(&this->_mutex_global_map);
 
 	// shutdown pool threads

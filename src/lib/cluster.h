@@ -208,7 +208,7 @@ public:
 	};
 
 	inline int from_node_key(string node_key, string& server_name, int& server_port) {
-		uint32_t n = node_key.find(":", 0);
+		string::size_type n = node_key.find(":", 0);
 		if (n == string::npos) {
 			return -1;
 		}

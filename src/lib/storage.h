@@ -209,9 +209,9 @@ public:
 		inline int response(char** p, int& len, response_type t) {
 			int response_len = this->size + this->key.size() + BUFSIZ;
 			*p = _new_ char[response_len];
-			len = snprintf(*p, response_len, "VALUE %s %u %llu", this->key.c_str(), this->flag, this->size);
+			len = snprintf(*p, response_len, "VALUE %s %u %llu", this->key.c_str(), this->flag, static_cast<unsigned long long>(this->size));
 			if (t == response_type_gets || t == response_type_dump) {
-				len += snprintf((*p)+len, response_len-len, " %llu", this->version);
+				len += snprintf((*p)+len, response_len-len, " %llu", static_cast<unsigned long long>(this->version));
 			}
 			if (t == response_type_dump) {
 				len += snprintf((*p)+len, response_len-len, " %ld", this->expire);

@@ -13,8 +13,10 @@
 #include <stack>
 #include <vector>
 
-#include <boost/archive/text_oarchive.hpp>
-#include <boost/archive/text_iarchive.hpp>
+#include <boost/archive/xml_oarchive.hpp>
+#include <boost/archive/xml_iarchive.hpp>
+#include <boost/serialization/serialization.hpp>
+#include <boost/serialization/nvp.hpp>
 #include <boost/serialization/map.hpp>
 #include <boost/serialization/string.hpp>
 #include <boost/lexical_cast.hpp>
@@ -84,14 +86,14 @@ public:
 
 	private:
 		friend class serialization::access;
-		template<class T> void serialize(T& ar, uint32_t version) {
-			ar & node_server_name;
-			ar & node_server_port;
-			ar & node_role;
-			ar & node_state;
-			ar & node_partition;
-			ar & node_balance;
-			ar & node_thread_type;
+		template<class T> void serialize(T& ar, const unsigned int version) {
+			ar & BOOST_SERIALIZATION_NVP(node_server_name);
+			ar & BOOST_SERIALIZATION_NVP(node_server_port);
+			ar & BOOST_SERIALIZATION_NVP(node_role);
+			ar & BOOST_SERIALIZATION_NVP(node_state);
+			ar & BOOST_SERIALIZATION_NVP(node_partition);
+			ar & BOOST_SERIALIZATION_NVP(node_balance);
+			ar & BOOST_SERIALIZATION_NVP(node_thread_type);
 		};
 	} node;
 

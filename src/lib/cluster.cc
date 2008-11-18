@@ -364,6 +364,7 @@ int cluster::down_node(string node_server_name, int node_server_port) {
 
 	this->_reconstruct_node_partition(false);
 
+	this->_save();
 	pthread_rwlock_unlock(&this->_mutex_node_partition_map);
 	pthread_rwlock_unlock(&this->_mutex_node_map);
 
@@ -423,6 +424,7 @@ int cluster::up_node(string node_server_name, int node_server_port, bool force) 
 
 	this->_reconstruct_node_partition(false);
 
+	this->_save();
 	pthread_rwlock_unlock(&this->_mutex_node_partition_map);
 	pthread_rwlock_unlock(&this->_mutex_node_map);
 
@@ -487,6 +489,7 @@ int cluster::remove_node(string node_server_name, int node_server_port) {
 
 	this->_reconstruct_node_partition(false);
 
+	this->_save();
 	pthread_rwlock_unlock(&this->_mutex_node_partition_map);
 	pthread_rwlock_unlock(&this->_mutex_node_map);
 
@@ -667,6 +670,7 @@ int cluster::set_node_role(string node_server_name, int node_server_port, role n
 
 	this->_reconstruct_node_partition(false);
 
+	this->_save();
 	pthread_rwlock_unlock(&this->_mutex_node_partition_map);
 	pthread_rwlock_unlock(&this->_mutex_node_map);
 
@@ -1130,7 +1134,7 @@ int cluster::_broadcast(shared_thread_queue q, bool sync) {
  *	save node variables
  */
 int cluster::_save() {
-	string path = this->_data_dir + "/flare.slz";
+	string path = this->_data_dir + "/flare.xml";
 	string path_tmp = path + ".tmp";
 
 	pthread_mutex_lock(&this->_mutex_serialization);
@@ -1141,9 +1145,9 @@ int cluster::_save() {
 		return -1;
 	}
 
-	archive::text_oarchive oa(ofs);
-	oa << (const node_map&)this->_node_map;
-	oa << (const int&)this->_thread_type;
+	archive::xml_oarchive oa(ofs);
+	oa << serialization::make_nvp("node_map", (const node_map&)this->_node_map);
+	oa << serialization::make_nvp("thread_type", (const int&)this->_thread_type);
 
 	ofs.close();
 
@@ -1166,7 +1170,7 @@ int cluster::_save() {
  *	load node variables
  */
 int cluster::_load() {
-	string path = this->_data_dir + "/flare.slz";
+	string path = this->_data_dir + "/flare.xml";
 
 	pthread_mutex_lock(&this->_mutex_serialization);
 	ifstream ifs(path.c_str());
@@ -1182,9 +1186,9 @@ int cluster::_load() {
 		return -1;
 	}
 
-	archive::text_iarchive ia(ifs);
-	ia >> this->_node_map;
-	ia >> this->_thread_type;
+	archive::xml_iarchive ia(ifs);
+	ia >> serialization::make_nvp("node_map", this->_node_map);
+	ia >> serialization::make_nvp("thread_type", this->_thread_type);
 
 	ifs.close();
 	pthread_mutex_unlock(&this->_mutex_serialization);

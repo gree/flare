@@ -1,0 +1,4 @@
+RUN_INDEX=yes
+RUN_NODE="yes"
+CONF_INDEX="/etc/flarei.conf"
+CONF_NODE="/etc/flared.conf"

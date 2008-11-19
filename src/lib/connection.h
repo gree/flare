@@ -8,6 +8,8 @@
 #ifndef __NET_CONNECTION_H__
 #define __NET_CONNECTION_H__
 
+#include <poll.h>
+
 #include "net.h"
 
 namespace gree {

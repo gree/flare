@@ -131,31 +131,23 @@ int connection::read(char** p) {
 		return len;
 	}
 
-	fd_set fds;
-	timeval tv;
-	FD_ZERO(&fds);
-	FD_SET(this->_sock, &fds);
-	tv.tv_sec = connection::read_timeout / 1000;
-	tv.tv_usec = 0;
-	int n = select(FD_SETSIZE, &fds, 0, 0, &tv);
+	struct pollfd ufds;
+	ufds.fd= this->_sock;
+	ufds.events= POLLIN | POLLPRI;
+	int n = poll(&ufds, 1, connection::read_timeout);
 	if (n == 0) {
-		log_info("select() timed out (%d sec)", connection::read_timeout / 1000);
+		log_info("poll() timed out (%d sec)", connection::read_timeout / 1000);
 		this->_errno = -1;
 		return -1;
 	}
-	if (n < 0) {
+	if (n < 0 || !(ufds.revents & (POLLIN | POLLPRI))) {
 		if (errno != EINTR) {
-			log_err("select() failed: %s (%d) -> closing socket", util::strerror(errno), errno);
+			log_err("poll() failed: %s (%d) -> closing socket", util::strerror(errno), errno);
 			this->close();
 		} else {
-			log_notice("select() failed: %s (%d)", util::strerror(errno), errno);
+			log_notice("poll() failed: %s (%d)", util::strerror(errno), errno);
 		}
 		this->_errno = errno;
-		return -1;
-	}
-	if (!FD_ISSET(this->_sock, &fds)) {
-		log_info("select() retruns > 0 value but no socket available", 0);
-		this->_errno = -1;
 		return -1;
 	}
 

@@ -142,7 +142,7 @@ int storage_tch::set(entry& e, result& r, int b) {
 		}
 
 		if (b & behavior_cas) {
-			if (e.version != e_current.version && (e_current_exists < 0 && e.version != (e_current.version-1))) {
+			if ((e_current_st != st_not_expired && e.version != e_current.version) || (e_current_st == st_not_expired && e.version != (e_current.version-1))) {
 				log_info("behavior=cas and specified version is not equal to current version -> skip setting (current=%llu, specified=%llu)", e_current.version, e.version);
 				r = result_exists;
 				throw 0;

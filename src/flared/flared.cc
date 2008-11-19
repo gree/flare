@@ -119,6 +119,10 @@ int flared::startup(int argc, char **argv) {
 	log_notice("  proxy_concurrency: %d", ini_option_object().get_proxy_concurrency());
 	log_notice("  server_name:       %s", ini_option_object().get_server_name().c_str());
 	log_notice("  server_port:       %d", ini_option_object().get_server_port());
+	log_notice("  storage_ap:        %u", ini_option_object().get_storage_ap());
+	log_notice("  storage_bucket_size: %llu", ini_option_object().get_storage_bucket_size());
+	log_notice("  storage_compress:  %s", ini_option_object().get_storage_compress().c_str());
+	log_notice("  storage_large:     %s", ini_option_object().is_storage_large() ? "true" : "false");
 	log_notice("  storage_type:      %s", ini_option_object().get_storage_type().c_str());
 	log_notice("  thread_pool_size:  %d", ini_option_object().get_thread_pool_size());
 
@@ -155,7 +159,12 @@ int flared::startup(int argc, char **argv) {
 	storage::type_cast(ini_option_object().get_storage_type(), t);
 	switch (t) {
 	case storage::type_tch:
-		this->_storage = _new_ storage_tch(ini_option_object().get_data_dir(), ini_option_object().get_mutex_slot());
+		this->_storage = _new_ storage_tch(ini_option_object().get_data_dir(),
+				ini_option_object().get_mutex_slot(),
+				ini_option_object().get_storage_ap(),
+				ini_option_object().get_storage_bucket_size(),
+				ini_option_object().get_storage_compress(),
+				ini_option_object().is_storage_large());
 		break;
 	default:
 		log_err("unknown storage type [%s]", ini_option_object().get_storage_type().c_str());

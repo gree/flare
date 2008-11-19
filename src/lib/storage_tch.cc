@@ -20,13 +20,33 @@ namespace flare {
 /**
  *	ctor for storage_tch
  */
-storage_tch::storage_tch(string data_dir, int mutex_slot_size):
+storage_tch::storage_tch(string data_dir, int mutex_slot_size, uint32_t storage_ap, uint64_t storage_bucket_size, string storage_compess, bool storage_large):
 		storage(data_dir, mutex_slot_size),
 		_iter_lock(0) {
 	this->_data_path = this->_data_dir + "/flare.hdb";
 
 	this->_db = tchdbnew();
 	tchdbsetmutex(this->_db);
+	compress t = compress_none;
+	compress_cast(storage_compess, t);
+	int n = 0;
+	if (storage_large) {
+		n |= HDBTLARGE;
+	}
+	switch (t) {
+	case compress_none:
+		break;
+	case compress_deflate:
+		n |= HDBTDEFLATE;
+		break;
+	case compress_bz2:
+		n |= HDBTBZIP;
+		break;
+	case compress_tcbs:
+		n |= HDBTTCBS;
+		break;
+	}
+	tchdbtune(this->_db, storage_bucket_size, storage_ap, 10, n);
 }
 
 /**

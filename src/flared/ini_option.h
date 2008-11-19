@@ -35,6 +35,10 @@ private:
 	int					_proxy_concurrency;
 	string			_server_name;
 	int					_server_port;
+	uint32_t		_storage_ap;
+	uint64_t		_storage_bucket_size;
+	string			_storage_compress;
+	bool				_storage_large;
 	string			_storage_type;
 	int					_thread_pool_size;
 	
@@ -44,6 +48,8 @@ public:
 	static const int default_mutex_slot = 64;
 	static const int default_proxy_concurrency = 2;
 	static const int default_server_port = 12121;
+	static const uint32_t default_storage_ap = 4;
+	static const uint64_t default_storage_bucket_size = 131071;
 	static const int default_thread_pool_size = 5;
 
 	ini_option();
@@ -65,6 +71,10 @@ public:
 	int get_proxy_concurrency() { return this->_proxy_concurrency; };
 	string get_server_name() { return this->_server_name; };
 	int get_server_port() { return this->_server_port; };
+	uint32_t get_storage_ap() { return this->_storage_ap; };
+	uint64_t get_storage_bucket_size() { return this->_storage_bucket_size; };
+	string get_storage_compress() { return this->_storage_compress; };
+	bool is_storage_large() { return this->_storage_large; };
 	string get_storage_type() { return this->_storage_type; };
 	int get_thread_pool_size() { return this->_thread_pool_size; };
 

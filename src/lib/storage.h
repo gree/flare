@@ -57,6 +57,13 @@ public:
 		type_tch,
 	};
 
+	enum									compress {
+		compress_none,
+		compress_deflate,
+		compress_bz2,
+		compress_tcbs,
+	};
+
 	enum									hash_algorithm {
 		hash_algorithm_simple = 0,
 		hash_algorithm_bitshift,
@@ -332,6 +339,35 @@ public:
 		switch (t) {
 		case type_tch:
 			return "tch";
+		}
+		return "";
+	};
+
+	static inline int compress_cast(string s, compress& t) {
+		if (s == "") {
+			t = compress_none;
+		} else if (s == "deflate") {
+			t = compress_deflate;
+		} else if (s == "bz2") {
+			t = compress_bz2;
+		} else if (s == "tcbs") {
+			t = compress_tcbs;
+		} else {
+			return -1;
+		}
+		return 0;
+	};
+
+	static inline string compress_cast(compress t) {
+		switch (t) {
+		case compress_none:
+			return "";
+		case compress_deflate:
+			return "deflate";
+		case compress_bz2:
+			return "bz2";
+		case compress_tcbs:
+			return "tcbs";
 		}
 		return "";
 	};

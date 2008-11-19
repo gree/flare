@@ -32,6 +32,10 @@ ini_option::ini_option():
 		_proxy_concurrency(default_proxy_concurrency),
 		_server_name(""),
 		_server_port(default_server_port),
+		_storage_ap(default_storage_ap),
+		_storage_bucket_size(default_storage_bucket_size),
+		_storage_compress(""),
+		_storage_large(false),
 		_storage_type(""),
 		_thread_pool_size(default_thread_pool_size) {
 }
@@ -161,6 +165,29 @@ int ini_option::load() {
 			this->_server_port = opt_var_map["server-port"].as<int>();
 		}
 
+		if (opt_var_map.count("storage-ap")) {
+			this->_storage_ap = opt_var_map["storage-ap"].as<uint32_t>();
+		}
+
+		if (opt_var_map.count("storage-bucket-size")) {
+			this->_storage_bucket_size = opt_var_map["storage-bucket-size"].as<uint64_t>();
+		}
+
+		if (opt_var_map.count("storage-compress")) {
+			storage::compress t;
+			if (storage::compress_cast(opt_var_map["storage-compress"].as<string>(), t) < 0) {
+				cout << "unknown storage compress [" << opt_var_map["storage-compress"].as<string>() << "]" << endl;
+				throw -1;
+			}
+			this->_storage_compress = opt_var_map["storage-compress"].as<string>();
+		} else {
+			this->_storage_compress = storage::compress_cast(storage::compress_none);
+		}
+
+		if (opt_var_map.count("storage-large")) {
+			this->_storage_large = true;
+		}
+
 		if (opt_var_map.count("storage-type")) {
 			storage::type t;
 			if (storage::type_cast(opt_var_map["storage-type"].as<string>(), t) < 0) {
@@ -283,6 +310,10 @@ int ini_option::_setup_config_option(program_options::options_description& optio
 		("proxy-concurrency",	program_options::value<int>(),			"proxy request concurrency for each node")
 		("server-name",				program_options::value<string>(),		"my server name")
 		("server-port",				program_options::value<int>(),			"my server port")
+		("storage-ap",				program_options::value<uint32_t>(),	"storage size of record alignment by power of 2 (tch)")
+		("storage-bucket-size",	program_options::value<uint64_t>(),	"number of elements of the bucket array (tch)")
+		("storage-compress",	program_options::value<string>(),		"storage compress type (deflate, bz2, tcbs) (tch)")
+		("storage-large",																					"use large storage (tch)")
 		("storage-type",			program_options::value<string>(),		"storage type (tch:tokyo cabinet hash database)")
 		("thread-pool-size",	program_options::value<int>(),			"thread pool size (dynamic)");
 

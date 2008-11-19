@@ -45,9 +45,12 @@ protected:
 	pthread_rwlock_t	_mutex_pool;
 
 	pool::size_type		_max_pool_size;
+	int								_stack_size;			// kb
 
 public:
-	thread_pool(pool::size_type max_pool_size);
+	static const int default_stack_size = 128;
+
+	thread_pool(pool::size_type max_pool_size, int stack_size = default_stack_size);
 	virtual ~thread_pool();
 
 	shared_thread get(int type);

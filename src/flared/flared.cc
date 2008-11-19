@@ -109,22 +109,23 @@ int flared::startup(int argc, char **argv) {
 	log_notice("%s version %s - system logger started", this->_ident.c_str(), PACKAGE_VERSION);
 
 	log_notice("application startup in progress...", 0);
-	log_notice("  config_path:       %s", ini_option_object().get_config_path().c_str());
-	log_notice("  daemonize:         %s", ini_option_object().is_daemonize() ? "true" : "false");
-	log_notice("  data_dir:          %s", ini_option_object().get_data_dir().c_str());
-	log_notice("  index_server_name: %s", ini_option_object().get_index_server_name().c_str());
-	log_notice("  index_server_port: %d", ini_option_object().get_index_server_port());
-	log_notice("  max_connection:    %d", ini_option_object().get_max_connection());
-	log_notice("  mutex_slot:        %d", ini_option_object().get_mutex_slot());
-	log_notice("  proxy_concurrency: %d", ini_option_object().get_proxy_concurrency());
-	log_notice("  server_name:       %s", ini_option_object().get_server_name().c_str());
-	log_notice("  server_port:       %d", ini_option_object().get_server_port());
-	log_notice("  storage_ap:        %u", ini_option_object().get_storage_ap());
+	log_notice("  config_path:         %s", ini_option_object().get_config_path().c_str());
+	log_notice("  daemonize:           %s", ini_option_object().is_daemonize() ? "true" : "false");
+	log_notice("  data_dir:            %s", ini_option_object().get_data_dir().c_str());
+	log_notice("  index_server_name:   %s", ini_option_object().get_index_server_name().c_str());
+	log_notice("  index_server_port:   %d", ini_option_object().get_index_server_port());
+	log_notice("  max_connection:      %d", ini_option_object().get_max_connection());
+	log_notice("  mutex_slot:          %d", ini_option_object().get_mutex_slot());
+	log_notice("  proxy_concurrency:   %d", ini_option_object().get_proxy_concurrency());
+	log_notice("  server_name:         %s", ini_option_object().get_server_name().c_str());
+	log_notice("  server_port:         %d", ini_option_object().get_server_port());
+	log_notice("  stack_size:          %d", ini_option_object().get_stack_size());
+	log_notice("  storage_ap:          %u", ini_option_object().get_storage_ap());
 	log_notice("  storage_bucket_size: %llu", ini_option_object().get_storage_bucket_size());
-	log_notice("  storage_compress:  %s", ini_option_object().get_storage_compress().c_str());
-	log_notice("  storage_large:     %s", ini_option_object().is_storage_large() ? "true" : "false");
-	log_notice("  storage_type:      %s", ini_option_object().get_storage_type().c_str());
-	log_notice("  thread_pool_size:  %d", ini_option_object().get_thread_pool_size());
+	log_notice("  storage_compress:    %s", ini_option_object().get_storage_compress().c_str());
+	log_notice("  storage_large:       %s", ini_option_object().is_storage_large() ? "true" : "false");
+	log_notice("  storage_type:        %s", ini_option_object().get_storage_type().c_str());
+	log_notice("  thread_pool_size:    %d", ini_option_object().get_thread_pool_size());
 
 	// startup procs
 	if (this->_set_resource_limit() < 0) {
@@ -147,7 +148,7 @@ int flared::startup(int argc, char **argv) {
 		return -1;
 	}
 
-	this->_thread_pool = _new_ thread_pool(ini_option_object().get_thread_pool_size());
+	this->_thread_pool = _new_ thread_pool(ini_option_object().get_thread_pool_size(), ini_option_object().get_stack_size());
 
 	this->_cluster = _new_ cluster(this->_thread_pool, ini_option_object().get_data_dir(), ini_option_object().get_server_name(), ini_option_object().get_server_port());
 	this->_cluster->set_proxy_concurrency(ini_option_object().get_proxy_concurrency());
@@ -205,13 +206,17 @@ int flared::run() {
 			shared_connection c = *it;
 
 			if (this->_thread_pool->get_thread_size(thread_pool::thread_type_request) >= ini_option_object().get_max_connection()) {
-				log_warning("too many connection [%d] -> closing socket and continue", ini_option_object().get_max_connection());
+				log_warning("too many connections [%d] -> closing socket and continue", ini_option_object().get_max_connection());
 				continue;
 			}
 
 			stats_object->increment_total_connections();
 
 			shared_thread t = this->_thread_pool->get(thread_pool::thread_type_request);
+			if (t->get_id() == 0) {
+				log_warning("too many threads (failed to create thread) [%d] -> closing socket and continue", this->_thread_pool->get_thread_size(thread_pool::thread_type_request));
+				continue;
+			}
 			handler_request* h = _new_ handler_request(t, c);
 			t->trigger(h);
 		}

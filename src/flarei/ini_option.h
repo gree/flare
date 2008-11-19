@@ -32,6 +32,7 @@ private:
 	int					_monitor_interval;
 	string			_server_name;
 	int					_server_port;
+	int					_stack_size;
 	int					_thread_pool_size;
 	
 public:
@@ -39,6 +40,7 @@ public:
 	static const int default_monitor_threshold = 3;
 	static const int default_monitor_interval = 5;
 	static const int default_server_port = 12120;
+	static const int default_stack_size = 128;
 	static const int default_thread_pool_size = 5;
 
 	ini_option();
@@ -58,6 +60,7 @@ public:
 	int get_monitor_interval() { return this->_monitor_interval; };
 	string get_server_name() { return this->_server_name; };
 	int get_server_port() { return this->_server_port; };
+	int get_stack_size() { return this->_stack_size; };
 	int get_thread_pool_size() { return this->_thread_pool_size; };
 
 private:

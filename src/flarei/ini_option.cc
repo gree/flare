@@ -30,6 +30,7 @@ ini_option::ini_option():
 		_monitor_interval(default_monitor_interval),
 		_server_name(""),
 		_server_port(default_server_port),
+		_stack_size(default_stack_size),
 		_thread_pool_size(default_thread_pool_size) {
 }
 
@@ -144,6 +145,10 @@ int ini_option::load() {
 
 		if (opt_var_map.count("server-port")) {
 			this->_server_port = opt_var_map["server-port"].as<int>();
+		}
+
+		if (opt_var_map.count("stack-size")) {
+			this->_stack_size = opt_var_map["stack-size"].as<int>();
 		}
 
 		if (opt_var_map.count("thread-pool-size")) {
@@ -265,6 +270,7 @@ int ini_option::_setup_config_option(program_options::options_description& optio
 		("monitor-interval",	program_options::value<int>(),			"node server monitoring interval (sec) (dynamic)")
 		("server-name",				program_options::value<string>(),		"my server name")
 		("server-port",				program_options::value<int>(),			"my server port")
+		("stack-size",				program_options::value<int>(),			"thread stack size (kb)")
 		("thread-pool-size",	program_options::value<int>(),			"thread pool size (dynamic)");
 
 	return 0;

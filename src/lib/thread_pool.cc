@@ -16,9 +16,10 @@ namespace flare {
 /**
  *	ctor for thread_pool
  */
-thread_pool::thread_pool(thread_pool::pool::size_type max_pool_size):
+thread_pool::thread_pool(thread_pool::pool::size_type max_pool_size, int stack_size):
 		_index(1),
-		_max_pool_size(max_pool_size) {
+		_max_pool_size(max_pool_size),
+		_stack_size(stack_size) {
 	this->_global_map.clear();
 
 	pthread_rwlock_init(&this->_mutex_global_map, NULL);
@@ -53,6 +54,10 @@ shared_thread thread_pool::get(int type) {
 	pthread_rwlock_unlock(&this->_mutex_pool);
 	if (pool_size <= 0) {
 		tmp = this->_create_thread();
+		if (tmp->get_thread_id() == 0) {
+			log_err("failed to create thread (thread_id=%d)", tmp->get_thread_id());
+			return tmp;
+		}
 		log_debug("new thread object (thread_id=%u)", tmp->get_thread_id());
 	}
 	
@@ -252,7 +257,7 @@ thread_pool::pool::size_type thread_pool::get_pool_size() {
 shared_thread thread_pool::_create_thread() {
 	shared_thread t(new thread(this));
 	weak_thread weak_t(t);
-	t->startup(weak_t);
+	t->startup(weak_t, this->_stack_size);
 
 	return t;
 }

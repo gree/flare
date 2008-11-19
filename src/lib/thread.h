@@ -95,7 +95,7 @@ public:
 	thread(thread_pool* t);
 	virtual ~thread();
 
-	int startup(weak_thread myself);
+	int startup(weak_thread myself, int stack_size);
 	int setup(int type, unsigned int id);
 	int trigger(thread_handler* th, bool request_delete = true, bool async = true);
 	int wait();

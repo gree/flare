@@ -126,14 +126,18 @@ thread::~thread() {
  *
  *	(should be called from parent thread)
  */
-int thread::startup(weak_thread myself) {
+int thread::startup(weak_thread myself, int stack_size) {
 	this->_myself = myself;
 
 	pthread_t thread_id;
 	pthread_attr_t thr_attr;
 	pthread_attr_init(&thr_attr);
+	if (pthread_attr_setstacksize(&thr_attr, stack_size * 1024) != 0) {
+		log_warning("pthread_attr_setstacksize() failed (perhaps stack size is too small) -> trying minimum stack size (%d -> %d)", stack_size * 1024, PTHREAD_STACK_MIN);
+		pthread_attr_setstacksize(&thr_attr, PTHREAD_STACK_MIN);
+	}
 	pthread_attr_setdetachstate(&thr_attr, PTHREAD_CREATE_DETACHED);
-	if (pthread_create(&thread_id, &thr_attr, thread_run, (void*)this) < 0) {
+	if (pthread_create(&thread_id, &thr_attr, thread_run, (void*)this) != 0) {
 		log_err("pthread_create() failed: %s", strerror(errno), errno);
 		return -1;
 	}

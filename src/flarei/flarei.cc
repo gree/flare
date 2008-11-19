@@ -113,6 +113,7 @@ int flarei::startup(int argc, char **argv) {
 	log_notice("  monitor_interval:  %d", ini_option_object().get_monitor_interval());
 	log_notice("  server_name:       %s", ini_option_object().get_server_name().c_str());
 	log_notice("  server_port:       %d", ini_option_object().get_server_port());
+	log_notice("  stack_size:        %d", ini_option_object().get_stack_size());
 	log_notice("  thread_pool_size:  %d", ini_option_object().get_thread_pool_size());
 
 	// startup procs
@@ -136,7 +137,7 @@ int flarei::startup(int argc, char **argv) {
 		return -1;
 	}
 
-	this->_thread_pool = _new_ thread_pool(ini_option_object().get_thread_pool_size());
+	this->_thread_pool = _new_ thread_pool(ini_option_object().get_thread_pool_size(), ini_option_object().get_stack_size());
 
 	this->_cluster = _new_ cluster(this->_thread_pool, ini_option_object().get_data_dir(), ini_option_object().get_server_name(), ini_option_object().get_server_port());
 	this->_cluster->set_monitor_threshold(ini_option_object().get_monitor_threshold());

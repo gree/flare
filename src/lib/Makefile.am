@@ -24,6 +24,7 @@ libflare_a_SOURCES = \
 	net.h net.cc \
 	op.cc op.h \
 	op_add.h op_add.cc \
+	op_append.h op_append.cc \
 	op_cas.h op_cas.cc \
 	op_decr.h op_decr.cc \
 	op_delete.h op_delete.cc \
@@ -43,6 +44,7 @@ libflare_a_SOURCES = \
 	op_parser_binary.h op_parser_binary.cc \
 	op_parser_text.h op_parser_text.cc \
 	op_ping.h op_ping.cc \
+	op_prepend.h op_prepend.cc \
 	op_proxy_read.h op_proxy_read.cc \
 	op_proxy_write.h op_proxy_write.cc \
 	op_quit.h op_quit.cc \

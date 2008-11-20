@@ -41,6 +41,8 @@ public:
 		behavior_add						= 0x01 << 4,
 		behavior_replace				= 0x01 << 5,
 		behavior_cas						= 0x01 << 6,
+		behavior_append					= 0x01 << 7,
+		behavior_prepend				= 0x01 << 8,
 	};
 	
 	enum									result {

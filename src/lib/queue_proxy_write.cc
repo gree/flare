@@ -10,10 +10,12 @@
 #include "queue_proxy_write.h"
 #include "op_proxy_write.h"
 #include "op_add.h"
+#include "op_append.h"
 #include "op_cas.h"
 #include "op_decr.h"
 #include "op_delete.h"
 #include "op_incr.h"
+#include "op_prepend.h"
 #include "op_set.h"
 #include "op_replace.h"
 
@@ -117,6 +119,18 @@ op_proxy_write* queue_proxy_write::_get_op(string op_ident, shared_connection c)
 			return _new_ op_set(c, this->_cluster, this->_storage);
 		} else {
 			return _new_ op_cas(c, this->_cluster, this->_storage);
+		}
+	} else if (op_ident == "append") {
+		if (this->is_post_proxy()) {
+			return _new_ op_set(c, this->_cluster, this->_storage);
+		} else {
+			return _new_ op_append(c, this->_cluster, this->_storage);
+		}
+	} else if (op_ident == "prepend") {
+		if (this->is_post_proxy()) {
+			return _new_ op_set(c, this->_cluster, this->_storage);
+		} else {
+			return _new_ op_prepend(c, this->_cluster, this->_storage);
 		}
 	} else if (op_ident == "incr") {
 		if (this->is_post_proxy()) {

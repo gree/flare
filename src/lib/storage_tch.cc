@@ -13,9 +13,6 @@
 namespace gree {
 namespace flare {
 
-// {{{
-// }}}
-
 // {{{ ctor/dtor
 /**
  *	ctor for storage_tch
@@ -117,7 +114,20 @@ int storage_tch::set(entry& e, result& r, int b) {
 		}
 
 		entry e_current;
-		int e_current_exists = this->_get_header(e.key, e_current);
+		int e_current_exists = 0;
+		if ((b & behavior_append) || (b & behavior_prepend)) {
+			result r;
+			e_current.key = e.key;
+			int n = this->get(e_current, r, behavior_skip_lock);
+			if (r == result_not_found || n < 0) {
+				this->_get_header_cache(e_current.key, e_current);
+				e_current_exists = -1;
+			} else {
+				e_current_exists = 0;
+			}
+		} else {
+			e_current_exists = this->_get_header(e.key, e_current);
+		}
 
 		enum st {
 			st_alive,
@@ -179,9 +189,35 @@ int storage_tch::set(entry& e, result& r, int b) {
 			log_debug("updating version (version=%llu)", e.version);
 		}
 
-		p = _new_ uint8_t[entry::header_size + e.size];
-		this->_serialize_header(e, p);
-		memcpy(p+entry::header_size, e.data.get(), e.size);
+		if ((b & behavior_append) || (b & behavior_prepend)) {
+			if (e_current_st != st_alive) {
+				log_warning("behavior=append|prepend but no data exists -> skip setting", 0);
+				throw -1;
+			}
+
+			// memcached ignores expire in case of append|prepend
+			e.expire = e_current.expire;
+			p = _new_ uint8_t[entry::header_size + e.size + e_current.size];
+			uint64_t e_size = e.size;
+			e.size += e_current.size;
+			this->_serialize_header(e, p);
+
+			// :(
+			if (b & behavior_append) {
+				memcpy(p+entry::header_size, e_current.data.get(), e_current.size);
+				memcpy(p+entry::header_size+e_current.size, e.data.get(), e_size);
+			} else {
+				memcpy(p+entry::header_size, e.data.get(), e_size);
+				memcpy(p+entry::header_size+e_size, e_current.data.get(), e_current.size);
+			}
+			shared_byte data(new uint8_t[e.size]);
+			memcpy(data.get(), p+entry::header_size, e.size);
+			e.data = data;
+		} else {
+			p = _new_ uint8_t[entry::header_size + e.size];
+			this->_serialize_header(e, p);
+			memcpy(p+entry::header_size, e.data.get(), e.size);
+		}
 
 		if (e.option & option_noreply) {
 			if (tchdbputasync(this->_db, e.key.c_str(), e.key.size(), p, entry::header_size + e.size) == true) {

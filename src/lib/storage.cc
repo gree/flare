@@ -13,9 +13,6 @@
 namespace gree {
 namespace flare {
 
-// {{{
-// }}}
-
 // {{{ ctor/dtor
 /**
  *	ctor for storage

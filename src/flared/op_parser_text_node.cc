@@ -50,6 +50,10 @@ op* op_parser_text_node::_determine_op(const char* first, const char* buf, int& 
 		r = static_cast<op*>(_new_ op_replace(this->_connection, singleton<flared>::instance().get_cluster(), singleton<flared>::instance().get_storage())); 
 	} else if (strcmp(first, "cas") == 0) {
 		r = static_cast<op*>(_new_ op_cas(this->_connection, singleton<flared>::instance().get_cluster(), singleton<flared>::instance().get_storage())); 
+	} else if (strcmp(first, "append") == 0) {
+		r = static_cast<op*>(_new_ op_append(this->_connection, singleton<flared>::instance().get_cluster(), singleton<flared>::instance().get_storage())); 
+	} else if (strcmp(first, "prepend") == 0) {
+		r = static_cast<op*>(_new_ op_prepend(this->_connection, singleton<flared>::instance().get_cluster(), singleton<flared>::instance().get_storage())); 
 	} else if (strcmp(first, "incr") == 0) {
 		r = static_cast<op*>(_new_ op_incr(this->_connection, singleton<flared>::instance().get_cluster(), singleton<flared>::instance().get_storage())); 
 	} else if (strcmp(first, "decr") == 0) {

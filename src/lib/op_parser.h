@@ -10,6 +10,7 @@
 
 #include "op.h"
 #include "op_add.h"
+#include "op_append.h"
 #include "op_cas.h"
 #include "op_decr.h"
 #include "op_delete.h"
@@ -26,6 +27,7 @@
 #include "op_node_state.h"
 #include "op_node_sync.h"
 #include "op_ping.h"
+#include "op_prepend.h"
 #include "op_quit.h"
 #include "op_replace.h"
 #include "op_set.h"

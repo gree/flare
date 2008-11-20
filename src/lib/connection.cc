@@ -20,6 +20,7 @@ namespace flare {
 connection::connection():
 		_host(""),
 		_port(-1),
+		_read_timeout(read_timeout),
 		_read_buf(NULL),
 		_read_buf_len(0),
 		_write_buf(NULL),
@@ -35,6 +36,7 @@ connection::connection(int sock, struct sockaddr_in addr):
 		_addr(addr),
 		_host(""),
 		_port(-1),
+		_read_timeout(read_timeout),
 		_read_buf(NULL),
 		_read_buf_len(0),
 		_write_buf(NULL),
@@ -134,9 +136,9 @@ int connection::read(char** p) {
 	struct pollfd ufds;
 	ufds.fd= this->_sock;
 	ufds.events= POLLIN | POLLPRI;
-	int n = poll(&ufds, 1, connection::read_timeout);
+	int n = poll(&ufds, 1, this->_read_timeout);
 	if (n == 0) {
-		log_info("poll() timed out (%d sec)", connection::read_timeout / 1000);
+		log_info("poll() timed out (%0.4f sec)", this->_read_timeout / 1000.0);
 		this->_errno = -1;
 		return -1;
 	}

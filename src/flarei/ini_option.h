@@ -30,6 +30,7 @@ private:
 	uint32_t		_max_connection;
 	int					_monitor_threshold;
 	int					_monitor_interval;
+	int					_monitor_read_timeout;
 	string			_server_name;
 	int					_server_port;
 	int					_stack_size;
@@ -39,6 +40,7 @@ public:
 	static const uint32_t default_max_connection = 128;
 	static const int default_monitor_threshold = 3;
 	static const int default_monitor_interval = 5;
+	static const int default_monitor_read_timeout = 1 * 1000;
 	static const int default_server_port = 12120;
 	static const int default_stack_size = 128;
 	static const int default_thread_pool_size = 5;
@@ -58,6 +60,7 @@ public:
 	uint32_t get_max_connection() { return this->_max_connection; };
 	int get_monitor_threshold() { return this->_monitor_threshold; };
 	int get_monitor_interval() { return this->_monitor_interval; };
+	int get_monitor_read_timeout() { return this->_monitor_read_timeout; };
 	string get_server_name() { return this->_server_name; };
 	int get_server_port() { return this->_server_port; };
 	int get_stack_size() { return this->_stack_size; };

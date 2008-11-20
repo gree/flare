@@ -39,6 +39,7 @@ cluster::cluster(thread_pool* tp, string data_dir, string server_name, int serve
 		_server_port(server_port),
 		_monitor_threshold(0),
 		_monitor_interval(0),
+		_monitor_read_timeout(0),
 		_thread_type(default_thread_type),
 		_index_server_name(""),
 		_index_server_port(0),
@@ -157,6 +158,7 @@ int cluster::startup_index() {
 		handler_monitor* h = _new_ handler_monitor(t, this, it->second.node_server_name, it->second.node_server_port);
 		h->set_monitor_threshold(this->_monitor_threshold);
 		h->set_monitor_interval(this->_monitor_interval);
+		h->set_monitor_read_timeout(this->_monitor_read_timeout);
 		t->trigger(h);
 	}
 
@@ -275,6 +277,7 @@ int cluster::add_node(string node_server_name, int node_server_port) {
 		handler_monitor* h = _new_ handler_monitor(t, this, node_server_name, node_server_port);
 		h->set_monitor_threshold(this->_monitor_threshold);
 		h->set_monitor_interval(this->_monitor_interval);
+		h->set_monitor_read_timeout(this->_monitor_read_timeout);
 		t->trigger(h);
 	}
 
@@ -785,7 +788,7 @@ int cluster::set_monitor_threshold(int monitor_threshold) {
 	this->_monitor_threshold = monitor_threshold;
 
 	// notify current threads
-	shared_queue_update_monitor_option q(new queue_update_monitor_option(this->_monitor_threshold, this->_monitor_interval));
+	shared_queue_update_monitor_option q(new queue_update_monitor_option(this->_monitor_threshold, this->_monitor_interval, this->_monitor_read_timeout));
 	this->_broadcast(q, true);
 
 	return 0;
@@ -798,7 +801,20 @@ int cluster::set_monitor_interval(int monitor_interval) {
 	this->_monitor_interval = monitor_interval;
 
 	// notify current threads
-	shared_queue_update_monitor_option q(new queue_update_monitor_option(this->_monitor_threshold, this->_monitor_interval));
+	shared_queue_update_monitor_option q(new queue_update_monitor_option(this->_monitor_threshold, this->_monitor_interval, this->_monitor_read_timeout));
+	this->_broadcast(q, true);
+
+	return 0;
+}
+
+/**
+ *	[index] set node server monitoring read timeout
+ */
+int cluster::set_monitor_read_timeout(int monitor_read_timeout) {
+	this->_monitor_read_timeout = monitor_read_timeout;
+
+	// notify current threads
+	shared_queue_update_monitor_option q(new queue_update_monitor_option(this->_monitor_threshold, this->_monitor_interval, this->_monitor_read_timeout));
 	this->_broadcast(q, true);
 
 	return 0;

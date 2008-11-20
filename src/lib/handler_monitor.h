@@ -33,6 +33,7 @@ protected:
 	int									_node_server_port;
 	int									_monitor_threshold;
 	int									_monitor_interval;
+	int									_monitor_read_timeout;
 	int									_down_state;
 
 public:
@@ -43,6 +44,7 @@ public:
 
 	int set_monitor_threshold(int monitor_threshold) { this->_monitor_threshold = monitor_threshold; return 0; };
 	int set_monitor_interval(int monitor_interval) { this->_monitor_interval = monitor_interval; return 0; };
+	int set_monitor_read_timeout(int monitor_read_timeout) { this->_monitor_read_timeout = monitor_read_timeout; return 0; };
 
 protected:
 	int _process_monitor();

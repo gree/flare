@@ -29,6 +29,7 @@ handler_monitor::handler_monitor(shared_thread t, cluster* cl, string node_serve
 		_node_server_port(node_server_port),
 		_monitor_threshold(0),
 		_monitor_interval(0),
+		_monitor_read_timeout(0),
 		_down_state(0) {
 }
 
@@ -108,15 +109,27 @@ int handler_monitor::_process_monitor() {
 		}
 	}
 
+	int current_read_timeout = this->_connection->get_read_timeout();
+
+	// clear read buf
+	char* tmp;
+	this->_connection->set_read_timeout(0);
+	if (this->_connection->read(&tmp) > 0) {
+		_delete_(tmp);
+	}
+	this->_connection->set_read_timeout(this->_monitor_read_timeout);
+
 	op_ping* p = _new_ op_ping(this->_connection);
 	this->_thread->set_state("execute");
 	this->_thread->set_op(p->get_ident());
 
 	if (p->run_client() < 0) {
+		this->_connection->set_read_timeout(current_read_timeout);
 		_delete_(p);
 		return -1;
 	}
 
+	this->_connection->set_read_timeout(current_read_timeout);
 	_delete_(p);
 	return 0;
 }
@@ -128,9 +141,10 @@ int handler_monitor::_process_queue(shared_thread_queue q) {
 
 	if (q->get_ident() == "update_monitor_option") {
 		shared_queue_update_monitor_option r = shared_dynamic_cast<queue_update_monitor_option, thread_queue>(q);
-		log_debug("updating monitor option [threshold: %d -> %d, interval:%d -> %d]", this->_monitor_threshold, r->get_monitor_threshold(), this->_monitor_interval, r->get_monitor_interval());
+		log_debug("updating monitor option [threshold: %d -> %d, interval:%d -> %d, read_timeout:%d -> %d]", this->_monitor_threshold, r->get_monitor_threshold(), this->_monitor_interval, r->get_monitor_interval(), this->_monitor_read_timeout, r->get_monitor_read_timeout());
 		this->_monitor_threshold = r->get_monitor_threshold();
 		this->_monitor_interval = r->get_monitor_interval();
+		this->_monitor_read_timeout = r->get_monitor_read_timeout();
 	} else if (q->get_ident() == "node_sync") {
 		if (this->_down_state >= this->_monitor_threshold) {
 			log_info("node seems already down -> skip processing queue (node_server_name=%s, node_server_port=%d, ident=%s)", this->_node_server_name.c_str(), this->_node_server_port, q->get_ident().c_str());

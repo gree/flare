@@ -28,6 +28,7 @@ ini_option::ini_option():
 		_max_connection(default_max_connection),
 		_monitor_threshold(default_monitor_threshold),
 		_monitor_interval(default_monitor_interval),
+		_monitor_read_timeout(default_monitor_read_timeout),
 		_server_name(""),
 		_server_port(default_server_port),
 		_stack_size(default_stack_size),
@@ -137,6 +138,10 @@ int ini_option::load() {
 			this->_monitor_interval = opt_var_map["monitor-interval"].as<int>();
 		}
 
+		if (opt_var_map.count("monitor-read-timeout")) {
+			this->_monitor_read_timeout = opt_var_map["monitor-read-timeout"].as<int>();
+		}
+
 		if (opt_var_map.count("server-name")) {
 			this->_server_name = opt_var_map["server-name"].as<string>();
 		} else {
@@ -226,6 +231,11 @@ int ini_option::reload() {
 			this->_monitor_interval = opt_var_map["monitor-interval"].as<int>();
 		}
 
+		if (opt_var_map.count("monitor-read-timeout")) {
+			log_info("  monitor_read_timeout: %d -> %d", this->_monitor_read_timeout, opt_var_map["monitor-read-timeout"].as<int>());
+			this->_monitor_read_timeout = opt_var_map["monitor-read-timeout"].as<int>();
+		}
+
 		if (opt_var_map.count("thread-pool-size")) {
 			log_info("  thread_pool_size: %d -> %d", this->_thread_pool_size, opt_var_map["thread-pool-size"].as<int>());
 			this->_thread_pool_size = opt_var_map["thread-pool-size"].as<int>();
@@ -263,15 +273,16 @@ int ini_option::_setup_cli_option(program_options::options_description& option) 
 int ini_option::_setup_config_option(program_options::options_description& option) {
 	option.add_options()
 		("daemonize",																							"run as daemon")
-		("data-dir",					program_options::value<string>(), 	"data directory")
-		("log-facility",			program_options::value<string>(), 	"log facility (dynamic)")
-		("max-connection",		program_options::value<int>(),			"max concurrent connections to accept (dynamic)")
-		("monitor-threshold",	program_options::value<int>(),			"node server monitoring threshold (dynamic)")
-		("monitor-interval",	program_options::value<int>(),			"node server monitoring interval (sec) (dynamic)")
-		("server-name",				program_options::value<string>(),		"my server name")
-		("server-port",				program_options::value<int>(),			"my server port")
-		("stack-size",				program_options::value<int>(),			"thread stack size (kb)")
-		("thread-pool-size",	program_options::value<int>(),			"thread pool size (dynamic)");
+		("data-dir",							program_options::value<string>(), 	"data directory")
+		("log-facility",					program_options::value<string>(), 	"log facility (dynamic)")
+		("max-connection",				program_options::value<int>(),			"max concurrent connections to accept (dynamic)")
+		("monitor-threshold",			program_options::value<int>(),			"node server monitoring threshold (dynamic)")
+		("monitor-interval",			program_options::value<int>(),			"node server monitoring interval (sec) (dynamic)")
+		("monitor-read-timeout",	program_options::value<int>(),			"node server monitoring read timeout (millisec) (dynamic)")
+		("server-name",						program_options::value<string>(),		"my server name")
+		("server-port",						program_options::value<int>(),			"my server port")
+		("stack-size",						program_options::value<int>(),			"thread stack size (kb)")
+		("thread-pool-size",			program_options::value<int>(),			"thread pool size (dynamic)");
 
 	return 0;
 }

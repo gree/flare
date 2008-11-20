@@ -26,6 +26,7 @@ protected:
 	struct sockaddr_in	_addr;
 	string							_host;
 	int									_port;
+	int									_read_timeout;
 	char*								_read_buf;
 	uint32_t						_read_buf_len;
 	char*								_write_buf;
@@ -57,6 +58,8 @@ public:
 	bool is_error() { return this->_errno != 0 ? true : false; };
 	string get_host();
 	int get_port();
+	int get_read_timeout() { return this->_read_timeout; };
+	int set_read_timeout(int timeout) { this->_read_timeout = timeout; return 0; };
 
 private:
 	int _add_read_buf(char* p, int len);

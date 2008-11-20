@@ -48,7 +48,7 @@ int handler_request::run() {
 			if (this->_thread->is_shutdown_request()) {
 				log_info("thread shutdown request -> breaking loop", 0);
 			} else {
-				log_warning("something is going wrong while parsing request -> breaking loop", 0);
+				log_info("something is going wrong while parsing request -> breaking loop", 0);
 			}
 			break;
 		}

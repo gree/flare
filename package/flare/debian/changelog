@@ -1,6 +1,6 @@
-flare (0.9.9-1) unstable; urgency=low
+flare (1.0.0-1) unstable; urgency=low
 
   * Initial release
 
- -- Masaki Fujimoto <fujimoto@php.net>  Tue, 18 Nov 2008 14:28:29 +0900
+ -- Masaki Fujimoto <fujimoto@php.net>  Mon, 24 Nov 2008 14:28:29 +0900
 

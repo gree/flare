@@ -1,0 +1,408 @@
+commit 25ce9685fd9c2030fcc8428382c86f6a385aca3b
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Fri Nov 21 01:35:38 2008 +0900
+
+    append/prepend op implementation
+
+commit 2efca16ca0fde7b882e6d7ecea9167ab2db13aa6
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Fri Nov 21 00:24:35 2008 +0900
+
+    added monitor-read-timeout option
+
+commit 7649bee2462ac9c86a362b79eec04e3fceafaabe
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Thu Nov 20 12:11:59 2008 +0900
+
+    log level tweaks
+
+commit 65c379d705b2c646b6e840a760cbd25e5c2da4c5
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Thu Nov 20 03:21:27 2008 +0900
+
+    thread stack size tunes (and added --stack-size option)
+
+commit 41948c7fcab48e906cf12dadb351961c77f02221
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Thu Nov 20 00:02:58 2008 +0900
+
+    tchdbtune support
+
+commit c3b89d1670e742000f4f30d1afa0da9211b28818
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Wed Nov 19 20:38:19 2008 +0900
+
+    select() -> poll() (anyway)
+
+commit 655ba10a30e847bcb9451de4d3796b966eaea64c
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Wed Nov 19 11:03:10 2008 +0900
+
+    fix cas condition
+
+commit e431f7644cb6b2f80d59bc53cebf4ed4d287f8b3
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Tue Nov 18 22:09:37 2008 +0900
+
+    xml serialization (human readable)
+
+commit 7aac27e45e9af9ca0dc7ddba120ef9b37fe0ae44
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Tue Nov 18 21:22:43 2008 +0900
+
+    package fixes
+
+commit 20d53ab7d26f4bf5ed9adcef74ee73d52b64cb1c
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Tue Nov 18 20:22:41 2008 +0900
+
+    default config file tweaks
+
+commit 98d26090abc3c9f9355d2e9a0d90592fc2c21483
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Tue Nov 18 19:49:56 2008 +0900
+
+    package files for debian
+
+commit dd080cd6ad6876a5ce4eb8b2c3be8d58d74eab72
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Tue Nov 18 14:14:55 2008 +0900
+
+    bump a version of tc
+
+commit 7954aac2385758079a6210a3c1d7765dfdb35152
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Tue Nov 18 13:00:14 2008 +0900
+
+    64bit fixes
+
+commit 5649c91ea0aefcddf3fa002896bc795606ab8ad5
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Tue Nov 18 12:43:43 2008 +0900
+
+    fix missing initialization
+
+commit 4e3c7dcab3c36cfdce8640616144c807549e1b1d
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Tue Nov 18 12:37:34 2008 +0900
+
+    fix typo
+
+commit fabb64f688bba606a207493c4b894081c9376224
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Tue Nov 18 07:13:44 2008 +0900
+
+    incr/decr op implementation
+    fix expire handlings
+
+commit fdee26308c90e4425e480672c84c52f8fb1e5440
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Tue Nov 18 02:01:37 2008 +0900
+
+    verbosity op implementation
+
+commit 45378599891c0b631840fc45eae8f6640199416a
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Tue Nov 18 01:19:40 2008 +0900
+
+    cas op implementation
+
+commit bf5bba345b9fa2d24606d4a17d3ad09b96fb40e2
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Tue Nov 18 00:34:52 2008 +0900
+
+    replace op implementation
+
+commit b87b648fc87c2ffd3e31f27351258a5f799fcc80
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Tue Nov 18 00:25:10 2008 +0900
+
+    add op implementation
+
+commit 8604d1ec0cc1c590453f2254fd4196ce44bd518e
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Mon Nov 17 23:30:31 2008 +0900
+
+    stats implementation fixes
+
+commit 8ba63acd8c9ba133be72832358ef0b9a0772b284
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Mon Nov 17 22:16:42 2008 +0900
+
+    race condition bug fixes (esp. w/ -O3 or -O4)
+    buffered write quick support, and misc fixes
+
+commit 127f504ebb73612774ad005ead82f6b6906e0d9d
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Sat Nov 15 23:18:35 2008 +0900
+
+    clear header cache when truncating database
+
+commit f15bcc2833feed697a236c2283a3a4f58d221808
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Sat Nov 15 23:13:32 2008 +0900
+
+    fix delete ops (esp. expire handling), and more log messages
+
+commit c1d785eafacf55f2a26335e43c5b766f537a3440
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Fri Nov 14 00:01:00 2008 +0900
+
+    delete implementation
+
+commit f28222a39d961239716eff9d9143aae51a2a771f
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Thu Nov 13 23:28:25 2008 +0900
+
+    get/gets implementation
+
+commit 55efda861b010a7c220a1d8cb3bbe853c6e4cb48
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Wed Nov 12 21:45:08 2008 +0900
+
+    fix node failover
+
+commit 67cd3e07f4ab5285d5dc146afc36eb4eb13746d3
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Wed Nov 12 21:01:53 2008 +0900
+
+    post proxy is now available
+
+commit 16666c89e21f857815e0d667bed2a457e4f08ff4
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Wed Nov 12 01:01:08 2008 +0900
+
+    master reconstruction (dynamic partitioning)
+
+commit 57ffdbfccde6755435d6458d7cf18eb901d11437
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Wed Nov 12 00:24:47 2008 +0900
+
+    slave reconstruction is now available
+
+commit 50507f7c3ea0c324af9ff006dcd7f88e3cd40a9e
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Tue Nov 11 22:47:03 2008 +0900
+
+    rough implementation of slave node reconstruction
+
+commit e9540e702aa015d6f813230d4aa38fbaa99cc6d8
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Tue Nov 11 20:45:08 2008 +0900
+
+    fix segfault
+
+commit 0c707268535517770f700adf48256737647d73cd
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Sat Nov 8 03:26:17 2008 +0900
+
+    fix class hierarchy
+
+commit 108ca093e30259b95055eff9ebc604b23124317c
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Sat Nov 8 03:02:25 2008 +0900
+
+    op_flush_all, and op_dump implementation
+
+commit 70d46aacfd00cc8bc2eafef60bb69d9dfe797140
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Wed Nov 5 22:00:41 2008 +0900
+
+    append proxy identifier
+
+commit aad2badcc998c8341cfb4e4a08fac10b82f8c07a
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Wed Nov 5 20:22:49 2008 +0900
+
+    show current queue size at "stats threads"
+
+commit fe66d40e937c671249111857ccf9f2fffe96b34f
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Wed Nov 5 19:54:09 2008 +0900
+
+    one more hash algorithm to correct distribution (and misc fixes)
+
+commit bf64ad0d9ece3e6c9f5bf7e384d70799149072c6
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Wed Nov 5 19:17:17 2008 +0900
+
+    implementing realtime() (compatible w/ memcached...)
+
+commit ac7cbaa635144d008e16870e1ab127b737cae55b
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Wed Nov 5 19:07:23 2008 +0900
+
+    suppress calling time(), and update timestamp in stats object every seconds by alarm thread (idea from memcached:)
+
+commit 2760165e6cfb48b21944fd58d46be0db15da8383
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Wed Nov 5 18:17:39 2008 +0900
+
+    fundamental proxy implementation (failover is not yet available)
+
+commit 7eadc1367e865a2b993386e891755aa1cbfb5822
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Sun Nov 2 16:42:47 2008 +0900
+
+    added doxygen config file (run `doxygen doc/flare.doxygen` to create html docs)
+
+commit 7c20dddfbde394f32353bc65ee845800085a44f5
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Sun Nov 2 13:22:17 2008 +0900
+
+    implementing storage fundamental i/o methods (get/set/delete)
+
+commit d0d7bc272f34def2ac48bb2154d80820cd9da5ef
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Thu Oct 30 21:24:12 2008 +0900
+
+    implementing storage fundamental i/o methods (get)
+
+commit 37ca998cc06fef5025f0878a44fae09c592bc242
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Tue Oct 28 23:54:28 2008 +0900
+
+    set op, and proxy architecture (under development)
+
+commit 7a37dd6f38be5fc6bedbb200156a8f2ff436eb02
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Thu Oct 23 11:49:28 2008 +0900
+
+    implemented node remove op
+
+commit ce822dc8da297846c36c9937f96e5e657fa09635
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Thu Oct 23 10:54:57 2008 +0900
+
+    implmented node state op
+
+commit 9f7285ed57c59faac90faa77335bac3e3847a80c
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Wed Oct 22 12:23:13 2008 +0900
+
+    implemented node role
+
+commit f9e2654c6517c187a6d47d663a17f83e0b185c3e
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Tue Oct 21 09:53:05 2008 +0900
+
+    implement node down/up
+
+commit fd66617a6e17329fad30127ba579c19aa63c8393
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Sun Oct 19 11:27:45 2008 +0900
+
+    node down/up skelton
+
+commit d10ece13d46493c7863023dcceabaf8d150c0f47
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Sat Oct 18 12:49:01 2008 +0900
+
+    leak fixes
+    type fixes
+
+commit ad4e9b34ee719b9aeee6171c6b9fcc01a4d01622
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Sat Oct 18 11:24:57 2008 +0900
+
+    darwin fixes
+
+commit 5833be5f561f36ce2765172f94261fe5ca25af40
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Fri Oct 17 23:59:20 2008 +0900
+
+    missing commit of node sync
+
+commit 07d174232f1fc73a75a791c91a088b33dcc4d98d
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Fri Oct 17 23:51:42 2008 +0900
+
+    node add, node sync, and stats nodes opcode implementation
+    monitoring threads implementation
+    thread queue architecture implementation
+    (thanks god it's friday)
+
+commit b0cfb5af728a769c2422f1a268367698b391f923
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Tue Oct 14 00:29:39 2008 +0900
+
+    ws, and style fixes
+
+commit bb250abf9aa4afa1f1334b24610f6851b4c329f9
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Tue Oct 14 00:13:50 2008 +0900
+
+    implementing "node add" opcode (not yet fixed - intermediate commit)
+
+commit 206ff64d5e4139579c58b1e243681d8495e9f1a3
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Sun Oct 12 12:02:52 2008 +0900
+
+    portability fix (settled for a while)
+
+commit b9a73bf4ac25857c73f74068d682a13aa873d92f
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Sun Oct 12 11:40:02 2008 +0900
+
+    missing files
+
+commit bb5e78828128433c3ac87d974205178d80468bde
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Sun Oct 12 04:35:36 2008 +0900
+
+    added node_add opcode (not yet fixed)
+
+commit f6be19b77520ccf9af20dd24bbbd0fb4a2cb8fc8
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Sun Oct 12 04:33:36 2008 +0900
+
+    portability fix
+
+commit 4cdd8f0c2e5109bfb45e73dd61425969cb14025f
+Merge: 6b3512c... 8ea0d14...
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Sun Oct 12 04:20:28 2008 +0900
+
+    Merge branch 'master' of git@github.com:fujimoto/flare
+
+commit 8ea0d1437c93cdd7b8c5b51a2e81b62b90a78588
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Sun Oct 12 04:07:05 2008 +0900
+
+    remove auto-generated files
+
+commit 377f879032c959d98200bb0ebf0f2541863ca869
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Sun Oct 12 04:04:43 2008 +0900
+
+    portability update (especially for darwin)
+
+commit 6b3512caf416268381df29e78960826836ab236d
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Sat Oct 11 19:33:26 2008 +0900
+
+    added option (index-server-name (required), index-server-port)
+
+commit bf5af152faf42277b3c3500da155f3a4fe653d16
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Sat Oct 11 19:05:29 2008 +0900
+
+    flarem -> flarei (manager -> index), and added cluster skelton
+
+commit 26321f1957efc5f813798919eb23e818fc6b95a5
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Sat Oct 11 19:01:53 2008 +0900
+
+    catch lexical_cast exception
+
+commit 9882ed85ef80c7b570535a8859c821209050579f
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Sat Oct 11 02:21:46 2008 +0900
+
+    fix numeric format for thread id
+
+commit 717e4e8ee6ded5ff9d500ac27c1b13c5cf49c0e2
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Sat Oct 11 02:07:36 2008 +0900
+
+    import (sunday programming:)

@@ -1,3 +1,9 @@
+flare (1.0.1-1) unstable; urgency=low
+
+  * 1.0.1
+
+ -- fujimoto <fujimoto@php.net>  Thu, 27 Nov 2008 20:09:27 +0900
+
 flare (1.0.0-1) unstable; urgency=low
 
   * Initial release

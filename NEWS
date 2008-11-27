@@ -1,3 +1,11 @@
+* [2008/11/27] 1.0.1 release
+
+  * feature updates
+    - try node sync op even if node seems to be down
+
+  * bug fixes
+    - fix replication in case of master preparation
+
 * [2008/11/25] 1.0.0 release
 
 - initial release

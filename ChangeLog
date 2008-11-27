@@ -1,3 +1,21 @@
+commit 31b2ef2dd28200cef1c170227817246a7665562e
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Thu Nov 27 20:03:03 2008 +0900
+
+    try node sync op even if node seems to be down
+
+commit 20c59c8594d54a90c39e4c585d58a701e970e0a6
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Thu Nov 27 14:55:15 2008 +0900
+
+    fix replication in case of master preparation
+
+commit 571c8c6ed279bf6a62ea7dc4e9fb7a45622e84f2
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Tue Nov 25 12:07:01 2008 +0900
+
+    ready for 1.0.0
+
 commit 25ce9685fd9c2030fcc8428382c86f6a385aca3b
 Author: Masaki Fujimoto <fujimoto@php.net>
 Date:   Fri Nov 21 01:35:38 2008 +0900

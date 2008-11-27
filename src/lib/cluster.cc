@@ -1272,6 +1272,11 @@ int cluster::_reconstruct_node_partition(bool lock) {
 				nppm[n.node_partition].master.node_key = node_key;
 				nppm[n.node_partition].master.node_balance = n.node_balance;
 
+				for (int i = 0; i < n.node_balance; i++) {
+					nppm[n.node_partition].balance.push_back(node_key);
+				}
+				nppm[n.node_partition].index[node_key] = true;
+
 				log_debug("master (prepare) node added (node_key=%s, partition=%d, balance=%d)", node_key.c_str(), n.node_partition, n.node_balance);
 			}
 		} catch (const char* e) {
@@ -1309,7 +1314,11 @@ int cluster::_reconstruct_node_partition(bool lock) {
 				}
 				npm[n.node_partition].index[node_key] = true;
 			} else if (nppm.count(n.node_partition) > 0) {
-					nppm[n.node_partition].slave.push_back(pn);
+				nppm[n.node_partition].slave.push_back(pn);
+				for (int i = 0; i < pn.node_balance; i++) {
+					nppm[n.node_partition].balance.push_back(node_key);
+				}
+				nppm[n.node_partition].index[node_key] = true;
 			} else {
 				throw "no node partition for this slave";
 			}

@@ -146,8 +146,8 @@ int handler_monitor::_process_queue(shared_thread_queue q) {
 		this->_monitor_interval = r->get_monitor_interval();
 		this->_monitor_read_timeout = r->get_monitor_read_timeout();
 	} else if (q->get_ident() == "node_sync") {
-		if (this->_down_state >= this->_monitor_threshold) {
-			log_info("node seems already down -> skip processing queue (node_server_name=%s, node_server_port=%d, ident=%s)", this->_node_server_name.c_str(), this->_node_server_port, q->get_ident().c_str());
+		if (this->_down_state >= this->_monitor_threshold && this->_connection->is_available() == false) {
+			log_info("node seems realy down -> skip processing queue (node_server_name=%s, node_server_port=%d, ident=%s)", this->_node_server_name.c_str(), this->_node_server_port, q->get_ident().c_str());
 			return -1;
 		}
 		shared_queue_node_sync r = shared_dynamic_cast<queue_node_sync, thread_queue>(q);

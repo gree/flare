@@ -1,3 +1,8 @@
+* [2008/11/28] 1.0.2 release
+
+  * feature updates
+    - added mysql replication feature (w/ --enable-mysql-replication) (very very experimental)
+
 * [2008/11/27] 1.0.1 release
 
   * feature updates

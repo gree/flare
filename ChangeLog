@@ -1,3 +1,21 @@
+commit 2ae245e07d2a0908eff2bb020052537160d55c3e
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Fri Nov 28 17:33:29 2008 +0900
+
+    added mysql replication feature (w/ --enable-mysql-replication) (very very experimental)
+
+commit 686e16aa01a065e23b338c631d386eaf907b5191
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Thu Nov 27 20:09:50 2008 +0900
+
+    debian changelog update
+
+commit 030fad6d2d279230a0e7cbdf73b44ae2987eac92
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Thu Nov 27 20:06:10 2008 +0900
+
+    ready for 1.0.1
+
 commit 31b2ef2dd28200cef1c170227817246a7665562e
 Author: Masaki Fujimoto <fujimoto@php.net>
 Date:   Thu Nov 27 20:03:03 2008 +0900

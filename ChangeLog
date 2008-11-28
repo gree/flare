@@ -1,3 +1,15 @@
+commit 617fb1b97946be36d139a21d7aa61f33b419b09a
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Fri Nov 28 18:47:25 2008 +0900
+
+    misc bug fixes
+
+commit dcbc62cc3a0a4c83f5fdd00e1b63b33a819e9b72
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Fri Nov 28 17:39:05 2008 +0900
+
+    - reday for 1.0.2
+
 commit 2ae245e07d2a0908eff2bb020052537160d55c3e
 Author: Masaki Fujimoto <fujimoto@php.net>
 Date:   Fri Nov 28 17:33:29 2008 +0900

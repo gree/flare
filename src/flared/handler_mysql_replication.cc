@@ -20,8 +20,9 @@ namespace flare {
 /**
  *	ctor for handler_mysql_replication
  */
-handler_mysql_replication::handler_mysql_replication(shared_thread t):
-		thread_handler(t) {
+handler_mysql_replication::handler_mysql_replication(shared_thread t, cluster* c):
+		thread_handler(t),
+		_cluster(c) {
 }
 
 /**
@@ -58,6 +59,7 @@ int handler_mysql_replication::run() {
 		vector<shared_connection>::iterator it;
 		for (it = connection_list.begin(); it != connection_list.end(); it++) {
 			shared_connection c = *it;
+			c->set_read_timeout(86400 * 365);
 
 			mysql_replication* m = _new_ mysql_replication(this->_thread, c, ini_option_object().get_mysql_replication_id(), ini_option_object().get_mysql_replication_db(), ini_option_object().get_mysql_replication_table());
 			if (m->handshake() < 0) {
@@ -69,6 +71,8 @@ int handler_mysql_replication::run() {
 				_delete_(m);
 				continue;
 			}
+
+			this->_cluster->set_mysql_replication(true);
 
 			for (;;) {
 				if (this->_thread->is_shutdown_request()) {
@@ -98,7 +102,7 @@ int handler_mysql_replication::run() {
 				m->send(r);
 				q->sync_unref();
 			}
-
+			this->_cluster->set_mysql_replication(false);
 			_delete_(m);
 		}
 	}

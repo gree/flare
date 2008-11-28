@@ -195,9 +195,8 @@ int flared::startup(int argc, char **argv) {
 
 #ifdef ENABLE_MYSQL_REPLICATION
 	if (ini_option_object().is_mysql_replication()) {
-		this->_cluster->set_mysql_replication(true);
 		shared_thread th_mysql_replication = this->_thread_pool->get(thread_pool::thread_type_mysql_replication);
-		handler_mysql_replication* h_mysql_replication = _new_ handler_mysql_replication(th_mysql_replication);
+		handler_mysql_replication* h_mysql_replication = _new_ handler_mysql_replication(th_mysql_replication, this->_cluster);
 		th_mysql_replication->trigger(h_mysql_replication);
 	}
 #endif

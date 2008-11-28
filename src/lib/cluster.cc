@@ -41,6 +41,7 @@ cluster::cluster(thread_pool* tp, string data_dir, string server_name, int serve
 		_monitor_interval(0),
 		_monitor_read_timeout(0),
 		_thread_type(default_thread_type),
+		_mysql_replication(false),
 		_index_server_name(""),
 		_index_server_port(0),
 		_proxy_concurrency(0) {

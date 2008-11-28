@@ -20,9 +20,10 @@ namespace flare {
  */
 class handler_mysql_replication : public thread_handler {
 protected:
+	cluster*		_cluster;
 
 public:
-	handler_mysql_replication(shared_thread t);
+	handler_mysql_replication(shared_thread t, cluster* c);
 	virtual ~handler_mysql_replication();
 
 	virtual int run();

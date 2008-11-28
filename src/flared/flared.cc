@@ -122,7 +122,7 @@ int flared::startup(int argc, char **argv) {
 	log_notice("  max_connection:         %d", ini_option_object().get_max_connection());
 	log_notice("  mutex_slot:             %d", ini_option_object().get_mutex_slot());
 #ifdef ENABLE_MYSQL_REPLICATION
-	log_notice("  mysql_replication: 			%s", ini_option_object().is_mysql_replication() ? "true" : "false");
+	log_notice("  mysql_replication:      %s", ini_option_object().is_mysql_replication() ? "true" : "false");
 	log_notice("  mysql_replication_port: %d", ini_option_object().get_mysql_replication_port());
 	log_notice("  mysql_replication_id:   %u", ini_option_object().get_mysql_replication_id());
 	log_notice("  mysql_replication_db:   %s", ini_option_object().get_mysql_replication_db().c_str());

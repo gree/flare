@@ -21,6 +21,7 @@ libflare_a_SOURCES = \
 	ini.h ini.cc \
 	logger.h logger.cc \
 	mm.h mm.cc \
+	mysql_replication.h mysql_replication.cc \
 	net.h net.cc \
 	op.cc op.h \
 	op_add.h op_add.cc \

@@ -29,6 +29,13 @@ ini_option::ini_option():
 		_log_facility(""),
 		_max_connection(default_max_connection),
 		_mutex_slot(default_mutex_slot),
+#ifdef ENABLE_MYSQL_REPLICATION
+		_mysql_replication(false),
+		_mysql_replication_port(default_mysql_replication_port),
+		_mysql_replication_id(default_mysql_replication_id),
+		_mysql_replication_db(""),
+		_mysql_replication_table(""),
+#endif
 		_proxy_concurrency(default_proxy_concurrency),
 		_server_name(""),
 		_server_port(default_server_port),
@@ -151,6 +158,32 @@ int ini_option::load() {
 		if (opt_var_map.count("mutex-slot")) {
 			this->_mutex_slot = opt_var_map["mutex-slot"].as<int>();
 		}
+
+#ifdef ENABLE_MYSQL_REPLICATION
+		if (opt_var_map.count("mysql-replication")) {
+			this->_mysql_replication = true;
+		}
+
+		if (opt_var_map.count("mysql-replication-port")) {
+			this->_mysql_replication_port = opt_var_map["mysql-replication-port"].as<int>();
+		}
+
+		if (opt_var_map.count("mysql-replication-id")) {
+			this->_mysql_replication_id = opt_var_map["mysql-replication-id"].as<uint32_t>();
+		}
+
+		if (opt_var_map.count("mysql-replication-db")) {
+			this->_mysql_replication_db = opt_var_map["mysql-replication-db"].as<string>();
+		} else {
+			this->_mysql_replication_db = "flare";
+		}
+
+		if (opt_var_map.count("mysql-replication-table")) {
+			this->_mysql_replication_table = opt_var_map["mysql-replication-table"].as<string>();
+		} else {
+			this->_mysql_replication_table = "flare";
+		}
+#endif
 
 		if (opt_var_map.count("proxy-concurrency")) {
 			this->_proxy_concurrency = opt_var_map["proxy-concurrency"].as<int>();
@@ -305,23 +338,30 @@ int ini_option::_setup_cli_option(program_options::options_description& option) 
  */
 int ini_option::_setup_config_option(program_options::options_description& option) {
 	option.add_options()
-		("daemonize",																							"run as daemon")
-		("data-dir",					program_options::value<string>(), 	"data directory")
-		("index-server-name",	program_options::value<string>(), 	"index server name")
-		("index-server-port",	program_options::value<int>(),		 	"index server port")
-		("log-facility",			program_options::value<string>(), 	"log facility (dynamic)")
-		("max-connection",		program_options::value<int>(),			"max concurrent connections to accept (dynamic)")
-		("mutex-slot",				program_options::value<int>(),			"mutex slot size for storage I/O")
-		("proxy-concurrency",	program_options::value<int>(),			"proxy request concurrency for each node")
-		("server-name",				program_options::value<string>(),		"my server name")
-		("server-port",				program_options::value<int>(),			"my server port")
-		("stack-size",				program_options::value<int>(),			"thread stack size (kb)")
-		("storage-ap",				program_options::value<uint32_t>(),	"storage size of record alignment by power of 2 (tch)")
-		("storage-bucket-size",	program_options::value<uint64_t>(),	"number of elements of the bucket array (tch)")
-		("storage-compress",	program_options::value<string>(),		"storage compress type (deflate, bz2, tcbs) (tch)")
-		("storage-large",																					"use large storage (tch)")
-		("storage-type",			program_options::value<string>(),		"storage type (tch:tokyo cabinet hash database)")
-		("thread-pool-size",	program_options::value<int>(),			"thread pool size (dynamic)");
+		("daemonize",																										"run as daemon")
+		("data-dir",								program_options::value<string>(),		"data directory")
+		("index-server-name",				program_options::value<string>(),		"index server name")
+		("index-server-port",				program_options::value<int>(),	 		"index server port")
+		("log-facility",						program_options::value<string>(),		"log facility (dynamic)")
+		("max-connection",					program_options::value<int>(),			"max concurrent connections to accept (dynamic)")
+		("mutex-slot",							program_options::value<int>(),			"mutex slot size for storage I/O")
+#ifdef ENABLE_MYSQL_REPLICATION
+		("mysql-replication",																						"enabe mysql replication")
+		("mysql-replication-port",	program_options::value<int>(),			"mysql replication port")
+		("mysql-replication-id",		program_options::value<uint32_t>(),	"mysql replication server id")
+		("mysql-replication-db",		program_options::value<string>(),		"mysql replication database")
+		("mysql-replication-table",	program_options::value<string>(),		"mysql replication table")
+#endif
+		("proxy-concurrency",				program_options::value<int>(),			"proxy request concurrency for each node")
+		("server-name",							program_options::value<string>(),		"my server name")
+		("server-port",							program_options::value<int>(),			"my server port")
+		("stack-size",							program_options::value<int>(),			"thread stack size (kb)")
+		("storage-ap",							program_options::value<uint32_t>(),	"storage size of record alignment by power of 2 (tch)")
+		("storage-bucket-size",			program_options::value<uint64_t>(),	"number of elements of the bucket array (tch)")
+		("storage-compress",				program_options::value<string>(),		"storage compress type (deflate, bz2, tcbs) (tch)")
+		("storage-large",																								"use large storage (tch)")
+		("storage-type",						program_options::value<string>(),		"storage type (tch:tokyo cabinet hash database)")
+		("thread-pool-size",				program_options::value<int>(),			"thread pool size (dynamic)");
 
 	return 0;
 }

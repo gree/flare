@@ -32,6 +32,13 @@ private:
 	string			_log_facility;
 	uint32_t		_max_connection;
 	int					_mutex_slot;
+#ifdef ENABLE_MYSQL_REPLICATION
+	bool				_mysql_replication;
+	int					_mysql_replication_port;
+	uint32_t		_mysql_replication_id;
+	string			_mysql_replication_db;
+	string			_mysql_replication_table;
+#endif
 	int					_proxy_concurrency;
 	string			_server_name;
 	int					_server_port;
@@ -47,6 +54,10 @@ public:
 	static const int default_index_server_port = 12120;
 	static const uint32_t default_max_connection = 128;
 	static const int default_mutex_slot = 64;
+#ifdef ENABLE_MYSQL_REPLICATION
+	static const int default_mysql_replication_port = 12122;
+	static const int default_mysql_replication_id = 19790217;
+#endif
 	static const int default_proxy_concurrency = 2;
 	static const int default_server_port = 12121;
 	static const int default_stack_size = 128;
@@ -70,6 +81,13 @@ public:
 	string get_log_facility() { return this->_log_facility; };
 	uint32_t get_max_connection() { return this->_max_connection; };
 	int get_mutex_slot() { return this->_mutex_slot; };
+#ifdef ENABLE_MYSQL_REPLICATION
+	bool is_mysql_replication() { return this->_mysql_replication; };
+	int get_mysql_replication_port() { return this->_mysql_replication_port; };
+	uint32_t get_mysql_replication_id() { return this->_mysql_replication_id; };
+	string get_mysql_replication_db() { return this->_mysql_replication_db; };
+	string get_mysql_replication_table() { return this->_mysql_replication_table; };
+#endif
 	int get_proxy_concurrency() { return this->_proxy_concurrency; };
 	string get_server_name() { return this->_server_name; };
 	int get_server_port() { return this->_server_port; };

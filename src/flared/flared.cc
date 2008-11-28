@@ -8,6 +8,11 @@
  *	$Id$
  */
 #include "flared.h"
+#include "handler_alarm.h"
+#include "handler_request.h"
+#ifdef ENABLE_MYSQL_REPLICATION
+# include "handler_mysql_replication.h"
+#endif
 
 namespace gree {
 namespace flare {
@@ -109,23 +114,30 @@ int flared::startup(int argc, char **argv) {
 	log_notice("%s version %s - system logger started", this->_ident.c_str(), PACKAGE_VERSION);
 
 	log_notice("application startup in progress...", 0);
-	log_notice("  config_path:         %s", ini_option_object().get_config_path().c_str());
-	log_notice("  daemonize:           %s", ini_option_object().is_daemonize() ? "true" : "false");
-	log_notice("  data_dir:            %s", ini_option_object().get_data_dir().c_str());
-	log_notice("  index_server_name:   %s", ini_option_object().get_index_server_name().c_str());
-	log_notice("  index_server_port:   %d", ini_option_object().get_index_server_port());
-	log_notice("  max_connection:      %d", ini_option_object().get_max_connection());
-	log_notice("  mutex_slot:          %d", ini_option_object().get_mutex_slot());
-	log_notice("  proxy_concurrency:   %d", ini_option_object().get_proxy_concurrency());
-	log_notice("  server_name:         %s", ini_option_object().get_server_name().c_str());
-	log_notice("  server_port:         %d", ini_option_object().get_server_port());
-	log_notice("  stack_size:          %d", ini_option_object().get_stack_size());
-	log_notice("  storage_ap:          %u", ini_option_object().get_storage_ap());
-	log_notice("  storage_bucket_size: %llu", ini_option_object().get_storage_bucket_size());
-	log_notice("  storage_compress:    %s", ini_option_object().get_storage_compress().c_str());
-	log_notice("  storage_large:       %s", ini_option_object().is_storage_large() ? "true" : "false");
-	log_notice("  storage_type:        %s", ini_option_object().get_storage_type().c_str());
-	log_notice("  thread_pool_size:    %d", ini_option_object().get_thread_pool_size());
+	log_notice("  config_path:            %s", ini_option_object().get_config_path().c_str());
+	log_notice("  daemonize:              %s", ini_option_object().is_daemonize() ? "true" : "false");
+	log_notice("  data_dir:               %s", ini_option_object().get_data_dir().c_str());
+	log_notice("  index_server_name:      %s", ini_option_object().get_index_server_name().c_str());
+	log_notice("  index_server_port:      %d", ini_option_object().get_index_server_port());
+	log_notice("  max_connection:         %d", ini_option_object().get_max_connection());
+	log_notice("  mutex_slot:             %d", ini_option_object().get_mutex_slot());
+#ifdef ENABLE_MYSQL_REPLICATION
+	log_notice("  mysql_replication: 			%s", ini_option_object().is_mysql_replication() ? "true" : "false");
+	log_notice("  mysql_replication_port: %d", ini_option_object().get_mysql_replication_port());
+	log_notice("  mysql_replication_id:   %u", ini_option_object().get_mysql_replication_id());
+	log_notice("  mysql_replication_db:   %s", ini_option_object().get_mysql_replication_db().c_str());
+	log_notice("  mysql_replication_table:%s", ini_option_object().get_mysql_replication_table().c_str());
+#endif
+	log_notice("  proxy_concurrency:      %d", ini_option_object().get_proxy_concurrency());
+	log_notice("  server_name:            %s", ini_option_object().get_server_name().c_str());
+	log_notice("  server_port:            %d", ini_option_object().get_server_port());
+	log_notice("  stack_size:             %d", ini_option_object().get_stack_size());
+	log_notice("  storage_ap:             %u", ini_option_object().get_storage_ap());
+	log_notice("  storage_bucket_size:    %llu", ini_option_object().get_storage_bucket_size());
+	log_notice("  storage_compress:       %s", ini_option_object().get_storage_compress().c_str());
+	log_notice("  storage_large:          %s", ini_option_object().is_storage_large() ? "true" : "false");
+	log_notice("  storage_type:           %s", ini_option_object().get_storage_type().c_str());
+	log_notice("  thread_pool_size:       %d", ini_option_object().get_thread_pool_size());
 
 	// startup procs
 	if (this->_set_resource_limit() < 0) {
@@ -177,9 +189,18 @@ int flared::startup(int argc, char **argv) {
 	this->_cluster->set_storage(this->_storage);
 
 	// creating alarm thread in advance
-	shared_thread th = this->_thread_pool->get(thread_pool::thread_type_alarm);
-	handler_alarm* h = _new_ handler_alarm(th);
-	th->trigger(h);
+	shared_thread th_alarm = this->_thread_pool->get(thread_pool::thread_type_alarm);
+	handler_alarm* h_alarm = _new_ handler_alarm(th_alarm);
+	th_alarm->trigger(h_alarm);
+
+#ifdef ENABLE_MYSQL_REPLICATION
+	if (ini_option_object().is_mysql_replication()) {
+		this->_cluster->set_mysql_replication(true);
+		shared_thread th_mysql_replication = this->_thread_pool->get(thread_pool::thread_type_mysql_replication);
+		handler_mysql_replication* h_mysql_replication = _new_ handler_mysql_replication(th_mysql_replication);
+		th_mysql_replication->trigger(h_mysql_replication);
+	}
+#endif
 
 	if (this->_set_pid() < 0) {
 		return -1;

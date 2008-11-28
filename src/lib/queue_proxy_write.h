@@ -50,6 +50,8 @@ public:
 	bool is_post_proxy() { return this->_post_proxy; };
 	int set_generic_value(uint64_t generic_value) { this->_generic_value = generic_value; return 0; };
 	uint64_t get_generic_value() { return this->_generic_value; };
+	string get_op_ident() { return this->_op_ident; };
+	storage::entry& get_entry() { return this->_entry; };
 
 protected:
 	op_proxy_write* _get_op(string op_ident, shared_connection c);

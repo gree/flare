@@ -150,6 +150,9 @@ protected:
 	int										_monitor_interval;
 	int										_monitor_read_timeout;
 	int										_thread_type;
+#ifdef ENABLE_MYSQL_REPLICATION
+	bool									_mysql_replication;
+#endif
 
 	// [node]
 	string								_index_server_name;
@@ -205,6 +208,11 @@ public:
 	int get_server_port() { return this->_server_port; };
 	string get_index_server_name() { return this->_index_server_name; };
 	int get_index_server_port() { return this->_index_server_port; };
+
+#ifdef ENABLE_MYSQL_REPLICATION
+	int set_mysql_replication(bool mysql_replication) { this->_mysql_replication = mysql_replication; return 0; };
+	bool is_mysql_replication() { return this->_mysql_replication; };
+#endif
 
 	inline string to_node_key(string server_name, int server_port) {
 		string node_key = server_name + ":" + lexical_cast<string>(server_port);
@@ -279,6 +287,7 @@ protected:
 	int _shift_node_state(string node_key, state old_state, state new_state);
 	int _shift_node_role(string node_key, role old_role, int old_partition, role new_role, int new_partition);
 	int _enqueue(shared_thread_queue q, string node_key, int key_hash, bool sync = false);
+	int _enqueue(shared_thread_queue q, thread_pool::thread_type t, bool sync);
 	int _broadcast(shared_thread_queue q, bool sync = false);
 	int _save();
 	int _load();

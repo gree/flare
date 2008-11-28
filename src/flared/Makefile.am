@@ -18,6 +18,7 @@ flared_SOURCES = \
 	flared.h flared.cc \
 	ini_option.h ini_option.cc \
 	handler_alarm.h handler_alarm.cc \
+	handler_mysql_replication.h handler_mysql_replication.cc \
 	handler_request.h handler_request.cc \
 	op_parser_binary_node.h op_parser_binary_node.cc \
 	op_parser_text_node.h op_parser_text_node.cc \

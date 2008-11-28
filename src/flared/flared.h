@@ -9,8 +9,6 @@
 #define	__FLARED_H__
 
 #include "app.h"
-#include "handler_alarm.h"
-#include "handler_request.h"
 #include "ini_option.h"
 #include "stats_node.h"
 
@@ -26,6 +24,9 @@ private:
 	thread_pool*	_thread_pool;
 	cluster*			_cluster;
 	storage*			_storage;
+#ifdef ENABLE_MYSQL_REPLICATION
+	server*				_mysql_replication_server;
+#endif
 
 public:
 	flared();

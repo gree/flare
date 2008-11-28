@@ -30,6 +30,9 @@ public:
 		thread_type_request = 1,
 		thread_type_alarm,
 		thread_type_reconstruction,
+#ifdef ENABLE_MYSQL_REPLICATION
+		thread_type_mysql_replication,
+#endif
 	};
 
 	typedef	map<unsigned int, shared_thread>	local_map;

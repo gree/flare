@@ -29,6 +29,15 @@ AC_ARG_WITH(tokyocabinet,
 	[CXXFLAGS="${CXXFLAGS} -I${withval}/include -I${withval}/include/tc" LDFLAGS="${LDFLAGS} -L${withval}/lib"])
 AC_CHECK_LIB(tokyocabinet, main, [], [echo "libtokyocabinet not found"; exit 1])
 
+# Checks for additional features
+AC_MSG_CHECKING(if mysql replication is enabled)
+AC_ARG_ENABLE(mysql-replication, [AC_HELP_STRING([--enable-mysql-replication], [enable mysql replication feature (very experimental) [default=no]])], [enable_mysql_replication="yes"], [enable_mysql_replication="no"])
+if test "x$enable_mysql_replication" = "xyes"
+then
+	AC_DEFINE([ENABLE_MYSQL_REPLICATION], 1, [enable mysql replication feature or not])
+fi
+AC_MSG_RESULT($enable_mysql_replication)
+
 # Checks for header files.
 AC_STDC_HEADERS
 AC_CHECK_HEADER(pthread.h, [], [echo "pthread.h not found"; exit1])
@@ -51,21 +60,25 @@ fi
 # And others
 
 #   debug options
-AC_ARG_ENABLE(debug, [AC_HELP_STRING([--enable-debug], [enable debug compile [default=no]])], [], [enable_debug="no"])
+AC_MSG_CHECKING(if debug is enabled)
+AC_ARG_ENABLE(debug, [AC_HELP_STRING([--enable-debug], [enable debug compile [default=no]])], [enable_debug="yes"], [enable_debug="no"])
 if test "x$enable_debug" = "xno"
 then
 	DEBUG_DEFS=""
 else
 	DEBUG_DEFS="-DDEBUG"
 fi
+AC_MSG_RESULT($enable_debug)
 
-AC_ARG_ENABLE(memory-allocation-check, [AC_HELP_STRING([--enable-memory-allocation-check], [enable memory allocation check procs [default=no]])], [], [enable_memory_allocation_check="no"])
+AC_MSG_CHECKING(if memory allocation check is enabled)
+AC_ARG_ENABLE(memory-allocation-check, [AC_HELP_STRING([--enable-memory-allocation-check], [enable memory allocation check procs [default=no]])], [enable_memory_allocation_check="yes"], [enable_memory_allocation_check="no"])
 if test "x$enable_memory_allocation_check" = "xno"
 then
 	DEBUG_DEFS="${DEBUG_DEFS}"
 else
 	DEBUG_DEFS="${DEBUG_DEFS} -DMM_ALLOCATION_CHECK"
 fi
+AC_MSG_RESULT($enable_memory_allocation_check)
 
 #   pthread options
 PTHREAD_DEFS="-pthread -D_REENTRANT -D_THREAD_SAFE"

@@ -987,6 +987,11 @@ cluster::proxy_request cluster::post_proxy_write(op_proxy_write* op, bool sync) 
 			continue;
 		}
 	}
+#ifdef ENABLE_MYSQL_REPLICATION
+	if (this->_mysql_replication) {
+		this->_enqueue(q, thread_pool::thread_type_mysql_replication, sync);
+	}
+#endif
 	if (sync) {
 		q->sync();
 	}
@@ -1092,6 +1097,35 @@ int cluster::_enqueue(shared_thread_queue q, string node_key, int key_hash, bool
 
 	shared_thread t;
 	if (this->_get_proxy_thread(node_key, key_hash, t) < 0) {
+		return -1;
+	}
+
+	if (sync) {
+		q->sync_ref();
+	}
+	if (t->enqueue(q) < 0) {
+		log_warning("enqueue failed (perhaps thread is now exiting?)", 0);
+		if (sync) {
+			q->sync_unref();
+		}
+		return -1;
+	}
+
+	return 0;
+}
+
+int cluster::_enqueue(shared_thread_queue q, thread_pool::thread_type type, bool sync) {
+	log_debug("enqueue (ident=%s, thread_type=%d)", q->get_ident().c_str(), type);
+
+	shared_thread t;
+	thread_pool::local_map m = this->_thread_pool->get_active(type);
+	bool found = false;
+	for (thread_pool::local_map::iterator it = m.begin(); it != m.end(); it++) {
+		t = it->second;
+		found = true;
+		break;
+	}
+	if (found == false) {
 		return -1;
 	}
 

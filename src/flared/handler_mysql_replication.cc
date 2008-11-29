@@ -83,24 +83,43 @@ int handler_mysql_replication::run() {
 
 				// dequeue
 				shared_thread_queue q;
-				if (this->_thread->dequeue(q, 0) < 0) {
-					 log_info("dequeued but no queue is available (something is inconsistent?", 0);
-					 continue;
-				}
+				int r = this->_thread->dequeue(q, 60);
 				if (this->_thread->is_shutdown_request()) {
 					log_info("thread shutdown request -> breaking loop", 0);
 					this->_thread->set_state("shutdown");
 					break;
 				}
 
-				// process
-				if (this->_process_queue(q) < 0) {
+				if (r == ETIMEDOUT) {
+					// see if connection is available
+					c->set_read_timeout(0);
+					char *tmp;
+					int tmp_len = c->read(&tmp);
+					if (tmp_len > 0) {
+						c->push_back(tmp, tmp_len);
+						_delete_(tmp);
+					}
+					c->set_read_timeout(86400 * 365);
+					if (c->is_available() == false) {
+						log_debug("connection is not available -> breaking loop", 0);
+						break;
+					}
+				} else if (r == 0) {
+					// process
+					if (this->_process_queue(q) < 0) {
+						q->sync_unref();
+						break;
+					}
+					shared_queue_proxy_write r = shared_dynamic_cast<queue_proxy_write, thread_queue>(q);
+					if (m->send(r) < 0) {
+						q->sync_unref();
+						break;
+					}
 					q->sync_unref();
+				} else {
+					// something is going wrong
 					break;
 				}
-				shared_queue_proxy_write r = shared_dynamic_cast<queue_proxy_write, thread_queue>(q);
-				m->send(r);
-				q->sync_unref();
 			}
 			this->_cluster->set_mysql_replication(false);
 			_delete_(m);

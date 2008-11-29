@@ -213,8 +213,10 @@ int mysql_replication::send(shared_queue_proxy_write q) {
 	} else {
 		query_len = snprintf(query, query_size, "DELETE FROM `%s` WHERE k='%s'", this->_table.c_str(), e.key.c_str());
 	}
-	this->_send_query_log_event(query, query_len);
-
+	if (this->_send_query_log_event(query, query_len) < 0) {
+		_delete_(query);
+		return -1;
+	}
 	_delete_(query);
 
 	return 0;

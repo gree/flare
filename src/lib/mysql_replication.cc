@@ -295,7 +295,8 @@ int mysql_replication::_send_ok() {
 }
 
 int mysql_replication::_send_query_log_event(const char* query, int query_len) {
-	char buf[BUFSIZ];
+	int buf_size = BUFSIZ + query_len;
+	char* buf = _new_ char[buf_size];
 	int len = 0;
 	memset(buf, 0, sizeof(buf));
 
@@ -354,8 +355,10 @@ int mysql_replication::_send_query_log_event(const char* query, int query_len) {
 	len += query_len;
 
 	if (this->_write(buf, len) != len) {
+		_delete_(buf);
 		return -1;
 	}
+	_delete_(buf);
 
 	return 0;
 }

@@ -135,7 +135,7 @@ int connection::read(char** p, int expect_len) {
 
 	struct pollfd ufds;
 	ufds.fd= this->_sock;
-	ufds.events= POLLIN | POLLPRI;
+	ufds.events = POLLIN | POLLPRI;
 	int n = poll(&ufds, 1, this->_read_timeout);
 	if (n == 0) {
 		log_info("poll() timed out (%0.4f sec)", this->_read_timeout / 1000.0);
@@ -387,7 +387,27 @@ int connection::write(const char* p, int bufsiz, bool buffered) {
 	while (written < bufsiz) {
 		len = ::write(this->_sock, p+written, bufsiz-written);
 		if (len < 0) {
-			if (errno == EAGAIN || errno == EINTR) {
+			if (errno == EAGAIN) {
+				log_info("write() failed: %s (%d) -> poll()", util::strerror(errno), errno);
+
+				// poll
+				struct pollfd ufds;
+				ufds.fd = this->_sock;
+				ufds.events = POLLOUT;
+				int n = poll(&ufds, 1, connection::write_timeout);
+				if (n == 0) {
+					log_info("poll() timed out (%0.4f sec)", connection::write_timeout / 1000.0);
+					continue;
+				} else if (n < 0 || !(ufds.revents & (POLLOUT))) {
+					if (errno == EINTR) {
+						log_info("poll() failed: %s (%d)", util::strerror(errno), errno);
+						continue;
+					}
+				} else {
+					log_debug("poll() -> ready to write", 0);
+					continue;
+				}
+			} else if (errno == EINTR) {
 				log_info("write() failed: %s (%d)", util::strerror(errno), errno);
 				continue;
 			}

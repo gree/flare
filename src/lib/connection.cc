@@ -115,7 +115,7 @@ int connection::open(string host, int port) {
  *	
  *	- caller should delete *p if this method is successfully done (returned > 0)
  */
-int connection::read(char** p) {
+int connection::read(char** p, int expect_len) {
 	if (this->_sock < 0) {
 		log_warning("connection seems to be already closed (sock=%d)", this->_sock);
 		return -1;
@@ -154,43 +154,72 @@ int connection::read(char** p) {
 	}
 
 	int bufsiz;
-	if (::ioctl(this->_sock, FIONREAD, &bufsiz)) {
-		log_err("ioctl() failed: %s (%d) -> closing socket", util::strerror(errno), errno);
-		this->close();
-		this->_errno = errno;
-		return -1;
+	if (expect_len > 0) {
+		bufsiz = expect_len;
+	} else {
+		if (::ioctl(this->_sock, FIONREAD, &bufsiz)) {
+			log_err("ioctl() failed: %s (%d) -> closing socket", util::strerror(errno), errno);
+			this->close();
+			this->_errno = errno;
+			return -1;
+		}
 	}
 
 	*p = _new_ char[bufsiz];
-	int len = ::read(this->_sock, *p, bufsiz);
-	if (len == 0) {
-		// peer seems to close connection
-		log_info("peer seems to close connection (read 0 byte) -> closing socket", 0);
-		_delete_(*p);
-		*p = NULL;
-		this->close();
-		this->_errno = -2;
-		return -2;
-	} else if (len == bufsiz) {
-		log_debug("read %d bytes", len);
-	} else if (len < 0) {
-		log_err("read() failed: %s (%d)", util::strerror(errno), errno);
-		_delete_(*p);
-		*p = NULL;
-		if (errno == EAGAIN) {
-			return 0;
-		} else if (errno == EINTR) {
-			return 0;
-		}
-		log_err("-> closing socket", 0);
-		this->close();
-		return -1;
-	} else if (len < bufsiz) {
-		// something wrong but worth continuing
-		log_info("expect %d bytes but read %d byes -> continue processing", bufsiz, len);
-	}
+	int len = 0;
+	while (len < bufsiz) {
+		int tmp = ::read(this->_sock, (*p) + len, bufsiz - len);
+		if (tmp == 0) {
+			// peer seems to close connection
+			log_info("peer seems to close connection (read 0 byte) -> closing socket", 0);
+			_delete_(*p);
+			*p = NULL;
+			this->close();
+			this->_errno = -2;
+			return -2;
+		} else if ((len+tmp) >= bufsiz) {
+			log_debug("read %d bytes (complete)", len+tmp);
+		} else if (tmp < 0) {
+			if (errno == EAGAIN) {
+				n = poll(&ufds, 1, this->_read_timeout);
+				if (n <= 0) {
+					_delete_(*p);
+					*p = NULL;
+				}
+				if (n == 0) {
+					log_info("poll() timed out (%0.4f sec)", this->_read_timeout / 1000.0);
+					this->_errno = -1;
+					return -1;
+				}
+				if (n < 0 || !(ufds.revents & (POLLIN | POLLPRI))) {
+					if (errno != EINTR) {
+						log_err("poll() failed: %s (%d) -> closing socket", util::strerror(errno), errno);
+						this->close();
+					} else {
+						log_notice("poll() failed: %s (%d)", util::strerror(errno), errno);
+					}
+					this->_errno = errno;
+					return -1;
+				}
+				continue;
+			}
 
-	stats_object->add_bytes_read(len);
+			log_err("read() failed: %s (%d)", util::strerror(errno), errno);
+			_delete_(*p);
+			*p = NULL;
+			if (errno == EINTR) {
+				return 0;
+			}
+			log_err("-> closing socket", 0);
+			this->close();
+			return -1;
+		} else if ((len+tmp) < bufsiz) {
+			// something wrong but worth continuing
+			log_info("expect %d bytes but read %d byes (total %d bytes) -> continue processing", bufsiz, tmp, len);
+		}
+		stats_object->add_bytes_read(tmp);
+		len += tmp;
+	}
 
 	return len;
 }
@@ -271,7 +300,7 @@ int connection::readsize(int expect_len, char** p) {
 	log_debug("ready to read %d bytes", expect_len);
 	while (data_len < expect_len) {
 		char* tmp;
-		int tmp_len = this->read(&tmp);
+		int tmp_len = this->read(&tmp, expect_len - data_len);
 		if (tmp_len < 0) {
 			return tmp_len;
 		}
@@ -354,13 +383,12 @@ int connection::write(const char* p, int bufsiz, bool buffered) {
 	this->_errno = 0;
 
 	int written = 0;
-	int i, len;
-	for (i = 0; i < connection::write_retry_limit; i++) {
+	int len;
+	while (written < bufsiz) {
 		len = ::write(this->_sock, p+written, bufsiz-written);
 		if (len < 0) {
 			if (errno == EAGAIN || errno == EINTR) {
-				log_notice("write() failed: %s (%d)", util::strerror(errno), errno);
-				usleep(connection::write_retry_wait);
+				log_info("write() failed: %s (%d)", util::strerror(errno), errno);
 				continue;
 			}
 			log_err("write() failed: %s (%d) -> closing socket", util::strerror(errno), errno);
@@ -382,11 +410,8 @@ int connection::write(const char* p, int bufsiz, bool buffered) {
 			log_debug("write %d bytes", len);
 			break;
 		} else {
-			log_info("expect %d bytes but write %d byes -> continue processing", bufsiz, len);
+			log_info("expect %d bytes but write %d byes (total %d bytes) -> continue processing", bufsiz, len, written);
 		}
-	}
-	if (i == connection::write_retry_limit) {
-		return len >= 0 ? written : -1;
 	}
 	if (this->_write_buf != NULL) {
 		_delete_(this->_write_buf);

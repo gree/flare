@@ -47,11 +47,15 @@ int server::listen(int port) {
 	// socket option/attr
 	int tmp = 1;
 	if (setsockopt(this->_sock, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<char *>(&tmp), sizeof(tmp)) < 0) {
-		log_err("setsockopt() failed: %s (%d)", util::strerror(errno), errno);
+		log_err("setsockopt() for SO_REUSEADDR failed: %s (%d)", util::strerror(errno), errno);
 		return -1;
 	}
 	if (setsockopt(this->_sock, SOL_SOCKET, SO_KEEPALIVE, reinterpret_cast<char *>(&tmp), sizeof(tmp)) < 0) {
-		log_err("setsockopt() failed: %s (%d)", util::strerror(errno), errno);
+		log_err("setsockopt() SO_KEEPALIVE failed: %s (%d)", util::strerror(errno), errno);
+		return -1;
+	}
+	if (setsockopt(this->_sock, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<char*>(&tmp), sizeof(tmp)) < 0) {
+		log_err("setsockopt() TCP_NODELAY failed: %s (%d)", util::strerror(errno), errno);
 		return -1;
 	}
 	int flag = fcntl(this->_sock, F_GETFL, 0);

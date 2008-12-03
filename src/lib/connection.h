@@ -38,8 +38,6 @@ public:
 	static const int connect_retry_limit = 8;
 	static const int connect_retry_wait = 500*1000;		// usec
 	static const int read_timeout = 10*60*1000;				// msec
-	static const int write_retry_limit = 8;
-	static const int write_retry_wait = 500*1000;			// usec
 	static const int chunk_size = 8192;
 
 	connection();
@@ -48,7 +46,7 @@ public:
 
 	int open(string host, int port);
 	int open() { return this->open(this->_host, this->_port); };
-	int read(char** p);
+	int read(char** p, int expect_len = -1);
 	int readline(char** p);
 	int readsize(int expect_len, char** p);
 	int push_back(char* p, int bufsiz);

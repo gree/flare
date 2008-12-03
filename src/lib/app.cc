@@ -12,7 +12,6 @@
 namespace gree {
 namespace flare {
 
-
 // {{{ global functions/variables
 stats* stats_object = NULL;
 // }}}

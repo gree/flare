@@ -47,7 +47,7 @@ public:
 
 	int open(string host, int port);
 	int open() { return this->open(this->_host, this->_port); };
-	int read(char** p, int expect_len = -1);
+	int read(char** p);
 	int readline(char** p);
 	int readsize(int expect_len, char** p);
 	int push_back(char* p, int bufsiz);

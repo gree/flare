@@ -1,3 +1,45 @@
+commit 26bb5d0bac04821526b4d20b4b3c22bb9080f505
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Wed Dec 3 16:34:42 2008 +0900
+
+    ws fix
+
+commit 30e65cd2e62c7823ede763b30681d5673077e655
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Wed Dec 3 10:58:41 2008 +0900
+
+    socket i/o tweaks
+
+commit 31048779d859e47acf3b8ca4c6c5d61f6c0f34af
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Wed Dec 3 02:49:27 2008 +0900
+
+    fix build w/out --enable-mysql-replication
+
+commit be899bddb0dc26e8a94dc64134008204e9341548
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Sun Nov 30 18:18:08 2008 +0900
+
+    fix segfault
+
+commit 1be07df8bd047d43cdbf257d17f123e682dcb675
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Sat Nov 29 22:34:39 2008 +0900
+
+    fix mysql replication reconnecting problem
+
+commit 7c62b5e9b00f9357d3131c1b056543797a1fcecd
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Fri Nov 28 19:15:17 2008 +0900
+
+    ws fix
+
+commit d426df2db58a1f5102619e6bd981e23bb2bbd152
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Fri Nov 28 18:48:45 2008 +0900
+
+    ready for 1.0.3
+
 commit 617fb1b97946be36d139a21d7aa61f33b419b09a
 Author: Masaki Fujimoto <fujimoto@php.net>
 Date:   Fri Nov 28 18:47:25 2008 +0900

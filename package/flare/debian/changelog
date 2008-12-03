@@ -1,14 +1,20 @@
+flare (1.0.4-1) unstable; urgency=low
+
+  * 1.0.4
+
+ -- fujimoto <fujimoto@php.net>  Wed,  3 Dec 2008 18:07:37 +0900
+
 flare (1.0.3-1) unstable; urgency=low
 
   * 1.0.3
 
- -- fujimoto <fujimoto@false>  Fri, 28 Nov 2008 18:48:21 +0900
+ -- fujimoto <fujimoto@php.net>  Fri, 28 Nov 2008 18:48:21 +0900
 
 flare (1.0.2-1) unstable; urgency=low
 
   * 1.0.2
 
- -- fujimoto <fujimoto@false>  Fri, 28 Nov 2008 17:36:13 +0900
+ -- fujimoto <fujimoto@php.net>  Fri, 28 Nov 2008 17:36:13 +0900
 
 flare (1.0.1-1) unstable; urgency=low
 

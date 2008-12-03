@@ -1,3 +1,10 @@
+* [2008/12/03] 1.0.4 release
+
+  * bug fixes
+    - fix mysql replication bugs
+	- fix build w/out mysql replication
+	- fix EAGAIN handlings
+
 * [2008/11/28] 1.0.3 release
 
   * bug fixes

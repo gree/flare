@@ -163,6 +163,15 @@ int connection::read(char** p, int expect_len) {
 			this->_errno = errno;
 			return -1;
 		}
+		if (bufsiz == 0) {
+			// peer seems to close connection
+			log_info("peer seems to close connection (read 0 byte) -> closing socket", 0);
+			_delete_(*p);
+			*p = NULL;
+			this->close();
+			this->_errno = -2;
+			return -2;
+		}
 	}
 
 	*p = _new_ char[bufsiz];

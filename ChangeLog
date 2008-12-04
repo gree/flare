@@ -1,3 +1,33 @@
+commit 644890de77f2c1f6c6389da9859f0408a8dd7db8
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Thu Dec 4 20:41:13 2008 +0900
+
+    socket I/O tunings
+
+commit c6206e750497108d9aeda8f64426b4f8e3b6def7
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Wed Dec 3 21:44:41 2008 +0900
+
+    fix socket I/O problems (reverted previous patch for a while)
+
+commit 62f2cd9c3c44bf550bb5e2fa2acf890369691336
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Wed Dec 3 21:08:14 2008 +0900
+
+    read infinite loop quick fix
+
+commit 055315737b974025fae560ef2517ad9b9ae67bba
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Wed Dec 3 20:00:41 2008 +0900
+
+    poll() after EAGAIN
+
+commit 4fac9acb288a6683508e8b8609b797b918a08ed6
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Wed Dec 3 18:09:14 2008 +0900
+
+    ready for 1.0.4
+
 commit 26bb5d0bac04821526b4d20b4b3c22bb9080f505
 Author: Masaki Fujimoto <fujimoto@php.net>
 Date:   Wed Dec 3 16:34:42 2008 +0900

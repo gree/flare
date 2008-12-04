@@ -1,3 +1,8 @@
+* [2008/12/04] 1.0.5 release
+
+  * bug fixes
+    - socket I/O tunings
+
 * [2008/12/03] 1.0.4 release
 
   * bug fixes

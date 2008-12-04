@@ -28,10 +28,11 @@ protected:
 	int									_port;
 	int									_read_timeout;
 	char*								_read_buf;
-	uint32_t						_read_buf_len;
+	char*								_read_buf_p;
+	int									_read_buf_len;
 	char*								_write_buf;
-	uint32_t						_write_buf_len;
-	uint32_t						_write_buf_chunk_size;
+	int									_write_buf_len;
+	int									_write_buf_chunk_size;
 	int									_errno;
 
 public:
@@ -47,7 +48,7 @@ public:
 
 	int open(string host, int port);
 	int open() { return this->open(this->_host, this->_port); };
-	int read(char** p);
+	int read(char** p, int expect_len, bool readline, bool& actual);
 	int readline(char** p);
 	int readsize(int expect_len, char** p);
 	int push_back(char* p, int bufsiz);
@@ -62,6 +63,7 @@ public:
 
 private:
 	int _add_read_buf(char* p, int len);
+	int _clear_read_buf();
 	int _add_write_buf(const char* p, int len);
 };
 

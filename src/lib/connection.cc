@@ -22,6 +22,7 @@ connection::connection():
 		_port(-1),
 		_read_timeout(read_timeout),
 		_read_buf(NULL),
+		_read_buf_p(NULL),
 		_read_buf_len(0),
 		_write_buf(NULL),
 		_write_buf_len(0),
@@ -38,6 +39,7 @@ connection::connection(int sock, struct sockaddr_in addr):
 		_port(-1),
 		_read_timeout(read_timeout),
 		_read_buf(NULL),
+		_read_buf_p(NULL),
 		_read_buf_len(0),
 		_write_buf(NULL),
 		_write_buf_len(0),
@@ -115,7 +117,7 @@ int connection::open(string host, int port) {
  *	
  *	- caller should delete *p if this method is successfully done (returned > 0)
  */
-int connection::read(char** p) {
+int connection::read(char** p, int expect_len, bool readline, bool& actual) {
 	if (this->_sock < 0) {
 		log_warning("connection seems to be already closed (sock=%d)", this->_sock);
 		return -1;
@@ -123,74 +125,134 @@ int connection::read(char** p) {
 
 	this->_errno = 0;
 
-	if (this->_read_buf_len > 0) {
-		*p = this->_read_buf;
-		int len = this->_read_buf_len;
-		log_debug("reading from internal buffer (%d bytes)", len);
+	// internal buffer handling
+	if (readline && this->_read_buf_len > 0) {
+		log_debug("reading from internal buffer (mode=readline, read_buf_len=%d)", this->_read_buf_len);
+		int len = 0;
+		char* q = static_cast<char*>(memchr(this->_read_buf_p, '\n', this->_read_buf_len));
+		if (q) {
+			len = q-this->_read_buf_p+1;
+			*p = _new_ char[len+1];
+			memcpy(*p, this->_read_buf_p, len);
+			*((*p)+len) = '\0';
+			this->_read_buf_p += len;
+			this->_read_buf_len -= len;
+			log_debug("new line char found [%s] (len=%d, read_buf_len=%d)", *p, len, this->_read_buf_len);
 
-		this->_read_buf = NULL;
-		this->_read_buf_len = 0;
+			// skip clearing read buffer (lazy deletetion)
+		} else {
+			*p = _new_ char[this->_read_buf_len];
+			memcpy(*p, this->_read_buf_p, this->_read_buf_len);
+			len = this->_read_buf_len;
+			log_debug("no new line char found (read_buf_len=%d) -> flushing buffers", this->_read_buf_len);
+			this->_clear_read_buf();
+		}
+		actual = false;
+
+		return len;
+	} else if (this->_read_buf_len > 0) {
+		log_debug("reading from internal buffer (mode=binary, read_buf_len=%d, expect_len)", this->_read_buf_len, expect_len);
+		int len = 0;
+		if (expect_len > 0 && this->_read_buf_len > expect_len) {
+			*p = _new_ char[expect_len];
+			memcpy(*p, this->_read_buf_p, expect_len);
+			len = expect_len;
+			this->_read_buf_p += expect_len;
+			this->_read_buf_len -= expect_len;
+		} else {
+			*p = _new_ char[this->_read_buf_len];
+			memcpy(*p, this->_read_buf_p, this->_read_buf_len);
+			len = this->_read_buf_len;
+			this->_clear_read_buf();
+		}
+		actual = false;
+
 		return len;
 	}
 
 	struct pollfd ufds;
 	ufds.fd = this->_sock;
 	ufds.events = POLLIN | POLLPRI;
-	int n = poll(&ufds, 1, this->_read_timeout);
-	if (n == 0) {
-		log_info("poll() timed out (%0.4f sec)", this->_read_timeout / 1000.0);
-		this->_errno = -1;
-		return -1;
-	}
-	if (n < 0 || !(ufds.revents & (POLLIN | POLLPRI))) {
-		if (errno != EINTR) {
-			log_err("poll() failed: %s (%d) -> closing socket", util::strerror(errno), errno);
+
+	*p = NULL;
+	int bufsiz = -1;
+	int len = 0;
+	actual = true;
+	do {
+		int n = poll(&ufds, 1, this->_read_timeout);
+		if (n == 0) {
+			log_info("poll() timed out (%0.4f sec)", this->_read_timeout / 1000.0);
+			this->_errno = -1;
+			return -1;
+		}
+		if (n < 0 || !(ufds.revents & (POLLIN | POLLPRI))) {
+			if (errno != EINTR) {
+				log_err("poll() failed: %s (%d) -> closing socket", util::strerror(errno), errno);
+				this->close();
+			} else {
+				log_notice("poll() failed: %s (%d)", util::strerror(errno), errno);
+			}
+			this->_errno = errno;
+			return -1;
+		}
+
+		if (bufsiz < 0) {
+			// initial loop
+			if (expect_len > 1 * 1024) {
+				bufsiz = expect_len;
+			} else {
+				if (::ioctl(this->_sock, FIONREAD, &bufsiz)) {
+					log_err("ioctl() failed: %s (%d) -> closing socket", util::strerror(errno), errno);
+					this->close();
+					this->_errno = errno;
+					return -1;
+				}
+			}
+			log_debug("trying to read %d bytes", bufsiz);
+			*p = _new_ char[bufsiz];
+		}
+
+		int tmp = ::read(this->_sock, (*p) + len, bufsiz - len);
+		if (tmp == 0) {
+			// peer seems to close connection
+			log_info("peer seems to close connection (read 0 byte) -> closing socket", 0);
+			_delete_(*p);
+			*p = NULL;
 			this->close();
-		} else {
-			log_notice("poll() failed: %s (%d)", util::strerror(errno), errno);
+			this->_errno = -2;
+			return -2;
+		} else if ((len+tmp) >= bufsiz) {
+			log_debug("read %d bytes (expect %d bytes) -> complete", len+tmp, bufsiz);
+			if (expect_len > 0 && (len+tmp) > expect_len && bufsiz < (1 * 1024) && this->_read_buf == NULL) {
+				this->_add_read_buf(*p, len+tmp);
+				this->_read_buf_len -= expect_len;
+				this->_read_buf_p += expect_len;
+
+				stats_object->add_bytes_read(tmp);
+				return expect_len;
+			}
+		} else if (tmp < 0) {
+			if (errno == EAGAIN) {
+				log_info("read() failed: %s (%d)", util::strerror(errno), errno);
+				continue;
+			}
+			log_err("read() failed: %s (%d)", util::strerror(errno), errno);
+			_delete_(*p);
+			*p = NULL;
+			if (errno == EINTR) {
+				return 0;
+			}
+			log_err("-> closing socket", 0);
+			this->close();
+			return -1;
+		} else if ((len+tmp) < bufsiz) {
+			// worth continuing
+			log_info("expect %d bytes but read %d byes (total %d bytes) -> continue processing", bufsiz, tmp, len);
 		}
-		this->_errno = errno;
-		return -1;
-	}
 
-	int bufsiz;
-	if (::ioctl(this->_sock, FIONREAD, &bufsiz)) {
-		log_err("ioctl() failed: %s (%d) -> closing socket", util::strerror(errno), errno);
-		this->close();
-		this->_errno = errno;
-		return -1;
-	}
-
-	*p = _new_ char[bufsiz];
-	int len = ::read(this->_sock, *p, bufsiz);
-	if (len == 0) {
-		// peer seems to close connection
-		log_info("peer seems to close connection (read 0 byte) -> closing socket", 0);
-		_delete_(*p);
-		*p = NULL;
-		this->close();
-		this->_errno = -2;
-		return -2;
-	} else if (len == bufsiz) {
-		log_debug("read %d bytes", len);
-	} else if (len < 0) {
-		log_err("read() failed: %s (%d)", util::strerror(errno), errno);
-		_delete_(*p);
-		*p = NULL;
-		if (errno == EAGAIN) {
-			return 0;
-		} else if (errno == EINTR) {
-			return 0;
-		}
-		log_err("-> closing socket", 0);
-		this->close();
-		return -1;
-	} else if (len < bufsiz) {
-		// something wrong but worth continuing
-		log_info("expect %d bytes but read %d byes -> continue processing", bufsiz, len);
-	}
-
-	stats_object->add_bytes_read(len);
+		stats_object->add_bytes_read(tmp);
+		len += tmp;
+	} while (len < bufsiz);
 
 	return len;
 }
@@ -208,15 +270,27 @@ int connection::readline(char** p) {
 	char* r_tmp = NULL;
 	for (;;) {
 		char* tmp = NULL;
-		int len = this->read(&tmp);
+		bool actual;
+		int len = this->read(&tmp, -1, true, actual);
 		if (len < 0) {
-			if (r_len > 0) {
-				log_err("discarding intermediate buffers (%d bytes)", r_len);
-			}
 			if (r) {
+				log_err("discarding intermediate buffers (%d bytes)", r_len);
 				_delete_(r);
 			}
 			return len;
+		}
+
+		// directly using read buffer (disirable case)
+		if (actual == false && r_len == 0 && tmp[len-1] == '\n') {
+			log_debug("seems that we can use internal buffer directly", 0);
+			r_len = len;
+			if (len > 1 && tmp[len-2] == '\r') {
+				tmp[len-2] = '\n';
+				tmp[len-1] = '\0';
+				r_len--;
+			}
+			r = tmp;
+			break;
 		}
 
 		char* q = static_cast<char*>(memchr(tmp, '\n', len));
@@ -237,7 +311,9 @@ int connection::readline(char** p) {
 			r_len += tmp_len;
 			r = r_tmp;
 
-			this->_add_read_buf(tmp+(q-tmp+1), len-(q-tmp+1));
+			if ((len - (q-tmp+1)) > 0) {
+				this->_add_read_buf(tmp+(q-tmp+1), len-(q-tmp+1));
+			}
 			_delete_(tmp);
 			break;
 		} else {
@@ -267,40 +343,39 @@ int connection::readline(char** p) {
  */
 int connection::readsize(int expect_len, char** p) {
 	char* data = NULL;
+	char* data_tmp = NULL;
 	int data_len = 0;
 	log_debug("ready to read %d bytes", expect_len);
+
 	while (data_len < expect_len) {
 		char* tmp;
-		int tmp_len = this->read(&tmp);
+		bool actual;
+		int tmp_len = this->read(&tmp, expect_len - data_len, false, actual);
 		if (tmp_len < 0) {
 			return tmp_len;
+		} else if (data_len == 0 && tmp_len == expect_len) {
+			log_debug("successfully read %d bytes (desirable)", tmp_len);
+			*p = tmp;
+			return tmp_len;
+		} else if (data == NULL) {
+			data = _new_ char[expect_len];
+			data_tmp = data;
 		}
 
 		if (data_len+tmp_len >= expect_len) {
 			int diff_len = expect_len - data_len;
-			diff_len = diff_len > tmp_len ? tmp_len : diff_len;
-			char* data_tmp = _new_ char[data_len+diff_len];
-			if (data) {
-				memcpy(data_tmp, data, data_len);
-				_delete_(data);
-			}
-			memcpy(data_tmp+data_len, tmp, diff_len);
-			data = data_tmp;
-			data_len += diff_len;
+			memcpy(data_tmp, tmp, diff_len);
+			data_tmp += diff_len;
+			data_len = data_tmp - data;
 
 			// add extra data to internal read buffer
 			if (tmp_len-diff_len > 0) {
 				this->_add_read_buf(tmp+diff_len, tmp_len-diff_len);
 			}
 		} else {
-			char* data_tmp = _new_ char[data_len+tmp_len];
-			if (data) {
-				memcpy(data_tmp, data, data_len);
-				_delete_(data);
-			}
-			memcpy(data_tmp+data_len, tmp, tmp_len);
-			data = data_tmp;
-			data_len += tmp_len;
+			memcpy(data_tmp, tmp, tmp_len);
+			data_tmp += tmp_len;
+			data_len = data_tmp - data;
 		}
 		_delete_(tmp);
 	}
@@ -317,14 +392,22 @@ int connection::readsize(int expect_len, char** p) {
  *	- data is always push back at *top* of read buffer, so caller should be carefull of order
  */
 int connection::push_back(char* p, int bufsiz) {
+	log_debug("checking for lazy push back (bufsiz=%d, current=%d)", bufsiz, this->_read_buf_p - this->_read_buf);
+	if (this->_read_buf && bufsiz <= (this->_read_buf_p - this->_read_buf)) {
+		this->_read_buf_p -= bufsiz;
+		this->_read_buf_len += bufsiz;
+		return this->_read_buf_len;
+	}
+
 	char* tmp = _new_ char[this->_read_buf_len+bufsiz];
 	memcpy(tmp, p, bufsiz);
 	if (this->_read_buf) {
-		memcpy(tmp+bufsiz, this->_read_buf, this->_read_buf_len);
+		memcpy(tmp+bufsiz, this->_read_buf_p, this->_read_buf_len);
 		_delete_(this->_read_buf);
 	}
-	this->_read_buf_len += bufsiz;
 	this->_read_buf = tmp;
+	this->_read_buf_p = this->_read_buf;
+	this->_read_buf_len += bufsiz;
 
 	log_debug("successfully pushed back %d bytes (total buffer size=%d)", bufsiz, this->_read_buf_len);
 
@@ -477,23 +560,39 @@ int connection::get_port() {
  *	append data to internal read buffer
  */
 int connection::_add_read_buf(char* p, int len) {
+	if (this->_read_buf && this->_read_buf_len <= 0) {
+		this->_clear_read_buf();
+	}
+
 	char* tmp = _new_ char[this->_read_buf_len+len];
-	if (this->_read_buf) {
-		memcpy(tmp, this->_read_buf, this->_read_buf_len);
+	if (this->_read_buf_len > 0) {
+		memcpy(tmp, this->_read_buf_p, this->_read_buf_len);
 		_delete_(this->_read_buf);
 	}
 	memcpy(tmp+this->_read_buf_len, p, len);
-	this->_read_buf_len += len;
+
 	this->_read_buf = tmp;
+	this->_read_buf_p = this->_read_buf;
+	this->_read_buf_len += len;
 
 	return this->_read_buf_len;
+}
+
+int connection::_clear_read_buf() {
+	log_debug("clearing internal read buffer (read_buf_len=%d)", this->_read_buf_len);
+	_delete_(this->_read_buf);
+	this->_read_buf = NULL;
+	this->_read_buf_p = NULL;
+	this->_read_buf_len = 0;
+
+	return 0;
 }
 
 /**
  *	append data to internal write buffer
  */
 int connection::_add_write_buf(const char* p, int len) {
-	uint32_t new_chunk_size = (this->_write_buf_len + len) / connection::chunk_size + 1;
+	int new_chunk_size = (this->_write_buf_len + len) / connection::chunk_size + 1;
 	log_debug("adding to internal write buffer (current_len=%d, current_chunk_size=%d, write_len=%d, new_chunk_size=%d)", this->_write_buf_len, this->_write_buf_chunk_size, len, new_chunk_size);
 	if (new_chunk_size > this->_write_buf_chunk_size) {
 		char* tmp = _new_ char[new_chunk_size * connection::chunk_size];

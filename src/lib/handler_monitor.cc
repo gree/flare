@@ -113,8 +113,9 @@ int handler_monitor::_process_monitor() {
 
 	// clear read buf
 	char* tmp;
+	bool actual;
 	this->_connection->set_read_timeout(0);
-	if (this->_connection->read(&tmp) > 0) {
+	if (this->_connection->read(&tmp, -1, false, actual) > 0) {
 		_delete_(tmp);
 	}
 	this->_connection->set_read_timeout(this->_monitor_read_timeout);

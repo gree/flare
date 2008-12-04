@@ -94,7 +94,8 @@ int handler_mysql_replication::run() {
 					// see if connection is available
 					c->set_read_timeout(0);
 					char *tmp;
-					int tmp_len = c->read(&tmp);
+					bool actual;
+					int tmp_len = c->read(&tmp, -1, false, actual);
 					if (tmp_len > 0) {
 						c->push_back(tmp, tmp_len);
 						_delete_(tmp);

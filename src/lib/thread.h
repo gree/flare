@@ -101,6 +101,7 @@ public:
 	int wait();
 	int run();
 	int clean(bool& is_pool);
+	int clean_internal();
 	int shutdown(bool graceful = false, bool async = false);
 	int notify_shutdown();
 

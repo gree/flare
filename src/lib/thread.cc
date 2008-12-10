@@ -270,9 +270,16 @@ int thread::clean(bool& is_pool) {
 
 	int r = this->_thread_pool->clean(this, is_pool);
 
-	// we should clean id *after* we clean up thread pool issue
-	this->_id = 0;
+	return r;
+}
 
+/**
+ *	clean up internal data (should be called *after* thread object is removed from map, and *before* adding to thread_pool)
+ */
+int thread::clean_internal() {
+	log_debug("cleaning internal data", 0);
+
+	this->_id = 0;
 	this->_info.id = 0;
 	this->_info.type = 0;
 	this->_info.peer_name = "";
@@ -282,7 +289,7 @@ int thread::clean(bool& is_pool) {
 	this->_info.state = "";
 	this->_info.info = "";
 
-	return r;
+	return 0;
 }
 
 /**

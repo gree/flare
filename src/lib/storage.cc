@@ -17,11 +17,12 @@ namespace flare {
 /**
  *	ctor for storage
  */
-storage::storage(string data_dir, int mutex_slot_size):
+storage::storage(string data_dir, int mutex_slot_size, int header_cache_size):
 		_open(false),
 		_data_dir(data_dir),
 		_mutex_slot_size(mutex_slot_size),
 		_mutex_slot(NULL),
+		_header_cache_size(header_cache_size),
 		_header_cache_map(NULL) {
 	this->_mutex_slot = _new_ pthread_rwlock_t[mutex_slot_size];
 	int i;
@@ -125,6 +126,13 @@ int storage::_set_header_cache(string key, entry& e) {
 	*q = e.version;
 
 	tcmapput(this->_header_cache_map, key.c_str(), key.size(), tmp, sizeof(tmp));
+
+	// cut front here
+	int n = tcmaprnum(this->_header_cache_map) - this->_header_cache_size;
+	if (n > 0) {
+		log_debug("cutting front cache (n=%d, current=%d, size=%d)", n, tcmaprnum(this->_header_cache_map), this->_header_cache_size);
+		tcmapcutfront(this->_header_cache_map, n);
+	}
 
 	return 0;
 };

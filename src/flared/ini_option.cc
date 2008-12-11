@@ -42,6 +42,7 @@ ini_option::ini_option():
 		_stack_size(default_stack_size),
 		_storage_ap(default_storage_ap),
 		_storage_bucket_size(default_storage_bucket_size),
+		_storage_cache_size(default_storage_cache_size),
 		_storage_compress(""),
 		_storage_large(false),
 		_storage_type(""),
@@ -211,6 +212,10 @@ int ini_option::load() {
 			this->_storage_bucket_size = opt_var_map["storage-bucket-size"].as<uint64_t>();
 		}
 
+		if (opt_var_map.count("storage-cache-size")) {
+			this->_storage_cache_size = opt_var_map["storage-cache-size"].as<int>();
+		}
+
 		if (opt_var_map.count("storage-compress")) {
 			storage::compress t;
 			if (storage::compress_cast(opt_var_map["storage-compress"].as<string>(), t) < 0) {
@@ -358,6 +363,7 @@ int ini_option::_setup_config_option(program_options::options_description& optio
 		("stack-size",							program_options::value<int>(),			"thread stack size (kb)")
 		("storage-ap",							program_options::value<uint32_t>(),	"storage size of record alignment by power of 2 (tch)")
 		("storage-bucket-size",			program_options::value<uint64_t>(),	"number of elements of the bucket array (tch)")
+		("storage-cache-size",			program_options::value<int>(),			"storage header cache size")
 		("storage-compress",				program_options::value<string>(),		"storage compress type (deflate, bz2, tcbs) (tch)")
 		("storage-large",																								"use large storage (tch)")
 		("storage-type",						program_options::value<string>(),		"storage type (tch:tokyo cabinet hash database)")

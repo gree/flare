@@ -45,6 +45,7 @@ private:
 	int					_stack_size;
 	uint32_t		_storage_ap;
 	uint64_t		_storage_bucket_size;
+	int					_storage_cache_size;
 	string			_storage_compress;
 	bool				_storage_large;
 	string			_storage_type;
@@ -63,6 +64,7 @@ public:
 	static const int default_stack_size = 128;
 	static const uint32_t default_storage_ap = 4;
 	static const uint64_t default_storage_bucket_size = 131071;
+	static const int default_storage_cache_size = 65536;
 	static const int default_thread_pool_size = 5;
 
 	ini_option();
@@ -94,6 +96,7 @@ public:
 	int get_stack_size() { return this->_stack_size; };
 	uint32_t get_storage_ap() { return this->_storage_ap; };
 	uint64_t get_storage_bucket_size() { return this->_storage_bucket_size; };
+	int get_storage_cache_size() { return this->_storage_cache_size; };
 	string get_storage_compress() { return this->_storage_compress; };
 	bool is_storage_large() { return this->_storage_large; };
 	string get_storage_type() { return this->_storage_type; };

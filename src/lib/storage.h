@@ -241,10 +241,11 @@ protected:
 	string								_data_path;
 	int										_mutex_slot_size;
 	pthread_rwlock_t*			_mutex_slot;
+	int										_header_cache_size;
 	TCMAP*								_header_cache_map;
 
 public:
-	storage(string data_dir, int mutex_slot_size);
+	storage(string data_dir, int mutex_slot_size, int header_cache_size);
 	virtual ~storage();
 
 	virtual int open() = 0;

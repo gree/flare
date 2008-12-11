@@ -17,8 +17,8 @@ namespace flare {
 /**
  *	ctor for storage_tch
  */
-storage_tch::storage_tch(string data_dir, int mutex_slot_size, uint32_t storage_ap, uint64_t storage_bucket_size, string storage_compess, bool storage_large):
-		storage(data_dir, mutex_slot_size),
+storage_tch::storage_tch(string data_dir, int mutex_slot_size, uint32_t storage_ap, uint64_t storage_bucket_size, int storage_cache_size, string storage_compess, bool storage_large):
+		storage(data_dir, mutex_slot_size, storage_cache_size),
 		_iter_lock(0) {
 	this->_data_path = this->_data_dir + "/flare.hdb";
 

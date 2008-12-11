@@ -134,6 +134,7 @@ int flared::startup(int argc, char **argv) {
 	log_notice("  stack_size:             %d", ini_option_object().get_stack_size());
 	log_notice("  storage_ap:             %u", ini_option_object().get_storage_ap());
 	log_notice("  storage_bucket_size:    %llu", ini_option_object().get_storage_bucket_size());
+	log_notice("  storage_cache_size:     %d", ini_option_object().get_storage_cache_size());
 	log_notice("  storage_compress:       %s", ini_option_object().get_storage_compress().c_str());
 	log_notice("  storage_large:          %s", ini_option_object().is_storage_large() ? "true" : "false");
 	log_notice("  storage_type:           %s", ini_option_object().get_storage_type().c_str());
@@ -176,6 +177,7 @@ int flared::startup(int argc, char **argv) {
 				ini_option_object().get_mutex_slot(),
 				ini_option_object().get_storage_ap(),
 				ini_option_object().get_storage_bucket_size(),
+				ini_option_object().get_storage_cache_size(),
 				ini_option_object().get_storage_compress(),
 				ini_option_object().is_storage_large());
 		break;

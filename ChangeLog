@@ -1,3 +1,33 @@
+commit 5ac765d0c0d838874665f1f19a8ec173161562d4
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Thu Jan 22 11:37:23 2009 +0900
+
+    revert previous commit
+
+commit c87ec51704721c3ec7b05121682094426dc219ed
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Tue Jan 13 17:14:29 2009 +0900
+
+    default socket read timeout tweaks
+
+commit 8142308afe0a6df73fe70ffcab216c5f430807a7
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Thu Dec 11 12:42:26 2008 +0900
+
+    purge header caches
+
+commit 44eb3b608fbf70419ae1a40b107b44b90734d4ff
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Wed Dec 10 18:27:07 2008 +0900
+
+    fix race condition around thread pool
+
+commit 936cfcb5075923d424133bbb86281d490bd6a9c5
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Thu Dec 4 20:42:31 2008 +0900
+
+    ready for 1.0.5
+
 commit 644890de77f2c1f6c6389da9859f0408a8dd7db8
 Author: Masaki Fujimoto <fujimoto@php.net>
 Date:   Thu Dec 4 20:41:13 2008 +0900

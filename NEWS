@@ -1,3 +1,9 @@
+* [2009/01/22] 1.0.6 release
+
+  * bug fixes
+    - fix random assertion errors (race condition around thread pool)
+    - purge header caches
+
 * [2008/12/04] 1.0.5 release
 
   * bug fixes
@@ -7,8 +13,8 @@
 
   * bug fixes
     - fix mysql replication bugs
-	- fix build w/out mysql replication
-	- fix EAGAIN handlings
+    - fix build w/out mysql replication
+    - fix EAGAIN handlings
 
 * [2008/11/28] 1.0.3 release
 
@@ -30,4 +36,4 @@
 
 * [2008/11/25] 1.0.0 release
 
-- initial release
+  * initial release

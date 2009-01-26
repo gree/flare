@@ -62,12 +62,23 @@ shared_thread thread_pool::get(int type) {
 	}
 	
 	unsigned int id;
-	ATOMIC_ADD(&this->_index, 1, id);
-	tmp->setup(type, id);
-
 	pthread_rwlock_wrlock(&this->_mutex_global_map);
-	log_debug("adding thread object to global map (type=%d)", type);
-	this->_global_map[type][tmp->get_id()] = tmp;
+	for (;;) {
+		ATOMIC_ADD(&this->_index, 1, id);
+		if (id == 0) {
+			this->_index = 1;
+			continue;
+		}
+		if (this->_global_map.find(type) != this->_global_map.end() && this->_global_map[type].find(id) != this->_global_map[type].end()) {
+			log_info("therad id [%u] is already in use -> retry...", id);
+			continue;
+		}
+		tmp->setup(type, id);
+
+		this->_global_map[type][tmp->get_id()] = tmp;
+		log_debug("adding thread object to global map (type=%d)", type);
+		break;
+	}
 	pthread_rwlock_unlock(&this->_mutex_global_map);
 
 	return tmp;

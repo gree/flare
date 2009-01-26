@@ -1,3 +1,15 @@
+commit fd6d429ee2f9260e6df24a39bb58363634a9c387
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Mon Jan 26 20:12:00 2009 +0900
+
+    fixed problem caused by thread-id overflow
+
+commit acbf2ec4514e87d06f94b6c921b8fb802f09c64c
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Thu Jan 22 11:41:30 2009 +0900
+
+    ready for 1.0.6
+
 commit 5ac765d0c0d838874665f1f19a8ec173161562d4
 Author: Masaki Fujimoto <fujimoto@php.net>
 Date:   Thu Jan 22 11:37:23 2009 +0900

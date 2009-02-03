@@ -1,3 +1,15 @@
+commit 47ce63022cb74728893ee280e88826e8812e1463
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Tue Feb 3 19:00:16 2009 +0900
+
+    added lock around non-thread-safe function calls
+
+commit f08e8d4248ee31b2957b687702efe45c906c1f50
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Mon Jan 26 20:14:33 2009 +0900
+
+    ready for 1.0.7
+
 commit fd6d429ee2f9260e6df24a39bb58363634a9c387
 Author: Masaki Fujimoto <fujimoto@php.net>
 Date:   Mon Jan 26 20:12:00 2009 +0900

@@ -241,6 +241,7 @@ protected:
 	string								_data_path;
 	int										_mutex_slot_size;
 	pthread_rwlock_t*			_mutex_slot;
+	pthread_rwlock_t			_mutex_header_cache_map;
 	int										_header_cache_size;
 	TCMAP*								_header_cache_map;
 
@@ -384,23 +385,30 @@ protected:
 	inline int _get_header_cache(string key, entry& e) {
 		log_debug("get header from cache (key=%s)", key.c_str());
 		int tmp_len;
+
+		pthread_rwlock_rdlock(&this->_mutex_header_cache_map);
+
 		uint8_t* tmp = (uint8_t*)tcmapget(this->_header_cache_map, key.c_str(), key.size(), &tmp_len);
 		if (tmp == NULL) {
 			log_debug("no header in cache (key=%s)", key.c_str());
+			pthread_rwlock_unlock(&this->_mutex_header_cache_map);
 			return 0;
 		}
-
 		e.expire = *(reinterpret_cast<time_t*>(tmp));
 		e.version = *(reinterpret_cast<uint64_t*>(tmp+sizeof(time_t)));
 		log_debug("header from cache (key=%s, expire=%ld, version=%llu)", key.c_str(), e.expire, e.version);
 
+		pthread_rwlock_unlock(&this->_mutex_header_cache_map);
+
 		return 0;
 	};
 
-	int _gc_header_cache(int lifetime);
 	int _clear_header_cache() {
+		pthread_rwlock_wrlock(&this->_mutex_header_cache_map);
 		tcmapdel(this->_header_cache_map);
 		this->_header_cache_map = tcmapnew();
+		pthread_rwlock_unlock(&this->_mutex_header_cache_map);
+
 		return 0;
 	};
 };

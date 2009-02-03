@@ -29,6 +29,7 @@ storage::storage(string data_dir, int mutex_slot_size, int header_cache_size):
 	for (i = 0; i < this->_mutex_slot_size; i++) {
 		pthread_rwlock_init(&this->_mutex_slot[i], NULL);
 	}
+	pthread_rwlock_init(&this->_mutex_header_cache_map, NULL);
 
 	this->_header_cache_map = tcmapnew();
 }
@@ -125,6 +126,7 @@ int storage::_set_header_cache(string key, entry& e) {
 	q = reinterpret_cast<uint64_t*>(tmp+sizeof(time_t));
 	*q = e.version;
 
+	pthread_rwlock_wrlock(&this->_mutex_header_cache_map);
 	tcmapput(this->_header_cache_map, key.c_str(), key.size(), tmp, sizeof(tmp));
 
 	// cut front here
@@ -133,33 +135,10 @@ int storage::_set_header_cache(string key, entry& e) {
 		log_debug("cutting front cache (n=%d, current=%d, size=%d)", n, tcmaprnum(this->_header_cache_map), this->_header_cache_size);
 		tcmapcutfront(this->_header_cache_map, n);
 	}
+	pthread_rwlock_unlock(&this->_mutex_header_cache_map);
 
 	return 0;
 };
-
-int storage::_gc_header_cache(int lifetime) {
-	log_debug("gc header cache (lifetime=%d)", lifetime);
-
-	time_t t_limit = stats_object->get_timestamp() - lifetime;
-	tcmapiterinit(this->_header_cache_map);
-	int key_len;
-	char* key;
-	while ((key = (char*)tcmapiternext(this->_header_cache_map, &key_len)) != NULL) {
-		int tmp_len;
-		uint8_t* tmp = (uint8_t*)tcmapget(this->_header_cache_map, key, key_len, &tmp_len);
-		if (tmp == NULL) {
-			continue;
-		}
-
-		time_t t = *(reinterpret_cast<time_t*>(tmp));
-		if (t < t_limit) {
-			log_debug("clearing expired data version cache (key=%s, t=%d)", key, t);
-			tcmapout(this->_header_cache_map, key, key_len);
-		}
-	}
-
-	return 0;
-}
 // }}}
 
 // {{{ private methods

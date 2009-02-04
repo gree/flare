@@ -883,7 +883,7 @@ cluster::proxy_request cluster::pre_proxy_read(op_proxy_read* op, storage::entry
 		return proxy_request_continue;
 	}
 	for (vector<partition_node>::iterator it = p.slave.begin(); it != p.slave.end(); it++) {
-		if (it->node_key == this->_node_key) {
+		if (it->node_balance > 0 && it->node_key == this->_node_key) {
 			return proxy_request_continue;
 		}
 	}

@@ -158,6 +158,7 @@ protected:
 	string								_index_server_name;
 	int										_index_server_port;
 	int										_proxy_concurrency;
+	int										_reconstruction_interval;
 
 public:
 	cluster(thread_pool* tp, string data_dir, string server_name, int server_port);
@@ -204,6 +205,8 @@ public:
 	int set_monitor_interval(int monitor_interval);
 	int set_monitor_read_timeout(int monitor_read_timeout);
 	int set_proxy_concurrency(int proxy_concurrency) { this->_proxy_concurrency = proxy_concurrency; return 0; };
+	int get_reconstruction_interval() { return this->_reconstruction_interval; };
+	int set_reconstruction_interval(int reconstruction_interval) { this->_reconstruction_interval = reconstruction_interval; return 0; };
 	string get_server_name() { return this->_server_name; };
 	int get_server_port() { return this->_server_port; };
 	string get_index_server_name() { return this->_index_server_name; };

@@ -37,6 +37,7 @@ ini_option::ini_option():
 		_mysql_replication_table(""),
 #endif
 		_proxy_concurrency(default_proxy_concurrency),
+		_reconstruction_interval(default_reconstruction_interval),
 		_server_name(""),
 		_server_port(default_server_port),
 		_stack_size(default_stack_size),
@@ -190,6 +191,10 @@ int ini_option::load() {
 			this->_proxy_concurrency = opt_var_map["proxy-concurrency"].as<int>();
 		}
 
+		if (opt_var_map.count("reconstruction-interval")) {
+			this->_reconstruction_interval = opt_var_map["reconstruction-interval"].as<int>();
+		}
+
 		if (opt_var_map.count("server-name")) {
 			this->_server_name = opt_var_map["server-name"].as<string>();
 		} else {
@@ -298,17 +303,22 @@ int ini_option::reload() {
 
 	try {
 		if (opt_var_map.count("log-facility")) {
-			log_info("  log_facility:      %s -> %s", this->_log_facility.c_str(), opt_var_map["log-facility"].as<string>().c_str());
+			log_info("  log_facility:           %s -> %s", this->_log_facility.c_str(), opt_var_map["log-facility"].as<string>().c_str());
 			this->_log_facility = opt_var_map["log-facility"].as<string>();
 		}
 
 		if (opt_var_map.count("max-connection")) {
-			log_info("  max_connection:    %d -> %d", this->_max_connection, opt_var_map["max-connection"].as<int>());
+			log_info("  max_connection:         %d -> %d", this->_max_connection, opt_var_map["max-connection"].as<int>());
 			this->_max_connection = opt_var_map["max-connection"].as<int>();
 		}
 
+		if (opt_var_map.count("reconstruction-interval")) {
+			log_info("  reconstruction_inteval: %d -> %d", this->_reconstruction_interval, opt_var_map["reconstruction-interval"].as<int>());
+			this->_reconstruction_interval = opt_var_map["reconstruction-interval"].as<int>();
+		}
+
 		if (opt_var_map.count("thread-pool-size")) {
-			log_info("  thread_pool_size:  %d -> %d", this->_thread_pool_size, opt_var_map["thread-pool-size"].as<int>());
+			log_info("  thread_pool_size:       %d -> %d", this->_thread_pool_size, opt_var_map["thread-pool-size"].as<int>());
 			this->_thread_pool_size = opt_var_map["thread-pool-size"].as<int>();
 		}
 	} catch (int e) {
@@ -358,6 +368,7 @@ int ini_option::_setup_config_option(program_options::options_description& optio
 		("mysql-replication-table",	program_options::value<string>(),		"mysql replication table")
 #endif
 		("proxy-concurrency",				program_options::value<int>(),			"proxy request concurrency for each node")
+		("reconstruction-interval",	program_options::value<int>(),			"master/slave dump interval in msec (dynamic)")
 		("server-name",							program_options::value<string>(),		"my server name")
 		("server-port",							program_options::value<int>(),			"my server port")
 		("stack-size",							program_options::value<int>(),			"thread stack size (kb)")

@@ -1,6 +1,6 @@
 /**
  *	handler_reconstruction.cc
- e
+ *
  *	implementation of gree::flare::handler_reconstruction
  *
  *	@author	Masaki Fujimoto <fujimoto@php.net>
@@ -60,7 +60,7 @@ int handler_reconstruction::run() {
 	this->_thread->set_state("execute");
 	this->_thread->set_op(p->get_ident());
 
-	if (p->run_client(0, this->_partition, this->_partition_size) < 0) {
+	if (p->run_client(this->_cluster->get_reconstruction_interval(), this->_partition, this->_partition_size) < 0) {
 		_delete_(p);
 		this->_cluster->deactivate_node();
 		return -1;

@@ -129,6 +129,7 @@ int flared::startup(int argc, char **argv) {
 	log_notice("  mysql_replication_table:%s", ini_option_object().get_mysql_replication_table().c_str());
 #endif
 	log_notice("  proxy_concurrency:      %d", ini_option_object().get_proxy_concurrency());
+	log_notice("  reconstruction_inteval: %d", ini_option_object().get_reconstruction_interval());
 	log_notice("  server_name:            %s", ini_option_object().get_server_name().c_str());
 	log_notice("  server_port:            %d", ini_option_object().get_server_port());
 	log_notice("  stack_size:             %d", ini_option_object().get_stack_size());
@@ -165,6 +166,7 @@ int flared::startup(int argc, char **argv) {
 
 	this->_cluster = _new_ cluster(this->_thread_pool, ini_option_object().get_data_dir(), ini_option_object().get_server_name(), ini_option_object().get_server_port());
 	this->_cluster->set_proxy_concurrency(ini_option_object().get_proxy_concurrency());
+	this->_cluster->set_reconstruction_interval(ini_option_object().get_reconstruction_interval());
 	if (this->_cluster->startup_node(ini_option_object().get_index_server_name(), ini_option_object().get_index_server_port()) < 0) {
 		return -1;
 	}
@@ -260,6 +262,9 @@ int flared::reload() {
 	log_notice("re-opening syslog...", 0);
 	singleton<logger>::instance().close();
 	singleton<logger>::instance().open(this->_ident, ini_option_object().get_log_facility());
+
+	// reconstruction_inteval
+	this->_cluster->set_reconstruction_interval(ini_option_object().get_reconstruction_interval());
 	
 	// thread_pool_size
 	this->_thread_pool->set_max_pool_size(ini_option_object().get_thread_pool_size());

@@ -40,6 +40,7 @@ private:
 	string			_mysql_replication_table;
 #endif
 	int					_proxy_concurrency;
+	int					_reconstruction_interval;
 	string			_server_name;
 	int					_server_port;
 	int					_stack_size;
@@ -60,6 +61,7 @@ public:
 	static const int default_mysql_replication_id = 19790217;
 #endif
 	static const int default_proxy_concurrency = 2;
+	static const int default_reconstruction_interval = 0;
 	static const int default_server_port = 12121;
 	static const int default_stack_size = 128;
 	static const uint32_t default_storage_ap = 4;
@@ -91,6 +93,7 @@ public:
 	string get_mysql_replication_table() { return this->_mysql_replication_table; };
 #endif
 	int get_proxy_concurrency() { return this->_proxy_concurrency; };
+	int get_reconstruction_interval() { return this->_reconstruction_interval; };
 	string get_server_name() { return this->_server_name; };
 	int get_server_port() { return this->_server_port; };
 	int get_stack_size() { return this->_stack_size; };

@@ -161,8 +161,8 @@ int op_dump::_run_server() {
 
 		// wait
 		if (this->_wait > 0) {
-			log_debug("wait for %d msec", this->_wait);
-			usleep(this->_wait * 1000);
+			log_debug("wait for %d usec", this->_wait);
+			usleep(this->_wait);
 		}
 	}
 

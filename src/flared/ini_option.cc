@@ -368,7 +368,7 @@ int ini_option::_setup_config_option(program_options::options_description& optio
 		("mysql-replication-table",	program_options::value<string>(),		"mysql replication table")
 #endif
 		("proxy-concurrency",				program_options::value<int>(),			"proxy request concurrency for each node")
-		("reconstruction-interval",	program_options::value<int>(),			"master/slave dump interval in msec (dynamic)")
+		("reconstruction-interval",	program_options::value<int>(),			"master/slave dump interval in usec (dynamic)")
 		("server-name",							program_options::value<string>(),		"my server name")
 		("server-port",							program_options::value<int>(),			"my server port")
 		("stack-size",							program_options::value<int>(),			"thread stack size (kb)")

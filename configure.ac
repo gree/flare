@@ -38,6 +38,19 @@ then
 fi
 AC_MSG_RESULT($enable_mysql_replication)
 
+AC_MSG_CHECKING(if flarefs is enabled)
+AC_ARG_ENABLE(flarefs, [AC_HELP_STRING([--enable-flarefs], [enable flarefs feature (very experimental) [default=no]])], [enable_flarefs="yes"], [enable_flarefs="no"])
+AC_MSG_RESULT($enable_flarefs)
+AM_CONDITIONAL(ENABLE_FLAREFS, test "$enable_flarefs" = "yes")
+
+if test "x$enable_flarefs" = "xyes"
+then
+	AC_ARG_WITH(fuse,
+		[  --with-fuse             fuse libraries],
+		[CXXFLAGS="${CXXFLAGS} -I${withval}/include" LDFLAGS="${LDFLAGS} -L${withval}/lib"])
+	AC_CHECK_LIB(fuse, main, [], [echo "libfuse not found"; exit 1])
+fi
+
 # Checks for header files.
 AC_STDC_HEADERS
 AC_CHECK_HEADER(pthread.h, [], [echo "pthread.h not found"; exit1])
@@ -94,5 +107,6 @@ AC_CONFIG_FILES([Makefile \
 	src/Makefile \
 	src/lib/Makefile \
 	src/flared/Makefile \
-	src/flarei/Makefile])
+	src/flarei/Makefile \
+	src/flarefs/Makefile])
 AC_OUTPUT

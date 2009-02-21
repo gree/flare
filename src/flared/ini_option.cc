@@ -21,6 +21,7 @@ namespace flare {
 ini_option::ini_option():
 		_argc(0),
 		_argv(NULL),
+		_back_log(default_back_log),
 		_config_path(""),
 		_daemonize(false),
 		_data_dir(""),
@@ -125,6 +126,10 @@ int ini_option::load() {
 	}
 
 	try {
+		if (opt_var_map.count("back-log")) {
+			this->_max_connection = opt_var_map["back-log"].as<int>();
+		}
+
 		if (opt_var_map.count("daemonize")) {
 			this->_daemonize = true;
 		}
@@ -353,6 +358,7 @@ int ini_option::_setup_cli_option(program_options::options_description& option) 
  */
 int ini_option::_setup_config_option(program_options::options_description& option) {
 	option.add_options()
+		("back-log",								program_options::value<int>(),			"back log")
 		("daemonize",																										"run as daemon")
 		("data-dir",								program_options::value<string>(),		"data directory")
 		("index-server-name",				program_options::value<string>(),		"index server name")

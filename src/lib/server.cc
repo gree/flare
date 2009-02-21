@@ -34,7 +34,7 @@ server::~server() {
 /**
  *	setup server socket
  */
-int server::listen(int port) {
+int server::listen(int port, int backlog) {
 	this->_port = port;
 
 	// creating a socket
@@ -73,7 +73,6 @@ int server::listen(int port) {
 		log_err("bind() failed: %s (%d)", util::strerror(errno), errno);
 		return -1;
 	}
-	int backlog = 8;    // see also tcp_max_syn_backlog
 	if (::listen(this->_sock, backlog) < 0) {
 		log_err("listen() failed: %s (%d)", util::strerror(errno), errno);
 		return -1;

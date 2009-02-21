@@ -114,6 +114,7 @@ int flared::startup(int argc, char **argv) {
 	log_notice("%s version %s - system logger started", this->_ident.c_str(), PACKAGE_VERSION);
 
 	log_notice("application startup in progress...", 0);
+	log_notice("  back_log:               %s", ini_option_object().get_back_log());
 	log_notice("  config_path:            %s", ini_option_object().get_config_path().c_str());
 	log_notice("  daemonize:              %s", ini_option_object().is_daemonize() ? "true" : "false");
 	log_notice("  data_dir:               %s", ini_option_object().get_data_dir().c_str());
@@ -158,7 +159,7 @@ int flared::startup(int argc, char **argv) {
 
 	// application objects
 	this->_server = _new_ server();
-	if (this->_server->listen(ini_option_object().get_server_port()) < 0) {
+	if (this->_server->listen(ini_option_object().get_server_port(), ini_option_object().get_back_log()) < 0) {
 		return -1;
 	}
 

@@ -24,6 +24,7 @@ private:
 	int					_argc;
 	char**			_argv;
 
+	int					_back_log;
 	string			_config_path;
 	bool				_daemonize;
 	string			_data_dir;
@@ -53,6 +54,7 @@ private:
 	int					_thread_pool_size;
 	
 public:
+	static const int default_back_log = 30;
 	static const int default_index_server_port = 12120;
 	static const uint32_t default_max_connection = 128;
 	static const int default_mutex_slot = 64;
@@ -77,6 +79,7 @@ public:
 
 	int set_args(int argc, char** argv) { this->_argc = argc; this->_argv = argv; return 0; };
 
+	int get_back_log() { return this->_back_log; };
 	string get_config_path() { return this->_config_path; };
 	bool is_daemonize() { return this->_daemonize; };
 	string get_data_dir() { return this->_data_dir; };

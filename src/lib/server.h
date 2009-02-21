@@ -32,7 +32,7 @@ public:
 
 	int get_port() { return this->_port; };
 
-	int listen(int port);
+	int listen(int port, int backlog = 10);
 	vector<shared_connection> wait();
 };
 

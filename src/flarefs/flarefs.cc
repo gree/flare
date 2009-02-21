@@ -57,7 +57,6 @@ int flarefs::startup(int argc, char **argv) {
 
 	log_notice("application startup in progress...", 0);
 	log_notice("  config_path:            %s", ini_option_object().get_config_path().c_str());
-	log_notice("  daemonize:              %s", ini_option_object().is_daemonize() ? "true" : "false");
 	log_notice("  data_dir:               %s", ini_option_object().get_data_dir().c_str());
 	log_notice("  fuse_allow_other:       %s", ini_option_object().is_fuse_allow_other() ? "true" : "false");
 	log_notice("  fuse_allow_root:        %s", ini_option_object().is_fuse_allow_root() ? "true" : "false");
@@ -68,12 +67,6 @@ int flarefs::startup(int argc, char **argv) {
 	// startup procs
 	if (this->_set_resource_limit() < 0) {
 		return -1;
-	}
-
-	if (ini_option_object().is_daemonize()) {
-		if (this->_daemonize() < 0) {
-			return -1;
-		}
 	}
 
 	if (this->_set_signal_handler() < 0) {

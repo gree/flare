@@ -24,7 +24,6 @@ private:
 	char**			_argv;
 
 	string			_config_path;
-	bool				_daemonize;
 	string			_data_dir;
 	bool				_fuse_allow_other;
 	bool				_fuse_allow_root;
@@ -45,7 +44,6 @@ public:
 	int set_args(int argc, char** argv) { this->_argc = argc; this->_argv = argv; return 0; };
 
 	string get_config_path() { return this->_config_path; };
-	bool is_daemonize() { return this->_daemonize; };
 	string get_data_dir() { return this->_data_dir; };
 	bool is_fuse_allow_other() { return this->_fuse_allow_other; };
 	bool is_fuse_allow_root() { return this->_fuse_allow_root; };

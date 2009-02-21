@@ -22,7 +22,6 @@ ini_option::ini_option():
 		_argc(0),
 		_argv(NULL),
 		_config_path(""),
-		_daemonize(false),
 		_data_dir(""),
 		_fuse_allow_other(false),
 		_fuse_allow_root(false),
@@ -107,10 +106,6 @@ int ini_option::load() {
 	}
 
 	try {
-		if (opt_var_map.count("daemonize")) {
-			this->_daemonize = true;
-		}
-
 		if (opt_var_map.count("data-dir")) {
 			this->_data_dir = opt_var_map["data-dir"].as<string>();
 		}
@@ -241,7 +236,6 @@ int ini_option::_setup_cli_option(program_options::options_description& option) 
  */
 int ini_option::_setup_config_option(program_options::options_description& option) {
 	option.add_options()
-		("daemonize",																										"run as daemon")
 		("data-dir",								program_options::value<string>(),		"data directory")
 		("fuse-allow-other",																						"[fuse option] allow other access")
 		("fuse-allow-root",																							"[fuse option] allow root access")

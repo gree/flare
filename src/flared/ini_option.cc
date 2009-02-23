@@ -127,7 +127,7 @@ int ini_option::load() {
 
 	try {
 		if (opt_var_map.count("back-log")) {
-			this->_max_connection = opt_var_map["back-log"].as<int>();
+			this->_back_log = opt_var_map["back-log"].as<int>();
 		}
 
 		if (opt_var_map.count("daemonize")) {

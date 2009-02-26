@@ -77,6 +77,8 @@ op* op_parser_text_node::_determine_op(const char* first, const char* buf, int& 
 		} 
 	} else if (strcmp(first, "dump") == 0) {
 		r = static_cast<op*>(_new_ op_dump(this->_connection, singleton<flared>::instance().get_cluster(), singleton<flared>::instance().get_storage()));
+	} else if (strcmp(first, "dump_key") == 0) {
+		r = static_cast<op*>(_new_ op_dump_key(this->_connection, singleton<flared>::instance().get_cluster(), singleton<flared>::instance().get_storage()));
 	} else if (strcmp(first, "flush_all") == 0) {
 		r = static_cast<op*>(_new_ op_flush_all(this->_connection, singleton<flared>::instance().get_storage()));
 	} else if (strcmp(first, "kill") == 0) {

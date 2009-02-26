@@ -30,6 +30,7 @@ libflare_a_SOURCES = \
 	op_decr.h op_decr.cc \
 	op_delete.h op_delete.cc \
 	op_dump.h op_dump.cc \
+	op_dump_key.h op_dump_key.cc \
 	op_error.h op_error.cc \
 	op_flush_all.h op_flush_all.cc \
 	op_get.h op_get.cc \

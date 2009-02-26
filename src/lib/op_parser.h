@@ -15,6 +15,7 @@
 #include "op_decr.h"
 #include "op_delete.h"
 #include "op_dump.h"
+#include "op_dump_key.h"
 #include "op_error.h"
 #include "op_flush_all.h"
 #include "op_get.h"

@@ -129,6 +129,16 @@ vector<shared_connection> server::wait() {
 		::close(sock);	// try
 		return connection_list;
 	}
+	flag = 1;
+	if (setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, reinterpret_cast<char*>(&flag), sizeof(flag)) < 0) {
+		log_err("setsockopt() failed: %s (%d) - SO_KEEPALIVE", util::strerror(errno), errno);
+		return connection_list;
+	}
+	flag = 1;
+	if (setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<char*>(&flag), sizeof(flag)) < 0) {
+		log_err("setsockopt() failed: %s (%d) - TCP_NODELAY", util::strerror(errno), errno);
+		return connection_list;
+	}
 	log_info("socket accepted (fd=%d remote=%s)", sock, inet_ntoa(addr_remote.sin_addr));
 	shared_connection c;
 	try {

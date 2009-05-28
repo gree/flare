@@ -31,6 +31,10 @@ flarefs::~flarefs() {
 	if (this->_fuse != NULL) {
 		_delete_(this->_fuse);
 	}
+	if (stats_object != NULL) {
+		_delete_(stats_object);
+		stats_object = NULL;
+	}
 
 #ifdef MM_ALLOCATION_CHECK
 	mm::dump_alloc_list();
@@ -52,11 +56,15 @@ int flarefs::startup(int argc, char **argv) {
 	}
 
 	singleton<logger>::instance().open(this->_ident, ini_option_object().get_log_facility());
+	stats_object = _new_ stats();
+	stats_object->startup();
 
 	log_notice("%s version %s - system logger started", this->_ident.c_str(), PACKAGE_VERSION);
 
 	log_notice("application startup in progress...", 0);
+	log_notice("  chunk_size:             %d", ini_option_object().get_chunk_size());
 	log_notice("  config_path:            %s", ini_option_object().get_config_path().c_str());
+	log_notice("  connection_pool_size    %d", ini_option_object().get_connection_pool_size());
 	log_notice("  data_dir:               %s", ini_option_object().get_data_dir().c_str());
 	log_notice("  fuse_allow_other:       %s", ini_option_object().is_fuse_allow_other() ? "true" : "false");
 	log_notice("  fuse_allow_root:        %s", ini_option_object().is_fuse_allow_root() ? "true" : "false");
@@ -74,7 +82,7 @@ int flarefs::startup(int argc, char **argv) {
 	}
 
 	// application objects
-	this->_fuse = _new_ fuse_impl(ini_option_object().get_mount_dir(), ini_option_object().get_node_server_name(), ini_option_object().get_node_server_port());
+	this->_fuse = _new_ fuse_impl(ini_option_object().get_mount_dir());
 	this->_fuse->set_allow_other(ini_option_object().is_fuse_allow_other());
 	this->_fuse->set_allow_root(ini_option_object().is_fuse_allow_root());
 

@@ -95,8 +95,8 @@ int fuse_impl_fsync(const char* path, int m, struct fuse_file_info* f) {
 	return fuse_obj->fsync(path, m, f);
 }
 
-int fuse_impl_setxattr(const char* path, const char* name, const char* value, size_t value_size, int m) {
-	return fuse_obj->setxattr(path, name, value, value_size, m);
+int fuse_impl_setxattr(const char* path, const char* name, const char* value, size_t value_size, int flag) {
+	return fuse_obj->setxattr(path, name, value, value_size, flag);
 }
 
 int fuse_impl_getxattr(const char* path, const char* name, char* value, size_t value_size) {
@@ -152,18 +152,20 @@ int fuse_impl_fgetattr(const char* path, struct stat* st, struct fuse_file_info*
 /**
  *	ctor for fuse_impl
  */
-fuse_impl::fuse_impl(string mount_dir, string node_server_name, int node_server_port):
+fuse_impl::fuse_impl(string mount_dir):
 		_allow_other(false),
 		_allow_root(false),
-		_mount_dir(mount_dir),
-		_node_server_name(node_server_name),
-		_node_server_port(node_server_port) {
+		_fs(NULL),
+		_mount_dir(mount_dir) {
 }
 
 /**
  *	dtor for fuse_impl
  */
 fuse_impl::~fuse_impl() {
+	if (this->_fs != NULL) {
+		_delete_(this->_fs);
+	}
 }
 // }}}
 
@@ -180,6 +182,8 @@ int fuse_impl::run() {
 		return -1;
 	}
 	fuse_obj = this;
+
+	this->_fs = _new_ fuse_fs(ini_option_object().get_node_server_name(), ini_option_object().get_node_server_port(), ini_option_object().get_chunk_size(), ini_option_object().get_connection_pool_size());
 
 	fuse_operations fo;
 	memset(&fo, 0, sizeof(fo));
@@ -245,7 +249,7 @@ int fuse_impl::run() {
 int fuse_impl::getattr(const char* path, struct stat* st) {
 	log_debug("getattr() (path=%s)", path);
 
-	return 0;
+	return this->_fs->getattr(path, st);
 }
 
 /**
@@ -272,7 +276,7 @@ int fuse_impl::mknod(const char* path, mode_t m, dev_t d) {
 int fuse_impl::mkdir(const char* path, mode_t m) {
 	log_debug("mkdir() (path=%s, mode=%d)", path, m);
 
-	return 0;
+	return this->_fs->mkdir(path, m);
 }
 
 /**
@@ -422,19 +426,19 @@ int fuse_impl::fsync(const char* path, int m, struct fuse_file_info* f) {
 /**
  *	setxattr
  */
-int fuse_impl::setxattr(const char* path, const char* name, const char* value, size_t value_size, int m) {
-	log_debug("setxattr() (path=%s, name=%s, mode=%d)", path, name, m);
+int fuse_impl::setxattr(const char* path, const char* name, const char* value, size_t value_size, int flag) {
+	log_debug("setxattr() (path=%s, name=%s, flag=%d)", path, name, flag);
 
-	return 0;
+	return this->_fs->setxattr(path, name, value, value_size, flag);
 }
 
 /**
  *	getxattr
  */
 int fuse_impl::getxattr(const char* path, const char* name, char* value, size_t value_size) {
-	log_debug("getattr() (path=%s, name=%s)", path, name);
+	log_debug("getxattr() (path=%s, name=%s)", path, name);
 
-	return 0;
+	return this->_fs->getxattr(path, name, value, value_size);
 }
 
 /**
@@ -458,19 +462,19 @@ int fuse_impl::removexattr(const char* path, const char* name) {
 /**
  *	opendir
  */
-int fuse_impl::opendir(const char* path, struct fuse_file_info* f) {
+int fuse_impl::opendir(const char* path, struct fuse_file_info* fi) {
 	log_debug("opendir() (path=%s)", path);
 
-	return 0;
+	return this->_fs->opendir(path, fi);
 }
 
 /**
  *	readdir
  */
-int fuse_impl::readdir(const char* path, void* buf, fuse_fill_dir_t d, off_t o, struct fuse_file_info* f) {
+int fuse_impl::readdir(const char* path, void* buf, fuse_fill_dir_t filler, off_t o, struct fuse_file_info* fi) {
 	log_debug("readdir() (path=%s, offset=%d)", path, o);
 
-	return 0;
+	return this->_fs->readdir(path, buf, filler, o, fi);
 }
 
 /**
@@ -487,6 +491,8 @@ int fuse_impl::fsyncdir(const char* path, int m, struct fuse_file_info* f) {
  */
 void* fuse_impl::init() {
 	log_debug("init()", 0);
+
+	this->_fs->init();
 
 	return NULL;
 }

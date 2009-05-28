@@ -8,3 +8,8 @@ http://labs.gree.jp/Top/OpenSource/Flare.html (Japanese)
 
 * thanks to Tokyo Cabinet (http://tokyocabinet.sourceforge.net/)
 
+* notes on flarefs
+  * no hard link supported
+  * no sym link supoprted
+  * no atime supported
+  * return EACCES instead of ENOATTR on *xattr();

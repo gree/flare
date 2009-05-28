@@ -42,6 +42,7 @@
 #include "util.h"
 #include "connection.h"
 #include "server.h"
+#include "client.h"
 #include "stats.h"
 #include "thread_pool.h"
 #include "op.h"

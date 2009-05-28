@@ -21,7 +21,9 @@ namespace flare {
 ini_option::ini_option():
 		_argc(0),
 		_argv(NULL),
+		_chunk_size(default_chunk_size),
 		_config_path(""),
+		_connection_pool_size(default_connection_pool_size),
 		_data_dir(""),
 		_fuse_allow_other(false),
 		_fuse_allow_root(false),
@@ -106,6 +108,14 @@ int ini_option::load() {
 	}
 
 	try {
+		if (opt_var_map.count("chunk-size")) {
+			this->_chunk_size = opt_var_map["chunk-size"].as<int>();
+		}
+
+		if (opt_var_map.count("connection-pool-size")) {
+			this->_connection_pool_size = opt_var_map["connection-pool-size"].as<int>();
+		}
+
 		if (opt_var_map.count("data-dir")) {
 			this->_data_dir = opt_var_map["data-dir"].as<string>();
 		}
@@ -236,6 +246,8 @@ int ini_option::_setup_cli_option(program_options::options_description& option) 
  */
 int ini_option::_setup_config_option(program_options::options_description& option) {
 	option.add_options()
+		("chunk-size",							program_options::value<int>(),			"file chunk size (kb)")
+		("connection-pool-size",		program_options::value<int>(),			"connection pool size")
 		("data-dir",								program_options::value<string>(),		"data directory")
 		("fuse-allow-other",																						"[fuse option] allow other access")
 		("fuse-allow-root",																							"[fuse option] allow root access")

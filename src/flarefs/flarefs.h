@@ -8,6 +8,9 @@
 #ifndef	__FLAREFS_H__
 #define	__FLAREFS_H__
 
+#define	FUSE_USE_VERSION	25
+#include <fuse.h>
+
 #include "app.h"
 #include "ini_option.h"
 
@@ -21,7 +24,7 @@ typedef class fuse_impl fuse_impl;
  */
 class flarefs : public app {
 private:
-	fuse_impl*		_fuse;
+	fuse_impl*				_fuse;
 
 public:
 	flarefs();

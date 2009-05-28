@@ -8,10 +8,8 @@
 #ifndef	__FUSE_IMPL_H__
 #define	__FUSE_IMPL_H__
 
-#define	FUSE_USE_VERSION	25
-#include <fuse.h>
-
 #include "flarefs.h"
+#include "fuse_fs.h"
 
 namespace gree {
 namespace flare {
@@ -23,12 +21,11 @@ class fuse_impl {
 private:
 	bool				_allow_other;
 	bool				_allow_root;
+	fuse_fs*		_fs;
 	string			_mount_dir;
-	string			_node_server_name;
-	int					_node_server_port;
 
 public:
-	fuse_impl(string mount_dir, string node_server_name, int node_server_port);
+	fuse_impl(string mount_dir);
 	~fuse_impl();
 
 	int run();
@@ -60,8 +57,8 @@ public:
 	int getxattr(const char* path, const char* name, char* value, size_t value_size);
 	int listxattr(const char* path, char* buf, size_t buf_size);
 	int removexattr(const char* path, const char* name);
-	int opendir(const char* path, struct fuse_file_info* f);
-	int readdir(const char* path, void* buf, fuse_fill_dir_t d, off_t o, struct fuse_file_info* f);
+	int opendir(const char* path, struct fuse_file_info* fi);
+	int readdir(const char* path, void* buf, fuse_fill_dir_t filler, off_t o, struct fuse_file_info* fi);
 	int fsyncdir(const char* path, int m, struct fuse_file_info* f);
 	void* init();
 	void destroy(void* buf);

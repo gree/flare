@@ -69,6 +69,8 @@ public:
 	static unsigned int next_word(const char* src, char* dst, unsigned int dst_len);
 	static unsigned int next_digit(const char* src, char* dst, unsigned int dst_len);
 	static time_t realtime(time_t t);
+	static string base64_encode(const char* src, size_t src_size);
+	static char* base64_decode(string src, size_t& dst_size);
 
 	template<class T> static string vector_join(vector<T> list, string glue) {
 		ostringstream sout;

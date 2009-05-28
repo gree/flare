@@ -23,7 +23,9 @@ private:
 	int					_argc;
 	char**			_argv;
 
+	int					_chunk_size;
 	string			_config_path;
+	int					_connection_pool_size;
 	string			_data_dir;
 	bool				_fuse_allow_other;
 	bool				_fuse_allow_root;
@@ -33,6 +35,8 @@ private:
 	string			_log_facility;
 	
 public:
+	static const int default_chunk_size = 8192;
+	static const int default_connection_pool_size = 8;
 	static const int default_node_server_port = 12121;
 
 	ini_option();
@@ -43,7 +47,9 @@ public:
 
 	int set_args(int argc, char** argv) { this->_argc = argc; this->_argv = argv; return 0; };
 
+	int get_chunk_size() { return this->_chunk_size; };
 	string get_config_path() { return this->_config_path; };
+	int get_connection_pool_size() { return this->_connection_pool_size; };
 	string get_data_dir() { return this->_data_dir; };
 	bool is_fuse_allow_other() { return this->_fuse_allow_other; };
 	bool is_fuse_allow_root() { return this->_fuse_allow_root; };

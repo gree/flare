@@ -13,6 +13,7 @@ DEFS = -Wall $(FLARE_CXXFLAGS)
 
 libflare_a_SOURCES = \
 	app.h app.cc \
+	client.h client.cc \
 	cluster.h cluster.cc \
 	connection.h connection.cc \
 	handler_monitor.h handler_monitor.cc \

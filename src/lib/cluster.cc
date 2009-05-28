@@ -1453,7 +1453,7 @@ int cluster::_check_node_balance(string node_key, int node_balance) {
 		if (it->first == node_key) {
 			n += node_balance;
 		} else if (it->second.node_partition == node_partition) {
-			n += it->second.node_partition;
+			n += it->second.node_balance;
 		}
 	}
 

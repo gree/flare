@@ -107,8 +107,6 @@ int app::_daemonize() {
 	dup2(0, 1);
 	dup2(0, 2);
 
-	umask(0);
-
 	return 0;
 }
 

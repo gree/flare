@@ -270,6 +270,9 @@ int flared::reload() {
 	// thread_pool_size
 	this->_thread_pool->set_max_pool_size(ini_option_object().get_thread_pool_size());
 
+	// re-setup resource limit (do not care about return value here)
+	this->_set_resource_limit();
+
 	log_notice("process successfully reloaded", 0);
 
 	return 0;

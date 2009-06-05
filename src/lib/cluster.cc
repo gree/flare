@@ -1199,9 +1199,12 @@ int cluster::_save() {
 		return -1;
 	}
 
-	archive::xml_oarchive oa(ofs);
-	oa << serialization::make_nvp("node_map", (const node_map&)this->_node_map);
-	oa << serialization::make_nvp("thread_type", (const int&)this->_thread_type);
+	// creating scope to destroy xml_oarchive object before ofstream::close();
+	{
+		archive::xml_oarchive oa(ofs);
+		oa << serialization::make_nvp("node_map", (const node_map&)this->_node_map);
+		oa << serialization::make_nvp("thread_type", (const int&)this->_thread_type);
+	}
 
 	ofs.close();
 
@@ -1240,9 +1243,12 @@ int cluster::_load() {
 		return -1;
 	}
 
-	archive::xml_iarchive ia(ifs);
-	ia >> serialization::make_nvp("node_map", this->_node_map);
-	ia >> serialization::make_nvp("thread_type", this->_thread_type);
+	// creating scope to destroy xml_iarchive object before ifstream::close();
+	{
+		archive::xml_iarchive ia(ifs);
+		ia >> serialization::make_nvp("node_map", this->_node_map);
+		ia >> serialization::make_nvp("thread_type", this->_thread_type);
+	}
 
 	ifs.close();
 	pthread_mutex_unlock(&this->_mutex_serialization);

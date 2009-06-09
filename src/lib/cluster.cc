@@ -759,8 +759,9 @@ int cluster::reconstruct_node(vector<node> v) {
 
 	// check out removed nodes
 	for (node_map::iterator it = this->_node_map.begin(); it != this->_node_map.end(); it++) {
-		log_debug("detecting removed node [node_key=%s]", it->first.c_str());
-		this->_node_map.erase(it->first);
+		log_notice("detecting removed node [node_key=%s]", it->first.c_str());
+
+		// do something?
 	}
 
 	this->_node_map = nm;

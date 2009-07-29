@@ -137,9 +137,8 @@ int thread_pool::clean(thread* t, bool& is_pool) {
 	}
 	tmp = this->_global_map[type][id];
 	this->_global_map[type].erase(id);
-	pthread_rwlock_unlock(&this->_mutex_global_map);
-
 	tmp->clean_internal();
+	pthread_rwlock_unlock(&this->_mutex_global_map);
 
 	pthread_rwlock_wrlock(&this->_mutex_pool);
 	if (this->_pool.size() < this->get_max_pool_size()) {

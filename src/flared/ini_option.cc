@@ -37,6 +37,7 @@ ini_option::ini_option():
 		_mysql_replication_db(""),
 		_mysql_replication_table(""),
 #endif
+		_net_read_timeout(default_net_read_timeout),
 		_proxy_concurrency(default_proxy_concurrency),
 		_reconstruction_interval(default_reconstruction_interval),
 		_server_name(""),
@@ -192,6 +193,10 @@ int ini_option::load() {
 		}
 #endif
 
+		if (opt_var_map.count("net-read-timeout")) {
+			this->_net_read_timeout = opt_var_map["net-read-timeout"].as<int>();
+		}
+
 		if (opt_var_map.count("proxy-concurrency")) {
 			this->_proxy_concurrency = opt_var_map["proxy-concurrency"].as<int>();
 		}
@@ -317,6 +322,11 @@ int ini_option::reload() {
 			this->_max_connection = opt_var_map["max-connection"].as<int>();
 		}
 
+		if (opt_var_map.count("net-read-timeout")) {
+			log_info("  net_read_timeout:       %d -> %d", this->_net_read_timeout, opt_var_map["net-read-timeout"].as<int>());
+			this->_net_read_timeout = opt_var_map["net-read-timeout"].as<int>();
+		}
+
 		if (opt_var_map.count("reconstruction-interval")) {
 			log_info("  reconstruction_inteval: %d -> %d", this->_reconstruction_interval, opt_var_map["reconstruction-interval"].as<int>());
 			this->_reconstruction_interval = opt_var_map["reconstruction-interval"].as<int>();
@@ -373,6 +383,7 @@ int ini_option::_setup_config_option(program_options::options_description& optio
 		("mysql-replication-db",		program_options::value<string>(),		"mysql replication database")
 		("mysql-replication-table",	program_options::value<string>(),		"mysql replication table")
 #endif
+		("net-read-timeout",				program_options::value<int>(),			"network read timeout (sec) (dynamic)")
 		("proxy-concurrency",				program_options::value<int>(),			"proxy request concurrency for each node")
 		("reconstruction-interval",	program_options::value<int>(),			"master/slave dump interval in usec (dynamic)")
 		("server-name",							program_options::value<string>(),		"my server name")

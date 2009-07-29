@@ -29,6 +29,7 @@ ini_option::ini_option():
 		_monitor_threshold(default_monitor_threshold),
 		_monitor_interval(default_monitor_interval),
 		_monitor_read_timeout(default_monitor_read_timeout),
+		_net_read_timeout(default_net_read_timeout),
 		_server_name(""),
 		_server_port(default_server_port),
 		_stack_size(default_stack_size),
@@ -142,6 +143,10 @@ int ini_option::load() {
 			this->_monitor_read_timeout = opt_var_map["monitor-read-timeout"].as<int>();
 		}
 
+		if (opt_var_map.count("net-read-timeout")) {
+			this->_net_read_timeout = opt_var_map["net-read-timeout"].as<int>();
+		}
+
 		if (opt_var_map.count("server-name")) {
 			this->_server_name = opt_var_map["server-name"].as<string>();
 		} else {
@@ -234,6 +239,11 @@ int ini_option::reload() {
 		if (opt_var_map.count("monitor-read-timeout")) {
 			log_info("  monitor_read_timeout: %d -> %d", this->_monitor_read_timeout, opt_var_map["monitor-read-timeout"].as<int>());
 			this->_monitor_read_timeout = opt_var_map["monitor-read-timeout"].as<int>();
+		}
+
+		if (opt_var_map.count("net-read-timeout")) {
+			log_info("  net_read_timeout: %d -> %d", this->_net_read_timeout, opt_var_map["net-read-timeout"].as<int>());
+			this->_net_read_timeout = opt_var_map["net-read-timeout"].as<int>();
 		}
 
 		if (opt_var_map.count("thread-pool-size")) {

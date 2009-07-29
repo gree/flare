@@ -40,6 +40,7 @@ private:
 	string			_mysql_replication_db;
 	string			_mysql_replication_table;
 #endif
+	int					_net_read_timeout;
 	int					_proxy_concurrency;
 	int					_reconstruction_interval;
 	string			_server_name;
@@ -62,6 +63,7 @@ public:
 	static const int default_mysql_replication_port = 12122;
 	static const int default_mysql_replication_id = 19790217;
 #endif
+	static const int default_net_read_timeout = 10*60;						// sec
 	static const int default_proxy_concurrency = 2;
 	static const int default_reconstruction_interval = 0;
 	static const int default_server_port = 12121;
@@ -95,6 +97,7 @@ public:
 	string get_mysql_replication_db() { return this->_mysql_replication_db; };
 	string get_mysql_replication_table() { return this->_mysql_replication_table; };
 #endif
+	int get_net_read_timeout() { return this->_net_read_timeout; };
 	int get_proxy_concurrency() { return this->_proxy_concurrency; };
 	int get_reconstruction_interval() { return this->_reconstruction_interval; };
 	string get_server_name() { return this->_server_name; };

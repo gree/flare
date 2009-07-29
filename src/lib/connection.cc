@@ -13,6 +13,8 @@
 namespace gree {
 namespace flare {
 
+int connection::read_timeout = 10*60*1000;
+
 // {{{ ctor/dtor
 /**
  *	ctor for connection

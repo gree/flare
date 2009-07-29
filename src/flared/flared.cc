@@ -129,6 +129,7 @@ int flared::startup(int argc, char **argv) {
 	log_notice("  mysql_replication_db:   %s", ini_option_object().get_mysql_replication_db().c_str());
 	log_notice("  mysql_replication_table:%s", ini_option_object().get_mysql_replication_table().c_str());
 #endif
+	log_notice("  net_read_timeout:       %d", ini_option_object().get_net_read_timeout());
 	log_notice("  proxy_concurrency:      %d", ini_option_object().get_proxy_concurrency());
 	log_notice("  reconstruction_inteval: %d", ini_option_object().get_reconstruction_interval());
 	log_notice("  server_name:            %s", ini_option_object().get_server_name().c_str());
@@ -158,6 +159,7 @@ int flared::startup(int argc, char **argv) {
 	}
 
 	// application objects
+	connection::read_timeout = ini_option_object().get_net_read_timeout() * 1000;		// -> msec
 	this->_server = _new_ server();
 	if (this->_server->listen(ini_option_object().get_server_port(), ini_option_object().get_back_log()) < 0) {
 		return -1;
@@ -263,6 +265,9 @@ int flared::reload() {
 	log_notice("re-opening syslog...", 0);
 	singleton<logger>::instance().close();
 	singleton<logger>::instance().open(this->_ident, ini_option_object().get_log_facility());
+
+	// net_read_timeout
+	connection::read_timeout = ini_option_object().get_net_read_timeout() * 1000;	// -> msec
 
 	// reconstruction_inteval
 	this->_cluster->set_reconstruction_interval(ini_option_object().get_reconstruction_interval());

@@ -112,6 +112,7 @@ int flarei::startup(int argc, char **argv) {
 	log_notice("  monitor_threshold:    %d", ini_option_object().get_monitor_threshold());
 	log_notice("  monitor_interval:     %d", ini_option_object().get_monitor_interval());
 	log_notice("  monitor_read_timeout: %d", ini_option_object().get_monitor_read_timeout());
+	log_notice("  net_read_timeout:     %d", ini_option_object().get_net_read_timeout());
 	log_notice("  server_name:          %s", ini_option_object().get_server_name().c_str());
 	log_notice("  server_port:          %d", ini_option_object().get_server_port());
 	log_notice("  stack_size:           %d", ini_option_object().get_stack_size());
@@ -133,6 +134,7 @@ int flarei::startup(int argc, char **argv) {
 	}
 
 	// application objects
+	connection::read_timeout = ini_option_object().get_net_read_timeout() * 1000;		// -> msec
 	this->_server = _new_ server();
 	if (this->_server->listen(ini_option_object().get_server_port()) < 0) {
 		return -1;
@@ -209,6 +211,9 @@ int flarei::reload() {
 	this->_cluster->set_monitor_threshold(ini_option_object().get_monitor_threshold());
 	this->_cluster->set_monitor_interval(ini_option_object().get_monitor_interval());
 	this->_cluster->set_monitor_read_timeout(ini_option_object().get_monitor_read_timeout());
+
+	// net_read_timeout
+	connection::read_timeout = ini_option_object().get_net_read_timeout() * 1000;		// -> msec
 
 	// thread_pool_size
 	this->_thread_pool->set_max_pool_size(ini_option_object().get_thread_pool_size());

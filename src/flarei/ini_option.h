@@ -34,6 +34,7 @@ private:
 	int					_net_read_timeout;
 	string			_server_name;
 	int					_server_port;
+	string			_server_socket;
 	int					_stack_size;
 	int					_thread_pool_size;
 	
@@ -66,6 +67,7 @@ public:
 	int get_net_read_timeout() { return this->_net_read_timeout; };
 	string get_server_name() { return this->_server_name; };
 	int get_server_port() { return this->_server_port; };
+	string get_server_socket() { return this->_server_socket; };
 	int get_stack_size() { return this->_stack_size; };
 	int get_thread_pool_size() { return this->_thread_pool_size; };
 

@@ -115,6 +115,7 @@ int flarei::startup(int argc, char **argv) {
 	log_notice("  net_read_timeout:     %d", ini_option_object().get_net_read_timeout());
 	log_notice("  server_name:          %s", ini_option_object().get_server_name().c_str());
 	log_notice("  server_port:          %d", ini_option_object().get_server_port());
+	log_notice("  server_socket:        %s", ini_option_object().get_server_socket().c_str());
 	log_notice("  stack_size:           %d", ini_option_object().get_stack_size());
 	log_notice("  thread_pool_size:     %d", ini_option_object().get_thread_pool_size());
 
@@ -138,6 +139,11 @@ int flarei::startup(int argc, char **argv) {
 	this->_server = _new_ server();
 	if (this->_server->listen(ini_option_object().get_server_port()) < 0) {
 		return -1;
+	}
+	if (ini_option_object().get_server_socket().empty() == false) {
+		if (this->_server->listen(ini_option_object().get_server_socket()) < 0) {
+			return -1;
+		}
 	}
 
 	this->_thread_pool = _new_ thread_pool(ini_option_object().get_thread_pool_size(), ini_option_object().get_stack_size());

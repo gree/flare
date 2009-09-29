@@ -9,6 +9,7 @@
 #define __NET_CONNECTION_H__
 
 #include <poll.h>
+#include <sys/un.h>
 
 #include "net.h"
 
@@ -23,9 +24,12 @@ typedef shared_ptr<connection> shared_connection;
  */
 class connection : public net {
 protected:
-	struct sockaddr_in	_addr;
+	sa_family_t					_addr_family;
+	struct sockaddr_in	_addr_inet;
+	struct sockaddr_un	_addr_unix;
 	string							_host;
 	int									_port;
+	string							_path;
 	int									_read_timeout;
 	char*								_read_buf;
 	char*								_read_buf_p;
@@ -45,6 +49,7 @@ public:
 
 	connection();
 	connection(int sock, struct sockaddr_in addr);
+	connection(int sock, struct sockaddr_un addr);
 	virtual ~connection();
 
 	int open(string host, int port);
@@ -59,6 +64,7 @@ public:
 	bool is_error() { return this->_errno != 0 ? true : false; };
 	string get_host();
 	int get_port();
+	string get_path();
 	int get_read_timeout() { return this->_read_timeout; };
 	int set_read_timeout(int timeout) { this->_read_timeout = timeout; return 0; };
 

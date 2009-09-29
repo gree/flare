@@ -45,6 +45,7 @@ private:
 	int					_reconstruction_interval;
 	string			_server_name;
 	int					_server_port;
+	string			_server_socket;
 	int					_stack_size;
 	uint32_t		_storage_ap;
 	uint64_t		_storage_bucket_size;
@@ -102,6 +103,7 @@ public:
 	int get_reconstruction_interval() { return this->_reconstruction_interval; };
 	string get_server_name() { return this->_server_name; };
 	int get_server_port() { return this->_server_port; };
+	string get_server_socket() { return this->_server_socket; };
 	int get_stack_size() { return this->_stack_size; };
 	uint32_t get_storage_ap() { return this->_storage_ap; };
 	uint64_t get_storage_bucket_size() { return this->_storage_bucket_size; };

@@ -20,8 +20,10 @@ int connection::read_timeout = 10*60*1000;
  *	ctor for connection
  */
 connection::connection():
+		_addr_family(AF_INET),
 		_host(""),
 		_port(-1),
+		_path(""),
 		_read_timeout(read_timeout),
 		_read_buf(NULL),
 		_read_buf_p(NULL),
@@ -36,9 +38,30 @@ connection::connection():
  */
 connection::connection(int sock, struct sockaddr_in addr):
 		net(sock),
-		_addr(addr),
+		_addr_family(AF_INET),
+		_addr_inet(addr),
 		_host(""),
 		_port(-1),
+		_path(""),
+		_read_timeout(read_timeout),
+		_read_buf(NULL),
+		_read_buf_p(NULL),
+		_read_buf_len(0),
+		_write_buf(NULL),
+		_write_buf_len(0),
+		_write_buf_chunk_size(0) {
+}
+
+/**
+ *	ctor for connection
+ */
+connection::connection(int sock, struct sockaddr_un addr):
+		net(sock),
+		_addr_family(AF_UNIX),
+		_addr_unix(addr),
+		_host(""),
+		_port(-1),
+		_path(""),
 		_read_timeout(read_timeout),
 		_read_buf(NULL),
 		_read_buf_p(NULL),
@@ -66,7 +89,7 @@ connection::~connection() {
 
 // {{{ public methods
 /**
- *	open connection
+ *	open tcp connection
  */
 int connection::open(string host, int port) {
 	this->_errno = 0;
@@ -79,9 +102,10 @@ int connection::open(string host, int port) {
 		return -1;
 	}
 
-	memset(&this->_addr, 0, sizeof(this->_addr));
-	this->_addr.sin_family = AF_INET;
-	this->_addr.sin_port = htons(port);
+	this->_addr_family = AF_INET;
+	memset(&this->_addr_inet, 0, sizeof(this->_addr_inet));
+	this->_addr_inet.sin_family = AF_INET;
+	this->_addr_inet.sin_port = htons(port);
 
 	struct hostent he;
 	int he_errno;
@@ -90,11 +114,11 @@ int connection::open(string host, int port) {
 		this->close();
 		return -1;
 	}
-	memcpy(&this->_addr.sin_addr, he.h_addr, he.h_length);
+	memcpy(&this->_addr_inet.sin_addr, he.h_addr, he.h_length);
 
 	int i;
 	for (i = 0; i < connection::connect_retry_limit; i++) {
-		if (connect(this->_sock, (struct sockaddr*)&this->_addr, sizeof(this->_addr)) < 0) {
+		if (connect(this->_sock, (struct sockaddr*)&this->_addr_inet, sizeof(this->_addr_inet)) < 0) {
 			log_warning("connect() failed: %s (%d) -> wait for %d usec", util::strerror(errno), errno, connection::connect_retry_wait);
 			usleep(connection::connect_retry_wait);
 			continue;
@@ -536,10 +560,12 @@ int connection::writeline(const char* p) {
 string connection::get_host() {
 	if (this->_host.empty() == false) {
 		return this->_host;
+	} else if (this->_addr_family == AF_UNIX) {
+		return "";
 	}
 
 	char buf[BUFSIZ];
-	util::inet_ntoa(this->_addr.sin_addr, buf);
+	util::inet_ntoa(this->_addr_inet.sin_addr, buf);
 
 	string s = buf;
 	return s;
@@ -548,9 +574,21 @@ string connection::get_host() {
 int connection::get_port() {
 	if (this->_port >= 0) {
 		return this->_port;
+	} else if (this->_addr_family == AF_UNIX) {
+		return 0;
 	}
 
-	return ntohs(this->_addr.sin_port);
+	return ntohs(this->_addr_inet.sin_port);
+}
+
+string connection::get_path() {
+	if (this->_path.empty() == false) {
+		return this->_path;
+	} else if (this->_addr_family != AF_UNIX) {
+		return "";
+	}
+
+	return this->_addr_unix.sun_path;
 }
 // }}}
 

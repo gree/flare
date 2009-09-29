@@ -42,6 +42,7 @@ ini_option::ini_option():
 		_reconstruction_interval(default_reconstruction_interval),
 		_server_name(""),
 		_server_port(default_server_port),
+		_server_socket(""),
 		_stack_size(default_stack_size),
 		_storage_ap(default_storage_ap),
 		_storage_bucket_size(default_storage_bucket_size),
@@ -213,6 +214,10 @@ int ini_option::load() {
 
 		if (opt_var_map.count("server-port")) {
 			this->_server_port = opt_var_map["server-port"].as<int>();
+		}
+
+		if (opt_var_map.count("server-socket")) {
+			this->_server_socket = opt_var_map["server-socket"].as<string>();
 		}
 
 		if (opt_var_map.count("stack-size")) {
@@ -388,6 +393,7 @@ int ini_option::_setup_config_option(program_options::options_description& optio
 		("reconstruction-interval",	program_options::value<int>(),			"master/slave dump interval in usec (dynamic)")
 		("server-name",							program_options::value<string>(),		"my server name")
 		("server-port",							program_options::value<int>(),			"my server port")
+		("server-socket",						program_options::value<string>(),		"my server unix domain socket (optional)")
 		("stack-size",							program_options::value<int>(),			"thread stack size (kb)")
 		("storage-ap",							program_options::value<uint32_t>(),	"storage size of record alignment by power of 2 (tch)")
 		("storage-bucket-size",			program_options::value<uint64_t>(),	"number of elements of the bucket array (tch)")

@@ -1,3 +1,147 @@
+commit 40bc682790281d11d9f0feb8af4f51e2564ccc8b
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Fri Oct 9 18:43:43 2009 +0900
+
+    make partition determining method pluggable
+    added --partition-type option (default=modular)
+    added --partition-modular-hint option (default=1, this is *very* important when upgrading 1.0.9 or later if you already have 2 or more partition)
+    added meta op
+
+commit 36e94778c5126a72a3db890dd9f0df847cdff96a
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Tue Sep 29 16:57:20 2009 +0900
+
+    added unix domain socket support (option "server-socket" is now available)
+    and try to use epoll if available
+
+commit cf45f8965ee6673a787915424c65adc5884c8275
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Thu Jul 30 00:29:29 2009 +0900
+
+    fix possible crash
+
+commit bafca08c810104865c3b481c9ac76c9eb0e2b26f
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Wed Jul 29 23:08:29 2009 +0900
+
+    fix issue #1
+
+commit 325cdd78428d3c2957cf32f226e03b08f999975a
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Wed Jul 29 22:58:48 2009 +0900
+
+    added network read timeout option (net-read-timeout = [sec])
+
+commit 3a03d6ee2763a6b1c2130ba69f69b8d8d67e1b9c
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Wed Jul 29 17:12:29 2009 +0900
+
+    tc package version update (1.4.30)
+
+commit c99a81a36317b55736d782fa74aecfd21845cc10
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Tue Jun 9 18:38:19 2009 +0900
+
+    added missing files (client.*)
+
+commit fbefe3da7e41de538944b345f6e319b83a312f4d
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Tue Jun 9 16:58:15 2009 +0900
+
+    fix segfault (iterator goes invalid after std::map::erase())
+
+commit 02dc854bcc73f2d369b3682a0ac7332e1c1521fb
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Sat Jun 6 01:50:25 2009 +0900
+
+    re-set resouce limit when received sighup
+
+commit 0dd5ecde1222900f6cd83dc79b35f214a51dda5b
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Sat Jun 6 01:42:39 2009 +0900
+
+    fix xml format bug (destroy xml_oarchive object before closing stream)
+    (thx to patch from kazuhiko)
+
+commit e3dfb58a34669e41816d85147515c6979b462e76
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Fri Jun 5 22:40:50 2009 +0900
+
+    remove umask(0) (why did i do this? non-sense...)
+    (thx to patch from kazuhiko)
+
+commit c87724b33b21f3be0ca097c2ec1c8af583575507
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Thu May 28 18:53:30 2009 +0900
+
+    flarefs experimental code (not yet available)
+
+commit 2ed414499a2e20cedf379ba0bd8302062cf4b8cd
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Thu May 28 18:52:03 2009 +0900
+
+    fix bug in "node role" op (could not shift slave node balance to 0)
+
+commit fe676823ea60287f55d3a475cc0bd8578deb051b
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Thu Feb 26 18:01:31 2009 +0900
+
+    added dump_key op
+
+commit 764a5a320f4aa11f5a97819895d1f3af9e9a26ba
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Mon Feb 23 17:01:47 2009 +0900
+
+    fix typo :(
+
+commit f8bcc2b087ce306c84f3cc3e389c1e1d3a2c62df
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Sat Feb 21 18:21:26 2009 +0900
+
+    fix typo
+
+commit a9914149c87eb439d1eaefb2f4ab3b6ea0718eea
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Sat Feb 21 13:25:10 2009 +0900
+
+    added back-log option
+
+commit 46130361e8e8f4a5fa0755b3b679836273bee5bd
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Sat Feb 21 13:24:47 2009 +0900
+
+    remove daemonize option from flarefs (fuse_main() daemonizes)
+
+commit b84ee5195dba82d4a9fd9c51956a18ad8460fff4
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Thu Feb 19 15:07:02 2009 +0900
+
+    flarefs skelton (very experimental)
+
+commit 4c66299fdf61b43d5aac4e08e978e9e1f3fcf810
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Thu Feb 19 00:20:56 2009 +0900
+
+    tweak time scale of reconstruction interval (msec -> usec)
+
+commit 1bcf8b8f73695e5108323f2c4b47bef4adefb234
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Thu Feb 5 14:20:34 2009 +0900
+
+    added reconstruction-interval option (node server only)
+
+commit c8ad83c3545da4378f87318405ca8997772ea42a
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Wed Feb 4 23:14:04 2009 +0900
+
+    proxy request when balance is set to 0, even if role:slave, state:active and partition:[target]
+
+commit 1ab1fbd4ae26f127b78578e4933c3ab4aab50aa8
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Tue Feb 3 19:09:06 2009 +0900
+
+    ready for 1.0.8
+
 commit 47ce63022cb74728893ee280e88826e8812e1463
 Author: Masaki Fujimoto <fujimoto@php.net>
 Date:   Tue Feb 3 19:00:16 2009 +0900

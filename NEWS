@@ -1,3 +1,27 @@
+* [2009/10/09] 1.0.9 release
+
+  * feature updates
+    - mandatorily proxy requests when balance is set to 0, even if role is slave and state is active and partition is set to [target]
+	- added reconstruction-interval option (node server only, in usec)
+	  - wait for N usec for each entry update when reconstructing node (this will reduce load of master nodes)
+	- added back-log option
+	- added network read timeout option (net-read-timeout = [sec])
+	- added unix domain socket support (option "server-socket" is now available)
+    - added --partition-type option (default=modular)
+    - added --partition-modular-hint option (default=1, this is *very* important when upgrading 1.0.9 or later if you already have 2 or more partition)
+	- added dump_key op
+    - added meta op
+
+  * bug fixes
+    - fix bug in "node role" op (could not shift slave node balance to 0)
+	- fix xml format bug (thx to patch from kazuhiko)
+	- re-set resouce limit when received sighup (this will fix shortage of fd after you dynamically update max-connection)
+	- fix segfault caused by removing a node
+
+  * misc changes
+    - remove umask(0) (thx to patch from kazuhiko)
+	- try to use epoll if available
+
 * [2009/02/03] 1.0.8 release
 
   * bug fixes

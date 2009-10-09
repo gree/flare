@@ -22,6 +22,7 @@
 #include "op_gets.h"
 #include "op_incr.h"
 #include "op_kill.h"
+#include "op_meta.h"
 #include "op_node_add.h"
 #include "op_node_remove.h"
 #include "op_node_role.h"

@@ -130,12 +130,15 @@ int op_dump::_run_server() {
 		return this->_send_result(result_server_error, "database busy");
 	}
 
+	key_resolver* kr = this->_cluster->get_key_resolver();
+
 	storage::entry e;
 	while (this->_storage->iter_next(e.key) >= 0) {
 		if (this->_partition >= 0) {
 			int key_hash_value = e.get_key_hash_value();
-			if (key_hash_value % this->_partition_size != this->_partition) {
-				log_debug("skipping entry (key=%s, key_hash_value=%d, mod=%d, partition=%d, partition_size=%d)", e.key.c_str(), key_hash_value, key_hash_value%this->_partition_size, this->_partition, this->_partition_size);
+			int p = kr->resolve(key_hash_value, this->_partition_size);
+			if (p != this->_partition) {
+				log_debug("skipping entry (key=%s, key_hash_value=%d, mod=%d, partition=%d, partition_size=%d)", e.key.c_str(), key_hash_value, p, this->_partition, this->_partition_size);
 				continue;
 			}
 		}

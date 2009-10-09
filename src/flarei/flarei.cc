@@ -105,19 +105,21 @@ int flarei::startup(int argc, char **argv) {
 	log_notice("%s version %s - system logger started", this->_ident.c_str(), PACKAGE_VERSION);
 
 	log_notice("application startup in progress...", 0);
-	log_notice("  config_path:          %s", ini_option_object().get_config_path().c_str());
-	log_notice("  daemonize:            %s", ini_option_object().is_daemonize() ? "true" : "false");
-	log_notice("  data_dir:             %s", ini_option_object().get_data_dir().c_str());
-	log_notice("  max_connection:       %d", ini_option_object().get_max_connection());
-	log_notice("  monitor_threshold:    %d", ini_option_object().get_monitor_threshold());
-	log_notice("  monitor_interval:     %d", ini_option_object().get_monitor_interval());
-	log_notice("  monitor_read_timeout: %d", ini_option_object().get_monitor_read_timeout());
-	log_notice("  net_read_timeout:     %d", ini_option_object().get_net_read_timeout());
-	log_notice("  server_name:          %s", ini_option_object().get_server_name().c_str());
-	log_notice("  server_port:          %d", ini_option_object().get_server_port());
-	log_notice("  server_socket:        %s", ini_option_object().get_server_socket().c_str());
-	log_notice("  stack_size:           %d", ini_option_object().get_stack_size());
-	log_notice("  thread_pool_size:     %d", ini_option_object().get_thread_pool_size());
+	log_notice("  config_path:            %s", ini_option_object().get_config_path().c_str());
+	log_notice("  daemonize:              %s", ini_option_object().is_daemonize() ? "true" : "false");
+	log_notice("  data_dir:               %s", ini_option_object().get_data_dir().c_str());
+	log_notice("  max_connection:         %d", ini_option_object().get_max_connection());
+	log_notice("  monitor_threshold:      %d", ini_option_object().get_monitor_threshold());
+	log_notice("  monitor_interval:       %d", ini_option_object().get_monitor_interval());
+	log_notice("  monitor_read_timeout:   %d", ini_option_object().get_monitor_read_timeout());
+	log_notice("  net_read_timeout:       %d", ini_option_object().get_net_read_timeout());
+	log_notice("  partition_modular_hint: %d", ini_option_object().get_partition_modular_hint());
+	log_notice("  partition_type:         %s", ini_option_object().get_partition_type().c_str());
+	log_notice("  server_name:            %s", ini_option_object().get_server_name().c_str());
+	log_notice("  server_port:            %d", ini_option_object().get_server_port());
+	log_notice("  server_socket:          %s", ini_option_object().get_server_socket().c_str());
+	log_notice("  stack_size:             %d", ini_option_object().get_stack_size());
+	log_notice("  thread_pool_size:       %d", ini_option_object().get_thread_pool_size());
 
 	// startup procs
 	if (this->_set_resource_limit() < 0) {
@@ -152,7 +154,10 @@ int flarei::startup(int argc, char **argv) {
 	this->_cluster->set_monitor_threshold(ini_option_object().get_monitor_threshold());
 	this->_cluster->set_monitor_interval(ini_option_object().get_monitor_interval());
 	this->_cluster->set_monitor_read_timeout(ini_option_object().get_monitor_read_timeout());
-	if (this->_cluster->startup_index() < 0) {
+
+	key_resolver::type t;
+	key_resolver::type_cast(ini_option_object().get_partition_type(), t);
+	if (this->_cluster->startup_index(t, ini_option_object().get_partition_modular_hint()) < 0) {
 		return -1;
 	}
 

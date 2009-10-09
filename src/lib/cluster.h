@@ -28,6 +28,7 @@
 #include "connection.h"
 #include "storage.h"
 #include "thread_pool.h"
+#include "key_resolver.h"
 
 using namespace std;
 using namespace boost;
@@ -127,9 +128,11 @@ public:
 	typedef map<int, partition>	node_partition_map;
 
 	static const int	default_thread_type = 16;
+	static const int	max_partition_size = 1024;
 
 protected:
 	thread_pool*					_thread_pool;
+	key_resolver*					_key_resolver;
 	storage*							_storage;
 	type									_type;
 	string								_data_dir;
@@ -164,7 +167,7 @@ public:
 	cluster(thread_pool* tp, string data_dir, string server_name, int server_port);
 	virtual ~cluster();
 
-	int startup_index();
+	int startup_index(key_resolver::type key_resolver_type, int key_resolver_modular_hint);
 	int startup_node(string index_server_name, int index_server_port);
 
 	int add_node(string node_server_name, int node_server_port);
@@ -201,6 +204,7 @@ public:
 	}
 	vector<node> get_node();
 
+	key_resolver* get_key_resolver() { return this->_key_resolver; };
 	int set_monitor_threshold(int monitor_threshold);
 	int set_monitor_interval(int monitor_interval);
 	int set_monitor_read_timeout(int monitor_read_timeout);

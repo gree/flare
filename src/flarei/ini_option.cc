@@ -30,6 +30,8 @@ ini_option::ini_option():
 		_monitor_interval(default_monitor_interval),
 		_monitor_read_timeout(default_monitor_read_timeout),
 		_net_read_timeout(default_net_read_timeout),
+		_partition_modular_hint(default_partition_modular_hint),
+		_partition_type(""),
 		_server_name(""),
 		_server_port(default_server_port),
 		_server_socket(""),
@@ -146,6 +148,21 @@ int ini_option::load() {
 
 		if (opt_var_map.count("net-read-timeout")) {
 			this->_net_read_timeout = opt_var_map["net-read-timeout"].as<int>();
+		}
+
+		if (opt_var_map.count("partition-modular-hint")) {
+			this->_partition_modular_hint = opt_var_map["partition-modular-hint"].as<int>();
+		}
+
+		if (opt_var_map.count("partition-type")) {
+			key_resolver::type t;
+			if (key_resolver::type_cast(opt_var_map["partition-type"].as<string>(), t) < 0) {
+				cout << "unknown partition type [" << opt_var_map["partition-type"].as<string>() << "]" << endl;
+				throw -1;
+			}
+			this->_partition_type = opt_var_map["partition-type"].as<string>();
+		} else {
+			this->_partition_type = key_resolver::type_cast(key_resolver::type_modular);
 		}
 
 		if (opt_var_map.count("server-name")) {
@@ -287,18 +304,20 @@ int ini_option::_setup_cli_option(program_options::options_description& option) 
  */
 int ini_option::_setup_config_option(program_options::options_description& option) {
 	option.add_options()
-		("daemonize",																							"run as daemon")
-		("data-dir",							program_options::value<string>(), 	"data directory")
-		("log-facility",					program_options::value<string>(), 	"log facility (dynamic)")
-		("max-connection",				program_options::value<int>(),			"max concurrent connections to accept (dynamic)")
-		("monitor-threshold",			program_options::value<int>(),			"node server monitoring threshold (dynamic)")
-		("monitor-interval",			program_options::value<int>(),			"node server monitoring interval (sec) (dynamic)")
-		("monitor-read-timeout",	program_options::value<int>(),			"node server monitoring read timeout (millisec) (dynamic)")
-		("server-name",						program_options::value<string>(),		"my server name")
-		("server-port",						program_options::value<int>(),			"my server port")
-		("server-socket",					program_options::value<string>(),		"my server unix domain socket (optional)")
-		("stack-size",						program_options::value<int>(),			"thread stack size (kb)")
-		("thread-pool-size",			program_options::value<int>(),			"thread pool size (dynamic)");
+		("daemonize",																										"run as daemon")
+		("data-dir",								program_options::value<string>(), 	"data directory")
+		("log-facility",						program_options::value<string>(), 	"log facility (dynamic)")
+		("max-connection",					program_options::value<int>(),			"max concurrent connections to accept (dynamic)")
+		("monitor-threshold",				program_options::value<int>(),			"node server monitoring threshold (dynamic)")
+		("monitor-interval",				program_options::value<int>(),			"node server monitoring interval (sec) (dynamic)")
+		("monitor-read-timeout",		program_options::value<int>(),			"node server monitoring read timeout (millisec) (dynamic)")
+		("partition-modular-hint",	program_options::value<int>(),		"partitioning hint (only for partition-type=modular")
+		("partition-type",					program_options::value<string>(),		"partition type (modular:simple algorithm base)")
+		("server-name",							program_options::value<string>(),		"my server name")
+		("server-port",							program_options::value<int>(),			"my server port")
+		("server-socket",						program_options::value<string>(),		"my server unix domain socket (optional)")
+		("stack-size",							program_options::value<int>(),			"thread stack size (kb)")
+		("thread-pool-size",				program_options::value<int>(),			"thread pool size (dynamic)");
 
 	return 0;
 }

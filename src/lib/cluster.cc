@@ -11,6 +11,8 @@
 #include "handler_monitor.h"
 #include "handler_proxy.h"
 #include "handler_reconstruction.h"
+#include "key_resolver_modular.h"
+#include "op_meta.h"
 #include "op_node_add.h"
 #include "op_node_role.h"
 #include "op_node_state.h"
@@ -33,6 +35,7 @@ namespace flare {
  */
 cluster::cluster(thread_pool* tp, string data_dir, string server_name, int server_port):
 		_thread_pool(tp),
+		_key_resolver(NULL),
 		_storage(NULL),
 		_data_dir(data_dir),
 		_server_name(server_name),
@@ -58,6 +61,9 @@ cluster::cluster(thread_pool* tp, string data_dir, string server_name, int serve
  *	dtor for cluster
  */
 cluster::~cluster() {
+	if (this->_key_resolver != NULL) {
+		_delete_(this->_key_resolver);
+	}
 }
 // }}}
 
@@ -143,7 +149,7 @@ int cluster::node::parse(const char* p) {
 /**
  *	startup proc for index process
  */
-int cluster::startup_index() {
+int cluster::startup_index(key_resolver::type key_resolver_type, int key_resolver_modular_hint) {
 	this->_type = type_index;
 
 	// load
@@ -153,6 +159,17 @@ int cluster::startup_index() {
 	}
 	if (this->_reconstruct_node_partition() < 0) {
 		log_err("failed to reconstruct node partition map", 0);
+		return -1;
+	}
+
+	// key resolver
+	if (key_resolver_type == key_resolver::type_modular) {
+		this->_key_resolver = _new_ key_resolver_modular(key_resolver_modular_hint);
+	} else {
+		log_err("unknown key resolver type [%s]", key_resolver::type_cast(key_resolver_type).c_str());
+		return -1;
+	}
+	if (this->_key_resolver->startup() < 0) {
 		return -1;
 	}
 
@@ -185,22 +202,42 @@ int cluster::startup_node(string index_server_name, int index_server_port) {
 		return -1;
 	}
 
-	op_node_add* p = _new_ op_node_add(c, this);
+	op_node_add* p_na = _new_ op_node_add(c, this);
 	vector<node> v;
-	if (p->run_client(v) < 0) {
+	if (p_na->run_client(v) < 0) {
 		log_err("failed to add node to index server", 0);
-		_delete_(p);
+		_delete_(p_na);
 		return -1;
 	}
-	
+	_delete_(p_na);
+
+	// get meta data from index server
+	key_resolver::type key_resolver_type;
+	int key_resolver_modular_hint;
+	op_meta* p_m = _new_ op_meta(c, this);
+	if (p_m->run_client(key_resolver_type, key_resolver_modular_hint) < 0) {
+		log_err("failed to get meta data from index server", 0);
+		_delete_(p_m);
+		return -1;
+	}
+	log_debug("meta: key_resolver_type=%s, key_resolver_modular_hint=%d", key_resolver::type_cast(key_resolver_type).c_str(), key_resolver_modular_hint);
+
+	// startup key resolver
+	if (key_resolver_type == key_resolver::type_modular) {
+		this->_key_resolver = _new_ key_resolver_modular(key_resolver_modular_hint);
+	} else {
+		log_err("unknown key resolver type [%s]", key_resolver::type_cast(key_resolver_type).c_str());
+		return -1;
+	}
+	if (this->_key_resolver->startup() < 0) {
+		return -1;
+	}
+
 	// set state and other nodes
 	if (this->reconstruct_node(v) < 0) {
 		log_err("failed to reconstruct node map", 0);
-		_delete_(p);
 		return -1;
 	}
-	
-	_delete_(p);
 
 	return 0;
 }
@@ -1547,7 +1584,7 @@ int cluster::_determine_partition(storage::entry& e, partition& p, bool check_pr
 		if (check_prepare) {
 			partition_size += this->_node_partition_prepare_map.size();
 		}
-		n = e.get_key_hash_value() % partition_size;
+		n = this->_key_resolver->resolve(e.get_key_hash_value(), partition_size);
 		log_debug("determined partition (key=%s, n=%d)", e.key.c_str(), n);
 
 		if (check_prepare) {

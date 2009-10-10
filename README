@@ -6,7 +6,7 @@ flare - distributed, and persistent key-value storage
 http://labs.gree.jp/Top/OpenSource/Flare-en.html (English)
 http://labs.gree.jp/Top/OpenSource/Flare.html (Japanese)
 
-* thanks to Tokyo Cabinet (http://tokyocabinet.sourceforge.net/)
+* thanks to Tokyo Cabinet (http://1978th.net/tokyocabinet/)
 
 * notes on flarefs
   * no hard link supported

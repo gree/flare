@@ -8,5 +8,5 @@ Section: libs
 Package: tokyocabinet-dev
 Section: libdevel
 Architecture: any
-Depends: zlib1g, libbz2-1.0
+Depends: ${shlibs:Depends}, ${misc:Depends}, zlib1g, libbz2-1.0
 Description: high performance DBM library

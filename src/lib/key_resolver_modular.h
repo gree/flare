@@ -21,7 +21,7 @@ namespace flare {
  */
 class key_resolver_modular : public key_resolver {
 public:
-	static const int		key_distribution_size = 1024;
+	static const int		key_distribution_size = 4096;
 
 protected:
 	static const type		_type = key_resolver::type_modular;

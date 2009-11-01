@@ -65,5 +65,5 @@ protected:
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __STORAGE_H__
+#endif	// __STORAGE_TCH_H__
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

@@ -95,6 +95,16 @@ else
 fi
 AC_MSG_RESULT($enable_memory_allocation_check)
 
+# Test
+m4_ifdef([AC_CHECK_CPPCUTTER], [
+AC_CHECK_CPPCUTTER
+],
+[ac_cv_use_cppcutter="no"])
+AM_CONDITIONAL([WITH_CUTTER], [test "$ac_cv_use_cppcutter" != "no"])
+if test "$ac_cv_use_cppcutter" != "no"; then
+  AC_DEFINE(WITH_CUTTER, 1, [Define to 1 if you use Cutter])
+fi
+
 #   pthread options
 PTHREAD_DEFS="-pthread -D_REENTRANT -D_THREAD_SAFE"
 
@@ -110,5 +120,7 @@ AC_CONFIG_FILES([Makefile \
 	src/lib/Makefile \
 	src/flared/Makefile \
 	src/flarei/Makefile \
-	src/flarefs/Makefile])
+	src/flarefs/Makefile \
+	test/Makefile \
+	test/lib/Makefile])
 AC_OUTPUT

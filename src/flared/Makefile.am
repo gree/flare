@@ -10,7 +10,7 @@ datarootdir = @datarootdir@
 # main
 bin_PROGRAMS = flared
 DEFS = -Wall $(FLARE_CXXFLAGS)
-LDADD = ../lib/libflare.a
+LDADD = ../lib/libflare.la
 
 # src
 flared_CPPFLAGS = -I../lib

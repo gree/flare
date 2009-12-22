@@ -15,7 +15,7 @@ bin_PROGRAMS =
 endif
 
 DEFS = -Wall $(FLARE_CXXFLAGS)
-LDADD = ../lib/libflare.a
+LDADD = ../lib/libflare.la
 
 # src
 flarefs_CPPFLAGS = -I../lib -D_FILE_OFFSET_BITS=64

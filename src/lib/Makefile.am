@@ -7,11 +7,11 @@
 # forward compatibility
 datarootdir = @datarootdir@
 
-noinst_LIBRARIES = libflare.a
+noinst_LTLIBRARIES = libflare.la
 
 DEFS = -Wall $(FLARE_CXXFLAGS)
 
-libflare_a_SOURCES = \
+libflare_la_SOURCES = \
 	app.h app.cc \
 	client.h client.cc \
 	cluster.h cluster.cc \

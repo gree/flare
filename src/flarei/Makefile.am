@@ -10,7 +10,7 @@ datarootdir = @datarootdir@
 # main
 bin_PROGRAMS = flarei
 DEFS = -Wall $(FLARE_CXXFLAGS)
-LDADD = ../lib/libflare.a
+LDADD = ../lib/libflare.la
 
 # src
 flarei_CPPFLAGS = -I../lib

@@ -10,10 +10,10 @@
 
 #include "config.h"
 
-#include <netinet/tcp.h>
-#include <sys/un.h>
 #include <sys/types.h>
+#include <sys/un.h>
 #include <sys/stat.h>
+#include <netinet/tcp.h>
 
 #ifdef HAVE_EPOLL
 #include <sys/epoll.h>

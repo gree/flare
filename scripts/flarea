@@ -1,0 +1,1007 @@
+#!/usr/bin/php
+<?php
+//
+//	typical usage:
+//		[basic stats]
+//		$ /path/to/flare_admin -c default:127.0.0.1:12120 --stats --header
+//
+//		[show qps (requires few minutes (first time only))]
+//		$ /path/to/flare_admin -c default:127.0.0.1:12120 --stats --header --qps
+//
+//	requires:
+//		php5 and pear (Console/Getopt.php)
+//
+require_once 'Console/Getopt.php';
+
+// {{{ Flare_Admin
+class Flare_Admin {
+	const	list_flag_node	= 0x01;
+	const	list_flag_stats	= 0x02;
+	const	list_flag_qps	= 0x04;
+
+	private	$cluster_list = array();
+	private	$header = false;
+	private	$force = false;
+	private	$verbose = false;
+
+	function Flare_Admin($cluster_list) {
+		$this->cluster_list = $cluster_list;
+	}
+
+	function setHeaderFlag($header) {
+		$this->header = $header;
+	}
+
+	function setForceFlag($force) {
+		$this->force = $force;
+	}
+
+	function setVerboseFlag($verbose) {
+		$this->verbose = $verbose;
+	}
+
+	function getClusterList() {
+		return $this->cluster_list;
+	}
+
+	function getCluster($ident, $flag = self::list_flag_node) {
+		if (isset($this->cluster_list[$ident]) == false) {
+			return PEAR::raiseError("no such cluster [$ident]");
+		}
+		$cluster = $this->cluster_list[$ident];
+		$cluster['ident'] = $ident;
+
+		$node_list = $this->opStatsNodes($cluster['name'], $cluster['port']);
+
+		if ($flag & self::list_flag_stats) {
+			foreach ($node_list as $node_key => $node) {
+				$node = $this->_getNodeStats($node_key, $node);
+				if (PEAR::isError($node)) {
+					return $node;
+				}
+				$node_list[$node_key] = $node;
+			}
+		}
+		if ($flag & self::list_flag_qps) {
+			foreach ($node_list as $node_key => $node) {
+				$node = $this->_getNodeQps($node_key, $node);
+				if (PEAR::isError($node)) {
+					return $node;
+				}
+				$node_list[$node_key] = $node;
+			}
+		}
+		$cluster['node'] = $node_list;
+
+		// partition list
+		$partition_list = array();
+		$proxy_list = array();
+		foreach ($node_list as $node_key => $node) {
+			if ($node['role'] == 'proxy') {
+				$proxy_list[$node_key] = $node;
+				continue;
+			}
+			if (isset($partition_list[$node['partition']]) == false) {
+				$partition_list[$node['partition']] = array('master' => null, 'slave' => array());
+			}
+			if ($node['role'] == 'master') {
+				$partition_list[$node['partition']]['master'] = $node;
+			}
+			if ($node['role'] == 'slave') {
+				$partition_list[$node['partition']]['slave'][$node_key] = $node;
+			}
+		}
+		$cluster['partition'] = $partition_list;
+		$cluster['proxy'] = $proxy_list;
+
+		return $cluster;
+	}
+
+	function getStats($ident, $flag = self::list_flag_stats) {
+		$flag |= self::list_flag_stats;	// for safe
+
+		$r = array();
+		if (isset($this->cluster_list[$ident])) {
+			$r = $this->getCluster($ident, $flag);
+			if (PEAR::isError($r)) {
+				return $r;
+			}
+		} else {
+			$r = $this->_getNodeStats($ident);
+			if (PEAR::isError($r)) {
+				return $r;
+			}
+			if ($flag & self::list_flag_qps) {
+				$r = $this->_getNodeQps($ident, $r);
+			}
+			if (PEAR::isError($r)) {
+				return $r;
+			}
+		}
+
+		return $r;
+	}
+
+	function setNodeState($node_key, $state) {
+		// find cluster
+		$cluster = $this->_getClusterFromNode($node_key);
+		if (PEAR::isError($cluster)) {
+			return $cluster;
+		}
+		$node = $cluster['node'][$node_key];
+
+		$r = $this->_confirm("shifting node state (node=$node_key, state={$node['state']} -> $state)");
+		if (!$r) {
+			return PEAR::raiseError("aborted");
+		}
+
+		$node['state'] = $state;
+		$r = $this->opNodeState($cluster['name'], $cluster['port'], $node);
+		if (PEAR::isError($r)) {
+			return $r;
+		}
+
+		$cluster = $this->_getClusterFromNode($node_key);
+		return $cluster['node'][$node_key];
+	}
+
+	// interface :(
+	function setNodeRole($ident, $role = null) {
+		$node = $this->_parseNodeRole($ident);
+		if (PEAR::isError($node)) {
+			return $node;
+		}
+		$node_key = $node['host'] . ':' . $node['port'];
+		$balance = $node['balance'];
+		$partition = isset($node['partition']) ? $node['partition'] : null;
+
+		// find cluster
+		$cluster = $this->_getClusterFromNode($node_key);
+		if (PEAR::isError($cluster)) {
+			return $cluster;
+		}
+		$node = $cluster['node'][$node_key];
+
+		$s = null;
+		if ($node['balance'] != $balance) {
+			$s .= ", balance={$node['balance']} -> $balance";
+			$node['balance'] = $balance;
+		}
+		if (is_null($partition) == false && $node['partition'] != $partition) {
+			$s .= ", partition={$node['partition']} -> $partition";
+			$node['partition'] = $partition;
+		}
+		if (is_null($role) == false && $node['role'] != $role) {
+			$s .= ", role={$node['role']} -> $role";
+			$node['role'] = $role;
+		}
+
+		if ($s == null) {
+			return PEAR::raiseError("no update");
+		} else {
+			$s = "updating node role (node=$node_key$s)";
+		}
+
+		$r = $this->_confirm($s);
+		if (!$r) {
+			return PEAR::raiseError("aborted");
+		}
+
+		$r = $this->opNodeRole($cluster['name'], $cluster['port'], $node);
+		if (PEAR::isError($r)) {
+			return $r;
+		}
+
+		$cluster = $this->_getClusterFromNode($node_key);
+		return $cluster['node'][$node_key];
+	}
+
+	function waitForSlaveConstruction($node_key) {
+		// identify master
+		$cluster = $this->_getClusterFromNode($node_key);
+		if (PEAR::isError($cluster)) {
+			return $cluster;
+		}
+		$node = $cluster['node'][$node_key];
+		if ($node['role'] != 'slave') {
+			return PEAR::raiseError("role of specified node is not slave ($node_key)");
+		}
+		$partition = $node['partition'];
+		$master_node = $cluster['partition'][$partition]['master'];
+
+		// wait for slave construction (check state and items)
+		$state = null;
+		$ts_begin = time();
+		for (;;) {
+			$stats_node = $this->opStatsNodes($cluster['name'], $cluster['port']);
+			$stats_master = $this->opStats($master_node['host'], $master_node['port']);
+			$stats_slave = $this->opStats($node['host'], $node['port']);
+
+			$ts_diff = time() - $ts_begin;
+			$state = $stats_node[$node_key]['state'];
+			$item_m = $stats_master['curr_items'];
+			$item_s = $stats_slave['curr_items'];
+
+			if ($ts_diff > 0) {
+				$eta = intval(($item_m - $item_s) / ($item_s / $ts_diff));
+			} else {
+				$eta = "n/a";
+			}
+
+			printf("%d / %d (state = %s) [ETA: %s sec (elapsed = %d sec)]\n", $item_s, $item_m, $state, $eta, $ts_diff);
+
+			if ($state == "active" && $item_m == $item_s) {
+				print "state is active and items are equal -> stop waiting\n";
+				break;
+			}
+
+			sleep(1);
+		}
+
+		return true;
+	}
+
+	function isNodeReconstructable($node_key) {
+		$cluster = $this->_getClusterFromNode($node_key);
+		if (PEAR::isError($cluster)) {
+			return $cluster;
+		}
+		$node = $cluster['node'][$node_key];
+
+		if ($node['state'] != 'active') {
+			return PEAR::raiseError("specified node is not active");
+		}
+
+		if ($node['role'] == 'proxy') {
+			return PEAR::raiseError("specified node is proxy -> cannot reconstruct");
+		} else if ($node['role'] == 'slave') {
+			return $node;
+		}
+
+		// master: see if master has active slave
+		$slave = $cluster['partition'][$node['partition']]['slave'];
+		foreach ($slave as $k => $n) {
+			if ($n['state'] == 'active') {
+				return $node;
+			}
+		}
+
+		return PEAR::raiseError("specified node is master and has no slave");
+	}
+
+	function clear($node_key) {
+		$tmp = $this->_parseNodeKey($node_key);
+
+		return $this->opFlushAll($tmp['host'], $tmp['port']);
+	}
+
+	function opNodeState($host, $port, $node) {
+		// assert
+		if (isset($node['host']) == false || isset($node['port']) == false || isset($node['state']) == false) {
+			return PEAR::raiseError('invalid node (missing required information)');
+		}
+
+		$c = $this->_getConnection($host, $port);
+		if (PEAR::isError($c)) {
+			return $c;
+		}
+
+		$op = sprintf("node state %s %d %s", $node['host'], $node['port'], $node['state']);
+		$this->_writeLine($c, $op);
+		$r = $this->_readLine($c);
+		if ($r != "OK") {
+			fclose($c);
+			return PEAR::raiseError("server error (perhaps invalid setting?): $r");
+		}
+
+		fclose($c);
+		return true;
+	}
+
+	function opNodeRole($host, $port, $node) {
+		// assert
+		if (isset($node['host']) == false || isset($node['port']) == false || isset($node['role']) == false || isset($node['balance']) == false || isset($node['partition']) == false) {
+			return PEAR::raiseError('invalid node (missing required information)');
+		}
+
+		$c = $this->_getConnection($host, $port);
+		if (PEAR::isError($c)) {
+			return $c;
+		}
+
+		$op = sprintf("node role %s %d %s %d %d", $node['host'], $node['port'], $node['role'], $node['balance'], $node['partition']);
+		$this->_writeLine($c, $op);
+		$r = $this->_readLine($c);
+		if ($r != "OK") {
+			fclose($c);
+			return PEAR::raiseError("server error (perhaps invalid setting?): $r");
+		}
+
+		fclose($c);
+		return true;
+	}
+
+	function opStats($host, $port) {
+		$c = $this->_getConnection($host, $port);
+		if (PEAR::isError($c)) {
+			return $c;
+		}
+		$this->_writeLine($c, "stats");
+
+		$stats = array();
+		while (($s = $this->_readLine($c)) !== false) {
+			if ($s == "END") {
+				break;
+			}
+
+			if (preg_match('/STAT\s+(\S+)\s+(\S+)/', $s, $match) == 0) {
+				print "warning: unknown format: $s -> ignoring\n";
+				continue;
+			}
+
+			$stats[$match[1]] = $match[2];
+		}
+
+		fclose($c);
+		return $stats;
+	}
+
+	function opStatsNodes($host, $port) {
+		$c = $this->_getConnection($host, $port);
+		if (PEAR::isError($c)) {
+			return $c;
+		}
+		$this->_writeLine($c, "stats nodes");
+
+		$node_list = array();
+		while (($s = $this->_readLine($c)) !== false) {
+			if ($s == "END") {
+				break;
+			}
+
+			if (preg_match('/STAT\s+(.*?):(\d+):(\S+)\s+(\S+)/', $s, $match) == 0) {
+				print "warning: unknown format: $s -> ignoring\n";
+				continue;
+			}
+
+			$node_key = $match[1] . ':' . $match[2];
+			if (isset($node_list[$node_key]) == false) {
+				$node_list[$node_key] = array('host' => $match[1], 'port' => $match[2]);
+			}
+
+			$node_list[$node_key][$match[3]] = $match[4];
+		}
+
+		fclose($c);
+		return $node_list;
+	}
+
+	function opFlushAll($host, $port) {
+		$c = $this->_getConnection($host, $port);
+		if (PEAR::isError($c)) {
+			return $c;
+		}
+		$this->_writeLine($c, "flush_all");
+		$r = $this->_readLine($c);
+		if ($r != "OK") {
+			fclose($c);
+			return PEAR::raiseError("server error (perhaps invalid setting?): $r");
+		}
+
+		fclose($c);
+		return true;
+	}
+
+	// {{{ display related methods
+	function showCluster($ident, $cluster) {
+		printf("[%s (%s:%d)]\n", $ident, $cluster['name'], $cluster['port']);
+	}
+
+	function showPartition($cluster, $flag = self::list_flag_node) {
+		$this->showHeader($flag);
+
+		foreach ($cluster['partition'] as $partition => $tmp) {
+			$this->showNode($tmp['master'], $flag);
+			foreach ($tmp['slave'] as $slave) {
+				$this->showNode($slave, $flag);
+			}
+		}
+		if (count($cluster['proxy']) > 0) {
+			foreach ($cluster['proxy'] as $tmp) {
+				$this->showNode($tmp, $flag);
+			}
+		}
+
+		print "\n";
+	}
+
+	function showHeader($flag) {
+		if ($this->header) {
+			$s = "";
+			if ($flag & self::list_flag_node) {
+				$s .= sprintf("%-24s%4s%2s%8s%3s", "node", "p", "r", "state", "b");
+			}
+			if ($flag & self::list_flag_stats) {
+				$s .= sprintf("%6s%6s%9s%5s%9s%8s%7s", "la", "conn", "items", "siz", "uptime", "version", "ratio");
+			}
+			if ($flag & self::list_flag_qps) {
+				$s .= sprintf("%6s%6s%6s", "qps", "qps-r", "qps-w");
+			}
+			print $s . "\n";
+		}
+	}
+
+	function showNode($node, $flag) {
+		$node_key = sprintf("%s:%d", $node['host'], $node['port']);
+		$s = "";
+		if ($flag & self::list_flag_node) {
+			$s .= sprintf("%-24s%4s%2s%8s%3s",
+					$node_key,
+					$node['partition'] >= 0 ? $node['partition'] : "",
+					$node['role']{0},
+					$node['state'],
+					$node['role'] == 'proxy' ? "" : $node['balance']);
+		}
+		if ($flag & self::list_flag_stats) {
+			$s .= sprintf("%6s%6d%9d%5.1f%9d%8s%7.2f",
+					$node['la'][1],
+					$node['curr_connections'],
+					$node['curr_items'],
+					$node['bytes'] / 1024 / 1024 / 1024,
+					$node['uptime'],
+					$node['version'],
+					$node['cmd_get'] > 0 ? ($node['get_hits'] / $node['cmd_get'] * 100.0) : 0);
+		}
+		if ($flag & self::list_flag_qps) {
+			$s .= sprintf("%6d%6d%6d", $node['qps'], $node['qps_r'], $node['qps_w']);
+		}
+		print $s . "\n";
+	}
+	// }}}
+
+	function _getClusterFromNode($node_key) {
+		foreach ($this->cluster_list as $ident => $tmp) {
+			$cluster = $this->getCluster($ident);
+			if (PEAR::isError($cluster)) {
+				// no way
+				continue;
+			}
+			if (isset($cluster['node'][$node_key])) {
+				return $cluster;
+			}
+		}
+		return PEAR::raiseError("no such node [$node_key]");
+	}
+
+	function _getNodeStats($node_key, $hint = array()) {
+		$tmp = $this->_parseNodeKey($node_key);
+		if (PEAR::isError($tmp)) {
+			return $tmp;
+		}
+		$node = array_merge($tmp, $hint);
+
+		if (isset($node['role']) == false) {
+			// append node info
+			$node_list = $this->opStatsNodes($node['host'], $node['port']);
+			if (PEAR::isError($node_list)) {
+				return $node_list;
+			} else if (isset($node_list[$node_key]) == false) {
+				return PEAR::raiseError("no such node [$node_key]");
+			}
+			$node = array_merge($node, $node_list[$node_key]);
+		}
+
+		$stats = $this->opStats($node['host'], $node['port']);
+		if (PEAR::isError($stats)) {
+			return $stats;
+		}
+		$la = $this->_getLoadAverage($node['host']);
+		if (PEAR::isError($la)) {
+			// print "warning: failed to get load average ({$node['host']}) [" . $la->getMessage() . "] -> skip\n";
+			$stats['la'] = array(1 => null, 2 => null, 3 => null);
+		} else {
+			$stats['la'] = $la;
+		}
+
+		return array_merge($node, $stats);
+	}
+
+	function _getNodeQps($node_key, $hint = array()) {
+		$tmp = $this->_parseNodeKey($node_key);
+		if (PEAR::isError($tmp)) {
+			return $tmp;
+		}
+		$node = array_merge($tmp, $hint);
+
+		if (isset($node['cmd_get']) == false) {
+			$node = $this->_getNodeStats($node_key, $node);
+			if (PEAR::isError($node)) {
+				return $node;
+			}
+		}
+
+		$stats_diff = $this->_loadStats($node_key);
+		if (!$stats_diff) {
+			$delta = 3.00;
+			sleep($delta);
+			$stats_diff = $node;
+			$node = $this->_getNodeStats($node_key, $node);
+		} else {
+			$start = explode(' ', $stats_diff['microtime']);
+			$end = explode(' ', microtime());
+			$delta = ($end[0] - $start[0]) + (float)($end[1] - $start[1]);
+		}
+
+		$node['qps'] = ($node['cmd_get'] + $node['cmd_set'] - $stats_diff['cmd_get'] - $stats_diff['cmd_set']) / $delta;
+		$node['qps_r'] = ($node['cmd_get'] - $stats_diff['cmd_get']) / $delta;
+		$node['qps_w'] = ($node['cmd_set'] - $stats_diff['cmd_set']) / $delta;
+
+		$this->_saveStats($node_key, $node);
+
+		return $node;
+	}
+
+	function _getLoadAverage($host) {
+		if (file_exists("/usr/bin/snmpwalk") == false) {
+			return PEAR::isError("snmpwalk not found");
+		}
+		$r = `/usr/bin/snmpwalk -c public -v 1 $host laLoad`;
+		if (!$r) {
+			return PEAR::isError("server dit not responed");
+		}
+
+		$la = array();
+		foreach (explode("\n", $r) as $s) {
+			if (preg_match('/UCD-SNMP-MIB::laLoad.(\d+)\s*=\s*STRING:\s*([\d\.]+)/', $s, $match) == 0) {
+				continue;
+			}
+			$la[$match[1]] = $match[2];
+		}
+
+		return $la;
+	}
+
+	function _getConnection($host, $port) {
+		$sock = fsockopen($host, $port, $errno, $errstr);
+		if (!$sock) {
+			return PEAR::raiseError("fsockopen() failed: $errstr ($errno)");
+		}
+
+		return $sock;
+	}
+
+	function _readLine($c) {
+		$s = fgets($c, 8192);
+		if ($s === false) {
+			return $s;
+		}
+
+		$s = rtrim($s);
+		$this->_debug("> $s\n");
+		return $s;
+	}
+
+	function _writeLine($c, $s) {
+		$this->_debug("< $s\n");
+		return fwrite($c, "$s\r\n");
+	}
+
+	function _debug() {
+		if ($this->verbose == false) {
+			return;
+		}
+
+		$args = func_get_args();
+		$format = array_shift($args);
+		vprintf($format, $args);
+	}
+
+	function _parseNodeKey($node_key) {
+		if (preg_match('/^(.*):(\d+)$/', $node_key, $match) == 0) {
+			return PEAR::raiseError("invalid node key [$node_key]");
+		}
+		$node = array(
+			'host' => $match[1],
+			'port' => $match[2],
+		);
+
+		return $node;
+	}
+
+	function _parseNodeRole($node_key) {
+		if (preg_match('/^(.*?):(\d+):(\d+):(\d+)$/', $node_key, $match) > 0) {
+			$node = array(
+				'host' => $match[1],
+				'port' => $match[2],
+				'balance' => $match[3],
+				'partition' => $match[4],
+			);
+		} else if (preg_match('/^(.*?):(\d+):(\d+)$/', $node_key, $match) > 0) {
+			$node = array(
+				'host' => $match[1],
+				'port' => $match[2],
+				'balance' => $match[3],
+			);
+		} else {
+			return PEAR::raiseError("invalid node key or balance or partiton [$node_key]");
+		}
+
+		return $node;
+	}
+
+	function _saveStats($node_key, $stats) {
+		$stats['microtime'] = microtime();
+		$file = sprintf("/var/tmp/_flare_admin_%s", str_replace(':', '_', $node_key));
+		$fp = fopen($file, "w");
+		fwrite($fp, serialize($stats));
+		fclose($fp);
+
+		return true;
+	}
+
+	function _loadStats($node_key) {
+		$file = sprintf("/var/tmp/_flare_admin_%s", str_replace(':', '_', $node_key));
+		if (is_file($file) == false) {
+			return false;
+		}
+		$r = unserialize(file_get_contents($file));
+
+		return $r;
+	}
+
+	function _confirm($s) {
+		$s = "$s (y/n): ";
+		if ($this->force) {
+			print $s . "(force mode -> skip confrimation)\n";
+			return true;
+		}
+
+		$fp = fopen("php://stdin", "r");
+		for (;;) {
+			print $s;
+			$r = strtolower(trim(fgets($fp, 1024)));
+			if ($r == "y") {
+				fclose($fp);
+				return true;
+			} else if ($r == "n") {
+				fclose($fp);
+				return false;
+			} else {
+				print "please answer w/ y or n...\n";
+			}
+		}
+
+		// for safe
+		fclose($fp);
+		return false;
+	}
+}
+// }}}
+
+// {{{ main
+function main($arg_list) {
+	array_shift($arg_list);
+	list($cluster_list, $op, $op_aux, $qps, $header, $force, $verbose) = parse_arg_list($arg_list);
+
+	$flare_admin = new Flare_Admin($cluster_list);
+	$flare_admin->setHeaderFlag($header);
+	$flare_admin->setForceFlag($force);
+	$flare_admin->setVerboseFlag($verbose);
+
+	$parameter = array('qps' => $qps);
+
+	$f = "handleOp$op";
+	if (function_exists($f) == false) {
+		print "operation [$op] is not yet supported\n";
+		return 0;
+	}
+
+	return $f($flare_admin, $op_aux, $parameter);
+}
+// }}}
+
+// {{{ handleOpList
+function handleOpList(&$flare_admin, $op_aux, $parameter) {
+	$flag = Flare_Admin::list_flag_node;
+	if ($parameter['qps']) {
+		$flag |= Flare_Admin::list_flag_qps;
+	}
+
+	if ($op_aux) {
+		$list = preg_split('/\s*,\s*/', $op_aux);
+	} else {
+		$list = array_keys($flare_admin->getClusterList());
+	}
+	foreach ($list as $ident) {
+		$r = $flare_admin->getCluster($ident, $flag);
+		if (PEAR::isError($r)) {
+			print $r->getMessage() . "\n\n";
+			break;
+		}
+		$flare_admin->showCluster($r['ident'], $r);
+		$flare_admin->showPartition($r, $flag);
+	}
+
+	return 0;
+}
+// }}}
+
+// {{{ handleOpStats
+function handleOpStats(&$flare_admin, $op_aux, $parameter) {
+	$flag = Flare_Admin::list_flag_node | Flare_Admin::list_flag_stats;
+	if ($parameter['qps']) {
+		$flag |= Flare_Admin::list_flag_qps;
+	}
+
+	if ($op_aux) {
+		$list = preg_split('/\s*,\s*/', $op_aux);
+	} else {
+		$list = array_keys($flare_admin->getClusterList());
+	}
+	foreach ($list as $ident) {
+		$r = $flare_admin->getStats($ident, $flag);
+		if (PEAR::isError($r)) {
+			print $r->getMessage() . "\n\n";
+			break;
+		}
+		if (isset($r['ident'])) {
+			$flare_admin->showCluster($ident, $r);
+			$flare_admin->showPartition($r, $flag);
+		} else {
+			$flare_admin->showNode($r, $flag);
+		}
+	}
+
+	return 0;
+}
+// }}}
+
+// {{{ handleOpBalance
+function handleOpBalance(&$flare_admin, $op_aux, $parameter) {
+	$r = $flare_admin->setNodeRole($op_aux);
+	if (PEAR::isError($r)) {
+		print $r->getMessage() . "\n\n";
+		return -1;
+	}
+	print "node balance updated:\n";
+	$flare_admin->showNode($r, Flare_Admin::list_flag_node);
+
+	return 0;
+}
+// }}}
+
+// {{{ handleOpDown
+function handleOpDown(&$flare_admin, $op_aux, $parameter) {
+	$r = $flare_admin->setNodeState($op_aux, "down");
+	if (PEAR::isError($r)) {
+		print $r->getMessage() . "\n\n";
+		return -1;
+	}
+	print "node state shifted:\n";
+	$flare_admin->showNode($r, Flare_Admin::list_flag_node);
+
+	return 0;
+}
+// }}}
+
+// {{{ handleOpSlave
+function handleOpSlave(&$flare_admin, $op_aux, $parameter) {
+	$r = $flare_admin->setNodeRole($op_aux, "slave");
+	if (PEAR::isError($r)) {
+		print $r->getMessage() . "\n\n";
+		return -1;
+	}
+	print "started to constructing slave node...\n";
+
+	// wait for slave construction
+	$node_key = $r['host'] . ':' . $r['port'];
+	$tmp = $flare_admin->waitForSlaveConstruction($node_key);
+	if (PEAR::isError($tmp)) {
+		print $tmp->getMessage() . "\n\n";
+		return -1;
+	}
+
+	// set node balance
+	$r = $flare_admin->setNodeRole($op_aux, "slave");
+	if (PEAR::isError($r)) {
+		print $r->getMessage() . "\n\n";
+		return -1;
+	}
+
+	print "constructing slave successfully done!\n";
+	$flare_admin->showNode($r, Flare_Admin::list_flag_node);
+
+	return 0;
+}
+// }}}
+
+// {{{ handleOpReconstruct
+function handleOpReconstruct(&$flare_admin, $op_aux, $parameter) {
+	// see if we can reconstruct specified node
+	$r = $flare_admin->isNodeReconstructable($op_aux);
+	if (PEAR::isError($r)) {
+		print $r->getMessage() . "\n\n";
+		return -1;
+	}
+
+	$node_key = $op_aux;
+	$op_aux = "$node_key:{$r['balance']}:{$r['partition']}";
+
+	// shift state of specified node to down
+	$r = $flare_admin->setNodeState($node_key, "down");
+	if (PEAR::isError($r)) {
+		print $r->getMessage() . "\n\n";
+		return -1;
+	}
+	$flare_admin->showNode($r, Flare_Admin::list_flag_node);
+
+	print "waiting for node to be active again...";
+	sleep(3);
+	print "\n";
+
+	// flush current items and begin constructing slave
+	print "clearing current items...\n";
+	$r = $flare_admin->clear($node_key);
+	if (PEAR::isError($r)) {
+		print $r->getMessage() . "\n\n";
+		return -1;
+	}
+
+	$r = $flare_admin->setNodeRole($op_aux, "slave");
+	if (PEAR::isError($r)) {
+		print $r->getMessage() . "\n\n";
+		return -1;
+	}
+	print "started to constructing slave node...\n";
+
+	// wait for slave construction
+	$node_key = $r['host'] . ':' . $r['port'];
+	$tmp = $flare_admin->waitForSlaveConstruction($node_key);
+	if (PEAR::isError($tmp)) {
+		print $tmp->getMessage() . "\n\n";
+		return -1;
+	}
+
+	// set node balance
+	$r = $flare_admin->setNodeRole($op_aux, "slave");
+	if (PEAR::isError($r)) {
+		print $r->getMessage() . "\n\n";
+		return -1;
+	}
+
+	print "constructing slave successfully done!\n";
+	$flare_admin->showNode($r, Flare_Admin::list_flag_node);
+
+	return 0;
+}
+// }}}
+
+// {{{ parse_arg_list
+function parse_arg_list($arg_list) {
+	list($opt_list, $additional) = Console_Getopt::getopt2($arg_list, "c:l::n:s::qb:d:a:r:efvh", array("cluster==", "list==", "stats==", "qps", "balance=", "down=", "slave=", "reconstruct=", "header", "force", "verbose", "help"));
+
+	$cluster_list = array();
+	$op = null;
+	$op_aux = null;
+	$qps = false;
+	$header = false;
+	$force = false;
+	$verbose = false;
+	if (is_null($opt_list)) {
+		$opt_list = array();
+	}
+	foreach ($opt_list as $opt) {
+		if (is_array($opt) && isset($opt[0])) {
+			switch($opt[0]) {
+			case 'c':
+			case '--cluster':
+				foreach (preg_split('/\s*,\s*/', $opt[1]) as $s) {
+					if (preg_match('/^(.*?):(.*?):(\d+)$/', $s, $match) > 0) {
+						$cluster_list[$match[1]] = array('name' => $match[2], 'port' => $match[3]);
+					} else {
+						print "warning: unrecognized cluster [$s] -> skipping...\n";
+					}
+				}
+				break;
+			case 'l':
+			case '--list':
+				$op = "list";
+				$op_aux = $opt[1];
+				break;
+			case 's':
+			case '--stats':
+				$op = "stats";
+				$op_aux = $opt[1];
+				break;
+			case 'q':
+			case '--qps':
+				$qps = true;
+				break;
+			case 'b':
+			case '--balance':
+				$op = "balance";
+				$op_aux = $opt[1];
+				break;
+			case 'd':
+			case '--down':
+				$op = "down";
+				$op_aux = $opt[1];
+				break;
+			case 'a':
+			case '--slave':
+				$op = "slave";
+				$op_aux = $opt[1];
+				break;
+			case 'r':
+			case '--reconstruct':
+				$op = "reconstruct";
+				$op_aux = $opt[1];
+				break;
+			case 'e':
+			case '--header':
+				$header = true;
+				break;
+			case 'f':
+			case '--force':
+				$force = true;
+				break;
+			case 'v':
+			case '--verbose':
+				$verbose = true;
+				break;
+			case 'h':
+			case '--help':
+				usage();
+				break;
+			default:
+				printf("unkown option [%s]\n\n", $opt[0]);
+				usage();
+				break;
+			}
+		}
+	}
+
+	if (count($cluster_list) == 0 || $op == null) {
+		usage();
+	}
+
+	return array($cluster_list, $op, $op_aux, $qps, $header, $force, $verbose);
+}
+// }}}
+
+// {{{ usage
+function usage() {
+	$usage = <<<EOD
+flare_admin [options]
+
+options (cluster):
+  -c, --cluster ([arg])    list your index servers (arg="name(arbitary string):host:port,...")
+
+options (stats):
+  -l, --list ([arg])       list flare nodes
+  -s, --stats ([arg])      show statistics of specified node(s)
+  -q, --qps                add qps
+
+options (operation):
+  -b, --balance [arg]      set node balance (arg="host:port:balance")
+  -d, --down [arg]         shift state of specified node to down (arg="host:port")
+  -a, --slave [arg]        shift role of specified node to slave (arg="host:port:balance:partition")
+  -r, --reconstruct [arg]  reconstruct specified node (arg="host:port")
+
+and something else:
+  -e, --header             show header
+  -f, --force              skip confirmation (not recommended)
+  -v, --verbose            verbose mode
+  -h, --help               show this message
+
+EOD;
+	print $usage;
+
+	// bail out:)
+	exit();
+}
+// }}}
+
+exit(main($_SERVER['argv']));
+
+// vim: foldmethod=marker tabstop=4 shiftwidth=4 autoindent

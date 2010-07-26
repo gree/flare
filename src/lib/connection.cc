@@ -413,34 +413,6 @@ int connection::readsize(int expect_len, char** p) {
 }
 
 /**
- *	push back read buffer
- *
- *	- data is always push back at *top* of read buffer, so caller should be carefull of order
- */
-int connection::push_back(char* p, int bufsiz) {
-	log_debug("checking for lazy push back (bufsiz=%d, current=%d)", bufsiz, this->_read_buf_p - this->_read_buf);
-	if (this->_read_buf && bufsiz <= (this->_read_buf_p - this->_read_buf)) {
-		this->_read_buf_p -= bufsiz;
-		this->_read_buf_len += bufsiz;
-		return this->_read_buf_len;
-	}
-
-	char* tmp = _new_ char[this->_read_buf_len+bufsiz];
-	memcpy(tmp, p, bufsiz);
-	if (this->_read_buf) {
-		memcpy(tmp+bufsiz, this->_read_buf_p, this->_read_buf_len);
-		_delete_(this->_read_buf);
-	}
-	this->_read_buf = tmp;
-	this->_read_buf_p = this->_read_buf;
-	this->_read_buf_len += bufsiz;
-
-	log_debug("successfully pushed back %d bytes (total buffer size=%d)", bufsiz, this->_read_buf_len);
-
-	return this->_read_buf_len;
-}
-
-/**
  *	write data to peer
  */
 int connection::write(const char* p, int bufsiz, bool buffered) {

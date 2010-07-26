@@ -68,7 +68,7 @@ public:
 	int set_proxy(string proxy);
 	int set_proxy(vector<string> proxy) { this->_proxy = proxy; return 0; };
 	int set_thread(shared_thread t) { this->_thread = t; this->_thread_available = true; return 0; };
-	string get_ident() { return this->_ident; };
+	inline string get_ident() { return this->_ident; };
 	int is_proxy_request() { return this->_proxy_request; };
 	bool is_shutdown_request() { return this->_shutdown_request; };
 	result get_result() { return this->_result; };

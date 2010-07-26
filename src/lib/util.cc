@@ -120,44 +120,6 @@ int util::get_fqdn(string& fqdn) {
 }
 
 /**
- *	get next word from buffer
- */
-unsigned int util::next_word(const char* src, char* dst, unsigned int dst_len) {
-	const char *p = src;
-	char *q = dst;
-
-	// sync w/ memcached behavior (cannot use isspace() here because memcached does not recognize '\t' and other space chars as ws)
-	while (*p == ' ') {
-		p++;
-	}
-	while (*p && *p != ' ' && *p != '\n' && static_cast<unsigned int>(p-src) < dst_len) {
-		*q++ = *p++;
-	}
-	*q = '\0';
-
-	return p-src;
-}
-
-/**
- *	get next digit(s) from buffer
- */
-unsigned int util::next_digit(const char* src, char* dst, unsigned int dst_len) {
-	const char *p = src;
-	char *q = dst;
-
-	// sync w/ memcached behavior (cannot use isspace() here because memcached does not recognize '\t' and other space chars as ws)
-	while (*p == ' ') {
-		p++;
-	}
-	while (*p && (isdigit(*p) || *p == '-') && *p != '\n' && static_cast<unsigned int>(p-src) < dst_len) {
-		*q++ = *p++;
-	}
-	*q = '\0';
-
-	return p-src;
-}
-
-/**
  *	get realtime(?) (from memcached...)
  */
 time_t util::realtime(time_t t) {

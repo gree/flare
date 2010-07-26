@@ -66,8 +66,36 @@ public:
 	static int gethostbyname(const char *name, struct hostent* he, int* he_errno);
 	static int inet_ntoa(struct in_addr in, char* dst);
 	static int get_fqdn(string& fqdn);
-	static unsigned int next_word(const char* src, char* dst, unsigned int dst_len);
-	static unsigned int next_digit(const char* src, char* dst, unsigned int dst_len);
+	static inline unsigned int next_word(const char* src, char* dst, unsigned int dst_len) {
+		const char *p = src;
+		char *q = dst;
+
+		// sync w/ memcached behavior (cannot use isspace() here because memcached does not recognize '\t' and other space chars as ws)
+		while (*p == ' ') {
+			p++;
+		}
+		while (*p && *p != ' ' && *p != '\n' && static_cast<unsigned int>(p-src) < dst_len) {
+			*q++ = *p++;
+		}
+		*q = '\0';
+
+		return p-src;
+	};
+	static inline unsigned int next_digit(const char* src, char* dst, unsigned int dst_len) {
+		const char *p = src;
+		char *q = dst;
+
+		// sync w/ memcached behavior (cannot use isspace() here because memcached does not recognize '\t' and other space chars as ws)
+		while (*p == ' ') {
+			p++;
+		}
+		while (*p && (isdigit(*p) || *p == '-') && *p != '\n' && static_cast<unsigned int>(p-src) < dst_len) {
+			*q++ = *p++;
+		}
+		*q = '\0';
+
+		return p-src;
+	};
 	static time_t realtime(time_t t);
 	static string base64_encode(const char* src, size_t src_size);
 	static char* base64_decode(string src, size_t& dst_size);

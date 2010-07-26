@@ -57,7 +57,28 @@ public:
 	int read(char** p, int expect_len, bool readline, bool& actual);
 	int readline(char** p);
 	int readsize(int expect_len, char** p);
-	int push_back(char* p, int bufsiz);
+	inline int push_back(char* p, int bufsiz) {
+		log_debug("checking for lazy push back (bufsiz=%d, current=%d)", bufsiz, this->_read_buf_p - this->_read_buf);
+		if (this->_read_buf && bufsiz <= (this->_read_buf_p - this->_read_buf)) {
+			this->_read_buf_p -= bufsiz;
+			this->_read_buf_len += bufsiz;
+			return this->_read_buf_len;
+		}
+
+		char* tmp = _new_ char[this->_read_buf_len+bufsiz];
+		memcpy(tmp, p, bufsiz);
+		if (this->_read_buf) {
+			memcpy(tmp+bufsiz, this->_read_buf_p, this->_read_buf_len);
+			_delete_(this->_read_buf);
+		}
+		this->_read_buf = tmp;
+		this->_read_buf_p = this->_read_buf;
+		this->_read_buf_len += bufsiz;
+
+		log_debug("successfully pushed back %d bytes (total buffer size=%d)", bufsiz, this->_read_buf_len);
+
+		return this->_read_buf_len;
+	};
 	int write(const char *p, int bufsiz, bool buffered = false);
 	int writeline(const char* p);
 	int get_errno() { return this->_errno; };

@@ -55,6 +55,11 @@ public:
 		type_node,
 	};
 
+	enum							replication {
+		replication_async,
+		replication_sync,
+	};
+
 	enum							role {
 		role_master,
 		role_slave,
@@ -73,6 +78,7 @@ public:
 		proxy_request_continue = 1,
 		proxy_request_complete,
 	};
+
 
 	typedef struct		_node {
 		string					node_server_name;
@@ -162,6 +168,7 @@ protected:
 	int										_index_server_port;
 	int										_proxy_concurrency;
 	int										_reconstruction_interval;
+	replication						_replication_type;
 
 public:
 	cluster(thread_pool* tp, string data_dir, string server_name, int server_port);
@@ -211,6 +218,8 @@ public:
 	int set_proxy_concurrency(int proxy_concurrency) { this->_proxy_concurrency = proxy_concurrency; return 0; };
 	int get_reconstruction_interval() { return this->_reconstruction_interval; };
 	int set_reconstruction_interval(int reconstruction_interval) { this->_reconstruction_interval = reconstruction_interval; return 0; };
+	replication get_replication_type() { return this->_replication_type; };
+	int set_replication_type(string replication_type) { cluster::replication_cast(replication_type, this->_replication_type); return 0; };
 	string get_server_name() { return this->_server_name; };
 	int get_server_port() { return this->_server_port; };
 	string get_index_server_name() { return this->_index_server_name; };
@@ -238,6 +247,27 @@ public:
 			return -1;
 		}
 		return 0;
+	}
+
+	static inline int replication_cast(string s, replication& t) {
+		if (s == "async") {
+			t = replication_async;
+		} else if (s == "sync") {
+			t = replication_sync;
+		} else {
+			return -1;
+		}
+		return 0;
+	}
+
+	static inline string replication_cast(replication t) {
+		switch (t) {
+		case replication_async:
+			return "async";
+		case replication_sync:
+			return "sync";
+		}
+		return "";
 	}
 
 	static inline int role_cast(string s, role& r) {

@@ -102,7 +102,7 @@ int op_set::_run_server() {
 	if (r_storage == storage::result_stored) {
 		stats_object->increment_total_items();
 		// post-proxy (notify updates to slaves if we need)
-		r_proxy = this->_cluster->post_proxy_write(this, (this->_entry.option & storage::option_sync));
+		r_proxy = this->_cluster->post_proxy_write(this, this->_is_sync(this->_entry.option, this->_cluster->get_replication_type()));
 	}
 	
 	if ((this->_entry.option & storage::option_noreply) == 0) {
@@ -125,6 +125,9 @@ int op_set::_run_client(storage::entry& e) {
 	}
 	if (e.option & storage::option_sync) {
 		offset += snprintf(request+offset, request_len-offset, " %s", storage::option_cast(storage::option_sync).c_str());
+	}
+	if (e.option & storage::option_async) {
+		offset += snprintf(request+offset, request_len-offset, " %s", storage::option_cast(storage::option_async).c_str());
 	}
 	offset += snprintf(request+offset, request_len-offset, line_delimiter);
 	memcpy(request+offset, e.data.get(), e.size);

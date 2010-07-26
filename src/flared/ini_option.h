@@ -9,6 +9,7 @@
 #define __INI_OPTION_H__
 
 #include "ini.h"
+#include "cluster.h"
 #include "storage.h"
 
 namespace gree {
@@ -43,6 +44,7 @@ private:
 	int					_net_read_timeout;
 	int					_proxy_concurrency;
 	int					_reconstruction_interval;
+	string			_replication_type;
 	string			_server_name;
 	int					_server_port;
 	string			_server_socket;
@@ -101,6 +103,7 @@ public:
 	int get_net_read_timeout() { return this->_net_read_timeout; };
 	int get_proxy_concurrency() { return this->_proxy_concurrency; };
 	int get_reconstruction_interval() { return this->_reconstruction_interval; };
+	string get_replication_type() { return this->_replication_type; };
 	string get_server_name() { return this->_server_name; };
 	int get_server_port() { return this->_server_port; };
 	string get_server_socket() { return this->_server_socket; };

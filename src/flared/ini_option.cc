@@ -40,6 +40,7 @@ ini_option::ini_option():
 		_net_read_timeout(default_net_read_timeout),
 		_proxy_concurrency(default_proxy_concurrency),
 		_reconstruction_interval(default_reconstruction_interval),
+		_replication_type(""),
 		_server_name(""),
 		_server_port(default_server_port),
 		_server_socket(""),
@@ -206,6 +207,17 @@ int ini_option::load() {
 			this->_reconstruction_interval = opt_var_map["reconstruction-interval"].as<int>();
 		}
 
+		if (opt_var_map.count("replication-type")) {
+			cluster::replication t;
+			if (cluster::replication_cast(opt_var_map["replication-type"].as<string>(), t) < 0) {
+				cout << "unknown replication type [" << opt_var_map["replication-type"].as<string>() << "]" << endl;
+				throw -1;
+			}
+			this->_replication_type = opt_var_map["replication-type"].as<string>();
+		} else {
+			this->_replication_type = cluster::replication_cast(cluster::replication_async);
+		}
+
 		if (opt_var_map.count("server-name")) {
 			this->_server_name = opt_var_map["server-name"].as<string>();
 		} else {
@@ -337,6 +349,17 @@ int ini_option::reload() {
 			this->_reconstruction_interval = opt_var_map["reconstruction-interval"].as<int>();
 		}
 
+		if (opt_var_map.count("replication-type")) {
+			log_info("  replication_type: %s -> %s", this->_replication_type, opt_var_map["replication-type"].as<string>());
+
+			cluster::replication t;
+			if (cluster::replication_cast(opt_var_map["replication-type"].as<string>(), t) < 0) {
+				log_warning("unknown replication type [%s]", opt_var_map["replication-type"].as<string>().c_str());
+				throw -1;
+			}
+			this->_replication_type = opt_var_map["replication-type"].as<string>();
+		}
+
 		if (opt_var_map.count("thread-pool-size")) {
 			log_info("  thread_pool_size:       %d -> %d", this->_thread_pool_size, opt_var_map["thread-pool-size"].as<int>());
 			this->_thread_pool_size = opt_var_map["thread-pool-size"].as<int>();
@@ -391,6 +414,7 @@ int ini_option::_setup_config_option(program_options::options_description& optio
 		("net-read-timeout",				program_options::value<int>(),			"network read timeout (sec) (dynamic)")
 		("proxy-concurrency",				program_options::value<int>(),			"proxy request concurrency for each node")
 		("reconstruction-interval",	program_options::value<int>(),			"master/slave dump interval in usec (dynamic)")
+		("replication-type",				program_options::value<string>(),		"replication type (async, sync) (dynamic)")
 		("server-name",							program_options::value<string>(),		"my server name")
 		("server-port",							program_options::value<int>(),			"my server port")
 		("server-socket",						program_options::value<string>(),		"my server unix domain socket (optional)")

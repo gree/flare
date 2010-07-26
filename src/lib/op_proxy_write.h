@@ -40,6 +40,17 @@ protected:
 	virtual int _run_server();
 	virtual int _run_client(storage::entry& e);
 	virtual int _parse_client_parameter(storage::entry& e);
+
+	inline bool _is_sync(uint32_t option, cluster::replication cluster_option) {
+		if (option & storage::option_sync) {
+			return true;
+		} else if (option & storage::option_async) {
+			return false;
+		} else if (cluster_option == cluster::replication_sync) {
+			return true;
+		}
+		return false;
+	};
 };
 
 }	// namespace flare

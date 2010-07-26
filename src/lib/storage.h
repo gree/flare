@@ -31,6 +31,7 @@ public:
 		option_none				= 0,
 		option_noreply		= 0x01,
 		option_sync				= 0x01 << 1,
+		option_async			= 0x01 << 2,
 	};
 
 	enum									behavior {
@@ -271,6 +272,8 @@ public:
 			r = option_noreply;
 		} else if (s == "sync") {
 			r = option_sync;
+		} else if (s == "async") {
+			r = option_async;
 		} else {
 			return -1;
 		}
@@ -285,6 +288,8 @@ public:
 			return "noreply";
 		case option_sync:
 			return "sync";
+		case option_async:
+			return "async";
 		}
 		return "";
 	};

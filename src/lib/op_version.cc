@@ -56,7 +56,7 @@ int op_version::_parse_server_parameter() {
 
 int op_version::_run_server() {
 	char buf[BUFSIZ];
-	snprintf(buf, sizeof(buf), "VERSION %s", PACKAGE_VERSION);
+	snprintf(buf, sizeof(buf), "VERSION %s-%s", PACKAGE, PACKAGE_VERSION);
 	this->_connection->writeline(buf);
 
 	return 0;

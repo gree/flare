@@ -201,7 +201,7 @@ char* util::base64_decode(string src, size_t& dst_size) {
 	};
 
 	int src_size = src.size();
-	uint8_t buf_binary[3];
+	uint8_t buf_binary[3] = {0};
 	uint8_t buf_text[4];
 
 	char* dst = _new_ char[src_size];

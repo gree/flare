@@ -64,8 +64,8 @@ public:
 
 		op_parser* parser = NULL;
 		switch (*p) {
-		case 0x80:
-		case 0x81:
+		case -0x80:
+		case -0x79:
 			log_debug("found binary protocol magic bytes (p=%c) -> creating binay parser", *p);
 			parser = static_cast<op_parser*>(_new_ T_binary(c));
 			break;

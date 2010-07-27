@@ -27,6 +27,7 @@ private:
 
 	int					_back_log;
 	string			_config_path;
+	string			_pid_path;
 	bool				_daemonize;
 	string			_data_dir;
 	string			_index_server_name;
@@ -86,6 +87,7 @@ public:
 
 	int get_back_log() { return this->_back_log; };
 	string get_config_path() { return this->_config_path; };
+	string get_pid_path() { return this->_pid_path; };
 	bool is_daemonize() { return this->_daemonize; };
 	string get_data_dir() { return this->_data_dir; };
 	string get_index_server_name() { return this->_index_server_name; };

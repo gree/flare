@@ -21,6 +21,9 @@ server::server():
 #ifdef HAVE_EPOLL
 		_epoll_socket(0),
 #endif
+#ifdef HAVE_KQUEUE
+		_kqueue_socket(-1),
+#endif
 		_back_log(SOMAXCONN) {
 }
 
@@ -51,6 +54,14 @@ int server::close() {
 	if (this->_epoll_socket > 0) {
 		if (::close(this->_epoll_socket) < 0) {
 			log_err("close() failed: %s (%d) (sock=epoll)", util::strerror(errno), errno);
+		}
+	}
+#endif
+
+#ifdef HAVE_KQUEUE
+	if (this->_kqueue_socket >= 0) {
+		if (::close(this->_kqueue_socket) < 0) {
+			log_err("close() failed: %s (%d) (sock=kqueue)", util::strerror(errno), errno);
 		}
 	}
 #endif
@@ -139,6 +150,12 @@ int server::listen(int port) {
 	}
 #endif
 
+#ifdef HAVE_KQUEUE
+	if (this->_add_kqueue_socket(sock) < 0) {
+		return -1;
+	}
+#endif
+
 	return 0;
 }
 
@@ -195,6 +212,12 @@ int server::listen(string uds) {
 	}
 #endif
 
+#ifdef HAVE_KQUEUE
+	if (this->_add_kqueue_socket(sock) < 0) {
+		return -1;
+	}
+#endif
+
 	return 0;
 }
 
@@ -204,10 +227,14 @@ int server::listen(string uds) {
 vector<shared_connection> server::wait() {
 	vector<shared_connection> connection_list;
 
-#ifdef HAVE_EPOLL
+#if defined(HAVE_EPOLL)
 	const char* poll_type = "epoll_wait";		// just for logging
 	struct epoll_event ev_list[this->max_listen_socket];
 	int n = epoll_wait(this->_epoll_socket, ev_list, this->max_listen_socket, -1);
+#elif defined(HAVE_KQUEUE)
+	const char* poll_type = "kqueue_wait";		// just for logging
+	struct kevent kev[this->max_listen_socket];
+	int n = kevent(this->_kqueue_socket, NULL, 0, kev, this->max_listen_socket, NULL);
 #else
 	const char* poll_type = "select";		// just for logging
 	fd_set fds;
@@ -227,9 +254,12 @@ vector<shared_connection> server::wait() {
 	}
 
 	// accpet anyway
-#ifdef HAVE_EPOLL
+#if defined(HAVE_EPOLL)
 	for (int i = 0; i < n; i++) {
 		int listen_socket = ev_list[i].data.fd;
+#elif defined(HAVE_KQUEUE)
+	for (int i = 0; i < n; i++) {
+		int listen_socket = kev[i].ident;
 #else
 	for (int i = 0; i < this->_listen_socket_index; i++) {
 		if (!FD_ISSET(this->_listen_socket[i], &fds)) {
@@ -364,6 +394,32 @@ int server::_add_epoll_socket(int sock) {
 		return -1;
 	} else {
 		log_debug("added listen socket to epoll (epoll_socket=%d, listen_socket=%d)", this->_epoll_socket, sock);
+	}
+
+	return 0;
+}
+#endif
+
+#ifdef HAVE_KQUEUE
+/**
+ *  add listen socket to kqueue
+ */
+int server::_add_kqueue_socket(int sock) {
+	if (this->_kqueue_socket <= 0) {
+		this->_kqueue_socket = kqueue();
+		if (this->_kqueue_socket < 0) {
+			log_err("kqueue() failed: %s (%s)", util::strerror(errno), errno);
+			return -1;
+		}
+	}
+
+	struct kevent kev;
+	EV_SET(&kev, sock, EVFILT_READ, EV_ADD, 0, 0, NULL);
+	if (kevent(this->_kqueue_socket, &kev, 1, NULL, 0, NULL) < 0 ) {
+		log_err("kevent() failed: %s (%d) (sock=%d)", util::strerror(errno), errno, sock);
+		return -1;
+	} else {
+		log_debug("added listen socket to kevent (kqueue_socket=%d, listen_socket=%d)", this->_kqueue_socket, sock);
 	}
 
 	return 0;

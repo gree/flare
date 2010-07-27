@@ -61,6 +61,7 @@ AC_CHECK_HEADER(pthread.h, [], [echo "pthread.h not found"; exit1])
 # Checks for library functions.
 AC_CHECK_FUNC(gethostbyname_r, [AC_DEFINE([HAVE_GETHOSTBYNAME_R], [], [have gethostbyname_r() or not])])
 AC_CHECK_FUNC(epoll_create, [AC_DEFINE([HAVE_EPOLL], [], [have epoll functions or not])])
+AC_CHECK_FUNC(kqueue, [AC_DEFINE([HAVE_KQUEUE], [], [have kqueue functions or not])])
 
 AC_MSG_CHECKING(for gnu specific strerror_r)
 AC_TRY_COMPILE([

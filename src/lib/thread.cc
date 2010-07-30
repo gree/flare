@@ -94,6 +94,7 @@ thread::thread(thread_pool* t):
 	pthread_cond_init(&this->_cond_queue, NULL);
 	pthread_mutex_init(&this->_mutex_running, NULL);
 	pthread_cond_init(&this->_cond_running, NULL);
+	pthread_rwlock_init(&this->_mutex_info, NULL);
 }
 
 /**
@@ -155,10 +156,12 @@ int thread::startup(weak_thread myself, int stack_size) {
 int thread::setup(int type, unsigned int id) {
 	this->_id = id;
 
+	pthread_rwlock_wrlock(&this->_mutex_info);
 	this->_info.id = id;
 	this->_info.type = type;
 	this->_info.timestamp = stats_object->get_timestamp();
 	this->_info.state = "setup";
+	pthread_rwlock_unlock(&this->_mutex_info);
 	
 	return 0;
 }
@@ -279,6 +282,7 @@ int thread::clean(bool& is_pool) {
 int thread::clean_internal() {
 	log_debug("cleaning internal data", 0);
 
+	pthread_rwlock_wrlock(&this->_mutex_info);
 	this->_id = 0;
 	this->_info.id = 0;
 	this->_info.type = 0;
@@ -288,6 +292,7 @@ int thread::clean_internal() {
 	this->_info.timestamp = 0;
 	this->_info.state = "";
 	this->_info.info = "";
+	pthread_rwlock_unlock(&this->_mutex_info);
 
 	return 0;
 }
@@ -412,11 +417,16 @@ int thread::enqueue(shared_thread_queue& q) {
 }
 
 thread::thread_info thread::get_thread_info() {
+	thread_info info;
+
+	pthread_rwlock_rdlock(&this->_mutex_info);
 	pthread_mutex_lock(&this->_mutex_queue);
 	this->_info.queue_size = this->_thread_queue.size();
+	info = this->_info;
 	pthread_mutex_unlock(&this->_mutex_queue);
+	pthread_rwlock_unlock(&this->_mutex_info);
 
-	return this->_info;
+	return info;
 }
 // }}}
 

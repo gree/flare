@@ -91,6 +91,8 @@ private:
 	pthread_mutex_t							_mutex_queue;
 	pthread_cond_t							_cond_queue;
 
+	pthread_rwlock_t			_mutex_info;
+
 public:
 	thread(thread_pool* t);
 	virtual ~thread();
@@ -112,10 +114,10 @@ public:
 	unsigned int get_id() { return this->_id; };
 	pthread_t get_thread_id() { return this->_thread_id; };
 	int get_type() { return this->_info.type; };
-	int set_peer(string host, int port) { this->_info.peer_name = host; this->_info.peer_port = port; return 0; };
-	int set_op(string op) { this->_info.op = op; return 0; };
-	string get_state() { return this->_info.state; };
-	int set_state(string state) { log_debug("%s -> %s", this->_info.state.c_str(), state.c_str()); this->_info.state = state; return 0; };
+	int set_peer(string host, int port) { pthread_rwlock_wrlock(&this->_mutex_info); this->_info.peer_name = host; this->_info.peer_port = port; pthread_rwlock_unlock(&this->_mutex_info); return 0; };
+	int set_op(string op) { pthread_rwlock_wrlock(&this->_mutex_info); this->_info.op = op; pthread_rwlock_unlock(&this->_mutex_info); return 0; };
+	string get_state() { pthread_rwlock_rdlock(&this->_mutex_info); string s = this->_info.state; pthread_rwlock_unlock(&this->_mutex_info); return s; };
+	int set_state(string state) { pthread_rwlock_wrlock(&this->_mutex_info); log_debug("%s -> %s", this->_info.state.c_str(), state.c_str()); this->_info.state = state; pthread_rwlock_unlock(&this->_mutex_info); return 0; };
 	bool is_running() { return this->_running; };
 	shutdown_request is_shutdown_request() { return this->_shutdown_request; };
 	shared_thread get_shared_thread() { return this->_myself.lock(); };

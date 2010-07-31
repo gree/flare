@@ -59,6 +59,8 @@ int op_stats::_parse_server_parameter() {
 			this->_stats_type = stats_type_threads;
 		} else if (strcmp(r, "request") == 0) {
 			this->_stats_type = stats_type_threads_request;
+		} else if (strcmp(r, "slave") == 0) {
+			this->_stats_type = stats_type_threads_slave;
 		} else {
 			this->_stats_type = stats_type_error;
 		}
@@ -143,6 +145,7 @@ int op_stats::_send_stats_threads(thread_pool* tp) {
 		s << "STAT " << it->id << ":state " << it->state << line_delimiter;
 		s << "STAT " << it->id << ":info " << it->info << line_delimiter;
 		s << "STAT " << it->id << ":queue " << it->queue_size << line_delimiter;
+		s << "STAT " << it->id << ":behind " << it->queue_behind << line_delimiter;
 	}
 	this->_connection->write(s.str().c_str(), s.str().size());
 	
@@ -161,6 +164,7 @@ int op_stats::_send_stats_threads(thread_pool* tp, int type) {
 		s << "STAT " << it->id << ":state " << it->state << line_delimiter;
 		s << "STAT " << it->id << ":info " << it->info << line_delimiter;
 		s << "STAT " << it->id << ":queue " << it->queue_size << line_delimiter;
+		s << "STAT " << it->id << ":behind " << it->queue_behind << line_delimiter;
 	}
 	this->_connection->write(s.str().c_str(), s.str().size());
 	

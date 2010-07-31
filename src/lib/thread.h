@@ -53,6 +53,7 @@ public:
 		string							state;
 		string							info;
 		uint32_t						queue_size;
+		int									queue_behind;
 	} thread_info;
 
 	enum									shutdown_request {

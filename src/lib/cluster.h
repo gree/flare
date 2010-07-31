@@ -210,6 +210,7 @@ public:
 		return this->get_node(this->to_node_key(node_server_name, node_server_port));
 	}
 	vector<node> get_node();
+	vector<node> get_slave_node();
 
 	key_resolver* get_key_resolver() { return this->_key_resolver; };
 	int set_monitor_threshold(int monitor_threshold);

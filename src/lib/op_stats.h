@@ -34,6 +34,7 @@ protected:
 		stats_type_sizes,
 		stats_type_threads,
 		stats_type_threads_request,
+		stats_type_threads_slave,
 		stats_type_nodes,
 	};
 

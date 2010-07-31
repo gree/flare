@@ -37,6 +37,7 @@ protected:
 	pthread_cond_t			_cond_sync;
 	int									_sync_ref_count;
 	bool								_success;
+	time_t							_timestamp;
 
 public:
 	thread_queue();
@@ -51,6 +52,7 @@ public:
 
 	virtual string get_ident() { return this->_ident; };
 	bool is_success() { return this->_success; };
+	time_t get_timestamp() { return this->_timestamp; };
 };
 
 }	// namespace flare

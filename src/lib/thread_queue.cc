@@ -8,6 +8,7 @@
  *	$Id$
  */
 #include "thread_queue.h"
+#include "app.h"
 
 namespace gree {
 namespace flare {
@@ -20,6 +21,7 @@ thread_queue::thread_queue():
 		_ident(""),
 		_sync(false),
 		_sync_ref_count(0) {
+	this->_timestamp = stats_object->get_timestamp();
 }
 
 /**
@@ -30,6 +32,7 @@ thread_queue::thread_queue(string ident):
 		_sync(false),
 		_sync_ref_count(0),
 		_success(false) {
+	this->_timestamp = stats_object->get_timestamp();
 }
 
 /**

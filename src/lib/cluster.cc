@@ -258,6 +258,37 @@ vector<cluster::node> cluster::get_node() {
 }
 
 /**
+ *	get slave node info vector
+ */
+vector<cluster::node> cluster::get_slave_node() {
+	vector<node> v;
+
+	node n = this->get_node(this->_node_key);
+	if (n.node_role != role_master) {
+		return v;
+	}
+
+	pthread_rwlock_rdlock(&this->_mutex_node_partition_map);
+	vector<partition_node> slave;
+	if (this->_node_partition_map.count(n.node_partition) > 0) {
+		slave = this->_node_partition_map[n.node_partition].slave;
+	} else if (this->_node_partition_prepare_map.count(n.node_partition) > 0) {
+		slave = this->_node_partition_prepare_map[n.node_partition].slave;
+	} else {
+		// something is going wrong
+		pthread_rwlock_unlock(&this->_mutex_node_partition_map);
+	}
+	pthread_rwlock_unlock(&this->_mutex_node_partition_map);
+
+	for (vector<partition_node>::iterator it = slave.begin(); it != slave.end(); it++) {
+		node tmp = this->get_node(it->node_key);
+		v.push_back(tmp);
+	}
+
+	return v;
+}
+
+/**
  *	[index] add new node
  */
 int cluster::add_node(string node_server_name, int node_server_port) {

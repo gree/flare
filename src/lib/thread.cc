@@ -422,6 +422,12 @@ thread::thread_info thread::get_thread_info() {
 	pthread_rwlock_rdlock(&this->_mutex_info);
 	pthread_mutex_lock(&this->_mutex_queue);
 	this->_info.queue_size = this->_thread_queue.size();
+	if (this->_info.queue_size > 0) {
+		shared_thread_queue q = this->_thread_queue.front();
+		this->_info.queue_behind = stats_object->get_timestamp() - q->get_timestamp();
+	} else {
+		this->_info.queue_behind = 0;
+	}
 	info = this->_info;
 	pthread_mutex_unlock(&this->_mutex_queue);
 	pthread_rwlock_unlock(&this->_mutex_info);

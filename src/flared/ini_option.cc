@@ -51,6 +51,8 @@ ini_option::ini_option():
 		_storage_cache_size(default_storage_cache_size),
 		_storage_compress(""),
 		_storage_large(false),
+		_storage_lmemb(default_storage_lmemb),
+		_storage_nmemb(default_storage_nmemb),
 		_storage_type(""),
 		_thread_pool_size(default_thread_pool_size) {
 }
@@ -267,6 +269,14 @@ int ini_option::load() {
 			this->_storage_large = true;
 		}
 
+		if (opt_var_map.count("storage-lmemb")) {
+			this->_storage_lmemb = opt_var_map["storage-lmemb"].as<int>();
+		}
+
+		if (opt_var_map.count("storage-nmemb")) {
+			this->_storage_nmemb = opt_var_map["storage-nmemb"].as<int>();
+		}
+
 		if (opt_var_map.count("storage-type")) {
 			storage::type t;
 			if (storage::type_cast(opt_var_map["storage-type"].as<string>(), t) < 0) {
@@ -429,7 +439,9 @@ int ini_option::_setup_config_option(program_options::options_description& optio
 		("storage-cache-size",			program_options::value<int>(),			"storage header cache size")
 		("storage-compress",				program_options::value<string>(),		"storage compress type (deflate, bz2, tcbs) (tch)")
 		("storage-large",																								"use large storage (tch)")
-		("storage-type",						program_options::value<string>(),		"storage type (tch:tokyo cabinet hash database)")
+		("storage-lmemb",						program_options::value<int>(),			"number of members in each leaf page (tcb)")
+		("storage-nmemb",						program_options::value<int>(),			"number of members in each non-leaf page (tcb")
+		("storage-type",						program_options::value<string>(),		"storage type (tch:tokyo cabinet hash database, tcb:tokyo cabinet b+tree database)")
 		("thread-pool-size",				program_options::value<int>(),			"thread pool size (dynamic)");
 
 	return 0;

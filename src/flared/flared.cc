@@ -143,6 +143,8 @@ int flared::startup(int argc, char **argv) {
 	log_notice("  storage_cache_size:     %d", ini_option_object().get_storage_cache_size());
 	log_notice("  storage_compress:       %s", ini_option_object().get_storage_compress().c_str());
 	log_notice("  storage_large:          %s", ini_option_object().is_storage_large() ? "true" : "false");
+	log_notice("  storage_lmemb:          %d", ini_option_object().get_storage_lmemb());
+	log_notice("  storage_nmemb:          %d", ini_option_object().get_storage_nmemb());
 	log_notice("  storage_type:           %s", ini_option_object().get_storage_type().c_str());
 	log_notice("  thread_pool_size:       %d", ini_option_object().get_thread_pool_size());
 
@@ -184,7 +186,7 @@ int flared::startup(int argc, char **argv) {
 		return -1;
 	}
 
-	storage::type t;
+	storage::type t = storage::type_tch;
 	storage::type_cast(ini_option_object().get_storage_type(), t);
 	switch (t) {
 	case storage::type_tch:
@@ -195,6 +197,17 @@ int flared::startup(int argc, char **argv) {
 				ini_option_object().get_storage_cache_size(),
 				ini_option_object().get_storage_compress(),
 				ini_option_object().is_storage_large());
+		break;
+	case storage::type_tcb:
+		this->_storage = _new_ storage_tcb(ini_option_object().get_data_dir(),
+				ini_option_object().get_mutex_slot(),
+				ini_option_object().get_storage_ap(),
+				ini_option_object().get_storage_bucket_size(),
+				ini_option_object().get_storage_cache_size(),
+				ini_option_object().get_storage_compress(),
+				ini_option_object().is_storage_large(),
+				ini_option_object().get_storage_lmemb(),
+				ini_option_object().get_storage_nmemb());
 		break;
 	default:
 		log_err("unknown storage type [%s]", ini_option_object().get_storage_type().c_str());

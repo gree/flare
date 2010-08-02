@@ -58,6 +58,7 @@ public:
 
 	enum									type {
 		type_tch,
+		type_tcb,
 	};
 
 	enum									compress {
@@ -338,6 +339,8 @@ public:
 	static inline int type_cast(string s, type& t) {
 		if (s == "tch") {
 			t = type_tch;
+		} else if (s == "tcb") {
+			t = type_tcb;
 		} else {
 			return -1;
 		}
@@ -348,6 +351,8 @@ public:
 		switch (t) {
 		case type_tch:
 			return "tch";
+		case type_tcb:
+			return "tcb";
 		}
 		return "";
 	};

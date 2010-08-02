@@ -67,6 +67,7 @@ libflare_la_SOURCES = \
 	singleton.h \
 	stats.h stats.cc \
 	storage.h storage.cc \
+	storage_tcb.h storage_tcb.cc \
 	storage_tch.h storage_tch.cc \
 	util.h util.cc \
 	thread.h thread.cc \

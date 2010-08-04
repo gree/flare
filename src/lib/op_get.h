@@ -31,8 +31,8 @@ public:
 protected:
 	virtual int _parse_server_parameter();
 	virtual int _run_server();
-	virtual int _run_client(storage::entry& e);
-	virtual int _run_client(list<storage::entry>& e);
+	virtual int _run_client(storage::entry& e, void* parameter);
+	virtual int _run_client(list<storage::entry>& e, void* parameter);
 	virtual int _parse_client_parameter(storage::entry& e);
 	virtual int _parse_client_parameter(list<storage::entry>& e);
 };

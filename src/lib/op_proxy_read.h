@@ -28,21 +28,25 @@ protected:
 	cluster*							_cluster;
 	storage*							_storage;
 	list<storage::entry>	_entry_list;
+	void*									_parameter;
+	bool									_is_multiple_response;
 
 public:
 	op_proxy_read(shared_connection c, string ident, cluster* cl, storage* st);
 	virtual ~op_proxy_read();
 
-	virtual int run_client(storage::entry& e);
-	virtual int run_client(list<storage::entry>& entry_list);
+	bool is_multiple_response() { return this->_is_multiple_response; };
+
+	virtual int run_client(storage::entry& e, void* parameter);
+	virtual int run_client(list<storage::entry>& entry_list, void* parameter);
 
 	list<storage::entry>& get_entry_list() { return this->_entry_list; };
 
 protected:
 	virtual int _parse_server_parameter();
 	virtual int _run_server();
-	virtual int _run_client(storage::entry& e);
-	virtual int _run_client(list<storage::entry>& e);
+	virtual int _run_client(storage::entry& e, void* parameter);
+	virtual int _run_client(list<storage::entry>& e, void* parameter);
 	virtual int _parse_client_parameter(storage::entry& e);
 	virtual int _parse_client_parameter(list<storage::entry>& e);
 };

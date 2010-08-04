@@ -84,7 +84,7 @@ int op_get::_run_server() {
 		stats_object->increment_cmd_get();
 
 		shared_queue_proxy_read q;
-		cluster::proxy_request r_proxy = this->_cluster->pre_proxy_read(this, *it, q);
+		cluster::proxy_request r_proxy = this->_cluster->pre_proxy_read(this, *it, this->_parameter, q);
 		if (r_proxy == cluster::proxy_request_complete) {
 			q_map[it->key] = q;
 		} else if (r_proxy == cluster::proxy_request_error_enqueue) {
@@ -139,7 +139,7 @@ int op_get::_run_server() {
 	return 0;
 }
 
-int op_get::_run_client(storage::entry& e) {
+int op_get::_run_client(storage::entry& e, void* parameter) {
 	int request_len = e.key.size() + BUFSIZ;
 	char* request = _new_ char[request_len];
 	snprintf(request, request_len, "%s %s", this->get_ident().c_str(), e.key.c_str());
@@ -149,7 +149,7 @@ int op_get::_run_client(storage::entry& e) {
 	return r;
 }
 
-int op_get::_run_client(list<storage::entry>& e) {
+int op_get::_run_client(list<storage::entry>& e, void* parameter) {
 	if (e.size() == 0) {
 		log_warning("passed 0 entry...", 0);
 		return -1;

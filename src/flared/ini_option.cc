@@ -364,7 +364,7 @@ int ini_option::reload() {
 		}
 
 		if (opt_var_map.count("replication-type")) {
-			log_info("  replication_type: %s -> %s", this->_replication_type, opt_var_map["replication-type"].as<string>());
+			log_info("  replication_type: %s -> %s", this->_replication_type.c_str(), opt_var_map["replication-type"].as<string>().c_str());
 
 			cluster::replication t;
 			if (cluster::replication_cast(opt_var_map["replication-type"].as<string>(), t) < 0) {

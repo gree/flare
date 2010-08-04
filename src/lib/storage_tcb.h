@@ -55,8 +55,10 @@ public:
 	virtual int iter_end();
 	virtual uint32_t count();
 	virtual uint64_t size();
+	virtual int get_key(string key, int limit, vector<string>& r);
 
 	virtual type get_type() { return this->_type; };
+	virtual bool is_capable(capability c);
 
 protected:
 	virtual int _get_header(string key, entry& e);

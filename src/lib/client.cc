@@ -72,7 +72,7 @@ op::result client::get(string key, storage::entry& e) {
 	e.key = key;
 	
 	op_get* p = _new_ op_get(this->_connection, NULL, NULL);
-	if (p->run_client(e) < 0) {
+	if (p->run_client(e, 0) < 0) {
 		log_err("get operation failed", 0);
 		_delete_(p);
 		return op::result_error;
@@ -90,7 +90,7 @@ op::result client::gets(string key, storage::entry& e) {
 	e.key = key;
 	
 	op_gets* p = _new_ op_gets(this->_connection, NULL, NULL);
-	if (p->run_client(e) < 0) {
+	if (p->run_client(e, 0) < 0) {
 		log_err("gets operation failed", 0);
 		_delete_(p);
 		return op::result_error;

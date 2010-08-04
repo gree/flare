@@ -612,6 +612,39 @@ uint32_t storage_tcb::count() {
 uint64_t storage_tcb::size() {
 	return tcbdbfsiz(this->_db);
 }
+
+int storage_tcb::get_key(string key, int limit, vector<string>& r) {
+	TCLIST* key_list = tcbdbfwmkeys(this->_db, key.c_str(), key.size(), limit);
+
+	int i;
+	for (i = 0; i < tclistnum(key_list); i++) {
+		int n;
+		const char* p = static_cast<const char*>(tclistval(key_list, i, &n));
+		if (p == NULL) {
+			break;
+		}
+		string tmp_key = p;
+		r.push_back(tmp_key);
+	}
+
+	tclistdel(key_list);
+
+	return 0;
+}
+
+bool storage_tcb::is_capable(capability c) {
+	switch (c) {
+	case capability_prefix_search:
+		return true;
+	case capability_list:
+		return true;
+	default:
+		// nop
+		break;
+	}
+
+	return false;
+}
 // }}}
 
 // {{{ protected methods

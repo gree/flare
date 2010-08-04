@@ -57,6 +57,7 @@ public:
 	virtual uint64_t size();
 
 	virtual type get_type() { return this->_type; };
+	virtual bool is_capable(capability c);
 
 protected:
 	virtual int _get_header(string key, entry& e);

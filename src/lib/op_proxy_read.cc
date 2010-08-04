@@ -20,6 +20,7 @@ op_proxy_read::op_proxy_read(shared_connection c, string ident, cluster* cl, sto
 		op(c, ident),
 		_cluster(cl),
 		_storage(st) {
+	this->_is_multiple_response = false;
 }
 
 /**
@@ -36,8 +37,8 @@ op_proxy_read::~op_proxy_read() {
 /**
  *	send client request
  */
-int op_proxy_read::run_client(storage::entry& e) {
-	if (this->_run_client(e) < 0) {
+int op_proxy_read::run_client(storage::entry& e, void* parameter) {
+	if (this->_run_client(e, parameter) < 0) {
 		return -1;
 	}
 
@@ -47,8 +48,8 @@ int op_proxy_read::run_client(storage::entry& e) {
 /**
  *	send client request
  */
-int op_proxy_read::run_client(list<storage::entry>& e) {
-	if (this->_run_client(e) < 0) {
+int op_proxy_read::run_client(list<storage::entry>& e, void* parameter) {
+	if (this->_run_client(e, parameter) < 0) {
 		return -1;
 	}
 
@@ -68,11 +69,11 @@ int op_proxy_read::_run_server() {
 	return 0;
 }
 
-int op_proxy_read::_run_client(storage::entry& e) {
+int op_proxy_read::_run_client(storage::entry& e, void* parameter) {
 	return 0;
 }
 
-int op_proxy_read::_run_client(list<storage::entry>& e) {
+int op_proxy_read::_run_client(list<storage::entry>& e, void* parameter) {
 	return 0;
 }
 

@@ -8,6 +8,8 @@
 #ifndef	__QUEUE_PROXY_READ_H__
 #define	__QUEUE_PROXY_READ_H__
 
+#include <list>
+
 #include "cluster.h"
 #include "storage.h"
 #include "thread_queue.h"
@@ -31,6 +33,8 @@ protected:
 	storage*								_storage;
 	vector<string>					_proxy;
 	storage::entry					_entry;
+	list<storage::entry>		_entry_list;
+	void*										_parameter;
 	string									_op_ident;
 	op::result							_result;
 	string									_result_message;
@@ -38,13 +42,14 @@ protected:
 public:
 	static const int max_retry = 4;
 
-	queue_proxy_read(cluster* cl, storage* st, vector<string> proxy, storage::entry entry, string op_ident);
+	queue_proxy_read(cluster* cl, storage* st, vector<string> proxy, storage::entry entry, void* parameter, string op_ident);
 	virtual ~queue_proxy_read();
 
 	virtual int run(shared_connection c);
 	op::result get_result() { return this->_result; };
 	string get_result_message() { return this->_result_message; };
 	storage::entry& get_entry() { return this->_entry; };
+	list<storage::entry>& get_entry_list() { return this->_entry_list; };
 
 protected:
 	op_proxy_read* _get_op(string op_ident, shared_connection c);

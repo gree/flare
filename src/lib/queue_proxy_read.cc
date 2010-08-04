@@ -11,6 +11,7 @@
 #include "op_proxy_read.h"
 #include "op_get.h"
 #include "op_gets.h"
+#include "op_keys.h"
 
 namespace gree {
 namespace flare {
@@ -19,12 +20,13 @@ namespace flare {
 /**
  *	ctor for queue_proxy_read
  */
-queue_proxy_read::queue_proxy_read(cluster* cl, storage* st, vector<string> proxy, storage::entry entry, string op_ident):
+queue_proxy_read::queue_proxy_read(cluster* cl, storage* st, vector<string> proxy, storage::entry entry, void* parameter, string op_ident):
 		thread_queue("proxy_read"),
 		_cluster(cl),
 		_storage(st),
 		_proxy(proxy),
 		_entry(entry),
+		_parameter(parameter),
 		_op_ident(op_ident),
 		_result(op::result_none),
 		_result_message("") {
@@ -51,9 +53,18 @@ int queue_proxy_read::run(shared_connection c) {
 	p->set_proxy(this->_proxy);
 
 	int retry = queue_proxy_read::max_retry;
+	if (p->is_multiple_response()) {
+		this->_entry_list.push_back(this->_entry);
+	}
 	while (retry > 0) {
-		if (p->run_client(this->_entry) >= 0) {
-			break;
+		if (p->is_multiple_response()) {
+			if (p->run_client(this->_entry_list, this->_parameter) >= 0) {
+				break;
+			}
+		} else {
+			if (p->run_client(this->_entry, this->_parameter) >= 0) {
+				break;
+			}
 		}
 		if (c->is_available() == false) {
 			log_debug("reconnecting (host=%s, port=%d)", c->get_host().c_str(), c->get_port());
@@ -81,6 +92,8 @@ op_proxy_read* queue_proxy_read::_get_op(string op_ident, shared_connection c) {
 		return _new_ op_get(c, this->_cluster, this->_storage);
 	} else if (op_ident == "gets") {
 		return _new_ op_gets(c, this->_cluster, this->_storage);
+	} else if (op_ident == "keys") {
+		return _new_ op_keys(c, this->_cluster, this->_storage);
 	}
 	log_warning("unknown op (ident=%s)", op_ident.c_str());
 

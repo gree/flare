@@ -590,6 +590,10 @@ uint32_t storage_tch::count() {
 uint64_t storage_tch::size() {
 	return tchdbfsiz(this->_db);
 }
+
+bool storage_tch::is_capable(capability c) {
+	return false;
+}
 // }}}
 
 // {{{ protected methods

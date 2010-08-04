@@ -61,6 +61,11 @@ public:
 		type_tcb,
 	};
 
+	enum									capability {
+		capability_prefix_search,
+		capability_list,
+	};
+
 	enum									compress {
 		compress_none,
 		compress_deflate,
@@ -263,8 +268,10 @@ public:
 	virtual int iter_end() = 0;
 	virtual uint32_t count() = 0;
 	virtual uint64_t size() = 0;
+	virtual int get_key(string key, int limit, vector<string>& r) { return -1; };
 
 	virtual type get_type() = 0;
+	virtual bool is_capable(capability c) = 0;
 
 	static inline int option_cast(string s, option& r) {
 		if (s == "") {

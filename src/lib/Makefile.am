@@ -39,6 +39,7 @@ libflare_la_SOURCES = \
 	op_get.h op_get.cc \
 	op_gets.h op_gets.cc \
 	op_incr.h op_incr.cc \
+	op_keys.h op_keys.cc \
 	op_kill.h op_kill.cc \
 	op_meta.h op_meta.cc \
 	op_node_add.h op_node_add.cc \

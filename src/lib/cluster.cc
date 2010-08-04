@@ -940,7 +940,7 @@ int cluster::deactivate_node() {
  *
  *	@todo fix performance issue
  */
-cluster::proxy_request cluster::pre_proxy_read(op_proxy_read* op, storage::entry& e, shared_queue_proxy_read& q_result) {
+cluster::proxy_request cluster::pre_proxy_read(op_proxy_read* op, storage::entry& e, void* parameter, shared_queue_proxy_read& q_result) {
 	partition p;
 	bool dummy;
 	int n = this->_determine_partition(e, p, false, dummy);
@@ -968,7 +968,7 @@ cluster::proxy_request cluster::pre_proxy_read(op_proxy_read* op, storage::entry
 
 	vector<string> proxy = op->get_proxy();
 	proxy.push_back(this->_node_key);
-	shared_queue_proxy_read q(new queue_proxy_read(this, this->_storage, proxy, e, op->get_ident()));
+	shared_queue_proxy_read q(new queue_proxy_read(this, this->_storage, proxy, e, parameter, op->get_ident()));
 	if (this->_enqueue(shared_static_cast<thread_queue, queue_proxy_read>(q), node_key, e.get_key_hash_value(storage::hash_algorithm_bitshift), true) < 0) {
 		return proxy_request_error_enqueue;
 	}

@@ -181,9 +181,10 @@ int op_dump::_run_client(int wait, int partition, int partition_size) {
 }
 
 int op_dump::_parse_client_parameter() {
+	int items = 0;
 	for (;;) {
 		if (this->_thread_available && this->_thread->is_shutdown_request()) {
-			log_info("thread shutdown request -> breaking loop", 0);
+			log_notice("thread shutdown request -> breaking loop", 0);
 			break;
 		}
 
@@ -193,13 +194,14 @@ int op_dump::_parse_client_parameter() {
 		}
 
 		if (this->_thread_available && this->_thread->is_shutdown_request()) {
-			log_info("thread shutdown request -> breaking loop", 0);
+			log_notice("thread shutdown request -> breaking loop", 0);
 			_delete_(p);
 			break;
 		}
 
 		if (strcmp(p, "END\n") == 0) {
 			_delete_(p);
+			log_notice("found delimiter, dump completed (items=%d)", items);
 			break;
 		}
 
@@ -233,6 +235,7 @@ int op_dump::_parse_client_parameter() {
 			log_warning("something is going wrong while storing data -> continue processing", 0);
 			// nop
 		}
+		items++;
 	}
 
 	return 0;

@@ -60,6 +60,8 @@ int handler_reconstruction::run() {
 	this->_thread->set_state("execute");
 	this->_thread->set_op(p->get_ident());
 
+	log_notice("starting dump operation (master=%s:%d, partition=%d, partition_size=%d, interval=%d)", this->_node_server_name.c_str(), this->_node_server_port, this->_partition, this->_partition_size, this->_cluster->get_reconstruction_interval());
+
 	if (p->run_client(this->_cluster->get_reconstruction_interval(), this->_partition, this->_partition_size) < 0) {
 		_delete_(p);
 		this->_cluster->deactivate_node();
@@ -67,6 +69,7 @@ int handler_reconstruction::run() {
 	}
 
 	_delete_(p);
+	log_notice("dump completed (master=%s:%d, partition=%d, partition_size=%d, interval=%d)", this->_node_server_name.c_str(), this->_node_server_port, this->_partition, this->_partition_size, this->_cluster->get_reconstruction_interval());
 
 	// node activation (slave only)
 	if (this->_role == cluster::role_slave) {

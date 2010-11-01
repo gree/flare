@@ -485,7 +485,7 @@ int connection::write(const char* p, int bufsiz, bool buffered) {
 			log_debug("write %d bytes (total %d bytes) -> complete", len, written);
 			break;
 		} else {
-			log_info("expect %d bytes but write %d byes (total %d bytes) -> continue processing", bufsiz, len, written);
+			log_info("expect %d bytes but write %d bytes (total %d bytes) -> continue processing", bufsiz, len, written);
 		}
 	}
 

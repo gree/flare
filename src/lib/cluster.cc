@@ -38,6 +38,7 @@ cluster::cluster(thread_pool* tp, string data_dir, string server_name, int serve
 		_key_resolver(NULL),
 		_storage(NULL),
 		_data_dir(data_dir),
+		_master_reconstruction(0),
 		_server_name(server_name),
 		_server_port(server_port),
 		_monitor_threshold(0),
@@ -53,6 +54,7 @@ cluster::cluster(thread_pool* tp, string data_dir, string server_name, int serve
 		_reconstruction_interval(0) {
 	this->_node_key = this->to_node_key(server_name, server_port);
 	pthread_mutex_init(&this->_mutex_serialization, NULL);
+	pthread_mutex_init(&this->_mutex_master_reconstruction, NULL);
 	pthread_rwlock_init(&this->_mutex_node_map, NULL);
 	pthread_rwlock_init(&this->_mutex_node_partition_map, NULL);
 }
@@ -411,8 +413,8 @@ int cluster::down_node(string node_server_name, int node_server_port) {
 						log_notice("found new master node (node_key=%s, partition=%d, balance=%d)", failover_node_key.c_str(), n.node_partition, this->_node_map[failover_node_key].node_balance);
 					}
 				}
-			} else if (n.node_state == state_prepare) {
-				log_err("master node (prepare) down -> clearing all preparing nodes in this partition (partition=%d)", n.node_partition);
+			} else if (n.node_state == state_prepare || n.node_state == state_ready) {
+				log_err("master node (prepare|ready) down -> clearing all preparing nodes in this partition (partition=%d)", n.node_partition);
 
 				for (vector<partition_node>::iterator it = this->_node_partition_prepare_map[n.node_partition].slave.begin(); it != this->_node_partition_prepare_map[n.node_partition].slave.end(); it++) {
 					log_debug("  -> node_key: %s", it->node_key.c_str());
@@ -451,9 +453,47 @@ int cluster::down_node(string node_server_name, int node_server_port) {
 }
 
 /**
+ *	[index] node ready event handler
+ */
+int cluster::ready_node(string node_server_name, int node_server_port) {
+	string node_key = this->to_node_key(node_server_name, node_server_port);
+
+	log_notice("handling node ready event [node_key=%s]", node_key.c_str());
+
+	pthread_rwlock_wrlock(&this->_mutex_node_map);
+	pthread_rwlock_wrlock(&this->_mutex_node_partition_map);
+
+	try {
+		node& n = this->_node_map[node_key];
+		if (n.node_state != state_prepare) {
+			log_notice("node state is not prepare (node_key=%s, node_state=%s)", node_key.c_str(), cluster::state_cast(n.node_state).c_str());
+			throw -1;
+		}
+
+		this->_node_map[node_key].node_state = state_ready;
+	} catch (int e) {
+		pthread_rwlock_unlock(&this->_mutex_node_partition_map);
+		pthread_rwlock_unlock(&this->_mutex_node_map);
+		return e;
+	}
+
+	this->_reconstruct_node_partition(false);
+
+	this->_save();
+	pthread_rwlock_unlock(&this->_mutex_node_partition_map);
+	pthread_rwlock_unlock(&this->_mutex_node_map);
+
+	// notify
+	shared_queue_node_sync q(new queue_node_sync(this));
+	this->_broadcast(q);
+
+	return 0;
+}
+
+/**
  *	[index] node up event handler
  */
-int cluster::up_node(string node_server_name, int node_server_port, bool force) {
+int cluster::up_node(string node_server_name, int node_server_port) {
 	string node_key = this->to_node_key(node_server_name, node_server_port);
 
 	log_notice("handling node up event [node_key=%s]", node_key.c_str());
@@ -463,12 +503,15 @@ int cluster::up_node(string node_server_name, int node_server_port, bool force) 
 
 	try {
 		node& n = this->_node_map[node_key];
-		if (n.node_state == state_active || (force == false && n.node_state == state_prepare)) {
-			log_notice("node is already active/prepare (node_key=%s, node_state=%s)", node_key.c_str(), cluster::state_cast(n.node_state).c_str());
+		if (n.node_state == state_active) {
+			log_notice("node is already active (node_key=%s, node_state=%s)", node_key.c_str(), cluster::state_cast(n.node_state).c_str());
 			throw 0;
+		} else if (n.node_state == state_prepare) {
+			log_notice("node is not ready to be active (current state=prepare), skip this operation (node_key=%s, node_state=%s)", node_key.c_str(), cluster::state_cast(n.node_state).c_str());
+			throw -1;
 		}
 
-		if (n.node_state == state_prepare) {
+		if (n.node_state == state_ready) {
 			// just shift state to active
 		} else {
 			if (n.node_role == role_master) {
@@ -604,9 +647,9 @@ int cluster::set_node_role(string node_server_name, int node_server_port, role n
 			throw -1;
 		}
 
-		// state=prepare
-		if (n.node_state == state_prepare) {
-			// role=master
+		// state=prepare|ready
+		if (n.node_state == state_prepare || n.node_state == state_ready) {
+			// current role=master
 			if (n.node_role == role_master) {
 				if (node_role == role_master) {
 					if (this->_check_node_balance(node_key, node_balance) < 0) {
@@ -615,7 +658,7 @@ int cluster::set_node_role(string node_server_name, int node_server_port, role n
 					n.node_balance = node_balance;
 					log_notice("setting node balance [node_key=%s, node_balance=%d -> %d]", node_key.c_str(), n.node_balance, node_balance);
 				} else if (node_role == role_slave) {
-					log_notice("failed to set node role [role=master, state=prepare] -> [role=slave] not allowed", 0);
+					log_notice("failed to set node role [role=master, state=prepare|ready] -> [role=slave] not allowed", 0);
 					throw -1;
 				} else if (node_role == role_proxy) {
 					log_notice("clearing all slave nodes (partition=%d)", n.node_partition);
@@ -652,7 +695,7 @@ int cluster::set_node_role(string node_server_name, int node_server_port, role n
 					n.node_balance = node_balance;
 					log_notice("setting node balance [node_key=%s, node_balance=%d -> %d]", node_key.c_str(), n.node_balance, node_balance);
 				} else if (node_role == role_proxy) {
-					// we do not have to check node balance here (<- state=prepare)
+					// we do not have to check node balance here (<- state=prepare|ready)
 					n.node_role = node_role;
 					n.node_state = state_active;
 					n.node_balance = 0;
@@ -661,7 +704,7 @@ int cluster::set_node_role(string node_server_name, int node_server_port, role n
 				}
 			} else if (n.node_role == role_proxy) {
 				n.node_state = state_active;
-				log_notice("setting node role [role=proxy, state=prepare] -> something inconsistent -> shift state to active", 0);
+				log_notice("setting node role [role=proxy, state=prepare|ready] -> something inconsistent -> shift state to active", 0);
 			}
 		}
 
@@ -771,7 +814,9 @@ int cluster::set_node_state(string node_server_name, int node_server_port, state
 	if (node_state == state_down) {
 		return this->down_node(node_server_name, node_server_port);
 	} else if (node_state == state_active) {
-		return this->up_node(node_server_name, node_server_port, true);		// force mode (allow preparing nodes to shift to active)
+		return this->up_node(node_server_name, node_server_port);
+	} else if (node_state == state_ready) {
+		return this->ready_node(node_server_name, node_server_port);
 	}
 
 	return 0;
@@ -894,7 +939,7 @@ int cluster::set_monitor_read_timeout(int monitor_read_timeout) {
 }
 
 /**
- *	[node] activate node (prepare -> active)
+ *	[node] activate node (prepare -> ready)
  */
 int cluster::activate_node() {
 	shared_connection c(new connection());
@@ -904,7 +949,7 @@ int cluster::activate_node() {
 	}
 
 	op_node_state* p = _new_ op_node_state(c, this);
-	if (p->run_client(this->_server_name, this->_server_port, state_active) < 0 || p->get_result() != op::result_ok) {
+	if (p->run_client(this->_server_name, this->_server_port, state_ready) < 0 || p->get_result() != op::result_ok) {
 		log_err("failed to activate node", 0);
 		_delete_(p);
 		return -1;
@@ -1131,6 +1176,10 @@ int cluster::_shift_node_role(string node_key, role old_role, int old_partition,
 			}
 			log_debug("determined reconstruction source node (node_key=%s, partition=%d, new_role=%s, new_partition=%d)", it->first.c_str(), it->second.node_partition, cluster::role_cast(new_role).c_str(), new_partition);
 
+			pthread_mutex_lock(&this->_mutex_master_reconstruction);
+			this->_master_reconstruction++;
+			pthread_mutex_unlock(&this->_mutex_master_reconstruction);
+
 			shared_thread t = this->_thread_pool->get(thread_pool::thread_type_reconstruction);
 			string node_server_name;
 			int node_server_port = 0;
@@ -1138,6 +1187,9 @@ int cluster::_shift_node_role(string node_key, role old_role, int old_partition,
 			handler_reconstruction* h = _new_ handler_reconstruction(t, this, this->_storage, node_server_name, node_server_port, new_partition, partition_size, new_role);
 			t->trigger(h);
 		}
+		pthread_mutex_lock(&this->_mutex_master_reconstruction);
+		log_notice("master reconstruction started (n=%d)", this->_master_reconstruction);
+		pthread_mutex_unlock(&this->_mutex_master_reconstruction);
 	} else {
 		string master_node_key = "";
 		int partition_size = this->_node_partition_map.size();
@@ -1378,7 +1430,7 @@ int cluster::_reconstruct_node_partition(bool lock) {
 				npm[n.node_partition].index[node_key] = true;
 
 				log_debug("master node added (node_key=%s, partition=%d, balance=%d)", node_key.c_str(), n.node_partition, n.node_balance);
-			} else if (n.node_state == state_prepare) {
+			} else if (n.node_state == state_prepare || n.node_state == state_ready) {
 				if (nppm[n.node_partition].master.node_key.empty() == false) {
 					throw "master (prepare) is already set, cannot overwrite";
 				}

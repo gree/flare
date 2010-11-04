@@ -70,6 +70,7 @@ public:
 		state_active,
 		state_prepare,
 		state_down,
+		state_ready,
 	};
 
 	enum							proxy_request {
@@ -144,6 +145,9 @@ protected:
 	string								_data_dir;
 	pthread_mutex_t				_mutex_serialization;
 
+	int										_master_reconstruction;
+	pthread_mutex_t				_mutex_master_reconstruction;
+
 	node_map							_node_map;
 	node_partition_map		_node_partition_map;
 	node_partition_map		_node_partition_prepare_map;
@@ -179,7 +183,8 @@ public:
 
 	int add_node(string node_server_name, int node_server_port);
 	int down_node(string node_server_name, int node_server_port);
-	int up_node(string node_server_name, int node_server_port, bool force = true);
+	int ready_node(string node_server_name, int node_server_port);
+	int up_node(string node_server_name, int node_server_port);
 	int remove_node(string node_server_name, int node_server_port);
 	int set_node_role(string node_server_name, int node_server_port, role node_role, int node_balance, int node_partition);
 	int set_node_state(string node_server_name, int node_server_port, state node_state);
@@ -187,6 +192,7 @@ public:
 
 	int set_storage(storage* st) { this->_storage = st; return 0; };
 
+	int notify_master_reconstruction() { int n; pthread_mutex_lock(&this->_mutex_master_reconstruction); this->_master_reconstruction--; n = this->_master_reconstruction; pthread_mutex_unlock(&this->_mutex_master_reconstruction); return n; };
 	int activate_node();
 	int deactivate_node();
 	proxy_request pre_proxy_read(op_proxy_read* op, storage::entry& e, void* parameter, shared_queue_proxy_read& q);
@@ -303,6 +309,8 @@ public:
 			t = state_prepare;
 		} else if (s == "down") {
 			t = state_down;
+		} else if (s == "ready") {
+			t = state_ready;
 		} else {
 			return -1;
 		}
@@ -317,6 +325,8 @@ public:
 			return "prepare";
 		case state_down:
 			return "down";
+		case state_ready:
+			return "ready";
 		}
 		return "";
 	}

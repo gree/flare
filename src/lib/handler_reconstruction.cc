@@ -71,8 +71,15 @@ int handler_reconstruction::run() {
 	_delete_(p);
 	log_notice("dump completed (master=%s:%d, partition=%d, partition_size=%d, interval=%d)", this->_node_server_name.c_str(), this->_node_server_port, this->_partition, this->_partition_size, this->_cluster->get_reconstruction_interval());
 
-	// node activation (slave only)
-	if (this->_role == cluster::role_slave) {
+	// node activation (state -> ready)
+	if (this->_role == cluster::role_master) {
+		int n = this->_cluster->notify_master_reconstruction();
+		log_notice("master reconstruction completed (%d threads left)", n);
+		if (n <= 0) {
+			this->_cluster->activate_node();
+		}
+	} else {
+		// just shift state to ready
 		this->_cluster->activate_node();
 	}
 

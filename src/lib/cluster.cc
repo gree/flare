@@ -941,7 +941,7 @@ int cluster::set_monitor_read_timeout(int monitor_read_timeout) {
 /**
  *	[node] activate node (prepare -> ready)
  */
-int cluster::activate_node() {
+int cluster::activate_node(bool skip_ready_state) {
 	shared_connection c(new connection());
 	if (c->open(this->_index_server_name, this->_index_server_port) < 0) {
 		log_err("failed to connect to index server", 0);
@@ -949,7 +949,8 @@ int cluster::activate_node() {
 	}
 
 	op_node_state* p = _new_ op_node_state(c, this);
-	if (p->run_client(this->_server_name, this->_server_port, state_ready) < 0 || p->get_result() != op::result_ok) {
+	state new_state = skip_ready_state ? state_active : state_ready;
+	if (p->run_client(this->_server_name, this->_server_port, new_state) < 0 || p->get_result() != op::result_ok) {
 		log_err("failed to activate node", 0);
 		_delete_(p);
 		return -1;

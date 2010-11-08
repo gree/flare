@@ -193,7 +193,7 @@ public:
 	int set_storage(storage* st) { this->_storage = st; return 0; };
 
 	int notify_master_reconstruction() { int n; pthread_mutex_lock(&this->_mutex_master_reconstruction); this->_master_reconstruction--; n = this->_master_reconstruction; pthread_mutex_unlock(&this->_mutex_master_reconstruction); return n; };
-	int activate_node();
+	int activate_node(bool skip_ready_state = false);
 	int deactivate_node();
 	proxy_request pre_proxy_read(op_proxy_read* op, storage::entry& e, void* parameter, shared_queue_proxy_read& q);
 	proxy_request pre_proxy_write(op_proxy_write* op, shared_queue_proxy_write& q, uint64_t generic_value = 0);

@@ -80,7 +80,7 @@ int handler_reconstruction::run() {
 		}
 	} else {
 		// just shift state to ready
-		this->_cluster->activate_node();
+		this->_cluster->activate_node(true);		// true: skip ready state
 	}
 
 	return 0;

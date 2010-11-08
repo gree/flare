@@ -1,3 +1,196 @@
+commit 7a562c9f550bc0de0eea34d7a699221b9346aeaf
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Mon Nov 8 23:57:30 2010 +0900
+
+    fix reload op in init.d script
+
+commit 36351d0fdbab5455b832bd3c99efc5a4b550de33
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Mon Nov 8 23:44:38 2010 +0900
+
+    added test for key_resolver_modular
+
+commit 8cd505a95e7a509aab59de4f99c96c9eb992f34c
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Mon Nov 8 23:44:07 2010 +0900
+
+    shift slave state to active after reconstruction (skip ready state as for slave)
+
+commit 65ffe2ee65ab4b8a9f9389e1296d0e26b4ece42f
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Thu Nov 4 16:47:21 2010 +0900
+
+    added new state:ready, and fine tunes
+
+commit 854f22829d2f8bbea37bb528c080d76cba858fe7
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Tue Nov 2 01:19:28 2010 +0900
+
+    some more notice messages
+
+commit 1fc21d6f9b4e04b8bf62da669bef5633bbbec34b
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Mon Nov 1 21:31:13 2010 +0900
+
+    fix typo in log message
+
+commit 15b87f2c5adc139a0bde2b829ca186a4b0931847
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Wed Aug 4 17:33:01 2010 +0900
+
+    added "keys" op
+    (now, key prefix search is available on tcb (tokyo cabinet b+tree) storage)
+
+commit 925092837e97db947fa98d80979291ac88d0eb19
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Mon Aug 2 19:25:28 2010 +0900
+
+    tokyo cabinet b+tree database support (still, just replacement of tch, no advantage:)
+
+commit 23e65bc2916cefba047f68b268605c432bfe0156
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Sun Aug 1 00:40:58 2010 +0900
+
+    added "behind" parameter to "stats threads" (seconds behind from the oldest queue)
+    added "stats threads slave" to show only replication threads
+
+commit b910e9c8920e0433314a8cce776d5655d5467e20
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Fri Jul 30 15:58:28 2010 +0900
+
+    fix segfault caused by "stats threads" under heavy load
+
+commit da8296e6b5e23e0114a551599b28cb281327f153
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Tue Jul 27 17:32:12 2010 +0900
+
+    fixes for FreeBSD ports (patch from <nork@FreeBSD.org>)
+
+commit b55b66f244c2729dbd6ea3ccbf5a1eace64c3630
+Merge: 599bc1c... e0f7bec...
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Tue Jul 27 16:12:51 2010 +0900
+
+    Merge commit 'takano32/master'
+
+commit 599bc1c4185dfc171193a9a6a588a155a5baa5f1
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Tue Jul 27 01:57:56 2010 +0900
+
+    added replication-type option (support semi-sync replication)
+
+commit dfb49434a673fa0532e5915381d86d7defc8bf6a
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Tue Jul 27 01:11:35 2010 +0900
+
+    identify package (= software) name in version op
+
+commit 0f1ae1e0733ce9712423573efa1006cfb0d7f9f7
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Tue Jul 27 00:38:03 2010 +0900
+
+    a little bit faster
+
+commit e0f7bec459469768d27ec21551d68d54d176b13b
+Author: TAKANO Mitsuhiro <takano32@gmail.com>
+Date:   Wed Jul 14 13:08:28 2010 +0900
+
+    * src/lib/op_parser.h: fix "case label value exceeds maximum value for type" warning.
+      0x80 => -0x80, 0x81 => -0x79
+
+commit aa9e5592736a4763e39d6fe8ea28082984480917
+Author: TAKANO Mitsuhiro <takano32@gmail.com>
+Date:   Wed Jul 14 12:27:52 2010 +0900
+
+    src/lib/util.cc: remove warning.
+                     ‘buf_binary’ is used uninitialized in this function
+
+commit 4e68440bacd1e5c01f994beac2355859bc5a40cd
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Sat Feb 27 19:37:00 2010 +0900
+
+    added flare administrative script (not officially documented yet)
+    (faq:
+      q. why you use php?
+      a. please do not ask
+    )
+
+commit 39b7f553cd70b159069975fff5c5f954000df55b
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Sat Feb 27 19:31:49 2010 +0900
+
+    added flare administrative script (not officially documented yet)
+    (faq:
+      q. why you use php?
+      a. please do not ask
+    )
+
+commit 20d08ce602753fd9d05c0cf03cb8d7c398b25757
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Wed Feb 3 19:59:23 2010 +0900
+
+    fix FreeBSD build
+
+commit 49d332e3c17be3073f792a9d729586321ab4028d
+Author: Kouhei Sutou <kou@clear-code.com>
+Date:   Sun Nov 15 22:49:46 2009 +0900
+
+    use CppCutter as a testing framework.
+
+commit e948d7eb1b2b40b975963d0a393e3261306f504f
+Author: Kouhei Sutou <kou@clear-code.com>
+Date:   Wed Dec 23 00:32:36 2009 +0900
+
+    use convenience library instead of static library.
+
+commit c90cf3b5ba83edb416a53f1a09c9a4c2a85b1eb6
+Author: Kouhei Sutou <kou@clear-code.com>
+Date:   Sat Nov 7 23:34:59 2009 +0900
+
+    add .gitignore.
+
+commit b22e32f4b59c5c22b6c33264e4dd6f4cf750d234
+Author: Kouhei Sutou <kou@clear-code.com>
+Date:   Sat Nov 7 23:27:41 2009 +0900
+
+    add autogen.sh.
+
+commit 780fda9493ad5de48a3308d2d3be9ff8de871b8a
+Author: Kouhei Sutou <kou@clear-code.com>
+Date:   Sun Nov 1 17:37:00 2009 +0900
+
+    fix a typo in comment.
+
+commit 3e15749d863f5c4ede28700df82365315b3d22c6
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Wed Oct 21 12:04:42 2009 +0900
+
+    key resolving parameter (modular) update
+
+commit 70d1fabca50d91a7ec22f5f3d4b5c1ec601da11e
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Thu Oct 15 21:02:56 2009 +0900
+
+    tc package fixes
+
+commit 96d6f0362b86474ad4b1fe4047d3193a0b3ec06b
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Sat Oct 10 12:54:09 2009 +0900
+
+    update url
+
+commit 519c529730995f189bb02e178e71af513a5aad5a
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Fri Oct 9 19:08:47 2009 +0900
+
+    ready for 1.0.9
+
+commit 440724b49e8a031813b95fcd4e1e4a1ae916e690
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Fri Oct 9 19:02:41 2009 +0900
+
+    tc package version update (1.4.34)
+
 commit 40bc682790281d11d9f0feb8af4f51e2564ccc8b
 Author: Masaki Fujimoto <fujimoto@php.net>
 Date:   Fri Oct 9 18:43:43 2009 +0900

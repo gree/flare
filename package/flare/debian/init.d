@@ -91,23 +91,23 @@ case "$1" in
   reload)
 	if [ $RUN_INDEX = "yes" ]; then
 		echo "Reloading $DESC_INDEX configuration files."
-		start-stop-daemon --stop --signal 1 --quiet --pidfile $DATA_INDEX/$NAME_INDEX.pid --exec $DAEMON
+		start-stop-daemon --stop --signal 1 --quiet --pidfile $DATA_INDEX/$NAME_INDEX.pid --exec $DAEMON_INDEX
 	fi
 	if [ $RUN_NODE = "yes" ]; then
 		echo "Reloading $DESC_NODE configuration files."
-		start-stop-daemon --stop --signal 1 --quiet --pidfile $DATA_NODE/$NAME_NODE.pid --exec $DAEMON
+		start-stop-daemon --stop --signal 1 --quiet --pidfile $DATA_NODE/$NAME_NODE.pid --exec $DAEMON_NODE
 	fi
   	;;
   reload-index)
 	if [ $RUN_INDEX = "yes" ]; then
 		echo "Reloading $DESC_INDEX configuration files."
-		start-stop-daemon --stop --signal 1 --quiet --pidfile $DATA_INDEX/$NAME_INDEX.pid --exec $DAEMON
+		start-stop-daemon --stop --signal 1 --quiet --pidfile $DATA_INDEX/$NAME_INDEX.pid --exec $DAEMON_INDEX
 	fi
 	;;
   reload-node)
 	if [ $RUN_NODE = "yes" ]; then
 		echo "Reloading $DESC_NODE configuration files."
-		start-stop-daemon --stop --signal 1 --quiet --pidfile $DATA_NODE/$NAME_NODE.pid --exec $DAEMON
+		start-stop-daemon --stop --signal 1 --quiet --pidfile $DATA_NODE/$NAME_NODE.pid --exec $DAEMON_NODE
 	fi
 	;;
   restart)

@@ -1,3 +1,33 @@
+commit c48c36fb3b4890f9f371e95616cf783beeba64cf
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Tue Nov 9 03:35:58 2010 +0900
+
+    final fix...
+
+commit 138e285f4348730096e603f2d51db91dab66ca7a
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Tue Nov 9 03:17:30 2010 +0900
+
+    and more (fix)
+
+commit df527692d8b4f25544dc084478387c23e46f5b8f
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Tue Nov 9 03:00:34 2010 +0900
+
+    fix index server behavior
+
+commit 9948de74628c29539d44811ba579e382275a6fc7
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Tue Nov 9 00:32:41 2010 +0900
+
+    fix debian package dependencies
+
+commit fb196b30012039574f6691ad25a1662f195eee6e
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Tue Nov 9 00:07:27 2010 +0900
+
+    ready for 1.0.10 (still, some more fixes would be applied?)
+
 commit 7a562c9f550bc0de0eea34d7a699221b9346aeaf
 Author: Masaki Fujimoto <fujimoto@php.net>
 Date:   Mon Nov 8 23:57:30 2010 +0900

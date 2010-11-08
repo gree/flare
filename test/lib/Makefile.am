@@ -1,6 +1,7 @@
 if WITH_CUTTER
 noinst_LTLIBRARIES =	\
-	test-storage-tc.la
+	test-storage-tc.la \
+	test-key-resolver-modular.la
 endif
 
 INCLUDES =			\
@@ -22,3 +23,4 @@ LIBS =						\
 	$(CPPCUTTER_LIBS)
 
 test_storage_tc_la_SOURCES	= test-storage-tc.cc
+test_key_resolver_modular_la_SOURCES	= test-key-resolver-modular.cc

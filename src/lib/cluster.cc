@@ -506,7 +506,7 @@ int cluster::up_node(string node_server_name, int node_server_port) {
 		if (n.node_state == state_active) {
 			log_notice("node is already active (node_key=%s, node_state=%s)", node_key.c_str(), cluster::state_cast(n.node_state).c_str());
 			throw 0;
-		} else if (n.node_state == state_prepare) {
+		} else if (n.node_role != role_slave && n.node_state == state_prepare) {
 			log_notice("node is not ready to be active (current state=prepare), skip this operation (node_key=%s, node_state=%s)", node_key.c_str(), cluster::state_cast(n.node_state).c_str());
 			throw -1;
 		}

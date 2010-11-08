@@ -511,7 +511,7 @@ int cluster::up_node(string node_server_name, int node_server_port) {
 			throw -1;
 		}
 
-		if (n.node_state == state_ready || (n.node_role == role_proxy && n.node_state == state_active)) {
+		if (n.node_state == state_ready || (n.node_role == role_slave && n.node_state == state_prepare)) {
 			// just shift state to active
 		} else {
 			if (n.node_role == role_master) {

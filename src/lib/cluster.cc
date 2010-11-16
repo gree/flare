@@ -501,6 +501,7 @@ int cluster::up_node(string node_server_name, int node_server_port) {
 	pthread_rwlock_wrlock(&this->_mutex_node_map);
 	pthread_rwlock_wrlock(&this->_mutex_node_partition_map);
 
+	bool require_prior_node_key = false;
 	try {
 		node& n = this->_node_map[node_key];
 		if (n.node_state == state_active) {
@@ -513,6 +514,10 @@ int cluster::up_node(string node_server_name, int node_server_port) {
 
 		if (n.node_state == state_ready || (n.node_role == role_slave && n.node_state == state_prepare)) {
 			// just shift state to active
+			if (n.node_state == state_ready && n.node_role == role_master) {
+				// when new master shifts from ready to active, we need to activate new master prior to other nodes (to avoid dead lock between nodes)
+				require_prior_node_key = true;
+			}
 		} else {
 			if (n.node_role == role_master) {
 				for (node_map::iterator it = this->_node_map.begin(); it != this->_node_map.end(); it++) {
@@ -548,7 +553,7 @@ int cluster::up_node(string node_server_name, int node_server_port) {
 
 	// notify
 	shared_queue_node_sync q(new queue_node_sync(this));
-	this->_broadcast(q);
+	this->_broadcast(q, false, require_prior_node_key ? node_key : "");
 
 	return 0;
 }
@@ -1274,9 +1279,41 @@ int cluster::_enqueue(shared_thread_queue q, thread_pool::thread_type type, bool
  *	
  *	[notice] all threads receive same thread_queue object
  */
-int cluster::_broadcast(shared_thread_queue q, bool sync) {
+int cluster::_broadcast(shared_thread_queue q, bool sync, string prior_node_key) {
 	log_debug("broadcasting queue [ident=%s]", q->get_ident().c_str());
 
+	// handle prior node key first
+	if (prior_node_key.empty() == false && this->_node_map.count(prior_node_key) > 0) {
+		pthread_rwlock_rdlock(&this->_mutex_node_map);
+		log_notice("prior node key = %s -> process target node first w/ sync mode", prior_node_key.c_str());
+		thread_pool::local_map m = this->_thread_pool->get_active(this->_node_map[prior_node_key].node_thread_type);
+
+		int n = 0;
+		for (thread_pool::local_map::iterator it_local = m.begin(); it_local != m.end(); it_local++) {
+			if (it_local->second->is_myself()) {
+				log_warning("thread is myself -> skip enqueue (<- will cause dead lock) (id=%d, thread_id=%d)", it_local->first, it_local->second->get_thread_id());
+				continue;
+			}
+
+			q->sync_ref();
+			if (it_local->second->enqueue(q) < 0) {
+				log_warning("enqueue failed (perhaps thread is now exiting?)", 0);
+				q->sync_unref();
+				continue;
+			}
+			log_debug("  -> enqueue (id=%d)", it_local->first);
+			n++;
+
+			// only 1 queue for each node
+			break;
+		}
+		pthread_rwlock_unlock(&this->_mutex_node_map);
+		if (n > 0) {
+			q->sync();
+		}
+	}
+
+	// TODO: see if thread is myself or not to avoid dead locks
 	pthread_rwlock_rdlock(&this->_mutex_node_map);
 	for (node_map::iterator it = this->_node_map.begin(); it != this->_node_map.end(); it++) {
 		thread_pool::local_map m = this->_thread_pool->get_active(it->second.node_thread_type);

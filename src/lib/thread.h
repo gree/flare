@@ -112,6 +112,7 @@ public:
 	int enqueue(shared_thread_queue& q);
 	thread_info get_thread_info();
 
+	bool is_myself() { return pthread_self() == this->_thread_id; };
 	unsigned int get_id() { return this->_id; };
 	pthread_t get_thread_id() { return this->_thread_id; };
 	int get_type() { return this->_info.type; };

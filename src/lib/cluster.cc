@@ -1140,7 +1140,7 @@ cluster::proxy_request cluster::post_proxy_write(op_proxy_write* op, bool sync) 
  *	assumes that node_map and node_partition_map is alreadby write locked
  */
 int cluster::_shift_node_state(string node_key, state old_state, state new_state) {
-	log_notice("shifting node_state (node_key=%s, old_state=%d, new_state=%d)", node_key.c_str(), old_state, new_state);
+	log_notice("shifting node_state (node_key=%s, old_state=%s, new_state=%s)", node_key.c_str(), cluster::state_cast(old_state).c_str(), cluster::state_cast(new_state).c_str());
 
 	if (node_key == this->_node_key) {
 		// nothing to do?
@@ -1157,7 +1157,7 @@ int cluster::_shift_node_state(string node_key, state old_state, state new_state
  *	assumes that node_map and node_partition_map is alreadby write locked
  */
 int cluster::_shift_node_role(string node_key, role old_role, int old_partition, role new_role, int new_partition) {
-	log_notice("shifting node_role (node_key=%s, old_role=%d, old_partition=%d, new_role=%d, new_partition=%d)", node_key.c_str(), old_role, old_partition, new_role, new_partition);
+	log_notice("shifting node_role (node_key=%s, old_role=%s, old_partition=%d, new_role=%s, new_partition=%d)", node_key.c_str(), cluster::role_cast(old_role).c_str(), old_partition, cluster::role_cast(new_role).c_str(), new_partition);
 
 	if (node_key != this->_node_key) {
 		// we do not have to care about other nodes (maybe?)

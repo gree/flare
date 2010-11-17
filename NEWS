@@ -1,3 +1,13 @@
+* [2010/11/20] 1.0.11 release
+
+  * feature updates
+    - added --partition-size option (default=1024)
+    - added --partition-modular-virtual option (default=4096)
+
+  * bug fixes
+    - fix possible dead locks (could happen when activating new master node under heavy load)
+    - uppress bogus master reconstruction, happens when slave is promoted to master
+
 * [2010/11/08] 1.0.10 release
 
   * feature updates

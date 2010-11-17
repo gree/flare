@@ -1,3 +1,33 @@
+commit fdd0665d768ea9aed26ec230babbbc398e9fa95e
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Wed Nov 17 23:11:19 2010 +0900
+
+    added --partition-size, --partition-modular-virtual option (for limited users)
+
+commit a8b809e8a64d01d1d0e09e572b32e2070b6e7e54
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Wed Nov 17 22:21:51 2010 +0900
+
+    make log human readable
+
+commit a12aa9ffe2aa7cad73b53432126bde13492afd40
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Wed Nov 17 16:52:59 2010 +0900
+
+    suppress bogus master reconstruction, happens when slave is promoted to master
+
+commit f0254af483fcfd7994497b18af322820aef78650
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Tue Nov 16 12:01:57 2010 +0900
+
+    - fix possible dead locks (could happen when activating new master node under heavy load)
+
+commit 0c1fcec3e5c663aa7148fc10827ed7a974e85a0d
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Tue Nov 9 05:16:10 2010 +0900
+
+    changelog update for 1.0.10 release
+
 commit c48c36fb3b4890f9f371e95616cf783beeba64cf
 Author: Masaki Fujimoto <fujimoto@php.net>
 Date:   Tue Nov 9 03:35:58 2010 +0900

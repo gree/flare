@@ -44,6 +44,7 @@ cluster::cluster(thread_pool* tp, string data_dir, string server_name, int serve
 		_monitor_threshold(0),
 		_monitor_interval(0),
 		_monitor_read_timeout(0),
+		_partition_size(default_partition_size),
 		_thread_type(default_thread_type),
 #ifdef ENABLE_MYSQL_REPLICATION
 		_mysql_replication(false),
@@ -151,7 +152,7 @@ int cluster::node::parse(const char* p) {
 /**
  *	startup proc for index process
  */
-int cluster::startup_index(key_resolver::type key_resolver_type, int key_resolver_modular_hint) {
+int cluster::startup_index(key_resolver::type key_resolver_type, int key_resolver_modular_hint, int key_resolver_modular_virtual) {
 	this->_type = type_index;
 
 	// load
@@ -166,7 +167,7 @@ int cluster::startup_index(key_resolver::type key_resolver_type, int key_resolve
 
 	// key resolver
 	if (key_resolver_type == key_resolver::type_modular) {
-		this->_key_resolver = _new_ key_resolver_modular(key_resolver_modular_hint);
+		this->_key_resolver = _new_ key_resolver_modular(this->_partition_size, key_resolver_modular_hint, key_resolver_modular_virtual);
 	} else {
 		log_err("unknown key resolver type [%s]", key_resolver::type_cast(key_resolver_type).c_str());
 		return -1;
@@ -215,18 +216,25 @@ int cluster::startup_node(string index_server_name, int index_server_port) {
 
 	// get meta data from index server
 	key_resolver::type key_resolver_type;
+	int partition_size;
 	int key_resolver_modular_hint;
+	int key_resolver_modular_virtual;
 	op_meta* p_m = _new_ op_meta(c, this);
-	if (p_m->run_client(key_resolver_type, key_resolver_modular_hint) < 0) {
+	if (p_m->run_client(partition_size, key_resolver_type, key_resolver_modular_hint, key_resolver_modular_virtual) < 0) {
 		log_err("failed to get meta data from index server", 0);
 		_delete_(p_m);
 		return -1;
 	}
-	log_debug("meta: key_resolver_type=%s, key_resolver_modular_hint=%d", key_resolver::type_cast(key_resolver_type).c_str(), key_resolver_modular_hint);
+	log_notice("meta data from index server:", 0);
+	log_notice("  partition_size:                 %d", partition_size);
+	log_notice("  key_resolver_type:              %s", key_resolver::type_cast(key_resolver_type).c_str());
+	log_notice("  key_resolver_modular_hint:      %d", key_resolver_modular_hint);
+	log_notice("  key_resolver_modular_virtual:   %d", key_resolver_modular_virtual);
+	this->_partition_size = partition_size;
 
 	// startup key resolver
 	if (key_resolver_type == key_resolver::type_modular) {
-		this->_key_resolver = _new_ key_resolver_modular(key_resolver_modular_hint);
+		this->_key_resolver = _new_ key_resolver_modular(partition_size, key_resolver_modular_hint, key_resolver_modular_virtual);
 	} else {
 		log_err("unknown key resolver type [%s]", key_resolver::type_cast(key_resolver_type).c_str());
 		return -1;

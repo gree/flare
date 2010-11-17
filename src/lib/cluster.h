@@ -135,7 +135,7 @@ public:
 	typedef map<int, partition>	node_partition_map;
 
 	static const int	default_thread_type = 16;
-	static const int	max_partition_size = 1024;
+	static const int	default_partition_size = 1024;
 
 protected:
 	thread_pool*					_thread_pool;
@@ -162,6 +162,7 @@ protected:
 	int										_monitor_threshold;
 	int										_monitor_interval;
 	int										_monitor_read_timeout;
+	int										_partition_size;
 	int										_thread_type;
 #ifdef ENABLE_MYSQL_REPLICATION
 	bool									_mysql_replication;
@@ -178,7 +179,7 @@ public:
 	cluster(thread_pool* tp, string data_dir, string server_name, int server_port);
 	virtual ~cluster();
 
-	int startup_index(key_resolver::type key_resolver_type, int key_resolver_modular_hint);
+	int startup_index(key_resolver::type key_resolver_type, int key_resolver_modular_hint, int key_resolver_modular_virtual);
 	int startup_node(string index_server_name, int index_server_port);
 
 	int add_node(string node_server_name, int node_server_port);
@@ -222,6 +223,8 @@ public:
 	int set_monitor_threshold(int monitor_threshold);
 	int set_monitor_interval(int monitor_interval);
 	int set_monitor_read_timeout(int monitor_read_timeout);
+	int get_partition_size() { return this->_partition_size; };
+	int set_partition_size(int partition_size) { this->_partition_size = partition_size; return 0; };
 	int set_proxy_concurrency(int proxy_concurrency) { this->_proxy_concurrency = proxy_concurrency; return 0; };
 	int get_reconstruction_interval() { return this->_reconstruction_interval; };
 	int set_reconstruction_interval(int reconstruction_interval) { this->_reconstruction_interval = reconstruction_interval; return 0; };

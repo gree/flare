@@ -115,6 +115,8 @@ int flarei::startup(int argc, char **argv) {
 	log_notice("  monitor_read_timeout:   %d", ini_option_object().get_monitor_read_timeout());
 	log_notice("  net_read_timeout:       %d", ini_option_object().get_net_read_timeout());
 	log_notice("  partition_modular_hint: %d", ini_option_object().get_partition_modular_hint());
+	log_notice("  partition_modular_virtual: %d", ini_option_object().get_partition_modular_virtual());
+	log_notice("  partition_size:         %d", ini_option_object().get_partition_size());
 	log_notice("  partition_type:         %s", ini_option_object().get_partition_type().c_str());
 	log_notice("  server_name:            %s", ini_option_object().get_server_name().c_str());
 	log_notice("  server_port:            %d", ini_option_object().get_server_port());
@@ -155,10 +157,12 @@ int flarei::startup(int argc, char **argv) {
 	this->_cluster->set_monitor_threshold(ini_option_object().get_monitor_threshold());
 	this->_cluster->set_monitor_interval(ini_option_object().get_monitor_interval());
 	this->_cluster->set_monitor_read_timeout(ini_option_object().get_monitor_read_timeout());
+	this->_cluster->set_partition_size(ini_option_object().get_partition_size());
 
 	key_resolver::type t;
 	key_resolver::type_cast(ini_option_object().get_partition_type(), t);
-	if (this->_cluster->startup_index(t, ini_option_object().get_partition_modular_hint()) < 0) {
+	// XXX: fix this interface...just passing key resolver object will do? refactor when another partition type is added
+	if (this->_cluster->startup_index(t, ini_option_object().get_partition_modular_hint(), ini_option_object().get_partition_modular_virtual()) < 0) {
 		return -1;
 	}
 

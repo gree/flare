@@ -36,12 +36,12 @@ op_meta::~op_meta() {
 /**
  *	send client request
  */
-int op_meta::run_client(key_resolver::type& key_resolver_type, int& key_resolver_modular_hint) {
+int op_meta::run_client(int& partition_size, key_resolver::type& key_resolver_type, int& key_resolver_modular_hint, int& key_resolver_modular_virtual) {
 	if (this->_run_client() < 0) {
 		return -1;
 	}
 
-	return this->_parse_client_parameter(key_resolver_type, key_resolver_modular_hint);
+	return this->_parse_client_parameter(partition_size, key_resolver_type, key_resolver_modular_hint, key_resolver_modular_virtual);
 }
 // }}}
 
@@ -76,15 +76,22 @@ int op_meta::_run_server() {
 	ostringstream s;
 	char buf[BUFSIZ];
 
+	// partition size
+	snprintf(buf, sizeof(buf), "META partition-size %d", this->_cluster->get_partition_size());
+	s << buf << line_delimiter;
+
 	// partition type
 	key_resolver* kr = this->_cluster->get_key_resolver();
 	snprintf(buf, sizeof(buf), "META partition-type %s", key_resolver::type_cast(kr->get_type()).c_str());
 	s << buf << line_delimiter;
 
-	// partition modular hint
+	// partition modular hint|virtual
 	if (kr->get_type() == key_resolver::type_modular) {
 		key_resolver_modular* krm = dynamic_cast<key_resolver_modular*>(kr);
 		snprintf(buf, sizeof(buf), "META partition-modular-hint %d", krm->get_hint());
+		s << buf << line_delimiter;
+
+		snprintf(buf, sizeof(buf), "META partition-modular-virtual %d", krm->get_virtual());
 		s << buf << line_delimiter;
 	}
 
@@ -99,7 +106,7 @@ int op_meta::_run_client() {
 	return this->_send_request(request);
 }
 
-int op_meta::_parse_client_parameter(key_resolver::type& key_resolver_type, int& key_resolver_modular_hint) {
+int op_meta::_parse_client_parameter(int& partition_size, key_resolver::type& key_resolver_type, int& key_resolver_modular_hint, int& key_resolver_modular_virtual) {
 	for (;;) {
 		char* p;
 		if (this->_connection->readline(&p) < 0) {
@@ -127,7 +134,15 @@ int op_meta::_parse_client_parameter(key_resolver::type& key_resolver_type, int&
 			}
 
 			// value(s)
-			if (strcmp(q, "partition-type") == 0) {
+			if (strcmp(q, "partition-size") == 0) {
+				i += util::next_digit(p+i, q, sizeof(q));
+				if (q[0] == '\0') {
+					log_warning("no parition size value (required)", 0);
+					throw -1;
+				}
+				partition_size = lexical_cast<int>(q);
+				log_debug("meta: key=[%s] value=[%d]", "partition-size", partition_size);
+			} else if (strcmp(q, "partition-type") == 0) {
 				i += util::next_word(p+i, q, sizeof(q));
 				if (key_resolver::type_cast(q, key_resolver_type) < 0) {
 					log_warning("unknown partition type [%s]", q);
@@ -142,6 +157,14 @@ int op_meta::_parse_client_parameter(key_resolver::type& key_resolver_type, int&
 				}
 				key_resolver_modular_hint = lexical_cast<int>(q);
 				log_debug("meta: key=[%s] value=[%d]", "partition-modular-hint", key_resolver_modular_hint);
+			} else if (strcmp(q, "partition-modular-virtual") == 0) {
+				i += util::next_digit(p+i, q, sizeof(q));
+				if (q[0] == '\0') {
+					log_warning("no hint value (required)", 0);
+					throw -1;
+				}
+				key_resolver_modular_virtual = lexical_cast<int>(q);
+				log_debug("meta: key=[%s] value=[%d]", "partition-modular-virtual", key_resolver_modular_virtual);
 			} else {
 				log_warning("unknown meta key [%s]", q);
 				throw -2;

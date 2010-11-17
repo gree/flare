@@ -21,21 +21,24 @@ namespace flare {
  */
 class key_resolver_modular : public key_resolver {
 public:
-	static const int		key_distribution_size = 4096;
 
 protected:
 	static const type		_type = key_resolver::type_modular;
 
+	int									_partition_size;
 	int									_hint;
+	int									_virtual;
 	int**								_map;
 
 public:
-	key_resolver_modular(int hint);
+	key_resolver_modular(int p, int hint, int v);
 	virtual ~key_resolver_modular();
 
 	int startup();
 	type get_type() { return this->_type; };
+	int get_partition_size() { return this->_partition_size; };
 	int get_hint() { return this->_hint; };
+	int get_virtual() { return this->_virtual; };
 	int resolve(int key_hash_value, int partition_size);
 };
 

@@ -35,6 +35,8 @@ private:
 	int					_monitor_read_timeout;
 	int					_net_read_timeout;
 	int					_partition_modular_hint;
+	int					_partition_modular_virtual;
+	int					_partition_size;
 	string			_partition_type;
 	string			_server_name;
 	int					_server_port;
@@ -49,6 +51,8 @@ public:
 	static const int default_monitor_read_timeout = 1*1000;
 	static const int default_net_read_timeout = 10*60*1000;
 	static const int default_partition_modular_hint = 1;
+	static const int default_partition_modular_virtual = 4096;
+	static const int default_partition_size = 1024;
 	static const int default_server_port = 12120;
 	static const int default_stack_size = 128;
 	static const int default_thread_pool_size = 5;
@@ -72,6 +76,8 @@ public:
 	int get_monitor_read_timeout() { return this->_monitor_read_timeout; };
 	int get_net_read_timeout() { return this->_net_read_timeout; };
 	int get_partition_modular_hint() { return this->_partition_modular_hint; };
+	int get_partition_modular_virtual() { return this->_partition_modular_virtual; };
+	int get_partition_size() { return this->_partition_size; };
 	string get_partition_type() { return this->_partition_type; };
 	string get_server_name() { return this->_server_name; };
 	int get_server_port() { return this->_server_port; };

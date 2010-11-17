@@ -28,13 +28,13 @@ public:
 	op_meta(shared_connection c, cluster* cl);
 	virtual ~op_meta();
 
-	virtual int run_client(key_resolver::type& key_resolver_type, int& key_resolver_modular_hint);
+	virtual int run_client(int& partition_size, key_resolver::type& key_resolver_type, int& key_resolver_modular_hint, int& key_resolver_modular_virtual);
 
 protected:
 	virtual int _parse_server_parameter();
 	virtual int _run_server();
 	virtual int _run_client();
-	virtual int _parse_client_parameter(key_resolver::type& key_resolver_type, int& key_resolver_modular_hint);
+	virtual int _parse_client_parameter(int& partition_size, key_resolver::type& key_resolver_type, int& key_resolver_modular_hint, int& key_resolver_modular_virtual);
 };
 
 }	// namespace flare

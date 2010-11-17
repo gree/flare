@@ -32,6 +32,8 @@ ini_option::ini_option():
 		_monitor_read_timeout(default_monitor_read_timeout),
 		_net_read_timeout(default_net_read_timeout),
 		_partition_modular_hint(default_partition_modular_hint),
+		_partition_modular_virtual(default_partition_modular_virtual),
+		_partition_size(default_partition_size),
 		_partition_type(""),
 		_server_name(""),
 		_server_port(default_server_port),
@@ -156,6 +158,14 @@ int ini_option::load() {
 
 		if (opt_var_map.count("partition-modular-hint")) {
 			this->_partition_modular_hint = opt_var_map["partition-modular-hint"].as<int>();
+		}
+
+		if (opt_var_map.count("partition-modular-virtual")) {
+			this->_partition_modular_virtual = opt_var_map["partition-modular-virtual"].as<int>();
+		}
+
+		if (opt_var_map.count("partition-size")) {
+			this->_partition_size = opt_var_map["partition-size"].as<int>();
 		}
 
 		if (opt_var_map.count("partition-type")) {
@@ -316,7 +326,9 @@ int ini_option::_setup_config_option(program_options::options_description& optio
 		("monitor-threshold",				program_options::value<int>(),			"node server monitoring threshold (dynamic)")
 		("monitor-interval",				program_options::value<int>(),			"node server monitoring interval (sec) (dynamic)")
 		("monitor-read-timeout",		program_options::value<int>(),			"node server monitoring read timeout (millisec) (dynamic)")
-		("partition-modular-hint",	program_options::value<int>(),		"partitioning hint (only for partition-type=modular")
+		("partition-modular-hint",	program_options::value<int>(),			"partitioning hint (only for partition-type=modular)")
+		("partition-modular-virtual",	program_options::value<int>(),		"partitioning virtual node size (only for partition-type=modular)")
+		("partition-size",					program_options::value<int>(),			"max partition size")
 		("partition-type",					program_options::value<string>(),		"partition type (modular:simple algorithm base)")
 		("server-name",							program_options::value<string>(),		"my server name")
 		("server-port",							program_options::value<int>(),			"my server port")

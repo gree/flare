@@ -19,7 +19,7 @@ namespace test_key_resolver_modular {
 	key_resolver*		kr;
 
 	void setup() {
-		kr = new key_resolver_modular(1);
+		kr = new key_resolver_modular(1024, 1, 4096);
 		kr->startup();
 	}
 

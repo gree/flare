@@ -1172,7 +1172,7 @@ int cluster::_shift_node_role(string node_key, role old_role, int old_partition,
 	// we intentionally do not truncate current database here (for safe)
 	// if user *really* want to reconstruct database, they can use "flush_all" op
 	log_debug("creating reconstruction thread(s)... (type=%s)", cluster::role_cast(new_role).c_str());
-	if (new_role == role_master) {
+	if (new_role == role_master && old_role == role_proxy) {
 		int partition_size = this->_node_partition_map.size() + this->_node_partition_prepare_map.size();
 		log_debug("partition_size: %d", partition_size);
 		for (node_map::iterator it = this->_node_map.begin(); it != this->_node_map.end(); it++) {
@@ -1196,7 +1196,7 @@ int cluster::_shift_node_role(string node_key, role old_role, int old_partition,
 		pthread_mutex_lock(&this->_mutex_master_reconstruction);
 		log_notice("master reconstruction started (n=%d)", this->_master_reconstruction);
 		pthread_mutex_unlock(&this->_mutex_master_reconstruction);
-	} else {
+	} else if (new_role == role_slave && old_role == role_proxy) {
 		string master_node_key = "";
 		int partition_size = this->_node_partition_map.size();
 		if (this->_node_partition_map.count(new_partition) > 0) {

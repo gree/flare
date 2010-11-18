@@ -339,7 +339,7 @@ protected:
 	int _shift_node_role(string node_key, role old_role, int old_partition, role new_role, int new_partition);
 	int _enqueue(shared_thread_queue q, string node_key, int key_hash, bool sync = false);
 	int _enqueue(shared_thread_queue q, thread_pool::thread_type t, bool sync);
-	int _broadcast(shared_thread_queue q, bool sync = false, string prior_node_key = "");
+	int _broadcast(shared_thread_queue q, bool sync, vector<string> prior_node_key);
 	int _save();
 	int _load();
 	int _reconstruct_node_partition(bool lock = true);

@@ -365,7 +365,8 @@ int cluster::add_node(string node_server_name, int node_server_port) {
 
 	// notify other nodes
 	shared_queue_node_sync q(new queue_node_sync(this));
-	this->_broadcast(q);
+	vector<string> dummy;
+	this->_broadcast(q, false, dummy);
 	
 	return 0;
 }
@@ -455,7 +456,8 @@ int cluster::down_node(string node_server_name, int node_server_port) {
 
 	// notify
 	shared_queue_node_sync q(new queue_node_sync(this));
-	this->_broadcast(q);
+	vector<string> dummy;
+	this->_broadcast(q, false, dummy);
 
 	return 0;
 }
@@ -493,7 +495,8 @@ int cluster::ready_node(string node_server_name, int node_server_port) {
 
 	// notify
 	shared_queue_node_sync q(new queue_node_sync(this));
-	this->_broadcast(q);
+	vector<string> dummy;
+	this->_broadcast(q, false, dummy);
 
 	return 0;
 }
@@ -509,7 +512,7 @@ int cluster::up_node(string node_server_name, int node_server_port) {
 	pthread_rwlock_wrlock(&this->_mutex_node_map);
 	pthread_rwlock_wrlock(&this->_mutex_node_partition_map);
 
-	bool require_prior_node_key = false;
+	vector<string> prior_node_key;
 	try {
 		node& n = this->_node_map[node_key];
 		if (n.node_state == state_active) {
@@ -524,7 +527,10 @@ int cluster::up_node(string node_server_name, int node_server_port) {
 			// just shift state to active
 			if (n.node_state == state_ready && n.node_role == role_master) {
 				// when new master shifts from ready to active, we need to activate new master prior to other nodes (to avoid dead lock between nodes)
-				require_prior_node_key = true;
+				prior_node_key.push_back(node_key);
+				for (vector<partition_node>::iterator it = this->_node_partition_prepare_map[n.node_partition].slave.begin(); it != this->_node_partition_prepare_map[n.node_partition].slave.end(); it++) {
+					prior_node_key.push_back(it->node_key);
+				}
 			}
 		} else {
 			if (n.node_role == role_master) {
@@ -561,7 +567,7 @@ int cluster::up_node(string node_server_name, int node_server_port) {
 
 	// notify
 	shared_queue_node_sync q(new queue_node_sync(this));
-	this->_broadcast(q, false, require_prior_node_key ? node_key : "");
+	this->_broadcast(q, false, prior_node_key);
 
 	return 0;
 }
@@ -626,7 +632,8 @@ int cluster::remove_node(string node_server_name, int node_server_port) {
 
 	// notify
 	shared_queue_node_sync q(new queue_node_sync(this));
-	this->_broadcast(q);
+	vector<string> dummy;
+	this->_broadcast(q, false, dummy);
 
 	return 0;
 }
@@ -807,7 +814,8 @@ int cluster::set_node_role(string node_server_name, int node_server_port, role n
 
 	// notify
 	shared_queue_node_sync q(new queue_node_sync(this));
-	this->_broadcast(q);
+	vector<string> dummy;
+	this->_broadcast(q, false, dummy);
 
 	return 0;
 }
@@ -920,7 +928,8 @@ int cluster::set_monitor_threshold(int monitor_threshold) {
 
 	// notify current threads
 	shared_queue_update_monitor_option q(new queue_update_monitor_option(this->_monitor_threshold, this->_monitor_interval, this->_monitor_read_timeout));
-	this->_broadcast(q, true);
+	vector<string> dummy;
+	this->_broadcast(q, true, dummy);
 
 	return 0;
 }
@@ -933,7 +942,8 @@ int cluster::set_monitor_interval(int monitor_interval) {
 
 	// notify current threads
 	shared_queue_update_monitor_option q(new queue_update_monitor_option(this->_monitor_threshold, this->_monitor_interval, this->_monitor_read_timeout));
-	this->_broadcast(q, true);
+	vector<string> dummy;
+	this->_broadcast(q, true, dummy);
 
 	return 0;
 }
@@ -946,7 +956,8 @@ int cluster::set_monitor_read_timeout(int monitor_read_timeout) {
 
 	// notify current threads
 	shared_queue_update_monitor_option q(new queue_update_monitor_option(this->_monitor_threshold, this->_monitor_interval, this->_monitor_read_timeout));
-	this->_broadcast(q, true);
+	vector<string> dummy;
+	this->_broadcast(q, true, dummy);
 
 	return 0;
 }
@@ -1287,37 +1298,39 @@ int cluster::_enqueue(shared_thread_queue q, thread_pool::thread_type type, bool
  *	
  *	[notice] all threads receive same thread_queue object
  */
-int cluster::_broadcast(shared_thread_queue q, bool sync, string prior_node_key) {
+int cluster::_broadcast(shared_thread_queue q, bool sync, vector<string> prior_node_key) {
 	log_debug("broadcasting queue [ident=%s]", q->get_ident().c_str());
 
 	// handle prior node key first
-	if (prior_node_key.empty() == false && this->_node_map.count(prior_node_key) > 0) {
+	if (prior_node_key.size() > 0) {
 		pthread_rwlock_rdlock(&this->_mutex_node_map);
-		log_notice("prior node key = %s -> process target node first w/ sync mode", prior_node_key.c_str());
-		thread_pool::local_map m = this->_thread_pool->get_active(this->_node_map[prior_node_key].node_thread_type);
+		for (vector<string>::iterator it = prior_node_key.begin(); it != prior_node_key.end(); it++) {
+			string p = *it;
+			log_notice("prior node key = %s -> process target node first w/ sync mode", p.c_str());
+			thread_pool::local_map m = this->_thread_pool->get_active(this->_node_map[p].node_thread_type);
 
-		int n = 0;
-		for (thread_pool::local_map::iterator it_local = m.begin(); it_local != m.end(); it_local++) {
-			if (it_local->second->is_myself()) {
-				log_warning("thread is myself -> skip enqueue (<- will cause dead lock) (id=%d, thread_id=%d)", it_local->first, it_local->second->get_thread_id());
-				continue;
+			int n = 0;
+			for (thread_pool::local_map::iterator it_local = m.begin(); it_local != m.end(); it_local++) {
+				if (it_local->second->is_myself()) {
+					log_warning("thread is myself -> skip enqueue (<- will cause dead lock) (id=%d, thread_id=%d)", it_local->first, it_local->second->get_thread_id());
+					continue;
+				}
+				q->sync_ref();
+				if (it_local->second->enqueue(q) < 0) {
+					log_warning("enqueue failed (perhaps thread is now exiting?)", 0);
+					q->sync_unref();
+					continue;
+				}
+				log_debug("  -> enqueue (id=%d)", it_local->first);
+				n++;
+
+				// only 1 queue for each node
+				break;
 			}
-
-			q->sync_ref();
-			if (it_local->second->enqueue(q) < 0) {
-				log_warning("enqueue failed (perhaps thread is now exiting?)", 0);
-				q->sync_unref();
-				continue;
+			pthread_rwlock_unlock(&this->_mutex_node_map);
+			if (n > 0) {
+				q->sync();
 			}
-			log_debug("  -> enqueue (id=%d)", it_local->first);
-			n++;
-
-			// only 1 queue for each node
-			break;
-		}
-		pthread_rwlock_unlock(&this->_mutex_node_map);
-		if (n > 0) {
-			q->sync();
 		}
 	}
 

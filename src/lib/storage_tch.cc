@@ -472,7 +472,7 @@ int storage_tch::remove(entry& e, result& r, int b) {
 		entry e_current;
 		int e_current_exists = this->_get_header(e.key, e_current);
 		if ((b & behavior_skip_version) == 0 && e.version != 0) {
-			if (e.version <= e_current.version || ((b & behavior_version_equal) != 0 && e.version != e_current.version)) {
+			if (((b & behavior_version_equal) == 0 && e.version <= e_current.version) || ((b & behavior_version_equal) != 0 && e.version != e_current.version)) {
 				log_info("specified version is older than (or equal to) current version -> skip removing (current=%u, specified=%u)", e_current.version, e.version);
 				r = result_not_found;
 				throw 0;

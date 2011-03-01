@@ -120,7 +120,8 @@ int op_keys::_run_server() {
 			if (this->_storage->get_key(it->key, limit, tmp_list) < 0) {
 				log_warning("storage i/o error (key=%s) -> continue processing (pretending not found)", it->key.c_str());
 				r_map[it->key] = storage::result_not_found;
-			}
+				continue;
+			} 
 			log_debug("found %d key(s)", tmp_list.size());
 
 			s_map[it->key] = tmp_list;

@@ -1,3 +1,36 @@
+commit 32cfadb1e50b6a2bb29d8f15d3ab12655d80b3f4
+Merge: 11f066b... b1f98bb...
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Tue Mar 1 22:31:12 2011 +0900
+
+    Merge branch 'master' of https://github.com/sejima/flare into sejima-master
+
+commit 11f066b845f638649aba39ca575582f6570a1aed
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Tue Mar 1 22:25:12 2011 +0900
+
+    added missing change logs
+
+commit b1f98bbcd9756557f7e06783f60765c3be74ff81
+Author: SEJIMA Takanori <takanori.sejima@gmail.com>
+Date:   Tue Mar 1 11:59:52 2011 +0900
+
+    fix overriding error code, in keys op.
+    
+    but, storage_tcb::get_key() always returns 0
+
+commit 4b0770ae82a72dd5780119b63b8b4f3a266256a2
+Author: SEJIMA Takanori <takanori.sejima@gmail.com>
+Date:   Mon Feb 28 20:03:47 2011 +0900
+
+    fix replication bug.
+
+commit 363ab3fc733a2e765936a3e1457e410d1524a768
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Thu Feb 24 23:17:17 2011 +0900
+
+    - fix replication bug (esp. important when reconstructing nodes)
+
 commit c1ef2a48f4fc5ea36320f2d18708877a41368f6e
 Author: Masaki Fujimoto <fujimoto@php.net>
 Date:   Thu Nov 18 10:45:35 2010 +0900

@@ -1,3 +1,9 @@
+* [2011/03/01] 1.0.12 release
+
+  * bug fixes (thx to sejima)
+    - fix replication bug (esp. important when reconstructing nodes)
+    - fix overriding error code, in keys op.
+
 * [2010/11/20] 1.0.11 release
 
   * feature updates

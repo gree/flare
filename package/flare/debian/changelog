@@ -1,4 +1,10 @@
-flare (1.0.12) unstable; urgency=low
+flare (1.0.13-1) unstable; urgency=low
+
+  * 1.0.13
+
+ -- fujimoto <fujimoto@php.net>  Thu, 03 Mar 2011 13:31:25 +0900
+
+flare (1.0.12-1) unstable; urgency=low
 
   * 1.0.12
 

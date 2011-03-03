@@ -1,3 +1,8 @@
+* [2011/03/03] 1.0.13 release
+
+  * bug fixes
+    - set default values to keep compatibility w/ older index servers
+
 * [2011/03/01] 1.0.12 release
 
   * bug fixes (thx to sejima)

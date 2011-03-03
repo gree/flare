@@ -1,3 +1,21 @@
+commit 3efbf9eef990db9813c6df9245a4b057d47508cd
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Thu Mar 3 13:27:11 2011 +0900
+
+    fix default parameter for key_resolver_modular_virtual
+
+commit 37a5224039f76ec999c458bfe144f525364c73b9
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Thu Mar 3 13:15:25 2011 +0900
+
+    set default values to keep compatibility w/ older index servers
+
+commit 321c19e429c30aac0b76287699b5c0012217e306
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Tue Mar 1 22:44:29 2011 +0900
+
+    ready for 1.0.12
+
 commit 32cfadb1e50b6a2bb29d8f15d3ab12655d80b3f4
 Merge: 11f066b... b1f98bb...
 Author: Masaki Fujimoto <fujimoto@php.net>

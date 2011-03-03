@@ -51,7 +51,7 @@ public:
 	static const int default_monitor_read_timeout = 1*1000;
 	static const int default_net_read_timeout = 10*60*1000;
 	static const int default_partition_modular_hint = 1;
-	static const int default_partition_modular_virtual = 4096;
+	static const int default_partition_modular_virtual = 1024;
 	static const int default_partition_size = 1024;
 	static const int default_server_port = 12120;
 	static const int default_stack_size = 128;

@@ -216,9 +216,9 @@ int cluster::startup_node(string index_server_name, int index_server_port) {
 
 	// get meta data from index server
 	key_resolver::type key_resolver_type;
-	int partition_size;
-	int key_resolver_modular_hint;
-	int key_resolver_modular_virtual;
+	int partition_size = cluster::default_partition_size;
+	int key_resolver_modular_hint = 0;
+	int key_resolver_modular_virtual = cluster::default_key_resolver_modular_virtual;
 	op_meta* p_m = _new_ op_meta(c, this);
 	if (p_m->run_client(partition_size, key_resolver_type, key_resolver_modular_hint, key_resolver_modular_virtual) < 0) {
 		log_err("failed to get meta data from index server", 0);

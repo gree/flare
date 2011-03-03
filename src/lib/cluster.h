@@ -136,6 +136,7 @@ public:
 
 	static const int	default_thread_type = 16;
 	static const int	default_partition_size = 1024;
+	static const int	default_key_resolver_modular_virtual = 1024;
 
 protected:
 	thread_pool*					_thread_pool;

@@ -179,7 +179,7 @@ int storage_tcb::set(entry& e, result& r, int b) {
 			}
 			e.version++;
 		} else if ((b & behavior_skip_version) == 0 && e.version != 0) {
-			if (e_current_exists == 0 && e.version <= e_current.version) {
+			if ((e_current_exists == 0 || (b & behavior_dump) != 0) && e.version <= e_current.version) {
 				log_info("specified version is older than (or equal to) current version -> skip setting (current=%u, specified=%u)", e_current.version, e.version);
 				r = result_not_stored;
 				throw 0;

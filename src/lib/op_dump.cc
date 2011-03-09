@@ -231,7 +231,7 @@ int op_dump::_parse_client_parameter() {
 		log_debug("storing data [%d bytes]", e.size);
 
 		storage::result r;
-		if (this->_storage->set(e, r) < 0) {
+		if (this->_storage->set(e, r, storage::behavior_dump) < 0) {
 			log_warning("something is going wrong while storing data -> continue processing", 0);
 			// nop
 		}

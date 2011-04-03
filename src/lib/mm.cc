@@ -7,6 +7,8 @@
  *
  *	$Id$
  */
+#include <string.h>
+#include <stdlib.h>
 #include "mm.h"
 
 #ifdef MM_ALLOCATION_CHECK

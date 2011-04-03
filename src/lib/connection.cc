@@ -212,13 +212,20 @@ int connection::read(char** p, int expect_len, bool readline, bool& actual) {
 			return -1;
 		}
 		if (n < 0 || !(ufds.revents & (POLLIN | POLLPRI))) {
+			this->_errno = errno;
+#ifdef POLLRDHUP
+			if (ufds.revents & POLLRDHUP) {  // since Linux 2.6.17
+				log_notice("poll() failed: %s (%d) -> peer closed connection", util::strerror(errno), errno);
+				this->close();
+				return -1;
+			}
+#endif
 			if (errno != EINTR) {
 				log_err("poll() failed: %s (%d) -> closing socket", util::strerror(errno), errno);
 				this->close();
 			} else {
 				log_notice("poll() failed: %s (%d)", util::strerror(errno), errno);
 			}
-			this->_errno = errno;
 			return -1;
 		}
 
@@ -454,7 +461,7 @@ int connection::write(const char* p, int bufsiz, bool buffered) {
 						continue;
 					}
 
-					// other errros are treated as write() error
+					// other errors are treated as write() error
 				} else {
 					log_debug("poll() -> ready to write", 0);
 					continue;

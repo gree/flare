@@ -183,6 +183,7 @@ int op_dump_key::_parse_client_parameter() {
 			return -1;
 		}
 
+		_delete_(p);
 		// TODO: handle dumped key
 	}
 

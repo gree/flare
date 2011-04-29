@@ -288,7 +288,7 @@ vector<cluster::node> cluster::get_slave_node() {
 		slave = this->_node_partition_prepare_map[n.node_partition].slave;
 	} else {
 		// something is going wrong
-		pthread_rwlock_unlock(&this->_mutex_node_partition_map);
+		log_warning("not found node_partition [%d]", n.node_partition);
 	}
 	pthread_rwlock_unlock(&this->_mutex_node_partition_map);
 
@@ -405,9 +405,13 @@ int cluster::down_node(string node_server_name, int node_server_port) {
 				} else {
 					string failover_node_key = "";
 					int balance = 0;
+					int prev_balance = 0;
 					for (vector<partition_node>::iterator it = this->_node_partition_map[n.node_partition].slave.begin(); it != this->_node_partition_map[n.node_partition].slave.end(); it++) {
-						if (this->_node_map[it->node_key].node_state == state_active && failover_node_key.empty()) {
-							failover_node_key = it->node_key;
+						if (this->_node_map[it->node_key].node_state == state_active) {
+							if (failover_node_key.empty() || it->node_balance > prev_balance) {	// first slave(balance == 0) or balance is largest.
+								failover_node_key = it->node_key;
+								prev_balance = it->node_balance;
+							}
 						}
 						balance += it->node_balance;
 					}
@@ -476,6 +480,10 @@ int cluster::ready_node(string node_server_name, int node_server_port) {
 	pthread_rwlock_wrlock(&this->_mutex_node_partition_map);
 
 	try {
+		if (this->_node_map.count(node_key) == 0) {
+			log_warning("no such node (node_key=%s)", node_key.c_str());
+			throw -1;
+		}
 		node& n = this->_node_map[node_key];
 		if (n.node_state != state_prepare) {
 			log_notice("node state is not prepare (node_key=%s, node_state=%s)", node_key.c_str(), cluster::state_cast(n.node_state).c_str());
@@ -516,6 +524,10 @@ int cluster::up_node(string node_server_name, int node_server_port) {
 
 	vector<string> prior_node_key;
 	try {
+		if (this->_node_map.count(node_key) == 0) {
+			log_warning("no such node (node_key=%s)", node_key.c_str());
+			throw -1;
+		}
 		node& n = this->_node_map[node_key];
 		if (n.node_state == state_active) {
 			log_notice("node is already active (node_key=%s, node_state=%s)", node_key.c_str(), cluster::state_cast(n.node_state).c_str());

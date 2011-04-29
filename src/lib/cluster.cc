@@ -52,7 +52,8 @@ cluster::cluster(thread_pool* tp, string data_dir, string server_name, int serve
 		_index_server_name(""),
 		_index_server_port(0),
 		_proxy_concurrency(0),
-		_reconstruction_interval(0) {
+		_reconstruction_interval(0),
+		_reconstruction_bwlimit(0) {
 	this->_node_key = this->to_node_key(server_name, server_port);
 	pthread_mutex_init(&this->_mutex_serialization, NULL);
 	pthread_mutex_init(&this->_mutex_master_reconstruction, NULL);

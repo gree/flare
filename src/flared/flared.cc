@@ -132,7 +132,8 @@ int flared::startup(int argc, char **argv) {
 #endif
 	log_notice("  net_read_timeout:       %d", ini_option_object().get_net_read_timeout());
 	log_notice("  proxy_concurrency:      %d", ini_option_object().get_proxy_concurrency());
-	log_notice("  reconstruction_inteval: %d", ini_option_object().get_reconstruction_interval());
+	log_notice("  reconstruction_interval:%d", ini_option_object().get_reconstruction_interval());
+	log_notice("  reconstruction_bwlimit: %d", ini_option_object().get_reconstruction_bwlimit());
 	log_notice("  replication_type:       %s", ini_option_object().get_replication_type().c_str());
 	log_notice("  server_name:            %s", ini_option_object().get_server_name().c_str());
 	log_notice("  server_port:            %d", ini_option_object().get_server_port());
@@ -181,6 +182,7 @@ int flared::startup(int argc, char **argv) {
 	this->_cluster = _new_ cluster(this->_thread_pool, ini_option_object().get_data_dir(), ini_option_object().get_server_name(), ini_option_object().get_server_port());
 	this->_cluster->set_proxy_concurrency(ini_option_object().get_proxy_concurrency());
 	this->_cluster->set_reconstruction_interval(ini_option_object().get_reconstruction_interval());
+	this->_cluster->set_reconstruction_bwlimit(ini_option_object().get_reconstruction_bwlimit());
 	this->_cluster->set_replication_type(ini_option_object().get_replication_type());
 	if (this->_cluster->startup_node(ini_option_object().get_index_server_name(), ini_option_object().get_index_server_port()) < 0) {
 		return -1;
@@ -292,8 +294,11 @@ int flared::reload() {
 	// net_read_timeout
 	connection::read_timeout = ini_option_object().get_net_read_timeout() * 1000;	// -> msec
 
-	// reconstruction_inteval
+	// reconstruction_interval
 	this->_cluster->set_reconstruction_interval(ini_option_object().get_reconstruction_interval());
+
+	// reconstruction_bwlimit
+	this->_cluster->set_reconstruction_bwlimit(ini_option_object().get_reconstruction_bwlimit());
 
 	// replication_type
 	this->_cluster->set_replication_type(ini_option_object().get_replication_type());

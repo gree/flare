@@ -45,6 +45,7 @@ private:
 	int					_net_read_timeout;
 	int					_proxy_concurrency;
 	int					_reconstruction_interval;
+	int					_reconstruction_bwlimit;
 	string			_replication_type;
 	string			_server_name;
 	int					_server_port;
@@ -72,6 +73,7 @@ public:
 	static const int default_net_read_timeout = 10*60;						// sec
 	static const int default_proxy_concurrency = 2;
 	static const int default_reconstruction_interval = 0;
+	static const int default_reconstruction_bwlimit = 0;
 	static const int default_server_port = 12121;
 	static const int default_stack_size = 128;
 	static const uint32_t default_storage_ap = 4;
@@ -109,6 +111,7 @@ public:
 	int get_net_read_timeout() { return this->_net_read_timeout; };
 	int get_proxy_concurrency() { return this->_proxy_concurrency; };
 	int get_reconstruction_interval() { return this->_reconstruction_interval; };
+	int get_reconstruction_bwlimit() { return this->_reconstruction_bwlimit; };
 	string get_replication_type() { return this->_replication_type; };
 	string get_server_name() { return this->_server_name; };
 	int get_server_port() { return this->_server_port; };

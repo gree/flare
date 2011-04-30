@@ -260,7 +260,7 @@ int op_dump::_parse_client_parameter() {
 	return 0;
 }
 
-// code from rsync.
+// code from rsync 2.6.9
 void op_dump::_sleep_for_bwlimit(int bytes_written) {
 	if (bytes_written == 0) {
 		return;

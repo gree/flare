@@ -126,6 +126,12 @@ int op_get::_run_server() {
 			stats_object->increment_misses();
 			continue;
 		} else {
+			// for safe
+			// op like "get key1 key1" will cause segfault
+			if (it->is_data_available() == false) {
+				stats_object->increment_misses();
+				continue;
+			}
 			it->response(&response, response_len, this->_append_version ? storage::response_type_gets : storage::response_type_get);
 		}
 

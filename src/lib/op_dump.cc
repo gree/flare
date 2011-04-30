@@ -22,7 +22,9 @@ op_dump::op_dump(shared_connection c, cluster* cl, storage* st):
 		_storage(st),
 		_wait(0),
 		_partition(-1),
-		_partition_size(0) {
+		_partition_size(0),
+		_bwlimit(0),
+		_total_written(0) {
 }
 
 /**
@@ -39,8 +41,8 @@ op_dump::~op_dump() {
 /**
  *	send client request
  */
-int op_dump::run_client(int wait, int partition, int parition_size) {
-	if (this->_run_client(wait, partition, parition_size) < 0) {
+int op_dump::run_client(int wait, int partition, int parition_size, int bwlimit) {
+	if (this->_run_client(wait, partition, parition_size, bwlimit) < 0) {
 		return -1;
 	}
 
@@ -100,6 +102,18 @@ int op_dump::_parse_server_parameter() {
 			}
 			if (this->_partition_size < 0) {
 				log_debug("invalid partition_size (partition_size=%d)", this->_partition_size);
+				throw -1;
+			}
+		}
+
+		// bwlimit (optional)
+		n += util::next_digit(p+n, q, sizeof(q));
+		if (q[0]) {
+			try {
+				this->_bwlimit = lexical_cast<int>(q);
+				log_debug("storing bwlimit [%d]", this->_bwlimit);
+			} catch (bad_lexical_cast e) {
+				log_debug("invalid bwlimit (bwlimit=%s)", q);
 				throw -1;
 			}
 		}
@@ -165,6 +179,8 @@ int op_dump::_run_server() {
 		if (this->_wait > 0) {
 			log_debug("wait for %d usec", this->_wait);
 			usleep(this->_wait);
+		} else if (this->_bwlimit > 0) {
+			this->_sleep_for_bwlimit(n); // bwlimit
 		}
 	}
 
@@ -173,10 +189,13 @@ int op_dump::_run_server() {
 	return this->_send_result(result_end);
 }
 
-int op_dump::_run_client(int wait, int partition, int partition_size) {
+int op_dump::_run_client(int wait, int partition, int partition_size, int bwlimit) {
 	char request[BUFSIZ];
-	snprintf(request, sizeof(request), "dump %d %d %d", wait, partition, partition_size);
-
+	if (bwlimit > 0) {
+		snprintf(request, sizeof(request), "dump %d %d %d %d", wait, partition, partition_size, bwlimit);
+	} else {
+		snprintf(request, sizeof(request), "dump %d %d %d", wait, partition, partition_size);	// Backward compatibility.
+	}
 	return this->_send_request(request);
 }
 
@@ -239,6 +258,42 @@ int op_dump::_parse_client_parameter() {
 	}
 
 	return 0;
+}
+
+// code from rsync 2.6.9
+void op_dump::_sleep_for_bwlimit(int bytes_written) {
+	if (bytes_written == 0) {
+		return;
+	}
+
+	this->_total_written += bytes_written;
+
+	static const long one_sec = 1000000L; // of microseconds in a second.
+
+	long elapsed_usec;
+	struct timeval start_tv;
+	gettimeofday(&start_tv, NULL);
+	if (this->_prior_tv.tv_sec) {
+		elapsed_usec = (start_tv.tv_sec - this->_prior_tv.tv_sec) * one_sec
+			+ (start_tv.tv_usec - this->_prior_tv.tv_usec);
+		this->_total_written -= elapsed_usec * this->_bwlimit / (one_sec/1024);
+		if (this->_total_written < 0) {
+			this->_total_written = 0;
+		}
+	}
+
+	long sleep_usec = this->_total_written * (one_sec/1024) / this->_bwlimit;
+	if (sleep_usec < one_sec / 10) {
+		this->_prior_tv = start_tv;
+		return;
+	}
+
+	usleep(sleep_usec);
+
+	gettimeofday(&this->_prior_tv, NULL);
+	elapsed_usec = (this->_prior_tv.tv_sec - start_tv.tv_sec) * one_sec
+		     + (this->_prior_tv.tv_usec - start_tv.tv_usec);
+	this->_total_written = (sleep_usec - elapsed_usec) * this->_bwlimit / (one_sec/1024);
 }
 // }}}
 

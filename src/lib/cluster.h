@@ -174,6 +174,7 @@ protected:
 	int										_index_server_port;
 	int										_proxy_concurrency;
 	int										_reconstruction_interval;
+	int										_reconstruction_bwlimit;
 	replication						_replication_type;
 
 public:
@@ -229,6 +230,8 @@ public:
 	int set_proxy_concurrency(int proxy_concurrency) { this->_proxy_concurrency = proxy_concurrency; return 0; };
 	int get_reconstruction_interval() { return this->_reconstruction_interval; };
 	int set_reconstruction_interval(int reconstruction_interval) { this->_reconstruction_interval = reconstruction_interval; return 0; };
+	int get_reconstruction_bwlimit() { return this->_reconstruction_bwlimit; };
+	int set_reconstruction_bwlimit(int reconstruction_bwlimit) { this->_reconstruction_bwlimit = reconstruction_bwlimit; return 0; };
 	replication get_replication_type() { return this->_replication_type; };
 	int set_replication_type(string replication_type) { cluster::replication_cast(replication_type, this->_replication_type); return 0; };
 	string get_server_name() { return this->_server_name; };

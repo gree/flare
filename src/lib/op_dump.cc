@@ -191,8 +191,11 @@ int op_dump::_run_server() {
 
 int op_dump::_run_client(int wait, int partition, int partition_size, int bwlimit) {
 	char request[BUFSIZ];
-	snprintf(request, sizeof(request), "dump %d %d %d %d", wait, partition, partition_size, bwlimit);
-
+	if (bwlimit > 0) {
+		snprintf(request, sizeof(request), "dump %d %d %d %d", wait, partition, partition_size, bwlimit);
+	} else {
+		snprintf(request, sizeof(request), "dump %d %d %d", wait, partition, partition_size);	// Backward compatibility.
+	}
 	return this->_send_request(request);
 }
 

@@ -225,6 +225,8 @@ int cluster::startup_node(string index_server_name, int index_server_port) {
 		_delete_(p_m);
 		return -1;
 	}
+	_delete_(p_m);
+
 	log_notice("meta data from index server:", 0);
 	log_notice("  partition_size:                 %d", partition_size);
 	log_notice("  key_resolver_type:              %s", key_resolver::type_cast(key_resolver_type).c_str());

@@ -13,6 +13,7 @@
 #include <string>
 
 #include <unistd.h>
+#include <stdint.h>
 
 using namespace std;
 
@@ -58,8 +59,21 @@ public:
 }	// namespace gree
 
 #else
+
+#include <stdint.h>
+#include <pthread.h>
+
 # define	_new_				new
-# define	_delete_(p)	delete p
+namespace gree {
+namespace flare {
+	inline void _delete_(char* const p)					{ delete[] p; } // for char[]
+	inline void _delete_(int* const p)					{ delete[] p; } // for int[]
+	inline void _delete_(int** const p)					{ delete[] p; } // for int*[]
+	inline void _delete_(uint8_t* const p)				{ delete[] p; } // for uint8_t[]
+	inline void _delete_(pthread_rwlock_t* const p)		{ delete[] p; } // for pthread_rwlock_t[]
+	template<class T> inline void _delete_(T* const p)	{ delete p; }
+}	// namespace flare
+}	// namespace gree
 #endif
 
 #endif // __MM_H__

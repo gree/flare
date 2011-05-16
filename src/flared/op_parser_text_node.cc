@@ -91,6 +91,8 @@ op* op_parser_text_node::_determine_op(const char* first, const char* buf, int& 
 		r = static_cast<op*>(_new_ op_verbosity(this->_connection)); 
 	} else if (strcmp(first, "version") == 0) {
 		r = static_cast<op*>(_new_ op_version(this->_connection)); 
+	} else if (strcmp(first, "show") == 0) {
+		r = static_cast<op*>(_new_ op_show_node(this->_connection));
 	} else {
 		r = static_cast<op*>(_new_ op_error(this->_connection)); 
 	}

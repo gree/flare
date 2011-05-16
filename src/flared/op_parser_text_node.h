@@ -10,6 +10,7 @@
 
 #include "op_parser_text.h"
 #include "op_stats_node.h"
+#include "op_show_node.h"
 
 namespace gree {
 namespace flare {

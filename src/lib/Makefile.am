@@ -60,6 +60,7 @@ libflare_la_SOURCES = \
 	op_stats.h op_stats.cc \
 	op_verbosity.h op_verbosity.cc \
 	op_version.h op_version.cc \
+	op_show.h op_show.cc \
 	queue_node_sync.h queue_node_sync.cc \
 	queue_proxy_read.h queue_proxy_read.cc \
 	queue_proxy_write.h queue_proxy_write.cc \

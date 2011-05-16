@@ -22,4 +22,5 @@ flarei_SOURCES = \
 	op_parser_binary_index.h op_parser_binary_index.cc \
 	op_parser_text_index.h op_parser_text_index.cc \
 	op_stats_index.h op_stats_index.cc \
+	op_show_index.h op_show_index.cc \
 	stats_index.h stats_index.cc

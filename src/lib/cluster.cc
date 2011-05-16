@@ -385,6 +385,7 @@ int cluster::down_node(string node_server_name, int node_server_port) {
 	pthread_rwlock_wrlock(&this->_mutex_node_map);
 	pthread_rwlock_wrlock(&this->_mutex_node_partition_map);
 
+	vector<string> prior_node_key;
 	try {
 		if (this->_node_map.count(node_key) == 0) {
 			log_warning("no such node (node_key=%s)", node_key.c_str());
@@ -427,6 +428,7 @@ int cluster::down_node(string node_server_name, int node_server_port) {
 							this->_node_map[failover_node_key].node_balance++;
 						}
 						log_notice("found new master node (node_key=%s, partition=%d, balance=%d)", failover_node_key.c_str(), n.node_partition, this->_node_map[failover_node_key].node_balance);
+						prior_node_key.push_back(failover_node_key);
 					}
 				}
 			} else if (n.node_state == state_prepare || n.node_state == state_ready) {
@@ -463,8 +465,7 @@ int cluster::down_node(string node_server_name, int node_server_port) {
 
 	// notify
 	shared_queue_node_sync q(new queue_node_sync(this));
-	vector<string> dummy;
-	this->_broadcast(q, false, dummy);
+	this->_broadcast(q, false, prior_node_key);
 
 	return 0;
 }

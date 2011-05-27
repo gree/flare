@@ -253,22 +253,22 @@ int ini_option::reload() {
 
 	try {
 		if (opt_var_map.count("log-facility")) {
-			log_notice("  log_facility:     %s -> %s", this->_log_facility.c_str(), opt_var_map["log-facility"].as<string>().c_str());
+			log_notice("  log_facility:         %s -> %s", this->_log_facility.c_str(), opt_var_map["log-facility"].as<string>().c_str());
 			this->_log_facility = opt_var_map["log-facility"].as<string>();
 		}
 
 		if (opt_var_map.count("max-connection")) {
-			log_notice("  max_connection:   %d -> %d", this->_max_connection, opt_var_map["max-connection"].as<int>());
+			log_notice("  max_connection:       %d -> %d", this->_max_connection, opt_var_map["max-connection"].as<int>());
 			this->_max_connection = opt_var_map["max-connection"].as<int>();
 		}
 
 		if (opt_var_map.count("monitor-threshold")) {
-			log_notice("  monitor_threshold: %d -> %d", this->_monitor_threshold, opt_var_map["monitor-threshold"].as<int>());
+			log_notice("  monitor_threshold:    %d -> %d", this->_monitor_threshold, opt_var_map["monitor-threshold"].as<int>());
 			this->_monitor_threshold = opt_var_map["monitor-threshold"].as<int>();
 		}
 
 		if (opt_var_map.count("monitor-interval")) {
-			log_notice("  monitor_interval: %d -> %d", this->_monitor_interval, opt_var_map["monitor-interval"].as<int>());
+			log_notice("  monitor_interval:     %d -> %d", this->_monitor_interval, opt_var_map["monitor-interval"].as<int>());
 			this->_monitor_interval = opt_var_map["monitor-interval"].as<int>();
 		}
 
@@ -278,12 +278,12 @@ int ini_option::reload() {
 		}
 
 		if (opt_var_map.count("net-read-timeout")) {
-			log_notice("  net_read_timeout: %d -> %d", this->_net_read_timeout, opt_var_map["net-read-timeout"].as<int>());
+			log_notice("  net_read_timeout:     %d -> %d", this->_net_read_timeout, opt_var_map["net-read-timeout"].as<int>());
 			this->_net_read_timeout = opt_var_map["net-read-timeout"].as<int>();
 		}
 
 		if (opt_var_map.count("thread-pool-size")) {
-			log_notice("  thread_pool_size: %d -> %d", this->_thread_pool_size, opt_var_map["thread-pool-size"].as<int>());
+			log_notice("  thread_pool_size:     %d -> %d", this->_thread_pool_size, opt_var_map["thread-pool-size"].as<int>());
 			this->_thread_pool_size = opt_var_map["thread-pool-size"].as<int>();
 		}
 	} catch (int e) {

@@ -294,6 +294,15 @@ int flared::reload() {
 	// net_read_timeout
 	connection::read_timeout = ini_option_object().get_net_read_timeout() * 1000;	// -> msec
 
+	//  index_server_name
+	this->_cluster->set_index_server_name(ini_option_object().get_index_server_name());
+
+	//  index_server_port
+	this->_cluster->set_index_server_port(ini_option_object().get_index_server_port());
+
+	// reconstruction_interval
+	this->_cluster->set_reconstruction_interval(ini_option_object().get_reconstruction_interval());
+
 	// reconstruction_interval
 	this->_cluster->set_reconstruction_interval(ini_option_object().get_reconstruction_interval());
 

@@ -237,7 +237,9 @@ public:
 	string get_server_name() { return this->_server_name; };
 	int get_server_port() { return this->_server_port; };
 	string get_index_server_name() { return this->_index_server_name; };
+	int set_index_server_name(string index_server_name) { this->_index_server_name = index_server_name; return 0; };
 	int get_index_server_port() { return this->_index_server_port; };
+	int set_index_server_port(int index_server_port) { this->_index_server_port = index_server_port; return 0; };
 
 #ifdef ENABLE_MYSQL_REPLICATION
 	int set_mysql_replication(bool mysql_replication) { this->_mysql_replication = mysql_replication; return 0; };

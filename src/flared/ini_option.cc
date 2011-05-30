@@ -349,32 +349,32 @@ int ini_option::reload() {
 
 	try {
 		if (opt_var_map.count("log-facility")) {
-			log_info("  log_facility:           %s -> %s", this->_log_facility.c_str(), opt_var_map["log-facility"].as<string>().c_str());
+			log_notice("  log_facility:           %s -> %s", this->_log_facility.c_str(), opt_var_map["log-facility"].as<string>().c_str());
 			this->_log_facility = opt_var_map["log-facility"].as<string>();
 		}
 
 		if (opt_var_map.count("max-connection")) {
-			log_info("  max_connection:         %d -> %d", this->_max_connection, opt_var_map["max-connection"].as<int>());
+			log_notice("  max_connection:         %d -> %d", this->_max_connection, opt_var_map["max-connection"].as<int>());
 			this->_max_connection = opt_var_map["max-connection"].as<int>();
 		}
 
 		if (opt_var_map.count("net-read-timeout")) {
-			log_info("  net_read_timeout:       %d -> %d", this->_net_read_timeout, opt_var_map["net-read-timeout"].as<int>());
+			log_notice("  net_read_timeout:       %d -> %d", this->_net_read_timeout, opt_var_map["net-read-timeout"].as<int>());
 			this->_net_read_timeout = opt_var_map["net-read-timeout"].as<int>();
 		}
 
 		if (opt_var_map.count("reconstruction-interval")) {
-			log_info("  reconstruction_inteval: %d -> %d", this->_reconstruction_interval, opt_var_map["reconstruction-interval"].as<int>());
+			log_notice("  reconstruction_inteval: %d -> %d", this->_reconstruction_interval, opt_var_map["reconstruction-interval"].as<int>());
 			this->_reconstruction_interval = opt_var_map["reconstruction-interval"].as<int>();
 		}
 
 		if (opt_var_map.count("reconstruction-bwlimit")) {
-			log_info("  reconstruction_bwlimit: %d -> %d", this->_reconstruction_bwlimit, opt_var_map["reconstruction-bwlimit"].as<int>());
+			log_notice("  reconstruction_bwlimit: %d -> %d", this->_reconstruction_bwlimit, opt_var_map["reconstruction-bwlimit"].as<int>());
 			this->_reconstruction_bwlimit = opt_var_map["reconstruction-bwlimit"].as<int>();
 		}
 
 		if (opt_var_map.count("replication-type")) {
-			log_info("  replication_type: %s -> %s", this->_replication_type.c_str(), opt_var_map["replication-type"].as<string>().c_str());
+			log_notice("  replication_type:       %s -> %s", this->_replication_type.c_str(), opt_var_map["replication-type"].as<string>().c_str());
 
 			cluster::replication t;
 			if (cluster::replication_cast(opt_var_map["replication-type"].as<string>(), t) < 0) {
@@ -385,8 +385,22 @@ int ini_option::reload() {
 		}
 
 		if (opt_var_map.count("thread-pool-size")) {
-			log_info("  thread_pool_size:       %d -> %d", this->_thread_pool_size, opt_var_map["thread-pool-size"].as<int>());
+			log_notice("  thread_pool_size:       %d -> %d", this->_thread_pool_size, opt_var_map["thread-pool-size"].as<int>());
 			this->_thread_pool_size = opt_var_map["thread-pool-size"].as<int>();
+		}
+
+		if (opt_var_map.count("index-server-name")) {
+			log_notice("  index_server_name:      %s -> %s", this->_index_server_name.c_str(), opt_var_map["index-server-name"].as<string>().c_str());
+			this->_index_server_name = opt_var_map["index-server-name"].as<string>();
+		}
+		if (this->_index_server_name.empty()) {
+			cout << "option [index-server-name] is required" << endl;
+			throw -1;
+		}
+
+		if (opt_var_map.count("index-server-port")) {
+			log_notice("  index_server_port:      %d -> %d", this->_index_server_port, opt_var_map["index-server-port"].as<int>());
+			this->_index_server_port = opt_var_map["index-server-port"].as<int>();
 		}
 	} catch (int e) {
 		ostringstream ss;

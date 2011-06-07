@@ -602,6 +602,11 @@ int cluster::remove_node(string node_server_name, int node_server_port) {
 	pthread_rwlock_wrlock(&this->_mutex_node_partition_map);
 
 	try {
+		if (this->_node_map.count(node_key) == 0) {
+			log_warning("no such node (node_key=%s)", node_key.c_str());
+			throw -1;
+		}
+
 		node& n = this->_node_map[node_key];
 
 		// see if node is really down and removable

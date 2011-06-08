@@ -1,7 +1,17 @@
-* [2011/03/03] 1.0.13 release
+* [2011/06/08] 1.0.13 release
+
+  * feature updates
+    - added 'show variables' op
+    - added reconstruction-bwlimit option (node server only, in KB)
 
   * bug fixes
     - set default values to keep compatibility w/ older index servers
+    - fix bug of replication inconsistency
+    - fix possible memory leaks
+    - fix possible node map corruption, happens when non-existent nodes are passed to remove_node()
+    - fix segfault (cased by multi get w/ same keys (like "get key1 key1 key1"), w/ concurrent expiration)
+
+  (thanks to sejima)
 
 * [2011/03/01] 1.0.12 release
 

@@ -1,3 +1,137 @@
+commit b3bd0f8dc58866e95a03ac08333293131538a929
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Tue Jun 7 19:06:45 2011 +0900
+
+    fix node map corruption, happens when non-existent nodes are passed to remove_node()
+
+commit 38473a8f9cbdcbce20c697fcc9a16b194ddf93e0
+Merge: 269a3ba... e1e3407...
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Mon May 30 14:47:21 2011 +0900
+
+    Merge commit 'sejima/reloadable_index_server_config'
+
+commit e1e34076d066fceeef1b706de0db91cff175d99a
+Author: SEJIMA Takanori <takanori.sejima@gmail.com>
+Date:   Fri May 27 19:24:26 2011 +0900
+
+    fix log messages
+
+commit 269a3bae2b04c7a6b5c3394825b7d866216c2bb8
+Author: SEJIMA Takanori <takanori.sejima@gmail.com>
+Date:   Fri May 27 16:47:20 2011 +0900
+
+    fix 'show variables'
+    
+    fix format
+
+commit 450d7225024a98174ab0c690f4f68de79697a27b
+Author: SEJIMA Takanori <takanori.sejima@gmail.com>
+Date:   Tue May 17 01:21:11 2011 +0900
+
+    added command 'show variables'
+
+commit c9c4d6f70619095e498222b63e4d3f22cc801521
+Author: SEJIMA Takanori <takanori.sejima@gmail.com>
+Date:   Mon May 16 20:01:47 2011 +0900
+
+    fix failover problem.
+    
+    When the master switch, throw first notify the new master.
+
+commit 51eb55401f7d0be2b6267e2ca8ee8adb78f26b4f
+Author: SEJIMA Takanori <takanori.sejima@gmail.com>
+Date:   Mon May 16 18:55:48 2011 +0900
+
+    fix misc
+    - logging dyamic variables at SIGHUP.
+    - change attribute from static to dynamic.
+    -- index_server_name, index_server_port
+
+commit e9d15b03a20012b7f325131ae94018eee3587ab8
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Sat Apr 30 22:18:38 2011 +0900
+
+    fix segfault (cased by multi get w/ same keys (like "get key1 key1 key1"), w/ concurrent expiration)
+
+commit d6f437c5d18098ce6320ef6b9b93813e44be5717
+Author: SEJIMA Takanori <takanori.sejima@gmail.com>
+Date:   Sat Apr 30 16:57:15 2011 +0900
+
+    added comment: op_dump::_sleep_for_bwlimit()
+    
+    code from rsync 2.6.9
+
+commit 823555660c74835dcf6eee7ec1532e46a1004eb4
+Author: SEJIMA Takanori <takanori.sejima@gmail.com>
+Date:   Sat Apr 30 16:16:54 2011 +0900
+
+    fix op_dump
+    
+    backward compatibility.
+
+commit 2b45dcfc54d090ce4abaafa01640233b800a74c7
+Author: SEJIMA Takanori <takanori.sejima@gmail.com>
+Date:   Sat Apr 30 02:01:25 2011 +0900
+
+    added option: reconstruct_bwlimit
+
+commit e1d106dede2daa5c7a89d9d6e5c4aab3e008b707
+Author: SEJIMA Takanori <takanori.sejima@gmail.com>
+Date:   Fri Apr 29 23:31:56 2011 +0900
+
+    fix misc
+    
+    - fix double unlock.
+    - The priority of failover is decided with balance.
+    - fix flarei bug(Garbage mixes in 'stats nodes').
+
+commit 32309df073e1c1361a53a9fad528df312e2e1097
+Author: SEJIMA Takanori <takanori.sejima@gmail.com>
+Date:   Sun Apr 3 16:02:49 2011 +0900
+
+    fix misc
+    
+    - added event handling for POLLRDHUP
+    - fix typo
+    - added _delete_
+
+commit 7a6b947946ff5569ce0355442593e4e580296e0c
+Author: SEJIMA Takanori <takanori.sejima@gmail.com>
+Date:   Sun Apr 3 15:59:48 2011 +0900
+
+    fix mm.h, mm.cc
+    
+    modified _delete_
+
+commit dcee20b262250a1c7c6a2c6430832a00d4fd4d6a
+Author: SEJIMA Takanori <takanori.sejima@gmail.com>
+Date:   Wed Mar 9 18:27:53 2011 +0900
+
+    and more fix
+    
+    check deleted entry::version at op_dump.
+
+commit 431dea28055d88a0f590575c152fdb3010a21d05
+Author: takanori-sejima <takanori.sejima@gree.co.jp>
+Date:   Fri Mar 4 18:07:58 2011 +0900
+
+    one more fix replication bug
+    
+    ignore entry::version in delete_cache, cmd_set(with version) at slave.
+
+commit 8bfd83d05d233520d54bc9ade406f7bdfb876748
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Thu Mar 3 19:53:46 2011 +0900
+
+    fix default values
+
+commit be1c81e3a93b36efe3a6dd5caa4b02000f5914d0
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Thu Mar 3 13:32:56 2011 +0900
+
+    ready for 1.0.13
+
 commit 3efbf9eef990db9813c6df9245a4b057d47508cd
 Author: Masaki Fujimoto <fujimoto@php.net>
 Date:   Thu Mar 3 13:27:11 2011 +0900

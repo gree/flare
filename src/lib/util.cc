@@ -120,6 +120,22 @@ int util::get_fqdn(string& fqdn) {
 }
 
 /**
+ *	get network address
+ */
+in_addr_t util::inet_addr(const char *cp, const uint32_t netmask) {
+	in_addr_t addr = ::inet_addr(cp);
+	if (addr == INADDR_NONE) {
+		struct hostent he;
+		int e;
+		if (util::gethostbyname(cp, &he, &e) != 0) {
+			return INADDR_NONE;
+		}
+		addr = *(reinterpret_cast<in_addr_t *>(he.h_addr_list[0]));
+	}
+	return (addr & static_cast<in_addr_t>(netmask));
+}
+
+/**
  *	get realtime(?) (from memcached...)
  */
 time_t util::realtime(time_t t) {

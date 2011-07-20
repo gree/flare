@@ -11,6 +11,7 @@
 #include "op_parser_text.h"
 #include "op_stats_index.h"
 #include "op_show_index.h"
+#include "op_shutdown.h"
 
 namespace gree {
 namespace flare {

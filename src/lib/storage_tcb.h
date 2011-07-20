@@ -40,7 +40,7 @@ protected:
 	BDBCUR*						_cursor;
 
 public:
-	storage_tcb(string data_dir, int mutex_slot_size, uint32_t storage_ap, uint64_t storage_bucket_size, int storage_cache_size, string storage_compess, bool storage_large, int storage_lmemb, int storage_nmemb);
+	storage_tcb(string data_dir, int mutex_slot_size, uint32_t storage_ap, uint64_t storage_bucket_size, int storage_cache_size, string storage_compess, bool storage_large, int storage_lmemb, int storage_nmemb, int32_t storage_dfunit);
 	virtual ~storage_tcb();
 
 	virtual int open();

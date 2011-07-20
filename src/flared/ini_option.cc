@@ -54,8 +54,11 @@ ini_option::ini_option():
 		_storage_large(false),
 		_storage_lmemb(default_storage_lmemb),
 		_storage_nmemb(default_storage_nmemb),
+		_storage_dfunit(default_storage_dfunit),
 		_storage_type(""),
-		_thread_pool_size(default_thread_pool_size) {
+		_thread_pool_size(default_thread_pool_size),
+		_proxy_prior_netmask(default_proxy_prior_netmask),
+		_max_total_thread_queue(default_max_total_thread_queue) {
 }
 
 /**
@@ -282,6 +285,10 @@ int ini_option::load() {
 			this->_storage_nmemb = opt_var_map["storage-nmemb"].as<int>();
 		}
 
+		if (opt_var_map.count("storage-dfunit")) {
+			this->_storage_nmemb = opt_var_map["storage-dfunit"].as<int32_t>();
+		}
+
 		if (opt_var_map.count("storage-type")) {
 			storage::type t;
 			if (storage::type_cast(opt_var_map["storage-type"].as<string>(), t) < 0) {
@@ -295,6 +302,14 @@ int ini_option::load() {
 
 		if (opt_var_map.count("thread-pool-size")) {
 			this->_thread_pool_size = opt_var_map["thread-pool-size"].as<int>();
+		}
+
+		if (opt_var_map.count("proxy-prior-netmask")) {
+			this->_proxy_prior_netmask = opt_var_map["proxy-prior-netmask"].as<uint32_t>();
+		}
+
+		if (opt_var_map.count("max-total-thread-queue")) {
+			this->_max_total_thread_queue = opt_var_map["max-total-thread-queue"].as<uint32_t>();
 		}
 	} catch (int e) {
 		cout << option << endl;
@@ -402,6 +417,11 @@ int ini_option::reload() {
 			log_notice("  index_server_port:      %d -> %d", this->_index_server_port, opt_var_map["index-server-port"].as<int>());
 			this->_index_server_port = opt_var_map["index-server-port"].as<int>();
 		}
+
+		if (opt_var_map.count("max-total-thread-queue")) {
+			log_notice("  max_total_thread_queue:      %u -> %u", this->_index_server_port, opt_var_map["max-total-thread-queue"].as<uint32_t>());
+			this->_max_total_thread_queue = opt_var_map["max-total-thread-queue"].as<uint32_t>();
+		}
 	} catch (int e) {
 		ostringstream ss;
 		ss << option << endl;
@@ -466,8 +486,11 @@ int ini_option::_setup_config_option(program_options::options_description& optio
 		("storage-large",																								"use large storage (tch)")
 		("storage-lmemb",						program_options::value<int>(),			"number of members in each leaf page (tcb)")
 		("storage-nmemb",						program_options::value<int>(),			"number of members in each non-leaf page (tcb")
+		("storage-dfunit",						program_options::value<int32_t>(),		"the unit step number of auto defragmentation of a database object(tch/tcb)")
 		("storage-type",						program_options::value<string>(),		"storage type (tch:tokyo cabinet hash database, tcb:tokyo cabinet b+tree database)")
-		("thread-pool-size",				program_options::value<int>(),			"thread pool size (dynamic)");
+		("thread-pool-size",				program_options::value<int>(),			"thread pool size (dynamic)")
+		("proxy-prior-netmask",				program_options::value<uint32_t>(),		"proxy prior netmask")
+		("max-total-thread-queue",			program_options::value<uint32_t>(),		"max thread queue length(dynamic)");
 
 	return 0;
 }

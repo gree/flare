@@ -17,7 +17,7 @@ namespace flare {
 /**
  *	ctor for storage_tcb
  */
-storage_tcb::storage_tcb(string data_dir, int mutex_slot_size, uint32_t storage_ap, uint64_t storage_bucket_size, int storage_cache_size, string storage_compess, bool storage_large, int storage_lmemb, int storage_nmemb):
+storage_tcb::storage_tcb(string data_dir, int mutex_slot_size, uint32_t storage_ap, uint64_t storage_bucket_size, int storage_cache_size, string storage_compess, bool storage_large, int storage_lmemb, int storage_nmemb, int32_t storage_dfunit):
 		storage(data_dir, mutex_slot_size, storage_cache_size),
 		_cursor(NULL) {
 	this->_data_path = this->_data_dir + "/flare.bdb";
@@ -44,6 +44,10 @@ storage_tcb::storage_tcb(string data_dir, int mutex_slot_size, uint32_t storage_
 		break;
 	}
 	tcbdbtune(this->_db, storage_lmemb, storage_nmemb, storage_bucket_size, storage_ap, 10, n);
+
+	if (storage_dfunit > 0) {
+		tcbdbsetdfunit(this->_db, storage_dfunit);
+	}
 }
 
 /**

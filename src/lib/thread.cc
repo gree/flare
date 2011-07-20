@@ -107,6 +107,7 @@ thread::~thread() {
 			shared_thread_queue q = this->_thread_queue.front();
 			q->sync_unref();
 			this->_thread_queue.pop();
+			stats_object->decrement_total_thread_queue();
 		}
 	}
 
@@ -267,6 +268,7 @@ int thread::clean(bool& is_pool) {
 			shared_thread_queue q = this->_thread_queue.front();
 			q->sync_unref();
 			this->_thread_queue.pop();
+			stats_object->decrement_total_thread_queue();
 		}
 	}
 	pthread_mutex_unlock(&this->_mutex_queue);
@@ -364,6 +366,7 @@ int thread::dequeue(shared_thread_queue& q, int timeout) {
 	if (this->_thread_queue.size() > 0) {
 		q = this->_thread_queue.front();
 		this->_thread_queue.pop();
+		stats_object->decrement_total_thread_queue();
 		pthread_mutex_unlock(&this->_mutex_queue);
 		return 0;
 	}
@@ -389,6 +392,7 @@ int thread::dequeue(shared_thread_queue& q, int timeout) {
 			log_debug("signal received -> pop queue", 0);
 			q = this->_thread_queue.front();
 			this->_thread_queue.pop();
+			stats_object->decrement_total_thread_queue();
 		}
 	} else {
 		log_debug("waiting for queue timed out (timeout=%d, retval=%d)", timeout, r);
@@ -401,15 +405,26 @@ int thread::dequeue(shared_thread_queue& q, int timeout) {
 /**
  *	enqueue to current thread queue
  */
-int thread::enqueue(shared_thread_queue& q) {
+int thread::enqueue(shared_thread_queue& q, const uint32_t max_total_thread_queue) {
+	uint32_t size = 0;
 	if (this->_running == false) {
 		log_warning("trying to enqueue to inactive thread [id=%u, thread_id=%u, ident=%s]", this->_id, this->_thread_id, q->get_ident().c_str());
 		return -1;
 	}
 
 	pthread_mutex_lock(&this->_mutex_queue);
-	this->_thread_queue.push(q);
+	if (max_total_thread_queue > 0) {
+		size = static_cast<uint32_t>(stats_object->get_total_thread_queue());
+	}
+	if (max_total_thread_queue == 0 || size < max_total_thread_queue) {
+		this->_thread_queue.push(q);
+		stats_object->increment_total_thread_queue();
+	}
 	pthread_mutex_unlock(&this->_mutex_queue);
+	if (max_total_thread_queue > 0 && size >= max_total_thread_queue) {
+		log_err("too many thread queue [%u]", size);
+		return -1;
+	}
 	pthread_cond_signal(&this->_cond_queue);
 	log_debug("pushed queue and signal sent (ident=%s)", q->get_ident().c_str());
 

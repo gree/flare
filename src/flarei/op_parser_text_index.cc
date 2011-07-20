@@ -71,6 +71,8 @@ op* op_parser_text_index::_determine_op(const char* first, const char* buf, int&
 		r = static_cast<op*>(_new_ op_version(this->_connection)); 
 	} else if (strcmp(first, "show") == 0) {
 		r = static_cast<op*>(_new_ op_show_index(this->_connection)); 
+	} else if (strcmp(first, "shutdown") == 0) {
+		r = static_cast<op*>(_new_ op_shutdown(this->_connection, singleton<flarei>::instance().get_cluster()));
 	} else {
 		r = static_cast<op*>(_new_ op_error(this->_connection)); 
 	}

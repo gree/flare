@@ -65,6 +65,7 @@ public:
 	static const char* strerror(int e);
 	static int gethostbyname(const char *name, struct hostent* he, int* he_errno);
 	static int inet_ntoa(struct in_addr in, char* dst);
+	static in_addr_t inet_addr(const char *cp, const uint32_t netmask = 0xffffffff);
 	static int get_fqdn(string& fqdn);
 	static inline unsigned int next_word(const char* src, char* dst, unsigned int dst_len) {
 		const char *p = src;

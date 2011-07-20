@@ -1348,11 +1348,11 @@ int cluster::_broadcast(shared_thread_queue q, bool sync, vector<string> prior_n
 				// only 1 queue for each node
 				break;
 			}
-			pthread_rwlock_unlock(&this->_mutex_node_map);
 			if (n > 0) {
 				q->sync();
 			}
 		}
+		pthread_rwlock_unlock(&this->_mutex_node_map);
 	}
 
 	// TODO: see if thread is myself or not to avoid dead locks

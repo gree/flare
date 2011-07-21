@@ -419,7 +419,7 @@ int ini_option::reload() {
 		}
 
 		if (opt_var_map.count("max-total-thread-queue")) {
-			log_notice("  max_total_thread_queue:      %u -> %u", this->_index_server_port, opt_var_map["max-total-thread-queue"].as<uint32_t>());
+			log_notice("  max_total_thread_queue: %u -> %u", this->_max_total_thread_queue, opt_var_map["max-total-thread-queue"].as<uint32_t>());
 			this->_max_total_thread_queue = opt_var_map["max-total-thread-queue"].as<uint32_t>();
 		}
 	} catch (int e) {

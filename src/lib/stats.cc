@@ -26,7 +26,8 @@ stats::stats():
 		_hits(0),
 		_misses(0),
 		_bytes_read(0),
-		_bytes_written(0) {
+		_bytes_written(0),
+		_total_thread_queue(0) {
 }
 
 /**
@@ -147,6 +148,10 @@ unsigned int stats::get_bytes_read() {
 
 unsigned int stats::get_bytes_written() {
 	return this->_bytes_written;
+}
+
+unsigned int stats::get_total_thread_queue() {
+	return this->_total_thread_queue;
 }
 
 uint32_t stats::get_limit_maxbytes() {

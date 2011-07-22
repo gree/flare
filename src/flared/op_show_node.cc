@@ -90,8 +90,11 @@ int op_show_node::_send_show_variables() {
 	s << "storage_large:          " << (ini_option_object().is_storage_large() ? "true": "false") << line_delimiter;
 	s << "storage_lmemb:          " << ini_option_object().get_storage_lmemb() << line_delimiter;
 	s << "storage_nmemb:          " << ini_option_object().get_storage_nmemb() << line_delimiter;
+	s << "storage_dfunit:         " << ini_option_object().get_storage_dfunit() << line_delimiter;
 	s << "storage_type:           " << ini_option_object().get_storage_type().c_str() << line_delimiter;
-	s << "thread_pool_size:       " << ini_option_object().get_thread_pool_size();
+	s << "thread_pool_size:       " << ini_option_object().get_thread_pool_size() << line_delimiter;
+	s << "proxy_prior_netmask:    " << ini_option_object().get_proxy_prior_netmask() << line_delimiter;
+	s << "max_total_thread_queue: " << ini_option_object().get_max_total_thread_queue();
 
 	this->_connection->writeline(s.str().c_str());
 

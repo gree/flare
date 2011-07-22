@@ -40,7 +40,7 @@ protected:
 	time_t						_iter_lock;
 
 public:
-	storage_tch(string data_dir, int mutex_slot_size, uint32_t storage_ap, uint64_t storage_bucket_size, int storage_cache_size, string storage_compess, bool storage_large);
+	storage_tch(string data_dir, int mutex_slot_size, uint32_t storage_ap, uint64_t storage_bucket_size, int storage_cache_size, string storage_compess, bool storage_large, int32_t storage_dfunit);
 	virtual ~storage_tch();
 
 	virtual int open();

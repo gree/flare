@@ -114,6 +114,7 @@ public:
 		partition_node					master;
 		vector<partition_node>	slave;
 		vector<string>					balance;
+		vector<string>					prior_balance;
 		map<string, bool>				index;
 	} partition;
 
@@ -176,16 +177,19 @@ protected:
 	int										_reconstruction_interval;
 	int										_reconstruction_bwlimit;
 	replication						_replication_type;
+	uint32_t						_proxy_prior_netmask;
+	uint32_t						_max_total_thread_queue;
 
 public:
 	cluster(thread_pool* tp, string data_dir, string server_name, int server_port);
 	virtual ~cluster();
 
 	int startup_index(key_resolver::type key_resolver_type, int key_resolver_modular_hint, int key_resolver_modular_virtual);
-	int startup_node(string index_server_name, int index_server_port);
+	int startup_node(string index_server_name, int index_server_port, uint32_t prior_proxy_netmask);
 
 	int add_node(string node_server_name, int node_server_port);
-	int down_node(string node_server_name, int node_server_port);
+	int down_node(string node_server_name, int node_server_port, bool shutdown_mode = false);
+	int shutdown_node(string node_server_name, int node_server_port);
 	int ready_node(string node_server_name, int node_server_port);
 	int up_node(string node_server_name, int node_server_port);
 	int remove_node(string node_server_name, int node_server_port);
@@ -198,6 +202,7 @@ public:
 	int notify_master_reconstruction() { int n; pthread_mutex_lock(&this->_mutex_master_reconstruction); this->_master_reconstruction--; n = this->_master_reconstruction; pthread_mutex_unlock(&this->_mutex_master_reconstruction); return n; };
 	int activate_node(bool skip_ready_state = false);
 	int deactivate_node();
+	int shutdown_node();
 	proxy_request pre_proxy_read(op_proxy_read* op, storage::entry& e, void* parameter, shared_queue_proxy_read& q);
 	proxy_request pre_proxy_write(op_proxy_write* op, shared_queue_proxy_write& q, uint64_t generic_value = 0);
 	proxy_request post_proxy_write(op_proxy_write* op, bool sync = false);
@@ -240,6 +245,8 @@ public:
 	int set_index_server_name(string index_server_name) { this->_index_server_name = index_server_name; return 0; };
 	int get_index_server_port() { return this->_index_server_port; };
 	int set_index_server_port(int index_server_port) { this->_index_server_port = index_server_port; return 0; };
+	uint32_t get_max_total_thread_queue() { return this->_max_total_thread_queue; };
+	uint32_t set_max_total_thread_queue(uint32_t max_total_thread_queue) { this->_max_total_thread_queue = max_total_thread_queue; return 0; };
 
 #ifdef ENABLE_MYSQL_REPLICATION
 	int set_mysql_replication(bool mysql_replication) { this->_mysql_replication = mysql_replication; return 0; };
@@ -345,7 +352,7 @@ protected:
 	int _shift_node_role(string node_key, role old_role, int old_partition, role new_role, int new_partition);
 	int _enqueue(shared_thread_queue q, string node_key, int key_hash, bool sync = false);
 	int _enqueue(shared_thread_queue q, thread_pool::thread_type t, bool sync);
-	int _broadcast(shared_thread_queue q, bool sync, vector<string> prior_node_key);
+	int _broadcast(shared_thread_queue q, bool sync, vector<string> prior_node_key, string exclude_node_key = "");
 	int _save();
 	int _load();
 	int _reconstruct_node_partition(bool lock = true);

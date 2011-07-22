@@ -61,6 +61,8 @@ int op_stats::_parse_server_parameter() {
 			this->_stats_type = stats_type_threads_request;
 		} else if (strcmp(r, "slave") == 0) {
 			this->_stats_type = stats_type_threads_slave;
+		} else if (strcmp(r, "queue") == 0) {
+			this->_stats_type = stats_type_threads_queue;
 		} else {
 			this->_stats_type = stats_type_error;
 		}
@@ -184,6 +186,16 @@ int op_stats::_send_stats_nodes(cluster* cl) {
 		s << "STAT " << node_key << ":thread_type " << it->node_thread_type << line_delimiter;
 	}
 	this->_connection->write(s.str().c_str(), s.str().size());
+
+	return 0;
+}
+
+int op_stats::_send_stats_threads_queue() {
+	ostringstream s;
+
+	s << "STAT " << "total_thread_queue " << stats_object->get_total_thread_queue();
+
+	this->_connection->writeline(s.str().c_str());
 
 	return 0;
 }

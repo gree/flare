@@ -146,8 +146,11 @@ int flared::startup(int argc, char **argv) {
 	log_notice("  storage_large:          %s", ini_option_object().is_storage_large() ? "true" : "false");
 	log_notice("  storage_lmemb:          %d", ini_option_object().get_storage_lmemb());
 	log_notice("  storage_nmemb:          %d", ini_option_object().get_storage_nmemb());
+	log_notice("  storage_dfunit:         %d", ini_option_object().get_storage_dfunit());
 	log_notice("  storage_type:           %s", ini_option_object().get_storage_type().c_str());
 	log_notice("  thread_pool_size:       %d", ini_option_object().get_thread_pool_size());
+	log_notice("  proxy-prior-netmask:    %u", ini_option_object().get_proxy_prior_netmask());
+	log_notice("  max-total-thread-queue: %u", ini_option_object().get_max_total_thread_queue());
 
 	// startup procs
 	if (this->_set_resource_limit() < 0) {
@@ -184,7 +187,10 @@ int flared::startup(int argc, char **argv) {
 	this->_cluster->set_reconstruction_interval(ini_option_object().get_reconstruction_interval());
 	this->_cluster->set_reconstruction_bwlimit(ini_option_object().get_reconstruction_bwlimit());
 	this->_cluster->set_replication_type(ini_option_object().get_replication_type());
-	if (this->_cluster->startup_node(ini_option_object().get_index_server_name(), ini_option_object().get_index_server_port()) < 0) {
+	this->_cluster->set_max_total_thread_queue(ini_option_object().get_max_total_thread_queue());
+	if (this->_cluster->startup_node(ini_option_object().get_index_server_name(),
+									 ini_option_object().get_index_server_port(),
+									 ini_option_object().get_proxy_prior_netmask()) < 0) {
 		return -1;
 	}
 
@@ -198,7 +204,9 @@ int flared::startup(int argc, char **argv) {
 				ini_option_object().get_storage_bucket_size(),
 				ini_option_object().get_storage_cache_size(),
 				ini_option_object().get_storage_compress(),
-				ini_option_object().is_storage_large());
+				ini_option_object().is_storage_large(),
+				ini_option_object().get_storage_dfunit());
+
 		break;
 	case storage::type_tcb:
 		this->_storage = _new_ storage_tcb(ini_option_object().get_data_dir(),
@@ -209,7 +217,8 @@ int flared::startup(int argc, char **argv) {
 				ini_option_object().get_storage_compress(),
 				ini_option_object().is_storage_large(),
 				ini_option_object().get_storage_lmemb(),
-				ini_option_object().get_storage_nmemb());
+				ini_option_object().get_storage_nmemb(),
+				ini_option_object().get_storage_dfunit());
 		break;
 	default:
 		log_err("unknown storage type [%s]", ini_option_object().get_storage_type().c_str());
@@ -249,6 +258,10 @@ int flared::run() {
 	for (;;) {
 		if (this->_shutdown_request) {
 			log_notice("shutdown request accepted -> breaking running loop", 0);
+			log_notice("send shutdown message to index server", 0);
+			if (this->_cluster->shutdown_node()) {
+				log_warning("failed to send shutdown message", 0);
+			}
 			break;
 		}
 
@@ -314,6 +327,9 @@ int flared::reload() {
 	
 	// thread_pool_size
 	this->_thread_pool->set_max_pool_size(ini_option_object().get_thread_pool_size());
+
+	// max_total_thread_queue
+	this->_cluster->set_max_total_thread_queue(ini_option_object().get_max_total_thread_queue());
 
 	// re-setup resource limit (do not care about return value here)
 	this->_set_resource_limit();

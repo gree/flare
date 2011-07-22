@@ -16,6 +16,7 @@
 #include "op_node_add.h"
 #include "op_node_role.h"
 #include "op_node_state.h"
+#include "op_shutdown.h"
 #include "op_proxy_read.h"
 #include "op_proxy_write.h"
 #include "queue_node_sync.h"
@@ -53,7 +54,9 @@ cluster::cluster(thread_pool* tp, string data_dir, string server_name, int serve
 		_index_server_port(0),
 		_proxy_concurrency(0),
 		_reconstruction_interval(0),
-		_reconstruction_bwlimit(0) {
+		_reconstruction_bwlimit(0),
+		_proxy_prior_netmask(0), 
+		_max_total_thread_queue(0) {
 	this->_node_key = this->to_node_key(server_name, server_port);
 	pthread_mutex_init(&this->_mutex_serialization, NULL);
 	pthread_mutex_init(&this->_mutex_master_reconstruction, NULL);
@@ -193,10 +196,14 @@ int cluster::startup_index(key_resolver::type key_resolver_type, int key_resolve
 /**
  *	startup proc for node process
  */
-int cluster::startup_node(string index_server_name, int index_server_port) {
+int cluster::startup_node(string index_server_name, int index_server_port, uint32_t proxy_prior_netmask) {
 	this->_type = type_node;
 	this->_index_server_name = index_server_name;
 	this->_index_server_port = index_server_port;
+
+	if (proxy_prior_netmask != 0) {
+		this->_proxy_prior_netmask = ~(((uint32_t)1 << proxy_prior_netmask) - 1); // length -> mask bits
+	}
 
 	log_notice("setting up cluster node... (type=%d, index_server_name=%s, index_server_port=%d)", this->_type, this->_index_server_name.c_str(), this->_index_server_port);
 
@@ -377,10 +384,16 @@ int cluster::add_node(string node_server_name, int node_server_port) {
 /**
  *	[index] node down event handler
  */
-int cluster::down_node(string node_server_name, int node_server_port) {
+int cluster::down_node(string node_server_name, int node_server_port, bool shutdown_mode) {
 	string node_key = this->to_node_key(node_server_name, node_server_port);
+	string exclude_node_key;
 
-	log_notice("handling node down event [node_key=%s]", node_key.c_str());
+	if (shutdown_mode) {
+		exclude_node_key = node_key; // skip broadcasting to a terminated node.
+	} else {
+		log_notice("handling node down event [node_key=%s]", node_key.c_str());
+		exclude_node_key = "";
+	}
 
 	pthread_rwlock_wrlock(&this->_mutex_node_map);
 	pthread_rwlock_wrlock(&this->_mutex_node_partition_map);
@@ -401,6 +414,10 @@ int cluster::down_node(string node_server_name, int node_server_port) {
 		if (n.node_role == role_master) {
 			if (n.node_state == state_active) {
 				log_err("master node down -> finding an active slave and shift its role to master", 0);
+				if (shutdown_mode) {
+					log_err("master node[%s] maybe send shutdown op", node_key.c_str());
+					exclude_node_key = "";	// try to send down message, and shift role master -> proxy.
+				}
 				if (this->_node_partition_map[n.node_partition].slave.size() == 0) {
 					log_err("no slave for this partition (partition=%d) -> all requests for this partition will fail!", n.node_partition);
 					preserve = true;		// leave role as master to keep partition count (*important*)
@@ -465,9 +482,18 @@ int cluster::down_node(string node_server_name, int node_server_port) {
 
 	// notify
 	shared_queue_node_sync q(new queue_node_sync(this));
-	this->_broadcast(q, false, prior_node_key);
+	this->_broadcast(q, false, prior_node_key, exclude_node_key);
 
 	return 0;
+}
+
+/**
+ *	[index] node shutdown event handler
+ */
+int cluster::shutdown_node(string node_server_name, int node_server_port) {
+	string node_key = this->to_node_key(node_server_name, node_server_port);
+	log_notice("node shutdown event [node_key=%s]", node_key.c_str());
+	return this->down_node(node_server_name, node_server_port, true);
 }
 
 /**
@@ -1027,6 +1053,27 @@ int cluster::deactivate_node() {
 }
 
 /**
+ *  [node] send shutdown message upon receiving a SIGTERM.
+ */
+int cluster::shutdown_node() {
+	shared_connection c(new connection());
+	if (c->open(this->_index_server_name, this->_index_server_port) < 0) {
+		log_err("failed to connect to index server", 0);
+		return -1;
+	}
+
+	op_shutdown* p = _new_ op_shutdown(c, this);
+	if (p->run_client(this->_server_name, this->_server_port) < 0 || p->get_result() != op::result_ok) {
+		log_err("failed to send shutdown message", 0);
+		_delete_(p);
+		return -1;
+	}
+	_delete_(p);
+
+	return 0;
+}
+
+/**
  *	[node] pre proxy for reading ops (get, gets)
  *
  *	@todo fix performance issue
@@ -1054,7 +1101,13 @@ cluster::proxy_request cluster::pre_proxy_read(op_proxy_read* op, storage::entry
 		log_err("no node is available for this partition (all balance is set to 0)", 0);
 		return proxy_request_error_partition;
 	}
-	string node_key = p.balance[rand() % p.balance.size()];
+
+	string node_key;
+	if (p.prior_balance.size() > 0) {
+		node_key = p.prior_balance[rand() % p.prior_balance.size()];
+	} else {
+		node_key = p.balance[rand() % p.balance.size()];
+	}
 	log_debug("selected proxy node (node_key=%s)", node_key.c_str());
 
 	vector<string> proxy = op->get_proxy();
@@ -1154,6 +1207,7 @@ cluster::proxy_request cluster::post_proxy_write(op_proxy_write* op, bool sync) 
 #ifdef ENABLE_MYSQL_REPLICATION
 	if (this->_mysql_replication) {
 		this->_enqueue(q, thread_pool::thread_type_mysql_replication, sync);
+		// no follow up...?
 	}
 #endif
 	if (sync) {
@@ -1274,7 +1328,7 @@ int cluster::_enqueue(shared_thread_queue q, string node_key, int key_hash, bool
 	if (sync) {
 		q->sync_ref();
 	}
-	if (t->enqueue(q) < 0) {
+	if (t->enqueue(q, this->_max_total_thread_queue) < 0) {
 		log_warning("enqueue failed (perhaps thread is now exiting?)", 0);
 		if (sync) {
 			q->sync_unref();
@@ -1319,7 +1373,7 @@ int cluster::_enqueue(shared_thread_queue q, thread_pool::thread_type type, bool
  *	
  *	[notice] all threads receive same thread_queue object
  */
-int cluster::_broadcast(shared_thread_queue q, bool sync, vector<string> prior_node_key) {
+int cluster::_broadcast(shared_thread_queue q, bool sync, vector<string> prior_node_key, string exclude_node_key) {
 	log_debug("broadcasting queue [ident=%s]", q->get_ident().c_str());
 
 	// handle prior node key first
@@ -1327,6 +1381,11 @@ int cluster::_broadcast(shared_thread_queue q, bool sync, vector<string> prior_n
 		pthread_rwlock_rdlock(&this->_mutex_node_map);
 		for (vector<string>::iterator it = prior_node_key.begin(); it != prior_node_key.end(); it++) {
 			string p = *it;
+			if (exclude_node_key == p) {
+				log_notice("node key = %s skip enqueue", exclude_node_key.c_str());
+				continue;
+			}
+
 			log_notice("prior node key = %s -> process target node first w/ sync mode", p.c_str());
 			thread_pool::local_map m = this->_thread_pool->get_active(this->_node_map[p].node_thread_type);
 
@@ -1358,6 +1417,10 @@ int cluster::_broadcast(shared_thread_queue q, bool sync, vector<string> prior_n
 	// TODO: see if thread is myself or not to avoid dead locks
 	pthread_rwlock_rdlock(&this->_mutex_node_map);
 	for (node_map::iterator it = this->_node_map.begin(); it != this->_node_map.end(); it++) {
+		if (exclude_node_key == it->first) {
+			log_notice("node key = %s skip enqueue", exclude_node_key.c_str());
+			continue;
+		}
 		thread_pool::local_map m = this->_thread_pool->get_active(it->second.node_thread_type);
 		for (thread_pool::local_map::iterator it_local = m.begin(); it_local != m.end(); it_local++) {
 			if (sync) {
@@ -1530,6 +1593,8 @@ int cluster::_reconstruct_node_partition(bool lock) {
 		}
 	}
 
+	const in_addr_t network_addr = util::inet_addr(this->_server_name.c_str(), this->_proxy_prior_netmask);
+	log_debug("network address (myself):%u", network_addr);
 	for (node_map::iterator it = this->_node_map.begin(); it != this->_node_map.end(); it++) {
 		// slave (2nd path)
 		node& n = it->second;
@@ -1558,6 +1623,17 @@ int cluster::_reconstruct_node_partition(bool lock) {
 					npm[n.node_partition].balance.push_back(node_key);
 				}
 				npm[n.node_partition].index[node_key] = true;
+
+				if (this->_proxy_prior_netmask == 0) {
+					continue;
+				}
+				const in_addr_t addr = util::inet_addr(n.node_server_name.c_str(), this->_proxy_prior_netmask);
+				log_debug("network address %s:%u", node_key.c_str(), addr);
+				if (network_addr == addr) {
+					for (int i = 0; i < pn.node_balance; i++) {
+						npm[n.node_partition].prior_balance.push_back(node_key);
+					}
+				}
 			} else if (nppm.count(n.node_partition) > 0) {
 				nppm[n.node_partition].slave.push_back(pn);
 				for (int i = 0; i < pn.node_balance; i++) {

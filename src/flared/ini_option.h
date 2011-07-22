@@ -58,9 +58,11 @@ private:
 	bool				_storage_large;
 	int					_storage_lmemb;
 	int					_storage_nmemb;
+	int32_t				_storage_dfunit;
 	string			_storage_type;
 	int					_thread_pool_size;
-	
+	uint32_t 		_proxy_prior_netmask;
+	uint32_t 		_max_total_thread_queue;
 public:
 	static const int default_back_log = 30;
 	static const int default_index_server_port = 12120;
@@ -81,7 +83,10 @@ public:
 	static const int default_storage_cache_size = 65536;
 	static const int default_storage_lmemb = 128;
 	static const int default_storage_nmemb = 256;
+	static const int32_t default_storage_dfunit = 0;						// disable dynamic defragmentation
 	static const int default_thread_pool_size = 5;
+	static const uint32_t default_proxy_prior_netmask = 0x00;
+	static const uint32_t default_max_total_thread_queue = 0;				// unlimited
 
 	ini_option();
 	virtual ~ini_option();
@@ -124,8 +129,11 @@ public:
 	bool is_storage_large() { return this->_storage_large; };
 	int get_storage_lmemb() { return this->_storage_lmemb; };
 	int get_storage_nmemb() { return this->_storage_nmemb; };
+	int32_t get_storage_dfunit() { return this->_storage_dfunit; };
 	string get_storage_type() { return this->_storage_type; };
 	int get_thread_pool_size() { return this->_thread_pool_size; };
+	uint32_t get_proxy_prior_netmask() { return this->_proxy_prior_netmask; };
+	uint32_t get_max_total_thread_queue() { return this->_max_total_thread_queue; };
 
 private:
 	int _setup_cli_option(program_options::options_description& option);

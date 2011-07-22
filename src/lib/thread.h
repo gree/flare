@@ -109,7 +109,7 @@ public:
 	int notify_shutdown();
 
 	int dequeue(shared_thread_queue& q, int timeout);
-	int enqueue(shared_thread_queue& q);
+	int enqueue(shared_thread_queue& q, uint32_t max_total_thread_queue = 0);
 	thread_info get_thread_info();
 
 	bool is_myself() { return pthread_self() == this->_thread_id; };

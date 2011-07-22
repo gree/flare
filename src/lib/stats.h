@@ -41,6 +41,7 @@ protected:
 	unsigned int	_misses;
 	unsigned int	_bytes_read;
 	unsigned int	_bytes_written;
+	unsigned int	_total_thread_queue;
 
 public:
 	stats();
@@ -56,6 +57,8 @@ public:
 	inline int increment_misses() { unsigned int dummy; ATOMIC_ADD(&this->_misses, 1, dummy); return 0; };
 	inline int add_bytes_read(unsigned int n) { unsigned int dummy; ATOMIC_ADD(&this->_bytes_read, n, dummy); return 0; };
 	inline int add_bytes_written(unsigned int n) { unsigned int dummy; ATOMIC_ADD(&this->_bytes_written, n, dummy); return 0; };
+	inline int increment_total_thread_queue() { unsigned int dummy; ATOMIC_ADD(&this->_total_thread_queue, 1, dummy); return 0; };
+	inline int decrement_total_thread_queue() { unsigned int dummy; ATOMIC_ADD(&this->_total_thread_queue, -1, dummy); return 0; };
 
 	pid_t get_pid();
 	time_t get_uptime();
@@ -77,6 +80,7 @@ public:
 	unsigned int get_evictions();
 	unsigned int get_bytes_read();
 	unsigned int get_bytes_written();
+	unsigned int get_total_thread_queue();
 	uint32_t get_limit_maxbytes();
 	uint32_t get_threads(thread_pool* tp);
 	uint32_t get_pool_threads(thread_pool* tp);

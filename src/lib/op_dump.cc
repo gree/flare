@@ -147,7 +147,8 @@ int op_dump::_run_server() {
 	key_resolver* kr = this->_cluster->get_key_resolver();
 
 	storage::entry e;
-	while (this->_storage->iter_next(e.key) >= 0) {
+	storage::iteration i;
+	while ((i = this->_storage->iter_next(e.key)) == storage::iteration_continue) {
 		if (this->_partition >= 0) {
 			int key_hash_value = e.get_key_hash_value();
 			int p = kr->resolve(key_hash_value, this->_partition_size);
@@ -186,6 +187,9 @@ int op_dump::_run_server() {
 
 	this->_storage->iter_end();
 
+	if (i == storage::iteration_error) {
+		return this->_send_result(result_server_error);
+	}
 	return this->_send_result(result_end);
 }
 
@@ -222,6 +226,10 @@ int op_dump::_parse_client_parameter() {
 			_delete_(p);
 			log_notice("found delimiter, dump completed (items=%d)", items);
 			break;
+		} else if (strcmp(p, "SERVER_ERROR\n") == 0) {
+			_delete_(p);
+			log_err("something is going wrong, dump uncompleted (items=%d)", items);
+			return -1;
 		}
 
 		char q[BUFSIZ];

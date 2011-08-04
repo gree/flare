@@ -580,23 +580,29 @@ int storage_tcb::iter_begin() {
 	return 0;
 }
 
-int storage_tcb::iter_next(string& key) {
+storage::iteration storage_tcb::iter_next(string& key) {
 	if (this->_cursor == NULL) {
-		return -1;
+		return iteration_end;
 	}
 
 	int len = 0;
 	char* p = static_cast<char*>(tcbdbcurkey(this->_cursor, &len));
 	if (p == NULL) {
-		// end of iteration
-		return -1;
+		int ecode = tcbdbecode(this->_db);
+		if (ecode == TCESUCCESS || ecode == TCENOREC) {
+			// end of iteration
+			return iteration_end;
+		} else {
+			log_err("tcbdbcurkey() failed: %s (%d)", tcbdberrmsg(ecode), ecode);
+			return iteration_error;
+		}
 	}
 	key = p;
 	free(p);
 
 	tcbdbcurnext(this->_cursor);
 
-	return 0;
+	return iteration_continue;
 }
 
 int storage_tcb::iter_end() {

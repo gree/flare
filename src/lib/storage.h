@@ -92,6 +92,12 @@ public:
 		response_type_dump,
 	};
 
+	enum									iteration {
+		iteration_error = -1,
+		iteration_end = 0,
+		iteration_continue,
+	};
+
 	typedef struct 				_entry {
 		string							key;
 		uint32_t						flag;
@@ -265,7 +271,7 @@ public:
 	virtual int remove(entry& e, result& r, int b = 0) = 0;
 	virtual int truncate(int b = 0) = 0;
 	virtual int iter_begin() = 0;
-	virtual int iter_next(string& key) = 0;
+	virtual iteration iter_next(string& key) = 0;
 	virtual int iter_end() = 0;
 	virtual uint32_t count() = 0;
 	virtual uint64_t size() = 0;

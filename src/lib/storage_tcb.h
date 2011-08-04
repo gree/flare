@@ -51,7 +51,7 @@ public:
 	virtual int remove(entry& e, result& r, int b = 0);
 	virtual int truncate(int b = 0);
 	virtual int iter_begin();
-	virtual int iter_next(string& key);
+	virtual iteration iter_next(string& key);
 	virtual int iter_end();
 	virtual uint32_t count();
 	virtual uint64_t size();

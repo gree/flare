@@ -568,17 +568,23 @@ int storage_tch::iter_begin() {
 	return 0;
 }
 
-int storage_tch::iter_next(string& key) {
+storage::iteration storage_tch::iter_next(string& key) {
 	int len = 0;
 	char* p = static_cast<char*>(tchdbiternext(this->_db, &len));
 	if (p == NULL) {
-		// end of iteration
-		return -1;
+		int ecode = tchdbecode(this->_db);
+		if (ecode == TCESUCCESS || ecode == TCENOREC) {
+			// end of iteration
+			return iteration_end;
+		} else {
+			log_err("tchdbiternext() failed: %s (%d)", tchdberrmsg(ecode), ecode);
+			return iteration_error;
+		}
 	}
 	key = p;
 	free(p);
 
-	return 0;
+	return iteration_continue;
 }
 
 int storage_tch::iter_end() {

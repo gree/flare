@@ -187,9 +187,6 @@ int op_dump::_run_server() {
 
 	this->_storage->iter_end();
 
-	if (i == storage::iteration_error) {
-		return this->_send_result(result_server_error);
-	}
 	return this->_send_result(result_end);
 }
 

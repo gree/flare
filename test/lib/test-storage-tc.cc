@@ -34,7 +34,8 @@ namespace test_storage
                                   131071,
                                   65536,
                                   compress,
-                                  true);
+                                  true,
+																	0);
         storage->open();
     }
 

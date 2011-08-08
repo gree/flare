@@ -1,3 +1,15 @@
+* [2011/08/09] 1.0.14 release
+  * feature updates
+    - added 'stats threads queue' op
+    - added 'shutdown' op (for graceful shutdown)
+    - added --max-total-thread-queue option (default=0 (unlimited))
+    - added --proxy-prior-netmask option
+    - added --storage-dfunit (support for dynamic defragmentation)
+
+  * bug fixes
+    - fix double unlock (which causes dead lock)
+    - fix dump error handling (tc iteration returns error in some rare cases)
+
 * [2011/06/08] 1.0.13 release
 
   * feature updates

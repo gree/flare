@@ -1,3 +1,107 @@
+commit c1664626c7af6327262f5395867fd8024ea265ab
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Mon Aug 8 22:51:21 2011 +0900
+
+    fix test
+
+commit 70703ea8bc3de4a8a65a54ef07f9c95296731c86
+Merge: e57d884... d89991a...
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Sun Aug 7 07:43:08 2011 -0700
+
+    Merge pull request #17 from sejima/master
+    
+    add files
+
+commit d89991af2b4c2a916029464709840be76420e8f2
+Merge: 86b51bf... e57d884...
+Author: SEJIMA Takanori <takanori.sejima@gmail.com>
+Date:   Sun Aug 7 23:22:34 2011 +0900
+
+    Merge remote branch 'upstream/master'
+
+commit 86b51bff34d593e3f33dfbcd9506251c2dcdcdb7
+Merge: 291ac8f... d4f9b05...
+Author: SEJIMA Takanori <takanori.sejima@gmail.com>
+Date:   Sun Aug 7 23:07:48 2011 +0900
+
+    Merge branch 'master' into pre-1.0.14
+
+commit 291ac8f8c3d4c52c66db5ed32ce231c70efbc2f8
+Author: SEJIMA Takanori <takanori.sejima@gmail.com>
+Date:   Sun Aug 7 22:57:12 2011 +0900
+
+    add file
+
+commit e57d884e0a4c621f00182fb5413a1e63bca8eb72
+Merge: 8c71062... d4f9b05...
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Sun Aug 7 04:38:46 2011 -0700
+
+    Merge pull request #16 from sejima/master
+    
+    revert: result code of op_dump.
+
+commit d4f9b05d4e6e675037cb4ce667d3f855c6d46c7e
+Author: SEJIMA Takanori <takanori.sejima@gmail.com>
+Date:   Sun Aug 7 19:56:00 2011 +0900
+
+    revert: result code of op_dump.
+
+commit 8c710621b81b9d74d52d01890ca5822e4b4a9152
+Merge: 0b4193e... ae1d346...
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Wed Aug 3 21:12:12 2011 -0700
+
+    Merge pull request #15 from sejima/pre-1.0.14
+    
+    added error_handling for replication
+
+commit ae1d3462e756ad14330f3c5b62b8fb0154eb9f60
+Author: SEJIMA Takanori <takanori.sejima@gmail.com>
+Date:   Wed Aug 3 01:47:31 2011 +0900
+
+    added error_handling for replication
+
+commit 0b4193efc4b8605e345bf6987c9e8f8216c6c182
+Merge: faf1c71... f71827e...
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Fri Jul 22 09:03:10 2011 -0700
+
+    Merge pull request #14 from sejima/pre-1.0.14
+    
+    added stats threads queue, proxy_prior_netmask, op_shutdown, storage_dfunitdfunit
+
+commit f71827eece2082399c41beef409db51d527710a5
+Author: SEJIMA Takanori <takanori.sejima@gmail.com>
+Date:   Thu Jul 21 14:21:09 2011 +0900
+
+    fix log message
+
+commit 94fcc1bc432f134882dc86d8b43b2a3979f7860c
+Author: SEJIMA Takanori <takanori.sejima@gmail.com>
+Date:   Thu Jul 21 03:28:58 2011 +0900
+
+    added stats threads queue, proxy_prior_netmask, op_shutdown, storage_dfunit
+    
+    - stats threads queue(total)
+    - max_total_thread_queue
+    - proxy_prior_netmask
+    - op_shutdown(for graceful shutdown)
+    - storage_dfunit(support for dynamic defragmentation)
+
+commit faf1c713068ec020c6c6fcd01882c7c4619355f6
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Wed Jul 20 19:12:36 2011 +0900
+
+    fix double unlock (which causes deadlocks)
+
+commit 95d9d7f285ac10d1b65a8a69c32ea52f5d4ef52d
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Wed Jun 8 11:55:37 2011 +0900
+
+    ready for 1.0.13 (again)
+
 commit b3bd0f8dc58866e95a03ac08333293131538a929
 Author: Masaki Fujimoto <fujimoto@php.net>
 Date:   Tue Jun 7 19:06:45 2011 +0900

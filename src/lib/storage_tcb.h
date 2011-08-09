@@ -8,8 +8,6 @@
 #ifndef	__STORAGE_TCB_H__
 #define	__STORAGE_TCB_H__
 
-#include <boost/shared_ptr.hpp>
-
 #ifdef HAVE_STDLIB_H
 # include <stdlib.h>
 #endif // HAVE_STDLIB_H

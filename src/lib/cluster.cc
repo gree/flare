@@ -202,7 +202,10 @@ int cluster::startup_node(string index_server_name, int index_server_port, uint3
 	this->_index_server_port = index_server_port;
 
 	if (proxy_prior_netmask != 0) {
-		this->_proxy_prior_netmask = ~(((uint32_t)1 << proxy_prior_netmask) - 1); // length -> mask bits
+		this->_proxy_prior_netmask = htonl((uint32_t)0xffffffff << (32-proxy_prior_netmask)); // length -> mask bits
+		struct in_addr in;
+		in.s_addr = util::inet_addr(this->_server_name.c_str(), this->_proxy_prior_netmask);
+		log_notice("my network address (server_name=%s, proxy_prior_netmask=0x%x, prior_network_address=%s)", this->_server_name.c_str(), ntohl(this->_proxy_prior_netmask), inet_ntoa(in));
 	}
 
 	log_notice("setting up cluster node... (type=%d, index_server_name=%s, index_server_port=%d)", this->_type, this->_index_server_name.c_str(), this->_index_server_port);

@@ -17,6 +17,9 @@
 namespace gree {
 namespace flare {
 
+// This variable is set by main thread.
+static volatile sig_atomic_t reload_request = 0;
+
 // {{{ global functions
 /**
  *	signal handler (SIGTERM/SIGINT)
@@ -36,14 +39,11 @@ void sa_term_handler(int sig) {
  *	signal handler (SIGHUP)
  */
 void sa_hup_handler(int sig) {
-	if (sig != SIGHUP) {
-		return;
-	}
-	log_notice("received signal [SIGHUP] -> reloading", 0);
-
-	singleton<flared>::instance().reload();
-
-	return;
+	//
+	// Set signal flag. 
+	// Reload action is executed in the main loop.
+	//
+	reload_request = 1;
 }
 
 /**
@@ -265,7 +265,20 @@ int flared::run() {
 			break;
 		}
 
+		if (reload_request) {
+			log_notice("received signal [SIGHUP] -> reloading", 0);
+			singleton<flared>::instance().reload();
+			reload_request = 0;
+		}
+
 		vector<shared_connection> connection_list = this->_server->wait();
+
+		if (reload_request) {
+			log_notice("received signal [SIGHUP] -> reloading", 0);
+			singleton<flared>::instance().reload();
+			reload_request = 0;
+		}
+
 		vector<shared_connection>::iterator it;
 		for (it = connection_list.begin(); it != connection_list.end(); it++) {
 			shared_connection c = *it;

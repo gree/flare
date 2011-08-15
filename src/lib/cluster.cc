@@ -202,7 +202,10 @@ int cluster::startup_node(string index_server_name, int index_server_port, uint3
 	this->_index_server_port = index_server_port;
 
 	if (proxy_prior_netmask != 0) {
-		this->_proxy_prior_netmask = ~(((uint32_t)1 << proxy_prior_netmask) - 1); // length -> mask bits
+		this->_proxy_prior_netmask = htonl((uint32_t)0xffffffff << (32-proxy_prior_netmask)); // length -> mask bits
+		struct in_addr in;
+		in.s_addr = util::inet_addr(this->_server_name.c_str(), this->_proxy_prior_netmask);
+		log_notice("my network address (server_name=%s, proxy_prior_netmask=0x%x, prior_network_address=%s)", this->_server_name.c_str(), ntohl(this->_proxy_prior_netmask), inet_ntoa(in));
 	}
 
 	log_notice("setting up cluster node... (type=%d, index_server_name=%s, index_server_port=%d)", this->_type, this->_index_server_name.c_str(), this->_index_server_port);
@@ -1536,6 +1539,9 @@ int cluster::_reconstruct_node_partition(bool lock) {
 	node_partition_map npm;
 	node_partition_map nppm;
 
+	const in_addr_t network_addr = util::inet_addr(this->_server_name.c_str(), this->_proxy_prior_netmask);
+	log_debug("network address (myself):%u", network_addr);
+
 	for (node_map::iterator it = this->_node_map.begin(); it != this->_node_map.end(); it++) {
 		// master (1st path)
 		node& n = it->second;
@@ -1573,6 +1579,17 @@ int cluster::_reconstruct_node_partition(bool lock) {
 				npm[n.node_partition].index[node_key] = true;
 
 				log_debug("master node added (node_key=%s, partition=%d, balance=%d)", node_key.c_str(), n.node_partition, n.node_balance);
+
+				if (this->_proxy_prior_netmask == 0) {
+					continue;
+				}
+				const in_addr_t addr = util::inet_addr(n.node_server_name.c_str(), this->_proxy_prior_netmask);
+				log_debug("master network address %s:%u", node_key.c_str(), addr);
+				if (network_addr == addr) {
+					for (int i = 0; i < n.node_balance; i++) {
+						npm[n.node_partition].prior_balance.push_back(node_key);
+					}
+				}
 			} else if (n.node_state == state_prepare || n.node_state == state_ready) {
 				if (nppm[n.node_partition].master.node_key.empty() == false) {
 					throw "master (prepare) is already set, cannot overwrite";
@@ -1593,8 +1610,6 @@ int cluster::_reconstruct_node_partition(bool lock) {
 		}
 	}
 
-	const in_addr_t network_addr = util::inet_addr(this->_server_name.c_str(), this->_proxy_prior_netmask);
-	log_debug("network address (myself):%u", network_addr);
 	for (node_map::iterator it = this->_node_map.begin(); it != this->_node_map.end(); it++) {
 		// slave (2nd path)
 		node& n = it->second;

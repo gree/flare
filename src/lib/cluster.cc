@@ -1194,6 +1194,14 @@ cluster::proxy_request cluster::post_proxy_write(op_proxy_write* op, bool sync) 
 
 	int key_hash_value = e.get_key_hash_value(storage::hash_algorithm_bitshift);
 	vector<string> proxy = op->get_proxy();
+	if (static_cast<int>(count(proxy.begin(), proxy.end(), this->_node_key)) >= 2) {
+		// nothing to do
+		// The following cases may occur. (count() == 1, w/failover)
+		// e.g.) client -> nodeA(slave) -> nodeB(preparing, changed role from master to slave) -> nodeA(master, failovered) -> nodeB
+		//                                                                                        ^^^^^
+		log_warning("skip proxy request to slave -> storing proxied node list (n=%d, proxy=%s)", proxy.size(), util::vector_join<string>(proxy, ",").c_str());
+		return proxy_request_complete;
+	}
 	proxy.push_back(this->_node_key);
 	shared_queue_proxy_write q(new queue_proxy_write(this, this->_storage, proxy, e, op->get_ident()));
 	q->set_post_proxy(true);

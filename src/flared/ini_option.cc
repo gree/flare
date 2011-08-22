@@ -286,7 +286,7 @@ int ini_option::load() {
 		}
 
 		if (opt_var_map.count("storage-dfunit")) {
-			this->_storage_nmemb = opt_var_map["storage-dfunit"].as<int32_t>();
+			this->_storage_dfunit = opt_var_map["storage-dfunit"].as<int32_t>();
 		}
 
 		if (opt_var_map.count("storage-type")) {

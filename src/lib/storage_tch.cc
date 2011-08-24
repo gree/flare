@@ -290,6 +290,7 @@ int storage_tch::incr(entry& e, uint64_t value, result& r, bool increment, int b
 			log_err("failed to unserialize header (data is corrupted) (tmp_len=%d)", tmp_len);
 			throw -1;
 		}
+		e_current.key = e.key;
 		if (static_cast<uint64_t>(tmp_len - offset) != e_current.size) {
 			log_err("actual data size is different from header data size (actual=%d, header=%u)", tmp_len-offset, e_current.size);
 			throw -1;
@@ -372,12 +373,13 @@ int storage_tch::incr(entry& e, uint64_t value, result& r, bool increment, int b
 		if (p) {
 			_delete_(p);
 		}
+		if ((b & behavior_skip_lock) == 0) {
+			pthread_rwlock_unlock(&this->_mutex_slot[mutex_index]);
+		}
+
 		if (remove_request) {
 			result r_remove;
 			this->remove(e_current, r_remove, behavior_version_equal);		// do not care about result here
-		}
-		if ((b & behavior_skip_lock) == 0) {
-			pthread_rwlock_unlock(&this->_mutex_slot[mutex_index]);
 		}
 		return error;
 	}

@@ -12,7 +12,7 @@
 #include <sstream>
 
 #include <boost/lexical_cast.hpp>
-#include <boost/shared_ptr.hpp>
+#include <boost/shared_array.hpp>
 #include <boost/tokenizer.hpp>
 
 #include <ctype.h>
@@ -53,7 +53,7 @@ typedef unsigned char uint8_t;
 #endif // HAVE_STDINT_H
 
 extern const char* const line_delimiter;
-typedef shared_ptr<uint8_t> shared_byte;
+typedef shared_array<uint8_t> shared_byte;
 
 /**
  *	utility class (misc methods)

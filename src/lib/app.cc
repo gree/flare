@@ -136,6 +136,8 @@ int app::_set_pid() {
 	ofstream ofs(pid_path.c_str());
 	if (ofs.fail()) {
 		log_err("setting pid failed [%s]", pid_path.c_str());
+		ofs.close();
+		return -1;
 	}
 	ofs << pid << endl;
 	ofs.close();

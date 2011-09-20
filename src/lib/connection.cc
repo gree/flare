@@ -196,7 +196,7 @@ int connection::read(char** p, int expect_len, bool readline, bool& actual) {
 		return len;
 	}
 
-	struct pollfd ufds;
+	struct pollfd ufds = {0};
 	ufds.fd = this->_sock;
 	ufds.events = POLLIN | POLLPRI;
 

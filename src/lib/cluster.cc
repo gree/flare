@@ -50,6 +50,7 @@ cluster::cluster(thread_pool* tp, string data_dir, string server_name, int serve
 #ifdef ENABLE_MYSQL_REPLICATION
 		_mysql_replication(false),
 #endif
+		_noreply_window_limit(0),
 		_index_server_name(""),
 		_index_server_port(0),
 		_proxy_concurrency(0),

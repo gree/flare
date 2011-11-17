@@ -169,6 +169,7 @@ protected:
 #ifdef ENABLE_MYSQL_REPLICATION
 	bool									_mysql_replication;
 #endif
+	int										_noreply_window_limit;
 
 	// [node]
 	string								_index_server_name;
@@ -252,6 +253,8 @@ public:
 	int set_mysql_replication(bool mysql_replication) { this->_mysql_replication = mysql_replication; return 0; };
 	bool is_mysql_replication() { return this->_mysql_replication; };
 #endif
+	int set_noreply_window_limit(int noreply_window_limit) { this->_noreply_window_limit = noreply_window_limit; return 0; };
+	int get_noreply_window_limit() { return this->_noreply_window_limit; }
 
 	inline string to_node_key(string server_name, int server_port) {
 		string node_key = server_name + ":" + lexical_cast<string>(server_port);

@@ -203,9 +203,8 @@ int thread::trigger(thread_handler* th, bool request_delete, bool async) {
 	pthread_mutex_lock(&this->_mutex_trigger);
 	// a fail safe flag in case we send signal before waiting
 	this->_trigger = true;
-	pthread_mutex_unlock(&this->_mutex_trigger);
-
 	pthread_cond_signal(&this->_cond_trigger);
+	pthread_mutex_unlock(&this->_mutex_trigger);
 
 	if (async == false) {
 		pthread_mutex_lock(&this->_mutex_running);

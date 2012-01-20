@@ -1147,8 +1147,7 @@ cluster::proxy_request cluster::pre_proxy_write(op_proxy_write* op, shared_queue
 	}
 
 	if (op->is_proxy_request()) {
-		partition& p_tmp = is_prepare ? p_prepare : p;
-		if (p_tmp.index.count(this->_node_key) > 0) {
+		if (p.index.count(this->_node_key) > 0 || (is_prepare && p_prepare.index.count(this->_node_key) > 0)) {
 			return proxy_request_continue;
 		}
 	}
@@ -1187,7 +1186,9 @@ cluster::proxy_request cluster::post_proxy_write(op_proxy_write* op, bool sync) 
 	}
 	n_prepare = this->_determine_partition(e, p_prepare, true, is_prepare);
 
-	if (p.master.node_key != this->_node_key && (op->is_proxy_request() == false || is_prepare == false || p_prepare.master.node_key != this->_node_key)) {
+	if ((p.master.node_key == this->_node_key) || (op->is_proxy_request() && is_prepare && p_prepare.master.node_key == this->_node_key)) {
+		// fall through
+	} else {
 		// nothing to do
 		return proxy_request_complete;
 	}
@@ -1206,7 +1207,7 @@ cluster::proxy_request cluster::post_proxy_write(op_proxy_write* op, bool sync) 
 	shared_queue_proxy_write q(new queue_proxy_write(this, this->_storage, proxy, e, op->get_ident()));
 	q->set_post_proxy(true);
 
-	partition& p_tmp = is_prepare ? p_prepare : p;
+	partition& p_tmp = (is_prepare && p_prepare.master.node_key == this->_node_key) ? p_prepare : p;
 	for (vector<partition_node>::iterator it = p_tmp.slave.begin(); it != p_tmp.slave.end(); it++) {
 		// proxy request to slave
 		log_debug("proxy request to slave (node_key=%s, ident=%s)", it->node_key.c_str(), op->get_ident().c_str());

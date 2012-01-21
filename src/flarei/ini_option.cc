@@ -10,6 +10,7 @@
  *	$Id$
  */
 #include "ini_option.h"
+#include "storage.h"
 
 namespace gree {
 namespace flare {
@@ -179,6 +180,18 @@ int ini_option::load() {
 			this->_partition_type = key_resolver::type_cast(key_resolver::type_modular);
 		}
 
+		if (opt_var_map.count("key-hash-algorithm")) {
+			const string& value = opt_var_map["key-hash-algorithm"].as<string>();
+			storage::hash_algorithm ha;
+			if (storage::hash_algorithm_cast(value, ha) < 0) {
+				cout << "unknown hash algorithm [" << value << "]" << endl;
+				throw -1;
+			}
+			this->_key_hash_algorithm = value;
+		} else {
+			this->_key_hash_algorithm = storage::hash_algorithm_cast(storage::hash_algorithm_simple);
+		}
+
 		if (opt_var_map.count("server-name")) {
 			this->_server_name = opt_var_map["server-name"].as<string>();
 		} else {
@@ -328,6 +341,7 @@ int ini_option::_setup_config_option(program_options::options_description& optio
 		("monitor-read-timeout",		program_options::value<int>(),			"node server monitoring read timeout (millisec) (dynamic)")
 		("partition-modular-hint",	program_options::value<int>(),			"partitioning hint (only for partition-type=modular)")
 		("partition-modular-virtual",	program_options::value<int>(),		"partitioning virtual node size (only for partition-type=modular)")
+		("key-hash-algorithm",			program_options::value<string>(),		"key hash algorithm")
 		("partition-size",					program_options::value<int>(),			"max partition size")
 		("partition-type",					program_options::value<string>(),		"partition type (modular:simple algorithm base)")
 		("server-name",							program_options::value<string>(),		"my server name")

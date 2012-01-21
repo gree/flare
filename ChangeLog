@@ -1,3 +1,219 @@
+commit 97de82b816d08b2043bcd5431581d95069c30447
+Author: Kiyoshi Ikehara <kiyoshi.ikehara@gree.co.jp>
+Date:   Wed Apr 18 13:54:12 2012 +0900
+
+    fix test_key_resolver_modular
+    fix test_storage
+
+commit 2461488ca6d998fbef6e257c3601307ddc2b9149
+Merge: 6335dee... a9b2e92...
+Author: Kiyoshi Ikehara <kiyoshi.ikehara@gree.co.jp>
+Date:   Wed Apr 11 20:28:32 2012 +0900
+
+    Merge branch 'dump_resolve_fix' into pre-1.0.15
+
+commit a9b2e925c938fa7fff1c77a437ee1f91a4c03f45
+Author: Kiyoshi Ikehara <kiyoshi.ikehara@gree.co.jp>
+Date:   Wed Apr 11 17:49:17 2012 +0900
+
+    remove the default value of storage::get_key_hash_value()
+
+commit 4887ad33e85c1569ac26a3c7c9704684c7484037
+Author: Kiyoshi Ikehara <kiyoshi.ikehara@gree.co.jp>
+Date:   Wed Apr 11 15:59:40 2012 +0900
+
+    fix
+
+commit 7769bcc2186a34bdeda66a47e776ef4ce15f8d65
+Author: Kiyoshi Ikehara <kiyoshi.ikehara@gree.co.jp>
+Date:   Wed Apr 11 15:40:31 2012 +0900
+
+    fix key resolving for dump operations
+
+commit efc489678f8dfd53b88e2a150eecb38d4578eaa7
+Merge: ff03257... ac8b2ac...
+Author: Kiyoshi Ikehara <kiyoshi.ikehara@gree.co.jp>
+Date:   Wed Mar 14 10:37:56 2012 +0100
+
+    Merge pull request #2 from gree/duplicate_thread_id-fix
+    
+    Duplicate thread id fix
+
+commit ac8b2ac4987ba8f5b76b0147d49d8ea91dbc6703
+Author: Kiyoshi Ikehara <kiyoshi.ikehara@gree.co.jp>
+Date:   Wed Mar 14 14:45:38 2012 +0900
+
+    fix thread id duplication
+
+commit 6335dee1efe6a940a5b9e771308601abbb994b4b
+Author: Kiyoshi Ikehara <kiyoshi.ikehara@gree.co.jp>
+Date:   Fri Mar 2 15:04:01 2012 +0900
+
+    update NEWS
+
+commit ff03257774c3682b47c57b15be221d48c49276d4
+Author: Kiyoshi Ikehara <kiyoshi.ikehara@gree.co.jp>
+Date:   Mon Feb 27 22:30:53 2012 +0900
+
+    prepare for 1.0.15
+
+commit 71fa4cf1aba5b9a539fb8a78d3ebcce58ceb5b15
+Merge: bfb9fe2... 95cd962...
+Author: Kiyoshi Ikehara <kiyoshi.ikehara@gree.co.jp>
+Date:   Mon Feb 27 11:17:13 2012 +0100
+
+    Merge pull request #1 from kiyoshi-ikehara/crc32
+    
+    add --key-hash-algorithm option to flarei
+
+commit 95cd962391f62845f5147ee8e6fdd327510486b1
+Author: Kiyoshi Ikehara <kiyoshi.ikehara@gree.co.jp>
+Date:   Sat Jan 21 20:17:11 2012 +0900
+
+    add --key-hash-algorithm option to flarei
+
+commit bfb9fe207a93b62d978a962d6ee432ac7822327b
+Merge: 1d77b32... 0a58d0e...
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Fri Jan 20 13:49:59 2012 -0800
+
+    Merge pull request #24 from ikehara/post_proxy-fix
+    
+    fix post proxy problem during preparation
+
+commit 0a58d0ec8777c25db4d6a707cebcdd21c5c83163
+Author: Kiyoshi Ikehara <kiyoshi.ikehara@gree.co.jp>
+Date:   Tue Jan 10 16:35:42 2012 +0900
+
+    fix the post proxy problem.
+
+commit 1d77b32daa2f12d7d32fe466398b5d4f54ec2564
+Merge: 679d0a7... a60bb55...
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Tue Dec 27 17:44:15 2011 -0800
+
+    Merge pull request #23 from ikehara/master
+    
+    Threads waiting in the thread pool may be tiggered unintentionally under high LA situation.
+
+commit a60bb55fd214f2ccdb817eba62a839380f6b5cf9
+Author: Kiyoshi Ikehara <kiyoshi.ikehara@gree.co.jp>
+Date:   Tue Dec 27 10:59:22 2011 +0900
+
+    fix unintentional pooled thread triggering bug
+
+commit 679d0a7f4cb7ff4afa78b2656ec43094a953224d
+Merge: aa00227... cb30ecf...
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Tue Sep 20 02:12:45 2011 -0700
+
+    Merge pull request #22 from sejima/1.0.15-develop
+    
+    replication loop detection
+
+commit aa002276667683420dcd2852f72c872771eabc5e
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Wed Aug 24 21:12:38 2011 +0900
+
+    fix possible dead lock (occurred when incrmenting expired key)
+
+commit a194c1b68ce5dd90c9819f51697a108ddcce91a0
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Tue Aug 16 08:37:46 2011 +0900
+
+    Merge commit 'y-asaba/fix_sighup_issue' into 1.0.15-develop
+
+commit 3d16d45539fe25a46d754c28867d9c5891b3d8be
+Merge: fde1f1e... 806967b...
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Sun Aug 21 20:04:30 2011 -0700
+
+    Merge pull request #21 from sejima/master
+    
+    fix bug
+
+commit 806967babe5e1b832ee14b95dd31c0e3d6e62398
+Author: SEJIMA Takanori <takanori.sejima@gmail.com>
+Date:   Sun Aug 21 23:56:52 2011 +0900
+
+    fix bug
+
+commit cb30ecf02b509f700c3b310d894ceb102f2a729d
+Author: SEJIMA Takanori <takanori.sejima@gmail.com>
+Date:   Sun Aug 21 21:09:56 2011 +0900
+
+    replication loop detection
+
+commit f22b4747ff0449fc42a448ad347c803ed1491120
+Merge: bd44dfd... be286a1...
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Tue Aug 16 08:37:46 2011 +0900
+
+    Merge commit 'y-asaba/fix_sighup_issue' into 1.0.15-develop
+
+commit bd44dfdbff0baa4688a40e5c5bd0295b83def689
+Merge: bbdc842... fde1f1e...
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Tue Aug 16 08:35:34 2011 +0900
+
+    Merge branch 'master' of git@github.com:fujimoto/flare into 1.0.15-develop
+
+commit fde1f1e3e6638b7feaa8d2d26910537d32ffff59
+Merge: f450f8b... 1e96a10...
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Mon Aug 15 16:34:54 2011 -0700
+
+    Merge pull request #20 from sejima/master
+    
+    fix proxy_prior_netmask
+
+commit 1e96a105d2dd0e7a1137b14a8d401d7a2e944a74
+Author: SEJIMA Takanori <takanori.sejima@gmail.com>
+Date:   Tue Aug 16 03:16:57 2011 +0900
+
+    one more fix
+
+commit 614bb708d7041b6da5f0320c7a86bb40ba45174b
+Author: SEJIMA Takanori <takanori.sejima@gmail.com>
+Date:   Tue Aug 16 01:07:22 2011 +0900
+
+    fix bug and logging cluster::_proxy_prior_netmask
+
+commit be286a1523657482acd70fc5fa9e4d523113e2e3
+Author: Yoshiyuki Asaba <yoshiyuki.asaba@gree.co.jp>
+Date:   Tue Aug 16 00:28:23 2011 +0900
+
+    Fix a hangup issue when flared or flarei got the SIGHUP signal.
+    
+    sa_hup_handler was not signal-safe because it called non-reentrant
+    functions. So flare just sets a flag in the signal handler, then calls
+    reload action in the main loop.
+
+commit bbdc842796de8eb9191d213d10c5ee8be0862033
+Author: Yoshiyuki Asaba <yoshiyuki.asaba@gree.co.jp>
+Date:   Tue Aug 9 10:26:06 2011 +0900
+
+    flared kept writing error logs when it could not create a pid file.
+    To avoid this issue, this fix terminates flared immediately.
+
+commit 5b8702b317c68a452c739e0aea415e23f372dc61
+Author: Yoshiyuki Asaba <yoshiyuki.asaba@gree.co.jp>
+Date:   Tue Aug 9 10:17:34 2011 +0900
+
+    Change shared_byte type from shared_ptr to shared_array to release memory properly.
+
+commit d08c6c3fb6abb03e25356ca97077df465fe1929b
+Author: Yoshiyuki Asaba <yoshiyuki.asaba@gree.co.jp>
+Date:   Tue Aug 9 10:11:44 2011 +0900
+
+    Initialize "ufds" variable.
+
+commit f450f8b566a08fd7e5b094ddac456bab7f6a67ed
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Mon Aug 8 22:58:39 2011 +0900
+
+    ready for 1.0.14
+
 commit c1664626c7af6327262f5395867fd8024ea265ab
 Author: Masaki Fujimoto <fujimoto@php.net>
 Date:   Mon Aug 8 22:51:21 2011 +0900

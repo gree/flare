@@ -1,7 +1,7 @@
 #                                               -*- Autoconf -*-
 # Process this file with autoconf to produce a configure script.
 AC_PREREQ(2.59)
-AC_INIT(flare, 1.0.14)
+AC_INIT(flare, 1.0.15)
 AC_CONFIG_SRCDIR(src/flared/flared.cc)
 AM_INIT_AUTOMAKE
 AM_CONFIG_HEADER(src/config.h)
@@ -29,6 +29,7 @@ AC_ARG_WITH(tokyocabinet,
 	[  --with-tokyocabinet     tokyocabinet libraries],
 	[CXXFLAGS="${CXXFLAGS} -I${withval}/include -I${withval}/include/tc" LDFLAGS="${LDFLAGS} -L${withval}/lib"])
 AC_CHECK_LIB(tokyocabinet, main, [], [echo "libtokyocabinet not found"; exit 1])
+AC_CHECK_LIB(z, main, [], [echo "zlib not found"; exit 1])
 
 # Checks for additional features
 AC_MSG_CHECKING(if mysql replication is enabled)

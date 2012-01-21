@@ -14,6 +14,8 @@
 #include "mm.h"
 #include "util.h"
 
+#include <zlib.h>
+
 using namespace std;
 using namespace boost;
 
@@ -75,6 +77,7 @@ public:
 	enum									hash_algorithm {
 		hash_algorithm_simple = 0,
 		hash_algorithm_bitshift,
+		hash_algorithm_crc32,
 	};
 
 	enum									parse_type {
@@ -111,7 +114,7 @@ public:
 
 		bool is_data_available() { return this->data.get() != NULL; };
 
-		inline int get_key_hash_value(const char* p, hash_algorithm h = hash_algorithm_simple) {
+		inline int get_key_hash_value(const char* p, hash_algorithm h) {
 			int r = 0;
 			switch (h) {
 			case hash_algorithm_simple:
@@ -126,6 +129,11 @@ public:
 					r = (r << 5) + (r << 2) + r + static_cast<int>(*p);
 					p++;
 				}
+				break;
+			case hash_algorithm_crc32:
+				r = crc32(r, (const Bytef*)p, strlen(p));
+				// Note that the result value isn't crc32 because this function returns 31-bit value.
+				break;
 			}
 			if (r < 0) {
 				r *= -1;
@@ -133,7 +141,7 @@ public:
 			return r;
 		}
 
-		inline int get_key_hash_value(hash_algorithm h = hash_algorithm_simple) {
+		inline int get_key_hash_value(hash_algorithm h) {
 			return this->get_key_hash_value(this->key.c_str(), h);
 		}
 
@@ -397,6 +405,31 @@ public:
 		}
 		return "";
 	};
+
+	static inline int hash_algorithm_cast(const string& s, hash_algorithm& t) {
+		if (s == "simple") {
+			t = hash_algorithm_simple;
+		} else if (s == "bitshift") {
+			t = hash_algorithm_bitshift;
+		} else if (s == "crc32") {
+			t = hash_algorithm_crc32;
+		} else {
+			return -1;
+		}
+		return 0;
+	}
+
+	static inline string hash_algorithm_cast(hash_algorithm t) {
+		switch (t) {
+		case hash_algorithm_simple:
+			return "simple";
+		case hash_algorithm_bitshift:
+			return "bitshift";
+		case hash_algorithm_crc32:
+			return "crc32";
+		}
+		return "";
+	}
 
 protected:
 	virtual int _serialize_header(entry& e, uint8_t* data);

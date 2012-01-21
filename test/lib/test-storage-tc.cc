@@ -16,33 +16,34 @@ using namespace gree::flare;
 
 namespace test_storage
 {
+
     const char tmp_dir[] = "tmp";
-    storage_tch *storage;
+    storage_tch *sto;
 
     void setup()
     {
         const char *db_dir;
-        storage = NULL;
+        sto = NULL;
 
         // db_dir = cut_build_path(tmp_dir, "storage", "tc", NULL);
         db_dir = tmp_dir;
         mkdir(db_dir, 0700);
         string compress("");
-        storage = new storage_tch(db_dir,
-                                  32,
-                                  4,
-                                  131071,
-                                  65536,
-                                  compress,
-                                  true,
-																	0);
-        storage->open();
+        sto = new storage_tch(db_dir,
+                              32,
+                              4,
+                              131071,
+                              65536,
+                              compress,
+                              true,
+						 									0);
+        sto->open();
     }
 
     void teardown()
     {
-        if (storage)
-            delete storage;
+        if (sto)
+            delete sto;
         cut_remove_path(tmp_dir, NULL);
     }
 
@@ -55,11 +56,11 @@ namespace test_storage
         entry.size = name.length() + 1;
         entry.data = gree::flare::shared_byte(new uint8_t(entry.size));
         memcpy(entry.data.get(), name.c_str(), entry.size);
-        cppcut_assert_equal(0, storage->set(entry, result));
+        cppcut_assert_equal(0, sto->set(entry, result));
 
         storage::entry new_entry;
         new_entry.key = "name";
-        cppcut_assert_equal(0, storage->get(new_entry, result));
+        cppcut_assert_equal(0, sto->get(new_entry, result));
         char actual_name_c_str[new_entry.size];
         memcpy(actual_name_c_str, new_entry.data.get(), new_entry.size);
         string actual_name(actual_name_c_str);

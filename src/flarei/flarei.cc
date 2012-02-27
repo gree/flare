@@ -118,6 +118,7 @@ int flarei::startup(int argc, char **argv) {
 	log_notice("  partition_modular_virtual: %d", ini_option_object().get_partition_modular_virtual());
 	log_notice("  partition_size:         %d", ini_option_object().get_partition_size());
 	log_notice("  partition_type:         %s", ini_option_object().get_partition_type().c_str());
+	log_notice("  key_hash_algorithm:     %s", ini_option_object().get_key_hash_algorithm().c_str());
 	log_notice("  server_name:            %s", ini_option_object().get_server_name().c_str());
 	log_notice("  server_port:            %d", ini_option_object().get_server_port());
 	log_notice("  server_socket:          %s", ini_option_object().get_server_socket().c_str());
@@ -158,6 +159,13 @@ int flarei::startup(int argc, char **argv) {
 	this->_cluster->set_monitor_interval(ini_option_object().get_monitor_interval());
 	this->_cluster->set_monitor_read_timeout(ini_option_object().get_monitor_read_timeout());
 	this->_cluster->set_partition_size(ini_option_object().get_partition_size());
+
+	storage::hash_algorithm ha;
+	if (storage::hash_algorithm_cast(ini_option_object().get_key_hash_algorithm(), ha) < 0
+			|| ha == storage::hash_algorithm_bitshift) {
+		return -1;
+	}
+	this->_cluster->set_key_hash_algorithm(ha);
 
 	key_resolver::type t;
 	key_resolver::type_cast(ini_option_object().get_partition_type(), t);

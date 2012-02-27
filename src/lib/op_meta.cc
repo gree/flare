@@ -36,12 +36,12 @@ op_meta::~op_meta() {
 /**
  *	send client request
  */
-int op_meta::run_client(int& partition_size, key_resolver::type& key_resolver_type, int& key_resolver_modular_hint, int& key_resolver_modular_virtual) {
+int op_meta::run_client(int& partition_size, storage::hash_algorithm& key_hash_algorithm, key_resolver::type& key_resolver_type, int& key_resolver_modular_hint, int& key_resolver_modular_virtual) {
 	if (this->_run_client() < 0) {
 		return -1;
 	}
 
-	return this->_parse_client_parameter(partition_size, key_resolver_type, key_resolver_modular_hint, key_resolver_modular_virtual);
+	return this->_parse_client_parameter(partition_size, key_hash_algorithm, key_resolver_type, key_resolver_modular_hint, key_resolver_modular_virtual);
 }
 // }}}
 
@@ -80,6 +80,11 @@ int op_meta::_run_server() {
 	snprintf(buf, sizeof(buf), "META partition-size %d", this->_cluster->get_partition_size());
 	s << buf << line_delimiter;
 
+	// hash algorithm
+	snprintf(buf, sizeof(buf), "META key-hash-algorithm %s",
+					 storage::hash_algorithm_cast(this->_cluster->get_key_hash_algorithm()).c_str());
+	s << buf << line_delimiter;
+
 	// partition type
 	key_resolver* kr = this->_cluster->get_key_resolver();
 	snprintf(buf, sizeof(buf), "META partition-type %s", key_resolver::type_cast(kr->get_type()).c_str());
@@ -106,7 +111,7 @@ int op_meta::_run_client() {
 	return this->_send_request(request);
 }
 
-int op_meta::_parse_client_parameter(int& partition_size, key_resolver::type& key_resolver_type, int& key_resolver_modular_hint, int& key_resolver_modular_virtual) {
+int op_meta::_parse_client_parameter(int& partition_size, storage::hash_algorithm& key_hash_algorithm, key_resolver::type& key_resolver_type, int& key_resolver_modular_hint, int& key_resolver_modular_virtual) {
 	for (;;) {
 		char* p;
 		if (this->_connection->readline(&p) < 0) {
@@ -142,6 +147,13 @@ int op_meta::_parse_client_parameter(int& partition_size, key_resolver::type& ke
 				}
 				partition_size = lexical_cast<int>(q);
 				log_debug("meta: key=[%s] value=[%d]", "partition-size", partition_size);
+			} else if (strcmp(q, "key-hash-algorithm") == 0) {
+				i += util::next_word(p+i, q, sizeof(q));
+				if (storage::hash_algorithm_cast(q, key_hash_algorithm) < 0) {
+					log_warning("meta: key=[%s] value=[%d]", "key-hash-algorithm", key_hash_algorithm);
+					throw -1;
+				}
+				log_debug("meta: key=[%s] value=[%s]", "key-hash-algorithm", q);
 			} else if (strcmp(q, "partition-type") == 0) {
 				i += util::next_word(p+i, q, sizeof(q));
 				if (key_resolver::type_cast(q, key_resolver_type) < 0) {

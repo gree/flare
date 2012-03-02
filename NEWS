@@ -1,4 +1,14 @@
+* [2012/03/24] 1.0.15 release
+
+  * feature updates
+    - added --key-hash-algorithm option (default=simple)
+
+  * bug fixes
+    - fix wrong post proxy destination during dynamic patition creation.
+    - fix unintentional thread triggering.
+
 * [2011/08/09] 1.0.14 release
+
   * feature updates
     - added 'stats threads queue' op
     - added 'shutdown' op (for graceful shutdown)

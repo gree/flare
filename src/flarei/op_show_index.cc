@@ -71,7 +71,7 @@ int op_show_index::_send_show_variables() {
 	s << "partition_modular_virtual:" << ini_option_object().get_partition_modular_virtual() << line_delimiter;
 	s << "partition_size:           " << ini_option_object().get_partition_size() << line_delimiter;
 	s << "partition_type:           " << ini_option_object().get_partition_type().c_str() << line_delimiter;
-	s << "server_name:              " << ini_option_object().get_server_name().c_str() << line_delimiter;
+	s << "key_hash_algorithm:       " << ini_option_object().get_key_hash_algorithm().c_str() << line_delimiter;
 	s << "server_port:              " << ini_option_object().get_server_port() << line_delimiter;
 	s << "server_socket:            " << ini_option_object().get_server_socket().c_str() << line_delimiter;
 	s << "stack_size:               " << ini_option_object().get_stack_size() << line_delimiter;

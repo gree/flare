@@ -160,7 +160,7 @@ int flarei::startup(int argc, char **argv) {
 	this->_cluster->set_monitor_read_timeout(ini_option_object().get_monitor_read_timeout());
 	this->_cluster->set_partition_size(ini_option_object().get_partition_size());
 
-	storage::hash_algorithm ha;
+	storage::hash_algorithm ha = storage::hash_algorithm_simple;
 	if (storage::hash_algorithm_cast(ini_option_object().get_key_hash_algorithm(), ha) < 0
 			|| ha == storage::hash_algorithm_bitshift) {
 		return -1;

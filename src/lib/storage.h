@@ -114,7 +114,7 @@ public:
 
 		bool is_data_available() { return this->data.get() != NULL; };
 
-		inline int get_key_hash_value(const char* p, hash_algorithm h = hash_algorithm_simple) {
+		inline int get_key_hash_value(const char* p, hash_algorithm h) {
 			int r = 0;
 			switch (h) {
 			case hash_algorithm_simple:
@@ -132,6 +132,7 @@ public:
 				break;
 			case hash_algorithm_crc32:
 				r = crc32(r, (const Bytef*)p, strlen(p));
+				// Note that the result value isn't crc32 because this function returns 31-bit value.
 				break;
 			}
 			if (r < 0) {
@@ -140,7 +141,7 @@ public:
 			return r;
 		}
 
-		inline int get_key_hash_value(hash_algorithm h = hash_algorithm_simple) {
+		inline int get_key_hash_value(hash_algorithm h) {
 			return this->get_key_hash_value(this->key.c_str(), h);
 		}
 

@@ -130,6 +130,7 @@ int flared::startup(int argc, char **argv) {
 	log_notice("  mysql_replication_db:   %s", ini_option_object().get_mysql_replication_db().c_str());
 	log_notice("  mysql_replication_table:%s", ini_option_object().get_mysql_replication_table().c_str());
 #endif
+	log_notice("  noreply_window_limit:   %d", ini_option_object().get_noreply_window_limit());
 	log_notice("  net_read_timeout:       %d", ini_option_object().get_net_read_timeout());
 	log_notice("  proxy_concurrency:      %d", ini_option_object().get_proxy_concurrency());
 	log_notice("  reconstruction_interval:%d", ini_option_object().get_reconstruction_interval());
@@ -188,6 +189,7 @@ int flared::startup(int argc, char **argv) {
 	this->_cluster->set_reconstruction_bwlimit(ini_option_object().get_reconstruction_bwlimit());
 	this->_cluster->set_replication_type(ini_option_object().get_replication_type());
 	this->_cluster->set_max_total_thread_queue(ini_option_object().get_max_total_thread_queue());
+	this->_cluster->set_noreply_window_limit(ini_option_object().get_noreply_window_limit());
 	if (this->_cluster->startup_node(ini_option_object().get_index_server_name(),
 									 ini_option_object().get_index_server_port(),
 									 ini_option_object().get_proxy_prior_netmask()) < 0) {
@@ -346,6 +348,9 @@ int flared::reload() {
 
 	// re-setup resource limit (do not care about return value here)
 	this->_set_resource_limit();
+
+	// noreply_window_limit
+	this->_cluster->set_noreply_window_limit(ini_option_object().get_noreply_window_limit());
 
 	log_notice("process successfully reloaded", 0);
 

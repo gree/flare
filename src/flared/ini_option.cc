@@ -38,6 +38,7 @@ ini_option::ini_option():
 		_mysql_replication_db(""),
 		_mysql_replication_table(""),
 #endif
+		_noreply_window_limit(default_noreply_window_limit),
 		_net_read_timeout(default_net_read_timeout),
 		_proxy_concurrency(default_proxy_concurrency),
 		_reconstruction_interval(default_reconstruction_interval),
@@ -204,6 +205,10 @@ int ini_option::load() {
 			this->_mysql_replication_table = "flare";
 		}
 #endif
+
+		if (opt_var_map.count("noreply-window-limit")) {
+			this->_noreply_window_limit = opt_var_map["noreply-window-limit"].as<int>();
+		}
 
 		if (opt_var_map.count("net-read-timeout")) {
 			this->_net_read_timeout = opt_var_map["net-read-timeout"].as<int>();
@@ -422,6 +427,12 @@ int ini_option::reload() {
 			log_notice("  max_total_thread_queue: %u -> %u", this->_max_total_thread_queue, opt_var_map["max-total-thread-queue"].as<uint32_t>());
 			this->_max_total_thread_queue = opt_var_map["max-total-thread-queue"].as<uint32_t>();
 		}
+
+		if (opt_var_map.count("noreply-window-limit")) {
+			log_notice("  noreply_window_limit: %d -> %d", this->_noreply_window_limit, opt_var_map["noreply-window-limit"].as<int>());
+			this->_noreply_window_limit = opt_var_map["noreply-window-limit"].as<int>();
+		}
+
 	} catch (int e) {
 		ostringstream ss;
 		ss << option << endl;
@@ -464,12 +475,13 @@ int ini_option::_setup_config_option(program_options::options_description& optio
 		("max-connection",					program_options::value<int>(),			"max concurrent connections to accept (dynamic)")
 		("mutex-slot",							program_options::value<int>(),			"mutex slot size for storage I/O")
 #ifdef ENABLE_MYSQL_REPLICATION
-		("mysql-replication",																						"enabe mysql replication")
+		("mysql-replication",																						"enable mysql replication")
 		("mysql-replication-port",	program_options::value<int>(),			"mysql replication port")
 		("mysql-replication-id",		program_options::value<uint32_t>(),	"mysql replication server id")
 		("mysql-replication-db",		program_options::value<string>(),		"mysql replication database")
 		("mysql-replication-table",	program_options::value<string>(),		"mysql replication table")
 #endif
+		("noreply-window-limit",		program_options::value<int>(),			"noreply window limit")
 		("net-read-timeout",				program_options::value<int>(),			"network read timeout (sec) (dynamic)")
 		("proxy-concurrency",				program_options::value<int>(),			"proxy request concurrency for each node")
 		("reconstruction-interval",	program_options::value<int>(),			"master/slave dump interval in usec (dynamic)")

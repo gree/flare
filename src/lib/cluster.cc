@@ -36,6 +36,7 @@ namespace flare {
  */
 cluster::cluster(thread_pool* tp, string data_dir, string server_name, int server_port):
 		_thread_pool(tp),
+		_key_hash_algorithm(storage::hash_algorithm_simple),
 		_key_resolver(NULL),
 		_storage(NULL),
 		_data_dir(data_dir),
@@ -229,10 +230,11 @@ int cluster::startup_node(string index_server_name, int index_server_port, uint3
 	// get meta data from index server
 	key_resolver::type key_resolver_type;
 	int partition_size = cluster::default_partition_size;
+	storage::hash_algorithm key_hash_algorithm = storage::hash_algorithm_simple;
 	int key_resolver_modular_hint = 0;
 	int key_resolver_modular_virtual = cluster::default_key_resolver_modular_virtual;
 	op_meta* p_m = _new_ op_meta(c, this);
-	if (p_m->run_client(partition_size, key_resolver_type, key_resolver_modular_hint, key_resolver_modular_virtual) < 0) {
+	if (p_m->run_client(partition_size, key_hash_algorithm, key_resolver_type, key_resolver_modular_hint, key_resolver_modular_virtual) < 0) {
 		log_err("failed to get meta data from index server", 0);
 		_delete_(p_m);
 		return -1;
@@ -241,10 +243,12 @@ int cluster::startup_node(string index_server_name, int index_server_port, uint3
 
 	log_notice("meta data from index server:", 0);
 	log_notice("  partition_size:                 %d", partition_size);
+	log_notice("  key_hash_algorithm:             %s", storage::hash_algorithm_cast(key_hash_algorithm).c_str());
 	log_notice("  key_resolver_type:              %s", key_resolver::type_cast(key_resolver_type).c_str());
 	log_notice("  key_resolver_modular_hint:      %d", key_resolver_modular_hint);
 	log_notice("  key_resolver_modular_virtual:   %d", key_resolver_modular_virtual);
 	this->_partition_size = partition_size;
+	this->_key_hash_algorithm = key_hash_algorithm;
 
 	// startup key resolver
 	if (key_resolver_type == key_resolver::type_modular) {
@@ -1848,7 +1852,7 @@ int cluster::_determine_partition(storage::entry& e, partition& p, bool check_pr
 		if (check_prepare) {
 			partition_size += this->_node_partition_prepare_map.size();
 		}
-		n = this->_key_resolver->resolve(e.get_key_hash_value(), partition_size);
+		n = this->_key_resolver->resolve(e.get_key_hash_value(this->_key_hash_algorithm), partition_size);
 		log_debug("determined partition (key=%s, n=%d)", e.key.c_str(), n);
 
 		if (check_prepare) {

@@ -38,6 +38,7 @@ private:
 	int					_partition_modular_virtual;
 	int					_partition_size;
 	string			_partition_type;
+	string			_key_hash_algorithm;
 	string			_server_name;
 	int					_server_port;
 	string			_server_socket;
@@ -79,6 +80,7 @@ public:
 	int get_partition_modular_virtual() { return this->_partition_modular_virtual; };
 	int get_partition_size() { return this->_partition_size; };
 	string get_partition_type() { return this->_partition_type; };
+	string get_key_hash_algorithm() { return this->_key_hash_algorithm; };
 	string get_server_name() { return this->_server_name; };
 	int get_server_port() { return this->_server_port; };
 	string get_server_socket() { return this->_server_socket; };

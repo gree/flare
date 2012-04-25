@@ -25,7 +25,8 @@ handler_proxy::handler_proxy(shared_thread t, cluster* cl, string node_server_na
 		thread_handler(t),
 		_cluster(cl),
 		_node_server_name(node_server_name),
-		_node_server_port(node_server_port) {
+		_node_server_port(node_server_port),
+		_noreply_count(0) {
 }
 
 /**
@@ -94,7 +95,25 @@ int handler_proxy::_process_queue(shared_thread_queue q) {
 		return r->run(this->_connection);
 	} else if (q->get_ident() == "proxy_write") {
 		shared_queue_proxy_write r = shared_dynamic_cast<queue_proxy_write, thread_queue>(q);
-		return r->run(this->_connection);
+		int noreply_window_limit = this->_cluster->get_noreply_window_limit();
+		if (!r->is_post_proxy() || (r->get_entry().option & storage::option_noreply) || noreply_window_limit <= 0) {
+			return r->run(this->_connection);
+		} else {
+			if (this->_noreply_count < noreply_window_limit) {
+				this->_noreply_count++;
+				storage::entry& entry = r->get_entry();
+				uint32_t option = entry.option;
+				entry.option = option | storage::option_noreply;
+				r->run(this->_connection);
+			} else {
+				this->_noreply_count = 0;
+				if (r->run(this->_connection) < 0) {
+					log_err("failed to send '%s' command to %s:%d after noreply requests.",
+									r->get_op_ident().c_str(), this->_node_server_name.c_str(), this->_node_server_port);
+					return -1;
+				}
+			}
+		}
 	} else {
 		log_warning("unknown queue [ident=%s] -> skip processing", q->get_ident().c_str());
 		return -1;

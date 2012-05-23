@@ -1,79 +1,15 @@
-commit 97de82b816d08b2043bcd5431581d95069c30447
-Author: Kiyoshi Ikehara <kiyoshi.ikehara@gree.co.jp>
-Date:   Wed Apr 18 13:54:12 2012 +0900
-
-    fix test_key_resolver_modular
-    fix test_storage
-
-commit 2461488ca6d998fbef6e257c3601307ddc2b9149
-Merge: 6335dee... a9b2e92...
-Author: Kiyoshi Ikehara <kiyoshi.ikehara@gree.co.jp>
-Date:   Wed Apr 11 20:28:32 2012 +0900
-
-    Merge branch 'dump_resolve_fix' into pre-1.0.15
-
-commit a9b2e925c938fa7fff1c77a437ee1f91a4c03f45
-Author: Kiyoshi Ikehara <kiyoshi.ikehara@gree.co.jp>
-Date:   Wed Apr 11 17:49:17 2012 +0900
-
-    remove the default value of storage::get_key_hash_value()
-
-commit 4887ad33e85c1569ac26a3c7c9704684c7484037
-Author: Kiyoshi Ikehara <kiyoshi.ikehara@gree.co.jp>
-Date:   Wed Apr 11 15:59:40 2012 +0900
-
-    fix
-
-commit 7769bcc2186a34bdeda66a47e776ef4ce15f8d65
-Author: Kiyoshi Ikehara <kiyoshi.ikehara@gree.co.jp>
-Date:   Wed Apr 11 15:40:31 2012 +0900
-
-    fix key resolving for dump operations
-
-commit efc489678f8dfd53b88e2a150eecb38d4578eaa7
-Merge: ff03257... ac8b2ac...
-Author: Kiyoshi Ikehara <kiyoshi.ikehara@gree.co.jp>
-Date:   Wed Mar 14 10:37:56 2012 +0100
-
-    Merge pull request #2 from gree/duplicate_thread_id-fix
-    
-    Duplicate thread id fix
-
-commit ac8b2ac4987ba8f5b76b0147d49d8ea91dbc6703
-Author: Kiyoshi Ikehara <kiyoshi.ikehara@gree.co.jp>
-Date:   Wed Mar 14 14:45:38 2012 +0900
-
-    fix thread id duplication
-
-commit 6335dee1efe6a940a5b9e771308601abbb994b4b
-Author: Kiyoshi Ikehara <kiyoshi.ikehara@gree.co.jp>
-Date:   Fri Mar 2 15:04:01 2012 +0900
-
-    update NEWS
-
-commit ff03257774c3682b47c57b15be221d48c49276d4
-Author: Kiyoshi Ikehara <kiyoshi.ikehara@gree.co.jp>
-Date:   Mon Feb 27 22:30:53 2012 +0900
-
-    prepare for 1.0.15
-
-commit 71fa4cf1aba5b9a539fb8a78d3ebcce58ceb5b15
-Merge: bfb9fe2... 95cd962...
-Author: Kiyoshi Ikehara <kiyoshi.ikehara@gree.co.jp>
-Date:   Mon Feb 27 11:17:13 2012 +0100
-
-    Merge pull request #1 from kiyoshi-ikehara/crc32
-    
-    add --key-hash-algorithm option to flarei
-
-commit 95cd962391f62845f5147ee8e6fdd327510486b1
+commit 011a7bc451c7b603dd8e7e08f41f90afca583cd0
 Author: Kiyoshi Ikehara <kiyoshi.ikehara@gree.co.jp>
 Date:   Sat Jan 21 20:17:11 2012 +0900
 
-    add --key-hash-algorithm option to flarei
+    ready for 1.0.15
+     - add --key-hash-algorithm option to flarei
+     - fix thread id duplication
+     - fix test_key_resolver_modular
+     - fix test_storage
 
 commit bfb9fe207a93b62d978a962d6ee432ac7822327b
-Merge: 1d77b32... 0a58d0e...
+Merge: 1d77b32 0a58d0e
 Author: Masaki Fujimoto <fujimoto@php.net>
 Date:   Fri Jan 20 13:49:59 2012 -0800
 
@@ -88,7 +24,7 @@ Date:   Tue Jan 10 16:35:42 2012 +0900
     fix the post proxy problem.
 
 commit 1d77b32daa2f12d7d32fe466398b5d4f54ec2564
-Merge: 679d0a7... a60bb55...
+Merge: 679d0a7 a60bb55
 Author: Masaki Fujimoto <fujimoto@php.net>
 Date:   Tue Dec 27 17:44:15 2011 -0800
 
@@ -103,7 +39,7 @@ Date:   Tue Dec 27 10:59:22 2011 +0900
     fix unintentional pooled thread triggering bug
 
 commit 679d0a7f4cb7ff4afa78b2656ec43094a953224d
-Merge: aa00227... cb30ecf...
+Merge: aa00227 cb30ecf
 Author: Masaki Fujimoto <fujimoto@php.net>
 Date:   Tue Sep 20 02:12:45 2011 -0700
 
@@ -124,7 +60,7 @@ Date:   Tue Aug 16 08:37:46 2011 +0900
     Merge commit 'y-asaba/fix_sighup_issue' into 1.0.15-develop
 
 commit 3d16d45539fe25a46d754c28867d9c5891b3d8be
-Merge: fde1f1e... 806967b...
+Merge: fde1f1e 806967b
 Author: Masaki Fujimoto <fujimoto@php.net>
 Date:   Sun Aug 21 20:04:30 2011 -0700
 
@@ -145,21 +81,21 @@ Date:   Sun Aug 21 21:09:56 2011 +0900
     replication loop detection
 
 commit f22b4747ff0449fc42a448ad347c803ed1491120
-Merge: bd44dfd... be286a1...
+Merge: bd44dfd be286a1
 Author: Masaki Fujimoto <fujimoto@php.net>
 Date:   Tue Aug 16 08:37:46 2011 +0900
 
     Merge commit 'y-asaba/fix_sighup_issue' into 1.0.15-develop
 
 commit bd44dfdbff0baa4688a40e5c5bd0295b83def689
-Merge: bbdc842... fde1f1e...
+Merge: bbdc842 fde1f1e
 Author: Masaki Fujimoto <fujimoto@php.net>
 Date:   Tue Aug 16 08:35:34 2011 +0900
 
     Merge branch 'master' of git@github.com:fujimoto/flare into 1.0.15-develop
 
 commit fde1f1e3e6638b7feaa8d2d26910537d32ffff59
-Merge: f450f8b... 1e96a10...
+Merge: f450f8b 1e96a10
 Author: Masaki Fujimoto <fujimoto@php.net>
 Date:   Mon Aug 15 16:34:54 2011 -0700
 
@@ -221,7 +157,7 @@ Date:   Mon Aug 8 22:51:21 2011 +0900
     fix test
 
 commit 70703ea8bc3de4a8a65a54ef07f9c95296731c86
-Merge: e57d884... d89991a...
+Merge: e57d884 d89991a
 Author: Masaki Fujimoto <fujimoto@php.net>
 Date:   Sun Aug 7 07:43:08 2011 -0700
 
@@ -230,14 +166,14 @@ Date:   Sun Aug 7 07:43:08 2011 -0700
     add files
 
 commit d89991af2b4c2a916029464709840be76420e8f2
-Merge: 86b51bf... e57d884...
+Merge: 86b51bf e57d884
 Author: SEJIMA Takanori <takanori.sejima@gmail.com>
 Date:   Sun Aug 7 23:22:34 2011 +0900
 
     Merge remote branch 'upstream/master'
 
 commit 86b51bff34d593e3f33dfbcd9506251c2dcdcdb7
-Merge: 291ac8f... d4f9b05...
+Merge: 291ac8f d4f9b05
 Author: SEJIMA Takanori <takanori.sejima@gmail.com>
 Date:   Sun Aug 7 23:07:48 2011 +0900
 
@@ -250,7 +186,7 @@ Date:   Sun Aug 7 22:57:12 2011 +0900
     add file
 
 commit e57d884e0a4c621f00182fb5413a1e63bca8eb72
-Merge: 8c71062... d4f9b05...
+Merge: 8c71062 d4f9b05
 Author: Masaki Fujimoto <fujimoto@php.net>
 Date:   Sun Aug 7 04:38:46 2011 -0700
 
@@ -265,7 +201,7 @@ Date:   Sun Aug 7 19:56:00 2011 +0900
     revert: result code of op_dump.
 
 commit 8c710621b81b9d74d52d01890ca5822e4b4a9152
-Merge: 0b4193e... ae1d346...
+Merge: 0b4193e ae1d346
 Author: Masaki Fujimoto <fujimoto@php.net>
 Date:   Wed Aug 3 21:12:12 2011 -0700
 
@@ -280,7 +216,7 @@ Date:   Wed Aug 3 01:47:31 2011 +0900
     added error_handling for replication
 
 commit 0b4193efc4b8605e345bf6987c9e8f8216c6c182
-Merge: faf1c71... f71827e...
+Merge: faf1c71 f71827e
 Author: Masaki Fujimoto <fujimoto@php.net>
 Date:   Fri Jul 22 09:03:10 2011 -0700
 
@@ -325,7 +261,7 @@ Date:   Tue Jun 7 19:06:45 2011 +0900
     fix node map corruption, happens when non-existent nodes are passed to remove_node()
 
 commit 38473a8f9cbdcbce20c697fcc9a16b194ddf93e0
-Merge: 269a3ba... e1e3407...
+Merge: 269a3ba e1e3407
 Author: Masaki Fujimoto <fujimoto@php.net>
 Date:   Mon May 30 14:47:21 2011 +0900
 
@@ -471,7 +407,7 @@ Date:   Tue Mar 1 22:44:29 2011 +0900
     ready for 1.0.12
 
 commit 32cfadb1e50b6a2bb29d8f15d3ab12655d80b3f4
-Merge: 11f066b... b1f98bb...
+Merge: 11f066b b1f98bb
 Author: Masaki Fujimoto <fujimoto@php.net>
 Date:   Tue Mar 1 22:31:12 2011 +0900
 
@@ -644,7 +580,7 @@ Date:   Tue Jul 27 17:32:12 2010 +0900
     fixes for FreeBSD ports (patch from <nork@FreeBSD.org>)
 
 commit b55b66f244c2729dbd6ea3ccbf5a1eace64c3630
-Merge: 599bc1c... e0f7bec...
+Merge: 599bc1c e0f7bec
 Author: Masaki Fujimoto <fujimoto@php.net>
 Date:   Tue Jul 27 16:12:51 2010 +0900
 
@@ -1447,7 +1383,7 @@ Date:   Sun Oct 12 04:33:36 2008 +0900
     portability fix
 
 commit 4cdd8f0c2e5109bfb45e73dd61425969cb14025f
-Merge: 6b3512c... 8ea0d14...
+Merge: 6b3512c 8ea0d14
 Author: Masaki Fujimoto <fujimoto@php.net>
 Date:   Sun Oct 12 04:20:28 2008 +0900
 

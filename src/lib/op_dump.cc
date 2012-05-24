@@ -150,7 +150,7 @@ int op_dump::_run_server() {
 	storage::iteration i;
 	while ((i = this->_storage->iter_next(e.key)) == storage::iteration_continue) {
 		if (this->_partition >= 0) {
-			int key_hash_value = e.get_key_hash_value();
+			int key_hash_value = e.get_key_hash_value(this->_cluster->get_key_hash_algorithm());
 			int p = kr->resolve(key_hash_value, this->_partition_size);
 			if (p != this->_partition) {
 				log_debug("skipping entry (key=%s, key_hash_value=%d, mod=%d, partition=%d, partition_size=%d)", e.key.c_str(), key_hash_value, p, this->_partition, this->_partition_size);

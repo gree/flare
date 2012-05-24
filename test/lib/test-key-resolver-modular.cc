@@ -33,19 +33,19 @@ namespace test_key_resolver_modular {
 
 		int test_key1_assert[] = {0, 0, 2, 2, 2, 5, 5, 5};
 		for (int i = 0; i < sizeof(test_key1_assert) / sizeof(int); i++) {
-			r = kr->resolve(e.get_key_hash_value("test_key1"), i+1);
+			r = kr->resolve(e.get_key_hash_value("test_key1", storage::hash_algorithm_simple), i+1);
 			cppcut_assert_equal(test_key1_assert[i], r);
 		}
 
 		int test_key2_assert[] = {0, 0, 0, 0, 0, 5, 5, 5};
 		for (int i = 0; i < sizeof(test_key2_assert) / sizeof(int); i++) {
-			r = kr->resolve(e.get_key_hash_value("::test::key::1979"), i+1);
+			r = kr->resolve(e.get_key_hash_value("::test::key::1979", storage::hash_algorithm_simple), i+1);
 			cppcut_assert_equal(test_key2_assert[i], r);
 		}
 
 		int test_key3_assert[] = {0, 0, 2, 2, 2, 2, 2, 2};
 		for (int i = 0; i < sizeof(test_key3_assert) / sizeof(int); i++) {
-			r = kr->resolve(e.get_key_hash_value("::test::key::19790217"), i+1);
+			r = kr->resolve(e.get_key_hash_value("::test::key::19790217", storage::hash_algorithm_simple), i+1);
 			cppcut_assert_equal(test_key3_assert[i], r);
 		}
 	}

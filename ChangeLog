@@ -1,3 +1,155 @@
+commit 011a7bc451c7b603dd8e7e08f41f90afca583cd0
+Author: Kiyoshi Ikehara <kiyoshi.ikehara@gree.co.jp>
+Date:   Sat Jan 21 20:17:11 2012 +0900
+
+    ready for 1.0.15
+     - add --key-hash-algorithm option to flarei
+     - fix thread id duplication
+     - fix test_key_resolver_modular
+     - fix test_storage
+
+commit bfb9fe207a93b62d978a962d6ee432ac7822327b
+Merge: 1d77b32 0a58d0e
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Fri Jan 20 13:49:59 2012 -0800
+
+    Merge pull request #24 from ikehara/post_proxy-fix
+    
+    fix post proxy problem during preparation
+
+commit 0a58d0ec8777c25db4d6a707cebcdd21c5c83163
+Author: Kiyoshi Ikehara <kiyoshi.ikehara@gree.co.jp>
+Date:   Tue Jan 10 16:35:42 2012 +0900
+
+    fix the post proxy problem.
+
+commit 1d77b32daa2f12d7d32fe466398b5d4f54ec2564
+Merge: 679d0a7 a60bb55
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Tue Dec 27 17:44:15 2011 -0800
+
+    Merge pull request #23 from ikehara/master
+    
+    Threads waiting in the thread pool may be tiggered unintentionally under high LA situation.
+
+commit a60bb55fd214f2ccdb817eba62a839380f6b5cf9
+Author: Kiyoshi Ikehara <kiyoshi.ikehara@gree.co.jp>
+Date:   Tue Dec 27 10:59:22 2011 +0900
+
+    fix unintentional pooled thread triggering bug
+
+commit 679d0a7f4cb7ff4afa78b2656ec43094a953224d
+Merge: aa00227 cb30ecf
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Tue Sep 20 02:12:45 2011 -0700
+
+    Merge pull request #22 from sejima/1.0.15-develop
+    
+    replication loop detection
+
+commit aa002276667683420dcd2852f72c872771eabc5e
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Wed Aug 24 21:12:38 2011 +0900
+
+    fix possible dead lock (occurred when incrmenting expired key)
+
+commit a194c1b68ce5dd90c9819f51697a108ddcce91a0
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Tue Aug 16 08:37:46 2011 +0900
+
+    Merge commit 'y-asaba/fix_sighup_issue' into 1.0.15-develop
+
+commit 3d16d45539fe25a46d754c28867d9c5891b3d8be
+Merge: fde1f1e 806967b
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Sun Aug 21 20:04:30 2011 -0700
+
+    Merge pull request #21 from sejima/master
+    
+    fix bug
+
+commit 806967babe5e1b832ee14b95dd31c0e3d6e62398
+Author: SEJIMA Takanori <takanori.sejima@gmail.com>
+Date:   Sun Aug 21 23:56:52 2011 +0900
+
+    fix bug
+
+commit cb30ecf02b509f700c3b310d894ceb102f2a729d
+Author: SEJIMA Takanori <takanori.sejima@gmail.com>
+Date:   Sun Aug 21 21:09:56 2011 +0900
+
+    replication loop detection
+
+commit f22b4747ff0449fc42a448ad347c803ed1491120
+Merge: bd44dfd be286a1
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Tue Aug 16 08:37:46 2011 +0900
+
+    Merge commit 'y-asaba/fix_sighup_issue' into 1.0.15-develop
+
+commit bd44dfdbff0baa4688a40e5c5bd0295b83def689
+Merge: bbdc842 fde1f1e
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Tue Aug 16 08:35:34 2011 +0900
+
+    Merge branch 'master' of git@github.com:fujimoto/flare into 1.0.15-develop
+
+commit fde1f1e3e6638b7feaa8d2d26910537d32ffff59
+Merge: f450f8b 1e96a10
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Mon Aug 15 16:34:54 2011 -0700
+
+    Merge pull request #20 from sejima/master
+    
+    fix proxy_prior_netmask
+
+commit 1e96a105d2dd0e7a1137b14a8d401d7a2e944a74
+Author: SEJIMA Takanori <takanori.sejima@gmail.com>
+Date:   Tue Aug 16 03:16:57 2011 +0900
+
+    one more fix
+
+commit 614bb708d7041b6da5f0320c7a86bb40ba45174b
+Author: SEJIMA Takanori <takanori.sejima@gmail.com>
+Date:   Tue Aug 16 01:07:22 2011 +0900
+
+    fix bug and logging cluster::_proxy_prior_netmask
+
+commit be286a1523657482acd70fc5fa9e4d523113e2e3
+Author: Yoshiyuki Asaba <yoshiyuki.asaba@gree.co.jp>
+Date:   Tue Aug 16 00:28:23 2011 +0900
+
+    Fix a hangup issue when flared or flarei got the SIGHUP signal.
+    
+    sa_hup_handler was not signal-safe because it called non-reentrant
+    functions. So flare just sets a flag in the signal handler, then calls
+    reload action in the main loop.
+
+commit bbdc842796de8eb9191d213d10c5ee8be0862033
+Author: Yoshiyuki Asaba <yoshiyuki.asaba@gree.co.jp>
+Date:   Tue Aug 9 10:26:06 2011 +0900
+
+    flared kept writing error logs when it could not create a pid file.
+    To avoid this issue, this fix terminates flared immediately.
+
+commit 5b8702b317c68a452c739e0aea415e23f372dc61
+Author: Yoshiyuki Asaba <yoshiyuki.asaba@gree.co.jp>
+Date:   Tue Aug 9 10:17:34 2011 +0900
+
+    Change shared_byte type from shared_ptr to shared_array to release memory properly.
+
+commit d08c6c3fb6abb03e25356ca97077df465fe1929b
+Author: Yoshiyuki Asaba <yoshiyuki.asaba@gree.co.jp>
+Date:   Tue Aug 9 10:11:44 2011 +0900
+
+    Initialize "ufds" variable.
+
+commit f450f8b566a08fd7e5b094ddac456bab7f6a67ed
+Author: Masaki Fujimoto <fujimoto@php.net>
+Date:   Mon Aug 8 22:58:39 2011 +0900
+
+    ready for 1.0.14
+
 commit c1664626c7af6327262f5395867fd8024ea265ab
 Author: Masaki Fujimoto <fujimoto@php.net>
 Date:   Mon Aug 8 22:51:21 2011 +0900
@@ -5,7 +157,7 @@ Date:   Mon Aug 8 22:51:21 2011 +0900
     fix test
 
 commit 70703ea8bc3de4a8a65a54ef07f9c95296731c86
-Merge: e57d884... d89991a...
+Merge: e57d884 d89991a
 Author: Masaki Fujimoto <fujimoto@php.net>
 Date:   Sun Aug 7 07:43:08 2011 -0700
 
@@ -14,14 +166,14 @@ Date:   Sun Aug 7 07:43:08 2011 -0700
     add files
 
 commit d89991af2b4c2a916029464709840be76420e8f2
-Merge: 86b51bf... e57d884...
+Merge: 86b51bf e57d884
 Author: SEJIMA Takanori <takanori.sejima@gmail.com>
 Date:   Sun Aug 7 23:22:34 2011 +0900
 
     Merge remote branch 'upstream/master'
 
 commit 86b51bff34d593e3f33dfbcd9506251c2dcdcdb7
-Merge: 291ac8f... d4f9b05...
+Merge: 291ac8f d4f9b05
 Author: SEJIMA Takanori <takanori.sejima@gmail.com>
 Date:   Sun Aug 7 23:07:48 2011 +0900
 
@@ -34,7 +186,7 @@ Date:   Sun Aug 7 22:57:12 2011 +0900
     add file
 
 commit e57d884e0a4c621f00182fb5413a1e63bca8eb72
-Merge: 8c71062... d4f9b05...
+Merge: 8c71062 d4f9b05
 Author: Masaki Fujimoto <fujimoto@php.net>
 Date:   Sun Aug 7 04:38:46 2011 -0700
 
@@ -49,7 +201,7 @@ Date:   Sun Aug 7 19:56:00 2011 +0900
     revert: result code of op_dump.
 
 commit 8c710621b81b9d74d52d01890ca5822e4b4a9152
-Merge: 0b4193e... ae1d346...
+Merge: 0b4193e ae1d346
 Author: Masaki Fujimoto <fujimoto@php.net>
 Date:   Wed Aug 3 21:12:12 2011 -0700
 
@@ -64,7 +216,7 @@ Date:   Wed Aug 3 01:47:31 2011 +0900
     added error_handling for replication
 
 commit 0b4193efc4b8605e345bf6987c9e8f8216c6c182
-Merge: faf1c71... f71827e...
+Merge: faf1c71 f71827e
 Author: Masaki Fujimoto <fujimoto@php.net>
 Date:   Fri Jul 22 09:03:10 2011 -0700
 
@@ -109,7 +261,7 @@ Date:   Tue Jun 7 19:06:45 2011 +0900
     fix node map corruption, happens when non-existent nodes are passed to remove_node()
 
 commit 38473a8f9cbdcbce20c697fcc9a16b194ddf93e0
-Merge: 269a3ba... e1e3407...
+Merge: 269a3ba e1e3407
 Author: Masaki Fujimoto <fujimoto@php.net>
 Date:   Mon May 30 14:47:21 2011 +0900
 
@@ -255,7 +407,7 @@ Date:   Tue Mar 1 22:44:29 2011 +0900
     ready for 1.0.12
 
 commit 32cfadb1e50b6a2bb29d8f15d3ab12655d80b3f4
-Merge: 11f066b... b1f98bb...
+Merge: 11f066b b1f98bb
 Author: Masaki Fujimoto <fujimoto@php.net>
 Date:   Tue Mar 1 22:31:12 2011 +0900
 
@@ -428,7 +580,7 @@ Date:   Tue Jul 27 17:32:12 2010 +0900
     fixes for FreeBSD ports (patch from <nork@FreeBSD.org>)
 
 commit b55b66f244c2729dbd6ea3ccbf5a1eace64c3630
-Merge: 599bc1c... e0f7bec...
+Merge: 599bc1c e0f7bec
 Author: Masaki Fujimoto <fujimoto@php.net>
 Date:   Tue Jul 27 16:12:51 2010 +0900
 
@@ -1231,7 +1383,7 @@ Date:   Sun Oct 12 04:33:36 2008 +0900
     portability fix
 
 commit 4cdd8f0c2e5109bfb45e73dd61425969cb14025f
-Merge: 6b3512c... 8ea0d14...
+Merge: 6b3512c 8ea0d14
 Author: Masaki Fujimoto <fujimoto@php.net>
 Date:   Sun Oct 12 04:20:28 2008 +0900
 

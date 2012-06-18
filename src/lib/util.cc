@@ -26,18 +26,45 @@ const char* const line_delimiter = "\r\n";
  *	strerror (thread safe)
  */
 const char* util::strerror(int e) {
-	static map<pthread_t, string> msg_map;
+	static map<pthread_t, shared_ptr<string> > msg_map;
+	static pthread_mutex_t mutex_msg_map = PTHREAD_MUTEX_INITIALIZER; 
 	char buf[BUFSIZ];
 
 #ifdef HAVE_GNU_STRERROR_R
 	char* p = strerror_r(e, buf, sizeof(buf));
-	msg_map[pthread_self()] = p;
+	shared_ptr<string> ptr(new string(p));
 #else
 	strerror_r(e, buf, sizeof(buf));
-	msg_map[pthread_self()] = buf;
+	shared_ptr<string> ptr(new string(buf));
 #endif // HAVE_GNU_STRERROR_R
 
-	return msg_map[pthread_self()].c_str();
+	pthread_mutex_lock(&mutex_msg_map);
+	msg_map[pthread_self()] = ptr;
+	pthread_mutex_unlock(&mutex_msg_map);
+
+	return msg_map[pthread_self()]->c_str();
+}
+
+/**
+ *	hstrerror
+ */
+const char* util::hstrerror(int e) {
+	const char* msg = "unknown error";
+	switch (e) {
+	case HOST_NOT_FOUND:
+		msg = "host is unknown";
+		break;
+	case NO_ADDRESS:
+		msg = "name is valid but does not have an address";
+		break;
+	case NO_RECOVERY:
+		msg = "non-recoverable name server error";
+		break;
+	case TRY_AGAIN:
+		msg = "temporary error";
+		break;
+	}
+	return msg;
 }
 
 /**
@@ -48,18 +75,13 @@ int util::gethostbyname(const char *name, struct hostent* he, int* he_errno) {
 	struct hostent* he_result;
 	char he_buf[BUFSIZ];
 	if (gethostbyname_r(name, he, he_buf, sizeof(he_buf), &he_result, he_errno) < 0) {
-		log_err("gethostbyname_r() failed: %s (%d)", util::strerror(*he_errno), *he_errno);
+		log_err("gethostbyname_r() failed: %s (%d)", util::hstrerror(*he_errno), *he_errno);
 		return -1;
 	} 
 
 	return 0;
 #else
-	static pthread_mutex_t m;
-	static bool is_mutex_initialized = false;
-	if (is_mutex_initialized == false) {
-		pthread_mutex_init(&m, NULL);
-		is_mutex_initialized = true;
-	}
+	static pthread_mutex_t m = PTHREAD_MUTEX_INITIALIZER;
 
 	pthread_mutex_lock(&m);
 	struct hostent* he_tmp;
@@ -68,7 +90,7 @@ int util::gethostbyname(const char *name, struct hostent* he, int* he_errno) {
 	*he_errno = ::h_errno;
 	pthread_mutex_unlock(&m);
 	if (*he_errno) {
-		log_err("gethostbyname() failed: %s (%d)", util::strerror(*he_errno), *he_errno);
+		log_err("gethostbyname() failed: %s (%d)", util::hstrerror(*he_errno), *he_errno);
 		return -1;
 	}
 
@@ -80,13 +102,7 @@ int util::gethostbyname(const char *name, struct hostent* he, int* he_errno) {
  *	thread safe inet_ntoa()
  */
 int util::inet_ntoa(struct in_addr in, char* dst) {
-	static pthread_mutex_t m;
-	static bool is_mutex_initialized = false;
-
-	if (is_mutex_initialized == false) {
-		pthread_mutex_init(&m, NULL);
-		is_mutex_initialized = true;
-	}
+	static pthread_mutex_t m = PTHREAD_MUTEX_INITIALIZER;
 
 	char* p;
 	pthread_mutex_lock(&m);

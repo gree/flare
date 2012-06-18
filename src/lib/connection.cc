@@ -331,6 +331,8 @@ int connection::readline(char** p) {
 			char* w = q;
 			if ((w-tmp) > 0 && *(w-1) == '\r') {
 				w--;
+			} else if ((w-tmp) == 0 && r_len > 0 && r[r_len-1] == '\r') {
+				r_len -= 1;
 			}
 			int tmp_len = w-tmp+1;
 			r_tmp = _new_ char[r_len+tmp_len+1];

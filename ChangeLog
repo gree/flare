@@ -1,3 +1,39 @@
+commit 5f7250c19caec117fc940261ea39923b637fbab7
+Author: Kiyoshi Ikehara <kiyoshi.ikehara@gree.net>
+Date:   Mon Jun 18 11:54:45 2012 +0900
+
+    add hash_algorithm_adler32 for internal use
+    apply noreply replication patch for high latency network
+    fix connection::readline() to check the last charactor of a read buffer
+    fix thread safety of utility functions
+    adding test-util.cc
+    fix reconstruction-bwlimit
+    basic empty string test + basis for future tests
+    
+    update Changelog
+
+commit 237a6d3b2341a43d190dbcfb56657a23b14ede03
+Merge: c8b13cb 61091fc
+Author: Kiyoshi Ikehara <kiyoshi.ikehara@gree.net>
+Date:   Thu May 24 12:02:16 2012 +0900
+
+    Merge branch 'release-1.0.15'
+
+commit 61091fca0ebb65d9429aaf88ffcdcca32dce4010
+Author: Kiyoshi Ikehara <kiyoshi.ikehara@gree.net>
+Date:   Wed May 23 18:44:13 2012 +0900
+
+    ready for 1.0.15 again
+
+commit c8b13cb98178d95a0c126812c56f23f529dada92
+Merge: 71fa4cf 97de82b
+Author: Kiyoshi Ikehara <kiyoshi.ikehara@gree.co.jp>
+Date:   Tue May 22 07:49:24 2012 +0200
+
+    Merge pull request #3 from gree/pre-1.0.15
+    
+    ready for 1.0.15
+
 commit 011a7bc451c7b603dd8e7e08f41f90afca583cd0
 Author: Kiyoshi Ikehara <kiyoshi.ikehara@gree.co.jp>
 Date:   Sat Jan 21 20:17:11 2012 +0900
@@ -7,6 +43,80 @@ Date:   Sat Jan 21 20:17:11 2012 +0900
      - fix thread id duplication
      - fix test_key_resolver_modular
      - fix test_storage
+
+commit 97de82b816d08b2043bcd5431581d95069c30447
+Author: Kiyoshi Ikehara <kiyoshi.ikehara@gree.co.jp>
+Date:   Wed Apr 18 13:54:12 2012 +0900
+
+    fix test_key_resolver_modular
+    fix test_storage
+
+commit 2461488ca6d998fbef6e257c3601307ddc2b9149
+Merge: 6335dee a9b2e92
+Author: Kiyoshi Ikehara <kiyoshi.ikehara@gree.co.jp>
+Date:   Wed Apr 11 20:28:32 2012 +0900
+
+    Merge branch 'dump_resolve_fix' into pre-1.0.15
+
+commit a9b2e925c938fa7fff1c77a437ee1f91a4c03f45
+Author: Kiyoshi Ikehara <kiyoshi.ikehara@gree.co.jp>
+Date:   Wed Apr 11 17:49:17 2012 +0900
+
+    remove the default value of storage::get_key_hash_value()
+
+commit 4887ad33e85c1569ac26a3c7c9704684c7484037
+Author: Kiyoshi Ikehara <kiyoshi.ikehara@gree.co.jp>
+Date:   Wed Apr 11 15:59:40 2012 +0900
+
+    fix
+
+commit 7769bcc2186a34bdeda66a47e776ef4ce15f8d65
+Author: Kiyoshi Ikehara <kiyoshi.ikehara@gree.co.jp>
+Date:   Wed Apr 11 15:40:31 2012 +0900
+
+    fix key resolving for dump operations
+
+commit efc489678f8dfd53b88e2a150eecb38d4578eaa7
+Merge: ff03257 ac8b2ac
+Author: Kiyoshi Ikehara <kiyoshi.ikehara@gree.co.jp>
+Date:   Wed Mar 14 10:37:56 2012 +0100
+
+    Merge pull request #2 from gree/duplicate_thread_id-fix
+    
+    Duplicate thread id fix
+
+commit ac8b2ac4987ba8f5b76b0147d49d8ea91dbc6703
+Author: Kiyoshi Ikehara <kiyoshi.ikehara@gree.co.jp>
+Date:   Wed Mar 14 14:45:38 2012 +0900
+
+    fix thread id duplication
+
+commit 6335dee1efe6a940a5b9e771308601abbb994b4b
+Author: Kiyoshi Ikehara <kiyoshi.ikehara@gree.co.jp>
+Date:   Fri Mar 2 15:04:01 2012 +0900
+
+    update NEWS
+
+commit ff03257774c3682b47c57b15be221d48c49276d4
+Author: Kiyoshi Ikehara <kiyoshi.ikehara@gree.co.jp>
+Date:   Mon Feb 27 22:30:53 2012 +0900
+
+    prepare for 1.0.15
+
+commit 71fa4cf1aba5b9a539fb8a78d3ebcce58ceb5b15
+Merge: bfb9fe2 95cd962
+Author: Kiyoshi Ikehara <kiyoshi.ikehara@gree.co.jp>
+Date:   Mon Feb 27 11:17:13 2012 +0100
+
+    Merge pull request #1 from kiyoshi-ikehara/crc32
+    
+    add --key-hash-algorithm option to flarei
+
+commit 95cd962391f62845f5147ee8e6fdd327510486b1
+Author: Kiyoshi Ikehara <kiyoshi.ikehara@gree.co.jp>
+Date:   Sat Jan 21 20:17:11 2012 +0900
+
+    add --key-hash-algorithm option to flarei
 
 commit bfb9fe207a93b62d978a962d6ee432ac7822327b
 Merge: 1d77b32 0a58d0e

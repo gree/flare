@@ -142,6 +142,7 @@ public:
 protected:
 	thread_pool*					_thread_pool;
 	storage::hash_algorithm _key_hash_algorithm;
+	const storage::hash_algorithm _proxy_hash_algorithm;
 	key_resolver*					_key_resolver;
 	storage*							_storage;
 	type									_type;
@@ -170,6 +171,7 @@ protected:
 #ifdef ENABLE_MYSQL_REPLICATION
 	bool									_mysql_replication;
 #endif
+	int										_noreply_window_limit;
 
 	// [node]
 	string								_index_server_name;
@@ -228,6 +230,7 @@ public:
 	vector<node> get_slave_node();
 
 	storage::hash_algorithm get_key_hash_algorithm() { return this->_key_hash_algorithm; };
+	storage::hash_algorithm get_proxy_hash_algorithm() { return this->_proxy_hash_algorithm; };
 	int set_key_hash_algorithm(storage::hash_algorithm key_hash_algorithm) { this->_key_hash_algorithm = key_hash_algorithm; return 0; };
 	key_resolver* get_key_resolver() { return this->_key_resolver; };
 	int set_monitor_threshold(int monitor_threshold);
@@ -255,6 +258,8 @@ public:
 	int set_mysql_replication(bool mysql_replication) { this->_mysql_replication = mysql_replication; return 0; };
 	bool is_mysql_replication() { return this->_mysql_replication; };
 #endif
+	int set_noreply_window_limit(int noreply_window_limit) { this->_noreply_window_limit = noreply_window_limit; return 0; };
+	int get_noreply_window_limit() { return this->_noreply_window_limit; }
 
 	inline string to_node_key(string server_name, int server_port) {
 		string node_key = server_name + ":" + lexical_cast<string>(server_port);

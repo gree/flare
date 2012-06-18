@@ -37,6 +37,7 @@ namespace flare {
 cluster::cluster(thread_pool* tp, string data_dir, string server_name, int server_port):
 		_thread_pool(tp),
 		_key_hash_algorithm(storage::hash_algorithm_simple),
+		_proxy_hash_algorithm(storage::hash_algorithm_adler32),
 		_key_resolver(NULL),
 		_storage(NULL),
 		_data_dir(data_dir),
@@ -51,6 +52,7 @@ cluster::cluster(thread_pool* tp, string data_dir, string server_name, int serve
 #ifdef ENABLE_MYSQL_REPLICATION
 		_mysql_replication(false),
 #endif
+		_noreply_window_limit(0),
 		_index_server_name(""),
 		_index_server_port(0),
 		_proxy_concurrency(0),
@@ -1120,7 +1122,7 @@ cluster::proxy_request cluster::pre_proxy_read(op_proxy_read* op, storage::entry
 	vector<string> proxy = op->get_proxy();
 	proxy.push_back(this->_node_key);
 	shared_queue_proxy_read q(new queue_proxy_read(this, this->_storage, proxy, e, parameter, op->get_ident()));
-	if (this->_enqueue(shared_static_cast<thread_queue, queue_proxy_read>(q), node_key, e.get_key_hash_value(storage::hash_algorithm_bitshift), true) < 0) {
+	if (this->_enqueue(shared_static_cast<thread_queue, queue_proxy_read>(q), node_key, e.get_key_hash_value(this->_proxy_hash_algorithm), true) < 0) {
 		return proxy_request_error_enqueue;
 	}
 	q_result = q;
@@ -1162,7 +1164,7 @@ cluster::proxy_request cluster::pre_proxy_write(op_proxy_write* op, shared_queue
 	proxy.push_back(this->_node_key);
 	shared_queue_proxy_write q(new queue_proxy_write(this, this->_storage, proxy, e, op->get_ident()));
 	q->set_generic_value(generic_value);
-	if (this->_enqueue(shared_static_cast<thread_queue, queue_proxy_write>(q), p.master.node_key, e.get_key_hash_value(storage::hash_algorithm_bitshift), sync) < 0) {
+	if (this->_enqueue(shared_static_cast<thread_queue, queue_proxy_write>(q), p.master.node_key, e.get_key_hash_value(this->_proxy_hash_algorithm), sync) < 0) {
 		return proxy_request_error_enqueue;
 	}
 	if (sync) {
@@ -1197,7 +1199,7 @@ cluster::proxy_request cluster::post_proxy_write(op_proxy_write* op, bool sync) 
 		return proxy_request_complete;
 	}
 
-	int key_hash_value = e.get_key_hash_value(storage::hash_algorithm_bitshift);
+	int key_hash_value = e.get_key_hash_value(this->_proxy_hash_algorithm);
 	vector<string> proxy = op->get_proxy();
 	if (static_cast<int>(count(proxy.begin(), proxy.end(), this->_node_key)) >= 2) {
 		// nothing to do

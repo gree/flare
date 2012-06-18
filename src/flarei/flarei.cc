@@ -162,7 +162,9 @@ int flarei::startup(int argc, char **argv) {
 
 	storage::hash_algorithm ha = storage::hash_algorithm_simple;
 	if (storage::hash_algorithm_cast(ini_option_object().get_key_hash_algorithm(), ha) < 0
-			|| ha == storage::hash_algorithm_bitshift) {
+			|| ha == storage::hash_algorithm_bitshift // used internally up to 1.0.15
+			|| ha == storage::hash_algorithm_adler32  // used internally after 1.0.16
+			|| ha == this->_cluster->get_proxy_hash_algorithm()) {
 		return -1;
 	}
 	this->_cluster->set_key_hash_algorithm(ha);

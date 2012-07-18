@@ -19,45 +19,6 @@
 namespace gree {
 namespace flare {
 
-// This variable is set by main thread.
-static volatile sig_atomic_t reload_request = 0;
-
-// {{{ global functions
-/**
- *	signal handler (SIGTERM/SIGINT)
- */
-void sa_term_handler(int sig) {
-	if (sig != SIGTERM && sig != SIGINT) {
-		return;
-	}
-	log_notice("received signal [%s] -> requesting shutdown", sig == SIGTERM ? "SIGTERM" : "SIGINT");
-
-	singleton<flared>::instance().request_shutdown();
-
-	return;
-}
-
-/**
- *	signal handler (SIGHUP)
- */
-void sa_hup_handler(int sig) {
-	//
-	// Set signal flag. 
-	// Reload action is executed in the main loop.
-	//
-	reload_request = 1;
-}
-
-/**
- *	signal handler (SIGUSR1)
- */
-void sa_usr1_handler(int sig) {
-	log_notice("received signal [SIGUSR1]", 0);
-
-	// just interrupting -> nothing to do
-}
-// }}}
-
 // {{{ ctor/dtor
 /**
  *	ctor for flared
@@ -101,6 +62,8 @@ flared::~flared() {
  *	flared application startup procs
  */
 int flared::startup(int argc, char **argv) {
+	this->_main_thread_id = pthread_self();
+
 	ini_option_object().set_args(argc, argv);
 	if (ini_option_object().load() < 0) {
 		return -1;
@@ -132,7 +95,7 @@ int flared::startup(int argc, char **argv) {
 		}
 	}
 
-	if (this->_set_signal_handler() < 0) {
+	if (this->_setup_signal_handler() < 0) {
 		return -1;
 	}
 
@@ -249,20 +212,10 @@ int flared::run() {
 			}
 			break;
 		}
-
-		if (reload_request) {
-			log_notice("received signal [SIGHUP] -> reloading", 0);
-			singleton<flared>::instance().reload();
-			reload_request = 0;
-		}
+		this->_reload_if_request();
+		this->_sigusr1_flag_check();
 
 		vector<shared_connection_tcp> connection_list = this->_server->wait();
-
-		if (reload_request) {
-			log_notice("received signal [SIGHUP] -> reloading", 0);
-			singleton<flared>::instance().reload();
-			reload_request = 0;
-		}
 
 		vector<shared_connection_tcp>::iterator it;
 		for (it = connection_list.begin(); it != connection_list.end(); it++) {
@@ -392,58 +345,6 @@ int flared::_set_resource_limit() {
 			}
 		}
 		log_info("setting resource limit (RLIMIT_NOFILE): %d", fd_limit);
-	}
-
-	return 0;
-}
-
-/**
- *	setup signal handler(s)
- */
-int flared::_set_signal_handler() {
-	struct sigaction sa;
-
-	// SIGTERM/SIGINT
-	memset(&sa, 0, sizeof(sa));
-	sa.sa_handler = sa_term_handler;
-	if (sigaction(SIGTERM, &sa, NULL) < 0) {
-		log_err("sigaction for %d failed: %s (%d)", SIGTERM, util::strerror(errno), errno);
-		return -1;
-	}
-	memset(&sa, 0, sizeof(sa));
-	sa.sa_handler = sa_term_handler;
-	if (sigaction(SIGINT, &sa, NULL) < 0) {
-		log_err("sigaction for %d failed: %s (%d)", SIGINT, util::strerror(errno), errno);
-		return -1;
-	}
-	log_info("set up sigterm/sigint handler", 0);
-
-	// SIGHUP
-	memset(&sa, 0, sizeof(sa));
-	sa.sa_handler = sa_hup_handler;
-	if (sigaction(SIGHUP, &sa, NULL) < 0) {
-		log_err("sigaction for %d failed: %s (%d)", SIGHUP, util::strerror(errno), errno);
-		return -1;
-	}
-	log_info("set up sighup handler", 0);
-
-	// SIGUSR1
-	memset(&sa, 0, sizeof(sa));
-	sa.sa_handler = sa_usr1_handler;
-	if (sigaction(SIGUSR1, &sa, NULL) < 0) {
-		log_err("sigaction for %d failed: %s (%d)", SIGUSR1, util::strerror(errno), errno);
-		return -1;
-	}
-	log_info("set up sigusr1 handler", 0);
-
-	// signal mask
-	sigset_t ss;
-	sigfillset(&ss);
-	sigdelset(&ss, SIGTERM);
-	sigdelset(&ss, SIGINT);
-	sigdelset(&ss, SIGHUP);
-	if (sigprocmask(SIG_SETMASK, &ss, NULL) < 0) {
-		log_err("sigprocmask() failed: %s (%d)", util::strerror(errno), errno);
 	}
 
 	return 0;

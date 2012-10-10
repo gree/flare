@@ -1,4 +1,4 @@
-commit 5f7250c19caec117fc940261ea39923b637fbab7
+commit 49e1e27fe1f1802a8b454ff85f92649c730ad7e7
 Author: Kiyoshi Ikehara <kiyoshi.ikehara@gree.net>
 Date:   Mon Jun 18 11:54:45 2012 +0900
 
@@ -9,8 +9,6 @@ Date:   Mon Jun 18 11:54:45 2012 +0900
     adding test-util.cc
     fix reconstruction-bwlimit
     basic empty string test + basis for future tests
-    
-    update Changelog
 
 commit 237a6d3b2341a43d190dbcfb56657a23b14ede03
 Merge: c8b13cb 61091fc

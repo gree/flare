@@ -50,3 +50,4 @@ namespace test_key_resolver_modular {
 		}
 	}
 }
+// vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

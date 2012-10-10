@@ -78,6 +78,7 @@ public:
 		hash_algorithm_simple = 0,
 		hash_algorithm_bitshift,
 		hash_algorithm_crc32,
+		hash_algorithm_adler32,
 	};
 
 	enum									parse_type {
@@ -131,8 +132,14 @@ public:
 				}
 				break;
 			case hash_algorithm_crc32:
-				r = crc32(r, (const Bytef*)p, strlen(p));
 				// Note that the result value isn't crc32 because this function returns 31-bit value.
+				// The initial value of crc32 is 0.
+				r = crc32(crc32(0L, Z_NULL, 0), (const Bytef*)p, strlen(p));
+				break;
+			case hash_algorithm_adler32:
+				// Note that the result value isn't adler32 because this function returns 31-bit value.
+				// The initial value of alder is 1.
+				r = adler32(adler32(0L, Z_NULL, 0), (const Bytef*)p, strlen(p));
 				break;
 			}
 			if (r < 0) {
@@ -413,6 +420,8 @@ public:
 			t = hash_algorithm_bitshift;
 		} else if (s == "crc32") {
 			t = hash_algorithm_crc32;
+		} else if (s == "adler32") {
+			t = hash_algorithm_adler32;
 		} else {
 			return -1;
 		}
@@ -427,6 +436,8 @@ public:
 			return "bitshift";
 		case hash_algorithm_crc32:
 			return "crc32";
+		case hash_algorithm_adler32:
+			return "adler32";
 		}
 		return "";
 	}

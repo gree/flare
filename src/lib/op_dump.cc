@@ -25,6 +25,8 @@ op_dump::op_dump(shared_connection c, cluster* cl, storage* st):
 		_partition_size(0),
 		_bwlimit(0),
 		_total_written(0) {
+	this->_prior_tv.tv_sec = 0;
+	this->_prior_tv.tv_usec = 0;
 }
 
 /**
@@ -140,6 +142,9 @@ int op_dump::_parse_server_parameter() {
 }
 
 int op_dump::_run_server() {
+	this->_prior_tv.tv_sec = 0;
+	this->_prior_tv.tv_usec = 0;
+
 	if (this->_storage->iter_begin() < 0) {
 		return this->_send_result(result_server_error, "database busy");
 	}

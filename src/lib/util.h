@@ -63,6 +63,7 @@ public:
 	static const int max_realtime_delta = 60*60*24*30;		// from memcached.c
 
 	static const char* strerror(int e);
+	static const char* hstrerror(int e);
 	static int gethostbyname(const char *name, struct hostent* he, int* he_errno);
 	static int inet_ntoa(struct in_addr in, char* dst);
 	static in_addr_t inet_addr(const char *cp, const uint32_t netmask = 0xffffffff);

@@ -108,7 +108,7 @@ int storage_tcb::set(entry& e, result& r, int b) {
 	int mutex_index = 0;
 
 	if ((b & behavior_skip_lock) == 0) {
-		mutex_index = e.get_key_hash_value(hash_algorithm_bitshift) % this->_mutex_slot_size;
+		mutex_index = e.get_key_hash_value(hash_algorithm_adler32) % this->_mutex_slot_size;
 	}
 
 	uint8_t* p = NULL;
@@ -267,7 +267,7 @@ int storage_tcb::incr(entry& e, uint64_t value, result& r, bool increment, int b
 	int mutex_index = 0;
 
 	if ((b & behavior_skip_lock) == 0) {
-		mutex_index = e.get_key_hash_value(hash_algorithm_bitshift) % this->_mutex_slot_size;
+		mutex_index = e.get_key_hash_value(hash_algorithm_adler32) % this->_mutex_slot_size;
 	}
 
 	uint8_t* tmp_data = NULL;
@@ -401,7 +401,7 @@ int storage_tcb::get(entry& e, result& r, int b) {
 	bool remove_request = false;
 
 	if ((b & behavior_skip_lock) == 0) {
-		mutex_index = e.get_key_hash_value(hash_algorithm_bitshift) % this->_mutex_slot_size;
+		mutex_index = e.get_key_hash_value(hash_algorithm_adler32) % this->_mutex_slot_size;
 	}
 
 	try {
@@ -467,7 +467,7 @@ int storage_tcb::remove(entry& e, result& r, int b) {
 	int mutex_index = 0;
 
 	if ((b & behavior_skip_lock) == 0) {
-		mutex_index = e.get_key_hash_value(hash_algorithm_bitshift) % this->_mutex_slot_size;
+		mutex_index = e.get_key_hash_value(hash_algorithm_adler32) % this->_mutex_slot_size;
 	}
 
 	try {

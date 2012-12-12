@@ -443,6 +443,24 @@ public:
 	}
 
 protected:
+	void inline _mutex_slot_rdlock_all() {
+		for (int i = 0; i < this->_mutex_slot_size; i++) {
+			pthread_rwlock_rdlock(&this->_mutex_slot[i]);
+		}
+	}
+
+	void inline _mutex_slot_wrlock_all() {
+		for (int i = 0; i < this->_mutex_slot_size; i++) {
+			pthread_rwlock_wrlock(&this->_mutex_slot[i]);
+		}
+	}
+
+	void inline _mutex_slot_unlock_all() {
+		for (int i = this->_mutex_slot_size-1; i >= 0; i--) {
+			pthread_rwlock_unlock(&this->_mutex_slot[i]);
+		}
+	}
+
 	virtual int _serialize_header(entry& e, uint8_t* data);
 	virtual int _unserialize_header(const uint8_t* data, int data_len, entry& e);
 	virtual int _get_header(string key, entry& e) = 0;

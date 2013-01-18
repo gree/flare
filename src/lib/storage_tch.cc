@@ -533,9 +533,7 @@ int storage_tch::truncate(int b) {
 
 	int i;
 	if ((b & behavior_skip_lock) == 0) {
-		for (i = 0; i < this->_mutex_slot_size; i++) {
-			pthread_rwlock_wrlock(&this->_mutex_slot[i]);
-		}
+		this->_mutex_slot_wrlock_all();
 	}
 
 	int r = 0;
@@ -548,9 +546,7 @@ int storage_tch::truncate(int b) {
 	this->_clear_header_cache();
 
 	if ((b & behavior_skip_lock) == 0) {
-		for (i = 0; i < this->_mutex_slot_size; i++) {
-			pthread_rwlock_unlock(&this->_mutex_slot[i]);
-		}
+		this->_mutex_slot_unlock_all();
 	}
 
 	return r;
@@ -572,7 +568,9 @@ int storage_tch::iter_begin() {
 
 storage::iteration storage_tch::iter_next(string& key) {
 	int len = 0;
+	this->_mutex_slot_rdlock_all();
 	char* p = static_cast<char*>(tchdbiternext(this->_db, &len));
+	this->_mutex_slot_unlock_all();
 	if (p == NULL) {
 		int ecode = tchdbecode(this->_db);
 		if (ecode == TCESUCCESS || ecode == TCENOREC) {

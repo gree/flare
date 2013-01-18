@@ -1,3 +1,18 @@
+* [2012/12/12] 1.0.16-2 release
+
+  * bug fixes
+    - fix for a rare race condition in storage_tch.cc which can lead dump operations to end prematurely, thus causing replication to fail
+
+* [2012/10/16] 1.0.16 release
+
+  * feature updates
+    - added --noreply-window-limit (default=0) for high latency network
+
+  * bug fixes
+    - fix connection::readline() to check the last character of a read buffer
+    - fix thread safety of utility functions
+    - fix reconstruction-bwlimit option
+
 * [2012/03/24] 1.0.15 release
 
   * feature updates

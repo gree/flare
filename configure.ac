@@ -2,7 +2,7 @@
 # Process this file with autoconf to produce a configure script.
 
 AC_PREREQ(2.59)
-AC_INIT(flare, 1.0.16)
+AC_INIT(flare, 1.0.17)
 AC_CONFIG_SRCDIR(src/flared/flared.cc)
 AM_INIT_AUTOMAKE
 AM_CONFIG_HEADER(src/config.h)

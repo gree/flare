@@ -17,7 +17,17 @@ namespace flare {
  *	ctor for op_flush_all
  */
 op_flush_all::op_flush_all(shared_connection c, storage* st):
-		op(c, "flush_all"),
+		op(c, "flush_all", binary_header::opcode_flush),
+		_storage(st),
+		_expire(0),
+		_option(storage::option_none) {
+}
+
+/**
+ *	ctor for op_flush_all
+ */
+op_flush_all::op_flush_all(shared_connection c, string ident, binary_header::opcode opcode, storage* st):
+		op(c, ident, opcode),
 		_storage(st),
 		_expire(0),
 		_option(storage::option_none) {
@@ -42,7 +52,7 @@ int op_flush_all::run_client(time_t expire, storage::option option) {
 		return -1;
 	}
 
-	return this->_parse_client_parameter(option);
+	return this->_parse_text_client_parameters(option);
 }
 // }}}
 
@@ -50,7 +60,7 @@ int op_flush_all::run_client(time_t expire, storage::option option) {
 /**
  *	parser server request parameters
  */
-int op_flush_all::_parse_server_parameter() {
+int op_flush_all::_parse_text_server_parameters() {
 	char* p;
 	if (this->_connection->readline(&p) < 0) {
 		return -1;
@@ -88,10 +98,10 @@ int op_flush_all::_parse_server_parameter() {
 			throw -1;
 		}
 	} catch (int e) {
-		_delete_(p);
+		delete[] p;
 		return e;
 	}
-	_delete_(p);
+	delete[] p;
 
 	return 0;
 }
@@ -127,7 +137,7 @@ int op_flush_all::_run_client(time_t expire, storage::option option) {
 	return this->_send_request(request);
 }
 
-int op_flush_all::_parse_client_parameter(storage::option option) {
+int op_flush_all::_parse_text_client_parameters(storage::option option) {
 	if (option & storage::option_noreply) {
 		this->_result = result_none;
 		return 0;
@@ -138,11 +148,11 @@ int op_flush_all::_parse_client_parameter(storage::option option) {
 		return -1;
 	}
 
-	if (this->_parse_response(p, this->_result, this->_result_message) < 0) {
-		_delete_(p);
+	if (this->_parse_text_response(p, this->_result, this->_result_message) < 0) {
+		delete[] p;
 		return -1;
 	}
-	_delete_(p);
+	delete[] p;
 
 	return 0;
 }

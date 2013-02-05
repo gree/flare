@@ -1,0 +1,35 @@
+/**
+ *	op_getk.h
+ *
+ *	@author	Benjamin Surma <benjamin.surma@gree.net>
+ *
+ *	$Id$
+ */
+#ifndef	__OP_GETK_H__
+#define	__OP_GETK_H__
+
+#include "op_get.h"
+
+using namespace std;
+using namespace boost;
+
+namespace gree {
+namespace flare {
+
+/**
+ *	opcode class (getk)
+ */
+class op_getk : public op_get {
+public:
+	op_getk(shared_connection c, cluster* cl, storage* st);
+	virtual ~op_getk();
+
+protected:
+	op_getk(shared_connection c, string ident, binary_header::opcode opcode, cluster* cl, storage* st);
+};
+
+}	// namespace flare
+}	// namespace gree
+
+#endif	// __OP_GETK_H__
+// vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

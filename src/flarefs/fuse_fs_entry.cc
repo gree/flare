@@ -215,12 +215,12 @@ int fuse_fs_entry::get_xattr(const char* name, char* value, size_t value_size) {
 	char* data = util::base64_decode(this->_xattr[name], data_size);
 	if (data_size > value_size) {
 		log_warning("xattr value size exceeded (name=%s, data_size=%d, value_size=%d)", name, data_size, value_size);
-		_delete_(data);
+		delete[] data;
 		return -ERANGE;
 	}
 
 	memcpy(value, data, data_size);
-	_delete_(data);
+	delete[] data;
 
 	log_debug("name=%s, data_size=%d", name, data_size);
 
@@ -276,7 +276,7 @@ op::result fuse_fs_entry::store(bool force) {
 		r = this->_client->cas(this->_path, data, data_size, this->_type, this->_version);
 	}
 
-	_delete_(data);
+	delete[] data;
 
 	return r;
 }
@@ -293,7 +293,7 @@ const char* fuse_fs_entry::serialize(int& data_size) {
 	oa << (const fuse_fs_entry&)*this;
 
 	data_size = s.str().size()+1;
-	char* data = _new_ char[data_size];
+	char* data = new char[data_size];
 	memcpy(data, s.str().c_str(), data_size);
 
 	return data;

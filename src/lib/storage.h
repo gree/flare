@@ -11,7 +11,6 @@
 #include "tcutil.h"
 
 #include "logger.h"
-#include "mm.h"
 #include "util.h"
 
 #include <zlib.h>
@@ -21,6 +20,10 @@ using namespace boost;
 
 namespace gree {
 namespace flare {
+
+// Forward declarations
+class binary_request_header;
+class binary_response_header;
 
 /**
  *	storage class
@@ -44,7 +47,8 @@ public:
 		behavior_cas						= 0x01 << 6,
 		behavior_append					= 0x01 << 7,
 		behavior_prepend				= 0x01 << 8,
-		behavior_dump					= 0x01 << 9,
+		behavior_dump						= 0x01 << 9,
+		behavior_touch					= 0x01 << 10,
 	};
 	
 	enum									result {
@@ -55,11 +59,13 @@ public:
 		result_not_found,
 		result_deleted,
 		result_found,
+		result_touched,
 	};
 
 	enum									type {
 		type_tch,
 		type_tcb,
+		type_kch,
 	};
 
 	enum									capability {
@@ -86,6 +92,7 @@ public:
 		parse_type_cas,
 		parse_type_get,
 		parse_type_delete,
+		parse_type_touch,
 	};
 
 	enum									response_type {
@@ -113,9 +120,9 @@ public:
 
 		_entry() { flag = expire = size = version = option = 0; };
 
-		bool is_data_available() { return this->data.get() != NULL; };
+		bool is_data_available() const { return this->data.get() != NULL; };
 
-		inline int get_key_hash_value(const char* p, hash_algorithm h) {
+		inline int get_key_hash_value(const char* p, hash_algorithm h) const {
 			int r = 0;
 			switch (h) {
 			case hash_algorithm_simple:
@@ -148,118 +155,15 @@ public:
 			return r;
 		}
 
-		inline int get_key_hash_value(hash_algorithm h) {
+		inline int get_key_hash_value(hash_algorithm h) const {
 			return this->get_key_hash_value(this->key.c_str(), h);
 		}
 
-		int parse(const char* p, parse_type t) {
-			char q[BUFSIZ];
-			try {
-				// key
-				int n = util::next_word(p, q, sizeof(q));
-				if (q[0] == '\0') {
-					log_debug("key not found", 0);
-					return -1;
-				}
-				this->key = q;
-				log_debug("storing key [%s]", this->key.c_str());
-
-				if (t != parse_type_delete) {
-					// flag
-					n += util::next_digit(p+n, q, sizeof(q));
-					if (q[0] == '\0') {
-						log_debug("no flag found", 0);
-						return -1;
-					}
-					this->flag = lexical_cast<uint32_t>(q);
-					log_debug("storing flag [%u]", this->flag);
-				}
-				
-				if (t != parse_type_get) {
-					// expire
-					n += util::next_digit(p+n, q, sizeof(q));
-					if (q[0] == '\0') {
-						if (t == parse_type_set) {
-							log_debug("no expire found", 0);
-							return -1;
-						}
-					} else {
-						this->expire = util::realtime(lexical_cast<time_t>(q));
-						log_debug("storing expire [%ld]", this->expire);
-					}
-				}
-
-				if (t != parse_type_delete) {
-					// size
-					n += util::next_digit(p+n, q, sizeof(q));
-					if (q[0] == '\0') {
-						log_debug("no size found", 0);
-						return -1;
-					}
-					this->size = lexical_cast<uint64_t>(q);
-					log_debug("storing size [%u]", this->size);
-				}
-
-				// version (if we have)
-				n += util::next_digit(p+n, q, sizeof(q));
-				if (q[0]) {
-					this->version = lexical_cast<uint64_t>(q);
-					log_debug("storing version [%u]", this->version);
-				} else if (t == parse_type_cas) {
-					log_debug("no version found", 0);
-					return -1;
-				}
-
-				if (t == parse_type_get) {
-					// expire (if we have)
-					n += util::next_digit(p+n, q, sizeof(q));
-					if (q[0]) {
-						this->expire = util::realtime(lexical_cast<time_t>(q));
-						log_debug("storing expire [%ld]", this->expire);
-					}
-				}
-
-				if (t != parse_type_get) {
-					// option
-					n += util::next_word(p+n, q, sizeof(q));
-					while (q[0]) {
-						storage::option r = storage::option_none;
-						if (storage::option_cast(q, r) < 0) {
-							log_debug("unknown option [%s] (cast failed)", q);
-							return -1;
-						}
-						this->option |= r;
-						log_debug("storing option [%s -> %d]", q, r);
-
-						n += util::next_word(p+n, q, sizeof(q));
-					}
-				}
-			} catch (bad_lexical_cast e) {
-				log_debug("invalid digit [%s]", e.what());
-				return -1;
-			}
-
-			return 0;
-		}
-
-		inline int response(char** p, int& len, response_type t) {
-			int response_len = this->size + this->key.size() + BUFSIZ;
-			*p = _new_ char[response_len];
-			len = snprintf(*p, response_len, "VALUE %s %u %llu", this->key.c_str(), this->flag, static_cast<unsigned long long>(this->size));
-			if (t == response_type_gets || t == response_type_dump) {
-				len += snprintf((*p)+len, response_len-len, " %llu", static_cast<unsigned long long>(this->version));
-			}
-			if (t == response_type_dump) {
-				len += snprintf((*p)+len, response_len-len, " %ld", this->expire);
-			}
-			len += snprintf((*p)+len, response_len-len, "%s", line_delimiter);
-
-			memcpy((*p)+len, this->data.get(), this->size);
-			len += this->size;
-			len += snprintf((*p)+len, response_len-len, "%s", line_delimiter);
-
-			return 0;
-		}
+		int parse(const char* p, parse_type t);
+		int parse(const binary_request_header& header, const char* body);
+		
+		int response(char** p, int& len, response_type t) const;
+		int response(binary_response_header& header, char** body, bool prepend_key = false) const;
 	} entry;
 
 protected:
@@ -268,9 +172,11 @@ protected:
 	string								_data_path;
 	int										_mutex_slot_size;
 	pthread_rwlock_t*			_mutex_slot;
-	pthread_rwlock_t			_mutex_header_cache_map;
+	bool									_iter_lock;
+	pthread_mutex_t				_mutex_iter_lock;
 	int										_header_cache_size;
 	TCMAP*								_header_cache_map;
+	pthread_rwlock_t			_mutex_header_cache_map;
 
 public:
 	storage(string data_dir, int mutex_slot_size, int header_cache_size);
@@ -337,6 +243,8 @@ public:
 			r = result_deleted;
 		} else if (s == "FOUND") {
 			r = result_found;
+		} else if (s == "TOUCHED") {
+			r = result_touched;
 		} else {
 			return -1;
 		}
@@ -359,6 +267,8 @@ public:
 			return "DELETED";
 		case result_found:
 			return "FOUND";
+		case result_touched:
+			return "TOUCHED";
 		}
 		return "";
 	};
@@ -368,6 +278,8 @@ public:
 			t = type_tch;
 		} else if (s == "tcb") {
 			t = type_tcb;
+		} else if (s == "kch") {
+			t = type_kch;
 		} else {
 			return -1;
 		}
@@ -380,6 +292,8 @@ public:
 			return "tch";
 		case type_tcb:
 			return "tcb";
+		case type_kch:
+			return "kch";
 		}
 		return "";
 	};

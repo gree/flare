@@ -12,7 +12,7 @@
 
 #include <boost/lexical_cast.hpp>
 
-#include "connection.h"
+#include "connection_tcp.h"
 #include "thread_handler.h"
 #include "cluster.h"
 
@@ -27,14 +27,14 @@ namespace flare {
  */
 class handler_monitor : public thread_handler {
 protected:
-	cluster*						_cluster;
-	shared_connection		_connection;
-	string							_node_server_name;
-	int									_node_server_port;
-	int									_monitor_threshold;
-	int									_monitor_interval;
-	int									_monitor_read_timeout;
-	int									_down_state;
+	cluster*							_cluster;
+	shared_connection_tcp	_connection;
+	const string					_node_server_name;
+	const int							_node_server_port;
+	int										_monitor_threshold;
+	int										_monitor_interval;
+	int										_monitor_read_timeout;
+	int										_down_state;
 
 public:
 	handler_monitor(shared_thread t, cluster* cl, string node_server_name, int node_server_port);

@@ -40,7 +40,7 @@ int op_node_sync::run_client(vector<cluster::node>& v) {
 		return -1;
 	}
 
-	return this->_parse_client_parameter();
+	return this->_parse_text_client_parameters();
 }
 // }}}
 
@@ -48,7 +48,7 @@ int op_node_sync::run_client(vector<cluster::node>& v) {
 /**
  *	parser server request parameters
  */
-int op_node_sync::_parse_server_parameter() {
+int op_node_sync::_parse_text_server_parameters() {
 	char* p;
 	if (this->_connection->readline(&p) < 0) {
 		return -1;
@@ -59,11 +59,11 @@ int op_node_sync::_parse_server_parameter() {
 	if (q[0]) {
 		// no arguments allowed
 		log_debug("bogus string(s) found [%s] -> error", q); 
-		_delete_(p);
+		delete[] p;
 		return -1;
 	}
 
-	_delete_(p);
+	delete[] p;
 
 	return 0;
 }
@@ -80,21 +80,21 @@ int op_node_sync::_run_server() {
 		}
 
 		if (strcmp(p, "END\n") == 0) {
-			_delete_(p);
+			delete[] p;
 			break;
 		}
 
 		cluster::node n;
 		if (n.parse(p) < 0) {
 			this->_send_result(result_client_error, "format error");
-			_delete_(p);
+			delete[] p;
 			return -1;
 		}
 
 		log_debug("node: server_name[%s] server_port[%d] role[%d] state[%d] partition[%d] balance[%d] thread_type[%d]", n.node_server_name.c_str(), n.node_server_port, n.node_role, n.node_state, n.node_partition, n.node_balance, n.node_thread_type);
 		v.push_back(n);
 
-		_delete_(p);
+		delete[] p;
 	}
 
 	if (this->_cluster->reconstruct_node(v) < 0) {
@@ -123,13 +123,13 @@ int op_node_sync::_run_client(vector<cluster::node>& v) {
 	return this->_send_result(result_end);
 }
 
-int op_node_sync::_parse_client_parameter() {
+int op_node_sync::_parse_text_client_parameters() {
 	char *p;
 	if (this->_connection->readline(&p) < 0) {
 		return -1;
 	}
 	int r = (strcmp(p, "OK\n") == 0) ? 0 : -1;
-	_delete_(p);
+	delete[] p;
 
 	return r;
 }

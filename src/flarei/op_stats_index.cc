@@ -35,8 +35,8 @@ op_stats_index::~op_stats_index() {
 // }}}
 
 // {{{ protected methods
-int op_stats_index::_parse_server_parameter() {
-	int r = op_stats::_parse_server_parameter();
+int op_stats_index::_parse_text_server_parameters() {
+	int r = op_stats::_parse_text_server_parameters();
 
 	return r;
 }

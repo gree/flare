@@ -8,6 +8,7 @@
  *	$Id$
  */
 #include "handler_proxy.h"
+#include "connection_tcp.h"
 #include "queue_proxy_read.h"
 #include "queue_proxy_write.h"
 
@@ -44,9 +45,9 @@ int handler_proxy::run() {
 	this->_thread->set_peer(this->_node_server_name, this->_node_server_port);
 	this->_thread->set_state("connect");
 
-	shared_connection c(new connection());
+	shared_connection c(new connection_tcp(this->_node_server_name, this->_node_server_port));
 	this->_connection = c;
-	if (c->open(this->_node_server_name, this->_node_server_port) < 0) {
+	if (c->open() < 0) {
 		log_err("failed to connect to node server [name=%s, port=%d]", this->_node_server_name.c_str(), this->_node_server_port);
 	}
 
@@ -64,7 +65,7 @@ int handler_proxy::run() {
 		shared_thread_queue q;
 		if (this->_thread->dequeue(q, 0) < 0) {
 			// FIXME: check if we can safely ignore this...
-			log_info("dequeued but no queue is available (something is inconsistent?", 0);
+			log_info("dequeued but no queue is available (something is inconsistent?)", 0);
 			continue;
 		}
 		if (this->_thread->is_shutdown_request()) {

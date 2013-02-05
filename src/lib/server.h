@@ -10,10 +10,20 @@
 
 #include "config.h"
 
+#include <arpa/inet.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <sys/ioctl.h>
+#include <sys/resource.h>
+#include <sys/select.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/un.h>
-#include <sys/stat.h>
-#include <netinet/tcp.h>
+#include <unistd.h>
 
 #ifdef HAVE_EPOLL
 #include <sys/epoll.h>
@@ -23,7 +33,7 @@
 #include <sys/event.h>
 #endif
 
-#include "connection.h"
+#include "connection_tcp.h"
 
 namespace gree {
 namespace flare {
@@ -33,7 +43,7 @@ namespace flare {
  *
  *	@todo	support multi-port-listening (w/ epoll, kequeue, etc...)
  */
-class server : public net {
+class server {
 public:
 	static const int max_listen_socket = 256;
 	static const int accept_retry_limit = 16;
@@ -59,7 +69,7 @@ public:
 	int close();
 	int listen(int port);
 	int listen(string uds);
-	vector<shared_connection> wait();
+	vector<shared_connection_tcp> wait();
 
 protected:
 	int _set_listen_socket_option(int sock, int domain = PF_INET);

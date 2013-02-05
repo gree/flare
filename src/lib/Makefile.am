@@ -13,19 +13,23 @@ DEFS = -Wall $(FLARE_CXXFLAGS)
 
 libflare_la_SOURCES = \
 	app.h app.cc \
+	binary_header.h \
+	binary_network_mapping.h \
+	binary_request_header.h \
+	binary_response_header.h \
 	client.h client.cc \
 	cluster.h cluster.cc \
-	connection.h connection.cc \
+	connection.h \
+	connection_tcp.h connection_tcp.cc \
 	handler_monitor.h handler_monitor.cc \
 	handler_proxy.h handler_proxy.cc \
 	handler_reconstruction.h handler_reconstruction.cc \
+	htonll.h \
 	key_resolver.h key_resolver.cc \
 	key_resolver_modular.h key_resolver_modular.cc \
 	ini.h ini.cc \
 	logger.h logger.cc \
-	mm.h mm.cc \
 	mysql_replication.h mysql_replication.cc \
-	net.h net.cc \
 	op.cc op.h \
 	op_add.h op_add.cc \
 	op_append.h op_append.cc \
@@ -36,7 +40,9 @@ libflare_la_SOURCES = \
 	op_dump_key.h op_dump_key.cc \
 	op_error.h op_error.cc \
 	op_flush_all.h op_flush_all.cc \
+	op_gat.h op_gat.cc \
 	op_get.h op_get.cc \
+	op_getk.h op_getk.cc \
 	op_gets.h op_gets.cc \
 	op_incr.h op_incr.cc \
 	op_keys.h op_keys.cc \
@@ -58,6 +64,7 @@ libflare_la_SOURCES = \
 	op_replace.h op_replace.cc \
 	op_set.h op_set.cc \
 	op_stats.h op_stats.cc \
+	op_touch.h op_touch.cc \
 	op_verbosity.h op_verbosity.cc \
 	op_version.h op_version.cc \
 	op_show.h op_show.cc \
@@ -77,3 +84,6 @@ libflare_la_SOURCES = \
 	thread_handler.h \
 	thread_pool.h thread_pool.cc \
 	thread_queue.h thread_queue.cc
+if ENABLE_KYOTOCABINET
+libflare_la_SOURCES += storage_kch.h storage_kch.cc
+endif

@@ -27,7 +27,7 @@ public:
 	virtual ~op_error();
 
 protected:
-	virtual int _parse_server_parameter();
+	virtual int _parse_text_server_parameters();
 	virtual int _run_server();
 };
 

@@ -12,7 +12,6 @@
 
 #include <boost/shared_ptr.hpp>
 
-#include "mm.h"
 #include "logger.h"
 #include "util.h"
 #include "connection.h"

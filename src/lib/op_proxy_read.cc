@@ -16,8 +16,8 @@ namespace flare {
 /**
  *	ctor for op_proxy_read
  */
-op_proxy_read::op_proxy_read(shared_connection c, string ident, cluster* cl, storage* st):
-		op(c, ident),
+op_proxy_read::op_proxy_read(shared_connection c, string ident, binary_header::opcode opcode, cluster* cl, storage* st):
+		op(c, ident, opcode),
 		_cluster(cl),
 		_storage(st) {
 	this->_is_multiple_response = false;
@@ -42,7 +42,7 @@ int op_proxy_read::run_client(storage::entry& e, void* parameter) {
 		return -1;
 	}
 
-	return this->_parse_client_parameter(e);
+	return this->_parse_text_client_parameters(e);
 }
 
 /**
@@ -53,7 +53,7 @@ int op_proxy_read::run_client(list<storage::entry>& e, void* parameter) {
 		return -1;
 	}
 
-	return this->_parse_client_parameter(e);
+	return this->_parse_text_client_parameters(e);
 }
 // }}}
 
@@ -61,7 +61,7 @@ int op_proxy_read::run_client(list<storage::entry>& e, void* parameter) {
 /**
  *	parser server request parameters
  */
-int op_proxy_read::_parse_server_parameter() {
+int op_proxy_read::_parse_text_server_parameters() {
 	return 0;
 }
 
@@ -77,11 +77,11 @@ int op_proxy_read::_run_client(list<storage::entry>& e, void* parameter) {
 	return 0;
 }
 
-int op_proxy_read::_parse_client_parameter(storage::entry& e) {
+int op_proxy_read::_parse_text_client_parameters(storage::entry& e) {
 	return 0;
 }
 
-int op_proxy_read::_parse_client_parameter(list<storage::entry>& e) {
+int op_proxy_read::_parse_text_client_parameters(list<storage::entry>& e) {
 	return 0;
 }
 // }}}

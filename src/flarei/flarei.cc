@@ -8,6 +8,7 @@
  *	$Id$
  */
 #include "flarei.h"
+#include "connection_tcp.h"
 
 namespace gree {
 namespace flare {
@@ -66,22 +67,18 @@ flarei::flarei():
  */
 flarei::~flarei() {
 	if (this->_server != NULL) {
-		_delete_(this->_server);
+		delete this->_server;
 	}
 	if (this->_thread_pool != NULL) {
-		_delete_(this->_thread_pool);
+		delete this->_thread_pool;
 	}
 	if (this->_cluster != NULL) {
-		_delete_(this->_cluster);
+		delete this->_cluster;
 	}
 	if (stats_object != NULL) {
-		_delete_(stats_object);
+		delete stats_object;
 		stats_object = NULL;
 	}
-
-#ifdef MM_ALLOCATION_CHECK
-	mm::dump_alloc_list();
-#endif
 }
 // }}}
 
@@ -99,7 +96,7 @@ int flarei::startup(int argc, char **argv) {
 	}
 
 	singleton<logger>::instance().open(this->_ident, ini_option_object().get_log_facility());
-	stats_object = _new_ stats_index();
+	stats_object = new stats_index();
 	stats_object->startup();
 
 	log_notice("%s version %s - system logger started", this->_ident.c_str(), PACKAGE_VERSION);
@@ -141,8 +138,8 @@ int flarei::startup(int argc, char **argv) {
 	}
 
 	// application objects
-	connection::read_timeout = ini_option_object().get_net_read_timeout() * 1000;		// -> msec
-	this->_server = _new_ server();
+	connection_tcp::read_timeout = ini_option_object().get_net_read_timeout() * 1000;		// -> msec
+	this->_server = new server();
 	if (this->_server->listen(ini_option_object().get_server_port()) < 0) {
 		return -1;
 	}
@@ -152,9 +149,9 @@ int flarei::startup(int argc, char **argv) {
 		}
 	}
 
-	this->_thread_pool = _new_ thread_pool(ini_option_object().get_thread_pool_size(), ini_option_object().get_stack_size());
+	this->_thread_pool = new thread_pool(ini_option_object().get_thread_pool_size(), ini_option_object().get_stack_size());
 
-	this->_cluster = _new_ cluster(this->_thread_pool, ini_option_object().get_data_dir(), ini_option_object().get_server_name(), ini_option_object().get_server_port());
+	this->_cluster = new cluster(this->_thread_pool, ini_option_object().get_data_dir(), ini_option_object().get_server_name(), ini_option_object().get_server_port());
 	this->_cluster->set_monitor_threshold(ini_option_object().get_monitor_threshold());
 	this->_cluster->set_monitor_interval(ini_option_object().get_monitor_interval());
 	this->_cluster->set_monitor_read_timeout(ini_option_object().get_monitor_read_timeout());
@@ -177,7 +174,7 @@ int flarei::startup(int argc, char **argv) {
 	}
 
 	shared_thread th = this->_thread_pool->get(thread_pool::thread_type_alarm);
-	handler_alarm* h = _new_ handler_alarm(th);
+	handler_alarm* h = new handler_alarm(th);
 	th->trigger(h);
 
 	if (this->_set_pid() < 0) {
@@ -207,7 +204,7 @@ int flarei::run() {
 			reload_request = 0;
 		}
 
-		vector<shared_connection> connection_list = this->_server->wait();
+		vector<shared_connection_tcp> connection_list = this->_server->wait();
 
 		if (reload_request) {
 			log_notice("received signal [SIGHUP] -> reloading", 0);
@@ -217,9 +214,9 @@ int flarei::run() {
 			reload_request = 0;
 		}
 
-		vector<shared_connection>::iterator it;
+		vector<shared_connection_tcp>::iterator it;
 		for (it = connection_list.begin(); it != connection_list.end(); it++) {
-			shared_connection c = *it;
+			shared_connection_tcp c = *it;
 
 			if (this->_thread_pool->get_thread_size(thread_pool::thread_type_request) >= ini_option_object().get_max_connection()) {
 				log_warning("too many connection [%d] -> closing socket and continue", ini_option_object().get_max_connection());
@@ -229,7 +226,7 @@ int flarei::run() {
 			stats_object->increment_total_connections();
 
 			shared_thread t = this->_thread_pool->get(thread_pool::thread_type_request);
-			handler_request* h = _new_ handler_request(t, c);
+			handler_request* h = new handler_request(t, c);
 			t->trigger(h);
 		}
 	}
@@ -256,7 +253,7 @@ int flarei::reload() {
 	this->_cluster->set_monitor_read_timeout(ini_option_object().get_monitor_read_timeout());
 
 	// net_read_timeout
-	connection::read_timeout = ini_option_object().get_net_read_timeout() * 1000;		// -> msec
+	connection_tcp::read_timeout = ini_option_object().get_net_read_timeout() * 1000;		// -> msec
 
 	// thread_pool_size
 	this->_thread_pool->set_max_pool_size(ini_option_object().get_thread_pool_size());

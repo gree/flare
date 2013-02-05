@@ -48,7 +48,7 @@ int op_dump::run_client(int wait, int partition, int parition_size, int bwlimit)
 		return -1;
 	}
 
-	return this->_parse_client_parameter();
+	return this->_parse_text_client_parameters();
 }
 // }}}
 
@@ -56,7 +56,7 @@ int op_dump::run_client(int wait, int partition, int parition_size, int bwlimit)
 /**
  *	parser server request parameters
  */
-int op_dump::_parse_server_parameter() {
+int op_dump::_parse_text_server_parameters() {
 	char* p;
 	if (this->_connection->readline(&p) < 0) {
 		return -1;
@@ -133,10 +133,10 @@ int op_dump::_parse_server_parameter() {
 			}
 		}
 	} catch (int e) {
-		_delete_(p);
+		delete[] p;
 		return e;
 	}
-	_delete_(p);
+	delete[] p;
 
 	return 0;
 }
@@ -144,6 +144,10 @@ int op_dump::_parse_server_parameter() {
 int op_dump::_run_server() {
 	this->_prior_tv.tv_sec = 0;
 	this->_prior_tv.tv_usec = 0;
+
+	if (!this->_thread) {
+		return this->_send_result(result_server_error, "thread not set");
+	}
 
 	if (this->_storage->iter_begin() < 0) {
 		return this->_send_result(result_server_error, "database busy");
@@ -153,7 +157,8 @@ int op_dump::_run_server() {
 
 	storage::entry e;
 	storage::iteration i;
-	while ((i = this->_storage->iter_next(e.key)) == storage::iteration_continue) {
+	while ((i = this->_storage->iter_next(e.key)) == storage::iteration_continue
+			&& this->_thread && !this->_thread->is_shutdown_request()) {
 		if (this->_partition >= 0) {
 			int key_hash_value = e.get_key_hash_value(this->_cluster->get_key_hash_algorithm());
 			int p = kr->resolve(key_hash_value, this->_partition_size);
@@ -176,7 +181,7 @@ int op_dump::_run_server() {
 		int response_len;
 		e.response(&response, response_len, storage::response_type_dump);
 		int n = this->_connection->write(response, response_len);
-		_delete_(response);
+		delete[] response;
 		if (n < 0) {
 			break;
 		}
@@ -192,7 +197,13 @@ int op_dump::_run_server() {
 
 	this->_storage->iter_end();
 
-	return this->_send_result(result_end);
+	if (!this->_thread) {
+		return this->_send_result(result_server_error, "thread not set");
+	} else if (this->_thread->is_shutdown_request()) {
+		return this->_send_result(result_server_error, "operation interrupted");
+	} else {
+		return this->_send_result(result_end);
+	}
 }
 
 int op_dump::_run_client(int wait, int partition, int partition_size, int bwlimit) {
@@ -205,7 +216,7 @@ int op_dump::_run_client(int wait, int partition, int partition_size, int bwlimi
 	return this->_send_request(request);
 }
 
-int op_dump::_parse_client_parameter() {
+int op_dump::_parse_text_client_parameters() {
 	int items = 0;
 	for (;;) {
 		if (this->_thread_available && this->_thread->is_shutdown_request()) {
@@ -220,17 +231,17 @@ int op_dump::_parse_client_parameter() {
 
 		if (this->_thread_available && this->_thread->is_shutdown_request()) {
 			log_notice("thread shutdown request -> breaking loop", 0);
-			_delete_(p);
+			delete[] p;
 			break;
 		}
 
 		if (strcmp(p, "END\n") == 0) {
-			_delete_(p);
+			delete[] p;
 			log_notice("found delimiter, dump completed (items=%d)", items);
 			break;
 		} else if (strcmp(p, "SERVER_ERROR\n") == 0) {
-			_delete_(p);
-			log_err("something is going wrong, dump uncompleted (items=%d)", items);
+			delete[] p;
+			log_err("something is going wrong, dump uncomplete (items=%d)", items);
 			return -1;
 		}
 
@@ -238,16 +249,16 @@ int op_dump::_parse_client_parameter() {
 		int n = util::next_word(p, q, sizeof(q));
 		if (strcmp(q, "VALUE") != 0) {
 			log_debug("invalid token (q=%s)", q);
-			_delete_(p);
+			delete[] p;
 			return -1;
 		}
 
 		storage::entry e;
 		if (e.parse(p+n, storage::parse_type_get) < 0) {
-			_delete_(p);
+			delete[] p;
 			return -1;
 		}
-		_delete_(p);
+		delete[] p;
 
 		// data (+2 -> "\r\n")
 		if (this->_connection->readsize(e.size + 2, &p) < 0) {
@@ -255,7 +266,7 @@ int op_dump::_parse_client_parameter() {
 		}
 		shared_byte data(new uint8_t[e.size]);
 		memcpy(data.get(), p, e.size);
-		_delete_(p);
+		delete[] p;
 		e.data = data;
 		log_debug("storing data [%d bytes]", e.size);
 

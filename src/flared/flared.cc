@@ -8,6 +8,7 @@
  *	$Id$
  */
 #include "flared.h"
+#include "connection_tcp.h"
 #include "handler_alarm.h"
 #include "handler_request.h"
 #ifdef ENABLE_MYSQL_REPLICATION
@@ -72,25 +73,21 @@ flared::flared():
  */
 flared::~flared() {
 	if (this->_storage != NULL) {
-		_delete_(this->_storage);
+		delete this->_storage;
 	}
 	if (this->_server != NULL) {
-		_delete_(this->_server);
+		delete this->_server;
 	}
 	if (this->_thread_pool != NULL) {
-		_delete_(this->_thread_pool);
+		delete this->_thread_pool;
 	}
 	if (this->_cluster != NULL) {
-		_delete_(this->_cluster);
+		delete this->_cluster;
 	}
 	if (stats_object != NULL) {
-		_delete_(stats_object);
+		delete stats_object;
 		stats_object = NULL;
 	}
-
-#ifdef MM_ALLOCATION_CHECK
-	mm::dump_alloc_list();
-#endif
 }
 // }}}
 
@@ -108,7 +105,7 @@ int flared::startup(int argc, char **argv) {
 	}
 
 	singleton<logger>::instance().open(this->_ident, ini_option_object().get_log_facility());
-	stats_object = _new_ stats_node();
+	stats_object = new stats_node();
 	stats_object->startup();
 
 	log_notice("%s version %s - system logger started", this->_ident.c_str(), PACKAGE_VERSION);
@@ -169,8 +166,8 @@ int flared::startup(int argc, char **argv) {
 	}
 
 	// application objects
-	connection::read_timeout = ini_option_object().get_net_read_timeout() * 1000;		// -> msec
-	this->_server = _new_ server();
+	connection_tcp::read_timeout = ini_option_object().get_net_read_timeout() * 1000;		// -> msec
+	this->_server = new server();
 	this->_server->set_back_log(ini_option_object().get_back_log());
 	if (this->_server->listen(ini_option_object().get_server_port()) < 0) {
 		return -1;
@@ -181,9 +178,9 @@ int flared::startup(int argc, char **argv) {
 		}
 	}
 
-	this->_thread_pool = _new_ thread_pool(ini_option_object().get_thread_pool_size(), ini_option_object().get_stack_size());
+	this->_thread_pool = new thread_pool(ini_option_object().get_thread_pool_size(), ini_option_object().get_stack_size());
 
-	this->_cluster = _new_ cluster(this->_thread_pool, ini_option_object().get_data_dir(), ini_option_object().get_server_name(), ini_option_object().get_server_port());
+	this->_cluster = new cluster(this->_thread_pool, ini_option_object().get_data_dir(), ini_option_object().get_server_name(), ini_option_object().get_server_port());
 	this->_cluster->set_proxy_concurrency(ini_option_object().get_proxy_concurrency());
 	this->_cluster->set_reconstruction_interval(ini_option_object().get_reconstruction_interval());
 	this->_cluster->set_reconstruction_bwlimit(ini_option_object().get_reconstruction_bwlimit());
@@ -200,7 +197,7 @@ int flared::startup(int argc, char **argv) {
 	storage::type_cast(ini_option_object().get_storage_type(), t);
 	switch (t) {
 	case storage::type_tch:
-		this->_storage = _new_ storage_tch(ini_option_object().get_data_dir(),
+		this->_storage = new storage_tch(ini_option_object().get_data_dir(),
 				ini_option_object().get_mutex_slot(),
 				ini_option_object().get_storage_ap(),
 				ini_option_object().get_storage_bucket_size(),
@@ -211,7 +208,7 @@ int flared::startup(int argc, char **argv) {
 
 		break;
 	case storage::type_tcb:
-		this->_storage = _new_ storage_tcb(ini_option_object().get_data_dir(),
+		this->_storage = new storage_tcb(ini_option_object().get_data_dir(),
 				ini_option_object().get_mutex_slot(),
 				ini_option_object().get_storage_ap(),
 				ini_option_object().get_storage_bucket_size(),
@@ -222,6 +219,18 @@ int flared::startup(int argc, char **argv) {
 				ini_option_object().get_storage_nmemb(),
 				ini_option_object().get_storage_dfunit());
 		break;
+	#ifdef HAVE_LIBKYOTOCABINET
+	case storage::type_kch:
+		this->_storage = new storage_kch(ini_option_object().get_data_dir(),
+				ini_option_object().get_mutex_slot(),
+				ini_option_object().get_storage_ap(),
+				ini_option_object().get_storage_bucket_size(),
+				ini_option_object().get_storage_cache_size(),
+				ini_option_object().get_storage_compress(),
+				ini_option_object().is_storage_large(),
+				ini_option_object().get_storage_dfunit());
+		break;
+	#endif
 	default:
 		log_err("unknown storage type [%s]", ini_option_object().get_storage_type().c_str());
 		return -1;
@@ -233,13 +242,13 @@ int flared::startup(int argc, char **argv) {
 
 	// creating alarm thread in advance
 	shared_thread th_alarm = this->_thread_pool->get(thread_pool::thread_type_alarm);
-	handler_alarm* h_alarm = _new_ handler_alarm(th_alarm);
+	handler_alarm* h_alarm = new handler_alarm(th_alarm);
 	th_alarm->trigger(h_alarm);
 
 #ifdef ENABLE_MYSQL_REPLICATION
 	if (ini_option_object().is_mysql_replication()) {
 		shared_thread th_mysql_replication = this->_thread_pool->get(thread_pool::thread_type_mysql_replication);
-		handler_mysql_replication* h_mysql_replication = _new_ handler_mysql_replication(th_mysql_replication, this->_cluster);
+		handler_mysql_replication* h_mysql_replication = new handler_mysql_replication(th_mysql_replication, this->_cluster);
 		th_mysql_replication->trigger(h_mysql_replication);
 	}
 #endif
@@ -273,7 +282,7 @@ int flared::run() {
 			reload_request = 0;
 		}
 
-		vector<shared_connection> connection_list = this->_server->wait();
+		vector<shared_connection_tcp> connection_list = this->_server->wait();
 
 		if (reload_request) {
 			log_notice("received signal [SIGHUP] -> reloading", 0);
@@ -281,9 +290,9 @@ int flared::run() {
 			reload_request = 0;
 		}
 
-		vector<shared_connection>::iterator it;
+		vector<shared_connection_tcp>::iterator it;
 		for (it = connection_list.begin(); it != connection_list.end(); it++) {
-			shared_connection c = *it;
+			shared_connection_tcp c = *it;
 
 			if (this->_thread_pool->get_thread_size(thread_pool::thread_type_request) >= ini_option_object().get_max_connection()) {
 				log_warning("too many connections [%d] -> closing socket and continue", ini_option_object().get_max_connection());
@@ -297,7 +306,7 @@ int flared::run() {
 				log_warning("too many threads (failed to create thread) [%d] -> closing socket and continue", this->_thread_pool->get_thread_size(thread_pool::thread_type_request));
 				continue;
 			}
-			handler_request* h = _new_ handler_request(t, c);
+			handler_request* h = new handler_request(t, c);
 			t->trigger(h);
 		}
 	}
@@ -320,7 +329,7 @@ int flared::reload() {
 	singleton<logger>::instance().open(this->_ident, ini_option_object().get_log_facility());
 
 	// net_read_timeout
-	connection::read_timeout = ini_option_object().get_net_read_timeout() * 1000;	// -> msec
+	connection_tcp::read_timeout = ini_option_object().get_net_read_timeout() * 1000;	// -> msec
 
 	//  index_server_name
 	this->_cluster->set_index_server_name(ini_option_object().get_index_server_name());

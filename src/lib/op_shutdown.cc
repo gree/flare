@@ -42,7 +42,7 @@ int op_shutdown::run_client(string node_server_name, int node_server_port) {
 		return -1;
 	}
 
-	return this->_parse_client_parameter();
+	return this->_parse_text_client_parameters();
 }
 // }}}
 
@@ -53,7 +53,7 @@ int op_shutdown::run_client(string node_server_name, int node_server_port) {
  *	syntax:
  *	SHUTDOWN [node_server_name] [node_server_port]
  */
-int op_shutdown::_parse_server_parameter() {
+int op_shutdown::_parse_text_server_parameters() {
 	char* p;
 	if (this->_connection->readline(&p) < 0) {
 		return -1;
@@ -91,11 +91,11 @@ int op_shutdown::_parse_server_parameter() {
 			throw -1;
 		}
 	} catch (int e) {
-		_delete_(p);
+		delete[] p;
 		return e;
 	}
 
-	_delete_(p);
+	delete[] p;
 
 	return 0;
 }
@@ -116,17 +116,17 @@ int op_shutdown::_run_client(string node_server_name, int node_server_port) {
 	return this->_send_request(request);
 }
 
-int op_shutdown::_parse_client_parameter() {
+int op_shutdown::_parse_text_client_parameters() {
 	char* p;
 	if (this->_connection->readline(&p) < 0) {
 		return -1;
 	}
 
-	if (this->_parse_response(p, this->_result, this->_result_message) < 0) {
-		_delete_(p);
+	if (this->_parse_text_response(p, this->_result, this->_result_message) < 0) {
+		delete[] p;
 		return -1;
 	}
-	_delete_(p);
+	delete[] p;
 
 	return 0;
 }

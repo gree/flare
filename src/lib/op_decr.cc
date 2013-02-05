@@ -17,7 +17,15 @@ namespace flare {
  *	ctor for op_decr
  */
 op_decr::op_decr(shared_connection c, cluster* cl, storage* st):
-		op_incr(c, "decr", cl, st) {
+		op_incr(c, "decr", binary_header::opcode_decrement, cl, st) {
+	this->_incr = false;
+}
+
+/**
+ *	ctor for op_decr
+ */
+op_decr::op_decr(shared_connection c, string ident, binary_header::opcode opcode, cluster* cl, storage* st):
+		op_incr(c, ident, opcode, cl, st) {
 	this->_incr = false;
 }
 

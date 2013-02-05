@@ -9,6 +9,9 @@
  */
 #include "handler_request.h"
 
+#include "op_parser_binary_index.h"
+#include "op_parser_text_index.h"
+
 namespace gree {
 namespace flare {
 
@@ -16,7 +19,7 @@ namespace flare {
 /**
  *	ctor for handler_request
  */
-handler_request::handler_request(shared_thread t, shared_connection c):
+handler_request::handler_request(shared_thread t, shared_connection_tcp c):
 		thread_handler(t),
 		_connection(c) {
 }
@@ -62,11 +65,11 @@ int handler_request::run() {
 		if (p->is_shutdown_request()) {
 			this->_thread->set_state("shutdown");
 			log_info("session shutdown request -> breaking loop", 0);
-			_delete_(p);
+			delete p;
 			break;
 		}
 
-		_delete_(p);
+		delete p;
 
 		if (this->_thread->is_shutdown_request()) {
 			this->_thread->set_state("shutdown");

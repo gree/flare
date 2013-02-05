@@ -17,7 +17,7 @@ namespace flare {
  *	ctor for op_cas
  */
 op_cas::op_cas(shared_connection c, cluster* cl, storage* st):
-		op_set(c, "cas", cl, st) {
+		op_set(c, "cas", binary_header::opcode_set, cl, st) {
 	this->_behavior = storage::behavior_cas;
 }
 

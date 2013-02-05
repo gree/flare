@@ -31,10 +31,10 @@ key_resolver_modular::~key_resolver_modular() {
 	if (this->_map != NULL) {
 		for (int i = 0; i < this->_partition_size; i++) {
 			if (this->_map[i] != NULL) {
-				_delete_(this->_map[i]);
+				delete[] this->_map[i];
 			}
 		}
-		_delete_(this->_map);
+		delete[] this->_map;
 	}
 }
 // }}}
@@ -47,16 +47,16 @@ key_resolver_modular::~key_resolver_modular() {
  *	key resolver startup procs
  */
 int key_resolver_modular::startup() {
-	this->_map = _new_ int*[this->_partition_size];
+	this->_map = new int*[this->_partition_size];
 
-	log_debug("buiding key resolving table (type=modular)...", 0);
+	log_debug("building key resolving table (type=modular)...", 0);
 	for (int i = 0; i < this->_partition_size; i++) {
 		if (i == 0) {
 			this->_map[i] = NULL;
 			continue;
 		}
 
-		this->_map[i] = _new_ int[this->_virtual];
+		this->_map[i] = new int[this->_virtual];
 		int counter[this->_partition_size];
 		memset(counter, 0, sizeof(counter));
 

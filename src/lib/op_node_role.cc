@@ -45,7 +45,7 @@ int op_node_role::run_client(string node_server_name, int node_server_port, clus
 		return -1;
 	}
 
-	return this->_parse_client_parameter();
+	return this->_parse_text_client_parameters();
 }
 // }}}
 
@@ -56,7 +56,7 @@ int op_node_role::run_client(string node_server_name, int node_server_port, clus
  *	syntax:
  *	NODE ROLE [node_server_name] [node_server_port] [node_role] ([node_balance])
  */
-int op_node_role::_parse_server_parameter() {
+int op_node_role::_parse_text_server_parameters() {
 	char* p;
 	if (this->_connection->readline(&p) < 0) {
 		return -1;
@@ -125,11 +125,11 @@ int op_node_role::_parse_server_parameter() {
 			}
 		}
 	} catch (int e) {
-		_delete_(p);
+		delete[] p;
 		return e;
 	}
 
-	_delete_(p);
+	delete[] p;
 
 	return 0;
 }
@@ -152,17 +152,17 @@ int op_node_role::_run_client(string node_server_name, int node_server_port, clu
 	return 0;
 }
 
-int op_node_role::_parse_client_parameter() {
+int op_node_role::_parse_text_client_parameters() {
 	char* p;
 	if (this->_connection->readline(&p) < 0) {
 		return -1;
 	}
 
-	if (this->_parse_response(p, this->_result, this->_result_message) < 0) {
-		_delete_(p);
+	if (this->_parse_text_response(p, this->_result, this->_result_message) < 0) {
+		delete[] p;
 		return -1;
 	}
-	_delete_(p);
+	delete[] p;
 
 	return 0;
 }

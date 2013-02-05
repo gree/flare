@@ -35,7 +35,7 @@ op_kill::~op_kill() {
 // }}}
 
 // {{{ protected methods
-int op_kill::_parse_server_parameter() {
+int op_kill::_parse_text_server_parameters() {
 	char* p;
 	if (this->_connection->readline(&p) < 0) {
 		return -1;
@@ -64,11 +64,11 @@ int op_kill::_parse_server_parameter() {
 			throw -1;
 		}
 	} catch (int e) {
-		_delete_(p);
+		delete[] p;
 		return e;
 	}
 
-	_delete_(p);
+	delete[] p;
 
 	return 0;
 }

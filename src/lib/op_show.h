@@ -37,7 +37,7 @@ public:
 	virtual ~op_show();
 
 protected:
-	virtual int _parse_server_parameter();
+	virtual int _parse_text_server_parameters();
 	virtual int _run_server();
 
 	virtual int _send_show_variables();

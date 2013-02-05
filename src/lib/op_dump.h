@@ -39,10 +39,10 @@ public:
 	virtual int run_client(int wait, int partition, int partition_size, int bwlimit = 0);
 
 protected:
-	virtual int _parse_server_parameter();
+	virtual int _parse_text_server_parameters();
 	virtual int _run_server();
 	virtual int _run_client(int wait, int partition, int partition_size, int bwlimit);
-	virtual int _parse_client_parameter();
+	virtual int _parse_text_client_parameters();
 	virtual void _sleep_for_bwlimit(int bytes_written);
 };
 

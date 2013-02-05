@@ -33,10 +33,11 @@ public:
 	virtual int run_client(time_t expire, storage::option option);
 
 protected:
-	virtual int _parse_server_parameter();
+	op_flush_all(shared_connection c, string ident, binary_header::opcode opcode, storage* st);
+	virtual int _parse_text_server_parameters();
 	virtual int _run_server();
 	virtual int _run_client(time_t expire, storage::option option);
-	virtual int _parse_client_parameter(storage::option option);
+	virtual int _parse_text_client_parameters(storage::option option);
 };
 
 }	// namespace flare

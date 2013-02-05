@@ -343,7 +343,7 @@ int ini_option::_setup_config_option(program_options::options_description& optio
 		("partition-modular-virtual",	program_options::value<int>(),		"partitioning virtual node size (only for partition-type=modular)")
 		("key-hash-algorithm",			program_options::value<string>(),		"key hash algorithm")
 		("partition-size",					program_options::value<int>(),			"max partition size")
-		("partition-type",					program_options::value<string>(),		"partition type (modular:simple algorithm base)")
+		("partition-type",					program_options::value<string>(),		"partition type (modular: simple algorithm base)")
 		("server-name",							program_options::value<string>(),		"my server name")
 		("server-port",							program_options::value<int>(),			"my server port")
 		("server-socket",						program_options::value<string>(),		"my server unix domain socket (optional)")

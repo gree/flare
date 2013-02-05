@@ -37,7 +37,6 @@
 
 #include "config.h"
 #include "singleton.h"
-#include "mm.h"
 #include "logger.h"
 #include "util.h"
 #include "connection.h"
@@ -50,6 +49,9 @@
 #include "storage.h"
 #include "storage_tch.h"
 #include "storage_tcb.h"
+#ifdef HAVE_LIBKYOTOCABINET
+#include "storage_kch.h"
+#endif
 
 using namespace std;
 using namespace boost;

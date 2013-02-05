@@ -32,7 +32,7 @@ app::app():
  */
 app::~app() {
 	if (stats_object != NULL) {
-		_delete_(stats_object);
+		delete stats_object;
 		stats_object = NULL;
 	}
 }
@@ -46,7 +46,7 @@ app::~app() {
  *	application startup procs
  */
 int app::startup(int argc, char **argv) {
-	stats_object = _new_ stats();
+	stats_object = new stats();
 	stats_object->startup();
 
 	this->_set_pid();

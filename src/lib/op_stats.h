@@ -12,6 +12,7 @@
 #include <string>
 
 #include "op.h"
+#include "cluster.h"
 #include "storage.h"
 #include "thread_pool.h"
 
@@ -46,7 +47,8 @@ public:
 	virtual ~op_stats();
 
 protected:
-	virtual int _parse_server_parameter();
+	virtual int _parse_text_server_parameters();
+	virtual int _parse_binary_request(const binary_request_header&, const char* body);
 	virtual int _run_server();
 
 	virtual int _send_stats(thread_pool* tp, storage* st);
@@ -57,7 +59,26 @@ protected:
 	virtual int _send_stats_threads(thread_pool* tp, int type);
 	virtual int _send_stats_nodes(cluster* cl);
 	virtual int _send_stats_threads_queue();
+
+	virtual int _send_text_result(result r, const char* message = NULL);
+	virtual int _send_binary_result(result r, const char* message = NULL);
+
+private:
+	stats_type _parse_stats_type(const char* body) const;
+
+	template<typename T> inline int _send_stat(const char* key, const T& value);
+	template<typename T> int _send_text_stat(const char* key, const T& value);
+	template<typename T> int _send_binary_stat(const char* key, const T& value);
+	int _send_stats(const thread::thread_info&);
+
+	std::ostringstream _text_stream;
 };
+
+template<typename T> int op_stats::_send_stat(const char* key, const T& value) {
+	return _protocol == op::text
+		? _send_text_stat<T>(key, value)
+		: _send_binary_stat<T>(key, value);
+}
 
 }	// namespace flare
 }	// namespace gree

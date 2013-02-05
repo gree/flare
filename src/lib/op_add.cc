@@ -17,7 +17,15 @@ namespace flare {
  *	ctor for op_add
  */
 op_add::op_add(shared_connection c, cluster* cl, storage* st):
-		op_set(c, "add", cl, st) {
+		op_set(c, "add", binary_header::opcode_add, cl, st) {
+	this->_behavior = storage::behavior_add;
+}
+
+/**
+ *	ctor for op_add
+ */
+op_add::op_add(shared_connection c, string ident, binary_header::opcode opcode, cluster* cl, storage* st):
+		op_set(c, ident, opcode, cl, st) {
 	this->_behavior = storage::behavior_add;
 }
 

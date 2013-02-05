@@ -16,7 +16,6 @@
 
 #include "config.h"
 #include "singleton.h"
-#include "mm.h"
 #include "logger.h"
 #include "util.h"
 

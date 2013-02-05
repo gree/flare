@@ -9,7 +9,6 @@
 #define	__KEY_RESOLVER_H__
 
 #include "logger.h"
-#include "mm.h"
 #include "util.h"
 
 using namespace std;

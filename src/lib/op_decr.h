@@ -20,13 +20,12 @@ namespace flare {
  *	opcode class (decr)
  */
 class op_decr : public op_incr {
-protected:
-
 public:
 	op_decr(shared_connection c, cluster* cl, storage* st);
 	virtual ~op_decr();
 
 protected:
+	op_decr(shared_connection c, string ident, binary_header::opcode opcode, cluster* cl, storage* st);
 };
 
 }	// namespace flare

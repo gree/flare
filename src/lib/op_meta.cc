@@ -41,7 +41,7 @@ int op_meta::run_client(int& partition_size, storage::hash_algorithm& key_hash_a
 		return -1;
 	}
 
-	return this->_parse_client_parameter(partition_size, key_hash_algorithm, key_resolver_type, key_resolver_modular_hint, key_resolver_modular_virtual);
+	return this->_parse_text_client_parameters(partition_size, key_hash_algorithm, key_resolver_type, key_resolver_modular_hint, key_resolver_modular_virtual);
 }
 // }}}
 
@@ -52,7 +52,7 @@ int op_meta::run_client(int& partition_size, storage::hash_algorithm& key_hash_a
  *	syntax:
  *	META
  */
-int op_meta::_parse_server_parameter() {
+int op_meta::_parse_text_server_parameters() {
 	char* p;
 	if (this->_connection->readline(&p) < 0) {
 		return -1;
@@ -63,11 +63,11 @@ int op_meta::_parse_server_parameter() {
 	if (q[0]) {
 		// no arguments allowed
 		log_debug("bogus string(s) found [%s] -> error", q);
-		_delete_(p);
+		delete[] p;
 		return -1;
 	}
 
-	_delete_(p);
+	delete[] p;
 
 	return 0;
 }
@@ -111,7 +111,7 @@ int op_meta::_run_client() {
 	return this->_send_request(request);
 }
 
-int op_meta::_parse_client_parameter(int& partition_size, storage::hash_algorithm& key_hash_algorithm, key_resolver::type& key_resolver_type, int& key_resolver_modular_hint, int& key_resolver_modular_virtual) {
+int op_meta::_parse_text_client_parameters(int& partition_size, storage::hash_algorithm& key_hash_algorithm, key_resolver::type& key_resolver_type, int& key_resolver_modular_hint, int& key_resolver_modular_virtual) {
 	for (;;) {
 		char* p;
 		if (this->_connection->readline(&p) < 0) {
@@ -119,7 +119,7 @@ int op_meta::_parse_client_parameter(int& partition_size, storage::hash_algorith
 			return -1;
 		}
 		if (strcmp(p, "END\n") == 0) {
-			_delete_(p);
+			delete[] p;
 			break;
 		}
 
@@ -142,7 +142,7 @@ int op_meta::_parse_client_parameter(int& partition_size, storage::hash_algorith
 			if (strcmp(q, "partition-size") == 0) {
 				i += util::next_digit(p+i, q, sizeof(q));
 				if (q[0] == '\0') {
-					log_warning("no parition size value (required)", 0);
+					log_warning("no partition size value (required)", 0);
 					throw -1;
 				}
 				partition_size = lexical_cast<int>(q);
@@ -192,12 +192,12 @@ int op_meta::_parse_client_parameter(int& partition_size, storage::hash_algorith
 			if (e == -2) {
 				log_warning("error occured while parsing response -> skip this line", 0);
 			} else {
-				_delete_(p);
+				delete[] p;
 				return -1;
 			}
 		}
 
-		_delete_(p);
+		delete[] p;
 	}
 
 	return 0;

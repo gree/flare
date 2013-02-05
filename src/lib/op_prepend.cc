@@ -17,7 +17,15 @@ namespace flare {
  *	ctor for op_prepend
  */
 op_prepend::op_prepend(shared_connection c, cluster* cl, storage* st):
-		op_set(c, "prepend", cl, st) {
+		op_append(c, "prepend", binary_header::opcode_prepend, cl, st) {
+	this->_behavior = storage::behavior_replace | storage::behavior_prepend;
+}
+
+/**
+ *	ctor for op_prepend
+ */
+op_prepend::op_prepend(shared_connection c, string ident, binary_header::opcode opcode, cluster* cl, storage* st):
+		op_append(c, ident, opcode, cl, st) {
 	this->_behavior = storage::behavior_replace | storage::behavior_prepend;
 }
 

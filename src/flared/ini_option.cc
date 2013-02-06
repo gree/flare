@@ -384,7 +384,7 @@ int ini_option::reload() {
 		}
 
 		if (opt_var_map.count("reconstruction-interval")) {
-			log_notice("  reconstruction_inteval: %d -> %d", this->_reconstruction_interval, opt_var_map["reconstruction-interval"].as<int>());
+			log_notice("  reconstruction_interval: %d -> %d", this->_reconstruction_interval, opt_var_map["reconstruction-interval"].as<int>());
 			this->_reconstruction_interval = opt_var_map["reconstruction-interval"].as<int>();
 		}
 
@@ -498,11 +498,11 @@ int ini_option::_setup_config_option(program_options::options_description& optio
 		("storage-large",																								"use large storage (tch)")
 		("storage-lmemb",						program_options::value<int>(),			"number of members in each leaf page (tcb)")
 		("storage-nmemb",						program_options::value<int>(),			"number of members in each non-leaf page (tcb")
-		("storage-dfunit",						program_options::value<int32_t>(),		"the unit step number of auto defragmentation of a database object(tch/tcb)")
-		("storage-type",						program_options::value<string>(),		"storage type (tch:tokyo cabinet hash database, tcb:tokyo cabinet b+tree database)")
+		("storage-dfunit",					program_options::value<int32_t>(),	"unit step number of auto defragmentation of a database object (tch/tcb)")
+		("storage-type",						program_options::value<string>(),		"storage type (tch:tokyo cabinet hash database, tcb:tokyo cabinet b+tree database, kch:kyoto cabinet hash database)")
 		("thread-pool-size",				program_options::value<int>(),			"thread pool size (dynamic)")
-		("proxy-prior-netmask",				program_options::value<uint32_t>(),		"proxy prior netmask")
-		("max-total-thread-queue",			program_options::value<uint32_t>(),		"max thread queue length(dynamic)");
+		("proxy-prior-netmask",			program_options::value<uint32_t>(),	"proxy prior netmask")
+		("max-total-thread-queue",	program_options::value<uint32_t>(),	"max thread queue length (dynamic)");
 
 	return 0;
 }

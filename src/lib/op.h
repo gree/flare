@@ -10,18 +10,21 @@
 
 #include "config.h"
 #include "singleton.h"
-#include "mm.h"
 #include "logger.h"
 #include "util.h"
 #include "connection.h"
 #include "thread.h"
 #include "storage.h"
+#include "binary_header.h"
 
 using namespace std;
 using namespace boost;
 
 namespace gree {
 namespace flare {
+
+// Forward declaration
+class binary_response_header;
 
 /**
  *	opcode base class
@@ -44,30 +47,40 @@ public:
 		result_not_found,
 		result_deleted,
 		result_found,
+		result_touched,
+	};
+
+	enum protocol {
+		text,
+		binary,
 	};
 
 protected:
-	shared_connection			_connection;
-	shared_thread					_thread;
-	bool									_thread_available;
-	string								_ident;
-	vector<string>				_proxy;
-	bool									_proxy_request;
-	bool									_shutdown_request;
-	result								_result;
-	string								_result_message;
+	shared_connection						_connection;
+	protocol										_protocol;
+	shared_thread								_thread;
+	bool												_thread_available;
+	const string								_ident;
+	const binary_header::opcode	_opcode;
+	const bool									_quiet;
+	vector<string>							_proxy;
+	bool												_proxy_request;
+	bool												_shutdown_request;
+	result											_result;
+	string											_result_message;
 
 public:
-	op(shared_connection c, string ident = "");
+	op(shared_connection c, string ident, binary_header::opcode opcode = binary_header::opcode_noop);
 	virtual ~op();
 
 	virtual int run_server();
 	virtual int run_client();
 
+	void set_protocol(op::protocol protocol) { _protocol = protocol; }
+	int set_thread(shared_thread t) { this->_thread = t; this->_thread_available = true; return 0; };
 	vector<string> get_proxy() { return this->_proxy; };
 	int set_proxy(string proxy);
 	int set_proxy(vector<string> proxy) { this->_proxy = proxy; return 0; };
-	int set_thread(shared_thread t) { this->_thread = t; this->_thread_available = true; return 0; };
 	inline string get_ident() { return this->_ident; };
 	int is_proxy_request() { return this->_proxy_request; };
 	bool is_shutdown_request() { return this->_shutdown_request; };
@@ -93,6 +106,8 @@ public:
 			r = result_deleted;
 		} else if (s == "FOUND") {
 			r = result_found;
+		} else if (s == "TOUCHED") {
+			r = result_touched;
 		} else if (s == "ERROR") {
 			r = result_error;
 		} else if (s == "CLIENT_ERROR") {
@@ -125,6 +140,8 @@ public:
 			return "DELETED";
 		case result_found:
 			return "FOUND";
+		case result_touched:
+			return "TOUCHED";
 		case result_error:
 			return "ERROR";
 		case result_client_error:
@@ -136,17 +153,50 @@ public:
 	};
 
 protected:
-	virtual int _parse_server_parameter();
+	// Parse parameters
+	virtual int _parse_text_server_parameters();
+	int _parse_binary_server_parameters();
+	virtual int _parse_binary_request(const binary_request_header&, const char* body);
+
+	// Run op core
 	virtual int _run_server();
 	virtual int _run_client();
-	virtual int _parse_client_parameter();
-	virtual int _parse_response(const char* p, result& r, string& r_message);
 
-	int _send_result(result r, const char* message = NULL);
+	// Communicate within cluster
+	virtual int _parse_text_client_parameters();
+	virtual int _parse_binary_client_parameters();
+	virtual int _parse_text_response(const char* p, result& r, string& r_message);
 	int _send_request(const char* request);
-
 	string _get_proxy_ident();
+
+	// Send reply back to sender
+	inline int _send_result(result r, const char* message = NULL);
+	virtual int _send_text_result(result r, const char* message = NULL);
+	virtual int _send_binary_result(result r, const char* message = NULL);
+	int _send_binary_response(const binary_response_header& header, const char* body, bool buffer = false);
+
+private:
+	inline int _parse_server_parameters();
+	inline int _parse_client_parameters();
 };
+
+int op::_parse_server_parameters() {
+	return _protocol == text
+		? _parse_text_server_parameters()
+		: _parse_binary_server_parameters();
+}
+
+int op::_parse_client_parameters() {
+	return _protocol == text
+		? _parse_text_client_parameters()
+		: _parse_binary_client_parameters();
+}
+
+int op::_send_result(result r, const char* message) {
+	return _protocol == text
+		? _send_text_result(r, message)
+		: _send_binary_result(r, message);
+}
 
 }	// namespace flare
 }	// namespace gree

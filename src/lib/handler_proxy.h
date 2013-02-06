@@ -29,8 +29,8 @@ class handler_proxy : public thread_handler {
 protected:
 	cluster*						_cluster;
 	shared_connection		_connection;
-	string							_node_server_name;
-	int									_node_server_port;
+	const string				_node_server_name;
+	const int						_node_server_port;
 	int									_noreply_count;
 
 public:

@@ -32,7 +32,7 @@ protected:
 	bool									_is_multiple_response;
 
 public:
-	op_proxy_read(shared_connection c, string ident, cluster* cl, storage* st);
+	op_proxy_read(shared_connection c, string ident, binary_header::opcode opcode, cluster* cl, storage* st);
 	virtual ~op_proxy_read();
 
 	bool is_multiple_response() { return this->_is_multiple_response; };
@@ -43,12 +43,12 @@ public:
 	list<storage::entry>& get_entry_list() { return this->_entry_list; };
 
 protected:
-	virtual int _parse_server_parameter();
+	virtual int _parse_text_server_parameters();
 	virtual int _run_server();
 	virtual int _run_client(storage::entry& e, void* parameter);
 	virtual int _run_client(list<storage::entry>& e, void* parameter);
-	virtual int _parse_client_parameter(storage::entry& e);
-	virtual int _parse_client_parameter(list<storage::entry>& e);
+	virtual int _parse_text_client_parameters(storage::entry& e);
+	virtual int _parse_text_client_parameters(list<storage::entry>& e);
 };
 
 }	// namespace flare

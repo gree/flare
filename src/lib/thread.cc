@@ -113,7 +113,7 @@ thread::~thread() {
 
 	if (this->_is_delete_thread_handler && this->_thread_handler != NULL) {
 		log_debug("deleting thread_handler object", 0);
-		_delete_(this->_thread_handler);
+		delete this->_thread_handler;
 	}
 	log_debug("thread is completely shutdown", 0);
 }
@@ -241,7 +241,7 @@ int thread::run() {
 
 	if (this->_is_delete_thread_handler && this->_thread_handler != NULL) {
 		log_debug("deleting thread_handler object", 0);
-		_delete_(this->_thread_handler);
+		delete this->_thread_handler;
 	}
 	this->_thread_handler = NULL;
 	this->_is_delete_thread_handler = false;
@@ -421,7 +421,7 @@ int thread::enqueue(shared_thread_queue& q, const uint32_t max_total_thread_queu
 	}
 	pthread_mutex_unlock(&this->_mutex_queue);
 	if (max_total_thread_queue > 0 && size >= max_total_thread_queue) {
-		log_err("too many thread queue [%u]", size);
+		log_err("too many thread queues [%u]", size);
 		return -1;
 	}
 	pthread_cond_signal(&this->_cond_queue);

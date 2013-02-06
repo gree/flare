@@ -70,32 +70,27 @@ const char* util::hstrerror(int e) {
 /**
  *	thread safe gethostbyname()
  */
-int util::gethostbyname(const char *name, struct hostent* he, int* he_errno) {
-#ifdef HAVE_GETHOSTBYNAME_R
-	struct hostent* he_result;
-	char he_buf[BUFSIZ];
-	if (gethostbyname_r(name, he, he_buf, sizeof(he_buf), &he_result, he_errno) < 0) {
-		log_err("gethostbyname_r() failed: %s (%d)", util::hstrerror(*he_errno), *he_errno);
-		return -1;
-	} 
-
-	return 0;
-#else
-	static pthread_mutex_t m = PTHREAD_MUTEX_INITIALIZER;
-
-	pthread_mutex_lock(&m);
-	struct hostent* he_tmp;
-	he_tmp = ::gethostbyname(name);
-	*he = *he_tmp;
-	*he_errno = ::h_errno;
-	pthread_mutex_unlock(&m);
-	if (*he_errno) {
-		log_err("gethostbyname() failed: %s (%d)", util::hstrerror(*he_errno), *he_errno);
+int util::gethostbyname(const std::string& host, int port, sa_family_t family, sockaddr_in& output, int& gai_errno, std::string* canonname) {
+	std::ostringstream port_os;
+	port_os << port;
+	struct addrinfo hints, *res;
+	memset(&hints, 0, sizeof(hints));
+	hints.ai_socktype = SOCK_STREAM;
+	hints.ai_family = family;
+	if (canonname) {
+		hints.ai_flags |= AI_CANONNAME;
+	}
+	gai_errno = getaddrinfo(host.c_str(), port_os.str().c_str(), &hints, &res);
+	if (gai_errno) {
+		log_err("getaddrinfo() failed: %s (%d)", gai_strerror(gai_errno), gai_errno);
 		return -1;
 	}
-
+	memcpy(&output, res->ai_addr, res->ai_addrlen);
+	if (canonname && res->ai_canonname) {
+		canonname->assign(res->ai_canonname, strlen(res->ai_canonname));
+	}
+	freeaddrinfo(res);
 	return 0;
-#endif // HAVE_GETHOSTBYNAME_R
 }
 
 /**
@@ -124,13 +119,11 @@ int util::get_fqdn(string& fqdn) {
 		return -1;
 	}
 
-	struct hostent he;
-	int e;
-	if (util::gethostbyname(buf_hostname, &he, &e) != 0) {
+	struct sockaddr_in dummy;
+	int gai_errno;
+	if (util::gethostbyname(buf_hostname, 0, AF_INET, dummy, gai_errno, &fqdn) != 0) {
 		return -1;
 	}
-
-	fqdn = he.h_name;
 
 	return 0;
 }
@@ -141,12 +134,12 @@ int util::get_fqdn(string& fqdn) {
 in_addr_t util::inet_addr(const char *cp, const uint32_t netmask) {
 	in_addr_t addr = ::inet_addr(cp);
 	if (addr == INADDR_NONE) {
-		struct hostent he;
-		int e;
-		if (util::gethostbyname(cp, &he, &e) != 0) {
+		sockaddr_in sockaddr;
+		int gai_errno;
+		if (util::gethostbyname(cp, 0, AF_INET, sockaddr, gai_errno) != 0) {
 			return INADDR_NONE;
 		}
-		addr = *(reinterpret_cast<in_addr_t *>(he.h_addr_list[0]));
+		addr = sockaddr.sin_addr.s_addr;
 	}
 	return (addr & static_cast<in_addr_t>(netmask));
 }
@@ -236,7 +229,7 @@ char* util::base64_decode(string src, size_t& dst_size) {
 	uint8_t buf_binary[3] = {0};
 	uint8_t buf_text[4];
 
-	char* dst = _new_ char[src_size];
+	char* dst = new char[src_size];
 	dst_size = 0;
 
 	int i = 0;

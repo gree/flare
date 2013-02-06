@@ -1,0 +1,114 @@
+flare (1.0.17-1) unstable; urgency=low
+
+  * 1.0.17
+
+ -- Benjamin Surma <benjamin.surma@gree.net>  Tue, 05 Feb 2013 15:30:00 +0900
+
+flare (1.0.16-2) unstable; urgency=low
+
+  * 1.0.16-2
+
+ -- Benjamin Surma <benjamin.surma@gree.net>  Wed, 12 Dec 2012 19:52:30 +0900
+
+flare (1.0.16-1) unstable; urgency=low
+
+  * 1.0.16
+
+ -- Kiyoshi Ikehara <kiyoshi.ikehara@gree.net>  Wed, 10 Oct 2012 10:09:30 +0900
+
+flare (1.0.15-1) unstable; urgency=low
+
+  * 1.0.15
+
+ -- Kiyoshi Ikehara <kiyoshi.ikehara@gree.co.jp>  Mon, 27 Feb 2012 21:49:00 +0900
+
+flare (1.0.14-1) unstable; urgency=low
+
+  * 1.0.14
+
+ -- fujimoto <fujimoto@php.net>  Mon, 08 Aug 2011 22:52:43 +0900
+
+flare (1.0.13-1) unstable; urgency=low
+
+  * 1.0.13
+
+ -- fujimoto <fujimoto@php.net>  Thu, 03 Mar 2011 13:31:25 +0900
+
+flare (1.0.12-1) unstable; urgency=low
+
+  * 1.0.12
+
+ -- fujimoto <fujimoto@php.net>  Tue, 01 Mar 2011 22:43:56 +0900
+
+flare (1.0.11-1) unstable; urgency=low
+
+  * 1.0.11
+
+ -- fujimoto <fujimoto@php.net>  Wed, 17 Nov 2010 23:42:56 +0900
+
+flare (1.0.10-1) unstable; urgency=low
+
+  * 1.0.10
+
+ -- fujimoto <fujimoto@php.net>  Mon, 08 Nov 2010 23:54:35 +0900
+
+flare (1.0.9-1) unstable; urgency=low
+
+  * 1.0.9
+
+ -- fujimoto <fujimoto@php.net>  Fri,  9 Oct 2009 19:07:26 +0900
+
+flare (1.0.8-1) unstable; urgency=low
+
+  * 1.0.8
+
+ -- fujimoto <fujimoto@php.net>  Tue,  3 Feb 2009 19:06:19 +0900
+
+flare (1.0.7-1) unstable; urgency=low
+
+  * 1.0.7
+
+ -- fujimoto <fujimoto@php.net>  Mon, 26 Jan 2009 20:13:50 +0900
+
+flare (1.0.6-1) unstable; urgency=low
+
+  * 1.0.6
+
+ -- fujimoto <fujimoto@php.net>  Thu, 22 Jan 2009 11:40:52 +0900
+
+flare (1.0.5-1) unstable; urgency=low
+
+  * 1.0.5
+
+ -- fujimoto <fujimoto@php.net>  Thu,  4 Dec 2008 20:42:11 +0900
+
+flare (1.0.4-1) unstable; urgency=low
+
+  * 1.0.4
+
+ -- fujimoto <fujimoto@php.net>  Wed,  3 Dec 2008 18:07:37 +0900
+
+flare (1.0.3-1) unstable; urgency=low
+
+  * 1.0.3
+
+ -- fujimoto <fujimoto@php.net>  Fri, 28 Nov 2008 18:48:21 +0900
+
+flare (1.0.2-1) unstable; urgency=low
+
+  * 1.0.2
+
+ -- fujimoto <fujimoto@php.net>  Fri, 28 Nov 2008 17:36:13 +0900
+
+flare (1.0.1-1) unstable; urgency=low
+
+  * 1.0.1
+
+ -- fujimoto <fujimoto@php.net>  Thu, 27 Nov 2008 20:09:27 +0900
+
+flare (1.0.0-1) unstable; urgency=low
+
+  * Initial release
+
+ -- Masaki Fujimoto <fujimoto@php.net>  Mon, 24 Nov 2008 14:28:29 +0900
+

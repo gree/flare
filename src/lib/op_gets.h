@@ -20,8 +20,6 @@ namespace flare {
  *	opcode class (gets)
  */
 class op_gets : public op_get {
-protected:
-
 public:
 	op_gets(shared_connection c, cluster* cl, storage* st);
 	virtual ~op_gets();

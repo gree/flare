@@ -31,8 +31,8 @@ protected:
 	cluster*						_cluster;
 	storage*						_storage;
 	shared_connection		_connection;
-	string							_node_server_name;
-	int									_node_server_port;
+	const string				_node_server_name;
+	const int						_node_server_port;
 	int									_partition;
 	int									_partition_size;
 	cluster::role				_role;

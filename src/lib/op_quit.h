@@ -20,16 +20,20 @@ namespace flare {
  *	opcode class (quit)
  */
 class op_quit : public op {
-protected:
-
 public:
 	op_quit(shared_connection c);
 	virtual ~op_quit();
 
 protected:
-	virtual int _parse_server_parameter();
+	op_quit(shared_connection c, string ident, binary_header::opcode opcode);
+	virtual int _parse_text_server_parameters();
 	virtual int _run_server();
+	virtual inline int _send_text_result(result r, const char* message = NULL);
 };
+
+int op_quit::_send_text_result(result r, const char* message) {
+	return 0;
+}
 
 }	// namespace flare
 }	// namespace gree

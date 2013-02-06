@@ -18,6 +18,7 @@ namespace flare {
  */
 class op_parser_binary_index : public op_parser_binary {
 protected:
+	virtual op* _determine_op(const binary_request_header&) { return NULL; }
 
 public:
 	op_parser_binary_index(shared_connection c);

@@ -17,7 +17,7 @@ namespace flare {
  *	ctor for op_ping
  */
 op_ping::op_ping(shared_connection c):
-		op(c, "ping") {
+		op(c, "ping", binary_header::opcode_noop) {
 }
 
 /**
@@ -34,7 +34,7 @@ op_ping::~op_ping() {
 // }}}
 
 // {{{ protected methods
-int op_ping::_parse_server_parameter() {
+int op_ping::_parse_text_server_parameters() {
 	char* p;
 	if (this->_connection->readline(&p) < 0) {
 		return -1;
@@ -45,11 +45,11 @@ int op_ping::_parse_server_parameter() {
 	if (q[0]) {
 		// no arguments allowed
 		log_debug("bogus string(s) found [%s] -> error", q); 
-		_delete_(p);
+		delete[] p;
 		return -1;
 	}
 
-	_delete_(p);
+	delete[] p;
 
 	return 0;
 }
@@ -67,13 +67,13 @@ int op_ping::_run_client() {
 	return this->_send_request(request);
 }
 
-int op_ping::_parse_client_parameter() {
+int op_ping::_parse_text_client_parameters() {
 	char *p;
 	if (this->_connection->readline(&p) < 0) {
 		return -1;
 	}
 	int r = (strcmp(p, "OK\n") == 0) ? 0 : -1;
-	_delete_(p);
+	delete[] p;
 
 	return r;
 }

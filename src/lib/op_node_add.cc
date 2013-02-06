@@ -42,7 +42,7 @@ int op_node_add::run_client(vector<cluster::node>& v) {
 		return -1;
 	}
 
-	return this->_parse_client_parameter(v);
+	return this->_parse_text_client_parameters(v);
 }
 // }}}
 
@@ -53,7 +53,7 @@ int op_node_add::run_client(vector<cluster::node>& v) {
  *	syntax:
  *	NODE ADD [node name(required)] [node port(required)]
  */
-int op_node_add::_parse_server_parameter() {
+int op_node_add::_parse_text_server_parameters() {
 	char* p;
 	if (this->_connection->readline(&p) < 0) {
 		return -1;
@@ -91,11 +91,11 @@ int op_node_add::_parse_server_parameter() {
 			throw -1;
 		}
 	} catch (int e) {
-		_delete_(p);
+		delete[] p;
 		return e;
 	}
 
-	_delete_(p);
+	delete[] p;
 
 	return 0;
 }
@@ -125,7 +125,7 @@ int op_node_add::_run_client() {
 	return this->_send_request(request);
 }
 
-int op_node_add::_parse_client_parameter(vector<cluster::node>& v) {
+int op_node_add::_parse_text_client_parameters(vector<cluster::node>& v) {
 	v.clear();
 
 	for (;;) {
@@ -135,20 +135,20 @@ int op_node_add::_parse_client_parameter(vector<cluster::node>& v) {
 			return -1;
 		}
 		if (strcmp(p, "END\n") == 0) {
-			_delete_(p);
+			delete[] p;
 			break;
 		}
 
 		cluster::node n;
 		if (n.parse(p) < 0) {
-			_delete_(p);
+			delete[] p;
 			return -1;
 		}
 
 		log_debug("node: server_name[%s] server_port[%d] role[%d] state[%d] partition[%d] balance[%d] thread_type[%d]", n.node_server_name.c_str(), n.node_server_port, n.node_role, n.node_state, n.node_partition, n.node_balance, n.node_thread_type);
 		v.push_back(n);
 
-		_delete_(p);
+		delete[] p;
 	}
 
 	return 0;

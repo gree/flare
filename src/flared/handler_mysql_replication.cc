@@ -43,9 +43,9 @@ int handler_mysql_replication::run() {
 	this->_thread->set_state("wait"); 
 	this->_thread->set_op("");
 
-	server* s = _new_ server();
+	server* s = new server();
 	if (s->listen(ini_option_object().get_mysql_replication_port()) < 0) {
-		_delete_(s);
+		delete s;
 		return -1;
 	}
 
@@ -55,20 +55,20 @@ int handler_mysql_replication::run() {
 			break;
 		}
 
-		vector<shared_connection> connection_list = s->wait();
-		vector<shared_connection>::iterator it;
+		vector<shared_connection_tcp> connection_list = s->wait();
+		vector<shared_connection_tcp>::iterator it;
 		for (it = connection_list.begin(); it != connection_list.end(); it++) {
-			shared_connection c = *it;
+			shared_connection_tcp c = *it;
 			c->set_read_timeout(86400 * 365);
 
-			mysql_replication* m = _new_ mysql_replication(this->_thread, c, ini_option_object().get_mysql_replication_id(), ini_option_object().get_mysql_replication_db(), ini_option_object().get_mysql_replication_table());
+			mysql_replication* m = new mysql_replication(this->_thread, c, ini_option_object().get_mysql_replication_id(), ini_option_object().get_mysql_replication_db(), ini_option_object().get_mysql_replication_table());
 			if (m->handshake() < 0) {
-				_delete_(m);
+				delete m;
 				continue;
 			}
 
 			if (m->parse() < 0) {
-				_delete_(m);
+				delete m;
 				continue;
 			}
 
@@ -98,7 +98,7 @@ int handler_mysql_replication::run() {
 					int tmp_len = c->read(&tmp, -1, false, actual);
 					if (tmp_len > 0) {
 						c->push_back(tmp, tmp_len);
-						_delete_(tmp);
+						delete[] tmp;
 					}
 					c->set_read_timeout(86400 * 365);
 					if (c->is_available() == false) {
@@ -123,11 +123,11 @@ int handler_mysql_replication::run() {
 				}
 			}
 			this->_cluster->set_mysql_replication(false);
-			_delete_(m);
+			delete m;
 		}
 	}
 
-	_delete_(s);
+	delete s;
 
 	return 0;
 }

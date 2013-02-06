@@ -17,7 +17,7 @@ namespace flare {
  *	ctor for op_gets
  */
 op_gets::op_gets(shared_connection c, cluster* cl, storage* st):
-		op_get(c, "gets", cl, st) {
+		op_get(c, "gets", binary_header::opcode_get, cl, st) {
 	this->_append_version = true;
 }
 

@@ -19,7 +19,7 @@ namespace flare {
  *	ctor for op_keys
  */
 op_keys::op_keys(shared_connection c, cluster* cl, storage* st):
-		op_proxy_read(c, "keys", cl, st) {
+		op_proxy_read(c, "keys", binary_header::opcode_noop, cl, st) {
 	this->_is_multiple_response = true;
 }
 
@@ -40,7 +40,7 @@ op_keys::~op_keys() {
 /**
  *	parser server request parameters
  */
-int op_keys::_parse_server_parameter() {
+int op_keys::_parse_text_server_parameters() {
 	char* p;
 	if (this->_connection->readline(&p) < 0) {
 		return -1;
@@ -59,10 +59,10 @@ int op_keys::_parse_server_parameter() {
 		log_debug("storing key [%s]", e.key.c_str());
 		this->_entry_list.push_back(e);
 	}
-	_delete_(p);
+	delete[] p;
 
 	if (this->_entry_list.size() < 2) {
-		log_debug("not enough parameter [%d]", this->_entry_list.size());
+		log_debug("not enough parameters [%d]", this->_entry_list.size());
 		return -1;
 	}
 
@@ -111,7 +111,7 @@ int op_keys::_run_server() {
 			r_map[it->key] = storage::result_not_found;
 		} else {
 			if (this->_storage->is_capable(storage::capability_prefix_search) == false) {
-				return this->_send_result(result_server_error, "not capable on current storage type");
+				return this->_send_result(result_server_error, "not available on current storage type");
 			}
 
 			// storage i/o
@@ -171,7 +171,7 @@ int op_keys::_run_client(storage::entry& e, void* parameter) {
 
 int op_keys::_run_client(list<storage::entry>& e, void* parameter) {
 	if (e.size() == 0) {
-		log_warning("passed 0 entry...", 0);
+		log_warning("passed 0 entries...", 0);
 		return -1;
 	}
 
@@ -187,12 +187,12 @@ int op_keys::_run_client(list<storage::entry>& e, void* parameter) {
 	return this->_send_request(s.str().c_str());
 }
 
-int op_keys::_parse_client_parameter(storage::entry& e) {
+int op_keys::_parse_text_client_parameters(storage::entry& e) {
 	// support multiple entries only
 	return -1;
 }
 
-int op_keys::_parse_client_parameter(list<storage::entry>& e) {
+int op_keys::_parse_text_client_parameters(list<storage::entry>& e) {
 	e.clear();
 
 	for (;;) {
@@ -202,7 +202,7 @@ int op_keys::_parse_client_parameter(list<storage::entry>& e) {
 		}
 
 		if (strcmp(p, "END\n") == 0) {
-			_delete_(p);
+			delete[] p;
 			break;
 		}
 
@@ -210,7 +210,7 @@ int op_keys::_parse_client_parameter(list<storage::entry>& e) {
 		int n = util::next_word(p, q, sizeof(q));
 		if (strcmp(q, "KEY") != 0) {
 			log_debug("invalid token (q=%s)", q);
-			_delete_(p);
+			delete[] p;
 			return -1;
 		}
 
@@ -218,14 +218,14 @@ int op_keys::_parse_client_parameter(list<storage::entry>& e) {
 		n += util::next_word(p + n, q, sizeof(q));
 		if (q[0] == '\0') {
 			log_debug("no key strings found", 0);
-			_delete_(p);
+			delete[] p;
 			return -1;
 		}
 		e_tmp.key = q;
 
 		e.push_back(e_tmp);
 
-		_delete_(p);
+		delete[] p;
 	}
 
 	return 0;

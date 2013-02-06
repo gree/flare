@@ -8,6 +8,7 @@
  *	$Id$
  */
 #include "handler_reconstruction.h"
+#include "connection_tcp.h"
 #include "op_dump.h"
 
 namespace gree {
@@ -46,15 +47,15 @@ int handler_reconstruction::run() {
 	this->_thread->set_peer(this->_node_server_name, this->_node_server_port);
 	this->_thread->set_state("connect");
 
-	shared_connection c(new connection());
+	shared_connection c(new connection_tcp(this->_node_server_name, this->_node_server_port));
 	this->_connection = c;
-	if (c->open(this->_node_server_name, this->_node_server_port) < 0) {
+	if (c->open() < 0) {
 		log_err("failed to connect to node server (name=%s, port=%d) -> deactivating node", this->_node_server_name.c_str(), this->_node_server_port);
 		this->_cluster->deactivate_node();
 		return -1;
 	}
 
-	op_dump* p = _new_ op_dump(c, this->_cluster, this->_storage);
+	op_dump* p = new op_dump(c, this->_cluster, this->_storage);
 
 	p->set_thread(this->_thread);
 	this->_thread->set_state("execute");
@@ -64,12 +65,12 @@ int handler_reconstruction::run() {
 			   this->_node_server_name.c_str(), this->_node_server_port, this->_partition, this->_partition_size, this->_cluster->get_reconstruction_interval(), this->_cluster->get_reconstruction_bwlimit());
 
 	if (p->run_client(this->_cluster->get_reconstruction_interval(), this->_partition, this->_partition_size, this->_cluster->get_reconstruction_bwlimit()) < 0) {
-		_delete_(p);
+		delete p;
 		this->_cluster->deactivate_node();
 		return -1;
 	}
 
-	_delete_(p);
+	delete p;
 	log_notice("dump completed (master=%s:%d, partition=%d, partition_size=%d, interval=%d, bwlimit=%d)",
 			   this->_node_server_name.c_str(), this->_node_server_port, this->_partition, this->_partition_size, this->_cluster->get_reconstruction_interval(), this->_cluster->get_reconstruction_bwlimit());
 

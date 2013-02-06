@@ -32,7 +32,17 @@ op_parser_binary::~op_parser_binary() {
 
 // {{{ public methods
 op* op_parser_binary::parse_server() {
-	return NULL;
+	op* r = NULL;
+	try {
+		const binary_request_header header(this->_connection);
+		r = _determine_op(header);
+		if (r)
+			r->set_protocol(op::binary);
+		header.push_back(this->_connection);
+	} catch (...) {
+		r = NULL;
+	}
+	return r;
 }
 // }}}
 

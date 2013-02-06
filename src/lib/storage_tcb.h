@@ -60,6 +60,9 @@ public:
 
 protected:
 	virtual int _get_header(string key, entry& e);
+
+private:
+	bool _iter_first;
 };
 
 }	// namespace flare

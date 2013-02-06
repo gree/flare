@@ -9,8 +9,7 @@
 #define __HANDLER_REQUEST_H__
 
 #include "app.h"
-#include "op_parser_binary_node.h"
-#include "op_parser_text_node.h"
+#include "connection_tcp.h"
 
 namespace gree {
 namespace flare {
@@ -20,10 +19,10 @@ namespace flare {
  */
 class handler_request : public thread_handler {
 protected:
-	shared_connection			_connection;
+	shared_connection_tcp		_connection;
 
 public:
-	handler_request(shared_thread t, shared_connection c);
+	handler_request(shared_thread t, shared_connection_tcp c);
 	virtual ~handler_request();
 
 	virtual int run();

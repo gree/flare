@@ -48,9 +48,9 @@ int handler_monitor::run() {
 	this->_thread->set_peer(this->_node_server_name, this->_node_server_port);
 	this->_thread->set_state("connect");
 
-	shared_connection c(new connection());
+	shared_connection_tcp c(new connection_tcp(this->_node_server_name, this->_node_server_port));
 	this->_connection = c;
-	if (c->open(this->_node_server_name, this->_node_server_port) < 0) {
+	if (c->open() < 0) {
 		log_err("failed to connect to node server [name=%s, port=%d]", this->_node_server_name.c_str(), this->_node_server_port);
 		this->_down();
 	}
@@ -104,7 +104,7 @@ int handler_monitor::run() {
 int handler_monitor::_process_monitor() {
 	if (this->_connection->is_available() == false) {
 		log_info("connection for %s:%d is unavailable -> re-opening...", this->_node_server_name.c_str(), this->_node_server_port);
-		if (this->_connection->open(this->_node_server_name, this->_node_server_port) < 0) {
+		if (this->_connection->open() < 0) {
 			return -1;
 		}
 	}
@@ -116,22 +116,22 @@ int handler_monitor::_process_monitor() {
 	bool actual;
 	this->_connection->set_read_timeout(0);
 	if (this->_connection->read(&tmp, -1, false, actual) > 0) {
-		_delete_(tmp);
+		delete[] tmp;
 	}
 	this->_connection->set_read_timeout(this->_monitor_read_timeout);
 
-	op_ping* p = _new_ op_ping(this->_connection);
+	op_ping* p = new op_ping(this->_connection);
 	this->_thread->set_state("execute");
 	this->_thread->set_op(p->get_ident());
 
 	if (p->run_client() < 0) {
 		this->_connection->set_read_timeout(current_read_timeout);
-		_delete_(p);
+		delete p;
 		return -1;
 	}
 
 	this->_connection->set_read_timeout(current_read_timeout);
-	_delete_(p);
+	delete p;
 	return 0;
 }
 

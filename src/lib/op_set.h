@@ -25,14 +25,18 @@ protected:
 
 public:
 	op_set(shared_connection c, cluster* cl, storage* st);
-	op_set(shared_connection c, string ident, cluster* cl, storage* st);
 	virtual ~op_set();
 
 protected:
-	virtual int _parse_server_parameter();
+	op_set(shared_connection c, string ident, binary_header::opcode opcode, cluster* cl, storage* st);
+	virtual int _parse_text_server_parameters();
+	virtual int _parse_binary_request(const binary_request_header&, const char* body);
 	virtual int _run_server();
 	virtual int _run_client(storage::entry& e);
-	virtual int _parse_client_parameter(storage::entry& e);
+	virtual int _parse_text_client_parameters(storage::entry& e);
+	
+private:
+	static const uint8_t _binary_request_required_extras_length = 8;
 };
 
 }	// namespace flare

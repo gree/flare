@@ -8,7 +8,7 @@
 #ifndef	__OP_PREPEND_H__
 #define	__OP_PREPEND_H__
 
-#include "op_set.h"
+#include "op_append.h"
 
 using namespace std;
 using namespace boost;
@@ -19,14 +19,13 @@ namespace flare {
 /**
  *	opcode class (prepend)
  */
-class op_prepend : public op_set {
-protected:
-
+class op_prepend : public op_append {
 public:
 	op_prepend(shared_connection c, cluster* cl, storage* st);
 	virtual ~op_prepend();
 
 protected:
+	op_prepend(shared_connection c, string ident, binary_header::opcode opcode, cluster* cl, storage* st);
 };
 
 }	// namespace flare

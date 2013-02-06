@@ -32,10 +32,10 @@ public:
 	virtual int run_client(int verbositfy, storage::option option);
 
 protected:
-	virtual int _parse_server_parameter();
+	virtual int _parse_text_server_parameters();
 	virtual int _run_server();
 	virtual int _run_client(int verbosity, storage::option option);
-	virtual int _parse_client_parameter(storage::option option);
+	virtual int _parse_text_client_parameters(storage::option option);
 };
 
 }	// namespace flare

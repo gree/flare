@@ -8,6 +8,7 @@
  *	$Id$
  */
 #include "queue_proxy_read.h"
+#include "connection_tcp.h"
 #include "op_proxy_read.h"
 #include "op_get.h"
 #include "op_gets.h"
@@ -44,7 +45,11 @@ queue_proxy_read::~queue_proxy_read() {
 
 // {{{ public methods
 int queue_proxy_read::run(shared_connection c) {
-	log_debug("proxy request (read) (host=%s, port=%d, op=%s, key=%s, version=%u)", c->get_host().c_str(), c->get_port(), this->_op_ident.c_str(), this->_entry.key.c_str(), this->_entry.version);
+#ifdef DEBUG
+	if (const connection_tcp* ctp = dynamic_cast<const connection_tcp*>(c.get())) {
+		log_debug("proxy request (read) (host=%s, port=%d, op=%s, key=%s, version=%u)", ctp->get_host().c_str(), ctp->get_port(), this->_op_ident.c_str(), this->_entry.key.c_str(), this->_entry.version);
+	}
+#endif
 
 	op_proxy_read* p = this->_get_op(this->_op_ident, c);
 	if (p == NULL) {
@@ -67,20 +72,24 @@ int queue_proxy_read::run(shared_connection c) {
 			}
 		}
 		if (c->is_available() == false) {
-			log_debug("reconnecting (host=%s, port=%d)", c->get_host().c_str(), c->get_port());
+#ifdef DEBUG
+			if (const connection_tcp* ctp = dynamic_cast<const connection_tcp*>(c.get())) {
+				log_debug("reconnecting (host=%s, port=%d)", ctp->get_host().c_str(), ctp->get_port());
+			}
+#endif
 			c->open();
 		}
 		retry--;
 	}
 	if (retry <= 0) {
-		_delete_(p);
+		delete p;
 		return -1;
 	}
 
 	this->_success = true;
 	this->_result = p->get_result();
 	this->_result_message = p->get_result_message();
-	_delete_(p);
+	delete p;
 
 	return 0;
 }
@@ -89,11 +98,11 @@ int queue_proxy_read::run(shared_connection c) {
 // {{{ protected methods
 op_proxy_read* queue_proxy_read::_get_op(string op_ident, shared_connection c) {
 	if (op_ident == "get") {
-		return _new_ op_get(c, this->_cluster, this->_storage);
+		return new op_get(c, this->_cluster, this->_storage);
 	} else if (op_ident == "gets") {
-		return _new_ op_gets(c, this->_cluster, this->_storage);
+		return new op_gets(c, this->_cluster, this->_storage);
 	} else if (op_ident == "keys") {
-		return _new_ op_keys(c, this->_cluster, this->_storage);
+		return new op_keys(c, this->_cluster, this->_storage);
 	}
 	log_warning("unknown op (ident=%s)", op_ident.c_str());
 

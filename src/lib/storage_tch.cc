@@ -117,9 +117,10 @@ int storage_tch::set(entry& e, result& r, int b) {
 			pthread_rwlock_wrlock(&this->_mutex_slot[mutex_index]);
 		}
 
+		// get current entry
 		entry e_current;
 		int e_current_exists = 0;
-		if ((b & behavior_append) || (b & behavior_prepend)) {
+		if (b & (behavior_append | behavior_prepend | behavior_touch)) {
 			result r;
 			e_current.key = e.key;
 			int n = this->get(e_current, r, behavior_skip_lock);
@@ -133,6 +134,7 @@ int storage_tch::set(entry& e, result& r, int b) {
 			e_current_exists = this->_get_header(e.key, e_current);
 		}
 
+		// determine state
 		enum st {
 			st_alive,
 			st_not_expired,
@@ -168,14 +170,20 @@ int storage_tch::set(entry& e, result& r, int b) {
 			throw 0;
 		}
 
-		// check for "cas"
-		if ((b & behavior_cas) != 0 && e_current_st == st_gone) {
-			log_debug("behavior=cas and data not found -> skip setting", 0);
+		// check for "touch" and "gat"
+		if ((b & behavior_touch) != 0 && e_current_st != st_alive) {
+			log_debug("behavior=touch and data not found (or delete queue not expired) -> skip setting", 0);
 			r = result_not_found;
 			throw 0;
 		}
 
+		// version handling
 		if (b & behavior_cas) {
+			if (e_current_st == st_gone) {
+				log_debug("behavior=cas and data not found -> skip setting", 0);
+				r = result_not_found;
+				throw 0;
+			}
 			if ((e_current_st != st_not_expired && e.version != e_current.version) || (e_current_st == st_not_expired && e.version != (e_current.version-1))) {
 				log_info("behavior=cas and specified version is not equal to current version -> skip setting (current=%llu, specified=%llu)", e_current.version, e.version);
 				r = result_exists;
@@ -188,20 +196,24 @@ int storage_tch::set(entry& e, result& r, int b) {
 				r = result_not_stored;
 				throw 0;
 			}
+		} else if (b & behavior_touch) {
+			// touch does not update the version
+			e.version = e_current.version;
 		} else if (e.version == 0) {
 			e.version = e_current.version+1;
 			log_debug("updating version (version=%llu)", e.version);
 		}
 
-		if ((b & behavior_append) || (b & behavior_prepend)) {
+		// prepare data for storage
+		if (b & (behavior_append | behavior_prepend)) {
 			if (e_current_st != st_alive) {
 				log_warning("behavior=append|prepend but no data exists -> skip setting", 0);
 				throw -1;
 			}
-
-			// memcached ignores expire in case of append|prepend
+			// memcached ignores expire and flag in case of append|prepend
 			e.expire = e_current.expire;
-			p = _new_ uint8_t[entry::header_size + e.size + e_current.size];
+			e.flag = e_current.flag;
+			p = new uint8_t[entry::header_size + e.size + e_current.size];
 			uint64_t e_size = e.size;
 			e.size += e_current.size;
 			this->_serialize_header(e, p);
@@ -217,12 +229,21 @@ int storage_tch::set(entry& e, result& r, int b) {
 			shared_byte data(new uint8_t[e.size]);
 			memcpy(data.get(), p+entry::header_size, e.size);
 			e.data = data;
+		} else if (b & behavior_touch) {
+			// copy everything except the expiration
+			e.flag = e_current.flag;
+			e.size = e_current.size;
+			e.data = e_current.data;
+			p = new uint8_t[entry::header_size + e.size];
+			this->_serialize_header(e, p);
+			memcpy(p+entry::header_size, e_current.data.get(), e.size);
 		} else {
-			p = _new_ uint8_t[entry::header_size + e.size];
+			p = new uint8_t[entry::header_size + e.size];
 			this->_serialize_header(e, p);
 			memcpy(p+entry::header_size, e.data.get(), e.size);
 		}
 
+		// store in database
 		if (e.option & option_noreply) {
 			if (tchdbputasync(this->_db, e.key.c_str(), e.key.size(), p, entry::header_size + e.size) == true) {
 				log_debug("stored data [async] (key=%s, size=%llu)", e.key.c_str(), entry::header_size + e.size);
@@ -242,9 +263,18 @@ int storage_tch::set(entry& e, result& r, int b) {
 				throw -1;
 			}
 		}
+
+		// "touch" commands expect result_touched
+		if (b & behavior_touch
+				&& r == result_stored) {
+			r = result_touched;
+			e.data = e_current.data;
+			e.size = e_current.size;
+			e.version = e_current.version;
+		}
 	} catch (int error) {
 		if (p) {
-			_delete_(p);
+			delete[] p;
 		}
 		if ((b & behavior_skip_lock) == 0) {
 			pthread_rwlock_unlock(&this->_mutex_slot[mutex_index]);
@@ -252,7 +282,7 @@ int storage_tch::set(entry& e, result& r, int b) {
 		return error;
 	}
 	if (p) {
-		_delete_(p);
+		delete[] p;
 	}
 	if ((b & behavior_skip_lock) == 0) {
 		pthread_rwlock_unlock(&this->_mutex_slot[mutex_index]);
@@ -273,7 +303,7 @@ int storage_tch::incr(entry& e, uint64_t value, result& r, bool increment, int b
 	int tmp_len = 0;
 	uint8_t* p = NULL;
 	entry e_current;
-	bool remove_request = false;
+	bool expired = false;
 	try {
 		if ((b & behavior_skip_lock) == 0) {
 			pthread_rwlock_wrlock(&this->_mutex_slot[mutex_index]);
@@ -287,7 +317,7 @@ int storage_tch::incr(entry& e, uint64_t value, result& r, bool increment, int b
 		}
 		int offset = this->_unserialize_header(tmp_data, tmp_len, e_current);
 		if (offset < 0) {
-			log_err("failed to unserialize header (data is corrupted) (tmp_len=%d)", tmp_len);
+			log_err("failed to deserialize header (data is corrupted) (tmp_len=%d)", tmp_len);
 			throw -1;
 		}
 		e_current.key = e.key;
@@ -299,7 +329,7 @@ int storage_tch::incr(entry& e, uint64_t value, result& r, bool increment, int b
 			if (e_current.expire > 0 && e_current.expire <= stats_object->get_timestamp()) {
 				log_info("data expired [expire=%d] -> remove requesting", e_current.expire);
 				r = result_not_found;
-				remove_request = true;
+				expired = true;
 				throw 0;
 			}
 		}
@@ -343,7 +373,7 @@ int storage_tch::incr(entry& e, uint64_t value, result& r, bool increment, int b
 		e.data = data;
 
 		// store
-		p = _new_ uint8_t[entry::header_size + e.size];
+		p = new uint8_t[entry::header_size + e.size];
 		this->_serialize_header(e, p);
 		memcpy(p+entry::header_size, e.data.get(), e.size);
 
@@ -371,20 +401,20 @@ int storage_tch::incr(entry& e, uint64_t value, result& r, bool increment, int b
 			free(tmp_data);
 		}
 		if (p) {
-			_delete_(p);
+			delete[] p;
 		}
 		if ((b & behavior_skip_lock) == 0) {
 			pthread_rwlock_unlock(&this->_mutex_slot[mutex_index]);
 		}
 
-		if (remove_request) {
+		if (expired) {
 			result r_remove;
-			this->remove(e_current, r_remove, behavior_version_equal);		// do not care about result here
+			this->remove(e_current, r_remove, (b & behavior_skip_lock) | behavior_version_equal);		// do not care about result here
 		}
 		return error;
 	}
 	if (p) {
-		_delete_(p);
+		delete[] p;
 	}
 	if ((b & behavior_skip_lock) == 0) {
 		pthread_rwlock_unlock(&this->_mutex_slot[mutex_index]);
@@ -398,7 +428,7 @@ int storage_tch::get(entry& e, result& r, int b) {
 	int mutex_index = 0;
 	uint8_t* tmp_data = NULL;
 	int tmp_len = 0;
-	bool remove_request = false;
+	bool expired = false;
 
 	if ((b & behavior_skip_lock) == 0) {
 		mutex_index = e.get_key_hash_value(hash_algorithm_adler32) % this->_mutex_slot_size;
@@ -418,7 +448,7 @@ int storage_tch::get(entry& e, result& r, int b) {
 
 		int offset = this->_unserialize_header(tmp_data, tmp_len, e);
 		if (offset < 0) {
-			log_err("failed to unserialize header (data is corrupted) (tmp_len=%d)", tmp_len);
+			log_err("failed to deserialize header (data is corrupted) (tmp_len=%d)", tmp_len);
 			throw -1;
 		}
 		if (static_cast<uint64_t>(tmp_len - offset) != e.size) {
@@ -430,7 +460,7 @@ int storage_tch::get(entry& e, result& r, int b) {
 			if (e.expire > 0 && e.expire <= stats_object->get_timestamp()) {
 				log_info("data expired [expire=%d] -> remove requesting", e.expire);
 				r = result_not_found;
-				remove_request = true;
+				expired = true;
 				throw 0;
 			}
 		}
@@ -447,9 +477,9 @@ int storage_tch::get(entry& e, result& r, int b) {
 			pthread_rwlock_unlock(&this->_mutex_slot[mutex_index]);
 		}
 
-		if (remove_request) {
+		if (expired) {
 			result r_remove;
-			this->remove(e, r_remove, behavior_version_equal);		// do not care about result here
+			this->remove(e, r_remove, (b & behavior_skip_lock) | behavior_version_equal);		// do not care about result here
 		}
 
 		return error;
@@ -553,24 +583,41 @@ int storage_tch::truncate(int b) {
 }
 
 int storage_tch::iter_begin() {
-	if (this->_iter_lock > 0) {
-		return -1;
+	pthread_mutex_lock(&this->_mutex_iter_lock);
+	{
+		if (this->_iter_lock) {
+			pthread_mutex_unlock(&this->_mutex_iter_lock);
+			return -1;
+		} else if (tchdbiterinit(this->_db) == false) {
+			int ecode = tchdbecode(this->_db);
+			log_err("tchdbiterinit() failed: %s (%d)", tchdberrmsg(ecode), ecode);
+			pthread_mutex_unlock(&this->_mutex_iter_lock);
+			return -1;
+		}
+		this->_iter_lock = true;
 	}
-
-	if (tchdbiterinit(this->_db) == false) {
-		int ecode = tchdbecode(this->_db);
-		log_err("tchdbiterinit() failed: %s (%d)", tchdberrmsg(ecode), ecode);
-		return -1;
-	}
-
+	pthread_mutex_unlock(&this->_mutex_iter_lock);
 	return 0;
 }
 
 storage::iteration storage_tch::iter_next(string& key) {
+	pthread_mutex_lock(&this->_mutex_iter_lock);
+	if (!this->_iter_lock) {
+		pthread_mutex_unlock(&this->_mutex_iter_lock);
+		log_warning("cursor is not initialized", 0);
+		return iteration_error;
+	}
+	pthread_mutex_unlock(&this->_mutex_iter_lock);
+
 	int len = 0;
+	char* p = NULL;
+
 	this->_mutex_slot_rdlock_all();
-	char* p = static_cast<char*>(tchdbiternext(this->_db, &len));
+	{
+		p = static_cast<char*>(tchdbiternext(this->_db, &len));
+	}
 	this->_mutex_slot_unlock_all();
+
 	if (p == NULL) {
 		int ecode = tchdbecode(this->_db);
 		if (ecode == TCESUCCESS || ecode == TCENOREC) {
@@ -588,8 +635,16 @@ storage::iteration storage_tch::iter_next(string& key) {
 }
 
 int storage_tch::iter_end() {
-	this->_iter_lock = 0;
-
+	pthread_mutex_lock(&this->_mutex_iter_lock);
+	{
+		if (!this->_iter_lock) {
+			pthread_mutex_unlock(&this->_mutex_iter_lock);
+			log_warning("cursor is not initialized", 0);
+			return -1;
+		}
+		this->_iter_lock = false;
+	}
+	pthread_mutex_unlock(&this->_mutex_iter_lock);
 	return 0;
 }
 
@@ -620,7 +675,7 @@ int storage_tch::_get_header(string key, entry& e) {
 
 	int offset = this->_unserialize_header(tmp_data, tmp_len, e);
 	if (offset < 0) {
-		log_err("failed to unserialize header (data is corrupted) (tmp_len=%d)", tmp_len);
+		log_err("failed to deserialize header (data is corrupted) (tmp_len=%d)", tmp_len);
 		return -1;
 	}
 

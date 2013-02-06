@@ -43,7 +43,7 @@ int op_dump_key::run_client(int partition, int parition_size) {
 		return -1;
 	}
 
-	return this->_parse_client_parameter();
+	return this->_parse_text_client_parameters();
 }
 // }}}
 
@@ -51,7 +51,7 @@ int op_dump_key::run_client(int partition, int parition_size) {
 /**
  *	parser server request parameters
  */
-int op_dump_key::_parse_server_parameter() {
+int op_dump_key::_parse_text_server_parameters() {
 	char* p;
 	if (this->_connection->readline(&p) < 0) {
 		return -1;
@@ -100,10 +100,10 @@ int op_dump_key::_parse_server_parameter() {
 			}
 		}
 	} catch (int e) {
-		_delete_(p);
+		delete[] p;
 		return e;
 	}
-	_delete_(p);
+	delete[] p;
 
 	return 0;
 }
@@ -149,7 +149,7 @@ int op_dump_key::_run_client(int partition, int partition_size) {
 	return this->_send_request(request);
 }
 
-int op_dump_key::_parse_client_parameter() {
+int op_dump_key::_parse_text_client_parameters() {
 	for (;;) {
 		if (this->_thread_available && this->_thread->is_shutdown_request()) {
 			log_info("thread shutdown request -> breaking loop", 0);
@@ -163,12 +163,12 @@ int op_dump_key::_parse_client_parameter() {
 
 		if (this->_thread_available && this->_thread->is_shutdown_request()) {
 			log_info("thread shutdown request -> breaking loop", 0);
-			_delete_(p);
+			delete[] p;
 			break;
 		}
 
 		if (strcmp(p, "END\n") == 0) {
-			_delete_(p);
+			delete[] p;
 			break;
 		}
 
@@ -176,18 +176,18 @@ int op_dump_key::_parse_client_parameter() {
 		int n = util::next_word(p, q, sizeof(q));
 		if (strcmp(q, "KEY") != 0) {
 			log_debug("invalid token (q=%s)", q);
-			_delete_(p);
+			delete[] p;
 			return -1;
 		}
 
 		n += util::next_word(p+n, q, sizeof(q));
 		if (q[0] == '\0') {
 			log_debug("no key-entry found", 0);
-			_delete_(p);
+			delete[] p;
 			return -1;
 		}
 
-		_delete_(p);
+		delete[] p;
 		// TODO: handle dumped key
 	}
 

@@ -18,6 +18,7 @@ namespace flare {
  */
 class op_parser_binary_node : public op_parser_binary {
 protected:
+	virtual op* _determine_op(const binary_request_header&);
 
 public:
 	op_parser_binary_node(shared_connection c);

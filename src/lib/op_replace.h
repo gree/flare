@@ -20,13 +20,12 @@ namespace flare {
  *	opcode class (replace)
  */
 class op_replace : public op_set {
-protected:
-
 public:
 	op_replace(shared_connection c, cluster* cl, storage* st);
 	virtual ~op_replace();
 
 protected:
+	op_replace(shared_connection c, string ident, binary_header::opcode opcode, cluster* cl, storage* st);
 };
 
 }	// namespace flare

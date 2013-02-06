@@ -43,7 +43,7 @@ int op_node_remove::run_client(string node_server_name, int node_server_port) {
 		return -1;
 	}
 
-	return this->_parse_client_parameter();
+	return this->_parse_text_client_parameters();
 }
 // }}}
 
@@ -54,7 +54,7 @@ int op_node_remove::run_client(string node_server_name, int node_server_port) {
  *	syntax:
  *	NODE ROLE [node_server_name] [node_server_port]
  */
-int op_node_remove::_parse_server_parameter() {
+int op_node_remove::_parse_text_server_parameters() {
 	char* p;
 	if (this->_connection->readline(&p) < 0) {
 		return -1;
@@ -92,11 +92,11 @@ int op_node_remove::_parse_server_parameter() {
 			throw -1;
 		}
 	} catch (int e) {
-		_delete_(p);
+		delete[] p;
 		return e;
 	}
 
-	_delete_(p);
+	delete[] p;
 
 	return 0;
 }
@@ -111,12 +111,12 @@ int op_node_remove::_run_server() {
 }
 
 int op_node_remove::_run_client(string node_server_name, int node_server_port) {
-	log_err("not yet implemented:(", 0);
+	log_err("not yet implemented :(", 0);
 
 	return 0;
 }
 
-int op_node_remove::_parse_client_parameter() {
+int op_node_remove::_parse_text_client_parameters() {
 	return 0;
 }
 // }}}

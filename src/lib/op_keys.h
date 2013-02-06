@@ -28,12 +28,12 @@ public:
 	virtual ~op_keys();
 
 protected:
-	int _parse_server_parameter();
+	int _parse_text_server_parameters();
 	int _run_server();
 	int _run_client(storage::entry&e, void* parameter);
 	int _run_client(list<storage::entry>& e, void* parameter);
-	int _parse_client_parameter(storage::entry& e);
-	int _parse_client_parameter(list<storage::entry>& e);
+	int _parse_text_client_parameters(storage::entry& e);
+	int _parse_text_client_parameters(list<storage::entry>& e);
 };
 
 }	// namespace flare

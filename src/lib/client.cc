@@ -9,6 +9,8 @@
  */
 #include "client.h"
 
+#include "connection_tcp.h"
+
 namespace gree {
 namespace flare {
 
@@ -19,7 +21,7 @@ namespace flare {
 client::client(string node_server_name, int node_server_port):
 		_node_server_name(node_server_name),
 		_node_server_port(node_server_port) {
-	this->_connection = shared_connection(new connection());
+	this->_connection = shared_connection(new connection_tcp(_node_server_name, _node_server_port));
 }
 
 /**
@@ -42,7 +44,7 @@ int client::connect() {
 		return 0;
 	}
 
-	if (this->_connection->open(this->_node_server_name, this->_node_server_port) < 0) {
+	if (this->_connection->open() < 0) {
 		return -1;
 	}
 
@@ -54,7 +56,7 @@ int client::connect() {
  */
 int client::disconnect() {
 	if (this->_connection->is_available()) {
-		log_info("connection sate is already unavailable -> skip disconnecting", 0);
+		log_info("connection state is already unavailable -> skip disconnecting", 0);
 		return 0;
 	}
 
@@ -71,14 +73,14 @@ int client::disconnect() {
 op::result client::get(string key, storage::entry& e) {
 	e.key = key;
 	
-	op_get* p = _new_ op_get(this->_connection, NULL, NULL);
+	op_get* p = new op_get(this->_connection, NULL, NULL);
 	if (p->run_client(e, 0) < 0) {
 		log_err("get operation failed", 0);
-		_delete_(p);
+		delete p;
 		return op::result_error;
 	}
 
-	_delete_(p);
+	delete p;
 
 	return e.is_data_available() ? op::result_ok : op::result_not_found;
 }
@@ -89,14 +91,14 @@ op::result client::get(string key, storage::entry& e) {
 op::result client::gets(string key, storage::entry& e) {
 	e.key = key;
 	
-	op_gets* p = _new_ op_gets(this->_connection, NULL, NULL);
+	op_gets* p = new op_gets(this->_connection, NULL, NULL);
 	if (p->run_client(e, 0) < 0) {
 		log_err("gets operation failed", 0);
-		_delete_(p);
+		delete p;
 		return op::result_error;
 	}
 
-	_delete_(p);
+	delete p;
 
 	return e.is_data_available() ? op::result_ok : op::result_not_found;
 }
@@ -112,7 +114,7 @@ op::result client::add(string key, const char* data, uint64_t data_size, int fla
 		}
 	}
 
-	op_add* p = _new_ op_add(this->_connection, NULL, NULL);
+	op_add* p = new op_add(this->_connection, NULL, NULL);
 	storage::entry e;
 	e.key = key;
 	e.flag = flag;
@@ -122,14 +124,14 @@ op::result client::add(string key, const char* data, uint64_t data_size, int fla
 
 	if (p->run_client(e) < 0) {
 		log_err("add operation failed", 0);
-		_delete_(p);
+		delete p;
 		return op::result_error;
 	}
 
 	op::result r = p->get_result();
 	log_debug("add operation successfully done (code=%s, message=%s)", op::result_cast(r).c_str(), p->get_result_message().c_str());
 
-	_delete_(p);
+	delete p;
 
 	return r;
 }
@@ -155,7 +157,7 @@ op::result client::cas(string key, const char* data, uint64_t data_size, int fla
 		}
 	}
 
-	op_cas* p = _new_ op_cas(this->_connection, NULL, NULL);
+	op_cas* p = new op_cas(this->_connection, NULL, NULL);
 	storage::entry e;
 	e.key = key;
 	e.flag = flag;
@@ -166,14 +168,14 @@ op::result client::cas(string key, const char* data, uint64_t data_size, int fla
 
 	if (p->run_client(e) < 0) {
 		log_err("cas operation failed", 0);
-		_delete_(p);
+		delete p;
 		return op::result_error;
 	}
 
 	op::result r = p->get_result();
 	log_debug("cas operation successfully done (code=%s, message=%s)", op::result_cast(r).c_str(), p->get_result_message().c_str());
 
-	_delete_(p);
+	delete p;
 
 	return r;
 }

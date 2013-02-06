@@ -36,8 +36,8 @@ op_show_index::~op_show_index() {
 // }}}
 
 // {{{ protected methods
-int op_show_index::_parse_server_parameter() {
-	int r = op_show::_parse_server_parameter();
+int op_show_index::_parse_text_server_parameters() {
+	int r = op_show::_parse_text_server_parameters();
 
 	return r;
 }

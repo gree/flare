@@ -8,6 +8,7 @@
  *	$Id$
  */
 #include "cluster.h"
+#include "connection_tcp.h"
 #include "handler_monitor.h"
 #include "handler_proxy.h"
 #include "handler_reconstruction.h"
@@ -72,7 +73,7 @@ cluster::cluster(thread_pool* tp, string data_dir, string server_name, int serve
  */
 cluster::~cluster() {
 	if (this->_key_resolver != NULL) {
-		_delete_(this->_key_resolver);
+		delete this->_key_resolver;
 	}
 }
 // }}}
@@ -174,7 +175,7 @@ int cluster::startup_index(key_resolver::type key_resolver_type, int key_resolve
 
 	// key resolver
 	if (key_resolver_type == key_resolver::type_modular) {
-		this->_key_resolver = _new_ key_resolver_modular(this->_partition_size, key_resolver_modular_hint, key_resolver_modular_virtual);
+		this->_key_resolver = new key_resolver_modular(this->_partition_size, key_resolver_modular_hint, key_resolver_modular_virtual);
 	} else {
 		log_err("unknown key resolver type [%s]", key_resolver::type_cast(key_resolver_type).c_str());
 		return -1;
@@ -186,7 +187,7 @@ int cluster::startup_index(key_resolver::type key_resolver_type, int key_resolve
 	// monitoring threads
 	for (node_map::iterator it = this->_node_map.begin(); it != this->_node_map.end(); it++) {
 		shared_thread t = this->_thread_pool->get(it->second.node_thread_type);
-		handler_monitor* h = _new_ handler_monitor(t, this, it->second.node_server_name, it->second.node_server_port);
+		handler_monitor* h = new handler_monitor(t, this, it->second.node_server_name, it->second.node_server_port);
 		h->set_monitor_threshold(this->_monitor_threshold);
 		h->set_monitor_interval(this->_monitor_interval);
 		h->set_monitor_read_timeout(this->_monitor_read_timeout);
@@ -213,20 +214,20 @@ int cluster::startup_node(string index_server_name, int index_server_port, uint3
 
 	log_notice("setting up cluster node... (type=%d, index_server_name=%s, index_server_port=%d)", this->_type, this->_index_server_name.c_str(), this->_index_server_port);
 
-	shared_connection c(new connection());
-	if (c->open(this->_index_server_name, this->_index_server_port) < 0) {
+	shared_connection c(new connection_tcp(this->_index_server_name, this->_index_server_port));
+	if (c->open() < 0) {
 		log_err("failed to connect to index server", 0);
 		return -1;
 	}
 
-	op_node_add* p_na = _new_ op_node_add(c, this);
+	op_node_add* p_na = new op_node_add(c, this);
 	vector<node> v;
 	if (p_na->run_client(v) < 0) {
 		log_err("failed to add node to index server", 0);
-		_delete_(p_na);
+		delete p_na;
 		return -1;
 	}
-	_delete_(p_na);
+	delete p_na;
 
 	// get meta data from index server
 	key_resolver::type key_resolver_type;
@@ -234,13 +235,13 @@ int cluster::startup_node(string index_server_name, int index_server_port, uint3
 	storage::hash_algorithm key_hash_algorithm = storage::hash_algorithm_simple;
 	int key_resolver_modular_hint = 0;
 	int key_resolver_modular_virtual = cluster::default_key_resolver_modular_virtual;
-	op_meta* p_m = _new_ op_meta(c, this);
+	op_meta* p_m = new op_meta(c, this);
 	if (p_m->run_client(partition_size, key_hash_algorithm, key_resolver_type, key_resolver_modular_hint, key_resolver_modular_virtual) < 0) {
 		log_err("failed to get meta data from index server", 0);
-		_delete_(p_m);
+		delete p_m;
 		return -1;
 	}
-	_delete_(p_m);
+	delete p_m;
 
 	log_notice("meta data from index server:", 0);
 	log_notice("  partition_size:                 %d", partition_size);
@@ -253,7 +254,7 @@ int cluster::startup_node(string index_server_name, int index_server_port, uint3
 
 	// startup key resolver
 	if (key_resolver_type == key_resolver::type_modular) {
-		this->_key_resolver = _new_ key_resolver_modular(partition_size, key_resolver_modular_hint, key_resolver_modular_virtual);
+		this->_key_resolver = new key_resolver_modular(partition_size, key_resolver_modular_hint, key_resolver_modular_virtual);
 	} else {
 		log_err("unknown key resolver type [%s]", key_resolver::type_cast(key_resolver_type).c_str());
 		return -1;
@@ -361,7 +362,7 @@ int cluster::add_node(string node_server_name, int node_server_port) {
 			this->_node_map[node_key] = n;
 			log_debug("node is [%s] added to node map (state=%d, thread_type=%d)", node_key.c_str(), n.node_state, n.node_thread_type, replace);
 		} else {
-			log_debug("node is already in node map (perhaps node is restarting) (state=%d, thread_type=%d", this->_node_map[node_key].node_state, this->_node_map[node_key].node_thread_type);
+			log_debug("node is already in node map (perhaps node is restarting) (state=%d, thread_type=%d)", this->_node_map[node_key].node_state, this->_node_map[node_key].node_thread_type);
 		}
 
 	} catch (int e) {
@@ -375,7 +376,7 @@ int cluster::add_node(string node_server_name, int node_server_port) {
 	// create monitoring thread
 	if (replace == false) {
 		shared_thread t = this->_thread_pool->get(thread_type);
-		handler_monitor* h = _new_ handler_monitor(t, this, node_server_name, node_server_port);
+		handler_monitor* h = new handler_monitor(t, this, node_server_name, node_server_port);
 		h->set_monitor_threshold(this->_monitor_threshold);
 		h->set_monitor_interval(this->_monitor_interval);
 		h->set_monitor_read_timeout(this->_monitor_read_timeout);
@@ -445,7 +446,7 @@ int cluster::down_node(string node_server_name, int node_server_port, bool shutd
 					}
 
 					if (failover_node_key.empty()) {
-						log_err("no active slave:( -> all requests for this partition will fail!", 0);
+						log_err("no active slave :( -> all requests for this partition will fail!", 0);
 						preserve = true;		// leave role as master to keep partition count (*important*)
 					} else {
 						// shift target slave role to master
@@ -597,7 +598,7 @@ int cluster::up_node(string node_server_name, int node_server_port) {
 					}
 				}
 			} else {
-				log_notice("node role is set to proxy for safe...", 0);
+				log_notice("node role is set to proxy for safety...", 0);
 				n.node_role = role_proxy;
 				n.node_partition = -1;
 			}
@@ -1022,20 +1023,20 @@ int cluster::set_monitor_read_timeout(int monitor_read_timeout) {
  *	[node] activate node (prepare -> ready)
  */
 int cluster::activate_node(bool skip_ready_state) {
-	shared_connection c(new connection());
-	if (c->open(this->_index_server_name, this->_index_server_port) < 0) {
+	shared_connection c(new connection_tcp(this->_index_server_name, this->_index_server_port));
+	if (c->open() < 0) {
 		log_err("failed to connect to index server", 0);
 		return -1;
 	}
 
-	op_node_state* p = _new_ op_node_state(c, this);
+	op_node_state* p = new op_node_state(c, this);
 	state new_state = skip_ready_state ? state_active : state_ready;
 	if (p->run_client(this->_server_name, this->_server_port, new_state) < 0 || p->get_result() != op::result_ok) {
 		log_err("failed to activate node", 0);
-		_delete_(p);
+		delete p;
 		return -1;
 	}
-	_delete_(p);
+	delete p;
 
 	return 0;
 }
@@ -1044,19 +1045,19 @@ int cluster::activate_node(bool skip_ready_state) {
  *	[node] deactivate node (* -> proxy)
  */
 int cluster::deactivate_node() {
-	shared_connection c(new connection());
-	if (c->open(this->_index_server_name, this->_index_server_port) < 0) {
+	shared_connection c(new connection_tcp(this->_index_server_name, this->_index_server_port));
+	if (c->open() < 0) {
 		log_err("failed to connect to index server", 0);
 		return -1;
 	}
 
-	op_node_role* p = _new_ op_node_role(c, this);
+	op_node_role* p = new op_node_role(c, this);
 	if (p->run_client(this->_server_name, this->_server_port, role_proxy, 0, -1) < 0 || p->get_result() != op::result_ok) {
 		log_err("failed to deactivate node", 0);
-		_delete_(p);
+		delete p;
 		return -1;
 	}
-	_delete_(p);
+	delete p;
 
 	return 0;
 }
@@ -1065,19 +1066,19 @@ int cluster::deactivate_node() {
  *  [node] send shutdown message upon receiving a SIGTERM.
  */
 int cluster::shutdown_node() {
-	shared_connection c(new connection());
-	if (c->open(this->_index_server_name, this->_index_server_port) < 0) {
+	shared_connection c(new connection_tcp(this->_index_server_name, this->_index_server_port));
+	if (c->open() < 0) {
 		log_err("failed to connect to index server", 0);
 		return -1;
 	}
 
-	op_shutdown* p = _new_ op_shutdown(c, this);
+	op_shutdown* p = new op_shutdown(c, this);
 	if (p->run_client(this->_server_name, this->_server_port) < 0 || p->get_result() != op::result_ok) {
 		log_err("failed to send shutdown message", 0);
-		_delete_(p);
+		delete p;
 		return -1;
 	}
-	_delete_(p);
+	delete p;
 
 	return 0;
 }
@@ -1107,7 +1108,7 @@ cluster::proxy_request cluster::pre_proxy_read(op_proxy_read* op, storage::entry
 
 	// select one (rand() will do)
 	if (p.balance.size() == 0) {
-		log_err("no node is available for this partition (all balance is set to 0)", 0);
+		log_err("no node is available for this partition (all balances are set to 0)", 0);
 		return proxy_request_error_partition;
 	}
 
@@ -1302,7 +1303,7 @@ int cluster::_shift_node_role(string node_key, role old_role, int old_partition,
 			string node_server_name;
 			int node_server_port = 0;
 			this->from_node_key(it->first, node_server_name, node_server_port);
-			handler_reconstruction* h = _new_ handler_reconstruction(t, this, this->_storage, node_server_name, node_server_port, new_partition, partition_size, new_role);
+			handler_reconstruction* h = new handler_reconstruction(t, this, this->_storage, node_server_name, node_server_port, new_partition, partition_size, new_role);
 			t->trigger(h);
 		}
 		pthread_mutex_lock(&this->_mutex_master_reconstruction);
@@ -1328,7 +1329,7 @@ int cluster::_shift_node_role(string node_key, role old_role, int old_partition,
 		string node_server_name;
 		int node_server_port = 0;
 		this->from_node_key(master_node_key, node_server_name, node_server_port);
-		handler_reconstruction* h = _new_ handler_reconstruction(t, this, this->_storage, node_server_name, node_server_port, new_partition, partition_size, new_role);
+		handler_reconstruction* h = new handler_reconstruction(t, this, this->_storage, node_server_name, node_server_port, new_partition, partition_size, new_role);
 		t->trigger(h);
 	}
 
@@ -1517,7 +1518,7 @@ int cluster::_load() {
 		pthread_mutex_unlock(&this->_mutex_serialization);
 		struct stat st;
 		if (::stat(path.c_str(), &st) < 0 && errno == ENOENT) {
-			log_info("no such entry -> skip unserialization [%s]", path.c_str());
+			log_info("no such entry -> skip deserialization [%s]", path.c_str());
 			return 0;
 		} else {
 			log_err("opening serialization file failed -> daemon restart will cause serious problem (path=%s)", path.c_str());
@@ -1555,7 +1556,7 @@ int cluster::_reconstruct_node_partition(bool lock) {
 	node_partition_map nppm;
 
 	const in_addr_t network_addr = util::inet_addr(this->_server_name.c_str(), this->_proxy_prior_netmask);
-	log_debug("network address (myself):%u", network_addr);
+	log_debug("network address (myself): %u", network_addr);
 
 	for (node_map::iterator it = this->_node_map.begin(); it != this->_node_map.end(); it++) {
 		// master (1st path)
@@ -1703,14 +1704,14 @@ int cluster::_reconstruct_node_partition(bool lock) {
 		n = 0;
 		log_notice("node partition map (prepare):", 0);
 		if (nppm.size() > 1) {
-			log_err("more than 1 partition prepare map -> some thing is seriously going wrong", 0);
+			log_err("more than 1 partition prepare map -> something is seriously going wrong", 0);
 			throw -1;
 		}
 
 		for (node_partition_map::iterator it = nppm.begin(); it != nppm.end(); it++) {
 			if (it->first != static_cast<int>(npm.size())) {
 				// allow only 1 and next partition
-				log_err("invalid partition [%d] for partition prepare map -> some thing is seriously going wrong", it->first);
+				log_err("invalid partition [%d] for partition prepare map -> something is seriously going wrong", it->first);
 				throw -1;
 			}
 
@@ -1914,7 +1915,7 @@ int cluster::_get_proxy_thread(string node_key, int key_hash, shared_thread& t) 
 			string node_server_name;
 			int node_server_port = 0;
 			this->from_node_key(node_key, node_server_name, node_server_port);
-			handler_proxy* h = _new_ handler_proxy(tmp, this, node_server_name, node_server_port);
+			handler_proxy* h = new handler_proxy(tmp, this, node_server_name, node_server_port);
 			tmp->trigger(h, true, false);
 		}
 		m = this->_thread_pool->get_active(thread_type);

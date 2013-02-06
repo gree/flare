@@ -164,7 +164,7 @@ fuse_impl::fuse_impl(string mount_dir):
  */
 fuse_impl::~fuse_impl() {
 	if (this->_fs != NULL) {
-		_delete_(this->_fs);
+		delete this->_fs;
 	}
 }
 // }}}
@@ -183,7 +183,7 @@ int fuse_impl::run() {
 	}
 	fuse_obj = this;
 
-	this->_fs = _new_ fuse_fs(ini_option_object().get_node_server_name(), ini_option_object().get_node_server_port(), ini_option_object().get_chunk_size(), ini_option_object().get_connection_pool_size());
+	this->_fs = new fuse_fs(ini_option_object().get_node_server_name(), ini_option_object().get_node_server_port(), ini_option_object().get_chunk_size(), ini_option_object().get_connection_pool_size());
 
 	fuse_operations fo;
 	memset(&fo, 0, sizeof(fo));

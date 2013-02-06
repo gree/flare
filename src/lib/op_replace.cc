@@ -17,7 +17,15 @@ namespace flare {
  *	ctor for op_replace
  */
 op_replace::op_replace(shared_connection c, cluster* cl, storage* st):
-		op_set(c, "replace", cl, st) {
+		op_set(c, "replace", binary_header::opcode_replace, cl, st) {
+	this->_behavior = storage::behavior_replace;
+}
+
+/**
+ *	ctor for op_replace
+ */
+op_replace::op_replace(shared_connection c, string ident, binary_header::opcode opcode, cluster* cl, storage* st):
+		op_set(c, ident, opcode, cl, st) {
 	this->_behavior = storage::behavior_replace;
 }
 

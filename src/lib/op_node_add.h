@@ -34,10 +34,10 @@ public:
 	virtual int run_client(vector<cluster::node>& v);
 
 protected:
-	virtual int _parse_server_parameter();
+	virtual int _parse_text_server_parameters();
 	virtual int _run_server();
 	virtual int _run_client();
-	virtual int _parse_client_parameter(vector<cluster::node>& v);
+	virtual int _parse_text_client_parameters(vector<cluster::node>& v);
 };
 
 }	// namespace flare

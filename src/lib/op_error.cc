@@ -34,13 +34,13 @@ op_error::~op_error() {
 // }}}
 
 // {{{ protected methods
-int op_error::_parse_server_parameter() {
+int op_error::_parse_text_server_parameters() {
 	// consume 1 line anyway...
 	char* p;
 	if (this->_connection->readline(&p) < 0) {
 		return -1;
 	}
-	_delete_(p);
+	delete[] p;
 
 	return 0;
 }

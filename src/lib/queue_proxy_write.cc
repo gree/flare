@@ -8,6 +8,7 @@
  *	$Id$
  */
 #include "queue_proxy_write.h"
+#include "connection_tcp.h"
 #include "op_proxy_write.h"
 #include "op_add.h"
 #include "op_append.h"
@@ -18,6 +19,8 @@
 #include "op_prepend.h"
 #include "op_set.h"
 #include "op_replace.h"
+#include "op_touch.h"
+#include "op_gat.h"
 
 namespace gree {
 namespace flare {
@@ -51,7 +54,11 @@ queue_proxy_write::~queue_proxy_write() {
 
 // {{{ public methods
 int queue_proxy_write::run(shared_connection c) {
-	log_debug("proxy request (write) (host=%s, port=%d, op=%s, key=%s, version=%u)", c->get_host().c_str(), c->get_port(), this->_op_ident.c_str(), this->_entry.key.c_str(), this->_entry.version);
+#ifdef DEBUG
+	if (const connection_tcp* ctp = dynamic_cast<const connection_tcp*>(c.get())) {
+		log_debug("proxy request (write) (host=%s, port=%d, op=%s, key=%s, version=%u)", ctp->get_host().c_str(), ctp->get_port(), this->_op_ident.c_str(), this->_entry.key.c_str(), this->_entry.version);
+	}
+#endif
 
 	op_proxy_write* p = this->_get_op(this->_op_ident, c);
 	if (p == NULL) {
@@ -65,13 +72,17 @@ int queue_proxy_write::run(shared_connection c) {
 			break;
 		}
 		if (c->is_available() == false) {
-			log_debug("reconnecting (host=%s, port=%d)", c->get_host().c_str(), c->get_port());
+#ifdef DEBUG
+			if (const connection_tcp* ctp = dynamic_cast<const connection_tcp*>(c.get())) {
+				log_debug("reconnecting (host=%s, port=%d)", ctp->get_host().c_str(), ctp->get_port());
+			}
+#endif
 			c->open();
 		}
 		retry--;
 	}
 	if (retry <= 0) {
-		_delete_(p);
+		delete p;
 		return -1;
 	}
 
@@ -92,7 +103,7 @@ int queue_proxy_write::run(shared_connection c) {
 	} else {
 		this->_result_message = p->get_result_message();
 	}
-	_delete_(p);
+	delete p;
 
 	return 0;
 }
@@ -101,55 +112,63 @@ int queue_proxy_write::run(shared_connection c) {
 // {{{ protected methods
 op_proxy_write* queue_proxy_write::_get_op(string op_ident, shared_connection c) {
 	if (op_ident == "set") {
-		return _new_ op_set(c, this->_cluster, this->_storage);
+		return new op_set(c, this->_cluster, this->_storage);
 	} else if (op_ident == "add") {
 		if (this->is_post_proxy()) {
-			return _new_ op_set(c, this->_cluster, this->_storage);
+			return new op_set(c, this->_cluster, this->_storage);
 		} else {
-			return _new_ op_add(c, this->_cluster, this->_storage);
+			return new op_add(c, this->_cluster, this->_storage);
 		}
 	} else if (op_ident == "replace") {
 		if (this->is_post_proxy()) {
-			return _new_ op_set(c, this->_cluster, this->_storage);
+			return new op_set(c, this->_cluster, this->_storage);
 		} else {
-			return _new_ op_replace(c, this->_cluster, this->_storage);
+			return new op_replace(c, this->_cluster, this->_storage);
 		}
 	} else if (op_ident == "cas") {
 		if (this->is_post_proxy()) {
-			return _new_ op_set(c, this->_cluster, this->_storage);
+			return new op_set(c, this->_cluster, this->_storage);
 		} else {
-			return _new_ op_cas(c, this->_cluster, this->_storage);
+			return new op_cas(c, this->_cluster, this->_storage);
 		}
 	} else if (op_ident == "append") {
 		if (this->is_post_proxy()) {
-			return _new_ op_set(c, this->_cluster, this->_storage);
+			return new op_set(c, this->_cluster, this->_storage);
 		} else {
-			return _new_ op_append(c, this->_cluster, this->_storage);
+			return new op_append(c, this->_cluster, this->_storage);
 		}
 	} else if (op_ident == "prepend") {
 		if (this->is_post_proxy()) {
-			return _new_ op_set(c, this->_cluster, this->_storage);
+			return new op_set(c, this->_cluster, this->_storage);
 		} else {
-			return _new_ op_prepend(c, this->_cluster, this->_storage);
+			return new op_prepend(c, this->_cluster, this->_storage);
 		}
 	} else if (op_ident == "incr") {
 		if (this->is_post_proxy()) {
-			return _new_ op_set(c, this->_cluster, this->_storage);
+			return new op_set(c, this->_cluster, this->_storage);
 		} else {
-			op_incr* p = _new_ op_incr(c, this->_cluster, this->_storage);
+			op_incr* p = new op_incr(c, this->_cluster, this->_storage);
 			p->set_value(this->_generic_value);
 			return p;
 		}
 	} else if (op_ident == "decr") {
 		if (this->is_post_proxy()) {
-			return _new_ op_set(c, this->_cluster, this->_storage);
+			return new op_set(c, this->_cluster, this->_storage);
 		} else {
-			op_incr* p = _new_ op_decr(c, this->_cluster, this->_storage);
+			op_incr* p = new op_decr(c, this->_cluster, this->_storage);
 			p->set_value(this->_generic_value);
 			return p;
 		}
 	} else if (op_ident == "delete") {
-		return _new_ op_delete(c, this->_cluster, this->_storage);
+		return new op_delete(c, this->_cluster, this->_storage);
+	} else if (op_ident == "touch") {
+		return new op_touch(c, this->_cluster, this->_storage);
+	} else if (op_ident == "gat") {
+		if (this->is_post_proxy()) {
+			return new op_touch(c, this->_cluster, this->_storage);
+		} else {
+			return new op_gat(c, this->_cluster, this->_storage);
+		}
 	}
 	log_warning("unknown op (ident=%s)", op_ident.c_str());
 

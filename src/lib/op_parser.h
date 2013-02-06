@@ -8,6 +8,7 @@
 #ifndef	__OP_PARSER_H__
 #define	__OP_PARSER_H__
 
+#include "binary_header.h"
 #include "op.h"
 #include "op_add.h"
 #include "op_append.h"
@@ -35,6 +36,8 @@
 #include "op_replace.h"
 #include "op_set.h"
 #include "op_stats.h"
+#include "op_touch.h"
+#include "op_gat.h"
 #include "op_verbosity.h"
 #include "op_version.h"
 
@@ -64,19 +67,18 @@ public:
 		}
 
 		op_parser* parser = NULL;
-		switch (*p) {
-		case -0x80:
-		case -0x79:
-			log_debug("found binary protocol magic bytes (p=%c) -> creating binay parser", *p);
-			parser = static_cast<op_parser*>(_new_ T_binary(c));
+		switch (static_cast<uint8_t>(*p)) {
+		case binary_header::magic_request:
+			log_debug("found binary protocol magic byte (p=%c) -> creating binary parser", *p);
+			parser = static_cast<op_parser*>(new T_binary(c));
 			break;
 		default:
 			log_debug("found text protocol magic bytes (p=%c) -> creating text parser", *p);
-			parser = static_cast<op_parser*>(_new_ T_text(c));
+			parser = static_cast<op_parser*>(new T_text(c));
 			break;
 		}
 		c->push_back(p, 1);
-		_delete_(p);
+		delete[] p;
 
 		op* q = parser->parse_server();
 		if (q) {
@@ -84,7 +86,7 @@ public:
 		}
 
 		if (parser != NULL) {
-			_delete_(parser);
+			delete parser;
 		}
 
 		return q;

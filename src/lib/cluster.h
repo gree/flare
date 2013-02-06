@@ -82,8 +82,8 @@ public:
 
 
 	typedef struct		_node {
-		string					node_server_name;
-		int							node_server_port;
+		string		node_server_name;
+		int				node_server_port;
 		role						node_role;
 		state						node_state;
 		int							node_partition;

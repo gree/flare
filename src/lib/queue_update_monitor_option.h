@@ -8,7 +8,6 @@
 #ifndef	__QUEUE_UPDATE_MONITOR_OPTION_H__
 #define	__QUEUE_UPDATE_MONITOR_OPTION_H__
 
-#include "mm.h"
 #include "logger.h"
 #include "util.h"
 #include "thread_queue.h"

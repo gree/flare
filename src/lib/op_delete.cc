@@ -9,6 +9,7 @@
  */
 #include "op_delete.h"
 #include "queue_proxy_write.h"
+#include "binary_request_header.h"
 
 namespace gree {
 namespace flare {
@@ -18,7 +19,14 @@ namespace flare {
  *	ctor for op_delete
  */
 op_delete::op_delete(shared_connection c, cluster* cl, storage* st):
-		op_proxy_write(c, "delete", cl, st) {
+		op_proxy_write(c, "delete", binary_header::opcode_delete, cl, st) {
+}
+
+/**
+ *	ctor for op_delete
+ */
+op_delete::op_delete(shared_connection c, string ident, binary_header::opcode opcode, cluster* cl, storage* st):
+		op_proxy_write(c, ident, opcode, cl, st) {
 }
 
 /**
@@ -38,19 +46,28 @@ op_delete::~op_delete() {
 /**
  *	parser server request parameters
  */
-int op_delete::_parse_server_parameter() {
+int op_delete::_parse_text_server_parameters() {
 	char* p;
 	if (this->_connection->readline(&p) < 0) {
 		return -1;
 	}
 
 	if (this->_entry.parse(p, storage::parse_type_delete) < 0) {
-		_delete_(p);
+		delete[] p;
 		return -1;
 	}
-	_delete_(p);
+	delete[] p;
 
 	return 0;
+}
+
+int op_delete::_parse_binary_request(const binary_request_header& header, const char* body) {
+	if (body
+			&& !header.get_extras_length()
+			&& this->_entry.parse(header, body) == 0) {
+		return 0;
+	}
+	return -1;
 }
 
 int op_delete::_run_server() {
@@ -93,7 +110,7 @@ int op_delete::_run_server() {
 int op_delete::_run_client(storage::entry& e) {
 	string proxy_ident = this->_get_proxy_ident();
 	int request_len = proxy_ident.size() + e.key.size() + e.size + BUFSIZ;
-	char* request = _new_ char[request_len];
+	char* request = new char[request_len];
 	int offset = snprintf(request, request_len, "%sdelete %s %ld", proxy_ident.c_str(), e.key.c_str(), e.expire);
 	if (e.version > 0) {
 		offset += snprintf(request+offset, request_len-offset, " %llu", static_cast<unsigned long long>(e.version));
@@ -109,15 +126,15 @@ int op_delete::_run_client(storage::entry& e) {
 	}
 	offset += snprintf(request+offset, request_len-offset, line_delimiter);
 	if (this->_connection->write(request, offset) < 0) {
-		_delete_(request);
+		delete[] request;
 		return -1;
 	}
-	_delete_(request);
+	delete[] request;
 
 	return 0;
 }
 
-int op_delete::_parse_client_parameter(storage::entry& e) {
+int op_delete::_parse_text_client_parameters(storage::entry& e) {
 	if (e.option & storage::option_noreply) {
 		this->_result = result_none;
 		return 0;
@@ -128,11 +145,11 @@ int op_delete::_parse_client_parameter(storage::entry& e) {
 		return -1;
 	}
 
-	if (this->_parse_response(p, this->_result, this->_result_message) < 0) {
-		_delete_(p);
+	if (this->_parse_text_response(p, this->_result, this->_result_message) < 0) {
+		delete[] p;
 		return -1;
 	}
-	_delete_(p);
+	delete[] p;
 
 	return 0;
 }

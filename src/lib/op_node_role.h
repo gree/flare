@@ -37,10 +37,10 @@ public:
 	virtual int run_client(string node_server_name, int node_server_port, cluster::role node_role, int node_balance, int node_partition);
 
 protected:
-	virtual int _parse_server_parameter();
+	virtual int _parse_text_server_parameters();
 	virtual int _run_server();
 	virtual int _run_client(string node_server_name, int node_server_port, cluster::role node_role, int node_balance, int node_partition);
-	virtual int _parse_client_parameter();
+	virtual int _parse_text_client_parameters();
 };
 
 }	// namespace flare

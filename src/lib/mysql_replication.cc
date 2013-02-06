@@ -139,11 +139,11 @@ int mysql_replication::parse() {
 				this->_send_ok();
 			}
 		}
-		_delete_(p);
+		delete[] p;
 		p = NULL;
 	}
 	if (p) {
-		_delete_(p);
+		delete[] p;
 	}
 
 	return r;
@@ -162,7 +162,7 @@ int mysql_replication::send(shared_queue_proxy_write q) {
 	// FIXME: design fixes
 	int query_size = BUFSIZ + e.key.size() + e.size*2;
 	int query_len = 0;
-	char* query = _new_ char[BUFSIZ + e.key.size() + e.size*2];
+	char* query = new char[BUFSIZ + e.key.size() + e.size*2];
 	if (op_ident != "delete") {
 		query_len = snprintf(query, query_size, "REPLACE INTO `%s` VALUES ('%s', '", this->_table.c_str(), e.key.c_str());
 
@@ -207,17 +207,17 @@ int mysql_replication::send(shared_queue_proxy_write q) {
 			struct tm t;
 			localtime_r(&(e.expire), &t);
 			query_len += snprintf(query+query_len, query_size-query_len, "'%04d-%02d-%02d %02d:%02d:%02d')", t.tm_year+1900, t.tm_mon+1, t.tm_mday, t.tm_hour, t.tm_min, t.tm_sec);
-		}else {
+		} else {
 			query_len += snprintf(query+query_len, query_size-query_len, "0)");
 		}
 	} else {
 		query_len = snprintf(query, query_size, "DELETE FROM `%s` WHERE k='%s'", this->_table.c_str(), e.key.c_str());
 	}
 	if (this->_send_query_log_event(query, query_len) < 0) {
-		_delete_(query);
+		delete[] query;
 		return -1;
 	}
-	_delete_(query);
+	delete[] query;
 
 	return 0;
 }
@@ -296,7 +296,7 @@ int mysql_replication::_send_ok() {
 
 int mysql_replication::_send_query_log_event(const char* query, int query_len) {
 	int buf_size = BUFSIZ + query_len;
-	char* buf = _new_ char[buf_size];
+	char* buf = new char[buf_size];
 	int len = 0;
 	memset(buf, 0, sizeof(buf));
 
@@ -355,10 +355,10 @@ int mysql_replication::_send_query_log_event(const char* query, int query_len) {
 	len += query_len;
 
 	if (this->_write(buf, len) != len) {
-		_delete_(buf);
+		delete[] buf;
 		return -1;
 	}
-	_delete_(buf);
+	delete[] buf;
 
 	return 0;
 }
@@ -502,7 +502,7 @@ int mysql_replication::_recv_handshake() {
 
 	// nop
 
-	_delete_(p);
+	delete[] p;
 
 	return 0;
 }
@@ -548,7 +548,7 @@ int mysql_replication::_read(char** p) {
 	}
 	this->_packet_id++;
 
-	_delete_(header);
+	delete[] header;
 
 	if (this->_connection->readsize(len, p) != len) {
 		return -1;

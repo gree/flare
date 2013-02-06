@@ -10,6 +10,8 @@
 #include "app.h"
 #include "op_get.h"
 #include "queue_proxy_read.h"
+#include "binary_request_header.h"
+#include "binary_response_header.h"
 
 namespace gree {
 namespace flare {
@@ -19,15 +21,15 @@ namespace flare {
  *	ctor for op_get
  */
 op_get::op_get(shared_connection c, cluster* cl, storage* st):
-		op_proxy_read(c, "get", cl, st) {
+		op_proxy_read(c, "get", binary_header::opcode_get, cl, st) {
 	this->_append_version = false;
 }
 
 /**
  *	ctor for op_get
  */
-op_get::op_get(shared_connection c, string ident, cluster* cl, storage* st):
-		op_proxy_read(c, ident, cl, st) {
+op_get::op_get(shared_connection c, string ident, binary_header::opcode opcode, cluster* cl, storage* st):
+		op_proxy_read(c, ident, opcode, cl, st) {
 	this->_append_version = false;
 }
 
@@ -48,7 +50,7 @@ op_get::~op_get() {
 /**
  *	parser server request parameters
  */
-int op_get::_parse_server_parameter() {
+int op_get::_parse_text_server_parameters() {
 	char* p;
 	if (this->_connection->readline(&p) < 0) {
 		return -1;
@@ -67,7 +69,7 @@ int op_get::_parse_server_parameter() {
 		this->_entry_list.push_back(e);
 	}
 	log_debug("found %d keys", this->_entry_list.size());
-	_delete_(p);
+	delete[] p;
 
 	if (this->_entry_list.size() == 0) {
 		return -1;
@@ -76,8 +78,23 @@ int op_get::_parse_server_parameter() {
 	return 0;
 }
 
+int op_get::_parse_binary_request(const binary_request_header& header, const char* body) {
+	if (header.get_extras_length() == _binary_request_required_extras_length) {
+		uint16_t key_length = header.get_key_length();
+		if (key_length) {
+			storage::entry e;
+			if (e.parse(header, body) == 0) {
+				this->_entry_list.push_back(e);
+			}
+		}
+	}
+	return this->_entry_list.size() > 0 ? 0 : -1;
+}
+
 int op_get::_run_server() {
+	// Queries
 	map<string, shared_queue_proxy_read> q_map;
+	// Results
 	map<string, storage::result> r_map;
 
 	for (list<storage::entry>::iterator it = this->_entry_list.begin(); it != this->_entry_list.end(); it++) {
@@ -106,38 +123,32 @@ int op_get::_run_server() {
 	}
 
 	for (list<storage::entry>::iterator it = this->_entry_list.begin(); it != this->_entry_list.end(); it++) {
-		char* response = NULL;
-		int response_len = 0;
-
 		if (q_map.count(it->key) > 0) {
 			shared_queue_proxy_read q = q_map[it->key];
 			q->sync();
 			storage::entry& e = q->get_entry();
-			if (e.is_data_available() == false) {
+			_send_entry(e);
+			if (e.is_data_available()) {
+				stats_object->increment_hits();
+			} else {
 				stats_object->increment_misses();
-				continue;
 			}
-			e.response(&response, response_len, this->_append_version ? storage::response_type_gets : storage::response_type_get);
 		} else if (r_map.count(it->key) == 0) {
-			stats_object->increment_misses();
 			log_warning("result map is inconsistent (key=%s)", it->key.c_str());
-			continue;
-		} else if (r_map[it->key] == storage::result_not_found) {
 			stats_object->increment_misses();
-			continue;
+		} else if (r_map[it->key] == storage::result_not_found) {
+			_send_entry(*it);
+			stats_object->increment_misses();
 		} else {
-			// for safe
+			// for safety
 			// op like "get key1 key1" will cause segfault
-			if (it->is_data_available() == false) {
+			_send_entry(*it);
+			if (it->is_data_available()) {
+				stats_object->increment_hits();
+			} else {
 				stats_object->increment_misses();
-				continue;
 			}
-			it->response(&response, response_len, this->_append_version ? storage::response_type_gets : storage::response_type_get);
 		}
-
-		stats_object->increment_hits();
-		this->_connection->write(response, response_len, true);
-		_delete_(response);
 	}
 
 	this->_send_result(result_end);
@@ -147,22 +158,26 @@ int op_get::_run_server() {
 
 int op_get::_run_client(storage::entry& e, void* parameter) {
 	int request_len = e.key.size() + BUFSIZ;
-	char* request = _new_ char[request_len];
-	snprintf(request, request_len, "%s %s", this->get_ident().c_str(), e.key.c_str());
+	char* request = new char[request_len];
+	snprintf(request, request_len, "%s %s",
+			_protocol == text
+				? this->get_ident().c_str()
+				: "gets",
+			e.key.c_str());
 	int r = this->_send_request(request);
-	_delete_(request);
+	delete[] request;
 
 	return r;
 }
 
 int op_get::_run_client(list<storage::entry>& e, void* parameter) {
 	if (e.size() == 0) {
-		log_warning("passed 0 entry...", 0);
+		log_warning("passed 0 entries...", 0);
 		return -1;
 	}
 
 	ostringstream s;
-	s << this->get_ident();
+	s << (_protocol == text ? this->get_ident() : "gets");
 	for (list<storage::entry>::iterator it = e.begin(); it != e.end(); it++) {
 		s << " " << it->key;
 	}
@@ -170,7 +185,7 @@ int op_get::_run_client(list<storage::entry>& e, void* parameter) {
 	return this->_send_request(s.str().c_str());
 }
 
-int op_get::_parse_client_parameter(storage::entry& e) {
+int op_get::_parse_text_client_parameters(storage::entry& e) {
 	for (;;) {
 		char* p;
 		if (this->_connection->readline(&p) < 0) {
@@ -178,7 +193,7 @@ int op_get::_parse_client_parameter(storage::entry& e) {
 		}
 
 		if (strcmp(p, "END\n") == 0) {
-			_delete_(p);
+			delete[] p;
 			return 0;
 		}
 
@@ -186,16 +201,16 @@ int op_get::_parse_client_parameter(storage::entry& e) {
 		int n = util::next_word(p, q, sizeof(q));
 		if (strcmp(q, "VALUE") != 0) {
 			log_debug("invalid token (q=%s)", q);
-			_delete_(p);
+			delete[] p;
 			return -1;
 		}
 
 		storage::entry e_tmp;
 		if (e_tmp.parse(p+n, storage::parse_type_get) < 0) {
-			_delete_(p);
+			delete[] p;
 			return -1;
 		}
-		_delete_(p);
+		delete[] p;
 
 		if (e.key != e_tmp.key) {
 			log_warning("cannot found corresponding key (key=%s)", e_tmp.key.c_str());
@@ -212,7 +227,7 @@ int op_get::_parse_client_parameter(storage::entry& e) {
 		}
 		shared_byte data(new uint8_t[e.size]);
 		memcpy(data.get(), p, e.size);
-		_delete_(p);
+		delete[] p;
 		e.data = data;
 		log_debug("storing data [%d bytes]", e.size);
 	}
@@ -220,7 +235,7 @@ int op_get::_parse_client_parameter(storage::entry& e) {
 	return 0;
 }
 
-int op_get::_parse_client_parameter(list<storage::entry>& e) {
+int op_get::_parse_text_client_parameters(list<storage::entry>& e) {
 	list<storage::entry>::iterator it = e.begin();
 
 	for (;;) {
@@ -230,7 +245,7 @@ int op_get::_parse_client_parameter(list<storage::entry>& e) {
 		}
 
 		if (strcmp(p, "END\n") == 0) {
-			_delete_(p);
+			delete[] p;
 			break;
 		}
 
@@ -238,16 +253,16 @@ int op_get::_parse_client_parameter(list<storage::entry>& e) {
 		int n = util::next_word(p, q, sizeof(q));
 		if (strcmp(q, "VALUE") != 0) {
 			log_debug("invalid token (q=%s)", q);
-			_delete_(p);
+			delete[] p;
 			return -1;
 		}
 
 		storage::entry e_tmp;
 		if (e_tmp.parse(p+n, storage::parse_type_get) < 0) {
-			_delete_(p);
+			delete[] p;
 			return -1;
 		}
-		_delete_(p);
+		delete[] p;
 
 		while (it->key != e_tmp.key && it != e.end()) {
 			it++;
@@ -267,12 +282,64 @@ int op_get::_parse_client_parameter(list<storage::entry>& e) {
 		}
 		shared_byte data(new uint8_t[it->size]);
 		memcpy(data.get(), p, it->size);
-		_delete_(p);
+		delete[] p;
 		it->data = data;
 		log_debug("storing data [%d bytes]", it->size);
 	}
 
 	return 0;
+}
+
+int op_get::_send_binary_result(result r, const char* message) {
+	// Sending is handled by _send_binary_entry
+	if (r == result_end) {
+		this->_connection->write(NULL, 0);
+		return 0;
+	}	else {
+		return op::_send_binary_result(r, message);
+	}
+}
+
+int op_get::_send_text_entry(const storage::entry& entry) {
+	int return_value = 0;
+	if (entry.is_data_available()) {
+		char* response = NULL;
+		int response_len = 0;
+		entry.response(&response, response_len, this->_append_version ? storage::response_type_gets : storage::response_type_get);
+		return_value = this->_connection->write(response, response_len, true);
+		delete[] response;
+	}
+	return return_value;
+}
+
+int op_get::_send_binary_entry(const storage::entry& entry) {
+	int return_value = 0;
+	bool prepend_key = this->_opcode == binary_header::opcode_getk
+		|| this->_opcode == binary_header::opcode_getkq;
+	binary_response_header header(this->_opcode);
+	if (entry.is_data_available()) {
+		// Data is available: send the value normally
+		char* body;
+		entry.response(header, &body, prepend_key);
+		return_value = _send_binary_response(header, body, true);
+		delete[] body;
+	} else if (!_quiet) {
+		// Data is not available: prepend key if needed then send "Not found" status
+		header.set_status(binary_header::status_key_not_found);
+		static const std::string& not_found_message = binary_header::status_cast(binary_header::status_key_not_found);
+		std::ostringstream body_os;
+		if (prepend_key) {
+			// Prepend key
+			header.set_key_length(entry.key.size());
+			header.set_total_body_length(entry.key.size() + not_found_message.size());
+			body_os.write(entry.key.data(), entry.key.size());
+		} else {
+			header.set_total_body_length(not_found_message.size());
+		}
+		body_os.write(not_found_message.c_str(), not_found_message.size());
+		return_value = _send_binary_response(header, body_os.str().data());
+	}
+	return return_value;
 }
 // }}}
 

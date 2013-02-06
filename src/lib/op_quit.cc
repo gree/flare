@@ -17,7 +17,14 @@ namespace flare {
  *	ctor for op_quit
  */
 op_quit::op_quit(shared_connection c):
-		op(c, "quit") {
+		op(c, "quit", binary_header::opcode_quit) {
+}
+
+/**
+ *	ctor for op_quit
+ */
+op_quit::op_quit(shared_connection c, string ident, binary_header::opcode opcode):
+		op(c, ident, opcode) {
 }
 
 /**
@@ -34,7 +41,7 @@ op_quit::~op_quit() {
 // }}}
 
 // {{{ protected methods
-int op_quit::_parse_server_parameter() {
+int op_quit::_parse_text_server_parameters() {
 	char* p;
 	if (this->_connection->readline(&p) < 0) {
 		return -1;
@@ -45,11 +52,11 @@ int op_quit::_parse_server_parameter() {
 	if (q[0]) {
 		// no arguments allowed
 		log_debug("bogus string(s) found [%s] -> error", q); 
-		_delete_(p);
+		delete[] p;
 		return -1;
 	}
 
-	_delete_(p);
+	delete[] p;
 
 	return 0;
 }
@@ -57,6 +64,7 @@ int op_quit::_parse_server_parameter() {
 int op_quit::_run_server() {
 	log_info("requesting shutdown", 0);
 	this->_shutdown_request = true;
+	_send_result(result_end);
 	
 	return 0;
 }

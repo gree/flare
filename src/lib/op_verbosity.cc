@@ -41,7 +41,7 @@ int op_verbosity::run_client(int verbosity, storage::option option) {
 		return -1;
 	}
 
-	return this->_parse_client_parameter(option);
+	return this->_parse_text_client_parameters(option);
 }
 // }}}
 
@@ -49,7 +49,7 @@ int op_verbosity::run_client(int verbosity, storage::option option) {
 /**
  *	parser server request parameters
  */
-int op_verbosity::_parse_server_parameter() {
+int op_verbosity::_parse_text_server_parameters() {
 	char* p;
 	if (this->_connection->readline(&p) < 0) {
 		return -1;
@@ -89,10 +89,10 @@ int op_verbosity::_parse_server_parameter() {
 			throw -1;
 		}
 	} catch (int e) {
-		_delete_(p);
+		delete[] p;
 		return e;
 	}
-	_delete_(p);
+	delete[] p;
 
 	return 0;
 }
@@ -122,7 +122,7 @@ int op_verbosity::_run_client(int verbosity, storage::option option) {
 	return this->_send_request(request);
 }
 
-int op_verbosity::_parse_client_parameter(storage::option option) {
+int op_verbosity::_parse_text_client_parameters(storage::option option) {
 	if (option & storage::option_noreply) {
 		this->_result = result_none;
 		return 0;
@@ -133,11 +133,11 @@ int op_verbosity::_parse_client_parameter(storage::option option) {
 		return -1;
 	}
 
-	if (this->_parse_response(p, this->_result, this->_result_message) < 0) {
-		_delete_(p);
+	if (this->_parse_text_response(p, this->_result, this->_result_message) < 0) {
+		delete[] p;
 		return -1;
 	}
-	_delete_(p);
+	delete[] p;
 
 	return 0;
 }

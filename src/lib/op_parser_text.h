@@ -20,8 +20,6 @@ namespace flare {
  *	opcode text parser class
  */
 class op_parser_text : public op_parser {
-protected:
-
 public:
 	op_parser_text(shared_connection c);
 	virtual ~op_parser_text();

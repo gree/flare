@@ -13,3 +13,6 @@
 /ltmain.sh
 Makefile
 Makefile.in
+/cscope.*
+/tags
+/test/log

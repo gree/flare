@@ -36,7 +36,7 @@ op_show::~op_show() {
 // }}}
 
 // {{{ protected methods
-int op_show::_parse_server_parameter() {
+int op_show::_parse_text_server_parameters() {
 	char* p;
 	if (this->_connection->readline(&p) < 0) {
 		return -1;
@@ -50,7 +50,7 @@ int op_show::_parse_server_parameter() {
 		this->_show_type = show_type_error;
 	}
 	log_debug("parameter=%s -> show_type=%d", p, this->_show_type);
-	_delete_(p);
+	delete[] p;
 
 	if (this->_show_type == show_type_error) {
 		return -1;

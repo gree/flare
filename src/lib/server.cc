@@ -8,6 +8,7 @@
  *	$Id$
  */
 #include "server.h"
+#include "connection_tcp.h"
 
 namespace gree {
 namespace flare {
@@ -224,8 +225,8 @@ int server::listen(string uds) {
 /**
  *	wait for client request
  */
-vector<shared_connection> server::wait() {
-	vector<shared_connection> connection_list;
+vector<shared_connection_tcp> server::wait() {
+	vector<shared_connection_tcp> connection_list;
 
 #if defined(HAVE_EPOLL)
 	const char* poll_type = "epoll_wait";		// just for logging
@@ -320,12 +321,12 @@ vector<shared_connection> server::wait() {
 		}
 
 		log_info("socket accepted (fd=%d remote=%s)", sock, addr.sa_family == AF_UNIX ? "unix domain socket" : inet_ntoa(addr_inet->sin_addr));
-		shared_connection c;
+		shared_connection_tcp c;
 		try {
 			if (addr.sa_family == AF_UNIX) {
-				c = shared_connection(new connection(sock, *addr_unix));
+				c = shared_connection_tcp(new connection_tcp(sock, *addr_unix));
 			} else {
-				c = shared_connection(new connection(sock, *addr_inet));
+				c = shared_connection_tcp(new connection_tcp(sock, *addr_inet));
 			}
 		} catch (int e) {
 			return connection_list;

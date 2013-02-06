@@ -20,7 +20,6 @@
 #include <time.h>
 
 #include "logger.h"
-#include "mm.h"
 #include "util.h"
 #include "thread_queue.h"
 

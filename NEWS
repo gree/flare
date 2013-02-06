@@ -1,3 +1,18 @@
+* [2012/02/05] 1.0.17 release
+
+  * new features:
+    - added support for Kyoto cabinet
+    - binary protocol implementation and input tests
+    - touch/gat implementation
+    - migration from gethostbyname to getaddrinfo
+    - integrated valgrind memory tests
+    - added over 2000 unit tests
+ 
+  * bug fixes:
+    - various fixes under BSD
+    - append does not reset the stored flag anymore
+    - fixes for input validation
+
 * [2012/12/12] 1.0.16-2 release
 
   * bug fixes

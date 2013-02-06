@@ -11,6 +11,7 @@
 #include <vector>
 #include <sstream>
 
+#include <boost/detail/endian.hpp>
 #include <boost/lexical_cast.hpp>
 #include <boost/shared_array.hpp>
 #include <boost/tokenizer.hpp>
@@ -24,7 +25,6 @@
 #include <arpa/inet.h>
 
 #include "config.h"
-#include "mm.h"
 #include "logger.h"
 
 using namespace std;
@@ -64,70 +64,77 @@ public:
 
 	static const char* strerror(int e);
 	static const char* hstrerror(int e);
-	static int gethostbyname(const char *name, struct hostent* he, int* he_errno);
+	static int gethostbyname(const std::string& host, int port, sa_family_t, sockaddr_in&, int& gai_errno, std::string* canonname = 0);
 	static int inet_ntoa(struct in_addr in, char* dst);
 	static in_addr_t inet_addr(const char *cp, const uint32_t netmask = 0xffffffff);
 	static int get_fqdn(string& fqdn);
-	static inline unsigned int next_word(const char* src, char* dst, unsigned int dst_len) {
-		const char *p = src;
-		char *q = dst;
-
-		// sync w/ memcached behavior (cannot use isspace() here because memcached does not recognize '\t' and other space chars as ws)
-		while (*p == ' ') {
-			p++;
-		}
-		while (*p && *p != ' ' && *p != '\n' && static_cast<unsigned int>(p-src) < dst_len) {
-			*q++ = *p++;
-		}
-		*q = '\0';
-
-		return p-src;
-	};
-	static inline unsigned int next_digit(const char* src, char* dst, unsigned int dst_len) {
-		const char *p = src;
-		char *q = dst;
-
-		// sync w/ memcached behavior (cannot use isspace() here because memcached does not recognize '\t' and other space chars as ws)
-		while (*p == ' ') {
-			p++;
-		}
-		while (*p && (isdigit(*p) || *p == '-') && *p != '\n' && static_cast<unsigned int>(p-src) < dst_len) {
-			*q++ = *p++;
-		}
-		*q = '\0';
-
-		return p-src;
-	};
+	static inline unsigned int next_word(const char* src, char* dst, unsigned int dst_len);
+	static inline unsigned int next_digit(const char* src, char* dst, unsigned int dst_len);
 	static time_t realtime(time_t t);
 	static string base64_encode(const char* src, size_t src_size);
 	static char* base64_decode(string src, size_t& dst_size);
 
-	template<class T> static string vector_join(vector<T> list, string glue) {
-		ostringstream sout;
-		typename vector<T>::iterator it;
-		for (it = list.begin(); it != list.end(); it++) {
-			if (sout.tellp() > 0) {
-				sout << glue;
-			}
-			sout << *it;
-		}
-
-		return sout.str();
-	};
-
-	template<class T> static vector<T> vector_split(string s, string sep) {
-		vector<T> r;
-
-		typedef boost::tokenizer<boost::char_separator<char> > tokenizer;
-		boost::char_separator<char> separator(sep.c_str());
-		tokenizer token_list(s, separator);
-		for (tokenizer::iterator it = token_list.begin(); it != token_list.end(); it++) {
-			r.push_back(lexical_cast<T>(*it));
-		}
-
-		return r;
-	};
+	template<class T> static string vector_join(vector<T> list, string glue);
+	template<class T> static vector<T> vector_split(string s, string sep);
 };
+
+unsigned int util::next_word(const char* src, char* dst, unsigned int dst_len) {
+	const char *p = src;
+	char *q = dst;
+
+	// sync w/ memcached behavior (cannot use isspace() here because memcached does not recognize '\t' and other space chars as ws)
+	while (*p == ' ') {
+		p++;
+	}
+	while (*p && *p != ' ' && *p != '\n' && static_cast<unsigned int>(q-dst)+1 < dst_len) {
+		*q++ = *p++;
+	}
+	*q = '\0';
+
+	return p-src;
+}
+
+unsigned int util::next_digit(const char* src, char* dst, unsigned int dst_len) {
+	const char *p = src;
+	char *q = dst;
+
+	// sync w/ memcached behavior (cannot use isspace() here because memcached does not recognize '\t' and other space chars as ws)
+	while (*p == ' ') {
+		p++;
+	}
+	while (*p && (isdigit(*p) || *p == '-') && *p != '\n' && static_cast<unsigned int>(p-src) < dst_len) {
+		*q++ = *p++;
+	}
+	*q = '\0';
+
+	return p-src;
+}
+
+template<class T> string util::vector_join(vector<T> list, string glue) {
+	ostringstream sout;
+	typename vector<T>::iterator it;
+	for (it = list.begin(); it != list.end(); it++) {
+		if (sout.tellp() > 0) {
+			sout << glue;
+		}
+		sout << *it;
+	}
+
+	return sout.str();
+}
+
+template<class T> vector<T> util::vector_split(string s, string sep) {
+	vector<T> r;
+
+	typedef boost::tokenizer<boost::char_separator<char> > tokenizer;
+	boost::char_separator<char> separator(sep.c_str());
+	tokenizer token_list(s, separator);
+	for (tokenizer::iterator it = token_list.begin(); it != token_list.end(); it++) {
+		r.push_back(lexical_cast<T>(*it));
+	}
+
+	return r;
+}
 
 }	// namespace flare
 }	// namespace gree

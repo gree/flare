@@ -29,16 +29,12 @@ flarefs::flarefs():
  */
 flarefs::~flarefs() {
 	if (this->_fuse != NULL) {
-		_delete_(this->_fuse);
+		delete this->_fuse;
 	}
 	if (stats_object != NULL) {
-		_delete_(stats_object);
+		delete stats_object;
 		stats_object = NULL;
 	}
-
-#ifdef MM_ALLOCATION_CHECK
-	mm::dump_alloc_list();
-#endif
 }
 // }}}
 
@@ -56,7 +52,7 @@ int flarefs::startup(int argc, char **argv) {
 	}
 
 	singleton<logger>::instance().open(this->_ident, ini_option_object().get_log_facility());
-	stats_object = _new_ stats();
+	stats_object = new stats();
 	stats_object->startup();
 
 	log_notice("%s version %s - system logger started", this->_ident.c_str(), PACKAGE_VERSION);
@@ -82,7 +78,7 @@ int flarefs::startup(int argc, char **argv) {
 	}
 
 	// application objects
-	this->_fuse = _new_ fuse_impl(ini_option_object().get_mount_dir());
+	this->_fuse = new fuse_impl(ini_option_object().get_mount_dir());
 	this->_fuse->set_allow_other(ini_option_object().is_fuse_allow_other());
 	this->_fuse->set_allow_root(ini_option_object().is_fuse_allow_root());
 

@@ -35,12 +35,12 @@ queue_node_sync::~queue_node_sync() {
 
 // {{{ public methods
 int queue_node_sync::run(shared_connection c) {
-	op_node_sync* p = _new_ op_node_sync(c, this->_cluster);
+	op_node_sync* p = new op_node_sync(c, this->_cluster);
 	if (p->run_client(this->_node_vector) < 0) {
-		_delete_(p);
+		delete p;
 		return -1;
 	}
-	_delete_(p);
+	delete p;
 
 	return 0;
 }

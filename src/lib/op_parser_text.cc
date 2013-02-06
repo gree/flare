@@ -45,7 +45,7 @@ op* op_parser_text::parse_server() {
 		char* p = strchr(buf, '>');
 		if (p != NULL) {
 			consume = p-buf+1;
-			proxy = _new_ char[p-buf];
+			proxy = new char[p-buf];
 			strncpy(proxy, buf+1, p-buf-1);
 			proxy[p-buf-1] = '\0';
 		}
@@ -59,10 +59,10 @@ op* op_parser_text::parse_server() {
 	op* r = this->_determine_op(first, buf, consume);
 	this->_connection->push_back(buf+consume, buf_len-consume);
 	if (proxy != NULL) {
-		r->set_proxy(proxy);
-		_delete_(proxy);
+		r->set_proxy(string(proxy));
+		delete proxy;
 	}
-	_delete_(buf);
+	delete[] buf;
 
 	return r;
 }

@@ -36,8 +36,8 @@ namespace flare {
 #define	log_alert(fmt, ...)		logger_singleton::instance().alert(__FILE__, __LINE__, __func__, fmt, __VA_ARGS__)
 #define	log_emerge(fmt, ...)	logger_singleton::instance().emerge(__FILE__, __LINE__, __func__, fmt, __VA_ARGS__)
 #else
-#define	log_debug(fmt, ...)
-#define	log_info(fmt, ...)
+#define	log_debug(fmt, ...)		do {} while(0)
+#define	log_info(fmt, ...)		do {} while(0)
 #define	log_notice(fmt, ...)	logger_singleton::instance().notice(__FILE__, __LINE__, __func__, fmt, __VA_ARGS__)
 #define	log_warning(fmt, ...)	logger_singleton::instance().warning(__FILE__, __LINE__, __func__, fmt, __VA_ARGS__)
 #define	log_err(fmt, ...)			logger_singleton::instance().err(__FILE__, __LINE__, __func__, fmt, __VA_ARGS__)

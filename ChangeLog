@@ -1,6 +1,15 @@
-commit 866de7d81941e14cc0f17d6bd343135401401634
+commit 1adf9d9434fa70a309bb25861dde8fde5afa9540
 Author: Benjamin Surma <benjamin.surma@gree.net>
-Date:   Tue Dec 11 16:49:43 2012 +0900
+Date:   Wed Apr 10 18:57:06 2013 +0900
+
+    Fixes for 1.0.16.2
+
+    Sanity check the thread_type value in flare.xml
+    Fix and test for a duplicate thread id issue
+
+commit e12ae6be24fde796e657e2f0cb33d3c826e2ec4e
+Author: Benjamin Surma <benjamin.surma@gree.net>
+Date:   Wed Dec 12 20:09:47 2012 +0900
 
     Minimal fix for replication race condition
 

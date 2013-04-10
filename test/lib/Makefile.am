@@ -1,9 +1,11 @@
 if WITH_CUTTER
 noinst_LTLIBRARIES =	\
+	test_cluster.la \
 	test-storage.la \
 	test-storage-tcb.la \
 	test-storage-tch.la \
 	test-key-resolver-modular.la \
+	test_thread_pool.la	\
 	test-util.la
 endif
 
@@ -25,8 +27,10 @@ LIBS =						\
 	$(top_builddir)/src/lib/libflare.la	\
 	$(CPPCUTTER_LIBS)
 
+test_cluster_la_SOURCES	= test_cluster.cc
 test_storage_la_SOURCES	= test-storage.cc
 test_storage_tcb_la_SOURCES	= test-storage-tcb.cc common-storage-tests.cc
 test_storage_tch_la_SOURCES	= test-storage-tch.cc common-storage-tests.cc
 test_key_resolver_modular_la_SOURCES	= test-key-resolver-modular.cc
+test_thread_pool_la_SOURCES	= test_thread_pool.cc
 test_util_la_SOURCES	= test-util.cc

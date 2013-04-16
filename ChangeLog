@@ -1,4 +1,19 @@
-commit 8a77dddb7cf354104aa7647e87f5eaed660b869b
+commit 492e6d62c57d43f98d71d6ef8bf5fdd71a4ff84c
+Author: Benjamin Surma <benjamin.surma@gree.net>
+Date:   Wed Apr 10 19:30:34 2013 +0900
+
+    Fixes for 1.0.17.1
+
+    Sanity check the thread_type value in flare.xml
+    Fix and test for a duplicate thread id issue
+
+commit 4e2752879af7d18ca6d2e9dab6626347634df15c
+Author: Benjamin Surma <benjamin.surma@gree.net>
+Date:   Tue Feb 5 15:38:01 2013 +0900
+
+    ready for 1.0.17
+
+commit 57299afba781ba12b20697671eba90cfd5b70884
 Author: Benjamin Surma <benjamin.surma@gree.net>
 Date:   Tue Feb 5 15:32:41 2013 +0900
 

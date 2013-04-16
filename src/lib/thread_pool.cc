@@ -69,12 +69,18 @@ shared_thread thread_pool::get(int type) {
 			this->_index = 1;
 			continue;
 		}
+		bool dup = false;
 		for (global_map::iterator it = this->_global_map.begin(); it != this->_global_map.end(); it++) {
 			if (it->second.find(id) != it->second.end()) {
-				log_info("therad id [%u] is already in use -> retry...", id);
-				continue;
+				dup = true;
+				break;
 			}
 		}
+		if (dup) {
+			log_info("thread id [%u] is already in use -> retry...", id);
+			continue;
+		}
+
 		tmp->setup(type, id);
 
 		this->_global_map[type][tmp->get_id()] = tmp;

@@ -1534,6 +1534,21 @@ int cluster::_load() {
 	}
 
 	ifs.close();
+
+	// sanity check
+	for (node_map::const_iterator it_node = this->_node_map.begin();
+			 it_node != this->_node_map.end();
+			 ++it_node) {
+		if (it_node->second.node_thread_type >= this->_thread_type) {
+			pthread_mutex_unlock(&this->_mutex_serialization);
+			log_err("node %s has a thread_type (%d) greater or equal to the global thread_type value (%d)",
+					it_node->first.c_str(),
+					it_node->second.node_thread_type,
+					this->_thread_type);
+			return -1;
+		}
+	}
+
 	pthread_mutex_unlock(&this->_mutex_serialization);
 
 	return 0;

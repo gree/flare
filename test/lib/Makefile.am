@@ -1,6 +1,7 @@
 if WITH_CUTTER
 noinst_LTLIBRARIES =	\
 	test_binary_header.la \
+	test_cluster.la \
 	test_connection_tcp.la \
 	test_connection_iostream.la \
 	test_storage.la \
@@ -42,6 +43,7 @@ noinst_LTLIBRARIES =	\
 	test_op_touch.la	\
 	test_op_verbosity.la	\
 	test_op_version.la	\
+	test_thread_pool.la	\
 	test_util.la
 if ENABLE_KYOTOCABINET
 noinst_LTLIBRARIES += test_storage_kch.la
@@ -66,6 +68,7 @@ LIBS =									\
 
 test_binary_header_la_SOURCES	= test_binary_header.cc connection_iostream.cc
 test_connection_tcp_la_SOURCES	= test_connection_tcp.cc common_connection_tests.cc
+test_cluster_la_SOURCES	= test_cluster.cc
 test_connection_iostream_la_SOURCES	= test_connection_iostream.cc common_connection_tests.cc connection_iostream.cc
 test_storage_la_SOURCES	= test_storage.cc
 test_storage_entry_la_SOURCES	= test_storage_entry.cc
@@ -109,4 +112,5 @@ test_op_stats_la_SOURCES	= test_op_stats.cc connection_iostream.cc
 test_op_touch_la_SOURCES	= test_op_touch.cc connection_iostream.cc
 test_op_verbosity_la_SOURCES	= test_op_verbosity.cc connection_iostream.cc
 test_op_version_la_SOURCES	= test_op_version.cc connection_iostream.cc
+test_thread_pool_la_SOURCES	= test_thread_pool.cc
 test_util_la_SOURCES	= test_util.cc

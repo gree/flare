@@ -53,6 +53,7 @@ private:
 	string			_server_socket;
 	int					_stack_size;
 	uint32_t		_storage_ap;
+	uint32_t		_storage_fp;
 	uint64_t		_storage_bucket_size;
 	int					_storage_cache_size;
 	string			_storage_compress;
@@ -81,6 +82,7 @@ public:
 	static const int default_server_port = 12121;
 	static const int default_stack_size = 128;
 	static const uint32_t default_storage_ap = 4;
+	static const uint32_t default_storage_fp = 10;
 	static const uint64_t default_storage_bucket_size = 131071;
 	static const int default_storage_cache_size = 65536;
 	static const int default_storage_lmemb = 128;
@@ -126,6 +128,7 @@ public:
 	string get_server_socket() { return this->_server_socket; };
 	int get_stack_size() { return this->_stack_size; };
 	uint32_t get_storage_ap() { return this->_storage_ap; };
+	uint32_t get_storage_fp() { return this->_storage_fp; };
 	uint64_t get_storage_bucket_size() { return this->_storage_bucket_size; };
 	int get_storage_cache_size() { return this->_storage_cache_size; };
 	string get_storage_compress() { return this->_storage_compress; };

@@ -32,6 +32,7 @@ namespace test_storage_tch
 		tch_tester = new test_storage::storage_tester(new storage_tch(db_dir,
 					32,
 					4,
+					10,
 					131071,
 					65536,
 					compress,

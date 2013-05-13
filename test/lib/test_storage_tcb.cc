@@ -31,6 +31,7 @@ namespace test_storage_tcb
 		tcb_tester = new test_storage::storage_tester(new storage_tcb(db_dir,
 					32,
 					4,
+					10,
 					131071,
 					65536,
 					compress,

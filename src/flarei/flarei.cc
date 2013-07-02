@@ -169,6 +169,10 @@ int flarei::startup(int argc, char **argv) {
 	}
 	this->_cluster->set_key_hash_algorithm(ha);
 
+	shared_thread cth = this->_thread_pool->get(thread_pool::thread_type_controller);
+	handler_controller* ch = new handler_controller(cth, this->_cluster);
+	cth->trigger(ch);
+
 	key_resolver::type t;
 	key_resolver::type_cast(ini_option_object().get_partition_type(), t);
 	// XXX: fix this interface...just passing key resolver object will do? refactor when another partition type is added
@@ -176,9 +180,9 @@ int flarei::startup(int argc, char **argv) {
 		return -1;
 	}
 
-	shared_thread th = this->_thread_pool->get(thread_pool::thread_type_alarm);
-	handler_alarm* h = _new_ handler_alarm(th);
-	th->trigger(h);
+	shared_thread ath = this->_thread_pool->get(thread_pool::thread_type_alarm);
+	handler_alarm* ah = new handler_alarm(ath);
+	ath->trigger(ah);
 
 	if (this->_set_pid() < 0) {
 		return -1;

@@ -4,7 +4,7 @@ AC_PREREQ(2.59)
 AC_INIT(flare, 1.0.16)
 AC_CONFIG_SRCDIR(src/flared/flared.cc)
 AM_INIT_AUTOMAKE
-AM_CONFIG_HEADER(src/config.h)
+AC_CONFIG_HEADERS(src/config.h)
 AC_CANONICAL_HOST
 
 # Checks for programs.

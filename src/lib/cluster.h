@@ -206,6 +206,8 @@ public:
 	int activate_node(bool skip_ready_state = false);
 	int deactivate_node();
 	int shutdown_node();
+	int request_down_node(string node_server_name, int node_server_port);
+	int request_up_node(string node_server_name, int node_server_port);
 	proxy_request pre_proxy_read(op_proxy_read* op, storage::entry& e, void* parameter, shared_queue_proxy_read& q);
 	proxy_request pre_proxy_write(op_proxy_write* op, shared_queue_proxy_write& q, uint64_t generic_value = 0);
 	proxy_request post_proxy_write(op_proxy_write* op, bool sync = false);

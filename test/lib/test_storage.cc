@@ -71,5 +71,25 @@ namespace test_storage
 												e.get_key_hash_value("MINUSminusMINUSminusMINUSminusMINUS", ha));
 		cut_assert_equal_int(1, e.get_key_hash_value("\0NOTUSED", ha));
 	}
+
+	void test_hash_algorithm_murmur()
+	{
+		storage::hash_algorithm ha = storage::hash_algorithm_murmur;
+		storage::entry e;
+		e.key = "";
+		cut_assert_equal_int(0, e.get_key_hash_value("", ha));
+		cut_assert_equal_int(919031308, e.get_key_hash_value("Flare", ha));
+		cut_assert_equal_int(0, e.get_key_hash_value("\0NOTUSED", ha));
+	}
+
+	void test_hash_algorithm_jenkins()
+	{
+		storage::hash_algorithm ha = storage::hash_algorithm_jenkins;
+		storage::entry e;
+		e.key = "";
+		cut_assert_equal_int(559038724, e.get_key_hash_value("", ha));
+		cut_assert_equal_int(1155665962, e.get_key_hash_value("Flare", ha));
+		cut_assert_equal_int(559038724, e.get_key_hash_value("\0NOTUSED", ha));
+	}
 }
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 noexpandtab autoindent

@@ -1,0 +1,31 @@
+Source: flare
+Section: misc
+Priority: extra
+Maintainer: Masaki Fujimoto <fujimoto@php.net>
+Uploaders: Kiyoshi Ikehara <kiyoshi.ikehara@gree.net>, Benjamin Surma <benjamin.surma@gree.net>
+Build-Depends: debhelper (>= 5),
+               autotools-dev,
+               libtokyocabinet-dev,
+               libboost-program-options-dev,
+               libboost-regex-dev,
+               libboost-serialization-dev,
+               libkyotocabinet-dev,
+               libhashkit-dev
+Standards-Version: 3.8.0
+
+Package: flare
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: Persistent and distributed key-value storage with kyotocabinet support
+ Flare is a distributed, and persistent key-value storage
+ compatible with memcached, with several additional features:
+  * persistent storage
+  * pluggable storage
+   - Tokyo Cabinet
+   - Kyoto Cabinet (experimental)
+  * data replication (synchronous or asynchronous)
+  * data partitioning
+  * dynamic reconstruction, and partitioning
+  * node monitoring and failover
+  * request proxy
+  * no limit on key and value lengths

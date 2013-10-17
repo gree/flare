@@ -21,6 +21,7 @@
 #include "op_proxy_read.h"
 #include "op_proxy_write.h"
 #include "queue_node_sync.h"
+#include "queue_node_state.h"
 #include "queue_proxy_read.h"
 #include "queue_proxy_write.h"
 #include "queue_update_monitor_option.h"
@@ -38,7 +39,7 @@ namespace flare {
 cluster::cluster(thread_pool* tp, string data_dir, string server_name, int server_port):
 		_thread_pool(tp),
 		_key_hash_algorithm(storage::hash_algorithm_simple),
-		_proxy_hash_algorithm(storage::hash_algorithm_adler32),
+		_proxy_hash_algorithm(storage::hash_algorithm_murmur),
 		_key_resolver(NULL),
 		_storage(NULL),
 		_data_dir(data_dir),
@@ -900,6 +901,22 @@ int cluster::set_node_state(string node_server_name, int node_server_port, state
 	return 0;
 }
 
+/*
+ * [index] request node down
+ */
+int cluster::request_down_node(string node_server_name, int node_server_port) {
+	shared_queue_node_state q(new queue_node_state(node_server_name, node_server_port, queue_node_state::state_operation_down));
+	return this->_enqueue(q, thread_pool::thread_type_controller, false);
+}
+
+/*
+ * [index] request node up
+ */
+int cluster::request_up_node(string node_server_name, int node_server_port) {
+	shared_queue_node_state q(new queue_node_state(node_server_name, node_server_port, queue_node_state::state_operation_up));
+	return this->_enqueue(q, thread_pool::thread_type_controller, false);
+}
+
 /**
  *	reconstruct all node map
  */
@@ -1123,7 +1140,7 @@ cluster::proxy_request cluster::pre_proxy_read(op_proxy_read* op, storage::entry
 	vector<string> proxy = op->get_proxy();
 	proxy.push_back(this->_node_key);
 	shared_queue_proxy_read q(new queue_proxy_read(this, this->_storage, proxy, e, parameter, op->get_ident()));
-	if (this->_enqueue(shared_static_cast<thread_queue, queue_proxy_read>(q), node_key, e.get_key_hash_value(this->_proxy_hash_algorithm), true) < 0) {
+	if (this->_enqueue(static_pointer_cast<thread_queue, queue_proxy_read>(q), node_key, e.get_key_hash_value(this->_proxy_hash_algorithm), true) < 0) {
 		return proxy_request_error_enqueue;
 	}
 	q_result = q;
@@ -1165,7 +1182,7 @@ cluster::proxy_request cluster::pre_proxy_write(op_proxy_write* op, shared_queue
 	proxy.push_back(this->_node_key);
 	shared_queue_proxy_write q(new queue_proxy_write(this, this->_storage, proxy, e, op->get_ident()));
 	q->set_generic_value(generic_value);
-	if (this->_enqueue(shared_static_cast<thread_queue, queue_proxy_write>(q), p.master.node_key, e.get_key_hash_value(this->_proxy_hash_algorithm), sync) < 0) {
+	if (this->_enqueue(static_pointer_cast<thread_queue, queue_proxy_write>(q), p.master.node_key, e.get_key_hash_value(this->_proxy_hash_algorithm), sync) < 0) {
 		return proxy_request_error_enqueue;
 	}
 	if (sync) {

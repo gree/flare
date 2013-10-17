@@ -16,3 +16,6 @@ Makefile.in
 /cscope.*
 /tags
 /test/log
+/test/*.log
+/test/*.trs
+/test-driver

@@ -5,7 +5,7 @@ AC_PREREQ(2.59)
 AC_INIT(flare, 1.0.17)
 AC_CONFIG_SRCDIR(src/flared/flared.cc)
 AM_INIT_AUTOMAKE
-AM_CONFIG_HEADER(src/config.h)
+AC_CONFIG_HEADERS(src/config.h)
 AC_CANONICAL_HOST
 
 
@@ -37,6 +37,7 @@ AC_CHECK_LIB(boost_regex, main, [], [AC_CHECK_LIB(boost_regex-mt, main, [], [AC_
 AC_CHECK_LIB(boost_serialization, main, [], [AC_CHECK_LIB(boost_serialization-mt, main, [], [AC_MSG_ERROR(boost_serialization not found)])])
 AC_CHECK_LIB(pthread, pthread_create, [], [AC_MSG_ERROR(libpthread not found)])
 AC_CHECK_LIB(z, main, [], [AC_MSG_ERROR(zlib not found)])
+AC_CHECK_LIB(hashkit, libhashkit_murmur, [], [AC_MSG_ERROR(libhashkit not found)])
 
 # Tokyo Cabinet
 AC_ARG_WITH(tokyocabinet,

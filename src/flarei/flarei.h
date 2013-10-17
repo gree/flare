@@ -11,6 +11,7 @@
 #include "app.h"
 #include "handler_alarm.h"
 #include "handler_request.h"
+#include "handler_controller.h"
 #include "ini_option.h"
 #include "stats_index.h"
 

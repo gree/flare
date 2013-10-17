@@ -110,7 +110,7 @@ int storage_kch::set(entry &e, result &r, int b) {
 	int mutex_index = 0;
 
 	if ((b & behavior_skip_lock) == 0) {
-		mutex_index = e.get_key_hash_value(hash_algorithm_adler32) % this->_mutex_slot_size;
+		mutex_index = e.get_key_hash_value(hash_algorithm_murmur) % this->_mutex_slot_size;
 	}
 
 	uint8_t *p = NULL;
@@ -143,19 +143,16 @@ int storage_kch::set(entry &e, result &r, int b) {
 			st_gone,
 		};
 		int e_current_st = st_alive;
-		if (b != 0) {
-			if (e_current_exists == 0) {
-				if ((b & behavior_skip_timestamp) == 0 && e_current.expire > 0 && e_current.expire <= stats_object->get_timestamp()) {
-					e_current_st = st_gone;
-				}
-			} else {
-				if ((b & behavior_skip_timestamp) == 0 && e_current.expire > 0 && e_current.expire > stats_object->get_timestamp()) {
-					e_current_st = st_not_expired;
-				} else {
-					e_current_st = st_gone;
-				}
+		if (e_current_exists == 0) {
+			if ((b & behavior_skip_timestamp) == 0 && e_current.expire > 0 && e_current.expire <= stats_object->get_timestamp()) {
+				e_current_st = st_gone;
 			}
-			log_debug("determined state (st=%d)", e_current_st);
+		} else {
+			if ((b & behavior_skip_timestamp) == 0 && e_current.expire > 0 && e_current.expire > stats_object->get_timestamp()) {
+				e_current_st = st_not_expired;
+			} else {
+				e_current_st = st_gone;
+			}
 		}
 
 		// check for "add"
@@ -186,21 +183,21 @@ int storage_kch::set(entry &e, result &r, int b) {
 				r = result_not_found;
 				throw 0;
 			}
-			if ((e_current_st != st_not_expired && e.version != e_current.version) || (e_current_st == st_not_expired && e.version != (e_current.version - 1))) {
+			if (e.version != e_current.version) {
 				log_info("behavior=cas and specified version is not equal to current version -> skip setting (current=%llu, specified=%llu)", e_current.version, e.version);
 				r = result_exists;
 				throw 0;
 			}
 			e.version++;
+		} else if (b & behavior_touch) {
+			// touch does not update the version
+			e.version = e_current.version;
 		} else if ((b & behavior_skip_version) == 0 && e.version != 0) {
-			if ((e_current_exists == 0 || (b & behavior_dump) != 0) && e.version <= e_current.version) {
+			if ((e_current_st == st_alive || (b & behavior_dump) != 0) && e.version <= e_current.version) {
 				log_info("specified version is older than (or equal to) current version -> skip setting (current=%u, specified=%u)", e_current.version, e.version);
 				r = result_not_stored;
 				throw 0;
 			}
-		} else if (b & behavior_touch) {
-			// touch does not update the version
-			e.version = e_current.version;
 		} else if (e.version == 0) {
 			e.version = e_current.version + 1;
 			log_debug("updating version (version=%llu)", e.version);
@@ -297,7 +294,7 @@ int storage_kch::incr(entry &e, uint64_t value, result &r, bool increment, int b
 	int mutex_index = 0;
 
 	if ((b & behavior_skip_lock) == 0) {
-		mutex_index = e.get_key_hash_value(hash_algorithm_adler32) % this->_mutex_slot_size;
+		mutex_index = e.get_key_hash_value(hash_algorithm_murmur) % this->_mutex_slot_size;
 	}
 
 	uint8_t *tmp_data = NULL;
@@ -428,7 +425,7 @@ int storage_kch::get(entry &e, result &r, int b) {
 	bool expired = false;
 
 	if ((b & behavior_skip_lock) == 0) {
-		mutex_index = e.get_key_hash_value(hash_algorithm_adler32) % this->_mutex_slot_size;
+		mutex_index = e.get_key_hash_value(hash_algorithm_murmur) % this->_mutex_slot_size;
 	}
 
 	try {
@@ -493,7 +490,7 @@ int storage_kch::remove(entry &e, result &r, int b) {
 	int mutex_index = 0;
 
 	if ((b & behavior_skip_lock) == 0) {
-		mutex_index = e.get_key_hash_value(hash_algorithm_adler32) % this->_mutex_slot_size;
+		mutex_index = e.get_key_hash_value(hash_algorithm_murmur) % this->_mutex_slot_size;
 	}
 
 	try {
@@ -504,7 +501,7 @@ int storage_kch::remove(entry &e, result &r, int b) {
 		entry e_current;
 		int e_current_exists = this->_get_header(e.key, e_current);
 		if ((b & behavior_skip_version) == 0 && e.version != 0) {
-			if (((b & behavior_version_equal) == 0 && e.version <= e_current.version) || ((b & behavior_version_equal) != 0 && e.version != e_current.version)) {
+			if (((b & behavior_version_equal) == 0 && e.version < e_current.version) || ((b & behavior_version_equal) != 0 && e.version != e_current.version)) {
 				log_info("specified version is older than (or equal to) current version -> skip removing (current=%u, specified=%u)", e_current.version, e.version);
 				r = result_not_found;
 				throw 0;
@@ -534,13 +531,11 @@ int storage_kch::remove(entry &e, result &r, int b) {
 			log_err("%s failed: %s (%d)","HashDB::remove()", error.message(), error.code());
 			throw - 1;
 		}
-		if (expired == false) {
-			if (e.version == 0) {
-				e.version = e_current.version + 1;
-				log_debug("updating version (version=%llu)", e.version);
-			}
-			this->_set_header_cache(e.key, e);
+
+		if (e.version == 0) {
+			e.version = e_current.version;
 		}
+		this->_set_header_cache(e.key, e);
 	} catch (int error) {
 		if ((b & behavior_skip_lock) == 0) {
 			pthread_rwlock_unlock(&this->_mutex_slot[mutex_index]);

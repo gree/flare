@@ -13,6 +13,7 @@
 #include "logger.h"
 #include "util.h"
 
+#include <libhashkit/hashkit.h>
 #include <zlib.h>
 
 using namespace std;
@@ -85,6 +86,8 @@ public:
 		hash_algorithm_bitshift,
 		hash_algorithm_crc32,
 		hash_algorithm_adler32,
+		hash_algorithm_murmur,
+		hash_algorithm_jenkins,
 	};
 
 	enum									parse_type {
@@ -147,6 +150,12 @@ public:
 				// Note that the result value isn't adler32 because this function returns 31-bit value.
 				// The initial value of alder is 1.
 				r = adler32(adler32(0L, Z_NULL, 0), (const Bytef*)p, strlen(p));
+				break;
+			case hash_algorithm_murmur:
+				r = libhashkit_murmur(p, strlen(p));
+				break;
+			case hash_algorithm_jenkins:
+				r = libhashkit_jenkins(p, strlen(p));
 				break;
 			}
 			if (r < 0) {
@@ -336,6 +345,10 @@ public:
 			t = hash_algorithm_crc32;
 		} else if (s == "adler32") {
 			t = hash_algorithm_adler32;
+		} else if (s == "murmur") {
+			t = hash_algorithm_murmur;
+		} else if (s == "jenkins") {
+			t = hash_algorithm_jenkins;
 		} else {
 			return -1;
 		}
@@ -352,6 +365,10 @@ public:
 			return "crc32";
 		case hash_algorithm_adler32:
 			return "adler32";
+		case hash_algorithm_murmur:
+			return "murmur";
+		case hash_algorithm_jenkins:
+			return "jenkins";
 		}
 		return "";
 	}

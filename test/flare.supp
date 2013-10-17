@@ -1,0 +1,26 @@
+{
+   Work-around for cutter false-positive
+   Memcheck:Leak
+   fun:malloc
+   fun:g_malloc
+   fun:g_slice_alloc
+   fun:g_list_append
+   obj:/usr/lib/cutter/module/ui/console.so
+   obj:/usr/lib/cutter/module/ui/console.so
+   fun:g_closure_invoke
+   obj:/usr/lib/x86_64-linux-gnu/libgobject-2.0.so.*
+   fun:g_signal_emit_valist
+   fun:g_signal_emit_by_name
+   fun:cut_run_context_emit_complete_run
+   fun:cut_runner_run
+}
+{
+   Ignore leaks due to incorrect thread pool usage
+   Memcheck:Leak
+   fun:_Znwm
+   fun:_ZN4gree5flare11thread_pool14_create_threadEv
+   fun:_ZN4gree5flare11thread_pool3getEi
+   fun:_ZN16test_thread_pool*
+   ...
+   fun:cut_runner_run
+}

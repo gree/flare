@@ -84,7 +84,6 @@ std::string storage_tester::get_type_key(entry_type type) {
 		case et_removed: return "removed";
 		case et_number: return "number";
 		case et_zero: return "zero";
-		case et_newer: return "newer";
 	}
 }
 
@@ -96,7 +95,6 @@ std::string storage_tester::get_type_value(entry_type type) {
 		case et_removed: return "removed";
 		case et_number: return "25";
 		case et_zero: return "0";
-		case et_newer: return "newer";
 	}
 }
 
@@ -119,10 +117,6 @@ storage::entry storage_tester::make_entry(entry_type type) {
 		case et_removed:
 			entry.expire = util::realtime(3600); // now + 1h
 			break;
-		case et_newer:
-			entry.expire = 0;
-			entry.version += 1;
-			break;
 		default:
 			entry.expire = 0;
 			break;
@@ -137,7 +131,7 @@ std::string storage_tester::get_entry_value(storage::entry &entry) {
 }
 
 void storage_tester::lock_entry(storage::entry &e, bool write) {
-	int mutex_index = e.get_key_hash_value(storage::hash_algorithm_adler32) % this->_helper->_mutex_slot_size;
+	int mutex_index = e.get_key_hash_value(storage::hash_algorithm_murmur) % this->_helper->_mutex_slot_size;
 	if (write) {
 		pthread_rwlock_wrlock(&this->_helper->_mutex_slot[mutex_index]);
 	} else {
@@ -146,7 +140,7 @@ void storage_tester::lock_entry(storage::entry &e, bool write) {
 }
 
 void storage_tester::unlock_entry(storage::entry &e) {
-	int mutex_index = e.get_key_hash_value(storage::hash_algorithm_adler32) % this->_helper->_mutex_slot_size;
+	int mutex_index = e.get_key_hash_value(storage::hash_algorithm_murmur) % this->_helper->_mutex_slot_size;
 	pthread_rwlock_unlock(&this->_helper->_mutex_slot[mutex_index]);
 }
 
@@ -177,11 +171,6 @@ void storage_tester::before_each() {
 	this->_current_entries_nb++;
 
 	entry = make_entry(et_zero);
-	cut_assert_equal_int(0, this->_container->set(entry, result, storage::behavior_skip_version));
-	cut_assert_equal_int(storage::result_stored, result);
-	this->_current_entries_nb++;
-
-	entry = make_entry(et_newer);
 	cut_assert_equal_int(0, this->_container->set(entry, result, storage::behavior_skip_version));
 	cut_assert_equal_int(storage::result_stored, result);
 	this->_current_entries_nb++;
@@ -532,7 +521,7 @@ void storage_tester::iter_next_concurrent(concurrent_test_type type) {
 	}
 }
 
-storage::entry storage_tester::prepare_set_operation(entry_type type, bool noreply, int behaviors) {
+storage::entry storage_tester::prepare_set_operation(entry_type type, version_type version, bool noreply, int behaviors) {
 	std::string test_data = "*data*";
 
 	storage::entry entry;
@@ -548,7 +537,6 @@ storage::entry storage_tester::prepare_set_operation(entry_type type, bool norep
 		case et_expired:
 		case et_number:
 		case et_zero:
-		case et_newer:
 			cut_assert_equal_int(storage::result_none, result);
 			cut_assert_equal_string(this->get_type_value(type).c_str(), stored_data.c_str());
 			break;
@@ -565,6 +553,21 @@ storage::entry storage_tester::prepare_set_operation(entry_type type, bool norep
 		this->lock_entry(entry);
 	}
 
+	switch (version) {
+		case vt_disabled:
+			entry.version = 0;
+			break;
+		case vt_older:
+			entry.version = default_version - 1;
+			break;
+		case vt_equal:
+			entry.version = default_version;
+			break;
+		case vt_newer:
+			entry.version = default_version + 1;
+			break;
+	}
+
 	return entry;
 }
 
@@ -574,18 +577,27 @@ void storage_tester::end_set_operation(storage::entry &e, int behaviors) {
 	}
 }
 
-void storage_tester::perform_set_check(storage::entry &entry, entry_type type, int b) {
+void storage_tester::perform_set_check(storage::entry &entry, entry_type type, version_type version, int b) {
 	storage::result result;
 
-	cut_assert_equal_int(0, this->_container->set(entry, result, b));
-	cut_assert_equal_int(storage::result_stored, result);
+	if (version == vt_disabled || version == vt_newer || (b & storage::behavior_skip_version)
+			|| type == et_nonexistent
+			|| (type == et_expired && !(b & storage::behavior_skip_timestamp))
+			|| type == et_removed) {
+		cut_assert_equal_int(0, this->_container->set(entry, result, b));
+		cut_assert_equal_int(storage::result_stored, result);
+	} else {
+		cut_assert_equal_int(0, this->_container->set(entry, result, b));
+		cut_assert_equal_int(storage::result_not_stored, result);
+	}
 }
 
-void storage_tester::perform_append_prepend_check(storage::entry &entry, entry_type type, int b) {
+void storage_tester::perform_append_prepend_check(storage::entry &entry, entry_type type, version_type version, int b) {
 	storage::result result;
 	std::string stored_data;
 
-	if (type == et_normal) {
+	if (type == et_normal
+			&& (version == vt_disabled || version == vt_newer || (b & storage::behavior_skip_version))) {
 		std::string expected = (b & storage::behavior_append)
 			? get_type_value(type) + get_entry_value(entry)
 			: get_entry_value(entry) + get_type_value(type);
@@ -602,15 +614,16 @@ void storage_tester::perform_append_prepend_check(storage::entry &entry, entry_t
 	}
 }
 
-void storage_tester::perform_add_check(storage::entry &entry, entry_type type, int b) {
-	bool skip_timestamp = b & storage::behavior_skip_timestamp;
+void storage_tester::perform_add_check(storage::entry &entry, entry_type type, version_type version, int b) {
 	storage::result result;
 	std::string stored_data;
 
 	cut_assert_not_equal_int(0, b & storage::behavior_add);
 	cut_assert_equal_int(0, this->_container->set(entry, result, b));
 
-	if (type == et_normal || (type == et_expired && skip_timestamp) || (type == et_removed && !skip_timestamp)) {
+	if (type == et_normal
+			|| (type == et_expired && (b & storage::behavior_skip_timestamp))
+			|| (type == et_removed && !(b & storage::behavior_skip_timestamp))) {
 		cut_assert_equal_int(storage::result_not_stored, result);
 	} else {
 		cut_assert_equal_int(storage::result_stored, result);
@@ -619,15 +632,16 @@ void storage_tester::perform_add_check(storage::entry &entry, entry_type type, i
 	}
 }
 
-void storage_tester::perform_replace_check(storage::entry &entry, entry_type type, int b) {
-	bool skip_timestamp = b & storage::behavior_skip_timestamp;
+void storage_tester::perform_replace_check(storage::entry &entry, entry_type type, version_type version, int b) {
 	storage::result result;
 	std::string stored_data;
 
 	cut_assert_not_equal_int(0, b & storage::behavior_replace);
 	cut_assert_equal_int(0, this->_container->set(entry, result, b));
 
-	if (type == et_normal || (type == et_expired && skip_timestamp)) {
+	if ((type == et_normal
+				|| (type == et_expired && (b & storage::behavior_skip_timestamp)))
+			&& (version == vt_disabled || version == vt_newer || (b & storage::behavior_skip_version))) {
 		cut_assert_equal_int(storage::result_stored, result);
 		this->get(entry.key, stored_data, NULL, NULL, b & storage::behavior_skip_lock);
 		cut_assert_equal_memory(entry.data.get(), entry.size, stored_data.data(), stored_data.size());
@@ -636,40 +650,39 @@ void storage_tester::perform_replace_check(storage::entry &entry, entry_type typ
 	}
 }
 
-void storage_tester::perform_cas_check(storage::entry &entry, entry_type type, int b) {
-	bool skip_timestamp = b & storage::behavior_skip_timestamp;
+void storage_tester::perform_cas_check(storage::entry &entry, entry_type type, version_type version, int b) {
 	storage::result result;
 
 	cut_assert_not_equal_int(0, b & storage::behavior_cas);
 
-	if (type == et_normal || (type == et_expired && skip_timestamp) ||
-	    (type == et_removed && !skip_timestamp)) {
-		entry.version = 5;
+	if (type == et_normal
+			|| (type == et_expired && (b & storage::behavior_skip_timestamp))
+			|| (type == et_removed && !(b & storage::behavior_skip_timestamp))) {
 		cut_assert_equal_int(0, this->_container->set(entry, result, b));
-		cut_assert_equal_int(storage::result_exists, result);
-		entry.version = type != et_removed ? default_version : default_version - 1;
-		cut_assert_equal_int(0, this->_container->set(entry, result, b));
-		cut_assert_equal_int(storage::result_stored, result);
+		if (version == vt_equal) {
+			cut_assert_equal_int(storage::result_stored, result);
+		} else {
+			cut_assert_equal_int(storage::result_exists, result);
+		}
 	} else {
 		cut_assert_equal_int(0, this->_container->set(entry, result, b));
 		cut_assert_equal_int(storage::result_not_found, result);
 	}
 }
 
-void storage_tester::perform_touch_check(storage::entry &entry, entry_type type, int b) {
+void storage_tester::perform_touch_check(storage::entry &entry, entry_type type, version_type version, int b) {
 	storage::result result;
 	std::string stored_value = get_type_value(type);
 
-	storage::entry set_input;
-	set_input.key = entry.key;
-	set_input.expire = util::realtime(60);
+	entry.version = 0; // Version checks are ignored by touch anyway
+	entry.expire = util::realtime(60);
 
+	cut_assert_equal_int(0, this->_container->set(entry, result, b));
 	if (type == et_normal) {
-		cut_assert_equal_int(0, this->_container->set(set_input, result, b));
 		cut_assert_equal_int(storage::result_touched, result);
-		cut_assert_equal_int(default_version, set_input.version);
-		cut_assert_equal_int(stored_value.size(), set_input.size);
-		cut_assert_equal_memory(stored_value.data(), stored_value.size(), set_input.data.get(), set_input.size);
+		cut_assert_equal_int(default_version, entry.version);
+		cut_assert_equal_int(stored_value.size(), entry.size);
+		cut_assert_equal_memory(stored_value.data(), stored_value.size(), entry.data.get(), entry.size);
 		// check new expiration
 		storage::entry get_input;
 		get_input.key = entry.key;
@@ -680,12 +693,11 @@ void storage_tester::perform_touch_check(storage::entry &entry, entry_type type,
 		cut_assert_equal_memory(stored_value.data(), stored_value.size(), get_input.data.get(), get_input.size);
 		cut_assert_equal_double(util::realtime(60), 2, get_input.expire);
 	}	else {
-		cut_assert_equal_int(0, this->_container->set(set_input, result, b));
 		cut_assert_equal_int(storage::result_not_found, result);
 	}
 }
 
-void storage_tester::perform_dump_check(storage::entry &entry, entry_type type, int b) {
+void storage_tester::perform_dump_check(storage::entry &entry, entry_type type, version_type version, int b) {
 	storage::result result;
 
 	entry.version = default_version;
@@ -709,32 +721,32 @@ void storage_tester::perform_dump_check(storage::entry &entry, entry_type type, 
 	cut_assert_equal_int(storage::result_stored, result);
 }
 
-void storage_tester::set_check(entry_type type, bool noreply, int behaviors) {
+void storage_tester::set_check(entry_type type, version_type version, bool noreply, int behaviors) {
 	// Prepare test data
-	storage::entry entry = this->prepare_set_operation(type, noreply, behaviors);
+	storage::entry entry = this->prepare_set_operation(type, version, noreply, behaviors);
 
 	// Perform test
 	if (behaviors & (storage::behavior_append | storage::behavior_prepend)) {
-		perform_append_prepend_check(entry, type, behaviors);
+		perform_append_prepend_check(entry, type, version, behaviors);
 	} else if (behaviors & storage::behavior_add) {
-		perform_add_check(entry, type, behaviors);
+		perform_add_check(entry, type, version, behaviors);
 	} else if (behaviors & storage::behavior_replace) {
-		perform_replace_check(entry, type, behaviors);
+		perform_replace_check(entry, type, version, behaviors);
 	} else if (behaviors & storage::behavior_cas) {
-		perform_cas_check(entry, type, behaviors);
+		perform_cas_check(entry, type, version, behaviors);
 	} else if (behaviors & storage::behavior_touch) {
-		perform_touch_check(entry, type, behaviors);
+		perform_touch_check(entry, type, version, behaviors);
 	} else if (behaviors & storage::behavior_dump) {
-		perform_dump_check(entry, type, behaviors);
+		perform_dump_check(entry, type, version, behaviors);
 	} else {
-		perform_set_check(entry, type, behaviors);
+		perform_set_check(entry, type, version, behaviors);
 	}
 
 	// Cleaning
 	this->end_set_operation(entry, behaviors);
 }
 
-void storage_tester::perform_incr_check(storage::entry &entry, bool is_incr, entry_type type, int b) {
+void storage_tester::perform_incr_check(storage::entry &entry, bool is_incr, entry_type type, version_type version, int b) {
 	storage::result result;
 	
 	cut_assert_equal_int(0, this->_container->incr(entry, 1, result, is_incr, b));
@@ -766,58 +778,44 @@ void storage_tester::perform_incr_check(storage::entry &entry, bool is_incr, ent
 	}
 }
 
-void storage_tester::incr_check(bool is_incr, entry_type type, bool noreply, int behaviors) {
+void storage_tester::incr_check(bool is_incr, entry_type type, version_type version, bool noreply, int behaviors) {
 	// Prepare test data
-	storage::entry entry = this->prepare_set_operation(type, noreply, behaviors);
+	storage::entry entry = this->prepare_set_operation(type, version, noreply, behaviors);
 
 	// Perform test
-	perform_incr_check(entry, is_incr, type, behaviors);
+	perform_incr_check(entry, is_incr, type, version, behaviors);
 
 	// Cleaning
 	this->end_set_operation(entry, behaviors);
 }
 
-void storage_tester::remove_check(entry_type type, int behaviors) {
+void storage_tester::remove_check(entry_type type, version_type version, int behaviors) {
 	// Prepare test data
-	storage::entry entry = this->prepare_set_operation(type, false, behaviors);
-	// Entries are inserted in the DB with the version number "default_version"
-	// Since passing an entry with version == 0 to storage::remove() disables
-	// version checking, all remove tests are run with default_version + 1,
-	// except for et_zero, where we test that version checks are disabled.
-	entry.version = type != et_zero ? default_version + 1 : 0;
+	storage::entry entry = this->prepare_set_operation(type, version, false, behaviors);
 
 	// Perform test: delete the entry
 	storage::result result;
 	cut_assert_equal_int(0, this->_container->remove(entry, result, behaviors));
-	if (type == et_normal /* normal case */
-			|| type == et_zero /* version check disabled */
-			|| type == et_expired && (behaviors & storage::behavior_skip_timestamp) /* expiry check disabled */
-			|| type == et_newer && (behaviors & storage::behavior_skip_version) /* version check disabled */) {
+	if ((type == et_normal /* normal case */
+				|| type == et_expired && (behaviors & storage::behavior_skip_timestamp) /* expiry check disabled */)
+			&& (version != vt_older || (behaviors & storage::behavior_skip_version))) {
 		cut_assert_equal_int(storage::result_deleted, result);
-	} else if (type == et_newer) {
-		// In this case, the entry is the same version (default_version + 1),
-		// so deletion fails at first
+		// Try to get the deleted object; this should fail
+		// Note: skip_timestamp is used here to ensure the item is really deleted,
+		//       and not just expired
+		cut_assert_equal_int(0, this->_container->get(entry, result, (behaviors & storage::behavior_skip_lock) | storage::behavior_skip_timestamp));
 		cut_assert_equal_int(storage::result_not_found, result);
-		entry.version = default_version + 2;
-		cut_assert_equal_int(0, this->_container->remove(entry, result, behaviors));
-		cut_assert_equal_int(storage::result_deleted, result);
 	} else {
 		cut_assert_equal_int(storage::result_not_found, result);
 	}
-
-	// Try to get the deleted object; this should fail
-	// Note: skip_timestamp is used here to ensure the item is really deleted,
-	//       and not just expired
-	cut_assert_equal_int(0, this->_container->get(entry, result, (behaviors & storage::behavior_skip_lock) | storage::behavior_skip_timestamp));
-	cut_assert_equal_int(storage::result_not_found, result);
 
 	// Cleaning
 	this->end_set_operation(entry, behaviors);
 }
 
-void storage_tester::get_check(entry_type type, int behaviors) {
+void storage_tester::get_check(entry_type type, version_type version, int behaviors) {
 	// Prepare test data
-	storage::entry entry = this->prepare_set_operation(type, false, behaviors);
+	storage::entry entry = this->prepare_set_operation(type, version, false, behaviors);
 	entry.data = shared_byte();
 
 	// Perform test: attempt to get the entry

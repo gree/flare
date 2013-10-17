@@ -1,3 +1,27 @@
+* [2013/10/17] 1.0.18 release
+
+  * feature updates
+    - Skip memory tests with valgrind < 3.8
+    - Do not build tests when packaging
+    - Switched from simple/adler32 to jenkins/murmur
+    - Unified packaging for debian and ubuntu
+    - Made core dump file size limit configurable
+
+  * bug fixes
+    - Fix for deletion replication bug
+    - Fixed CAS behavior when using defered deletion
+    - Fixed compilation warning
+    - Skip version checks on expired and removed items
+    - Added version checks to storage tests
+    - Ignore version on touch commands
+    - Always store the last version number on deletion
+    - Fixed build on Ubuntu
+    - Monitor failover fix
+    - Fix handler_monitor to avoid deadlock caused by simultaneous node down events
+    - Fixes for Ubuntu Saucy Salamander (13.10)
+    - Ignore new test-driver script
+    - Fixed erroneous memory leak report
+
 * [2013/04/10] 1.0.17-2 release
 
   * feature updates

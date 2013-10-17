@@ -1,9 +1,55 @@
+commit dcaa0810419c8080debe168737fe575cb474669a
+Author: Yoshimoto Masanori <masanori.yoshimoto@gree.net>
+Date:   Thu Oct 17 13:12:32 2013 +0900
+
+    Flare 1.0.18 new features and bug fixes
+    
+    * New features:
+      - Skip memory tests with valgrind < 3.8
+      - Do not build tests when packaging
+      - Switched from simple/adler32 to jenkins/murmur
+      - Unified packaging for debian and ubuntu
+      - Made core dump file size limit configurable
+    
+    * Bug fixes:
+      - Fix for deletion replication bug
+      - Fixed CAS behavior when using defered deletion
+      - Fixed compilation warning
+      - Skip version checks on expired and removed items
+      - Added version checks to storage tests
+      - Ignore version on touch commands
+      - Always store the last version number on deletion
+      - Fixed build on Ubuntu
+      - Monitor failover fix
+      - Fix handler_monitor to avoid deadlock caused by simultaneous node down events
+      - Fixes for Ubuntu Saucy Salamander (13.10)
+      - Ignore new test-driver script
+      - Fixed erroneous memory leak report
+
+commit ed64f6acc392f9827c41e18cef1fca4550ecd778
+Author: Benjamin Surma <benjamin.surma@gree.net>
+Date:   Mon May 13 14:09:11 2013 +0900
+
+    Fixed tests build
+
+commit ad760a3bde610d758f6392b38f48b26a4f027ae0
+Author: Yasuaki Takebe <yasuaki.takebe@gree.co.jp>
+Date:   Thu May 9 14:58:44 2013 +0900
+
+    add storage-fp option.
+
+commit 2b3557e85deb706c6544c0d4f8aa3185e9f5b9a6
+Author: Benjamin Surma <benjamin.surma@gree.net>
+Date:   Wed Apr 10 19:38:04 2013 +0900
+
+    ready for 1.0.17.1
+
 commit 492e6d62c57d43f98d71d6ef8bf5fdd71a4ff84c
 Author: Benjamin Surma <benjamin.surma@gree.net>
 Date:   Wed Apr 10 19:30:34 2013 +0900
 
     Fixes for 1.0.17.1
-
+    
     Sanity check the thread_type value in flare.xml
     Fix and test for a duplicate thread id issue
 
@@ -31,6 +77,18 @@ Date:   Tue Feb 5 15:32:41 2013 +0900
       - Various fixes under BSD
       - Append does not reset the stored flag anymore
       - Fixes for input validation
+
+commit f62c4f0b31c9bca2b5200f2858f0c5f3cf5407bb
+Author: zaker <zgmfzaku@163.com>
+Date:   Fri Jan 25 10:29:56 2013 +0800
+
+    fix incorrect macro
+
+commit 4a18713352d5d66be4720bc3f96e1613bdcaafff
+Author: Takayuki Okazaki <takayuki.okazaki@gree.net>
+Date:   Mon Jan 21 16:20:11 2013 +0900
+
+    replace dead link to Tokyo Cabinet
 
 commit 32164d13d797ae0735c8821b2f1b56b143fd01a9
 Author: Benjamin Surma <benjamin.surma@gree.net>

@@ -1,3 +1,13 @@
+* [2013/12/20] 1.0.18-2 release
+
+ * feature updates
+   - Allow combination of reconstruct-interval and reconstruct-bwlimit
+
+ * bug fixes
+   - Fix a crash when a log message contains a format string
+   - Fixed invalid input of set command and added test cases
+   - Safety dump operation
+
 * [2013/10/17] 1.0.18 release
 
   * feature updates

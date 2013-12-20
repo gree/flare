@@ -141,7 +141,7 @@ int connection_iostream::push_back(const char* p, int bufsiz) {
  */
 int connection_iostream::write(const char* p, int bufsiz, bool buffered) {
 	_ostream->write(p, bufsiz);
-	return 0;
+	return bufsiz;
 }
 
 /**

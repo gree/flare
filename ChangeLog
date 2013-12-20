@@ -1,3 +1,19 @@
+commit 4f85f65a28a8d92d1d79d5d33f61061abac5de30
+Author: Yoshimoto Masanori <masanori.yoshimoto@gree.net>
+Date:   Fri Dec 20 17:12:46 2013 +0900
+
+    Fixes for 1.0.18.1
+    
+    Fix a crash when a log message contains a format string
+    Fixed invalid input of set command and added test cases
+    Safety dump operation
+
+commit 05387415493b664f779a88fa147d482e349c208e
+Author: Yoshimoto Masanori <masanori.yoshimoto@gree.net>
+Date:   Thu Oct 17 13:39:24 2013 +0900
+
+    ready for 1.0.18
+
 commit dcaa0810419c8080debe168737fe575cb474669a
 Author: Yoshimoto Masanori <masanori.yoshimoto@gree.net>
 Date:   Thu Oct 17 13:12:32 2013 +0900

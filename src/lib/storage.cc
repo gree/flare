@@ -78,6 +78,9 @@ int storage::entry::parse(const char*p, parse_type t) {
 			if (q[0] == '\0') {
 				log_debug("no flag found", 0);
 				return -1;
+			} else if (!util::is_unsigned_integer_string(q)) {
+				log_debug("invalid flag [%s]", q);
+				return -1;
 			}
 			this->flag = lexical_cast<uint32_t>(q);
 			log_debug("storing flag [%u]", this->flag);
@@ -93,6 +96,10 @@ int storage::entry::parse(const char*p, parse_type t) {
 					return -1;
 				}
 			} else {
+				if (!util::is_unsigned_integer_string(q)) {
+					log_debug("invalid expire [%s]", q);
+					return -1;
+				}
 				this->expire = util::realtime(lexical_cast<time_t>(q));
 				log_debug("storing expire [%ld]", this->expire);
 			}
@@ -105,14 +112,25 @@ int storage::entry::parse(const char*p, parse_type t) {
 			if (q[0] == '\0') {
 				log_debug("no size found", 0);
 				return -1;
+			} else if (!util::is_unsigned_integer_string(q)) {
+				log_debug("invalid size [%s]", q);
+				return -1;
 			}
 			this->size = lexical_cast<uint64_t>(q);
-			log_debug("storing size [%u]", this->size);
+			if (this->size > storage::entry::max_data_size) {
+				log_debug("exceed maximum data size [%llu]", this->size);
+				return -1;
+			}
+			log_debug("storing size [%llu]", this->size);
 		}
 
 		// version (if we have)
 		n += util::next_digit(p+n, q, sizeof(q));
 		if (q[0]) {
+			if (!util::is_unsigned_integer_string(q)) {
+				log_debug("invalid version [%s]", q);
+				return -1;
+			}
 			this->version = lexical_cast<uint64_t>(q);
 			log_debug("storing version [%u]", this->version);
 		} else if (t == parse_type_cas) {

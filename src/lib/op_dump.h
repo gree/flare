@@ -30,7 +30,7 @@ protected:
 	int								_partition_size;
 	int								_bwlimit;
 	int								_total_written;
-	struct timeval					_prior_tv;
+	struct timeval		_prior_tv;
 
 public:
 	op_dump(shared_connection c, cluster* cl, storage* st);
@@ -43,7 +43,7 @@ protected:
 	virtual int _run_server();
 	virtual int _run_client(int wait, int partition, int partition_size, int bwlimit);
 	virtual int _parse_text_client_parameters();
-	virtual void _sleep_for_bwlimit(int bytes_written);
+	virtual long _sleep_for_bwlimit(int bytes_written);
 };
 
 }	// namespace flare

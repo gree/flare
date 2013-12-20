@@ -13,6 +13,7 @@
 
 #include <boost/detail/endian.hpp>
 #include <boost/lexical_cast.hpp>
+#include <boost/regex.hpp>
 #include <boost/shared_array.hpp>
 #include <boost/tokenizer.hpp>
 
@@ -73,6 +74,7 @@ public:
 	static time_t realtime(time_t t);
 	static string base64_encode(const char* src, size_t src_size);
 	static char* base64_decode(string src, size_t& dst_size);
+	static inline bool is_unsigned_integer_string(const string s);
 
 	template<class T> static string vector_join(vector<T> list, string glue);
 	template<class T> static vector<T> vector_split(string s, string sep);
@@ -108,6 +110,13 @@ unsigned int util::next_digit(const char* src, char* dst, unsigned int dst_len) 
 	*q = '\0';
 
 	return p-src;
+}
+
+bool util::is_unsigned_integer_string(const string s) {
+	const char *pattern = "\\A[0-9]+\\z";
+	const regex e(pattern);
+
+	return regex_match(s, e);
 }
 
 template<class T> string util::vector_join(vector<T> list, string glue) {

@@ -8,6 +8,7 @@
  *	$Id$
  */
 #include "op_dump.h"
+#include "connection_tcp.h"
 
 namespace gree {
 namespace flare {
@@ -153,6 +154,12 @@ int op_dump::_run_server() {
 		return this->_send_result(result_server_error, "database busy");
 	}
 
+	bool nodelay_saved = false;
+	if (connection_tcp* ctp = dynamic_cast<connection_tcp*>(this->_connection.get())) {
+		ctp->get_tcp_nodelay(nodelay_saved);
+		ctp->set_tcp_nodelay(false);
+	}
+
 	key_resolver* kr = this->_cluster->get_key_resolver();
 
 	storage::entry e;
@@ -187,20 +194,28 @@ int op_dump::_run_server() {
 		}
 
 		// wait
-		if (this->_wait > 0) {
+		long elapsed_usec = 0;
+		if (this->_bwlimit > 0) {
+			elapsed_usec = this->_sleep_for_bwlimit(n);
+		}
+		if (this->_wait > 0 && this->_wait-elapsed_usec > 0) {
 			log_debug("wait for %d usec", this->_wait);
-			usleep(this->_wait);
-		} else if (this->_bwlimit > 0) {
-			this->_sleep_for_bwlimit(n); // bwlimit
+			usleep(this->_wait-elapsed_usec);
 		}
 	}
 
 	this->_storage->iter_end();
 
+	if (connection_tcp* ctp = dynamic_cast<connection_tcp*>(this->_connection.get())) {
+		ctp->set_tcp_nodelay(nodelay_saved);
+	}
+
 	if (!this->_thread) {
 		return this->_send_result(result_server_error, "thread not set");
 	} else if (this->_thread->is_shutdown_request()) {
 		return this->_send_result(result_server_error, "operation interrupted");
+	} else if (i != storage::iteration_end) {
+		return this->_send_result(result_server_error, "iteration canceled");
 	} else {
 		return this->_send_result(result_end);
 	}
@@ -282,9 +297,9 @@ int op_dump::_parse_text_client_parameters() {
 }
 
 // code from rsync 2.6.9
-void op_dump::_sleep_for_bwlimit(int bytes_written) {
+long op_dump::_sleep_for_bwlimit(int bytes_written) {
 	if (bytes_written == 0) {
-		return;
+		return 0;
 	}
 
 	this->_total_written += bytes_written;
@@ -306,7 +321,7 @@ void op_dump::_sleep_for_bwlimit(int bytes_written) {
 	long sleep_usec = this->_total_written * (one_sec/1024) / this->_bwlimit;
 	if (sleep_usec < one_sec / 10) {
 		this->_prior_tv = start_tv;
-		return;
+		return 0;
 	}
 
 	usleep(sleep_usec);
@@ -315,6 +330,8 @@ void op_dump::_sleep_for_bwlimit(int bytes_written) {
 	elapsed_usec = (this->_prior_tv.tv_sec - start_tv.tv_sec) * one_sec
 		     + (this->_prior_tv.tv_usec - start_tv.tv_usec);
 	this->_total_written = (sleep_usec - elapsed_usec) * this->_bwlimit / (one_sec/1024);
+
+	return elapsed_usec;
 }
 // }}}
 

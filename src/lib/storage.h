@@ -119,7 +119,8 @@ public:
 		uint32_t						option;
 		shared_byte					data;
 
-		static const int		header_size = sizeof(uint32_t) + sizeof(time_t) + sizeof(uint64_t) + sizeof(uint64_t);
+		static const int				header_size = sizeof(uint32_t) + sizeof(time_t) + sizeof(uint64_t) + sizeof(uint64_t);
+		static const uint64_t		max_data_size = 2147483647;
 
 		_entry() { flag = expire = size = version = option = 0; };
 
@@ -186,6 +187,7 @@ protected:
 	int										_header_cache_size;
 	TCMAP*								_header_cache_map;
 	pthread_rwlock_t			_mutex_header_cache_map;
+
 
 public:
 	storage(string data_dir, int mutex_slot_size, int header_cache_size);

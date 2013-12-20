@@ -53,6 +53,8 @@ namespace test_connection_tcp
 
 	struct connection_tcp_test : public connection_tcp
 	{
+		using connection_tcp::_addr_family;
+		using connection_tcp::_sock;
 		using connection_tcp::_read_buf;
 		using connection_tcp::_read_buf_p;
 		using connection_tcp::_read_buf_len;
@@ -105,7 +107,38 @@ namespace test_connection_tcp
 		cut_assert_equal_boolean(false, actual);
 		delete[] buffer;
 	}
-	
+
+	bool get_tcp_nodelay(sa_family_t addr_family, int sock)
+	{
+		cut_assert(addr_family != AF_UNIX);
+		int flag = 0;
+		socklen_t flaglen = sizeof(flag);
+		cut_assert_equal_int(0,
+			      getsockopt(sock, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<char*>(&flag), &flaglen));
+		return flag?true:false;
+	}
+
+	void test_connection_tcp_nodelay()
+	{
+		shared_connection c(new_connection_tcp(""));
+		c->open();
+		connection_tcp_test& ctcp = static_cast<connection_tcp_test&>(*c);
+		bool nodelay;
+		cut_assert_equal_int(0, ctcp.get_tcp_nodelay(nodelay));
+		cut_assert_equal_boolean(false, nodelay);
+		cut_assert_equal_boolean(false, get_tcp_nodelay(ctcp._addr_family, ctcp._sock));
+
+		cut_assert_equal_int(0, ctcp.set_tcp_nodelay(true));
+		cut_assert_equal_int(0, ctcp.get_tcp_nodelay(nodelay));
+		cut_assert_equal_boolean(true, nodelay);
+		cut_assert_equal_boolean(true, get_tcp_nodelay(ctcp._addr_family, ctcp._sock));
+
+		cut_assert_equal_int(0, ctcp.set_tcp_nodelay(false));
+		cut_assert_equal_int(0, ctcp.get_tcp_nodelay(nodelay));
+		cut_assert_equal_boolean(false, nodelay);
+		cut_assert_equal_boolean(false, get_tcp_nodelay(ctcp._addr_family, ctcp._sock));
+	}
+
 	void teardown()
 	{
 		delete stats_object;

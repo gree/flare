@@ -106,6 +106,9 @@ public:
 	virtual int close();
 	virtual bool is_available() const { return this->_sock >= 0 ? true : false; };
 
+	int set_tcp_nodelay(bool nodelay);
+	int get_tcp_nodelay(bool& nodelay);
+
 private:
 	int _open(string host, int port);
 	int _add_read_buf(char* p, int len);

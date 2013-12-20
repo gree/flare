@@ -39,7 +39,6 @@ namespace test_op
 			binary_header::status expected_status, const char* expected_message) {
 		const connection_sstream* connection = dynamic_cast<const connection_sstream*>(&*static_cast<test_op&>(static_cast<op&>(op_instance))._connection);
 		if (connection) {
-			cut_assert_equal_int(0, static_cast<test_op&>(static_cast<op&>(op_instance))._send_binary_result(input_result, input_message));
 			binary_response_header expected_header(static_cast<const test_op&>(static_cast<op&>(op_instance))._opcode);
 			expected_header.set_status(expected_status);
 			if (expected_message) {
@@ -50,6 +49,8 @@ namespace test_op
 			if (expected_message) {
 				expected_os.write(expected_message, strlen(expected_message));
 			}
+			cut_assert_equal_int(expected_header.get_raw_size() + expected_header.get_total_body_length(),
+				      static_cast<test_op&>(static_cast<op&>(op_instance))._send_binary_result(input_result, input_message));
 			std::string binary_output = connection->get_output();
 			cut_assert_equal_memory(expected_os.str().data(), expected_os.str().size(), binary_output.data(), binary_output.size());
 		}

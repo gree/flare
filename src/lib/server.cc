@@ -312,14 +312,6 @@ vector<shared_connection_tcp> server::wait() {
 			return connection_list;
 		}
 
-		if (addr.sa_family != AF_UNIX) {
-			flag = 1;
-			if (setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<char*>(&flag), sizeof(flag)) < 0) {
-				log_err("setsockopt() failed: %s (%d) - TCP_NODELAY", util::strerror(errno), errno);
-				return connection_list;
-			}
-		}
-
 		log_info("socket accepted (fd=%d remote=%s)", sock, addr.sa_family == AF_UNIX ? "unix domain socket" : inet_ntoa(addr_inet->sin_addr));
 		shared_connection_tcp c;
 		try {
@@ -327,6 +319,9 @@ vector<shared_connection_tcp> server::wait() {
 				c = shared_connection_tcp(new connection_tcp(sock, *addr_unix));
 			} else {
 				c = shared_connection_tcp(new connection_tcp(sock, *addr_inet));
+				if (c->set_tcp_nodelay(true) < 0) {
+					throw -1;
+				}
 			}
 		} catch (int e) {
 			return connection_list;

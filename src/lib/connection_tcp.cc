@@ -604,6 +604,46 @@ int connection_tcp::close() {
 	}
 	return 0;
 }
+
+/**
+ *	setsockopt TCP_NODELAY
+ */
+int connection_tcp::set_tcp_nodelay(bool nodelay) {
+	if (this->_sock < 0) {
+		log_warning("connection seems to be already closed (sock=%d)", this->_sock);
+		return -1;
+	}
+	if (this->_addr_family != AF_UNIX) {
+		int flag = nodelay?1:0;
+		if (setsockopt(this->_sock, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<char*>(&flag), sizeof(flag)) < 0) {
+			log_err("setsockopt() failed: %s (%d) - TCP_NODELAY", util::strerror(errno), errno);
+			return -1;
+		}
+	}
+	return 0;
+}
+
+/**
+ *	getsockopt TCP_NODELAY
+ */
+int connection_tcp::get_tcp_nodelay(bool& nodelay) {
+	if (this->_sock < 0) {
+		log_warning("connection seems to be already closed (sock=%d)", this->_sock);
+		return -1;
+	}
+	if (this->_addr_family != AF_UNIX) {
+		int flag = 0;
+		socklen_t flaglen = sizeof(flag);
+		if (getsockopt(this->_sock, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<char*>(&flag), &flaglen) < 0) {
+			log_err("getsockopt() failed: %s (%d) - TCP_NODELAY", util::strerror(errno), errno);
+			return -1;
+		}
+		nodelay = flag?true:false;
+	} else {
+		nodelay = false;
+	}
+	return 0;
+}
 // }}}
 
 // {{{ protected methods

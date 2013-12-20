@@ -77,7 +77,7 @@ void logger::emerg(const char* file, const int line, const char* func, const cha
 	vsnprintf(buf, sizeof(buf), format, op);
 	va_end(op);
 	s << buf;
-	syslog(LOG_EMERG, s.str().c_str());
+	syslog(LOG_EMERG, "%s", s.str().c_str());
 }
 
 /**
@@ -93,7 +93,7 @@ void logger::alert(const char* file, const int line, const char* func, const cha
 	vsnprintf(buf, sizeof(buf), format, op);
 	va_end(op);
 	s << buf;
-	syslog(LOG_ALERT, s.str().c_str());
+	syslog(LOG_ALERT, "%s", s.str().c_str());
 }
 
 /**
@@ -109,7 +109,7 @@ void logger::crit(const char* file, const int line, const char* func, const char
 	vsnprintf(buf, sizeof(buf), format, op);
 	va_end(op);
 	s << buf;
-	syslog(LOG_CRIT, s.str().c_str());
+	syslog(LOG_CRIT, "%s", s.str().c_str());
 }
 
 /**
@@ -125,7 +125,7 @@ void logger::err(const char* file, const int line, const char* func, const char 
 	vsnprintf(buf, sizeof(buf), format, op);
 	va_end(op);
 	s << buf;
-	syslog(LOG_ERR, s.str().c_str());
+	syslog(LOG_ERR, "%s", s.str().c_str());
 }
 
 /**
@@ -141,7 +141,7 @@ void logger::warning(const char* file, const int line, const char* func, const c
 	vsnprintf(buf, sizeof(buf), format, op);
 	va_end(op);
 	s << buf;
-	syslog(LOG_WARNING, s.str().c_str());
+	syslog(LOG_WARNING, "%s", s.str().c_str());
 }
 
 /**
@@ -157,7 +157,7 @@ void logger::notice(const char* file, const int line, const char* func, const ch
 	vsnprintf(buf, sizeof(buf), format, op);
 	va_end(op);
 	s << buf;
-	syslog(LOG_NOTICE, s.str().c_str());
+	syslog(LOG_NOTICE, "%s", s.str().c_str());
 }
 
 /**
@@ -173,7 +173,7 @@ void logger::info(const char* file, const int line, const char* func, const char
 	vsnprintf(buf, sizeof(buf), format, op);
 	va_end(op);
 	s << buf;
-	syslog(LOG_INFO, s.str().c_str());
+	syslog(LOG_INFO, "%s", s.str().c_str());
 }
 
 /**
@@ -189,7 +189,7 @@ void logger::debug(const char* file, const int line, const char* func, const cha
 	vsnprintf(buf, sizeof(buf), format, op);
 	va_end(op);
 	s << buf;
-	syslog(LOG_DEBUG, s.str().c_str());
+	syslog(LOG_DEBUG, "%s", s.str().c_str());
 
 }
 // }}}

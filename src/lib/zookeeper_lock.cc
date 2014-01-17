@@ -12,6 +12,7 @@
 #include <boost/format.hpp>
 #include <uuid/uuid.h>
 
+#include "abort.h"
 #include "util.h"
 #include "zookeeper_lock.h"
 
@@ -50,12 +51,12 @@ zookeeper_lock::zookeeper_lock(const string& connstring, const string& path, str
 		_is_owner(false) {
 	this->_wait_ts.tv_sec = 0;
 	this->_wait_ts.tv_nsec = (.5)*1000000;
-	pthread_mutex_init(&(this->_mutex_lock), NULL);
-	pthread_mutex_init(&(this->_mutex_ownership), NULL);
-	pthread_cond_init(&(this->_cond_ownership), NULL);
+	ABORT_IF_FAILURE(pthread_mutex_init(&(this->_mutex_lock), NULL), 0);
+	ABORT_IF_FAILURE(pthread_mutex_init(&(this->_mutex_ownership), NULL), 0);
+	ABORT_IF_FAILURE(pthread_cond_init(&(this->_cond_ownership), NULL), 0);
 	this->_session_state = session_state_inactive;
-	pthread_mutex_init(&(this->_mutex_session_state), NULL);
-	pthread_cond_init(&(this->_cond_session_state), NULL);
+	ABORT_IF_FAILURE(pthread_mutex_init(&(this->_mutex_session_state), NULL), 0);
+	ABORT_IF_FAILURE(pthread_cond_init(&(this->_cond_session_state), NULL), 0);
 	this->_zh = zookeeper_init(connstring.c_str(), zookeeper_lock::_global_watcher_fn,
 														 10000, 0, reinterpret_cast<void *>(this), 0);
 	this->_reset_lock();

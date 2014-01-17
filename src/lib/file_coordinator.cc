@@ -13,6 +13,7 @@
 #include <unistd.h>
 #include <fstream>
 
+#include "abort.h"
 #include "util.h"
 #include "file_coordinator.h"
 
@@ -28,7 +29,7 @@ namespace flare {
  */
 file_coordinator::file_coordinator(const string& coordinator_uri)
 	: _uri(coordinator_uri) {
-	pthread_mutex_init(&this->_mutex_file_manipulation, NULL);
+	ABORT_IF_FAILURE(pthread_mutex_init(&this->_mutex_file_manipulation, NULL), 0);
 	if (this->get_scheme() != "file") {
 		log_warning("invalid scheme [%s]", this->get_scheme().c_str());
 	}

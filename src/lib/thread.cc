@@ -11,6 +11,7 @@
 #include "thread.h"
 #include "thread_pool.h"
 #include "thread_handler.h"
+#include "abort.h"
 
 namespace gree {
 namespace flare {
@@ -86,15 +87,15 @@ thread::thread(thread_pool* t):
 	this->_info.timestamp = 0;
 	this->_info.state = "";
 	this->_info.info = "";
-	pthread_mutex_init(&this->_mutex_trigger, NULL);
-	pthread_cond_init(&this->_cond_trigger, NULL);
-	pthread_mutex_init(&this->_mutex_shutdown, NULL);
-	pthread_cond_init(&this->_cond_shutdown, NULL);
-	pthread_mutex_init(&this->_mutex_queue, NULL);
-	pthread_cond_init(&this->_cond_queue, NULL);
-	pthread_mutex_init(&this->_mutex_running, NULL);
-	pthread_cond_init(&this->_cond_running, NULL);
-	pthread_rwlock_init(&this->_mutex_info, NULL);
+	ABORT_IF_FAILURE(pthread_mutex_init(&this->_mutex_trigger, NULL), 0);
+	ABORT_IF_FAILURE(pthread_cond_init(&this->_cond_trigger, NULL), 0);
+	ABORT_IF_FAILURE(pthread_mutex_init(&this->_mutex_shutdown, NULL), 0);
+	ABORT_IF_FAILURE(pthread_cond_init(&this->_cond_shutdown, NULL), 0);
+	ABORT_IF_FAILURE(pthread_mutex_init(&this->_mutex_queue, NULL), 0);
+	ABORT_IF_FAILURE(pthread_cond_init(&this->_cond_queue, NULL), 0);
+	ABORT_IF_FAILURE(pthread_mutex_init(&this->_mutex_running, NULL), 0);
+	ABORT_IF_FAILURE(pthread_cond_init(&this->_cond_running, NULL), 0);
+	ABORT_IF_FAILURE(pthread_rwlock_init(&this->_mutex_info, NULL), 0);
 }
 
 /**

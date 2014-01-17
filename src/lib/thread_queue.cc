@@ -8,6 +8,7 @@
  *	$Id$
  */
 #include "thread_queue.h"
+#include "abort.h"
 #include "app.h"
 
 namespace gree {
@@ -79,8 +80,8 @@ int thread_queue::sync() {
 int thread_queue::sync_ref() {
 	if (this->_sync == false) {
 		this->_sync = true;
-		pthread_mutex_init(&this->_mutex_sync, NULL);
-		pthread_cond_init(&this->_cond_sync, NULL);
+		ABORT_IF_FAILURE(pthread_mutex_init(&this->_mutex_sync, NULL), 0);
+		ABORT_IF_FAILURE(pthread_cond_init(&this->_cond_sync, NULL), 0);
 	}
 
 	pthread_mutex_lock(&this->_mutex_sync);

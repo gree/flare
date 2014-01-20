@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef	__OP_DECR_H__
-#define	__OP_DECR_H__
+#ifndef	OP_DECR_H
+#define	OP_DECR_H
 
 #include "op_incr.h"
 
@@ -31,5 +31,5 @@ protected:
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __OP_DECR_H__
+#endif	// OP_DECR_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

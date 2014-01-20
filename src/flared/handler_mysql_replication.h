@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef __HANDLER_MYSQL_REPLICATION_H__
-#define __HANDLER_MYSQL_REPLICATION_H__
+#ifndef HANDLER_MYSQL_REPLICATION_H
+#define HANDLER_MYSQL_REPLICATION_H
 
 #include "flared.h"
 
@@ -37,5 +37,5 @@ protected:
 
 #endif // ENABLE_MYSQL_REPLICATION
 
-#endif // __HANDLER_MYSQL_REPLICATION_H__
+#endif // HANDLER_MYSQL_REPLICATION_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

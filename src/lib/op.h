@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef	__OP_H__
-#define	__OP_H__
+#ifndef	OP_H
+#define	OP_H
 
 #include "config.h"
 #include "singleton.h"
@@ -201,5 +201,5 @@ int op::_send_result(result r, const char* message) {
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __OP_H__
+#endif	// OP_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef	__FUSE_FS_ENTRY_H__
-#define	__FUSE_FS_ENTRY_H__
+#ifndef	FUSE_FS_ENTRY_H
+#define	FUSE_FS_ENTRY_H
 
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -186,5 +186,5 @@ private:
 
 BOOST_CLASS_VERSION(gree::flare::fuse_fs_entry, 1);
 
-#endif	// __FUSE_FS_ENTRY_H__
+#endif	// FUSE_FS_ENTRY_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

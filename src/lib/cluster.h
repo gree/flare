@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef	__CLUSTER_H__
-#define	__CLUSTER_H__
+#ifndef	CLUSTER_H
+#define	CLUSTER_H
 
 #include <fstream>
 #include <map>
@@ -377,5 +377,5 @@ protected:
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __CLUSTER_H__
+#endif	// CLUSTER_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

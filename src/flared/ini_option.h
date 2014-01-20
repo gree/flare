@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef __INI_OPTION_H__
-#define __INI_OPTION_H__
+#ifndef INI_OPTION_H
+#define INI_OPTION_H
 
 #include "ini.h"
 #include "cluster.h"
@@ -149,5 +149,5 @@ private:
 }	// namespace flare
 }	// namespace gree
 
-#endif // __INI_OPTION_H__
+#endif // INI_OPTION_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef	__APP_H__
-#define	__APP_H__
+#ifndef	APP_H
+#define	APP_H
 
 #include <fstream>
 #include <iostream>
@@ -97,5 +97,5 @@ protected:
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __APP_H__
+#endif	// APP_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

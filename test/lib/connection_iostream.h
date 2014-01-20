@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef __CONNECTION_IOSTREAM_H__
-#define __CONNECTION_IOSTREAM_H__
+#ifndef CONNECTION_IOSTREAM_H
+#define CONNECTION_IOSTREAM_H
 
 #include <connection.h>
 
@@ -63,5 +63,5 @@ public:
 }	// namespace flare
 }	// namespace gree
 
-#endif // __CONNECTION_IOSTREAM_H__
+#endif // CONNECTION_IOSTREAM_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 noexpandtab autoindent

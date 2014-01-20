@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef	__SINGLETON_H__
-#define	__SINGLETON_H__
+#ifndef	SINGLETON_H
+#define	SINGLETON_H
 
 namespace gree {
 namespace flare {
@@ -32,5 +32,5 @@ public:
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __SINGLETON_H__
+#endif	// SINGLETON_H
 // vim: foldmethod=marker tabstop=4 shiftwidth=4 autoindent

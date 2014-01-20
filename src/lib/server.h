@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef __NET_SERVER_H__
-#define __NET_SERVER_H__
+#ifndef NET_SERVER_H
+#define NET_SERVER_H
 
 #include "config.h"
 
@@ -84,5 +84,5 @@ protected:
 }	// namespace flare
 }	// namespace gree
 
-#endif // __NET_SERVER_H__
+#endif // NET_SERVER_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

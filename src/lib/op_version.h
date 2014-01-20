@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef	__OP_VERSION_H__
-#define	__OP_VERSION_H__
+#ifndef	OP_VERSION_H
+#define	OP_VERSION_H
 
 #include "op.h"
 
@@ -45,5 +45,5 @@ int op_version::_send_version() {
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __OP_VERSION_H__
+#endif	// OP_VERSION_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

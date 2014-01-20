@@ -4,8 +4,8 @@
  *	@author Benjamin Surma <benjamin.surma@gree.net>
  *
  */
-#ifndef	__OP_APPENDQ_H__
-#define	__OP_APPENDQ_H__
+#ifndef	OP_APPENDQ_H
+#define	OP_APPENDQ_H
 
 #include "op_append.h"
 
@@ -28,5 +28,5 @@ public:
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __OP_APPENDQ_H__
+#endif	// OP_APPENDQ_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

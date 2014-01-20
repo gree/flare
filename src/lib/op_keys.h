@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef	__OP_KEYS_H__
-#define	__OP_KEYS_H__
+#ifndef	OP_KEYS_H
+#define	OP_KEYS_H
 
 #include "op_proxy_read.h"
 #include "storage.h"
@@ -39,5 +39,5 @@ protected:
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __OP_KEYS_H__
+#endif	// OP_KEYS_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

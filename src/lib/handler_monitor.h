@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef	__HANDLER_MONITOR_H__
-#define	__HANDLER_MONITOR_H__
+#ifndef	HANDLER_MONITOR_H
+#define	HANDLER_MONITOR_H
 
 #include <string>
 
@@ -57,5 +57,5 @@ protected:
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __HANDLER_MONITOR_H__
+#endif	// HANDLER_MONITOR_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

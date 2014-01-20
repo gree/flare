@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef	__OP_GET_H__
-#define	__OP_GET_H__
+#ifndef	OP_GET_H
+#define	OP_GET_H
 
 #include "op_proxy_read.h"
 
@@ -55,5 +55,5 @@ int op_get::_send_entry(const storage::entry& entry) {
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __OP_GET_H__
+#endif	// OP_GET_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

@@ -4,8 +4,8 @@
  *	@author Benjamin Surma <benjamin.surma@gree.net>
  *
  */
-#ifndef	__OP_INCRQ_H__
-#define	__OP_INCRQ_H__
+#ifndef	OP_INCRQ_H
+#define	OP_INCRQ_H
 
 #include "op_incr.h"
 
@@ -28,5 +28,5 @@ public:
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __OP_INCRQ_H__
+#endif	// OP_INCRQ_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

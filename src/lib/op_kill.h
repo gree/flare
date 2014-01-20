@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef	__OP_KILL_H__
-#define	__OP_KILL_H__
+#ifndef	OP_KILL_H
+#define	OP_KILL_H
 
 #include <boost/lexical_cast.hpp>
 
@@ -39,5 +39,5 @@ protected:
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __OP_KILL_H__
+#endif	// OP_KILL_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

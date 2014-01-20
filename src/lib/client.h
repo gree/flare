@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef __CLIENT_H__
-#define __CLIENT_H__
+#ifndef CLIENT_H
+#define CLIENT_H
 
 #include "connection.h"
 #include "op_get.h"
@@ -48,5 +48,5 @@ public:
 }	// namespace flare
 }	// namespace gree
 
-#endif // __CLIENT_H__
+#endif // CLIENT_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef	__OP_SHUTDOWN_H__
-#define	__OP_SHUTDOWN_H__
+#ifndef	OP_SHUTDOWN_H
+#define	OP_SHUTDOWN_H
 
 #include "op.h"
 #include "cluster.h"
@@ -43,5 +43,5 @@ protected:
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __OP_SHUTDOWN_H__
+#endif	// OP_SHUTDOWN_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

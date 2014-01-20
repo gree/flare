@@ -4,8 +4,8 @@
  *	@author	Benjamin Surma <benjamin.surma@gree.net>
  *
  */
-#ifndef __HTONLL_H__
-#define __HTONLL_H__
+#ifndef HTONLL_H
+#define HTONLL_H
 
 #include <config.h>
 #include <boost/detail/endian.hpp>
@@ -64,5 +64,5 @@
 #	endif
 #endif
 
-#endif // __HTONLL_H__
+#endif // HTONLL_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

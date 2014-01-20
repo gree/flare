@@ -6,8 +6,8 @@
  *	$Id$
  */
 
-#ifndef __BINARY_HEADER_H__
-#define __BINARY_HEADER_H__
+#ifndef BINARY_HEADER_H
+#define BINARY_HEADER_H
 
 #include <string>
 
@@ -221,6 +221,6 @@ const std::string& binary_header::status_cast(status status) {
 } // namespace flare
 } // namespace gree
 
-#endif//__BINARY_HEADER_H__
+#endif//BINARY_HEADER_H
 
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

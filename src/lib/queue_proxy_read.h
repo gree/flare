@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef	__QUEUE_PROXY_READ_H__
-#define	__QUEUE_PROXY_READ_H__
+#ifndef	QUEUE_PROXY_READ_H
+#define	QUEUE_PROXY_READ_H
 
 #include <list>
 
@@ -58,5 +58,5 @@ protected:
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __QUEUE_PROXY_READ_H__
+#endif	// QUEUE_PROXY_READ_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

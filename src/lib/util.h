@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef __UTIL_H__
-#define __UTIL_H__
+#ifndef UTIL_H
+#define UTIL_H
 
 #include <vector>
 #include <sstream>
@@ -148,5 +148,5 @@ template<class T> vector<T> util::vector_split(string s, string sep) {
 }	// namespace flare
 }	// namespace gree
 
-#endif // __UTIL_H__
+#endif // UTIL_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef	__OP_QUIT_H__
-#define	__OP_QUIT_H__
+#ifndef	OP_QUIT_H
+#define	OP_QUIT_H
 
 #include "op.h"
 
@@ -38,5 +38,5 @@ int op_quit::_send_text_result(result r, const char* message) {
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __OP_QUIT_H__
+#endif	// OP_QUIT_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

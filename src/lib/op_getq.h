@@ -4,8 +4,8 @@
  *	@author Benjamin Surma <benjamin.surma@gree.net>
  *
  */
-#ifndef	__OP_GETQ_H__
-#define	__OP_GETQ_H__
+#ifndef	OP_GETQ_H
+#define	OP_GETQ_H
 
 #include "op_getq.h"
 
@@ -28,5 +28,5 @@ public:
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __OP_GETQ_H__
+#endif	// OP_GETQ_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef	__OP_SET_H__
-#define	__OP_SET_H__
+#ifndef	OP_SET_H
+#define	OP_SET_H
 
 #include "op_proxy_write.h"
 
@@ -42,5 +42,5 @@ private:
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __OP_SET_H__
+#endif	// OP_SET_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

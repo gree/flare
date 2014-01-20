@@ -5,8 +5,8 @@
  *
  *  $Id$
  */
-#ifndef __STORAGE_KCH_H__
-#define __STORAGE_KCH_H__
+#ifndef STORAGE_KCH_H
+#define STORAGE_KCH_H
 
 #ifdef HAVE_STDLIB_H
 # include <stdlib.h>
@@ -67,5 +67,5 @@ private:
 }   // namespace flare
 }   // namespace gree
 
-#endif  // __STORAGE_KCH_H__
+#endif  // STORAGE_KCH_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

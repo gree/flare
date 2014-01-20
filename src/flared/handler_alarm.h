@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef __HANDLER_ALARM_H__
-#define __HANDLER_ALARM_H__
+#ifndef HANDLER_ALARM_H
+#define HANDLER_ALARM_H
 
 #include "app.h"
 
@@ -29,5 +29,5 @@ public:
 }	// namespace flare
 }	// namespace gree
 
-#endif // __HANDLER_ALARM_H__
+#endif // HANDLER_ALARM_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

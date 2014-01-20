@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef	__FUSE_FS_ENTRY_DIR_H__
-#define	__FUSE_FS_ENTRY_DIR_H__
+#ifndef	FUSE_FS_ENTRY_DIR_H
+#define	FUSE_FS_ENTRY_DIR_H
 
 #include "flarefs.h"
 #include "fuse_fs_entry.h"
@@ -40,5 +40,5 @@ private:
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __FUSE_FS_ENTRY_DIR_H__
+#endif	// FUSE_FS_ENTRY_DIR_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

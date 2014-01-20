@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef	__THREAD_HANDLER_H__
-#define	__THREAD_HANDLER_H__
+#ifndef	THREAD_HANDLER_H
+#define	THREAD_HANDLER_H
 
 #include "thread.h"
 
@@ -35,5 +35,5 @@ protected:
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __THREAD_HANDLER_H__
+#endif	// THREAD_HANDLER_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

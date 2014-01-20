@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef	__HANDLER_RECONSTRUCTION_H__
-#define	__HANDLER_RECONSTRUCTION_H__
+#ifndef	HANDLER_RECONSTRUCTION_H
+#define	HANDLER_RECONSTRUCTION_H
 
 #include <string>
 
@@ -49,5 +49,5 @@ protected:
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __HANDLER_RECONSTRUCTION_H__
+#endif	// HANDLER_RECONSTRUCTION_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

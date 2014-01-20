@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef	__OP_DELETE_H__
-#define	__OP_DELETE_H__
+#ifndef	OP_DELETE_H
+#define	OP_DELETE_H
 
 #include "op_proxy_write.h"
 
@@ -36,5 +36,5 @@ protected:
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __OP_DELETE_H__
+#endif	// OP_DELETE_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

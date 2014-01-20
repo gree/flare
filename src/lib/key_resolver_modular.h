@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef	__KEY_RESOLVER_MODULAR_H__
-#define	__KEY_RESOLVER_MODULAR_H__
+#ifndef	KEY_RESOLVER_MODULAR_H
+#define	KEY_RESOLVER_MODULAR_H
 
 #include "key_resolver.h"
 
@@ -45,5 +45,5 @@ public:
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __KEY_RESOLVER_MODULAR_H__
+#endif	// KEY_RESOLVER_MODULAR_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

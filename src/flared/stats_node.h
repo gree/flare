@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef __STATS_NODE_H__
-#define __STATS_NODE_H__
+#ifndef STATS_NODE_H
+#define STATS_NODE_H
 
 #include "stats.h"
 
@@ -28,5 +28,5 @@ public:
 }	// namespace flare
 }	// namespace gree
 
-#endif // __STATS_NODE_H__
+#endif // STATS_NODE_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

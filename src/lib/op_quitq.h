@@ -4,8 +4,8 @@
  *	@author Benjamin Surma <benjamin.surma@gree.net>
  *
  */
-#ifndef	__OP_QUITQ_H__
-#define	__OP_QUITQ_H__
+#ifndef	OP_QUITQ_H
+#define	OP_QUITQ_H
 
 #include "op_quit.h"
 
@@ -28,5 +28,5 @@ public:
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __OP_QUITQ_H__
+#endif	// OP_QUITQ_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef	__THREAD_POOL_H__
-#define	__THREAD_POOL_H__
+#ifndef	THREAD_POOL_H
+#define	THREAD_POOL_H
 
 #include <map>
 #include <stack>
@@ -78,5 +78,5 @@ protected:
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __THREAD_POOL_H__
+#endif	// THREAD_POOL_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

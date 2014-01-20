@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef	__FUSE_IMPL_H__
-#define	__FUSE_IMPL_H__
+#ifndef	FUSE_IMPL_H
+#define	FUSE_IMPL_H
 
 #include "flarefs.h"
 #include "fuse_fs.h"
@@ -75,5 +75,5 @@ private:
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __FUSE_IMPL_H__
+#endif	// FUSE_IMPL_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

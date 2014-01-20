@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef	__HANDLER_PROXY_H__
-#define	__HANDLER_PROXY_H__
+#ifndef	HANDLER_PROXY_H
+#define	HANDLER_PROXY_H
 
 #include <string>
 
@@ -46,5 +46,5 @@ protected:
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __HANDLER_PROXY_H__
+#endif	// HANDLER_PROXY_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

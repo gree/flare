@@ -4,8 +4,8 @@
  *	@author Benjamin Surma <benjamin.surma@gree.net>
  *
  */
-#ifndef	__OP_REPLACEQ_H__
-#define	__OP_REPLACEQ_H__
+#ifndef	OP_REPLACEQ_H
+#define	OP_REPLACEQ_H
 
 #include "op_replace.h"
 
@@ -28,5 +28,5 @@ public:
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __OP_REPLACEQ_H__
+#endif	// OP_REPLACEQ_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

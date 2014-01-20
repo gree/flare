@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef	__OP_PROXY_READ_H__
-#define	__OP_PROXY_READ_H__
+#ifndef	OP_PROXY_READ_H
+#define	OP_PROXY_READ_H
 
 #include <list>
 
@@ -54,5 +54,5 @@ protected:
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __OP_PROXY_READ_H__
+#endif	// OP_PROXY_READ_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

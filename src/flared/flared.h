@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef	__FLARED_H__
-#define	__FLARED_H__
+#ifndef	FLARED_H
+#define	FLARED_H
 
 #include "app.h"
 #include "ini_option.h"
@@ -52,5 +52,5 @@ private:
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __FLARED_H__
+#endif	// FLARED_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

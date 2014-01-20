@@ -6,8 +6,8 @@
  *	$Id$
  */
 
-#ifndef __BINARY_REQUEST_HEADER_H__
-#define __BINARY_REQUEST_HEADER_H__
+#ifndef BINARY_REQUEST_HEADER_H
+#define BINARY_REQUEST_HEADER_H
 
 #include "binary_network_mapping.h"
 
@@ -66,6 +66,6 @@ public:
 } // namespace flare
 } // namespace gree
 
-#endif//__BINARY_REQUEST_HEADER_H__
+#endif//BINARY_REQUEST_HEADER_H
 
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

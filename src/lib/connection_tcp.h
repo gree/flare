@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef __CONNECTION_TCP_H__
-#define __CONNECTION_TCP_H__
+#ifndef CONNECTION_TCP_H
+#define CONNECTION_TCP_H
 
 #include "connection.h"
 #include "logger.h"
@@ -119,5 +119,5 @@ private:
 }	// namespace flare
 }	// namespace gree
 
-#endif // __CONNECTION_TCP_H__
+#endif // CONNECTION_TCP_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

@@ -4,8 +4,8 @@
  *	@author	Benjamin Surma <benjamin.surma@gree.net>
  *
  */
-#ifndef	__OP_TOUCH_H__
-#define	__OP_TOUCH_H__
+#ifndef	OP_TOUCH_H
+#define	OP_TOUCH_H
 
 #include "op_set.h"
 
@@ -36,5 +36,5 @@ private:
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __OP_TOUCH_H__
+#endif	// OP_TOUCH_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

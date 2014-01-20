@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef __STORAGE_SIMPLE_MAP_H__
-#define __STORAGE_SIMPLE_MAP_H__
+#ifndef STORAGE_SIMPLE_MAP_H
+#define STORAGE_SIMPLE_MAP_H
 
 #include <storage.h>
 
@@ -98,5 +98,5 @@ protected:
 }	// namespace flare
 }	// namespace gree
 
-#endif // __STORAGE_SIMPLE_MAP_H__
+#endif // STORAGE_SIMPLE_MAP_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 noexpandtab autoindent

@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef __LOGGER_H__
-#define __LOGGER_H__
+#ifndef LOGGER_H
+#define LOGGER_H
 
 #include <iterator>
 #include <map>
@@ -89,5 +89,5 @@ private:
 }	// namespace flare
 }	// namespace gree
 
-#endif // __LOGGER_H__
+#endif // LOGGER_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

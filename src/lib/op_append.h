@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef	__OP_APPEND_H__
-#define	__OP_APPEND_H__
+#ifndef	OP_APPEND_H
+#define	OP_APPEND_H
 
 #include "op_set.h"
 
@@ -35,5 +35,5 @@ private:
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __OP_APPEND_H__
+#endif	// OP_APPEND_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

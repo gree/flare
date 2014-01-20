@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef	__FLAREFS_H__
-#define	__FLAREFS_H__
+#ifndef	FLAREFS_H
+#define	FLAREFS_H
 
 #define	FUSE_USE_VERSION	25
 #include <fuse.h>
@@ -46,5 +46,5 @@ private:
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __FLAREFS_H__
+#endif	// FLAREFS_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

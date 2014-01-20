@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef	__STATS_H__
-#define	__STATS_H__
+#ifndef	STATS_H
+#define	STATS_H
 
 #include <boost/lexical_cast.hpp>
 
@@ -89,5 +89,5 @@ public:
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __STATS_H__
+#endif	// STATS_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

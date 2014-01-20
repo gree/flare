@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef __MYSQL_REPLICATION_H__
-#define __MYSQL_REPLICATION_H__
+#ifndef MYSQL_REPLICATION_H
+#define MYSQL_REPLICATION_H
 
 #include "connection.h"
 #include "thread.h"
@@ -103,5 +103,5 @@ protected:
 
 #endif //ENABLE_MYSQL_REPLICATION
 
-#endif // __MYSQL_REPLICATION_H__
+#endif // MYSQL_REPLICATION_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

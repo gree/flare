@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef	__STORAGE_H__
-#define	__STORAGE_H__
+#ifndef	STORAGE_H
+#define	STORAGE_H
 
 #include "tcutil.h"
 
@@ -433,5 +433,5 @@ protected:
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __STORAGE_H__
+#endif	// STORAGE_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

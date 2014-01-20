@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef __OP_PARSER_BINARY_INDEX_H__
-#define __OP_PARSER_BINARY_INDEX_H__
+#ifndef OP_PARSER_BINARY_INDEX_H
+#define OP_PARSER_BINARY_INDEX_H
 
 #include "op_parser_binary.h"
 
@@ -28,5 +28,5 @@ public:
 }	// namespace flare
 }	// namespace gree
 
-#endif // __OP_PARSER_BINARY_INDEX_H__
+#endif // OP_PARSER_BINARY_INDEX_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

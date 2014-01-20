@@ -4,8 +4,8 @@
  *	@author Benjamin Surma <benjamin.surma@gree.net>
  *
  */
-#ifndef	__OP_DELETEQ_H__
-#define	__OP_DELETEQ_H__
+#ifndef	OP_DELETEQ_H
+#define	OP_DELETEQ_H
 
 #include "op_delete.h"
 
@@ -28,5 +28,5 @@ public:
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __OP_DELETEQ_H__
+#endif	// OP_DELETEQ_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

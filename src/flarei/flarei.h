@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef	__FLAREI_H__
-#define	__FLAREI_H__
+#ifndef	FLAREI_H
+#define	FLAREI_H
 
 #include "app.h"
 #include "handler_alarm.h"
@@ -50,5 +50,5 @@ private:
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __FLAREI_H__
+#endif	// FLAREI_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

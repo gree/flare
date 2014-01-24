@@ -93,6 +93,8 @@ AC_STDC_HEADERS
 AC_CHECK_HEADER(pthread.h, [], [AC_MSG_ERROR(pthread.h not found)])
 AC_CHECK_HEADERS(arpa/inet.h endian.h sys/endian.h sys/types.h winsock2.h byteswap.h, [], [])
 
+AC_CHECK_HEADER(boost/atomic.hpp, [AC_DEFINE([HAVE_BOOST_ATOMIC],[],[have boost/atomic.hpp or not])], [])
+
 
 # Checks for typedefs, structures, and compiler characteristics.
 

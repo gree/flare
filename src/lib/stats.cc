@@ -23,8 +23,19 @@ stats::stats():
 		_total_connections(0),
 		_cmd_get(0),
 		_cmd_set(0),
-		_hits(0),
-		_misses(0),
+		_get_hits(0),
+		_get_misses(0),
+		_delete_hits(0),
+		_delete_misses(0),
+		_incr_hits(0),
+		_incr_misses(0),
+		_decr_hits(0),
+		_decr_misses(0),
+		_cas_hits(0),
+		_cas_misses(0),
+		_cas_badval(0),
+		_touch_hits(0),
+		_touch_misses(0),
 		_bytes_read(0),
 		_bytes_written(0),
 		_total_thread_queue(0) {
@@ -122,21 +133,21 @@ uint32_t stats::get_connection_structures() {
 	return 0;
 }
 
-unsigned int stats::get_cmd_get() {
-	return this->_cmd_get;
-}
-
-unsigned int stats::get_cmd_set() {
-	return this->_cmd_set;
-}
-
-unsigned int stats::get_hits() {
-	return this->_hits;
-}
-
-unsigned int stats::get_misses() {
-	return this->_misses;
-}
+UINT_T stats::get_cmd_get()		{ return this->_cmd_get;	}
+UINT_T stats::get_cmd_set()		{ return this->_cmd_set;	}
+UINT_T stats::get_get_hits()		{ return this->_get_hits;	}
+UINT_T stats::get_get_misses()	{ return this->_get_misses;	}
+UINT_T stats::get_delete_hits()	{ return this->_delete_hits;    }
+UINT_T stats::get_delete_misses()	{ return this->_delete_misses;  }
+UINT_T stats::get_incr_hits()		{ return this->_incr_hits;	}
+UINT_T stats::get_incr_misses()	{ return this->_incr_misses;	}
+UINT_T stats::get_decr_hits()		{ return this->_decr_hits;	}
+UINT_T stats::get_decr_misses()	{ return this->_decr_misses;	}
+UINT_T stats::get_cas_hits()		{ return this->_cas_hits;	}
+UINT_T stats::get_cas_misses()	{ return this->_cas_misses;	}
+UINT_T stats::get_cas_badval()	{ return this->_cas_badval;	}
+UINT_T stats::get_touch_hits()	{ return this->_touch_hits;	}
+UINT_T stats::get_touch_misses()	{ return this->_touch_misses;	}
 
 unsigned int stats::get_evictions() {
 	return 0;

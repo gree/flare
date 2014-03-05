@@ -143,7 +143,12 @@ int op_set::_run_server() {
 			}
 		}
 	}
-	
+
+	// replicate inter-cluster
+	if (this->_cluster->forward_query(this->_entry, this->get_ident().c_str(), false) < 0) {
+		log_warning("something is going wrong while replication inter cluster -> continue processing", 0);
+	}
+
 	if ((this->_entry.option & storage::option_noreply) == 0) {
 		return this->_send_result(static_cast<result>(r_storage));
 	}

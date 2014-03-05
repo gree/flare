@@ -189,6 +189,7 @@ protected:
 	replication						_replication_type;
 	uint32_t							_proxy_prior_netmask;
 	uint32_t							_max_total_thread_queue;
+	bool									_cluster_replication;
 
 public:
 	cluster(thread_pool* tp, string server_name, int server_port);
@@ -266,6 +267,12 @@ public:
 #endif
 	int set_noreply_window_limit(int noreply_window_limit) { this->_noreply_window_limit = noreply_window_limit; return 0; };
 	int get_noreply_window_limit() { return this->_noreply_window_limit; }
+
+	int set_cluster_replication(bool cluster_replication) { this->_cluster_replication = cluster_replication; return 0; };
+	bool is_cluster_replication() { return this->_cluster_replication; };
+	int start_cluster_replication(string server_name, int servr_port, bool dump);
+	int stop_cluster_replication();
+	int forward_query(storage::entry& entry, string op_ident, bool sync);
 
 	inline string to_node_key(string server_name, int server_port) {
 		string node_key = server_name + ":" + lexical_cast<string>(server_port);

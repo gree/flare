@@ -226,6 +226,17 @@ int flared::startup(int argc, char **argv) {
 	}
 #endif
 
+	// cluster replication
+	this->_cluster->set_cluster_replication(ini_option_object().is_cluster_replication());
+	if (ini_option_object().is_cluster_replication()) {
+		this->_cluster->start_cluster_replication(
+			ini_option_object().get_cluster_replication_name(),
+			ini_option_object().get_cluster_replication_port(), true);
+	} else {
+		this->_cluster->stop_cluster_replication();
+	}
+
+
 	if (this->_set_pid() < 0) {
 		return -1;
 	}
@@ -331,6 +342,16 @@ int flared::reload() {
 
 	// noreply_window_limit
 	this->_cluster->set_noreply_window_limit(ini_option_object().get_noreply_window_limit());
+
+	// cluster-replication
+	this->_cluster->set_cluster_replication(ini_option_object().is_cluster_replication());
+	if (ini_option_object().is_cluster_replication()) {
+		this->_cluster->start_cluster_replication(
+			ini_option_object().get_cluster_replication_name(),
+			ini_option_object().get_cluster_replication_port(), true);
+	} else {
+		this->_cluster->stop_cluster_replication();
+	}
 
 	log_notice("process successfully reloaded", 0);
 
@@ -448,6 +469,7 @@ int flared::_set_signal_handler() {
 
 	return 0;
 }
+
 // }}}
 
 }	// namespace flare

@@ -21,7 +21,9 @@ libflare_la_SOURCES = \
 	cluster.h cluster.cc \
 	connection.h \
 	connection_tcp.h connection_tcp.cc \
+	handler_cluster_replication.h handler_cluster_replication.cc \
 	handler_controller.h handler_controller.cc \
+	handler_dump_replication.h handler_dump_replication.cc \
 	handler_monitor.h handler_monitor.cc \
 	handler_proxy.h handler_proxy.cc \
 	handler_reconstruction.h handler_reconstruction.cc \
@@ -70,6 +72,7 @@ libflare_la_SOURCES = \
 	op_version.h op_version.cc \
 	op_show.h op_show.cc \
 	op_shutdown.h op_shutdown.cc \
+	queue_forward_query.h queue_forward_query.cc \
 	queue_node_state.h queue_node_state.cc \
 	queue_node_sync.h queue_node_sync.cc \
 	queue_proxy_read.h queue_proxy_read.cc \

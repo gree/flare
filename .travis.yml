@@ -26,7 +26,7 @@ before_install:
   - travis_retry sudo add-apt-repository -y ppa:hvr/ghc
   - travis_retry sudo apt-get update
   - travis_retry sudo apt-get install libtokyocabinet-dev
-  - travis_retry sudo apt-get install libboost-program-options-dev libboost-regex-dev libboost-serialization-dev libboost-thread-dev
+  - travis_retry sudo apt-get install libboost-program-options-dev libboost-regex-dev libboost-serialization-dev libboost-thread-dev libboost-system-dev
   - travis_retry sudo apt-get install uuid-dev
   - travis_retry sudo apt-get install cutter-testing-framework
   - travis_retry sudo apt-get install cabal-install-1.18 ghc-7.6.3

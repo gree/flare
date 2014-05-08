@@ -45,8 +45,10 @@ noinst_LTLIBRARIES =	\
 	test_op_verbosity.la	\
 	test_op_version.la	\
 	test_thread_pool.la	\
+	test_time_util.la \
 	test_util.la	\
-	test_file_coordinator.la
+	test_file_coordinator.la \
+	test_time_watcher.la
 if ENABLE_KYOTOCABINET
 noinst_LTLIBRARIES += test_storage_kch.la
 endif
@@ -119,8 +121,10 @@ test_op_touch_la_SOURCES	= test_op_touch.cc connection_iostream.cc
 test_op_verbosity_la_SOURCES	= test_op_verbosity.cc connection_iostream.cc
 test_op_version_la_SOURCES	= test_op_version.cc connection_iostream.cc
 test_thread_pool_la_SOURCES	= test_thread_pool.cc
+test_time_util_la_SOURCES	= test_time_util.cc
 test_util_la_SOURCES	= test_util.cc
 test_file_coordinator_la_SOURCES	= test_file_coordinator.cc
+test_time_watcher_la_SOURCES	= test_time_watcher.cc
 if ENABLE_ZOOKEEPER
 test_zookeeper_coordinator_la_SOURCES	= test_zookeeper_coordinator.cc
 test_zookeeper_lock_la_SOURCES		= test_zookeeper_lock.cc

@@ -11,6 +11,7 @@
 #include "op_delete.h"
 #include "queue_proxy_write.h"
 #include "binary_request_header.h"
+#include "time_watcher_scoped_observer.h"
 
 namespace gree {
 namespace flare {
@@ -92,7 +93,13 @@ int op_delete::_run_server() {
 
 	// storage i/o
 	storage::result r_storage;
-	if (this->_storage->remove(this->_entry, r_storage) < 0) {
+	int retcode;
+	{
+		storage_access_info info = { this->_thread };
+		time_watcher_scoped_observer ob(info);
+		retcode = this->_storage->remove(this->_entry, r_storage);
+	}
+	if (retcode < 0) {
 		return this->_send_result(result_server_error, "i/o error");
 	}
 

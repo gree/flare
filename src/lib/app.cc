@@ -8,6 +8,7 @@
  *	$Id$
  */
 #include "app.h"
+#include "time_watcher.h"
 
 namespace gree {
 namespace flare {
@@ -15,6 +16,7 @@ namespace flare {
 // {{{ global functions/variables
 stats* stats_object = NULL;
 status* status_object = NULL;
+time_watcher* time_watcher_object = NULL;
 // }}}
 
 // {{{ ctor/dtor

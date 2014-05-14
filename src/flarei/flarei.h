@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef	__FLAREI_H__
-#define	__FLAREI_H__
+#ifndef	FLAREI_H
+#define	FLAREI_H
 
 #include "app.h"
 #include "handler_alarm.h"
@@ -14,6 +14,8 @@
 #include "handler_controller.h"
 #include "ini_option.h"
 #include "stats_index.h"
+#include "coordinator_factory.h"
+#include "status_index.h"
 
 namespace gree {
 namespace flare {
@@ -23,9 +25,11 @@ namespace flare {
  */
 class flarei : public app {
 private:
-	server*				_server;
-	thread_pool*	_thread_pool;
-	cluster*			_cluster;
+	server*								_server;
+	thread_pool*					_thread_pool;
+	cluster*							_cluster;
+	coordinator*					_coordinator;
+	coordinator_factory		_coordinator_factory;
 
 public:
 	flarei();
@@ -50,5 +54,5 @@ private:
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __FLAREI_H__
+#endif	// FLAREI_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

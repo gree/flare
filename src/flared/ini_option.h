@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef __INI_OPTION_H__
-#define __INI_OPTION_H__
+#ifndef INI_OPTION_H
+#define INI_OPTION_H
 
 #include "ini.h"
 #include "cluster.h"
@@ -30,8 +30,8 @@ private:
 	string			_pid_path;
 	bool				_daemonize;
 	string			_data_dir;
-	string			_index_server_name;
-	int					_index_server_port;
+	vector<cluster::index_server>	_index_servers;
+	pthread_mutex_t								_mutex_index_servers;
 	string			_log_facility;
 	uint32_t		_max_connection;
 	int					_mutex_slot;
@@ -105,8 +105,13 @@ public:
 	string get_pid_path() { return this->_pid_path; };
 	bool is_daemonize() { return this->_daemonize; };
 	string get_data_dir() { return this->_data_dir; };
-	string get_index_server_name() { return this->_index_server_name; };
-	int get_index_server_port() { return this->_index_server_port; };
+	vector<cluster::index_server> get_index_servers() {
+		vector<cluster::index_server> v;
+		pthread_mutex_lock(&this->_mutex_index_servers);
+		v = this->_index_servers;
+		pthread_mutex_unlock(&this->_mutex_index_servers);
+		return v;
+	};
 	string get_log_facility() { return this->_log_facility; };
 	uint32_t get_max_connection() { return this->_max_connection; };
 	int get_mutex_slot() { return this->_mutex_slot; };
@@ -144,10 +149,11 @@ public:
 private:
 	int _setup_cli_option(program_options::options_description& option);
 	int _setup_config_option(program_options:: options_description& option);
+	int _process_index_servers(program_options::variables_map& opt_var_map);
 };
 
 }	// namespace flare
 }	// namespace gree
 
-#endif // __INI_OPTION_H__
+#endif // INI_OPTION_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

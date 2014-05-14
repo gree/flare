@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef __LOGGER_H__
-#define __LOGGER_H__
+#ifndef LOGGER_H
+#define LOGGER_H
 
 #include <iterator>
 #include <map>
@@ -43,7 +43,7 @@ namespace flare {
 #define	log_err(fmt, ...)			logger_singleton::instance().err(__FILE__, __LINE__, __func__, fmt, __VA_ARGS__)
 #define	log_crit(fmt, ...)		logger_singleton::instance().crit(__FILE__, __LINE__, __func__, fmt, __VA_ARGS__)
 #define	log_alert(fmt, ...)		logger_singleton::instance().alert(__FILE__, __LINE__, __func__, fmt, __VA_ARGS__)
-#define	log_emerge(fmt, ...)	logger_singleton::instance().emerge(__FILE__, __LINE__, __func__, fmt, __VA_ARGS__)
+#define	log_emerg(fmt, ...)	logger_singleton::instance().emerg(__FILE__, __LINE__, __func__, fmt, __VA_ARGS__)
 #endif	// DEBUG
 
 #define	logger_object()		logger_singleton::instance()
@@ -89,5 +89,5 @@ private:
 }	// namespace flare
 }	// namespace gree
 
-#endif // __LOGGER_H__
+#endif // LOGGER_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

@@ -25,6 +25,10 @@
 #include "queue_proxy_read.h"
 #include "queue_proxy_write.h"
 #include "queue_update_monitor_option.h"
+#include "coordinator.h"
+
+#include <functional>
+#include <boost/bind.hpp>
 
 namespace gree {
 namespace flare {
@@ -36,14 +40,14 @@ namespace flare {
 /**
  *	ctor for cluster
  */
-cluster::cluster(thread_pool* tp, string data_dir, string server_name, int server_port):
+cluster::cluster(thread_pool* tp, string server_name, int server_port):
 		_thread_pool(tp),
 		_key_hash_algorithm(storage::hash_algorithm_simple),
 		_proxy_hash_algorithm(storage::hash_algorithm_murmur),
 		_key_resolver(NULL),
 		_storage(NULL),
-		_data_dir(data_dir),
 		_master_reconstruction(0),
+		_node_map_version(0),
 		_server_name(server_name),
 		_server_port(server_port),
 		_monitor_threshold(0),
@@ -54,9 +58,8 @@ cluster::cluster(thread_pool* tp, string data_dir, string server_name, int serve
 #ifdef ENABLE_MYSQL_REPLICATION
 		_mysql_replication(false),
 #endif
+		_coordinator(NULL),
 		_noreply_window_limit(0),
-		_index_server_name(""),
-		_index_server_port(0),
 		_proxy_concurrency(0),
 		_reconstruction_interval(0),
 		_reconstruction_bwlimit(0),
@@ -65,6 +68,7 @@ cluster::cluster(thread_pool* tp, string data_dir, string server_name, int serve
 	this->_node_key = this->to_node_key(server_name, server_port);
 	pthread_mutex_init(&this->_mutex_serialization, NULL);
 	pthread_mutex_init(&this->_mutex_master_reconstruction, NULL);
+	pthread_mutex_init(&this->_mutex_node_map_version, NULL);
 	pthread_rwlock_init(&this->_mutex_node_map, NULL);
 	pthread_rwlock_init(&this->_mutex_node_partition_map, NULL);
 }
@@ -73,9 +77,13 @@ cluster::cluster(thread_pool* tp, string data_dir, string server_name, int serve
  *	dtor for cluster
  */
 cluster::~cluster() {
-	if (this->_key_resolver != NULL) {
-		delete this->_key_resolver;
+	if (this->_coordinator != NULL) {
+		this->_coordinator->set_update_handler(NULL);
+		this->_coordinator = NULL;
 	}
+
+	delete this->_key_resolver;
+	this->_key_resolver = NULL;
 }
 // }}}
 
@@ -161,18 +169,15 @@ int cluster::node::parse(const char* p) {
 /**
  *	startup proc for index process
  */
-int cluster::startup_index(key_resolver::type key_resolver_type, int key_resolver_modular_hint, int key_resolver_modular_virtual) {
+int cluster::startup_index(coordinator* coord, key_resolver::type key_resolver_type, int key_resolver_modular_hint, int key_resolver_modular_virtual) {
 	this->_type = type_index;
 
-	// load
-	if (this->_load() < 0) {
-		log_err("failed to load serialized vars (node map, etc)", 0);
+	// setup
+	if (coord == NULL) {
+		log_err("invalid coordinator %p", coord);
 		return -1;
 	}
-	if (this->_reconstruct_node_partition() < 0) {
-		log_err("failed to reconstruct node partition map", 0);
-		return -1;
-	}
+	this->_coordinator = coord;
 
 	// key resolver
 	if (key_resolver_type == key_resolver::type_modular) {
@@ -182,6 +187,27 @@ int cluster::startup_index(key_resolver::type key_resolver_type, int key_resolve
 		return -1;
 	}
 	if (this->_key_resolver->startup() < 0) {
+		return -1;
+	}
+
+	// load
+	coordinator::shared_operation operation;
+	if (this->_coordinator->begin_operation(operation, "startup index") < 0) {
+		log_err("failed to acquire coordination lock", 0);
+		return -1;
+	}
+	if (this->_load(false) < 0) {
+		log_err("failed to load serialized vars (node map, etc)", 0);
+		this->_coordinator->end_operation(operation);
+		return -1;
+	}
+	if (this->_reconstruct_node_partition() < 0) {
+		log_err("failed to reconstruct node partition map", 0);
+		this->_coordinator->end_operation(operation);
+		return -1;
+	}
+	if (this->_coordinator->end_operation(operation) < 0) {
+		log_err("failed to release coordination lock", 0);
 		return -1;
 	}
 
@@ -195,16 +221,17 @@ int cluster::startup_index(key_resolver::type key_resolver_type, int key_resolve
 		t->trigger(h);
 	}
 
+	this->_coordinator->set_update_handler(bind(&cluster::_update, this));
+
 	return 0;
 }
 
 /**
  *	startup proc for node process
  */
-int cluster::startup_node(string index_server_name, int index_server_port, uint32_t proxy_prior_netmask) {
+int cluster::startup_node(const vector<index_server>& index_servers, uint32_t proxy_prior_netmask) {
 	this->_type = type_node;
-	this->_index_server_name = index_server_name;
-	this->_index_server_port = index_server_port;
+	this->_index_servers = index_servers;
 
 	if (proxy_prior_netmask != 0) {
 		this->_proxy_prior_netmask = htonl((uint32_t)0xffffffff << (32-proxy_prior_netmask)); // length -> mask bits
@@ -213,10 +240,10 @@ int cluster::startup_node(string index_server_name, int index_server_port, uint3
 		log_notice("my network address (server_name=%s, proxy_prior_netmask=0x%x, prior_network_address=%s)", this->_server_name.c_str(), ntohl(this->_proxy_prior_netmask), inet_ntoa(in));
 	}
 
-	log_notice("setting up cluster node... (type=%d, index_server_name=%s, index_server_port=%d)", this->_type, this->_index_server_name.c_str(), this->_index_server_port);
+	log_notice("setting up cluster node... (type=%d, index_server_name=%s, index_server_port=%d)", this->_type, this->_index_servers[0].index_server_name.c_str(), this->_index_servers[0].index_server_port);
 
-	shared_connection c(new connection_tcp(this->_index_server_name, this->_index_server_port));
-	if (c->open() < 0) {
+	shared_connection c = this->_open_index();
+	if (!c) {
 		log_err("failed to connect to index server", 0);
 		return -1;
 	}
@@ -288,6 +315,21 @@ vector<cluster::node> cluster::get_node() {
 	return v;
 }
 
+cluster::node cluster::get_node(string node_key) {
+	node n;
+
+	pthread_rwlock_rdlock(&this->_mutex_node_map);
+	if (this->_node_map.count(node_key) > 0) {
+		n = this->_node_map[node_key];
+	} else {
+		n.node_server_name = "";
+		n.node_server_port = 0;
+	}
+	pthread_rwlock_unlock(&this->_mutex_node_map);
+
+	return n;
+};
+
 /**
  *	get slave node info vector
  */
@@ -328,14 +370,27 @@ int cluster::add_node(string node_server_name, int node_server_port) {
 		return -1;
 	}
 
+	coordinator::shared_operation operation;
+	ostringstream msg;
+	msg << "add node " << node_server_name << ":" << node_server_port;
+	if (this->_coordinator->begin_operation(operation, msg.str()) < 0) {
+		log_err("failed to begin operation for %s:%d", node_server_name.c_str(), node_server_port);
+		return -1;
+	}
+
 	string node_key = this->to_node_key(node_server_name, node_server_port);
 	log_debug("adding new node (server_name=%s, server_port=%d, node_key=%s)", node_server_name.c_str(), node_server_port, node_key.c_str());
 
 	// add node to map
-	pthread_rwlock_wrlock(&this->_mutex_node_map);
 	int thread_type;
 	bool replace = false;
+	pthread_rwlock_wrlock(&this->_mutex_node_map);
 	try {
+		if (this->_load() < 0) {
+			log_warning("failed to load nodemap", 0);
+			throw -1;
+		}
+		
 		if (this->_node_map.count(node_key) > 0) {
 			if (this->_node_map[node_key].node_state == state_down) {
 				log_notice("node_key [%s] is already in node map (state is down -> continue processing)", node_key.c_str());
@@ -366,12 +421,15 @@ int cluster::add_node(string node_server_name, int node_server_port) {
 			log_debug("node is already in node map (perhaps node is restarting) (state=%d, thread_type=%d)", this->_node_map[node_key].node_state, this->_node_map[node_key].node_thread_type);
 		}
 
+		if (this->_save() < 0) {
+			log_err("failed to save nodemap and skip broadcasting", 0);
+			throw -1;
+		}
 	} catch (int e) {
 		pthread_rwlock_unlock(&this->_mutex_node_map);
+		this->_coordinator->end_operation(operation);
 		return e;
 	}
-
-	this->_save();
 	pthread_rwlock_unlock(&this->_mutex_node_map);
 
 	// create monitoring thread
@@ -384,11 +442,12 @@ int cluster::add_node(string node_server_name, int node_server_port) {
 		t->trigger(h);
 	}
 
-	// notify other nodes
+	// notify other nodes - add node
 	shared_queue_node_sync q(new queue_node_sync(this));
 	vector<string> dummy;
 	this->_broadcast(q, false, dummy);
 	
+	this->_coordinator->end_operation(operation);
 	return 0;
 }
 
@@ -399,6 +458,14 @@ int cluster::down_node(string node_server_name, int node_server_port, bool shutd
 	string node_key = this->to_node_key(node_server_name, node_server_port);
 	string exclude_node_key;
 
+	coordinator::shared_operation operation;
+	ostringstream msg;
+	msg << "down node " << node_key << " shutdown_mode=" << shutdown_mode;
+	if (this->_coordinator->begin_operation(operation, msg.str()) < 0) {
+		log_err("failed to begin operation for %s", node_key.c_str());
+		return -1;
+	}
+
 	if (shutdown_mode) {
 		exclude_node_key = node_key; // skip broadcasting to a terminated node.
 	} else {
@@ -408,9 +475,13 @@ int cluster::down_node(string node_server_name, int node_server_port, bool shutd
 
 	pthread_rwlock_wrlock(&this->_mutex_node_map);
 	pthread_rwlock_wrlock(&this->_mutex_node_partition_map);
-
 	vector<string> prior_node_key;
 	try {
+		if (this->_load() < 0) {
+			log_warning("failed to load nodemap", 0);
+			throw -1;
+		}
+
 		if (this->_node_map.count(node_key) == 0) {
 			log_warning("no such node (node_key=%s)", node_key.c_str());
 			throw -1;
@@ -479,22 +550,26 @@ int cluster::down_node(string node_server_name, int node_server_port, bool shutd
 			n.node_partition = -1;
 			n.node_balance = 0;
 		}
+
+		this->_reconstruct_node_partition(false);
+		if (this->_save() < 0) {
+			log_err("failed to save nodemap and skip broadcasting", 0);
+			throw -1;
+		}
 	} catch (int e) {
 		pthread_rwlock_unlock(&this->_mutex_node_partition_map);
 		pthread_rwlock_unlock(&this->_mutex_node_map);
+		this->_coordinator->end_operation(operation);
 		return e;
 	}
-
-	this->_reconstruct_node_partition(false);
-
-	this->_save();
 	pthread_rwlock_unlock(&this->_mutex_node_partition_map);
 	pthread_rwlock_unlock(&this->_mutex_node_map);
 
-	// notify
+	// notify - down node
 	shared_queue_node_sync q(new queue_node_sync(this));
 	this->_broadcast(q, false, prior_node_key, exclude_node_key);
 
+	this->_coordinator->end_operation(operation);
 	return 0;
 }
 
@@ -515,10 +590,22 @@ int cluster::ready_node(string node_server_name, int node_server_port) {
 
 	log_notice("handling node ready event [node_key=%s]", node_key.c_str());
 
+	coordinator::shared_operation operation;
+	ostringstream msg;
+	msg << "ready node " << node_key;
+	if (this->_coordinator->begin_operation(operation, msg.str()) < 0) {
+		log_err("failed to begin operation for %s:%d", node_server_name.c_str(), node_server_port);
+		return -1;
+	}
+
 	pthread_rwlock_wrlock(&this->_mutex_node_map);
 	pthread_rwlock_wrlock(&this->_mutex_node_partition_map);
-
 	try {
+		if (this->_load() < 0) {
+			log_warning("failed to load nodemap", 0);
+			throw -1;
+		}
+		
 		if (this->_node_map.count(node_key) == 0) {
 			log_warning("no such node (node_key=%s)", node_key.c_str());
 			throw -1;
@@ -530,23 +617,27 @@ int cluster::ready_node(string node_server_name, int node_server_port) {
 		}
 
 		this->_node_map[node_key].node_state = state_ready;
+
+		this->_reconstruct_node_partition(false);
+		if (this->_save() < 0) {
+			log_err("failed to save nodemap and skip broadcasting", 0);
+			throw -1;
+		}
 	} catch (int e) {
 		pthread_rwlock_unlock(&this->_mutex_node_partition_map);
 		pthread_rwlock_unlock(&this->_mutex_node_map);
+		this->_coordinator->end_operation(operation);
 		return e;
 	}
-
-	this->_reconstruct_node_partition(false);
-
-	this->_save();
 	pthread_rwlock_unlock(&this->_mutex_node_partition_map);
 	pthread_rwlock_unlock(&this->_mutex_node_map);
 
-	// notify
+	// notify - ready node
 	shared_queue_node_sync q(new queue_node_sync(this));
 	vector<string> dummy;
 	this->_broadcast(q, false, dummy);
 
+	this->_coordinator->end_operation(operation);
 	return 0;
 }
 
@@ -558,11 +649,23 @@ int cluster::up_node(string node_server_name, int node_server_port) {
 
 	log_notice("handling node up event [node_key=%s]", node_key.c_str());
 
+	coordinator::shared_operation operation;
+	ostringstream msg;
+	msg << "up node " << node_key;
+	if (this->_coordinator->begin_operation(operation, msg.str()) < 0) {
+		log_err("failed to begin operation for %s:%d", node_server_name.c_str(), node_server_port);
+		return -1;
+	}
+
 	pthread_rwlock_wrlock(&this->_mutex_node_map);
 	pthread_rwlock_wrlock(&this->_mutex_node_partition_map);
-
 	vector<string> prior_node_key;
 	try {
+		if (this->_load() < 0) {
+			log_warning("failed to load nodemap", 0);
+			throw -1;
+		}
+
 		if (this->_node_map.count(node_key) == 0) {
 			log_warning("no such node (node_key=%s)", node_key.c_str());
 			throw -1;
@@ -604,24 +707,27 @@ int cluster::up_node(string node_server_name, int node_server_port) {
 				n.node_partition = -1;
 			}
 		}
-
 		this->_node_map[node_key].node_state = state_active;
+
+		this->_reconstruct_node_partition(false);
+		if (this->_save() < 0) {
+			log_err("failed to save nodemap and skip broadcasting", 0);
+			throw -1;
+		}
 	} catch (int e) {
 		pthread_rwlock_unlock(&this->_mutex_node_partition_map);
 		pthread_rwlock_unlock(&this->_mutex_node_map);
+		this->_coordinator->end_operation(operation);
 		return e;
 	}
-
-	this->_reconstruct_node_partition(false);
-
-	this->_save();
 	pthread_rwlock_unlock(&this->_mutex_node_partition_map);
 	pthread_rwlock_unlock(&this->_mutex_node_map);
 
-	// notify
+	// notify - up node
 	shared_queue_node_sync q(new queue_node_sync(this));
 	this->_broadcast(q, false, prior_node_key);
 
+	this->_coordinator->end_operation(operation);
 	return 0;
 }
 
@@ -635,10 +741,22 @@ int cluster::remove_node(string node_server_name, int node_server_port) {
 
 	log_notice("removing node [node_key=%s]", node_key.c_str());
 
+	coordinator::shared_operation operation;
+	ostringstream msg;
+	msg << "remove node " << node_key;
+	if (this->_coordinator->begin_operation(operation, msg.str()) < 0) {
+		log_err("failed to begin operation for %s:%d", node_server_name.c_str(), node_server_port);
+		return -1;
+	}
+
 	pthread_rwlock_wrlock(&this->_mutex_node_map);
 	pthread_rwlock_wrlock(&this->_mutex_node_partition_map);
-
 	try {
+		if (this->_load() < 0) {
+			log_warning("failed to load nodemap", 0);
+			throw -1;
+		}
+
 		if (this->_node_map.count(node_key) == 0) {
 			log_warning("no such node (node_key=%s)", node_key.c_str());
 			throw -1;
@@ -676,23 +794,28 @@ int cluster::remove_node(string node_server_name, int node_server_port) {
 			it->second->shutdown(true, false);
 		}
 		this->_node_map.erase(node_key);
+
+		this->_reconstruct_node_partition(false);
+		if (this->_save() < 0) {
+			log_err("failed to save nodemap and skip broadcasting", 0);
+			throw -1;
+		}
 	} catch (int e) {
 		pthread_rwlock_unlock(&this->_mutex_node_partition_map);
 		pthread_rwlock_unlock(&this->_mutex_node_map);
+		this->_coordinator->end_operation(operation);
 		return e;
 	}
 
-	this->_reconstruct_node_partition(false);
-
-	this->_save();
 	pthread_rwlock_unlock(&this->_mutex_node_partition_map);
 	pthread_rwlock_unlock(&this->_mutex_node_map);
 
-	// notify
+	// notify - remove node
 	shared_queue_node_sync q(new queue_node_sync(this));
 	vector<string> dummy;
 	this->_broadcast(q, false, dummy);
 
+	this->_coordinator->end_operation(operation);
 	return 0;
 }
 
@@ -708,10 +831,22 @@ int cluster::set_node_role(string node_server_name, int node_server_port, role n
 
 	log_notice("set node role (node_key=%s, node_role=%d, node_balance=%d, node_partition=%d)", node_key.c_str(), node_role, node_balance, node_partition);
 
+	coordinator::shared_operation operation;
+	ostringstream msg;
+	msg << "set node role " << node_key << " " << node_role << " " << node_balance << " " << node_partition;
+	if (this->_coordinator->begin_operation(operation, msg.str()) < 0) {
+		log_err("failed to begin operation for %s:%d", node_server_name.c_str(), node_server_port);
+		return -1;
+	}
+
 	pthread_rwlock_wrlock(&this->_mutex_node_map);
 	pthread_rwlock_wrlock(&this->_mutex_node_partition_map);
-
 	try {
+		if (this->_load() < 0) {
+			log_warning("failed to load nodemap", 0);
+			throw -1;
+		}
+
 		if (this->_node_map.count(node_key) == 0) {
 			log_warning("no such node (node_key=%s)", node_key.c_str());
 			throw -1;
@@ -858,23 +993,27 @@ int cluster::set_node_role(string node_server_name, int node_server_port, role n
 				}
 			}
 		}
+
+		this->_reconstruct_node_partition(false);
+		if (this->_save() < 0) {
+			log_err("failed to save nodemap and skip broadcasting", 0);
+			throw -1;
+		}
 	} catch (int e) {
 		pthread_rwlock_unlock(&this->_mutex_node_partition_map);
 		pthread_rwlock_unlock(&this->_mutex_node_map);
+		this->_coordinator->end_operation(operation);
 		return e;
 	}
-
-	this->_reconstruct_node_partition(false);
-
-	this->_save();
 	pthread_rwlock_unlock(&this->_mutex_node_partition_map);
 	pthread_rwlock_unlock(&this->_mutex_node_map);
 
-	// notify
+	// notify - set node role
 	shared_queue_node_sync q(new queue_node_sync(this));
 	vector<string> dummy;
 	this->_broadcast(q, false, dummy);
 
+	this->_coordinator->end_operation(operation);
 	return 0;
 }
 
@@ -920,12 +1059,19 @@ int cluster::request_up_node(string node_server_name, int node_server_port) {
 /**
  *	reconstruct all node map
  */
-int cluster::reconstruct_node(vector<node> v) {
+int cluster::reconstruct_node(vector<node> v, uint64_t node_map_version) {
 	stack<node_shift_state> shift_state_stack;
 	stack<node_shift_role> shift_role_stack;
 
 	pthread_rwlock_wrlock(&this->_mutex_node_map);
 	pthread_rwlock_wrlock(&this->_mutex_node_partition_map);
+
+	if (this->get_node_map_version() > 0 && this->get_node_map_version() > node_map_version) {
+		log_notice("ignored: the current node_map_version (%llu) is newer than (%llu)", this->get_node_map_version(), node_map_version);
+		pthread_rwlock_unlock(&this->_mutex_node_partition_map);
+		pthread_rwlock_unlock(&this->_mutex_node_map);
+		return -1;
+	}
 
 	log_notice("reconstructing node map... (%d entries)", v.size());
 
@@ -988,6 +1134,8 @@ int cluster::reconstruct_node(vector<node> v) {
 		shift_role_stack.pop();
 	}
 
+	this->_set_node_map_version(node_map_version);
+
 	pthread_rwlock_unlock(&this->_mutex_node_partition_map);
 	pthread_rwlock_unlock(&this->_mutex_node_map);
 
@@ -1040,8 +1188,8 @@ int cluster::set_monitor_read_timeout(int monitor_read_timeout) {
  *	[node] activate node (prepare -> ready)
  */
 int cluster::activate_node(bool skip_ready_state) {
-	shared_connection c(new connection_tcp(this->_index_server_name, this->_index_server_port));
-	if (c->open() < 0) {
+	shared_connection c = this->_open_index();
+	if (!c) {
 		log_err("failed to connect to index server", 0);
 		return -1;
 	}
@@ -1062,8 +1210,8 @@ int cluster::activate_node(bool skip_ready_state) {
  *	[node] deactivate node (* -> proxy)
  */
 int cluster::deactivate_node() {
-	shared_connection c(new connection_tcp(this->_index_server_name, this->_index_server_port));
-	if (c->open() < 0) {
+	shared_connection c = this->_open_index();
+	if (!c) {
 		log_err("failed to connect to index server", 0);
 		return -1;
 	}
@@ -1083,8 +1231,8 @@ int cluster::deactivate_node() {
  *  [node] send shutdown message upon receiving a SIGTERM.
  */
 int cluster::shutdown_node() {
-	shared_connection c(new connection_tcp(this->_index_server_name, this->_index_server_port));
-	if (c->open() < 0) {
+	shared_connection c = this->_open_index();
+	if (!c) {
 		log_err("failed to connect to index server", 0);
 		return -1;
 	}
@@ -1414,6 +1562,7 @@ int cluster::_broadcast(shared_thread_queue q, bool sync, vector<string> prior_n
 
 	// handle prior node key first
 	if (prior_node_key.size() > 0) {
+		bool sync_for_proior_nodes = false;
 		pthread_rwlock_rdlock(&this->_mutex_node_map);
 		for (vector<string>::iterator it = prior_node_key.begin(); it != prior_node_key.end(); it++) {
 			string p = *it;
@@ -1444,10 +1593,13 @@ int cluster::_broadcast(shared_thread_queue q, bool sync, vector<string> prior_n
 				break;
 			}
 			if (n > 0) {
-				q->sync();
+				sync_for_proior_nodes = true;
 			}
 		}
 		pthread_rwlock_unlock(&this->_mutex_node_map);
+		if (sync_for_proior_nodes) {
+			q->sync();
+		}
 	}
 
 	// TODO: see if thread is myself or not to avoid dead locks
@@ -1486,71 +1638,78 @@ int cluster::_broadcast(shared_thread_queue q, bool sync, vector<string> prior_n
 
 /**
  *	save node variables
+ *  Note that this function doesn't acquire the lock for this->_node_map.
  */
 int cluster::_save() {
-	string path = this->_data_dir + "/flare.xml";
-	string path_tmp = path + ".tmp";
-
-	pthread_mutex_lock(&this->_mutex_serialization);
-	ofstream ofs(path_tmp.c_str());
-	if (ofs.fail()) {
-		log_err("creating serialization file failed -> daemon restart will cause serious problem (path=%s)", path_tmp.c_str());
-		pthread_mutex_unlock(&this->_mutex_serialization);
+	if (this->_coordinator == NULL) {
+		log_err("coordinator not initialized", 0);
 		return -1;
 	}
 
-	// creating scope to destroy xml_oarchive object before ofstream::close();
+	pthread_mutex_lock(&this->_mutex_serialization);
+	if (this->_increment_node_map_version() < 0) {
+		log_warning("node map version overflow", 0);
+	}
+	ostringstream oss;
+	// creating scope to destroy xml_oarchive object before ostringstream::close();
 	{
-		archive::xml_oarchive oa(ofs);
+		archive::xml_oarchive oa(oss);
+		oa << serialization::make_nvp("version", (const uint64_t&)this->_node_map_version);
 		oa << serialization::make_nvp("node_map", (const node_map&)this->_node_map);
 		oa << serialization::make_nvp("thread_type", (const int&)this->_thread_type);
 	}
 
-	ofs.close();
+	string flare_xml = oss.str();
+	if (this->_coordinator->store_state(flare_xml) < 0) {
+		log_err("failed to store node variables", 0);
+		pthread_mutex_unlock(&this->_mutex_serialization);
+		return -1;
+	}
 
-	if (unlink(path.c_str()) < 0 && errno != ENOENT) {
-		pthread_mutex_unlock(&this->_mutex_serialization);
-		log_err("unlink() for current serialization file failed (%s)", util::strerror(errno));
-		return -1;
-	}
-	if (rename(path_tmp.c_str(), path.c_str()) < 0) {
-		pthread_mutex_unlock(&this->_mutex_serialization);
-		log_err("rename() for current serialization file failed (%s)", util::strerror(errno));
-		return -1;
-	}
 	pthread_mutex_unlock(&this->_mutex_serialization);
-
 	return 0;
 }
 
 /**
  *	load node variables
+ *  Note that this function doesn't acquire the lock for this->_node_map.
  */
-int cluster::_load() {
-	string path = this->_data_dir + "/flare.xml";
-
-	pthread_mutex_lock(&this->_mutex_serialization);
-	ifstream ifs(path.c_str());
-	if (ifs.fail()) {
-		pthread_mutex_unlock(&this->_mutex_serialization);
-		struct stat st;
-		if (::stat(path.c_str(), &st) < 0 && errno == ENOENT) {
-			log_info("no such entry -> skip deserialization [%s]", path.c_str());
-			return 0;
-		} else {
-			log_err("opening serialization file failed -> daemon restart will cause serious problem (path=%s)", path.c_str());
-		}
+int cluster::_load(bool update_monitor) {
+	if (this->_coordinator == NULL) {
+		log_err("coordinator not initialized", 0);
 		return -1;
 	}
 
-	// creating scope to destroy xml_iarchive object before ifstream::close();
-	{
-		archive::xml_iarchive ia(ifs);
-		ia >> serialization::make_nvp("node_map", this->_node_map);
-		ia >> serialization::make_nvp("thread_type", this->_thread_type);
-	}
+	map<string, node> preserved_node_map = this->_node_map;
 
-	ifs.close();
+	pthread_mutex_lock(&this->_mutex_serialization);
+	string flare_xml;
+	if (this->_coordinator->restore_state(flare_xml) < 0) {
+		pthread_mutex_unlock(&this->_mutex_serialization);
+		log_err("failed to restore state", 0);
+		return -1;
+	}
+	if (!flare_xml.empty()) {
+		try {
+			istringstream iss(flare_xml);
+			archive::xml_iarchive ia(iss);
+			ia >> serialization::make_nvp("version", this->_node_map_version);
+			ia >> serialization::make_nvp("node_map", this->_node_map);
+			ia >> serialization::make_nvp("thread_type", this->_thread_type);
+		} catch (archive::archive_exception& e) {
+			try {
+				istringstream iss(flare_xml);
+				archive::xml_iarchive ia(iss);
+				this->_node_map_version = 0;
+				ia >> serialization::make_nvp("node_map", this->_node_map);
+				ia >> serialization::make_nvp("thread_type", this->_thread_type);
+			} catch (archive::archive_exception& e) {
+				pthread_mutex_unlock(&this->_mutex_serialization);
+				log_err("invalid XML format", 0);
+				return -1;
+			}
+		}
+	}
 
 	// sanity check
 	for (node_map::const_iterator it_node = this->_node_map.begin();
@@ -1559,16 +1718,57 @@ int cluster::_load() {
 		if (it_node->second.node_thread_type >= this->_thread_type) {
 			pthread_mutex_unlock(&this->_mutex_serialization);
 			log_err("node %s has a thread_type (%d) greater or equal to the global thread_type value (%d)",
-					it_node->first.c_str(),
-					it_node->second.node_thread_type,
-					this->_thread_type);
+							it_node->first.c_str(),
+							it_node->second.node_thread_type,
+							this->_thread_type);
 			return -1;
 		}
 	}
 
 	pthread_mutex_unlock(&this->_mutex_serialization);
 
+	if (update_monitor) {
+		// kill monitoring threads
+		for (node_map::iterator it = preserved_node_map.begin(); it != preserved_node_map.end(); it++) {
+			if (this->_node_map.count(it->first) == 0) {
+				thread_pool::local_map m = this->_thread_pool->get_active(it->second.node_thread_type);
+				for (thread_pool::local_map::iterator tit = m.begin(); tit != m.end(); tit++) {
+					log_notice("killing monitoring thread(s)... (node_thread_type=%d, thread_id=%d)",
+										 it->second.node_thread_type, tit->second->get_id());
+					tit->second->set_state("killed");
+					tit->second->shutdown(true, false);
+				}
+			}
+		}
+
+		// create monitoring threads
+		for (node_map::iterator it = this->_node_map.begin(); it != this->_node_map.end(); it++) {
+			if (preserved_node_map.count(it->first) == 0) {
+				shared_thread t = this->_thread_pool->get(it->second.node_thread_type);
+				handler_monitor* h = new handler_monitor(t, this, it->second.node_server_name, it->second.node_server_port);
+				h->set_monitor_threshold(this->_monitor_threshold);
+				h->set_monitor_interval(this->_monitor_interval);
+				h->set_monitor_read_timeout(this->_monitor_read_timeout);
+				t->trigger(h);
+			}
+		}
+	}
+
 	return 0;
+}
+
+void cluster::_update() {
+	log_notice("updating node partition map", 0);
+
+	pthread_rwlock_wrlock(&this->_mutex_node_map);
+	pthread_rwlock_wrlock(&this->_mutex_node_partition_map);
+	if (this->_load() < 0) {
+		log_warning("failed to load nodemap", 0);
+	} else {
+		this->_reconstruct_node_partition(false);
+	}
+	pthread_rwlock_unlock(&this->_mutex_node_partition_map);
+	pthread_rwlock_unlock(&this->_mutex_node_map);
 }
 
 /**
@@ -1706,8 +1906,8 @@ int cluster::_reconstruct_node_partition(bool lock) {
 			} else {
 				throw "no node partition for this slave";
 			}
-		} catch (string e) {
-			log_err("%s [node_key=%s, state=%d, role=%d, partition=%d]", e.c_str(), node_key.c_str(), n.node_state, n.node_role, n.node_partition);
+		} catch (const char *e) {
+			log_err("%s [node_key=%s, state=%d, role=%d, partition=%d]", e, node_key.c_str(), n.node_state, n.node_role, n.node_partition);
 			r = -1;
 		}
 	}
@@ -1964,6 +2164,43 @@ int cluster::_get_proxy_thread(string node_key, int key_hash, shared_thread& t) 
 	}
 
 	return -1;
+}
+
+shared_connection cluster::_open_index() {
+	return this->_index_servers.size() > 1
+		? this->_open_index_redundant()
+		: this->_open_index_single_server();
+}
+
+/**
+ * open index server with default connect_index_retry_limit count
+ */
+shared_connection cluster::_open_index_single_server() {
+	index_server server = this->_index_servers.front();
+	shared_connection_tcp ctp(new connection_tcp(server.index_server_name, server.index_server_port));
+	if (ctp && ctp->open() == 0) {
+		return ctp;
+	}
+	return shared_connection();
+}
+
+/**
+ * open index server.
+ * try to connect other server when failed once.
+ */
+shared_connection cluster::_open_index_redundant() {
+	vector<index_server> servers = this->_index_servers;
+	random_shuffle(servers.begin(), servers.end());
+	for (vector<index_server>::iterator it = servers.begin(); it != servers.end(); it++) {
+		shared_connection_tcp ctp(new connection_tcp(it->index_server_name, it->index_server_port));
+		int connect_retry_limit = ctp->get_connect_retry_limit();
+		ctp->set_connect_retry_limit(0);
+		if (ctp && ctp->open() == 0) {
+			ctp->set_connect_retry_limit(connect_retry_limit);
+			return ctp;
+		}
+	}
+	return shared_connection();
 }
 // }}}
 

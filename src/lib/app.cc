@@ -14,6 +14,7 @@ namespace flare {
 
 // {{{ global functions/variables
 stats* stats_object = NULL;
+status* status_object = NULL;
 // }}}
 
 // {{{ ctor/dtor
@@ -31,10 +32,11 @@ app::app():
  *	dtor for app
  */
 app::~app() {
-	if (stats_object != NULL) {
-		delete stats_object;
-		stats_object = NULL;
-	}
+	delete stats_object;
+	stats_object = NULL;
+
+	delete status_object;
+	status_object = NULL;
 }
 // }}}
 
@@ -48,6 +50,8 @@ app::~app() {
 int app::startup(int argc, char **argv) {
 	stats_object = new stats();
 	stats_object->startup();
+
+	status_object = new status();
 
 	this->_set_pid();
 

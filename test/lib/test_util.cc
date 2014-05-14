@@ -247,5 +247,70 @@ namespace test_util
 	{
 		cut_assert_equal_int(1353317300, util::realtime(1353317300)); // 1353317300 = 2012/11/19 18:30 JST
 	}
+
+	const int atomic_count_num=1024*1024;
+	void* atomic_count_incr(void* ptr){
+		AtomicCounter* cnt=(AtomicCounter*)ptr;
+		for(int i=0;i<atomic_count_num;i++){
+			cnt->incr();
+		}
+		return NULL;
+	}
+
+	void* atomic_count_decr(void* ptr){
+		AtomicCounter* cnt=(AtomicCounter*)ptr;
+		for(int i=0;i<atomic_count_num;i++){
+			cnt->add(-1);
+		}
+		return NULL;
+	}
+
+	void test_atomic_counter()
+	{
+		{
+			AtomicCounter cnt(100);
+			cut_assert_equal_int(cnt.fetch(),100);
+			cut_assert_equal_int(cnt.add(100),100);
+			cut_assert_equal_int(cnt.fetch(),200);
+			cut_assert_equal_int(cnt.incr(),200);
+			cut_assert_equal_int(cnt.incr(),201);
+			cut_assert_equal_int(cnt.incr(),202);
+			cut_assert_equal_int(cnt.incr(),203);
+			cut_assert_equal_int(cnt.fetch(),204);
+		}
+		{
+			AtomicCounter cnt(0);
+			cut_assert_equal_int(cnt.fetch(),0);
+			cut_assert_equal_int(cnt.incr(),0);
+			cut_assert_equal_int(cnt.incr(),1);
+			cut_assert_equal_int(cnt.incr(),2);
+			cut_assert_equal_int(cnt.incr(),3);
+			cut_assert_equal_int(cnt.add(-1),4);
+			cut_assert_equal_int(cnt.add(-1),3);
+			cut_assert_equal_int(cnt.add(-1),2);
+			cut_assert_equal_int(cnt.fetch(),1);
+		}
+		{
+			const int initval=-1024;
+			AtomicCounter cnt(initval);
+			const int tnum=128;
+			const int retval =tnum*atomic_count_num+initval;
+			pthread_t threads[tnum];
+			for(int i=0;i<tnum;i++){
+				pthread_create(threads+i,NULL,atomic_count_incr,(void*)&cnt);
+			}
+			for(int i=0;i<tnum;i++){
+				pthread_join(threads[i],NULL);
+			}
+			cut_assert_equal_int(cnt.fetch(),retval);
+			for(int i=0;i<tnum;i++){
+				pthread_create(threads+i,NULL,atomic_count_decr,(void*)&cnt);
+			}
+			for(int i=0;i<tnum;i++){
+				pthread_join(threads[i],NULL);
+			}
+			cut_assert_equal_int(cnt.fetch(),initval);
+		}
+	}
 }
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 noexpandtab autoindent

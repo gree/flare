@@ -5,12 +5,14 @@
  *
  *	$Id$
  */
-#ifndef	__FLARED_H__
-#define	__FLARED_H__
+#ifndef	FLARED_H
+#define	FLARED_H
 
 #include "app.h"
 #include "ini_option.h"
 #include "stats_node.h"
+#include "status_node.h"
+#include "storage_listener.h"
 
 namespace gree {
 namespace flare {
@@ -18,7 +20,7 @@ namespace flare {
 /**
  *	flared application class
  */
-class flared : public app {
+class flared : public app, public storage_listener {
 private:
 	server*				_server;
 	thread_pool*	_thread_pool;
@@ -41,6 +43,8 @@ public:
 	cluster* get_cluster() { return this->_cluster; };
 	storage* get_storage() { return this->_storage; };
 
+	virtual void on_storage_error();
+
 protected:
 	string _get_pid_path();
 
@@ -52,5 +56,5 @@ private:
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __FLARED_H__
+#endif	// FLARED_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

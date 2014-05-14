@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef __HANDLER_REQUEST_H__
-#define __HANDLER_REQUEST_H__
+#ifndef HANDLER_REQUEST_H
+#define HANDLER_REQUEST_H
 
 #include "app.h"
 #include "connection_tcp.h"
@@ -31,5 +31,5 @@ public:
 }	// namespace flare
 }	// namespace gree
 
-#endif // __HANDLER_REQUEST_H__
+#endif // HANDLER_REQUEST_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

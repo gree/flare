@@ -14,6 +14,7 @@
 #ifdef ENABLE_MYSQL_REPLICATION
 # include "handler_mysql_replication.h"
 #endif
+#include "show_node.h"
 
 namespace gree {
 namespace flare {
@@ -72,22 +73,23 @@ flared::flared():
  *	dtor for flared
  */
 flared::~flared() {
-	if (this->_storage != NULL) {
-		delete this->_storage;
-	}
-	if (this->_server != NULL) {
-		delete this->_server;
-	}
-	if (this->_thread_pool != NULL) {
-		delete this->_thread_pool;
-	}
-	if (this->_cluster != NULL) {
-		delete this->_cluster;
-	}
-	if (stats_object != NULL) {
-		delete stats_object;
-		stats_object = NULL;
-	}
+	delete this->_storage;
+	this->_storage = NULL;
+
+	delete this->_server;
+	this->_server = NULL;
+
+	delete this->_thread_pool;
+	this->_thread_pool = NULL;
+
+	delete this->_cluster;
+	this->_cluster = NULL;
+
+	delete stats_object;
+	stats_object = NULL;
+
+	delete status_object;
+	status_object = NULL;
 }
 // }}}
 
@@ -108,47 +110,16 @@ int flared::startup(int argc, char **argv) {
 	stats_object = new stats_node();
 	stats_object->startup();
 
+	status_object = new status_node();
+
 	log_notice("%s version %s - system logger started", this->_ident.c_str(), PACKAGE_VERSION);
 
 	log_notice("application startup in progress...", 0);
-	log_notice("  back_log:               %d", ini_option_object().get_back_log());
-	log_notice("  config_path:            %s", ini_option_object().get_config_path().c_str());
-	log_notice("  pid_path:               %s", ini_option_object().get_pid_path().c_str());
-	log_notice("  daemonize:              %s", ini_option_object().is_daemonize() ? "true" : "false");
-	log_notice("  data_dir:               %s", ini_option_object().get_data_dir().c_str());
-	log_notice("  index_server_name:      %s", ini_option_object().get_index_server_name().c_str());
-	log_notice("  index_server_port:      %d", ini_option_object().get_index_server_port());
-	log_notice("  max_connection:         %d", ini_option_object().get_max_connection());
-	log_notice("  mutex_slot:             %d", ini_option_object().get_mutex_slot());
-#ifdef ENABLE_MYSQL_REPLICATION
-	log_notice("  mysql_replication:      %s", ini_option_object().is_mysql_replication() ? "true" : "false");
-	log_notice("  mysql_replication_port: %d", ini_option_object().get_mysql_replication_port());
-	log_notice("  mysql_replication_id:   %u", ini_option_object().get_mysql_replication_id());
-	log_notice("  mysql_replication_db:   %s", ini_option_object().get_mysql_replication_db().c_str());
-	log_notice("  mysql_replication_table:%s", ini_option_object().get_mysql_replication_table().c_str());
-#endif
-	log_notice("  noreply_window_limit:   %d", ini_option_object().get_noreply_window_limit());
-	log_notice("  net_read_timeout:       %d", ini_option_object().get_net_read_timeout());
-	log_notice("  proxy_concurrency:      %d", ini_option_object().get_proxy_concurrency());
-	log_notice("  reconstruction_interval:%d", ini_option_object().get_reconstruction_interval());
-	log_notice("  reconstruction_bwlimit: %d", ini_option_object().get_reconstruction_bwlimit());
-	log_notice("  replication_type:       %s", ini_option_object().get_replication_type().c_str());
-	log_notice("  server_name:            %s", ini_option_object().get_server_name().c_str());
-	log_notice("  server_port:            %d", ini_option_object().get_server_port());
-	log_notice("  server_socket:          %s", ini_option_object().get_server_socket().c_str());
-	log_notice("  stack_size:             %d", ini_option_object().get_stack_size());
-	log_notice("  storage_ap:             %u", ini_option_object().get_storage_ap());
-	log_notice("  storage_bucket_size:    %llu", ini_option_object().get_storage_bucket_size());
-	log_notice("  storage_cache_size:     %d", ini_option_object().get_storage_cache_size());
-	log_notice("  storage_compress:       %s", ini_option_object().get_storage_compress().c_str());
-	log_notice("  storage_large:          %s", ini_option_object().is_storage_large() ? "true" : "false");
-	log_notice("  storage_lmemb:          %d", ini_option_object().get_storage_lmemb());
-	log_notice("  storage_nmemb:          %d", ini_option_object().get_storage_nmemb());
-	log_notice("  storage_dfunit:         %d", ini_option_object().get_storage_dfunit());
-	log_notice("  storage_type:           %s", ini_option_object().get_storage_type().c_str());
-	log_notice("  thread_pool_size:       %d", ini_option_object().get_thread_pool_size());
-	log_notice("  proxy-prior-netmask:    %u", ini_option_object().get_proxy_prior_netmask());
-	log_notice("  max-total-thread-queue: %u", ini_option_object().get_max_total_thread_queue());
+
+	vector<string> lines = show_node::lines();
+	for (vector<string>::iterator line = lines.begin(); line != lines.end(); line++) {
+		log_notice("  %s", line->c_str());
+	}
 
 	// startup procs
 	if (this->_set_resource_limit() < 0) {
@@ -180,16 +151,15 @@ int flared::startup(int argc, char **argv) {
 
 	this->_thread_pool = new thread_pool(ini_option_object().get_thread_pool_size(), ini_option_object().get_stack_size());
 
-	this->_cluster = new cluster(this->_thread_pool, ini_option_object().get_data_dir(), ini_option_object().get_server_name(), ini_option_object().get_server_port());
+	this->_cluster = new cluster(this->_thread_pool, ini_option_object().get_server_name(), ini_option_object().get_server_port());
 	this->_cluster->set_proxy_concurrency(ini_option_object().get_proxy_concurrency());
 	this->_cluster->set_reconstruction_interval(ini_option_object().get_reconstruction_interval());
 	this->_cluster->set_reconstruction_bwlimit(ini_option_object().get_reconstruction_bwlimit());
 	this->_cluster->set_replication_type(ini_option_object().get_replication_type());
 	this->_cluster->set_max_total_thread_queue(ini_option_object().get_max_total_thread_queue());
 	this->_cluster->set_noreply_window_limit(ini_option_object().get_noreply_window_limit());
-	if (this->_cluster->startup_node(ini_option_object().get_index_server_name(),
-									 ini_option_object().get_index_server_port(),
-									 ini_option_object().get_proxy_prior_netmask()) < 0) {
+	if (this->_cluster->startup_node(ini_option_object().get_index_servers(),
+																	 ini_option_object().get_proxy_prior_netmask()) < 0) {
 		return -1;
 	}
 
@@ -240,6 +210,7 @@ int flared::startup(int argc, char **argv) {
 	if (this->_storage->open() < 0) {
 		return -1;
 	}
+	this->_storage->set_listener(this);
 	this->_cluster->set_storage(this->_storage);
 
 	// creating alarm thread in advance
@@ -334,11 +305,8 @@ int flared::reload() {
 	// net_read_timeout
 	connection_tcp::read_timeout = ini_option_object().get_net_read_timeout() * 1000;	// -> msec
 
-	//  index_server_name
-	this->_cluster->set_index_server_name(ini_option_object().get_index_server_name());
-
-	//  index_server_port
-	this->_cluster->set_index_server_port(ini_option_object().get_index_server_port());
+	//  index_servers
+	this->_cluster->set_index_servers(ini_option_object().get_index_servers());
 
 	// reconstruction_interval
 	this->_cluster->set_reconstruction_interval(ini_option_object().get_reconstruction_interval());
@@ -383,6 +351,14 @@ int flared::shutdown() {
 	this->_clear_pid();
 
 	return 0;
+}
+
+/**
+ *	notified storage error event procs
+ */
+void flared::on_storage_error() {
+	status_node* s = dynamic_cast<status_node*>(status_object);
+	s->set_node_status_code(status_node::node_status_storage_error);
 }
 // }}}
 

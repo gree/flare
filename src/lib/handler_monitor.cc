@@ -50,6 +50,8 @@ int handler_monitor::run() {
 
 	shared_connection_tcp c(new connection_tcp(this->_node_server_name, this->_node_server_port));
 	this->_connection = c;
+	this->_connection->set_connect_retry_limit(0);
+
 	if (c->open() < 0) {
 		log_err("failed to connect to node server [name=%s, port=%d]", this->_node_server_name.c_str(), this->_node_server_port);
 		this->_down();
@@ -76,8 +78,14 @@ int handler_monitor::run() {
 
 		// sync w/ node_map for safe
 		cluster::node n = this->_cluster->get_node(this->_node_server_name, this->_node_server_port);
-		if (n.node_state == cluster::state_down) {
-			this->_down_state = this->_monitor_threshold;
+		if (n.node_server_name == this->_node_server_name) {
+			if (n.node_state == cluster::state_down) {
+				this->_down_state = this->_monitor_threshold;
+			} else if (this->_down_state >= this->_monitor_threshold) {
+				this->_down_state = 0;
+			}
+		} else {
+			log_warning("failed to get node information of %s", n.node_server_name.c_str()); 
 		}
 
 		if (r == ETIMEDOUT) {

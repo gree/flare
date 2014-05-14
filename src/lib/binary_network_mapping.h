@@ -6,8 +6,8 @@
  *	$Id$
  */
 
-#ifndef __BINARY_NETWORK_MAPPING_H__
-#define __BINARY_NETWORK_MAPPING_H__
+#ifndef BINARY_NETWORK_MAPPING_H
+#define BINARY_NETWORK_MAPPING_H
 
 #include "binary_header.h"
 #include "connection.h"
@@ -136,6 +136,6 @@ size_t network_mapping<T, M>::get_raw_size() const {
 } // namespace flare
 } // namespace gree
 
-#endif//__BINARY_NETWORK_MAPPING_H__
+#endif//BINARY_NETWORK_MAPPING_H
 
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef	__QUEUE_UPDATE_MONITOR_OPTION_H__
-#define	__QUEUE_UPDATE_MONITOR_OPTION_H__
+#ifndef	QUEUE_UPDATE_MONITOR_OPTION_H
+#define	QUEUE_UPDATE_MONITOR_OPTION_H
 
 #include "logger.h"
 #include "util.h"
@@ -42,5 +42,5 @@ public:
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __QUEUE_UPDATE_MONITOR_OPTION_H__
+#endif	// QUEUE_UPDATE_MONITOR_OPTION_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

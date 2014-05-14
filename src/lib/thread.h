@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef	__THREAD_H__
-#define	__THREAD_H__
+#ifndef	THREAD_H
+#define	THREAD_H
 
 #include <map>
 #include <queue>
@@ -129,5 +129,5 @@ protected:
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __THREAD_H__
+#endif	// THREAD_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

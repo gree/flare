@@ -5,12 +5,13 @@
  *
  *	$Id$
  */
-#ifndef	__STORAGE_H__
-#define	__STORAGE_H__
+#ifndef	STORAGE_H
+#define	STORAGE_H
 
 #include "tcutil.h"
 
 #include "logger.h"
+#include "storage_listener.h"
 #include "util.h"
 
 #include <libhashkit/hashkit.h>
@@ -51,7 +52,7 @@ public:
 		behavior_dump						= 0x01 << 9,
 		behavior_touch					= 0x01 << 10,
 	};
-	
+
 	enum									result {
 		result_none						= 0,
 		result_stored					= 16,
@@ -187,6 +188,7 @@ protected:
 	int										_header_cache_size;
 	TCMAP*								_header_cache_map;
 	pthread_rwlock_t			_mutex_header_cache_map;
+	storage_listener*			_listener;
 
 
 public:
@@ -206,6 +208,8 @@ public:
 	virtual uint32_t count() = 0;
 	virtual uint64_t size() = 0;
 	virtual int get_key(string key, int limit, vector<string>& r) { return -1; };
+
+	virtual void set_listener(storage_listener* l) { this->_listener = l; };
 
 	virtual type get_type() = 0;
 	virtual bool is_capable(capability c) = 0;
@@ -433,5 +437,5 @@ protected:
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __STORAGE_H__
+#endif	// STORAGE_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

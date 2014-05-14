@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef __CONNECTION_TCP_H__
-#define __CONNECTION_TCP_H__
+#ifndef CONNECTION_TCP_H
+#define CONNECTION_TCP_H
 
 #include "connection.h"
 #include "logger.h"
@@ -51,6 +51,8 @@ protected:
 	char*								_write_buf;
 	int									_write_buf_len;
 	int									_write_buf_chunk_size;
+	int									_connect_retry_limit;
+	int									_connect_retry_wait;	// usec
 
 public:
 	static int read_timeout;												// msec
@@ -97,8 +99,10 @@ public:
 	int get_port() const;
 	string get_path() const;
 	
-	virtual int get_read_timeout() const { return _read_timeout; };
-	virtual int set_read_timeout(int timeout) { _read_timeout = timeout; return 0; };
+	virtual int get_read_timeout() const { return this->_read_timeout; };
+	virtual int set_read_timeout(int timeout) { this->_read_timeout = timeout; return 0; };
+	virtual int get_connect_retry_limit() const { return this->_connect_retry_limit; };
+	virtual int set_connect_retry_limit(int retry_limit) { this->_connect_retry_limit = retry_limit; return 0; };
 
 	int get_errno() const { return this->_errno; };
 	bool is_error() const { return this->_errno != 0 ? true : false; };
@@ -119,5 +123,5 @@ private:
 }	// namespace flare
 }	// namespace gree
 
-#endif // __CONNECTION_TCP_H__
+#endif // CONNECTION_TCP_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

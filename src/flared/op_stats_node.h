@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef __OP_STATS_NODE_H__
-#define __OP_STATS_NODE_H__
+#ifndef OP_STATS_NODE_H
+#define OP_STATS_NODE_H
 
 #include <sstream>
 
@@ -33,5 +33,5 @@ protected:
 }	// namespace flare
 }	// namespace gree
 
-#endif // __OP_STATS_NODE_H__
+#endif // OP_STATS_NODE_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

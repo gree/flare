@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef	__OP_STATS_H__
-#define	__OP_STATS_H__
+#ifndef	OP_STATS_H
+#define	OP_STATS_H
 
 #include <sstream>
 #include <string>
@@ -83,5 +83,5 @@ template<typename T> int op_stats::_send_stat(const char* key, const T& value) {
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __OP_STATS_H__
+#endif	// OP_STATS_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

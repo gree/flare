@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef	__OP_VERBOSITY_H__
-#define	__OP_VERBOSITY_H__
+#ifndef	OP_VERBOSITY_H
+#define	OP_VERBOSITY_H
 
 #include "op.h"
 #include "storage.h"
@@ -41,5 +41,5 @@ protected:
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __OP_VERBOSITY_H__
+#endif	// OP_VERBOSITY_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

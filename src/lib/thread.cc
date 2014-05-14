@@ -111,9 +111,10 @@ thread::~thread() {
 		}
 	}
 
-	if (this->_is_delete_thread_handler && this->_thread_handler != NULL) {
+	if (this->_is_delete_thread_handler) {
 		log_debug("deleting thread_handler object", 0);
 		delete this->_thread_handler;
+		this->_thread_handler = NULL;
 	}
 	log_debug("thread is completely shutdown", 0);
 }
@@ -239,7 +240,7 @@ int thread::run() {
 	this->_running = false;
 	log_debug("setting running flag=%d", this->_running);
 
-	if (this->_is_delete_thread_handler && this->_thread_handler != NULL) {
+	if (this->_is_delete_thread_handler) {
 		log_debug("deleting thread_handler object", 0);
 		delete this->_thread_handler;
 	}

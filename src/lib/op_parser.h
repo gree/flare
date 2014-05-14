@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef	__OP_PARSER_H__
-#define	__OP_PARSER_H__
+#ifndef	OP_PARSER_H
+#define	OP_PARSER_H
 
 #include "binary_header.h"
 #include "op.h"
@@ -98,5 +98,5 @@ public:
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __OP_PARSER_H_
+#endif	// OP_PARSER_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

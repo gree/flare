@@ -32,10 +32,10 @@ namespace test_thread_pool
 	void test_duplicate_thread_id_different_types() {
 		// Preparation
 		thread_pool_test pool;
-		cut_assert_equal_int(1, pool._index);
+		cut_assert_equal_int(1, pool._index.fetch());
 		//	Put a dummy thread (Type 0, ID 1, ensuring collision) in the global map
 		shared_thread dummy(new thread(&pool));
-		dummy->setup(0, pool._index);
+		dummy->setup(0, pool._index.fetch());
 		pool._global_map[0][dummy->get_id()] = dummy;
 		// Test
 		// 	Fetch thread, ID should be != 1
@@ -47,10 +47,10 @@ namespace test_thread_pool
 	void test_duplicate_thread_id_same_type() {
 		// Preparation
 		thread_pool_test pool;
-		cut_assert_equal_int(1, pool._index);
+		cut_assert_equal_int(1, pool._index.fetch());
 		//	Put a dummy thread (Type 0, ID 1, ensuring collision) in the global map
 		shared_thread dummy(new thread(&pool));
-		dummy->setup(0, pool._index);
+		dummy->setup(0, pool._index.fetch());
 		pool._global_map[0][dummy->get_id()] = dummy;
 		// Test
 		// 	Fetch thread, ID should be != 1

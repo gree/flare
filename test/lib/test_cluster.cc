@@ -10,23 +10,71 @@
 
 #include <app.h>
 #include <cluster.h>
+#include <coordinator_factory.h>
+#include <stats.h>
 
 using namespace gree::flare;
+
+void sa_usr1_handler(int sig) {
+		log_notice("received signal [SIGUSR1]", 0);
+}
 
 namespace test_cluster
 {
 	const std::string tmp_dir = "tmp";
+	thread_pool *tp;
 
 	void setup() {
+		struct sigaction sa;
+		memset(&sa, 0, sizeof(sa));
+		sa.sa_handler = sa_usr1_handler;
+		if (sigaction(SIGUSR1, &sa, NULL) < 0) {
+			log_err("sigaction for %d failed: %s (%d)", SIGUSR1, util::strerror(errno), errno);
+		}
+
+		tp = new thread_pool(5, 128);
+
 		mkdir(tmp_dir.c_str(), 0700);
+
+		singleton<logger>::instance().open("test-cluster", "local5");
+		stats_object = new stats();
+		stats_object->startup();
+	}
+
+	void teardown() {
+		delete tp;
+		cut_remove_path(tmp_dir.c_str(), NULL);
 	}
 
 	struct cluster_test : public cluster
 	{
 		cluster_test(std::string data_dir):
-			cluster(NULL, data_dir, "localhost", 11211) { }
-		~cluster_test() { }
+			cluster(tp, "localhost", 11211) {
+			char cwd[PATH_MAX];
+			getcwd(cwd, sizeof(cwd));
 
+			char *uri = getenv("TEST_CLUSTER_INDEX_DB");
+
+			coordinator *coord = NULL;
+			if (uri != NULL) {
+				coord = this->_coordinator_factory.create_coordinator(uri, "myname");
+			}
+			if (coord == NULL) {
+				coord = this->_coordinator_factory.create_coordinator("file://"+std::string(cwd)+"/"+data_dir, "myname");
+			}
+
+			key_resolver::type t;
+			key_resolver::type_cast("modular", t);
+			this->startup_index(coord, t, 1, 65536);
+		}
+		~cluster_test() {
+			this->_coordinator->set_update_handler(NULL);
+			this->_coordinator_factory.destroy_coordinator(this->_coordinator);
+			this->_coordinator = NULL;
+		}
+
+		coordinator_factory _coordinator_factory;
+		std::string _tmp_data_dir;
 		using cluster::_load;
 		using cluster::_save;
 		using cluster::_node_map;
@@ -47,6 +95,7 @@ namespace test_cluster
 		std::string flare_xml_contents = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\" ?>\n"
 			"<!DOCTYPE boost_serialization>\n"
 			"<boost_serialization signature=\"serialization::archive\" version=\"7\">\n"
+			"<node_map_version>1</node_map_version>\n"
 			"<node_map class_id=\"0\" tracking_level=\"0\" version=\"0\">\n"
 			"	<count>1</count>\n"
 			"	<item_version>0</item_version>\n"
@@ -90,6 +139,7 @@ namespace test_cluster
 		std::string flare_xml_contents = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\" ?>\n"
 			"<!DOCTYPE boost_serialization>\n"
 			"<boost_serialization signature=\"serialization::archive\" version=\"7\">\n"
+			"<node_map_version>1</node_map_version>\n"
 			"<node_map class_id=\"0\" tracking_level=\"0\" version=\"0\">\n"
 			"	<count>1</count>\n"
 			"	<item_version>0</item_version>\n"
@@ -116,8 +166,45 @@ namespace test_cluster
 		cut_assert_equal_int(-1, cluster._load());
 	}
 
-	void teardown() {
-		cut_remove_path(tmp_dir.c_str(), NULL);
+	void test_version_for_index()
+	{
+		// Initialization
+		const std::string _tmp_dir = tmp_dir + std::string("/version_for_index");
+		mkdir(_tmp_dir.c_str(), 0700);
+		// Test
+		cluster_test cluster(_tmp_dir);
+		uint64_t ver = 0;
+		ver = cluster.get_node_map_version();
+		cppcut_assert_equal(ver, cluster.get_node_map_version());
+		if (cluster.add_node("localhost", 12121) < 0) {
+			cppcut_assert_equal(ver, cluster.get_node_map_version());
+		} else {
+			ver++;
+			cppcut_assert_equal(ver, cluster.get_node_map_version());
+		}
+		cluster.down_node("localhost", 12121);
+		ver = cluster.get_node_map_version();
+		if (cluster.remove_node("localhost", 12121) < 0) {
+			cppcut_assert_equal(ver, cluster.get_node_map_version());
+		} else {
+			ver++;
+			cppcut_assert_equal(ver, cluster.get_node_map_version());
+		}
+	}
+
+	void test_version_for_data()
+	{
+		// Initialization
+		const std::string _tmp_dir = tmp_dir + std::string("/version_for_data");
+		mkdir(_tmp_dir.c_str(), 0700);
+		// Test
+		cluster_test cluster(_tmp_dir);
+		uint64_t ver = cluster.get_node_map_version();
+		vector<cluster::node> v;
+		ver += 10;
+		cppcut_assert_equal(0, cluster.reconstruct_node(v, ver));    // allow higher version
+		cppcut_assert_equal(0, cluster.reconstruct_node(v, ver));    // allow the same version
+		cppcut_assert_equal(-1, cluster.reconstruct_node(v, ver-1)); // deny lower version
 	}
 }
 

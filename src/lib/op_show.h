@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef	__OP_SHOW_H__
-#define	__OP_SHOW_H__
+#ifndef	OP_SHOW_H
+#define	OP_SHOW_H
 
 #include <string>
 
@@ -46,5 +46,5 @@ protected:
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __OP_SHOW_H__
+#endif	// OP_SHOW_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

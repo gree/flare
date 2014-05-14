@@ -46,6 +46,7 @@ storage::~storage() {
 		pthread_rwlock_destroy(&_mutex_slot[i]);
 	}
 	delete[] this->_mutex_slot;
+	this->_mutex_slot = NULL;
 	pthread_mutex_destroy(&_mutex_iter_lock);
 	pthread_rwlock_destroy(&_mutex_header_cache_map);
 

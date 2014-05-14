@@ -7,6 +7,7 @@
 # forward compatibility
 datarootdir = @datarootdir@
 
+
 # subdirs
 SUBDIRS =	\
 	src	\

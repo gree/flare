@@ -64,9 +64,8 @@ shared_thread thread_pool::get(int type) {
 	unsigned int id;
 	pthread_rwlock_wrlock(&this->_mutex_global_map);
 	for (;;) {
-		ATOMIC_ADD(&this->_index, 1, id);
+		id=this->_index.incr();
 		if (id == 0) {
-			this->_index = 1;
 			continue;
 		}
 		bool dup = false;

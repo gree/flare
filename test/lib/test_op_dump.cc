@@ -175,7 +175,7 @@ namespace test_op_dump
 	{
 		shared_connection c(new connection_sstream("\r\n"));
 		connection_sstream& cstr = dynamic_cast<connection_sstream&>(*c);
-		cluster cl(NULL, "", "", 0);
+		cluster cl(NULL, "", 0);
 		storage_simple_map st("", 0, 0);
 		thread_pool tp(1);
 		test_op_dump op(c, &cl, &st);
@@ -190,7 +190,7 @@ namespace test_op_dump
 	void test_run_server_wait()
 	{
 		shared_connection c(new connection_sstream(" 1000000\r\n"));
-		cluster cl(NULL, "", "", 0);
+		cluster cl(NULL, "", 0);
 		storage_simple_map st("", 0, 0);
 		thread_pool tp(1);
 		test_op_dump op(c, &cl, &st);
@@ -206,7 +206,7 @@ namespace test_op_dump
 	void test_run_server_bwlimit()
 	{
 		shared_connection c(new connection_sstream(" 0 -1 0 1\r\n"));
-		cluster cl(NULL, "", "", 0);
+		cluster cl(NULL, "", 0);
 		storage_simple_map st("", 0, 0);
 		thread_pool tp(1);
 		test_op_dump op(c, &cl, &st);
@@ -222,7 +222,7 @@ namespace test_op_dump
 	void test_run_server_wait_over_bwlimit()
 	{
 		shared_connection c(new connection_sstream(" 2000000 -1 0 1\r\n"));
-		cluster cl(NULL, "", "", 0);
+		cluster cl(NULL, "", 0);
 		storage_simple_map st("", 0, 0);
 		thread_pool tp(1);
 		test_op_dump op(c, &cl, &st);
@@ -238,7 +238,7 @@ namespace test_op_dump
 	void test_run_server_bwlimit_over_wait()
 	{
 		shared_connection c(new connection_sstream(" 100 -1 0 1\r\n"));
-		cluster cl(NULL, "", "", 0);
+		cluster cl(NULL, "", 0);
 		storage_simple_map st("", 0, 0);
 		thread_pool tp(1);
 		test_op_dump op(c, &cl, &st);

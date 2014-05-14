@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef	__OP_INCR_H__
-#define	__OP_INCR_H__
+#ifndef	OP_INCR_H
+#define	OP_INCR_H
 
 #include "op_proxy_write.h"
 
@@ -49,5 +49,5 @@ private:
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __OP_INCR_H__
+#endif	// OP_INCR_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

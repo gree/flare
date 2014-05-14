@@ -26,8 +26,6 @@ ini_option::ini_option():
 		_pid_path(""),
 		_daemonize(false),
 		_data_dir(""),
-		_index_server_name(""),
-		_index_server_port(default_index_server_port),
 		_log_facility(""),
 		_max_connection(default_max_connection),
 		_mutex_slot(default_mutex_slot),
@@ -61,12 +59,16 @@ ini_option::ini_option():
 		_thread_pool_size(default_thread_pool_size),
 		_proxy_prior_netmask(default_proxy_prior_netmask),
 		_max_total_thread_queue(default_max_total_thread_queue) {
+	pthread_mutex_init(&this->_mutex_index_servers, NULL);
 }
 
 /**
  *	dtor for ini_option
  */
 ini_option::~ini_option() {
+	if (pthread_mutex_destroy(&this->_mutex_index_servers) != 0) {
+		log_err("failed to destroy the mutex for index_servers", 0);
+	}
 }
 // }}}
 
@@ -157,16 +159,9 @@ int ini_option::load() {
 			throw -1;
 		}
 
-		if (opt_var_map.count("index-server-name")) {
-			this->_index_server_name = opt_var_map["index-server-name"].as<string>();
-		}
-		if (this->_index_server_name.empty()) {
-			cout << "option [index-server-name] is required" << endl;
+		if (this->_process_index_servers(opt_var_map) < 0) {
+			cout << "invalid index servers are specified" << endl;
 			throw -1;
-		}
-
-		if (opt_var_map.count("index-server-port")) {
-			this->_index_server_port = opt_var_map["index-server-port"].as<int>();
 		}
 
 		if (opt_var_map.count("log-facility")) {
@@ -414,18 +409,30 @@ int ini_option::reload() {
 			this->_thread_pool_size = opt_var_map["thread-pool-size"].as<int>();
 		}
 
-		if (opt_var_map.count("index-server-name")) {
-			log_notice("  index_server_name:      %s -> %s", this->_index_server_name.c_str(), opt_var_map["index-server-name"].as<string>().c_str());
-			this->_index_server_name = opt_var_map["index-server-name"].as<string>();
-		}
-		if (this->_index_server_name.empty()) {
-			cout << "option [index-server-name] is required" << endl;
-			throw -1;
+		vector<cluster::index_server> index_servers = ini_option_object().get_index_servers();
+		if (opt_var_map.count("index-servers")) {
+			ostringstream ss;
+			for (vector<cluster::index_server>::iterator it = index_servers.begin(); it != index_servers.end(); it++) {
+				if (it != index_servers.begin()) {
+					ss << ",";
+				}
+				ss << it->index_server_name.c_str() << ":" << it->index_server_port;
+			}
+			log_notice("  index_servers:          %s -> %s", ss.str().c_str(),  opt_var_map["index-servers"].as<string>().c_str());
+		} else {
+			if (index_servers.size() > 0) {
+				cluster::index_server is = index_servers[0];
+				if (opt_var_map.count("index-server-name")) {
+					log_notice(" index_server_name: %s -> %s", is.index_server_name.c_str(), opt_var_map["index-server-name"].as<string>().c_str());
+				}
+				if (opt_var_map.count("index-server-port")) {
+					log_notice(" index_server_port: %d -> %d", is.index_server_port, opt_var_map["index-server-port"].as<int>());
+				}
+			}
 		}
 
-		if (opt_var_map.count("index-server-port")) {
-			log_notice("  index_server_port:      %d -> %d", this->_index_server_port, opt_var_map["index-server-port"].as<int>());
-			this->_index_server_port = opt_var_map["index-server-port"].as<int>();
+		if (this->_process_index_servers(opt_var_map) < 0) {
+			throw -1;
 		}
 
 		if (opt_var_map.count("max-total-thread-queue")) {
@@ -474,6 +481,7 @@ int ini_option::_setup_config_option(program_options::options_description& optio
 		("back-log",								program_options::value<int>(),			"back log")
 		("daemonize",																										"run as daemon")
 		("data-dir",								program_options::value<string>(),		"data directory")
+		("index-servers",						program_options::value<string>(),		"index servers (name:port,...)")
 		("index-server-name",				program_options::value<string>(),		"index server name")
 		("index-server-port",				program_options::value<int>(),	 		"index server port")
 		("log-facility",						program_options::value<string>(),		"log facility (dynamic)")
@@ -512,6 +520,63 @@ int ini_option::_setup_config_option(program_options::options_description& optio
 
 	return 0;
 }
+
+
+int ini_option::_process_index_servers(program_options::variables_map& opt_var_map) {
+	vector<cluster::index_server> v;
+	if (opt_var_map.count("index-servers")) {
+		static const char * pattern = ",?\\s*([^,:\\s]+):(\\d+)";
+		string index_servers = opt_var_map["index-servers"].as<string>();
+		static const boost::regex e(pattern);
+		boost::smatch match;
+		string::const_iterator start = index_servers.begin();
+		string::const_iterator end = index_servers.end();
+
+		while (regex_search(start, end, match, e)) {
+			string index_server_name = match.str(1);
+			int index_server_port = default_index_server_port;
+			try {
+				index_server_port = lexical_cast<int>(match.str(2));
+			} catch (bad_lexical_cast& e) {
+				log_warning("invalid port number %s", match.str(2).c_str());
+				return -1;
+			}
+			cluster::index_server is = { index_server_name, index_server_port };
+			v.push_back(is);
+			start = match[0].second;
+		}
+
+		if (v.size() == 0) {
+			log_warning("option [index-servers] is invalid", 0);
+			return -1;
+		}
+		if (opt_var_map.count("index-server-name") || opt_var_map.count("index-server-port")) {
+			log_warning("option [index-server-port] is found although [index-servers] is specified", 0);
+			return -1;
+		}
+	} else {
+		string index_server_name("");
+		int index_server_port(default_index_server_port);
+
+		if (opt_var_map.count("index-server-name")) {
+			index_server_name = opt_var_map["index-server-name"].as<string>();
+		}
+		if (opt_var_map.count("index-server-port")) {
+			index_server_port = opt_var_map["index-server-port"].as<int>();
+		}
+		if (index_server_name.empty()) {
+			log_warning("option [index-server-name] is required", 0);
+			return -1;
+		}
+		cluster::index_server is = { index_server_name, index_server_port };
+		v.push_back(is);
+	}
+	pthread_mutex_lock(&this->_mutex_index_servers);
+	this->_index_servers = v;
+	pthread_mutex_unlock(&this->_mutex_index_servers);
+	return 0;
+}
+
 // }}}
 
 }	// namespace flare

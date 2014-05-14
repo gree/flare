@@ -21,6 +21,7 @@ queue_node_sync::queue_node_sync(cluster* cl):
 		thread_queue("node_sync"),
 		_cluster(cl) {
 	this->_node_vector = this->_cluster->get_node();
+	this->_node_map_version = this->_cluster->get_node_map_version();
 }
 
 /**
@@ -36,7 +37,7 @@ queue_node_sync::~queue_node_sync() {
 // {{{ public methods
 int queue_node_sync::run(shared_connection c) {
 	op_node_sync* p = new op_node_sync(c, this->_cluster);
-	if (p->run_client(this->_node_vector) < 0) {
+	if (p->run_client(this->_node_vector, this->_node_map_version) < 0) {
 		delete p;
 		return -1;
 	}

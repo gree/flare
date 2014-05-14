@@ -18,7 +18,8 @@ namespace flare {
  */
 op_node_sync::op_node_sync(shared_connection c, cluster* cl):
 		op(c, "node_sync"),
-		_cluster(cl) {
+		_cluster(cl),
+		_node_map_version(0) {
 }
 
 /**
@@ -35,8 +36,8 @@ op_node_sync::~op_node_sync() {
 /**
  *	send client request
  */
-int op_node_sync::run_client(vector<cluster::node>& v) {
-	if (this->_run_client(v) < 0) {
+int op_node_sync::run_client(vector<cluster::node>& v, uint64_t node_map_version) {
+	if (this->_run_client(v, node_map_version) < 0) {
 		return -1;
 	}
 
@@ -55,12 +56,28 @@ int op_node_sync::_parse_text_server_parameters() {
 	}
 
 	char q[1024];
-	util::next_word(p, q, sizeof(q));
-	if (q[0]) {
-		// no arguments allowed
-		log_debug("bogus string(s) found [%s] -> error", q); 
+	try {
+		// node_map_version (optional)
+		int n = util::next_digit(p, q, sizeof(q));
+		if (q[0]) {
+			try {
+				this->_node_map_version = lexical_cast<uint64_t>(q);
+				log_debug("storing node_map_version [%d]", this->_node_map_version);
+			} catch (bad_lexical_cast e) {
+				log_debug("invalid node_map_version (node_map_version=%s)", q);
+				throw -1;
+			}
+		}
+
+		// no more arguments allowed
+		n += util::next_word(p+n, q, sizeof(q));
+		if (q[0]) {
+			log_debug("bogus string(s) found [%s] -> error", q); 
+			throw -1;
+		}
+	} catch(int e) {
 		delete[] p;
-		return -1;
+		return e;
 	}
 
 	delete[] p;
@@ -97,7 +114,7 @@ int op_node_sync::_run_server() {
 		delete[] p;
 	}
 
-	if (this->_cluster->reconstruct_node(v) < 0) {
+	if (this->_cluster->reconstruct_node(v, this->_node_map_version) < 0) {
 		this->_send_result(result_server_error, "node sync error");
 		return -1;
 	}
@@ -105,9 +122,9 @@ int op_node_sync::_run_server() {
 	return this->_send_result(result_ok);
 }
 
-int op_node_sync::_run_client(vector<cluster::node>& v) {
+int op_node_sync::_run_client(vector<cluster::node>& v, uint64_t node_map_version) {
 	char request[BUFSIZ];
-	snprintf(request, sizeof(request), "node sync");
+	snprintf(request, sizeof(request), "node sync %llu", node_map_version);
 	if (this->_send_request(request) < 0) {
 		return -1;
 	}

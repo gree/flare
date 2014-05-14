@@ -4,8 +4,8 @@
  *	@author Benjamin Surma <benjamin.surma@gree.net>
  *
  */
-#ifndef	__OP_FLUSH_ALLQ_H__
-#define	__OP_FLUSH_ALLQ_H__
+#ifndef	OP_FLUSH_ALLQ_H
+#define	OP_FLUSH_ALLQ_H
 
 #include "op_flush_all.h"
 
@@ -28,5 +28,5 @@ public:
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __OP_FLUSH_ALLQ_H__
+#endif	// OP_FLUSH_ALLQ_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

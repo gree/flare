@@ -40,7 +40,8 @@ ini_option::ini_option():
 		_server_port(default_server_port),
 		_server_socket(""),
 		_stack_size(default_stack_size),
-		_thread_pool_size(default_thread_pool_size) {
+		_thread_pool_size(default_thread_pool_size),
+		_index_db("") {
 }
 
 /**
@@ -213,6 +214,10 @@ int ini_option::load() {
 		if (opt_var_map.count("thread-pool-size")) {
 			this->_thread_pool_size = opt_var_map["thread-pool-size"].as<int>();
 		}
+
+		if (opt_var_map.count("index-db")) {
+			this->_index_db = opt_var_map["index-db"].as<string>();
+		}
 	} catch (int e) {
 		cout << option << endl;
 		return -1;
@@ -348,7 +353,8 @@ int ini_option::_setup_config_option(program_options::options_description& optio
 		("server-port",							program_options::value<int>(),			"my server port")
 		("server-socket",						program_options::value<string>(),		"my server unix domain socket (optional)")
 		("stack-size",							program_options::value<int>(),			"thread stack size (kb)")
-		("thread-pool-size",				program_options::value<int>(),			"thread pool size (dynamic)");
+		("thread-pool-size",				program_options::value<int>(),			"thread pool size (dynamic)")
+		("index-db",								program_options::value<string>(),		"coordination database identifier");
 
 	return 0;
 }

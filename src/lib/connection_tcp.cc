@@ -33,7 +33,9 @@ connection_tcp::connection_tcp(const std::string& host, int port):
 		_read_buf_len(0),
 		_write_buf(NULL),
 		_write_buf_len(0),
-		_write_buf_chunk_size(0) {
+		_write_buf_chunk_size(0),
+		_connect_retry_limit(connection_tcp::connect_retry_limit),
+		_connect_retry_wait(connection_tcp::connect_retry_wait) {
 }
 
 /**
@@ -54,7 +56,9 @@ connection_tcp::connection_tcp(int sock, struct sockaddr_in addr):
 		_read_buf_len(0),
 		_write_buf(NULL),
 		_write_buf_len(0),
-		_write_buf_chunk_size(0) {
+		_write_buf_chunk_size(0),
+		_connect_retry_limit(connection_tcp::connect_retry_limit),
+		_connect_retry_wait(connection_tcp::connect_retry_wait) {
 }
 
 /**
@@ -75,7 +79,9 @@ connection_tcp::connection_tcp(int sock, struct sockaddr_un addr):
 		_read_buf_len(0),
 		_write_buf(NULL),
 		_write_buf_len(0),
-		_write_buf_chunk_size(0) {
+		_write_buf_chunk_size(0),
+		_connect_retry_limit(connection_tcp::connect_retry_limit),
+		_connect_retry_wait(connection_tcp::connect_retry_wait) {
 }
 
 /**
@@ -89,12 +95,10 @@ connection_tcp::~connection_tcp() {
 			log_debug("socket closed (%d)", this->_sock);
 		}
 	}
-	if (this->_read_buf) {
-		delete[] this->_read_buf;
-	}
-	if (this->_write_buf) {
-		delete[] this->_write_buf;
-	}
+	delete[] this->_read_buf;
+	this->_read_buf = NULL;
+	delete[] this->_write_buf;
+	this->_write_buf = NULL;
 }
 // }}}
 
@@ -124,15 +128,15 @@ int connection_tcp::_open(string host, int port) {
 	}
 
 	int i;
-	for (i = 0; i < connection_tcp::connect_retry_limit; i++) {
+	for (i = 0; i < (this->_connect_retry_limit+1); i++) {
 		if (connect(this->_sock, (struct sockaddr*)&this->_addr_inet, sizeof(this->_addr_inet)) < 0) {
-			log_warning("connect() failed: %s (%d) -> wait for %d usec", util::strerror(errno), errno, connection_tcp::connect_retry_wait);
-			usleep(connection_tcp::connect_retry_wait);
+			log_warning("connect() failed: %s (%d) -> wait for %d usec", util::strerror(errno), errno, this->_connect_retry_wait);
+			usleep(this->_connect_retry_wait);
 			continue;
 		}
 		break;
 	}
-	if (i == connection_tcp::connect_retry_limit) {
+	if (i == (this->_connect_retry_limit+1)) {
 		log_err("connect() failed", -1);
 		this->_errno = errno;
 		this->close();
@@ -493,11 +497,9 @@ int connection_tcp::write(const char* p, int bufsiz, bool buffered) {
 			this->_errno = errno;
 
 			// delete buffer...anyway
-			if (this->_write_buf != NULL) {
-				delete[] this->_write_buf;
-				this->_write_buf = NULL;
-				this->_write_buf_len = this->_write_buf_chunk_size = 0;
-			}
+			delete[] this->_write_buf;
+			this->_write_buf = NULL;
+			this->_write_buf_len = this->_write_buf_chunk_size = 0;
 
 			return -1;
 		} else if (len == 0) {
@@ -514,11 +516,9 @@ int connection_tcp::write(const char* p, int bufsiz, bool buffered) {
 		}
 	}
 
-	if (this->_write_buf != NULL) {
-		delete[] this->_write_buf;
-		this->_write_buf = NULL;
-		this->_write_buf_len = this->_write_buf_chunk_size = 0;
-	}
+	delete[] this->_write_buf;
+	this->_write_buf = NULL;
+	this->_write_buf_len = this->_write_buf_chunk_size = 0;
 
 	return written;
 }

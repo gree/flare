@@ -249,6 +249,7 @@ int storage_tcb::set(entry& e, result& r, int b) {
 			} else {
 				int ecode = tcbdbecode(this->_db);
 				log_err("tcbdbput() failed: %s (%d)", tcbdberrmsg(ecode), ecode);
+				this->_listener->on_storage_error();
 				throw -1;
 			}
 		} else {
@@ -258,6 +259,7 @@ int storage_tcb::set(entry& e, result& r, int b) {
 			} else {
 				int ecode = tcbdbecode(this->_db);
 				log_err("tcbdbput() failed: %s (%d)", tcbdberrmsg(ecode), ecode);
+				this->_listener->on_storage_error();
 				throw -1;
 			}
 		}
@@ -271,17 +273,13 @@ int storage_tcb::set(entry& e, result& r, int b) {
 			e.version = e_current.version;
 		}
 	} catch (int error) {
-		if (p) {
-			delete[] p;
-		}
+		delete[] p;
 		if ((b & behavior_skip_lock) == 0) {
 			pthread_rwlock_unlock(&this->_mutex_slot[mutex_index]);
 		}
 		return error;
 	}
-	if (p) {
-		delete[] p;
-	}
+	delete[] p;
 	if ((b & behavior_skip_lock) == 0) {
 		pthread_rwlock_unlock(&this->_mutex_slot[mutex_index]);
 	}
@@ -382,6 +380,7 @@ int storage_tcb::incr(entry& e, uint64_t value, result& r, bool increment, int b
 			} else {
 				int ecode = tcbdbecode(this->_db);
 				log_err("tcbdbputasync() failed: %s (%d)", tcbdberrmsg(ecode), ecode);
+				this->_listener->on_storage_error();
 				throw -1;
 			}
 		} else {
@@ -391,6 +390,7 @@ int storage_tcb::incr(entry& e, uint64_t value, result& r, bool increment, int b
 			} else {
 				int ecode = tcbdbecode(this->_db);
 				log_err("tcbdbput() failed: %s (%d)", tcbdberrmsg(ecode), ecode);
+				this->_listener->on_storage_error();
 				throw -1;
 			}
 		}
@@ -398,9 +398,7 @@ int storage_tcb::incr(entry& e, uint64_t value, result& r, bool increment, int b
 		if (tmp_data != NULL) {
 			free(tmp_data);
 		}
-		if (p) {
-			delete[] p;
-		}
+		delete[] p;
 		if (expired) {
 			result r_remove;
 			this->remove(e_current, r_remove, (b & behavior_skip_lock) | behavior_version_equal);		// do not care about result here
@@ -410,9 +408,7 @@ int storage_tcb::incr(entry& e, uint64_t value, result& r, bool increment, int b
 		}
 		return error;
 	}
-	if (p) {
-		delete[] p;
-	}
+	delete[] p;
 	if ((b & behavior_skip_lock) == 0) {
 		pthread_rwlock_unlock(&this->_mutex_slot[mutex_index]);
 	}
@@ -533,6 +529,7 @@ int storage_tcb::remove(entry& e, result& r, int b) {
 		} else {
 			int ecode = tcbdbecode(this->_db);
 			log_err("tcbdbout() failed: %s (%d)", tcbdberrmsg(ecode), ecode);
+			this->_listener->on_storage_error();
 			throw -1;
 		}
 

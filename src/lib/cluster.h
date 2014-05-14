@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef	__CLUSTER_H__
-#define	__CLUSTER_H__
+#ifndef	CLUSTER_H
+#define	CLUSTER_H
 
 #include <fstream>
 #include <map>
@@ -15,6 +15,7 @@
 
 #include <boost/archive/xml_oarchive.hpp>
 #include <boost/archive/xml_iarchive.hpp>
+#include <boost/archive/archive_exception.hpp>
 #include <boost/serialization/serialization.hpp>
 #include <boost/serialization/nvp.hpp>
 #include <boost/serialization/map.hpp>
@@ -29,6 +30,7 @@
 #include "storage.h"
 #include "thread_pool.h"
 #include "key_resolver.h"
+#include "coordinator.h"
 
 using namespace std;
 using namespace boost;
@@ -80,6 +82,10 @@ public:
 		proxy_request_complete,
 	};
 
+	typedef struct		_index_server {
+		string					index_server_name;
+		int							index_server_port;
+	} index_server;
 
 	typedef struct		_node {
 		string		node_server_name;
@@ -94,7 +100,7 @@ public:
 
 	private:
 		friend class serialization::access;
-		template<class T> void serialize(T& ar, const unsigned int version) {
+		template<class T> void serialize(T& ar, const unsigned int node_map_version) {
 			ar & BOOST_SERIALIZATION_NVP(node_server_name);
 			ar & BOOST_SERIALIZATION_NVP(node_server_port);
 			ar & BOOST_SERIALIZATION_NVP(node_role);
@@ -146,12 +152,13 @@ protected:
 	key_resolver*					_key_resolver;
 	storage*							_storage;
 	type									_type;
-	string								_data_dir;
 	pthread_mutex_t				_mutex_serialization;
 
 	int										_master_reconstruction;
 	pthread_mutex_t				_mutex_master_reconstruction;
 
+	uint64_t							_node_map_version;
+	pthread_mutex_t				_mutex_node_map_version;
 	node_map							_node_map;
 	node_partition_map		_node_partition_map;
 	node_partition_map		_node_partition_prepare_map;
@@ -171,24 +178,24 @@ protected:
 #ifdef ENABLE_MYSQL_REPLICATION
 	bool									_mysql_replication;
 #endif
+	coordinator*					_coordinator;
 	int										_noreply_window_limit;
 
 	// [node]
-	string								_index_server_name;
-	int										_index_server_port;
+	vector<index_server>	_index_servers;
 	int										_proxy_concurrency;
 	int										_reconstruction_interval;
 	int										_reconstruction_bwlimit;
 	replication						_replication_type;
-	uint32_t						_proxy_prior_netmask;
-	uint32_t						_max_total_thread_queue;
+	uint32_t							_proxy_prior_netmask;
+	uint32_t							_max_total_thread_queue;
 
 public:
-	cluster(thread_pool* tp, string data_dir, string server_name, int server_port);
+	cluster(thread_pool* tp, string server_name, int server_port);
 	virtual ~cluster();
 
-	int startup_index(key_resolver::type key_resolver_type, int key_resolver_modular_hint, int key_resolver_modular_virtual);
-	int startup_node(string index_server_name, int index_server_port, uint32_t prior_proxy_netmask);
+	int startup_index(coordinator* coord, key_resolver::type key_resolver_type, int key_resolver_modular_hint, int key_resolver_modular_virtual);
+	int startup_node(const vector<index_server>& index_servers, uint32_t proxy_prior_netmask);
 
 	int add_node(string node_server_name, int node_server_port);
 	int down_node(string node_server_name, int node_server_port, bool shutdown_mode = false);
@@ -198,7 +205,7 @@ public:
 	int remove_node(string node_server_name, int node_server_port);
 	int set_node_role(string node_server_name, int node_server_port, role node_role, int node_balance, int node_partition);
 	int set_node_state(string node_server_name, int node_server_port, state node_state);
-	int reconstruct_node(vector<node> v);
+	int reconstruct_node(vector<node> v, uint64_t node_map_version = 0);
 
 	int set_storage(storage* st) { this->_storage = st; return 0; };
 
@@ -212,19 +219,14 @@ public:
 	proxy_request pre_proxy_write(op_proxy_write* op, shared_queue_proxy_write& q, uint64_t generic_value = 0);
 	proxy_request post_proxy_write(op_proxy_write* op, bool sync = false);
 
-	inline node get_node(string node_key) {
-		node n;
-		pthread_rwlock_rdlock(&this->_mutex_node_map);
-		if (this->_node_map.count(node_key) > 0) {
-			n = this->_node_map[node_key];
-		} else {
-			n.node_server_name = "";
-			n.node_server_port = 0;
-		}
-		pthread_rwlock_unlock(&this->_mutex_node_map);
-
-		return n;
-	};
+	uint64_t get_node_map_version() {
+		uint64_t node_map_version;
+		pthread_mutex_lock(&this->_mutex_node_map_version);
+		node_map_version = this->_node_map_version;
+		pthread_mutex_unlock(&this->_mutex_node_map_version);
+		return node_map_version;
+	}
+	node get_node(string node_key);
 	inline node get_node(string node_server_name, int node_server_port) {
 		return this->get_node(this->to_node_key(node_server_name, node_server_port));
 	}
@@ -249,10 +251,12 @@ public:
 	int set_replication_type(string replication_type) { cluster::replication_cast(replication_type, this->_replication_type); return 0; };
 	string get_server_name() { return this->_server_name; };
 	int get_server_port() { return this->_server_port; };
-	string get_index_server_name() { return this->_index_server_name; };
-	int set_index_server_name(string index_server_name) { this->_index_server_name = index_server_name; return 0; };
-	int get_index_server_port() { return this->_index_server_port; };
-	int set_index_server_port(int index_server_port) { this->_index_server_port = index_server_port; return 0; };
+	string get_index_server_name() { return this->_index_servers[0].index_server_name; };
+	int get_index_server_port() { return this->_index_servers[0].index_server_port; };
+	int set_index_servers(const vector<index_server>& index_servers) {
+		this->_index_servers = index_servers;
+		return 0;
+	};
 	uint32_t get_max_total_thread_queue() { return this->_max_total_thread_queue; };
 	uint32_t set_max_total_thread_queue(uint32_t max_total_thread_queue) { this->_max_total_thread_queue = max_total_thread_queue; return 0; };
 
@@ -364,7 +368,8 @@ protected:
 	int _enqueue(shared_thread_queue q, thread_pool::thread_type t, bool sync);
 	int _broadcast(shared_thread_queue q, bool sync, vector<string> prior_node_key, string exclude_node_key = "");
 	int _save();
-	int _load();
+	int _load(bool update_monitor = true);
+	void _update();
 	int _reconstruct_node_partition(bool lock = true);
 	int _check_node_balance(string node_key, int node_balance);
 	int _check_node_partition(int node_partition, bool& preparing);
@@ -372,10 +377,29 @@ protected:
 	int _determine_partition(storage::entry& e, partition& p, bool include_prepare, bool& is_preprare);
 	string _get_partition_key(string key);
 	int _get_proxy_thread(string node_key, int key_hash, shared_thread& t);
+	shared_connection _open_index();
+	shared_connection _open_index_single_server();
+	shared_connection _open_index_redundant();
+
+	int _set_node_map_version(uint64_t node_map_version) {
+		pthread_mutex_lock(&this->_mutex_node_map_version);
+		this->_node_map_version = node_map_version;
+		pthread_mutex_unlock(&this->_mutex_node_map_version);
+		return 0;
+	}
+
+	uint64_t _increment_node_map_version() {
+		uint64_t node_map_version;
+		pthread_mutex_lock(&this->_mutex_node_map_version);
+		node_map_version = this->_node_map_version;
+		this->_node_map_version++;
+		pthread_mutex_unlock(&this->_mutex_node_map_version);
+		return node_map_version;
+	}
 };
 
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __CLUSTER_H__
+#endif	// CLUSTER_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

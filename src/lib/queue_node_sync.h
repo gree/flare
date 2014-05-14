@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef	__QUEUE_NODE_SYNC_H__
-#define	__QUEUE_NODE_SYNC_H__
+#ifndef	QUEUE_NODE_SYNC_H
+#define	QUEUE_NODE_SYNC_H
 
 #include "cluster.h"
 #include "thread_queue.h"
@@ -27,6 +27,7 @@ class queue_node_sync : public thread_queue {
 protected:
 	cluster*								_cluster;
 	vector<cluster::node>		_node_vector;
+	uint64_t								_node_map_version;
 
 public:
 	queue_node_sync(cluster* cl);
@@ -38,5 +39,5 @@ public:
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __QUEUE_NODE_SYNC_H__
+#endif	// QUEUE_NODE_SYNC_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

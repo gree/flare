@@ -8,6 +8,7 @@
  *	$Id$
  */
 #include "flarei.h"
+#include "coordinator_factory.h"
 #include "connection_tcp.h"
 
 namespace gree {
@@ -59,26 +60,33 @@ void sa_usr1_handler(int sig) {
 flarei::flarei():
 		_server(NULL),
 		_thread_pool(NULL),
-		_cluster(NULL) {
+		_cluster(NULL),
+		_coordinator(NULL) {
 }
 
 /**
  *	dtor for flarei
  */
 flarei::~flarei() {
-	if (this->_server != NULL) {
-		delete this->_server;
+	delete this->_server;
+	this->_server = NULL;
+
+	delete this->_thread_pool;
+	this->_thread_pool = NULL;
+
+	delete this->_cluster;
+	this->_cluster = NULL;
+
+	if (this->_coordinator != NULL) {
+		this->_coordinator_factory.destroy_coordinator(this->_coordinator);
+		this->_coordinator = NULL;
 	}
-	if (this->_thread_pool != NULL) {
-		delete this->_thread_pool;
-	}
-	if (this->_cluster != NULL) {
-		delete this->_cluster;
-	}
-	if (stats_object != NULL) {
-		delete stats_object;
-		stats_object = NULL;
-	}
+
+	delete stats_object;
+	stats_object = NULL;
+
+	delete status_object;
+	status_object = NULL;
 }
 // }}}
 
@@ -99,6 +107,8 @@ int flarei::startup(int argc, char **argv) {
 	stats_object = new stats_index();
 	stats_object->startup();
 
+	status_object = new status_index();
+
 	log_notice("%s version %s - system logger started", this->_ident.c_str(), PACKAGE_VERSION);
 
 	log_notice("application startup in progress...", 0);
@@ -111,11 +121,6 @@ int flarei::startup(int argc, char **argv) {
 	log_notice("  monitor_interval:       %d", ini_option_object().get_monitor_interval());
 	log_notice("  monitor_read_timeout:   %d", ini_option_object().get_monitor_read_timeout());
 	log_notice("  net_read_timeout:       %d", ini_option_object().get_net_read_timeout());
-	log_notice("  partition_modular_hint: %d", ini_option_object().get_partition_modular_hint());
-	log_notice("  partition_modular_virtual: %d", ini_option_object().get_partition_modular_virtual());
-	log_notice("  partition_size:         %d", ini_option_object().get_partition_size());
-	log_notice("  partition_type:         %s", ini_option_object().get_partition_type().c_str());
-	log_notice("  key_hash_algorithm:     %s", ini_option_object().get_key_hash_algorithm().c_str());
 	log_notice("  server_name:            %s", ini_option_object().get_server_name().c_str());
 	log_notice("  server_port:            %d", ini_option_object().get_server_port());
 	log_notice("  server_socket:          %s", ini_option_object().get_server_socket().c_str());
@@ -132,6 +137,69 @@ int flarei::startup(int argc, char **argv) {
 			return -1;
 		}
 	}
+
+	string index_db               = ini_option_object().get_index_db();
+	int partition_modular_hint    = ini_option_object().get_partition_modular_hint();
+	int partition_modular_virtual = ini_option_object().get_partition_modular_virtual();
+	int partition_size            = ini_option_object().get_partition_size();
+	string partition_type         = ini_option_object().get_partition_type();
+	string key_hash_algorithm     = ini_option_object().get_key_hash_algorithm();	
+
+	// create a coordinator from option [index-db]
+	if (index_db.empty()) {
+		index_db = "file://"+ini_option_object().get_data_dir();
+	}
+	ostringstream myname_oss;
+	myname_oss << ini_option_object().get_server_name() << ":" << ini_option_object().get_server_port();
+	this->_coordinator = this->_coordinator_factory.create_coordinator(index_db, myname_oss.str());
+	if (this->_coordinator == NULL) {
+		log_warning("failed to create a coordinator: %s", index_db.c_str());
+		return -1;
+	}
+
+	// startup meta info with a coordinator
+	map<string,string> meta_variables;
+	if (this->_coordinator->get_meta_variables(meta_variables) < 0) {
+		log_warning("failed to get meta variables", 0);
+		return -1;
+	}
+	if (meta_variables.count("partition-modular-hint") > 0) {
+		try {
+			partition_modular_hint = lexical_cast<int>(meta_variables["partition-modular-hint"]);
+		} catch (bad_lexical_cast& e) {
+			log_warning("invalid partition-modular-hint: %s", meta_variables["partition-modular-hint"].c_str());
+			return -1;
+		}
+	}
+	if (meta_variables.count("partition-modular-virtual") > 0) {
+		try {
+			partition_modular_virtual = lexical_cast<int>(meta_variables["partition-modular-virtual"]);
+		} catch (bad_lexical_cast& e) {
+			log_warning("invalid partition-modular-virtual: %s", meta_variables["partition-modular-virtual"].c_str());
+			return -1;
+		}
+	}
+	if (meta_variables.count("partition-size") > 0) {
+		try {
+			partition_size = lexical_cast<int>(meta_variables["partition-size"]);
+		} catch (bad_lexical_cast& e) {
+			log_warning("invalid partition-size: %s", meta_variables["partition-size"].c_str());
+			return -1;
+		}
+	}
+	if (meta_variables.count("partition-type") > 0) {
+		partition_type = meta_variables["partition-type"];
+	}
+	if (meta_variables.count("key-hash-algorithm") > 0) {
+		key_hash_algorithm = meta_variables["key-hash-algorithm"];
+	}
+
+	log_notice("  index_db:               %s", index_db.c_str());
+	log_notice("  partition_modular_hint: %d", partition_modular_hint);
+	log_notice("  partition_modular_virtual: %d", partition_modular_virtual);
+	log_notice("  partition_size:         %d", partition_size);
+	log_notice("  partition_type:         %s", partition_type.c_str());
+	log_notice("  key_hash_algorithm:     %s", key_hash_algorithm.c_str());
 
 	if (this->_set_signal_handler() < 0) {
 		return -1;
@@ -151,14 +219,14 @@ int flarei::startup(int argc, char **argv) {
 
 	this->_thread_pool = new thread_pool(ini_option_object().get_thread_pool_size(), ini_option_object().get_stack_size());
 
-	this->_cluster = new cluster(this->_thread_pool, ini_option_object().get_data_dir(), ini_option_object().get_server_name(), ini_option_object().get_server_port());
+	this->_cluster = new cluster(this->_thread_pool, ini_option_object().get_server_name(), ini_option_object().get_server_port());
 	this->_cluster->set_monitor_threshold(ini_option_object().get_monitor_threshold());
 	this->_cluster->set_monitor_interval(ini_option_object().get_monitor_interval());
 	this->_cluster->set_monitor_read_timeout(ini_option_object().get_monitor_read_timeout());
-	this->_cluster->set_partition_size(ini_option_object().get_partition_size());
 
+	this->_cluster->set_partition_size(partition_size);
 	storage::hash_algorithm ha = storage::hash_algorithm_simple;
-	if (storage::hash_algorithm_cast(ini_option_object().get_key_hash_algorithm(), ha) < 0
+	if (storage::hash_algorithm_cast(key_hash_algorithm, ha) < 0
 			|| ha == storage::hash_algorithm_bitshift // used internally up to 1.0.15
 			|| ha == storage::hash_algorithm_adler32  // used internally after 1.0.16
 			|| ha == storage::hash_algorithm_murmur  // used internally after 1.0.18
@@ -172,9 +240,9 @@ int flarei::startup(int argc, char **argv) {
 	cth->trigger(ch);
 
 	key_resolver::type t;
-	key_resolver::type_cast(ini_option_object().get_partition_type(), t);
+	key_resolver::type_cast(partition_type, t);
 	// XXX: fix this interface...just passing key resolver object will do? refactor when another partition type is added
-	if (this->_cluster->startup_index(t, ini_option_object().get_partition_modular_hint(), ini_option_object().get_partition_modular_virtual()) < 0) {
+	if (this->_cluster->startup_index(this->_coordinator, t, partition_modular_hint, partition_modular_virtual) < 0) {
 		return -1;
 	}
 

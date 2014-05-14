@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef	__OP_DUMP_KEY_H__
-#define	__OP_DUMP_KEY_H__
+#ifndef	OP_DUMP_KEY_H
+#define	OP_DUMP_KEY_H
 
 #include "op.h"
 #include "cluster.h"
@@ -44,5 +44,5 @@ protected:
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __OP_DUMP_KEY_H__
+#endif	// OP_DUMP_KEY_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

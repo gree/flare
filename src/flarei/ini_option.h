@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef __INI_OPTION_H__
-#define __INI_OPTION_H__
+#ifndef INI_OPTION_H
+#define INI_OPTION_H
 
 #include "ini.h"
 #include "key_resolver.h"
@@ -44,6 +44,7 @@ private:
 	string			_server_socket;
 	int					_stack_size;
 	int					_thread_pool_size;
+	string			_index_db;
 	
 public:
 	static const uint32_t default_max_connection = 128;
@@ -86,6 +87,7 @@ public:
 	string get_server_socket() { return this->_server_socket; };
 	int get_stack_size() { return this->_stack_size; };
 	int get_thread_pool_size() { return this->_thread_pool_size; };
+	string get_index_db() { return this->_index_db; };
 
 private:
 	int _setup_cli_option(program_options::options_description& option);
@@ -95,5 +97,5 @@ private:
 }	// namespace flare
 }	// namespace gree
 
-#endif // __INI_OPTION_H__
+#endif // INI_OPTION_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

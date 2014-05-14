@@ -7,7 +7,9 @@
  *
  *	$Id$
  */
+#include "app.h"
 #include "op_ping.h"
+#include "status.h"
 
 namespace gree {
 namespace flare {
@@ -55,7 +57,11 @@ int op_ping::_parse_text_server_parameters() {
 }
 
 int op_ping::_run_server() {
-	this->_send_result(result_ok);
+	if (status_object->get_status_code() == status::status_ok) {
+		this->_send_result(result_ok);
+	} else {
+		this->_send_result(result_server_error, status_object->get_detail_status());
+	}
 
 	return 0;
 }

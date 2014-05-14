@@ -35,6 +35,7 @@ AC_ARG_WITH(boost,
 AC_CHECK_LIB(boost_program_options, main, [], [AC_CHECK_LIB(boost_program_options-mt, main, [], [AC_MSG_ERROR(boost_program_options not found)])])
 AC_CHECK_LIB(boost_regex, main, [], [AC_CHECK_LIB(boost_regex-mt, main, [], [AC_MSG_ERROR(boost_regex not found)])])
 AC_CHECK_LIB(boost_serialization, main, [], [AC_CHECK_LIB(boost_serialization-mt, main, [], [AC_MSG_ERROR(boost_serialization not found)])])
+AC_CHECK_LIB(boost_thread, main, [], [AC_CHECK_LIB(boost_thread-mt, main, [], [AC_MSG_ERROR(boost_thread not found)])])
 AC_CHECK_LIB(pthread, pthread_create, [], [AC_MSG_ERROR(libpthread not found)])
 AC_CHECK_LIB(z, main, [], [AC_MSG_ERROR(zlib not found)])
 AC_CHECK_LIB(hashkit, libhashkit_murmur, [], [AC_MSG_ERROR(libhashkit not found)])
@@ -58,11 +59,29 @@ AS_IF([test "x$ac_cv_lib_kyotocabinet_main" = "xyes"],
 		])
 	])
 
+# libuuid
+AC_CHECK_LIB(uuid, main, [], [echo "libuuid not found"; exit 1])
+
+# libzookeeper
+AC_ARG_WITH(zookeeper,
+	AS_HELP_STRING([--with-zookeeper], [zookeeper libraries]),
+	AS_IF([test "$withval" != "no"], [CXXFLAGS="${CXXFLAGS} -I${withval}/include -I${withval}/include/zookeeper" LDFLAGS="${LDFLAGS} -L${withval}/lib"], []))
+AS_IF([test "x$with_zookeeper" != "xno"],
+	[AC_CHECK_LIB(zookeeper_mt, main, [], [])], [ac_cv_lib_zookeeper_mt_main=no])
+AS_IF([test "x$ac_cv_lib_zookeeper_mt_main" = "xyes"],
+	[AC_DEFINE([THREADED], [], [enable multi-threaded zookeeper library])],
+	[AS_IF([test "x$with_zookeeper" != "x" -a "x$with_zookeeper" != "xno"],
+		[AC_MSG_ERROR([zookeeper requested but not found])
+		])
+	])
 
 # Checks for additional features
 
 # Kyoto Cabinet
 AM_CONDITIONAL(ENABLE_KYOTOCABINET, test "$ac_cv_lib_kyotocabinet_main" = "yes")
+
+# libzookeeper
+AM_CONDITIONAL(ENABLE_ZOOKEEPER, test "$ac_cv_lib_zookeeper_mt_main" = "yes")
 
 # MySQL replication
 AC_MSG_CHECKING(if mysql replication is enabled)
@@ -92,12 +111,21 @@ fi
 AC_STDC_HEADERS
 AC_CHECK_HEADER(pthread.h, [], [AC_MSG_ERROR(pthread.h not found)])
 AC_CHECK_HEADERS(arpa/inet.h endian.h sys/endian.h sys/types.h winsock2.h byteswap.h, [], [])
-
+AC_CHECK_HEADER(boost/atomic.hpp,
+[AC_DEFINE([HAVE_LIBBOOST_ATOMIC],[1],[have boost/atomic.hpp or not])],
+[])
 
 # Checks for typedefs, structures, and compiler characteristics.
 
 
 # Checks for library functions.
+
+AC_COMPILE_CHECK(
+[whether we have __sync_fetch_and_add],
+[#include <stdint.h>],
+[uint64_t v;__sync_fetch_and_add(&v,1);],
+[AC_DEFINE([HAVE_SYNC_FETCH_AND_ADD],[1],[have __sync_fetch_and_add])]
+)
 
 AC_CHECK_FUNC(epoll_create, [AC_DEFINE([HAVE_EPOLL], [], [have epoll functions or not])])
 AC_CHECK_FUNC(kqueue, [AC_DEFINE([HAVE_KQUEUE], [], [have kqueue functions or not])])

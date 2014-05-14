@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef	__QUEUE_NODE_STATE_H__
-#define	__QUEUE_NODE_STATE_H__
+#ifndef	QUEUE_NODE_STATE_H
+#define	QUEUE_NODE_STATE_H
 
 #include "cluster.h"
 #include "thread_queue.h"
@@ -46,5 +46,5 @@ public:
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __QUEUE_NODE_STATE_H__
+#endif	// QUEUE_NODE_STATE_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

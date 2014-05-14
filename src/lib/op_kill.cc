@@ -53,7 +53,7 @@ int op_kill::_parse_text_server_parameters() {
 			this->_id = lexical_cast<unsigned int>(q);
 			log_debug("storing id [%u]", this->_id);
 		} catch (bad_lexical_cast e) {
-			log_debug("invalid thead id (id=%s)", q);
+			log_debug("invalid thread id (id=%s)", q);
 			throw -1;
 		}
 

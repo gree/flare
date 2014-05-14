@@ -28,13 +28,11 @@ flarefs::flarefs():
  *	dtor for flarefs
  */
 flarefs::~flarefs() {
-	if (this->_fuse != NULL) {
-		delete this->_fuse;
-	}
-	if (stats_object != NULL) {
-		delete stats_object;
-		stats_object = NULL;
-	}
+	delete this->_fuse;
+	this->_fuse = NULL;
+
+	delete stats_object;
+	stats_object = NULL;
 }
 // }}}
 

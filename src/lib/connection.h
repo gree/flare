@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef __CONNECTION_H__
-#define __CONNECTION_H__
+#ifndef CONNECTION_H
+#define CONNECTION_H
 
 #include <string>
 
@@ -44,5 +44,5 @@ public:
 }	// namespace flare
 }	// namespace gree
 
-#endif // __CONNECTION_H__
+#endif // CONNECTION_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

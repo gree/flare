@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef	__OP_CAS_H__
-#define	__OP_CAS_H__
+#ifndef	OP_CAS_H
+#define	OP_CAS_H
 
 #include "op_set.h"
 
@@ -32,5 +32,5 @@ protected:
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __OP_CAS_H__
+#endif	// OP_CAS_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

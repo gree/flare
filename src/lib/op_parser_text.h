@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef	__OP_PARSER_TEXT_H__
-#define	__OP_PARSER_TEXT_H__
+#ifndef	OP_PARSER_TEXT_H
+#define	OP_PARSER_TEXT_H
 
 #include "op_parser.h"
 
@@ -33,5 +33,5 @@ protected:
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __OP_PARSER_TEXT_H_
+#endif	// OP_PARSER_TEXT_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

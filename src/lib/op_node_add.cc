@@ -121,7 +121,8 @@ int op_node_add::_run_server() {
 
 int op_node_add::_run_client() {
 	char request[BUFSIZ];
-	snprintf(request, sizeof(request), "node add %s %d", this->_cluster->get_server_name().c_str(), this->_cluster->get_server_port());
+	string server_name = this->_cluster->get_server_name();
+	snprintf(request, sizeof(request), "node add %s %d", server_name.c_str(), this->_cluster->get_server_port());
 	return this->_send_request(request);
 }
 

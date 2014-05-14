@@ -21,6 +21,11 @@ export DH_OPTIONS
 DEB_HOST_GNU_TYPE   ?= $(shell dpkg-architecture -qDEB_HOST_GNU_TYPE)
 DEB_BUILD_GNU_TYPE  ?= $(shell dpkg-architecture -qDEB_BUILD_GNU_TYPE)
 
+DEB_PACKAGE ?= flare
+CONFIGURE_OPT = --enable-mysql-replication
+ifneq ($(ENABLE_TEST),true)
+	CONFIGURE_OPT += --without-cutter
+endif
 
 CFLAGS = -Wall -g
 
@@ -33,7 +38,7 @@ endif
 config.status: configure
 	dh_testdir
 	# Add here commands to configure the package.
-	./configure --host=$(DEB_HOST_GNU_TYPE) --build=$(DEB_BUILD_GNU_TYPE) --prefix=/usr --mandir=\$${prefix}/share/man --infodir=\$${prefix}/share/info --enable-mysql-replication --without-cutter CFLAGS="$(CFLAGS)" LDFLAGS="-Wl,-z,defs"
+	./configure --host=$(DEB_HOST_GNU_TYPE) --build=$(DEB_BUILD_GNU_TYPE) --prefix=/usr --mandir=\$${prefix}/share/man --infodir=\$${prefix}/share/info $(CONFIGURE_OPT) CFLAGS="$(CFLAGS)" LDFLAGS="-Wl,-z,defs"
 
 
 #Architecture 
@@ -66,8 +71,6 @@ endif
 ifneq "$(wildcard /usr/share/misc/config.guess)" ""
 	cp -f /usr/share/misc/config.guess config.guess
 endif
-
-
 	dh_clean 
 
 install: install-indep install-arch
@@ -91,7 +94,10 @@ install-arch:
 
 	# Add here commands to install the arch part of the package into 
 	# debian/tmp.
-	$(MAKE) DESTDIR=$(CURDIR)/debian/flare install
+	$(MAKE) DESTDIR=$(CURDIR)/debian/$(DEB_PACKAGE) install
+ifeq ($(ENABLE_TEST),true)
+	$(MAKE) check; true # XXX "make check" cannot check the test result correctly.
+endif
 
 	dh_install -s
 # Must not depend on anything. This is to be called by

@@ -163,9 +163,8 @@ fuse_impl::fuse_impl(string mount_dir):
  *	dtor for fuse_impl
  */
 fuse_impl::~fuse_impl() {
-	if (this->_fs != NULL) {
-		delete this->_fs;
-	}
+	delete this->_fs;
+	this->_fs = NULL;
 }
 // }}}
 

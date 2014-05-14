@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef	__APP_H__
-#define	__APP_H__
+#ifndef	APP_H
+#define	APP_H
 
 #include <fstream>
 #include <iostream>
@@ -43,6 +43,7 @@
 #include "server.h"
 #include "client.h"
 #include "stats.h"
+#include "status.h"
 #include "thread_pool.h"
 #include "op.h"
 #include "cluster.h"
@@ -60,6 +61,7 @@ namespace gree {
 namespace flare {
 
 extern stats* stats_object;
+extern status* status_object;
 
 /**
  *	application base class
@@ -97,5 +99,5 @@ protected:
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __APP_H__
+#endif	// APP_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

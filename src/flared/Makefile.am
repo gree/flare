@@ -24,4 +24,6 @@ flared_SOURCES = \
 	op_parser_text_node.h op_parser_text_node.cc \
 	op_stats_node.h op_stats_node.cc \
 	op_show_node.h op_show_node.cc \
-	stats_node.h stats_node.cc
+	stats_node.h stats_node.cc \
+	status_node.h status_node.cc \
+	show_node.h show_node.cc

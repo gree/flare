@@ -159,9 +159,21 @@ int op_incr::_run_server() {
 	if (this->_storage->incr(this->_entry, this->_value, r_storage, this->_incr) < 0) {
 		return this->_send_result(result_server_error, "i/o error");
 	}
+
 	if (r_storage == storage::result_stored) {
+		if(this->_incr){
+			stats_object->increment_incr_hits();
+		} else {
+			stats_object->increment_decr_hits();
+		}
 		// post-proxy (notify updates to slaves if we need)
 		r_proxy = this->_cluster->post_proxy_write(this, this->_is_sync(this->_entry.option, this->_cluster->get_replication_type()));
+	} else if (r_storage == storage::result_not_found) {
+		if(this->_incr){
+			stats_object->increment_incr_misses();
+		} else {
+			stats_object->increment_decr_misses();
+		}
 	}
 	
 	if ((this->_entry.option & storage::option_noreply) == 0) {

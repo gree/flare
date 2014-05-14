@@ -122,7 +122,26 @@ int op_set::_run_server() {
 	}
 	if (r_storage == storage::result_stored
 			|| r_storage == storage::result_touched) {
-			r_proxy = this->_cluster->post_proxy_write(this, this->_is_sync(this->_entry.option, this->_cluster->get_replication_type()));
+		if (this->get_ident() == "cas"){
+			stats_object->increment_cas_hits();
+		} else if (this->get_ident() == "touch"){
+			stats_object->increment_touch_hits();
+		}
+		r_proxy = this->_cluster->post_proxy_write(this,
+																							 this->_is_sync(this->_entry.option,
+																															this->_cluster->get_replication_type()));
+	} else {
+		if (this->get_ident() == "cas"){
+			if (r_storage == storage::result_exists){
+				stats_object->increment_cas_badval();
+			} else if (r_storage == storage::result_not_found) {
+				stats_object->increment_cas_misses();
+			}
+		} else if (this->get_ident() == "touch"){
+			if (r_storage == storage::result_not_found) {
+				stats_object->increment_touch_misses();
+			}
+		}
 	}
 	
 	if ((this->_entry.option & storage::option_noreply) == 0) {

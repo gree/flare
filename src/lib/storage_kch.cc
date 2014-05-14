@@ -59,9 +59,8 @@ storage_kch::~storage_kch() {
 	if (this->_open) {
 		this->close();
 	}
-	if (this->_db != NULL) {
-		delete this->_db;
-	}
+	delete this->_db;
+	this->_db = NULL;
 }
 // }}}
 
@@ -259,6 +258,7 @@ int storage_kch::set(entry &e, result &r, int b) {
 		} else {
 			BasicDB::Error error = this->_db->error();
 			log_err("%s failed: %s (%d)", "HashDB::set()", error.message(), error.code());
+			this->_listener->on_storage_error();
 			throw - 1;
 		}
 
@@ -271,17 +271,13 @@ int storage_kch::set(entry &e, result &r, int b) {
 			e.version = e_current.version;
 		}
 	} catch (int error) {
-		if (p) {
-			delete[] p;
-		}
+		delete[] p;
 		if ((b & behavior_skip_lock) == 0) {
 			pthread_rwlock_unlock(&this->_mutex_slot[mutex_index]);
 		}
 		return error;
 	}
-	if (p) {
-		delete[] p;
-	}
+	delete[] p;
 	if ((b & behavior_skip_lock) == 0) {
 		pthread_rwlock_unlock(&this->_mutex_slot[mutex_index]);
 	}
@@ -388,15 +384,12 @@ int storage_kch::incr(entry &e, uint64_t value, result &r, bool increment, int b
 		} else {
 			BasicDB::Error error = this->_db->error();
 			log_err("%s failed: %s (%d)", "HashDB::set()", error.message(), error.code());
+			this->_listener->on_storage_error();
 			throw - 1;
 		}
 	} catch (int error) {
-		if (tmp_data != NULL) {
-			delete[] tmp_data;
-		}
-		if (p) {
-			delete[] p;
-		}
+		delete[] tmp_data;
+		delete[] p;
 		if ((b & behavior_skip_lock) == 0) {
 			pthread_rwlock_unlock(&this->_mutex_slot[mutex_index]);
 		}
@@ -407,9 +400,7 @@ int storage_kch::incr(entry &e, uint64_t value, result &r, bool increment, int b
 		}
 		return error;
 	}
-	if (p) {
-		delete[] p;
-	}
+	delete[] p;
 	if ((b & behavior_skip_lock) == 0) {
 		pthread_rwlock_unlock(&this->_mutex_slot[mutex_index]);
 	}
@@ -529,6 +520,7 @@ int storage_kch::remove(entry &e, result &r, int b) {
 		} else {
 			BasicDB::Error error = this->_db->error();
 			log_err("%s failed: %s (%d)","HashDB::remove()", error.message(), error.code());
+			this->_listener->on_storage_error();
 			throw - 1;
 		}
 

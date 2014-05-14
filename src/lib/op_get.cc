@@ -129,24 +129,24 @@ int op_get::_run_server() {
 			storage::entry& e = q->get_entry();
 			_send_entry(e);
 			if (e.is_data_available()) {
-				stats_object->increment_hits();
+				stats_object->increment_get_hits();
 			} else {
-				stats_object->increment_misses();
+				stats_object->increment_get_misses();
 			}
 		} else if (r_map.count(it->key) == 0) {
 			log_warning("result map is inconsistent (key=%s)", it->key.c_str());
-			stats_object->increment_misses();
+			stats_object->increment_get_misses();
 		} else if (r_map[it->key] == storage::result_not_found) {
 			_send_entry(*it);
-			stats_object->increment_misses();
+			stats_object->increment_get_misses();
 		} else {
 			// for safety
 			// op like "get key1 key1" will cause segfault
 			_send_entry(*it);
 			if (it->is_data_available()) {
-				stats_object->increment_hits();
+				stats_object->increment_get_hits();
 			} else {
-				stats_object->increment_misses();
+				stats_object->increment_get_misses();
 			}
 		}
 	}

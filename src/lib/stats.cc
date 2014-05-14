@@ -23,8 +23,19 @@ stats::stats():
 		_total_connections(0),
 		_cmd_get(0),
 		_cmd_set(0),
-		_hits(0),
-		_misses(0),
+		_get_hits(0),
+		_get_misses(0),
+		_delete_hits(0),
+		_delete_misses(0),
+		_incr_hits(0),
+		_incr_misses(0),
+		_decr_hits(0),
+		_decr_misses(0),
+		_cas_hits(0),
+		_cas_misses(0),
+		_cas_badval(0),
+		_touch_hits(0),
+		_touch_misses(0),
 		_bytes_read(0),
 		_bytes_written(0),
 		_total_thread_queue(0) {
@@ -102,8 +113,8 @@ uint32_t stats::get_curr_items(storage* st) {
 	return st ? st->count() : 0;
 }
 
-unsigned int stats::get_total_items() {
-	return this->_total_items;
+uint32_t stats::get_total_items() {
+	return this->_total_items.fetch();
 }
 
 uint64_t stats::get_bytes(storage* st) {
@@ -114,57 +125,33 @@ uint32_t stats::get_curr_connections(thread_pool* tp) {
 	return 0;
 }
 
-unsigned int stats::get_total_connections() {
-	return this->_total_connections;
-}
+uint32_t stats::get_total_connections()						{return this->_total_connections.fetch();}
+uint32_t stats::get_connection_structures()				{return 0;}
 
-uint32_t stats::get_connection_structures() {
-	return 0;
-}
+uint64_t stats::get_cmd_get()											{ return this->_cmd_get.fetch(); }
+uint64_t stats::get_cmd_set()											{ return this->_cmd_set.fetch(); }
+uint64_t stats::get_get_hits()											{ return this->_get_hits.fetch(); }
+uint64_t stats::get_get_misses()										{ return this->_get_misses.fetch(); }
+uint64_t stats::get_delete_hits()									{ return this->_delete_hits.fetch(); }
+uint64_t stats::get_delete_misses()								{ return this->_delete_misses.fetch(); }
+uint64_t stats::get_incr_hits()										{ return this->_incr_hits.fetch(); }
+uint64_t stats::get_incr_misses()									{ return this->_incr_misses.fetch(); }
+uint64_t stats::get_decr_hits()										{ return this->_decr_hits.fetch(); }
+uint64_t stats::get_decr_misses()									{ return this->_decr_misses.fetch(); }
+uint64_t stats::get_cas_hits()											{ return this->_cas_hits.fetch(); }
+uint64_t stats::get_cas_misses()										{ return this->_cas_misses.fetch(); }
+uint64_t stats::get_cas_badval()										{ return this->_cas_badval.fetch(); }
+uint64_t stats::get_touch_hits()										{ return this->_touch_hits.fetch(); }
+uint64_t stats::get_touch_misses()									{ return this->_touch_misses.fetch(); }
+uint64_t stats::get_evictions()										{ return 0; }
+uint64_t stats::get_bytes_read()										{ return this->_bytes_read.fetch();}
+uint64_t stats::get_bytes_written()								{ return this->_bytes_written.fetch();}
 
-unsigned int stats::get_cmd_get() {
-	return this->_cmd_get;
-}
+uint32_t stats::get_total_thread_queue()						{ return this->_total_thread_queue.fetch();}
+uint32_t stats::get_limit_maxbytes()								{ return 0; }
+uint32_t stats::get_threads(thread_pool* th)				{ return th->get_thread_size(); }
+uint32_t stats::get_pool_threads(thread_pool* th)	{ return th->get_pool_size(); }
 
-unsigned int stats::get_cmd_set() {
-	return this->_cmd_set;
-}
-
-unsigned int stats::get_hits() {
-	return this->_hits;
-}
-
-unsigned int stats::get_misses() {
-	return this->_misses;
-}
-
-unsigned int stats::get_evictions() {
-	return 0;
-}
-
-unsigned int stats::get_bytes_read() {
-	return this->_bytes_read;
-}
-
-unsigned int stats::get_bytes_written() {
-	return this->_bytes_written;
-}
-
-unsigned int stats::get_total_thread_queue() {
-	return this->_total_thread_queue;
-}
-
-uint32_t stats::get_limit_maxbytes() {
-	return 0;
-}
-
-uint32_t stats::get_threads(thread_pool* th) {
-	return th->get_thread_size();
-}
-
-uint32_t stats::get_pool_threads(thread_pool* th) {
-	return th->get_pool_size();
-}
 // }}}
 
 // {{{ protected methods

@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef	__OP_ERROR_H__
-#define	__OP_ERROR_H__
+#ifndef	OP_ERROR_H
+#define	OP_ERROR_H
 
 #include "op.h"
 
@@ -34,5 +34,5 @@ protected:
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __OP_ERROR_H__
+#endif	// OP_ERROR_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

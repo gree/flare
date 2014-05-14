@@ -30,11 +30,11 @@ key_resolver_modular::key_resolver_modular(int p, int hint, int v):
 key_resolver_modular::~key_resolver_modular() {
 	if (this->_map != NULL) {
 		for (int i = 0; i < this->_partition_size; i++) {
-			if (this->_map[i] != NULL) {
-				delete[] this->_map[i];
-			}
+			delete[] this->_map[i];
+			this->_map[i] = NULL;
 		}
 		delete[] this->_map;
+		this->_map = NULL;
 	}
 }
 // }}}

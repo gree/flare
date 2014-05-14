@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef	__OP_NODE_STATE_H__
-#define	__OP_NODE_STATE_H__
+#ifndef	OP_NODE_STATE_H
+#define	OP_NODE_STATE_H
 
 #include "op.h"
 #include "cluster.h"
@@ -44,5 +44,5 @@ protected:
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __OP_NODE_STATE_H__
+#endif	// OP_NODE_STATE_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

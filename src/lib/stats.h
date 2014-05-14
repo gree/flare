@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef	__STATS_H__
-#define	__STATS_H__
+#ifndef	STATS_H
+#define	STATS_H
 
 #include <boost/lexical_cast.hpp>
 
@@ -31,17 +31,28 @@ namespace flare {
  */
 class stats {
 protected:
-	time_t				_start_timestamp;
-	time_t				_current_timestamp;
-	unsigned int	_total_items;
-	unsigned int	_total_connections;
-	unsigned int	_cmd_get;
-	unsigned int	_cmd_set;
-	unsigned int	_hits;
-	unsigned int	_misses;
-	unsigned int	_bytes_read;
-	unsigned int	_bytes_written;
-	unsigned int	_total_thread_queue;
+	time_t			_start_timestamp;
+	time_t			_current_timestamp;
+	AtomicCounter _total_items;
+	AtomicCounter _total_connections;
+	AtomicCounter _cmd_get;
+	AtomicCounter _cmd_set;
+	AtomicCounter _get_hits;
+	AtomicCounter _get_misses;
+	AtomicCounter _delete_hits;
+	AtomicCounter _delete_misses;
+	AtomicCounter _incr_hits;
+	AtomicCounter _incr_misses;
+	AtomicCounter _decr_hits;
+	AtomicCounter _decr_misses;
+	AtomicCounter _cas_hits;
+	AtomicCounter _cas_misses;
+	AtomicCounter _cas_badval;
+	AtomicCounter _touch_hits;
+	AtomicCounter _touch_misses;
+	AtomicCounter _bytes_read;
+	AtomicCounter _bytes_written;
+	AtomicCounter _total_thread_queue;
 
 public:
 	stats();
@@ -49,16 +60,27 @@ public:
 
 	int startup();
 
-	inline int increment_total_items() { unsigned int dummy; ATOMIC_ADD(&this->_total_items, 1, dummy); return 0; };
-	inline int increment_total_connections() { unsigned int dummy; ATOMIC_ADD(&this->_total_connections, 1, dummy); return 0; };
-	inline int increment_cmd_get() { unsigned int dummy; ATOMIC_ADD(&this->_cmd_get, 1, dummy); return 0; };
-	inline int increment_cmd_set() { unsigned int dummy; ATOMIC_ADD(&this->_cmd_set, 1, dummy); return 0; };
-	inline int increment_hits() { unsigned int dummy; ATOMIC_ADD(&this->_hits, 1, dummy); return 0; };
-	inline int increment_misses() { unsigned int dummy; ATOMIC_ADD(&this->_misses, 1, dummy); return 0; };
-	inline int add_bytes_read(unsigned int n) { unsigned int dummy; ATOMIC_ADD(&this->_bytes_read, n, dummy); return 0; };
-	inline int add_bytes_written(unsigned int n) { unsigned int dummy; ATOMIC_ADD(&this->_bytes_written, n, dummy); return 0; };
-	inline int increment_total_thread_queue() { unsigned int dummy; ATOMIC_ADD(&this->_total_thread_queue, 1, dummy); return 0; };
-	inline int decrement_total_thread_queue() { unsigned int dummy; ATOMIC_ADD(&this->_total_thread_queue, -1, dummy); return 0; };
+	inline int increment_total_items()           { this->_total_items.incr();return 0; };
+	inline int increment_total_connections()     { this->_total_connections.incr();return 0; };
+	inline int increment_cmd_get()               { this->_cmd_get.incr();return 0; };
+	inline int increment_cmd_set()               { this->_cmd_set.incr();return 0; };
+	inline int increment_get_hits()              { this->_get_hits.incr();return 0; };
+	inline int increment_get_misses()            { this->_get_misses.incr();return 0; };
+	inline int increment_delete_hits()           { this->_delete_hits.incr();return 0; };
+	inline int increment_delete_misses()         { this->_delete_misses.incr();return 0; };
+	inline int increment_incr_hits()             { this->_incr_hits.incr();return 0; };
+	inline int increment_incr_misses()           { this->_incr_misses.incr();return 0; };
+	inline int increment_decr_hits()             { this->_decr_hits.incr();return 0; };
+	inline int increment_decr_misses()           { this->_decr_misses.incr();return 0; };
+	inline int increment_cas_hits()              { this->_cas_hits.incr();return 0; };
+	inline int increment_cas_misses()            { this->_cas_misses.incr();return 0; };
+	inline int increment_cas_badval()            { this->_cas_badval.incr();return 0; };
+	inline int increment_touch_hits()            { this->_touch_hits.incr();return 0; };
+	inline int increment_touch_misses()          { this->_touch_misses.incr();return 0; };
+	inline int add_bytes_read(uint64_t n)        { this->_bytes_read.add(n);return 0; };
+	inline int add_bytes_written(uint64_t n)     { this->_bytes_written.add(n);return 0; };
+	inline int increment_total_thread_queue()    { this->_total_thread_queue.incr();return 0; };
+	inline int decrement_total_thread_queue()    { this->_total_thread_queue.add(-1);return 0; };
 
 	pid_t get_pid();
 	time_t get_uptime();
@@ -68,19 +90,30 @@ public:
 	int get_pointer_size();
 	struct rusage get_rusage();
 	virtual uint32_t get_curr_items(storage* st);
-	virtual unsigned int get_total_items();
+	virtual uint32_t get_total_items();
 	virtual uint64_t get_bytes(storage* st);
 	virtual uint32_t get_curr_connections(thread_pool* tp);
-	unsigned int get_total_connections();
+	uint32_t get_total_connections();
 	uint32_t get_connection_structures();
-	unsigned int get_cmd_get();
-	unsigned int get_cmd_set();
-	unsigned int get_hits();
-	unsigned int get_misses();
-	unsigned int get_evictions();
-	unsigned int get_bytes_read();
-	unsigned int get_bytes_written();
-	unsigned int get_total_thread_queue();
+	uint64_t get_cmd_get();
+	uint64_t get_cmd_set();
+	uint64_t get_get_hits();
+	uint64_t get_get_misses();
+	uint64_t get_delete_hits();
+	uint64_t get_delete_misses();
+	uint64_t get_incr_hits();
+	uint64_t get_incr_misses();
+	uint64_t get_decr_hits();
+	uint64_t get_decr_misses();
+	uint64_t get_cas_hits();
+	uint64_t get_cas_misses();
+	uint64_t get_cas_badval();
+	uint64_t get_touch_hits();
+	uint64_t get_touch_misses();
+	uint64_t get_evictions();
+	uint64_t get_bytes_read();
+	uint64_t get_bytes_written();
+	uint32_t get_total_thread_queue();
 	uint32_t get_limit_maxbytes();
 	uint32_t get_threads(thread_pool* tp);
 	uint32_t get_pool_threads(thread_pool* tp);
@@ -89,5 +122,5 @@ public:
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __STATS_H__
+#endif	// STATS_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef	__STORAGE_TCB_H__
-#define	__STORAGE_TCB_H__
+#ifndef	STORAGE_TCB_H
+#define	STORAGE_TCB_H
 
 #ifdef HAVE_STDLIB_H
 # include <stdlib.h>
@@ -68,5 +68,5 @@ private:
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __STORAGE_TCB_H__
+#endif	// STORAGE_TCB_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

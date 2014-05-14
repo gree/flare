@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef	__OP_FLUSH_ALL_H__
-#define	__OP_FLUSH_ALL_H__
+#ifndef	OP_FLUSH_ALL_H
+#define	OP_FLUSH_ALL_H
 
 #include "op.h"
 #include "storage.h"
@@ -43,5 +43,5 @@ protected:
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __OP_FLUSH_ALL_H__
+#endif	// OP_FLUSH_ALL_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

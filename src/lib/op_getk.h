@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef	__OP_GETK_H__
-#define	__OP_GETK_H__
+#ifndef	OP_GETK_H
+#define	OP_GETK_H
 
 #include "op_get.h"
 
@@ -31,5 +31,5 @@ protected:
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __OP_GETK_H__
+#endif	// OP_GETK_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

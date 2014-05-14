@@ -7,6 +7,7 @@
  *
  *	$Id$
  */
+#include "app.h"
 #include "op_delete.h"
 #include "queue_proxy_write.h"
 #include "binary_request_header.h"
@@ -94,10 +95,16 @@ int op_delete::_run_server() {
 	if (this->_storage->remove(this->_entry, r_storage) < 0) {
 		return this->_send_result(result_server_error, "i/o error");
 	}
-	
-	// post-proxy (notify updates to slaves if we need)
+
 	if (r_storage == storage::result_deleted) {
-		r_proxy = this->_cluster->post_proxy_write(this, this->_is_sync(this->_entry.option, this->_cluster->get_replication_type()));
+		stats_object->increment_delete_hits();
+		// post-proxy (notify updates to slaves if we need)
+		r_proxy = this->_cluster->post_proxy_write(this,
+																							 this->_is_sync(this->_entry.option,
+																															this->_cluster->get_replication_type()
+																															));
+	} else if (r_storage == storage::result_not_found) {
+		stats_object->increment_delete_misses();
 	}
 	
 	if ((this->_entry.option & storage::option_noreply) == 0) {

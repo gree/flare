@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef	__OP_REPLACE_H__
-#define	__OP_REPLACE_H__
+#ifndef	OP_REPLACE_H
+#define	OP_REPLACE_H
 
 #include "op_set.h"
 
@@ -31,5 +31,5 @@ protected:
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __OP_REPLACE_H__
+#endif	// OP_REPLACE_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

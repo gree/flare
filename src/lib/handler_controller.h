@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef	__HANDLER_CONTROLLER_H__
-#define	__HANDLER_CONTROLLER_H__
+#ifndef	HANDLER_CONTROLLER_H
+#define	HANDLER_CONTROLLER_H
 
 #include <string>
 
@@ -39,5 +39,5 @@ protected:
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __HANDLER_CONTROLLER_H__
+#endif	// HANDLER_CONTROLLER_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef	__OP_PING_H__
-#define	__OP_PING_H__
+#ifndef	OP_PING_H
+#define	OP_PING_H
 
 #include "op.h"
 
@@ -20,8 +20,6 @@ namespace flare {
  *	opcode class (ping)
  */
 class op_ping : public op {
-protected:
-
 public:
 	op_ping(shared_connection c);
 	virtual ~op_ping();
@@ -36,5 +34,5 @@ protected:
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __OP_PING_H__
+#endif	// OP_PING_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

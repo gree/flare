@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef __UTIL_H__
-#define __UTIL_H__
+#ifndef UTIL_H
+#define UTIL_H
 
 #include <vector>
 #include <sstream>
@@ -28,6 +28,10 @@
 #include "config.h"
 #include "logger.h"
 
+#ifdef HAVE_LIBBOOST_ATOMIC
+#include <boost/atomic.hpp>
+#endif
+
 using namespace std;
 using namespace boost;
 
@@ -38,14 +42,64 @@ namespace flare {
 #define	BUFSIZ	4096
 #endif	// BUFSIZ
 
-// code from senna (http://qwik.jp/senna/)
-#ifdef __GNUC__
-#	if (defined(__i386__) || defined(__x86_64__))
-#define ATOMIC_ADD(p,i,r) __asm__ __volatile__ ("lock; xaddl %0,%1" : "=r"(r), "=m"(*p) : "0"(i), "m" (*p))
-#	elif (defined(__PPC__) || defined(__ppc__))
-#define ATOMIC_ADD(p,i,r) __asm__ __volatile__ ("\n1:\n\tlwarx %0, 0, %1\n\tadd %0, %0, %2\n\tstwcx. %0, 0, %1\n\tbne- 1b\n\tsub %0, %0, %2" : "=&r" (r) : "r" (p), "r" (i) : "cc", "memory");
-#	endif
-#endif // __GNUC__
+#define ATOMIC_ADD_X86_32(p,i,r) __asm__ __volatile__ ("lock; xaddl %0,%1" : "=r"(r), "=m"(*p) : "0"(i), "m" (*p))
+#define ATOMIC_ADD_X86_64(p,i,r) __asm__ __volatile__ ("lock; xaddq %0,%1" : "=r"(r), "=m"(*p) : "0"(i), "m" (*p))
+#define ATOMIC_ADD_PPC_32(p,i,r) __asm__ __volatile__ ("\n1:\n\tlwarx %0, 0, %1\n\tadd %0, %0, %2\n\tstwcx. %0, 0, %1\n\tbne- 1b\n\tsub %0, %0, %2" : "=&r" (r) : "r" (p), "r" (i) : "cc", "memory")
+
+
+class AtomicCounter{
+#if defined(HAVE_LIBBOOST_ATOMIC)
+	boost::atomic<uint64_t> val;
+#elif defined(HAVE_SYNC_FETCH_AND_ADD)
+	uint64_t val;
+#elif defined(__GNUC__) && defined (__x86_64__)
+	uint64_t val;
+#elif defined(__GNUC__)
+	uint32_t val;
+#else
+#error "Can not find atomic-instruction."
+#endif
+public:
+	inline AtomicCounter(uint64_t init_val):val(init_val){}
+
+	inline uint64_t fetch(){
+#if defined(HAVE_LIBBOOST_ATOMIC)
+		return val;
+#elif defined(HAVE_SYNC_FETCH_AND_ADD)
+		return __sync_fetch_and_add(&val,0);
+#else
+		return val;
+#endif
+	}
+
+	inline uint64_t add(uint64_t n){
+#if defined(HAVE_LIBBOOST_ATOMIC)
+		return val.fetch_add(n,memory_order_relaxed);
+#elif defined(HAVE_SYNC_FETCH_AND_ADD)
+		return __sync_fetch_and_add(&val,n);
+#elif defined(__GNUC__) && defined (__x86_64__)
+		uint64_t r;
+		ATOMIC_ADD_X86_64(&val,n,r);
+		return r;
+#elif defined(__GNUC__) && defined (__i386__)
+		uint32_t r;
+		ATOMIC_ADD_X86_32(&val,n,r);
+		return r;
+#elif defined(__GNUC__) && ( defined (__ppc__) || defined (__PPC__) )
+		uint32_t r;
+		ATOMIC_ADD_PPC_32(&val,n,r);
+		return r;
+#else
+#error "Can not find atomic-instruction."
+#endif
+	}
+
+	inline uint64_t incr(){
+		return this->add(1);
+	}
+
+};
+
 
 #ifdef HAVE_STDINT_H
 # include <stdint.h>
@@ -148,5 +202,5 @@ template<class T> vector<T> util::vector_split(string s, string sep) {
 }	// namespace flare
 }	// namespace gree
 
-#endif // __UTIL_H__
+#endif // UTIL_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

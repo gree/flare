@@ -1,3 +1,21 @@
+* [2014/05/14] 1.1.0 release
+
+ * feature updates
+   - Redundant index servers
+   - Add coordinator classes to store and restore the state of the index server
+     - Add coordinator class for handling the state of the index server
+     - Move the code for storing and restoring flare.xml from cluster to file_coordinator
+     - Add zookeeper_coordinator class to store flare.xml into a zookeeper cluster
+     - Add --index-db option to flarei to specify a database for storing flare.xml
+     - Add --index-servers option to flared to specify multiple index servers
+     - Add connect_retry_limit parameter to connection_tcp to avoid retrying too much in open()
+   - Improved statistics information
+   - Automatically node down when storage error happens
+
+ * bug fixes
+   - Modified include guards to fit them to the C++ standard naming convention.
+   - Remove unnecessary null check and avoid double free
+
 * [2013/12/20] 1.0.18-2 release
 
  * feature updates

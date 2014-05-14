@@ -1,3 +1,31 @@
+commit df498f689f885b31c11f78a1a9262daf84e8e507
+Author: Yuya YAGUCHI <yuya.yaguchi@gree.net>
+Date:   Wed May 14 06:21:12 2014 +0000
+
+    Flare 1.l.0 new features and bug fixes
+    
+    * New features:
+      - Redundant index servers
+      - Add coordinator classes to store and restore the state of the index server
+        - Add coordinator class for handling the state of the index server
+        - Move the code for storing and restoring flare.xml from cluster to file_coordinator
+        - Add zookeeper_coordinator class to store flare.xml into a zookeeper cluster
+        - Add --index-db option to flarei to specify a database for storing flare.xml
+        - Add --index-servers option to flared to specify multiple index servers
+        - Add connect_retry_limit parameter to connection_tcp to avoid retrying too much in open()
+      - Improved statistics information
+      - Automatically node down when storage error happens
+    
+    * Bug fixes:
+      - Modified include guards to fit them to the C++ standard naming convention.
+      - Remove unnecessary null check and avoid double free
+
+commit 1da478e129fe66e443293e833af62b687c828126
+Author: Yoshimoto Masanori <masanori.yoshimoto@gree.net>
+Date:   Fri Dec 20 17:29:46 2013 +0900
+
+    ready for 1.0.18.1
+
 commit 4f85f65a28a8d92d1d79d5d33f61061abac5de30
 Author: Yoshimoto Masanori <masanori.yoshimoto@gree.net>
 Date:   Fri Dec 20 17:12:46 2013 +0900
@@ -41,6 +69,12 @@ Date:   Thu Oct 17 13:12:32 2013 +0900
       - Fixes for Ubuntu Saucy Salamander (13.10)
       - Ignore new test-driver script
       - Fixed erroneous memory leak report
+
+commit 6bf820f215f22f47f6fc9df6c40e3e4061b7771c
+Author: Takashi Imagire <takashi.imagire@gree.co.jp>
+Date:   Wed Sep 4 15:03:19 2013 +0900
+
+    Fixed redirected links in README
 
 commit ed64f6acc392f9827c41e18cef1fca4550ecd778
 Author: Benjamin Surma <benjamin.surma@gree.net>

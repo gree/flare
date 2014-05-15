@@ -131,7 +131,7 @@ int op_delete::_run_client(storage::entry& e) {
 	if (e.option & storage::option_async) {
 		offset += snprintf(request+offset, request_len-offset, " %s", storage::option_cast(storage::option_async).c_str());
 	}
-	offset += snprintf(request+offset, request_len-offset, line_delimiter);
+	offset += snprintf(request+offset, request_len-offset, "%s", line_delimiter);
 	if (this->_connection->write(request, offset) < 0) {
 		delete[] request;
 		return -1;

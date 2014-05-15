@@ -1350,13 +1350,12 @@ cluster::proxy_request cluster::post_proxy_write(op_proxy_write* op, bool sync) 
 	partition p, p_prepare;
 	bool is_prepare;
 	int n = 0;
-	int n_prepare = 0;
 	n = this->_determine_partition(e, p, false, is_prepare);
 	if (n < 0) {
 		// perhaps no partition available
 		return proxy_request_error_partition;
 	}
-	n_prepare = this->_determine_partition(e, p_prepare, true, is_prepare);
+	this->_determine_partition(e, p_prepare, true, is_prepare);
 
 	if ((p.master.node_key == this->_node_key) || (op->is_proxy_request() && is_prepare && p_prepare.master.node_key == this->_node_key)) {
 		// fall through

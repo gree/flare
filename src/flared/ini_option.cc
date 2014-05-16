@@ -58,7 +58,10 @@ ini_option::ini_option():
 		_storage_type(""),
 		_thread_pool_size(default_thread_pool_size),
 		_proxy_prior_netmask(default_proxy_prior_netmask),
-		_max_total_thread_queue(default_max_total_thread_queue) {
+		_max_total_thread_queue(default_max_total_thread_queue),
+		_cluster_replication(false),
+		_cluster_replication_name(""),
+		_cluster_replication_port(default_server_port) {
 	pthread_mutex_init(&this->_mutex_index_servers, NULL);
 }
 
@@ -316,6 +319,18 @@ int ini_option::load() {
 		if (opt_var_map.count("max-total-thread-queue")) {
 			this->_max_total_thread_queue = opt_var_map["max-total-thread-queue"].as<uint32_t>();
 		}
+
+		if (opt_var_map.count("cluster-replication")) {
+			this->_cluster_replication = true;
+		}
+
+		if (opt_var_map.count("cluster-replication-name")) {
+			this->_cluster_replication_name = opt_var_map["cluster-replication-name"].as<string>();
+		}
+
+		if (opt_var_map.count("cluster-replication-port")) {
+			this->_cluster_replication_port = opt_var_map["cluster-replication-port"].as<int>();
+		}
 	} catch (int e) {
 		cout << option << endl;
 		return -1;
@@ -445,6 +460,19 @@ int ini_option::reload() {
 			this->_noreply_window_limit = opt_var_map["noreply-window-limit"].as<int>();
 		}
 
+		log_notice("  cluster_replication: %s -> %s", this->_cluster_replication ? "true" : "false", opt_var_map.count("cluster-replication") ? "true" : "false");
+		this->_cluster_replication = opt_var_map.count("cluster-replication") ? true : false;
+
+		if (opt_var_map.count("cluster-replication-name")) {
+			log_notice("  cluster_replication_name: %s -> %s", this->_cluster_replication_name.c_str(), opt_var_map["cluster-replication-name"].as<string>().c_str());
+			this->_cluster_replication_name = opt_var_map["cluster-replication-name"].as<string>();
+		}
+
+		if (opt_var_map.count("cluster-replication-port")) {
+			log_notice("  cluster_replication_port: %d -> %d", this->_cluster_replication_port, opt_var_map["cluster-replication-port"].as<int>());
+			this->_cluster_replication_port = opt_var_map["cluster-replication-port"].as<int>();
+		}
+
 	} catch (int e) {
 		ostringstream ss;
 		ss << option << endl;
@@ -478,45 +506,48 @@ int ini_option::_setup_cli_option(program_options::options_description& option) 
  */
 int ini_option::_setup_config_option(program_options::options_description& option) {
 	option.add_options()
-		("back-log",								program_options::value<int>(),			"back log")
-		("daemonize",																										"run as daemon")
-		("data-dir",								program_options::value<string>(),		"data directory")
-		("index-servers",						program_options::value<string>(),		"index servers (name:port,...)")
-		("index-server-name",				program_options::value<string>(),		"index server name")
-		("index-server-port",				program_options::value<int>(),	 		"index server port")
-		("log-facility",						program_options::value<string>(),		"log facility (dynamic)")
-		("max-connection",					program_options::value<int>(),			"max concurrent connections to accept (dynamic)")
-		("mutex-slot",							program_options::value<int>(),			"mutex slot size for storage I/O")
+		("back-log",									program_options::value<int>(),			"back log")
+		("daemonize",																											"run as daemon")
+		("data-dir",									program_options::value<string>(),		"data directory")
+		("index-servers",							program_options::value<string>(),		"index servers (name:port,...)")
+		("index-server-name",					program_options::value<string>(),		"index server name")
+		("index-server-port",					program_options::value<int>(),	 		"index server port")
+		("log-facility",							program_options::value<string>(),		"log facility (dynamic)")
+		("max-connection",						program_options::value<int>(),			"max concurrent connections to accept (dynamic)")
+		("mutex-slot",								program_options::value<int>(),			"mutex slot size for storage I/O")
 #ifdef ENABLE_MYSQL_REPLICATION
-		("mysql-replication",																						"enable mysql replication")
-		("mysql-replication-port",	program_options::value<int>(),			"mysql replication port")
-		("mysql-replication-id",		program_options::value<uint32_t>(),	"mysql replication server id")
-		("mysql-replication-db",		program_options::value<string>(),		"mysql replication database")
-		("mysql-replication-table",	program_options::value<string>(),		"mysql replication table")
+		("mysql-replication",																							"enable mysql replication")
+		("mysql-replication-port",		program_options::value<int>(),			"mysql replication port")
+		("mysql-replication-id",			program_options::value<uint32_t>(),	"mysql replication server id")
+		("mysql-replication-db",			program_options::value<string>(),		"mysql replication database")
+		("mysql-replication-table",		program_options::value<string>(),		"mysql replication table")
 #endif
-		("noreply-window-limit",		program_options::value<int>(),			"noreply window limit")
-		("net-read-timeout",				program_options::value<int>(),			"network read timeout (sec) (dynamic)")
-		("proxy-concurrency",				program_options::value<int>(),			"proxy request concurrency for each node")
-		("reconstruction-interval",	program_options::value<int>(),			"master/slave dump interval in usec (dynamic)")
-		("reconstruction-bwlimit",	program_options::value<int>(),			"master/slave dump limit I/O bandwidth; KBytes per second (dynamic)")
-		("replication-type",				program_options::value<string>(),		"replication type (async, sync) (dynamic)")
-		("server-name",							program_options::value<string>(),		"my server name")
-		("server-port",							program_options::value<int>(),			"my server port")
-		("server-socket",						program_options::value<string>(),		"my server unix domain socket (optional)")
-		("stack-size",							program_options::value<int>(),			"thread stack size (kb)")
-		("storage-ap",							program_options::value<uint32_t>(),	"storage size of record alignment by power of 2 (tch)")
-		("storage-fp",							program_options::value<uint32_t>(),	"storage size of free block pool by power of 2 (tch)")
-		("storage-bucket-size",			program_options::value<uint64_t>(),	"number of elements of the bucket array (tch)")
-		("storage-cache-size",			program_options::value<int>(),			"storage header cache size")
-		("storage-compress",				program_options::value<string>(),		"storage compress type (deflate, bz2, tcbs) (tch)")
-		("storage-large",																								"use large storage (tch)")
-		("storage-lmemb",						program_options::value<int>(),			"number of members in each leaf page (tcb)")
-		("storage-nmemb",						program_options::value<int>(),			"number of members in each non-leaf page (tcb")
-		("storage-dfunit",					program_options::value<int32_t>(),	"unit step number of auto defragmentation of a database object (tch/tcb)")
-		("storage-type",						program_options::value<string>(),		"storage type (tch:tokyo cabinet hash database, tcb:tokyo cabinet b+tree database, kch:kyoto cabinet hash database)")
-		("thread-pool-size",				program_options::value<int>(),			"thread pool size (dynamic)")
-		("proxy-prior-netmask",			program_options::value<uint32_t>(),	"proxy prior netmask")
-		("max-total-thread-queue",	program_options::value<uint32_t>(),	"max thread queue length (dynamic)");
+		("noreply-window-limit",			program_options::value<int>(),			"noreply window limit")
+		("net-read-timeout",					program_options::value<int>(),			"network read timeout (sec) (dynamic)")
+		("proxy-concurrency",					program_options::value<int>(),			"proxy request concurrency for each node")
+		("reconstruction-interval",		program_options::value<int>(),			"master/slave dump interval in usec (dynamic)")
+		("reconstruction-bwlimit",		program_options::value<int>(),			"master/slave dump limit I/O bandwidth; KBytes per second (dynamic)")
+		("replication-type",					program_options::value<string>(),		"replication type (async, sync) (dynamic)")
+		("server-name",								program_options::value<string>(),		"my server name")
+		("server-port",								program_options::value<int>(),			"my server port")
+		("server-socket",							program_options::value<string>(),		"my server unix domain socket (optional)")
+		("stack-size",								program_options::value<int>(),			"thread stack size (kb)")
+		("storage-ap",								program_options::value<uint32_t>(),	"storage size of record alignment by power of 2 (tch)")
+		("storage-fp",								program_options::value<uint32_t>(),	"storage size of free block pool by power of 2 (tch)")
+		("storage-bucket-size",				program_options::value<uint64_t>(),	"number of elements of the bucket array (tch)")
+		("storage-cache-size",				program_options::value<int>(),			"storage header cache size")
+		("storage-compress",					program_options::value<string>(),		"storage compress type (deflate, bz2, tcbs) (tch)")
+		("storage-large",																									"use large storage (tch)")
+		("storage-lmemb",							program_options::value<int>(),			"number of members in each leaf page (tcb)")
+		("storage-nmemb",							program_options::value<int>(),			"number of members in each non-leaf page (tcb")
+		("storage-dfunit",						program_options::value<int32_t>(),	"unit step number of auto defragmentation of a database object (tch/tcb)")
+		("storage-type",							program_options::value<string>(),		"storage type (tch:tokyo cabinet hash database, tcb:tokyo cabinet b+tree database, kch:kyoto cabinet hash database)")
+		("thread-pool-size",					program_options::value<int>(),			"thread pool size (dynamic)")
+		("proxy-prior-netmask",				program_options::value<uint32_t>(),	"proxy prior netmask")
+		("max-total-thread-queue",		program_options::value<uint32_t>(),	"max thread queue length (dynamic)")
+		("cluster-replication",																						"enable cluster replication")
+		("cluster-replication-name",	program_options::value<string>(),		"replication destination name over cluster")
+		("cluster-replication-port",	program_options::value<int>(),			"replication destination port over cluster");
 
 	return 0;
 }

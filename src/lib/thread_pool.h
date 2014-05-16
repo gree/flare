@@ -31,6 +31,7 @@ public:
 		thread_type_alarm,
 		thread_type_reconstruction,
 		thread_type_controller,
+		thread_type_cluster_replication,
 #ifdef ENABLE_MYSQL_REPLICATION
 		thread_type_mysql_replication,
 #endif

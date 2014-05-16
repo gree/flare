@@ -9,6 +9,8 @@
  */
 #include "cluster.h"
 #include "connection_tcp.h"
+#include "handler_cluster_replication.h"
+#include "handler_dump_replication.h"
 #include "handler_monitor.h"
 #include "handler_proxy.h"
 #include "handler_reconstruction.h"
@@ -20,6 +22,7 @@
 #include "op_shutdown.h"
 #include "op_proxy_read.h"
 #include "op_proxy_write.h"
+#include "queue_forward_query.h"
 #include "queue_node_sync.h"
 #include "queue_node_state.h"
 #include "queue_proxy_read.h"
@@ -64,7 +67,8 @@ cluster::cluster(thread_pool* tp, string server_name, int server_port):
 		_reconstruction_interval(0),
 		_reconstruction_bwlimit(0),
 		_proxy_prior_netmask(0), 
-		_max_total_thread_queue(0) {
+		_max_total_thread_queue(0),
+		_cluster_replication(false) {
 	this->_node_key = this->to_node_key(server_name, server_port);
 	pthread_mutex_init(&this->_mutex_serialization, NULL);
 	pthread_mutex_init(&this->_mutex_master_reconstruction, NULL);
@@ -1408,6 +1412,72 @@ cluster::proxy_request cluster::post_proxy_write(op_proxy_write* op, bool sync) 
 	}
 
 	return proxy_request_complete;
+}
+
+/**
+ * [node] start replication over cluster.
+ */
+int cluster::start_cluster_replication(string server_name, int server_port, bool dump) {
+	if (!this->_cluster_replication) {
+		log_warning("cluster replication is not enabled", 0);
+	}
+
+	thread_pool::local_map m = this->_thread_pool->get_active(thread_pool::thread_type_cluster_replication);
+	if (m.size() > 0) {
+		log_debug("cluster replication thread is already active", 0);
+		return 0;
+	}
+
+	shared_thread t = this->_thread_pool->get(thread_pool::thread_type_cluster_replication);
+	handler_cluster_replication* h = new handler_cluster_replication(t, this, server_name, server_port);
+	t->trigger(h);
+
+	if (dump) {
+		node n = this->get_node(this->_node_key);
+		if (n.node_role == role_proxy) {
+			log_debug("skiped dumping to replicate over cluster due to proxy node", 0);
+			return 0;
+		}
+
+		int partition_size = this->_node_partition_map.size() + this->_node_partition_prepare_map.size();
+
+		shared_thread t_dump = this->_thread_pool->get(thread_pool::thread_type_cluster_replication);
+		handler_dump_replication* h_dump = new handler_dump_replication(
+				   t_dump, this, this->_storage, server_name, server_port,
+				   n.node_partition, partition_size, this->get_reconstruction_interval(), this->get_reconstruction_bwlimit());
+		t_dump->trigger(h_dump);
+	}
+
+	return 0;
+}
+
+/**
+ * [node] stop replication over cluster.
+ */
+int cluster::stop_cluster_replication() {
+	thread_pool::local_map m = this->_thread_pool->get_active(thread_pool::thread_type_cluster_replication);
+	for (thread_pool::local_map::iterator it = m.begin(); it != m.end(); it++) {
+		log_notice("killing cluster replication thread", 0);
+		it->second->set_state("killed");
+		it->second->shutdown(true, false);
+	}
+	return 0;
+}
+
+/**
+ * [node] forward query to replication destination over cluster.
+ */
+int cluster::forward_query(storage::entry& entry, string op_ident, bool sync) {
+	if (!this->_cluster_replication) {
+		return 0;
+	}
+
+	shared_queue_forward_query q(new queue_forward_query(entry, op_ident));
+	if (this->_enqueue(q, thread_pool::thread_type_cluster_replication, sync) < 0) {
+		return -1;
+	}
+
+	return 0;
 }
 // }}}
 

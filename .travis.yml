@@ -20,7 +20,3 @@ before_script:
   - travis_retry ./configure
 
 script: make && make test && make check
-
-branches:
-  only:
-    - travis

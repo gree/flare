@@ -1,0 +1,26 @@
+language: cpp
+
+compiler:
+  - gcc
+  - clang
+
+matrix:
+  allow_failures:
+    - compiler: clang
+
+before_install:
+  - sudo apt-get update
+  - sudo apt-get install libtokyocabinet-dev
+  - sudo apt-get install libboost-program-options-dev libboost-regex-dev libboost-serialization-dev libboost-thread-dev
+  - sudo apt-get install uuid-dev
+  - sudo apt-get install cutter-testing-framework
+
+before_script:
+  - travis_retry ./autogen.sh
+  - travis_retry ./configure
+
+script: make && make test && make check
+
+branches:
+  only:
+    - travis

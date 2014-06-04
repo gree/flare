@@ -71,7 +71,6 @@ protected:
 	string				_ident;
 	pid_t					_pid;
 	string				_pid_path;
-	bool					_shutdown_request;
 
 public:
 	app();
@@ -81,8 +80,6 @@ public:
 	virtual int run();
 	virtual int reload();
 	virtual int shutdown();
-
-	int request_shutdown() { this->_shutdown_request = true; return 0; };
 
 	int set_ident(string ident) { this->_ident = ident; return 0; };
 	string get_ident() { return this->_ident; };

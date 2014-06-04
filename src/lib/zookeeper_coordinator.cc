@@ -12,6 +12,7 @@
 #include <sstream>
 #include <boost/format.hpp>
 
+#include "abort.h"
 #include "util.h"
 #include "logger.h"
 #include "zookeeper_coordinator.h"
@@ -38,9 +39,9 @@ zookeeper_coordinator::zookeeper_coordinator(const string& coordinator_uri, cons
 		_sync_nodemap(false),
 		_retry(default_retry_count) {
 
-	pthread_mutex_init(&(this->_mutex_sync_nodemap), NULL);
-	pthread_cond_init(&(this->_cond_sync_nodemap), NULL);
-	pthread_mutex_init(&(this->_mutex_operation_pool), NULL);
+	ABORT_IF_FAILURE(pthread_mutex_init(&(this->_mutex_sync_nodemap), NULL), 0);
+	ABORT_IF_FAILURE(pthread_cond_init(&(this->_cond_sync_nodemap), NULL), 0);
+	ABORT_IF_FAILURE(pthread_mutex_init(&(this->_mutex_operation_pool), NULL), 0);
 
 	/* check the scheme part of identifier */
 	if (this->get_scheme() != "zookeeper") {

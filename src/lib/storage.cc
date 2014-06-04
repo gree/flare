@@ -11,6 +11,7 @@
 #include "storage.h"
 #include "binary_request_header.h"
 #include "binary_response_header.h"
+#include "abort.h"
 
 namespace gree {
 namespace flare {
@@ -30,10 +31,10 @@ storage::storage(string data_dir, int mutex_slot_size, int header_cache_size):
 	this->_mutex_slot = new pthread_rwlock_t[mutex_slot_size];
 	int i;
 	for (i = 0; i < this->_mutex_slot_size; i++) {
-		pthread_rwlock_init(&this->_mutex_slot[i], NULL);
+		ABORT_IF_FAILURE(pthread_rwlock_init(&this->_mutex_slot[i], NULL), 0);
 	}
-	pthread_mutex_init(&_mutex_iter_lock, NULL);
-	pthread_rwlock_init(&this->_mutex_header_cache_map, NULL);
+	ABORT_IF_FAILURE(pthread_mutex_init(&_mutex_iter_lock, NULL), 0);
+	ABORT_IF_FAILURE(pthread_rwlock_init(&this->_mutex_header_cache_map, NULL), 0);
 
 	this->_header_cache_map = tcmapnew();
 }

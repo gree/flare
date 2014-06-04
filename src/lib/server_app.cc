@@ -65,6 +65,7 @@ void* server_app::_signal_thread_run(void* p) {
 					"received signal [%s] -> requesting shutdown",
 					sig == SIGTERM ? "SIGTERM" : "SIGINT");
 			self->_shutdown_request = true;
+			log_notice("sending [SIGUSR1] to thread_id:%u (main thread)", self->_main_thread_id);
 			pthread_kill(self->_main_thread_id, SIGUSR1);
 		} else if (sig == SIGHUP) {
 			log_notice("received signal [SIGHUP] -> requesting reload", 0);
@@ -75,6 +76,7 @@ void* server_app::_signal_thread_run(void* p) {
 			self->_reload_request = true;
 			pthread_mutex_unlock(&self->_mutex_reload_request);
 
+			log_notice("sending [SIGUSR1] to thread_id:%u (main thread)", self->_main_thread_id);
 			pthread_kill(self->_main_thread_id, SIGUSR1);
 		} else {
 			log_warning("unexpected signal (%d)", sig);
@@ -145,7 +147,7 @@ void server_app::_sigusr1_flag_check() {
 	if (!server_app::_sigusr1_flag)
 		return;
 
-	log_notice("received signal [SIGUSR1]", 0);
+	log_notice("received signal [SIGUSR1]. (This notice is logged with async. It might have received a long time ago.)", 0);
 	server_app::_sigusr1_flag = 0;
 }
 // }}}

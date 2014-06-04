@@ -313,7 +313,7 @@ int thread::shutdown(bool graceful, bool async) {
 	this->trigger(NULL);
 
 	if (this->_running) {
-		log_debug("sending SIGUSR1 to %u", this->_thread_id);
+		log_notice("sending [SIGUSR1] to thread_id:%u", this->_thread_id);
 		pthread_kill(this->_thread_id, SIGUSR1);
 		pthread_cond_broadcast(&this->_cond_queue);
 	}

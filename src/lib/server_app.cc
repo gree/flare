@@ -128,7 +128,7 @@ int server_app::_setup_signal_handler() {
 /**
  * reload if reload_request in main loop
  */
-void server_app::_reload_if_request() {
+void server_app::_reload_if_requested() {
 	pthread_mutex_lock(&this->_mutex_reload_request);
 	if (this->_reload_request) {
 		log_notice("reloading", 0);

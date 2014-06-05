@@ -31,7 +31,7 @@ protected:
 	static void* _signal_thread_run(void*);
 	static void _sa_usr1_handler(int sig);
 	int _setup_signal_handler();
-	void _reload_if_request();
+	void _reload_if_requested();
 	void _sigusr1_flag_check();
 };
 

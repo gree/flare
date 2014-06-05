@@ -231,7 +231,7 @@ int flarei::run() {
 			log_notice("shutdown request accepted -> breaking running loop", 0);
 			break;
 		}
-		this->_reload_if_request();
+		this->_reload_if_requested();
 		this->_sigusr1_flag_check();
 
 		vector<shared_connection_tcp> connection_list = this->_server->wait();

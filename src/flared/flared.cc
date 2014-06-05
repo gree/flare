@@ -212,7 +212,7 @@ int flared::run() {
 			}
 			break;
 		}
-		this->_reload_if_request();
+		this->_reload_if_requested();
 		this->_sigusr1_flag_check();
 
 		vector<shared_connection_tcp> connection_list = this->_server->wait();

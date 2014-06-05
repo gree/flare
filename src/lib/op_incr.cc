@@ -218,32 +218,50 @@ int op_incr::_parse_text_client_parameters(storage::entry& e) {
 	}
 
 	char* p;
-	if (this->_connection->readline(&p) < 0) {
+	// when returned length < 0
+	// readline returned string is always end with "\n\0"
+	// ex.
+	//  "abc\n\0"
+	//  "def \n\0"
+	//  "123\n\0"
+	int len = this->_connection->readline(&p);
+	if (len < 1) { // len == 1 means "\n\0". substantially empty.
 		return -1;
 	}
 
-	// skip traling ws
-	int len = strlen(p);
+	// remove traling whitespace and '\n'
+	// ex.
+	//  "abc\0\0"
+	//  "def\0\n\0"
+	//  "123\0\0"
+	len -= 2;
 	while (len >= 0) {
-		if ((*(p+len) != '\0' && *(p+len) != '\n' && *(p+len) != ' ') || len == 0) {
-			len++;
+		char c = *(p+len);
+		if (c != ' ' && c != '\n' && c != '\0') {
 			break;
 		}
 		len--;
 	}
+	len++;
 	*(p+len) = '\0';
 	log_debug("normalized resonse: %s", p);
 
 	try {
 		uint64_t dummy = 0;
 		dummy = lexical_cast<uint64_t>(p);
-		shared_byte data(new uint8_t[strlen(p)+1]);
+		shared_byte data(new uint8_t[len+1]);
 		strcpy(reinterpret_cast<char*>(data.get()), p);
 		e.data = data;
-		e.size = strlen(p);
+		e.size = len;
 		this->_result = result_stored;
 	} catch (bad_lexical_cast e) {
 		// then try to parse response as always
+
+		// _parse_text_response() expected '\n\0' terminated string.
+		// need to modifed p again.
+		// ex.
+		//  "abc\n\0"
+		//  "def\n\0\0"
 		*(p+len) = '\n'; *(p+len+1) = '\0';
 		if (this->_parse_text_response(p, this->_result, this->_result_message) < 0) {
 			delete[] p;

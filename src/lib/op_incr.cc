@@ -218,8 +218,8 @@ int op_incr::_parse_text_client_parameters(storage::entry& e) {
 	}
 
 	char* p;
-	// when returned length < 0
-	// readline returned string is always end with "\n\0"
+	// A string returned by readline() ends with "\n\0"
+	// when the result value is bigger than 0.
 	// ex.
 	//  "abc\n\0"
 	//  "def \n\0"

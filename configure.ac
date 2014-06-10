@@ -205,8 +205,5 @@ AC_CONFIG_FILES([Makefile \
 	src/Makefile \
 	src/lib/Makefile \
 	src/flared/Makefile \
-	src/flarei/Makefile \
-	src/flarefs/Makefile \
-	test/Makefile \
-	test/lib/Makefile])
+	src/flarei/Makefile])
 AC_OUTPUT

@@ -16,8 +16,6 @@
 # include <stdint.h>
 #endif // HAVE_STDINT_H
 
-#include "tcutil.h"
-#include "tchdb.h"
 #include "storage.h"
 
 using namespace std;
@@ -26,16 +24,16 @@ using namespace boost;
 namespace gree {
 namespace flare {
 
+class storage_engine_tch;
+
 /**
  *	storage class
  */
 class storage_tch : public storage {
 protected:
 	static const type	_type = storage::type_tch;
-
-	string						_data_path;
-	TCHDB*						_db;
 	time_t						_iter_lock;
+	storage_engine_tch*						_engine;
 
 public:
 	storage_tch(string data_dir, int mutex_slot_size, uint32_t storage_ap, uint32_t storage_fp, uint64_t storage_bucket_size, int storage_cache_size, string storage_compess, bool storage_large, int32_t storage_dfunit);
@@ -56,6 +54,9 @@ public:
 
 	virtual type get_type() { return this->_type; };
 	virtual bool is_capable(capability c);
+
+	/** override */
+	virtual void set_listener(storage_listener* l);
 
 protected:
 	virtual int _get_header(string key, entry& e);

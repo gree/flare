@@ -9,6 +9,7 @@
  */
 #include "app.h"
 #include "storage_tch.h"
+#include "storage_engine_tch.h"
 
 namespace gree {
 namespace flare {
@@ -20,46 +21,15 @@ namespace flare {
 storage_tch::storage_tch(string data_dir, int mutex_slot_size, uint32_t storage_ap, uint32_t storage_fp, uint64_t storage_bucket_size, int storage_cache_size, string storage_compess, bool storage_large, int32_t storage_dfunit):
 		storage(data_dir, mutex_slot_size, storage_cache_size),
 		_iter_lock(0) {
-	this->_data_path = this->_data_dir + "/flare.hdb";
-
-	this->_db = tchdbnew();
-	tchdbsetmutex(this->_db);
-	compress t = compress_none;
-	compress_cast(storage_compess, t);
-	int n = 0;
-	if (storage_large) {
-		n |= HDBTLARGE;
-	}
-	switch (t) {
-	case compress_none:
-		break;
-	case compress_deflate:
-		n |= HDBTDEFLATE;
-		break;
-	case compress_bz2:
-		n |= HDBTBZIP;
-		break;
-	case compress_tcbs:
-		n |= HDBTTCBS;
-		break;
-	}
-	tchdbtune(this->_db, storage_bucket_size, storage_ap, storage_fp, n);
-
-	if (storage_dfunit > 0) {
-		tchdbsetdfunit(this->_db, storage_dfunit);
-	}
+	
+	this->_engine = new storage_engine_tch(data_dir, storage_ap, storage_fp, storage_bucket_size, storage_compess, storage_large, storage_dfunit);
 }
 
 /**
  *	dtor for storage
  */
 storage_tch::~storage_tch() {
-	if (this->_open) {
-		this->close();
-	}
-	if (this->_db != NULL) {
-		tchdbdel(this->_db);
-	}
+	delete this->_engine;
 }
 // }}}
 
@@ -68,39 +38,13 @@ storage_tch::~storage_tch() {
 
 // {{{ public methods
 int storage_tch::open() {
-	if (this->_open) {
-		log_warning("storage has been already opened", 0);
-		return -1;
-	}
-
-	if (tchdbopen(this->_db, this->_data_path.c_str(), HDBOWRITER | HDBOCREAT) == false) {
-		int ecode = tchdbecode(this->_db);
-		log_err("tchdbopen() failed: %s (%d)", tchdberrmsg(ecode), ecode);
-		return -1;
-	}
-
-	log_debug("storage open (path=%s, type=%s)", this->_data_path.c_str(), storage::type_cast(this->_type).c_str());
 	this->_open = true;
-
-	return 0;
+	return this->_engine->open();
 }
 
 int storage_tch::close() {
-	if (this->_open == false) {
-		log_warning("storage is not yet opened", 0);
-		return -1;
-	}
-
-	if (tchdbclose(this->_db) == false) {
-		int ecode = tchdbecode(this->_db);
-		log_err("tchdbclose() failed: %s (%d)", tchdberrmsg(ecode), ecode);
-		return -1;
-	}
-
-	log_debug("storage close", 0);
 	this->_open = false;
-
-	return 0;
+	return this->_engine->close();
 }
 
 int storage_tch::set(entry& e, result& r, int b) {
@@ -152,6 +96,10 @@ int storage_tch::set(entry& e, result& r, int b) {
 				e_current_st = st_gone;
 			}
 		}
+
+		//if ((b & behavior_add)) {
+			//log_notice("behavior_add: key=%s, st=%d e_cur_exists=%d", e.key.c_str(), e_current_st, e_current_exists);
+		//}
 		
 		// check for "add"
 		if ((b & behavior_add) != 0 && e_current_st != st_gone) {
@@ -241,27 +189,11 @@ int storage_tch::set(entry& e, result& r, int b) {
 		}
 
 		// store in database
-		if (e.option & option_noreply) {
-			if (tchdbputasync(this->_db, e.key.c_str(), e.key.size(), p, entry::header_size + e.size) == true) {
-				log_debug("stored data [async] (key=%s, size=%llu)", e.key.c_str(), entry::header_size + e.size);
-				r = result_stored;
-			} else {
-				int ecode = tchdbecode(this->_db);
-				log_err("tchdbputasync() failed: %s (%d)", tchdberrmsg(ecode), ecode);
-				this->_listener->on_storage_error();
-				throw -1;
-			}
-		} else {
-			if (tchdbput(this->_db, e.key.c_str(), e.key.size(), p, entry::header_size + e.size) == true) {
-				log_debug("stored data [sync] (key=%s, size=%llu)", e.key.c_str(), entry::header_size + e.size);
-				r = result_stored;
-			} else {
-				int ecode = tchdbecode(this->_db);
-				log_err("tchdbput() failed: %s (%d)", tchdberrmsg(ecode), ecode);
-				this->_listener->on_storage_error();
-				throw -1;
-			}
+		int ecode = this->_engine->set(e, p, entry::header_size + e.size);
+		if (ecode != 0) {
+			throw -1;
 		}
+		r = result_stored;
 
 		// "touch" commands expect result_touched
 		if (b & behavior_touch
@@ -305,7 +237,7 @@ int storage_tch::incr(entry& e, uint64_t value, result& r, bool increment, int b
 		}
 
 		// get current data (and check existence)
-		tmp_data = (uint8_t*)tchdbget(this->_db, e.key.c_str(), e.key.size(), &tmp_len);
+		tmp_data = this->_engine->get(e.key, tmp_len);
 		if (tmp_data == NULL) {
 			r = result_not_found;
 			throw 0;
@@ -372,27 +304,12 @@ int storage_tch::incr(entry& e, uint64_t value, result& r, bool increment, int b
 		this->_serialize_header(e, p);
 		memcpy(p+entry::header_size, e.data.get(), e.size);
 
-		if (e.option & option_noreply) {
-			if (tchdbputasync(this->_db, e.key.c_str(), e.key.size(), p, entry::header_size + e.size) == true) {
-				log_debug("stored data [async] (key=%s, size=%llu)", e.key.c_str(), entry::header_size + e.size);
-				r = result_stored;
-			} else {
-				int ecode = tchdbecode(this->_db);
-				log_err("tchdbputasync() failed: %s (%d)", tchdberrmsg(ecode), ecode);
-				this->_listener->on_storage_error();
-				throw -1;
-			}
-		} else {
-			if (tchdbput(this->_db, e.key.c_str(), e.key.size(), p, entry::header_size + e.size) == true) {
-				log_debug("stored data [sync] (key=%s, size=%llu)", e.key.c_str(), entry::header_size + e.size);
-				r = result_stored;
-			} else {
-				int ecode = tchdbecode(this->_db);
-				log_err("tchdbput() failed: %s (%d)", tchdberrmsg(ecode), ecode);
-				this->_listener->on_storage_error();
-				throw -1;
-			}
+		// store in database
+		int ecode = this->_engine->set(e, p, entry::header_size + e.size);
+		if (ecode != 0) {
+			throw -1;
 		}
+		r = result_stored;
 	} catch (int error) {
 		if (tmp_data != NULL) {
 			free(tmp_data);
@@ -433,7 +350,7 @@ int storage_tch::get(entry& e, result& r, int b) {
 			pthread_rwlock_rdlock(&this->_mutex_slot[mutex_index]);
 		}
 
-		tmp_data = (uint8_t*)tchdbget(this->_db, e.key.c_str(), e.key.size(), &tmp_len);
+		tmp_data = this->_engine->get(e.key, tmp_len);
 		if (tmp_data == NULL) {
 			r = result_not_found;
 			throw 0;
@@ -523,14 +440,12 @@ int storage_tch::remove(entry& e, result& r, int b) {
 			expired = true;
 		}
 
-		if (tchdbout(this->_db, e.key.c_str(), e.key.size()) == true) {
+		int ecode = this->_engine->remove(e);
+		if (ecode == 0) {
 			r = expired ? result_not_found : result_deleted;
 			log_debug("removed data (key=%s)", e.key.c_str());
 		} else {
-			int ecode = tchdbecode(this->_db);
-			log_err("tchdbout() failed: %s (%d)", tchdberrmsg(ecode), ecode);
-			this->_listener->on_storage_error();
-			throw -1;
+			throw ecode;
 		}
 
 		if (e.version == 0) {
@@ -557,12 +472,7 @@ int storage_tch::truncate(int b) {
 		this->_mutex_slot_wrlock_all();
 	}
 
-	int r = 0;
-	if (tchdbvanish(this->_db) == false) {
-		int ecode = tchdbecode(this->_db);
-		log_err("tchdbvanish() failed: %s (%d)", tchdberrmsg(ecode), ecode);
-		r = -1;
-	}
+	int r = this->_engine->truncate();
 
 	this->_clear_header_cache();
 
@@ -579,9 +489,8 @@ int storage_tch::iter_begin() {
 		if (this->_iter_lock) {
 			pthread_mutex_unlock(&this->_mutex_iter_lock);
 			return -1;
-		} else if (tchdbiterinit(this->_db) == false) {
-			int ecode = tchdbecode(this->_db);
-			log_err("tchdbiterinit() failed: %s (%d)", tchdberrmsg(ecode), ecode);
+		}
+		if (this->_engine->iter_begin() != 0) {
 			pthread_mutex_unlock(&this->_mutex_iter_lock);
 			return -1;
 		}
@@ -600,29 +509,15 @@ storage::iteration storage_tch::iter_next(string& key) {
 	}
 	pthread_mutex_unlock(&this->_mutex_iter_lock);
 
-	int len = 0;
-	char* p = NULL;
+	storage::iteration result;
 
 	this->_mutex_slot_rdlock_all();
 	{
-		p = static_cast<char*>(tchdbiternext(this->_db, &len));
+		result = this->_engine->iter_next(key);
 	}
 	this->_mutex_slot_unlock_all();
 
-	if (p == NULL) {
-		int ecode = tchdbecode(this->_db);
-		if (ecode == TCESUCCESS || ecode == TCENOREC) {
-			// end of iteration
-			return iteration_end;
-		} else {
-			log_err("tchdbiternext() failed: %s (%d)", tchdberrmsg(ecode), ecode);
-			return iteration_error;
-		}
-	}
-	key = p;
-	free(p);
-
-	return iteration_continue;
+	return result;
 }
 
 int storage_tch::iter_end() {
@@ -640,11 +535,11 @@ int storage_tch::iter_end() {
 }
 
 uint32_t storage_tch::count() {
-	return tchdbrnum(this->_db);
+	return this->_engine->count();
 }
 
 uint64_t storage_tch::size() {
-	return tchdbfsiz(this->_db);
+	return this->_engine->size();
 }
 
 bool storage_tch::is_capable(capability c) {
@@ -655,8 +550,9 @@ bool storage_tch::is_capable(capability c) {
 // {{{ protected methods
 int storage_tch::_get_header(string key, entry& e) {
 	log_debug("get header from database (key=%s)", key.c_str());
+
 	uint8_t tmp_data[entry::header_size];
-	int tmp_len = tchdbget3(this->_db, key.c_str(), key.size(), tmp_data, entry::header_size);
+	int tmp_len = this->_engine->get_with_buffer(key, tmp_data, entry::header_size);
 	if (tmp_len < 0) {
 		// if not found, check data version cache
 		log_debug("header not found in database -> checking cache", 0);
@@ -674,6 +570,11 @@ int storage_tch::_get_header(string key, entry& e) {
 
 	return 0;
 }
+
+void storage_tch::set_listener(storage_listener* l) {
+	storage::set_listener(l);
+	this->_engine->set_listener(l);
+};
 // }}}
 
 // {{{ private methods

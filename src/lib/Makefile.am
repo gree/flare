@@ -80,8 +80,9 @@ libflare_la_SOURCES = \
 	stats.h stats.cc \
 	status.h \
 	storage.h storage.cc \
-	storage_tcb.h storage_tcb.cc \
-	storage_tch.h storage_tch.cc \
+	storage_engine_interface.h \
+	storage_engine_tcb.h storage_engine_tcb.cc \
+	storage_engine_tch.h storage_engine_tch.cc \
 	storage_listener.h \
 	util.h util.cc \
 	thread.h thread.cc \
@@ -95,5 +96,5 @@ if ENABLE_ZOOKEEPER
 libflare_la_SOURCES += zookeeper_lock.h zookeeper_lock.cc zookeeper_coordinator.h zookeeper_coordinator.cc
 endif
 if ENABLE_KYOTOCABINET
-libflare_la_SOURCES += storage_kch.h storage_kch.cc
+libflare_la_SOURCES += storage_engine_kch.h storage_engine_kch.cc
 endif

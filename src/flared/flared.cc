@@ -15,6 +15,7 @@
 # include "handler_mysql_replication.h"
 #endif
 #include "show_node.h"
+#include "storage_engine_factory.h"
 
 namespace gree {
 namespace flare {
@@ -163,6 +164,29 @@ int flared::startup(int argc, char **argv) {
 		return -1;
 	}
 
+	storage_engine_interface* engine = storage_engine_factory::create(
+		ini_option_object().get_storage_type(),
+		ini_option_object().get_data_dir(),
+		ini_option_object().get_storage_ap(),
+		ini_option_object().get_storage_fp(),
+		ini_option_object().get_storage_bucket_size(),
+		ini_option_object().get_storage_compress(),
+		ini_option_object().is_storage_large(),
+		ini_option_object().get_storage_lmemb(),
+		ini_option_object().get_storage_nmemb(),
+		ini_option_object().get_storage_dfunit(),
+		this
+	);
+	if (!engine) {
+		return -1;
+	}
+	this->_storage = new storage(
+		ini_option_object().get_mutex_slot(),
+		ini_option_object().get_storage_cache_size(),
+		engine,
+		this
+	);
+	/*
 	storage::type t = storage::type_tch;
 	storage::type_cast(ini_option_object().get_storage_type(), t);
 	switch (t) {
@@ -207,10 +231,10 @@ int flared::startup(int argc, char **argv) {
 		log_err("unknown storage type [%s]", ini_option_object().get_storage_type().c_str());
 		return -1;
 	}
+	*/
 	if (this->_storage->open() < 0) {
 		return -1;
 	}
-	this->_storage->set_listener(this);
 	this->_cluster->set_storage(this->_storage);
 
 	// creating alarm thread in advance

@@ -26,6 +26,7 @@ namespace flare {
 // Forward declarations
 class binary_request_header;
 class binary_response_header;
+class storage_engine_interface;
 
 /**
  *	storage class
@@ -178,41 +179,36 @@ public:
 	} entry;
 
 protected:
-	bool									_open;
-	string								_data_dir;
-	string								_data_path;
-	int										_mutex_slot_size;
-	pthread_rwlock_t*			_mutex_slot;
-	bool									_iter_lock;
-	pthread_mutex_t				_mutex_iter_lock;
-	int										_header_cache_size;
-	TCMAP*								_header_cache_map;
-	pthread_rwlock_t			_mutex_header_cache_map;
-	storage_listener*			_listener;
-
+	bool												_open;
+	int													_mutex_slot_size;
+	pthread_rwlock_t*						_mutex_slot;
+	bool												_iter_lock;
+	pthread_mutex_t							_mutex_iter_lock;
+	int													_header_cache_size;
+	TCMAP*											_header_cache_map;
+	pthread_rwlock_t						_mutex_header_cache_map;
+	storage_engine_interface*		_engine;
+	storage_listener*						_listener;
 
 public:
-	storage(string data_dir, int mutex_slot_size, int header_cache_size);
+	storage(int mutex_slot_size, int header_cache_size, storage_engine_interface* engine, storage_listener* listener);
 	virtual ~storage();
 
-	virtual int open() = 0;
-	virtual int close() = 0;
-	virtual int set(entry& e, result& r, int b = 0) = 0;
-	virtual int incr(entry& e, uint64_t value, result& r, bool increment, int b = 0) = 0;
-	virtual int get(entry& e, result& r, int b = 0) = 0;
-	virtual int remove(entry& e, result& r, int b = 0) = 0;
-	virtual int truncate(int b = 0) = 0;
-	virtual int iter_begin() = 0;
-	virtual iteration iter_next(string& key) = 0;
-	virtual int iter_end() = 0;
-	virtual uint32_t count() = 0;
-	virtual uint64_t size() = 0;
-	virtual int get_key(string key, int limit, vector<string>& r) { return -1; };
+	int open();
+	int close();
+	int set(entry& e, result& r, int b = 0);
+	int incr(entry& e, uint64_t value, result& r, bool increment, int b = 0);
+	int get(entry& e, result& r, int b = 0);
+	int remove(entry& e, result& r, int b = 0);
+	int truncate(int b = 0);
+	int iter_begin();
+	iteration iter_next(string& key);
+	int iter_end();
+	uint32_t count();
+	uint64_t size();
+	int get_key(string key, int limit, vector<string>& r);
 
-	virtual void set_listener(storage_listener* l) { this->_listener = l; };
-
-	virtual type get_type() = 0;
-	virtual bool is_capable(capability c) = 0;
+	bool is_capable(capability c);
 
 	static inline int option_cast(string s, option& r) {
 		if (s == "") {
@@ -398,9 +394,10 @@ protected:
 		}
 	}
 
-	virtual int _serialize_header(entry& e, uint8_t* data);
-	virtual int _unserialize_header(const uint8_t* data, int data_len, entry& e);
-	virtual int _get_header(string key, entry& e) = 0;
+	int _serialize_header(entry& e, uint8_t* data);
+	int _unserialize_header(const uint8_t* data, int data_len, entry& e);
+	int _get_header(string key, entry& e);
+	int _check_and_unserialize_header(string& key, entry& e, const uint8_t* tmp_data, int tmp_len, bool found);
 	int _set_header_cache(string key, entry& e);
 
 	inline int _get_header_cache(string key, entry& e) {

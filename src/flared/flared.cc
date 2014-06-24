@@ -186,52 +186,6 @@ int flared::startup(int argc, char **argv) {
 		engine,
 		this
 	);
-	/*
-	storage::type t = storage::type_tch;
-	storage::type_cast(ini_option_object().get_storage_type(), t);
-	switch (t) {
-	case storage::type_tch:
-		this->_storage = new storage_tch(ini_option_object().get_data_dir(),
-				ini_option_object().get_mutex_slot(),
-				ini_option_object().get_storage_ap(),
-				ini_option_object().get_storage_fp(),
-				ini_option_object().get_storage_bucket_size(),
-				ini_option_object().get_storage_cache_size(),
-				ini_option_object().get_storage_compress(),
-				ini_option_object().is_storage_large(),
-				ini_option_object().get_storage_dfunit());
-
-		break;
-	case storage::type_tcb:
-		this->_storage = new storage_tcb(ini_option_object().get_data_dir(),
-				ini_option_object().get_mutex_slot(),
-				ini_option_object().get_storage_ap(),
-				ini_option_object().get_storage_fp(),
-				ini_option_object().get_storage_bucket_size(),
-				ini_option_object().get_storage_cache_size(),
-				ini_option_object().get_storage_compress(),
-				ini_option_object().is_storage_large(),
-				ini_option_object().get_storage_lmemb(),
-				ini_option_object().get_storage_nmemb(),
-				ini_option_object().get_storage_dfunit());
-		break;
-	#ifdef HAVE_LIBKYOTOCABINET
-	case storage::type_kch:
-		this->_storage = new storage_kch(ini_option_object().get_data_dir(),
-				ini_option_object().get_mutex_slot(),
-				ini_option_object().get_storage_ap(),
-				ini_option_object().get_storage_bucket_size(),
-				ini_option_object().get_storage_cache_size(),
-				ini_option_object().get_storage_compress(),
-				ini_option_object().is_storage_large(),
-				ini_option_object().get_storage_dfunit());
-		break;
-	#endif
-	default:
-		log_err("unknown storage type [%s]", ini_option_object().get_storage_type().c_str());
-		return -1;
-	}
-	*/
 	if (this->_storage->open() < 0) {
 		return -1;
 	}

@@ -10,4 +10,5 @@ datarootdir = @datarootdir@
 
 # subdirs
 SUBDIRS =	\
-	src	
+	src	\
+	test

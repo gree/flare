@@ -112,7 +112,7 @@ public:
 		iteration_continue,
 	};
 
-	typedef struct 				_entry {
+	struct 				entry {
 		string							key;
 		uint32_t						flag;
 		time_t							expire;
@@ -124,7 +124,7 @@ public:
 		static const int				header_size = sizeof(uint32_t) + sizeof(time_t) + sizeof(uint64_t) + sizeof(uint64_t);
 		static const uint64_t		max_data_size = 2147483647;
 
-		_entry() { flag = expire = size = version = option = 0; };
+		entry() { flag = expire = size = version = option = 0; };
 
 		bool is_data_available() const { return this->data.get() != NULL; };
 
@@ -176,7 +176,7 @@ public:
 		
 		int response(char** p, int& len, response_type t) const;
 		int response(binary_response_header& header, char** body, bool prepend_key = false) const;
-	} entry;
+	};
 
 protected:
 	bool												_open;

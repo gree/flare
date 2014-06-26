@@ -106,7 +106,10 @@ int storage_engine_kch::set(storage::entry& e, const uint8_t* data, const int da
 }
 
 uint8_t* storage_engine_kch::get(const string& key, int& data_len) {
-	return (uint8_t *)this->_db->get(key.c_str(), (size_t)key.size(), (size_t *)&data_len);
+	size_t tmp_data_len = 0;
+	uint8_t* data = reinterpret_cast<uint8_t *>(this->_db->get(key.c_str(), key.size(), &tmp_data_len));
+	data_len = static_cast<int>(tmp_data_len);
+	return data;
 }
 
 int storage_engine_kch::remove(const string& key) {

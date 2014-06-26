@@ -7,6 +7,7 @@ noinst_LTLIBRARIES =	\
 	test_storage.la \
 	test_storage_entry.la \
 	test_storage_tch.la \
+	test_storage_tcb.la \
 	test_key_resolver_modular.la \
 	test_op.la	\
 	test_op_add.la	\
@@ -43,10 +44,9 @@ noinst_LTLIBRARIES =	\
 	test_thread_pool.la	\
 	test_util.la	\
 	test_file_coordinator.la
-#if ENABLE_KYOTOCABINET
-#noinst_LTLIBRARIES += test_storage_kch.la
-#endif
-#	test_storage_tcb.la
+if ENABLE_KYOTOCABINET
+noinst_LTLIBRARIES += test_storage_kch.la
+endif
 #	test_op_dump.la
 #	test_op_dump_key.la
 
@@ -77,10 +77,10 @@ test_cluster_la_SOURCES	= test_cluster.cc
 test_connection_iostream_la_SOURCES	= test_connection_iostream.cc common_connection_tests.cc connection_iostream.cc
 test_storage_la_SOURCES	= test_storage.cc
 test_storage_entry_la_SOURCES	= test_storage_entry.cc
-#test_storage_tcb_la_SOURCES	= test_storage_tcb.cc common_storage_tests.cc
+test_storage_tcb_la_SOURCES	= test_storage_tcb.cc common_storage_tests.cc
 test_storage_tch_la_SOURCES	= test_storage_tch.cc common_storage_tests.cc
 if ENABLE_KYOTOCABINET
-#test_storage_kch_la_SOURCES	= test_storage_kch.cc common_storage_tests.cc
+test_storage_kch_la_SOURCES	= test_storage_kch.cc common_storage_tests.cc
 endif
 test_key_resolver_modular_la_SOURCES	= test_key_resolver_modular.cc
 test_op_la_SOURCES	= test_op.cc connection_iostream.cc

@@ -6,8 +6,9 @@
 #include <cppcutter.h>
 
 #include "common_storage_tests.h"
+#include "storage_listener_simple.h"
 #include <app.h>
-#include <storage_kch.h>
+#include <storage_engine_kch.h>
 
 #include <limits>
 #include <sys/stat.h>
@@ -17,7 +18,8 @@ using namespace std;
 
 namespace test_storage_kch
 {
-	const char tmp_dir[] = "tmp_kch";
+	const char tmp_dir[] = "/tmp/flare-cutter";
+	storage_listener_simple listener;
 	test_storage::storage_tester* kch_tester;
 
 	void setup()
@@ -26,16 +28,24 @@ namespace test_storage_kch
 		stats_object->update_timestamp();
 		const char *db_dir;
 		db_dir = tmp_dir;
+		cut_remove_path(db_dir, NULL);
 		mkdir(db_dir, 0700);
 		string compress("");
-		kch_tester = new test_storage::storage_tester(new storage_kch(db_dir,
-					32,
-					4,
-					131071,
-					65536,
-					compress,
-					true,
-					0));
+		storage_engine_kch* engine = new storage_engine_kch(
+			db_dir,
+			4, // ap
+			131071, // bucket size
+			compress,
+			true, // large
+			0, // dfunit
+			&listener
+		);
+		kch_tester = new test_storage::storage_tester(new storage(
+			32, // mutex slot
+			65536, // cache size
+			engine,
+			&listener
+		));
 	}
 
 COMMON_STORAGE_TEST(kch_tester, get_not_found);

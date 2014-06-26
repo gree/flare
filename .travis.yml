@@ -1,5 +1,9 @@
 language: cpp
 
+env:
+  global:
+   - secure: "CzgKaVZjkx1nyFnE8pcbjSTLygutqPt6mwEhHmlE3b2GQEcRXFaHOzyrcfbnJvBZ1awvtvHhVfV/tZwvkLDxOw/+Zj04QAna39C8utgC8hXXBvfocuAvpuIFWsub72CR8c+qBUe+5+nT6eNOWRwCU0DqXMLApNtgbReo8xo/ePU="
+
 compiler:
   - gcc
   - clang
@@ -7,6 +11,16 @@ compiler:
 matrix:
   allow_failures:
     - compiler: clang
+
+addons:
+  coverity_scan:
+    project:
+      name: "ikehara/flare"
+      description: "my own flare repo"
+    notification_email: kikehara@gmail.com
+    build_command_prepend: "./configure"
+    build_command: "make -j4"
+    branch_pattern: coverity_scan
 
 before_install:
   - sudo apt-get update
@@ -19,4 +33,5 @@ before_script:
   - travis_retry ./autogen.sh
   - travis_retry ./configure
 
-script: make && make test && make check
+script: make -j2 && make test && make check
+

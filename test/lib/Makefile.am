@@ -15,6 +15,8 @@ noinst_LTLIBRARIES =	\
 	test_op_cas.la	\
 	test_op_decr.la	\
 	test_op_delete.la	\
+	test_op_dump.la	\
+	test_op_dump_key.la	\
 	test_op_error.la	\
 	test_op_flush_all.la	\
 	test_op_gat.la	\
@@ -47,8 +49,6 @@ noinst_LTLIBRARIES =	\
 if ENABLE_KYOTOCABINET
 noinst_LTLIBRARIES += test_storage_kch.la
 endif
-#	test_op_dump.la
-#	test_op_dump_key.la
 
 if ENABLE_ZOOKEEPER
 noinst_LTLIBRARIES += test_zookeeper_coordinator.la test_zookeeper_lock.la
@@ -89,8 +89,8 @@ test_op_append_la_SOURCES	= test_op_append.cc connection_iostream.cc
 test_op_cas_la_SOURCES	= test_op_cas.cc connection_iostream.cc
 test_op_decr_la_SOURCES	= test_op_decr.cc connection_iostream.cc
 test_op_delete_la_SOURCES	= test_op_delete.cc connection_iostream.cc
-#test_op_dump_la_SOURCES	= test_op_dump.cc connection_iostream.cc
-#test_op_dump_key_la_SOURCES	= test_op_dump_key.cc connection_iostream.cc
+test_op_dump_la_SOURCES	= test_op_dump.cc connection_iostream.cc
+test_op_dump_key_la_SOURCES	= test_op_dump_key.cc connection_iostream.cc
 test_op_error_la_SOURCES	= test_op_error.cc connection_iostream.cc
 test_op_flush_all_la_SOURCES	= test_op_flush_all.cc connection_iostream.cc
 test_op_gat_la_SOURCES	= test_op_gat.cc connection_iostream.cc

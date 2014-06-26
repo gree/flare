@@ -194,21 +194,21 @@ public:
 	storage(int mutex_slot_size, int header_cache_size, storage_engine_interface* engine, storage_listener* listener);
 	virtual ~storage();
 
-	int open();
-	int close();
-	int set(entry& e, result& r, int b = 0);
-	int incr(entry& e, uint64_t value, result& r, bool increment, int b = 0);
-	int get(entry& e, result& r, int b = 0);
-	int remove(entry& e, result& r, int b = 0);
-	int truncate(int b = 0);
-	int iter_begin();
-	iteration iter_next(string& key);
-	int iter_end();
-	uint32_t count();
-	uint64_t size();
-	int get_key(string key, int limit, vector<string>& r);
+	virtual int open();
+	virtual int close();
+	virtual int set(entry& e, result& r, int b = 0);
+	virtual int incr(entry& e, uint64_t value, result& r, bool increment, int b = 0);
+	virtual int get(entry& e, result& r, int b = 0);
+	virtual int remove(entry& e, result& r, int b = 0);
+	virtual int truncate(int b = 0);
+	virtual int iter_begin();
+	virtual iteration iter_next(string& key);
+	virtual int iter_end();
+	virtual uint32_t count();
+	virtual uint64_t size();
+	virtual int get_key(string key, int limit, vector<string>& r);
 
-	bool is_capable(capability c);
+	virtual bool is_capable(capability c);
 
 	static inline int option_cast(string s, option& r) {
 		if (s == "") {

@@ -96,7 +96,7 @@ int storage_engine_tcb::set(storage::entry& e, const uint8_t* data, const int da
 }
 
 uint8_t* storage_engine_tcb::get(const string& key, int& data_len) {
-	return (uint8_t*)tcbdbget(this->_db, key.c_str(), key.size(), &data_len);
+	return reinterpret_cast<uint8_t *>(tcbdbget(this->_db, key.c_str(), key.size(), &data_len));
 }
 
 int storage_engine_tcb::remove(const string& key) {

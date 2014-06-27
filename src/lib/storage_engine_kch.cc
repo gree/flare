@@ -85,7 +85,7 @@ int storage_engine_kch::close() {
 }
 
 int storage_engine_kch::set(storage::entry& e, const uint8_t* data, const int data_len) {
-	if (!this->_db->set(e.key.c_str(), e.key.size(), (char *)data, data_len)) {
+	if (!this->_db->set(e.key.c_str(), e.key.size(), reinterpret_cast<const char*>(data), data_len)) {
 		BasicDB::Error error = this->_db->error();
 		log_err("%s failed: %s (%d)", "HashDB::set()", error.message(), error.code());
 		this->_listener->on_storage_error();
@@ -180,7 +180,7 @@ bool storage_engine_kch::is_get_with_buffer_support() {
  * return length
  */
 int storage_engine_kch::get_with_buffer(const string& key, uint8_t* buffer, const int max_size){
-	return this->_db->get(key.c_str(), key.size(), (char *)buffer, max_size);
+	return this->_db->get(key.c_str(), key.size(), reinterpret_cast<char *>(buffer), max_size);
 }
 
 bool storage_engine_kch::is_get_volatile_support() {

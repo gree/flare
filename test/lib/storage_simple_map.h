@@ -30,8 +30,14 @@ public:
 		this->_map.clear();
 	};
 
-	virtual int open() { this->_open = true; };
-	virtual int close() { this->_open = false; };
+	virtual int open() {
+		this->_open = true;
+		return 0;
+	};
+	virtual int close() {
+		this->_open = false;
+		return 0;
+	};
 	virtual int set(entry& e, result& r, int b = 0) {
 		this->_map.insert(pair<string, storage::entry>(e.key, e));
 		r = result_stored;

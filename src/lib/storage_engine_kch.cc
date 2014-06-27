@@ -172,7 +172,7 @@ uint64_t storage_engine_kch::size() {
 	return this->_db->size();
 }
 
-bool storage_engine_kch::support_get_with_buffer() {
+bool storage_engine_kch::is_get_with_buffer_support() {
 	return true;
 }
 
@@ -183,7 +183,7 @@ int storage_engine_kch::get_with_buffer(const string& key, uint8_t* buffer, cons
 	return this->_db->get(key.c_str(), key.size(), (char *)buffer, max_size);
 }
 
-bool storage_engine_kch::support_get_volatile() {
+bool storage_engine_kch::is_get_volatile_support() {
 	return false;
 }
 
@@ -191,7 +191,7 @@ const uint8_t* storage_engine_kch::get_volatile(const string& key, int& data_len
 	return NULL;
 }
 
-bool storage_engine_kch::support_prefix_search() {
+bool storage_engine_kch::is_prefix_search_support() {
 	return false;
 }
 

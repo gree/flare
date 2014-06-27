@@ -573,7 +573,7 @@ uint64_t storage::size() {
 }
 
 int storage::get_key(string key, int limit, vector<string>& r) {
-	if (!this->_engine->support_prefix_search()) {
+	if (!this->_engine->is_prefix_search_support()) {
 		return -1;
 	}
 	return this->_engine->get_key_list_with_prefix(key, limit, r);
@@ -582,9 +582,9 @@ int storage::get_key(string key, int limit, vector<string>& r) {
 bool storage::is_capable(capability c) {
 	switch (c) {
 	case capability_prefix_search:
-		return this->_engine->support_prefix_search();
+		return this->_engine->is_prefix_search_support();
 	case capability_list:
-		return this->_engine->support_prefix_search();
+		return this->_engine->is_prefix_search_support();
 	default:
 		break;
 	}
@@ -851,13 +851,13 @@ int storage::_set_header_cache(string key, entry& e) {
 int storage::_get_header(string key, entry& e) {
 	log_debug("get header from database (key=%s)", key.c_str());
 
-	if (this->_engine->support_get_with_buffer()) {
+	if (this->_engine->is_get_with_buffer_support()) {
 		uint8_t tmp_data[entry::header_size];
 		int tmp_len = this->_engine->get_with_buffer(key, tmp_data, entry::header_size);
 		if (this->_check_and_unserialize_header (key, e, tmp_data, tmp_len, tmp_len >= 0) != 0) {
 			return -1;
 		}
-	} else if (this->_engine->support_get_volatile()) {
+	} else if (this->_engine->is_get_volatile_support()) {
 		int tmp_len = entry::header_size;
 		const uint8_t* tmp_data = this->_engine->get_volatile(key, tmp_len);
 		if (this->_check_and_unserialize_header (key, e, tmp_data, tmp_len, !!tmp_data) != 0) {

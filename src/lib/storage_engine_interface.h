@@ -22,20 +22,20 @@ public:
 	virtual uint32_t count() = 0;
 	virtual uint64_t size() = 0;
 
-	virtual bool support_get_with_buffer() = 0;
+	virtual bool is_get_with_buffer_support() = 0;
 
-	// You must check support_get_with_buffer() before call this method.
+	// You must check is_get_with_buffer_support() before call this method.
 	virtual int get_with_buffer(const string& key, uint8_t* buffer, const int max_size) = 0;
 
-	virtual bool support_get_volatile() = 0;
+	virtual bool is_get_volatile_support() = 0;
 
-	// You must check support_get_with_buffer() before call this method.
+	// You must check is_get_with_buffer_support() before call this method.
 	// Return value is pointer to volatile buffer. Unnecessary to call free().
 	virtual const uint8_t* get_volatile(const string& key, int& data_len) = 0;
 
-	virtual bool support_prefix_search() = 0;
+	virtual bool is_prefix_search_support() = 0;
 
-	// You must check support_prefix_search() before call this method.
+	// You must check is_prefix_search_support() before call this method.
 	virtual int get_key_list_with_prefix(const string& prefix, int limit, vector<string>& r) = 0;
 };
 

@@ -162,7 +162,7 @@ uint64_t storage_engine_tcb::size() {
 	return tcbdbfsiz(this->_db);
 }
 
-bool storage_engine_tcb::support_get_with_buffer() {
+bool storage_engine_tcb::is_get_with_buffer_support() {
 	return false;
 }
 
@@ -170,7 +170,7 @@ int storage_engine_tcb::get_with_buffer(const string& key, uint8_t* buffer, cons
 	return -1;
 }
 
-bool storage_engine_tcb::support_get_volatile() {
+bool storage_engine_tcb::is_get_volatile_support() {
 	return true;
 }
 
@@ -178,7 +178,7 @@ const uint8_t* storage_engine_tcb::get_volatile(const string& key, int& data_len
 	return static_cast<const uint8_t*>(tcbdbget3(this->_db, key.c_str(), key.size(), &data_len));
 }
 
-bool storage_engine_tcb::support_prefix_search() {
+bool storage_engine_tcb::is_prefix_search_support() {
 	return true;
 }
 

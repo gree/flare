@@ -33,11 +33,11 @@ public:
 	virtual int iter_end();
 	virtual uint32_t count();
 	virtual uint64_t size();
-	virtual bool support_get_with_buffer();
+	virtual bool is_get_with_buffer_support();
 	virtual int get_with_buffer(const string& key, uint8_t* buffer, const int max_size);
-	virtual bool support_get_volatile();
+	virtual bool is_get_volatile_support();
 	virtual const uint8_t* get_volatile(const string& key, int& data_len);
-	virtual bool support_prefix_search();
+	virtual bool is_prefix_search_support();
 	virtual int get_key_list_with_prefix(const string& prefix, int limit, vector<string>& r);
 };
 

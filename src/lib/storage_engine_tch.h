@@ -1,3 +1,8 @@
+/**
+ *	storage_engine_tch.h
+ *
+ *	@author	Yuya YAGUCHI <yuya.yaguchi@gree.net>
+ */
 #ifndef	STORAGE_ENGINE_TCH_H
 #define	STORAGE_ENGINE_TCH_H
 

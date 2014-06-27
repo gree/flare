@@ -1,3 +1,8 @@
+/**
+ *	storage_engine_tch.cc
+ *
+ *	@author	Yuya YAGUCHI <yuya.yaguchi@gree.net>
+ */
 #include "storage_engine_tch.h"
 
 namespace gree {

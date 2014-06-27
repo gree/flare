@@ -1,3 +1,8 @@
+/**
+ *	storage_engine_kch.h
+ *
+ *	@author	Yuya YAGUCHI <yuya.yaguchi@gree.net>
+ */
 #ifndef	STORAGE_ENGINE_KCH_H
 #define	STORAGE_ENGINE_KCH_H
 

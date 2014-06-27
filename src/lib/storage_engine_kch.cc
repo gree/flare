@@ -1,3 +1,8 @@
+/**
+ *	storage_engine_kch.cc
+ *
+ *	@author	Yuya YAGUCHI <yuya.yaguchi@gree.net>
+ */
 #include "storage_engine_kch.h"
 
 using namespace kyotocabinet;

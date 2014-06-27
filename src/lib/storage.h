@@ -112,7 +112,7 @@ public:
 		iteration_continue,
 	};
 
-	struct 				entry {
+	struct entry {
 		string							key;
 		uint32_t						flag;
 		time_t							expire;

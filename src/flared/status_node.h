@@ -9,6 +9,7 @@
 #define	__STATUS_NODE_H__
 
 #include "status.h"
+#include "logger.h"
 
 namespace gree {
 namespace flare {
@@ -52,6 +53,8 @@ private:
 		case node_status_unknown_error:
 			return status_ng;
 		}
+		log_err("node_status_code is unknown value: %d", s);
+		return status_ng;
 	}
 };
 

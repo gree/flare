@@ -9,6 +9,7 @@
 #define	__STATUS_INDEX_H__
 
 #include "status.h"
+#include "logger.h"
 
 namespace gree {
 namespace flare {
@@ -47,6 +48,8 @@ private:
 		case index_status_unknown_error:
 			return status_ng;
 		}
+		log_err("index_status_code is unknown value: %d", s);
+		return status_ng;
 	}
 };
 

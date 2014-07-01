@@ -7,7 +7,12 @@
  *
  *	$Id$
  */
+// include order is important to include inttypes.h with __STDC_FORMAT_MACROS defined
+#define __STDC_FORMAT_MACROS
+#include <inttypes.h>
+
 #include "op_node_sync.h"
+
 
 namespace gree {
 namespace flare {
@@ -124,7 +129,7 @@ int op_node_sync::_run_server() {
 
 int op_node_sync::_run_client(vector<cluster::node>& v, uint64_t node_map_version) {
 	char request[BUFSIZ];
-	snprintf(request, sizeof(request), "node sync %llu", node_map_version);
+	snprintf(request, sizeof(request), "node sync %" PRIu64, node_map_version);
 	if (this->_send_request(request) < 0) {
 		return -1;
 	}

@@ -115,7 +115,7 @@ namespace test_op_gat
 		op._entry.size = 9;
 		op._entry.data = shared_byte(new uint8_t[op._entry.size]);
 		memcpy(op._entry.data.get(), "gat_value", op._entry.size);
-		char* expected_msg = "VALUE gat_key 5 9\r\ngat_value\r\n";
+		const char* expected_msg = "VALUE gat_key 5 9\r\ngat_value\r\n";
 		cut_assert_equal_int(strlen(expected_msg), op._send_text_result(op::result_touched, NULL));
 		cut_assert_equal_string(expected_msg, static_cast<const connection_sstream&>(*c).get_output().c_str());
 	}

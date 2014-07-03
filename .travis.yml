@@ -15,7 +15,7 @@ matrix:
 addons:
   coverity_scan:
     project:
-      name: "ikehara/flare"
+      name: "gree/flare"
       description: "my own flare repo"
     notification_email: kikehara@gmail.com
     build_command_prepend: "./configure"

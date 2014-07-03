@@ -2,7 +2,7 @@ language: cpp
 
 env:
   global:
-   - secure: "CzgKaVZjkx1nyFnE8pcbjSTLygutqPt6mwEhHmlE3b2GQEcRXFaHOzyrcfbnJvBZ1awvtvHhVfV/tZwvkLDxOw/+Zj04QAna39C8utgC8hXXBvfocuAvpuIFWsub72CR8c+qBUe+5+nT6eNOWRwCU0DqXMLApNtgbReo8xo/ePU="
+   - secure: "Ll4Oa/ZV+CICeObtlR4I9bMEo3U+i9ilsGvgVfsTqrXcbyw/0v0e2ZPV+3g+Y/oqZJFWCnmccNcOia5oIqDL87lyH0w02VTb0B8bQxuTrkXHVXIVLREiVeTyAQOX9hXtrlsBQRB6JxTKPO2CmBpQH3SLLr5QciS0JIGp6OeVHPI="
 
 compiler:
   - gcc

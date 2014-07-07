@@ -1,8 +1,22 @@
 language: cpp
 
+env:
+  global:
+    - secure: "MQ3t1c/4Tl+Gqi9c/kWB2Uw++LL7D5y2v1lQSYzvs0XmN3eGQBKBCIlnaNUMsxjeH/szYkJW20kwu3flyY6XG8g/psdnphxah8LisTiBcBaWHXxomX1kVJ/Jg1ysjwGODZFKWgT5NovYRo7pej1wFfk0355bRQcj7Q0714SMvW8="
+
 compiler:
   - gcc
   - clang
+
+
+addons:
+  coverity_scan:
+    project:
+      name: "gree/flare"
+      description: "my own flare repo"
+    build_command_prepend: "./configure"
+    build_command: "make -j4"
+    branch_pattern: develop
 
 matrix:
   allow_failures:

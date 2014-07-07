@@ -34,3 +34,4 @@ before_script:
   - travis_retry ./configure
 
 script: make -j2 && make test && make check
+

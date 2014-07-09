@@ -1,6 +1,7 @@
 /**
  *	storage_engine_tch.cc
  *
+ *	@author	Masaki Fujimoto <fujimoto@php.net>
  *	@author	Yuya YAGUCHI <yuya.yaguchi@gree.net>
  */
 #include "storage_engine_tch.h"

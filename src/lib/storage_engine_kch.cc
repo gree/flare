@@ -1,6 +1,7 @@
 /**
  *	storage_engine_kch.cc
  *
+ *	@author Daniel Perez <tuvistavie@hotmail.com>
  *	@author	Yuya YAGUCHI <yuya.yaguchi@gree.net>
  */
 #include "storage_engine_kch.h"

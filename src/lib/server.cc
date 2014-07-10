@@ -56,6 +56,7 @@ int server::close() {
 		if (::close(this->_epoll_socket) < 0) {
 			log_err("close() failed: %s (%d) (sock=epoll)", util::strerror(errno), errno);
 		}
+		this->_epoll_socket = -1;
 	}
 #endif
 
@@ -64,6 +65,7 @@ int server::close() {
 		if (::close(this->_kqueue_socket) < 0) {
 			log_err("close() failed: %s (%d) (sock=kqueue)", util::strerror(errno), errno);
 		}
+		this->_kqueue_socket = -1;
 	}
 #endif
 

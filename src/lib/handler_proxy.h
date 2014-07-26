@@ -32,6 +32,7 @@ protected:
 	const string				_node_server_name;
 	const int						_node_server_port;
 	int									_noreply_count;
+	bool								_skip_proxy;
 
 public:
 	handler_proxy(shared_thread t, cluster* cl, string node_server_name, int node_server_port);

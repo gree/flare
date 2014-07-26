@@ -20,7 +20,7 @@ namespace flare {
 server::server():
 		_listen_socket_index(0),
 #ifdef HAVE_EPOLL
-		_epoll_socket(0),
+		_epoll_socket(-1),
 #endif
 #ifdef HAVE_KQUEUE
 		_kqueue_socket(-1),
@@ -52,11 +52,11 @@ int server::close() {
 	struct sockaddr_un* addr_unix = NULL;
 
 #ifdef HAVE_EPOLL
-	if (this->_epoll_socket > 0) {
+	if (this->_epoll_socket >= 0) {
 		if (::close(this->_epoll_socket) < 0) {
 			log_err("close() failed: %s (%d) (sock=epoll)", util::strerror(errno), errno);
 		}
-		this->_epoll_socket = 0;
+		this->_epoll_socket = -1;
 	}
 #endif
 

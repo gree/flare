@@ -254,7 +254,9 @@ int thread::run() {
  *	clean up *current* thread activity
  */
 int thread::clean(bool& is_pool) {
+	pthread_mutex_lock(&this->_mutex_trigger);
 	this->_trigger = false;
+	pthread_mutex_unlock(&this->_mutex_trigger);
 	if (this->_shutdown_request == shutdown_request_graceful) {
 		// clear shutdown flag makes main loop to continue processing
 		this->_shutdown_request = shutdown_request_none;

@@ -93,11 +93,15 @@ int op_meta::_run_server() {
 	// partition modular hint|virtual
 	if (kr->get_type() == key_resolver::type_modular) {
 		key_resolver_modular* krm = dynamic_cast<key_resolver_modular*>(kr);
-		snprintf(buf, sizeof(buf), "META partition-modular-hint %d", krm->get_hint());
-		s << buf << line_delimiter;
+		if (krm) {
+			snprintf(buf, sizeof(buf), "META partition-modular-hint %d", krm->get_hint());
+			s << buf << line_delimiter;
 
-		snprintf(buf, sizeof(buf), "META partition-modular-virtual %d", krm->get_virtual());
-		s << buf << line_delimiter;
+			snprintf(buf, sizeof(buf), "META partition-modular-virtual %d", krm->get_virtual());
+			s << buf << line_delimiter;
+		} else {
+			log_err("keyresolver dynamic cast failed", 0);
+		}
 	}
 
 	this->_connection->write(s.str().c_str(), s.str().size());

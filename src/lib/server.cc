@@ -373,7 +373,7 @@ int server::_set_listen_socket_option(int sock, int domain) {
  *	add listen socket to epoll
  */
 int server::_add_epoll_socket(int sock) {
-	if (this->_epoll_socket <= 0) {
+	if (this->_epoll_socket < 0) {
 		this->_epoll_socket = epoll_create(this->max_listen_socket);
 		if (this->_epoll_socket < 0) {
 			log_err("epoll_create() failed: %s (%d)", util::strerror(errno), errno);
@@ -403,7 +403,7 @@ int server::_add_epoll_socket(int sock) {
  *  add listen socket to kqueue
  */
 int server::_add_kqueue_socket(int sock) {
-	if (this->_kqueue_socket <= 0) {
+	if (this->_kqueue_socket < 0) {
 		this->_kqueue_socket = kqueue();
 		if (this->_kqueue_socket < 0) {
 			log_err("kqueue() failed: %s (%s)", util::strerror(errno), errno);

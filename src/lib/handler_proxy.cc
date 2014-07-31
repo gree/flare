@@ -76,19 +76,23 @@ int handler_proxy::run() {
 		}
 
 		cluster::node n = this->_cluster->get_node(this->_node_server_name, this->_node_server_port);
-		if (n.node_state == cluster::state_down || n.node_role == cluster::role_proxy) {
+		if (n.node_role == cluster::role_proxy) {
 			if (!this->_skip_proxy) {
-				log_warning("skip to proxy due to node down [name=%s, port=%d]",
+				log_warning("skip to proxy because the destination node is proxy [name=%s, port=%d]",
 						this->_node_server_name.c_str(), this->_node_server_port);
 				this->_skip_proxy = true;
 			}
 			string key = "";
 			if (q->get_ident() == "proxy_read") {
 				shared_queue_proxy_read r = dynamic_pointer_cast<queue_proxy_read, thread_queue>(q);
-				key = r->get_entry().key;
+				if (r) {
+					key = r->get_entry().key;
+				}
 			} else if (q->get_ident() == "proxy_write") {
 				shared_queue_proxy_write r = dynamic_pointer_cast<queue_proxy_write, thread_queue>(q);
-				key = r->get_entry().key;
+				if (r) {
+					key = r->get_entry().key;
+				}
 			}
 			log_notice("skipped proxy request is [ident=%s, key=%s]", q->get_ident().c_str(), key.c_str());
 		} else {

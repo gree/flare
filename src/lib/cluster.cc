@@ -1467,7 +1467,7 @@ int cluster::_shift_node_role(string node_key, role old_role, int old_partition,
 			string node_server_name;
 			int node_server_port = 0;
 			this->from_node_key(it->first, node_server_name, node_server_port);
-			handler_reconstruction* h = new handler_reconstruction(t, this, this->_storage, node_server_name, node_server_port, new_partition, partition_size, new_role);
+			handler_reconstruction* h = new handler_reconstruction(t, this, this->_storage, node_server_name, node_server_port, new_partition, partition_size, new_role, this->get_reconstruction_interval(), this->_get_reconstruction_bwlimit_for_new_partition());
 			t->trigger(h);
 		}
 		pthread_mutex_lock(&this->_mutex_master_reconstruction);
@@ -1493,7 +1493,7 @@ int cluster::_shift_node_role(string node_key, role old_role, int old_partition,
 		string node_server_name;
 		int node_server_port = 0;
 		this->from_node_key(master_node_key, node_server_name, node_server_port);
-		handler_reconstruction* h = new handler_reconstruction(t, this, this->_storage, node_server_name, node_server_port, new_partition, partition_size, new_role);
+		handler_reconstruction* h = new handler_reconstruction(t, this, this->_storage, node_server_name, node_server_port, new_partition, partition_size, new_role, this->get_reconstruction_interval(), this->get_reconstruction_bwlimit());
 		t->trigger(h);
 	}
 
@@ -2200,6 +2200,16 @@ shared_connection cluster::_open_index_redundant() {
 		}
 	}
 	return shared_connection();
+}
+
+int cluster::_get_reconstruction_bwlimit_for_new_partition() {
+	if (this->get_reconstruction_bwlimit() <= 0) {
+		return this->get_reconstruction_bwlimit();
+	}
+	size_t current_partition_size = this->_node_partition_map.size();
+
+	// avoid 0 (= unlimited)
+	return max(this->get_reconstruction_bwlimit() / (int)current_partition_size, 1);
 }
 // }}}
 

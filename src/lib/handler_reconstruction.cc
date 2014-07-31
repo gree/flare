@@ -21,7 +21,7 @@ namespace flare {
 /**
  *	ctor for handler_reconstruction
  */
-handler_reconstruction::handler_reconstruction(shared_thread t, cluster* cl, storage* st, string node_server_name, int node_server_port, int partition, int partition_size, cluster::role r):
+handler_reconstruction::handler_reconstruction(shared_thread t, cluster* cl, storage* st, string node_server_name, int node_server_port, int partition, int partition_size, cluster::role r, int reconstruction_interval, int reconstruction_bwlimit):
 		thread_handler(t),
 		_cluster(cl),
 		_storage(st),
@@ -29,7 +29,9 @@ handler_reconstruction::handler_reconstruction(shared_thread t, cluster* cl, sto
 		_node_server_port(node_server_port),
 		_partition(partition),
 		_partition_size(partition_size),
-		_role(r) {
+		_role(r),
+		_reconstruction_interval(reconstruction_interval),
+		_reconstruction_bwlimit(reconstruction_bwlimit) {
 }
 
 /**
@@ -64,7 +66,7 @@ int handler_reconstruction::run() {
 	log_notice("starting dump operation (master=%s:%d, partition=%d, partition_size=%d, interval=%d, bwlimit=%d)",
 			   this->_node_server_name.c_str(), this->_node_server_port, this->_partition, this->_partition_size, this->_cluster->get_reconstruction_interval(), this->_cluster->get_reconstruction_bwlimit());
 
-	if (p->run_client(this->_cluster->get_reconstruction_interval(), this->_partition, this->_partition_size, this->_cluster->get_reconstruction_bwlimit()) < 0) {
+	if (p->run_client(this->_reconstruction_interval, this->_partition, this->_partition_size, this->_reconstruction_bwlimit) < 0) {
 		delete p;
 		this->_cluster->deactivate_node();
 		return -1;
@@ -72,7 +74,7 @@ int handler_reconstruction::run() {
 
 	delete p;
 	log_notice("dump completed (master=%s:%d, partition=%d, partition_size=%d, interval=%d, bwlimit=%d)",
-			   this->_node_server_name.c_str(), this->_node_server_port, this->_partition, this->_partition_size, this->_cluster->get_reconstruction_interval(), this->_cluster->get_reconstruction_bwlimit());
+			   this->_node_server_name.c_str(), this->_node_server_port, this->_partition, this->_partition_size, this->_reconstruction_interval, this->_reconstruction_bwlimit);
 
 	// node activation (state -> ready)
 	if (this->_role == cluster::role_master) {

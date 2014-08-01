@@ -30,7 +30,6 @@ namespace test_handler_proxy {
 	mock_cluster*		cl;
 	thread_pool*		tp;
 	server*					s;
-	bool						is_connected;
 	vector<shared_connection_tcp>		cs;
 	struct sigaction	prev_sigusr1_action;
 
@@ -48,14 +47,19 @@ namespace test_handler_proxy {
 
 		port = rand() % (65535 - 1024) + 1024;
 		s = new server();
-		is_connected = false;
 
 		cl = new mock_cluster("localhost", port);
 		tp = new thread_pool(5);
 	}
 
 	void teardown() {
-		s->close();
+		for (int i = 0; i < cs.size(); i++) {
+			cs[i]->close();
+		}
+		cs.clear();
+		if (s) {
+			s->close();
+		}
 		tp->shutdown();
 		delete s;
 		delete tp;
@@ -107,11 +111,10 @@ namespace test_handler_proxy {
 	void proxy_request(shared_thread t, shared_thread_queue q, string response = "") {
 		q->sync_ref();
 		t->enqueue(q);
-		if (!is_connected) {
+		if (cs.size() == 0) {
 			cs = s->wait();
-			is_connected = true;
 		}
-		if (response.length() > 0) {
+		if (response.length() > 0 && cs.size() > 0) {
 			cs[0]->writeline(response.c_str());
 		}
 		q->sync();
@@ -174,6 +177,7 @@ namespace test_handler_proxy {
 
 	void test_proxy_write_to_down_node() {
 		shared_thread t = start_handler_proxy(cluster::role_master, cluster::state_down);
+		s->close();
 
 		shared_queue_proxy_write q = get_proxy_queue_write();
 		proxy_request(t, q);
@@ -236,11 +240,11 @@ namespace test_handler_proxy {
 		cut_assert_equal_boolean(true, q->is_success());
 		//cut_assert_equal_int(op::result_found, q->get_result());
 		cut_assert_equal_int(0, stats_object->get_total_thread_queue());
-
 	}
 
 	void test_proxy_read_to_down_node() {
 		shared_thread t = start_handler_proxy(cluster::role_master, cluster::state_down);
+		s->close();
 
 		shared_queue_proxy_read q = get_proxy_queue_read();
 		proxy_request(t, q);
@@ -251,24 +255,39 @@ namespace test_handler_proxy {
 	}
 
 	// active -> down -> active
-	void test_proxy_state_machine_when_node_state_going_into_down() {
+	void test_proxy_state_machine_for_node_state() {
 		shared_thread t = start_handler_proxy(cluster::role_master, cluster::state_active);
+		log_notice("debug 1", 0);
 
 		shared_queue_proxy_write q = get_proxy_queue_write();
 		proxy_request(t, q, "STORED");
 		cut_assert_equal_boolean(true, q->is_success());
+		log_notice("debug 2", 0);
 
 		cl->set_node("localhost", port, cluster::role_master, cluster::state_down);
+		for (int i = 0; i < cs.size(); i++) {
+			cs[i]->close();
+		}
+		s->close();
+		delete s;
+		s = NULL;
+		log_notice("debug 3", 0);
 
 		q = get_proxy_queue_write();
-		proxy_request(t, q, "STORED");
+		proxy_request(t, q);
 		cut_assert_equal_boolean(false, q->is_success());
+		log_notice("debug 4", 0);
 
 		cl->set_node("localhost", port, cluster::role_master, cluster::state_active);
+		s = new server();
+		s->listen(port);
+		cs.clear();
+		log_notice("debug 5", 0);
 
 		q = get_proxy_queue_write();
 		proxy_request(t, q, "STORED");
 		cut_assert_equal_boolean(true, q->is_success());
+		log_notice("debug 6", 0);
 	}
 
 	// proxy -> master

@@ -1431,7 +1431,7 @@ int cluster::_shift_node_state(string node_key, state old_state, state new_state
 /**
  *	[node] shift node role (and partition)
  *
- *	assumes that node_map and node_partition_map is alreadby write locked
+ *	assumes that node_map and node_partition_map is already write locked
  */
 int cluster::_shift_node_role(string node_key, role old_role, int old_partition, role new_role, int new_partition) {
 	log_notice("shifting node_role (node_key=%s, old_role=%s, old_partition=%d, new_role=%s, new_partition=%d)", node_key.c_str(), cluster::role_cast(old_role).c_str(), old_partition, cluster::role_cast(new_role).c_str(), new_partition);
@@ -1467,7 +1467,18 @@ int cluster::_shift_node_role(string node_key, role old_role, int old_partition,
 			string node_server_name;
 			int node_server_port = 0;
 			this->from_node_key(it->first, node_server_name, node_server_port);
-			handler_reconstruction* h = new handler_reconstruction(t, this, this->_storage, node_server_name, node_server_port, new_partition, partition_size, new_role, this->get_reconstruction_interval(), this->_get_reconstruction_bwlimit_for_new_partition());
+			handler_reconstruction* h = new handler_reconstruction(
+				t,
+				this,
+				this->_storage,
+				node_server_name,
+				node_server_port,
+				new_partition,
+				partition_size,
+				new_role,
+				this->get_reconstruction_interval(),
+				this->_get_reconstruction_bwlimit_for_new_partition(this->_node_partition_map.size())
+			);
 			t->trigger(h);
 		}
 		pthread_mutex_lock(&this->_mutex_master_reconstruction);
@@ -2202,14 +2213,17 @@ shared_connection cluster::_open_index_redundant() {
 	return shared_connection();
 }
 
-int cluster::_get_reconstruction_bwlimit_for_new_partition() {
-	if (this->get_reconstruction_bwlimit() <= 0) {
-		return this->get_reconstruction_bwlimit();
+/**
+ * return bwlimit divided by partition size
+ */
+int cluster::_get_reconstruction_bwlimit_for_new_partition(size_t current_partition_size) {
+	int bwlimit = this->get_reconstruction_bwlimit();
+	if (bwlimit <= 0 || current_partition_size <= 0) {
+		return bwlimit;
 	}
-	size_t current_partition_size = this->_node_partition_map.size();
 
 	// avoid 0 (= unlimited)
-	return max(this->get_reconstruction_bwlimit() / (int)current_partition_size, 1);
+	return max(bwlimit / (int)current_partition_size, 1);
 }
 // }}}
 

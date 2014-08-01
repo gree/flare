@@ -36,9 +36,11 @@ protected:
 	int									_partition;
 	int									_partition_size;
 	cluster::role				_role;
+	int									_reconstruction_interval;
+	int									_reconstruction_bwlimit;
 
 public:
-	handler_reconstruction(shared_thread t, cluster* cl, storage* st, string node_server_name, int node_server_port, int partition, int partition_size, cluster::role r);
+	handler_reconstruction(shared_thread t, cluster* cl, storage* st, string node_server_name, int node_server_port, int partition, int partition_size, cluster::role r, int reconstruction_interval, int reconstruction_bwlimit);
 	virtual ~handler_reconstruction();
 
 	virtual int run();

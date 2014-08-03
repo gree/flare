@@ -27,7 +27,8 @@ handler_proxy::handler_proxy(shared_thread t, cluster* cl, string node_server_na
 		_cluster(cl),
 		_node_server_name(node_server_name),
 		_node_server_port(node_server_port),
-		_noreply_count(0) {
+		_noreply_count(0),
+		_skip_proxy(false) {
 }
 
 /**
@@ -74,7 +75,34 @@ int handler_proxy::run() {
 			break;
 		}
 
-		this->_process_queue(q);
+		cluster::node n = this->_cluster->get_node(this->_node_server_name, this->_node_server_port);
+		if (n.node_role == cluster::role_proxy) {
+			if (!this->_skip_proxy) {
+				log_warning("skip to proxy because the destination node is proxy [name=%s, port=%d]",
+						this->_node_server_name.c_str(), this->_node_server_port);
+				this->_skip_proxy = true;
+			}
+			string key = "";
+			if (q->get_ident() == "proxy_read") {
+				shared_queue_proxy_read r = dynamic_pointer_cast<queue_proxy_read, thread_queue>(q);
+				if (r) {
+					key = r->get_entry().key;
+				}
+			} else if (q->get_ident() == "proxy_write") {
+				shared_queue_proxy_write r = dynamic_pointer_cast<queue_proxy_write, thread_queue>(q);
+				if (r) {
+					key = r->get_entry().key;
+				}
+			}
+			log_notice("skipped proxy request is [ident=%s, key=%s]", q->get_ident().c_str(), key.c_str());
+		} else {
+			this->_process_queue(q);
+			if (this->_skip_proxy) {
+				log_notice("node [name=%s, port=%d] is rollback to active, stopped to skip to proxy",
+						this->_node_server_name.c_str(), this->_node_server_port);
+				this->_skip_proxy = false;
+			}
+		}
 
 		// failover if we need
 

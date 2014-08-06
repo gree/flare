@@ -60,7 +60,7 @@ op* op_parser_text::parse_server() {
 	this->_connection->push_back(buf+consume, buf_len-consume);
 	if (proxy != NULL) {
 		r->set_proxy(string(proxy));
-		delete proxy;
+		delete[] proxy;
 	}
 	delete[] buf;
 

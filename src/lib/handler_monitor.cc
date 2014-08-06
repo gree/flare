@@ -167,8 +167,8 @@ int handler_monitor::_down() {
 
 	// not >= but == (somehow dangerous?)
 	if (this->_down_state == this->_monitor_threshold) {
-		log_info("down_state >= threshold -> dispatch node down event (down_state=%d, threshold=%d)", this->_down_state, this->_monitor_threshold);
-		this->_cluster->down_node(this->_node_server_name, this->_node_server_port);
+		log_info("down_state == threshold -> dispatch node down event (down_state=%d, threshold=%d)", this->_down_state, this->_monitor_threshold);
+		this->_cluster->request_down_node(this->_node_server_name, this->_node_server_port);
 	}
 
 	return 0;
@@ -177,7 +177,7 @@ int handler_monitor::_down() {
 int handler_monitor::_up() {
 	if (this->_down_state >= this->_monitor_threshold) {
 		log_info("node seems up -> dispatch node up event", 0);
-		this->_cluster->up_node(this->_node_server_name, this->_node_server_port);
+		this->_cluster->request_up_node(this->_node_server_name, this->_node_server_port);
 	}
 	this->_down_state = 0;
 

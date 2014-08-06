@@ -20,6 +20,7 @@
 #include "op_proxy_read.h"
 #include "op_proxy_write.h"
 #include "queue_node_sync.h"
+#include "queue_node_state.h"
 #include "queue_proxy_read.h"
 #include "queue_proxy_write.h"
 #include "queue_update_monitor_option.h"
@@ -897,6 +898,22 @@ int cluster::set_node_state(string node_server_name, int node_server_port, state
 	}
 
 	return 0;
+}
+
+/*
+ * [index] request node down
+ */
+int cluster::request_down_node(string node_server_name, int node_server_port) {
+	shared_queue_node_state q(new queue_node_state(node_server_name, node_server_port, queue_node_state::state_operation_down));
+	return this->_enqueue(q, thread_pool::thread_type_controller, false);
+}
+
+/*
+ * [index] request node up
+ */
+int cluster::request_up_node(string node_server_name, int node_server_port) {
+	shared_queue_node_state q(new queue_node_state(node_server_name, node_server_port, queue_node_state::state_operation_up));
+	return this->_enqueue(q, thread_pool::thread_type_controller, false);
 }
 
 /**

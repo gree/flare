@@ -317,13 +317,17 @@ vector<cluster::node> cluster::get_node() {
 
 cluster::node cluster::get_node(string node_key) {
 	node n;
+	n.node_server_name = "";
+	n.node_server_port = 0;
+	n.node_role = role_proxy;
+	n.node_state = state_down;
+	n.node_partition = -1;
+	n.node_balance = 0;
+	n.node_thread_type = 0;
 
 	pthread_rwlock_rdlock(&this->_mutex_node_map);
 	if (this->_node_map.count(node_key) > 0) {
 		n = this->_node_map[node_key];
-	} else {
-		n.node_server_name = "";
-		n.node_server_port = 0;
 	}
 	pthread_rwlock_unlock(&this->_mutex_node_map);
 

@@ -107,7 +107,12 @@ int app::_daemonize() {
 	close(0);
 	close(1);
 	close(2);
-	open("/dev/null", O_RDWR);
+	int fd = open("/dev/null", O_RDWR);
+	if (fd != 0){
+		log_err("(fd=open(\"/dev/null\", O_RDWR)) != 0 in daemonize process\n",0);
+		log_err("server exits, because IO-buffer may be unsafe.",0);
+		exit(1);
+	}
 	dup2(0, 1);
 	dup2(0, 2);
 

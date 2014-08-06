@@ -261,7 +261,6 @@ int flared::run() {
 		if (this->_shutdown_request) {
 			log_notice("shutdown request accepted -> breaking running loop", 0);
 			log_notice("send shutdown message to index server", 0);
-			this->_server->close(); /* prevent this node from responding */
 			if (this->_cluster->shutdown_node()) {
 				log_warning("failed to send shutdown message", 0);
 			}

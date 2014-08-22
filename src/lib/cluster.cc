@@ -1661,9 +1661,8 @@ int cluster::_save() {
 	}
 
 	pthread_mutex_lock(&this->_mutex_serialization);
-	if (this->_increment_node_map_version() < 0) {
-		log_warning("node map version overflow", 0);
-	}
+	this->_increment_node_map_version();
+
 	ostringstream oss;
 	// creating scope to destroy xml_oarchive object before ostringstream::close();
 	{

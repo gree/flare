@@ -124,6 +124,7 @@ int server::listen(int port) {
 
 	// socket option/attr
 	if (this->_set_listen_socket_option(sock) < 0) {
+		::close(sock);
 		return -1;
 	}
 
@@ -134,10 +135,12 @@ int server::listen(int port) {
 	addr.sin_addr.s_addr = INADDR_ANY;
 	addr.sin_port = htons(port);
 	if (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+		::close(sock);
 		log_err("bind() failed: %s (%d)", util::strerror(errno), errno);
 		return -1;
 	}
 	if (::listen(sock, this->_back_log) < 0) {
+		::close(sock);
 		log_err("listen() failed: %s (%d)", util::strerror(errno), errno);
 		return -1;
 	}
@@ -180,6 +183,7 @@ int server::listen(string uds) {
 
 	// socket option/attr
 	if (this->_set_listen_socket_option(sock, PF_UNIX) < 0) {
+		::close(sock);
 		return -1;
 	}
 
@@ -189,15 +193,18 @@ int server::listen(string uds) {
 	addr.sun_family = AF_UNIX;
 	strncpy(addr.sun_path, uds.c_str(), sizeof(addr.sun_path)-1);
 	if (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+		::close(sock);
 		log_err("bind() failed: %s (%d)", util::strerror(errno), errno);
 		return -1;
 	}
 	if (::listen(sock, this->_back_log) < 0) {
+		::close(sock);
 		log_err("listen() failed: %s (%d)", util::strerror(errno), errno);
 		return -1;
 	}
 
 	if (chmod(addr.sun_path, 0777) < 0) {
+		::close(sock);
 		log_err("chmod() failed: %s (%d) (path=%s)", util::strerror(errno), errno, addr.sun_path);
 		return -1;
 	} else {
@@ -311,6 +318,7 @@ vector<shared_connection_tcp> server::wait() {
 		flag = 1;
 		if (setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, reinterpret_cast<char*>(&flag), sizeof(flag)) < 0) {
 			log_err("setsockopt() failed: %s (%d) - SO_KEEPALIVE", util::strerror(errno), errno);
+			::close(sock);
 			return connection_list;
 		}
 

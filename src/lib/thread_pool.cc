@@ -8,6 +8,7 @@
  *	$Id$
  */
 #include "thread_pool.h"
+#include "abort.h"
 
 namespace gree {
 namespace flare {
@@ -22,8 +23,8 @@ thread_pool::thread_pool(thread_pool::pool::size_type max_pool_size, int stack_s
 		_stack_size(stack_size) {
 	this->_global_map.clear();
 
-	pthread_rwlock_init(&this->_mutex_global_map, NULL);
-	pthread_rwlock_init(&this->_mutex_pool, NULL);
+	ABORT_IF_FAILURE(pthread_rwlock_init(&this->_mutex_global_map, NULL), 0);
+	ABORT_IF_FAILURE(pthread_rwlock_init(&this->_mutex_pool, NULL), 0);
 }
 
 /**

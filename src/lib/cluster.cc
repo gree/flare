@@ -26,6 +26,7 @@
 #include "queue_proxy_write.h"
 #include "queue_update_monitor_option.h"
 #include "coordinator.h"
+#include "abort.h"
 
 #include <functional>
 #include <boost/bind.hpp>
@@ -66,11 +67,11 @@ cluster::cluster(thread_pool* tp, string server_name, int server_port):
 		_proxy_prior_netmask(0), 
 		_max_total_thread_queue(0) {
 	this->_node_key = this->to_node_key(server_name, server_port);
-	pthread_mutex_init(&this->_mutex_serialization, NULL);
-	pthread_mutex_init(&this->_mutex_master_reconstruction, NULL);
-	pthread_mutex_init(&this->_mutex_node_map_version, NULL);
-	pthread_rwlock_init(&this->_mutex_node_map, NULL);
-	pthread_rwlock_init(&this->_mutex_node_partition_map, NULL);
+	ABORT_IF_FAILURE(pthread_mutex_init(&this->_mutex_serialization, NULL), 0);
+	ABORT_IF_FAILURE(pthread_mutex_init(&this->_mutex_master_reconstruction, NULL), 0);
+	ABORT_IF_FAILURE(pthread_mutex_init(&this->_mutex_node_map_version, NULL), 0);
+	ABORT_IF_FAILURE(pthread_rwlock_init(&this->_mutex_node_map, NULL), 0);
+	ABORT_IF_FAILURE(pthread_rwlock_init(&this->_mutex_node_partition_map, NULL), 0);
 }
 
 /**

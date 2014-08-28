@@ -8,6 +8,7 @@
  *	$Id$
  */
 #include "fuse_fs.h"
+#include "abort.h"
 
 namespace gree {
 namespace flare {
@@ -25,7 +26,7 @@ fuse_fs::fuse_fs(string node_server_name, int node_server_port, int chunk_size, 
 		_client_pool_size(client_pool_size),
 		_node_server_name(node_server_name),
 		_node_server_port(node_server_port) {
-	pthread_mutex_init(&this->_mutex_pool, NULL);
+	ABORT_IF_FAILURE(pthread_mutex_init(&this->_mutex_pool, NULL), 0);
 }
 
 /**

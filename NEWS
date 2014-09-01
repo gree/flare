@@ -1,3 +1,19 @@
+* [2014/09/01] 1.1.1 release
+
+ * bug fixes
+   - Avoid to close the already closed socket
+   - Skip proxy request when destination node is down
+   - Fix the resource leaks of socket in server
+   - Fix some compile warnings
+   - Fix some race conditions in thread.cc
+   - Check dynamic_cast result
+   - Fix pthread_cond_wait() in zookeeper_lock::_assure_session_connected()
+   - Add initialization of cluster#node
+   - Remove some deadcode
+   - Add null check before the code with the potential null access
+   - Exit when IO-buffer is unsafe
+   - Fix memory leak of proxy in op_parser_text
+
 * [2014/05/14] 1.1.0 release
 
  * feature updates

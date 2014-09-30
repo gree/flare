@@ -156,9 +156,9 @@ int thread::startup(weak_thread myself, int stack_size) {
  *	setup proc for each execution
  */
 int thread::setup(int type, unsigned int id) {
-	this->_id = id;
 
 	pthread_rwlock_wrlock(&this->_mutex_info);
+	this->_id = id;
 	this->_info.id = id;
 	this->_info.type = type;
 	this->_info.timestamp = stats_object->get_timestamp();
@@ -237,7 +237,9 @@ int thread::run() {
 
 	this->_thread_handler->run();
 
+	pthread_mutex_lock(&this->_mutex_running);
 	this->_running = false;
+	pthread_mutex_unlock(&this->_mutex_running);
 	log_debug("setting running flag=%d", this->_running);
 
 	if (this->_is_delete_thread_handler) {
@@ -254,7 +256,9 @@ int thread::run() {
  *	clean up *current* thread activity
  */
 int thread::clean(bool& is_pool) {
+	pthread_mutex_lock(&this->_mutex_trigger);
 	this->_trigger = false;
+	pthread_mutex_unlock(&this->_mutex_trigger);
 	if (this->_shutdown_request == shutdown_request_graceful) {
 		// clear shutdown flag makes main loop to continue processing
 		this->_shutdown_request = shutdown_request_none;

@@ -80,16 +80,18 @@ public:
 		c->push_back(p, 1);
 		delete[] p;
 
-		op* q = parser->parse_server();
-		if (q) {
-			log_info("determined request [ident=%s]", q->get_ident().c_str());
-		}
-
 		if (parser != NULL) {
+			op* q = parser->parse_server();
+			if (q) {
+				log_info("determined request [ident=%s]", q->get_ident().c_str());
+			}
 			delete parser;
-		}
+			return q;
 
-		return q;
+		} else {
+			log_err("failed to get op_parser", 0);
+			return NULL;
+		}
 	}
 
 	virtual op* parse_server() = 0;

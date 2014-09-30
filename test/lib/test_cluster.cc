@@ -51,7 +51,10 @@ namespace test_cluster
 		cluster_test(std::string data_dir):
 			cluster(tp, "localhost", 11211) {
 			char cwd[PATH_MAX];
-			getcwd(cwd, sizeof(cwd));
+			if (getcwd(cwd, sizeof(cwd)) != cwd) {
+				log_err("getcwd() failed.", 1);
+				exit(1);
+			}
 
 			char *uri = getenv("TEST_CLUSTER_INDEX_DB");
 

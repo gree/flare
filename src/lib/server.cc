@@ -20,7 +20,7 @@ namespace flare {
 server::server():
 		_listen_socket_index(0),
 #ifdef HAVE_EPOLL
-		_epoll_socket(0),
+		_epoll_socket(-1),
 #endif
 #ifdef HAVE_KQUEUE
 		_kqueue_socket(-1),
@@ -52,10 +52,11 @@ int server::close() {
 	struct sockaddr_un* addr_unix = NULL;
 
 #ifdef HAVE_EPOLL
-	if (this->_epoll_socket > 0) {
+	if (this->_epoll_socket >= 0) {
 		if (::close(this->_epoll_socket) < 0) {
 			log_err("close() failed: %s (%d) (sock=epoll)", util::strerror(errno), errno);
 		}
+		this->_epoll_socket = -1;
 	}
 #endif
 
@@ -64,6 +65,7 @@ int server::close() {
 		if (::close(this->_kqueue_socket) < 0) {
 			log_err("close() failed: %s (%d) (sock=kqueue)", util::strerror(errno), errno);
 		}
+		this->_kqueue_socket = -1;
 	}
 #endif
 
@@ -122,6 +124,7 @@ int server::listen(int port) {
 
 	// socket option/attr
 	if (this->_set_listen_socket_option(sock) < 0) {
+		::close(sock);
 		return -1;
 	}
 
@@ -132,10 +135,12 @@ int server::listen(int port) {
 	addr.sin_addr.s_addr = INADDR_ANY;
 	addr.sin_port = htons(port);
 	if (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+		::close(sock);
 		log_err("bind() failed: %s (%d)", util::strerror(errno), errno);
 		return -1;
 	}
 	if (::listen(sock, this->_back_log) < 0) {
+		::close(sock);
 		log_err("listen() failed: %s (%d)", util::strerror(errno), errno);
 		return -1;
 	}
@@ -178,6 +183,7 @@ int server::listen(string uds) {
 
 	// socket option/attr
 	if (this->_set_listen_socket_option(sock, PF_UNIX) < 0) {
+		::close(sock);
 		return -1;
 	}
 
@@ -187,15 +193,18 @@ int server::listen(string uds) {
 	addr.sun_family = AF_UNIX;
 	strncpy(addr.sun_path, uds.c_str(), sizeof(addr.sun_path)-1);
 	if (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+		::close(sock);
 		log_err("bind() failed: %s (%d)", util::strerror(errno), errno);
 		return -1;
 	}
 	if (::listen(sock, this->_back_log) < 0) {
+		::close(sock);
 		log_err("listen() failed: %s (%d)", util::strerror(errno), errno);
 		return -1;
 	}
 
 	if (chmod(addr.sun_path, 0777) < 0) {
+		::close(sock);
 		log_err("chmod() failed: %s (%d) (path=%s)", util::strerror(errno), errno, addr.sun_path);
 		return -1;
 	} else {
@@ -309,6 +318,7 @@ vector<shared_connection_tcp> server::wait() {
 		flag = 1;
 		if (setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, reinterpret_cast<char*>(&flag), sizeof(flag)) < 0) {
 			log_err("setsockopt() failed: %s (%d) - SO_KEEPALIVE", util::strerror(errno), errno);
+			::close(sock);
 			return connection_list;
 		}
 
@@ -371,7 +381,7 @@ int server::_set_listen_socket_option(int sock, int domain) {
  *	add listen socket to epoll
  */
 int server::_add_epoll_socket(int sock) {
-	if (this->_epoll_socket <= 0) {
+	if (this->_epoll_socket < 0) {
 		this->_epoll_socket = epoll_create(this->max_listen_socket);
 		if (this->_epoll_socket < 0) {
 			log_err("epoll_create() failed: %s (%d)", util::strerror(errno), errno);
@@ -401,7 +411,7 @@ int server::_add_epoll_socket(int sock) {
  *  add listen socket to kqueue
  */
 int server::_add_kqueue_socket(int sock) {
-	if (this->_kqueue_socket <= 0) {
+	if (this->_kqueue_socket < 0) {
 		this->_kqueue_socket = kqueue();
 		if (this->_kqueue_socket < 0) {
 			log_err("kqueue() failed: %s (%s)", util::strerror(errno), errno);

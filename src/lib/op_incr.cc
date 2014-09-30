@@ -201,7 +201,7 @@ int op_incr::_run_client(storage::entry& e) {
 	if (e.option & storage::option_async) {
 		offset += snprintf(request+offset, request_len-offset, " %s", storage::option_cast(storage::option_async).c_str());
 	}
-	offset += snprintf(request+offset, request_len-offset, line_delimiter);
+	offset += snprintf(request+offset, request_len-offset, "%s", line_delimiter);
 	if (this->_connection->write(request, offset) < 0) {
 		delete[] request;
 		return -1;
@@ -235,8 +235,7 @@ int op_incr::_parse_text_client_parameters(storage::entry& e) {
 	log_debug("normalized resonse: %s", p);
 
 	try {
-		uint64_t dummy = 0;
-		dummy = lexical_cast<uint64_t>(p);
+		(void)lexical_cast<uint64_t>(p);
 		shared_byte data(new uint8_t[strlen(p)+1]);
 		strcpy(reinterpret_cast<char*>(data.get()), p);
 		e.data = data;

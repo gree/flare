@@ -358,6 +358,10 @@ int flared::shutdown() {
  */
 void flared::on_storage_error() {
 	status_node* s = dynamic_cast<status_node*>(status_object);
+	if (!s) {
+		log_err("status_object dynamic cast failed", 0);
+		return;
+	}
 	s->set_node_status_code(status_node::node_status_storage_error);
 }
 // }}}

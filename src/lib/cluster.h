@@ -380,6 +380,7 @@ protected:
 	shared_connection _open_index();
 	shared_connection _open_index_single_server();
 	shared_connection _open_index_redundant();
+	int _get_reconstruction_bwlimit_for_new_partition(size_t current_partition_size);
 
 	int _set_node_map_version(uint64_t node_map_version) {
 		pthread_mutex_lock(&this->_mutex_node_map_version);

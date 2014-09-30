@@ -169,7 +169,7 @@ namespace test_util
 		in_addr reference;
 		inet_aton("127.0.0.1", &reference);
 		cut_assert_equal_memory(&reference.s_addr, sizeof(reference), &output.sin_addr.s_addr, sizeof(reference));
-		cut_assert_equal_string("localhost", fqdn.c_str());
+		cut_assert_equal_int(0, fqdn.find("localhost", 0));
 	}
 
 	const char plain[] = "All your base are belong to us";

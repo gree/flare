@@ -115,6 +115,7 @@ int storage_kch::set(entry &e, result &r, int b) {
 	uint8_t *p = NULL;
 	try {
 		if ((b & behavior_skip_lock) == 0) {
+			pthread_rwlock_rdlock(&this->_mutex_wholelock);
 			pthread_rwlock_wrlock(&this->_mutex_slot[mutex_index]);
 		}
 
@@ -274,12 +275,14 @@ int storage_kch::set(entry &e, result &r, int b) {
 		delete[] p;
 		if ((b & behavior_skip_lock) == 0) {
 			pthread_rwlock_unlock(&this->_mutex_slot[mutex_index]);
+			pthread_rwlock_unlock(&this->_mutex_wholelock);
 		}
 		return error;
 	}
 	delete[] p;
 	if ((b & behavior_skip_lock) == 0) {
 		pthread_rwlock_unlock(&this->_mutex_slot[mutex_index]);
+		pthread_rwlock_unlock(&this->_mutex_wholelock);
 	}
 
 	return 0;
@@ -300,6 +303,7 @@ int storage_kch::incr(entry &e, uint64_t value, result &r, bool increment, int b
 	bool expired = false;
 	try {
 		if ((b & behavior_skip_lock) == 0) {
+			pthread_rwlock_rdlock(&this->_mutex_wholelock);
 			pthread_rwlock_wrlock(&this->_mutex_slot[mutex_index]);
 		}
 
@@ -392,6 +396,7 @@ int storage_kch::incr(entry &e, uint64_t value, result &r, bool increment, int b
 		delete[] p;
 		if ((b & behavior_skip_lock) == 0) {
 			pthread_rwlock_unlock(&this->_mutex_slot[mutex_index]);
+			pthread_rwlock_unlock(&this->_mutex_wholelock);
 		}
 
 		if (expired) {
@@ -403,6 +408,7 @@ int storage_kch::incr(entry &e, uint64_t value, result &r, bool increment, int b
 	delete[] p;
 	if ((b & behavior_skip_lock) == 0) {
 		pthread_rwlock_unlock(&this->_mutex_slot[mutex_index]);
+		pthread_rwlock_unlock(&this->_mutex_wholelock);
 	}
 
 	return 0;
@@ -486,6 +492,7 @@ int storage_kch::remove(entry &e, result &r, int b) {
 
 	try {
 		if ((b & behavior_skip_lock) == 0) {
+			pthread_rwlock_rdlock(&this->_mutex_wholelock);
 			pthread_rwlock_wrlock(&this->_mutex_slot[mutex_index]);
 		}
 
@@ -531,11 +538,13 @@ int storage_kch::remove(entry &e, result &r, int b) {
 	} catch (int error) {
 		if ((b & behavior_skip_lock) == 0) {
 			pthread_rwlock_unlock(&this->_mutex_slot[mutex_index]);
+			pthread_rwlock_unlock(&this->_mutex_wholelock);
 		}
 		return error;
 	}
 	if ((b & behavior_skip_lock) == 0) {
 		pthread_rwlock_unlock(&this->_mutex_slot[mutex_index]);
+		pthread_rwlock_unlock(&this->_mutex_wholelock);
 	}
 
 	return 0;
@@ -545,6 +554,7 @@ int storage_kch::truncate(int b) {
 	log_info("truncating all data", 0);
 
 	if ((b & behavior_skip_lock) == 0) {
+		pthread_rwlock_wrlock(&this->_mutex_wholelock);
 		this->_mutex_slot_wrlock_all();
 	}
 
@@ -559,6 +569,7 @@ int storage_kch::truncate(int b) {
 
 	if ((b & behavior_skip_lock) == 0) {
 		this->_mutex_slot_unlock_all();
+		pthread_rwlock_unlock(&this->_mutex_wholelock);
 	}
 
 	return r;
@@ -590,7 +601,7 @@ storage::iteration storage_kch::iter_next(string &key) {
 
 	bool fetched = false;
 	
-	this->_mutex_slot_rdlock_all();
+	pthread_rwlock_wrlock(&this->_mutex_wholelock);
 	{
 		if (this->_iter_first) {
 			this->_cursor->jump();
@@ -600,7 +611,7 @@ storage::iteration storage_kch::iter_next(string &key) {
 		}
 		fetched = this->_cursor->get_key(&key);
 	}
-	this->_mutex_slot_unlock_all();
+	pthread_rwlock_unlock(&this->_mutex_wholelock);
 
 	if (!fetched) {
 		BasicDB::Error error = this->_db->error();

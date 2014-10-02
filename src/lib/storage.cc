@@ -37,6 +37,7 @@ storage::storage(string data_dir, int mutex_slot_size, int header_cache_size):
 	}
 	pthread_mutex_init(&_mutex_iter_lock, NULL);
 	pthread_rwlock_init(&this->_mutex_header_cache_map, NULL);
+	pthread_rwlock_init(&this->_mutex_wholelock, NULL);
 
 	this->_header_cache_map = tcmapnew();
 }
@@ -52,6 +53,7 @@ storage::~storage() {
 	this->_mutex_slot = NULL;
 	pthread_mutex_destroy(&_mutex_iter_lock);
 	pthread_rwlock_destroy(&_mutex_header_cache_map);
+	pthread_rwlock_destroy(&_mutex_wholelock);
 
 	if (this->_header_cache_map) {
 		tcmapdel(this->_header_cache_map);

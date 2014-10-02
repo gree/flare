@@ -40,4 +40,8 @@ before_script:
   - travis_retry ./autogen.sh
   - travis_retry ./configure
 
-script: make && make test && make check && sudo make install && flare-tests
+script:
+  - make
+  - make check && sudo make install
+  - flare-tests
+

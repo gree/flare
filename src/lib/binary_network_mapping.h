@@ -12,6 +12,7 @@
 #include "binary_header.h"
 #include "connection.h"
 #include "htonll.h"
+#include "string.h"
 
 #include <boost/static_assert.hpp>
 #include <boost/type_traits.hpp>

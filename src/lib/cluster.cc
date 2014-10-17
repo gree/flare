@@ -1542,15 +1542,11 @@ int cluster::_enqueue(shared_thread_queue q, thread_pool::thread_type type, bool
 
 	shared_thread t;
 	thread_pool::local_map m = this->_thread_pool->get_active(type);
-	bool found = false;
-	for (thread_pool::local_map::iterator it = m.begin(); it != m.end(); it++) {
-		t = it->second;
-		found = true;
-		break;
-	}
-	if (found == false) {
+	thread_pool::local_map::iterator it = m.begin();
+	if (it == m.end()) {
 		return -1;
 	}
+	t = it->second;
 
 	if (sync) {
 		q->sync_ref();

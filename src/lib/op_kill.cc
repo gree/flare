@@ -18,7 +18,8 @@ namespace flare {
  */
 op_kill::op_kill(shared_connection c, thread_pool* tp):
 		op(c, "kill"),
-		_thread_pool(tp) {
+		_thread_pool(tp),
+		_id(0) {
 }
 
 /**

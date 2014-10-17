@@ -16,8 +16,9 @@ namespace flare {
 /**
  *	ctor for logger
  */
-logger::logger() {
-	this->_open = false;
+logger::logger():
+	_open(false),
+	_facility(LOG_USER) {
 }
 
 /**

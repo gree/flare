@@ -20,7 +20,10 @@ namespace flare {
 thread_queue::thread_queue():
 		_ident(""),
 		_sync(false),
-		_sync_ref_count(0) {
+		_sync_ref_count(0),
+		_success(false) {
+	pthread_mutex_init(&this->_mutex_sync, NULL);
+	pthread_cond_init(&this->_cond_sync, NULL);
 	this->_timestamp = stats_object->get_timestamp();
 }
 
@@ -32,6 +35,8 @@ thread_queue::thread_queue(string ident):
 		_sync(false),
 		_sync_ref_count(0),
 		_success(false) {
+	pthread_mutex_init(&this->_mutex_sync, NULL);
+	pthread_cond_init(&this->_cond_sync, NULL);
 	this->_timestamp = stats_object->get_timestamp();
 }
 

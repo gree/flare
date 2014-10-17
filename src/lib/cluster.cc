@@ -46,6 +46,7 @@ cluster::cluster(thread_pool* tp, string server_name, int server_port):
 		_proxy_hash_algorithm(storage::hash_algorithm_murmur),
 		_key_resolver(NULL),
 		_storage(NULL),
+		_type(type_node),
 		_master_reconstruction(0),
 		_node_map_version(0),
 		_server_name(server_name),
@@ -63,6 +64,7 @@ cluster::cluster(thread_pool* tp, string server_name, int server_port):
 		_proxy_concurrency(0),
 		_reconstruction_interval(0),
 		_reconstruction_bwlimit(0),
+		_replication_type(replication_async),
 		_proxy_prior_netmask(0), 
 		_max_total_thread_queue(0) {
 	this->_node_key = this->to_node_key(server_name, server_port);

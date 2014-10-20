@@ -32,10 +32,10 @@ class thread_queue {
 protected:
 	string							_ident;
 	bool								_sync;
-	pthread_mutex_t			_mutex_sync;
-	pthread_cond_t			_cond_sync;
 	int									_sync_ref_count;
 	bool								_success;
+	pthread_mutex_t			_mutex_sync;
+	pthread_cond_t			_cond_sync;
 	time_t							_timestamp;
 
 public:

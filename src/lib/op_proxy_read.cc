@@ -19,8 +19,9 @@ namespace flare {
 op_proxy_read::op_proxy_read(shared_connection c, string ident, binary_header::opcode opcode, cluster* cl, storage* st):
 		op(c, ident, opcode),
 		_cluster(cl),
-		_storage(st) {
-	this->_is_multiple_response = false;
+		_storage(st),
+		_parameter(NULL),
+		_is_multiple_response(false) {
 }
 
 /**

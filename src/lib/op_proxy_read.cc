@@ -20,8 +20,8 @@ op_proxy_read::op_proxy_read(shared_connection c, string ident, binary_header::o
 		op(c, ident, opcode),
 		_cluster(cl),
 		_storage(st),
-    _parameter(NULL),
-    _is_multiple_response(false) {
+		_parameter(NULL),
+		_is_multiple_response(false) {
 }
 
 /**

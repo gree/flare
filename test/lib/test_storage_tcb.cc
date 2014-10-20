@@ -6,8 +6,9 @@
 #include <cppcutter.h>
 
 #include "common_storage_tests.h"
+#include "storage_listener_simple.h"
 #include <app.h>
-#include <storage_tcb.h>
+#include <storage_engine_tcb.h>
 
 #include <limits>
 #include <sys/stat.h>
@@ -17,7 +18,8 @@ using namespace std;
 
 namespace test_storage_tcb
 {
-	const char tmp_dir[] = "tmp";
+	const char tmp_dir[] = "/tmp/flare-cutter";
+	storage_listener_simple listener;
 	test_storage::storage_tester* tcb_tester;
 
 	void setup()
@@ -26,19 +28,27 @@ namespace test_storage_tcb
 		stats_object->update_timestamp();
 		const char *db_dir;
 		db_dir = tmp_dir;
+		cut_remove_path(db_dir, NULL);
 		mkdir(db_dir, 0700);
 		string compress("");
-		tcb_tester = new test_storage::storage_tester(new storage_tcb(db_dir,
-					32,
-					4,
-					10,
-					131071,
-					65536,
-					compress,
-					true,
-					0,
-					0,
-					0));
+		storage_engine_tcb* engine = new storage_engine_tcb(
+			db_dir,
+			4, // ap
+			10, // fp
+			131071, // bucket size
+			compress,
+			true, // large
+			0, // lmemb
+			0, // nmemb
+			0, // dfunit
+			&listener
+		);
+		tcb_tester = new test_storage::storage_tester(new storage(
+			32, // mutex slot
+			65536, // cache size
+			engine,
+			&listener
+		));
 	}
 
 COMMON_STORAGE_TEST(tcb_tester, get_not_found);

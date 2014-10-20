@@ -48,11 +48,6 @@
 #include "op.h"
 #include "cluster.h"
 #include "storage.h"
-#include "storage_tch.h"
-#include "storage_tcb.h"
-#ifdef HAVE_LIBKYOTOCABINET
-#include "storage_kch.h"
-#endif
 
 using namespace std;
 using namespace boost;

@@ -22,16 +22,22 @@ protected:
 	map<string, storage::entry>::iterator	_it;
 
 public:
-	storage_simple_map(string data_dir, int mutex_slot_size, int header_cache_size):
-		storage(data_dir, mutex_slot_size, header_cache_size) {
+	storage_simple_map():
+		storage(0, 0, NULL, NULL) {
 		this->_it = this->_map.end();
 	};
 	virtual ~storage_simple_map() {
 		this->_map.clear();
 	};
 
-	virtual int open() { this->_open = true; };
-	virtual int close() { this->_open = false; };
+	virtual int open() {
+		this->_open = true;
+		return 0;
+	};
+	virtual int close() {
+		this->_open = false;
+		return 0;
+	};
 	virtual int set(entry& e, result& r, int b = 0) {
 		this->_map.insert(pair<string, storage::entry>(e.key, e));
 		r = result_stored;
@@ -90,9 +96,6 @@ public:
 		memcpy(entry.data.get(), value.data(), entry.size);
 		this->set(entry, result);
 	};
-
-protected:
-	virtual int _get_header(string key, entry& e) { return -1; };
 };
 
 }	// namespace flare

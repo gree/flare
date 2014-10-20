@@ -7,8 +7,8 @@ noinst_LTLIBRARIES =	\
 	test_handler_proxy.la \
 	test_storage.la \
 	test_storage_entry.la \
-	test_storage_tcb.la \
 	test_storage_tch.la \
+	test_storage_tcb.la \
 	test_key_resolver_modular.la \
 	test_op.la	\
 	test_op_add.la	\
@@ -50,6 +50,7 @@ noinst_LTLIBRARIES =	\
 if ENABLE_KYOTOCABINET
 noinst_LTLIBRARIES += test_storage_kch.la
 endif
+
 if ENABLE_ZOOKEEPER
 noinst_LTLIBRARIES += test_zookeeper_coordinator.la test_zookeeper_lock.la
 endif

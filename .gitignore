@@ -11,6 +11,7 @@
 /configure
 /libtool
 /ltmain.sh
+compile
 Makefile
 Makefile.in
 /cscope.*

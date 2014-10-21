@@ -15,6 +15,9 @@
 namespace gree {
 namespace flare {
 
+const int storage::_entry::header_size;
+const uint64_t storage::_entry::max_data_size;
+
 // {{{ ctor/dtor
 /**
  *	ctor for storage

@@ -18,7 +18,6 @@
 #define ZHANDLE_SOCK(x) (*(reinterpret_cast<int*>(x)))
 
 using namespace std;
-using namespace boost;
 using namespace gree::flare;
 
 namespace test_zookeeper_lock {
@@ -81,9 +80,9 @@ namespace test_zookeeper_lock {
 	void test_many_locker1() {
 		if (!zhandle) return;
 		log_debug("-------------------------------- many locker1", 0);
-		thread_group tg;
+		boost::thread_group tg;
 		for (int i = 0; i < 10; i++) {
-			tg.create_thread(bind(&many_locker_main, cut_get_current_test_context(), i));
+			tg.create_thread(boost::bind(&many_locker_main, cut_get_current_test_context(), i));
 		}
 		tg.join_all();
 	}
@@ -91,9 +90,9 @@ namespace test_zookeeper_lock {
 	void test_many_locker2() {
 		if (!zhandle) return;
 		log_debug("-------------------------------- many locker2", 0);
-		thread_group tg;
+		boost::thread_group tg;
 		for (int i = 0; i < 100; i++) {
-			tg.create_thread(bind(&many_locker_main, cut_get_current_test_context(), i));
+			tg.create_thread(boost::bind(&many_locker_main, cut_get_current_test_context(), i));
 		}
 		tg.join_all();
 	}
@@ -101,9 +100,9 @@ namespace test_zookeeper_lock {
 	void test_many_locker3() {
 		if (!zhandle) return;
 		log_debug("-------------------------------- many locker3", 0);
-		thread_group tg;
+		boost::thread_group tg;
 		for (int i = 0; i < nworkers; i++) {
-			tg.create_thread(bind(&many_locker_main, cut_get_current_test_context(), i));
+			tg.create_thread(boost::bind(&many_locker_main, cut_get_current_test_context(), i));
 		}
 		tg.join_all();
 	}
@@ -113,7 +112,7 @@ namespace test_zookeeper_lock {
 
 		random_nanosleep(100);
 		zookeeper_lock zl(connstring, work_path);
-		zl.set_message((format("%1%") % i).str());
+		zl.set_message((boost::format("%1%") % i).str());
 		cut_assert_equal_int(0, zl.lock());
 		// cut_assert_equal_int(0, zl.wait_for_ownership()); // XXX
 		random_nanosleep(1000);
@@ -123,9 +122,9 @@ namespace test_zookeeper_lock {
 	void test_no_wait() {
 		if (!zhandle) return;
 		log_debug("-------------------------------- no wait", 0);
-		thread_group tg;
+		boost::thread_group tg;
 		for (int i = 0; i < 5; i++) {
-			tg.create_thread(bind(&no_wait_main, cut_get_current_test_context(), i));
+			tg.create_thread(boost::bind(&no_wait_main, cut_get_current_test_context(), i));
 		}
 		tg.join_all();
 	}
@@ -134,7 +133,7 @@ namespace test_zookeeper_lock {
 		cut_set_current_test_context(context);
 		random_nanosleep(100);
 		zookeeper_lock zl(connstring, work_path);
-		zl.set_message((format("%1%") % i).str());
+		zl.set_message((boost::format("%1%") % i).str());
 		cut_assert_equal_int(0, zl.lock());
 		cut_assert_equal_int(0, zl.wait_for_ownership());
 		random_nanosleep(1000);
@@ -144,13 +143,13 @@ namespace test_zookeeper_lock {
 	void test_crush_locker_close() {
 		if (!zhandle) return;
 		log_debug("-------------------------------- crush locker close", 0);
-		thread_group tg;
+		boost::thread_group tg;
 		{
 			zookeeper_lock zl(connstring, work_path);
 			cut_assert_equal_int(0, zl.lock());
 			cut_assert_equal_int(0, zl.wait_for_ownership());
 			for (int i = 0; i < 100; i++) {
-				tg.create_thread(bind(&crush_locker_main, cut_get_current_test_context(), i));
+				tg.create_thread(boost::bind(&crush_locker_main, cut_get_current_test_context(), i));
 			}
 		}
 		tg.join_all();
@@ -159,13 +158,13 @@ namespace test_zookeeper_lock {
 	void test_crush_locker_shutdown() {
 		if (!zhandle) return;
 		log_debug("-------------------------------- crush locker shutdown", 0);
-		thread_group tg;
+		boost::thread_group tg;
 		{
 			zookeeper_lock zl(connstring, work_path);
 			cut_assert_equal_int(0, zl.lock());
 			cut_assert_equal_int(0, zl.wait_for_ownership());
 			for (int i = 0; i < nworkers; i++) {
-				tg.create_thread(bind(&crush_locker_main, cut_get_current_test_context(), i));
+				tg.create_thread(boost::bind(&crush_locker_main, cut_get_current_test_context(), i));
 			}
 			random_nanosleep(1000);
 			::shutdown(ZHANDLE_SOCK(zl.get_zhandle()), SHUT_RD); // crush
@@ -177,7 +176,7 @@ namespace test_zookeeper_lock {
 		cut_set_current_test_context(context);
 		random_nanosleep(100);
 		zookeeper_lock zl(connstring, work_path);
-		zl.set_message((format("%1%") % i).str());
+		zl.set_message((boost::format("%1%") % i).str());
 		cut_assert_equal_int(0, zl.lock());
 		cut_assert_equal_int(0, zl.wait_for_ownership());
 		int count = *counter;
@@ -191,9 +190,9 @@ namespace test_zookeeper_lock {
 		if (!zhandle) return;
 		log_debug("-------------------------------- counting", 0);
 		volatile int counter = 0;
-		thread_group tg;
+		boost::thread_group tg;
 		for (int i = 0; i < nworkers; i++) {
-			tg.create_thread(bind(&counting_main, cut_get_current_test_context(), i, &counter));
+			tg.create_thread(boost::bind(&counting_main, cut_get_current_test_context(), i, &counter));
 		}
 		tg.join_all();
 		cut_assert_equal_int(nworkers, counter);
@@ -203,7 +202,7 @@ namespace test_zookeeper_lock {
 		cut_set_current_test_context(context);
 		random_nanosleep(100);
 		zookeeper_lock *zl = new zookeeper_lock(connstring, work_path);
-		zl->set_message((format("%1%") % i).str());
+		zl->set_message((boost::format("%1%") % i).str());
 		cut_assert_equal_int(0, zl->lock());
 		random_nanosleep(1000);
 		delete zl;
@@ -213,7 +212,7 @@ namespace test_zookeeper_lock {
 		cut_set_current_test_context(context);
 		random_nanosleep(100);
 		zookeeper_lock *zl = new zookeeper_lock(connstring, work_path);
-		zl->set_message((format("%1%") % i).str());
+		zl->set_message((boost::format("%1%") % i).str());
 		cut_assert_equal_int(0, zl->lock());
 		random_nanosleep(100);
 		cut_assert_equal_int(0, zl->wait_for_ownership());
@@ -225,12 +224,12 @@ namespace test_zookeeper_lock {
 	void test_cancelled_lock() {
 		if (!zhandle) return;
 		log_debug("-------------------------------- cancelled lock", 0);
-		thread_group tg;
+		boost::thread_group tg;
 		for (int i = 0; i < 4; i++) {
 			if (i % 2 == 0) {
-				tg.create_thread(bind(&normal_lock_main, cut_get_current_test_context(), i));
+				tg.create_thread(boost::bind(&normal_lock_main, cut_get_current_test_context(), i));
 			} else {
-				tg.create_thread(bind(&cancelled_lock_main, cut_get_current_test_context(), i));
+				tg.create_thread(boost::bind(&cancelled_lock_main, cut_get_current_test_context(), i));
 			}
 		}
 		tg.join_all();

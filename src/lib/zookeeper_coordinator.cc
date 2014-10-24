@@ -49,7 +49,7 @@ zookeeper_coordinator::zookeeper_coordinator(const string& coordinator_uri, cons
 
 	/* construct a connection string */
 	ostringstream connstring_oss;
-	for (vector<tuple<string,string,int> >::iterator it = this->_uri.authorities.begin();
+	for (vector<boost::tuple<string,string,int> >::iterator it = this->_uri.authorities.begin();
 			 it != this->_uri.authorities.end(); it++) {
 		string host = it->get<1>();
 		int port = it->get<2>();
@@ -85,7 +85,7 @@ zookeeper_coordinator::~zookeeper_coordinator() {
 // {{{ public methods
 int zookeeper_coordinator::begin_operation(shared_operation& operation, const string& message) {
 	operation.reset();
-	shared_ptr<zk_operation> zkop = this->_take_operation();
+	boost::shared_ptr<zk_operation> zkop = this->_take_operation();
 
 	try {
 		if (!zkop) {
@@ -130,7 +130,7 @@ int zookeeper_coordinator::begin_operation(shared_operation& operation, const st
 }
 
 int zookeeper_coordinator::end_operation(shared_operation& operation) {
-	shared_ptr<zk_operation> zkop = dynamic_pointer_cast<zk_operation>(operation);
+	boost::shared_ptr<zk_operation> zkop = boost::dynamic_pointer_cast<zk_operation>(operation);
 	log_notice("end operation: %s (%s)", zkop->get_message().c_str(), zkop->get_nickname().c_str());
 	operation.reset();
 	if (zkop->unlock() < 0) {
@@ -283,11 +283,11 @@ void zookeeper_coordinator::_close_zookeeper() {
 	}
 }
 
-shared_ptr<zookeeper_coordinator::zk_operation> zookeeper_coordinator::_take_operation() {
-	shared_ptr<zk_operation> zkop;
+boost::shared_ptr<zookeeper_coordinator::zk_operation> zookeeper_coordinator::_take_operation() {
+	boost::shared_ptr<zk_operation> zkop;
 	pthread_mutex_lock(&(this->_mutex_operation_pool));
 	if (this->operation_pool.size() > 0) {
-		zkop = dynamic_pointer_cast<zk_operation>(this->operation_pool.front());
+		zkop = boost::dynamic_pointer_cast<zk_operation>(this->operation_pool.front());
 		this->operation_pool.pop_front();
 	} else {
 		zkop = this->_new_operation();
@@ -296,11 +296,11 @@ shared_ptr<zookeeper_coordinator::zk_operation> zookeeper_coordinator::_take_ope
 	return zkop;
 }
 
-shared_ptr<zookeeper_coordinator::zk_operation> zookeeper_coordinator::_new_operation() {
-	return (shared_ptr<zk_operation>(new zookeeper_coordinator::zk_operation(this, this->_connstring, string(ZNODENAME_INDEX_LOCK))));
+boost::shared_ptr<zookeeper_coordinator::zk_operation> zookeeper_coordinator::_new_operation() {
+	return (boost::shared_ptr<zk_operation>(new zookeeper_coordinator::zk_operation(this, this->_connstring, string(ZNODENAME_INDEX_LOCK))));
 }
 
-void zookeeper_coordinator::_put_operation(shared_ptr<zk_operation> zkop) {
+void zookeeper_coordinator::_put_operation(boost::shared_ptr<zk_operation> zkop) {
 	pthread_mutex_lock(&(this->_mutex_operation_pool));
 	this->operation_pool.push_back(zkop);
 	pthread_mutex_unlock(&(this->_mutex_operation_pool));

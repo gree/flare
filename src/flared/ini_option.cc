@@ -532,12 +532,12 @@ int ini_option::_process_index_servers(program_options::variables_map& opt_var_m
 		string::const_iterator start = index_servers.begin();
 		string::const_iterator end = index_servers.end();
 
-		while (regex_search(start, end, match, e)) {
+		while (boost::regex_search(start, end, match, e)) {
 			string index_server_name = match.str(1);
 			int index_server_port = default_index_server_port;
 			try {
-				index_server_port = lexical_cast<int>(match.str(2));
-			} catch (bad_lexical_cast& e) {
+				index_server_port = boost::lexical_cast<int>(match.str(2));
+			} catch (boost::bad_lexical_cast& e) {
 				log_warning("invalid port number %s", match.str(2).c_str());
 				return -1;
 			}

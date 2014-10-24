@@ -12,7 +12,6 @@
 #include "cluster.h"
 
 using namespace std;
-using namespace boost;
 
 namespace gree {
 namespace flare {

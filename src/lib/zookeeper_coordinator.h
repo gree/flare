@@ -17,7 +17,6 @@
 #include "zookeeper_lock.h"
 
 using namespace std;
-using namespace boost;
 
 namespace gree {
 namespace flare {
@@ -26,7 +25,7 @@ class zookeeper_coordinator : public coordinator
 {
 public:
 	static const int		default_retry_count = 10;
-	typedef tuple<string,string,int> authority_type;
+	typedef boost::tuple<string,string,int> authority_type;
 
 protected:
 	class zk_operation : public operation
@@ -72,7 +71,7 @@ protected:
 			vector<string> authstrings;
 			static const boost::regex e(pattern);
 			boost::smatch match;
-			regex_match(s, match, e);
+			boost::regex_match(s, match, e);
 			this->scheme    = match[1].str();
 			authstrings.push_back(match[2].str());
 			for (int i = 3; i < 7; i++) {
@@ -83,14 +82,14 @@ protected:
 			for(vector<string>::iterator it = authstrings.begin(); it != authstrings.end(); it++) {
 				static const boost::regex auth_e(auth_pattern);
 				boost::smatch auth_match;
-				regex_match(*it, auth_match, auth_e);
+				boost::regex_match(*it, auth_match, auth_e);
 				string user      = auth_match[1].str();
 				string host      = auth_match[2].str();
 				int port         = 0;
 				try {
-					port           = lexical_cast<int>(auth_match[3].str());
-				} catch (bad_lexical_cast& e) {}
-				authorities.push_back(make_tuple(user, host, port));
+					port           = boost::lexical_cast<int>(auth_match[3].str());
+				} catch (boost::bad_lexical_cast& e) {}
+				authorities.push_back(boost::make_tuple(user, host, port));
 			}
 
 			this->path      = match[7].str();
@@ -105,7 +104,7 @@ private:
 	string						_connstring;
 	zhandle_t*				_zhandle;
 	clientid_t				_client_id;
-	function<void (void)>	_update_handler;
+	boost::function<void (void)>	_update_handler;
 	pthread_mutex_t		_mutex_sync_nodemap;
 	pthread_cond_t		_cond_sync_nodemap;
 	bool							_sync_nodemap;
@@ -126,20 +125,20 @@ public:
 	int setup();
 	bool is_initialized() { return this->_is_initialized; }
 	string get_scheme() { return this->_uri.scheme; }
-	vector<tuple<string,string,int> > get_authorities() { return this->_uri.authorities; }
+	vector<boost::tuple<string,string,int> > get_authorities() { return this->_uri.authorities; }
 	string get_user()   { return this->_uri.authorities.front().get<0>(); }
 	string get_host()   { return this->_uri.authorities.front().get<1>(); }
 	int get_port()      { return this->_uri.authorities.front().get<2>(); }
 	string get_path()   { return this->_uri.path; }
-	void set_update_handler(function<void (void)> fn) { this->_update_handler = fn; }
+	void set_update_handler(boost::function<void (void)> fn) { this->_update_handler = fn; }
 	int get_meta_variables(map<string,string>& variables);
 	zhandle_t* get_zhandle();
 
 protected:
 	void _close_zookeeper();
-	shared_ptr<zk_operation> _new_operation();
-	shared_ptr<zk_operation> _take_operation();
-	void _put_operation(shared_ptr<zk_operation> zkop);
+	boost::shared_ptr<zk_operation> _new_operation();
+	boost::shared_ptr<zk_operation> _take_operation();
+	void _put_operation(boost::shared_ptr<zk_operation> zkop);
 	virtual void _handle_global_watch_event(int type, int state, const string& path);
 	virtual void _handle_nodemap_watch_event(int type, int state, const string& path);
 	virtual void _handle_sync_completion_event(int rc, const string& value);

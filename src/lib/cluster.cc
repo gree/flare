@@ -119,7 +119,7 @@ int cluster::node::parse(const char* p) {
 			log_warning("no server port (required)", 0);
 			return -1;
 		}
-		this->node_server_port = lexical_cast<int>(q);
+		this->node_server_port = boost::lexical_cast<int>(q);
 
 		// node_role
 		i += util::next_digit(p+i, q, sizeof(q));
@@ -127,7 +127,7 @@ int cluster::node::parse(const char* p) {
 			log_warning("no role (required)", 0);
 			return -1;
 		}
-		this->node_role = static_cast<cluster::role>(lexical_cast<int>(q));
+		this->node_role = static_cast<cluster::role>(boost::lexical_cast<int>(q));
 
 		// node_state
 		i += util::next_digit(p+i, q, sizeof(q));
@@ -135,7 +135,7 @@ int cluster::node::parse(const char* p) {
 			log_warning("no state (required)", 0);
 			return -1;
 		}
-		this->node_state = static_cast<cluster::state>(lexical_cast<int>(q));
+		this->node_state = static_cast<cluster::state>(boost::lexical_cast<int>(q));
 
 		// node_partition
 		i += util::next_digit(p+i, q, sizeof(q));
@@ -143,7 +143,7 @@ int cluster::node::parse(const char* p) {
 			log_warning("no partition (required)", 0);
 			return -1;
 		}
-		this->node_partition = lexical_cast<int>(q);
+		this->node_partition = boost::lexical_cast<int>(q);
 
 		// node_balance
 		i += util::next_digit(p+i, q, sizeof(q));
@@ -151,7 +151,7 @@ int cluster::node::parse(const char* p) {
 			log_warning("no balance (required)", 0);
 			return -1;
 		}
-		this->node_balance = lexical_cast<int>(q);
+		this->node_balance = boost::lexical_cast<int>(q);
 
 		// node_thread_type
 		i += util::next_digit(p+i, q, sizeof(q));
@@ -159,8 +159,8 @@ int cluster::node::parse(const char* p) {
 			log_warning("no thread_type (required)", 0);
 			return -1;
 		}
-		this->node_thread_type = lexical_cast<int>(q);
-	} catch (bad_lexical_cast e) {
+		this->node_thread_type = boost::lexical_cast<int>(q);
+	} catch (boost::bad_lexical_cast e) {
 		log_warning("invalid digit [%s]", e.what());
 		return -1;
 	}
@@ -223,7 +223,7 @@ int cluster::startup_index(coordinator* coord, key_resolver::type key_resolver_t
 		t->trigger(h);
 	}
 
-	this->_coordinator->set_update_handler(bind(&cluster::_update, this));
+	this->_coordinator->set_update_handler(boost::bind(&cluster::_update, this));
 
 	return 0;
 }
@@ -1294,7 +1294,7 @@ cluster::proxy_request cluster::pre_proxy_read(op_proxy_read* op, storage::entry
 	vector<string> proxy = op->get_proxy();
 	proxy.push_back(this->_node_key);
 	shared_queue_proxy_read q(new queue_proxy_read(this, this->_storage, proxy, e, parameter, op->get_ident()));
-	if (this->_enqueue(static_pointer_cast<thread_queue, queue_proxy_read>(q), node_key, e.get_key_hash_value(this->_proxy_hash_algorithm), true) < 0) {
+	if (this->_enqueue(boost::static_pointer_cast<thread_queue, queue_proxy_read>(q), node_key, e.get_key_hash_value(this->_proxy_hash_algorithm), true) < 0) {
 		return proxy_request_error_enqueue;
 	}
 	q_result = q;
@@ -1336,7 +1336,7 @@ cluster::proxy_request cluster::pre_proxy_write(op_proxy_write* op, shared_queue
 	proxy.push_back(this->_node_key);
 	shared_queue_proxy_write q(new queue_proxy_write(this, this->_storage, proxy, e, op->get_ident()));
 	q->set_generic_value(generic_value);
-	if (this->_enqueue(static_pointer_cast<thread_queue, queue_proxy_write>(q), p.master.node_key, e.get_key_hash_value(this->_proxy_hash_algorithm), sync) < 0) {
+	if (this->_enqueue(boost::static_pointer_cast<thread_queue, queue_proxy_write>(q), p.master.node_key, e.get_key_hash_value(this->_proxy_hash_algorithm), sync) < 0) {
 		return proxy_request_error_enqueue;
 	}
 	if (sync) {
@@ -1664,10 +1664,10 @@ int cluster::_save() {
 	ostringstream oss;
 	// creating scope to destroy xml_oarchive object before ostringstream::close();
 	{
-		archive::xml_oarchive oa(oss);
-		oa << serialization::make_nvp("version", (const uint64_t&)this->_node_map_version);
-		oa << serialization::make_nvp("node_map", (const node_map&)this->_node_map);
-		oa << serialization::make_nvp("thread_type", (const int&)this->_thread_type);
+		boost::archive::xml_oarchive oa(oss);
+		oa << boost::serialization::make_nvp("version", (const uint64_t&)this->_node_map_version);
+		oa << boost::serialization::make_nvp("node_map", (const node_map&)this->_node_map);
+		oa << boost::serialization::make_nvp("thread_type", (const int&)this->_thread_type);
 	}
 
 	string flare_xml = oss.str();
@@ -1703,18 +1703,18 @@ int cluster::_load(bool update_monitor) {
 	if (!flare_xml.empty()) {
 		try {
 			istringstream iss(flare_xml);
-			archive::xml_iarchive ia(iss);
-			ia >> serialization::make_nvp("version", this->_node_map_version);
-			ia >> serialization::make_nvp("node_map", this->_node_map);
-			ia >> serialization::make_nvp("thread_type", this->_thread_type);
-		} catch (archive::archive_exception& e) {
+			boost::archive::xml_iarchive ia(iss);
+			ia >> boost::serialization::make_nvp("version", this->_node_map_version);
+			ia >> boost::serialization::make_nvp("node_map", this->_node_map);
+			ia >> boost::serialization::make_nvp("thread_type", this->_thread_type);
+		} catch (boost::archive::archive_exception& e) {
 			try {
 				istringstream iss(flare_xml);
-				archive::xml_iarchive ia(iss);
+				boost::archive::xml_iarchive ia(iss);
 				this->_node_map_version = 0;
-				ia >> serialization::make_nvp("node_map", this->_node_map);
-				ia >> serialization::make_nvp("thread_type", this->_thread_type);
-			} catch (archive::archive_exception& e) {
+				ia >> boost::serialization::make_nvp("node_map", this->_node_map);
+				ia >> boost::serialization::make_nvp("thread_type", this->_thread_type);
+			} catch (boost::archive::archive_exception& e) {
 				pthread_mutex_unlock(&this->_mutex_serialization);
 				log_err("invalid XML format", 0);
 				return -1;

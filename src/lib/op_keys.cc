@@ -70,14 +70,14 @@ int op_keys::_parse_text_server_parameters() {
 	this->_entry_list.pop_back();
 	int limit;
 	try {
-		limit = lexical_cast<int>(last_parameter);
+		limit = boost::lexical_cast<int>(last_parameter);
 		if (limit <= 0) {
 			log_debug("invalid limit [%d]", limit);
 			return -1;
 		}
 		this->_parameter = reinterpret_cast<void*>(limit);
 		log_debug("storing limit [%d]", limit);
-	} catch (bad_lexical_cast e) {
+	} catch (boost::bad_lexical_cast e) {
 		log_debug("invalid limit [%s]", last_parameter.c_str());
 		return -1;
 	}

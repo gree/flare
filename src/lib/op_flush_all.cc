@@ -72,9 +72,9 @@ int op_flush_all::_parse_text_server_parameters() {
 		int n = util::next_digit(p, q, sizeof(q));
 		if (q[0]) {
 			try {
-				this->_expire = lexical_cast<time_t>(q);
+				this->_expire = boost::lexical_cast<time_t>(q);
 				log_debug("storing expire [%ld]", this->_expire);
-			} catch (bad_lexical_cast e) {
+			} catch (boost::bad_lexical_cast e) {
 				log_debug("invalid expire (expire=%s)", q);
 				throw -1;
 			}

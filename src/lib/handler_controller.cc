@@ -69,7 +69,7 @@ int handler_controller::_process_queue(shared_thread_queue q) {
 	this->_thread->set_op(q->get_ident());
 
 	if (q->get_ident() == "node_state") {
-		shared_queue_node_state r = dynamic_pointer_cast<queue_node_state, thread_queue>(q);
+		shared_queue_node_state r = boost::dynamic_pointer_cast<queue_node_state, thread_queue>(q);
 		if (r) {
 			if (r->get_operation() == queue_node_state::state_operation_down) {
 				this->_cluster->down_node(r->get_node_server_name(), r->get_node_server_port());

@@ -86,7 +86,7 @@ int storage::entry::parse(const char*p, parse_type t) {
 				log_debug("invalid flag [%s]", q);
 				return -1;
 			}
-			this->flag = lexical_cast<uint32_t>(q);
+			this->flag = boost::lexical_cast<uint32_t>(q);
 			log_debug("storing flag [%u]", this->flag);
 		}
 		
@@ -104,7 +104,7 @@ int storage::entry::parse(const char*p, parse_type t) {
 					log_debug("invalid expire [%s]", q);
 					return -1;
 				}
-				this->expire = util::realtime(lexical_cast<time_t>(q));
+				this->expire = util::realtime(boost::lexical_cast<time_t>(q));
 				log_debug("storing expire [%ld]", this->expire);
 			}
 		}
@@ -120,7 +120,7 @@ int storage::entry::parse(const char*p, parse_type t) {
 				log_debug("invalid size [%s]", q);
 				return -1;
 			}
-			this->size = lexical_cast<uint64_t>(q);
+			this->size = boost::lexical_cast<uint64_t>(q);
 			if (this->size > storage::entry::max_data_size) {
 				log_debug("exceed maximum data size [%llu]", this->size);
 				return -1;
@@ -135,7 +135,7 @@ int storage::entry::parse(const char*p, parse_type t) {
 				log_debug("invalid version [%s]", q);
 				return -1;
 			}
-			this->version = lexical_cast<uint64_t>(q);
+			this->version = boost::lexical_cast<uint64_t>(q);
 			log_debug("storing version [%u]", this->version);
 		} else if (t == parse_type_cas) {
 			log_debug("no version found", 0);
@@ -146,7 +146,7 @@ int storage::entry::parse(const char*p, parse_type t) {
 			// expire (if we have)
 			n += util::next_digit(p+n, q, sizeof(q));
 			if (q[0]) {
-				this->expire = util::realtime(lexical_cast<time_t>(q));
+				this->expire = util::realtime(boost::lexical_cast<time_t>(q));
 				log_debug("storing expire [%ld]", this->expire);
 			}
 		}
@@ -166,7 +166,7 @@ int storage::entry::parse(const char*p, parse_type t) {
 				n += util::next_word(p+n, q, sizeof(q));
 			}
 		}
-	} catch (bad_lexical_cast e) {
+	} catch (boost::bad_lexical_cast e) {
 		log_debug("invalid digit [%s]", e.what());
 		return -1;
 	}

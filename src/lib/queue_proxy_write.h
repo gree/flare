@@ -14,13 +14,12 @@
 #include "op.h"
 
 using namespace std;
-using namespace boost;
 
 namespace gree {
 namespace flare {
 
 typedef class queue_proxy_write queue_proxy_write;
-typedef shared_ptr<queue_proxy_write> shared_queue_proxy_write;
+typedef boost::shared_ptr<queue_proxy_write> shared_queue_proxy_write;
 
 /**
  *	proxy write queue class

@@ -26,16 +26,16 @@ const char* const line_delimiter = "\r\n";
  *	strerror (thread safe)
  */
 const char* util::strerror(int e) {
-	static map<pthread_t, shared_ptr<string> > msg_map;
+	static map<pthread_t, boost::shared_ptr<string> > msg_map;
 	static pthread_mutex_t mutex_msg_map = PTHREAD_MUTEX_INITIALIZER; 
 	char buf[BUFSIZ];
 
 #ifdef HAVE_GNU_STRERROR_R
 	char* p = strerror_r(e, buf, sizeof(buf));
-	shared_ptr<string> ptr(new string(p));
+	boost::shared_ptr<string> ptr(new string(p));
 #else
 	strerror_r(e, buf, sizeof(buf));
-	shared_ptr<string> ptr(new string(buf));
+	boost::shared_ptr<string> ptr(new string(buf));
 #endif // HAVE_GNU_STRERROR_R
 
 	pthread_mutex_lock(&mutex_msg_map);

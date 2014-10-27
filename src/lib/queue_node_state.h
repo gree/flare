@@ -12,13 +12,12 @@
 #include "thread_queue.h"
 
 using namespace std;
-using namespace boost;
 
 namespace gree {
 namespace flare {
 
 typedef class queue_node_state queue_node_state;
-typedef shared_ptr<queue_node_state> shared_queue_node_state;
+typedef boost::shared_ptr<queue_node_state> shared_queue_node_state;
 
 /**
  *	node state queue class

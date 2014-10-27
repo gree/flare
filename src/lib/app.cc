@@ -131,7 +131,7 @@ int app::_set_pid() {
 	if (ifs.fail() == false) {
 		string s;
 		ifs >> s;
-		pid_t pid_current = lexical_cast<pid_t>(s);
+		pid_t pid_current = boost::lexical_cast<pid_t>(s);
 		if (kill(pid_current, 0) < 0 && errno == ESRCH) {
 			log_info("logged pid [%d] seems not to exist (%s) -> ignoring", pid_current, util::strerror(errno));
 		} else {

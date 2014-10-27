@@ -77,9 +77,9 @@ int op_node_add::_parse_text_server_parameters() {
 			throw -1;
 		}
 		try {
-			this->_node_server_port = lexical_cast<int>(q);
+			this->_node_server_port = boost::lexical_cast<int>(q);
 			log_debug("storing node server port [%d]", this->_node_server_port);
-		} catch (bad_lexical_cast e) {
+		} catch (boost::bad_lexical_cast e) {
 			log_debug("invalid node server port (port=%s)", q);
 			throw -1;
 		}

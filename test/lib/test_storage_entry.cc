@@ -309,13 +309,13 @@ namespace test_storage_entry
 	void test_parse_entry_abnormal_exceeded_size()
 	{
 		// maximum check
-		std::string input = " key 0 0 " + lexical_cast<std::string>(storage::entry::max_data_size);
+		std::string input = " key 0 0 " + boost::lexical_cast<std::string>(storage::entry::max_data_size);
 		storage::entry entry = parse_entry(input, storage::parse_type_set, 0);
 		cut_assert_equal_string("key", entry.key.c_str());
 		cut_assert_equal_int(storage::entry::max_data_size, entry.size);
 
 		// over max_data_size
-		input = "key 0 0 " + lexical_cast<std::string>(storage::entry::max_data_size + 1);
+		input = "key 0 0 " + boost::lexical_cast<std::string>(storage::entry::max_data_size + 1);
 		parse_entry(input, storage::parse_type_set, -1);
 	}
 

@@ -61,10 +61,10 @@ coordinator_factory::~coordinator_factory() {
 // {{{ public methods
 coordinator* coordinator_factory::create_coordinator(const string& identifier, const string& myname) {
 	const char* pattern = "\\A([^:]+)://.+\\z";
-	static const regex e(pattern);
+	static const boost::regex e(pattern);
 
-	smatch match;
-	regex_match(identifier, match, e);
+	boost::smatch match;
+	boost::regex_match(identifier, match, e);
 	string scheme = match[1];
 
 	try {

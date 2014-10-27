@@ -29,7 +29,7 @@ namespace gree {
 namespace flare {
 
 typedef class connection_tcp connection_tcp;
-typedef shared_ptr<connection_tcp> shared_connection_tcp;
+typedef boost::shared_ptr<connection_tcp> shared_connection_tcp;
 
 /**
  *	network connection class

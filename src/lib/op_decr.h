@@ -11,7 +11,6 @@
 #include "op_incr.h"
 
 using namespace std;
-using namespace boost;
 
 namespace gree {
 namespace flare {

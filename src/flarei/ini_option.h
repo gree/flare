@@ -14,6 +14,8 @@
 namespace gree {
 namespace flare {
 
+namespace program_options = boost::program_options;
+
 #define	ini_option_object()			singleton<ini_option>::instance()
 
 /**

@@ -64,9 +64,9 @@ int op_verbosity::_parse_text_server_parameters() {
 			throw -1;
 		}
 		try {
-			this->_verbosity = lexical_cast<int>(q);
+			this->_verbosity = boost::lexical_cast<int>(q);
 			log_debug("storing verbosity [%d]", this->_verbosity);
-		} catch (bad_lexical_cast e) {
+		} catch (boost::bad_lexical_cast e) {
 			log_debug("invalid verbosity (verbosity=%s)", q);
 			throw -1;
 		}

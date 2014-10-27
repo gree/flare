@@ -341,8 +341,8 @@ int storage_tcb::incr(entry& e, uint64_t value, result& r, bool increment, int b
 
 		uint64_t n = 0, m;
 		try {
-			n = lexical_cast<uint64_t>(tmp_data+offset);
-		} catch (bad_lexical_cast e) {
+			n = boost::lexical_cast<uint64_t>(tmp_data+offset);
+		} catch (boost::bad_lexical_cast e) {
 			n = 0;
 		}
 		free(tmp_data);

@@ -18,7 +18,7 @@ namespace gree {
 namespace flare {
 
 typedef class client client;
-typedef shared_ptr<client> shared_client;
+typedef boost::shared_ptr<client> shared_client;
 
 /**
  *	flare client class

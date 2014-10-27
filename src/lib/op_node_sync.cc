@@ -66,9 +66,9 @@ int op_node_sync::_parse_text_server_parameters() {
 		int n = util::next_digit(p, q, sizeof(q));
 		if (q[0]) {
 			try {
-				this->_node_map_version = lexical_cast<uint64_t>(q);
+				this->_node_map_version = boost::lexical_cast<uint64_t>(q);
 				log_debug("storing node_map_version [%d]", this->_node_map_version);
-			} catch (bad_lexical_cast e) {
+			} catch (boost::bad_lexical_cast e) {
 				log_debug("invalid node_map_version (node_map_version=%s)", q);
 				throw -1;
 			}

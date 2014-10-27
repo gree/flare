@@ -23,7 +23,7 @@ namespace flare {
 
 static string nickname(const string& id) {
 	vector<string> pathnodes;
-	algorithm::split(pathnodes, id, is_any_of("/"));
+	boost::algorithm::split(pathnodes, id, boost::is_any_of("/"));
 	if (pathnodes.size() > 0) {
 		string name = pathnodes.back();
 		try {
@@ -394,7 +394,7 @@ int zookeeper_lock::_lock_operation(bool again, int& zerr) {
 					throw -1;
 				}
 				vector<string> pathnodes;
-				algorithm::split(pathnodes, resulted_path, is_any_of("/"));
+				boost::algorithm::split(pathnodes, resulted_path, boost::is_any_of("/"));
 				if (pathnodes.size() == 0) {
 					log_err("failed to split resulted path %s - %s", resulted_path.c_str(), this->_message.c_str());
 					throw -1;

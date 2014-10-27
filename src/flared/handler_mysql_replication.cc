@@ -111,7 +111,7 @@ int handler_mysql_replication::run() {
 						q->sync_unref();
 						break;
 					}
-					shared_queue_proxy_write r = dynamic_pointer_cast<queue_proxy_write, thread_queue>(q);
+					shared_queue_proxy_write r = boost::dynamic_pointer_cast<queue_proxy_write, thread_queue>(q);
 					if (m->send(r) < 0) {
 						q->sync_unref();
 						break;

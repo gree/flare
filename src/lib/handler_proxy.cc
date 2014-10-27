@@ -84,12 +84,12 @@ int handler_proxy::run() {
 			}
 			string key = "";
 			if (q->get_ident() == "proxy_read") {
-				shared_queue_proxy_read r = dynamic_pointer_cast<queue_proxy_read, thread_queue>(q);
+				shared_queue_proxy_read r = boost::dynamic_pointer_cast<queue_proxy_read, thread_queue>(q);
 				if (r) {
 					key = r->get_entry().key;
 				}
 			} else if (q->get_ident() == "proxy_write") {
-				shared_queue_proxy_write r = dynamic_pointer_cast<queue_proxy_write, thread_queue>(q);
+				shared_queue_proxy_write r = boost::dynamic_pointer_cast<queue_proxy_write, thread_queue>(q);
 				if (r) {
 					key = r->get_entry().key;
 				}
@@ -120,10 +120,10 @@ int handler_proxy::_process_queue(shared_thread_queue q) {
 	this->_thread->set_op(q->get_ident());
 
 	if (q->get_ident() == "proxy_read") {
-		shared_queue_proxy_read r = dynamic_pointer_cast<queue_proxy_read, thread_queue>(q);
+		shared_queue_proxy_read r = boost::dynamic_pointer_cast<queue_proxy_read, thread_queue>(q);
 		return r->run(this->_connection);
 	} else if (q->get_ident() == "proxy_write") {
-		shared_queue_proxy_write r = dynamic_pointer_cast<queue_proxy_write, thread_queue>(q);
+		shared_queue_proxy_write r = boost::dynamic_pointer_cast<queue_proxy_write, thread_queue>(q);
 		int noreply_window_limit = this->_cluster->get_noreply_window_limit();
 		if (!r->is_post_proxy() || (r->get_entry().option & storage::option_noreply) || noreply_window_limit <= 0) {
 			return r->run(this->_connection);

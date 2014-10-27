@@ -11,7 +11,6 @@
 #include "key_resolver.h"
 
 using namespace std;
-using namespace boost;
 
 namespace gree {
 namespace flare {

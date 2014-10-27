@@ -24,14 +24,13 @@
 #include "thread_queue.h"
 
 using namespace std;
-using namespace boost;
 
 namespace gree {
 namespace flare {
 
 typedef class thread					thread;
-typedef shared_ptr<thread>		shared_thread;
-typedef weak_ptr<thread>			weak_thread;
+typedef boost::shared_ptr<thread>		shared_thread;
+typedef boost::weak_ptr<thread>			weak_thread;
 
 typedef class thread_pool			thread_pool;
 typedef class thread_handler	thread_handler;

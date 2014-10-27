@@ -153,10 +153,10 @@ namespace test_zookeeper_coordinator {
 		cut_set_current_test_context(context);
 		if (!connuri) return;
 
-		zookeeper_coordinator zc(connuri, (format("localhost:%1%") % i).str());
+		zookeeper_coordinator zc(connuri, (boost::format("localhost:%1%") % i).str());
 		random_nanosleep(100);
 		coordinator::shared_operation operation;
-		if (zc.begin_operation(operation, (format("many_locker_main %1%") % i).str()) == 0) {
+		if (zc.begin_operation(operation, (boost::format("many_locker_main %1%") % i).str()) == 0) {
 			random_nanosleep(1000);
 			zc.end_operation(operation);
 		}
@@ -165,9 +165,9 @@ namespace test_zookeeper_coordinator {
 	void test_many_locker1() {
 		if (!connuri) return;
 
-		thread_group tg;
+		boost::thread_group tg;
 		for (int i = 0; i < 10; i++) {
-			tg.create_thread(bind(&many_locker_main, cut_get_current_test_context(), i));
+			tg.create_thread(boost::bind(&many_locker_main, cut_get_current_test_context(), i));
 		}
 		tg.join_all();
 	}
@@ -175,9 +175,9 @@ namespace test_zookeeper_coordinator {
 	void test_many_locker2() {
 		if (!connuri) return;
 
-		thread_group tg;
+		boost::thread_group tg;
 		for (int i = 0; i < 50; i++) {
-			tg.create_thread(bind(&many_locker_main, cut_get_current_test_context(), i));
+			tg.create_thread(boost::bind(&many_locker_main, cut_get_current_test_context(), i));
 		}
 		tg.join_all();
 	}
@@ -202,7 +202,7 @@ namespace test_zookeeper_coordinator {
 		random_nanosleep(100);
 		for (int i = 0; i < 10; i++) {
 			coordinator::shared_operation operation;
-			if (zc->begin_operation(operation, (format("store_and_restore %1%") % i).str()) == 0) {
+			if (zc->begin_operation(operation, (boost::format("store_and_restore %1%") % i).str()) == 0) {
 				random_nanosleep(1000);
 				cut_assert_equal_int(0, zc->restore_state(input));
 				cut_assert_equal_int(0, zc->store_state(input));
@@ -220,9 +220,9 @@ namespace test_zookeeper_coordinator {
 	void test_store_and_restore() {
 		if (!connuri) return;
 
-		thread_group tg;
+		boost::thread_group tg;
 		for (int i = 0; i < 50; i++) {
-			tg.create_thread(bind(&store_and_restore, cut_get_current_test_context(), i));
+			tg.create_thread(boost::bind(&store_and_restore, cut_get_current_test_context(), i));
 		}
 		tg.join_all();
 	}
@@ -240,7 +240,7 @@ namespace test_zookeeper_coordinator {
 
 		vector<cluster::node> nodes = cl->get_node();
 		for (vector<cluster::node>::iterator it = nodes.begin(); it != nodes.end(); it++) {
-			string s = (format("%1% %2% %3% %4% %5% %6% %7%") % it->node_server_name % it->node_server_port
+			string s = (boost::format("%1% %2% %3% %4% %5% %6% %7%") % it->node_server_name % it->node_server_port
 									% it->node_role % it->node_state % it->node_partition % it->node_balance
 									% it->node_thread_type).str();
 			cout << s << endl;
@@ -260,7 +260,7 @@ namespace test_zookeeper_coordinator {
 		string::const_iterator end = index_servers.end();
 
 		vector<string> v;
-		while (regex_search(start, end, match, e)) {
+		while (boost::regex_search(start, end, match, e)) {
 			v.push_back(match.str(1)+":"+match.str(2));
 			start = match[0].second;
 		}

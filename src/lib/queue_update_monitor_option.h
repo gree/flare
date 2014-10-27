@@ -13,13 +13,12 @@
 #include "thread_queue.h"
 
 using namespace std;
-using namespace boost;
 
 namespace gree {
 namespace flare {
 
 typedef class queue_update_monitor_option queue_update_monitor_option;
-typedef shared_ptr<queue_update_monitor_option> shared_queue_update_monitor_option;
+typedef boost::shared_ptr<queue_update_monitor_option> shared_queue_update_monitor_option;
 
 /**
  *	monitor option update queue class

@@ -95,7 +95,7 @@ int flared::startup(int argc, char **argv) {
 		}
 	}
 
-	if (this->_setup_signal_handler() < 0) {
+	if (this->_startup_signal_handler() < 0) {
 		return -1;
 	}
 
@@ -203,7 +203,7 @@ int flared::run() {
 	log_notice("entering running loop", 0);
 
 	for (;;) {
-		if (this->_shutdown_request) {
+		if (this->_shutdown_requested) {
 			log_notice("shutdown request accepted -> breaking running loop", 0);
 			log_notice("send shutdown message to index server", 0);
 			this->_server->close(); /* prevent this node from responding */
@@ -296,6 +296,7 @@ int flared::reload() {
 int flared::shutdown() {
 	log_notice("shutting down active, and pool threads...", 0);
 	this->_thread_pool->shutdown();
+	this->_shutdown_signal_handler();
 	log_notice("all threads are successfully shutdown", 0);
 
 	log_notice("closing storage...", 0);

@@ -164,7 +164,7 @@ int flarei::startup(int argc, char **argv) {
 	log_notice("  partition_type:         %s", partition_type.c_str());
 	log_notice("  key_hash_algorithm:     %s", key_hash_algorithm.c_str());
 
-	if (this->_setup_signal_handler() < 0) {
+	if (this->_startup_signal_handler() < 0) {
 		return -1;
 	}
 
@@ -227,7 +227,7 @@ int flarei::run() {
 	log_notice("entering running loop", 0);
 
 	for (;;) {
-		if (this->_shutdown_request) {
+		if (this->_shutdown_requested) {
 			log_notice("shutdown request accepted -> breaking running loop", 0);
 			break;
 		}
@@ -294,6 +294,7 @@ int flarei::reload() {
 int flarei::shutdown() {
 	log_notice("shutting down active, and pool threads...", 0);
 	this->_thread_pool->shutdown();
+	this->_shutdown_signal_handler();
 	log_notice("all threads are successfully shutdown", 0);
 
 	this->_clear_pid();

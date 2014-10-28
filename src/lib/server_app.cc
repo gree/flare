@@ -18,8 +18,8 @@ volatile sig_atomic_t server_app::_sigusr1_flag = 0;
 
 // {{{ ctor/dtor
 server_app::server_app():
-		_shutdown_request(false),
-		_reload_request(false) {
+		_shutdown_requested(false),
+		_reload_requested(false) {
 	
 	// TODO: Added ABORT_IF_FAILURE() macro
 	pthread_mutex_init(&this->_mutex_reload_request, NULL);
@@ -39,7 +39,7 @@ void* server_app::_signal_thread_run(void* p) {
 	int result = 0;
 	sigset_t waitset;
 
-	pthread_detach(pthread_self());
+	//pthread_detach(pthread_self());
 
 	sigemptyset(&waitset);
 	sigaddset(&waitset, SIGTERM);
@@ -64,16 +64,17 @@ void* server_app::_signal_thread_run(void* p) {
 			log_notice(
 					"received signal [%s] -> requesting shutdown",
 					sig == SIGTERM ? "SIGTERM" : "SIGINT");
-			self->_shutdown_request = true;
+			self->_shutdown_requested = true;
 			log_notice("sending [SIGUSR1] to thread_id:%u (main thread)", self->_main_thread_id);
 			pthread_kill(self->_main_thread_id, SIGUSR1);
+			break;
 		} else if (sig == SIGHUP) {
 			log_notice("received signal [SIGHUP] -> requesting reload", 0);
 
-			// _reload_request requries mutex
+			// _reload_requested requires mutex
 			// because main thread read & modify this value atomically.
 			pthread_mutex_lock(&self->_mutex_reload_request);
-			self->_reload_request = true;
+			self->_reload_requested = true;
 			pthread_mutex_unlock(&self->_mutex_reload_request);
 
 			log_notice("sending [SIGUSR1] to thread_id:%u (main thread)", self->_main_thread_id);
@@ -95,9 +96,9 @@ void server_app::_sa_usr1_handler(int sig) {
 }
 
 /**
- *	setup signal handler(s)
+ *	startup signal handler(s)
  */
-int server_app::_setup_signal_handler() {
+int server_app::_startup_signal_handler() {
 	// SIGUSR1
 	struct sigaction sa;
 	memset(&sa, 0, sizeof(sa));
@@ -126,16 +127,28 @@ int server_app::_setup_signal_handler() {
 }
 
 /**
+ *	shutdown signal handler(s)
+ */
+int server_app::_shutdown_signal_handler() {
+	pthread_kill(this->_signal_thread_id, SIGINT);
+	if (pthread_join(this->_signal_thread_id, NULL) != 0) {
+		log_err("failed to join signal handling thread.", 0);
+		return -1;
+	}
+	return 0;
+}
+
+/**
  * reload if reload_request in main loop
  */
 void server_app::_reload_if_requested() {
 	pthread_mutex_lock(&this->_mutex_reload_request);
-	if (this->_reload_request) {
+	if (this->_reload_requested) {
 		log_notice("reloading", 0);
 		this->reload();
 
 		// Reset signal flag
-		this->_reload_request = false;
+		this->_reload_requested = false;
 	}
 	pthread_mutex_unlock(&this->_mutex_reload_request);
 }

@@ -17,8 +17,8 @@ namespace flare {
 class server_app : public app {
 protected:
 	static volatile sig_atomic_t	_sigusr1_flag;
-	volatile bool									_shutdown_request;
-	volatile bool									_reload_request;
+	volatile bool _shutdown_requested;
+	volatile bool _reload_requested;
 	pthread_mutex_t								_mutex_reload_request;
 	pthread_t											_signal_thread_id;
 	pthread_t											_main_thread_id;
@@ -30,7 +30,8 @@ public:
 protected:
 	static void* _signal_thread_run(void*);
 	static void _sa_usr1_handler(int sig);
-	int _setup_signal_handler();
+	int _startup_signal_handler();
+	int _shutdown_signal_handler();
 	void _reload_if_requested();
 	void _sigusr1_flag_check();
 };

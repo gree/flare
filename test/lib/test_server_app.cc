@@ -110,6 +110,23 @@ void test_server_app_sighup_handling() {
 	nanosleep(&t, 0);
 	cut_assert_false(app->get_shutdown_request());
 	cut_assert_true(app->get_reload_request());
+
+	// handler accept SIGHUP multiple times.
+	app->set_shutdown_request(false);
+	app->set_reload_request(false);
+	nanosleep(&t, 0);
+	kill(getpid(), SIGHUP);
+	nanosleep(&t, 0);
+	cut_assert_false(app->get_shutdown_request());
+	cut_assert_true(app->get_reload_request());
+
+	app->set_shutdown_request(false);
+	app->set_reload_request(false);
+	nanosleep(&t, 0);
+	kill(getpid(), SIGHUP);
+	nanosleep(&t, 0);
+	cut_assert_false(app->get_shutdown_request());
+	cut_assert_true(app->get_reload_request());
 }
 
 void test_server_app_sigusr1_handling() {

@@ -8,7 +8,6 @@ compiler:
   - gcc
   - clang
 
-
 addons:
   coverity_scan:
     project:
@@ -41,7 +40,8 @@ before_script:
   - travis_retry ./configure
 
 script:
-  - make
-  - make check && sudo make install
+  - travis_retry make
+  - travis_retry make check
+  - travis_retry sudo make install
   - flare-tests
 

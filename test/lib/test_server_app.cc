@@ -67,58 +67,60 @@ public:
 	}
 };
 
-void test_server_app_signal_thread() {
-	server_app_test app;
-	timespec t = {0, 1000000};
 
-	cut_assert_equal_int(app.startup(0, NULL), 0);
+server_app_test* app;
+timespec t = {0, 1000000};
 
-	app.set_shutdown_request(false);
-	app.set_reload_request(false);
+void setup() {
+	app = new server_app_test();
+	cut_assert_equal_int(app->startup(0, NULL), 0);
+}
+
+void teardown() {
+	cut_assert_equal_int(app->shutdown(), 0);
+	delete app;
+	sigaction(SIGUSR1, NULL, NULL);
+}
+
+void test_server_app_sigterm_handling() {
+	app->set_shutdown_request(false);
+	app->set_reload_request(false);
 	nanosleep(&t, 0);
 	kill(getpid(), SIGTERM);
 	nanosleep(&t, 0);
-	cut_assert_true(app.get_shutdown_request());
-	cut_assert_false(app.get_reload_request());
-	cut_assert_equal_int(app.shutdown_signal_handler(), 0);
+	cut_assert_true(app->get_shutdown_request());
+	cut_assert_false(app->get_reload_request());
+}
 
-	cut_assert_equal_int(app.startup_signal_handler(), 0);
-	app.set_shutdown_request(false);
-	app.set_reload_request(false);
+void test_server_app_sigint_handling() {
+	app->set_shutdown_request(false);
+	app->set_reload_request(false);
 	nanosleep(&t, 0);
 	kill(getpid(), SIGINT);
 	nanosleep(&t, 0);
-	cut_assert_true(app.get_shutdown_request());
-	cut_assert_false(app.get_reload_request());
-	cut_assert_equal_int(app.shutdown_signal_handler(), 0);
+	cut_assert_true(app->get_shutdown_request());
+	cut_assert_false(app->get_reload_request());
+}
 
-	cut_assert_equal_int(app.startup_signal_handler(), 0);
-	app.set_shutdown_request(false);
-	app.set_reload_request(false);
+void test_server_app_sighup_handling() {
+	app->set_shutdown_request(false);
+	app->set_reload_request(false);
 	nanosleep(&t, 0);
 	kill(getpid(), SIGHUP);
 	nanosleep(&t, 0);
-	cut_assert_false(app.get_shutdown_request());
-	cut_assert_true(app.get_reload_request());
-
-	cut_assert_equal_int(app.shutdown(), 0);
+	cut_assert_false(app->get_shutdown_request());
+	cut_assert_true(app->get_reload_request());
 }
 
 void test_server_app_sigusr1_handling() {
-	server_app_test app;
-	cut_assert_equal_int(app.startup(0, NULL), 0);
-
-	app.set_sigusr1_flag(0);
+	app->set_sigusr1_flag(0);
 	kill(getpid(), SIGUSR1);
-	cut_assert_equal_int(app.get_sigusr1_flag(), 1);
+	cut_assert_equal_int(app->get_sigusr1_flag(), 1);
 
-	app.set_sigusr1_flag(0);
+	app->set_sigusr1_flag(0);
 	kill(getpid(), SIGUSR1);
 	kill(getpid(), SIGUSR1);
-	cut_assert_equal_int(app.get_sigusr1_flag(), 1);
-
-	cut_assert_equal_int(app.shutdown(), 0);
+	cut_assert_equal_int(app->get_sigusr1_flag(), 1);
 }
-
 
 }

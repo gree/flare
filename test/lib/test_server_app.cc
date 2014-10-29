@@ -21,10 +21,10 @@ public:
 	}
 
 	int shutdown() {
-		if (server_app::shutdown()) {
+		if (server_app::shutdown() < 0) {
 			return -1;
 		}
-		if (this->_shutdown_signal_handler()) {
+		if (this->_shutdown_signal_handler() < 0) {
 			return -1;
 		}
 		return 0;

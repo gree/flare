@@ -20,14 +20,6 @@ void* thread_run(void* p) {
 	thread* tmp = (thread*)p;
 	shared_thread t = tmp->get_shared_thread();
 
-	// signal mask
-	sigset_t ss;
-	sigfillset(&ss);
-	sigdelset(&ss, SIGUSR1);
-	if (pthread_sigmask(SIG_SETMASK, &ss, NULL) < 0) {
-		log_err("pthread_sigmask() failed: %s (%d)", util::strerror(errno), errno);
-	}
-
 	bool is_pool = false;
 	thread::shutdown_request r;
 	do {
@@ -125,9 +117,12 @@ thread::~thread() {
 
 // {{{ public methods
 /**
- *	preparing thread (creating thread and make it wait for signal)
+ *	preparing thread (creating thread)
  *
- *	(should be called from parent thread)
+ *  A created thread inherit the signal mask of the creating(= main) thread.
+ *  Expect all signals without SIGUSR1 are blocked.
+ *
+ *	This method should be called from parent thread.
  */
 int thread::startup(weak_thread myself, int stack_size) {
 	this->_myself = myself;

@@ -20,12 +20,11 @@ volatile sig_atomic_t server_app::_sigusr1_flag = 0;
 server_app::server_app():
 		_shutdown_requested(false),
 		_reload_requested(false) {
-	
-	// TODO: Added ABORT_IF_FAILURE() macro
 	pthread_mutex_init(&this->_mutex_reload_request, NULL);
 }
 
 server_app::~server_app() {
+	pthread_mutex_destroy(&this->_mutex_reload_request);
 }
 // }}}
 
@@ -39,16 +38,10 @@ void* server_app::_signal_thread_run(void* p) {
 	int result = 0;
 	sigset_t waitset;
 
-	//pthread_detach(pthread_self());
-
 	sigemptyset(&waitset);
 	sigaddset(&waitset, SIGTERM);
 	sigaddset(&waitset, SIGINT);
 	sigaddset(&waitset, SIGHUP);
-
-	if (pthread_sigmask(SIG_BLOCK, &waitset, NULL) < 0) {
-		log_err("pthread_sigmask() failed: %s (%d)", util::strerror(errno), errno);
-	}
 
 	for (;;) {
 		result = sigwait(&waitset, &sig);
@@ -96,10 +89,11 @@ void server_app::_sa_usr1_handler(int sig) {
 }
 
 /**
- *	startup signal handler(s)
+ * startup signal handler(s)
+ * the main threads should call this method on setup.
  */
 int server_app::_startup_signal_handler() {
-	// SIGUSR1
+	// SIGUSR1 handler
 	struct sigaction sa;
 	memset(&sa, 0, sizeof(sa));
 	sa.sa_handler = server_app::_sa_usr1_handler;
@@ -110,14 +104,16 @@ int server_app::_startup_signal_handler() {
 	log_info("set up sigusr1 handler", 0);
 
 	// signal mask
+	// Every threads should not block SIGUSR1.
 	sigset_t ss;
 	sigfillset(&ss);
 	sigdelset(&ss, SIGUSR1);
-	if (sigprocmask(SIG_SETMASK, &ss, NULL) < 0) {
-		log_err("sigprocmask() failed: %s (%d)", util::strerror(errno), errno);
+	if (pthread_sigmask(SIG_SETMASK, &ss, NULL) < 0) {
+		log_err("pthread_sigmask() failed: %s (%d)", util::strerror(errno), errno);
 	}
 	
-	// start the signal handling thread
+	// Start the signal handling thread.
+	// The created thread inherit the signal mask of the creating(= main) thread.
 	if (pthread_create(&this->_signal_thread_id, NULL, server_app::_signal_thread_run, (void*)this) != 0) {
 		log_err("failed to create signal handling thread.", 0);
 		return -1;

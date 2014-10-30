@@ -42,6 +42,8 @@ before_script:
 
 script:
   - make
+  - EXCLUDE_TESTS="--exclude-file=test_storage_tch.so --exclude-file=test_storage_tcb.so --exclude-file=test_storage_kch.so" make check
+  - TARGET_TESTS="-t test_storage_tch -t test_storage_kch -t test_storage_tcb" make check
   - make check && sudo make install
   - flare-tests
 

@@ -12,16 +12,11 @@
 #include <iostream>
 #include <sstream>
 #include <string>
-#include <iterator>
 #include <vector>
 #include <map>
-#include <queue>
 
 #include <boost/algorithm/string.hpp>
-#include <boost/lexical_cast.hpp>
-#include <boost/regex.hpp>
 #include <boost/shared_ptr.hpp>
-#include <boost/tokenizer.hpp>
 
 #include <unistd.h>
 #include <stdio.h>

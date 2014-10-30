@@ -21,21 +21,10 @@ public:
 	}
 
 	int shutdown() {
-		if (server_app::shutdown() < 0) {
-			return -1;
-		}
 		if (this->_shutdown_signal_handler() < 0) {
 			return -1;
 		}
 		return 0;
-	}
-
-	int startup_signal_handler() {
-		return server_app::_startup_signal_handler();
-	}
-
-	int shutdown_signal_handler() {
-		return server_app::_shutdown_signal_handler();
 	}
 
 	void set_shutdown_request(bool a) {

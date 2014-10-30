@@ -13,13 +13,12 @@
 #include <boost/shared_ptr.hpp>
 
 using std::string;
-using boost::shared_ptr;
 
 namespace gree {
 namespace flare {
 
 typedef class connection connection;
-typedef shared_ptr<connection> shared_connection;
+typedef boost::shared_ptr<connection> shared_connection;
 
 /**
  *	network connection class

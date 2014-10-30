@@ -16,13 +16,12 @@
 #include "op.h"
 
 using namespace std;
-using namespace boost;
 
 namespace gree {
 namespace flare {
 
 typedef class queue_proxy_read queue_proxy_read;
-typedef shared_ptr<queue_proxy_read> shared_queue_proxy_read;
+typedef boost::shared_ptr<queue_proxy_read> shared_queue_proxy_read;
 
 /**
  *	proxy read queue class

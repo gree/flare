@@ -149,7 +149,7 @@ int op_meta::_parse_text_client_parameters(int& partition_size, storage::hash_al
 					log_warning("no partition size value (required)", 0);
 					throw -1;
 				}
-				partition_size = lexical_cast<int>(q);
+				partition_size = boost::lexical_cast<int>(q);
 				log_debug("meta: key=[%s] value=[%d]", "partition-size", partition_size);
 			} else if (strcmp(q, "key-hash-algorithm") == 0) {
 				i += util::next_word(p+i, q, sizeof(q));
@@ -171,7 +171,7 @@ int op_meta::_parse_text_client_parameters(int& partition_size, storage::hash_al
 					log_warning("no hint value (required)", 0);
 					throw -1;
 				}
-				key_resolver_modular_hint = lexical_cast<int>(q);
+				key_resolver_modular_hint = boost::lexical_cast<int>(q);
 				log_debug("meta: key=[%s] value=[%d]", "partition-modular-hint", key_resolver_modular_hint);
 			} else if (strcmp(q, "partition-modular-virtual") == 0) {
 				i += util::next_digit(p+i, q, sizeof(q));
@@ -179,7 +179,7 @@ int op_meta::_parse_text_client_parameters(int& partition_size, storage::hash_al
 					log_warning("no hint value (required)", 0);
 					throw -1;
 				}
-				key_resolver_modular_virtual = lexical_cast<int>(q);
+				key_resolver_modular_virtual = boost::lexical_cast<int>(q);
 				log_debug("meta: key=[%s] value=[%d]", "partition-modular-virtual", key_resolver_modular_virtual);
 			} else {
 				log_warning("unknown meta key [%s]", q);
@@ -190,7 +190,7 @@ int op_meta::_parse_text_client_parameters(int& partition_size, storage::hash_al
 			if (q[0] != '\0') {
 				log_notice("bogus parameter: %s -> ignoring", q);
 			}
-		} catch (bad_lexical_cast e) {
+		} catch (boost::bad_lexical_cast e) {
 			log_warning("invalid digit [%s]", e.what());
 		} catch (int e) {
 			if (e == -2) {

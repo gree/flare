@@ -77,9 +77,9 @@ int op_incr::_parse_text_server_parameters() {
 			throw -1;
 		}
 		try {
-			this->_value = lexical_cast<uint64_t>(q);
+			this->_value = boost::lexical_cast<uint64_t>(q);
 			log_debug("storing value [%llu]", this->_value);
-		} catch (bad_lexical_cast e) {
+		} catch (boost::bad_lexical_cast e) {
 			log_debug("invalid value [%s]", e.what());
 			throw -1;
 		}
@@ -235,13 +235,13 @@ int op_incr::_parse_text_client_parameters(storage::entry& e) {
 	log_debug("normalized resonse: %s", p);
 
 	try {
-		(void)lexical_cast<uint64_t>(p);
+		(void)boost::lexical_cast<uint64_t>(p);
 		shared_byte data(new uint8_t[strlen(p)+1]);
 		strcpy(reinterpret_cast<char*>(data.get()), p);
 		e.data = data;
 		e.size = strlen(p);
 		this->_result = result_stored;
-	} catch (bad_lexical_cast e) {
+	} catch (boost::bad_lexical_cast e) {
 		// then try to parse response as always
 		*(p+len) = '\n'; *(p+len+1) = '\0';
 		if (this->_parse_text_response(p, this->_result, this->_result_message) < 0) {

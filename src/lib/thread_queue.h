@@ -17,13 +17,12 @@
 #include "connection.h"
 
 using namespace std;
-using namespace boost;
 
 namespace gree {
 namespace flare {
 
 typedef class thread_queue thread_queue;
-typedef shared_ptr<thread_queue> shared_thread_queue;
+typedef boost::shared_ptr<thread_queue> shared_thread_queue;
 
 /**
  *	thread queue base class
@@ -32,10 +31,10 @@ class thread_queue {
 protected:
 	string							_ident;
 	bool								_sync;
-	pthread_mutex_t			_mutex_sync;
-	pthread_cond_t			_cond_sync;
 	int									_sync_ref_count;
 	bool								_success;
+	pthread_mutex_t			_mutex_sync;
+	pthread_cond_t			_cond_sync;
 	time_t							_timestamp;
 
 public:

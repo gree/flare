@@ -116,7 +116,7 @@ namespace test_op_dump
 	void set_dummy_items(storage_simple_map& st, int item_num = 1, int item_size = 1)
 	{
 		for (int i = 0; i < item_num; i++) {
-			string key = string("key") + lexical_cast<string>(i);
+			string key = string("key") + boost::lexical_cast<string>(i);
 			ostringstream value;
 			for (int j = 0; j < item_size; j++) {
 				value << "o";

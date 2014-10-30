@@ -33,7 +33,6 @@
 #endif
 
 using namespace std;
-using namespace boost;
 
 namespace gree {
 namespace flare {
@@ -74,7 +73,7 @@ public:
 
 	inline uint64_t add(uint64_t n){
 #if defined(HAVE_LIBBOOST_ATOMIC)
-		return val.fetch_add(n,memory_order_relaxed);
+		return val.fetch_add(n,boost::memory_order_relaxed);
 #elif defined(HAVE_SYNC_FETCH_AND_ADD)
 		return __sync_fetch_and_add(&val,n);
 #elif defined(__GNUC__) && defined (__x86_64__)
@@ -108,7 +107,7 @@ typedef unsigned char uint8_t;
 #endif // HAVE_STDINT_H
 
 extern const char* const line_delimiter;
-typedef shared_array<uint8_t> shared_byte;
+typedef boost::shared_array<uint8_t> shared_byte;
 
 /**
  *	utility class (misc methods)
@@ -168,9 +167,9 @@ unsigned int util::next_digit(const char* src, char* dst, unsigned int dst_len) 
 
 bool util::is_unsigned_integer_string(const string s) {
 	const char *pattern = "\\A[0-9]+\\z";
-	const regex e(pattern);
+	const boost::regex e(pattern);
 
-	return regex_match(s, e);
+	return boost::regex_match(s, e);
 }
 
 template<class T> string util::vector_join(vector<T> list, string glue) {
@@ -193,7 +192,7 @@ template<class T> vector<T> util::vector_split(string s, string sep) {
 	boost::char_separator<char> separator(sep.c_str());
 	tokenizer token_list(s, separator);
 	for (tokenizer::iterator it = token_list.begin(); it != token_list.end(); it++) {
-		r.push_back(lexical_cast<T>(*it));
+		r.push_back(boost::lexical_cast<T>(*it));
 	}
 
 	return r;

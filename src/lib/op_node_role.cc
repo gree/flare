@@ -80,9 +80,9 @@ int op_node_role::_parse_text_server_parameters() {
 			throw -1;
 		}
 		try {
-			this->_node_server_port = lexical_cast<int>(q);
+			this->_node_server_port = boost::lexical_cast<int>(q);
 			log_debug("storing node server port [%d]", this->_node_server_port);
-		} catch (bad_lexical_cast e) {
+		} catch (boost::bad_lexical_cast e) {
 			log_debug("invalid node server port (port=%s)", q);
 			throw -1;
 		}
@@ -105,9 +105,9 @@ int op_node_role::_parse_text_server_parameters() {
 		n += util::next_digit(p+n, q, sizeof(q));
 		if (q[0]) {
 			try {
-				this->_node_balance = lexical_cast<int>(q);
+				this->_node_balance = boost::lexical_cast<int>(q);
 				log_debug("storing node balance [%d]", this->_node_balance);
-			} catch (bad_lexical_cast e) {
+			} catch (boost::bad_lexical_cast e) {
 				log_debug("invalid node balance (balance=%s)", q);
 				throw -1;
 			}
@@ -117,9 +117,9 @@ int op_node_role::_parse_text_server_parameters() {
 		n += util::next_digit(p+n, q, sizeof(q));
 		if (q[0]) {
 			try {
-				this->_node_partition = lexical_cast<int>(q);
+				this->_node_partition = boost::lexical_cast<int>(q);
 				log_debug("storing node partition [%d]", this->_node_partition);
-			} catch (bad_lexical_cast e) {
+			} catch (boost::bad_lexical_cast e) {
 				log_debug("invalid node partition (partition=%s)", q);
 				throw -1;
 			}

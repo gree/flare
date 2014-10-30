@@ -149,7 +149,7 @@ int handler_monitor::_process_queue(shared_thread_queue q) {
 	this->_thread->set_op(q->get_ident());
 
 	if (q->get_ident() == "update_monitor_option") {
-		shared_queue_update_monitor_option r = dynamic_pointer_cast<queue_update_monitor_option, thread_queue>(q);
+		shared_queue_update_monitor_option r = boost::dynamic_pointer_cast<queue_update_monitor_option, thread_queue>(q);
 		log_debug("updating monitor option [threshold: %d -> %d, interval:%d -> %d, read_timeout:%d -> %d]", this->_monitor_threshold, r->get_monitor_threshold(), this->_monitor_interval, r->get_monitor_interval(), this->_monitor_read_timeout, r->get_monitor_read_timeout());
 		this->_monitor_threshold = r->get_monitor_threshold();
 		this->_monitor_interval = r->get_monitor_interval();
@@ -159,7 +159,7 @@ int handler_monitor::_process_queue(shared_thread_queue q) {
 			log_info("node seems realy down -> skip processing queue (node_server_name=%s, node_server_port=%d, ident=%s)", this->_node_server_name.c_str(), this->_node_server_port, q->get_ident().c_str());
 			return -1;
 		}
-		shared_queue_node_sync r = dynamic_pointer_cast<queue_node_sync, thread_queue>(q);
+		shared_queue_node_sync r = boost::dynamic_pointer_cast<queue_node_sync, thread_queue>(q);
 		return r->run(this->_connection);
 	} else {
 		log_warning("unknown queue [ident=%s] -> skip processing", q->get_ident().c_str());

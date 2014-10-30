@@ -22,6 +22,8 @@ int connection_tcp::read_timeout = 10*60*1000;
 connection_tcp::connection_tcp(const std::string& host, int port):
 		connection(),
 		_addr_family(AF_INET),
+		_addr_inet(),
+		_addr_unix(),
 		_host(host),
 		_port(port),
 		_path(""),
@@ -45,6 +47,7 @@ connection_tcp::connection_tcp(int sock, struct sockaddr_in addr):
 		connection(),
 		_addr_family(AF_INET),
 		_addr_inet(addr),
+		_addr_unix(),
 		_host(""),
 		_port(-1),
 		_path(""),
@@ -67,6 +70,7 @@ connection_tcp::connection_tcp(int sock, struct sockaddr_in addr):
 connection_tcp::connection_tcp(int sock, struct sockaddr_un addr):
 		connection(),
 		_addr_family(AF_UNIX),
+		_addr_inet(),
 		_addr_unix(addr),
 		_host(""),
 		_port(-1),

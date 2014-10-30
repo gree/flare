@@ -20,7 +20,10 @@ namespace flare {
 thread_queue::thread_queue():
 		_ident(""),
 		_sync(false),
-		_sync_ref_count(0) {
+		_sync_ref_count(0),
+		_success(false) {
+	pthread_mutex_init(&this->_mutex_sync, NULL);
+	pthread_cond_init(&this->_cond_sync, NULL);
 	this->_timestamp = stats_object->get_timestamp();
 }
 
@@ -32,6 +35,8 @@ thread_queue::thread_queue(string ident):
 		_sync(false),
 		_sync_ref_count(0),
 		_success(false) {
+	pthread_mutex_init(&this->_mutex_sync, NULL);
+	pthread_cond_init(&this->_cond_sync, NULL);
 	this->_timestamp = stats_object->get_timestamp();
 }
 
@@ -39,6 +44,8 @@ thread_queue::thread_queue(string ident):
  *	dtor for thread_queue
  */
 thread_queue::~thread_queue() {
+	pthread_mutex_destroy(&this->_mutex_sync);
+	pthread_cond_destroy(&this->_cond_sync);
 }
 // }}}
 
@@ -77,11 +84,7 @@ int thread_queue::sync() {
  *	add sync ref count
  */
 int thread_queue::sync_ref() {
-	if (this->_sync == false) {
-		this->_sync = true;
-		pthread_mutex_init(&this->_mutex_sync, NULL);
-		pthread_cond_init(&this->_cond_sync, NULL);
-	}
+	this->_sync = true;
 
 	pthread_mutex_lock(&this->_mutex_sync);
 	this->_sync_ref_count++;

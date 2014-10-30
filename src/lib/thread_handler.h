@@ -11,7 +11,6 @@
 #include "thread.h"
 
 using namespace std;
-using namespace boost;
 
 namespace gree {
 namespace flare {

@@ -165,24 +165,24 @@ int flarei::startup(int argc, char **argv) {
 	}
 	if (meta_variables.count("partition-modular-hint") > 0) {
 		try {
-			partition_modular_hint = lexical_cast<int>(meta_variables["partition-modular-hint"]);
-		} catch (bad_lexical_cast& e) {
+			partition_modular_hint = boost::lexical_cast<int>(meta_variables["partition-modular-hint"]);
+		} catch (boost::bad_lexical_cast& e) {
 			log_warning("invalid partition-modular-hint: %s", meta_variables["partition-modular-hint"].c_str());
 			return -1;
 		}
 	}
 	if (meta_variables.count("partition-modular-virtual") > 0) {
 		try {
-			partition_modular_virtual = lexical_cast<int>(meta_variables["partition-modular-virtual"]);
-		} catch (bad_lexical_cast& e) {
+			partition_modular_virtual = boost::lexical_cast<int>(meta_variables["partition-modular-virtual"]);
+		} catch (boost::bad_lexical_cast& e) {
 			log_warning("invalid partition-modular-virtual: %s", meta_variables["partition-modular-virtual"].c_str());
 			return -1;
 		}
 	}
 	if (meta_variables.count("partition-size") > 0) {
 		try {
-			partition_size = lexical_cast<int>(meta_variables["partition-size"]);
-		} catch (bad_lexical_cast& e) {
+			partition_size = boost::lexical_cast<int>(meta_variables["partition-size"]);
+		} catch (boost::bad_lexical_cast& e) {
 			log_warning("invalid partition-size: %s", meta_variables["partition-size"].c_str());
 			return -1;
 		}

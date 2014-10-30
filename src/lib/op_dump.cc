@@ -69,9 +69,9 @@ int op_dump::_parse_text_server_parameters() {
 		int n = util::next_digit(p, q, sizeof(q));
 		if (q[0]) {
 			try {
-				this->_wait = lexical_cast<int>(q);
+				this->_wait = boost::lexical_cast<int>(q);
 				log_debug("storing wait [%d]", this->_wait);
-			} catch (bad_lexical_cast e) {
+			} catch (boost::bad_lexical_cast e) {
 				log_debug("invalid wait (wait=%s)", q);
 				throw -1;
 			}
@@ -85,9 +85,9 @@ int op_dump::_parse_text_server_parameters() {
 		n += util::next_digit(p+n, q, sizeof(q));
 		if (q[0]) {
 			try {
-				this->_partition = lexical_cast<int>(q);
+				this->_partition = boost::lexical_cast<int>(q);
 				log_debug("storing partition [%d]", this->_partition);
-			} catch (bad_lexical_cast e) {
+			} catch (boost::bad_lexical_cast e) {
 				log_debug("invalid partition (partition=%s)", q);
 				throw -1;
 			}
@@ -97,9 +97,9 @@ int op_dump::_parse_text_server_parameters() {
 		n += util::next_digit(p+n, q, sizeof(q));
 		if (q[0]) {
 			try {
-				this->_partition_size = lexical_cast<int>(q);
+				this->_partition_size = boost::lexical_cast<int>(q);
 				log_debug("storing parition_size [%d]", this->_partition_size);
-			} catch (bad_lexical_cast e) {
+			} catch (boost::bad_lexical_cast e) {
 				log_debug("invalid partition_size (partition_size=%s)", q);
 				throw -1;
 			}
@@ -113,9 +113,9 @@ int op_dump::_parse_text_server_parameters() {
 		n += util::next_digit(p+n, q, sizeof(q));
 		if (q[0]) {
 			try {
-				this->_bwlimit = lexical_cast<int>(q);
+				this->_bwlimit = boost::lexical_cast<int>(q);
 				log_debug("storing bwlimit [%d]", this->_bwlimit);
-			} catch (bad_lexical_cast e) {
+			} catch (boost::bad_lexical_cast e) {
 				log_debug("invalid bwlimit (bwlimit=%s)", q);
 				throw -1;
 			}

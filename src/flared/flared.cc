@@ -16,6 +16,12 @@
 #endif
 #include "show_node.h"
 
+#include "storage_tch.h"
+#include "storage_tcb.h"
+#ifdef HAVE_LIBKYOTOCABINET
+#include "storage_kch.h"
+#endif
+
 namespace gree {
 namespace flare {
 

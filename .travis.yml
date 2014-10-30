@@ -39,6 +39,7 @@ before_install:
 before_script:
   - travis_retry ./autogen.sh
   - travis_retry ./configure
+  - sed -i "s/--keep-opening-modules//g" test/run-tests.sh
 
 script:
   - make

@@ -22,6 +22,7 @@ using namespace std;
 using namespace gree::flare;
 
 namespace test_handler_proxy {
+	static const int wait_retry_num = 10;
 	void sa_usr1_handler(int sig) {
 		// just ignore
 	}
@@ -108,16 +109,35 @@ namespace test_handler_proxy {
 		return t;
 	}
 
-	void proxy_request(shared_thread t, shared_thread_queue q, string response = "") {
+	void proxy_request(shared_thread t, shared_thread_queue q, string response) {
+		int retry = 0;
 		q->sync_ref();
 		t->enqueue(q);
-		if (cs.size() == 0) {
+		while (cs.size() == 0 && retry < wait_retry_num) {
 			cs = s->wait();
+			if (cs.size() > 0) {
+				break;
+			}
+			// server->wait() might fail by system call interruption
+			// when it is called immediately after server->listen()
+			usleep(100 * 1000); // 100 msecs
+			retry++;
 		}
-		if (response.length() > 0 && cs.size() > 0) {
+		if (retry == wait_retry_num) {
+			// server failed to establish connection in 1 seconds due to a critical reason
+			// so abort test case
+			cut_fail("failed to wait for connection establishment");
+		}
+		if (response.length() > 0) {
 			cs[0]->writeline(response.c_str());
 		}
 		q->sync();
+	}
+
+	void proxy_request_to_down_node(shared_thread t, shared_thread_queue q) {
+		q->sync_ref();
+		t->enqueue(q);
+		q->sync();  // this will return by failure of connection_tcp->open() at handler_proxy
 	}
 
 	void test_proxy_write_to_master() {
@@ -146,7 +166,7 @@ namespace test_handler_proxy {
 		shared_thread t = start_handler_proxy(cluster::role_proxy, cluster::state_active);
 
 		shared_queue_proxy_write q = get_proxy_queue_write();
-		proxy_request(t, q);
+		proxy_request(t, q, ""); // proxy request should be skip so no response
 
 		cut_assert_equal_boolean(false, q->is_success());
 		cut_assert_equal_int(op::result_none, q->get_result());
@@ -180,7 +200,7 @@ namespace test_handler_proxy {
 		s->close();
 
 		shared_queue_proxy_write q = get_proxy_queue_write();
-		proxy_request(t, q);
+		proxy_request_to_down_node(t, q);
 
 		cut_assert_equal_boolean(false, q->is_success());
 		cut_assert_equal_int(op::result_none, q->get_result());
@@ -213,7 +233,7 @@ namespace test_handler_proxy {
 		shared_thread t = start_handler_proxy(cluster::role_proxy, cluster::state_active);
 
 		shared_queue_proxy_read q = get_proxy_queue_read();
-		proxy_request(t, q);
+		proxy_request(t, q, "");  // proxy request should be skipped so no reponse
 
 		cut_assert_equal_boolean(false, q->is_success());
 		cut_assert_equal_int(op::result_none, q->get_result());
@@ -247,7 +267,7 @@ namespace test_handler_proxy {
 		s->close();
 
 		shared_queue_proxy_read q = get_proxy_queue_read();
-		proxy_request(t, q);
+		proxy_request_to_down_node(t, q);
 
 		cut_assert_equal_boolean(false, q->is_success());
 		cut_assert_equal_int(op::result_none, q->get_result());
@@ -257,12 +277,10 @@ namespace test_handler_proxy {
 	// active -> down -> active
 	void test_proxy_state_machine_for_node_state() {
 		shared_thread t = start_handler_proxy(cluster::role_master, cluster::state_active);
-		log_notice("debug 1", 0);
 
 		shared_queue_proxy_write q = get_proxy_queue_write();
 		proxy_request(t, q, "STORED");
 		cut_assert_equal_boolean(true, q->is_success());
-		log_notice("debug 2", 0);
 
 		cl->set_node("localhost", port, cluster::role_master, cluster::state_down);
 		for (int i = 0; i < cs.size(); i++) {
@@ -271,23 +289,19 @@ namespace test_handler_proxy {
 		s->close();
 		delete s;
 		s = NULL;
-		log_notice("debug 3", 0);
 
 		q = get_proxy_queue_write();
-		proxy_request(t, q);
+		proxy_request_to_down_node(t, q);
 		cut_assert_equal_boolean(false, q->is_success());
-		log_notice("debug 4", 0);
 
 		cl->set_node("localhost", port, cluster::role_master, cluster::state_active);
 		s = new server();
 		s->listen(port);
 		cs.clear();
-		log_notice("debug 5", 0);
 
 		q = get_proxy_queue_write();
 		proxy_request(t, q, "STORED");
 		cut_assert_equal_boolean(true, q->is_success());
-		log_notice("debug 6", 0);
 	}
 
 	// proxy -> master

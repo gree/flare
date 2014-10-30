@@ -23,7 +23,7 @@ if test -n "$CUTTER"; then
 		mkdir $LOG_DIR
 	fi
 	LOG_FILE=$LOG_DIR/cutter_report.xml
-	CUTTER_ARGS="--keep-opening-modules --xml-report=$LOG_FILE -v v"
+	CUTTER_ARGS="--keep-opening-modules --xml-report=$LOG_FILE -v v $TARGET_TESTS $EXCLUDE_TESTS"
 	CUTTER_WRAPPER=""
 	if test x"$CUTTER_DEBUG" = x"yes"; then
 	    CUTTER_WRAPPER="$TOP_DIR/libtool --mode=execute gdb --args"

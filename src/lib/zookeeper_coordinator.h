@@ -10,6 +10,8 @@
 
 #include <zookeeper/zookeeper.h>
 #include <boost/tuple/tuple.hpp>
+#include <boost/lexical_cast.hpp>
+#include <boost/regex.hpp>
 #include <vector>
 #include <deque>
 

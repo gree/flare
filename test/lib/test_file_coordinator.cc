@@ -38,15 +38,19 @@ namespace test_file_coordinator {
 #endif
 	}
 
-	void test_scheme() {
+	void test_scheme_dot() {
 		file_coordinator fc_dot("file://./");
 		check(fc_dot, "file", "", "", ".", 0, "/");
-		file_coordinator fc_local("file://./var/run/flare/flare.xml");
-		check(fc_local, "file", "", "", ".", 0, "/var/run/flare/flare.xml");
-		file_coordinator fc_emptyhost("file:///var/run/flare/flare.xml");
-
-		check(fc_emptyhost, "file", "", "", "", 0, "/var/run/flare/flare.xml");
 	}
 
+	void test_scheme_local() {
+		file_coordinator fc_local("file://./var/run/flare/flare.xml");
+		check(fc_local, "file", "", "", ".", 0, "/var/run/flare/flare.xml");
+	}
+
+	void test_scheme_emptyhost() {
+		file_coordinator fc_emptyhost("file:///var/run/flare/flare.xml");
+		check(fc_emptyhost, "file", "", "", "", 0, "/var/run/flare/flare.xml");
+	}
 
 }

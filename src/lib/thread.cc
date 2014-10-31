@@ -224,6 +224,15 @@ int thread::run() {
 		return -1;
 	}
 
+	// signal mask
+	// Every threads should not block SIGUSR1.
+	sigset_t ss;
+	sigfillset(&ss);
+	sigdelset(&ss, SIGUSR1);
+	if (pthread_sigmask(SIG_SETMASK, &ss, NULL) < 0) {
+		log_err("pthread_sigmask() failed: %s (%d)", util::strerror(errno), errno);
+	}
+
 	pthread_mutex_lock(&this->_mutex_running);
 	this->_running = true;
 	pthread_mutex_unlock(&this->_mutex_running);

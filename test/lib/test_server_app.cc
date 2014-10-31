@@ -13,6 +13,9 @@ namespace test_server_app {
 class server_app_test : public server_app {
 public:
 	int startup(int argc, char **argv) {
+		if (server_app::startup(argc, argv) < 0) {
+			return -1;
+		};
 		this->_main_thread_id = pthread_self();
 		if (this->_startup_signal_handler() < 0) {
 			return -1;
@@ -24,6 +27,9 @@ public:
 		if (this->_shutdown_signal_handler() < 0) {
 			return -1;
 		}
+		if (server_app::shutdown() < 0) {
+			return -1;
+		};
 		return 0;
 	}
 
@@ -59,8 +65,13 @@ public:
 
 server_app_test* app;
 timespec t = {0, 1000000};
+struct sigaction	prev_sigusr1_action;
 
 void setup() {
+	if (sigaction(SIGUSR1, NULL, &prev_sigusr1_action) < 0) {
+		log_err("sigaction for %d failed: %s (%d)", SIGUSR1, util::strerror(errno), errno);
+	}
+
 	app = new server_app_test();
 	cut_assert_equal_int(app->startup(0, NULL), 0);
 }
@@ -69,14 +80,19 @@ void teardown() {
 	cut_assert_equal_int(app->shutdown(), 0);
 	delete app;
 	sigaction(SIGUSR1, NULL, NULL);
+
+	if (sigaction(SIGUSR1, &prev_sigusr1_action, NULL) < 0) {
+		log_err("sigaction for %d failed: %s (%d)", SIGUSR1, util::strerror(errno), errno);
+		return;
+	}
 }
 
 void test_server_app_sigterm_handling() {
 	app->set_shutdown_request(false);
 	app->set_reload_request(false);
-	nanosleep(&t, 0);
+	nanosleep(&t, NULL);
 	kill(getpid(), SIGTERM);
-	nanosleep(&t, 0);
+	nanosleep(&t, NULL);
 	cut_assert_true(app->get_shutdown_request());
 	cut_assert_false(app->get_reload_request());
 }
@@ -84,9 +100,9 @@ void test_server_app_sigterm_handling() {
 void test_server_app_sigint_handling() {
 	app->set_shutdown_request(false);
 	app->set_reload_request(false);
-	nanosleep(&t, 0);
+	nanosleep(&t, NULL);
 	kill(getpid(), SIGINT);
-	nanosleep(&t, 0);
+	nanosleep(&t, NULL);
 	cut_assert_true(app->get_shutdown_request());
 	cut_assert_false(app->get_reload_request());
 }
@@ -94,26 +110,26 @@ void test_server_app_sigint_handling() {
 void test_server_app_sighup_handling() {
 	app->set_shutdown_request(false);
 	app->set_reload_request(false);
-	nanosleep(&t, 0);
+	nanosleep(&t, NULL);
 	kill(getpid(), SIGHUP);
-	nanosleep(&t, 0);
+	nanosleep(&t, NULL);
 	cut_assert_false(app->get_shutdown_request());
 	cut_assert_true(app->get_reload_request());
 
 	// handler accept SIGHUP multiple times.
 	app->set_shutdown_request(false);
 	app->set_reload_request(false);
-	nanosleep(&t, 0);
+	nanosleep(&t, NULL);
 	kill(getpid(), SIGHUP);
-	nanosleep(&t, 0);
+	nanosleep(&t, NULL);
 	cut_assert_false(app->get_shutdown_request());
 	cut_assert_true(app->get_reload_request());
 
 	app->set_shutdown_request(false);
 	app->set_reload_request(false);
-	nanosleep(&t, 0);
+	nanosleep(&t, NULL);
 	kill(getpid(), SIGHUP);
-	nanosleep(&t, 0);
+	nanosleep(&t, NULL);
 	cut_assert_false(app->get_shutdown_request());
 	cut_assert_true(app->get_reload_request());
 }

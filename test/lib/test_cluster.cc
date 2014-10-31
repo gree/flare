@@ -15,20 +15,22 @@
 
 using namespace gree::flare;
 
-void sa_usr1_handler(int sig) {
-		log_notice("received signal [SIGUSR1]", 0);
-}
 
 namespace test_cluster
 {
+	void sa_usr1_handler(int sig) {
+		// just ignore
+	}
+
 	const std::string tmp_dir = "tmp";
 	thread_pool *tp;
+	struct sigaction prev_sigusr1_action;
 
 	void setup() {
 		struct sigaction sa;
 		memset(&sa, 0, sizeof(sa));
 		sa.sa_handler = sa_usr1_handler;
-		if (sigaction(SIGUSR1, &sa, NULL) < 0) {
+		if (sigaction(SIGUSR1, &sa, &prev_sigusr1_action) < 0) {
 			log_err("sigaction for %d failed: %s (%d)", SIGUSR1, util::strerror(errno), errno);
 		}
 
@@ -42,8 +44,16 @@ namespace test_cluster
 	}
 
 	void teardown() {
+		tp->shutdown();
 		delete tp;
+		delete stats_object;
+		singleton<logger>::instance().close();
 		cut_remove_path(tmp_dir.c_str(), NULL);
+
+		if (sigaction(SIGUSR1, &prev_sigusr1_action, NULL) < 0) {
+			log_err("sigaction for %d failed: %s (%d)", SIGUSR1, util::strerror(errno), errno);
+			return;
+		}
 	}
 
 	struct cluster_test : public cluster

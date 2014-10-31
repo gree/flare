@@ -254,15 +254,16 @@ int op_dump::_parse_text_client_parameters() {
 			delete[] p;
 			log_notice("found delimiter, dump completed (items=%d)", items);
 			break;
-		} else if (strcmp(p, "SERVER_ERROR\n") == 0) {
-			delete[] p;
-			log_err("something is going wrong, dump uncomplete (items=%d)", items);
-			return -1;
 		}
 
 		char q[BUFSIZ];
 		int n = util::next_word(p, q, sizeof(q));
-		if (strcmp(q, "VALUE") != 0) {
+		if (strcmp(q, "SERVER_ERROR") == 0) {
+			log_err("something is going wrong. dump uncomplete (item=%d)", items);
+			this->_parse_text_response(p, this->_result, this->_result_message);
+			delete[] p;
+			return -1;
+		} else if (strcmp(q, "VALUE") != 0) {
 			log_debug("invalid token (q=%s)", q);
 			delete[] p;
 			return -1;

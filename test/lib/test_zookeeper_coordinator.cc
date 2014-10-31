@@ -86,6 +86,7 @@ namespace test_zookeeper_coordinator {
 			zoo_delete(zhandle, "/index", -1);
 			zookeeper_close(zhandle);
 			free(connuri);
+			singleton<logger>::instance().close();
 		}
 		delete stats_object;
 	}

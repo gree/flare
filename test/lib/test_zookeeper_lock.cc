@@ -47,6 +47,7 @@ namespace test_zookeeper_lock {
 			zookeeper_close(zhandle);
 		}
 		log_debug("----------------------------------------------------------------", 0);
+		singleton<logger>::instance().close();
 	}
 
 	void random_nanosleep(int limit_nsec = 1000000) {

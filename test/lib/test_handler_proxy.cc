@@ -23,6 +23,7 @@ using namespace gree::flare;
 
 namespace test_handler_proxy {
 	static const int wait_retry_num = 10;
+
 	void sa_usr1_handler(int sig) {
 		// just ignore
 	}

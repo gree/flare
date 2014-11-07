@@ -5,8 +5,8 @@
  *
  *	$Id$
  */
-#ifndef	__STORAGE_LISTENER_H__
-#define __STORAGE_LISTENER_H__
+#ifndef	STORAGE_LISTENER_H
+#define STORAGE_LISTENER_H
 
 namespace gree {
 namespace flare {
@@ -19,5 +19,5 @@ public:
 }	// namespace flare
 }	// namespace gree
 
-#endif	// __STORAGE_LISTENER_H__
+#endif	// STORAGE_LISTENER_H
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

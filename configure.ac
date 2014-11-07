@@ -36,6 +36,7 @@ AC_CHECK_LIB(boost_program_options, main, [], [AC_CHECK_LIB(boost_program_option
 AC_CHECK_LIB(boost_regex, main, [], [AC_CHECK_LIB(boost_regex-mt, main, [], [AC_MSG_ERROR(boost_regex not found)])])
 AC_CHECK_LIB(boost_serialization, main, [], [AC_CHECK_LIB(boost_serialization-mt, main, [], [AC_MSG_ERROR(boost_serialization not found)])])
 AC_CHECK_LIB(boost_thread, main, [], [AC_CHECK_LIB(boost_thread-mt, main, [], [AC_MSG_ERROR(boost_thread not found)])])
+AC_CHECK_LIB(boost_system, main, [], [AC_CHECK_LIB(boost_system-mt, main, [], [AC_MSG_ERROR(boost_system not found)])])
 AC_CHECK_LIB(pthread, pthread_create, [], [AC_MSG_ERROR(libpthread not found)])
 AC_CHECK_LIB(z, main, [], [AC_MSG_ERROR(zlib not found)])
 AC_CHECK_LIB(hashkit, libhashkit_murmur, [], [AC_MSG_ERROR(libhashkit not found)])
@@ -159,8 +160,9 @@ if test $ac_strerror_r = yes; then
 	AC_DEFINE([HAVE_GNU_STRERROR_R], [], [have gnu specific strerror_r()])
 fi
 
-
 # And others...
+
+AC_CHECK_FUNC(clock_gettime,[AC_DEFINE([HAVE_CLOCK_GETTIME], [], [have clock_gettime or not])])
 
 # Debug options
 

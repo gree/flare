@@ -67,6 +67,10 @@ private:
 	int					_thread_pool_size;
 	uint32_t 		_proxy_prior_netmask;
 	uint32_t 		_max_total_thread_queue;
+	bool				_time_watcher_enabled;
+	uint32_t 		_time_watcher_polling_interval_msec;
+	uint32_t 		_storage_access_watch_threshold_warn_msec;
+	uint32_t 		_storage_access_watch_threshold_ping_ng_msec;
 public:
 	static const int default_back_log = 30;
 	static const int default_index_server_port = 12120;
@@ -93,6 +97,7 @@ public:
 	static const int default_thread_pool_size = 5;
 	static const uint32_t default_proxy_prior_netmask = 0x00;
 	static const uint32_t default_max_total_thread_queue = 0;				// unlimited
+	static const uint32_t default_time_watcher_polling_interval_msec = 0; // disabled
 
 	ini_option();
 	virtual ~ini_option();
@@ -147,6 +152,10 @@ public:
 	int get_thread_pool_size() { return this->_thread_pool_size; };
 	uint32_t get_proxy_prior_netmask() { return this->_proxy_prior_netmask; };
 	uint32_t get_max_total_thread_queue() { return this->_max_total_thread_queue; };
+	bool get_time_watcher_enabled() { return this->_time_watcher_enabled; };
+	uint32_t get_time_watcher_polling_interval_msec() { return this->_time_watcher_polling_interval_msec; };
+	uint32_t get_storage_access_watch_threshold_warn_msec() { return this->_storage_access_watch_threshold_warn_msec; };
+	uint32_t get_storage_access_watch_threshold_ping_ng() { return this->_storage_access_watch_threshold_ping_ng_msec; };
 
 private:
 	int _setup_cli_option(program_options::options_description& option);

@@ -179,7 +179,7 @@ namespace test_op_dump
 		storage_simple_map st("", 0, 0);
 		thread_pool tp(1);
 		test_op_dump op(c, &cl, &st);
-		op.set_thread(shared_thread(new thread(&tp)));
+		op.set_thread(shared_thread(new gree::flare::thread(&tp)));
 
 		set_dummy_items(st, 5, 5);
 		cut_assert_equal_int(0, op._parse_text_server_parameters());
@@ -194,7 +194,7 @@ namespace test_op_dump
 		storage_simple_map st("", 0, 0);
 		thread_pool tp(1);
 		test_op_dump op(c, &cl, &st);
-		op.set_thread(shared_thread(new thread(&tp)));
+		op.set_thread(shared_thread(new gree::flare::thread(&tp)));
 
 		set_dummy_items(st, 1, 10);
 		cut_assert_equal_int(0, op._parse_text_server_parameters());
@@ -210,7 +210,7 @@ namespace test_op_dump
 		storage_simple_map st("", 0, 0);
 		thread_pool tp(1);
 		test_op_dump op(c, &cl, &st);
-		op.set_thread(shared_thread(new thread(&tp)));
+		op.set_thread(shared_thread(new gree::flare::thread(&tp)));
 
 		set_dummy_items(st, 1, 1024);
 		cut_assert_equal_int(0, op._parse_text_server_parameters());
@@ -226,7 +226,7 @@ namespace test_op_dump
 		storage_simple_map st("", 0, 0);
 		thread_pool tp(1);
 		test_op_dump op(c, &cl, &st);
-		op.set_thread(shared_thread(new thread(&tp)));
+		op.set_thread(shared_thread(new gree::flare::thread(&tp)));
 
 		set_dummy_items(st, 1, 1024);
 		cut_assert_equal_int(0, op._parse_text_server_parameters());
@@ -242,7 +242,7 @@ namespace test_op_dump
 		storage_simple_map st("", 0, 0);
 		thread_pool tp(1);
 		test_op_dump op(c, &cl, &st);
-		op.set_thread(shared_thread(new thread(&tp)));
+		op.set_thread(shared_thread(new gree::flare::thread(&tp)));
 
 		set_dummy_items(st, 1, 1024);
 		cut_assert_equal_int(0, op._parse_text_server_parameters());

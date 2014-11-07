@@ -12,7 +12,7 @@
 #include "ini_option.h"
 #include "stats_node.h"
 #include "status_node.h"
-#include "storage_listener.h"
+#include "storage_access_info.h"
 
 namespace gree {
 namespace flare {
@@ -20,7 +20,9 @@ namespace flare {
 /**
  *	flared application class
  */
-class flared : public app, public storage_listener {
+class flared :
+	public app,
+	public storage_listener {
 private:
 	server*				_server;
 	thread_pool*	_thread_pool;

@@ -15,6 +15,8 @@
 # include "handler_mysql_replication.h"
 #endif
 #include "show_node.h"
+#include "time_watcher.h"
+#include "time_watcher_observer.h"
 
 #include "storage_tch.h"
 #include "storage_tcb.h"
@@ -96,6 +98,8 @@ flared::~flared() {
 
 	delete status_object;
 	status_object = NULL;
+
+	delete time_watcher_object;
 }
 // }}}
 
@@ -224,6 +228,15 @@ int flared::startup(int argc, char **argv) {
 	handler_alarm* h_alarm = new handler_alarm(th_alarm);
 	th_alarm->trigger(h_alarm);
 
+	time_watcher_object = new time_watcher();
+	time_watcher_observer::set_threshold_warn_msec(ini_option_object().get_storage_access_watch_threshold_warn_msec());
+	time_watcher_observer::set_threshold_ping_ng_msec(ini_option_object().get_storage_access_watch_threshold_ping_ng());
+	time_watcher_observer::set_storage_listener(this);
+	if (ini_option_object().get_time_watcher_enabled()) {
+		time_watcher_object->start(ini_option_object().get_time_watcher_polling_interval_msec());
+	}
+
+
 #ifdef ENABLE_MYSQL_REPLICATION
 	if (ini_option_object().is_mysql_replication()) {
 		shared_thread th_mysql_replication = this->_thread_pool->get(thread_pool::thread_type_mysql_replication);
@@ -337,6 +350,13 @@ int flared::reload() {
 
 	// noreply_window_limit
 	this->_cluster->set_noreply_window_limit(ini_option_object().get_noreply_window_limit());
+
+	time_watcher_object->stop();
+	time_watcher_observer::set_threshold_warn_msec(ini_option_object().get_storage_access_watch_threshold_warn_msec());
+	time_watcher_observer::set_threshold_ping_ng_msec(ini_option_object().get_storage_access_watch_threshold_ping_ng());
+	if (ini_option_object().get_time_watcher_enabled()) {
+		time_watcher_object->start(ini_option_object().get_time_watcher_polling_interval_msec());
+	}
 
 	log_notice("process successfully reloaded", 0);
 

@@ -34,7 +34,7 @@ namespace test_thread_pool
 		thread_pool_test pool;
 		cut_assert_equal_int(1, pool._index.fetch());
 		//	Put a dummy thread (Type 0, ID 1, ensuring collision) in the global map
-		shared_thread dummy(new thread(&pool));
+		shared_thread dummy(new gree::flare::thread(&pool));
 		dummy->setup(0, pool._index.fetch());
 		pool._global_map[0][dummy->get_id()] = dummy;
 		// Test
@@ -49,7 +49,7 @@ namespace test_thread_pool
 		thread_pool_test pool;
 		cut_assert_equal_int(1, pool._index.fetch());
 		//	Put a dummy thread (Type 0, ID 1, ensuring collision) in the global map
-		shared_thread dummy(new thread(&pool));
+		shared_thread dummy(new gree::flare::thread(&pool));
 		dummy->setup(0, pool._index.fetch());
 		pool._global_map[0][dummy->get_id()] = dummy;
 		// Test

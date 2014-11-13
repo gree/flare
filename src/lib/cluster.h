@@ -31,11 +31,14 @@
 #include "thread_pool.h"
 #include "key_resolver.h"
 #include "coordinator.h"
+#include "proxy_event_listener.h"
 
 using namespace std;
 
 namespace gree {
 namespace flare {
+
+typedef boost::shared_ptr<proxy_event_listener> shared_proxy_event_listener;
 
 typedef class op_proxy_write op_proxy_write;
 typedef class op_proxy_read op_proxy_read;
@@ -189,6 +192,9 @@ protected:
 	uint32_t							_proxy_prior_netmask;
 	uint32_t							_max_total_thread_queue;
 
+	list<shared_proxy_event_listener>			_proxy_event_listeners;
+	vector<shared_proxy_event_listener>		_fixed_proxy_event_listeners;
+
 public:
 	cluster(thread_pool* tp, string server_name, int server_port);
 	virtual ~cluster();
@@ -214,6 +220,7 @@ public:
 	int shutdown_node();
 	int request_down_node(string node_server_name, int node_server_port);
 	int request_up_node(string node_server_name, int node_server_port);
+	int add_proxy_event_listener(shared_proxy_event_listener listener);
 	proxy_request pre_proxy_read(op_proxy_read* op, storage::entry& e, void* parameter, shared_queue_proxy_read& q);
 	proxy_request pre_proxy_write(op_proxy_write* op, shared_queue_proxy_write& q, uint64_t generic_value = 0);
 	proxy_request post_proxy_write(op_proxy_write* op, bool sync = false);
@@ -241,6 +248,7 @@ public:
 	int set_monitor_read_timeout(int monitor_read_timeout);
 	int get_partition_size() { return this->_partition_size; };
 	int set_partition_size(int partition_size) { this->_partition_size = partition_size; return 0; };
+	int get_node_partition_map_size();
 	int set_proxy_concurrency(int proxy_concurrency) { this->_proxy_concurrency = proxy_concurrency; return 0; };
 	int get_reconstruction_interval() { return this->_reconstruction_interval; };
 	int set_reconstruction_interval(int reconstruction_interval) { this->_reconstruction_interval = reconstruction_interval; return 0; };

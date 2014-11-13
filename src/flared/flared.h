@@ -9,13 +9,18 @@
 #define	FLARED_H
 
 #include "app.h"
+#include "cluster_replication.h"
 #include "ini_option.h"
 #include "stats_node.h"
 #include "status_node.h"
 #include "storage_access_info.h"
 
+using boost::shared_ptr;
+
 namespace gree {
 namespace flare {
+
+typedef shared_ptr<cluster_replication> shared_cluster_replication;
 
 /**
  *	flared application class
@@ -31,6 +36,7 @@ private:
 #ifdef ENABLE_MYSQL_REPLICATION
 	server*				_mysql_replication_server;
 #endif
+	shared_cluster_replication	_cluster_replication;
 
 public:
 	flared();

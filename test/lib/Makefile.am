@@ -2,9 +2,12 @@ if WITH_CUTTER
 noinst_LTLIBRARIES =	\
 	test_binary_header.la \
 	test_cluster.la \
+	test_cluster_replication.la \
 	test_connection_tcp.la \
 	test_connection_iostream.la \
 	test_handler_proxy.la \
+	test_handler_cluster_replication.la \
+	test_handler_dump_replication.la \
 	test_storage.la \
 	test_storage_entry.la \
 	test_storage_tcb.la \
@@ -44,6 +47,7 @@ noinst_LTLIBRARIES =	\
 	test_op_touch.la	\
 	test_op_verbosity.la	\
 	test_op_version.la	\
+	test_queue_forward_query.la	\
 	test_thread_pool.la	\
 	test_time_util.la \
 	test_util.la	\
@@ -76,8 +80,11 @@ LIBS =									\
 test_binary_header_la_SOURCES	= test_binary_header.cc connection_iostream.cc
 test_connection_tcp_la_SOURCES	= test_connection_tcp.cc common_connection_tests.cc
 test_cluster_la_SOURCES	= test_cluster.cc
+test_cluster_replication_la_SOURCES	= test_cluster_replication.cc connection_iostream.cc mock_cluster.cc mock_storage.cc
 test_connection_iostream_la_SOURCES	= test_connection_iostream.cc common_connection_tests.cc connection_iostream.cc
-test_handler_proxy_la_SOURCES	= test_handler_proxy.cc mock_cluster.h
+test_handler_proxy_la_SOURCES	= test_handler_proxy.cc mock_cluster.cc
+test_handler_cluster_replication_la_SOURCES	= test_handler_cluster_replication.cc
+test_handler_dump_replication_la_SOURCES	= test_handler_dump_replication.cc mock_cluster.cc mock_storage.cc
 test_storage_la_SOURCES	= test_storage.cc
 test_storage_entry_la_SOURCES	= test_storage_entry.cc
 test_storage_tcb_la_SOURCES	= test_storage_tcb.cc common_storage_tests.cc
@@ -92,7 +99,7 @@ test_op_append_la_SOURCES	= test_op_append.cc connection_iostream.cc
 test_op_cas_la_SOURCES	= test_op_cas.cc connection_iostream.cc
 test_op_decr_la_SOURCES	= test_op_decr.cc connection_iostream.cc
 test_op_delete_la_SOURCES	= test_op_delete.cc connection_iostream.cc
-test_op_dump_la_SOURCES	= test_op_dump.cc connection_iostream.cc
+test_op_dump_la_SOURCES	= test_op_dump.cc connection_iostream.cc mock_storage.cc
 test_op_dump_key_la_SOURCES	= test_op_dump_key.cc connection_iostream.cc
 test_op_error_la_SOURCES	= test_op_error.cc connection_iostream.cc
 test_op_flush_all_la_SOURCES	= test_op_flush_all.cc connection_iostream.cc
@@ -120,6 +127,7 @@ test_op_stats_la_SOURCES	= test_op_stats.cc connection_iostream.cc
 test_op_touch_la_SOURCES	= test_op_touch.cc connection_iostream.cc
 test_op_verbosity_la_SOURCES	= test_op_verbosity.cc connection_iostream.cc
 test_op_version_la_SOURCES	= test_op_version.cc connection_iostream.cc
+test_queue_forward_query_la_SOURCES	= test_queue_forward_query.cc connection_iostream.cc
 test_thread_pool_la_SOURCES	= test_thread_pool.cc
 test_time_util_la_SOURCES	= test_time_util.cc
 test_util_la_SOURCES	= test_util.cc

@@ -557,13 +557,12 @@ int zookeeper_lock::_reset_lock() {
 
 int zookeeper_lock::_assure_session_connected() {
 	pthread_mutex_lock(&(this->_mutex_session_state));
-	session_state s = this->_session_state;
-	while (s != session_state_active && s != session_state_finished) {
+	while (this->_session_state != session_state_active && this->_session_state != session_state_finished) {
 		log_notice("not connected [%s] - %s", this->_path.c_str(), this->_message.c_str());
 		pthread_cond_wait(&this->_cond_session_state, &this->_mutex_session_state);	
 	}
 	pthread_mutex_unlock(&(this->_mutex_session_state));
-	return (s == session_state_active)?0:-1;
+	return (this->_session_state == session_state_active)?0:-1;
 }
 
 void zookeeper_lock::_lock_watcher_fn(zhandle_t* zh, int type, int state,

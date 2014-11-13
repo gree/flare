@@ -55,6 +55,11 @@ vector<string> show_node::lines() {
 	l.PUSH_BACK_STRING_WITH_STREAM("thread_pool_size:       " << ini_option_object().get_thread_pool_size());
 	l.PUSH_BACK_STRING_WITH_STREAM("proxy_prior_netmask:    " << ini_option_object().get_proxy_prior_netmask());
 	l.PUSH_BACK_STRING_WITH_STREAM("max_total_thread_queue: " << ini_option_object().get_max_total_thread_queue());
+	l.PUSH_BACK_STRING_WITH_STREAM("cluster_replication:    " << ini_option_object().is_cluster_replication());
+	l.PUSH_BACK_STRING_WITH_STREAM("cluster_replication_server_name: " << ini_option_object().get_cluster_replication_server_name());
+	l.PUSH_BACK_STRING_WITH_STREAM("cluster_replication_server_port: " << ini_option_object().get_cluster_replication_server_port());
+	l.PUSH_BACK_STRING_WITH_STREAM("cluster_replication_concurrency: " << ini_option_object().get_cluster_replication_concurrency());
+	l.PUSH_BACK_STRING_WITH_STREAM("cluster_replication_sync: " << ini_option_object().get_cluster_replication_sync());
 
 	return l;
 }

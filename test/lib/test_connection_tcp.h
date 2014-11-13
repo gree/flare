@@ -102,7 +102,9 @@ namespace test_connection_tcp
 		sockaddr_in addr;
 		socklen_t addrlen = sizeof(addr);
 		int nsfd = accept(instance._sfd, (sockaddr*)&addr, &addrlen);
-		send(nsfd, instance._output.data(), instance._output.size(), MSG_DONTWAIT);
+		if (instance._output.size() > 0) {
+			send(nsfd, instance._output.data(), instance._output.size(), MSG_DONTWAIT);
+		}
 		while(instance._running) { sleep(1); }
 		pthread_exit(NULL);
 	}

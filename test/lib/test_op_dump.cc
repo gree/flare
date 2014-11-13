@@ -8,7 +8,7 @@
 
 #include "test_op.h"
 #include "connection_iostream.h"
-#include "storage_simple_map.h"
+#include "mock_storage.h"
 
 #include <app.h>
 #include <op_dump.h>
@@ -113,7 +113,7 @@ namespace test_op_dump
 		cut_assert_equal_int(5, op._bwlimit);
 	}
 
-	void set_dummy_items(storage_simple_map& st, int item_num = 1, int item_size = 1)
+	void set_dummy_items(mock_storage& st, int item_num = 1, int item_size = 1)
 	{
 		for (int i = 0; i < item_num; i++) {
 			string key = string("key") + boost::lexical_cast<string>(i);
@@ -121,7 +121,7 @@ namespace test_op_dump
 			for (int j = 0; j < item_size; j++) {
 				value << "o";
 			}
-			st.set(key, value.str(), 0);
+			st.set_helper(key, value.str(), 0);
 		}
 	}
 
@@ -176,7 +176,7 @@ namespace test_op_dump
 		shared_connection c(new connection_sstream("\r\n"));
 		connection_sstream& cstr = dynamic_cast<connection_sstream&>(*c);
 		cluster cl(NULL, "", 0);
-		storage_simple_map st("", 0, 0);
+		mock_storage st("", 0, 0);
 		thread_pool tp(1);
 		test_op_dump op(c, &cl, &st);
 		op.set_thread(shared_thread(new gree::flare::thread(&tp)));
@@ -191,7 +191,7 @@ namespace test_op_dump
 	{
 		shared_connection c(new connection_sstream(" 1000000\r\n"));
 		cluster cl(NULL, "", 0);
-		storage_simple_map st("", 0, 0);
+		mock_storage st("", 0, 0);
 		thread_pool tp(1);
 		test_op_dump op(c, &cl, &st);
 		op.set_thread(shared_thread(new gree::flare::thread(&tp)));
@@ -207,7 +207,7 @@ namespace test_op_dump
 	{
 		shared_connection c(new connection_sstream(" 0 -1 0 1\r\n"));
 		cluster cl(NULL, "", 0);
-		storage_simple_map st("", 0, 0);
+		mock_storage st("", 0, 0);
 		thread_pool tp(1);
 		test_op_dump op(c, &cl, &st);
 		op.set_thread(shared_thread(new gree::flare::thread(&tp)));
@@ -223,7 +223,7 @@ namespace test_op_dump
 	{
 		shared_connection c(new connection_sstream(" 2000000 -1 0 1\r\n"));
 		cluster cl(NULL, "", 0);
-		storage_simple_map st("", 0, 0);
+		mock_storage st("", 0, 0);
 		thread_pool tp(1);
 		test_op_dump op(c, &cl, &st);
 		op.set_thread(shared_thread(new gree::flare::thread(&tp)));
@@ -239,7 +239,7 @@ namespace test_op_dump
 	{
 		shared_connection c(new connection_sstream(" 100 -1 0 1\r\n"));
 		cluster cl(NULL, "", 0);
-		storage_simple_map st("", 0, 0);
+		mock_storage st("", 0, 0);
 		thread_pool tp(1);
 		test_op_dump op(c, &cl, &st);
 		op.set_thread(shared_thread(new gree::flare::thread(&tp)));

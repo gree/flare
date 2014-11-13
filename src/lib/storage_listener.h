@@ -6,7 +6,7 @@
  *	$Id$
  */
 #ifndef	STORAGE_LISTENER_H
-#define STORAGE_LISTENER_H
+#define	STORAGE_LISTENER_H
 
 namespace gree {
 namespace flare {

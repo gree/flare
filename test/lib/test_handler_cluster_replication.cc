@@ -142,7 +142,6 @@ namespace test_handler_cluster_replication {
 
 		// assert
 		for (int i = 0; i < 5; i++) {
-			cut_assert_equal_int(4 - i, stats_object->get_total_thread_queue());
 			char *p, *q;
 			cs[0]->readline(&p);
 			cs[0]->readline(&q);

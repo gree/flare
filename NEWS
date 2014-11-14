@@ -1,3 +1,25 @@
+* [2014/11/14] 1.2.0 release
+
+ * feature updates
+   - Added storage access time watching feature
+   - Replication over cluster
+
+ * bug fixes
+   - Avoid to close the already closed socket.
+   - Fix bwlimit when creating new partition
+   - Fix initial value of epoll socket
+   - Fix pthread_cond_wait() in zookeeper_lock::_assure_session_connected()
+   - Fix resource leak of server socket
+   - Fix some initialization
+   - Fix the race condition in thread class
+   - Fix zookeeper_lock::_assure_session_connected()
+   - Fixed socket condition add_epoll_socket and add_kqueue_socket
+   - Modified include guards to fit them to the C++ standard naming convention.
+   - Skip proxy when destination node is down
+
+ * others
+   - Support TravisCI
+
 * [2014/09/01] 1.1.1 release
 
  * bug fixes

@@ -15,10 +15,10 @@
 #include "status_node.h"
 #include "storage_access_info.h"
 
-using boost::shared_ptr;
-
 namespace gree {
 namespace flare {
+
+using boost::shared_ptr;
 
 typedef shared_ptr<cluster_replication> shared_cluster_replication;
 

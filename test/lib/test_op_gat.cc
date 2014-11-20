@@ -123,9 +123,9 @@ namespace test_op_gat
 	void test_send_text_result_not_found() {
 		shared_connection c(new connection_sstream(std::string()));
 		test_op_gat op(c);
-		cut_assert_equal_int(0, op._send_text_result(op::result_not_found, NULL));
-		cut_assert_equal_string("NOT_FOUND\r\n",
-				static_cast<const connection_sstream&>(*c).get_output().c_str());
+		const char* expected_msg = "NOT_FOUND\r\n";
+		cut_assert_equal_int(strlen(expected_msg), op._send_text_result(op::result_not_found, NULL));
+		cut_assert_equal_string(expected_msg, static_cast<const connection_sstream&>(*c).get_output().c_str());
 	}
 
 	void teardown()

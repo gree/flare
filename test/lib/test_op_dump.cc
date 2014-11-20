@@ -140,13 +140,13 @@ namespace test_op_dump
 	}
 
 	void run_server_test(test_op_dump& op, int item_num, int item_size, int wait = 0, int bwlimit = 0,
-		                   int sleep_precision = 1, int expected = 0)
+		                   int sleep_precision = 1)
 	{
 		static const long one_sec = 1000000L;
 		struct timeval start_tv, end_tv;
 
 		gettimeofday(&start_tv, NULL);
-		cut_assert_equal_int(expected, op._run_server());
+		op._run_server();
 		gettimeofday(&end_tv, NULL);
 
 		if (wait == 0 && bwlimit == 0) {
@@ -199,7 +199,7 @@ namespace test_op_dump
 		set_dummy_items(st, 1, 10);
 		cut_assert_equal_int(0, op._parse_text_server_parameters());
 		cut_assert_equal_int(1000000, op._wait);
-		cut_assert_equal_int(0, op._bwlimit);
+		cut_assert_equal_int(0, op._bwlimitter.get_bwlimit());
 		run_server_test(op, 1, 10, 1000000, 0, 100000);
 	}
 
@@ -215,7 +215,7 @@ namespace test_op_dump
 		set_dummy_items(st, 1, 1024);
 		cut_assert_equal_int(0, op._parse_text_server_parameters());
 		cut_assert_equal_int(0, op._wait);
-		cut_assert_equal_int(1, op._bwlimit);
+		cut_assert_equal_int(1, op._bwlimitter.get_bwlimit());
 		run_server_test(op, 1, 1024, 0, 1, 100000);
 	}
 
@@ -231,7 +231,7 @@ namespace test_op_dump
 		set_dummy_items(st, 1, 1024);
 		cut_assert_equal_int(0, op._parse_text_server_parameters());
 		cut_assert_equal_int(2000000, op._wait);
-		cut_assert_equal_int(1, op._bwlimit);
+		cut_assert_equal_int(1, op._bwlimitter.get_bwlimit());
 		run_server_test(op, 1, 1024, 2000000, 1, 100000);
 	}
 
@@ -247,7 +247,7 @@ namespace test_op_dump
 		set_dummy_items(st, 1, 1024);
 		cut_assert_equal_int(0, op._parse_text_server_parameters());
 		cut_assert_equal_int(100, op._wait);
-		cut_assert_equal_int(1, op._bwlimit);
+		cut_assert_equal_int(1, op._bwlimitter.get_bwlimit());
 		run_server_test(op, 1, 1024, 100, 1, 100000);
 	}
 

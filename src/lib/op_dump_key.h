@@ -11,6 +11,7 @@
 #include "op.h"
 #include "cluster.h"
 #include "storage.h"
+#include "bwlimitter.h"
 
 using namespace std;
 
@@ -26,17 +27,18 @@ protected:
 	storage*					_storage;
 	int								_partition;
 	int								_partition_size;
+	bwlimitter				_bwlimitter;
 
 public:
 	op_dump_key(shared_connection c, cluster* cl, storage* st);
 	virtual ~op_dump_key();
 
-	virtual int run_client(int partition, int partition_size);
+	virtual int run_client(int partition, int partition_size, uint64_t bwlimit);
 
 protected:
 	virtual int _parse_text_server_parameters();
 	virtual int _run_server();
-	virtual int _run_client(int partition, int partition_size);
+	virtual int _run_client(int partition, int partition_size, uint64_t bwlimit);
 	virtual int _parse_text_client_parameters();
 };
 

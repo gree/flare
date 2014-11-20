@@ -7,6 +7,10 @@
  *
  *	$Id$
  */
+// include order is important to include inttypes.h with __STDC_FORMAT_MACROS defined
+#define __STDC_FORMAT_MACROS
+#include <inttypes.h>
+
 #include "op_dump.h"
 #include "connection_tcp.h"
 
@@ -24,10 +28,7 @@ op_dump::op_dump(shared_connection c, cluster* cl, storage* st):
 		_wait(0),
 		_partition(-1),
 		_partition_size(0),
-		_bwlimit(0),
-		_total_written(0) {
-	this->_prior_tv.tv_sec = 0;
-	this->_prior_tv.tv_usec = 0;
+		_bwlimitter() {
 }
 
 /**
@@ -44,7 +45,7 @@ op_dump::~op_dump() {
 /**
  *	send client request
  */
-int op_dump::run_client(int wait, int partition, int parition_size, int bwlimit) {
+int op_dump::run_client(int wait, int partition, int parition_size, uint64_t bwlimit) {
 	if (this->_run_client(wait, partition, parition_size, bwlimit) < 0) {
 		return -1;
 	}
@@ -113,8 +114,8 @@ int op_dump::_parse_text_server_parameters() {
 		n += util::next_digit(p+n, q, sizeof(q));
 		if (q[0]) {
 			try {
-				this->_bwlimit = boost::lexical_cast<int>(q);
-				log_debug("storing bwlimit [%d]", this->_bwlimit);
+				this->_bwlimitter.set_bwlimit(boost::lexical_cast<uint64_t>(q));
+				log_debug("storing bwlimit [%d]", this->_bwlimitter.get_bwlimit());
 			} catch (boost::bad_lexical_cast e) {
 				log_debug("invalid bwlimit (bwlimit=%s)", q);
 				throw -1;
@@ -143,9 +144,6 @@ int op_dump::_parse_text_server_parameters() {
 }
 
 int op_dump::_run_server() {
-	this->_prior_tv.tv_sec = 0;
-	this->_prior_tv.tv_usec = 0;
-
 	if (!this->_thread) {
 		return this->_send_result(result_server_error, "thread not set");
 	}
@@ -195,8 +193,8 @@ int op_dump::_run_server() {
 
 		// wait
 		long elapsed_usec = 0;
-		if (this->_bwlimit > 0) {
-			elapsed_usec = this->_sleep_for_bwlimit(n);
+		if (this->_bwlimitter.get_bwlimit() > 0) {
+			elapsed_usec = this->_bwlimitter.sleep_for_bwlimit(static_cast<uint64_t>(n));
 		}
 		if (this->_wait > 0 && this->_wait-elapsed_usec > 0) {
 			log_debug("wait for %d usec", this->_wait);
@@ -221,10 +219,10 @@ int op_dump::_run_server() {
 	}
 }
 
-int op_dump::_run_client(int wait, int partition, int partition_size, int bwlimit) {
+int op_dump::_run_client(int wait, int partition, int partition_size, uint64_t bwlimit) {
 	char request[BUFSIZ];
 	if (bwlimit > 0) {
-		snprintf(request, sizeof(request), "dump %d %d %d %d", wait, partition, partition_size, bwlimit);
+		snprintf(request, sizeof(request), "dump %d %d %d %" PRIu64, wait, partition, partition_size, bwlimit);
 	} else {
 		snprintf(request, sizeof(request), "dump %d %d %d", wait, partition, partition_size);	// Backward compatibility.
 	}
@@ -295,44 +293,6 @@ int op_dump::_parse_text_client_parameters() {
 	}
 
 	return 0;
-}
-
-// code from rsync 2.6.9
-long op_dump::_sleep_for_bwlimit(int bytes_written) {
-	if (bytes_written == 0) {
-		return 0;
-	}
-
-	this->_total_written += bytes_written;
-
-	static const long one_sec = 1000000L; // of microseconds in a second.
-
-	long elapsed_usec;
-	struct timeval start_tv;
-	gettimeofday(&start_tv, NULL);
-	if (this->_prior_tv.tv_sec) {
-		elapsed_usec = (start_tv.tv_sec - this->_prior_tv.tv_sec) * one_sec
-			+ (start_tv.tv_usec - this->_prior_tv.tv_usec);
-		this->_total_written -= elapsed_usec * this->_bwlimit / (one_sec/1024);
-		if (this->_total_written < 0) {
-			this->_total_written = 0;
-		}
-	}
-
-	long sleep_usec = this->_total_written * (one_sec/1024) / this->_bwlimit;
-	if (sleep_usec < one_sec / 10) {
-		this->_prior_tv = start_tv;
-		return 0;
-	}
-
-	usleep(sleep_usec);
-
-	gettimeofday(&this->_prior_tv, NULL);
-	elapsed_usec = (this->_prior_tv.tv_sec - start_tv.tv_sec) * one_sec
-		     + (this->_prior_tv.tv_usec - start_tv.tv_usec);
-	this->_total_written = (sleep_usec - elapsed_usec) * this->_bwlimit / (one_sec/1024);
-
-	return elapsed_usec;
 }
 // }}}
 

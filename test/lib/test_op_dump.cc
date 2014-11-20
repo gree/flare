@@ -22,7 +22,7 @@ namespace test_op_dump
 		EXPOSE(op_dump, _wait);
 		EXPOSE(op_dump, _partition);
 		EXPOSE(op_dump, _partition_size);
-		EXPOSE(op_dump, _bwlimit);
+		EXPOSE(op_dump, _bwlimitter);
 	TEST_OP_CLASS_END;
 
 	void setup()
@@ -39,7 +39,7 @@ namespace test_op_dump
 		cut_assert_equal_int(0, op._wait);
 		cut_assert_equal_int(-1, op._partition);
 		cut_assert_equal_int(0, op._partition_size);
-		cut_assert_equal_int(0, op._bwlimit);
+		cut_assert_equal_int(0, op._bwlimitter.get_bwlimit());
 	}
 
 	void test_parse_text_server_parameters_wait()
@@ -50,7 +50,7 @@ namespace test_op_dump
 		cut_assert_equal_int(1, op._wait);
 		cut_assert_equal_int(-1, op._partition);
 		cut_assert_equal_int(0, op._partition_size);
-		cut_assert_equal_int(0, op._bwlimit);
+		cut_assert_equal_int(0, op._bwlimitter.get_bwlimit());
 	}
 
 	void test_parse_text_server_parameters_wait_partition()
@@ -71,7 +71,7 @@ namespace test_op_dump
 			cut_assert_equal_int(1, op._wait);
 			cut_assert_equal_int(-1, op._partition);
 			cut_assert_equal_int(0, op._partition_size);
-			cut_assert_equal_int(0, op._bwlimit);
+			cut_assert_equal_int(0, op._bwlimitter.get_bwlimit());
 		}
 		{
 			// partition > 0 -> partition_size > partition + 1
@@ -81,7 +81,7 @@ namespace test_op_dump
 			cut_assert_equal_int(1, op._wait);
 			cut_assert_equal_int(2, op._partition);
 			cut_assert_equal_int(5, op._partition_size);
-			cut_assert_equal_int(0, op._bwlimit);
+			cut_assert_equal_int(0, op._bwlimitter.get_bwlimit());
 		}
 	}
 
@@ -110,7 +110,7 @@ namespace test_op_dump
 		cut_assert_equal_int(1, op._wait);
 		cut_assert_equal_int(-1, op._partition);
 		cut_assert_equal_int(0, op._partition_size);
-		cut_assert_equal_int(5, op._bwlimit);
+		cut_assert_equal_int(5, op._bwlimitter.get_bwlimit());
 	}
 
 	void set_dummy_items(mock_storage& st, int item_num = 1, int item_size = 1)

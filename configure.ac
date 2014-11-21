@@ -163,6 +163,7 @@ fi
 # And others...
 
 AC_CHECK_FUNC(clock_gettime,[AC_DEFINE([HAVE_CLOCK_GETTIME], [], [have clock_gettime or not])])
+AC_DEFINE([__STDC_FORMAT_MACROS], [1], [enable stdc format macros])
 
 # Debug options
 

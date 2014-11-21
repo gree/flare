@@ -7,12 +7,10 @@
  *
  *	$Id$
  */
-// include order is important to include inttypes.h with __STDC_FORMAT_MACROS defined
-#define __STDC_FORMAT_MACROS
-#include <inttypes.h>
 
 #include "op_dump.h"
 #include "connection_tcp.h"
+#include <inttypes.h>
 
 namespace gree {
 namespace flare {
@@ -192,10 +190,7 @@ int op_dump::_run_server() {
 		}
 
 		// wait
-		long elapsed_usec = 0;
-		if (this->_bwlimitter.get_bwlimit() > 0) {
-			elapsed_usec = this->_bwlimitter.sleep_for_bwlimit(static_cast<uint64_t>(n));
-		}
+		long elapsed_usec = this->_bwlimitter.sleep_for_bwlimit(static_cast<uint64_t>(n));
 		if (this->_wait > 0 && this->_wait-elapsed_usec > 0) {
 			log_debug("wait for %d usec", this->_wait);
 			usleep(this->_wait-elapsed_usec);

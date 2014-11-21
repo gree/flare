@@ -22,7 +22,7 @@ bwlimitter::~bwlimitter() {
 
 // code from rsync 2.6.9
 long bwlimitter::sleep_for_bwlimit(uint64_t bytes_written) {
-	if (bytes_written == 0) {
+	if (this->_bwlimit == 0 || bytes_written == 0) {
 		return 0;
 	}
 

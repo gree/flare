@@ -7,11 +7,9 @@
  *
  *	$Id$
  */
-// include order is important to include inttypes.h with __STDC_FORMAT_MACROS defined
-#define __STDC_FORMAT_MACROS
-#include <inttypes.h>
 
 #include "op_dump_key.h"
+#include <inttypes.h>
 
 namespace gree {
 namespace flare {
@@ -149,9 +147,7 @@ int op_dump_key::_run_server() {
 		if (n < 0) {
 			break;
 		}
-		if (this->_bwlimitter.get_bwlimit() > 0) {
-			this->_bwlimitter.sleep_for_bwlimit(static_cast<uint64_t>(n));
-		}
+		this->_bwlimitter.sleep_for_bwlimit(static_cast<uint64_t>(n));
 	}
 
 	this->_storage->iter_end();

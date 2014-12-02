@@ -7,9 +7,11 @@
  *
  *	$Id$
  */
+
 #include "handler_dump_replication.h"
 #include "connection_tcp.h"
 #include "op_set.h"
+#include <inttypes.h>
 
 namespace gree {
 namespace flare {
@@ -27,9 +29,7 @@ handler_dump_replication::handler_dump_replication(shared_thread t, cluster* cl,
 		_storage(st),
 		_replication_server_name(server_name),
 		_replication_server_port(server_port),
-		_total_written(0) {
-	this->_prior_tv.tv_sec = 0;
-	this->_prior_tv.tv_usec = 0;
+		_bwlimitter() {
 }
 
 /**
@@ -59,9 +59,6 @@ int handler_dump_replication::run() {
 	this->_thread->set_state("execute");
 	this->_thread->set_op("dump");
 
-	this->_prior_tv.tv_sec = 0;
-	this->_prior_tv.tv_usec = 0;
-
 	if (this->_storage->iter_begin() < 0) {
 		log_err("database busy", 0);
 		return -1;
@@ -72,10 +69,10 @@ int handler_dump_replication::run() {
 	int partition = n.node_partition;
 	int partition_size = this->_cluster->get_node_partition_map_size();
 	int wait = this->_cluster->get_reconstruction_interval();
-	int bwlimit = this->_cluster->get_reconstruction_bwlimit();
+	this->_bwlimitter.set_bwlimit(static_cast<u_int64_t>(this->_cluster->get_reconstruction_bwlimit()));
 
 	log_notice("starting dump replication (dest=%s:%d, partition=%d, partition_size=%d, interval=%d, bwlimit=%d)",
-			   this->_replication_server_name.c_str(), this->_replication_server_port, partition, partition_size, wait, bwlimit);
+			   this->_replication_server_name.c_str(), this->_replication_server_port, partition, partition_size, wait, this->_bwlimitter.get_bwlimit());
 	storage::entry e;
 	storage::iteration i;
 	while ((i = this->_storage->iter_next(e.key)) == storage::iteration_continue
@@ -111,10 +108,7 @@ int handler_dump_replication::run() {
 		delete p;
 
 		// wait
-		long elapsed_usec = 0;
-		if (bwlimit > 0) {
-			elapsed_usec = this->_sleep_for_bwlimit(e.size, bwlimit);
-		}
+		long elapsed_usec = this->_bwlimitter.sleep_for_bwlimit(e.size);
 		if (wait > 0 && wait-elapsed_usec > 0) {
 			log_debug("wait for %d usec", wait);
 			usleep(wait-elapsed_usec);
@@ -123,12 +117,12 @@ int handler_dump_replication::run() {
 
 	this->_storage->iter_end();
 	if (!this->_thread->is_shutdown_request()) {
-		log_notice("dump replication completed (dest=%s:%d, partition=%d, partition_size=%d, interval=%d, bwlimit=%d)",
-				   this->_replication_server_name.c_str(), this->_replication_server_port, partition, partition_size, wait, bwlimit);
+		log_notice("dump replication completed (dest=%s:%d, partition=%d, partition_size=%d, interval=%d, bwlimit=%" PRIu64 ")",
+				   this->_replication_server_name.c_str(), this->_replication_server_port, partition, partition_size, wait, this->_bwlimitter.get_bwlimit());
 	} else {
 		this->_thread->set_state("shutdown");
-		log_warning("dump replication interruptted (dest=%s:%d, partition=%d, partition_size=%d, interval=%d, bwlimit=%d)",
-				   this->_replication_server_name.c_str(), this->_replication_server_port, partition, partition_size, wait, bwlimit);
+		log_warning("dump replication interruptted (dest=%s:%d, partition=%d, partition_size=%d, interval=%d, bwlimit=%" PRIu64 ")",
+				   this->_replication_server_name.c_str(), this->_replication_server_port, partition, partition_size, wait, this->_bwlimitter.get_bwlimit());
 	}
 	return 0;
 }
@@ -138,43 +132,6 @@ int handler_dump_replication::run() {
 // }}}
 
 // {{{ private methods
-// code from rsync 2.6.9
-long handler_dump_replication::_sleep_for_bwlimit(int bytes_written, int bwlimit) {
-	if (bytes_written == 0) {
-		return 0;
-	}
-
-	this->_total_written += bytes_written;
-
-	static const long one_sec = 1000000L; // of microseconds in a second.
-
-	long elapsed_usec;
-	struct timeval start_tv;
-	gettimeofday(&start_tv, NULL);
-	if (this->_prior_tv.tv_sec) {
-		elapsed_usec = (start_tv.tv_sec - this->_prior_tv.tv_sec) * one_sec
-			+ (start_tv.tv_usec - this->_prior_tv.tv_usec);
-		this->_total_written -= elapsed_usec * bwlimit / (one_sec/1024);
-		if (this->_total_written < 0) {
-			this->_total_written = 0;
-		}
-	}
-
-	long sleep_usec = this->_total_written * (one_sec/1024) / bwlimit;
-	if (sleep_usec < one_sec / 10) {
-		this->_prior_tv = start_tv;
-		return 0;
-	}
-
-	usleep(sleep_usec);
-
-	gettimeofday(&this->_prior_tv, NULL);
-	elapsed_usec = (this->_prior_tv.tv_sec - start_tv.tv_sec) * one_sec
-		     + (this->_prior_tv.tv_usec - start_tv.tv_usec);
-	this->_total_written = (sleep_usec - elapsed_usec) * bwlimit / (one_sec/1024);
-
-	return elapsed_usec;
-}
 // }}}
 
 }	// namespace flare

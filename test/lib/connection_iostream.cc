@@ -149,7 +149,8 @@ int connection_iostream::write(const char* p, int bufsiz, bool buffered) {
  */
 int connection_iostream::writeline(const char* p) {
 	(*_ostream) << p << line_delimiter;
-	return 0;
+	int len = strlen(p);
+	return len + 2;
 }
 
 string connection_sstream::get_output() const {

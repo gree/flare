@@ -17,6 +17,7 @@ libflare_la_SOURCES = \
 	binary_network_mapping.h \
 	binary_request_header.h \
 	binary_response_header.h \
+	bwlimitter.cc \
 	client.h client.cc \
 	cluster.h cluster.cc \
 	cluster_replication.h cluster_replication.cc \

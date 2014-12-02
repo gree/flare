@@ -14,6 +14,7 @@
 #include "cluster.h"
 #include "storage.h"
 #include "thread_handler.h"
+#include "bwlimitter.h"
 
 using namespace std;
 
@@ -29,9 +30,8 @@ protected:
 	storage*									_storage;
 	const string							_replication_server_name;
 	const int									_replication_server_port;
-	int												_total_written;
 	shared_connection					_connection;
-	struct timeval						_prior_tv;
+	bwlimitter								_bwlimitter;
 
 public:
 	handler_dump_replication(shared_thread t, cluster* cl, storage* st, string server_name, int server_port);

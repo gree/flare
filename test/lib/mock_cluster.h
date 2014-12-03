@@ -38,6 +38,10 @@ public:
 	void dump_node_map();
 	void dump_node_partition_map();
 
+	void set_node_map_version(uint64_t version) {
+		this->_node_map_version = version;
+	};
+
 private:
 	cluster::partition_node _get_partition_node(string server_name, int server_port, int balance);
 };

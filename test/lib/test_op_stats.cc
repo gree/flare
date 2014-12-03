@@ -122,6 +122,61 @@ TEST_PARSE_BINARY_SERVER_PARAMETERS(nodes);
 		cut_assert_equal_int(-1, c->readsize(1, &dummy));
 	}
 
+	void test_parse_text_client_parameters_empty()
+	{
+		shared_connection c(new connection_sstream(std::string("END\r\n")));
+		test_op_stats op(c);
+		stats_results results;
+		cut_assert_equal_int(0, op._parse_text_client_parameters(results));
+		cut_assert_equal_int(0, results.size());
+	}
+
+	void test_parse_text_client_parameters()
+	{
+		shared_connection c(new connection_sstream(std::string(
+			"STAT pid 42661\r\n"
+			"STAT time 1417595953\r\n"
+			"STAT version 1.1.0\r\n"
+			"STAT rusage_user 0.044821\r\n"
+			"STAT connection_structures 0\r\n"
+			"STAT node_map_version 3\r\n"
+			"END\r\n"
+		)));
+		test_op_stats op(c);
+		stats_results results;
+		cut_assert_equal_int(0, op._parse_text_client_parameters(results));
+		cut_assert_equal_int(6, results.size());
+
+		// access by key name
+		{
+			stats_results::const_iterator result = results.find("version");
+			cut_assert_equal_string("version", result->first.c_str());
+			cut_assert_equal_string("1.1.0", result->second.c_str());
+		}
+		{
+			stats_results::const_iterator result = results.find("not_found_key");
+			cut_assert_true(result == results.end());
+		}
+	}
+
+	void test_parse_text_client_parameters_invalid()
+	{
+		{
+			shared_connection c(new connection_sstream(std::string("foo \r\n")));
+			test_op_stats op(c);
+			stats_results results;
+			cut_assert_equal_int(-1, op._parse_text_client_parameters(results));
+		}
+		{
+			shared_connection c(new connection_sstream(std::string(
+				"STAT pid 42661\r\n"
+			)));
+			test_op_stats op(c);
+			stats_results results;
+			cut_assert_equal_int(-1, op._parse_text_client_parameters(results));
+		}
+	}
+
 	void teardown()
 	{
 		delete stats_object;

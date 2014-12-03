@@ -10,6 +10,7 @@
 
 #include <sstream>
 #include <string>
+#include <map>
 
 #include "op.h"
 #include "cluster.h"
@@ -20,6 +21,8 @@ using namespace std;
 
 namespace gree {
 namespace flare {
+
+typedef map<string, string> stats_results;
 
 /**
  *	opcode class (stats)
@@ -44,13 +47,14 @@ protected:
 public:
 	op_stats(shared_connection c);
 	virtual ~op_stats();
+	virtual int run_client(stats_results& results);
 
 protected:
 	virtual int _parse_text_server_parameters();
 	virtual int _parse_binary_request(const binary_request_header&, const char* body);
 	virtual int _run_server();
 
-	virtual int _send_stats(thread_pool* tp, storage* st);
+	virtual int _send_stats(thread_pool* tp, storage* st, cluster* cl);
 	virtual int _send_stats_items();
 	virtual int _send_stats_slabs();
 	virtual int _send_stats_sizes();
@@ -61,6 +65,9 @@ protected:
 
 	virtual int _send_text_result(result r, const char* message = NULL);
 	virtual int _send_binary_result(result r, const char* message = NULL);
+
+	virtual int _run_client();
+	virtual int _parse_text_client_parameters(stats_results& results);
 
 private:
 	stats_type _parse_stats_type(const char* body) const;

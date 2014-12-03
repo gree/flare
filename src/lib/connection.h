@@ -38,6 +38,11 @@ public:
 	virtual int push_back(const char* p, int bufsiz) = 0;
 	virtual int write(const char *p, int bufsiz, bool buffered = false) = 0;
 	virtual int writeline(const char* p) = 0;
+
+	virtual int get_read_timeout() const = 0;
+	virtual int set_read_timeout(int timeout) = 0;
+	virtual int get_connect_retry_limit() const = 0;
+	virtual int set_connect_retry_limit(int retry_limit) = 0;
 };
 
 }	// namespace flare

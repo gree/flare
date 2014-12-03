@@ -35,6 +35,7 @@ private:
 	int					_monitor_threshold;
 	int					_monitor_interval;
 	int					_monitor_read_timeout;
+	int 				_monitor_node_map_version_mismatch_threshold;
 	int					_net_read_timeout;
 	int					_partition_modular_hint;
 	int					_partition_modular_virtual;
@@ -78,6 +79,7 @@ public:
 	int get_monitor_threshold() { return this->_monitor_threshold; };
 	int get_monitor_interval() { return this->_monitor_interval; };
 	int get_monitor_read_timeout() { return this->_monitor_read_timeout; };
+	int get_monitor_node_map_version_mismatch_threshold() { return this->_monitor_node_map_version_mismatch_threshold; }
 	int get_net_read_timeout() { return this->_net_read_timeout; };
 	int get_partition_modular_hint() { return this->_partition_modular_hint; };
 	int get_partition_modular_virtual() { return this->_partition_modular_virtual; };

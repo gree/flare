@@ -120,6 +120,7 @@ int flarei::startup(int argc, char **argv) {
 	log_notice("  monitor_threshold:      %d", ini_option_object().get_monitor_threshold());
 	log_notice("  monitor_interval:       %d", ini_option_object().get_monitor_interval());
 	log_notice("  monitor_read_timeout:   %d", ini_option_object().get_monitor_read_timeout());
+	log_notice("  monitor_node_map_version_mismatch_threshold: %d", ini_option_object().get_monitor_node_map_version_mismatch_threshold());
 	log_notice("  net_read_timeout:       %d", ini_option_object().get_net_read_timeout());
 	log_notice("  server_name:            %s", ini_option_object().get_server_name().c_str());
 	log_notice("  server_port:            %d", ini_option_object().get_server_port());
@@ -223,6 +224,7 @@ int flarei::startup(int argc, char **argv) {
 	this->_cluster->set_monitor_threshold(ini_option_object().get_monitor_threshold());
 	this->_cluster->set_monitor_interval(ini_option_object().get_monitor_interval());
 	this->_cluster->set_monitor_read_timeout(ini_option_object().get_monitor_read_timeout());
+	this->_cluster->set_monitor_node_map_version_mismatch_threshold(ini_option_object().get_monitor_node_map_version_mismatch_threshold());
 
 	this->_cluster->set_partition_size(partition_size);
 	storage::hash_algorithm ha = storage::hash_algorithm_simple;
@@ -324,6 +326,7 @@ int flarei::reload() {
 	this->_cluster->set_monitor_threshold(ini_option_object().get_monitor_threshold());
 	this->_cluster->set_monitor_interval(ini_option_object().get_monitor_interval());
 	this->_cluster->set_monitor_read_timeout(ini_option_object().get_monitor_read_timeout());
+	this->_cluster->set_monitor_node_map_version_mismatch_threshold(ini_option_object().get_monitor_node_map_version_mismatch_threshold());
 
 	// net_read_timeout
 	connection_tcp::read_timeout = ini_option_object().get_net_read_timeout() * 1000;		// -> msec

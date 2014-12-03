@@ -16,11 +16,12 @@ namespace flare {
 /**
  *	ctor for queue_update_monitor_option
  */
-queue_update_monitor_option::queue_update_monitor_option(int monitor_threshold, int monitor_interval, int monitor_read_timeout):
+queue_update_monitor_option::queue_update_monitor_option(int monitor_threshold, int monitor_interval, int monitor_read_timeout, int monitor_node_map_version_mismatch_threshold):
 		thread_queue("update_monitor_option"),
 		_monitor_threshold(monitor_threshold),
 		_monitor_interval(monitor_interval),
-		_monitor_read_timeout(monitor_read_timeout) {
+		_monitor_read_timeout(monitor_read_timeout),
+		_monitor_node_map_version_mismatch_threshold(monitor_node_map_version_mismatch_threshold) {
 }
 
 /**

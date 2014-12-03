@@ -175,6 +175,7 @@ protected:
 	int										_monitor_threshold;
 	int										_monitor_interval;
 	int										_monitor_read_timeout;
+	int										_monitor_node_map_version_mismatch_threshold;
 	int										_partition_size;
 	int										_thread_type;
 #ifdef ENABLE_MYSQL_REPLICATION
@@ -246,6 +247,7 @@ public:
 	int set_monitor_threshold(int monitor_threshold);
 	int set_monitor_interval(int monitor_interval);
 	int set_monitor_read_timeout(int monitor_read_timeout);
+	int set_monitor_node_map_version_mismatch_threshold(int monitor_node_map_version_mismatch_threshold);
 	int get_partition_size() { return this->_partition_size; };
 	int set_partition_size(int partition_size) { this->_partition_size = partition_size; return 0; };
 	int get_node_partition_map_size();

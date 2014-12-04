@@ -28,14 +28,16 @@ protected:
 	int			_monitor_threshold;
 	int			_monitor_interval;
 	int			_monitor_read_timeout;
+	int			_monitor_node_map_version_mismatch_threshold;
 
 public:
-	queue_update_monitor_option(int monitor_threshold, int monitor_inteval, int monitor_read_timeout);
+	queue_update_monitor_option(int monitor_threshold, int monitor_inteval, int monitor_read_timeout, int _monitor_node_map_version_mismatch_threshold);
 	virtual ~queue_update_monitor_option();
 
 	int get_monitor_threshold() { return this->_monitor_threshold; };
 	int get_monitor_interval() { return this->_monitor_interval; };
 	int get_monitor_read_timeout() { return this->_monitor_read_timeout; };
+	int get_monitor_node_map_version_mismatch_threshold() { return this->_monitor_node_map_version_mismatch_threshold; };
 };
 
 }	// namespace flare

@@ -31,6 +31,7 @@ ini_option::ini_option():
 		_monitor_threshold(default_monitor_threshold),
 		_monitor_interval(default_monitor_interval),
 		_monitor_read_timeout(default_monitor_read_timeout),
+		_monitor_node_map_version_mismatch_threshold(0),
 		_net_read_timeout(default_net_read_timeout),
 		_partition_modular_hint(default_partition_modular_hint),
 		_partition_modular_virtual(default_partition_modular_virtual),
@@ -152,6 +153,10 @@ int ini_option::load() {
 
 		if (opt_var_map.count("monitor-read-timeout")) {
 			this->_monitor_read_timeout = opt_var_map["monitor-read-timeout"].as<int>();
+		}
+
+		if (opt_var_map.count("monitor-node-map-version-mismatch-threshold")) {
+			this->_monitor_node_map_version_mismatch_threshold = opt_var_map["monitor-node-map-version-mismatch-threshold"].as<int>();
 		}
 
 		if (opt_var_map.count("net-read-timeout")) {
@@ -295,6 +300,11 @@ int ini_option::reload() {
 			this->_monitor_read_timeout = opt_var_map["monitor-read-timeout"].as<int>();
 		}
 
+		if (opt_var_map.count("monitor-node-map-version-mismatch-threshold")) {
+			log_notice("  monitor_node_map_version_mismatch_threshold: %d -> %d", this->_monitor_node_map_version_mismatch_threshold, opt_var_map["monitor-node-map-version-mismatch-threshold"].as<int>());
+			this->_monitor_node_map_version_mismatch_threshold = opt_var_map["monitor-node-map-version-mismatch-threshold"].as<int>();
+		}
+
 		if (opt_var_map.count("net-read-timeout")) {
 			log_notice("  net_read_timeout:     %d -> %d", this->_net_read_timeout, opt_var_map["net-read-timeout"].as<int>());
 			this->_net_read_timeout = opt_var_map["net-read-timeout"].as<int>();
@@ -344,6 +354,7 @@ int ini_option::_setup_config_option(program_options::options_description& optio
 		("monitor-threshold",				program_options::value<int>(),			"node server monitoring threshold (dynamic)")
 		("monitor-interval",				program_options::value<int>(),			"node server monitoring interval (sec) (dynamic)")
 		("monitor-read-timeout",		program_options::value<int>(),			"node server monitoring read timeout (millisec) (dynamic)")
+		("monitor-node-map-version-mismatch-threshold",	program_options::value<int>(), "node server monitoring: how many times node_map_version mismatch is allowed (dynamic)")
 		("partition-modular-hint",	program_options::value<int>(),			"partitioning hint (only for partition-type=modular)")
 		("partition-modular-virtual",	program_options::value<int>(),		"partitioning virtual node size (only for partition-type=modular)")
 		("key-hash-algorithm",			program_options::value<string>(),		"key hash algorithm")

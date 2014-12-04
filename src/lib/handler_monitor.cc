@@ -8,9 +8,11 @@
  *	$Id$
  */
 #include "handler_monitor.h"
-#include "op_ping.h"
+#include "op_stats.h"
 #include "queue_node_sync.h"
 #include "queue_update_monitor_option.h"
+#include <boost/shared_ptr.hpp>
+#include <boost/lexical_cast.hpp>
 
 namespace gree {
 namespace flare {
@@ -30,7 +32,9 @@ handler_monitor::handler_monitor(shared_thread t, cluster* cl, string node_serve
 		_monitor_threshold(0),
 		_monitor_interval(0),
 		_monitor_read_timeout(0),
-		_down_state(0) {
+		_monitor_node_map_version_mismatch_threshold(0),
+		_down_state(0),
+		_node_map_version_mismatch_state(0) {
 }
 
 /**
@@ -128,18 +132,18 @@ int handler_monitor::_process_monitor() {
 	}
 	this->_connection->set_read_timeout(this->_monitor_read_timeout);
 
-	op_ping* p = new op_ping(this->_connection);
+	boost::shared_ptr<op_stats> op(new op_stats(this->_connection));
 	this->_thread->set_state("execute");
-	this->_thread->set_op(p->get_ident());
+	this->_thread->set_op(op->get_ident());
 
-	if (p->run_client() < 0) {
+	stats_results stats_results;
+	if (op->run_client(stats_results) < 0) {
 		this->_connection->set_read_timeout(current_read_timeout);
-		delete p;
 		return -1;
 	}
 
+	this->_process_node_map_version(stats_results);
 	this->_connection->set_read_timeout(current_read_timeout);
-	delete p;
 	return 0;
 }
 
@@ -150,10 +154,16 @@ int handler_monitor::_process_queue(shared_thread_queue q) {
 
 	if (q->get_ident() == "update_monitor_option") {
 		shared_queue_update_monitor_option r = boost::dynamic_pointer_cast<queue_update_monitor_option, thread_queue>(q);
-		log_debug("updating monitor option [threshold: %d -> %d, interval:%d -> %d, read_timeout:%d -> %d]", this->_monitor_threshold, r->get_monitor_threshold(), this->_monitor_interval, r->get_monitor_interval(), this->_monitor_read_timeout, r->get_monitor_read_timeout());
+		log_debug("updating monitor option [threshold: %d -> %d, interval:%d -> %d, read_timeout:%d -> %d, node_map_version_threshold: %d -> %d]",
+			this->_monitor_threshold, r->get_monitor_threshold(),
+			this->_monitor_interval, r->get_monitor_interval(),
+			this->_monitor_read_timeout, r->get_monitor_read_timeout(),
+			this->_monitor_node_map_version_mismatch_threshold, r->get_monitor_node_map_version_mismatch_threshold()
+		);
 		this->_monitor_threshold = r->get_monitor_threshold();
 		this->_monitor_interval = r->get_monitor_interval();
 		this->_monitor_read_timeout = r->get_monitor_read_timeout();
+		this->_monitor_node_map_version_mismatch_threshold = r->get_monitor_node_map_version_mismatch_threshold();
 	} else if (q->get_ident() == "node_sync") {
 		if (this->_down_state >= this->_monitor_threshold && this->_connection->is_available() == false) {
 			log_info("node seems realy down -> skip processing queue (node_server_name=%s, node_server_port=%d, ident=%s)", this->_node_server_name.c_str(), this->_node_server_port, q->get_ident().c_str());
@@ -190,6 +200,41 @@ int handler_monitor::_up() {
 	this->_down_state = 0;
 
 	return 0;
+}
+
+void handler_monitor::_process_node_map_version(const stats_results& results) {
+	stats_results::const_iterator result = results.find_by_name("node_map_version");
+	if (result == results.end()) {
+		return;
+	}
+	uint64_t version;
+	try {
+		version = boost::lexical_cast<uint64_t>(result->value);
+	} catch (boost::bad_lexical_cast&) {
+		log_debug("invalid version");
+		return;
+	}
+	this->_update_node_map_version_match_state(version);
+}
+
+void handler_monitor::_update_node_map_version_match_state(uint64_t version) {
+	if (this->_cluster->get_node_map_version() == version) {
+		this->_node_map_version_mismatch_state = 0;
+		return;
+	}
+
+	this->_node_map_version_mismatch_state++;
+
+	if (this->_monitor_node_map_version_mismatch_threshold != 0
+		&& this->_node_map_version_mismatch_state >= this->_monitor_node_map_version_mismatch_threshold) {
+		log_err(
+			"node_map_version seems mismatch (current_index_server:%"PRIu64", node(%s:%d):%"PRIu64")",
+			this->_cluster->get_node_map_version(),
+			this->_node_server_name.c_str(),
+			this->_node_server_port,
+			version
+		);
+	}
 }
 // }}}
 

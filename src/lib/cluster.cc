@@ -223,6 +223,7 @@ int cluster::startup_index(coordinator* coord, key_resolver::type key_resolver_t
 		h->set_monitor_threshold(this->_monitor_threshold);
 		h->set_monitor_interval(this->_monitor_interval);
 		h->set_monitor_read_timeout(this->_monitor_read_timeout);
+		h->set_monitor_node_map_version_mismatch_threshold(this->_monitor_node_map_version_mismatch_threshold);
 		t->trigger(h);
 	}
 
@@ -455,6 +456,7 @@ int cluster::add_node(string node_server_name, int node_server_port) {
 		h->set_monitor_threshold(this->_monitor_threshold);
 		h->set_monitor_interval(this->_monitor_interval);
 		h->set_monitor_read_timeout(this->_monitor_read_timeout);
+		h->set_monitor_node_map_version_mismatch_threshold(this->_monitor_node_map_version_mismatch_threshold);
 		t->trigger(h);
 	}
 
@@ -1165,7 +1167,7 @@ int cluster::set_monitor_threshold(int monitor_threshold) {
 	this->_monitor_threshold = monitor_threshold;
 
 	// notify current threads
-	shared_queue_update_monitor_option q(new queue_update_monitor_option(this->_monitor_threshold, this->_monitor_interval, this->_monitor_read_timeout));
+	shared_queue_update_monitor_option q(new queue_update_monitor_option(this->_monitor_threshold, this->_monitor_interval, this->_monitor_read_timeout, this->_monitor_node_map_version_mismatch_threshold));
 	vector<string> dummy;
 	this->_broadcast(q, true, dummy);
 
@@ -1179,7 +1181,7 @@ int cluster::set_monitor_interval(int monitor_interval) {
 	this->_monitor_interval = monitor_interval;
 
 	// notify current threads
-	shared_queue_update_monitor_option q(new queue_update_monitor_option(this->_monitor_threshold, this->_monitor_interval, this->_monitor_read_timeout));
+	shared_queue_update_monitor_option q(new queue_update_monitor_option(this->_monitor_threshold, this->_monitor_interval, this->_monitor_read_timeout, this->_monitor_node_map_version_mismatch_threshold));
 	vector<string> dummy;
 	this->_broadcast(q, true, dummy);
 
@@ -1193,7 +1195,21 @@ int cluster::set_monitor_read_timeout(int monitor_read_timeout) {
 	this->_monitor_read_timeout = monitor_read_timeout;
 
 	// notify current threads
-	shared_queue_update_monitor_option q(new queue_update_monitor_option(this->_monitor_threshold, this->_monitor_interval, this->_monitor_read_timeout));
+	shared_queue_update_monitor_option q(new queue_update_monitor_option(this->_monitor_threshold, this->_monitor_interval, this->_monitor_read_timeout, this->_monitor_node_map_version_mismatch_threshold));
+	vector<string> dummy;
+	this->_broadcast(q, true, dummy);
+
+	return 0;
+}
+
+/**
+*	[index] set node server monitoring node map version mismatch threshold
+*/
+int cluster::set_monitor_node_map_version_mismatch_threshold(int monitor_node_map_version_mismatch_threshold) {
+	this->_monitor_node_map_version_mismatch_threshold = monitor_node_map_version_mismatch_threshold;
+
+	// notify current threads
+	shared_queue_update_monitor_option q(new queue_update_monitor_option(this->_monitor_threshold, this->_monitor_interval, this->_monitor_read_timeout, this->_monitor_node_map_version_mismatch_threshold));
 	vector<string> dummy;
 	this->_broadcast(q, true, dummy);
 
@@ -1794,6 +1810,7 @@ int cluster::_load(bool update_monitor) {
 				h->set_monitor_threshold(this->_monitor_threshold);
 				h->set_monitor_interval(this->_monitor_interval);
 				h->set_monitor_read_timeout(this->_monitor_read_timeout);
+				h->set_monitor_node_map_version_mismatch_threshold(this->_monitor_node_map_version_mismatch_threshold);
 				t->trigger(h);
 			}
 		}

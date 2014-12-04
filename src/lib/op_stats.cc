@@ -301,6 +301,8 @@ int op_stats::_parse_text_client_parameters(stats_results& results) {
 		r.name = match.str(1);
 		r.value = match.str(2);
 		results.push_back(r);
+
+		delete[] p;
 	}
 }
 // }}}

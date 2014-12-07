@@ -1,3 +1,23 @@
+/*
+ * Flare
+ * --------------
+ * Copyright (C) 2004 Brazil <senna@razil.jp>
+ * Copyright (C) 2008-2014 GREE, Inc.
+ * 
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation; either version 2
+ * of the License, or (at your option) any later version.
+ * 
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ * 
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ */
 /**
  *	util.h
  *
@@ -41,6 +61,7 @@ namespace flare {
 #define	BUFSIZ	4096
 #endif	// BUFSIZ
 
+// code from senna (http://qwik.jp/senna/)
 #define ATOMIC_ADD_X86_32(p,i,r) __asm__ __volatile__ ("lock; xaddl %0,%1" : "=r"(r), "=m"(*p) : "0"(i), "m" (*p))
 #define ATOMIC_ADD_X86_64(p,i,r) __asm__ __volatile__ ("lock; xaddq %0,%1" : "=r"(r), "=m"(*p) : "0"(i), "m" (*p))
 #define ATOMIC_ADD_PPC_32(p,i,r) __asm__ __volatile__ ("\n1:\n\tlwarx %0, 0, %1\n\tadd %0, %0, %2\n\tstwcx. %0, 0, %1\n\tbne- 1b\n\tsub %0, %0, %2" : "=&r" (r) : "r" (p), "r" (i) : "cc", "memory")

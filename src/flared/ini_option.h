@@ -180,7 +180,7 @@ public:
 	bool get_time_watcher_enabled() { return this->_time_watcher_enabled; };
 	uint32_t get_time_watcher_polling_interval_msec() { return this->_time_watcher_polling_interval_msec; };
 	uint32_t get_storage_access_watch_threshold_warn_msec() { return this->_storage_access_watch_threshold_warn_msec; };
-	uint32_t get_storage_access_watch_threshold_ping_ng() { return this->_storage_access_watch_threshold_ping_ng_msec; };
+	uint32_t get_storage_access_watch_threshold_ping_ng_msec() { return this->_storage_access_watch_threshold_ping_ng_msec; };
 	bool is_cluster_replication() { return this->_cluster_replication; }
 	string get_cluster_replication_server_name() { return this->_cluster_replication_server_name; };
 	int get_cluster_replication_server_port() { return this->_cluster_replication_server_port; }

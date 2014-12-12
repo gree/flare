@@ -252,7 +252,7 @@ int flared::startup(int argc, char **argv) {
 
 	time_watcher_object = new time_watcher();
 	time_watcher_observer::set_threshold_warn_msec(ini_option_object().get_storage_access_watch_threshold_warn_msec());
-	time_watcher_observer::set_threshold_ping_ng_msec(ini_option_object().get_storage_access_watch_threshold_ping_ng());
+	time_watcher_observer::set_threshold_ping_ng_msec(ini_option_object().get_storage_access_watch_threshold_ping_ng_msec());
 	time_watcher_observer::set_storage_listener(this);
 	if (ini_option_object().get_time_watcher_enabled()) {
 		time_watcher_object->start(ini_option_object().get_time_watcher_polling_interval_msec());
@@ -386,7 +386,7 @@ int flared::reload() {
 
 	time_watcher_object->stop();
 	time_watcher_observer::set_threshold_warn_msec(ini_option_object().get_storage_access_watch_threshold_warn_msec());
-	time_watcher_observer::set_threshold_ping_ng_msec(ini_option_object().get_storage_access_watch_threshold_ping_ng());
+	time_watcher_observer::set_threshold_ping_ng_msec(ini_option_object().get_storage_access_watch_threshold_ping_ng_msec());
 	if (ini_option_object().get_time_watcher_enabled()) {
 		time_watcher_object->start(ini_option_object().get_time_watcher_polling_interval_msec());
 	}

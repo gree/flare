@@ -174,6 +174,7 @@ int op_get::_run_server() {
 			} else {
 				stats_object->increment_get_misses();
 			}
+			stats_object->increment_read_query_without_proxy();
 		}
 	}
 

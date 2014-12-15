@@ -148,6 +148,8 @@ int op_stats::_send_stats(thread_pool* tp, storage* st) {
 	_send_stat("incr_misses"					, stats_object->get_incr_misses());
 	_send_stat("decr_hits"						, stats_object->get_decr_hits());
 	_send_stat("decr_misses"					, stats_object->get_decr_misses());
+	_send_stat("read_query_without_proxy"		, stats_object->get_read_query_without_proxy());
+	_send_stat("write_query_without_proxy"	, stats_object->get_write_query_without_proxy());
 	_send_stat("cas_hits" 						, stats_object->get_cas_hits());
 	_send_stat("cas_misses" 					, stats_object->get_cas_misses());
 	_send_stat("cas_badval" 					, stats_object->get_cas_badval());

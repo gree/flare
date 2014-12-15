@@ -124,6 +124,7 @@ int op_delete::_run_server() {
 
 	if (r_storage == storage::result_deleted) {
 		stats_object->increment_delete_hits();
+		stats_object->increment_write_query_without_proxy();
 		// post-proxy (notify updates to slaves if we need)
 		r_proxy = this->_cluster->post_proxy_write(this,
 																							 this->_is_sync(this->_entry.option,

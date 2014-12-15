@@ -57,6 +57,8 @@ stats::stats():
 		_touch_misses(0),
 		_bytes_read(0),
 		_bytes_written(0),
+		_read_query_without_proxy(0),
+		_write_query_without_proxy(0),
 		_total_thread_queue(0) {
 }
 
@@ -165,6 +167,8 @@ uint64_t stats::get_touch_misses()									{ return this->_touch_misses.fetch();
 uint64_t stats::get_evictions()										{ return 0; }
 uint64_t stats::get_bytes_read()										{ return this->_bytes_read.fetch();}
 uint64_t stats::get_bytes_written()								{ return this->_bytes_written.fetch();}
+uint64_t stats::get_read_query_without_proxy()		{ return this->_read_query_without_proxy.fetch();}
+uint64_t stats::get_write_query_without_proxy()		{ return this->_write_query_without_proxy.fetch();}
 
 uint32_t stats::get_total_thread_queue()						{ return this->_total_thread_queue.fetch();}
 uint32_t stats::get_limit_maxbytes()								{ return 0; }

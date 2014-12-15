@@ -42,7 +42,7 @@ before_script:
   - mv test/run-tests.travis.sh test/run-tests.sh
 
 script:
-  - make
+  - travis_retry make
   - make check && sudo make install
   - flare-tests
 

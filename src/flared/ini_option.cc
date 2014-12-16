@@ -354,7 +354,7 @@ int ini_option::load() {
 		}
 
 		if (opt_var_map.count("storage-access-watch-threshold-warn-msec")) {
-			this->_storage_access_watch_threshold_warn_msec = opt_var_map["storage-access-watch-watch-threshold-warn-msec"].as<uint32_t>();
+			this->_storage_access_watch_threshold_warn_msec = opt_var_map["storage-access-watch-threshold-warn-msec"].as<uint32_t>();
 		}
 
 		if (opt_var_map.count("storage-access-watch-threshold-ping-ng-msec")) {
@@ -514,13 +514,13 @@ int ini_option::reload() {
 		if (opt_var_map.count("time-watcher-enabled")) {
 			log_notice("  time_watcher_enabled: %s -> %s",
 					this->_time_watcher_enabled ? "true" : "false",
-					opt_var_map["time_watcher-enabled"].as<bool>() ? "true" : "false");
+					opt_var_map["time-watcher-enabled"].as<bool>() ? "true" : "false");
 			this->_time_watcher_enabled = opt_var_map["time-watcher-enabled"].as<bool>();
 		}
 
 		if (opt_var_map.count("time-watcher-polling-interval-msec")) {
-			log_notice("  time_watcher_polling_interval_msec: %u -> %u", this->_time_watcher_polling_interval_msec, opt_var_map["time_watcher-polling-interval-msec"].as<uint32_t>());
-			this->_time_watcher_polling_interval_msec = opt_var_map["thread-watcher-polling-interval-msec"].as<uint32_t>();
+			log_notice("  time_watcher_polling_interval_msec: %u -> %u", this->_time_watcher_polling_interval_msec, opt_var_map["time-watcher-polling-interval-msec"].as<uint32_t>());
+			this->_time_watcher_polling_interval_msec = opt_var_map["time-watcher-polling-interval-msec"].as<uint32_t>();
 		}
 
 		if (opt_var_map.count("storage-access-watch-threshold-warn-msec")) {

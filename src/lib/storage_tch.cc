@@ -133,6 +133,7 @@ int storage_tch::set(entry& e, result& r, int b) {
 	uint8_t* p = NULL;
 	try {
 		if ((b & behavior_skip_lock) == 0) {
+			pthread_rwlock_rdlock(&this->_mutex_wholelock);
 			pthread_rwlock_wrlock(&this->_mutex_slot[mutex_index]);
 		}
 
@@ -294,12 +295,14 @@ int storage_tch::set(entry& e, result& r, int b) {
 		delete[] p;
 		if ((b & behavior_skip_lock) == 0) {
 			pthread_rwlock_unlock(&this->_mutex_slot[mutex_index]);
+			pthread_rwlock_unlock(&this->_mutex_wholelock);
 		}
 		return error;
 	}
 	delete[] p;
 	if ((b & behavior_skip_lock) == 0) {
 		pthread_rwlock_unlock(&this->_mutex_slot[mutex_index]);
+		pthread_rwlock_unlock(&this->_mutex_wholelock);
 	}
 
 	return 0;
@@ -320,6 +323,7 @@ int storage_tch::incr(entry& e, uint64_t value, result& r, bool increment, int b
 	bool expired = false;
 	try {
 		if ((b & behavior_skip_lock) == 0) {
+			pthread_rwlock_rdlock(&this->_mutex_wholelock);
 			pthread_rwlock_wrlock(&this->_mutex_slot[mutex_index]);
 		}
 
@@ -419,6 +423,7 @@ int storage_tch::incr(entry& e, uint64_t value, result& r, bool increment, int b
 		delete[] p;
 		if ((b & behavior_skip_lock) == 0) {
 			pthread_rwlock_unlock(&this->_mutex_slot[mutex_index]);
+			pthread_rwlock_unlock(&this->_mutex_wholelock);
 		}
 
 		if (expired) {
@@ -430,6 +435,7 @@ int storage_tch::incr(entry& e, uint64_t value, result& r, bool increment, int b
 	delete[] p;
 	if ((b & behavior_skip_lock) == 0) {
 		pthread_rwlock_unlock(&this->_mutex_slot[mutex_index]);
+		pthread_rwlock_unlock(&this->_mutex_wholelock);
 	}
 
 	return 0;
@@ -514,6 +520,7 @@ int storage_tch::remove(entry& e, result& r, int b) {
 
 	try {
 		if ((b & behavior_skip_lock) == 0) {
+			pthread_rwlock_rdlock(&this->_mutex_wholelock);
 			pthread_rwlock_wrlock(&this->_mutex_slot[mutex_index]);
 		}
 
@@ -559,11 +566,13 @@ int storage_tch::remove(entry& e, result& r, int b) {
 	} catch (int error) {
 		if ((b & behavior_skip_lock) == 0) {
 			pthread_rwlock_unlock(&this->_mutex_slot[mutex_index]);
+			pthread_rwlock_unlock(&this->_mutex_wholelock);
 		}
 		return error;
 	}
 	if ((b & behavior_skip_lock) == 0) {
 		pthread_rwlock_unlock(&this->_mutex_slot[mutex_index]);
+		pthread_rwlock_unlock(&this->_mutex_wholelock);
 	}
 
 	return 0;
@@ -573,6 +582,7 @@ int storage_tch::truncate(int b) {
 	log_info("truncating all data", 0);
 
 	if ((b & behavior_skip_lock) == 0) {
+		pthread_rwlock_wrlock(&this->_mutex_wholelock);
 		this->_mutex_slot_wrlock_all();
 	}
 
@@ -587,6 +597,7 @@ int storage_tch::truncate(int b) {
 
 	if ((b & behavior_skip_lock) == 0) {
 		this->_mutex_slot_unlock_all();
+		pthread_rwlock_unlock(&this->_mutex_wholelock);
 	}
 
 	return r;
@@ -622,11 +633,11 @@ storage::iteration storage_tch::iter_next(string& key) {
 	int len = 0;
 	char* p = NULL;
 
-	this->_mutex_slot_rdlock_all();
+	pthread_rwlock_wrlock(&this->_mutex_wholelock);
 	{
 		p = static_cast<char*>(tchdbiternext(this->_db, &len));
 	}
-	this->_mutex_slot_unlock_all();
+	pthread_rwlock_unlock(&this->_mutex_wholelock);
 
 	if (p == NULL) {
 		int ecode = tchdbecode(this->_db);

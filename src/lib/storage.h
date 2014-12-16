@@ -207,7 +207,7 @@ protected:
 	TCMAP*								_header_cache_map;
 	pthread_rwlock_t			_mutex_header_cache_map;
 	storage_listener*			_listener;
-
+	pthread_rwlock_t			_mutex_wholelock;
 
 public:
 	storage(string data_dir, int mutex_slot_size, int header_cache_size);

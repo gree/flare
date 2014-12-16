@@ -162,9 +162,11 @@ int op_get::_run_server() {
 		} else if (r_map.count(it->key) == 0) {
 			log_warning("result map is inconsistent (key=%s)", it->key.c_str());
 			stats_object->increment_get_misses();
+			stats_object->increment_read_query_without_proxy();
 		} else if (r_map[it->key] == storage::result_not_found) {
 			_send_entry(*it);
 			stats_object->increment_get_misses();
+			stats_object->increment_read_query_without_proxy();
 		} else {
 			// for safety
 			// op like "get key1 key1" will cause segfault

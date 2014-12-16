@@ -145,8 +145,10 @@ int op_set::_run_server() {
 	}
 	if (r_storage == storage::result_stored) {
 		stats_object->increment_total_items();
-		stats_object->increment_write_query_without_proxy();
 	}
+
+	stats_object->increment_write_query_without_proxy();
+
 	if (r_storage == storage::result_stored
 			|| r_storage == storage::result_touched) {
 		if (this->get_ident() == "cas"){

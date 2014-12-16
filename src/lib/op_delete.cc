@@ -110,6 +110,8 @@ int op_delete::_run_server() {
 		return this->_send_result(result_server_error, "no partition available");
 	}
 
+	stats_object->increment_write_query_without_proxy();
+
 	// storage i/o
 	storage::result r_storage;
 	int retcode;
@@ -121,8 +123,6 @@ int op_delete::_run_server() {
 	if (retcode < 0) {
 		return this->_send_result(result_server_error, "i/o error");
 	}
-
-	stats_object->increment_write_query_without_proxy();
 
 	if (r_storage == storage::result_deleted) {
 		stats_object->increment_delete_hits();

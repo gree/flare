@@ -125,12 +125,16 @@ int op_get::_run_server() {
 		if (r_proxy == cluster::proxy_request_complete) {
 			q_map[it->key] = q;
 		} else if (r_proxy == cluster::proxy_request_error_enqueue) {
+			stats_object->increment_read_query_without_proxy();
 			log_warning("proxy error (key=%s) -> continue processing (pretending not found)", it->key.c_str());
 			r_map[it->key] = storage::result_not_found;
 		} else if (r_proxy == cluster::proxy_request_error_partition) {
+			stats_object->increment_read_query_without_proxy();
 			log_warning("partition error (key=%s) -> continue processing (pretending not found)", it->key.c_str());
 			r_map[it->key] = storage::result_not_found;
 		} else {
+			stats_object->increment_read_query_without_proxy();
+
 			// storage i/o
 			storage::result r_storage;
 			int retcode;
@@ -162,11 +166,9 @@ int op_get::_run_server() {
 		} else if (r_map.count(it->key) == 0) {
 			log_warning("result map is inconsistent (key=%s)", it->key.c_str());
 			stats_object->increment_get_misses();
-			stats_object->increment_read_query_without_proxy();
 		} else if (r_map[it->key] == storage::result_not_found) {
 			_send_entry(*it);
 			stats_object->increment_get_misses();
-			stats_object->increment_read_query_without_proxy();
 		} else {
 			// for safety
 			// op like "get key1 key1" will cause segfault
@@ -176,7 +178,6 @@ int op_get::_run_server() {
 			} else {
 				stats_object->increment_get_misses();
 			}
-			stats_object->increment_read_query_without_proxy();
 		}
 	}
 

@@ -132,6 +132,8 @@ int op_set::_run_server() {
 		return this->_send_result(result_server_error, "no partition available");
 	}
 
+	stats_object->increment_write_query_without_proxy();
+
 	// storage i/o
 	storage::result r_storage;
 	int retcode;
@@ -146,8 +148,6 @@ int op_set::_run_server() {
 	if (r_storage == storage::result_stored) {
 		stats_object->increment_total_items();
 	}
-
-	stats_object->increment_write_query_without_proxy();
 
 	if (r_storage == storage::result_stored
 			|| r_storage == storage::result_touched) {

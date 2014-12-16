@@ -51,8 +51,14 @@ public:
 	mock_storage(string data_dir, int mutex_slot_size, int header_cache_size);
 	virtual ~mock_storage();
 
-	virtual int open() { this->_open = true; };
-	virtual int close() { this->_open = false; };
+	virtual int open() {
+		this->_open = true;
+		return 0;
+	};
+	virtual int close() {
+		this->_open = false;
+		return 0;
+	};
 	virtual int set(entry& e, result& r, int b = 0);
 	virtual int incr(entry& e, uint64_t value, result& r, bool increment, int b = 0);
 	virtual int get(entry& e, result& r, int b = 0);

@@ -106,6 +106,7 @@ namespace test_op_set
 		cut_assert_equal_int(1, op._entry.flag);
 		cut_assert_equal_double(stats_object->get_timestamp() + 60, 2, op._entry.expire);
 		cut_assert_equal_int(5, op._entry.size);
+		cut_assert_equal_int(5, op._entry.version);
 		cut_assert_equal_memory("value", 5, op._entry.data.get(), 5);
 		char* dummy;
 		cut_assert_equal_int(-1, c->readsize(1, &dummy));

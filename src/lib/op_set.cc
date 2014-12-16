@@ -97,6 +97,9 @@ int op_set::_parse_text_server_parameters() {
 int op_set::_parse_binary_request(const binary_request_header& header, const char* body) {
 	if (header.get_extras_length() == _binary_request_required_extras_length
 			&& this->_entry.parse(header, body) == 0) {
+		if (this->_entry.version > 0) {
+			this->_behavior |= storage::behavior_cas;
+		}
 		this->_entry.flag = ntohl(*(reinterpret_cast<const uint32_t*>(body)));
 		this->_entry.expire = util::realtime(ntohl(*(reinterpret_cast<const uint32_t*>(body + 4))));
 		shared_byte data(new uint8_t[this->_entry.size]);
@@ -148,7 +151,7 @@ int op_set::_run_server() {
 	}
 	if (r_storage == storage::result_stored
 			|| r_storage == storage::result_touched) {
-		if (this->get_ident() == "cas"){
+		if ((this->_behavior & storage::behavior_cas) || this->get_ident() == "cas"){
 			stats_object->increment_cas_hits();
 		} else if (this->get_ident() == "touch"){
 			stats_object->increment_touch_hits();
@@ -157,7 +160,7 @@ int op_set::_run_server() {
 																							 this->_is_sync(this->_entry.option,
 																															this->_cluster->get_replication_type()));
 	} else {
-		if (this->get_ident() == "cas"){
+		if ((this->_behavior & storage::behavior_cas) || this->get_ident() == "cas"){
 			if (r_storage == storage::result_exists){
 				stats_object->increment_cas_badval();
 			} else if (r_storage == storage::result_not_found) {

@@ -1,3 +1,13 @@
+* [2014/12/17] 1.2.1 release
+
+ * feature updates
+   - Add bwlimit to op_dump_key
+
+ * bug fixes
+   - Fix time_watcher options
+   - Fix to build with clang
+   - Fix op_set binary parser to enable behavior_cas flag
+
 * [2014/11/14] 1.2.0 release
 
  * feature updates

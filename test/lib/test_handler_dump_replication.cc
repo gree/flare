@@ -205,10 +205,6 @@ namespace test_handler_dump_replication {
 			response_dump("STORED", i);
 		}
 
-		// assert
-		// still being under dump replication due to sleep of last key
-		cut_assert_equal_boolean(true, t->is_running());
-		cut_assert_equal_string("execute", t->get_state().c_str());
 		usleep(100 * 1000); // waiting for completion of sleep of last key
 
 		long elapsed_msec = get_elapsed_msec(start_tv);
@@ -233,11 +229,6 @@ namespace test_handler_dump_replication {
 		for (int i = 0; i < 5; i++) {
 			response_dump("STORED", i, 100);
 		}
-
-		// assert
-		// still being under dump replication due to sleep of last key
-		cut_assert_equal_boolean(true, t->is_running());
-		cut_assert_equal_string("execute", t->get_state().c_str());
 
 		usleep(200 * 1000); // waiting for dump completed
 		long elapsed_msec = get_elapsed_msec(start_tv);

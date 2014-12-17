@@ -153,6 +153,9 @@ int connection_iostream::push_back(const char* p, int bufsiz) {
 		for (int i = bufsiz - 1; i >= 0; --i)
 			_istream->putback(p[i]);
 	}
+
+	// getting buffer length of iostream isn't easy.
+	return 0;
 }
 
 /**

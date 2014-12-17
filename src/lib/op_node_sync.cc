@@ -26,12 +26,9 @@
  *
  *	$Id$
  */
-// include order is important to include inttypes.h with __STDC_FORMAT_MACROS defined
-#define __STDC_FORMAT_MACROS
-#include <inttypes.h>
 
 #include "op_node_sync.h"
-
+#include <inttypes.h>
 
 namespace gree {
 namespace flare {

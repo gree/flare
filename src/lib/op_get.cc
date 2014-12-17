@@ -125,11 +125,9 @@ int op_get::_run_server() {
 		if (r_proxy == cluster::proxy_request_complete) {
 			q_map[it->key] = q;
 		} else if (r_proxy == cluster::proxy_request_error_enqueue) {
-			stats_object->increment_read_query_without_proxy();
 			log_warning("proxy error (key=%s) -> continue processing (pretending not found)", it->key.c_str());
 			r_map[it->key] = storage::result_not_found;
 		} else if (r_proxy == cluster::proxy_request_error_partition) {
-			stats_object->increment_read_query_without_proxy();
 			log_warning("partition error (key=%s) -> continue processing (pretending not found)", it->key.c_str());
 			r_map[it->key] = storage::result_not_found;
 		} else {

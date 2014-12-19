@@ -23,6 +23,8 @@
  *	@author	Benjamin Surma <benjamin.surma@gree.net>
  */
 
+#include "assertions.h" // include first to include config.h
+
 #include <cppcutter.h>
 #include <iomanip>
 
@@ -112,8 +114,8 @@ namespace test_op_dump_key
 
 	void run_server_test(test_op_dump_key& op, int item_num, int item_key_size, int bwlimit = 0, int sleep_precision = 1)
 	{
-		static const long one_sec = 1000000L;
-		static const long delta   =  100000L;
+		static const int64_t one_sec = 1000000L;
+		static const int64_t epsilon =  100000L;
 		struct timeval start_tv, end_tv;
 
 		gettimeofday(&start_tv, NULL);
@@ -124,15 +126,15 @@ namespace test_op_dump_key
 			return;
 		}
 
-		long elapsed_usec = ((end_tv.tv_sec - start_tv.tv_sec) * one_sec + (end_tv.tv_usec - start_tv.tv_usec));
-		long estimated_bwlimit_usec = 0;
+		int64_t elapsed_usec = ((end_tv.tv_sec - start_tv.tv_sec) * one_sec + (end_tv.tv_usec - start_tv.tv_usec));
+		int64_t estimated_bwlimit_usec = 0;
 		if (bwlimit != 0) {
 			estimated_bwlimit_usec = item_num * (item_key_size + 8) * one_sec / (bwlimit * 1024);
 		}
 
-		long actual_sleep = elapsed_usec / sleep_precision;
-		long expected_sleep = estimated_bwlimit_usec / sleep_precision;
-		cut_assert(abs(actual_sleep - expected_sleep) < delta);
+		int64_t actual_sleep = elapsed_usec / sleep_precision;
+		int64_t expected_sleep = estimated_bwlimit_usec / sleep_precision;
+		flare_assert_nearly_equal_int64(expected_sleep, actual_sleep, epsilon);
 	}
 
 	void test_run_server()

@@ -36,9 +36,15 @@ namespace flare {
 
 class time_util {
 public:
+	enum clock {
+		clock_monotonic,
+		clock_realtime,
+	};
+
 	static timespec msec_to_timespec(const uint32_t& msec);
 	static timespec timeval_to_timespec(const timeval& val);
-	static timespec get_time();
+	static timespec get_time(clock clk = clock_monotonic);
+	static timespec add(const timespec& a, const timespec& b);
 	static timespec sub(const timespec& a, const timespec& b);
 	static bool is_bigger(const timespec& a, const timespec& b);
 };

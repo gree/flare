@@ -70,15 +70,15 @@ void time_watcher_processor::operator()()
 void time_watcher_processor::request_shutdown() {
 	pthread_mutex_lock(&this->_mutex_shutdown_requested);
 	this->_shutdown_requested = true;
-	pthread_mutex_unlock(&this->_mutex_shutdown_requested);
 	pthread_cond_signal(&this->_cond_shutdown_requested);
+	pthread_mutex_unlock(&this->_mutex_shutdown_requested);
 }
 
 void time_watcher_processor::_sleep_with_shutdown_request_wait() {
 	pthread_mutex_lock(&this->_mutex_shutdown_requested);
 	if (this->_shutdown_requested == false) {
-		timespec interval_timespec = this->_polling_interval;
-		pthread_cond_timedwait(&this->_cond_shutdown_requested, &this->_mutex_shutdown_requested, &interval_timespec);
+		timespec sleep_until = time_util::add(time_util::get_time(time_util::clock_realtime), this->_polling_interval);
+		pthread_cond_timedwait(&this->_cond_shutdown_requested, &this->_mutex_shutdown_requested, &sleep_until);
 	}
 	pthread_mutex_unlock(&this->_mutex_shutdown_requested);
 }

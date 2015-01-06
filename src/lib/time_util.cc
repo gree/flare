@@ -30,6 +30,8 @@
 namespace gree {
 namespace flare {
 
+const long time_util_billion = 1000000000;
+
 timespec time_util::msec_to_timespec(const uint32_t& msec) {
 	timespec t;
 	t.tv_sec = msec / 1000;
@@ -53,10 +55,19 @@ timespec time_util::timeval_to_timespec(const timeval &val) {
  * even if it is called with CLOCK_MONOTONIC option,
  * but the slew rate is limited to 0.5 ms/s. Generally no problem.
  */
-timespec time_util::get_time() {
+timespec time_util::get_time(clock clk) {
 	timespec t;
 #ifdef HAVE_CLOCK_GETTIME
-	clock_gettime(CLOCK_MONOTONIC, &t);
+	clockid_t clock_id;
+	switch (clk) {
+	case clock_monotonic:
+		clock_id = CLOCK_MONOTONIC;
+		break;
+	case clock_realtime:
+		clock_id = CLOCK_REALTIME;
+		break;
+	}
+	clock_gettime(clock_id, &t);
 #else
 	timeval val;
 	gettimeofday(&val, NULL);
@@ -65,13 +76,24 @@ timespec time_util::get_time() {
 	return t;
 }
 
+timespec time_util::add(const timespec &a, const timespec &b) {
+	timespec result;
+	result.tv_sec = a.tv_sec + b.tv_sec;
+	result.tv_nsec = a.tv_nsec + b.tv_nsec;
+	if (result.tv_nsec >= time_util_billion) {
+		result.tv_nsec -= time_util_billion;
+		++result.tv_sec;
+	}
+	return result;
+}
+
 timespec time_util::sub(const timespec &a, const timespec &b) {
 	timespec result;
 	result.tv_sec = a.tv_sec - b.tv_sec;
 	result.tv_nsec = a.tv_nsec - b.tv_nsec;
 	if (result.tv_nsec < 0) {
 		--result.tv_sec;
-		result.tv_nsec += 1000000000;
+		result.tv_nsec += time_util_billion;
 	}
 	return result;
 }

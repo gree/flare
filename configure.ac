@@ -40,6 +40,7 @@ AC_CHECK_LIB(boost_system, main, [], [AC_CHECK_LIB(boost_system-mt, main, [], [A
 AC_CHECK_LIB(pthread, pthread_create, [], [AC_MSG_ERROR(libpthread not found)])
 AC_CHECK_LIB(z, main, [], [AC_MSG_ERROR(zlib not found)])
 AC_CHECK_LIB(hashkit, libhashkit_murmur, [], [AC_MSG_ERROR(libhashkit not found)])
+AC_SEARCH_LIBS([clock_gettime], [rt])
 
 # Tokyo Cabinet
 AC_ARG_WITH(tokyocabinet,

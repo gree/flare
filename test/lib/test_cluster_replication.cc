@@ -179,8 +179,8 @@ namespace test_cluster_replication {
 		return e;
 	}
 
-	void start_cluster_replication(string host, int _port, int concurrency, bool wait = true) {
-		cut_assert_equal_int(0, cl_repl->start(host, _port, concurrency, st, cl));
+	void start_cluster_replication(string host, int _port, int concurrency, bool wait = true, bool skip_dump = false) {
+		cut_assert_equal_int(0, cl_repl->start(host, _port, concurrency, st, cl, skip_dump));
 		if (s->listen(port) < 0) {
 			cut_fail("failed to listen port (=%d)", port);
 		}
@@ -308,6 +308,18 @@ namespace test_cluster_replication {
 			cut_assert_equal_memory("VALUE", 5, (const char*)e.data.get(), 5);
 		}
 		usleep(100 * 1000);
+		assert_state(true, false);
+	}
+
+	void test_start_success_without_dump() {
+		// prepare
+		cluster::node master = cl->set_node("localhost", port, cluster::role_master, cluster::state_active);
+		cl->set_partition(0, master);
+		prepare_storage(5, 1);
+
+		// execute
+		start_cluster_replication("localhost", port, 1, false, true);
+		assert_variable("localhost", port, 1);
 		assert_state(true, false);
 	}
 

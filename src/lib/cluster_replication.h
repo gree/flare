@@ -57,7 +57,7 @@ public:
 	virtual ~cluster_replication();
 
 	bool is_started() { return this->_started; };
-	int start(string server_name, int server_port, int concurrency, storage* st, cluster* cl);
+	int start(string server_name, int server_port, int concurrency, storage* st, cluster* cl, bool skip_dump = false);
 	int stop();
 
 	int set_sync(bool sync) { this->_sync = sync; return 0; };

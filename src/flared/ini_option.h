@@ -94,6 +94,7 @@ private:
 	string			_cluster_replication_server_name;
 	int					_cluster_replication_server_port;
 	int					_cluster_replication_concurrency;
+	bool				_cluster_replication_without_dump;
 	bool				_cluster_replication_sync;
 public:
 	static const int default_back_log = 30;
@@ -185,6 +186,7 @@ public:
 	string get_cluster_replication_server_name() { return this->_cluster_replication_server_name; };
 	int get_cluster_replication_server_port() { return this->_cluster_replication_server_port; }
 	int get_cluster_replication_concurrency() { return this->_cluster_replication_concurrency; };
+	bool is_skip_dump_for_cluster_replication() { return this->_cluster_replication_without_dump; };
 	bool get_cluster_replication_sync() { return this->_cluster_replication_sync; }
 
 private:

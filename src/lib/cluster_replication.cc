@@ -67,7 +67,7 @@ cluster_replication::~cluster_replication() {
 /**
  *	start cluster replication.
  */
-int cluster_replication::start(string server_name, int server_port, int concurrency, storage* st, cluster* cl) {
+int cluster_replication::start(string server_name, int server_port, int concurrency, storage* st, cluster* cl, bool skip_dump) {
 	log_notice("start cluster replication (dest=%s:%d, concurrency=%d)", server_name.c_str(), server_port, concurrency);
 
 	if (this->_started) {
@@ -99,7 +99,11 @@ int cluster_replication::start(string server_name, int server_port, int concurre
 	this->_server_port = server_port;
 	this->_concurrency = concurrency;
 
-	this->_start_dump_replication(server_name, server_port, st, cl);
+	if (!skip_dump) {
+		this->_start_dump_replication(server_name, server_port, st, cl);
+	} else {
+		log_notice("skip dump replication when starting cluster replication", 0);
+	}
 
 	return 0;
 }

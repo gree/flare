@@ -273,7 +273,8 @@ int flared::startup(int argc, char **argv) {
 		string n = ini_option_object().get_cluster_replication_server_name();
 		int p = ini_option_object().get_cluster_replication_server_port();
 		int c = ini_option_object().get_cluster_replication_concurrency();
-		if (this->_cluster_replication->start(n, p, c, this->_storage, this->_cluster) < 0) {
+		bool skip_dump = ini_option_object().is_skip_dump_for_cluster_replication();
+		if (this->_cluster_replication->start(n, p, c, this->_storage, this->_cluster, skip_dump) < 0) {
 			return -1;
 		}
 	}
@@ -398,6 +399,7 @@ int flared::reload() {
 		string cl_repl_server_name = ini_option_object().get_cluster_replication_server_name();
 		int cl_repl_server_port = ini_option_object().get_cluster_replication_server_port();
 		int cl_repl_concurrency = ini_option_object().get_cluster_replication_concurrency();
+		bool skip_dump = ini_option_object().is_skip_dump_for_cluster_replication();
 
 		if (this->_cluster_replication->is_started()
 				&& (cl_repl_server_name != this->_cluster_replication->get_server_name()
@@ -406,7 +408,7 @@ int flared::reload() {
 		}
 
 		this->_cluster_replication->start(cl_repl_server_name, cl_repl_server_port, cl_repl_concurrency,
-			   this->_storage, this->_cluster);
+			   this->_storage, this->_cluster, skip_dump);
 	} else {
 		this->_cluster_replication->stop();
 	}

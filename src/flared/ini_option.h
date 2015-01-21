@@ -1,3 +1,22 @@
+/*
+ * Flare
+ * --------------
+ * Copyright (C) 2008-2014 GREE, Inc.
+ * 
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation; either version 2
+ * of the License, or (at your option) any later version.
+ * 
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ * 
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ */
 /**
  *	ini_option.h
  *
@@ -62,11 +81,20 @@ private:
 	bool				_storage_large;
 	int					_storage_lmemb;
 	int					_storage_nmemb;
-	int32_t				_storage_dfunit;
+	int32_t			_storage_dfunit;
 	string			_storage_type;
 	int					_thread_pool_size;
 	uint32_t 		_proxy_prior_netmask;
 	uint32_t 		_max_total_thread_queue;
+	bool				_time_watcher_enabled;
+	uint32_t 		_time_watcher_polling_interval_msec;
+	uint32_t 		_storage_access_watch_threshold_warn_msec;
+	uint32_t 		_storage_access_watch_threshold_ping_ng_msec;
+	bool				_cluster_replication;
+	string			_cluster_replication_server_name;
+	int					_cluster_replication_server_port;
+	int					_cluster_replication_concurrency;
+	bool				_cluster_replication_sync;
 public:
 	static const int default_back_log = 30;
 	static const int default_index_server_port = 12120;
@@ -93,6 +121,8 @@ public:
 	static const int default_thread_pool_size = 5;
 	static const uint32_t default_proxy_prior_netmask = 0x00;
 	static const uint32_t default_max_total_thread_queue = 0;				// unlimited
+	static const uint32_t default_time_watcher_polling_interval_msec = 0; // disabled
+	static const uint32_t default_cluster_replication_concurrency = 1;
 
 	ini_option();
 	virtual ~ini_option();
@@ -147,6 +177,15 @@ public:
 	int get_thread_pool_size() { return this->_thread_pool_size; };
 	uint32_t get_proxy_prior_netmask() { return this->_proxy_prior_netmask; };
 	uint32_t get_max_total_thread_queue() { return this->_max_total_thread_queue; };
+	bool get_time_watcher_enabled() { return this->_time_watcher_enabled; };
+	uint32_t get_time_watcher_polling_interval_msec() { return this->_time_watcher_polling_interval_msec; };
+	uint32_t get_storage_access_watch_threshold_warn_msec() { return this->_storage_access_watch_threshold_warn_msec; };
+	uint32_t get_storage_access_watch_threshold_ping_ng_msec() { return this->_storage_access_watch_threshold_ping_ng_msec; };
+	bool is_cluster_replication() { return this->_cluster_replication; }
+	string get_cluster_replication_server_name() { return this->_cluster_replication_server_name; };
+	int get_cluster_replication_server_port() { return this->_cluster_replication_server_port; }
+	int get_cluster_replication_concurrency() { return this->_cluster_replication_concurrency; };
+	bool get_cluster_replication_sync() { return this->_cluster_replication_sync; }
 
 private:
 	int _setup_cli_option(program_options::options_description& option);

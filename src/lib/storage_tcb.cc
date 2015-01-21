@@ -1,3 +1,22 @@
+/*
+ * Flare
+ * --------------
+ * Copyright (C) 2008-2014 GREE, Inc.
+ * 
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation; either version 2
+ * of the License, or (at your option) any later version.
+ * 
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ * 
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ */
 /**
  *	storage_tcb.cc
  *
@@ -114,6 +133,7 @@ int storage_tcb::set(entry& e, result& r, int b) {
 	uint8_t* p = NULL;
 	try {
 		if ((b & behavior_skip_lock) == 0) {
+			pthread_rwlock_rdlock(&this->_mutex_wholelock);
 			pthread_rwlock_wrlock(&this->_mutex_slot[mutex_index]);
 		}
 
@@ -276,12 +296,14 @@ int storage_tcb::set(entry& e, result& r, int b) {
 		delete[] p;
 		if ((b & behavior_skip_lock) == 0) {
 			pthread_rwlock_unlock(&this->_mutex_slot[mutex_index]);
+			pthread_rwlock_unlock(&this->_mutex_wholelock);
 		}
 		return error;
 	}
 	delete[] p;
 	if ((b & behavior_skip_lock) == 0) {
 		pthread_rwlock_unlock(&this->_mutex_slot[mutex_index]);
+		pthread_rwlock_unlock(&this->_mutex_wholelock);
 	}
 
 	return 0;
@@ -302,6 +324,7 @@ int storage_tcb::incr(entry& e, uint64_t value, result& r, bool increment, int b
 	bool expired = false;
 	try {
 		if ((b & behavior_skip_lock) == 0) {
+			pthread_rwlock_rdlock(&this->_mutex_wholelock);
 			pthread_rwlock_wrlock(&this->_mutex_slot[mutex_index]);
 		}
 
@@ -405,12 +428,14 @@ int storage_tcb::incr(entry& e, uint64_t value, result& r, bool increment, int b
 		}
 		if ((b & behavior_skip_lock) == 0) {
 			pthread_rwlock_unlock(&this->_mutex_slot[mutex_index]);
+			pthread_rwlock_unlock(&this->_mutex_wholelock);
 		}
 		return error;
 	}
 	delete[] p;
 	if ((b & behavior_skip_lock) == 0) {
 		pthread_rwlock_unlock(&this->_mutex_slot[mutex_index]);
+		pthread_rwlock_unlock(&this->_mutex_wholelock);
 	}
 
 	return 0;
@@ -495,6 +520,7 @@ int storage_tcb::remove(entry& e, result& r, int b) {
 
 	try {
 		if ((b & behavior_skip_lock) == 0) {
+			pthread_rwlock_rdlock(&this->_mutex_wholelock);
 			pthread_rwlock_wrlock(&this->_mutex_slot[mutex_index]);
 		}
 
@@ -540,11 +566,13 @@ int storage_tcb::remove(entry& e, result& r, int b) {
 	} catch (int error) {
 		if ((b & behavior_skip_lock) == 0) {
 			pthread_rwlock_unlock(&this->_mutex_slot[mutex_index]);
+			pthread_rwlock_unlock(&this->_mutex_wholelock);
 		}
 		return error;
 	}
 	if ((b & behavior_skip_lock) == 0) {
 		pthread_rwlock_unlock(&this->_mutex_slot[mutex_index]);
+		pthread_rwlock_unlock(&this->_mutex_wholelock);
 	}
 
 	return 0;
@@ -554,6 +582,7 @@ int storage_tcb::truncate(int b) {
 	log_info("truncating all data", 0);
 
 	if ((b & behavior_skip_lock) == 0) {
+		pthread_rwlock_wrlock(&this->_mutex_wholelock);
 		this->_mutex_slot_wrlock_all();
 	}
 
@@ -568,6 +597,7 @@ int storage_tcb::truncate(int b) {
 
 	if ((b & behavior_skip_lock) == 0) {
 		this->_mutex_slot_unlock_all();
+		pthread_rwlock_unlock(&this->_mutex_wholelock);
 	}
 
 	return r;
@@ -600,7 +630,7 @@ storage::iteration storage_tcb::iter_next(string& key) {
 	int len = 0;
 	char* p = NULL;
 	
-	this->_mutex_slot_rdlock_all();
+	pthread_rwlock_wrlock(&this->_mutex_wholelock);
 	{
 		if (this->_iter_first) {
 			tcbdbcurfirst(this->_cursor);
@@ -610,7 +640,7 @@ storage::iteration storage_tcb::iter_next(string& key) {
 		}
 		p = static_cast<char*>(tcbdbcurkey(this->_cursor, &len));
 	}
-	this->_mutex_slot_unlock_all();
+	pthread_rwlock_unlock(&this->_mutex_wholelock);
 
 	if (p == NULL) {
 		int ecode = tcbdbecode(this->_db);

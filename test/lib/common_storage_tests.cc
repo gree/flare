@@ -1,3 +1,22 @@
+/*
+ * Flare
+ * --------------
+ * Copyright (C) 2008-2014 GREE, Inc.
+ * 
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation; either version 2
+ * of the License, or (at your option) any later version.
+ * 
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ * 
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ */
 /**
  *  common_storage_tests.cc
  *
@@ -507,16 +526,16 @@ void storage_tester::iter_next_concurrent(concurrent_test_type type) {
 	}
 	delete keys;
 	if (type != ctt_remove) {
-		cut_assert(min_count <= total, cut_message("iteration did not fetch enough keys (%d/%d)", total, min_count));
+		cut_assert(min_count <= total, cut_message("iteration did not fetch enough keys (%d/%lu)", total, min_count));
 		if (total > min_count) {
-			cut_notify("Notice: iteration returns too many items (%d/%d)", total, min_count);
+			cut_notify("Notice: iteration returns too many items (%d/%lu)", total, min_count);
 		}
 		// Finally, check that we have all the keys from before iter_begin()
 		unsigned int expected = 0;
 		for (std::vector<unsigned short>::const_iterator it = key_counts.begin();
 				it != key_counts.end();
 				++it) {
-			cut_assert(*it > 0, cut_message("missing key detected (%d)", it - key_counts.begin()));
+			cut_assert(*it > 0, cut_message("missing key detected (%ld)", it - key_counts.begin()));
 		}
 	}
 }
@@ -753,7 +772,7 @@ void storage_tester::perform_incr_check(storage::entry &entry, bool is_incr, ent
 	if (type == et_number
 			|| type == et_zero
 			|| type == et_normal
-			|| type == et_expired && (b & storage::behavior_skip_timestamp)) {
+			|| (type == et_expired && (b & storage::behavior_skip_timestamp))) {
 		cut_assert_equal_int(storage::result_stored, result);
 		uint64_t expected_value = 0;
 		{
@@ -797,7 +816,7 @@ void storage_tester::remove_check(entry_type type, version_type version, int beh
 	storage::result result;
 	cut_assert_equal_int(0, this->_container->remove(entry, result, behaviors));
 	if ((type == et_normal /* normal case */
-				|| type == et_expired && (behaviors & storage::behavior_skip_timestamp) /* expiry check disabled */)
+				|| (type == et_expired && (behaviors & storage::behavior_skip_timestamp)) /* expiry check disabled */)
 			&& (version != vt_older || (behaviors & storage::behavior_skip_version))) {
 		cut_assert_equal_int(storage::result_deleted, result);
 		// Try to get the deleted object; this should fail
@@ -822,7 +841,7 @@ void storage_tester::get_check(entry_type type, version_type version, int behavi
 	storage::result result;
 	cut_assert_equal_int(0, this->_container->get(entry, result, behaviors));
 	if (type == et_normal /* normal case */
-			|| type == et_expired && (behaviors & storage::behavior_skip_timestamp) /* expiry check disabled */) {
+			|| (type == et_expired && (behaviors & storage::behavior_skip_timestamp)) /* expiry check disabled */) {
 		cut_assert_equal_int(storage::result_none, result);
 		cut_assert_equal_int(default_version, entry.version);
 		std::string expected = get_type_value(type);

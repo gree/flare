@@ -1,3 +1,22 @@
+/*
+ * Flare
+ * --------------
+ * Copyright (C) 2008-2014 GREE, Inc.
+ * 
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation; either version 2
+ * of the License, or (at your option) any later version.
+ * 
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ * 
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ */
 /**
  *	app.h
  *
@@ -12,16 +31,8 @@
 #include <iostream>
 #include <sstream>
 #include <string>
-#include <iterator>
 #include <vector>
 #include <map>
-#include <queue>
-
-#include <boost/algorithm/string.hpp>
-#include <boost/lexical_cast.hpp>
-#include <boost/regex.hpp>
-#include <boost/shared_ptr.hpp>
-#include <boost/tokenizer.hpp>
 
 #include <unistd.h>
 #include <stdio.h>
@@ -48,11 +59,6 @@
 #include "op.h"
 #include "cluster.h"
 #include "storage.h"
-#include "storage_tch.h"
-#include "storage_tcb.h"
-#ifdef HAVE_LIBKYOTOCABINET
-#include "storage_kch.h"
-#endif
 
 using namespace std;
 
@@ -61,6 +67,9 @@ namespace flare {
 
 extern stats* stats_object;
 extern status* status_object;
+
+class time_watcher;
+extern time_watcher* time_watcher_object;
 
 /**
  *	application base class

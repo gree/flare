@@ -17,11 +17,16 @@ libflare_la_SOURCES = \
 	binary_network_mapping.h \
 	binary_request_header.h \
 	binary_response_header.h \
+	bwlimitter.cc \
 	client.h client.cc \
 	cluster.h cluster.cc \
+	cluster_replication.h cluster_replication.cc \
+	cluster_replication_listener.h \
 	connection.h \
 	connection_tcp.h connection_tcp.cc \
+	handler_cluster_replication.h handler_cluster_replication.cc \
 	handler_controller.h handler_controller.cc \
+	handler_dump_replication.h handler_dump_replication.cc \
 	handler_monitor.h handler_monitor.cc \
 	handler_proxy.h handler_proxy.cc \
 	handler_reconstruction.h handler_reconstruction.cc \
@@ -70,6 +75,7 @@ libflare_la_SOURCES = \
 	op_version.h op_version.cc \
 	op_show.h op_show.cc \
 	op_shutdown.h op_shutdown.cc \
+	queue_forward_query.h queue_forward_query.cc \
 	queue_node_state.h queue_node_state.cc \
 	queue_node_sync.h queue_node_sync.cc \
 	queue_proxy_read.h queue_proxy_read.cc \
@@ -89,9 +95,16 @@ libflare_la_SOURCES = \
 	thread_handler.h \
 	thread_pool.h thread_pool.cc \
 	thread_queue.h thread_queue.cc \
+	time_util.h time_util.cc \
+	time_watcher.h time_watcher.cc \
+	time_watcher_observer.h time_watcher_observer.cc \
+	time_watcher_processor.h time_watcher_processor.cc \
+	time_watcher_scoped_observer.h time_watcher_scoped_observer.cc \
+	time_watcher_target_info.h \
 	coordinator.h coordinator.cc \
 	coordinator_factory.h coordinator_factory.cc \
-	file_coordinator.h file_coordinator.cc
+	file_coordinator.h file_coordinator.cc \
+	proxy_event_listener.h
 if ENABLE_ZOOKEEPER
 libflare_la_SOURCES += zookeeper_lock.h zookeeper_lock.cc zookeeper_coordinator.h zookeeper_coordinator.cc
 endif

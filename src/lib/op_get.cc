@@ -1,3 +1,22 @@
+/*
+ * Flare
+ * --------------
+ * Copyright (C) 2008-2014 GREE, Inc.
+ * 
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation; either version 2
+ * of the License, or (at your option) any later version.
+ * 
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ * 
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ */
 /**
  *	op_get.cc
  *
@@ -12,6 +31,7 @@
 #include "queue_proxy_read.h"
 #include "binary_request_header.h"
 #include "binary_response_header.h"
+#include "time_watcher_scoped_observer.h"
 
 namespace gree {
 namespace flare {
@@ -113,7 +133,13 @@ int op_get::_run_server() {
 		} else {
 			// storage i/o
 			storage::result r_storage;
-			if (this->_storage->get(*it, r_storage) < 0) {
+			int retcode;
+			{
+				storage_access_info info = { this->_thread };
+				time_watcher_scoped_observer ob(info);
+				retcode = this->_storage->get(*it, r_storage);
+			}
+			if (retcode < 0) {
 				log_warning("storage i/o error (key=%s) -> continue processing (pretending not found)", it->key.c_str());
 				r_map[it->key] = storage::result_not_found;
 				continue;

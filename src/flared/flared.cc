@@ -1,3 +1,22 @@
+/*
+ * Flare
+ * --------------
+ * Copyright (C) 2008-2014 GREE, Inc.
+ * 
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation; either version 2
+ * of the License, or (at your option) any later version.
+ * 
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ * 
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ */
 /**
  *	flared.cc
  *
@@ -15,6 +34,14 @@
 # include "handler_mysql_replication.h"
 #endif
 #include "show_node.h"
+#include "time_watcher.h"
+#include "time_watcher_observer.h"
+
+#include "storage_tch.h"
+#include "storage_tcb.h"
+#ifdef HAVE_LIBKYOTOCABINET
+#include "storage_kch.h"
+#endif
 
 namespace gree {
 namespace flare {
@@ -51,6 +78,8 @@ flared::~flared() {
 
 	delete status_object;
 	status_object = NULL;
+
+	delete time_watcher_object;
 }
 // }}}
 
@@ -114,6 +143,8 @@ int flared::startup(int argc, char **argv) {
 
 	this->_thread_pool = new thread_pool(ini_option_object().get_thread_pool_size(), ini_option_object().get_stack_size());
 
+	this->_cluster_replication = shared_cluster_replication(new cluster_replication(this->_thread_pool));
+
 	this->_cluster = new cluster(this->_thread_pool, ini_option_object().get_server_name(), ini_option_object().get_server_port());
 	this->_cluster->set_proxy_concurrency(ini_option_object().get_proxy_concurrency());
 	this->_cluster->set_reconstruction_interval(ini_option_object().get_reconstruction_interval());
@@ -121,6 +152,7 @@ int flared::startup(int argc, char **argv) {
 	this->_cluster->set_replication_type(ini_option_object().get_replication_type());
 	this->_cluster->set_max_total_thread_queue(ini_option_object().get_max_total_thread_queue());
 	this->_cluster->set_noreply_window_limit(ini_option_object().get_noreply_window_limit());
+	this->_cluster->add_proxy_event_listener(this->_cluster_replication);
 	if (this->_cluster->startup_node(ini_option_object().get_index_servers(),
 																	 ini_option_object().get_proxy_prior_netmask()) < 0) {
 		return -1;
@@ -181,6 +213,15 @@ int flared::startup(int argc, char **argv) {
 	handler_alarm* h_alarm = new handler_alarm(th_alarm);
 	th_alarm->trigger(h_alarm);
 
+	time_watcher_object = new time_watcher();
+	time_watcher_observer::set_threshold_warn_msec(ini_option_object().get_storage_access_watch_threshold_warn_msec());
+	time_watcher_observer::set_threshold_ping_ng_msec(ini_option_object().get_storage_access_watch_threshold_ping_ng_msec());
+	time_watcher_observer::set_storage_listener(this);
+	if (ini_option_object().get_time_watcher_enabled()) {
+		time_watcher_object->start(ini_option_object().get_time_watcher_polling_interval_msec());
+	}
+
+
 #ifdef ENABLE_MYSQL_REPLICATION
 	if (ini_option_object().is_mysql_replication()) {
 		shared_thread th_mysql_replication = this->_thread_pool->get(thread_pool::thread_type_mysql_replication);
@@ -188,6 +229,17 @@ int flared::startup(int argc, char **argv) {
 		th_mysql_replication->trigger(h_mysql_replication);
 	}
 #endif
+
+	// cluster replication
+	this->_cluster_replication->set_sync(ini_option_object().get_cluster_replication_sync());
+	if (ini_option_object().is_cluster_replication()) {
+		string n = ini_option_object().get_cluster_replication_server_name();
+		int p = ini_option_object().get_cluster_replication_server_port();
+		int c = ini_option_object().get_cluster_replication_concurrency();
+		if (this->_cluster_replication->start(n, p, c, this->_storage, this->_cluster) < 0) {
+			return -1;
+		}
+	}
 
 	if (this->_set_pid() < 0) {
 		return -1;
@@ -284,6 +336,33 @@ int flared::reload() {
 
 	// noreply_window_limit
 	this->_cluster->set_noreply_window_limit(ini_option_object().get_noreply_window_limit());
+
+	time_watcher_object->stop();
+	time_watcher_observer::set_threshold_warn_msec(ini_option_object().get_storage_access_watch_threshold_warn_msec());
+	time_watcher_observer::set_threshold_ping_ng_msec(ini_option_object().get_storage_access_watch_threshold_ping_ng_msec());
+	if (ini_option_object().get_time_watcher_enabled()) {
+		time_watcher_object->start(ini_option_object().get_time_watcher_polling_interval_msec());
+	}
+
+	// cluster replication
+	this->_cluster_replication->set_sync(ini_option_object().get_cluster_replication_sync());
+
+	if (ini_option_object().is_cluster_replication()) {
+		string cl_repl_server_name = ini_option_object().get_cluster_replication_server_name();
+		int cl_repl_server_port = ini_option_object().get_cluster_replication_server_port();
+		int cl_repl_concurrency = ini_option_object().get_cluster_replication_concurrency();
+
+		if (this->_cluster_replication->is_started()
+				&& (cl_repl_server_name != this->_cluster_replication->get_server_name()
+						|| cl_repl_server_port != this->_cluster_replication->get_server_port())) {
+			this->_cluster_replication->stop();
+		}
+
+		this->_cluster_replication->start(cl_repl_server_name, cl_repl_server_port, cl_repl_concurrency,
+			   this->_storage, this->_cluster);
+	} else {
+		this->_cluster_replication->stop();
+	}
 
 	log_notice("process successfully reloaded", 0);
 

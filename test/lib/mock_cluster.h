@@ -1,3 +1,22 @@
+/*
+ * Flare
+ * --------------
+ * Copyright (C) 2008-2014 GREE, Inc.
+ * 
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation; either version 2
+ * of the License, or (at your option) any later version.
+ * 
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ * 
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ */
 /**
  *	mock_cluster.h
  *
@@ -6,6 +25,8 @@
  */
 #ifndef MOCK_CLUSTER_H
 #define MOCK_CLUSTER_H
+
+#include <string>
 
 #include "cluster.h"
 #include "key_resolver_modular.h"
@@ -20,40 +41,24 @@ private:
 	using cluster::_node_partition_map;
 
 public:
-	mock_cluster(string server_name, int server_port):
-			cluster(NULL, server_name, server_port) {
-		this->_key_hash_algorithm = storage::hash_algorithm_simple;
-		this->_key_resolver = new key_resolver_modular(1024, 1, 4096);
-	};
+	mock_cluster(string server_name, int server_port);
+	virtual ~mock_cluster();
 
-	~mock_cluster() {
-	};
+	/*
+	 * set partition to node_partition_map
+	 */
+	cluster::partition set_partition(int partition, node master, node slave[] = NULL, int slave_num = 0);
+	/*
+	 * set node to node_map
+	 */
+	cluster::node set_node(string server_name, int server_port, role r, state s, int partition = 0, int balance = 0);
+	void clear_node_map();
+	void clear_node_partition_map();
+	void dump_node_map();
+	void dump_node_partition_map();
 
-	cluster::node set_node(string server_name, int server_port, cluster::role r, cluster::state s, int partition = 0, int balance = 0) {
-		string node_key = this->to_node_key(server_name, server_port);
-		if (this->_node_map.count(node_key) > 0) {
-			this->_node_map[node_key].node_role = r;
-			this->_node_map[node_key].node_state = s;
-			this->_node_map[node_key].node_partition = partition;
-			return this->_node_map[node_key];
-		} else {
-			cluster::node n;
-			n.node_server_name = server_name;
-			n.node_server_port = server_port;
-			n.node_role = r;
-			n.node_state = s;
-			if (r == cluster::role_proxy) {
-				n.node_partition = -1;
-			} else {
-				n.node_partition = partition;
-			}
-			n.node_balance = balance;
-			n.node_thread_type = this->_thread_type;
-			this->_thread_type++;
-			this->_node_map[node_key] = n;
-			return n;
-		}
-	};
+private:
+	cluster::partition_node _get_partition_node(string server_name, int server_port, int balance);
 };
 
 }	// namespace flare

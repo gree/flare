@@ -23,8 +23,11 @@ test_lib_la_SOURCES = \
 	test_binary_header.cc \
 	test_connection_tcp.cc \
 	test_cluster.cc \
+	test_cluster_replication.cc \
 	test_connection_iostream.cc \
-	test_handler_proxy.cc mock_cluster.h \
+	test_handler_proxy.cc \
+	test_handler_cluster_replication.cc \
+	test_handler_dump_replication.cc \
 	test_server_app.cc \
 	test_storage.cc \
 	test_storage_entry.cc \
@@ -65,13 +68,12 @@ test_lib_la_SOURCES = \
 	test_op_touch.cc \
 	test_op_verbosity.cc \
 	test_op_version.cc \
+	test_queue_forward_query.cc \
 	test_thread_pool.cc \
+	test_time_util.cc \
+	test_time_watcher.cc \
 	test_util.cc \
 	test_file_coordinator.cc
-if ENABLE_KYOTOCABINET
-test_lib_la_SOURCES += \
-	test_storage_kch.cc
-endif
 if ENABLE_ZOOKEEPER
 test_lib_la_SOURCES += \
 	test_zookeeper_coordinator.cc \
@@ -80,4 +82,6 @@ endif
 test_lib_la_SOURCES += \
 	connection_iostream.cc \
 	common_connection_tests.cc \
-	common_storage_tests.cc
+	common_storage_tests.cc \
+	mock_storage.cc \
+	mock_cluster.cc

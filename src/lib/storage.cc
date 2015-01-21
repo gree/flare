@@ -1,3 +1,22 @@
+/*
+ * Flare
+ * --------------
+ * Copyright (C) 2008-2014 GREE, Inc.
+ * 
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation; either version 2
+ * of the License, or (at your option) any later version.
+ * 
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ * 
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ */
 /**
  *	storage.cc
  *
@@ -37,6 +56,7 @@ storage::storage(string data_dir, int mutex_slot_size, int header_cache_size):
 	}
 	pthread_mutex_init(&_mutex_iter_lock, NULL);
 	pthread_rwlock_init(&this->_mutex_header_cache_map, NULL);
+	pthread_rwlock_init(&this->_mutex_wholelock, NULL);
 
 	this->_header_cache_map = tcmapnew();
 }
@@ -52,6 +72,7 @@ storage::~storage() {
 	this->_mutex_slot = NULL;
 	pthread_mutex_destroy(&_mutex_iter_lock);
 	pthread_rwlock_destroy(&_mutex_header_cache_map);
+	pthread_rwlock_destroy(&_mutex_wholelock);
 
 	if (this->_header_cache_map) {
 		tcmapdel(this->_header_cache_map);

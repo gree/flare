@@ -1,3 +1,22 @@
+/*
+ * Flare
+ * --------------
+ * Copyright (C) 2008-2014 GREE, Inc.
+ * 
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation; either version 2
+ * of the License, or (at your option) any later version.
+ * 
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ * 
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ */
 /**
  *	op_delete.cc
  *
@@ -11,6 +30,7 @@
 #include "op_delete.h"
 #include "queue_proxy_write.h"
 #include "binary_request_header.h"
+#include "time_watcher_scoped_observer.h"
 
 namespace gree {
 namespace flare {
@@ -92,7 +112,13 @@ int op_delete::_run_server() {
 
 	// storage i/o
 	storage::result r_storage;
-	if (this->_storage->remove(this->_entry, r_storage) < 0) {
+	int retcode;
+	{
+		storage_access_info info = { this->_thread };
+		time_watcher_scoped_observer ob(info);
+		retcode = this->_storage->remove(this->_entry, r_storage);
+	}
+	if (retcode < 0) {
 		return this->_send_result(result_server_error, "i/o error");
 	}
 

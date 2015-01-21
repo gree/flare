@@ -1,3 +1,22 @@
+/*
+ * Flare
+ * --------------
+ * Copyright (C) 2008-2014 GREE, Inc.
+ * 
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation; either version 2
+ * of the License, or (at your option) any later version.
+ * 
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ * 
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ */
 /**
  *	op_dump_key.cc
  *
@@ -7,7 +26,9 @@
  *
  *	$Id$
  */
+
 #include "op_dump_key.h"
+#include <inttypes.h>
 
 namespace gree {
 namespace flare {
@@ -21,7 +42,8 @@ op_dump_key::op_dump_key(shared_connection c, cluster* cl, storage* st):
 		_cluster(cl),
 		_storage(st),
 		_partition(-1),
-		_partition_size(0) {
+		_partition_size(0),
+		_bwlimitter() {
 }
 
 /**
@@ -38,8 +60,8 @@ op_dump_key::~op_dump_key() {
 /**
  *	send client request
  */
-int op_dump_key::run_client(int partition, int parition_size) {
-	if (this->_run_client(partition, parition_size) < 0) {
+int op_dump_key::run_client(int partition, int parition_size, uint64_t bwlimit) {
+	if (this->_run_client(partition, parition_size, bwlimit) < 0) {
 		return -1;
 	}
 
@@ -83,6 +105,18 @@ int op_dump_key::_parse_text_server_parameters() {
 			}
 			if (this->_partition_size < 0) {
 				log_debug("invalid partition_size (partition_size=%d)", this->_partition_size);
+				throw -1;
+			}
+		}
+
+		// bwlimit (optional)
+		n += util::next_digit(p+n, q, sizeof(q));
+		if (q[0]) {
+			try {
+				this->_bwlimitter.set_bwlimit(boost::lexical_cast<uint64_t>(q));
+				log_debug("storing bwlimit [%d]", this->_bwlimitter.get_bwlimit());
+			} catch (boost::bad_lexical_cast e) {
+				log_debug("invalid bwlimit (bwlimit=%s)", q);
 				throw -1;
 			}
 		}
@@ -132,6 +166,7 @@ int op_dump_key::_run_server() {
 		if (n < 0) {
 			break;
 		}
+		this->_bwlimitter.sleep_for_bwlimit(static_cast<uint64_t>(n));
 	}
 
 	this->_storage->iter_end();
@@ -142,9 +177,14 @@ int op_dump_key::_run_server() {
 	return this->_send_result(result_end);
 }
 
-int op_dump_key::_run_client(int partition, int partition_size) {
+int op_dump_key::_run_client(int partition, int partition_size, uint64_t bwlimit) {
 	char request[BUFSIZ];
-	snprintf(request, sizeof(request), "dump_key %d %d", partition, partition_size);
+
+	if (bwlimit > 0) {
+		snprintf(request, sizeof(request), "dump_key %d %d %" PRIu64, partition, partition_size, bwlimit);
+	} else {
+		snprintf(request, sizeof(request), "dump_key %d %d", partition, partition_size);
+	}
 
 	return this->_send_request(request);
 }

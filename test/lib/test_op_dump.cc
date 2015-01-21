@@ -1,3 +1,22 @@
+/*
+ * Flare
+ * --------------
+ * Copyright (C) 2008-2014 GREE, Inc.
+ * 
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation; either version 2
+ * of the License, or (at your option) any later version.
+ * 
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ * 
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ */
 /**
  *	test_op_dump.cc
  *
@@ -8,7 +27,7 @@
 
 #include "test_op.h"
 #include "connection_iostream.h"
-#include "storage_simple_map.h"
+#include "mock_storage.h"
 
 #include <app.h>
 #include <op_dump.h>
@@ -22,7 +41,7 @@ namespace test_op_dump
 		EXPOSE(op_dump, _wait);
 		EXPOSE(op_dump, _partition);
 		EXPOSE(op_dump, _partition_size);
-		EXPOSE(op_dump, _bwlimit);
+		EXPOSE(op_dump, _bwlimitter);
 	TEST_OP_CLASS_END;
 
 	void setup()
@@ -39,7 +58,7 @@ namespace test_op_dump
 		cut_assert_equal_int(0, op._wait);
 		cut_assert_equal_int(-1, op._partition);
 		cut_assert_equal_int(0, op._partition_size);
-		cut_assert_equal_int(0, op._bwlimit);
+		cut_assert_equal_int(0, op._bwlimitter.get_bwlimit());
 	}
 
 	void test_parse_text_server_parameters_wait()
@@ -50,7 +69,7 @@ namespace test_op_dump
 		cut_assert_equal_int(1, op._wait);
 		cut_assert_equal_int(-1, op._partition);
 		cut_assert_equal_int(0, op._partition_size);
-		cut_assert_equal_int(0, op._bwlimit);
+		cut_assert_equal_int(0, op._bwlimitter.get_bwlimit());
 	}
 
 	void test_parse_text_server_parameters_wait_partition()
@@ -71,7 +90,7 @@ namespace test_op_dump
 			cut_assert_equal_int(1, op._wait);
 			cut_assert_equal_int(-1, op._partition);
 			cut_assert_equal_int(0, op._partition_size);
-			cut_assert_equal_int(0, op._bwlimit);
+			cut_assert_equal_int(0, op._bwlimitter.get_bwlimit());
 		}
 		{
 			// partition > 0 -> partition_size > partition + 1
@@ -81,7 +100,7 @@ namespace test_op_dump
 			cut_assert_equal_int(1, op._wait);
 			cut_assert_equal_int(2, op._partition);
 			cut_assert_equal_int(5, op._partition_size);
-			cut_assert_equal_int(0, op._bwlimit);
+			cut_assert_equal_int(0, op._bwlimitter.get_bwlimit());
 		}
 	}
 
@@ -110,10 +129,10 @@ namespace test_op_dump
 		cut_assert_equal_int(1, op._wait);
 		cut_assert_equal_int(-1, op._partition);
 		cut_assert_equal_int(0, op._partition_size);
-		cut_assert_equal_int(5, op._bwlimit);
+		cut_assert_equal_int(5, op._bwlimitter.get_bwlimit());
 	}
 
-	void set_dummy_items(storage_simple_map& st, int item_num = 1, int item_size = 1)
+	void set_dummy_items(mock_storage& st, int item_num = 1, int item_size = 1)
 	{
 		for (int i = 0; i < item_num; i++) {
 			string key = string("key") + boost::lexical_cast<string>(i);
@@ -121,7 +140,7 @@ namespace test_op_dump
 			for (int j = 0; j < item_size; j++) {
 				value << "o";
 			}
-			st.set(key, value.str(), 0);
+			st.set_helper(key, value.str(), 0);
 		}
 	}
 
@@ -140,13 +159,13 @@ namespace test_op_dump
 	}
 
 	void run_server_test(test_op_dump& op, int item_num, int item_size, int wait = 0, int bwlimit = 0,
-		                   int sleep_precision = 1, int expected = 0)
+		                   int sleep_precision = 1)
 	{
 		static const long one_sec = 1000000L;
 		struct timeval start_tv, end_tv;
 
 		gettimeofday(&start_tv, NULL);
-		cut_assert_equal_int(expected, op._run_server());
+		op._run_server();
 		gettimeofday(&end_tv, NULL);
 
 		if (wait == 0 && bwlimit == 0) {
@@ -176,10 +195,10 @@ namespace test_op_dump
 		shared_connection c(new connection_sstream("\r\n"));
 		connection_sstream& cstr = dynamic_cast<connection_sstream&>(*c);
 		cluster cl(NULL, "", 0);
-		storage_simple_map st("", 0, 0);
+		mock_storage st("", 0, 0);
 		thread_pool tp(1);
 		test_op_dump op(c, &cl, &st);
-		op.set_thread(shared_thread(new thread(&tp)));
+		op.set_thread(shared_thread(new gree::flare::thread(&tp)));
 
 		set_dummy_items(st, 5, 5);
 		cut_assert_equal_int(0, op._parse_text_server_parameters());
@@ -191,15 +210,15 @@ namespace test_op_dump
 	{
 		shared_connection c(new connection_sstream(" 1000000\r\n"));
 		cluster cl(NULL, "", 0);
-		storage_simple_map st("", 0, 0);
+		mock_storage st("", 0, 0);
 		thread_pool tp(1);
 		test_op_dump op(c, &cl, &st);
-		op.set_thread(shared_thread(new thread(&tp)));
+		op.set_thread(shared_thread(new gree::flare::thread(&tp)));
 
 		set_dummy_items(st, 1, 10);
 		cut_assert_equal_int(0, op._parse_text_server_parameters());
 		cut_assert_equal_int(1000000, op._wait);
-		cut_assert_equal_int(0, op._bwlimit);
+		cut_assert_equal_int(0, op._bwlimitter.get_bwlimit());
 		run_server_test(op, 1, 10, 1000000, 0, 100000);
 	}
 
@@ -207,15 +226,15 @@ namespace test_op_dump
 	{
 		shared_connection c(new connection_sstream(" 0 -1 0 1\r\n"));
 		cluster cl(NULL, "", 0);
-		storage_simple_map st("", 0, 0);
+		mock_storage st("", 0, 0);
 		thread_pool tp(1);
 		test_op_dump op(c, &cl, &st);
-		op.set_thread(shared_thread(new thread(&tp)));
+		op.set_thread(shared_thread(new gree::flare::thread(&tp)));
 
 		set_dummy_items(st, 1, 1024);
 		cut_assert_equal_int(0, op._parse_text_server_parameters());
 		cut_assert_equal_int(0, op._wait);
-		cut_assert_equal_int(1, op._bwlimit);
+		cut_assert_equal_int(1, op._bwlimitter.get_bwlimit());
 		run_server_test(op, 1, 1024, 0, 1, 100000);
 	}
 
@@ -223,15 +242,15 @@ namespace test_op_dump
 	{
 		shared_connection c(new connection_sstream(" 2000000 -1 0 1\r\n"));
 		cluster cl(NULL, "", 0);
-		storage_simple_map st("", 0, 0);
+		mock_storage st("", 0, 0);
 		thread_pool tp(1);
 		test_op_dump op(c, &cl, &st);
-		op.set_thread(shared_thread(new thread(&tp)));
+		op.set_thread(shared_thread(new gree::flare::thread(&tp)));
 
 		set_dummy_items(st, 1, 1024);
 		cut_assert_equal_int(0, op._parse_text_server_parameters());
 		cut_assert_equal_int(2000000, op._wait);
-		cut_assert_equal_int(1, op._bwlimit);
+		cut_assert_equal_int(1, op._bwlimitter.get_bwlimit());
 		run_server_test(op, 1, 1024, 2000000, 1, 100000);
 	}
 
@@ -239,15 +258,15 @@ namespace test_op_dump
 	{
 		shared_connection c(new connection_sstream(" 100 -1 0 1\r\n"));
 		cluster cl(NULL, "", 0);
-		storage_simple_map st("", 0, 0);
+		mock_storage st("", 0, 0);
 		thread_pool tp(1);
 		test_op_dump op(c, &cl, &st);
-		op.set_thread(shared_thread(new thread(&tp)));
+		op.set_thread(shared_thread(new gree::flare::thread(&tp)));
 
 		set_dummy_items(st, 1, 1024);
 		cut_assert_equal_int(0, op._parse_text_server_parameters());
 		cut_assert_equal_int(100, op._wait);
-		cut_assert_equal_int(1, op._bwlimit);
+		cut_assert_equal_int(1, op._bwlimitter.get_bwlimit());
 		run_server_test(op, 1, 1024, 100, 1, 100000);
 	}
 

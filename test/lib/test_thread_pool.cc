@@ -1,3 +1,22 @@
+/*
+ * Flare
+ * --------------
+ * Copyright (C) 2008-2014 GREE, Inc.
+ * 
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation; either version 2
+ * of the License, or (at your option) any later version.
+ * 
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ * 
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ */
 /**
  *	test_thread_pool.cc
  *
@@ -35,7 +54,7 @@ namespace test_thread_pool
 		{
 			cut_assert_equal_int(1, pool._index.fetch());
 			//	Put a dummy thread (Type 0, ID 1, ensuring collision) in the global map
-			shared_thread dummy(new thread(&pool));
+			shared_thread dummy(new gree::flare::thread(&pool));
 			dummy->setup(0, pool._index.fetch());
 			pool._global_map[0][dummy->get_id()] = dummy;
 			// Test
@@ -54,7 +73,7 @@ namespace test_thread_pool
 		{
 			cut_assert_equal_int(1, pool._index.fetch());
 			//	Put a dummy thread (Type 0, ID 1, ensuring collision) in the global map
-			shared_thread dummy(new thread(&pool));
+			shared_thread dummy(new gree::flare::thread(&pool));
 			dummy->setup(0, pool._index.fetch());
 			pool._global_map[0][dummy->get_id()] = dummy;
 			// Test

@@ -1,3 +1,22 @@
+/*
+ * Flare
+ * --------------
+ * Copyright (C) 2008-2014 GREE, Inc.
+ * 
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation; either version 2
+ * of the License, or (at your option) any later version.
+ * 
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ * 
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ */
 /**
  *	test_op_gat.cc
  *
@@ -123,9 +142,9 @@ namespace test_op_gat
 	void test_send_text_result_not_found() {
 		shared_connection c(new connection_sstream(std::string()));
 		test_op_gat op(c);
-		cut_assert_equal_int(0, op._send_text_result(op::result_not_found, NULL));
-		cut_assert_equal_string("NOT_FOUND\r\n",
-				static_cast<const connection_sstream&>(*c).get_output().c_str());
+		const char* expected_msg = "NOT_FOUND\r\n";
+		cut_assert_equal_int(strlen(expected_msg), op._send_text_result(op::result_not_found, NULL));
+		cut_assert_equal_string(expected_msg, static_cast<const connection_sstream&>(*c).get_output().c_str());
 	}
 
 	void teardown()

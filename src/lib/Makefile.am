@@ -82,6 +82,7 @@ libflare_la_SOURCES = \
 	queue_proxy_write.h queue_proxy_write.cc \
 	queue_update_monitor_option.h queue_update_monitor_option.cc \
 	server.h server.cc \
+	server_app.h server_app.cc \
 	singleton.h \
 	stats.h stats.cc \
 	status.h \

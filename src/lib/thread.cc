@@ -39,14 +39,6 @@ void* thread_run(void* p) {
 	thread* tmp = (thread*)p;
 	shared_thread t = tmp->get_shared_thread();
 
-	// signal mask
-	sigset_t ss;
-	sigfillset(&ss);
-	sigdelset(&ss, SIGUSR1);
-	if (pthread_sigmask(SIG_SETMASK, &ss, NULL) < 0) {
-		log_err("pthread_sigmask() failed: %s (%d)", util::strerror(errno), errno);
-	}
-
 	bool is_pool = false;
 	thread::shutdown_request r;
 	do {
@@ -144,9 +136,12 @@ thread::~thread() {
 
 // {{{ public methods
 /**
- *	preparing thread (creating thread and make it wait for signal)
+ *	preparing thread (creating thread)
  *
- *	(should be called from parent thread)
+ *  A created thread inherit the signal mask of the creating(= main) thread.
+ *  Expect all signals without SIGUSR1 are blocked.
+ *
+ *	This method should be called from parent thread.
  */
 int thread::startup(weak_thread myself, int stack_size) {
 	this->_myself = myself;
@@ -248,6 +243,15 @@ int thread::run() {
 		return -1;
 	}
 
+	// signal mask
+	// Every threads should not block SIGUSR1.
+	sigset_t ss;
+	sigfillset(&ss);
+	sigdelset(&ss, SIGUSR1);
+	if (pthread_sigmask(SIG_SETMASK, &ss, NULL) < 0) {
+		log_err("pthread_sigmask() failed: %s (%d)", util::strerror(errno), errno);
+	}
+
 	pthread_mutex_lock(&this->_mutex_running);
 	this->_running = true;
 	pthread_mutex_unlock(&this->_mutex_running);
@@ -332,7 +336,7 @@ int thread::shutdown(bool graceful, bool async) {
 	this->trigger(NULL);
 
 	if (this->_running) {
-		log_debug("sending SIGUSR1 to %u", this->_thread_id);
+		log_notice("sending [SIGUSR1] to thread_id:%u", this->_thread_id);
 		pthread_kill(this->_thread_id, SIGUSR1);
 		pthread_cond_broadcast(&this->_cond_queue);
 	}

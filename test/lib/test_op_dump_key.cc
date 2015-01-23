@@ -46,6 +46,8 @@ namespace test_op_dump_key
 		EXPOSE(op_dump_key, _bwlimitter);
 	TEST_OP_CLASS_END;
 
+	static const int dump_key_overhead = 5;
+
 	void setup()
 	{
 		stats_object = new stats();
@@ -129,7 +131,7 @@ namespace test_op_dump_key
 		int64_t elapsed_usec = ((end_tv.tv_sec - start_tv.tv_sec) * one_sec + (end_tv.tv_usec - start_tv.tv_usec));
 		int64_t estimated_bwlimit_usec = 0;
 		if (bwlimit != 0) {
-			estimated_bwlimit_usec = item_num * (item_key_size + 8) * one_sec / (bwlimit * 1024);
+			estimated_bwlimit_usec = item_num * (item_key_size + dump_key_overhead) * one_sec / (bwlimit * 1024);
 		}
 
 		int64_t actual_sleep = elapsed_usec / sleep_precision;
@@ -142,7 +144,7 @@ namespace test_op_dump_key
 		static const long one_sec = 1000000L;
 		int bwlimit = 1000; // KB
 		int item_key_size = 1024;
-		int item_num = bwlimit * 1024 / (item_key_size + 8);
+		int item_num = bwlimit * 1024 / (item_key_size + dump_key_overhead);
 
 		shared_connection c(new connection_sstream(" -1 0 1000\r\n"));
 		cluster cl(NULL, "", 0);

@@ -27,7 +27,7 @@
 #ifndef	FLARED_H
 #define	FLARED_H
 
-#include "app.h"
+#include "server_app.h"
 #include "cluster_replication.h"
 #include "ini_option.h"
 #include "stats_node.h"
@@ -44,9 +44,7 @@ typedef shared_ptr<cluster_replication> shared_cluster_replication;
 /**
  *	flared application class
  */
-class flared :
-	public app,
-	public storage_listener {
+class flared : public server_app, public storage_listener {
 private:
 	server*				_server;
 	thread_pool*	_thread_pool;
@@ -77,7 +75,6 @@ protected:
 
 private:
 	int _set_resource_limit();
-	int _set_signal_handler();
 };
 
 }	// namespace flare

@@ -27,7 +27,7 @@
 #ifndef	FLAREI_H
 #define	FLAREI_H
 
-#include "app.h"
+#include "server_app.h"
 #include "handler_alarm.h"
 #include "handler_request.h"
 #include "handler_controller.h"
@@ -42,7 +42,7 @@ namespace flare {
 /**
  *	flarei application class
  */
-class flarei : public app {
+class flarei : public server_app {
 private:
 	server*								_server;
 	thread_pool*					_thread_pool;
@@ -67,7 +67,6 @@ protected:
 
 private:
 	int _set_resource_limit();
-	int _set_signal_handler();
 };
 
 }	// namespace flare

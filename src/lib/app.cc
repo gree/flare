@@ -45,8 +45,7 @@ time_watcher* time_watcher_object = NULL;
 app::app():
 		_ident(""),
 		_pid(0),
-		_pid_path(""),
-		_shutdown_request(false) {
+		_pid_path("") {
 }
 
 /**

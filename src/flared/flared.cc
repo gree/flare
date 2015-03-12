@@ -268,7 +268,12 @@ int flared::startup(int argc, char **argv) {
 #endif
 
 	// cluster replication
-	this->_cluster_replication->set_sync(ini_option_object().get_cluster_replication_sync());
+	cluster_replication::mode m = cluster_replication::mode_duplicate;
+	if (cluster_replication::mode_cast(ini_option_object().get_cluster_replication_mode(), m) >= 0) {
+		this->_cluster_replication->set_mode(m);
+	} else {
+		return -1;
+	}
 	if (ini_option_object().is_cluster_replication()) {
 		string n = ini_option_object().get_cluster_replication_server_name();
 		int p = ini_option_object().get_cluster_replication_server_port();
@@ -392,23 +397,25 @@ int flared::reload() {
 	}
 
 	// cluster replication
-	this->_cluster_replication->set_sync(ini_option_object().get_cluster_replication_sync());
+	cluster_replication::mode m = cluster_replication::mode_duplicate;
+	if (cluster_replication::mode_cast(ini_option_object().get_cluster_replication_mode(), m) >= 0) {
+		this->_cluster_replication->set_mode(m);
+		if (ini_option_object().is_cluster_replication()) {
+			string cl_repl_server_name = ini_option_object().get_cluster_replication_server_name();
+			int cl_repl_server_port = ini_option_object().get_cluster_replication_server_port();
+			int cl_repl_concurrency = ini_option_object().get_cluster_replication_concurrency();
 
-	if (ini_option_object().is_cluster_replication()) {
-		string cl_repl_server_name = ini_option_object().get_cluster_replication_server_name();
-		int cl_repl_server_port = ini_option_object().get_cluster_replication_server_port();
-		int cl_repl_concurrency = ini_option_object().get_cluster_replication_concurrency();
+			if (this->_cluster_replication->is_started()
+					&& (cl_repl_server_name != this->_cluster_replication->get_server_name()
+							|| cl_repl_server_port != this->_cluster_replication->get_server_port())) {
+				this->_cluster_replication->stop();
+			}
 
-		if (this->_cluster_replication->is_started()
-				&& (cl_repl_server_name != this->_cluster_replication->get_server_name()
-						|| cl_repl_server_port != this->_cluster_replication->get_server_port())) {
+			this->_cluster_replication->start(cl_repl_server_name, cl_repl_server_port, cl_repl_concurrency,
+				   this->_storage, this->_cluster);
+		} else {
 			this->_cluster_replication->stop();
 		}
-
-		this->_cluster_replication->start(cl_repl_server_name, cl_repl_server_port, cl_repl_concurrency,
-			   this->_storage, this->_cluster);
-	} else {
-		this->_cluster_replication->stop();
 	}
 
 	log_notice("process successfully reloaded", 0);

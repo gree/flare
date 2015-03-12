@@ -50,12 +50,13 @@
 #include "thread_pool.h"
 #include "key_resolver.h"
 #include "coordinator.h"
-#include "proxy_event_listener.h"
 
 using namespace std;
 
 namespace gree {
 namespace flare {
+
+typedef class proxy_event_listener proxy_event_listener;
 
 typedef boost::shared_ptr<proxy_event_listener> shared_proxy_event_listener;
 

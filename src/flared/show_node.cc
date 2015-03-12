@@ -82,7 +82,7 @@ vector<string> show_node::lines() {
 	l.PUSH_BACK_STRING_WITH_STREAM("cluster_replication_server_name: " << ini_option_object().get_cluster_replication_server_name());
 	l.PUSH_BACK_STRING_WITH_STREAM("cluster_replication_server_port: " << ini_option_object().get_cluster_replication_server_port());
 	l.PUSH_BACK_STRING_WITH_STREAM("cluster_replication_concurrency: " << ini_option_object().get_cluster_replication_concurrency());
-	l.PUSH_BACK_STRING_WITH_STREAM("cluster_replication_sync: " << ini_option_object().get_cluster_replication_sync());
+	l.PUSH_BACK_STRING_WITH_STREAM("cluster_replication_mode: " << ini_option_object().get_cluster_replication_mode());
 
 	return l;
 }

@@ -26,7 +26,8 @@
 #include "app.h"
 #include "stats.h"
 #include "handler_cluster_replication.h"
-#include "queue_forward_query.h"
+#include "queue_proxy_read.h"
+#include "queue_proxy_write.h"
 #include "server.h"
 #include "storage.h"
 
@@ -133,7 +134,9 @@ namespace test_handler_cluster_replication {
 		// execute
 		for (int i = 0; i < 5; i++) {
 			storage::entry e = get_entry(" key 0 0 5 3", storage::parse_type_set, "VALUE");
-			shared_queue_forward_query q(new queue_forward_query(e, "set"));
+			vector<string> proxy;
+			shared_queue_proxy_write q(new queue_proxy_write(NULL, NULL, proxy, e, "set"));
+			q->set_post_proxy(true);
 			replicate_sync(t, q, "STORED", "set key 0 0 5 3\n", "VALUE\n"); 
 			cut_assert_equal_int(0, stats_object->get_total_thread_queue());
 			cut_assert_equal_boolean(true, q->is_success());
@@ -149,12 +152,14 @@ namespace test_handler_cluster_replication {
 	void test_run_success_async() {
 		// prepare
 		shared_thread t = start_handler();
-		shared_queue_forward_query queues[5];
+		shared_queue_proxy_write queues[5];
 
 		// execute
 		for (int i = 0; i < 5; i++) {
 			storage::entry e = get_entry(" key 0 0 5 3", storage::parse_type_set, "VALUE");
-			shared_queue_forward_query q(new queue_forward_query(e, "set"));
+			vector<string> proxy;
+			shared_queue_proxy_write q(new queue_proxy_write(NULL, NULL, proxy, e, "set"));
+			q->set_post_proxy(true);
 			queues[i] = q;
 			enqueue(t, q);
 		}

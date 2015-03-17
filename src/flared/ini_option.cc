@@ -86,7 +86,7 @@ ini_option::ini_option():
 		_cluster_replication_server_name(""),
 		_cluster_replication_server_port(default_server_port),
 		_cluster_replication_concurrency(default_proxy_concurrency),
-		_cluster_replication_sync(false) {
+		_cluster_replication_mode("") {
 	pthread_mutex_init(&this->_mutex_index_servers, NULL);
 }
 
@@ -362,7 +362,7 @@ int ini_option::load() {
 		}
 
 		if (opt_var_map.count("cluster-replication")) {
-			this->_cluster_replication = true;
+			this->_cluster_replication = opt_var_map["cluster-replication"].as<bool>();
 		}
 
 		if (opt_var_map.count("cluster-replication-server-name")) {
@@ -379,8 +379,15 @@ int ini_option::load() {
 			this->_cluster_replication_concurrency = this->_proxy_concurrency;
 		}
 
-		if (opt_var_map.count("cluster-replication-sync")) {
-				this->_cluster_replication_sync = true;
+		if (opt_var_map.count("cluster-replication-mode")) {
+			cluster_replication::mode m;
+			if (cluster_replication::mode_cast(opt_var_map["cluster-replication-mode"].as<string>(), m) < 0) {
+				log_warning("unknown cluster replication mode [%s]", opt_var_map["cluster-replication-mode"].as<string>().c_str());
+				throw -1;
+			}
+			this->_cluster_replication_mode = opt_var_map["cluster-replication-mode"].as<string>();
+		} else {
+			this->_cluster_replication_mode = cluster_replication::mode_cast(cluster_replication::mode_duplicate);
 		}
 	} catch (int e) {
 		cout << option << endl;
@@ -533,8 +540,12 @@ int ini_option::reload() {
 			this->_storage_access_watch_threshold_ping_ng_msec = opt_var_map["storage-access-watch-threshold-ping-ng-msec"].as<uint32_t>();
 		}
 
-		log_notice("  cluster_replication: %s -> %s", this->_cluster_replication ? "true" : "false", opt_var_map.count("cluster-replication") ? "true" : "false");
-		this->_cluster_replication = opt_var_map.count("cluster-replication") ? true : false;
+		if (opt_var_map.count("cluster-replication")) {
+			log_notice("  cluster_replication: %s -> %s",
+					this->_cluster_replication ? "true" : "false",
+					opt_var_map["cluster-replication"].as<bool>() ? "true" : "false");
+			this->_cluster_replication = opt_var_map["cluster-replication"].as<bool>();
+		}
 
 		if (opt_var_map.count("cluster-replication-server-name")) {
 			log_notice("  cluster_replication_server_name: %s -> %s", this->_cluster_replication_server_name.c_str(), opt_var_map["cluster-replication-server-name"].as<string>().c_str());
@@ -546,8 +557,17 @@ int ini_option::reload() {
 			this->_cluster_replication_server_port = opt_var_map["cluster-replication-server-port"].as<int>();
 		}
 
-		log_notice("  cluster_replication_sync: %s -> %s", this->_cluster_replication_sync ? "true" : "false", opt_var_map.count("cluster-replication-sync") ? "true" : "false");
-		this->_cluster_replication_sync = opt_var_map.count("cluster-replication-sync") ? true : false;
+		if (opt_var_map.count("cluster-replication-mode")) {
+			log_notice("  cluster_replication_mode: %s -> %s",
+					this->_cluster_replication_mode.c_str(),
+					opt_var_map["cluster-replication-mode"].as<string>().c_str());
+			cluster_replication::mode m;
+			if (cluster_replication::mode_cast(opt_var_map["cluster-replication-mode"].as<string>(), m) < 0) {
+				log_warning("unknown cluster replication mode [%s]", opt_var_map["cluster-replication-mode"].as<string>().c_str());
+				throw -1;
+			}
+			this->_cluster_replication_mode = opt_var_map["cluster-replication-mode"].as<string>();
+		}
 
 	} catch (int e) {
 		ostringstream ss;
@@ -625,11 +645,11 @@ int ini_option::_setup_config_option(program_options::options_description& optio
 		("time-watcher-polling-interval-msec",					program_options::value<uint32_t>(),	"time watcher polling interval (msec)")
 		("storage-access-watch-threshold-warn-msec",		program_options::value<uint32_t>(),	"threshold to log error when a thread accessing storage long time (msec)")
 		("storage-access-watch-threshold-ping-ng-msec",	program_options::value<uint32_t>(),	"threshold to return ping ng when a thread accessing storage long time (msec)")
-		("cluster-replication",																								"enable cluster replication")
+		("cluster-replication",							program_options::value<bool>(),		"enable cluster replication")
 		("cluster-replication-server-name",	program_options::value<string>(),	"destination server name to replicate over cluster (dynamic)")
 		("cluster-replication-server-port",	program_options::value<int>(),		"destination server port to replicate over cluster (dynamic)")
 		("cluster-replication-concurrency",	program_options::value<int>(),		"concurrency to replicate over cluster")
-		("cluster-replication-sync",																					"type of the replication over cluster");
+		("cluster-replication-mode",				program_options::value<string>(),	"cluster replication mode (write, read, both) (write)");
 
 	return 0;
 }

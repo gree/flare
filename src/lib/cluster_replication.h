@@ -36,6 +36,9 @@
 #include "storage.h"
 #include "thread_pool.h"
 
+#include "queue_proxy_read.h"
+#include "queue_proxy_write.h"
+
 namespace gree {
 namespace flare {
 
@@ -43,13 +46,19 @@ namespace flare {
  *	class to handle replication over cluster
  **/
 class cluster_replication : public proxy_event_listener {
+public:
+	enum							mode {
+			mode_duplicate				= 1,
+			mode_forward					= 2,
+	};
+
 private:
 	thread_pool*			_thread_pool;
 	string						_server_name;
 	int								_server_port;
 	int								_concurrency;
 	bool							_started;
-	bool							_sync;
+	mode							_mode;
 	pthread_mutex_t		_mutex_started;
 
 public:
@@ -60,19 +69,41 @@ public:
 	int start(string server_name, int server_port, int concurrency, storage* st, cluster* cl);
 	int stop();
 
-	int set_sync(bool sync) { this->_sync = sync; return 0; };
-	bool get_sync() { return this->_sync; };
+	int set_mode(mode m) { this->_mode = m; return 0; };
+	mode get_mode() { return this->_mode; };
 	string get_server_name() { return this->_server_name; };
 	int get_server_port() { return this->_server_port; };
 	int get_concurrency() { return this->_concurrency; };
 
-	virtual int on_pre_proxy_read(op_proxy_read* op);
-	virtual int on_pre_proxy_write(op_proxy_write* op);
-	virtual int on_post_proxy_write(op_proxy_write* op);
+	virtual cluster::proxy_request on_pre_proxy_read(op_proxy_read* op, storage::entry& e, void* parameter, shared_queue_proxy_read& q_result);
+	virtual cluster::proxy_request on_pre_proxy_write(op_proxy_write* op, shared_queue_proxy_write& q_result, uint64_t generic_value);
+	virtual cluster::proxy_request on_post_proxy_write(op_proxy_write* op, cluster::node node);
+
+	static inline int mode_cast(string s, mode& m) {
+		if (s == "duplicate") {
+			m = mode_duplicate;
+		} else if (s == "forward") {
+			m = mode_forward;
+		} else {
+			return -1;
+		}
+		return 0;
+	};
+
+	static inline string mode_cast(mode m) {
+		switch (m) {
+		case mode_duplicate:
+			return "duplicate";
+		case mode_forward:
+			return "forward";
+		}
+		return "";
+	};
 
 private:
 	int _start_dump_replication(string server_name, int server_port, storage* st, cluster* cl);
 	int _stop_dump_replication();
+	int _enqueue(shared_thread_queue q, int key_hash_value, bool sync);
 };
 
 }	// namespace flare

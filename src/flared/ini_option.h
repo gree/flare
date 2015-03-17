@@ -29,6 +29,7 @@
 
 #include "ini.h"
 #include "cluster.h"
+#include "cluster_replication.h"
 #include "storage.h"
 
 namespace gree {
@@ -94,7 +95,7 @@ private:
 	string			_cluster_replication_server_name;
 	int					_cluster_replication_server_port;
 	int					_cluster_replication_concurrency;
-	bool				_cluster_replication_sync;
+	string			_cluster_replication_mode;
 public:
 	static const int default_back_log = 30;
 	static const int default_index_server_port = 12120;
@@ -185,7 +186,7 @@ public:
 	string get_cluster_replication_server_name() { return this->_cluster_replication_server_name; };
 	int get_cluster_replication_server_port() { return this->_cluster_replication_server_port; }
 	int get_cluster_replication_concurrency() { return this->_cluster_replication_concurrency; };
-	bool get_cluster_replication_sync() { return this->_cluster_replication_sync; }
+	string get_cluster_replication_mode() { return this->_cluster_replication_mode; }
 
 private:
 	int _setup_cli_option(program_options::options_description& option);

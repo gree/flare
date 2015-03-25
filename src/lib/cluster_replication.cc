@@ -30,7 +30,10 @@
 #include "handler_cluster_replication.h"
 #include "handler_dump_replication.h"
 #include "logger.h"
-#include "queue_forward_query.h"
+#include "op_proxy_read.h"
+#include "op_proxy_write.h"
+#include "queue_proxy_read.h"
+#include "queue_proxy_write.h"
 
 namespace gree {
 namespace flare {
@@ -48,7 +51,7 @@ cluster_replication::cluster_replication(thread_pool* tp):
 		_server_port(0),
 		_concurrency(0),
 		_started(false),
-		_sync (false) {
+		_mode (mode_duplicate) {
 	pthread_mutex_init(&this->_mutex_started, NULL);
 }
 
@@ -75,12 +78,6 @@ int cluster_replication::start(string server_name, int server_port, int concurre
 		return -1;
 	}
 
-	cluster::node n = cl->get_node(cl->get_server_name(), cl->get_server_port());
-	if (n.node_role == cluster::role_proxy) {
-		log_warning("unavailable to start cluster replication becuase this node is proxy node", 0);
-		return -1;
-	}
-
 	if (concurrency <= 0) {
 		log_warning("concurrency is not valid, concurrency=%d", concurrency);
 		return -1;
@@ -99,7 +96,13 @@ int cluster_replication::start(string server_name, int server_port, int concurre
 	this->_server_port = server_port;
 	this->_concurrency = concurrency;
 
-	this->_start_dump_replication(server_name, server_port, st, cl);
+	cluster::node n = cl->get_node(cl->get_server_name(), cl->get_server_port());
+	if (this->_mode == mode_duplicate && n.node_role == cluster::role_master) {
+		// replicate the dump data over cluster when the mode of master server is duplicate
+		this->_start_dump_replication(server_name, server_port, st, cl);
+	} else {
+		log_notice("skip to start dump replication, dump is started only when node is master and mode is duplicate", 0);
+	}
 
 	return 0;
 }
@@ -133,66 +136,64 @@ int cluster_replication::stop() {
 /**
  *	implementation of on_pre_proxy_read event handling.
  */
-int cluster_replication::on_pre_proxy_read(op_proxy_read* op) {
-	// nothing to do
-	return 0;
+cluster::proxy_request cluster_replication::on_pre_proxy_read(op_proxy_read* op, storage::entry& e, void* parameter, shared_queue_proxy_read& q_result) {
+	pthread_mutex_lock(&this->_mutex_started);
+	if (!this->_started) {
+		pthread_mutex_unlock(&this->_mutex_started);
+		return cluster::proxy_request_continue;
+	}
+	pthread_mutex_unlock(&this->_mutex_started);
+
+	if (this->_mode == mode_forward) {
+		// forwarding read query only when mode is forward
+		// not depend on the role of server
+		vector<string> proxy = op->get_proxy();
+		shared_queue_proxy_read q(new queue_proxy_read(NULL, NULL, proxy, e, parameter, op->get_ident()));
+		int key_hash_value = e.get_key_hash_value(storage::hash_algorithm_murmur);
+		if (this->_enqueue(q, key_hash_value, true)) {
+			return cluster::proxy_request_error_enqueue;
+		}
+		q_result = q;
+
+		return cluster::proxy_request_complete;
+	}
+
+	return cluster::proxy_request_continue;
 }
 
 /**
  *	implementation of on_pre_proxy_write event handling.
  */
-int cluster_replication::on_pre_proxy_write(op_proxy_write* op) {
-	// nothing to do
-	return 0;
+cluster::proxy_request cluster_replication::on_pre_proxy_write(op_proxy_write* op, shared_queue_proxy_write& q_result, uint64_t generic_value) {
+	return cluster::proxy_request_continue;
 }
 
 /**
  *	implementation of on_post_proxy_write event handling.
  */
-int cluster_replication::on_post_proxy_write(op_proxy_write* op) {
+cluster::proxy_request cluster_replication::on_post_proxy_write(op_proxy_write* op, cluster::node node) {
 	pthread_mutex_lock(&this->_mutex_started);
 	if (!this->_started) {
 		pthread_mutex_unlock(&this->_mutex_started);
-		return -1;
+		return cluster::proxy_request_continue;
 	}
 	pthread_mutex_unlock(&this->_mutex_started);
 
-	storage::entry& e = op->get_entry();
-	shared_thread_queue q(new queue_forward_query(e, op->get_ident()));
+	if (node.node_role == cluster::role_master) {
+		// replicate over cluster only when master
+		// not depend on mode of master
+		storage::entry& e = op->get_entry();
+		vector<string> proxy = op->get_proxy();
+		shared_queue_proxy_write q(new queue_proxy_write(NULL, NULL, proxy, e, op->get_ident()));
+		q->set_post_proxy(true);
 
-	thread_pool::local_map m = this->_thread_pool->get_active(thread_pool::thread_type_cluster_replication);
-	if (m.size() == 0) {
-		log_notice("no available thread to proxy", 0);
-		return -1;
-	}
-
-	shared_thread t;
-	int key_hash_value = e.get_key_hash_value(storage::hash_algorithm_murmur);
-	int index = key_hash_value % m.size();
-	int i = 0;
-	for (thread_pool::local_map::iterator it = m.begin(); it != m.end(); it++) {
-		if (i == index) {
-			t = it->second;
-			break;
+		int key_hash_value = e.get_key_hash_value(storage::hash_algorithm_murmur);
+		if (this->_enqueue(q, key_hash_value, false) < 0) {
+			return cluster::proxy_request_continue;
 		}
-		i++;
 	}
 
-	if (this->_sync) {
-		q->sync_ref();
-	}
-	if (t->enqueue(q) < 0) {
-		log_warning("enqueue failed (perhaps thread is now exiting?)", 0);
-		if (this->_sync) {
-			q->sync_unref();
-		}
-		return -1;
-	}
-	if (this->_sync) {
-		q->sync();
-	}
-
-	return 0;
+	return cluster::proxy_request_continue;
 }
 // }}}
 
@@ -224,6 +225,41 @@ int cluster_replication::_stop_dump_replication() {
 	}
 	return 0;
 }
+
+int cluster_replication::_enqueue(shared_thread_queue q, int key_hash_value, bool sync) {
+	log_debug("enqueue (indent=%s)", q->get_ident().c_str());
+
+	thread_pool::local_map m = this->_thread_pool->get_active(thread_pool::thread_type_cluster_replication);
+	if (m.size() == 0) {
+		log_notice("no available thread to forward queue", 0);
+		return -1;
+	}
+
+	shared_thread t;
+	int index = key_hash_value % m.size();
+	int i = 0;
+	for (thread_pool::local_map::iterator it = m.begin(); it != m.end(); it++) {
+		if (i == index) {
+			t = it->second;
+			break;
+		}
+		i++;
+	}
+
+	if (sync) {
+		q->sync_ref();
+	}
+	if (t->enqueue(q) < 0) {
+		log_warning("enqueue failed (perhaps thread is now exiting?)", 0);
+		if (sync) {
+			q->sync_unref();
+		}
+		return -1;
+	}
+
+	return 0;
+}
+
 // }}}
 
 }	// namespace flare

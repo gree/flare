@@ -27,6 +27,8 @@
 #ifndef	PROXY_EVENT_LISTENER_H
 #define	PROXY_EVENT_LISTENER_H
 
+#include "cluster.h"
+
 namespace gree {
 namespace flare {
 
@@ -38,9 +40,9 @@ public:
 	proxy_event_listener() { }
 	virtual ~proxy_event_listener() { }
 
-	virtual int on_pre_proxy_read(op_proxy_read* op) = 0;
-	virtual int on_pre_proxy_write(op_proxy_write* op) = 0;
-	virtual int on_post_proxy_write(op_proxy_write* op) = 0;
+	virtual cluster::proxy_request on_pre_proxy_read(op_proxy_read* op, storage::entry& e, void* parameter, shared_queue_proxy_read& q_result) = 0;
+	virtual cluster::proxy_request on_pre_proxy_write(op_proxy_write* op, shared_queue_proxy_write& q_result, uint64_t generic_value) = 0;
+	virtual cluster::proxy_request on_post_proxy_write(op_proxy_write* op, cluster::node node) = 0;
 };
 
 }	// namespace flare

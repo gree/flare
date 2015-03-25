@@ -45,6 +45,7 @@
 #include "queue_proxy_write.h"
 #include "queue_update_monitor_option.h"
 #include "coordinator.h"
+#include "proxy_event_listener.h"
 
 #include <functional>
 #include <boost/bind.hpp>
@@ -1301,6 +1302,20 @@ int cluster::add_proxy_event_listener(shared_proxy_event_listener listener) {
  *	@todo fix performance issue
  */
 cluster::proxy_request cluster::pre_proxy_read(op_proxy_read* op, storage::entry& e, void* parameter, shared_queue_proxy_read& q_result) {
+	for (vector<shared_proxy_event_listener>::iterator it = this->_fixed_proxy_event_listeners.begin();
+			it != this->_fixed_proxy_event_listeners.end(); it++) {
+		shared_queue_proxy_read q_proxy_result;
+		proxy_request r = (*it)->on_pre_proxy_read(op, e, parameter, q_proxy_result);
+		if (r == proxy_request_complete) {
+			q_result = q_proxy_result;
+			return proxy_request_complete;
+		} else if (r == proxy_request_continue) {
+			continue;
+		} else {
+			return r;
+		}
+	}
+
 	partition p;
 	bool dummy;
 	int n = this->_determine_partition(e, p, false, dummy);
@@ -1339,7 +1354,6 @@ cluster::proxy_request cluster::pre_proxy_read(op_proxy_read* op, storage::entry
 		return proxy_request_error_enqueue;
 	}
 	q_result = q;
-	
 	return proxy_request_complete;
 }
 
@@ -1350,6 +1364,16 @@ cluster::proxy_request cluster::pre_proxy_read(op_proxy_read* op, storage::entry
  */
 cluster::proxy_request cluster::pre_proxy_write(op_proxy_write* op, shared_queue_proxy_write& q_result, uint64_t generic_value) {
 	storage::entry& e = op->get_entry();
+	for (vector<shared_proxy_event_listener>::iterator it = this->_fixed_proxy_event_listeners.begin();
+			it != this->_fixed_proxy_event_listeners.end(); it++) {
+		shared_queue_proxy_write q_proxy_result;
+		proxy_request r = (*it)->on_pre_proxy_write(op, q_proxy_result, generic_value);
+		if (r == proxy_request_continue) {
+			continue;
+		} else {
+			return r;
+		}
+	}
 
 	partition p, p_prepare;
 	bool is_prepare;
@@ -1394,7 +1418,12 @@ cluster::proxy_request cluster::pre_proxy_write(op_proxy_write* op, shared_queue
 cluster::proxy_request cluster::post_proxy_write(op_proxy_write* op, bool sync) {
 	for (vector<shared_proxy_event_listener>::iterator it = this->_fixed_proxy_event_listeners.begin();
 			   it != this->_fixed_proxy_event_listeners.end(); it++) {
-		(*it)->on_post_proxy_write(op);
+		proxy_request r = (*it)->on_post_proxy_write(op, this->get_node(this->_node_key));
+		if (r == proxy_request_continue) {
+			continue;
+		} else {
+			return r;
+		}
 	}
 
 	storage::entry& e = op->get_entry();

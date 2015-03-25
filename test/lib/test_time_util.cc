@@ -52,6 +52,28 @@ void test_timeval_to_timespec () {
 	cut_assert_equal_int(12345000, actual.tv_nsec);
 }
 
+void test_timer_add () {
+	timespec actual;
+	timespec a;
+	timespec b;
+
+	a.tv_sec = 15;
+	a.tv_nsec = 25;
+	b.tv_sec = 10;
+	b.tv_nsec = 25;
+	actual = time_util::add(a, b);
+	cut_assert_equal_int(25, actual.tv_sec);
+	cut_assert_equal_int(50, actual.tv_nsec);
+
+	a.tv_sec = 15;
+	a.tv_nsec = 999999980;
+	b.tv_sec = 0;
+	b.tv_nsec = 25;
+	actual = time_util::add(a, b);
+	cut_assert_equal_int(16, actual.tv_sec);
+	cut_assert_equal_int(5, actual.tv_nsec);
+}
+
 	void test_timer_sub () {
 		timespec actual;
 		timespec a;

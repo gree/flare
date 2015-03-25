@@ -28,7 +28,6 @@
  */
 #include "handler_cluster_replication.h"
 #include "connection_tcp.h"
-#include "queue_forward_query.h"
 
 namespace gree {
 namespace flare {
@@ -106,13 +105,7 @@ int handler_cluster_replication::_process_queue(shared_thread_queue q) {
 	this->_thread->set_state("execute");
 	this->_thread->set_op(q->get_ident());
 
-	shared_queue_forward_query r = boost::dynamic_pointer_cast<queue_forward_query, thread_queue>(q);
-	if (r.get()) {
-		return r->run(this->_connection);
-	} else {
-		log_err("invalid type of queue is enqueued", 0);
-		return -1;
-	}
+	return q->run(this->_connection);
 }
 // }}}
 

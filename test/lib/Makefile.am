@@ -50,7 +50,8 @@ noinst_LTLIBRARIES =	\
 	test_time_util.la \
 	test_util.la	\
 	test_file_coordinator.la \
-	test_time_watcher.la
+	test_time_watcher.la \
+	test_handler_monitor.la
 if ENABLE_KYOTOCABINET
 noinst_LTLIBRARIES += test_storage_kch.la
 endif
@@ -129,6 +130,7 @@ test_time_util_la_SOURCES	= test_time_util.cc
 test_util_la_SOURCES	= test_util.cc
 test_file_coordinator_la_SOURCES	= test_file_coordinator.cc
 test_time_watcher_la_SOURCES	= test_time_watcher.cc
+test_handler_monitor_la_SOURCES = test_handler_monitor.cc
 if ENABLE_ZOOKEEPER
 test_zookeeper_coordinator_la_SOURCES	= test_zookeeper_coordinator.cc
 test_zookeeper_lock_la_SOURCES		= test_zookeeper_lock.cc

@@ -30,6 +30,7 @@
 #include "op_stats.h"
 #include "binary_request_header.h"
 #include "binary_response_header.h"
+#include <boost/regex.hpp>
 
 namespace gree {
 namespace flare {
@@ -54,6 +55,13 @@ op_stats::~op_stats() {
 // }}}
 
 // {{{ public methods
+int op_stats::run_client(stats_results& results) {
+	if (this->_run_client() < 0) {
+		return -1;
+	}
+
+	return this->_parse_text_client_parameters(results);
+}
 // }}}
 
 // {{{ protected methods
@@ -118,7 +126,7 @@ int op_stats::_run_server() {
 	return 0;
 }
 
-int op_stats::_send_stats(thread_pool* tp, storage* st) {
+int op_stats::_send_stats(thread_pool* tp, storage* st, cluster* cl) {
 	rusage usage = stats_object->get_rusage();
 	char usage_user[BUFSIZ];
 	char usage_system[BUFSIZ];
@@ -159,6 +167,8 @@ int op_stats::_send_stats(thread_pool* tp, storage* st) {
 	_send_stat("limit_maxbytes" 			, stats_object->get_limit_maxbytes());
 	_send_stat("threads"							, stats_object->get_threads(tp));
 	_send_stat("pool_threads" 				, stats_object->get_pool_threads(tp));
+	_send_stat("flare_node_status", status_object->get_status_code() == status::status_ok ? "OK" : "NG");
+	_send_stat("flare_node_map_version" , cl->get_node_map_version());
 
 	return 0;
 }
@@ -280,6 +290,37 @@ int op_stats::_send_binary_result(result r, const char* message) {
 	}
 	_text_stream.str(std::string());
 	return result;
+}
+
+int op_stats::_run_client() {
+	static const char* request = "stats";
+	return this->_send_request(request);
+}
+
+int op_stats::_parse_text_client_parameters(stats_results& results) {
+	for (;;) {
+		char* p;
+		if (this->_connection->readline(&p) < 0) {
+			return -1;
+		}
+
+		if (strcmp(p, "END\n") == 0) {
+			delete[] p;
+			return 0;
+		}
+
+		static const boost::regex regex("STAT ([^ ]+) ([^ ]+)\n");
+		boost::smatch match;
+		if (!boost::regex_match(string(p), match, regex)) {
+			log_debug("invalid stats response (q=%s)", p);
+			delete[] p;
+			return -1;
+		}
+
+		results[match.str(1)] = match.str(2);
+
+		delete[] p;
+	}
 }
 // }}}
 

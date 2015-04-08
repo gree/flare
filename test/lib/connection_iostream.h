@@ -56,10 +56,18 @@ public:
 	virtual int write(const char *p, int bufsiz, bool buffered = false);
 	virtual int writeline(const char* p);
 
+	// note: timeout and retry are not implemented
+	virtual int get_read_timeout() const { return this->_read_timeout; };
+	virtual int set_read_timeout(int timeout) { this->_read_timeout = timeout; return 0; };
+	virtual int get_connect_retry_limit() const { return this->_connect_retry_limit; };
+	virtual int set_connect_retry_limit(int retry_limit) { this->_connect_retry_limit = retry_limit; return 0; };
+
 protected:
 	connection_iostream(std::iostream* istream, std::iostream* ostream);
 	boost::shared_ptr<std::iostream> const _istream;
 	boost::shared_ptr<std::iostream> const _ostream;
+	int _read_timeout;
+	int	_connect_retry_limit;
 };
 
 class connection_sstream : public connection_iostream {

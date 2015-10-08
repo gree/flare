@@ -118,7 +118,7 @@ int op_stats::_run_server() {
 	return 0;
 }
 
-int op_stats::_send_stats(thread_pool* tp, storage* st) {
+int op_stats::_send_stats(thread_pool* tp, storage* st, cluster* cl) {
 	rusage usage = stats_object->get_rusage();
 	char usage_user[BUFSIZ];
 	char usage_system[BUFSIZ];
@@ -159,6 +159,7 @@ int op_stats::_send_stats(thread_pool* tp, storage* st) {
 	_send_stat("limit_maxbytes" 			, stats_object->get_limit_maxbytes());
 	_send_stat("threads"							, stats_object->get_threads(tp));
 	_send_stat("pool_threads" 				, stats_object->get_pool_threads(tp));
+	_send_stat("node_map_version"		, cl->get_node_map_version());
 
 	return 0;
 }

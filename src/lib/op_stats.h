@@ -69,7 +69,7 @@ protected:
 	virtual int _parse_binary_request(const binary_request_header&, const char* body);
 	virtual int _run_server();
 
-	virtual int _send_stats(thread_pool* tp, storage* st);
+	virtual int _send_stats(thread_pool* tp, storage* st, cluster* cl);
 	virtual int _send_stats_items();
 	virtual int _send_stats_slabs();
 	virtual int _send_stats_sizes();

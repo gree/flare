@@ -137,6 +137,7 @@ private:
 	int _add_read_buf(char* p, int len);
 	int _clear_read_buf();
 	int _add_write_buf(const char* p, int len);
+	int _clear_write_buf();
 };
 
 }	// namespace flare

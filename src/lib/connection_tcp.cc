@@ -625,6 +625,8 @@ int connection_tcp::close() {
 	} else {
 		log_info("close() called but socket seems to be already closed [%d]", this->_sock);
 	}
+	this->_clear_read_buf();
+	this->_clear_write_buf();
 	return 0;
 }
 
@@ -726,6 +728,16 @@ int connection_tcp::_add_write_buf(const char* p, int len) {
 	return this->_write_buf_len;
 }
 // }}}
+
+int connection_tcp::_clear_write_buf() {
+	log_debug("clearing internal read buffer (read_buf_len=%d)", this->_read_buf_len);
+	delete[] this->_write_buf;
+	this->_write_buf = NULL;
+	this->_write_buf_len = 0;
+	this->_write_buf_chunk_size = 0;
+
+	return 0;
+}
 
 }	// namespace flare
 }	// namespace gree

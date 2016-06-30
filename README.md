@@ -22,11 +22,17 @@ flare is mainly developed under following platforms:
 - FreeBSD
 - other UNIX like OSs.
 
-## Dependent package
+## Dependent library
+### Run-time
+- [boost](http://www.boost.org/)
 - [Tokyo Cabinet](http://fallabs.com/tokyocabinet/)
 - [Kyoto Cabinet](http://fallabs.com/kyotocabinet/) (optional)
-- [boost](http://www.boost.org/)
+
+### Build-time
+- [gcc](https://gcc.gnu.org/)
 - zlib
+- autoconf
+- automake
 - libtool
 - libhashkit
 - uuid

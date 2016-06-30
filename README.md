@@ -27,15 +27,15 @@ flare is mainly developed under following platforms:
 - [boost](http://www.boost.org/)
 - [Tokyo Cabinet](http://fallabs.com/tokyocabinet/)
 - [Kyoto Cabinet](http://fallabs.com/kyotocabinet/) (optional)
+- zlib
+- libhashkit
+- uuid
 
 ### Build-time
 - [gcc](https://gcc.gnu.org/)
-- zlib
 - autoconf
 - automake
 - libtool
-- libhashkit
-- uuid
 
 ## Install from source code on Ubuntu 14.04 (Trusty Tahr)
 ### Installation of depending packages

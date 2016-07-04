@@ -1,5 +1,9 @@
 # How To Use
+
 ## Node setting
+**Normally, use [Flare-tools](https://github.com/gree/flare-tools) to maintain flare by command line.**  
+
+
 First of all, you should access index server (flarei) by `telnet`.
 ```
 $ telnet [index server] [index server port]
@@ -38,7 +42,7 @@ get [key name] [index] [index]
 ```
 
 ## Example
-For example, we introduce how to build flare as the figure below indicates:  
+For example, we introduce how to build flare cluster as the figure below indicates:  
 ![sample_image](flare_sample.png)
 - two master node
   - Only master exec write request
@@ -65,8 +69,8 @@ max-connection = 256
 monitor-threshold = 3
 # node monitoring interval (index server sends "ping" w/ this interval)
 monitor-interval = 1
-# server name of myself
-server-name = index.example.com
+# server name of myself (IP address is preferred)
+server-name = 10.0.0.1
 # server port of myself
 server-port = 12120
 # max thread pool size
@@ -88,7 +92,7 @@ Create config file `/etc/flared.conf` at each server as below.
 # data directory
 data-dir = /home/flared
 # name and port of index server (sync this to "server-name" of flarei.conf at index server)
-index-servers = index.example.com:12120
+index-servers = 10.0.0.1:12120
 # syslog facility
 log-facility = local1
 # max-connections to accept
@@ -97,8 +101,8 @@ max-connection = 256
 mutex-slot = 32
 # number of proxy request concurrency
 proxy-concurrency = 2
-# server name of myself
-server-name = master.node0.example.com
+# server name of myself (IP address is preferred)
+server-name = 10.0.0.5
 # server port of myself
 server-port = 12121
 # storage type (currently only "tch" is available)
@@ -126,7 +130,7 @@ $ sudo /usr/local/bin/flared -f /etc/flared.conf --daemonize -p /var/run/flared.
 ### Configure node setting
 Connect index server by `telnet` as below.
 ```
-$ telnet index.example.com 12120
+$ telnet 10.0.0.1 12120
 ```
 and check node states by `stats` command.
 ```
@@ -134,40 +138,40 @@ stats nodes
 ```
 The result will be printed as below.
 ```
-STAT master.node0.example.com:12121:role proxy
-STAT master.node0.example.com:12121:state active
-STAT master.node0.example.com:12121:partition -1
-STAT master.node0.example.com:12121:balance 0
-STAT master.node0.example.com:12121:thread_type 16
-STAT slave.node0.example.com:12121:role proxy
-STAT slave.node0.example.com:12121:state active
-STAT slave.node0.example.com:12121:partition -1
-STAT slave.node0.example.com:12121:balance 0
-STAT slave.node0.example.com:12121:thread_type 17
-STAT master.node1.example.com:12121:role proxy
-STAT master.node1.example.com:12121:state active
-STAT master.node1.example.com:12121:partition -1
-STAT master.node1.example.com:12121:balance 0
-STAT master.node1.example.com:12121:thread_type 19
-STAT slave.node1.example.com:12121:role proxy
-STAT slave.node1.example.com:12121:state active
-STAT slave.node1.example.com:12121:partition -1
-STAT slave.node1.example.com:12121:balance 0
-STAT slave.node1.example.com:12121:thread_type 18
-STAT proxy.example.com:12121:role proxy
-STAT proxy.example.com:12121:state active
-STAT proxy.example.com:12121:partition -1
-STAT proxy.example.com:12121:balance 0
-STAT proxy.example.com:12121:thread_type 20
+STAT 10.0.0.2:12121:role proxy
+STAT 10.0.0.2:12121:state active
+STAT 10.0.0.2:12121:partition -1
+STAT 10.0.0.2:12121:balance 0
+STAT 10.0.0.2:12121:thread_type 20
+STAT 10.0.0.3:12121:role proxy
+STAT 10.0.0.3:12121:state active
+STAT 10.0.0.3:12121:partition -1
+STAT 10.0.0.3:12121:balance 0
+STAT 10.0.0.3:12121:thread_type 19
+STAT 10.0.0.4:12121:role proxy
+STAT 10.0.0.4:12121:state active
+STAT 10.0.0.4:12121:partition -1
+STAT 10.0.0.4:12121:balance 0
+STAT 10.0.0.4:12121:thread_type 18
+STAT 10.0.0.5:12121:role proxy
+STAT 10.0.0.5:12121:state active
+STAT 10.0.0.5:12121:partition -1
+STAT 10.0.0.5:12121:balance 0
+STAT 10.0.0.5:12121:thread_type 16
+STAT 10.0.0.6:12121:role proxy
+STAT 10.0.0.6:12121:state active
+STAT 10.0.0.6:12121:partition -1
+STAT 10.0.0.6:12121:balance 0
+STAT 10.0.0.6:12121:thread_type 17
 END
 ```
 When you start flared for the first time, all node will treated as proxy.  
 So you should give role to each node by `node role` command.
 ```
-node role master.node0.example.com 12121 master 1 0
-node role slave.node0.example.com 12121 slave 0 0
-node role master.node1.example.com 12121 master 1 1
-node role slave.node1.example.com 12121 slave 0 1
+node role 10.0.0.5 12121 master 1 0
+node role 10.0.0.6 12121 slave 0 0
+node role 10.0.0.3 12121 master 1 1
+node role 10.0.0.4 12121 slave 0 1
 ```
 and check node states.
 ```
@@ -175,31 +179,31 @@ stats nodes
 ```
 The result:
 ```
-STAT master.node0.example.com:12121:role master
-STAT master.node0.example.com:12121:state active
-STAT master.node0.example.com:12121:partition 0
-STAT master.node0.example.com:12121:balance 1
-STAT master.node0.example.com:12121:thread_type 16
-STAT slave.node0.example.com:12121:role slave
-STAT slave.node0.example.com:12121:state active
-STAT slave.node0.example.com:12121:partition 0
-STAT slave.node0.example.com:12121:balance 0
-STAT slave.node0.example.com:12121:thread_type 17
-STAT master.node1.example.com:12121:role master
-STAT master.node1.example.com:12121:state active
-STAT master.node1.example.com:12121:partition 1
-STAT master.node1.example.com:12121:balance 1
-STAT master.node1.example.com:12121:thread_type 19
-STAT slave.node1.example.com:12121:role slave
-STAT slave.node1.example.com:12121:state active
-STAT slave.node1.example.com:12121:partition 1
-STAT slave.node1.example.com:12121:balance 0
-STAT slave.node1.example.com:12121:thread_type 18
-STAT proxy.example.com:12121:role proxy
-STAT proxy.example.com:12121:state active
-STAT proxy.example.com:12121:partition -1
-STAT proxy.example.com:12121:balance 0
-STAT proxy.example.com:12121:thread_type 20
+STAT 10.0.0.2:12121:role proxy
+STAT 10.0.0.2:12121:state active
+STAT 10.0.0.2:12121:partition -1
+STAT 10.0.0.2:12121:balance 0
+STAT 10.0.0.2:12121:thread_type 20
+STAT 10.0.0.3:12121:role master
+STAT 10.0.0.3:12121:state active
+STAT 10.0.0.3:12121:partition 1
+STAT 10.0.0.3:12121:balance 1
+STAT 10.0.0.3:12121:thread_type 19
+STAT 10.0.0.4:12121:role slave
+STAT 10.0.0.4:12121:state active
+STAT 10.0.0.4:12121:partition 1
+STAT 10.0.0.4:12121:balance 0
+STAT 10.0.0.4:12121:thread_type 18
+STAT 10.0.0.5:12121:role master
+STAT 10.0.0.5:12121:state active
+STAT 10.0.0.5:12121:partition 0
+STAT 10.0.0.5:12121:balance 1
+STAT 10.0.0.5:12121:thread_type 16
+STAT 10.0.0.6:12121:role slave
+STAT 10.0.0.6:12121:state active
+STAT 10.0.0.6:12121:partition 0
+STAT 10.0.0.6:12121:balance 0
+STAT 10.0.0.6:12121:thread_type 17
 END
 ```
 Now, `balance` parametor of slave servers is `0`.  
@@ -207,13 +211,13 @@ If this parametor is `0`, no request goes to the node.
 But we want to execute read request on slave server.  
 So, we set `balance` parametor to `1`, and devide read requests into halves for master and slave.
 ```
-node role slave.node0.example.com 12121 slave 1 0
-node role slave.node1.example.com 12121 slave 1 1
+node role 10.0.0.6 12121 slave 1 0
+node role 10.0.0.4 12121 slave 1 1
 ```
 Now, all configuration has been finished.  
 Let's use flare.
 ```
-$ telnet proxy.example.com 12121
+$ telnet 10.0.0.2 12121
 ```
 Set a key for test.
 ```

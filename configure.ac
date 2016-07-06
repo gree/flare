@@ -29,6 +29,22 @@ AC_CHECK_HEADERS([valgrind.h valgrind/valgrind.h])
 # Checks for libraries.
 
 # Required libraries
+AC_SEARCH_LIBS([clock_gettime], [rt])
+# Link with -lrt (only for glibc versions before 2.17) for clock_gettime.
+#
+# This clock_gettime macro detects clock_getime by running gcc-command.
+#
+# When gcc-command fails, the macro adds $LIBS to -lrt.
+#
+# The macro uses following code and gcc-command.
+#   Code:  char clock_gettime ();int main (){return clock_gettime ();return 0;}
+#   Command: g++  -g -O2 above-source-code.cpp $LIBS
+#
+# Following AC_CHECK_LIB adds $LIBS to -lboost_thread -lboost_... and other libraries.
+# When the clock_gettime macro is behind AC_CHECK_LIB(boost_thread), 
+# the macro does not add -lrt, because libboost_thread has clock_gettime-symbol.
+# So, the macro must be in front of AC_CHECK_LIB(boost_thread).
+
 AC_ARG_WITH(boost,
 	AS_HELP_STRING([--with-boost], [boost libraries]),
 	[CXXFLAGS="${CXXFLAGS} -I${withval}/include" LDFLAGS="${LDFLAGS} -L${withval}/lib"])
@@ -40,7 +56,6 @@ AC_CHECK_LIB(boost_system, main, [], [AC_CHECK_LIB(boost_system-mt, main, [], [A
 AC_CHECK_LIB(pthread, pthread_create, [], [AC_MSG_ERROR(libpthread not found)])
 AC_CHECK_LIB(z, main, [], [AC_MSG_ERROR(zlib not found)])
 AC_CHECK_LIB(hashkit, libhashkit_murmur, [], [AC_MSG_ERROR(libhashkit not found)])
-AC_SEARCH_LIBS([clock_gettime], [rt])
 
 # Tokyo Cabinet
 AC_ARG_WITH(tokyocabinet,

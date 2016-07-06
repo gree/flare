@@ -173,6 +173,8 @@ int op_incr::_run_server() {
 		return this->_send_result(result_server_error, "no partition available");
 	}
 
+	stats_object->increment_write_query_without_proxy();
+
 	// storage i/o
 	storage::result r_storage;
 	if (this->_storage->incr(this->_entry, this->_value, r_storage, this->_incr) < 0) {

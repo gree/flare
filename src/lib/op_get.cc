@@ -131,6 +131,8 @@ int op_get::_run_server() {
 			log_warning("partition error (key=%s) -> continue processing (pretending not found)", it->key.c_str());
 			r_map[it->key] = storage::result_not_found;
 		} else {
+			stats_object->increment_read_query_without_proxy();
+
 			// storage i/o
 			storage::result r_storage;
 			int retcode;

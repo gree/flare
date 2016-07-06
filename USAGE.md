@@ -33,12 +33,12 @@ $ telnet [proxy or master node server] [server port]
 ```
 You can store keys by `set`.
 ```
-set [key name] [index] [index] [word count of key value]
-[key value]
+set [key name] [flag] [expiration time] [size of value]
+[value]
 ```
 and you can get keys by `get`.
 ```
-get [key name] [index] [index]
+get [key name]
 ```
 
 ## Example
@@ -230,7 +230,7 @@ STORED
 ```
 Get a key for test.
 ```
-get key0 0 0
+get key0
 ```
 The result:
 ```

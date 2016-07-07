@@ -1,8 +1,10 @@
 # flare command manual
 
-## Data operation commands
+## Compatibility with memcached
 
-### get 
+### Data operation commands
+
+#### get 
 
 **syntax**
 
@@ -15,7 +17,7 @@
 
 Get value by key name.
 
-### set
+#### set
 
 **syntax**
 
@@ -32,7 +34,7 @@ Get value by key name.
 Set a key unconditionally.
 If the key already exists, it will be overwritten.
 
-### add
+#### add
 
 **syntax**
 
@@ -46,7 +48,7 @@ If the key already exists, it will be overwritten.
 Add a key.
 If the key already exists, it will NOT be overwritten and abort writing.
 
-### replace
+#### replace
 
 **syntax**
 
@@ -60,7 +62,7 @@ If the key already exists, it will NOT be overwritten and abort writing.
 Overwrite existing key.
 If the key doesn't exist, abort writing.
 
-### append
+#### append
 
 **syntax**
 
@@ -74,7 +76,7 @@ If the key doesn't exist, abort writing.
 Append value to existing key.
 If the key doesn't exist, abort writing.
 
-### prepend
+#### prepend
 
 **syntax**
 
@@ -88,7 +90,7 @@ If the key doesn't exist, abort writing.
 Prepend value to existing key.
 If the key doesn't exist, abort writing.
 
-### incr
+#### incr
 
 **syntax**
 
@@ -101,7 +103,7 @@ If the key doesn't exist, abort writing.
 Increments numerical key value by given number.
 If the key value is not numeric value, it will be treated `0`.
 
-### decr
+#### decr
 
 **syntax**
 
@@ -114,7 +116,7 @@ If the key value is not numeric value, it will be treated `0`.
 Decrements numerical key value by given number.
 If the key value is not numeric value, the value will be `0`.
 
-### delete
+#### delete
 
 **syntax**
 
@@ -126,7 +128,44 @@ If the key value is not numeric value, the value will be `0`.
 
 Deletes an existing key.
 
-### flush_all
+### Node operation commands
+
+#### version
+
+**syntax**
+
+    version
+
+**response**
+
+    VERSION flare-X.X.X
+
+Prints server version.
+
+#### quit
+
+**syntax**
+
+    quit
+
+Terminate telnet session.
+
+### Command options
+
+#### noreply option
+
+available on set/add/replace/append/prepend/incr/decr commands, like:
+
+    set key1 0 0 3 noreply
+
+If this option is specified, response will NOT be returned.
+
+
+## Original or Incompatibility with memcached
+
+### Data operation commands
+
+#### flush_all
 
 **syntax**
 
@@ -138,7 +177,7 @@ Deletes an existing key.
 
 Clear all data from terget node.
 
-### dump
+#### dump
 
 **syntax**
 
@@ -157,7 +196,7 @@ Clear all data from terget node.
 
 Dump all the data in the target node. If partition arguments are specified, only data in target partition are dumped.
 
-### dump_key (>= 1.1.0)
+#### dump_key (>= 1.1.0)
 
 **syntax**
 
@@ -174,9 +213,9 @@ Dump all the data in the target node. If partition arguments are specified, only
 
 Dump all the keys in the target node. If partition arguments are specified, only keys in target partition are dumped.
 
-## Node operation commands
+### Node operation commands
 
-### kill
+#### kill
 
 **syntax**
 
@@ -188,7 +227,7 @@ Dump all the keys in the target node. If partition arguments are specified, only
 
 Kill specified thread (thread id is identified via "stats threads").
 
-### node add (index server only)
+#### node add (index server only)
 
 **syntax**
 
@@ -200,7 +239,7 @@ Kill specified thread (thread id is identified via "stats threads").
 
 Node server sends this command at startup (internal command).
 
-### node role (index server only)
+#### node role (index server only)
 
 **syntax**
 
@@ -224,7 +263,7 @@ Shift node role.
 
 Shift node state.
 
-### node remove (index server only)
+#### node remove (index server only)
 
 **syntax**
 
@@ -232,7 +271,7 @@ Shift node state.
 
 Remove node from index server (only available if target node is down).
 
-### node sync (index server only)
+#### node sync (index server only)
 
 **syntax**
 
@@ -246,7 +285,7 @@ Remove node from index server (only available if target node is down).
 
 Index server sends this command to each node if index server detects any change of role or state (internal command).
 
-### ping
+#### ping
 
 **syntax**
 
@@ -258,7 +297,7 @@ Index server sends this command to each node if index server detects any change 
 
 Always return "OK" (internal command - to watch each node).
 
-### stats nodes
+#### stats nodes
 
 **syntax**
 
@@ -274,7 +313,7 @@ Always return "OK" (internal command - to watch each node).
 
 Show all nodes ("thread_type" is internal id).
 
-### stats threads
+#### stats threads
 
 **syntax**
 
@@ -292,43 +331,15 @@ Show all nodes ("thread_type" is internal id).
 
 Show all threads.
 
-### version
+### Command options
 
-**syntax**
-
-    version
-
-**response**
-
-    VERSION flare-X.X.X
-
-Prints server version.
-
-### quit
-
-**syntax**
-
-    quit
-
-Terminate telnet session.
-
-## Command options
-
-### sync option
+#### sync option
 
 available on set/add/replace/append/prepend/incr/decr commands, like:
 
     set key1 0 0 3 sync
 
 If this option is specified, response is send ''after'' replication is done (just opposite way of "noreply" option).
-
-### noreply option
-
-available on set/add/replace/append/prepend/incr/decr commands, like:
-
-    set key1 0 0 3 noreply
-
-If this option is specified, response will NOT be returned.
 
 ## Specification
 

@@ -1,6 +1,6 @@
 # flare command manual
 
-## Compatible commands with memcached
+## Commands compatible with memcached
 
 ### Data operation commands
 
@@ -161,7 +161,7 @@ available on set/add/replace/append/prepend/incr/decr commands, like:
 If this option is specified, response will NOT be returned.
 
 
-## Original or Incompatible commands with memcached
+## Commands incompatible with memcached
 
 ### Data operation commands
 

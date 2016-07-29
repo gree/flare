@@ -37,7 +37,9 @@ before_install:
   - export PATH=$HOME/.cabal/bin:/opt/ghc/7.6.3/bin:/opt/cabal/1.18/bin:$PATH
   - git clone https://github.com/gree/flare-tests.git
   - cabal update
-  - cabal install flare-tests/
+  - cabal unpack test-sandbox
+  - sed -i -e 's/"localhost"/"127.0.0.1"/g' test-sandbox*/src/Test/Sandbox/Internals.hs
+  - cabal install ./test-sandbox* flare-tests/
 
 before_script:
   - travis_retry ./autogen.sh
@@ -48,4 +50,3 @@ script:
   - travis_retry make
   - make check && sudo make install
   - flare-tests
-

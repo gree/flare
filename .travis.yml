@@ -1,5 +1,8 @@
 language: cpp
 
+sudo: required
+dist: trusty
+
 env:
   global:
     - secure: "MQ3t1c/4Tl+Gqi9c/kWB2Uw++LL7D5y2v1lQSYzvs0XmN3eGQBKBCIlnaNUMsxjeH/szYkJW20kwu3flyY6XG8g/psdnphxah8LisTiBcBaWHXxomX1kVJ/Jg1ysjwGODZFKWgT5NovYRo7pej1wFfk0355bRQcj7Q0714SMvW8="
@@ -25,16 +28,18 @@ matrix:
 before_install:
   - travis_retry sudo add-apt-repository -y ppa:hvr/ghc
   - travis_retry sudo apt-get update
-  - travis_retry sudo apt-get install libtokyocabinet-dev
-  - travis_retry sudo apt-get install libboost-program-options-dev libboost-regex-dev libboost-serialization-dev libboost-thread-dev libboost-system-dev
-  - travis_retry sudo apt-get install uuid-dev
-  - travis_retry sudo apt-get install cutter-testing-framework
-  - travis_retry sudo apt-get install cabal-install-1.18 ghc-7.6.3
-  - travis_retry sudo apt-get install git
+  - travis_retry sudo apt-get -y install libtokyocabinet-dev
+  - travis_retry sudo apt-get -y install libboost-program-options-dev libboost-regex-dev libboost-serialization-dev libboost-thread-dev libboost-system-dev
+  - travis_retry sudo apt-get -y install uuid-dev
+  - travis_retry sudo apt-get -y install cutter-testing-framework
+  - travis_retry sudo apt-get -y install cabal-install-1.18 ghc-7.6.3
+  - travis_retry sudo apt-get -y install git
   - export PATH=$HOME/.cabal/bin:/opt/ghc/7.6.3/bin:/opt/cabal/1.18/bin:$PATH
   - git clone https://github.com/gree/flare-tests.git
   - cabal update
-  - cabal install flare-tests/
+  - cabal unpack test-sandbox
+  - sed -i -e 's/"localhost"/"127.0.0.1"/g' test-sandbox*/src/Test/Sandbox/Internals.hs
+  - cabal install ./test-sandbox* flare-tests/
 
 before_script:
   - travis_retry ./autogen.sh
@@ -45,4 +50,3 @@ script:
   - travis_retry make
   - make check && sudo make install
   - flare-tests
-

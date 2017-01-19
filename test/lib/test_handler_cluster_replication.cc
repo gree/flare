@@ -175,6 +175,8 @@ namespace test_handler_cluster_replication {
 			usleep(100 * 1000); // waiting for queue proceeded
 			cut_assert_equal_boolean(true, queues[i]->is_success());
 			cut_assert_equal_int(op::result_stored, queues[i]->get_result());
+			delete[] p;
+			delete[] q;
 		}
 
 		cut_assert_equal_boolean(true, t->is_running());

@@ -1,0 +1,13 @@
+machine:
+  timezone: Asia/Tokyo
+  services:
+    - docker
+
+dependencies:
+  override:
+    - docker info
+    - docker build -t gree/flare .
+
+test:
+  override:
+    - docker run -d -p 12121:12121 gree/flare

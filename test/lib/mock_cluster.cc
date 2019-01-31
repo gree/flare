@@ -38,7 +38,7 @@ namespace flare {
 
 // {{{ ctor/dtor
 mock_cluster::mock_cluster(string server_name, int server_port):
-		cluster(NULL, server_name, server_port) {
+		cluster(NULL, NULL, server_name, server_port) {
 	this->_key_hash_algorithm = storage::hash_algorithm_simple;
 	this->_key_resolver = new key_resolver_modular(1024, 1, 4096);
 	this->_key_resolver->startup();

@@ -109,7 +109,7 @@ op* op_parser_text_node::_determine_op(const char* first, const char* buf, int& 
 	} else if (strcmp(first, "flush_all") == 0) {
 		r = new op_flush_all(this->_connection, singleton<flared>::instance().get_storage());
 	} else if (strcmp(first, "kill") == 0) {
-		r = new op_kill(this->_connection, singleton<flared>::instance().get_thread_pool()); 
+		r = new op_kill(this->_connection, singleton<flared>::instance().get_req_thread_pool(), singleton<flared>::instance().get_other_thread_pool());
 	} else if (strcmp(first, "quit") == 0) {
 		r = new op_quit(this->_connection); 
 	} else if (strcmp(first, "verbosity") == 0) {

@@ -42,7 +42,8 @@ namespace test_cluster
 	}
 
 	const std::string tmp_dir = "tmp";
-	thread_pool *tp;
+	thread_pool *req_tp;
+	thread_pool *other_tp;
 	struct sigaction prev_sigusr1_action;
 
 	void setup() {
@@ -53,7 +54,8 @@ namespace test_cluster
 			log_err("sigaction for %d failed: %s (%d)", SIGUSR1, util::strerror(errno), errno);
 		}
 
-		tp = new thread_pool(5, 128);
+		req_tp = new thread_pool(5, 128);
+		other_tp = new thread_pool(5, 128);
 
 		mkdir(tmp_dir.c_str(), 0700);
 
@@ -63,8 +65,10 @@ namespace test_cluster
 	}
 
 	void teardown() {
-		tp->shutdown();
-		delete tp;
+		req_tp->shutdown();
+		delete req_tp;
+		other_tp->shutdown();
+		delete other_tp;
 		delete stats_object;
 		singleton<logger>::instance().close();
 		cut_remove_path(tmp_dir.c_str(), NULL);
@@ -78,7 +82,7 @@ namespace test_cluster
 	struct cluster_test : public cluster
 	{
 		cluster_test(std::string data_dir):
-			cluster(tp, "localhost", 11211) {
+			cluster(req_tp, other_tp, "localhost", 11211) {
 			char cwd[PATH_MAX];
 			if (getcwd(cwd, sizeof(cwd)) != cwd) {
 				log_err("getcwd() failed.", 1);

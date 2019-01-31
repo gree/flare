@@ -42,7 +42,8 @@ using namespace std;
 using namespace gree::flare;
 
 namespace test_zookeeper_coordinator {
-	thread_pool tp(10, 8192);
+	thread_pool req_tp(10, 8192);
+	thread_pool other_tp(10, 8192);
 	char* connstring = NULL;
 	char* connuri = NULL;
 	zhandle_t* zhandle;
@@ -252,7 +253,7 @@ namespace test_zookeeper_coordinator {
 
 		coordinator_factory cf;
 		coordinator* coord = cf.create_coordinator(connuri, "localhost:12120");
-		cluster* cl = new cluster(&tp, "localhost", 12120);
+		cluster* cl = new cluster(&req_tp, &other_tp, "localhost", 12120);
 
 		key_resolver::type t;
 		key_resolver::type_cast("modular", t);

@@ -145,7 +145,7 @@ namespace test_op_dump_key
 		int item_num = bwlimit * 1024 / (item_key_size + 8);
 
 		shared_connection c(new connection_sstream(" -1 0 1000\r\n"));
-		cluster cl(NULL, "", 0);
+		cluster cl(NULL, NULL, "", 0);
 		mock_storage st("", 0, 0);
 		thread_pool tp(1);
 		test_op_dump_key op(c, &cl, &st);

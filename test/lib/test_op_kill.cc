@@ -35,7 +35,7 @@ using namespace gree::flare;
 
 namespace test_op_kill
 {
-	TEST_OP_CLASS_BEGIN(op_kill, NULL)
+	TEST_OP_CLASS_BEGIN(op_kill, NULL, NULL)
 		EXPOSE(op_kill, _id);
 	TEST_OP_CLASS_END;
 

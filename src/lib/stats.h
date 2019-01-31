@@ -110,7 +110,7 @@ public:
 	virtual uint32_t get_curr_items(storage* st);
 	virtual uint32_t get_total_items();
 	virtual uint64_t get_bytes(storage* st);
-	virtual uint32_t get_curr_connections(thread_pool* tp);
+	virtual uint32_t get_curr_connections(thread_pool* req_tp, thread_pool* other_tp);
 	uint32_t get_total_connections();
 	uint32_t get_connection_structures();
 	uint64_t get_cmd_get();
@@ -133,8 +133,8 @@ public:
 	uint64_t get_bytes_written();
 	uint32_t get_total_thread_queue();
 	uint32_t get_limit_maxbytes();
-	uint32_t get_threads(thread_pool* tp);
-	uint32_t get_pool_threads(thread_pool* tp);
+	uint32_t get_threads(thread_pool* req_tp, thread_pool* other_tp);
+	uint32_t get_pool_threads(thread_pool* req_tp, thread_pool* other_tp);
 };
 
 }	// namespace flare

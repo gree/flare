@@ -140,7 +140,7 @@ uint64_t stats::get_bytes(storage* st) {
 	return st ? st->size() : 0;
 }
 
-uint32_t stats::get_curr_connections(thread_pool* tp) {
+uint32_t stats::get_curr_connections(thread_pool* req_tp, thread_pool* other_tp) {
 	return 0;
 }
 
@@ -168,8 +168,8 @@ uint64_t stats::get_bytes_written()								{ return this->_bytes_written.fetch()
 
 uint32_t stats::get_total_thread_queue()						{ return this->_total_thread_queue.fetch();}
 uint32_t stats::get_limit_maxbytes()								{ return 0; }
-uint32_t stats::get_threads(thread_pool* th)				{ return th->get_thread_size(); }
-uint32_t stats::get_pool_threads(thread_pool* th)	{ return th->get_pool_size(); }
+uint32_t stats::get_threads(thread_pool* req_th, thread_pool* other_th)				{ return req_th->get_thread_size() + other_th->get_thread_size(); }
+uint32_t stats::get_pool_threads(thread_pool* req_th, thread_pool* other_th)	{ return req_th->get_pool_size(); }
 
 // }}}
 

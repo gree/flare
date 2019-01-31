@@ -35,9 +35,10 @@ namespace flare {
 /**
  *	ctor for op_kill
  */
-op_kill::op_kill(shared_connection c, thread_pool* tp):
+  op_kill::op_kill(shared_connection c, thread_pool* req_tp, thread_pool* other_tp):
 		op(c, "kill"),
-		_thread_pool(tp),
+		_req_thread_pool(req_tp),
+		_other_thread_pool(other_tp),
 		_id(0) {
 }
 
@@ -97,7 +98,9 @@ int op_kill::_run_server() {
 	log_info("killing thread (id=%u)", this->_id);
 
 	shared_thread t;
-	if (this->_thread_pool->get_active(this->_id, t) < 0) {
+	if (this->_req_thread_pool->get_active(this->_id, t) < 0 &&
+      this->_other_thread_pool->get_active(this->_id, t) < 0
+      ) {
 		log_debug("specified thread (id=%u) not found", this->_id);
 		this->_send_result(result_client_error, "thread not found");
 		return -1;

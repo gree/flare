@@ -72,10 +72,10 @@ int op_stats_index::_run_server() {
 		this->_send_stats_sizes();
 		break;
 	case stats_type_threads:
-		this->_send_stats_threads(singleton<flarei>::instance().get_thread_pool());
+		this->_send_stats_threads(singleton<flarei>::instance().get_req_thread_pool(), singleton<flarei>::instance().get_other_thread_pool());
 		break;
 	case stats_type_threads_request:
-		this->_send_stats_threads(singleton<flarei>::instance().get_thread_pool(), thread_pool::thread_type_request);
+		this->_send_stats_threads(singleton<flarei>::instance().get_req_thread_pool(), singleton<flarei>::instance().get_other_thread_pool(), thread_pool::thread_type_request);
 		break;
 	case stats_type_threads_slave:
 		break;
@@ -86,7 +86,7 @@ int op_stats_index::_run_server() {
 		this->_send_stats_threads_queue();
 		break;
 	default:
-		this->_send_stats(singleton<flarei>::instance().get_thread_pool(),
+		this->_send_stats(singleton<flarei>::instance().get_req_thread_pool(), singleton<flarei>::instance().get_other_thread_pool(),
 				NULL,
 				singleton<flarei>::instance().get_cluster());
 		break;

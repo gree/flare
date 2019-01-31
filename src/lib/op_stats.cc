@@ -118,7 +118,7 @@ int op_stats::_run_server() {
 	return 0;
 }
 
-int op_stats::_send_stats(thread_pool* tp, storage* st, cluster* cl) {
+int op_stats::_send_stats(thread_pool* req_tp, thread_pool* other_tp, storage* st, cluster* cl) {
 	rusage usage = stats_object->get_rusage();
 	char usage_user[BUFSIZ];
 	char usage_system[BUFSIZ];
@@ -135,7 +135,7 @@ int op_stats::_send_stats(thread_pool* tp, storage* st, cluster* cl) {
 	_send_stat("curr_items" 					, stats_object->get_curr_items(st));
 	_send_stat("total_items"					, stats_object->get_total_items());
 	_send_stat("bytes"								, stats_object->get_bytes(st));
-	_send_stat("curr_connections" 		, stats_object->get_curr_connections(tp));
+	_send_stat("curr_connections" 		, stats_object->get_curr_connections(req_tp, other_tp));
 	_send_stat("total_connections"		, stats_object->get_total_connections());
 	_send_stat("connection_structures", stats_object->get_connection_structures());
 	_send_stat("cmd_get"							, stats_object->get_cmd_get());
@@ -157,8 +157,8 @@ int op_stats::_send_stats(thread_pool* tp, storage* st, cluster* cl) {
 	_send_stat("bytes_read" 					, stats_object->get_bytes_read());
 	_send_stat("bytes_written"				, stats_object->get_bytes_written());
 	_send_stat("limit_maxbytes" 			, stats_object->get_limit_maxbytes());
-	_send_stat("threads"							, stats_object->get_threads(tp));
-	_send_stat("pool_threads" 				, stats_object->get_pool_threads(tp));
+	_send_stat("threads"							, stats_object->get_threads(req_tp, other_tp));
+	_send_stat("pool_threads" 				, stats_object->get_pool_threads(req_tp, other_tp));
 	_send_stat("node_map_version"		, cl->get_node_map_version());
 
 	return 0;
@@ -199,21 +199,33 @@ int op_stats::_send_stats(const thread::thread_info& info) {
 	return 0;
 }
 
-int op_stats::_send_stats_threads(thread_pool* tp) {
-	vector<thread::thread_info> list = tp->get_thread_info();
-	for (vector<thread::thread_info>::iterator it = list.begin(); it != list.end(); it++) {
-		_send_stats(*it);
-	}
-	
+int op_stats::_send_stats_threads(thread_pool* req_tp, thread_pool* other_tp) {
+  {
+    vector<thread::thread_info> list = req_tp->get_thread_info();
+    for (vector<thread::thread_info>::iterator it = list.begin(); it != list.end(); it++) {
+      _send_stats(*it);
+    }
+  }
+  {
+    vector<thread::thread_info> list = other_tp->get_thread_info();
+    for (vector<thread::thread_info>::iterator it = list.begin(); it != list.end(); it++) {
+      _send_stats(*it);
+    }
+  }
 	return 0;
 }
 
-int op_stats::_send_stats_threads(thread_pool* tp, int type) {
-	vector<thread::thread_info> list = tp->get_thread_info(type);
-	for (vector<thread::thread_info>::iterator it = list.begin(); it != list.end(); it++) {
-		_send_stats(*it);
+int op_stats::_send_stats_threads(thread_pool* req_tp, thread_pool* other_tp, int type) {
+	{
+    vector<thread::thread_info> list = req_tp->get_thread_info(type);
+    for (vector<thread::thread_info>::iterator it = list.begin(); it != list.end(); it++)
+      _send_stats(*it);
 	}
-	
+	{
+    vector<thread::thread_info> list = other_tp->get_thread_info(type);
+    for (vector<thread::thread_info>::iterator it = list.begin(); it != list.end(); it++)
+      _send_stats(*it);
+	}
 	return 0;
 }
 

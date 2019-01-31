@@ -78,7 +78,8 @@ void sa_usr1_handler(int sig) {
  */
 flarei::flarei():
 		_server(NULL),
-		_thread_pool(NULL),
+		_req_thread_pool(NULL),
+		_other_thread_pool(NULL),
 		_cluster(NULL),
 		_coordinator(NULL) {
 }
@@ -90,8 +91,11 @@ flarei::~flarei() {
 	delete this->_server;
 	this->_server = NULL;
 
-	delete this->_thread_pool;
-	this->_thread_pool = NULL;
+	delete this->_req_thread_pool;
+	this->_other_thread_pool = NULL;
+
+	delete this->_other_thread_pool;
+	this->_other_thread_pool = NULL;
 
 	delete this->_cluster;
 	this->_cluster = NULL;
@@ -236,9 +240,10 @@ int flarei::startup(int argc, char **argv) {
 		}
 	}
 
-	this->_thread_pool = new thread_pool(ini_option_object().get_thread_pool_size(), ini_option_object().get_stack_size());
+	this->_req_thread_pool = new thread_pool(ini_option_object().get_thread_pool_size(), ini_option_object().get_stack_size());
+	this->_other_thread_pool = new thread_pool(ini_option_object().get_thread_pool_size(), ini_option_object().get_stack_size());
 
-	this->_cluster = new cluster(this->_thread_pool, ini_option_object().get_server_name(), ini_option_object().get_server_port());
+	this->_cluster = new cluster(this->_req_thread_pool, this->_other_thread_pool, ini_option_object().get_server_name(), ini_option_object().get_server_port());
 	this->_cluster->set_monitor_threshold(ini_option_object().get_monitor_threshold());
 	this->_cluster->set_monitor_interval(ini_option_object().get_monitor_interval());
 	this->_cluster->set_monitor_read_timeout(ini_option_object().get_monitor_read_timeout());
@@ -254,7 +259,7 @@ int flarei::startup(int argc, char **argv) {
 	}
 	this->_cluster->set_key_hash_algorithm(ha);
 
-	shared_thread cth = this->_thread_pool->get(thread_pool::thread_type_controller);
+	shared_thread cth = this->_other_thread_pool->get(thread_pool::thread_type_controller);
 	handler_controller* ch = new handler_controller(cth, this->_cluster);
 	cth->trigger(ch);
 
@@ -265,7 +270,7 @@ int flarei::startup(int argc, char **argv) {
 		return -1;
 	}
 
-	shared_thread ath = this->_thread_pool->get(thread_pool::thread_type_alarm);
+	shared_thread ath = this->_other_thread_pool->get(thread_pool::thread_type_alarm);
 	handler_alarm* ah = new handler_alarm(ath);
 	ath->trigger(ah);
 
@@ -310,14 +315,14 @@ int flarei::run() {
 		for (it = connection_list.begin(); it != connection_list.end(); it++) {
 			shared_connection_tcp c = *it;
 
-			if (this->_thread_pool->get_thread_size(thread_pool::thread_type_request) >= ini_option_object().get_max_connection()) {
+			if (this->_req_thread_pool->get_thread_size(thread_pool::thread_type_request) >= ini_option_object().get_max_connection()) {
 				log_warning("too many connection [%d] -> closing socket and continue", ini_option_object().get_max_connection());
 				continue;
 			}
 
 			stats_object->increment_total_connections();
 
-			shared_thread t = this->_thread_pool->get(thread_pool::thread_type_request);
+			shared_thread t = this->_req_thread_pool->get(thread_pool::thread_type_request);
 			handler_request* h = new handler_request(t, c);
 			t->trigger(h);
 		}
@@ -348,7 +353,7 @@ int flarei::reload() {
 	connection_tcp::read_timeout = ini_option_object().get_net_read_timeout() * 1000;		// -> msec
 
 	// thread_pool_size
-	this->_thread_pool->set_max_pool_size(ini_option_object().get_thread_pool_size());
+	this->_req_thread_pool->set_max_pool_size(ini_option_object().get_thread_pool_size());
 
 	// re-setup resource limit (do not care about return value here)
 	this->_set_resource_limit();
@@ -363,7 +368,8 @@ int flarei::reload() {
  */
 int flarei::shutdown() {
 	log_notice("shutting down active, and pool threads...", 0);
-	this->_thread_pool->shutdown();
+	this->_req_thread_pool->shutdown();
+	this->_other_thread_pool->shutdown();
 	log_notice("all threads are successfully shutdown", 0);
 
 	this->_clear_pid();

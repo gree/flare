@@ -69,12 +69,12 @@ protected:
 	virtual int _parse_binary_request(const binary_request_header&, const char* body);
 	virtual int _run_server();
 
-	virtual int _send_stats(thread_pool* tp, storage* st, cluster* cl);
+	virtual int _send_stats(thread_pool* req_tp, thread_pool* other_tp, storage* st, cluster* cl);
 	virtual int _send_stats_items();
 	virtual int _send_stats_slabs();
 	virtual int _send_stats_sizes();
-	virtual int _send_stats_threads(thread_pool* tp);
-	virtual int _send_stats_threads(thread_pool* tp, int type);
+	virtual int _send_stats_threads(thread_pool* req_tp, thread_pool* other_tp);
+	virtual int _send_stats_threads(thread_pool* req_tp, thread_pool* other_tp, int type);
 	virtual int _send_stats_nodes(cluster* cl);
 	virtual int _send_stats_threads_queue();
 

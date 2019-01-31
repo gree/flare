@@ -72,17 +72,17 @@ int op_stats_node::_run_server() {
 		this->_send_stats_sizes();
 		break;
 	case stats_type_threads:
-		this->_send_stats_threads(singleton<flared>::instance().get_thread_pool());
+		this->_send_stats_threads(singleton<flared>::instance().get_req_thread_pool(), singleton<flared>::instance().get_other_thread_pool());
 		break;
 	case stats_type_threads_request:
-		this->_send_stats_threads(singleton<flared>::instance().get_thread_pool(), thread_pool::thread_type_request);
+		this->_send_stats_threads(singleton<flared>::instance().get_req_thread_pool(), singleton<flared>::instance().get_other_thread_pool(), thread_pool::thread_type_request);
 		break;
 	case stats_type_threads_slave:
 		{
 			cluster* cl = singleton<flared>::instance().get_cluster();
 			vector<cluster::node> slave = cl->get_slave_node();
 			for (vector<cluster::node>::iterator it = slave.begin(); it != slave.end(); it++) {
-				this->_send_stats_threads(singleton<flared>::instance().get_thread_pool(), it->node_thread_type);
+				this->_send_stats_threads(singleton<flared>::instance().get_req_thread_pool(), singleton<flared>::instance().get_other_thread_pool(), it->node_thread_type);
 			}
 		}
 		break;
@@ -93,7 +93,7 @@ int op_stats_node::_run_server() {
 		this->_send_stats_threads_queue();
 		break;
 	default:
-		this->_send_stats(singleton<flared>::instance().get_thread_pool(),
+		this->_send_stats(singleton<flared>::instance().get_req_thread_pool(),singleton<flared>::instance().get_other_thread_pool(),
 				singleton<flared>::instance().get_storage(),
 				singleton<flared>::instance().get_cluster());
 		break;

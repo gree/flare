@@ -61,7 +61,7 @@ public:
 	typedef	stack<shared_thread>							pool;
 
 protected:
-	AtomicCounter 		_index;
+	AtomicCounter*		_index;
 	global_map				_global_map;
 	pool							_pool;
 
@@ -74,7 +74,7 @@ protected:
 public:
 	static const int default_stack_size = 128;
 
-	thread_pool(pool::size_type max_pool_size, int stack_size = default_stack_size);
+	thread_pool(pool::size_type max_pool_size, int stack_size, AtomicCounter* _thread_index);
 	virtual ~thread_pool();
 
 	shared_thread get(int type);

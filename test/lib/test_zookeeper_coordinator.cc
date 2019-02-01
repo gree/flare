@@ -42,8 +42,9 @@ using namespace std;
 using namespace gree::flare;
 
 namespace test_zookeeper_coordinator {
-	thread_pool req_tp(10, 8192);
-	thread_pool other_tp(10, 8192);
+	AtomicCounter thread_idx(1);
+	thread_pool req_tp(10, 8192, &thread_idx);
+	thread_pool other_tp(10, 8192, &thread_idx);
 	char* connstring = NULL;
 	char* connuri = NULL;
 	zhandle_t* zhandle;

@@ -49,6 +49,7 @@ namespace test_handler_proxy {
 
 	int							port;
 	mock_cluster*		cl;
+	AtomicCounter*		thread_idx;
 	thread_pool*		tp;
 	server*					s;
 	vector<shared_connection_tcp>		cs;
@@ -70,7 +71,8 @@ namespace test_handler_proxy {
 		s = new server();
 
 		cl = new mock_cluster("localhost", port);
-		tp = new thread_pool(5);
+		thread_idx = new AtomicCounter(1);
+		tp = new thread_pool(5, 128, thread_idx);
 	}
 
 	void teardown() {
@@ -84,6 +86,7 @@ namespace test_handler_proxy {
 		tp->shutdown();
 		delete s;
 		delete tp;
+		delete thread_idx;
 		delete cl;
 		delete stats_object;
 

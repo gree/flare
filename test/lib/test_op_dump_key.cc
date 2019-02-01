@@ -147,7 +147,8 @@ namespace test_op_dump_key
 		shared_connection c(new connection_sstream(" -1 0 1000\r\n"));
 		cluster cl(NULL, NULL, "", 0);
 		mock_storage st("", 0, 0);
-		thread_pool tp(1);
+		AtomicCounter thread_idx(1);
+		thread_pool tp(1, 128, &thread_idx);
 		test_op_dump_key op(c, &cl, &st);
 		op.set_thread(shared_thread(new gree::flare::thread(&tp)));
 		set_dummy_items(st, item_num, item_key_size);

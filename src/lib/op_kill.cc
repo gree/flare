@@ -99,8 +99,8 @@ int op_kill::_run_server() {
 
 	shared_thread t;
 	if (this->_req_thread_pool->get_active(this->_id, t) < 0 &&
-      this->_other_thread_pool->get_active(this->_id, t) < 0
-      ) {
+			this->_other_thread_pool->get_active(this->_id, t) < 0
+			) {
 		log_debug("specified thread (id=%u) not found", this->_id);
 		this->_send_result(result_client_error, "thread not found");
 		return -1;

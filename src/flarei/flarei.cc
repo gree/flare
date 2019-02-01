@@ -78,6 +78,7 @@ void sa_usr1_handler(int sig) {
  */
 flarei::flarei():
 		_server(NULL),
+		_thread_index(NULL),
 		_req_thread_pool(NULL),
 		_other_thread_pool(NULL),
 		_cluster(NULL),
@@ -96,6 +97,9 @@ flarei::~flarei() {
 
 	delete this->_other_thread_pool;
 	this->_other_thread_pool = NULL;
+
+	delete this->_thread_index;
+	this->_thread_index = NULL;
 
 	delete this->_cluster;
 	this->_cluster = NULL;
@@ -240,8 +244,9 @@ int flarei::startup(int argc, char **argv) {
 		}
 	}
 
-	this->_req_thread_pool = new thread_pool(ini_option_object().get_thread_pool_size(), ini_option_object().get_stack_size());
-	this->_other_thread_pool = new thread_pool(ini_option_object().get_thread_pool_size(), ini_option_object().get_stack_size());
+	this->_thread_index = new AtomicCounter(1);
+	this->_req_thread_pool = new thread_pool(ini_option_object().get_thread_pool_size(), ini_option_object().get_stack_size(), this->_thread_index);
+	this->_other_thread_pool = new thread_pool(ini_option_object().get_thread_pool_size(), ini_option_object().get_stack_size(), this->_thread_index);
 
 	this->_cluster = new cluster(this->_req_thread_pool, this->_other_thread_pool, ini_option_object().get_server_name(), ini_option_object().get_server_port());
 	this->_cluster->set_monitor_threshold(ini_option_object().get_monitor_threshold());

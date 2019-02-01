@@ -44,6 +44,7 @@ namespace test_handler_dump_replication {
 	mock_cluster*					cl;
 	mock_storage*					st;
 	server*								s;
+	AtomicCounter *thread_idx;
 	thread_pool*					tp;
 	vector<shared_connection_tcp>		cs;
 	struct sigaction	prev_sigusr1_action;
@@ -64,7 +65,8 @@ namespace test_handler_dump_replication {
 		s = new server();
 
 		cl = new mock_cluster("localhost", port);
-		tp = new thread_pool(5);
+		thread_idx = new AtomicCounter(1);
+		tp = new thread_pool(5, 128, thread_idx);
 		st = new mock_storage("", 0, 0);
 		st->open();
 	}
@@ -82,6 +84,7 @@ namespace test_handler_dump_replication {
 
 		delete s;
 		delete tp;
+		delete thread_idx;
 		delete st;
 		delete cl;
 		delete stats_object;

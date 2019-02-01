@@ -39,8 +39,10 @@ namespace test_thread_pool
 
 	struct thread_pool_test : public thread_pool
 	{
+		AtomicCounter thread_idx;
 		thread_pool_test():
-			thread_pool(128) { }
+			thread_idx(1),
+			thread_pool(128, 128, &thread_idx) { }
 		~thread_pool_test() { }
 
 		using thread_pool::_index;
@@ -51,10 +53,10 @@ namespace test_thread_pool
 	void test_duplicate_thread_id_different_types() {
 		// Preparation
 		thread_pool_test pool;
-		cut_assert_equal_int(1, pool._index.fetch());
+		cut_assert_equal_int(1, pool._index->fetch());
 		//	Put a dummy thread (Type 0, ID 1, ensuring collision) in the global map
 		shared_thread dummy(new gree::flare::thread(&pool));
-		dummy->setup(0, pool._index.fetch());
+		dummy->setup(0, pool._index->fetch());
 		pool._global_map[0][dummy->get_id()] = dummy;
 		// Test
 		// 	Fetch thread, ID should be != 1
@@ -66,10 +68,10 @@ namespace test_thread_pool
 	void test_duplicate_thread_id_same_type() {
 		// Preparation
 		thread_pool_test pool;
-		cut_assert_equal_int(1, pool._index.fetch());
+		cut_assert_equal_int(1, pool._index->fetch());
 		//	Put a dummy thread (Type 0, ID 1, ensuring collision) in the global map
 		shared_thread dummy(new gree::flare::thread(&pool));
-		dummy->setup(0, pool._index.fetch());
+		dummy->setup(0, pool._index->fetch());
 		pool._global_map[0][dummy->get_id()] = dummy;
 		// Test
 		// 	Fetch thread, ID should be != 1

@@ -91,6 +91,7 @@ void sa_usr1_handler(int sig) {
  */
 flared::flared():
 		_server(NULL),
+		_thread_index(NULL),
 		_req_thread_pool(NULL),
 		_other_thread_pool(NULL),
 		_cluster(NULL),
@@ -112,6 +113,9 @@ flared::~flared() {
 
 	delete this->_other_thread_pool;
 	this->_other_thread_pool = NULL;
+
+	delete this->_thread_index;
+	this->_thread_index = NULL;
 
 	delete this->_cluster;
 	this->_cluster = NULL;
@@ -182,8 +186,9 @@ int flared::startup(int argc, char **argv) {
 		}
 	}
 
-	this->_req_thread_pool = new thread_pool(ini_option_object().get_thread_pool_size(), ini_option_object().get_stack_size());
-	this->_other_thread_pool = new thread_pool(ini_option_object().get_thread_pool_size(), ini_option_object().get_stack_size());
+	this->_thread_index = new AtomicCounter(1);
+	this->_req_thread_pool = new thread_pool(ini_option_object().get_thread_pool_size(), ini_option_object().get_stack_size(), this->_thread_index);
+	this->_other_thread_pool = new thread_pool(ini_option_object().get_thread_pool_size(), ini_option_object().get_stack_size(), this->_thread_index);
 
 	this->_cluster_replication = shared_cluster_replication(new cluster_replication(this->_other_thread_pool));
 

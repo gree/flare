@@ -200,31 +200,33 @@ int op_stats::_send_stats(const thread::thread_info& info) {
 }
 
 int op_stats::_send_stats_threads(thread_pool* req_tp, thread_pool* other_tp) {
-  {
-    vector<thread::thread_info> list = req_tp->get_thread_info();
-    for (vector<thread::thread_info>::iterator it = list.begin(); it != list.end(); it++) {
-      _send_stats(*it);
-    }
-  }
-  {
-    vector<thread::thread_info> list = other_tp->get_thread_info();
-    for (vector<thread::thread_info>::iterator it = list.begin(); it != list.end(); it++) {
-      _send_stats(*it);
-    }
-  }
+	{
+		vector<thread::thread_info> list = req_tp->get_thread_info();
+		for (vector<thread::thread_info>::iterator it = list.begin(); it != list.end(); it++) {
+			_send_stats(*it);
+		}
+	}
+	{
+		vector<thread::thread_info> list = other_tp->get_thread_info();
+		for (vector<thread::thread_info>::iterator it = list.begin(); it != list.end(); it++) {
+			_send_stats(*it);
+		}
+	}
 	return 0;
 }
 
 int op_stats::_send_stats_threads(thread_pool* req_tp, thread_pool* other_tp, int type) {
 	{
-    vector<thread::thread_info> list = req_tp->get_thread_info(type);
-    for (vector<thread::thread_info>::iterator it = list.begin(); it != list.end(); it++)
-      _send_stats(*it);
+		vector<thread::thread_info> list = req_tp->get_thread_info(type);
+		for (vector<thread::thread_info>::iterator it = list.begin(); it != list.end(); it++) {
+			_send_stats(*it);
+		}
 	}
 	{
-    vector<thread::thread_info> list = other_tp->get_thread_info(type);
-    for (vector<thread::thread_info>::iterator it = list.begin(); it != list.end(); it++)
-      _send_stats(*it);
+		vector<thread::thread_info> list = other_tp->get_thread_info(type);
+		for (vector<thread::thread_info>::iterator it = list.begin(); it != list.end(); it++) {
+			_send_stats(*it);
+		}
 	}
 	return 0;
 }

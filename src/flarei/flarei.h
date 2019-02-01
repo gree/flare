@@ -45,6 +45,7 @@ namespace flare {
 class flarei : public app {
 private:
 	server*								_server;
+	AtomicCounter*					_thread_index;
 	thread_pool*					_req_thread_pool;
 	thread_pool*					_other_thread_pool;
 	cluster*							_cluster;

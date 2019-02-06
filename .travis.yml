@@ -23,18 +23,16 @@ matrix:
     - compiler: clang
 
 before_install:
-  - travis_retry sudo add-apt-repository -y ppa:hvr/ghc
   - travis_retry sudo apt-get update
   - travis_retry sudo apt-get install libtokyocabinet-dev
   - travis_retry sudo apt-get install libboost-program-options-dev libboost-regex-dev libboost-serialization-dev libboost-thread-dev libboost-system-dev
   - travis_retry sudo apt-get install uuid-dev
   - travis_retry sudo apt-get install cutter-testing-framework
-  - travis_retry sudo apt-get install cabal-install-1.18 ghc-7.6.3
-  - travis_retry sudo apt-get install git
+  - travis_retry sudo apt-get install git curl
+  - travis_retry curl -sSL https://get.haskellstack.org/ | sh
   - export PATH=$HOME/.cabal/bin:/opt/ghc/7.6.3/bin:/opt/cabal/1.18/bin:$PATH
   - git clone https://github.com/gree/flare-tests.git
-  - cabal update
-  - cabal install flare-tests/
+  - cd flare-tests && stack install && cd ..
 
 before_script:
   - travis_retry ./autogen.sh

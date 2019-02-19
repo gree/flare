@@ -42,11 +42,12 @@ namespace flare {
  */
 class op_kill : public op {
 protected:
-	thread_pool*				_thread_pool;
+	thread_pool*				_req_thread_pool;
+	thread_pool*				_other_thread_pool;
 	unsigned int				_id;
 
 public:
-	op_kill(shared_connection c, thread_pool* tp);
+	op_kill(shared_connection c, thread_pool* req_tp, thread_pool* other_tp);
 	virtual ~op_kill();
 
 protected:

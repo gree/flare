@@ -35,8 +35,8 @@ namespace flare {
 /**
  *	ctor for thread_pool
  */
-thread_pool::thread_pool(thread_pool::pool::size_type max_pool_size, int stack_size):
-		_index(1),
+thread_pool::thread_pool(thread_pool::pool::size_type max_pool_size, int stack_size, AtomicCounter* thread_index):
+		_index(thread_index),
 		_max_pool_size(max_pool_size),
 		_stack_size(stack_size) {
 	this->_global_map.clear();
@@ -83,7 +83,7 @@ shared_thread thread_pool::get(int type) {
 	unsigned int id;
 	pthread_rwlock_wrlock(&this->_mutex_global_map);
 	for (;;) {
-		id=this->_index.incr();
+		id=this->_index->incr();
 		if (id == 0) {
 			continue;
 		}

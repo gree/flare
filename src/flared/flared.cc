@@ -91,7 +91,9 @@ void sa_usr1_handler(int sig) {
  */
 flared::flared():
 		_server(NULL),
-		_thread_pool(NULL),
+		_thread_index(NULL),
+		_req_thread_pool(NULL),
+		_other_thread_pool(NULL),
 		_cluster(NULL),
 		_storage(NULL) {
 }
@@ -106,8 +108,14 @@ flared::~flared() {
 	delete this->_server;
 	this->_server = NULL;
 
-	delete this->_thread_pool;
-	this->_thread_pool = NULL;
+	delete this->_req_thread_pool;
+	this->_req_thread_pool = NULL;
+
+	delete this->_other_thread_pool;
+	this->_other_thread_pool = NULL;
+
+	delete this->_thread_index;
+	this->_thread_index = NULL;
 
 	delete this->_cluster;
 	this->_cluster = NULL;
@@ -178,11 +186,13 @@ int flared::startup(int argc, char **argv) {
 		}
 	}
 
-	this->_thread_pool = new thread_pool(ini_option_object().get_thread_pool_size(), ini_option_object().get_stack_size());
+	this->_thread_index = new AtomicCounter(1);
+	this->_req_thread_pool = new thread_pool(ini_option_object().get_thread_pool_size(), ini_option_object().get_stack_size(), this->_thread_index);
+	this->_other_thread_pool = new thread_pool(ini_option_object().get_thread_pool_size(), ini_option_object().get_stack_size(), this->_thread_index);
 
-	this->_cluster_replication = shared_cluster_replication(new cluster_replication(this->_thread_pool));
+	this->_cluster_replication = shared_cluster_replication(new cluster_replication(this->_other_thread_pool));
 
-	this->_cluster = new cluster(this->_thread_pool, ini_option_object().get_server_name(), ini_option_object().get_server_port());
+	this->_cluster = new cluster(this->_req_thread_pool, this->_other_thread_pool, ini_option_object().get_server_name(), ini_option_object().get_server_port());
 	this->_cluster->set_proxy_concurrency(ini_option_object().get_proxy_concurrency());
 	this->_cluster->set_reconstruction_interval(ini_option_object().get_reconstruction_interval());
 	this->_cluster->set_reconstruction_bwlimit(ini_option_object().get_reconstruction_bwlimit());
@@ -246,7 +256,7 @@ int flared::startup(int argc, char **argv) {
 	this->_cluster->set_storage(this->_storage);
 
 	// creating alarm thread in advance
-	shared_thread th_alarm = this->_thread_pool->get(thread_pool::thread_type_alarm);
+	shared_thread th_alarm = this->_other_thread_pool->get(thread_pool::thread_type_alarm);
 	handler_alarm* h_alarm = new handler_alarm(th_alarm);
 	th_alarm->trigger(h_alarm);
 
@@ -261,7 +271,7 @@ int flared::startup(int argc, char **argv) {
 
 #ifdef ENABLE_MYSQL_REPLICATION
 	if (ini_option_object().is_mysql_replication()) {
-		shared_thread th_mysql_replication = this->_thread_pool->get(thread_pool::thread_type_mysql_replication);
+		shared_thread th_mysql_replication = this->_other_thread_pool->get(thread_pool::thread_type_mysql_replication);
 		handler_mysql_replication* h_mysql_replication = new handler_mysql_replication(th_mysql_replication, this->_cluster);
 		th_mysql_replication->trigger(h_mysql_replication);
 	}
@@ -325,16 +335,16 @@ int flared::run() {
 		for (it = connection_list.begin(); it != connection_list.end(); it++) {
 			shared_connection_tcp c = *it;
 
-			if (this->_thread_pool->get_thread_size(thread_pool::thread_type_request) >= ini_option_object().get_max_connection()) {
+			if (this->_req_thread_pool->get_thread_size(thread_pool::thread_type_request) >= ini_option_object().get_max_connection()) {
 				log_warning("too many connections [%d] -> closing socket and continue", ini_option_object().get_max_connection());
 				continue;
 			}
 
 			stats_object->increment_total_connections();
 
-			shared_thread t = this->_thread_pool->get(thread_pool::thread_type_request);
+			shared_thread t = this->_req_thread_pool->get(thread_pool::thread_type_request);
 			if (t->get_id() == 0) {
-				log_warning("too many threads (failed to create thread) [%d] -> closing socket and continue", this->_thread_pool->get_thread_size(thread_pool::thread_type_request));
+				log_warning("too many threads (failed to create thread) [%d] -> closing socket and continue", this->_req_thread_pool->get_thread_size(thread_pool::thread_type_request));
 				continue;
 			}
 			handler_request* h = new handler_request(t, c);
@@ -378,7 +388,10 @@ int flared::reload() {
 	this->_cluster->set_replication_type(ini_option_object().get_replication_type());
 	
 	// thread_pool_size
-	this->_thread_pool->set_max_pool_size(ini_option_object().get_thread_pool_size());
+	this->_req_thread_pool->set_max_pool_size(ini_option_object().get_thread_pool_size());
+
+	// thread_pool_size
+	this->_other_thread_pool->set_max_pool_size(ini_option_object().get_thread_pool_size());
 
 	// max_total_thread_queue
 	this->_cluster->set_max_total_thread_queue(ini_option_object().get_max_total_thread_queue());
@@ -428,7 +441,8 @@ int flared::reload() {
  */
 int flared::shutdown() {
 	log_notice("shutting down active, and pool threads...", 0);
-	this->_thread_pool->shutdown();
+	this->_req_thread_pool->shutdown();
+	this->_other_thread_pool->shutdown();
 	log_notice("all threads are successfully shutdown", 0);
 
 	log_notice("closing storage...", 0);

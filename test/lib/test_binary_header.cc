@@ -62,7 +62,7 @@ namespace test_binary_header
 		cut_assert_equal_memory(reference_header.get_raw_data(), reference_header.get_raw_size(),
 				test_header.get_raw_data(), test_header.get_raw_size());
 		// Check endianness
-		uint8_t big_endian_blob[24] = {
+		int8_t big_endian_blob[24] = {
 			'\x80',																									// magic
 			'\x42',																									// opcode
 			'\x04','\x20',																					// key_length
@@ -78,7 +78,7 @@ namespace test_binary_header
 	}
 	
 	void test_request_header_decoding() {
-		uint8_t network_header[24] = {
+		int8_t network_header[24] = {
 			'\x80',																									// magic
 			'\x42',																									// opcode
 			'\x04','\x20',																					// key_length
@@ -124,7 +124,7 @@ namespace test_binary_header
 		cut_assert_equal_memory(reference_header.get_raw_data(), reference_header.get_raw_size(),
 				test_header.get_raw_data(), test_header.get_raw_size());
 		// Check endianness
-		uint8_t big_endian_blob[24] = {
+		int8_t big_endian_blob[24] = {
 			'\x81',																									// magic
 			'\x42',																									// opcode
 			'\x04','\x20',																					// key_length
@@ -140,7 +140,7 @@ namespace test_binary_header
 	}
 	
 	void test_response_header_decoding() {
-		uint8_t network_header[24] = {
+		int8_t network_header[24] = {
 			'\x81',																									// magic
 			'\x42',																									// opcode
 			'\x04','\x20',																					// key_length

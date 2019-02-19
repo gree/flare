@@ -60,8 +60,9 @@ namespace flare {
 /**
  *	ctor for cluster
  */
-cluster::cluster(thread_pool* tp, string server_name, int server_port):
-		_thread_pool(tp),
+cluster::cluster(thread_pool* req_tp, thread_pool* other_tp, string server_name, int server_port):
+		_req_thread_pool(req_tp),
+		_other_thread_pool(other_tp),
 		_key_hash_algorithm(storage::hash_algorithm_simple),
 		_proxy_hash_algorithm(storage::hash_algorithm_murmur),
 		_key_resolver(NULL),
@@ -238,7 +239,7 @@ int cluster::startup_index(coordinator* coord, key_resolver::type key_resolver_t
 
 	// monitoring threads
 	for (node_map::iterator it = this->_node_map.begin(); it != this->_node_map.end(); it++) {
-		shared_thread t = this->_thread_pool->get(it->second.node_thread_type);
+		shared_thread t = this->_other_thread_pool->get(it->second.node_thread_type);
 		handler_monitor* h = new handler_monitor(t, this, it->second.node_server_name, it->second.node_server_port);
 		h->set_monitor_threshold(this->_monitor_threshold);
 		h->set_monitor_interval(this->_monitor_interval);
@@ -470,7 +471,7 @@ int cluster::add_node(string node_server_name, int node_server_port) {
 
 	// create monitoring thread
 	if (replace == false) {
-		shared_thread t = this->_thread_pool->get(thread_type);
+		shared_thread t = this->_other_thread_pool->get(thread_type);
 		handler_monitor* h = new handler_monitor(t, this, node_server_name, node_server_port);
 		h->set_monitor_threshold(this->_monitor_threshold);
 		h->set_monitor_interval(this->_monitor_interval);
@@ -823,7 +824,7 @@ int cluster::remove_node(string node_server_name, int node_server_port) {
 		}
 
 		// remove a node
-		thread_pool::local_map m = this->_thread_pool->get_active(n.node_thread_type);
+		thread_pool::local_map m = this->_other_thread_pool->get_active(n.node_thread_type);
 		for (thread_pool::local_map::iterator it = m.begin(); it != m.end(); it++) {
 			log_notice("killing monitoring thread(s)... (node_thread_type=%d, thread_id=%d)", n.node_thread_type, it->second->get_id());
 			it->second->set_state("killed");
@@ -1551,7 +1552,7 @@ int cluster::_shift_node_role(string node_key, role old_role, int old_partition,
 			this->_master_reconstruction++;
 			pthread_mutex_unlock(&this->_mutex_master_reconstruction);
 
-			shared_thread t = this->_thread_pool->get(thread_pool::thread_type_reconstruction);
+			shared_thread t = this->_other_thread_pool->get(thread_pool::thread_type_reconstruction);
 			string node_server_name;
 			int node_server_port = 0;
 			this->from_node_key(it->first, node_server_name, node_server_port);
@@ -1588,7 +1589,7 @@ int cluster::_shift_node_role(string node_key, role old_role, int old_partition,
 			return -1;
 		}
 		
-		shared_thread t = this->_thread_pool->get(thread_pool::thread_type_reconstruction);
+		shared_thread t = this->_other_thread_pool->get(thread_pool::thread_type_reconstruction);
 		string node_server_name;
 		int node_server_port = 0;
 		this->from_node_key(master_node_key, node_server_name, node_server_port);
@@ -1625,7 +1626,7 @@ int cluster::_enqueue(shared_thread_queue q, thread_pool::thread_type type, bool
 	log_debug("enqueue (ident=%s, thread_type=%d)", q->get_ident().c_str(), type);
 
 	shared_thread t;
-	thread_pool::local_map m = this->_thread_pool->get_active(type);
+	thread_pool::local_map m = this->_other_thread_pool->get_active(type);
 	thread_pool::local_map::iterator it = m.begin();
 	if (it == m.end()) {
 		return -1;
@@ -1666,7 +1667,7 @@ int cluster::_broadcast(shared_thread_queue q, bool sync, vector<string> prior_n
 			}
 
 			log_notice("prior node key = %s -> process target node first w/ sync mode", p.c_str());
-			thread_pool::local_map m = this->_thread_pool->get_active(this->_node_map[p].node_thread_type);
+			thread_pool::local_map m = this->_other_thread_pool->get_active(this->_node_map[p].node_thread_type);
 
 			int n = 0;
 			for (thread_pool::local_map::iterator it_local = m.begin(); it_local != m.end(); it_local++) {
@@ -1703,7 +1704,7 @@ int cluster::_broadcast(shared_thread_queue q, bool sync, vector<string> prior_n
 			log_notice("node key = %s skip enqueue", exclude_node_key.c_str());
 			continue;
 		}
-		thread_pool::local_map m = this->_thread_pool->get_active(it->second.node_thread_type);
+		thread_pool::local_map m = this->_other_thread_pool->get_active(it->second.node_thread_type);
 		for (thread_pool::local_map::iterator it_local = m.begin(); it_local != m.end(); it_local++) {
 			if (sync) {
 				q->sync_ref();
@@ -1824,7 +1825,7 @@ int cluster::_load(bool update_monitor) {
 		// kill monitoring threads
 		for (node_map::iterator it = preserved_node_map.begin(); it != preserved_node_map.end(); it++) {
 			if (this->_node_map.count(it->first) == 0) {
-				thread_pool::local_map m = this->_thread_pool->get_active(it->second.node_thread_type);
+				thread_pool::local_map m = this->_other_thread_pool->get_active(it->second.node_thread_type);
 				for (thread_pool::local_map::iterator tit = m.begin(); tit != m.end(); tit++) {
 					log_notice("killing monitoring thread(s)... (node_thread_type=%d, thread_id=%d)",
 										 it->second.node_thread_type, tit->second->get_id());
@@ -1837,7 +1838,7 @@ int cluster::_load(bool update_monitor) {
 		// create monitoring threads
 		for (node_map::iterator it = this->_node_map.begin(); it != this->_node_map.end(); it++) {
 			if (preserved_node_map.count(it->first) == 0) {
-				shared_thread t = this->_thread_pool->get(it->second.node_thread_type);
+				shared_thread t = this->_other_thread_pool->get(it->second.node_thread_type);
 				handler_monitor* h = new handler_monitor(t, this, it->second.node_server_name, it->second.node_server_port);
 				h->set_monitor_threshold(this->_monitor_threshold);
 				h->set_monitor_interval(this->_monitor_interval);
@@ -2232,18 +2233,18 @@ int cluster::_get_proxy_thread(string node_key, int key_hash, shared_thread& t) 
 	thread_type = this->_node_map[node_key].node_thread_type;
 	pthread_rwlock_unlock(&this->_mutex_node_map);
 
-	thread_pool::local_map m = this->_thread_pool->get_active(thread_type);
+	thread_pool::local_map m = this->_other_thread_pool->get_active(thread_type);
 	if (static_cast<int>(m.size()) < this->_proxy_concurrency) {
 		int i;
 		for (i = 0; i < this->_proxy_concurrency - static_cast<int>(m.size()); i++) {
-			shared_thread tmp = this->_thread_pool->get(thread_type);
+			shared_thread tmp = this->_other_thread_pool->get(thread_type);
 			string node_server_name;
 			int node_server_port = 0;
 			this->from_node_key(node_key, node_server_name, node_server_port);
 			handler_proxy* h = new handler_proxy(tmp, this, node_server_name, node_server_port);
 			tmp->trigger(h, true, false);
 		}
-		m = this->_thread_pool->get_active(thread_type);
+		m = this->_other_thread_pool->get_active(thread_type);
 	}
 
 	int index = key_hash % m.size();

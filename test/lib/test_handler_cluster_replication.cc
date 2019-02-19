@@ -43,6 +43,7 @@ namespace test_handler_cluster_replication {
 
 	int							port;
 	server*					s;
+	AtomicCounter *thread_idx;
 	thread_pool*		tp;
 	vector<shared_connection_tcp>		cs;
 	struct sigaction	prev_sigusr1_action;
@@ -62,7 +63,8 @@ namespace test_handler_cluster_replication {
 		port = rand() % (65535 - 1024) + 1024;
 		s = new server();
 
-		tp = new thread_pool(1);
+		thread_idx = new AtomicCounter(1);
+		tp = new thread_pool(1, 128, thread_idx);
 	}
 
 	void teardown() {
@@ -77,6 +79,7 @@ namespace test_handler_cluster_replication {
 
 		delete s;
 		delete tp;
+		delete thread_idx;
 		delete stats_object;
 
 		if (sigaction(SIGUSR1, &prev_sigusr1_action, NULL) < 0) {

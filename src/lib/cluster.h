@@ -168,7 +168,8 @@ public:
 	static const int	default_key_resolver_modular_virtual = 4096;
 
 protected:
-	thread_pool*					_thread_pool;
+	thread_pool*					_req_thread_pool;
+	thread_pool*					_other_thread_pool;
 	storage::hash_algorithm _key_hash_algorithm;
 	const storage::hash_algorithm _proxy_hash_algorithm;
 	key_resolver*					_key_resolver;
@@ -216,7 +217,7 @@ protected:
 	vector<shared_proxy_event_listener>		_fixed_proxy_event_listeners;
 
 public:
-	cluster(thread_pool* tp, string server_name, int server_port);
+	cluster(thread_pool* req_tp, thread_pool* other_tp, string server_name, int server_port);
 	virtual ~cluster();
 
 	int startup_index(coordinator* coord, key_resolver::type key_resolver_type, int key_resolver_modular_hint, int key_resolver_modular_virtual);

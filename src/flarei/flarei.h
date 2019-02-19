@@ -45,7 +45,9 @@ namespace flare {
 class flarei : public app {
 private:
 	server*								_server;
-	thread_pool*					_thread_pool;
+	AtomicCounter*					_thread_index;
+	thread_pool*					_req_thread_pool;
+	thread_pool*					_other_thread_pool;
 	cluster*							_cluster;
 	coordinator*					_coordinator;
 	coordinator_factory		_coordinator_factory;
@@ -59,7 +61,8 @@ public:
 	int reload();
 	int shutdown();
 
-	thread_pool* get_thread_pool() { return this->_thread_pool; };
+	thread_pool* get_req_thread_pool() { return this->_req_thread_pool; };
+	thread_pool* get_other_thread_pool() { return this->_other_thread_pool; };
 	cluster* get_cluster() { return this->_cluster; };
 
 protected:

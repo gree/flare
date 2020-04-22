@@ -13,7 +13,7 @@ Build-Depends: debhelper (>= 5),
                libhashkit-dev
 Standards-Version: 3.8.0
 
-Package: flare
+Package: kvs-flare
 Architecture: any
 Depends: ${shlibs:Depends}, ${misc:Depends}
 Description: Persistent and distributed key-value storage with kyotocabinet support

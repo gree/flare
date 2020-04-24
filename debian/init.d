@@ -32,8 +32,8 @@ test -x $DAEMON_INDEX || exit 0
 test -x $DAEMON_NODE || exit 0
 
 # Include flare defaults if available
-if [ -f /etc/default/flare ] ; then
-  . /etc/default/flare
+if [ -f /etc/default/kvs-flare ] ; then
+  . /etc/default/kvs-flare
 fi
 
 # Exit on error

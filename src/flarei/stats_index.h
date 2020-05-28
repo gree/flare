@@ -41,7 +41,7 @@ protected:
 public:
 	stats_index();
 	virtual ~stats_index();
-	virtual uint32_t get_curr_connections(thread_pool* tp);
+	virtual uint32_t get_curr_connections(thread_pool* req_tp, thread_pool* other_tp);
 };
 
 }	// namespace flare

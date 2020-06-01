@@ -1,0 +1,14 @@
+diff --git a/configure.ac b/configure.ac
+index 2956e3aa..17872aa6 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -561,6 +561,9 @@ m4_ifdef([GTK_DOC_CHECK], [
+ GTK_DOC_CHECK([1.16],[--flavour no-tmpl])
+ ], [enable_gtk_doc=no
+     AM_CONDITIONAL([GTK_DOC_USE_LIBTOOL], [false])
++    AM_CONDITIONAL([GTK_DOC_BUILD_HTML], [false])
++    AM_CONDITIONAL([GTK_DOC_BUILD_PDF], [false])
++    AM_CONDITIONAL([HAVE_GTK_DOC], [false])
+     AM_CONDITIONAL([ENABLE_GTK_DOC], [false])])
+ 
+ dnl **************************************************************

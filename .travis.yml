@@ -34,7 +34,7 @@ before_install:
   - travis_retry curl -sSL https://get.haskellstack.org/ | sh
   - export PATH=$HOME/.cabal/bin:/opt/ghc/7.6.3/bin:/opt/cabal/1.18/bin:$PATH
   - git clone https://github.com/gree/flare-tests.git
-  - cd flare-tests && stack install && cd ..
+  - cd flare-tests && patch -p1 < ../flare-tests.patch && stack install && cd ..
 
 before_script:
   - travis_retry ./autogen.sh

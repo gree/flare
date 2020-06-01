@@ -27,6 +27,7 @@ before_install:
   - travis_retry sudo apt-get install libtokyocabinet-dev
   - travis_retry sudo apt-get install libboost-program-options-dev libboost-regex-dev libboost-serialization-dev libboost-thread-dev libboost-system-dev
   - travis_retry sudo apt-get install uuid-dev
+  - travis_retry sudo apt-get install intltool
   - git clone https://github.com/clear-code/cutter.git
   - cd cutter && ./autogen.sh && ./configure && make && sudo make install
   - travis_retry sudo apt-get install git curl

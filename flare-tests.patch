@@ -1,0 +1,15 @@
+diff --git a/src/Properties.hs b/src/Properties.hs
+index b4d9c43..7b4ff46 100644
+--- a/src/Properties.hs
++++ b/src/Properties.hs
+@@ -40,4 +40,10 @@ properties binDir = sandboxTests "properties" [
+                                      liftIO . putStrLn $ show items ++ " => Deviation: " ++ show dev
+                                      assertBool "deviation too large" (dev < 0.3)
+     ]
++  , sandboxTestGroup "get stat" [
++      sandboxTest "curr connections" $ do daemons <- getVariable "daemons" [] :: Sandbox [FlareDaemon]
++                                          items <- mapM (liftM read . getStat "curr_connections" :: FlareDaemon -> Sandbox Int) daemons
++                                          forM_ items $ \item ->
++                                            assertBool "curr_connections is zero" (item > 0)
++    ]
+   ]

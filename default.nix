@@ -1,5 +1,5 @@
-with import <nixpkgs> {};
-
+{pkgs}:
+with pkgs;
 stdenv.mkDerivation {
   name = "flare";
   src = ./.;
@@ -9,7 +9,7 @@ stdenv.mkDerivation {
   buildPhase = ''
     ./autogen.sh
     ./configure
-    make
+    make -j$NIX_BUILD_CORES
   '';
 
   installPhase = ''

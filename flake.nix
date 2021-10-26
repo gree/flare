@@ -16,10 +16,10 @@
             , ... }:
     flake-utils.lib.eachDefaultSystem (system:
       let pkgs = import nixpkgs {inherit system;};
-          flare = import ./default.nix {
+          flare = import ./nix/default.nix {
             inherit pkgs;
           };
-          shell = import ./shell.nix {
+          shell = import ./nix/shell.nix {
             inherit pkgs;
           };
       in {

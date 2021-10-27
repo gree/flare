@@ -21,10 +21,12 @@
           flare-tests-exe = flare-tests.packages.${system}.flare-tests;
           flare = import ./nix/default.nix {
             inherit pkgs;
+            inherit system;
             flare-tests = flare-tests-exe;
           };
           shell = import ./nix/shell.nix {
             inherit pkgs;
+            inherit system;
             flare-tests = flare-tests-exe;
           };
           test-flare = with pkgs; runCommand "test-flare" {

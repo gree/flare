@@ -1,4 +1,4 @@
-name: nix-linux
+name: nix-macos
 
 on: [push, pull_request]
 

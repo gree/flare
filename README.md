@@ -79,6 +79,37 @@ And run `./configure` with `--with-kyotocabinet` option.
 $ ./configure --with-kyotocabinet=/usr/include
 ```
 
+## Install flare via Nix on Ubuntu or MacOS
+
+We experimentally support development with nix package manager.
+
+### Installation of flare
+
+Just type following commands.
+
+```
+# Install nix package manager
+$ curl -L https://nixos.org/nix/install | sh
+# Install flare
+$ nix profile install github:gree/flare
+```
+
+### Development of flare via Nix
+
+```
+# Clone source code
+$ git clone git@github.com:gree/flare.git
+
+# Enter a development environment of nix
+$ nix develop
+
+# Build source codes
+$ ./autogen.sh
+$ ./configure
+$ make
+$ make test
+```
+
 ## Create configuration file
 Copy default configuration files from `etc`, and modify it.
 ```

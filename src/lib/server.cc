@@ -153,7 +153,7 @@ int server::listen(int port) {
 	addr.sin_family = AF_INET;
 	addr.sin_addr.s_addr = INADDR_ANY;
 	addr.sin_port = htons(port);
-	if (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+	if (::bind(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
 		::close(sock);
 		log_err("bind() failed: %s (%d)", util::strerror(errno), errno);
 		return -1;
@@ -211,7 +211,7 @@ int server::listen(string uds) {
 	memset(&addr, 0, sizeof(addr));
 	addr.sun_family = AF_UNIX;
 	strncpy(addr.sun_path, uds.c_str(), sizeof(addr.sun_path)-1);
-	if (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+	if (::bind(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
 		::close(sock);
 		log_err("bind() failed: %s (%d)", util::strerror(errno), errno);
 		return -1;

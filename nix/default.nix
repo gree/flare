@@ -1,5 +1,6 @@
 {pkgs
-,flare-tests}:
+,flare-tests
+,system}:
 with pkgs;
 let cutter = callPackage ./cutter.nix {};
 in
@@ -23,7 +24,7 @@ stdenv.mkDerivation {
     zlib
     libmemcached
     tokyocabinet
-    libuuid
+    (if system == "x86_64-darwin" then libossp_uuid else libuuid)
     cutter
     pkgconfig
   ];

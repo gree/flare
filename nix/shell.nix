@@ -1,8 +1,10 @@
 {pkgs
 ,flare-tests
+,flare-tools
 ,system}:
 with pkgs;
 let cutter = callPackage ./cutter.nix {};
+    emacs-for-flare = callPackage ./emacs.nix {};
 in
 mkShell {
   buildInputs = [
@@ -17,5 +19,7 @@ mkShell {
     cutter
     pkgconfig
     flare-tests
+    emacs-for-flare
+    flare-tools
   ];
 }

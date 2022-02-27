@@ -61,7 +61,7 @@ namespace test_cluster
 
 		mkdir(tmp_dir.c_str(), 0700);
 
-		singleton<logger>::instance().open("test-cluster", "local5");
+		singleton<logger>::instance().open("test-cluster", "local5", false);
 		stats_object = new stats();
 		stats_object->startup();
 	}

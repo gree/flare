@@ -50,6 +50,7 @@ private:
 	bool				_daemonize;
 	string			_data_dir;
 	string			_log_facility;
+	bool				_log_stderr;
 	uint32_t		_max_connection;
 	int					_monitor_threshold;
 	int					_monitor_interval;
@@ -93,6 +94,7 @@ public:
 	bool is_daemonize() { return this->_daemonize; };
 	string get_data_dir() { return this->_data_dir; };
 	string get_log_facility() { return this->_log_facility; };
+	bool get_log_stderr() { return this->_log_stderr; };
 	uint32_t get_max_connection() { return this->_max_connection; };
 	int get_monitor_threshold() { return this->_monitor_threshold; };
 	int get_monitor_interval() { return this->_monitor_interval; };

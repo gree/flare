@@ -62,7 +62,7 @@ namespace test_zookeeper_coordinator {
 		if (connstring) {
 			connuri = strdup((string("zookeeper://")+connstring).c_str());
 			zoo_set_debug_level(ZOO_LOG_LEVEL_ERROR);
-			singleton<logger>::instance().open("test_zkcoord", "local0");
+			singleton<logger>::instance().open("test_zkcoord", "local0", false);
 		}
 
 		stats_object = new stats();

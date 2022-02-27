@@ -44,7 +44,9 @@ logger::logger():
  *	dtor for logger
  */
 logger::~logger() {
-	closelog();
+	if (!this->_log_stderr) {
+		closelog();
+	}
 }
 // }}}
 
@@ -55,14 +57,17 @@ logger::~logger() {
 /**
  *	open log procs
  */
-int logger::open(string ident, string facility) {
+int logger::open(string ident, string facility, bool log_stderr) {
 	if (this->_open) {
 		return -1;
 	}
 
 	this->_ident = ident;
 	this->_facility = this->_facility_atoi(facility);
-	openlog(this->_ident.c_str(), LOG_NDELAY|LOG_PID, this->_facility);
+	this->_log_stderr = log_stderr;
+	if (!this->_log_stderr) {
+		openlog(this->_ident.c_str(), LOG_NDELAY|LOG_PID, this->_facility);
+	}
 
 	this->_open = true;
 
@@ -77,7 +82,9 @@ int logger::close() {
 		return -1;
 	}
 
-	closelog();
+	if (!this->_log_stderr) {
+		closelog();
+	}
 
 	this->_open = false;
 
@@ -97,7 +104,11 @@ void logger::emerg(const char* file, const int line, const char* func, const cha
 	vsnprintf(buf, sizeof(buf), format, op);
 	va_end(op);
 	s << buf;
-	syslog(LOG_EMERG, "%s", s.str().c_str());
+	if (this->_log_stderr) {
+		fprintf(stderr, "%s\n", s.str().c_str());
+	} else {
+		syslog(LOG_EMERG, "%s", s.str().c_str());
+	}
 }
 
 /**
@@ -113,7 +124,11 @@ void logger::alert(const char* file, const int line, const char* func, const cha
 	vsnprintf(buf, sizeof(buf), format, op);
 	va_end(op);
 	s << buf;
-	syslog(LOG_ALERT, "%s", s.str().c_str());
+	if (this->_log_stderr) {
+		fprintf(stderr, "%s\n", s.str().c_str());
+	} else {
+		syslog(LOG_ALERT, "%s", s.str().c_str());
+	}
 }
 
 /**
@@ -129,7 +144,11 @@ void logger::crit(const char* file, const int line, const char* func, const char
 	vsnprintf(buf, sizeof(buf), format, op);
 	va_end(op);
 	s << buf;
-	syslog(LOG_CRIT, "%s", s.str().c_str());
+	if (this->_log_stderr) {
+		fprintf(stderr, "%s\n", s.str().c_str());
+	} else {
+		syslog(LOG_CRIT, "%s", s.str().c_str());
+	}
 }
 
 /**
@@ -145,7 +164,11 @@ void logger::err(const char* file, const int line, const char* func, const char 
 	vsnprintf(buf, sizeof(buf), format, op);
 	va_end(op);
 	s << buf;
-	syslog(LOG_ERR, "%s", s.str().c_str());
+	if (this->_log_stderr) {
+		fprintf(stderr, "%s\n", s.str().c_str());
+	} else {
+		syslog(LOG_ERR, "%s", s.str().c_str());
+	}
 }
 
 /**
@@ -161,7 +184,11 @@ void logger::warning(const char* file, const int line, const char* func, const c
 	vsnprintf(buf, sizeof(buf), format, op);
 	va_end(op);
 	s << buf;
-	syslog(LOG_WARNING, "%s", s.str().c_str());
+	if (this->_log_stderr) {
+		fprintf(stderr, "%s\n", s.str().c_str());
+	} else {
+		syslog(LOG_WARNING, "%s", s.str().c_str());
+	}
 }
 
 /**
@@ -177,7 +204,11 @@ void logger::notice(const char* file, const int line, const char* func, const ch
 	vsnprintf(buf, sizeof(buf), format, op);
 	va_end(op);
 	s << buf;
-	syslog(LOG_NOTICE, "%s", s.str().c_str());
+	if (this->_log_stderr) {
+		fprintf(stderr, "%s\n", s.str().c_str());
+	} else {
+		syslog(LOG_NOTICE, "%s", s.str().c_str());
+	}
 }
 
 /**
@@ -193,7 +224,11 @@ void logger::info(const char* file, const int line, const char* func, const char
 	vsnprintf(buf, sizeof(buf), format, op);
 	va_end(op);
 	s << buf;
-	syslog(LOG_INFO, "%s", s.str().c_str());
+	if (this->_log_stderr) {
+		fprintf(stderr, "%s\n", s.str().c_str());
+	} else {
+		syslog(LOG_INFO, "%s", s.str().c_str());
+	}
 }
 
 /**
@@ -209,7 +244,11 @@ void logger::debug(const char* file, const int line, const char* func, const cha
 	vsnprintf(buf, sizeof(buf), format, op);
 	va_end(op);
 	s << buf;
-	syslog(LOG_DEBUG, "%s", s.str().c_str());
+	if (this->_log_stderr) {
+		fprintf(stderr, "%s\n", s.str().c_str());
+	} else {
+		syslog(LOG_DEBUG, "%s", s.str().c_str());
+	}
 
 }
 // }}}

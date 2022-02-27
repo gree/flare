@@ -86,7 +86,8 @@ ini_option::ini_option():
 		_cluster_replication_server_name(""),
 		_cluster_replication_server_port(default_server_port),
 		_cluster_replication_concurrency(default_proxy_concurrency),
-		_cluster_replication_mode("") {
+		_cluster_replication_mode(""),
+		_log_stderr(false) {
 	pthread_mutex_init(&this->_mutex_index_servers, NULL);
 }
 
@@ -148,6 +149,9 @@ int ini_option::load() {
 	}
 	if (opt_var_map.count("pid")) {
 		this->_pid_path = opt_var_map["pid"].as<string>();
+	}
+	if (opt_var_map.count("stderr")) {
+		this->_log_stderr = true;
 	}
 
 	// parse config file
@@ -591,6 +595,7 @@ int ini_option::_setup_cli_option(program_options::options_description& option) 
 	option.add_options()
 		("config,f",					program_options::value<string>(),	"path to config file")
 		("pid,p",							program_options::value<string>(),	"path to pid file")
+		("stderr,s",																						"output log to stderr")
 		("version,v",																						"display version")
 		("help,h",																							"display this help");
 

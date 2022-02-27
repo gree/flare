@@ -60,7 +60,8 @@ ini_option::ini_option():
 		_server_socket(""),
 		_stack_size(default_stack_size),
 		_thread_pool_size(default_thread_pool_size),
-		_index_db("") {
+		_index_db(""),
+		_log_stderr(false) {
 }
 
 /**
@@ -118,6 +119,9 @@ int ini_option::load() {
 	}
 	if (opt_var_map.count("pid")) {
 		this->_pid_path = opt_var_map["pid"].as<string>();
+	}
+	if (opt_var_map.count("stderr")) {
+		this->_log_stderr = true;
 	}
 
 	// parse config file
@@ -345,6 +349,7 @@ int ini_option::_setup_cli_option(program_options::options_description& option) 
 	option.add_options()
 		("config,f",					program_options::value<string>(),	"path to config file")
 		("pid,p",							program_options::value<string>(),	"path to pid file")
+		("stderr,s",																						"output log to stderr")
 		("version,v",																						"display version")
 		("help,h",																							"display this help");
 

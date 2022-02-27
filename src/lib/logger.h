@@ -82,12 +82,13 @@ private:
 	string						_ident;
 	int								_facility;
 	map<string, int>	_facility_map;
+	bool							_log_stderr;
 
 public:
 	logger();
 	virtual ~logger();
 
-	int open(string ident, string facility);
+	int open(string ident, string facility, bool log_stderr);
 	int close();
 
 	string get_ident() { return this->_ident; };

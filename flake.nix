@@ -9,16 +9,19 @@
     nixpkgs.url = "github:nixos/nixpkgs";
     flake-utils.url = "github:numtide/flake-utils";
     flare-tests.url = "github:gree/flare-tests";
+    flare-tools.url = "github:gree/flare-tools";
   };
 
   outputs = { self
             , nixpkgs
             , flake-utils
             , flare-tests
+            , flare-tools
             , ... }:
     flake-utils.lib.eachDefaultSystem (system:
       let pkgs = import nixpkgs {inherit system;};
           flare-tests-exe = flare-tests.packages.${system}.flare-tests;
+          flare-tools-exe = flare-tools.packages.${system}.flare-tools;
           flare = import ./nix/default.nix {
             inherit pkgs;
             inherit system;
@@ -27,6 +30,7 @@
           shell = import ./nix/shell.nix {
             inherit pkgs;
             inherit system;
+            flare-tools = flare-tools-exe;
             flare-tests = flare-tests-exe;
           };
           test-flare = with pkgs; runCommand "test-flare" {

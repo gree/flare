@@ -6,10 +6,14 @@
   };
 
   inputs = {
-    nixpkgs.url = "github:nixos/nixpkgs";
+    nixpkgs.url = "github:nixos/nixpkgs?rev=2558d8e64f3816ec4291555fc8dc2212bd21f0a8";
     flake-utils.url = "github:numtide/flake-utils";
     flare-tests.url = "github:gree/flare-tests";
+    flare-tests.inputs.nixpkgs.follows = "nixpkgs";
+    flare-tests.inputs.flake-utils.follows = "flake-utils";
     flare-tools.url = "github:gree/flare-tools";
+    flare-tools.inputs.nixpkgs.follows = "nixpkgs";
+    flare-tools.inputs.flake-utils.follows = "flake-utils";
   };
 
   outputs = { self

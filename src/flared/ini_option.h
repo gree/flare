@@ -55,6 +55,7 @@ private:
 	vector<cluster::index_server>	_index_servers;
 	pthread_mutex_t								_mutex_index_servers;
 	string			_log_facility;
+	bool				_log_stderr;
 	uint32_t		_max_connection;
 	int					_mutex_slot;
 #ifdef ENABLE_MYSQL_REPLICATION
@@ -146,6 +147,7 @@ public:
 		return v;
 	};
 	string get_log_facility() { return this->_log_facility; };
+	bool get_log_stderr() { return this->_log_stderr; };
 	uint32_t get_max_connection() { return this->_max_connection; };
 	int get_mutex_slot() { return this->_mutex_slot; };
 #ifdef ENABLE_MYSQL_REPLICATION

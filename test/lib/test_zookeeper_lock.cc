@@ -47,7 +47,7 @@ namespace test_zookeeper_lock {
 	int nworkers = 500;
 
 	void setup() {
-		singleton<logger>::instance().open("test_zookeeper_lock", "local2");
+		singleton<logger>::instance().open("test_zookeeper_lock", "local2", false);
 		log_debug("----------------------------------------------------------------", 0);
 
 		connstring = getenv("TEST_ZOOKEEPER_COORDINATOR_COORD");

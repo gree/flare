@@ -130,7 +130,7 @@ int flarei::startup(int argc, char **argv) {
 		return -1;
 	}
 
-	singleton<logger>::instance().open(this->_ident, ini_option_object().get_log_facility());
+	singleton<logger>::instance().open(this->_ident, ini_option_object().get_log_facility(), ini_option_object().get_log_stderr());
 	stats_object = new stats_index();
 	stats_object->startup();
 
@@ -141,6 +141,7 @@ int flarei::startup(int argc, char **argv) {
 	log_notice("application startup in progress...", 0);
 	log_notice("  config_path:            %s", ini_option_object().get_config_path().c_str());
 	log_notice("  pid_path:               %s", ini_option_object().get_pid_path().c_str());
+	log_notice("  stderr:                 %s", ini_option_object().get_log_stderr() ? "true" : "false");
 	log_notice("  daemonize:              %s", ini_option_object().is_daemonize() ? "true" : "false");
 	log_notice("  data_dir:               %s", ini_option_object().get_data_dir().c_str());
 	log_notice("  max_connection:         %d", ini_option_object().get_max_connection());
@@ -348,7 +349,7 @@ int flarei::reload() {
 	// log_facility
 	log_notice("re-opening syslog...", 0);
 	singleton<logger>::instance().close();
-	singleton<logger>::instance().open(this->_ident, ini_option_object().get_log_facility());
+	singleton<logger>::instance().open(this->_ident, ini_option_object().get_log_facility(), ini_option_object().get_log_stderr());
 
 	this->_cluster->set_monitor_threshold(ini_option_object().get_monitor_threshold());
 	this->_cluster->set_monitor_interval(ini_option_object().get_monitor_interval());

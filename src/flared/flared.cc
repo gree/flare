@@ -143,7 +143,7 @@ int flared::startup(int argc, char **argv) {
 		return -1;
 	}
 
-	singleton<logger>::instance().open(this->_ident, ini_option_object().get_log_facility());
+	singleton<logger>::instance().open(this->_ident, ini_option_object().get_log_facility(), ini_option_object().get_log_stderr());
 	stats_object = new stats_node();
 	stats_object->startup();
 
@@ -367,7 +367,7 @@ int flared::reload() {
 	// log_facility
 	log_notice("re-opening syslog...", 0);
 	singleton<logger>::instance().close();
-	singleton<logger>::instance().open(this->_ident, ini_option_object().get_log_facility());
+	singleton<logger>::instance().open(this->_ident, ini_option_object().get_log_facility(), ini_option_object().get_log_stderr());
 
 	// net_read_timeout
 	connection_tcp::read_timeout = ini_option_object().get_net_read_timeout() * 1000;	// -> msec

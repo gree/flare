@@ -1368,8 +1368,11 @@ cluster::proxy_request cluster::pre_proxy_write(op_proxy_write* op, shared_queue
 	for (vector<shared_proxy_event_listener>::iterator it = this->_fixed_proxy_event_listeners.begin();
 			it != this->_fixed_proxy_event_listeners.end(); it++) {
 		shared_queue_proxy_write q_proxy_result;
-		proxy_request r = (*it)->on_pre_proxy_write(op, q_proxy_result, generic_value);
-		if (r == proxy_request_continue) {
+		proxy_request r = (*it)->on_pre_proxy_write(op, e, q_proxy_result, generic_value);
+		if (r == proxy_request_complete) {
+			q_result = q_proxy_result;
+			return proxy_request_complete;
+		} else if (r == proxy_request_continue) {
 			continue;
 		} else {
 			return r;

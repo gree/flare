@@ -41,7 +41,7 @@ public:
 	virtual ~proxy_event_listener() { }
 
 	virtual cluster::proxy_request on_pre_proxy_read(op_proxy_read* op, storage::entry& e, void* parameter, shared_queue_proxy_read& q_result) = 0;
-	virtual cluster::proxy_request on_pre_proxy_write(op_proxy_write* op, shared_queue_proxy_write& q_result, uint64_t generic_value) = 0;
+	virtual cluster::proxy_request on_pre_proxy_write(op_proxy_write* op, storage::entry& e, shared_queue_proxy_write& q_result, uint64_t generic_value) = 0;
 	virtual cluster::proxy_request on_post_proxy_write(op_proxy_write* op, cluster::node node) = 0;
 };
 

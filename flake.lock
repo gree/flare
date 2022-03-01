@@ -2,11 +2,11 @@
   "nodes": {
     "flake-utils": {
       "locked": {
-        "lastModified": 1634851050,
-        "narHash": "sha256-N83GlSGPJJdcqhUxSCS/WwW5pksYf3VP1M13cDRTSVA=",
+        "lastModified": 1644229661,
+        "narHash": "sha256-1YdnJAsNy69bpcjuoKdOYQX0YxZBiCYZo4Twxerqv7k=",
         "owner": "numtide",
         "repo": "flake-utils",
-        "rev": "c91f3de5adaf1de973b797ef7485e441a65b8935",
+        "rev": "3cecb5b042f7f209c56ffd8371b2711a290ec797",
         "type": "github"
       },
       "original": {
@@ -32,6 +32,21 @@
     },
     "flake-utils_3": {
       "locked": {
+        "lastModified": 1634851050,
+        "narHash": "sha256-N83GlSGPJJdcqhUxSCS/WwW5pksYf3VP1M13cDRTSVA=",
+        "owner": "numtide",
+        "repo": "flake-utils",
+        "rev": "c91f3de5adaf1de973b797ef7485e441a65b8935",
+        "type": "github"
+      },
+      "original": {
+        "owner": "numtide",
+        "repo": "flake-utils",
+        "type": "github"
+      }
+    },
+    "flake-utils_4": {
+      "locked": {
         "lastModified": 1644229661,
         "narHash": "sha256-1YdnJAsNy69bpcjuoKdOYQX0YxZBiCYZo4Twxerqv7k=",
         "owner": "numtide",
@@ -45,9 +60,54 @@
         "type": "github"
       }
     },
-    "flare-tests": {
+    "flare": {
       "inputs": {
         "flake-utils": "flake-utils_2",
+        "flare-tests": "flare-tests_2",
+        "flare-tools": "flare-tools",
+        "nixpkgs": "nixpkgs_3"
+      },
+      "locked": {
+        "lastModified": 1646028281,
+        "narHash": "sha256-QuxcHyD3x+pSXnsGQiuzsr83q/9FRvsRY7c2Jk+2hAw=",
+        "owner": "gree",
+        "repo": "flare",
+        "rev": "9b1e2a9a987113f1c0c7873fe591fbe7b673f7e8",
+        "type": "github"
+      },
+      "original": {
+        "owner": "gree",
+        "repo": "flare",
+        "type": "github"
+      }
+    },
+    "flare-tests": {
+      "inputs": {
+        "flake-utils": [
+          "flake-utils"
+        ],
+        "flare": "flare",
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1646044580,
+        "narHash": "sha256-+Dy4NiVm9KSrAzztgYYLziybAGyhEWmoSp/KWw/y5oo=",
+        "owner": "gree",
+        "repo": "flare-tests",
+        "rev": "ea3f93f3440ee46bdb9a31398947b8e9e88badb9",
+        "type": "github"
+      },
+      "original": {
+        "owner": "gree",
+        "repo": "flare-tests",
+        "type": "github"
+      }
+    },
+    "flare-tests_2": {
+      "inputs": {
+        "flake-utils": "flake-utils_3",
         "nixpkgs": "nixpkgs"
       },
       "locked": {
@@ -66,8 +126,31 @@
     },
     "flare-tools": {
       "inputs": {
-        "flake-utils": "flake-utils_3",
+        "flake-utils": "flake-utils_4",
         "nixpkgs": "nixpkgs_2"
+      },
+      "locked": {
+        "lastModified": 1645783248,
+        "narHash": "sha256-PXvAsTxffTiO79vri1YKMplvHJRFaCv25PF74iYcv08=",
+        "owner": "gree",
+        "repo": "flare-tools",
+        "rev": "2c030d70dbbf239b2cca1948411c8e6df278b8e3",
+        "type": "github"
+      },
+      "original": {
+        "owner": "gree",
+        "repo": "flare-tools",
+        "type": "github"
+      }
+    },
+    "flare-tools_2": {
+      "inputs": {
+        "flake-utils": [
+          "flake-utils"
+        ],
+        "nixpkgs": [
+          "nixpkgs"
+        ]
       },
       "locked": {
         "lastModified": 1645783248,
@@ -127,12 +210,28 @@
         "type": "github"
       }
     },
+    "nixpkgs_4": {
+      "locked": {
+        "lastModified": 1635261841,
+        "narHash": "sha256-TsPBFEIarRkpDoqIX0cqi4PxYq2w1oVygElpPokIDaU=",
+        "owner": "nixos",
+        "repo": "nixpkgs",
+        "rev": "2558d8e64f3816ec4291555fc8dc2212bd21f0a8",
+        "type": "github"
+      },
+      "original": {
+        "owner": "nixos",
+        "repo": "nixpkgs",
+        "rev": "2558d8e64f3816ec4291555fc8dc2212bd21f0a8",
+        "type": "github"
+      }
+    },
     "root": {
       "inputs": {
         "flake-utils": "flake-utils",
         "flare-tests": "flare-tests",
-        "flare-tools": "flare-tools",
-        "nixpkgs": "nixpkgs_3"
+        "flare-tools": "flare-tools_2",
+        "nixpkgs": "nixpkgs_4"
       }
     }
   },

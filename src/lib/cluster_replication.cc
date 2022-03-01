@@ -164,7 +164,29 @@ cluster::proxy_request cluster_replication::on_pre_proxy_read(op_proxy_read* op,
 /**
  *	implementation of on_pre_proxy_write event handling.
  */
-cluster::proxy_request cluster_replication::on_pre_proxy_write(op_proxy_write* op, shared_queue_proxy_write& q_result, uint64_t generic_value) {
+cluster::proxy_request cluster_replication::on_pre_proxy_write(op_proxy_write* op, storage::entry& e, shared_queue_proxy_write& q_result, uint64_t generic_value) {
+	pthread_mutex_lock(&this->_mutex_started);
+	if (!this->_started) {
+		pthread_mutex_unlock(&this->_mutex_started);
+		return cluster::proxy_request_continue;
+	}
+	pthread_mutex_unlock(&this->_mutex_started);
+
+	if (this->_mode == mode_forward) {
+		// forwarding write query only when mode is forward
+		// not depend on the role of server
+		vector<string> proxy = op->get_proxy();
+		shared_queue_proxy_write q(new queue_proxy_write(NULL, NULL, proxy, e, op->get_ident()));
+		int key_hash_value = e.get_key_hash_value(storage::hash_algorithm_murmur);
+		if (this->_enqueue(q, key_hash_value, true)) {
+			return cluster::proxy_request_error_enqueue;
+		}
+		q->sync();
+		q_result = q;
+
+		return cluster::proxy_request_complete;
+	}
+
 	return cluster::proxy_request_continue;
 }
 

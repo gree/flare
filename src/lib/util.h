@@ -31,7 +31,7 @@
 #include <vector>
 #include <sstream>
 
-#include <boost/detail/endian.hpp>
+#include <boost/predef/other/endian.h>
 #include <boost/lexical_cast.hpp>
 #include <boost/regex.hpp>
 #include <boost/shared_array.hpp>

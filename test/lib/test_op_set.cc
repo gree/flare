@@ -34,7 +34,7 @@
 #include <op_set.h>
 #include <binary_request_header.h>
 
-#include <boost/detail/endian.hpp>
+#include <boost/predef/other/endian.h>
 
 using namespace gree::flare;
 

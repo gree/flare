@@ -65,7 +65,7 @@ void time_watcher_observer::on_storage_access_no_response(const timespec& differ
 uint64_t time_watcher_observer::register_on_storage_access_no_response_callback(storage_access_info info) {
 	return time_watcher_object->register_target(
 		time_watcher_observer::_threshold_warn,
-		boost::bind(&time_watcher_observer::on_storage_access_no_response, _1, info)
+		boost::bind(&time_watcher_observer::on_storage_access_no_response, boost::placeholders::_1, info)
 	);
 }
 

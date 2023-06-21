@@ -27,7 +27,7 @@
 #define HTONLL_H
 
 #include <config.h>
-#include <boost/detail/endian.hpp>
+#include <boost/predef/other/endian.h>
 #ifdef HAVE_ARPA_INET_H
 #	include <arpa/inet.h>
 #endif
@@ -73,7 +73,7 @@
 					 | (((x) & 0x00000000000000ffull) << 56))
 #			endif
 #		endif
-#		if defined BOOST_LITTLE_ENDIAN
+#		if defined BOOST_ENDIAN_LITTLE_BYTE
 #			define ntohll(x) bswap64(x)
 #			define htonll(x) bswap64(x)
 #		else

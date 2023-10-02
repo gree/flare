@@ -11,9 +11,7 @@
     flare-tests.url = "github:gree/flare-tests";
     flare-tests.inputs.nixpkgs.follows = "nixpkgs";
     flare-tests.inputs.flake-utils.follows = "flake-utils";
-    flare-tools.url = "github:gree/flare-tools";
-    flare-tools.inputs.nixpkgs.follows = "nixpkgs";
-    flare-tools.inputs.flake-utils.follows = "flake-utils";
+    flare-tools.url = "github:gree/flare-tools?rev=fb5fdb35b222c894de817f406581174cd7115134";
   };
 
   outputs = { self

@@ -115,7 +115,11 @@ namespace test_op_dump_key
 	void run_server_test(test_op_dump_key& op, int item_num, int item_key_size, int bwlimit = 0, int sleep_precision = 1)
 	{
 		static const int64_t one_sec = 1000000L;
+#if __APPLE__
+		static const int64_t epsilon = 1000000L;
+#else
 		static const int64_t epsilon =  100000L;
+#endif
 		struct timeval start_tv, end_tv;
 
 		gettimeofday(&start_tv, NULL);

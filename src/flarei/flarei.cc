@@ -464,6 +464,9 @@ int flarei::_set_signal_handler() {
 	sigdelset(&ss, SIGTERM);
 	sigdelset(&ss, SIGINT);
 	sigdelset(&ss, SIGHUP);
+#if __APPLE__
+	sigdelset(&ss, SIGPIPE);
+#endif
 	if (sigprocmask(SIG_SETMASK, &ss, NULL) < 0) {
 		log_err("sigprocmask() failed: %s (%d)", util::strerror(errno), errno);
 	}

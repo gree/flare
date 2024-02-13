@@ -43,6 +43,9 @@ void* thread_run(void* p) {
 	sigset_t ss;
 	sigfillset(&ss);
 	sigdelset(&ss, SIGUSR1);
+#if __APPLE__
+	sigdelset(&ss, SIGPIPE);
+#endif
 	if (pthread_sigmask(SIG_SETMASK, &ss, NULL) < 0) {
 		log_err("pthread_sigmask() failed: %s (%d)", util::strerror(errno), errno);
 	}

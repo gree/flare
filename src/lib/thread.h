@@ -42,17 +42,15 @@
 #include "util.h"
 #include "thread_queue.h"
 
-using namespace std;
-
 namespace gree {
 namespace flare {
 
-typedef class thread					thread;
-typedef boost::shared_ptr<thread>		shared_thread;
-typedef boost::weak_ptr<thread>			weak_thread;
+class thread;
+typedef boost::shared_ptr<gree::flare::thread>		shared_thread;
+typedef boost::weak_ptr<gree::flare::thread>		weak_thread;
 
-typedef class thread_pool			thread_pool;
-typedef class thread_handler	thread_handler;
+class thread_pool;
+class thread_handler;
 
 /**
  *	thread class

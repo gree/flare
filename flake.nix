@@ -2,16 +2,18 @@
   description = "flare";
 
   nixConfig = {
-    bash-prompt = "\[\\e[1m\\e[32mdev-flare\\e[0m:\\w\]$ ";
+    bash-prompt = "\[\\e[1m\\e[32mdev-flare\\e[0m:\\w\]\n$ ";
   };
 
   inputs = {
-    nixpkgs.url = "github:nixos/nixpkgs?rev=2558d8e64f3816ec4291555fc8dc2212bd21f0a8";
+    nixpkgs.url = "github:nixos/nixpkgs?rev=fe977679240ac2027b151ecca1bc6ce808c2e8af";
     flake-utils.url = "github:numtide/flake-utils";
     flare-tests.url = "github:gree/flare-tests";
     flare-tests.inputs.nixpkgs.follows = "nixpkgs";
     flare-tests.inputs.flake-utils.follows = "flake-utils";
-    flare-tools.url = "github:gree/flare-tools?rev=fb5fdb35b222c894de817f406581174cd7115134";
+    flare-tools.url = "github:gree/flare-tools?rev=a4df2e32743bd803ed2d8ad4ba3925cbaccbdb1f";
+    flare-tools.inputs.nixpkgs.follows = "nixpkgs";
+    flare-tools.inputs.flake-utils.follows = "flake-utils";
   };
 
   outputs = { self

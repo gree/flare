@@ -15,9 +15,9 @@ mkShell {
     zlib
     libmemcached
     tokyocabinet
-    (if system == "x86_64-darwin" then libossp_uuid else libuuid)
+    (if stdenv.isDarwin then libossp_uuid else libuuid)
     cutter
-    pkgconfig
+    pkg-config
     flare-tests
     emacs-for-flare
     flare-tools

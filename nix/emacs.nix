@@ -5,7 +5,7 @@
 
 let
   myEmacs = pkgs.emacs;
-  emacsWithPackages = (pkgs.emacsPackagesNgGen myEmacs).emacsWithPackages;
+  emacsWithPackages = (pkgs.emacsPackagesFor myEmacs).emacsWithPackages;
   my-config = (epkgs: pkgs.emacsPackages.trivialBuild {
     pname = "my-mode";
     version = "2022-02-25";

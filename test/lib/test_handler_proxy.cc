@@ -63,6 +63,9 @@ namespace test_handler_proxy {
 			log_err("sigaction for %d failed: %s (%d)", SIGUSR1, util::strerror(errno), errno);
 			return;
 		}
+#if __APPLE__
+		signal(SIGPIPE, SIG_IGN);
+#endif
 
 		stats_object = new stats();
 		stats_object->update_timestamp();

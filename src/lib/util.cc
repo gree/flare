@@ -225,7 +225,7 @@ string util::base64_encode(const char* src, size_t src_size) {
 }
 
 char* util::base64_decode(string src, size_t& dst_size) {
-	static const char base64_map[] = {
+	static const signed char base64_map[] = {
 		-2, -2, -2, -2, -2, -2, -2, -2, -2, -1, -1, -2, -2, -1, -2, -2,
 		-2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2,
 		-1, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 62, -2, -2, -2, 63,

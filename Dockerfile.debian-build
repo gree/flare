@@ -1,0 +1,121 @@
+FROM --platform=linux/x86_64 ubuntu:noble
+
+LABEL description="Flare Debian package builder"
+
+# Set environment variables to prevent interactive prompts
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=UTC
+
+# Update package manager and install build dependencies
+RUN apt-get update && apt-get install -y \
+    git \
+    locales \
+    zlib1g-dev \
+    build-essential \
+    autoconf \
+    automake \
+    libtool \
+    libboost-all-dev \
+    libhashkit-dev \
+    libtokyocabinet-dev \
+    libkyotocabinet-dev \
+    uuid-dev \
+    pkg-config \
+    devscripts \
+    debhelper \
+    dh-make \
+    dpkg-dev \
+    fakeroot \
+    lsb-release \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set locale
+RUN locale-gen en_US.UTF-8
+ENV LANG en_US.UTF-8
+ENV LANGUAGE en_US:en
+ENV LC_ALL en_US.UTF-8
+
+# Create build directory
+WORKDIR /build
+
+# Copy source code
+COPY . /build/flare/
+
+# Create build script
+RUN echo '#!/bin/bash\n\
+set -e\n\
+\n\
+echo "=== Building Debian Package for kvs-flare ==="\n\
+\n\
+cd /build/flare\n\
+\n\
+# Set build variables\n\
+BUILD_TYPE=${BUILD_TYPE:-release}\n\
+MACHINE=$(uname -m)\n\
+DEB_ARCH=$(echo $MACHINE | sed -e "s/i686/i386/" -e "s/x86_64/amd64/")\n\
+DEB_TARGET=$(lsb_release -cs)\n\
+FLARE_VERSION=$(head -n 1 debian/changelog | awk "match(\\$0, /[0-9\\.\\-]+/) {print substr(\\$0, RSTART, RLENGTH)}")\n\
+FLARE_BUILD_VERSION=${FLARE_BUILD_VERSION:-1}\n\
+\n\
+echo "Build configuration:"\n\
+echo "BUILD_TYPE=$BUILD_TYPE"\n\
+echo "DEB_ARCH=$DEB_ARCH"\n\
+echo "DEB_TARGET=$DEB_TARGET"\n\
+echo "FLARE_VERSION=$FLARE_VERSION"\n\
+echo "FLARE_BUILD_VERSION=$FLARE_BUILD_VERSION"\n\
+\n\
+# Clean any existing build artifacts\n\
+if [ -f Makefile ]; then\n\
+    make distclean || true\n\
+fi\n\
+\n\
+# Remove git files and build artifacts\n\
+find . -name ".git*" -exec rm -rf {} + 2>/dev/null || true\n\
+find . -name "*.o" -delete 2>/dev/null || true\n\
+find . -name "*.lo" -delete 2>/dev/null || true\n\
+find . -name ".libs" -exec rm -rf {} + 2>/dev/null || true\n\
+find . -name "autom4te.cache" -exec rm -rf {} + 2>/dev/null || true\n\
+\n\
+# Update debian/changelog with DEB_TARGET\n\
+if [ "$BUILD_TYPE" = "release" ] && [ -n "$FLARE_VERSION" ]; then\n\
+    echo "Updating debian/changelog for release build..."\n\
+    sed -i -e "s/${FLARE_VERSION}/${FLARE_VERSION}+${DEB_TARGET}${FLARE_BUILD_VERSION}/g" debian/changelog\n\
+fi\n\
+\n\
+# Prepare source\n\
+if [ ! -f configure ]; then\n\
+    echo "Running autogen.sh..."\n\
+    ./autogen.sh\n\
+fi\n\
+\n\
+# Build package with debuild\n\
+echo "Running debuild --no-tgz-check -uc -us..."\n\
+echo "y" | debuild --no-tgz-check -uc -us\n\
+\n\
+# Update distribution in changes file\n\
+cd /build\n\
+if ls flare_*.changes >/dev/null 2>&1; then\n\
+    echo "Updating distribution in changes file..."\n\
+    sed -i -e "s/Distribution: unstable/Distribution: ${DEB_TARGET}/g" flare_*.changes\n\
+fi\n\
+\n\
+# Show results\n\
+echo "=== Build Results ==="\n\
+cd /build\n\
+ls -la *.deb *.ddeb *.dsc *.tar.* *.changes 2>/dev/null || echo "No package files found in /build"\n\
+\n\
+# Copy to output directory from parent (where debuild creates files)\n\
+mkdir -p /output\n\
+find /build -maxdepth 1 -name "*.deb" -exec cp {} /output/ \\;\n\
+find /build -maxdepth 1 -name "*.ddeb" -exec cp {} /output/ \\;\n\
+find /build -maxdepth 1 -name "*.dsc" -exec cp {} /output/ \\;\n\
+find /build -maxdepth 1 -name "*.tar.*" -exec cp {} /output/ \\;\n\
+find /build -maxdepth 1 -name "*.changes" -exec cp {} /output/ \\;\n\
+\n\
+echo "Package files copied to /output/"\n\
+ls -la /output/\n\
+' > /usr/local/bin/build-package.sh && \
+    chmod +x /usr/local/bin/build-package.sh
+
+# Set entrypoint
+ENTRYPOINT ["/usr/local/bin/build-package.sh"]

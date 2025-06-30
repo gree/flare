@@ -110,6 +110,16 @@ $ make
 $ make test
 ```
 
+## Build Debian Package with Docker
+
+```bash
+# Build Debian package
+$ ./build-debian-docker.sh
+
+# Install the package
+$ sudo dpkg -i debian-packages/kvs-flare*.deb
+```
+
 ## Create configuration file
 Copy default configuration files from `etc`, and modify it.
 ```

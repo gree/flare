@@ -94,6 +94,15 @@ then
 fi
 AC_MSG_RESULT($enable_mysql_replication)
 
+# K8s Operator
+AC_MSG_CHECKING(if k8s-operator mode is enabled)
+AC_ARG_ENABLE(k8s-operator, [AS_HELP_STRING([--enable-k8s-operator], [enable Kubernetes operator mode: use Lean 4 operator as index server [default=no]])], [enable_k8s_operator="yes"], [enable_k8s_operator="no"])
+if test "x$enable_k8s_operator" = "xyes"
+then
+	AC_DEFINE([ENABLE_K8S_OPERATOR], 1, [enable Kubernetes operator mode])
+fi
+AC_MSG_RESULT($enable_k8s_operator)
+
 # FlareFS
 AC_MSG_CHECKING(if flarefs is enabled)
 AC_ARG_ENABLE(flarefs, [AS_HELP_STRING([--enable-flarefs], [enable flarefs feature (very experimental) [default=no]])], [enable_flarefs="yes"], [enable_flarefs="no"])

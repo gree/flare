@@ -55,6 +55,26 @@ theorem addNode_nodeMap (state : FlareClusterState) (key : String) (node : Flare
     (state.addNode key node).nodeMap = (key, node) :: state.nodeMap.filter (·.1 != key) := by
   unfold FlareClusterState.addNode; rfl
 
+/-- lookupNode result implies membership in nodeMap. -/
+private theorem lookupNode_mem (state : FlareClusterState) (key : String) (node : FlareNode)
+    (h : state.lookupNode key = some node) : (key, node) ∈ state.nodeMap := by
+  unfold FlareClusterState.lookupNode at h
+  suffices ∀ (l : List (String × FlareNode)), l.lookup key = some node → (key, node) ∈ l from
+    this state.nodeMap h
+  intro l
+  induction l with
+  | nil => intro h'; simp [List.lookup] at h'
+  | cons hd tl ih =>
+    intro h'
+    obtain ⟨a, b⟩ := hd
+    unfold List.lookup at h'
+    split at h'
+    · rename_i heq
+      have hv : b = node := by injection h'
+      have hk : key = a := eq_of_beq heq
+      subst hk; subst hv; exact .head _
+    · exact .tail _ (ih h')
+
 theorem autoAssign_version (state : FlareClusterState) (crd : FlareClusterView)
     (key : String) (node : FlareNode) :
     (autoAssign state crd key node).1.nodeMapVersion = state.nodeMapVersion + 1 := by
@@ -219,8 +239,8 @@ theorem event_exhaustive (event : FlareEvent) :
     match event with
     | .Ping => True | .Meta => True | .Stats => True | .Version => True
     | .Quit => True | .NodeAdd _ _ => True | .NodeSync _ => True
-    | .NodeRemove _ _ => True | .MutationAttempt _ => True
-    | .ParseError _ => True := by
+    | .NodeRemove _ _ => True | .NodeState _ _ _ => True
+    | .MutationAttempt _ => True | .ParseError _ => True := by
   cases event <;> trivial
 
 -- ===========================================================================
@@ -251,6 +271,34 @@ theorem proxiesUnassigned_step
   | NodeRemove _ _ => exact h_inv
   | MutationAttempt _ => exact h_inv
   | ParseError _ => exact h_inv
+  | NodeState serverName serverPort newSt =>
+    unfold proxiesUnassigned reconcileStep
+    simp only []
+    split
+    · -- lookupNode = none: state unchanged
+      exact h_inv
+    · -- lookupNode = some node
+      rename_i node h_lookup
+      split
+      · -- Prepare → Active transition
+        intro ⟨k, n⟩ h_mem h_proxy
+        dsimp at h_mem
+        rw [addNode_nodeMap, List.mem_cons] at h_mem
+        cases h_mem with
+        | inl h_eq =>
+          -- n = { node with state := Active }, same role/partition as node
+          have h_role : n.role = node.role := by
+            have := congrArg (FlareNode.role ∘ Prod.snd) h_eq; simp at this; exact this
+          have h_part : n.partition = node.partition := by
+            have := congrArg (FlareNode.partition ∘ Prod.snd) h_eq; simp at this; exact this
+          rw [h_role] at h_proxy; rw [h_part]
+          have h_mem_orig := lookupNode_mem _ _ _ h_lookup
+          exact h_inv (_, node) h_mem_orig h_proxy
+        | inr h_old =>
+          rw [List.mem_filter] at h_old
+          exact h_inv (k, n) h_old.1 h_proxy
+      · -- condition false: state unchanged
+        exact h_inv
   | NodeAdd serverName serverPort =>
     unfold proxiesUnassigned reconcileStep
     simp only []
@@ -307,6 +355,17 @@ theorem versionMonotonic_step :
   | NodeRemove _ _ => simp [reconcileStep]
   | MutationAttempt _ => simp [reconcileStep]
   | ParseError _ => simp [reconcileStep]
+  | NodeState serverName serverPort newSt =>
+    simp only [reconcileStep]
+    split
+    · -- lookupNode = none
+      dsimp; omega
+    · -- lookupNode = some
+      split
+      · -- Prepare → Active: addNode increments version
+        simp [addNode_version]
+      · -- condition false: state unchanged
+        dsimp; omega
   | NodeAdd name port =>
     unfold reconcileStep; simp only []
     have h := autoAssign_version state crd (FlareClusterState.toNodeKey name port)
@@ -335,6 +394,56 @@ theorem atMostOneMasterPerPartition_step :
   | NodeRemove _ _ => exact h_inv
   | MutationAttempt _ => exact h_inv
   | ParseError _ => exact h_inv
+  | NodeState serverName serverPort newSt =>
+    unfold atMostOneMasterPerPartition reconcileStep
+    simp only []
+    split
+    · -- lookupNode = none: state unchanged
+      exact h_inv
+    · -- lookupNode = some node
+      rename_i node h_lookup
+      split
+      · -- Prepare → Active transition: addNode key { node with state := Active }
+        -- Role and partition unchanged, so invariant preserved
+        intro k1 k2 n1 n2 h1 h2 hr1 hr2 hp
+        dsimp at h1 h2
+        rw [addNode_nodeMap, List.mem_cons] at h1
+        rw [addNode_nodeMap, List.mem_cons] at h2
+        cases h1 with
+        | inl h1_eq =>
+          cases h2 with
+          | inl h2_eq =>
+            exact (congrArg Prod.fst h1_eq).trans (congrArg Prod.fst h2_eq).symm
+          | inr h2_old =>
+            -- n1 is updated node with same role as original node
+            rw [List.mem_filter] at h2_old
+            have h_n1_role : n1.role = node.role := by
+              have := congrArg (FlareNode.role ∘ Prod.snd) h1_eq; simp at this; exact this
+            have h_n1_part : n1.partition = node.partition := by
+              have := congrArg (FlareNode.partition ∘ Prod.snd) h1_eq; simp at this; exact this
+            have h_mem_orig := lookupNode_mem _ _ _ h_lookup
+            have h_k1 := congrArg Prod.fst h1_eq
+            subst h_k1
+            exact h_inv _ k2 node n2 h_mem_orig h2_old.1
+              (h_n1_role ▸ hr1) hr2 (h_n1_part ▸ hp)
+        | inr h1_old =>
+          cases h2 with
+          | inl h2_eq =>
+            rw [List.mem_filter] at h1_old
+            have h_n2_role : n2.role = node.role := by
+              have := congrArg (FlareNode.role ∘ Prod.snd) h2_eq; simp at this; exact this
+            have h_n2_part : n2.partition = node.partition := by
+              have := congrArg (FlareNode.partition ∘ Prod.snd) h2_eq; simp at this; exact this
+            have h_mem_orig := lookupNode_mem _ _ _ h_lookup
+            have h_k2 := congrArg Prod.fst h2_eq
+            subst h_k2
+            exact h_inv k1 _ n1 node h1_old.1 h_mem_orig
+              hr1 (h_n2_role ▸ hr2) (h_n2_part ▸ hp)
+          | inr h2_old =>
+            rw [List.mem_filter] at h1_old h2_old
+            exact h_inv k1 k2 n1 n2 h1_old.1 h2_old.1 hr1 hr2 hp
+      · -- condition false: state unchanged
+        exact h_inv
   | NodeAdd serverName serverPort =>
     unfold atMostOneMasterPerPartition reconcileStep
     simp only []
@@ -420,8 +529,7 @@ theorem atMostOneMasterPerPartition_step :
 -- ===========================================================================
 
 /-- reconcileStep produces valid transitions.
-    The 2 sorry's in the Master branch of atMostOneMasterPerPartition_step
-    propagate here. All other conjuncts are fully proved. -/
+    All conjuncts are fully proved. -/
 theorem reconcileStep_valid (state : FlareClusterState) (crd : FlareClusterView)
     (event : FlareEvent) (h_master : atMostOneMasterPerPartition state)
     (h_proxy : proxiesUnassigned state) :

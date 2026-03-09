@@ -109,10 +109,10 @@ def autoAssign (state : FlareClusterState) (crd : FlareClusterView) (nodeKey : S
     let newState := (state.addNode nodeKey newNode).setPartition pIdx newPart
     (newState, newNode)
   | none =>
-    -- Try Slave
+    -- Try Slave (enters Prepare state — reconstruction needed before Active)
     match findPartitionNeedingSlave state numPartitions maxSlaves with
     | some pIdx =>
-      let newNode := { node with role := FlareRole.Slave, state := FlareState.Ready, partition := Int.ofNat pIdx }
+      let newNode := { node with role := FlareRole.Slave, state := FlareState.Prepare, partition := Int.ofNat pIdx }
       let part := (state.lookupPartition pIdx).getD {}
       let newPart := { part with slaves := part.slaves ++ [nodeKey] }
       let newState := (state.addNode nodeKey newNode).setPartition pIdx newPart
@@ -162,6 +162,19 @@ def reconcileStep (state : FlareClusterState) (crd : FlareClusterView)
     let nodeList := state.getNodes
     let lines := nodeList.map serializeNode
     (state, .End (lines.map String.trim))
+  | .NodeState serverName serverPort newState =>
+    let nodeKey := FlareClusterState.toNodeKey serverName serverPort
+    match state.lookupNode nodeKey with
+    | none =>
+      (state, .ServerError s!"node state: unknown node {nodeKey}")
+    | some node =>
+      -- Only allow Prepare → Active transition (reconstruction complete)
+      if node.state == FlareState.Prepare && newState == FlareState.Active then
+        let updatedNode := { node with state := FlareState.Active }
+        let newClusterState := state.addNode nodeKey updatedNode
+        (newClusterState, .OK)
+      else
+        (state, .ServerError s!"node state: transition {node.state.toNat}→{newState.toNat} not allowed")
   | .NodeRemove _ _ =>
     (state, .ServerError "node removal is managed by Kubernetes")
   | .MutationAttempt _ =>

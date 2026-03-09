@@ -1211,6 +1211,15 @@ int cluster::set_monitor_interval(int monitor_interval) {
  *	[index] set node server monitoring read timeout
  */
 int cluster::set_monitor_read_timeout(int monitor_read_timeout) {
+#ifdef ENABLE_K8S_OPERATOR
+	// In K8s operator mode, cap the monitor read timeout to 10 seconds.
+	// The operator handles node health monitoring via K8s pod readiness probes,
+	// so the in-process monitor only needs a short timeout as a secondary check.
+	if (monitor_read_timeout > 10) {
+		log_notice("K8s operator mode: capping monitor_read_timeout from %d to 10s", monitor_read_timeout);
+		monitor_read_timeout = 10;
+	}
+#endif
 	this->_monitor_read_timeout = monitor_read_timeout;
 
 	// notify current threads
@@ -2275,6 +2284,12 @@ shared_connection cluster::_open_index() {
 shared_connection cluster::_open_index_single_server() {
 	index_server server = this->_index_servers.front();
 	shared_connection_tcp ctp(new connection_tcp(server.index_server_name, server.index_server_port));
+#ifdef ENABLE_K8S_OPERATOR
+	// In K8s operator mode, reduce connect retry limit for faster startup.
+	// The operator pod is expected to be reachable via K8s Service ClusterIP
+	// with minimal latency. If it's not reachable, K8s will restart the pod.
+	ctp->set_connect_retry_limit(2);
+#endif
 	if (ctp && ctp->open() == 0) {
 		return ctp;
 	}

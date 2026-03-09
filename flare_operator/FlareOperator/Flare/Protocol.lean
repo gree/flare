@@ -20,6 +20,7 @@ inductive FlareEvent where
   | NodeAdd (serverName : String) (serverPort : Nat)
   | NodeSync (nodeMapVersion : Option Nat)
   | NodeRemove (serverName : String) (serverPort : Nat)
+  | NodeState (serverName : String) (serverPort : Nat) (newState : FlareState)
   | MutationAttempt (raw : String)
   | ParseError (raw : String)
   deriving Repr
@@ -67,7 +68,11 @@ def parseFlareCommand (line : String) : FlareEvent :=
     | some port => FlareEvent.NodeRemove name port
     | none => FlareEvent.ParseError trimmed
   | "node" :: "role" :: _ => FlareEvent.MutationAttempt trimmed
-  | "node" :: "state" :: _ => FlareEvent.MutationAttempt trimmed
+  | "node" :: "state" :: name :: portStr :: stateStr :: _ =>
+    match parseNat portStr, FlareState.fromNat (stateStr.trim.toNat?.getD 99) with
+    | some port, some st => FlareEvent.NodeState name port st
+    | _, _ => FlareEvent.ParseError trimmed
+  | "node" :: "state" :: _ => FlareEvent.ParseError trimmed
   | _ => FlareEvent.ParseError trimmed
 
 /-! ## Serializer -/
@@ -115,7 +120,7 @@ def serializeResponse (resp : FlareResponse) : String :=
 #eval parseFlareCommand "node sync 5"    -- NodeSync (some 5)
 #eval parseFlareCommand "node remove host1 1234"  -- NodeRemove
 #eval parseFlareCommand "node role host1 1234 master 100 0"  -- MutationAttempt
-#eval parseFlareCommand "node state host1 1234 active"  -- MutationAttempt
+#eval parseFlareCommand "node state host1 1234 0"       -- NodeState Active
 #eval parseFlareCommand ""               -- ParseError
 
 end FlareOperator.Flare

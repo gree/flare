@@ -43,6 +43,10 @@
 #include "storage_kch.h"
 #endif
 
+#ifdef ENABLE_K8S_OPERATOR
+# include <cstdlib>
+#endif
+
 namespace gree {
 namespace flare {
 
@@ -174,7 +178,13 @@ int flared::startup(int argc, char **argv) {
 	}
 
 	// application objects
+#ifdef ENABLE_K8S_OPERATOR
+	// In K8s operator mode, reduce read timeout for faster failover detection.
+	// The Lean 4 operator on :12120 responds much faster than the legacy flarei.
+	connection_tcp::read_timeout = 30 * 1000;		// 30s (vs default 600s)
+#else
 	connection_tcp::read_timeout = ini_option_object().get_net_read_timeout() * 1000;		// -> msec
+#endif
 	this->_server = new server();
 	this->_server->set_back_log(ini_option_object().get_back_log());
 	if (this->_server->listen(ini_option_object().get_server_port()) < 0) {
@@ -200,10 +210,35 @@ int flared::startup(int argc, char **argv) {
 	this->_cluster->set_max_total_thread_queue(ini_option_object().get_max_total_thread_queue());
 	this->_cluster->set_noreply_window_limit(ini_option_object().get_noreply_window_limit());
 	this->_cluster->add_proxy_event_listener(this->_cluster_replication);
+#ifdef ENABLE_K8S_OPERATOR
+	// In K8s operator mode, override the index server address from environment
+	// variables if set. This allows the operator pod's Service ClusterIP to be
+	// injected via K8s downward API or ConfigMap, so flared connects to the
+	// Lean 4 operator instead of the legacy flarei.
+	{
+		vector<cluster::index_server> k8s_index_servers = ini_option_object().get_index_servers();
+		const char* op_host = std::getenv("FLARE_OPERATOR_HOST");
+		const char* op_port = std::getenv("FLARE_OPERATOR_PORT");
+		if (op_host != NULL && op_port != NULL) {
+			k8s_index_servers.clear();
+			cluster::index_server s;
+			s.index_server_name = string(op_host);
+			s.index_server_port = atoi(op_port);
+			k8s_index_servers.push_back(s);
+			log_notice("K8s operator mode: using operator at %s:%d as index server",
+				op_host, atoi(op_port));
+		}
+		if (this->_cluster->startup_node(k8s_index_servers,
+																		 ini_option_object().get_proxy_prior_netmask()) < 0) {
+			return -1;
+		}
+	}
+#else
 	if (this->_cluster->startup_node(ini_option_object().get_index_servers(),
 																	 ini_option_object().get_proxy_prior_netmask()) < 0) {
 		return -1;
 	}
+#endif
 
 	storage::type t = storage::type_tch;
 	storage::type_cast(ini_option_object().get_storage_type(), t);

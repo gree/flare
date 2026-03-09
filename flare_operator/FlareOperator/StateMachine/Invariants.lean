@@ -24,12 +24,16 @@
 import FlareOperator.K8s.FlareCluster
 import FlareOperator.Flare.Protocol
 import FlareOperator.StateMachine.Reconciler
+import FlareOperator.StateMachine.TemporalLogic
+import FlareOperator.StateMachine.K8sReconciler
 
 namespace FlareOperator.Invariants
 
 open FlareOperator.K8s
 open FlareOperator.Flare
 open FlareOperator.Reconciler
+open FlareOperator.TemporalLogic
+open FlareOperator.K8sReconciler
 
 -- ===========================================================================
 -- Helper Lemmas: addNode / setPartition structure
@@ -437,5 +441,140 @@ def safetyInvariant (state : FlareClusterState) : Prop :=
 theorem safetyInvariant_init :
     safetyInvariant FlareClusterState.default :=
   ⟨atMostOneMasterPerPartition_init, proxiesUnassigned_init⟩
+
+-- ===========================================================================
+-- Cluster-Level State (for K8s reconciler liveness proofs)
+-- ===========================================================================
+
+/-- Cluster-level state combining reconciler FSM, cluster state, CRD spec,
+    service selectors, and failover status. -/
+structure FlareClusterLevelState where
+  k8sReconcileState : FlareReconcileState
+  clusterState : FlareClusterState
+  crdSpec : FlareClusterView
+  serviceSelectors : List (Nat × String)  -- partition → pod receiving traffic
+  failoverInProgress : Bool := false
+  deriving Repr
+
+-- ===========================================================================
+-- Cluster-Level Next-State Relation
+-- ===========================================================================
+
+/-- Valid cluster-level transition: encodes safety properties as a conjunction.
+    Following gungnir's `validTransition` pattern. -/
+def validClusterTransition (s s' : FlareClusterLevelState) : Prop :=
+  -- 1. Split-brain prevention: at most one master per partition
+  atMostOneMasterPerPartition s'.clusterState ∧
+  -- 2. Proxy invariant: proxies have partition = -1
+  proxiesUnassigned s'.clusterState ∧
+  -- 3. Version monotonicity
+  s'.clusterState.nodeMapVersion ≥ s.clusterState.nodeMapVersion ∧
+  -- 4. Service selector bounded: at most one pod per partition
+  s'.serviceSelectors.length ≤ s'.clusterState.partitionMap.length ∧
+  -- 5. Failover implies dead nodes exist
+  (s'.failoverInProgress = true →
+    s'.k8sReconcileState.deadNodeKeys ≠ []) ∧
+  -- 6. Service changes only during failover
+  (s'.serviceSelectors ≠ s.serviceSelectors →
+    s'.failoverInProgress = true ∨ s.failoverInProgress = true)
+
+-- ===========================================================================
+-- handleFailoverPure preserves safety invariants
+-- ===========================================================================
+
+/-- Single-key failover step preserves atMostOneMasterPerPartition.
+    The demoted node has role=Proxy, so it cannot be a Master.
+    Any two Masters in the result were already in the original state. -/
+private theorem handleFailoverSingleKey_preserves_atMostOneMaster
+    (s : FlareClusterState) (key : String)
+    (h_inv : atMostOneMasterPerPartition s) :
+    atMostOneMasterPerPartition (handleFailoverSingleKey s key) := by
+  unfold handleFailoverSingleKey
+  unfold FlareClusterState.lookupNode
+  split
+  · -- lookupNode = none: state unchanged
+    exact h_inv
+  · -- lookupNode = some node: addNode key demoted where demoted.role = Proxy
+    intro k1 k2 n1 n2 h1 h2 hr1 hr2 hp
+    dsimp at h1 h2
+    rw [addNode_nodeMap, List.mem_cons] at h1
+    rw [addNode_nodeMap, List.mem_cons] at h2
+    cases h1 with
+    | inl h1_eq =>
+      -- k1's node = demoted (role=Proxy), but hr1 says role=Master → contradiction
+      exfalso
+      have := congrArg (FlareNode.role ∘ Prod.snd) h1_eq
+      simp at this; rw [this] at hr1; exact absurd hr1 (by decide)
+    | inr h1_old =>
+      cases h2 with
+      | inl h2_eq =>
+        exfalso
+        have := congrArg (FlareNode.role ∘ Prod.snd) h2_eq
+        simp at this; rw [this] at hr2; exact absurd hr2 (by decide)
+      | inr h2_old =>
+        -- Both from original nodeMap (filtered) → apply h_inv
+        rw [List.mem_filter] at h1_old h2_old
+        exact h_inv k1 k2 n1 n2 h1_old.1 h2_old.1 hr1 hr2 hp
+
+/-- handleFailoverPure preserves atMostOneMasterPerPartition.
+    Induction on deadKeys: each foldl step preserves the invariant. -/
+theorem handleFailover_preserves_atMostOneMaster
+    (state : FlareClusterState) (deadKeys : List String)
+    (h_inv : atMostOneMasterPerPartition state) :
+    atMostOneMasterPerPartition (handleFailoverPure state deadKeys) := by
+  unfold handleFailoverPure
+  induction deadKeys generalizing state with
+  | nil => simpa [List.foldl]
+  | cons key rest ih =>
+    simp only [List.foldl]
+    exact ih _ (handleFailoverSingleKey_preserves_atMostOneMaster state key h_inv)
+
+/-- Single-key failover step preserves proxiesUnassigned.
+    The demoted node has role=Proxy and partition=-1, satisfying the invariant.
+    Old Proxy entries are preserved with their original partitions. -/
+private theorem handleFailoverSingleKey_preserves_proxiesUnassigned
+    (s : FlareClusterState) (key : String)
+    (h_inv : proxiesUnassigned s) :
+    proxiesUnassigned (handleFailoverSingleKey s key) := by
+  unfold handleFailoverSingleKey
+  unfold FlareClusterState.lookupNode
+  split
+  · -- lookupNode = none: state unchanged
+    exact h_inv
+  · -- lookupNode = some node: addNode key demoted where demoted.partition = -1
+    intro ⟨k, n⟩ h_mem h_proxy
+    dsimp at h_mem
+    rw [addNode_nodeMap, List.mem_cons] at h_mem
+    cases h_mem with
+    | inl h_eq =>
+      -- (k, n) = (key, demoted) → n.partition = demoted.partition = -1
+      have := congrArg (FlareNode.partition ∘ Prod.snd) h_eq
+      simp at this; exact this
+    | inr h_old =>
+      -- From original nodeMap (filtered) → apply h_inv
+      rw [List.mem_filter] at h_old
+      exact h_inv (k, n) h_old.1 h_proxy
+
+/-- handleFailoverPure preserves proxiesUnassigned.
+    Induction on deadKeys: each foldl step preserves the invariant. -/
+theorem handleFailover_preserves_proxiesUnassigned
+    (state : FlareClusterState) (deadKeys : List String)
+    (h_inv : proxiesUnassigned state) :
+    proxiesUnassigned (handleFailoverPure state deadKeys) := by
+  unfold handleFailoverPure
+  induction deadKeys generalizing state with
+  | nil => simpa [List.foldl]
+  | cons key rest ih =>
+    simp only [List.foldl]
+    exact ih _ (handleFailoverSingleKey_preserves_proxiesUnassigned state key h_inv)
+
+-- ===========================================================================
+-- Safety Property as Temporal Predicate
+-- ===========================================================================
+
+/-- The safety property as a temporal predicate: always(safetyInvariant).
+    Following gungnir's safetyProperty pattern. -/
+def safetyProperty : TempPred FlareClusterLevelState :=
+  always (liftState (fun s => safetyInvariant s.clusterState))
 
 end FlareOperator.Invariants

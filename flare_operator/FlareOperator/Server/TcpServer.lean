@@ -136,6 +136,26 @@ def handleConnection (sock : Socket) (state : ServerState) : IO Unit := do
       let (newState, response) := reconcileStep cs crd event
       -- Write back
       state.clusterState.set newState
+      -- Trace logging
+      match event with
+      | .NodeAdd serverName serverPort =>
+        let nodeKey := FlareClusterState.toNodeKey serverName serverPort
+        match newState.lookupNode nodeKey with
+        | some node =>
+          if node.role == FlareRole.Master then
+            IO.eprintln s!"[TRACE] Event: NodeAdd {nodeKey} | Result: Master P{node.partition} | Reason: partition needed master"
+          else if node.role == FlareRole.Slave then
+            IO.eprintln s!"[TRACE] Event: NodeAdd {nodeKey} | Result: Slave P{node.partition} (Prepare) | Reason: partition needed slave"
+          else
+            IO.eprintln s!"[TRACE] Event: NodeAdd {nodeKey} | Result: Proxy | Reason: all partitions full"
+        | none => pure ()
+      | .NodeState serverName serverPort _ =>
+        let nodeKey := FlareClusterState.toNodeKey serverName serverPort
+        match response with
+        | .OK => IO.eprintln s!"[TRACE] Event: NodeState {nodeKey} | Result: Prepare->Active | Reason: reconstruction complete"
+        | .ServerError msg => IO.eprintln s!"[TRACE] Event: NodeState {nodeKey} | Result: rejected | Reason: {msg}"
+        | _ => pure ()
+      | _ => pure ()
       -- Respond
       match response with
       | .CloseConnection =>

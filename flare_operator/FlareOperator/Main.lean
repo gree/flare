@@ -206,7 +206,7 @@ private def handleClusterReplication
       match ← patchFlareClusterStatus crName ns .None with
       | .error e => IO.eprintln s!"[flare-operator] warning: failed to reset migrationPhase: {e}"
       | .ok () => pure ()
-      IO.eprintln s!"[flare-operator] cluster replication disabled, reset to None"
+      IO.eprintln s!"[TRACE] ClusterReplication: {phase.toString}->None | Reason: replication disabled"
     return
 
   let phase ← migrationRef.get
@@ -223,7 +223,7 @@ private def handleClusterReplication
     match ← patchFlareClusterStatus crName ns .Dumping with
     | .error e => IO.eprintln s!"[flare-operator] warning: failed to patch status: {e}"
     | .ok () => pure ()
-    IO.eprintln s!"[flare-operator] cluster replication started (mode=duplicate)"
+    IO.eprintln s!"[TRACE] ClusterReplication: None->Dumping | Reason: replication enabled (mode=duplicate)"
 
   | .Dumping =>
     -- Monitor: query all ready pods for dump_replication thread status
@@ -235,6 +235,7 @@ private def handleClusterReplication
       | .error _ => dumpRunning := true  -- assume still running on error
       | .ok output =>
         if containsSubstr output "dump_replication" then
+          IO.eprintln s!"[TRACE] ClusterReplication: Dumping | dump_replication still running on {pod.name}"
           dumpRunning := true
     if !dumpRunning then
       -- Dump complete → transition to forward mode
@@ -249,7 +250,7 @@ private def handleClusterReplication
       match ← patchFlareClusterStatus crName ns .Forwarding with
       | .error e => IO.eprintln s!"[flare-operator] warning: failed to patch status: {e}"
       | .ok () => pure ()
-      IO.eprintln s!"[flare-operator] dump complete, transitioned to forward mode"
+      IO.eprintln s!"[TRACE] ClusterReplication: Dumping->Forwarding | Reason: all dump_replication threads complete"
 
   | .Forwarding =>
     -- Steady state: forward mode active, nothing to do
@@ -292,12 +293,14 @@ private def reconcileOnce (stateRef : IO.Ref FlareClusterState) (crdRef : IO.Ref
     -- 4. Handle failover (pure state transition)
     if !deadKeys.isEmpty then
       IO.eprintln s!"[flare-operator] detected {deadKeys.length} dead node(s): {deadKeys}"
+      IO.eprintln s!"[TRACE] DeadDetection: found {deadKeys.length} dead nodes: {deadKeys}"
       -- Before failover, rebuild partitionMap from nodeMap (single source of truth)
       let state := state.rebuildPartitionMap
       let (newState, failoverLogs) := handleFailover state deadKeys
       for msg in failoverLogs do
         IO.eprintln msg
       stateRef.set newState
+      IO.eprintln s!"[TRACE] Failover: processed {deadKeys.length} dead nodes, {failoverLogs.length} actions taken"
 
       -- 5. Patch K8s Service selectors for failover
       ensureServiceRouting newState crName ns

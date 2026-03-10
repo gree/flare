@@ -1,0 +1,336 @@
+/-
+  E2E/Setup.lean - Common setup/teardown for E2E tests
+
+  Provides cluster deployment, cleanup, and stability waiting helpers.
+  Generates YAML for operator deployments, StatefulSets, and FlareCluster CRDs.
+-/
+
+import FlareOperator.E2E.Helpers
+
+namespace FlareOperator.E2E.Setup
+
+open FlareOperator.E2E.Helpers
+open FlareOperator.Kubectl
+
+/-- Configuration for a Flare cluster deployment. -/
+structure ClusterConfig where
+  name : String
+  «namespace» : String := "flare-system"
+  partitions : Nat := 2
+  replicas : Nat := 2
+  operatorName : String := "flare-operator"
+  debugPod : String := "debug-e2e"
+  flarePort : Nat := 12121
+  operatorPort : Nat := 12120
+  deriving Repr
+
+-- ===========================================================================
+-- YAML Generation
+-- ===========================================================================
+
+/-- Generate operator Deployment + Service YAML. -/
+def operatorDeploymentYaml (cfg : ClusterConfig) : String :=
+  let name := cfg.operatorName
+  let ns := cfg.«namespace»
+  s!"apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {name}
+  namespace: {ns}
+  labels:
+    app: {name}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {name}
+  template:
+    metadata:
+      labels:
+        app: {name}
+    spec:
+      serviceAccountName: flare-operator
+      containers:
+        - name: flare-operator
+          image: flare-operator:test
+          imagePullPolicy: Never
+          args:
+            - \"--namespace\"
+            - \"{ns}\"
+            - \"--cluster-name\"
+            - \"{cfg.name}\"
+          ports:
+            - containerPort: {cfg.operatorPort}
+              name: flare-index
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {name}
+  namespace: {ns}
+spec:
+  selector:
+    app: {name}
+  ports:
+    - port: {cfg.operatorPort}
+      targetPort: flare-index
+      protocol: TCP
+  type: ClusterIP"
+
+/-- Generate StatefulSet + headless Service YAML. -/
+def statefulSetYaml (cfg : ClusterConfig) : String :=
+  let cluster := cfg.name
+  let ns := cfg.«namespace»
+  let numPods := cfg.partitions * cfg.replicas
+  let operatorSvc := s!"{cfg.operatorName}.{ns}.svc.cluster.local"
+  s!"apiVersion: v1
+kind: Service
+metadata:
+  name: {cluster}-nodes
+  namespace: {ns}
+  labels:
+    app: flare
+    cluster: {cluster}
+spec:
+  clusterIP: None
+  selector:
+    app: flare
+    cluster: {cluster}
+  ports:
+    - port: {cfg.flarePort}
+      targetPort: flare
+      name: flare
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {cluster}-nodes
+  namespace: {ns}
+spec:
+  serviceName: {cluster}-nodes
+  replicas: {numPods}
+  selector:
+    matchLabels:
+      app: flare
+      cluster: {cluster}
+  template:
+    metadata:
+      labels:
+        app: flare
+        cluster: {cluster}
+    spec:
+      terminationGracePeriodSeconds: 5
+      containers:
+        - name: flared
+          image: flare-node:test
+          imagePullPolicy: Never
+          command: [\"sh\", \"-c\", \"rm -rf /tmp/flare/*.hdb /tmp/flare/*.hdb.wal && mkdir -p /tmp/flare && exec flared --data-dir /tmp/flare --server-port {cfg.flarePort} --index-server-name {operatorSvc} --index-server-port {cfg.operatorPort} --stderr\"]
+          ports:
+            - containerPort: {cfg.flarePort}
+              name: flare
+          livenessProbe:
+            tcpSocket:
+              port: {cfg.flarePort}
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 6
+          readinessProbe:
+            tcpSocket:
+              port: {cfg.flarePort}
+            initialDelaySeconds: 5
+            periodSeconds: 3
+            failureThreshold: 4
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi"
+
+/-- Generate FlareCluster CRD YAML. -/
+def flareClusterCrdYaml (cfg : ClusterConfig) : String :=
+  s!"apiVersion: flare.gree.net/v1alpha1
+kind: FlareCluster
+metadata:
+  name: {cfg.name}
+  namespace: {cfg.«namespace»}
+spec:
+  partitions: {cfg.partitions}
+  replicas: {cfg.replicas}"
+
+/-- Generate partition Service YAML for a single partition. -/
+def partitionServiceYaml (cfg : ClusterConfig) (partIdx : Nat) : String :=
+  s!"apiVersion: v1
+kind: Service
+metadata:
+  name: {cfg.name}-{partIdx}
+  namespace: {cfg.«namespace»}
+spec:
+  selector:
+    statefulset.kubernetes.io/pod-name: {cfg.name}-nodes-0
+  ports:
+    - port: {cfg.flarePort}
+      targetPort: {cfg.flarePort}"
+
+-- ===========================================================================
+-- Deploy / Cleanup
+-- ===========================================================================
+
+/-- Apply YAML string via kubectl. -/
+private def applyYaml (yaml : String) : IO Unit := do
+  try
+    let result ← IO.Process.output {
+      cmd := "sh"
+      args := #["-c", s!"cat <<'ENDOFYAML' | kubectl apply -f -\n{yaml}\nENDOFYAML"]
+    }
+    if result.exitCode != 0 then
+      IO.eprintln s!"# kubectl apply failed: {result.stderr}"
+  catch e =>
+    IO.eprintln s!"# kubectl apply error: {e}"
+
+/-- Deploy a full cluster: namespace → CRD/RBAC → FlareCluster CR → partition services →
+    debug pod → empty ConfigMap → operator → StatefulSet -/
+def deployCluster (cfg : ClusterConfig) : IO Unit := do
+  IO.eprintln s!"# Deploying cluster '{cfg.name}' in namespace '{cfg.«namespace»}'"
+
+  -- Ensure namespace
+  let _ ← kubectl ["create", "namespace", cfg.«namespace»]
+
+  -- Apply CRD and RBAC
+  let _ ← kubectl ["apply", "-f", "deploy/crd.yaml"]
+  let _ ← kubectl ["apply", "-f", "deploy/rbac.yaml"]
+
+  -- Create FlareCluster CR
+  applyYaml (flareClusterCrdYaml cfg)
+
+  -- Create partition services
+  for i in List.range cfg.partitions do
+    applyYaml (partitionServiceYaml cfg i)
+
+  -- Create empty ConfigMap for replication config
+  let cmName := s!"{cfg.name}-config"
+  try
+    let result ← IO.Process.output {
+      cmd := "sh"
+      args := #["-c", s!"kubectl create configmap {cmName} -n {cfg.«namespace»} --from-literal='extra.conf=' 2>/dev/null || true"]
+    }
+    let _ := result
+    pure ()
+  catch _ => pure ()
+
+  -- Create debug pod
+  try
+    let result ← IO.Process.output {
+      cmd := "sh"
+      args := #["-c", s!"kubectl run {cfg.debugPod} --namespace={cfg.«namespace»} --image=busybox:1.36 --restart=Never --command -- sleep 3600 2>/dev/null || true"]
+    }
+    let _ := result
+    pure ()
+  catch _ => pure ()
+  let _ ← kubectlWaitReady s!"pod/{cfg.debugPod}" cfg.«namespace» 60
+
+  -- Deploy operator
+  applyYaml (operatorDeploymentYaml cfg)
+
+  -- Wait for operator to be ready
+  let _ ← kubectlRolloutStatus s!"deployment/{cfg.operatorName}" cfg.«namespace» 120
+
+  -- Extra wait for the first reconcile cycle to fetch the CRD
+  IO.sleep 10000
+
+  -- Deploy StatefulSet
+  applyYaml (statefulSetYaml cfg)
+
+/-- Deploy a second cluster for inter-cluster replication tests. -/
+def deploySecondCluster (cfg : ClusterConfig) : IO Unit := do
+  IO.eprintln s!"# Deploying second cluster '{cfg.name}'"
+
+  -- Create FlareCluster CR
+  applyYaml (flareClusterCrdYaml cfg)
+
+  -- Create empty ConfigMap for replication config
+  let cmName := s!"{cfg.name}-config"
+  try
+    let result ← IO.Process.output {
+      cmd := "sh"
+      args := #["-c", s!"kubectl create configmap {cmName} -n {cfg.«namespace»} --from-literal='extra.conf=' 2>/dev/null || true"]
+    }
+    let _ := result
+    pure ()
+  catch _ => pure ()
+
+  -- Deploy operator
+  applyYaml (operatorDeploymentYaml cfg)
+  let _ ← kubectlRolloutStatus s!"deployment/{cfg.operatorName}" cfg.«namespace» 120
+
+  IO.sleep 10000
+
+  -- Deploy StatefulSet
+  applyYaml (statefulSetYaml cfg)
+
+/-- Cleanup all resources for a cluster. -/
+def cleanupCluster (cfg : ClusterConfig) : IO Unit := do
+  IO.eprintln s!"# Cleaning up cluster '{cfg.name}'"
+  let ns := cfg.«namespace»
+  kubectlDelete "flarecluster" cfg.name ns
+  kubectlDelete "statefulset" s!"{cfg.name}-nodes" ns
+  kubectlDelete "deployment" cfg.operatorName ns
+  kubectlDelete "service" s!"{cfg.name}-nodes" ns
+  kubectlDelete "service" cfg.operatorName ns
+  kubectlDelete "configmap" s!"{cfg.name}-config" ns
+  kubectlDelete "configmap" s!"{cfg.name}-node-map" ns
+  kubectlDelete "lease" s!"{cfg.name}-operator-lease" ns
+  for i in List.range cfg.partitions do
+    kubectlDelete "service" s!"{cfg.name}-{i}" ns
+  -- Delete debug pod
+  let _ ← kubectl ["delete", "pod", cfg.debugPod, "-n", ns,
+                    "--force", "--grace-period=0", "--ignore-not-found"]
+  IO.sleep 3000
+
+/-- Wait for cluster to be stable (all pods ready + node registration + grace period). -/
+def waitForStable (cfg : ClusterConfig) (graceSec : Nat := 50) : IO Bool := do
+  let numPods := cfg.partitions * cfg.replicas
+
+  -- Wait for StatefulSet rollout
+  let rolloutOk ← kubectlRolloutStatus s!"statefulset/{cfg.name}-nodes" cfg.«namespace» 300
+  if !rolloutOk then
+    IO.eprintln s!"# StatefulSet rollout failed"
+    return false
+
+  -- Wait for all pods to be ready
+  let podsReady ← waitForCondition s!"all {numPods} pods ready" 180 do
+    match ← kubectlGetJsonpath "statefulset" s!"{cfg.name}-nodes" cfg.«namespace»
+              "{.status.readyReplicas}" with
+    | .ok val => return (val.toNat?.getD 0 >= numPods)
+    | .error _ => return false
+  if !podsReady then return false
+
+  -- Wait for nodes to register with operator
+  let nodesRegistered ← waitForCondition s!"{numPods} nodes registered" 120 do
+    let sync ← operatorTcpCmd cfg.debugPod cfg.«namespace» cfg.operatorName cfg.operatorPort "node sync"
+    let entries := parseNodeSync sync
+    return (entries.length >= numPods)
+  if !nodesRegistered then return false
+
+  -- Grace period for startup
+  IO.eprintln s!"# Waiting {graceSec}s grace period..."
+  IO.sleep (graceSec * 1000).toUInt32
+  return true
+
+/-- Dump operator logs for debugging failures. -/
+def dumpOperatorLogs (cfg : ClusterConfig) : IO Unit := do
+  IO.eprintln s!"# --- Operator logs ({cfg.operatorName}) ---"
+  let logs ← kubectlLogsLabel s!"app={cfg.operatorName}" cfg.«namespace» 30
+  for line in logs.splitOn "\n" do
+    IO.eprintln s!"#   {line}"
+
+end FlareOperator.E2E.Setup

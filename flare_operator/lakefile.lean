@@ -13,3 +13,6 @@ lean_lib FlareOperator where
 
 lean_exe flare_operator where
   root := `FlareOperator.Main
+
+lean_exe flare_e2e where
+  root := `FlareOperator.E2E.Main

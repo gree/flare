@@ -4,65 +4,11 @@
 -/
 
 import FlareOperator.K8s.FlareCluster
+import Lean.Data.Json
 
 namespace FlareOperator.Kubectl
 
 open FlareOperator.K8s
-
-/-- Simple substring search: find needle in haystack, return byte position. -/
-private def findSubstring (haystack : String) (needle : String) : Option Nat :=
-  let hLen := haystack.length
-  let nLen := needle.length
-  if nLen > hLen then none
-  else
-    let rec go (i : Nat) (fuel : Nat) : Option Nat :=
-      match fuel with
-      | 0 => none
-      | fuel + 1 =>
-        if i + nLen > hLen then none
-        else if (haystack.drop i).startsWith needle then some i
-        else go (i + 1) fuel
-    go 0 (hLen + 1)
-
-/-- Extract a natural number value from a JSON-like string for a given key. -/
-private def extractJsonNat (json : String) (key : String) : Option Nat :=
-  let needle := "\"" ++ key ++ "\":"
-  match findSubstring json needle with
-  | none => none
-  | some pos =>
-    let afterKey := json.drop (pos + needle.length)
-    let trimmed := afterKey.trim
-    -- Extract digits from the start of trimmed
-    let digits := trimmed.takeWhile Char.isDigit
-    digits.toNat?
-
-/-- Extract a string value from a JSON-like string for a given key. -/
-private def extractJsonString (json : String) (key : String) : Option String :=
-  let needle := "\"" ++ key ++ "\":"
-  match findSubstring json needle with
-  | none => none
-  | some pos =>
-    let afterKey := json.drop (pos + needle.length)
-    let trimmed := afterKey.trim
-    -- Expect a quoted string
-    if trimmed.startsWith "\"" then
-      let rest := trimmed.drop 1
-      let value := rest.takeWhile (· != '"')
-      some value
-    else
-      none
-
-/-- Extract a boolean value from a JSON-like string for a given key. -/
-private def extractJsonBool (json : String) (key : String) : Option Bool :=
-  let needle := "\"" ++ key ++ "\":"
-  match findSubstring json needle with
-  | none => none
-  | some pos =>
-    let afterKey := json.drop (pos + needle.length)
-    let trimmed := afterKey.trim
-    if trimmed.startsWith "true" then some true
-    else if trimmed.startsWith "false" then some false
-    else none
 
 /-- Run kubectl with given arguments and return stdout or error. -/
 def kubectl (args : List String) : IO (Except String String) := do
@@ -75,25 +21,34 @@ def kubectl (args : List String) : IO (Except String String) := do
   catch e =>
     return .error s!"kubectl error: {e}"
 
+/-- Parse a FlareClusterView from a Lean.Json object. -/
+private def getFlareClusterFromJson (json : Lean.Json) (name ns : String)
+    : Except String FlareClusterView := do
+  let spec ← json.getObjVal? "spec"
+  let partitions := spec.getObjValD "partitions" |>.getNat?.toOption |>.getD 1
+  let replicas := spec.getObjValD "replicas" |>.getNat?.toOption |>.getD 1
+  let replObj := spec.getObjValD "clusterReplication"
+  let repl : ClusterReplicationSpec := {
+    enabled := replObj.getObjValD "enabled" |>.getBool?.toOption |>.getD false
+    serverName := replObj.getObjValD "serverName" |>.getStr?.toOption |>.getD ""
+    port := replObj.getObjValD "port" |>.getNat?.toOption |>.getD 12121
+    mode := replObj.getObjValD "mode" |>.getStr?.toOption |>.getD "duplicate"
+    concurrency := replObj.getObjValD "concurrency" |>.getNat?.toOption |>.getD 2
+  }
+  .ok {
+    metadata := { name := some name, «namespace» := some ns }
+    spec := { partitions := partitions, replicas := replicas, clusterReplication := repl }
+  }
+
 /-- Get a FlareCluster CR by name and namespace. Returns a minimal view. -/
 def getFlareCluster (name ns : String) : IO (Except String FlareClusterView) := do
   let result ← kubectl ["get", "flarecluster", name, "-n", ns, "-o", "json"]
   match result with
   | .error e => return .error e
   | .ok output =>
-    let partitions := extractJsonNat output "partitions" |>.getD 1
-    let replicas := extractJsonNat output "replicas" |>.getD 1
-    let repl : ClusterReplicationSpec := {
-      enabled := extractJsonBool output "enabled" |>.getD false
-      serverName := extractJsonString output "serverName" |>.getD ""
-      port := extractJsonNat output "port" |>.getD 12121
-      mode := extractJsonString output "mode" |>.getD "duplicate"
-      concurrency := extractJsonNat output "concurrency" |>.getD 2
-    }
-    return .ok {
-      metadata := { name := some name, «namespace» := some ns }
-      spec := { partitions := partitions, replicas := replicas, clusterReplication := repl }
-    }
+    match Lean.Json.parse output with
+    | .error e => return .error s!"JSON parse error: {e}"
+    | .ok json => return getFlareClusterFromJson json name ns
 
 /-- List flared pods matching a label selector. Returns (podName, podIP, port). -/
 def listFlaredPods (crName ns : String) : IO (List (String × String × Nat)) := do

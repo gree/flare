@@ -1,7 +1,8 @@
 /-
   E2E/Tests/ScaleInSlave.lean - Scale in slave (reduce replicas) test suite
 
-  Tests: stable cluster (3 replicas), patch replicas 3→2, scale down, verify masters intact
+  Tests: stable cluster (3 replicas), write keys per partition, verify curr_items,
+         patch replicas 3→2, scale down, verify masters intact, verify items preserved
 -/
 
 import FlareOperator.E2E.Framework
@@ -22,6 +23,8 @@ private def cfg : ClusterConfig := {
   debugPod := "debug-scale-in-s"
 }
 
+private def totalKeys : Nat := 100
+
 def suite : TestSuite := {
   name := "scale-in-slave"
   setup := do
@@ -32,14 +35,39 @@ def suite : TestSuite := {
   teardown := cleanupCluster cfg
   tests := [
     -- Test 1: cluster stable with 3 replicas
-    { name := "pre-flight: cluster stable with 3 replicas (6 pods)"
+    { name := "pre-flight: cluster stable with 3R (6 pods)"
       run := do
         let sync ← operatorTcpCmd cfg.debugPod cfg.«namespace» cfg.operatorName cfg.operatorPort "node sync"
         let entries := parseNodeSync sync
         if entries.length >= 6 && countMasters entries >= 2 then return .pass
         else return .fail s!"expected 6+ nodes, got {entries.length}" },
 
-    -- Test 2: patch CRD replicas 3→2
+    -- Test 2: write 100 keys via proxy routing (single entry point)
+    { name := "write 100 keys via proxy routing"
+      run := do
+        let sync ← operatorTcpCmd cfg.debugPod cfg.«namespace» cfg.operatorName cfg.operatorPort "node sync"
+        let entries := parseNodeSync sync
+        match findMasterPod entries 0 with
+        | none => return .fail "no P0 master"
+        | some pod =>
+          match ← getPodIp pod cfg.«namespace» with
+          | none => return .fail s!"no IP for {pod}"
+          | some ip =>
+            let stored ← writeKeys cfg.debugPod cfg.«namespace» ip cfg.flarePort "sis" totalKeys
+            IO.eprintln s!"# Wrote via {pod}: stored {stored}/{totalKeys}"
+            if stored == totalKeys then return .pass
+            else return .fail s!"only {stored}/{totalKeys} keys stored" },
+
+    -- Test 3: verify key distribution across partitions
+    { name := "verify key distribution (P0 > 0, P1 > 0, total = 100)"
+      run := do
+        let p0 ← getPartitionMasterItems cfg.debugPod cfg.«namespace» cfg.operatorName cfg.operatorPort 0 cfg.flarePort
+        let p1 ← getPartitionMasterItems cfg.debugPod cfg.«namespace» cfg.operatorName cfg.operatorPort 1 cfg.flarePort
+        IO.eprintln s!"# Distribution: P0={p0}, P1={p1}, total={p0 + p1}"
+        if p0 > 0 && p1 > 0 && p0 + p1 == totalKeys then return .pass
+        else return .fail s!"P0={p0}, P1={p1}, total={p0 + p1} (expected both > 0, total = {totalKeys})" },
+
+    -- Test 4: patch CRD replicas 3→2
     { name := "patch replicas 3→2"
       run := do
         let patchJson := "{\"spec\":{\"replicas\":2}}"
@@ -47,12 +75,11 @@ def suite : TestSuite := {
         | .ok _ => return .pass
         | .error e => return .fail s!"patch failed: {e}" },
 
-    -- Test 3: scale down StatefulSet
-    { name := "scale down to 4 pods (2 partitions × 2 replicas)"
+    -- Test 5: scale down StatefulSet
+    { name := "scale down to 4 pods (2P × 2R)"
       run := do
         match ← kubectlScale "statefulset" s!"{cfg.name}-nodes" cfg.«namespace» 4 with
         | .ok _ =>
-          -- Wait for scale-down to complete
           let ok ← waitForCondition "4 pods running" 120 do
             match ← kubectlGetJsonpath "statefulset" s!"{cfg.name}-nodes" cfg.«namespace»
                       "{.status.readyReplicas}" with
@@ -62,35 +89,36 @@ def suite : TestSuite := {
           else return .fail "scale-down did not complete"
         | .error e => return .fail s!"scale failed: {e}" },
 
-    -- Test 4: wait for operator to detect removed pods
+    -- Test 6: wait for operator to detect removed pods
     { name := "operator detects removed pods"
       run := do
-        -- Wait for dead detection + grace period
-        IO.sleep 40000
-        let sync ← operatorTcpCmd cfg.debugPod cfg.«namespace» cfg.operatorName cfg.operatorPort "node sync"
-        let entries := parseNodeSync sync
-        let active := countActiveNodes entries
-        -- After scale-down, some nodes may be marked Down
-        if active >= 4 then return .pass
-        else return .fail s!"only {active} active nodes (expected >= 4)" },
+        let ok ← waitForCondition "active >= 4" 120 do
+          let sync ← operatorTcpCmd cfg.debugPod cfg.«namespace» cfg.operatorName cfg.operatorPort "node sync"
+          let entries := parseNodeSync sync
+          let active := countActiveNodes entries
+          return (active >= 4)
+        if ok then return .pass
+        else return .fail "active nodes did not reach >= 4" },
 
-    -- Test 5: masters intact
+    -- Test 7: masters intact and one-master-per-partition
     { name := "masters intact after scale-in"
       run := do
         let sync ← operatorTcpCmd cfg.debugPod cfg.«namespace» cfg.operatorName cfg.operatorPort "node sync"
         let entries := parseNodeSync sync
         let masters := countMasters entries
-        if masters >= 2 then return .pass
-        else return .fail s!"only {masters} masters (expected 2)" },
-
-    -- Test 6: one-master-per-partition maintained
-    { name := "one-master-per-partition maintained"
-      run := do
-        let sync ← operatorTcpCmd cfg.debugPod cfg.«namespace» cfg.operatorName cfg.operatorPort "node sync"
-        let entries := parseNodeSync sync
         let dups := checkOneMasterPerPartition entries
-        if dups.isEmpty then return .pass
-        else return .fail s!"duplicate masters for partitions: {dups}" }
+        if masters < 2 then return .fail s!"only {masters} masters (expected 2)"
+        else if !dups.isEmpty then return .fail s!"duplicate masters: {dups}"
+        else return .pass },
+
+    -- Test 8: curr_items on masters preserved after scale-in
+    { name := "curr_items preserved on masters after scale-in"
+      run := do
+        let p0 ← getPartitionMasterItems cfg.debugPod cfg.«namespace» cfg.operatorName cfg.operatorPort 0 cfg.flarePort
+        let p1 ← getPartitionMasterItems cfg.debugPod cfg.«namespace» cfg.operatorName cfg.operatorPort 1 cfg.flarePort
+        IO.eprintln s!"# After scale-in: P0={p0}, P1={p1}"
+        if p0 > 0 && p1 > 0 then return .pass
+        else return .fail s!"items lost: P0={p0}, P1={p1}" }
   ]
 }
 

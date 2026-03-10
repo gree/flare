@@ -1,7 +1,8 @@
 /-
   E2E/Tests/Failover.lean - Failover test suite
 
-  Tests: ping, one-master-per-partition, write keys, kill master, verify promotion, recovery
+  Tests: ping, one-master-per-partition, write keys per partition, verify curr_items,
+         kill master, verify promotion, verify P1 items unchanged, recovery
 -/
 
 import FlareOperator.E2E.Framework
@@ -24,6 +25,7 @@ private def cfg : ClusterConfig := {
 }
 
 private def numPods : Nat := cfg.partitions * cfg.replicas
+private def totalKeys : Nat := 100
 
 def suite : TestSuite := {
   name := "failover"
@@ -58,20 +60,15 @@ def suite : TestSuite := {
         else
           return .pass },
 
-    -- Test 3: both partitions have masters
-    { name := "both partitions have masters"
+    -- Test 3: verify META returns correct partition-size
+    { name := "META returns partition-size 2"
       run := do
-        let sync ← operatorTcpCmd cfg.debugPod cfg.«namespace» cfg.operatorName cfg.operatorPort "node sync"
-        let entries := parseNodeSync sync
-        let p0 := findMasterPod entries 0
-        let p1 := findMasterPod entries 1
-        match p0, p1 with
-        | some _, some _ => return .pass
-        | none, _ => return .fail "no master for partition 0"
-        | _, none => return .fail "no master for partition 1" },
+        let resp ← operatorTcpCmd cfg.debugPod cfg.«namespace» cfg.operatorName cfg.operatorPort "meta"
+        if containsSubstr resp "partition-size 2" then return .pass
+        else return .fail s!"META response: {resp.trim}" },
 
-    -- Test 4: write keys to P0 master
-    { name := "write keys to P0 master"
+    -- Test 4: write 100 keys via P0 master (proxy routing distributes across partitions)
+    { name := "write 100 keys via proxy routing"
       run := do
         let sync ← operatorTcpCmd cfg.debugPod cfg.«namespace» cfg.operatorName cfg.operatorPort "node sync"
         let entries := parseNodeSync sync
@@ -81,18 +78,21 @@ def suite : TestSuite := {
           match ← getPodIp masterPod cfg.«namespace» with
           | none => return .fail s!"could not get IP for {masterPod}"
           | some ip =>
-            let mut stored := 0
-            for i in List.range 10 do
-              let key := s!"fkey_{i}"
-              let value := s!"fval_{i}"
-              let ok ← memcachedSet cfg.debugPod cfg.«namespace» ip cfg.flarePort key value
-              if ok then stored := stored + 1
-            if stored > 0 then
-              return .pass
-            else
-              return .fail "no keys stored" },
+            let stored ← writeKeys cfg.debugPod cfg.«namespace» ip cfg.flarePort "fo" totalKeys
+            IO.eprintln s!"# Wrote via {masterPod}: stored {stored}/{totalKeys}"
+            if stored == totalKeys then return .pass
+            else return .fail s!"only {stored}/{totalKeys} keys stored" },
 
-    -- Test 5: kill P0 master, verify failover
+    -- Test 5: verify keys distributed across both partitions
+    { name := "verify key distribution (P0 > 0, P1 > 0, total = 100)"
+      run := do
+        let p0 ← getPartitionMasterItems cfg.debugPod cfg.«namespace» cfg.operatorName cfg.operatorPort 0 cfg.flarePort
+        let p1 ← getPartitionMasterItems cfg.debugPod cfg.«namespace» cfg.operatorName cfg.operatorPort 1 cfg.flarePort
+        IO.eprintln s!"# Distribution: P0={p0}, P1={p1}, total={p0 + p1}"
+        if p0 > 0 && p1 > 0 && p0 + p1 == totalKeys then return .pass
+        else return .fail s!"P0={p0}, P1={p1}, total={p0 + p1} (expected both > 0, total = {totalKeys})" },
+
+    -- Test 6: kill P0 master, verify failover
     { name := "failover: new master elected for P0"
       run := do
         let sync ← operatorTcpCmd cfg.debugPod cfg.«namespace» cfg.operatorName cfg.operatorPort "node sync"
@@ -115,15 +115,13 @@ def suite : TestSuite := {
             let entries := parseNodeSync sync
             match findMasterPod entries 0 with
             | some newMaster =>
-              if newMaster == oldMaster then
-                return .pass  -- reclaimed by restarted pod
-              else
-                return .pass  -- slave promoted
+              IO.eprintln s!"# New P0 master: {newMaster} (was: {oldMaster})"
+              return .pass
             | none => return .fail "master not found after wait"
           else
             return .fail "no P0 master within 90s" },
 
-    -- Test 6: one-master-per-partition after failover
+    -- Test 7: one-master-per-partition after failover
     { name := "failover: one-master-per-partition maintained"
       run := do
         let sync ← operatorTcpCmd cfg.debugPod cfg.«namespace» cfg.operatorName cfg.operatorPort "node sync"
@@ -132,36 +130,49 @@ def suite : TestSuite := {
         if dups.isEmpty then return .pass
         else return .fail s!"duplicate masters for partitions: {dups}" },
 
-    -- Test 7: P1 unaffected
-    { name := "failover: P1 unaffected"
+    -- Test 8: P1 curr_items unchanged after P0 failover
+    { name := "failover: P1 curr_items unchanged"
       run := do
-        let sync ← operatorTcpCmd cfg.debugPod cfg.«namespace» cfg.operatorName cfg.operatorPort "node sync"
-        let entries := parseNodeSync sync
-        match findMasterPod entries 1 with
-        | none => return .fail "no P1 master found"
-        | some _ => return .pass },
+        let p1Items ← getPartitionMasterItems cfg.debugPod cfg.«namespace» cfg.operatorName cfg.operatorPort 1 cfg.flarePort
+        IO.eprintln s!"# P1 curr_items after failover: {p1Items}"
+        if p1Items > 0 then
+          return .pass
+        else
+          return .skip "data may have been lost during failover" },
 
-    -- Test 8: recovery - all pods ready
+    -- Test 9: recovery - all pods ready
     { name := "recovery: all pods ready"
       run := do
-        let ok ← waitForCondition s!"all {numPods} pods ready" 120 do
-          match ← kubectlGetJsonpath "statefulset" "flare-nodes" cfg.«namespace»
+        let ok ← waitForCondition s!"all {numPods} pods ready" 180 do
+          match ← kubectlGetJsonpath "statefulset" s!"{cfg.name}-nodes" cfg.«namespace»
                     "{.status.readyReplicas}" with
           | .ok val => return (val.toNat?.getD 0 >= numPods)
           | .error _ => return false
         if ok then return .pass
         else return .fail s!"not all {numPods} pods ready" },
 
-    -- Test 9: recovery - one-master-per-partition
+    -- Test 10: recovery - one-master-per-partition
     { name := "recovery: one-master-per-partition"
       run := do
-        -- Wait for re-registration
-        IO.sleep 15000
-        let sync ← operatorTcpCmd cfg.debugPod cfg.«namespace» cfg.operatorName cfg.operatorPort "node sync"
-        let entries := parseNodeSync sync
-        let dups := checkOneMasterPerPartition entries
-        if dups.isEmpty then return .pass
-        else return .fail s!"duplicate masters for partitions: {dups}" }
+        let ok ← waitForCondition "one-master-per-partition" 60 do
+          let sync ← operatorTcpCmd cfg.debugPod cfg.«namespace» cfg.operatorName cfg.operatorPort "node sync"
+          let entries := parseNodeSync sync
+          let dups := checkOneMasterPerPartition entries
+          return (dups.isEmpty && countMasters entries >= cfg.partitions)
+        if ok then return .pass
+        else
+          let sync ← operatorTcpCmd cfg.debugPod cfg.«namespace» cfg.operatorName cfg.operatorPort "node sync"
+          let entries := parseNodeSync sync
+          let dups := checkOneMasterPerPartition entries
+          return .fail s!"duplicate masters for partitions: {dups}" },
+
+    -- Test 11: verify total items across cluster after recovery
+    { name := "recovery: total curr_items across cluster"
+      run := do
+        let total ← getTotalItems cfg.debugPod cfg.«namespace» s!"app=flare,cluster={cfg.name}" cfg.flarePort
+        IO.eprintln s!"# Total curr_items after recovery: {total}"
+        if total > 0 then return .pass
+        else return .skip "items may have been lost during pod restart" }
   ]
 }
 

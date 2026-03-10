@@ -1,7 +1,9 @@
 /-
   E2E/Tests/ScaleOutMaster.lean - Scale out master (add partition) test suite
 
-  Tests: stable cluster, write keys, patch partitions 2→3, scale pods, verify P2 master+slave
+  Tests: stable cluster, write keys per partition, verify curr_items,
+         patch partitions 2→3, scale pods, verify P2 master+slave,
+         verify original partition items preserved
 -/
 
 import FlareOperator.E2E.Framework
@@ -22,6 +24,8 @@ private def cfg : ClusterConfig := {
   debugPod := "debug-scale-out-m"
 }
 
+private def totalKeys : Nat := 100
+
 def suite : TestSuite := {
   name := "scale-out-master"
   setup := do
@@ -39,18 +43,32 @@ def suite : TestSuite := {
         if countMasters entries >= 2 then return .pass
         else return .fail s!"only {countMasters entries} masters (expected 2)" },
 
-    -- Test 2: write keys before scaling
-    { name := "write keys before scaling"
+    -- Test 2: write 100 keys via proxy routing
+    { name := "write 100 keys via proxy routing"
       run := do
-        let ips ← getPodIps s!"app=flare,cluster={cfg.name}" cfg.«namespace»
-        match ips.head? with
-        | none => return .fail "no pod IPs"
-        | some ip =>
-          let ok ← memcachedSet cfg.debugPod cfg.«namespace» ip cfg.flarePort "scale_key" "scale_val"
-          if ok then return .pass
-          else return .fail "SET failed" },
+        let sync ← operatorTcpCmd cfg.debugPod cfg.«namespace» cfg.operatorName cfg.operatorPort "node sync"
+        let entries := parseNodeSync sync
+        match findMasterPod entries 0 with
+        | none => return .fail "no P0 master"
+        | some pod =>
+          match ← getPodIp pod cfg.«namespace» with
+          | none => return .fail s!"no IP for {pod}"
+          | some ip =>
+            let stored ← writeKeys cfg.debugPod cfg.«namespace» ip cfg.flarePort "som" totalKeys
+            IO.eprintln s!"# Wrote via {pod}: stored {stored}/{totalKeys}"
+            if stored == totalKeys then return .pass
+            else return .fail s!"only {stored}/{totalKeys} keys stored" },
 
-    -- Test 3: patch CRD partitions 2→3
+    -- Test 3: verify key distribution across partitions
+    { name := "verify key distribution (P0 > 0, P1 > 0, total = 100)"
+      run := do
+        let p0 ← getPartitionMasterItems cfg.debugPod cfg.«namespace» cfg.operatorName cfg.operatorPort 0 cfg.flarePort
+        let p1 ← getPartitionMasterItems cfg.debugPod cfg.«namespace» cfg.operatorName cfg.operatorPort 1 cfg.flarePort
+        IO.eprintln s!"# Distribution: P0={p0}, P1={p1}, total={p0 + p1}"
+        if p0 > 0 && p1 > 0 && p0 + p1 == totalKeys then return .pass
+        else return .fail s!"P0={p0}, P1={p1}, total={p0 + p1} (expected both > 0, total = {totalKeys})" },
+
+    -- Test 4: patch CRD partitions 2→3
     { name := "patch partitions 2→3"
       run := do
         let patchJson := "{\"spec\":{\"partitions\":3}}"
@@ -58,12 +76,11 @@ def suite : TestSuite := {
         | .ok _ => return .pass
         | .error e => return .fail s!"patch failed: {e}" },
 
-    -- Test 4: scale StatefulSet pods
+    -- Test 5: scale StatefulSet pods
     { name := "scale pods to 6 (3 partitions × 2 replicas)"
       run := do
         match ← kubectlScale "statefulset" s!"{cfg.name}-nodes" cfg.«namespace» 6 with
         | .ok _ =>
-          -- Create partition-2 service
           let svcYaml := partitionServiceYaml { cfg with partitions := 3 } 2
           try
             let result ← IO.Process.output {
@@ -78,19 +95,17 @@ def suite : TestSuite := {
           else return .fail "rollout timeout"
         | .error e => return .fail s!"scale failed: {e}" },
 
-    -- Test 5: wait for new nodes to register
+    -- Test 6: wait for new nodes to register
     { name := "new nodes registered with operator"
       run := do
-        -- Wait for grace period + registration
-        IO.sleep 60000
-        let ok ← waitForCondition "6 nodes registered" 120 do
+        let ok ← waitForCondition "6 nodes registered" 180 do
           let sync ← operatorTcpCmd cfg.debugPod cfg.«namespace» cfg.operatorName cfg.operatorPort "node sync"
           let entries := parseNodeSync sync
           return (entries.length >= 6)
         if ok then return .pass
         else return .fail "not all 6 nodes registered" },
 
-    -- Test 6: verify P2 has master and slave
+    -- Test 7: verify P2 has master and slave
     { name := "P2 has master and slave"
       run := do
         let sync ← operatorTcpCmd cfg.debugPod cfg.«namespace» cfg.operatorName cfg.operatorPort "node sync"
@@ -100,19 +115,18 @@ def suite : TestSuite := {
         match p2Master with
         | none => return .fail "no master for P2"
         | some _ =>
-          if p2Slaves.isEmpty then
-            return .fail "no slave for P2"
-          else
-            return .pass },
+          if p2Slaves.isEmpty then return .fail "no slave for P2"
+          else return .pass },
 
-    -- Test 7: all 3 partitions have masters
-    { name := "all 3 partitions have masters"
+    -- Test 8: original partition items preserved after scale-out
+    { name := "P0 and P1 curr_items preserved after scale-out"
       run := do
-        let sync ← operatorTcpCmd cfg.debugPod cfg.«namespace» cfg.operatorName cfg.operatorPort "node sync"
-        let entries := parseNodeSync sync
-        let masters := countMasters entries
-        if masters >= 3 then return .pass
-        else return .fail s!"only {masters}/3 masters" }
+        let p0 ← getPartitionMasterItems cfg.debugPod cfg.«namespace» cfg.operatorName cfg.operatorPort 0 cfg.flarePort
+        let p1 ← getPartitionMasterItems cfg.debugPod cfg.«namespace» cfg.operatorName cfg.operatorPort 1 cfg.flarePort
+        let p2 ← getPartitionMasterItems cfg.debugPod cfg.«namespace» cfg.operatorName cfg.operatorPort 2 cfg.flarePort
+        IO.eprintln s!"# After scale-out: P0={p0}, P1={p1}, P2={p2}"
+        if p0 > 0 && p1 > 0 then return .pass
+        else return .fail s!"P0={p0}, P1={p1} (items lost during scale-out)" }
   ]
 }
 

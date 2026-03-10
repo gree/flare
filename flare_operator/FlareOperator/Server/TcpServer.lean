@@ -129,13 +129,12 @@ def handleConnection (sock : Socket) (state : ServerState) : IO Unit := do
     | some line =>
       -- Parse: pure (String → FlareEvent)
       let event := parseFlareCommand line
-      -- Read shared state
+      -- Atomic read-modify-write: modifyGet uses Ref.take (destructive read)
+      -- to prevent lost updates from concurrent handlers
       let crd ← state.crdSpec.get
-      let cs ← state.clusterState.get
-      -- Transition: pure (FlareClusterState → FlareClusterView → FlareEvent → ...)
-      let (newState, response) := reconcileStep cs crd event
-      -- Write back
-      state.clusterState.set newState
+      let (newState, response) ← state.clusterState.modifyGet fun cs =>
+        let (newState, resp) := reconcileStep cs crd event
+        ((newState, resp), newState)
       -- Trace logging
       match event with
       | .NodeAdd serverName serverPort =>

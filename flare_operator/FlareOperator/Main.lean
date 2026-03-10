@@ -38,23 +38,43 @@ open FlareOperator.Server
 -- CLI Argument Parsing
 -- ===========================================================================
 
-/-- Parse CLI arguments. Returns (namespace, port, reconcileInterval). -/
-private def parseArgs (args : List String) : String × UInt16 × Nat :=
-  let rec go (args : List String) (ns : String) (port : UInt16) (interval : Nat) :
-      String × UInt16 × Nat :=
+/-- Parse CLI arguments. Returns (namespace, port, reconcileInterval, clusterName). -/
+private def parseArgs (args : List String) : String × UInt16 × Nat × Option String :=
+  let rec go (args : List String) (ns : String) (port : UInt16) (interval : Nat)
+      (clusterName : Option String) : String × UInt16 × Nat × Option String :=
     match args with
-    | [] => (ns, port, interval)
-    | "--namespace" :: v :: rest => go rest v port interval
+    | [] => (ns, port, interval, clusterName)
+    | "--namespace" :: v :: rest => go rest v port interval clusterName
     | "--port" :: v :: rest =>
       match v.toNat? with
-      | some p => go rest ns p.toUInt16 interval
-      | none => go rest ns port interval
+      | some p => go rest ns p.toUInt16 interval clusterName
+      | none => go rest ns port interval clusterName
     | "--reconcile-interval" :: v :: rest =>
       match v.toNat? with
-      | some i => go rest ns port i
-      | none => go rest ns port interval
-    | _ :: rest => go rest ns port interval
-  go args "default" 12120 5
+      | some i => go rest ns port i clusterName
+      | none => go rest ns port interval clusterName
+    | "--cluster-name" :: v :: rest => go rest ns port interval (some v)
+    | _ :: rest => go rest ns port interval clusterName
+  go args "default" 12120 5 none
+
+-- ===========================================================================
+-- String helpers
+-- ===========================================================================
+
+/-- Check if needle is a substring of haystack. -/
+private def containsSubstr (haystack needle : String) : Bool :=
+  let hLen := haystack.length
+  let nLen := needle.length
+  if nLen > hLen then false
+  else
+    let rec go (i : Nat) (fuel : Nat) : Bool :=
+      match fuel with
+      | 0 => false
+      | fuel + 1 =>
+        if i + nLen > hLen then false
+        else if (haystack.drop i).startsWith needle then true
+        else go (i + 1) fuel
+    go 0 (hLen + 1)
 
 -- ===========================================================================
 -- Dead Node Detection (pure)
@@ -163,6 +183,72 @@ private def detectAndRestartLaggingPods (state : FlareClusterState) (pods : List
         | .ok () => pure ()
 
 -- ===========================================================================
+-- Cluster Replication (Blue/Green Migration)
+-- ===========================================================================
+
+/-- Handle cluster replication state machine.
+    Manages the duplicate → forward mode transition autonomously. -/
+private def handleClusterReplication
+    (crd : FlareClusterView) (pods : List PodInfo)
+    (migrationRef : IO.Ref MigrationPhase) (crName ns : String) : IO Unit := do
+  let repl := crd.spec.clusterReplication
+  if !repl.enabled then
+    -- If replication was active but now disabled, clear config and reset
+    let phase ← migrationRef.get
+    if phase != .None then
+      migrationRef.set .None
+      match ← patchFlareClusterStatus crName ns .None with
+      | .error e => IO.eprintln s!"[flare-operator] warning: failed to reset migrationPhase: {e}"
+      | .ok () => pure ()
+      IO.eprintln s!"[flare-operator] cluster replication disabled, reset to None"
+    return
+
+  let phase ← migrationRef.get
+  match phase with
+  | .None =>
+    -- Start replication: write config with mode=duplicate, SIGHUP, set Dumping
+    match ← updateFlaredReplicationConfig crName ns repl with
+    | .error e =>
+      IO.eprintln s!"[flare-operator] warning: failed to write replication config: {e}"
+      return
+    | .ok () => pure ()
+    sendSighupToPods crName ns
+    migrationRef.set .Dumping
+    match ← patchFlareClusterStatus crName ns .Dumping with
+    | .error e => IO.eprintln s!"[flare-operator] warning: failed to patch status: {e}"
+    | .ok () => pure ()
+    IO.eprintln s!"[flare-operator] cluster replication started (mode=duplicate)"
+
+  | .Dumping =>
+    -- Monitor: query master pods for dump_replication thread status
+    let masters := pods.filter fun p => p.ready
+    let mut dumpRunning := false
+    for pod in masters do
+      match ← queryPodStats pod.name ns "stats threads" with
+      | .error _ => dumpRunning := true  -- assume still running on error
+      | .ok output =>
+        if containsSubstr output "dump_replication" then
+          dumpRunning := true
+    if !dumpRunning then
+      -- Dump complete → transition to forward mode
+      let forwardRepl := { repl with mode := "forward" }
+      match ← updateFlaredReplicationConfig crName ns forwardRepl with
+      | .error e =>
+        IO.eprintln s!"[flare-operator] warning: failed to update replication config to forward: {e}"
+        return
+      | .ok () => pure ()
+      sendSighupToPods crName ns
+      migrationRef.set .Forwarding
+      match ← patchFlareClusterStatus crName ns .Forwarding with
+      | .error e => IO.eprintln s!"[flare-operator] warning: failed to patch status: {e}"
+      | .ok () => pure ()
+      IO.eprintln s!"[flare-operator] dump complete, transitioned to forward mode"
+
+  | .Forwarding =>
+    -- Steady state: forward mode active, nothing to do
+    pure ()
+
+-- ===========================================================================
 -- Main Reconcile Loop
 -- ===========================================================================
 
@@ -170,7 +256,7 @@ private def detectAndRestartLaggingPods (state : FlareClusterState) (pods : List
     Implements the K8s reconcile pattern:
     fetch CRD → list pods → detect dead → failover → route services → update ConfigMap -/
 private def reconcileOnce (stateRef : IO.Ref FlareClusterState) (crdRef : IO.Ref FlareClusterView)
-    (crName ns : String) : IO Unit := do
+    (migrationRef : IO.Ref MigrationPhase) (crName ns : String) : IO Unit := do
   -- 1. Fetch latest CRD spec
   match ← getFlareClusterCRD crName ns with
   | .error e =>
@@ -207,28 +293,91 @@ private def reconcileOnce (stateRef : IO.Ref FlareClusterState) (crdRef : IO.Ref
   -- 7. Detect and restart lagging/zombie pods
   detectAndRestartLaggingPods currentState pods ns
 
+  -- 8. Handle cluster replication migration
+  let crd ← crdRef.get
+  handleClusterReplication crd pods migrationRef crName ns
+
+-- ===========================================================================
+-- Leader Election Helpers
+-- ===========================================================================
+
+private def leaseDurationSeconds : Nat := 15
+
+private def getHostname : IO String := do
+  let result ← IO.Process.output { cmd := "hostname", args := #[] }
+  return result.stdout.trim
+
+/-- Try to acquire or renew the leader lease.
+    Returns true if this instance is (or became) the leader. -/
+private def tryAcquireOrRenew (leaseName ns identity : String) : IO Bool := do
+  match ← getLease leaseName ns with
+  | .error _ =>
+    -- Lease not found or transient error. Try to create.
+    match ← createLease leaseName ns identity leaseDurationSeconds with
+    | .ok () => return true
+    | .error _ => return false
+  | .ok lease =>
+    if lease.holderIdentity == identity then
+      -- We hold it, renew
+      match ← renewLease leaseName ns identity with
+      | .ok () => return true
+      | .error _ => return false
+    else if lease.expired then
+      -- Expired, try to take over
+      match ← acquireLease leaseName ns identity lease.holderIdentity leaseDurationSeconds with
+      | .ok () => return true
+      | .error _ => return false
+    else
+      return false  -- another pod holds a valid lease
+
 -- ===========================================================================
 -- Entry Point
 -- ===========================================================================
 
-/-- Main entry point. -/
+/-- Main entry point. Two-phase leader election:
+    Phase 1 (follower): Try to acquire the lease, completely passive.
+    Phase 2 (leader): Run TCP server + reconcile loop, renew lease each iteration. -/
 def main (args : List String) : IO Unit := do
-  let (ns, port, interval) := parseArgs args
+  let (ns, port, interval, clusterNameArg) := parseArgs args
+  let identity ← getHostname
 
-  IO.eprintln s!"[flare-operator] starting (namespace={ns}, port={port}, interval={interval}s)"
+  IO.eprintln s!"[flare-operator] starting (namespace={ns}, port={port}, interval={interval}s, identity={identity})"
 
-  -- Discover FlareCluster CRs
+  -- Discover FlareCluster CRs (or use --cluster-name if provided)
   let crName ← do
-    match ← listFlareClusters ns with
-    | .error e =>
-      IO.eprintln s!"[flare-operator] warning: could not list FlareClusters: {e}"
-      pure "flare"
-    | .ok [] =>
-      IO.eprintln s!"[flare-operator] no FlareCluster CR found, using default name 'flare'"
-      pure "flare"
-    | .ok ((name, _) :: _) =>
-      IO.eprintln s!"[flare-operator] managing FlareCluster '{name}'"
+    match clusterNameArg with
+    | some name =>
+      IO.eprintln s!"[flare-operator] managing FlareCluster '{name}' (from --cluster-name)"
       pure name
+    | none =>
+      match ← listFlareClusters ns with
+      | .error e =>
+        IO.eprintln s!"[flare-operator] warning: could not list FlareClusters: {e}"
+        pure "flare"
+      | .ok [] =>
+        IO.eprintln s!"[flare-operator] no FlareCluster CR found, using default name 'flare'"
+        pure "flare"
+      | .ok ((name, _) :: _) =>
+        IO.eprintln s!"[flare-operator] managing FlareCluster '{name}'"
+        pure name
+
+  let leaseName := s!"{crName}-operator-lease"
+
+  -- ═══════════════════════════════════════════════════════════════════════
+  -- PHASE 1: Follower loop — try to become leader
+  -- ═══════════════════════════════════════════════════════════════════════
+  IO.eprintln s!"[flare-operator] phase 1: attempting to acquire lease '{leaseName}'"
+  let mut isLeader := false
+  while !isLeader do
+    isLeader ← tryAcquireOrRenew leaseName ns identity
+    if !isLeader then
+      IO.sleep (interval * 1000).toUInt32
+
+  IO.eprintln s!"[flare-operator] phase 2: acquired lease, entering leader mode"
+
+  -- ═══════════════════════════════════════════════════════════════════════
+  -- PHASE 2: Leader mode — run TCP server + reconcile loop
+  -- ═══════════════════════════════════════════════════════════════════════
 
   -- Initialize shared state
   let stateRef ← IO.mkRef FlareClusterState.default
@@ -247,6 +396,7 @@ def main (args : List String) : IO Unit := do
     metadata := { name := some crName, «namespace» := some ns }
     spec := { partitions := 1, replicas := 1 }
   } : FlareClusterView)
+  let migrationRef ← IO.mkRef MigrationPhase.None
 
   -- Start TCP server in background (using Server.TcpServer)
   let _ ← IO.asTask (prio := .default) do
@@ -255,10 +405,16 @@ def main (args : List String) : IO Unit := do
     catch e =>
       IO.eprintln s!"[flare-operator] TCP server error: {e}"
 
-  -- Reconcile loop (foreground)
+  -- Reconcile loop with lease renewal
   while true do
+    -- Renew lease each iteration
+    let renewed ← tryAcquireOrRenew leaseName ns identity
+    if !renewed then
+      IO.eprintln s!"[flare-operator] LOST LEASE -- exiting"
+      throw (IO.userError "lease lost")
+
     try
-      reconcileOnce stateRef crdRef crName ns
+      reconcileOnce stateRef crdRef migrationRef crName ns
     catch e =>
       IO.eprintln s!"[flare-operator] reconcile error: {e}"
     IO.sleep (interval * 1000).toUInt32

@@ -17,6 +17,10 @@ rules:
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "watch", "delete"]
+  # Pods/exec (exec into pods for replication control)
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
   # Services (patch selectors for routing)
   - apiGroups: [""]
     resources: ["services"]
@@ -29,6 +33,10 @@ rules:
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["create", "patch"]
+  # Leases (leader election)
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

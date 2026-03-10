@@ -32,9 +32,19 @@ spec:
                     enabled:
                       type: boolean
                       default: false
-                    peerCluster:
+                    serverName:
                       type: string
-                      description: Name of the peer FlareCluster for blue/green replication
+                      description: Destination cluster service FQDN
+                    port:
+                      type: integer
+                      description: Destination flared port
+                    mode:
+                      type: string
+                      enum: [duplicate, forward]
+                      default: duplicate
+                    concurrency:
+                      type: integer
+                      default: 2
             status:
               type: object
               properties:
@@ -47,6 +57,9 @@ spec:
                   type: integer
                 totalNodes:
                   type: integer
+                migrationPhase:
+                  type: string
+                  enum: [None, Dumping, Forwarding]
       subresources:
         status: {}
       additionalPrinterColumns:
@@ -62,6 +75,9 @@ spec:
         - name: Ready
           type: integer
           jsonPath: .status.readyNodes
+        - name: Migration
+          type: string
+          jsonPath: .status.migrationPhase
         - name: Age
           type: date
           jsonPath: .metadata.creationTimestamp

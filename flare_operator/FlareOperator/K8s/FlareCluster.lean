@@ -60,11 +60,31 @@ structure FlareNode where
   threadType : Nat := 16
   deriving Repr, BEq
 
+/-! ## Cluster Replication (Blue/Green Migration) -/
+
+structure ClusterReplicationSpec where
+  enabled : Bool := false
+  serverName : String := ""
+  port : Nat := 12121
+  mode : String := "duplicate"  -- "duplicate" or "forward"
+  concurrency : Nat := 2
+  deriving Repr, BEq
+
+inductive MigrationPhase where
+  | None | Dumping | Forwarding
+  deriving Repr, BEq
+
+def MigrationPhase.toString : MigrationPhase → String
+  | .None => "None"
+  | .Dumping => "Dumping"
+  | .Forwarding => "Forwarding"
+
 /-! ## Flare Cluster CRD Spec -/
 
 structure FlareClusterSpecView where
   partitions : Nat := 1
   replicas : Nat := 1  -- 1 Master + (N-1) Slaves per partition
+  clusterReplication : ClusterReplicationSpec := {}
   deriving Repr
 
 structure FlareClusterView where

@@ -36,6 +36,34 @@ private def extractJsonNat (json : String) (key : String) : Option Nat :=
     let digits := trimmed.takeWhile Char.isDigit
     digits.toNat?
 
+/-- Extract a string value from a JSON-like string for a given key. -/
+private def extractJsonString (json : String) (key : String) : Option String :=
+  let needle := "\"" ++ key ++ "\":"
+  match findSubstring json needle with
+  | none => none
+  | some pos =>
+    let afterKey := json.drop (pos + needle.length)
+    let trimmed := afterKey.trim
+    -- Expect a quoted string
+    if trimmed.startsWith "\"" then
+      let rest := trimmed.drop 1
+      let value := rest.takeWhile (· != '"')
+      some value
+    else
+      none
+
+/-- Extract a boolean value from a JSON-like string for a given key. -/
+private def extractJsonBool (json : String) (key : String) : Option Bool :=
+  let needle := "\"" ++ key ++ "\":"
+  match findSubstring json needle with
+  | none => none
+  | some pos =>
+    let afterKey := json.drop (pos + needle.length)
+    let trimmed := afterKey.trim
+    if trimmed.startsWith "true" then some true
+    else if trimmed.startsWith "false" then some false
+    else none
+
 /-- Run kubectl with given arguments and return stdout or error. -/
 def kubectl (args : List String) : IO (Except String String) := do
   try
@@ -55,9 +83,16 @@ def getFlareCluster (name ns : String) : IO (Except String FlareClusterView) := 
   | .ok output =>
     let partitions := extractJsonNat output "partitions" |>.getD 1
     let replicas := extractJsonNat output "replicas" |>.getD 1
+    let repl : ClusterReplicationSpec := {
+      enabled := extractJsonBool output "enabled" |>.getD false
+      serverName := extractJsonString output "serverName" |>.getD ""
+      port := extractJsonNat output "port" |>.getD 12121
+      mode := extractJsonString output "mode" |>.getD "duplicate"
+      concurrency := extractJsonNat output "concurrency" |>.getD 2
+    }
     return .ok {
       metadata := { name := some name, «namespace» := some ns }
-      spec := { partitions := partitions, replicas := replicas }
+      spec := { partitions := partitions, replicas := replicas, clusterReplication := repl }
     }
 
 /-- List flared pods matching a label selector. Returns (podName, podIP, port). -/

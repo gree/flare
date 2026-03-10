@@ -138,6 +138,62 @@ def updateFlaredConfigMap (cmName ns : String) (nodeMapData : String) : IO (Exce
     return .error s!"configmap update error: {e}"
 
 -- ===========================================================================
+-- Cluster Replication Bridge Functions
+-- ===========================================================================
+
+/-- Run a command inside a pod via kubectl exec. -/
+def execInPod (podName ns : String) (cmd : List String) : IO (Except String String) := do
+  kubectl (["exec", podName, "-n", ns, "--"] ++ cmd)
+
+/-- Send SIGHUP to all pods in a cluster to trigger config reload. -/
+def sendSighupToPods (crName ns : String) : IO Unit := do
+  let pods ← listFlaredPods crName ns
+  for pod in pods do
+    match ← execInPod pod.name ns ["kill", "-HUP", "1"] with
+    | .error e =>
+      IO.eprintln s!"[flare-operator] warning: SIGHUP to {pod.name} failed: {e}"
+    | .ok _ => pure ()
+
+/-- Update (or create) a ConfigMap with cluster replication config.
+    ConfigMap name: {crName}-config, data key: "extra.conf" -/
+def updateFlaredReplicationConfig (crName ns : String) (repl : ClusterReplicationSpec)
+    : IO (Except String Unit) := do
+  let cmName := s!"{crName}-config"
+  let content := String.intercalate "\n" [
+    s!"cluster-replication = true",
+    s!"cluster-replication-server-name = {repl.serverName}",
+    s!"cluster-replication-server-port = {repl.port}",
+    s!"cluster-replication-mode = {repl.mode}",
+    s!"cluster-replication-concurrency = {repl.concurrency}"
+  ]
+  try
+    let result ← IO.Process.output {
+      cmd := "sh"
+      args := #["-c",
+        s!"kubectl create configmap {cmName} -n {ns} --from-literal='extra.conf={content}' -o yaml --dry-run=client | kubectl apply -f -"]
+    }
+    if result.exitCode == 0 then
+      return .ok ()
+    else
+      return .error s!"replication configmap update failed (exit {result.exitCode}): {result.stderr}"
+  catch e =>
+    return .error s!"replication configmap update error: {e}"
+
+/-- Update CRD status.migrationPhase via kubectl patch. -/
+def patchFlareClusterStatus (crName ns : String) (phase : MigrationPhase)
+    : IO (Except String Unit) := do
+  let patch := s!"\{\"status\":\{\"migrationPhase\":\"{phase.toString}\"}}"
+  let result ← kubectl ["patch", "flarecluster", crName, "-n", ns,
+    "--subresource=status", "--type=merge", "-p", patch]
+  match result with
+  | .error e => return .error e
+  | .ok _ => return .ok ()
+
+/-- Query flared stats via kubectl exec and nc. -/
+def queryPodStats (podName ns : String) (statsCmd : String) : IO (Except String String) :=
+  execInPod podName ns ["sh", "-c", s!"printf '{statsCmd}\\r\\n' | nc localhost 12121"]
+
+-- ===========================================================================
 -- Convenience: extract live node keys from PodInfo list
 -- ===========================================================================
 
@@ -149,5 +205,84 @@ def liveNodeKeys (pods : List PodInfo) : List String :=
     kubectl get configmap <name> -n <ns> -o jsonpath='{.data.nodeMap}' -/
 def readFlaredConfigMap (cmName ns : String) : IO (Except String String) :=
   kubectl ["get", "configmap", cmName, "-n", ns, "-o", "jsonpath={.data.nodeMap}"]
+
+-- ===========================================================================
+-- Lease API Functions (leader election)
+-- ===========================================================================
+
+/-- Lease information returned from K8s API. -/
+structure LeaseInfo where
+  holderIdentity : String
+  leaseDurationSeconds : Nat
+  expired : Bool
+  deriving Repr, BEq
+
+/-- Get lease info including expiry check.
+    Uses shell date arithmetic to determine if the lease has expired. -/
+def getLease (leaseName ns : String) : IO (Except String LeaseInfo) := do
+  try
+    let result ← IO.Process.output {
+      cmd := "sh"
+      args := #["-c",
+        s!"HOLDER=$(kubectl get lease {leaseName} -n {ns} -o jsonpath='\{.spec.holderIdentity}') && DUR=$(kubectl get lease {leaseName} -n {ns} -o jsonpath='\{.spec.leaseDurationSeconds}') && RENEW=$(kubectl get lease {leaseName} -n {ns} -o jsonpath='\{.spec.renewTime}') && RENEW_EPOCH=$(date -d \"$RENEW\" +%s 2>/dev/null || echo 0) && NOW_EPOCH=$(date -u +%s) && if [ $((NOW_EPOCH - RENEW_EPOCH)) -ge \"$DUR\" ]; then EXP=true; else EXP=false; fi && echo \"$HOLDER|$DUR|$EXP\""]
+    }
+    if result.exitCode != 0 then
+      return .error s!"getLease failed (exit {result.exitCode}): {result.stderr}"
+    let parts := result.stdout.trim.splitOn "|"
+    match parts with
+    | [holder, durStr, expStr] =>
+      let dur := durStr.trim.toNat?.getD 15
+      let expired := expStr.trim == "true"
+      return .ok { holderIdentity := holder.trim, leaseDurationSeconds := dur, expired := expired }
+    | _ => return .error s!"unexpected getLease output: {result.stdout}"
+  catch e =>
+    return .error s!"getLease error: {e}"
+
+/-- Create a new lease atomically. Fails with error if lease already exists.
+    Uses kubectl create (NOT apply) for atomic create-or-fail semantics. -/
+def createLease (leaseName ns identity : String) (durationSec : Nat) : IO (Except String Unit) := do
+  try
+    let nowResult ← IO.Process.output { cmd := "date", args := #["-u", "+%Y-%m-%dT%H:%M:%SZ"] }
+    let now := nowResult.stdout.trim
+    let result ← IO.Process.output {
+      cmd := "sh"
+      args := #["-c",
+        s!"echo 'apiVersion: coordination.k8s.io/v1\nkind: Lease\nmetadata:\n  name: {leaseName}\n  namespace: {ns}\nspec:\n  holderIdentity: {identity}\n  leaseDurationSeconds: {durationSec}\n  acquireTime: \"{now}\"\n  renewTime: \"{now}\"' | kubectl create -f -"]
+    }
+    if result.exitCode == 0 then
+      return .ok ()
+    else
+      return .error s!"createLease failed (exit {result.exitCode}): {result.stderr}"
+  catch e =>
+    return .error s!"createLease error: {e}"
+
+/-- Renew lease using JSON Patch with test-and-set semantics.
+    The test op rejects the patch if holderIdentity changed (CAS). -/
+def renewLease (leaseName ns identity : String) : IO (Except String Unit) := do
+  try
+    let nowResult ← IO.Process.output { cmd := "date", args := #["-u", "+%Y-%m-%dT%H:%M:%SZ"] }
+    let now := nowResult.stdout.trim
+    let patch := s!"[\{\"op\":\"test\",\"path\":\"/spec/holderIdentity\",\"value\":\"{identity}\"},\{\"op\":\"replace\",\"path\":\"/spec/renewTime\",\"value\":\"{now}\"}]"
+    let result ← kubectl ["patch", "lease", leaseName, "-n", ns, "--type=json", "-p", patch]
+    match result with
+    | .error e => return .error e
+    | .ok _ => return .ok ()
+  catch e =>
+    return .error s!"renewLease error: {e}"
+
+/-- Acquire an expired lease using JSON Patch with test-and-set.
+    Tests that holderIdentity matches oldIdentity to prevent race conditions. -/
+def acquireLease (leaseName ns newIdentity oldIdentity : String) (durationSec : Nat)
+    : IO (Except String Unit) := do
+  try
+    let nowResult ← IO.Process.output { cmd := "date", args := #["-u", "+%Y-%m-%dT%H:%M:%SZ"] }
+    let now := nowResult.stdout.trim
+    let patch := s!"[\{\"op\":\"test\",\"path\":\"/spec/holderIdentity\",\"value\":\"{oldIdentity}\"},\{\"op\":\"replace\",\"path\":\"/spec/holderIdentity\",\"value\":\"{newIdentity}\"},\{\"op\":\"replace\",\"path\":\"/spec/renewTime\",\"value\":\"{now}\"},\{\"op\":\"replace\",\"path\":\"/spec/acquireTime\",\"value\":\"{now}\"},\{\"op\":\"replace\",\"path\":\"/spec/leaseDurationSeconds\",\"value\":{durationSec}}]"
+    let result ← kubectl ["patch", "lease", leaseName, "-n", ns, "--type=json", "-p", patch]
+    match result with
+    | .error e => return .error e
+    | .ok _ => return .ok ()
+  catch e =>
+    return .error s!"acquireLease error: {e}"
 
 end FlareOperator.K8s.Bridge

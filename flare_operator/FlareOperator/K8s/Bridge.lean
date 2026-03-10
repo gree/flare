@@ -242,7 +242,7 @@ def getLease (leaseName ns : String) : IO (Except String LeaseInfo) := do
     Uses kubectl create (NOT apply) for atomic create-or-fail semantics. -/
 def createLease (leaseName ns identity : String) (durationSec : Nat) : IO (Except String Unit) := do
   try
-    let nowResult ← IO.Process.output { cmd := "date", args := #["-u", "+%Y-%m-%dT%H:%M:%SZ"] }
+    let nowResult ← IO.Process.output { cmd := "date", args := #["-u", "+%Y-%m-%dT%H:%M:%S.000000Z"] }
     let now := nowResult.stdout.trim
     let result ← IO.Process.output {
       cmd := "sh"
@@ -260,7 +260,7 @@ def createLease (leaseName ns identity : String) (durationSec : Nat) : IO (Excep
     The test op rejects the patch if holderIdentity changed (CAS). -/
 def renewLease (leaseName ns identity : String) : IO (Except String Unit) := do
   try
-    let nowResult ← IO.Process.output { cmd := "date", args := #["-u", "+%Y-%m-%dT%H:%M:%SZ"] }
+    let nowResult ← IO.Process.output { cmd := "date", args := #["-u", "+%Y-%m-%dT%H:%M:%S.000000Z"] }
     let now := nowResult.stdout.trim
     let patch := s!"[\{\"op\":\"test\",\"path\":\"/spec/holderIdentity\",\"value\":\"{identity}\"},\{\"op\":\"replace\",\"path\":\"/spec/renewTime\",\"value\":\"{now}\"}]"
     let result ← kubectl ["patch", "lease", leaseName, "-n", ns, "--type=json", "-p", patch]
@@ -275,7 +275,7 @@ def renewLease (leaseName ns identity : String) : IO (Except String Unit) := do
 def acquireLease (leaseName ns newIdentity oldIdentity : String) (durationSec : Nat)
     : IO (Except String Unit) := do
   try
-    let nowResult ← IO.Process.output { cmd := "date", args := #["-u", "+%Y-%m-%dT%H:%M:%SZ"] }
+    let nowResult ← IO.Process.output { cmd := "date", args := #["-u", "+%Y-%m-%dT%H:%M:%S.000000Z"] }
     let now := nowResult.stdout.trim
     let patch := s!"[\{\"op\":\"test\",\"path\":\"/spec/holderIdentity\",\"value\":\"{oldIdentity}\"},\{\"op\":\"replace\",\"path\":\"/spec/holderIdentity\",\"value\":\"{newIdentity}\"},\{\"op\":\"replace\",\"path\":\"/spec/renewTime\",\"value\":\"{now}\"},\{\"op\":\"replace\",\"path\":\"/spec/acquireTime\",\"value\":\"{now}\"},\{\"op\":\"replace\",\"path\":\"/spec/leaseDurationSeconds\",\"value\":{durationSec}}]"
     let result ← kubectl ["patch", "lease", leaseName, "-n", ns, "--type=json", "-p", patch]

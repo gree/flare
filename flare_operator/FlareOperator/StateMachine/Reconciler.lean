@@ -103,7 +103,7 @@ def autoAssign (state : FlareClusterState) (crd : FlareClusterView) (nodeKey : S
   -- Try Master first
   match findPartitionNeedingMaster state numPartitions with
   | some pIdx =>
-    let newNode := { node with role := FlareRole.Master, state := FlareState.Ready, partition := Int.ofNat pIdx }
+    let newNode := { node with role := FlareRole.Master, state := FlareState.Active, partition := Int.ofNat pIdx }
     let part := (state.lookupPartition pIdx).getD {}
     let newPart := { part with master := some nodeKey }
     let newState := (state.addNode nodeKey newNode).setPartition pIdx newPart
@@ -127,13 +127,18 @@ def autoAssign (state : FlareClusterState) (crd : FlareClusterView) (nodeKey : S
 /-- Pure reconcile step: process a FlareEvent against the current state. -/
 def reconcileStep (state : FlareClusterState) (crd : FlareClusterView)
     (event : FlareEvent) : FlareClusterState × FlareResponse :=
+  -- Ensure partitionSize always reflects CRD spec
+  let state := { state with partitionSize := crd.spec.partitions }
   match event with
   | .Ping =>
     (state, .OK)
   | .Meta =>
     (state, .End [
-      s!"META partition_size {state.partitionSize}",
-      s!"META key_hash_algorithm {state.keyHashAlgorithm}",
+      s!"META partition-size {state.partitionSize}",
+      s!"META key-hash-algorithm {state.keyHashAlgorithm}",
+      s!"META partition-type modular",
+      s!"META partition-modular-hint 1",
+      s!"META partition-modular-virtual 4096",
       s!"META node_map_version {state.nodeMapVersion}"
     ])
   | .Stats =>
@@ -205,5 +210,19 @@ private def testCrd : FlareClusterView := {
   let s0 : FlareClusterState := .default
   let (s1, resp) := reconcileStep s0 testCrd (.MutationAttempt "node role host1 1234 master 100 0")
   return (s1.nodeMapVersion == s0.nodeMapVersion, resp)
+
+-- META must report partition-size = 2 (from CRD), NOT 1024
+#eval do
+  let (_, resp) := reconcileStep .default testCrd .Meta
+  return resp
+
+-- NODE SYNC: register 4 nodes, verify partition assignment and balance
+#eval do
+  let (s1, _) := reconcileStep .default testCrd (.NodeAdd "host-a" 12121)
+  let (s2, _) := reconcileStep s1 testCrd (.NodeAdd "host-b" 12121)
+  let (s3, _) := reconcileStep s2 testCrd (.NodeAdd "host-c" 12121)
+  let (s4, resp) := reconcileStep s3 testCrd (.NodeAdd "host-d" 12121)
+  -- Print NODE SYNC to verify: partition 0,1 have masters, balance=100, partitionSize=2
+  return (s4.partitionSize, resp)
 
 end FlareOperator.Reconciler

@@ -95,32 +95,38 @@ def findPartitionNeedingSlave (state : FlareClusterState) (numPartitions : Nat) 
   findPartitionNeedingSlaveAux state numPartitions maxSlaves 0 numPartitions
 
 /-- Auto-assign a proxy node to the first partition that needs filling.
-    Returns updated state and the assigned role/partition. -/
+    Returns updated state and the assigned role/partition.
+    First clears any stale entry for this nodeKey so re-registering nodes
+    don't block their own partition from being filled. -/
 def autoAssign (state : FlareClusterState) (crd : FlareClusterView) (nodeKey : String) (node : FlareNode)
     : FlareClusterState × FlareNode :=
   let numPartitions := crd.spec.partitions
   let maxSlaves := if crd.spec.replicas > 1 then crd.spec.replicas - 1 else 0
+  -- Clear stale entry for this node before checking partition needs.
+  -- A re-registering node enters as Proxy, so the old Master/Slave entry
+  -- must not block the partition from being refilled.
+  let cleanState := state.addNode nodeKey node  -- Replace old entry with Proxy
+  let cleanState := cleanState.rebuildPartitionMap  -- Rebuild so hasMasterForPartition is accurate
   -- Try Master first
-  match findPartitionNeedingMaster state numPartitions with
+  match findPartitionNeedingMaster cleanState numPartitions with
   | some pIdx =>
     let newNode := { node with role := FlareRole.Master, state := FlareState.Active, partition := Int.ofNat pIdx }
-    let part := (state.lookupPartition pIdx).getD {}
+    let part := (cleanState.lookupPartition pIdx).getD {}
     let newPart := { part with master := some nodeKey }
-    let newState := (state.addNode nodeKey newNode).setPartition pIdx newPart
+    let newState := (cleanState.addNode nodeKey newNode).setPartition pIdx newPart
     (newState, newNode)
   | none =>
     -- Try Slave (enters Prepare state — reconstruction needed before Active)
-    match findPartitionNeedingSlave state numPartitions maxSlaves with
+    match findPartitionNeedingSlave cleanState numPartitions maxSlaves with
     | some pIdx =>
-      let newNode := { node with role := FlareRole.Slave, state := FlareState.Prepare, partition := Int.ofNat pIdx }
-      let part := (state.lookupPartition pIdx).getD {}
+      let newNode := { node with role := FlareRole.Slave, state := FlareState.Prepare, partition := Int.ofNat pIdx, balance := 0 }
+      let part := (cleanState.lookupPartition pIdx).getD {}
       let newPart := { part with slaves := part.slaves ++ [nodeKey] }
-      let newState := (state.addNode nodeKey newNode).setPartition pIdx newPart
+      let newState := (cleanState.addNode nodeKey newNode).setPartition pIdx newPart
       (newState, newNode)
     | none =>
       -- Stay as Proxy
-      let newState := state.addNode nodeKey node
-      (newState, node)
+      (cleanState, node)
 
 /-! ## Core reconcile step -/
 
@@ -149,7 +155,8 @@ def reconcileStep (state : FlareClusterState) (crd : FlareClusterView)
     (state, .CloseConnection)
   | .NodeAdd serverName serverPort =>
     let nodeKey := FlareClusterState.toNodeKey serverName serverPort
-    -- Register as Proxy initially, then auto-assign
+    -- Always register as Proxy: a restarted node has no data, so it must
+    -- re-enter as Proxy and let autoAssign decide (typically Slave).
     let newNode : FlareNode := {
       serverName := serverName
       serverPort := serverPort

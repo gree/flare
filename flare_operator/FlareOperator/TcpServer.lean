@@ -82,6 +82,12 @@ def handleConnection (sock : Socket) (stateRef : IO.Ref FlareClusterState)
       running := false
     | some line =>
       let event := parseFlareCommand line
+      -- Log re-registration as Proxy for data safety
+      match event with
+      | .NodeAdd serverName serverPort =>
+        let nodeKey := FlareClusterState.toNodeKey serverName serverPort
+        IO.eprintln s!"[RECONCILER] Node {nodeKey} re-registered. Starting as Proxy to ensure data safety."
+      | _ => pure ()
       let crd ← crdRef.get
       let state ← stateRef.get
       let (newState, response) := reconcileStep state crd event

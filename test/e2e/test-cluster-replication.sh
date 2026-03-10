@@ -204,6 +204,8 @@ EOF
 deploy_flare_statefulset() {
   local cluster="$1"
   local replicas="$2"
+  # Operator service name matches the operator deployment name pattern
+  local operator_svc="flare-operator-${cluster##flare-}"
 
   cat <<EOF | kubectl apply -f -
 apiVersion: v1
@@ -242,6 +244,7 @@ spec:
         app: flare
         cluster: ${cluster}
     spec:
+      terminationGracePeriodSeconds: 5
       containers:
         - name: flared
           image: flare-node:test
@@ -252,11 +255,14 @@ spec:
             - "--server-port"
             - "${FLARE_PORT}"
             - "--index-server-name"
-            - "${cluster}-nodes.${NAMESPACE}.svc.cluster.local"
+            - "${operator_svc}.${NAMESPACE}.svc.cluster.local"
             - "--index-server-port"
             - "12120"
             - "--config"
             - "/etc/flare/extra.conf"
+            - "--data-dir"
+            - "/tmp/flare"
+            - "--stderr"
           env:
             - name: POD_NAME
               valueFrom:
@@ -266,10 +272,19 @@ spec:
             - containerPort: ${FLARE_PORT}
               name: flare
           volumeMounts:
+            - name: data
+              mountPath: /tmp/flare
             - name: extra-config
               mountPath: /etc/flare/extra.conf
               subPath: extra.conf
+          readinessProbe:
+            tcpSocket:
+              port: ${FLARE_PORT}
+            initialDelaySeconds: 5
+            periodSeconds: 3
       volumes:
+        - name: data
+          emptyDir: {}
         - name: extra-config
           configMap:
             name: ${cluster}-config

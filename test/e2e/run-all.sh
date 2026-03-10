@@ -15,7 +15,9 @@ run_test() {
   fi
 }
 
+run_test "Failover & Data Integrity" "$SCRIPT_DIR/test-failover.sh"
 run_test "Cluster Replication" "$SCRIPT_DIR/test-cluster-replication.sh"
+run_test "Shrink Migration" "$SCRIPT_DIR/test-shrink-migration.sh"
 
 echo ""
 echo "Tests: ${TOTAL}, Failures: ${FAIL}"

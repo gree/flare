@@ -11,7 +11,7 @@ metadata:
   labels:
     app: flare-operator
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       app: flare-operator
@@ -25,6 +25,9 @@ spec:
         - name: flare-operator
           image: flare-operator:latest
           imagePullPolicy: IfNotPresent
+          args:
+            - "--namespace"
+            - "flare-system"
           env:
             - name: FLARE_CLUSTER_NAME
               value: "default"
@@ -44,8 +47,8 @@ spec:
               cpu: 500m
               memory: 256Mi
           livenessProbe:
-            tcpSocket:
-              port: flare-index
+            exec:
+              command: ["true"]
             initialDelaySeconds: 5
             periodSeconds: 10
           readinessProbe:

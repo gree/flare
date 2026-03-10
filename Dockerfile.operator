@@ -50,7 +50,7 @@ RUN curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/s
 COPY --from=builder /build/flare_operator/.lake/build/bin/flare_operator /usr/local/bin/flare_operator
 
 # Run as non-root
-RUN useradd -r -s /bin/false operator
+RUN useradd -r -g operator -s /bin/false operator
 USER operator
 
 ENTRYPOINT ["/usr/local/bin/flare_operator"]

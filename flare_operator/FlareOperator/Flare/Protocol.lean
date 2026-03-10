@@ -92,8 +92,11 @@ def serializeNodeList (nodes : List FlareNode) : String :=
 /-- Serialize META response with cluster state. -/
 def serializeMeta (cs : FlareClusterState) : String :=
   let metaLines :=
-    s!"META partition_size {cs.partitionSize}\r\n" ++
-    s!"META key_hash_algorithm {cs.keyHashAlgorithm}\r\n" ++
+    s!"META partition-size {cs.partitionSize}\r\n" ++
+    s!"META key-hash-algorithm {cs.keyHashAlgorithm}\r\n" ++
+    s!"META partition-type modular\r\n" ++
+    s!"META partition-modular-hint 1\r\n" ++
+    s!"META partition-modular-virtual 4096\r\n" ++
     s!"META node_map_version {cs.nodeMapVersion}\r\n"
   metaLines ++ "END\r\n"
 

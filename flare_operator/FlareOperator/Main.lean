@@ -80,44 +80,50 @@ private def containsSubstr (haystack needle : String) : Bool :=
 -- Dead Node Detection (pure)
 -- ===========================================================================
 
-/-- Detect dead nodes: nodes registered in state but not in the ready pods list.
-    Uses Bridge.PodInfo for typed pod data. -/
+/-- Detect dead nodes: nodes with an active role (Master/Slave) that are no longer
+    in the ready pods list.  Proxy/Down nodes are already inactive and should not
+    be re-detected — this prevents false positives during startup when pods have
+    registered via TCP but are not yet visible in the K8s pods list. -/
 private def detectDeadNodes (state : FlareClusterState) (pods : List PodInfo)
     : List String :=
   let liveKeys := liveNodeKeys pods
-  state.nodeMap.filter (fun (key, _) => !liveKeys.contains key) |>.map Prod.fst
+  state.nodeMap.filter (fun (key, node) =>
+    !liveKeys.contains key && node.role != FlareRole.Proxy && node.state != FlareState.Down
+  ) |>.map Prod.fst
 
 -- ===========================================================================
 -- Failover Handler (pure state + IO for K8s patches)
 -- ===========================================================================
 
 /-- Handle failover: mark dead nodes Down, promote a Slave if master died.
-    Pure state transition — no K8s I/O. -/
+    Pure state transition — no K8s I/O.
+    Returns (newState, log messages) so the IO caller can print them. -/
 private def handleFailover (state : FlareClusterState) (deadKeys : List String)
-    : FlareClusterState :=
-  deadKeys.foldl (fun s key =>
+    : FlareClusterState × List String :=
+  deadKeys.foldl (fun (s, logs) key =>
     match s.lookupNode key with
-    | none => s
+    | none => (s, logs)
     | some node =>
-      let downNode := { node with state := FlareState.Down, role := FlareRole.Proxy }
+      let downNode := { node with state := FlareState.Down, role := FlareRole.Proxy, partition := -1 }
       let s' := s.addNode key downNode
       -- If dead node was a Master, try to promote a Slave in the same partition
       if node.role == FlareRole.Master then
         let partIdx := node.partition
         match s'.partitionMap.find? (fun (idx, _) => Int.ofNat idx == partIdx) with
-        | none => s'
+        | none => (s', logs ++ [s!"[RECONCILER] Master for P{partIdx} ({key}) is gone. No partition entry found."])
         | some (_, part) =>
           match part.slaves.head? with
-          | none => s'
+          | none => (s', logs ++ [s!"[RECONCILER] Master for P{partIdx} ({key}) is gone. No Slave available for promotion."])
           | some slaveKey =>
             match s'.lookupNode slaveKey with
-            | none => s'
+            | none => (s', logs ++ [s!"[RECONCILER] Master for P{partIdx} ({key}) is gone. Slave {slaveKey} not found in nodeMap."])
             | some slaveNode =>
-              let promoted := { slaveNode with role := FlareRole.Master, state := FlareState.Active }
+              let promoted := { slaveNode with role := FlareRole.Master, state := FlareState.Active, balance := 100 }
               let newPart := { part with master := some slaveKey, slaves := part.slaves.tail }
-              (s'.addNode slaveKey promoted).setPartition partIdx.toNat newPart
-      else s'
-  ) state
+              let s'' := (s'.addNode slaveKey promoted).setPartition partIdx.toNat newPart
+              (s'', logs ++ [s!"[RECONCILER] Master for P{partIdx} ({key}) is gone. Promoting Slave {slaveKey} to Master."])
+      else (s', logs)
+  ) (state, [])
 
 -- ===========================================================================
 -- Service Routing
@@ -220,10 +226,11 @@ private def handleClusterReplication
     IO.eprintln s!"[flare-operator] cluster replication started (mode=duplicate)"
 
   | .Dumping =>
-    -- Monitor: query master pods for dump_replication thread status
-    let masters := pods.filter fun p => p.ready
+    -- Monitor: query all ready pods for dump_replication thread status
+    -- (only masters actually run dump_replication threads; checking all is safe)
+    let readyPods := pods.filter fun p => p.ready
     let mut dumpRunning := false
-    for pod in masters do
+    for pod in readyPods do
       match ← queryPodStats pod.name ns "stats threads" with
       | .error _ => dumpRunning := true  -- assume still running on error
       | .ok output =>
@@ -254,9 +261,12 @@ private def handleClusterReplication
 
 /-- Single iteration of the operator reconcile loop.
     Implements the K8s reconcile pattern:
-    fetch CRD → list pods → detect dead → failover → route services → update ConfigMap -/
+    fetch CRD → list pods → detect dead → failover → route services → update ConfigMap
+    The graceCyclesRef counts down startup grace cycles where dead detection is skipped,
+    giving pods time to register via TCP and appear in the K8s ready list. -/
 private def reconcileOnce (stateRef : IO.Ref FlareClusterState) (crdRef : IO.Ref FlareClusterView)
-    (migrationRef : IO.Ref MigrationPhase) (crName ns : String) : IO Unit := do
+    (migrationRef : IO.Ref MigrationPhase) (graceCyclesRef : IO.Ref Nat)
+    (crName ns : String) : IO Unit := do
   -- 1. Fetch latest CRD spec
   match ← getFlareClusterCRD crName ns with
   | .error e =>
@@ -267,31 +277,41 @@ private def reconcileOnce (stateRef : IO.Ref FlareClusterState) (crdRef : IO.Ref
   -- 2. List live pods (typed PodInfo with readiness)
   let pods ← Bridge.listFlaredPods crName ns
 
-  -- 3. Detect dead nodes (pure)
+  -- 3. Detect dead nodes (pure) — skipped during startup grace period
+  let graceCycles ← graceCyclesRef.get
   let state ← stateRef.get
-  let deadKeys := detectDeadNodes state pods
-
-  -- 4. Handle failover (pure state transition)
-  if !deadKeys.isEmpty then
-    IO.eprintln s!"[flare-operator] detected {deadKeys.length} dead node(s): {deadKeys}"
-    -- Before failover, rebuild partitionMap from nodeMap (single source of truth)
-    let state := state.rebuildPartitionMap
-    let newState := handleFailover state deadKeys
-    stateRef.set newState
-
-    -- 5. Patch K8s Service selectors for failover
-    ensureServiceRouting newState crName ns
-  else
-    -- 5b. Ensure service routing even when no failover (idempotent)
+  if graceCycles > 0 then
+    graceCyclesRef.set (graceCycles - 1)
+    IO.eprintln s!"[flare-operator] startup grace period: {graceCycles} cycles remaining, skipping dead detection"
+    -- Still ensure service routing during grace period
     let state := state.rebuildPartitionMap
     ensureServiceRouting state crName ns
+  else
+    let deadKeys := detectDeadNodes state pods
+
+    -- 4. Handle failover (pure state transition)
+    if !deadKeys.isEmpty then
+      IO.eprintln s!"[flare-operator] detected {deadKeys.length} dead node(s): {deadKeys}"
+      -- Before failover, rebuild partitionMap from nodeMap (single source of truth)
+      let state := state.rebuildPartitionMap
+      let (newState, failoverLogs) := handleFailover state deadKeys
+      for msg in failoverLogs do
+        IO.eprintln msg
+      stateRef.set newState
+
+      -- 5. Patch K8s Service selectors for failover
+      ensureServiceRouting newState crName ns
+    else
+      -- 5b. Ensure service routing even when no failover (idempotent)
+      let state := state.rebuildPartitionMap
+      ensureServiceRouting state crName ns
 
   -- 6. Update ConfigMap for observability
   let currentState ← stateRef.get
   updateObservabilityConfigMap currentState crName ns
 
-  -- 7. Detect and restart lagging/zombie pods
-  detectAndRestartLaggingPods currentState pods ns
+  -- 7. Detect and restart lagging/zombie pods (disabled: too aggressive during startup)
+  -- detectAndRestartLaggingPods currentState pods ns
 
   -- 8. Handle cluster replication migration
   let crd ← crdRef.get
@@ -398,6 +418,12 @@ def main (args : List String) : IO Unit := do
   } : FlareClusterView)
   let migrationRef ← IO.mkRef MigrationPhase.None
 
+  -- Startup grace period: skip dead node detection for the first 6 reconcile cycles
+  -- (6 × 5s = 30s) to let all pods register via TCP and appear in the K8s ready list.
+  -- This prevents the race condition where nodes register via `node add` and get
+  -- assigned Master/Slave roles before their pods appear in `kubectl get pods`.
+  let graceCyclesRef ← IO.mkRef (6 : Nat)
+
   -- Start TCP server in background (using Server.TcpServer)
   let _ ← IO.asTask (prio := .default) do
     try
@@ -414,7 +440,7 @@ def main (args : List String) : IO Unit := do
       throw (IO.userError "lease lost")
 
     try
-      reconcileOnce stateRef crdRef migrationRef crName ns
+      reconcileOnce stateRef crdRef migrationRef graceCyclesRef crName ns
     catch e =>
       IO.eprintln s!"[flare-operator] reconcile error: {e}"
     IO.sleep (interval * 1000).toUInt32

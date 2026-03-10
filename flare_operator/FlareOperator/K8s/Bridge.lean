@@ -197,9 +197,11 @@ def queryPodStats (podName ns : String) (statsCmd : String) : IO (Except String 
 -- Convenience: extract live node keys from PodInfo list
 -- ===========================================================================
 
-/-- Extract node keys (ip:port) from a list of ready pods. -/
+/-- Extract node keys from all existing pods (not just ready ones).
+    A pod that exists but isn't ready is probably restarting, not dead.
+    Dead detection should only trigger for pods that are completely gone. -/
 def liveNodeKeys (pods : List PodInfo) : List String :=
-  (pods.filter PodInfo.ready).map PodInfo.toNodeKey
+  pods.map PodInfo.toNodeKey
 
 /-- Read the nodeMap data from a ConfigMap.
     kubectl get configmap <name> -n <ns> -o jsonpath='{.data.nodeMap}' -/

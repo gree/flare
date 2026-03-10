@@ -30,12 +30,19 @@ structure PodInfo where
   name : String
   ip : String
   port : Nat
+  hostname : String := ""
+  subdomain : String := ""
+  «namespace» : String := ""
   ready : Bool := true
   deriving Repr, BEq
 
-/-- Convert a PodInfo to a node key (ip:port). -/
+/-- Convert a PodInfo to a node key matching the FQDN used by flared for registration.
+    StatefulSet pods register as <hostname>.<subdomain>.<namespace>.svc.cluster.local:<port>. -/
 def PodInfo.toNodeKey (p : PodInfo) : String :=
-  FlareClusterState.toNodeKey p.ip p.port
+  if p.hostname != "" && p.subdomain != "" && p.«namespace» != "" then
+    FlareClusterState.toNodeKey s!"{p.hostname}.{p.subdomain}.{p.«namespace»}.svc.cluster.local" p.port
+  else
+    FlareClusterState.toNodeKey p.ip p.port
 
 -- ===========================================================================
 -- Bridge Functions
@@ -53,7 +60,7 @@ def getFlareClusterCRD (crName ns : String) : IO (Except String FlareClusterView
     -o jsonpath='{range .items[*]}{.metadata.name} {.status.podIP} 12121 {.status.conditions[?(.type=="Ready")].status}{\n}{end}' -/
 def listFlaredPods (crName ns : String) : IO (List PodInfo) := do
   let result ← kubectl ["get", "pods", "-n", ns, "-l", s!"app=flare,cluster={crName}",
-                         "-o", "jsonpath={range .items[*]}{.metadata.name} {.status.podIP} 12121 {.status.conditions[?(.type==\"Ready\")].status}{\"\\n\"}{end}"]
+                         "-o", "jsonpath={range .items[*]}{.metadata.name} {.status.podIP} 12121 {.status.conditions[?(.type==\"Ready\")].status} {.spec.hostname} {.spec.subdomain}{\"\\n\"}{end}"]
   match result with
   | .error _ => return []
   | .ok output =>
@@ -61,12 +68,25 @@ def listFlaredPods (crName ns : String) : IO (List PodInfo) := do
     return lines.filterMap fun line =>
       let parts := line.splitOn " "
       match parts with
+      | [podName, ip, portStr, readyStr, hostname, subdomain] =>
+        match portStr.trim.toNat? with
+        | some port => some {
+            name := podName.trim
+            ip := ip.trim
+            port := port
+            hostname := hostname.trim
+            subdomain := subdomain.trim
+            «namespace» := ns
+            ready := readyStr.trim == "True"
+          }
+        | none => none
       | [podName, ip, portStr, readyStr] =>
         match portStr.trim.toNat? with
         | some port => some {
             name := podName.trim
             ip := ip.trim
             port := port
+            «namespace» := ns
             ready := readyStr.trim == "True"
           }
         | none => none
@@ -76,6 +96,7 @@ def listFlaredPods (crName ns : String) : IO (List PodInfo) := do
             name := podName.trim
             ip := ip.trim
             port := port
+            «namespace» := ns
             ready := true
           }
         | none => none
@@ -123,5 +144,10 @@ def updateFlaredConfigMap (cmName ns : String) (nodeMapData : String) : IO (Exce
 /-- Extract node keys (ip:port) from a list of ready pods. -/
 def liveNodeKeys (pods : List PodInfo) : List String :=
   (pods.filter PodInfo.ready).map PodInfo.toNodeKey
+
+/-- Read the nodeMap data from a ConfigMap.
+    kubectl get configmap <name> -n <ns> -o jsonpath='{.data.nodeMap}' -/
+def readFlaredConfigMap (cmName ns : String) : IO (Except String String) :=
+  kubectl ["get", "configmap", cmName, "-n", ns, "-o", "jsonpath={.data.nodeMap}"]
 
 end FlareOperator.K8s.Bridge

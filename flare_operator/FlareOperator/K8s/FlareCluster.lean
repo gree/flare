@@ -116,6 +116,56 @@ def setPartition (state : FlareClusterState) (idx : Nat) (p : FlarePartition) : 
   let filtered := state.partitionMap.filter (·.1 != idx)
   { state with partitionMap := (idx, p) :: filtered }
 
+/-- Parse a node key "host:port" into (host, port). -/
+def fromNodeKey (key : String) : Option (String × Nat) :=
+  match key.splitOn ":" with
+  | [name, portStr] => portStr.toNat?.map fun port => (name, port)
+  | _ => none
+
+private def stripPrefix (s pfx : String) : Option String :=
+  if s.startsWith pfx then some (s.drop pfx.length) else none
+
+private def parseIntStr (s : String) : Option Int :=
+  if s.startsWith "-" then
+    (s.drop 1).toNat?.map fun n => -(Int.ofNat n)
+  else
+    s.toNat?.map Int.ofNat
+
+/-- Parse a single serialized node-map line:
+    "host:port role=R state=S partition=P" → (key, FlareNode) -/
+def parseNodeMapLine (line : String) : Option (String × FlareNode) :=
+  match line.trim.splitOn " " with
+  | [key, roleStr, stateStr, partStr] => do
+    let roleVal ← stripPrefix roleStr "role=" >>= fun (s : String) => s.toNat? >>= FlareRole.fromNat
+    let stateVal ← stripPrefix stateStr "state=" >>= fun (s : String) => s.toNat? >>= FlareState.fromNat
+    let partVal ← stripPrefix partStr "partition=" >>= parseIntStr
+    let (host, port) ← fromNodeKey key
+    return (key, { serverName := host, serverPort := port, role := roleVal, state := stateVal, partition := partVal })
+  | _ => none
+
+/-- Rebuild FlareClusterState from serialized ConfigMap data. -/
+def fromNodeMapData (data : String) : FlareClusterState :=
+  let lines := data.splitOn "\n" |>.filter (· != "")
+  let nodes := lines.filterMap parseNodeMapLine
+  { FlareClusterState.default with nodeMap := nodes }
+
+/-- Rebuild partitionMap deterministically from nodeMap.
+    Scans all nodes and groups masters/slaves by partition index. -/
+def rebuildPartitionMap (state : FlareClusterState) : FlareClusterState :=
+  let partMap := state.nodeMap.foldl (fun acc entry =>
+    let (key, node) := entry
+    if node.partition < 0 then acc
+    else
+      let idx := node.partition.toNat
+      let current := acc.lookup idx |>.getD { master := none, slaves := [] }
+      let updated := match node.role with
+        | .Master => { current with master := some key }
+        | .Slave  => { current with slaves := current.slaves ++ [key] }
+        | .Proxy  => current
+      acc.filter (fun p => p.1 != idx) ++ [(idx, updated)]
+  ) ([] : List (Nat × FlarePartition))
+  { state with partitionMap := partMap }
+
 end FlareClusterState
 
 end FlareOperator.K8s

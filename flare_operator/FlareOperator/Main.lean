@@ -79,7 +79,7 @@ private def handleFailover (state : FlareClusterState) (deadKeys : List String)
     match s.lookupNode key with
     | none => s
     | some node =>
-      let downNode := { node with state := FlareState.Down }
+      let downNode := { node with state := FlareState.Down, role := FlareRole.Proxy }
       let s' := s.addNode key downNode
       -- If dead node was a Master, try to promote a Slave in the same partition
       if node.role == FlareRole.Master then
@@ -93,7 +93,7 @@ private def handleFailover (state : FlareClusterState) (deadKeys : List String)
             match s'.lookupNode slaveKey with
             | none => s'
             | some slaveNode =>
-              let promoted := { slaveNode with role := FlareRole.Master }
+              let promoted := { slaveNode with role := FlareRole.Master, state := FlareState.Active }
               let newPart := { part with master := some slaveKey, slaves := part.slaves.tail }
               (s'.addNode slaveKey promoted).setPartition partIdx.toNat newPart
       else s'
@@ -188,6 +188,8 @@ private def reconcileOnce (stateRef : IO.Ref FlareClusterState) (crdRef : IO.Ref
   -- 4. Handle failover (pure state transition)
   if !deadKeys.isEmpty then
     IO.eprintln s!"[flare-operator] detected {deadKeys.length} dead node(s): {deadKeys}"
+    -- Before failover, rebuild partitionMap from nodeMap (single source of truth)
+    let state := state.rebuildPartitionMap
     let newState := handleFailover state deadKeys
     stateRef.set newState
 
@@ -195,6 +197,7 @@ private def reconcileOnce (stateRef : IO.Ref FlareClusterState) (crdRef : IO.Ref
     ensureServiceRouting newState crName ns
   else
     -- 5b. Ensure service routing even when no failover (idempotent)
+    let state := state.rebuildPartitionMap
     ensureServiceRouting state crName ns
 
   -- 6. Update ConfigMap for observability
@@ -229,6 +232,17 @@ def main (args : List String) : IO Unit := do
 
   -- Initialize shared state
   let stateRef ← IO.mkRef FlareClusterState.default
+
+  -- Try to load persisted state from ConfigMap
+  let cmName := s!"{crName}-node-map"
+  match ← readFlaredConfigMap cmName ns with
+  | .error _ => IO.eprintln s!"[flare-operator] no persisted state found, starting fresh"
+  | .ok data =>
+    if data.trim != "" then
+      let loaded := FlareClusterState.fromNodeMapData data
+      let loaded := loaded.rebuildPartitionMap
+      stateRef.set loaded
+      IO.eprintln s!"[flare-operator] loaded {loaded.nodeMap.length} nodes from ConfigMap"
   let crdRef ← IO.mkRef ({
     metadata := { name := some crName, «namespace» := some ns }
     spec := { partitions := 1, replicas := 1 }

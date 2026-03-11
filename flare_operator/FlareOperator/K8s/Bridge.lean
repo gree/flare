@@ -145,7 +145,9 @@ def updateFlaredConfigMap (cmName ns : String) (nodeMapData : String) : IO (Exce
 def execInPod (podName ns : String) (cmd : List String) : IO (Except String String) := do
   kubectl (["exec", podName, "-n", ns, "--"] ++ cmd)
 
-/-- Send SIGHUP to all pods in a cluster to trigger config reload. -/
+/-- Send SIGHUP to all pods in a cluster to trigger config reload.
+    When flared receives SIGHUP, it re-registers with the index server (operator),
+    receiving the full updated topology via the node sync response. -/
 def sendSighupToPods (crName ns : String) : IO Unit := do
   let pods ← listFlaredPods crName ns
   for pod in pods do
@@ -189,9 +191,9 @@ def patchFlareClusterStatus (crName ns : String) (phase : MigrationPhase)
   | .error e => return .error e
   | .ok _ => return .ok ()
 
-/-- Query flared stats via kubectl exec and nc. -/
+/-- Query flared stats via kubectl exec and bash /dev/tcp. -/
 def queryPodStats (podName ns : String) (statsCmd : String) : IO (Except String String) :=
-  execInPod podName ns ["sh", "-c", s!"printf '{statsCmd}\\r\\n' | nc localhost 12121"]
+  execInPod podName ns ["bash", "-c", s!"exec 3<>/dev/tcp/localhost/12121; printf '{statsCmd}\\r\\n' >&3; timeout 3 cat <&3; exec 3>&-"]
 
 -- ===========================================================================
 -- Convenience: extract live node keys from PodInfo list

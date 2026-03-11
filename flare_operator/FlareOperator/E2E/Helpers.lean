@@ -252,4 +252,45 @@ def getPodNames (label ns : String) : IO (List String) := do
     return output.splitOn "\n" |>.map String.trim |>.filter (· != "")
   | .error _ => return []
 
+-- ===========================================================================
+-- Key writing helper
+-- ===========================================================================
+
+/-- Write N keys via a single memcached entry point (proxy routing distributes).
+    Returns the number of successfully stored keys. -/
+def writeKeys (debugPod ns targetIp : String) (port : Nat) (keyPrefix : String) (count : Nat)
+    : IO Nat := do
+  let mut stored := 0
+  for i in List.range count do
+    let ok ← memcachedSet debugPod ns targetIp port s!"{keyPrefix}_{i}" s!"val_{i}"
+    if ok then stored := stored + 1
+  return stored
+
+-- ===========================================================================
+-- Partition-aware item counting
+-- ===========================================================================
+
+/-- Get curr_items from the master of a specific partition.
+    Queries the operator for NODE SYNC, finds the master pod for the partition,
+    gets its IP, then queries memcached stats. -/
+def getPartitionMasterItems (debugPod ns operatorName : String) (operatorPort : Nat)
+    (partition : Nat) (flarePort : Nat) : IO Nat := do
+  let sync ← operatorTcpCmd debugPod ns operatorName operatorPort "node sync"
+  let entries := parseNodeSync sync
+  match findMasterPod entries partition with
+  | none => return 0
+  | some masterPod =>
+    match ← getPodIp masterPod ns with
+    | none => return 0
+    | some ip => getCurrItems debugPod ns ip flarePort
+
+/-- Get total curr_items across all pods matching a label selector. -/
+def getTotalItems (debugPod ns label : String) (flarePort : Nat) : IO Nat := do
+  let ips ← getPodIps label ns
+  let mut total := 0
+  for ip in ips do
+    let items ← getCurrItems debugPod ns ip flarePort
+    total := total + items
+  return total
+
 end FlareOperator.E2E.Helpers

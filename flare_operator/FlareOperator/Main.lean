@@ -316,7 +316,7 @@ private def reconcileOnce (stateRef : IO.Ref FlareClusterState) (crdRef : IO.Ref
   -- 7. Detect and restart lagging/zombie pods (disabled: too aggressive during startup)
   -- detectAndRestartLaggingPods currentState pods ns
 
-  -- 8. Handle cluster replication migration
+  -- 9. Handle cluster replication migration
   let crd ← crdRef.get
   handleClusterReplication crd pods migrationRef crName ns
 
@@ -415,10 +415,35 @@ def main (args : List String) : IO Unit := do
       let loaded := loaded.rebuildPartitionMap
       stateRef.set loaded
       IO.eprintln s!"[flare-operator] loaded {loaded.nodeMap.length} nodes from ConfigMap"
-  let crdRef ← IO.mkRef ({
-    metadata := { name := some crName, «namespace» := some ns }
-    spec := { partitions := 1, replicas := 1 }
-  } : FlareClusterView)
+  -- Fetch CRD BEFORE starting TCP server so META returns correct partition-size
+  -- from the very first request. Without this, flared nodes connecting early
+  -- would get partition-size=1 and operate in single-partition mode permanently.
+  let initialCrd ← do
+    match ← getFlareClusterCRD crName ns with
+    | .ok crd =>
+      IO.eprintln s!"[flare-operator] fetched CRD: partitions={crd.spec.partitions}, replicas={crd.spec.replicas}"
+      pure crd
+    | .error e =>
+      IO.eprintln s!"[flare-operator] warning: could not fetch CRD on startup: {e}, retrying..."
+      -- Retry up to 10 times with 2s delay — CRD must be available before serving META
+      let mut result : FlareClusterView := {
+        metadata := { name := some crName, «namespace» := some ns }
+        spec := { partitions := 1, replicas := 1 }
+      }
+      let mut fetched := false
+      for _ in List.range 10 do
+        IO.sleep 2000
+        match ← getFlareClusterCRD crName ns with
+        | .ok crd =>
+          IO.eprintln s!"[flare-operator] fetched CRD on retry: partitions={crd.spec.partitions}, replicas={crd.spec.replicas}"
+          result := crd
+          fetched := true
+          break
+        | .error _ => pure ()
+      if !fetched then
+        IO.eprintln s!"[flare-operator] CRITICAL: could not fetch CRD after retries, META will return wrong partition-size"
+      pure result
+  let crdRef ← IO.mkRef initialCrd
   let migrationRef ← IO.mkRef MigrationPhase.None
 
   -- Startup grace period: skip dead node detection for the first 6 reconcile cycles

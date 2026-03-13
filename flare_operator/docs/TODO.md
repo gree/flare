@@ -14,11 +14,12 @@
 - Simulation: 17-step initialization scenario (97 lines)
 - VerifiedSafety: 100% proven theorems (NO axioms, NO sorry)
 
-✅ **Production Readiness Features** (as of commit TBD)
-- Prometheus metrics: HTTP server on port 9090 (446 lines)
-- Exponential backoff retry: K8s API resilience (165 lines)
-- Health check endpoints: HTTP server on port 8080 (230+ lines)
+✅ **Production Readiness Features** (as of commit `c725f2e`)
+- Prometheus metrics: HTTP server on port 9090 (446 lines) - INTEGRATED
+- Exponential backoff retry: K8s API resilience (165 lines) - INTEGRATED
+- Health check endpoints: HTTP server on port 8080 (230+ lines) - INTEGRATED
 - All critical K8s operations now retry-protected
+- Full operator lifecycle integration complete
 
 ## Completed Items
 
@@ -44,7 +45,7 @@
 
 **Significance**: First Kubernetes operator with formal correctness proofs
 
-### ✅ Prometheus Metrics (commit `8d57bc7`)
+### ✅ Prometheus Metrics (commit `8d57bc7`, integrated `93d91cb`)
 
 **Implemented**:
 - Prometheus.lean (275 lines): Metric types, collection, and export
@@ -57,7 +58,15 @@
 - `flare_operator_topology_broadcasts_total` (counter)
 - `flare_operator_nodes_total` (gauge, by role/state)
 
-**Status**: Ready for integration into Main.lean reconcile loop
+**Integration** (commit `93d91cb`):
+- Metrics initialized on leader election
+- HTTP server auto-starts on port 9090
+- Reconcile duration tracked for each iteration
+- Dead nodes counter incremented on failover
+- Topology broadcasts tracked on version changes
+- Node counts updated after proxy assignment
+
+**Status**: ✅ Fully integrated into operator lifecycle
 
 ### ✅ Retry Logic for K8s API Calls (commit `37b37c9`)
 
@@ -76,7 +85,7 @@
 
 **Benefit**: Production stability against transient K8s API failures
 
-### ✅ Health Check Endpoints (commit TBD)
+### ✅ Health Check Endpoints (commit `75c131d`, integrated `c725f2e`)
 
 **Implemented**:
 - HealthCheck.lean (230+ lines): HTTP server on port 8080 for K8s probes
@@ -92,6 +101,16 @@
 - Leader election awareness
 - TCP server readiness tracking
 - Automatic failover support via readiness detection
+
+**Integration** (commit `c725f2e`):
+- Health status initialized on leader election
+- HTTP server auto-starts on port 8080
+- Leader status set to true when acquiring lease
+- TCP server status set to ready after startup
+- Leader status set to false on lease loss
+- Enables K8s automatic restart and traffic routing
+
+**Status**: ✅ Fully integrated into operator lifecycle
 
 **Benefit**: K8s best practice for pod lifecycle management and automatic restart
 
@@ -382,13 +401,17 @@ status:
 - ✅ Retry logic for K8s API calls (commit `37b37c9`)
   - Retry.lean (165 lines)
   - Bridge.lean integration
-- ✅ Health check endpoints (commit TBD)
+- ✅ Health check endpoints (commit `75c131d`)
   - HealthCheck.lean (230+ lines)
   - HTTP server on port 8080
+- ✅ Metrics integration into Main.lean (commit `93d91cb`)
+  - Auto-start on leader election
+  - Track all operator activity
+- ✅ Health check integration into Main.lean (commit `c725f2e`)
+  - Status tracking throughout lifecycle
+  - K8s probe support
 
 ### Short Term (1-2 weeks)
-- Integrate metrics into Main.lean (2-3 hours)
-- Integrate health checks into Main.lean (1-2 hours)
 - User guide documentation (3 days)
 
 ### Medium Term (1-2 months)

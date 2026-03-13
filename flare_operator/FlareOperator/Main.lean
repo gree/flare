@@ -27,6 +27,7 @@ import FlareOperator.Server.TcpServer
 import FlareOperator.Server.TopologyBroadcast
 import FlareOperator.Metrics.Prometheus
 import FlareOperator.Metrics.HttpServer
+import FlareOperator.Health.HealthCheck
 
 namespace FlareOperator
 
@@ -38,6 +39,7 @@ open FlareOperator.Kubectl
 open FlareOperator.Server
 open FlareOperator.Metrics.Prometheus
 open FlareOperator.Metrics.HttpServer
+open FlareOperator.Health.HealthCheck
 
 -- ===========================================================================
 -- CLI Argument Parsing
@@ -460,6 +462,15 @@ def main (args : List String) : IO Unit := do
   -- PHASE 2: Leader mode — run TCP server + reconcile loop
   -- ═══════════════════════════════════════════════════════════════════════
 
+  -- Initialize health status
+  let healthStatus ← HealthStatus.new
+  healthStatus.setLeader true  -- We just acquired the lease
+  IO.eprintln s!"[flare-operator] health status initialized (leader=true)"
+
+  -- Start health check HTTP server in background
+  startHealthServerBackground healthStatus
+  IO.eprintln s!"[flare-operator] health check server started on port 8080"
+
   -- Initialize metrics
   let metrics ← initMetrics
   IO.eprintln s!"[flare-operator] metrics initialized"
@@ -525,12 +536,17 @@ def main (args : List String) : IO Unit := do
     catch e =>
       IO.eprintln s!"[flare-operator] TCP server error: {e}"
 
+  -- Mark TCP server as ready for health checks
+  healthStatus.setTcpServerReady true
+  IO.eprintln s!"[flare-operator] TCP server marked ready for health checks"
+
   -- Reconcile loop with lease renewal
   while true do
     -- Renew lease each iteration
     let renewed ← tryAcquireOrRenew leaseName ns identity
     if !renewed then
       IO.eprintln s!"[flare-operator] LOST LEASE -- exiting"
+      healthStatus.setLeader false  -- Update health status before exit
       throw (IO.userError "lease lost")
 
     -- Time the reconcile loop

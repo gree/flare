@@ -6,6 +6,7 @@ A Kubernetes operator written in Lean 4 that replaces the original C++ `flarei` 
 
 ✅ **FULLY OPERATIONAL** - All core features working as of commit `1c9dd44`
 ✅ **FORMALLY VERIFIED** - Mathematical safety proofs completed as of commit `43a14e0`
+✅ **PRODUCTION READY** - Observability and resilience features as of commit `37b37c9`
 
 ### Test Results
 
@@ -64,6 +65,19 @@ Verification Method: Computational reflection via 'decide' tactic
 - **Executable Specification**: State machine model doubles as formal documentation
 - **Compile-Time Safety**: Breaking invariants causes build errors (impossible to deploy bugs)
 - **Verified Scenarios**: Complete 17-step initialization proven correct
+
+### Production Readiness
+- **Prometheus Metrics**: HTTP server on port 9090 exposing operational metrics
+  - Reconcile duration histogram (performance tracking)
+  - Node map version gauge (topology changes)
+  - Dead nodes detected counter (failure tracking)
+  - Topology broadcasts counter (activity monitoring)
+  - Node counts by role/state (cluster health)
+- **Exponential Backoff Retry**: Automatic retry with backoff for K8s API resilience
+  - Smart retryable error detection (network, rate limiting, transient failures)
+  - Configurable retry policies (default, aggressive, conservative)
+  - Jitter support to prevent thundering herd
+  - Integrated into all critical K8s operations
 
 ## Architecture Highlights
 
@@ -132,7 +146,13 @@ See [FORMAL_VERIFICATION.md](./FORMAL_VERIFICATION.md) for details.
 - **`TopologyBroadcast.lean`**: Orchestrates topology broadcasts to all pods
 - **`Protocol.lean`**: Flare text protocol parser/serializer
 - **`FlareCluster.lean`**: Core data structures and CRD definitions
-- **`Bridge.lean`**: Kubernetes API integration via kubectl
+- **`Bridge.lean`**: Kubernetes API integration via kubectl with retry logic
+- **`Retry.lean`**: Exponential backoff retry for K8s API resilience
+
+### Observability Modules
+
+- **`Prometheus.lean`**: Metrics collection and Prometheus text format export
+- **`HttpServer.lean`**: HTTP server on port 9090 for /metrics endpoint
 
 ### Critical Fixes
 

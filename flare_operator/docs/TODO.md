@@ -14,6 +14,11 @@
 - Simulation: 17-step initialization scenario (97 lines)
 - VerifiedSafety: 100% proven theorems (NO axioms, NO sorry)
 
+✅ **Production Readiness Features** (as of commit `37b37c9`)
+- Prometheus metrics: HTTP server on port 9090 (446 lines)
+- Exponential backoff retry: K8s API resilience (165 lines)
+- All critical K8s operations now retry-protected
+
 ## Completed Items
 
 ### ✅ Test Assertion Fix (commit `1c9dd44`)
@@ -24,7 +29,7 @@
 
 **Result**: All 11 failover tests passing
 
-### ✅ Formal Verification (commits `43a14e0`)
+### ✅ Formal Verification (commit `43a14e0`)
 
 **Implemented**:
 - Complete mathematical model of distributed system
@@ -37,6 +42,38 @@
 - Complete 17-step initialization preserves safety
 
 **Significance**: First Kubernetes operator with formal correctness proofs
+
+### ✅ Prometheus Metrics (commit `8d57bc7`)
+
+**Implemented**:
+- Prometheus.lean (275 lines): Metric types, collection, and export
+- HttpServer.lean (171 lines): HTTP/1.1 server on port 9090
+
+**Metrics Exposed**:
+- `flare_operator_reconcile_duration_seconds` (histogram)
+- `flare_operator_node_map_version` (gauge)
+- `flare_operator_dead_nodes_detected_total` (counter)
+- `flare_operator_topology_broadcasts_total` (counter)
+- `flare_operator_nodes_total` (gauge, by role/state)
+
+**Status**: Ready for integration into Main.lean reconcile loop
+
+### ✅ Retry Logic for K8s API Calls (commit `37b37c9`)
+
+**Implemented**:
+- Retry.lean (165 lines): Exponential backoff with jitter
+- Bridge.lean integration: All critical K8s operations protected
+
+**Features**:
+- 3 retry configurations (default, aggressive, conservative)
+- Smart retryable error detection
+- Exponential backoff (2.0x multiplier, 30s cap)
+- Jitter support (±25% randomness)
+
+**Protected Operations**:
+- CRD fetch, pod listing, service patching, ConfigMap updates
+
+**Benefit**: Production stability against transient K8s API failures
 
 ## Known Issues
 
@@ -328,11 +365,16 @@ status:
   - FlaredNode model (84 lines)
   - GlobalModel + Simulation (328 lines)
   - Complete safety proofs (496 lines)
+- ✅ Prometheus metrics (commit `8d57bc7`)
+  - Prometheus.lean (275 lines)
+  - HttpServer.lean (171 lines)
+- ✅ Retry logic for K8s API calls (commit `37b37c9`)
+  - Retry.lean (165 lines)
+  - Bridge.lean integration
 
 ### Short Term (1-2 weeks)
-- Add retry logic for K8s API calls (2 days)
 - Implement health checks (1 day)
-- Prometheus metrics (3 days)
+- Integrate metrics into Main.lean (2-3 hours)
 - User guide documentation (3 days)
 
 ### Medium Term (1-2 months)

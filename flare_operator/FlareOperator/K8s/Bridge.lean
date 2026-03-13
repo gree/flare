@@ -14,11 +14,13 @@
 -/
 
 import FlareOperator.K8s.FlareCluster
+import FlareOperator.K8s.Retry
 import FlareOperator.Kubectl
 
 namespace FlareOperator.K8s.Bridge
 
 open FlareOperator.K8s
+open FlareOperator.K8s.Retry
 open FlareOperator.Kubectl
 
 -- ===========================================================================
@@ -49,18 +51,21 @@ def PodInfo.toNodeKey (p : PodInfo) : String :=
 -- ===========================================================================
 
 /-- Fetch the FlareCluster CRD spec from K8s API.
-    Wraps Kubectl.getFlareCluster with error logging. -/
+    Wraps Kubectl.getFlareCluster with retry logic for resilience. -/
 def getFlareClusterCRD (crName ns : String) : IO (Except String FlareClusterView) := do
-  getFlareCluster crName ns
+  retry s!"fetch CRD {crName}" do
+    getFlareCluster crName ns
 
 /-- List flared pods matching the cluster label selector.
     Returns typed PodInfo list instead of raw tuples.
+    Uses retry logic for resilience against transient API failures.
 
     kubectl get pods -n <ns> -l app=flare,cluster=<crName>
     -o jsonpath='{range .items[*]}{.metadata.name} {.status.podIP} 12121 {.status.conditions[?(.type=="Ready")].status}{\n}{end}' -/
 def listFlaredPods (crName ns : String) : IO (List PodInfo) := do
-  let result ← kubectl ["get", "pods", "-n", ns, "-l", s!"app=flare,cluster={crName}",
-                         "-o", "jsonpath={range .items[*]}{.metadata.name} {.status.podIP} 12121 {.status.conditions[?(.type==\"Ready\")].status} {.spec.hostname} {.spec.subdomain}{\"\\n\"}{end}"]
+  let result ← retryConservative s!"list pods for {crName}" do
+    kubectl ["get", "pods", "-n", ns, "-l", s!"app=flare,cluster={crName}",
+             "-o", "jsonpath={range .items[*]}{.metadata.name} {.status.podIP} 12121 {.status.conditions[?(.type==\"Ready\")].status} {.spec.hostname} {.spec.subdomain}{\"\\n\"}{end}"]
   match result with
   | .error _ => return []
   | .ok output =>
@@ -103,10 +108,12 @@ def listFlaredPods (crName ns : String) : IO (List PodInfo) := do
       | _ => none
 
 /-- Patch a K8s Service selector to route traffic to a specific pod.
+    Uses retry logic for resilience.
 
     kubectl patch svc <svcName> -n <ns> -p '{"spec":{"selector":{"statefulset.kubernetes.io/pod-name":"<podName>"}}}' -/
 def patchClientServiceSelector (svcName ns podName : String) : IO (Except String Unit) := do
-  patchServiceSelector svcName ns podName
+  retry s!"patch service {svcName}" do
+    patchServiceSelector svcName ns podName
 
 /-- Force-delete a pod by name.
 
@@ -120,22 +127,24 @@ def deletePod (podName ns : String) : IO (Except String Unit) := do
 
 /-- Update (or create) a ConfigMap with the current node-map data.
     Used to persist the operator's view of the cluster for observability.
+    Uses retry logic for resilience.
 
     kubectl create configmap <name> -n <ns> --from-literal=nodeMap=<data> -o yaml --dry-run=client | kubectl apply -f - -/
 def updateFlaredConfigMap (cmName ns : String) (nodeMapData : String) : IO (Except String Unit) := do
-  -- Use kubectl apply with dry-run pipe pattern for idempotent create-or-update
-  try
-    let result ← IO.Process.output {
-      cmd := "sh"
-      args := #["-c",
-        s!"kubectl create configmap {cmName} -n {ns} --from-literal=nodeMap='{nodeMapData}' -o yaml --dry-run=client | kubectl apply -f -"]
-    }
-    if result.exitCode == 0 then
-      return .ok ()
-    else
-      return .error s!"configmap update failed (exit {result.exitCode}): {result.stderr}"
-  catch e =>
-    return .error s!"configmap update error: {e}"
+  retry s!"update configmap {cmName}" do
+    -- Use kubectl apply with dry-run pipe pattern for idempotent create-or-update
+    try
+      let result ← IO.Process.output {
+        cmd := "sh"
+        args := #["-c",
+          s!"kubectl create configmap {cmName} -n {ns} --from-literal=nodeMap='{nodeMapData}' -o yaml --dry-run=client | kubectl apply -f -"]
+      }
+      if result.exitCode == 0 then
+        return .ok ()
+      else
+        return .error s!"configmap update failed (exit {result.exitCode}): {result.stderr}"
+    catch e =>
+      return .error s!"configmap update error: {e}"
 
 -- ===========================================================================
 -- Cluster Replication Bridge Functions

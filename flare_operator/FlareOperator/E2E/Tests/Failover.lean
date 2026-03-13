@@ -60,11 +60,11 @@ def suite : TestSuite := {
         else
           return .pass },
 
-    -- Test 3: verify META returns correct partition-size
-    { name := "META returns partition-size 2"
+    -- Test 3: verify META returns correct partition-size (max ring size)
+    { name := "META returns partition-size 1024"
       run := do
         let resp ← operatorTcpCmd cfg.debugPod cfg.«namespace» cfg.operatorName cfg.operatorPort "meta"
-        if containsSubstr resp "partition-size 2" then return .pass
+        if containsSubstr resp "partition-size 1024" then return .pass
         else return .fail s!"META response: {resp.trim}" },
 
     -- Test 4: write 100 keys via P0 master (proxy routing distributes across partitions)

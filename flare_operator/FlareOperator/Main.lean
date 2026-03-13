@@ -272,6 +272,47 @@ private def handleClusterReplication
     pure ()
 
 -- ===========================================================================
+-- Partition Reduction Detection
+-- ===========================================================================
+
+/-- Count the number of active partitions in the cluster state.
+    Returns the highest partition index + 1 (since partitions are 0-indexed). -/
+private def countActivePartitions (state : FlareClusterState) : Nat :=
+  match state.partitionMap.map Prod.fst |>.max? with
+  | none => 0
+  | some maxIdx => maxIdx + 1
+
+/-- Detect unsafe partition reduction and warn the user.
+    Returns true if partition reduction was detected (and blocked). -/
+private def detectPartitionReduction (state : FlareClusterState) (crd : FlareClusterView)
+    (crName : String) : IO Bool := do
+  let currentPartitions := countActivePartitions state
+  let desiredPartitions := crd.spec.partitions
+
+  if desiredPartitions < currentPartitions && currentPartitions > 0 then
+    IO.eprintln ""
+    IO.eprintln "WARNING: UNSAFE PARTITION REDUCTION DETECTED"
+    IO.eprintln "============================================="
+    IO.eprintln ""
+    IO.eprintln ("CRD specifies " ++ toString desiredPartitions ++ " partitions, but cluster has " ++ toString currentPartitions ++ " partitions")
+    IO.eprintln "Reducing partitions directly will cause DATA LOSS!"
+    IO.eprintln ""
+    IO.eprintln "To safely reduce partitions, use cluster replication:"
+    IO.eprintln "1. Create new cluster with fewer partitions"
+    IO.eprintln "2. Enable cluster replication on old cluster"
+    IO.eprintln "3. Wait for data migration to complete"
+    IO.eprintln "4. Switch application to new cluster"
+    IO.eprintln "5. Delete old cluster"
+    IO.eprintln ""
+    IO.eprintln "For detailed instructions, see: docs/PARTITION_REDUCTION.md"
+    IO.eprintln ""
+    IO.eprintln ("The operator will IGNORE this partition reduction (keeping " ++ toString currentPartitions ++ " partitions)")
+    IO.eprintln ""
+    pure true
+  else
+    pure false
+
+-- ===========================================================================
 -- Proxy Assignment Helper
 -- ===========================================================================
 
@@ -306,6 +347,13 @@ private def reconcileOnce (stateRef : IO.Ref FlareClusterState) (crdRef : IO.Ref
     IO.eprintln s!"[flare-operator] warning: failed to fetch CRD: {e}"
   | .ok crd =>
     crdRef.set crd
+
+    -- 1b. Detect unsafe partition reduction
+    let state ← stateRef.get
+    let partitionReductionDetected ← detectPartitionReduction state crd crName
+    if partitionReductionDetected then
+      -- Skip this reconcile cycle to prevent unsafe partition reduction
+      return
 
   -- 2. List live pods (typed PodInfo with readiness)
   let pods ← Bridge.listFlaredPods crName ns

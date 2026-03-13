@@ -1,20 +1,18 @@
 /-
-  Server/TcpServer.lean - Native TCP server with topology broadcast
+  Server/TcpServer.lean - Native TCP server for flarei protocol
 
   Provides a TCP server on port 12120 for the flarei text protocol.
   Uses Lean 4 Std.Internal.UV.TCP Socket API with IO.asTask for
   concurrent client handling.
 
   Architecture:
-  - ServerState: encapsulates shared mutable state (IO.Ref) + active sockets
+  - ServerState: encapsulates shared mutable state (IO.Ref)
   - handleConnection: read loop calling pure reconcileStep (no K8s IO)
-  - broadcastNodeSync: push topology to all connected clients on version change
   - startServer: bind + listen + accept loop with concurrent dispatch
 
-  Topology broadcast mirrors the original flarei behavior:
-  when nodeMapVersion changes after a reconcileStep, the full NODE list
-  is pushed to ALL active sockets so every flared node updates its
-  proxy routing table immediately.
+  Topology broadcast is handled by Main.lean's reconcile loop, which
+  actively connects to each flared node's port 12121 when nodeMapVersion
+  changes (matching C++ flarei's queue_node_sync behavior).
 -/
 
 import Std.Internal.UV.TCP
@@ -44,12 +42,6 @@ structure ServerState where
   clusterState : IO.Ref FlareClusterState
   /-- CRD spec, read-only from TCP handlers (updated by reconcile loop) -/
   crdSpec : IO.Ref FlareClusterView
-  /-- Active client sockets for topology broadcast, keyed by connection ID.
-      Each handleConnection adds its socket on entry and removes it on exit.
-      When nodeMapVersion changes, the handler broadcasts to all sockets. -/
-  activeSockets : IO.Ref (List (Nat × Socket))
-  /-- Monotonically increasing connection ID counter. -/
-  nextConnId : IO.Ref Nat
 
 /-- Create a new ServerState with default values. -/
 def ServerState.new (crName ns : String) : IO ServerState := do
@@ -58,14 +50,11 @@ def ServerState.new (crName ns : String) : IO ServerState := do
     metadata := { name := some crName, «namespace» := some ns }
     spec := { partitions := 1, replicas := 1 }
   } : FlareClusterView)
-  let sockRef ← IO.mkRef ([] : List (Nat × Socket))
-  let idRef ← IO.mkRef (0 : Nat)
-  return { clusterState := stateRef, crdSpec := crdRef, activeSockets := sockRef, nextConnId := idRef }
+  return { clusterState := stateRef, crdSpec := crdRef }
 
 /-- Create a ServerState from existing refs (for backward compatibility with Main.lean). -/
-def ServerState.fromRefs (stateRef : IO.Ref FlareClusterState) (crdRef : IO.Ref FlareClusterView)
-    (sockRef : IO.Ref (List (Nat × Socket))) (idRef : IO.Ref Nat) : ServerState :=
-  { clusterState := stateRef, crdSpec := crdRef, activeSockets := sockRef, nextConnId := idRef }
+def ServerState.fromRefs (stateRef : IO.Ref FlareClusterState) (crdRef : IO.Ref FlareClusterView) : ServerState :=
+  { clusterState := stateRef, crdSpec := crdRef }
 
 -- ===========================================================================
 -- Socket I/O Helpers
@@ -124,44 +113,15 @@ private def sendResponse (sock : Socket) (response : String) : IO Unit := do
   let _ ← IO.wait promise.result!
 
 -- ===========================================================================
--- Topology Broadcast
--- ===========================================================================
-
-/-- Broadcast the full node list to all active sockets.
-    Mirrors the original flarei _broadcast(queue_node_sync): when topology
-    changes (nodeMapVersion increments), push the complete NODE list to
-    every connected flared node so it can update its proxy routing table.
-
-    Wire format (server push — no command header, just data tokens):
-      NODE <name> <port> <role> <state> <partition> <balance> <thread>\r\n
-      ...
-      END\r\n
--/
-private def broadcastNodeSync (state : ServerState) (cs : FlareClusterState) : IO Unit := do
-  let payload := serializeNodeList cs.getNodes
-  let sockets ← state.activeSockets.get
-  for (_, sock) in sockets do
-    try
-      sendResponse sock payload
-    catch _ => pure ()
-  IO.eprintln s!"[TRACE] Broadcast: pushed {cs.nodeMap.length} nodes (v{cs.nodeMapVersion}) to {sockets.length} sockets"
-
--- ===========================================================================
 -- Connection Handler
 -- ===========================================================================
 
 /-- Handle a single client connection.
     Read loop: parse command → pure reconcileStep → send response.
-    After each reconcileStep, if nodeMapVersion changed, broadcasts the
-    full topology to ALL active sockets (including this one).
+    Topology broadcast is handled by Main.lean's reconcile loop, which
+    actively pushes updates to all flared nodes' port 12121.
     No K8s I/O happens here — strict separation from kubectl bridge. -/
 def handleConnection (sock : Socket) (state : ServerState) : IO Unit := do
-  -- Assign unique ID; socket is NOT yet registered for broadcast.
-  -- It will be registered after the first NodeAdd, once the flared node
-  -- has completed its handshake (meta → node add) and can safely receive
-  -- unsolicited node sync pushes.
-  let connId ← state.nextConnId.modifyGet fun n => (n, n + 1)
-  let registeredRef ← IO.mkRef false
   let bufRef ← IO.mkRef ByteArray.empty
   let mut running := true
   while running do
@@ -170,22 +130,26 @@ def handleConnection (sock : Socket) (state : ServerState) : IO Unit := do
       running := false
     | some line =>
       -- Parse: pure (String → FlareEvent)
+      IO.eprintln s!"[DEBUG] Received command: {line.take 100}"
       let event := parseFlareCommand line
+      IO.eprintln s!"[DEBUG] Parsed to: {toString (repr event) |>.take 150}"
       -- Atomic read-modify-write: modifyGet uses Ref.take (destructive read)
       -- to prevent lost updates from concurrent handlers.
-      -- Also capture the old nodeMapVersion to detect topology changes.
       let crd ← state.crdSpec.get
-      let (oldVersion, newState, response) ← state.clusterState.modifyGet fun cs =>
+      let (newState, response) ← state.clusterState.modifyGet fun cs =>
         let (newState, resp) := reconcileStep cs crd event
-        ((cs.nodeMapVersion, newState, resp), newState)
+        ((newState, resp), newState)
       -- Trace logging + register socket after first NodeAdd
       match event with
+      | .Meta =>
+        IO.eprintln s!"[TRACE] Event: Meta | CRD partitions={crd.spec.partitions} replicas={crd.spec.replicas} | State partitionSize={newState.partitionSize} | Returning partition-size {newState.partitionSize}"
       | .NodeAdd serverName serverPort =>
         let nodeKey := FlareClusterState.toNodeKey serverName serverPort
         match newState.lookupNode nodeKey with
         | some node =>
           if node.role == FlareRole.Master then
-            IO.eprintln s!"[TRACE] Event: NodeAdd {nodeKey} | Result: Master P{node.partition} | Reason: partition needed master"
+            let stateStr := if node.state == FlareState.Active then "Active" else if node.state == FlareState.Prepare then "Prepare" else "Other"
+            IO.eprintln s!"[TRACE] Event: NodeAdd {nodeKey} | Result: Master P{node.partition} ({stateStr}) | Reason: partition needed master"
           else if node.role == FlareRole.Slave then
             IO.eprintln s!"[TRACE] Event: NodeAdd {nodeKey} | Result: Slave P{node.partition} (Prepare) | Reason: partition needed slave"
           else
@@ -203,22 +167,14 @@ def handleConnection (sock : Socket) (state : ServerState) : IO Unit := do
       | .CloseConnection =>
         running := false
       | _ =>
-        sendResponse sock (serializeResponse response)
-      -- After first NodeAdd, register this socket for future broadcasts.
-      -- The node has completed its handshake and can now receive unsolicited
-      -- node sync pushes (matching original flarei monitor connection behavior).
-      match event with
-      | .NodeAdd .. =>
-        let alreadyRegistered ← registeredRef.get
-        if !alreadyRegistered then
-          state.activeSockets.modify ((connId, sock) :: ·)
-          registeredRef.set true
-      | _ => pure ()
-      -- Broadcast topology to ALL registered sockets when nodeMapVersion changes
-      if newState.nodeMapVersion != oldVersion then
-        broadcastNodeSync state newState
-  -- Unregister this socket on exit
-  state.activeSockets.modify (·.filter (fun (id, _) => id != connId))
+        let payload := serializeResponse response
+        -- Log node list payloads to debug partition=-1 issue
+        match event with
+        | .NodeAdd .. | .NodeSync .. =>
+          let preview := payload.take 500 |>.replace "\r\n" " | "
+          IO.eprintln s!"[DEBUG] Sending response: {preview}"
+        | _ => pure ()
+        sendResponse sock payload
 
 -- ===========================================================================
 -- Server Entry Point
@@ -260,8 +216,6 @@ def startServer (port : UInt16) (state : ServerState) : IO Unit := do
 /-- Convenience: start server from raw IO.Ref (backward compatible with Main.lean). -/
 def startServerFromRefs (port : UInt16) (stateRef : IO.Ref FlareClusterState)
     (crdRef : IO.Ref FlareClusterView) : IO Unit := do
-  let sockRef ← IO.mkRef ([] : List (Nat × Socket))
-  let idRef ← IO.mkRef (0 : Nat)
-  startServer port (ServerState.fromRefs stateRef crdRef sockRef idRef)
+  startServer port (ServerState.fromRefs stateRef crdRef)
 
 end FlareOperator.Server

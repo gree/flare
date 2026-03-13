@@ -24,6 +24,7 @@ import FlareOperator.Flare.Protocol
 import FlareOperator.StateMachine.Reconciler
 import FlareOperator.Kubectl
 import FlareOperator.Server.TcpServer
+import FlareOperator.Server.TopologyBroadcast
 
 namespace FlareOperator
 
@@ -129,6 +130,13 @@ private def handleFailover (state : FlareClusterState) (deadKeys : List String)
 -- Service Routing
 -- ===========================================================================
 
+/-- Extract pod name from FQDN (e.g., "pod-0.svc.ns.cluster.local" -> "pod-0").
+    Kubernetes selector values must be ≤63 chars, so we can't use full FQDNs. -/
+private def extractPodName (fqdn : String) : String :=
+  match fqdn.splitOn "." with
+  | podName :: _ => podName
+  | [] => fqdn
+
 /-- Ensure K8s Service selectors point to the current Master for each partition. -/
 private def ensureServiceRouting (state : FlareClusterState) (crName ns : String)
     : IO Unit := do
@@ -140,7 +148,8 @@ private def ensureServiceRouting (state : FlareClusterState) (crName ns : String
       | none => pure ()
       | some masterNode =>
         let svcName := s!"{crName}-{masterNode.partition}"
-        match ← patchClientServiceSelector svcName ns masterNode.serverName with
+        let podName := extractPodName masterNode.serverName
+        match ← patchClientServiceSelector svcName ns podName with
         | .error e =>
           IO.eprintln s!"[flare-operator] warning: failed to patch service {svcName}: {e}"
         | .ok () => pure ()
@@ -257,6 +266,23 @@ private def handleClusterReplication
     pure ()
 
 -- ===========================================================================
+-- Proxy Assignment Helper
+-- ===========================================================================
+
+/-- Assign roles to any Proxy nodes.
+    This triggers the C++ state machine's role shift: when flared receives a
+    topology broadcast showing Proxy → Master/Slave, it calls _shift_node_role(),
+    spawns reconstruction thread, and sends "node state ready" upon completion. -/
+private def assignProxies (state : FlareClusterState) (crd : FlareClusterView) : FlareClusterState :=
+  -- Fold over all nodes, assigning any Proxies
+  state.nodeMap.foldl (init := state) fun currentState (nodeKey, node) =>
+    if node.role == FlareRole.Proxy then
+      let (newState, _) := autoAssign currentState crd nodeKey node
+      newState
+    else
+      currentState
+
+-- ===========================================================================
 -- Main Reconcile Loop
 -- ===========================================================================
 
@@ -281,6 +307,7 @@ private def reconcileOnce (stateRef : IO.Ref FlareClusterState) (crdRef : IO.Ref
   -- 3. Detect dead nodes (pure) — skipped during startup grace period
   let graceCycles ← graceCyclesRef.get
   let state ← stateRef.get
+  let oldVersion := state.nodeMapVersion
   if graceCycles > 0 then
     graceCyclesRef.set (graceCycles - 1)
     IO.eprintln s!"[flare-operator] startup grace period: {graceCycles} cycles remaining, skipping dead detection"
@@ -309,12 +336,30 @@ private def reconcileOnce (stateRef : IO.Ref FlareClusterState) (crdRef : IO.Ref
       let state := state.rebuildPartitionMap
       ensureServiceRouting state crName ns
 
+  -- 5c. Assign roles to any Proxy nodes (triggers role shift in flared)
+  let currentState ← stateRef.get
+  let crd ← crdRef.get
+  let stateAfterAssignment := assignProxies currentState crd
+  if stateAfterAssignment.nodeMapVersion != currentState.nodeMapVersion then
+    stateRef.set stateAfterAssignment
+    let proxyCount := currentState.nodeMap.foldl (init := 0) fun count (_, node) =>
+      if node.role == FlareRole.Proxy then count + 1 else count
+    IO.eprintln s!"[flare-operator] assigned {proxyCount} proxy node(s) to roles (v{currentState.nodeMapVersion} → v{stateAfterAssignment.nodeMapVersion})"
+
   -- 6. Update ConfigMap for observability
   let currentState ← stateRef.get
   updateObservabilityConfigMap currentState crName ns
 
   -- 7. Detect and restart lagging/zombie pods (disabled: too aggressive during startup)
   -- detectAndRestartLaggingPods currentState pods ns
+
+  -- 8. Broadcast topology if version changed since start of reconcile cycle
+  -- This catches state changes from both failover AND TCP server (node add/state transitions)
+  let finalState ← stateRef.get
+  let finalVersion := finalState.nodeMapVersion
+  if finalVersion != oldVersion then
+    IO.eprintln s!"[flare-operator] topology changed during reconcile (v{oldVersion} → v{finalVersion}), broadcasting to all pods"
+    broadcastTopologyToAllPods crName ns finalVersion finalState.getNodes
 
   -- 9. Handle cluster replication migration
   let crd ← crdRef.get

@@ -41,6 +41,16 @@ inductive FlareResponse where
 private def parseNat (s : String) : Option Nat :=
   s.toNat?
 
+/-- Parse state from string (e.g., "active", "prepare", "ready", "down") or number.
+    Matches C++ cluster::state_cast() behavior. -/
+private def parseStateString (s : String) : Option FlareState :=
+  match s.trim.toLower with
+  | "active" => some .Active
+  | "prepare" => some .Prepare
+  | "down" => some .Down
+  | "ready" => some .Ready
+  | _ => s.toNat? >>= FlareState.fromNat
+
 /-- Parse a flare protocol command line (total, pure). -/
 def parseFlareCommand (line : String) : FlareEvent :=
   let trimmed := line.trim
@@ -69,7 +79,7 @@ def parseFlareCommand (line : String) : FlareEvent :=
     | none => FlareEvent.ParseError trimmed
   | "node" :: "role" :: _ => FlareEvent.MutationAttempt trimmed
   | "node" :: "state" :: name :: portStr :: stateStr :: _ =>
-    match parseNat portStr, FlareState.fromNat (stateStr.trim.toNat?.getD 99) with
+    match parseNat portStr, parseStateString stateStr with
     | some port, some st => FlareEvent.NodeState name port st
     | _, _ => FlareEvent.ParseError trimmed
   | "node" :: "state" :: _ => FlareEvent.ParseError trimmed

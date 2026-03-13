@@ -18,6 +18,11 @@ open FlareOperator.Flare
 def hasMasterForPartition (state : FlareClusterState) (pIdx : Nat) : Bool :=
   state.nodeMap.any (fun (_, n) => decide (n.role = FlareRole.Master ∧ n.partition = Int.ofNat pIdx))
 
+/-- Check if partition 0 has an Active master (cluster is operational). -/
+def hasActiveMasterP0 (state : FlareClusterState) : Bool :=
+  state.nodeMap.any (fun (_, n) =>
+    decide (n.role = FlareRole.Master ∧ n.partition = 0 ∧ n.state = FlareState.Active))
+
 /-- Metric: count of slaves for a given partition in nodeMap. -/
 def slaveCountForPartition (state : FlareClusterState) (pIdx : Nat) : Nat :=
   (state.nodeMap.filter (fun (_, n) => n.role == FlareRole.Slave && n.partition == Int.ofNat pIdx)).length
@@ -110,7 +115,12 @@ def autoAssign (state : FlareClusterState) (crd : FlareClusterView) (nodeKey : S
   -- Try Master first
   match findPartitionNeedingMaster cleanState numPartitions with
   | some pIdx =>
-    let newNode := { node with role := FlareRole.Master, state := FlareState.Active, partition := Int.ofNat pIdx }
+    -- Mimic C++ flarei state assignment logic (cluster.cc:1010):
+    -- Partition 0: always Active (special case, no reconstruction needed)
+    -- Partition 1+: always Prepare (must reconstruct from P0 before becoming Active)
+    -- C++ flared nodes will send "node state ready" after reconstruction completes
+    let masterState := if pIdx == 0 then FlareState.Active else FlareState.Prepare
+    let newNode := { node with role := FlareRole.Master, state := masterState, partition := Int.ofNat pIdx }
     let part := (cleanState.lookupPartition pIdx).getD {}
     let newPart := { part with master := some nodeKey }
     let newState := (cleanState.addNode nodeKey newNode).setPartition pIdx newPart
@@ -133,19 +143,20 @@ def autoAssign (state : FlareClusterState) (crd : FlareClusterView) (nodeKey : S
 /-- Pure reconcile step: process a FlareEvent against the current state. -/
 def reconcileStep (state : FlareClusterState) (crd : FlareClusterView)
     (event : FlareEvent) : FlareClusterState × FlareResponse :=
-  -- Ensure partitionSize always reflects CRD spec
-  let state := { state with partitionSize := crd.spec.partitions }
+  -- NOTE: partitionSize must remain 1024 (max ring size for consistent hashing),
+  -- NOT crd.spec.partitions (current partition count). C++ flared allocates
+  -- _map array using partition-size, then indexes it with actual partition count.
+  -- Setting partitionSize=2 causes out-of-bounds access when _map[2] is read!
   match event with
   | .Ping =>
     (state, .OK)
   | .Meta =>
     (state, .End [
       s!"META partition-size {state.partitionSize}",
-      s!"META key-hash-algorithm {state.keyHashAlgorithm}",
+      s!"META key-hash-algorithm jenkins",
       s!"META partition-type modular",
       s!"META partition-modular-hint 1",
-      s!"META partition-modular-virtual 4096",
-      s!"META node_map_version {state.nodeMapVersion}"
+      s!"META partition-modular-virtual 4096"
     ])
   | .Stats =>
     (state, .End [s!"STAT node_count {state.nodeMap.length}"])
@@ -155,8 +166,7 @@ def reconcileStep (state : FlareClusterState) (crd : FlareClusterView)
     (state, .CloseConnection)
   | .NodeAdd serverName serverPort =>
     let nodeKey := FlareClusterState.toNodeKey serverName serverPort
-    -- Always register as Proxy: a restarted node has no data, so it must
-    -- re-enter as Proxy and let autoAssign decide (typically Slave).
+    -- Register as Proxy initially
     let newNode : FlareNode := {
       serverName := serverName
       serverPort := serverPort
@@ -166,10 +176,33 @@ def reconcileStep (state : FlareClusterState) (crd : FlareClusterView)
       balance := 100
       threadType := 16
     }
-    let (newState, _) := autoAssign state crd nodeKey newNode
-    let nodeList := newState.getNodes
-    let lines := nodeList.map serializeNode
-    (newState, .End (lines.map String.trim))
+    -- SPECIAL CASE: P0 Master must be assigned immediately to avoid reconstruction.
+    -- P0 is the source of truth - it should never witness a role transition and
+    -- should never run reconstruction. P1+ Masters are assigned later via reconcile
+    -- loop, which triggers Proxy→Master transition, which triggers reconstruction.
+    let numPartitions := crd.spec.partitions
+    let p0 := state.lookupPartition 0
+    let needsP0Master := match p0 with | some part => part.master.isNone | none => true
+    if needsP0Master && numPartitions > 0 then
+      -- Assign as P0 Master immediately - no role transition, no reconstruction
+      let (newState, assignedNode) := autoAssign state crd nodeKey newNode
+      if assignedNode.role == FlareRole.Master && assignedNode.partition == 0 then
+        -- Successfully assigned as P0 Master - return immediately
+        let nodeList := newState.getNodes
+        let lines := nodeList.map serializeNode
+        (newState, .End (lines.map String.trim))
+      else
+        -- Not assigned as P0 Master - register as Proxy for later assignment
+        let newState := state.addNode nodeKey newNode
+        let nodeList := newState.getNodes
+        let lines := nodeList.map serializeNode
+        (newState, .End (lines.map String.trim))
+    else
+      -- Not the first node or P0 already has master - register as Proxy
+      let newState := state.addNode nodeKey newNode
+      let nodeList := newState.getNodes
+      let lines := nodeList.map serializeNode
+      (newState, .End (lines.map String.trim))
   | .NodeSync _ =>
     let nodeList := state.getNodes
     let lines := nodeList.map serializeNode
@@ -180,8 +213,9 @@ def reconcileStep (state : FlareClusterState) (crd : FlareClusterView)
     | none =>
       (state, .ServerError s!"node state: unknown node {nodeKey}")
     | some node =>
-      -- Only allow Prepare → Active transition (reconstruction complete)
-      if node.state == FlareState.Prepare && newState == FlareState.Active then
+      -- Allow Prepare → Active (slaves) and Prepare → Ready (masters)
+      -- Auto-promote Ready to Active so partitions immediately become usable
+      if node.state == FlareState.Prepare && (newState == FlareState.Active || newState == FlareState.Ready) then
         let updatedNode := { node with state := FlareState.Active }
         let newClusterState := state.addNode nodeKey updatedNode
         (newClusterState, .OK)

@@ -78,6 +78,11 @@ Verification Method: Computational reflection via 'decide' tactic
   - Configurable retry policies (default, aggressive, conservative)
   - Jitter support to prevent thundering herd
   - Integrated into all critical K8s operations
+- **Health Check Endpoints**: HTTP server on port 8080 for Kubernetes probes
+  - `/healthz`: Liveness probe (operator is running)
+  - `/readyz`: Readiness probe (leader elected, TCP server ready)
+  - Standard K8s health check integration
+  - Automatic failover support via readiness detection
 
 ## Architecture Highlights
 
@@ -153,6 +158,7 @@ See [FORMAL_VERIFICATION.md](./FORMAL_VERIFICATION.md) for details.
 
 - **`Prometheus.lean`**: Metrics collection and Prometheus text format export
 - **`HttpServer.lean`**: HTTP server on port 9090 for /metrics endpoint
+- **`HealthCheck.lean`**: HTTP server on port 8080 for /healthz and /readyz endpoints
 
 ### Critical Fixes
 

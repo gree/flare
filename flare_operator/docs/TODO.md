@@ -14,9 +14,10 @@
 - Simulation: 17-step initialization scenario (97 lines)
 - VerifiedSafety: 100% proven theorems (NO axioms, NO sorry)
 
-✅ **Production Readiness Features** (as of commit `37b37c9`)
+✅ **Production Readiness Features** (as of commit TBD)
 - Prometheus metrics: HTTP server on port 9090 (446 lines)
 - Exponential backoff retry: K8s API resilience (165 lines)
+- Health check endpoints: HTTP server on port 8080 (230+ lines)
 - All critical K8s operations now retry-protected
 
 ## Completed Items
@@ -74,6 +75,25 @@
 - CRD fetch, pod listing, service patching, ConfigMap updates
 
 **Benefit**: Production stability against transient K8s API failures
+
+### ✅ Health Check Endpoints (commit TBD)
+
+**Implemented**:
+- HealthCheck.lean (230+ lines): HTTP server on port 8080 for K8s probes
+- Liveness and readiness endpoint handlers
+- Health status tracking for leader election and TCP server state
+
+**Endpoints**:
+- `/healthz`: Liveness probe (returns 200 OK if operator is running)
+- `/readyz`: Readiness probe (returns 200 OK if leader elected and TCP server ready)
+
+**Features**:
+- Standard Kubernetes health check integration
+- Leader election awareness
+- TCP server readiness tracking
+- Automatic failover support via readiness detection
+
+**Benefit**: K8s best practice for pod lifecycle management and automatic restart
 
 ## Known Issues
 
@@ -242,28 +262,19 @@ flare_operator_nodes_total{cluster="my-cluster",role="master",state="active"}
 
 ### Reliability
 
-#### 1. Retry Logic for K8s API Calls
+#### 1. ~~Retry Logic for K8s API Calls~~ ✅ COMPLETED
 
-**Current**: Single kubectl call, fails on transient errors
+~~**Current**: Single kubectl call, fails on transient errors~~
 
-**Proposed**: Exponential backoff retry for:
-- CRD fetch
-- Pod list
-- ConfigMap update
+~~**Proposed**: Exponential backoff retry for CRD fetch, pod list, ConfigMap update~~
 
-**Implementation**: Wrap `kubectl` calls in retry loop
+**Status**: ✅ Implemented (see Completed Items above)
 
-**Priority**: High (production stability)
+#### 2. ~~Health Checks~~ ✅ COMPLETED
 
-#### 2. Health Checks
+~~**Proposed**: HTTP endpoints for liveness/readiness~~
 
-**Proposed**: HTTP endpoints for liveness/readiness
-- `/healthz`: Operator is running
-- `/readyz`: Leader elected, TCP server listening
-
-**Implementation**: Add HTTP server on port 8080
-
-**Priority**: High (K8s best practice)
+**Status**: ✅ Implemented (see Completed Items above)
 
 #### 3. Graceful Shutdown
 
@@ -371,10 +382,13 @@ status:
 - ✅ Retry logic for K8s API calls (commit `37b37c9`)
   - Retry.lean (165 lines)
   - Bridge.lean integration
+- ✅ Health check endpoints (commit TBD)
+  - HealthCheck.lean (230+ lines)
+  - HTTP server on port 8080
 
 ### Short Term (1-2 weeks)
-- Implement health checks (1 day)
 - Integrate metrics into Main.lean (2-3 hours)
+- Integrate health checks into Main.lean (1-2 hours)
 - User guide documentation (3 days)
 
 ### Medium Term (1-2 months)

@@ -23,7 +23,7 @@ spec:
       serviceAccountName: flare-operator
       containers:
         - name: flare-operator
-          image: flare-operator:latest
+          image: flare-operator:test
           imagePullPolicy: IfNotPresent
           args:
             - "--namespace"

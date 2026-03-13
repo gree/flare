@@ -25,6 +25,8 @@ import FlareOperator.StateMachine.Reconciler
 import FlareOperator.Kubectl
 import FlareOperator.Server.TcpServer
 import FlareOperator.Server.TopologyBroadcast
+import FlareOperator.Metrics.Prometheus
+import FlareOperator.Metrics.HttpServer
 
 namespace FlareOperator
 
@@ -34,6 +36,8 @@ open FlareOperator.Flare
 open FlareOperator.Reconciler
 open FlareOperator.Kubectl
 open FlareOperator.Server
+open FlareOperator.Metrics.Prometheus
+open FlareOperator.Metrics.HttpServer
 
 -- ===========================================================================
 -- CLI Argument Parsing
@@ -293,7 +297,7 @@ private def assignProxies (state : FlareClusterState) (crd : FlareClusterView) :
     giving pods time to register via TCP and appear in the K8s ready list. -/
 private def reconcileOnce (stateRef : IO.Ref FlareClusterState) (crdRef : IO.Ref FlareClusterView)
     (migrationRef : IO.Ref MigrationPhase) (graceCyclesRef : IO.Ref Nat)
-    (crName ns : String) : IO Unit := do
+    (metrics : OperatorMetrics) (crName ns : String) : IO Unit := do
   -- 1. Fetch latest CRD spec
   match ← getFlareClusterCRD crName ns with
   | .error e =>
@@ -321,6 +325,9 @@ private def reconcileOnce (stateRef : IO.Ref FlareClusterState) (crdRef : IO.Ref
     if !deadKeys.isEmpty then
       IO.eprintln s!"[flare-operator] detected {deadKeys.length} dead node(s): {deadKeys}"
       IO.eprintln s!"[TRACE] DeadDetection: found {deadKeys.length} dead nodes: {deadKeys}"
+      -- Record dead nodes detected
+      for _ in deadKeys do
+        recordDeadNode metrics
       -- Before failover, rebuild partitionMap from nodeMap (single source of truth)
       let state := state.rebuildPartitionMap
       let (newState, failoverLogs) := handleFailover state deadKeys
@@ -345,6 +352,8 @@ private def reconcileOnce (stateRef : IO.Ref FlareClusterState) (crdRef : IO.Ref
     let proxyCount := currentState.nodeMap.foldl (init := 0) fun count (_, node) =>
       if node.role == FlareRole.Proxy then count + 1 else count
     IO.eprintln s!"[flare-operator] assigned {proxyCount} proxy node(s) to roles (v{currentState.nodeMapVersion} → v{stateAfterAssignment.nodeMapVersion})"
+    -- Update node counts after assignment
+    updateNodeCounts metrics stateAfterAssignment
 
   -- 6. Update ConfigMap for observability
   let currentState ← stateRef.get
@@ -360,6 +369,10 @@ private def reconcileOnce (stateRef : IO.Ref FlareClusterState) (crdRef : IO.Ref
   if finalVersion != oldVersion then
     IO.eprintln s!"[flare-operator] topology changed during reconcile (v{oldVersion} → v{finalVersion}), broadcasting to all pods"
     broadcastTopologyToAllPods crName ns finalVersion finalState.getNodes
+    -- Track topology broadcast
+    recordTopologyBroadcast metrics
+    -- Update node map version gauge
+    updateNodeMapVersion metrics finalVersion
 
   -- 9. Handle cluster replication migration
   let crd ← crdRef.get
@@ -447,6 +460,14 @@ def main (args : List String) : IO Unit := do
   -- PHASE 2: Leader mode — run TCP server + reconcile loop
   -- ═══════════════════════════════════════════════════════════════════════
 
+  -- Initialize metrics
+  let metrics ← initMetrics
+  IO.eprintln s!"[flare-operator] metrics initialized"
+
+  -- Start metrics HTTP server in background
+  startMetricsServerBackground metrics crName
+  IO.eprintln s!"[flare-operator] metrics server started on port 9090"
+
   -- Initialize shared state
   let stateRef ← IO.mkRef FlareClusterState.default
 
@@ -512,10 +533,17 @@ def main (args : List String) : IO Unit := do
       IO.eprintln s!"[flare-operator] LOST LEASE -- exiting"
       throw (IO.userError "lease lost")
 
+    -- Time the reconcile loop
+    let startTime ← IO.monoMsNow
     try
-      reconcileOnce stateRef crdRef migrationRef graceCyclesRef crName ns
+      reconcileOnce stateRef crdRef migrationRef graceCyclesRef metrics crName ns
     catch e =>
       IO.eprintln s!"[flare-operator] reconcile error: {e}"
+    let endTime ← IO.monoMsNow
+    let durationMs := endTime - startTime
+    let durationSeconds := durationMs.toFloat / 1000.0
+    recordReconcileDuration metrics durationSeconds
+
     IO.sleep (interval * 1000).toUInt32
 
 end FlareOperator

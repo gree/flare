@@ -1,0 +1,101 @@
+# Default values for flare-operator.
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+# Number of operator replicas (leader election handles HA)
+replicaCount: 2
+
+image:
+  repository: flare-operator
+  pullPolicy: IfNotPresent
+  # Overrides the image tag whose default is the chart appVersion.
+  tag: ""
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# Namespace where the operator will run
+# Note: The operator can manage FlareCluster resources across all namespaces
+namespace: flare-system
+
+# Default cluster name to manage (can be overridden per FlareCluster CR)
+clusterName: "default"
+
+serviceAccount:
+  # Specifies whether a service account should be created
+  create: true
+  # Annotations to add to the service account
+  annotations: {}
+  # The name of the service account to use.
+  # If not set and create is true, a name is generated using the fullname template
+  name: ""
+
+rbac:
+  # Specifies whether RBAC resources should be created
+  create: true
+
+podAnnotations: {}
+
+podSecurityContext: {}
+  # fsGroup: 2000
+
+securityContext: {}
+  # capabilities:
+  #   drop:
+  #   - ALL
+  # readOnlyRootFilesystem: true
+  # runAsNonRoot: true
+  # runAsUser: 1000
+
+service:
+  type: ClusterIP
+  port: 12120
+  targetPort: flare-index
+
+# Operator TCP server port for flared index server protocol
+operatorPort: 12120
+
+# Metrics server port (Prometheus)
+metricsPort: 8081
+
+# Health check port
+healthPort: 8080
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 256Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+
+# Liveness probe configuration
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: 8080
+  initialDelaySeconds: 5
+  periodSeconds: 10
+
+# Readiness probe configuration
+readinessProbe:
+  httpGet:
+    path: /readyz
+    port: 8080
+  initialDelaySeconds: 3
+  periodSeconds: 5
+
+# Additional environment variables for the operator
+env: []
+  # - name: CUSTOM_VAR
+  #   value: "custom-value"
+
+# Additional arguments for the operator
+extraArgs: []

@@ -27,6 +27,20 @@ def hasActiveMasterP0 (state : FlareClusterState) : Bool :=
 def slaveCountForPartition (state : FlareClusterState) (pIdx : Nat) : Nat :=
   (state.nodeMap.filter (fun (_, n) => n.role == FlareRole.Slave && n.partition == Int.ofNat pIdx)).length
 
+/-- Check if a partition is currently reconstructing (has any node in Prepare state).
+    Used for throttling to prevent thundering herd: only allow one reconstruction per partition.
+
+    Throttled Reconciliation Pattern:
+    - When mass failures occur (e.g., AZ failure), multiple nodes restart as Proxy simultaneously
+    - Without throttling: all Proxies promoted to Slave→Prepare at once → synchronization storm
+    - With throttling: only one Slave promoted at a time, others wait in Proxy pool
+    - Once first node completes (Prepare→Active), next Proxy can be promoted
+
+    This implements "Proxy Pool" pattern for controlled, serialized reconstruction. -/
+def isPartitionReconstructing (state : FlareClusterState) (pIdx : Nat) : Bool :=
+  state.nodeMap.any (fun (_, n) =>
+    decide (n.partition == Int.ofNat pIdx ∧ n.state == FlareState.Prepare))
+
 /-! ## Auto-assignment logic (metric reduction: decisions based on nodeMap) -/
 
 /-- Auxiliary recursive search for partition needing a Master.
@@ -92,7 +106,10 @@ def findPartitionNeedingSlaveAux (state : FlareClusterState) (numPartitions : Na
   | 0 => none
   | fuel + 1 =>
     if i >= numPartitions then none
-    else if slaveCountForPartition state i < maxSlaves then some i
+    -- Throttling: only assign if partition needs slaves AND no ongoing reconstruction
+    else if slaveCountForPartition state i < maxSlaves
+         && !isPartitionReconstructing state i then
+      some i
     else findPartitionNeedingSlaveAux state numPartitions maxSlaves (i + 1) fuel
 
 /-- Find the first partition index that needs more Slaves (has fewer than replicas-1). -/

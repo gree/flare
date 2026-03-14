@@ -53,10 +53,10 @@ def suite : TestSuite := {
           return .pass
         | .error e => return .fail s!"patch failed: {e}" },
 
-    -- Test 3: wait a bit for operator to process the reduction attempt
+    -- Test 3: wait for operator to process the reduction attempt
     { name := "wait for operator to detect reduction"
       run := do
-        IO.sleep 5000  -- 5 seconds for operator to process
+        IO.sleep 15000  -- 15 seconds for operator to process (2-3 reconcile cycles)
         return .pass },
 
     -- Test 4: verify cluster still has 2 partitions (reduction was blocked)
@@ -77,8 +77,8 @@ def suite : TestSuite := {
         match opPods.head? with
         | none => return .fail "operator pod not found"
         | some opPod =>
-          -- Get operator logs
-          let logs ← kubectlLogs opPod cfg.«namespace» 100
+          -- Get operator logs (more lines to ensure we catch the warning)
+          let logs ← kubectlLogs opPod cfg.«namespace» 200
           -- Check for warning message (check if log contains substring)
           let hasWarning := (logs.splitOn "UNSAFE PARTITION REDUCTION DETECTED").length > 1
           if hasWarning then do

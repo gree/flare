@@ -24,6 +24,19 @@ structure ClusterConfig where
   operatorPort : Nat := 12120
   deriving Repr
 
+/-- Generate a unique namespace name using timestamp to avoid test conflicts.
+    Format: {baseName}-{timestamp-ms}
+    Example: "flare-test-1710412345678" -/
+def uniqueNamespace (baseName : String := "flare-test") : IO String := do
+  let timestamp ← IO.monoMsNow
+  pure s!"{baseName}-{timestamp}"
+
+/-- Create a ClusterConfig with a unique namespace to ensure test isolation.
+    This prevents cleanup race conditions between parallel or sequential test runs. -/
+def ClusterConfig.withUniqueNamespace (cfg : ClusterConfig) : IO ClusterConfig := do
+  let uniqueNs ← uniqueNamespace cfg.name
+  pure { cfg with «namespace» := uniqueNs }
+
 -- ===========================================================================
 -- YAML Generation
 -- ===========================================================================

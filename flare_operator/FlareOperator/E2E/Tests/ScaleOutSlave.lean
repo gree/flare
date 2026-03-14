@@ -17,6 +17,7 @@ open FlareOperator.E2E.Setup
 
 private def cfg : ClusterConfig := {
   name := "scale-out-slave"
+  «namespace» := "flare-scale-out-s"  -- Unique namespace for test isolation
   partitions := 2
   replicas := 2
   operatorName := "flare-operator"

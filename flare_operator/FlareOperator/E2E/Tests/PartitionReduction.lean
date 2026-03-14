@@ -18,6 +18,7 @@ open FlareOperator.E2E.Setup
 
 private def cfg : ClusterConfig := {
   name := "partition-reduction"
+  «namespace» := "flare-part-red"  -- Unique namespace for test isolation
   partitions := 2
   replicas := 2
   operatorName := "flare-operator"

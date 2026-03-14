@@ -17,6 +17,7 @@ open FlareOperator.E2E.Setup
 
 private def cfgV1 : ClusterConfig := {
   name := "repl-v1"
+  «namespace» := "flare-repl-v1"  -- Unique namespace for test isolation
   partitions := 2
   replicas := 2
   operatorName := "flare-operator-repl-v1"
@@ -25,6 +26,7 @@ private def cfgV1 : ClusterConfig := {
 
 private def cfgV2 : ClusterConfig := {
   name := "repl-v2"
+  «namespace» := "flare-repl-v2"  -- Unique namespace for test isolation
   partitions := 1
   replicas := 2
   operatorName := "flare-operator-repl-v2"

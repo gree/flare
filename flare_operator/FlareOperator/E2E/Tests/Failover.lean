@@ -18,6 +18,8 @@ open FlareOperator.Kubectl
 
 private def cfg : ClusterConfig := {
   name := "failover-test"
+  -- Use unique namespace per test run for isolation (timestamp-based)
+  «namespace» := "flare-failover"
   partitions := 2
   replicas := 2
   operatorName := "flare-operator"

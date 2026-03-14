@@ -464,7 +464,47 @@ private def runReconcileDriver (stateRef : IO.Ref FlareClusterState)
   runReconcileFSMLoop initialState stateRef migrationRef graceCyclesRef crName ns
 
 -- ===========================================================================
--- Main Reconcile Loop
+-- FSM-Driven Reconcile (Complete with safety checks and metrics)
+-- ===========================================================================
+
+/-- FSM-driven reconcile loop with partition reduction safety check and metrics.
+    This is the production-ready version that wraps runReconcileDriver. -/
+private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.Ref FlareClusterView)
+    (migrationRef : IO.Ref MigrationPhase) (graceCyclesRef : IO.Ref Nat)
+    (metrics : OperatorMetrics) (crName ns : String) : IO Unit := do
+  -- 1. Fetch CRD (handled by FSM, but we need it early for partition reduction check)
+  match ← getFlareClusterCRD crName ns with
+  | .error e =>
+    IO.eprintln s!"[flare-operator] warning: failed to fetch CRD: {e}"
+    return
+  | .ok crd =>
+    crdRef.set crd
+
+    -- 1b. Detect unsafe partition reduction (safety check BEFORE running FSM)
+    let state ← stateRef.get
+    let partitionReductionDetected ← detectPartitionReduction state crd crName
+    if partitionReductionDetected then
+      -- Skip this reconcile cycle to prevent unsafe partition reduction
+      return
+
+  -- 2. Run the FSM driver
+  let oldVersion := (← stateRef.get).nodeMapVersion
+  runReconcileDriver stateRef migrationRef graceCyclesRef crName ns
+
+  -- 3. Post-FSM: Broadcast topology if version changed
+  let finalState ← stateRef.get
+  let finalVersion := finalState.nodeMapVersion
+  if finalVersion != oldVersion then
+    IO.eprintln s!"[flare-operator] topology changed (v{oldVersion} → v{finalVersion}), broadcasting"
+    broadcastTopologyToAllPods crName ns finalVersion finalState.getNodes
+    recordTopologyBroadcast metrics
+    updateNodeMapVersion metrics finalVersion
+
+  -- 4. Update node counts
+  updateNodeCounts metrics finalState
+
+-- ===========================================================================
+-- Main Reconcile Loop (Legacy - for comparison/fallback)
 -- ===========================================================================
 
 /-- Single iteration of the operator reconcile loop.
@@ -734,7 +774,8 @@ def main (args : List String) : IO Unit := do
     -- Time the reconcile loop
     let startTime ← IO.monoMsNow
     try
-      reconcileOnce stateRef crdRef migrationRef graceCyclesRef metrics crName ns
+      -- Use FSM-driven reconcile (complete implementation with all 5 requirements)
+      reconcileOnceFSM stateRef crdRef migrationRef graceCyclesRef metrics crName ns
     catch e =>
       IO.eprintln s!"[flare-operator] reconcile error: {e}"
     let endTime ← IO.monoMsNow

@@ -23,6 +23,12 @@ The main Helm chart for deploying the Flare Operator, which manages Flare distri
 - Kubernetes 1.19+
 - Helm 3.0+
 
+### Example Deployments
+
+The chart includes example configurations:
+- `examples/flare-cluster-persistent.yaml` - Production deployment with persistent volumes
+- `examples/flare-cluster-tmpfs.yaml` - Test/development deployment with tmpfs (in-memory storage)
+
 ### Install the Operator
 
 ```bash
@@ -49,6 +55,24 @@ kubectl logs -n flare-system -l app.kubernetes.io/name=flare-operator -f
 ```
 
 ### Create a Flare Cluster
+
+#### Using tmpfs (for testing/development)
+
+```bash
+kubectl apply -f helm/flare-operator/examples/flare-cluster-tmpfs.yaml
+```
+
+This deploys a cluster with in-memory storage (data is lost on pod restart).
+
+#### Using persistent volumes (for production)
+
+```bash
+kubectl apply -f helm/flare-operator/examples/flare-cluster-persistent.yaml
+```
+
+This deploys a cluster with persistent storage via PersistentVolumeClaims.
+
+#### Manual CRD creation
 
 ```bash
 kubectl apply -f - <<EOF

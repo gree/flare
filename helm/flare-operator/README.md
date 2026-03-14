@@ -159,6 +159,77 @@ spec:
             storage: 10Gi
 ```
 
+### Using tmpfs for In-Memory Storage
+
+For testing or high-performance scenarios, you can use tmpfs (RAM-based storage) instead of persistent volumes:
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: my-flare-cluster-nodes
+  namespace: default
+spec:
+  clusterIP: None
+  selector:
+    app: flare
+    cluster: my-flare-cluster
+  ports:
+    - port: 12121
+      name: flare
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: my-flare-cluster-nodes
+  namespace: default
+spec:
+  serviceName: my-flare-cluster-nodes
+  replicas: 8  # partitions * replicas = 4 * 2
+  selector:
+    matchLabels:
+      app: flare
+      cluster: my-flare-cluster
+  template:
+    metadata:
+      labels:
+        app: flare
+        cluster: my-flare-cluster
+    spec:
+      containers:
+        - name: flared
+          image: flare-node:latest
+          command:
+            - flared
+            - --data-dir=/data/flare
+            - --server-port=12121
+            - --index-server-name=flare-operator.flare-system.svc.cluster.local
+            - --index-server-port=12120
+          ports:
+            - containerPort: 12121
+              name: flare
+          volumeMounts:
+            - name: tmpfs-data
+              mountPath: /data
+          resources:
+            limits:
+              memory: 2Gi  # Ensure sufficient memory for tmpfs
+      volumes:
+        - name: tmpfs-data
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Gi  # Limit tmpfs size
+```
+
+**Important notes for tmpfs:**
+- Data is stored in RAM and will be lost on pod restart
+- Suitable for testing, caching, or ephemeral workloads
+- Set appropriate memory limits to prevent OOM issues
+- `sizeLimit` controls maximum tmpfs size (optional)
+- Ensure container memory limits are higher than tmpfs size
+```
+
 ## Monitoring
 
 ### Prometheus Metrics

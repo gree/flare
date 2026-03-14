@@ -394,6 +394,76 @@ private def executeEffects (effects : List K8sReconciler.FlareEffect)
       | .error e => IO.eprintln s!"[flare-operator] warning: failed to patch CRD status: {e}"
 
 -- ===========================================================================
+-- FSM Driver Loop (Phase 4)
+-- ===========================================================================
+
+/-- FSM driver loop helper.
+    The FSM measure proves termination, but Lean can't see it through IO. -/
+private partial def runReconcileFSMLoop
+    (s : K8sReconciler.FlareReconcileState)
+    (stateRef : IO.Ref FlareClusterState)
+    (migrationRef : IO.Ref MigrationPhase)
+    (graceCyclesRef : IO.Ref Nat)
+    (crName ns : String) : IO Unit := do
+  if K8sReconciler.flareReconcileTerminalBool s.reconcileStep then
+    -- Terminal state reached
+    match s.reconcileStep with
+    | .Done =>
+      -- Success: update refs for next cycle
+      graceCyclesRef.set s.graceCycles
+      if let some phase := s.nextMigrationPhase then
+        migrationRef.set phase
+      pure ()
+    | .Error msg =>
+      -- Error: log and gracefully exit (operator restarts FSM next tick)
+      IO.eprintln s!"[flare-operator] FSM error: {msg}"
+      pure ()
+    | _ =>
+      -- Other terminal states (shouldn't happen)
+      pure ()
+  else
+    -- Non-terminal: get current cluster state and transition
+    let cs ← stateRef.get
+    let (newState, reqOpt, effects) := K8sReconciler.flareReconcileCore .NoResponse s cs
+
+    -- Execute side effects
+    executeEffects effects crName ns stateRef migrationRef
+
+    -- Execute K8s request if present
+    match reqOpt with
+    | some req =>
+      let resp ← executeK8sRequest req crName ns
+      let cs2 ← stateRef.get
+      let (nextState, _, moreEffects) := K8sReconciler.flareReconcileCore resp newState cs2
+      executeEffects moreEffects crName ns stateRef migrationRef
+
+      -- Update cluster state if FSM produced a new one
+      if let some ucs := nextState.updatedClusterState then
+        stateRef.set ucs
+      runReconcileFSMLoop nextState stateRef migrationRef graceCyclesRef crName ns
+    | none =>
+      -- No request: update cluster state if FSM produced one and continue
+      if let some ucs := newState.updatedClusterState then
+        stateRef.set ucs
+      runReconcileFSMLoop newState stateRef migrationRef graceCyclesRef crName ns
+
+/-- Run the FSM-driven reconcile loop.
+    Repeatedly calls flareReconcileCore, executing requests/effects until Done/Error.
+    Implements requirement #5: Error states don't crash the operator; they're logged
+    and the FSM restarts from Init on the next tick. -/
+private def runReconcileDriver (stateRef : IO.Ref FlareClusterState)
+    (migrationRef : IO.Ref MigrationPhase) (graceCyclesRef : IO.Ref Nat)
+    (crName ns : String) : IO Unit := do
+  let initialGrace ← graceCyclesRef.get
+  let initialPhase ← migrationRef.get
+  let initialState : K8sReconciler.FlareReconcileState := {
+    graceCycles := initialGrace,
+    currentMigrationPhase := initialPhase
+  }
+
+  runReconcileFSMLoop initialState stateRef migrationRef graceCyclesRef crName ns
+
+-- ===========================================================================
 -- Main Reconcile Loop
 -- ===========================================================================
 

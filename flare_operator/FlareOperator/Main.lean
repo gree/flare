@@ -22,6 +22,7 @@ import FlareOperator.K8s.FlareCluster
 import FlareOperator.K8s.Bridge
 import FlareOperator.Flare.Protocol
 import FlareOperator.StateMachine.Reconciler
+import FlareOperator.StateMachine.K8sReconciler
 import FlareOperator.Kubectl
 import FlareOperator.Server.TcpServer
 import FlareOperator.Server.TopologyBroadcast
@@ -328,6 +329,69 @@ private def assignProxies (state : FlareClusterState) (crd : FlareClusterView) :
       newState
     else
       currentState
+
+-- ===========================================================================
+-- FSM IO Interpreters (Phase 3)
+-- ===========================================================================
+
+/-- Execute a K8s API request from the FSM.
+    Maps K8sRequest to actual kubectl/K8s.Bridge calls. -/
+private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : String)
+    : IO K8sReconciler.K8sResponse := do
+  match req with
+  | .FetchCRD =>
+    match ← getFlareClusterCRD crName ns with
+    | .ok crd => pure (.CRDResponse (some crd))
+    | .error _ => pure (.CRDResponse none)
+  | .ListPods =>
+    let pods ← Bridge.listFlaredPods crName ns
+    let podKeys := pods.map (fun p => s!"{p.name}")
+    pure (.PodListResponse podKeys)
+  | .PatchService =>
+    -- Service patching happens in executeEffects (PatchService effect)
+    -- This just signals completion
+    pure (.PatchResponse true)
+  | .None =>
+    pure .NoResponse
+
+/-- Execute a list of side effects from the FSM.
+    Maps FlareEffect to actual IO operations. -/
+private def executeEffects (effects : List K8sReconciler.FlareEffect)
+    (crName ns : String) (_stateRef : IO.Ref FlareClusterState)
+    (migrationRef : IO.Ref MigrationPhase) : IO Unit := do
+  for eff in effects do
+    match eff with
+    | .Log msg =>
+      IO.eprintln msg
+
+    | .PatchService svcName podName =>
+      -- Update K8s Service selector to point to the master pod
+      match ← patchClientServiceSelector svcName ns podName with
+      | .ok () => pure ()
+      | .error e => IO.eprintln s!"[flare-operator] warning: failed to patch service {svcName}: {e}"
+
+    | .BroadcastTopology version nodes =>
+      -- Send topology to all flared nodes via TCP
+      let nodeList := nodes.map (·.snd)
+      broadcastTopologyToAllPods crName ns version nodeList
+
+    | .UpdateConfigMap data =>
+      -- Write node map to observability ConfigMap (Main.lean:174-178)
+      let cmName := s!"{crName}-node-map"
+      match ← updateFlaredConfigMap cmName ns data with
+      | .ok () => pure ()
+      | .error e => IO.eprintln s!"[flare-operator] warning: failed to update ConfigMap: {e}"
+
+    | .SendSighup _podNames =>
+      -- Send SIGHUP to all pods to reload replication config (Main.lean:236)
+      sendSighupToPods crName ns
+
+    | .PatchCRDStatus phase =>
+      -- Update migration phase in CRD status (Main.lean:238-241)
+      migrationRef.set phase
+      match ← patchFlareClusterStatus crName ns phase with
+      | .ok () => pure ()
+      | .error e => IO.eprintln s!"[flare-operator] warning: failed to patch CRD status: {e}"
 
 -- ===========================================================================
 -- Main Reconcile Loop

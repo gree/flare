@@ -79,12 +79,38 @@ def MigrationPhase.toString : MigrationPhase → String
   | .Dumping => "Dumping"
   | .Forwarding => "Forwarding"
 
+/-! ## Circuit Breaker Configuration -/
+
+/-- Circuit breaker configuration for AZ-level failure protection.
+    Prevents automatic recovery during infrastructure failures.
+
+    Hysteresis (tripThreshold ≠ resetThreshold) prevents flapping. -/
+structure CircuitBreakerConfig where
+  /-- Enable/disable circuit breaker. Default: true (enabled for production) -/
+  enabled : Bool := true
+
+  /-- Percentage of dead nodes that trips the breaker (0-100).
+      Default: 50 (trip when ≥50% nodes are dead) -/
+  tripThresholdPercent : Nat := 50
+
+  /-- Percentage of healthy nodes required to auto-reset breaker (0-100).
+      Default: 80 (reset when ≥80% nodes healthy, i.e., ≤20% dead)
+      Must be > (100 - tripThresholdPercent) to prevent flapping. -/
+  resetThresholdPercent : Nat := 80
+
+  /-- Enable automatic reset when cluster recovers.
+      If false, breaker requires manual pod restart even after recovery.
+      Default: true -/
+  autoResetEnabled : Bool := true
+  deriving Repr, BEq
+
 /-! ## Flare Cluster CRD Spec -/
 
 structure FlareClusterSpecView where
   partitions : Nat := 1
   replicas : Nat := 1  -- 1 Master + (N-1) Slaves per partition
   clusterReplication : ClusterReplicationSpec := {}
+  circuitBreaker : CircuitBreakerConfig := {}
   deriving Repr
 
 structure FlareClusterView where

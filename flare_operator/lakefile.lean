@@ -16,3 +16,6 @@ lean_exe flare_operator where
 
 lean_exe flare_e2e where
   root := `FlareOperator.E2E.Main
+
+lean_exe circuit_breaker_sim where
+  root := `FlareOperator.StateMachine.CircuitBreakerSimMain

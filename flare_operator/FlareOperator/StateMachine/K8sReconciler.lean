@@ -115,6 +115,47 @@ structure FlareReconcileState where
 def reconcileInitState : FlareReconcileState := {}
 
 -- ===========================================================================
+-- Circuit Breaker Helper
+-- ===========================================================================
+
+/-- Circuit breaker decision: should we trip or continue with failover?
+    Returns (nextStep, effects) -/
+def circuitBreakerDecision
+    (deadCount : Nat)
+    (totalNodes : Nat)
+    (breakerCfg : CircuitBreakerConfig)
+    : FlareReconcileStep × List FlareEffect :=
+  if !breakerCfg.enabled then
+    (.AfterHandleFailover,
+     [.Log s!"[flare-operator] Circuit breaker DISABLED - automatic recovery enabled"])
+  else
+    let deadPercent := if totalNodes > 0 then (deadCount * 100) / totalNodes else 0
+    if deadPercent >= breakerCfg.tripThresholdPercent then
+      (.EmergencyPaused,
+       [.Log s!"[flare-operator] 🚨 CIRCUIT BREAKER TRIPPED: {deadCount}/{totalNodes} nodes dead ({deadPercent}% ≥ {breakerCfg.tripThresholdPercent}%)",
+        .Log s!"[flare-operator] Suspected AZ failure - automatic recovery PAUSED",
+        .Log s!"[flare-operator] Surviving nodes will continue serving traffic",
+        .Log s!"[flare-operator] Manual intervention required: kubectl delete pod -n <namespace> <operator-pod> to reset"])
+    else
+      (.AfterHandleFailover, [])
+
+/-- circuitBreakerDecision only returns EmergencyPaused or AfterHandleFailover -/
+theorem circuitBreakerDecision_only_returns_emergency_or_failover
+    (deadCount totalNodes : Nat) (cfg : CircuitBreakerConfig) :
+    (circuitBreakerDecision deadCount totalNodes cfg).1 = .EmergencyPaused ∨
+    (circuitBreakerDecision deadCount totalNodes cfg).1 = .AfterHandleFailover := by
+  simp only [circuitBreakerDecision]
+  split
+  · right; rfl  -- disabled
+  · split
+    · split
+      · left; rfl  -- enabled, totalNodes > 0, tripped
+      · right; rfl  -- enabled, totalNodes > 0, not tripped
+    · split
+      · left; rfl  -- enabled, totalNodes = 0, threshold = 0
+      · right; rfl  -- enabled, totalNodes = 0, threshold > 0
+
+-- ===========================================================================
 -- Terminal Predicate
 -- ===========================================================================
 
@@ -262,27 +303,22 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
     let totalNodes := clusterState.nodeMap.length
     let deadCount := s.deadNodeKeys.length
 
+    -- Get circuit breaker config from CRD (default if not available)
+    let breakerCfg := match s.cachedCrd with
+      | some crd => crd.spec.circuitBreaker
+      | none => {}  -- Use default config
+
     if deadCount == 0 then
       -- No failures - continue normally
       ({ s with reconcileStep := .AfterHandleFailover,
                 failoverTriggered := false,
                 updatedClusterState := some clusterState }, none, [])
-    else if deadCount * 2 >= totalNodes then
-      -- 🚨 Circuit Breaker Tripped: >= 50% nodes dead (likely AZ failure)
-      -- STOP automatic recovery to prevent:
-      -- 1. Split-brain from K8s API hallucinations
-      -- 2. Cascading failure in surviving AZ from resource exhaustion
-      -- 3. Unnecessary full sync when AZ will recover in minutes
-      ({ s with reconcileStep := .EmergencyPaused }, none,
-       [.Log s!"[flare-operator] 🚨 CIRCUIT BREAKER TRIPPED: {deadCount}/{totalNodes} nodes dead (≥50%)",
-        .Log s!"[flare-operator] Suspected AZ failure - automatic recovery PAUSED",
-        .Log s!"[flare-operator] Surviving nodes will continue serving traffic",
-        .Log s!"[flare-operator] Manual intervention required: kubectl delete pod -n <namespace> <operator-pod> to reset"])
     else
-      -- Normal failure (< 50%) - safe to perform automatic failover
-      ({ s with reconcileStep := .AfterHandleFailover,
-                failoverTriggered := true }, none,
-       [.Log s!"[flare-operator] detected {s.deadNodeKeys.length} dead nodes: {s.deadNodeKeys}"])
+      -- Check circuit breaker
+      let (nextStep, breakerEffects) := circuitBreakerDecision deadCount totalNodes breakerCfg
+      let allEffects := .Log s!"[flare-operator] detected {deadCount} dead nodes: {s.deadNodeKeys}" :: breakerEffects
+      ({ s with reconcileStep := nextStep,
+                failoverTriggered := (nextStep == .AfterHandleFailover) }, none, allEffects)
 
   | .AfterHandleFailover =>
     -- Apply failover logic if triggered
@@ -423,9 +459,13 @@ theorem flareReconcileStep_decreases_measure (resp : K8sResponse)
     simp only [flareReconcileCore, h]
     split
     · left; simp [flareReconcileMeasure]  -- deadCount == 0
-    · split
-      · right; simp [flareReconcileTerminalBool]  -- Circuit breaker tripped (EmergencyPaused)
-      · left; simp [flareReconcileMeasure]  -- Normal failover
+    · -- deadCount > 0, check circuit breaker decision
+      have h_decision := circuitBreakerDecision_only_returns_emergency_or_failover
+        s.deadNodeKeys.length cs.nodeMap.length
+        (match s.cachedCrd with | some crd => crd.spec.circuitBreaker | none => {})
+      cases h_decision
+      · simp [*]; right; simp [flareReconcileTerminalBool]  -- EmergencyPaused
+      · simp [*]; left; simp [flareReconcileMeasure]  -- AfterHandleFailover
   | AfterHandleFailover =>
     left; simp [flareReconcileCore, h, flareReconcileMeasure]
   | AfterAssignRoles =>

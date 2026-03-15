@@ -49,8 +49,8 @@ RUN curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/s
 # Copy the built operator binary
 COPY --from=builder /build/flare_operator/.lake/build/bin/flare_operator /usr/local/bin/flare_operator
 
-# Run as non-root user (use a different name to avoid conflict with existing operator group)
-RUN useradd -r -u 1000 -s /bin/false flare-operator
+# Run as non-root user (let system auto-assign UID to avoid conflicts)
+RUN useradd -r -s /bin/false flare-operator
 USER flare-operator
 
 ENTRYPOINT ["/usr/local/bin/flare_operator"]

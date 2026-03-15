@@ -20,10 +20,10 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Install Nix
-        uses: cachix/install-nix-action@v24
-        with:
-          nix_path: nixpkgs=channel:nixos-unstable
+      - name: Install elan (Lean version manager)
+        run: |
+          curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf | sh -s -- -y
+          echo "$HOME/.elan/bin" >> $GITHUB_PATH
 
       - name: Install kind
         run: |
@@ -41,20 +41,13 @@ jobs:
         run: |
           curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
 
-      - name: Create kind cluster
-        run: kind create cluster --name flare-e2e --wait 120s
-
       - name: Build Lean operator
         run: |
           cd flare_operator
-          nix-shell --run "lake build flare_operator flare_e2e"
+          lake build flare_operator flare_e2e
 
-      - name: Build flare C++ (for integration)
-        run: |
-          nix-shell --run "./autogen.sh"
-          nix-shell --run "./configure --disable-dependency-tracking --prefix=/tmp/flare-install"
-          nix-shell --run "make -j$(nproc)"
-          nix-shell --run "make install"
+      - name: Create kind cluster
+        run: kind create cluster --name flare-e2e --wait 120s
 
       - name: Build Docker images
         run: |

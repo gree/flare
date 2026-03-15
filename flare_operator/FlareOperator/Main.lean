@@ -418,6 +418,13 @@ private partial def runReconcileFSMLoop
       -- Error: log and gracefully exit (operator restarts FSM next tick)
       IO.eprintln s!"[flare-operator] FSM error: {msg}"
       pure ()
+    | .EmergencyPaused =>
+      -- Circuit breaker tripped - operator stays paused until pod restart
+      -- This is intentional: AZ-level failures require manual intervention
+      IO.eprintln "[flare-operator] ⚠️  Operator in EMERGENCY PAUSE state"
+      IO.eprintln "[flare-operator] ⚠️  Circuit breaker will remain tripped until operator pod is restarted"
+      IO.eprintln "[flare-operator] ⚠️  Surviving nodes continue serving traffic"
+      pure ()
     | _ =>
       -- Other terminal states (shouldn't happen)
       pure ()

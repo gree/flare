@@ -31,12 +31,14 @@ open FlareOperator.Reconciler (autoAssign)
     - Proxy Assignment (Main.lean:323)
     - ConfigMap Update (Main.lean:325-327)
     - Cluster Replication (Main.lean:212-272)
-    - Topology Broadcast (Main.lean:329-331) -/
+    - Topology Broadcast (Main.lean:329-331)
+    - Emergency Pause (Circuit Breaker for AZ-level failures) -/
 inductive FlareReconcileStep where
-  | Init                     -- 11: Starting state
-  | AfterFetchCRD            -- 10: CRD fetched
-  | AfterListPods            -- 9: Pods listed
-  | AfterDetectDead          -- 8: Dead nodes computed
+  | Init                     -- 12: Starting state
+  | AfterFetchCRD            -- 11: CRD fetched
+  | AfterListPods            -- 10: Pods listed
+  | AfterDetectDead          -- 9: Dead nodes computed
+  | EmergencyPaused          -- 8: Circuit breaker tripped - blast radius too large
   | AfterHandleFailover      -- 7: Failover applied
   | AfterAssignRoles         -- 6: Proxy roles assigned
   | AfterUpdateConfigMap     -- 5: Observability ConfigMap updated
@@ -116,10 +118,12 @@ def reconcileInitState : FlareReconcileState := {}
 -- Terminal Predicate
 -- ===========================================================================
 
-/-- Check if a step is terminal (Done or Error). -/
+/-- Check if a step is terminal (Done, Error, or EmergencyPaused).
+    EmergencyPaused is terminal to prevent automatic recovery during AZ failures. -/
 def flareReconcileTerminalBool : FlareReconcileStep → Bool
   | .Done => true
   | .Error _ => true
+  | .EmergencyPaused => true
   | _ => false
 
 /-- Prop-level terminal check. -/
@@ -254,13 +258,28 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
       ({ s with reconcileStep := .Error "unexpected response at AfterListPods" }, none, [])
 
   | .AfterDetectDead =>
-    -- Unconditionally continue to failover step (even if no dead nodes)
-    -- K8s operators must be idempotent
-    if s.deadNodeKeys.isEmpty then
+    -- Blast Radius Circuit Breaker: Check if failure is too large (AZ-level)
+    let totalNodes := clusterState.nodeMap.length
+    let deadCount := s.deadNodeKeys.length
+
+    if deadCount == 0 then
+      -- No failures - continue normally
       ({ s with reconcileStep := .AfterHandleFailover,
                 failoverTriggered := false,
                 updatedClusterState := some clusterState }, none, [])
+    else if deadCount * 2 >= totalNodes then
+      -- 🚨 Circuit Breaker Tripped: >= 50% nodes dead (likely AZ failure)
+      -- STOP automatic recovery to prevent:
+      -- 1. Split-brain from K8s API hallucinations
+      -- 2. Cascading failure in surviving AZ from resource exhaustion
+      -- 3. Unnecessary full sync when AZ will recover in minutes
+      ({ s with reconcileStep := .EmergencyPaused }, none,
+       [.Log s!"[flare-operator] 🚨 CIRCUIT BREAKER TRIPPED: {deadCount}/{totalNodes} nodes dead (≥50%)",
+        .Log s!"[flare-operator] Suspected AZ failure - automatic recovery PAUSED",
+        .Log s!"[flare-operator] Surviving nodes will continue serving traffic",
+        .Log s!"[flare-operator] Manual intervention required: kubectl delete pod -n <namespace> <operator-pod> to reset"])
     else
+      -- Normal failure (< 50%) - safe to perform automatic failover
       ({ s with reconcileStep := .AfterHandleFailover,
                 failoverTriggered := true }, none,
        [.Log s!"[flare-operator] detected {s.deadNodeKeys.length} dead nodes: {s.deadNodeKeys}"])
@@ -331,6 +350,12 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
     -- Issue PatchService request
     ({ s with reconcileStep := .Done }, some .PatchService, [])
 
+  | .EmergencyPaused =>
+    -- Terminal: Circuit breaker tripped, stay paused
+    -- Operator will remain in this state until manually restarted (pod delete)
+    -- Surviving nodes continue serving traffic, no automatic recovery
+    (s, none, [])
+
   | .Done =>
     -- Terminal: stay in Done
     (s, none, [])
@@ -346,10 +371,11 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
 /-- Measure on FlareReconcileStep for termination arguments.
     Strictly decreasing on non-terminal transitions. -/
 def flareReconcileMeasure : FlareReconcileStep → Nat
-  | .Init => 11
-  | .AfterFetchCRD => 10
-  | .AfterListPods => 9
-  | .AfterDetectDead => 8
+  | .Init => 12
+  | .AfterFetchCRD => 11
+  | .AfterListPods => 10
+  | .AfterDetectDead => 9
+  | .EmergencyPaused => 0
   | .AfterHandleFailover => 7
   | .AfterAssignRoles => 6
   | .AfterUpdateConfigMap => 5
@@ -395,7 +421,11 @@ theorem flareReconcileStep_decreases_measure (resp : K8sResponse)
     | NoResponse => right; simp [flareReconcileCore, h, flareReconcileTerminalBool]
   | AfterDetectDead =>
     simp only [flareReconcileCore, h]
-    split <;> (left; simp [flareReconcileMeasure])
+    split
+    · left; simp [flareReconcileMeasure]  -- deadCount == 0
+    · split
+      · right; simp [flareReconcileTerminalBool]  -- Circuit breaker tripped (EmergencyPaused)
+      · left; simp [flareReconcileMeasure]  -- Normal failover
   | AfterHandleFailover =>
     left; simp [flareReconcileCore, h, flareReconcileMeasure]
   | AfterAssignRoles =>
@@ -425,6 +455,7 @@ theorem flareReconcileStep_decreases_measure (resp : K8sResponse)
     · left; simp [flareReconcileMeasure]
   | AfterPatchService =>
     left; simp [flareReconcileCore, h, flareReconcileMeasure]
+  | EmergencyPaused => simp [h, flareReconcileTerminalBool] at hNT
   | Done => simp [h, flareReconcileTerminalBool] at hNT
   | Error _msg => simp [h, flareReconcileTerminalBool] at hNT
 
@@ -435,6 +466,7 @@ theorem measure_zero_is_terminal (step : FlareReconcileStep) :
   cases step with
   | Done => rfl
   | Error _ => rfl
+  | EmergencyPaused => rfl
   | Init => simp [flareReconcileMeasure] at h
   | AfterFetchCRD => simp [flareReconcileMeasure] at h
   | AfterListPods => simp [flareReconcileMeasure] at h
@@ -455,6 +487,7 @@ theorem terminal_absorption (resp : K8sResponse) (s : FlareReconcileState)
   cases h : s.reconcileStep with
   | Done => simp [flareReconcileCore, h]
   | Error msg => simp [flareReconcileCore, h]
+  | EmergencyPaused => simp [flareReconcileCore, h]
   | Init => simp [h, flareReconcileTerminalBool] at hTerm
   | AfterFetchCRD => simp [h, flareReconcileTerminalBool] at hTerm
   | AfterListPods => simp [h, flareReconcileTerminalBool] at hTerm

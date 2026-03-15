@@ -1,0 +1,116 @@
+name: E2E Tests
+
+on:
+  push:
+    branches:
+      - flare-operator
+      - master
+  pull_request:
+    branches:
+      - flare-operator
+      - master
+
+jobs:
+  e2e-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v24
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+
+      - name: Install kind
+        run: |
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.24.0/kind-linux-amd64
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+
+      - name: Install kubectl
+        run: |
+          curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x kubectl
+          sudo mv kubectl /usr/local/bin/kubectl
+
+      - name: Install helm
+        run: |
+          curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+      - name: Create kind cluster
+        run: kind create cluster --name flare-e2e --wait 120s
+
+      - name: Build Lean operator
+        run: |
+          cd flare_operator
+          nix-shell --run "lake build flare_operator flare_e2e"
+
+      - name: Build flare C++ (for integration)
+        run: |
+          nix-shell --run "./autogen.sh"
+          nix-shell --run "./configure --disable-dependency-tracking --prefix=/tmp/flare-install"
+          nix-shell --run "make -j$(nproc)"
+          nix-shell --run "make install"
+
+      - name: Build Docker images
+        run: |
+          docker build -t flare-operator:test -f Dockerfile.operator .
+          docker build -t flare-node:test -f Dockerfile.flare-node .
+
+      - name: Load images into kind
+        run: |
+          kind load docker-image flare-operator:test --name flare-e2e
+          kind load docker-image flare-node:test --name flare-e2e
+
+      - name: Install Helm chart
+        run: |
+          helm install flare-operator ./helm/flare-operator \
+            --create-namespace \
+            --namespace flare-system \
+            --set image.repository=flare-operator \
+            --set image.tag=test \
+            --set image.pullPolicy=Never \
+            --set flareNode.image.repository=flare-node \
+            --set flareNode.image.tag=test \
+            --wait \
+            --timeout=5m
+
+      - name: Wait for operator ready
+        run: |
+          kubectl wait --for=condition=Ready pod -l app.kubernetes.io/name=flare-operator \
+            -n flare-system --timeout=120s
+
+      - name: Run E2E tests
+        run: |
+          cd flare_operator
+          export KUBECONFIG=$HOME/.kube/config
+          timeout 600 .lake/build/bin/flare_e2e
+
+      - name: Dump operator logs on failure
+        if: failure()
+        run: |
+          echo "=== Operator Logs ==="
+          kubectl logs -n flare-system -l app.kubernetes.io/name=flare-operator --tail=500 || true
+
+      - name: Dump K8s state on failure
+        if: failure()
+        run: |
+          echo "=== All Namespaces ==="
+          kubectl get ns || true
+          echo ""
+          echo "=== All Pods ==="
+          kubectl get pods --all-namespaces || true
+          echo ""
+          echo "=== Events (all namespaces) ==="
+          kubectl get events --all-namespaces --sort-by='.lastTimestamp' || true
+          echo ""
+          echo "=== FlareCluster CRs ==="
+          kubectl get flareclusters --all-namespaces -o yaml || true
+
+      - name: Delete kind cluster
+        if: always()
+        run: kind delete cluster --name flare-e2e

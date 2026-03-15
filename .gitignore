@@ -19,3 +19,6 @@ Makefile.in
 /test/*.log
 /test/*.trs
 /test-driver
+
+# Lean build artifacts
+.lake/

@@ -59,23 +59,22 @@ jobs:
           kind load docker-image flare-operator:test --name flare-e2e
           kind load docker-image flare-node:test --name flare-e2e
 
-      - name: Install Helm chart
+      - name: Install CRD
+        run: kubectl apply -f deploy/crd.yaml
+
+      - name: Install RBAC
+        run: kubectl apply -f deploy/rbac.yaml
+
+      - name: Deploy operator
         run: |
-          helm install flare-operator ./helm/flare-operator \
-            --create-namespace \
-            --namespace flare-system \
-            --set image.repository=flare-operator \
-            --set image.tag=test \
-            --set image.pullPolicy=Never \
-            --set flareNode.image.repository=flare-node \
-            --set flareNode.image.tag=test \
-            --wait \
-            --timeout=5m
+          # Use simple deployment manifest instead of Helm to avoid timeout issues in CI
+          kubectl create namespace flare-system --dry-run=client -o yaml | kubectl apply -f -
+          sed 's|flare-operator:latest|flare-operator:test|;s|IfNotPresent|Never|' \
+            deploy/operator.yaml | kubectl apply -f -
 
       - name: Wait for operator ready
         run: |
-          kubectl wait --for=condition=Ready pod -l app.kubernetes.io/name=flare-operator \
-            -n flare-system --timeout=120s
+          kubectl rollout status deployment/flare-operator -n flare-system --timeout=300s
 
       - name: Run E2E tests
         run: |

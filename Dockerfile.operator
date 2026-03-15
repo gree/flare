@@ -1,6 +1,6 @@
 # Multi-stage build for the Lean 4 flare-operator
 # Stage 1: Build the operator binary with elan + lake
-FROM --platform=linux/x86_64 ubuntu:noble AS builder
+FROM --platform=linux/amd64 ubuntu:noble AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=UTC
@@ -32,7 +32,7 @@ COPY flare_operator/ /build/flare_operator/
 RUN cd /build/flare_operator && lake build flare_operator
 
 # Stage 2: Minimal runtime image
-FROM --platform=linux/x86_64 ubuntu:noble
+FROM --platform=linux/amd64 ubuntu:noble
 
 ENV DEBIAN_FRONTEND=noninteractive
 

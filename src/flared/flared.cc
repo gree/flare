@@ -44,6 +44,7 @@
 #endif
 
 #ifdef ENABLE_K8S_OPERATOR
+# include <cerrno>
 # include <cstdlib>
 #endif
 
@@ -220,13 +221,20 @@ int flared::startup(int argc, char **argv) {
 		const char* op_host = std::getenv("FLARE_OPERATOR_HOST");
 		const char* op_port = std::getenv("FLARE_OPERATOR_PORT");
 		if (op_host != NULL && op_port != NULL) {
-			k8s_index_servers.clear();
-			cluster::index_server s;
-			s.index_server_name = string(op_host);
-			s.index_server_port = atoi(op_port);
-			k8s_index_servers.push_back(s);
-			log_notice("K8s operator mode: using operator at %s:%d as index server",
-				op_host, atoi(op_port));
+			char* endptr = nullptr;
+			errno = 0;
+			long port_val = strtol(op_port, &endptr, 10);
+			if (errno != 0 || endptr == op_port || *endptr != '\0' || port_val < 1 || port_val > 65535) {
+				log_warning("K8s operator mode: invalid FLARE_OPERATOR_PORT value '%s', ignoring operator override", op_port);
+			} else {
+				k8s_index_servers.clear();
+				cluster::index_server s;
+				s.index_server_name = string(op_host);
+				s.index_server_port = static_cast<int>(port_val);
+				k8s_index_servers.push_back(s);
+				log_notice("K8s operator mode: using operator at %s:%d as index server",
+					op_host, static_cast<int>(port_val));
+			}
 		}
 		if (this->_cluster->startup_node(k8s_index_servers,
 																		 ini_option_object().get_proxy_prior_netmask()) < 0) {

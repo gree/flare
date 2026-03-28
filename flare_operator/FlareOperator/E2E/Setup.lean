@@ -301,7 +301,7 @@ def deployCluster (cfg : ClusterConfig) : IO Unit := do
     dumpOperatorLogs cfg
     let _ ← kubectl ["get", "pods", "-n", cfg.«namespace»]
     let _ ← kubectl ["describe", "deployment", cfg.operatorName, "-n", cfg.«namespace»]
-    return ()
+    throw (IO.userError "Operator deployment failed")
 
   IO.eprintln s!"# Operator ready, waiting 10s for first reconcile cycle..."
   IO.sleep 10000

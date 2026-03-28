@@ -295,8 +295,8 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
         ({ s with reconcileStep := .AfterDetectDead,
                   livePodKeys := pods,
                   deadNodeKeys := deadKeys }, none, [])
-    | _ =>
-      ({ s with reconcileStep := .Error "unexpected response at AfterListPods" }, none, [])
+    | other =>
+      ({ s with reconcileStep := .Error s!"unexpected response at AfterListPods: {repr other}" }, none, [])
 
   | .AfterDetectDead =>
     -- Blast Radius Circuit Breaker: Check if failure is too large (AZ-level)

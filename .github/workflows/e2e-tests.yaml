@@ -59,6 +59,9 @@ jobs:
           kind load docker-image flare-operator:test --name flare-e2e
           kind load docker-image flare-node:test --name flare-e2e
 
+      - name: Create namespace
+        run: kubectl create namespace flare-system --dry-run=client -o yaml | kubectl apply -f -
+
       - name: Install CRD
         run: kubectl apply -f deploy/crd.yaml
 
@@ -68,7 +71,6 @@ jobs:
       - name: Deploy operator
         run: |
           # Use simple deployment manifest instead of Helm to avoid timeout issues in CI
-          kubectl create namespace flare-system --dry-run=client -o yaml | kubectl apply -f -
           sed 's|flare-operator:latest|flare-operator:test|;s|IfNotPresent|Never|' \
             deploy/operator.yaml | kubectl apply -f -
 

@@ -390,9 +390,14 @@ def waitForStable (cfg : ClusterConfig) (graceSec : Nat := 50) : IO Bool := do
     return (entries.length >= numPods)
   if !nodesRegistered then return false
 
-  -- Grace period for startup
-  IO.eprintln s!"# Waiting {graceSec}s grace period..."
+  -- Grace period for startup and initial reconciliation
+  IO.eprintln s!"# Waiting {graceSec}s grace period for operator reconciliation..."
   IO.sleep (graceSec * 1000).toUInt32
+
+  -- Verify operator is reconciling by checking recent logs
+  IO.eprintln s!"# Checking operator activity..."
+  dumpOperatorLogs cfg
+
   return true
 
 end FlareOperator.E2E.Setup

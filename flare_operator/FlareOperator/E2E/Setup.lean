@@ -238,6 +238,13 @@ private def applyYaml (yaml : String) : IO Unit := do
   catch e =>
     IO.eprintln s!"# kubectl apply error: {e}"
 
+/-- Dump operator logs for debugging failures. -/
+def dumpOperatorLogs (cfg : ClusterConfig) : IO Unit := do
+  IO.eprintln s!"# --- Operator logs ({cfg.operatorName}) ---"
+  let logs ← kubectlLogsLabel s!"app={cfg.operatorName}" cfg.«namespace» 30
+  for line in logs.splitOn "\n" do
+    IO.eprintln s!"#   {line}"
+
 /-- Deploy a full cluster: namespace → CRD/RBAC → FlareCluster CR → partition services →
     debug pod → empty ConfigMap → operator → StatefulSet -/
 def deployCluster (cfg : ClusterConfig) : IO Unit := do
@@ -287,12 +294,20 @@ def deployCluster (cfg : ClusterConfig) : IO Unit := do
   applyYaml (operatorDeploymentYaml cfg)
 
   -- Wait for operator to be ready
-  let _ ← kubectlRolloutStatus s!"deployment/{cfg.operatorName}" cfg.«namespace» 120
+  IO.eprintln s!"# Waiting for operator deployment to be ready..."
+  let operatorReady ← kubectlRolloutStatus s!"deployment/{cfg.operatorName}" cfg.«namespace» 120
+  if !operatorReady then
+    IO.eprintln s!"# ERROR: Operator deployment failed to become ready"
+    dumpOperatorLogs cfg
+    let _ ← kubectl ["get", "pods", "-n", cfg.«namespace»]
+    let _ ← kubectl ["describe", "deployment", cfg.operatorName, "-n", cfg.«namespace»]
+    return ()
 
-  -- Extra wait for the first reconcile cycle to fetch the CRD
+  IO.eprintln s!"# Operator ready, waiting 10s for first reconcile cycle..."
   IO.sleep 10000
 
   -- Deploy StatefulSet
+  IO.eprintln s!"# Deploying StatefulSet..."
   applyYaml (statefulSetYaml cfg)
 
 /-- Deploy a second cluster for inter-cluster replication tests. -/
@@ -349,9 +364,15 @@ def waitForStable (cfg : ClusterConfig) (graceSec : Nat := 50) : IO Bool := do
   let numPods := cfg.partitions * cfg.replicas
 
   -- Wait for StatefulSet rollout
+  IO.eprintln s!"# Waiting for StatefulSet {cfg.name}-nodes to be ready..."
   let rolloutOk ← kubectlRolloutStatus s!"statefulset/{cfg.name}-nodes" cfg.«namespace» 300
   if !rolloutOk then
-    IO.eprintln s!"# StatefulSet rollout failed"
+    IO.eprintln s!"# ERROR: StatefulSet rollout failed"
+    IO.eprintln s!"# Dumping debug info..."
+    let _ ← kubectl ["get", "pods", "-n", cfg.«namespace», "-l", s!"cluster={cfg.name}"]
+    let _ ← kubectl ["describe", "statefulset", s!"{cfg.name}-nodes", "-n", cfg.«namespace»]
+    let _ ← kubectl ["get", "events", "-n", cfg.«namespace», "--sort-by=.lastTimestamp"]
+    dumpOperatorLogs cfg
     return false
 
   -- Wait for all pods to be ready
@@ -373,12 +394,5 @@ def waitForStable (cfg : ClusterConfig) (graceSec : Nat := 50) : IO Bool := do
   IO.eprintln s!"# Waiting {graceSec}s grace period..."
   IO.sleep (graceSec * 1000).toUInt32
   return true
-
-/-- Dump operator logs for debugging failures. -/
-def dumpOperatorLogs (cfg : ClusterConfig) : IO Unit := do
-  IO.eprintln s!"# --- Operator logs ({cfg.operatorName}) ---"
-  let logs ← kubectlLogsLabel s!"app={cfg.operatorName}" cfg.«namespace» 30
-  for line in logs.splitOn "\n" do
-    IO.eprintln s!"#   {line}"
 
 end FlareOperator.E2E.Setup

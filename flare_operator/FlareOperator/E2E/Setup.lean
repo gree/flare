@@ -41,6 +41,34 @@ def ClusterConfig.withUniqueNamespace (cfg : ClusterConfig) : IO ClusterConfig :
 -- YAML Generation
 -- ===========================================================================
 
+/-- Generate ServiceAccount for the operator in the test namespace. -/
+def serviceAccountYaml (cfg : ClusterConfig) : String :=
+  let ns := cfg.«namespace»
+  s!"apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: flare-operator
+  namespace: {ns}"
+
+/-- Generate ClusterRoleBinding for the operator ServiceAccount in test namespace.
+    This binds the global flare-operator ClusterRole (created by deploy/rbac.yaml in CI)
+    to the namespace-specific ServiceAccount. -/
+def clusterRoleBindingYaml (cfg : ClusterConfig) : String :=
+  let ns := cfg.«namespace»
+  let bindingName := s!"flare-operator-{ns}"
+  s!"apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {bindingName}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: flare-operator
+subjects:
+  - kind: ServiceAccount
+    name: flare-operator
+    namespace: {ns}"
+
 /-- Generate operator Deployment + Service YAML. -/
 def operatorDeploymentYaml (cfg : ClusterConfig) : String :=
   let name := cfg.operatorName
@@ -218,9 +246,13 @@ def deployCluster (cfg : ClusterConfig) : IO Unit := do
   -- Ensure namespace
   let _ ← kubectl ["create", "namespace", cfg.«namespace»]
 
-  -- Apply CRD and RBAC
+  -- Apply CRD (cluster-scoped, only needs to be done once)
   let _ ← kubectl ["apply", "-f", "deploy/crd.yaml"]
-  let _ ← kubectl ["apply", "-f", "deploy/rbac.yaml"]
+
+  -- Create ServiceAccount and ClusterRoleBinding in test namespace
+  -- (not using deploy/rbac.yaml which is hardcoded for flare-system namespace)
+  applyYaml (serviceAccountYaml cfg)
+  applyYaml (clusterRoleBindingYaml cfg)
 
   -- Create FlareCluster CR
   applyYaml (flareClusterCrdYaml cfg)
@@ -304,6 +336,9 @@ def cleanupCluster (cfg : ClusterConfig) : IO Unit := do
   kubectlDelete "lease" s!"{cfg.name}-operator-lease" ns
   for i in List.range cfg.partitions do
     kubectlDelete "service" s!"{cfg.name}-{i}" ns
+  -- Delete ClusterRoleBinding (cluster-scoped resource)
+  let bindingName := s!"flare-operator-{ns}"
+  let _ ← kubectl ["delete", "clusterrolebinding", bindingName, "--ignore-not-found"]
   -- Delete debug pod
   let _ ← kubectl ["delete", "pod", cfg.debugPod, "-n", ns,
                     "--force", "--grace-period=0", "--ignore-not-found"]

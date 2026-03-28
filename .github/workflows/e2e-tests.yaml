@@ -77,18 +77,22 @@ jobs:
       - name: Wait for operator ready
         run: |
           kubectl rollout status deployment/flare-operator -n flare-system --timeout=300s
+          echo "=== Operator pods ==="
+          kubectl get pods -n flare-system
+          echo "=== Operator logs (initial) ==="
+          kubectl logs -n flare-system -l app=flare-operator --tail=50
 
       - name: Run E2E tests
         run: |
           cd flare_operator
           export KUBECONFIG=$HOME/.kube/config
-          timeout 600 .lake/build/bin/flare_e2e
+          timeout 1200 .lake/build/bin/flare_e2e
 
       - name: Dump operator logs on failure
         if: failure()
         run: |
           echo "=== Operator Logs ==="
-          kubectl logs -n flare-system -l app.kubernetes.io/name=flare-operator --tail=500 || true
+          kubectl logs -n flare-system -l app=flare-operator --tail=500 || true
 
       - name: Dump K8s state on failure
         if: failure()

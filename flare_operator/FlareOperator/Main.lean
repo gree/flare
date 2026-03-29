@@ -594,14 +594,18 @@ private def reconcileOnce (stateRef : IO.Ref FlareClusterState) (crdRef : IO.Ref
   -- 5c. Assign roles to any Proxy nodes (triggers role shift in flared)
   let currentState ← stateRef.get
   let crd ← crdRef.get
+  let proxyCount := currentState.nodeMap.foldl (init := 0) fun count (_, node) =>
+    if node.role == FlareRole.Proxy then count + 1 else count
   let stateAfterAssignment := assignProxies currentState crd
   if stateAfterAssignment.nodeMapVersion != currentState.nodeMapVersion then
     stateRef.set stateAfterAssignment
-    let proxyCount := currentState.nodeMap.foldl (init := 0) fun count (_, node) =>
-      if node.role == FlareRole.Proxy then count + 1 else count
     IO.eprintln s!"[flare-operator] assigned {proxyCount} proxy node(s) to roles (v{currentState.nodeMapVersion} → v{stateAfterAssignment.nodeMapVersion})"
     -- Update node counts after assignment
     updateNodeCounts metrics stateAfterAssignment
+  else
+    -- No assignment happened - log if there were proxies
+    if proxyCount != 0 then
+      IO.eprintln s!"[flare-operator] DEBUG: {proxyCount} proxy nodes but no assignments (CRD: {crd.spec.partitions}P × {crd.spec.replicas}R)"
 
   -- 6. Update ConfigMap for observability
   let currentState ← stateRef.get

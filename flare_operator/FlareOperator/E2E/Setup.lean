@@ -314,8 +314,19 @@ def deployCluster (cfg : ClusterConfig) : IO Unit := do
 def deploySecondCluster (cfg : ClusterConfig) : IO Unit := do
   IO.eprintln s!"# Deploying second cluster '{cfg.name}'"
 
+  -- Ensure namespace exists
+  let _ ← kubectl ["create", "namespace", cfg.«namespace»]
+
+  -- Create ServiceAccount and ClusterRoleBinding in second cluster's namespace
+  applyYaml (serviceAccountYaml cfg)
+  applyYaml (clusterRoleBindingYaml cfg)
+
   -- Create FlareCluster CR
   applyYaml (flareClusterCrdYaml cfg)
+
+  -- Create partition services
+  for i in List.range cfg.partitions do
+    applyYaml (partitionServiceYaml cfg i)
 
   -- Create empty ConfigMap for replication config
   let cmName := s!"{cfg.name}-config"
@@ -327,6 +338,17 @@ def deploySecondCluster (cfg : ClusterConfig) : IO Unit := do
     let _ := result
     pure ()
   catch _ => pure ()
+
+  -- Create debug pod
+  try
+    let result ← IO.Process.output {
+      cmd := "sh"
+      args := #["-c", s!"kubectl run {cfg.debugPod} --namespace={cfg.«namespace»} --image=busybox:1.36 --restart=Never --command -- sleep 3600 2>/dev/null || true"]
+    }
+    let _ := result
+    pure ()
+  catch _ => pure ()
+  let _ ← kubectlWaitReady s!"pod/{cfg.debugPod}" cfg.«namespace» 60
 
   -- Deploy operator
   applyYaml (operatorDeploymentYaml cfg)

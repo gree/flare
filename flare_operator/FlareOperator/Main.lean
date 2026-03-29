@@ -441,13 +441,29 @@ private partial def runReconcileFSMLoop
     | some req =>
       let resp ← executeK8sRequest req crName ns
       let cs2 ← stateRef.get
-      let (nextState, _, moreEffects) := K8sReconciler.flareReconcileCore resp newState cs2
+      let (nextState, nextReqOpt, moreEffects) := K8sReconciler.flareReconcileCore resp newState cs2
       executeEffects moreEffects crName ns stateRef migrationRef
 
       -- Update cluster state if FSM produced a new one
       if let some ucs := nextState.updatedClusterState then
         stateRef.set ucs
-      runReconcileFSMLoop nextState stateRef migrationRef graceCyclesRef crName ns
+
+      -- CRITICAL FIX: Check if FSM issued another request.
+      -- If yes, nextState is in a "waiting for response" state and must NOT be called
+      -- with .NoResponse. We need to execute the request first.
+      match nextReqOpt with
+      | some nextReq =>
+        -- FSM issued another request - execute it before recursing
+        let nextResp ← executeK8sRequest nextReq crName ns
+        let cs3 ← stateRef.get
+        let (finalState, _, finalEffects) := K8sReconciler.flareReconcileCore nextResp nextState cs3
+        executeEffects finalEffects crName ns stateRef migrationRef
+        if let some ucs := finalState.updatedClusterState then
+          stateRef.set ucs
+        runReconcileFSMLoop finalState stateRef migrationRef graceCyclesRef crName ns
+      | none =>
+        -- No new request - safe to recurse (nextState is in an "action" state)
+        runReconcileFSMLoop nextState stateRef migrationRef graceCyclesRef crName ns
     | none =>
       -- No request: update cluster state if FSM produced one and continue
       if let some ucs := newState.updatedClusterState then

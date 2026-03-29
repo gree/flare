@@ -345,7 +345,8 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
     | .error _ => pure (.CRDResponse none)
   | .ListPods =>
     let pods ← Bridge.listFlaredPods crName ns
-    let podKeys := pods.map (fun p => s!"{p.name}")
+    -- Convert pod names to node keys (FQDNs with port) to match nodeMap keys
+    let podKeys := pods.map Bridge.PodInfo.toNodeKey
     pure (.PodListResponse podKeys)
   | .PatchService =>
     -- Service patching happens in executeEffects (PatchService effect)

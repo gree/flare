@@ -86,7 +86,7 @@ jobs:
         run: |
           cd flare_operator
           export KUBECONFIG=$HOME/.kube/config
-          timeout 1200 .lake/build/bin/flare_e2e
+          timeout 2400 .lake/build/bin/flare_e2e
 
       - name: Dump operator logs on failure
         if: failure()

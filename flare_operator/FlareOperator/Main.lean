@@ -214,6 +214,7 @@ private def handleClusterReplication
     (crd : FlareClusterView) (pods : List PodInfo)
     (migrationRef : IO.Ref MigrationPhase) (crName ns : String) : IO Unit := do
   let repl := crd.spec.clusterReplication
+  IO.eprintln s!"[DEBUG] handleClusterReplication: enabled={repl.enabled}"
   if !repl.enabled then
     -- If replication was active but now disabled, clear config and reset
     let phase ← migrationRef.get
@@ -226,14 +227,17 @@ private def handleClusterReplication
     return
 
   let phase ← migrationRef.get
+  IO.eprintln s!"[DEBUG] handleClusterReplication: current phase={phase.toString}"
   match phase with
   | .None =>
     -- Start replication: write config with mode=duplicate, SIGHUP, set Dumping
+    IO.eprintln s!"[DEBUG] handleClusterReplication: calling updateFlaredReplicationConfig"
     match ← updateFlaredReplicationConfig crName ns repl with
     | .error e =>
-      IO.eprintln s!"[flare-operator] warning: failed to write replication config: {e}"
+      IO.eprintln s!"[flare-operator] ERROR: failed to write replication config: {e}"
       return
-    | .ok () => pure ()
+    | .ok () =>
+      IO.eprintln s!"[DEBUG] handleClusterReplication: ConfigMap updated successfully"
     sendSighupToPods crName ns
     migrationRef.set .Dumping
     match ← patchFlareClusterStatus crName ns .Dumping with

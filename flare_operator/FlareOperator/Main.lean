@@ -246,6 +246,32 @@ private def handleClusterReplication
     IO.eprintln s!"[TRACE] ClusterReplication: None->Dumping | Reason: replication enabled (mode=duplicate)"
 
   | .Dumping =>
+    -- Ensure ConfigMap exists (handle operator restart during Dumping phase)
+    -- Check if ConfigMap has replication settings, if not, recreate it
+    let cmName := s!"{crName}-config"
+    match ← readFlaredConfigMap cmName ns with
+    | .error _ =>
+      -- ConfigMap doesn't exist or can't be read - recreate it
+      IO.eprintln s!"[flare-operator] WARNING: Dumping phase but ConfigMap missing, recreating..."
+      match ← updateFlaredReplicationConfig crName ns repl with
+      | .error e =>
+        IO.eprintln s!"[flare-operator] ERROR: failed to recreate replication config: {e}"
+        return
+      | .ok () =>
+        IO.eprintln s!"[DEBUG] handleClusterReplication: ConfigMap recreated in Dumping phase"
+        sendSighupToPods crName ns
+    | .ok data =>
+      -- ConfigMap exists, check if it has replication settings
+      if !containsSubstr data "cluster-replication" then
+        IO.eprintln s!"[flare-operator] WARNING: ConfigMap exists but missing replication settings, updating..."
+        match ← updateFlaredReplicationConfig crName ns repl with
+        | .error e =>
+          IO.eprintln s!"[flare-operator] ERROR: failed to update replication config: {e}"
+          return
+        | .ok () =>
+          IO.eprintln s!"[DEBUG] handleClusterReplication: ConfigMap updated in Dumping phase"
+          sendSighupToPods crName ns
+
     -- Monitor: query all ready pods for dump_replication thread status
     -- (only masters actually run dump_replication threads; checking all is safe)
     let readyPods := pods.filter fun p => p.ready
@@ -290,7 +316,7 @@ private def countActivePartitions (state : FlareClusterState) : Nat :=
 /-- Detect unsafe partition reduction and warn the user.
     Returns true if partition reduction was detected (and blocked). -/
 private def detectPartitionReduction (state : FlareClusterState) (crd : FlareClusterView)
-    (crName : String) : IO Bool := do
+    (_crName : String) : IO Bool := do
   let currentPartitions := countActivePartitions state
   let desiredPartitions := crd.spec.partitions
 
@@ -775,6 +801,7 @@ def main (args : List String) : IO Unit := do
         IO.eprintln s!"[flare-operator] CRITICAL: could not fetch CRD after retries, META will return wrong partition-size"
       pure result
   let crdRef ← IO.mkRef initialCrd
+  -- Always start from None phase - operator manages migration state internally
   let migrationRef ← IO.mkRef MigrationPhase.None
 
   -- Startup grace period: skip dead node detection for the first 6 reconcile cycles

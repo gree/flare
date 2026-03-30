@@ -106,9 +106,8 @@ def findPartitionNeedingSlaveAux (state : FlareClusterState) (numPartitions : Na
   | 0 => none
   | fuel + 1 =>
     if i >= numPartitions then none
-    -- Throttling: only assign if partition needs slaves AND no ongoing reconstruction
-    else if slaveCountForPartition state i < maxSlaves
-         && !isPartitionReconstructing state i then
+    -- Assign if partition needs more slaves (scale-out scenario)
+    else if slaveCountForPartition state i < maxSlaves then
       some i
     else findPartitionNeedingSlaveAux state numPartitions maxSlaves (i + 1) fuel
 

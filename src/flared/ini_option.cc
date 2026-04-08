@@ -87,6 +87,16 @@ ini_option::ini_option():
 		_cluster_replication_server_port(default_server_port),
 		_cluster_replication_concurrency(default_proxy_concurrency),
 		_cluster_replication_mode(""),
+		_rocksdb_block_cache_size_mb(default_rocksdb_block_cache_size_mb),
+		_rocksdb_write_buffer_size_mb(default_rocksdb_write_buffer_size_mb),
+		_rocksdb_max_write_buffer_number(default_rocksdb_max_write_buffer_number),
+		_rocksdb_wal_ttl_seconds(default_rocksdb_wal_ttl_seconds),
+		_rocksdb_wal_size_limit_mb(default_rocksdb_wal_size_limit_mb),
+		_rocksdb_sync_writes(false),
+		_rocksdb_resync_failure_threshold(default_rocksdb_resync_failure_threshold),
+		_rocksdb_wal_max_batch_bytes(default_rocksdb_wal_max_batch_bytes),
+		_rocksdb_wal_sync_bwlimit(default_rocksdb_wal_sync_bwlimit),
+		_rocksdb_wal_sync_interval(default_rocksdb_wal_sync_interval),
 		_log_stderr(false) {
 	pthread_mutex_init(&this->_mutex_index_servers, NULL);
 }
@@ -393,6 +403,37 @@ int ini_option::load() {
 		} else {
 			this->_cluster_replication_mode = cluster_replication::mode_cast(cluster_replication::mode_duplicate);
 		}
+
+		if (opt_var_map.count("rocksdb-block-cache-size-mb")) {
+			this->_rocksdb_block_cache_size_mb = opt_var_map["rocksdb-block-cache-size-mb"].as<uint64_t>();
+		}
+		if (opt_var_map.count("rocksdb-write-buffer-size-mb")) {
+			this->_rocksdb_write_buffer_size_mb = opt_var_map["rocksdb-write-buffer-size-mb"].as<uint64_t>();
+		}
+		if (opt_var_map.count("rocksdb-max-write-buffer-number")) {
+			this->_rocksdb_max_write_buffer_number = opt_var_map["rocksdb-max-write-buffer-number"].as<int>();
+		}
+		if (opt_var_map.count("rocksdb-wal-ttl-seconds")) {
+			this->_rocksdb_wal_ttl_seconds = opt_var_map["rocksdb-wal-ttl-seconds"].as<uint64_t>();
+		}
+		if (opt_var_map.count("rocksdb-wal-size-limit-mb")) {
+			this->_rocksdb_wal_size_limit_mb = opt_var_map["rocksdb-wal-size-limit-mb"].as<uint64_t>();
+		}
+		if (opt_var_map.count("rocksdb-sync-writes")) {
+			this->_rocksdb_sync_writes = opt_var_map["rocksdb-sync-writes"].as<bool>();
+		}
+		if (opt_var_map.count("rocksdb-resync-failure-threshold")) {
+			this->_rocksdb_resync_failure_threshold = opt_var_map["rocksdb-resync-failure-threshold"].as<int>();
+		}
+		if (opt_var_map.count("rocksdb-wal-max-batch-bytes")) {
+			this->_rocksdb_wal_max_batch_bytes = opt_var_map["rocksdb-wal-max-batch-bytes"].as<uint64_t>();
+		}
+		if (opt_var_map.count("rocksdb-wal-sync-bwlimit")) {
+			this->_rocksdb_wal_sync_bwlimit = opt_var_map["rocksdb-wal-sync-bwlimit"].as<int>();
+		}
+		if (opt_var_map.count("rocksdb-wal-sync-interval")) {
+			this->_rocksdb_wal_sync_interval = opt_var_map["rocksdb-wal-sync-interval"].as<int>();
+		}
 	} catch (int e) {
 		cout << option << endl;
 		return -1;
@@ -654,7 +695,17 @@ int ini_option::_setup_config_option(program_options::options_description& optio
 		("cluster-replication-server-name",	program_options::value<string>(),	"destination server name to replicate over cluster (dynamic)")
 		("cluster-replication-server-port",	program_options::value<int>(),		"destination server port to replicate over cluster (dynamic)")
 		("cluster-replication-concurrency",	program_options::value<int>(),		"concurrency to replicate over cluster")
-		("cluster-replication-mode",				program_options::value<string>(),	"cluster replication mode (write, read, both) (write)");
+		("cluster-replication-mode",				program_options::value<string>(),	"cluster replication mode (write, read, both) (write)")
+		("rocksdb-block-cache-size-mb",		program_options::value<uint64_t>(),	"RocksDB block cache size in MB (default 512, rocksdb only)")
+		("rocksdb-write-buffer-size-mb",	program_options::value<uint64_t>(),	"RocksDB memtable write buffer size in MB (default 64, rocksdb only)")
+		("rocksdb-max-write-buffer-number",	program_options::value<int>(),		"RocksDB max number of memtables (default 3, rocksdb only)")
+		("rocksdb-wal-ttl-seconds",				program_options::value<uint64_t>(),	"RocksDB WAL retention window in seconds; controls how far a slave may fall behind before full-dump is forced (default 86400, rocksdb only)")
+		("rocksdb-wal-size-limit-mb",			program_options::value<uint64_t>(),	"RocksDB WAL retention size cap in MB (default 10240, rocksdb only)")
+		("rocksdb-sync-writes",						program_options::value<bool>(),		"force fsync on every RocksDB write for strict durability (default false, rocksdb only)")
+		("rocksdb-resync-failure-threshold",program_options::value<int>(),		"consecutive WAL/dump resync failures before the slave self-demotes to down state; data is preserved (default 3, rocksdb only)")
+		("rocksdb-wal-max-batch-bytes",		program_options::value<uint64_t>(),	"max size of a single replicated RocksDB WriteBatch; batches beyond this abort WAL sync and fall back to full dump (default 16MB, 0 disables, rocksdb only)")
+		("rocksdb-wal-sync-bwlimit",			program_options::value<int>(),		"bandwidth limit in KB/s for WAL incremental sync; 0 inherits reconstruction-bwlimit (default 0, rocksdb only)")
+		("rocksdb-wal-sync-interval",			program_options::value<int>(),		"inter-batch delay in usec for WAL incremental sync; 0 inherits reconstruction-interval (default 0, rocksdb only)");
 
 	return 0;
 }

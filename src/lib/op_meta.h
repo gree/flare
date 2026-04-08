@@ -41,18 +41,27 @@ namespace flare {
 class op_meta : public op {
 protected:
 	cluster*	_cluster;
+	storage*	_storage;
+	string		_meta_key;  // "features" for capability negotiation, empty for cluster metadata
 
 public:
-	op_meta(shared_connection c, cluster* cl);
+	op_meta(shared_connection c, cluster* cl, storage* st = NULL);
 	virtual ~op_meta();
 
 	virtual int run_client(int& partition_size, storage::hash_algorithm& key_hash_algorithm, key_resolver::type& key_resolver_type, int& key_resolver_modular_hint, int& key_resolver_modular_virtual);
+	virtual int run_client_features(bool& rocksdb_wal_supported);
+	// Extended features probe that also returns the server's master
+	// identity token. Empty string means "server did not advertise a
+	// token" (e.g. non-RocksDB backend or older flared).
+	virtual int run_client_features(bool& rocksdb_wal_supported, string& master_id);
 
 protected:
 	virtual int _parse_text_server_parameters();
 	virtual int _run_server();
 	virtual int _run_client();
+	virtual int _run_client_features();
 	virtual int _parse_text_client_parameters(int& partition_size, storage::hash_algorithm& key_hash_algorithm, key_resolver::type& key_resolver_type, int& key_resolver_modular_hint, int& key_resolver_modular_virtual);
+	virtual int _parse_text_client_features(bool& rocksdb_wal_supported, string& master_id);
 };
 
 }	// namespace flare

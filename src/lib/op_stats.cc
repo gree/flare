@@ -30,6 +30,9 @@
 #include "op_stats.h"
 #include "binary_request_header.h"
 #include "binary_response_header.h"
+#ifdef HAVE_LIBROCKSDB
+#include "storage_rocksdb.h"
+#endif
 
 namespace gree {
 namespace flare {
@@ -160,6 +163,32 @@ int op_stats::_send_stats(thread_pool* req_tp, thread_pool* other_tp, storage* s
 	_send_stat("threads"							, stats_object->get_threads(req_tp, other_tp));
 	_send_stat("pool_threads" 				, stats_object->get_pool_threads(req_tp, other_tp));
 	_send_stat("node_map_version"		, cl->get_node_map_version());
+
+#ifdef HAVE_LIBROCKSDB
+	// RocksDB WAL-replication observability. Only emitted when the
+	// storage backend is actually RocksDB so non-RocksDB deployments
+	// see no change in `stats` output.
+	if (st && st->get_type() == storage::type_rocksdb) {
+		storage_rocksdb* rdb = dynamic_cast<storage_rocksdb*>(st);
+		if (rdb) {
+			_send_stat("rocksdb_master_id"                  , rdb->get_master_id());
+			_send_stat("rocksdb_repl_last_lsn"              , rdb->get_repl_last_lsn());
+			_send_stat("rocksdb_latest_sequence_number"     , rdb->get_latest_sequence_number());
+			_send_stat("rocksdb_wal_sync_success"           , rdb->get_wal_sync_success());
+			_send_stat("rocksdb_wal_sync_lsn_purged"        , rdb->get_wal_sync_lsn_purged());
+			_send_stat("rocksdb_wal_sync_lsn_ahead"         , rdb->get_wal_sync_lsn_ahead());
+			_send_stat("rocksdb_wal_sync_master_id_mismatch", rdb->get_wal_sync_master_id_mismatch());
+			_send_stat("rocksdb_wal_sync_apply_failure"     , rdb->get_wal_sync_apply_failure());
+			_send_stat("rocksdb_wal_sync_other_error"       , rdb->get_wal_sync_other_error());
+			_send_stat("rocksdb_wal_fallback_to_dump"       , rdb->get_wal_fallback_to_dump());
+			_send_stat("rocksdb_resync_failure_count"       , rdb->get_resync_failure_count());
+			_send_stat("rocksdb_resync_failure_threshold"   , rdb->get_resync_failure_threshold());
+			_send_stat("rocksdb_wal_max_batch_bytes"        , rdb->get_wal_max_batch_bytes());
+			_send_stat("rocksdb_wal_sync_bwlimit"           , rdb->get_wal_sync_bwlimit());
+			_send_stat("rocksdb_wal_sync_interval"          , rdb->get_wal_sync_interval());
+		}
+	}
+#endif
 
 	return 0;
 }

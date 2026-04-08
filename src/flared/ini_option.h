@@ -97,6 +97,27 @@ private:
 	int					_cluster_replication_server_port;
 	int					_cluster_replication_concurrency;
 	string			_cluster_replication_mode;
+
+	// RocksDB backend tuning (ignored when storage-type != rocksdb).
+	uint64_t		_rocksdb_block_cache_size_mb;
+	uint64_t		_rocksdb_write_buffer_size_mb;
+	int				_rocksdb_max_write_buffer_number;
+	uint64_t		_rocksdb_wal_ttl_seconds;
+	uint64_t		_rocksdb_wal_size_limit_mb;
+	bool			_rocksdb_sync_writes;
+	int				_rocksdb_resync_failure_threshold;
+	// Hard cap on a single replicated WriteBatch in bytes. Batches
+	// beyond this limit abort WAL sync with SERVER_ERROR batch_too_large
+	// and the caller falls back to full-dump replication. 0 disables.
+	uint64_t		_rocksdb_wal_max_batch_bytes;
+	// Throttling for the WAL-sync path. 0 = inherit the global
+	// reconstruction-bwlimit / reconstruction-interval so that
+	// operators can leave them at zero and have WAL sync share the
+	// existing tuning, while still letting them override with
+	// WAL-specific values when the two phases have different
+	// bandwidth budgets (e.g. daytime WAL vs. nightly full dump).
+	int				_rocksdb_wal_sync_bwlimit;
+	int				_rocksdb_wal_sync_interval;
 public:
 	static const int default_back_log = 30;
 	static const int default_index_server_port = 12120;
@@ -120,6 +141,18 @@ public:
 	static const int default_storage_lmemb = 128;
 	static const int default_storage_nmemb = 256;
 	static const int32_t default_storage_dfunit = 0;						// disable dynamic defragmentation
+	// RocksDB defaults — chosen to match the historical constructor
+	// defaults in storage_rocksdb.h so that existing deployments see
+	// no behavior change if they don't set these in flared.conf.
+	static const uint64_t default_rocksdb_block_cache_size_mb      = 512;
+	static const uint64_t default_rocksdb_write_buffer_size_mb     = 64;
+	static const int      default_rocksdb_max_write_buffer_number  = 3;
+	static const uint64_t default_rocksdb_wal_ttl_seconds          = 86400;
+	static const uint64_t default_rocksdb_wal_size_limit_mb        = 10240;
+	static const int      default_rocksdb_resync_failure_threshold = 3;
+	static const uint64_t default_rocksdb_wal_max_batch_bytes      = 16 * 1024 * 1024;  // 16 MB
+	static const int      default_rocksdb_wal_sync_bwlimit         = 0;  // inherit
+	static const int      default_rocksdb_wal_sync_interval        = 0;  // inherit
 	static const int default_thread_pool_size = 5;
 	static const uint32_t default_proxy_prior_netmask = 0x00;
 	static const uint32_t default_max_total_thread_queue = 0;				// unlimited
@@ -189,6 +222,17 @@ public:
 	int get_cluster_replication_server_port() { return this->_cluster_replication_server_port; }
 	int get_cluster_replication_concurrency() { return this->_cluster_replication_concurrency; };
 	string get_cluster_replication_mode() { return this->_cluster_replication_mode; }
+
+	uint64_t get_rocksdb_block_cache_size_mb() { return this->_rocksdb_block_cache_size_mb; }
+	uint64_t get_rocksdb_write_buffer_size_mb() { return this->_rocksdb_write_buffer_size_mb; }
+	int get_rocksdb_max_write_buffer_number() { return this->_rocksdb_max_write_buffer_number; }
+	uint64_t get_rocksdb_wal_ttl_seconds() { return this->_rocksdb_wal_ttl_seconds; }
+	uint64_t get_rocksdb_wal_size_limit_mb() { return this->_rocksdb_wal_size_limit_mb; }
+	bool is_rocksdb_sync_writes() { return this->_rocksdb_sync_writes; }
+	int get_rocksdb_resync_failure_threshold() { return this->_rocksdb_resync_failure_threshold; }
+	uint64_t get_rocksdb_wal_max_batch_bytes() { return this->_rocksdb_wal_max_batch_bytes; }
+	int get_rocksdb_wal_sync_bwlimit() { return this->_rocksdb_wal_sync_bwlimit; }
+	int get_rocksdb_wal_sync_interval() { return this->_rocksdb_wal_sync_interval; }
 
 private:
 	int _setup_cli_option(program_options::options_description& option);

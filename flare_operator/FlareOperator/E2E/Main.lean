@@ -16,6 +16,7 @@ import FlareOperator.E2E.Tests.ClusterReplication
 import FlareOperator.E2E.Tests.PartitionReduction
 import FlareOperator.E2E.Tests.WalRetentionConfig
 import FlareOperator.E2E.Tests.StrictDurability
+import FlareOperator.E2E.Tests.WalBandwidthThrottle
 
 open FlareOperator.E2E
 
@@ -30,5 +31,6 @@ def main (args : List String) : IO UInt32 :=
     Tests.ClusterReplication.suite,
     Tests.PartitionReduction.suite,
     Tests.WalRetentionConfig.suite,
-    Tests.StrictDurability.suite
+    Tests.StrictDurability.suite,
+    Tests.WalBandwidthThrottle.suite
   ] args

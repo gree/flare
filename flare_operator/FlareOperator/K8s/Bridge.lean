@@ -165,18 +165,36 @@ def sendSighupToPods (crName ns : String) : IO Unit := do
       IO.eprintln s!"[flare-operator] warning: SIGHUP to {pod.name} failed: {e}"
     | .ok _ => pure ()
 
-/-- Update (or create) a ConfigMap with cluster replication config.
-    ConfigMap name: {crName}-config, data key: "extra.conf" -/
-def updateFlaredReplicationConfig (crName ns : String) (repl : ClusterReplicationSpec)
+/-- Render `extra.conf` content from rocksdb + optional cluster-replication
+    sections. Sections are separated by a blank line when both are present so
+    the file stays readable. Returns the empty string when neither section has
+    anything to emit. -/
+def renderFlaredExtraConf (rocksdb : RocksdbConfigSpec)
+    (repl : Option ClusterReplicationSpec) : String :=
+  let rocksdbBlock := rocksdb.toExtraConf
+  let replBlock := match repl with
+    | some r =>
+      String.intercalate "\n" [
+        s!"cluster-replication = true",
+        s!"cluster-replication-server-name = {r.serverName}",
+        s!"cluster-replication-server-port = {r.port}",
+        s!"cluster-replication-mode = {r.mode}",
+        s!"cluster-replication-concurrency = {r.concurrency}"
+      ]
+    | none => ""
+  match rocksdbBlock, replBlock with
+  | "", "" => ""
+  | "", r  => r
+  | r,  "" => r
+  | a,  b  => a ++ "\n\n" ++ b
+
+/-- Apply a ConfigMap named `{crName}-config` with the given `extra.conf`
+    content via `kubectl create --dry-run=client -o yaml | kubectl apply -f -`.
+    This is an upsert: it creates the ConfigMap if missing, or replaces its
+    `extra.conf` key if present. -/
+private def applyExtraConfConfigMap (crName ns content : String)
     : IO (Except String Unit) := do
   let cmName := s!"{crName}-config"
-  let content := String.intercalate "\n" [
-    s!"cluster-replication = true",
-    s!"cluster-replication-server-name = {repl.serverName}",
-    s!"cluster-replication-server-port = {repl.port}",
-    s!"cluster-replication-mode = {repl.mode}",
-    s!"cluster-replication-concurrency = {repl.concurrency}"
-  ]
   try
     let result ← IO.Process.output {
       cmd := "sh"
@@ -186,9 +204,40 @@ def updateFlaredReplicationConfig (crName ns : String) (repl : ClusterReplicatio
     if result.exitCode == 0 then
       return .ok ()
     else
-      return .error s!"replication configmap update failed (exit {result.exitCode}): {result.stderr}"
+      return .error s!"extra.conf configmap apply failed (exit {result.exitCode}): {result.stderr}"
   catch e =>
-    return .error s!"replication configmap update error: {e}"
+    return .error s!"extra.conf configmap apply error: {e}"
+
+/-- Read the `extra.conf` key from `{crName}-config`, if present. -/
+def readFlaredExtraConf (crName ns : String) : IO (Except String String) := do
+  kubectl ["get", "configmap", s!"{crName}-config", "-n", ns,
+           "-o", "jsonpath={.data.extra\\.conf}"]
+
+/-- Update (or create) a ConfigMap with cluster replication config.
+    ConfigMap name: {crName}-config, data key: "extra.conf".
+
+    Preserves any rocksdb configuration passed in alongside the replication
+    spec: the rendered file contains both sections when `rocksdb.hasAny` is
+    true. -/
+def updateFlaredReplicationConfig (crName ns : String) (repl : ClusterReplicationSpec)
+    (rocksdb : RocksdbConfigSpec := {})
+    : IO (Except String Unit) := do
+  let content := renderFlaredExtraConf rocksdb (some repl)
+  applyExtraConfConfigMap crName ns content
+
+/-- Update (or create) the ConfigMap with only the rocksdb section.
+    Used when cluster-replication is disabled but the CR still sets
+    `spec.rocksdb.*` — we still need those lines in `extra.conf`.
+
+    No-op (returns .ok) if `rocksdb.hasAny` is false: we do not want to
+    overwrite a ConfigMap that may already contain other hand-edited keys
+    when the user has not asked for any rocksdb tuning. -/
+def updateFlaredRocksdbConfig (crName ns : String) (rocksdb : RocksdbConfigSpec)
+    : IO (Except String Unit) := do
+  if !rocksdb.hasAny then
+    return .ok ()
+  let content := renderFlaredExtraConf rocksdb none
+  applyExtraConfConfigMap crName ns content
 
 /-- Update CRD status.migrationPhase via kubectl patch. -/
 def patchFlareClusterStatus (crName ns : String) (phase : MigrationPhase)

@@ -35,9 +35,22 @@ private def getFlareClusterFromJson (json : Lean.Json) (name ns : String)
     mode := replObj.getObjValD "mode" |>.getStr?.toOption |>.getD "duplicate"
     concurrency := replObj.getObjValD "concurrency" |>.getNat?.toOption |>.getD 2
   }
+  let rocksdbObj := spec.getObjValD "rocksdb"
+  let rocksdb : RocksdbConfigSpec := {
+    walTtlSeconds := rocksdbObj.getObjValD "walTtlSeconds" |>.getNat?.toOption
+    walSizeLimitMb := rocksdbObj.getObjValD "walSizeLimitMb" |>.getNat?.toOption
+    syncWrites := rocksdbObj.getObjValD "syncWrites" |>.getBool?.toOption
+    resyncFailureThreshold := rocksdbObj.getObjValD "resyncFailureThreshold" |>.getNat?.toOption
+    walMaxBatchBytes := rocksdbObj.getObjValD "walMaxBatchBytes" |>.getNat?.toOption
+    walSyncBwlimit := rocksdbObj.getObjValD "walSyncBwlimit" |>.getNat?.toOption
+    walSyncInterval := rocksdbObj.getObjValD "walSyncInterval" |>.getNat?.toOption
+  }
   .ok {
     metadata := { name := some name, «namespace» := some ns }
-    spec := { partitions := partitions, replicas := replicas, clusterReplication := repl }
+    spec := {
+      partitions := partitions, replicas := replicas,
+      clusterReplication := repl, rocksdb := rocksdb
+    }
   }
 
 /-- Get a FlareCluster CR by name and namespace. Returns a minimal view. -/

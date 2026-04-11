@@ -14,6 +14,7 @@ import FlareOperator.E2E.Tests.ScaleInMaster
 import FlareOperator.E2E.Tests.ReplaceNodes
 import FlareOperator.E2E.Tests.ClusterReplication
 import FlareOperator.E2E.Tests.PartitionReduction
+import FlareOperator.E2E.Tests.WalRetentionConfig
 
 open FlareOperator.E2E
 
@@ -26,5 +27,6 @@ def main (args : List String) : IO UInt32 :=
     Tests.ScaleInMaster.suite,
     Tests.ReplaceNodes.suite,
     Tests.ClusterReplication.suite,
-    Tests.PartitionReduction.suite
+    Tests.PartitionReduction.suite,
+    Tests.WalRetentionConfig.suite
   ] args

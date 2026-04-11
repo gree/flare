@@ -70,6 +70,70 @@ structure ClusterReplicationSpec where
   concurrency : Nat := 2
   deriving Repr, BEq
 
+/-! ## RocksDB Storage Backend Configuration
+
+    Maps 1:1 to flared's `rocksdb-*` ini options. Fields are `Option` so an
+    unset field produces no line in the generated `extra.conf`, preserving
+    flared's built-in defaults. See `ROCKSDB_REPLICATION.md` for semantics. -/
+
+structure RocksdbConfigSpec where
+  /-- WAL retention time in seconds. flared: `rocksdb-wal-ttl-seconds`. -/
+  walTtlSeconds : Option Nat := none
+  /-- WAL size cap in megabytes. flared: `rocksdb-wal-size-limit-mb`. -/
+  walSizeLimitMb : Option Nat := none
+  /-- Force `sync=true` on every write for strict durability.
+      flared: `rocksdb-sync-writes`. -/
+  syncWrites : Option Bool := none
+  /-- Consecutive resync failures before the slave self-demotes.
+      flared: `rocksdb-resync-failure-threshold`. -/
+  resyncFailureThreshold : Option Nat := none
+  /-- Per-WriteBatch size ceiling (bytes) for WAL replication.
+      flared: `rocksdb-wal-max-batch-bytes`. -/
+  walMaxBatchBytes : Option Nat := none
+  /-- Bandwidth cap (KB/s) for WAL-sync streaming.
+      flared: `rocksdb-wal-sync-bwlimit`. -/
+  walSyncBwlimit : Option Nat := none
+  /-- Inter-batch delay (usec) for WAL-sync streaming.
+      flared: `rocksdb-wal-sync-interval`. -/
+  walSyncInterval : Option Nat := none
+  deriving Repr, BEq
+
+/-- True when at least one rocksdb field has been set by the user. -/
+def RocksdbConfigSpec.hasAny (r : RocksdbConfigSpec) : Bool :=
+  r.walTtlSeconds.isSome || r.walSizeLimitMb.isSome || r.syncWrites.isSome ||
+  r.resyncFailureThreshold.isSome || r.walMaxBatchBytes.isSome ||
+  r.walSyncBwlimit.isSome || r.walSyncInterval.isSome
+
+/-- Render the rocksdb spec as `extra.conf` lines (one per set field).
+    Returns an empty string when no fields are set. Lines are joined with "\n";
+    the caller is responsible for joining with other sections. -/
+def RocksdbConfigSpec.toExtraConf (r : RocksdbConfigSpec) : String :=
+  let lines : List String := []
+  let lines := match r.walTtlSeconds with
+    | some n => lines ++ [s!"rocksdb-wal-ttl-seconds = {n}"]
+    | none => lines
+  let lines := match r.walSizeLimitMb with
+    | some n => lines ++ [s!"rocksdb-wal-size-limit-mb = {n}"]
+    | none => lines
+  let lines := match r.syncWrites with
+    | some b =>
+      let v := if b then "true" else "false"
+      lines ++ [s!"rocksdb-sync-writes = {v}"]
+    | none => lines
+  let lines := match r.resyncFailureThreshold with
+    | some n => lines ++ [s!"rocksdb-resync-failure-threshold = {n}"]
+    | none => lines
+  let lines := match r.walMaxBatchBytes with
+    | some n => lines ++ [s!"rocksdb-wal-max-batch-bytes = {n}"]
+    | none => lines
+  let lines := match r.walSyncBwlimit with
+    | some n => lines ++ [s!"rocksdb-wal-sync-bwlimit = {n}"]
+    | none => lines
+  let lines := match r.walSyncInterval with
+    | some n => lines ++ [s!"rocksdb-wal-sync-interval = {n}"]
+    | none => lines
+  String.intercalate "\n" lines
+
 inductive MigrationPhase where
   | None | Dumping | Forwarding
   deriving Repr, BEq
@@ -111,6 +175,7 @@ structure FlareClusterSpecView where
   replicas : Nat := 1  -- 1 Master + (N-1) Slaves per partition
   clusterReplication : ClusterReplicationSpec := {}
   circuitBreaker : CircuitBreakerConfig := {}
+  rocksdb : RocksdbConfigSpec := {}
   deriving Repr
 
 structure FlareClusterView where

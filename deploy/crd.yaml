@@ -45,6 +45,41 @@ spec:
                     concurrency:
                       type: integer
                       default: 2
+                rocksdb:
+                  type: object
+                  description: >-
+                    RocksDB storage backend tuning. Fields map 1:1 to flared's
+                    rocksdb-* ini options and are only emitted into the
+                    cluster ConfigMap when explicitly set. See
+                    ROCKSDB_REPLICATION.md for semantics.
+                  properties:
+                    walTtlSeconds:
+                      type: integer
+                      minimum: 0
+                      description: WAL retention time in seconds (rocksdb-wal-ttl-seconds)
+                    walSizeLimitMb:
+                      type: integer
+                      minimum: 0
+                      description: WAL size cap in megabytes (rocksdb-wal-size-limit-mb)
+                    syncWrites:
+                      type: boolean
+                      description: Force sync=true on every write (rocksdb-sync-writes)
+                    resyncFailureThreshold:
+                      type: integer
+                      minimum: 1
+                      description: Consecutive resync failures before self-demote
+                    walMaxBatchBytes:
+                      type: integer
+                      minimum: 0
+                      description: Per-WriteBatch size ceiling for WAL replication
+                    walSyncBwlimit:
+                      type: integer
+                      minimum: 0
+                      description: Bandwidth cap (KB/s) for WAL-sync streaming
+                    walSyncInterval:
+                      type: integer
+                      minimum: 0
+                      description: Inter-batch delay (usec) for WAL-sync streaming
             status:
               type: object
               properties:

@@ -208,12 +208,47 @@ private def detectAndRestartLaggingPods (state : FlareClusterState) (pods : List
 -- Cluster Replication (Blue/Green Migration)
 -- ===========================================================================
 
+/-- Reconcile `spec.rocksdb` into the flared ConfigMap.
+
+    Runs unconditionally on every reconcile cycle, but is a fast no-op in two
+    cases: (1) the CR has no rocksdb fields set, or (2) the ConfigMap already
+    contains exactly the lines we would write. Only on a genuine change do we
+    re-apply and SIGHUP the pods so flared re-reads `extra.conf`.
+
+    This handler is intentionally independent of cluster-replication: a user
+    who wants rocksdb tuning but has not enabled blue/green migration still
+    needs these lines written. When cluster-replication IS enabled, the
+    `handleClusterReplication` path below renders a combined extra.conf
+    containing both sections, so the two handlers never fight. -/
+private def handleRocksdbConfig (crd : FlareClusterView) (crName ns : String) : IO Unit := do
+  let rocksdb := crd.spec.rocksdb
+  if !rocksdb.hasAny then
+    return  -- nothing to do; leave any existing ConfigMap alone
+  if crd.spec.clusterReplication.enabled then
+    return  -- handleClusterReplication will render both sections together
+  let desired := renderFlaredExtraConf rocksdb none
+  -- Skip if the ConfigMap already has exactly this content (avoid SIGHUP storm).
+  match ← readFlaredExtraConf crName ns with
+  | .ok current =>
+    if current == desired then
+      return
+  | .error _ =>
+    pure ()  -- missing or unreadable; fall through and (re)create it
+  IO.eprintln s!"[flare-operator] reconciling rocksdb config for {crName}"
+  match ← updateFlaredRocksdbConfig crName ns rocksdb with
+  | .error e =>
+    IO.eprintln s!"[flare-operator] ERROR: failed to write rocksdb config: {e}"
+  | .ok () =>
+    sendSighupToPods crName ns
+    IO.eprintln s!"[TRACE] RocksdbConfig: applied {rocksdb.toExtraConf.length} bytes, SIGHUP sent"
+
 /-- Handle cluster replication state machine.
     Manages the duplicate → forward mode transition autonomously. -/
 private def handleClusterReplication
     (crd : FlareClusterView) (pods : List PodInfo)
     (migrationRef : IO.Ref MigrationPhase) (crName ns : String) : IO Unit := do
   let repl := crd.spec.clusterReplication
+  let rocksdb := crd.spec.rocksdb
   IO.eprintln s!"[DEBUG] handleClusterReplication: enabled={repl.enabled}"
   if !repl.enabled then
     -- If replication was active but now disabled, clear config and reset
@@ -232,7 +267,7 @@ private def handleClusterReplication
   | .None =>
     -- Start replication: write config with mode=duplicate, SIGHUP, set Dumping
     IO.eprintln s!"[DEBUG] handleClusterReplication: calling updateFlaredReplicationConfig"
-    match ← updateFlaredReplicationConfig crName ns repl with
+    match ← updateFlaredReplicationConfig crName ns repl rocksdb with
     | .error e =>
       IO.eprintln s!"[flare-operator] ERROR: failed to write replication config: {e}"
       return
@@ -253,7 +288,7 @@ private def handleClusterReplication
     | .error _ =>
       -- ConfigMap doesn't exist or can't be read - recreate it
       IO.eprintln s!"[flare-operator] WARNING: Dumping phase but ConfigMap missing, recreating..."
-      match ← updateFlaredReplicationConfig crName ns repl with
+      match ← updateFlaredReplicationConfig crName ns repl rocksdb with
       | .error e =>
         IO.eprintln s!"[flare-operator] ERROR: failed to recreate replication config: {e}"
         return
@@ -264,7 +299,7 @@ private def handleClusterReplication
       -- ConfigMap exists, check if it has replication settings
       if !containsSubstr data "cluster-replication" then
         IO.eprintln s!"[flare-operator] WARNING: ConfigMap exists but missing replication settings, updating..."
-        match ← updateFlaredReplicationConfig crName ns repl with
+        match ← updateFlaredReplicationConfig crName ns repl rocksdb with
         | .error e =>
           IO.eprintln s!"[flare-operator] ERROR: failed to update replication config: {e}"
           return
@@ -286,7 +321,7 @@ private def handleClusterReplication
     if !dumpRunning then
       -- Dump complete → transition to forward mode
       let forwardRepl := { repl with mode := "forward" }
-      match ← updateFlaredReplicationConfig crName ns forwardRepl with
+      match ← updateFlaredReplicationConfig crName ns forwardRepl rocksdb with
       | .error e =>
         IO.eprintln s!"[flare-operator] warning: failed to update replication config to forward: {e}"
         return
@@ -656,8 +691,9 @@ private def reconcileOnce (stateRef : IO.Ref FlareClusterState) (crdRef : IO.Ref
     -- Update node map version gauge
     updateNodeMapVersion metrics finalVersion
 
-  -- 9. Handle cluster replication migration
+  -- 9. Handle cluster replication migration + rocksdb config propagation
   let crd ← crdRef.get
+  handleRocksdbConfig crd crName ns
   handleClusterReplication crd pods migrationRef crName ns
 
 -- ===========================================================================

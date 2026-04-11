@@ -11,9 +11,11 @@ stdenv.mkDerivation {
   buildInputs = [ autoconf automake libtool intltool glib m4 pkg-config ];
   patches = [../cutter.patch];
 
+  env.NIX_CFLAGS_COMPILE = "-Wno-error=incompatible-pointer-types -Wno-error=int-conversion -Wno-error=implicit-function-declaration -Wno-error";
+
   buildPhase = ''
     ./autogen.sh
-    ./configure --prefix=$out
+    ./configure --prefix=$out --disable-Werror
     make -j$NIX_BUILD_CORES
   '';
 

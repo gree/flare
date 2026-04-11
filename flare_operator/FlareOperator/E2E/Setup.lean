@@ -12,7 +12,15 @@ namespace FlareOperator.E2E.Setup
 open FlareOperator.E2E.Helpers
 open FlareOperator.Kubectl
 
-/-- Configuration for a Flare cluster deployment. -/
+/-- Configuration for a Flare cluster deployment.
+
+    `storageBackend` selects which flared image and `--storage-type` flag
+    to use. The default "tch" uses the existing `flare-node:test` image
+    (Tokyo Cabinet, no RocksDB code compiled in). Setting it to "rocksdb"
+    switches to `flare-node-rocksdb:test` which is built by
+    `Dockerfile.flare-node-rocksdb` and has the RocksDB backend + WAL
+    replication path compiled in. Only the rocksdb backend exposes the
+    `rocksdb_*` stats that the G1/G2/G5/G10-stats tests assert on. -/
 structure ClusterConfig where
   name : String
   «namespace» : String := "flare-system"
@@ -22,7 +30,15 @@ structure ClusterConfig where
   debugPod : String := "debug-e2e"
   flarePort : Nat := 12121
   operatorPort : Nat := 12120
+  /-- Storage backend: "tch" (default, Tokyo Cabinet) or "rocksdb". -/
+  storageBackend : String := "tch"
   deriving Repr
+
+/-- Image tag used for the flared container in this cluster. -/
+def ClusterConfig.flaredImage (cfg : ClusterConfig) : String :=
+  match cfg.storageBackend with
+  | "rocksdb" => "flare-node-rocksdb:test"
+  | _ => "flare-node:test"
 
 /-- Generate a unique namespace name using timestamp to avoid test conflicts.
     Format: {baseName}-{timestamp-ms}
@@ -132,6 +148,12 @@ def statefulSetYaml (cfg : ClusterConfig) : String :=
   let ns := cfg.«namespace»
   let numPods := cfg.partitions * cfg.replicas
   let operatorSvc := s!"{cfg.operatorName}.{ns}.svc.cluster.local"
+  let image := cfg.flaredImage
+  -- TCH stores a single `.hdb` file; RocksDB stores a directory. The
+  -- cleanup line below wipes whichever is there (plus a leftover WAL)
+  -- so a fresh pod always starts with an empty data directory.
+  let cleanup := "rm -rf /tmp/flare/*.hdb /tmp/flare/*.hdb.wal /tmp/flare/rocksdb"
+  let storageFlag := s!"--storage-type={cfg.storageBackend}"
   s!"apiVersion: v1
 kind: Service
 metadata:
@@ -171,12 +193,15 @@ spec:
       terminationGracePeriodSeconds: 5
       containers:
         - name: flared
-          image: flare-node:test
+          image: {image}
           imagePullPolicy: Never
-          command: [\"sh\", \"-c\", \"rm -rf /tmp/flare/*.hdb /tmp/flare/*.hdb.wal && mkdir -p /tmp/flare && exec flared --data-dir /tmp/flare --server-port {cfg.flarePort} --index-server-name {operatorSvc} --index-server-port {cfg.operatorPort} --stderr\"]
+          command: [\"sh\", \"-c\", \"{cleanup} && mkdir -p /tmp/flare && exec flared --config=/etc/flared/extra.conf --data-dir /tmp/flare --server-port {cfg.flarePort} --index-server-name {operatorSvc} --index-server-port {cfg.operatorPort} {storageFlag} --stderr\"]
           ports:
             - containerPort: {cfg.flarePort}
               name: flare
+          volumeMounts:
+            - name: flared-config
+              mountPath: /etc/flared
           livenessProbe:
             tcpSocket:
               port: {cfg.flarePort}
@@ -195,7 +220,11 @@ spec:
               memory: 256Mi
             limits:
               cpu: 500m
-              memory: 512Mi"
+              memory: 512Mi
+      volumes:
+        - name: flared-config
+          configMap:
+            name: {cluster}-config"
 
 /-- Generate FlareCluster CRD YAML. -/
 def flareClusterCrdYaml (cfg : ClusterConfig) : String :=

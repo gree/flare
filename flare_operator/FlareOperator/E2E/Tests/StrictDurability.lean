@@ -38,6 +38,9 @@ private def cfg : ClusterConfig := {
   replicas := 2
   operatorName := "flare-operator-strict-dur"
   debugPod := "debug-strict-dur"
+  -- RocksDB image: syncWrites is a rocksdb-only knob and the stats
+  -- check in test 5 requires rocksdb_sync_writes to be present.
+  storageBackend := "rocksdb"
 }
 
 /-- Poll the ConfigMap's `extra.conf` until it contains the given substring,

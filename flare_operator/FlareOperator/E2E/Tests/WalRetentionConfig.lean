@@ -37,6 +37,9 @@ private def cfg : ClusterConfig := {
   replicas := 2
   operatorName := "flare-operator-wal-retention"
   debugPod := "debug-wal-retention"
+  -- Use the RocksDB-enabled image so the stats check in test 5 actually
+  -- runs instead of skipping. See Dockerfile.flare-node-rocksdb.
+  storageBackend := "rocksdb"
 }
 
 /-- Poll the ConfigMap's `extra.conf` until it contains the given substring,

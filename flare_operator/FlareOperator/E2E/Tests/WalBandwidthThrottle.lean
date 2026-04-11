@@ -40,6 +40,8 @@ private def cfg : ClusterConfig := {
   replicas := 2
   operatorName := "flare-operator-wal-throttle"
   debugPod := "debug-wal-throttle"
+  -- RocksDB image: walSyncBwlimit/walSyncInterval are rocksdb-only knobs.
+  storageBackend := "rocksdb"
 }
 
 /-- Poll the ConfigMap's `extra.conf` until it contains the given substring,

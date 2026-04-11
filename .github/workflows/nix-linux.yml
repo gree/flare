@@ -3,7 +3,8 @@ name: nix-linux
 on: [push, pull_request]
 
 jobs:
-  build-cache:
+  test-legacy:
+    name: Test Legacy Build (without RocksDB)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
@@ -12,5 +13,36 @@ jobs:
           extra_nix_config: |
             experimental-features = nix-command flakes
           nix_path: nixpkgs=channel:nixos-unstable
-      - run: |
+      - name: Build and test legacy Flare
+        run: |
           nix build .#test-flare -L
+      - name: Verify RocksDB is NOT compiled
+        run: |
+          nix build .#flare -L
+          if nm result/bin/flared | grep -q rocksdb; then
+            echo "ERROR: RocksDB symbols found in legacy build"
+            exit 1
+          fi
+          echo "SUCCESS: Legacy build has no RocksDB dependencies"
+
+  test-rocksdb:
+    name: Test RocksDB Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: cachix/install-nix-action@v22
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+          nix_path: nixpkgs=channel:nixos-unstable
+      - name: Build and test Flare with RocksDB
+        run: |
+          nix build .#test-flare-rocksdb -L
+      - name: Verify RocksDB is compiled
+        run: |
+          nix build .#flare-rocksdb -L
+          if ! nm result/bin/flared | grep -q rocksdb; then
+            echo "ERROR: RocksDB symbols NOT found in RocksDB build"
+            exit 1
+          fi
+          echo "SUCCESS: RocksDB build has RocksDB dependencies"

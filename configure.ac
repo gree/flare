@@ -61,6 +61,19 @@ AS_IF([test "x$ac_cv_lib_kyotocabinet_main" = "xyes"],
 		])
 	])
 
+# RocksDB
+AC_ARG_WITH(rocksdb,
+	AS_HELP_STRING([--with-rocksdb], [rocksdb libraries]),
+	AS_IF([test "$withval" != "no"], [CXXFLAGS="${CXXFLAGS} -I${withval}/include" LDFLAGS="${LDFLAGS} -L${withval}/lib"], []))
+AS_IF([test "x$with_rocksdb" != "xno"],
+	[AC_CHECK_LIB(rocksdb, main, [], [])], [ac_cv_lib_rocksdb_main=no])
+AS_IF([test "x$ac_cv_lib_rocksdb_main" = "xyes"],
+	[],
+	[AS_IF([test "x$with_rocksdb" != "x" -a "x$with_rocksdb" != "xno"],
+		[AC_MSG_ERROR([rocksdb requested but not found])
+		])
+	])
+
 # libuuid
 AC_CHECK_LIB(uuid, main, [], [echo "libuuid not found"; exit 1])
 
@@ -81,6 +94,9 @@ AS_IF([test "x$ac_cv_lib_zookeeper_mt_main" = "xyes"],
 
 # Kyoto Cabinet
 AM_CONDITIONAL(ENABLE_KYOTOCABINET, test "$ac_cv_lib_kyotocabinet_main" = "yes")
+
+# RocksDB
+AM_CONDITIONAL(ENABLE_ROCKSDB, test "$ac_cv_lib_rocksdb_main" = "yes")
 
 # libzookeeper
 AM_CONDITIONAL(ENABLE_ZOOKEEPER, test "$ac_cv_lib_zookeeper_mt_main" = "yes")

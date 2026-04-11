@@ -54,6 +54,9 @@ libflare_la_SOURCES = \
 	op_keys.h op_keys.cc \
 	op_kill.h op_kill.cc \
 	op_meta.h op_meta.cc \
+	op_repl_sync_wal.h op_repl_sync_wal.cc \
+	op_orphan_scan.h op_orphan_scan.cc \
+	op_orphan_purge.h op_orphan_purge.cc \
 	op_node_add.h op_node_add.cc \
 	op_node_remove.h op_node_remove.cc \
 	op_node_role.h op_node_role.cc \
@@ -108,4 +111,7 @@ libflare_la_SOURCES += zookeeper_lock.h zookeeper_lock.cc zookeeper_coordinator.
 endif
 if ENABLE_KYOTOCABINET
 libflare_la_SOURCES += storage_kch.h storage_kch.cc
+endif
+if ENABLE_ROCKSDB
+libflare_la_SOURCES += storage_rocksdb.h storage_rocksdb.cc
 endif

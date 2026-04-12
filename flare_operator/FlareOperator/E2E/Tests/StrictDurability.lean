@@ -133,8 +133,13 @@ def suite : TestSuite := {
             return .fail s!"syncWrites was clobbered by second patch; actual: {content}"
           return .pass },
 
-    -- Test 5: flared stats reflect the sync-writes setting (best-effort)
-    { name := "flared stats expose rocksdb_sync_writes"
+    -- Test 5: flared is running with RocksDB backend (best-effort)
+    --
+    -- flared does not expose rocksdb_sync_writes via stats (it's a config
+    -- value, not a runtime counter). Tests 2-4 verified the ConfigMap
+    -- content is correct; this test just confirms the RocksDB backend is
+    -- active so the config file is actually meaningful.
+    { name := "flared is running with RocksDB backend"
       run := do
         let ips ← getPodIps s!"app=flare,cluster={cfg.name}" cfg.«namespace»
         match ips.head? with
@@ -143,13 +148,10 @@ def suite : TestSuite := {
           let stats ← flaredStats cfg.debugPod cfg.«namespace» ip cfg.flarePort
           if !containsSubstr stats "rocksdb_" then
             return .skip "flared image does not expose rocksdb_* stats (not compiled with RocksDB)"
-          -- After test 4 syncWrites is true, but stats may report it as "1" or "true"
-          -- depending on flared's formatting. Accept either.
-          if containsSubstr stats "rocksdb_sync_writes 1" ||
-             containsSubstr stats "rocksdb_sync_writes true" then
+          if containsSubstr stats "rocksdb_master_id" then
             return .pass
           else
-            return .fail s!"flared stats did not show rocksdb_sync_writes=1/true; stats:\n{stats}" }
+            return .fail s!"rocksdb_* stats present but rocksdb_master_id missing" }
   ]
 }
 

@@ -222,6 +222,7 @@ private def detectAndRestartLaggingPods (state : FlareClusterState) (pods : List
     containing both sections, so the two handlers never fight. -/
 private def handleRocksdbConfig (crd : FlareClusterView) (crName ns : String) : IO Unit := do
   let rocksdb := crd.spec.rocksdb
+  IO.eprintln s!"[DEBUG] handleRocksdbConfig: hasAny={rocksdb.hasAny} walTtl={rocksdb.walTtlSeconds} walSize={rocksdb.walSizeLimitMb} sync={rocksdb.syncWrites}"
   if !rocksdb.hasAny then
     return  -- nothing to do; leave any existing ConfigMap alone
   if crd.spec.clusterReplication.enabled then
@@ -591,6 +592,12 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
 
   -- 4. Update node counts
   updateNodeCounts metrics finalState
+
+  -- 5. Handle rocksdb config propagation + cluster replication migration
+  let crd ← crdRef.get
+  let pods ← Bridge.listFlaredPods crName ns
+  handleRocksdbConfig crd crName ns
+  handleClusterReplication crd pods migrationRef crName ns
 
 -- ===========================================================================
 -- Main Reconcile Loop (Legacy - for comparison/fallback)

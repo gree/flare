@@ -449,8 +449,12 @@ def waitForStable (cfg : ClusterConfig) (graceSec : Nat := 50) : IO Bool := do
     | .error _ => return false
   if !podsReady then return false
 
-  -- Wait for nodes to register with operator
-  let nodesRegistered ← waitForCondition s!"{numPods} nodes registered" 120 do
+  -- Wait for nodes to register with operator.
+  -- 300s timeout: RocksDB-backed nodes with large datasets can take 30-60s to
+  -- open the database and send the initial `node add`.  The previous 120s was
+  -- too tight for production-sized data (100 GB+) and caused false negatives
+  -- in E2E tests on loaded machines.
+  let nodesRegistered ← waitForCondition s!"{numPods} nodes registered" 300 do
     let sync ← operatorTcpCmd cfg.debugPod cfg.«namespace» cfg.operatorName cfg.operatorPort "node sync"
     let entries := parseNodeSync sync
     return (entries.length >= numPods)

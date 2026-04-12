@@ -102,8 +102,8 @@ structure FlareReconcileState where
   livePodKeys : List String := []
   deadNodeKeys : List String := []
   failoverTriggered : Bool := false
-  -- Grace period for startup (CRITICAL for safety - Main.lean:355-359)
-  graceCycles : Nat := 6
+  -- Grace period for startup: 24 cycles × 5s = 120s (see Main.lean)
+  graceCycles : Nat := 24
   -- Cluster state evolution:
   updatedClusterState : Option FlareClusterState := none  -- State after failover/proxy assignment
   -- Replication state machine:

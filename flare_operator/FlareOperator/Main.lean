@@ -88,15 +88,39 @@ private def containsSubstr (haystack needle : String) : Bool :=
 -- Dead Node Detection (pure)
 -- ===========================================================================
 
-/-- Detect dead nodes: nodes with an active role (Master/Slave) that are no longer
-    in the ready pods list.  Proxy/Down nodes are already inactive and should not
-    be re-detected — this prevents false positives during startup when pods have
-    registered via TCP but are not yet visible in the K8s pods list. -/
+/-- Detect dead nodes: nodes in the nodeMap whose pod has completely disappeared
+    from the K8s pod list.
+
+    **Production design considerations**:
+
+    The following nodes are EXCLUDED from dead detection:
+    - Proxy / Down: already inactive; re-detecting them causes noise.
+    - Prepare: actively reconstructing data from a peer.  A 100 GB dataset can
+      take hours to reconstruct and the node stays in Prepare the whole time.
+      Marking it dead during reconstruction would trigger an unnecessary
+      failover and waste the work already done.  If the pod genuinely crashes,
+      K8s will restart it and it will re-register via `node add`.
+
+    Only Active Masters and Active Slaves are eligible for dead detection,
+    because losing one of those affects data availability.
+
+    The `pods` list comes from `kubectl get pods -l app=flare,cluster=<name>`
+    and includes ALL pods (Ready or not).  A pod in CrashLoopBackOff still
+    appears in this list, so its node key stays in `liveKeys` and the node is
+    not prematurely marked dead.  Only a pod that has been completely deleted
+    (e.g., StatefulSet scale-down, manual delete, or node eviction) disappears
+    from the list and triggers dead detection.
+
+    See ROCKSDB_REPLICATION.md §S1 (slave recovery) and §S4 (zombie master)
+    for the interaction between dead detection and replication recovery. -/
 private def detectDeadNodes (state : FlareClusterState) (pods : List PodInfo)
     : List String :=
   let liveKeys := liveNodeKeys pods
   state.nodeMap.filter (fun (key, node) =>
-    !liveKeys.contains key && node.role != FlareRole.Proxy && node.state != FlareState.Down
+    !liveKeys.contains key
+    && node.role != FlareRole.Proxy
+    && node.state != FlareState.Down
+    && node.state != FlareState.Prepare
   ) |>.map Prod.fst
 
 -- ===========================================================================
@@ -847,11 +871,21 @@ def main (args : List String) : IO Unit := do
   -- Always start from None phase - operator manages migration state internally
   let migrationRef ← IO.mkRef MigrationPhase.None
 
-  -- Startup grace period: skip dead node detection for the first 6 reconcile cycles
-  -- (6 × 5s = 30s) to let all pods register via TCP and appear in the K8s ready list.
-  -- This prevents the race condition where nodes register via `node add` and get
-  -- assigned Master/Slave roles before their pods appear in `kubectl get pods`.
-  let graceCyclesRef ← IO.mkRef (6 : Nat)
+  -- Startup grace period: skip dead node detection for the first N reconcile cycles
+  -- to let all pods register via TCP and appear in the K8s ready list.
+  --
+  -- Production sizing: 24 cycles × 5s = 120s.  RocksDB-backed nodes with large
+  -- datasets (100 GB+) can take 30-60s just to open the database and send the
+  -- initial `node add`.  The previous value of 6 cycles (30s) was too aggressive
+  -- for production workloads — nodes that hadn't registered yet would be invisible
+  -- to the operator (not in nodeMap), and once the grace period expired, the
+  -- operator would start assigning roles to the subset that *had* registered,
+  -- potentially causing unnecessary partition rebalancing.
+  --
+  -- Note: this grace period only affects dead-node detection at startup.
+  -- Nodes in Prepare state (actively reconstructing) are separately protected
+  -- by detectDeadNodes regardless of the grace period.
+  let graceCyclesRef ← IO.mkRef (24 : Nat)
 
   -- Start TCP server in background (using Server.TcpServer)
   let _ ← IO.asTask (prio := .default) do

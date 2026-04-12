@@ -255,17 +255,32 @@ spec:
 -- Deploy / Cleanup
 -- ===========================================================================
 
-/-- Apply YAML string via kubectl. -/
+/-- Apply YAML string via kubectl.
+
+    On failure, prints the generated YAML (leading 20 lines so the test log
+    stays readable) alongside kubectl's stdout and stderr, then re-throws so
+    setup fails loudly instead of limping along with a half-applied cluster.
+    This replaces an older silent-swallow pattern that was masking apply
+    failures behind later "rollout timed out" errors in waitForStable. -/
 private def applyYaml (yaml : String) : IO Unit := do
-  try
-    let result ← IO.Process.output {
+  let result ← try
+    IO.Process.output {
       cmd := "sh"
       args := #["-c", s!"cat <<'ENDOFYAML' | kubectl apply -f -\n{yaml}\nENDOFYAML"]
     }
-    if result.exitCode != 0 then
-      IO.eprintln s!"# kubectl apply failed: {result.stderr}"
   catch e =>
-    IO.eprintln s!"# kubectl apply error: {e}"
+    IO.eprintln s!"# kubectl apply spawn error: {e}"
+    throw (IO.userError s!"kubectl apply spawn error: {e}")
+  if result.exitCode != 0 then
+    IO.eprintln s!"# kubectl apply FAILED (exit {result.exitCode})"
+    IO.eprintln s!"# stdout: {result.stdout}"
+    IO.eprintln s!"# stderr: {result.stderr}"
+    -- Show the first ~20 lines of the generated YAML to identify what was rejected.
+    let lines := yaml.splitOn "\n"
+    let head := lines.take 20
+    IO.eprintln s!"# --- first {head.length}/{lines.length} lines of rejected YAML ---"
+    for l in head do IO.eprintln s!"#  | {l}"
+    throw (IO.userError s!"kubectl apply failed (exit {result.exitCode}): {result.stderr}")
 
 /-- Dump operator logs for debugging failures. -/
 def dumpOperatorLogs (cfg : ClusterConfig) : IO Unit := do

@@ -4,11 +4,37 @@ Last updated: 2026-04-13
 
 ## Summary
 
-- **Total**: 76 tests across 11 suites
+- **Total**: 76 tests (11 suites)
 - **Original failures**: 7 (tests 25, 26, 40, 45, 51, 52, 53)
 - **New suites added**: wal-retention-config (G10), strict-durability (G11), wal-bandwidth-throttle (G12)
 
-## Original Failing Tests (from CI)
+## G10–G12 Results (RocksDB config propagation)
+
+### G10: wal-retention-config — 5/5 PASS
+
+Verified live on kind cluster with `flare-node-rocksdb:test` image.
+
+| # | Test | Result |
+|---|------|--------|
+| 1 | ConfigMap exists with extra.conf key | ✅ PASS |
+| 2 | walTtlSeconds=1800 propagated to ConfigMap | ✅ PASS |
+| 3 | walSizeLimitMb + cross-field preservation | ✅ PASS |
+| 4 | Re-render on value change (1800→600) | ✅ PASS |
+| 5 | RocksDB backend active (rocksdb_master_id in stats) | ✅ PASS |
+
+### G11: strict-durability — NOT YET RUN LIVE
+
+Built and committed. Uses same `handleRocksdbConfig` path as G10.
+Exercises the `Option Bool` field path (syncWrites true/false toggle).
+
+### G12: wal-bandwidth-throttle — NOT YET RUN LIVE
+
+Built and committed. Tests `walSyncBwlimit` and `walSyncInterval`.
+Test 5 checks `rocksdb_wal_sync_bwlimit` in flared stats — this field
+IS exposed by `op_stats.cc` and IS updated by `ini_option::reload()`,
+so it should pass when run.
+
+## Original Failing Tests
 
 ### Group 1: scale-out-slave (tests 25, 26)
 
@@ -17,16 +43,19 @@ Last updated: 2026-04-13
 | 25 | `6 nodes registered with operator` | TIMEOUT 180s — not all 6 nodes registered |
 | 26 | `new slaves assigned (Prepare state)` | P0 has 1 slave, P1 has 1 slave (expected 2 each) |
 
-**Fix** (committed `106b723`): removed `!isPartitionReconstructing` throttle from slave assignment.
+**Fix committed**: `106b723` — removed `!isPartitionReconstructing` throttle.
+**Status**: Not yet verified in CI (commits not pushed).
 
 ### Group 2: Migration stuck at Dumping (tests 40, 45)
 
 | # | Suite | Test | Failure |
 |---|-------|------|---------|
 | 40 | scale-in-master | `migrationPhase transitions to Forwarding` | TIMEOUT — stuck at Dumping |
-| 45 | replace-nodes | `migration reaches Forwarding` | TIMEOUT — stuck at Dumping |
+| 45 | replace-nodes | `migration reaches Forwarding` | TIMEOUT 240s — stuck at Dumping |
 
-**Fix** (committed `c731039`): added ConfigMap recovery in `.Dumping` phase.
+**Fix committed**: `e2ccfab` — wired `handleClusterReplication` into `reconcileOnceFSM`.
+Previously the handler was only in the legacy `reconcileOnce` path which is never called.
+**Status**: Not yet verified in CI.
 
 ### Group 3: cluster-replication ConfigMap (tests 51, 52, 53)
 
@@ -36,75 +65,50 @@ Last updated: 2026-04-13
 | 52 | `migrationPhase transitions to Forwarding` | TIMEOUT — did not reach Forwarding |
 | 53 | `ConfigMap updated to forward mode` | ConfigMap not in forward mode |
 
-**Root cause**: `handleClusterReplication` was only called from the legacy `reconcileOnce` path, not from `reconcileOnceFSM` (the active production path). Fixed in `e2ccfab`.
+**Root cause**: Same as Group 2 — `handleClusterReplication` was in the dead legacy code path.
+The ConfigMap recovery logic (`c731039`) was correct but never executed because `reconcileOnceFSM`
+didn't call it.
+**Fix**: `e2ccfab` (same commit as Group 2).
+**Status**: Not yet verified in CI.
 
-## New RocksDB Test Suites (G10-G12)
+## Production Hardening (e749c06)
 
-### G10: wal-retention-config (5 tests) — VERIFIED
+Three changes to prevent premature dead-node detection in production workloads
+with 100 GB+ datasets and multi-hour reconstruction:
 
-Tests `spec.rocksdb.walTtlSeconds` and `walSizeLimitMb` propagation from CRD to ConfigMap.
+1. **Prepare-state nodes excluded from dead detection**: `detectDeadNodes` now
+   skips nodes in `FlareState.Prepare`. A node mid-reconstruct whose pod
+   disappears gets restarted by K8s and re-registers via `node add` — marking
+   it dead during reconstruction wastes hours of already-completed work.
 
-| # | Test | Live result |
-|---|------|-------------|
-| 1 | ConfigMap exists | PASS |
-| 2 | walTtlSeconds → ConfigMap | PASS |
-| 3 | walSizeLimitMb + cross-field preservation | PASS |
-| 4 | Re-render on value change | PASS |
-| 5 | RocksDB backend active (rocksdb_master_id in stats) | PASS |
+2. **Startup grace period 30s → 120s**: RocksDB-backed nodes with large datasets
+   take 30-60s to open the database and send `node add`. Previous 30s grace
+   caused the operator to start assigning roles to a subset of nodes.
 
-### G11: strict-durability (5 tests) — NOT YET RUN LIVE
+3. **E2E registration timeout 120s → 300s**: Prevents flaky test failures on
+   loaded machines where 3/4 nodes register but the 4th times out.
 
-Tests `spec.rocksdb.syncWrites` (boolean field) propagation. Same `handleRocksdbConfig` path as G10, exercises the `Option Bool` rendering path.
+## Infrastructure Delivered
 
-### G12: wal-bandwidth-throttle (5 tests) — NOT YET RUN LIVE
-
-Tests `spec.rocksdb.walSyncBwlimit` and `walSyncInterval` propagation. Includes an explicit-zero test (distinguishes "inherit cluster-wide setting" from "unset") and a flared stats assertion (`rocksdb_wal_sync_bwlimit` IS exposed in stats and updated by `ini_option::reload`).
-
-## Remaining Test Proposals (not yet implemented)
-
-| # | Name | Description | Difficulty |
-|---|------|-------------|------------|
-| G1 | WAL incremental sync | Slave restart within WAL TTL → `rocksdb_wal_sync_success` increments | Medium |
-| G2 | WAL purged fallback | Slave down > TTL → `rocksdb_wal_sync_lsn_purged` > 0 | Medium |
-| G5 | Resync failure self-demote | Consecutive failures → `state_down`, data preserved | High |
-| G7 | Orphan scan/purge | Failover + rejoin → orphan_scan/orphan_purge admin commands | High |
-| G3 | Zombie master | Network partition → failover → ex-master returns as role_proxy | Very high |
-| G4 | master_id mismatch | RocksDB wipe → mismatch detection → full dump | High |
-
-## Production Hardening (committed `e749c06`)
-
-Issues discovered during live testing that affect production deployments:
-
-### 1. Prepare-state nodes excluded from dead detection
-
-Previously `detectDeadNodes` only excluded Proxy and Down nodes. A node in Prepare (actively reconstructing 100 GB+ data) whose pod briefly disappeared from the K8s pod list could trigger unnecessary failover, wasting hours of reconstruction work. Now Prepare nodes are excluded.
-
-### 2. Startup grace period increased (30s → 120s)
-
-RocksDB-backed nodes with large datasets take 30-60s to open the database and send `node add`. The previous 30s grace period was too aggressive — nodes that hadn't registered yet were invisible to the operator, causing premature role assignments.
-
-### 3. E2E node registration timeout increased (120s → 300s)
-
-On loaded machines or with large datasets, not all nodes register within 120s.
-
-### Design note: reconstruction can take days
-
-Production environments with 100 GB+ datasets can have reconstruction times of hours to a full day. The operator's design handles this correctly:
-
-- Reconstructing nodes stay in **Prepare** state until flared sends `node state ready`
-- `detectDeadNodes` skips Prepare nodes (pod must genuinely disappear for failover)
-- No hardcoded timeout on how long a node can stay in Prepare
-- The operator does not interfere with ongoing reconstruction
-
-## Infrastructure Changes
-
-| Component | Description |
+| Item | Purpose |
 |---|---|
-| `Dockerfile.flare-node-rocksdb` | RocksDB-enabled flared image with ldd sanity check |
-| `.dockerignore` | Prevents Nix-built host binary from shipping into Docker images |
+| `Dockerfile.flare-node-rocksdb` | RocksDB-enabled flared image (153 MB) |
+| `.dockerignore` | Prevents Nix-built host binary from leaking into Docker images |
 | `ClusterConfig.storageBackend` | E2E selector: "tch" (default) or "rocksdb" |
-| ConfigMap mount | StatefulSet mounts `{cluster}-config` at `/etc/flared/extra.conf` |
+| ConfigMap volume mount | StatefulSet mounts `{cluster}-config` at `/etc/flared/extra.conf` |
 | `applyYaml` strict mode | Fails fast with diagnostics instead of silently swallowing errors |
+| `handleRocksdbConfig` debug logging | Shows `hasAny/walTtl/walSize/sync` every reconcile cycle |
+
+## Remaining G-tests (not yet started)
+
+| # | Test | Description | Blocker |
+|---|------|-------------|---------|
+| G1 | WAL incremental sync | Slave restart → WAL sync success counter | Needs RocksDB image (done) |
+| G2 | WAL purged fallback | TTL exceeded → full dump fallback | Needs RocksDB image (done) |
+| G5 | Resync failure self-demote | Consecutive failures → state_down | Needs failure injection |
+| G7 | Orphan scan/purge | Failover → orphan_scan → orphan_purge | Needs failover + rejoin cycle |
+| G3 | Zombie master | Network partition → role_proxy transition | Needs network simulation |
+| G4 | master_id mismatch | RocksDB dir wipe → mismatch detection | Needs exec into pod |
 
 ## Commit History
 

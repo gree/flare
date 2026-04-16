@@ -294,11 +294,62 @@ def dumpOperatorLogs (cfg : ClusterConfig) : IO Unit := do
 def deployCluster (cfg : ClusterConfig) : IO Unit := do
   IO.eprintln s!"# Deploying cluster '{cfg.name}' in namespace '{cfg.«namespace»}'"
 
-  -- Ensure namespace
+  -- Ensure namespace. If a stuck Terminating namespace from a prior run is
+  -- still present, wait up to 30s for it to finish so that subsequent
+  -- resource creates don't fail with "namespace is being terminated".
+  let _ ← waitForCondition s!"namespace {cfg.«namespace»} not Terminating" 30 do
+    match ← kubectl ["get", "namespace", cfg.«namespace», "-o", "jsonpath={.status.phase}"] with
+    | .ok phase => return (phase.trim != "Terminating")
+    | .error _ => return true  -- NotFound → can create fresh
   let _ ← kubectl ["create", "namespace", cfg.«namespace»]
 
-  -- Apply CRD (cluster-scoped, only needs to be done once)
-  let _ ← kubectl ["apply", "-f", "deploy/crd.yaml"]
+  -- Wait for the `default` ServiceAccount to be created by the k8s SA
+  -- controller.  On a fresh kind cluster, the SA controller lags behind
+  -- namespace creation by a few seconds; without this wait, the debug pod
+  -- and operator pod both fail to start with "serviceaccount 'default' not
+  -- found".  Pods need a service account to mount the API token.
+  let _ ← waitForCondition s!"default ServiceAccount in {cfg.«namespace»}" 30 do
+    match ← kubectl ["get", "serviceaccount", "default", "-n", cfg.«namespace»,
+                     "-o", "jsonpath={.metadata.name}"] with
+    | .ok name => return (name.trim == "default")
+    | .error _ => return false
+
+  -- Apply CRD + ClusterRole (cluster-scoped, only needs to be done once).
+  -- The e2e binary is invoked from either the repo root or flare_operator/,
+  -- so try both paths.  We also wait for the CRD to be established before
+  -- proceeding, otherwise the FlareCluster CR apply on a fresh cluster races
+  -- against the apiserver's CRD discovery cache and fails with
+  -- "no matches for kind FlareCluster".
+  let applyManifest (relPath : String) : IO Bool := do
+    match ← kubectl ["apply", "-f", relPath] with
+    | .ok _ => pure true
+    | .error _ =>
+      match ← kubectl ["apply", "-f", s!"../{relPath}"] with
+      | .ok _ => pure true
+      | .error e =>
+        IO.eprintln s!"# kubectl apply {relPath} failed: {e}"
+        pure false
+  if !(← applyManifest "deploy/crd.yaml") then
+    throw (IO.userError "Could not apply deploy/crd.yaml from either . or ..")
+  -- Apply RBAC so the ClusterRole `flare-operator` exists for the test's
+  -- ClusterRoleBinding to reference.  Without this the operator can't create
+  -- leases and hangs in `phase 1: attempting to acquire lease`.
+  --
+  -- deploy/rbac.yaml also contains a SA and CRB in the `flare-system`
+  -- namespace; those may fail if flare-system doesn't exist, but that's OK —
+  -- kubectl apply processes each document independently, and the
+  -- ClusterRole (cluster-scoped, the part we actually need) still gets
+  -- created.  Verify by checking the ClusterRole directly after.
+  let _ ← applyManifest "deploy/rbac.yaml"
+  match ← kubectl ["get", "clusterrole", "flare-operator", "-o", "jsonpath={.metadata.name}"] with
+  | .ok name =>
+    if name.trim != "flare-operator" then
+      throw (IO.userError s!"ClusterRole flare-operator missing after rbac apply (got '{name}')")
+  | .error e =>
+    throw (IO.userError s!"ClusterRole flare-operator missing after rbac apply: {e}")
+  -- Wait for CRD to be established (kubectl wait --for=condition=Established)
+  let _ ← kubectl ["wait", "--for=condition=Established",
+                    "crd/flareclusters.flare.gree.net", "--timeout=60s"]
 
   -- Create ServiceAccount and ClusterRoleBinding in test namespace
   -- (not using deploy/rbac.yaml which is hardcoded for flare-system namespace)
@@ -312,34 +363,53 @@ def deployCluster (cfg : ClusterConfig) : IO Unit := do
   for i in List.range cfg.partitions do
     applyYaml (partitionServiceYaml cfg i)
 
-  -- Create empty ConfigMap for replication config
+  -- Create empty ConfigMap for replication config.
+  -- This ConfigMap MUST exist before StatefulSet is deployed, because the
+  -- flared pods mount it at /etc/flared/extra.conf and flared's
+  -- `ini_option::load()` exits immediately if `--config` points at a missing
+  -- file.  Using direct kubectl (not `sh -c`) so failures are visible.
   let cmName := s!"{cfg.name}-config"
-  try
-    let result ← IO.Process.output {
-      cmd := "sh"
-      args := #["-c", s!"kubectl create configmap {cmName} -n {cfg.«namespace»} --from-literal='extra.conf=' 2>/dev/null || true"]
-    }
-    let _ := result
-    pure ()
-  catch _ => pure ()
+  match ← kubectl ["create", "configmap", cmName, "-n", cfg.«namespace»,
+                    "--from-literal=extra.conf="] with
+  | .ok _ => pure ()
+  | .error e =>
+    -- "AlreadyExists" is fine; anything else is a real failure we want to see.
+    if containsSubstr e "AlreadyExists" then pure ()
+    else
+      IO.eprintln s!"# ERROR: could not create {cmName}: {e}"
+      throw (IO.userError s!"configmap create failed: {e}")
+  -- Verify the ConfigMap is actually there (catches the "namespace was
+  -- Terminating and swallowed the create" race).
+  match ← kubectlGetJsonpath "configmap" cmName cfg.«namespace» "{.metadata.name}" with
+  | .ok name =>
+    if name.trim == cmName then pure ()
+    else
+      IO.eprintln s!"# ERROR: ConfigMap {cmName} missing after create (got '{name}')"
+      throw (IO.userError s!"ConfigMap {cmName} vanished after create")
+  | .error e =>
+    IO.eprintln s!"# ERROR: ConfigMap {cmName} not readable after create: {e}"
+    throw (IO.userError s!"ConfigMap {cmName} missing after create")
 
-  -- Create debug pod
-  try
-    let result ← IO.Process.output {
-      cmd := "sh"
-      args := #["-c", s!"kubectl run {cfg.debugPod} --namespace={cfg.«namespace»} --image=busybox:1.36 --restart=Never --command -- sleep 3600 2>/dev/null || true"]
-    }
-    let _ := result
-    pure ()
-  catch _ => pure ()
+  -- Create debug pod (direct kubectl so errors are visible)
+  match ← kubectl ["run", cfg.debugPod, s!"--namespace={cfg.«namespace»}",
+                    "--image=busybox:1.36", "--restart=Never", "--command", "--",
+                    "sleep", "3600"] with
+  | .ok _ => pure ()
+  | .error e =>
+    if containsSubstr e "AlreadyExists" then pure ()
+    else
+      IO.eprintln s!"# WARNING: could not create debug pod {cfg.debugPod}: {e}"
   let _ ← kubectlWaitReady s!"pod/{cfg.debugPod}" cfg.«namespace» 60
 
   -- Deploy operator
   applyYaml (operatorDeploymentYaml cfg)
 
-  -- Wait for operator to be ready
+  -- Wait for operator to be ready.
+  -- 300s accounts for image pull on a fresh node (flare-operator image is
+  -- ~300 MB) plus the operator's own startup (lease acquisition + initial
+  -- CRD fetch retries).
   IO.eprintln s!"# Waiting for operator deployment to be ready..."
-  let operatorReady ← kubectlRolloutStatus s!"deployment/{cfg.operatorName}" cfg.«namespace» 120
+  let operatorReady ← kubectlRolloutStatus s!"deployment/{cfg.operatorName}" cfg.«namespace» 300
   if !operatorReady then
     IO.eprintln s!"# ERROR: Operator deployment failed to become ready"
     dumpOperatorLogs cfg
@@ -349,6 +419,22 @@ def deployCluster (cfg : ClusterConfig) : IO Unit := do
 
   IO.eprintln s!"# Operator ready, waiting 10s for first reconcile cycle..."
   IO.sleep 10000
+
+  -- Verify ConfigMap is STILL there before deploying StatefulSet.  Flared
+  -- pods mount {cfg.name}-config/extra.conf at startup; if the ConfigMap
+  -- is missing, flared crashes with "/etc/flared/extra.conf not found"
+  -- and the pod goes into CrashLoopBackOff.
+  let cmName := s!"{cfg.name}-config"
+  match ← kubectlGetJsonpath "configmap" cmName cfg.«namespace» "{.metadata.name}" with
+  | .ok name =>
+    if name.trim == cmName then
+      IO.eprintln s!"# ConfigMap {cmName} confirmed present before StatefulSet deploy"
+    else
+      IO.eprintln s!"# ERROR: ConfigMap {cmName} missing before StatefulSet deploy (got '{name}')"
+      throw (IO.userError s!"ConfigMap {cmName} vanished before StatefulSet deploy")
+  | .error e =>
+    IO.eprintln s!"# ERROR: ConfigMap {cmName} not found before StatefulSet deploy: {e}"
+    throw (IO.userError s!"ConfigMap {cmName} not found: {e}")
 
   -- Deploy StatefulSet
   IO.eprintln s!"# Deploying StatefulSet..."
@@ -396,7 +482,7 @@ def deploySecondCluster (cfg : ClusterConfig) : IO Unit := do
 
   -- Deploy operator
   applyYaml (operatorDeploymentYaml cfg)
-  let _ ← kubectlRolloutStatus s!"deployment/{cfg.operatorName}" cfg.«namespace» 120
+  let _ ← kubectlRolloutStatus s!"deployment/{cfg.operatorName}" cfg.«namespace» 300
 
   IO.sleep 10000
 

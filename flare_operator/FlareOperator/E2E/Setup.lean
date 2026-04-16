@@ -255,32 +255,46 @@ spec:
 -- Deploy / Cleanup
 -- ===========================================================================
 
-/-- Apply YAML string via kubectl.
+/-- Apply YAML string via kubectl with retry on transient etcd errors.
 
-    On failure, prints the generated YAML (leading 20 lines so the test log
-    stays readable) alongside kubectl's stdout and stderr, then re-throws so
-    setup fails loudly instead of limping along with a half-applied cluster.
-    This replaces an older silent-swallow pattern that was masking apply
-    failures behind later "rollout timed out" errors in waitForStable. -/
+    Retries up to 3 times with 5s backoff when kubectl's stderr contains
+    "etcdserver: request timed out" — this happens on loaded/restarting
+    apiservers and is almost always transient.  Other failures (validation,
+    conflicts, etc.) fail fast after the first attempt, printing the
+    generated YAML's head so the rejected resource is identifiable. -/
 private def applyYaml (yaml : String) : IO Unit := do
-  let result ← try
-    IO.Process.output {
-      cmd := "sh"
-      args := #["-c", s!"cat <<'ENDOFYAML' | kubectl apply -f -\n{yaml}\nENDOFYAML"]
-    }
-  catch e =>
-    IO.eprintln s!"# kubectl apply spawn error: {e}"
-    throw (IO.userError s!"kubectl apply spawn error: {e}")
-  if result.exitCode != 0 then
-    IO.eprintln s!"# kubectl apply FAILED (exit {result.exitCode})"
-    IO.eprintln s!"# stdout: {result.stdout}"
-    IO.eprintln s!"# stderr: {result.stderr}"
-    -- Show the first ~20 lines of the generated YAML to identify what was rejected.
-    let lines := yaml.splitOn "\n"
-    let head := lines.take 20
-    IO.eprintln s!"# --- first {head.length}/{lines.length} lines of rejected YAML ---"
-    for l in head do IO.eprintln s!"#  | {l}"
-    throw (IO.userError s!"kubectl apply failed (exit {result.exitCode}): {result.stderr}")
+  let maxRetries := 3
+  let mut lastErr := ""
+  for _ in List.range (maxRetries + 1) do
+    let result ← try
+      IO.Process.output {
+        cmd := "sh"
+        args := #["-c", s!"cat <<'ENDOFYAML' | kubectl apply -f -\n{yaml}\nENDOFYAML"]
+      }
+    catch e =>
+      IO.eprintln s!"# kubectl apply spawn error: {e}"
+      throw (IO.userError s!"kubectl apply spawn error: {e}")
+    if result.exitCode == 0 then return ()
+    lastErr := result.stderr
+    -- Transient etcd timeout → retry
+    let isTransient := containsSubstr result.stderr "etcdserver: request timed out"
+                    || containsSubstr result.stderr "request timed out"
+                    || containsSubstr result.stderr "connection refused"
+    if isTransient then
+      IO.eprintln s!"# kubectl apply hit transient error, retrying in 5s..."
+      IO.sleep 5000
+    else
+      -- Non-transient: fail immediately
+      IO.eprintln s!"# kubectl apply FAILED (exit {result.exitCode})"
+      IO.eprintln s!"# stdout: {result.stdout}"
+      IO.eprintln s!"# stderr: {result.stderr}"
+      let lines := yaml.splitOn "\n"
+      let head := lines.take 20
+      IO.eprintln s!"# --- first {head.length}/{lines.length} lines of rejected YAML ---"
+      for l in head do IO.eprintln s!"#  | {l}"
+      throw (IO.userError s!"kubectl apply failed (exit {result.exitCode}): {result.stderr}")
+  -- All retries exhausted
+  throw (IO.userError s!"kubectl apply failed after {maxRetries} retries: {lastErr}")
 
 /-- Dump operator logs for debugging failures. -/
 def dumpOperatorLogs (cfg : ClusterConfig) : IO Unit := do
@@ -305,10 +319,11 @@ def deployCluster (cfg : ClusterConfig) : IO Unit := do
 
   -- Wait for the `default` ServiceAccount to be created by the k8s SA
   -- controller.  On a fresh kind cluster, the SA controller lags behind
-  -- namespace creation by a few seconds; without this wait, the debug pod
-  -- and operator pod both fail to start with "serviceaccount 'default' not
-  -- found".  Pods need a service account to mount the API token.
-  let _ ← waitForCondition s!"default ServiceAccount in {cfg.«namespace»}" 30 do
+  -- namespace creation — typically by a few seconds, but up to ~60s when
+  -- the apiserver is under load or just restarted.  Without this wait,
+  -- the debug pod and operator pod both fail to start with
+  -- "serviceaccount 'default' not found".
+  let _ ← waitForCondition s!"default ServiceAccount in {cfg.«namespace»}" 120 do
     match ← kubectl ["get", "serviceaccount", "default", "-n", cfg.«namespace»,
                      "-o", "jsonpath={.metadata.name}"] with
     | .ok name => return (name.trim == "default")

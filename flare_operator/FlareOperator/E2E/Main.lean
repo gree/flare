@@ -17,6 +17,10 @@ import FlareOperator.E2E.Tests.PartitionReduction
 import FlareOperator.E2E.Tests.WalRetentionConfig
 import FlareOperator.E2E.Tests.StrictDurability
 import FlareOperator.E2E.Tests.WalBandwidthThrottle
+import FlareOperator.E2E.Tests.WalIncrementalSync
+import FlareOperator.E2E.Tests.WalPurgedFallback
+import FlareOperator.E2E.Tests.ResyncFailureSelfDemote
+import FlareOperator.E2E.Tests.OrphanScanPurge
 
 open FlareOperator.E2E
 
@@ -32,5 +36,9 @@ def main (args : List String) : IO UInt32 :=
     Tests.PartitionReduction.suite,
     Tests.WalRetentionConfig.suite,
     Tests.StrictDurability.suite,
-    Tests.WalBandwidthThrottle.suite
+    Tests.WalBandwidthThrottle.suite,
+    Tests.WalIncrementalSync.suite,
+    Tests.WalPurgedFallback.suite,
+    Tests.ResyncFailureSelfDemote.suite,
+    Tests.OrphanScanPurge.suite
   ] args

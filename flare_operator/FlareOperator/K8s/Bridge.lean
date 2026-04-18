@@ -195,6 +195,11 @@ def renderFlaredExtraConf (rocksdb : RocksdbConfigSpec)
 private def applyExtraConfConfigMap (crName ns content : String)
     : IO (Except String Unit) := do
   let cmName := s!"{crName}-config"
+  -- Log content summary for production debugging (hash + byte count + first line).
+  -- Full content is not logged to avoid leaking sensitive config values.
+  let contentLines := content.splitOn "\n" |>.filter (· != "")
+  let firstLine := contentLines.headD "(empty)"
+  IO.eprintln s!"[flare-operator] ConfigMap {cmName}: {content.length} bytes, {contentLines.length} lines, first: {firstLine}"
   try
     let result ← IO.Process.output {
       cmd := "sh"

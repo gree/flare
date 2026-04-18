@@ -136,8 +136,11 @@ private def handleFailover (state : FlareClusterState) (deadKeys : List String)
     match s.lookupNode key with
     | none => (s, logs)
     | some node =>
+      let roleName := match node.role with | .Master => "Master" | .Slave => "Slave" | .Proxy => "Proxy"
+      let stateName := match node.state with | .Active => "Active" | .Prepare => "Prepare" | .Down => "Down" | .Ready => "Ready"
       let downNode := { node with state := FlareState.Down, role := FlareRole.Proxy, partition := -1 }
       let s' := s.addNode key downNode
+      let logs := logs ++ [s!"[NodeState] {key}: {roleName}/{stateName} P{node.partition} → Proxy/Down (dead)"]
       -- If dead node was a Master, try to promote a Slave in the same partition
       if node.role == FlareRole.Master then
         let partIdx := node.partition
@@ -592,6 +595,11 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
     IO.eprintln s!"[flare-operator] warning: failed to fetch CRD: {e}"
     return
   | .ok crd =>
+    -- 1a. Detect CRD spec changes (for debugging)
+    let prevCrd ← crdRef.get
+    if prevCrd.spec.partitions != crd.spec.partitions ||
+       prevCrd.spec.replicas != crd.spec.replicas then
+      IO.eprintln s!"[flare-operator] CRD changed: partitions {prevCrd.spec.partitions}→{crd.spec.partitions}, replicas {prevCrd.spec.replicas}→{crd.spec.replicas}"
     crdRef.set crd
 
     -- 1b. Detect unsafe partition reduction (safety check BEFORE running FSM)
@@ -696,6 +704,19 @@ private def reconcileOnce (stateRef : IO.Ref FlareClusterState) (crdRef : IO.Ref
   if stateAfterAssignment.nodeMapVersion != currentState.nodeMapVersion then
     stateRef.set stateAfterAssignment
     IO.eprintln s!"[flare-operator] assigned {proxyCount} proxy node(s) to roles (v{currentState.nodeMapVersion} → v{stateAfterAssignment.nodeMapVersion})"
+    -- Log individual node state transitions for debugging
+    for (key, newNode) in stateAfterAssignment.nodeMap do
+      match currentState.lookupNode key with
+      | some oldNode =>
+        if oldNode.role != newNode.role || oldNode.partition != newNode.partition then
+          let oldRole := match oldNode.role with | .Master => "Master" | .Slave => "Slave" | .Proxy => "Proxy"
+          let newRole := match newNode.role with | .Master => "Master" | .Slave => "Slave" | .Proxy => "Proxy"
+          let newState' := match newNode.state with | .Active => "Active" | .Prepare => "Prepare" | .Down => "Down" | .Ready => "Ready"
+          IO.eprintln s!"[NodeState] {key}: {oldRole} P{oldNode.partition} → {newRole}/{newState'} P{newNode.partition}"
+      | none =>
+        let newRole := match newNode.role with | .Master => "Master" | .Slave => "Slave" | .Proxy => "Proxy"
+        let newState' := match newNode.state with | .Active => "Active" | .Prepare => "Prepare" | .Down => "Down" | .Ready => "Ready"
+        IO.eprintln s!"[NodeState] {key}: (new) → {newRole}/{newState'} P{newNode.partition}"
     -- Update node counts after assignment
     updateNodeCounts metrics stateAfterAssignment
   else
@@ -918,6 +939,18 @@ def main (args : List String) : IO Unit := do
     let durationMs := endTime - startTime
     let durationSeconds := durationMs.toFloat / 1000.0
     recordReconcileDuration metrics durationSeconds
+
+    -- Log reconcile duration and cluster summary for production debugging.
+    -- Only log when duration > 1s (to avoid noise in normal operation) or
+    -- every 12th cycle (~60s at 5s interval) as a heartbeat.
+    let state ← stateRef.get
+    let nodeCount := state.nodeMap.length
+    let masterCount := state.nodeMap.filter (fun (_, n) => n.role == FlareRole.Master) |>.length
+    let slaveCount := state.nodeMap.filter (fun (_, n) => n.role == FlareRole.Slave) |>.length
+    let downCount := state.nodeMap.filter (fun (_, n) => n.state == FlareState.Down) |>.length
+    let prepareCount := state.nodeMap.filter (fun (_, n) => n.state == FlareState.Prepare) |>.length
+    if durationMs > 1000 then
+      IO.eprintln s!"[flare-operator] reconcile slow: {durationMs}ms (nodes={nodeCount} M={masterCount} S={slaveCount} D={downCount} P={prepareCount})"
 
     IO.sleep (interval * 1000).toUInt32
 

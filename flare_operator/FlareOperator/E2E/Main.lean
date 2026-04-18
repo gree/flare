@@ -21,6 +21,8 @@ import FlareOperator.E2E.Tests.WalIncrementalSync
 import FlareOperator.E2E.Tests.WalPurgedFallback
 import FlareOperator.E2E.Tests.ResyncFailureSelfDemote
 import FlareOperator.E2E.Tests.OrphanScanPurge
+import FlareOperator.E2E.Tests.TerminatingPodHandling
+import FlareOperator.E2E.Tests.FailoverDuringReplication
 
 open FlareOperator.E2E
 
@@ -40,5 +42,7 @@ def main (args : List String) : IO UInt32 :=
     Tests.WalIncrementalSync.suite,
     Tests.WalPurgedFallback.suite,
     Tests.ResyncFailureSelfDemote.suite,
-    Tests.OrphanScanPurge.suite
+    Tests.OrphanScanPurge.suite,
+    Tests.TerminatingPodHandling.suite,
+    Tests.FailoverDuringReplication.suite
   ] args

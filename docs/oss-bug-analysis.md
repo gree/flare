@@ -82,10 +82,23 @@ Last updated: 2026-04-19
 4. Log reconcile cycle duration
 5. Log lease renewal heartbeat periodically
 
-### Tests to add (based on OSS bugs)
+### Tests added (based on OSS bugs)
 
-1. Failover during cluster-replication (Vitess #8909)
-2. PVC-backed storage tests (redis-operator #1407)
-3. Terminating pod detection (redis-operator #1544)
-4. Concurrent CRD changes (TiDB #720)
-5. All-dead partition recovery (redis-operator PR #1720)
+| Test | Source bug | Result |
+|---|---|---|
+| terminating-pod-handling | redis-operator [#1544](https://github.com/OT-CONTAINER-KIT/redis-operator/issues/1544) | ✅ 5/5 PASS — Flareは正しく処理 |
+| failover-during-replication | Vitess [#8909](https://github.com/vitessio/vitess/issues/8909) | ✅ 6/6 PASS — Dumping中のfailoverで回復可能 |
+
+### Tests remaining (based on OSS bugs)
+
+1. PVC-backed storage tests (redis-operator #1407)
+2. Concurrent CRD changes (TiDB #720)
+3. All-dead partition recovery (redis-operator PR #1720)
+
+### Logging improvements implemented
+
+1. ✅ ConfigMap content summary (byte count, line count, first line)
+2. ✅ Per-node state transitions `[NodeState]`
+3. ✅ CRD change detection (partitions/replicas diff)
+4. ✅ Reconcile duration + cluster summary (when >1s)
+5. ⬜ Lease renewal heartbeat (not yet added)

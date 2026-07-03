@@ -142,7 +142,7 @@ def updateFlaredConfigMap (cmName ns : String) (nodeMapData : String) : IO (Exce
                      "-o", "yaml", "--dry-run=client"] with
     | .error e => return .error s!"configmap render failed: {e}"
     | .ok manifest =>
-      match ← kubectlWithStdin ["apply", "-f", "-"] manifest with
+      match ← kubectlApplyManifest manifest with
       | .error e => return .error s!"configmap apply failed: {e}"
       | .ok _ => return .ok ()
 
@@ -207,7 +207,7 @@ private def applyExtraConfConfigMap (crName ns content : String)
                    "-o", "yaml", "--dry-run=client"] with
   | .error e => return .error s!"extra.conf configmap render failed: {e}"
   | .ok manifest =>
-    match ← kubectlWithStdin ["apply", "-f", "-"] manifest with
+    match ← kubectlApplyManifest manifest with
     | .error e => return .error s!"extra.conf configmap apply failed: {e}"
     | .ok _ => return .ok ()
 

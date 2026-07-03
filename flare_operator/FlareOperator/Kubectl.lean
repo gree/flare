@@ -21,39 +21,41 @@ def kubectl (args : List String) : IO (Except String String) := do
   catch e =>
     return .error s!"kubectl error: {e}"
 
-/-- Run kubectl with `stdin` fed from a string, returning stdout or error.
+/-- Apply a manifest to the cluster by writing it to a temp file and running
+    `kubectl apply -f <file>` (argv-direct, no shell).
 
     This exists so that untrusted data (node names, CRD-supplied config values)
-    can be handed to `kubectl ... -f -` / `--from-file=/dev/stdin` WITHOUT ever
-    being interpolated into a `sh -c` string. Building a shell command with such
-    data (`kubectl create ... --from-literal=x='{data}'`) is a command-injection
-    vector: a node registering as `x';kubectl delete ns …;'` would break out of
-    the quoting and run arbitrary commands with the operator's ClusterRole. Passing
-    argv directly + data over stdin removes the shell entirely. -/
-def kubectlWithStdin (args : List String) (stdinData : String)
-    : IO (Except String String) := do
+    embedded in the manifest is never interpolated into a `sh -c` string. Building
+    a shell command with such data (`kubectl create ... --from-literal=x='{data}'`)
+    is a command-injection vector: a node registering as `x';kubectl delete ns …;'`
+    would break out of the quoting and run arbitrary commands with the operator's
+    ClusterRole.
+
+    We route the manifest through a temp file rather than stdin: Lean's
+    `IO.FS.Handle` has no explicit close and piping to `kubectl apply -f -` risks
+    a deadlock (the child blocks on stdin EOF while we block on its stdout). A temp
+    file sidesteps that entirely and is still shell-free. The file is unlinked in
+    a `finally`-style cleanup regardless of the apply result. -/
+def kubectlApplyManifest (manifest : String) : IO (Except String String) := do
   try
-    let child ← IO.Process.spawn {
+    -- Unique-per-call temp path (pid + monotonic clock) to avoid collisions
+    -- between concurrent operator goroutines / reconcile ticks.
+    let pid ← IO.Process.getPID
+    let nowNs ← IO.monoNanosNow
+    let tmpPath : System.FilePath := s!"/tmp/flare-operator-manifest-{pid}-{nowNs}.yaml"
+    IO.FS.writeFile tmpPath manifest
+    let result ← IO.Process.output {
       cmd := "kubectl"
-      args := args.toArray
-      stdin := .piped
-      stdout := .piped
-      stderr := .piped
+      args := #["apply", "-f", tmpPath.toString]
     }
-    let (stdinHandle, child) ← child.takeStdin
-    stdinHandle.putStr stdinData
-    stdinHandle.flush
-    -- Dropping the handle closes stdin so kubectl sees EOF.
-    let _ := stdinHandle
-    let stdout ← child.stdout.readToEnd
-    let stderr ← child.stderr.readToEnd
-    let exitCode ← child.wait
-    if exitCode == 0 then
-      return .ok stdout
+    -- Best-effort cleanup; ignore errors (e.g. already gone).
+    try IO.FS.removeFile tmpPath catch _ => pure ()
+    if result.exitCode == 0 then
+      return .ok result.stdout
     else
-      return .error s!"kubectl failed (exit {exitCode}): {stderr}"
+      return .error s!"kubectl apply failed (exit {result.exitCode}): {result.stderr}"
   catch e =>
-    return .error s!"kubectl error: {e}"
+    return .error s!"kubectl apply error: {e}"
 
 /-- Parse a FlareClusterView from a Lean.Json object. -/
 private def getFlareClusterFromJson (json : Lean.Json) (name ns : String)

@@ -29,6 +29,11 @@
 #include "handler_reconstruction.h"
 #include "connection_tcp.h"
 #include "op_dump.h"
+#include "op_meta.h"
+
+#ifdef HAVE_LIBROCKSDB
+#include "storage_rocksdb.h"
+#endif
 
 namespace gree {
 namespace flare {
@@ -95,6 +100,15 @@ int handler_reconstruction::run() {
 	delete p;
 	log_notice("dump completed (master=%s:%d, partition=%d, partition_size=%d, interval=%d, bwlimit=%d)",
 			   this->_node_server_name.c_str(), this->_node_server_port, this->_partition, this->_partition_size, this->_reconstruction_interval, this->_reconstruction_bwlimit);
+
+	// NOTE: this node's own master_id (its WAL sequence-domain
+	// identifier) is deliberately NOT changed here. Reconstruction
+	// replaces the data but the local RocksDB keeps its own sequence
+	// counter, so adopting the peer's token would let two different
+	// sequence domains share one identity and make downstream WAL
+	// syncs interpret positions from the wrong domain (silent gaps).
+	// Cluster-replication destinations track their upstream via the
+	// separate repl_source_id marker recorded by `repl_sync_wal seed`.
 
 	// node activation (state -> ready)
 	if (this->_role == cluster::role_master) {

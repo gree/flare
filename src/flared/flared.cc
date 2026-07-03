@@ -42,6 +42,9 @@
 #ifdef HAVE_LIBKYOTOCABINET
 #include "storage_kch.h"
 #endif
+#ifdef HAVE_LIBROCKSDB
+#include "storage_rocksdb.h"
+#endif
 
 namespace gree {
 namespace flare {
@@ -243,6 +246,30 @@ int flared::startup(int argc, char **argv) {
 				ini_option_object().get_storage_compress(),
 				ini_option_object().is_storage_large(),
 				ini_option_object().get_storage_dfunit());
+		break;
+	#endif
+	#ifdef HAVE_LIBROCKSDB
+	case storage::type_rocksdb:
+		{
+			storage_rocksdb* rdb = new storage_rocksdb(ini_option_object().get_data_dir(),
+					ini_option_object().get_mutex_slot(),
+					ini_option_object().get_storage_cache_size(),
+					ini_option_object().get_rocksdb_block_cache_size_mb(),
+					ini_option_object().get_rocksdb_write_buffer_size_mb(),
+					ini_option_object().get_rocksdb_max_write_buffer_number(),
+					ini_option_object().get_rocksdb_wal_ttl_seconds(),
+					ini_option_object().get_rocksdb_wal_size_limit_mb(),
+					ini_option_object().is_rocksdb_sync_writes());
+			rdb->set_resync_failure_threshold(
+				ini_option_object().get_rocksdb_resync_failure_threshold());
+			rdb->set_wal_max_batch_bytes(
+				ini_option_object().get_rocksdb_wal_max_batch_bytes());
+			rdb->set_wal_sync_bwlimit(
+				ini_option_object().get_rocksdb_wal_sync_bwlimit());
+			rdb->set_wal_sync_interval(
+				ini_option_object().get_rocksdb_wal_sync_interval());
+			this->_storage = rdb;
+		}
 		break;
 	#endif
 	default:

@@ -15,6 +15,7 @@ mkShell {
     zlib
     libmemcached
     tokyocabinet
+    rocksdb
     (if stdenv.isDarwin then libossp_uuid else libuuid)
     cutter
     pkg-config

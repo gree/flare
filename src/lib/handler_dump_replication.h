@@ -62,6 +62,16 @@ protected:
 
 private:
 	long _sleep_for_bwlimit(int bytes_written, int bwlimit);
+
+	// RocksDB resync accounting: record the outcome of one resync
+	// attempt (WAL or full dump) and self-demote when the consecutive
+	// failure streak reaches the configured threshold. No-op for
+	// non-RocksDB backends.
+	void _notify_resync_result(bool success);
+
+	// Replace this->_connection with a freshly opened one; used when a
+	// failed WAL exchange left the previous connection unsynchronized.
+	int _reopen_connection();
 };
 
 }	// namespace flare

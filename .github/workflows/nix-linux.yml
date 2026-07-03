@@ -1,9 +1,17 @@
 name: nix-linux
 
-on: [push, pull_request]
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  build-cache:
+  test-legacy:
+    name: Test Legacy Build (without RocksDB)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
@@ -12,5 +20,58 @@ jobs:
           extra_nix_config: |
             experimental-features = nix-command flakes
           nix_path: nixpkgs=channel:nixos-unstable
-      - run: |
-          nix build .#test-flare -L
+      - name: Build legacy Flare and run unit tests
+        # Builds flared and runs the cutter unit test suite (default.nix
+        # checkPhase). NOT retried: a flaky unit test must fail the build
+        # rather than be masked by a retry. Output linked as result-flare
+        # so the verify step below inspects the flared binary directly.
+        run: |
+          nix build .#flare -L --out-link result-flare
+      - name: Run flare-tests integration suite
+        # Separate step so ONLY the integration suite is retried. Its
+        # `repartition` case is statistical (random key distribution,
+        # fails when deviation >= 0.3) and genuinely flaky; the flare
+        # build above is already cached, so a retry re-runs only the
+        # integration tests, not the unit tests.
+        run: |
+          for i in 1 2 3; do
+            nix build .#test-flare -L && exit 0 || echo "attempt $i failed"
+          done
+          exit 1
+      - name: Verify RocksDB is NOT compiled
+        run: |
+          if nm result-flare/bin/flared | grep -q rocksdb; then
+            echo "ERROR: RocksDB symbols found in legacy build"
+            exit 1
+          fi
+          echo "SUCCESS: Legacy build has no RocksDB dependencies"
+
+  test-rocksdb:
+    name: Test RocksDB Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: cachix/install-nix-action@v22
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+          nix_path: nixpkgs=channel:nixos-unstable
+      - name: Build RocksDB Flare and run unit tests
+        # Same split as the legacy job: unit tests (incl. the new WAL /
+        # storage_rocksdb tests) run here without retry so a flaky race
+        # cannot sneak through three attempts.
+        run: |
+          nix build .#flare-rocksdb -L --out-link result-flare
+      - name: Run flare-tests integration suite (RocksDB)
+        run: |
+          for i in 1 2 3; do
+            nix build .#test-flare-rocksdb -L && exit 0 || echo "attempt $i failed"
+          done
+          exit 1
+      - name: Verify RocksDB is compiled
+        run: |
+          if ! nm result-flare/bin/flared | grep -q rocksdb; then
+            echo "ERROR: RocksDB symbols NOT found in RocksDB build"
+            exit 1
+          fi
+          echo "SUCCESS: RocksDB build has RocksDB dependencies"

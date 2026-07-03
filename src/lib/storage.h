@@ -86,6 +86,7 @@ public:
 		type_tch,
 		type_tcb,
 		type_kch,
+		type_rocksdb,
 	};
 
 	enum									capability {
@@ -313,6 +314,8 @@ public:
 			t = type_tcb;
 		} else if (s == "kch") {
 			t = type_kch;
+		} else if (s == "rocksdb") {
+			t = type_rocksdb;
 		} else {
 			return -1;
 		}
@@ -327,6 +330,8 @@ public:
 			return "tcb";
 		case type_kch:
 			return "kch";
+		case type_rocksdb:
+			return "rocksdb";
 		}
 		return "";
 	};

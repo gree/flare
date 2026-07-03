@@ -1333,12 +1333,20 @@ int storage_rocksdb::set_repl_source(const string& source_id, uint64_t lsn) {
 	return 0;
 }
 
-uint64_t storage_rocksdb::flush_and_purge_wal_for_test() {
+bool storage_rocksdb::flush_and_purge_wal_for_test() {
 	// Flush the memtable so its contents are in an SST, then physically
 	// delete every archived WAL file. After this, GetUpdatesSince() for
 	// a sequence that lived only in those WALs returns positioned at a
 	// later batch (or nothing), which our continuity check must map to
 	// ERR_LSN_PURGED.
+	//
+	// Returns true ONLY when we have actually confirmed, via a direct
+	// GetUpdatesSince() probe, that sequence 1 is no longer retrievable
+	// from the WAL — i.e. a purge really happened. A test can then hard-
+	// assert that get_updates_since(0) reports ERR_LSN_PURGED. If the
+	// environment retained the WAL (nothing was purged), it returns
+	// false and the test skips the purge assertion instead of passing
+	// vacuously.
 	uint64_t seq_before_flush = this->_db->GetLatestSequenceNumber();
 
 	rocksdb::FlushOptions fo;
@@ -1346,42 +1354,47 @@ uint64_t storage_rocksdb::flush_and_purge_wal_for_test() {
 	rocksdb::Status fs = this->_db->Flush(fo);
 	if (!fs.ok()) {
 		log_err("flush_and_purge_wal_for_test: Flush failed: %s", fs.ToString().c_str());
-		return 0;
+		return false;
 	}
 
 	rocksdb::VectorLogPtr wal_files;
 	rocksdb::Status ws = this->_db->GetSortedWalFiles(wal_files);
-	if (!ws.ok()) {
-		log_err("flush_and_purge_wal_for_test: GetSortedWalFiles failed: %s", ws.ToString().c_str());
-		return 0;
-	}
-
-	rocksdb::Env* env = this->_db->GetEnv();
-	string archive_dir = this->_data_path + "/archive";
-	uint64_t purged_upto = 0;
-	for (size_t i = 0; i < wal_files.size(); i++) {
-		// Only archived WALs are safe to delete out from under the DB;
-		// the live WAL is still needed for the current memtable.
-		if (wal_files[i]->Type() != rocksdb::kArchivedLogFile) {
-			continue;
-		}
-		string path = archive_dir + "/" + wal_files[i]->PathName();
-		// PathName() may already include the "archive/" prefix depending
-		// on the build; try both.
-		rocksdb::Status ds = env->DeleteFile(path);
-		if (!ds.ok()) {
-			ds = env->DeleteFile(this->_data_path + "/" + wal_files[i]->PathName());
-		}
-		if (ds.ok()) {
-			if (wal_files[i]->StartSequence() > purged_upto) {
-				purged_upto = wal_files[i]->StartSequence();
+	if (ws.ok()) {
+		rocksdb::Env* env = this->_db->GetEnv();
+		string archive_dir = this->_data_path + "/archive";
+		for (size_t i = 0; i < wal_files.size(); i++) {
+			// Only archived WALs are safe to delete out from under the
+			// DB; the live WAL is still needed for the current memtable.
+			if (wal_files[i]->Type() != rocksdb::kArchivedLogFile) {
+				continue;
+			}
+			rocksdb::Status ds = env->DeleteFile(archive_dir + "/" + wal_files[i]->PathName());
+			if (!ds.ok()) {
+				// PathName() may already include the "archive/" prefix.
+				env->DeleteFile(this->_data_path + "/" + wal_files[i]->PathName());
 			}
 		}
 	}
 
-	log_notice("flush_and_purge_wal_for_test: flushed at seq %llu, purged archived WAL up to seq %llu",
-		(unsigned long long)seq_before_flush, (unsigned long long)purged_upto);
-	return purged_upto;
+	// Probe: is sequence 1 still retrievable? If GetUpdatesSince(1)
+	// cannot be positioned at (or before) sequence 1, the early WAL is
+	// gone and a purge is confirmed.
+	bool purged = false;
+	std::unique_ptr<rocksdb::TransactionLogIterator> iter;
+	rocksdb::Status probe = this->_db->GetUpdatesSince(1, &iter);
+	if (!probe.ok()) {
+		purged = probe.IsNotFound();
+	} else if (!iter->Valid()) {
+		// nothing at or after seq 1 although we wrote several records
+		purged = (seq_before_flush >= 1);
+	} else {
+		rocksdb::BatchResult first = iter->GetBatch();
+		purged = (first.sequence > 1);
+	}
+
+	log_notice("flush_and_purge_wal_for_test: flushed at seq %llu, purge confirmed=%s",
+		(unsigned long long)seq_before_flush, purged ? "true" : "false");
+	return purged;
 }
 
 int storage_rocksdb::set_repl_last_lsn(uint64_t lsn) {

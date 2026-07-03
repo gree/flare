@@ -853,22 +853,22 @@ void test_wal_get_updates_since_purged_detected() {
 		snprintf(key, sizeof(key), "purge%02d", i);
 		cut_assert_equal_int(0, storage_set_string(m, key, "v"));
 	}
-	m->flush_and_purge_wal_for_test();
+	bool purged = m->flush_and_purge_wal_for_test();
 
 	vector<pair<uint64_t, rocksdb::WriteBatch> > updates;
 	int rc = m->get_updates_since(0, updates);
 
-	// Two acceptable outcomes, both correct; a truncated stream (rc==0
-	// with a first batch whose sequence > 1) is the silent-gap bug and
-	// must NOT happen.
-	if (rc == storage_rocksdb::ERR_LSN_PURGED) {
-		// Continuity check fired: the purged early range was detected
-		// and the caller will be forced onto a full resync. This is the
-		// path F2 was about.
+	if (purged) {
+		// A purge was CONFIRMED (early sequences are gone), so the
+		// continuity check MUST fire — this is the whole point of F2, a
+		// hard assertion that the purged range is never silently
+		// streamed as a truncated (gapped) update set.
+		cut_assert_equal_int(storage_rocksdb::ERR_LSN_PURGED, rc);
 		cut_assert_true(updates.empty());
 	} else {
-		// WAL still fully covers sequence 0 in this environment: then
-		// the stream must be contiguous from sequence 1, never skipping.
+		// The environment retained the WAL (nothing was purged). The
+		// stream must still be contiguous from sequence 1 — never a
+		// silent gap — but there is no purge to detect here.
 		cut_assert_equal_int(0, rc);
 		if (!updates.empty()) {
 			cut_assert_operator(updates.front().first, <=, static_cast<uint64_t>(1));

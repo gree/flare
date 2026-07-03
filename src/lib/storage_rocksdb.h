@@ -243,11 +243,13 @@ public:
 
 	// Testing hook: flush the memtable and delete archived WAL files so
 	// that a subsequent get_updates_since() below the flushed sequence
-	// hits the purged-WAL path. Returns the sequence number up to which
-	// updates are no longer retrievable (0 if nothing was purged). This
-	// exercises the ERR_LSN_PURGED continuity check without waiting for
-	// the time-/size-based WAL retention to trigger.
-	uint64_t flush_and_purge_wal_for_test();
+	// hits the purged-WAL path. Returns true only when it has confirmed
+	// (via a direct GetUpdatesSince probe) that early sequences are no
+	// longer retrievable — so a test can hard-assert ERR_LSN_PURGED —
+	// and false if the environment retained the WAL. This exercises the
+	// ERR_LSN_PURGED continuity check without waiting for the time-/
+	// size-based WAL retention to trigger.
+	bool flush_and_purge_wal_for_test();
 
 	// Master identity token access. `get_master_id()` returns this DB's
 	// token (set at open(); empty only if open() was never called or

@@ -97,20 +97,28 @@ def suite : TestSuite := {
           IO.eprintln s!"# Killing P0 master: {oldMaster}"
           let _ ← kubectl ["delete", "pod", oldMaster, "-n", cfg.«namespace»,
                            "--force", "--grace-period=0"]
-          -- Wait for a DIFFERENT pod to become P0 master.
-          let elected ← waitForCondition "new P0 master elected" 90 do
+          -- flare's failover model: the StatefulSet recreates the pod under the
+          -- SAME name and the operator re-assigns it (or promotes a replica),
+          -- so we wait for a P0 master to be AVAILABLE again — not for a
+          -- different pod name (which never happens with StatefulSet identity).
+          -- We also require all pods ready so the recreated pod is serving before
+          -- we read data back.
+          let recovered ← waitForCondition "P0 master available after kill" 120 do
             match ← currentP0Master with
-            | some m => return (m != oldMaster)
             | none => return false
-          if !elected then
-            return .fail s!"no new P0 master within 90s after killing {oldMaster}"
+            | some _ =>
+              match ← kubectlGetJsonpath "statefulset" s!"{cfg.name}-nodes" cfg.«namespace»
+                        "{.status.readyReplicas}" with
+              | .ok val => return (val.toNat?.getD 0 >= cfg.partitions * cfg.replicas)
+              | .error _ => return false
+          if !recovered then
+            return .fail s!"P0 master not available / pods not ready within 120s after killing {oldMaster}"
           match ← currentP0Master with
-          | none => return .fail "P0 master missing after re-election"
+          | none => return .fail "P0 master missing after recovery"
           | some newMaster =>
-            IO.eprintln s!"# New P0 master: {newMaster} (was {oldMaster})"
-            -- Give the promoted node a moment to be serving, then verify data.
+            IO.eprintln s!"# P0 master after failover: {newMaster} (killed {oldMaster})"
             match ← getPodIp newMaster cfg.«namespace» with
-            | none => return .fail s!"could not get IP for new master {newMaster}"
+            | none => return .fail s!"could not get IP for P0 master {newMaster}"
             | some ip => assertAllKeysSurvive ip },
 
     -- Test 3: the new P0 master must actually hold data (count-level guard that

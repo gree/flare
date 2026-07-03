@@ -83,12 +83,20 @@ def suite : TestSuite := {
     -- Test 4: ConfigMap contains replication settings
     { name := "ConfigMap contains cluster-replication settings"
       run := do
-        match ← kubectlGetJsonpath "configmap" s!"{cfgV1.name}-config" cfgV1.«namespace»
-                  "{.data.extra\\.conf}" with
-        | .ok data =>
-          if containsSubstr data "cluster-replication = true" then return .pass
-          else return .fail s!"ConfigMap missing replication settings: {data}"
-        | .error e => return .fail s!"could not read ConfigMap: {e}" },
+        -- The CRD status (migrationPhase) and the extra.conf ConfigMap are written
+        -- by separate async steps of the reconcile, so poll rather than reading
+        -- once — the ConfigMap can lag the phase transition by a tick or two.
+        let ok ← waitForCondition "extra.conf has cluster-replication=true" 60 do
+          match ← kubectlGetJsonpath "configmap" s!"{cfgV1.name}-config" cfgV1.«namespace»
+                    "{.data.extra\\.conf}" with
+          | .ok data => return containsSubstr data "cluster-replication = true"
+          | .error _ => return false
+        if ok then return .pass
+        else
+          match ← kubectlGetJsonpath "configmap" s!"{cfgV1.name}-config" cfgV1.«namespace»
+                    "{.data.extra\\.conf}" with
+          | .ok data => return .fail s!"ConfigMap missing replication settings after 60s: {data}"
+          | .error e => return .fail s!"could not read ConfigMap: {e}" },
 
     -- Test 5: verify Forwarding phase (auto transition)
     { name := "migrationPhase transitions to Forwarding"

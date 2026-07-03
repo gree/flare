@@ -132,19 +132,19 @@ def deletePod (podName ns : String) : IO (Except String Unit) := do
     kubectl create configmap <name> -n <ns> --from-literal=nodeMap=<data> -o yaml --dry-run=client | kubectl apply -f - -/
 def updateFlaredConfigMap (cmName ns : String) (nodeMapData : String) : IO (Except String Unit) := do
   retry s!"update configmap {cmName}" do
-    -- Use kubectl apply with dry-run pipe pattern for idempotent create-or-update
-    try
-      let result ← IO.Process.output {
-        cmd := "sh"
-        args := #["-c",
-          s!"kubectl create configmap {cmName} -n {ns} --from-literal=nodeMap='{nodeMapData}' -o yaml --dry-run=client | kubectl apply -f -"]
-      }
-      if result.exitCode == 0 then
-        return .ok ()
-      else
-        return .error s!"configmap update failed (exit {result.exitCode}): {result.stderr}"
-    catch e =>
-      return .error s!"configmap update error: {e}"
+    -- Idempotent create-or-update WITHOUT a shell. `nodeMapData` contains node
+    -- names sourced from untrusted TCP `node add` input, so it must never be
+    -- interpolated into a `sh -c` string. We render the ConfigMap manifest with
+    -- `kubectl create` (argv-direct: nodeMapData is a single argv element, not
+    -- shell-parsed) and pipe the YAML to `kubectl apply -f -` over stdin.
+    match ← kubectl ["create", "configmap", cmName, "-n", ns,
+                     s!"--from-literal=nodeMap={nodeMapData}",
+                     "-o", "yaml", "--dry-run=client"] with
+    | .error e => return .error s!"configmap render failed: {e}"
+    | .ok manifest =>
+      match ← kubectlWithStdin ["apply", "-f", "-"] manifest with
+      | .error e => return .error s!"configmap apply failed: {e}"
+      | .ok _ => return .ok ()
 
 -- ===========================================================================
 -- Cluster Replication Bridge Functions
@@ -200,18 +200,16 @@ private def applyExtraConfConfigMap (crName ns content : String)
   let contentLines := content.splitOn "\n" |>.filter (· != "")
   let firstLine := contentLines.headD "(empty)"
   IO.eprintln s!"[flare-operator] ConfigMap {cmName}: {content.length} bytes, {contentLines.length} lines, first: {firstLine}"
-  try
-    let result ← IO.Process.output {
-      cmd := "sh"
-      args := #["-c",
-        s!"kubectl create configmap {cmName} -n {ns} --from-literal='extra.conf={content}' -o yaml --dry-run=client | kubectl apply -f -"]
-    }
-    if result.exitCode == 0 then
-      return .ok ()
-    else
-      return .error s!"extra.conf configmap apply failed (exit {result.exitCode}): {result.stderr}"
-  catch e =>
-    return .error s!"extra.conf configmap apply error: {e}"
+  -- Shell-free create-or-update (see updateFlaredConfigMap). `content` is rendered
+  -- from CRD-supplied values (replication server name etc.); keep it off `sh -c`.
+  match ← kubectl ["create", "configmap", cmName, "-n", ns,
+                   s!"--from-literal=extra.conf={content}",
+                   "-o", "yaml", "--dry-run=client"] with
+  | .error e => return .error s!"extra.conf configmap render failed: {e}"
+  | .ok manifest =>
+    match ← kubectlWithStdin ["apply", "-f", "-"] manifest with
+    | .error e => return .error s!"extra.conf configmap apply failed: {e}"
+    | .ok _ => return .ok ()
 
 /-- Read the `extra.conf` key from `{crName}-config`, if present. -/
 def readFlaredExtraConf (crName ns : String) : IO (Except String String) := do

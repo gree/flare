@@ -21,6 +21,40 @@ def kubectl (args : List String) : IO (Except String String) := do
   catch e =>
     return .error s!"kubectl error: {e}"
 
+/-- Run kubectl with `stdin` fed from a string, returning stdout or error.
+
+    This exists so that untrusted data (node names, CRD-supplied config values)
+    can be handed to `kubectl ... -f -` / `--from-file=/dev/stdin` WITHOUT ever
+    being interpolated into a `sh -c` string. Building a shell command with such
+    data (`kubectl create ... --from-literal=x='{data}'`) is a command-injection
+    vector: a node registering as `x';kubectl delete ns …;'` would break out of
+    the quoting and run arbitrary commands with the operator's ClusterRole. Passing
+    argv directly + data over stdin removes the shell entirely. -/
+def kubectlWithStdin (args : List String) (stdinData : String)
+    : IO (Except String String) := do
+  try
+    let child ← IO.Process.spawn {
+      cmd := "kubectl"
+      args := args.toArray
+      stdin := .piped
+      stdout := .piped
+      stderr := .piped
+    }
+    let (stdinHandle, child) ← child.takeStdin
+    stdinHandle.putStr stdinData
+    stdinHandle.flush
+    -- Dropping the handle closes stdin so kubectl sees EOF.
+    let _ := stdinHandle
+    let stdout ← child.stdout.readToEnd
+    let stderr ← child.stderr.readToEnd
+    let exitCode ← child.wait
+    if exitCode == 0 then
+      return .ok stdout
+    else
+      return .error s!"kubectl failed (exit {exitCode}): {stderr}"
+  catch e =>
+    return .error s!"kubectl error: {e}"
+
 /-- Parse a FlareClusterView from a Lean.Json object. -/
 private def getFlareClusterFromJson (json : Lean.Json) (name ns : String)
     : Except String FlareClusterView := do

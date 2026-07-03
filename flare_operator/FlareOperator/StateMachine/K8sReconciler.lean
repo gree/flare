@@ -200,17 +200,34 @@ def handleFailoverPure (state : FlareClusterState) (deadKeys : List String)
     : FlareClusterState :=
   deadKeys.foldl handleFailoverSingleKey state
 
-/-- Pure dead-node detection (Main.lean:39-42). -/
+/-- Pure dead-node detection (mirrors legacy `detectDeadNodes`, Main.lean:116-124).
+    A node is dead only if its pod is gone AND it is a role/state that should be
+    actively served. Excludes:
+    - Proxy nodes: not yet assigned to a partition, nothing to fail over.
+    - Down nodes: already demoted, re-flagging causes churn.
+    - Prepare nodes: actively reconstructing (potentially a 100GB+ dataset). Their
+      pod may briefly drop from the ready list; marking them dead would abort the
+      reconstruction and trigger a needless rebalance. -/
 def detectDeadNodesPure (state : FlareClusterState) (livePodKeys : List String)
     : List String :=
-  state.nodeMap.filter (fun (key, _) => !livePodKeys.contains key) |>.map Prod.fst
+  state.nodeMap.filter (fun (key, node) =>
+    !livePodKeys.contains key
+    && node.role != FlareRole.Proxy
+    && node.state != FlareState.Down
+    && node.state != FlareState.Prepare) |>.map Prod.fst
 
 /-- Pure proxy assignment (Main.lean:323-330).
-    Assigns roles to any Proxy nodes using autoAssign. -/
+    Assigns roles to any Proxy nodes using autoAssign.
+
+    A node that was just demoted by failover has role=Proxy AND state=Down; it must
+    NOT be picked back up as the new master (that would resurrect the dead node and
+    flap forever). We only auto-assign Proxy nodes that are actually alive, so an
+    open master slot is filled by a live registered node (the promoted replica),
+    never by the corpse of the node that just failed. -/
 def assignProxiesPure (state : FlareClusterState) (crd : FlareClusterView)
     : FlareClusterState :=
   state.nodeMap.foldl (init := state) fun currentState (nodeKey, node) =>
-    if node.role == FlareRole.Proxy then
+    if node.role == FlareRole.Proxy && node.state != FlareState.Down then
       let (newState, _) := autoAssign currentState crd nodeKey node
       newState
     else
@@ -242,6 +259,33 @@ def computeNextReplicationPhase (crd : FlareClusterView) (currentPhase : Migrati
     | .Forwarding =>
       -- Steady state
       (none, false)
+
+/-- Extract the pod name (first DNS label) from a node's FQDN serverName.
+    K8s Service selector values must be ≤63 chars, so the full FQDN can't be used
+    (mirrors the legacy `extractPodName`, Main.lean:169-172). -/
+def extractPodNamePure (fqdn : String) : String :=
+  match fqdn.splitOn "." with
+  | podName :: _ => podName
+  | [] => fqdn
+
+/-- Build the Service-selector patch effects for a reconciled cluster state.
+    For each partition that has a current master, emit a `.PatchService` effect
+    pointing the partition's client Service (`{crName}-{partition}`) at the master's
+    pod. This is what actually re-routes client traffic after a failover/assignment;
+    without it the Service keeps targeting the dead pod (mirrors the legacy
+    `ensureServiceRouting`, Main.lean:174-189). -/
+def servicePatchEffects (state : FlareClusterState) (crName : String)
+    : List FlareEffect :=
+  state.partitionMap.filterMap fun (idx, part) =>
+    match part.master with
+    | none => none
+    | some masterKey =>
+      match state.lookupNode masterKey with
+      | none => none
+      | some masterNode =>
+        let svcName := s!"{crName}-{idx}"
+        let podName := extractPodNamePure masterNode.serverName
+        some (.PatchService svcName podName)
 
 -- ===========================================================================
 -- Core Transition Function
@@ -382,9 +426,17 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
       ({ s with reconcileStep := .Error "missing cluster state at AfterBroadcastTopology" }, none, [])
 
   | .AfterPatchService =>
-    -- ALWAYS patch services (K8s idempotency requirement)
-    -- Issue PatchService request
-    ({ s with reconcileStep := .Done }, some .PatchService, [])
+    -- ALWAYS patch services (K8s idempotency requirement).
+    -- Emit a PatchService effect for each partition's current master so client
+    -- Services are re-routed to the live master. Previously this step only issued
+    -- the arg-less PatchService *request* (a no-op executor), so selectors were
+    -- never updated and clients kept hitting the dead pod after a failover.
+    let crName := (s.cachedCrd.bind (·.metadata.name)).getD "flare"
+    let patchEffects :=
+      match s.updatedClusterState with
+      | some state => servicePatchEffects state crName
+      | none => []
+    ({ s with reconcileStep := .Done }, some .PatchService, patchEffects)
 
   | .EmergencyPaused =>
     -- Terminal: Circuit breaker tripped, stay paused

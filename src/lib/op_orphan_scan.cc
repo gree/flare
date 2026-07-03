@@ -82,12 +82,23 @@ int op_orphan_scan::_run_server() {
 
 	if (partition < 0) {
 		// Node is not currently assigned to a partition (proxy,
-		// down, prepare). Every local key is, by definition, an
-		// orphan — but in that state the operator should NOT be
-		// purging, so we refuse and let them figure out the right
-		// move.
+		// down). Every local key is, by definition, an orphan — but
+		// in that state the operator should NOT be purging, so we
+		// refuse and let them figure out the right move.
 		log_warning("orphan_scan refused: node has no partition assignment (role/state transient)", 0);
 		return this->_send_result(result_server_error, "no_partition");
+	}
+
+	// A node in state_prepare/state_ready has a partition assignment in
+	// the PREPARE partition map, which the active map (and therefore
+	// partition_size / resolve()) does not include yet — every local
+	// key would be judged an orphan and a purge would wipe the entire
+	// dataset mid-reconstruction. Only a fully active node whose
+	// partition exists in the active map may scan.
+	if (self.node_state != cluster::state_active || partition >= partition_size) {
+		log_warning("orphan_scan refused: node is not active in the current partition map (state=%d, partition=%d, partition_size=%d)",
+			self.node_state, partition, partition_size);
+		return this->_send_result(result_server_error, "not_active");
 	}
 
 	if (this->_storage->iter_begin() < 0) {

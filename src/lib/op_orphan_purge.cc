@@ -102,6 +102,19 @@ int op_orphan_purge::_run_server() {
 		return this->_send_result(result_server_error, "no_partition");
 	}
 
+	// A node in state_prepare/state_ready has its partition in the
+	// PREPARE map only; the active map (partition_size / resolve())
+	// does not include it, so every local key would resolve to another
+	// partition and the purge would wipe the entire dataset while the
+	// node is still being reconstructed. Refuse unless the node is
+	// fully active in the current partition map.
+	if (self.node_state != cluster::state_active || partition >= partition_size) {
+		log_warning("orphan_purge refused: node is not active in the current partition map (state=%d, partition=%d, partition_size=%d)",
+			self.node_state, partition, partition_size);
+		rdb->clear_orphan_scan();  // a token issued in this state must not survive
+		return this->_send_result(result_server_error, "not_active");
+	}
+
 	if (this->_storage->iter_begin() < 0) {
 		return this->_send_result(result_server_error, "iter_failed");
 	}

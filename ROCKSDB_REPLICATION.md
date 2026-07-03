@@ -161,20 +161,40 @@ ERROR\r\n
 ### WAL Push Streaming: `repl_sync_wal begin`
 
 **Purpose**: Push the source's WAL delta to the destination, guarded by
-a master-identity token to prevent cross-lineage corruption. The
-protocol client is the SOURCE (the node with the data); the protocol
-server is the DESTINATION.
+a **source id** (sequence-domain identity) to prevent cross-domain
+corruption. The protocol client is the SOURCE (the node with the data);
+the protocol server is the DESTINATION.
+
+> **Topology constraint (important).** WAL batches are applied to the
+> destination entry node's local RocksDB directly — this bypasses the
+> destination cluster's key routing (`pre_proxy_write`) and its own
+> slave fan-out (`post_proxy_write`). It is therefore only correct when
+> the destination is **a single active partition with no slave**. The
+> destination enforces this (`cluster::is_wal_sync_destination_safe()`)
+> and replies `SERVER_ERROR topology_unsupported` otherwise, which the
+> source treats as not-applicable and falls back to a full dump (which
+> IS routed and replicated correctly through `op_set`). Any wider
+> destination topology always uses full dump.
+
+> **Source id is NOT the destination's master_id.** Each physical DB
+> has its own immutable `master_id` naming its WAL sequence domain. The
+> source sends *its own* master_id as the source id; the destination
+> compares it against `repl_source_id` — the source it was last seeded
+> by (see `seed` below) — NOT against the destination's own master_id.
+> This prevents two DBs that share a lineage token (e.g. after a
+> reconstruction) but have independent sequence counters from being
+> treated as the same WAL domain, which would silently skip updates.
 
 **Source Request**:
 ```
-repl_sync_wal begin <master_id>\r\n
+repl_sync_wal begin <source_id>\r\n
 ```
 
-`<master_id>` is the source's lineage token (or `-` if it has none,
-which the destination treats as a lineage mismatch).
+`<source_id>` is the source's own master_id (or `-` if it has none,
+which the destination treats as a mismatch).
 
-**Destination Response (lineage matches)** — its recorded position in
-the source's WAL:
+**Destination Response (source matches its recorded upstream)** — its
+recorded position in that source's WAL:
 ```
 LSN <last_lsn>\r\n
 ```
@@ -221,19 +241,26 @@ apply. On the destination, a single failed batch stops application (no
 gaps are ever applied); the remainder of the stream is drained and
 discarded to keep the connection framed.
 
-### Lineage Seeding: `repl_sync_wal seed`
+### Source Seeding: `repl_sync_wal seed`
 
-**Purpose**: After a successful full dump, the source records its
-lineage token and the WAL position the dump covered on the
-destination, enabling incremental syncs from then on. The seed LSN is
-captured BEFORE the dump's iteration snapshot, so the overlap between
-the dump and the next WAL push is re-applied idempotently rather than
-skipped.
+**Purpose**: After a successful full dump, the source records **which
+source (its own master_id / sequence domain) the destination now
+follows** and the WAL position the dump covered, enabling incremental
+syncs from then on. The destination stores these as `repl_source_id`
+and `repl_last_lsn` in **one atomic WriteBatch** (so a crash can never
+pair a new source with a stale position). It does NOT change the
+destination's own master_id. The seed LSN is captured BEFORE the
+dump's iteration snapshot, so the overlap between the dump and the next
+WAL push is re-applied idempotently rather than skipped.
+
+The destination re-checks the topology constraint here too, so a node
+that grew slaves/partitions after its dump does not later accept
+un-routed WAL batches.
 
 **Source Request / Destination Response**:
 ```
-repl_sync_wal seed <master_id> <lsn>\r\n
-OK\r\n            (or SERVER_ERROR invalid_seed / seed_failed)
+repl_sync_wal seed <source_id> <lsn>\r\n
+OK\r\n            (or SERVER_ERROR invalid_seed / seed_failed / topology_unsupported)
 ```
 
 **Implementation**: `op_repl_sync_wal.cc`
@@ -737,9 +764,12 @@ protected from user-visible operations:
 
 | Key                         | Purpose                                  |
 |-----------------------------|------------------------------------------|
-| `__flare_repl_last_lsn`     | Last master LSN the slave has applied    |
-| `__flare_repl_master_id`    | Identity token of the master this slave  |
-|                             | is following (see Master Identity Token) |
+| `__flare_repl_last_lsn`     | Last upstream LSN this DB has applied     |
+| `__flare_repl_master_id`    | This DB's OWN immutable identity (its WAL |
+|                             | sequence domain); never adopted from a peer |
+| `__flare_repl_source_id`    | The upstream source (its master_id) that |
+|                             | `__flare_repl_last_lsn` refers to        |
+| `__flare_record_count`      | Exact user-record count (persisted on close) |
 
 These keys:
 
@@ -748,25 +778,44 @@ These keys:
 - Are recreated automatically if a `flush_all` or manual wipe removes them,
   so that a wiped slave transitions cleanly to an initial full-dump state.
 
-### Master Identity Token
+### Source Identity and Sequence Domains
 
-To detect cross-generation divergence (split-brain recovery, master
-rebuilt from scratch, rollback from backup) the master publishes a stable
-identity token and the slave remembers which master it is following.
+Each physical RocksDB has exactly one **sequence domain**: its WAL
+sequence numbers are only meaningful relative to that specific DB. A
+position (`repl_last_lsn`) recorded against one domain is meaningless
+against another. Two identity keys keep this straight:
 
-- On first `open()`, `storage_rocksdb` reads `__flare_repl_master_id`. If
-  absent, it generates a fresh UUID and persists it. The token is stable
-  for the lifetime of the on-disk database and is preserved across slave
-  promotion (an ex-slave that becomes master keeps the token it already
-  had, so the other slaves see a consistent lineage).
-- The source sends its token in `repl_sync_wal begin <master_id>`; the
-  destination compares against the lineage it has recorded:
-  - **match + `dest_lsn <= source_latest`**: the destination reports its
-    position and the source streams the incremental updates.
-  - **match + `dest_lsn > source_latest`**: the destination is ahead of
-    the source's WAL (rollback, restore from backup, split-brain
-    remnant). The source aborts (`ABORT lsn_ahead`) and falls back to a
-    full dump that resets the destination's position via `seed`.
+- **`__flare_repl_master_id`** — this DB's OWN identity, i.e. the name of
+  ITS sequence domain. Generated as a fresh UUID on first `open()` and
+  then **immutable** for the lifetime of the on-disk database. It is
+  never overwritten by a peer — in particular, reconstruction replaces
+  the data but keeps this DB's own id, because the local sequence
+  counter is still this DB's.
+- **`__flare_repl_source_id`** — on a destination, which upstream source
+  (that source's master_id) the recorded `repl_last_lsn` belongs to.
+  Written only by `repl_sync_wal seed`, atomically together with the
+  position.
+
+`repl_sync_wal begin <source_id>` compares the source's id against the
+destination's `repl_source_id`, NOT against the destination's own
+master_id:
+
+- **match + `dest_lsn <= source_latest`**: the destination reports its
+  position and the source streams the incremental updates.
+- **match + `dest_lsn > source_latest`**: the destination is ahead of
+  the source's WAL (rollback, restore from backup, split-brain
+  remnant). The source aborts (`ABORT lsn_ahead`) and falls back to a
+  full dump that re-seeds the destination's position.
+- **mismatch / never seeded**: `SERVER_ERROR master_id_mismatch`, full
+  dump + seed.
+
+Why not just reuse `master_id` for both? After a partition split a new
+master reconstructed from an old one would, under the old scheme, adopt
+the old master's token — so two DBs with *independent* sequence counters
+would share one identity, and one could trust the other's recorded LSN
+as a position in its own WAL, silently skipping updates. Separating
+"my domain" (`master_id`, immutable) from "the domain my position
+refers to" (`source_id`) removes that confusion.
   - **mismatch**: the destination follows a different lineage. It
     replies `SERVER_ERROR master_id_mismatch <dest_master_id>`; the
     source falls back to full dump and, on completion, seeds the

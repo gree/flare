@@ -39,10 +39,12 @@ namespace flare {
 // operations cannot accidentally clobber or observe them.
 const char* const storage_rocksdb::kReplLastLsnKey  = "__flare_repl_last_lsn";
 const char* const storage_rocksdb::kReplMasterIdKey = "__flare_repl_master_id";
+const char* const storage_rocksdb::kReplSourceIdKey = "__flare_repl_source_id";
 const char* const storage_rocksdb::kRecordCountKey  = "__flare_record_count";
 
 bool storage_rocksdb::is_reserved_key(const string& key) {
-	return key == kReplLastLsnKey || key == kReplMasterIdKey || key == kRecordCountKey;
+	return key == kReplLastLsnKey || key == kReplMasterIdKey
+		|| key == kReplSourceIdKey || key == kRecordCountKey;
 }
 // }}}
 
@@ -585,6 +587,12 @@ int storage_rocksdb::get(entry& e, result& r, int b) {
 		mutex_index = e.get_key_hash_value(hash_algorithm_murmur) % this->_mutex_slot_size;
 	}
 
+	// Set when we find an expired entry that should be physically
+	// removed after releasing the read locks (a rdlock cannot be
+	// upgraded in place; remove() takes the slot lock as a writer).
+	bool expired_to_remove = false;
+	uint32_t expired_version = 0;
+
 	try {
 		if ((b & behavior_skip_lock) == 0) {
 			pthread_rwlock_rdlock(&this->_mutex_wholelock);
@@ -620,6 +628,12 @@ int storage_rocksdb::get(entry& e, result& r, int b) {
 			log_debug("entry expired (key=%s, expire=%ld, timestamp=%ld)",
 				e.key.c_str(), e.expire, stats_object->get_timestamp());
 			r = result_not_found;
+			// Only reap when we own the locks; a skip_lock caller (e.g.
+			// incr) already holds them and handles reaping itself.
+			if ((b & behavior_skip_lock) == 0) {
+				expired_to_remove = true;
+				expired_version = e.version;
+			}
 			throw 0;
 		}
 
@@ -631,12 +645,23 @@ int storage_rocksdb::get(entry& e, result& r, int b) {
 
 		r = result_none;
 
-	} catch (int e) {
+	} catch (int rc) {
 		if ((b & behavior_skip_lock) == 0) {
 			pthread_rwlock_unlock(&this->_mutex_slot[mutex_index]);
 			pthread_rwlock_unlock(&this->_mutex_wholelock);
 		}
-		return e;
+		if (expired_to_remove) {
+			// Physically remove the expired record so TTL-heavy
+			// workloads don't accumulate dead rows (matching
+			// storage_tcb::get). Best-effort: failure only leaves the
+			// record for a later overwrite, which is already correct.
+			storage::entry del;
+			del.key = e.key;
+			del.version = expired_version;
+			result r_remove;
+			this->remove(del, r_remove, behavior_version_equal);
+		}
+		return rc;
 	}
 
 	if ((b & behavior_skip_lock) == 0) {
@@ -905,22 +930,25 @@ int storage_rocksdb::truncate(int b) {
 
 	delete it;
 
-	// Reset the replicated-LSN marker: after a truncate the slave is
-	// logically empty from the application's perspective and the next
-	// sync should start from scratch. The master-id lineage token is
-	// preserved so that incremental sync with the current master can
-	// continue if appropriate.
+	// Reset the upstream replication markers: after a truncate this DB
+	// is logically empty, so any recorded position in an upstream
+	// source's WAL is meaningless and the next sync must start over
+	// (source id + last lsn are cleared together). This node's own
+	// master_id (its sequence-domain identity) is preserved.
+	rocksdb::WriteBatch reset;
+	reset.Delete(kReplLastLsnKey);
+	reset.Delete(kReplSourceIdKey);
 	rocksdb::WriteOptions wo;
 	wo.sync = this->_sync_writes;
 	wo.disableWAL = false;
-	this->_db->Delete(wo, kReplLastLsnKey);
+	this->_db->Write(wo, &reset);
 
 	this->_clear_header_cache();
 	this->_record_count.add(-this->_record_count.fetch());
 
 	pthread_rwlock_unlock(&this->_mutex_wholelock);
 
-	log_notice("storage truncated (master_id preserved=%s, repl_last_lsn reset to 0)",
+	log_notice("storage truncated (master_id preserved=%s, repl source+lsn reset)",
 		this->get_master_id().c_str());
 	return 0;
 }
@@ -931,6 +959,15 @@ int storage_rocksdb::iter_begin() {
 	// Serialize the busy-check and cursor setup: a shared rdlock alone
 	// cannot provide mutual exclusion between two concurrent
 	// iterations (dump, dump replication, orphan scan/purge, ...).
+	//
+	// We deliberately do NOT hold _mutex_wholelock across the whole
+	// iteration. The RocksDB snapshot below already gives a consistent
+	// point-in-time view independent of concurrent writers/truncate, so
+	// there is nothing for the whole lock to protect here — and holding
+	// its rdlock until iter_end() would deadlock: the same thread calls
+	// get()/remove() during iteration (op_dump/orphan_scan/purge pass no
+	// behavior_skip_lock), each re-acquiring the rdlock, while truncate()
+	// and apply_batch() now take it as a writer.
 	pthread_mutex_lock(&this->_mutex_iter_lock);
 
 	if (this->_iter_snapshot) {
@@ -938,10 +975,6 @@ int storage_rocksdb::iter_begin() {
 		log_warning("iteration already in progress", 0);
 		return -1;
 	}
-
-	// Held (shared) until iter_end() so that whole-storage operations
-	// (truncate) exclude active iterations.
-	pthread_rwlock_rdlock(&this->_mutex_wholelock);
 
 	// Create snapshot for consistent iteration
 	this->_iter_snapshot = this->_db->GetSnapshot();
@@ -1009,7 +1042,6 @@ int storage_rocksdb::iter_end() {
 		this->_iter_snapshot = NULL;
 	}
 
-	pthread_rwlock_unlock(&this->_mutex_wholelock);
 	pthread_mutex_unlock(&this->_mutex_iter_lock);
 
 	return 0;
@@ -1262,6 +1294,94 @@ uint64_t storage_rocksdb::get_repl_last_lsn() {
 	}
 
 	return 0;  // No previous sync
+}
+
+string storage_rocksdb::get_repl_source_id() {
+	string value;
+	rocksdb::Status status = this->_db->Get(this->_read_options, kReplSourceIdKey, &value);
+	if (status.ok()) {
+		return value;
+	}
+	return "";	// never seeded by any upstream
+}
+
+int storage_rocksdb::set_repl_source(const string& source_id, uint64_t lsn) {
+	if (source_id.empty()) {
+		log_err("refusing to record an empty replication source id", 0);
+		return -1;
+	}
+	// The source identity and the position in that source's WAL are one
+	// logical fact — commit them in a single atomic Write() so a crash
+	// can never leave a new source id paired with a stale position (a
+	// stale position from another sequence domain would make the next
+	// incremental sync silently skip a gap).
+	rocksdb::WriteBatch batch;
+	batch.Put(kReplSourceIdKey, source_id);
+	string lsn_value = boost::lexical_cast<string>(lsn);
+	batch.Put(kReplLastLsnKey, lsn_value);
+	rocksdb::WriteOptions wo;
+	wo.sync = true;
+	wo.disableWAL = false;
+	rocksdb::Status status = this->_db->Write(wo, &batch);
+	if (!status.ok()) {
+		log_err("failed to persist replication source (source_id=%s, lsn=%llu): %s",
+			source_id.c_str(), (unsigned long long)lsn, status.ToString().c_str());
+		return -1;
+	}
+	log_notice("replication source recorded (source_id=%s, lsn=%llu)",
+		source_id.c_str(), (unsigned long long)lsn);
+	return 0;
+}
+
+uint64_t storage_rocksdb::flush_and_purge_wal_for_test() {
+	// Flush the memtable so its contents are in an SST, then physically
+	// delete every archived WAL file. After this, GetUpdatesSince() for
+	// a sequence that lived only in those WALs returns positioned at a
+	// later batch (or nothing), which our continuity check must map to
+	// ERR_LSN_PURGED.
+	uint64_t seq_before_flush = this->_db->GetLatestSequenceNumber();
+
+	rocksdb::FlushOptions fo;
+	fo.wait = true;
+	rocksdb::Status fs = this->_db->Flush(fo);
+	if (!fs.ok()) {
+		log_err("flush_and_purge_wal_for_test: Flush failed: %s", fs.ToString().c_str());
+		return 0;
+	}
+
+	rocksdb::VectorLogPtr wal_files;
+	rocksdb::Status ws = this->_db->GetSortedWalFiles(wal_files);
+	if (!ws.ok()) {
+		log_err("flush_and_purge_wal_for_test: GetSortedWalFiles failed: %s", ws.ToString().c_str());
+		return 0;
+	}
+
+	rocksdb::Env* env = this->_db->GetEnv();
+	string archive_dir = this->_data_path + "/archive";
+	uint64_t purged_upto = 0;
+	for (size_t i = 0; i < wal_files.size(); i++) {
+		// Only archived WALs are safe to delete out from under the DB;
+		// the live WAL is still needed for the current memtable.
+		if (wal_files[i]->Type() != rocksdb::kArchivedLogFile) {
+			continue;
+		}
+		string path = archive_dir + "/" + wal_files[i]->PathName();
+		// PathName() may already include the "archive/" prefix depending
+		// on the build; try both.
+		rocksdb::Status ds = env->DeleteFile(path);
+		if (!ds.ok()) {
+			ds = env->DeleteFile(this->_data_path + "/" + wal_files[i]->PathName());
+		}
+		if (ds.ok()) {
+			if (wal_files[i]->StartSequence() > purged_upto) {
+				purged_upto = wal_files[i]->StartSequence();
+			}
+		}
+	}
+
+	log_notice("flush_and_purge_wal_for_test: flushed at seq %llu, purged archived WAL up to seq %llu",
+		(unsigned long long)seq_before_flush, (unsigned long long)purged_upto);
+	return purged_upto;
 }
 
 int storage_rocksdb::set_repl_last_lsn(uint64_t lsn) {

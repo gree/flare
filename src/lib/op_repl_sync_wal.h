@@ -59,6 +59,8 @@ using namespace std;
 namespace gree {
 namespace flare {
 
+class cluster;
+
 /**
  *	opcode class (repl_sync_wal)
  */
@@ -96,10 +98,11 @@ protected:
 	};
 
 	storage*	_storage;
+	cluster*	_cluster;             // destination-side topology check (may be NULL)
 	server_mode	_server_mode;
 	uint64_t	_seed_lsn;            // seed subcommand argument
-	string		_client_master_id;    // master_id sent by the source
-	string		_server_master_id;    // master_id extracted from a mismatch reply
+	string		_client_source_id;    // source id (source's own master_id) sent by the source
+	string		_server_source_id;    // source id echoed back in a mismatch reply
 	client_result _client_result;
 	bool		_connection_dirty;    // response stream left unsynchronized
 
@@ -111,18 +114,20 @@ protected:
 	int			_interval_usec;     // 0 = no per-batch sleep
 
 public:
-	op_repl_sync_wal(shared_connection c, storage* st);
+	op_repl_sync_wal(shared_connection c, storage* st, cluster* cl = NULL);
 	virtual ~op_repl_sync_wal();
 
-	// Entry points on the source side. run_client_push() negotiates the
-	// dest's position and streams the WAL delta; run_client_seed()
-	// records lineage + position on the dest after a full dump.
-	virtual int run_client_push(const string& master_id);
-	virtual int run_client_seed(const string& master_id, uint64_t lsn);
+	// Entry points on the source side. `source_id` is this source's own
+	// master_id — the identity of its WAL sequence domain.
+	// run_client_push() negotiates the dest's position and streams the
+	// WAL delta; run_client_seed() records source + position on the
+	// dest after a full dump.
+	virtual int run_client_push(const string& source_id);
+	virtual int run_client_seed(const string& source_id, uint64_t lsn);
 
 	// Result inspectors populated after run_client_push() returns.
 	client_result get_client_result() const { return this->_client_result; }
-	const string& get_server_master_id() const { return this->_server_master_id; }
+	const string& get_server_source_id() const { return this->_server_source_id; }
 
 	// True when a failure left unread/unwritten protocol data on the
 	// connection; the caller must reconnect before reusing it.
@@ -136,6 +141,18 @@ public:
 protected:
 	virtual int _parse_text_server_parameters();
 	virtual int _run_server();
+
+	// True if a graceful shutdown of this thread has been requested.
+	// Safe when no thread is attached (unit tests) — returns false.
+	bool _shutdown_requested() {
+		return this->_thread_available && this->_thread
+			&& this->_thread->is_shutdown_request();
+	}
+
+	// Cap on get_updates_since() fetch iterations in one push before a
+	// non-converging catch-up (write rate persistently above the
+	// throttled send rate) is abandoned in favor of a full dump.
+	static const int max_fetch_iterations = 64;
 
 #ifdef HAVE_LIBROCKSDB
 	int _run_server_begin(storage_rocksdb* rocksdb);

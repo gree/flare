@@ -78,7 +78,11 @@ int handler_dump_replication::run() {
 	if (c->open() < 0) {
 		log_err("failed to connect to cluster replication server (name=%s, port=%d)",
 				   this->_replication_server_name.c_str(), this->_replication_server_port);
-		this->_notify_resync_result(false);
+		// A failed connection to the destination is not a resync
+		// failure of THIS (source) node: the destination being down or
+		// unreachable, possibly combined with repeated config reloads,
+		// must not accumulate a streak that self-demotes a healthy
+		// authoritative source. Only real dump failures count.
 		return -1;
 	}
 
@@ -89,9 +93,9 @@ int handler_dump_replication::run() {
 		this->_replication_server_port,
 		storage::type_cast(this->_storage->get_type()).c_str());
 
-	// Phase 1: probe the destination's capabilities and lineage
+	// Phase 1: probe whether the destination speaks RocksDB WAL.
 	bool peer_supports_wal = false;
-	string peer_master_id;
+	string peer_master_id;	// unused for the lineage decision; see below
 #ifdef HAVE_LIBROCKSDB
 	storage_rocksdb* local_rocksdb = NULL;
 	if (this->_storage->get_type() == storage::type_rocksdb) {
@@ -109,75 +113,73 @@ int handler_dump_replication::run() {
 	// Phase 2: incremental WAL push. This node is the replication
 	// SOURCE (cluster_replication starts this handler only on a master
 	// in mode=duplicate), so we stream OUR WAL delta to the
-	// destination. Incremental sync is only meaningful when the
-	// destination already follows our lineage — i.e. it was previously
-	// seeded by a full dump from this node (or from the same lineage).
+	// destination. We identify our own sequence domain by our master_id
+	// and let the DESTINATION decide whether the push applies: it
+	// compares our source id against the source it was last seeded by
+	// (repl_source_id) and refuses (falling us back to full dump + seed)
+	// on a mismatch. We do NOT gate on the peer's own master_id — that
+	// is the destination DB's identity, a different sequence domain.
 	if (local_rocksdb && peer_supports_wal) {
-		string local_master_id = local_rocksdb->get_master_id();
-		if (peer_master_id == local_master_id) {
-			this->_thread->set_op("repl_sync_wal");
-			log_info("attempting incremental WAL push (master_id=%s)", local_master_id.c_str());
+		string local_source_id = local_rocksdb->get_master_id();
+		this->_thread->set_op("repl_sync_wal");
+		log_info("attempting incremental WAL push (source_id=%s)", local_source_id.c_str());
 
-			op_repl_sync_wal* wal_op = new op_repl_sync_wal(this->_connection, this->_storage);
+		op_repl_sync_wal* wal_op = new op_repl_sync_wal(this->_connection, this->_storage);
 
-			// Streaming throttle: a RocksDB-specific WAL bandwidth /
-			// interval of 0 inherits the cluster-wide reconstruction
-			// settings, so operators who don't need phase-specific
-			// tuning get sensible defaults automatically.
-			wal_op->set_max_batch_bytes(local_rocksdb->get_wal_max_batch_bytes());
-			int wal_bwlimit = local_rocksdb->get_wal_sync_bwlimit();
-			if (wal_bwlimit == 0) {
-				wal_bwlimit = this->_cluster->get_reconstruction_bwlimit();
-			}
-			int wal_interval = local_rocksdb->get_wal_sync_interval();
-			if (wal_interval == 0) {
-				wal_interval = this->_cluster->get_reconstruction_interval();
-			}
-			wal_op->set_wal_sync_bwlimit(wal_bwlimit);
-			wal_op->set_wal_sync_interval(wal_interval);
-
-			int wal_result = wal_op->run_client_push(local_master_id);
-			op_repl_sync_wal::client_result rc = wal_op->get_client_result();
-			bool connection_dirty = wal_op->connection_dirty();
-			delete wal_op;
-
-			if (wal_result == 0 && rc == op_repl_sync_wal::client_success) {
-				log_notice("WAL replication completed successfully (dest=%s:%d)",
-					this->_replication_server_name.c_str(), this->_replication_server_port);
-				this->_notify_resync_result(true);
-				return 0;
-			}
-
-			switch (rc) {
-				case op_repl_sync_wal::client_master_id_mismatch:
-					log_warning("WAL push refused (master_id_mismatch) -> full dump", 0);
-					break;
-				case op_repl_sync_wal::client_lsn_ahead:
-					log_warning("destination position ahead of local WAL (lsn_ahead) -> full dump to reset peer", 0);
-					break;
-				case op_repl_sync_wal::client_lsn_purged:
-					log_notice("local WAL no longer covers destination position (lsn_purged) -> full dump to catch up", 0);
-					break;
-				default:
-					log_warning("WAL replication failed (rc=%d), falling back to full dump replication", rc);
-					break;
-			}
-			local_rocksdb->incr_wal_fallback_to_dump();
-
-			// A failed exchange may have left protocol data on the
-			// connection; reconnect before reusing it for op_set traffic.
-			if (connection_dirty) {
-				if (this->_reopen_connection() < 0) {
-					this->_notify_resync_result(false);
-					return -1;
-				}
-			}
-			// Fall through to full dump replication
-		} else {
-			log_notice("destination follows a different lineage (dest=%s local=%s) -> full dump, then seed",
-				peer_master_id.empty() ? "-" : peer_master_id.c_str(),
-				local_rocksdb->get_master_id().c_str());
+		// Streaming throttle: a RocksDB-specific WAL bandwidth /
+		// interval of 0 inherits the cluster-wide reconstruction
+		// settings, so operators who don't need phase-specific
+		// tuning get sensible defaults automatically.
+		wal_op->set_max_batch_bytes(local_rocksdb->get_wal_max_batch_bytes());
+		int wal_bwlimit = local_rocksdb->get_wal_sync_bwlimit();
+		if (wal_bwlimit == 0) {
+			wal_bwlimit = this->_cluster->get_reconstruction_bwlimit();
 		}
+		int wal_interval = local_rocksdb->get_wal_sync_interval();
+		if (wal_interval == 0) {
+			wal_interval = this->_cluster->get_reconstruction_interval();
+		}
+		wal_op->set_wal_sync_bwlimit(wal_bwlimit);
+		wal_op->set_wal_sync_interval(wal_interval);
+
+		int wal_result = wal_op->run_client_push(local_source_id);
+		op_repl_sync_wal::client_result rc = wal_op->get_client_result();
+		bool connection_dirty = wal_op->connection_dirty();
+		delete wal_op;
+
+		if (wal_result == 0 && rc == op_repl_sync_wal::client_success) {
+			log_notice("WAL replication completed successfully (dest=%s:%d)",
+				this->_replication_server_name.c_str(), this->_replication_server_port);
+			this->_notify_resync_result(true);
+			return 0;
+		}
+
+		switch (rc) {
+			case op_repl_sync_wal::client_master_id_mismatch:
+				log_notice("destination follows a different source (mismatch) -> full dump, then seed", 0);
+				break;
+			case op_repl_sync_wal::client_lsn_ahead:
+				log_warning("destination position ahead of local WAL (lsn_ahead) -> full dump to reset peer", 0);
+				break;
+			case op_repl_sync_wal::client_lsn_purged:
+				log_notice("local WAL no longer covers destination position (lsn_purged) -> full dump to catch up", 0);
+				break;
+			default:
+				log_warning("WAL replication failed (rc=%d), falling back to full dump replication", rc);
+				break;
+		}
+		local_rocksdb->incr_wal_fallback_to_dump();
+
+		// A failed exchange may have left protocol data on the
+		// connection; reconnect before reusing it for op_set traffic.
+		if (connection_dirty) {
+			if (this->_reopen_connection() < 0) {
+				// reconnect failure is a connectivity problem, not a
+				// resync failure of this node — do not count it
+				return -1;
+			}
+		}
+		// Fall through to full dump replication
 	}
 
 	// Capture the WAL position the dump will cover BEFORE the iteration
@@ -281,14 +283,15 @@ int handler_dump_replication::run() {
 			   this->_replication_server_name.c_str(), this->_replication_server_port, partition, partition_size, wait, this->_bwlimitter.get_bwlimit());
 
 #ifdef HAVE_LIBROCKSDB
-	// Phase 4: seed the destination with our lineage token and the WAL
-	// position the dump covered, so the next resync can be incremental.
-	// A seed failure is not a replication failure — the dump itself
-	// succeeded; the next resync just falls back to a full dump again.
+	// Phase 4: tell the destination which source (our sequence domain,
+	// named by our master_id) it now follows and the WAL position the
+	// dump covered, so the next resync can be incremental. A seed
+	// failure is not a replication failure — the dump itself succeeded;
+	// the next resync just falls back to a full dump again.
 	if (local_rocksdb && peer_supports_wal) {
 		op_repl_sync_wal* seed_op = new op_repl_sync_wal(this->_connection, this->_storage);
 		if (seed_op->run_client_seed(local_rocksdb->get_master_id(), seed_lsn) < 0) {
-			log_warning("failed to seed destination lineage; next resync will use a full dump", 0);
+			log_warning("failed to seed destination source; next resync will use a full dump", 0);
 		}
 		delete seed_op;
 	}

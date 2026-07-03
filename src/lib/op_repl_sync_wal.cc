@@ -26,6 +26,7 @@
  *	$Id$
  */
 #include "op_repl_sync_wal.h"
+#include "cluster.h"
 
 namespace gree {
 namespace flare {
@@ -34,13 +35,14 @@ namespace flare {
 /**
  *	ctor for op_repl_sync_wal
  */
-op_repl_sync_wal::op_repl_sync_wal(shared_connection c, storage* st):
+op_repl_sync_wal::op_repl_sync_wal(shared_connection c, storage* st, cluster* cl):
 		op(c, "repl_sync_wal"),
 		_storage(st),
+		_cluster(cl),
 		_server_mode(mode_none),
 		_seed_lsn(0),
-		_client_master_id(""),
-		_server_master_id(""),
+		_client_source_id(""),
+		_server_source_id(""),
 		_client_result(client_server_error),
 		_connection_dirty(false),
 		_max_batch_bytes(0),
@@ -65,7 +67,7 @@ op_repl_sync_wal::~op_repl_sync_wal() {
  *	and connection_dirty() tells the caller whether the connection is
  *	still line-synchronized.
  */
-int op_repl_sync_wal::run_client_push(const string& master_id) {
+int op_repl_sync_wal::run_client_push(const string& source_id) {
 #ifdef HAVE_LIBROCKSDB
 	this->_client_result = client_server_error;
 	this->_connection_dirty = false;
@@ -83,7 +85,7 @@ int op_repl_sync_wal::run_client_push(const string& master_id) {
 	}
 
 	char request[BUFSIZ];
-	const char* id = master_id.empty() ? "-" : master_id.c_str();
+	const char* id = source_id.empty() ? "-" : source_id.c_str();
 	snprintf(request, sizeof(request), "repl_sync_wal begin %s", id);
 	if (this->_send_request(request) < 0) {
 		this->_client_result = client_protocol_error;
@@ -115,14 +117,15 @@ int op_repl_sync_wal::run_client_push(const string& master_id) {
 				 server_id[server_id.size() - 1] == '\r')) {
 				server_id.erase(server_id.size() - 1);
 			}
-			this->_server_master_id = server_id;
+			this->_server_source_id = server_id;
 			this->_client_result = client_master_id_mismatch;
 			rocksdb->incr_wal_sync_master_id_mismatch();
-			log_notice("destination follows a different lineage (dest master_id=%s) -> full dump required", server_id.c_str());
+			log_notice("destination follows a different replication source (dest recorded=%s) -> full dump required", server_id.c_str());
 		} else if (strncmp(body, "not_supported", 13) == 0 ||
-		           strncmp(body, "not_compiled", 12) == 0) {
+		           strncmp(body, "not_compiled", 12) == 0 ||
+		           strncmp(body, "topology_unsupported", 20) == 0) {
 			this->_client_result = client_not_supported;
-			log_notice("WAL sync not supported by peer", 0);
+			log_notice("WAL sync not applicable to peer (%s) -> full dump", body);
 		} else {
 			this->_client_result = client_server_error;
 			rocksdb->incr_wal_sync_other_error();
@@ -177,21 +180,22 @@ int op_repl_sync_wal::run_client_push(const string& master_id) {
 }
 
 /**
- *	record our lineage token and WAL position on the destination after
- *	a successful full dump, enabling incremental syncs from now on.
+ *	tell the destination which source (our sequence domain) it now
+ *	follows and the WAL position our full dump covered, enabling
+ *	incremental syncs from now on.
  */
-int op_repl_sync_wal::run_client_seed(const string& master_id, uint64_t lsn) {
+int op_repl_sync_wal::run_client_seed(const string& source_id, uint64_t lsn) {
 	this->_client_result = client_server_error;
 	this->_connection_dirty = false;
 
-	if (master_id.empty()) {
-		log_err("refusing to seed an empty master_id", 0);
+	if (source_id.empty()) {
+		log_err("refusing to seed an empty source id", 0);
 		return -1;
 	}
 
 	char request[BUFSIZ];
 	snprintf(request, sizeof(request), "repl_sync_wal seed %s %llu",
-		master_id.c_str(), (unsigned long long)lsn);
+		source_id.c_str(), (unsigned long long)lsn);
 	if (this->_send_request(request) < 0) {
 		this->_client_result = client_protocol_error;
 		this->_connection_dirty = true;
@@ -208,8 +212,8 @@ int op_repl_sync_wal::run_client_seed(const string& master_id, uint64_t lsn) {
 	char q[BUFSIZ];
 	util::next_word(p, q, sizeof(q));
 	if (strcmp(q, "OK") == 0) {
-		log_notice("seeded destination (master_id=%s, lsn=%llu)",
-			master_id.c_str(), (unsigned long long)lsn);
+		log_notice("seeded destination (source_id=%s, lsn=%llu)",
+			source_id.c_str(), (unsigned long long)lsn);
 		this->_client_result = client_success;
 		delete[] p;
 		return 0;
@@ -233,10 +237,11 @@ int op_repl_sync_wal::run_client_seed(const string& master_id, uint64_t lsn) {
  *	parser server request parameters
  *
  *	syntax:
- *	REPL_SYNC_WAL begin <master_id>
- *	REPL_SYNC_WAL seed <master_id> <lsn>
+ *	REPL_SYNC_WAL begin <source_id>
+ *	REPL_SYNC_WAL seed <source_id> <lsn>
  *
- *	<master_id> of "-" means "no lineage token".
+ *	<source_id> is the source node's own master_id (its WAL sequence
+ *	domain); "-" means "no source id".
  */
 int op_repl_sync_wal::_parse_text_server_parameters() {
 	char* p;
@@ -258,12 +263,12 @@ int op_repl_sync_wal::_parse_text_server_parameters() {
 
 	n += util::next_word(p+n, q, sizeof(q));
 	if (q[0] == '\0') {
-		log_warning("no master_id specified", 0);
+		log_warning("no source id specified", 0);
 		delete[] p;
 		return -1;
 	}
 	if (strcmp(q, "-") != 0) {
-		this->_client_master_id = q;
+		this->_client_source_id = q;
 	}
 
 	if (this->_server_mode == mode_seed) {
@@ -326,17 +331,34 @@ int op_repl_sync_wal::_run_server() {
  *	streamed batches.
  */
 int op_repl_sync_wal::_run_server_begin(storage_rocksdb* rocksdb) {
-	// Lineage check. Applying WAL batches from a different lineage
-	// would silently corrupt our data, so require an exact match; the
-	// source falls back to a non-destructive full dump and then seeds
-	// us with its token.
-	string server_master_id = rocksdb->get_master_id();
-	if (this->_client_master_id.empty() || this->_client_master_id != server_master_id) {
-		log_notice("master_id mismatch (source=%s local=%s) -> full dump required",
-			this->_client_master_id.empty() ? "-" : this->_client_master_id.c_str(),
-			server_master_id.c_str());
+	// Topology check. WAL batches are applied to THIS node's local
+	// storage directly, bypassing the destination cluster's key
+	// routing and slave fan-out. In any topology wider than a single
+	// partition with no slave, that would misplace keys or leave our
+	// own slaves stale, so we refuse and let the source fall back to a
+	// full dump (which goes through op_set and is routed correctly).
+	if (!this->_cluster || !this->_cluster->is_wal_sync_destination_safe()) {
+		log_notice("repl_sync_wal begin refused: destination topology not eligible for WAL sync -> full dump", 0);
+		rocksdb->incr_wal_sync_other_error();
+		return this->_send_result(result_server_error, "topology_unsupported");
+	}
+
+	// Sequence-domain check. `repl_last_lsn` is a position in ONE
+	// physical DB's WAL — the source that seeded us. Applying batches
+	// whose sequence numbers come from a different domain would make
+	// our recorded position meaningless and silently skip a gap. The
+	// source names its own sequence domain (its master_id) as the
+	// source id; we require it to equal the source we were last seeded
+	// by. On mismatch (or if we were never seeded) the source falls
+	// back to a non-destructive full dump and re-seeds us.
+	string recorded_source = rocksdb->get_repl_source_id();
+	if (this->_client_source_id.empty() || recorded_source.empty()
+			|| this->_client_source_id != recorded_source) {
+		log_notice("replication source mismatch (source=%s recorded=%s) -> full dump required",
+			this->_client_source_id.empty() ? "-" : this->_client_source_id.c_str(),
+			recorded_source.empty() ? "-" : recorded_source.c_str());
 		rocksdb->incr_wal_sync_master_id_mismatch();
-		string msg = "master_id_mismatch " + server_master_id;
+		string msg = "master_id_mismatch " + recorded_source;
 		return this->_send_result(result_server_error, msg.c_str());
 	}
 
@@ -367,29 +389,37 @@ int op_repl_sync_wal::_run_server_begin(storage_rocksdb* rocksdb) {
 	}
 	char msg[64];
 	snprintf(msg, sizeof(msg), "%llu", (unsigned long long)last_applied);
-	log_notice("WAL sync applied up to LSN %llu (lineage=%s)",
-		(unsigned long long)last_applied, server_master_id.c_str());
+	log_notice("WAL sync applied up to LSN %llu (source=%s)",
+		(unsigned long long)last_applied, recorded_source.c_str());
 	rocksdb->incr_wal_sync_success();
 	return this->_send_result(result_ok, msg);
 }
 
 /**
- *	destination side of `repl_sync_wal seed`: adopt the source's
- *	lineage token and record the WAL position its full dump covered.
+ *	destination side of `repl_sync_wal seed`: record which source
+ *	(sequence domain) our data now follows and the position in that
+ *	source's WAL that the full dump covered. Recorded atomically so a
+ *	crash can never pair a new source id with a stale position. This
+ *	does NOT touch our own master_id.
  */
 int op_repl_sync_wal::_run_server_seed(storage_rocksdb* rocksdb) {
-	if (this->_client_master_id.empty()) {
-		log_warning("seed with empty master_id -> refusing", 0);
+	// Recording a source id promises the next `begin` will apply WAL
+	// batches locally; only accept it while the topology remains WAL-
+	// eligible, so a node that grew slaves/partitions after its dump
+	// does not later apply un-routed batches.
+	if (!this->_cluster || !this->_cluster->is_wal_sync_destination_safe()) {
+		log_notice("repl_sync_wal seed refused: destination topology not eligible for WAL sync", 0);
+		return this->_send_result(result_server_error, "topology_unsupported");
+	}
+	if (this->_client_source_id.empty()) {
+		log_warning("seed with empty source id -> refusing", 0);
 		return this->_send_result(result_server_error, "invalid_seed");
 	}
-	if (rocksdb->set_master_id(this->_client_master_id) < 0) {
+	if (rocksdb->set_repl_source(this->_client_source_id, this->_seed_lsn) < 0) {
 		return this->_send_result(result_server_error, "seed_failed");
 	}
-	if (rocksdb->set_repl_last_lsn(this->_seed_lsn) < 0) {
-		return this->_send_result(result_server_error, "seed_failed");
-	}
-	log_notice("adopted lineage (master_id=%s, lsn=%llu)",
-		this->_client_master_id.c_str(), (unsigned long long)this->_seed_lsn);
+	log_notice("recorded replication source (source_id=%s, lsn=%llu)",
+		this->_client_source_id.c_str(), (unsigned long long)this->_seed_lsn);
 	return this->_send_result(result_ok);
 }
 
@@ -403,6 +433,16 @@ int op_repl_sync_wal::_run_server_seed(storage_rocksdb* rocksdb) {
 int op_repl_sync_wal::_receive_batches(storage_rocksdb* rocksdb, uint64_t& last_applied,
 		bool& aborted, string& fail_reason) {
 	for (;;) {
+		// On a graceful shutdown, stop applying but keep draining the
+		// stream so the connection stays framed (the source is told via
+		// the final SERVER_ERROR and falls back to a full dump next
+		// time). Never leave the socket mid-record — that is why we do
+		// not simply break out here.
+		if (fail_reason.empty() && this->_shutdown_requested()) {
+			log_notice("shutdown requested during WAL receive -> draining remaining stream", 0);
+			fail_reason = "shutdown";
+		}
+
 		char* p;
 		if (this->_connection->readline(&p) < 0) {
 			log_err("connection error while reading WAL stream", 0);
@@ -532,7 +572,29 @@ int op_repl_sync_wal::_stream_batches(storage_rocksdb* rocksdb, uint64_t dest_ls
 	uint64_t from_lsn = dest_lsn;
 	uint64_t streamed = 0;
 	bool has_more = true;
+	int fetch_iterations = 0;
 	while (has_more) {
+		// Abandon a non-converging catch-up: if the local write rate
+		// stays above the throttled send rate, get_updates_since keeps
+		// reporting has_more forever and the resync never completes. Cap
+		// the number of chunks and fall back to a full dump instead.
+		if (++fetch_iterations > max_fetch_iterations) {
+			log_notice("WAL catch-up not converging after %d chunks (still %llu behind) -> full dump",
+				max_fetch_iterations,
+				(unsigned long long)(rocksdb->get_latest_sequence_number() - from_lsn));
+			rocksdb->incr_wal_sync_other_error();
+			this->_client_result = client_server_error;
+			return this->_abort_stream("not_converging");
+		}
+
+		// Honor a graceful shutdown between chunks so the thread can
+		// exit promptly instead of streaming a multi-GB backlog.
+		if (this->_shutdown_requested()) {
+			log_notice("shutdown requested during WAL stream -> aborting", 0);
+			this->_client_result = client_server_error;
+			return this->_abort_stream("shutdown");
+		}
+
 		has_more = false;
 		vector<pair<uint64_t, rocksdb::WriteBatch> > updates;
 		int result = rocksdb->get_updates_since(from_lsn, updates, fetch_chunk_bytes, &has_more);

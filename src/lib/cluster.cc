@@ -1500,6 +1500,23 @@ int cluster::get_node_partition_map_size() {
 	pthread_rwlock_unlock(&this->_mutex_node_partition_map);
 	return partition_size;
 }
+
+bool cluster::is_wal_sync_destination_safe() {
+	pthread_rwlock_rdlock(&this->_mutex_node_partition_map);
+	bool safe = false;
+	// Exactly one partition (partition 0) and no slave under it. Any
+	// prepare-side partitions also disqualify the destination, since a
+	// reconstruction in flight means routing/fan-out is about to matter.
+	if (this->_node_partition_map.size() == 1
+			&& this->_node_partition_prepare_map.size() == 0) {
+		node_partition_map::iterator it = this->_node_partition_map.find(0);
+		if (it != this->_node_partition_map.end() && it->second.slave.size() == 0) {
+			safe = true;
+		}
+	}
+	pthread_rwlock_unlock(&this->_mutex_node_partition_map);
+	return safe;
+}
 // }}}
 
 // {{{ protected methods

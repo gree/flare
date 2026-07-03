@@ -101,34 +101,14 @@ int handler_reconstruction::run() {
 	log_notice("dump completed (master=%s:%d, partition=%d, partition_size=%d, interval=%d, bwlimit=%d)",
 			   this->_node_server_name.c_str(), this->_node_server_port, this->_partition, this->_partition_size, this->_reconstruction_interval, this->_reconstruction_bwlimit);
 
-#ifdef HAVE_LIBROCKSDB
-	// After a successful reconstruction from an authoritative master,
-	// adopt the master's identity token so that future WAL incremental
-	// syncs against the same master succeed without being refused by
-	// the mismatch check. Without this the node would trip
-	// master_id_mismatch on every WAL attempt and burn cycles on
-	// redundant full dumps.
-	if (this->_storage->get_type() == storage::type_rocksdb) {
-		storage_rocksdb* rdb = dynamic_cast<storage_rocksdb*>(this->_storage);
-		if (rdb) {
-			op_meta* meta = new op_meta(c, NULL, this->_storage);
-			bool wal_supported = false;
-			string peer_master_id;
-			if (meta->run_client_features(wal_supported, peer_master_id) == 0
-				&& !peer_master_id.empty()) {
-				if (rdb->set_master_id(peer_master_id) == 0) {
-					log_notice("adopted master_id=%s after reconstruction",
-						peer_master_id.c_str());
-				} else {
-					log_warning("failed to persist adopted master_id", 0);
-				}
-			} else {
-				log_info("peer did not advertise master_id; skipping lineage adoption", 0);
-			}
-			delete meta;
-		}
-	}
-#endif
+	// NOTE: this node's own master_id (its WAL sequence-domain
+	// identifier) is deliberately NOT changed here. Reconstruction
+	// replaces the data but the local RocksDB keeps its own sequence
+	// counter, so adopting the peer's token would let two different
+	// sequence domains share one identity and make downstream WAL
+	// syncs interpret positions from the wrong domain (silent gaps).
+	// Cluster-replication destinations track their upstream via the
+	// separate repl_source_id marker recorded by `repl_sync_wal seed`.
 
 	// node activation (state -> ready)
 	if (this->_role == cluster::role_master) {

@@ -66,6 +66,7 @@ public:
 	// Defined in the .cc so they link once across TUs.
 	static const char* const kReplLastLsnKey;
 	static const char* const kReplMasterIdKey;
+	static const char* const kReplSourceIdKey;
 	static const char* const kRecordCountKey;
 
 	// Return true if key is a reserved replication metadata key.
@@ -230,6 +231,23 @@ public:
 	int apply_batch_with_lsn(const rocksdb::WriteBatch& batch, uint64_t master_lsn);
 	uint64_t get_repl_last_lsn();
 	int set_repl_last_lsn(uint64_t lsn);
+
+	// Upstream replication source tracking (destination side). The
+	// source id names the physical DB (= WAL sequence domain) whose
+	// positions repl_last_lsn refers to; it is distinct from this
+	// node's own master_id, which never changes for the lifetime of
+	// the local DB. Recorded atomically together with the position by
+	// `repl_sync_wal seed`.
+	string get_repl_source_id();
+	int set_repl_source(const string& source_id, uint64_t lsn);
+
+	// Testing hook: flush the memtable and delete archived WAL files so
+	// that a subsequent get_updates_since() below the flushed sequence
+	// hits the purged-WAL path. Returns the sequence number up to which
+	// updates are no longer retrievable (0 if nothing was purged). This
+	// exercises the ERR_LSN_PURGED continuity check without waiting for
+	// the time-/size-based WAL retention to trigger.
+	uint64_t flush_and_purge_wal_for_test();
 
 	// Master identity token access. `get_master_id()` returns this DB's
 	// token (set at open(); empty only if open() was never called or

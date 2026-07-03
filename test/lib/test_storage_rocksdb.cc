@@ -838,6 +838,46 @@ void test_wal_get_updates_since_boundaries() {
 	drop_rocksdb(m, wal_master_dir);
 }
 
+// F2 regression: a request below the oldest still-available WAL sequence
+// must be detected as ERR_LSN_PURGED (not silently streamed from a later
+// batch, which would skip the purged range). We reproduce a real purge
+// by flushing the memtable and deleting the archived WAL files, then
+// asking for updates since sequence 0.
+void test_wal_get_updates_since_purged_detected() {
+	storage_rocksdb* m = make_rocksdb(wal_master_dir);
+
+	// Write enough to have committed WAL, then flush + purge so the
+	// early sequences are no longer retrievable from the WAL.
+	for (int i = 0; i < 8; i++) {
+		char key[16];
+		snprintf(key, sizeof(key), "purge%02d", i);
+		cut_assert_equal_int(0, storage_set_string(m, key, "v"));
+	}
+	m->flush_and_purge_wal_for_test();
+
+	vector<pair<uint64_t, rocksdb::WriteBatch> > updates;
+	int rc = m->get_updates_since(0, updates);
+
+	// Two acceptable outcomes, both correct; a truncated stream (rc==0
+	// with a first batch whose sequence > 1) is the silent-gap bug and
+	// must NOT happen.
+	if (rc == storage_rocksdb::ERR_LSN_PURGED) {
+		// Continuity check fired: the purged early range was detected
+		// and the caller will be forced onto a full resync. This is the
+		// path F2 was about.
+		cut_assert_true(updates.empty());
+	} else {
+		// WAL still fully covers sequence 0 in this environment: then
+		// the stream must be contiguous from sequence 1, never skipping.
+		cut_assert_equal_int(0, rc);
+		if (!updates.empty()) {
+			cut_assert_operator(updates.front().first, <=, static_cast<uint64_t>(1));
+		}
+	}
+
+	drop_rocksdb(m, wal_master_dir);
+}
+
 // Reserved metadata keys inside a replicated batch are filtered out on
 // apply: a peer's master_id / repl_last_lsn markers can never overwrite
 // ours (only the LSN we explicitly record with the batch counts).

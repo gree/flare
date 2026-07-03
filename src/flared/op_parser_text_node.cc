@@ -124,7 +124,9 @@ op* op_parser_text_node::_determine_op(const char* first, const char* buf, int& 
 	} else if (strcmp(first, "meta") == 0) {
 		r = new op_meta(this->_connection, singleton<flared>::instance().get_cluster(), singleton<flared>::instance().get_storage());
 	} else if (strcmp(first, "repl_sync_wal") == 0) {
-		r = new op_repl_sync_wal(this->_connection, singleton<flared>::instance().get_storage());
+		r = new op_repl_sync_wal(this->_connection,
+			singleton<flared>::instance().get_storage(),
+			singleton<flared>::instance().get_cluster());
 	} else if (strcmp(first, "orphan_scan") == 0) {
 		r = new op_orphan_scan(this->_connection,
 			singleton<flared>::instance().get_cluster(),

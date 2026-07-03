@@ -270,6 +270,15 @@ public:
 	int get_partition_size() { return this->_partition_size; };
 	int set_partition_size(int partition_size) { this->_partition_size = partition_size; return 0; };
 	int get_node_partition_map_size();
+
+	// True when this node can safely be a destination for RocksDB WAL
+	// incremental replication: exactly one active partition and no
+	// slaves under it. WAL batches are applied to the entry node's
+	// local storage directly, bypassing the destination cluster's
+	// key routing (pre_proxy_write) and slave fan-out
+	// (post_proxy_write); in any wider topology that would place keys
+	// on the wrong node or leave the destination's own slaves stale.
+	bool is_wal_sync_destination_safe();
 	int set_proxy_concurrency(int proxy_concurrency) { this->_proxy_concurrency = proxy_concurrency; return 0; };
 	int get_reconstruction_interval() { return this->_reconstruction_interval; };
 	int set_reconstruction_interval(int reconstruction_interval) { this->_reconstruction_interval = reconstruction_interval; return 0; };

@@ -29,6 +29,7 @@
 #include <cppcutter.h>
 
 #include "connection_iostream.h"
+#include "mock_cluster.h"
 
 #include <app.h>
 #include <op_repl_sync_wal.h>
@@ -46,10 +47,31 @@ namespace test_op_repl_sync_wal
 	const char dest_dir[]   = "tmp_rocksdb_op_wal_dest";
 
 	struct test_op : public op_repl_sync_wal {
-		test_op(shared_connection c, storage* st): op_repl_sync_wal(c, st) { }
+		test_op(shared_connection c, storage* st, cluster* cl): op_repl_sync_wal(c, st, cl) { }
 		using op_repl_sync_wal::_parse_text_server_parameters;
 		using op_repl_sync_wal::_run_server;
 	};
+
+	// A destination cluster that is WAL-sync eligible: exactly one
+	// active partition (0) with no slave. Kept as a single shared
+	// instance per test via make/drop.
+	mock_cluster* make_safe_cluster() {
+		mock_cluster* cl = new mock_cluster("dest", 12121);
+		cluster::node master = cl->set_node("dest", 12121, cluster::role_master, cluster::state_active, 0);
+		cl->set_partition(0, master);
+		return cl;
+	}
+
+	// A destination cluster that is NOT WAL-sync eligible: two
+	// partitions, so applying WAL locally would misroute keys.
+	mock_cluster* make_unsafe_cluster() {
+		mock_cluster* cl = new mock_cluster("dest", 12121);
+		cluster::node m0 = cl->set_node("dest",  12121, cluster::role_master, cluster::state_active, 0);
+		cluster::node m1 = cl->set_node("dest2", 12122, cluster::role_master, cluster::state_active, 1);
+		cl->set_partition(0, m0);
+		cl->set_partition(1, m1);
+		return cl;
+	}
 
 	storage_rocksdb* make_rocksdb(const char* dir) {
 		mkdir(dir, 0700);
@@ -137,72 +159,102 @@ namespace test_op_repl_sync_wal
 	void test_parse_server_begin()
 	{
 		shared_connection c(new connection_sstream(" begin some-master-id\r\n"));
-		test_op op(c, NULL);
+		test_op op(c, NULL, NULL);
 		cut_assert_equal_int(0, op._parse_text_server_parameters());
 	}
 
 	void test_parse_server_seed()
 	{
 		shared_connection c(new connection_sstream(" seed some-master-id 42\r\n"));
-		test_op op(c, NULL);
+		test_op op(c, NULL, NULL);
 		cut_assert_equal_int(0, op._parse_text_server_parameters());
 	}
 
 	void test_parse_server_unknown_subcommand()
 	{
-		shared_connection c(new connection_sstream(" 12345 some-master-id\r\n"));
-		test_op op(c, NULL);
+		shared_connection c(new connection_sstream(" 12345 some-source-id\r\n"));
+		test_op op(c, NULL, NULL);
 		cut_assert_equal_int(-1, op._parse_text_server_parameters());
 	}
 
 	void test_parse_server_seed_missing_lsn()
 	{
-		shared_connection c(new connection_sstream(" seed some-master-id\r\n"));
-		test_op op(c, NULL);
+		shared_connection c(new connection_sstream(" seed some-source-id\r\n"));
+		test_op op(c, NULL, NULL);
 		cut_assert_equal_int(-1, op._parse_text_server_parameters());
 	}
 
 	void test_parse_server_seed_bogus_lsn()
 	{
 		// must fail cleanly, not throw bad_lexical_cast up the stack
-		shared_connection c(new connection_sstream(" seed some-master-id 99999999999999999999999999\r\n"));
-		test_op op(c, NULL);
+		shared_connection c(new connection_sstream(" seed some-source-id 99999999999999999999999999\r\n"));
+		test_op op(c, NULL, NULL);
 		cut_assert_equal_int(-1, op._parse_text_server_parameters());
 	}
 
 	// --- destination (server) side ------------------------------------
 
-	void test_server_begin_master_id_mismatch()
+	// A source id that does not match what the dest was seeded by is
+	// refused (dest echoes its own recorded source id).
+	void test_server_begin_source_mismatch()
 	{
 		storage_rocksdb* dest = make_rocksdb(dest_dir);
+		mock_cluster* cl = make_safe_cluster();
+		// dest currently follows some other source
+		cut_assert_equal_int(0, dest->set_repl_source("the-real-source", 5));
 
-		shared_connection c(new connection_sstream(" begin lineage-of-somebody-else\r\n"));
-		test_op op(c, dest);
+		shared_connection c(new connection_sstream(" begin somebody-else\r\n"));
+		test_op op(c, dest, cl);
 		cut_assert_equal_int(0, op._parse_text_server_parameters());
 		op._run_server();
 
 		connection_sstream* cs = dynamic_cast<connection_sstream*>(c.get());
 		string out = cs->get_output();
-		cut_assert_true(out.find("SERVER_ERROR master_id_mismatch " + dest->get_master_id()) != string::npos);
+		cut_assert_true(out.find("SERVER_ERROR master_id_mismatch the-real-source") != string::npos);
 		cut_assert_equal_int(1, (int)dest->get_wal_sync_master_id_mismatch());
 
+		delete cl;
 		drop_rocksdb(dest, dest_dir);
 	}
 
-	void test_server_seed_adopts_lineage_and_lsn()
+	// A destination in an ineligible topology refuses WAL sync entirely.
+	void test_server_begin_topology_unsupported()
 	{
 		storage_rocksdb* dest = make_rocksdb(dest_dir);
+		mock_cluster* cl = make_unsafe_cluster();
+		cut_assert_equal_int(0, dest->set_repl_source("src-id", 0));
 
-		shared_connection c(new connection_sstream(" seed adopted-lineage-token 1234\r\n"));
-		test_op op(c, dest);
+		shared_connection c(new connection_sstream(" begin src-id\r\n"));
+		test_op op(c, dest, cl);
+		cut_assert_equal_int(0, op._parse_text_server_parameters());
+		op._run_server();
+
+		connection_sstream* cs = dynamic_cast<connection_sstream*>(c.get());
+		cut_assert_true(cs->get_output().find("SERVER_ERROR topology_unsupported") != string::npos);
+
+		delete cl;
+		drop_rocksdb(dest, dest_dir);
+	}
+
+	void test_server_seed_records_source_and_lsn()
+	{
+		storage_rocksdb* dest = make_rocksdb(dest_dir);
+		mock_cluster* cl = make_safe_cluster();
+		// dest's own master_id must be unaffected by the seed
+		string own_id = dest->get_master_id();
+
+		shared_connection c(new connection_sstream(" seed upstream-source-id 1234\r\n"));
+		test_op op(c, dest, cl);
 		cut_assert_equal_int(0, op._parse_text_server_parameters());
 		op._run_server();
 
 		connection_sstream* cs = dynamic_cast<connection_sstream*>(c.get());
 		cut_assert_true(cs->get_output().find("OK") == 0);
-		cut_assert_equal_string("adopted-lineage-token", dest->get_master_id().c_str());
+		cut_assert_equal_string("upstream-source-id", dest->get_repl_source_id().c_str());
 		cut_assert_equal_int(1234, (int)dest->get_repl_last_lsn());
+		cut_assert_equal_string(own_id.c_str(), dest->get_master_id().c_str());
 
+		delete cl;
 		drop_rocksdb(dest, dest_dir);
 	}
 
@@ -210,9 +262,11 @@ namespace test_op_repl_sync_wal
 	{
 		storage_rocksdb* src  = make_rocksdb(source_dir);
 		storage_rocksdb* dest = make_rocksdb(dest_dir);
+		mock_cluster* cl = make_safe_cluster();
 
-		// dest already follows src's lineage (as after a full dump + seed)
-		cut_assert_equal_int(0, dest->set_master_id(src->get_master_id()));
+		// dest already follows src's source (as after a full dump + seed)
+		cut_assert_equal_int(0, dest->set_repl_source(src->get_master_id(), 0));
+		string dest_own_id = dest->get_master_id();
 
 		cut_assert_equal_int(0, storage_set_string(src, "wal_key_a", "alpha"));
 		cut_assert_equal_int(0, storage_set_string(src, "wal_key_b", "bravo"));
@@ -223,7 +277,7 @@ namespace test_op_repl_sync_wal
 
 		string input = " begin " + src->get_master_id() + "\r\n" + framed + "END\r\n";
 		shared_connection c(new connection_sstream(input));
-		test_op op(c, dest);
+		test_op op(c, dest, cl);
 		cut_assert_equal_int(0, op._parse_text_server_parameters());
 		cut_assert_operator(op._run_server(), >=, 0);
 
@@ -243,9 +297,12 @@ namespace test_op_repl_sync_wal
 		cut_assert_equal_int(0, storage_get_string(dest, "wal_key_b", value));
 		cut_assert_equal_string("bravo", value.c_str());
 		cut_assert_equal_int((int)last_end_seq, (int)dest->get_repl_last_lsn());
-		// the source's own metadata markers were filtered, not adopted
-		cut_assert_equal_string(src->get_master_id().c_str(), dest->get_master_id().c_str());
+		// the source's own metadata markers were filtered: dest keeps its
+		// own master_id and the recorded source is unchanged
+		cut_assert_equal_string(dest_own_id.c_str(), dest->get_master_id().c_str());
+		cut_assert_equal_string(src->get_master_id().c_str(), dest->get_repl_source_id().c_str());
 
+		delete cl;
 		drop_rocksdb(src, source_dir);
 		drop_rocksdb(dest, dest_dir);
 	}
@@ -254,11 +311,12 @@ namespace test_op_repl_sync_wal
 	{
 		storage_rocksdb* src  = make_rocksdb(source_dir);
 		storage_rocksdb* dest = make_rocksdb(dest_dir);
-		cut_assert_equal_int(0, dest->set_master_id(src->get_master_id()));
+		mock_cluster* cl = make_safe_cluster();
+		cut_assert_equal_int(0, dest->set_repl_source(src->get_master_id(), 0));
 
 		string input = " begin " + src->get_master_id() + "\r\nABORT lsn_purged\r\n";
 		shared_connection c(new connection_sstream(input));
-		test_op op(c, dest);
+		test_op op(c, dest, cl);
 		cut_assert_equal_int(0, op._parse_text_server_parameters());
 		cut_assert_operator(op._run_server(), >=, 0);
 
@@ -267,6 +325,7 @@ namespace test_op_repl_sync_wal
 		// the connection for the full-dump fallback
 		cut_assert_true(cs->get_output().find("OK aborted") != string::npos);
 
+		delete cl;
 		drop_rocksdb(src, source_dir);
 		drop_rocksdb(dest, dest_dir);
 	}
@@ -275,16 +334,18 @@ namespace test_op_repl_sync_wal
 	{
 		storage_rocksdb* src  = make_rocksdb(source_dir);
 		storage_rocksdb* dest = make_rocksdb(dest_dir);
-		cut_assert_equal_int(0, dest->set_master_id(src->get_master_id()));
+		mock_cluster* cl = make_safe_cluster();
+		cut_assert_equal_int(0, dest->set_repl_source(src->get_master_id(), 0));
 
 		string input = " begin " + src->get_master_id() + "\r\nLSN 5\r\nBATCH not_a_number\r\n";
 		shared_connection c(new connection_sstream(input));
-		test_op op(c, dest);
+		test_op op(c, dest, cl);
 		cut_assert_equal_int(0, op._parse_text_server_parameters());
 		// unrecoverable framing error -> -1, but no crash and nothing applied
 		cut_assert_equal_int(-1, op._run_server());
 		cut_assert_equal_int(0, (int)dest->get_repl_last_lsn());
 
+		delete cl;
 		drop_rocksdb(src, source_dir);
 		drop_rocksdb(dest, dest_dir);
 	}
@@ -293,7 +354,8 @@ namespace test_op_repl_sync_wal
 	{
 		storage_rocksdb* src  = make_rocksdb(source_dir);
 		storage_rocksdb* dest = make_rocksdb(dest_dir);
-		cut_assert_equal_int(0, dest->set_master_id(src->get_master_id()));
+		mock_cluster* cl = make_safe_cluster();
+		cut_assert_equal_int(0, dest->set_repl_source(src->get_master_id(), 0));
 		dest->set_wal_max_batch_bytes(8);	// tiny receive ceiling
 
 		cut_assert_equal_int(0, storage_set_string(src, "wal_big", "0123456789abcdef"));
@@ -302,7 +364,7 @@ namespace test_op_repl_sync_wal
 
 		string input = " begin " + src->get_master_id() + "\r\n" + framed + "END\r\n";
 		shared_connection c(new connection_sstream(input));
-		test_op op(c, dest);
+		test_op op(c, dest, cl);
 		cut_assert_equal_int(0, op._parse_text_server_parameters());
 		cut_assert_operator(op._run_server(), >=, 0);
 
@@ -312,6 +374,7 @@ namespace test_op_repl_sync_wal
 		string value;
 		cut_assert_equal_int(-1, storage_get_string(dest, "wal_big", value));
 
+		delete cl;
 		drop_rocksdb(src, source_dir);
 		drop_rocksdb(dest, dest_dir);
 	}
@@ -329,7 +392,7 @@ namespace test_op_repl_sync_wal
 		char response[64];
 		snprintf(response, sizeof(response), "LSN 0\r\nOK %llu\r\n", (unsigned long long)latest);
 		shared_connection c(new connection_sstream(string(response)));
-		op_repl_sync_wal op(c, src);
+		op_repl_sync_wal op(c, src, NULL);
 		cut_assert_equal_int(0, op.run_client_push(src->get_master_id()));
 		cut_assert_equal_int(op_repl_sync_wal::client_success, op.get_client_result());
 		cut_assert_true(!op.connection_dirty());
@@ -348,10 +411,10 @@ namespace test_op_repl_sync_wal
 		storage_rocksdb* src = make_rocksdb(source_dir);
 
 		shared_connection c(new connection_sstream("SERVER_ERROR master_id_mismatch other-lineage\r\n"));
-		op_repl_sync_wal op(c, src);
+		op_repl_sync_wal op(c, src, NULL);
 		cut_assert_equal_int(-1, op.run_client_push(src->get_master_id()));
 		cut_assert_equal_int(op_repl_sync_wal::client_master_id_mismatch, op.get_client_result());
-		cut_assert_equal_string("other-lineage", op.get_server_master_id().c_str());
+		cut_assert_equal_string("other-lineage", op.get_server_source_id().c_str());
 		cut_assert_true(!op.connection_dirty());	// safe to reuse for full dump
 
 		drop_rocksdb(src, source_dir);
@@ -363,7 +426,7 @@ namespace test_op_repl_sync_wal
 
 		// old flared replies a single ERROR line to unknown ops
 		shared_connection c(new connection_sstream("ERROR\r\n"));
-		op_repl_sync_wal op(c, src);
+		op_repl_sync_wal op(c, src, NULL);
 		cut_assert_equal_int(-1, op.run_client_push(src->get_master_id()));
 		cut_assert_equal_int(op_repl_sync_wal::client_not_supported, op.get_client_result());
 		cut_assert_true(!op.connection_dirty());
@@ -379,7 +442,7 @@ namespace test_op_repl_sync_wal
 		// must abort the stream (keeping both sides synchronized) and
 		// classify the failure for the full-dump fallback
 		shared_connection c(new connection_sstream("LSN 99999999\r\nOK aborted\r\n"));
-		op_repl_sync_wal op(c, src);
+		op_repl_sync_wal op(c, src, NULL);
 		cut_assert_equal_int(-1, op.run_client_push(src->get_master_id()));
 		cut_assert_equal_int(op_repl_sync_wal::client_lsn_ahead, op.get_client_result());
 		cut_assert_true(!op.connection_dirty());
@@ -397,7 +460,7 @@ namespace test_op_repl_sync_wal
 		// non-numeric LSN reply: the client aborts the stream instead of
 		// crashing on bad_lexical_cast
 		shared_connection c(new connection_sstream("LSN abc\r\nOK aborted\r\n"));
-		op_repl_sync_wal op(c, src);
+		op_repl_sync_wal op(c, src, NULL);
 		cut_assert_equal_int(-1, op.run_client_push(src->get_master_id()));
 		cut_assert_equal_int(op_repl_sync_wal::client_protocol_error, op.get_client_result());
 
@@ -409,7 +472,7 @@ namespace test_op_repl_sync_wal
 		storage_rocksdb* src = make_rocksdb(source_dir);
 
 		shared_connection c(new connection_sstream("GARBAGE RESPONSE\r\n"));
-		op_repl_sync_wal op(c, src);
+		op_repl_sync_wal op(c, src, NULL);
 		cut_assert_equal_int(-1, op.run_client_push(src->get_master_id()));
 		cut_assert_equal_int(op_repl_sync_wal::client_protocol_error, op.get_client_result());
 		cut_assert_true(op.connection_dirty());	// caller must reconnect
@@ -423,7 +486,7 @@ namespace test_op_repl_sync_wal
 
 		{
 			shared_connection c(new connection_sstream("OK\r\n"));
-			op_repl_sync_wal op(c, src);
+			op_repl_sync_wal op(c, src, NULL);
 			cut_assert_equal_int(0, op.run_client_seed(src->get_master_id(), 77));
 			connection_sstream* cs = dynamic_cast<connection_sstream*>(c.get());
 			string expected = "repl_sync_wal seed " + src->get_master_id() + " 77\r\n";
@@ -431,7 +494,7 @@ namespace test_op_repl_sync_wal
 		}
 		{
 			shared_connection c(new connection_sstream("SERVER_ERROR seed_failed\r\n"));
-			op_repl_sync_wal op(c, src);
+			op_repl_sync_wal op(c, src, NULL);
 			cut_assert_equal_int(-1, op.run_client_seed(src->get_master_id(), 77));
 			cut_assert_true(!op.connection_dirty());
 		}
@@ -445,7 +508,8 @@ namespace test_op_repl_sync_wal
 	{
 		storage_rocksdb* src  = make_rocksdb(source_dir);
 		storage_rocksdb* dest = make_rocksdb(dest_dir);
-		cut_assert_equal_int(0, dest->set_master_id(src->get_master_id()));
+		mock_cluster* cl = make_safe_cluster();
+		cut_assert_equal_int(0, dest->set_repl_source(src->get_master_id(), 0));
 
 		cut_assert_equal_int(0, storage_set_string(src, "rt_key", "roundtrip"));
 		uint64_t latest = src->get_latest_sequence_number();
@@ -454,7 +518,7 @@ namespace test_op_repl_sync_wal
 		char response[64];
 		snprintf(response, sizeof(response), "LSN 0\r\nOK %llu\r\n", (unsigned long long)latest);
 		shared_connection cc(new connection_sstream(string(response)));
-		op_repl_sync_wal client_op(cc, src);
+		op_repl_sync_wal client_op(cc, src, NULL);
 		cut_assert_equal_int(0, client_op.run_client_push(src->get_master_id()));
 		string client_out = dynamic_cast<connection_sstream*>(cc.get())->get_output();
 
@@ -464,7 +528,7 @@ namespace test_op_repl_sync_wal
 		cut_assert_true(client_out.compare(0, op_name.size(), op_name) == 0);
 		string server_input = client_out.substr(op_name.size());
 		shared_connection sc(new connection_sstream(server_input));
-		test_op server_op(sc, dest);
+		test_op server_op(sc, dest, cl);
 		cut_assert_equal_int(0, server_op._parse_text_server_parameters());
 		cut_assert_operator(server_op._run_server(), >=, 0);
 
@@ -473,6 +537,7 @@ namespace test_op_repl_sync_wal
 		cut_assert_equal_string("roundtrip", value.c_str());
 		cut_assert_equal_int((int)latest, (int)dest->get_repl_last_lsn());
 
+		delete cl;
 		drop_rocksdb(src, source_dir);
 		drop_rocksdb(dest, dest_dir);
 	}

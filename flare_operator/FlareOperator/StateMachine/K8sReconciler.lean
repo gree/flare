@@ -200,6 +200,51 @@ def handleFailoverPure (state : FlareClusterState) (deadKeys : List String)
     : FlareClusterState :=
   deadKeys.foldl handleFailoverSingleKey state
 
+/-- Process a single dead key WITH slave promotion (mirrors the legacy
+    `handleFailover`, Main.lean:133-161).
+
+    Demotes the dead node to Proxy/Down, and — crucially — if it was a Master,
+    promotes a live Slave from the SAME partition to Master/Active so the
+    partition's data (which the slave still holds) is preserved. Without this the
+    empty pod that the StatefulSet recreates under the same name grabs the master
+    slot and serves an empty dataset, silently losing the partition's data. The
+    live slave is a DIFFERENT pod that was never killed, so promoting it keeps the
+    data even without persistent volumes. -/
+def handleFailoverWithPromotionSingleKey (s : FlareClusterState) (key : String)
+    : FlareClusterState :=
+  match s.lookupNode key with
+  | none => s
+  | some node =>
+    -- Demote the dead node first.
+    let demoted : FlareNode :=
+      { node with state := FlareState.Down, role := FlareRole.Proxy, partition := -1 }
+    let s := s.addNode key demoted
+    -- If it was a Master, promote a live slave of its partition.
+    if node.role == FlareRole.Master then
+      let partIdx := node.partition
+      match s.partitionMap.find? (fun (idx, _) => Int.ofNat idx == partIdx) with
+      | none => s
+      | some (_, part) =>
+        match part.slaves.head? with
+        | none => s  -- no slave to promote; slot stays empty until a node registers
+        | some slaveKey =>
+          match s.lookupNode slaveKey with
+          | none => s
+          | some slaveNode =>
+            let promoted := { slaveNode with role := FlareRole.Master,
+                                             state := FlareState.Active, balance := 100 }
+            let newPart := { part with master := some slaveKey, slaves := part.slaves.tail }
+            (s.addNode slaveKey promoted).setPartition partIdx.toNat newPart
+    else s
+
+/-- Failover with slave promotion over all dead keys (see the single-key doc).
+    This is what the running FSM path uses; it both demotes dead masters and
+    promotes the surviving replica, preserving partition data across a master
+    kill. -/
+def handleFailoverWithPromotion (state : FlareClusterState) (deadKeys : List String)
+    : FlareClusterState :=
+  deadKeys.foldl handleFailoverWithPromotionSingleKey state
+
 /-- Pure dead-node detection (mirrors legacy `detectDeadNodes`, Main.lean:116-124).
     A node is dead only if its pod is gone AND it is a role/state that should be
     actively served. Excludes:
@@ -365,10 +410,13 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
                 failoverTriggered := (nextStep == .AfterHandleFailover) }, none, allEffects)
 
   | .AfterHandleFailover =>
-    -- Apply failover logic if triggered
+    -- Apply failover logic if triggered. Use the promotion variant so a dead
+    -- master's live slave is promoted (preserving the partition's data), not left
+    -- for the empty recreated pod to grab. rebuildPartitionMap first so the
+    -- promotion sees an accurate master/slave grouping.
     let newState :=
       if s.failoverTriggered then
-        handleFailoverPure clusterState s.deadNodeKeys
+        handleFailoverWithPromotion clusterState.rebuildPartitionMap s.deadNodeKeys
       else
         clusterState
     ({ s with reconcileStep := .AfterAssignRoles,

@@ -20,7 +20,8 @@
 /**
  *	op_repl_sync_wal.cc
  *
- *	implementation of gree::flare::op_repl_sync_wal
+ *	implementation of gree::flare::op_repl_sync_wal (push protocol;
+ *	see op_repl_sync_wal.h for the wire format)
  *
  *	$Id$
  */
@@ -36,10 +37,12 @@ namespace flare {
 op_repl_sync_wal::op_repl_sync_wal(shared_connection c, storage* st):
 		op(c, "repl_sync_wal"),
 		_storage(st),
-		_lsn(0),
+		_server_mode(mode_none),
+		_seed_lsn(0),
 		_client_master_id(""),
 		_server_master_id(""),
 		_client_result(client_server_error),
+		_connection_dirty(false),
 		_max_batch_bytes(0),
 		_bwlimit_kbps(0),
 		_interval_usec(0) {
@@ -57,10 +60,171 @@ op_repl_sync_wal::~op_repl_sync_wal() {
 
 // {{{ public methods
 /**
- *	send client request
+ *	push our WAL delta to the destination. See op_repl_sync_wal.h for
+ *	the exchange; on return get_client_result() classifies the outcome
+ *	and connection_dirty() tells the caller whether the connection is
+ *	still line-synchronized.
  */
-int op_repl_sync_wal::run_client(uint64_t lsn, const string& master_id) {
-	return this->_run_client(lsn, master_id);
+int op_repl_sync_wal::run_client_push(const string& master_id) {
+#ifdef HAVE_LIBROCKSDB
+	this->_client_result = client_server_error;
+	this->_connection_dirty = false;
+
+	if (!this->_storage || this->_storage->get_type() != storage::type_rocksdb) {
+		log_err("local storage is not RocksDB, cannot stream WAL", 0);
+		this->_client_result = client_not_supported;
+		return -1;
+	}
+	storage_rocksdb* rocksdb = dynamic_cast<storage_rocksdb*>(this->_storage);
+	if (!rocksdb) {
+		log_err("failed to cast storage to storage_rocksdb", 0);
+		this->_client_result = client_not_supported;
+		return -1;
+	}
+
+	char request[BUFSIZ];
+	const char* id = master_id.empty() ? "-" : master_id.c_str();
+	snprintf(request, sizeof(request), "repl_sync_wal begin %s", id);
+	if (this->_send_request(request) < 0) {
+		this->_client_result = client_protocol_error;
+		this->_connection_dirty = true;
+		return -1;
+	}
+
+	// The destination answers with its recorded position in our WAL
+	// lineage ("LSN <n>"), or refuses with a single line.
+	char* p;
+	if (this->_connection->readline(&p) < 0) {
+		log_err("connection error while reading begin response", 0);
+		this->_client_result = client_protocol_error;
+		this->_connection_dirty = true;
+		return -1;
+	}
+
+	char q[BUFSIZ];
+	int n = util::next_word(p, q, sizeof(q));
+	if (strcmp(q, "SERVER_ERROR") == 0) {
+		const char* body = p + n;
+		while (*body == ' ') body++;
+		if (strncmp(body, "master_id_mismatch", 18) == 0) {
+			const char* sid = body + 18;
+			while (*sid == ' ') sid++;
+			string server_id = sid;
+			while (!server_id.empty() &&
+				(server_id[server_id.size() - 1] == '\n' ||
+				 server_id[server_id.size() - 1] == '\r')) {
+				server_id.erase(server_id.size() - 1);
+			}
+			this->_server_master_id = server_id;
+			this->_client_result = client_master_id_mismatch;
+			rocksdb->incr_wal_sync_master_id_mismatch();
+			log_notice("destination follows a different lineage (dest master_id=%s) -> full dump required", server_id.c_str());
+		} else if (strncmp(body, "not_supported", 13) == 0 ||
+		           strncmp(body, "not_compiled", 12) == 0) {
+			this->_client_result = client_not_supported;
+			log_notice("WAL sync not supported by peer", 0);
+		} else {
+			this->_client_result = client_server_error;
+			rocksdb->incr_wal_sync_other_error();
+			log_warning("server error on repl_sync_wal begin: %s", p);
+		}
+		delete[] p;
+		return -1;
+	}
+	if (strcmp(q, "ERROR") == 0) {
+		// old flared (or a build without RocksDB) that doesn't know the op
+		this->_client_result = client_not_supported;
+		log_notice("peer does not understand repl_sync_wal", 0);
+		delete[] p;
+		return -1;
+	}
+	if (strcmp(q, "LSN") != 0) {
+		log_warning("unexpected begin response [%s]", p);
+		this->_client_result = client_protocol_error;
+		this->_connection_dirty = true;
+		delete[] p;
+		return -1;
+	}
+
+	uint64_t dest_lsn = 0;
+	util::next_digit(p+n, q, sizeof(q));
+	delete[] p;
+	try {
+		dest_lsn = boost::lexical_cast<uint64_t>(q);
+	} catch (boost::bad_lexical_cast e) {
+		// the destination is now waiting for batches; abort the stream
+		// so both sides stay line-synchronized
+		log_warning("invalid LSN in begin response [%s]", q);
+		this->_client_result = client_protocol_error;
+		return this->_abort_stream("protocol_error");
+	}
+
+	if (this->_stream_batches(rocksdb, dest_lsn) < 0) {
+		return -1;
+	}
+
+	if (this->_connection->writeline("END") < 0) {
+		this->_client_result = client_protocol_error;
+		this->_connection_dirty = true;
+		return -1;
+	}
+	return this->_read_final_result();
+#else
+	log_err("RocksDB not compiled in, cannot stream WAL", 0);
+	this->_client_result = client_not_supported;
+	return -1;
+#endif
+}
+
+/**
+ *	record our lineage token and WAL position on the destination after
+ *	a successful full dump, enabling incremental syncs from now on.
+ */
+int op_repl_sync_wal::run_client_seed(const string& master_id, uint64_t lsn) {
+	this->_client_result = client_server_error;
+	this->_connection_dirty = false;
+
+	if (master_id.empty()) {
+		log_err("refusing to seed an empty master_id", 0);
+		return -1;
+	}
+
+	char request[BUFSIZ];
+	snprintf(request, sizeof(request), "repl_sync_wal seed %s %llu",
+		master_id.c_str(), (unsigned long long)lsn);
+	if (this->_send_request(request) < 0) {
+		this->_client_result = client_protocol_error;
+		this->_connection_dirty = true;
+		return -1;
+	}
+
+	char* p;
+	if (this->_connection->readline(&p) < 0) {
+		this->_client_result = client_protocol_error;
+		this->_connection_dirty = true;
+		return -1;
+	}
+
+	char q[BUFSIZ];
+	util::next_word(p, q, sizeof(q));
+	if (strcmp(q, "OK") == 0) {
+		log_notice("seeded destination (master_id=%s, lsn=%llu)",
+			master_id.c_str(), (unsigned long long)lsn);
+		this->_client_result = client_success;
+		delete[] p;
+		return 0;
+	}
+	if (strcmp(q, "SERVER_ERROR") == 0 || strcmp(q, "ERROR") == 0) {
+		log_warning("destination refused seed: %s", p);
+		this->_client_result = client_server_error;
+		delete[] p;
+		return -1;
+	}
+	log_warning("unexpected seed response [%s]", p);
+	this->_client_result = client_protocol_error;
+	this->_connection_dirty = true;
+	delete[] p;
+	return -1;
 }
 // }}}
 
@@ -69,10 +233,10 @@ int op_repl_sync_wal::run_client(uint64_t lsn, const string& master_id) {
  *	parser server request parameters
  *
  *	syntax:
- *	REPL_SYNC_WAL <lsn> <master_id>
+ *	REPL_SYNC_WAL begin <master_id>
+ *	REPL_SYNC_WAL seed <master_id> <lsn>
  *
- *	<master_id> is either a UUID the slave remembers from the last sync
- *	or "-" meaning "I have no prior lineage (fresh slave)".
+ *	<master_id> of "-" means "no lineage token".
  */
 int op_repl_sync_wal::_parse_text_server_parameters() {
 	char* p;
@@ -81,30 +245,42 @@ int op_repl_sync_wal::_parse_text_server_parameters() {
 	}
 
 	char q[BUFSIZ];
-	int n = util::next_digit(p, q, sizeof(q));
-	if (q[0] == '\0') {
-		log_warning("no LSN specified", 0);
+	int n = util::next_word(p, q, sizeof(q));
+	if (strcmp(q, "begin") == 0) {
+		this->_server_mode = mode_begin;
+	} else if (strcmp(q, "seed") == 0) {
+		this->_server_mode = mode_seed;
+	} else {
+		log_warning("unknown repl_sync_wal subcommand [%s]", q);
 		delete[] p;
 		return -1;
 	}
 
-	try {
-		this->_lsn = boost::lexical_cast<uint64_t>(q);
-	} catch (boost::bad_lexical_cast e) {
-		log_warning("invalid LSN [%s]", q);
-		delete[] p;
-		return -1;
-	}
-
-	// master_id token — missing ("") is accepted for backward
-	// compatibility with pre-token clients; "-" explicitly means "no
-	// prior lineage".
 	n += util::next_word(p+n, q, sizeof(q));
-	if (q[0] != '\0' && strcmp(q, "-") != 0) {
+	if (q[0] == '\0') {
+		log_warning("no master_id specified", 0);
+		delete[] p;
+		return -1;
+	}
+	if (strcmp(q, "-") != 0) {
 		this->_client_master_id = q;
 	}
-	log_debug("repl_sync_wal: lsn=%llu master_id=%s",
-		this->_lsn, this->_client_master_id.c_str());
+
+	if (this->_server_mode == mode_seed) {
+		n += util::next_digit(p+n, q, sizeof(q));
+		if (q[0] == '\0') {
+			log_warning("no seed LSN specified", 0);
+			delete[] p;
+			return -1;
+		}
+		try {
+			this->_seed_lsn = boost::lexical_cast<uint64_t>(q);
+		} catch (boost::bad_lexical_cast e) {
+			log_warning("invalid seed LSN [%s]", q);
+			delete[] p;
+			return -1;
+		}
+	}
 
 	// Check for extra parameters
 	n += util::next_word(p+n, q, sizeof(q));
@@ -118,8 +294,7 @@ int op_repl_sync_wal::_parse_text_server_parameters() {
 
 int op_repl_sync_wal::_run_server() {
 #ifdef HAVE_LIBROCKSDB
-	// Check if storage is RocksDB
-	if (this->_storage->get_type() != storage::type_rocksdb) {
+	if (!this->_storage || this->_storage->get_type() != storage::type_rocksdb) {
 		log_warning("repl_sync_wal requested but storage is not RocksDB", 0);
 		return this->_send_result(result_server_error, "not_supported");
 	}
@@ -130,296 +305,393 @@ int op_repl_sync_wal::_run_server() {
 		return this->_send_result(result_server_error, "internal_error");
 	}
 
-	// Master identity token check. A slave that is following a
-	// different lineage (split-brain, restored from backup, synced
-	// against a different cluster) must NOT be allowed to consume WAL
-	// batches from us — it would silently corrupt its own data.
-	// Instead, respond with master_id_mismatch; the slave will fall
-	// back to a non-destructive full dump and adopt our token.
-	const string& server_master_id = rocksdb->get_master_id();
-	if (!this->_client_master_id.empty() && this->_client_master_id != server_master_id) {
-		log_notice("master_id mismatch (client=%s server=%s) -> slave must resync",
-			this->_client_master_id.c_str(), server_master_id.c_str());
-		rocksdb->incr_wal_sync_master_id_mismatch();
-		string msg = "master_id_mismatch " + server_master_id;
-		return this->_send_result(result_server_error, msg.c_str());
+	switch (this->_server_mode) {
+	case mode_begin:
+		return this->_run_server_begin(rocksdb);
+	case mode_seed:
+		return this->_run_server_seed(rocksdb);
+	default:
+		return this->_send_result(result_server_error, "not_supported");
 	}
-
-	// Slave-ahead check: if the slave claims a sequence number beyond
-	// anything we have produced, it came from a different (or newer)
-	// master. Force a full dump rather than silently returning zero
-	// updates, which would make the slave believe it is synchronized.
-	uint64_t server_latest = rocksdb->get_latest_sequence_number();
-	if (this->_lsn > server_latest) {
-		log_warning("slave LSN (%llu) ahead of master latest (%llu) -> forcing resync",
-			this->_lsn, server_latest);
-		rocksdb->incr_wal_sync_lsn_ahead();
-		char msg[BUFSIZ];
-		snprintf(msg, sizeof(msg), "lsn_ahead %llu", (unsigned long long)server_latest);
-		return this->_send_result(result_server_error, msg);
-	}
-
-	// Get updates since requested LSN
-	vector<pair<uint64_t, rocksdb::WriteBatch>> updates;
-	int result = rocksdb->get_updates_since(this->_lsn, updates);
-
-	if (result == storage_rocksdb::ERR_LSN_PURGED) {
-		log_notice("LSN %llu purged from WAL, slave needs full sync", this->_lsn);
-		rocksdb->incr_wal_sync_lsn_purged();
-		return this->_send_result(result_server_error, "lsn_purged");
-	}
-
-	if (result < 0) {
-		log_err("get_updates_since failed for LSN %llu", this->_lsn);
-		rocksdb->incr_wal_sync_other_error();
-		return this->_send_result(result_server_error, "wal_read_error");
-	}
-
-	{
-		uint64_t first_seq = updates.empty() ? 0 : updates.front().first;
-		uint64_t last_seq  = updates.empty() ? 0 : updates.back().first;
-		log_info("streaming %zu WAL updates from LSN %llu (range %llu..%llu, server_latest=%llu, master_id=%s)",
-			updates.size(), (unsigned long long)this->_lsn,
-			(unsigned long long)first_seq, (unsigned long long)last_seq,
-			(unsigned long long)server_latest,
-			server_master_id.c_str());
-	}
-
-	// Optional throttling for the WAL streaming path. A zero bwlimit
-	// means "no rate cap"; a zero interval means "no per-batch
-	// sleep". The bwlimiter is local so the config is scoped to this
-	// single WAL sync and never leaks into other paths.
-	bwlimitter throttler;
-	if (this->_bwlimit_kbps > 0) {
-		throttler.set_bwlimit(static_cast<uint64_t>(this->_bwlimit_kbps));
-	}
-
-	// Stream updates to client
-	for (size_t i = 0; i < updates.size(); i++) {
-		uint64_t seq = updates[i].first;
-		rocksdb::WriteBatch& batch = updates[i].second;
-		string batch_data = batch.Data();
-
-		// Enforce the configured batch-size ceiling. A single huge
-		// WriteBatch (multi-megabyte append, or a burst bulk write)
-		// can outgrow the slave's receive buffer or the message-
-		// framing assumptions in this protocol. Rather than try to
-		// chunk — which would break WriteBatch atomicity — we abort
-		// WAL sync and let the caller fall through to the non-
-		// destructive full-dump path. Counter is incremented on the
-		// server side so operators see it in their own stats.
-		if (this->_max_batch_bytes > 0 && batch_data.size() > this->_max_batch_bytes) {
-			log_warning("WAL batch at LSN %llu exceeds limit (size=%zu limit=%llu) -> batch_too_large",
-				(unsigned long long)seq, batch_data.size(),
-				(unsigned long long)this->_max_batch_bytes);
-			rocksdb->incr_wal_sync_other_error();
-			char msg[BUFSIZ];
-			snprintf(msg, sizeof(msg), "batch_too_large %zu", batch_data.size());
-			return this->_send_result(result_server_error, msg);
-		}
-
-		// Send LSN marker
-		char lsn_line[BUFSIZ];
-		snprintf(lsn_line, sizeof(lsn_line), "LSN %llu%s", (unsigned long long)seq, line_delimiter);
-		this->_connection->write(lsn_line, strlen(lsn_line));
-
-		// Stream entries from WriteBatch
-		// We need to iterate through the batch and send each key-value pair
-		// For now, we'll send the raw batch data
-		// TODO: Implement proper batch iteration and send as memcached protocol
-		char batch_line[BUFSIZ];
-		snprintf(batch_line, sizeof(batch_line), "BATCH %zu%s", batch_data.size(), line_delimiter);
-		this->_connection->write(batch_line, strlen(batch_line));
-		this->_connection->write(batch_data.data(), batch_data.size());
-		this->_connection->write(line_delimiter, strlen(line_delimiter));
-
-		// Throttling: sleep according to the configured bandwidth
-		// cap for the bytes we just sent, then apply any additional
-		// per-batch interval. Skipped entirely for the common case
-		// of both being zero.
-		if (this->_bwlimit_kbps > 0) {
-			long elapsed_usec = throttler.sleep_for_bwlimit(
-				batch_data.size() + strlen(lsn_line) + strlen(batch_line) + strlen(line_delimiter));
-			if (this->_interval_usec > 0 && this->_interval_usec > elapsed_usec) {
-				usleep(this->_interval_usec - elapsed_usec);
-			}
-		} else if (this->_interval_usec > 0) {
-			usleep(this->_interval_usec);
-		}
-	}
-
-	return this->_send_result(result_end);
 #else
 	log_warning("repl_sync_wal requested but RocksDB not compiled in", 0);
 	return this->_send_result(result_server_error, "not_compiled");
 #endif
 }
 
-int op_repl_sync_wal::_run_client(uint64_t lsn, const string& master_id) {
-	char request[BUFSIZ];
-	const char* id = master_id.empty() ? "-" : master_id.c_str();
-	snprintf(request, sizeof(request), "repl_sync_wal %llu %s",
-		(unsigned long long)lsn, id);
-	return this->_send_request(request);
+#ifdef HAVE_LIBROCKSDB
+/**
+ *	destination side of `repl_sync_wal begin`: report our recorded
+ *	position in the source's lineage, then receive and apply the
+ *	streamed batches.
+ */
+int op_repl_sync_wal::_run_server_begin(storage_rocksdb* rocksdb) {
+	// Lineage check. Applying WAL batches from a different lineage
+	// would silently corrupt our data, so require an exact match; the
+	// source falls back to a non-destructive full dump and then seeds
+	// us with its token.
+	string server_master_id = rocksdb->get_master_id();
+	if (this->_client_master_id.empty() || this->_client_master_id != server_master_id) {
+		log_notice("master_id mismatch (source=%s local=%s) -> full dump required",
+			this->_client_master_id.empty() ? "-" : this->_client_master_id.c_str(),
+			server_master_id.c_str());
+		rocksdb->incr_wal_sync_master_id_mismatch();
+		string msg = "master_id_mismatch " + server_master_id;
+		return this->_send_result(result_server_error, msg.c_str());
+	}
+
+	uint64_t last_lsn = rocksdb->get_repl_last_lsn();
+	char lsn_line[BUFSIZ];
+	snprintf(lsn_line, sizeof(lsn_line), "LSN %llu", (unsigned long long)last_lsn);
+	if (this->_connection->writeline(lsn_line) < 0) {
+		log_err("failed to send LSN response", 0);
+		return -1;
+	}
+
+	uint64_t last_applied = last_lsn;
+	bool aborted = false;
+	string fail_reason;
+	if (this->_receive_batches(rocksdb, last_applied, aborted, fail_reason) < 0) {
+		// transport failure or unrecoverable framing error; the
+		// connection is dead, no final result can be delivered
+		return -1;
+	}
+
+	if (!fail_reason.empty()) {
+		return this->_send_result(result_server_error, fail_reason.c_str());
+	}
+	if (aborted) {
+		// the source explained why; just acknowledge so it can reuse
+		// the connection
+		return this->_send_result(result_ok, "aborted");
+	}
+	char msg[64];
+	snprintf(msg, sizeof(msg), "%llu", (unsigned long long)last_applied);
+	log_notice("WAL sync applied up to LSN %llu (lineage=%s)",
+		(unsigned long long)last_applied, server_master_id.c_str());
+	rocksdb->incr_wal_sync_success();
+	return this->_send_result(result_ok, msg);
 }
 
-int op_repl_sync_wal::_parse_text_client_parameters() {
-#ifdef HAVE_LIBROCKSDB
-	if (this->_storage->get_type() != storage::type_rocksdb) {
-		log_err("slave storage is not RocksDB, cannot apply WAL", 0);
-		this->_client_result = client_not_supported;
-		return -1;
+/**
+ *	destination side of `repl_sync_wal seed`: adopt the source's
+ *	lineage token and record the WAL position its full dump covered.
+ */
+int op_repl_sync_wal::_run_server_seed(storage_rocksdb* rocksdb) {
+	if (this->_client_master_id.empty()) {
+		log_warning("seed with empty master_id -> refusing", 0);
+		return this->_send_result(result_server_error, "invalid_seed");
 	}
-
-	storage_rocksdb* rocksdb = dynamic_cast<storage_rocksdb*>(this->_storage);
-	if (!rocksdb) {
-		log_err("failed to cast storage to storage_rocksdb", 0);
-		this->_client_result = client_server_error;
-		return -1;
+	if (rocksdb->set_master_id(this->_client_master_id) < 0) {
+		return this->_send_result(result_server_error, "seed_failed");
 	}
+	if (rocksdb->set_repl_last_lsn(this->_seed_lsn) < 0) {
+		return this->_send_result(result_server_error, "seed_failed");
+	}
+	log_notice("adopted lineage (master_id=%s, lsn=%llu)",
+		this->_client_master_id.c_str(), (unsigned long long)this->_seed_lsn);
+	return this->_send_result(result_ok);
+}
 
-	// Read response lines
+/**
+ *	receive "LSN/BATCH/<data>" records until END or ABORT, applying each
+ *	batch in order. After the first failure the remaining records are
+ *	drained (to keep the connection synchronized) but not applied, so
+ *	the destination never applies batches with a gap. Returns -1 only
+ *	on transport/framing errors that leave the connection unusable.
+ */
+int op_repl_sync_wal::_receive_batches(storage_rocksdb* rocksdb, uint64_t& last_applied,
+		bool& aborted, string& fail_reason) {
 	for (;;) {
 		char* p;
 		if (this->_connection->readline(&p) < 0) {
 			log_err("connection error while reading WAL stream", 0);
-			this->_client_result = client_protocol_error;
 			return -1;
 		}
 
-		// Check for end or error
-		if (strcmp(p, "END\n") == 0) {
-			delete[] p;
-			break;
-		}
-
-		if (strncmp(p, "SERVER_ERROR", 12) == 0) {
-			// Classify the reason so the caller can decide whether to
-			// fall back to a full dump and, if so, whether to adopt a
-			// new master identity. Counters are incremented on the
-			// slave side as well so operators can see the failure from
-			// either end of the connection via `stats`.
-			const char* body = p + 12;
-			while (*body == ' ') body++;
-			if (strncmp(body, "master_id_mismatch", 18) == 0) {
-				const char* id = body + 18;
-				while (*id == ' ') id++;
-				// strip trailing \r\n
-				string server_id = id;
-				while (!server_id.empty() &&
-					(server_id[server_id.size() - 1] == '\n' ||
-					 server_id[server_id.size() - 1] == '\r')) {
-					server_id.erase(server_id.size() - 1);
-				}
-				this->_server_master_id = server_id;
-				this->_client_result = client_master_id_mismatch;
-				rocksdb->incr_wal_sync_master_id_mismatch();
-				log_warning("master_id mismatch (server reports %s)", server_id.c_str());
-			} else if (strncmp(body, "lsn_ahead", 9) == 0) {
-				this->_client_result = client_lsn_ahead;
-				rocksdb->incr_wal_sync_lsn_ahead();
-				log_warning("slave LSN ahead of master (%s)", body);
-			} else if (strncmp(body, "lsn_purged", 10) == 0) {
-				this->_client_result = client_lsn_purged;
-				rocksdb->incr_wal_sync_lsn_purged();
-				log_notice("master reports lsn_purged -> full dump required", 0);
-			} else if (strncmp(body, "not_supported", 13) == 0 ||
-			           strncmp(body, "not_compiled", 12) == 0) {
-				this->_client_result = client_not_supported;
-				log_notice("WAL sync not supported by peer", 0);
-			} else if (strncmp(body, "batch_too_large", 15) == 0) {
-				// The peer had a single WriteBatch that exceeded
-				// its rocksdb_wal_max_batch_bytes ceiling. This is
-				// classified as a transport failure, not a lineage
-				// or data-integrity problem, so the caller still
-				// falls back to full dump (which sends key-by-key
-				// and is not subject to this limit).
-				this->_client_result = client_server_error;
-				rocksdb->incr_wal_sync_other_error();
-				log_warning("WAL sync aborted: %s", body);
-			} else {
-				this->_client_result = client_server_error;
-				rocksdb->incr_wal_sync_other_error();
-				log_warning("server error during WAL sync: %s", p);
-			}
-			delete[] p;
-			return -1;
-		}
-
-		// Parse LSN line
 		char q[BUFSIZ];
 		int n = util::next_word(p, q, sizeof(q));
-		if (strcmp(q, "LSN") == 0) {
-			n += util::next_digit(p+n, q, sizeof(q));
-			uint64_t lsn = boost::lexical_cast<uint64_t>(q);
-			log_debug("received LSN %llu", lsn);
-
+		if (strcmp(q, "END") == 0) {
 			delete[] p;
-
-			// Read BATCH line
-			if (this->_connection->readline(&p) < 0) {
-				log_err("connection error while reading BATCH line", 0);
-				return -1;
-			}
-
-			n = util::next_word(p, q, sizeof(q));
-			if (strcmp(q, "BATCH") != 0) {
-				log_err("expected BATCH, got %s", q);
-				delete[] p;
-				return -1;
-			}
-
-			n += util::next_digit(p+n, q, sizeof(q));
-			size_t batch_size = boost::lexical_cast<size_t>(q);
+			return 0;
+		}
+		if (strcmp(q, "ABORT") == 0) {
+			log_notice("source aborted WAL stream: %s", p+n);
+			aborted = true;
 			delete[] p;
-
-			// Read batch data
-			char* batch_data = NULL;
-			bool actual = false;
-			if (this->_connection->read(&batch_data, batch_size, false, actual) < 0) {
-				log_err("failed to read batch data", 0);
-				if (batch_data) delete[] batch_data;
-				return -1;
-			}
-
-			// Read trailing newline
-			if (this->_connection->readline(&p) < 0) {
-				delete[] batch_data;
-				return -1;
-			}
+			return 0;
+		}
+		if (strcmp(q, "LSN") != 0) {
+			log_err("expected LSN/END/ABORT, got [%s]", p);
 			delete[] p;
+			return -1;
+		}
 
-			// Apply batch
+		uint64_t seq;
+		util::next_digit(p+n, q, sizeof(q));
+		delete[] p;
+		try {
+			seq = boost::lexical_cast<uint64_t>(q);
+		} catch (boost::bad_lexical_cast e) {
+			log_err("invalid LSN in WAL stream [%s]", q);
+			return -1;
+		}
+
+		if (this->_connection->readline(&p) < 0) {
+			log_err("connection error while reading BATCH line", 0);
+			return -1;
+		}
+		n = util::next_word(p, q, sizeof(q));
+		if (strcmp(q, "BATCH") != 0) {
+			log_err("expected BATCH, got [%s]", p);
+			delete[] p;
+			return -1;
+		}
+		uint64_t batch_size;
+		util::next_digit(p+n, q, sizeof(q));
+		delete[] p;
+		try {
+			batch_size = boost::lexical_cast<uint64_t>(q);
+		} catch (boost::bad_lexical_cast e) {
+			log_err("invalid BATCH size in WAL stream [%s]", q);
+			return -1;
+		}
+
+		// Size guards: reject batches over the operator-configured
+		// ceiling or the absolute hard limit, but keep reading (and
+		// discarding) the declared bytes so the stream stays framed.
+		uint64_t ceiling = rocksdb->get_wal_max_batch_bytes();
+		bool too_large = batch_size > max_batch_bytes_hard_limit
+			|| (ceiling > 0 && batch_size > ceiling);
+		if (too_large) {
+			log_warning("WAL batch at LSN %llu exceeds limit (size=%llu) -> discarding stream",
+				(unsigned long long)seq, (unsigned long long)batch_size);
+			if (fail_reason.empty()) {
+				fail_reason = "batch_too_large";
+				rocksdb->incr_wal_sync_other_error();
+			}
+			uint64_t remaining = batch_size + 2;	// + trailing CRLF
+			while (remaining > 0) {
+				int chunk = remaining > (1 << 20) ? (1 << 20) : (int)remaining;
+				char* buf = NULL;
+				if (this->_connection->readsize(chunk, &buf) < 0) {
+					return -1;
+				}
+				delete[] buf;
+				remaining -= chunk;
+			}
+			continue;
+		}
+
+		char* batch_data = NULL;
+		if (this->_connection->readsize((int)(batch_size + 2), &batch_data) < 0) {
+			log_err("failed to read batch data (size=%llu)", (unsigned long long)batch_size);
+			return -1;
+		}
+
+		if (fail_reason.empty()) {
 			rocksdb::WriteBatch batch(string(batch_data, batch_size));
-			delete[] batch_data;
-
-			int result = rocksdb->apply_batch_with_lsn(batch, lsn);
-			if (result < 0) {
-				log_err("failed to apply batch for LSN %llu", lsn);
-				this->_client_result = client_apply_error;
+			if (rocksdb->apply_batch_with_lsn(batch, seq) < 0) {
+				log_err("failed to apply batch for LSN %llu", (unsigned long long)seq);
+				fail_reason = "apply_error";
 				rocksdb->incr_wal_sync_apply_failure();
+			} else {
+				last_applied = seq;
+				log_debug("applied batch for LSN %llu (batch_size=%llu)",
+					(unsigned long long)seq, (unsigned long long)batch_size);
+			}
+		}
+		delete[] batch_data;
+	}
+}
+
+/**
+ *	source side: fetch the WAL delta after dest_lsn in bounded chunks
+ *	and stream each batch. The LSN marker sent with a batch is the
+ *	sequence of its LAST operation, so the position the destination
+ *	records lets the next sync resume without a gap.
+ */
+int op_repl_sync_wal::_stream_batches(storage_rocksdb* rocksdb, uint64_t dest_lsn) {
+	uint64_t local_latest = rocksdb->get_latest_sequence_number();
+	if (dest_lsn > local_latest) {
+		// The destination has seen more of "our" WAL than we have — we
+		// lost data (restored from backup?) or the lineage token was
+		// reused. Force a full resync.
+		log_warning("dest LSN (%llu) ahead of local latest (%llu) -> forcing full resync",
+			(unsigned long long)dest_lsn, (unsigned long long)local_latest);
+		rocksdb->incr_wal_sync_lsn_ahead();
+		this->_client_result = client_lsn_ahead;
+		return this->_abort_stream("lsn_ahead");
+	}
+
+	bwlimitter throttler;
+	if (this->_bwlimit_kbps > 0) {
+		throttler.set_bwlimit(static_cast<uint64_t>(this->_bwlimit_kbps));
+	}
+
+	uint64_t from_lsn = dest_lsn;
+	uint64_t streamed = 0;
+	bool has_more = true;
+	while (has_more) {
+		has_more = false;
+		vector<pair<uint64_t, rocksdb::WriteBatch> > updates;
+		int result = rocksdb->get_updates_since(from_lsn, updates, fetch_chunk_bytes, &has_more);
+		if (result == storage_rocksdb::ERR_LSN_PURGED) {
+			log_notice("WAL no longer covers LSN %llu -> destination needs full dump",
+				(unsigned long long)from_lsn);
+			rocksdb->incr_wal_sync_lsn_purged();
+			this->_client_result = client_lsn_purged;
+			return this->_abort_stream("lsn_purged");
+		}
+		if (result < 0) {
+			log_err("get_updates_since failed for LSN %llu", (unsigned long long)from_lsn);
+			rocksdb->incr_wal_sync_other_error();
+			this->_client_result = client_server_error;
+			return this->_abort_stream("wal_read_error");
+		}
+
+		uint64_t chunk_start_lsn = from_lsn;
+		for (size_t i = 0; i < updates.size(); i++) {
+			uint64_t seq = updates[i].first;
+			rocksdb::WriteBatch& batch = updates[i].second;
+			int count = batch.Count();
+			uint64_t end_seq = seq + (count > 0 ? count - 1 : 0);
+			if (end_seq <= from_lsn) {
+				// entirely covered by the destination's position (the
+				// first batch of a fetch may overlap it)
+				continue;
+			}
+			string batch_data = batch.Data();
+
+			// Enforce the configured batch-size ceiling. A single huge
+			// WriteBatch can outgrow the destination's limits; rather
+			// than chunk it — which would break WriteBatch atomicity —
+			// abort and let the caller fall back to the full dump.
+			if (this->_max_batch_bytes > 0 && batch_data.size() > this->_max_batch_bytes) {
+				log_warning("WAL batch at LSN %llu exceeds limit (size=%zu limit=%llu) -> batch_too_large",
+					(unsigned long long)seq, batch_data.size(),
+					(unsigned long long)this->_max_batch_bytes);
+				rocksdb->incr_wal_sync_other_error();
+				this->_client_result = client_server_error;
+				return this->_abort_stream("batch_too_large");
+			}
+
+			char lsn_line[BUFSIZ];
+			snprintf(lsn_line, sizeof(lsn_line), "LSN %llu%s", (unsigned long long)end_seq, line_delimiter);
+			char batch_line[BUFSIZ];
+			snprintf(batch_line, sizeof(batch_line), "BATCH %zu%s", batch_data.size(), line_delimiter);
+			if (this->_connection->write(lsn_line, strlen(lsn_line)) < 0
+					|| this->_connection->write(batch_line, strlen(batch_line)) < 0
+					|| this->_connection->write(batch_data.data(), batch_data.size()) < 0
+					|| this->_connection->write(line_delimiter, strlen(line_delimiter)) < 0) {
+				log_err("connection error while streaming WAL batch", 0);
+				this->_client_result = client_protocol_error;
+				this->_connection_dirty = true;
 				return -1;
 			}
 
-			log_debug("applied batch for LSN %llu (batch_size=%zu)", lsn, batch_size);
-		} else {
-			log_warning("unexpected line in WAL stream: %s", p);
-			delete[] p;
+			// Throttling: sleep according to the configured bandwidth
+			// cap for the bytes we just sent, then apply any additional
+			// per-batch interval.
+			if (this->_bwlimit_kbps > 0) {
+				long elapsed_usec = throttler.sleep_for_bwlimit(
+					batch_data.size() + strlen(lsn_line) + strlen(batch_line) + strlen(line_delimiter));
+				if (this->_interval_usec > 0 && this->_interval_usec > elapsed_usec) {
+					usleep(this->_interval_usec - elapsed_usec);
+				}
+			} else if (this->_interval_usec > 0) {
+				usleep(this->_interval_usec);
+			}
+
+			from_lsn = end_seq;
+			streamed++;
+		}
+
+		if (has_more && from_lsn == chunk_start_lsn) {
+			// no forward progress although more data is pending —
+			// should not happen, but never spin here
+			log_err("WAL streaming stalled at LSN %llu -> aborting", (unsigned long long)from_lsn);
+			rocksdb->incr_wal_sync_other_error();
+			this->_client_result = client_server_error;
+			return this->_abort_stream("wal_read_error");
 		}
 	}
 
-	log_notice("WAL sync completed successfully (last_applied_lsn=%llu, master_id=%s)",
-		(unsigned long long)rocksdb->get_repl_last_lsn(),
-		rocksdb->get_master_id().c_str());
-	this->_client_result = client_success;
-	rocksdb->incr_wal_sync_success();
+	log_info("streamed %llu WAL batches (dest_lsn=%llu -> %llu)",
+		(unsigned long long)streamed, (unsigned long long)dest_lsn,
+		(unsigned long long)from_lsn);
 	return 0;
-#else
-	log_err("RocksDB not compiled in, cannot apply WAL", 0);
-	this->_client_result = client_not_supported;
-	return -1;
-#endif
 }
+
+/**
+ *	terminate the stream early but keep both sides line-synchronized:
+ *	tell the destination why, and consume its acknowledgment.
+ */
+int op_repl_sync_wal::_abort_stream(const char* reason) {
+	char line[BUFSIZ];
+	snprintf(line, sizeof(line), "ABORT %s", reason);
+	if (this->_connection->writeline(line) < 0) {
+		this->_connection_dirty = true;
+		return -1;
+	}
+	char* p;
+	if (this->_connection->readline(&p) < 0) {
+		this->_connection_dirty = true;
+		return -1;
+	}
+	delete[] p;
+	return -1;
+}
+
+/**
+ *	read the destination's final verdict after END.
+ */
+int op_repl_sync_wal::_read_final_result() {
+	char* p;
+	if (this->_connection->readline(&p) < 0) {
+		log_err("connection error while reading final result", 0);
+		this->_client_result = client_protocol_error;
+		this->_connection_dirty = true;
+		return -1;
+	}
+
+	storage_rocksdb* rocksdb = dynamic_cast<storage_rocksdb*>(this->_storage);
+	char q[BUFSIZ];
+	int n = util::next_word(p, q, sizeof(q));
+	if (strcmp(q, "OK") == 0) {
+		log_notice("WAL sync completed successfully (%s)", p+n);
+		this->_client_result = client_success;
+		if (rocksdb) {
+			rocksdb->incr_wal_sync_success();
+		}
+		delete[] p;
+		return 0;
+	}
+	if (strcmp(q, "SERVER_ERROR") == 0) {
+		const char* body = p + n;
+		while (*body == ' ') body++;
+		if (strncmp(body, "apply_error", 11) == 0) {
+			this->_client_result = client_apply_error;
+			if (rocksdb) {
+				rocksdb->incr_wal_sync_apply_failure();
+			}
+		} else {
+			this->_client_result = client_server_error;
+			if (rocksdb) {
+				rocksdb->incr_wal_sync_other_error();
+			}
+		}
+		log_warning("destination reported WAL sync failure: %s", p);
+		delete[] p;
+		return -1;
+	}
+	log_warning("unexpected final result [%s]", p);
+	this->_client_result = client_protocol_error;
+	this->_connection_dirty = true;
+	delete[] p;
+	return -1;
+}
+#endif	// HAVE_LIBROCKSDB
 // }}}
 
 // {{{ private methods

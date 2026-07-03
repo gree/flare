@@ -61,11 +61,13 @@ AS_IF([test "x$ac_cv_lib_kyotocabinet_main" = "xyes"],
 		])
 	])
 
-# RocksDB
+# RocksDB (explicit opt-in: unlike the other optional libraries, enabling
+# RocksDB changes runtime/replication behavior, so it is never picked up
+# just because librocksdb happens to exist on the build host)
 AC_ARG_WITH(rocksdb,
 	AS_HELP_STRING([--with-rocksdb], [rocksdb libraries]),
-	AS_IF([test "$withval" != "no"], [CXXFLAGS="${CXXFLAGS} -I${withval}/include" LDFLAGS="${LDFLAGS} -L${withval}/lib"], []))
-AS_IF([test "x$with_rocksdb" != "xno"],
+	AS_IF([test "$withval" != "no" -a "$withval" != "yes"], [CXXFLAGS="${CXXFLAGS} -I${withval}/include" LDFLAGS="${LDFLAGS} -L${withval}/lib"], []))
+AS_IF([test "x$with_rocksdb" != "x" -a "x$with_rocksdb" != "xno"],
 	[AC_CHECK_LIB(rocksdb, main, [], [])], [ac_cv_lib_rocksdb_main=no])
 AS_IF([test "x$ac_cv_lib_rocksdb_main" = "xyes"],
 	[],

@@ -39,9 +39,10 @@ namespace flare {
 // operations cannot accidentally clobber or observe them.
 const char* const storage_rocksdb::kReplLastLsnKey  = "__flare_repl_last_lsn";
 const char* const storage_rocksdb::kReplMasterIdKey = "__flare_repl_master_id";
+const char* const storage_rocksdb::kRecordCountKey  = "__flare_record_count";
 
 bool storage_rocksdb::is_reserved_key(const string& key) {
-	return key == kReplLastLsnKey || key == kReplMasterIdKey;
+	return key == kReplLastLsnKey || key == kReplMasterIdKey || key == kRecordCountKey;
 }
 // }}}
 
@@ -71,6 +72,7 @@ storage_rocksdb::storage_rocksdb(
 	_wal_ttl_seconds(wal_ttl_seconds),
 	_wal_size_limit_mb(wal_size_limit_mb),
 	_sync_writes(sync_writes),
+	_record_count(0),
 	_master_id(""),
 	_wal_sync_success(0),
 	_wal_sync_lsn_purged(0),
@@ -86,6 +88,8 @@ storage_rocksdb::storage_rocksdb(
 	_wal_sync_interval(0),
 	_orphan_scan_valid(false),
 	_orphan_scan_ttl_seconds(300) {
+	pthread_mutex_init(&this->_mutex_iter_lock, NULL);
+	pthread_mutex_init(&this->_mutex_master_id, NULL);
 	pthread_mutex_init(&this->_resync_failure_mutex, NULL);
 	pthread_mutex_init(&this->_orphan_scan_mutex, NULL);
 	this->_data_path = this->_data_dir + "/flare.rocksdb";
@@ -103,6 +107,8 @@ storage_rocksdb::~storage_rocksdb() {
 		delete this->_db;
 		this->_db = NULL;
 	}
+	pthread_mutex_destroy(&this->_mutex_iter_lock);
+	pthread_mutex_destroy(&this->_mutex_master_id);
 	pthread_mutex_destroy(&this->_resync_failure_mutex);
 	pthread_mutex_destroy(&this->_orphan_scan_mutex);
 }
@@ -188,8 +194,10 @@ int storage_rocksdb::_load_or_generate_master_id() {
 	string value;
 	rocksdb::Status status = this->_db->Get(this->_read_options, kReplMasterIdKey, &value);
 	if (status.ok()) {
+		pthread_mutex_lock(&this->_mutex_master_id);
 		this->_master_id = value;
-		log_debug("loaded existing master id (id=%s)", this->_master_id.c_str());
+		pthread_mutex_unlock(&this->_mutex_master_id);
+		log_debug("loaded existing master id (id=%s)", value.c_str());
 		return 0;
 	}
 	if (!status.IsNotFound()) {
@@ -215,8 +223,10 @@ int storage_rocksdb::_load_or_generate_master_id() {
 		log_err("failed to persist master id: %s", status.ToString().c_str());
 		return -1;
 	}
+	pthread_mutex_lock(&this->_mutex_master_id);
 	this->_master_id = new_id;
-	log_notice("generated new master id (id=%s)", this->_master_id.c_str());
+	pthread_mutex_unlock(&this->_mutex_master_id);
+	log_notice("generated new master id (id=%s)", new_id.c_str());
 	return 0;
 }
 
@@ -233,9 +243,67 @@ int storage_rocksdb::set_master_id(const string& id) {
 		log_err("failed to persist master id: %s", status.ToString().c_str());
 		return -1;
 	}
+	pthread_mutex_lock(&this->_mutex_master_id);
 	string old_id = this->_master_id;
 	this->_master_id = id;
-	log_notice("master id updated (old=%s, new=%s)", old_id.c_str(), this->_master_id.c_str());
+	pthread_mutex_unlock(&this->_mutex_master_id);
+	log_notice("master id updated (old=%s, new=%s)", old_id.c_str(), id.c_str());
+	return 0;
+}
+
+/**
+ * Initialize the exact record counter. A clean close persists the count
+ * under kRecordCountKey; load it and durably delete the marker so that a
+ * crash before the next clean close forces a re-count instead of
+ * trusting a stale value. Without a marker (first open or post-crash),
+ * fall back to a one-time full scan.
+ */
+int storage_rocksdb::_load_or_count_records() {
+	// the same object may be close()d and re-open()ed (tests do); start
+	// from zero either way
+	this->_record_count.add(-this->_record_count.fetch());
+
+	string value;
+	rocksdb::Status status = this->_db->Get(this->_read_options, kRecordCountKey, &value);
+	if (status.ok()) {
+		uint64_t persisted = 0;
+		bool valid = true;
+		try {
+			persisted = boost::lexical_cast<uint64_t>(value);
+		} catch (boost::bad_lexical_cast e) {
+			log_warning("corrupt record count marker [%s] -> re-counting", value.c_str());
+			valid = false;
+		}
+		rocksdb::WriteOptions wo;
+		wo.sync = true;
+		wo.disableWAL = false;
+		rocksdb::Status del_status = this->_db->Delete(wo, kRecordCountKey);
+		if (!del_status.ok()) {
+			log_err("failed to clear record count marker: %s", del_status.ToString().c_str());
+			return -1;
+		}
+		if (valid) {
+			this->_record_count.add(persisted);
+			log_debug("loaded persisted record count (%llu)", (unsigned long long)persisted);
+			return 0;
+		}
+	} else if (!status.IsNotFound()) {
+		log_err("failed to read record count marker: %s", status.ToString().c_str());
+		return -1;
+	}
+
+	log_notice("no record count marker (first open or unclean shutdown) -> counting records", 0);
+	uint64_t count = 0;
+	rocksdb::Iterator* it = this->_db->NewIterator(this->_read_options);
+	for (it->SeekToFirst(); it->Valid(); it->Next()) {
+		if (is_reserved_key(it->key().ToString())) {
+			continue;
+		}
+		count++;
+	}
+	delete it;
+	this->_record_count.add(count);
+	log_notice("record count initialized (%llu)", (unsigned long long)count);
 	return 0;
 }
 // }}}
@@ -262,6 +330,12 @@ int storage_rocksdb::open() {
 		return -1;
 	}
 
+	if (this->_load_or_count_records() < 0) {
+		delete this->_db;
+		this->_db = NULL;
+		return -1;
+	}
+
 	log_notice("storage open (path=%s, type=%s, master_id=%s, sync_writes=%s, wal_ttl=%llus, wal_size_limit=%lluMB)",
 		this->_data_path.c_str(), storage::type_cast(this->_type).c_str(), this->_master_id.c_str(),
 		this->_sync_writes ? "true" : "false",
@@ -281,6 +355,21 @@ int storage_rocksdb::close() {
 	// Clean up any active iteration
 	if (this->_iter_snapshot) {
 		this->iter_end();
+	}
+
+	// Persist the record count so the next open() can skip the full
+	// scan. Written durably; a crash before this point leaves no marker
+	// and forces a re-count, which is the safe default.
+	{
+		rocksdb::WriteOptions wo;
+		wo.sync = true;
+		wo.disableWAL = false;
+		string count_value = boost::lexical_cast<string>(this->_record_count.fetch());
+		rocksdb::Status status = this->_db->Put(wo, kRecordCountKey, count_value);
+		if (!status.ok()) {
+			log_warning("failed to persist record count (next open will re-count): %s",
+				status.ToString().c_str());
+		}
 	}
 
 	delete this->_db;
@@ -452,6 +541,12 @@ int storage_rocksdb::set(entry& e, result& r, int b) {
 			throw 0;
 		}
 
+		if (e_current_exists < 0) {
+			// created a record that did not physically exist before
+			// (append/prepend/touch never reach here with exists < 0)
+			this->_record_count.incr();
+		}
+
 		r = (b & behavior_touch) ? result_touched : result_stored;
 
 		delete[] p;
@@ -599,6 +694,7 @@ int storage_rocksdb::remove(entry& e, result& r, int b) {
 
 		rocksdb::Status status = this->_db->Delete(this->_write_options, e.key);
 		if (status.ok()) {
+			this->_record_count.add((uint64_t)-1);
 			r = expired ? result_not_found : result_deleted;
 			log_debug("removed data (key=%s)", e.key.c_str());
 		} else {
@@ -648,13 +744,26 @@ int storage_rocksdb::incr(entry& e, uint64_t value, result& r, bool increment, i
 			pthread_rwlock_wrlock(&this->_mutex_slot[mutex_index]);
 		}
 
-		// Get current entry
+		// Get current entry. Fetch even an expired record so it can be
+		// physically removed below (matching storage_tcb).
 		entry e_current;
 		e_current.key = e.key;
-		int result_code = this->get(e_current, r, behavior_skip_lock | (b & behavior_skip_timestamp));
+		int result_code = this->get(e_current, r, behavior_skip_lock | behavior_skip_timestamp);
 
 		if (result_code < 0 || r == result_not_found) {
 			log_debug("key not found for incr/decr (key=%s)", e.key.c_str());
+			r = result_not_found;
+			throw 0;
+		}
+
+		if ((b & behavior_skip_timestamp) == 0 && e_current.expire > 0
+				&& e_current.expire <= stats_object->get_timestamp()) {
+			// Expired: remove the record (recording its version tombstone)
+			// and report not found, matching storage_tcb::incr().
+			log_debug("entry expired on incr/decr -> removing (key=%s, expire=%ld)",
+				e.key.c_str(), e_current.expire);
+			result r_remove;
+			this->remove(e_current, r_remove, behavior_skip_lock | behavior_version_equal);
 			r = result_not_found;
 			throw 0;
 		}
@@ -683,10 +792,15 @@ int storage_rocksdb::incr(entry& e, uint64_t value, result& r, bool increment, i
 			}
 		}
 
-		// Perform increment/decrement
+		// Perform increment/decrement. Overflow clamps to UINT64_MAX and
+		// underflow clamps to 0, matching storage_tcb.
 		uint64_t new_value;
 		if (increment) {
 			new_value = current_value + value;
+			if (new_value < current_value) {
+				new_value = 0;
+				new_value--;
+			}
 		} else {
 			if (current_value < value) {
 				new_value = 0;
@@ -704,12 +818,22 @@ int storage_rocksdb::incr(entry& e, uint64_t value, result& r, bool increment, i
 		e.expire = e_current.expire;
 		e.version = e_current.version + 1;
 
-		// Store updated value
-		result set_result;
-		int set_code = this->set(e, set_result, behavior_skip_lock);
+		// Store the updated value with a single Put. Routing through
+		// set() would re-read the header we already hold (a second
+		// RocksDB Get of the same key under the slot lock); this mirrors
+		// storage_tcb's one-get/one-put incr. The record physically
+		// exists, so the record count is unchanged.
+		uint8_t* p = new uint8_t[entry::header_size + e.size];
+		this->_serialize_header(e, p);
+		memcpy(p+entry::header_size, e.data.get(), e.size);
+		rocksdb::Slice key_slice(e.key);
+		rocksdb::Slice value_slice(reinterpret_cast<char*>(p), entry::header_size + e.size);
+		rocksdb::Status status = this->_db->Put(this->_write_options, key_slice, value_slice);
+		delete[] p;
 
-		if (set_code < 0 || set_result != result_stored) {
-			log_err("failed to store incr/decr result (key=%s)", e.key.c_str());
+		if (!status.ok()) {
+			log_err("failed to store incr/decr result (key=%s): %s",
+				e.key.c_str(), status.ToString().c_str());
 			r = result_not_stored;
 			throw 0;
 		}
@@ -735,22 +859,46 @@ int storage_rocksdb::incr(entry& e, uint64_t value, result& r, bool increment, i
 int storage_rocksdb::truncate(int b) {
 	log_notice("truncating storage (this may take a while)", 0);
 
+	// Exclude every concurrent reader/writer/iteration for the duration
+	// (they all hold the wholelock shared, matching storage_tcb).
+	pthread_rwlock_wrlock(&this->_mutex_wholelock);
+
 	// Full table scan delete (RocksDB doesn't have fast truncate).
 	// Reserved replication metadata keys are preserved: truncating them
 	// would silently break WAL sync lineage tracking on the next sync.
 	// If an operator truly wants to start over they can remove the DB
-	// directory.
+	// directory. Deletes are grouped into WriteBatch chunks so the WAL
+	// (and any incremental replication of it) sees a bounded number of
+	// writes instead of one per key.
 	rocksdb::Iterator* it = this->_db->NewIterator(this->_read_options);
 
+	static const int truncate_batch_size = 1024;
+	rocksdb::WriteBatch batch;
+	int pending = 0;
 	for (it->SeekToFirst(); it->Valid(); it->Next()) {
 		string k = it->key().ToString();
 		if (is_reserved_key(k)) {
 			continue;
 		}
-		rocksdb::Status status = this->_db->Delete(this->_write_options, k);
+		batch.Delete(k);
+		if (++pending >= truncate_batch_size) {
+			rocksdb::Status status = this->_db->Write(this->_write_options, &batch);
+			if (!status.ok()) {
+				log_err("RocksDB::Write() failed during truncate: %s", status.ToString().c_str());
+				delete it;
+				pthread_rwlock_unlock(&this->_mutex_wholelock);
+				return -1;
+			}
+			batch.Clear();
+			pending = 0;
+		}
+	}
+	if (pending > 0) {
+		rocksdb::Status status = this->_db->Write(this->_write_options, &batch);
 		if (!status.ok()) {
-			log_err("RocksDB::Delete() failed during truncate: %s", status.ToString().c_str());
+			log_err("RocksDB::Write() failed during truncate: %s", status.ToString().c_str());
 			delete it;
+			pthread_rwlock_unlock(&this->_mutex_wholelock);
 			return -1;
 		}
 	}
@@ -768,21 +916,32 @@ int storage_rocksdb::truncate(int b) {
 	this->_db->Delete(wo, kReplLastLsnKey);
 
 	this->_clear_header_cache();
+	this->_record_count.add(-this->_record_count.fetch());
+
+	pthread_rwlock_unlock(&this->_mutex_wholelock);
 
 	log_notice("storage truncated (master_id preserved=%s, repl_last_lsn reset to 0)",
-		this->_master_id.c_str());
+		this->get_master_id().c_str());
 	return 0;
 }
 
 int storage_rocksdb::iter_begin() {
 	log_debug("iter_begin()", 0);
 
-	pthread_rwlock_rdlock(&this->_mutex_wholelock);
+	// Serialize the busy-check and cursor setup: a shared rdlock alone
+	// cannot provide mutual exclusion between two concurrent
+	// iterations (dump, dump replication, orphan scan/purge, ...).
+	pthread_mutex_lock(&this->_mutex_iter_lock);
 
 	if (this->_iter_snapshot) {
+		pthread_mutex_unlock(&this->_mutex_iter_lock);
 		log_warning("iteration already in progress", 0);
 		return -1;
 	}
+
+	// Held (shared) until iter_end() so that whole-storage operations
+	// (truncate) exclude active iterations.
+	pthread_rwlock_rdlock(&this->_mutex_wholelock);
 
 	// Create snapshot for consistent iteration
 	this->_iter_snapshot = this->_db->GetSnapshot();
@@ -795,6 +954,8 @@ int storage_rocksdb::iter_begin() {
 	this->_iter = this->_db->NewIterator(iter_options);
 	this->_iter->SeekToFirst();
 	this->_iter_first = true;
+
+	pthread_mutex_unlock(&this->_mutex_iter_lock);
 
 	return 0;
 }
@@ -830,7 +991,10 @@ storage::iteration storage_rocksdb::iter_next(string& key) {
 int storage_rocksdb::iter_end() {
 	log_debug("iter_end()", 0);
 
+	pthread_mutex_lock(&this->_mutex_iter_lock);
+
 	if (!this->_iter && !this->_iter_snapshot) {
+		pthread_mutex_unlock(&this->_mutex_iter_lock);
 		log_warning("cursor is not initialized", 0);
 		return -1;
 	}
@@ -846,23 +1010,16 @@ int storage_rocksdb::iter_end() {
 	}
 
 	pthread_rwlock_unlock(&this->_mutex_wholelock);
+	pthread_mutex_unlock(&this->_mutex_iter_lock);
 
 	return 0;
 }
 
 uint32_t storage_rocksdb::count() {
-	uint32_t count = 0;
-	rocksdb::Iterator* it = this->_db->NewIterator(this->_read_options);
-
-	for (it->SeekToFirst(); it->Valid(); it->Next()) {
-		if (is_reserved_key(it->key().ToString())) {
-			continue;
-		}
-		count++;
-	}
-
-	delete it;
-	return count;
+	// O(1): maintained on every create/delete (see _record_count).
+	// stats polls this per `stats` request, so a full scan here would
+	// put a whole-DB iteration on the monitoring path.
+	return static_cast<uint32_t>(this->_record_count.fetch());
 }
 
 uint64_t storage_rocksdb::size() {
@@ -887,13 +1044,30 @@ uint64_t storage_rocksdb::get_latest_sequence_number() {
 	return this->_db->GetLatestSequenceNumber();
 }
 
-int storage_rocksdb::get_updates_since(uint64_t seq_number, vector<pair<uint64_t, rocksdb::WriteBatch>>& updates) {
-	// Use RocksDB's GetUpdatesSince for WAL-based replication
+int storage_rocksdb::get_updates_since(uint64_t seq_number, vector<pair<uint64_t, rocksdb::WriteBatch>>& updates,
+		uint64_t max_total_bytes, bool* has_more) {
+	if (has_more) {
+		*has_more = false;
+	}
+
+	// Use RocksDB's GetUpdatesSince for WAL-based replication.
+	// Semantics: the caller has applied everything up to and including
+	// seq_number and wants every later update. The first returned batch
+	// may overlap seq_number (RocksDB positions the iterator at the
+	// batch whose range covers it); re-applying such a batch is
+	// idempotent (raw Put/Delete records), so callers may either skip
+	// or re-apply it.
 	std::unique_ptr<rocksdb::TransactionLogIterator> iter;
 	rocksdb::Status status = this->_db->GetUpdatesSince(seq_number, &iter);
 
 	if (!status.ok()) {
 		if (status.IsNotFound()) {
+			// NotFound is also returned when there is simply nothing at or
+			// after seq_number (e.g. a caller already at the latest
+			// sequence); only report a purge when updates should exist.
+			if (seq_number >= this->_db->GetLatestSequenceNumber()) {
+				return 0;	// already up to date
+			}
 			log_warning("LSN %llu not found (purged from WAL)", seq_number);
 			return ERR_LSN_PURGED;
 		}
@@ -901,52 +1075,177 @@ int storage_rocksdb::get_updates_since(uint64_t seq_number, vector<pair<uint64_t
 		return ERR_LSN_INVALID;
 	}
 
+	// Continuity check. When the requested sequence has been purged from
+	// the WAL but later WAL files remain, GetUpdatesSince() does NOT
+	// return NotFound — it returns OK positioned at the first batch that
+	// is still available (see rocksdb/db.h). Streaming from there would
+	// silently skip the purged range, so detect the gap here and force
+	// the caller onto the full-resync path instead.
+	if (!iter->Valid()) {
+		if (seq_number < this->_db->GetLatestSequenceNumber()) {
+			log_warning("no WAL batches available after LSN %llu although latest is %llu (purged)",
+				(unsigned long long)seq_number,
+				(unsigned long long)this->_db->GetLatestSequenceNumber());
+			return ERR_LSN_PURGED;
+		}
+		return 0;	// already up to date
+	}
+
+	// Accumulate batches up to max_total_bytes (0 = unlimited). At least
+	// one batch that advances the caller past seq_number is always
+	// included so the caller makes progress even when the budget is
+	// smaller than a batch (the first batch may only overlap
+	// seq_number); when the budget is exhausted `has_more` is set and
+	// the caller re-fetches from the last applied sequence. This bounds
+	// the memory held by a single fetch — the full WAL retention window
+	// can be many GB.
+	//
+	// NOTE: GetBatch() MOVES the batch out of the iterator, so it must
+	// be called exactly once per position — the continuity check on the
+	// first batch happens inside the loop for that reason.
+	uint64_t total_bytes = 0;
+	bool included_progress = false;
+	bool first_batch = true;
 	while (iter->Valid()) {
 		rocksdb::BatchResult batch = iter->GetBatch();
+		if (first_batch) {
+			if (batch.sequence > seq_number + 1) {
+				log_warning("WAL gap detected: requested LSN %llu but first available batch starts at %llu (purged)",
+					(unsigned long long)seq_number, (unsigned long long)batch.sequence);
+				return ERR_LSN_PURGED;
+			}
+			first_batch = false;
+		}
+		uint64_t batch_bytes = batch.writeBatchPtr->GetDataSize();
+		if (max_total_bytes > 0 && included_progress && total_bytes + batch_bytes > max_total_bytes) {
+			if (has_more) {
+				*has_more = true;
+			}
+			break;
+		}
+		int op_count = batch.writeBatchPtr->Count();
+		uint64_t end_seq = batch.sequence + (op_count > 0 ? op_count - 1 : 0);
 		// Copy the WriteBatch contents since writeBatchPtr is a unique_ptr
 		updates.push_back(std::make_pair(batch.sequence, *batch.writeBatchPtr));
+		total_bytes += batch_bytes;
+		if (end_seq > seq_number) {
+			included_progress = true;
+		}
 		iter->Next();
 	}
 
 	return 0;
 }
 
-int storage_rocksdb::apply_batch(const rocksdb::WriteBatch& batch) {
-	// WriteBatch is passed as const reference, but Write() needs non-const pointer
-	rocksdb::WriteBatch* batch_ptr = const_cast<rocksdb::WriteBatch*>(&batch);
-	rocksdb::Status status = this->_db->Write(this->_write_options, batch_ptr);
+namespace {
+// Rebuilds an incoming replication batch without reserved metadata keys
+// (a peer's master_id / repl_last_lsn / record_count markers travel in
+// its WAL and must never overwrite ours) and computes the record-count
+// delta the batch will cause, honoring multiple operations on the same
+// key within one batch.
+class replication_batch_filter : public rocksdb::WriteBatch::Handler {
+public:
+	rocksdb::DB* db;
+	const rocksdb::ReadOptions* read_options;
+	rocksdb::WriteBatch filtered;
+	int64_t count_delta;
+	map<string, bool> batch_state;	// key -> exists after the ops so far
+
+	replication_batch_filter(rocksdb::DB* db, const rocksdb::ReadOptions* ro):
+			db(db), read_options(ro), count_delta(0) {
+	}
+
+	virtual void Put(const rocksdb::Slice& key, const rocksdb::Slice& value) {
+		string k = key.ToString();
+		if (storage_rocksdb::is_reserved_key(k)) {
+			return;
+		}
+		if (!this->_exists(k)) {
+			this->count_delta++;
+		}
+		this->batch_state[k] = true;
+		this->filtered.Put(key, value);
+	}
+
+	virtual void Delete(const rocksdb::Slice& key) {
+		string k = key.ToString();
+		if (storage_rocksdb::is_reserved_key(k)) {
+			return;
+		}
+		if (this->_exists(k)) {
+			this->count_delta--;
+		}
+		this->batch_state[k] = false;
+		this->filtered.Delete(key);
+	}
+
+private:
+	bool _exists(const string& k) {
+		map<string, bool>::const_iterator it = this->batch_state.find(k);
+		if (it != this->batch_state.end()) {
+			return it->second;
+		}
+		string tmp;
+		return this->db->Get(*this->read_options, k, &tmp).ok();
+	}
+};
+}	// anonymous namespace
+
+int storage_rocksdb::_apply_batch_filtered(const rocksdb::WriteBatch& batch, const string* lsn_value) {
+	// Applied exclusively: replication batches touch arbitrary keys, so
+	// they must not interleave with slot-locked writers (and the
+	// record-count delta computed below must match the state the batch
+	// is applied against).
+	pthread_rwlock_wrlock(&this->_mutex_wholelock);
+
+	replication_batch_filter filter(this->_db, &this->_read_options);
+	rocksdb::Status status = const_cast<rocksdb::WriteBatch&>(batch).Iterate(&filter);
 	if (!status.ok()) {
-		log_err("WriteBatch apply failed: %s", status.ToString().c_str());
+		pthread_rwlock_unlock(&this->_mutex_wholelock);
+		log_err("failed to iterate replication batch: %s", status.ToString().c_str());
 		return -1;
 	}
+
+	if (lsn_value) {
+		// Atomic LSN tracking: the data and the last-LSN marker commit
+		// in a single Write(), so a crash between "data applied" and
+		// "LSN marker updated" is impossible — the destination is
+		// always crash-consistent with respect to its recorded
+		// replication position. See ROCKSDB_REPLICATION.md (S5).
+		rocksdb::Status put_status = filter.filtered.Put(kReplLastLsnKey, *lsn_value);
+		if (!put_status.ok()) {
+			pthread_rwlock_unlock(&this->_mutex_wholelock);
+			log_err("failed to append LSN marker to batch: %s", put_status.ToString().c_str());
+			return -1;
+		}
+	}
+
+	status = this->_db->Write(this->_write_options, &filter.filtered);
+	if (!status.ok()) {
+		pthread_rwlock_unlock(&this->_mutex_wholelock);
+		log_err("replication batch Write() failed: %s", status.ToString().c_str());
+		return -1;
+	}
+	this->_record_count.add((uint64_t)filter.count_delta);
+
+	pthread_rwlock_unlock(&this->_mutex_wholelock);
 	return 0;
 }
 
-int storage_rocksdb::apply_batch_with_lsn(const rocksdb::WriteBatch& batch, uint64_t master_lsn) {
-	// Atomic LSN tracking: copy the incoming batch, append the
-	// last-LSN marker update, and commit both in a single RocksDB
-	// Write(). RocksDB guarantees that either the whole merged batch
-	// is applied or none of it is, so a crash between "data applied"
-	// and "LSN marker updated" is impossible — the slave is always
-	// crash-consistent with respect to its recorded replication
-	// position. See ROCKSDB_REPLICATION.md (S5) for rationale.
-	rocksdb::WriteBatch merged(batch.Data());
-	string lsn_value = boost::lexical_cast<string>(master_lsn);
-	rocksdb::Status put_status = merged.Put(kReplLastLsnKey, lsn_value);
-	if (!put_status.ok()) {
-		log_err("failed to append LSN marker to batch: %s", put_status.ToString().c_str());
-		return -1;
-	}
+int storage_rocksdb::apply_batch(const rocksdb::WriteBatch& batch) {
+	return this->_apply_batch_filtered(batch, NULL);
+}
 
-	rocksdb::Status status = this->_db->Write(this->_write_options, &merged);
-	if (!status.ok()) {
-		log_err("apply_batch_with_lsn Write() failed (lsn=%llu): %s",
-			(unsigned long long)master_lsn, status.ToString().c_str());
-		return -1;
+int storage_rocksdb::apply_batch_with_lsn(const rocksdb::WriteBatch& batch, uint64_t master_lsn) {
+	string lsn_value = boost::lexical_cast<string>(master_lsn);
+	int r = this->_apply_batch_filtered(batch, &lsn_value);
+	if (r == 0) {
+		log_debug("apply_batch_with_lsn success (lsn=%llu, batch_bytes=%zu)",
+			(unsigned long long)master_lsn, batch.Data().size());
+	} else {
+		log_err("apply_batch_with_lsn failed (lsn=%llu)", (unsigned long long)master_lsn);
 	}
-	log_debug("apply_batch_with_lsn success (lsn=%llu, batch_bytes=%zu)",
-		(unsigned long long)master_lsn, batch.Data().size());
-	return 0;
+	return r;
 }
 
 uint64_t storage_rocksdb::get_repl_last_lsn() {
@@ -954,10 +1253,32 @@ uint64_t storage_rocksdb::get_repl_last_lsn() {
 
 	rocksdb::Status status = this->_db->Get(this->_read_options, kReplLastLsnKey, &value);
 	if (status.ok()) {
-		return boost::lexical_cast<uint64_t>(value);
+		try {
+			return boost::lexical_cast<uint64_t>(value);
+		} catch (boost::bad_lexical_cast e) {
+			log_err("corrupt repl_last_lsn marker [%s] -> treating as no previous sync", value.c_str());
+			return 0;
+		}
 	}
 
 	return 0;  // No previous sync
+}
+
+int storage_rocksdb::set_repl_last_lsn(uint64_t lsn) {
+	// Persist the replication position marker durably: it is written
+	// once per seed (after a full dump), not on the hot path.
+	rocksdb::WriteOptions wo;
+	wo.sync = true;
+	wo.disableWAL = false;
+	string lsn_value = boost::lexical_cast<string>(lsn);
+	rocksdb::Status status = this->_db->Put(wo, kReplLastLsnKey, lsn_value);
+	if (!status.ok()) {
+		log_err("failed to persist repl_last_lsn=%llu: %s",
+			(unsigned long long)lsn, status.ToString().c_str());
+		return -1;
+	}
+	log_notice("repl_last_lsn set to %llu", (unsigned long long)lsn);
+	return 0;
 }
 
 // Returns the current consecutive-failure streak. Held under a

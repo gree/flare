@@ -55,7 +55,7 @@ if ENABLE_KYOTOCABINET
 noinst_LTLIBRARIES += test_storage_kch.la
 endif
 if ENABLE_ROCKSDB
-noinst_LTLIBRARIES += test_storage_rocksdb.la
+noinst_LTLIBRARIES += test_storage_rocksdb.la test_op_repl_sync_wal.la
 endif
 if ENABLE_ZOOKEEPER
 noinst_LTLIBRARIES += test_zookeeper_coordinator.la test_zookeeper_lock.la
@@ -94,6 +94,7 @@ test_storage_kch_la_SOURCES	= test_storage_kch.cc common_storage_tests.cc
 endif
 if ENABLE_ROCKSDB
 test_storage_rocksdb_la_SOURCES	= test_storage_rocksdb.cc common_storage_tests.cc
+test_op_repl_sync_wal_la_SOURCES	= test_op_repl_sync_wal.cc connection_iostream.cc
 endif
 test_key_resolver_modular_la_SOURCES	= test_key_resolver_modular.cc
 test_op_la_SOURCES	= test_op.cc connection_iostream.cc

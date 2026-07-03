@@ -709,6 +709,173 @@ void test_phaseA_apply_batch_with_lsn_atomic_success() {
 	drop_rocksdb(slave_s,  wal_slave_dir);
 }
 
+// ---------------------------------------------------------------------------
+// Regression tests for the review fixes (see ROCKSDB_REVIEW.md)
+// ---------------------------------------------------------------------------
+
+// Data, the replication position marker, and the lineage token survive
+// close() + open() on the same directory.
+void test_reopen_persists_data_and_repl_last_lsn() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	cut_assert_equal_int(0, storage_set_string(s, "persist_a", "alpha"));
+	cut_assert_equal_int(0, storage_set_string(s, "persist_b", "bravo"));
+	cut_assert_equal_int(0, s->set_repl_last_lsn(4242));
+	string master_id = s->get_master_id();
+	drop_rocksdb_noremove(s);
+
+	s = make_rocksdb(wal_master_dir);
+	string out;
+	cut_assert_equal_int(0, storage_get_string(s, "persist_a", out));
+	cut_assert_equal_string("alpha", out.c_str());
+	cut_assert_equal_int(0, storage_get_string(s, "persist_b", out));
+	cut_assert_equal_string("bravo", out.c_str());
+	cut_assert_equal_int(4242, static_cast<int>(s->get_repl_last_lsn()));
+	cut_assert_equal_string(master_id.c_str(), s->get_master_id().c_str());
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// incr clamps to UINT64_MAX on overflow (matching storage_tcb) instead
+// of wrapping around to a small value.
+void test_incr_overflow_clamps_to_uint64_max() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	const char max_str[] = "18446744073709551615";
+	cut_assert_equal_int(0, storage_set_string(s, "big", max_str));
+
+	storage::entry e;
+	e.key = "big";
+	storage::result r;
+	cut_assert_equal_int(0, s->incr(e, 1, r, true, 0));
+	cut_assert_equal_int(storage::result_stored, r);
+
+	string out;
+	cut_assert_equal_int(0, storage_get_string(s, "big", out));
+	cut_assert_equal_string(max_str, out.c_str());
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// count() is maintained exactly across set/overwrite/remove/truncate and
+// survives a clean close + reopen without a rescan.
+void test_count_maintained_and_persisted() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	cut_assert_equal_int(0, static_cast<int>(s->count()));
+	cut_assert_equal_int(0, storage_set_string(s, "c1", "x"));
+	cut_assert_equal_int(0, storage_set_string(s, "c2", "y"));
+	cut_assert_equal_int(0, storage_set_string(s, "c2", "z"));	// overwrite: no change
+	cut_assert_equal_int(2, static_cast<int>(s->count()));
+	cut_assert_equal_int(0, storage_remove_key(s, "c1"));
+	cut_assert_equal_int(1, static_cast<int>(s->count()));
+	drop_rocksdb_noremove(s);
+
+	s = make_rocksdb(wal_master_dir);
+	cut_assert_equal_int(1, static_cast<int>(s->count()));
+	cut_assert_equal_int(0, s->truncate());
+	cut_assert_equal_int(0, static_cast<int>(s->count()));
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// get_updates_since() honors the byte budget: partial fetches with
+// has_more set, and repeated fetches from the last applied sequence
+// drain the whole backlog without stalling.
+void test_wal_get_updates_since_byte_budget() {
+	storage_rocksdb* m = make_rocksdb(wal_master_dir);
+	for (int i = 0; i < 20; i++) {
+		char key[16];
+		snprintf(key, sizeof(key), "k%02d", i);
+		cut_assert_equal_int(0, storage_set_string(m, key, string(100, 'v')));
+	}
+
+	uint64_t from = 0;
+	int fetches = 0;
+	bool has_more = true;
+	while (has_more) {
+		has_more = false;
+		vector<pair<uint64_t, rocksdb::WriteBatch> > updates;
+		cut_assert_equal_int(0, m->get_updates_since(from, updates, 256, &has_more));
+		uint64_t prev_from = from;
+		for (size_t i = 0; i < updates.size(); i++) {
+			int op_count = updates[i].second.Count();
+			uint64_t end_seq = updates[i].first + (op_count > 0 ? op_count - 1 : 0);
+			if (end_seq > from) {
+				from = end_seq;
+			}
+		}
+		// every fetch must make progress — a stalled fetch would spin
+		// the streaming loop forever
+		if (has_more) {
+			cut_assert_operator(from, >, prev_from);
+		}
+		fetches++;
+		cut_assert_operator(fetches, <, 1000);
+	}
+	cut_assert_operator(fetches, >, 1);	// the budget actually forced chunking
+	cut_assert_equal_int(static_cast<int>(m->get_latest_sequence_number()), static_cast<int>(from));
+	drop_rocksdb(m, wal_master_dir);
+}
+
+// get_updates_since() detects a gap between the requested position and
+// the first available batch (purged WAL) instead of silently skipping
+// the missing range. A gap is simulated by requesting a position below
+// the first batch... which cannot happen with a live WAL, so instead
+// verify the two reachable conditions: contiguous fetch succeeds, and
+// a request beyond the latest sequence reports "up to date", never a
+// bogus batch range.
+void test_wal_get_updates_since_boundaries() {
+	storage_rocksdb* m = make_rocksdb(wal_master_dir);
+	cut_assert_equal_int(0, storage_set_string(m, "b1", "x"));
+	uint64_t latest = m->get_latest_sequence_number();
+
+	// contiguous: from 0 must start at sequence 1
+	vector<pair<uint64_t, rocksdb::WriteBatch> > updates;
+	cut_assert_equal_int(0, m->get_updates_since(0, updates));
+	cut_assert_true(!updates.empty());
+	cut_assert_equal_int(1, static_cast<int>(updates.front().first));
+
+	// beyond latest: up to date, not an error and not a purge
+	updates.clear();
+	cut_assert_equal_int(0, m->get_updates_since(latest + 10, updates));
+	cut_assert_true(updates.empty());
+
+	drop_rocksdb(m, wal_master_dir);
+}
+
+// Reserved metadata keys inside a replicated batch are filtered out on
+// apply: a peer's master_id / repl_last_lsn markers can never overwrite
+// ours (only the LSN we explicitly record with the batch counts).
+void test_apply_batch_filters_reserved_keys() {
+	storage_rocksdb* s = make_rocksdb(wal_slave_dir);
+	string own_id = s->get_master_id();
+
+	rocksdb::WriteBatch batch;
+	batch.Put(storage_rocksdb::kReplMasterIdKey, "evil-lineage-takeover");
+	batch.Put(storage_rocksdb::kReplLastLsnKey, "99999");
+	cut_assert_equal_int(0, s->apply_batch_with_lsn(batch, 7));
+
+	cut_assert_equal_string(own_id.c_str(), s->get_master_id().c_str());
+	cut_assert_equal_int(7, static_cast<int>(s->get_repl_last_lsn()));
+	cut_assert_equal_int(0, static_cast<int>(s->count()));
+
+	drop_rocksdb(s, wal_slave_dir);
+}
+
+// Applying replicated batches keeps the record count exact on the
+// destination, including deletes.
+void test_apply_batch_maintains_count() {
+	storage_rocksdb* master = make_rocksdb(wal_master_dir);
+	storage_rocksdb* slave  = make_rocksdb(wal_slave_dir);
+
+	cut_assert_equal_int(0, storage_set_string(master, "n1", "1"));
+	cut_assert_equal_int(0, storage_set_string(master, "n2", "2"));
+	cut_assert_equal_int(0, storage_set_string(master, "n3", "3"));
+	cut_assert_equal_int(0, storage_remove_key(master, "n2"));
+	cut_assert_equal_int(2, static_cast<int>(master->count()));
+
+	cut_assert_operator(replicate_from(master, slave, 0), >, 0);
+	cut_assert_equal_int(2, static_cast<int>(slave->count()));
+
+	drop_rocksdb(master, wal_master_dir);
+	drop_rocksdb(slave,  wal_slave_dir);
+}
+
 	void teardown()
 	{
 		delete rocksdb_tester;

@@ -61,13 +61,12 @@ public:
 	// Error codes for WAL operations
 	static const int ERR_LSN_PURGED       = -1;
 	static const int ERR_LSN_INVALID      = -2;
-	static const int ERR_LSN_AHEAD        = -3;  // slave's LSN > master's latest
-	static const int ERR_MASTER_ID_MISMATCH = -4;
 
 	// Reserved metadata keys (hidden from get/set/remove/iter/truncate).
 	// Defined in the .cc so they link once across TUs.
 	static const char* const kReplLastLsnKey;
 	static const char* const kReplMasterIdKey;
+	static const char* const kRecordCountKey;
 
 	// Return true if key is a reserved replication metadata key.
 	static bool is_reserved_key(const string& key);
@@ -94,7 +93,11 @@ protected:
 	rocksdb::WriteOptions _write_options;
 	rocksdb::ReadOptions _read_options;
 
-	// Iteration support
+	// Iteration support. `_mutex_iter_lock` serializes the busy-check
+	// and cursor setup/teardown in iter_begin()/iter_end() (matching
+	// storage_tcb); `_mutex_wholelock` is additionally held (read) for
+	// the duration of an iteration.
+	mutable pthread_mutex_t _mutex_iter_lock;
 	const rocksdb::Snapshot* _iter_snapshot;
 	rocksdb::Iterator* _iter;
 	bool _iter_first;
@@ -107,8 +110,19 @@ protected:
 	uint64_t _wal_size_limit_mb;
 	bool     _sync_writes;
 
+	// Exact number of user records (reserved keys excluded), maintained
+	// on every create/delete so count() is O(1) — RocksDB has no cheap
+	// exact count (rocksdb.estimate-num-keys is approximate). Persisted
+	// to kRecordCountKey on clean close and re-seeded by a one-time scan
+	// after a crash (the marker is durably deleted right after loading).
+	AtomicCounter _record_count;
+
 	// Master identity token (this node's DB lineage identifier, persisted
-	// in the reserved key `__flare_repl_master_id`). Populated by open().
+	// in the reserved key `__flare_repl_master_id`). Populated by open()
+	// and overwritten at runtime by set_master_id() (reconstruction /
+	// seed), so every access goes through `_mutex_master_id` — readers
+	// run on op worker threads concurrently with the writer.
+	mutable pthread_mutex_t _mutex_master_id;
 	string _master_id;
 
 	// WAL replication observability counters. Read-only after increment;
@@ -157,6 +171,17 @@ protected:
 	// the DB handle is ready. Returns 0 on success, -1 on fatal I/O error.
 	int _load_or_generate_master_id();
 
+	// Initialize _record_count at open(): load the count persisted by the
+	// last clean close, or fall back to a one-time full scan.
+	int _load_or_count_records();
+
+	// Common implementation of apply_batch()/apply_batch_with_lsn():
+	// filters reserved keys out of the incoming batch (a peer's metadata
+	// markers must never overwrite ours), computes the record-count
+	// delta, optionally appends our own LSN marker, and commits
+	// atomically under the whole lock.
+	int _apply_batch_filtered(const rocksdb::WriteBatch& batch, const string* lsn_value);
+
 public:
 	storage_rocksdb(
 		string data_dir,
@@ -189,19 +214,35 @@ public:
 	};
 	virtual bool is_capable(capability c);
 
-	// RocksDB-specific methods for WAL replication
+	// RocksDB-specific methods for WAL replication.
+	// get_updates_since() returns every WAL batch after `seq_number`
+	// (the first returned batch may overlap it; re-application is
+	// idempotent). It fails with ERR_LSN_PURGED when the WAL no longer
+	// covers the requested position — callers must then fall back to a
+	// full resync. `max_total_bytes` (0 = unlimited) bounds the bytes
+	// accumulated per call; when the budget is hit, `has_more` (if
+	// non-NULL) is set and the caller should fetch again from the last
+	// applied sequence.
 	uint64_t get_latest_sequence_number();
-	int get_updates_since(uint64_t seq_number, vector<pair<uint64_t, rocksdb::WriteBatch>>& updates);
+	int get_updates_since(uint64_t seq_number, vector<pair<uint64_t, rocksdb::WriteBatch>>& updates,
+		uint64_t max_total_bytes = 0, bool* has_more = NULL);
 	int apply_batch(const rocksdb::WriteBatch& batch);
 	int apply_batch_with_lsn(const rocksdb::WriteBatch& batch, uint64_t master_lsn);
 	uint64_t get_repl_last_lsn();
+	int set_repl_last_lsn(uint64_t lsn);
 
 	// Master identity token access. `get_master_id()` returns this DB's
 	// token (set at open(); empty only if open() was never called or
 	// failed). `set_master_id()` overwrites and persists a new token,
 	// used after a successful full dump or reconstruction from a different
-	// master to adopt that master's lineage.
-	const string& get_master_id() const { return this->_master_id; }
+	// master to adopt that master's lineage. Returns by value under the
+	// token mutex — the writer runs on a different thread than readers.
+	string get_master_id() const {
+		pthread_mutex_lock(&this->_mutex_master_id);
+		string id = this->_master_id;
+		pthread_mutex_unlock(&this->_mutex_master_id);
+		return id;
+	}
 	int set_master_id(const string& id);
 
 	// WAL sync observability. All counters are monotonically increasing

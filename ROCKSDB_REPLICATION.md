@@ -42,76 +42,92 @@ flowchart TD
         BothRDB -->|No| FallThrough
     end
 
-    subgraph P2["Phase 2: WAL Incremental Sync"]
-        WALReq["Send: repl_sync_wal LSN master_id"]
-        Validate{"Server validates"}
-        WALReq --> Validate
-        Validate -->|"master_id mismatch"| ErrMismatch["SERVER_ERROR\nmaster_id_mismatch"]
-        Validate -->|"slave LSN > master"| ErrAhead["SERVER_ERROR\nlsn_ahead"]
-        Validate -->|"WAL purged"| ErrPurged["SERVER_ERROR\nlsn_purged"]
-        Validate -->|"batch > ceiling"| ErrBatch["SERVER_ERROR\nbatch_too_large"]
-        Validate -->|OK| Stream["Stream LSN+BATCH pairs"]
-        Stream --> Apply["apply_batch_with_lsn\n(atomic: data+LSN marker)"]
-        Apply -->|Success| Done["WAL sync complete\nnotify_resync_result true"]
-        Apply -->|Failure| ErrApply["Apply error"]
-        ErrMismatch --> Fallback["Increment counter\nFall through to Phase 3"]
-        ErrAhead --> Fallback
-        ErrPurged --> Fallback
-        ErrBatch --> Fallback
-        ErrApply --> Fallback
+    subgraph P2["Phase 2: WAL Incremental Push (only if dest follows our lineage)"]
+        LineageEq{"dest master_id ==\nlocal master_id?"}
+        LineageEq -->|No| FallSeed["Skip to Phase 3\n(dump, then seed)"]
+        LineageEq -->|Yes| WALReq["Send: repl_sync_wal begin master_id"]
+        WALReq --> DestPos{"Destination replies"}
+        DestPos -->|"LSN n (its position)"| SrcCheck{"Source checks\nits own WAL"}
+        DestPos -->|"SERVER_ERROR\nmaster_id_mismatch"| Fallback
+        SrcCheck -->|"dest LSN > local latest"| AbortAhead["ABORT lsn_ahead"]
+        SrcCheck -->|"WAL no longer covers n\n(continuity check)"| AbortPurged["ABORT lsn_purged"]
+        SrcCheck -->|OK| Stream["Stream LSN+BATCH frames\n(chunked fetch, throttled)"]
+        Stream --> DestApply["dest: apply_batch_with_lsn\n(atomic: data+LSN marker,\nreserved keys filtered)"]
+        DestApply -->|"OK last_lsn"| Done["WAL push complete\nnotify_resync_result true"]
+        DestApply -->|"SERVER_ERROR apply_error"| Fallback
+        AbortAhead --> Fallback["Increment counter\nFall through to Phase 3\n(reconnect if desynced)"]
+        AbortPurged --> Fallback
     end
 
     subgraph P3["Phase 3: Full Dump Fallback"]
+        SeedLsn["Capture seed LSN\n(local latest sequence,\nbefore the iteration snapshot)"]
         Iter["iter_begin → iter_next loop"]
-        SetOp["op_set each key to peer"]
+        SetOp["op_set each key to dest"]
+        SeedLsn --> Iter
         Iter --> SetOp
-        SetOp --> ResyncResult{"Completed\nsuccessfully?"}
-        ResyncResult -->|Yes| ResyncOK["notify_resync_result true\nstreak = 0"]
-        ResyncResult -->|No| ResyncFail["notify_resync_result false\nstreak++"]
+        SetOp --> ResyncResult{"Outcome?"}
+        ResyncResult -->|"Completed"| Seed["Send: repl_sync_wal seed\nmaster_id seed_lsn\n(dest adopts lineage+position)"]
+        Seed --> ResyncOK["notify_resync_result true\nstreak = 0"]
+        ResyncResult -->|"op_set / iterator error"| ResyncFail["notify_resync_result false\nstreak++"]
+        ResyncResult -->|"Shutdown request"| Interrupted["Not counted\n(neither success nor failure)"]
         ResyncFail --> Demote{"streak ≥\nthreshold?"}
         Demote -->|Yes| Down["request_down_node self\n(data preserved)"]
         Demote -->|No| EndFail["Return failure"]
     end
 
-    GoP2 --> WALReq
-    FallThrough --> Iter
-    Fallback --> Iter
+    GoP2 --> LineageEq
+    FallThrough --> SeedLsn
+    FallSeed --> SeedLsn
+    Fallback --> SeedLsn
     Done --> EndOK["Return 0"]
     ResyncOK --> EndOK
 ```
 
 ### WAL Sync Protocol Sequence
 
+The source (the node that HAS the data — cluster replication starts the
+handler only on a master in mode=duplicate) pushes its WAL delta to the
+destination. The destination only reports its recorded position and
+applies what it receives.
+
 ```mermaid
 sequenceDiagram
-    participant S as Source (handler_dump_replication)
-    participant P as Peer (op_repl_sync_wal server)
+    participant S as Source (handler_dump_replication, protocol client)
+    participant D as Destination (op_repl_sync_wal server)
 
-    S->>P: meta features
-    P-->>S: OK rocksdb_wal=1 master_id=abc-123
+    S->>D: meta features
+    D-->>S: OK rocksdb_wal=1 master_id=abc-123
+    Note over S: proceed only if abc-123 ==<br/>local master_id (dest was<br/>seeded by us before)
 
-    S->>P: repl_sync_wal 42000 abc-123
-    Note over P: Validate: master_id match?<br/>LSN ≤ latest? batch sizes OK?
+    S->>D: repl_sync_wal begin abc-123
+    Note over D: lineage check:<br/>local master_id == abc-123?
 
-    alt Validation passes
-        loop For each WAL batch
-            P-->>S: LSN 42001
-            P-->>S: BATCH 1234
-            P-->>S: [binary batch data]
-            Note over P: throttle(bwlimit, interval)
+    alt Lineage matches
+        D-->>S: LSN 42000
+        Note over S: continuity check:<br/>WAL still covers 42000?<br/>dest not ahead of us?
+        loop For each WAL batch after 42000 (chunked fetch)
+            S->>D: LSN 42001
+            S->>D: BATCH 1234
+            S->>D: [binary batch data]
+            Note over S: throttle(bwlimit, interval)<br/>ceiling: wal_max_batch_bytes
+            Note over D: apply_batch_with_lsn<br/>(atomic: data + LSN marker,<br/>reserved keys filtered)
         end
-        P-->>S: END
-        Note over S: apply_batch_with_lsn<br/>(atomic: data + LSN marker)
-    else master_id mismatch
-        P-->>S: SERVER_ERROR master_id_mismatch def-456
-        Note over S: Fall back to full dump<br/>Adopt def-456 after dump
-    else LSN ahead of master
-        P-->>S: SERVER_ERROR lsn_ahead 41000
-        Note over S: Fall back to full dump
-    else LSN purged from WAL
-        P-->>S: SERVER_ERROR lsn_purged
-        Note over S: Fall back to full dump
+        S->>D: END
+        D-->>S: OK 42517
+    else Source cannot serve the delta
+        D-->>S: LSN 42000
+        S->>D: ABORT lsn_purged
+        D-->>S: OK aborted
+        Note over S: Fall back to full dump + seed
+    else Lineage mismatch
+        D-->>S: SERVER_ERROR master_id_mismatch def-456
+        Note over S: Fall back to full dump,<br/>then seed dest with abc-123
     end
+
+    Note over S,D: after a successful full dump:
+    S->>D: repl_sync_wal seed abc-123 42600
+    D-->>S: OK
+    Note over D: adopts lineage abc-123,<br/>records position 42600
 ```
 
 ## Protocol Details
@@ -142,52 +158,83 @@ ERROR\r\n
 
 **Implementation**: `op_meta.cc`
 
-### WAL Streaming: `repl_sync_wal`
+### WAL Push Streaming: `repl_sync_wal begin`
 
-**Purpose**: Stream WAL updates since a given LSN, guarded by a
-master-identity token to prevent cross-lineage corruption.
+**Purpose**: Push the source's WAL delta to the destination, guarded by
+a master-identity token to prevent cross-lineage corruption. The
+protocol client is the SOURCE (the node with the data); the protocol
+server is the DESTINATION.
 
-**Client Request**:
+**Source Request**:
 ```
-repl_sync_wal <lsn> <master_id_or_dash>\r\n
-```
-
-`<master_id_or_dash>` is the UUID the slave remembers from its last
-sync, or `-` (dash) if the slave has no prior lineage.
-
-Example:
-```
-repl_sync_wal 12345 a1b2c3d4-e5f6-7890-abcd-ef1234567890\r\n
-repl_sync_wal 0 -\r\n
+repl_sync_wal begin <master_id>\r\n
 ```
 
-**Server Response (Success)**:
+`<master_id>` is the source's lineage token (or `-` if it has none,
+which the destination treats as a lineage mismatch).
+
+**Destination Response (lineage matches)** — its recorded position in
+the source's WAL:
 ```
-LSN <seq1>\r\n
+LSN <last_lsn>\r\n
+```
+
+**Source Stream** — every WAL batch after `<last_lsn>`; the `LSN`
+marker carries the sequence of the batch's LAST operation, i.e. the
+position the destination records after applying it:
+```
+LSN <end_seq1>\r\n
 BATCH <size1>\r\n
-<batch_data_1>
-\r\n
-LSN <seq2>\r\n
+<batch_data_1>\r\n
+LSN <end_seq2>\r\n
 BATCH <size2>\r\n
-<batch_data_2>
-\r\n
+<batch_data_2>\r\n
 ...
 END\r\n
 ```
 
-**Server Response (Error — classified)**:
+When the source cannot serve the delta it terminates the stream with
+`ABORT <reason>\r\n` (reasons: `lsn_purged`, `lsn_ahead`,
+`batch_too_large`, `wal_read_error`, `protocol_error`) instead of
+`END`; the destination acknowledges with `OK aborted\r\n` so both sides
+stay line-synchronized and the connection can be reused for the
+full-dump fallback.
+
+**Destination Final Response**:
 ```
-SERVER_ERROR lsn_purged\r\n
-SERVER_ERROR lsn_ahead <server_latest_lsn>\r\n
-SERVER_ERROR master_id_mismatch <server_master_id>\r\n
-SERVER_ERROR batch_too_large <batch_size>\r\n
-SERVER_ERROR wal_read_error\r\n
-SERVER_ERROR not_supported\r\n
+OK <last_applied_lsn>\r\n
+SERVER_ERROR apply_error\r\n
+SERVER_ERROR batch_too_large\r\n
 ```
 
-All error responses cause the caller to fall back to the non-destructive
-full-dump path. See the Failure Modes section below for the rationale
-behind each classification.
+**Destination Refusals (single-line, before any streaming)**:
+```
+SERVER_ERROR master_id_mismatch <dest_master_id>\r\n
+SERVER_ERROR not_supported\r\n
+SERVER_ERROR not_compiled\r\n
+```
+
+All failures cause the source to fall back to the non-destructive
+full-dump path. Reserved metadata keys travelling inside replicated
+batches (the source's own `__flare_repl_*` markers) are filtered out on
+apply. On the destination, a single failed batch stops application (no
+gaps are ever applied); the remainder of the stream is drained and
+discarded to keep the connection framed.
+
+### Lineage Seeding: `repl_sync_wal seed`
+
+**Purpose**: After a successful full dump, the source records its
+lineage token and the WAL position the dump covered on the
+destination, enabling incremental syncs from then on. The seed LSN is
+captured BEFORE the dump's iteration snapshot, so the overlap between
+the dump and the next WAL push is re-applied idempotently rather than
+skipped.
+
+**Source Request / Destination Response**:
+```
+repl_sync_wal seed <master_id> <lsn>\r\n
+OK\r\n            (or SERVER_ERROR invalid_seed / seed_failed)
+```
 
 **Implementation**: `op_repl_sync_wal.cc`
 
@@ -259,54 +306,64 @@ If slave's LSN is older than retained WAL, server returns `lsn_purged` error and
 
 ## Code Flow (Pseudocode)
 
-### Server Side (handles `repl_sync_wal <lsn> <master_id>`)
+### Destination Side (handles `repl_sync_wal begin|seed`)
 
 ```
 function _run_server():
-    if client_master_id != "" and client_master_id != my_master_id:
+    if subcommand == "seed":
+        set_master_id(client_master_id)       # adopt the source's lineage
+        set_repl_last_lsn(seed_lsn)           # record the dump's coverage
+        return OK
+
+    # subcommand == "begin"
+    if client_master_id != my_master_id:
         return SERVER_ERROR master_id_mismatch <my_master_id>
-    if lsn > my_latest_sequence_number:
-        return SERVER_ERROR lsn_ahead <latest>
-    updates = get_updates_since(lsn)
-    if updates == LSN_PURGED:
-        return SERVER_ERROR lsn_purged
-    for each (seq, batch) in updates:
-        if max_batch_bytes > 0 and batch.size > max_batch_bytes:
-            return SERVER_ERROR batch_too_large <size>
-        write "LSN <seq>"
-        write "BATCH <batch.size>"
-        write batch.data
-        throttle(bwlimit, interval)
-    return END
+    write "LSN <my_repl_last_lsn>"            # report our position
+    for each frame from the source:
+        if frame == END:   break
+        if frame == ABORT: return OK aborted
+        (seq, batch) = read LSN/BATCH/data    # guarded parse, exact-size read
+        if batch.size > ceiling:              # own wal_max_batch_bytes + hard limit
+            drain and record batch_too_large  # keep the stream framed
+        else if no failure so far:
+            apply_batch_with_lsn(batch, seq)  # atomic, reserved keys filtered
+    return OK <last_applied_lsn> or SERVER_ERROR <reason>
 ```
 
-### Client Side (`handler_dump_replication::run()`)
+### Source Side (`handler_dump_replication::run()`)
 
 ```
 function run():
     # Phase 1: Capability negotiation
-    (wal_ok, peer_master_id) = meta_features(connection)
-    if local_storage is RocksDB and wal_ok:
-        # Phase 2: WAL incremental sync
-        lsn = local_storage.get_repl_last_lsn()
-        mid = local_storage.get_master_id()
-        result = repl_sync_wal(lsn, mid)
+    (wal_ok, dest_master_id) = meta_features(connection)
+
+    if local_storage is RocksDB and wal_ok and dest_master_id == my_master_id:
+        # Phase 2: WAL incremental push
+        result = repl_sync_wal_begin(my_master_id)   # dest replies its LSN,
+                                                     # we stream our delta
         if result == success:
             notify_resync_result(true)
             return 0
-        # Classify and log the error
-        notify_resync_result(false)
         incr_wal_fallback_to_dump()
+        if connection desynchronized: reconnect
         # Fall through to Phase 3
 
     # Phase 3: Full dump (always works, non-destructive)
+    seed_lsn = my_latest_sequence_number    # BEFORE the iteration snapshot
     iter_begin()
     for each key in iter_next():
-        op_set(key, value) to peer
+        op_set(key, value) to dest          # failure -> dump_failed
     iter_end()
-    notify_resync_result(success_or_failure)
-    if should_self_demote():
-        request_down_node(self)
+    if shutdown_requested:
+        return 0                            # not counted either way
+    if dump_failed:
+        notify_resync_result(false)         # streak++, maybe self-demote
+        return -1
+
+    # Phase 4: seed the destination so the next resync is incremental
+    if wal_ok:
+        repl_sync_wal_seed(my_master_id, seed_lsn)
+    notify_resync_result(true)
     return 0
 ```
 
@@ -384,22 +441,24 @@ STAT rocksdb_wal_sync_interval 0
 
 ### Log Messages
 
-**Master side:**
+**Source side (streams the WAL):**
 ```
-[INFO]    streaming N WAL updates from LSN ...
-[NOTICE]  master_id mismatch (client=... server=...) -> slave must resync
-[WARNING] slave LSN ahead of master latest -> forcing resync
+[INFO]    attempting incremental WAL push (master_id=...)
+[INFO]    streamed N WAL batches (dest_lsn=... -> ...)
+[NOTICE]  WAL replication completed successfully (dest=...)
+[WARNING] WAL push refused (master_id_mismatch) -> full dump
+[WARNING] destination position ahead of local WAL (lsn_ahead) -> full dump to reset peer
+[NOTICE]  local WAL no longer covers destination position (lsn_purged) -> full dump to catch up
 [WARNING] WAL batch at LSN ... exceeds limit -> batch_too_large
+[ERR]     resync failure threshold reached -> self-demoting to state_down
 ```
 
-**Slave side:**
+**Destination side (applies the WAL):**
 ```
-[INFO]    attempting WAL replication from LSN ... (master_id=...)
-[NOTICE]  WAL replication completed successfully from LSN ...
-[WARNING] WAL sync refused (master_id_mismatch) -> full dump
-[WARNING] WAL sync refused (lsn_ahead) -> full dump
-[NOTICE]  WAL sync refused (lsn_purged) -> full dump
-[ERR]     resync failure threshold reached -> self-demoting to state_down
+[NOTICE]  master_id mismatch (source=... local=...) -> full dump required
+[NOTICE]  WAL sync applied up to LSN ... (lineage=...)
+[NOTICE]  adopted lineage (master_id=..., lsn=...)
+[NOTICE]  source aborted WAL stream: ...
 ```
 
 ## Failure Scenarios (Quick Reference)
@@ -700,18 +759,21 @@ identity token and the slave remembers which master it is following.
   for the lifetime of the on-disk database and is preserved across slave
   promotion (an ex-slave that becomes master keeps the token it already
   had, so the other slaves see a consistent lineage).
-- The slave sends its remembered token alongside the LSN in
-  `repl_sync_wal <lsn> <master_id>`.
-- The master compares against its own token:
-  - **match + `slave_lsn <= master_latest`**: stream incremental updates.
-  - **match + `slave_lsn > master_latest`**: the slave is ahead of the
-    master (rollback, restore from backup, split-brain remnant). Reply
-    `SERVER_ERROR lsn_ahead`. The slave falls back to full dump.
-  - **mismatch**: the slave was following a different lineage. Reply
-    `SERVER_ERROR master_id_mismatch <master_id>`. The slave falls back
-    to full dump and, on completion, adopts the new master's token.
-- After any successful WAL sync OR reconstruction, the slave overwrites
-  its own `__flare_repl_master_id` with the master's value.
+- The source sends its token in `repl_sync_wal begin <master_id>`; the
+  destination compares against the lineage it has recorded:
+  - **match + `dest_lsn <= source_latest`**: the destination reports its
+    position and the source streams the incremental updates.
+  - **match + `dest_lsn > source_latest`**: the destination is ahead of
+    the source's WAL (rollback, restore from backup, split-brain
+    remnant). The source aborts (`ABORT lsn_ahead`) and falls back to a
+    full dump that resets the destination's position via `seed`.
+  - **mismatch**: the destination follows a different lineage. It
+    replies `SERVER_ERROR master_id_mismatch <dest_master_id>`; the
+    source falls back to full dump and, on completion, seeds the
+    destination with its own token (`repl_sync_wal seed`).
+- After a successful full dump + seed OR a reconstruction, the receiving
+  node overwrites its own `__flare_repl_master_id` with the data
+  source's value.
 
 Because the failure reply path always lands on full dump — which is
 non-destructive — a mismatch **never** causes data loss; it only forces a
@@ -776,15 +838,18 @@ sequenceDiagram
 
     rect rgb(230, 255, 230)
         Note over S: Slave AZ recovers
-        S->>M: meta features
-        M-->>S: OK rocksdb_wal=1 master_id=abc
-        S->>M: repl_sync_wal <saved_lsn> abc
-        alt WAL still available
-            M-->>S: LSN + BATCH stream
+        M->>S: meta features
+        S-->>M: OK rocksdb_wal=1 master_id=abc
+        M->>S: repl_sync_wal begin abc
+        S-->>M: LSN <saved_lsn>
+        alt WAL still covers saved_lsn
+            M->>S: LSN + BATCH stream, END
+            S-->>M: OK <last_lsn>
             Note over S: WAL incremental sync
-        else WAL purged
-            M-->>S: SERVER_ERROR lsn_purged
-            Note over S: Falls back to full dump
+        else WAL purged (continuity check)
+            M->>S: ABORT lsn_purged
+            S-->>M: OK aborted
+            Note over M: Falls back to full dump,<br/>then seed
         end
         I->>I: monitor detects slave up
     end

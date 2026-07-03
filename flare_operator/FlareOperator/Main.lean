@@ -492,27 +492,60 @@ private def executeEffects (effects : List K8sReconciler.FlareEffect)
 -- FSM Driver Loop (Phase 4)
 -- ===========================================================================
 
-/-- Compare-and-set the shared cluster state.
+/-- Per-key merge of the FSM's computed state (`ucs`) onto the live ref
+    (`current`).
 
-    The reconcile loop reads `stateRef` into a snapshot, computes a new state
-    purely, then wants to write it back. Meanwhile the TCP server mutates the SAME
-    ref atomically via `modifyGet` on every `node add`/`node state`, bumping
-    `nodeMapVersion` (see `autoAssign_version`). A plain `stateRef.set` here would
-    clobber any registration that landed after our snapshot (lost update + version
-    rollback).
+    The FSM reconcile loop snapshots `stateRef`, computes `ucs` purely, then wants
+    to write it back. Meanwhile the TCP server mutates the SAME ref via `modifyGet`
+    on every `node add`/`node state ready` — in particular it completes the
+    Prepare→Active transition when a node finishes reconstruction. A blind
+    full-state replace of `ucs` would revert that Active back to Prepare (ucs was
+    built from a snapshot that predates the transition), so a partition-1 master
+    stuck in Prepare would never go Active and never serve data.
 
-    Instead we commit atomically only if `nodeMapVersion` still equals what we
-    observed (`expectedVersion`). If the TCP server advanced it in the meantime we
-    drop our computed state and let the next reconcile tick recompute from the
-    fresher snapshot — reconcile is idempotent, so convergence is preserved and no
-    registration is lost. Returns true if the write committed. -/
+    Merge rule (per key in `ucs`):
+    - role / partition / assignment: `ucs` wins — the FSM legitimately owns
+      failover demotions and proxy→master/slave assignments.
+    - state: `ucs` wins, EXCEPT when `current` has the SAME role, is `Active`, and
+      `ucs` is `Prepare`. That single case is the TCP-driven Prepare→Active
+      completion the FSM hasn't observed yet; keep `Active`.
+    The same-role guard makes preservation narrow enough to never resurrect a
+    corpse: a failover-demoted node appears in `ucs` with a CHANGED role
+    (Proxy/Down), so it can't match a `current` Active entry of the same role and
+    `ucs` correctly wins.
+
+    Keys present only in `current` (nodes registered after our snapshot) are
+    carried forward so no registration is lost — this subsumes the old
+    version-CAS's purpose. -/
+private def mergeClusterState (current ucs : FlareClusterState) : FlareClusterState :=
+  let mergedNodeMap : List (String × FlareNode) :=
+    ucs.nodeMap.map fun (key, ucsNode) =>
+      match current.nodeMap.lookup key with
+      | some curNode =>
+        if curNode.role == ucsNode.role
+           && curNode.state == FlareState.Active
+           && ucsNode.state == FlareState.Prepare then
+          (key, { ucsNode with state := FlareState.Active })
+        else
+          (key, ucsNode)
+      | none => (key, ucsNode)
+  let ucsKeys := ucs.nodeMap.map Prod.fst
+  let currentOnly := current.nodeMap.filter (fun kv => !ucsKeys.contains kv.1)
+  { ucs with
+      nodeMap := mergedNodeMap ++ currentOnly
+      nodeMapVersion := current.nodeMapVersion + 1 }
+
+/-- Commit the FSM's computed cluster state by MERGING it onto the live ref inside
+    a single atomic `modifyGet` (see `mergeClusterState`). The merge — not a version
+    compare-and-set — is what makes the write safe: a Prepare→Active transition the
+    TCP server completed after our snapshot is preserved rather than clobbered, and
+    a node registered after our snapshot is carried forward. Always commits.
+    `expectedVersion` is retained for call-site compatibility but no longer gates
+    the write. -/
 private def commitClusterState (stateRef : IO.Ref FlareClusterState)
-    (expectedVersion : Nat) (newState : FlareClusterState) : IO Bool := do
+    (_expectedVersion : Nat) (newState : FlareClusterState) : IO Bool := do
   stateRef.modifyGet fun current =>
-    if current.nodeMapVersion == expectedVersion then
-      (true, newState)
-    else
-      (false, current)
+    (true, mergeClusterState current newState)
 
 /-- FSM driver loop helper.
     The FSM measure proves termination, but Lean can't see it through IO. -/
@@ -563,12 +596,10 @@ private partial def runReconcileFSMLoop
       let (nextState, nextReqOpt, moreEffects) := K8sReconciler.flareReconcileCore resp newState cs2
       executeEffects moreEffects crName ns stateRef migrationRef
 
-      -- Update cluster state if FSM produced a new one (compare-and-set: drop our
-      -- result if the TCP server registered a node since we snapshotted cs2).
+      -- Update cluster state if FSM produced a new one (merge onto the live ref so
+      -- a TCP-driven Prepare→Active is preserved; see commitClusterState).
       if let some ucs := nextState.updatedClusterState then
-        let committed ← commitClusterState stateRef cs2Version ucs
-        if !committed then
-          IO.eprintln "[flare-operator] reconcile: state changed concurrently, deferring to next tick"
+        let _ ← commitClusterState stateRef cs2Version ucs
 
       -- CRITICAL FIX: Check if FSM issued another request.
       -- If yes, nextState is in a "waiting for response" state and must NOT be called
@@ -582,9 +613,7 @@ private partial def runReconcileFSMLoop
         let (finalState, _, finalEffects) := K8sReconciler.flareReconcileCore nextResp nextState cs3
         executeEffects finalEffects crName ns stateRef migrationRef
         if let some ucs := finalState.updatedClusterState then
-          let committed ← commitClusterState stateRef cs3Version ucs
-          if !committed then
-            IO.eprintln "[flare-operator] reconcile: state changed concurrently, deferring to next tick"
+          let _ ← commitClusterState stateRef cs3Version ucs
         runReconcileFSMLoop finalState stateRef migrationRef graceCyclesRef crName ns
       | none =>
         -- No new request - safe to recurse (nextState is in an "action" state)
@@ -592,9 +621,7 @@ private partial def runReconcileFSMLoop
     | none =>
       -- No request: update cluster state if FSM produced one and continue
       if let some ucs := newState.updatedClusterState then
-        let committed ← commitClusterState stateRef csVersion ucs
-        if !committed then
-          IO.eprintln "[flare-operator] reconcile: state changed concurrently, deferring to next tick"
+        let _ ← commitClusterState stateRef csVersion ucs
       runReconcileFSMLoop newState stateRef migrationRef graceCyclesRef crName ns
 
 /-- Run the FSM-driven reconcile loop.

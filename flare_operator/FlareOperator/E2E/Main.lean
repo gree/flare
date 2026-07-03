@@ -23,6 +23,7 @@ import FlareOperator.E2E.Tests.ResyncFailureSelfDemote
 import FlareOperator.E2E.Tests.OrphanScanPurge
 import FlareOperator.E2E.Tests.TerminatingPodHandling
 import FlareOperator.E2E.Tests.FailoverDuringReplication
+import FlareOperator.E2E.Tests.DataSurvivalFailover
 
 open FlareOperator.E2E
 
@@ -44,5 +45,6 @@ def main (args : List String) : IO UInt32 :=
     Tests.ResyncFailureSelfDemote.suite,
     Tests.OrphanScanPurge.suite,
     Tests.TerminatingPodHandling.suite,
-    Tests.FailoverDuringReplication.suite
+    Tests.FailoverDuringReplication.suite,
+    Tests.DataSurvivalFailover.suite
   ] args

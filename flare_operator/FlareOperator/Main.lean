@@ -192,11 +192,12 @@ private def ensureServiceRouting (state : FlareClusterState) (crName ns : String
 -- ConfigMap Observability
 -- ===========================================================================
 
-/-- Serialize the current node map to a string for ConfigMap storage. -/
+/-- Serialize the current node map to a string for ConfigMap storage.
+    Delegates to the shared `FlareClusterState.serializeNodeMap` (inverse of
+    `fromNodeMapData`) so the reconcile loop and the restart-reload path can never
+    drift into incompatible formats. -/
 private def serializeNodeMap (state : FlareClusterState) : String :=
-  let lines := state.nodeMap.map fun (key, node) =>
-    s!"{key} role={node.role.toNat} state={node.state.toNat} partition={node.partition}"
-  "\n".intercalate lines
+  FlareClusterState.serializeNodeMap state
 
 /-- Update the ConfigMap with the current cluster state for observability. -/
 private def updateObservabilityConfigMap (state : FlareClusterState) (crName ns : String)

@@ -254,6 +254,16 @@ def parseNodeMapLine (line : String) : Option (String × FlareNode) :=
     return (key, { serverName := host, serverPort := port, role := roleVal, state := stateVal, partition := partVal })
   | _ => none
 
+/-- Serialize a node map to the ConfigMap line format that `fromNodeMapData`
+    parses back: one `host:port role=R state=S partition=P` line per node.
+    This is the exact inverse of `parseNodeMapLine`; the FSM reconcile path MUST
+    use this (not `repr`) or the persisted `{cr}-node-map` ConfigMap can't be
+    reloaded on operator restart and the in-memory topology is lost. -/
+def serializeNodeMap (state : FlareClusterState) : String :=
+  let lines := state.nodeMap.map fun (key, node) =>
+    s!"{key} role={node.role.toNat} state={node.state.toNat} partition={node.partition}"
+  "\n".intercalate lines
+
 /-- Rebuild FlareClusterState from serialized ConfigMap data. -/
 def fromNodeMapData (data : String) : FlareClusterState :=
   let lines := data.splitOn "\n" |>.filter (· != "")

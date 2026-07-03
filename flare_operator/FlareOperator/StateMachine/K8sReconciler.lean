@@ -385,10 +385,14 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
       ({ s with reconcileStep := .Error "missing cluster state or CRD at AfterAssignRoles" }, none, [])
 
   | .AfterUpdateConfigMap =>
-    -- Emit ConfigMap update effect (Main.lean:325-327)
+    -- Emit ConfigMap update effect (Main.lean:325-327).
+    -- Use serializeNodeMap (the inverse of fromNodeMapData) so the persisted
+    -- {cr}-node-map ConfigMap is reloadable on operator restart. A previous
+    -- version wrote `repr state.nodeMap`, which fromNodeMapData cannot parse —
+    -- the operator would silently start with an empty topology after a restart.
     match s.updatedClusterState with
     | some state =>
-      let configData := toString (repr state.nodeMap)  -- Simplified; real impl uses JSON
+      let configData := FlareClusterState.serializeNodeMap state
       ({ s with reconcileStep := .AfterHandleReplication }, none,
        [.UpdateConfigMap configData])
     | none =>

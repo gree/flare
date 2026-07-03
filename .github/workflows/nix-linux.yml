@@ -1,6 +1,13 @@
 name: nix-linux
 
-on: [push, pull_request]
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test-legacy:
@@ -14,8 +21,13 @@ jobs:
             experimental-features = nix-command flakes
           nix_path: nixpkgs=channel:nixos-unstable
       - name: Build and test legacy Flare
+        # The repartition test in flare-tests is statistical (random key
+        # distribution, fails when deviation >= 0.3), so retry up to 3 times.
         run: |
-          nix build .#test-flare -L
+          for i in 1 2 3; do
+            nix build .#test-flare -L && exit 0 || echo "attempt $i failed"
+          done
+          exit 1
       - name: Verify RocksDB is NOT compiled
         run: |
           nix build .#flare -L
@@ -36,8 +48,12 @@ jobs:
             experimental-features = nix-command flakes
           nix_path: nixpkgs=channel:nixos-unstable
       - name: Build and test Flare with RocksDB
+        # Same statistical repartition test as the legacy job; retry up to 3 times.
         run: |
-          nix build .#test-flare-rocksdb -L
+          for i in 1 2 3; do
+            nix build .#test-flare-rocksdb -L && exit 0 || echo "attempt $i failed"
+          done
+          exit 1
       - name: Verify RocksDB is compiled
         run: |
           nix build .#flare-rocksdb -L

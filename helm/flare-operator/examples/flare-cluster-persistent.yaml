@@ -52,6 +52,15 @@ spec:
             - sh
             - -c
             - |
+              # Restore hook: if /data/flare/RESTORE names a checkpoint dir
+              # (created by the flared `backup` op), swap it in before start.
+              # See docs/BACKUP_RESTORE.md.
+              if [ -f /data/flare/RESTORE ]; then
+                SRC=$(cat /data/flare/RESTORE)
+                rm -rf /data/flare/flare.rocksdb
+                cp -a "$SRC" /data/flare/flare.rocksdb
+                rm -f /data/flare/RESTORE
+              fi
               mkdir -p /data/flare
               exec flared --data-dir /data/flare --server-port 12121 --index-server-name flare-operator.flare-system.svc.cluster.local --index-server-port 12120 --stderr
           ports:

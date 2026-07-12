@@ -25,6 +25,7 @@ import FlareOperator.E2E.Tests.TerminatingPodHandling
 import FlareOperator.E2E.Tests.FailoverDuringReplication
 import FlareOperator.E2E.Tests.DataSurvivalFailover
 import FlareOperator.E2E.Tests.PvcDataSurvival
+import FlareOperator.E2E.Tests.BackupRestore
 
 open FlareOperator.E2E
 
@@ -48,5 +49,6 @@ def main (args : List String) : IO UInt32 :=
     Tests.TerminatingPodHandling.suite,
     Tests.FailoverDuringReplication.suite,
     Tests.DataSurvivalFailover.suite,
-    Tests.PvcDataSurvival.suite
+    Tests.PvcDataSurvival.suite,
+    Tests.BackupRestore.suite
   ] args

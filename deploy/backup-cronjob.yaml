@@ -1,0 +1,114 @@
+# Periodic flare backup via the flared `backup` op (RocksDB checkpoint).
+#
+# Tier 1 (this CronJob): each flared pod creates a checkpoint of its own DB
+# on its own PVC under <data-dir>/backups/<timestamp>. Checkpoints are
+# hard-linked (near-instant, application-consistent) and survive logical
+# destruction (flush_all / bad deletes only touch the live DB). Retention is
+# enforced by flared itself (`rocksdb-backup-keep`, default 7).
+#
+# Tier 2 (optional, see the second CronJob below): stream the newest
+# checkpoint off-cluster to S3 so backups also survive PVC loss and
+# namespace deletion.
+#
+# Restore procedure: see docs/BACKUP_RESTORE.md.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: flare-backup
+  namespace: flare-system
+spec:
+  schedule: "0 3 * * *"          # daily 03:00 UTC
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 600
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: trigger
+              image: busybox:1.36
+              env:
+                - name: CLUSTER
+                  value: "default"           # FlareCluster name
+                - name: NAMESPACE
+                  value: "flare-system"
+                - name: NUM_PODS
+                  value: "4"                 # partitions * replicas
+                - name: FLARE_PORT
+                  value: "12121"
+              command:
+                - sh
+                - -c
+                - |
+                  set -e
+                  STAMP=$(date -u +%Y%m%d-%H%M%S)
+                  FAIL=0
+                  i=0
+                  while [ "$i" -lt "$NUM_PODS" ]; do
+                    HOST="${CLUSTER}-nodes-${i}.${CLUSTER}-nodes.${NAMESPACE}.svc.cluster.local"
+                    echo "backing up ${HOST} -> ${STAMP}"
+                    REPLY=$(printf 'backup %s\r\n' "$STAMP" | nc -w 30 "$HOST" "$FLARE_PORT" || true)
+                    echo "  reply: ${REPLY}"
+                    case "$REPLY" in
+                      *ERROR*|"") echo "  BACKUP FAILED on ${HOST}"; FAIL=1 ;;
+                    esac
+                    i=$((i + 1))
+                  done
+                  exit "$FAIL"
+---
+# OPTIONAL tier 2: off-cluster copy to S3 (or any S3-compatible store).
+# Runs after the checkpoint window; streams `tar` of the newest checkpoint
+# out of each pod without touching the live DB. Requires:
+#   - a ServiceAccount bound to a Role allowing pods/exec (kubectl exec)
+#   - S3 credentials (Secret with AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY,
+#     or IRSA on EKS — then drop the envFrom)
+# Swap `aws s3 cp` for `rclone rcat` to target GCS/other backends.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: flare-backup-s3
+  namespace: flare-system
+spec:
+  schedule: "30 3 * * *"         # after flare-backup
+  concurrencyPolicy: Forbid
+  suspend: true                  # enable after configuring bucket + credentials
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 3600
+      template:
+        spec:
+          restartPolicy: Never
+          serviceAccountName: flare-backup   # needs pods/get + pods/exec
+          containers:
+            - name: upload
+              image: amazon/aws-cli:2.15.0   # includes kubectl? NO — use an image with both, e.g. a small custom image or bitnami/kubectl + awscli layer
+              envFrom:
+                - secretRef:
+                    name: flare-backup-s3-credentials
+              env:
+                - name: CLUSTER
+                  value: "default"
+                - name: NAMESPACE
+                  value: "flare-system"
+                - name: NUM_PODS
+                  value: "4"
+                - name: BUCKET
+                  value: "s3://YOUR-BUCKET/flare-backups"
+              command:
+                - sh
+                - -c
+                - |
+                  set -e
+                  i=0
+                  while [ "$i" -lt "$NUM_PODS" ]; do
+                    POD="${CLUSTER}-nodes-${i}"
+                    LATEST=$(kubectl exec -n "$NAMESPACE" "$POD" -- sh -c 'ls -1 /data/flare/backups | tail -1')
+                    echo "uploading ${POD}:${LATEST}"
+                    kubectl exec -n "$NAMESPACE" "$POD" -- \
+                      tar czf - -C /data/flare/backups "$LATEST" \
+                      | aws s3 cp - "${BUCKET}/$(date -u +%Y%m%d)/${POD}-${LATEST}.tar.gz"
+                    i=$((i + 1))
+                  done

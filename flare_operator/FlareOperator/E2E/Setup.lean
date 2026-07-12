@@ -165,8 +165,12 @@ def statefulSetYaml (cfg : ClusterConfig) : String :=
   -- stores a directory). WITH a PVC the whole point is that data survives
   -- pod recreation, so we only mkdir and never wipe.
   let dataDir := if cfg.usePvc then "/data/flare" else "/tmp/flare"
+  -- RESTORE hook (PVC only): if the marker file exists it names a checkpoint
+  -- directory (created by the flared `backup` op, a complete RocksDB dir);
+  -- replace the live DB with it and consume the marker, then start flared.
+  -- Restore procedure: write the marker on each pod's PVC, delete the pods.
   let prep := if cfg.usePvc then
-      s!"mkdir -p {dataDir}"
+      s!"if [ -f {dataDir}/RESTORE ]; then SRC=$(cat {dataDir}/RESTORE) && rm -rf {dataDir}/flare.rocksdb && cp -a $SRC {dataDir}/flare.rocksdb && rm -f {dataDir}/RESTORE; fi; mkdir -p {dataDir}"
     else
       s!"rm -rf {dataDir}/*.hdb {dataDir}/*.hdb.wal {dataDir}/rocksdb && mkdir -p {dataDir}"
   let storageFlag := s!"--storage-type={cfg.storageBackend}"

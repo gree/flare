@@ -31,6 +31,8 @@
 #include <limits>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <pthread.h>
+#include <unistd.h>
 
 using namespace std;
 
@@ -707,6 +709,115 @@ void test_phaseA_apply_batch_with_lsn_atomic_success() {
 
 	drop_rocksdb(master_s, wal_master_dir);
 	drop_rocksdb(slave_s,  wal_slave_dir);
+}
+
+// ---------------------------------------------------------------------------
+// Concurrency: truncate() vs set()
+//
+// truncate() takes the wholelock in write mode plus every slot lock, so it
+// must be mutually exclusive with set()/get()/remove() (which take the
+// wholelock in read mode plus a single slot lock). This test hammers set()
+// from a worker thread while the main thread interleaves truncate() calls,
+// then asserts: no deadlock/crash, no torn reads (every readable key returns
+// its last written value or not-found — never garbage), and that a final
+// truncate leaves count()==0 with the reserved master_id preserved.
+// ---------------------------------------------------------------------------
+
+namespace {
+	struct set_loop_arg {
+		storage_rocksdb* s;
+		int iterations;
+		int num_keys;
+	};
+
+	// Writes keys key0..key{num_keys-1} = "vN" on each iteration, where N is
+	// the iteration index, so the last value written for keyK is
+	// "v{iterations-1}". Runs concurrently with truncate() on the main thread.
+	void* set_loop(void* raw) {
+		set_loop_arg* a = static_cast<set_loop_arg*>(raw);
+		for (int i = 0; i < a->iterations; i++) {
+			char val[32];
+			snprintf(val, sizeof(val), "v%d", i);
+			for (int k = 0; k < a->num_keys; k++) {
+				char key[32];
+				snprintf(key, sizeof(key), "key%d", k);
+				storage_set_string(a->s, key, val);
+			}
+		}
+		return NULL;
+	}
+}
+
+void test_concurrent_truncate_and_set() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+
+	// master_id must exist before we start so we can assert it survives.
+	cut_assert_operator(s->get_master_id().empty(), ==, false);
+
+	const int iterations = 200;
+	const int num_keys   = 8;
+	set_loop_arg arg = { s, iterations, num_keys };
+
+	pthread_t writer;
+	cut_assert_equal_int(0, pthread_create(&writer, NULL, set_loop, &arg));
+
+	// Interleave a handful of truncates while the writer runs. Each
+	// truncate must acquire the wholelock, proving mutual exclusion holds
+	// without deadlocking against the concurrent set()s.
+	for (int t = 0; t < 5; t++) {
+		cut_assert_equal_int(0, s->truncate(0));
+		usleep(1000);
+	}
+
+	cut_assert_equal_int(0, pthread_join(writer, NULL));
+
+	// Consistency: any key still present must read back a value the writer
+	// actually wrote ("v0".."v{iterations-1}"), never a torn/garbage value.
+	for (int k = 0; k < num_keys; k++) {
+		char key[32];
+		snprintf(key, sizeof(key), "key%d", k);
+		string out;
+		int rc = storage_get_string(s, key, out);
+		if (rc == 0) {
+			cut_assert_equal_int('v', out.empty() ? 0 : out[0]);
+			bool numeric = out.size() >= 2;
+			for (size_t i = 1; numeric && i < out.size(); i++) {
+				if (out[i] < '0' || out[i] > '9') numeric = false;
+			}
+			cut_assert_operator(numeric, ==, true);
+		}
+	}
+
+	// A final truncate with no concurrent writer: storage is empty of user
+	// keys, and the reserved master_id lineage token is preserved.
+	cut_assert_equal_int(0, s->truncate(0));
+	cut_assert_equal_int(0, static_cast<int>(s->count()));
+	cut_assert_operator(s->get_master_id().empty(), ==, false);
+
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// ---------------------------------------------------------------------------
+// Orphan scan token TTL expiry
+//
+// lookup_orphan_scan() rejects a token once it is older than the configured
+// TTL window. Drive it fast by shrinking the window to 1 second.
+// ---------------------------------------------------------------------------
+
+void test_phaseC_orphan_scan_token_expires_after_ttl() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	s->set_orphan_scan_ttl_seconds(1);
+
+	string t = s->remember_orphan_scan(9, 3, 300);
+	storage_rocksdb::orphan_scan_token out;
+	// Valid immediately after issue.
+	cut_assert_equal_int(1, s->lookup_orphan_scan(t, out) ? 1 : 0);
+
+	// After the TTL window elapses the same token is no longer actionable.
+	sleep(2);
+	cut_assert_equal_int(0, s->lookup_orphan_scan(t, out) ? 1 : 0);
+
+	drop_rocksdb(s, wal_master_dir);
 }
 
 	void teardown()

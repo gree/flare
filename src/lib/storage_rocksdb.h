@@ -277,6 +277,17 @@ public:
 	// Discard any outstanding token. Called implicitly after a
 	// successful purge so the same token cannot be replayed.
 	void clear_orphan_scan();
+
+	// Validity window for an outstanding orphan scan token, in seconds
+	// (default 300). Exposed so operators can tune how long a scan result
+	// stays actionable and so tests can drive the TTL-expiry path without
+	// a multi-minute sleep.
+	void set_orphan_scan_ttl_seconds(time_t seconds) {
+		this->_orphan_scan_ttl_seconds = seconds;
+	}
+	time_t get_orphan_scan_ttl_seconds() const {
+		return this->_orphan_scan_ttl_seconds;
+	}
 };
 
 }   // namespace flare

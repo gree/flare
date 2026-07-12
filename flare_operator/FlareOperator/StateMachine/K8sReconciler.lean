@@ -245,6 +245,76 @@ def handleFailoverWithPromotion (state : FlareClusterState) (deadKeys : List Str
     : FlareClusterState :=
   deadKeys.foldl handleFailoverWithPromotionSingleKey state
 
+/-- Demote every Master that duplicates an EARLIER Master of the same
+    partition in the list (first Master for a partition wins; later ones are
+    demoted back to an unassigned Proxy and will be re-assigned by the next
+    reconcile tick).
+
+    This is the repair step for the merge race: the FSM computes its state
+    (`ucs`) from a snapshot while the TCP server can concurrently assign a
+    master (the P0 fast path in `reconcileStep`) on the live ref. A merge
+    that carries both forward would leave two Masters for one partition —
+    a split-brain the rest of the system never repairs. Callers put the
+    FSM-computed entries FIRST so the FSM's assignment is the survivor. -/
+def demoteDuplicateMasters (nodeMap : List (String × FlareNode))
+    : List (String × FlareNode) :=
+  let step := fun (acc : List Int × List (String × FlareNode))
+      (kv : String × FlareNode) =>
+    let (seenParts, out) := acc
+    let (key, node) := kv
+    if node.role == FlareRole.Master then
+      if seenParts.contains node.partition then
+        let demoted := { node with role := FlareRole.Proxy,
+                                   state := FlareState.Active,
+                                   partition := -1,
+                                   balance := 100 }
+        (seenParts, out ++ [(key, demoted)])
+      else
+        (seenParts ++ [node.partition], out ++ [(key, node)])
+    else
+      (seenParts, out ++ [(key, node)])
+  (nodeMap.foldl step ([], [])).2
+
+/-- Per-key merge of the FSM's computed state (`ucs`) onto the live state
+    (`current`). Lives in the pure layer (rather than Main) so its safety
+    properties can be machine-checked.
+
+    The FSM reconcile loop snapshots the live ref, computes `ucs` purely, then
+    commits it back while the TCP server mutates the SAME ref on every
+    `node add` / `node state ready`. A blind full-state replace would revert a
+    TCP-driven Prepare→Active completion, so we merge per key:
+    - role / partition / assignment: `ucs` wins — the FSM legitimately owns
+      failover demotions and proxy→master/slave assignments.
+    - state: `ucs` wins, EXCEPT when `current` has the SAME role, is `Active`,
+      and `ucs` is `Prepare`: that is the TCP-driven Prepare→Active completion
+      the FSM has not observed yet; keep `Active`.
+    - keys only in `current` (nodes registered after the snapshot) are carried
+      forward so no registration is lost.
+
+    Finally `demoteDuplicateMasters` repairs the one inconsistency the merge
+    itself can create — the FSM and the TCP fast path each assigning a
+    different Master to the same partition (FSM entries come first, so the
+    FSM's choice survives) — and the partitionMap is rebuilt from the merged
+    nodeMap (single source of truth). -/
+def mergeClusterState (current ucs : FlareClusterState) : FlareClusterState :=
+  let mergedNodeMap : List (String × FlareNode) :=
+    ucs.nodeMap.map fun (key, ucsNode) =>
+      match current.nodeMap.lookup key with
+      | some curNode =>
+        if curNode.role == ucsNode.role
+           && curNode.state == FlareState.Active
+           && ucsNode.state == FlareState.Prepare then
+          (key, { ucsNode with state := FlareState.Active })
+        else
+          (key, ucsNode)
+      | none => (key, ucsNode)
+  let ucsKeys := ucs.nodeMap.map Prod.fst
+  let currentOnly := current.nodeMap.filter (fun kv => !ucsKeys.contains kv.1)
+  let combined := demoteDuplicateMasters (mergedNodeMap ++ currentOnly)
+  ({ ucs with
+      nodeMap := combined
+      nodeMapVersion := current.nodeMapVersion + 1 }).rebuildPartitionMap
+
 /-- Pure dead-node detection (mirrors legacy `detectDeadNodes`, Main.lean:116-124).
     A node is dead only if its pod is gone AND it is a role/state that should be
     actively served. Excludes:

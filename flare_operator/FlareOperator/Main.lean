@@ -492,48 +492,12 @@ private def executeEffects (effects : List K8sReconciler.FlareEffect)
 -- FSM Driver Loop (Phase 4)
 -- ===========================================================================
 
-/-- Per-key merge of the FSM's computed state (`ucs`) onto the live ref
-    (`current`).
-
-    The FSM reconcile loop snapshots `stateRef`, computes `ucs` purely, then wants
-    to write it back. Meanwhile the TCP server mutates the SAME ref via `modifyGet`
-    on every `node add`/`node state ready` — in particular it completes the
-    Prepare→Active transition when a node finishes reconstruction. A blind
-    full-state replace of `ucs` would revert that Active back to Prepare (ucs was
-    built from a snapshot that predates the transition), so a partition-1 master
-    stuck in Prepare would never go Active and never serve data.
-
-    Merge rule (per key in `ucs`):
-    - role / partition / assignment: `ucs` wins — the FSM legitimately owns
-      failover demotions and proxy→master/slave assignments.
-    - state: `ucs` wins, EXCEPT when `current` has the SAME role, is `Active`, and
-      `ucs` is `Prepare`. That single case is the TCP-driven Prepare→Active
-      completion the FSM hasn't observed yet; keep `Active`.
-    The same-role guard makes preservation narrow enough to never resurrect a
-    corpse: a failover-demoted node appears in `ucs` with a CHANGED role
-    (Proxy/Down), so it can't match a `current` Active entry of the same role and
-    `ucs` correctly wins.
-
-    Keys present only in `current` (nodes registered after our snapshot) are
-    carried forward so no registration is lost — this subsumes the old
-    version-CAS's purpose. -/
+/-- Per-key merge of the FSM's computed state onto the live ref. The merge
+    logic (including the duplicate-master repair for the FSM-vs-TCP assignment
+    race) lives in the pure layer so it can be machine-checked; see
+    `K8sReconciler.mergeClusterState`. -/
 private def mergeClusterState (current ucs : FlareClusterState) : FlareClusterState :=
-  let mergedNodeMap : List (String × FlareNode) :=
-    ucs.nodeMap.map fun (key, ucsNode) =>
-      match current.nodeMap.lookup key with
-      | some curNode =>
-        if curNode.role == ucsNode.role
-           && curNode.state == FlareState.Active
-           && ucsNode.state == FlareState.Prepare then
-          (key, { ucsNode with state := FlareState.Active })
-        else
-          (key, ucsNode)
-      | none => (key, ucsNode)
-  let ucsKeys := ucs.nodeMap.map Prod.fst
-  let currentOnly := current.nodeMap.filter (fun kv => !ucsKeys.contains kv.1)
-  { ucs with
-      nodeMap := mergedNodeMap ++ currentOnly
-      nodeMapVersion := current.nodeMapVersion + 1 }
+  K8sReconciler.mergeClusterState current ucs
 
 /-- Commit the FSM's computed cluster state by MERGING it onto the live ref inside
     a single atomic `modifyGet` (see `mergeClusterState`). The merge — not a version

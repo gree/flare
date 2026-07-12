@@ -34,6 +34,11 @@ private def cfg : ClusterConfig := {
   operatorName := "flare-operator-wal-sync"
   debugPod := "debug-wal-sync"
   storageBackend := "rocksdb"
+  -- PVC: the whole point of these suites is behavior across pod restarts
+  -- (prior LSN retention, purged-WAL fallback, orphan keys left on disk).
+  -- On emptyDir those preconditions vanish with the pod and the interesting
+  -- tests degrade to .skip; with a PVC they take their real assert paths.
+  usePvc := true
 }
 
 /-- Query flared stats and return the raw output. -/

@@ -37,6 +37,11 @@ private def cfg : ClusterConfig := {
   operatorName := "flare-operator-orphan-mgmt"
   debugPod := "debug-orphan-mgmt"
   storageBackend := "rocksdb"
+  -- PVC: the whole point of these suites is behavior across pod restarts
+  -- (prior LSN retention, purged-WAL fallback, orphan keys left on disk).
+  -- On emptyDir those preconditions vanish with the pod and the interesting
+  -- tests degrade to .skip; with a PVC they take their real assert paths.
+  usePvc := true
 }
 
 private def flaredStats (debugPod ns targetIp : String) (port : Nat) : IO String := do

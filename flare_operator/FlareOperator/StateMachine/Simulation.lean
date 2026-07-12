@@ -46,24 +46,33 @@ def scenario2_fullInit : GlobalState :=
   -- assigned here: the P1 Master and one Slave per partition.
   let s5 := stepGlobal s4 .OperatorReconcile
 
-  -- Step 6-9: Nodes receive topology broadcasts
-  let s6 := stepGlobal s5 (.NodeProcessMsg "node-0:11211")
-  let s7 := stepGlobal s6 (.NodeProcessMsg "node-1:11211")
-  let s8 := stepGlobal s7 (.NodeProcessMsg "node-2:11211")
-  let s9 := stepGlobal s8 (.NodeProcessMsg "node-3:11211")
+  -- Drain the topology broadcasts. Every NodeAdd above ALSO enqueued a
+  -- broadcast to all 4 nodes, so each node has several queued NodeSync
+  -- messages and only the LAST one (from the reconcile) carries its final
+  -- role. An earlier version of this trace processed exactly one message
+  -- per node, which silently left every node on a stale pre-assignment
+  -- topology: reconstruction never started, no Ready was ever sent, and
+  -- steps "10-17" were no-ops. Process 5 per node (4 NodeAdd broadcasts +
+  -- 1 reconcile broadcast); extra steps on an empty queue are no-ops.
+  let drainOne (g : GlobalState) (key : String) : GlobalState :=
+    stepMany g (List.replicate 5 (.NodeProcessMsg key))
+  let s9 := ["node-0:11211", "node-1:11211", "node-2:11211", "node-3:11211"].foldl drainOne s5
 
-  -- Step 10-13: Nodes complete reconstruction (P0 Master is instant; the
-  -- other roles were assigned in Prepare and reconstruct before Active)
+  -- Nodes complete reconstruction (P0 Master is instant and never
+  -- reconstructs; the other three were assigned in Prepare, saw the role
+  -- shift in the final broadcast, and now finish: each sends `node state`
+  -- (Ready for a Master, Active for a Slave) to the operator).
   let s10 := stepGlobal s9 (.NodeReconstructionComplete "node-0:11211")
   let s11 := stepGlobal s10 (.NodeReconstructionComplete "node-1:11211")
   let s12 := stepGlobal s11 (.NodeReconstructionComplete "node-2:11211")
   let s13 := stepGlobal s12 (.NodeReconstructionComplete "node-3:11211")
 
-  -- Step 14-17: Operator processes Ready/Active messages
-  let s14 := stepGlobal s13 .OperatorProcessMsg  -- node-0 Ready
-  let s15 := stepGlobal s14 .OperatorProcessMsg  -- node-1 Ready
-  let s16 := stepGlobal s15 .OperatorProcessMsg  -- node-2 Ready
-  let s17 := stepGlobal s16 .OperatorProcessMsg  -- node-3 Ready
+  -- Operator processes the Ready/Active messages: Prepare→Active completes
+  -- for the P1 master and both slaves.
+  let s14 := stepGlobal s13 .OperatorProcessMsg
+  let s15 := stepGlobal s14 .OperatorProcessMsg
+  let s16 := stepGlobal s15 .OperatorProcessMsg
+  let s17 := stepGlobal s16 .OperatorProcessMsg
 
   s17
 
@@ -76,6 +85,23 @@ def scenario2_fullInit : GlobalState :=
     master and its data survives on the promoted replica. -/
 def scenario3_afterFailover : GlobalState :=
   stepGlobal scenario2_fullInit (.NodeDie "node-0:11211")
+
+/-! ## Scenario 4: Zombie master resurrection -/
+
+/-- The P0 master's flared process restarts and RE-REGISTERS (`node add`)
+    while its pod never leaves the live pod list — so dead-node detection
+    never fires and failover never runs. Re-registration replaces the node's
+    Master entry with a fresh Proxy, leaving P0 master-less while its Active
+    slave still holds the data. The next reconcile must promote THAT slave —
+    not hand the master slot back to the empty, freshly-restarted zombie.
+    (Without the zombie guard in `autoAssign`, the zombie became P0
+    Master/Active again with an empty dataset: silent total data loss for
+    the partition, reproduced by this exact trace.) -/
+def scenario4_zombieResurrection : GlobalState :=
+  let g := { scenario2_fullInit with
+             nodeToOpQueue := [.NodeAdd "node-0" 11211] }
+  let s1 := stepGlobal g .OperatorProcessMsg   -- zombie re-registers as Proxy
+  stepGlobal s1 .OperatorReconcile             -- reconcile must promote the slave
 
 /-! ## Invariant Checks -/
 

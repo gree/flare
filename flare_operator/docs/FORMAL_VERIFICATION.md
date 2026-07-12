@@ -390,12 +390,22 @@ theorem scenario2_verified :
 
 ✅ Core invariant: "At most one master per partition"
 ✅ Concrete scenarios: Fresh 4-node cluster initialization (non-vacuous:
-   both partitions provably end with exactly one master)
-✅ Specific execution traces: 17-step deployment sequence
+   both partitions provably end with exactly one master, and the Ready
+   chain provably completes — the P0 slave ends Active)
+✅ Specific execution traces: full deployment sequence with queue draining
 ✅ Master failover: dead-master demotion + live-slave promotion preserves
    the invariant (scenario 3, same functions as the production FSM)
+✅ Zombie-master resurrection (scenario 4): a master whose flared restarts
+   and re-registers before dead-node detection fires can NOT reclaim the
+   master slot with an empty dataset; the partition's Active slave (which
+   holds the data) is promoted instead — `scenario4_zombie_not_master`
 ✅ Merge repair: the FSM-vs-TCP double-master race is repaired by
    `mergeClusterState` (R-1 theorems)
+✅ **GENERAL split-brain repair theorem** (`K8sReconciler.lean`):
+   `demoteDuplicateMasters_atMostOne` / `mergeClusterState_atMostOneMaster`
+   — proven by induction over ARBITRARY node maps, not scenarios: whatever
+   the FSM snapshot and the TCP server wrote, the committed node map never
+   contains two Masters for one partition
 
 ### What Is NOT Yet Verified
 

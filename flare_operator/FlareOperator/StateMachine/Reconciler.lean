@@ -115,6 +115,15 @@ def findPartitionNeedingSlaveAux (state : FlareClusterState) (numPartitions : Na
 def findPartitionNeedingSlave (state : FlareClusterState) (numPartitions : Nat) (maxSlaves : Nat) : Option Nat :=
   findPartitionNeedingSlaveAux state numPartitions maxSlaves 0 numPartitions
 
+/-- Find a live replica of partition `pIdx`: a Slave in Active state (its
+    reconstruction completed, so it holds a full copy of the partition's
+    data). Prepare slaves are excluded — promoting a half-reconstructed
+    replica would serve partial data. -/
+def findActiveSlaveForPartition (state : FlareClusterState) (pIdx : Nat) : Option String :=
+  state.nodeMap.find? (fun (_, n) =>
+    n.role == FlareRole.Slave && n.state == FlareState.Active
+      && n.partition == Int.ofNat pIdx) |>.map Prod.fst
+
 /-- Auto-assign a proxy node to the first partition that needs filling.
     Returns updated state and the assigned role/partition.
     First clears any stale entry for this nodeKey so re-registering nodes
@@ -131,16 +140,45 @@ def autoAssign (state : FlareClusterState) (crd : FlareClusterView) (nodeKey : S
   -- Try Master first
   match findPartitionNeedingMaster cleanState numPartitions with
   | some pIdx =>
-    -- Mimic C++ flarei state assignment logic (cluster.cc:1010):
-    -- Partition 0: always Active (special case, no reconstruction needed)
-    -- Partition 1+: always Prepare (must reconstruct from P0 before becoming Active)
-    -- C++ flared nodes will send "node state ready" after reconstruction completes
-    let masterState := if pIdx == 0 then FlareState.Active else FlareState.Prepare
-    let newNode := { node with role := FlareRole.Master, state := masterState, partition := Int.ofNat pIdx }
-    let part := (cleanState.lookupPartition pIdx).getD {}
-    let newPart := { part with master := some nodeKey }
-    let newState := (cleanState.addNode nodeKey newNode).setPartition pIdx newPart
-    (newState, newNode)
+    -- ZOMBIE-MASTER GUARD: if the master-less partition still has a live
+    -- Active slave, promote THAT slave — never hand the master slot to the
+    -- (empty) proxy being assigned. Without this, a master whose flared
+    -- restarts and re-registers before dead-node detection fires (the pod
+    -- never leaves the live list, so failover never runs) is replaced by
+    -- an empty node as Active master while the data-bearing slave keeps
+    -- serving nothing — silent data loss. The proxy joins as a fresh slave
+    -- of the same partition and reconstructs from the promoted master.
+    match findActiveSlaveForPartition cleanState pIdx with
+    | some slaveKey =>
+      match cleanState.lookupNode slaveKey with
+      | some slaveNode =>
+        let promoted := { slaveNode with role := FlareRole.Master,
+                                         state := FlareState.Active, balance := 100 }
+        let newNode := { node with role := FlareRole.Slave, state := FlareState.Prepare,
+                                   partition := Int.ofNat pIdx, balance := 0 }
+        let newState := ((cleanState.addNode slaveKey promoted).addNode nodeKey newNode)
+          |>.rebuildPartitionMap
+        (newState, newNode)
+      | none =>
+        -- Unreachable (findActiveSlaveForPartition returned a nodeMap key);
+        -- fall through to the plain master assignment.
+        let masterState := if pIdx == 0 then FlareState.Active else FlareState.Prepare
+        let newNode := { node with role := FlareRole.Master, state := masterState, partition := Int.ofNat pIdx }
+        let part := (cleanState.lookupPartition pIdx).getD {}
+        let newPart := { part with master := some nodeKey }
+        let newState := (cleanState.addNode nodeKey newNode).setPartition pIdx newPart
+        (newState, newNode)
+    | none =>
+      -- Mimic C++ flarei state assignment logic (cluster.cc:1010):
+      -- Partition 0: always Active (special case, no reconstruction needed)
+      -- Partition 1+: always Prepare (must reconstruct from P0 before becoming Active)
+      -- C++ flared nodes will send "node state ready" after reconstruction completes
+      let masterState := if pIdx == 0 then FlareState.Active else FlareState.Prepare
+      let newNode := { node with role := FlareRole.Master, state := masterState, partition := Int.ofNat pIdx }
+      let part := (cleanState.lookupPartition pIdx).getD {}
+      let newPart := { part with master := some nodeKey }
+      let newState := (cleanState.addNode nodeKey newNode).setPartition pIdx newPart
+      (newState, newNode)
   | none =>
     -- Try Slave (enters Prepare state — reconstruction needed before Active)
     match findPartitionNeedingSlave cleanState numPartitions maxSlaves with

@@ -97,6 +97,17 @@ theorem scenario2_p1_has_master :
     countMastersForPartition scenario2_fullInit 1 = 1 := by
   decide
 
+/-- Non-vacuity of the Ready chain: initialization completes with the P0
+    slave ACTIVE in the operator's view. An earlier version of the trace
+    processed only one broadcast per node, so reconstruction never started,
+    no `node state` was ever sent, and every non-P0 node silently stayed in
+    Prepare — this theorem fails to compile if that regression returns. -/
+theorem scenario2_p0_slave_active :
+    ((scenario2_fullInit.operatorState.nodeMap.lookup "node-2:11211").map
+      (fun n => n.role == FlareRole.Slave && n.state == FlareState.Active
+        && n.partition == 0)) = some true := by
+  decide
+
 /-! ## VERIFIED THEOREM 4: Master failover preserves the invariant -/
 
 /--
@@ -121,6 +132,40 @@ theorem scenario3_p0_still_has_master :
 theorem scenario3_dead_node_not_master :
     ((scenario3_afterFailover.operatorState.nodeMap.lookup "node-0:11211").map
       (fun n => n.role == FlareRole.Master)) = some false := by
+  decide
+
+/-! ## VERIFIED THEOREM 4b: Zombie master resurrection cannot steal the data -/
+
+/--
+  FULLY PROVEN: when the P0 master's flared restarts and re-registers while
+  its pod never leaves the live list (so failover NEVER runs — scenario 4),
+  the next reconcile promotes the partition's Active slave, which still
+  holds the data. The invariant is preserved throughout.
+-/
+theorem scenario4_verified :
+    checkInvariantFinite scenario4_zombieResurrection 2 = true := by
+  decide
+
+/-- P0 keeps exactly one master across the zombie re-registration. -/
+theorem scenario4_p0_has_one_master :
+    countMastersForPartition scenario4_zombieResurrection 0 = 1 := by
+  decide
+
+/-- The promoted master is the DATA-BEARING replica (node-2, the former P0
+    Active slave) — not an arbitrary empty node. -/
+theorem scenario4_master_is_former_slave :
+    ((scenario4_zombieResurrection.operatorState.nodeMap.lookup "node-2:11211").map
+      (fun n => n.role == FlareRole.Master && n.state == FlareState.Active
+        && n.partition == 0)) = some true := by
+  decide
+
+/-- The zombie itself does NOT get the master slot back: it re-joins as a
+    Slave in Prepare and must reconstruct from the promoted master before
+    serving. (Without the zombie guard in `autoAssign`, this theorem fails:
+    the zombie came back as Master/Active with an empty dataset.) -/
+theorem scenario4_zombie_not_master :
+    ((scenario4_zombieResurrection.operatorState.nodeMap.lookup "node-0:11211").map
+      (fun n => n.role == FlareRole.Slave && n.state == FlareState.Prepare)) = some true := by
   decide
 
 /-! ## VERIFIED THEOREM 5: merge repairs the FSM-vs-TCP double-master race -/
@@ -215,7 +260,14 @@ example :
     the master slot, and the promoted node is a different live pod — using
     the same detectDeadNodesPure / handleFailoverWithPromotion functions the
     production FSM executes
+  ✓ Zombie-master resurrection (scenario 4): a master whose flared restarts
+    and re-registers while failover never fires CANNOT reclaim the master
+    slot; the data-bearing Active slave is promoted instead
   ✓ mergeClusterState repairs the FSM-vs-TCP double-master race (R-1)
+  ✓ GENERAL (not scenario-bound): demoteDuplicateMasters_atMostOne and
+    mergeClusterState_atMostOneMaster in K8sReconciler.lean prove by
+    induction — for ARBITRARY inputs — that the committed node map never
+    holds two Masters for one partition
   ✓ Intermediate checkpoints maintain invariant
 
   METHOD: Computational reflection via `decide` tactic

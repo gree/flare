@@ -301,22 +301,36 @@ def demoteDuplicateMasters (nodeMap : List (String × FlareNode))
     itself can create — the FSM and the TCP fast path each assigning a
     different Master to the same partition (FSM entries come first, so the
     FSM's choice survives) — and the partitionMap is rebuilt from the merged
-    nodeMap (single source of truth). -/
+    nodeMap (single source of truth).
+
+    Merge rule for a single `ucs` entry (see `mergeClusterState`): keep the
+    FSM's value except for the one TCP-driven Prepare→Active completion. A
+    top-level def (not an inline lambda) so the preservation lemmas below can
+    reason about it directly. -/
+def mergeNodeEntry (current : FlareClusterState) (key : String) (ucsNode : FlareNode)
+    : FlareNode :=
+  match current.nodeMap.lookup key with
+  | some curNode =>
+    if curNode.role == ucsNode.role
+       && curNode.state == FlareState.Active
+       && ucsNode.state == FlareState.Prepare then
+      { ucsNode with state := FlareState.Active }
+    else
+      ucsNode
+  | none => ucsNode
+
+/-- The `ucs` entries after the per-key merge. -/
+def mergedUcsEntries (current ucs : FlareClusterState) : List (String × FlareNode) :=
+  ucs.nodeMap.map fun kv => (kv.1, mergeNodeEntry current kv.1 kv.2)
+
+/-- Entries only present on the live ref (nodes registered after the FSM's
+    snapshot); carried forward so no registration is lost. -/
+def currentOnlyEntries (current ucs : FlareClusterState) : List (String × FlareNode) :=
+  current.nodeMap.filter (fun kv => !(ucs.nodeMap.map Prod.fst).contains kv.1)
+
 def mergeClusterState (current ucs : FlareClusterState) : FlareClusterState :=
-  let mergedNodeMap : List (String × FlareNode) :=
-    ucs.nodeMap.map fun (key, ucsNode) =>
-      match current.nodeMap.lookup key with
-      | some curNode =>
-        if curNode.role == ucsNode.role
-           && curNode.state == FlareState.Active
-           && ucsNode.state == FlareState.Prepare then
-          (key, { ucsNode with state := FlareState.Active })
-        else
-          (key, ucsNode)
-      | none => (key, ucsNode)
-  let ucsKeys := ucs.nodeMap.map Prod.fst
-  let currentOnly := current.nodeMap.filter (fun kv => !ucsKeys.contains kv.1)
-  let combined := demoteDuplicateMasters (mergedNodeMap ++ currentOnly)
+  let combined := demoteDuplicateMasters
+    (mergedUcsEntries current ucs ++ currentOnlyEntries current ucs)
   ({ ucs with
       nodeMap := combined
       nodeMapVersion := current.nodeMapVersion + 1 }).rebuildPartitionMap
@@ -435,6 +449,102 @@ theorem mergeClusterState_atMostOneMaster (current ucs : FlareClusterState) (p :
     countMastersFor p (mergeClusterState current ucs).nodeMap ≤ 1 := by
   unfold mergeClusterState
   exact demoteDuplicateMasters_atMostOne _ p
+
+/-- The repair never drops or reorders an entry: the key list is preserved
+    verbatim. -/
+theorem demoteDuplicateMastersGo_keys (l : List (String × FlareNode)) (seen : List Int) :
+    (demoteDuplicateMastersGo seen l).map Prod.fst = l.map Prod.fst := by
+  induction l generalizing seen with
+  | nil => rfl
+  | cons kv rest ih =>
+    obtain ⟨key, node⟩ := kv
+    simp only [demoteDuplicateMastersGo]
+    split
+    · split
+      · simp [ih seen]
+      · simp [ih (node.partition :: seen)]
+    · simp [ih seen]
+
+theorem demoteDuplicateMasters_keys (l : List (String × FlareNode)) :
+    (demoteDuplicateMasters l).map Prod.fst = l.map Prod.fst :=
+  demoteDuplicateMastersGo_keys l []
+
+/-- Non-Master entries pass through the repair verbatim (the repair only
+    ever touches Masters). -/
+theorem demoteDuplicateMastersGo_nonmaster_mem (l : List (String × FlareNode))
+    (seen : List Int) (k : String) (n : FlareNode)
+    (hmem : (k, n) ∈ l) (hrole : (n.role == FlareRole.Master) = false) :
+    (k, n) ∈ demoteDuplicateMastersGo seen l := by
+  induction l generalizing seen with
+  | nil => cases hmem
+  | cons kv rest ih =>
+    obtain ⟨key, node⟩ := kv
+    simp only [demoteDuplicateMastersGo]
+    rcases List.mem_cons.mp hmem with heq | htail
+    · cases heq
+      simp [hrole]
+    · split
+      · split
+        · exact List.mem_cons_of_mem _ (ih seen htail)
+        · exact List.mem_cons_of_mem _ (ih (node.partition :: seen) htail)
+      · exact List.mem_cons_of_mem _ (ih seen htail)
+
+/-- NO LOST REGISTRATION: every key present in either input state appears in
+    the node map committed by the merge — a node registered on the live ref
+    after the FSM snapshot, or present in the FSM's own output, is never
+    dropped. General theorem over arbitrary states. -/
+theorem mergeClusterState_preserves_keys (current ucs : FlareClusterState)
+    (k : String)
+    (h : k ∈ ucs.nodeMap.map Prod.fst ∨ k ∈ current.nodeMap.map Prod.fst) :
+    k ∈ (mergeClusterState current ucs).nodeMap.map Prod.fst := by
+  have hkeys : (mergeClusterState current ucs).nodeMap.map Prod.fst
+      = (mergedUcsEntries current ucs ++ currentOnlyEntries current ucs).map Prod.fst := by
+    unfold mergeClusterState
+    exact demoteDuplicateMasters_keys _
+  have hm : (mergedUcsEntries current ucs).map Prod.fst = ucs.nodeMap.map Prod.fst := by
+    unfold mergedUcsEntries
+    rw [List.map_map]
+    exact List.map_congr_left (fun kv _ => rfl)
+  rw [hkeys, List.map_append, List.mem_append]
+  by_cases hin : k ∈ ucs.nodeMap.map Prod.fst
+  · left; rw [hm]; exact hin
+  · rcases h with hu | hc
+    · exact absurd hu hin
+    · right
+      obtain ⟨kv, hkv, hfst⟩ := List.mem_map.mp hc
+      refine List.mem_map.mpr ⟨kv, List.mem_filter.mpr ⟨hkv, ?_⟩, hfst⟩
+      have hnotin : ¬ ((ucs.nodeMap.map Prod.fst).contains kv.1 = true) := by
+        intro hcontains
+        apply hin
+        rw [← hfst]
+        simpa using hcontains
+      simpa using hnotin
+
+/-- NO CORPSE RESURRECTION: a Down (failover-demoted) entry in the FSM state
+    survives the merge verbatim — still Down. The Prepare→Active preservation
+    can only fire on a Prepare entry, and the duplicate-Master repair only
+    touches Masters, so a Proxy/Down corpse is untouched by both. General
+    theorem over arbitrary states. -/
+theorem mergeClusterState_down_survives (current ucs : FlareClusterState)
+    (k : String) (n : FlareNode)
+    (hmem : (k, n) ∈ ucs.nodeMap)
+    (hrole : (n.role == FlareRole.Master) = false)
+    (hdown : n.state = FlareState.Down) :
+    (k, n) ∈ (mergeClusterState current ucs).nodeMap := by
+  have hentry : mergeNodeEntry current k n = n := by
+    unfold mergeNodeEntry
+    cases current.nodeMap.lookup k with
+    | none => rfl
+    | some curNode =>
+      simp [hdown, show (FlareState.Down == FlareState.Prepare) = false from rfl]
+  have hmerged : (k, n) ∈ mergedUcsEntries current ucs := by
+    have himg := List.mem_map_of_mem
+      (f := fun kv => (kv.1, mergeNodeEntry current kv.1 kv.2)) hmem
+    simpa [mergedUcsEntries, hentry] using himg
+  have hcomb : (k, n) ∈ mergedUcsEntries current ucs ++ currentOnlyEntries current ucs :=
+    List.mem_append_left _ hmerged
+  unfold mergeClusterState
+  exact demoteDuplicateMastersGo_nonmaster_mem _ [] k n hcomb hrole
 
 /-- Pure dead-node detection (mirrors legacy `detectDeadNodes`, Main.lean:116-124).
     A node is dead only if its pod is gone AND it is a role/state that should be

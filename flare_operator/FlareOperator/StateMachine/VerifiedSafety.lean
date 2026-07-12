@@ -8,6 +8,7 @@
 import FlareOperator.StateMachine.GlobalModel
 import FlareOperator.StateMachine.Simulation
 import FlareOperator.StateMachine.Safety
+import FlareOperator.StateMachine.K8sReconciler
 
 namespace FlareOperator.StateMachine.VerifiedSafety
 
@@ -16,6 +17,7 @@ open FlareOperator.StateMachine.GlobalModel
 open FlareOperator.StateMachine.Safety
 open FlareOperator.StateMachine.Simulation
 open FlareOperator.Reconciler
+open FlareOperator.K8sReconciler (mergeClusterState demoteDuplicateMasters)
 
 /-! ## Helper Function -/
 
@@ -78,7 +80,94 @@ theorem scenario2_verified :
     checkInvariantFinite scenario2_fullInit 2 = true := by
   decide
 
-/-! ## VERIFIED THEOREM 4: Checkpoints along the execution trace -/
+/--
+  NON-VACUITY: scenario 2's reconcile step really assigns roles.
+
+  "At most one master" holds trivially on a trace that never creates
+  masters, so we also prove that after full initialization BOTH partitions
+  have exactly one master. This theorem fails to prove if the model's
+  reconcile step degrades to a no-op again (which it silently was when it
+  called `reconcileStep .Ping`).
+-/
+theorem scenario2_p0_has_master :
+    countMastersForPartition scenario2_fullInit 0 = 1 := by
+  decide
+
+theorem scenario2_p1_has_master :
+    countMastersForPartition scenario2_fullInit 1 = 1 := by
+  decide
+
+/-! ## VERIFIED THEOREM 4: Master failover preserves the invariant -/
+
+/--
+  FULLY PROVEN: After the P0 Master's pod dies (scenario 3), the invariant
+  still holds — using the SAME dead-node detection and promotion functions
+  the production FSM runs (detectDeadNodesPure, handleFailoverWithPromotion).
+-/
+theorem scenario3_verified :
+    checkInvariantFinite scenario3_afterFailover 2 = true := by
+  decide
+
+/-- After failover, P0 still has exactly one master (the slot is refilled,
+    not left empty and not doubled). -/
+theorem scenario3_p0_still_has_master :
+    countMastersForPartition scenario3_afterFailover 0 = 1 := by
+  decide
+
+/-- The dead node itself is no longer a master (it was demoted). Together
+    with `scenario3_p0_still_has_master` this proves the promoted node is a
+    DIFFERENT, live pod — the surviving replica that still holds the
+    partition's data. -/
+theorem scenario3_dead_node_not_master :
+    ((scenario3_afterFailover.operatorState.nodeMap.lookup "node-0:11211").map
+      (fun n => n.role == FlareRole.Master)) = some false := by
+  decide
+
+/-! ## VERIFIED THEOREM 5: merge repairs the FSM-vs-TCP double-master race -/
+
+/--
+  R-1 regression model: the FSM computed `ucs` from a snapshot in which P0
+  had no master and assigned pod-y; meanwhile the TCP fast path registered
+  pod-x and assigned it P0 master on the live ref (`current`). A naive merge
+  carries BOTH forward — two masters for P0.
+-/
+def r1_podX : FlareNode :=
+  { serverName := "pod-x", serverPort := 11211,
+    role := FlareRole.Master, state := FlareState.Active, partition := 0 }
+
+def r1_podY : FlareNode :=
+  { serverName := "pod-y", serverPort := 11211,
+    role := FlareRole.Master, state := FlareState.Active, partition := 0 }
+
+def r1_current : FlareClusterState :=
+  { nodeMap := [("pod-x:11211", r1_podX)], nodeMapVersion := 2 }
+
+def r1_ucs : FlareClusterState :=
+  { nodeMap := [("pod-y:11211", r1_podY)], nodeMapVersion := 1 }
+
+def r1_merged : FlareClusterState := mergeClusterState r1_current r1_ucs
+
+/-- FULLY PROVEN: after the merge, P0 has exactly one master. -/
+theorem r1_merge_repairs_double_master :
+    (r1_merged.nodeMap.filter
+      (fun kv => kv.2.role == FlareRole.Master && kv.2.partition == 0)).length = 1 := by
+  decide
+
+/-- The FSM's assignment (pod-y) is the survivor: the FSM owns role
+    assignments per the merge rule. -/
+theorem r1_merge_keeps_fsm_master :
+    ((r1_merged.nodeMap.lookup "pod-y:11211").map
+      (fun n => n.role == FlareRole.Master)) = some true := by
+  decide
+
+/-- The TCP fast path's duplicate (pod-x) is demoted back to an unassigned
+    Proxy — no registration is lost, and the next reconcile re-assigns it. -/
+theorem r1_merge_demotes_tcp_duplicate :
+    ((r1_merged.nodeMap.lookup "pod-x:11211").map
+      (fun n => n.role == FlareRole.Proxy && n.partition == -1)) = some true := by
+  decide
+
+/-! ## VERIFIED THEOREM 6: Checkpoints along the execution trace -/
 
 /--
   FULLY PROVEN: After node registration (step 4), invariant holds.
@@ -116,28 +205,34 @@ example :
 /-! ## Summary -/
 
 /-
-  WHAT WE HAVE PROVEN (100% formally verified, no sorry):
+  WHAT WE HAVE PROVEN (no sorry in THIS file; verified by Lean's kernel):
 
   ✓ Initial cluster state satisfies AtMostOneMasterPerPartition
   ✓ Fresh 4-node cluster satisfies invariant
-  ✓ Complete 17-step initialization maintains invariant
+  ✓ Complete 17-step initialization maintains invariant, AND is non-vacuous:
+    both partitions end with exactly one master (scenario2_p{0,1}_has_master)
+  ✓ Master failover (P0 master pod dies) preserves the invariant, refills
+    the master slot, and the promoted node is a different live pod — using
+    the same detectDeadNodesPure / handleFailoverWithPromotion functions the
+    production FSM executes
+  ✓ mergeClusterState repairs the FSM-vs-TCP double-master race (R-1)
   ✓ Intermediate checkpoints maintain invariant
 
   METHOD: Computational reflection via `decide` tactic
-  - Lean symbolically executes the state machine
-  - Checks invariant at each state
-  - Reduces to `true` and verifies with `rfl`
-  - NO axioms, NO assumptions, NO sorry
+  - Lean symbolically executes the state machine and reduces to `true`
 
-  SIGNIFICANCE:
-  This is a COMPLETE formal verification for the concrete scenarios.
-  No bugs can hide in these execution paths - they are mathematically proven correct.
-
-  The remaining work (general case with arbitrary traces) is important for
-  completeness, but the executable scenarios already provide strong guarantees:
-  - They cover the most common "happy path" (fresh deployment)
-  - They serve as regression tests (changes that break safety will fail compilation)
-  - They document the expected behavior formally
+  HONEST LIMITS (do not overstate these results):
+  - These are CONCRETE scenarios, not a general inductive proof over
+    arbitrary traces (`stepPreservesAtMostOneMaster` in Safety.lean is still
+    a `sorry`-sketch).
+  - The model shares the pure functions (reconcileStep, autoAssign,
+    assignProxiesPure, detectDeadNodesPure, handleFailoverWithPromotion,
+    mergeClusterState) with the production operator, but the IO layer
+    (kubectl, TCP server threads, ConfigMap persistence) and true
+    concurrency are NOT modeled; the model is sequential.
+  - Value of these theorems: regression tests that fail compilation if the
+    shared pure logic breaks the invariant on these paths, plus formal
+    documentation of intended behavior.
 -/
 
 end FlareOperator.StateMachine.VerifiedSafety

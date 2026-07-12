@@ -41,7 +41,9 @@ def scenario2_fullInit : GlobalState :=
   let s3 := stepGlobal s2 .OperatorProcessMsg       -- node-2 registers
   let s4 := stepGlobal s3 .OperatorProcessMsg       -- node-3 registers
 
-  -- Step 5: Operator reconciles (assigns Proxies to roles)
+  -- Step 5: Operator reconciles. This runs the production assignment
+  -- function (assignProxiesPure → autoAssign), so the remaining proxies are
+  -- assigned here: the P1 Master and one Slave per partition.
   let s5 := stepGlobal s4 .OperatorReconcile
 
   -- Step 6-9: Nodes receive topology broadcasts
@@ -50,11 +52,12 @@ def scenario2_fullInit : GlobalState :=
   let s8 := stepGlobal s7 (.NodeProcessMsg "node-2:11211")
   let s9 := stepGlobal s8 (.NodeProcessMsg "node-3:11211")
 
-  -- Step 10-13: Nodes complete reconstruction (except P0 Master which is instant)
-  let s10 := stepGlobal s9 (.NodeReconstructionComplete "node-0:11211")  -- P0 Master (no reconstruction)
-  let s11 := stepGlobal s10 (.NodeReconstructionComplete "node-1:11211") -- P0 Slave
-  let s12 := stepGlobal s11 (.NodeReconstructionComplete "node-2:11211") -- P1 Master
-  let s13 := stepGlobal s12 (.NodeReconstructionComplete "node-3:11211") -- P1 Slave
+  -- Step 10-13: Nodes complete reconstruction (P0 Master is instant; the
+  -- other roles were assigned in Prepare and reconstruct before Active)
+  let s10 := stepGlobal s9 (.NodeReconstructionComplete "node-0:11211")
+  let s11 := stepGlobal s10 (.NodeReconstructionComplete "node-1:11211")
+  let s12 := stepGlobal s11 (.NodeReconstructionComplete "node-2:11211")
+  let s13 := stepGlobal s12 (.NodeReconstructionComplete "node-3:11211")
 
   -- Step 14-17: Operator processes Ready/Active messages
   let s14 := stepGlobal s13 .OperatorProcessMsg  -- node-0 Ready
@@ -63,6 +66,16 @@ def scenario2_fullInit : GlobalState :=
   let s17 := stepGlobal s16 .OperatorProcessMsg  -- node-3 Ready
 
   s17
+
+/-! ## Scenario 3: Master failover -/
+
+/-- After full initialization, the P0 Master's pod dies. The operator's dead
+    node detection and failover (the SAME functions the production FSM runs:
+    detectDeadNodesPure → handleFailoverWithPromotion) must demote the dead
+    master and promote P0's live slave — so the partition keeps exactly one
+    master and its data survives on the promoted replica. -/
+def scenario3_afterFailover : GlobalState :=
+  stepGlobal scenario2_fullInit (.NodeDie "node-0:11211")
 
 /-! ## Invariant Checks -/
 

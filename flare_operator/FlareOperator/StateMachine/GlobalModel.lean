@@ -10,6 +10,7 @@
 
 import FlareOperator.StateMachine.Reconciler
 import FlareOperator.StateMachine.FlaredNode
+import FlareOperator.StateMachine.K8sReconciler
 import FlareOperator.K8s.FlareCluster
 import FlareOperator.Flare.Protocol
 
@@ -19,6 +20,7 @@ open FlareOperator.K8s
 open FlareOperator.Flare
 open FlareOperator.Reconciler
 open FlareOperator.StateMachine.FlaredNode
+open FlareOperator.K8sReconciler (assignProxiesPure handleFailoverWithPromotion detectDeadNodesPure)
 
 /-! ## Network Messages -/
 
@@ -81,6 +83,9 @@ inductive GlobalStep where
   | OperatorReconcile
   /-- A node completes its reconstruction -/
   | NodeReconstructionComplete (nodeKey : String)
+  /-- A node's pod dies, and the operator's dead-node detection + failover
+      run (mirrors the AfterDetectDead → AfterHandleFailover FSM steps) -/
+  | NodeDie (nodeKey : String)
   deriving Repr
 
 def stepGlobal (g : GlobalState) (step : GlobalStep) : GlobalState :=
@@ -159,9 +164,14 @@ def stepGlobal (g : GlobalState) (step : GlobalStep) : GlobalState :=
             nodeToOpQueue := newNodeToOpQueue }
 
   | .OperatorReconcile =>
-    -- Trigger reconciliation without external event
+    -- Role assignment for unassigned proxies, using the SAME function the
+    -- production FSM runs in its AfterAssignRoles step (assignProxiesPure →
+    -- autoAssign). Previously this called `reconcileStep .Ping`, which is a
+    -- no-op — meaning the model's "reconcile" never assigned any role and
+    -- the scenario proofs only ever saw the single P0 master created by the
+    -- NodeAdd fast path.
     let oldVersion := g.operatorState.nodeMapVersion
-    let (newOpState, _) := reconcileStep g.operatorState g.crdSpec .Ping
+    let newOpState := assignProxiesPure g.operatorState g.crdSpec
 
     let newQueue := if newOpState.nodeMapVersion > oldVersion then
       let nodes := newOpState.getNodes
@@ -192,6 +202,34 @@ def stepGlobal (g : GlobalState) (step : GlobalStep) : GlobalState :=
       { g with
         nodeStates := newNodeStates,
         nodeToOpQueue := newNodeToOpQueue }
+
+  | .NodeDie nodeKey =>
+    -- The pod disappears from the live pod list; the operator then runs the
+    -- SAME dead-node detection and failover functions as the production FSM
+    -- (detectDeadNodesPure → handleFailoverWithPromotion on the rebuilt
+    -- partition map, cf. flareReconcileCore's AfterHandleFailover step).
+    -- A dead Master's live Slave is promoted to Master/Active so the
+    -- partition's data survives.
+    let newNodeStates := g.nodeStates.filter (fun kv => kv.1 != nodeKey)
+    let livePodKeys := newNodeStates.map Prod.fst
+    let deadKeys := detectDeadNodesPure g.operatorState livePodKeys
+    let oldVersion := g.operatorState.nodeMapVersion
+    let newOpState :=
+      handleFailoverWithPromotion g.operatorState.rebuildPartitionMap deadKeys
+
+    let newQueue := if newOpState.nodeMapVersion > oldVersion then
+      let nodes := newOpState.getNodes
+      let version := newOpState.nodeMapVersion
+      newNodeStates.foldl (fun acc (nodeKey, _) =>
+        acc ++ [(nodeKey, .NodeSync version nodes)]
+      ) g.opToNodeQueue
+    else
+      g.opToNodeQueue
+
+    { g with
+      operatorState := newOpState,
+      nodeStates := newNodeStates,
+      opToNodeQueue := newQueue }
 
 /-! ## Multi-Step Execution -/
 

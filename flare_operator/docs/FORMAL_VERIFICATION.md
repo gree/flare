@@ -95,7 +95,54 @@ At **every single step**, the invariant holds. Lean kernel verifies this by exec
 
 **Significance**: The most common production scenario (fresh deployment) is mathematically proven correct.
 
-#### 4. Checkpoint Proofs
+#### 4. Non-Vacuity of Scenario 2
+
+```lean
+theorem scenario2_p0_has_master : countMastersForPartition scenario2_fullInit 0 = 1
+theorem scenario2_p1_has_master : countMastersForPartition scenario2_fullInit 1 = 1
+```
+
+**Why this matters**: "At most one master" holds trivially on a trace that
+never assigns masters. An earlier version of the model called
+`reconcileStep .Ping` (a no-op) as its reconcile step, so `scenario2_verified`
+was proving the invariant over a trace with only the single P0 master created
+by the NodeAdd fast path. The model's reconcile now runs the SAME
+`assignProxiesPure` function as the production FSM's AfterAssignRoles step,
+and these theorems fail to compile if the trace ever stops producing both
+masters.
+
+#### 5. Master Failover Safety ⭐
+
+```lean
+theorem scenario3_verified :
+    checkInvariantFinite scenario3_afterFailover 2 = true
+theorem scenario3_p0_still_has_master :
+    countMastersForPartition scenario3_afterFailover 0 = 1
+theorem scenario3_dead_node_not_master : ...
+```
+
+**Proof**: After full initialization, the P0 master's pod dies (`.NodeDie`).
+The model runs the SAME functions the production FSM executes
+(`detectDeadNodesPure` → `handleFailoverWithPromotion`) and Lean verifies:
+the invariant holds, P0's master slot is refilled by exactly one node, and
+that node is NOT the dead pod — i.e. the promoted node is the surviving
+replica that still holds the partition's data.
+
+#### 6. Merge Repairs the FSM-vs-TCP Double-Master Race (R-1)
+
+```lean
+theorem r1_merge_repairs_double_master : ...
+theorem r1_merge_keeps_fsm_master : ...
+theorem r1_merge_demotes_tcp_duplicate : ...
+```
+
+**Scenario**: the FSM assigns pod-y as P0 master from a stale snapshot while
+the TCP fast path concurrently assigns pod-x on the live ref. A naive merge
+carries both forward — two masters. `mergeClusterState` (shared by the
+production commit path in Main.lean) now demotes the duplicate, keeping the
+FSM's assignment, and these theorems verify it.
+
+#### 7. Checkpoint Proofs
 
 ```lean
 -- After node registration (step 4)
@@ -342,13 +389,25 @@ theorem scenario2_verified :
 ### What Is Verified
 
 ✅ Core invariant: "At most one master per partition"
-✅ Concrete scenarios: Fresh 4-node cluster initialization
+✅ Concrete scenarios: Fresh 4-node cluster initialization (non-vacuous:
+   both partitions provably end with exactly one master)
 ✅ Specific execution traces: 17-step deployment sequence
+✅ Master failover: dead-master demotion + live-slave promotion preserves
+   the invariant (scenario 3, same functions as the production FSM)
+✅ Merge repair: the FSM-vs-TCP double-master race is repaired by
+   `mergeClusterState` (R-1 theorems)
 
 ### What Is NOT Yet Verified
 
 ❌ **General case**: Arbitrary execution traces of unbounded length
+❌ **True concurrency**: The model is sequential. The production operator
+   runs the TCP server and the FSM loop as concurrent IO threads over a
+   shared `IO.Ref`; only the pure merge/repair logic is verified, not the
+   interleaving itself
+❌ **The IO layer**: kubectl subprocesses, TCP wire handling, ConfigMap
+   persistence — the proofs cover the shared pure functions only
 ❌ **Liveness properties**: "Eventually all partitions get a master"
+   (Liveness.lean proves termination/ESR only under 9 explicit assumptions)
 ❌ **Byzantine faults**: Malicious nodes sending invalid messages
 ❌ **Network partitions**: Split-brain scenarios
 

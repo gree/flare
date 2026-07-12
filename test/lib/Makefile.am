@@ -38,6 +38,7 @@ noinst_LTLIBRARIES =	\
 	test_op_ping.la	\
 	test_op_prepend.la	\
 	test_op_quit.la	\
+	test_op_repl_sync_wal.la	\
 	test_op_replace.la	\
 	test_op_set.la	\
 	test_op_show.la	\
@@ -122,6 +123,7 @@ test_op_parser_la_SOURCES	= test_op_parser.cc connection_iostream.cc
 test_op_ping_la_SOURCES	= test_op_ping.cc connection_iostream.cc
 test_op_prepend_la_SOURCES	= test_op_prepend.cc connection_iostream.cc
 test_op_quit_la_SOURCES	= test_op_quit.cc connection_iostream.cc
+test_op_repl_sync_wal_la_SOURCES	= test_op_repl_sync_wal.cc connection_iostream.cc
 test_op_replace_la_SOURCES	= test_op_replace.cc connection_iostream.cc
 test_op_set_la_SOURCES	= test_op_set.cc connection_iostream.cc
 test_op_show_la_SOURCES	= test_op_show.cc connection_iostream.cc

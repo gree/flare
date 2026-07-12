@@ -511,6 +511,73 @@ int ini_option::reload() {
 			this->_reconstruction_bwlimit = opt_var_map["reconstruction-bwlimit"].as<int>();
 		}
 
+		// RocksDB WAL streaming limits are runtime-tunable: they are only
+		// read per-batch by the WAL sync path, so a plain setter propagation
+		// (see flared::reload()) is enough. Reload them here.
+		if (opt_var_map.count("rocksdb-wal-sync-bwlimit")) {
+			log_notice("  rocksdb_wal_sync_bwlimit: %d -> %d", this->_rocksdb_wal_sync_bwlimit, opt_var_map["rocksdb-wal-sync-bwlimit"].as<int>());
+			this->_rocksdb_wal_sync_bwlimit = opt_var_map["rocksdb-wal-sync-bwlimit"].as<int>();
+		}
+
+		if (opt_var_map.count("rocksdb-wal-sync-interval")) {
+			log_notice("  rocksdb_wal_sync_interval: %d -> %d", this->_rocksdb_wal_sync_interval, opt_var_map["rocksdb-wal-sync-interval"].as<int>());
+			this->_rocksdb_wal_sync_interval = opt_var_map["rocksdb-wal-sync-interval"].as<int>();
+		}
+
+		if (opt_var_map.count("rocksdb-wal-max-batch-bytes")) {
+			log_notice("  rocksdb_wal_max_batch_bytes: %llu -> %llu",
+					(unsigned long long)this->_rocksdb_wal_max_batch_bytes,
+					(unsigned long long)opt_var_map["rocksdb-wal-max-batch-bytes"].as<uint64_t>());
+			this->_rocksdb_wal_max_batch_bytes = opt_var_map["rocksdb-wal-max-batch-bytes"].as<uint64_t>();
+		}
+
+		if (opt_var_map.count("rocksdb-resync-failure-threshold")) {
+			log_notice("  rocksdb_resync_failure_threshold: %d -> %d", this->_rocksdb_resync_failure_threshold, opt_var_map["rocksdb-resync-failure-threshold"].as<int>());
+			this->_rocksdb_resync_failure_threshold = opt_var_map["rocksdb-resync-failure-threshold"].as<int>();
+		}
+
+		// The remaining rocksdb options require reopening the DB (block cache,
+		// write buffers, WAL retention, sync-writes, storage-type). We do NOT
+		// hot-reload them; instead warn that a restart is required if the
+		// config value differs from the running value. This mirrors how
+		// non-reloadable options are treated (cf. storage-type in load()).
+		if (opt_var_map.count("rocksdb-block-cache-size-mb")
+				&& opt_var_map["rocksdb-block-cache-size-mb"].as<uint64_t>() != this->_rocksdb_block_cache_size_mb) {
+			log_warning("rocksdb-block-cache-size-mb changed in config (%llu -> %llu) but requires reopening the DB; restart flared to apply",
+					(unsigned long long)this->_rocksdb_block_cache_size_mb,
+					(unsigned long long)opt_var_map["rocksdb-block-cache-size-mb"].as<uint64_t>());
+		}
+		if (opt_var_map.count("rocksdb-write-buffer-size-mb")
+				&& opt_var_map["rocksdb-write-buffer-size-mb"].as<uint64_t>() != this->_rocksdb_write_buffer_size_mb) {
+			log_warning("rocksdb-write-buffer-size-mb changed in config (%llu -> %llu) but requires reopening the DB; restart flared to apply",
+					(unsigned long long)this->_rocksdb_write_buffer_size_mb,
+					(unsigned long long)opt_var_map["rocksdb-write-buffer-size-mb"].as<uint64_t>());
+		}
+		if (opt_var_map.count("rocksdb-max-write-buffer-number")
+				&& opt_var_map["rocksdb-max-write-buffer-number"].as<int>() != this->_rocksdb_max_write_buffer_number) {
+			log_warning("rocksdb-max-write-buffer-number changed in config (%d -> %d) but requires reopening the DB; restart flared to apply",
+					this->_rocksdb_max_write_buffer_number,
+					opt_var_map["rocksdb-max-write-buffer-number"].as<int>());
+		}
+		if (opt_var_map.count("rocksdb-wal-ttl-seconds")
+				&& opt_var_map["rocksdb-wal-ttl-seconds"].as<uint64_t>() != this->_rocksdb_wal_ttl_seconds) {
+			log_warning("rocksdb-wal-ttl-seconds changed in config (%llu -> %llu) but requires reopening the DB; restart flared to apply",
+					(unsigned long long)this->_rocksdb_wal_ttl_seconds,
+					(unsigned long long)opt_var_map["rocksdb-wal-ttl-seconds"].as<uint64_t>());
+		}
+		if (opt_var_map.count("rocksdb-wal-size-limit-mb")
+				&& opt_var_map["rocksdb-wal-size-limit-mb"].as<uint64_t>() != this->_rocksdb_wal_size_limit_mb) {
+			log_warning("rocksdb-wal-size-limit-mb changed in config (%llu -> %llu) but requires reopening the DB; restart flared to apply",
+					(unsigned long long)this->_rocksdb_wal_size_limit_mb,
+					(unsigned long long)opt_var_map["rocksdb-wal-size-limit-mb"].as<uint64_t>());
+		}
+		if (opt_var_map.count("rocksdb-sync-writes")
+				&& opt_var_map["rocksdb-sync-writes"].as<bool>() != this->_rocksdb_sync_writes) {
+			log_warning("rocksdb-sync-writes changed in config (%s -> %s) but requires reopening the DB; restart flared to apply",
+					this->_rocksdb_sync_writes ? "true" : "false",
+					opt_var_map["rocksdb-sync-writes"].as<bool>() ? "true" : "false");
+		}
+
 		if (opt_var_map.count("replication-type")) {
 			log_notice("  replication_type:       %s -> %s", this->_replication_type.c_str(), opt_var_map["replication-type"].as<string>().c_str());
 

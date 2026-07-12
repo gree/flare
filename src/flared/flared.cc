@@ -446,6 +446,25 @@ int flared::reload() {
 	// reconstruction_bwlimit
 	this->_cluster->set_reconstruction_bwlimit(ini_option_object().get_reconstruction_bwlimit());
 
+#ifdef HAVE_LIBROCKSDB
+	// RocksDB WAL streaming limits are runtime-tunable. Push the reloaded
+	// values onto the live storage instance. These setters only update
+	// plain members read per-batch by the WAL sync path, so no DB reopen
+	// is needed. DB-reopen-required rocksdb options are ignored here on
+	// purpose; ini_option::reload() already warned that a restart is needed.
+	if (this->_storage != NULL && this->_storage->get_type() == storage::type_rocksdb) {
+		storage_rocksdb* rdb = static_cast<storage_rocksdb*>(this->_storage);
+		rdb->set_resync_failure_threshold(
+			ini_option_object().get_rocksdb_resync_failure_threshold());
+		rdb->set_wal_max_batch_bytes(
+			ini_option_object().get_rocksdb_wal_max_batch_bytes());
+		rdb->set_wal_sync_bwlimit(
+			ini_option_object().get_rocksdb_wal_sync_bwlimit());
+		rdb->set_wal_sync_interval(
+			ini_option_object().get_rocksdb_wal_sync_interval());
+	}
+#endif
+
 	// replication_type
 	this->_cluster->set_replication_type(ini_option_object().get_replication_type());
 	

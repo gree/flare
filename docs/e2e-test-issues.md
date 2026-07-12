@@ -29,7 +29,7 @@ Last updated: 2026-04-18
 
 | Reason | Affected tests | Fix |
 |---|---|---|
-| flared `reload()` doesn't re-apply config values | G12-5, G2-5, G5-5 | Patch `ini_option.cc` reload() |
+| flared `reload()` doesn't re-apply config values | G12-5, G2-5, G5-5 | ✅ FIXED: `ini_option::reload()` + `flared::reload()` now hot-reload the runtime-tunable rocksdb WAL options (`rocksdb-wal-sync-bwlimit`, `rocksdb-wal-sync-interval`, `rocksdb-wal-max-batch-bytes`, `rocksdb-resync-failure-threshold`) and push them onto the live `storage_rocksdb` on SIGHUP. DB-reopen options (block cache, write buffer, wal-ttl/size-limit, sync-writes, storage-type) now log a restart-required warning. G2-5 still also needs a PVC. |
 | emptyDir (no PVC) → no prior LSN across restarts | G1-5, G2-5 | Add PVC to StatefulSet template |
 | emptyDir → no orphan keys after failover | G7-4, G7-5 | Add PVC to StatefulSet template |
 

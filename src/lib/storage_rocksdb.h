@@ -109,6 +109,11 @@ protected:
 
 	// Master identity token (this node's DB lineage identifier, persisted
 	// in the reserved key `__flare_repl_master_id`). Populated by open().
+	// Guarded by _mutex_master_id: set_master_id() runs on the
+	// reconstruction thread (token adoption after a full dump) while op
+	// worker threads read it concurrently, and std::string mutation is
+	// not atomic.
+	mutable pthread_rwlock_t _mutex_master_id;
 	string _master_id;
 
 	// WAL replication observability counters. Read-only after increment;
@@ -200,8 +205,10 @@ public:
 	// token (set at open(); empty only if open() was never called or
 	// failed). `set_master_id()` overwrites and persists a new token,
 	// used after a successful full dump or reconstruction from a different
-	// master to adopt that master's lineage.
-	const string& get_master_id() const { return this->_master_id; }
+	// master to adopt that master's lineage. Returns a copy (not a
+	// reference) because the token can be rewritten concurrently by the
+	// reconstruction thread; see _mutex_master_id.
+	string get_master_id() const;
 	int set_master_id(const string& id);
 
 	// WAL sync observability. All counters are monotonically increasing

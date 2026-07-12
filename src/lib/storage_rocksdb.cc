@@ -88,6 +88,7 @@ storage_rocksdb::storage_rocksdb(
 	_orphan_scan_ttl_seconds(300) {
 	pthread_mutex_init(&this->_resync_failure_mutex, NULL);
 	pthread_mutex_init(&this->_orphan_scan_mutex, NULL);
+	pthread_rwlock_init(&this->_mutex_master_id, NULL);
 	this->_data_path = this->_data_dir + "/flare.rocksdb";
 	this->_setup_rocksdb_options();
 }
@@ -105,6 +106,7 @@ storage_rocksdb::~storage_rocksdb() {
 	}
 	pthread_mutex_destroy(&this->_resync_failure_mutex);
 	pthread_mutex_destroy(&this->_orphan_scan_mutex);
+	pthread_rwlock_destroy(&this->_mutex_master_id);
 }
 // }}}
 
@@ -188,8 +190,10 @@ int storage_rocksdb::_load_or_generate_master_id() {
 	string value;
 	rocksdb::Status status = this->_db->Get(this->_read_options, kReplMasterIdKey, &value);
 	if (status.ok()) {
+		pthread_rwlock_wrlock(&this->_mutex_master_id);
 		this->_master_id = value;
-		log_debug("loaded existing master id (id=%s)", this->_master_id.c_str());
+		pthread_rwlock_unlock(&this->_mutex_master_id);
+		log_debug("loaded existing master id (id=%s)", value.c_str());
 		return 0;
 	}
 	if (!status.IsNotFound()) {
@@ -215,9 +219,18 @@ int storage_rocksdb::_load_or_generate_master_id() {
 		log_err("failed to persist master id: %s", status.ToString().c_str());
 		return -1;
 	}
+	pthread_rwlock_wrlock(&this->_mutex_master_id);
 	this->_master_id = new_id;
-	log_notice("generated new master id (id=%s)", this->_master_id.c_str());
+	pthread_rwlock_unlock(&this->_mutex_master_id);
+	log_notice("generated new master id (id=%s)", new_id.c_str());
 	return 0;
+}
+
+string storage_rocksdb::get_master_id() const {
+	pthread_rwlock_rdlock(&this->_mutex_master_id);
+	string id = this->_master_id;
+	pthread_rwlock_unlock(&this->_mutex_master_id);
+	return id;
 }
 
 int storage_rocksdb::set_master_id(const string& id) {
@@ -233,9 +246,11 @@ int storage_rocksdb::set_master_id(const string& id) {
 		log_err("failed to persist master id: %s", status.ToString().c_str());
 		return -1;
 	}
+	pthread_rwlock_wrlock(&this->_mutex_master_id);
 	string old_id = this->_master_id;
 	this->_master_id = id;
-	log_notice("master id updated (old=%s, new=%s)", old_id.c_str(), this->_master_id.c_str());
+	pthread_rwlock_unlock(&this->_mutex_master_id);
+	log_notice("master id updated (old=%s, new=%s)", old_id.c_str(), id.c_str());
 	return 0;
 }
 // }}}
@@ -263,7 +278,7 @@ int storage_rocksdb::open() {
 	}
 
 	log_notice("storage open (path=%s, type=%s, master_id=%s, sync_writes=%s, wal_ttl=%llus, wal_size_limit=%lluMB)",
-		this->_data_path.c_str(), storage::type_cast(this->_type).c_str(), this->_master_id.c_str(),
+		this->_data_path.c_str(), storage::type_cast(this->_type).c_str(), this->get_master_id().c_str(),
 		this->_sync_writes ? "true" : "false",
 		(unsigned long long)this->_wal_ttl_seconds,
 		(unsigned long long)this->_wal_size_limit_mb);
@@ -735,6 +750,17 @@ int storage_rocksdb::incr(entry& e, uint64_t value, result& r, bool increment, i
 int storage_rocksdb::truncate(int b) {
 	log_notice("truncating storage (this may take a while)", 0);
 
+	// Exclude every concurrent get/set/remove/incr (they hold the
+	// wholelock in read mode plus a slot lock) while we scan-delete and
+	// clear the header cache. Same locking convention as
+	// storage_tcb::truncate().
+	if ((b & behavior_skip_lock) == 0) {
+		pthread_rwlock_wrlock(&this->_mutex_wholelock);
+		this->_mutex_slot_wrlock_all();
+	}
+
+	int r = 0;
+
 	// Full table scan delete (RocksDB doesn't have fast truncate).
 	// Reserved replication metadata keys are preserved: truncating them
 	// would silently break WAL sync lineage tracking on the next sync.
@@ -750,28 +776,37 @@ int storage_rocksdb::truncate(int b) {
 		rocksdb::Status status = this->_db->Delete(this->_write_options, k);
 		if (!status.ok()) {
 			log_err("RocksDB::Delete() failed during truncate: %s", status.ToString().c_str());
-			delete it;
-			return -1;
+			r = -1;
+			break;
 		}
 	}
 
 	delete it;
 
-	// Reset the replicated-LSN marker: after a truncate the slave is
-	// logically empty from the application's perspective and the next
-	// sync should start from scratch. The master-id lineage token is
-	// preserved so that incremental sync with the current master can
-	// continue if appropriate.
-	rocksdb::WriteOptions wo;
-	wo.sync = this->_sync_writes;
-	wo.disableWAL = false;
-	this->_db->Delete(wo, kReplLastLsnKey);
+	if (r == 0) {
+		// Reset the replicated-LSN marker: after a truncate the slave is
+		// logically empty from the application's perspective and the next
+		// sync should start from scratch. The master-id lineage token is
+		// preserved so that incremental sync with the current master can
+		// continue if appropriate.
+		rocksdb::WriteOptions wo;
+		wo.sync = this->_sync_writes;
+		wo.disableWAL = false;
+		this->_db->Delete(wo, kReplLastLsnKey);
+	}
 
 	this->_clear_header_cache();
 
-	log_notice("storage truncated (master_id preserved=%s, repl_last_lsn reset to 0)",
-		this->_master_id.c_str());
-	return 0;
+	if ((b & behavior_skip_lock) == 0) {
+		this->_mutex_slot_unlock_all();
+		pthread_rwlock_unlock(&this->_mutex_wholelock);
+	}
+
+	if (r == 0) {
+		log_notice("storage truncated (master_id preserved=%s, repl_last_lsn reset to 0)",
+			this->get_master_id().c_str());
+	}
+	return r;
 }
 
 int storage_rocksdb::iter_begin() {
@@ -781,6 +816,9 @@ int storage_rocksdb::iter_begin() {
 
 	if (this->_iter_snapshot) {
 		log_warning("iteration already in progress", 0);
+		// Release the wholelock acquired above: leaking a rdlock here
+		// would permanently block any later wrlock (e.g. truncate()).
+		pthread_rwlock_unlock(&this->_mutex_wholelock);
 		return -1;
 	}
 

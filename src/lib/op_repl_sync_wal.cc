@@ -136,7 +136,7 @@ int op_repl_sync_wal::_run_server() {
 	// batches from us — it would silently corrupt its own data.
 	// Instead, respond with master_id_mismatch; the slave will fall
 	// back to a non-destructive full dump and adopt our token.
-	const string& server_master_id = rocksdb->get_master_id();
+	const string server_master_id = rocksdb->get_master_id();
 	if (!this->_client_master_id.empty() && this->_client_master_id != server_master_id) {
 		log_notice("master_id mismatch (client=%s server=%s) -> slave must resync",
 			this->_client_master_id.c_str(), server_master_id.c_str());

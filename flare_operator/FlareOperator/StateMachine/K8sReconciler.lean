@@ -255,25 +255,31 @@ def handleFailoverWithPromotion (state : FlareClusterState) (deadKeys : List Str
     master (the P0 fast path in `reconcileStep`) on the live ref. A merge
     that carries both forward would leave two Masters for one partition —
     a split-brain the rest of the system never repairs. Callers put the
-    FSM-computed entries FIRST so the FSM's assignment is the survivor. -/
-def demoteDuplicateMasters (nodeMap : List (String × FlareNode))
-    : List (String × FlareNode) :=
-  let step := fun (acc : List Int × List (String × FlareNode))
-      (kv : String × FlareNode) =>
-    let (seenParts, out) := acc
-    let (key, node) := kv
+    FSM-computed entries FIRST so the FSM's assignment is the survivor.
+
+    Recursive worker: `seen` accumulates the partitions whose (first) Master
+    has already been kept; any later Master of a partition in `seen` is
+    demoted. Structural recursion (not a fold) so the safety theorem below
+    goes through by plain induction. -/
+def demoteDuplicateMastersGo (seen : List Int)
+    : List (String × FlareNode) → List (String × FlareNode)
+  | [] => []
+  | (key, node) :: rest =>
     if node.role == FlareRole.Master then
-      if seenParts.contains node.partition then
+      if seen.contains node.partition then
         let demoted := { node with role := FlareRole.Proxy,
                                    state := FlareState.Active,
                                    partition := -1,
                                    balance := 100 }
-        (seenParts, out ++ [(key, demoted)])
+        (key, demoted) :: demoteDuplicateMastersGo seen rest
       else
-        (seenParts ++ [node.partition], out ++ [(key, node)])
+        (key, node) :: demoteDuplicateMastersGo (node.partition :: seen) rest
     else
-      (seenParts, out ++ [(key, node)])
-  (nodeMap.foldl step ([], [])).2
+      (key, node) :: demoteDuplicateMastersGo seen rest
+
+def demoteDuplicateMasters (nodeMap : List (String × FlareNode))
+    : List (String × FlareNode) :=
+  demoteDuplicateMastersGo [] nodeMap
 
 /-- Per-key merge of the FSM's computed state (`ucs`) onto the live state
     (`current`). Lives in the pure layer (rather than Main) so its safety
@@ -314,6 +320,121 @@ def mergeClusterState (current ucs : FlareClusterState) : FlareClusterState :=
   ({ ucs with
       nodeMap := combined
       nodeMapVersion := current.nodeMapVersion + 1 }).rebuildPartitionMap
+
+/-! ## General safety of the duplicate-master repair
+
+These are GENERAL theorems over ARBITRARY node maps — not `decide` checks of
+concrete scenarios. Together they machine-check the split-brain repair at the
+state-commit boundary: no matter what the FSM and the TCP server each wrote,
+the node map that `mergeClusterState` commits can never contain two Masters
+for the same partition. -/
+
+/-- Count the Masters assigned to partition `p`. -/
+def countMastersFor (p : Int) (l : List (String × FlareNode)) : Nat :=
+  (l.filter (fun kv => kv.2.role == FlareRole.Master && kv.2.partition == p)).length
+
+/-- `countMastersFor` over a cons: the head contributes 1 exactly when it is
+    a Master of partition `p`. -/
+theorem countMastersFor_cons (p : Int) (key : String) (node : FlareNode)
+    (l : List (String × FlareNode)) :
+    countMastersFor p ((key, node) :: l) =
+      (if node.role == FlareRole.Master && node.partition == p
+       then countMastersFor p l + 1 else countMastersFor p l) := by
+  simp only [countMastersFor, List.filter_cons]
+  split
+  · simp
+  · rfl
+
+/-- If partition `p` is already in `seen`, the worker never emits a Master
+    for `p` (all further Masters of `p` are demoted). -/
+theorem demoteDuplicateMastersGo_none (l : List (String × FlareNode))
+    (seen : List Int) (p : Int) (h : seen.contains p = true) :
+    countMastersFor p (demoteDuplicateMastersGo seen l) = 0 := by
+  induction l generalizing seen with
+  | nil => rfl
+  | cons kv rest ih =>
+    obtain ⟨key, node⟩ := kv
+    simp only [demoteDuplicateMastersGo]
+    split
+    · rename_i hm
+      split
+      · -- duplicate Master: demoted to Proxy, contributes nothing
+        have hproxy : (FlareRole.Proxy == FlareRole.Master) = false := rfl
+        simp [countMastersFor_cons, hproxy]
+        exact ih seen h
+      · -- first Master of its partition: kept, but its partition ≠ p
+        rename_i hc
+        have hne : (node.partition == p) = false := by
+          cases hb : node.partition == p with
+          | false => rfl
+          | true =>
+            have heq : node.partition = p := eq_of_beq hb
+            rw [heq] at hc
+            rw [h] at hc
+            exact absurd rfl hc
+        simp [countMastersFor_cons, hne]
+        exact ih (node.partition :: seen)
+          (by simp [List.contains_cons]; exact Or.inr (by simpa using h))
+    · rename_i hm
+      have hm' : (node.role == FlareRole.Master) = false := by
+        cases hb : node.role == FlareRole.Master with
+        | false => rfl
+        | true => exact absurd hb hm
+      simp [countMastersFor_cons, hm']
+      exact ih seen h
+
+/-- MAIN GENERAL THEOREM (worker): for EVERY input list and every partition,
+    the worker's output contains at most one Master. -/
+theorem demoteDuplicateMastersGo_atMostOne (l : List (String × FlareNode))
+    (seen : List Int) (p : Int) :
+    countMastersFor p (demoteDuplicateMastersGo seen l) ≤ 1 := by
+  induction l generalizing seen with
+  | nil => simp [demoteDuplicateMastersGo, countMastersFor]
+  | cons kv rest ih =>
+    obtain ⟨key, node⟩ := kv
+    simp only [demoteDuplicateMastersGo]
+    split
+    · rename_i hm
+      split
+      · -- duplicate Master: demoted, contributes nothing
+        have hproxy : (FlareRole.Proxy == FlareRole.Master) = false := rfl
+        simp [countMastersFor_cons, hproxy]
+        exact ih seen
+      · -- first Master of its partition: kept
+        rename_i hc
+        cases hp : node.partition == p with
+        | false =>
+          simp [countMastersFor_cons, hp]
+          exact ih (node.partition :: seen)
+        | true =>
+          -- the kept Master IS for partition p: it contributes exactly 1,
+          -- and with p now in `seen` the tail contributes 0.
+          have heq : node.partition = p := eq_of_beq hp
+          have hzero := demoteDuplicateMastersGo_none rest (node.partition :: seen) p
+            (by simp [List.contains_cons, heq])
+          simp [countMastersFor_cons, hm, hp, hzero]
+    · rename_i hm
+      have hm' : (node.role == FlareRole.Master) = false := by
+        cases hb : node.role == FlareRole.Master with
+        | false => rfl
+        | true => exact absurd hb hm
+      simp [countMastersFor_cons, hm']
+      exact ih seen
+
+/-- MAIN GENERAL THEOREM: `demoteDuplicateMasters` outputs at most one
+    Master per partition for EVERY input. -/
+theorem demoteDuplicateMasters_atMostOne (l : List (String × FlareNode)) (p : Int) :
+    countMastersFor p (demoteDuplicateMasters l) ≤ 1 :=
+  demoteDuplicateMastersGo_atMostOne l [] p
+
+/-- COROLLARY: the node map committed by `mergeClusterState` can never
+    contain two Masters for one partition — for ARBITRARY `current` and
+    `ucs` states, i.e. regardless of how the FSM snapshot and the TCP
+    server's live writes interleaved. -/
+theorem mergeClusterState_atMostOneMaster (current ucs : FlareClusterState) (p : Int) :
+    countMastersFor p (mergeClusterState current ucs).nodeMap ≤ 1 := by
+  unfold mergeClusterState
+  exact demoteDuplicateMasters_atMostOne _ p
 
 /-- Pure dead-node detection (mirrors legacy `detectDeadNodes`, Main.lean:116-124).
     A node is dead only if its pod is gone AND it is a role/state that should be

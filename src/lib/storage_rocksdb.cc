@@ -27,8 +27,15 @@
 #include "app.h"
 #include "storage_rocksdb.h"
 
+#include <rocksdb/utilities/checkpoint.h>
+
 #include <uuid/uuid.h>
 #include <pthread.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <dirent.h>
+#include <algorithm>
+#include <vector>
 
 namespace gree {
 namespace flare {
@@ -85,7 +92,11 @@ storage_rocksdb::storage_rocksdb(
 	_wal_sync_bwlimit(0),
 	_wal_sync_interval(0),
 	_orphan_scan_valid(false),
-	_orphan_scan_ttl_seconds(300) {
+	_orphan_scan_ttl_seconds(300),
+	_backup_keep(7),
+	_last_backup_epoch(0),
+	_backup_success(0),
+	_backup_failure(0) {
 	pthread_mutex_init(&this->_resync_failure_mutex, NULL);
 	pthread_mutex_init(&this->_orphan_scan_mutex, NULL);
 	pthread_rwlock_init(&this->_mutex_master_id, NULL);
@@ -1084,6 +1095,162 @@ void storage_rocksdb::clear_orphan_scan() {
 	this->_orphan_scan_valid = false;
 	this->_orphan_scan.token.clear();
 	pthread_mutex_unlock(&this->_orphan_scan_mutex);
+}
+
+// }}}
+
+// {{{ named backups (checkpoints + retention)
+
+namespace {
+	// Validate a user-supplied backup name. It becomes a directory
+	// component under backups/, so it must not enable path traversal or
+	// escape the backups/ dir. Allowed: [A-Za-z0-9._-], non-empty, no
+	// leading '.', no '/'. Returns true if safe.
+	bool is_valid_backup_name(const string& name) {
+		if (name.empty()) {
+			return false;
+		}
+		if (name[0] == '.') {
+			return false;
+		}
+		for (size_t i = 0; i < name.size(); i++) {
+			char c = name[i];
+			bool ok = (c >= 'A' && c <= 'Z') ||
+			          (c >= 'a' && c <= 'z') ||
+			          (c >= '0' && c <= '9') ||
+			          c == '.' || c == '_' || c == '-';
+			if (!ok) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	// Recursively delete a directory tree. Best-effort: logs but does not
+	// throw. Returns 0 on success, -1 if anything could not be removed.
+	int remove_tree(const string& path) {
+		DIR* d = opendir(path.c_str());
+		if (d == NULL) {
+			// Not a directory (or gone): try a plain unlink.
+			if (unlink(path.c_str()) == 0 || errno == ENOENT) {
+				return 0;
+			}
+			return -1;
+		}
+		int r = 0;
+		struct dirent* ent;
+		while ((ent = readdir(d)) != NULL) {
+			string n = ent->d_name;
+			if (n == "." || n == "..") {
+				continue;
+			}
+			string child = path + "/" + n;
+			struct stat st;
+			if (lstat(child.c_str(), &st) != 0) {
+				r = -1;
+				continue;
+			}
+			if (S_ISDIR(st.st_mode)) {
+				if (remove_tree(child) != 0) {
+					r = -1;
+				}
+			} else {
+				if (unlink(child.c_str()) != 0 && errno != ENOENT) {
+					r = -1;
+				}
+			}
+		}
+		closedir(d);
+		if (rmdir(path.c_str()) != 0 && errno != ENOENT) {
+			r = -1;
+		}
+		return r;
+	}
+}
+
+int storage_rocksdb::create_named_backup(const string& name, string& out_path) {
+	if (!is_valid_backup_name(name)) {
+		log_err("invalid backup name [%s] (allowed: [A-Za-z0-9._-], no leading '.', no '/')", name.c_str());
+		this->incr_backup_failure();
+		return -1;
+	}
+
+	if (this->_db == NULL) {
+		log_err("create_named_backup called before DB open", 0);
+		this->incr_backup_failure();
+		return -1;
+	}
+
+	const string backups_dir = this->_data_dir + "/backups";
+	const string path        = backups_dir + "/" + name;
+
+	// Ensure the backups/ parent exists (EEXIST is fine).
+	if (mkdir(backups_dir.c_str(), 0700) != 0 && errno != EEXIST) {
+		log_err("failed to create backups dir [%s]: %s", backups_dir.c_str(), util::strerror(errno));
+		this->incr_backup_failure();
+		return -1;
+	}
+
+	rocksdb::Checkpoint* cp = NULL;
+	rocksdb::Status s = rocksdb::Checkpoint::Create(this->_db, &cp);
+	if (!s.ok() || cp == NULL) {
+		log_err("Checkpoint::Create failed: %s", s.ToString().c_str());
+		this->incr_backup_failure();
+		return -1;
+	}
+
+	// CreateCheckpoint requires the target directory to NOT already
+	// exist; it fails otherwise. That is the behavior we want (never
+	// silently overwrite an existing backup).
+	s = cp->CreateCheckpoint(path);
+	delete cp;
+	if (!s.ok()) {
+		log_err("CreateCheckpoint(%s) failed: %s", path.c_str(), s.ToString().c_str());
+		this->incr_backup_failure();
+		return -1;
+	}
+
+	out_path = path;
+	this->incr_backup_success();
+	this->_last_backup_epoch = time(NULL);
+	log_notice("backup created at %s (keep=%d)", path.c_str(), this->_backup_keep);
+
+	// Prune: keep the newest _backup_keep sibling directories under
+	// backups/. Names are expected to be sortable (timestamp-prefixed),
+	// so lexical order == chronological order and the oldest sort first.
+	if (this->_backup_keep > 0) {
+		vector<string> names;
+		DIR* d = opendir(backups_dir.c_str());
+		if (d != NULL) {
+			struct dirent* ent;
+			while ((ent = readdir(d)) != NULL) {
+				string n = ent->d_name;
+				if (n == "." || n == "..") {
+					continue;
+				}
+				struct stat st;
+				string child = backups_dir + "/" + n;
+				if (lstat(child.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) {
+					names.push_back(n);
+				}
+			}
+			closedir(d);
+		}
+		if (static_cast<int>(names.size()) > this->_backup_keep) {
+			sort(names.begin(), names.end());
+			int to_remove = static_cast<int>(names.size()) - this->_backup_keep;
+			for (int i = 0; i < to_remove; i++) {
+				string victim = backups_dir + "/" + names[i];
+				if (remove_tree(victim) == 0) {
+					log_notice("pruned old backup %s", victim.c_str());
+				} else {
+					log_warning("failed to fully prune old backup %s", victim.c_str());
+				}
+			}
+		}
+	}
+
+	return 0;
 }
 
 // }}}

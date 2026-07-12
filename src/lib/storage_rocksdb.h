@@ -155,6 +155,16 @@ protected:
 	orphan_scan_token       _orphan_scan;
 	time_t                  _orphan_scan_ttl_seconds;
 
+	// Named-checkpoint backups (logical-destruction protection). Backups
+	// are RocksDB Checkpoints placed under _data_dir + "/backups/<name>".
+	// _backup_keep bounds how many are retained (oldest pruned by name
+	// order); _last_backup_epoch is the wall-clock time of the last
+	// successful backup (0 = never) so monitoring can alert on staleness.
+	int                     _backup_keep;
+	time_t                  _last_backup_epoch;
+	AtomicCounter           _backup_success;
+	AtomicCounter           _backup_failure;
+
 	virtual int _get_header(string key, entry& e);
 	void _setup_rocksdb_options();
 
@@ -288,6 +298,30 @@ public:
 	time_t get_orphan_scan_ttl_seconds() const {
 		return this->_orphan_scan_ttl_seconds;
 	}
+
+	// Create a RocksDB Checkpoint (a consistent, hard-linked snapshot of
+	// the live DB) under _data_dir + "/backups/<name>". `name` must be a
+	// simple, non-empty identifier ([A-Za-z0-9._-], no leading '.', no
+	// '/') — this is a path-traversal guard, since the name becomes a
+	// directory component. On success returns 0 and sets out_path to the
+	// checkpoint directory; on any failure returns -1. After a successful
+	// checkpoint, prunes sibling backups down to the newest _backup_keep
+	// by lexical name order (callers are expected to use sortable
+	// timestamp-prefixed names so lexical order == chronological order).
+	int create_named_backup(const string& name, string& out_path);
+
+	// Retention: how many backups to keep under backups/ (default 7).
+	void set_backup_keep(int n) { this->_backup_keep = n; }
+	int  get_backup_keep() const { return this->_backup_keep; }
+
+	// Wall-clock epoch of the last successful backup (0 = never).
+	time_t get_last_backup_epoch() const { return this->_last_backup_epoch; }
+
+	// Backup observability counters (monotonic).
+	uint64_t get_backup_success() { return this->_backup_success.fetch(); }
+	uint64_t get_backup_failure() { return this->_backup_failure.fetch(); }
+	void incr_backup_success()    { this->_backup_success.incr(); }
+	void incr_backup_failure()    { this->_backup_failure.incr(); }
 };
 
 }   // namespace flare

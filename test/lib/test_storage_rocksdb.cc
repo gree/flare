@@ -33,6 +33,9 @@
 #include <sys/types.h>
 #include <pthread.h>
 #include <unistd.h>
+#include <dirent.h>
+#include <rocksdb/db.h>
+#include <rocksdb/options.h>
 
 using namespace std;
 
@@ -816,6 +819,132 @@ void test_phaseC_orphan_scan_token_expires_after_ttl() {
 	// After the TTL window elapses the same token is no longer actionable.
 	sleep(2);
 	cut_assert_equal_int(0, s->lookup_orphan_scan(t, out) ? 1 : 0);
+
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// ---------------------------------------------------------------------------
+// Named backups (RocksDB checkpoints) + retention
+// ---------------------------------------------------------------------------
+
+namespace {
+	// Count immediate subdirectories of a path (used to check retention).
+	int count_subdirs(const string& path) {
+		DIR* d = opendir(path.c_str());
+		if (d == NULL) {
+			return -1;
+		}
+		int n = 0;
+		struct dirent* ent;
+		while ((ent = readdir(d)) != NULL) {
+			string name = ent->d_name;
+			if (name == "." || name == "..") {
+				continue;
+			}
+			struct stat st;
+			string child = path + "/" + name;
+			if (lstat(child.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) {
+				n++;
+			}
+		}
+		closedir(d);
+		return n;
+	}
+
+	bool path_is_dir(const string& path) {
+		struct stat st;
+		return stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
+	}
+
+	bool path_exists(const string& path) {
+		struct stat st;
+		return stat(path.c_str(), &st) == 0;
+	}
+}
+
+// A backup of a populated DB produces a complete, openable checkpoint dir
+// (has a CURRENT file) from which the written key is readable.
+void test_backup_create_and_read_back() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	cut_assert_equal_int(0, storage_set_string(s, "hello", "world"));
+
+	string out_path;
+	cut_assert_equal_int(0, s->create_named_backup("20260712-000000", out_path));
+	cut_assert_operator(out_path.empty(), ==, false);
+	cut_assert_operator(path_is_dir(out_path), ==, true);
+	// A RocksDB directory always has a CURRENT manifest pointer.
+	cut_assert_operator(path_exists(out_path + "/CURRENT"), ==, true);
+
+	// Open the checkpoint as a standalone read-only RocksDB and confirm the
+	// key is present. The stored value carries storage_rocksdb's serialized
+	// header prefix, so we assert the payload appears at the tail rather
+	// than doing an exact-equals on the raw bytes.
+	rocksdb::DB* raw = NULL;
+	rocksdb::Options opt;
+	opt.create_if_missing = false;
+	rocksdb::Status st = rocksdb::DB::OpenForReadOnly(opt, out_path, &raw);
+	cut_assert_operator(st.ok(), ==, true);
+	string val;
+	rocksdb::Status g = raw->Get(rocksdb::ReadOptions(), "hello", &val);
+	cut_assert_operator(g.ok(), ==, true);
+	cut_assert_operator(val.size() >= 5, ==, true);
+	cut_assert_equal_string("world", val.substr(val.size() - 5).c_str());
+	delete raw;
+
+	// Success is reflected in the counters / epoch.
+	cut_assert_equal_int(1, static_cast<int>(s->get_backup_success()));
+	cut_assert_operator(s->get_last_backup_epoch(), >, static_cast<time_t>(0));
+
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// Names that could escape the backups/ directory (or are otherwise invalid)
+// are rejected and create nothing.
+void test_backup_rejects_invalid_names() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+
+	const char* bad[] = { "../evil", "a/b", "", ".hidden" };
+	for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+		string out_path;
+		cut_assert_equal_int(-1, s->create_named_backup(bad[i], out_path));
+	}
+	// Every rejection bumped the failure counter; nothing succeeded.
+	cut_assert_equal_int(0, static_cast<int>(s->get_backup_success()));
+	cut_assert_equal_int(4, static_cast<int>(s->get_backup_failure()));
+	// No backups directory content was produced by the invalid names. (A
+	// backups/ dir may not even exist; count_subdirs returns -1 then.)
+	string backups = string(wal_master_dir) + "/backups";
+	int n = count_subdirs(backups);
+	cut_assert_operator(n <= 0, ==, true);
+
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// With _backup_keep=2, creating 4 backups leaves only the 2 newest (by
+// sortable name order).
+void test_backup_retention_prunes_oldest() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	s->set_backup_keep(2);
+	cut_assert_equal_int(0, storage_set_string(s, "k", "v"));
+
+	const char* names[] = {
+		"20260712-000001",
+		"20260712-000002",
+		"20260712-000003",
+		"20260712-000004",
+	};
+	for (size_t i = 0; i < 4; i++) {
+		string out_path;
+		cut_assert_equal_int(0, s->create_named_backup(names[i], out_path));
+	}
+
+	string backups = string(wal_master_dir) + "/backups";
+	cut_assert_equal_int(2, count_subdirs(backups));
+	// The two newest survive; the two oldest are pruned.
+	cut_assert_operator(path_is_dir(backups + "/20260712-000003"), ==, true);
+	cut_assert_operator(path_is_dir(backups + "/20260712-000004"), ==, true);
+	cut_assert_operator(path_exists(backups + "/20260712-000001"), ==, false);
+	cut_assert_operator(path_exists(backups + "/20260712-000002"), ==, false);
 
 	drop_rocksdb(s, wal_master_dir);
 }

@@ -186,6 +186,9 @@ int op_stats::_send_stats(thread_pool* req_tp, thread_pool* other_tp, storage* s
 			_send_stat("rocksdb_wal_max_batch_bytes"        , rdb->get_wal_max_batch_bytes());
 			_send_stat("rocksdb_wal_sync_bwlimit"           , rdb->get_wal_sync_bwlimit());
 			_send_stat("rocksdb_wal_sync_interval"          , rdb->get_wal_sync_interval());
+			_send_stat("rocksdb_backup_success"             , rdb->get_backup_success());
+			_send_stat("rocksdb_backup_failure"             , rdb->get_backup_failure());
+			_send_stat("rocksdb_last_backup_epoch"          , static_cast<uint64_t>(rdb->get_last_backup_epoch()));
 		}
 	}
 #endif

@@ -97,6 +97,7 @@ ini_option::ini_option():
 		_rocksdb_wal_max_batch_bytes(default_rocksdb_wal_max_batch_bytes),
 		_rocksdb_wal_sync_bwlimit(default_rocksdb_wal_sync_bwlimit),
 		_rocksdb_wal_sync_interval(default_rocksdb_wal_sync_interval),
+		_rocksdb_backup_keep(default_rocksdb_backup_keep),
 		_log_stderr(false) {
 	pthread_mutex_init(&this->_mutex_index_servers, NULL);
 }
@@ -434,6 +435,10 @@ int ini_option::load() {
 		if (opt_var_map.count("rocksdb-wal-sync-interval")) {
 			this->_rocksdb_wal_sync_interval = opt_var_map["rocksdb-wal-sync-interval"].as<int>();
 		}
+
+		if (opt_var_map.count("rocksdb-backup-keep")) {
+			this->_rocksdb_backup_keep = opt_var_map["rocksdb-backup-keep"].as<int>();
+		}
 	} catch (int e) {
 		cout << option << endl;
 		return -1;
@@ -534,6 +539,11 @@ int ini_option::reload() {
 		if (opt_var_map.count("rocksdb-resync-failure-threshold")) {
 			log_notice("  rocksdb_resync_failure_threshold: %d -> %d", this->_rocksdb_resync_failure_threshold, opt_var_map["rocksdb-resync-failure-threshold"].as<int>());
 			this->_rocksdb_resync_failure_threshold = opt_var_map["rocksdb-resync-failure-threshold"].as<int>();
+		}
+
+		if (opt_var_map.count("rocksdb-backup-keep")) {
+			log_notice("  rocksdb_backup_keep: %d -> %d", this->_rocksdb_backup_keep, opt_var_map["rocksdb-backup-keep"].as<int>());
+			this->_rocksdb_backup_keep = opt_var_map["rocksdb-backup-keep"].as<int>();
 		}
 
 		// The remaining rocksdb options require reopening the DB (block cache,
@@ -772,7 +782,8 @@ int ini_option::_setup_config_option(program_options::options_description& optio
 		("rocksdb-resync-failure-threshold",program_options::value<int>(),		"consecutive WAL/dump resync failures before the slave self-demotes to down state; data is preserved (default 3, rocksdb only)")
 		("rocksdb-wal-max-batch-bytes",		program_options::value<uint64_t>(),	"max size of a single replicated RocksDB WriteBatch; batches beyond this abort WAL sync and fall back to full dump (default 16MB, 0 disables, rocksdb only)")
 		("rocksdb-wal-sync-bwlimit",			program_options::value<int>(),		"bandwidth limit in KB/s for WAL incremental sync; 0 inherits reconstruction-bwlimit (default 0, rocksdb only)")
-		("rocksdb-wal-sync-interval",			program_options::value<int>(),		"inter-batch delay in usec for WAL incremental sync; 0 inherits reconstruction-interval (default 0, rocksdb only)");
+		("rocksdb-wal-sync-interval",			program_options::value<int>(),		"inter-batch delay in usec for WAL incremental sync; 0 inherits reconstruction-interval (default 0, rocksdb only)")
+		("rocksdb-backup-keep",					program_options::value<int>(),		"number of on-disk named backups (checkpoints) to retain under data-dir/backups/; oldest pruned by name order (default 7, dynamic, rocksdb only)");
 
 	return 0;
 }

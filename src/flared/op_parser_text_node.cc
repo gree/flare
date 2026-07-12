@@ -33,6 +33,7 @@
 #include "op_repl_sync_wal.h"
 #include "op_orphan_scan.h"
 #include "op_orphan_purge.h"
+#include "op_backup.h"
 
 namespace gree {
 namespace flare {
@@ -132,6 +133,9 @@ op* op_parser_text_node::_determine_op(const char* first, const char* buf, int& 
 	} else if (strcmp(first, "orphan_purge") == 0) {
 		r = new op_orphan_purge(this->_connection,
 			singleton<flared>::instance().get_cluster(),
+			singleton<flared>::instance().get_storage());
+	} else if (strcmp(first, "backup") == 0) {
+		r = new op_backup(this->_connection,
 			singleton<flared>::instance().get_storage());
 	} else {
 		r = new op_error(this->_connection);

@@ -24,6 +24,7 @@ import FlareOperator.E2E.Tests.OrphanScanPurge
 import FlareOperator.E2E.Tests.TerminatingPodHandling
 import FlareOperator.E2E.Tests.FailoverDuringReplication
 import FlareOperator.E2E.Tests.DataSurvivalFailover
+import FlareOperator.E2E.Tests.PvcDataSurvival
 
 open FlareOperator.E2E
 
@@ -46,5 +47,6 @@ def main (args : List String) : IO UInt32 :=
     Tests.OrphanScanPurge.suite,
     Tests.TerminatingPodHandling.suite,
     Tests.FailoverDuringReplication.suite,
-    Tests.DataSurvivalFailover.suite
+    Tests.DataSurvivalFailover.suite,
+    Tests.PvcDataSurvival.suite
   ] args

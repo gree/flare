@@ -32,6 +32,16 @@ structure ClusterConfig where
   operatorPort : Nat := 12120
   /-- Storage backend: "tch" (default, Tokyo Cabinet) or "rocksdb". -/
   storageBackend : String := "tch"
+  /-- Persist flared data on a PVC (volumeClaimTemplates) instead of the
+      pod-local tmpdir. With a PVC the data directory survives pod
+      recreation, so a partition can recover its data even when the master
+      AND all its slaves die at once — the case replica promotion alone can
+      never cover. Mirrors the production example
+      helm/flare-operator/examples/flare-cluster-persistent.yaml. -/
+  usePvc : Bool := false
+  /-- PVC size request (only used when usePvc). Kind's default storage
+      class (local-path) ignores the size, so keep it small. -/
+  pvcSize : String := "1Gi"
   deriving Repr
 
 /-- Image tag used for the flared container in this cluster. -/
@@ -149,11 +159,29 @@ def statefulSetYaml (cfg : ClusterConfig) : String :=
   let numPods := cfg.partitions * cfg.replicas
   let operatorSvc := s!"{cfg.operatorName}.{ns}.svc.cluster.local"
   let image := cfg.flaredImage
-  -- TCH stores a single `.hdb` file; RocksDB stores a directory. The
-  -- cleanup line below wipes whichever is there (plus a leftover WAL)
-  -- so a fresh pod always starts with an empty data directory.
-  let cleanup := "rm -rf /tmp/flare/*.hdb /tmp/flare/*.hdb.wal /tmp/flare/rocksdb"
+  -- Without a PVC the pod-local dir may contain leftovers from a previous
+  -- container in the same sandbox, so we wipe it: a fresh pod must start
+  -- with an empty data directory (TCH stores a single `.hdb` file; RocksDB
+  -- stores a directory). WITH a PVC the whole point is that data survives
+  -- pod recreation, so we only mkdir and never wipe.
+  let dataDir := if cfg.usePvc then "/data/flare" else "/tmp/flare"
+  let prep := if cfg.usePvc then
+      s!"mkdir -p {dataDir}"
+    else
+      s!"rm -rf {dataDir}/*.hdb {dataDir}/*.hdb.wal {dataDir}/rocksdb && mkdir -p {dataDir}"
   let storageFlag := s!"--storage-type={cfg.storageBackend}"
+  let pvcMount := if cfg.usePvc then "
+            - name: data
+              mountPath: /data" else ""
+  let pvcTemplates := if cfg.usePvc then s!"
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [\"ReadWriteOnce\"]
+        resources:
+          requests:
+            storage: {cfg.pvcSize}" else ""
   s!"apiVersion: v1
 kind: Service
 metadata:
@@ -195,13 +223,13 @@ spec:
         - name: flared
           image: {image}
           imagePullPolicy: Never
-          command: [\"sh\", \"-c\", \"{cleanup} && mkdir -p /tmp/flare && exec flared --config=/etc/flared/extra.conf --data-dir /tmp/flare --server-port {cfg.flarePort} --index-server-name {operatorSvc} --index-server-port {cfg.operatorPort} {storageFlag} --stderr\"]
+          command: [\"sh\", \"-c\", \"{prep} && exec flared --config=/etc/flared/extra.conf --data-dir {dataDir} --server-port {cfg.flarePort} --index-server-name {operatorSvc} --index-server-port {cfg.operatorPort} {storageFlag} --stderr\"]
           ports:
             - containerPort: {cfg.flarePort}
               name: flare
           volumeMounts:
             - name: flared-config
-              mountPath: /etc/flared
+              mountPath: /etc/flared{pvcMount}
           livenessProbe:
             tcpSocket:
               port: {cfg.flarePort}
@@ -224,7 +252,7 @@ spec:
       volumes:
         - name: flared-config
           configMap:
-            name: {cluster}-config"
+            name: {cluster}-config{pvcTemplates}"
 
 /-- Generate FlareCluster CRD YAML. -/
 def flareClusterCrdYaml (cfg : ClusterConfig) : String :=
@@ -518,6 +546,11 @@ def cleanupCluster (cfg : ClusterConfig) : IO Unit := do
   kubectlDelete "lease" s!"{cfg.name}-operator-lease" ns
   for i in List.range cfg.partitions do
     kubectlDelete "service" s!"{cfg.name}-{i}" ns
+  -- volumeClaimTemplates PVCs outlive the StatefulSet by design; delete them
+  -- explicitly so a re-run starts from empty storage.
+  if cfg.usePvc then
+    for i in List.range (cfg.partitions * cfg.replicas) do
+      kubectlDelete "pvc" s!"data-{cfg.name}-nodes-{i}" ns
   -- Delete ClusterRoleBinding (cluster-scoped resource)
   let bindingName := s!"flare-operator-{ns}"
   let _ ← kubectl ["delete", "clusterrolebinding", bindingName, "--ignore-not-found"]

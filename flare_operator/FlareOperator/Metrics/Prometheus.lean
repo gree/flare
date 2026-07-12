@@ -63,6 +63,12 @@ structure OperatorMetrics where
   slavePrepareCount : Gauge
   proxyCount : Gauge
 
+  -- Gauge: nodes stuck in Prepare beyond the watchdog threshold. Alert-only:
+  -- the operator never auto-demotes a reconstructing node (large datasets
+  -- legitimately reconstruct for hours), so this gauge is the signal for a
+  -- human to investigate a stalled reconstruction.
+  prepareStuckCount : Gauge
+
   deriving Nonempty
 
 /-! ## Initialization -/
@@ -87,6 +93,7 @@ def initMetrics : IO OperatorMetrics := do
   let slaveActiveCount ← IO.mkRef 0.0
   let slavePrepareCount ← IO.mkRef 0.0
   let proxyCount ← IO.mkRef 0.0
+  let prepareStuckCount ← IO.mkRef 0.0
 
   return {
     reconcileDuration := reconcileDuration
@@ -98,6 +105,7 @@ def initMetrics : IO OperatorMetrics := do
     slaveActiveCount := { value := slaveActiveCount }
     slavePrepareCount := { value := slavePrepareCount }
     proxyCount := { value := proxyCount }
+    prepareStuckCount := { value := prepareStuckCount }
   }
 
 /-! ## Metric Update Functions -/
@@ -238,6 +246,12 @@ def exportMetrics (metrics : OperatorMetrics) (clusterName : String) : IO String
 
   let proxy ← metrics.proxyCount.value.get
   output := output ++ formatGauge "flare_operator_nodes_total" (labels ++ ",role=\"proxy\",state=\"active\"") proxy
+
+  -- Prepare-stuck watchdog (gauge)
+  output := output ++ "# HELP flare_operator_nodes_prepare_stuck Nodes in Prepare longer than the watchdog threshold\n"
+  output := output ++ "# TYPE flare_operator_nodes_prepare_stuck gauge\n"
+  let prepareStuck ← metrics.prepareStuckCount.value.get
+  output := output ++ formatGauge "flare_operator_nodes_prepare_stuck" labels prepareStuck
 
   return output
 

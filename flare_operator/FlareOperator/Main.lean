@@ -608,11 +608,27 @@ private def runReconcileDriver (stateRef : IO.Ref FlareClusterState)
 -- FSM-Driven Reconcile (Complete with safety checks and metrics)
 -- ===========================================================================
 
+/-- Prepare-stuck watchdog threshold in reconcile cycles (5s each): 720 ≈ 1h. -/
+private def prepareStuckThresholdCycles : Nat := 720
+
 /-- FSM-driven reconcile loop with partition reduction safety check and metrics.
-    This is the production-ready version that wraps runReconcileDriver. -/
+    This is the production-ready version that wraps runReconcileDriver.
+
+    LEASE FENCE / dual-leader window: the lease is renewed at the top of each
+    outer loop iteration, but a reconcile that outlives the 15s lease (slow
+    kubectl, many effects) keeps issuing writes until the NEXT iteration
+    notices the loss — during which a new leader may already be active. The
+    K8s-side writes are level-triggered and idempotent (the new leader
+    re-issues them within one 5s tick), so the damaging stale write is the
+    TCP topology broadcast to flared nodes. We therefore re-verify lease
+    holdership immediately before broadcasting and skip it if lost. Residual
+    window: a broadcast already in flight when the lease flips — bounded by
+    one broadcast duration, and corrected by the new leader's next tick. -/
 private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.Ref FlareClusterView)
     (migrationRef : IO.Ref MigrationPhase) (graceCyclesRef : IO.Ref Nat)
-    (metrics : OperatorMetrics) (crName ns : String) : IO Unit := do
+    (prepareCyclesRef : IO.Ref (List (String × Nat)))
+    (metrics : OperatorMetrics) (leaseName identity : String)
+    (crName ns : String) : IO Unit := do
   -- 1. Fetch CRD (handled by FSM, but we need it early for partition reduction check)
   match ← getFlareClusterCRD crName ns with
   | .error e =>
@@ -641,13 +657,42 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
   let finalState ← stateRef.get
   let finalVersion := finalState.nodeMapVersion
   if finalVersion != oldVersion then
-    IO.eprintln s!"[flare-operator] topology changed (v{oldVersion} → v{finalVersion}), broadcasting"
-    broadcastTopologyToAllPods crName ns finalVersion finalState.getNodes
-    recordTopologyBroadcast metrics
-    updateNodeMapVersion metrics finalVersion
+    -- Lease fence: never broadcast topology from a stale leader (see docstring).
+    let stillLeader ← do
+      match ← getLease leaseName ns with
+      | .ok lease => pure (lease.holderIdentity == identity && !lease.expired)
+      | .error e =>
+        IO.eprintln s!"[flare-operator] lease fence: getLease failed ({e}); skipping broadcast this tick"
+        pure false
+    if stillLeader then
+      IO.eprintln s!"[flare-operator] topology changed (v{oldVersion} → v{finalVersion}), broadcasting"
+      broadcastTopologyToAllPods crName ns finalVersion finalState.getNodes
+      recordTopologyBroadcast metrics
+      updateNodeMapVersion metrics finalVersion
+    else
+      IO.eprintln s!"[flare-operator] LEASE FENCE: not the lease holder anymore — suppressing topology broadcast (v{oldVersion} → v{finalVersion})"
 
   -- 4. Update node counts
   updateNodeCounts metrics finalState
+
+  -- 4b. Prepare-stuck watchdog (alert-only). A node whose reconstruction
+  -- stalls stays in Prepare forever: it is deliberately excluded from dead
+  -- node detection, so nothing else will ever surface it. Track how many
+  -- consecutive reconcile cycles each node has been in Prepare and raise a
+  -- log warning + the flare_operator_nodes_prepare_stuck gauge past the
+  -- threshold. NO automatic demotion: a 100GB+ dataset legitimately
+  -- reconstructs for hours, and demoting it would abort a healthy rebuild.
+  let prevCycles ← prepareCyclesRef.get
+  let prepareNodes := finalState.nodeMap.filter (fun kv => kv.2.state == FlareState.Prepare)
+  let newCycles := prepareNodes.map (fun (key, _) =>
+    (key, ((prevCycles.lookup key).getD 0) + 1))
+  prepareCyclesRef.set newCycles
+  let stuck := newCycles.filter (fun kv => kv.2 > prepareStuckThresholdCycles)
+  metrics.prepareStuckCount.set stuck.length.toFloat
+  for (key, cycles) in stuck do
+    -- Log at the first crossing, then roughly every 10 minutes — not every tick.
+    if cycles == prepareStuckThresholdCycles + 1 || cycles % 120 == 0 then
+      IO.eprintln s!"[flare-operator] WARNING: node {key} has been in Prepare for {cycles} cycles (~{cycles * 5 / 60} min). Reconstruction may have stalled; check that pod's flared logs. No automatic action is taken."
 
   -- 5. Handle rocksdb config propagation + cluster replication migration
   let crd ← crdRef.get
@@ -931,6 +976,7 @@ def main (args : List String) : IO Unit := do
   -- Nodes in Prepare state (actively reconstructing) are separately protected
   -- by detectDeadNodes regardless of the grace period.
   let graceCyclesRef ← IO.mkRef (24 : Nat)
+  let prepareCyclesRef ← IO.mkRef ([] : List (String × Nat))
 
   -- Start TCP server in background (using Server.TcpServer)
   let _ ← IO.asTask (prio := .default) do
@@ -956,7 +1002,7 @@ def main (args : List String) : IO Unit := do
     let startTime ← IO.monoMsNow
     try
       -- Use FSM-driven reconcile (complete implementation with all 5 requirements)
-      reconcileOnceFSM stateRef crdRef migrationRef graceCyclesRef metrics crName ns
+      reconcileOnceFSM stateRef crdRef migrationRef graceCyclesRef prepareCyclesRef metrics leaseName identity crName ns
     catch e =>
       IO.eprintln s!"[flare-operator] reconcile error: {e}"
     let endTime ← IO.monoMsNow

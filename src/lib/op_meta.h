@@ -54,6 +54,10 @@ public:
 	// identity token. Empty string means "server did not advertise a
 	// token" (e.g. non-RocksDB backend or older flared).
 	virtual int run_client_features(bool& rocksdb_wal_supported, string& master_id);
+	// Full features probe that also returns the server's current RocksDB
+	// sequence number (latest_lsn). 0 means "server did not advertise one"
+	// (non-RocksDB backend or older flared that predates the token).
+	virtual int run_client_features(bool& rocksdb_wal_supported, string& master_id, uint64_t& latest_lsn);
 
 protected:
 	virtual int _parse_text_server_parameters();
@@ -61,7 +65,7 @@ protected:
 	virtual int _run_client();
 	virtual int _run_client_features();
 	virtual int _parse_text_client_parameters(int& partition_size, storage::hash_algorithm& key_hash_algorithm, key_resolver::type& key_resolver_type, int& key_resolver_modular_hint, int& key_resolver_modular_virtual);
-	virtual int _parse_text_client_features(bool& rocksdb_wal_supported, string& master_id);
+	virtual int _parse_text_client_features(bool& rocksdb_wal_supported, string& master_id, uint64_t& latest_lsn);
 };
 
 }	// namespace flare

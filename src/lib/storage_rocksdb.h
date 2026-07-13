@@ -210,6 +210,10 @@ public:
 	int apply_batch(const rocksdb::WriteBatch& batch);
 	int apply_batch_with_lsn(const rocksdb::WriteBatch& batch, uint64_t master_lsn);
 	uint64_t get_repl_last_lsn();
+	// Durably overwrite the replication cursor (kReplLastLsnKey). Used to
+	// seed the cursor after a full-dump reconstruction so the next WAL
+	// sync can be incremental. Returns 0 on success, -1 on write failure.
+	int set_repl_last_lsn(uint64_t lsn);
 
 	// Master identity token access. `get_master_id()` returns this DB's
 	// token (set at open(); empty only if open() was never called or

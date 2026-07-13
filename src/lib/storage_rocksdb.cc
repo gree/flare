@@ -1009,6 +1009,29 @@ uint64_t storage_rocksdb::get_repl_last_lsn() {
 	return 0;  // No previous sync
 }
 
+int storage_rocksdb::set_repl_last_lsn(uint64_t lsn) {
+	// Durable, WAL-logged Put so the seeded cursor survives a crash /
+	// restart just like the marker written by apply_batch_with_lsn. This
+	// is how a slave reconstructed by full dump acquires a nonzero
+	// replication cursor (seeded from the master's latest_lsn) so that a
+	// *subsequent* WAL sync can be incremental. See handler_reconstruction.
+	uint64_t old_lsn = this->get_repl_last_lsn();
+	string lsn_value = boost::lexical_cast<string>(lsn);
+
+	rocksdb::WriteOptions wo;
+	wo.sync = this->_sync_writes;
+	wo.disableWAL = false;
+	rocksdb::Status status = this->_db->Put(wo, kReplLastLsnKey, lsn_value);
+	if (!status.ok()) {
+		log_err("set_repl_last_lsn Put() failed (lsn=%llu): %s",
+			(unsigned long long)lsn, status.ToString().c_str());
+		return -1;
+	}
+	log_notice("repl_last_lsn seeded: %llu -> %llu",
+		(unsigned long long)old_lsn, (unsigned long long)lsn);
+	return 0;
+}
+
 // Returns the current consecutive-failure streak. Held under a
 // dedicated mutex because the counter supports reset-on-success, which
 // AtomicCounter does not.

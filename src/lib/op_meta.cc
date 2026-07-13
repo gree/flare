@@ -73,15 +73,21 @@ int op_meta::run_client(int& partition_size, storage::hash_algorithm& key_hash_a
  */
 int op_meta::run_client_features(bool& rocksdb_wal_supported) {
 	string ignored;
-	return this->run_client_features(rocksdb_wal_supported, ignored);
+	uint64_t ignored_lsn = 0;
+	return this->run_client_features(rocksdb_wal_supported, ignored, ignored_lsn);
 }
 
 int op_meta::run_client_features(bool& rocksdb_wal_supported, string& master_id) {
+	uint64_t ignored_lsn = 0;
+	return this->run_client_features(rocksdb_wal_supported, master_id, ignored_lsn);
+}
+
+int op_meta::run_client_features(bool& rocksdb_wal_supported, string& master_id, uint64_t& latest_lsn) {
 	if (this->_run_client_features() < 0) {
 		return -1;
 	}
 
-	return this->_parse_text_client_features(rocksdb_wal_supported, master_id);
+	return this->_parse_text_client_features(rocksdb_wal_supported, master_id, latest_lsn);
 }
 // }}}
 
@@ -137,8 +143,17 @@ int op_meta::_run_server() {
 			// master_id_mismatch and force a redundant full dump.
 			storage_rocksdb* rdb = dynamic_cast<storage_rocksdb*>(this->_storage);
 			if (rdb) {
-				string reply = "rocksdb_wal=1 master_id=" + rdb->get_master_id();
-				return this->_send_result(result_ok, reply.c_str());
+				// latest_lsn is the master's current RocksDB sequence
+				// number. A peer that reconstructs via full dump seeds its
+				// own repl_last_lsn from this so that a *subsequent* WAL
+				// sync has a nonzero cursor to be incremental from (see
+				// handler_reconstruction). Field order is fixed and any
+				// unknown/extra token is ignorable by old clients.
+				char reply[BUFSIZ];
+				snprintf(reply, sizeof(reply), "rocksdb_wal=1 master_id=%s latest_lsn=%llu",
+					rdb->get_master_id().c_str(),
+					(unsigned long long)rdb->get_latest_sequence_number());
+				return this->_send_result(result_ok, reply);
 			}
 			return this->_send_result(result_ok, "rocksdb_wal=1");
 		}
@@ -288,9 +303,10 @@ int op_meta::_parse_text_client_parameters(int& partition_size, storage::hash_al
 	return 0;
 }
 
-int op_meta::_parse_text_client_features(bool& rocksdb_wal_supported, string& master_id) {
+int op_meta::_parse_text_client_features(bool& rocksdb_wal_supported, string& master_id, uint64_t& latest_lsn) {
 	rocksdb_wal_supported = false;
 	master_id.clear();
+	latest_lsn = 0;
 
 	// Read response line
 	char* p;
@@ -300,14 +316,16 @@ int op_meta::_parse_text_client_features(bool& rocksdb_wal_supported, string& ma
 	}
 
 	// Expected form:
-	//   OK rocksdb_wal=1 master_id=<uuid>\r\n
-	//   OK rocksdb_wal=1\r\n     (older server)
-	//   ERROR\r\n                (feature unavailable)
+	//   OK rocksdb_wal=1 master_id=<uuid> latest_lsn=<N>\r\n
+	//   OK rocksdb_wal=1 master_id=<uuid>\r\n   (server predating latest_lsn)
+	//   OK rocksdb_wal=1\r\n                    (older server)
+	//   ERROR\r\n                               (feature unavailable)
 	char q[BUFSIZ];
 	int i = util::next_word(p, q, sizeof(q));
 
 	if (strcmp(q, "OK") == 0) {
-		// Walk through remaining tokens. We accept them in any order.
+		// Walk through remaining tokens. We accept them in any order and
+		// silently ignore any we don't recognize (forward compatibility).
 		while (true) {
 			int consumed = util::next_word(p+i, q, sizeof(q));
 			if (q[0] == '\0') break;
@@ -316,12 +334,19 @@ int op_meta::_parse_text_client_features(bool& rocksdb_wal_supported, string& ma
 				rocksdb_wal_supported = true;
 			} else if (strncmp(q, "master_id=", 10) == 0) {
 				master_id.assign(q + 10);
+			} else if (strncmp(q, "latest_lsn=", 11) == 0) {
+				try {
+					latest_lsn = boost::lexical_cast<uint64_t>(q + 11);
+				} catch (boost::bad_lexical_cast&) {
+					log_debug("unparseable latest_lsn token [%s] -> ignoring", q);
+				}
 			} else {
 				log_debug("unknown features token [%s]", q);
 			}
 		}
 		if (rocksdb_wal_supported) {
-			log_info("master supports RocksDB WAL replication (master_id=%s)", master_id.c_str());
+			log_info("master supports RocksDB WAL replication (master_id=%s, latest_lsn=%llu)",
+				master_id.c_str(), (unsigned long long)latest_lsn);
 		}
 		delete[] p;
 		return 0;

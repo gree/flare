@@ -949,6 +949,34 @@ void test_backup_retention_prunes_oldest() {
 	drop_rocksdb(s, wal_master_dir);
 }
 
+// ---------------------------------------------------------------------------
+// Replication cursor seeding (set_repl_last_lsn)
+// ---------------------------------------------------------------------------
+
+// set_repl_last_lsn writes the cursor durably; get_repl_last_lsn reads it back.
+void test_set_repl_last_lsn_roundtrip() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	cut_assert_equal_int(0, static_cast<int>(s->get_repl_last_lsn()));  // fresh DB: 0
+	cut_assert_equal_int(0, s->set_repl_last_lsn(42));
+	cppcut_assert_equal(static_cast<uint64_t>(42), s->get_repl_last_lsn());
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// The seeded cursor survives a close/open cycle (durable Put).
+void test_set_repl_last_lsn_survives_reopen() {
+	storage_rocksdb* s1 = make_rocksdb(wal_master_dir);
+	cut_assert_equal_int(0, s1->set_repl_last_lsn(123456));
+	drop_rocksdb_noremove(s1);
+
+	storage_rocksdb* s2 = new storage_rocksdb(
+		wal_master_dir, 32, 4, 16, 4, 2, 86400, 1024);
+	cut_assert_equal_int(0, s2->open());
+	cppcut_assert_equal(static_cast<uint64_t>(123456), s2->get_repl_last_lsn());
+	s2->close();
+	delete s2;
+	cut_remove_path(wal_master_dir, NULL);
+}
+
 	void teardown()
 	{
 		delete rocksdb_tester;

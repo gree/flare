@@ -92,7 +92,14 @@ int handler_reconstruction::run() {
 	// on any failure (or non-rocksdb / no prior lineage) via_wal stays
 	// false and we fall through to the full dump, which merges (never
 	// truncates) and is therefore always safe as a fallback.
-	bool via_wal = this->_try_wal_reconstruction(c);
+	// _try_wal_reconstruction always probes the master's features first and
+	// reports them back here (even when it declines WAL sync), so we can
+	// seed the replication cursor after a full-dump fallback. peer_latest_lsn
+	// is captured BEFORE the dump — see the ordering rationale in that method.
+	bool peer_wal_supported = false;
+	string peer_master_id;
+	uint64_t peer_latest_lsn = 0;
+	bool via_wal = this->_try_wal_reconstruction(c, peer_wal_supported, peer_master_id, peer_latest_lsn);
 
 	if (!via_wal) {
 		op_dump* p = new op_dump(c, this->_cluster, this->_storage);
@@ -124,14 +131,12 @@ int handler_reconstruction::run() {
 	// master_id_mismatch on every WAL attempt and burn cycles on
 	// redundant full dumps. (Skipped when we reconstructed via WAL: the
 	// lineage already matched by construction — that was a precondition.)
+	// We reuse the master_id captured by _try_wal_reconstruction's pre-dump
+	// probe rather than re-probing.
 	if (!via_wal && this->_storage->get_type() == storage::type_rocksdb) {
 		storage_rocksdb* rdb = dynamic_cast<storage_rocksdb*>(this->_storage);
 		if (rdb) {
-			op_meta* meta = new op_meta(c, NULL, this->_storage);
-			bool wal_supported = false;
-			string peer_master_id;
-			if (meta->run_client_features(wal_supported, peer_master_id) == 0
-				&& !peer_master_id.empty()) {
+			if (!peer_master_id.empty()) {
 				if (rdb->set_master_id(peer_master_id) == 0) {
 					log_notice("adopted master_id=%s after reconstruction",
 						peer_master_id.c_str());
@@ -141,8 +146,14 @@ int handler_reconstruction::run() {
 			} else {
 				log_info("peer did not advertise master_id; skipping lineage adoption", 0);
 			}
-			delete meta;
 		}
+	}
+
+	// Seed the replication cursor from the master's pre-dump latest_lsn so
+	// the NEXT reconstruction can use incremental WAL sync. Runs after the
+	// master_id adoption above so the lineage check inside passes.
+	if (!via_wal) {
+		this->_seed_repl_lsn_after_dump(c, peer_wal_supported, peer_latest_lsn);
 	}
 #endif
 
@@ -166,19 +177,34 @@ int handler_reconstruction::run() {
 /**
  *	Attempt WAL-based incremental reconstruction against the master.
  *
- *	Returns true only if the full delta was applied via WAL sync (in which
- *	case the caller skips the full dump). Returns false — safely — in every
- *	other case: non-rocksdb storage, peer without WAL support, no prior
- *	lineage (empty/mismatched master_id or LSN 0), or any classified WAL
- *	failure. On a classified failure the wal_fallback_to_dump counter is
- *	bumped and the caller proceeds to the non-destructive full dump.
+ *	Always probes the master's features FIRST and reports them back via the
+ *	out-params (peer_wal_supported / peer_master_id / peer_latest_lsn), even
+ *	when it then declines to run WAL sync — the caller needs peer_latest_lsn
+ *	to seed the replication cursor after a full-dump fallback. CRITICAL: this
+ *	probe must run BEFORE the dump so the captured latest_lsn is the master's
+ *	sequence number as of *before* the dump snapshot. Seeding a pre-dump LSN
+ *	makes the next WAL sync replay a small overlapping suffix (harmless —
+ *	RocksDB WAL batches carry resolved absolute Puts, so re-applying them is
+ *	idempotent and converges), whereas a post-dump LSN could SKIP writes the
+ *	dump snapshot missed and silently lose data.
+ *
+ *	Returns true only if the full delta was applied via WAL sync (caller
+ *	skips the dump). Returns false — safely — in every other case: non-rocksdb
+ *	storage, peer without WAL support, no prior lineage (empty/mismatched
+ *	master_id or LSN 0), or any classified WAL failure. On a classified WAL
+ *	failure the wal_fallback_to_dump counter is bumped and the caller proceeds
+ *	to the non-destructive full dump.
  *
  *	Gating is deliberately strict: we only trust the local WAL cursor when
  *	the master identity token still matches the peer's, so a node restored
  *	from a backup, resynced against a different cluster, or freshly created
  *	always full-dumps rather than risk applying an incompatible WAL stream.
  */
-bool handler_reconstruction::_try_wal_reconstruction(shared_connection c) {
+bool handler_reconstruction::_try_wal_reconstruction(shared_connection c,
+		bool& peer_wal_supported, string& peer_master_id, uint64_t& peer_latest_lsn) {
+	peer_wal_supported = false;
+	peer_master_id.clear();
+	peer_latest_lsn = 0;
 #ifdef HAVE_LIBROCKSDB
 	if (this->_storage->get_type() != storage::type_rocksdb) {
 		return false;
@@ -188,24 +214,29 @@ bool handler_reconstruction::_try_wal_reconstruction(shared_connection c) {
 		return false;
 	}
 
+	// Probe the master's capabilities, lineage, and current LSN FIRST —
+	// before any dump — and hand the results back to the caller so the
+	// full-dump fallback can seed its cursor from peer_latest_lsn.
+	{
+		op_meta* meta = new op_meta(c, NULL, this->_storage);
+		int meta_rc = meta->run_client_features(peer_wal_supported, peer_master_id, peer_latest_lsn);
+		delete meta;
+		if (meta_rc != 0 || !peer_wal_supported) {
+			log_info("master does not support WAL replication -> full dump", 0);
+			return false;
+		}
+	}
+
 	// A nonzero last-applied LSN is the whole precondition for incremental
-	// catch-up: without it there is nothing to be incremental from.
+	// catch-up: without it there is nothing to be incremental from. (This
+	// is the chicken-and-egg case a fresh full-dump slave hits — it will
+	// now be seeded from peer_latest_lsn after the dump so the NEXT sync
+	// can go incremental.)
 	uint64_t last_lsn = rdb->get_repl_last_lsn();
 	string local_master_id = rdb->get_master_id();
 	if (last_lsn == 0 || local_master_id.empty()) {
 		log_info("WAL reconstruction skipped (last_lsn=%llu, master_id=%s) -> full dump",
 			(unsigned long long)last_lsn, local_master_id.c_str());
-		return false;
-	}
-
-	// Probe the master's capabilities and lineage.
-	op_meta* meta = new op_meta(c, NULL, this->_storage);
-	bool wal_supported = false;
-	string peer_master_id;
-	int meta_rc = meta->run_client_features(wal_supported, peer_master_id);
-	delete meta;
-	if (meta_rc != 0 || !wal_supported) {
-		log_info("master does not support WAL replication -> full dump", 0);
 		return false;
 	}
 
@@ -265,6 +296,45 @@ bool handler_reconstruction::_try_wal_reconstruction(shared_connection c) {
 #else
 	(void)c;
 	return false;
+#endif
+}
+
+void handler_reconstruction::_seed_repl_lsn_after_dump(shared_connection c,
+		bool peer_wal_supported, uint64_t peer_latest_lsn) {
+#ifdef HAVE_LIBROCKSDB
+	// Seed the replication cursor after a full-dump reconstruction so the
+	// NEXT reconstruction can go incremental (WAL). Only when: rocksdb
+	// backend, the peer advertised WAL support, it reported a nonzero
+	// latest_lsn, and — critically — our master_id now matches the peer's
+	// (the adoption step just ran). The seeded LSN is the master's *pre-
+	// dump* sequence number (captured in _try_wal_reconstruction before the
+	// dump); replaying that small overlap on the next sync is idempotent
+	// because RocksDB WAL batches are absolute Puts. A post-dump LSN is
+	// deliberately NOT used: it could skip writes the snapshot missed.
+	if (!peer_wal_supported || peer_latest_lsn == 0) {
+		return;
+	}
+	if (this->_storage->get_type() != storage::type_rocksdb) {
+		return;
+	}
+	storage_rocksdb* rdb = dynamic_cast<storage_rocksdb*>(this->_storage);
+	if (!rdb) {
+		return;
+	}
+	if (rdb->get_master_id().empty()) {
+		// Lineage adoption did not succeed; seeding an LSN against an
+		// unknown master would be unsafe. Skip — next time we full-dump.
+		log_info("skip repl_lsn seeding: no master_id after dump", 0);
+		return;
+	}
+	if (rdb->set_repl_last_lsn(peer_latest_lsn) == 0) {
+		log_notice("seeded repl_last_lsn=%llu after full dump (enables incremental WAL on next sync)",
+			(unsigned long long)peer_latest_lsn);
+	}
+#else
+	(void)c;
+	(void)peer_wal_supported;
+	(void)peer_latest_lsn;
 #endif
 }
 // }}}

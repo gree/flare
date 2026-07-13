@@ -248,7 +248,8 @@ private def detectAndRestartLaggingPods (state : FlareClusterState) (pods : List
     needs these lines written. When cluster-replication IS enabled, the
     `handleClusterReplication` path below renders a combined extra.conf
     containing both sections, so the two handlers never fight. -/
-private def handleRocksdbConfig (crd : FlareClusterView) (crName ns : String) : IO Unit := do
+private def handleRocksdbConfig (crd : FlareClusterView) (crName ns : String)
+    (pendingConfRef : IO.Ref (Option (String × Nat))) : IO Unit := do
   let rocksdb := crd.spec.rocksdb
   IO.eprintln s!"[DEBUG] handleRocksdbConfig: hasAny={rocksdb.hasAny} walTtl={rocksdb.walTtlSeconds} walSize={rocksdb.walSizeLimitMb} sync={rocksdb.syncWrites}"
   if !rocksdb.hasAny then
@@ -268,12 +269,18 @@ private def handleRocksdbConfig (crd : FlareClusterView) (crName ns : String) : 
   | .error e =>
     IO.eprintln s!"[flare-operator] ERROR: failed to write rocksdb config: {e}"
   | .ok () =>
-    -- Wait for kubelet to propagate the ConfigMap into each pod's mounted
-    -- file BEFORE signalling: an immediate SIGHUP makes flared re-read the
-    -- OLD file and the change is silently lost (observed as G12-5's stats
-    -- staying 0 in e2e despite flared's reload() being fixed).
-    syncConfAndSighupPods crName ns desired.trim
-    IO.eprintln s!"[TRACE] RocksdbConfig: applied {rocksdb.toExtraConf.length} bytes, verified + SIGHUP sent"
+    -- kubelet propagates the ConfigMap into the pods' mounted files
+    -- asynchronously (up to ~60-90s); a SIGHUP sent only now can make
+    -- flared re-read the OLD file and silently lose the change (observed
+    -- as G12-5's stats staying 0 despite flared's reload() being fixed).
+    -- SIGHUP immediately anyway (correct when propagation is fast), then
+    -- record the desired content as PENDING: each subsequent reconcile
+    -- tick re-checks propagation without blocking and re-signals once the
+    -- file has landed everywhere. (A synchronous wait here once stalled
+    -- the reconcile loop for minutes — never block this path.)
+    sendSighupToPods crName ns
+    pendingConfRef.set (some (desired.trim, 0))
+    IO.eprintln s!"[TRACE] RocksdbConfig: applied {rocksdb.toExtraConf.length} bytes, SIGHUP sent, verification pending"
 
 /-- Handle cluster replication state machine.
     Manages the duplicate → forward mode transition autonomously. -/
@@ -635,6 +642,7 @@ private def prepareStuckThresholdCycles : Nat := 720
 private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.Ref FlareClusterView)
     (migrationRef : IO.Ref MigrationPhase) (graceCyclesRef : IO.Ref Nat)
     (prepareCyclesRef : IO.Ref (List (String × Nat)))
+    (pendingConfRef : IO.Ref (Option (String × Nat)))
     (metrics : OperatorMetrics) (leaseName identity : String)
     (crName ns : String) : IO Unit := do
   -- 1. Fetch CRD (handled by FSM, but we need it early for partition reduction check)
@@ -705,8 +713,24 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
   -- 5. Handle rocksdb config propagation + cluster replication migration
   let crd ← crdRef.get
   let pods ← Bridge.listFlaredPods crName ns
-  handleRocksdbConfig crd crName ns
+  handleRocksdbConfig crd crName ns pendingConfRef
   handleClusterReplication crd pods migrationRef crName ns
+
+  -- 5b. Pending-config re-signal (see handleRocksdbConfig): one non-blocking
+  -- propagation check per tick; SIGHUP again once the mounted files caught
+  -- up. Give up with a loud warning after ~5 minutes of ticks.
+  match ← pendingConfRef.get with
+  | none => pure ()
+  | some (needle, ticks) =>
+    if ← Bridge.confLandedOnAllPods crName ns needle then
+      sendSighupToPods crName ns
+      pendingConfRef.set none
+      IO.eprintln s!"[flare-operator] config propagation confirmed after {ticks + 1} tick(s), SIGHUP re-sent"
+    else if ticks >= 60 then
+      pendingConfRef.set none
+      IO.eprintln s!"[flare-operator] WARNING: extra.conf update not observed on all pods after {ticks + 1} ticks — giving up re-signal; config may be applied only partially"
+    else
+      pendingConfRef.set (some (needle, ticks + 1))
 
 -- ===========================================================================
 -- Main Reconcile Loop (Legacy - for comparison/fallback)
@@ -822,7 +846,9 @@ private def reconcileOnce (stateRef : IO.Ref FlareClusterState) (crdRef : IO.Ref
 
   -- 9. Handle cluster replication migration + rocksdb config propagation
   let crd ← crdRef.get
-  handleRocksdbConfig crd crName ns
+  -- Legacy path: no pending-based re-signal (throwaway ref) — immediate
+  -- SIGHUP only, i.e. the historical behavior. Production runs the FSM path.
+  handleRocksdbConfig crd crName ns (← IO.mkRef none)
   handleClusterReplication crd pods migrationRef crName ns
 
 -- ===========================================================================
@@ -985,6 +1011,7 @@ def main (args : List String) : IO Unit := do
   -- by detectDeadNodes regardless of the grace period.
   let graceCyclesRef ← IO.mkRef (24 : Nat)
   let prepareCyclesRef ← IO.mkRef ([] : List (String × Nat))
+  let pendingConfRef ← IO.mkRef (none : Option (String × Nat))
 
   -- Start TCP server in background (using Server.TcpServer)
   let _ ← IO.asTask (prio := .default) do
@@ -1010,7 +1037,7 @@ def main (args : List String) : IO Unit := do
     let startTime ← IO.monoMsNow
     try
       -- Use FSM-driven reconcile (complete implementation with all 5 requirements)
-      reconcileOnceFSM stateRef crdRef migrationRef graceCyclesRef prepareCyclesRef metrics leaseName identity crName ns
+      reconcileOnceFSM stateRef crdRef migrationRef graceCyclesRef prepareCyclesRef pendingConfRef metrics leaseName identity crName ns
     catch e =>
       IO.eprintln s!"[flare-operator] reconcile error: {e}"
     let endTime ← IO.monoMsNow

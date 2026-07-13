@@ -165,39 +165,26 @@ def sendSighupToPods (crName ns : String) : IO Unit := do
       IO.eprintln s!"[flare-operator] warning: SIGHUP to {pod.name} failed: {e}"
     | .ok _ => pure ()
 
-/-- Wait until each pod's MOUNTED copy of extra.conf contains `needle`, then
-    SIGHUP that pod. kubelet propagates ConfigMap updates to the mounted file
-    asynchronously (typically up to ~60-90s); a SIGHUP sent immediately after
-    `kubectl apply` makes flared re-read the OLD file and the config change is
-    silently lost until the next unrelated reload. Per pod: poll (2s interval,
-    `timeoutSec` cap), then signal; pods that never converge get a warning and
-    NO signal (a useless SIGHUP is not harmful, but the log should say the
-    truth: the config did not land). -/
-def syncConfAndSighupPods (crName ns needle : String) (timeoutSec : Nat := 120)
-    : IO Unit := do
+/-- Single-pass check: does every flared pod's MOUNTED extra.conf already
+    contain `needle`? kubelet propagates ConfigMap updates asynchronously
+    (up to ~60-90s), so a SIGHUP sent right after `kubectl apply` makes
+    flared re-read the OLD file. Callers SIGHUP immediately anyway (harmless,
+    and correct when propagation happens to be fast), record the needle as
+    pending, and re-run this check once per reconcile tick — re-signalling
+    when it finally returns true. Never sleeps: one `cat` per pod, so the
+    reconcile loop stays responsive (a blocking wait here once stalled the
+    loop for minutes and starved every other reconcile duty). -/
+def confLandedOnAllPods (crName ns needle : String) : IO Bool := do
   let pods ← listFlaredPods crName ns
+  if pods.isEmpty then
+    return false
   for pod in pods do
-    let mut landed := false
-    let mut waited := 0
-    while !landed && waited < timeoutSec do
-      match ← execInPod pod.name ns ["sh", "-c", "cat /etc/flared/extra.conf 2>/dev/null || true"] with
-      | .ok content =>
-        if (content.splitOn needle).length > 1 then
-          landed := true
-        else
-          IO.sleep 2000
-          waited := waited + 2
-      | .error _ =>
-        IO.sleep 2000
-        waited := waited + 2
-    if landed then
-      match ← execInPod pod.name ns ["kill", "-HUP", "1"] with
-      | .error e =>
-        IO.eprintln s!"[flare-operator] warning: SIGHUP to {pod.name} failed: {e}"
-      | .ok _ =>
-        IO.eprintln s!"[flare-operator] config landed on {pod.name} after {waited}s, SIGHUP sent"
-    else
-      IO.eprintln s!"[flare-operator] WARNING: extra.conf update did not reach {pod.name} within {timeoutSec}s — SIGHUP withheld, config NOT applied there"
+    match ← execInPod pod.name ns ["sh", "-c", "cat /etc/flared/extra.conf 2>/dev/null || true"] with
+    | .ok content =>
+      if (content.splitOn needle).length <= 1 then
+        return false
+    | .error _ => return false
+  return true
 
 /-- Render `extra.conf` content from rocksdb + optional cluster-replication
     sections. Sections are separated by a blank line when both are present so

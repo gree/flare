@@ -231,10 +231,17 @@ def handleFailoverWithPromotionSingleKey (s : FlareClusterState) (key : String)
           match s.lookupNode slaveKey with
           | none => s
           | some slaveNode =>
-            let promoted := { slaveNode with role := FlareRole.Master,
-                                             state := FlareState.Active, balance := 100 }
-            let newPart := { part with master := some slaveKey, slaves := part.slaves.tail }
-            (s.addNode slaveKey promoted).setPartition partIdx.toNat newPart
+            -- Defensive: promote only a node that CURRENTLY has role Slave.
+            -- The partitionMap the caller rebuilt should guarantee this, but
+            -- checking here makes the precondition local — both hardening
+            -- against a stale map and letting the general safety proof read
+            -- the guarantee off this branch instead of trusting the caller.
+            if slaveNode.role == FlareRole.Slave && slaveNode.partition == partIdx then
+              let promoted := { slaveNode with role := FlareRole.Master,
+                                               state := FlareState.Active, balance := 100 }
+              let newPart := { part with master := some slaveKey, slaves := part.slaves.tail }
+              (s.addNode slaveKey promoted).setPartition partIdx.toNat newPart
+            else s
     else s
 
 /-- Failover with slave promotion over all dead keys (see the single-key doc).

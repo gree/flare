@@ -409,7 +409,14 @@ theorem scenario2_verified :
 
 ### What Is NOT Yet Verified
 
-❌ **General case**: Arbitrary execution traces of unbounded length
+✅ ~~**General case**: Arbitrary execution traces of unbounded length~~ —
+   PROVEN as of GeneralSafety.lean: every operation satisfies the
+   hypothesis-free bound `count p (new) ≤ max (count p old) 1`
+   (`stepGlobal_cle`), giving `stepPreservesAtMostOneMaster` /
+   `globalSystemSafety` for ARBITRARY states, steps, and trace lengths,
+   sorry-free. The defensive role/partition guards on both promotion sites
+   were added so the proof preconditions are local `if` conditions rather
+   than trusted caller contracts — hardening and provability in one change.
 ❌ **True concurrency**: The model is sequential. The production operator
    runs the TCP server and the FSM loop as concurrent IO threads over a
    shared `IO.Ref`; only the pure merge/repair logic is verified, not the
@@ -423,7 +430,8 @@ theorem scenario2_verified :
 
 ### Ongoing Work
 
-**General Inductive Proof** (partially complete, uses `sorry` placeholders):
+**General Inductive Proof** (COMPLETE — kept for historical context; the
+statement below is now proven in Safety.lean via GeneralSafety.lean):
 
 ```lean
 theorem stepPreservesAtMostOneMaster
@@ -431,7 +439,7 @@ theorem stepPreservesAtMostOneMaster
     (step : GlobalStep)
     (h : AtMostOneMasterPerPartition g) :
     AtMostOneMasterPerPartition (stepGlobal g step) := by
-  sorry  -- Proof sketch provided, detailed case analysis remains
+  -- proven: intro p; exact bound from GeneralSafety.stepGlobal_cle
 ```
 
 **What's Needed**:

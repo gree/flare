@@ -10,6 +10,7 @@
 
 import FlareOperator.StateMachine.GlobalModel
 import FlareOperator.StateMachine.Simulation
+import FlareOperator.StateMachine.GeneralSafety
 
 namespace FlareOperator.StateMachine.Safety
 
@@ -20,12 +21,14 @@ open FlareOperator.StateMachine.FlaredNode
 
 /-! ## Core Invariants as Propositions -/
 
-/-- Invariant 1: At most one Master per partition in the Operator's view -/
+/-- Invariant 1: At most one Master per partition in the Operator's view.
+    Counted via `K8sReconciler.countMastersFor` — the SAME function the
+    general preservation proof (GeneralSafety.lean) and the merge-repair
+    theorems are stated against, so all safety results share one counting
+    definition. -/
 def AtMostOneMasterPerPartition (g : GlobalState) : Prop :=
   ∀ (p : Nat),
-    let masters := g.operatorState.nodeMap.filter (fun (_, n) =>
-      n.role == FlareRole.Master ∧ n.partition == Int.ofNat p)
-    masters.length ≤ 1
+    FlareOperator.K8sReconciler.countMastersFor (Int.ofNat p) g.operatorState.nodeMap ≤ 1
 
 /-- Invariant 2: Topology version is monotonically increasing -/
 def VersionMonotonic (g1 g2 : GlobalState) : Prop :=
@@ -50,8 +53,7 @@ def ValidNodeStates (g : GlobalState) : Prop :=
 
 /-- Count masters for a specific partition -/
 def countMastersForPartition (g : GlobalState) (p : Nat) : Nat :=
-  (g.operatorState.nodeMap.filter (fun (_, n) =>
-    n.role == FlareRole.Master ∧ n.partition == Int.ofNat p)).length
+  FlareOperator.K8sReconciler.countMastersFor (Int.ofNat p) g.operatorState.nodeMap
 
 /-- Bool version of AtMostOneMasterPerPartition for computation -/
 def atMostOneMasterPerPartition_bool (g : GlobalState) (maxPartitions : Nat) : Bool :=
@@ -70,41 +72,17 @@ theorem stepPreservesAtMostOneMaster
     (step : GlobalStep)
     (h : AtMostOneMasterPerPartition g) :
     AtMostOneMasterPerPartition (stepGlobal g step) := by
-  sorry  -- Proof sketch below
+  intro p
+  have hc := GeneralSafety.stepGlobal_cle g step (Int.ofNat p)
+  have hp := h p
+  omega
 
 /-
-  PROOF SKETCH for stepPreservesAtMostOneMaster:
-
-  Case analysis on `step`:
-
-  1. OperatorProcessMsg case:
-     - Subcase NodeAdd: New node enters as Proxy (partition = -1), no Master added yet
-       → invariant preserved trivially
-     - Subcase NodeState:
-       - If Prepare→Active, node already assigned to partition in previous step
-       - reconcileStep in Reconciler.lean uses autoAssign which checks hasMasterForPartition
-       - autoAssign only assigns Master role if no existing Master for that partition
-       → invariant preserved by construction
-
-  2. NodeProcessMsg case:
-     - Node receives NodeSync broadcast from Operator
-     - Node updates its internal state (FlaredNode.step)
-     - No changes to Operator's nodeMap
-     → invariant trivially preserved (Operator state unchanged)
-
-  3. OperatorReconcile case:
-     - Calls reconcileStep with .Ping event
-     - Iterates through Proxies and assigns roles via autoAssign
-     - autoAssign uses findPartitionNeedingMaster which returns none if partition has Master
-     → invariant preserved by Reconciler.lean's design
-
-  4. NodeReconstructionComplete case:
-     - Node sends NodeState message to Operator
-     - Message enqueued but not processed yet
-     → invariant trivially preserved (Operator state unchanged)
-
-  The key insight is that Reconciler.lean's autoAssign function is designed to respect
-  the invariant by checking hasMasterForPartition before assigning a Master role.
+  The proof lives in GeneralSafety.lean: every state-mutating operation
+  (autoAssign, assignProxiesPure, reconcileStep, handleFailoverWithPromotion)
+  satisfies the hypothesis-free bound `stepGlobal_cle` —
+  count p (new) ≤ max (count p old) 1 — from which preservation follows for
+  every partition. The former proof sketch that lived here is superseded.
 -/
 
 /-- Corollary: Invariant holds for any sequence of steps -/
@@ -130,8 +108,9 @@ theorem atMostOneMasterInvariant
 /-- The initial cluster state satisfies AtMostOneMasterPerPartition (trivially, no Masters yet) -/
 theorem initClusterSatisfiesInvariant (crd : FlareClusterView) (nodeNames : List String) :
     AtMostOneMasterPerPartition (initCluster crd nodeNames) := by
-  -- Initial nodeMap is empty, so no masters exist
-  sorry
+  -- the initial nodeMap is empty, so every count is literally zero
+  intro p
+  exact Nat.zero_le 1
 
 /-! ## Complete Safety Guarantee -/
 

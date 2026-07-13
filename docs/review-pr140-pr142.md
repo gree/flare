@@ -382,7 +382,7 @@ kind 上で実 StatefulSet + operator を動かす 18 スイート(~96 テスト
 | ✅ | WAL sync 全エラーの full dump フォールバック | コードレビューで検証 + `31daf5c` の WAL-first 再構築も同じ非破壊フォールバック設計。G1/G2 E2E が実経路を execute |
 | ✅ | merge の Prepare→Active 非巻き戻し / 登録消失なし / 死者復活なし | pure 層へ移設(`141d725`)+ 一般定理3本(`9d736d3`)。Prepare→Active 保存そのものの専用定理は未追加(低リスク: 条件は単一分岐) |
 | ✅ | Lease 二重リーダー窓 | `9a75a10` でレビュー完了 + broadcast 直前フェンス追加。残余窓(送信中1回分)は文書化済み |
-| ⏳ | 一般安全性定理の `sorry`(`Safety.lean:73,134`) | 未解消(唯一の残存項目)。commit 境界の一般定理でリスクの大半をカバー。分解ロードマップあり |
+| ✅ | 一般安全性定理の `sorry` | **完全解消**: `GeneralSafety.lean` が全操作の統一上界 `stepGlobal_cle`(count ≤ max old 1、仮定なし)を帰納証明し、`stepPreservesAtMostOneMaster` / `globalSystemSafety`(任意状態・任意ステップ列・無制限長)を sorry なしで導出。昇格サイトの防御ガード(role+partition 再確認)により前提条件をコードにローカル化 |
 | □ | `count()` の O(n) スキャン | 未対応(性能課題、機能影響なし)。stats 呼び出し頻度の実測後に判断 |
 | □ | WAL sync の per-key partition フィルタなし(orphan purge 前提の設計合意) | 設計合意事項として残置。orphan purge の E2E は PVC 化(`b0d62f1`)で実アサート化済み |
 | □ | flared の version 逆転 broadcast 耐性 | 未調査(flared 側)。operator は単一 writer + version 単調のため実害シナリオは限定的 |
@@ -400,7 +400,7 @@ kind 上で実 StatefulSet + operator を動かす 18 スイート(~96 テスト
 - 危険シナリオ(failover / ゾンビ / ゴースト)はすべて「実装が変われば証明が落ちる」形で固定
 
 **残る乖離(正直な列挙)**:
-1. `stepPreservesAtMostOneMaster` の `sorry` — 任意ステップ列への帰納証明は未完(唯一の証明負債)
+1. ~~`stepPreservesAtMostOneMaster` の `sorry`~~ — **解消済み**(`GeneralSafety.lean`、任意トレース対応・sorry ゼロ)
 2. **モデルは逐次** — TCP サーバと FSM の実インターリーブは対象外(R-1 は merge 関数の性質として証明したが、インターリーブ生成自体はモデル外)
 3. **IO 層は対象外** — kubectl・TCP wire・ConfigMap 永続化はモデルにない
 4. **C++ flared の複製挙動はモデル外** — `FlaredNode.lean` は role shift の骨格のみ。今回追加した WAL-first 再構築・LSN 種付け(`31daf5c` `2b4b028`)は C++ 側にしか存在せず、これらの正しさは E2E とコードレビューが担保(モデル化は future work)

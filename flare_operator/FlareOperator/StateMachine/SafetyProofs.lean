@@ -48,30 +48,22 @@ theorem initCluster_nodeMap_empty (crd : FlareClusterView) (nodeNames : List Str
 theorem initClusterSatisfiesInvariant_v2 (crd : FlareClusterView) (nodeNames : List String) :
     AtMostOneMasterPerPartition (initCluster crd nodeNames) := by
   intro p
-  simp [AtMostOneMasterPerPartition]
-  rw [initCluster_nodeMap_empty]
-  rw [filter_empty]
-  simp
+  -- initial nodeMap is []; the count over [] is literally 0
+  exact Nat.zero_le 1
 
 /-! ## Proof 2: Single step preserves invariant -/
 
-/--
-  Key lemma: Adding a node as Proxy doesn't create new masters.
-  When a node registers (NodeAdd event), it enters as role=Proxy, partition=-1.
-  The filter condition requires role=Master AND partition=p, which is false for Proxies.
--/
-theorem addNode_preserves_masters (state : FlareClusterState) (key : String)
-    (node : FlareNode) (p : Nat)
+/-- Registering a node as Proxy never increases any partition's master
+    count. (The historical version of this lemma claimed EQUALITY, which is
+    false: a re-registering node whose old entry was a Master strictly
+    decreases the count — that is exactly the zombie-master scenario.) -/
+theorem addNode_proxy_le (state : FlareClusterState) (key : String)
+    (node : FlareNode) (p : Int)
     (h_proxy : node.role = FlareRole.Proxy) :
-    let masters := state.nodeMap.filter (fun (_, n) =>
-      n.role == FlareRole.Master ∧ n.partition == Int.ofNat p)
-    let newState := state.addNode key node
-    let newMasters := newState.nodeMap.filter (fun (_, n) =>
-      n.role == FlareRole.Master ∧ n.partition == Int.ofNat p)
-    newMasters.length = masters.length := by
-  simp [FlareClusterState.addNode]
-  -- The new node is a Proxy, so it won't match the Master filter
-  sorry  -- This requires reasoning about filter behavior with cons
+    FlareOperator.K8sReconciler.countMastersFor p (state.addNode key node).nodeMap
+      ≤ FlareOperator.K8sReconciler.countMastersFor p state.nodeMap := by
+  apply GeneralSafety.count_addNode_nonmaster
+  simp [GeneralSafety.isM, h_proxy, show (FlareRole.Proxy == FlareRole.Master) = false from rfl]
 
 /--
   Core Safety Theorem (simplified version):
@@ -88,9 +80,8 @@ theorem nodeAdd_preserves_invariant
     -- If the next message is NodeAdd, invariant holds
     (g.nodeToOpQueue.head? = some msg) →
     AtMostOneMasterPerPartition g' := by
-  intro h_msg
-  -- This requires detailed case analysis on reconcileStep
-  sorry
+  intro _msg _g' _hmsg
+  exact stepPreservesAtMostOneMaster g .OperatorProcessMsg h
 
 /-! ## Simplified Invariant for Computational Verification -/
 
@@ -113,25 +104,23 @@ theorem scenario2_satisfies_invariant :
     checkInvariantFinite scenario2_fullInit 2 = true := by
   decide
 
-/-! ## Weaker but Complete Proof: Bounded Verification -/
+/-! ## Unbounded trace safety (formerly a bounded, sorry-backed statement) -/
 
 /--
-  COMPLETE THEOREM (for finite traces):
-  For any execution trace of bounded length on scenario1_freshCluster,
-  the invariant holds at every step.
-
-  This is a weaker version than the general theorem, but it's fully proven
-  by exhaustive computation for specific scenarios.
+  For ANY execution trace of ANY length from ANY initial cluster, the
+  finite invariant check passes — a direct corollary of the general
+  inductive proof (GeneralSafety.lean via Safety.globalSystemSafety).
+  The previous version of this theorem was bounded to 20 steps and ended
+  in `sorry`; no bound is needed anymore.
 -/
-theorem bounded_safety_2_partitions (steps : List GlobalStep)
-    (h_bound : steps.length ≤ 20) :
-    let crd : FlareClusterView := {
-      metadata := { name := "test", «namespace» := "default" }
-      spec := { partitions := 2, replicas := 2 }
-    }
-    let initial := initCluster crd ["n0", "n1", "n2", "n3"]
-    checkInvariantFinite (stepMany initial steps) 2 = true := by
-  sorry  -- Can be proven by case analysis on bounded steps
+theorem trace_safety (crd : FlareClusterView) (nodeNames : List String)
+    (steps : List GlobalStep) (maxPartitions : Nat) :
+    checkInvariantFinite (stepMany (initCluster crd nodeNames) steps) maxPartitions = true := by
+  have hs := globalSystemSafety crd nodeNames steps
+  unfold checkInvariantFinite
+  rw [List.all_eq_true]
+  intro p _
+  exact decide_eq_true (hs p)
 
 /-! ## Main Result: Computational Verification -/
 
@@ -162,10 +151,10 @@ example : atMostOneMasterPerPartition_bool scenario1_freshCluster 2 = true := by
      - `scenario2_satisfies_invariant`: Full initialization trace is safe ✓
      - These are proven by `decide` tactic, which evaluates the computation.
 
-  2. **General Inductive Proof (proof sketch with sorry)**:
-     - `stepPreservesAtMostOneMaster`: Would prove safety for arbitrary steps
-     - `globalSystemSafety`: Would prove safety for arbitrary traces
-     - These require detailed case analysis on reconcileStep logic.
+  2. **General Inductive Proof (COMPLETE, sorry-free since GeneralSafety.lean)**:
+     - `stepPreservesAtMostOneMaster`: safety for arbitrary steps — proven
+     - `globalSystemSafety`: safety for arbitrary traces — proven
+     - `trace_safety` above: the executable-check version, any length.
 
   WHY IS COMPUTATIONAL VERIFICATION VALUABLE?
 
@@ -179,9 +168,9 @@ example : atMostOneMasterPerPartition_bool scenario1_freshCluster 2 = true := by
   - Executable specification that doubles as test oracle
   - Foundation for property-based testing (QuickCheck style)
 
-  The remaining `sorry` statements represent engineering work (writing out
-  the case analysis), not fundamental uncertainty. The hard mathematical
-  content is already captured in the executable model.
+  There are no remaining `sorry` statements in the safety development:
+  the general case analysis lives in GeneralSafety.lean as the uniform
+  bound `stepGlobal_cle` (count ≤ max old 1 per partition, per step).
 -/
 
 end FlareOperator.StateMachine.SafetyProofs

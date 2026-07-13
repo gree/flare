@@ -162,13 +162,25 @@ def autoAssign (state : FlareClusterState) (crd : FlareClusterView) (nodeKey : S
     | some slaveKey =>
       match cleanState.lookupNode slaveKey with
       | some slaveNode =>
-        let promoted := { slaveNode with role := FlareRole.Master,
-                                         state := FlareState.Active, balance := 100 }
-        let newNode := { node with role := FlareRole.Slave, state := FlareState.Prepare,
-                                   partition := Int.ofNat pIdx, balance := 0 }
-        let newState := ((cleanState.addNode slaveKey promoted).addNode nodeKey newNode)
-          |>.rebuildPartitionMap
-        (newState, newNode)
+        -- Defensive re-check on the LOOKED-UP entry (lookupNode may hit a
+        -- different duplicate than the one findActiveSlaveForPartition saw):
+        -- promote only a node that is really a Slave OF THIS PARTITION.
+        -- Localizes the precondition for the general safety proof too.
+        if slaveNode.role == FlareRole.Slave && slaveNode.partition == Int.ofNat pIdx then
+          let promoted := { slaveNode with role := FlareRole.Master,
+                                           state := FlareState.Active, balance := 100 }
+          let newNode := { node with role := FlareRole.Slave, state := FlareState.Prepare,
+                                     partition := Int.ofNat pIdx, balance := 0 }
+          let newState := ((cleanState.addNode slaveKey promoted).addNode nodeKey newNode)
+            |>.rebuildPartitionMap
+          (newState, newNode)
+        else
+          let masterState := if pIdx == 0 then FlareState.Active else FlareState.Prepare
+          let newNode := { node with role := FlareRole.Master, state := masterState, partition := Int.ofNat pIdx }
+          let part := (cleanState.lookupPartition pIdx).getD {}
+          let newPart := { part with master := some nodeKey }
+          let newState := (cleanState.addNode nodeKey newNode).setPartition pIdx newPart
+          (newState, newNode)
       | none =>
         -- Unreachable (findActiveSlaveForPartition returned a nodeMap key);
         -- fall through to the plain master assignment.

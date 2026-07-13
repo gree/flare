@@ -304,9 +304,11 @@ example :
   - Lean symbolically executes the state machine and reduces to `true`
 
   HONEST LIMITS (do not overstate these results):
-  - These are CONCRETE scenarios, not a general inductive proof over
-    arbitrary traces (`stepPreservesAtMostOneMaster` in Safety.lean is still
-    a `sorry`-sketch).
+  - The scenario theorems here are CONCRETE traces; the GENERAL inductive
+    proof over arbitrary states and arbitrary step sequences now exists,
+    sorry-free, in GeneralSafety.lean (`stepGlobal_cle`,
+    `stepGlobal_preserves_atMostOne`, `stepMany_preserves_atMostOne`) and
+    discharges Safety.lean's `stepPreservesAtMostOneMaster`.
   - The model shares the pure functions (reconcileStep, autoAssign,
     assignProxiesPure, detectDeadNodesPure, handleFailoverWithPromotion,
     mergeClusterState) with the production operator, but the IO layer

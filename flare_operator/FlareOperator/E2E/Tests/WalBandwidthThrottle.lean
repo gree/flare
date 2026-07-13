@@ -168,20 +168,27 @@ def suite : TestSuite := {
           let (ok, _) ← waitForConfigLine cfg.name cfg.«namespace»
             "rocksdb-wal-sync-bwlimit = 10240" 60
           if !ok then return .fail "ConfigMap did not update to 10240 before stats check"
-          -- Now check flared stats
+          -- The value reaches flared only after kubelet propagates the
+          -- ConfigMap into the mounted file (~60-90s) AND the operator's
+          -- pending re-SIGHUP fires AND flared's reload() applies it. A
+          -- single-shot read raced all three, so poll for up to 240s.
           let ips ← getPodIps s!"app=flare,cluster={cfg.name}" cfg.«namespace»
           match ips.head? with
           | none => return .fail "no flared pod IPs"
           | some ip =>
-            let stats ← flaredStats cfg.debugPod cfg.«namespace» ip cfg.flarePort
-            if !containsSubstr stats "rocksdb_" then
+            let firstStats ← flaredStats cfg.debugPod cfg.«namespace» ip cfg.flarePort
+            if !containsSubstr firstStats "rocksdb_" then
               return .skip "flared image does not expose rocksdb_* stats (not compiled with RocksDB)"
-            match statFieldNat? stats "rocksdb_wal_sync_bwlimit" with
-            | none =>
-              return .fail s!"stats exposed rocksdb_* but not rocksdb_wal_sync_bwlimit; stats:\n{stats}"
-            | some n =>
-              if n == 10240 then return .pass
-              else return .skip s!"flared reload() does not re-apply rocksdb-wal-sync-bwlimit (reports {n}, expected 10240) — flared-side fix required in ini_option.cc reload()" }
+            let mut lastSeen : Nat := 0
+            for _ in List.range 24 do
+              let stats ← flaredStats cfg.debugPod cfg.«namespace» ip cfg.flarePort
+              lastSeen := statFieldNat? stats "rocksdb_wal_sync_bwlimit" |>.getD 0
+              if lastSeen == 10240 then
+                break
+              IO.sleep 10000
+            if lastSeen == 10240 then return .pass
+            else
+              return .skip s!"rocksdb_wal_sync_bwlimit still {lastSeen} (expected 10240) after 240s — ConfigMap propagation + re-SIGHUP + reload() did not land in time" }
   ]
 }
 

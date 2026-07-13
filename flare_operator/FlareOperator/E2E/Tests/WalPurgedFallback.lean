@@ -92,8 +92,13 @@ def suite : TestSuite := {
   teardown := do
     cleanupCluster cfg
   tests := [
-    -- Test 1: set very short WAL TTL via CRD patch
-    { name := "set walTtlSeconds=1 to force WAL purge"
+    -- Test 1: set very short WAL TTL via CRD patch. WAL retention is a
+    -- DB-REOPEN option: flared's reload() deliberately does NOT hot-apply
+    -- it (it warns that a restart is required), so after the ConfigMap
+    -- lands we rollout-restart the StatefulSet — the recreated pods mount
+    -- the updated file and load() applies TTL=1 at boot. Data survives the
+    -- restart on the PVCs.
+    { name := "set walTtlSeconds=1 and restart pods to apply (reopen-only option)"
       run := do
         let patch := "{\"spec\":{\"rocksdb\":{\"walTtlSeconds\":1}}}"
         match ← kubectlPatch "flarecluster" cfg.name cfg.«namespace» patch with
@@ -101,8 +106,21 @@ def suite : TestSuite := {
         | .ok _ =>
           let (found, _) ← waitForConfigLine cfg.name cfg.«namespace»
             "rocksdb-wal-ttl-seconds = 1" 60
-          if found then return .pass
-          else return .fail "ConfigMap did not reflect walTtlSeconds=1" },
+          if !found then return .fail "ConfigMap did not reflect walTtlSeconds=1"
+          -- Give kubelet time to propagate the ConfigMap into the pod
+          -- template's volume before restarting, then restart and wait.
+          IO.sleep 15000
+          match ← kubectl ["rollout", "restart", s!"statefulset/{cfg.name}-nodes",
+                            "-n", cfg.«namespace»] with
+          | .error e => return .fail s!"rollout restart failed: {e}"
+          | .ok _ =>
+            match ← kubectl ["rollout", "status", s!"statefulset/{cfg.name}-nodes",
+                              "-n", cfg.«namespace», "--timeout=180s"] with
+            | .error e => return .fail s!"rollout did not complete: {e}"
+            | .ok _ =>
+              let stable ← waitForStable cfg 40
+              if stable then return .pass
+              else return .fail "cluster did not restabilize after TTL restart" },
 
     -- Test 2: write keys to advance master LSN
     { name := "write keys to advance master LSN"

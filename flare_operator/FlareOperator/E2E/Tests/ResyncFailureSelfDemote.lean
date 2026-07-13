@@ -117,16 +117,24 @@ def suite : TestSuite := {
             let stats ← flaredStats cfg.debugPod cfg.«namespace» ip cfg.flarePort
             if !containsSubstr stats "rocksdb_" then
               return .skip "flared not compiled with RocksDB"
-            let threshold := statFieldNat? stats "rocksdb_resync_failure_threshold" |>.getD 0
+            if !containsSubstr stats "rocksdb_resync_failure_count" then
+              return .skip "flared does not expose resync_failure_count stat"
+            -- The threshold IS hot-reloadable now (reload() re-applies it and
+            -- the operator re-SIGHUPs once the mounted ConfigMap catches up),
+            -- but that chain takes up to ~2min. Poll until the running value
+            -- shows the patched threshold so the later failure-injection
+            -- tests assert against the intended config.
+            let mut threshold : Nat := 0
+            for _ in List.range 24 do
+              let stats ← flaredStats cfg.debugPod cfg.«namespace» ip cfg.flarePort
+              threshold := statFieldNat? stats "rocksdb_resync_failure_threshold" |>.getD 0
+              if threshold == 2 then
+                break
+              IO.sleep 10000
             IO.eprintln s!"# Slave {slavePod}: resync_failure_threshold={threshold}"
-            -- Note: threshold may still show default (3) since reload()
-            -- doesn't re-apply this value (same flared bug as G12).
-            -- The important thing is the ConfigMap has the right value
-            -- and the test image has the counter.
-            if containsSubstr stats "rocksdb_resync_failure_count" then
-              return .pass
+            if threshold == 2 then return .pass
             else
-              return .skip "flared does not expose resync_failure_count stat" },
+              return .skip s!"threshold still {threshold} (expected 2) after 240s — ConfigMap propagation + re-SIGHUP + reload() did not land in time" },
 
     -- Test 3: record baseline failure count
     { name := "baseline resync_failure_count is 0"

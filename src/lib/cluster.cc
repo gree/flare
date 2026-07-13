@@ -1549,6 +1549,12 @@ int cluster::_shift_node_role(string node_key, role old_role, int old_partition,
 	// proxy -> slave or master: requesting reconstruction
 	// we intentionally do not truncate current database here (for safe)
 	// if user *really* want to reconstruct database, they can use "flush_all" op
+	// NOTE: the RocksDB reconstruction path (handler_reconstruction) now
+	// truncates its local storage before a FULL DUMP so deletions on the
+	// source propagate (otherwise a long-down replica would resurrect
+	// deleted keys). tch/tcb keep the legacy merge behavior. This comment
+	// still holds here: the truncate is done in the handler, not at this
+	// dispatch point.
 	log_debug("creating reconstruction thread(s)... (type=%s)", cluster::role_cast(new_role).c_str());
 	if (new_role == role_master && old_role == role_proxy) {
 		int partition_size = this->_node_partition_map.size() + this->_node_partition_prepare_map.size();

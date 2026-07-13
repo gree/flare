@@ -102,6 +102,35 @@ int handler_reconstruction::run() {
 	bool via_wal = this->_try_wal_reconstruction(c, peer_wal_supported, peer_master_id, peer_latest_lsn);
 
 	if (!via_wal) {
+#ifdef HAVE_LIBROCKSDB
+		// Deletion propagation: op_dump only ships live keys, never
+		// tombstones, and it MERGES into whatever is on disk. A replica
+		// that was down while keys were deleted on the master would keep
+		// those keys and, once Active, serve them (slaves serve reads) —
+		// a stale-read resurrection. So for RocksDB we replace local data
+		// with a clean truncate before the full dump. Safe because:
+		//  - the node is in Prepare with balance 0 for the whole
+		//    reconstruction; it serves no reads until activation, so the
+		//    empty window is never observable;
+		//  - a crash mid-dump leaves it in Prepare and reconstruction
+		//    re-runs — it was stale anyway, and an empty retry beats
+		//    serving resurrected keys;
+		//  - storage_rocksdb::truncate preserves the __flare_repl_master_id
+		//    lineage token and resets __flare_repl_last_lsn to 0, which is
+		//    exactly right — the post-dump seeding below re-seeds the LSN
+		//    from the pre-dump probe (peer_latest_lsn);
+		//  - it also clears any orphan keys left by a previous assignment.
+		// tch/tcb keep the legacy merge behavior (no lineage/LSN machinery).
+		if (this->_storage->get_type() == storage::type_rocksdb) {
+			log_notice("truncating local storage before full-dump reconstruction so deletions on the source propagate (WAL sync was unavailable; see previous log line)", 0);
+			if (this->_storage->truncate(0) < 0) {
+				log_err("failed to truncate storage before full dump -> deactivating node", 0);
+				this->_cluster->deactivate_node();
+				return -1;
+			}
+		}
+#endif
+
 		op_dump* p = new op_dump(c, this->_cluster, this->_storage);
 
 		p->set_thread(this->_thread);

@@ -977,6 +977,33 @@ void test_set_repl_last_lsn_survives_reopen() {
 	cut_remove_path(wal_master_dir, NULL);
 }
 
+// truncate-before-full-dump flow used by handler_reconstruction: truncate
+// clears user keys and resets the LSN cursor while preserving the master_id
+// lineage token, and the cursor can then be re-seeded from the master's
+// pre-dump LSN.
+void test_truncate_then_reseed_repl_lsn() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	string master_id = s->get_master_id();
+	cut_assert_operator(master_id.empty(), ==, false);
+
+	cut_assert_equal_int(0, storage_set_string(s, "a", "1"));
+	cut_assert_equal_int(0, storage_set_string(s, "b", "2"));
+	cut_assert_equal_int(0, s->set_repl_last_lsn(5));
+	cut_assert_operator(s->count(), >, static_cast<uint32_t>(0));
+
+	// truncate: user keys gone, LSN reset to 0, master_id preserved.
+	cut_assert_equal_int(0, s->truncate(0));
+	cut_assert_equal_int(0, static_cast<int>(s->count()));
+	cut_assert_equal_int(0, static_cast<int>(s->get_repl_last_lsn()));
+	cut_assert_equal_string(master_id.c_str(), s->get_master_id().c_str());
+
+	// re-seed the cursor from the master's pre-dump LSN (as the handler does).
+	cut_assert_equal_int(0, s->set_repl_last_lsn(9));
+	cppcut_assert_equal(static_cast<uint64_t>(9), s->get_repl_last_lsn());
+
+	drop_rocksdb(s, wal_master_dir);
+}
+
 	void teardown()
 	{
 		delete rocksdb_tester;

@@ -171,7 +171,7 @@ def stepGlobal (g : GlobalState) (step : GlobalStep) : GlobalState :=
     -- the scenario proofs only ever saw the single P0 master created by the
     -- NodeAdd fast path.
     let oldVersion := g.operatorState.nodeMapVersion
-    let newOpState := assignProxiesPure g.operatorState g.crdSpec
+    let newOpState := assignProxiesPure g.operatorState g.crdSpec (g.nodeStates.map Prod.fst)
 
     let newQueue := if newOpState.nodeMapVersion > oldVersion then
       let nodes := newOpState.getNodes

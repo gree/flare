@@ -117,19 +117,29 @@ def findPartitionNeedingSlave (state : FlareClusterState) (numPartitions : Nat) 
 
 /-- Find a live replica of partition `pIdx`: a Slave in Active state (its
     reconstruction completed, so it holds a full copy of the partition's
-    data). Prepare slaves are excluded — promoting a half-reconstructed
-    replica would serve partial data. -/
-def findActiveSlaveForPartition (state : FlareClusterState) (pIdx : Nat) : Option String :=
-  state.nodeMap.find? (fun (_, n) =>
+    data) whose POD is actually alive. Prepare slaves are excluded —
+    promoting a half-reconstructed replica would serve partial data.
+
+    `livePodKeys` guards against GHOST entries: when a pod dies and is
+    recreated under the same name faster than one reconcile tick, dead-node
+    detection never fires and the operator state can still say Slave/Active
+    for a pod that is gone or mid-restart. Promoting such a ghost points the
+    whole partition at a down node and sets off an assignment churn that can
+    end with an empty node as master (observed as the pvc-data-survival
+    DATA LOSS flake). Callers that genuinely know only about one live node
+    (the TCP registration fast path) pass just that node's key. -/
+def findActiveSlaveForPartition (state : FlareClusterState) (pIdx : Nat)
+    (livePodKeys : List String) : Option String :=
+  state.nodeMap.find? (fun (key, n) =>
     n.role == FlareRole.Slave && n.state == FlareState.Active
-      && n.partition == Int.ofNat pIdx) |>.map Prod.fst
+      && n.partition == Int.ofNat pIdx && livePodKeys.contains key) |>.map Prod.fst
 
 /-- Auto-assign a proxy node to the first partition that needs filling.
     Returns updated state and the assigned role/partition.
     First clears any stale entry for this nodeKey so re-registering nodes
     don't block their own partition from being filled. -/
 def autoAssign (state : FlareClusterState) (crd : FlareClusterView) (nodeKey : String) (node : FlareNode)
-    : FlareClusterState × FlareNode :=
+    (livePodKeys : List String) : FlareClusterState × FlareNode :=
   let numPartitions := crd.spec.partitions
   let maxSlaves := if crd.spec.replicas > 1 then crd.spec.replicas - 1 else 0
   -- Clear stale entry for this node before checking partition needs.
@@ -148,7 +158,7 @@ def autoAssign (state : FlareClusterState) (crd : FlareClusterView) (nodeKey : S
     -- an empty node as Active master while the data-bearing slave keeps
     -- serving nothing — silent data loss. The proxy joins as a fresh slave
     -- of the same partition and reconstructs from the promoted master.
-    match findActiveSlaveForPartition cleanState pIdx with
+    match findActiveSlaveForPartition cleanState pIdx livePodKeys with
     | some slaveKey =>
       match cleanState.lookupNode slaveKey with
       | some slaveNode =>
@@ -239,7 +249,11 @@ def reconcileStep (state : FlareClusterState) (crd : FlareClusterView)
     let needsP0Master := match p0 with | some part => part.master.isNone | none => true
     if needsP0Master && numPartitions > 0 then
       -- Assign as P0 Master immediately - no role transition, no reconstruction
-      let (newState, assignedNode) := autoAssign state crd nodeKey newNode
+      -- TCP context knows nothing about pod liveness except the node that is
+      -- registering right now, so only IT counts as live for the zombie
+      -- guard. Promotion of other slaves is the reconcile loop's job (which
+      -- has the real pod list).
+      let (newState, assignedNode) := autoAssign state crd nodeKey newNode [nodeKey]
       if assignedNode.role == FlareRole.Master && assignedNode.partition == 0 then
         -- Successfully assigned as P0 Master - return immediately
         let nodeList := newState.getNodes

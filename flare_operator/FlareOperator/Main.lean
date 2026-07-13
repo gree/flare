@@ -423,7 +423,11 @@ private def assignProxies (state : FlareClusterState) (crd : FlareClusterView) :
   -- Fold over all nodes, assigning any Proxies
   state.nodeMap.foldl (init := state) fun currentState (nodeKey, node) =>
     if node.role == FlareRole.Proxy then
+      -- Legacy (non-FSM) path: no pod list is threaded here, so pass every
+      -- known key — the liveness filter is a no-op and behavior is
+      -- unchanged. The production FSM path passes the real pod list.
       let (newState, _) := autoAssign currentState crd nodeKey node
+        (currentState.nodeMap.map Prod.fst)
       newState
     else
       currentState

@@ -103,6 +103,29 @@ def scenario4_zombieResurrection : GlobalState :=
   let s1 := stepGlobal g .OperatorProcessMsg   -- zombie re-registers as Proxy
   stepGlobal s1 .OperatorReconcile             -- reconcile must promote the slave
 
+/-! ## Scenario 5: Ghost slave after simultaneous partition loss -/
+
+/-- The P0 master AND its slave die at once and the master's pod is recreated
+    so fast that dead-node detection never fires (the pod list never showed a
+    gap at any 5s tick). The operator state still carries a GHOST entry: the
+    P0 slave (node-2) reads Slave/Active although its pod is gone. The
+    re-registered master (node-0) arrives as a Proxy.
+
+    The reconcile must NOT promote the ghost — its pod is dead; broadcasting
+    it as master points the partition at nothing and starts an assignment
+    churn that can end with an empty node serving (observed in CI as the
+    pvc-data-survival DATA LOSS flake). With the liveness-aware guard the
+    live re-registrant (which still holds the partition's data on its PVC)
+    takes the master slot directly. -/
+def scenario5_ghostSlave : GlobalState :=
+  let g := { scenario2_fullInit with
+             -- node-2's pod is gone (mid-restart); operator entry survives
+             nodeStates := scenario2_fullInit.nodeStates.filter
+               (fun kv => kv.1 != "node-2:11211"),
+             nodeToOpQueue := [.NodeAdd "node-0" 11211] }
+  let s1 := stepGlobal g .OperatorProcessMsg   -- node-0 re-registers as Proxy
+  stepGlobal s1 .OperatorReconcile
+
 /-! ## Invariant Checks -/
 
 /-- Check: At most one Master per partition -/

@@ -571,10 +571,10 @@ def detectDeadNodesPure (state : FlareClusterState) (livePodKeys : List String)
     open master slot is filled by a live registered node (the promoted replica),
     never by the corpse of the node that just failed. -/
 def assignProxiesPure (state : FlareClusterState) (crd : FlareClusterView)
-    : FlareClusterState :=
+    (livePodKeys : List String) : FlareClusterState :=
   state.nodeMap.foldl (init := state) fun currentState (nodeKey, node) =>
     if node.role == FlareRole.Proxy && node.state != FlareState.Down then
-      let (newState, _) := autoAssign currentState crd nodeKey node
+      let (newState, _) := autoAssign currentState crd nodeKey node livePodKeys
       newState
     else
       currentState
@@ -727,7 +727,7 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
     -- Assign proxy roles (Main.lean:323-330)
     match s.updatedClusterState, s.cachedCrd with
     | some state, some crd =>
-      let stateWithProxies := assignProxiesPure state crd
+      let stateWithProxies := assignProxiesPure state crd s.livePodKeys
       ({ s with reconcileStep := .AfterUpdateConfigMap,
                 updatedClusterState := some stateWithProxies }, none, [])
     | _, _ =>

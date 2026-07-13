@@ -168,6 +168,36 @@ theorem scenario4_zombie_not_master :
       (fun n => n.role == FlareRole.Slave && n.state == FlareState.Prepare)) = some true := by
   decide
 
+/-! ## VERIFIED THEOREM 4c: Ghost slaves are never promoted -/
+
+/--
+  FULLY PROVEN: when the P0 master and slave die together and the master's
+  pod re-registers before dead-node detection ever fires (scenario 5), the
+  operator still holds a GHOST Slave/Active entry for the dead slave. The
+  liveness-aware guard must not promote it: the master slot goes to the
+  live re-registrant instead (which, in production, still holds the
+  partition's data on its PVC). This is the model of the pvc-data-survival
+  DATA LOSS flake observed in CI.
+-/
+theorem scenario5_verified :
+    checkInvariantFinite scenario5_ghostSlave 2 = true := by
+  decide
+
+/-- The live re-registrant takes the P0 master slot. -/
+theorem scenario5_live_registrant_is_master :
+    ((scenario5_ghostSlave.operatorState.nodeMap.lookup "node-0:11211").map
+      (fun n => n.role == FlareRole.Master && n.state == FlareState.Active
+        && n.partition == 0)) = some true := by
+  decide
+
+/-- The ghost (pod gone, entry still Slave/Active) is NOT promoted to
+    master. Its stale entry is left for dead-node detection or its own
+    re-registration to clean up. -/
+theorem scenario5_ghost_not_promoted :
+    ((scenario5_ghostSlave.operatorState.nodeMap.lookup "node-2:11211").map
+      (fun n => n.role == FlareRole.Master)) = some false := by
+  decide
+
 /-! ## VERIFIED THEOREM 5: merge repairs the FSM-vs-TCP double-master race -/
 
 /--

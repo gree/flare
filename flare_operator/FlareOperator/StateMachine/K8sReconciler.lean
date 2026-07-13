@@ -133,11 +133,36 @@ def circuitBreakerDecision
     if deadPercent >= breakerCfg.tripThresholdPercent then
       (.EmergencyPaused,
        [.Log s!"[flare-operator] 🚨 CIRCUIT BREAKER TRIPPED: {deadCount}/{totalNodes} nodes dead ({deadPercent}% ≥ {breakerCfg.tripThresholdPercent}%)",
-        .Log s!"[flare-operator] Suspected AZ failure - automatic recovery PAUSED",
-        .Log s!"[flare-operator] Surviving nodes will continue serving traffic",
-        .Log s!"[flare-operator] Manual intervention required: kubectl delete pod -n <namespace> <operator-pod> to reset"])
+        .Log s!"[flare-operator] Suspected AZ failure - failover/reassignment PAUSED for this cycle",
+        .Log s!"[flare-operator] Surviving nodes continue serving traffic",
+        .Log s!"[flare-operator] Recovery resumes AUTOMATICALLY once the dead fraction drops below {breakerCfg.tripThresholdPercent}% (each 5s tick re-evaluates); no operator restart needed"])
     else
       (.AfterHandleFailover, [])
+
+/-- The breaker TRIPS exactly at/above the threshold (enabled, nonempty cluster). -/
+theorem circuitBreakerDecision_trips (deadCount totalNodes : Nat)
+    (cfg : CircuitBreakerConfig) (hen : cfg.enabled = true) (htot : 0 < totalNodes)
+    (h : cfg.tripThresholdPercent ≤ (deadCount * 100) / totalNodes) :
+    (circuitBreakerDecision deadCount totalNodes cfg).1 = .EmergencyPaused := by
+  unfold circuitBreakerDecision
+  simp only [hen, Bool.not_true, Bool.false_eq_true, if_false]
+  have ht : (0 < totalNodes) = True := eq_true htot
+  simp only [show (totalNodes > 0) = True from ht, if_true]
+  rw [if_pos h]
+
+/-- Below the threshold the breaker NEVER trips: failover proceeds. -/
+theorem circuitBreakerDecision_no_trip (deadCount totalNodes : Nat)
+    (cfg : CircuitBreakerConfig) (htot : 0 < totalNodes)
+    (h : (deadCount * 100) / totalNodes < cfg.tripThresholdPercent) :
+    (circuitBreakerDecision deadCount totalNodes cfg).1 = .AfterHandleFailover := by
+  unfold circuitBreakerDecision
+  cases hen : cfg.enabled with
+  | false => simp
+  | true =>
+    simp only [Bool.not_true, Bool.false_eq_true, if_false]
+    have ht : (0 < totalNodes) = True := eq_true htot
+    simp only [show (totalNodes > 0) = True from ht, if_true]
+    rw [if_neg (by omega)]
 
 /-- circuitBreakerDecision only returns EmergencyPaused or AfterHandleFailover -/
 theorem circuitBreakerDecision_only_returns_emergency_or_failover
@@ -799,9 +824,12 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
     ({ s with reconcileStep := .Done }, some .PatchService, patchEffects)
 
   | .EmergencyPaused =>
-    -- Terminal: Circuit breaker tripped, stay paused
-    -- Operator will remain in this state until manually restarted (pod delete)
-    -- Surviving nodes continue serving traffic, no automatic recovery
+    -- Terminal FOR THIS RECONCILE PASS: no failover, no assignment, no
+    -- effects while tripped (see emergencyPaused_inert below). The outer
+    -- loop rebuilds the FSM from Init on the next 5s tick, so the breaker
+    -- re-evaluates continuously and recovery resumes AUTOMATICALLY when
+    -- the dead fraction falls below the threshold — no operator restart
+    -- is needed (an earlier comment here claimed otherwise).
     (s, none, [])
 
   | .Done =>
@@ -811,6 +839,14 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
   | .Error _ =>
     -- Terminal: stay in Error (IO shell will log and restart on next tick)
     (s, none, [])
+
+/-- While tripped, the FSM is INERT: no state change, no K8s request, no
+    effects — the pause cannot itself cause churn. -/
+theorem emergencyPaused_inert (resp : K8sResponse) (s : FlareReconcileState)
+    (cs : FlareClusterState) (h : s.reconcileStep = .EmergencyPaused) :
+    flareReconcileCore resp s cs = (s, none, []) := by
+  unfold flareReconcileCore
+  split <;> simp_all
 
 -- ===========================================================================
 -- Measure Function for Termination

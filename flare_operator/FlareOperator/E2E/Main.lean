@@ -26,6 +26,8 @@ import FlareOperator.E2E.Tests.FailoverDuringReplication
 import FlareOperator.E2E.Tests.DataSurvivalFailover
 import FlareOperator.E2E.Tests.PvcDataSurvival
 import FlareOperator.E2E.Tests.BackupRestore
+import FlareOperator.E2E.Tests.CircuitBreaker
+import FlareOperator.E2E.Tests.OperatorRestart
 
 open FlareOperator.E2E
 
@@ -50,5 +52,7 @@ def main (args : List String) : IO UInt32 :=
     Tests.FailoverDuringReplication.suite,
     Tests.DataSurvivalFailover.suite,
     Tests.PvcDataSurvival.suite,
-    Tests.BackupRestore.suite
+    Tests.BackupRestore.suite,
+    Tests.CircuitBreaker.suite,
+    Tests.OperatorRestart.suite
   ] args

@@ -981,6 +981,13 @@ void test_set_repl_last_lsn_survives_reopen() {
 // clears user keys and resets the LSN cursor while preserving the master_id
 // lineage token, and the cursor can then be re-seeded from the master's
 // pre-dump LSN.
+//
+// NOTE: this exercises only the storage-level primitive. WHEN the handler
+// actually truncates is a handler-level policy gated on THREE conditions
+// (rocksdb backend AND target role == slave AND the pre-dump feature probe
+// reached a live source); a master reconstruction or an unreachable source
+// must NOT truncate (its local data may be the last copy). That gating is
+// covered by the e2e pvc-data-survival suite, not here.
 void test_truncate_then_reseed_repl_lsn() {
 	storage_rocksdb* s = make_rocksdb(wal_master_dir);
 	string master_id = s->get_master_id();

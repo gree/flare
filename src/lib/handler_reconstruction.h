@@ -71,8 +71,10 @@ protected:
 	// probes the master's features first and reports them via the out-
 	// params (even when declining WAL), so the caller can seed the cursor
 	// after a full-dump fallback. peer_latest_lsn is the master's LSN as of
-	// BEFORE the dump.
-	bool _try_wal_reconstruction(shared_connection c, bool& peer_wal_supported, string& peer_master_id, uint64_t& peer_latest_lsn);
+	// BEFORE the dump. peer_reachable reports whether the feature probe got
+	// ANY response (source alive) — the caller uses it to decide whether a
+	// truncate-before-dump is safe (never truncate against a dead source).
+	bool _try_wal_reconstruction(shared_connection c, bool& peer_wal_supported, string& peer_master_id, uint64_t& peer_latest_lsn, bool& peer_reachable);
 
 	// After a full-dump reconstruction (and master_id adoption), durably
 	// seed repl_last_lsn from the master's pre-dump latest_lsn so the next

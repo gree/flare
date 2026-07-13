@@ -99,7 +99,8 @@ int handler_reconstruction::run() {
 	bool peer_wal_supported = false;
 	string peer_master_id;
 	uint64_t peer_latest_lsn = 0;
-	bool via_wal = this->_try_wal_reconstruction(c, peer_wal_supported, peer_master_id, peer_latest_lsn);
+	bool peer_reachable = false;
+	bool via_wal = this->_try_wal_reconstruction(c, peer_wal_supported, peer_master_id, peer_latest_lsn, peer_reachable);
 
 	if (!via_wal) {
 #ifdef HAVE_LIBROCKSDB
@@ -107,8 +108,9 @@ int handler_reconstruction::run() {
 		// tombstones, and it MERGES into whatever is on disk. A replica
 		// that was down while keys were deleted on the master would keep
 		// those keys and, once Active, serve them (slaves serve reads) —
-		// a stale-read resurrection. So for RocksDB we replace local data
-		// with a clean truncate before the full dump. Safe because:
+		// a stale-read resurrection. So for a SLAVE with a reachable live
+		// source we replace local data with a clean truncate before the
+		// full dump. Safe because:
 		//  - the node is in Prepare with balance 0 for the whole
 		//    reconstruction; it serves no reads until activation, so the
 		//    empty window is never observable;
@@ -121,12 +123,29 @@ int handler_reconstruction::run() {
 		//    from the pre-dump probe (peer_latest_lsn);
 		//  - it also clears any orphan keys left by a previous assignment.
 		// tch/tcb keep the legacy merge behavior (no lineage/LSN machinery).
+		//
+		// TWO cases MUST NOT truncate, or we destroy the only good copy:
+		//  1. MASTER reconstruction — a node being promoted to master may
+		//     have NO live source (its predecessor is dead, which is why it
+		//     is becoming master) and its local data may be the last copy.
+		//     Truncating would wipe it and then dump nothing. Masters keep
+		//     the legacy merge.
+		//  2. Source unreachable — the pre-dump feature probe got no
+		//     response, so the source is likely dead. The dump will fail
+		//     too; leaving data intact lets the un-truncated retry preserve
+		//     it instead of emptying the DB first.
 		if (this->_storage->get_type() == storage::type_rocksdb) {
-			log_notice("truncating local storage before full-dump reconstruction so deletions on the source propagate (WAL sync was unavailable; see previous log line)", 0);
-			if (this->_storage->truncate(0) < 0) {
-				log_err("failed to truncate storage before full dump -> deactivating node", 0);
-				this->_cluster->deactivate_node();
-				return -1;
+			if (this->_role != cluster::role_slave) {
+				log_notice("truncate skipped (master reconstruction — local data may be the last copy)", 0);
+			} else if (!peer_reachable) {
+				log_notice("truncate skipped (source unreachable)", 0);
+			} else {
+				log_notice("truncating local storage before full-dump reconstruction so deletions on the source propagate (WAL sync was unavailable; see previous log line)", 0);
+				if (this->_storage->truncate(0) < 0) {
+					log_err("failed to truncate storage before full dump -> deactivating node", 0);
+					this->_cluster->deactivate_node();
+					return -1;
+				}
 			}
 		}
 #endif
@@ -230,10 +249,12 @@ int handler_reconstruction::run() {
  *	always full-dumps rather than risk applying an incompatible WAL stream.
  */
 bool handler_reconstruction::_try_wal_reconstruction(shared_connection c,
-		bool& peer_wal_supported, string& peer_master_id, uint64_t& peer_latest_lsn) {
+		bool& peer_wal_supported, string& peer_master_id, uint64_t& peer_latest_lsn,
+		bool& peer_reachable) {
 	peer_wal_supported = false;
 	peer_master_id.clear();
 	peer_latest_lsn = 0;
+	peer_reachable = false;
 #ifdef HAVE_LIBROCKSDB
 	if (this->_storage->get_type() != storage::type_rocksdb) {
 		return false;
@@ -245,11 +266,15 @@ bool handler_reconstruction::_try_wal_reconstruction(shared_connection c,
 
 	// Probe the master's capabilities, lineage, and current LSN FIRST —
 	// before any dump — and hand the results back to the caller so the
-	// full-dump fallback can seed its cursor from peer_latest_lsn.
+	// full-dump fallback can seed its cursor from peer_latest_lsn. A
+	// meta_rc of 0 means the source answered (it is alive), which the
+	// caller needs to decide whether truncating before the dump is safe:
+	// truncating and then dumping from a DEAD source yields an empty DB.
 	{
 		op_meta* meta = new op_meta(c, NULL, this->_storage);
 		int meta_rc = meta->run_client_features(peer_wal_supported, peer_master_id, peer_latest_lsn);
 		delete meta;
+		peer_reachable = (meta_rc == 0);
 		if (meta_rc != 0 || !peer_wal_supported) {
 			log_info("master does not support WAL replication -> full dump", 0);
 			return false;

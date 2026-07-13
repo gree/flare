@@ -368,23 +368,41 @@ kind 上で実 StatefulSet + operator を動かす 18 スイート(~96 テスト
 
 ## 7. レビューワー向けチェックリスト
 
-裏取り用の一次ソース一覧。**P1 = merge 前に確認必須**。
+裏取り用の一次ソース一覧。**全項目の現状を反映済み(2026-07-13)**。✅ = 修正/検証完了、⏳ = 対応中、□ = 未対応(合意事項/優先度低)。
 
-| 優先 | 確認事項 | 場所 |
+| 状態 | 確認事項 | 解決内容 / 場所 |
 |---|---|---|
-| P1✅ | `iter_begin` の早期 return が unlock しない(§3.5 F-1)→ **修正済み `f68671c`** | `src/lib/storage_rocksdb.cc:780-787` |
-| P1✅ | `truncate` が wholelock を取らない(§3.5 F-2)→ **修正済み `f68671c`** | `src/lib/storage_rocksdb.cc:735-` |
-| P1 | 昇格ロジック: slave 不在時に空スロットのまま残すこと、昇格対象が live pod であること | `K8sReconciler.lean:213-246` |
-| P1 | LSN+データの原子的適用 | `src/lib/storage_rocksdb.cc:925-950` 付近 |
-| P1✅ | **二重 master 競合(§4.6 R-1)** → **修正済み `141d725`**(`demoteDuplicateMasters` + 回帰定理)。修復ロジック自体のレビューを推奨 | `K8sReconciler.lean`(`mergeClusterState`), `VerifiedSafety.lean`(`r1_*`) |
-| P1✅ | **形式検証の主張の修正(§5)** → **修正済み `968e423`**(モデル接続 + 非自明性定理 + ドキュメント修正)。新定理の妥当性レビューを推奨 | `GlobalModel.lean`, `Simulation.lean`, `VerifiedSafety.lean`, `docs/FORMAL_VERIFICATION.md` |
-| P2 | WAL sync の全エラーが full dump にフォールバックすること | `op_repl_sync_wal.cc:119-176`, `handler_dump_replication.cc:155-175` |
-| P2 | `mergeClusterState` が Prepare→Active を巻き戻さない条件 | `Main.lean:520-536` |
-| P2 | Lease リーダー選出に二重リーダー窓がないか | `Main.lean:851-1021` |
-| P2 | 一般安全性定理の `sorry` の位置 | `Safety.lean:73,134`, `SafetyProofs.lean` |
-| P3 | `_master_id` の並行アクセス(ガードなし) | `op_repl_sync_wal.cc:139`, `storage_rocksdb.h` |
-| P3 | `count()` の O(n) スキャンの呼び出し頻度 | `storage_rocksdb.cc:853-865` |
-| P3 | WAL sync に per-key partition フィルタがない設計の合意(orphan purge 前提) | `handler_dump_replication.cc:200-206` との対比 |
-| P3 | flared が version 逆転の topology broadcast を無視するか | flared 側実装(要調査) |
+| ✅ | `iter_begin` の rdlock リーク(F-1) | `f68671c` で unlock 追加。並行性テストも `dda75dd` で追加 |
+| ✅ | `truncate` の排他なし(F-2) | `f68671c` で tcb 同等のロック規約に。truncate/set 競合テストで検証 |
+| ✅ | `_master_id` の並行アクセス | `f68671c` で専用 rwlock + 値返しに変更 |
+| ✅ | 昇格ロジック(空スロット維持・**live pod のみ昇格**) | `4da9278` + ゾンビガード `69d49ac` + **liveness ガード `aa9c055`**。scenario3/4/5 の計10定理で機械検証(dead 不昇格・ghost 不昇格・データ保持 replica 優先) |
+| ✅ | LSN+データの原子的適用 | レビューで検証済み(`apply_batch_with_lsn`、単一 WriteBatch)。WAL roundtrip 単体テストあり |
+| ✅ | 二重 master 競合(R-1) | `141d725` 修復 + `3464ee9` で**任意入力の一般定理**(`mergeClusterState_atMostOneMaster`、sorry なし) |
+| ✅ | 形式検証の主張と実装の乖離 | `968e423` でモデルを本番関数に接続。§5 追記参照 |
+| ✅ | WAL sync 全エラーの full dump フォールバック | コードレビューで検証 + `31daf5c` の WAL-first 再構築も同じ非破壊フォールバック設計。G1/G2 E2E が実経路を execute |
+| ✅ | merge の Prepare→Active 非巻き戻し / 登録消失なし / 死者復活なし | pure 層へ移設(`141d725`)+ 一般定理3本(`9d736d3`)。Prepare→Active 保存そのものの専用定理は未追加(低リスク: 条件は単一分岐) |
+| ✅ | Lease 二重リーダー窓 | `9a75a10` でレビュー完了 + broadcast 直前フェンス追加。残余窓(送信中1回分)は文書化済み |
+| ⏳ | 一般安全性定理の `sorry`(`Safety.lean:73,134`) | 未解消(唯一の残存項目)。commit 境界の一般定理でリスクの大半をカバー。分解ロードマップあり |
+| □ | `count()` の O(n) スキャン | 未対応(性能課題、機能影響なし)。stats 呼び出し頻度の実測後に判断 |
+| □ | WAL sync の per-key partition フィルタなし(orphan purge 前提の設計合意) | 設計合意事項として残置。orphan purge の E2E は PVC 化(`b0d62f1`)で実アサート化済み |
+| □ | flared の version 逆転 broadcast 耐性 | 未調査(flared 側)。operator は単一 writer + version 単調のため実害シナリオは限定的 |
 
-**参考ドキュメント(PR 内)**: `flare_operator/docs/FORMAL_VERIFICATION.md`(※§5 の通り主張が実態より強いので鵜呑みにしないこと)、`flare_operator/docs/ARCHITECTURE.md`、`docs/e2e-test-issues.md`(テスト結果と SKIP 理由)、`ROCKSDB_REPLICATION.md`(#142 の設計書)
+**参考ドキュメント(PR 内)**: `flare_operator/docs/FORMAL_VERIFICATION.md`(`968e423` 以降は実態と一致するよう修正済み — 証明済み/未証明の区分が明記されている)、`docs/BACKUP_RESTORE.md`(バックアップ/リストア手順)、`flare_operator/docs/ARCHITECTURE.md`、`docs/e2e-test-issues.md`、`ROCKSDB_REPLICATION.md`
+
+---
+
+## 8. 証明と実装の乖離: 現状(2026-07-13)
+
+**是正済み**:
+- モデルの全ステップが**本番と同一の関数を呼ぶ**: `NodeAdd`→`reconcileStep`/`autoAssign`(TCP fast path の `[nodeKey]` 制限も同一)、`OperatorReconcile`→`assignProxiesPure`(livePodKeys 配線も同一)、`NodeDie`→`detectDeadNodesPure`+`handleFailoverWithPromotion`、commit 境界→`mergeClusterState`
+- **非自明性カナリア**: 初期化で両パーティションに master が立つこと・Ready 連鎖が完走することを定理化 — モデルが空回りに退化すると**コンパイルが落ちる**
+- **一般定理**(シナリオ非依存・任意入力): master 高々1(commit 境界)・登録消失なし・死者復活なし
+- 危険シナリオ(failover / ゾンビ / ゴースト)はすべて「実装が変われば証明が落ちる」形で固定
+
+**残る乖離(正直な列挙)**:
+1. `stepPreservesAtMostOneMaster` の `sorry` — 任意ステップ列への帰納証明は未完(唯一の証明負債)
+2. **モデルは逐次** — TCP サーバと FSM の実インターリーブは対象外(R-1 は merge 関数の性質として証明したが、インターリーブ生成自体はモデル外)
+3. **IO 層は対象外** — kubectl・TCP wire・ConfigMap 永続化はモデルにない
+4. **C++ flared の複製挙動はモデル外** — `FlaredNode.lean` は role shift の骨格のみ。今回追加した WAL-first 再構築・LSN 種付け(`31daf5c` `2b4b028`)は C++ 側にしか存在せず、これらの正しさは E2E とコードレビューが担保(モデル化は future work)
+
+要約: **「証明が実装と別物」という当初の問題は解消**し、pure 層(割当・failover・merge)は共有コードとして機械検証されている。残るのは「一般帰納」「並行性」「IO/C++ 層」という、当初から明記していた3つの構造的限界。

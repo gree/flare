@@ -25,6 +25,12 @@ structure TestSuite where
   setup : IO Unit
   teardown : IO Unit
   tests : List TestCase
+  /-- Diagnostics hook: runs BEFORE teardown when any test in the suite
+      failed (and also when SKIP diagnostics are wanted — the hook decides).
+      Suites tear their per-namespace operator down immediately, so the CI
+      end-of-run log dump finds nothing; this is the only point where the
+      failing suite's operator/flared logs still exist. -/
+  onFailure : IO Unit := pure ()
 
 /-- Run a single suite, TAP output to stderr, return (total, failures) -/
 def runSuite (suite : TestSuite) (startIndex : Nat) : IO (Nat × Nat) := do
@@ -62,6 +68,13 @@ def runSuite (suite : TestSuite) (startIndex : Nat) : IO (Nat × Nat) := do
       IO.println s!"not ok {idx} - {tc.name}"
       IO.eprintln s!"#   exception: {e}"
       failures := failures + 1
+
+  if failures > 0 then
+    try
+      IO.eprintln s!"# --- diagnostics for failing suite '{suite.name}' ---"
+      suite.onFailure
+    catch e =>
+      IO.eprintln s!"# diagnostics hook failed: {e}"
 
   try
     suite.teardown

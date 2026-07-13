@@ -42,6 +42,13 @@ structure ClusterConfig where
   /-- PVC size request (only used when usePvc). Kind's default storage
       class (local-path) ignores the size, so keep it small. -/
   pvcSize : String := "1Gi"
+  /-- Extra flared.conf lines baked into the INITIAL {name}-config ConfigMap,
+      so pods BOOT with them applied by load(). Required for DB-reopen-only
+      options (e.g. rocksdb-wal-ttl-seconds) that reload() deliberately
+      refuses to hot-apply — patching the CRD after deploy can never apply
+      those, and restarting the whole StatefulSet mid-suite churns every
+      node through re-registration. -/
+  extraFlaredConf : String := ""
   deriving Repr
 
 /-- Image tag used for the flared container in this cluster. -/
@@ -417,7 +424,7 @@ def deployCluster (cfg : ClusterConfig) : IO Unit := do
   -- file.  Using direct kubectl (not `sh -c`) so failures are visible.
   let cmName := s!"{cfg.name}-config"
   match ← kubectl ["create", "configmap", cmName, "-n", cfg.«namespace»,
-                    "--from-literal=extra.conf="] with
+                    s!"--from-literal=extra.conf={cfg.extraFlaredConf}"] with
   | .ok _ => pure ()
   | .error e =>
     -- "AlreadyExists" is fine; anything else is a real failure we want to see.

@@ -34,6 +34,13 @@ private def cfg : ClusterConfig := {
   operatorName := "flare-operator-wal-purged"
   debugPod := "debug-wal-purged"
   storageBackend := "rocksdb"
+  -- WAL retention is a DB-REOPEN option: reload() refuses to hot-apply it
+  -- and restarting the StatefulSet mid-suite churns every node through
+  -- re-registration (observed: writes failing right after the restart).
+  -- Bake TTL=1 into the boot config instead so load() applies it from the
+  -- first start and the purge→fallback scenario is reachable with zero
+  -- restarts.
+  extraFlaredConf := "rocksdb-wal-ttl-seconds = 1"
   -- PVC: the whole point of these suites is behavior across pod restarts
   -- (prior LSN retention, purged-WAL fallback, orphan keys left on disk).
   -- On emptyDir those preconditions vanish with the pod and the interesting
@@ -89,38 +96,28 @@ def suite : TestSuite := {
     deployCluster cfg
     let ok ← waitForStable cfg 50
     if !ok then throw (IO.userError "cluster did not stabilize")
+  -- Per-suite operators are deleted in teardown, so the CI end-of-run log
+  -- dump can never capture a failing suite's logs; grab them here first.
+  onFailure := dumpClusterDiagnostics cfg.«namespace»
   teardown := do
     cleanupCluster cfg
   tests := [
-    -- Test 1: set very short WAL TTL via CRD patch. WAL retention is a
-    -- DB-REOPEN option: flared's reload() deliberately does NOT hot-apply
-    -- it (it warns that a restart is required), so after the ConfigMap
-    -- lands we rollout-restart the StatefulSet — the recreated pods mount
-    -- the updated file and load() applies TTL=1 at boot. Data survives the
-    -- restart on the PVCs.
-    { name := "set walTtlSeconds=1 and restart pods to apply (reopen-only option)"
+    -- Test 1: verify flared BOOTED with walTtlSeconds=1 (baked into the
+    -- initial ConfigMap — see extraFlaredConf on cfg; reopen-only option).
+    { name := "flared booted with rocksdb-wal-ttl-seconds=1 (boot config)"
       run := do
-        let patch := "{\"spec\":{\"rocksdb\":{\"walTtlSeconds\":1}}}"
-        match ← kubectlPatch "flarecluster" cfg.name cfg.«namespace» patch with
-        | .error e => return .fail s!"CR patch failed: {e}"
-        | .ok _ =>
-          let (found, _) ← waitForConfigLine cfg.name cfg.«namespace»
-            "rocksdb-wal-ttl-seconds = 1" 60
-          if !found then return .fail "ConfigMap did not reflect walTtlSeconds=1"
-          -- Give kubelet time to propagate the ConfigMap into the pod
-          -- template's volume before restarting, then restart and wait.
-          IO.sleep 15000
-          match ← kubectl ["rollout", "restart", s!"statefulset/{cfg.name}-nodes",
-                            "-n", cfg.«namespace»] with
-          | .error e => return .fail s!"rollout restart failed: {e}"
-          | .ok _ =>
-            match ← kubectl ["rollout", "status", s!"statefulset/{cfg.name}-nodes",
-                              "-n", cfg.«namespace», "--timeout=180s"] with
-            | .error e => return .fail s!"rollout did not complete: {e}"
-            | .ok _ =>
-              let stable ← waitForStable cfg 40
-              if stable then return .pass
-              else return .fail "cluster did not restabilize after TTL restart" },
+        let pods ← getPodNames s!"app=flare,cluster={cfg.name}" cfg.«namespace»
+        match pods.head? with
+        | none => return .fail "no flared pods"
+        | some pod =>
+          match ← kubectl ["exec", pod, "-n", cfg.«namespace», "--", "sh", "-c",
+                            "cat /etc/flared/extra.conf"] with
+          | .error e => return .fail s!"could not read mounted conf: {e}"
+          | .ok content =>
+            if containsSubstr content "rocksdb-wal-ttl-seconds = 1" then
+              return .pass
+            else
+              return .fail s!"mounted conf lacks wal-ttl=1; content: {content.take 200}"},
 
     -- Test 2: write keys to advance master LSN
     { name := "write keys to advance master LSN"

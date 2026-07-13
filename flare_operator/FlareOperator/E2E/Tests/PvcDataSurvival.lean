@@ -82,6 +82,9 @@ def suite : TestSuite := {
     let stable ← waitForStable cfg 50
     if !stable then
       throw (IO.userError "cluster did not stabilize")
+  -- Per-suite operators are deleted in teardown, so the CI end-of-run log
+  -- dump can never capture a failing suite's logs; grab them here first.
+  onFailure := dumpClusterDiagnostics cfg.«namespace»
   teardown := cleanupCluster cfg
   tests := [
     -- Test 1: baseline — write and read back through the P0 master.

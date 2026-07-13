@@ -119,6 +119,19 @@ def containsSubstr (haystack needle : String) : Bool :=
 -- TCP/protocol helpers (via kubectl exec in debug pod)
 -- ===========================================================================
 
+/-- Dump the suite's operator + flared logs (call from TestSuite.onFailure:
+    per-suite operators are deleted in teardown, so the CI end-of-run dump
+    can never capture the failing suite's logs — this hook point can). -/
+def dumpClusterDiagnostics (ns : String) : IO Unit := do
+  IO.eprintln s!"# === operator logs ({ns}) ==="
+  match ← kubectl ["logs", "-n", ns, "-l", "app=flare-operator", "--tail=200", "--prefix"] with
+  | .ok out => for line in out.splitOn "\n" do IO.eprintln s!"# {line}"
+  | .error e => IO.eprintln s!"# (operator logs unavailable: {e})"
+  IO.eprintln s!"# === flared logs ({ns}, tail 80 each) ==="
+  match ← kubectl ["logs", "-n", ns, "-l", "app=flare", "--tail=80", "--prefix"] with
+  | .ok out => for line in out.splitOn "\n" do IO.eprintln s!"# {line}"
+  | .error e => IO.eprintln s!"# (flared logs unavailable: {e})"
+
 /-- Execute a command in the debug pod. -/
 def execInDebugPod (debugPod ns cmd : String) : IO (Except String String) := do
   kubectl ["exec", debugPod, "-n", ns, "--", "sh", "-c", cmd]

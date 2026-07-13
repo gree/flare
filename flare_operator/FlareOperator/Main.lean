@@ -268,8 +268,12 @@ private def handleRocksdbConfig (crd : FlareClusterView) (crName ns : String) : 
   | .error e =>
     IO.eprintln s!"[flare-operator] ERROR: failed to write rocksdb config: {e}"
   | .ok () =>
-    sendSighupToPods crName ns
-    IO.eprintln s!"[TRACE] RocksdbConfig: applied {rocksdb.toExtraConf.length} bytes, SIGHUP sent"
+    -- Wait for kubelet to propagate the ConfigMap into each pod's mounted
+    -- file BEFORE signalling: an immediate SIGHUP makes flared re-read the
+    -- OLD file and the change is silently lost (observed as G12-5's stats
+    -- staying 0 in e2e despite flared's reload() being fixed).
+    syncConfAndSighupPods crName ns desired.trim
+    IO.eprintln s!"[TRACE] RocksdbConfig: applied {rocksdb.toExtraConf.length} bytes, verified + SIGHUP sent"
 
 /-- Handle cluster replication state machine.
     Manages the duplicate → forward mode transition autonomously. -/

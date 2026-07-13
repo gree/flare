@@ -165,6 +165,40 @@ def sendSighupToPods (crName ns : String) : IO Unit := do
       IO.eprintln s!"[flare-operator] warning: SIGHUP to {pod.name} failed: {e}"
     | .ok _ => pure ()
 
+/-- Wait until each pod's MOUNTED copy of extra.conf contains `needle`, then
+    SIGHUP that pod. kubelet propagates ConfigMap updates to the mounted file
+    asynchronously (typically up to ~60-90s); a SIGHUP sent immediately after
+    `kubectl apply` makes flared re-read the OLD file and the config change is
+    silently lost until the next unrelated reload. Per pod: poll (2s interval,
+    `timeoutSec` cap), then signal; pods that never converge get a warning and
+    NO signal (a useless SIGHUP is not harmful, but the log should say the
+    truth: the config did not land). -/
+def syncConfAndSighupPods (crName ns needle : String) (timeoutSec : Nat := 120)
+    : IO Unit := do
+  let pods ← listFlaredPods crName ns
+  for pod in pods do
+    let mut landed := false
+    let mut waited := 0
+    while !landed && waited < timeoutSec do
+      match ← execInPod pod.name ns ["sh", "-c", "cat /etc/flared/extra.conf 2>/dev/null || true"] with
+      | .ok content =>
+        if (content.splitOn needle).length > 1 then
+          landed := true
+        else
+          IO.sleep 2000
+          waited := waited + 2
+      | .error _ =>
+        IO.sleep 2000
+        waited := waited + 2
+    if landed then
+      match ← execInPod pod.name ns ["kill", "-HUP", "1"] with
+      | .error e =>
+        IO.eprintln s!"[flare-operator] warning: SIGHUP to {pod.name} failed: {e}"
+      | .ok _ =>
+        IO.eprintln s!"[flare-operator] config landed on {pod.name} after {waited}s, SIGHUP sent"
+    else
+      IO.eprintln s!"[flare-operator] WARNING: extra.conf update did not reach {pod.name} within {timeoutSec}s — SIGHUP withheld, config NOT applied there"
+
 /-- Render `extra.conf` content from rocksdb + optional cluster-replication
     sections. Sections are separated by a blank line when both are present so
     the file stays readable. Returns the empty string when neither section has

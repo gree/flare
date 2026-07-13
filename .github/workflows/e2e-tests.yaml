@@ -93,8 +93,15 @@ jobs:
       - name: Dump operator logs on failure
         if: failure()
         run: |
-          echo "=== Operator Logs ==="
-          kubectl logs -n flare-system -l app=flare-operator --tail=500 || true
+          # Suites run their own operator in per-suite namespaces (flare-*),
+          # so dump every one of them — a fixed -n flare-system misses the
+          # namespace of the suite that actually failed.
+          for ns in $(kubectl get ns -o name | sed 's|namespace/||' | grep '^flare-'); do
+            echo "=== Operator Logs ($ns) ==="
+            kubectl logs -n "$ns" -l app=flare-operator --tail=300 --prefix || true
+            echo "=== flared Logs ($ns, tail 100 each) ==="
+            kubectl logs -n "$ns" -l app=flare --tail=100 --prefix || true
+          done
 
       - name: Dump K8s state on failure
         if: failure()

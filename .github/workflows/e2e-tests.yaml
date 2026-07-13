@@ -1,14 +1,20 @@
 name: E2E Tests
 
 on:
+  # Feature branches are covered by their pull_request runs; running the same
+  # suite again on push produced duplicate hour-long runs of identical code
+  # (and confusing split verdicts when one of the pair hit a flake).
   push:
     branches:
-      - flare-operator
       - master
   pull_request:
     branches:
       - flare-operator
       - master
+
+concurrency:
+  group: e2e-${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   e2e-test:

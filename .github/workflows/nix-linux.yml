@@ -1,6 +1,15 @@
 name: nix-linux
 
-on: [push, pull_request]
+on:
+  # push builds only master; feature branches build via their PRs (dedup).
+  push:
+    branches:
+      - master
+  pull_request:
+
+concurrency:
+  group: nix-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test-legacy:

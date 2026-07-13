@@ -38,6 +38,22 @@
 > **CI 実績**: 全20スイート117テストの green を一度達成(run 29218569229)。その後の G 群深掘りラウンドで G2 の restart 方式が再登録チャーンを誘発する退行を検出(修正中)。G1 は「WAL-first が実際に発火してフォールバック」まで前進。
 >
 > **本番前の残課題(コード外)**: ステージング障害注入 / 監視アラート定義 / Runbook 整備 / canary 計画(§詳細は前回報告参照)。
+>
+> **第3ラウンド: 障害シナリオ監査と最終 green(2026-07-13 追記)**
+>
+> AZ 障害・通信断・部分消滅・ゾンビ化のシナリオ網羅監査を実施。監査は3つの穴(circuit breaker と operator 再起動の E2E 不在、full dump が削除を伝播しない設計欠陥)を特定し、修正の過程で CI が実バグ2件を検出、いずれも根本修正した:
+>
+> | コミット | 内容 |
+> |---|---|
+> | `cef9ad3` | **一般帰納証明完了 — sorry ゼロ**: 全操作の統一上界 `stepGlobal_cle`(count ≤ max old 1、仮定なし)により `stepPreservesAtMostOneMaster` / `globalSystemSafety`(任意状態・任意ステップ列・無制限長)を証明。昇格サイトに防御ガード(role+partition 再確認)を追加し前提をローカル化 |
+> | `0b037a3` | **監査対応**: circuit-breaker E2E(持続的過半死→トリップ→チャーンなし→自動復帰)+ operator-restart E2E(状態 reload 同一性+再起動後 failover)+ breaker 定理3本 + 「復旧に手動再起動が必要」という虚偽ログの修正(実際は毎 tick 再評価で自動復帰) |
+> | `1d7e4c1` | **削除伝播**: rocksdb の full dump 再構築前に truncate(長期離脱レプリカの削除済みキー復活 = stale read を根絶) |
+> | `fee7b60` | **幽霊蘇生バグ**(CI 診断フックが特定): merge が古い FSM スナップショットの Master/Slave で新しい Proxy 再登録を毎 tick 上書きし幽霊を不滅化 → `FlareNode.regEpoch`(wire 非搬送)導入、「新しい登録エポック側が丸ごと勝つ」merge に。`ghost_not_resurrected` 定理で固定 |
+> | `8978b36` | **最後のコピー消去バグ**(CI が検出): truncate が master ロール再構築・死亡ソース相手でも発火し、昇格ノードの PVC データ(最後のコピー)を消去 → gating を「slave ロール + ソース生存確認済み」に限定。「master になるノードのデータは最後のコピーかもしれない」を明文化 |
+>
+> **最終 CI**: E2E 22スイート・125テスト全 PASS + nix-linux PASS(run 29244264387 / 29244264328)。
+>
+> **監査の結論**: データ面(failover/ゾンビ/同時死/論理破壊)は「モデル定理 + E2E + 実装」の三層で担保。制御プレーン(AZ 障害・operator 死)も E2E 化済み。残存限界は operator↔flared の選択的通信断(緩和のみ)と IO/C++ 層の形式化外のみ。
 
 ---
 

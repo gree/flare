@@ -30,6 +30,7 @@
 #include "connection_tcp.h"
 #include "op_dump.h"
 #include "op_meta.h"
+#include "op_repl_sync_wal.h"
 
 #ifdef HAVE_LIBROCKSDB
 #include "storage_rocksdb.h"
@@ -81,34 +82,49 @@ int handler_reconstruction::run() {
 		return -1;
 	}
 
-	op_dump* p = new op_dump(c, this->_cluster, this->_storage);
+	// WAL-first: when the local storage is RocksDB and we still hold a
+	// consistent lineage with this master (matching master_id + a nonzero
+	// last-applied LSN), try to catch up via incremental WAL sync instead
+	// of a full dump. This is the common case after a slave pod restart on
+	// a persistent volume: the DB (and its __flare_repl_last_lsn /
+	// __flare_repl_master_id) survives, so only the delta needs shipping.
+	// If it succeeds we skip the full dump and go straight to activation;
+	// on any failure (or non-rocksdb / no prior lineage) via_wal stays
+	// false and we fall through to the full dump, which merges (never
+	// truncates) and is therefore always safe as a fallback.
+	bool via_wal = this->_try_wal_reconstruction(c);
 
-	p->set_thread(this->_thread);
-	this->_thread->set_state("execute");
-	this->_thread->set_op(p->get_ident());
+	if (!via_wal) {
+		op_dump* p = new op_dump(c, this->_cluster, this->_storage);
 
-	log_notice("starting dump operation (master=%s:%d, partition=%d, partition_size=%d, interval=%d, bwlimit=%d)",
-			   this->_node_server_name.c_str(), this->_node_server_port, this->_partition, this->_partition_size, this->_cluster->get_reconstruction_interval(), this->_cluster->get_reconstruction_bwlimit());
+		p->set_thread(this->_thread);
+		this->_thread->set_state("execute");
+		this->_thread->set_op(p->get_ident());
 
-	if (p->run_client(this->_reconstruction_interval, this->_partition, this->_partition_size, this->_reconstruction_bwlimit) < 0) {
-		log_err("failed to reconstruct (%s %s)", op::result_cast(p->get_result()).c_str(), p->get_result_message().c_str());
+		log_notice("starting dump operation (master=%s:%d, partition=%d, partition_size=%d, interval=%d, bwlimit=%d)",
+				   this->_node_server_name.c_str(), this->_node_server_port, this->_partition, this->_partition_size, this->_cluster->get_reconstruction_interval(), this->_cluster->get_reconstruction_bwlimit());
+
+		if (p->run_client(this->_reconstruction_interval, this->_partition, this->_partition_size, this->_reconstruction_bwlimit) < 0) {
+			log_err("failed to reconstruct (%s %s)", op::result_cast(p->get_result()).c_str(), p->get_result_message().c_str());
+			delete p;
+			this->_cluster->deactivate_node();
+			return -1;
+		}
+
 		delete p;
-		this->_cluster->deactivate_node();
-		return -1;
+		log_notice("reconstruction via full dump completed (master=%s:%d, partition=%d, partition_size=%d, interval=%d, bwlimit=%d)",
+				   this->_node_server_name.c_str(), this->_node_server_port, this->_partition, this->_partition_size, this->_reconstruction_interval, this->_reconstruction_bwlimit);
 	}
 
-	delete p;
-	log_notice("dump completed (master=%s:%d, partition=%d, partition_size=%d, interval=%d, bwlimit=%d)",
-			   this->_node_server_name.c_str(), this->_node_server_port, this->_partition, this->_partition_size, this->_reconstruction_interval, this->_reconstruction_bwlimit);
-
 #ifdef HAVE_LIBROCKSDB
-	// After a successful reconstruction from an authoritative master,
-	// adopt the master's identity token so that future WAL incremental
-	// syncs against the same master succeed without being refused by
-	// the mismatch check. Without this the node would trip
+	// After a successful FULL DUMP reconstruction from an authoritative
+	// master, adopt the master's identity token so that future WAL
+	// incremental syncs against the same master succeed without being
+	// refused by the mismatch check. Without this the node would trip
 	// master_id_mismatch on every WAL attempt and burn cycles on
-	// redundant full dumps.
-	if (this->_storage->get_type() == storage::type_rocksdb) {
+	// redundant full dumps. (Skipped when we reconstructed via WAL: the
+	// lineage already matched by construction — that was a precondition.)
+	if (!via_wal && this->_storage->get_type() == storage::type_rocksdb) {
 		storage_rocksdb* rdb = dynamic_cast<storage_rocksdb*>(this->_storage);
 		if (rdb) {
 			op_meta* meta = new op_meta(c, NULL, this->_storage);
@@ -147,6 +163,110 @@ int handler_reconstruction::run() {
 // }}}
 
 // {{{ protected methods
+/**
+ *	Attempt WAL-based incremental reconstruction against the master.
+ *
+ *	Returns true only if the full delta was applied via WAL sync (in which
+ *	case the caller skips the full dump). Returns false — safely — in every
+ *	other case: non-rocksdb storage, peer without WAL support, no prior
+ *	lineage (empty/mismatched master_id or LSN 0), or any classified WAL
+ *	failure. On a classified failure the wal_fallback_to_dump counter is
+ *	bumped and the caller proceeds to the non-destructive full dump.
+ *
+ *	Gating is deliberately strict: we only trust the local WAL cursor when
+ *	the master identity token still matches the peer's, so a node restored
+ *	from a backup, resynced against a different cluster, or freshly created
+ *	always full-dumps rather than risk applying an incompatible WAL stream.
+ */
+bool handler_reconstruction::_try_wal_reconstruction(shared_connection c) {
+#ifdef HAVE_LIBROCKSDB
+	if (this->_storage->get_type() != storage::type_rocksdb) {
+		return false;
+	}
+	storage_rocksdb* rdb = dynamic_cast<storage_rocksdb*>(this->_storage);
+	if (!rdb) {
+		return false;
+	}
+
+	// A nonzero last-applied LSN is the whole precondition for incremental
+	// catch-up: without it there is nothing to be incremental from.
+	uint64_t last_lsn = rdb->get_repl_last_lsn();
+	string local_master_id = rdb->get_master_id();
+	if (last_lsn == 0 || local_master_id.empty()) {
+		log_info("WAL reconstruction skipped (last_lsn=%llu, master_id=%s) -> full dump",
+			(unsigned long long)last_lsn, local_master_id.c_str());
+		return false;
+	}
+
+	// Probe the master's capabilities and lineage.
+	op_meta* meta = new op_meta(c, NULL, this->_storage);
+	bool wal_supported = false;
+	string peer_master_id;
+	int meta_rc = meta->run_client_features(wal_supported, peer_master_id);
+	delete meta;
+	if (meta_rc != 0 || !wal_supported) {
+		log_info("master does not support WAL replication -> full dump", 0);
+		return false;
+	}
+
+	// Strict lineage check: only proceed if our remembered master identity
+	// matches the peer's. Any mismatch (or a peer that does not advertise
+	// one) means our WAL cursor is not comparable to theirs.
+	if (peer_master_id.empty() || peer_master_id != local_master_id) {
+		log_notice("WAL reconstruction refused: master_id mismatch (local=%s peer=%s) -> full dump",
+			local_master_id.c_str(), peer_master_id.c_str());
+		return false;
+	}
+
+	this->_thread->set_state("execute");
+	this->_thread->set_op("repl_sync_wal");
+	log_notice("attempting reconstruction via WAL incremental sync (master=%s:%d, lsn=%llu, master_id=%s)",
+		this->_node_server_name.c_str(), this->_node_server_port,
+		(unsigned long long)last_lsn, local_master_id.c_str());
+
+	op_repl_sync_wal* wal_op = new op_repl_sync_wal(c, this->_storage);
+
+	// Throttling: a RocksDB-specific WAL bandwidth/interval of 0 inherits
+	// the cluster-wide reconstruction settings (mirrors
+	// handler_dump_replication).
+	wal_op->set_max_batch_bytes(rdb->get_wal_max_batch_bytes());
+	int wal_bwlimit = rdb->get_wal_sync_bwlimit();
+	if (wal_bwlimit == 0) {
+		wal_bwlimit = this->_reconstruction_bwlimit;
+	}
+	int wal_interval = rdb->get_wal_sync_interval();
+	if (wal_interval == 0) {
+		wal_interval = this->_reconstruction_interval;
+	}
+	wal_op->set_wal_sync_bwlimit(wal_bwlimit);
+	wal_op->set_wal_sync_interval(wal_interval);
+
+	int wal_result = wal_op->run_client(last_lsn, local_master_id);
+	op_repl_sync_wal::client_result rc = wal_op->get_client_result();
+	delete wal_op;
+
+	if (wal_result == 0 && rc == op_repl_sync_wal::client_success) {
+		log_notice("reconstruction via WAL incremental sync completed (master=%s:%d, from_lsn=%llu, now_lsn=%llu)",
+			this->_node_server_name.c_str(), this->_node_server_port,
+			(unsigned long long)last_lsn, (unsigned long long)rdb->get_repl_last_lsn());
+		return true;
+	}
+
+	const char* reason = "error";
+	switch (rc) {
+		case op_repl_sync_wal::client_master_id_mismatch: reason = "master_id_mismatch"; break;
+		case op_repl_sync_wal::client_lsn_ahead:          reason = "lsn_ahead"; break;
+		case op_repl_sync_wal::client_lsn_purged:         reason = "lsn_purged"; break;
+		default:                                          reason = "error"; break;
+	}
+	log_notice("WAL incremental sync failed (reason=%s) -> falling back to full dump", reason);
+	rdb->incr_wal_fallback_to_dump();
+	return false;
+#else
+	(void)c;
+	return false;
+#endif
+}
 // }}}
 
 // {{{ private methods

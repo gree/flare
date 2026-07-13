@@ -64,6 +64,11 @@ public:
 	virtual int run();
 
 protected:
+	// Try to catch up from the master via incremental WAL sync instead of
+	// a full dump. Returns true only when the delta was fully applied (so
+	// the caller can skip the dump); false — safely — otherwise, after
+	// which the caller performs the non-destructive full dump.
+	bool _try_wal_reconstruction(shared_connection c);
 };
 
 }	// namespace flare

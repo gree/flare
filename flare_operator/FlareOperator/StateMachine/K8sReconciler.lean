@@ -343,7 +343,16 @@ def mergeNodeEntry (current : FlareClusterState) (key : String) (ucsNode : Flare
     : FlareNode :=
   match current.nodeMap.lookup key with
   | some curNode =>
-    if curNode.role == ucsNode.role
+    -- A LIVE entry carrying a newer registration epoch was (re-)registered
+    -- over TCP AFTER the FSM snapshotted: the FSM's opinion about this key
+    -- is stale in its entirety, so the live entry wins wholesale. Without
+    -- this, every commit resurrected ghost Master/Slave roles over a fresh
+    -- Proxy re-registration (root cause of the pvc-data-survival data-loss
+    -- churn). Ties (the common case: no re-registration happened) keep the
+    -- established rules: FSM owns roles, TCP-driven Prepare→Active sticks.
+    if curNode.regEpoch > ucsNode.regEpoch then
+      curNode
+    else if curNode.role == ucsNode.role
        && curNode.state == FlareState.Active
        && ucsNode.state == FlareState.Prepare then
       { ucsNode with state := FlareState.Active }
@@ -553,22 +562,29 @@ theorem mergeClusterState_preserves_keys (current ucs : FlareClusterState)
       simpa using hnotin
 
 /-- NO CORPSE RESURRECTION: a Down (failover-demoted) entry in the FSM state
-    survives the merge verbatim — still Down. The Prepare→Active preservation
-    can only fire on a Prepare entry, and the duplicate-Master repair only
-    touches Masters, so a Proxy/Down corpse is untouched by both. General
-    theorem over arbitrary states. -/
+    survives the merge verbatim — still Down — UNLESS a strictly newer
+    registration for the same key exists on the live side (`regEpoch`
+    hypothesis): a pod that re-registered after the snapshot legitimately
+    supersedes its own corpse. The Prepare→Active preservation can only fire
+    on a Prepare entry, and the duplicate-Master repair only touches
+    Masters, so a Proxy/Down corpse is untouched by both. General theorem
+    over arbitrary states. -/
 theorem mergeClusterState_down_survives (current ucs : FlareClusterState)
     (k : String) (n : FlareNode)
     (hmem : (k, n) ∈ ucs.nodeMap)
     (hrole : (n.role == FlareRole.Master) = false)
-    (hdown : n.state = FlareState.Down) :
+    (hdown : n.state = FlareState.Down)
+    (hfresh : ∀ curNode, current.nodeMap.lookup k = some curNode →
+      curNode.regEpoch ≤ n.regEpoch) :
     (k, n) ∈ (mergeClusterState current ucs).nodeMap := by
   have hentry : mergeNodeEntry current k n = n := by
     unfold mergeNodeEntry
-    cases current.nodeMap.lookup k with
+    cases hl : current.nodeMap.lookup k with
     | none => rfl
     | some curNode =>
-      simp [hdown, show (FlareState.Down == FlareState.Prepare) = false from rfl]
+      have hle := hfresh curNode hl
+      simp [hdown, show (FlareState.Down == FlareState.Prepare) = false from rfl,
+        Nat.not_lt_of_le hle]
   have hmerged : (k, n) ∈ mergedUcsEntries current ucs := by
     have himg := List.mem_map_of_mem
       (f := fun kv => (kv.1, mergeNodeEntry current kv.1 kv.2)) hmem

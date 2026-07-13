@@ -242,6 +242,44 @@ theorem r1_merge_demotes_tcp_duplicate :
       (fun n => n.role == FlareRole.Proxy && n.partition == -1)) = some true := by
   decide
 
+/-! ## VERIFIED THEOREM 5b: the merge cannot resurrect ghosts -/
+
+/--
+  GHOST RESURRECTION regression (root cause of the pvc-data-survival DATA
+  LOSS churn): a pod re-registers as Proxy (regEpoch 5) while the FSM's
+  in-flight snapshot still says Master (regEpoch 3). The commit merge must
+  keep the NEWER Proxy registration — the old rule "FSM owns roles"
+  resurrected the ghost Master on every tick, locking the cluster into
+  M=2 S=2 P=0 with recreated pods stuck as ghosts.
+-/
+def ghost_current : FlareClusterState :=
+  { nodeMap := [("pod-a:11211",
+      { serverName := "pod-a", serverPort := 11211, role := FlareRole.Proxy,
+        state := FlareState.Active, partition := -1, regEpoch := 5 })],
+    nodeMapVersion := 5 }
+
+def ghost_ucs : FlareClusterState :=
+  { nodeMap := [("pod-a:11211",
+      { serverName := "pod-a", serverPort := 11211, role := FlareRole.Master,
+        state := FlareState.Active, partition := 0, regEpoch := 3 })],
+    nodeMapVersion := 3 }
+
+/-- The fresh Proxy re-registration survives the stale FSM commit. -/
+theorem ghost_not_resurrected :
+    ((mergeClusterState ghost_current ghost_ucs).nodeMap.lookup "pod-a:11211").map
+      (fun n => n.role == FlareRole.Proxy && n.regEpoch == 5) = some true := by
+  decide
+
+/-- Tie on the epoch (no re-registration happened) keeps the established
+    rule: the FSM's role assignment wins. -/
+theorem tie_fsm_still_owns_roles :
+    ((mergeClusterState { ghost_current with nodeMap := [("pod-a:11211",
+        { serverName := "pod-a", serverPort := 11211, role := FlareRole.Proxy,
+          state := FlareState.Active, partition := -1, regEpoch := 3 })] }
+      ghost_ucs).nodeMap.lookup "pod-a:11211").map
+      (fun n => n.role == FlareRole.Master) = some true := by
+  decide
+
 /-! ## VERIFIED THEOREM 6: Checkpoints along the execution trace -/
 
 /--

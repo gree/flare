@@ -251,6 +251,9 @@ def reconcileStep (state : FlareClusterState) (crd : FlareClusterView)
       partition := -1
       balance := 100
       threadType := 16
+      -- Stamp the registration so a concurrent FSM commit (computed from a
+      -- snapshot that predates this re-add) cannot resurrect the old role.
+      regEpoch := state.nodeMapVersion + 1
     }
     -- SPECIAL CASE: P0 Master must be assigned immediately to avoid reconstruction.
     -- P0 is the source of truth - it should never witness a role transition and

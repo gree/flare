@@ -58,6 +58,14 @@ structure FlareNode where
   partition : Int  -- -1 = unassigned proxy
   balance : Nat := 100
   threadType : Nat := 16
+  /-- Registration epoch: bumped on every TCP (re-)registration of this key
+      and NEVER serialized to the wire. Lets the FSM-commit merge tell a
+      LATER registration from its own stale snapshot: without it the merge
+      resurrected ghost Master/Slave roles over a pod's fresh Proxy
+      re-registration every tick — the root cause of the pvc-data-survival
+      DATA LOSS churn (operator log: re-adds flip to Proxy, next commit
+      flips them back, M=2 S=2 P=0 forever). -/
+  regEpoch : Nat := 0
   deriving Repr, BEq
 
 /-! ## Cluster Replication (Blue/Green Migration) -/

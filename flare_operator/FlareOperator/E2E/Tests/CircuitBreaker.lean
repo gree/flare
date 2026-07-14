@@ -63,12 +63,23 @@ def suite : TestSuite := {
         if n == 2 then return .pass
         else return .fail s!"expected 2 masters, got {n}" },
 
-    -- Dead detection is disabled during the 120s startup grace; wait it out
-    -- so the breaker actually evaluates the outage we are about to induce.
+    -- Dead detection is disabled during the startup grace. The grace is
+    -- counted in RECONCILE CYCLES (24), not wall-clock seconds — and a
+    -- cycle is 5s sleep PLUS the reconcile's own duration (measured
+    -- 1.5-2s in CI), so 24 cycles is ~160-170s of wall clock, not 120s.
+    -- A fixed 125s sleep raced it (observed flake: outage induced while
+    -- grace was still counting → no trip within the window). Wait on the
+    -- operator's own grace countdown log instead, with a generous cap.
     { name := "wait out the operator startup grace period"
       run := do
         IO.sleep 125000
-        return .pass },
+        let graceOver ← waitForCondition "grace countdown finished" 120 do
+          match ← kubectl ["logs", "-n", cfg.«namespace», "-l", "app=flare-operator",
+                            "--tail=5"] with
+          | .error _ => return false
+          | .ok out => return !(containsSubstr out "grace period:")
+        if graceOver then return .pass
+        else return .fail "operator still in startup grace after 245s" },
 
     { name := "majority outage (scale 4→1) trips the breaker"
       run := do
@@ -76,10 +87,10 @@ def suite : TestSuite := {
                           "-n", cfg.«namespace», "--replicas=1"] with
         | .error e => return .fail s!"scale down failed: {e}"
         | .ok _ =>
-          let tripped ← waitForCondition "breaker tripped in operator log" 90 do
+          let tripped ← waitForCondition "breaker tripped in operator log" 180 do
             return containsSubstr (← operatorLogs) "CIRCUIT BREAKER TRIPPED"
           if tripped then return .pass
-          else return .fail "no CIRCUIT BREAKER TRIPPED log within 90s of majority outage" },
+          else return .fail "no CIRCUIT BREAKER TRIPPED log within 180s of majority outage" },
 
     -- While tripped the FSM must be inert: the dead masters keep their map
     -- entries (the pause happens BEFORE demote/failover) and nothing gets

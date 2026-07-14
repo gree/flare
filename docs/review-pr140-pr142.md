@@ -463,4 +463,10 @@ kind 上で実 StatefulSet + operator を動かす 18 スイート(~96 テスト
 
 ### 9.5 仕様ギャップの充填: データ保全不変条件(2026-07-14 追加)
 
+### 9.6 乖離仮説の最終実証(2026-07-14、最終 green)
+
+§9 の主張「バグはモデルと実装の乖離に住む」は、最後のデータ喪失 flake でもう一度実証された。3ラウンドの追跡の末、真因は **flared C++ が「Proxy→Master shift は state=Active でも再構築を起動する」一方、モデル(FlaredNode.lean)は当初から「Active なら即時・再構築なし」と定義していた乖離**だった。誤った master 再構築が churn 中のリングから誤ソース(別パーティションの master)を選び、接続失敗の deactivate 連鎖でデータ喪失に至る。修正はモデルの意味論を C++ に移植する1箇所(Active-shift skip)で、修正後 **22スイート125テスト全 PASS**(run 29327938584)。truncate gating(slave ロール + ソース生存)は正当な slave full-dump 経路の防御として併存する2層構造。
+
+**最終状態**: sorry ゼロの証明体系(一般帰納 + データ保全不変条件)、E2E 125テスト green、全スイート診断フック配線済み、運用アーティファクト(アラート・PDB/zone分散 Helm・Runbook)完備。
+
 truncate 系バグ2件が住んでいた未言明領域「**Active な master はパーティションのデータを保持している**」を、モデルの第一級不変条件として追加(`holdsData` 抽象化 + `activeMasterHoldsData`)。truncate の gating(slave ロール + ソース到達可能)を仕様として言明し、**gating を外すと不変条件が破れることも定理化**(バグ再導入 = コンパイル失敗)。

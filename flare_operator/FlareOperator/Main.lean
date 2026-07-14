@@ -533,8 +533,12 @@ private partial def runReconcileFSMLoop
     (stateRef : IO.Ref FlareClusterState)
     (migrationRef : IO.Ref MigrationPhase)
     (graceCyclesRef : IO.Ref Nat)
+    (trippedRef : IO.Ref Bool)
     (crName ns : String) : IO Unit := do
   if K8sReconciler.flareReconcileTerminalBool s.reconcileStep then
+    -- Record whether this pass ended in the circuit breaker (for the
+    -- flare_operator_circuit_breaker_tripped gauge — alerting pages on it).
+    trippedRef.set (s.reconcileStep == .EmergencyPaused)
     -- Terminal state reached
     match s.reconcileStep with
     | .Done =>
@@ -593,15 +597,15 @@ private partial def runReconcileFSMLoop
         executeEffects finalEffects crName ns stateRef migrationRef
         if let some ucs := finalState.updatedClusterState then
           let _ ← commitClusterState stateRef cs3Version ucs
-        runReconcileFSMLoop finalState stateRef migrationRef graceCyclesRef crName ns
+        runReconcileFSMLoop finalState stateRef migrationRef graceCyclesRef trippedRef crName ns
       | none =>
         -- No new request - safe to recurse (nextState is in an "action" state)
-        runReconcileFSMLoop nextState stateRef migrationRef graceCyclesRef crName ns
+        runReconcileFSMLoop nextState stateRef migrationRef graceCyclesRef trippedRef crName ns
     | none =>
       -- No request: update cluster state if FSM produced one and continue
       if let some ucs := newState.updatedClusterState then
         let _ ← commitClusterState stateRef csVersion ucs
-      runReconcileFSMLoop newState stateRef migrationRef graceCyclesRef crName ns
+      runReconcileFSMLoop newState stateRef migrationRef graceCyclesRef trippedRef crName ns
 
 /-- Run the FSM-driven reconcile loop.
     Repeatedly calls flareReconcileCore, executing requests/effects until Done/Error.
@@ -609,6 +613,7 @@ private partial def runReconcileFSMLoop
     and the FSM restarts from Init on the next tick. -/
 private def runReconcileDriver (stateRef : IO.Ref FlareClusterState)
     (migrationRef : IO.Ref MigrationPhase) (graceCyclesRef : IO.Ref Nat)
+    (trippedRef : IO.Ref Bool)
     (crName ns : String) : IO Unit := do
   let initialGrace ← graceCyclesRef.get
   let initialPhase ← migrationRef.get
@@ -617,7 +622,7 @@ private def runReconcileDriver (stateRef : IO.Ref FlareClusterState)
     currentMigrationPhase := initialPhase
   }
 
-  runReconcileFSMLoop initialState stateRef migrationRef graceCyclesRef crName ns
+  runReconcileFSMLoop initialState stateRef migrationRef graceCyclesRef trippedRef crName ns
 
 -- ===========================================================================
 -- FSM-Driven Reconcile (Complete with safety checks and metrics)
@@ -657,6 +662,7 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
        prevCrd.spec.replicas != crd.spec.replicas then
       IO.eprintln s!"[flare-operator] CRD changed: partitions {prevCrd.spec.partitions}→{crd.spec.partitions}, replicas {prevCrd.spec.replicas}→{crd.spec.replicas}"
     crdRef.set crd
+    metrics.partitionsDesired.set crd.spec.partitions.toFloat
 
     -- 1b. Detect unsafe partition reduction (safety check BEFORE running FSM)
     let state ← stateRef.get
@@ -667,7 +673,9 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
 
   -- 2. Run the FSM driver
   let oldVersion := (← stateRef.get).nodeMapVersion
-  runReconcileDriver stateRef migrationRef graceCyclesRef crName ns
+  let trippedRef ← IO.mkRef false
+  runReconcileDriver stateRef migrationRef graceCyclesRef trippedRef crName ns
+  metrics.circuitBreakerTripped.set (if ← trippedRef.get then 1.0 else 0.0)
 
   -- 3. Post-FSM: Broadcast topology if version changed
   let finalState ← stateRef.get

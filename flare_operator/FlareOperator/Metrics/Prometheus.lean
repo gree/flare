@@ -69,6 +69,15 @@ structure OperatorMetrics where
   -- human to investigate a stalled reconstruction.
   prepareStuckCount : Gauge
 
+  -- Gauge: 1 while the blast-radius circuit breaker is tripped (the FSM's
+  -- last pass ended in EmergencyPaused), else 0. Page on this: it means a
+  -- suspected AZ-scale outage with automatic failover intentionally halted.
+  circuitBreakerTripped : Gauge
+
+  -- Gauge: partitions requested by the CRD. Lets alerting compare
+  -- masters(active) against the DESIRED count instead of a hardcoded one.
+  partitionsDesired : Gauge
+
   deriving Nonempty
 
 /-! ## Initialization -/
@@ -94,6 +103,8 @@ def initMetrics : IO OperatorMetrics := do
   let slavePrepareCount ← IO.mkRef 0.0
   let proxyCount ← IO.mkRef 0.0
   let prepareStuckCount ← IO.mkRef 0.0
+  let circuitBreakerTripped ← IO.mkRef 0.0
+  let partitionsDesired ← IO.mkRef 0.0
 
   return {
     reconcileDuration := reconcileDuration
@@ -106,6 +117,8 @@ def initMetrics : IO OperatorMetrics := do
     slavePrepareCount := { value := slavePrepareCount }
     proxyCount := { value := proxyCount }
     prepareStuckCount := { value := prepareStuckCount }
+    circuitBreakerTripped := { value := circuitBreakerTripped }
+    partitionsDesired := { value := partitionsDesired }
   }
 
 /-! ## Metric Update Functions -/
@@ -252,6 +265,18 @@ def exportMetrics (metrics : OperatorMetrics) (clusterName : String) : IO String
   output := output ++ "# TYPE flare_operator_nodes_prepare_stuck gauge\n"
   let prepareStuck ← metrics.prepareStuckCount.value.get
   output := output ++ formatGauge "flare_operator_nodes_prepare_stuck" labels prepareStuck
+
+  -- Circuit breaker state (gauge)
+  output := output ++ "# HELP flare_operator_circuit_breaker_tripped 1 while failover is paused by the blast-radius breaker\n"
+  output := output ++ "# TYPE flare_operator_circuit_breaker_tripped gauge\n"
+  let tripped ← metrics.circuitBreakerTripped.value.get
+  output := output ++ formatGauge "flare_operator_circuit_breaker_tripped" labels tripped
+
+  -- Desired partitions from the CRD (gauge)
+  output := output ++ "# HELP flare_operator_partitions_desired Partitions requested by the FlareCluster spec\n"
+  output := output ++ "# TYPE flare_operator_partitions_desired gauge\n"
+  let desired ← metrics.partitionsDesired.value.get
+  output := output ++ formatGauge "flare_operator_partitions_desired" labels desired
 
   return output
 

@@ -7,7 +7,8 @@ metricsPort: 9090
 replicaCount: 2
 
 image:
-  repository: flare-operator
+  # Published by .github/workflows/publish-images.yaml on version tags.
+  repository: ghcr.io/gree/flare-operator
   pullPolicy: IfNotPresent
   # Overrides the image tag whose default is the chart appVersion.
   tag: ""
@@ -111,7 +112,7 @@ cluster:
   partitions: 2
   replicas: 2
   image:
-    repository: flare-node-rocksdb
+    repository: ghcr.io/gree/flare-node-rocksdb
     tag: latest
     pullPolicy: IfNotPresent
   flarePort: 12121

@@ -34,6 +34,7 @@ def suite : TestSuite := {
     deployCluster cfg
     let stable ← waitForStable cfg 50
     if !stable then throw (IO.userError "cluster did not stabilize")
+  onFailure := dumpClusterDiagnostics cfg.«namespace»
   teardown := cleanupCluster cfg
   tests := [
     -- Test 1: cluster is stable with 2 partitions
@@ -106,18 +107,21 @@ def suite : TestSuite := {
         if ok then return .pass
         else return .fail "not all 6 nodes registered" },
 
-    -- Test 7: verify P2 has master and slave
+    -- Test 7: verify P2 has master and slave. The slave is assigned only
+    -- after the P2 master's reconstruction completes (proxy-pool
+    -- throttling: one reconstruction per partition at a time), so this is
+    -- a polling wait, not a single-shot read — the previous version raced
+    -- the master's Prepare→Active on slow CI runners.
     { name := "P2 has master and slave"
       run := do
-        let sync ← operatorTcpCmd cfg.debugPod cfg.«namespace» cfg.operatorName cfg.operatorPort "node sync"
-        let entries := parseNodeSync sync
-        let p2Master := findMasterPod entries 2
-        let p2Slaves := entries.filter (fun e => e.role == 1 && e.partition == 2)
-        match p2Master with
-        | none => return .fail "no master for P2"
-        | some _ =>
-          if p2Slaves.isEmpty then return .fail "no slave for P2"
-          else return .pass },
+        let ok ← waitForCondition "P2 master and slave assigned" 180 do
+          let sync ← operatorTcpCmd cfg.debugPod cfg.«namespace» cfg.operatorName cfg.operatorPort "node sync"
+          let entries := parseNodeSync sync
+          let p2Master := findMasterPod entries 2
+          let p2Slaves := entries.filter (fun e => e.role == 1 && e.partition == 2)
+          return p2Master.isSome && !p2Slaves.isEmpty
+        if ok then return .pass
+        else return .fail "P2 master+slave not both assigned within 180s" },
 
     -- Test 8: original partition items preserved after scale-out
     { name := "P0 and P1 curr_items preserved after scale-out"

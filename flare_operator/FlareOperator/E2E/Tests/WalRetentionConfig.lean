@@ -88,6 +88,7 @@ def suite : TestSuite := {
     deployCluster cfg
     let ok ← waitForStable cfg 50
     if !ok then throw (IO.userError "cluster did not stabilize")
+  onFailure := dumpClusterDiagnostics cfg.«namespace»
   teardown := do
     cleanupCluster cfg
   tests := [

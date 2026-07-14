@@ -37,6 +37,7 @@ def suite : TestSuite := {
     let stable ← waitForStable cfg 50
     if !stable then
       throw (IO.userError "cluster did not stabilize")
+  onFailure := dumpClusterDiagnostics cfg.«namespace»
   teardown := cleanupCluster cfg
   tests := [
     -- Test 1: operator responds to ping

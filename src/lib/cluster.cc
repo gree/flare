@@ -1555,6 +1555,41 @@ int cluster::_shift_node_role(string node_key, role old_role, int old_partition,
 	// deleted keys). tch/tcb keep the legacy merge behavior. This comment
 	// still holds here: the truncate is done in the handler, not at this
 	// dispatch point.
+	// Our own broadcast state as just applied to the node map (this branch
+	// only runs for node_key == this->_node_key). The operator (index
+	// server) decides state: it assigns a freshly-recreated designated
+	// master directly to state=active when its data is authoritative (e.g.
+	// P0 on a persistent volume), and only uses state=prepare for a node
+	// that must reconstruct from a live source (scale-out P1+). Matching the
+	// Lean model (FlaredNode.lean): "assigned master with state active ->
+	// instant, no reconstruction".
+	cluster::state my_state = state_prepare;
+	{
+		node_map::iterator me = this->_node_map.find(node_key);
+		if (me != this->_node_map.end()) {
+			my_state = me->second.node_state;
+		}
+	}
+
+	// Active means the operator has declared this node's local data
+	// authoritative / in-sync. Reconstructing anyway is not just wasteful:
+	// it picks a source from the churning ring (possibly the wrong
+	// partition's master), the dump contributes nothing or wrong data, the
+	// Active->Ready transition is rejected, and connect-failure
+	// deactivation amplifies churn until data is lost. So skip
+	// reconstruction entirely for an Active assignment (both master and
+	// slave) and keep the local data as-is.
+	if (my_state == state_active) {
+		if (new_role == role_master && old_role == role_proxy) {
+			log_notice("assigned master with state active — skipping reconstruction (operator designated this node the source of truth; local data is authoritative)", 0);
+			return 0;
+		}
+		if (new_role == role_slave && old_role == role_proxy) {
+			log_notice("assigned slave with state active — skipping reconstruction (operator declared this node in-sync per the node map)", 0);
+			return 0;
+		}
+	}
+
 	log_debug("creating reconstruction thread(s)... (type=%s)", cluster::role_cast(new_role).c_str());
 	if (new_role == role_master && old_role == role_proxy) {
 		int partition_size = this->_node_partition_map.size() + this->_node_partition_prepare_map.size();

@@ -126,6 +126,62 @@ def scenario5_ghostSlave : GlobalState :=
   let s1 := stepGlobal g .OperatorProcessMsg   -- node-0 re-registers as Proxy
   stepGlobal s1 .OperatorReconcile
 
+/-! ## Data-preservation scenarios (spec gap closed after the truncate bugs) -/
+
+/-- Full initialization, then clients commit writes on both Active masters
+    (replicated to the partitions' Active slaves). The dataful base for
+    every data-preservation assertion. -/
+def scenario2_dataful : GlobalState :=
+  let g := stepGlobal scenario2_fullInit (.MasterCommitsData "node-0:11211")
+  stepGlobal g (.MasterCommitsData "node-3:11211")
+
+/-- Failover on the dataful cluster: P0's master dies; the promoted replica
+    must HOLD THE DATA, not merely exist. -/
+def scenario3_dataful : GlobalState :=
+  stepGlobal scenario2_dataful (.NodeDie "node-0:11211")
+
+/-- Zombie resurrection on the dataful cluster. -/
+def scenario4_dataful : GlobalState :=
+  let g := { scenario2_dataful with nodeToOpQueue := [.NodeAdd "node-0" 11211] }
+  let s1 := stepGlobal g .OperatorProcessMsg
+  stepGlobal s1 .OperatorReconcile
+
+/-- Ghost-slave scenario on the dataful cluster: the re-registered pod's
+    FlaredState keeps holdsData = true — that is the PVC abstraction. -/
+def scenario5_dataful : GlobalState :=
+  let g := { scenario2_dataful with
+             nodeStates := scenario2_dataful.nodeStates.filter
+               (fun kv => kv.1 != "node-2:11211"),
+             nodeToOpQueue := [.NodeAdd "node-0" 11211] }
+  let s1 := stepGlobal g .OperatorProcessMsg
+  stepGlobal s1 .OperatorReconcile
+
+/-- Truncate-gate probe: node-2 (holds data) is mid-restart as Proxy and
+    receives a broadcast assigning it P0 Slave/Prepare while the partition's
+    master node-0 is DEAD (absent from nodeStates). Reconstruction starts.
+    The GATED truncate must keep node-2's data (source unreachable); the
+    ungated variant — the recalled buggy flared — wipes the last copy. -/
+def scenario6_base (gate : Bool) : GlobalState :=
+  let g0 := scenario2_dataful
+  let broadcast : List FlareNode :=
+    [{ serverName := "node-2", serverPort := 11211, role := FlareRole.Slave,
+       state := FlareState.Prepare, partition := 0 },
+     { serverName := "node-0", serverPort := 11211, role := FlareRole.Master,
+       state := FlareState.Active, partition := 0 }]
+  let g := { g0 with
+             gateTruncate := gate,
+             -- node-0's pod is gone; node-2 restarted with its PVC: role
+             -- reset to Proxy, data still on disk (holdsData true)
+             nodeStates := (g0.nodeStates.filter (fun kv => kv.1 != "node-0:11211")).map
+               (fun kv => if kv.1 == "node-2:11211" then
+                 (kv.1, { kv.2 with internalRole := FlareRole.Proxy,
+                                    internalState := FlareState.Active }) else kv),
+             opToNodeQueue := [("node-2:11211", .NodeSync 999 broadcast)] }
+  stepGlobal g (.NodeProcessMsg "node-2:11211")
+
+def scenario6_gated : GlobalState := scenario6_base true
+def scenario6_ungated : GlobalState := scenario6_base false
+
 /-! ## Invariant Checks -/
 
 /-- Check: At most one Master per partition -/

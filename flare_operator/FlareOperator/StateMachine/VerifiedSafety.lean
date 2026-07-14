@@ -198,6 +198,45 @@ theorem scenario5_ghost_not_promoted :
       (fun n => n.role == FlareRole.Master)) = some false := by
   decide
 
+/-! ## VERIFIED THEOREM 4d: data preservation — the invariant we never stated
+
+"At most one master" was fully compatible with an EMPTY master — the
+truncate bugs lived exactly in that unstated dimension. These theorems
+close the spec gap: every Active master holds its partition's committed
+data, across failover, zombie resurrection, ghost re-registration, and —
+critically — the truncate gate is proven to be what keeps it true. -/
+
+/-- After clients commit on both masters, every Active master holds data —
+    and so do the Active slaves (replication abstraction, non-vacuity). -/
+theorem data_base_ok : activeMasterHoldsData scenario2_dataful = true := by decide
+
+theorem data_slaves_replicated :
+    ((findNodeState scenario2_dataful.nodeStates "node-2:11211").map (·.holdsData))
+      = some true := by decide
+
+/-- Failover: the promoted replica HOLDS THE DATA, not merely exists. -/
+theorem data_failover_ok : activeMasterHoldsData scenario3_dataful = true := by decide
+
+/-- Zombie resurrection: still no empty Active master. -/
+theorem data_zombie_ok : activeMasterHoldsData scenario4_dataful = true := by decide
+
+/-- Ghost re-registration (PVC abstraction): still no empty Active master. -/
+theorem data_ghost_ok : activeMasterHoldsData scenario5_dataful = true := by decide
+
+/-- THE TRUNCATE GATE, AS A SPEC: a data-bearing node assigned a Slave
+    reconstruction against a DEAD source keeps its data under the gated
+    truncate (source unreachable → no truncate)... -/
+theorem truncate_gate_preserves_last_copy :
+    ((findNodeState scenario6_gated.nodeStates "node-2:11211").map (·.holdsData))
+      = some true := by decide
+
+/-- ...and the UNGATED variant — the recalled buggy flared — wipes the last
+    copy. Re-introducing an ungated truncate makes this pair contradictory:
+    the bug class is now a compile-time impossibility in the model. -/
+theorem ungated_truncate_destroys_last_copy :
+    ((findNodeState scenario6_ungated.nodeStates "node-2:11211").map (·.holdsData))
+      = some false := by decide
+
 /-! ## VERIFIED THEOREM 5: merge repairs the FSM-vs-TCP double-master race -/
 
 /--

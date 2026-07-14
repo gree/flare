@@ -23,6 +23,13 @@ structure FlaredState where
   internalState : FlareState := FlareState.Active
   localNodeMapVersion : Nat := 0
   isReconstructing : Bool := false
+  /-- Data-preservation abstraction: does this node hold a full copy of its
+      partition's committed data? Writes/replication set it, the (gated)
+      truncate-before-full-dump clears it, a PVC-backed restart keeps it.
+      Added after the truncate bugs showed the old spec never SAID anything
+      about data — "at most one master" was fully compatible with an empty
+      master. See `activeMasterHoldsData` in GlobalModel. -/
+  holdsData : Bool := false
   deriving Repr, BEq
 
 /-! ## Inputs to the flared process -/

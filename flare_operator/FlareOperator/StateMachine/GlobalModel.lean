@@ -53,6 +53,13 @@ structure GlobalState where
   /-- Messages in flight from Nodes to Operator -/
   nodeToOpQueue : List NodeToOperatorMsg
 
+  /-- Model parameter: is the truncate-before-full-dump GATED (slave role +
+      reachable source), as the fixed flared implements? Setting this false
+      models the recalled ungated version — used to prove the gate is what
+      keeps `activeMasterHoldsData` from breaking (the truncate-last-copy
+      bug as a theorem). -/
+  gateTruncate : Bool := true
+
   deriving Repr
 
 /-! ## Helper Functions -/
@@ -86,6 +93,10 @@ inductive GlobalStep where
   /-- A node's pod dies, and the operator's dead-node detection + failover
       run (mirrors the AfterDetectDead → AfterHandleFailover FSM steps) -/
   | NodeDie (nodeKey : String)
+  /-- A client write commits on an Active master: the master and its
+      partition's Active slaves now hold the data (flare replicates writes
+      to live replicas synchronously via op forwarding). -/
+  | MasterCommitsData (nodeKey : String)
   deriving Repr
 
 def stepGlobal (g : GlobalState) (step : GlobalStep) : GlobalState :=
@@ -150,6 +161,35 @@ def stepGlobal (g : GlobalState) (step : GlobalStep) : GlobalState :=
           let input := FlaredInput.ReceiveNodeSync version nodes
           let (newNodeState, output) := FlaredNode.step nodeState input
 
+          -- Data semantics of reconstruction START (mirrors flared's
+          -- truncate-before-full-dump): when this sync begins a
+          -- reconstruction, local data is truncated ONLY under the gate —
+          -- target role is Slave AND the partition's master (per the
+          -- broadcast) is a live node. Ungated (gateTruncate = false, the
+          -- recalled buggy version) truncates unconditionally.
+          let startedReconstruction :=
+            newNodeState.isReconstructing && !nodeState.isReconstructing
+          let newNodeState :=
+            if startedReconstruction then
+              let myEntry := nodes.find? (fun n =>
+                FlareClusterState.toNodeKey n.serverName n.serverPort == nodeKey)
+              let sourceAlive : Bool :=
+                match myEntry with
+                | none => false
+                | some me =>
+                  nodes.any (fun n =>
+                    n.role == FlareRole.Master && n.partition == me.partition
+                      && (let k := FlareClusterState.toNodeKey n.serverName n.serverPort
+                          k != nodeKey && (findNodeState g.nodeStates k).isSome))
+              let truncates :=
+                if g.gateTruncate then
+                  newNodeState.internalRole == FlareRole.Slave && sourceAlive
+                else
+                  true
+              if truncates then { newNodeState with holdsData := false }
+              else newNodeState
+            else newNodeState
+
           -- Update node state
           let newNodeStates := updateNodeState g.nodeStates nodeKey newNodeState
 
@@ -193,6 +233,25 @@ def stepGlobal (g : GlobalState) (step : GlobalStep) : GlobalState :=
       let input := FlaredInput.ReconstructionComplete
       let (newNodeState, output) := FlaredNode.step nodeState input
 
+      -- Data semantics of reconstruction COMPLETION: the node now holds the
+      -- data iff it copied from a live source that held it (the partition's
+      -- master in the operator's view). Otherwise its holdsData is
+      -- whatever the (gated) truncate left it.
+      let newNodeState :=
+        if nodeState.isReconstructing then
+          let myPartition := (g.operatorState.nodeMap.lookup nodeKey).map (·.partition)
+          let sourceHolds : Bool :=
+            match myPartition with
+            | none => false
+            | some p =>
+              g.operatorState.nodeMap.any (fun kv =>
+                kv.2.role == FlareRole.Master && kv.2.partition == p
+                  && kv.1 != nodeKey
+                  && (((findNodeState g.nodeStates kv.1).map (·.holdsData)).getD false))
+          if sourceHolds then { newNodeState with holdsData := true }
+          else newNodeState
+        else newNodeState
+
       let newNodeStates := updateNodeState g.nodeStates nodeKey newNodeState
 
       let newNodeToOpQueue := match flaredOutputToMsg nodeState.name nodeState.port output with
@@ -230,6 +289,35 @@ def stepGlobal (g : GlobalState) (step : GlobalStep) : GlobalState :=
       operatorState := newOpState,
       nodeStates := newNodeStates,
       opToNodeQueue := newQueue }
+
+  | .MasterCommitsData nodeKey =>
+    -- A committed write lands on the Active master and is replicated to the
+    -- partition's Active slaves (flare forwards writes to live replicas).
+    match g.operatorState.nodeMap.lookup nodeKey with
+    | none => g
+    | some node =>
+      if node.role == FlareRole.Master && node.state == FlareState.Active then
+        let markHolder := fun (states : List (String × FlaredNode.FlaredState)) key =>
+          states.map (fun kv =>
+            if kv.1 == key then (kv.1, { kv.2 with holdsData := true }) else kv)
+        let replicaKeys := g.operatorState.nodeMap.filterMap (fun kv =>
+          if kv.2.partition == node.partition && kv.2.state == FlareState.Active
+             && (kv.2.role == FlareRole.Master || kv.2.role == FlareRole.Slave) then
+            some kv.1
+          else none)
+        { g with nodeStates := replicaKeys.foldl markHolder g.nodeStates }
+      else g
+
+/-! ## Data-preservation invariant -/
+
+/-- THE invariant the truncate bugs violated while "at most one master"
+    held perfectly: every ACTIVE master's pod is alive and holds its
+    partition's committed data. An empty or dead Active master is exactly
+    the pvc-data-survival failure. -/
+def activeMasterHoldsData (g : GlobalState) : Bool :=
+  g.operatorState.nodeMap.all fun kv =>
+    !(kv.2.role == FlareRole.Master && kv.2.state == FlareState.Active)
+      || (((findNodeState g.nodeStates kv.1).map (·.holdsData)).getD false)
 
 /-! ## Multi-Step Execution -/
 

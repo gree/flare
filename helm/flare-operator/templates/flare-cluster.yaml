@@ -1,0 +1,140 @@
+{{- if .Values.cluster.enabled }}
+{{- $c := .Values.cluster }}
+{{- $ns := .Values.namespace }}
+apiVersion: flare.gree.net/v1alpha1
+kind: FlareCluster
+metadata:
+  name: {{ $c.name }}
+  namespace: {{ $ns }}
+spec:
+  partitions: {{ $c.partitions }}
+  replicas: {{ $c.replicas }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $c.name }}-nodes
+  namespace: {{ $ns }}
+  labels:
+    app: flare
+    cluster: {{ $c.name }}
+spec:
+  clusterIP: None
+  selector:
+    app: flare
+    cluster: {{ $c.name }}
+  ports:
+    - port: {{ $c.flarePort }}
+      name: flare
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $c.name }}-nodes
+  namespace: {{ $ns }}
+spec:
+  serviceName: {{ $c.name }}-nodes
+  replicas: {{ mul $c.partitions $c.replicas }}
+  selector:
+    matchLabels:
+      app: flare
+      cluster: {{ $c.name }}
+  template:
+    metadata:
+      labels:
+        app: flare
+        cluster: {{ $c.name }}
+    spec:
+      {{- if $c.zoneSpread }}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: {{ eq $c.zoneSpread "hard" | ternary "DoNotSchedule" "ScheduleAnyway" }}
+          labelSelector:
+            matchLabels:
+              app: flare
+              cluster: {{ $c.name }}
+      {{- end }}
+      containers:
+        - name: flared
+          image: "{{ $c.image.repository }}:{{ $c.image.tag }}"
+          imagePullPolicy: {{ $c.image.pullPolicy }}
+          command:
+            - sh
+            - -c
+            - |
+              {{- if $c.persistence.enabled }}
+              # Restore hook: if /data/flare/RESTORE names a checkpoint dir
+              # (created by the flared `backup` op), swap it in before start.
+              # See docs/BACKUP_RESTORE.md.
+              if [ -f /data/flare/RESTORE ]; then
+                SRC=$(cat /data/flare/RESTORE)
+                rm -rf /data/flare/flare.rocksdb
+                cp -a "$SRC" /data/flare/flare.rocksdb
+                rm -f /data/flare/RESTORE
+              fi
+              mkdir -p /data/flare
+              exec flared --config=/etc/flared/extra.conf --data-dir /data/flare --server-port {{ $c.flarePort }} --index-server-name {{ include "flare-operator.fullname" . }}.{{ $ns }}.svc.cluster.local --index-server-port {{ .Values.service.port }} --storage-type={{ $c.storageBackend }} --stderr
+              {{- else }}
+              mkdir -p /tmp/flare
+              exec flared --config=/etc/flared/extra.conf --data-dir /tmp/flare --server-port {{ $c.flarePort }} --index-server-name {{ include "flare-operator.fullname" . }}.{{ $ns }}.svc.cluster.local --index-server-port {{ .Values.service.port }} --storage-type={{ $c.storageBackend }} --stderr
+              {{- end }}
+          ports:
+            - containerPort: {{ $c.flarePort }}
+              name: flare
+          volumeMounts:
+            - name: flared-config
+              mountPath: /etc/flared
+            {{- if $c.persistence.enabled }}
+            - name: data
+              mountPath: /data
+            {{- end }}
+          livenessProbe:
+            tcpSocket:
+              port: {{ $c.flarePort }}
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 6
+          readinessProbe:
+            tcpSocket:
+              port: {{ $c.flarePort }}
+            initialDelaySeconds: 5
+            periodSeconds: 3
+            failureThreshold: 4
+          resources:
+            {{- toYaml $c.resources | nindent 12 }}
+      volumes:
+        - name: flared-config
+          configMap:
+            name: {{ $c.name }}-config
+  {{- if $c.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with $c.persistence.storageClassName }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ $c.persistence.size }}
+  {{- end }}
+{{- if $c.pdb.enabled }}
+---
+# Serializes voluntary disruptions: a rolling node drain can never evict a
+# partition's master and its slave at the same time. Combine with
+# zoneSpread so involuntary AZ loss also cannot take both.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ $c.name }}-nodes
+  namespace: {{ $ns }}
+spec:
+  maxUnavailable: {{ $c.pdb.maxUnavailable }}
+  selector:
+    matchLabels:
+      app: flare
+      cluster: {{ $c.name }}
+{{- end }}
+{{- end }}

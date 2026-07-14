@@ -1,0 +1,84 @@
+# Prometheus alerting rules for the Flare operator (raw-manifest variant of
+# the Helm template; keep in sync with
+# helm/flare-operator/templates/prometheusrule.yaml).
+# Requires the Prometheus Operator CRDs and a Prometheus scraping the
+# operator's :9090 metrics port.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: flare-operator
+  namespace: flare-system
+  labels:
+    app: flare-operator
+spec:
+  groups:
+    - name: flare-operator
+      rules:
+        # A partition without an Active master serves no writes for its key
+        # range. 2m tolerates a normal failover window (dead detection +
+        # promotion + broadcast). Runbook: docs/RUNBOOK.md#master-missing
+        - alert: FlareMasterMissing
+          expr: >
+            flare_operator_partitions_desired
+              - on(cluster) flare_operator_nodes_total{role="master",state="active"}
+              > 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Flare cluster {{ $labels.cluster }}: partition(s) without an active master"
+            runbook: docs/RUNBOOK.md#master-missing
+
+        # The blast-radius breaker halted failover: suspected AZ-scale
+        # outage. Surviving nodes keep serving; recovery resumes on its own
+        # when capacity returns — but a human MUST look at why half the
+        # cluster died. Runbook: docs/RUNBOOK.md#circuit-breaker
+        - alert: FlareCircuitBreakerTripped
+          expr: flare_operator_circuit_breaker_tripped == 1
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Flare operator {{ $labels.cluster }}: circuit breaker tripped (failover paused)"
+            runbook: docs/RUNBOOK.md#circuit-breaker
+
+        # A node stuck in Prepare is reconstructing forever — it will never
+        # serve and never be failed over (Prepare is exempt from dead
+        # detection by design). Runbook: docs/RUNBOOK.md#prepare-stuck
+        - alert: FlarePrepareStuck
+          expr: flare_operator_nodes_prepare_stuck > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Flare cluster {{ $labels.cluster }}: node(s) stuck in Prepare beyond the watchdog threshold"
+            runbook: docs/RUNBOOK.md#prepare-stuck
+
+        # No metrics at all: the operator (or its scrape path) is down. The
+        # data plane keeps serving with the last topology, but failover and
+        # scaling are dead until it returns.
+        - alert: FlareOperatorAbsent
+          expr: absent(flare_operator_node_map_version)
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Flare operator metrics absent — control plane down or unscraped"
+            runbook: docs/RUNBOOK.md#operator-down
+
+        # Sustained node churn (well below the breaker threshold) usually
+        # means crash-looping flared pods or node pressure.
+        - alert: FlareDeadNodeChurn
+          expr: increase(flare_operator_dead_nodes_detected_total[15m]) > 3
+          labels:
+            severity: warning
+          annotations:
+            summary: "Flare cluster {{ $labels.cluster }}: repeated dead-node detections"
+            runbook: docs/RUNBOOK.md#dead-node-churn
+
+        # NOTE (backup freshness): rocksdb_last_backup_epoch is exposed via
+        # flared's memcached `stats` (per data pod), not via the operator's
+        # Prometheus endpoint. To alert on stale backups, scrape flared with
+        # a memcached exporter mapping rocksdb_* stats, then:
+        #   time() - flare_rocksdb_last_backup_epoch > 2 * <backup interval>
+        # See docs/BACKUP_RESTORE.md#monitoring.

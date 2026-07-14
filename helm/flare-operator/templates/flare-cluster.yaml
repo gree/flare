@@ -1,6 +1,25 @@
 {{- if .Values.cluster.enabled }}
 {{- $c := .Values.cluster }}
 {{- $ns := .Values.namespace }}
+{{- /* flared mounts /etc/flared/extra.conf and exits immediately if the
+       file is missing, so the ConfigMap must exist BEFORE the StatefulSet
+       pods start. It is a pre-install HOOK on purpose: hook resources are
+       not tracked in the release, so `helm upgrade` neither resets the
+       content the operator wrote into it nor prunes it. (A lookup-guard
+       variant was tried first and backfired: on upgrade the skipped
+       render made helm DELETE the ConfigMap as removed-from-release.)
+       Trade-off: `helm uninstall` leaves it behind — harmless. */}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $c.name }}-config
+  namespace: {{ $ns }}
+  annotations:
+    "helm.sh/hook": pre-install
+    "helm.sh/hook-weight": "-5"
+data:
+  extra.conf: ""
+---
 apiVersion: flare.gree.net/v1alpha1
 kind: FlareCluster
 metadata:

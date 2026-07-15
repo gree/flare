@@ -227,7 +227,7 @@ E2E は計 22 スイート 125 テスト(kind 上の実 StatefulSet + 実 flared
 を網羅する。全スイートに「失敗時に operator/flared のログを teardown 前に採取する」
 診断フックが入っており、flake は再現ログ付きで届く。
 
-## 形式手法が実際に働いた代表例(4件)
+## 形式手法が実際に働いた代表例(5件)
 
 **1. ゾンビ master(モデルが実環境より先に発見)**
 「プロセスだけ再起動した空の旧 master が、failover を経ずに master に返り咲く」
@@ -256,6 +256,24 @@ C++ が実装していなかったこと。修正はモデルの1行の意味論
 以後 125 テスト全 green。**発見された実バグは一貫して「モデル外」か
 「未言明の性質」に分布し、証明済み・言明済みの領域からは出ていない**
 (詳細な層別は詳細資料 §9)。
+
+**5. 既存の定理群が「間違った修正」を却下した(全滅復帰のデータ消失)**
+CI が新たな DATA LOSS を検出: partition の master と slave が**同時に**再起動し、
+operator の起動猶予中(dead 検出停止中)に再登録すると、自分自身の古い
+エントリが席を塞いでいるため「全 partition 満員」→ データ保持ノードが
+**Proxy に降格**され、flared は proxy 指定でデータを落とす。最初の修正案
+「再登録時に旧 master をその場で復位」は、**既存の
+[`scenario4_zombie_not_master`](../flare_operator/FlareOperator/StateMachine/VerifiedSafety.lean#L167-L170)(ゾンビ)と
+[`scenario5_ghost_not_promoted`](../flare_operator/FlareOperator/StateMachine/VerifiedSafety.lean#L197)(幽霊)が
+コンパイル時に反例を出して却下** — TCP 文脈には pod の生死が見えず、
+ゾンビと全滅復帰は node map 上で区別不能だからである。採用した設計は
+「TCP 側は常に Slave/Prepare で旧 partition に再合流(Proxy には二度と
+しない)、master の復位判断は実 pod リストを持つ reconcile 側
+([`promoteMasterlessPartitions`](../flare_operator/FlareOperator/StateMachine/K8sReconciler.lean#L667))が行う」。
+この CI ランそのものは [`scenario6_*`](../flare_operator/FlareOperator/StateMachine/VerifiedSafety.lean#L207) の
+5定理(不変条件維持・master 席の復元・**Proxy 降格が一切起きない**・
+復位 master がデータを保持)として封印した。**モデルが正しい修正の形を
+先に決め、実装がそれに従った**最も鮮明な例である。
 
 ## Q. なぜ「証明したもの」と「動くもの」が同一だと言えるのか
 

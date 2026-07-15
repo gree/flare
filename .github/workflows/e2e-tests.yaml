@@ -50,7 +50,7 @@ jobs:
       - name: Build Lean operator
         run: |
           cd flare_operator
-          lake build flare_operator flare_e2e
+          lake build FlareOperator flare_operator flare_e2e
 
       - name: Create kind cluster
         run: kind create cluster --name flare-e2e --wait 120s

@@ -15,6 +15,9 @@ inductive FlareEvent where
   | Ping
   | Meta
   | Stats
+  /-- flarei-compatible `stats nodes` — what flare-tools' flare-admin uses
+      to list the cluster's nodes. -/
+  | StatsNodes
   | Version
   | Quit
   | NodeAdd (serverName : String) (serverPort : Nat)
@@ -60,6 +63,7 @@ def parseFlareCommand (line : String) : FlareEvent :=
   | ["ping"] => FlareEvent.Ping
   | ["meta"] => FlareEvent.Meta
   | ["stats"] => FlareEvent.Stats
+  | ["stats", "nodes"] => FlareEvent.StatsNodes
   | ["version"] => FlareEvent.Version
   | ["quit"] => FlareEvent.Quit
   | "node" :: "add" :: name :: portStr :: _ =>

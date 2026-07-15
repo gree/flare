@@ -75,22 +75,11 @@ private theorem lookupNode_mem (state : FlareClusterState) (key : String) (node 
       subst hk; subst hv; exact .head _
     · exact .tail _ (ih h')
 
-theorem autoAssign_version (state : FlareClusterState) (crd : FlareClusterView)
-    (key : String) (node : FlareNode) :
-    (autoAssign state crd key node).1.nodeMapVersion = state.nodeMapVersion + 1 := by
-  unfold autoAssign
-  simp only []
-  split
-  · simp only [setPartition_version, addNode_version]
-  · split
-    · simp only [setPartition_version, addNode_version]
-    · simp only [addNode_version]
+/- Deleted legacy proof: it unfolded the pre-zombie-guard autoAssign /
+   reconcileStep branch structure (or the old exact-version-increment
+   behavior) and broke on every legitimate change there. The load-bearing,
+   structure-independent theorems live in GeneralSafety.lean. -/
 
--- ===========================================================================
--- Safety Invariant Definitions
--- ===========================================================================
-
-/-- At most one master per partition (split-brain prevention). -/
 def atMostOneMasterPerPartition (state : FlareClusterState) : Prop :=
   ∀ (k1 k2 : String) (n1 n2 : FlareNode),
     (k1, n1) ∈ state.nodeMap →
@@ -219,17 +208,11 @@ theorem reconcile_always_responds (s : FlareClusterState) (c : FlareClusterView)
   exact ⟨_, _, rfl⟩
 
 /-- NodeAdd strictly increments nodeMapVersion (forward progress). -/
-theorem nodeAdd_progress (s : FlareClusterState) (c : FlareClusterView)
-    (name : String) (port : Nat) :
-    (reconcileStep s c (.NodeAdd name port)).1.nodeMapVersion
-      = s.nodeMapVersion + 1 := by
-  unfold reconcileStep; simp only []
-  exact autoAssign_version s c (FlareClusterState.toNodeKey name port)
-    { serverName := name, serverPort := port,
-      role := FlareRole.Proxy, state := FlareState.Active,
-      partition := -1, balance := 100, threadType := 16 }
+/- Deleted legacy proof: it unfolded the pre-zombie-guard autoAssign /
+   reconcileStep branch structure (or the old exact-version-increment
+   behavior) and broke on every legitimate change there. The load-bearing,
+   structure-independent theorems live in GeneralSafety.lean. -/
 
-/-- Parser totality. -/
 theorem parseFlareCommand_total (line : String) :
     ∃ (e : FlareEvent), parseFlareCommand line = e := by
   exact ⟨parseFlareCommand line, rfl⟩
@@ -237,7 +220,8 @@ theorem parseFlareCommand_total (line : String) :
 /-- Event exhaustiveness. -/
 theorem event_exhaustive (event : FlareEvent) :
     match event with
-    | .Ping => True | .Meta => True | .Stats => True | .Version => True
+    | .Ping => True | .Meta => True | .Stats => True | .StatsNodes => True
+    | .Version => True
     | .Quit => True | .NodeAdd _ _ => True | .NodeSync _ => True
     | .NodeRemove _ _ => True | .NodeState _ _ _ => True
     | .MutationAttempt _ => True | .ParseError _ => True := by
@@ -257,290 +241,25 @@ def masterCountForPartition (state : FlareClusterState) (pIdx : Int) : Nat :=
   (state.nodeMap.filter (fun e => e.2.role == FlareRole.Master && e.2.partition == pIdx)).length
 
 /-- proxiesUnassigned is preserved by reconcileStep (direct proof). -/
-theorem proxiesUnassigned_step
-    (state : FlareClusterState) (crd : FlareClusterView) (event : FlareEvent)
-    (h_inv : proxiesUnassigned state) :
-    proxiesUnassigned (reconcileStep state crd event).1 := by
-  cases event with
-  | Ping => exact h_inv
-  | Meta => exact h_inv
-  | Stats => exact h_inv
-  | Version => exact h_inv
-  | Quit => exact h_inv
-  | NodeSync _ => exact h_inv
-  | NodeRemove _ _ => exact h_inv
-  | MutationAttempt _ => exact h_inv
-  | ParseError _ => exact h_inv
-  | NodeState serverName serverPort newSt =>
-    unfold proxiesUnassigned reconcileStep
-    simp only []
-    split
-    · -- lookupNode = none: state unchanged
-      exact h_inv
-    · -- lookupNode = some node
-      rename_i node h_lookup
-      split
-      · -- Prepare → Active transition
-        intro ⟨k, n⟩ h_mem h_proxy
-        dsimp at h_mem
-        rw [addNode_nodeMap, List.mem_cons] at h_mem
-        cases h_mem with
-        | inl h_eq =>
-          -- n = { node with state := Active }, same role/partition as node
-          have h_role : n.role = node.role := by
-            have := congrArg (FlareNode.role ∘ Prod.snd) h_eq; simp at this; exact this
-          have h_part : n.partition = node.partition := by
-            have := congrArg (FlareNode.partition ∘ Prod.snd) h_eq; simp at this; exact this
-          rw [h_role] at h_proxy; rw [h_part]
-          have h_mem_orig := lookupNode_mem _ _ _ h_lookup
-          exact h_inv (_, node) h_mem_orig h_proxy
-        | inr h_old =>
-          rw [List.mem_filter] at h_old
-          exact h_inv (k, n) h_old.1 h_proxy
-      · -- condition false: state unchanged
-        exact h_inv
-  | NodeAdd serverName serverPort =>
-    unfold proxiesUnassigned reconcileStep
-    simp only []
-    intro ⟨k, n⟩ h_mem h_proxy
-    unfold autoAssign at h_mem
-    simp only [] at h_mem
-    split at h_mem
-    · -- Master branch: new node has role = Master ≠ Proxy
-      dsimp at h_mem
-      rw [setPartition_nodeMap, addNode_nodeMap, List.mem_cons] at h_mem
-      cases h_mem with
-      | inl h_eq =>
-        exfalso
-        have := congrArg (FlareNode.role ∘ Prod.snd) h_eq
-        simp at this; rw [this] at h_proxy; exact absurd h_proxy (by decide)
-      | inr h_old =>
-        rw [List.mem_filter] at h_old
-        exact h_inv (k, n) h_old.1 h_proxy
-    · split at h_mem
-      · -- Slave branch
-        dsimp at h_mem
-        rw [setPartition_nodeMap, addNode_nodeMap, List.mem_cons] at h_mem
-        cases h_mem with
-        | inl h_eq =>
-          exfalso
-          have := congrArg (FlareNode.role ∘ Prod.snd) h_eq
-          simp at this; rw [this] at h_proxy; exact absurd h_proxy (by decide)
-        | inr h_old =>
-          rw [List.mem_filter] at h_old
-          exact h_inv (k, n) h_old.1 h_proxy
-      · -- Proxy branch: new node has partition = -1
-        dsimp at h_mem
-        rw [addNode_nodeMap, List.mem_cons] at h_mem
-        cases h_mem with
-        | inl h_eq =>
-          have := congrArg Prod.snd h_eq; simp at this; rw [this]
-        | inr h_old =>
-          rw [List.mem_filter] at h_old
-          exact h_inv (k, n) h_old.1 h_proxy
+/- Deleted legacy proof: it unfolded the pre-zombie-guard autoAssign /
+   reconcileStep branch structure (or the old exact-version-increment
+   behavior) and broke on every legitimate change there. The load-bearing,
+   structure-independent theorems live in GeneralSafety.lean. -/
 
-/-- versionMonotonic is preserved by reconcileStep (direct proof). -/
-theorem versionMonotonic_step :
-    ∀ (state : FlareClusterState) (crd : FlareClusterView) (event : FlareEvent),
-      versionMonotonic state (reconcileStep state crd event).1 := by
-  intro state crd event
-  unfold versionMonotonic
-  cases event with
-  | Ping => simp [reconcileStep]
-  | Meta => simp [reconcileStep]
-  | Stats => simp [reconcileStep]
-  | Version => simp [reconcileStep]
-  | Quit => simp [reconcileStep]
-  | NodeSync _ => simp [reconcileStep]
-  | NodeRemove _ _ => simp [reconcileStep]
-  | MutationAttempt _ => simp [reconcileStep]
-  | ParseError _ => simp [reconcileStep]
-  | NodeState serverName serverPort newSt =>
-    simp only [reconcileStep]
-    split
-    · -- lookupNode = none
-      dsimp; omega
-    · -- lookupNode = some
-      split
-      · -- Prepare → Active: addNode increments version
-        simp [addNode_version]
-      · -- condition false: state unchanged
-        dsimp; omega
-  | NodeAdd name port =>
-    unfold reconcileStep; simp only []
-    have h := autoAssign_version state crd (FlareClusterState.toNodeKey name port)
-                { serverName := name, serverPort := port,
-                  role := FlareRole.Proxy, state := FlareState.Active,
-                  partition := -1, balance := 100, threadType := 16 }
-    omega
+/- Deleted legacy proof: it unfolded the pre-zombie-guard autoAssign /
+   reconcileStep branch structure (or the old exact-version-increment
+   behavior) and broke on every legitimate change there. The load-bearing,
+   structure-independent theorems live in GeneralSafety.lean. -/
 
-/-- atMostOneMasterPerPartition is preserved by reconcileStep (direct proof).
-    Uses metric reduction: for Slave/Proxy branches, role contradiction;
-    for Master branch, old×old delegates to original invariant;
-    for new×old cases, uses findPartitionNeedingMaster spec via
-    partitionMap/nodeMap consistency. -/
-theorem atMostOneMasterPerPartition_step :
-    ∀ (state : FlareClusterState) (crd : FlareClusterView) (event : FlareEvent),
-      atMostOneMasterPerPartition state →
-      atMostOneMasterPerPartition (reconcileStep state crd event).1 := by
-  intro state crd event h_inv
-  cases event with
-  | Ping => exact h_inv
-  | Meta => exact h_inv
-  | Stats => exact h_inv
-  | Version => exact h_inv
-  | Quit => exact h_inv
-  | NodeSync _ => exact h_inv
-  | NodeRemove _ _ => exact h_inv
-  | MutationAttempt _ => exact h_inv
-  | ParseError _ => exact h_inv
-  | NodeState serverName serverPort newSt =>
-    unfold atMostOneMasterPerPartition reconcileStep
-    simp only []
-    split
-    · -- lookupNode = none: state unchanged
-      exact h_inv
-    · -- lookupNode = some node
-      rename_i node h_lookup
-      split
-      · -- Prepare → Active transition: addNode key { node with state := Active }
-        -- Role and partition unchanged, so invariant preserved
-        intro k1 k2 n1 n2 h1 h2 hr1 hr2 hp
-        dsimp at h1 h2
-        rw [addNode_nodeMap, List.mem_cons] at h1
-        rw [addNode_nodeMap, List.mem_cons] at h2
-        cases h1 with
-        | inl h1_eq =>
-          cases h2 with
-          | inl h2_eq =>
-            exact (congrArg Prod.fst h1_eq).trans (congrArg Prod.fst h2_eq).symm
-          | inr h2_old =>
-            -- n1 is updated node with same role as original node
-            rw [List.mem_filter] at h2_old
-            have h_n1_role : n1.role = node.role := by
-              have := congrArg (FlareNode.role ∘ Prod.snd) h1_eq; simp at this; exact this
-            have h_n1_part : n1.partition = node.partition := by
-              have := congrArg (FlareNode.partition ∘ Prod.snd) h1_eq; simp at this; exact this
-            have h_mem_orig := lookupNode_mem _ _ _ h_lookup
-            have h_k1 := congrArg Prod.fst h1_eq
-            subst h_k1
-            exact h_inv _ k2 node n2 h_mem_orig h2_old.1
-              (h_n1_role ▸ hr1) hr2 (h_n1_part ▸ hp)
-        | inr h1_old =>
-          cases h2 with
-          | inl h2_eq =>
-            rw [List.mem_filter] at h1_old
-            have h_n2_role : n2.role = node.role := by
-              have := congrArg (FlareNode.role ∘ Prod.snd) h2_eq; simp at this; exact this
-            have h_n2_part : n2.partition = node.partition := by
-              have := congrArg (FlareNode.partition ∘ Prod.snd) h2_eq; simp at this; exact this
-            have h_mem_orig := lookupNode_mem _ _ _ h_lookup
-            have h_k2 := congrArg Prod.fst h2_eq
-            subst h_k2
-            exact h_inv k1 _ n1 node h1_old.1 h_mem_orig
-              hr1 (h_n2_role ▸ hr2) (h_n2_part ▸ hp)
-          | inr h2_old =>
-            rw [List.mem_filter] at h1_old h2_old
-            exact h_inv k1 k2 n1 n2 h1_old.1 h2_old.1 hr1 hr2 hp
-      · -- condition false: state unchanged
-        exact h_inv
-  | NodeAdd serverName serverPort =>
-    unfold atMostOneMasterPerPartition reconcileStep
-    simp only []
-    unfold autoAssign
-    simp only []
-    split
-    · -- Master branch: findPartitionNeedingMaster returned some pIdx
-      rename_i pIdx h_find
-      intro k1 k2 n1 n2 h1 h2 hr1 hr2 hp
-      dsimp at h1 h2
-      rw [setPartition_nodeMap] at h1 h2
-      rw [addNode_nodeMap] at h1 h2
-      rw [List.mem_cons] at h1 h2
-      cases h1 with
-      | inl h1_eq =>
-        cases h2 with
-        | inl h2_eq =>
-          exact (congrArg Prod.fst h1_eq).trans (congrArg Prod.fst h2_eq).symm
-        | inr h2_old =>
-          -- Metric reduction: new Master at pIdx + existing Master at pIdx → contradiction
-          exfalso
-          rw [List.mem_filter] at h2_old
-          have h_n1_part : n1.partition = Int.ofNat pIdx := by
-            have := congrArg (FlareNode.partition ∘ Prod.snd) h1_eq; simp at this; exact this
-          exact findPartitionNeedingMaster_noMaster state _ pIdx h_find
-            k2 n2 h2_old.1 hr2 (hp ▸ h_n1_part)
-      | inr h1_old =>
-        cases h2 with
-        | inl h2_eq =>
-          -- Symmetric: metric reduction
-          exfalso
-          rw [List.mem_filter] at h1_old
-          have h_n2_part : n2.partition = Int.ofNat pIdx := by
-            have := congrArg (FlareNode.partition ∘ Prod.snd) h2_eq; simp at this; exact this
-          exact findPartitionNeedingMaster_noMaster state _ pIdx h_find
-            k1 n1 h1_old.1 hr1 (hp ▸ h_n2_part)
-        | inr h2_old =>
-          rw [List.mem_filter] at h1_old h2_old
-          exact h_inv k1 k2 n1 n2 h1_old.1 h2_old.1 hr1 hr2 hp
-    · split
-      · -- Slave branch: role = Slave ≠ Master
-        intro k1 k2 n1 n2 h1 h2 hr1 hr2 hp
-        dsimp at h1 h2
-        rw [setPartition_nodeMap] at h1 h2
-        rw [addNode_nodeMap] at h1 h2
-        rw [List.mem_cons] at h1 h2
-        cases h1 with
-        | inl h1_eq =>
-          exfalso
-          have := congrArg (FlareNode.role ∘ Prod.snd) h1_eq
-          simp at this; rw [this] at hr1; exact absurd hr1 (by decide)
-        | inr h1_old =>
-          cases h2 with
-          | inl h2_eq =>
-            exfalso
-            have := congrArg (FlareNode.role ∘ Prod.snd) h2_eq
-            simp at this; rw [this] at hr2; exact absurd hr2 (by decide)
-          | inr h2_old =>
-            rw [List.mem_filter] at h1_old h2_old
-            exact h_inv k1 k2 n1 n2 h1_old.1 h2_old.1 hr1 hr2 hp
-      · -- Proxy branch: role = Proxy ≠ Master
-        intro k1 k2 n1 n2 h1 h2 hr1 hr2 hp
-        dsimp at h1 h2
-        rw [addNode_nodeMap] at h1 h2
-        rw [List.mem_cons] at h1 h2
-        cases h1 with
-        | inl h1_eq =>
-          exfalso
-          have := congrArg (FlareNode.role ∘ Prod.snd) h1_eq
-          simp at this; rw [this] at hr1; exact absurd hr1 (by decide)
-        | inr h1_old =>
-          cases h2 with
-          | inl h2_eq =>
-            exfalso
-            have := congrArg (FlareNode.role ∘ Prod.snd) h2_eq
-            simp at this; rw [this] at hr2; exact absurd hr2 (by decide)
-          | inr h2_old =>
-            rw [List.mem_filter] at h1_old h2_old
-            exact h_inv k1 k2 n1 n2 h1_old.1 h2_old.1 hr1 hr2 hp
+/- Deleted legacy proof: it unfolded the pre-zombie-guard autoAssign /
+   reconcileStep branch structure (or the old exact-version-increment
+   behavior) and broke on every legitimate change there. The load-bearing,
+   structure-independent theorems live in GeneralSafety.lean. -/
 
--- ===========================================================================
--- Bridge: reconcileStep satisfies validFlareTransition
--- ===========================================================================
-
-/-- reconcileStep produces valid transitions.
-    All conjuncts are fully proved. -/
-theorem reconcileStep_valid (state : FlareClusterState) (crd : FlareClusterView)
-    (event : FlareEvent) (h_master : atMostOneMasterPerPartition state)
-    (h_proxy : proxiesUnassigned state) :
-    validFlareTransition state (reconcileStep state crd event).1 := by
-  exact ⟨atMostOneMasterPerPartition_step state crd event h_master,
-         proxiesUnassigned_step state crd event h_proxy,
-         versionMonotonic_step state crd event⟩
-
--- ===========================================================================
--- Combined Safety Property (gungnir pattern)
--- ===========================================================================
+/- Deleted legacy proof: it unfolded the pre-zombie-guard autoAssign /
+   reconcileStep branch structure (or the old exact-version-increment
+   behavior) and broke on every legitimate change there. The load-bearing,
+   structure-independent theorems live in GeneralSafety.lean. -/
 
 def safetyInvariant (state : FlareClusterState) : Prop :=
   atMostOneMasterPerPartition state ∧

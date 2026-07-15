@@ -199,8 +199,11 @@ def flareReconcileDone (s : FlareReconcileState) : Prop :=
 def flareReconcileError (s : FlareReconcileState) : Prop :=
   ∃ msg, s.reconcileStep = .Error msg
 
+def flareReconcileEmergencyPaused (s : FlareReconcileState) : Prop :=
+  s.reconcileStep = .EmergencyPaused
+
 def flareReconcileTerminal (s : FlareReconcileState) : Prop :=
-  flareReconcileDone s ∨ flareReconcileError s
+  flareReconcileDone s ∨ flareReconcileError s ∨ flareReconcileEmergencyPaused s
 
 -- ===========================================================================
 -- Pure Failover Logic (extracted from Main.lean handleFailover)

@@ -126,7 +126,8 @@ private theorem isTerminal_of_isTerminalBool (s : FlareClusterLevelState) :
   intro h
   simp only [reconcileIsTerminal, flareReconcileTerminal]
   cases h' : s.k8sReconcileState.reconcileStep <;>
-    simp_all [flareReconcileTerminalBool, flareReconcileDone, flareReconcileError]
+    simp_all [flareReconcileTerminalBool, flareReconcileDone, flareReconcileError,
+      FlareOperator.K8sReconciler.flareReconcileEmergencyPaused]
 
 -- ===========================================================================
 -- Liveness Property 1: Reconcile Terminates
@@ -151,10 +152,11 @@ theorem flareReconcileTerminates_holds :
   suffices ∀ (k n : Nat),
       flareReconcileMeasure (ex.stateAt n).k8sReconcileState.reconcileStep ≤ k →
       ∃ m, m ≥ n ∧ flareReconcileTerminalBool (ex.stateAt m).k8sReconcileState.reconcileStep = true by
-    -- Init has measure 7
-    have hInitMeas : flareReconcileMeasure (ex.stateAt 0).k8sReconcileState.reconcileStep ≤ 7 := by
+    -- Init has measure 12 (the FSM grew from 8 to 12 states; the old
+    -- literal 7 silently rotted because nothing rebuilt this module)
+    have hInitMeas : flareReconcileMeasure (ex.stateAt 0).k8sReconcileState.reconcileStep ≤ 12 := by
       simp only [Execution.stateAt, hInit, reconcileInitState, flareReconcileMeasure]; omega
-    obtain ⟨m, _, hTerm⟩ := this 7 0 hInitMeas
+    obtain ⟨m, _, hTerm⟩ := this 12 0 hInitMeas
     exact ⟨m, by
       simp only [Execution.suffix, TempPred.satisfiedBy, liftState, Execution.head,
                  reconcileIsTerminal, Execution.stateAt]
@@ -215,10 +217,16 @@ theorem flare_esr_holds :
     | inl hDone =>
       cases h : (ex.stateAt n).k8sReconcileState.reconcileStep <;>
         simp_all [flareReconcileDone, flareReconcileTerminalBool]
-    | inr hErr =>
-      obtain ⟨msg, hErr⟩ := hErr
-      cases h : (ex.stateAt n).k8sReconcileState.reconcileStep <;>
-        simp_all [flareReconcileError, flareReconcileTerminalBool]
+    | inr hRest =>
+      cases hRest with
+      | inl hErr =>
+        obtain ⟨msg, hErr⟩ := hErr
+        cases h : (ex.stateAt n).k8sReconcileState.reconcileStep <;>
+          simp_all [flareReconcileError, flareReconcileTerminalBool]
+      | inr hPause =>
+        cases h : (ex.stateAt n).k8sReconcileState.reconcileStep <;>
+          simp_all [FlareOperator.K8sReconciler.flareReconcileEmergencyPaused,
+            flareReconcileTerminalBool]
   -- Terminal absorption: once terminal, stays terminal forever
   have hPermBool : ∀ k, flareReconcileTerminalBool (ex.stateAt (k + n)).k8sReconcileState.reconcileStep = true := by
     intro k; induction k with
@@ -310,7 +318,12 @@ def phase0Invariant (s : FlareClusterLevelState) : Prop :=
   | .AfterListPods => True
   | .AfterDetectDead => True
   | .AfterHandleFailover => True
+  | .AfterAssignRoles => True
+  | .AfterUpdateConfigMap => True
+  | .AfterHandleReplication => True
+  | .AfterBroadcastTopology => True
   | .AfterPatchService => True
+  | .EmergencyPaused => True
   | .Done => True
   | .Error _ => True
 

@@ -363,6 +363,7 @@ theorem reconcileStep_cle (s : FlareClusterState) (crd : FlareClusterView)
   | Version => exact CLE.rfl _
   | Quit => exact CLE.rfl _
   | NodeSync _ => exact CLE.rfl _
+  | StatsNodes => exact CLE.rfl _
   | NodeRemove _ _ => exact CLE.rfl _
   | MutationAttempt _ => exact CLE.rfl _
   | ParseError _ => exact CLE.rfl _
@@ -483,6 +484,12 @@ theorem stepGlobal_cle (g : GlobalState) (step : GlobalStep) :
     dsimp only
     exact assignProxiesPure_cle _ _ _
   | NodeReconstructionComplete nodeKey =>
+    dsimp only
+    repeat' split
+    all_goals exact CLE.rfl _
+  | MasterCommitsData nodeKey =>
+    -- data-plane bookkeeping only: nodeStates.holdsData changes, the
+    -- operator's nodeMap is untouched on every leaf
     dsimp only
     repeat' split
     all_goals exact CLE.rfl _

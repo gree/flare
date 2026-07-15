@@ -45,8 +45,9 @@ theorem initCluster_empty_nodeMap (crd : FlareClusterView) (nodeNames : List Str
 -/
 theorem initCluster_satisfies_invariant (crd : FlareClusterView) (nodeNames : List String) :
     AtMostOneMasterPerPartition (initCluster crd nodeNames) := by
+  -- the initial nodeMap is []; every count over [] is literally zero
   intro p
-  simp [AtMostOneMasterPerPartition, initCluster, FlareClusterState.default]
+  exact Nat.zero_le 1
 
 /-! ## VERIFIED THEOREM 2: Scenario 1 (fresh cluster) is safe -/
 

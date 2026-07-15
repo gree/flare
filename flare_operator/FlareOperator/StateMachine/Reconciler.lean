@@ -236,6 +236,25 @@ def reconcileStep (state : FlareClusterState) (crd : FlareClusterView)
     ])
   | .Stats =>
     (state, .End [s!"STAT node_count {state.nodeMap.length}"])
+  | .StatsNodes =>
+    -- flarei-compatible `stats nodes` (op_stats::_send_stats_nodes): five
+    -- STAT lines per node — role, state, partition, balance, thread_type —
+    -- keyed by <server>:<port>. This is the wire format flare-tools'
+    -- `flare-admin list` parses, so the operator answers it verbatim.
+    let roleStr := fun (r : FlareRole) => match r with
+      | .Master => "master" | .Slave => "slave" | .Proxy => "proxy"
+    let stateStr := fun (s : FlareState) => match s with
+      | .Active => "active" | .Prepare => "prepare"
+      | .Down => "down" | .Ready => "ready"
+    let lines := state.nodeMap.foldr (fun (_, n) acc =>
+      let nk := s!"{n.serverName}:{n.serverPort}"
+      s!"STAT {nk}:role {roleStr n.role}"
+        :: s!"STAT {nk}:state {stateStr n.state}"
+        :: s!"STAT {nk}:partition {n.partition}"
+        :: s!"STAT {nk}:balance {n.balance}"
+        :: s!"STAT {nk}:thread_type {n.threadType}"
+        :: acc) []
+    (state, .End lines)
   | .Version =>
     (state, .End ["VERSION flare-operator 1.0.0"])
   | .Quit =>

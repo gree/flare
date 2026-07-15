@@ -133,6 +133,21 @@ cluster:
   pdb:
     enabled: true
     maxUnavailable: 1
+  # Optional LoadBalancer in front of the flared DATA port (memcached
+  # protocol). flared proxies keys to the owning partition, so one LB over
+  # all nodes is a complete client entry point. The protocol has NO
+  # authentication: keep the LB VPC-internal (e.g. TKE internal CLB via the
+  # subnet annotation below) and never expose it publicly. Disabled by
+  # default — nothing is created unless explicitly enabled.
+  externalAccess:
+    enabled: false
+    type: LoadBalancer
+    # Cloud-specific annotations. TKE internal CLB example:
+    #   service.kubernetes.io/qcloud-loadbalancer-internal-subnetid: subnet-xxxxxxxx
+    annotations: {}
+    # Optional CIDR allow-list enforced by the cloud LB.
+    loadBalancerSourceRanges: []
+    port: 12121
   resources:
     requests:
       cpu: 100m

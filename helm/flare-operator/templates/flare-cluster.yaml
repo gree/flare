@@ -139,6 +139,37 @@ spec:
           requests:
             storage: {{ $c.persistence.size }}
   {{- end }}
+{{- if $c.externalAccess.enabled }}
+---
+# Client entry point: LB over every flared pod's data port. Any node
+# proxies to the key's owning partition, so no per-node exposure is
+# needed. See values.yaml (cluster.externalAccess) for the security notes.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $c.name }}-nodes-external
+  namespace: {{ $ns }}
+  labels:
+    app: flare
+    cluster: {{ $c.name }}
+  {{- with $c.externalAccess.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ $c.externalAccess.type }}
+  {{- with $c.externalAccess.loadBalancerSourceRanges }}
+  loadBalancerSourceRanges:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  selector:
+    app: flare
+    cluster: {{ $c.name }}
+  ports:
+    - port: {{ $c.externalAccess.port }}
+      targetPort: {{ $c.flarePort }}
+      name: flare
+{{- end }}
 {{- if $c.pdb.enabled }}
 ---
 # Serializes voluntary disruptions: a rolling node drain can never evict a

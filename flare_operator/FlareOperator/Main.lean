@@ -896,6 +896,19 @@ private def tryAcquireOrRenew (leaseName ns identity : String) : IO Bool := do
 -- Entry Point
 -- ===========================================================================
 
+/-- Set this pod's `flare.gree.net/role` label (leader/standby). The index
+    Service selects `role=leader`, so this label — not readiness — is what
+    routes flared's index traffic to the elected leader. Best-effort by
+    design: callers decide how loudly to react, and the leader loop
+    re-asserts it every tick so a transient API failure self-heals. -/
+private def setRoleLabel (identity ns role : String) : IO Bool := do
+  match ← Kubectl.kubectl ["label", "pod", identity,
+      s!"flare.gree.net/role={role}", "--overwrite", "-n", ns] with
+  | .ok _ => return true
+  | .error e =>
+    IO.eprintln s!"[flare-operator] WARNING: failed to label pod {identity} role={role}: {e}"
+    return false
+
 /-- Main entry point. Two-phase leader election:
     Phase 1 (follower): Try to acquire the lease, completely passive.
     Phase 2 (leader): Run TCP server + reconcile loop, renew lease each iteration. -/
@@ -936,6 +949,11 @@ def main (args : List String) : IO Unit := do
   startHealthServerBackground healthStatus
   IO.eprintln s!"[flare-operator] health check server started on port 8080 (leader=false)"
 
+  -- Pod labels survive container restarts: a crashed ex-leader would keep
+  -- routing index traffic to itself while it is back in the follower loop.
+  -- Reset to standby before ever trying for the lease.
+  let _ ← setRoleLabel identity ns "standby"
+
   -- ═══════════════════════════════════════════════════════════════════════
   -- PHASE 1: Follower loop — try to become leader
   -- ═══════════════════════════════════════════════════════════════════════
@@ -954,6 +972,12 @@ def main (args : List String) : IO Unit := do
 
   healthStatus.setLeader true  -- We just acquired the lease
   IO.eprintln s!"[flare-operator] health status: leader=true"
+
+  -- Claim the index traffic: the Service selects role=leader. Loud on
+  -- failure (a leader without the label serves nobody); the reconcile loop
+  -- re-asserts the label every tick until it sticks.
+  if !(← setRoleLabel identity ns "leader") then
+    IO.eprintln s!"[flare-operator] ERROR: leader label not set — index Service will not route here yet"
 
   -- Initialize metrics
   let metrics ← initMetrics
@@ -1044,7 +1068,14 @@ def main (args : List String) : IO Unit := do
     if !renewed then
       IO.eprintln s!"[flare-operator] LOST LEASE -- exiting"
       healthStatus.setLeader false  -- Update health status before exit
+      -- Best-effort step-down: stop attracting index traffic before the
+      -- replacement leader labels itself. If the API is unreachable this
+      -- fails too — the pod exits and the boot-time reset covers it.
+      let _ ← setRoleLabel identity ns "standby"
       throw (IO.userError "lease lost")
+    -- Self-healing label assert: a leader whose label patch failed (or was
+    -- stripped externally) reclaims the index Service every tick.
+    let _ ← setRoleLabel identity ns "leader"
 
     -- Time the reconcile loop
     let startTime ← IO.monoMsNow

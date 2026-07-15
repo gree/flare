@@ -22,3 +22,6 @@ spec:
       name: health
   selector:
     {{- include "flare-operator.selectorLabels" . | nindent 4 }}
+    # Only the elected leader runs the TCP index server; it labels its own
+    # pod on lease acquisition (and resets to standby on boot/step-down).
+    flare.gree.net/role: leader

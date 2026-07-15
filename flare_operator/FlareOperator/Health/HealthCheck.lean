@@ -38,11 +38,20 @@ def HealthStatus.setLeader (status : HealthStatus) (leader : Bool) : IO Unit := 
 def HealthStatus.setTcpServerReady (status : HealthStatus) (ready : Bool) : IO Unit := do
   status.tcpServerReady.set ready
 
-/-- Check if operator is ready (for /readyz endpoint) -/
+/-- Check if operator is ready (for /readyz endpoint).
+
+    A STANDBY is ready: it is healthy and can take the lease over. Routing
+    index traffic to the leader only is NOT readiness' job any more — the
+    leader labels its own pod `flare.gree.net/role=leader` and the index
+    Service selects on that label. (The previous leader-gated readiness kept
+    the Deployment permanently at 1/2 available: rollouts never completed,
+    availability alerts fired forever, and every upgrade needed a manual
+    old-ReplicaSet scale-down.) The leader itself is ready once its TCP
+    server is accepting index connections. -/
 def HealthStatus.isReady (status : HealthStatus) : IO Bool := do
   let leader ← status.isLeader.get
   let tcpReady ← status.tcpServerReady.get
-  return leader && tcpReady
+  return !leader || tcpReady
 
 /-! ## HTTP Request Parsing -/
 

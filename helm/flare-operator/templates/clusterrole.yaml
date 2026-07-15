@@ -10,10 +10,10 @@ rules:
   - apiGroups: ["flare.gree.net"]
     resources: ["flareclusters", "flareclusters/status"]
     verbs: ["get", "list", "watch", "update", "patch"]
-  # Pods (list flared pods, delete dead pods)
+  # Pods (list flared pods, delete dead pods, self-label leader/standby)
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["get", "list", "watch", "delete"]
+    verbs: ["get", "list", "watch", "delete", "patch"]
   # Pods/exec (exec into pods for replication control)
   - apiGroups: [""]
     resources: ["pods/exec"]

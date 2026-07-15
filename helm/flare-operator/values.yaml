@@ -127,6 +127,18 @@ cluster:
   # partition's master AND slave together. "soft" uses ScheduleAnyway
   # (small/dev clusters), "hard" uses DoNotSchedule (production).
   zoneSpread: soft
+  # Never stack two flared pods on one K8s node: a single node holding BOTH
+  # copies of a partition turns one node failure into a full partition
+  # outage (observed live: the scheduler happily co-located each
+  # partition's pair — zone balance was satisfied, node placement wasn't
+  # constrained). Enabled ("soft") by default so it works on small/dev
+  # clusters too; use "hard" in production to refuse such placement
+  # outright. NOTE: spread constraints separate PODS; which pod is a
+  # partition's master/slave is the operator's assignment. Node-level
+  # separation of pods therefore separates every partition's copies across
+  # nodes, but per-partition cross-AZ placement additionally needs the
+  # topology-aware assignment (planned) or replicas: 3.
+  hostnameSpread: soft
   # PodDisruptionBudget: maxUnavailable 1 serializes voluntary disruptions
   # (node drains), so rolling node maintenance can never evict a
   # partition's master and slave at the same time.

@@ -64,8 +64,9 @@ spec:
         app: flare
         cluster: {{ $c.name }}
     spec:
-      {{- if $c.zoneSpread }}
+      {{- if or $c.zoneSpread $c.hostnameSpread }}
       topologySpreadConstraints:
+        {{- if $c.zoneSpread }}
         - maxSkew: 1
           topologyKey: topology.kubernetes.io/zone
           whenUnsatisfiable: {{ eq $c.zoneSpread "hard" | ternary "DoNotSchedule" "ScheduleAnyway" }}
@@ -73,6 +74,17 @@ spec:
             matchLabels:
               app: flare
               cluster: {{ $c.name }}
+        {{- end }}
+        {{- if $c.hostnameSpread }}
+        # One node must never hold both copies of a partition; see values.
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: {{ eq $c.hostnameSpread "hard" | ternary "DoNotSchedule" "ScheduleAnyway" }}
+          labelSelector:
+            matchLabels:
+              app: flare
+              cluster: {{ $c.name }}
+        {{- end }}
       {{- end }}
       containers:
         - name: flared

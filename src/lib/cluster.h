@@ -179,6 +179,7 @@ protected:
 
 	int										_master_reconstruction;
 	bool _boot_shift_pending;
+	bool _reannounce_active;
 	pthread_mutex_t				_mutex_master_reconstruction;
 
 	uint64_t							_node_map_version;

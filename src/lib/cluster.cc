@@ -70,6 +70,7 @@ cluster::cluster(thread_pool* req_tp, thread_pool* other_tp, string server_name,
 		_type(type_node),
 		_master_reconstruction(0),
 		_boot_shift_pending(false),
+		_reannounce_active(false),
 		_node_map_version(0),
 		_server_name(server_name),
 		_server_port(server_port),
@@ -1142,8 +1143,28 @@ int cluster::reconstruct_node(vector<node> v, uint64_t node_map_version) {
 			} else {
 				log_debug("-> existing node", 0);
 				if (it->node_state != this->_node_map[node_key].node_state) {
-					node_shift_state tmp = { node_key, this->_node_map[node_key].node_state, it->node_state};
-					shift_state_stack.push(tmp);
+					if (node_key == this->_node_key
+							&& it->node_state == state_prepare
+							&& this->_node_map[node_key].node_state == state_active
+							&& it->node_role == this->_node_map[node_key].node_role
+							&& it->node_partition == this->_node_map[node_key].node_partition) {
+						// The index believes we are still syncing, but we
+						// completed reconstruction and ARE active with the
+						// same role/partition. This happens when the
+						// activation landed on an operator leader that died
+						// before persisting it (leader handover lost-update,
+						// observed live). Regressing to prepare would strand
+						// the node: no role diff ever arrives, so nothing
+						// would re-trigger reconstruction or activation.
+						// Keep active locally and re-announce it (after the
+						// locks are released).
+						log_notice("index map says prepare but local state is active (role/partition unchanged) — keeping active and re-announcing activation", 0);
+						it->node_state = state_active;
+						this->_reannounce_active = true;
+					} else {
+						node_shift_state tmp = { node_key, this->_node_map[node_key].node_state, it->node_state};
+						shift_state_stack.push(tmp);
+					}
 				}
 				if (it->node_role != this->_node_map[node_key].node_role || it->node_partition != this->_node_map[node_key].node_partition) {
 					node_shift_role tmp = {node_key, this->_node_map[node_key].node_role, this->_node_map[node_key].node_partition, it->node_role, it->node_partition};
@@ -1198,6 +1219,12 @@ int cluster::reconstruct_node(vector<node> v, uint64_t node_map_version) {
 
 	pthread_rwlock_unlock(&this->_mutex_node_partition_map);
 	pthread_rwlock_unlock(&this->_mutex_node_map);
+
+	if (this->_reannounce_active) {
+		this->_reannounce_active = false;
+		// network IO — deliberately outside the map locks
+		this->activate_node(true);
+	}
 
 	return 0;
 }

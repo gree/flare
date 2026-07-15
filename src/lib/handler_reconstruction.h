@@ -64,6 +64,9 @@ public:
 	virtual int run();
 
 protected:
+	int _run_once();
+
+protected:
 	// Try to catch up from the master via incremental WAL sync instead of
 	// a full dump. Returns true only when the delta was fully applied (so
 	// the caller can skip the dump); false — safely — otherwise, after

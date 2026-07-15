@@ -71,14 +71,48 @@ handler_reconstruction::~handler_reconstruction() {
 
 // {{{ public methods
 int handler_reconstruction::run() {
+	// Reconstruction failures are almost always transient in an orchestrated
+	// cluster: the source is mid-promotion, mid-restart, or service DNS
+	// still resolves to its previous pod IP (both observed live on TKE).
+	// There is no external retry any more — the K8s operator rejects
+	// deactivate_node and never re-issues a role shift for an unchanged
+	// role — so a single failure used to strand the node in prepare
+	// forever. Retry here with backoff; every attempt re-resolves and
+	// reconnects from scratch.
+	int result = -1;
+	for (int attempt = 0; ; attempt++) {
+		result = this->_run_once();
+		if (result == 0) {
+			return 0;
+		}
+		if (attempt >= 60) {
+			break;
+		}
+		int delay = attempt < 4 ? (2 << attempt) : 30;	// 2,4,8,16,30,30,...
+		log_notice("reconstruction attempt %d failed -> retrying in %d seconds (master=%s:%d, partition=%d)", attempt + 1, delay, this->_node_server_name.c_str(), this->_node_server_port, this->_partition);
+		for (int i = 0; i < delay; i++) {
+			if (this->_thread->is_shutdown_request()) {
+				log_notice("shutdown requested -> abandoning reconstruction retry", 0);
+				return -1;
+			}
+			sleep(1);
+		}
+	}
+	// legacy behavior on FINAL failure only (flarei marks the node down;
+	// the K8s operator rejects this and keeps the node in prepare).
+	log_err("reconstruction failed permanently after retries -> deactivating node", 0);
+	this->_cluster->deactivate_node();
+	return result;
+}
+
+int handler_reconstruction::_run_once() {
 	this->_thread->set_peer(this->_node_server_name, this->_node_server_port);
 	this->_thread->set_state("connect");
 
 	shared_connection c(new connection_tcp(this->_node_server_name, this->_node_server_port));
 	this->_connection = c;
 	if (c->open() < 0) {
-		log_err("failed to connect to node server (name=%s, port=%d) -> deactivating node", this->_node_server_name.c_str(), this->_node_server_port);
-		this->_cluster->deactivate_node();
+		log_err("failed to connect to node server (name=%s, port=%d)", this->_node_server_name.c_str(), this->_node_server_port);
 		return -1;
 	}
 
@@ -142,8 +176,7 @@ int handler_reconstruction::run() {
 			} else {
 				log_notice("truncating local storage before full-dump reconstruction so deletions on the source propagate (WAL sync was unavailable; see previous log line)", 0);
 				if (this->_storage->truncate(0) < 0) {
-					log_err("failed to truncate storage before full dump -> deactivating node", 0);
-					this->_cluster->deactivate_node();
+					log_err("failed to truncate storage before full dump", 0);
 					return -1;
 				}
 			}
@@ -162,7 +195,6 @@ int handler_reconstruction::run() {
 		if (p->run_client(this->_reconstruction_interval, this->_partition, this->_partition_size, this->_reconstruction_bwlimit) < 0) {
 			log_err("failed to reconstruct (%s %s)", op::result_cast(p->get_result()).c_str(), p->get_result_message().c_str());
 			delete p;
-			this->_cluster->deactivate_node();
 			return -1;
 		}
 

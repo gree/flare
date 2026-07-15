@@ -36,6 +36,8 @@ structure PodInfo where
   subdomain : String := ""
   «namespace» : String := ""
   ready : Bool := true
+  /-- K8s node the pod is scheduled on ("" while Pending). -/
+  nodeName : String := ""
   deriving Repr, BEq
 
 /-- Convert a PodInfo to a node key matching the FQDN used by flared for registration.
@@ -65,7 +67,7 @@ def getFlareClusterCRD (crName ns : String) : IO (Except String FlareClusterView
 def listFlaredPods (crName ns : String) : IO (List PodInfo) := do
   let result ← retryConservative s!"list pods for {crName}" do
     kubectl ["get", "pods", "-n", ns, "-l", s!"app=flare,cluster={crName}",
-             "-o", "jsonpath={range .items[*]}{.metadata.name} {.status.podIP} 12121 {.status.conditions[?(.type==\"Ready\")].status} {.spec.hostname} {.spec.subdomain}{\"\\n\"}{end}"]
+             "-o", "jsonpath={range .items[*]}{.metadata.name} {.status.podIP} 12121 {.status.conditions[?(.type==\"Ready\")].status} {.spec.hostname} {.spec.subdomain} {.spec.nodeName}{\"\\n\"}{end}"]
   match result with
   | .error _ => return []
   | .ok output =>
@@ -73,6 +75,19 @@ def listFlaredPods (crName ns : String) : IO (List PodInfo) := do
     return lines.filterMap fun line =>
       let parts := line.splitOn " "
       match parts with
+      | [podName, ip, portStr, readyStr, hostname, subdomain, nodeName] =>
+        match portStr.trim.toNat? with
+        | some port => some {
+            name := podName.trim
+            ip := ip.trim
+            port := port
+            hostname := hostname.trim
+            subdomain := subdomain.trim
+            «namespace» := ns
+            ready := readyStr.trim == "True"
+            nodeName := nodeName.trim
+          }
+        | none => none
       | [podName, ip, portStr, readyStr, hostname, subdomain] =>
         match portStr.trim.toNat? with
         | some port => some {
@@ -286,6 +301,27 @@ def queryPodStats (podName ns : String) (statsCmd : String) : IO (Except String 
     Dead detection should only trigger for pods that are completely gone. -/
 def liveNodeKeys (pods : List PodInfo) : List String :=
   pods.map PodInfo.toNodeKey
+
+/-- K8s node name → zone, from the well-known topology label. Nodes without
+    the label are omitted; on unlabeled clusters (kind) this is []. -/
+def listNodeZones : IO (List (String × String)) := do
+  let result ← retryConservative "list node zones" do
+    kubectl ["get", "nodes",
+             "-o", "jsonpath={range .items[*]}{.metadata.name} {.metadata.labels.topology\\.kubernetes\\.io/zone}{\"\\n\"}{end}"]
+  match result with
+  | .error _ => return []
+  | .ok output =>
+    return output.splitOn "\n" |>.filterMap fun line =>
+      match line.trim.splitOn " " with
+      | [node, zone] => if zone.isEmpty then none else some (node, zone)
+      | _ => none
+
+/-- nodeKey → zone for every pod scheduled on a zone-labeled node. -/
+def podZones (pods : List PodInfo) (nodeZones : List (String × String))
+    : List (String × String) :=
+  pods.filterMap fun p =>
+    if p.nodeName.isEmpty then none
+    else (nodeZones.lookup p.nodeName).map fun z => (p.toNodeKey, z)
 
 /-- Read the nodeMap data from a ConfigMap.
     kubectl get configmap <name> -n <ns> -o jsonpath='{.data.nodeMap}' -/

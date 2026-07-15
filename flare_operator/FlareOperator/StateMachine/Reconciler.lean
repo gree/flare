@@ -115,6 +115,53 @@ def findPartitionNeedingSlaveAux (state : FlareClusterState) (numPartitions : Na
 def findPartitionNeedingSlave (state : FlareClusterState) (numPartitions : Nat) (maxSlaves : Nat) : Option Nat :=
   findPartitionNeedingSlaveAux state numPartitions maxSlaves 0 numPartitions
 
+/-! ## Topology-aware placement
+
+The scheduler's spread constraints separate PODS across failure domains,
+but which pod becomes a partition's master/slave is decided HERE — blind
+assignment can put both copies of a partition into one zone even on a
+perfectly spread cluster (observed live). The reconcile loop feeds the
+pod→zone map in; TCP-context callers pass `[]` and get the old
+placement-blind behavior unchanged. -/
+
+/-- Zone of a node key per the reconcile loop's pod→zone map. `none` when
+    topology is unknown (kind, tests, clusters without zone labels). -/
+def zoneOf (zones : List (String × String)) (key : String) : Option String :=
+  zones.lookup key
+
+/-- The zone of partition `pIdx`'s current master, when both the master and
+    its zone are known. -/
+def masterZoneFor (state : FlareClusterState) (zones : List (String × String))
+    (pIdx : Nat) : Option String := do
+  let kv ← state.nodeMap.find? (fun kv =>
+    kv.2.role == FlareRole.Master && kv.2.partition == Int.ofNat pIdx)
+  zoneOf zones kv.1
+
+/-- Every partition currently short of slaves, in index order. -/
+def partitionsNeedingSlave (state : FlareClusterState)
+    (numPartitions maxSlaves : Nat) : List Nat :=
+  (List.range numPartitions).filter
+    (fun i => slaveCountForPartition state i < maxSlaves)
+
+/-- Zone-aware slave placement: among the partitions short of slaves,
+    prefer one whose master provably sits in a DIFFERENT zone than the
+    candidate — that slave becomes the partition's cross-zone copy.
+    Falls back to the first needing partition (the placement-blind choice)
+    when the candidate's zone is unknown or no cross-zone option exists. -/
+def findPartitionNeedingSlaveZoneAware (state : FlareClusterState)
+    (numPartitions maxSlaves : Nat) (zones : List (String × String))
+    (candidateKey : String) : Option Nat :=
+  let needing := partitionsNeedingSlave state numPartitions maxSlaves
+  match zoneOf zones candidateKey with
+  | none => needing.head?
+  | some z =>
+    match needing.filter (fun p =>
+        match masterZoneFor state zones p with
+        | some mz => mz != z
+        | none => false) with
+    | [] => needing.head?
+    | p :: _ => some p
+
 /-- Find a live replica of partition `pIdx`: a Slave in Active state (its
     reconstruction completed, so it holds a full copy of the partition's
     data) whose POD is actually alive. Prepare slaves are excluded —
@@ -139,7 +186,7 @@ def findActiveSlaveForPartition (state : FlareClusterState) (pIdx : Nat)
     First clears any stale entry for this nodeKey so re-registering nodes
     don't block their own partition from being filled. -/
 def autoAssign (state : FlareClusterState) (crd : FlareClusterView) (nodeKey : String) (node : FlareNode)
-    (livePodKeys : List String) : FlareClusterState × FlareNode :=
+    (livePodKeys : List String) (zones : List (String × String) := []) : FlareClusterState × FlareNode :=
   let numPartitions := crd.spec.partitions
   let maxSlaves := if crd.spec.replicas > 1 then crd.spec.replicas - 1 else 0
   -- Clear stale entry for this node before checking partition needs.
@@ -203,7 +250,7 @@ def autoAssign (state : FlareClusterState) (crd : FlareClusterView) (nodeKey : S
       (newState, newNode)
   | none =>
     -- Try Slave (enters Prepare state — reconstruction needed before Active)
-    match findPartitionNeedingSlave cleanState numPartitions maxSlaves with
+    match findPartitionNeedingSlaveZoneAware cleanState numPartitions maxSlaves zones nodeKey with
     | some pIdx =>
       let newNode := { node with role := FlareRole.Slave, state := FlareState.Prepare, partition := Int.ofNat pIdx, balance := 0 }
       let part := (cleanState.lookupPartition pIdx).getD {}
@@ -213,6 +260,78 @@ def autoAssign (state : FlareClusterState) (crd : FlareClusterView) (nodeKey : S
     | none =>
       -- Stay as Proxy
       (cleanState, node)
+
+/-- With no topology ([]) the zone-aware finder IS the placement-blind
+    choice: first partition short of slaves. TCP-context callers and
+    unlabeled clusters are exactly the old behavior. -/
+theorem findPartitionNeedingSlaveZoneAware_blind (state : FlareClusterState)
+    (n maxS : Nat) (key : String) :
+    findPartitionNeedingSlaveZoneAware state n maxS [] key
+      = (partitionsNeedingSlave state n maxS).head? := by
+  rfl
+
+/-- THE PLACEMENT GUARANTEE: when the candidate's zone is known and at
+    least one needing partition has a master provably in a different zone,
+    the chosen partition is one of those — the new slave always becomes a
+    cross-zone copy whenever that is possible at all. -/
+theorem findPartitionNeedingSlaveZoneAware_cross
+    (state : FlareClusterState) (n maxS : Nat) (zones : List (String × String))
+    (key z : String) (p : Nat)
+    (hz : zoneOf zones key = some z)
+    (hex : (partitionsNeedingSlave state n maxS).any (fun q =>
+        match masterZoneFor state zones q with
+        | some mz => mz != z
+        | none => false) = true)
+    (h : findPartitionNeedingSlaveZoneAware state n maxS zones key = some p) :
+    ∃ mz, masterZoneFor state zones p = some mz ∧ mz ≠ z := by
+  unfold findPartitionNeedingSlaveZoneAware at h
+  rw [hz] at h
+  dsimp only at h
+  cases hfil : (partitionsNeedingSlave state n maxS).filter (fun q =>
+      match masterZoneFor state zones q with
+      | some mz => mz != z
+      | none => false) with
+  | nil =>
+    rw [List.any_eq_true] at hex
+    obtain ⟨q, hqmem, hq⟩ := hex
+    have hmem : q ∈ (partitionsNeedingSlave state n maxS).filter (fun q =>
+        match masterZoneFor state zones q with
+        | some mz => mz != z
+        | none => false) := List.mem_filter.mpr ⟨hqmem, hq⟩
+    rw [hfil] at hmem
+    cases hmem
+  | cons hd tl =>
+    rw [hfil] at h
+    injection h with h
+    have hmem : hd ∈ (partitionsNeedingSlave state n maxS).filter (fun q =>
+        match masterZoneFor state zones q with
+        | some mz => mz != z
+        | none => false) := by
+      rw [hfil]; exact List.mem_cons_self ..
+    have hp := (List.mem_filter.mp hmem).2
+    rw [← h]
+    cases hmz : masterZoneFor state zones hd with
+    | none => rw [hmz] at hp; simp at hp
+    | some mz =>
+      rw [hmz] at hp
+      exact ⟨mz, rfl, by simpa using hp⟩
+
+/-- Partitions whose data-bearing copies (master + slaves) ALL sit in one
+    known zone — the persistent placement violation a single-zone outage
+    turns into a full partition outage. Partitions with fewer than two
+    copies or with any copy of unknown zone are excluded (no false alarms
+    while topology is partially known or the partition is degraded for
+    other reasons). -/
+def partitionsInSingleZone (state : FlareClusterState) (numPartitions : Nat)
+    (zones : List (String × String)) : List Nat :=
+  (List.range numPartitions).filter fun p =>
+    let copies := state.nodeMap.filter (fun kv =>
+      kv.2.partition == Int.ofNat p && kv.2.role != FlareRole.Proxy)
+    let copyZones := copies.map (fun kv => zoneOf zones kv.1)
+    copies.length >= 2 && copyZones.all Option.isSome &&
+      (match copyZones with
+       | some z :: rest => rest.all (· == some z)
+       | _ => false)
 
 /-! ## Core reconcile step -/
 

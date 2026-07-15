@@ -56,7 +56,7 @@ inductive FlareReconcileStep where
 /-- Responses from the K8s API server. -/
 inductive K8sResponse where
   | CRDResponse (crd : Option FlareClusterView)
-  | PodListResponse (pods : List String)
+  | PodListResponse (pods : List String) (zones : List (String × String))
   | PatchResponse (success : Bool)
   | NoResponse
   deriving Repr
@@ -100,6 +100,8 @@ structure FlareReconcileState where
   reconcileStep : FlareReconcileStep := .Init
   cachedCrd : Option FlareClusterView := none
   livePodKeys : List String := []
+  /-- nodeKey → zone, from the last pod listing ([] when topology unknown). -/
+  podZones : List (String × String) := []
   deadNodeKeys : List String := []
   failoverTriggered : Bool := false
   -- Grace period for startup: 24 cycles × 5s = 120s (see Main.lean)
@@ -622,10 +624,10 @@ def detectDeadNodesPure (state : FlareClusterState) (livePodKeys : List String)
     open master slot is filled by a live registered node (the promoted replica),
     never by the corpse of the node that just failed. -/
 def assignProxiesPure (state : FlareClusterState) (crd : FlareClusterView)
-    (livePodKeys : List String) : FlareClusterState :=
+    (livePodKeys : List String) (zones : List (String × String) := []) : FlareClusterState :=
   state.nodeMap.foldl (init := state) fun currentState (nodeKey, node) =>
     if node.role == FlareRole.Proxy && node.state != FlareState.Down then
-      let (newState, _) := autoAssign currentState crd nodeKey node livePodKeys
+      let (newState, _) := autoAssign currentState crd nodeKey node livePodKeys zones
       newState
     else
       currentState
@@ -760,12 +762,13 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
 
   | .AfterListPods =>
     match resp with
-    | .PodListResponse pods =>
+    | .PodListResponse pods zones =>
       -- CRITICAL: Check grace period (Main.lean:355-359)
       if s.graceCycles > 0 then
         -- Still in startup grace period - skip dead node detection
         ({ s with reconcileStep := .AfterDetectDead,
                   livePodKeys := pods,
+                  podZones := zones,
                   deadNodeKeys := [],
                   graceCycles := s.graceCycles - 1 }, none,
          [.Log s!"[flare-operator] grace period: {s.graceCycles - 1} cycles remaining"])
@@ -774,6 +777,7 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
         let deadKeys := detectDeadNodesPure clusterState pods
         ({ s with reconcileStep := .AfterDetectDead,
                   livePodKeys := pods,
+                  podZones := zones,
                   deadNodeKeys := deadKeys }, none, [])
     | other =>
       ({ s with reconcileStep := .Error s!"unexpected response at AfterListPods: {repr other}" }, none, [])
@@ -817,13 +821,20 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
     -- Assign proxy roles (Main.lean:323-330)
     match s.updatedClusterState, s.cachedCrd with
     | some state, some crd =>
-      let stateWithProxies := assignProxiesPure state crd s.livePodKeys
+      let stateWithProxies := assignProxiesPure state crd s.livePodKeys s.podZones
       -- Refill partitions that lost every master to a total restart (all
       -- replicas re-registered as Slave/Prepare, so no proxy exists for
       -- autoAssign and no Down entry exists for failover).
       let stateWithMasters := promoteMasterlessPartitions stateWithProxies crd s.livePodKeys
+      -- Persistent-violation detection: a partition whose copies all sit in
+      -- one zone survives spread constraints (they place pods, not roles).
+      -- Phase 1 warns; automated repair (slave migration) is future work.
+      let singleZone := FlareOperator.Reconciler.partitionsInSingleZone
+        stateWithMasters crd.spec.partitions s.podZones
+      let warnEffects := singleZone.map (fun p =>
+        FlareEffect.Log s!"[flare-operator] WARNING: every copy of partition {p} is in one zone — a single-zone outage takes the whole partition")
       ({ s with reconcileStep := .AfterUpdateConfigMap,
-                updatedClusterState := some stateWithMasters }, none, [])
+                updatedClusterState := some stateWithMasters }, none, warnEffects)
     | _, _ =>
       ({ s with reconcileStep := .Error "missing cluster state or CRD at AfterAssignRoles" }, none, [])
 

@@ -456,7 +456,9 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
     let pods ← Bridge.listFlaredPods crName ns
     -- Convert pod names to node keys (FQDNs with port) to match nodeMap keys
     let podKeys := pods.map Bridge.PodInfo.toNodeKey
-    pure (.PodListResponse podKeys)
+    -- Topology for zone-aware placement; [] on unlabeled clusters.
+    let nodeZones ← Bridge.listNodeZones
+    pure (.PodListResponse podKeys (Bridge.podZones pods nodeZones))
   | .PatchService =>
     -- Service patching happens in executeEffects (PatchService effect)
     -- This just signals completion

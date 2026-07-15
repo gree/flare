@@ -975,7 +975,7 @@ def main (args : List String) : IO Unit := do
       let loaded := FlareClusterState.fromNodeMapData data
       let loaded := loaded.rebuildPartitionMap
       stateRef.set loaded
-      IO.eprintln s!"[flare-operator] loaded {loaded.nodeMap.length} nodes from ConfigMap"
+      IO.eprintln s!"[flare-operator] loaded {loaded.nodeMap.length} nodes from ConfigMap (resuming at broadcast version {loaded.nodeMapVersion})"
   -- Fetch CRD BEFORE starting TCP server so META returns correct partition-size
   -- from the very first request. Without this, flared nodes connecting early
   -- would get partition-size=1 and operate in single-partition mode permanently.

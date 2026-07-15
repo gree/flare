@@ -278,13 +278,36 @@ def parseNodeMapLine (line : String) : Option (String × FlareNode) :=
 def serializeNodeMap (state : FlareClusterState) : String :=
   let lines := state.nodeMap.map fun (key, node) =>
     s!"{key} role={node.role.toNat} state={node.state.toNat} partition={node.partition}"
-  "\n".intercalate lines
+  -- The broadcast version MUST survive an operator restart. flared drops
+  -- any `node sync` whose version is not newer than the last one it saw
+  -- (cluster.cc reconstruct_node "ignored: ... newer than"); an operator
+  -- that reloads the map but restarts the counter at zero broadcasts into
+  -- the void until it out-counts the previous incarnation — observed live
+  -- as a cluster that could not converge for hours after an operator
+  -- replacement (flared at v10280, fresh operator at v189).
+  s!"version={state.nodeMapVersion}\n" ++ "\n".intercalate lines
 
 /-- Rebuild FlareClusterState from serialized ConfigMap data. -/
 def fromNodeMapData (data : String) : FlareClusterState :=
   let lines := data.splitOn "\n" |>.filter (· != "")
+  let version := (lines.findSome? fun l =>
+    if l.startsWith "version=" then (l.drop "version=".length).toNat? else none).getD 0
   let nodes := lines.filterMap parseNodeMapLine
-  { FlareClusterState.default with nodeMap := nodes }
+  { FlareClusterState.default with nodeMap := nodes, nodeMapVersion := version }
+
+private def roundtripSample : FlareClusterState :=
+  { FlareClusterState.default with
+    nodeMap := [("h:12121", { serverName := "h", serverPort := 12121, role := FlareRole.Master, state := FlareState.Active, partition := 0 })],
+    nodeMapVersion := 10280 }
+
+/-- The broadcast version survives the persist/reload roundtrip. Regression
+    guard for the operator-restart version reset (flared ignores broadcasts
+    whose version is not newer than the last it saw, so losing the counter
+    silences the operator for hours). -/
+theorem nodeMapVersion_roundtrip :
+    (fromNodeMapData (serializeNodeMap roundtripSample)).nodeMapVersion = 10280
+      ∧ (fromNodeMapData (serializeNodeMap roundtripSample)).nodeMap.length = 1 := by
+  native_decide
 
 /-- Rebuild partitionMap deterministically from nodeMap.
     Scans all nodes and groups masters/slaves by partition index. -/

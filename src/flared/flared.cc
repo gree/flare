@@ -318,6 +318,11 @@ int flared::startup(int argc, char **argv) {
 	}
 	this->_storage->set_listener(this);
 	this->_cluster->set_storage(this->_storage);
+	// A restarted node's very first map can already assign it a role (the
+	// operator re-registers it onto its old partition); the shift was
+	// deferred until the storage exists — run it now or the node sits in
+	// prepare forever.
+	this->_cluster->run_boot_shift();
 
 	// creating alarm thread in advance
 	shared_thread th_alarm = this->_other_thread_pool->get(thread_pool::thread_type_alarm);

@@ -69,6 +69,7 @@ cluster::cluster(thread_pool* req_tp, thread_pool* other_tp, string server_name,
 		_storage(NULL),
 		_type(type_node),
 		_master_reconstruction(0),
+		_boot_shift_pending(false),
 		_node_map_version(0),
 		_server_name(server_name),
 		_server_port(server_port),
@@ -1129,13 +1130,14 @@ int cluster::reconstruct_node(vector<node> v, uint64_t node_map_version) {
 					// role: the index re-registers a restarted node onto its
 					// old partition (slave/prepare) instead of demoting it to
 					// proxy. No later role DIFF will ever arrive, so without
-					// this the node sits in prepare forever and never
-					// reconstructs. Synthesize the boot transition
-					// proxy/-1 -> assigned; _shift_node_role's own rules then
-					// apply (state=prepare -> reconstruct from the partition
-					// master, state=active -> skip, local data authoritative).
-					node_shift_role tmp = {node_key, role_proxy, -1, it->node_role, it->node_partition};
-					shift_role_stack.push(tmp);
+					// a synthesized boot transition the node sits in prepare
+					// forever and never reconstructs. The shift cannot run
+					// HERE: startup_node executes before flared wires the
+					// storage into the cluster, and handler_reconstruction
+					// with a null storage takes the process down. Record it;
+					// flared calls run_boot_shift() right after set_storage.
+					log_notice("boot map already assigns my role (role=%s, partition=%d) — deferring role shift until storage is attached", cluster::role_cast(it->node_role).c_str(), it->node_partition);
+					this->_boot_shift_pending = true;
 				}
 			} else {
 				log_debug("-> existing node", 0);
@@ -1190,6 +1192,39 @@ int cluster::reconstruct_node(vector<node> v, uint64_t node_map_version) {
 	pthread_rwlock_unlock(&this->_mutex_node_map);
 
 	return 0;
+}
+
+/**
+ *	[node] run the role shift synthesized at boot.
+ *	reconstruct_node cannot run it inline: startup_node executes before
+ *	flared attaches the storage to the cluster, and handler_reconstruction
+ *	with a null storage takes the process down. flared calls this right
+ *	after set_storage(). Reads the CURRENT map (not a recorded snapshot) so
+ *	a broadcast landing in between cannot make the shift stale.
+ */
+int cluster::run_boot_shift() {
+	if (!this->_boot_shift_pending) {
+		return 0;
+	}
+	this->_boot_shift_pending = false;
+
+	pthread_rwlock_wrlock(&this->_mutex_node_map);
+	pthread_rwlock_wrlock(&this->_mutex_node_partition_map);
+	role r = role_proxy;
+	int p = -1;
+	node_map::iterator me = this->_node_map.find(this->_node_key);
+	if (me != this->_node_map.end()) {
+		r = me->second.node_role;
+		p = me->second.node_partition;
+	}
+	int result = 0;
+	if (r != role_proxy) {
+		result = this->_shift_node_role(this->_node_key, role_proxy, -1, r, p);
+	}
+	pthread_rwlock_unlock(&this->_mutex_node_partition_map);
+	pthread_rwlock_unlock(&this->_mutex_node_map);
+
+	return result;
 }
 
 /**

@@ -148,7 +148,7 @@ def suite : TestSuite := {
     -- into an assigned prepare role used to skip reconstruction entirely
     -- (cluster.cc reconstruct_node only fired role shifts on DIFFS, and the
     -- very first map already carried the role) and sat in Prepare forever —
-    -- seen live on the TKE deployment while every earlier test here passed.
+    -- seen on a live deployment while every earlier test here passed.
     { name := "all replicas return to Active after total-P0 restart"
       run := do
         let converged ← waitForCondition "all nodes Active" 180 do

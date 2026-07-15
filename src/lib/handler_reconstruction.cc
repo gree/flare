@@ -73,7 +73,8 @@ handler_reconstruction::~handler_reconstruction() {
 int handler_reconstruction::run() {
 	// Reconstruction failures are almost always transient in an orchestrated
 	// cluster: the source is mid-promotion, mid-restart, or service DNS
-	// still resolves to its previous pod IP (both observed live on TKE).
+	// still resolves to its previous pod IP (both observed on a live
+	// cluster).
 	// There is no external retry any more — the K8s operator rejects
 	// deactivate_node and never re-issues a role shift for an unchanged
 	// role — so a single failure used to strand the node in prepare

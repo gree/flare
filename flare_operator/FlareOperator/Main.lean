@@ -925,6 +925,17 @@ def main (args : List String) : IO Unit := do
 
   let leaseName := s!"{crName}-operator-lease"
 
+  -- The health server must be up BEFORE the follower loop: a standby
+  -- replica (replicaCount > 1) blocks in phase 1 indefinitely, and with no
+  -- /healthz listener the liveness probe kills it every failure window —
+  -- an exit-137 crashloop observed on the first 2-replica deployment.
+  -- While waiting for the lease: /healthz 200 (alive), /readyz 503 (not
+  -- leader), which keeps the standby out of the Service but out of the
+  -- kubelet's gun.
+  let healthStatus ← HealthStatus.new
+  startHealthServerBackground healthStatus
+  IO.eprintln s!"[flare-operator] health check server started on port 8080 (leader=false)"
+
   -- ═══════════════════════════════════════════════════════════════════════
   -- PHASE 1: Follower loop — try to become leader
   -- ═══════════════════════════════════════════════════════════════════════
@@ -941,14 +952,8 @@ def main (args : List String) : IO Unit := do
   -- PHASE 2: Leader mode — run TCP server + reconcile loop
   -- ═══════════════════════════════════════════════════════════════════════
 
-  -- Initialize health status
-  let healthStatus ← HealthStatus.new
   healthStatus.setLeader true  -- We just acquired the lease
-  IO.eprintln s!"[flare-operator] health status initialized (leader=true)"
-
-  -- Start health check HTTP server in background
-  startHealthServerBackground healthStatus
-  IO.eprintln s!"[flare-operator] health check server started on port 8080"
+  IO.eprintln s!"[flare-operator] health status: leader=true"
 
   -- Initialize metrics
   let metrics ← initMetrics

@@ -26,6 +26,32 @@ flare は「パーティション分割 + master/slave 複製」の分散 KVS �
 
 以下の性質はこの4つに1対1で対応する。
 
+## システムが保持する状態の全景
+
+障害の議論は「どの状態が失われたか」の議論なので、先に全状態を列挙する。
+レビュー観点は2つ: **各状態に書き手が一人か**(二重 writer は split-brain の芽)、
+**失われたときの復旧経路があるか**。
+
+| 状態 | 実体 | 書き手(唯一か) | 寿命 | 失うと / 復旧経路 |
+|---|---|---|---|---|
+| 望ましい構成(partitions, replicas, rocksdb 設定, breaker 閾値) | FlareCluster CRD | 利用者のみ | etcd | 利用者が再作成 |
+| **クラスタの権威状態**(各ノードの role / state / partition / balance / regEpoch) | operator メモリ内 `FlareClusterState`(nodeMap + 派生 partitionMap + version) | **二重**: TCP サーバ(登録・Ready)と FSM(割当・failover)が同じ ref を書く — これが唯一の意図的な二重 writer であり、**合流点 merge が P1/P4 で証明されている理由そのもの** | operator プロセス | ConfigMap から復元(次行) |
+| 権威状態のスナップショット | ConfigMap `{cr}-node-map` | operator のみ | クラスタ | 消えても再登録+再割当で再構築可能(ユーザーデータは無事)。operator-restart E2E が復元の同一性を検証 |
+| flared 配布設定 | ConfigMap `{cr}-config`(extra.conf) | operator のみ(初期値は Helm pre-install hook) | クラスタ | operator が次 tick で再生成 |
+| リーダーシップ | K8s Lease | 現リーダーのみ(JSON Patch の CAS) | クラスタ | 期限切れ→他レプリカが取得。残余窓は broadcast 前の lease fence で緩和 |
+| flared プロセス内の自己認識(自分の role、ローカル node map、再構築進行) | flared メモリ | flared 自身(operator の broadcast を受けて) | プロセス | 再起動で消える → 再登録(regEpoch が新旧を判別)。**broadcast の意味論が C++ とモデルで食い違った箇所が実バグ4件目**(Active-shift) |
+| **ユーザーデータ** | RocksDB 本体(PVC 上) | flared のみ(書込・複製・再構築・truncate) | **PVC(pod を超える)** | レプリカから再構築 / 全レプリカ喪失は checkpoint から復元(backup-restore E2E)。truncate の三重ゲート(P3)が「復旧処理自身による喪失」を防ぐ |
+| 複製カーソルと系統 | 予約キー `__flare_repl_last_lsn` / `__flare_repl_master_id`(RocksDB 内) | flared の複製機構のみ | PVC | 消えても full dump に退化するだけ(安全側)。lineage 不一致は WAL 適用を拒否 → 誤系統のデータ混入を防ぐ |
+| バックアップ | `backups/` checkpoint(PVC)+ S3(tier-2) | flared `backup` op / CronJob | PVC / S3 | 最後の砦。鮮度は `rocksdb_last_backup_epoch` で監視 |
+| pod の存在・Ready | K8s(StatefulSet) | kubelet | — | dead 検出の入力。**「pod 存在 ≠ プロセス健全」のずれ**がゾンビ/幽霊シナリオの根であり、P2/P4 が守る |
+| FSM の途中状態・猶予カウンタ | operator メモリ(tick ごとに Init から再構築) | FSM のみ | 1 tick | **意図的に非永続** — 毎 tick 白紙から再評価するから breaker が自動復帰できる(P5) |
+
+モデル(`GlobalModel.GlobalState`)はこのうち権威状態(operatorState)・flared 自己認識
+(nodeStates、データ保持は `holdsData` に抽象化)・両者間のメッセージ(queues)を
+写像している。**表の「書き手が二重」の1箇所と「pod 存在≠健全」の1箇所が、
+発見された operator 側バグ全件の発生源である** — 状態表の異常箇所と
+バグの分布が一致していること自体が、この整理の妥当性の傍証になっている。
+
 ## 想定した障害モデル(何が起きると仮定したか)
 
 設計・検証が前提にした障害ケースの全列挙。「検証」列が空欄のケースは存在しない

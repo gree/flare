@@ -1690,7 +1690,7 @@ int cluster::_shift_node_role(string node_key, role old_role, int old_partition,
 			log_notice("assigned master with state active — skipping reconstruction (operator designated this node the source of truth; local data is authoritative)", 0);
 			return 0;
 		}
-		if (new_role == role_slave && old_role == role_proxy) {
+		if (new_role == role_slave) {
 			log_notice("assigned slave with state active — skipping reconstruction (operator declared this node in-sync per the node map)", 0);
 			return 0;
 		}
@@ -1732,7 +1732,15 @@ int cluster::_shift_node_role(string node_key, role old_role, int old_partition,
 		pthread_mutex_lock(&this->_mutex_master_reconstruction);
 		log_notice("master reconstruction started (n=%d)", this->_master_reconstruction);
 		pthread_mutex_unlock(&this->_mutex_master_reconstruction);
-	} else if (new_role == role_slave && old_role == role_proxy) {
+	} else if (new_role == role_slave) {
+		// ANY shift into slave/prepare needs a resync, not just proxy->slave.
+		// The operator demotes masters to slaves routinely (duplicate-master
+		// repair after a leader handover, failover flip-back); legacy flare
+		// only ever produced proxy->slave here, so a demoted ex-master in
+		// prepare used to fall through with NO reconstruction and sit there
+		// forever (observed live). The ex-master's data may also contain
+		// keys deleted on the new master, so the gated truncate + dump in
+		// handler_reconstruction is exactly the right resync.
 		string master_node_key = "";
 		int partition_size = this->_node_partition_map.size();
 		if (this->_node_partition_map.count(new_partition) > 0) {

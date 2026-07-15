@@ -352,3 +352,103 @@ IO シェルは薄い。将来 Go 等へ移植する場合も「pure core を分
 P1〜P5 の各行について「コード列の関数を開き、定理列の言明がその関数を
 対象にしていること、E2E 列のテストがその性質を assert していること」を
 1行ずつ突合するのが、flare の内部知識なしで本 PR を検証する最短経路である。
+
+
+---
+
+## 付録: 実物のコードで見る「証明」— 予備知識なしで読むためのサンプル
+
+証明や TLA+ の経験は不要である。この付録の目的はひとつ:
+**「証明」と呼んでいるものが、普通のコードの隣に置かれた
+「コンパイラが検査する日本語の文」にすぎない**と体感してもらうこと。
+題材は最重要性質 P1(master は各パーティション高々1)の実コード。
+
+### ステップ1: まず普通の関数(本番コード)
+
+master を割り当てる場所を探す関数。Lean だが、Go や TypeScript の
+つもりで読めばそのまま読める(`Reconciler.lean` より、実物):
+
+```lean
+-- 「パーティション i に master がいるか?」— nodeMap を線形に見るだけ
+def hasMasterForPartition (state : FlareClusterState) (pIdx : Nat) : Bool :=
+  state.nodeMap.any (fun (_, n) =>
+    decide (n.role = FlareRole.Master ∧ n.partition = Int.ofNat pIdx))
+
+-- 「master が空いている最初のパーティションを探す」
+-- ① i がパーティション数を超えたら「空きなし」(none)
+-- ② パーティション i に master がいれば次へ
+-- ③ いなければ i を返す ← ここが P1 の心臓部:
+--    この関数は「master がいない場所」しか返せない作りになっている
+def findPartitionNeedingMasterAux (state) (numPartitions) (i) (fuel) : Option Nat :=
+  match fuel with
+  | 0 => none
+  | fuel + 1 =>
+    if i >= numPartitions then none                        -- ①
+    else if hasMasterForPartition state i then             -- ②
+      findPartitionNeedingMasterAux state numPartitions (i + 1) fuel
+    else some i                                            -- ③
+```
+
+割り当て側(`autoAssign`)はこの関数が返した場所**にだけ** master を置く。
+つまり「二重 master を作らない」ことの実質は③の1行に懸かっている。
+
+### ステップ2: その関数についての「文」(これが証明)
+
+上の関数のすぐ下に、こう書いてある(実物):
+
+```lean
+theorem findPartitionNeedingMaster_spec (state) (n pIdx) :
+    findPartitionNeedingMaster state n = some pIdx →
+    hasMasterForPartition state pIdx = false := by
+  ...(証明本体。読まなくてよい)
+```
+
+読み方: `theorem 名前 : 文 := by 証明本体`。
+**読むべきは「文」の部分だけ**で、これは日本語に直訳できる:
+
+> 「findPartitionNeedingMaster が pIdx を返したなら、
+>   そのパーティションに master はいない」
+
+`:= by ...` 以下は「この文が正しい理由」で、**人間ではなく Lean の
+コンパイラが検査する**。だからレビューワーは証明本体を読む必要がない —
+確認すべきは (a) 文が意図と一致しているか、(b) 文中の関数名が
+本番コードと同じものか(grep で確認できる。本文「同一性」の節参照)、
+の2点だけである。
+
+型注釈が「この関数は Nat を返す」をコンパイラに検査させるのと同様に、
+theorem は「この関数は master のいない場所しか返さない」を検査させる。
+**やっていることは型チェックの延長**であり、それ以上の神秘はない。
+
+### ステップ3: バグをそのまま封印した「文」(ユニットテストとの地続き)
+
+実際に起きたバグ(ゾンビ: 空の旧 master プロセスが復活して master の座を
+奪い、パーティションのデータが静かに空になる)は、修正後こう封印されている
+(`VerifiedSafety.lean` より、実物):
+
+```lean
+theorem scenario4_zombie_not_master :
+    ((scenario4_zombieResurrection.operatorState.nodeMap.lookup
+        "node-0:11211").map
+      (fun n => n.role == FlareRole.Slave && n.state == FlareState.Prepare))
+    = some true := by
+  decide
+```
+
+直訳: 「ゾンビ復活シナリオを最後まで実行したとき、復活したノード
+(node-0)は master ではなく、Slave/Prepare(= 新 master からデータを
+作り直してからでないと提供できない状態)になっている」。
+
+`by decide` は「シナリオを実際に実行して確かめよ」という指示で、
+**これは実質ユニットテストである**。ただし2点だけテストより強い:
+実装の定義に直結しているので**実装を変えると必ず再実行される**
+(呼び忘れが存在しない)こと、そして CI がこのファイル全体をビルドする
+ので**この文が偽になる変更はコンパイルが通らない**ことだ。
+
+### まとめ(この付録で言いたかったこと)
+
+- ステップ1は普通のコード、ステップ3は実質ユニットテスト。
+  「証明」の大半はこの2つの中間にある読み物であり、
+  **専門知識が要るのは証明本体(読まなくてよい部分)だけ**
+- 例外は一般定理(`GeneralSafety.lean`: 任意の状態・任意の操作列で P1 が
+  保たれる)で、これはテストでは原理的に書けない主張である。ただしそこでも
+  レビューワーの仕事は変わらない — **文を読み、意図と一致するか判断する**

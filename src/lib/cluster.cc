@@ -1124,6 +1124,19 @@ int cluster::reconstruct_node(vector<node> v, uint64_t node_map_version) {
 				// - myself -> should be role=proxy
 				// - others -> this node does not have to care about anything
 				log_debug("-> new node", 0);
+				if (node_key == this->_node_key && it->node_role != role_proxy) {
+					// The very first map we receive can already assign us a
+					// role: the index re-registers a restarted node onto its
+					// old partition (slave/prepare) instead of demoting it to
+					// proxy. No later role DIFF will ever arrive, so without
+					// this the node sits in prepare forever and never
+					// reconstructs. Synthesize the boot transition
+					// proxy/-1 -> assigned; _shift_node_role's own rules then
+					// apply (state=prepare -> reconstruct from the partition
+					// master, state=active -> skip, local data authoritative).
+					node_shift_role tmp = {node_key, role_proxy, -1, it->node_role, it->node_partition};
+					shift_role_stack.push(tmp);
+				}
 			} else {
 				log_debug("-> existing node", 0);
 				if (it->node_state != this->_node_map[node_key].node_state) {

@@ -140,7 +140,27 @@ def suite : TestSuite := {
           cfg.operatorName cfg.operatorPort 0 cfg.flarePort
         IO.eprintln s!"# P0 curr_items: {items}"
         if items > 0 then return .pass
-        else return .fail "P0 master reports 0 curr_items — PVC data did not survive" }
+        else return .fail "P0 master reports 0 curr_items — PVC data did not survive" },
+
+    -- Test 4: convergence — every replica returns to Active, not just the
+    -- reinstated master. A rejoined node re-registers as Slave/Prepare and
+    -- must reconstruct its way back to Active; a flared that boots straight
+    -- into an assigned prepare role used to skip reconstruction entirely
+    -- (cluster.cc reconstruct_node only fired role shifts on DIFFS, and the
+    -- very first map already carried the role) and sat in Prepare forever —
+    -- seen live on the TKE deployment while every earlier test here passed.
+    { name := "all replicas return to Active after total-P0 restart"
+      run := do
+        let converged ← waitForCondition "all nodes Active" 180 do
+          let sync ← operatorTcpCmd cfg.debugPod cfg.«namespace»
+            cfg.operatorName cfg.operatorPort "node sync"
+          let entries := parseNodeSync sync
+          return entries.length == numPods && countActiveNodes entries == numPods
+        if converged then return .pass
+        else
+          let sync ← operatorTcpCmd cfg.debugPod cfg.«namespace»
+            cfg.operatorName cfg.operatorPort "node sync"
+          return .fail s!"not all replicas Active after 180s: {sync.trim}" }
   ]
 }
 

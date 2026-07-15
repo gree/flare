@@ -23,9 +23,9 @@ flare は「パーティション分割 + master/slave 複製」の分散 KVS �
 ### 1. スプリットブレイン(所有権の分裂)
 
 - **証明した**: master は各パーティション高々1 — 任意の状態・任意の操作列で
-  (`stepGlobal_preserves_atMostOne`、一般帰納)。並行書き込みの合流点も任意
-  入力で(`mergeClusterState_atMostOneMaster`)。古い計算による幽霊 master の
-  蘇生も封印(`ghost_not_resurrected`)。過半死で誤って一斉昇格しないことも
+  ([`stepGlobal_preserves_atMostOne`](../flare_operator/FlareOperator/StateMachine/GeneralSafety.lean#L511)、一般帰納)。並行書き込みの合流点も任意
+  入力で([`mergeClusterState_atMostOneMaster`](../flare_operator/FlareOperator/StateMachine/K8sReconciler.lean#L492))。古い計算による幽霊 master の
+  蘇生も封印([`ghost_not_resurrected`](../flare_operator/FlareOperator/StateMachine/VerifiedSafety.lean#L308))。過半死で誤って一斉昇格しないことも
   (breaker 定理)
 - **証明できずテストした**: operator の権威 view が flared 側の view に
   正しく届くこと(broadcast の配線)— failover 系 E2E 全部 + operator-restart
@@ -37,7 +37,7 @@ flare は「パーティション分割 + master/slave 複製」の分散 KVS �
 
 - **証明した**: この目標は実体が C++ 複製層にあるため証明は薄い、と正直に
   言うのが正確。モデル側で証明したのは境界部分のみ — merge が複製の前提情報を
-  壊さないこと(登録消失なし `mergeClusterState_preserves_keys`、Down 保存、
+  壊さないこと(登録消失なし [`mergeClusterState_preserves_keys`](../flare_operator/FlareOperator/StateMachine/K8sReconciler.lean#L540)、Down 保存、
   Prepare→Active の非巻き戻し)
 - **証明できずテストした**: 食い違いを防ぐ実機構は3つで、すべて C++ 単体
   テスト + E2E 担保: ① **lineage token**(`master_id` 不一致の WAL を拒否 —
@@ -53,9 +53,9 @@ flare は「パーティション分割 + master/slave 複製」の分散 KVS �
 ### 3. システムの安定性(制御ループが暴れない・収束する)
 
 - **証明した**: reconcile FSM は必ず停止する(measure 厳減)。過半死では
-  トリップし(`circuitBreakerDecision_trips`)、閾値未満では絶対にトリップ
-  せず(`_no_trip`)、**トリップ中は状態変更も K8s 要求も一切発生しない**
-  (`emergencyPaused_inert` — 保護機構自身がチャーン源にならない)。収束
+  トリップし([`circuitBreakerDecision_trips`](../flare_operator/FlareOperator/StateMachine/K8sReconciler.lean#L143))、閾値未満では絶対にトリップ
+  せず([`_no_trip`](../flare_operator/FlareOperator/StateMachine/K8sReconciler.lean#L154))、**トリップ中は状態変更も K8s 要求も一切発生しない**
+  ([`emergencyPaused_inert`](../flare_operator/FlareOperator/StateMachine/K8sReconciler.lean#L864) — 保護機構自身がチャーン源にならない)。収束
   (ESR)は9つの公平性仮定下でのみ証明 — safety より弱い保証であることを明記
 - **証明できずテストした**: 実時間での収束 — 全 E2E が時間上限つきで
   「収束したこと」まで assert(failover ≤120s 等)。再起動しても構成が
@@ -66,11 +66,11 @@ flare は「パーティション分割 + master/slave 複製」の分散 KVS �
 
 ### 4. データの安定性(コミット済みデータが失われない・勝手に蘇らない)
 
-- **証明した**: **Active な master は必ずデータを保持**(`activeMasterHoldsData`
+- **証明した**: **Active な master は必ずデータを保持**([`activeMasterHoldsData`](../flare_operator/FlareOperator/StateMachine/GlobalModel.lean#L317)
   が failover/ゾンビ/幽霊の全シナリオで成立)。昇格対象は常にデータを持つ
   生きた replica(scenario3/4/5 定理)。復旧処理自身による喪失の禁止 —
   truncate の三重ゲートを仕様化し、**ゲートを外す変更はモデルのコンパイルが
-  通らない**(`ungated_truncate_destroys_last_copy`)
+  通らない**([`ungated_truncate_destroys_last_copy`](../flare_operator/FlareOperator/StateMachine/VerifiedSafety.lean#L237))
 - **証明できずテストした**: ディスク上の実データの生存 — per-key 完全一致の
   読み戻し(data-survival)、パーティション全損からの PVC 復旧
   (pvc-data-survival)、論理破壊からの checkpoint 復元(backup-restore)。
@@ -138,7 +138,7 @@ operator はレプリカ2(leader が a、standby が b)。breaker 閾値は既�
 | T+0 | az-b のノード群が停止。P0-slave / P1-master / operator-standby を喪失。**P0 は無傷で継続、P1 range への書き込みは失敗し始める** |
 | T+40s〜数分 | K8s が az-b ノードを NotReady と判定し pod を退去。operator の pod list から az-b の pod が消える |
 | 次の tick | dead 検出: 4 台中 2 台 = **50% ≥ 閾値 → circuit breaker がトリップ**。`CIRCUIT BREAKER TRIPPED` ログ + `FlareCircuitBreakerTripped` がページ(critical) |
-| トリップ中 | **operator は何もしない**(`emergencyPaused_inert` 定理: 状態変更も K8s 要求もゼロ)。P1-slave(a) を昇格させないのは意図的 — 大規模障害の最中の一斉再割当は復旧を妨げる、が P5 の設計判断。P0 は provide し続ける |
+| トリップ中 | **operator は何もしない**([`emergencyPaused_inert`](../flare_operator/FlareOperator/StateMachine/K8sReconciler.lean#L864) 定理: 状態変更も K8s 要求もゼロ)。P1-slave(a) を昇格させないのは意図的 — 大規模障害の最中の一斉再割当は復旧を妨げる、が P5 の設計判断。P0 は provide し続ける |
 | 復旧 A: az-b が帰ってくる | pod 再登録 → 死亡率が閾値未満に低下 → **breaker は自動解除**(毎 tick 白紙から再評価するため。operator 再起動は不要 — 旧ドキュメントの誤りは修正済み)→ 通常の failover が実行: P1-slave(a) が昇格(**データを持つ生きた replica** — P2 定理)、戻った az-b pod は slave として WAL/dump で追いつく |
 | 復旧 B: az-b が恒久喪失 | 人間の判断(Runbook「circuit-breaker」節): StatefulSet を縮退させ生存率を閾値超にする、または閾値を下げる → failover 進行 → P1-slave(a) 昇格。全パーティションが az-a で提供再開 |
 
@@ -216,11 +216,11 @@ P1 は az-a の slave と az-b の PVC の2箇所に残っており、**何も�
 
 | # | 性質(平文) | 守っている実コード | 機械検証(定理) | 実クラスタ E2E |
 |---|---|---|---|---|
-| P1 | **master は各パーティション高々1** | 割当は「master 不在のパーティション」にのみ行う `findPartitionNeedingMaster` / 並行書き込みの合流点で重複 master を修復する `mergeClusterState`+`demoteDuplicateMasters`(いずれも `StateMachine/K8sReconciler.lean`, `Reconciler.lean` — 本番がそのまま実行する関数) | **一般帰納**(任意の状態・任意のステップ列・無制限長): `stepGlobal_preserves_atMostOne` / `stepMany_preserves_atMostOne`(`GeneralSafety.lean`)。合流点単体でも任意入力で `mergeClusterState_atMostOneMaster` | failover / pvc-data-survival / circuit-breaker。**全開発期間・全 CI で二重 master の観測ゼロ** |
-| P2 | **failover はデータを持つ「生きた」replica を昇格する**(空の再作成 pod や、pod が消えた幽霊エントリを master にしない) | `handleFailoverWithPromotionSingleKey`(demote と同 tick で slave 昇格、role/partition の防御ガード付き)+ pod 生存リストで候補を絞る `findActiveSlaveForPartition` | failover: `scenario3_dead_node_not_master`、ゾンビ: `scenario4_zombie_not_master`、幽霊: `scenario5_ghost_not_promoted`(いずれも `VerifiedSafety.lean`、モデルは本番と同一関数を呼ぶ) | data-survival-failover(**100キーを値まで完全一致で読み戻す**。欠損は即 fail)/ pvc-data-survival(master+slave 同時死)/ terminating-pod-handling |
-| P3 | **Active な master はデータを保持している**(「空 master」の禁止 — P1 だけではこれを禁止できない点が本 PR 最大の学び) | 再構築前 truncate の三重ゲート(rocksdb かつ **slave ロール** かつ **ソース生存確認済み**、`handler_reconstruction.cc`)+ Active 指定の役割変更は再構築しない(`cluster.cc`) | データ保全不変条件 `activeMasterHoldsData` が failover/ゾンビ/幽霊の全シナリオで成立(`data_*_ok`)。truncate ゲートは仕様として定理化: `truncate_gate_preserves_last_copy` と **`ungated_truncate_destroys_last_copy`(ゲートを外す変更はモデルのコンパイルが通らない)** | pvc-data-survival / backup-restore(flush_all 全損→checkpoint から全キー復元) |
-| P4 | **新しい事実は古い計算に上書きされない**(pod の再登録を、古いスナップショットから計算した結果が「幽霊」として蘇生させない) | 登録エポック `FlareNode.regEpoch` + 「新しいエポック側が丸ごと勝つ」merge(`mergeNodeEntry`) | `ghost_not_resurrected`(バグをそのまま符号化した回帰定理)/ 併せて「登録は merge で消えない」`mergeClusterState_preserves_keys`(任意入力) | pvc-data-survival(この修正が green 化の決め手)/ operator-restart(operator 死→状態 reload の同一性) |
-| P5 | **過半死では何もしないのが正しい**(circuit breaker)、かつ**復旧は自動再開** | `circuitBreakerDecision`(閾値 50%)+ terminal 状態 `EmergencyPaused` | 閾値以上で必ずトリップ `circuitBreakerDecision_trips` / 未満では絶対にトリップしない `_no_trip` / **トリップ中 FSM は状態も要求も一切出さない** `emergencyPaused_inert` | circuit-breaker suite(持続的過半死→トリップ→**15秒2点サンプルでチャーンなし**→容量復帰→operator 再起動なしで回復) |
+| P1 | **master は各パーティション高々1** | 割当は「master 不在のパーティション」にのみ行う [`findPartitionNeedingMaster`](../flare_operator/FlareOperator/StateMachine/Reconciler.lean#L60-L61) / 並行書き込みの合流点で重複 master を修復する [`mergeClusterState`](../flare_operator/FlareOperator/StateMachine/K8sReconciler.lean#L375)+[`demoteDuplicateMasters`](../flare_operator/FlareOperator/StateMachine/K8sReconciler.lean#L315)(いずれも [`StateMachine/K8sReconciler.lean`](../flare_operator/FlareOperator/StateMachine/K8sReconciler.lean), [`Reconciler.lean`](../flare_operator/FlareOperator/StateMachine/Reconciler.lean) — 本番がそのまま実行する関数) | **一般帰納**(任意の状態・任意のステップ列・無制限長): [`stepGlobal_preserves_atMostOne`](../flare_operator/FlareOperator/StateMachine/GeneralSafety.lean#L511) / [`stepMany_preserves_atMostOne`](../flare_operator/FlareOperator/StateMachine/GeneralSafety.lean#L520)([`GeneralSafety.lean`](../flare_operator/FlareOperator/StateMachine/GeneralSafety.lean))。合流点単体でも任意入力で [`mergeClusterState_atMostOneMaster`](../flare_operator/FlareOperator/StateMachine/K8sReconciler.lean#L492) | failover / pvc-data-survival / circuit-breaker。**全開発期間・全 CI で二重 master の観測ゼロ** |
+| P2 | **failover はデータを持つ「生きた」replica を昇格する**(空の再作成 pod や、pod が消えた幽霊エントリを master にしない) | [`handleFailoverWithPromotionSingleKey`](../flare_operator/FlareOperator/StateMachine/K8sReconciler.lean#L241)(demote と同 tick で slave 昇格、role/partition の防御ガード付き)+ pod 生存リストで候補を絞る [`findActiveSlaveForPartition`](../flare_operator/FlareOperator/StateMachine/Reconciler.lean#L131) | failover: [`scenario3_dead_node_not_master`](../flare_operator/FlareOperator/StateMachine/VerifiedSafety.lean#L133)、ゾンビ: [`scenario4_zombie_not_master`](../flare_operator/FlareOperator/StateMachine/VerifiedSafety.lean#L167-L170)、幽霊: [`scenario5_ghost_not_promoted`](../flare_operator/FlareOperator/StateMachine/VerifiedSafety.lean#L197)(いずれも [`VerifiedSafety.lean`](../flare_operator/FlareOperator/StateMachine/VerifiedSafety.lean)、モデルは本番と同一関数を呼ぶ) | data-survival-failover(**100キーを値まで完全一致で読み戻す**。欠損は即 fail)/ pvc-data-survival(master+slave 同時死)/ terminating-pod-handling |
+| P3 | **Active な master はデータを保持している**(「空 master」の禁止 — P1 だけではこれを禁止できない点が本 PR 最大の学び) | 再構築前 truncate の三重ゲート(rocksdb かつ **slave ロール** かつ **ソース生存確認済み**、[`handler_reconstruction.cc`](../src/lib/handler_reconstruction.cc#L102-L146))+ Active 指定の役割変更は再構築しない([`cluster.cc`](../src/lib/cluster.cc#L1578-L1591)) | データ保全不変条件 [`activeMasterHoldsData`](../flare_operator/FlareOperator/StateMachine/GlobalModel.lean#L317) が failover/ゾンビ/幽霊の全シナリオで成立(`data_*_ok`)。truncate ゲートは仕様として定理化: [`truncate_gate_preserves_last_copy`](../flare_operator/FlareOperator/StateMachine/VerifiedSafety.lean#L230) と **[`ungated_truncate_destroys_last_copy`](../flare_operator/FlareOperator/StateMachine/VerifiedSafety.lean#L237)(ゲートを外す変更はモデルのコンパイルが通らない)** | pvc-data-survival / backup-restore(flush_all 全損→checkpoint から全キー復元) |
+| P4 | **新しい事実は古い計算に上書きされない**(pod の再登録を、古いスナップショットから計算した結果が「幽霊」として蘇生させない) | 登録エポック [`FlareNode.regEpoch`](../flare_operator/FlareOperator/StateMachine/K8sReconciler.lean#L345) + 「新しいエポック側が丸ごと勝つ」merge([`mergeNodeEntry`](../flare_operator/FlareOperator/StateMachine/K8sReconciler.lean#L345)) | [`ghost_not_resurrected`](../flare_operator/FlareOperator/StateMachine/VerifiedSafety.lean#L308)(バグをそのまま符号化した回帰定理)/ 併せて「登録は merge で消えない」[`mergeClusterState_preserves_keys`](../flare_operator/FlareOperator/StateMachine/K8sReconciler.lean#L540)(任意入力) | pvc-data-survival(この修正が green 化の決め手)/ operator-restart(operator 死→状態 reload の同一性) |
+| P5 | **過半死では何もしないのが正しい**(circuit breaker)、かつ**復旧は自動再開** | [`circuitBreakerDecision`](../flare_operator/FlareOperator/StateMachine/K8sReconciler.lean#L123)(閾値 50%)+ terminal 状態 `EmergencyPaused` | 閾値以上で必ずトリップ [`circuitBreakerDecision_trips`](../flare_operator/FlareOperator/StateMachine/K8sReconciler.lean#L143) / 未満では絶対にトリップしない [`_no_trip`](../flare_operator/FlareOperator/StateMachine/K8sReconciler.lean#L154) / **トリップ中 FSM は状態も要求も一切出さない** [`emergencyPaused_inert`](../flare_operator/FlareOperator/StateMachine/K8sReconciler.lean#L864) | circuit-breaker suite(持続的過半死→トリップ→**15秒2点サンプルでチャーンなし**→容量復帰→operator 再起動なしで回復) |
 
 E2E は計 22 スイート 125 テスト(kind 上の実 StatefulSet + 実 flared)。上記のほか、
 スケール操作(out/in)、Blue/Green 移行、WAL 増分同期、設定伝播、バックアップ/リストア
@@ -240,7 +240,7 @@ split-brain 修復のために入れた merge ルール「role は FSM が勝つ
 pod の**新しい再登録**を古いスナップショット由来の計算で毎 tick 上書きし、
 死んだ pod の Master エントリを不滅化していた(CI の診断ログで特定)。
 修正は「イベントの新旧を merge が判定できる」ようにする登録エポックの導入で、
-`ghost_not_resurrected` がバグそのものを回帰定理として封印している。
+[`ghost_not_resurrected`](../flare_operator/FlareOperator/StateMachine/VerifiedSafety.lean#L308) がバグそのものを回帰定理として封印している。
 
 **3. 最後のコピー消去(「証明済み」の外側にバグは住む)**
 削除伝播のために入れた「full dump 前 truncate」が、**master になるノード**の
@@ -266,9 +266,9 @@ C++ が実装していなかったこと。修正はモデルの1行の意味論
 「スペックを書き、別言語で実装し、目視で対応させる」翻訳工程が存在しない。
 例(P1 の合流点):
 
-- 定理: `mergeClusterState_atMostOneMaster`(`K8sReconciler.lean`)は
+- 定理: [`mergeClusterState_atMostOneMaster`](../flare_operator/FlareOperator/StateMachine/K8sReconciler.lean#L492)([`K8sReconciler.lean`](../flare_operator/FlareOperator/StateMachine/K8sReconciler.lean))は
   `FlareOperator.K8sReconciler.mergeClusterState` について述べる
-- 本番: reconcile ループの commit(`Main.lean` の `commitClusterState`)は
+- 本番: reconcile ループの commit([`Main.lean`](../flare_operator/FlareOperator/Main.lean) の [`commitClusterState`](../flare_operator/FlareOperator/Main.lean#L524))は
   `K8sReconciler.mergeClusterState current ucs` を呼ぶ — 同じ完全修飾名、
   つまり同じ定義
 
@@ -296,7 +296,7 @@ P1〜P5 すべて同じ手順で突合できる(対応表のコード列・定�
 |---|---|---|
 | 判断ロジック(割当・failover・merge・breaker) | **同一定義**(上記の機構) | 定理 + ビルド強制 |
 | IO シェル(いつ・どの引数で呼ぶか: kubectl の結果、TCP の順序) | 対象外 — 証明された関数に**間違った入力を渡す**ことはできる | E2E + 診断フック。実例: 幽霊蘇生バグは merge の定理が成立したまま起きた(古いスナップショットを食わせる境界の問題)。修正は判断材料(登録エポック)を証明層の**内側**に移すことだった — 「境界のバグは、境界を証明側に動かして潰す」が本 PR の運用パターン |
-| C++ flared(複製・再構築の実体) | **同一ではない** — 手書きモデル(`FlaredNode.lean`)による近似 | E2E + 単体テスト。実例: Active-shift の意味論乖離はここで起きた(前節4件目) |
+| C++ flared(複製・再構築の実体) | **同一ではない** — 手書きモデル([`FlaredNode.lean`](../flare_operator/FlareOperator/StateMachine/FlaredNode.lean))による近似 | E2E + 単体テスト。実例: Active-shift の意味論乖離はここで起きた(前節4件目) |
 
 ## よくある質問(先回り)
 
@@ -304,7 +304,7 @@ P1〜P5 すべて同じ手順で突合できる(対応表のコード列・定�
 その通り、具体シナリオの decide 定理の証拠能力はテストと同等である。差は
 2点: (1) 実装の定義に直結しているため、実装変更で**必ず**再実行される
 (テストは呼び忘れうる)。(2) それとは別に、入力に依存しない一般定理
-(`GeneralSafety.lean` の任意状態・任意ステップ列、merge の任意入力)が
+([`GeneralSafety.lean`](../flare_operator/FlareOperator/StateMachine/GeneralSafety.lean) の任意状態・任意ステップ列、merge の任意入力)が
 あり、これはテストが原理的に到達できない全状態空間を覆う。表の「証明」列は
 この2種を区別して書いてある。
 
@@ -366,7 +366,7 @@ P1〜P5 の各行について「コード列の関数を開き、定理列の言
 ### ステップ1: まず普通の関数(本番コード)
 
 master を割り当てる場所を探す関数。Lean だが、Go や TypeScript の
-つもりで読めばそのまま読める(`Reconciler.lean` より、実物):
+つもりで読めばそのまま読める(出典: [`Reconciler.lean:18,48-56`](../flare_operator/FlareOperator/StateMachine/Reconciler.lean#L18-L56)。①②③のコメントのみ本資料の注釈):
 
 ```lean
 -- 「パーティション i に master がいるか?」— nodeMap を線形に見るだけ
@@ -379,7 +379,8 @@ def hasMasterForPartition (state : FlareClusterState) (pIdx : Nat) : Bool :=
 -- ② パーティション i に master がいれば次へ
 -- ③ いなければ i を返す ← ここが P1 の心臓部:
 --    この関数は「master がいない場所」しか返せない作りになっている
-def findPartitionNeedingMasterAux (state) (numPartitions) (i) (fuel) : Option Nat :=
+def findPartitionNeedingMasterAux (state : FlareClusterState) (numPartitions : Nat)
+    (i : Nat) (fuel : Nat) : Option Nat :=
   match fuel with
   | 0 => none
   | fuel + 1 =>
@@ -394,7 +395,7 @@ def findPartitionNeedingMasterAux (state) (numPartitions) (i) (fuel) : Option Na
 
 ### ステップ2: その関数についての「文」(これが証明)
 
-上の関数のすぐ下に、こう書いてある(実物):
+上の関数のすぐ下に、こう書いてある(出典: [`Reconciler.lean:79-83`](../flare_operator/FlareOperator/StateMachine/Reconciler.lean#L79-L83)):
 
 ```lean
 theorem findPartitionNeedingMaster_spec (state) (n pIdx) :
@@ -423,7 +424,7 @@ theorem は「この関数は master のいない場所しか返さない」を�
 
 実際に起きたバグ(ゾンビ: 空の旧 master プロセスが復活して master の座を
 奪い、パーティションのデータが静かに空になる)は、修正後こう封印されている
-(`VerifiedSafety.lean` より、実物):
+(出典: [`VerifiedSafety.lean:167-170`](../flare_operator/FlareOperator/StateMachine/VerifiedSafety.lean#L167-L170)):
 
 ```lean
 theorem scenario4_zombie_not_master :
@@ -449,6 +450,6 @@ theorem scenario4_zombie_not_master :
 - ステップ1は普通のコード、ステップ3は実質ユニットテスト。
   「証明」の大半はこの2つの中間にある読み物であり、
   **専門知識が要るのは証明本体(読まなくてよい部分)だけ**
-- 例外は一般定理(`GeneralSafety.lean`: 任意の状態・任意の操作列で P1 が
+- 例外は一般定理([`GeneralSafety.lean`](../flare_operator/FlareOperator/StateMachine/GeneralSafety.lean): 任意の状態・任意の操作列で P1 が
   保たれる)で、これはテストでは原理的に書けない主張である。ただしそこでも
   レビューワーの仕事は変わらない — **文を読み、意図と一致するか判断する**

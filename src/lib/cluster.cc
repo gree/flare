@@ -1186,6 +1186,14 @@ int cluster::reconstruct_node(vector<node> v, uint64_t node_map_version) {
 		shift_role_stack.pop();
 	}
 
+	// retry a deferred/failed boot role shift now that this broadcast may
+	// have brought the missing reconstruction source (storage NULL = still
+	// inside startup_node; flared runs the first attempt via run_boot_shift
+	// right after set_storage).
+	if (this->_boot_shift_pending && this->_storage != NULL) {
+		this->_run_boot_shift_locked();
+	}
+
 	this->_set_node_map_version(node_map_version);
 
 	pthread_rwlock_unlock(&this->_mutex_node_partition_map);
@@ -1206,10 +1214,30 @@ int cluster::run_boot_shift() {
 	if (!this->_boot_shift_pending) {
 		return 0;
 	}
-	this->_boot_shift_pending = false;
 
 	pthread_rwlock_wrlock(&this->_mutex_node_map);
 	pthread_rwlock_wrlock(&this->_mutex_node_partition_map);
+	int result = this->_run_boot_shift_locked();
+	pthread_rwlock_unlock(&this->_mutex_node_partition_map);
+	pthread_rwlock_unlock(&this->_mutex_node_map);
+
+	return result;
+}
+
+/**
+ *	core of run_boot_shift; caller must hold _mutex_node_map and
+ *	_mutex_node_partition_map (write).
+ *
+ *	The pending flag is only cleared on SUCCESS: a node that reboots right
+ *	after its partition lost the master (rolling restart of a master) sees
+ *	no reconstruction source for a few seconds — the index promotes a new
+ *	master on its next reconcile tick. _shift_node_role returns -1 in that
+ *	window; keeping the flag set makes reconstruct_node retry on every
+ *	subsequent node map broadcast until a source exists. Without the retry
+ *	the node sits in prepare forever (observed live: rolled ex-master
+ *	rebooted 4s before the slave promotion landed).
+ */
+int cluster::_run_boot_shift_locked() {
 	role r = role_proxy;
 	int p = -1;
 	node_map::iterator me = this->_node_map.find(this->_node_key);
@@ -1217,14 +1245,17 @@ int cluster::run_boot_shift() {
 		r = me->second.node_role;
 		p = me->second.node_partition;
 	}
-	int result = 0;
-	if (r != role_proxy) {
-		result = this->_shift_node_role(this->_node_key, role_proxy, -1, r, p);
+	if (r == role_proxy) {
+		// role was withdrawn in the meantime: nothing to synthesize
+		this->_boot_shift_pending = false;
+		return 0;
 	}
-	pthread_rwlock_unlock(&this->_mutex_node_partition_map);
-	pthread_rwlock_unlock(&this->_mutex_node_map);
-
-	return result;
+	if (this->_shift_node_role(this->_node_key, role_proxy, -1, r, p) == 0) {
+		this->_boot_shift_pending = false;
+		return 0;
+	}
+	log_notice("boot role shift could not run yet (no reconstruction source for partition %d?) — retrying on the next node map broadcast", p);
+	return -1;
 }
 
 /**

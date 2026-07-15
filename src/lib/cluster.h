@@ -234,6 +234,7 @@ public:
 	int set_node_state(string node_server_name, int node_server_port, state node_state);
 	int reconstruct_node(vector<node> v, uint64_t node_map_version = 0);
 	int run_boot_shift();
+	int _run_boot_shift_locked();
 
 	int set_storage(storage* st) { this->_storage = st; return 0; };
 

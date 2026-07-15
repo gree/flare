@@ -350,6 +350,68 @@ theorem assignProxiesPure_cle (s : FlareClusterState) (crd : FlareClusterView)
       exact autoAssign_cle acc crd hd.1 hd.2 live hnm
     · exact CLE.rfl _
 
+/-! ## promoteMasterlessPartitions satisfies the bound -/
+
+theorem promoteMasterlessPartition_cle (s : FlareClusterState) (pIdx : Nat)
+    (live : List String) :
+    CLE s.nodeMap (K8sReconciler.promoteMasterlessPartition s pIdx live).nodeMap := by
+  unfold K8sReconciler.promoteMasterlessPartition
+  split
+  · exact CLE.rfl _
+  · next hno =>
+    -- promotion is gated on "no master entry for pIdx", so the count there
+    -- is zero and inserting one master lands at exactly 1; for every other
+    -- partition the inserted node is not a master, so the count shrinks.
+    have h0 : countMastersFor (Int.ofNat pIdx) s.nodeMap = 0 :=
+      count_zero_of_no_master s pIdx (by simpa using hno)
+    dsimp only
+    split
+    · next kv _ =>
+      intro p
+      by_cases hp : p = Int.ofNat pIdx
+      · subst hp
+        have hle := count_addNode_le_succ (Int.ofNat pIdx) s kv.1 { kv.2 with role := FlareRole.Master, state := FlareState.Active, partition := Int.ofNat pIdx, lastMasterOf := -1 }
+        have h1 : countMastersFor (Int.ofNat pIdx) (s.addNode kv.1 { kv.2 with role := FlareRole.Master, state := FlareState.Active, partition := Int.ofNat pIdx, lastMasterOf := -1 }).nodeMap ≤ 1 := by omega
+        exact Nat.le_trans h1 (Nat.le_max_right _ _)
+      · have hbp : (Int.ofNat pIdx == p) = false := by
+          cases hb : Int.ofNat pIdx == p
+          · rfl
+          · exact absurd (Eq.symm (eq_of_beq hb)) hp
+        have hM : isM p { kv.2 with role := FlareRole.Master, state := FlareState.Active, partition := Int.ofNat pIdx, lastMasterOf := -1 } = false := by
+          dsimp only [isM]
+          rw [hbp]
+          simp
+        exact Nat.le_trans (count_addNode_nonmaster p s kv.1 _ hM)
+          (Nat.le_max_left _ _)
+    · exact CLE.rfl _
+
+theorem promoteMasterlessPartitions_cle (s : FlareClusterState)
+    (crd : FlareClusterView) (live : List String) :
+    CLE s.nodeMap (K8sReconciler.promoteMasterlessPartitions s crd live).nodeMap := by
+  unfold K8sReconciler.promoteMasterlessPartitions
+  generalize List.range crd.spec.partitions = idxs
+  induction idxs generalizing s with
+  | nil => exact CLE.rfl _
+  | cons hd tl ih =>
+    rw [List.foldl_cons]
+    exact CLE.trans (promoteMasterlessPartition_cle s hd live) (ih _)
+
+/-! ## registerFreshNode satisfies the bound -/
+
+theorem registerFreshNode_cle (s : FlareClusterState) (crd : FlareClusterView)
+    (nodeKey serverName : String) (serverPort : Nat) :
+    CLE s.nodeMap (registerFreshNode s crd nodeKey serverName serverPort).1.nodeMap := by
+  unfold registerFreshNode
+  -- Branch tree: match lookupPartition 0 × if needsP0Master × if assigned-as-P0.
+  -- Every leaf is either an autoAssign result or a plain Proxy addNode; the
+  -- incoming node record literally has role := Proxy, so `rfl` discharges
+  -- both side conditions.
+  dsimp only
+  split <;> split <;> (try split) <;>
+    first
+      | (apply autoAssign_cle; rfl)
+      | (apply CLE.of_le; intro p; apply count_addNode_nonmaster; rfl)
+
 /-! ## reconcileStep satisfies the bound -/
 
 theorem reconcileStep_cle (s : FlareClusterState) (crd : FlareClusterView)
@@ -368,15 +430,19 @@ theorem reconcileStep_cle (s : FlareClusterState) (crd : FlareClusterView)
   | MutationAttempt _ => exact CLE.rfl _
   | ParseError _ => exact CLE.rfl _
   | NodeAdd serverName serverPort =>
-    -- Branch tree: match lookupPartition 0 × if needsP0Master × if assigned-as-P0.
-    -- Every leaf is either an autoAssign result or a plain Proxy addNode; the
-    -- incoming node record literally has role := Proxy, so `rfl` discharges
-    -- both side conditions.
+    -- Branch tree: match lookupNode (rejoin vs fresh) × if partition≥0.
+    -- The rejoin insert is always a Slave record — a non-master insert
+    -- that can only shrink the count (the master decision is deferred to
+    -- the reconcile loop's promoteMasterlessPartitions, proven separately).
+    -- Fresh keys delegate to registerFreshNode_cle.
     dsimp only
-    split <;> split <;> (try split) <;>
-      first
-        | (apply autoAssign_cle; rfl)
-        | (apply CLE.of_le; intro p; apply count_addNode_nonmaster; rfl)
+    split
+    · next old hlook =>
+      split
+      · -- old.partition ≥ 0: rejoin as syncing slave, a non-master insert
+        exact CLE.of_le (fun p => count_addNode_nonmaster p _ _ _ rfl)
+      · exact registerFreshNode_cle s crd _ serverName serverPort
+    · exact registerFreshNode_cle s crd _ serverName serverPort
   | NodeState serverName serverPort newState =>
     dsimp only
     split
@@ -482,7 +548,8 @@ theorem stepGlobal_cle (g : GlobalState) (step : GlobalStep) :
     all_goals exact CLE.rfl _
   | OperatorReconcile =>
     dsimp only
-    exact assignProxiesPure_cle _ _ _
+    exact CLE.trans (assignProxiesPure_cle _ _ _)
+      (promoteMasterlessPartitions_cle _ _ _)
   | NodeReconstructionComplete nodeKey =>
     dsimp only
     repeat' split

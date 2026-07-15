@@ -20,7 +20,7 @@ open FlareOperator.K8s
 open FlareOperator.Flare
 open FlareOperator.Reconciler
 open FlareOperator.StateMachine.FlaredNode
-open FlareOperator.K8sReconciler (assignProxiesPure handleFailoverWithPromotion detectDeadNodesPure)
+open FlareOperator.K8sReconciler (assignProxiesPure promoteMasterlessPartitions handleFailoverWithPromotion detectDeadNodesPure)
 
 /-! ## Network Messages -/
 
@@ -211,7 +211,11 @@ def stepGlobal (g : GlobalState) (step : GlobalStep) : GlobalState :=
     -- the scenario proofs only ever saw the single P0 master created by the
     -- NodeAdd fast path.
     let oldVersion := g.operatorState.nodeMapVersion
-    let newOpState := assignProxiesPure g.operatorState g.crdSpec (g.nodeStates.map Prod.fst)
+    let assigned := assignProxiesPure g.operatorState g.crdSpec (g.nodeStates.map Prod.fst)
+    -- Same order as the production FSM's AfterAssignRoles: proxy
+    -- assignment, then the masterless-partition refill (total restarts
+    -- re-register replicas as Slave/Prepare, which autoAssign never touches).
+    let newOpState := promoteMasterlessPartitions assigned g.crdSpec (g.nodeStates.map Prod.fst)
 
     let newQueue := if newOpState.nodeMapVersion > oldVersion then
       let nodes := newOpState.getNodes

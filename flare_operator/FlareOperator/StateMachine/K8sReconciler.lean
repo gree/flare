@@ -630,6 +630,45 @@ def assignProxiesPure (state : FlareClusterState) (crd : FlareClusterView)
     else
       currentState
 
+/-- Refill a partition that has lost EVERY master entry. Total-partition
+    restart re-registers every replica as a syncing Slave/Prepare (never
+    Proxy — see the NodeAdd rejoin path in Reconciler.lean), so neither
+    autoAssign (proxies only) nor failover (Down entries only) will ever
+    refill the slot; without this pass the partition deadlocks: slaves in
+    Prepare with no master to sync from.
+
+    Candidate order, LIVE pods only (this is the information the TCP rejoin
+    path lacked): an Active slave first — it is in sync, and preferring it
+    is exactly the zombie guard (the restarted ex-master must resync, not
+    resume) — otherwise the live node that most recently mastered the
+    partition (lastMasterOf), i.e. the newest surviving copy on its PVC.
+    Promotion is Master/Active: flared treats an Active designation as
+    authoritative and skips reconstruction, so the local data keeps
+    serving. -/
+def promoteMasterlessPartition (state : FlareClusterState) (pIdx : Nat)
+    (livePodKeys : List String) : FlareClusterState :=
+  if FlareOperator.Reconciler.hasMasterForPartition state pIdx then state
+  else
+    let candidate :=
+      (state.nodeMap.find? (fun (key, n) =>
+        n.role == FlareRole.Slave && n.state == FlareState.Active
+          && n.partition == Int.ofNat pIdx && livePodKeys.contains key)).orElse
+      (fun _ => state.nodeMap.find? (fun (key, n) =>
+        n.lastMasterOf == Int.ofNat pIdx && n.state != FlareState.Down
+          && livePodKeys.contains key))
+    match candidate with
+    | some kv =>
+      state.addNode kv.1 { kv.2 with
+        role := FlareRole.Master, state := FlareState.Active,
+        partition := Int.ofNat pIdx, lastMasterOf := -1 }
+    | none => state
+
+/-- Run the masterless-partition refill over every partition of the CRD. -/
+def promoteMasterlessPartitions (state : FlareClusterState) (crd : FlareClusterView)
+    (livePodKeys : List String) : FlareClusterState :=
+  (List.range crd.spec.partitions).foldl
+    (fun s pIdx => promoteMasterlessPartition s pIdx livePodKeys) state
+
 /-- Pure replication phase computation (Main.lean:212-272).
     Determines next migration phase based on current phase and CRD spec.
     Returns (next phase, should emit SIGHUP). -/
@@ -779,8 +818,12 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
     match s.updatedClusterState, s.cachedCrd with
     | some state, some crd =>
       let stateWithProxies := assignProxiesPure state crd s.livePodKeys
+      -- Refill partitions that lost every master to a total restart (all
+      -- replicas re-registered as Slave/Prepare, so no proxy exists for
+      -- autoAssign and no Down entry exists for failover).
+      let stateWithMasters := promoteMasterlessPartitions stateWithProxies crd s.livePodKeys
       ({ s with reconcileStep := .AfterUpdateConfigMap,
-                updatedClusterState := some stateWithProxies }, none, [])
+                updatedClusterState := some stateWithMasters }, none, [])
     | _, _ =>
       ({ s with reconcileStep := .Error "missing cluster state or CRD at AfterAssignRoles" }, none, [])
 

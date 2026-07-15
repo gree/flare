@@ -156,6 +156,34 @@ def scenario5_dataful : GlobalState :=
   let s1 := stepGlobal g .OperatorProcessMsg
   stepGlobal s1 .OperatorReconcile
 
+/-! ## Scenario 6: total-partition restart during the startup grace period -/
+
+/-- The CI data-loss reproduction (e2e pvc-data-survival, run 29383554894):
+    P0's master (node-0) AND slave (node-2) restart simultaneously and
+    re-register while their stale entries are still Active — the operator's
+    startup grace suppresses dead-node detection, so nothing ever cleared
+    the slots. The old NodeAdd fell through to fresh registration, saw
+    "all partitions full" (counting each node's own ghost) and demoted both
+    returning data-bearers to Proxy; flared drops partition data on a proxy
+    designation: silent total loss, curr_items 0. Now both rejoin as
+    Slave/Prepare (never Proxy) and the reconcile's masterless-partition
+    refill reinstates the live ex-master. -/
+def scenario6_totalPartitionRestart : GlobalState :=
+  let g := { scenario2_fullInit with
+             nodeToOpQueue := [.NodeAdd "node-0" 11211, .NodeAdd "node-2" 11211] }
+  let s1 := stepGlobal g .OperatorProcessMsg
+  let s2 := stepGlobal s1 .OperatorProcessMsg
+  stepGlobal s2 .OperatorReconcile
+
+/-- Scenario 6 on the dataful cluster: both returning replicas keep
+    holdsData = true across the restart — that is the PVC abstraction. -/
+def scenario6_dataful : GlobalState :=
+  let g := { scenario2_dataful with
+             nodeToOpQueue := [.NodeAdd "node-0" 11211, .NodeAdd "node-2" 11211] }
+  let s1 := stepGlobal g .OperatorProcessMsg
+  let s2 := stepGlobal s1 .OperatorProcessMsg
+  stepGlobal s2 .OperatorReconcile
+
 /-- Truncate-gate probe: node-2 (holds data) is mid-restart as Proxy and
     receives a broadcast assigning it P0 Slave/Prepare while the partition's
     master node-0 is DEAD (absent from nodeStates). Reconstruction starts.

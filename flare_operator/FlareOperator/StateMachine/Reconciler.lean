@@ -216,6 +216,56 @@ def autoAssign (state : FlareClusterState) (crd : FlareClusterView) (nodeKey : S
 
 /-! ## Core reconcile step -/
 
+/-- First-time registration of a node key (extracted from the NodeAdd arm so
+    the re-registration path below can bypass it). -/
+def registerFreshNode (state : FlareClusterState) (crd : FlareClusterView)
+    (nodeKey serverName : String) (serverPort : Nat) :
+    FlareClusterState × FlareResponse :=
+  -- Register as Proxy initially
+  let newNode : FlareNode := {
+    serverName := serverName
+    serverPort := serverPort
+    role := FlareRole.Proxy
+    state := FlareState.Active
+    partition := -1
+    balance := 100
+    threadType := 16
+    -- Stamp the registration so a concurrent FSM commit (computed from a
+    -- snapshot that predates this re-add) cannot resurrect the old role.
+    regEpoch := state.nodeMapVersion + 1
+  }
+  -- SPECIAL CASE: P0 Master must be assigned immediately to avoid reconstruction.
+  -- P0 is the source of truth - it should never witness a role transition and
+  -- should never run reconstruction. P1+ Masters are assigned later via reconcile
+  -- loop, which triggers Proxy→Master transition, which triggers reconstruction.
+  let numPartitions := crd.spec.partitions
+  let p0 := state.lookupPartition 0
+  let needsP0Master := match p0 with | some part => part.master.isNone | none => true
+  if needsP0Master && numPartitions > 0 then
+    -- Assign as P0 Master immediately - no role transition, no reconstruction
+    -- TCP context knows nothing about pod liveness except the node that is
+    -- registering right now, so only IT counts as live for the zombie
+    -- guard. Promotion of other slaves is the reconcile loop's job (which
+    -- has the real pod list).
+    let (newState, assignedNode) := autoAssign state crd nodeKey newNode [nodeKey]
+    if assignedNode.role == FlareRole.Master && assignedNode.partition == 0 then
+      -- Successfully assigned as P0 Master - return immediately
+      let nodeList := newState.getNodes
+      let lines := nodeList.map serializeNode
+      (newState, .End (lines.map String.trim))
+    else
+      -- Not assigned as P0 Master - register as Proxy for later assignment
+      let newState := state.addNode nodeKey newNode
+      let nodeList := newState.getNodes
+      let lines := nodeList.map serializeNode
+      (newState, .End (lines.map String.trim))
+  else
+    -- Not the first node or P0 already has master - register as Proxy
+    let newState := state.addNode nodeKey newNode
+    let nodeList := newState.getNodes
+    let lines := nodeList.map serializeNode
+    (newState, .End (lines.map String.trim))
+
 /-- Pure reconcile step: process a FlareEvent against the current state. -/
 def reconcileStep (state : FlareClusterState) (crd : FlareClusterView)
     (event : FlareEvent) : FlareClusterState × FlareResponse :=
@@ -261,50 +311,39 @@ def reconcileStep (state : FlareClusterState) (crd : FlareClusterView)
     (state, .CloseConnection)
   | .NodeAdd serverName serverPort =>
     let nodeKey := FlareClusterState.toNodeKey serverName serverPort
-    -- Register as Proxy initially
-    let newNode : FlareNode := {
-      serverName := serverName
-      serverPort := serverPort
-      role := FlareRole.Proxy
-      state := FlareState.Active
-      partition := -1
-      balance := 100
-      threadType := 16
-      -- Stamp the registration so a concurrent FSM commit (computed from a
-      -- snapshot that predates this re-add) cannot resurrect the old role.
-      regEpoch := state.nodeMapVersion + 1
-    }
-    -- SPECIAL CASE: P0 Master must be assigned immediately to avoid reconstruction.
-    -- P0 is the source of truth - it should never witness a role transition and
-    -- should never run reconstruction. P1+ Masters are assigned later via reconcile
-    -- loop, which triggers Proxy→Master transition, which triggers reconstruction.
-    let numPartitions := crd.spec.partitions
-    let p0 := state.lookupPartition 0
-    let needsP0Master := match p0 with | some part => part.master.isNone | none => true
-    if needsP0Master && numPartitions > 0 then
-      -- Assign as P0 Master immediately - no role transition, no reconstruction
-      -- TCP context knows nothing about pod liveness except the node that is
-      -- registering right now, so only IT counts as live for the zombie
-      -- guard. Promotion of other slaves is the reconcile loop's job (which
-      -- has the real pod list).
-      let (newState, assignedNode) := autoAssign state crd nodeKey newNode [nodeKey]
-      if assignedNode.role == FlareRole.Master && assignedNode.partition == 0 then
-        -- Successfully assigned as P0 Master - return immediately
-        let nodeList := newState.getNodes
-        let lines := nodeList.map serializeNode
+    -- Re-registration of a key that already owns a partition slot is a pod
+    -- RESTART, not a new node: the process lost its in-memory view but its
+    -- PVC may still hold the partition's only data. It must not fall through
+    -- to fresh registration — the stale entry for this very key still
+    -- occupies the partition, so autoAssign would conclude "all partitions
+    -- full" (counting the node's own ghost) and demote the returning
+    -- data-bearing node to Proxy. Observed live as total-P0 data loss when
+    -- master and slave restarted inside the operator's startup grace period
+    -- (dead detection suppressed, stale entries still Active).
+    match state.lookupNode nodeKey with
+    | some old =>
+      if old.partition >= 0 then
+        -- Rejoin the OLD partition as a syncing slave — deliberately the
+        -- most conservative role. The TCP context cannot tell a zombie
+        -- (an in-sync Active slave is alive and must be promoted instead)
+        -- from a total-partition restart (this registrant holds the newest
+        -- surviving copy): both look like "an Active slave entry exists",
+        -- because entries can be ghosts. Only the reconcile loop has the
+        -- real pod list, so the master decision is deferred to it; the
+        -- lastMasterOf marker tells it which live candidate was the
+        -- partition's newest copy (see promoteMasterlessPartitions).
+        let rejoined : FlareNode :=
+          { old with role := FlareRole.Slave, state := FlareState.Prepare,
+                     lastMasterOf := if old.role == FlareRole.Master then
+                       old.partition else old.lastMasterOf,
+                     regEpoch := state.nodeMapVersion + 1 }
+        let newState := state.addNode nodeKey rejoined
+        let lines := newState.getNodes.map serializeNode
         (newState, .End (lines.map String.trim))
       else
-        -- Not assigned as P0 Master - register as Proxy for later assignment
-        let newState := state.addNode nodeKey newNode
-        let nodeList := newState.getNodes
-        let lines := nodeList.map serializeNode
-        (newState, .End (lines.map String.trim))
-    else
-      -- Not the first node or P0 already has master - register as Proxy
-      let newState := state.addNode nodeKey newNode
-      let nodeList := newState.getNodes
-      let lines := nodeList.map serializeNode
-      (newState, .End (lines.map String.trim))
+        registerFreshNode state crd nodeKey serverName serverPort
+    | none =>
+      registerFreshNode state crd nodeKey serverName serverPort
   | .NodeSync _ =>
     let nodeList := state.getNodes
     let lines := nodeList.map serializeNode

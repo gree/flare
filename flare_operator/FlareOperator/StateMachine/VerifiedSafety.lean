@@ -199,6 +199,38 @@ theorem scenario5_ghost_not_promoted :
       (fun n => n.role == FlareRole.Master)) = some false := by
   decide
 
+/-! ## VERIFIED THEOREM 4e: total-partition restart (the CI DATA LOSS run) -/
+
+/-- Both P0 replicas restart and re-register while their stale entries are
+    still Active (startup grace, dead detection suppressed). The invariant
+    holds throughout. -/
+theorem scenario6_verified :
+    checkInvariantFinite scenario6_totalPartitionRestart 2 = true := by
+  decide
+
+/-- The master slot is refilled — the partition does not deadlock with two
+    Prepare slaves and nobody to sync from. -/
+theorem scenario6_p0_has_one_master :
+    countMastersForPartition scenario6_totalPartitionRestart 0 = 1 := by
+  decide
+
+/-- The refilled master is the EX-MASTER (lastMasterOf marker): the newest
+    surviving copy, reinstated Master/Active so flared skips reconstruction
+    and its local data keeps serving. -/
+theorem scenario6_ex_master_reinstated :
+    ((scenario6_totalPartitionRestart.operatorState.nodeMap.lookup "node-0:11211").map
+      (fun n => n.role == FlareRole.Master && n.state == FlareState.Active
+        && n.partition == 0)) = some true := by
+  decide
+
+/-- Neither returning replica was ever demoted to Proxy — the destructive
+    step in the CI failure: flared drops its partition data on a proxy
+    designation ("Result: Proxy | Reason: all partitions full"). -/
+theorem scenario6_no_proxy_demotion :
+    (scenario6_totalPartitionRestart.operatorState.nodeMap.filter
+      (fun kv => kv.2.role == FlareRole.Proxy)).length = 0 := by
+  decide
+
 /-! ## VERIFIED THEOREM 4d: data preservation — the invariant we never stated
 
 "At most one master" was fully compatible with an EMPTY master — the
@@ -223,6 +255,11 @@ theorem data_zombie_ok : activeMasterHoldsData scenario4_dataful = true := by de
 
 /-- Ghost re-registration (PVC abstraction): still no empty Active master. -/
 theorem data_ghost_ok : activeMasterHoldsData scenario5_dataful = true := by decide
+
+/-- Total-partition restart (the CI DATA LOSS run): the reinstated master
+    HOLDS the data — the 100 keys survive. -/
+theorem data_total_restart_ok :
+    activeMasterHoldsData scenario6_dataful = true := by decide
 
 /-- THE TRUNCATE GATE, AS A SPEC: a data-bearing node assigned a Slave
     reconstruction against a DEAD source keeps its data under the gated

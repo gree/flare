@@ -66,6 +66,14 @@ structure FlareNode where
       DATA LOSS churn (operator log: re-adds flip to Proxy, next commit
       flips them back, M=2 S=2 P=0 forever). -/
   regEpoch : Nat := 0
+  /-- Partition this key most recently held the Master role for, or -1.
+      Set when a re-registration turns an ex-master into a syncing slave;
+      read by the reconcile loop to pick the freshest live candidate when a
+      partition has lost every master (total-partition restart). NEVER
+      serialized (same policy as regEpoch): after an operator restart the
+      roles themselves reload intact, so the marker only matters within the
+      lifetime that witnessed the demotion. -/
+  lastMasterOf : Int := -1
   deriving Repr, BEq
 
 /-! ## Cluster Replication (Blue/Green Migration) -/

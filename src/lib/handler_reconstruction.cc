@@ -239,18 +239,56 @@ int handler_reconstruction::_run_once() {
 #endif
 
 	// node activation (state -> ready)
+	//
+	// The activation op is as vital as the dump itself: if it is lost (a
+	// single-shot send raced an index leader handover — observed live)
+	// nothing else will ever flip this node out of prepare. The map keeps
+	// saying prepare, the LOCAL state agrees, so even the activation
+	// re-announce guard has nothing to re-announce; the node is parked
+	// forever with a completed dataset. Retry with backoff and treat a
+	// persistent failure as a failure of the whole attempt, so the outer
+	// retry loop starts over.
 	if (this->_role == cluster::role_master) {
 		int n = this->_cluster->notify_master_reconstruction();
 		log_notice("master reconstruction completed (%d threads left)", n);
 		if (n <= 0) {
-			this->_cluster->activate_node();
+			if (this->_activate_with_retry(false) < 0) {
+				return -1;
+			}
 		}
 	} else {
 		// just shift state to ready
-		this->_cluster->activate_node(true);		// true: skip ready state
+		if (this->_activate_with_retry(true) < 0) {		// true: skip ready state
+			return -1;
+		}
 	}
 
 	return 0;
+}
+
+/**
+ *	activate_node with bounded retry (see the activation comment in
+ *	_run_once). ~1 minute of attempts covers any realistic index leader
+ *	handover; shutdown requests abort immediately.
+ */
+int handler_reconstruction::_activate_with_retry(bool skip_ready_state) {
+	int rc = -1;
+	for (int i = 0; i < 30; i++) {
+		rc = this->_cluster->activate_node(skip_ready_state);
+		if (rc == 0) {
+			return 0;
+		}
+		log_warning("node activation failed (attempt %d) -> retrying in 2 seconds", i + 1);
+		for (int j = 0; j < 2; j++) {
+			if (this->_thread->is_shutdown_request()) {
+				log_notice("shutdown requested -> abandoning activation retry", 0);
+				return -1;
+			}
+			sleep(1);
+		}
+	}
+	log_err("node activation failed permanently after retries", 0);
+	return rc;
 }
 // }}}
 

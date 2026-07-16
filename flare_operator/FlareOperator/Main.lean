@@ -637,7 +637,11 @@ private def runReconcileDriver (stateRef : IO.Ref FlareClusterState)
 -- FSM-Driven Reconcile (Complete with safety checks and metrics)
 -- ===========================================================================
 
-/-- Prepare-stuck watchdog threshold in reconcile cycles (5s each): 720 ≈ 1h. -/
+/-- Prepare-stuck watchdog threshold in reconcile cycles (5s each): 720 ≈ 1h.
+    Deliberately high by default (a 100GB+ dataset legitimately rebuilds for
+    hours); override with --prepare-stuck-cycles on small clusters where
+    minutes of Prepare already means "parked forever" (observed live: a
+    lost activation op). -/
 private def prepareStuckThresholdCycles : Nat := 720
 
 /-- FSM-driven reconcile loop with partition reduction safety check and metrics.
@@ -720,11 +724,15 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
   let newCycles := prepareNodes.map (fun (key, _) =>
     (key, ((prevCycles.lookup key).getD 0) + 1))
   prepareCyclesRef.set newCycles
-  let stuck := newCycles.filter (fun kv => kv.2 > prepareStuckThresholdCycles)
+  -- Env override for small clusters, where minutes of Prepare already
+  -- means "parked forever" (inject via the chart's `env:` values).
+  let threshold := ((← IO.getEnv "FLARE_PREPARE_STUCK_CYCLES").bind (·.toNat?)).getD
+    prepareStuckThresholdCycles
+  let stuck := newCycles.filter (fun kv => kv.2 > threshold)
   metrics.prepareStuckCount.set stuck.length.toFloat
   for (key, cycles) in stuck do
     -- Log at the first crossing, then roughly every 10 minutes — not every tick.
-    if cycles == prepareStuckThresholdCycles + 1 || cycles % 120 == 0 then
+    if cycles == threshold + 1 || cycles % 120 == 0 then
       IO.eprintln s!"[flare-operator] WARNING: node {key} has been in Prepare for {cycles} cycles (~{cycles * 5 / 60} min). Reconstruction may have stalled; check that pod's flared logs. No automatic action is taken."
 
   -- 5. Handle rocksdb config propagation + cluster replication migration

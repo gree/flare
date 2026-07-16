@@ -65,6 +65,7 @@ public:
 
 protected:
 	int _run_once();
+	int _activate_with_retry(bool skip_ready_state);
 
 protected:
 	// Try to catch up from the master via incremental WAL sync instead of

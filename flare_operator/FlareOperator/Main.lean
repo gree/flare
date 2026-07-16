@@ -453,12 +453,19 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
     | .ok crd => pure (.CRDResponse (some crd))
     | .error _ => pure (.CRDResponse none)
   | .ListPods =>
-    let pods ← Bridge.listFlaredPods crName ns
-    -- Convert pod names to node keys (FQDNs with port) to match nodeMap keys
-    let podKeys := pods.map Bridge.PodInfo.toNodeKey
-    -- Topology for zone-aware placement; [] on unlabeled clusters.
-    let nodeZones ← Bridge.listNodeZones
-    pure (.PodListResponse podKeys (Bridge.podZones pods nodeZones))
+    match ← Bridge.listFlaredPodsE crName ns with
+    | .error e =>
+      -- Abort the cycle rather than fabricate \"zero pods\": an empty list
+      -- here reads as \"every node died\" to dead detection. NoResponse
+      -- drives the FSM into its Error terminal; the next tick retries.
+      IO.eprintln s!"[flare-operator] ERROR: pod listing failed ({e}) — aborting this reconcile cycle"
+      pure .NoResponse
+    | .ok pods =>
+      -- Convert pod names to node keys (FQDNs with port) to match nodeMap keys
+      let podKeys := pods.map Bridge.PodInfo.toNodeKey
+      -- Topology for zone-aware placement; [] on unlabeled clusters.
+      let nodeZones ← Bridge.listNodeZones
+      pure (.PodListResponse podKeys (Bridge.podZones pods nodeZones))
   | .PatchService =>
     -- Service patching happens in executeEffects (PatchService effect)
     -- This just signals completion
@@ -1028,7 +1035,15 @@ def main (args : List String) : IO Unit := do
           break
         | .error _ => pure ()
       if !fetched then
-        IO.eprintln s!"[flare-operator] CRITICAL: could not fetch CRD after retries, META will return wrong partition-size"
+        -- Refuse to run on the fabricated 1×1 default: serving
+        -- partition-size/topology computed from a WRONG partition count
+        -- misassigns roles and misroutes keys — strictly worse than dying.
+        -- The pod exits, restarts, and retries with backoff; the standby
+        -- (or the next restart) takes over once the API answers. Same
+        -- policy as the silently-empty zone list: a degraded default that
+        -- changes decisions must be loud, not quiet.
+        IO.eprintln s!"[flare-operator] FATAL: could not fetch CRD after retries — refusing to serve with a fabricated 1x1 spec"
+        throw (IO.userError "CRD unavailable at startup")
       pure result
   let crdRef ← IO.mkRef initialCrd
   -- Always start from None phase - operator manages migration state internally

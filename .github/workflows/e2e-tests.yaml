@@ -26,6 +26,34 @@ jobs:
         with:
           submodules: recursive
 
+      # The operator's RBAC lives twice (helm chart + deploy/rbac.yaml for
+      # this CI). The nodes rule was once missing from BOTH; the next
+      # failure mode is fixing only one copy. Fail fast on divergence.
+      - name: RBAC parity (helm chart vs deploy/rbac.yaml)
+        run: |
+          helm template flare helm/flare-operator > /tmp/chart-rendered.yaml
+          python3 - <<'EOF'
+          import yaml, sys
+          def rules(path):
+              for d in yaml.safe_load_all(open(path)):
+                  if d and d.get('kind') == 'ClusterRole' and 'rules' in d:
+                      return d['rules']
+              return None
+          norm = lambda rs: sorted(
+              (tuple(sorted(r.get('apiGroups', []))),
+               tuple(sorted(r.get('resources', []))),
+               tuple(sorted(r.get('verbs', []))))
+              for r in rs)
+          a = norm(rules('/tmp/chart-rendered.yaml'))
+          b = norm(rules('deploy/rbac.yaml'))
+          if a != b:
+              print('ClusterRole rules diverge between the helm chart and deploy/rbac.yaml')
+              print('chart:', *a, sep='\n  ')
+              print('repo :', *b, sep='\n  ')
+              sys.exit(1)
+          print('RBAC rules in sync:', len(a), 'rules')
+          EOF
+
       - name: Install elan (Lean version manager)
         run: |
           curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf | sh -s -- -y

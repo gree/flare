@@ -268,6 +268,19 @@ def parseNodeMapLine (line : String) : Option (String × FlareNode) :=
     let partVal ← stripPrefix partStr "partition=" >>= parseIntStr
     let (host, port) ← fromNodeKey key
     return (key, { serverName := host, serverPort := port, role := roleVal, state := stateVal, partition := partVal })
+  | [key, roleStr, stateStr, partStr, lastMasterStr] => do
+    -- Optional 5th token: the lastMasterOf marker. Emitted only while a
+    -- rejoined ex-master waits for the masterless-partition refill, so an
+    -- operator restart in exactly that window no longer forgets which
+    -- candidate holds the newest copy. (A DOWNGRADED operator drops such
+    -- lines — acceptable: the marker is transient and pre-marker builds
+    -- behaved that way everywhere.)
+    let roleVal ← stripPrefix roleStr "role=" >>= fun (s : String) => s.toNat? >>= FlareRole.fromNat
+    let stateVal ← stripPrefix stateStr "state=" >>= fun (s : String) => s.toNat? >>= FlareState.fromNat
+    let partVal ← stripPrefix partStr "partition=" >>= parseIntStr
+    let lastMasterVal ← stripPrefix lastMasterStr "lastMasterOf=" >>= parseIntStr
+    let (host, port) ← fromNodeKey key
+    return (key, { serverName := host, serverPort := port, role := roleVal, state := stateVal, partition := partVal, lastMasterOf := lastMasterVal })
   | _ => none
 
 /-- Serialize a node map to the ConfigMap line format that `fromNodeMapData`
@@ -277,7 +290,10 @@ def parseNodeMapLine (line : String) : Option (String × FlareNode) :=
     reloaded on operator restart and the in-memory topology is lost. -/
 def serializeNodeMap (state : FlareClusterState) : String :=
   let lines := state.nodeMap.map fun (key, node) =>
-    s!"{key} role={node.role.toNat} state={node.state.toNat} partition={node.partition}"
+    if node.lastMasterOf != -1 then
+      s!"{key} role={node.role.toNat} state={node.state.toNat} partition={node.partition} lastMasterOf={node.lastMasterOf}"
+    else
+      s!"{key} role={node.role.toNat} state={node.state.toNat} partition={node.partition}"
   -- The broadcast version MUST survive an operator restart. flared drops
   -- any `node sync` whose version is not newer than the last one it saw
   -- (cluster.cc reconstruct_node "ignored: ... newer than"); an operator
@@ -297,7 +313,8 @@ def fromNodeMapData (data : String) : FlareClusterState :=
 
 private def roundtripSample : FlareClusterState :=
   { FlareClusterState.default with
-    nodeMap := [("h:12121", { serverName := "h", serverPort := 12121, role := FlareRole.Master, state := FlareState.Active, partition := 0 })],
+    nodeMap := [("h:12121", { serverName := "h", serverPort := 12121, role := FlareRole.Master, state := FlareState.Active, partition := 0 }),
+                ("i:12121", { serverName := "i", serverPort := 12121, role := FlareRole.Slave, state := FlareState.Prepare, partition := 0, lastMasterOf := 0 })],
     nodeMapVersion := 10280 }
 
 /-- The broadcast version survives the persist/reload roundtrip. Regression
@@ -306,7 +323,8 @@ private def roundtripSample : FlareClusterState :=
     silences the operator for hours). -/
 theorem nodeMapVersion_roundtrip :
     (fromNodeMapData (serializeNodeMap roundtripSample)).nodeMapVersion = 10280
-      ∧ (fromNodeMapData (serializeNodeMap roundtripSample)).nodeMap.length = 1 := by
+      ∧ (fromNodeMapData (serializeNodeMap roundtripSample)).nodeMap.length = 2
+      ∧ ((fromNodeMapData (serializeNodeMap roundtripSample)).nodeMap.lookup "i:12121").map (·.lastMasterOf) = some 0 := by
   native_decide
 
 /-- Rebuild partitionMap deterministically from nodeMap.

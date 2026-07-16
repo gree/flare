@@ -64,15 +64,15 @@ def getFlareClusterCRD (crName ns : String) : IO (Except String FlareClusterView
 
     kubectl get pods -n <ns> -l app=flare,cluster=<crName>
     -o jsonpath='{range .items[*]}{.metadata.name} {.status.podIP} 12121 {.status.conditions[?(.type=="Ready")].status}{\n}{end}' -/
-def listFlaredPods (crName ns : String) : IO (List PodInfo) := do
+def listFlaredPodsE (crName ns : String) : IO (Except String (List PodInfo)) := do
   let result ← retryConservative s!"list pods for {crName}" do
     kubectl ["get", "pods", "-n", ns, "-l", s!"app=flare,cluster={crName}",
              "-o", "jsonpath={range .items[*]}{.metadata.name} {.status.podIP} 12121 {.status.conditions[?(.type==\"Ready\")].status} {.spec.hostname} {.spec.subdomain} {.spec.nodeName}{\"\\n\"}{end}"]
   match result with
-  | .error _ => return []
+  | .error e => return .error e
   | .ok output =>
     let lines := output.splitOn "\n" |>.filter (· != "")
-    return lines.filterMap fun line =>
+    return .ok <| lines.filterMap fun line =>
       let parts := line.splitOn " "
       match parts with
       | [podName, ip, portStr, readyStr, hostname, subdomain, nodeName] =>
@@ -122,6 +122,16 @@ def listFlaredPods (crName ns : String) : IO (List PodInfo) := do
         | none => none
       | _ => none
 
+
+/-- Failure-swallowing wrapper for callers where an empty answer is safe
+    (topology broadcast just sends to nobody this tick). The RECONCILE path
+    must NOT use this: an API failure fabricated as \"zero pods\" walks
+    straight into dead-node detection. It uses listFlaredPodsE and aborts
+    the cycle instead. -/
+def listFlaredPods (crName ns : String) : IO (List PodInfo) := do
+  match ← listFlaredPodsE crName ns with
+  | .error _ => return []
+  | .ok pods => return pods
 /-- Patch a K8s Service selector to route traffic to a specific pod.
     Uses retry logic for resilience.
 
@@ -309,7 +319,12 @@ def listNodeZones : IO (List (String × String)) := do
     kubectl ["get", "nodes",
              "-o", "jsonpath={range .items[*]}{.metadata.name} {.metadata.labels.topology\\.kubernetes\\.io/zone}{\"\\n\"}{end}"]
   match result with
-  | .error _ => return []
+  | .error e =>
+    -- Loud on purpose: a silently-empty zone list once hid a missing
+    -- nodes RBAC rule and quietly disabled zone-aware placement. Real
+    -- label-less clusters return .ok with empty output and stay silent.
+    IO.eprintln s!"[flare-operator] WARNING: could not list node zones ({e}) — zone-aware placement disabled this cycle"
+    return []
   | .ok output =>
     return output.splitOn "\n" |>.filterMap fun line =>
       match line.trim.splitOn " " with

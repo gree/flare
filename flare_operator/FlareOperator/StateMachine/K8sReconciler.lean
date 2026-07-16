@@ -102,6 +102,12 @@ structure FlareReconcileState where
   livePodKeys : List String := []
   /-- nodeKey → zone, from the last pod listing ([] when topology unknown). -/
   podZones : List (String × String) := []
+  /-- nodeKey → consecutive reconcile cycles spent in Prepare. Convergence
+      watchdog: every stuck-Prepare incident in production was a node that
+      SHOULD have been reconstructing but was not (missing boot shift,
+      no-source race, lost activation, demotion fall-through) — safety
+      proofs cannot see these, so the loop at least makes them loud. -/
+  prepareTicks : List (String × Nat) := []
   deadNodeKeys : List String := []
   failoverTriggered : Bool := false
   -- Grace period for startup: 24 cycles × 5s = 120s (see Main.lean)
@@ -833,8 +839,21 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
         stateWithMasters crd.spec.partitions s.podZones
       let warnEffects := singleZone.map (fun p =>
         FlareEffect.Log s!"[flare-operator] WARNING: every copy of partition {p} is in one zone — a single-zone outage takes the whole partition")
+      -- Convergence watchdog: reconstruction normally finishes in seconds
+      -- on dev-sized data; a node still in Prepare after `stuckThreshold`
+      -- consecutive cycles is, in every incident so far, a node nothing
+      -- will ever activate again. Warn persistently (one line per cycle).
+      let stuckThreshold : Nat := 60  -- ≈5 min at the 5s tick
+      let prepareTicks := stateWithMasters.nodeMap.filterMap (fun kv =>
+        if kv.2.state == FlareState.Prepare then
+          some (kv.1, ((s.prepareTicks.lookup kv.1).getD 0) + 1)
+        else none)
+      let stuckEffects := (prepareTicks.filter (fun kv => kv.2 == stuckThreshold ||
+          (kv.2 > stuckThreshold && kv.2 % 12 == 0))).map (fun kv =>
+        FlareEffect.Log s!"[flare-operator] WARNING: {kv.1} has been in Prepare for {kv.2} cycles — reconstruction is likely stuck (check flared logs / kick the pod)")
       ({ s with reconcileStep := .AfterUpdateConfigMap,
-                updatedClusterState := some stateWithMasters }, none, warnEffects)
+                prepareTicks := prepareTicks,
+                updatedClusterState := some stateWithMasters }, none, warnEffects ++ stuckEffects)
     | _, _ =>
       ({ s with reconcileStep := .Error "missing cluster state or CRD at AfterAssignRoles" }, none, [])
 

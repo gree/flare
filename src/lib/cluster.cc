@@ -1762,6 +1762,16 @@ int cluster::_shift_node_role(string node_key, role old_role, int old_partition,
 		this->from_node_key(master_node_key, node_server_name, node_server_port);
 		handler_reconstruction* h = new handler_reconstruction(t, this, this->_storage, node_server_name, node_server_port, new_partition, partition_size, new_role, this->get_reconstruction_interval(), this->get_reconstruction_bwlimit());
 		t->trigger(h);
+	} else {
+		// Transition-matrix guard: every remaining combination reaches here
+		// (e.g. master assigned from a non-proxy role while in prepare).
+		// Today's operator never produces one, but two production
+		// incidents were exactly "a transition no branch handled, parked
+		// in prepare forever" — if a new combination ever appears, say so
+		// instead of silently doing nothing.
+		if (my_state == state_prepare) {
+			log_warning("unhandled role shift while in prepare (old_role=%s -> new_role=%s, partition=%d) — no reconstruction was dispatched; this node will NOT activate on its own", cluster::role_cast(old_role).c_str(), cluster::role_cast(new_role).c_str(), new_partition);
+		}
 	}
 
 	return 0;

@@ -39,6 +39,9 @@ spec:
             - containerPort: 12120
               name: flare-index
               protocol: TCP
+            - containerPort: 8080
+              name: health
+              protocol: TCP
           resources:
             requests:
               cpu: 100m
@@ -46,14 +49,25 @@ spec:
             limits:
               cpu: 500m
               memory: 256Mi
+          # Must match the helm chart: probe the health server (8080), not
+          # the index port (12120). Since the leader-label change only the
+          # leader binds 12120, so a tcpSocket:12120 readiness left every
+          # standby 0/1 forever and this replicas:2 rollout never completed
+          # — this CI manifest had drifted from the chart (same class as
+          # the RBAC drift). Under the leader-label design /readyz is 200 on
+          # BOTH the leader and a healthy standby (readiness means "able to
+          # take the lease", routing is by pod label), so the deployment
+          # reaches 2/2; /healthz is 200 on any live pod.
           livenessProbe:
-            exec:
-              command: ["true"]
+            httpGet:
+              path: /healthz
+              port: 8080
             initialDelaySeconds: 5
             periodSeconds: 10
           readinessProbe:
-            tcpSocket:
-              port: flare-index
+            httpGet:
+              path: /readyz
+              port: 8080
             initialDelaySeconds: 3
             periodSeconds: 5
 ---

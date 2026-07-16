@@ -851,9 +851,21 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
       let stuckEffects := (prepareTicks.filter (fun kv => kv.2 == stuckThreshold ||
           (kv.2 > stuckThreshold && kv.2 % 12 == 0))).map (fun kv =>
         FlareEffect.Log s!"[flare-operator] WARNING: {kv.1} has been in Prepare for {kv.2} cycles — reconstruction is likely stuck (check flared logs / kick the pod)")
+      -- Phase 2: repair a single-zone partition by swapping one of its
+      -- slaves with a cross-zone donor (gated inside: steady state only,
+      -- ≥2 slaves, donor's partition stays diverse). One swap per tick;
+      -- the resulting Prepare pair blocks further repairs until it syncs.
+      let (stateFinal, repairEffects) :=
+        match FlareOperator.Reconciler.findZoneRepairSwap stateWithMasters
+            crd.spec.partitions s.podZones with
+        | some (sKey, dKey) =>
+          (FlareOperator.Reconciler.applyZoneRepairSwap stateWithMasters sKey dKey,
+           [FlareEffect.Log s!"[flare-operator] zone repair: swapping slaves {sKey} ↔ {dKey} (cross-zone resync via reconstruction)"])
+        | none => (stateWithMasters, [])
       ({ s with reconcileStep := .AfterUpdateConfigMap,
                 prepareTicks := prepareTicks,
-                updatedClusterState := some stateWithMasters }, none, warnEffects ++ stuckEffects)
+                updatedClusterState := some stateFinal }, none,
+       warnEffects ++ stuckEffects ++ repairEffects)
     | _, _ =>
       ({ s with reconcileStep := .Error "missing cluster state or CRD at AfterAssignRoles" }, none, [])
 

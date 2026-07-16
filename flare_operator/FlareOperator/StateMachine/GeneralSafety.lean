@@ -396,6 +396,39 @@ theorem promoteMasterlessPartitions_cle (s : FlareClusterState)
     rw [List.foldl_cons]
     exact CLE.trans (promoteMasterlessPartition_cle s hd live) (ih _)
 
+/-! ## applyZoneRepairSwap satisfies the bound -/
+
+theorem applyZoneRepairSwap_cle (s : FlareClusterState) (sKey dKey : String) :
+    CLE s.nodeMap (applyZoneRepairSwap s sKey dKey).nodeMap := by
+  unfold applyZoneRepairSwap
+  split
+  · next sN dN hs hd =>
+    split
+    · next hroles =>
+      -- both writes are Slave records (roles copied from entries the guard
+      -- checked): two non-master inserts can only shrink every count
+      have hsr : (sN.role == FlareRole.Slave) = true := by
+        revert hroles; cases sN.role == FlareRole.Slave <;> simp
+      have hdr : (dN.role == FlareRole.Slave) = true := by
+        revert hroles
+        cases hb : sN.role == FlareRole.Slave <;> cases dN.role == FlareRole.Slave <;> simp
+      have hsr' : sN.role = FlareRole.Slave := eq_of_beq hsr
+      have hdr' : dN.role = FlareRole.Slave := eq_of_beq hdr
+      apply CLE.of_le
+      intro p
+      rw [rebuild_nodeMap]
+      have h1 : countMastersFor p ((s.addNode sKey { sN with partition := dN.partition, state := FlareState.Prepare, balance := 0 }).addNode dKey { dN with partition := sN.partition, state := FlareState.Prepare, balance := 0 }).nodeMap
+          ≤ countMastersFor p (s.addNode sKey { sN with partition := dN.partition, state := FlareState.Prepare, balance := 0 }).nodeMap := by
+        apply count_addNode_nonmaster
+        simp [isM, hdr']
+      have h2 : countMastersFor p (s.addNode sKey { sN with partition := dN.partition, state := FlareState.Prepare, balance := 0 }).nodeMap
+          ≤ countMastersFor p s.nodeMap := by
+        apply count_addNode_nonmaster
+        simp [isM, hsr']
+      exact Nat.le_trans h1 h2
+    · exact CLE.rfl _
+  · exact CLE.rfl _
+
 /-! ## registerFreshNode satisfies the bound -/
 
 theorem registerFreshNode_cle (s : FlareClusterState) (crd : FlareClusterView)
@@ -548,8 +581,11 @@ theorem stepGlobal_cle (g : GlobalState) (step : GlobalStep) :
     all_goals exact CLE.rfl _
   | OperatorReconcile =>
     dsimp only
-    exact CLE.trans (assignProxiesPure_cle _ _ _)
-      (promoteMasterlessPartitions_cle _ _ _)
+    split
+    · exact CLE.trans (CLE.trans (assignProxiesPure_cle _ _ _)
+        (promoteMasterlessPartitions_cle _ _ _)) (applyZoneRepairSwap_cle _ _ _)
+    · exact CLE.trans (assignProxiesPure_cle _ _ _)
+        (promoteMasterlessPartitions_cle _ _ _)
   | NodeReconstructionComplete nodeKey =>
     dsimp only
     repeat' split

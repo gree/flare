@@ -10,6 +10,10 @@ import FlareOperator.StateMachine.Simulation
 import FlareOperator.StateMachine.Safety
 import FlareOperator.StateMachine.K8sReconciler
 
+-- The reconcile pipeline gained the zone-repair pass; kernel-level
+-- `decide` over the scenario traces needs more reduction depth since.
+set_option maxRecDepth 8192
+
 namespace FlareOperator.StateMachine.VerifiedSafety
 
 open FlareOperator.K8s
@@ -230,6 +234,79 @@ theorem scenario6_no_proxy_demotion :
     (scenario6_totalPartitionRestart.operatorState.nodeMap.filter
       (fun kv => kv.2.role == FlareRole.Proxy)).length = 0 := by
   decide
+
+/-! ## VERIFIED THEOREM 4f: zone-placement auto-repair (phase 2) -/
+
+/-- A 2×3 cluster where every copy of P0 sits in zone az1 while P1 spans
+    az1/az2 — the exact violation observed live before zone-aware
+    placement existed. -/
+private def zr_node (r : FlareOperator.K8s.FlareRole)
+    (st : FlareOperator.K8s.FlareState) (p : Int) : FlareOperator.K8s.FlareNode :=
+  { serverName := "h", serverPort := 1, role := r, state := st, partition := p }
+
+private def zrState : FlareOperator.K8s.FlareClusterState :=
+  ({ FlareOperator.K8s.FlareClusterState.default with nodeMap := [
+    ("m0:1", zr_node .Master .Active 0),
+    ("s01:1", zr_node .Slave .Active 0),
+    ("s02:1", zr_node .Slave .Active 0),
+    ("m1:1", zr_node .Master .Active 1),
+    ("s11:1", zr_node .Slave .Active 1),
+    ("s12:1", zr_node .Slave .Active 1)] }).rebuildPartitionMap
+
+private def zrZones : List (String × String) :=
+  [("m0:1", "az1"), ("s01:1", "az1"), ("s02:1", "az1"),
+   ("m1:1", "az2"), ("s11:1", "az2"), ("s12:1", "az1")]
+
+private def zrAfter : FlareOperator.K8s.FlareClusterState :=
+  match FlareOperator.Reconciler.findZoneRepairSwap zrState 2 zrZones with
+  | some (sk, dk) => FlareOperator.Reconciler.applyZoneRepairSwap zrState sk dk
+  | none => zrState
+
+/-- The violation is visible before the repair… -/
+theorem zone_repair_sees_violation :
+    FlareOperator.Reconciler.partitionsInSingleZone zrState 2 zrZones = [0] := by
+  native_decide
+
+/-- …one swap resolves it: afterwards NO partition is single-zone. The
+    swap chose the az2 donor (s11) — the donor-safety gate rejected
+    nothing here because P1 keeps m1(az2)+s12(az1)+incoming(az1). -/
+theorem zone_repair_resolves :
+    FlareOperator.Reconciler.partitionsInSingleZone zrAfter 2 zrZones = [] := by
+  native_decide
+
+/-- Masters never move: both masters keep role and partition. -/
+theorem zone_repair_masters_untouched :
+    ((zrAfter.nodeMap.lookup "m0:1").map (fun n => n.role == FlareOperator.K8s.FlareRole.Master && n.partition == 0)) = some true
+    ∧ ((zrAfter.nodeMap.lookup "m1:1").map (fun n => n.role == FlareOperator.K8s.FlareRole.Master && n.partition == 1)) = some true := by
+  native_decide
+
+/-- Both swapped slaves resync: Slave/Prepare on their NEW partitions. -/
+theorem zone_repair_swapped_pair_resyncs :
+    ((zrAfter.nodeMap.lookup "s01:1").map (fun n => n.role == FlareOperator.K8s.FlareRole.Slave && n.state == FlareOperator.K8s.FlareState.Prepare && n.partition == 1)) = some true
+    ∧ ((zrAfter.nodeMap.lookup "s11:1").map (fun n => n.role == FlareOperator.K8s.FlareRole.Slave && n.state == FlareOperator.K8s.FlareState.Prepare && n.partition == 0)) = some true := by
+  native_decide
+
+/-- Steady-state gate: with any node still in Prepare the repair refuses
+    to act (it cannot interfere with rolls, failover, or itself). -/
+theorem zone_repair_waits_for_steady_state :
+    FlareOperator.Reconciler.findZoneRepairSwap
+      ({ zrState with nodeMap := zrState.nodeMap.map (fun kv =>
+        if kv.1 == "s12:1" then (kv.1, { kv.2 with state := FlareOperator.K8s.FlareState.Prepare }) else kv) })
+      2 zrZones = none := by
+  native_decide
+
+/-- Loss-free gate: at replicas = 2 (single slave per partition) the same
+    violation is NOT auto-repaired — the swap would drop the partition to
+    one Active copy mid-resync. The WARNING remains the signal. -/
+theorem zone_repair_requires_two_slaves :
+    FlareOperator.Reconciler.findZoneRepairSwap
+      ({ FlareOperator.K8s.FlareClusterState.default with nodeMap := [
+        ("m0:1", zr_node .Master .Active 0),
+        ("s01:1", zr_node .Slave .Active 0),
+        ("m1:1", zr_node .Master .Active 1),
+        ("s11:1", zr_node .Slave .Active 1)] }).rebuildPartitionMap
+      2 [("m0:1", "az1"), ("s01:1", "az1"), ("m1:1", "az2"), ("s11:1", "az2")] = none := by
+  native_decide
 
 /-! ## VERIFIED THEOREM 4d: data preservation — the invariant we never stated
 

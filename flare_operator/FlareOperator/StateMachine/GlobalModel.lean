@@ -215,7 +215,14 @@ def stepGlobal (g : GlobalState) (step : GlobalStep) : GlobalState :=
     -- Same order as the production FSM's AfterAssignRoles: proxy
     -- assignment, then the masterless-partition refill (total restarts
     -- re-register replicas as Slave/Prepare, which autoAssign never touches).
-    let newOpState := promoteMasterlessPartitions assigned g.crdSpec (g.nodeStates.map Prod.fst)
+    let promoted := promoteMasterlessPartitions assigned g.crdSpec (g.nodeStates.map Prod.fst)
+    -- Zone repair runs in the same pipeline position as production. The
+    -- model carries no topology (zones = []), which makes it a proven
+    -- no-op here; the zone-repair scenario theorems exercise the pure
+    -- functions directly with concrete zone maps.
+    let newOpState := match FlareOperator.Reconciler.findZoneRepairSwap promoted g.crdSpec.spec.partitions [] with
+      | some (sKey, dKey) => FlareOperator.Reconciler.applyZoneRepairSwap promoted sKey dKey
+      | none => promoted
 
     let newQueue := if newOpState.nodeMapVersion > oldVersion then
       let nodes := newOpState.getNodes

@@ -333,6 +333,68 @@ def partitionsInSingleZone (state : FlareClusterState) (numPartitions : Nat)
        | some z :: rest => rest.all (· == some z)
        | _ => false)
 
+/-! ## Zone-placement auto-repair (phase 2)
+
+Detection (partitionsInSingleZone) tells the operator a partition would
+not survive a zone outage; this section lets the reconcile loop FIX it.
+The repair primitive is a slave SWAP: exchange the partitions of one
+slave inside the violating partition and one cross-zone slave elsewhere,
+dropping both to Slave/Prepare — flared reconstructs each against its
+new partition's master (any-old-role slave shifts dispatch since the
+transition-matrix generalization) and activates. Masters never move.
+
+Gates, in order:
+- steady state only: any Prepare node anywhere postpones repair, so it
+  cannot interfere with rolls, failover, or a previous repair (which
+  also throttles repairs to one in flight);
+- loss-free only: the violating partition must keep master + an Active
+  slave through the swap, i.e. have ≥ 2 slaves (replicas ≥ 3);
+- no new violation: the donor's partition must stay zone-diverse after
+  losing the donor and gaining the swapped-in (same-zone-as-p) slave. -/
+
+/-- Pick one repair swap: `(slave of a violating partition, cross-zone
+    donor slave)`. `none` when nothing needs repair or no safe swap
+    exists (the standing WARNING then remains the operator's signal). -/
+def findZoneRepairSwap (state : FlareClusterState) (numPartitions : Nat)
+    (zones : List (String × String)) : Option (String × String) :=
+  if state.nodeMap.any (fun kv => kv.2.state == FlareState.Prepare) then none
+  else
+    (partitionsInSingleZone state numPartitions zones).findSome? fun p => do
+      let copies := state.nodeMap.filter (fun kv =>
+        kv.2.partition == Int.ofNat p && kv.2.role != FlareRole.Proxy)
+      let slaves := copies.filter (fun kv => kv.2.role == FlareRole.Slave)
+      if slaves.length < 2 then none
+      else do
+        let first ← copies.head?
+        let z ← zoneOf zones first.1
+        let sKv ← slaves.head?
+        let dKv ← state.nodeMap.find? fun kv =>
+          kv.2.role == FlareRole.Slave && kv.2.state == FlareState.Active
+            && kv.2.partition != Int.ofNat p && decide (kv.2.partition ≥ 0)
+            && ((zoneOf zones kv.1).map (fun dz => dz != z)).getD false
+            -- donor's partition keeps zone diversity: after the swap its
+            -- copy set is (copies \ donor) ∪ {swapped-in node in zone z};
+            -- it stays diverse unless everything remaining is ALSO in z.
+            && !((state.nodeMap.filter (fun other =>
+                  other.2.partition == kv.2.partition
+                    && other.2.role != FlareRole.Proxy
+                    && other.1 != kv.1)).all
+                (fun other => zoneOf zones other.1 == some z))
+        return (sKv.1, dKv.1)
+
+/-- Execute the swap: exchange the two slaves' partitions and drop both
+    to Prepare (balance 0) so they reconstruct from their new masters.
+    Defensive no-op unless BOTH keys are currently Slaves — keeps the
+    master-count argument local to this definition. -/
+def applyZoneRepairSwap (state : FlareClusterState) (sKey dKey : String)
+    : FlareClusterState :=
+  match state.lookupNode sKey, state.lookupNode dKey with
+  | some sN, some dN =>
+    if sN.role == FlareRole.Slave && dN.role == FlareRole.Slave then
+      ((state.addNode sKey { sN with partition := dN.partition, state := FlareState.Prepare, balance := 0 }).addNode dKey { dN with partition := sN.partition, state := FlareState.Prepare, balance := 0 }).rebuildPartitionMap
+    else state
+  | _, _ => state
+
 /-! ## Core reconcile step -/
 
 /-- First-time registration of a node key (extracted from the NodeAdd arm so

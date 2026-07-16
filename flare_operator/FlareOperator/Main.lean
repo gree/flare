@@ -1020,9 +1020,15 @@ def main (args : List String) : IO Unit := do
     | .error e =>
       IO.eprintln s!"[flare-operator] warning: could not fetch CRD on startup: {e}, retrying..."
       -- Retry up to 10 times with 2s delay — CRD must be available before serving META
+      -- Sentinel spec while the CR is missing: partitions = 0 makes every
+      -- assignment function a natural no-op (nothing to need a master or
+      -- slave), so early registrations park as proxies instead of being
+      -- MISASSIGNED against a fabricated 1x1 layout. The reconcile loop
+      -- refetches every tick and swaps the real spec in as soon as the CR
+      -- exists; the FSM then assigns the parked proxies correctly.
       let mut result : FlareClusterView := {
         metadata := { name := some crName, «namespace» := some ns }
-        spec := { partitions := 1, replicas := 1 }
+        spec := { partitions := 0, replicas := 0 }
       }
       let mut fetched := false
       for _ in List.range 10 do
@@ -1035,15 +1041,11 @@ def main (args : List String) : IO Unit := do
           break
         | .error _ => pure ()
       if !fetched then
-        -- Refuse to run on the fabricated 1×1 default: serving
-        -- partition-size/topology computed from a WRONG partition count
-        -- misassigns roles and misroutes keys — strictly worse than dying.
-        -- The pod exits, restarts, and retries with backoff; the standby
-        -- (or the next restart) takes over once the API answers. Same
-        -- policy as the silently-empty zone list: a degraded default that
-        -- changes decisions must be loud, not quiet.
-        IO.eprintln s!"[flare-operator] FATAL: could not fetch CRD after retries — refusing to serve with a fabricated 1x1 spec"
-        throw (IO.userError "CRD unavailable at startup")
+        -- Not fatal: an operator legitimately starts before its CR exists
+        -- (fresh install order). With the 0-partition sentinel nothing can
+        -- be misassigned in the meantime — but say so every startup, and
+        -- the reconcile loop will keep retrying each tick.
+        IO.eprintln s!"[flare-operator] WARNING: no FlareCluster spec yet — parking registrations as proxies until it appears (refetching every tick)"
       pure result
   let crdRef ← IO.mkRef initialCrd
   -- Always start from None phase - operator manages migration state internally

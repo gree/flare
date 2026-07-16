@@ -14,6 +14,10 @@ rules:
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "watch", "delete", "patch"]
+  # Nodes (read zone labels for topology-aware role placement)
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
   # Pods/exec (exec into pods for replication control)
   - apiGroups: [""]
     resources: ["pods/exec"]

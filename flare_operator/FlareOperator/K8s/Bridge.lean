@@ -359,8 +359,8 @@ structure LeaseInfo where
 def getLease (leaseName ns : String) : IO (Except String LeaseInfo) := do
   try
     let result ← IO.Process.output {
-      cmd := "sh"
-      args := #["-c",
+      cmd := "timeout"
+      args := #["-k", "5", "15", "sh", "-c",
         s!"HOLDER=$(kubectl get lease {leaseName} -n {ns} -o jsonpath='\{.spec.holderIdentity}') && DUR=$(kubectl get lease {leaseName} -n {ns} -o jsonpath='\{.spec.leaseDurationSeconds}') && RENEW=$(kubectl get lease {leaseName} -n {ns} -o jsonpath='\{.spec.renewTime}') && RENEW_EPOCH=$(date -d \"$RENEW\" +%s 2>/dev/null || echo 0) && NOW_EPOCH=$(date -u +%s) && if [ $((NOW_EPOCH - RENEW_EPOCH)) -ge \"$DUR\" ]; then EXP=true; else EXP=false; fi && echo \"$HOLDER|$DUR|$EXP\""]
     }
     if result.exitCode != 0 then
@@ -382,8 +382,8 @@ def createLease (leaseName ns identity : String) (durationSec : Nat) : IO (Excep
     let nowResult ← IO.Process.output { cmd := "date", args := #["-u", "+%Y-%m-%dT%H:%M:%S.000000Z"] }
     let now := nowResult.stdout.trim
     let result ← IO.Process.output {
-      cmd := "sh"
-      args := #["-c",
+      cmd := "timeout"
+      args := #["-k", "5", "15", "sh", "-c",
         s!"echo 'apiVersion: coordination.k8s.io/v1\nkind: Lease\nmetadata:\n  name: {leaseName}\n  namespace: {ns}\nspec:\n  holderIdentity: {identity}\n  leaseDurationSeconds: {durationSec}\n  acquireTime: \"{now}\"\n  renewTime: \"{now}\"' | kubectl create -f -"]
     }
     if result.exitCode == 0 then

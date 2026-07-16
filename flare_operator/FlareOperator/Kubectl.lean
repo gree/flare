@@ -13,9 +13,19 @@ open FlareOperator.K8s
 /-- Run kubectl with given arguments and return stdout or error. -/
 def kubectl (args : List String) : IO (Except String String) := do
   try
-    let result ← IO.Process.output { cmd := "kubectl", args := args.toArray }
+    -- Hard wall-clock cap on every kubectl subprocess. Without one, a
+    -- single hung API call blocked a reconcile iteration for 262 SECONDS
+    -- in production — the lease silently expired mid-iteration, a second
+    -- operator took over, and both served TCP for the whole hang (the
+    -- lease fence only runs at the top of each iteration). 10s request
+    -- timeout for the API layer, `timeout 15` (SIGKILL at +5s) as the
+    -- outer wall so a wedged binary cannot bypass it. The lease is 15s:
+    -- one slow call can no longer eat multiple renewal periods.
+    let result ← IO.Process.output { cmd := "timeout", args := #["-k", "5", "15", "kubectl", "--request-timeout=10s"] ++ args.toArray }
     if result.exitCode == 0 then
       return .ok result.stdout
+    else if result.exitCode == 124 then
+      return .error s!"kubectl timed out after 15s (args: {args.take 3})"
     else
       return .error s!"kubectl failed (exit {result.exitCode}): {result.stderr}"
   catch e =>

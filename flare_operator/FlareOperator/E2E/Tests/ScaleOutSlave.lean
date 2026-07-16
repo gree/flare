@@ -97,16 +97,25 @@ def suite : TestSuite := {
         if ok then return .pass
         else return .fail "not all 6 nodes registered" },
 
-    -- Test 7: new slaves assigned to partitions
+    -- Test 7: new slaves assigned to partitions. Registration parks a new
+    -- pod as Proxy; the assignment happens on the NEXT reconcile tick, and
+    -- OrderedReady pod creation staggers the two registrations across
+    -- ticks — a single instant read raced that window (observed flake).
     { name := "new slaves assigned (Prepare state)"
       run := do
-        let sync ← operatorTcpCmd cfg.debugPod cfg.«namespace» cfg.operatorName cfg.operatorPort "node sync"
-        let entries := parseNodeSync sync
-        let p0Slaves := (entries.filter (fun e => e.role == 1 && e.partition == 0)).length
-        let p1Slaves := (entries.filter (fun e => e.role == 1 && e.partition == 1)).length
-        IO.eprintln s!"# Slaves: P0={p0Slaves}, P1={p1Slaves}"
-        if p0Slaves >= 2 && p1Slaves >= 2 then return .pass
-        else return .fail s!"P0 has {p0Slaves} slaves, P1 has {p1Slaves} slaves (expected 2 each)" },
+        let ok ← waitForCondition "both partitions have 2 slaves" 60 do
+          let sync ← operatorTcpCmd cfg.debugPod cfg.«namespace» cfg.operatorName cfg.operatorPort "node sync"
+          let entries := parseNodeSync sync
+          let p0Slaves := (entries.filter (fun e => e.role == 1 && e.partition == 0)).length
+          let p1Slaves := (entries.filter (fun e => e.role == 1 && e.partition == 1)).length
+          return p0Slaves >= 2 && p1Slaves >= 2
+        if ok then return .pass
+        else
+          let sync ← operatorTcpCmd cfg.debugPod cfg.«namespace» cfg.operatorName cfg.operatorPort "node sync"
+          let entries := parseNodeSync sync
+          let p0Slaves := (entries.filter (fun e => e.role == 1 && e.partition == 0)).length
+          let p1Slaves := (entries.filter (fun e => e.role == 1 && e.partition == 1)).length
+          return .fail s!"P0 has {p0Slaves} slaves, P1 has {p1Slaves} slaves after 60s (expected 2 each)" },
 
     -- Test 8: masters unchanged and items preserved
     { name := "masters unchanged, curr_items preserved"

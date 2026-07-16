@@ -20,15 +20,27 @@ def kubectl (args : List String) : IO (Except String String) := do
     -- lease fence only runs at the top of each iteration). Only an OUTER
     -- `timeout` wall (SIGTERM at 30s, SIGKILL at +5s): a per-request
     -- --request-timeout was tried and killed the slow API-group discovery
-    -- during CRD cold-start ("couldn't get current server API group
-    -- list"), so every early call failed. The wall alone bounds true
-    -- hangs without touching normal request behavior; 30s > the 15s lease,
-    -- so a hung renewal still costs one extra lease period at most, which
-    -- the activation retry rides out.
-    let result ← IO.Process.output { cmd := "timeout", args := #["-k", "5", "30", "kubectl"] ++ args.toArray }
+    -- during CRD cold-start, so every early call failed. The wall alone
+    -- bounds true hangs without touching normal request behavior; 30s >
+    -- the 15s lease, so a hung renewal costs one extra lease period at
+    -- most, which the activation retry rides out.
+    --
+    -- EXEMPTION: `rollout status` / `wait` block intentionally for up to
+    -- their own --timeout (300s in the e2e framework, which shares this
+    -- wrapper). Wrapping THOSE in a 30s wall turns a slow-but-healthy
+    -- rollout into a false failure. When the caller already bounds the
+    -- call itself (rollout/wait, or an explicit --timeout=), skip the
+    -- wall and let their timeout govern. The operator reconcile loop never
+    -- issues these, so it keeps the 30s hang guard.
+    let selfBounded := args.any (fun a =>
+      a == "rollout" || a == "wait" || a.startsWith "--timeout")
+    let proc := if selfBounded
+      then { cmd := "kubectl", args := args.toArray : IO.Process.SpawnArgs }
+      else { cmd := "timeout", args := #["-k", "5", "30", "kubectl"] ++ args.toArray }
+    let result ← IO.Process.output proc
     if result.exitCode == 0 then
       return .ok result.stdout
-    else if result.exitCode == 124 then
+    else if result.exitCode == 124 && !selfBounded then
       return .error s!"kubectl timed out after 30s (args: {args.take 3})"
     else
       return .error s!"kubectl failed (exit {result.exitCode}): {result.stderr}"

@@ -245,9 +245,7 @@ helm install flare-operator ./helm/flare-operator \
 
 **Deploy with Raw Manifests**:
 ```bash
-kubectl apply -f deploy/crd.yaml
-kubectl apply -f deploy/rbac.yaml
-kubectl apply -f deploy/operator.yaml
+helm install flare ./helm/flare-operator -n flare-system --create-namespace
 ```
 
 ---

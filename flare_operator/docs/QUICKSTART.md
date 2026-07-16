@@ -11,7 +11,7 @@ Get a Flare distributed KVS cluster running on Kubernetes in 5 minutes.
 ## Step 1: Deploy the Operator
 
 ```bash
-kubectl apply -f deploy/operator.yaml
+helm install flare ./helm/flare-operator -n flare-system --create-namespace
 ```
 
 This creates:
@@ -262,7 +262,7 @@ This will:
 Delete the operator:
 
 ```bash
-kubectl delete -f deploy/operator.yaml
+helm uninstall flare -n flare-system
 ```
 
 ## Next Steps

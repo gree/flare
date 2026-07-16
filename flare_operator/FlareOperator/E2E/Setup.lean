@@ -84,7 +84,7 @@ metadata:
   namespace: {ns}"
 
 /-- Generate ClusterRoleBinding for the operator ServiceAccount in test namespace.
-    This binds the global flare-operator ClusterRole (created by deploy/rbac.yaml in CI)
+    This binds the global flare-operator ClusterRole (installed from the helm chart)
     to the namespace-specific ServiceAccount. -/
 def clusterRoleBindingYaml (cfg : ClusterConfig) : String :=
   let ns := cfg.«namespace»
@@ -368,42 +368,28 @@ def deployCluster (cfg : ClusterConfig) : IO Unit := do
     | .ok name => return (name.trim == "default")
     | .error _ => return false
 
-  -- Apply CRD + ClusterRole (cluster-scoped, only needs to be done once).
-  -- The e2e binary is invoked from either the repo root or flare_operator/,
-  -- so try both paths.  We also wait for the CRD to be established before
-  -- proceeding, otherwise the FlareCluster CR apply on a fresh cluster races
-  -- against the apiserver's CRD discovery cache and fails with
-  -- "no matches for kind FlareCluster".
-  let applyManifest (relPath : String) : IO Bool := do
-    match ← kubectl ["apply", "-f", relPath] with
-    | .ok _ => pure true
-    | .error _ =>
-      match ← kubectl ["apply", "-f", s!"../{relPath}"] with
-      | .ok _ => pure true
-      | .error e =>
-        IO.eprintln s!"# kubectl apply {relPath} failed: {e}"
-        pure false
-  if !(← applyManifest "deploy/crd.yaml") then
-    throw (IO.userError "Could not apply deploy/crd.yaml from either . or ..")
-  -- Apply RBAC so the ClusterRole `flare-operator` exists for the test's
-  -- ClusterRoleBinding to reference.  Without this the operator can't create
-  -- leases and hangs in `phase 1: attempting to acquire lease`.
-  --
-  -- deploy/rbac.yaml also contains a SA and CRB in the `flare-system`
-  -- namespace; those may fail if flare-system doesn't exist, but that's OK —
-  -- kubectl apply processes each document independently, and the
-  -- ClusterRole (cluster-scoped, the part we actually need) still gets
-  -- created.  Verify by checking the ClusterRole directly after.
-  let _ ← applyManifest "deploy/rbac.yaml"
-  match ← kubectl ["get", "clusterrole", "flare-operator", "-o", "jsonpath={.metadata.name}"] with
-  | .ok name =>
-    if name.trim != "flare-operator" then
-      throw (IO.userError s!"ClusterRole flare-operator missing after rbac apply (got '{name}')")
-  | .error e =>
-    throw (IO.userError s!"ClusterRole flare-operator missing after rbac apply: {e}")
-  -- Wait for CRD to be established (kubectl wait --for=condition=Established)
-  let _ ← kubectl ["wait", "--for=condition=Established",
-                    "crd/flareclusters.flare.gree.net", "--timeout=60s"]
+  -- The CRD and the cluster-scoped ClusterRole `flare-operator` are
+  -- installed ONCE from the helm chart (the CI "Deploy operator (helm
+  -- chart)" step; for a local run, `helm template helm/flare-operator
+  -- --set fullnameOverride=flare-operator --include-crds | kubectl apply`).
+  -- The chart is the single source of truth — no deploy/*.yaml copy to
+  -- drift (the readiness-probe and nodes-RBAC bugs were both such drift).
+  -- Verify both exist (retry: on a fresh kind cluster the helm apply and
+  -- this binary can race the apiserver's CRD discovery cache).
+  let crdReady ← waitForCondition "FlareCluster CRD established" 60 do
+    match ← kubectl ["get", "crd", "flareclusters.flare.gree.net",
+        "-o", "jsonpath={.status.conditions[?(@.type==\"Established\")].status}"] with
+    | .ok s => return s.trim == "True"
+    | .error _ => return false
+  if !crdReady then
+    throw (IO.userError "FlareCluster CRD not established — is the chart installed? \
+      (helm template helm/flare-operator --set fullnameOverride=flare-operator --include-crds | kubectl apply -f -)")
+  let roleReady ← waitForCondition "ClusterRole flare-operator present" 60 do
+    match ← kubectl ["get", "clusterrole", "flare-operator", "-o", "jsonpath={.metadata.name}"] with
+    | .ok name => return name.trim == "flare-operator"
+    | .error _ => return false
+  if !roleReady then
+    throw (IO.userError "ClusterRole flare-operator missing — install the helm chart first (see above)")
 
   -- Create ServiceAccount and ClusterRoleBinding in test namespace
   -- (not using deploy/rbac.yaml which is hardcoded for flare-system namespace)

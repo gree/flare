@@ -193,7 +193,7 @@ See [FORMAL_VERIFICATION.md](./FORMAL_VERIFICATION.md) for details.
 ### Deploy Operator
 
 ```bash
-kubectl apply -f deploy/operator.yaml
+helm install flare ./helm/flare-operator -n flare-system --create-namespace
 ```
 
 ### Deploy Flare Cluster

@@ -26,34 +26,6 @@ jobs:
         with:
           submodules: recursive
 
-      # The operator's RBAC lives twice (helm chart + deploy/rbac.yaml for
-      # this CI). The nodes rule was once missing from BOTH; the next
-      # failure mode is fixing only one copy. Fail fast on divergence.
-      - name: RBAC parity (helm chart vs deploy/rbac.yaml)
-        run: |
-          helm template flare helm/flare-operator > /tmp/chart-rendered.yaml
-          python3 - <<'EOF'
-          import yaml, sys
-          def rules(path):
-              for d in yaml.safe_load_all(open(path)):
-                  if d and d.get('kind') == 'ClusterRole' and 'rules' in d:
-                      return d['rules']
-              return None
-          norm = lambda rs: sorted(
-              (tuple(sorted(r.get('apiGroups', []))),
-               tuple(sorted(r.get('resources', []))),
-               tuple(sorted(r.get('verbs', []))))
-              for r in rs)
-          a = norm(rules('/tmp/chart-rendered.yaml'))
-          b = norm(rules('deploy/rbac.yaml'))
-          if a != b:
-              print('ClusterRole rules diverge between the helm chart and deploy/rbac.yaml')
-              print('chart:', *a, sep='\n  ')
-              print('repo :', *b, sep='\n  ')
-              sys.exit(1)
-          print('RBAC rules in sync:', len(a), 'rules')
-          EOF
-
       - name: Install elan (Lean version manager)
         run: |
           curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf | sh -s -- -y
@@ -98,17 +70,27 @@ jobs:
       - name: Create namespace
         run: kubectl create namespace flare-system --dry-run=client -o yaml | kubectl apply -f -
 
-      - name: Install CRD
-        run: kubectl apply -f deploy/crd.yaml
-
-      - name: Install RBAC
-        run: kubectl apply -f deploy/rbac.yaml
-
-      - name: Deploy operator
+      # Single source of truth: CRD, RBAC (ClusterRole `flare-operator`,
+      # which the per-suite operators' ClusterRoleBindings reference) and
+      # the flare-system operator all come from the helm chart. There is no
+      # second hand-maintained manifest to drift — the readiness-probe and
+      # nodes-RBAC bugs were both drift between the chart and a deploy/*.yaml
+      # copy. `helm template | kubectl apply` (not `helm install`) keeps it
+      # deterministic and side-effect-free in CI. fullnameOverride pins every
+      # name to `flare-operator` so the per-suite bindings still resolve.
+      - name: Deploy operator (helm chart)
         run: |
-          # Use simple deployment manifest instead of Helm to avoid timeout issues in CI
-          sed 's|flare-operator:latest|flare-operator:test|;s|IfNotPresent|Never|' \
-            deploy/operator.yaml | kubectl apply -f -
+          helm template flare helm/flare-operator \
+            --namespace flare-system \
+            --set fullnameOverride=flare-operator \
+            --set image.repository=flare-operator \
+            --set image.tag=test \
+            --set image.pullPolicy=Never \
+            --set cluster.enabled=false \
+            --include-crds \
+            | kubectl apply -f -
+          kubectl wait --for=condition=Established \
+            crd/flareclusters.flare.gree.net --timeout=60s
 
       - name: Wait for operator ready
         run: |

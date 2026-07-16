@@ -112,7 +112,21 @@ jobs:
 
       - name: Wait for operator ready
         run: |
-          kubectl rollout status deployment/flare-operator -n flare-system --timeout=300s
+          # bash -e used to abort before the diagnostics on rollout
+          # timeout — dump everything unconditionally, THEN fail.
+          if ! kubectl rollout status deployment/flare-operator -n flare-system --timeout=300s; then
+            echo "=== ROLLOUT TIMED OUT — diagnostics ==="
+            kubectl get pods -n flare-system -o wide
+            kubectl describe deployment/flare-operator -n flare-system | tail -20
+            for p in $(kubectl get pods -n flare-system -o name); do
+              echo "=== describe $p (events) ==="
+              kubectl describe "$p" -n flare-system | grep -A12 "^Events:"
+              echo "=== logs $p ==="
+              kubectl logs "$p" -n flare-system --tail=60 || true
+            done
+            kubectl get events -n flare-system --sort-by=.lastTimestamp | tail -20
+            exit 1
+          fi
           echo "=== Operator pods ==="
           kubectl get pods -n flare-system
           echo "=== Operator logs (initial) ==="

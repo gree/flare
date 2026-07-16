@@ -39,6 +39,11 @@ rbac:
 
 podAnnotations: {}
 
+# Extra labels for the operator pods (merged into the pod template).
+# Typical use: organization-wide cost-allocation / ownership labels that a
+# billing pipeline expects on every pod.
+podLabels: {}
+
 podSecurityContext: {}
   # fsGroup: 2000
 
@@ -152,6 +157,9 @@ cluster:
   # providers select an internal LB via a Service annotation) and never
   # expose it publicly. Disabled by default — nothing is created unless
   # explicitly enabled.
+  # Extra labels for the flared pods (merged into the pod template) —
+  # same purpose as the top-level podLabels (cost allocation etc.).
+  podLabels: {}
   externalAccess:
     enabled: false
     type: LoadBalancer

@@ -63,6 +63,9 @@ spec:
       labels:
         app: flare
         cluster: {{ $c.name }}
+        {{- with $c.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
     spec:
       {{- if or $c.zoneSpread $c.hostnameSpread }}
       topologySpreadConstraints:

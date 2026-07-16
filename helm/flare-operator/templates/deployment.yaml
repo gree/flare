@@ -18,6 +18,9 @@ spec:
       {{- end }}
       labels:
         {{- include "flare-operator.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
         # Every pod starts as standby; the leader overwrites its own label
         # after acquiring the lease. Deliberately NOT part of matchLabels
         # (the Deployment selector is immutable and must not track it).

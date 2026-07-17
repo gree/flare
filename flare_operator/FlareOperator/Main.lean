@@ -977,9 +977,15 @@ def main (args : List String) : IO Unit := do
   -- While waiting for the lease: /healthz 200 (alive), /readyz 503 (not
   -- leader), which keeps the standby out of the Service but out of the
   -- kubelet's gun.
+  -- Ports are env-configurable so the chart's values actually take effect
+  -- (they previously only changed the containerPort declarations while the
+  -- servers stayed hardcoded — ServiceMonitor got connection refused;
+  -- external review P2-6). The chart injects FLARE_*_PORT from its values.
+  let healthPort := (((← IO.getEnv "FLARE_HEALTH_PORT").bind (·.toNat?)).getD 8080).toUInt16
+  let metricsPort := (((← IO.getEnv "FLARE_METRICS_PORT").bind (·.toNat?)).getD 9090).toUInt16
   let healthStatus ← HealthStatus.new
-  startHealthServerBackground healthStatus
-  IO.eprintln s!"[flare-operator] health check server started on port 8080 (leader=false)"
+  startHealthServerBackground healthStatus { port := healthPort }
+  IO.eprintln s!"[flare-operator] health check server started on port {healthPort} (leader=false)"
 
   -- Pod labels survive container restarts: a crashed ex-leader would keep
   -- routing index traffic to itself while it is back in the follower loop.
@@ -1016,8 +1022,8 @@ def main (args : List String) : IO Unit := do
   IO.eprintln s!"[flare-operator] metrics initialized"
 
   -- Start metrics HTTP server in background
-  startMetricsServerBackground metrics crName
-  IO.eprintln s!"[flare-operator] metrics server started on port 9090"
+  startMetricsServerBackground metrics crName { port := metricsPort }
+  IO.eprintln s!"[flare-operator] metrics server started on port {metricsPort}"
 
   -- Initialize shared state
   let stateRef ← IO.mkRef FlareClusterState.default

@@ -1,4 +1,3 @@
-metricsPort: 9090
 # Default values for flare-operator.
 # This is a YAML-formatted file.
 # Declare variables to be passed into your templates.
@@ -64,7 +63,7 @@ service:
 operatorPort: 12120
 
 # Metrics server port (Prometheus)
-metricsPort: 8081
+metricsPort: 9090
 
 # Health check port
 healthPort: 8080

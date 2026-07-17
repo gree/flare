@@ -42,6 +42,8 @@ spec:
           args:
             - "--namespace"
             - {{ .Values.namespace | quote }}
+            - "--port"
+            - {{ .Values.operatorPort | quote }}
             {{- if .Values.clusterName }}
             - "--cluster-name"
             - {{ .Values.clusterName | quote }}
@@ -50,6 +52,13 @@ spec:
             {{- toYaml . | nindent 12 }}
             {{- end }}
           env:
+            # Servers read their ports from these; without the injection the
+            # values only changed containerPort declarations while the
+            # processes stayed on hardcoded ports (review P2-6).
+            - name: FLARE_METRICS_PORT
+              value: {{ .Values.metricsPort | quote }}
+            - name: FLARE_HEALTH_PORT
+              value: {{ .Values.healthPort | quote }}
             - name: FLARE_NAMESPACE
               valueFrom:
                 fieldRef:

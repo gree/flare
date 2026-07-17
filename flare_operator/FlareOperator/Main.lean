@@ -322,9 +322,12 @@ private def handleClusterReplication
 
   | .Dumping =>
     -- Ensure ConfigMap exists (handle operator restart during Dumping phase)
-    -- Check if ConfigMap has replication settings, if not, recreate it
-    let cmName := s!"{crName}-config"
-    match ← readFlaredConfigMap cmName ns with
+    -- Check if ConfigMap has replication settings, if not, recreate it.
+    -- MUST read the `extra.conf` key: readFlaredConfigMap reads `.data.nodeMap`,
+    -- which only exists on {cr}-node-map — reading it HERE always returned ""
+    -- ("no replication settings"), so every 5s tick rewrote the ConfigMap and
+    -- SIGHUPed every pod for the whole Dumping phase (external review, P1-3).
+    match ← readFlaredExtraConf crName ns with
     | .error _ =>
       -- ConfigMap doesn't exist or can't be read - recreate it
       IO.eprintln s!"[flare-operator] WARNING: Dumping phase but ConfigMap missing, recreating..."

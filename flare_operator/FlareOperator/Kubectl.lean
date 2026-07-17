@@ -107,11 +107,32 @@ private def getFlareClusterFromJson (json : Lean.Json) (name ns : String)
     walSyncBwlimit := rocksdbObj.getObjValD "walSyncBwlimit" |>.getNat?.toOption
     walSyncInterval := rocksdbObj.getObjValD "walSyncInterval" |>.getNat?.toOption
   }
+  -- The circuit breaker knobs were published in the CRD examples and the
+  -- Runbook but never parsed — the safety valve silently ran on defaults
+  -- regardless of what the user set (external review P1-5).
+  let cbObj := spec.getObjValD "circuitBreaker"
+  let cbDefault : CircuitBreakerConfig := {}
+  let trip := cbObj.getObjValD "tripThresholdPercent" |>.getNat?.toOption |>.getD cbDefault.tripThresholdPercent
+  let reset := cbObj.getObjValD "resetThresholdPercent" |>.getNat?.toOption |>.getD cbDefault.resetThresholdPercent
+  -- Validation: percentages capped at 100; anti-flap requires
+  -- reset > 100 - trip (documented on the struct). Invalid combinations
+  -- fall back to the safe defaults rather than a flappy configuration.
+  let cb : CircuitBreakerConfig :=
+    if trip ≤ 100 && reset ≤ 100 && reset > 100 - trip then
+      { enabled := cbObj.getObjValD "enabled" |>.getBool?.toOption |>.getD cbDefault.enabled
+        tripThresholdPercent := trip
+        resetThresholdPercent := reset
+        autoResetEnabled := cbObj.getObjValD "autoResetEnabled" |>.getBool?.toOption |>.getD cbDefault.autoResetEnabled }
+    else
+      { cbDefault with
+        enabled := cbObj.getObjValD "enabled" |>.getBool?.toOption |>.getD cbDefault.enabled
+        autoResetEnabled := cbObj.getObjValD "autoResetEnabled" |>.getBool?.toOption |>.getD cbDefault.autoResetEnabled }
   .ok {
     metadata := { name := some name, «namespace» := some ns }
     spec := {
       partitions := partitions, replicas := replicas,
-      clusterReplication := repl, rocksdb := rocksdb
+      clusterReplication := repl, rocksdb := rocksdb,
+      circuitBreaker := cb
     }
   }
 

@@ -106,6 +106,12 @@ structure FlareReconcileState where
   failoverTriggered : Bool := false
   -- Grace period for startup: 24 cycles × 5s = 120s (see Main.lean)
   graceCycles : Nat := 24
+  /-- Whether the breaker was tripped at the END of the previous cycle
+      (persisted via trippedRef in the IO shell — FSM state itself resets
+      every tick). Input to the reset-hysteresis: once tripped, recovery
+      requires healthy% ≥ resetThresholdPercent, not merely dropping below
+      the trip threshold, so the breaker cannot flap around one boundary. -/
+  wasTripped : Bool := false
   -- Cluster state evolution:
   updatedClusterState : Option FlareClusterState := none  -- State after failover/proxy assignment
   -- Replication state machine:
@@ -126,37 +132,57 @@ def circuitBreakerDecision
     (deadCount : Nat)
     (totalNodes : Nat)
     (breakerCfg : CircuitBreakerConfig)
+    (wasTripped : Bool := false)
     : FlareReconcileStep × List FlareEffect :=
   if !breakerCfg.enabled then
     (.AfterHandleFailover,
      [.Log s!"[flare-operator] Circuit breaker DISABLED - automatic recovery enabled"])
   else
     let deadPercent := if totalNodes > 0 then (deadCount * 100) / totalNodes else 0
-    if deadPercent >= breakerCfg.tripThresholdPercent then
+    if wasTripped then
+      -- Reset hysteresis (resetThresholdPercent was previously dead config —
+      -- external review P1-5): a tripped breaker stays tripped until the
+      -- HEALTHY fraction reaches the reset threshold, i.e. deadPercent ≤
+      -- 100 - reset. With trip=50/reset=80 the cluster must recover to 80%
+      -- healthy before failover resumes — recovering to 51% no longer flaps
+      -- the breaker around the trip boundary. autoResetEnabled=false holds
+      -- the trip regardless (operator restart = the manual reset).
+      if !breakerCfg.autoResetEnabled then
+        (.EmergencyPaused,
+         [.Log s!"[flare-operator] circuit breaker HELD (autoResetEnabled=false): {deadCount}/{totalNodes} dead — manual reset = operator restart"])
+      else if deadPercent ≤ 100 - breakerCfg.resetThresholdPercent then
+        (.AfterHandleFailover,
+         [.Log s!"[flare-operator] circuit breaker RESET: {100 - deadPercent}% healthy ≥ {breakerCfg.resetThresholdPercent}% — resuming failover"])
+      else
+        (.EmergencyPaused,
+         [.Log s!"[flare-operator] circuit breaker holding: {100 - deadPercent}% healthy < reset threshold {breakerCfg.resetThresholdPercent}%"])
+    else if deadPercent >= breakerCfg.tripThresholdPercent then
       (.EmergencyPaused,
        [.Log s!"[flare-operator] 🚨 CIRCUIT BREAKER TRIPPED: {deadCount}/{totalNodes} nodes dead ({deadPercent}% ≥ {breakerCfg.tripThresholdPercent}%)",
         .Log s!"[flare-operator] Suspected AZ failure - failover/reassignment PAUSED for this cycle",
         .Log s!"[flare-operator] Surviving nodes continue serving traffic",
-        .Log s!"[flare-operator] Recovery resumes AUTOMATICALLY once the dead fraction drops below {breakerCfg.tripThresholdPercent}% (each 5s tick re-evaluates); no operator restart needed"])
+        .Log s!"[flare-operator] Recovery resumes AUTOMATICALLY once healthy capacity reaches {breakerCfg.resetThresholdPercent}% (each 5s tick re-evaluates); no operator restart needed"])
     else
       (.AfterHandleFailover, [])
 
-/-- The breaker TRIPS exactly at/above the threshold (enabled, nonempty cluster). -/
+/-- The breaker TRIPS exactly at/above the threshold (enabled, nonempty
+    cluster, not already tripped). -/
 theorem circuitBreakerDecision_trips (deadCount totalNodes : Nat)
     (cfg : CircuitBreakerConfig) (hen : cfg.enabled = true) (htot : 0 < totalNodes)
     (h : cfg.tripThresholdPercent ≤ (deadCount * 100) / totalNodes) :
-    (circuitBreakerDecision deadCount totalNodes cfg).1 = .EmergencyPaused := by
+    (circuitBreakerDecision deadCount totalNodes cfg false).1 = .EmergencyPaused := by
   unfold circuitBreakerDecision
   simp only [hen, Bool.not_true, Bool.false_eq_true, if_false]
   have ht : (0 < totalNodes) = True := eq_true htot
   simp only [show (totalNodes > 0) = True from ht, if_true]
   rw [if_pos h]
 
-/-- Below the threshold the breaker NEVER trips: failover proceeds. -/
+/-- Below the threshold a fresh (not-tripped) breaker NEVER trips:
+    failover proceeds. -/
 theorem circuitBreakerDecision_no_trip (deadCount totalNodes : Nat)
     (cfg : CircuitBreakerConfig) (htot : 0 < totalNodes)
     (h : (deadCount * 100) / totalNodes < cfg.tripThresholdPercent) :
-    (circuitBreakerDecision deadCount totalNodes cfg).1 = .AfterHandleFailover := by
+    (circuitBreakerDecision deadCount totalNodes cfg false).1 = .AfterHandleFailover := by
   unfold circuitBreakerDecision
   cases hen : cfg.enabled with
   | false => simp
@@ -166,21 +192,52 @@ theorem circuitBreakerDecision_no_trip (deadCount totalNodes : Nat)
     simp only [show (totalNodes > 0) = True from ht, if_true]
     rw [if_neg (by omega)]
 
+/-- HYSTERESIS, holding side: a tripped breaker stays tripped while the
+    healthy fraction is below the reset threshold — even when the dead
+    fraction has already dropped below the TRIP threshold. This is the
+    anti-flap property resetThresholdPercent exists for (it was dead
+    config before — external review P1-5). -/
+theorem circuitBreakerDecision_holds_below_reset (deadCount totalNodes : Nat)
+    (cfg : CircuitBreakerConfig) (hen : cfg.enabled = true)
+    (har : cfg.autoResetEnabled = true) (htot : 0 < totalNodes)
+    (h : 100 - cfg.resetThresholdPercent < (deadCount * 100) / totalNodes) :
+    (circuitBreakerDecision deadCount totalNodes cfg true).1 = .EmergencyPaused := by
+  unfold circuitBreakerDecision
+  simp only [hen, har, Bool.not_true, Bool.false_eq_true, if_false, if_true]
+  have ht : (0 < totalNodes) = True := eq_true htot
+  simp only [show (totalNodes > 0) = True from ht, if_true]
+  rw [if_neg (by omega)]
+
+/-- HYSTERESIS, release side: once the healthy fraction reaches the reset
+    threshold, an auto-reset breaker releases and failover resumes. -/
+theorem circuitBreakerDecision_resets_at_threshold (deadCount totalNodes : Nat)
+    (cfg : CircuitBreakerConfig) (hen : cfg.enabled = true)
+    (har : cfg.autoResetEnabled = true) (htot : 0 < totalNodes)
+    (h : (deadCount * 100) / totalNodes ≤ 100 - cfg.resetThresholdPercent) :
+    (circuitBreakerDecision deadCount totalNodes cfg true).1 = .AfterHandleFailover := by
+  unfold circuitBreakerDecision
+  simp only [hen, har, Bool.not_true, Bool.false_eq_true, if_false, if_true]
+  have ht : (0 < totalNodes) = True := eq_true htot
+  simp only [show (totalNodes > 0) = True from ht, if_true]
+  rw [if_pos h]
+
+/-- autoResetEnabled = false holds a tripped breaker unconditionally:
+    the manual reset is an operator restart. -/
+theorem circuitBreakerDecision_manual_hold (deadCount totalNodes : Nat)
+    (cfg : CircuitBreakerConfig) (hen : cfg.enabled = true)
+    (har : cfg.autoResetEnabled = false) :
+    (circuitBreakerDecision deadCount totalNodes cfg true).1 = .EmergencyPaused := by
+  unfold circuitBreakerDecision
+  simp [hen, har]
+
 /-- circuitBreakerDecision only returns EmergencyPaused or AfterHandleFailover -/
 theorem circuitBreakerDecision_only_returns_emergency_or_failover
-    (deadCount totalNodes : Nat) (cfg : CircuitBreakerConfig) :
-    (circuitBreakerDecision deadCount totalNodes cfg).1 = .EmergencyPaused ∨
-    (circuitBreakerDecision deadCount totalNodes cfg).1 = .AfterHandleFailover := by
+    (deadCount totalNodes : Nat) (cfg : CircuitBreakerConfig) (wt : Bool) :
+    (circuitBreakerDecision deadCount totalNodes cfg wt).1 = .EmergencyPaused ∨
+    (circuitBreakerDecision deadCount totalNodes cfg wt).1 = .AfterHandleFailover := by
   simp only [circuitBreakerDecision]
-  split
-  · right; rfl  -- disabled
-  · split
-    · split
-      · left; rfl  -- enabled, totalNodes > 0, tripped
-      · right; rfl  -- enabled, totalNodes > 0, not tripped
-    · split
-      · left; rfl  -- enabled, totalNodes = 0, threshold = 0
-      · right; rfl  -- enabled, totalNodes = 0, threshold > 0
+  repeat' split
+  all_goals first | (left; rfl) | (right; rfl)
 
 -- ===========================================================================
 -- Terminal Predicate
@@ -799,7 +856,7 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
                 updatedClusterState := some clusterState }, none, [])
     else
       -- Check circuit breaker
-      let (nextStep, breakerEffects) := circuitBreakerDecision deadCount totalNodes breakerCfg
+      let (nextStep, breakerEffects) := circuitBreakerDecision deadCount totalNodes breakerCfg s.wasTripped
       let allEffects := .Log s!"[flare-operator] detected {deadCount} dead nodes: {s.deadNodeKeys}" :: breakerEffects
       ({ s with reconcileStep := nextStep,
                 failoverTriggered := (nextStep == .AfterHandleFailover) }, none, allEffects)
@@ -1000,6 +1057,7 @@ theorem flareReconcileStep_decreases_measure (resp : K8sResponse)
       have h_decision := circuitBreakerDecision_only_returns_emergency_or_failover
         s.deadNodeKeys.length cs.nodeMap.length
         (match s.cachedCrd with | some crd => crd.spec.circuitBreaker | none => {})
+        s.wasTripped
       cases h_decision
       · simp [*]; right; simp [flareReconcileTerminalBool]  -- EmergencyPaused
       · simp [*]; left; simp [flareReconcileMeasure]  -- AfterHandleFailover

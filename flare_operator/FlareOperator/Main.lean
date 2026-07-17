@@ -643,7 +643,10 @@ private def runReconcileDriver (stateRef : IO.Ref FlareClusterState)
   let initialPhase ← migrationRef.get
   let initialState : K8sReconciler.FlareReconcileState := {
     graceCycles := initialGrace,
-    currentMigrationPhase := initialPhase
+    currentMigrationPhase := initialPhase,
+    -- Seed the breaker hysteresis from the persistent ref: FSM state
+    -- resets every tick, so "was tripped last cycle" must ride in here.
+    wasTripped := (← trippedRef.get)
   }
 
   runReconcileFSMLoop initialState stateRef migrationRef graceCyclesRef trippedRef crName ns
@@ -674,6 +677,7 @@ private def prepareStuckThresholdCycles : Nat := 720
     one broadcast duration, and corrected by the new leader's next tick. -/
 private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.Ref FlareClusterView)
     (migrationRef : IO.Ref MigrationPhase) (graceCyclesRef : IO.Ref Nat)
+    (trippedRef : IO.Ref Bool)
     (prepareCyclesRef : IO.Ref (List (String × Nat)))
     (pendingConfRef : IO.Ref (Option (String × Nat)))
     (metrics : OperatorMetrics) (leaseName identity : String)
@@ -701,7 +705,6 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
 
   -- 2. Run the FSM driver
   let oldVersion := (← stateRef.get).nodeMapVersion
-  let trippedRef ← IO.mkRef false
   runReconcileDriver stateRef migrationRef graceCyclesRef trippedRef crName ns
   metrics.circuitBreakerTripped.set (if ← trippedRef.get then 1.0 else 0.0)
 
@@ -1103,6 +1106,8 @@ def main (args : List String) : IO Unit := do
   -- by detectDeadNodes regardless of the grace period.
   let graceCyclesRef ← IO.mkRef (24 : Nat)
   let prepareCyclesRef ← IO.mkRef ([] : List (String × Nat))
+  -- Persistent breaker-trip flag (input to the reset hysteresis).
+  let trippedRef ← IO.mkRef false
   let pendingConfRef ← IO.mkRef (none : Option (String × Nat))
 
   -- Start TCP server in background (using Server.TcpServer)
@@ -1136,7 +1141,7 @@ def main (args : List String) : IO Unit := do
     let startTime ← IO.monoMsNow
     try
       -- Use FSM-driven reconcile (complete implementation with all 5 requirements)
-      reconcileOnceFSM stateRef crdRef migrationRef graceCyclesRef prepareCyclesRef pendingConfRef metrics leaseName identity crName ns
+      reconcileOnceFSM stateRef crdRef migrationRef graceCyclesRef trippedRef prepareCyclesRef pendingConfRef metrics leaseName identity crName ns
     catch e =>
       IO.eprintln s!"[flare-operator] reconcile error: {e}"
     let endTime ← IO.monoMsNow

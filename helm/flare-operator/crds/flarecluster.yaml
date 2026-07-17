@@ -80,6 +80,35 @@ spec:
                       type: integer
                       minimum: 0
                       description: Inter-batch delay (usec) for WAL-sync streaming
+                circuitBreaker:
+                  type: object
+                  description: >-
+                    Blast-radius circuit breaker for AZ-level failures. When
+                    the dead fraction reaches tripThresholdPercent the
+                    operator pauses failover/reassignment; with hysteresis it
+                    resumes only after the healthy fraction reaches
+                    resetThresholdPercent (anti-flap: resetThresholdPercent
+                    must exceed 100 - tripThresholdPercent, otherwise the
+                    defaults are used).
+                  properties:
+                    enabled:
+                      type: boolean
+                      description: Enable the breaker (default true)
+                    tripThresholdPercent:
+                      type: integer
+                      minimum: 0
+                      maximum: 100
+                      description: Dead-node percentage that trips the breaker (default 50)
+                    resetThresholdPercent:
+                      type: integer
+                      minimum: 0
+                      maximum: 100
+                      description: Healthy percentage required to auto-reset (default 80)
+                    autoResetEnabled:
+                      type: boolean
+                      description: >-
+                        Auto-resume when healthy capacity returns (default
+                        true). false holds the trip until an operator restart.
             status:
               type: object
               properties:

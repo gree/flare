@@ -170,10 +170,36 @@ int handler_reconstruction::_run_once() {
 		//     too; leaving data intact lets the un-truncated retry preserve
 		//     it instead of emptying the DB first.
 		if (this->_storage->get_type() == storage::type_rocksdb) {
+			//  3. Source not newer than us — the empty/stale-master trap.
+			//     peer_reachable means the master ANSWERED, not that it has
+			//     data. A master freshly rebuilt from an empty/wrong source
+			//     reports latest_lsn 0 (truncate resets the cursor) while we
+			//     may hold the real last copy at a higher LSN. Truncating to
+			//     match it, then dumping its zero keys, destroys our data and
+			//     PROPAGATES the emptiness to the next slave that rebuilds
+			//     from us — the silent cascade observed on the dev cluster.
+			//     Compare LSNs when the lineage matches (same master_id, so
+			//     the counters are comparable) or when the source is simply
+			//     empty (latest_lsn 0 is unambiguous regardless of lineage):
+			//     if the source is not strictly newer than our local data,
+			//     do NOT truncate. The un-truncated dump then merges the
+			//     source's (nothing) into our data, preserving it; a genuine
+			//     deletion-propagation resync has the master AHEAD of us and
+			//     still truncates as before.
+			storage_rocksdb* rdb = dynamic_cast<storage_rocksdb*>(this->_storage);
+			uint64_t local_lsn = rdb ? rdb->get_repl_last_lsn() : 0;
+			string local_master_id = rdb ? rdb->get_master_id() : "";
+			bool same_lineage = rdb && !peer_master_id.empty()
+				&& peer_master_id == local_master_id;
+			bool source_not_newer = local_lsn > 0
+				&& (peer_latest_lsn == 0 || (same_lineage && peer_latest_lsn < local_lsn));
+
 			if (this->_role != cluster::role_slave) {
 				log_notice("truncate skipped (master reconstruction — local data may be the last copy)", 0);
 			} else if (!peer_reachable) {
 				log_notice("truncate skipped (source unreachable)", 0);
+			} else if (source_not_newer) {
+				log_warning("truncate skipped: source is not newer than local data (source latest_lsn=%llu, local last_lsn=%llu, same_lineage=%d) — refusing to overwrite our copy with an emptier/staler master; merging instead", (unsigned long long)peer_latest_lsn, (unsigned long long)local_lsn, same_lineage ? 1 : 0);
 			} else {
 				log_notice("truncating local storage before full-dump reconstruction so deletions on the source propagate (WAL sync was unavailable; see previous log line)", 0);
 				if (this->_storage->truncate(0) < 0) {

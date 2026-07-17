@@ -160,7 +160,42 @@ def suite : TestSuite := {
         else
           let sync ← operatorTcpCmd cfg.debugPod cfg.«namespace»
             cfg.operatorName cfg.operatorPort "node sync"
-          return .fail s!"not all replicas Active after 180s: {sync.trim}" }
+          return .fail s!"not all replicas Active after 180s: {sync.trim}" },
+
+    -- Test 5: ROLLING restart of every pod must not lose data. Simultaneous
+    -- kill (test 2) is one hazard; a rolling restart is another — as each
+    -- pod cycles, the reconstruction gate must never let a slave truncate
+    -- its own copy to match a master that was itself just rebuilt empty.
+    -- Observed live on the dev cluster: an empty master fed items=0 to a
+    -- slave that truncated first, and the emptiness cascaded across the
+    -- whole partition (the pre-dump truncate checked peer_reachable, not
+    -- peer_has_data). Write fresh data, roll the StatefulSet, read it back.
+    { name := s!"all {totalKeys} keys survive a rolling restart of every pod"
+      run := do
+        match ← currentP0Master with
+        | none => return .fail "no P0 master before rolling restart"
+        | some masterPod =>
+          match ← getPodIp masterPod cfg.«namespace» with
+          | none => return .fail s!"could not get IP for {masterPod}"
+          | some ip =>
+            let stored ← writeKeys cfg.debugPod cfg.«namespace» ip cfg.flarePort keyPrefix totalKeys
+            if stored != totalKeys then return .fail s!"only {stored}/{totalKeys} stored pre-roll"
+            IO.eprintln s!"# Rolling-restarting {cfg.name}-nodes"
+            let _ ← kubectl ["rollout", "restart", s!"statefulset/{cfg.name}-nodes", "-n", cfg.«namespace»]
+            let rolled ← kubectlRolloutStatus s!"statefulset/{cfg.name}-nodes" cfg.«namespace» 300
+            if !rolled then return .fail "StatefulSet rolling restart did not complete"
+            let stable ← waitForCondition "all nodes Active after roll" 180 do
+              let sync ← operatorTcpCmd cfg.debugPod cfg.«namespace»
+                cfg.operatorName cfg.operatorPort "node sync"
+              let entries := parseNodeSync sync
+              return entries.length == numPods && countActiveNodes entries == numPods
+            if !stable then return .fail "cluster did not reconverge after rolling restart"
+            match ← currentP0Master with
+            | none => return .fail "no P0 master after rolling restart"
+            | some m =>
+              match ← getPodIp m cfg.«namespace» with
+              | none => return .fail s!"could not get IP for {m}"
+              | some ip2 => assertAllKeysSurvive ip2 }
   ]
 }
 

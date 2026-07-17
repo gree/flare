@@ -180,6 +180,7 @@ protected:
 	int										_master_reconstruction;
 	bool _boot_shift_pending;
 	bool _reannounce_active;
+	bool _activation_pending;
 	pthread_mutex_t				_mutex_master_reconstruction;
 
 	uint64_t							_node_map_version;
@@ -235,6 +236,7 @@ public:
 	int set_node_state(string node_server_name, int node_server_port, state node_state);
 	int reconstruct_node(vector<node> v, uint64_t node_map_version = 0);
 	int run_boot_shift();
+	void set_activation_pending(bool v) { this->_activation_pending = v; };
 	int _run_boot_shift_locked();
 
 	int set_storage(storage* st) { this->_storage = st; return 0; };

@@ -71,6 +71,7 @@ cluster::cluster(thread_pool* req_tp, thread_pool* other_tp, string server_name,
 		_master_reconstruction(0),
 		_boot_shift_pending(false),
 		_reannounce_active(false),
+		_activation_pending(false),
 		_node_map_version(0),
 		_server_name(server_name),
 		_server_port(server_port),
@@ -1213,6 +1214,27 @@ int cluster::reconstruct_node(vector<node> v, uint64_t node_map_version) {
 	// right after set_storage).
 	if (this->_boot_shift_pending && this->_storage != NULL) {
 		this->_run_boot_shift_locked();
+	}
+
+	// Anti-entropy v2: our activation was ACKNOWLEDGED, yet accepted maps
+	// keep saying we are prepare. That means the ack landed on an index
+	// leader that died before persisting it (observed live): the activation
+	// RETRY cannot fire (the op succeeded) and the v1 re-announce above
+	// cannot fire either (local state only becomes active via the map echo
+	// that never came). Keep re-announcing on every accepted map until one
+	// shows us out of prepare.
+	{
+		node_map::iterator me = this->_node_map.find(this->_node_key);
+		if (me != this->_node_map.end() && me->second.node_role != role_proxy) {
+			if (me->second.node_state == state_prepare) {
+				if (this->_activation_pending) {
+					log_notice("activation was acknowledged but the map still says prepare — re-announcing (anti-entropy)", 0);
+					this->_reannounce_active = true;
+				}
+			} else {
+				this->_activation_pending = false;
+			}
+		}
 	}
 
 	this->_set_node_map_version(node_map_version);

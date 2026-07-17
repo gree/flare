@@ -255,12 +255,20 @@ int handler_reconstruction::_run_once() {
 			if (this->_activate_with_retry(false) < 0) {
 				return -1;
 			}
+			this->_cluster->set_activation_pending(true);
 		}
 	} else {
 		// just shift state to ready
 		if (this->_activate_with_retry(true) < 0) {		// true: skip ready state
 			return -1;
 		}
+		// Mark the ack as provisional until a node map echoes it back: an
+		// ack from a leader that dies before persisting is worth nothing,
+		// and neither the retry (op succeeded) nor the local-active
+		// re-announce (local state never flipped) can recover it. The
+		// map-side anti-entropy in cluster::reconstruct_node clears this
+		// once an accepted map shows us out of prepare.
+		this->_cluster->set_activation_pending(true);
 	}
 
 	return 0;

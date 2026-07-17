@@ -1,5 +1,26 @@
 # Flare Operator Runbook
 
+## Upgrading a release (READ THIS FIRST)
+
+Helm treats the chart's `crds/` directory as **install-only**: `helm
+upgrade` never touches CRDs. If a release adds CRD schema fields (the
+rocksdb block, circuitBreaker, …), an upgraded cluster silently rejects
+or PRUNES patches to those fields — `kubectl patch` appears to succeed
+while the field vanishes (observed live: circuitBreaker settings were
+dropped on a cluster whose CRD predated the schema).
+
+Upgrade procedure, always:
+
+```bash
+kubectl apply -f helm/flare-operator/crds/flarecluster.yaml   # CRDs first
+helm upgrade flare ./helm/flare-operator -n flare-system --reuse-values \
+  --set image.tag=<version> --set cluster.image.tag=<version>
+```
+
+Verify the schema took: `kubectl patch flarecluster <name> --dry-run=server
+--type=merge -p '{"spec":{"circuitBreaker":{"tripThresholdPercent":50}}}'`
+must NOT warn about unknown fields.
+
 On-call procedures for the Lean-operator-managed Flare cluster. Alert names
 match `deploy/monitoring/prometheus-rules.yaml` /
 `helm/flare-operator/templates/prometheusrule.yaml`.

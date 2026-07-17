@@ -189,7 +189,16 @@ def suite : TestSuite := {
             -- end-state instead — every pod on the new revision AND ready —
             -- with a generous timeout; the data assertion below is the real
             -- judge of bug #14.
-            let rolled ← waitForCondition "StatefulSet rolled to new revision" 420 do
+            -- OrderedReady RollingUpdate restarts pods one at a time, and
+            -- each restarted pod does a full reconstruction + activation
+            -- (~2-3 min/pod on loaded CI kind), so a 4-pod roll needs
+            -- ~10 min of wall clock — slow, not stuck (crash-free since the
+            -- #15 fix; convergence oscillates P=0↔P=1 as each pod cycles).
+            -- This is the ONLY test that exercises graceful shutdown
+            -- (SIGTERM → ~flared destructors), where #15 lived; the
+            -- simultaneous-kill test uses --grace-period=0 (SIGKILL) and
+            -- never runs the destructor path. Give it the room it needs.
+            let rolled ← waitForCondition "StatefulSet rolled to new revision" 720 do
               let upd ← kubectlGetJsonpath "statefulset" s!"{cfg.name}-nodes" cfg.«namespace» "{.status.updatedReplicas}"
               let rdy ← kubectlGetJsonpath "statefulset" s!"{cfg.name}-nodes" cfg.«namespace» "{.status.readyReplicas}"
               let cur ← kubectlGetJsonpath "statefulset" s!"{cfg.name}-nodes" cfg.«namespace» "{.status.currentRevision}"
@@ -198,8 +207,8 @@ def suite : TestSuite := {
               | .ok u, .ok r, .ok c, .ok n =>
                 return u.trim.toNat?.getD 0 >= numPods && r.trim.toNat?.getD 0 >= numPods && c.trim == n.trim && c.trim != ""
               | _, _, _, _ => return false
-            if !rolled then return .fail "StatefulSet rolling restart did not complete within 420s"
-            let stable ← waitForCondition "all nodes Active after roll" 240 do
+            if !rolled then return .fail "StatefulSet rolling restart did not complete within 720s"
+            let stable ← waitForCondition "all nodes Active after roll" 300 do
               let sync ← operatorTcpCmd cfg.debugPod cfg.«namespace»
                 cfg.operatorName cfg.operatorPort "node sync"
               let entries := parseNodeSync sync

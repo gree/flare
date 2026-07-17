@@ -288,6 +288,27 @@ def updateFlaredRocksdbConfig (crName ns : String) (rocksdb : RocksdbConfigSpec)
   let content := renderFlaredExtraConf rocksdb none
   applyExtraConfConfigMap crName ns content
 
+/-- Rewrite {cr}-config WITHOUT the replication block (rocksdb settings
+    kept). Unlike updateFlaredRocksdbConfig this ALWAYS writes, even when
+    the result is an empty extra.conf — the point is to REMOVE
+    `cluster-replication = true`, which flared keeps obeying (across pod
+    restarts, too) for as long as the ConfigMap carries it. -/
+def clearFlaredReplicationConfig (crName ns : String) (rocksdb : RocksdbConfigSpec := {})
+    : IO (Except String Unit) :=
+  applyExtraConfConfigMap crName ns (renderFlaredExtraConf rocksdb none)
+
+/-- Read status.migrationPhase from the FlareCluster CR (None when unset
+    or unreadable — safe default: a fresh cluster has no migration). -/
+def readMigrationPhase (crName ns : String) : IO MigrationPhase := do
+  match ← kubectl ["get", "flarecluster", crName, "-n", ns,
+      "-o", "jsonpath={.status.migrationPhase}"] with
+  | .ok s =>
+    return (match s.trim with
+      | "Dumping" => .Dumping
+      | "Forwarding" => .Forwarding
+      | _ => .None)
+  | .error _ => return .None
+
 /-- Update CRD status.migrationPhase via kubectl patch. -/
 def patchFlareClusterStatus (crName ns : String) (phase : MigrationPhase)
     : IO (Except String Unit) := do

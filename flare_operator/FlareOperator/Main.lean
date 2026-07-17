@@ -291,14 +291,26 @@ private def handleClusterReplication
   let rocksdb := crd.spec.rocksdb
   IO.eprintln s!"[DEBUG] handleClusterReplication: enabled={repl.enabled}"
   if !repl.enabled then
-    -- If replication was active but now disabled, clear config and reset
+    -- If replication was active but now disabled, STOP FLARED, not just our
+    -- bookkeeping: the previous version reset only the in-memory phase and
+    -- CR status, leaving `cluster-replication = true` in the ConfigMap with
+    -- no SIGHUP — flared kept forwarding, and kept doing so across its own
+    -- pod restarts (external review P1-4). Strip the replication block from
+    -- extra.conf (rocksdb settings preserved), SIGHUP so flared reloads,
+    -- and only then record None; on a write failure the phase stays as-is
+    -- so the next tick retries the whole disable.
     let phase ← migrationRef.get
     if phase != .None then
-      migrationRef.set .None
-      match ← patchFlareClusterStatus crName ns .None with
-      | .error e => IO.eprintln s!"[flare-operator] warning: failed to reset migrationPhase: {e}"
-      | .ok () => pure ()
-      IO.eprintln s!"[TRACE] ClusterReplication: {phase.toString}->None | Reason: replication disabled"
+      match ← clearFlaredReplicationConfig crName ns rocksdb with
+      | .error e =>
+        IO.eprintln s!"[flare-operator] ERROR: failed to clear replication config: {e} — retrying next tick"
+      | .ok () =>
+        sendSighupToPods crName ns
+        migrationRef.set .None
+        match ← patchFlareClusterStatus crName ns .None with
+        | .error e => IO.eprintln s!"[flare-operator] warning: failed to reset migrationPhase: {e}"
+        | .ok () => pure ()
+        IO.eprintln s!"[TRACE] ClusterReplication: {phase.toString}->None | Reason: replication disabled (config cleared, SIGHUP sent)"
     return
 
   let phase ← migrationRef.get
@@ -1060,7 +1072,14 @@ def main (args : List String) : IO Unit := do
       pure result
   let crdRef ← IO.mkRef initialCrd
   -- Always start from None phase - operator manages migration state internally
-  let migrationRef ← IO.mkRef MigrationPhase.None
+  -- Restore the migration phase from CR status: an operator restart during
+  -- an active migration must not forget it (the previous version always
+  -- started at None, so a restart mid-Dumping silently orphaned the
+  -- migration — external review P1-4).
+  let restoredPhase ← Bridge.readMigrationPhase crName ns
+  if restoredPhase != MigrationPhase.None then
+    IO.eprintln s!"[flare-operator] restored migrationPhase={restoredPhase.toString} from CR status"
+  let migrationRef ← IO.mkRef restoredPhase
 
   -- Startup grace period: skip dead node detection for the first N reconcile cycles
   -- to let all pods register via TCP and appear in the K8s ready list.

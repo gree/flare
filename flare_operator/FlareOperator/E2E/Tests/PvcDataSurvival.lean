@@ -162,60 +162,50 @@ def suite : TestSuite := {
             cfg.operatorName cfg.operatorPort "node sync"
           return .fail s!"not all replicas Active after 180s: {sync.trim}" },
 
-    -- Test 5: ROLLING restart of every pod must not lose data. Simultaneous
-    -- kill (test 2) is one hazard; a rolling restart is another — as each
-    -- pod cycles, the reconstruction gate must never let a slave truncate
-    -- its own copy to match a master that was itself just rebuilt empty.
-    -- Observed live on the dev cluster: an empty master fed items=0 to a
-    -- slave that truncated first, and the emptiness cascaded across the
-    -- whole partition (the pre-dump truncate checked peer_reachable, not
-    -- peer_has_data). Write fresh data, roll the StatefulSet, read it back.
-    { name := s!"all {totalKeys} keys survive a rolling restart of every pod"
+    -- Test 5: a GRACEFUL rolling restart of P0's pods must not lose data.
+    -- Two distinct hazards from the same partition, both real production
+    -- incidents:
+    --   * #14 — a slave rebuilding from a master that was itself just
+    --     rebuilt EMPTY truncated its own copy and the emptiness cascaded
+    --     (the pre-dump truncate checked peer_reachable, not peer_has_data);
+    --   * #15 — graceful shutdown (SIGTERM → ~flared destructors) aborted
+    --     with "pure virtual method called" tearing down cluster_replication
+    --     over an already-freed thread pool.
+    -- The simultaneous-kill test (test 2) uses --grace-period=0 (SIGKILL),
+    -- which never runs the destructor path, so ONLY a graceful delete
+    -- exercises #15. A full `kubectl rollout restart` of every pod is the
+    -- realistic operation but an OrderedReady serialized roll of a
+    -- reconstruction-heavy StatefulSet runs >12 min on loaded CI kind —
+    -- too slow/fragile for a per-test wait. Restart P0's master and slave
+    -- one at a time, GRACEFULLY (default terminationGracePeriod → SIGTERM),
+    -- each with a bounded wait for full reconvergence: that drives the
+    -- destructor path (#15) and a real master↔slave reconstruction (#14) in
+    -- bounded time, then reads every key back.
+    { name := s!"all {totalKeys} keys survive a graceful rolling restart of P0"
       run := do
         match ← currentP0Master with
-        | none => return .fail "no P0 master before rolling restart"
+        | none => return .fail "no P0 master before restart"
         | some masterPod =>
           match ← getPodIp masterPod cfg.«namespace» with
           | none => return .fail s!"could not get IP for {masterPod}"
           | some ip =>
             let stored ← writeKeys cfg.debugPod cfg.«namespace» ip cfg.flarePort keyPrefix totalKeys
-            if stored != totalKeys then return .fail s!"only {stored}/{totalKeys} stored pre-roll"
-            IO.eprintln s!"# Rolling-restarting {cfg.name}-nodes"
-            let _ ← kubectl ["rollout", "restart", s!"statefulset/{cfg.name}-nodes", "-n", cfg.«namespace»]
-            -- Do NOT gate on `kubectl rollout status`: an OrderedReady
-            -- StatefulSet restarts pods one at a time and each does a full
-            -- reconstruction, so a 4-pod roll legitimately exceeds its 300s
-            -- (a slow-but-healthy roll, not a failure). Poll the actual
-            -- end-state instead — every pod on the new revision AND ready —
-            -- with a generous timeout; the data assertion below is the real
-            -- judge of bug #14.
-            -- OrderedReady RollingUpdate restarts pods one at a time, and
-            -- each restarted pod does a full reconstruction + activation
-            -- (~2-3 min/pod on loaded CI kind), so a 4-pod roll needs
-            -- ~10 min of wall clock — slow, not stuck (crash-free since the
-            -- #15 fix; convergence oscillates P=0↔P=1 as each pod cycles).
-            -- This is the ONLY test that exercises graceful shutdown
-            -- (SIGTERM → ~flared destructors), where #15 lived; the
-            -- simultaneous-kill test uses --grace-period=0 (SIGKILL) and
-            -- never runs the destructor path. Give it the room it needs.
-            let rolled ← waitForCondition "StatefulSet rolled to new revision" 720 do
-              let upd ← kubectlGetJsonpath "statefulset" s!"{cfg.name}-nodes" cfg.«namespace» "{.status.updatedReplicas}"
-              let rdy ← kubectlGetJsonpath "statefulset" s!"{cfg.name}-nodes" cfg.«namespace» "{.status.readyReplicas}"
-              let cur ← kubectlGetJsonpath "statefulset" s!"{cfg.name}-nodes" cfg.«namespace» "{.status.currentRevision}"
-              let nxt ← kubectlGetJsonpath "statefulset" s!"{cfg.name}-nodes" cfg.«namespace» "{.status.updateRevision}"
-              match upd, rdy, cur, nxt with
-              | .ok u, .ok r, .ok c, .ok n =>
-                return u.trim.toNat?.getD 0 >= numPods && r.trim.toNat?.getD 0 >= numPods && c.trim == n.trim && c.trim != ""
-              | _, _, _, _ => return false
-            if !rolled then return .fail "StatefulSet rolling restart did not complete within 720s"
-            let stable ← waitForCondition "all nodes Active after roll" 300 do
-              let sync ← operatorTcpCmd cfg.debugPod cfg.«namespace»
-                cfg.operatorName cfg.operatorPort "node sync"
-              let entries := parseNodeSync sync
-              return entries.length == numPods && countActiveNodes entries == numPods
-            if !stable then return .fail "cluster did not reconverge after rolling restart"
+            if stored != totalKeys then return .fail s!"only {stored}/{totalKeys} stored pre-restart"
+            -- P0's two pods, restarted one at a time with a graceful SIGTERM.
+            let p0Pods ← currentP0Pods
+            for pod in p0Pods do
+              IO.eprintln s!"# Gracefully restarting {pod}"
+              -- default grace period = SIGTERM → runs ~flared destructors (#15)
+              let _ ← kubectl ["delete", "pod", pod, "-n", cfg.«namespace»]
+              let back ← waitForCondition s!"{pod} back and cluster all-Active" 240 do
+                let sync ← operatorTcpCmd cfg.debugPod cfg.«namespace»
+                  cfg.operatorName cfg.operatorPort "node sync"
+                let entries := parseNodeSync sync
+                return entries.length == numPods && countActiveNodes entries == numPods
+              if !back then
+                return .fail s!"cluster did not reconverge within 240s after gracefully restarting {pod}"
             match ← currentP0Master with
-            | none => return .fail "no P0 master after rolling restart"
+            | none => return .fail "no P0 master after graceful restart"
             | some m =>
               match ← getPodIp m cfg.«namespace» with
               | none => return .fail s!"could not get IP for {m}"

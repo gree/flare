@@ -109,6 +109,20 @@ flared::flared():
  *	dtor for flared
  */
 flared::~flared() {
+	// Tear cluster_replication down FIRST, while its thread pool and the
+	// cluster are still alive. _cluster_replication is a shared_ptr member;
+	// left to itself it is destroyed only AFTER this dtor body returns, at
+	// which point _other_thread_pool (the pool it holds as _thread_pool) has
+	// already been delete'd below — so ~cluster_replication()->stop() would
+	// walk a freed thread pool and abort with "pure virtual method called".
+	// Stopping and releasing it here, before those deletes, keeps every
+	// pointer it touches valid. stop() is a no-op when replication was never
+	// started; when it was, this is the only place it can be stopped safely.
+	if (this->_cluster_replication) {
+		this->_cluster_replication->stop();
+		this->_cluster_replication.reset();
+	}
+
 	delete this->_storage;
 	this->_storage = NULL;
 

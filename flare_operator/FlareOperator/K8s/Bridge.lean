@@ -376,6 +376,9 @@ structure LeaseInfo where
   /-- metadata.resourceVersion at read time — the optimistic-concurrency
       token for takeover (see acquireLease). -/
   resourceVersion : String := ""
+  /-- spec.leaseTransitions: the leadership GENERATION. Incremented by
+      every takeover; the fencing token (see Main's version composition). -/
+  transitions : Nat := 0
   deriving Repr, BEq
 
 /-- Get lease info including expiry check.
@@ -390,17 +393,18 @@ def getLease (leaseName ns : String) : IO (Except String LeaseInfo) := do
     let result ← IO.Process.output {
       cmd := "timeout"
       args := #["-k", "5", "30", "sh", "-c",
-        s!"OUT=$(kubectl get lease {leaseName} -n {ns} -o jsonpath='\{.spec.holderIdentity}\{\"|\"}\{.spec.leaseDurationSeconds}\{\"|\"}\{.spec.renewTime}\{\"|\"}\{.metadata.resourceVersion}') || exit 1; RENEW=$(printf %s \"$OUT\" | cut -d'|' -f3); RENEW_EPOCH=$(date -d \"$RENEW\" +%s 2>/dev/null || echo 0); NOW_EPOCH=$(date -u +%s); echo \"$OUT|$((NOW_EPOCH - RENEW_EPOCH))\""]
+        s!"OUT=$(kubectl get lease {leaseName} -n {ns} -o jsonpath='\{.spec.holderIdentity}\{\"|\"}\{.spec.leaseDurationSeconds}\{\"|\"}\{.spec.renewTime}\{\"|\"}\{.metadata.resourceVersion}\{\"|\"}\{.spec.leaseTransitions}') || exit 1; RENEW=$(printf %s \"$OUT\" | cut -d'|' -f3); RENEW_EPOCH=$(date -d \"$RENEW\" +%s 2>/dev/null || echo 0); NOW_EPOCH=$(date -u +%s); echo \"$OUT|$((NOW_EPOCH - RENEW_EPOCH))\""]
     }
     if result.exitCode != 0 then
       return .error s!"getLease failed (exit {result.exitCode}): {result.stderr}"
     let parts := result.stdout.trim.splitOn "|"
     match parts with
-    | [holder, durStr, _renew, rv, ageStr] =>
+    | [holder, durStr, _renew, rv, transStr, ageStr] =>
       let dur := durStr.trim.toNat?.getD 15
       let age := ageStr.trim.toNat?.getD 0
       return .ok { holderIdentity := holder.trim, leaseDurationSeconds := dur,
-                   expired := age ≥ dur, resourceVersion := rv.trim }
+                   expired := age ≥ dur, resourceVersion := rv.trim,
+                   transitions := transStr.trim.toNat?.getD 0 }
     | _ => return .error s!"unexpected getLease output: {result.stdout}"
   catch e =>
     return .error s!"getLease error: {e}"
@@ -414,7 +418,7 @@ def createLease (leaseName ns identity : String) (durationSec : Nat) : IO (Excep
     let result ← IO.Process.output {
       cmd := "timeout"
       args := #["-k", "5", "30", "sh", "-c",
-        s!"echo 'apiVersion: coordination.k8s.io/v1\nkind: Lease\nmetadata:\n  name: {leaseName}\n  namespace: {ns}\nspec:\n  holderIdentity: {identity}\n  leaseDurationSeconds: {durationSec}\n  acquireTime: \"{now}\"\n  renewTime: \"{now}\"' | kubectl create -f -"]
+        s!"echo 'apiVersion: coordination.k8s.io/v1\nkind: Lease\nmetadata:\n  name: {leaseName}\n  namespace: {ns}\nspec:\n  holderIdentity: {identity}\n  leaseDurationSeconds: {durationSec}\n  leaseTransitions: 1\n  acquireTime: \"{now}\"\n  renewTime: \"{now}\"' | kubectl create -f -"]
     }
     if result.exitCode == 0 then
       return .ok ()
@@ -447,11 +451,14 @@ def renewLease (leaseName ns identity : String) : IO (Except String Unit) := do
     the old test passed even after the holder had just renewed — external
     review P1-2.) The holder test is kept as defense in depth. -/
 def acquireLease (leaseName ns newIdentity oldIdentity resourceVersion : String)
-    (durationSec : Nat) : IO (Except String Unit) := do
+    (durationSec : Nat) (newTransitions : Nat := 0) : IO (Except String Unit) := do
   try
     let nowResult ← IO.Process.output { cmd := "date", args := #["-u", "+%Y-%m-%dT%H:%M:%S.000000Z"] }
     let now := nowResult.stdout.trim
-    let patch := s!"[\{\"op\":\"test\",\"path\":\"/metadata/resourceVersion\",\"value\":\"{resourceVersion}\"},\{\"op\":\"test\",\"path\":\"/spec/holderIdentity\",\"value\":\"{oldIdentity}\"},\{\"op\":\"replace\",\"path\":\"/spec/holderIdentity\",\"value\":\"{newIdentity}\"},\{\"op\":\"replace\",\"path\":\"/spec/renewTime\",\"value\":\"{now}\"},\{\"op\":\"replace\",\"path\":\"/spec/acquireTime\",\"value\":\"{now}\"},\{\"op\":\"replace\",\"path\":\"/spec/leaseDurationSeconds\",\"value\":{durationSec}}]"
+    -- leaseTransitions is the leadership GENERATION (fencing token):
+    -- bumped on every takeover, never on renewal. "add" upserts, so leases
+    -- created before this field existed are handled too.
+    let patch := s!"[\{\"op\":\"test\",\"path\":\"/metadata/resourceVersion\",\"value\":\"{resourceVersion}\"},\{\"op\":\"test\",\"path\":\"/spec/holderIdentity\",\"value\":\"{oldIdentity}\"},\{\"op\":\"replace\",\"path\":\"/spec/holderIdentity\",\"value\":\"{newIdentity}\"},\{\"op\":\"replace\",\"path\":\"/spec/renewTime\",\"value\":\"{now}\"},\{\"op\":\"replace\",\"path\":\"/spec/acquireTime\",\"value\":\"{now}\"},\{\"op\":\"replace\",\"path\":\"/spec/leaseDurationSeconds\",\"value\":{durationSec}},\{\"op\":\"add\",\"path\":\"/spec/leaseTransitions\",\"value\":{newTransitions}}]"
     let result ← kubectl ["patch", "lease", leaseName, "-n", ns, "--type=json", "-p", patch]
     match result with
     | .error e => return .error e

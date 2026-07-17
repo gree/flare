@@ -921,7 +921,7 @@ private def tryAcquireOrRenew (leaseName ns identity : String) : IO Bool := do
       | .error _ => return false
     else if lease.expired then
       -- Expired, try to take over
-      match ← acquireLease leaseName ns identity lease.holderIdentity lease.resourceVersion leaseDurationSeconds with
+      match ← acquireLease leaseName ns identity lease.holderIdentity lease.resourceVersion leaseDurationSeconds (lease.transitions + 1) with
       | .ok () => return true
       | .error _ => return false
     else
@@ -1054,6 +1054,28 @@ def main (args : List String) : IO Unit := do
       let loaded := loaded.rebuildPartitionMap
       stateRef.set loaded
       IO.eprintln s!"[flare-operator] loaded {loaded.nodeMap.length} nodes from ConfigMap (resuming at broadcast version {loaded.nodeMapVersion})"
+
+  -- FENCING: fold the leadership generation (Lease spec.leaseTransitions,
+  -- bumped on every takeover) into the broadcast version space:
+  --   version := max(resumed, generation * 2^32)
+  -- flared already ignores any node sync whose version is not newer than
+  -- the last it accepted, and that counter is persisted across our own
+  -- restarts — so with generation as the high bits, EVERY broadcast from a
+  -- deposed leader (lower generation ⇒ lower version, whatever its
+  -- counter) is rejected by any flared that has heard the new leader.
+  -- The dual-leader window (a hung iteration outliving the lease; an ack
+  -- landing on a dying leader) loses its ability to influence flared maps
+  -- — no wire-format change, old flared gets the fence for free. The low
+  -- 32 bits allow ~95 years of ticks per generation before overflow.
+  match ← getLease leaseName ns with
+  | .error e =>
+    IO.eprintln s!"[flare-operator] WARNING: could not read lease generation ({e}) — broadcasts stay in the resumed version space"
+  | .ok lease =>
+    let genBase := lease.transitions * 4294967296
+    let cur ← stateRef.get
+    if genBase > cur.nodeMapVersion then
+      stateRef.set { cur with nodeMapVersion := genBase }
+    IO.eprintln s!"[flare-operator] leadership generation {lease.transitions} — broadcast versions fenced at ≥ {max genBase cur.nodeMapVersion}"
   -- Fetch CRD BEFORE starting TCP server so META returns correct partition-size
   -- from the very first request. Without this, flared nodes connecting early
   -- would get partition-size=1 and operate in single-partition mode permanently.

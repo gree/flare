@@ -327,6 +327,15 @@ theorem nodeMapVersion_roundtrip :
       ∧ ((fromNodeMapData (serializeNodeMap roundtripSample)).nodeMap.lookup "i:12121").map (·.lastMasterOf) = some 0 := by
   native_decide
 
+/-- FENCING ARITHMETIC: any version from generation `g` (base g·2³² plus a
+    counter that stays below 2³²) is strictly below every version of
+    generation `g+1`. This is the whole correctness argument for the
+    broadcast fencing: flared's existing "ignore non-newer versions" gate
+    therefore rejects every broadcast of a deposed leader once it has
+    heard the successor. The counter bound holds for ~95 years of 5s ticks. -/
+theorem generation_fences (g v : Nat) (h : v < 4294967296) :
+    g * 4294967296 + v < (g + 1) * 4294967296 := by omega
+
 /-- Rebuild partitionMap deterministically from nodeMap.
     Scans all nodes and groups masters/slaves by partition index. -/
 def rebuildPartitionMap (state : FlareClusterState) : FlareClusterState :=

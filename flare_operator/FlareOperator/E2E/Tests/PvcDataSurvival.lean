@@ -182,9 +182,24 @@ def suite : TestSuite := {
             if stored != totalKeys then return .fail s!"only {stored}/{totalKeys} stored pre-roll"
             IO.eprintln s!"# Rolling-restarting {cfg.name}-nodes"
             let _ ← kubectl ["rollout", "restart", s!"statefulset/{cfg.name}-nodes", "-n", cfg.«namespace»]
-            let rolled ← kubectlRolloutStatus s!"statefulset/{cfg.name}-nodes" cfg.«namespace» 300
-            if !rolled then return .fail "StatefulSet rolling restart did not complete"
-            let stable ← waitForCondition "all nodes Active after roll" 180 do
+            -- Do NOT gate on `kubectl rollout status`: an OrderedReady
+            -- StatefulSet restarts pods one at a time and each does a full
+            -- reconstruction, so a 4-pod roll legitimately exceeds its 300s
+            -- (a slow-but-healthy roll, not a failure). Poll the actual
+            -- end-state instead — every pod on the new revision AND ready —
+            -- with a generous timeout; the data assertion below is the real
+            -- judge of bug #14.
+            let rolled ← waitForCondition "StatefulSet rolled to new revision" 420 do
+              let upd ← kubectlGetJsonpath "statefulset" s!"{cfg.name}-nodes" cfg.«namespace» "{.status.updatedReplicas}"
+              let rdy ← kubectlGetJsonpath "statefulset" s!"{cfg.name}-nodes" cfg.«namespace» "{.status.readyReplicas}"
+              let cur ← kubectlGetJsonpath "statefulset" s!"{cfg.name}-nodes" cfg.«namespace» "{.status.currentRevision}"
+              let nxt ← kubectlGetJsonpath "statefulset" s!"{cfg.name}-nodes" cfg.«namespace» "{.status.updateRevision}"
+              match upd, rdy, cur, nxt with
+              | .ok u, .ok r, .ok c, .ok n =>
+                return u.trim.toNat?.getD 0 >= numPods && r.trim.toNat?.getD 0 >= numPods && c.trim == n.trim && c.trim != ""
+              | _, _, _, _ => return false
+            if !rolled then return .fail "StatefulSet rolling restart did not complete within 420s"
+            let stable ← waitForCondition "all nodes Active after roll" 240 do
               let sync ← operatorTcpCmd cfg.debugPod cfg.«namespace»
                 cfg.operatorName cfg.operatorPort "node sync"
               let entries := parseNodeSync sync

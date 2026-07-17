@@ -18,7 +18,7 @@ flare は「パーティション分割 + master/slave 複製」の分散 KVS �
 
 この開発が避けようとしたのは結局4つである。各項目について「証明」
 「証明できない部分のテスト」「どちらも届かない残余」を分けて書く。
-後続の P1〜P5 対応表はこの4目標の実装明細である。
+後続の P1〜P6 対応表はこの4目標の実装明細である。
 
 ### 1. スプリットブレイン(所有権の分裂)
 
@@ -71,11 +71,37 @@ flare は「パーティション分割 + master/slave 複製」の分散 KVS �
   生きた replica(scenario3/4/5 定理)。復旧処理自身による喪失の禁止 —
   truncate の三重ゲートを仕様化し、**ゲートを外す変更はモデルのコンパイルが
   通らない**([`ungated_truncate_destroys_last_copy`](../flare_operator/FlareOperator/StateMachine/VerifiedSafety.lean#L237))
+- **証明した(配置)**: **各パーティションのコピーは可能な限り別 AZ に置く** —
+  slave 割当は「master と別 zone にある不足パーティション」を優先し
+  ([`findPartitionNeedingSlaveZoneAware`](../flare_operator/FlareOperator/StateMachine/Reconciler.lean#L151))、
+  **クロス zone 候補が1つでも存在すれば選ばれる配置は必ずクロス zone**
+  ([`findPartitionNeedingSlaveZoneAware_cross`](../flare_operator/FlareOperator/StateMachine/Reconciler.lean#L277))。
+  トポロジー不明時は旧来の盲目割当と**定義的に同一**
+  ([`findPartitionNeedingSlaveZoneAware_blind`](../flare_operator/FlareOperator/StateMachine/Reconciler.lean#L267)、`rfl` 証明)。
+  これは AZ ウォークスルーが前提にしている「配置は既にクロス AZ」を
+  **担保する性質そのもの**である
+- **証明した(自動修復)**: 恒久的に単一 zone に固まったパーティションを
+  自力で解消する — 違反 slave とクロス zone donor の slave を入れ替える
+  ([`applyZoneRepairSwap`](../flare_operator/FlareOperator/StateMachine/Reconciler.lean#L389))。
+  master は動かさないので **master 高々1の一般帰納にそのまま合成**
+  ([`applyZoneRepairSwap_cle`](../flare_operator/FlareOperator/StateMachine/GeneralSafety.lean#L401) が
+  [`stepGlobal_cle`](../flare_operator/FlareOperator/StateMachine/GeneralSafety.lean#L511) に入る)。
+  実際に観測した違反(2×3 で P0 全コピー同一 zone)を端到端で:
+  [`zone_repair_sees_violation`](../flare_operator/FlareOperator/StateMachine/VerifiedSafety.lean#L266) →
+  [`zone_repair_resolves`](../flare_operator/FlareOperator/StateMachine/VerifiedSafety.lean#L273)、
+  無損失ゲート([`zone_repair_requires_two_slaves`](../flare_operator/FlareOperator/StateMachine/VerifiedSafety.lean#L301):
+  replicas≥3 でのみ発動)と定常状態ゲート
+  ([`zone_repair_waits_for_steady_state`](../flare_operator/FlareOperator/StateMachine/VerifiedSafety.lean#L291))も定理化
 - **証明できずテストした**: ディスク上の実データの生存 — per-key 完全一致の
   読み戻し(data-survival)、パーティション全損からの PVC 復旧
   (pvc-data-survival)、論理破壊からの checkpoint 復元(backup-restore)。
-  「蘇らない」の側は削除伝播 E2E(G1/G2)が担保
-- **残余**: 論理破壊時の RPO はバックアップ間隔。分断少数派の書き込み(上記2)
+  「蘇らない」の側は削除伝播 E2E(G1/G2)が担保。zone 配置は実 dev クラスタ
+  でも実地確認済み(新 slave 2台が master と別 AZ に着地、単一 zone 検知が
+  違反中のみ発火)
+- **残余**: 論理破壊時の RPO はバックアップ間隔。分断少数派の書き込み(上記2)。
+  zone 配置は「役割」を分離するもので、**pod の物理配置**は K8s のスケジューラ
+  依存(`hostnameSpread` 制約で誘導するが、容量不足時は soft でベストエフォート)。
+  PVC が AZ 固定のため、既存 pod の AZ 移動は不可(修復は role の入替で行う)
 
 ## システムが保持する状態の全景
 
@@ -120,6 +146,7 @@ flare は「パーティション分割 + master/slave 複製」の分散 KVS �
 | 長期離脱ノードの復帰(離脱中の削除の伝播) | WAL 再生(短期)/ ゲート付き truncate+full dump(長期) | P3 定理(ゲートの仕様化)+ G1/G2 E2E |
 | 設定変更の伝播失敗(kubelet 遅延と SIGHUP の競合) | 伝播確認付き再 SIGHUP(tick 分割・非ブロッキング) | G10–G12 E2E |
 | 再構築中のノードの誤殺(大容量データで数時間 Prepare) | Prepare を dead 検出から除外 + 固着 watchdog(警報のみ) | E2E(暗黙)+ 運用アラート `FlarePrepareStuck` |
+| パーティションの全コピーが同一 AZ に集中(spread 制約は満たすが役割配置が偏る) | zone 考慮の slave 割当(クロス zone 優先)+ 恒久違反の自動修復(slave 入替)+ 単一 zone 検知の警報 | P6 定理群([`findPartitionNeedingSlaveZoneAware_cross`](../flare_operator/FlareOperator/StateMachine/Reconciler.lean#L277) / zone_repair_* )+ dev 実クラスタ確認 |
 | **選択的ネットワーク断(pod 生存・TCP のみ不通)** | tick ごと再送 + lease fence(**緩和のみ**) | **未カバー** — 明示的な残余リスク。ステージング障害注入で検証すべき項目 |
 
 最後の1行が「この表で唯一、検証列が弱いケース」であり、これを隠さないことが
@@ -128,8 +155,18 @@ flare は「パーティション分割 + master/slave 複製」の分散 KVS �
 ## ウォークスルー: AZ 障害の2形態で何が起こるか
 
 具体例で機構を追う。構成: 2 AZ(az-a / az-b)、2パーティション×2レプリカ。
-zone 分散制約により配置は P0-master(a), P0-slave(b), P1-master(b), P1-slave(a)。
+配置は P0-master(a), P0-slave(b), P1-master(b), P1-slave(a)。
 operator はレプリカ2(leader が a、standby が b)。breaker 閾値は既定 50%。
+
+**この「各パーティションが2 AZ にまたがる」配置は偶然ではなく保証されている**。
+K8s の spread 制約は pod を AZ 間に散らすだけで「どの pod が master/slave か」は
+決めない — 盲目割当では 2+2 の均等配置でも P0 の master と slave が同一 AZ に
+揃いうる(実際に dev で観測した)。operator の役割割当が pod→zone を見て
+「slave は master と別 zone のパーティションへ」割り当てることで初めて成立し、
+その保証が [`findPartitionNeedingSlaveZoneAware_cross`](../flare_operator/FlareOperator/StateMachine/Reconciler.lean#L277) 定理である
+(goal 4「データの安定性(配置)」参照)。恒久違反が残った場合は自動修復
+([`applyZoneRepairSwap`](../flare_operator/FlareOperator/StateMachine/Reconciler.lean#L389))が
+slave 入替で解消する。
 
 ### 形態1: AZ 片側の崩壊(az-b が丸ごと死ぬ)
 
@@ -221,13 +258,14 @@ P1 は az-a の slave と az-b の PVC の2箇所に残っており、**何も�
 | P3 | **Active な master はデータを保持している**(「空 master」の禁止 — P1 だけではこれを禁止できない点が本 PR 最大の学び) | 再構築前 truncate の三重ゲート(rocksdb かつ **slave ロール** かつ **ソース生存確認済み**、[`handler_reconstruction.cc`](../src/lib/handler_reconstruction.cc#L102-L146))+ Active 指定の役割変更は再構築しない([`cluster.cc`](../src/lib/cluster.cc#L1578-L1591)) | データ保全不変条件 [`activeMasterHoldsData`](../flare_operator/FlareOperator/StateMachine/GlobalModel.lean#L317) が failover/ゾンビ/幽霊の全シナリオで成立(`data_*_ok`)。truncate ゲートは仕様として定理化: [`truncate_gate_preserves_last_copy`](../flare_operator/FlareOperator/StateMachine/VerifiedSafety.lean#L230) と **[`ungated_truncate_destroys_last_copy`](../flare_operator/FlareOperator/StateMachine/VerifiedSafety.lean#L237)(ゲートを外す変更はモデルのコンパイルが通らない)** | pvc-data-survival / backup-restore(flush_all 全損→checkpoint から全キー復元) |
 | P4 | **新しい事実は古い計算に上書きされない**(pod の再登録を、古いスナップショットから計算した結果が「幽霊」として蘇生させない) | 登録エポック [`FlareNode.regEpoch`](../flare_operator/FlareOperator/StateMachine/K8sReconciler.lean#L345) + 「新しいエポック側が丸ごと勝つ」merge([`mergeNodeEntry`](../flare_operator/FlareOperator/StateMachine/K8sReconciler.lean#L345)) | [`ghost_not_resurrected`](../flare_operator/FlareOperator/StateMachine/VerifiedSafety.lean#L308)(バグをそのまま符号化した回帰定理)/ 併せて「登録は merge で消えない」[`mergeClusterState_preserves_keys`](../flare_operator/FlareOperator/StateMachine/K8sReconciler.lean#L540)(任意入力) | pvc-data-survival(この修正が green 化の決め手)/ operator-restart(operator 死→状態 reload の同一性) |
 | P5 | **過半死では何もしないのが正しい**(circuit breaker)、かつ**復旧は自動再開** | [`circuitBreakerDecision`](../flare_operator/FlareOperator/StateMachine/K8sReconciler.lean#L123)(閾値 50%)+ terminal 状態 `EmergencyPaused` | 閾値以上で必ずトリップ [`circuitBreakerDecision_trips`](../flare_operator/FlareOperator/StateMachine/K8sReconciler.lean#L143) / 未満では絶対にトリップしない [`_no_trip`](../flare_operator/FlareOperator/StateMachine/K8sReconciler.lean#L154) / **トリップ中 FSM は状態も要求も一切出さない** [`emergencyPaused_inert`](../flare_operator/FlareOperator/StateMachine/K8sReconciler.lean#L864) | circuit-breaker suite(持続的過半死→トリップ→**15秒2点サンプルでチャーンなし**→容量復帰→operator 再起動なしで回復) |
+| P6 | **各パーティションのコピーは可能な限り別 AZ に置き、固まったら自力で戻す**(単一 AZ 障害で全コピーを失わない — spread 制約が置くのは pod、master/slave の役割を置くのは operator) | slave 割当が pod→zone を見て「master と別 zone の不足パーティション」を優先 [`findPartitionNeedingSlaveZoneAware`](../flare_operator/FlareOperator/StateMachine/Reconciler.lean#L151) / 恒久違反を slave 入替で解消 [`applyZoneRepairSwap`](../flare_operator/FlareOperator/StateMachine/Reconciler.lean#L389)(検知 [`partitionsInSingleZone`](../flare_operator/FlareOperator/StateMachine/Reconciler.lean#L325)) | **クロス zone 可能なら必ずクロス zone** [`findPartitionNeedingSlaveZoneAware_cross`](../flare_operator/FlareOperator/StateMachine/Reconciler.lean#L277) / トポロジー不明時は旧割当と定義的に同一 [`findPartitionNeedingSlaveZoneAware_blind`](../flare_operator/FlareOperator/StateMachine/Reconciler.lean#L267)(`rfl`)/ 修復は master を動かさず P1 帰納に合成 [`applyZoneRepairSwap_cle`](../flare_operator/FlareOperator/StateMachine/GeneralSafety.lean#L401) / 端到端 [`zone_repair_sees_violation`](../flare_operator/FlareOperator/StateMachine/VerifiedSafety.lean#L266)→[`zone_repair_resolves`](../flare_operator/FlareOperator/StateMachine/VerifiedSafety.lean#L273) + 無損失/定常ゲート定理 | dev 実クラスタで実地確認(新 slave 2台が master と別 AZ、単一 zone 検知が違反中のみ発火→解消後停止)。kind e2e は zone ラベルなし=盲目 fallback を実行(後方互換の確認) |
 
 E2E は計 22 スイート 125 テスト(kind 上の実 StatefulSet + 実 flared)。上記のほか、
 スケール操作(out/in)、Blue/Green 移行、WAL 増分同期、設定伝播、バックアップ/リストア
 を網羅する。全スイートに「失敗時に operator/flared のログを teardown 前に採取する」
 診断フックが入っており、flake は再現ログ付きで届く。
 
-## 形式手法が実際に働いた代表例(5件)
+## 形式手法が実際に働いた代表例(6件)
 
 **1. ゾンビ master(モデルが実環境より先に発見)**
 「プロセスだけ再起動した空の旧 master が、failover を経ずに master に返り咲く」
@@ -275,6 +313,19 @@ operator の起動猶予中(dead 検出停止中)に再登録すると、自分�
 復位 master がデータを保持)として封印した。**モデルが正しい修正の形を
 先に決め、実装がそれに従った**最も鮮明な例である。
 
+**6. 実クラスタが「証明の前提の綻び」を見せた(全コピー同一 AZ 配置)**
+dev クラスタの実配置を調べると、AZ ウォークスルーが暗黙に仮定していた
+「各パーティションが2 AZ にまたがる」が**成立していなかった** — P0 の master も
+slave も同じ AZ に載っていた。K8s の spread 制約は pod 数を AZ 間で均すだけで
+役割を知らないため、2+2 の均等配置でも同居しうる。これは証明の「嘘」ではなく
+**証明していなかった性質**(P1 が「空 master でも成立」だったのと同型の学び)。
+対処は役割割当をトポロジー考慮にし、**クロス zone 可能なら必ずクロス zone**を
+定理化([`findPartitionNeedingSlaveZoneAware_cross`](../flare_operator/FlareOperator/StateMachine/Reconciler.lean#L277))、恒久違反の自動修復を
+master 高々1の一般帰納に合成([`applyZoneRepairSwap_cle`](../flare_operator/FlareOperator/StateMachine/GeneralSafety.lean#L401))。
+実クラスタでの検証がモデルの想定漏れを露呈させ、その修正をまた定理化した
+——「モデル ⇄ 実機」の往復が形式手法を実用に留める、というこの資料全体の
+主張の最新の実例である。
+
 ## Q. なぜ「証明したもの」と「動くもの」が同一だと言えるのか
 
 この資料が受けるべき最初の疑いなので、機構・確認手順・限界を明示する。
@@ -302,7 +353,7 @@ grep -n "K8sReconciler.mergeClusterState" flare_operator/FlareOperator/Main.lean
 grep -n "root := \`FlareOperator.Main" flare_operator/lakefile.lean
 ```
 
-P1〜P5 すべて同じ手順で突合できる(対応表のコード列・定理列がその対の一覧)。
+P1〜P6 すべて同じ手順で突合できる(対応表のコード列・定理列がその対の一覧)。
 
 **強制機構**: 定義が共有されているため、実装側を変更すると定理は自動的に
 再検査され、性質を破る変更は**ビルドエラー**になる。CI はライブラリ全体
@@ -367,7 +418,7 @@ IO シェルは薄い。将来 Go 等へ移植する場合も「pure core を分
 
 ## レビューワーへの提案
 
-P1〜P5 の各行について「コード列の関数を開き、定理列の言明がその関数を
+P1〜P6 の各行について「コード列の関数を開き、定理列の言明がその関数を
 対象にしていること、E2E 列のテストがその性質を assert していること」を
 1行ずつ突合するのが、flare の内部知識なしで本 PR を検証する最短経路である。
 

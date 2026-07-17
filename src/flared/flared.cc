@@ -516,7 +516,16 @@ int flared::reload() {
 
 			this->_cluster_replication->start(cl_repl_server_name, cl_repl_server_port, cl_repl_concurrency,
 				   this->_storage, this->_cluster);
-		} else {
+		} else if (this->_cluster_replication->is_started()) {
+			// Only stop what was actually started. reload() runs on every
+			// SIGHUP, and the operator SIGHUPs a lot during churn (rolling
+			// restart); calling stop() unconditionally drove
+			// _stop_dump_replication over a recycling/tearing-down thread
+			// set and crashed flared with "pure virtual method called"
+			// (observed on a rolling restart, bug #15). Guarding on
+			// is_started() matches the start-side reconfigure branch above
+			// and makes a disabled-replication reload a no-op instead of a
+			// repeated teardown.
 			this->_cluster_replication->stop();
 		}
 	}

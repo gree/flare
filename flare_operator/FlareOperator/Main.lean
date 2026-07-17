@@ -971,6 +971,19 @@ def main (args : List String) : IO Unit := do
         IO.eprintln s!"[flare-operator] managing FlareCluster '{name}'"
         pure name
 
+  -- 1-operator = 1-namespace/1-cluster is a hard design assumption: this
+  -- process serves the flarei protocol for exactly ONE FlareCluster. A CR
+  -- with any other name in this namespace is silently ignored by design —
+  -- but silence misleads (the chart's README once told users to create a
+  -- differently-named CR that nothing would ever manage; external review
+  -- P1-1). Say it loudly at startup.
+  match ← listFlareClusters ns with
+  | .error _ => pure ()
+  | .ok crs =>
+    for (otherName, _) in crs do
+      if otherName != crName then
+        IO.eprintln s!"[flare-operator] WARNING: FlareCluster '{otherName}' exists in namespace '{ns}' but this operator only manages '{crName}' (clusterName in the helm values). It will be IGNORED — deploy a second operator release or fix clusterName."
+
   let leaseName := s!"{crName}-operator-lease"
 
   -- The health server must be up BEFORE the follower loop: a standby

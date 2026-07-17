@@ -1,4 +1,11 @@
 {{- if .Values.cluster.enabled }}
+{{- /* The operator manages exactly one FlareCluster: the one named by
+       .Values.clusterName in .Values.namespace. Rendering a managed
+       cluster under any other name would create a CR the operator
+       ignores — fail at template time instead. */}}
+{{- if and .Values.clusterName (ne .Values.cluster.name .Values.clusterName) }}
+{{- fail (printf "cluster.name (%s) must equal clusterName (%s): the operator only manages the FlareCluster named clusterName" .Values.cluster.name .Values.clusterName) }}
+{{- end }}
 {{- $c := .Values.cluster }}
 {{- $ns := .Values.namespace }}
 {{- /* flared mounts /etc/flared/extra.conf and exits immediately if the

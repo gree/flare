@@ -81,20 +81,41 @@ The following table lists the configurable parameters of the Flare Operator char
 
 ## Creating a Flare Cluster
 
-After installing the operator, you can create a Flare cluster by creating a FlareCluster custom resource:
+**One operator release manages exactly one FlareCluster**: the CR named by
+`clusterName` (default `default`) in `namespace` (default `flare-system`).
+A CR with any other name or namespace is ignored (the operator logs a
+WARNING for such CRs at startup). To run several clusters, install several
+operator releases with distinct `namespace`/`clusterName` values.
+
+The recommended path is to let the chart own the whole stack — CR,
+StatefulSet, PDB and Services — by enabling the managed cluster:
+
+```bash
+helm install flare ./helm/flare-operator -n flare-system --create-namespace \
+  --set cluster.enabled=true \
+  --set cluster.partitions=4 \
+  --set cluster.replicas=2
+```
+
+If you prefer to manage the CR yourself, it MUST match the operator's
+namespace and clusterName:
 
 ```yaml
 apiVersion: flare.gree.net/v1alpha1
 kind: FlareCluster
 metadata:
-  name: my-flare-cluster
-  namespace: default
+  name: default        # = clusterName in the helm values
+  namespace: flare-system  # = namespace in the helm values
 spec:
   partitions: 4
   replicas: 2
 ```
 
-This will create a Flare cluster with 4 partitions and 2 replicas per partition (1 master + 1 slave).
+Note that the CR alone does not create any pods: the operator assigns
+roles to flared nodes that register with it, but the flared pods
+themselves come from the chart's managed StatefulSet
+(`cluster.enabled=true`) or from a StatefulSet you deploy yourself
+(see below).
 
 ### Deploy Flare Nodes
 

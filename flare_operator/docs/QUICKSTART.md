@@ -33,23 +33,19 @@ flare-operator-xxxxxxxxxx-xxxxx   1/1     Running   0          30s
 
 ## Step 2: Deploy a Flare Cluster
 
-Create a cluster definition file `cluster.yaml`:
+One operator release manages exactly one FlareCluster — the CR named by
+the chart's `clusterName` (default `default`) in its `namespace`
+(default `flare-system`); differently-named CRs are ignored with a
+startup WARNING. The CR alone does not create pods: the flared
+StatefulSet comes from the chart's managed cluster.
 
-```yaml
-apiVersion: flare.gree.net/v1
-kind: FlareCluster
-metadata:
-  name: my-cluster
-  namespace: default
-spec:
-  partitions: 2    # Number of partitions
-  replicas: 2      # Replicas per partition (master + slaves)
-```
-
-Apply the cluster:
+Enable the managed cluster (CR + StatefulSet + PDB + Services in one go):
 
 ```bash
-kubectl apply -f cluster.yaml
+helm upgrade flare ./helm/flare-operator -n flare-system \
+  --set cluster.enabled=true \
+  --set cluster.partitions=2 \
+  --set cluster.replicas=2
 ```
 
 ## Step 3: Verify Cluster is Ready
@@ -57,16 +53,16 @@ kubectl apply -f cluster.yaml
 Wait for all pods to be ready:
 
 ```bash
-kubectl get pods -l app=flare,cluster=my-cluster
+kubectl get pods -n flare-system -l app=flare,cluster=default
 ```
 
 Expected output (4 pods for 2 partitions × 2 replicas):
 ```
-NAME                 READY   STATUS    RESTARTS   AGE
-my-cluster-nodes-0   1/1     Running   0          1m
-my-cluster-nodes-1   1/1     Running   0          1m
-my-cluster-nodes-2   1/1     Running   0          1m
-my-cluster-nodes-3   1/1     Running   0          1m
+NAME              READY   STATUS    RESTARTS   AGE
+default-nodes-0   1/1     Running   0          1m
+default-nodes-1   1/1     Running   0          1m
+default-nodes-2   1/1     Running   0          1m
+default-nodes-3   1/1     Running   0          1m
 ```
 
 Check cluster status:
@@ -80,7 +76,7 @@ kubectl get flarecluster my-cluster
 Connect to any pod to test writes:
 
 ```bash
-kubectl exec -it my-cluster-nodes-0 -- sh
+kubectl exec -it default-nodes-0 -- sh
 ```
 
 Inside the pod, test setting keys:
@@ -104,10 +100,10 @@ Check distribution across partitions:
 
 ```bash
 # Connect to P0 master
-printf "stats\r\n" | nc my-cluster-nodes-0 12121 | grep curr_items
+printf "stats\r\n" | nc default-nodes-0 12121 | grep curr_items
 
 # Connect to P1 master
-printf "stats\r\n" | nc my-cluster-nodes-1 12121 | grep curr_items
+printf "stats\r\n" | nc default-nodes-1 12121 | grep curr_items
 ```
 
 Expected output (approximately even distribution):
@@ -121,7 +117,7 @@ STAT curr_items 5    # P1
 Delete the P0 master pod:
 
 ```bash
-kubectl delete pod my-cluster-nodes-0
+kubectl delete pod default-nodes-0
 ```
 
 Watch for automatic failover:
@@ -140,7 +136,7 @@ Expected logs:
 Verify new master is elected:
 
 ```bash
-kubectl get pods -l app=flare,cluster=my-cluster
+kubectl get pods -l app=flare,cluster=default
 ```
 
 After ~15 seconds, the deleted pod will restart and rejoin as a slave.
@@ -158,7 +154,7 @@ kubectl patch flarecluster my-cluster --type=merge -p '{"spec":{"partitions":3}}
 Watch the operator create new pods:
 
 ```bash
-kubectl get pods -l app=flare,cluster=my-cluster -w
+kubectl get pods -l app=flare,cluster=default -w
 ```
 
 ### Scale Up Replicas
@@ -197,7 +193,7 @@ Key log patterns:
 
 Check pod logs:
 ```bash
-kubectl logs my-cluster-nodes-0
+kubectl logs default-nodes-0
 ```
 
 Common issues:

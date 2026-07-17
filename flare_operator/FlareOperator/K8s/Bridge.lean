@@ -373,25 +373,34 @@ structure LeaseInfo where
   holderIdentity : String
   leaseDurationSeconds : Nat
   expired : Bool
+  /-- metadata.resourceVersion at read time — the optimistic-concurrency
+      token for takeover (see acquireLease). -/
+  resourceVersion : String := ""
   deriving Repr, BEq
 
 /-- Get lease info including expiry check.
     Uses shell date arithmetic to determine if the lease has expired. -/
 def getLease (leaseName ns : String) : IO (Except String LeaseInfo) := do
   try
+    -- ONE kubectl GET for every field (holder, duration, renewTime,
+    -- resourceVersion): the previous three separate reads were not a
+    -- consistent snapshot — holder/renewTime could come from different
+    -- lease generations. resourceVersion from this same read is the
+    -- optimistic-concurrency token a takeover must present (review P1-2).
     let result ← IO.Process.output {
       cmd := "timeout"
       args := #["-k", "5", "30", "sh", "-c",
-        s!"HOLDER=$(kubectl get lease {leaseName} -n {ns} -o jsonpath='\{.spec.holderIdentity}') && DUR=$(kubectl get lease {leaseName} -n {ns} -o jsonpath='\{.spec.leaseDurationSeconds}') && RENEW=$(kubectl get lease {leaseName} -n {ns} -o jsonpath='\{.spec.renewTime}') && RENEW_EPOCH=$(date -d \"$RENEW\" +%s 2>/dev/null || echo 0) && NOW_EPOCH=$(date -u +%s) && if [ $((NOW_EPOCH - RENEW_EPOCH)) -ge \"$DUR\" ]; then EXP=true; else EXP=false; fi && echo \"$HOLDER|$DUR|$EXP\""]
+        s!"OUT=$(kubectl get lease {leaseName} -n {ns} -o jsonpath='\{.spec.holderIdentity}\{\"|\"}\{.spec.leaseDurationSeconds}\{\"|\"}\{.spec.renewTime}\{\"|\"}\{.metadata.resourceVersion}') || exit 1; RENEW=$(printf %s \"$OUT\" | cut -d'|' -f3); RENEW_EPOCH=$(date -d \"$RENEW\" +%s 2>/dev/null || echo 0); NOW_EPOCH=$(date -u +%s); echo \"$OUT|$((NOW_EPOCH - RENEW_EPOCH))\""]
     }
     if result.exitCode != 0 then
       return .error s!"getLease failed (exit {result.exitCode}): {result.stderr}"
     let parts := result.stdout.trim.splitOn "|"
     match parts with
-    | [holder, durStr, expStr] =>
+    | [holder, durStr, _renew, rv, ageStr] =>
       let dur := durStr.trim.toNat?.getD 15
-      let expired := expStr.trim == "true"
-      return .ok { holderIdentity := holder.trim, leaseDurationSeconds := dur, expired := expired }
+      let age := ageStr.trim.toNat?.getD 0
+      return .ok { holderIdentity := holder.trim, leaseDurationSeconds := dur,
+                   expired := age ≥ dur, resourceVersion := rv.trim }
     | _ => return .error s!"unexpected getLease output: {result.stdout}"
   catch e =>
     return .error s!"getLease error: {e}"
@@ -429,13 +438,20 @@ def renewLease (leaseName ns identity : String) : IO (Except String Unit) := do
     return .error s!"renewLease error: {e}"
 
 /-- Acquire an expired lease using JSON Patch with test-and-set.
-    Tests that holderIdentity matches oldIdentity to prevent race conditions. -/
-def acquireLease (leaseName ns newIdentity oldIdentity : String) (durationSec : Nat)
-    : IO (Except String Unit) := do
+
+    The precondition is the lease's metadata.resourceVersion from the SAME
+    read that judged it expired: any write in between — in particular the
+    old holder renewing at the last moment — bumps the resourceVersion and
+    makes this patch fail, so a live lease can never be stolen. (Testing
+    only holderIdentity was racy: a renewal does not change the holder, so
+    the old test passed even after the holder had just renewed — external
+    review P1-2.) The holder test is kept as defense in depth. -/
+def acquireLease (leaseName ns newIdentity oldIdentity resourceVersion : String)
+    (durationSec : Nat) : IO (Except String Unit) := do
   try
     let nowResult ← IO.Process.output { cmd := "date", args := #["-u", "+%Y-%m-%dT%H:%M:%S.000000Z"] }
     let now := nowResult.stdout.trim
-    let patch := s!"[\{\"op\":\"test\",\"path\":\"/spec/holderIdentity\",\"value\":\"{oldIdentity}\"},\{\"op\":\"replace\",\"path\":\"/spec/holderIdentity\",\"value\":\"{newIdentity}\"},\{\"op\":\"replace\",\"path\":\"/spec/renewTime\",\"value\":\"{now}\"},\{\"op\":\"replace\",\"path\":\"/spec/acquireTime\",\"value\":\"{now}\"},\{\"op\":\"replace\",\"path\":\"/spec/leaseDurationSeconds\",\"value\":{durationSec}}]"
+    let patch := s!"[\{\"op\":\"test\",\"path\":\"/metadata/resourceVersion\",\"value\":\"{resourceVersion}\"},\{\"op\":\"test\",\"path\":\"/spec/holderIdentity\",\"value\":\"{oldIdentity}\"},\{\"op\":\"replace\",\"path\":\"/spec/holderIdentity\",\"value\":\"{newIdentity}\"},\{\"op\":\"replace\",\"path\":\"/spec/renewTime\",\"value\":\"{now}\"},\{\"op\":\"replace\",\"path\":\"/spec/acquireTime\",\"value\":\"{now}\"},\{\"op\":\"replace\",\"path\":\"/spec/leaseDurationSeconds\",\"value\":{durationSec}}]"
     let result ← kubectl ["patch", "lease", leaseName, "-n", ns, "--type=json", "-p", patch]
     match result with
     | .error e => return .error e

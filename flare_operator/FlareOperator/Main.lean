@@ -918,7 +918,7 @@ private def tryAcquireOrRenew (leaseName ns identity : String) : IO Bool := do
       | .error _ => return false
     else if lease.expired then
       -- Expired, try to take over
-      match ← acquireLease leaseName ns identity lease.holderIdentity leaseDurationSeconds with
+      match ← acquireLease leaseName ns identity lease.holderIdentity lease.resourceVersion leaseDurationSeconds with
       | .ok () => return true
       | .error _ => return false
     else

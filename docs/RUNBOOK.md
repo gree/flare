@@ -115,6 +115,51 @@ and events; fix the underlying cause. Churn is safe for data (promotion
 only ever selects live, data-bearing replicas) but each cycle costs
 reconstruction bandwidth.
 
+## Replacing a node with corrupt data {#replace-corrupt}
+
+To service out a node whose local data looks corrupt and rebuild it from a
+healthy peer.
+
+**CRITICAL — wipe the local data first.** `kubectl delete pod` alone keeps
+the PVC, so the corrupt RocksDB comes back. Worse, WAL-first reconstruction
+sees the intact `__flare_repl_last_lsn`/`__flare_repl_master_id` and applies
+only the delta *on top of the corruption* — it does not repair it. You must
+empty the node so it falls back to a full dump from a healthy master
+(`last_lsn=0` → WAL path skipped → full dump with the gated truncate). While
+rebuilding, the node is Prepare / balance 0 and serves no reads, so the
+corrupt copy is never exposed.
+
+**Case A — a SLAVE is corrupt** (its partition still has a healthy master):
+
+```bash
+CTX="--context <ctx>"; NS=flare-system
+kubectl $CTX -n $NS exec default-nodes-<N> -- sh -c 'rm -rf /data/flare/flare.rocksdb'
+kubectl $CTX -n $NS delete pod default-nodes-<N>       # restarts empty → full dump from master
+```
+Wait for the operator to report `P=0` again. (To recycle the whole volume
+instead: `delete pod` → `delete pvc data-default-nodes-<N>` → `delete pod`;
+the StatefulSet recreates an empty PVC and pod.)
+
+**Case B — a MASTER is corrupt.** Promote a healthy slave FIRST, or the
+other slaves rebuild from the corrupt master and the corruption spreads:
+
+```bash
+# 1) confirm the partition has a healthy Active slave (stats nodes / node sync)
+# 2) graceful delete → operator promotes a live, data-bearing slave (zombie guard)
+kubectl $CTX -n $NS delete pod default-nodes-<masterN>
+# 3) once the old master rejoins as a slave, wipe + restart it (as Case A)
+kubectl $CTX -n $NS exec default-nodes-<masterN> -- sh -c 'rm -rf /data/flare/flare.rocksdb'
+kubectl $CTX -n $NS delete pod default-nodes-<masterN>
+```
+
+**Case C — every copy of a partition is corrupt.** There is no healthy peer
+to rebuild from; restore from a checkpoint (see Backup / Restore below).
+
+Safety: the full dump only ever pulls from a healthy master, and the #14
+truncate gate refuses to truncate toward an empty/not-newer source, so a
+wipe-and-rebuild cannot cascade emptiness; promotion always picks a
+data-bearing Active slave.
+
 ## Backup / Restore
 
 See docs/BACKUP_RESTORE.md for the full procedures (tier-1 checkpoints,

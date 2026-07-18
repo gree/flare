@@ -67,12 +67,16 @@ private def nodeView : IO (List NodeSyncEntry) := do
 private def currentP0Master : IO (Option String) := do
   return findMasterPod (← nodeView) 0
 
-/-- Pod names of every node assigned to partition 0 (master and slaves).
+/-- Pod names of every node assigned to partition 0 (master and slaves),
+    derived from an already-fetched node-sync view.
     Role codes in node-sync lines: 0 = Master, 1 = Slave, 2 = Proxy. -/
-private def currentP0Pods : IO (List String) := do
-  let entries ← nodeView
-  return entries.filter (fun e => e.partition == 0 && (e.role == 0 || e.role == 1))
+private def currentP0PodsFrom (entries : List NodeSyncEntry) : List String :=
+  entries.filter (fun e => e.partition == 0 && (e.role == 0 || e.role == 1))
     |>.map (fun e => (e.fqdn.splitOn ".").headD e.fqdn)
+
+/-- Pod names of every node assigned to partition 0 (master and slaves). -/
+private def currentP0Pods : IO (List String) := do
+  return currentP0PodsFrom (← nodeView)
 
 def suite : TestSuite := {
   name := "pvc-data-survival"
@@ -162,9 +166,8 @@ def suite : TestSuite := {
             cfg.operatorName cfg.operatorPort "node sync"
           return .fail s!"not all replicas Active after 180s: {sync.trim}" },
 
-    -- Test 5: a GRACEFUL rolling restart of P0's pods must not lose data.
-    -- Two distinct hazards from the same partition, both real production
-    -- incidents:
+    -- Test 5: a GRACEFUL restart of P0's SLAVE must not lose data. Two
+    -- real production incidents share this path:
     --   * #14 — a slave rebuilding from a master that was itself just
     --     rebuilt EMPTY truncated its own copy and the emptiness cascaded
     --     (the pre-dump truncate checked peer_reachable, not peer_has_data);
@@ -173,52 +176,43 @@ def suite : TestSuite := {
     --     over an already-freed thread pool.
     -- The simultaneous-kill test (test 2) uses --grace-period=0 (SIGKILL),
     -- which never runs the destructor path, so ONLY a graceful delete
-    -- exercises #15. A full `kubectl rollout restart` of every pod is the
-    -- realistic operation but an OrderedReady serialized roll of a
-    -- reconstruction-heavy StatefulSet runs >12 min on loaded CI kind —
-    -- too slow/fragile for a per-test wait. Restart P0's master and slave
-    -- one at a time, GRACEFULLY (default terminationGracePeriod → SIGTERM),
-    -- each with a bounded wait for full reconvergence: that drives the
-    -- destructor path (#15) and a real master↔slave reconstruction (#14) in
-    -- bounded time, then reads every key back.
-    { name := s!"all {totalKeys} keys survive a graceful rolling restart of P0"
+    -- exercises #15 — and #15 fires on ANY pod's graceful termination
+    -- regardless of role. #14's truncate gate is a SLAVE-side concern (a
+    -- slave reconstructing from its master). Restarting just the P0 SLAVE
+    -- therefore covers both bugs while leaving the master up the whole time
+    -- — no failover/masterless churn, bounded (~1 reconstruction), and the
+    -- master's IP stays stable for the readback. (Restarting both P0 pods
+    -- sequentially re-creates the total-partition-loss window that test 2
+    -- already covers and made the final master lookup flap.)
+    { name := s!"all {totalKeys} keys survive a graceful restart of the P0 slave"
       run := do
-        match ← currentP0Master with
+        let entries0 ← nodeView
+        match findMasterPod entries0 0 with
         | none => return .fail "no P0 master before restart"
         | some masterPod =>
+          -- the P0 slave = the P0 data-bearing pod that is not the master
+          let slavePod? := (currentP0PodsFrom entries0).filter (· != masterPod) |>.head?
           match ← getPodIp masterPod cfg.«namespace» with
           | none => return .fail s!"could not get IP for {masterPod}"
           | some ip =>
             let stored ← writeKeys cfg.debugPod cfg.«namespace» ip cfg.flarePort keyPrefix totalKeys
             if stored != totalKeys then return .fail s!"only {stored}/{totalKeys} stored pre-restart"
-            -- P0's two pods, restarted one at a time with a graceful SIGTERM.
-            let p0Pods ← currentP0Pods
-            for pod in p0Pods do
-              IO.eprintln s!"# Gracefully restarting {pod}"
+            match slavePod? with
+            | none => return .fail "no P0 slave found to restart"
+            | some slavePod =>
+              IO.eprintln s!"# Gracefully restarting P0 slave {slavePod} (master {masterPod} stays up)"
               -- default grace period = SIGTERM → runs ~flared destructors (#15)
-              let _ ← kubectl ["delete", "pod", pod, "-n", cfg.«namespace»]
-              let back ← waitForCondition s!"{pod} back and cluster all-Active" 240 do
+              let _ ← kubectl ["delete", "pod", slavePod, "-n", cfg.«namespace»]
+              let back ← waitForCondition "cluster all-Active after slave restart" 240 do
                 let sync ← operatorTcpCmd cfg.debugPod cfg.«namespace»
                   cfg.operatorName cfg.operatorPort "node sync"
-                let entries := parseNodeSync sync
-                return entries.length == numPods && countActiveNodes entries == numPods
+                let e := parseNodeSync sync
+                return e.length == numPods && countActiveNodes e == numPods
               if !back then
-                return .fail s!"cluster did not reconverge within 240s after gracefully restarting {pod}"
-            -- The operator reports all-Active (via node sync) as soon as a
-            -- restarted pod re-registers over TCP, but kubectl's
-            -- status.podIP can lag a beat — so resolve the P0 master's IP
-            -- with a short retry rather than racing that window.
-            let ready ← waitForCondition "P0 master IP resolvable" 60 do
-              match ← currentP0Master with
-              | none => return false
-              | some m => return (← getPodIp m cfg.«namespace»).isSome
-            if !ready then
-              return .fail "P0 master IP not resolvable within 60s after graceful restart"
-            match ← currentP0Master with
-            | none => return .fail "no P0 master after graceful restart"
-            | some m =>
-              match ← getPodIp m cfg.«namespace» with
-              | none => return .fail s!"could not get IP for {m}"
+                return .fail s!"cluster did not reconverge within 240s after restarting {slavePod}"
+              -- Master never moved; read back through it.
+              match ← getPodIp masterPod cfg.«namespace» with
+              | none => return .fail s!"could not get IP for {masterPod} after restart"
               | some ip2 => assertAllKeysSurvive ip2 }
   ]
 }

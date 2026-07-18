@@ -204,6 +204,16 @@ def suite : TestSuite := {
                 return entries.length == numPods && countActiveNodes entries == numPods
               if !back then
                 return .fail s!"cluster did not reconverge within 240s after gracefully restarting {pod}"
+            -- The operator reports all-Active (via node sync) as soon as a
+            -- restarted pod re-registers over TCP, but kubectl's
+            -- status.podIP can lag a beat — so resolve the P0 master's IP
+            -- with a short retry rather than racing that window.
+            let ready ← waitForCondition "P0 master IP resolvable" 60 do
+              match ← currentP0Master with
+              | none => return false
+              | some m => return (← getPodIp m cfg.«namespace»).isSome
+            if !ready then
+              return .fail "P0 master IP not resolvable within 60s after graceful restart"
             match ← currentP0Master with
             | none => return .fail "no P0 master after graceful restart"
             | some m =>

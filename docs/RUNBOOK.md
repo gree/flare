@@ -129,10 +129,49 @@ exporter).
   covered by the scale-out e2e suites. One reconstruction per partition at
   a time (proxy-pool throttling) is expected — patience, not a bug.
 - Scale IN partitions is BLOCKED by the operator on purpose (data loss
-  risk). Plan a migration instead.
+  risk). Reducing partitions in place orphans every key that hashes to a
+  removed partition. To reduce partitions (= reduce the number of
+  masters), do a shrink migration — see below.
 - Blue/green cluster migration: `spec.clusterReplication` — validate on
   staging first; see the failover-during-replication e2e for the tested
   failure mode.
+
+## Reducing masters / partitions (shrink migration) {#shrink}
+
+There is no in-place partition reduction (the operator refuses it). To go
+from N masters to M (M < N), migrate to a new, smaller cluster with
+`spec.clusterReplication` and cut over. Because one operator manages
+exactly one FlareCluster (namespace + clusterName), v1 and v2 are two
+separate helm releases; keys are re-hashed into v2's partition count by
+v2's own index, so v1(4 partitions) → v2(2) is fine.
+
+1. **Stand up v2** (the target size) in its own namespace/clusterName:
+   `helm install flare-v2 ./helm/flare-operator -n flare-v2 --create-namespace
+   --set namespace=flare-v2 --set clusterName=<v2> --set cluster.enabled=true
+   --set cluster.partitions=<M> --set cluster.replicas=<R>`. Wait for it to
+   converge (`nodes=… M=<M> … P=0`).
+2. **Start replication** on v1: patch its FlareCluster
+   `spec.clusterReplication` to `{enabled:true, serverName:<v2 nodes svc
+   FQDN>, port:12121, mode:"duplicate", concurrency:2}`. The operator drives
+   None→**Dumping** (bulk-copies v1's existing data to v2, re-hashed into M
+   partitions) then →**Forwarding** (v1 also mirrors live writes to v2).
+   Watch `status.migrationPhase`.
+3. **Verify data landed on v2** before cutover: sample keys on v2 and check
+   counts. This is the least-proven step — the cluster-replication e2e now
+   asserts a 2→1 shrink keeps every key, but VERIFY on your real data set.
+4. **Cut over** application traffic to v2's endpoint.
+5. **Stop + delete v1**: set `spec.clusterReplication.enabled=false` (the
+   operator strips the replication config and SIGHUPs, so v1 stops
+   forwarding — see the disable path), confirm v1 is idle, then
+   `helm uninstall flare -n <v1 ns>`.
+
+Rollback before step 4 is trivial (traffic never moved); after step 4,
+treat v1 as the stale copy — writes since cutover exist only on v2.
+
+CAUTION: cluster replication is the least-hardened path in this operator
+(several bugs were found and fixed here). Rehearse the whole sequence on
+staging with a representative data set and confirm per-key survival on v2
+before doing it in production.
 
 ## Known limits (do not be surprised by)
 

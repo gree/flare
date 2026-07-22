@@ -71,6 +71,26 @@ clusters anyway; the consumer records the source's LSN as an opaque cursor, so
 misalignment is a non-issue. Do not design around LSN alignment; design around
 the verbatim/1:1 property.
 
+> **Review correction — "1:1 master WAL = clean v2 partition" is FALSE without a
+> precondition.** A node's RocksDB can hold **orphan keys outside its own
+> partition** (leftovers from a prior assignment — that is what `orphan_scan`/
+> `orphan_purge` exist for, `op_orphan_scan.h:19`, and why truncate clears them,
+> `handler_reconstruction.cc:159`). The **dump path filters orphans out**
+> (`handler_dump_replication.cc:200-208`: `resolve(...) != partition → continue`).
+> The **WAL path replays them verbatim** onto v2, planting keys that don't
+> belong to v2's partition (later servable/resurfacing). So byte-for-byte
+> reproduction copies exactly what the dump path deliberately drops.
+> **Precondition:** run `orphan_purge` on every v1 node before a WAL migration,
+> or the 1:1-clean premise does not hold.
+>
+> **Review correction — RocksDB version skew.** WAL is `rocksdb::WriteBatch`
+> bytes replayed verbatim. The whole premise (§1) includes *version upgrades* —
+> exactly when v1 and v2 may run different RocksDB builds. WriteBatch /
+> column-family / format compatibility across RocksDB versions is a **hard
+> correctness precondition** for verbatim replay and must be asserted (equal
+> RocksDB format) before choosing the WAL path; otherwise fall back to dump,
+> which is format-independent (per-key ops).
+
 ## 4. Current code state (what exists, what's inert)
 
 - `cluster_replication.cc` itself references only `dump`/`dump_replication` — no
@@ -123,44 +143,115 @@ cluster shapes.
 
 Add a push variant so v1 streams its WAL to the matching v2 node. Two options:
 
-- **(A) v2 pulls from v1 (preferred).** Reuse the existing pull `run_client`
-  semantics but invert roles: the operator tells each v2 master to run a
-  WAL-sync *client* against the corresponding v1 master as source. This reuses
-  the battle-tested reconstruction client path almost verbatim; the only new
-  thing is "source is a remote cluster's node" instead of the local master.
-  The `master_id`/`last_lsn` seeding (§5.3) makes the existing gate fire.
-- **(B) v1 pushes to v2 (new server-initiated stream).** More new C++, more
-  risk. Only if (A) is impossible given the migration control flow (v1 is the
-  one holding `spec.clusterReplication`).
+- **(A) v2 pulls from v1 (preferred).** The operator tells each v2 master to run
+  a WAL-sync *client* against the corresponding v1 master as source.
 
-Recommendation: **(A)**. It keeps cluster replication reusing the reconstruction
-WAL path rather than inventing a second WAL transport. The cluster-replication
-feature's role becomes orchestration + live forwarding; the bulk WAL copy is
-"each v2 node reconstructs from its v1 peer."
+  > **Review correction — do NOT describe this as "reuse `run_client` almost
+  > verbatim."** The address-agnostic wire op `op_repl_sync_wal` (`_run_client`
+  > writes `repl_sync_wal <lsn> <master_id>` on whatever connection it's handed,
+  > `op_repl_sync_wal.cc:258-264,396`) **is** reusable. But the *reconstruction
+  > handler* around it (`handler_reconstruction`) is saturated with
+  > intra-cluster assumptions and is **not** reusable:
+  > 1. Source address is resolved from the **local node map**
+  >    (`cluster.cc:1768-1784` `from_node_key(master_node_key,…)`); a v1 node is
+  >    not in v2's map — there is no entry point to point it at an arbitrary
+  >    remote address.
+  > 2. It is triggered by **role transitions** (`proxy→master`/`*→slave`,
+  >    `cluster.cc:1722,1757`), not by operator command.
+  > 3. `partition_size` is computed from **v2's own maps** (`cluster.cc:1723,
+  >    1767,1774`) — meaningless cross-cluster.
+  > 4. On success it runs **v2-internal activation** side effects
+  >    (`notify_master_reconstruction`, `_activate_with_retry`,
+  >    `set_activation_pending`, `handler_reconstruction.cc:277-298`) — a bulk
+  >    copy must NOT flip the v2 node to active.
+  > 5. The WAL gate is lineage-bound to the **local** master
+  >    (`handler_reconstruction.cc:394-409`), which is exactly why §5.3 seeding
+  >    is needed — proving the path is not verbatim-reusable.
+  >
+  > **Honest reusable unit = `op_repl_sync_wal` only.** The driver (source
+  > selection, command triggering, partition sizing, activation suppression,
+  > gate pre-seed) is all NEW code in the most bug-prone module. This narrows
+  > (A)'s advantage over (B) considerably.
+- **(B) v1 pushes to v2 (new server-initiated stream).** More new C++. Given the
+  review shows (A) is also mostly new driver code, (B) is no longer clearly
+  worse and should be re-weighed on its merits (v1 holds
+  `spec.clusterReplication`, so a push driver lives where the migration state
+  already is).
+
+Recommendation: still lean **(A)** for reusing the *wire op* and keeping the
+pull semantics that already handle LSN purge fallback — but budget for a new
+cross-cluster driver either way; do not plan around "reconstruction reuse."
 
 ### 5.3 Cross-cluster lineage seeding
 
-For the WAL gate to fire, each v2 node must adopt its v1 peer's identity:
+For the WAL gate to fire, the consuming side needs a lineage that matches the
+source. The naïve approach — have each v2 node `set_master_id(v1_peer.master_id)`
++ seed `repl_last_lsn` — is **more dangerous and more permanent than a "flag" can
+fix**, per the review:
 
-- v2-node(partition i) calls `set_master_id(v1_peer.master_id)` and seeds
-  `repl_last_lsn` to v1_peer's starting LSN — analogous to the post-dump seeding
-  reconstruction already does, but done cross-cluster per corresponding node.
-- This MUST be a **migration-only, explicitly-flagged path**, separate from
-  normal reconstruction, so a stray same-`master_id` can never make the #14
-  truncate gate or the WAL gate misfire during ordinary operation. Concretely:
-  a dedicated op/flag ("adopt lineage for migration") rather than reusing the
-  reconstruction seeding, and it is only ever issued by the operator during a
-  gated same-topology migration.
+> **Review correction — `master_id` adoption permanently FUSES the two clusters'
+> lineage and defeats the primary cross-cluster WAL safety gate.** `master_id` is
+> a durable per-DB UUID at `__flare_repl_master_id` (`storage_rocksdb.cc:200-266`).
+> Once v2's master holds v1's UUID, that identity is permanent and **propagates
+> into v2's own internal lineage**: v2's own slaves later adopt the master's
+> `master_id` on reconstruction (`handler_reconstruction.cc:243-257`) — i.e.
+> v1's UUID. Consequences:
+> - v1 and v2 now share one `master_id` **forever**. The `master_id` gate — the
+>   primary guard against cross-lineage WAL application
+>   (`op_repl_sync_wal.cc:136-146`) — is defeated between the clusters. The only
+>   remaining check is `lsn_ahead` (`:152-160`), and cross-cluster LSNs are
+>   unrelated cursors — so a stray/misconfigured WAL sync between the clusters
+>   can pass the identity gate and apply foreign WAL. This is the #14/#15 class
+>   the design claims to avoid.
+> - **Mid-adopt split inside v2**: if v2 slaves already reconstructed under v2's
+>   original fresh `master_id` before the master adopts v1's, the next intra-v2
+>   WAL sync trips `master_id_mismatch` → forced full dumps across v2's replicas
+>   during the migration window.
+>
+> A "migration-only flag" controls how the value is written, not its persistent
+> shared-identity effect. **Do not adopt v1's `master_id`.**
+
+**Revised approach — separate cross-cluster cursor, keep the intra-cluster
+`master_id` invariant intact.** Instead of overwriting `master_id`, add a
+distinct migration cursor the WAL path consults *only* in cluster-replication
+mode: `(source_cluster_id, source_lsn)` stored separately from
+`__flare_repl_master_id`. The WAL gate in migration mode checks the source
+cluster id (not the local `master_id`), so v2 keeps its own fresh `master_id`
+for all intra-v2 replication. Alternatively/additionally, **regenerate a fresh
+v2 `master_id` at cutover** so no fused identity outlives the migration. Either
+way, v2's internal lineage must never be contaminated with v1's UUID.
 
 ### 5.4 Live writes during the WAL window (Dumping→Forwarding)
 
-The existing dump+forward model is idempotent (forwarded `set`s can double-apply
-harmlessly). WAL batches replayed verbatim + concurrent forwarded sets need
-**explicit LSN fencing** at the handoff: the consumer records the last WAL LSN
-applied, and forwarding for that partition begins only from writes after that
-cursor. Design the handoff so a key written during the WAL window is either in
-the WAL stream or in the forward stream, never lost, and double-apply stays
-harmless (sets remain idempotent; deletes need ordering care).
+> **Review correction — a clean LSN fence is NOT expressible on today's
+> mechanism.** The live-forward path carries **no LSN and no sequencing**
+> relative to the bulk stream: `on_post_proxy_write` enqueues a
+> `queue_proxy_write` at proxy time (`cluster_replication.cc:219-242`) that
+> replays the op (set/**delete**/incr) against the destination with no RocksDB
+> sequence number attached. Bulk copy runs on a **separate thread/connection**
+> (`cluster_replication.cc:252-258`) and forwarding is started (`_started=true`)
+> **before** the dump (`cluster_replication.cc:86-102`). With no cursor on the
+> forward path, you cannot express "forward only writes after WAL LSN N."
+>
+> **Concrete race that exists TODAY** (and worsens with WAL): the dump reads
+> from a `GetSnapshot()` (`storage_rocksdb.cc:837`). A key deleted *after* the
+> snapshot has its delete forwarded live to v2, but the bulk stream later ships
+> the snapshot's *old* value as `op_set` (`handler_dump_replication.cc:222`) →
+> **resurrected key on v2**. Ordering across the two connections is
+> unguaranteed. "Forwarded sets double-apply harmlessly" holds for sets only;
+> deletes have no ordering primitive at all.
+
+Therefore this is not a small handoff detail — it requires **new plumbing**,
+one of:
+- **Sequence the forward path**: stamp forwarded ops with the source RocksDB
+  LSN so the consumer can drop any forwarded op older than the bulk cursor
+  (and vice versa), or
+- **Quiesce/drain at a fenced cutover**: pause writes (or drain the forward
+  queue to a known LSN) at the Dumping→Forwarding boundary so the two streams
+  never overlap for a given key.
+
+Note this delete-resurrection race is a **pre-existing cluster-replication bug**
+independent of WAL — worth filing/fixing regardless of this feature.
 
 ### 5.5 WAL-retention coordination
 
@@ -170,6 +261,19 @@ consume it; if v1 purges faster than v2 consumes, the stream breaks →
 **automatic fall back to full dump** for that partition (never silently stall).
 The operator should raise v1's WAL retention (`walTtl`/`walSize`) for the
 duration of the migration and restore it after.
+
+Graceful-failure plumbing **is** confirmed to exist: purged segments return
+`ERR_LSN_PURGED` (`storage_rocksdb.cc:944-951`) → `SERVER_ERROR lsn_purged`
+(`op_repl_sync_wal.cc:166-170`) → client classifies `client_lsn_purged` → dump
+fallback (`handler_reconstruction.cc:449-453`, `handler_dump_replication.cc:167-174`).
+
+> **Review caveat — which dump?** The reconstruction fallback is the
+> *intra-cluster* `op_dump` (partition-sized from v2's maps,
+> `handler_reconstruction.cc:213-226`), NOT the *cluster-replication* dump
+> (`handler_dump_replication`, partition-filtered). Cross-cluster, `op_dump`'s
+> partition-size arithmetic is wrong. So "reuse the fallback" does not cleanly
+> hold for the pull direction — per-partition dump fallback is **new operator
+> wiring**, not free reuse.
 
 ## 6. Change surface (summary)
 
@@ -208,6 +312,39 @@ the least-hardened path plus the exact invariants behind bugs #14/#15.**
 7. **Payoff is scoped.** Speeds up same-size migration only; does nothing for
    shrink. Weigh implementation cost against that limited scope.
 
+### 7b. Additional holes surfaced by adversarial review (ranked)
+
+1. **`master_id` fusion (§5.3)** — highest risk; addressed by the revised
+   separate-cursor / regenerate-at-cutover approach. Must NOT ship the naïve
+   adopt.
+2. **§5.4 fence not expressible** — forward path has no cursor; delete-vs-stale-
+   set resurrection is a real, pre-existing race. Needs new sequencing or a
+   quiesced cutover.
+3. **Orphan keys (§3)** — WAL copies keys the dump drops; require `orphan_purge`
+   precondition on v1.
+4. **Option (A) is mostly new code (§5.2)** — only `op_repl_sync_wal` is reusable.
+5. **Fallback-to-dump ambiguity (§5.5)** — pull-direction dump fallback is new.
+
+### 7c. Design gaps the first draft missed entirely
+
+- **No auth/TLS on the WAL transport.** `op_repl_sync_wal` is instantiated with
+  zero authentication (`op_parser_text_node.cc:127-128`) — plaintext
+  memcached-style protocol. Intra-cluster that assumes a trusted LAN;
+  **cross-cluster the whole-DB WAL byte stream would cross a trust boundary in
+  cleartext.** Must define the network path/port and transport security before
+  any cross-cluster WAL is allowed.
+- **How the operator learns each side's `master_id`/LSN.** The only read path is
+  the 3-arg `meta` probe over the node port (`op_meta.h:60`). LSN is a moving
+  target between probe and stream start; specify the query mechanism and its
+  consistency (probe→start handoff).
+- **v2's own internal replication during the migration** — must be analyzed so
+  the adopt (or its replacement) never forces mismatches/full-dumps inside v2.
+- **RocksDB version-skew** (see §3 correction) — equal-format precondition.
+- **Failover during migration** — source selection is node-map-internal
+  (`cluster.cc:1768-1784`) with no external re-point; a v1/v2 master failover
+  mid-stream has no defined recovery under (A). Needs an explicit re-seed /
+  restart-partition / fall-back-to-dump policy.
+
 ## 8. Recommended sequencing
 
 1. **First** close the verification hole: get the existing full-dump cluster
@@ -219,11 +356,27 @@ the least-hardened path plus the exact invariants behind bugs #14/#15.**
 4. Ship behind an explicit opt-in (`spec.clusterReplication.mode: "wal"` or a
    `wal: true` sub-flag), defaulting off, documented as same-topology-only.
 
-## 9. Verdict
+## 9. Verdict (post-review)
 
-Feasible and worthwhile for same-size migrations; **not** a shrink accelerator.
-The engineering is dominated by safety plumbing (fail-closed gate, migration-only
-lineage seeding, LSN-fenced handoff, retention coordination), not by the WAL copy
-itself — which is why this is a design doc first. Given the payoff is limited to
-same-count migrations, prioritize below closing the cluster-replication
-verification hole (§8.1), which benefits every migration path.
+Feasible for same-size migrations, **not** a shrink accelerator — but the
+adversarial review moved this from "moderate safety plumbing" to **"large, and
+gated on solving two hard problems first"**:
+
+- The one genuinely reusable piece is the wire op `op_repl_sync_wal`. Everything
+  else (cross-cluster driver, source selection, activation suppression,
+  per-partition dump fallback) is new code in the least-hardened module.
+- The naïve `master_id` adoption is unshippable (permanent lineage fusion); a
+  separate-cursor design is required and is itself non-trivial.
+- The live-write handoff fence is **not expressible** on the current forward
+  path and exposes a pre-existing delete-resurrection race.
+- New preconditions the draft lacked: `orphan_purge` on v1, equal RocksDB
+  format, cross-cluster transport security, failover-mid-migration policy.
+
+**Recommendation:** keep this DRAFT parked. Do NOT start WAL cluster replication
+until (a) the cluster-replication verification hole is closed (§8.1 — the
+current dump path isn't even end-to-end tested), and (b) the pre-existing
+delete-vs-dump resurrection race (§5.4) is fixed independently. The payoff
+(same-count migrations only) does not justify the risk surface ahead of those
+two. Two of the review's findings — the delete-resurrection race and the missing
+end-to-end verification — are worth acting on **now** regardless of whether WAL
+is ever built.

@@ -542,13 +542,29 @@ private def mergeClusterState (current ucs : FlareClusterState) : FlareClusterSt
     a single atomic `modifyGet` (see `mergeClusterState`). The merge — not a version
     compare-and-set — is what makes the write safe: a Prepare→Active transition the
     TCP server completed after our snapshot is preserved rather than clobbered, and
-    a node registered after our snapshot is carried forward. Always commits.
+    a node registered after our snapshot is carried forward.
     `expectedVersion` is retained for call-site compatibility but no longer gates
-    the write. -/
+    the write.
+
+    Idempotent commit: `mergeClusterState` bumps `nodeMapVersion` unconditionally,
+    but the FSM re-commits the SAME snapshot ~7×/tick (`updatedClusterState` is set
+    once at AfterDetectDead and carried — never cleared — through every downstream
+    step, each of which hits a commit site). That made a fully-converged cluster
+    advance the version +7 every tick and rebroadcast the identical node sync to
+    every pod forever. Advance the version — the broadcast trigger (see the
+    `finalVersion != oldVersion` gate) — only when the merged topology actually
+    changed, so a converged cluster stays quiescent and a single real change
+    yields exactly +1 instead of +7. Returns whether the version advanced. -/
 private def commitClusterState (stateRef : IO.Ref FlareClusterState)
     (_expectedVersion : Nat) (newState : FlareClusterState) : IO Bool := do
   stateRef.modifyGet fun current =>
-    (true, mergeClusterState current newState)
+    let merged := mergeClusterState current newState
+    -- `partitionMap` is a pure function of `nodeMap` (rebuildPartitionMap), so
+    -- comparing `nodeMap` is sufficient to detect a real topology change.
+    if merged.nodeMap == current.nodeMap then
+      (false, { merged with nodeMapVersion := current.nodeMapVersion })
+    else
+      (true, merged)
 
 /-- FSM driver loop helper.
     The FSM measure proves termination, but Lean can't see it through IO. -/

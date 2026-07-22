@@ -546,25 +546,44 @@ private def mergeClusterState (current ucs : FlareClusterState) : FlareClusterSt
     `expectedVersion` is retained for call-site compatibility but no longer gates
     the write.
 
-    Idempotent commit: `mergeClusterState` bumps `nodeMapVersion` unconditionally,
-    but the FSM re-commits the SAME snapshot ~7×/tick (`updatedClusterState` is set
+    Quiescence commit: `mergeClusterState` bumps `nodeMapVersion` unconditionally,
+    and the FSM re-commits the SAME snapshot ~7×/tick (`updatedClusterState` is set
     once at AfterDetectDead and carried — never cleared — through every downstream
-    step, each of which hits a commit site). That made a fully-converged cluster
+    step, each hitting a commit site). That made even a fully-converged cluster
     advance the version +7 every tick and rebroadcast the identical node sync to
-    every pod forever. Advance the version — the broadcast trigger (see the
-    `finalVersion != oldVersion` gate) — only when the merged topology actually
-    changed, so a converged cluster stays quiescent and a single real change
-    yields exactly +1 instead of +7. Returns whether the version advanced. -/
+    every pod forever.
+
+    We CANNOT simply suppress the bump whenever the nodeMap is unchanged: the
+    periodic version-advancing rebroadcast is LOAD-BEARING for reconstruction.
+    flared only re-processes a node sync whose version is strictly newer (the
+    fencing gate), and a Prepare node that has finished reconstructing needs that
+    fresh broadcast to be re-evaluated and flipped to Active. During reconstruction
+    the operator's nodeMap is unchanged tick-to-tick (the node stays Prepare in the
+    operator's view until it flips), so suppressing "unchanged" broadcasts wedges
+    the node in Prepare forever (observed live: rc19 left nodes stuck Prepare after
+    a roll; reverting restored convergence).
+
+    So: advance the version — the broadcast trigger (the `finalVersion != oldVersion`
+    gate) — when the topology actually changed OR the cluster is not yet fully at
+    rest (any node not Active: Prepare/Ready/Down still converging). Only when the
+    cluster is fully converged (every node Active) AND nothing changed do we pin the
+    version and go quiescent. This keeps the reconstruction nudge that rc18 relied
+    on while eliminating the steady-state +7/tick churn. Returns whether the version
+    advanced. -/
 private def commitClusterState (stateRef : IO.Ref FlareClusterState)
     (_expectedVersion : Nat) (newState : FlareClusterState) : IO Bool := do
   stateRef.modifyGet fun current =>
     let merged := mergeClusterState current newState
     -- `partitionMap` is a pure function of `nodeMap` (rebuildPartitionMap), so
-    -- comparing `nodeMap` is sufficient to detect a real topology change.
-    if merged.nodeMap == current.nodeMap then
-      (false, { merged with nodeMapVersion := current.nodeMapVersion })
-    else
+    -- comparing `nodeMap` detects a real topology change.
+    let changed := merged.nodeMap != current.nodeMap
+    -- Fully at rest only when every node is Active. Any Prepare/Ready/Down node
+    -- means convergence is still in progress and needs the periodic rebroadcast.
+    let allActive := merged.getNodes.all (fun n => n.state == FlareState.Active)
+    if changed || !allActive then
       (true, merged)
+    else
+      (false, { merged with nodeMapVersion := current.nodeMapVersion })
 
 /-- FSM driver loop helper.
     The FSM measure proves termination, but Lean can't see it through IO. -/

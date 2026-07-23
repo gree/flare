@@ -224,6 +224,13 @@ public:
 	// reconstruction thread; see _mutex_master_id.
 	string get_master_id() const;
 	int set_master_id(const string& id);
+	// Mint and persist a brand-new master_id (fresh UUID). Called at
+	// promotion to master when this node carries a replication cursor from a
+	// former master's sequence space (repl_last_lsn > latest_sequence_number),
+	// so same-lineage slaves see a clean lineage break and take a correct full
+	// dump instead of stranding on lsn_ahead / the #14 truncate-skip. See the
+	// call site in cluster::_shift_node_role.
+	int regenerate_master_id();
 
 	// WAL sync observability. All counters are monotonically increasing
 	// (except get_resync_failure_count() which is the current streak,

@@ -1699,6 +1699,37 @@ int cluster::_shift_node_role(string node_key, role old_role, int old_partition,
 		}
 	}
 
+	// Fix A (repl_last_lsn / sequence-space inversion): a node promoted TO
+	// master may carry a repl_last_lsn cursor seeded from a FORMER master's
+	// sequence space during its own past full-dump reconstruction
+	// (handler_reconstruction seeds the cursor from the SOURCE's latest_lsn,
+	// not from records written locally). That cursor is meaningless in this
+	// DB instance and can exceed this instance's own GetLatestSequenceNumber.
+	// Once this node serves as master it advertises its OWN sequence, but
+	// same-lineage slaves compare their (equally inflated) cursor against it
+	// and wrongly conclude the master is "not newer" (#14 truncate-skip) or
+	// "lsn_ahead" (op_repl_sync_wal), stranding themselves in Prepare forever
+	// (observed live on dev: master repl_last_lsn=273 vs latest_seq=42).
+	// Two RocksDB instances never share a sequence space, so WAL-incremental
+	// across a master change was never sound; mint a fresh master_id here so
+	// same-lineage slaves see a clean lineage break (master_id_mismatch) and
+	// take a correct full dump. The #14 empty-master guard is untouched: a
+	// genuinely empty source still refuses to be a truncate source
+	// (peer_latest_lsn == 0), so this does not reopen the empty-master cascade.
+	// These accessors are virtual on the base storage (non-RocksDB backends
+	// return 0, so the guard is a no-op there); we deliberately avoid pulling
+	// the RocksDB headers into cluster.cc.
+	if (new_role == role_master && old_role != role_master && this->_storage != NULL) {
+		uint64_t cursor = this->_storage->get_repl_last_lsn();
+		uint64_t seq = this->_storage->get_latest_sequence_number();
+		if (cursor > seq) {
+			log_warning("promotion to master with replication cursor ahead of own sequence (repl_last_lsn=%llu > latest_sequence_number=%llu): cursor belongs to a former master's sequence space. Minting fresh master_id so same-lineage slaves take a clean full dump instead of stranding on lsn_ahead / #14 truncate-skip.",
+				(unsigned long long)cursor, (unsigned long long)seq);
+			this->_storage->regenerate_master_id();
+			this->_storage->set_repl_last_lsn(seq);
+		}
+	}
+
 	// Active means the operator has declared this node's local data
 	// authoritative / in-sync. Reconstructing anyway is not just wasteful:
 	// it picks a source from the churning ring (possibly the wrong

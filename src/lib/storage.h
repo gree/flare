@@ -233,6 +233,16 @@ public:
 	virtual type get_type() = 0;
 	virtual bool is_capable(capability c) = 0;
 
+	// Replication-cursor / lineage accessors. Meaningful only for WAL-capable
+	// backends (storage_rocksdb overrides these); the base defaults let
+	// backend-agnostic callers (e.g. cluster::_shift_node_role) query them via
+	// a storage* without pulling in backend-specific headers. Non-WAL backends
+	// report 0, so cursor-vs-sequence logic is a safe no-op there.
+	virtual uint64_t get_repl_last_lsn() { return 0; }
+	virtual int set_repl_last_lsn(uint64_t lsn) { return 0; }
+	virtual uint64_t get_latest_sequence_number() { return 0; }
+	virtual int regenerate_master_id() { return 0; }
+
 	static inline int option_cast(string s, option& r) {
 		if (s == "") {
 			r = option_none;

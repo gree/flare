@@ -264,6 +264,21 @@ int storage_rocksdb::set_master_id(const string& id) {
 	log_notice("master id updated (old=%s, new=%s)", old_id.c_str(), id.c_str());
 	return 0;
 }
+
+int storage_rocksdb::regenerate_master_id() {
+	// Mint a fresh UUID (same generator as _load_or_generate_master_id) and
+	// persist it via set_master_id (durable Put + in-memory swap under
+	// _mutex_master_id). Used to deliberately break lineage at promotion so a
+	// former master's inflated replication cursor can never be compared, across
+	// a discontinuous sequence space, against this node's own sequence.
+	uuid_t uuid;
+	char buf[37];
+	uuid_generate(uuid);
+	uuid_unparse_lower(uuid, buf);
+	string new_id = buf;
+	log_notice("regenerating master id (promotion with inverted replication cursor)", 0);
+	return this->set_master_id(new_id);
+}
 // }}}
 
 // {{{ public methods

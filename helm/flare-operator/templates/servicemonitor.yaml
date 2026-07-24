@@ -13,4 +13,10 @@ spec:
   endpoints:
     - port: metrics
       interval: {{ .Values.monitoring.serviceMonitor.interval }}
+      # The operator scrapes flared's stats and re-exports per-pod flare_node_*
+      # / memcached_* series carrying their OWN {pod,cluster} labels. Honor them
+      # so Prometheus keeps pod=<flared-pod> instead of overwriting it with the
+      # scrape target's pod (the operator) and shunting ours to exported_pod —
+      # which would break per-pod grouping in memcached dashboards.
+      honorLabels: true
 {{- end }}

@@ -80,15 +80,23 @@ This flow is exercised end-to-end by the `backup-restore` e2e suite
 (write → checkpoint → flush_all on all replicas → marker → pod deletion →
 per-key exact-value verification).
 
-### Case B — restore from S3 (PVC also lost)
+### Case B — restore from object storage (PVC also lost)
+
+The tier-2 jobs store each pod's checkpoint as an UNPACKED directory (via
+`aws s3 sync`), not a tarball. Pick the source:
+- most-recent mirror: `s3://bucket/<cluster>/<pod>/latest/`
+- retained point-in-time: `s3://bucket/<cluster>-snapshots/<DATE>/<pod>/latest/`
+(`EP="--endpoint-url <COS/GCS/MinIO endpoint>"`, empty for AWS.)
 
 1. Provision the new PVC/pod (StatefulSet recreates it empty).
-2. Download and unpack into the pod:
+2. Pull the checkpoint down, then copy it into the pod under a backup name:
    ```
-   aws s3 cp s3://bucket/…/<pod>-<name>.tar.gz - | \
-     kubectl exec -i <pod> -- tar xzf - -C /data/flare/backups
+   aws s3 sync $EP s3://bucket/<cluster>/<pod>/latest/ /tmp/<name>
+   kubectl cp /tmp/<name> <namespace>/<pod>:/data/flare/backups/<name>
    ```
-3. Continue with Case A steps 2–4.
+   (For a dated restore, sync from `…/<cluster>-snapshots/<DATE>/<pod>/latest/`.)
+3. Continue with Case A steps 2–4 (write the `RESTORE` marker naming
+   `/data/flare/backups/<name>`, delete the pods, let the startup hook swap it in).
 
 ### Case C — multi-partition cluster: MANUAL, read this first
 

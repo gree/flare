@@ -92,14 +92,47 @@ def scrapeAllFlared (pods : List (String × String × Nat))
     let stats ← queryFlaredStats ip port
     return (name, stats)
 
-/-- flared stat key -> exported Prometheus metric name. Whitelist: only these
-    are republished (keeps cardinality bounded and names clean). -/
+/-- flared stat key -> exported Prometheus metric name. Whitelist keeps
+    cardinality bounded and names clean; non-numeric stats (version, master_id)
+    are dropped by parseStats anyway. Covers the memcached operational stats
+    (ops, hit rate, memory, connections, traffic), the backup freshness stats
+    (for the RPO alert in docs/BACKUP_RESTORE.md), and the rocksdb/replication
+    counters. All exported as gauges — PromQL rate() handles the monotonic ones
+    (and flared-restart resets) fine. -/
 def exportedKeys : List (String × String) :=
-  [ ("curr_items",                        "flare_node_curr_items"),
+  [ -- memcached operations (rate() for ops/sec; hits/misses for hit ratio)
+    ("cmd_get",                            "flare_node_cmd_get"),
+    ("cmd_set",                            "flare_node_cmd_set"),
+    ("get_hits",                           "flare_node_get_hits"),
+    ("get_misses",                         "flare_node_get_misses"),
+    ("delete_hits",                        "flare_node_delete_hits"),
+    ("delete_misses",                      "flare_node_delete_misses"),
+    ("incr_hits",                          "flare_node_incr_hits"),
+    ("incr_misses",                        "flare_node_incr_misses"),
+    ("evictions",                          "flare_node_evictions"),
+    -- storage / memory
+    ("curr_items",                         "flare_node_curr_items"),
+    ("total_items",                        "flare_node_total_items"),
+    ("bytes",                              "flare_node_bytes"),
+    ("limit_maxbytes",                     "flare_node_limit_maxbytes"),
+    -- connections / traffic
+    ("curr_connections",                   "flare_node_curr_connections"),
+    ("total_connections",                  "flare_node_total_connections"),
+    ("bytes_read",                         "flare_node_bytes_read"),
+    ("bytes_written",                      "flare_node_bytes_written"),
+    ("uptime",                             "flare_node_uptime"),
+    -- rocksdb / WAL replication
     ("rocksdb_repl_last_lsn",              "flare_node_repl_last_lsn"),
-    ("rocksdb_latest_sequence_number",    "flare_node_latest_sequence_number"),
-    ("rocksdb_wal_sync_lsn_ahead",        "flare_node_wal_sync_lsn_ahead"),
-    ("rocksdb_wal_sync_master_id_mismatch","flare_node_wal_sync_master_id_mismatch") ]
+    ("rocksdb_latest_sequence_number",     "flare_node_latest_sequence_number"),
+    ("rocksdb_wal_sync_success",           "flare_node_wal_sync_success"),
+    ("rocksdb_wal_sync_lsn_ahead",         "flare_node_wal_sync_lsn_ahead"),
+    ("rocksdb_wal_sync_master_id_mismatch","flare_node_wal_sync_master_id_mismatch"),
+    ("rocksdb_wal_fallback_to_dump",       "flare_node_wal_fallback_to_dump"),
+    ("rocksdb_resync_failure_count",       "flare_node_resync_failure_count"),
+    -- backup freshness (alert on time() - last_backup_epoch)
+    ("rocksdb_backup_success",             "flare_node_backup_success"),
+    ("rocksdb_backup_failure",             "flare_node_backup_failure"),
+    ("rocksdb_last_backup_epoch",          "flare_node_last_backup_epoch") ]
 
 /-- Render a Prometheus gauge line. -/
 private def gaugeLine (name cluster pod : String) (v : Float) : String :=

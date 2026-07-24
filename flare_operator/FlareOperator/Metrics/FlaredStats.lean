@@ -92,45 +92,84 @@ def scrapeAllFlared (pods : List (String × String × Nat))
     let stats ← queryFlaredStats ip port
     return (name, stats)
 
-/-- Whitelisted flared `stats` keys to republish. The exported metric name is
-    `flare_node_` + the raw stat key, so the name mirrors its source: memcached
-    stats keep their memcached names (flare_node_cmd_get, flare_node_curr_items)
-    and rocksdb stats keep their rocksdb_ prefix
-    (flare_node_rocksdb_repl_last_lsn). Whitelisting keeps cardinality bounded;
-    non-numeric stats (version, rocksdb_master_id) are dropped by parseStats
-    anyway. All exported as gauges — PromQL rate() handles the monotonic ones
-    (and flared-restart resets) fine. -/
-def exportedKeys : List String :=
-  [ -- memcached operations (rate() for ops/sec; hits/misses for hit ratio)
-    "cmd_get", "cmd_set",
-    "get_hits", "get_misses", "delete_hits", "delete_misses",
-    "incr_hits", "incr_misses", "evictions",
-    -- storage / memory
-    "curr_items", "total_items", "bytes", "limit_maxbytes",
-    -- connections / traffic
-    "curr_connections", "total_connections", "bytes_read", "bytes_written", "uptime",
-    -- rocksdb / WAL replication (keep the rocksdb_ prefix in the metric name)
-    "rocksdb_repl_last_lsn", "rocksdb_latest_sequence_number",
+/-- memcached-origin stats → the STANDARD prometheus/memcached_exporter metric
+    name (+ TYPE), so community memcached Grafana dashboards are drop-in.
+    (statKey, metricName, promType). -/
+def memcachedGauges : List (String × String × String) :=
+  [ ("curr_items",        "memcached_current_items",       "gauge"),
+    ("bytes",             "memcached_current_bytes",       "gauge"),
+    ("limit_maxbytes",    "memcached_limit_bytes",         "gauge"),
+    ("curr_connections",  "memcached_current_connections", "gauge"),
+    ("total_connections", "memcached_connections_total",   "counter"),
+    ("total_items",       "memcached_items_total",         "counter"),
+    ("bytes_read",        "memcached_read_bytes_total",    "counter"),
+    ("bytes_written",     "memcached_written_bytes_total", "counter"),
+    ("evictions",         "memcached_items_evicted_total",  "counter"),
+    ("uptime",            "memcached_uptime_seconds",      "gauge") ]
+
+/-- hit/miss-style stats → memcached_commands_total{command,status}, matching
+    memcached_exporter. (statKey, command, status). -/
+def memcachedCommands : List (String × String × String) :=
+  [ ("get_hits",      "get",    "hit"),
+    ("get_misses",    "get",    "miss"),
+    ("cmd_set",       "set",    "hit"),
+    ("delete_hits",   "delete", "hit"),
+    ("delete_misses", "delete", "miss"),
+    ("incr_hits",     "incr",   "hit"),
+    ("incr_misses",   "incr",   "miss"),
+    ("decr_hits",     "decr",   "hit"),
+    ("decr_misses",   "decr",   "miss"),
+    ("touch_hits",    "touch",  "hit"),
+    ("touch_misses",  "touch",  "miss"),
+    ("cas_hits",      "cas",    "hit"),
+    ("cas_misses",    "cas",    "miss"),
+    ("cas_badval",    "cas",    "badval") ]
+
+/-- rocksdb/replication/backup stats → flare_node_rocksdb_* (keep the rocksdb_
+    prefix; these have no memcached_exporter equivalent). -/
+def rocksdbKeys : List String :=
+  [ "rocksdb_repl_last_lsn", "rocksdb_latest_sequence_number",
     "rocksdb_wal_sync_success", "rocksdb_wal_sync_lsn_ahead",
     "rocksdb_wal_sync_master_id_mismatch", "rocksdb_wal_fallback_to_dump",
     "rocksdb_resync_failure_count",
     -- backup freshness (alert on time() - flare_node_rocksdb_last_backup_epoch)
     "rocksdb_backup_success", "rocksdb_backup_failure", "rocksdb_last_backup_epoch" ]
 
-/-- Render a Prometheus gauge line. -/
+/-- Render a Prometheus sample line with {cluster,pod} labels. -/
 private def gaugeLine (name cluster pod : String) (v : Float) : String :=
   s!"{name}\{cluster=\"{cluster}\",pod=\"{pod}\"} {v}\n"
 
-/-- Render all per-pod flared metrics. Raw whitelisted gauges only: we
-    deliberately do NOT emit a derived "cursor > sequence" boolean, because
-    repl_last_lsn > latest_sequence_number is the NORMAL state of a healthy
-    slave (its cursor lives in the master's higher sequence space). The
-    actionable wedge signal is `flare_node_wal_sync_lsn_ahead` — it increments
-    when a MASTER rejects slave syncs, i.e. the Bug A stranding symptom. -/
+/-- Render a memcached_commands_total sample with command/status labels. -/
+private def commandLine (cluster pod command status : String) (v : Float) : String :=
+  s!"memcached_commands_total\{cluster=\"{cluster}\",pod=\"{pod}\",command=\"{command}\",status=\"{status}\"} {v}\n"
+
+/-- Render all per-pod flared metrics: memcached-origin under the standard
+    memcached_exporter names (drop-in for community dashboards), and
+    rocksdb/replication/backup under flare_node_rocksdb_*. No derived
+    "cursor > sequence" boolean — that is the NORMAL state of a healthy slave;
+    the actionable wedge signal is flare_node_rocksdb_wal_sync_lsn_ahead
+    (a master rejecting slave syncs). -/
 def exportNodeStats (snapshot : List (String × List (String × Float)))
     (cluster : String) : String := Id.run do
   let mut out := ""
-  for statKey in exportedKeys do
+  -- memcached simple gauges/counters (standard names).
+  for (statKey, metricName, ty) in memcachedGauges do
+    out := out ++ s!"# HELP {metricName} memcached {statKey} (per pod)\n"
+    out := out ++ s!"# TYPE {metricName} {ty}\n"
+    for (pod, stats) in snapshot do
+      match stats.lookup statKey with
+      | some v => out := out ++ gaugeLine metricName cluster pod v
+      | none => pure ()
+  -- memcached_commands_total (labeled by command/status).
+  out := out ++ "# HELP memcached_commands_total Total memcached commands by command and status\n"
+  out := out ++ "# TYPE memcached_commands_total counter\n"
+  for (statKey, command, status) in memcachedCommands do
+    for (pod, stats) in snapshot do
+      match stats.lookup statKey with
+      | some v => out := out ++ commandLine cluster pod command status v
+      | none => pure ()
+  -- rocksdb / replication / backup (flare-specific, no memcached equivalent).
+  for statKey in rocksdbKeys do
     let metricName := s!"flare_node_{statKey}"
     out := out ++ s!"# HELP {metricName} flared stat {statKey} (per pod)\n"
     out := out ++ s!"# TYPE {metricName} gauge\n"

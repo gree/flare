@@ -79,6 +79,23 @@ structure OperatorMetrics where
   -- masters(active) against the DESIRED count instead of a hardcoded one.
   partitionsDesired : Gauge
 
+  -- Cluster-replication (Blue/Green migration) observability, so the phase is
+  -- visible from Grafana Cloud and the user can watch it to decide when to
+  -- advance the mode / cut over. Numeric encodings (see HELP in exportMetrics):
+  --   migrationPhase   applied:  0=none 1=dumping   2=forwarding
+  --   migrationDesired declared: 0=none 1=duplicate 2=forward
+  -- A gap between them (e.g. desired=2 forward while phase=1 dumping) means the
+  -- operator is still applying / the new mode hasn't propagated yet.
+  migrationPhase : Gauge
+  migrationDesired : Gauge
+
+  -- Counter: cluster-replication migrations aborted because a partition master
+  -- changed (failover/promotion) mid-migration. The operator NEVER blocks
+  -- source-cluster failover; it fail-safe aborts the migration instead (a
+  -- master change mid-dump/forward would leave the target inconsistent). Alert
+  -- on any increase: the migration must be restarted after the cluster settles.
+  migrationAborted : Counter
+
   -- Latest per-pod flared `stats` snapshot (podName, [(statKey, value)]),
   -- refreshed on a slow cadence by the main loop. Re-exported as per-pod
   -- flare_node_* gauges so flared's rocksdb/repl counters reach Grafana Cloud
@@ -112,6 +129,9 @@ def initMetrics : IO OperatorMetrics := do
   let prepareStuckCount ← IO.mkRef 0.0
   let circuitBreakerTripped ← IO.mkRef 0.0
   let partitionsDesired ← IO.mkRef 0.0
+  let migrationPhase ← IO.mkRef 0.0
+  let migrationDesired ← IO.mkRef 0.0
+  let migrationAborted ← IO.mkRef 0
   let nodeStats ← IO.mkRef []
 
   return {
@@ -127,6 +147,9 @@ def initMetrics : IO OperatorMetrics := do
     prepareStuckCount := { value := prepareStuckCount }
     circuitBreakerTripped := { value := circuitBreakerTripped }
     partitionsDesired := { value := partitionsDesired }
+    migrationPhase := { value := migrationPhase }
+    migrationDesired := { value := migrationDesired }
+    migrationAborted := { value := migrationAborted }
     nodeStats := nodeStats
   }
 
@@ -182,6 +205,14 @@ def updateNodeCounts (metrics : OperatorMetrics) (state : FlareClusterState) : I
   metrics.slaveActiveCount.set slaveActive.length.toFloat
   metrics.slavePrepareCount.set slavePrepare.length.toFloat
   metrics.proxyCount.set proxy.length.toFloat
+
+/-- Set the cluster-replication phase/desired gauges. Callers pass the numeric
+    encodings (phase: 0=none 1=dumping 2=forwarding; desired: 0=none 1=duplicate
+    2=forward) computed where the MigrationPhase / spec are in scope, so this
+    module needs no dependency on those types. -/
+def updateMigrationMetrics (metrics : OperatorMetrics) (phaseNum desiredNum : Float) : IO Unit := do
+  metrics.migrationPhase.set phaseNum
+  metrics.migrationDesired.set desiredNum
 
 /-! ## Prometheus Text Format Export -/
 
@@ -286,6 +317,22 @@ def exportMetrics (metrics : OperatorMetrics) (clusterName : String) : IO String
   output := output ++ "# TYPE flare_operator_partitions_desired gauge\n"
   let desired ← metrics.partitionsDesired.value.get
   output := output ++ formatGauge "flare_operator_partitions_desired" labels desired
+
+  -- Cluster-replication migration (Blue/Green) state.
+  output := output ++ "# HELP flare_operator_migration_phase Applied migration phase (0=none 1=dumping 2=forwarding)\n"
+  output := output ++ "# TYPE flare_operator_migration_phase gauge\n"
+  let migPhase ← metrics.migrationPhase.value.get
+  output := output ++ formatGauge "flare_operator_migration_phase" labels migPhase
+
+  output := output ++ "# HELP flare_operator_migration_desired Declared migration mode from spec (0=none 1=duplicate 2=forward)\n"
+  output := output ++ "# TYPE flare_operator_migration_desired gauge\n"
+  let migDesired ← metrics.migrationDesired.value.get
+  output := output ++ formatGauge "flare_operator_migration_desired" labels migDesired
+
+  output := output ++ "# HELP flare_operator_migration_aborted_total Migrations aborted due to a master change mid-migration\n"
+  output := output ++ "# TYPE flare_operator_migration_aborted_total counter\n"
+  let migAborted ← metrics.migrationAborted.value.get
+  output := output ++ formatCounter "flare_operator_migration_aborted_total" labels migAborted
 
   -- Per-pod flared stats (rocksdb cursor/sequence, curr_items, WAL-sync
   -- counters, + derived lsn_inversion). Scraped on a slow cadence by the main

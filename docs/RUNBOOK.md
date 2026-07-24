@@ -195,22 +195,39 @@ v2's own index, so v1(4 partitions) → v2(2) is fine.
    --set namespace=flare-v2 --set clusterName=<v2> --set cluster.enabled=true
    --set cluster.partitions=<M> --set cluster.replicas=<R>`. Wait for it to
    converge (`nodes=… M=<M> … P=0`).
-2. **Start replication** on v1: patch its FlareCluster
+2. **Start the bulk copy** on v1: patch its FlareCluster
    `spec.clusterReplication` to `{enabled:true, serverName:<v2 nodes svc
-   FQDN>, port:12121, mode:"duplicate", concurrency:2}`. The operator drives
-   None→**Dumping** (bulk-copies v1's existing data to v2, re-hashed into M
-   partitions) then →**Forwarding** (v1 also mirrors live writes to v2).
-   Watch `status.migrationPhase`.
-3. **Verify data landed on v2** before cutover: sample keys on v2 and check
-   counts. This is the least-proven step — the cluster-replication e2e now
-   asserts a 2→1 shrink keeps every key, but VERIFY on your real data set.
-4. **Cut over** application traffic to v2's endpoint.
-5. **Stop + delete v1**: set `spec.clusterReplication.enabled=false` (the
-   operator strips the replication config and SIGHUPs, so v1 stops
-   forwarding — see the disable path), confirm v1 is idle, then
+   FQDN>, port:12121, mode:"duplicate", concurrency:2}`. The operator applies
+   `mode=duplicate` → **Dumping**: v1's masters bulk-copy existing data to v2
+   (re-hashed into M partitions) AND mirror live writes. The transition is
+   **declarative and user-driven** — the operator does NOT auto-advance to
+   forward. Watch `status.migrationPhase` (also exported as
+   `flare_operator_migration_phase` → Grafana Cloud).
+3. **Verify data landed on v2** before advancing: sample keys / compare counts
+   on v2 (watch v2's `flare_node_curr_items` rise in Grafana Cloud). The
+   cluster-replication e2e asserts a 2→1 shrink migrates every key via the
+   duplicate dump, but VERIFY on your real data set.
+4. **Advance to forward (your call)**: once v2 is caught up, patch
+   `spec.clusterReplication.mode: "forward"` → **Forwarding** (v1 mirrors only
+   live writes; the initial dump is done). Optional — you can also stay in
+   duplicate through cutover; forward just avoids re-dumping.
+5. **Cut over** application traffic to v2's endpoint.
+6. **Stop + delete v1** (or CANCEL at any point): set
+   `spec.clusterReplication.enabled=false` — the operator strips the config and
+   SIGHUPs, so v1 stops forwarding (phase→None). Before cutover this is a clean
+   rollback (traffic never moved). Then confirm v1 idle and
    `helm uninstall flare -n <v1 ns>`.
 
-Rollback before step 4 is trivial (traffic never moved); after step 4,
+SAFETY — master change during migration: if a v1 partition's master
+fails over/promotes mid-migration, the operator **aborts** the migration
+(strips config, phase→None, bumps `flare_operator_migration_aborted_total`)
+rather than shipping an inconsistent copy — source-cluster failover is never
+blocked. Because the spec still says `enabled=true`, the migration
+auto-restarts (fresh dump) once the cluster reconverges; to stop for good,
+set `enabled=false`. (The operator only sees v1's masters; keep v2 stable
+during the migration.)
+
+Rollback before cutover is trivial (traffic never moved); after cutover,
 treat v1 as the stale copy — writes since cutover exist only on v2.
 
 CAUTION: cluster replication is the least-hardened path in this operator

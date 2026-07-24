@@ -119,74 +119,78 @@ def suite : TestSuite := {
           | .ok data => return .fail s!"ConfigMap missing replication settings after 60s: {data}"
           | .error e => return .fail s!"could not read ConfigMap: {e}" },
 
-    -- Test 5: verify Forwarding phase (auto transition)
+    -- Test 5: THE SHRINK — pre-existing keys from v1's two partitions migrate
+    -- to v2's single partition via the DUPLICATE-mode dump (no manual step: the
+    -- operator applies mode=duplicate on enable and re-SIGHUPs once it lands on
+    -- the mounted config, then flared dumps). Poll v2's P0 master until all keys
+    -- arrive. all present => pass; still 0 after the timeout => skip (env too
+    -- slow / unsupported image); partial => hard FAIL (silent loss).
+    { name := s!"all {shrinkKeys} keys migrate to v2 via the duplicate-mode dump"
+      run := do
+        let v2MasterIp : IO (Option String) := do
+          let sync ← operatorTcpCmd cfgV2.debugPod cfgV2.«namespace»
+                       cfgV2.operatorName cfgV2.operatorPort "node sync"
+          match findMasterPod (parseNodeSync sync) 0 with
+          | none => return none
+          | some m => getPodIp m cfgV2.«namespace»
+        let countPresent : String → IO (Nat × List Nat) := fun ip => do
+          let mut present : Nat := 0
+          let mut mismatched : List Nat := []
+          for i in List.range shrinkKeys do
+            match ← memcachedGet cfgV2.debugPod cfgV2.«namespace» ip cfgV2.flarePort s!"{shrinkPrefix}_{i}" with
+            | none => pure ()
+            | some got =>
+              present := present + 1
+              if got != s!"val_{i}" then mismatched := mismatched ++ [i]
+          return (present, mismatched)
+        -- Poll up to ~180s for the dump to propagate + run + land on v2.
+        let _ ← waitForCondition s!"all {shrinkKeys} keys on v2" 180 do
+          match ← v2MasterIp with
+          | none => return false
+          | some ip => return ((← countPresent ip).1 == shrinkKeys)
+        match ← v2MasterIp with
+        | none => return .fail "no v2 P0 master"
+        | some ip =>
+          let (present, mismatched) ← countPresent ip
+          IO.eprintln s!"# v2 after shrink: {present}/{shrinkKeys} keys present, {mismatched.length} mismatched"
+          if present == 0 then
+            return .skip "cluster-replication produced no data on v2 (env too slow / unsupported image)"
+          else if present == shrinkKeys && mismatched.isEmpty then
+            return .pass
+          else
+            return .fail s!"SHRINK DATA LOSS: only {present}/{shrinkKeys} keys on v2, mismatched={mismatched.take 10}" },
+
+    -- Test 6: user-controlled cutover — the operator does NOT auto-advance;
+    -- the user flips mode to forward when ready (verified the dump landed above).
+    { name := "user patches mode=forward to advance"
+      run := do
+        let v2Svc := s!"{cfgV2.name}-nodes.{cfgV2.«namespace»}.svc.cluster.local"
+        let patchJson := s!"\{\"spec\":\{\"clusterReplication\":\{\"enabled\":true,\"serverName\":\"{v2Svc}\",\"port\":{cfgV2.flarePort},\"mode\":\"forward\",\"concurrency\":2}}}"
+        match ← kubectlPatch "flarecluster" cfgV1.name cfgV1.«namespace» patchJson with
+        | .ok _ => return .pass
+        | .error e => return .fail s!"patch failed: {e}" },
+
+    -- Test 7: verify Forwarding phase (now user-driven by the mode=forward patch)
     { name := "migrationPhase transitions to Forwarding"
       run := do
-        let ok ← waitForCondition "migrationPhase=Forwarding" 180 do
+        let ok ← waitForCondition "migrationPhase=Forwarding" 120 do
           match ← kubectlGetJsonpath "flarecluster" cfgV1.name cfgV1.«namespace»
                     "{.status.migrationPhase}" with
           | .ok val => return (val == "Forwarding")
           | .error _ => return false
         if ok then return .pass
-        else return .fail "did not reach Forwarding" },
+        else return .fail "did not reach Forwarding after mode=forward patch" },
 
-    -- Test 6: ConfigMap updated to forward mode
+    -- Test 8: ConfigMap updated to forward mode
     { name := "ConfigMap updated to forward mode"
       run := do
-        match ← kubectlGetJsonpath "configmap" s!"{cfgV1.name}-config" cfgV1.«namespace»
-                  "{.data.extra\\.conf}" with
-        | .ok data =>
-          if containsSubstr data "cluster-replication-mode = forward" then return .pass
-          else return .fail s!"ConfigMap not in forward mode: {data}"
-        | .error e => return .fail s!"could not read ConfigMap: {e}" },
-
-    -- Test 7: verify data on v2 (skip if not supported)
-    { name := "data replicated to v2"
-      run := do
-        let ips ← getPodIps s!"app=flare,cluster={cfgV2.name}" cfgV2.«namespace»
-        match ips.head? with
-        | none => return .fail "no v2 pod IPs"
-        | some ip =>
-          let val ← memcachedGet cfgV2.debugPod cfgV2.«namespace» ip cfgV2.flarePort "repl_test_key"
-          match val with
-          | some v =>
-            if containsSubstr v "repl_test_value" then return .pass
-            else return .fail s!"unexpected value: {v}"
-          | none =>
-            return .skip "flared may not support cluster-replication in test image" },
-
-    -- Test 8: THE SHRINK — every key from v1's two partitions must survive
-    -- on v2's single partition. Read all shrink keys back through v2's P0
-    -- master. Partial survival is the silent-loss bug we care about, so a
-    -- some-but-not-all result is a hard FAIL; wholesale absence keeps the
-    -- existing skip (cluster-replication data migration is not wired in the
-    -- kind test image — the canary above already skips there), so this adds
-    -- partial-loss detection without turning that environment red.
-    { name := s!"all {shrinkKeys} keys survive the 2→1 partition shrink on v2"
-      run := do
-        let sync ← operatorTcpCmd cfgV2.debugPod cfgV2.«namespace»
-                     cfgV2.operatorName cfgV2.operatorPort "node sync"
-        match findMasterPod (parseNodeSync sync) 0 with
-        | none => return .fail "no v2 P0 master"
-        | some m =>
-          match ← getPodIp m cfgV2.«namespace» with
-          | none => return .fail s!"could not get IP for v2 master {m}"
-          | some ip =>
-            let mut present : Nat := 0
-            let mut mismatched : List Nat := []
-            for i in List.range shrinkKeys do
-              match ← memcachedGet cfgV2.debugPod cfgV2.«namespace» ip cfgV2.flarePort s!"{shrinkPrefix}_{i}" with
-              | none => pure ()
-              | some got =>
-                present := present + 1
-                if got != s!"val_{i}" then mismatched := mismatched ++ [i]
-            IO.eprintln s!"# v2 after shrink: {present}/{shrinkKeys} keys present, {mismatched.length} mismatched"
-            if present == 0 then
-              return .skip "cluster-replication data migration not supported in test image"
-            else if present == shrinkKeys && mismatched.isEmpty then
-              return .pass
-            else
-              return .fail s!"SHRINK DATA LOSS: only {present}/{shrinkKeys} keys on v2, mismatched={mismatched.take 10}" }
+        let ok ← waitForCondition "extra.conf mode=forward" 60 do
+          match ← kubectlGetJsonpath "configmap" s!"{cfgV1.name}-config" cfgV1.«namespace»
+                    "{.data.extra\\.conf}" with
+          | .ok data => return containsSubstr data "cluster-replication-mode = forward"
+          | .error _ => return false
+        if ok then return .pass
+        else return .fail "ConfigMap not in forward mode" }
   ]
 }
 

@@ -283,115 +283,135 @@ private def handleRocksdbConfig (crd : FlareClusterView) (crName ns : String)
     pendingConfRef.set (some (desired.trim, 0))
     IO.eprintln s!"[TRACE] RocksdbConfig: applied {rocksdb.toExtraConf.length} bytes, SIGHUP sent, verification pending"
 
-/-- Handle cluster replication state machine.
-    Manages the duplicate → forward mode transition autonomously. -/
+/-- Order-independent equality of two master signatures ("<partition>:<server>").
+    One master per partition, so the entries are unique and a set-compare (equal
+    length + every element present) detects any failover/promotion. -/
+private def sameMasters (a b : List String) : Bool :=
+  a.length == b.length && a.all (fun x => b.contains x)
+
+/-- Reconcile flared's cluster-replication config toward the DECLARED desired
+    state in `spec.clusterReplication` (enabled + mode). Key properties:
+
+    * DECLARATIVE, no auto-advance. The USER controls the duplicate→forward
+      transition (and thus cutover timing), which differs per use case — a
+      Blue/Green move to a different cluster wants human-controlled cutover
+      (verify data landed on the target, then flip mode to forward), while a
+      partition shrink can be flipped whenever. This removes the old
+      thread-polling detector, which could not distinguish "dump finished" from
+      "dump never started" and flipped to forward before any data shipped.
+
+    * CANCEL = `enabled=false` (declarative): strips the config, SIGHUPs, phase
+      →None. Before cutover this is a clean rollback (traffic never moved).
+
+    * ABORT-ON-MASTER-CHANGE (safety). A master failover/promotion mid-migration
+      would leave the target inconsistent (dump runs on masters; the handover
+      loses in-flight/forwarded writes). The operator NEVER blocks source-cluster
+      failover — instead it fail-safe ABORTS the migration (strip config, SIGHUP,
+      phase→None, bump migration_aborted_total) when the master set changes from
+      the snapshot taken at start. Because the spec still says enabled=true, once
+      the cluster reconverges the migration auto-restarts with a fresh dump from
+      the new master (self-healing); to stop for good, set enabled=false.
+
+    migrationPhase mirrors the applied mode: None / Dumping (duplicate) /
+    Forwarding (forward). Every config write uses the propagation-confirmed
+    re-signal (pendingConfRef) so a SIGHUP never races the async kubelet mount. -/
 private def handleClusterReplication
-    (crd : FlareClusterView) (pods : List PodInfo)
-    (migrationRef : IO.Ref MigrationPhase) (crName ns : String) : IO Unit := do
+    (crd : FlareClusterView) (state : FlareClusterState)
+    (migrationRef : IO.Ref MigrationPhase)
+    (pendingConfRef : IO.Ref (Option (String × Nat)))
+    (masterSnapshotRef : IO.Ref (Option (List String)))
+    (metrics : OperatorMetrics)
+    (crName ns : String) : IO Unit := do
   let repl := crd.spec.clusterReplication
   let rocksdb := crd.spec.rocksdb
-  IO.eprintln s!"[DEBUG] handleClusterReplication: enabled={repl.enabled}"
+  let phase ← migrationRef.get
+  -- Current master set (one "<partition>:<server>" per partition master).
+  let masterSig : List String := state.getNodes.filterMap fun n =>
+    if n.role == FlareRole.Master then some s!"{n.partition}:{n.serverName}" else none
+
   if !repl.enabled then
-    -- If replication was active but now disabled, STOP FLARED, not just our
-    -- bookkeeping: the previous version reset only the in-memory phase and
-    -- CR status, leaving `cluster-replication = true` in the ConfigMap with
-    -- no SIGHUP — flared kept forwarding, and kept doing so across its own
-    -- pod restarts (external review P1-4). Strip the replication block from
-    -- extra.conf (rocksdb settings preserved), SIGHUP so flared reloads,
-    -- and only then record None; on a write failure the phase stays as-is
-    -- so the next tick retries the whole disable.
-    let phase ← migrationRef.get
+    -- Disabled / cancelled: STOP flared, not just our bookkeeping (P1-4).
     if phase != .None then
       match ← clearFlaredReplicationConfig crName ns rocksdb with
       | .error e =>
         IO.eprintln s!"[flare-operator] ERROR: failed to clear replication config: {e} — retrying next tick"
       | .ok () =>
         sendSighupToPods crName ns
+        pendingConfRef.set none
+        masterSnapshotRef.set none
         migrationRef.set .None
         match ← patchFlareClusterStatus crName ns .None with
         | .error e => IO.eprintln s!"[flare-operator] warning: failed to reset migrationPhase: {e}"
         | .ok () => pure ()
-        IO.eprintln s!"[TRACE] ClusterReplication: {phase.toString}->None | Reason: replication disabled (config cleared, SIGHUP sent)"
+        IO.eprintln s!"[TRACE] ClusterReplication: {phase.toString}->None | replication disabled (config cleared, SIGHUP sent)"
     return
 
-  let phase ← migrationRef.get
-  IO.eprintln s!"[DEBUG] handleClusterReplication: current phase={phase.toString}"
-  match phase with
-  | .None =>
-    -- Start replication: write config with mode=duplicate, SIGHUP, set Dumping
-    IO.eprintln s!"[DEBUG] handleClusterReplication: calling updateFlaredReplicationConfig"
-    match ← updateFlaredReplicationConfig crName ns repl rocksdb with
-    | .error e =>
-      IO.eprintln s!"[flare-operator] ERROR: failed to write replication config: {e}"
-      return
-    | .ok () =>
-      IO.eprintln s!"[DEBUG] handleClusterReplication: ConfigMap updated successfully"
-    sendSighupToPods crName ns
-    migrationRef.set .Dumping
-    match ← patchFlareClusterStatus crName ns .Dumping with
-    | .error e => IO.eprintln s!"[flare-operator] warning: failed to patch status: {e}"
-    | .ok () => pure ()
-    IO.eprintln s!"[TRACE] ClusterReplication: None->Dumping | Reason: replication enabled (mode=duplicate)"
-
-  | .Dumping =>
-    -- Ensure ConfigMap exists (handle operator restart during Dumping phase)
-    -- Check if ConfigMap has replication settings, if not, recreate it.
-    -- MUST read the `extra.conf` key: readFlaredConfigMap reads `.data.nodeMap`,
-    -- which only exists on {cr}-node-map — reading it HERE always returned ""
-    -- ("no replication settings"), so every 5s tick rewrote the ConfigMap and
-    -- SIGHUPed every pod for the whole Dumping phase (external review, P1-3).
-    match ← readFlaredExtraConf crName ns with
-    | .error _ =>
-      -- ConfigMap doesn't exist or can't be read - recreate it
-      IO.eprintln s!"[flare-operator] WARNING: Dumping phase but ConfigMap missing, recreating..."
-      match ← updateFlaredReplicationConfig crName ns repl rocksdb with
+  -- ABORT-ON-MASTER-CHANGE: if we are mid-migration and the master set differs
+  -- from the snapshot taken at start, a failover/promotion happened — abort to
+  -- avoid an inconsistent target. Source-cluster failover is never blocked.
+  match ← masterSnapshotRef.get with
+  | some snap =>
+    if !sameMasters snap masterSig then
+      IO.eprintln s!"[flare-operator] WARNING: master changed during cluster replication (start={snap}, now={masterSig}) — ABORTING migration to avoid an inconsistent target (source failover is NOT blocked; migration auto-restarts once the cluster reconverges, or set enabled=false to stop)"
+      match ← clearFlaredReplicationConfig crName ns rocksdb with
       | .error e =>
-        IO.eprintln s!"[flare-operator] ERROR: failed to recreate replication config: {e}"
-        return
+        IO.eprintln s!"[flare-operator] ERROR: abort could not clear replication config: {e} — retrying next tick"
       | .ok () =>
-        IO.eprintln s!"[DEBUG] handleClusterReplication: ConfigMap recreated in Dumping phase"
         sendSighupToPods crName ns
-    | .ok data =>
-      -- ConfigMap exists, check if it has replication settings
-      if !containsSubstr data "cluster-replication" then
-        IO.eprintln s!"[flare-operator] WARNING: ConfigMap exists but missing replication settings, updating..."
-        match ← updateFlaredReplicationConfig crName ns repl rocksdb with
-        | .error e =>
-          IO.eprintln s!"[flare-operator] ERROR: failed to update replication config: {e}"
-          return
-        | .ok () =>
-          IO.eprintln s!"[DEBUG] handleClusterReplication: ConfigMap updated in Dumping phase"
-          sendSighupToPods crName ns
+        pendingConfRef.set none
+        masterSnapshotRef.set none
+        migrationRef.set .None
+        metrics.migrationAborted.inc
+        match ← patchFlareClusterStatus crName ns .None with
+        | .error e => IO.eprintln s!"[flare-operator] warning: failed to reset migrationPhase after abort: {e}"
+        | .ok () => pure ()
+        IO.eprintln s!"[TRACE] ClusterReplication: {phase.toString}->None | ABORTED (master changed mid-migration)"
+      return
+  | none => pure ()
 
-    -- Monitor: query all ready pods for dump_replication thread status
-    -- (only masters actually run dump_replication threads; checking all is safe)
-    let readyPods := pods.filter fun p => p.ready
-    let mut dumpRunning := false
-    for pod in readyPods do
-      match ← queryPodStats pod.name ns "stats threads" with
-      | .error _ => dumpRunning := true  -- assume still running on error
-      | .ok output =>
-        if containsSubstr output "dump_replication" then
-          IO.eprintln s!"[TRACE] ClusterReplication: Dumping | dump_replication still running on {pod.name}"
-          dumpRunning := true
-    if !dumpRunning then
-      -- Dump complete → transition to forward mode
-      let forwardRepl := { repl with mode := "forward" }
-      match ← updateFlaredReplicationConfig crName ns forwardRepl rocksdb with
-      | .error e =>
-        IO.eprintln s!"[flare-operator] warning: failed to update replication config to forward: {e}"
-        return
-      | .ok () => pure ()
-      sendSighupToPods crName ns
-      migrationRef.set .Forwarding
-      match ← patchFlareClusterStatus crName ns .Forwarding with
+  -- Only start/continue a migration from a converged cluster (every partition
+  -- has a master), so the snapshot is complete and we never spuriously abort on
+  -- a still-settling cluster.
+  if masterSig.length != crd.spec.partitions then
+    IO.eprintln s!"[flare-operator] ClusterReplication: waiting for all {crd.spec.partitions} masters before starting/continuing migration (have {masterSig.length})"
+    return
+
+  -- Enabled + converged: honor the user's declared mode. "forward" only if
+  -- explicitly requested; anything else (incl. the default) means "duplicate".
+  let desiredMode := if repl.mode == "forward" then "forward" else "duplicate"
+  let desiredPhase := if desiredMode == "forward" then MigrationPhase.Forwarding else MigrationPhase.Dumping
+  let needle := s!"cluster-replication-mode = {desiredMode}"
+  let alreadyDesired ← match ← readFlaredExtraConf crName ns with
+    | .ok data => pure (containsSubstr data needle)
+    | .error _ => pure false
+  if alreadyDesired then
+    -- Config already carries the desired mode → no rewrite, no SIGHUP storm
+    -- (P1-3). Make the phase reflect it and ensure a master snapshot exists
+    -- (e.g. after an operator restart mid-migration).
+    if (← masterSnapshotRef.get).isNone then
+      masterSnapshotRef.set (some masterSig)
+    if phase != desiredPhase then
+      migrationRef.set desiredPhase
+      match ← patchFlareClusterStatus crName ns desiredPhase with
       | .error e => IO.eprintln s!"[flare-operator] warning: failed to patch status: {e}"
       | .ok () => pure ()
-      IO.eprintln s!"[TRACE] ClusterReplication: Dumping->Forwarding | Reason: all dump_replication threads complete"
-
-  | .Forwarding =>
-    -- Steady state: forward mode active, nothing to do
-    pure ()
+      IO.eprintln s!"[TRACE] ClusterReplication: phase now {desiredPhase.toString} (matches applied mode={desiredMode})"
+    return
+  -- Desired mode not yet applied: write it, SIGHUP, register the propagation-
+  -- confirmed re-signal, and snapshot the master set as the migration baseline.
+  match ← updateFlaredReplicationConfig crName ns { repl with mode := desiredMode } rocksdb with
+  | .error e =>
+    IO.eprintln s!"[flare-operator] ERROR: failed to write replication config (mode={desiredMode}): {e}"
+    return
+  | .ok () => pure ()
+  sendSighupToPods crName ns
+  pendingConfRef.set (some (needle, 0))
+  masterSnapshotRef.set (some masterSig)
+  migrationRef.set desiredPhase
+  match ← patchFlareClusterStatus crName ns desiredPhase with
+  | .error e => IO.eprintln s!"[flare-operator] warning: failed to patch status: {e}"
+  | .ok () => pure ()
+  IO.eprintln s!"[TRACE] ClusterReplication: {phase.toString}->{desiredPhase.toString} | applied user-declared mode={desiredMode} (SIGHUP sent, propagation re-signal pending, master snapshot captured)"
 
 -- ===========================================================================
 -- Partition Reduction Detection
@@ -716,6 +736,7 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
     (trippedRef : IO.Ref Bool)
     (prepareCyclesRef : IO.Ref (List (String × Nat)))
     (pendingConfRef : IO.Ref (Option (String × Nat)))
+    (masterSnapshotRef : IO.Ref (Option (List String)))
     (metrics : OperatorMetrics) (leaseName identity : String)
     (crName ns : String) : IO Unit := do
   -- 1. Fetch CRD (handled by FSM, but we need it early for partition reduction check)
@@ -791,9 +812,16 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
 
   -- 5. Handle rocksdb config propagation + cluster replication migration
   let crd ← crdRef.get
-  let pods ← Bridge.listFlaredPods crName ns
   handleRocksdbConfig crd crName ns pendingConfRef
-  handleClusterReplication crd pods migrationRef crName ns
+  handleClusterReplication crd (← stateRef.get) migrationRef pendingConfRef masterSnapshotRef metrics crName ns
+  -- Publish the migration phase/desired to Prometheus (-> Grafana Cloud).
+  let migPhase ← migrationRef.get
+  let phaseNum : Float := match migPhase with
+    | .None => 0.0 | .Dumping => 1.0 | .Forwarding => 2.0
+  let desiredNum : Float :=
+    if !crd.spec.clusterReplication.enabled then 0.0
+    else if crd.spec.clusterReplication.mode == "forward" then 2.0 else 1.0
+  updateMigrationMetrics metrics phaseNum desiredNum
 
   -- 5b. Pending-config re-signal (see handleRocksdbConfig): one non-blocking
   -- propagation check per tick; SIGHUP again once the mounted files caught
@@ -928,7 +956,7 @@ private def reconcileOnce (stateRef : IO.Ref FlareClusterState) (crdRef : IO.Ref
   -- Legacy path: no pending-based re-signal (throwaway ref) — immediate
   -- SIGHUP only, i.e. the historical behavior. Production runs the FSM path.
   handleRocksdbConfig crd crName ns (← IO.mkRef none)
-  handleClusterReplication crd pods migrationRef crName ns
+  handleClusterReplication crd (← stateRef.get) migrationRef (← IO.mkRef none) (← IO.mkRef none) metrics crName ns
 
 -- ===========================================================================
 -- Leader Election Helpers
@@ -1180,6 +1208,9 @@ def main (args : List String) : IO Unit := do
   -- Persistent breaker-trip flag (input to the reset hysteresis).
   let trippedRef ← IO.mkRef false
   let pendingConfRef ← IO.mkRef (none : Option (String × Nat))
+  -- Master set captured when a cluster-replication migration starts; a change
+  -- mid-migration triggers a fail-safe abort (see handleClusterReplication).
+  let masterSnapshotRef ← IO.mkRef (none : Option (List String))
 
   -- Start TCP server in background (using Server.TcpServer)
   let _ ← IO.asTask (prio := .default) do
@@ -1215,7 +1246,7 @@ def main (args : List String) : IO Unit := do
     let startTime ← IO.monoMsNow
     try
       -- Use FSM-driven reconcile (complete implementation with all 5 requirements)
-      reconcileOnceFSM stateRef crdRef migrationRef graceCyclesRef trippedRef prepareCyclesRef pendingConfRef metrics leaseName identity crName ns
+      reconcileOnceFSM stateRef crdRef migrationRef graceCyclesRef trippedRef prepareCyclesRef pendingConfRef masterSnapshotRef metrics leaseName identity crName ns
     catch e =>
       IO.eprintln s!"[flare-operator] reconcile error: {e}"
     let endTime ← IO.monoMsNow

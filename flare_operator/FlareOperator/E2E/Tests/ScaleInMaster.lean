@@ -94,9 +94,13 @@ def suite : TestSuite := {
         if ok then return .pass
         else return .fail "did not reach Dumping" },
 
-    -- Test 5: verify Forwarding phase (auto transition)
+    -- Test 5: user-controlled cutover — the operator no longer auto-advances;
+    -- the user patches mode=forward when ready.
     { name := "migrationPhase transitions to Forwarding"
       run := do
+        let v2Svc := s!"{cfgV2.name}-nodes.{cfgV2.«namespace»}.svc.cluster.local"
+        let fwdPatch := s!"\{\"spec\":\{\"clusterReplication\":\{\"enabled\":true,\"serverName\":\"{v2Svc}\",\"port\":{cfgV2.flarePort},\"mode\":\"forward\",\"concurrency\":2}}}"
+        let _ ← kubectlPatch "flarecluster" cfgV1.name cfgV1.«namespace» fwdPatch
         let ok ← waitForCondition "migrationPhase=Forwarding" 180 do
           match ← kubectlGetJsonpath "flarecluster" cfgV1.name cfgV1.«namespace»
                     "{.status.migrationPhase}" with

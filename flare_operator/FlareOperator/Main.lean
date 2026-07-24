@@ -369,11 +369,13 @@ private def handleClusterReplication
       return
   | none => pure ()
 
-  -- Only start/continue a migration from a converged cluster (every partition
-  -- has a master), so the snapshot is complete and we never spuriously abort on
-  -- a still-settling cluster.
-  if masterSig.length != crd.spec.partitions then
-    IO.eprintln s!"[flare-operator] ClusterReplication: waiting for all {crd.spec.partitions} masters before starting/continuing migration (have {masterSig.length})"
+  -- Convergence guard ONLY when STARTING a migration (no snapshot yet), so the
+  -- captured snapshot is complete. Once migrating (snapshot present), a
+  -- missing/changed master is already handled by the abort check above, so we
+  -- must NOT block here — otherwise a mode transition (duplicate→forward) or any
+  -- tick during a brief master blip would stall in the current phase forever.
+  if (← masterSnapshotRef.get).isNone && masterSig.length != crd.spec.partitions then
+    IO.eprintln s!"[flare-operator] ClusterReplication: waiting for all {crd.spec.partitions} masters before STARTING migration (have {masterSig.length})"
     return
 
   -- Enabled + converged: honor the user's declared mode. "forward" only if

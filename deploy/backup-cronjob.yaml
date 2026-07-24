@@ -1,14 +1,35 @@
 # Periodic flare backup via the flared `backup` op (RocksDB checkpoint).
 #
-# Tier 1 (this CronJob): each flared pod creates a checkpoint of its own DB
-# on its own PVC under <data-dir>/backups/<timestamp>. Checkpoints are
-# hard-linked (near-instant, application-consistent) and survive logical
-# destruction (flush_all / bad deletes only touch the live DB). Retention is
-# enforced by flared itself (`rocksdb-backup-keep`, default 7).
+# Three tiers, each an independent CronJob you enable/schedule to taste:
 #
-# Tier 2 (optional, see the second CronJob below): stream the newest
-# checkpoint off-cluster to S3 so backups also survive PVC loss and
-# namespace deletion.
+#   Tier 1  flare-backup            local RocksDB checkpoint on each pod's PVC.
+#                                    Hard-linked, near-instant, survives
+#                                    flush_all. Retention: flared's
+#                                    `rocksdb-backup-keep` (default 7).
+#
+#   Tier 2a flare-backup-s3-delta   frequent DELTA upload to object storage.
+#                                    `aws s3 sync --size-only --delete` mirrors
+#                                    each pod's newest checkpoint to
+#                                    <bucket>/<cluster>/<pod>/latest/. RocksDB
+#                                    SSTs are immutable and uniquely named, so
+#                                    --size-only uploads only NEW SSTs (+ the
+#                                    small changed MANIFEST/CURRENT) and --delete
+#                                    prunes SSTs dropped by compaction. Every run
+#                                    is a delta; the WAN transfer is just the
+#                                    write delta since the previous run.
+#
+#   Tier 2b flare-backup-s3-daily   once-a-day FULL retained snapshot. A pure
+#                                    server-side copy latest/ -> snapshots/<date>/
+#                                    inside the bucket (no cluster egress), plus
+#                                    pruning of snapshots older than KEEP_DAYS.
+#                                    Gives point-in-time rollback; the delta job
+#                                    only keeps the single most-recent state.
+#
+# RPO = the tier-2a interval (writes since the last delta are the exposure).
+# Object storage is S3-compatible: for Tencent COS / GCS / MinIO set
+# S3_ENDPOINT (and, for COS, the region-specific endpoint). Vendor endpoints,
+# buckets, and credentials are DEPLOYMENT-side (a Secret + these env values),
+# never committed here.
 #
 # Restore procedure: see docs/BACKUP_RESTORE.md.
 apiVersion: batch/v1
@@ -17,7 +38,7 @@ metadata:
   name: flare-backup
   namespace: flare-system
 spec:
-  schedule: "0 3 * * *"          # daily 03:00 UTC
+  schedule: "0 3 * * *"          # daily 03:00 UTC (local checkpoints)
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 3
@@ -59,21 +80,30 @@ spec:
                   done
                   exit "$FAIL"
 ---
-# OPTIONAL tier 2: off-cluster copy to S3 (or any S3-compatible store).
-# Runs after the checkpoint window; streams `tar` of the newest checkpoint
-# out of each pod without touching the live DB. Requires:
-#   - a ServiceAccount bound to a Role allowing pods/exec (kubectl exec)
-#   - S3 credentials (Secret with AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY,
-#     or IRSA on EKS — then drop the envFrom)
-# Swap `aws s3 cp` for `rclone rcat` to target GCS/other backends.
+# Tier 2a: frequent DELTA upload to object storage (S3 / COS / GCS / MinIO).
+# Each run takes a fresh checkpoint per pod, copies it out, and mirrors it to
+# <bucket>/<cluster>/<pod>/latest/ with `aws s3 sync --size-only --delete` so
+# only newly-flushed SSTs cross the WAN. Requires:
+#   - a ServiceAccount bound to a Role allowing pods/get + pods/exec
+#   - an image with BOTH kubectl and aws-cli
+#   - a Secret `flare-backup-s3-credentials` with AWS_ACCESS_KEY_ID /
+#     AWS_SECRET_ACCESS_KEY (or IRSA/workload-identity — then drop envFrom)
+# For Tencent COS set S3_ENDPOINT to the COS S3-compatible endpoint.
+# NOTE ON CADENCE: this job pulls each pod's checkpoint intra-cluster before the
+# delta upload, so at minute-cadence on a large dataset the intra-cluster copy
+# dominates. For true minute-level RPO on big data, run aws-cli as a sidecar in
+# the flared pod (PVC mounted read-only) and `sync` the checkpoint dir in place,
+# skipping the pull entirely. Hourly (the default here) is fine job-based.
 apiVersion: batch/v1
 kind: CronJob
 metadata:
-  name: flare-backup-s3
+  name: flare-backup-s3-delta
   namespace: flare-system
 spec:
-  schedule: "30 3 * * *"         # after flare-backup
+  schedule: "0 * * * *"          # hourly delta (tighten toward */5 or */1 as needed)
   concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
   suspend: true                  # enable after configuring bucket + credentials
   jobTemplate:
     spec:
@@ -84,7 +114,9 @@ spec:
           serviceAccountName: flare-backup   # needs pods/get + pods/exec
           containers:
             - name: upload
-              image: amazon/aws-cli:2.15.0   # includes kubectl? NO — use an image with both, e.g. a small custom image or bitnami/kubectl + awscli layer
+              # Image needs kubectl AND aws-cli (build a small combined image;
+              # amazon/aws-cli alone has no kubectl).
+              image: YOUR-REGISTRY/kubectl-awscli:latest
               envFrom:
                 - secretRef:
                     name: flare-backup-s3-credentials
@@ -95,20 +127,96 @@ spec:
                   value: "flare-system"
                 - name: NUM_PODS
                   value: "4"
-                - name: BUCKET
+                - name: FLARE_PORT
+                  value: "12121"
+                - name: BUCKET            # s3://bucket/prefix (no trailing slash)
                   value: "s3://YOUR-BUCKET/flare-backups"
+                - name: S3_ENDPOINT       # e.g. COS S3-compatible endpoint; empty for AWS
+                  value: ""
+                - name: DATA_DIR
+                  value: "/data/flare"
               command:
                 - sh
                 - -c
                 - |
                   set -e
+                  EP=""; [ -n "$S3_ENDPOINT" ] && EP="--endpoint-url $S3_ENDPOINT"
+                  FAIL=0
                   i=0
                   while [ "$i" -lt "$NUM_PODS" ]; do
                     POD="${CLUSTER}-nodes-${i}"
-                    LATEST=$(kubectl exec -n "$NAMESPACE" "$POD" -- sh -c 'ls -1 /data/flare/backups | tail -1')
-                    echo "uploading ${POD}:${LATEST}"
-                    kubectl exec -n "$NAMESPACE" "$POD" -- \
-                      tar czf - -C /data/flare/backups "$LATEST" \
-                      | aws s3 cp - "${BUCKET}/$(date -u +%Y%m%d)/${POD}-${LATEST}.tar.gz"
+                    HOST="${POD}.${CLUSTER}-nodes.${NAMESPACE}.svc.cluster.local"
+                    STAMP=$(date -u +%Y%m%d-%H%M%S)
+                    # 1) fresh consistent checkpoint (hard-links; near-instant)
+                    REPLY=$(printf 'backup %s\r\n' "$STAMP" | nc -w 30 "$HOST" "$FLARE_PORT" || true)
+                    case "$REPLY" in *ERROR*|"") echo "checkpoint FAILED on ${POD}"; FAIL=1; i=$((i+1)); continue ;; esac
+                    # 2) copy the checkpoint out of the pod (intra-cluster)
+                    rm -rf "/tmp/${POD}"; mkdir -p "/tmp/${POD}"
+                    kubectl cp -n "$NAMESPACE" "${POD}:${DATA_DIR}/backups/${STAMP}" "/tmp/${POD}"
+                    # 3) DELTA upload: --size-only skips immutable SSTs already
+                    #    present; --delete prunes compaction leftovers. Result is
+                    #    a complete, current mirror at <bucket>/<cluster>/<pod>/latest/
+                    aws s3 sync "/tmp/${POD}" "${BUCKET}/${CLUSTER}/${POD}/latest/" \
+                      --size-only --delete $EP || FAIL=1
+                    rm -rf "/tmp/${POD}"
+                    # 4) local checkpoint retention is flared's job (rocksdb-backup-keep)
                     i=$((i + 1))
+                  done
+                  exit "$FAIL"
+---
+# Tier 2b: once-a-day FULL retained snapshot, entirely server-side (no cluster
+# egress) — copies the current mirror to a dated prefix and prunes old ones.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: flare-backup-s3-daily
+  namespace: flare-system
+spec:
+  schedule: "0 3 * * *"          # daily 03:00 UTC (independent of the delta job)
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  suspend: true                  # enable after configuring bucket + credentials
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 1800
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: snapshot
+              image: amazon/aws-cli:2.15.0
+              envFrom:
+                - secretRef:
+                    name: flare-backup-s3-credentials
+              env:
+                - name: CLUSTER
+                  value: "default"
+                - name: BUCKET
+                  value: "s3://YOUR-BUCKET/flare-backups"
+                - name: S3_ENDPOINT
+                  value: ""
+                - name: KEEP_DAYS
+                  value: "14"
+              command:
+                - sh
+                - -c
+                - |
+                  set -e
+                  EP=""; [ -n "$S3_ENDPOINT" ] && EP="--endpoint-url $S3_ENDPOINT"
+                  DATE=$(date -u +%Y%m%d)
+                  # Server-side copy of every pod's current mirror into a dated,
+                  # retained snapshot (COS/S3 copies within the bucket — no egress).
+                  aws s3 cp --recursive $EP \
+                    "${BUCKET}/${CLUSTER}/" \
+                    "${BUCKET}/${CLUSTER}-snapshots/${DATE}/" \
+                    --exclude "*" --include "*/latest/*"
+                  # Prune snapshots older than KEEP_DAYS (compare the YYYYMMDD prefix).
+                  CUTOFF=$(date -u -d "-${KEEP_DAYS} days" +%Y%m%d 2>/dev/null || date -u -v-${KEEP_DAYS}d +%Y%m%d)
+                  for d in $(aws s3 ls $EP "${BUCKET}/${CLUSTER}-snapshots/" | awk '{print $2}' | tr -d '/'); do
+                    case "$d" in ''|*[!0-9]*) continue ;; esac
+                    if [ "$d" -lt "$CUTOFF" ]; then
+                      echo "pruning old snapshot ${d}"
+                      aws s3 rm --recursive $EP "${BUCKET}/${CLUSTER}-snapshots/${d}/"
+                    fi
                   done

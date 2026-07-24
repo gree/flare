@@ -30,8 +30,15 @@ Components:
   `rocksdb_last_backup_epoch` — **alert when
   `time() - rocksdb_last_backup_epoch` exceeds ~2 backup intervals**.
 - `rocksdb-backup-keep` (flared.conf, default 7, hot-reloadable via SIGHUP).
-- `deploy/backup-cronjob.yaml` — daily trigger (busybox + nc over the
-  headless-service pod DNS) and an optional suspended S3-upload CronJob.
+- `deploy/backup-cronjob.yaml` — three independent CronJobs: `flare-backup`
+  (tier 1, local checkpoints via busybox+nc over the headless-service pod DNS),
+  `flare-backup-s3-delta` (tier 2a, frequent DELTA upload — `aws s3 sync
+  --size-only --delete` mirrors each pod's newest checkpoint to
+  `<bucket>/<cluster>/<pod>/latest/`; immutable uniquely-named SSTs mean only
+  new ones cross the WAN), and `flare-backup-s3-daily` (tier 2b, once-a-day
+  server-side copy of `latest/` to a dated, pruned `…-snapshots/<date>/` for
+  point-in-time rollback). Both tier-2 jobs start suspended; S3-compatible
+  stores (Tencent COS, GCS, MinIO) work via `S3_ENDPOINT`.
 - Restore hook in the StatefulSet startup command (PVC deployments): if
   `<data-dir>/RESTORE` exists, its content names a checkpoint directory; the
   live DB is replaced by it and the marker consumed before flared starts.
@@ -109,8 +116,13 @@ from restored data — future work), multi-partition restore must be manual:
 
 ## What backups do NOT cover
 
-- Writes between the last checkpoint and the incident are lost (RPO = backup
-  interval). Reduce the CronJob interval if that matters.
+- Writes between the last upload and the incident are lost. RPO = the tier-2a
+  DELTA interval (hourly by default; tighten to `*/5`/`*/1` — deltas are cheap
+  since only new SSTs upload). The daily tier-2b snapshot is for retained
+  point-in-time rollback, not RPO. Sub-minute/continuous RPO would need WAL
+  archiving to object storage (not implemented; the delta floor is the k8s
+  CronJob 1-minute granularity, and at minute-cadence on large data a
+  PVC-mounted aws-cli sidecar avoids the per-run intra-cluster checkpoint pull).
 - Tier 1 alone does not survive PVC/namespace/cluster loss — enable tier 2.
 - The checkpoint contains the replication metadata keys (`__flare_repl_*`);
   after restore the node keeps its lineage token, so WAL sync against peers

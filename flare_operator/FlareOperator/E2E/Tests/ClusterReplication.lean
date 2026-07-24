@@ -154,6 +154,21 @@ def suite : TestSuite := {
           let (present, mismatched) ← countPresent ip
           IO.eprintln s!"# v2 after shrink: {present}/{shrinkKeys} keys present, {mismatched.length} mismatched"
           if present == 0 then
+            -- DIAGNOSTICS: no data migrated. Dump the source (v1) + dest (v2)
+            -- flared logs and the v1 operator log, filtered to replication
+            -- markers, so CI shows exactly where the dump/forward broke.
+            let repl := ["cluster_replication", "dump_replication", "cluster-replication",
+                         "start cluster", "op_set", "forward", "duplicate", "SERVER_ERROR",
+                         "connect", "refused", "timeout", "fail", "error", "ERROR"]
+            let grep := fun (tag logs : String) => do
+              for line in logs.splitOn "\n" do
+                if repl.any (fun k => containsSubstr line k) then
+                  IO.eprintln s!"# {tag}: {line}"
+            IO.eprintln "# === cluster-replication DIAGNOSTICS (0 keys migrated) ==="
+            grep "v1-flared" (← kubectlLogsLabel s!"app=flare,cluster={cfgV1.name}" cfgV1.«namespace» 500)
+            grep "v2-flared" (← kubectlLogsLabel s!"app=flare,cluster={cfgV2.name}" cfgV2.«namespace» 300)
+            grep "v1-operator" (← kubectlLogsLabel "app=flare-operator" cfgV1.«namespace» 200)
+            IO.eprintln "# === end DIAGNOSTICS ==="
             return .skip "cluster-replication produced no data on v2 (env too slow / unsupported image)"
           else if present == shrinkKeys && mismatched.isEmpty then
             return .pass

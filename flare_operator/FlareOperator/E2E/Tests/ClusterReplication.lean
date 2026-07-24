@@ -15,6 +15,11 @@ open FlareOperator.E2E
 open FlareOperator.E2E.Helpers
 open FlareOperator.E2E.Setup
 
+-- Both clusters run the RocksDB backend: that is what production uses, and the
+-- shrink data-migration path we want to actually verify (dump-then-forward to a
+-- smaller cluster) must be exercised on the real backend. The tch image reached
+-- Dumping/Forwarding but never landed data on v2, so the migration assertions
+-- always skipped; rocksdb matches production and is the meaningful verification.
 private def cfgV1 : ClusterConfig := {
   name := "repl-v1"
   «namespace» := "flare-repl-v1"  -- Unique namespace for test isolation
@@ -22,6 +27,7 @@ private def cfgV1 : ClusterConfig := {
   replicas := 2
   operatorName := "flare-operator-repl-v1"
   debugPod := "debug-repl"
+  storageBackend := "rocksdb"
 }
 
 private def cfgV2 : ClusterConfig := {
@@ -31,6 +37,7 @@ private def cfgV2 : ClusterConfig := {
   replicas := 2
   operatorName := "flare-operator-repl-v2"
   debugPod := "debug-repl"
+  storageBackend := "rocksdb"
 }
 
 /-- Keys written to v1 to prove the SHRINK (2 partitions → 1) actually

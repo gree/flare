@@ -10,6 +10,7 @@
 -/
 
 import FlareOperator.K8s.FlareCluster
+import FlareOperator.Metrics.FlaredStats
 
 namespace FlareOperator.Metrics.Prometheus
 
@@ -78,6 +79,12 @@ structure OperatorMetrics where
   -- masters(active) against the DESIRED count instead of a hardcoded one.
   partitionsDesired : Gauge
 
+  -- Latest per-pod flared `stats` snapshot (podName, [(statKey, value)]),
+  -- refreshed on a slow cadence by the main loop. Re-exported as per-pod
+  -- flare_node_* gauges so flared's rocksdb/repl counters reach Grafana Cloud
+  -- via the operator's already-scraped /metrics.
+  nodeStats : IO.Ref (List (String × List (String × Float)))
+
   deriving Nonempty
 
 /-! ## Initialization -/
@@ -105,6 +112,7 @@ def initMetrics : IO OperatorMetrics := do
   let prepareStuckCount ← IO.mkRef 0.0
   let circuitBreakerTripped ← IO.mkRef 0.0
   let partitionsDesired ← IO.mkRef 0.0
+  let nodeStats ← IO.mkRef []
 
   return {
     reconcileDuration := reconcileDuration
@@ -119,6 +127,7 @@ def initMetrics : IO OperatorMetrics := do
     prepareStuckCount := { value := prepareStuckCount }
     circuitBreakerTripped := { value := circuitBreakerTripped }
     partitionsDesired := { value := partitionsDesired }
+    nodeStats := nodeStats
   }
 
 /-! ## Metric Update Functions -/
@@ -277,6 +286,12 @@ def exportMetrics (metrics : OperatorMetrics) (clusterName : String) : IO String
   output := output ++ "# TYPE flare_operator_partitions_desired gauge\n"
   let desired ← metrics.partitionsDesired.value.get
   output := output ++ formatGauge "flare_operator_partitions_desired" labels desired
+
+  -- Per-pod flared stats (rocksdb cursor/sequence, curr_items, WAL-sync
+  -- counters, + derived lsn_inversion). Scraped on a slow cadence by the main
+  -- loop; empty until the first scrape completes.
+  let snapshot ← metrics.nodeStats.get
+  output := output ++ FlaredStats.exportNodeStats snapshot clusterName
 
   return output
 

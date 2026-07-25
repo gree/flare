@@ -8,6 +8,12 @@
 {{- end }}
 {{- $c := .Values.cluster }}
 {{- $ns := .Values.namespace }}
+{{- /* Graceful-drain window. Computed via hasKey (NOT `| default`) so an
+       explicit drainSeconds: 0 disables the hook — sprig's `default` treats 0
+       as empty and would wrongly re-enable it. Absent (e.g. helm --reuse-values
+       from a release predating this key) falls back to 60. */}}
+{{- $drain := 60 }}
+{{- if hasKey $c "drainSeconds" }}{{- $drain = $c.drainSeconds }}{{- end }}
 {{- /* flared mounts /etc/flared/extra.conf and exits immediately if the
        file is missing, so the ConfigMap must exist BEFORE the StatefulSet
        pods start. It is a pre-install HOOK on purpose: hook resources are
@@ -96,6 +102,11 @@ spec:
               cluster: {{ $c.name }}
         {{- end }}
       {{- end }}
+      {{- if gt (int $drain) 0 }}
+      # Room for the preStop drain (below) + flared's own graceful shutdown after
+      # SIGTERM. Must exceed drainSeconds or K8s SIGKILLs mid-drain.
+      terminationGracePeriodSeconds: {{ add (int $drain) 30 }}
+      {{- end }}
       containers:
         - name: flared
           image: "{{ $c.image.repository }}:{{ $c.image.tag }}"
@@ -144,6 +155,18 @@ spec:
             failureThreshold: 4
           resources:
             {{- toYaml $c.resources | nindent 12 }}
+          {{- if gt (int $drain) 0 }}
+          lifecycle:
+            preStop:
+              exec:
+                # Graceful drain: once the pod is Terminating it is already out
+                # of the Service/CLB endpoints (no new connections) and the
+                # operator promotes a slave for any partition this pod mastered
+                # (TerminatingPodHandling). flared stays up for this window,
+                # continuing to serve/forward the connections it still holds, so
+                # clients drain or reconnect before SIGTERM. See cluster.drainSeconds.
+                command: ["sh", "-c", "sleep {{ int $drain }}"]
+          {{- end }}
       volumes:
         - name: flared-config
           configMap:

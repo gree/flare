@@ -121,6 +121,18 @@ cluster:
     pullPolicy: IfNotPresent
   flarePort: 12121
   storageBackend: rocksdb
+  # Graceful-drain window (seconds) before a terminating flared is stopped.
+  # A preStop hook sleeps this long AFTER the pod enters Terminating (so it is
+  # already out of the Service/CLB endpoints and the operator has promoted a
+  # slave for any partition this pod mastered — see TerminatingPodHandling),
+  # while flared stays alive and keeps serving/forwarding the connections it
+  # still holds. It approximates flare's old "demote to proxy, then drain"
+  # behaviour: no NEW connections arrive, existing clients finish or reconnect,
+  # and only then is flared sent SIGTERM. terminationGracePeriodSeconds is
+  # drainSeconds + 30 (headroom for flared's own graceful shutdown after SIGTERM).
+  # Cost: each pod takes ~drainSeconds longer to roll — a full 6-pod rolling
+  # restart is +6×drainSeconds. Set 0 to disable the hook (abrupt stop).
+  drainSeconds: 60
   persistence:
     # PVC-backed data dirs: REQUIRED for production. Survives pod loss and
     # enables the backup/restore flow (docs/BACKUP_RESTORE.md).

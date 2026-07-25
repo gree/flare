@@ -131,11 +131,20 @@ def listFlaredPodsE (crName ns : String) : IO (Except String (List PodInfo)) := 
     -- above: an empty deletionTimestamp emitted inline would collapse adjacent
     -- spaces and shift every field. Best-effort — on error, no pod is marked
     -- terminating (falls back to the pre-drain behaviour, never a false drain).
+    -- List name + deletionTimestamp for EVERY pod and decide in code: a pod is
+    -- Terminating iff its deletionTimestamp is non-empty. (kubectl jsonpath
+    -- existence filters like [?(@.metadata.deletionTimestamp)] are unreliable, so
+    -- we don't filter server-side.) A non-terminating pod emits just its name
+    -- (empty timestamp collapses on trim) → one token → not terminating.
     let termResult ← retryConservative s!"list terminating pods for {crName}" do
       kubectl ["get", "pods", "-n", ns, "-l", s!"app=flare,cluster={crName}",
-               "-o", "jsonpath={range .items[?(.metadata.deletionTimestamp)]}{.metadata.name}{\"\\n\"}{end}"]
+               "-o", "jsonpath={range .items[*]}{.metadata.name} {.metadata.deletionTimestamp}{\"\\n\"}{end}"]
     let termNames : List String := match termResult with
-      | .ok out => out.splitOn "\n" |>.map String.trim |>.filter (· != "")
+      | .ok out => out.splitOn "\n" |>.filterMap fun line =>
+          match line.trim.splitOn " " |>.filter (· != "") with
+          | [_name]      => none            -- name only, no timestamp → alive
+          | name :: _ :: _ => some name     -- name + timestamp token → Terminating
+          | []           => none
       | .error _ => []
     return .ok <| pods.map fun p =>
       if termNames.contains p.name then { p with terminating := true } else p

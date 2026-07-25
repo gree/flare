@@ -96,11 +96,13 @@ structure OperatorMetrics where
   -- on any increase: the migration must be restarted after the cluster settles.
   migrationAborted : Counter
 
-  -- Latest per-pod flared `stats` snapshot (podName, [(statKey, value)]),
-  -- refreshed on a slow cadence by the main loop. Re-exported as per-pod
-  -- flare_node_* gauges so flared's rocksdb/repl counters reach Grafana Cloud
-  -- via the operator's already-scraped /metrics.
-  nodeStats : IO.Ref (List (String × List (String × Float)))
+  -- Latest per-pod flared `stats` snapshot (podName, [(statKey, rawValue)]),
+  -- refreshed on a slow cadence by the main loop. Values are kept raw (strings)
+  -- so version/timeval stats survive; re-exported per-pod as memcached_* /
+  -- flared_* / flare_node_* (flare_exporter-compatible) so flared's memcached,
+  -- thread-queue and rocksdb/repl counters reach Grafana Cloud via the
+  -- operator's already-scraped /metrics.
+  nodeStats : IO.Ref (List (String × List (String × String)))
 
   deriving Nonempty
 
@@ -334,9 +336,11 @@ def exportMetrics (metrics : OperatorMetrics) (clusterName : String) : IO String
   let migAborted ← metrics.migrationAborted.value.get
   output := output ++ formatCounter "flare_operator_migration_aborted_total" labels migAborted
 
-  -- Per-pod flared stats (rocksdb cursor/sequence, curr_items, WAL-sync
-  -- counters, + derived lsn_inversion). Scraped on a slow cadence by the main
-  -- loop; empty until the first scrape completes.
+  -- Per-pod flared stats re-exported flare_exporter-compatibly: memcached_*
+  -- (curr_items, commands, ...), flared_* (up, version, node_map_version,
+  -- thread_queue_total, process cpu), and flare_node_rocksdb_* (cursor/sequence,
+  -- WAL-sync counters). Scraped on a slow cadence by the main loop; empty until
+  -- the first scrape completes.
   let snapshot ← metrics.nodeStats.get
   output := output ++ FlaredStats.exportNodeStats snapshot clusterName
 

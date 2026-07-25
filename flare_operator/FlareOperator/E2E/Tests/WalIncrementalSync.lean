@@ -10,9 +10,11 @@
     3. Record the slave's `rocksdb_wal_sync_success` counter
     4. Delete the slave pod (simulate slave restart)
     5. Wait for the pod to come back and re-register
-    6. After reconstruction, verify `rocksdb_wal_sync_success` incremented
-       (proving WAL sync was used, not full dump)
-    7. Verify `rocksdb_wal_fallback_to_dump` did NOT increment
+    6. After reconstruction, ASSERT `rocksdb_wal_sync_success` > 0 — with a PVC
+       the slave keeps its __flare_repl_last_lsn across the bounce and the master
+       is unchanged, so WAL catch-up is mandatory; a full dump is a hard failure
+       (this is the regression guard for the run_client-never-read-response bug).
+       On a non-RocksDB image (no `rocksdb_` stats) the test skips.
 -/
 
 import FlareOperator.E2E.Framework
@@ -160,25 +162,24 @@ def suite : TestSuite := {
               return .skip "flared not compiled with RocksDB"
             let syncCount := statFieldNat? stats "rocksdb_wal_sync_success" |>.getD 0
             let fallbackCount := statFieldNat? stats "rocksdb_wal_fallback_to_dump" |>.getD 0
-            IO.eprintln s!"# After restart: wal_sync_success={syncCount}, wal_fallback_to_dump={fallbackCount}"
-            -- After a slave restart within WAL retention, we expect WAL sync
-            -- to have been used. However, since the slave was force-deleted
-            -- and recreated, it lost its RocksDB state and may have done a
-            -- full dump instead. The key insight: if wal_sync_success > 0,
-            -- WAL sync worked at least once during the reconstruction.
-            -- If fallback_to_dump is also > 0, that's expected for the first
-            -- sync after a fresh start (no prior LSN).
+            let midMismatch := statFieldNat? stats "rocksdb_wal_sync_master_id_mismatch" |>.getD 0
+            let lsnAhead := statFieldNat? stats "rocksdb_wal_sync_lsn_ahead" |>.getD 0
+            IO.eprintln s!"# After restart: wal_sync_success={syncCount}, wal_fallback_to_dump={fallbackCount}, master_id_mismatch={midMismatch}, lsn_ahead={lsnAhead}"
+            -- This suite runs on a PVC (usePvc := true): the force-deleted slave
+            -- is recreated with the SAME PVC, so its RocksDB — including
+            -- __flare_repl_last_lsn and master_id — survives the bounce. Only
+            -- the slave was deleted, so the P0 master (and its lineage) is
+            -- unchanged. Therefore the slave MUST catch up via WAL incremental
+            -- sync; a full dump here is a real defect, not an acceptable skip.
+            --
+            -- (Do NOT re-add a `fallback_to_dump > 0 -> skip` branch: it silently
+            -- masked the regression where op_repl_sync_wal::run_client never read
+            -- the streamed response, so _client_result stayed at its default and
+            -- EVERY reconstruction fell back to a full dump with wal_sync_success
+            -- stuck at 0. This test's whole job is to fail on exactly that.)
             if syncCount > 0 then return .pass
-            else if fallbackCount > 0 then
-              return .skip s!"slave used full dump (expected on fresh pod with no prior LSN); wal_fallback_to_dump={fallbackCount}"
             else
-              -- On emptyDir (no PVC), the restarted pod has no prior
-              -- RocksDB state, so handler_reconstruction runs (operator-
-              -- initiated full sync) rather than handler_dump_replication
-              -- (replication-initiated WAL sync). Both counters stay 0.
-              -- WAL sync requires persistent storage to retain the slave's
-              -- __flare_repl_last_lsn across restarts.
-              return .skip s!"counters stayed 0 — expected with emptyDir (no PVC); WAL sync requires persistent storage to retain prior LSN across pod restarts" }
+              return .fail s!"WAL incremental sync never succeeded on a PVC slave restart (wal_sync_success=0, fallback_to_dump={fallbackCount}, master_id_mismatch={midMismatch}, lsn_ahead={lsnAhead}) — the slave kept its LSN on the PVC and the master was unchanged, so it must catch up via WAL, not a full dump" }
   ]
 }
 

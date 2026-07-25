@@ -947,8 +947,11 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
     let newState :=
       if s.drainNodeKeys.isEmpty then afterFailover
       else handleDrainWithPromotion afterFailover.rebuildPartitionMap s.drainNodeKeys
+    let drainEffects :=
+      if s.drainNodeKeys.isEmpty then []
+      else [FlareEffect.Log s!"[flare-operator] graceful drain: demoting Terminating node(s) to live proxy + promoting replacement(s): {s.drainNodeKeys}"]
     ({ s with reconcileStep := .AfterAssignRoles,
-              updatedClusterState := some newState }, none, [])
+              updatedClusterState := some newState }, none, drainEffects)
 
   | .AfterAssignRoles =>
     -- Assign proxy roles (Main.lean:323-330)

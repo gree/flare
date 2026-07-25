@@ -57,7 +57,12 @@ def suite : TestSuite := {
   setup := do
     cleanupCluster cfg
     deployCluster cfg
-    let ok ← waitForStable cfg 50
+    -- Wait past the operator's startup grace (24 cycles ≈ 120s) BEFORE the tests
+    -- delete anything: during grace the operator skips dead-detection AND drain,
+    -- so a master deleted mid-grace would only be handled after grace ends —
+    -- long after the ~20s preStop window closes, making the drain unobservable.
+    -- (Production operators are long-running, i.e. always post-grace.)
+    let ok ← waitForStable cfg 130
     if !ok then throw (IO.userError "cluster did not stabilize")
   onFailure := dumpClusterDiagnostics cfg.«namespace»
   teardown := do

@@ -60,7 +60,17 @@ op_repl_sync_wal::~op_repl_sync_wal() {
  *	send client request
  */
 int op_repl_sync_wal::run_client(uint64_t lsn, const string& master_id) {
-	return this->_run_client(lsn, master_id);
+	// Send the request, THEN read and apply the streamed WAL response.
+	// Without the second step the master streams LSN/BATCH/.../END into a
+	// connection the slave never reads: _client_result stays at its ctor
+	// default (client_server_error), the caller sees a generic error and
+	// falls back to a full dump every time, and wal_sync_success can never
+	// increment. (Every other client op wires run_client the same way; see
+	// op::run_client -> _parse_client_parameters.)
+	if (this->_run_client(lsn, master_id) < 0) {
+		return -1;
+	}
+	return this->_parse_text_client_parameters();
 }
 // }}}
 

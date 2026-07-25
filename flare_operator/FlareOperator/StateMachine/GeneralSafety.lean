@@ -39,6 +39,7 @@ open FlareOperator.Flare
 open FlareOperator.Reconciler
 open FlareOperator.K8sReconciler (countMastersFor countMastersFor_cons
   assignProxiesPure handleFailoverWithPromotion handleFailoverWithPromotionSingleKey
+  handleDrainWithPromotion handleDrainWithPromotionSingleKey
   detectDeadNodesPure)
 open FlareOperator.StateMachine.GlobalModel
 
@@ -318,14 +319,17 @@ theorem count_addNode_replace_le (p : Int) (s : FlareClusterState)
 /-! ## assignProxiesPure satisfies the bound -/
 
 theorem assignProxiesPure_cle (s : FlareClusterState) (crd : FlareClusterView)
-    (live : List String) :
-    CLE s.nodeMap (assignProxiesPure s crd live).nodeMap := by
+    (live : List String) (term : List String) :
+    CLE s.nodeMap (assignProxiesPure s crd live [] term).nodeMap := by
   unfold assignProxiesPure
-  -- generalize the fold: from any accumulator the bound holds w.r.t. it
+  -- generalize the fold: from any accumulator the bound holds w.r.t. it.
+  -- The Terminating-exclusion conjunct only ADDS identity steps, so the bound
+  -- is preserved regardless of `term`.
   suffices hgen : ∀ (items : List (String × FlareNode)) (acc : FlareClusterState),
       CLE acc.nodeMap
         (items.foldl (fun currentState kv =>
-          if kv.2.role == FlareRole.Proxy && kv.2.state != FlareState.Down then
+          if kv.2.role == FlareRole.Proxy && kv.2.state != FlareState.Down
+              && !term.contains kv.1 then
             (autoAssign currentState crd kv.1 kv.2 live).1
           else currentState) acc).nodeMap by
     exact hgen s.nodeMap s
@@ -336,14 +340,15 @@ theorem assignProxiesPure_cle (s : FlareClusterState) (crd : FlareClusterView)
     intro acc
     rw [List.foldl_cons]
     refine CLE.trans (b := (if hd.2.role == FlareRole.Proxy
-        && hd.2.state != FlareState.Down then
+        && hd.2.state != FlareState.Down && !term.contains hd.1 then
           (autoAssign acc crd hd.1 hd.2 live).1 else acc).nodeMap) ?_ (ih _)
     split
     · next hguard =>
       have hrole : (hd.2.role == FlareRole.Proxy) = true := by
         revert hguard
         cases hd.2.role == FlareRole.Proxy <;>
-          cases hd.2.state != FlareState.Down <;> simp
+          cases hd.2.state != FlareState.Down <;>
+          cases !term.contains hd.1 <;> simp
       have hnm : (hd.2.role == FlareRole.Master) = false := by
         have : hd.2.role = FlareRole.Proxy := eq_of_beq hrole
         rw [this]; rfl
@@ -561,6 +566,82 @@ theorem handleFailover_cle (s : FlareClusterState) (deadKeys : List String) :
     rw [List.foldl_cons]
     exact CLE.trans (handleFailoverSingle_cle acc hd) (ih _)
 
+/-! ## Graceful drain preserves the bound (mirrors failover)
+
+    `handleDrainWithPromotionSingleKey` is `handleFailoverWithPromotionSingleKey`
+    with the demoted node left state=Active (a live proxy) instead of Down. The
+    at-most-one-master count depends only on the `role` field, never `state`, so
+    the proof is identical to `handleFailoverSingle_cle`. -/
+theorem handleDrainSingle_cle (s : FlareClusterState) (key : String) :
+    CLE s.nodeMap (handleDrainWithPromotionSingleKey s key).nodeMap := by
+  unfold handleDrainWithPromotionSingleKey
+  dsimp only
+  split
+  · exact CLE.rfl _
+  next node hlook =>
+    have hmem : (key, node) ∈ s.nodeMap := mem_of_lookupNode hlook
+    have hdemote : ∀ p, countMastersFor p (s.addNode key { node with state := FlareState.Active, role := FlareRole.Proxy, partition := -1 }).nodeMap ≤ countMastersFor p s.nodeMap := fun p => count_addNode_nonmaster p s key _ (by simp [isM, show (FlareRole.Proxy == FlareRole.Master) = false from rfl])
+    split
+    next hM =>
+      split
+      · exact CLE.of_le hdemote
+      next part hfindp =>
+        split
+        · exact CLE.of_le hdemote
+        next slaveKey hhead =>
+          split
+          · exact CLE.of_le hdemote
+          next slaveNode hlook2 =>
+            split
+            next hguard =>
+              have hpartB : (slaveNode.partition == node.partition) = true := by
+                revert hguard
+                cases slaveNode.role == FlareRole.Slave <;>
+                  cases slaveNode.partition == node.partition <;> simp
+              have hpartEq : slaveNode.partition = node.partition := eq_of_beq hpartB
+              intro p
+              rw [setPartition_nodeMap]
+              cases hp : node.partition == p with
+              | false =>
+                have hnm : isM p { slaveNode with role := FlareRole.Master, state := FlareState.Active, balance := 100 } = false := by
+                  simp only [isM]
+                  have hpp : (slaveNode.partition == p) = false := by rw [hpartEq]; exact hp
+                  simp [hpp]
+                have h1 := count_addNode_nonmaster p (s.addNode key { node with state := FlareState.Active, role := FlareRole.Proxy, partition := -1 }) slaveKey _ hnm
+                have h2 := hdemote p
+                omega
+              | true =>
+                have hpe : node.partition = p := eq_of_beq hp
+                have hwit : isM p node = true := by
+                  simp only [isM, hM, Bool.true_and]
+                  rw [hpe]
+                  simp
+                have hlt := count_filter_ne_lt p key node s.nodeMap hmem hwit
+                have hdem0 : countMastersFor p (s.addNode key { node with state := FlareState.Active, role := FlareRole.Proxy, partition := -1 }).nodeMap ≤ countMastersFor p s.nodeMap - 1 := by
+                  rw [addNode_nodeMap, countMastersFor_cons]
+                  split
+                  · next habs =>
+                    exact absurd habs (by simp)
+                  · omega
+                have h1 := count_addNode_le_succ p (s.addNode key { node with state := FlareState.Active, role := FlareRole.Proxy, partition := -1 }) slaveKey { slaveNode with role := FlareRole.Master, state := FlareState.Active, balance := 100 }
+                omega
+            next hguard => exact CLE.of_le hdemote
+    next hM => exact CLE.of_le hdemote
+
+theorem handleDrain_cle (s : FlareClusterState) (drainKeys : List String) :
+    CLE s.nodeMap (handleDrainWithPromotion s drainKeys).nodeMap := by
+  unfold handleDrainWithPromotion
+  suffices hgen : ∀ (ks : List String) (acc : FlareClusterState),
+      CLE acc.nodeMap (ks.foldl handleDrainWithPromotionSingleKey acc).nodeMap by
+    exact hgen drainKeys s
+  intro ks
+  induction ks with
+  | nil => intro acc; exact CLE.rfl _
+  | cons hd tl ih =>
+    intro acc
+    rw [List.foldl_cons]
+    exact CLE.trans (handleDrainSingle_cle acc hd) (ih _)
+
 /-! ## Every GlobalStep satisfies the bound -/
 
 theorem stepGlobal_cle (g : GlobalState) (step : GlobalStep) :
@@ -582,9 +663,9 @@ theorem stepGlobal_cle (g : GlobalState) (step : GlobalStep) :
   | OperatorReconcile =>
     dsimp only
     split
-    · exact CLE.trans (CLE.trans (assignProxiesPure_cle _ _ _)
+    · exact CLE.trans (CLE.trans (assignProxiesPure_cle _ _ _ [])
         (promoteMasterlessPartitions_cle _ _ _)) (applyZoneRepairSwap_cle _ _ _)
-    · exact CLE.trans (assignProxiesPure_cle _ _ _)
+    · exact CLE.trans (assignProxiesPure_cle _ _ _ [])
         (promoteMasterlessPartitions_cle _ _ _)
   | NodeReconstructionComplete nodeKey =>
     dsimp only

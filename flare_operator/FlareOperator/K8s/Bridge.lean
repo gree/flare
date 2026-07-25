@@ -38,6 +38,11 @@ structure PodInfo where
   ready : Bool := true
   /-- K8s node the pod is scheduled on ("" while Pending). -/
   nodeName : String := ""
+  /-- True once the pod has a deletionTimestamp (Terminating). The pod is still
+      in the pod list and (with a preStop drain) still alive+Ready, so dead
+      detection won't fire — but the operator must drain it (promote a
+      replacement, demote it to a live proxy) BEFORE it exits. -/
+  terminating : Bool := false
   deriving Repr, BEq
 
 /-- Convert a PodInfo to a node key matching the FQDN used by flared for registration.
@@ -72,7 +77,7 @@ def listFlaredPodsE (crName ns : String) : IO (Except String (List PodInfo)) := 
   | .error e => return .error e
   | .ok output =>
     let lines := output.splitOn "\n" |>.filter (· != "")
-    return .ok <| lines.filterMap fun line =>
+    let pods := lines.filterMap fun line =>
       let parts := line.splitOn " "
       match parts with
       | [podName, ip, portStr, readyStr, hostname, subdomain, nodeName] =>
@@ -121,7 +126,23 @@ def listFlaredPodsE (crName ns : String) : IO (Except String (List PodInfo)) := 
           }
         | none => none
       | _ => none
+    -- Second, lightweight query for Terminating pods (those with a
+    -- deletionTimestamp). Kept SEPARATE from the positional space-split parse
+    -- above: an empty deletionTimestamp emitted inline would collapse adjacent
+    -- spaces and shift every field. Best-effort — on error, no pod is marked
+    -- terminating (falls back to the pre-drain behaviour, never a false drain).
+    let termResult ← retryConservative s!"list terminating pods for {crName}" do
+      kubectl ["get", "pods", "-n", ns, "-l", s!"app=flare,cluster={crName}",
+               "-o", "jsonpath={range .items[?(.metadata.deletionTimestamp)]}{.metadata.name}{\"\\n\"}{end}"]
+    let termNames : List String := match termResult with
+      | .ok out => out.splitOn "\n" |>.map String.trim |>.filter (· != "")
+      | .error _ => []
+    return .ok <| pods.map fun p =>
+      if termNames.contains p.name then { p with terminating := true } else p
 
+/-- Node keys of pods that are Terminating (have a deletionTimestamp). -/
+def terminatingPodKeys (pods : List PodInfo) : List String :=
+  (pods.filter (·.terminating)).map (·.toNodeKey)
 
 /-- Failure-swallowing wrapper for callers where an empty answer is safe
     (topology broadcast just sends to nobody this tick). The RECONCILE path

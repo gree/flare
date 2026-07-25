@@ -56,7 +56,7 @@ inductive FlareReconcileStep where
 /-- Responses from the K8s API server. -/
 inductive K8sResponse where
   | CRDResponse (crd : Option FlareClusterView)
-  | PodListResponse (pods : List String) (zones : List (String × String))
+  | PodListResponse (pods : List String) (zones : List (String × String)) (terminating : List String)
   | PatchResponse (success : Bool)
   | NoResponse
   deriving Repr
@@ -103,6 +103,12 @@ structure FlareReconcileState where
   /-- nodeKey → zone, from the last pod listing ([] when topology unknown). -/
   podZones : List (String × String) := []
   deadNodeKeys : List String := []
+  /-- Node keys of Terminating pods (deletionTimestamp set) this tick. Used to
+      exclude a draining node from role re-assignment (it must stay a proxy). -/
+  terminatingKeys : List String := []
+  /-- Terminating nodes that are still Master/Slave and must be drained this
+      tick: promote a replacement + demote them to a live proxy. -/
+  drainNodeKeys : List String := []
   failoverTriggered : Bool := false
   -- Grace period for startup: 24 cycles × 5s = 120s (see Main.lean)
   graceCycles : Nat := 24
@@ -338,6 +344,46 @@ def handleFailoverWithPromotionSingleKey (s : FlareClusterState) (key : String)
 def handleFailoverWithPromotion (state : FlareClusterState) (deadKeys : List String)
     : FlareClusterState :=
   deadKeys.foldl handleFailoverWithPromotionSingleKey state
+
+/-- Graceful drain of a single Terminating node. Identical in shape to
+    `handleFailoverWithPromotionSingleKey` (demote the node to an unassigned
+    Proxy; if it was a Master, promote a live slave of its partition) with ONE
+    difference: the demoted node is left **state=Active**, not Down — it is a
+    LIVE proxy, still running for the rest of its preStop window, so flared keeps
+    serving and forwards its existing connections to the new master. (The
+    at-most-one-master count is unaffected by the state field, so the safety
+    proof mirrors `handleFailoverSingle_cle`.) -/
+def handleDrainWithPromotionSingleKey (s : FlareClusterState) (key : String)
+    : FlareClusterState :=
+  match s.lookupNode key with
+  | none => s
+  | some node =>
+    let demoted : FlareNode :=
+      { node with state := FlareState.Active, role := FlareRole.Proxy, partition := -1 }
+    let s := s.addNode key demoted
+    if node.role == FlareRole.Master then
+      let partIdx := node.partition
+      match s.partitionMap.find? (fun (idx, _) => Int.ofNat idx == partIdx) with
+      | none => s
+      | some (_, part) =>
+        match part.slaves.head? with
+        | none => s
+        | some slaveKey =>
+          match s.lookupNode slaveKey with
+          | none => s
+          | some slaveNode =>
+            if slaveNode.role == FlareRole.Slave && slaveNode.partition == partIdx then
+              let promoted := { slaveNode with role := FlareRole.Master,
+                                               state := FlareState.Active, balance := 100 }
+              let newPart := { part with master := some slaveKey, slaves := part.slaves.tail }
+              (s.addNode slaveKey promoted).setPartition partIdx.toNat newPart
+            else s
+    else s
+
+/-- Drain every Terminating master/slave (see the single-key doc). -/
+def handleDrainWithPromotion (state : FlareClusterState) (drainKeys : List String)
+    : FlareClusterState :=
+  drainKeys.foldl handleDrainWithPromotionSingleKey state
 
 /-- Demote every Master that duplicates an EARLIER Master of the same
     partition in the list (first Master for a partition wins; later ones are
@@ -672,6 +718,20 @@ def detectDeadNodesPure (state : FlareClusterState) (livePodKeys : List String)
     && node.state != FlareState.Down
     && node.state != FlareState.Prepare) |>.map Prod.fst
 
+/-- Pure draining-node detection: a node whose pod is Terminating
+    (deletionTimestamp set) but STILL present+alive in the pod list, and still
+    an authoritative Master or replica Slave. Unlike `detectDeadNodesPure` this
+    fires while the pod is alive (inside the preStop window) so the operator can
+    hand off gracefully — promote a replacement and demote this node to a live
+    proxy — BEFORE flared exits, instead of only reacting once the pod vanishes.
+    Already-Proxy or Down nodes are skipped (nothing to drain / idempotent). -/
+def detectDrainingNodesPure (state : FlareClusterState) (terminatingKeys : List String)
+    : List String :=
+  state.nodeMap.filter (fun (key, node) =>
+    terminatingKeys.contains key
+    && node.role != FlareRole.Proxy
+    && node.state != FlareState.Down) |>.map Prod.fst
+
 /-- Pure proxy assignment (Main.lean:323-330).
     Assigns roles to any Proxy nodes using autoAssign.
 
@@ -681,9 +741,11 @@ def detectDeadNodesPure (state : FlareClusterState) (livePodKeys : List String)
     open master slot is filled by a live registered node (the promoted replica),
     never by the corpse of the node that just failed. -/
 def assignProxiesPure (state : FlareClusterState) (crd : FlareClusterView)
-    (livePodKeys : List String) (zones : List (String × String) := []) : FlareClusterState :=
+    (livePodKeys : List String) (zones : List (String × String) := [])
+    (terminatingKeys : List String := []) : FlareClusterState :=
   state.nodeMap.foldl (init := state) fun currentState (nodeKey, node) =>
-    if node.role == FlareRole.Proxy && node.state != FlareState.Down then
+    if node.role == FlareRole.Proxy && node.state != FlareState.Down
+        && !terminatingKeys.contains nodeKey then
       let (newState, _) := autoAssign currentState crd nodeKey node livePodKeys zones
       newState
     else
@@ -819,23 +881,29 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
 
   | .AfterListPods =>
     match resp with
-    | .PodListResponse pods zones =>
+    | .PodListResponse pods zones terminating =>
       -- CRITICAL: Check grace period (Main.lean:355-359)
       if s.graceCycles > 0 then
-        -- Still in startup grace period - skip dead node detection
+        -- Still in startup grace period - skip dead node detection AND drain
         ({ s with reconcileStep := .AfterDetectDead,
                   livePodKeys := pods,
                   podZones := zones,
                   deadNodeKeys := [],
+                  terminatingKeys := terminating,
+                  drainNodeKeys := [],
                   graceCycles := s.graceCycles - 1 }, none,
          [.Log s!"[flare-operator] grace period: {s.graceCycles - 1} cycles remaining"])
       else
-        -- Grace period over - perform normal dead node detection
+        -- Grace period over - normal dead-node detection + graceful drain of
+        -- any Terminating (deletionTimestamp) master/slave that is still alive.
         let deadKeys := detectDeadNodesPure clusterState pods
+        let drainKeys := detectDrainingNodesPure clusterState terminating
         ({ s with reconcileStep := .AfterDetectDead,
                   livePodKeys := pods,
                   podZones := zones,
-                  deadNodeKeys := deadKeys }, none, [])
+                  deadNodeKeys := deadKeys,
+                  terminatingKeys := terminating,
+                  drainNodeKeys := drainKeys }, none, [])
     | other =>
       ({ s with reconcileStep := .Error s!"unexpected response at AfterListPods: {repr other}" }, none, [])
 
@@ -866,11 +934,19 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
     -- master's live slave is promoted (preserving the partition's data), not left
     -- for the empty recreated pod to grab. rebuildPartitionMap first so the
     -- promotion sees an accurate master/slave grouping.
-    let newState :=
+    let afterFailover :=
       if s.failoverTriggered then
         handleFailoverWithPromotion clusterState.rebuildPartitionMap s.deadNodeKeys
       else
         clusterState
+    -- Graceful drain: demote Terminating masters/slaves to a LIVE proxy and
+    -- promote a replacement while the pod is still alive (preStop window), so
+    -- flared forwards existing connections to the new master. Runs regardless of
+    -- failover (a Terminating pod is still "live", so dead detection never fires
+    -- for it). rebuildPartitionMap so the promotion sees post-failover grouping.
+    let newState :=
+      if s.drainNodeKeys.isEmpty then afterFailover
+      else handleDrainWithPromotion afterFailover.rebuildPartitionMap s.drainNodeKeys
     ({ s with reconcileStep := .AfterAssignRoles,
               updatedClusterState := some newState }, none, [])
 
@@ -878,7 +954,9 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
     -- Assign proxy roles (Main.lean:323-330)
     match s.updatedClusterState, s.cachedCrd with
     | some state, some crd =>
-      let stateWithProxies := assignProxiesPure state crd s.livePodKeys s.podZones
+      -- Exclude Terminating keys: a just-drained node is Proxy/Active and would
+      -- otherwise be re-assigned a role here, undoing the drain (flapping).
+      let stateWithProxies := assignProxiesPure state crd s.livePodKeys s.podZones s.terminatingKeys
       -- Refill partitions that lost every master to a total restart (all
       -- replicas re-registered as Slave/Prepare, so no proxy exists for
       -- autoAssign and no Down entry exists for failover).
@@ -1038,12 +1116,12 @@ theorem flareReconcileStep_decreases_measure (resp : K8sResponse)
       cases crd with
       | some c => left; simp [flareReconcileCore, h, flareReconcileMeasure]
       | none => right; simp [flareReconcileCore, h, flareReconcileTerminalBool]
-    | PodListResponse _ => right; simp [flareReconcileCore, h, flareReconcileTerminalBool]
+    | PodListResponse _ _ _ => right; simp [flareReconcileCore, h, flareReconcileTerminalBool]
     | PatchResponse _ => right; simp [flareReconcileCore, h, flareReconcileTerminalBool]
     | NoResponse => right; simp [flareReconcileCore, h, flareReconcileTerminalBool]
   | AfterListPods =>
     cases resp with
-    | PodListResponse pods =>
+    | PodListResponse pods zones terminating =>
       simp only [flareReconcileCore, h]
       split <;> (left; simp [flareReconcileMeasure])
     | CRDResponse _ => right; simp [flareReconcileCore, h, flareReconcileTerminalBool]

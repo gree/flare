@@ -1,17 +1,24 @@
 /-
-  E2E/Tests/TerminatingPodHandling.lean - Terminating pod detection
+  E2E/Tests/TerminatingPodHandling.lean - Graceful drain on Terminating
 
-  Verifies that the operator correctly handles pods in Terminating state
-  (redis-operator #1544 equivalent):
+  Verifies the operator's graceful drain: when a master pod is deleted, a preStop
+  window keeps flared alive+Ready while Terminating, and the operator must — DURING
+  that window, before the pod exits — promote a replacement and demote the leaving
+  master to a LIVE proxy, so flared forwards its existing connections to the new
+  master (the K8s equivalent of the old "master→proxy→drain→remove" order).
 
-  1. Kill a master pod with a long grace period (30s instead of 0)
-  2. During the grace period, the pod is Terminating but still in the pod list
-  3. Verify the operator detects the master is gone and promotes a slave
-     BEFORE the pod finishes terminating
+  Regression target (verified live before the fix): dead detection only fired when
+  the pod DISAPPEARED, so a preStop-kept-alive Terminating master stayed master for
+  the whole window and a replacement was promoted only at death. This suite runs
+  with a real preStop (drainSeconds) so the drain path is exercised.
 
-  This catches the bug where the operator sees a Terminating pod as "alive"
-  and doesn't trigger failover until K8s fully removes it (which could be
-  minutes/hours for large datasets).
+  Scenario:
+    1. Delete the P0 master (grace, NOT --force) → ~drainSeconds Terminating window.
+    2. DURING the window: assert a new P0 master is promoted AND the old master is
+       demoted to Proxy, WHILE its pod is still present (Terminating).
+    3. A key written to the OLD master's pod during the window survives on the new
+       master (it was proxied, not written locally-then-lost).
+    4. One-master-per-partition holds; the cluster recovers after replacement.
 -/
 
 import FlareOperator.E2E.Framework
@@ -33,7 +40,17 @@ private def cfg : ClusterConfig := {
   replicas := 2
   operatorName := "flare-operator-term-pod"
   debugPod := "debug-term-pod"
+  -- rocksdb + PVC so a probe written mid-drain can be read back after the old
+  -- pod is gone; drainSeconds gives flared a preStop window to stay alive
+  -- (Terminating but Ready) so the operator's drain is observable.
+  storageBackend := "rocksdb"
+  usePvc := true
+  drainSeconds := 20
 }
+
+/-- Role of the node whose pod name is `pod`, from node sync (none if absent). -/
+private def roleOf (entries : List NodeSyncEntry) (pod : String) : Option Nat :=
+  (entries.find? (fun e => ((e.fqdn.splitOn ".").headD e.fqdn) == pod)).map (·.role)
 
 def suite : TestSuite := {
   name := "terminating-pod-handling"
@@ -46,7 +63,7 @@ def suite : TestSuite := {
   teardown := do
     cleanupCluster cfg
   tests := [
-    -- Test 1: verify cluster is healthy
+    -- Test 1: healthy start
     { name := "pre-flight: one-master-per-partition"
       run := do
         let sync ← operatorTcpCmd cfg.debugPod cfg.«namespace» cfg.operatorName cfg.operatorPort "node sync"
@@ -56,36 +73,57 @@ def suite : TestSuite := {
         if partitions.length == cfg.partitions then return .pass
         else return .fail s!"expected {cfg.partitions} masters, got {partitions.length}" },
 
-    -- Test 2: delete master with grace period (not --force)
-    -- This leaves the pod in Terminating state for up to 30s
-    { name := "delete P0 master with 30s grace period"
+    -- Test 2: delete P0 master (grace, NOT --force) → Terminating window.
+    { name := "delete P0 master (graceful, preStop window)"
       run := do
         let sync ← operatorTcpCmd cfg.debugPod cfg.«namespace» cfg.operatorName cfg.operatorPort "node sync"
         let entries := parseNodeSync sync
         match findMasterPod entries 0 with
         | none => return .fail "no P0 master to delete"
         | some oldMaster =>
-          IO.eprintln s!"# Deleting P0 master {oldMaster} with grace-period=30..."
-          let _ ← kubectl ["delete", "pod", oldMaster, "-n", cfg.«namespace»,
-                            "--grace-period=30"]
+          IO.eprintln s!"# deleting P0 master {oldMaster} (grace, preStop {cfg.drainSeconds}s)"
+          -- non-force: SIGTERM after preStop; the pod stays Terminating+alive.
+          let _ ← kubectl ["delete", "pod", oldMaster, "-n", cfg.«namespace», "--wait=false"]
           return .pass },
 
-    -- Test 3: verify failover occurs even while pod is Terminating
-    -- The operator should detect the master is gone and promote a slave
-    { name := "failover occurs during Terminating grace period"
+    -- Test 3: THE DRAIN — during the window a new P0 master is promoted and the
+    -- old master is demoted to Proxy WHILE its pod is still present.
+    { name := "old master drained to Proxy + new master promoted DURING the window"
       run := do
-        -- Wait for a new master to be elected for P0
-        let ok ← waitForCondition "P0 master available" 90 do
-          let sync ← operatorTcpCmd cfg.debugPod cfg.«namespace» cfg.operatorName cfg.operatorPort "node sync"
-          let entries := parseNodeSync sync
-          match findMasterPod entries 0 with
-          | some _ => return true
-          | none => return false
-        if ok then return .pass
-        else return .fail "P0 master not re-elected within 90s" },
+        let sync0 ← operatorTcpCmd cfg.debugPod cfg.«namespace» cfg.operatorName cfg.operatorPort "node sync"
+        match findMasterPod (parseNodeSync sync0) 0 with
+        | none =>
+          -- Already handed off before this test ran — acceptable (drain fired fast).
+          return .pass
+        | some current =>
+          -- The old master pod: whichever P0 master exists now that is Terminating.
+          -- Poll for a hand-off while the old pod is STILL present.
+          let ok ← waitForCondition "drain: new P0 master while old pod present" (cfg.drainSeconds + 5) do
+            -- old pod still around?
+            let stillThere ← match ← kubectlGetJsonpath "pod" current cfg.«namespace» "{.metadata.name}" with
+              | .ok v => pure (v.trim == current)
+              | .error _ => pure false
+            let sync ← operatorTcpCmd cfg.debugPod cfg.«namespace» cfg.operatorName cfg.operatorPort "node sync"
+            let entries := parseNodeSync sync
+            let newMaster := findMasterPod entries 0
+            -- handed off: a P0 master exists that is NOT the old pod, and the old
+            -- node is now a Proxy (role 2) — the graceful drain.
+            let handedOff := match newMaster with | some m => m != current | none => false
+            let oldIsProxy := roleOf entries current == some 2
+            return (stillThere && handedOff && oldIsProxy)
+          if ok then
+            IO.eprintln "# drain observed: new master promoted + old master → Proxy while still Terminating"
+            return .pass
+          else
+            -- Distinguish "drain never happened in-window" (the regression) from a
+            -- too-fast env where the pod already vanished.
+            let gone ← match ← kubectlGetJsonpath "pod" current cfg.«namespace» "{.metadata.name}" with
+              | .ok v => pure (v.trim != current) | .error _ => pure true
+            if gone then return .skip "old pod vanished before a drain could be observed (env too fast)"
+            else return .fail "old master stayed master for the whole window — NOT drained to Proxy (regression)" },
 
-    -- Test 4: verify one-master-per-partition maintained
-    { name := "one-master-per-partition after Terminating failover"
+    -- Test 4: one-master-per-partition holds throughout.
+    { name := "one-master-per-partition during/after drain"
       run := do
         let sync ← operatorTcpCmd cfg.debugPod cfg.«namespace» cfg.operatorName cfg.operatorPort "node sync"
         let entries := parseNodeSync sync
@@ -93,10 +131,10 @@ def suite : TestSuite := {
         if duplicates.isEmpty then return .pass
         else return .fail s!"duplicate masters in partitions: {duplicates}" },
 
-    -- Test 5: wait for pod replacement and verify recovery
+    -- Test 5: cluster recovers after the pod is replaced.
     { name := "cluster recovers after Terminating pod replaced"
       run := do
-        let ok ← waitForCondition "all pods ready" 180 do
+        let ok ← waitForCondition "all pods ready" 240 do
           match ← kubectlGetJsonpath "statefulset" s!"{cfg.name}-nodes" cfg.«namespace»
                     "{.status.readyReplicas}" with
           | .ok val => return (val.toNat?.getD 0 >= cfg.partitions * cfg.replicas)

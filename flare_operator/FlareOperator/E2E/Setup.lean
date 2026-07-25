@@ -49,6 +49,12 @@ structure ClusterConfig where
       those, and restarting the whole StatefulSet mid-suite churns every
       node through re-registration. -/
   extraFlaredConf : String := ""
+  /-- preStop drain window (seconds). >0 adds a `sleep {drainSeconds}` preStop
+      hook so flared stays alive+Ready while Terminating — the window the
+      operator's graceful drain (demote leaving master to a live proxy, promote
+      a replacement) needs to be observable. 0 = no hook (fast pod deletes, the
+      default for most suites). Mirrors the chart's cluster.drainSeconds. -/
+  drainSeconds : Nat := 0
   deriving Repr
 
 /-- Image tag used for the flared container in this cluster. -/
@@ -181,6 +187,16 @@ def statefulSetYaml (cfg : ClusterConfig) : String :=
     else
       s!"rm -rf {dataDir}/*.hdb {dataDir}/*.hdb.wal {dataDir}/rocksdb && mkdir -p {dataDir}"
   let storageFlag := s!"--storage-type={cfg.storageBackend}"
+  -- preStop drain window: keep flared alive+Ready while Terminating so the
+  -- operator's graceful drain is observable. grace must exceed drainSeconds.
+  let graceSeconds := if cfg.drainSeconds > 0 then cfg.drainSeconds + 10 else 5
+  let preStopBlock := if cfg.drainSeconds > 0 then
+      s!"
+          lifecycle:
+            preStop:
+              exec:
+                command: [\"sh\", \"-c\", \"sleep {cfg.drainSeconds}\"]"
+    else ""
   let pvcMount := if cfg.usePvc then "
             - name: data
               mountPath: /data" else ""
@@ -229,12 +245,12 @@ spec:
         app: flare
         cluster: {cluster}
     spec:
-      terminationGracePeriodSeconds: 5
+      terminationGracePeriodSeconds: {graceSeconds}
       containers:
         - name: flared
           image: {image}
           imagePullPolicy: Never
-          command: [\"sh\", \"-c\", \"{prep} && exec flared --config=/etc/flared/extra.conf --data-dir {dataDir} --server-port {cfg.flarePort} --index-server-name {operatorSvc} --index-server-port {cfg.operatorPort} {storageFlag} --stderr\"]
+          command: [\"sh\", \"-c\", \"{prep} && exec flared --config=/etc/flared/extra.conf --data-dir {dataDir} --server-port {cfg.flarePort} --index-server-name {operatorSvc} --index-server-port {cfg.operatorPort} {storageFlag} --stderr\"]{preStopBlock}
           ports:
             - containerPort: {cfg.flarePort}
               name: flare

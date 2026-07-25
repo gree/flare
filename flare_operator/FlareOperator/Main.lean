@@ -503,7 +503,9 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
       let podKeys := pods.map Bridge.PodInfo.toNodeKey
       -- Topology for zone-aware placement; [] on unlabeled clusters.
       let nodeZones ← Bridge.listNodeZones
-      pure (.PodListResponse podKeys (Bridge.podZones pods nodeZones))
+      -- Terminating (deletionTimestamp) pods → graceful drain in the FSM.
+      let termKeys := Bridge.terminatingPodKeys pods
+      pure (.PodListResponse podKeys (Bridge.podZones pods nodeZones) termKeys)
   | .PatchService =>
     -- Service patching happens in executeEffects (PatchService effect)
     -- This just signals completion

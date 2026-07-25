@@ -626,8 +626,22 @@ int ini_option::reload() {
 			}
 		}
 
-		if (this->_process_index_servers(opt_var_map) < 0) {
-			throw -1;
+		// Index servers are provided on the COMMAND LINE (--index-server-name /
+		// --index-server-port), not in the reloadable config file, and do not
+		// change at runtime. reload() re-parses only the config FILE, so on a
+		// normal SIGHUP opt_var_map has no index-server entries and
+		// _process_index_servers() would fail its "index-server-name is required"
+		// check, throw, and make reload() reject the WHOLE file as invalid —
+		// silently discarding every runtime-tunable change (rocksdb WAL settings,
+		// cluster-replication mode, ...). That is why config changes never took
+		// effect at runtime. Only re-process index servers when the reloaded file
+		// actually specifies them; otherwise keep the ones set at startup.
+		if (opt_var_map.count("index-servers")
+				|| opt_var_map.count("index-server-name")
+				|| opt_var_map.count("index-server-port")) {
+			if (this->_process_index_servers(opt_var_map) < 0) {
+				throw -1;
+			}
 		}
 
 		if (opt_var_map.count("max-total-thread-queue")) {

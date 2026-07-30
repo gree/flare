@@ -49,6 +49,8 @@ jobs:
             dockerfile: Dockerfile.flare-node
           - name: flare-node-rocksdb
             dockerfile: Dockerfile.flare-node-rocksdb
+          - name: flare-backup
+            dockerfile: Dockerfile.backup
     steps:
       - uses: actions/checkout@v4
         with:

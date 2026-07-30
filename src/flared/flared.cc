@@ -29,6 +29,7 @@
 #include "flared.h"
 #include "connection_tcp.h"
 #include "handler_alarm.h"
+#include "handler_reaper.h"
 #include "handler_request.h"
 #ifdef ENABLE_MYSQL_REPLICATION
 # include "handler_mysql_replication.h"
@@ -342,6 +343,14 @@ int flared::startup(int argc, char **argv) {
 	shared_thread th_alarm = this->_other_thread_pool->get(thread_pool::thread_type_alarm);
 	handler_alarm* h_alarm = new handler_alarm(th_alarm);
 	th_alarm->trigger(h_alarm);
+
+	// background expire crawler (master-only; deletes past-expire keys so their
+	// space is reclaimed and the deletes replicate through the WAL to slaves).
+	// It self-gates on role each cycle, so it is safe to start unconditionally;
+	// on non-rocksdb backends and non-master roles it simply no-ops.
+	shared_thread th_reaper = this->_other_thread_pool->get(thread_pool::thread_type_reaper);
+	handler_reaper* h_reaper = new handler_reaper(th_reaper, this->_cluster, this->_storage);
+	th_reaper->trigger(h_reaper);
 
 	time_watcher_object = new time_watcher();
 	time_watcher_observer::set_threshold_warn_msec(ini_option_object().get_storage_access_watch_threshold_warn_msec());

@@ -119,6 +119,13 @@ private:
 	int				_rocksdb_wal_sync_bwlimit;
 	int				_rocksdb_wal_sync_interval;
 	int				_rocksdb_backup_keep;
+	// Background expire crawler (memcached lru_crawler equivalent): a
+	// master-only sweep that physically deletes past-expire keys so they are
+	// reclaimed and — being real deletes — replicate through the WAL to slaves.
+	bool			_reap_expired;
+	int				_reap_expired_interval;
+	int				_reap_expired_chunk_size;
+	int				_reap_expired_chunk_sleep_msec;
 public:
 	static const int default_back_log = 30;
 	static const int default_index_server_port = 12120;
@@ -155,6 +162,10 @@ public:
 	static const int      default_rocksdb_wal_sync_bwlimit         = 0;  // inherit
 	static const int      default_rocksdb_wal_sync_interval        = 0;  // inherit
 	static const int      default_rocksdb_backup_keep              = 7;
+	static const bool     default_reap_expired                    = true;
+	static const int      default_reap_expired_interval           = 300;    // sec between full sweeps
+	static const int      default_reap_expired_chunk_size         = 10000;  // keys scanned per chunk
+	static const int      default_reap_expired_chunk_sleep_msec   = 100;    // throttle sleep between chunks
 	static const int default_thread_pool_size = 5;
 	static const uint32_t default_proxy_prior_netmask = 0x00;
 	static const uint32_t default_max_total_thread_queue = 0;				// unlimited
@@ -236,6 +247,10 @@ public:
 	int get_rocksdb_wal_sync_bwlimit() { return this->_rocksdb_wal_sync_bwlimit; }
 	int get_rocksdb_wal_sync_interval() { return this->_rocksdb_wal_sync_interval; }
 	int get_rocksdb_backup_keep() { return this->_rocksdb_backup_keep; }
+	bool is_reap_expired() { return this->_reap_expired; }
+	int get_reap_expired_interval() { return this->_reap_expired_interval; }
+	int get_reap_expired_chunk_size() { return this->_reap_expired_chunk_size; }
+	int get_reap_expired_chunk_sleep_msec() { return this->_reap_expired_chunk_sleep_msec; }
 
 private:
 	int _setup_cli_option(program_options::options_description& option);

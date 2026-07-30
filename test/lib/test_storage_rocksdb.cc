@@ -1011,6 +1011,136 @@ void test_truncate_then_reseed_repl_lsn() {
 	drop_rocksdb(s, wal_master_dir);
 }
 
+// ---------------------------------------------------------------------------
+// Expire reaping: lazy delete-on-get + background crawler (reap_expired).
+//
+// RocksDB has no lazy-expiry-on-get (unlike storage_tch) nor any TTL sweep, so
+// past-expire keys used to linger forever. A compaction filter can't fix it
+// under WAL replication (its drops bypass the WAL and diverge slaves), so the
+// master reaps with real deletes that replicate. These tests pin both paths.
+// ---------------------------------------------------------------------------
+
+namespace {
+	// set a key carrying an explicit expire (epoch seconds; 0 = never expires).
+	int storage_set_string_expire(storage* s, const string& key, const string& value, time_t expire) {
+		storage::entry e;
+		e.key = key;
+		e.flag = 0;
+		e.expire = expire;
+		e.version = 0;   // let storage assign
+		e.size = value.size();
+		shared_byte data(new uint8_t[value.size()]);
+		memcpy(data.get(), value.data(), value.size());
+		e.data = data;
+		storage::result r;
+		return s->set(e, r, 0);
+	}
+}
+
+// A get() landing on an expired entry returns NOT_FOUND *and* physically
+// removes it (mirrors storage_tch) so its space is reclaimed.
+void test_expire_lazy_delete_on_get() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+
+	// expire=1 => 1970, always past relative to the live timestamp.
+	cut_assert_equal_int(0, storage_set_string_expire(s, "k", "v", 1));
+	cut_assert_equal_int(1, static_cast<int>(s->count()));            // physically present
+	cut_assert_equal_int(0, static_cast<int>(s->get_expire_reaped()));
+
+	string out;
+	cut_assert_equal_int(-1, storage_get_string(s, "k", out));       // observes expiry
+
+	cut_assert_equal_int(0, static_cast<int>(s->count()));           // physically gone
+	cut_assert_equal_int(1, static_cast<int>(s->get_expire_reaped()));
+
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// reap_expired deletes only past-expire entries, keeps live/never-expire ones,
+// and reports accurate counts.
+void test_expire_reap_removes_only_expired() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+
+	time_t now = stats_object->get_timestamp();
+	cut_assert_equal_int(0, storage_set_string_expire(s, "past",   "v", now - 10));  // expired
+	cut_assert_equal_int(0, storage_set_string_expire(s, "never",  "v", 0));         // never
+	cut_assert_equal_int(0, storage_set_string_expire(s, "future", "v", now + 1000));// not yet
+	cut_assert_equal_int(3, static_cast<int>(s->count()));
+
+	uint32_t scanned = 0, reaped = 0;
+	bool more = true;
+	string last;
+	cut_assert_equal_int(0, s->reap_expired(now, 100, "", last, more, scanned, reaped));
+
+	cut_assert_equal_int(1, static_cast<int>(reaped));
+	cppcut_assert_equal(false, more);                          // whole keyspace in one chunk
+	cut_assert_equal_int(2, static_cast<int>(s->count()));
+	cut_assert_equal_int(1, static_cast<int>(s->get_expire_reaped()));
+
+	string out;
+	cut_assert_equal_int(-1, storage_get_string(s, "past", out));    // gone
+	cut_assert_equal_int(0,  storage_get_string(s, "never", out));   // kept
+	cut_assert_equal_int(0,  storage_get_string(s, "future", out));  // kept
+
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// A chunked sweep (small max_scan) drains the whole keyspace across calls,
+// resuming strictly after each chunk's last key.
+void test_expire_reap_chunked_sweep() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+
+	time_t now = stats_object->get_timestamp();
+	const int n = 25;
+	for (int i = 0; i < n; i++) {
+		char k[32];
+		snprintf(k, sizeof(k), "e%03d", i);
+		cut_assert_equal_int(0, storage_set_string_expire(s, k, "v", now - 5));
+	}
+	cut_assert_equal_int(n, static_cast<int>(s->count()));
+
+	uint64_t total_reaped = 0;
+	string after = "";
+	bool more = true;
+	int guard = 0;
+	while (more && guard++ < 1000) {
+		uint32_t scanned = 0, reaped = 0;
+		string last;
+		cut_assert_equal_int(0, s->reap_expired(now, 10, after, last, more, scanned, reaped));
+		total_reaped += reaped;
+		after = last;
+	}
+	cut_assert_equal_int(n, static_cast<int>(total_reaped));
+	cut_assert_equal_int(0, static_cast<int>(s->count()));
+
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// reap_expired must NOT delete a key whose expire was refreshed into the future
+// (a re-set before the sweep): only genuinely past-expire entries go.
+void test_expire_reap_skips_refreshed_key() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+
+	time_t now = stats_object->get_timestamp();
+	cut_assert_equal_int(0, storage_set_string_expire(s, "k", "old", now - 10));
+	// re-set with a future expire (new version) before the sweep.
+	cut_assert_equal_int(0, storage_set_string_expire(s, "k", "new", now + 1000));
+
+	uint32_t scanned = 0, reaped = 0;
+	bool more = true;
+	string last;
+	cut_assert_equal_int(0, s->reap_expired(now, 100, "", last, more, scanned, reaped));
+
+	cut_assert_equal_int(0, static_cast<int>(reaped));
+	cut_assert_equal_int(1, static_cast<int>(s->count()));
+
+	string out;
+	cut_assert_equal_int(0, storage_get_string(s, "k", out));
+	cut_assert_equal_string("new", out.c_str());
+
+	drop_rocksdb(s, wal_master_dir);
+}
+
 	void teardown()
 	{
 		delete rocksdb_tester;

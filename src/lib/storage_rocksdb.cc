@@ -86,6 +86,7 @@ storage_rocksdb::storage_rocksdb(
 	_wal_sync_apply_failure(0),
 	_wal_sync_other_error(0),
 	_wal_fallback_to_dump(0),
+	_expire_reaped(0),
 	_resync_failure_count(0),
 	_resync_failure_threshold(0),
 	_wal_max_batch_bytes(0),
@@ -531,6 +532,8 @@ int storage_rocksdb::get(entry& e, result& r, int b) {
 		mutex_index = e.get_key_hash_value(hash_algorithm_murmur) % this->_mutex_slot_size;
 	}
 
+	bool expired = false;
+
 	try {
 		if ((b & behavior_skip_lock) == 0) {
 			pthread_rwlock_rdlock(&this->_mutex_wholelock);
@@ -566,6 +569,7 @@ int storage_rocksdb::get(entry& e, result& r, int b) {
 			log_debug("entry expired (key=%s, expire=%ld, timestamp=%ld)",
 				e.key.c_str(), e.expire, stats_object->get_timestamp());
 			r = result_not_found;
+			expired = true;
 			throw 0;
 		}
 
@@ -577,12 +581,25 @@ int storage_rocksdb::get(entry& e, result& r, int b) {
 
 		r = result_none;
 
-	} catch (int e) {
+	} catch (int error) {
 		if ((b & behavior_skip_lock) == 0) {
 			pthread_rwlock_unlock(&this->_mutex_slot[mutex_index]);
 			pthread_rwlock_unlock(&this->_mutex_wholelock);
 		}
-		return e;
+		// Lazy expiry (mirrors storage_tch): physically remove the expired entry
+		// so its space is reclaimed and — on the partition master — the delete
+		// flows through the RocksDB WAL to replicas (a compaction filter would
+		// bypass the WAL and diverge the followers). version_equal so a delete is
+		// skipped if the key was re-set between the read and here. e already holds
+		// the current header (version/expire) from _unserialize_header above.
+		if (expired) {
+			result r_remove;
+			if (this->remove(e, r_remove, (b & behavior_skip_lock) | behavior_version_equal) == 0
+					&& r_remove == result_deleted) {
+				this->_expire_reaped.incr();
+			}
+		}
+		return error;
 	}
 
 	if ((b & behavior_skip_lock) == 0) {
@@ -889,6 +906,79 @@ storage::iteration storage_rocksdb::iter_next(string& key) {
 		key = candidate;
 		return iteration_continue;
 	}
+}
+
+int storage_rocksdb::reap_expired(time_t now, uint32_t max_scan, const string& after_key,
+		string& last_key, bool& more, uint32_t& scanned, uint32_t& reaped) {
+	scanned = 0;
+	reaped = 0;
+	more = false;
+	last_key = after_key;
+
+	// Best-effort sweep over the live DB. We deliberately do NOT take a
+	// long-lived snapshot (unlike iter_begin) so the caller can throttle a
+	// full-keyspace scan across many chunks without pinning superversions and
+	// blocking compaction from reclaiming space between chunks. A fresh
+	// iterator per chunk sees a slightly newer view each time, which is fine:
+	// reaping is idempotent and re-scanning a key is cheap.
+	rocksdb::ReadOptions ro = this->_read_options;
+	ro.fill_cache = false;                 // a full sweep must not thrash the block cache
+	rocksdb::Iterator* it = this->_db->NewIterator(ro);
+	if (it == NULL) {
+		log_err("reap_expired: NewIterator returned NULL", 0);
+		return -1;
+	}
+
+	if (after_key.empty()) {
+		it->SeekToFirst();
+	} else {
+		// Resume strictly after the previous chunk's last key.
+		it->Seek(after_key);
+		if (it->Valid() && it->key().ToString() == after_key) {
+			it->Next();
+		}
+	}
+
+	while (it->Valid()) {
+		if (scanned >= max_scan) {
+			more = true;                   // stopped on the budget, not end-of-keyspace
+			break;
+		}
+		string key = it->key().ToString();
+		last_key = key;
+		scanned++;
+
+		if (is_reserved_key(key)) {
+			it->Next();
+			continue;
+		}
+
+		rocksdb::Slice value = it->value();
+		if (value.size() >= static_cast<size_t>(entry::header_size)) {
+			entry hdr;
+			const uint8_t* value_ptr = reinterpret_cast<const uint8_t*>(value.data());
+			this->_unserialize_header(value_ptr, value.size(), hdr);
+			if (hdr.expire > 0 && hdr.expire <= now) {
+				// Delete only if the version is unchanged since we read the header
+				// (a concurrent set may have refreshed / un-expired the key). The
+				// remove() goes through the normal write path -> RocksDB WAL ->
+				// replicas. remove() takes its own per-slot lock.
+				entry del;
+				del.key = key;
+				del.version = hdr.version;
+				result r;
+				if (this->remove(del, r, behavior_version_equal) == 0 && r == result_deleted) {
+					reaped++;
+					this->_expire_reaped.incr();
+				}
+			}
+		}
+
+		it->Next();
+	}
+
+	delete it;
+	return 0;
 }
 
 int storage_rocksdb::iter_end() {

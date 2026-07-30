@@ -228,6 +228,21 @@ public:
 	virtual uint64_t size() = 0;
 	virtual int get_key(string key, int limit, vector<string>& r) { return -1; };
 
+	// Physically reap entries whose expire is in the past. Chunked so the
+	// caller can throttle a full-keyspace sweep: scans up to max_scan keys
+	// whose key is > after_key (empty = from the start), deletes the expired
+	// ones, sets last_key to the last key visited and more=true if further
+	// chunks remain. scanned/reaped are per-call counts. The deletes go
+	// through the normal write path so — on a WAL-replicated backend — they
+	// flow to the replicas (a RocksDB compaction filter would bypass the WAL
+	// and diverge followers). Default: not supported.
+	virtual int reap_expired(time_t now, uint32_t max_scan, const string& after_key,
+			string& last_key, bool& more, uint32_t& scanned, uint32_t& reaped) {
+		(void)now; (void)max_scan; (void)after_key; (void)last_key; (void)more;
+		(void)scanned; (void)reaped;
+		return -1;
+	}
+
 	virtual void set_listener(storage_listener* l) { this->_listener = l; };
 
 	virtual type get_type() = 0;

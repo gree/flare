@@ -128,6 +128,10 @@ protected:
 	AtomicCounter _wal_sync_other_error;
 	AtomicCounter _wal_fallback_to_dump;
 
+	// Total entries physically reaped by the background expire crawler
+	// (reap_expired) plus the lazy delete-on-get path. Monotonic.
+	AtomicCounter _expire_reaped;
+
 	// Consecutive resync failure streak. Reset to 0 on success, so it
 	// needs a non-monotonic reset operation — AtomicCounter only
 	// supports add, so we use a plain counter under a dedicated mutex.
@@ -198,6 +202,8 @@ public:
 	virtual int iter_end();
 	virtual uint32_t count();
 	virtual uint64_t size();
+	virtual int reap_expired(time_t now, uint32_t max_scan, const string& after_key,
+			string& last_key, bool& more, uint32_t& scanned, uint32_t& reaped);
 
 	virtual type get_type() {
 		return this->_type;
@@ -243,6 +249,7 @@ public:
 	uint64_t get_wal_sync_apply_failure()     { return this->_wal_sync_apply_failure.fetch(); }
 	uint64_t get_wal_sync_other_error()       { return this->_wal_sync_other_error.fetch(); }
 	uint64_t get_wal_fallback_to_dump()       { return this->_wal_fallback_to_dump.fetch(); }
+	uint64_t get_expire_reaped()              { return this->_expire_reaped.fetch(); }
 	uint64_t get_resync_failure_count();
 
 	// Observability mutators. Callers on the sync code paths invoke

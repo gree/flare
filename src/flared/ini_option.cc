@@ -98,6 +98,10 @@ ini_option::ini_option():
 		_rocksdb_wal_sync_bwlimit(default_rocksdb_wal_sync_bwlimit),
 		_rocksdb_wal_sync_interval(default_rocksdb_wal_sync_interval),
 		_rocksdb_backup_keep(default_rocksdb_backup_keep),
+		_reap_expired(default_reap_expired),
+		_reap_expired_interval(default_reap_expired_interval),
+		_reap_expired_chunk_size(default_reap_expired_chunk_size),
+		_reap_expired_chunk_sleep_msec(default_reap_expired_chunk_sleep_msec),
 		_log_stderr(false) {
 	pthread_mutex_init(&this->_mutex_index_servers, NULL);
 }
@@ -439,6 +443,19 @@ int ini_option::load() {
 		if (opt_var_map.count("rocksdb-backup-keep")) {
 			this->_rocksdb_backup_keep = opt_var_map["rocksdb-backup-keep"].as<int>();
 		}
+
+		if (opt_var_map.count("reap-expired")) {
+			this->_reap_expired = opt_var_map["reap-expired"].as<bool>();
+		}
+		if (opt_var_map.count("reap-expired-interval")) {
+			this->_reap_expired_interval = opt_var_map["reap-expired-interval"].as<int>();
+		}
+		if (opt_var_map.count("reap-expired-chunk-size")) {
+			this->_reap_expired_chunk_size = opt_var_map["reap-expired-chunk-size"].as<int>();
+		}
+		if (opt_var_map.count("reap-expired-chunk-sleep-msec")) {
+			this->_reap_expired_chunk_sleep_msec = opt_var_map["reap-expired-chunk-sleep-msec"].as<int>();
+		}
 	} catch (int e) {
 		cout << option << endl;
 		return -1;
@@ -544,6 +561,23 @@ int ini_option::reload() {
 		if (opt_var_map.count("rocksdb-backup-keep")) {
 			log_notice("  rocksdb_backup_keep: %d -> %d", this->_rocksdb_backup_keep, opt_var_map["rocksdb-backup-keep"].as<int>());
 			this->_rocksdb_backup_keep = opt_var_map["rocksdb-backup-keep"].as<int>();
+		}
+
+		if (opt_var_map.count("reap-expired")) {
+			log_notice("  reap_expired: %d -> %d", this->_reap_expired, opt_var_map["reap-expired"].as<bool>());
+			this->_reap_expired = opt_var_map["reap-expired"].as<bool>();
+		}
+		if (opt_var_map.count("reap-expired-interval")) {
+			log_notice("  reap_expired_interval: %d -> %d", this->_reap_expired_interval, opt_var_map["reap-expired-interval"].as<int>());
+			this->_reap_expired_interval = opt_var_map["reap-expired-interval"].as<int>();
+		}
+		if (opt_var_map.count("reap-expired-chunk-size")) {
+			log_notice("  reap_expired_chunk_size: %d -> %d", this->_reap_expired_chunk_size, opt_var_map["reap-expired-chunk-size"].as<int>());
+			this->_reap_expired_chunk_size = opt_var_map["reap-expired-chunk-size"].as<int>();
+		}
+		if (opt_var_map.count("reap-expired-chunk-sleep-msec")) {
+			log_notice("  reap_expired_chunk_sleep_msec: %d -> %d", this->_reap_expired_chunk_sleep_msec, opt_var_map["reap-expired-chunk-sleep-msec"].as<int>());
+			this->_reap_expired_chunk_sleep_msec = opt_var_map["reap-expired-chunk-sleep-msec"].as<int>();
 		}
 
 		// The remaining rocksdb options require reopening the DB (block cache,
@@ -797,7 +831,11 @@ int ini_option::_setup_config_option(program_options::options_description& optio
 		("rocksdb-wal-max-batch-bytes",		program_options::value<uint64_t>(),	"max size of a single replicated RocksDB WriteBatch; batches beyond this abort WAL sync and fall back to full dump (default 16MB, 0 disables, rocksdb only)")
 		("rocksdb-wal-sync-bwlimit",			program_options::value<int>(),		"bandwidth limit in KB/s for WAL incremental sync; 0 inherits reconstruction-bwlimit (default 0, rocksdb only)")
 		("rocksdb-wal-sync-interval",			program_options::value<int>(),		"inter-batch delay in usec for WAL incremental sync; 0 inherits reconstruction-interval (default 0, rocksdb only)")
-		("rocksdb-backup-keep",					program_options::value<int>(),		"number of on-disk named backups (checkpoints) to retain under data-dir/backups/; oldest pruned by name order (default 7, dynamic, rocksdb only)");
+		("rocksdb-backup-keep",					program_options::value<int>(),		"number of on-disk named backups (checkpoints) to retain under data-dir/backups/; oldest pruned by name order (default 7, dynamic, rocksdb only)")
+		("reap-expired",						program_options::value<bool>(),		"enable the background expire crawler that physically deletes past-expire keys on the partition master (default true, dynamic, rocksdb only)")
+		("reap-expired-interval",				program_options::value<int>(),		"seconds between full expire sweeps (default 300, dynamic, rocksdb only)")
+		("reap-expired-chunk-size",				program_options::value<int>(),		"keys scanned per chunk before the throttle sleep (default 10000, dynamic, rocksdb only)")
+		("reap-expired-chunk-sleep-msec",		program_options::value<int>(),		"throttle sleep between chunks in msec (default 100, dynamic, rocksdb only)");
 
 	return 0;
 }

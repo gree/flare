@@ -33,19 +33,26 @@ Components:
 - `deploy/backup-cronjob.yaml` — three independent CronJobs: `flare-backup`
   (tier 1, local checkpoints via busybox+nc over the headless-service pod DNS),
   `flare-backup-s3-delta` (tier 2a, frequent DELTA upload — `aws s3 sync
-  --size-only --delete` mirrors each pod's newest checkpoint to
-  `<bucket>/<cluster>/<pod>/latest/`; immutable uniquely-named SSTs mean only
+  --size-only --delete` mirrors the newest checkpoint of ONE node per partition
+  to `<bucket>/<cluster>/latest/p<N>/`; immutable uniquely-named SSTs mean only
   new ones cross the WAN), and `flare-backup-s3-daily` (tier 2b, once-a-day
-  server-side copy of `latest/` to a dated, pruned `…-snapshots/<date>/` for
-  point-in-time rollback). Both tier-2 jobs start suspended; S3-compatible
-  S3-compatible stores (GCS, MinIO, …) work via `S3_ENDPOINT`.
+  server-side copy of `<cluster>/latest/` to a dated, pruned
+  `<cluster>/snapshots/<date>/` for point-in-time rollback). Both tier-2 jobs
+  start suspended; S3-compatible stores (GCS, MinIO, …) work via `S3_ENDPOINT`.
+- **One node per partition, not every replica.** Replicas hold identical data,
+  so the jobs discover targets from the operator node map (`node sync` on
+  `:12120`) and back up exactly one Active node per partition of a selectable
+  `BACKUP_ROLE` (`master`, default — the freshest copy; or `slave` to offload
+  the master). The S3 layout is **generation-first**, keyed by partition (NOT
+  pod): `<cluster>/latest/p<N>/` is the live mirror, `<cluster>/snapshots/<date>/p<N>/`
+  the dated generations — so a master change (failover) keeps a stable path.
 - Restore hook in the StatefulSet startup command (PVC deployments): if
   `<data-dir>/RESTORE` exists, its content names a checkpoint directory; the
   live DB is replaced by it and the marker consumed before flared starts.
 
 ## Taking a backup
 
-Automatic: enable the `flare-backup` CronJob (adjust `NUM_PODS`, schedule).
+Automatic: enable the `flare-backup` CronJob (adjust `BACKUP_ROLE`, schedule).
 
 Manual (one pod):
 
@@ -53,11 +60,12 @@ Manual (one pod):
 printf 'backup manual-20260713\r\n' | nc <pod-ip> 12121
 ```
 
-Backups are **per pod**: each pod checkpoints its own DB. For a full-cluster
-restore point, back up all pods at (approximately) the same time — the
-CronJob does this. Cross-pod consistency is *not* atomic: pods are
-checkpointed seconds apart. For a KVS this is normally acceptable; if you
-need a hard cut, quiesce writes first.
+Backups are **per partition**: the CronJob checkpoints ONE node per partition
+(the `BACKUP_ROLE` copy — replicas are identical, so backing up all is
+redundant). For a full-cluster restore point, all partitions are backed up at
+(approximately) the same time — the CronJob does this. Cross-partition
+consistency is *not* atomic: partitions are checkpointed seconds apart. For a
+KVS this is normally acceptable; if you need a hard cut, quiesce writes first.
 
 ## Restore
 
@@ -82,19 +90,22 @@ per-key exact-value verification).
 
 ### Case B — restore from object storage (PVC also lost)
 
-The tier-2 jobs store each pod's checkpoint as an UNPACKED directory (via
-`aws s3 sync`), not a tarball. Pick the source:
-- most-recent mirror: `s3://bucket/<cluster>/<pod>/latest/`
-- retained point-in-time: `s3://bucket/<cluster>-snapshots/<DATE>/<pod>/latest/`
+The tier-2 jobs store each partition's checkpoint as an UNPACKED directory (via
+`aws s3 sync`), not a tarball, keyed by partition (`p<N>`). Pick the source for
+the partition you are restoring:
+- most-recent mirror: `s3://bucket/<cluster>/latest/p<N>/`
+- retained point-in-time: `s3://bucket/<cluster>/snapshots/<DATE>/p<N>/`
 (`EP="--endpoint-url <COS/GCS/MinIO endpoint>"`, empty for AWS.)
 
 1. Provision the new PVC/pod (StatefulSet recreates it empty).
-2. Pull the checkpoint down, then copy it into the pod under a backup name:
+2. Pull the checkpoint down, then copy it into EVERY pod of that partition
+   under a backup name (all replicas of a partition restore from the same
+   single backup):
    ```
-   aws s3 sync $EP s3://bucket/<cluster>/<pod>/latest/ /tmp/<name>
+   aws s3 sync $EP s3://bucket/<cluster>/latest/p<N>/ /tmp/<name>
    kubectl cp /tmp/<name> <namespace>/<pod>:/data/flare/backups/<name>
    ```
-   (For a dated restore, sync from `…/<cluster>-snapshots/<DATE>/<pod>/latest/`.)
+   (For a dated restore, sync from `…/<cluster>/snapshots/<DATE>/p<N>/`.)
 3. Continue with Case A steps 2–4 (write the `RESTORE` marker naming
    `/data/flare/backups/<name>`, delete the pods, let the startup hook swap it in).
 

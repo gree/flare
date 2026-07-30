@@ -11,7 +11,7 @@
 #                                    Backs up ONE node per partition (the master,
 #                                    or a slave via BACKUP_ROLE — replicas hold
 #                                    identical data) and mirrors its newest
-#                                    checkpoint to <bucket>/<cluster>/p<N>/latest/
+#                                    checkpoint to <bucket>/<cluster>/latest/p<N>/
 #                                    (keyed by partition, stable across failover)
 #                                    with `aws s3 sync --size-only --delete`. RocksDB
 #                                    SSTs are immutable and uniquely named, so
@@ -22,7 +22,8 @@
 #                                    write delta since the previous run.
 #
 #   Tier 2b flare-backup-s3-daily   once-a-day FULL retained snapshot. A pure
-#                                    server-side copy latest/ -> snapshots/<date>/
+#                                    server-side copy of <cluster>/latest/ ->
+#                                    <cluster>/snapshots/<date>/
 #                                    inside the bucket (no cluster egress), plus
 #                                    pruning of snapshots older than KEEP_DAYS.
 #                                    Gives point-in-time rollback; the delta job
@@ -101,7 +102,7 @@ spec:
 # Tier 2a: frequent DELTA upload to object storage (S3 / COS / GCS / MinIO).
 # Each run picks ONE node per partition (BACKUP_ROLE, discovered from the operator
 # node map), takes a fresh checkpoint, copies it out, and mirrors it to
-# <bucket>/<cluster>/p<N>/latest/ with `aws s3 sync --size-only --delete` so
+# <bucket>/<cluster>/latest/p<N>/ with `aws s3 sync --size-only --delete` so
 # only newly-flushed SSTs cross the WAN. Requires:
 #   - a ServiceAccount bound to a Role allowing pods/get + pods/exec
 #   - an image with BOTH kubectl and aws-cli
@@ -180,8 +181,10 @@ spec:
                     POD="${T%%:*}"; PART="${T##*:}"
                     HOST="${POD}.${CLUSTER}-nodes.${NAMESPACE}.svc.cluster.local"
                     STAMP=$(date -u +%Y%m%d-%H%M%S)
-                    # Keyed by PARTITION (p<N>), so a master change keeps a stable path.
-                    DST="${BUCKET}/${CLUSTER}/p${PART}/latest"
+                    # Generation-first layout: <cluster>/latest/p<N>/ (the daily job
+                    # snapshots it to <cluster>/snapshots/<date>/p<N>/). Keyed by
+                    # PARTITION so a master change keeps a stable path.
+                    DST="${BUCKET}/${CLUSTER}/latest/p${PART}"
                     # 1) fresh consistent checkpoint (hard-links; near-instant)
                     REPLY=$(printf 'backup %s\r\n' "$STAMP" | nc -w 30 "$HOST" "$FLARE_PORT" || true)
                     case "$REPLY" in *ERROR*|"") echo "checkpoint FAILED on ${POD}"; FAIL=1; continue ;; esac
@@ -190,7 +193,7 @@ spec:
                     kubectl cp -n "$NAMESPACE" "${POD}:${DATA_DIR}/backups/${STAMP}" "/tmp/${POD}"
                     # 3) DELTA upload: --size-only skips immutable SSTs already
                     #    present; --delete prunes compaction leftovers. Result is
-                    #    a complete, current mirror at <bucket>/<cluster>/p<N>/latest/.
+                    #    a complete, current mirror at <bucket>/<cluster>/latest/p<N>/.
                     #    (For the CURRENT-pointer restore hazard under --size-only, see
                     #    the 3-phase upload + verify in the OIDC variant.)
                     aws s3 sync "/tmp/${POD}" "${DST}/" --size-only --delete $EP || FAIL=1
@@ -240,18 +243,19 @@ spec:
                   set -e
                   EP=""; [ -n "$S3_ENDPOINT" ] && EP="--endpoint-url $S3_ENDPOINT"
                   DATE=$(date -u +%Y%m%d)
-                  # Server-side copy of every pod's current mirror into a dated,
-                  # retained snapshot (COS/S3 copies within the bucket — no egress).
+                  # Generation-first layout: snapshot the whole current mirror
+                  # (<cluster>/latest/p<N>/) into a dated, retained generation
+                  # (<cluster>/snapshots/<date>/p<N>/). Server-side copy within the
+                  # bucket (COS/S3) — no cluster egress.
                   aws s3 cp --recursive $EP \
-                    "${BUCKET}/${CLUSTER}/" \
-                    "${BUCKET}/${CLUSTER}-snapshots/${DATE}/" \
-                    --exclude "*" --include "*/latest/*"
-                  # Prune snapshots older than KEEP_DAYS (compare the YYYYMMDD prefix).
+                    "${BUCKET}/${CLUSTER}/latest/" \
+                    "${BUCKET}/${CLUSTER}/snapshots/${DATE}/"
+                  # Prune snapshot generations older than KEEP_DAYS (compare YYYYMMDD).
                   CUTOFF=$(date -u -d "-${KEEP_DAYS} days" +%Y%m%d 2>/dev/null || date -u -v-${KEEP_DAYS}d +%Y%m%d)
-                  for d in $(aws s3 ls $EP "${BUCKET}/${CLUSTER}-snapshots/" | awk '{print $2}' | tr -d '/'); do
+                  for d in $(aws s3 ls $EP "${BUCKET}/${CLUSTER}/snapshots/" | awk '{print $2}' | tr -d '/'); do
                     case "$d" in ''|*[!0-9]*) continue ;; esac
                     if [ "$d" -lt "$CUTOFF" ]; then
                       echo "pruning old snapshot ${d}"
-                      aws s3 rm --recursive $EP "${BUCKET}/${CLUSTER}-snapshots/${d}/"
+                      aws s3 rm --recursive $EP "${BUCKET}/${CLUSTER}/snapshots/${d}/"
                     fi
                   done

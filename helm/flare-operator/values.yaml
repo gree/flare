@@ -146,6 +146,15 @@ cluster:
   tmpfs:
     enabled: false
     sizeLimit: 10Gi
+  # RocksDB backend tuning. Keys map 1:1 to the FlareCluster CRD's spec.rocksdb
+  # (walSizeLimitMb, walTtlSeconds, syncWrites, walMaxBatchBytes, ...); only the
+  # keys you set are emitted, everything else keeps flared's built-in default.
+  # IMPORTANT on tmpfs: RocksDB keeps a WAL archive (for slave catch-up) up to
+  # walSizeLimitMb (flared default 10240 = 10Gi) on the RAM-backed data dir, so
+  # the archive alone can fill the tmpfs. On a tmpfs cluster cap it well under
+  # tmpfs.sizeLimit (rule of thumb ~5%) and add a short walTtlSeconds, e.g. for a
+  # 10Gi tmpfs: {walSizeLimitMb: 512, walTtlSeconds: 3600}.
+  rocksdb: {}
   # Spread flared pods across zones so one AZ cannot take a whole
   # partition's master AND slave together. "soft" uses ScheduleAnyway
   # (small/dev clusters), "hard" uses DoNotSchedule (production).

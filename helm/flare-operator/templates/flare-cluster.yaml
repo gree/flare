@@ -49,6 +49,16 @@ metadata:
 spec:
   partitions: {{ $c.partitions }}
   replicas: {{ $c.replicas }}
+  {{- /* RocksDB tuning passthrough. Fields map 1:1 to the CRD's spec.rocksdb
+         (walSizeLimitMb, walTtlSeconds, syncWrites, ...); the operator emits
+         only the ones set into the cluster ConfigMap. IMPORTANT for tmpfs: WAL
+         archive is retained up to walSizeLimitMb (flared default 10240=10Gi) on
+         the RAM-backed data dir, so on a tmpfs cluster cap it well under
+         tmpfs.sizeLimit (e.g. ~5%) or the archive can fill the RAM disk. */}}
+  {{- with $c.rocksdb }}
+  rocksdb:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 ---
 apiVersion: v1
 kind: Service

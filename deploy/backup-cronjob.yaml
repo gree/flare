@@ -26,8 +26,8 @@
 #                                    only keeps the single most-recent state.
 #
 # RPO = the tier-2a interval (writes since the last delta are the exposure).
-# Object storage is S3-compatible: for Tencent COS / GCS / MinIO set
-# S3_ENDPOINT (and, for COS, the region-specific endpoint). Vendor endpoints,
+# Object storage is S3-compatible: for a non-AWS S3-compatible store (GCS,
+# MinIO, …) set S3_ENDPOINT to that store's endpoint. Vendor endpoints,
 # buckets, and credentials are DEPLOYMENT-side (a Secret + these env values),
 # never committed here.
 #
@@ -88,7 +88,7 @@ spec:
 #   - an image with BOTH kubectl and aws-cli
 #   - a Secret `flare-backup-s3-credentials` with AWS_ACCESS_KEY_ID /
 #     AWS_SECRET_ACCESS_KEY (or IRSA/workload-identity — then drop envFrom)
-# For Tencent COS set S3_ENDPOINT to the COS S3-compatible endpoint.
+# For a non-AWS S3-compatible store set S3_ENDPOINT to that store's endpoint.
 # NOTE ON CADENCE: this job pulls each pod's checkpoint intra-cluster before the
 # delta upload, so at minute-cadence on a large dataset the intra-cluster copy
 # dominates. For true minute-level RPO on big data, run aws-cli as a sidecar in

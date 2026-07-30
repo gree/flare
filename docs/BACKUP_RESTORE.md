@@ -38,7 +38,7 @@ Components:
   new ones cross the WAN), and `flare-backup-s3-daily` (tier 2b, once-a-day
   server-side copy of `latest/` to a dated, pruned `…-snapshots/<date>/` for
   point-in-time rollback). Both tier-2 jobs start suspended; S3-compatible
-  stores (Tencent COS, GCS, MinIO) work via `S3_ENDPOINT`.
+  S3-compatible stores (GCS, MinIO, …) work via `S3_ENDPOINT`.
 - Restore hook in the StatefulSet startup command (PVC deployments): if
   `<data-dir>/RESTORE` exists, its content names a checkpoint directory; the
   live DB is replaced by it and the marker consumed before flared starts.

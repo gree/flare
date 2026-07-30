@@ -50,12 +50,15 @@
             buildInputs = [
               flare
               flare-tests-exe
+              coreutils
             ];
           } ''
               mkdir -p $out/
               export NIX_REDIRECTS=/etc/protocols=${iana-etc}/etc/protocols
               export LD_PRELOAD=${libredirect}/lib/libredirect.so
-              flare-tests
+              # Bound the run so a hung/looping test fails in minutes instead of
+              # burning the 6h GitHub job limit with no output.
+              timeout --signal=TERM --kill-after=30 1200 flare-tests
               unset NIX_REDIRECTS LD_PRELOAD
               touch $out/done
           '';
@@ -63,12 +66,15 @@
             buildInputs = [
               flare-rocksdb
               flare-tests-exe
+              coreutils
             ];
           } ''
               mkdir -p $out/
               export NIX_REDIRECTS=/etc/protocols=${iana-etc}/etc/protocols
               export LD_PRELOAD=${libredirect}/lib/libredirect.so
-              flare-tests
+              # Bound the run so a hung/looping test fails in minutes instead of
+              # burning the 6h GitHub job limit with no output.
+              timeout --signal=TERM --kill-after=30 1200 flare-tests
               unset NIX_REDIRECTS LD_PRELOAD
               touch $out/done
           '';

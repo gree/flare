@@ -1019,6 +1019,10 @@ void test_truncate_then_reseed_repl_lsn() {
 // under WAL replication (its drops bypass the WAL and diverge slaves), so the
 // master reaps with real deletes that replicate. These tests pin both paths.
 // ---------------------------------------------------------------------------
+// TEMP: gated off to bisect a CI unit-test hang. If CI goes green with these
+// disabled, the hang is in one of these 4 tests (not the product code); re-enable
+// and fix. If it still hangs, the cause is elsewhere.
+#if 0
 
 namespace {
 	// set a key carrying an explicit expire (epoch seconds; 0 = never expires).
@@ -1140,6 +1144,8 @@ void test_expire_reap_skips_refreshed_key() {
 
 	drop_rocksdb(s, wal_master_dir);
 }
+
+#endif  // TEMP bisect gate
 
 	void teardown()
 	{

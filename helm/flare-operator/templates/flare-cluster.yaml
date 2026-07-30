@@ -14,6 +14,14 @@
        from a release predating this key) falls back to 60. */}}
 {{- $drain := 60 }}
 {{- if hasKey $c "drainSeconds" }}{{- $drain = $c.drainSeconds }}{{- end }}
+{{- /* Storage mode: PVC (persistence.enabled) | tmpfs (memory emptyDir) |
+       ephemeral (node disk /tmp). tmpfs guarded for values without the key. */}}
+{{- $tmpfsEnabled := false }}
+{{- $tmpfsSize := "1Gi" }}
+{{- if $c.tmpfs }}{{- if $c.tmpfs.enabled }}{{- $tmpfsEnabled = true }}{{- $tmpfsSize = ($c.tmpfs.sizeLimit | default "1Gi") }}{{- end }}{{- end }}
+{{- if and $c.persistence.enabled $tmpfsEnabled }}{{- fail "cluster: set only one of persistence.enabled or tmpfs.enabled" }}{{- end }}
+{{- $useDataVol := or $c.persistence.enabled $tmpfsEnabled }}
+{{- $dataDir := ternary "/data/flare" "/tmp/flare" $useDataVol }}
 {{- /* flared mounts /etc/flared/extra.conf and exits immediately if the
        file is missing, so the ConfigMap must exist BEFORE the StatefulSet
        pods start. It is a pre-install HOOK on purpose: hook resources are
@@ -128,8 +136,11 @@ spec:
               mkdir -p /data/flare
               exec flared --config=/etc/flared/extra.conf --data-dir /data/flare --server-port {{ $c.flarePort }} --index-server-name {{ include "flare-operator.fullname" . }}.{{ $ns }}.svc.cluster.local --index-server-port {{ .Values.service.port }} --storage-type={{ $c.storageBackend }} --stderr
               {{- else }}
-              mkdir -p /tmp/flare
-              exec flared --config=/etc/flared/extra.conf --data-dir /tmp/flare --server-port {{ $c.flarePort }} --index-server-name {{ include "flare-operator.fullname" . }}.{{ $ns }}.svc.cluster.local --index-server-port {{ .Values.service.port }} --storage-type={{ $c.storageBackend }} --stderr
+              # tmpfs (emptyDir medium=Memory) or ephemeral node disk — either way
+              # the data is lost on pod restart (no restore hook: tmpfs can't
+              # retain a RESTORE marker across restarts anyway).
+              mkdir -p {{ $dataDir }}
+              exec flared --config=/etc/flared/extra.conf --data-dir {{ $dataDir }} --server-port {{ $c.flarePort }} --index-server-name {{ include "flare-operator.fullname" . }}.{{ $ns }}.svc.cluster.local --index-server-port {{ .Values.service.port }} --storage-type={{ $c.storageBackend }} --stderr
               {{- end }}
           ports:
             - containerPort: {{ $c.flarePort }}
@@ -137,7 +148,7 @@ spec:
           volumeMounts:
             - name: flared-config
               mountPath: /etc/flared
-            {{- if $c.persistence.enabled }}
+            {{- if $useDataVol }}
             - name: data
               mountPath: /data
             {{- end }}
@@ -171,6 +182,15 @@ spec:
         - name: flared-config
           configMap:
             name: {{ $c.name }}-config
+        {{- if $tmpfsEnabled }}
+        # tmpfs data dir: RAM-backed emptyDir, capped at sizeLimit (counts
+        # against the pod's memory). Data is lost on pod restart — pair with
+        # replicas>=2 (slave promotion) and/or off-cluster backup.
+        - name: data
+          emptyDir:
+            medium: Memory
+            sizeLimit: {{ $tmpfsSize }}
+        {{- end }}
   {{- if $c.persistence.enabled }}
   volumeClaimTemplates:
     - metadata:

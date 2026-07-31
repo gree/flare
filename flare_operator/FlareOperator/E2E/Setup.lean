@@ -240,11 +240,13 @@ metadata:
 spec:
   serviceName: {cluster}-nodes
   replicas: {numPods}
-  # Parallel keeps fresh-cluster bootstrap fast under the sync-gated readiness
-  # probe (OrderedReady would serialize pod creation on Ready = Active). Rolling
-  # UPDATES are unaffected by this policy and still proceed one pod at a time
-  # waiting for readiness — which is the safety property we want.
-  podManagementPolicy: Parallel
+  # podManagementPolicy stays OrderedReady (the default; same as the helm
+  # chart). Parallel was tried for faster bootstrap under the sync-gated
+  # readiness probe and REGRESSED the suite: it also parallelizes TERMINATION,
+  # so a scale-in could kill a partition's master and slave simultaneously
+  # (readiness gates updates, not deletions), and simultaneous re-registration
+  # after a total-partition kill broke master re-establishment. Sequential
+  # bootstrap on Ready=Active is slower but is the operator's proven path.
   selector:
     matchLabels:
       app: flare

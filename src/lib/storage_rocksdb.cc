@@ -1014,7 +1014,14 @@ int storage_rocksdb::iter_end() {
 
 uint32_t storage_rocksdb::count() {
 	uint32_t count = 0;
-	rocksdb::Iterator* it = this->_db->NewIterator(this->_read_options);
+	// Exact count = full keyspace iteration (O(N); TC had O(1) tchdbrnum).
+	// `stats` calls this, and the exporter polls `stats` periodically — do
+	// not let the periodic sweep evict the block cache's hot working set.
+	// (rocksdb.estimate-num-keys would be O(1) but drifts badly after delete
+	// churn; callers rely on curr_items being exact.)
+	rocksdb::ReadOptions ro = this->_read_options;
+	ro.fill_cache = false;
+	rocksdb::Iterator* it = this->_db->NewIterator(ro);
 
 	for (it->SeekToFirst(); it->Valid(); it->Next()) {
 		if (is_reserved_key(it->key().ToString())) {

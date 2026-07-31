@@ -594,7 +594,10 @@ int storage_rocksdb::get(entry& e, result& r, int b) {
 		// the current header (version/expire) from _unserialize_header above.
 		if (expired) {
 			result r_remove;
-			if (this->remove(e, r_remove, (b & behavior_skip_lock) | behavior_version_equal) == 0
+			// behavior_skip_timestamp so remove() reports result_deleted rather
+			// than result_not_found for the (known-expired) entry it deletes.
+			if (this->remove(e, r_remove,
+						(b & behavior_skip_lock) | behavior_skip_timestamp | behavior_version_equal) == 0
 					&& r_remove == result_deleted) {
 				this->_expire_reaped.incr();
 			}
@@ -967,7 +970,12 @@ int storage_rocksdb::reap_expired(time_t now, uint32_t max_scan, const string& a
 				del.key = key;
 				del.version = hdr.version;
 				result r;
-				if (this->remove(del, r, behavior_version_equal) == 0 && r == result_deleted) {
+				// behavior_skip_timestamp: we already know it is expired and want
+				// the delete to REPORT result_deleted. Without it, remove() treats
+				// an expired entry as already-gone and returns result_not_found
+				// (even though it deletes), which would under-count the reap.
+				if (this->remove(del, r, behavior_skip_timestamp | behavior_version_equal) == 0
+						&& r == result_deleted) {
 					reaped++;
 					this->_expire_reaped.incr();
 				}

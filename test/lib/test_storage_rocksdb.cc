@@ -1019,7 +1019,6 @@ void test_truncate_then_reseed_repl_lsn() {
 // under WAL replication (its drops bypass the WAL and diverge slaves), so the
 // master reaps with real deletes that replicate. These tests pin both paths.
 // ---------------------------------------------------------------------------
-// TEMP: per-test stderr markers (flushed) to pinpoint which one hangs in CI.
 namespace {
 	// set a key carrying an explicit expire (epoch seconds; 0 = never expires).
 	int storage_set_string_expire(storage* s, const string& key, const string& value, time_t expire) {
@@ -1040,7 +1039,6 @@ namespace {
 // A get() landing on an expired entry returns NOT_FOUND *and* physically
 // removes it (mirrors storage_tch) so its space is reclaimed.
 void test_expire_lazy_delete_on_get() {
-	fprintf(stderr, "REAPTEST-BEGIN test_expire_lazy_delete_on_get\n"); fflush(stderr);
 	storage_rocksdb* s = make_rocksdb(wal_master_dir);
 
 	// expire=1 => 1970, always past relative to the live timestamp.
@@ -1060,7 +1058,6 @@ void test_expire_lazy_delete_on_get() {
 // reap_expired deletes only past-expire entries, keeps live/never-expire ones,
 // and reports accurate counts.
 void test_expire_reap_removes_only_expired() {
-	fprintf(stderr, "REAPTEST-BEGIN test_expire_reap_removes_only_expired\n"); fflush(stderr);
 	storage_rocksdb* s = make_rocksdb(wal_master_dir);
 
 	time_t now = stats_object->get_timestamp();
@@ -1090,7 +1087,6 @@ void test_expire_reap_removes_only_expired() {
 // A chunked sweep (small max_scan) drains the whole keyspace across calls,
 // resuming strictly after each chunk's last key.
 void test_expire_reap_chunked_sweep() {
-	fprintf(stderr, "REAPTEST-BEGIN test_expire_reap_chunked_sweep\n"); fflush(stderr);
 	storage_rocksdb* s = make_rocksdb(wal_master_dir);
 
 	time_t now = stats_object->get_timestamp();
@@ -1122,7 +1118,6 @@ void test_expire_reap_chunked_sweep() {
 // reap_expired must NOT delete a key whose expire was refreshed into the future
 // (a re-set before the sweep): only genuinely past-expire entries go.
 void test_expire_reap_skips_refreshed_key() {
-	fprintf(stderr, "REAPTEST-BEGIN test_expire_reap_skips_refreshed_key\n"); fflush(stderr);
 	storage_rocksdb* s = make_rocksdb(wal_master_dir);
 
 	time_t now = stats_object->get_timestamp();

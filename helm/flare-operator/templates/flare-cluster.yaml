@@ -135,6 +135,16 @@ spec:
         - name: flared
           image: "{{ $c.image.repository }}:{{ $c.image.tag }}"
           imagePullPolicy: {{ $c.image.pullPolicy }}
+          env:
+            # Cap glibc malloc arenas. flared's worker threads otherwise get
+            # per-thread arenas (up to 8 x cores); under write bursts each arena
+            # balloons with freed-but-never-returned chunks and RSS ratchets to
+            # the traffic high-water mark (observed live: 69 arenas ~= 5.9 GiB
+            # resident with only ~38 MiB of live data). 2 arenas bound that
+            # bloat at a negligible allocation-contention cost for flared's
+            # thread counts.
+            - name: MALLOC_ARENA_MAX
+              value: {{ ($c.mallocArenaMax | default 2) | quote }}
           command:
             - sh
             - -c

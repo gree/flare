@@ -219,6 +219,11 @@ metadata:
     cluster: {cluster}
 spec:
   clusterIP: None
+  # REQUIRED with the sync-gated readiness probe (mirrors the helm chart): a
+  # re-seeding slave is NotReady for the whole reconstruction, but the master
+  # pushes the dump to the slave's per-pod DNS name (its node_key). Without
+  # this a NotReady pod has no DNS record -> it can never finish seeding.
+  publishNotReadyAddresses: true
   selector:
     app: flare
     cluster: {cluster}
@@ -235,6 +240,11 @@ metadata:
 spec:
   serviceName: {cluster}-nodes
   replicas: {numPods}
+  # Parallel keeps fresh-cluster bootstrap fast under the sync-gated readiness
+  # probe (OrderedReady would serialize pod creation on Ready = Active). Rolling
+  # UPDATES are unaffected by this policy and still proceed one pod at a time
+  # waiting for readiness — which is the safety property we want.
+  podManagementPolicy: Parallel
   selector:
     matchLabels:
       app: flare
@@ -263,12 +273,23 @@ spec:
             initialDelaySeconds: 10
             periodSeconds: 5
             failureThreshold: 6
+          # Sync-gated readiness (mirrors the helm chart): Ready only when this
+          # node is state=active in the node map flared holds — i.e. the operator
+          # judged it fully synced. Makes STS rolling updates wait for a real
+          # full copy before killing the next pod.
           readinessProbe:
-            tcpSocket:
-              port: {cfg.flarePort}
+            exec:
+              command:
+                - /bin/bash
+                - -c
+                - |
+                  exec 3<>/dev/tcp/127.0.0.1/{cfg.flarePort} || exit 1
+                  printf 'stats nodes\\r\\nquit\\r\\n' >&3
+                  grep -q \"^STAT $(hostname -f):{cfg.flarePort}:state active\" <&3
             initialDelaySeconds: 5
-            periodSeconds: 3
-            failureThreshold: 4
+            periodSeconds: 5
+            timeoutSeconds: 4
+            failureThreshold: 3
           resources:
             requests:
               cpu: 100m

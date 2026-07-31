@@ -70,6 +70,12 @@ metadata:
     cluster: {{ $c.name }}
 spec:
   clusterIP: None
+  # REQUIRED with the sync-gated readiness probe: a re-seeding slave is NotReady
+  # for the whole reconstruction, but the master pushes the dump to the slave's
+  # per-pod DNS name (its node_key). Without this, a NotReady pod has no DNS
+  # record -> the master can't reach it -> it can never finish seeding -> it can
+  # never become Ready (deadlock).
+  publishNotReadyAddresses: true
   selector:
     app: flare
     cluster: {{ $c.name }}
@@ -168,12 +174,30 @@ spec:
             initialDelaySeconds: 10
             periodSeconds: 5
             failureThreshold: 6
+          # Readiness gates on SYNC COMPLETION, not process liveness: the pod is
+          # Ready only when the operator has this node state=active in the node
+          # map it broadcast to flared ("stats nodes" reflects flared's local
+          # copy; the operator flips a re-seeding slave prepare->active only when
+          # flared reports reconstruction complete). This is what makes a
+          # StatefulSet rolling update safe: the controller will not proceed to
+          # kill the next pod (ultimately the master) until the freshly restarted
+          # slave holds a full copy — combined with drain-to-proxy on Terminating,
+          # a rolling restart never destroys the last complete replica. A high
+          # failureThreshold is irrelevant here: readiness may legitimately stay
+          # false for many minutes while a large dataset re-seeds.
           readinessProbe:
-            tcpSocket:
-              port: {{ $c.flarePort }}
+            exec:
+              command:
+                - /bin/bash
+                - -c
+                - |
+                  exec 3<>/dev/tcp/127.0.0.1/{{ $c.flarePort }} || exit 1
+                  printf 'stats nodes\r\nquit\r\n' >&3
+                  grep -q "^STAT $(hostname -f):{{ $c.flarePort }}:state active" <&3
             initialDelaySeconds: 5
-            periodSeconds: 3
-            failureThreshold: 4
+            periodSeconds: 5
+            timeoutSeconds: 4
+            failureThreshold: 3
           resources:
             {{- toYaml $c.resources | nindent 12 }}
           {{- if gt (int $drain) 0 }}

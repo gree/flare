@@ -504,17 +504,20 @@ theorem handleFailoverSingle_cle (s : FlareClusterState) (key : String) :
   · exact CLE.rfl _
   next node hlook =>
     have hmem : (key, node) ∈ s.nodeMap := mem_of_lookupNode hlook
-    have hdemote : ∀ p, countMastersFor p (s.addNode key { node with state := FlareState.Down, role := FlareRole.Proxy, partition := -1 }).nodeMap ≤ countMastersFor p s.nodeMap := fun p => count_addNode_nonmaster p s key _ (by simp [isM, show (FlareRole.Proxy == FlareRole.Master) = false from rfl])
+    -- Parametric over the stamped lastMasterOf: countMastersFor only inspects
+    -- role/partition, and the surrounding `split` reduces the record's inner
+    -- if differently per branch — a fixed literal would match neither.
+    have hdemote : ∀ (lmo : Int) p, countMastersFor p (s.addNode key { node with state := FlareState.Down, role := FlareRole.Proxy, partition := -1, lastMasterOf := lmo }).nodeMap ≤ countMastersFor p s.nodeMap := fun _lmo p => count_addNode_nonmaster p s key _ (by simp [isM, show (FlareRole.Proxy == FlareRole.Master) = false from rfl])
     split
     next hM =>
       split
-      · exact CLE.of_le hdemote
+      · exact CLE.of_le (fun p => hdemote _ p)
       next part hfindp =>
         split
-        · exact CLE.of_le hdemote
+        · exact CLE.of_le (fun p => hdemote _ p)
         next slaveKey hhead =>
           split
-          · exact CLE.of_le hdemote
+          · exact CLE.of_le (fun p => hdemote _ p)
           next slaveNode hlook2 =>
             split
             next hguard =>
@@ -531,8 +534,8 @@ theorem handleFailoverSingle_cle (s : FlareClusterState) (key : String) :
                   simp only [isM]
                   have hpp : (slaveNode.partition == p) = false := by rw [hpartEq]; exact hp
                   simp [hpp]
-                have h1 := count_addNode_nonmaster p (s.addNode key { node with state := FlareState.Down, role := FlareRole.Proxy, partition := -1 }) slaveKey _ hnm
-                have h2 := hdemote p
+                have h1 := count_addNode_nonmaster p (s.addNode key { node with state := FlareState.Down, role := FlareRole.Proxy, partition := -1, lastMasterOf := node.partition }) slaveKey _ hnm
+                have h2 := hdemote node.partition p
                 omega
               | true =>
                 have hpe : node.partition = p := eq_of_beq hp
@@ -541,16 +544,16 @@ theorem handleFailoverSingle_cle (s : FlareClusterState) (key : String) :
                   rw [hpe]
                   simp
                 have hlt := count_filter_ne_lt p key node s.nodeMap hmem hwit
-                have hdem0 : countMastersFor p (s.addNode key { node with state := FlareState.Down, role := FlareRole.Proxy, partition := -1 }).nodeMap ≤ countMastersFor p s.nodeMap - 1 := by
+                have hdem0 : countMastersFor p (s.addNode key { node with state := FlareState.Down, role := FlareRole.Proxy, partition := -1, lastMasterOf := node.partition }).nodeMap ≤ countMastersFor p s.nodeMap - 1 := by
                   rw [addNode_nodeMap, countMastersFor_cons]
                   split
                   · next habs =>
                     exact absurd habs (by simp)
                   · omega
-                have h1 := count_addNode_le_succ p (s.addNode key { node with state := FlareState.Down, role := FlareRole.Proxy, partition := -1 }) slaveKey { slaveNode with role := FlareRole.Master, state := FlareState.Active, balance := 100 }
+                have h1 := count_addNode_le_succ p (s.addNode key { node with state := FlareState.Down, role := FlareRole.Proxy, partition := -1, lastMasterOf := node.partition }) slaveKey { slaveNode with role := FlareRole.Master, state := FlareState.Active, balance := 100 }
                 omega
-            next hguard => exact CLE.of_le hdemote
-    next hM => exact CLE.of_le hdemote
+            next hguard => exact CLE.of_le (fun p => hdemote _ p)
+    next hM => exact CLE.of_le (fun p => hdemote _ p)
 
 theorem handleFailover_cle (s : FlareClusterState) (deadKeys : List String) :
     CLE s.nodeMap (handleFailoverWithPromotion s deadKeys).nodeMap := by

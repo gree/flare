@@ -297,7 +297,9 @@ def handleFailoverSingleKey (s : FlareClusterState) (key : String) : FlareCluste
   | none => s
   | some node =>
     let demoted : FlareNode :=
-      { node with state := FlareState.Down, role := FlareRole.Proxy, partition := -1 }
+      { node with state := FlareState.Down, role := FlareRole.Proxy, partition := -1,
+                  lastMasterOf := if node.role == FlareRole.Master then node.partition
+                                  else node.lastMasterOf }
     s.addNode key demoted
 
 /-- Pure version of handleFailover (Main.lean:45-69).
@@ -323,9 +325,16 @@ def handleFailoverWithPromotionSingleKey (s : FlareClusterState) (key : String)
   match s.lookupNode key with
   | none => s
   | some node =>
-    -- Demote the dead node first.
+    -- Demote the dead node first. Stamp lastMasterOf: the rejoin path and the
+    -- masterless refill identify "the node holding the newest copy of
+    -- partition P" by this field, and the rejoin can no longer infer it from
+    -- role once the corpse has been demoted to Proxy (observed live: the
+    -- returning ex-master lost its refill candidacy and the partition stayed
+    -- masterless until an unrelated resync).
     let demoted : FlareNode :=
-      { node with state := FlareState.Down, role := FlareRole.Proxy, partition := -1 }
+      { node with state := FlareState.Down, role := FlareRole.Proxy, partition := -1,
+                  lastMasterOf := if node.role == FlareRole.Master then node.partition
+                                  else node.lastMasterOf }
     let s := s.addNode key demoted
     -- If it was a Master, promote a live slave of its partition.
     if node.role == FlareRole.Master then

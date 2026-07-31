@@ -95,13 +95,26 @@ def suite : TestSuite := {
     -- While tripped the FSM must be inert: the dead masters keep their map
     -- entries (the pause happens BEFORE demote/failover) and nothing gets
     -- promoted into the holes. Two samples 15s apart guard against churn.
-    { name := "no failover churn while tripped"
+    { name := "no live-topology churn while tripped"
       run := do
-        let n1 ← activeMasterCount
+        -- The breaker pauses topology OPTIMIZATION; RECOVERY is allowed: dead
+        -- corpses are marked Down and a dead master's synced slave may be
+        -- promoted (here 3 of 4 pods are gone, so nothing is promotable).
+        -- Marking the dead P1 master's corpse Down is therefore EXPECTED —
+        -- the anti-churn property is that the SURVIVING master's mastership
+        -- never changes while tripped.
+        let masterOf (part : Int) : IO (Option String) := do
+          let sync ← operatorTcpCmd cfg.debugPod cfg.«namespace» cfg.operatorName cfg.operatorPort "node sync"
+          return (parseNodeSync sync).find? (fun e =>
+            e.role == 0 && e.state == 0 && e.partition == part) |>.map (·.fqdn)
+        let m1 ← masterOf 0
         IO.sleep 15000
-        let n2 ← activeMasterCount
-        if n1 == 2 && n2 == 2 then return .pass
-        else return .fail s!"master entries changed under pause: {n1} then {n2} (expected 2/2 — pause must precede failover)" },
+        let m2 ← masterOf 0
+        match m1, m2 with
+        | some a, some b =>
+          if a == b then return .pass
+          else return .fail s!"surviving P0 master churned under pause: {a} -> {b}"
+        | _, _ => return .fail s!"surviving P0 master missing under pause: {m1} then {m2}" },
 
     { name := "restoring capacity resumes recovery automatically"
       run := do

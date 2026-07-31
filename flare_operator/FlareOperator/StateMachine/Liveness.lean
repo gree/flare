@@ -323,6 +323,7 @@ def phase0Invariant (s : FlareClusterLevelState) : Prop :=
   | .AfterHandleReplication => True
   | .AfterBroadcastTopology => True
   | .AfterPatchService => True
+  | .RecoveryRefill => True
   | .EmergencyPaused => True
   | .Done => True
   | .Error _ => True

@@ -620,9 +620,12 @@ private partial def runReconcileFSMLoop
     (trippedRef : IO.Ref Bool)
     (crName ns : String) : IO Unit := do
   if K8sReconciler.flareReconcileTerminalBool s.reconcileStep then
-    -- Record whether this pass ended in the circuit breaker (for the
-    -- flare_operator_circuit_breaker_tripped gauge — alerting pages on it).
-    trippedRef.set (s.reconcileStep == .EmergencyPaused)
+    -- Record whether the breaker HELD during this pass (for hysteresis input
+    -- next cycle + the flare_operator_circuit_breaker_tripped gauge). NOT the
+    -- terminal step alone: a tripped pass that performed a masterless
+    -- RecoveryRefill ends in Done, yet must still count as tripped so the
+    -- reset keeps requiring healthy% ≥ resetThresholdPercent.
+    trippedRef.set (s.breakerHeld || s.reconcileStep == .EmergencyPaused)
     -- Terminal state reached
     match s.reconcileStep with
     | .Done =>
@@ -636,10 +639,12 @@ private partial def runReconcileFSMLoop
       IO.eprintln s!"[flare-operator] FSM error: {msg}"
       pure ()
     | .EmergencyPaused =>
-      -- Circuit breaker tripped - operator stays paused until pod restart
-      -- This is intentional: AZ-level failures require manual intervention
-      IO.eprintln "[flare-operator] ⚠️  Operator in EMERGENCY PAUSE state"
-      IO.eprintln "[flare-operator] ⚠️  Circuit breaker will remain tripped until operator pod is restarted"
+      -- Circuit breaker tripped and nothing was refillable this pass. The FSM
+      -- is rebuilt from Init next tick, so the breaker re-evaluates every 5s:
+      -- masterless-refill recovery runs via RecoveryRefill as returning nodes
+      -- register, and the trip auto-resets once healthy% reaches the reset
+      -- threshold (autoResetEnabled=false keeps it held until pod restart).
+      IO.eprintln "[flare-operator] ⚠️  Operator in EMERGENCY PAUSE state (failover/reassignment paused; masterless-refill recovery active)"
       IO.eprintln "[flare-operator] ⚠️  Surviving nodes continue serving traffic"
       pure ()
     | _ =>

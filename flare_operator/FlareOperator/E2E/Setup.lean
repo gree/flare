@@ -287,7 +287,21 @@ spec:
                 - |
                   exec 3<>/dev/tcp/127.0.0.1/{cfg.flarePort} || exit 1
                   printf 'stats nodes\\r\\nquit\\r\\n' >&3
-                  grep -q \"^STAT $(hostname -f):{cfg.flarePort}:state active\" <&3
+                  out=$(tr -d '\\r' <&3)
+                  me=\"$(hostname -f):{cfg.flarePort}\"
+                  case \"$out\" in *\"STAT $me:state active\"*) exit 0;; esac
+                  # Limbo clause (mirrors the helm chart): a syncing member of a
+                  # partition with NO active master has nothing to sync from —
+                  # total-partition recovery. Report Ready so the OrderedReady
+                  # StatefulSet can recreate the peer that will become master.
+                  mypart=$(printf '%s\\n' \"$out\" | sed -n \"s/^STAT $me:partition //p\")
+                  [ -n \"$mypart\" ] || exit 1
+                  [ \"$mypart\" != \"-1\" ] || exit 1
+                  for key in $(printf '%s\\n' \"$out\" | sed -n \"s/^STAT \\(.*\\):partition $mypart$/\\1/p\"); do
+                    printf '%s\\n' \"$out\" | grep -q \"^STAT $key:role master$\" || continue
+                    printf '%s\\n' \"$out\" | grep -q \"^STAT $key:state active$\" && exit 1
+                  done
+                  exit 0
             initialDelaySeconds: 5
             periodSeconds: 5
             timeoutSeconds: 4

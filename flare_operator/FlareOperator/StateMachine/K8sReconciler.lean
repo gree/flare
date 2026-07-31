@@ -38,7 +38,8 @@ inductive FlareReconcileStep where
   | AfterFetchCRD            -- 11: CRD fetched
   | AfterListPods            -- 10: Pods listed
   | AfterDetectDead          -- 9: Dead nodes computed
-  | EmergencyPaused          -- 8: Circuit breaker tripped - blast radius too large
+  | RecoveryRefill           -- 8: Breaker tripped — masterless-refill-only recovery pass
+  | EmergencyPaused          -- 0: Circuit breaker tripped and nothing refillable - fully inert
   | AfterHandleFailover      -- 7: Failover applied
   | AfterAssignRoles         -- 6: Proxy roles assigned
   | AfterUpdateConfigMap     -- 5: Observability ConfigMap updated
@@ -118,6 +119,12 @@ structure FlareReconcileState where
       requires healthy% ≥ resetThresholdPercent, not merely dropping below
       the trip threshold, so the breaker cannot flap around one boundary. -/
   wasTripped : Bool := false
+  /-- OUTPUT: the breaker held (tripped) during THIS pass. Distinct from the
+      terminal step: a tripped pass that performs a masterless refill ends in
+      Done, not EmergencyPaused, yet must still count as tripped for next
+      cycle's hysteresis — the IO shell persists (breakerHeld ∨ ended in
+      EmergencyPaused) into trippedRef. -/
+  breakerHeld : Bool := false
   -- Cluster state evolution:
   updatedClusterState : Option FlareClusterState := none  -- State after failover/proxy assignment
   -- Replication state machine:
@@ -160,12 +167,18 @@ def circuitBreakerDecision
         (.AfterHandleFailover,
          [.Log s!"[flare-operator] circuit breaker RESET: {100 - deadPercent}% healthy ≥ {breakerCfg.resetThresholdPercent}% — resuming failover"])
       else
-        (.EmergencyPaused,
-         [.Log s!"[flare-operator] circuit breaker holding: {100 - deadPercent}% healthy < reset threshold {breakerCfg.resetThresholdPercent}%"])
+        -- Holding, but via RecoveryRefill: masterless-partition refill (pure
+        -- recovery — see the RecoveryRefill step) still runs so a returning
+        -- node can be seated and turn Active. Without it, sync-gated readiness
+        -- + OrderedReady StatefulSets deadlock: the returning pod never turns
+        -- Active(=Ready), the next dead pod is never recreated, and the dead
+        -- fraction can never fall below the reset threshold.
+        (.RecoveryRefill,
+         [.Log s!"[flare-operator] circuit breaker holding: {100 - deadPercent}% healthy < reset threshold {breakerCfg.resetThresholdPercent}% (masterless-refill-only recovery)"])
     else if deadPercent >= breakerCfg.tripThresholdPercent then
-      (.EmergencyPaused,
+      (.RecoveryRefill,
        [.Log s!"[flare-operator] 🚨 CIRCUIT BREAKER TRIPPED: {deadCount}/{totalNodes} nodes dead ({deadPercent}% ≥ {breakerCfg.tripThresholdPercent}%)",
-        .Log s!"[flare-operator] Suspected AZ failure - failover/reassignment PAUSED for this cycle",
+        .Log s!"[flare-operator] Suspected AZ failure - failover/reassignment PAUSED (masterless-refill-only recovery continues)",
         .Log s!"[flare-operator] Surviving nodes continue serving traffic",
         .Log s!"[flare-operator] Recovery resumes AUTOMATICALLY once healthy capacity reaches {breakerCfg.resetThresholdPercent}% (each 5s tick re-evaluates); no operator restart needed"])
     else
@@ -176,7 +189,7 @@ def circuitBreakerDecision
 theorem circuitBreakerDecision_trips (deadCount totalNodes : Nat)
     (cfg : CircuitBreakerConfig) (hen : cfg.enabled = true) (htot : 0 < totalNodes)
     (h : cfg.tripThresholdPercent ≤ (deadCount * 100) / totalNodes) :
-    (circuitBreakerDecision deadCount totalNodes cfg false).1 = .EmergencyPaused := by
+    (circuitBreakerDecision deadCount totalNodes cfg false).1 = .RecoveryRefill := by
   unfold circuitBreakerDecision
   simp only [hen, Bool.not_true, Bool.false_eq_true, if_false]
   have ht : (0 < totalNodes) = True := eq_true htot
@@ -207,7 +220,7 @@ theorem circuitBreakerDecision_holds_below_reset (deadCount totalNodes : Nat)
     (cfg : CircuitBreakerConfig) (hen : cfg.enabled = true)
     (har : cfg.autoResetEnabled = true) (htot : 0 < totalNodes)
     (h : 100 - cfg.resetThresholdPercent < (deadCount * 100) / totalNodes) :
-    (circuitBreakerDecision deadCount totalNodes cfg true).1 = .EmergencyPaused := by
+    (circuitBreakerDecision deadCount totalNodes cfg true).1 = .RecoveryRefill := by
   unfold circuitBreakerDecision
   simp only [hen, har, Bool.not_true, Bool.false_eq_true, if_false, if_true]
   have ht : (0 < totalNodes) = True := eq_true htot
@@ -236,14 +249,16 @@ theorem circuitBreakerDecision_manual_hold (deadCount totalNodes : Nat)
   unfold circuitBreakerDecision
   simp [hen, har]
 
-/-- circuitBreakerDecision only returns EmergencyPaused or AfterHandleFailover -/
+/-- circuitBreakerDecision only returns EmergencyPaused, RecoveryRefill, or
+    AfterHandleFailover -/
 theorem circuitBreakerDecision_only_returns_emergency_or_failover
     (deadCount totalNodes : Nat) (cfg : CircuitBreakerConfig) (wt : Bool) :
     (circuitBreakerDecision deadCount totalNodes cfg wt).1 = .EmergencyPaused ∨
+    (circuitBreakerDecision deadCount totalNodes cfg wt).1 = .RecoveryRefill ∨
     (circuitBreakerDecision deadCount totalNodes cfg wt).1 = .AfterHandleFailover := by
   simp only [circuitBreakerDecision]
   repeat' split
-  all_goals first | (left; rfl) | (right; rfl)
+  all_goals first | (left; rfl) | (right; left; rfl) | (right; right; rfl)
 
 -- ===========================================================================
 -- Terminal Predicate
@@ -927,7 +942,11 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
       let (nextStep, breakerEffects) := circuitBreakerDecision deadCount totalNodes breakerCfg s.wasTripped
       let allEffects := .Log s!"[flare-operator] detected {deadCount} dead nodes: {s.deadNodeKeys}" :: breakerEffects
       ({ s with reconcileStep := nextStep,
-                failoverTriggered := (nextStep == .AfterHandleFailover) }, none, allEffects)
+                failoverTriggered := (nextStep == .AfterHandleFailover),
+                -- Tripped this pass (RecoveryRefill or EmergencyPaused): feed
+                -- next cycle's hysteresis even when the pass ends in Done
+                -- after a successful refill.
+                breakerHeld := !(nextStep == .AfterHandleFailover) }, none, allEffects)
 
   | .AfterHandleFailover =>
     -- Apply failover logic if triggered. Use the promotion variant so a dead
@@ -1050,9 +1069,40 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
       | none => []
     ({ s with reconcileStep := .Done }, some .PatchService, patchEffects)
 
+  | .RecoveryRefill =>
+    -- Breaker is TRIPPED: failover, demotion and reassignment stay paused,
+    -- but pure recovery — seating a live returning candidate on a partition
+    -- that has NO master at all — still runs. Without this the sync-gated
+    -- readiness probe deadlocks total-partition recovery: the returning pod
+    -- can never turn Active (= Ready), the OrderedReady StatefulSet then
+    -- never recreates the NEXT dead pod, so the dead fraction can never fall
+    -- below the reset threshold (FSM output feeding back into the
+    -- environment's pod-recreation — a composition loop outside the FSM's
+    -- own model). promoteMasterlessPartitions only ever fills EMPTY master
+    -- slots from live registered nodes (an Active slave first, else the
+    -- lastMasterOf holder), so it cannot churn surviving topology — the
+    -- breaker's anti-churn purpose is preserved. If nothing is refillable,
+    -- park in the fully-inert EmergencyPaused terminal exactly as before.
+    match s.cachedCrd with
+    | some crd =>
+      let recovered := promoteMasterlessPartitions clusterState crd s.livePodKeys
+      let refilled := (List.range crd.spec.partitions).filter (fun p =>
+        !FlareOperator.Reconciler.hasMasterForPartition clusterState p
+          && FlareOperator.Reconciler.hasMasterForPartition recovered p)
+      if refilled.isEmpty then
+        ({ s with reconcileStep := .EmergencyPaused }, none, [])
+      else
+        ({ s with reconcileStep := .AfterUpdateConfigMap,
+                  updatedClusterState := some recovered }, none,
+         [.Log s!"[flare-operator] breaker tripped: recovery refill promoted a returning node to master for partition(s) {refilled} (failover/reassignment remain paused)"])
+    | none =>
+      ({ s with reconcileStep := .EmergencyPaused }, none, [])
+
   | .EmergencyPaused =>
     -- Terminal FOR THIS RECONCILE PASS: no failover, no assignment, no
-    -- effects while tripped (see emergencyPaused_inert below). The outer
+    -- effects while tripped (see emergencyPaused_inert below). Reached when
+    -- the breaker is tripped AND the RecoveryRefill pass found nothing
+    -- refillable (or the hold is manual: autoResetEnabled=false). The outer
     -- loop rebuilds the FSM from Init on the next 5s tick, so the breaker
     -- re-evaluates continuously and recovery resumes AUTOMATICALLY when
     -- the dead fraction falls below the threshold — no operator restart
@@ -1086,6 +1136,7 @@ def flareReconcileMeasure : FlareReconcileStep → Nat
   | .AfterFetchCRD => 11
   | .AfterListPods => 10
   | .AfterDetectDead => 9
+  | .RecoveryRefill => 8
   | .EmergencyPaused => 0
   | .AfterHandleFailover => 7
   | .AfterAssignRoles => 6
@@ -1139,9 +1190,22 @@ theorem flareReconcileStep_decreases_measure (resp : K8sResponse)
         s.deadNodeKeys.length cs.nodeMap.length
         (match s.cachedCrd with | some crd => crd.spec.circuitBreaker | none => {})
         s.wasTripped
-      cases h_decision
-      · simp [*]; right; simp [flareReconcileTerminalBool]  -- EmergencyPaused
-      · simp [*]; left; simp [flareReconcileMeasure]  -- AfterHandleFailover
+      rcases h_decision with hd | hd | hd
+      · simp [hd]; right; simp [flareReconcileTerminalBool]  -- EmergencyPaused
+      · simp [hd]; left; simp [flareReconcileMeasure]  -- RecoveryRefill (8 < 9)
+      · simp [hd]; left; simp [flareReconcileMeasure]  -- AfterHandleFailover (7 < 9)
+  | RecoveryRefill =>
+    -- Either parks in EmergencyPaused (terminal) or advances to
+    -- AfterUpdateConfigMap (5 < 8) after a successful refill.
+    simp only [flareReconcileCore, h]
+    cases hc : s.cachedCrd with
+    | none => right; simp [flareReconcileTerminalBool]
+    | some crd =>
+      repeat' split
+      all_goals first
+        | (left; simp [h, flareReconcileMeasure])
+        | (right; simp [flareReconcileTerminalBool])
+        | simp_all
   | AfterHandleFailover =>
     left; simp [flareReconcileCore, h, flareReconcileMeasure]
   | AfterAssignRoles =>
@@ -1187,6 +1251,7 @@ theorem measure_zero_is_terminal (step : FlareReconcileStep) :
   | AfterFetchCRD => simp [flareReconcileMeasure] at h
   | AfterListPods => simp [flareReconcileMeasure] at h
   | AfterDetectDead => simp [flareReconcileMeasure] at h
+  | RecoveryRefill => simp [flareReconcileMeasure] at h
   | AfterHandleFailover => simp [flareReconcileMeasure] at h
   | AfterAssignRoles => simp [flareReconcileMeasure] at h
   | AfterUpdateConfigMap => simp [flareReconcileMeasure] at h
@@ -1208,11 +1273,55 @@ theorem terminal_absorption (resp : K8sResponse) (s : FlareReconcileState)
   | AfterFetchCRD => simp [h, flareReconcileTerminalBool] at hTerm
   | AfterListPods => simp [h, flareReconcileTerminalBool] at hTerm
   | AfterDetectDead => simp [h, flareReconcileTerminalBool] at hTerm
+  | RecoveryRefill => simp [h, flareReconcileTerminalBool] at hTerm
   | AfterHandleFailover => simp [h, flareReconcileTerminalBool] at hTerm
   | AfterAssignRoles => simp [h, flareReconcileTerminalBool] at hTerm
   | AfterUpdateConfigMap => simp [h, flareReconcileTerminalBool] at hTerm
   | AfterHandleReplication => simp [h, flareReconcileTerminalBool] at hTerm
   | AfterBroadcastTopology => simp [h, flareReconcileTerminalBool] at hTerm
   | AfterPatchService => simp [h, flareReconcileTerminalBool] at hTerm
+
+-- ===========================================================================
+-- Recovery-Refill Progress
+-- ===========================================================================
+
+/-- PROGRESS — the escape hatch that breaks the tripped-breaker ↔ sync-gated
+    readiness deadlock (a returning pod could never turn Active because the
+    tripped breaker paused all promotion, so the OrderedReady StatefulSet
+    never recreated the next dead pod and the dead fraction could never fall
+    below the reset threshold): at RecoveryRefill, whenever the refill fills
+    at least one masterless partition, the pass ADVANCES into the commit
+    pipeline carrying the refilled cluster state — it does not park in the
+    inert EmergencyPaused terminal. Safety of the refill itself is
+    promoteMasterlessPartitions_cle (GeneralSafety): it can only take a
+    partition's master count from 0 to ≤ 1. -/
+theorem recoveryRefill_advances (resp : K8sResponse) (s : FlareReconcileState)
+    (cs : FlareClusterState) (crd : FlareClusterView)
+    (h : s.reconcileStep = .RecoveryRefill)
+    (hcrd : s.cachedCrd = some crd)
+    (hne : ((List.range crd.spec.partitions).filter (fun p =>
+        !FlareOperator.Reconciler.hasMasterForPartition cs p
+          && FlareOperator.Reconciler.hasMasterForPartition
+               (promoteMasterlessPartitions cs crd s.livePodKeys) p)).isEmpty = false) :
+    (flareReconcileCore resp s cs).1.reconcileStep = .AfterUpdateConfigMap ∧
+    (flareReconcileCore resp s cs).1.updatedClusterState =
+      some (promoteMasterlessPartitions cs crd s.livePodKeys) := by
+  unfold flareReconcileCore
+  simp [h, hcrd, hne]
+
+/-- Dually: with nothing refillable, RecoveryRefill parks in the fully-inert
+    EmergencyPaused terminal — a tripped breaker with no recovery candidates
+    behaves exactly as it did before RecoveryRefill existed. -/
+theorem recoveryRefill_parks_when_nothing_refillable (resp : K8sResponse)
+    (s : FlareReconcileState) (cs : FlareClusterState) (crd : FlareClusterView)
+    (h : s.reconcileStep = .RecoveryRefill)
+    (hcrd : s.cachedCrd = some crd)
+    (hempty : ((List.range crd.spec.partitions).filter (fun p =>
+        !FlareOperator.Reconciler.hasMasterForPartition cs p
+          && FlareOperator.Reconciler.hasMasterForPartition
+               (promoteMasterlessPartitions cs crd s.livePodKeys) p)).isEmpty = true) :
+    (flareReconcileCore resp s cs).1.reconcileStep = .EmergencyPaused := by
+  unfold flareReconcileCore
+  simp [h, hcrd, hempty]
 
 end FlareOperator.K8sReconciler

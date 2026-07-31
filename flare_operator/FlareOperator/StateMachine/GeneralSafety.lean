@@ -487,11 +487,14 @@ theorem reconcileStep_cle (s : FlareClusterState) (crd : FlareClusterView)
     · next hlook => exact CLE.rfl _
     · next node hlook =>
       split
-      · apply CLE.of_le
-        intro p
-        apply count_addNode_replace_le
-        intro hM
-        exact ⟨node, mem_of_lookupNode hlook, hM⟩
+      · split
+        · -- vacuous-activation guard refused the transition: state unchanged
+          exact CLE.rfl _
+        · apply CLE.of_le
+          intro p
+          apply count_addNode_replace_le
+          intro hM
+          exact ⟨node, mem_of_lookupNode hlook, hM⟩
       · exact CLE.rfl _
 
 /-! ## Failover promotion satisfies the bound -/

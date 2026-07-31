@@ -538,9 +538,27 @@ def reconcileStep (state : FlareClusterState) (crd : FlareClusterView)
       -- Allow Prepare → Active (slaves) and Prepare → Ready (masters)
       -- Auto-promote Ready to Active so partitions immediately become usable
       if node.state == FlareState.Prepare && (newState == FlareState.Active || newState == FlareState.Ready) then
-        let updatedNode := { node with state := FlareState.Active }
-        let newClusterState := state.addNode nodeKey updatedNode
-        (newClusterState, .OK)
+        -- VACUOUS-ACTIVATION GUARD: a Prepare SLAVE reporting "reconstruction
+        -- complete" while its partition has NO Active master cannot have
+        -- synced anything — there was no source. Accepting it mints an
+        -- "Active" replica with arbitrary (typically empty) data that the
+        -- masterless refill then happily seats as master (observed live in
+        -- E2E as total-P0 data loss: a restarted empty ex-master rejoined as
+        -- Prepare, instantly reported completion against a masterless
+        -- partition, went Active and was promoted over the partition's real
+        -- — partially reseeded — copy). Masters are exempt: their
+        -- Prepare→Ready is the bootstrap path and has no sync source by
+        -- design. flared retries the report, so once a real master exists
+        -- and a real reconstruction finishes, activation proceeds normally.
+        if node.role == FlareRole.Slave
+            && !(state.nodeMap.any (fun kv =>
+                  kv.2.role == FlareRole.Master && kv.2.state == FlareState.Active
+                    && kv.2.partition == node.partition)) then
+          (state, .ServerError s!"node state: refusing Prepare→Active for slave {nodeKey}: partition {node.partition} has no Active master to have synced from")
+        else
+          let updatedNode := { node with state := FlareState.Active }
+          let newClusterState := state.addNode nodeKey updatedNode
+          (newClusterState, .OK)
       else
         (state, .ServerError s!"node state: transition {node.state.toNat}→{newState.toNat} not allowed")
   | .NodeRemove _ _ =>

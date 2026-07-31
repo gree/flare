@@ -95,6 +95,18 @@ def suite : TestSuite := {
         match ← currentP0Master with
         | none => return .fail "no P0 master found before kill"
         | some oldMaster =>
+          -- PRECONDITION: this test's claim is that a FULLY-SYNCED replica
+          -- takes over. Earlier tests in this suite deliberately churn P0
+          -- (kill-during-Dumping etc.), so wait until every P0 replica is
+          -- Active before killing — killing while the slave is still
+          -- mid-reseed loses the unsynced tail on emptyDir no matter what
+          -- the operator does (there is no complete copy left to promote).
+          let synced ← waitForCondition "all P0 replicas Active before kill" 180 do
+            let sync ← operatorTcpCmd cfg.debugPod cfg.«namespace» cfg.operatorName cfg.operatorPort "node sync"
+            let p0 := (parseNodeSync sync).filter (fun e => e.partition == 0)
+            return p0.length >= cfg.replicas && p0.all (fun e => e.state == 0)
+          if !synced then
+            return .fail "P0 replicas did not all reach Active before the kill (test precondition)"
           IO.eprintln s!"# Killing P0 master: {oldMaster}"
           let _ ← kubectl ["delete", "pod", oldMaster, "-n", cfg.«namespace»,
                            "--force", "--grace-period=0"]

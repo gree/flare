@@ -289,6 +289,12 @@ void test_wal_incremental_replication_replays_deletes() {
 	cut_assert_equal_int(0,  storage_get_string(slave, "keep", out));
 	cut_assert_equal_string("1", out.c_str());
 
+	// O(1) curr_items bookkeeping must hold on BOTH roles: the master counts
+	// through set()/remove(), the slave through the WriteBatch-apply handler
+	// (replicated batches bypass set()/remove() entirely).
+	cut_assert_equal_int(1, static_cast<int>(master->count()));
+	cut_assert_equal_int(1, static_cast<int>(slave->count()));
+
 	drop_rocksdb(master, wal_master_dir);
 	drop_rocksdb(slave,  wal_slave_dir);
 }

@@ -132,6 +132,18 @@ protected:
 	// (reap_expired) plus the lazy delete-on-get path. Monotonic.
 	AtomicCounter _expire_reaped;
 
+	// Live (non-reserved) key count, maintained incrementally so `stats`
+	// curr_items is O(1) instead of a full-keyspace iteration per call (the
+	// exporter polls stats periodically — the old scan burned a whole
+	// keyspace sweep per poll). Updated on every mutation path: set()/remove()
+	// on the master (they already read prior existence), WriteBatch
+	// application on the slave (apply_batch* walks the batch with an
+	// existence-checking handler), truncate() resets to 0. Seeded at open()
+	// from rocksdb.estimate-num-keys: exact 0 for a fresh DB; approximate
+	// (± compaction-pending garbage + ≤2 reserved keys) after reopening an
+	// existing directory — documented tradeoff, drift does not accumulate.
+	AtomicCounter _curr_items;
+
 	// Consecutive resync failure streak. Reset to 0 on success, so it
 	// needs a non-monotonic reset operation — AtomicCounter only
 	// supports add, so we use a plain counter under a dedicated mutex.

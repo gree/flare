@@ -118,6 +118,17 @@ public:
 		return this->add(1);
 	}
 
+	// Subtract via a wrapping add of the two's complement — every backend
+	// above implements a wrapping fetch-and-add, so this is exact modular
+	// arithmetic on all of them. Callers must never drive the counter
+	// negative (decrement only what was previously counted).
+	inline uint64_t sub(uint64_t n){
+		return this->add((uint64_t)0 - n);
+	}
+
+	inline uint64_t decr(){
+		return this->sub(1);
+	}
 };
 
 

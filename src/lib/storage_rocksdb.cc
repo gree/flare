@@ -35,6 +35,7 @@
 #include <sys/types.h>
 #include <dirent.h>
 #include <algorithm>
+#include <map>
 #include <vector>
 
 namespace gree {
@@ -87,6 +88,7 @@ storage_rocksdb::storage_rocksdb(
 	_wal_sync_other_error(0),
 	_wal_fallback_to_dump(0),
 	_expire_reaped(0),
+	_curr_items(0),
 	_resync_failure_count(0),
 	_resync_failure_threshold(0),
 	_wal_max_batch_bytes(0),
@@ -295,6 +297,36 @@ int storage_rocksdb::open() {
 		return -1;
 	}
 
+	// Seed the O(1) curr_items counter (see storage_rocksdb.h). Exact 0 on a
+	// fresh DB (nothing persisted yet — the reserved master-id key is written
+	// AFTER this point and reserved keys are never counted); approximate on
+	// reopen of an existing directory.
+	{
+		std::string est;
+		uint64_t seed_count = 0;
+		if (this->_db->GetProperty("rocksdb.estimate-num-keys", &est)) {
+			try {
+				seed_count = boost::lexical_cast<uint64_t>(est);
+			} catch (boost::bad_lexical_cast&) {
+				seed_count = 0;
+			}
+		}
+		// The estimate includes our reserved replication-metadata keys on a
+		// reopened DB — probe and exclude the ones actually present so a
+		// small dataset is not systematically over-counted.
+		std::string tmp;
+		if (seed_count > 0 && this->_db->Get(this->_read_options, kReplMasterIdKey, &tmp).ok()) {
+			seed_count--;
+		}
+		if (seed_count > 0 && this->_db->Get(this->_read_options, kReplLastLsnKey, &tmp).ok()) {
+			seed_count--;
+		}
+		this->_curr_items.sub(this->_curr_items.fetch());
+		if (seed_count > 0) {
+			this->_curr_items.add(seed_count);
+		}
+	}
+
 	// Establish this DB's master identity token. Must succeed; otherwise
 	// the WAL replication subsystem cannot detect cross-lineage sync
 	// attempts, so we fail closed.
@@ -496,6 +528,12 @@ int storage_rocksdb::set(entry& e, result& r, int b) {
 
 		r = (b & behavior_touch) ? result_touched : result_stored;
 
+		// O(1) curr_items bookkeeping: this Put created a key that was not
+		// physically present (e_current_exists reflects a real Get above).
+		if (e_current_exists < 0) {
+			this->_curr_items.incr();
+		}
+
 		delete[] p;
 		p = NULL;
 
@@ -661,6 +699,9 @@ int storage_rocksdb::remove(entry& e, result& r, int b) {
 		rocksdb::Status status = this->_db->Delete(this->_write_options, e.key);
 		if (status.ok()) {
 			r = expired ? result_not_found : result_deleted;
+			// O(1) curr_items bookkeeping: the not-found path threw before this
+			// point, so a physically present key was just deleted.
+			this->_curr_items.decr();
 			log_debug("removed data (key=%s)", e.key.c_str());
 		} else {
 			log_err("RocksDB::Delete() failed: %s", status.ToString().c_str());
@@ -843,6 +884,14 @@ int storage_rocksdb::truncate(int b) {
 
 	this->_clear_header_cache();
 
+	// O(1) curr_items bookkeeping: all non-reserved keys are gone. Reset under
+	// the wholelock (writes are excluded here, so a plain read-then-sub is
+	// exact). On a partial failure (r != 0) leave the counter alone — it may
+	// drift, but the storage error listener escalates anyway.
+	if (r == 0) {
+		this->_curr_items.sub(this->_curr_items.fetch());
+	}
+
 	if ((b & behavior_skip_lock) == 0) {
 		this->_mutex_slot_unlock_all();
 		pthread_rwlock_unlock(&this->_mutex_wholelock);
@@ -1013,25 +1062,12 @@ int storage_rocksdb::iter_end() {
 }
 
 uint32_t storage_rocksdb::count() {
-	uint32_t count = 0;
-	// Exact count = full keyspace iteration (O(N); TC had O(1) tchdbrnum).
-	// `stats` calls this, and the exporter polls `stats` periodically — do
-	// not let the periodic sweep evict the block cache's hot working set.
-	// (rocksdb.estimate-num-keys would be O(1) but drifts badly after delete
-	// churn; callers rely on curr_items being exact.)
-	rocksdb::ReadOptions ro = this->_read_options;
-	ro.fill_cache = false;
-	rocksdb::Iterator* it = this->_db->NewIterator(ro);
-
-	for (it->SeekToFirst(); it->Valid(); it->Next()) {
-		if (is_reserved_key(it->key().ToString())) {
-			continue;
-		}
-		count++;
-	}
-
-	delete it;
-	return count;
+	// O(1): incrementally-maintained live-key counter (see _curr_items in the
+	// header). The previous implementation iterated the ENTIRE keyspace per
+	// call — and `stats` calls this, and the exporter polls `stats`
+	// periodically, so every scrape burned a full O(N) sweep and thrashed the
+	// block cache.
+	return static_cast<uint32_t>(this->_curr_items.fetch());
 }
 
 uint64_t storage_rocksdb::size() {
@@ -1080,13 +1116,75 @@ int storage_rocksdb::get_updates_since(uint64_t seq_number, vector<pair<uint64_t
 	return 0;
 }
 
+namespace {
+// Computes the live-key delta a WriteBatch will cause, BEFORE it is applied:
+// +1 for a Put creating a key, -1 for a Delete of an existing key, 0 for
+// overwrites / deletes of absent keys / reserved replication-metadata keys.
+// Same-key sequences inside one batch are simulated via the overlay so e.g.
+// Put+Delete of a fresh key nets 0. Existence probes are memtable/bloom-cheap
+// (replicated keys were just written on the master moments ago).
+class curr_items_delta_handler : public rocksdb::WriteBatch::Handler {
+public:
+	rocksdb::DB* db;
+	const rocksdb::ReadOptions* ro;
+	std::map<std::string, bool> overlay;
+	int64_t delta;
+
+	curr_items_delta_handler(rocksdb::DB* db_, const rocksdb::ReadOptions* ro_):
+			db(db_), ro(ro_), delta(0) {}
+
+	rocksdb::Status PutCF(uint32_t, const rocksdb::Slice& key, const rocksdb::Slice&) override {
+		this->_track(key.ToString(), true);
+		return rocksdb::Status::OK();
+	}
+	rocksdb::Status DeleteCF(uint32_t, const rocksdb::Slice& key) override {
+		this->_track(key.ToString(), false);
+		return rocksdb::Status::OK();
+	}
+	rocksdb::Status SingleDeleteCF(uint32_t, const rocksdb::Slice& key) override {
+		this->_track(key.ToString(), false);
+		return rocksdb::Status::OK();
+	}
+
+private:
+	void _track(const std::string& k, bool present_after) {
+		if (storage_rocksdb::is_reserved_key(k)) {
+			return;
+		}
+		bool present_before;
+		std::map<std::string, bool>::iterator it = this->overlay.find(k);
+		if (it != this->overlay.end()) {
+			present_before = it->second;
+		} else {
+			std::string v;
+			present_before = this->db->Get(*this->ro, k, &v).ok();
+		}
+		if (!present_before && present_after) {
+			this->delta++;
+		} else if (present_before && !present_after) {
+			this->delta--;
+		}
+		this->overlay[k] = present_after;
+	}
+};
+}	// anonymous namespace
+
 int storage_rocksdb::apply_batch(const rocksdb::WriteBatch& batch) {
+	// O(1) curr_items bookkeeping for the replica path: replicated batches
+	// bypass set()/remove(), so walk the batch for its live-key delta first.
+	curr_items_delta_handler h(this->_db, &this->_read_options);
+	const_cast<rocksdb::WriteBatch&>(batch).Iterate(&h);
 	// WriteBatch is passed as const reference, but Write() needs non-const pointer
 	rocksdb::WriteBatch* batch_ptr = const_cast<rocksdb::WriteBatch*>(&batch);
 	rocksdb::Status status = this->_db->Write(this->_write_options, batch_ptr);
 	if (!status.ok()) {
 		log_err("WriteBatch apply failed: %s", status.ToString().c_str());
 		return -1;
+	}
+	if (h.delta > 0) {
+		this->_curr_items.add(static_cast<uint64_t>(h.delta));
+	} else if (h.delta < 0) {
+		this->_curr_items.sub(static_cast<uint64_t>(-h.delta));
 	}
 	return 0;
 }
@@ -1107,11 +1205,21 @@ int storage_rocksdb::apply_batch_with_lsn(const rocksdb::WriteBatch& batch, uint
 		return -1;
 	}
 
+	// O(1) curr_items bookkeeping (the LSN marker is a reserved key and is
+	// excluded by the handler).
+	curr_items_delta_handler h(this->_db, &this->_read_options);
+	merged.Iterate(&h);
+
 	rocksdb::Status status = this->_db->Write(this->_write_options, &merged);
 	if (!status.ok()) {
 		log_err("apply_batch_with_lsn Write() failed (lsn=%llu): %s",
 			(unsigned long long)master_lsn, status.ToString().c_str());
 		return -1;
+	}
+	if (h.delta > 0) {
+		this->_curr_items.add(static_cast<uint64_t>(h.delta));
+	} else if (h.delta < 0) {
+		this->_curr_items.sub(static_cast<uint64_t>(-h.delta));
 	}
 	log_debug("apply_batch_with_lsn success (lsn=%llu, batch_bytes=%zu)",
 		(unsigned long long)master_lsn, batch.Data().size());

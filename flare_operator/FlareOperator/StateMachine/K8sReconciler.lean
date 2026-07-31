@@ -1070,31 +1070,43 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
     ({ s with reconcileStep := .Done }, some .PatchService, patchEffects)
 
   | .RecoveryRefill =>
-    -- Breaker is TRIPPED: failover, demotion and reassignment stay paused,
-    -- but pure recovery — seating a live returning candidate on a partition
-    -- that has NO master at all — still runs. Without this the sync-gated
-    -- readiness probe deadlocks total-partition recovery: the returning pod
-    -- can never turn Active (= Ready), the OrderedReady StatefulSet then
-    -- never recreates the NEXT dead pod, so the dead fraction can never fall
-    -- below the reset threshold (FSM output feeding back into the
-    -- environment's pod-recreation — a composition loop outside the FSM's
-    -- own model). promoteMasterlessPartitions only ever fills EMPTY master
-    -- slots from live registered nodes (an Active slave first, else the
-    -- lastMasterOf holder), so it cannot churn surviving topology — the
-    -- breaker's anti-churn purpose is preserved. If nothing is refillable,
-    -- park in the fully-inert EmergencyPaused terminal exactly as before.
+    -- Breaker is TRIPPED. The breaker pauses topology OPTIMIZATION (proxy
+    -- assignment, zone repair) — it must NOT pause RECOVERY, or the system
+    -- deadlocks against sync-gated readiness + OrderedReady StatefulSets:
+    -- with failover fully paused a dead master's stale map entry still reads
+    -- master/active, so a returning replica never turns Active (= Ready),
+    -- the StatefulSet never recreates the NEXT dead pod, and the dead
+    -- fraction can never fall below the reset threshold (observed live: the
+    -- ghost-master entry also blinded both the refill and the probe's
+    -- no-active-master limbo clause). Recovery here is exactly two
+    -- data-safe moves, both with existing CLE lemmas:
+    --   1. handleFailoverWithPromotion over the dead keys: mark corpses Down
+    --      and promote a dead master's ACTIVE slave (the zombie guard keeps
+    --      unsynced nodes ineligible).
+    --   2. promoteMasterlessPartitions: seat a live returning candidate (an
+    --      Active slave, else the lastMasterOf holder) on a partition with
+    --      no master left at all.
+    -- If neither move changes anything, park in the fully-inert
+    -- EmergencyPaused terminal exactly as before.
     match s.cachedCrd with
     | some crd =>
-      let recovered := promoteMasterlessPartitions clusterState crd s.livePodKeys
+      let afterFailover :=
+        if s.deadNodeKeys.isEmpty then clusterState
+        else handleFailoverWithPromotion clusterState.rebuildPartitionMap s.deadNodeKeys
+      let recovered := promoteMasterlessPartitions afterFailover crd s.livePodKeys
       let refilled := (List.range crd.spec.partitions).filter (fun p =>
-        !FlareOperator.Reconciler.hasMasterForPartition clusterState p
+        !FlareOperator.Reconciler.hasMasterForPartition afterFailover p
           && FlareOperator.Reconciler.hasMasterForPartition recovered p)
-      if refilled.isEmpty then
+      let newlyDowned := s.deadNodeKeys.filter (fun k =>
+        match clusterState.nodeMap.find? (fun kv => kv.1 == k) with
+        | some kv => kv.2.state != FlareState.Down
+        | none => false)
+      if refilled.isEmpty && newlyDowned.isEmpty then
         ({ s with reconcileStep := .EmergencyPaused }, none, [])
       else
         ({ s with reconcileStep := .AfterUpdateConfigMap,
                   updatedClusterState := some recovered }, none,
-         [.Log s!"[flare-operator] breaker tripped: recovery refill promoted a returning node to master for partition(s) {refilled} (failover/reassignment remain paused)"])
+         [.Log s!"[flare-operator] breaker tripped: recovery pass (downed {newlyDowned}, refilled partition(s) {refilled}); optimization stays paused"])
     | none =>
       ({ s with reconcileStep := .EmergencyPaused }, none, [])
 
@@ -1286,42 +1298,61 @@ theorem terminal_absorption (resp : K8sResponse) (s : FlareReconcileState)
 -- ===========================================================================
 
 /-- PROGRESS — the escape hatch that breaks the tripped-breaker ↔ sync-gated
-    readiness deadlock (a returning pod could never turn Active because the
-    tripped breaker paused all promotion, so the OrderedReady StatefulSet
-    never recreated the next dead pod and the dead fraction could never fall
-    below the reset threshold): at RecoveryRefill, whenever the refill fills
-    at least one masterless partition, the pass ADVANCES into the commit
-    pipeline carrying the refilled cluster state — it does not park in the
-    inert EmergencyPaused terminal. Safety of the refill itself is
-    promoteMasterlessPartitions_cle (GeneralSafety): it can only take a
-    partition's master count from 0 to ≤ 1. -/
+    readiness deadlock: at RecoveryRefill, whenever the recovery pass has work
+    (a dead node not yet marked Down, or a masterless partition it can refill
+    after the scoped failover), the pass ADVANCES into the commit pipeline
+    carrying the recovered cluster state — it does not park in the inert
+    EmergencyPaused terminal. Safety of both moves is the existing CLE corpus
+    (handleFailover_cle, promoteMasterlessPartitions_cle): a partition's
+    master count never exceeds one. -/
 theorem recoveryRefill_advances (resp : K8sResponse) (s : FlareReconcileState)
     (cs : FlareClusterState) (crd : FlareClusterView)
     (h : s.reconcileStep = .RecoveryRefill)
     (hcrd : s.cachedCrd = some crd)
-    (hne : ((List.range crd.spec.partitions).filter (fun p =>
-        !FlareOperator.Reconciler.hasMasterForPartition cs p
+    (hwork : (((List.range crd.spec.partitions).filter (fun p =>
+        !FlareOperator.Reconciler.hasMasterForPartition
+            (if s.deadNodeKeys.isEmpty then cs
+             else handleFailoverWithPromotion cs.rebuildPartitionMap s.deadNodeKeys) p
           && FlareOperator.Reconciler.hasMasterForPartition
-               (promoteMasterlessPartitions cs crd s.livePodKeys) p)).isEmpty = false) :
-    (flareReconcileCore resp s cs).1.reconcileStep = .AfterUpdateConfigMap ∧
-    (flareReconcileCore resp s cs).1.updatedClusterState =
-      some (promoteMasterlessPartitions cs crd s.livePodKeys) := by
+               (promoteMasterlessPartitions
+                 (if s.deadNodeKeys.isEmpty then cs
+                  else handleFailoverWithPromotion cs.rebuildPartitionMap s.deadNodeKeys)
+                 crd s.livePodKeys) p)).isEmpty
+      && (s.deadNodeKeys.filter (fun k =>
+        match cs.nodeMap.find? (fun kv => kv.1 == k) with
+        | some kv => kv.2.state != FlareState.Down
+        | none => false)).isEmpty) = false) :
+    (flareReconcileCore resp s cs).1.reconcileStep = .AfterUpdateConfigMap := by
   unfold flareReconcileCore
-  simp [h, hcrd, hne]
+  simp only [h, hcrd]
+  repeat' split
+  all_goals simp_all
 
-/-- Dually: with nothing refillable, RecoveryRefill parks in the fully-inert
-    EmergencyPaused terminal — a tripped breaker with no recovery candidates
-    behaves exactly as it did before RecoveryRefill existed. -/
+/-- Dually: with no recovery work at all (every dead key already Down, nothing
+    refillable), RecoveryRefill parks in the fully-inert EmergencyPaused
+    terminal — a tripped breaker with no recovery candidates behaves exactly
+    as it did before RecoveryRefill existed. -/
 theorem recoveryRefill_parks_when_nothing_refillable (resp : K8sResponse)
     (s : FlareReconcileState) (cs : FlareClusterState) (crd : FlareClusterView)
     (h : s.reconcileStep = .RecoveryRefill)
     (hcrd : s.cachedCrd = some crd)
-    (hempty : ((List.range crd.spec.partitions).filter (fun p =>
-        !FlareOperator.Reconciler.hasMasterForPartition cs p
+    (hnone : (((List.range crd.spec.partitions).filter (fun p =>
+        !FlareOperator.Reconciler.hasMasterForPartition
+            (if s.deadNodeKeys.isEmpty then cs
+             else handleFailoverWithPromotion cs.rebuildPartitionMap s.deadNodeKeys) p
           && FlareOperator.Reconciler.hasMasterForPartition
-               (promoteMasterlessPartitions cs crd s.livePodKeys) p)).isEmpty = true) :
+               (promoteMasterlessPartitions
+                 (if s.deadNodeKeys.isEmpty then cs
+                  else handleFailoverWithPromotion cs.rebuildPartitionMap s.deadNodeKeys)
+                 crd s.livePodKeys) p)).isEmpty
+      && (s.deadNodeKeys.filter (fun k =>
+        match cs.nodeMap.find? (fun kv => kv.1 == k) with
+        | some kv => kv.2.state != FlareState.Down
+        | none => false)).isEmpty) = true) :
     (flareReconcileCore resp s cs).1.reconcileStep = .EmergencyPaused := by
   unfold flareReconcileCore
-  simp [h, hcrd, hempty]
+  simp only [h, hcrd]
+  repeat' split
+  all_goals simp_all
 
 end FlareOperator.K8sReconciler

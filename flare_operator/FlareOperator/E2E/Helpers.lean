@@ -131,6 +131,23 @@ def dumpClusterDiagnostics (ns : String) : IO Unit := do
   match ← kubectl ["logs", "-n", ns, "-l", "app=flare", "--tail=80", "--prefix"] with
   | .ok out => for line in out.splitOn "\n" do IO.eprintln s!"# {line}"
   | .error e => IO.eprintln s!"# (flared logs unavailable: {e})"
+  -- Pod-level timeline: readiness-probe outcomes (incl. the probe script's
+  -- output in Unhealthy events), scheduling/start times, restart counts.
+  -- This is the only place the "was the pod Ready, and if not why" question
+  -- is answerable after the fact — the node map alone can't distinguish a
+  -- NotReady pod from an unrecreated one.
+  IO.eprintln s!"# === pods ({ns}) ==="
+  match ← kubectl ["get", "pods", "-n", ns, "-o", "wide"] with
+  | .ok out => for line in out.splitOn "\n" do IO.eprintln s!"# {line}"
+  | .error e => IO.eprintln s!"# (pods unavailable: {e})"
+  IO.eprintln s!"# === events ({ns}, by time) ==="
+  match ← kubectl ["get", "events", "-n", ns, "--sort-by=.lastTimestamp"] with
+  | .ok out => for line in out.splitOn "\n" do IO.eprintln s!"# {line}"
+  | .error e => IO.eprintln s!"# (events unavailable: {e})"
+  IO.eprintln s!"# === describe flared pods ({ns}) ==="
+  match ← kubectl ["describe", "pods", "-n", ns, "-l", "app=flare"] with
+  | .ok out => for line in out.splitOn "\n" do IO.eprintln s!"# {line}"
+  | .error e => IO.eprintln s!"# (describe unavailable: {e})"
 
 /-- Execute a command in the debug pod. -/
 def execInDebugPod (debugPod ns cmd : String) : IO (Except String String) := do

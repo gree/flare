@@ -1106,16 +1106,21 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
       let refilled := (List.range crd.spec.partitions).filter (fun p =>
         !FlareOperator.Reconciler.hasMasterForPartition afterFailover p
           && FlareOperator.Reconciler.hasMasterForPartition recovered p)
-      let newlyDowned := s.deadNodeKeys.filter (fun k =>
-        match clusterState.nodeMap.find? (fun kv => kv.1 == k) with
-        | some kv => kv.2.state != FlareState.Down
-        | none => false)
-      if refilled.isEmpty && newlyDowned.isEmpty then
-        ({ s with reconcileStep := .EmergencyPaused }, none, [])
-      else
-        ({ s with reconcileStep := .AfterUpdateConfigMap,
-                  updatedClusterState := some recovered }, none,
-         [.Log s!"[flare-operator] breaker tripped: recovery pass (downed {newlyDowned}, refilled partition(s) {refilled}); optimization stays paused"])
+      -- ALWAYS advance into the commit pipeline (ConfigMap → broadcast →
+      -- services), even when this pass changed nothing: while tripped the
+      -- cluster is not fully Active, and the rc21 commit-layer semantics
+      -- deliberately keep rebroadcasting in that regime — re-registered
+      -- nodes need the fresh map to leave their stale self-entry behind
+      -- (observed live: a parked breaker starved a returning replica of
+      -- broadcasts and its readiness probe judged against a Down corpse of
+      -- itself for ~7 minutes until flared's periodic re-pull). The inert
+      -- EmergencyPaused terminal remains for the manual hold
+      -- (autoResetEnabled=false) and the no-CRD edge.
+      let logEffects :=
+        if refilled.isEmpty then []
+        else [FlareEffect.Log s!"[flare-operator] breaker tripped: recovery refill promoted returning node(s) for partition(s) {refilled}; optimization stays paused"]
+      ({ s with reconcileStep := .AfterUpdateConfigMap,
+                updatedClusterState := some recovered }, none, logEffects)
     | none =>
       ({ s with reconcileStep := .EmergencyPaused }, none, [])
 
@@ -1307,61 +1312,30 @@ theorem terminal_absorption (resp : K8sResponse) (s : FlareReconcileState)
 -- ===========================================================================
 
 /-- PROGRESS — the escape hatch that breaks the tripped-breaker ↔ sync-gated
-    readiness deadlock: at RecoveryRefill, whenever the recovery pass has work
-    (a dead node not yet marked Down, or a masterless partition it can refill
-    after the scoped failover), the pass ADVANCES into the commit pipeline
-    carrying the recovered cluster state — it does not park in the inert
-    EmergencyPaused terminal. Safety of both moves is the existing CLE corpus
-    (handleFailover_cle, promoteMasterlessPartitions_cle): a partition's
-    master count never exceeds one. -/
+    readiness deadlock: with a CRD cached, RecoveryRefill ALWAYS advances into
+    the commit pipeline (mark-dead-Down + refill + broadcast), so a tripped
+    breaker can never starve returning replicas of topology updates. Safety of
+    the recovery moves is the existing CLE corpus (handleFailover_cle,
+    promoteMasterlessPartitions_cle): a partition's master count never
+    exceeds one. -/
 theorem recoveryRefill_advances (resp : K8sResponse) (s : FlareReconcileState)
     (cs : FlareClusterState) (crd : FlareClusterView)
     (h : s.reconcileStep = .RecoveryRefill)
-    (hcrd : s.cachedCrd = some crd)
-    (hwork : (((List.range crd.spec.partitions).filter (fun p =>
-        !FlareOperator.Reconciler.hasMasterForPartition
-            (if s.deadNodeKeys.isEmpty then cs
-             else handleFailoverWithPromotion cs.rebuildPartitionMap s.deadNodeKeys) p
-          && FlareOperator.Reconciler.hasMasterForPartition
-               (promoteMasterlessPartitions
-                 (if s.deadNodeKeys.isEmpty then cs
-                  else handleFailoverWithPromotion cs.rebuildPartitionMap s.deadNodeKeys)
-                 crd s.livePodKeys) p)).isEmpty
-      && (s.deadNodeKeys.filter (fun k =>
-        match cs.nodeMap.find? (fun kv => kv.1 == k) with
-        | some kv => kv.2.state != FlareState.Down
-        | none => false)).isEmpty) = false) :
+    (hcrd : s.cachedCrd = some crd) :
     (flareReconcileCore resp s cs).1.reconcileStep = .AfterUpdateConfigMap := by
   unfold flareReconcileCore
   simp only [h, hcrd]
   repeat' split
   all_goals simp_all
 
-/-- Dually: with no recovery work at all (every dead key already Down, nothing
-    refillable), RecoveryRefill parks in the fully-inert EmergencyPaused
-    terminal — a tripped breaker with no recovery candidates behaves exactly
-    as it did before RecoveryRefill existed. -/
-theorem recoveryRefill_parks_when_nothing_refillable (resp : K8sResponse)
-    (s : FlareReconcileState) (cs : FlareClusterState) (crd : FlareClusterView)
+/-- Without a cached CRD there is nothing to recover against: park in the
+    fully-inert EmergencyPaused terminal. -/
+theorem recoveryRefill_parks_without_crd (resp : K8sResponse)
+    (s : FlareReconcileState) (cs : FlareClusterState)
     (h : s.reconcileStep = .RecoveryRefill)
-    (hcrd : s.cachedCrd = some crd)
-    (hnone : (((List.range crd.spec.partitions).filter (fun p =>
-        !FlareOperator.Reconciler.hasMasterForPartition
-            (if s.deadNodeKeys.isEmpty then cs
-             else handleFailoverWithPromotion cs.rebuildPartitionMap s.deadNodeKeys) p
-          && FlareOperator.Reconciler.hasMasterForPartition
-               (promoteMasterlessPartitions
-                 (if s.deadNodeKeys.isEmpty then cs
-                  else handleFailoverWithPromotion cs.rebuildPartitionMap s.deadNodeKeys)
-                 crd s.livePodKeys) p)).isEmpty
-      && (s.deadNodeKeys.filter (fun k =>
-        match cs.nodeMap.find? (fun kv => kv.1 == k) with
-        | some kv => kv.2.state != FlareState.Down
-        | none => false)).isEmpty) = true) :
+    (hnone : s.cachedCrd = none) :
     (flareReconcileCore resp s cs).1.reconcileStep = .EmergencyPaused := by
   unfold flareReconcileCore
-  simp only [h, hcrd]
-  repeat' split
-  all_goals simp_all
+  simp [h, hnone]
 
 end FlareOperator.K8sReconciler

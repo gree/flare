@@ -119,7 +119,12 @@ def suite : TestSuite := {
         IO.eprintln s!"# Killing ALL P0 nodes simultaneously: {p0Pods}"
         let _ ← kubectl (["delete", "pod"] ++ p0Pods ++
                          ["-n", cfg.«namespace», "--force", "--grace-period=0"])
-        let recovered ← waitForCondition "P0 master available after total P0 loss" 180 do
+        -- 420s: readiness is sync-gated (Ready = state=active) and the STS is
+        -- OrderedReady, so recovery is SERIAL — pod-0 must fully re-activate
+        -- (register + promote + probe) before pod-2 is even recreated, and
+        -- pod-2 then needs a full prepare->active reseed. The old 180s budget
+        -- assumed Ready = "port open" and parallel recreation.
+        let recovered ← waitForCondition "P0 master available after total P0 loss" 420 do
           match ← currentP0Master with
           | none => return false
           | some _ =>
@@ -128,7 +133,7 @@ def suite : TestSuite := {
             | .ok val => return (val.toNat?.getD 0 >= numPods)
             | .error _ => return false
         if !recovered then
-          return .fail s!"P0 master not re-established within 180s after killing {p0Pods}"
+          return .fail s!"P0 master not re-established within 420s after killing {p0Pods}"
         match ← currentP0Master with
         | none => return .fail "P0 master missing after recovery"
         | some newMaster =>

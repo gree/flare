@@ -110,7 +110,11 @@ def suite : TestSuite := {
         | .error e => return .fail s!"scale up failed: {e}"
         | .ok _ =>
           -- NO operator restart here — that is the point of the assertion.
-          let recovered ← waitForCondition "cluster recovered after scale-up" 240 do
+          -- 480s: readiness is sync-gated (Ready = state=active) and the STS is
+          -- OrderedReady, so restored pods come back SERIALLY, each waiting for
+          -- the previous one's full activation (register + assign + reseed).
+          -- The old 240s budget assumed Ready = "port open" and parallel return.
+          let recovered ← waitForCondition "cluster recovered after scale-up" 480 do
             match ← kubectlGetJsonpath "statefulset" s!"{cfg.name}-nodes" cfg.«namespace»
                       "{.status.readyReplicas}" with
             | .error _ => return false
@@ -118,7 +122,7 @@ def suite : TestSuite := {
               if val.toNat?.getD 0 < numPods then return false
               else return (← activeMasterCount) == 2
           if recovered then return .pass
-          else return .fail "cluster did not auto-recover within 240s after capacity returned (auto-resume broken?)" }
+          else return .fail "cluster did not auto-recover within 480s after capacity returned (auto-resume broken?)" }
   ]
 }
 

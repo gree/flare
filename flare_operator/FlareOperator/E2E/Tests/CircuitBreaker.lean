@@ -87,10 +87,14 @@ def suite : TestSuite := {
                           "-n", cfg.«namespace», "--replicas=1"] with
         | .error e => return .fail s!"scale down failed: {e}"
         | .ok _ =>
-          let tripped ← waitForCondition "breaker tripped in operator log" 180 do
+          -- 360s: with OrderedReady the scale-down terminates pods ONE AT A
+          -- TIME, each holding its preStop drain window, and the trip needs
+          -- the SECOND pod fully gone (dead ≥ 50%) — ~2 × (drain + detection)
+          -- ≈ 140-200s on a loaded runner. 180s was flake-tight by design math.
+          let tripped ← waitForCondition "breaker tripped in operator log" 360 do
             return containsSubstr (← operatorLogs) "CIRCUIT BREAKER TRIPPED"
           if tripped then return .pass
-          else return .fail "no CIRCUIT BREAKER TRIPPED log within 180s of majority outage" },
+          else return .fail "no CIRCUIT BREAKER TRIPPED log within 360s of majority outage" },
 
     -- While tripped the FSM must be inert: the dead masters keep their map
     -- entries (the pause happens BEFORE demote/failover) and nothing gets

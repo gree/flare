@@ -205,7 +205,25 @@ def suite : TestSuite := {
           | .ok data => return containsSubstr data "cluster-replication-mode = forward"
           | .error _ => return false
         if ok then return .pass
-        else return .fail "ConfigMap not in forward mode" }
+        else return .fail "ConfigMap not in forward mode" },
+
+    -- Stop procedure: flared's SIGHUP reload only updates keys PRESENT in
+    -- extra.conf, so disabling must render an EXPLICIT `cluster-replication
+    -- = false` — silently removing the block would leave a running flared
+    -- replicating forever on its stale in-memory true.
+    { name := "disable renders an explicit cluster-replication = false (not removal)"
+      run := do
+        let patchJson := "{\"spec\":{\"clusterReplication\":{\"enabled\":false}}}"
+        match ← kubectlPatch "flarecluster" cfgV1.name cfgV1.«namespace» patchJson with
+        | .error e => return .fail s!"CR patch failed: {e}"
+        | .ok _ =>
+          let ok ← waitForCondition "extra.conf has cluster-replication = false" 60 do
+            match ← kubectlGetJsonpath "configmap" s!"{cfgV1.name}-config" cfgV1.«namespace»
+                      "{.data.extra\\.conf}" with
+            | .ok data => return containsSubstr data "cluster-replication = false"
+            | .error _ => return false
+          if ok then return .pass
+          else return .fail "extra.conf lacks explicit cluster-replication = false after disable" }
   ]
 }
 

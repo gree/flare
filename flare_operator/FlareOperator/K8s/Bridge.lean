@@ -250,18 +250,26 @@ def renderFlaredExtraConf (rocksdb : RocksdbConfigSpec)
   let rocksdbBlock := rocksdb.toExtraConf
   let replBlock := match repl with
     | some r =>
+      let enabled := if r.enabled then "true" else "false"
       String.intercalate "\n" [
-        s!"cluster-replication = true",
+        s!"cluster-replication = {enabled}",
         s!"cluster-replication-server-name = {r.serverName}",
         s!"cluster-replication-server-port = {r.port}",
         s!"cluster-replication-mode = {r.mode}",
         s!"cluster-replication-concurrency = {r.concurrency}"
       ]
-    | none => ""
+    | none =>
+      -- ALWAYS an explicit false, never omission: flared's SIGHUP reload
+      -- only updates keys PRESENT in the file (ini_option::reload guards
+      -- every assignment with opt_var_map.count), so silently REMOVING
+      -- `cluster-replication = true` leaves a running flared replicating
+      -- forever on its stale in-memory true. The classic flare-tools stop
+      -- procedure was two-step ("= false" + reload, THEN remove + reload)
+      -- for exactly this reason; an always-present explicit value collapses
+      -- it into one declarative line.
+      "cluster-replication = false"
   match rocksdbBlock, replBlock with
-  | "", "" => ""
   | "", r  => r
-  | r,  "" => r
   | a,  b  => a ++ "\n\n" ++ b
 
 /-- Apply a ConfigMap named `{crName}-config` with the given `extra.conf`
@@ -318,11 +326,12 @@ def updateFlaredRocksdbConfig (crName ns : String) (rocksdb : RocksdbConfigSpec)
   let content := renderFlaredExtraConf rocksdb none
   applyExtraConfConfigMap crName ns content
 
-/-- Rewrite {cr}-config WITHOUT the replication block (rocksdb settings
-    kept). Unlike updateFlaredRocksdbConfig this ALWAYS writes, even when
-    the result is an empty extra.conf — the point is to REMOVE
-    `cluster-replication = true`, which flared keeps obeying (across pod
-    restarts, too) for as long as the ConfigMap carries it. -/
+/-- Rewrite {cr}-config with the replication block DISABLED (rocksdb
+    settings kept). Unlike updateFlaredRocksdbConfig this ALWAYS writes,
+    even when rocksdb has nothing to say — the point is to flip the file to
+    an explicit `cluster-replication = false` so the next SIGHUP actually
+    stops a running replication (reload ignores ABSENT keys, so plain
+    removal would leave flared replicating on its stale in-memory true). -/
 def clearFlaredReplicationConfig (crName ns : String) (rocksdb : RocksdbConfigSpec := {})
     : IO (Except String Unit) :=
   applyExtraConfConfigMap crName ns (renderFlaredExtraConf rocksdb none)

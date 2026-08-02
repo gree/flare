@@ -28,7 +28,6 @@ import FlareOperator.Server.TcpServer
 import FlareOperator.Server.TopologyBroadcast
 import FlareOperator.Metrics.Prometheus
 import FlareOperator.Metrics.HttpServer
-import FlareOperator.Metrics.FlaredStats
 import FlareOperator.Health.HealthCheck
 
 namespace FlareOperator
@@ -1232,9 +1231,6 @@ def main (args : List String) : IO Unit := do
   healthStatus.setTcpServerReady true
   IO.eprintln s!"[flare-operator] TCP server marked ready for health checks"
 
-  -- Throttle counter for the slow-cadence flared `stats` scrape.
-  let statsTickRef ← IO.mkRef (0 : Nat)
-
   -- Reconcile loop with lease renewal
   while true do
     -- Renew lease each iteration
@@ -1275,19 +1271,9 @@ def main (args : List String) : IO Unit := do
     if durationMs > 1000 then
       IO.eprintln s!"[flare-operator] reconcile slow: {durationMs}ms (nodes={nodeCount} M={masterCount} S={slaveCount} D={downCount} P={prepareCount})"
 
-    -- Slow-cadence flared `stats` scrape (fires on the 1st tick then every 6th,
-    -- ~30s at the 5s interval) to publish per-pod flare_node_* metrics without
-    -- adding the 6 TCP round-trips to every reconcile. Best-effort: any failure
-    -- leaves the previous snapshot in place and never disrupts reconcile.
-    statsTickRef.modify (· + 1)
-    let statsTick ← statsTickRef.get
-    if (statsTick - 1) % 6 == 0 then
-      try
-        let pods ← Kubectl.listFlaredPods crName ns
-        let snap ← FlareOperator.Metrics.FlaredStats.scrapeAllFlared pods
-        metrics.nodeStats.set snap
-      catch e =>
-        IO.eprintln s!"[flare-operator] flared stats scrape error: {e}"
+    -- NOTE: the operator no longer scrapes/re-exports flared stats. Each
+    -- flared serves its own /metrics (PodMonitor scrapes pods directly), so
+    -- data-plane observability does not share the control plane's fate.
 
     IO.sleep (interval * 1000).toUInt32
 

@@ -121,6 +121,10 @@ cluster:
     pullPolicy: IfNotPresent
   flarePort: 12121
   storageBackend: rocksdb
+  # Port for flared's NATIVE Prometheus /metrics endpoint (each pod exports its
+  # own stats; scraped directly by the flared-metrics PodMonitor, so metrics
+  # share the pod's fault domain instead of the operator's).
+  metricsPort: 9150
   # Graceful-drain window (seconds) before a terminating flared is stopped.
   # A preStop hook sleeps this long AFTER the pod enters Terminating (so it is
   # already out of the Service/CLB endpoints and the operator has promoted a

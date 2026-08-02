@@ -47,6 +47,7 @@ noinst_LTLIBRARIES =	\
 	test_op_touch.la	\
 	test_op_verbosity.la	\
 	test_op_version.la	\
+	test_metrics_formatter.la	\
 	test_thread_pool.la	\
 	test_time_util.la \
 	test_util.la	\
@@ -132,6 +133,7 @@ test_op_stats_la_SOURCES	= test_op_stats.cc connection_iostream.cc
 test_op_touch_la_SOURCES	= test_op_touch.cc connection_iostream.cc
 test_op_verbosity_la_SOURCES	= test_op_verbosity.cc connection_iostream.cc
 test_op_version_la_SOURCES	= test_op_version.cc connection_iostream.cc
+test_metrics_formatter_la_SOURCES	= test_metrics_formatter.cc
 test_thread_pool_la_SOURCES	= test_thread_pool.cc
 test_time_util_la_SOURCES	= test_time_util.cc
 test_util_la_SOURCES	= test_util.cc

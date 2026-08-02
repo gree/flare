@@ -29,6 +29,7 @@
 #include "flared.h"
 #include "connection_tcp.h"
 #include "handler_alarm.h"
+#include "handler_metrics.h"
 #include "handler_reaper.h"
 #include "handler_request.h"
 #ifdef ENABLE_MYSQL_REPLICATION
@@ -353,6 +354,18 @@ int flared::startup(int argc, char **argv) {
 	shared_thread th_reaper = this->_other_thread_pool->get(thread_pool::thread_type_reaper);
 	handler_reaper* h_reaper = new handler_reaper(th_reaper, this->_cluster, this->_storage);
 	th_reaper->trigger(h_reaper);
+
+	// native Prometheus /metrics endpoint: every node exports its own metrics,
+	// so observability shares the node's fault domain instead of a central
+	// collector's (a collector outage is indistinguishable from a real outage
+	// during triage — see handler_metrics.h)
+	if (ini_option_object().get_metrics_server_port() > 0) {
+		shared_thread th_metrics = this->_other_thread_pool->get(thread_pool::thread_type_metrics);
+		handler_metrics* h_metrics = new handler_metrics(th_metrics,
+				ini_option_object().get_metrics_server_port(),
+				ini_option_object().get_server_port());
+		th_metrics->trigger(h_metrics);
+	}
 
 	time_watcher_object = new time_watcher();
 	time_watcher_observer::set_threshold_warn_msec(ini_option_object().get_storage_access_watch_threshold_warn_msec());

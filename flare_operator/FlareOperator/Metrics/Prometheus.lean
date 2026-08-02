@@ -10,7 +10,6 @@
 -/
 
 import FlareOperator.K8s.FlareCluster
-import FlareOperator.Metrics.FlaredStats
 
 namespace FlareOperator.Metrics.Prometheus
 
@@ -96,13 +95,11 @@ structure OperatorMetrics where
   -- on any increase: the migration must be restarted after the cluster settles.
   migrationAborted : Counter
 
-  -- Latest per-pod flared `stats` snapshot (podName, [(statKey, rawValue)]),
-  -- refreshed on a slow cadence by the main loop. Values are kept raw (strings)
-  -- so version/timeval stats survive; re-exported per-pod as memcached_* /
-  -- flared_* / flare_node_* (flare_exporter-compatible) so flared's memcached,
-  -- thread-queue and rocksdb/repl counters reach Grafana Cloud via the
-  -- operator's already-scraped /metrics.
-  nodeStats : IO.Ref (List (String × List (String × String)))
+  -- NOTE: per-pod flared stats are NOT re-exported here anymore. Each flared
+  -- serves its own /metrics natively (scraped by a PodMonitor), so data-plane
+  -- observability shares the pod's fault domain — an operator outage no longer
+  -- blanks every node's series at once, which used to make a collector failure
+  -- indistinguishable from a real outage during triage.
 
   deriving Nonempty
 
@@ -134,7 +131,6 @@ def initMetrics : IO OperatorMetrics := do
   let migrationPhase ← IO.mkRef 0.0
   let migrationDesired ← IO.mkRef 0.0
   let migrationAborted ← IO.mkRef 0
-  let nodeStats ← IO.mkRef []
 
   return {
     reconcileDuration := reconcileDuration
@@ -152,7 +148,6 @@ def initMetrics : IO OperatorMetrics := do
     migrationPhase := { value := migrationPhase }
     migrationDesired := { value := migrationDesired }
     migrationAborted := { value := migrationAborted }
-    nodeStats := nodeStats
   }
 
 /-! ## Metric Update Functions -/
@@ -335,14 +330,6 @@ def exportMetrics (metrics : OperatorMetrics) (clusterName : String) : IO String
   output := output ++ "# TYPE flare_operator_migration_aborted_total counter\n"
   let migAborted ← metrics.migrationAborted.value.get
   output := output ++ formatCounter "flare_operator_migration_aborted_total" labels migAborted
-
-  -- Per-pod flared stats re-exported flare_exporter-compatibly: memcached_*
-  -- (curr_items, commands, ...), flared_* (up, version, node_map_version,
-  -- thread_queue_total, process cpu), and flare_node_rocksdb_* (cursor/sequence,
-  -- WAL-sync counters). Scraped on a slow cadence by the main loop; empty until
-  -- the first scrape completes.
-  let snapshot ← metrics.nodeStats.get
-  output := output ++ FlaredStats.exportNodeStats snapshot clusterName
 
   return output
 

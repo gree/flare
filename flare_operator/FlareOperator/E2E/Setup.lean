@@ -262,10 +262,12 @@ spec:
         - name: flared
           image: {image}
           imagePullPolicy: Never
-          command: [\"sh\", \"-c\", \"{prep} && exec flared --config=/etc/flared/extra.conf --data-dir {dataDir} --server-port {cfg.flarePort} --index-server-name {operatorSvc} --index-server-port {cfg.operatorPort} {storageFlag} --stderr\"]{preStopBlock}
+          command: [\"sh\", \"-c\", \"{prep} && exec flared --config=/etc/flared/extra.conf --data-dir {dataDir} --server-port {cfg.flarePort} --index-server-name {operatorSvc} --index-server-port {cfg.operatorPort} {storageFlag} --metrics-server-port 9150 --stderr\"]{preStopBlock}
           ports:
             - containerPort: {cfg.flarePort}
               name: flare
+            - containerPort: 9150
+              name: metrics
           volumeMounts:
             - name: flared-config
               mountPath: /etc/flared{pvcMount}

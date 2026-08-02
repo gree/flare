@@ -35,6 +35,7 @@ libflare_la_SOURCES = \
 	key_resolver_modular.h key_resolver_modular.cc \
 	ini.h ini.cc \
 	logger.h logger.cc \
+	metrics_formatter.h metrics_formatter.cc \
 	mysql_replication.h mysql_replication.cc \
 	op.cc op.h \
 	op_add.h op_add.cc \

@@ -1,0 +1,24 @@
+{{- if and .Values.monitoring.serviceMonitor.enabled .Values.cluster.enabled }}
+{{- $c := .Values.cluster }}
+# Scrape every flared pod's NATIVE /metrics endpoint directly. Each node is its
+# own exporter, so a metric's fault domain is exactly its pod: an operator
+# outage no longer blanks out every node's series at once (that made a
+# collector failure indistinguishable from a real outage during triage).
+# Prometheus attaches pod/namespace labels itself; scrape failure on one pod is
+# a signal about THAT pod.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: {{ include "flare-operator.fullname" . }}-{{ $c.name }}-nodes
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "flare-operator.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      app: flare
+      cluster: {{ $c.name }}
+  podMetricsEndpoints:
+    - port: metrics
+      interval: {{ .Values.monitoring.serviceMonitor.interval }}
+{{- end }}

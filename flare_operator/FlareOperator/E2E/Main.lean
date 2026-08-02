@@ -28,6 +28,7 @@ import FlareOperator.E2E.Tests.PvcDataSurvival
 import FlareOperator.E2E.Tests.BackupRestore
 import FlareOperator.E2E.Tests.CircuitBreaker
 import FlareOperator.E2E.Tests.OperatorRestart
+import FlareOperator.E2E.Tests.NativeMetrics
 
 open FlareOperator.E2E
 
@@ -54,5 +55,6 @@ def main (args : List String) : IO UInt32 :=
     Tests.PvcDataSurvival.suite,
     Tests.BackupRestore.suite,
     Tests.CircuitBreaker.suite,
-    Tests.OperatorRestart.suite
+    Tests.OperatorRestart.suite,
+    Tests.NativeMetrics.suite
   ] args

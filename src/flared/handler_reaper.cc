@@ -117,9 +117,17 @@ int handler_reaper::run() {
 			}
 		}
 
-		if (total_reaped > 0 || (!aborted && total_scanned > 0)) {
+		// Only log sweeps that actually reaped something. A sweep that scans the
+		// keyspace and deletes nothing (the common case) stays silent so we don't
+		// emit a line every interval forever; the scanned count is still visible
+		// at debug level.
+		if (total_reaped > 0) {
 			log_info("reap_expired sweep done (reaped=%llu, scanned=%llu, aborted=%d)",
 					(unsigned long long)total_reaped,
+					(unsigned long long)total_scanned,
+					aborted ? 1 : 0);
+		} else {
+			log_debug("reap_expired sweep done (reaped=0, scanned=%llu, aborted=%d)",
 					(unsigned long long)total_scanned,
 					aborted ? 1 : 0);
 		}

@@ -961,6 +961,13 @@ storage::iteration storage_rocksdb::iter_next(string& key) {
 	}
 }
 
+namespace {
+	// Defined later in this file, next to the named-backup code that also
+	// uses it (anonymous namespaces in one TU merge, so this forward
+	// declaration binds to that definition).
+	int remove_tree(const string& path);
+}
+
 int storage_rocksdb::create_snapshot_checkpoint(string& out_path, uint64_t& out_seq) {
 	if (this->_db == NULL) {
 		log_err("create_snapshot_checkpoint called before DB open", 0);

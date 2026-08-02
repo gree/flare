@@ -43,7 +43,8 @@ op_meta::op_meta(shared_connection c, cluster* cl, storage* st):
 		op(c, "meta"),
 		_cluster(cl),
 		_storage(st),
-		_meta_key("") {
+		_meta_key(""),
+		_peer_snapshot_supported(false) {
 }
 
 /**
@@ -150,7 +151,7 @@ int op_meta::_run_server() {
 				// handler_reconstruction). Field order is fixed and any
 				// unknown/extra token is ignorable by old clients.
 				char reply[BUFSIZ];
-				snprintf(reply, sizeof(reply), "rocksdb_wal=1 master_id=%s latest_lsn=%llu",
+				snprintf(reply, sizeof(reply), "rocksdb_wal=1 snapshot=1 master_id=%s latest_lsn=%llu",
 					rdb->get_master_id().c_str(),
 					(unsigned long long)rdb->get_latest_sequence_number());
 				return this->_send_result(result_ok, reply);
@@ -332,6 +333,8 @@ int op_meta::_parse_text_client_features(bool& rocksdb_wal_supported, string& ma
 			i += consumed;
 			if (strcmp(q, "rocksdb_wal=1") == 0) {
 				rocksdb_wal_supported = true;
+			} else if (strcmp(q, "snapshot=1") == 0) {
+				this->_peer_snapshot_supported = true;
 			} else if (strncmp(q, "master_id=", 10) == 0) {
 				master_id.assign(q + 10);
 			} else if (strncmp(q, "latest_lsn=", 11) == 0) {

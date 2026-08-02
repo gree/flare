@@ -1146,6 +1146,90 @@ void test_expire_reap_skips_refreshed_key() {
 	drop_rocksdb(s, wal_master_dir);
 }
 
+// ---------------------------------------------------------------------------
+// Snapshot bootstrap: checkpoint (with exact sequence) -> transfer -> swap ->
+// WAL catch-up. Pins the storage-layer contract behind op_repl_snapshot: the
+// swapped-in DB must carry the source's data, lineage token and an exact
+// replication cursor, such that a subsequent incremental WAL sync delivers
+// precisely the post-checkpoint tail. The wire transfer itself is exercised
+// by E2E (every fresh-slave reconstruction now goes snapshot-first).
+// ---------------------------------------------------------------------------
+
+namespace {
+	int copy_dir_flat(const string& src, const string& dst) {
+		DIR* d = opendir(src.c_str());
+		if (d == NULL) return -1;
+		struct dirent* ent;
+		int r = 0;
+		while ((ent = readdir(d)) != NULL) {
+			string n = ent->d_name;
+			if (n == "." || n == "..") continue;
+			struct stat st;
+			string from = src + "/" + n;
+			if (stat(from.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) continue;
+			FILE* in = fopen(from.c_str(), "rb");
+			FILE* out = fopen((dst + "/" + n).c_str(), "wb");
+			if (in == NULL || out == NULL) { if (in) fclose(in); if (out) fclose(out); r = -1; break; }
+			char buf[65536];
+			size_t got;
+			while ((got = fread(buf, 1, sizeof(buf), in)) > 0) {
+				if (fwrite(buf, 1, got, out) != got) { r = -1; break; }
+			}
+			fclose(in); fclose(out);
+			if (r != 0) break;
+		}
+		closedir(d);
+		return r;
+	}
+}
+
+void test_snapshot_bootstrap_checkpoint_swap_and_wal_catchup() {
+	storage_rocksdb* master = make_rocksdb(wal_master_dir);
+	storage_rocksdb* slave  = make_rocksdb(wal_slave_dir);
+
+	const int n = 100;
+	for (int i = 0; i < n; i++) {
+		char k[32];
+		snprintf(k, sizeof(k), "snap%03d", i);
+		cut_assert_equal_int(0, storage_set_string(master, k, "v"));
+	}
+
+	// Checkpoint captures data + the EXACT sequence number.
+	string cp_path;
+	uint64_t cp_seq = 0;
+	cut_assert_equal_int(0, master->create_snapshot_checkpoint(cp_path, cp_seq));
+	cut_assert_operator(cp_seq, >, static_cast<uint64_t>(0));
+
+	// Post-checkpoint tail: must arrive via WAL catch-up, not the files.
+	cut_assert_equal_int(0, storage_set_string(master, "after1", "tail"));
+	cut_assert_equal_int(0, storage_set_string(master, "after2", "tail"));
+
+	// "Transfer" the files (unit-level stand-in for the wire op).
+	string staging;
+	cut_assert_equal_int(0, slave->prepare_snapshot_staging(staging));
+	cut_assert_equal_int(0, copy_dir_flat(cp_path, staging));
+	cut_assert_equal_int(0, master->remove_snapshot_checkpoint(cp_path));
+
+	// Swap in: data, lineage, cursor and the O(1) counter must all be right.
+	cut_assert_equal_int(0, slave->swap_in_snapshot(staging, cp_seq));
+	cppcut_assert_equal(cp_seq, slave->get_repl_last_lsn());
+	cut_assert_equal_string(master->get_master_id().c_str(), slave->get_master_id().c_str());
+	string out;
+	cut_assert_equal_int(0, storage_get_string(slave, "snap000", out));
+	cut_assert_equal_int(-1, storage_get_string(slave, "after1", out));   // tail not in files
+	cut_assert_equal_int(n, static_cast<int>(slave->count()));            // exact reseed incl. WAL-only keys
+
+	// WAL catch-up from the checkpoint sequence delivers exactly the tail.
+	cut_assert_operator(replicate_from(master, slave, cp_seq), >=, 2);
+	cut_assert_equal_int(0, storage_get_string(slave, "after1", out));
+	cut_assert_equal_string("tail", out.c_str());
+	cut_assert_equal_int(0, storage_get_string(slave, "after2", out));
+	cut_assert_equal_int(n + 2, static_cast<int>(slave->count()));
+
+	drop_rocksdb(master, wal_master_dir);
+	drop_rocksdb(slave,  wal_slave_dir);
+}
+
 	void teardown()
 	{
 		delete rocksdb_tester;

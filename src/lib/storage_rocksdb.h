@@ -132,6 +132,10 @@ protected:
 	// (reap_expired) plus the lazy delete-on-get path. Monotonic.
 	AtomicCounter _expire_reaped;
 
+	// Completed snapshot bootstraps on this node (slave side: a physical
+	// checkpoint reseed replaced the logical full dump). Monotonic.
+	AtomicCounter _snapshot_bootstrap;
+
 	// Live (non-reserved) key count, maintained incrementally so `stats`
 	// curr_items is O(1) instead of a full-keyspace iteration per call (the
 	// exporter polls stats periodically — the old scan burned a whole
@@ -217,6 +221,24 @@ public:
 	virtual int reap_expired(time_t now, uint32_t max_scan, const string& after_key,
 			string& last_key, bool& more, uint32_t& scanned, uint32_t& reaped);
 
+	// Snapshot bootstrap (physical reseed = "snapshot + WAL catch-up" instead
+	// of the logical full dump). Master side: create a RocksDB checkpoint in a
+	// private staging dir and report the EXACT sequence number it captures —
+	// everything after that seq is in the master's WAL, so a peer that swaps
+	// this checkpoint in can finish with an incremental WAL sync from out_seq.
+	// Caller must remove_snapshot_checkpoint() when done streaming.
+	int create_snapshot_checkpoint(string& out_path, uint64_t& out_seq);
+	int remove_snapshot_checkpoint(const string& path);
+	// Slave side: replace the live DB with the received checkpoint (staging
+	// dir is renamed into place under the whole-storage write lock — readers
+	// and writers are excluded for the swap) and seed the replication cursor
+	// to the checkpoint's sequence. The master identity token travels INSIDE
+	// the checkpoint (reserved key), so lineage is inherited automatically.
+	int swap_in_snapshot(const string& staging_dir, uint64_t checkpoint_seq);
+	// Prepare (wipe + mkdir) the receive-side staging dir and return its
+	// path. Kept inside storage so callers never hand-construct DB paths.
+	int prepare_snapshot_staging(string& out_dir);
+
 	virtual type get_type() {
 		return this->_type;
 	};
@@ -262,6 +284,8 @@ public:
 	uint64_t get_wal_sync_other_error()       { return this->_wal_sync_other_error.fetch(); }
 	uint64_t get_wal_fallback_to_dump()       { return this->_wal_fallback_to_dump.fetch(); }
 	uint64_t get_expire_reaped()              { return this->_expire_reaped.fetch(); }
+	uint64_t get_snapshot_bootstrap()         { return this->_snapshot_bootstrap.fetch(); }
+	void incr_snapshot_bootstrap()            { this->_snapshot_bootstrap.incr(); }
 	uint64_t get_resync_failure_count();
 
 	// Observability mutators. Callers on the sync code paths invoke

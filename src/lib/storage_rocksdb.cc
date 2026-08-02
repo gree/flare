@@ -88,6 +88,7 @@ storage_rocksdb::storage_rocksdb(
 	_wal_sync_other_error(0),
 	_wal_fallback_to_dump(0),
 	_expire_reaped(0),
+	_snapshot_bootstrap(0),
 	_curr_items(0),
 	_resync_failure_count(0),
 	_resync_failure_threshold(0),
@@ -958,6 +959,164 @@ storage::iteration storage_rocksdb::iter_next(string& key) {
 		key = candidate;
 		return iteration_continue;
 	}
+}
+
+int storage_rocksdb::create_snapshot_checkpoint(string& out_path, uint64_t& out_seq) {
+	if (this->_db == NULL) {
+		log_err("create_snapshot_checkpoint called before DB open", 0);
+		return -1;
+	}
+
+	// Private staging area, sibling of the DB dir. Never under backups/ so
+	// the backup pruner cannot race it. Wipe any leftover from a previous
+	// aborted stream, then let CreateCheckpoint create the dir itself (it
+	// requires the target to not exist).
+	const string path = this->_data_dir + "/snapshot.serve.tmp";
+	remove_tree(path);
+
+	rocksdb::Checkpoint* cp = NULL;
+	rocksdb::Status s = rocksdb::Checkpoint::Create(this->_db, &cp);
+	if (!s.ok() || cp == NULL) {
+		log_err("Checkpoint::Create failed: %s", s.ToString().c_str());
+		return -1;
+	}
+
+	// sequence_number_ptr: the exact sequence the checkpoint captures —
+	// everything after it is in this node's WAL, so the receiver can finish
+	// with an incremental WAL sync from out_seq. This is what makes the
+	// physical reseed equivalent to (snapshot + binlog) bootstrap.
+	uint64_t seq = 0;
+	s = cp->CreateCheckpoint(path, 0 /* log_size_for_flush: default */, &seq);
+	delete cp;
+	if (!s.ok()) {
+		log_err("CreateCheckpoint(%s) failed: %s", path.c_str(), s.ToString().c_str());
+		remove_tree(path);
+		return -1;
+	}
+
+	out_path = path;
+	out_seq = seq;
+	log_notice("snapshot checkpoint created (path=%s, seq=%llu)", path.c_str(), (unsigned long long)seq);
+	return 0;
+}
+
+int storage_rocksdb::remove_snapshot_checkpoint(const string& path) {
+	// Only ever remove our own staging dir — refuse anything else so a bug
+	// in the caller cannot escalate into deleting the live DB.
+	if (path != this->_data_dir + "/snapshot.serve.tmp") {
+		log_err("refusing to remove non-staging path [%s]", path.c_str());
+		return -1;
+	}
+	return remove_tree(path);
+}
+
+int storage_rocksdb::prepare_snapshot_staging(string& out_dir) {
+	const string path = this->_data_dir + "/snapshot.recv.tmp";
+	remove_tree(path);
+	if (mkdir(path.c_str(), 0700) != 0) {
+		log_err("failed to create snapshot staging dir [%s]: %s", path.c_str(), util::strerror(errno));
+		return -1;
+	}
+	out_dir = path;
+	return 0;
+}
+
+int storage_rocksdb::swap_in_snapshot(const string& staging_dir, uint64_t checkpoint_seq) {
+	// Exclusive access for the whole swap: writers/readers take the
+	// wholelock in read mode, so a write lock parks every op while the DB
+	// handle is torn down and rebuilt. The node is a Prepare slave during
+	// reconstruction (balance 0, readiness-gated NotReady), so nothing
+	// user-visible is interrupted.
+	pthread_rwlock_wrlock(&this->_mutex_wholelock);
+
+	int r = -1;
+	do {
+		if (this->_db != NULL) {
+			// Flush is unnecessary (the DB is about to be discarded); just
+			// close the handle so the directory can be replaced.
+			delete this->_db;
+			this->_db = NULL;
+		}
+
+		if (remove_tree(this->_data_path) != 0) {
+			log_err("swap_in_snapshot: failed to remove old DB dir [%s]", this->_data_path.c_str());
+		}
+		if (rename(staging_dir.c_str(), this->_data_path.c_str()) != 0) {
+			log_err("swap_in_snapshot: rename(%s -> %s) failed: %s",
+				staging_dir.c_str(), this->_data_path.c_str(), util::strerror(errno));
+			// Try to come back up on an empty DB rather than staying closed:
+			// reconstruction will retry with a full dump.
+		}
+
+		rocksdb::Status status = rocksdb::DB::Open(this->_options, this->_data_path, &this->_db);
+		if (!status.ok()) {
+			log_err("swap_in_snapshot: reopen failed: %s", status.ToString().c_str());
+			this->_db = NULL;
+			break;
+		}
+
+		// Lineage: the checkpoint carries the SOURCE's master-id reserved key;
+		// adopt it as our in-memory token (mirrors what open() does).
+		{
+			string value;
+			rocksdb::Status st = this->_db->Get(this->_read_options, kReplMasterIdKey, &value);
+			if (st.ok()) {
+				pthread_rwlock_wrlock(&this->_mutex_master_id);
+				this->_master_id = value;
+				pthread_rwlock_unlock(&this->_mutex_master_id);
+			}
+		}
+
+		// Replication cursor := the checkpoint's exact sequence. Everything
+		// after it is in the source's WAL; the follow-up incremental sync
+		// starts here. (Write the marker with WAL enabled like set_repl_last_lsn.)
+		{
+			rocksdb::WriteOptions wo;
+			wo.sync = this->_sync_writes;
+			wo.disableWAL = false;
+			string lsn_value;
+			try {
+				lsn_value = boost::lexical_cast<string>(checkpoint_seq);
+			} catch (...) {
+				lsn_value = "0";
+			}
+			rocksdb::Status st = this->_db->Put(wo, kReplLastLsnKey, lsn_value);
+			if (!st.ok()) {
+				log_err("swap_in_snapshot: failed to seed repl_last_lsn: %s", st.ToString().c_str());
+				break;
+			}
+		}
+
+		// Reseed the O(1) curr_items counter with an EXACT scan. The estimate
+		// property is unusable here: a checkpoint ships the unflushed tail as
+		// WAL files, and estimate-num-keys does not see WAL-only keys — a
+		// write-heavy source would seed a large undercount. The swap is a
+		// rare one-time bootstrap, so a single fill_cache=false iteration is
+		// the right trade (and it doubles as a read-through of the fresh DB).
+		{
+			uint64_t exact = 0;
+			rocksdb::ReadOptions ro = this->_read_options;
+			ro.fill_cache = false;
+			rocksdb::Iterator* it = this->_db->NewIterator(ro);
+			for (it->SeekToFirst(); it->Valid(); it->Next()) {
+				if (!is_reserved_key(it->key().ToString())) {
+					exact++;
+				}
+			}
+			delete it;
+			this->_curr_items.sub(this->_curr_items.fetch());
+			if (exact > 0) this->_curr_items.add(exact);
+		}
+
+		this->_clear_header_cache();
+		this->incr_snapshot_bootstrap();
+		log_notice("snapshot bootstrap complete (seq=%llu, master_id=%s)",
+			(unsigned long long)checkpoint_seq, this->get_master_id().c_str());
+		r = 0;
+	} while (false);
+
+	pthread_rwlock_unlock(&this->_mutex_wholelock);
+	return r;
 }
 
 int storage_rocksdb::reap_expired(time_t now, uint32_t max_scan, const string& after_key,

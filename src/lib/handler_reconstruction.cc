@@ -31,6 +31,7 @@
 #include "op_dump.h"
 #include "op_meta.h"
 #include "op_repl_sync_wal.h"
+#include "op_repl_snapshot.h"
 
 #ifdef HAVE_LIBROCKSDB
 #include "storage_rocksdb.h"
@@ -135,7 +136,16 @@ int handler_reconstruction::_run_once() {
 	string peer_master_id;
 	uint64_t peer_latest_lsn = 0;
 	bool peer_reachable = false;
-	bool via_wal = this->_try_wal_reconstruction(c, peer_wal_supported, peer_master_id, peer_latest_lsn, peer_reachable);
+	bool peer_snapshot_supported = false;
+	bool via_wal = this->_try_wal_reconstruction(c, peer_wal_supported, peer_master_id, peer_latest_lsn, peer_reachable, peer_snapshot_supported);
+
+	// Physical reseed: when the conditions that would justify truncate+full-dump
+	// hold AND the source supports repl_snapshot, pull a checkpoint instead —
+	// pre-compacted files at network speed, no write-path WAL churn on the
+	// receiver, lineage + replication cursor seeded exactly by the swap (see
+	// op_repl_snapshot). On any failure this stays false and the legacy
+	// truncate+dump path runs unchanged.
+	bool via_snapshot = false;
 
 	if (!via_wal) {
 #ifdef HAVE_LIBROCKSDB
@@ -201,15 +211,34 @@ int handler_reconstruction::_run_once() {
 			} else if (source_not_newer) {
 				log_warning("truncate skipped: source is not newer than local data (source latest_lsn=%llu, local last_lsn=%llu, same_lineage=%d) — refusing to overwrite our copy with an emptier/staler master; merging instead", (unsigned long long)peer_latest_lsn, (unsigned long long)local_lsn, same_lineage ? 1 : 0);
 			} else {
-				log_notice("truncating local storage before full-dump reconstruction so deletions on the source propagate (WAL sync was unavailable; see previous log line)", 0);
-				if (this->_storage->truncate(0) < 0) {
-					log_err("failed to truncate storage before full dump", 0);
-					return -1;
+				// Exactly the truncate+full-dump conditions (slave role, source
+				// reachable and strictly newer) — the safe window for a physical
+				// reseed. Try it first; fall back to truncate+dump on failure.
+				if (peer_snapshot_supported) {
+					this->_thread->set_op("repl_snapshot");
+					log_notice("attempting snapshot bootstrap (physical reseed + WAL catch-up) instead of truncate+full-dump", 0);
+					op_repl_snapshot* sp = new op_repl_snapshot(c, this->_storage);
+					sp->set_bwlimit(this->_reconstruction_bwlimit);
+					if (sp->run_client() == 0) {
+						via_snapshot = true;
+						log_notice("snapshot bootstrap succeeded; skipping full dump (cursor and lineage seeded by the swap)", 0);
+					} else {
+						log_warning("snapshot bootstrap failed -> falling back to truncate+full-dump", 0);
+					}
+					delete sp;
+				}
+				if (!via_snapshot) {
+					log_notice("truncating local storage before full-dump reconstruction so deletions on the source propagate (WAL sync was unavailable; see previous log line)", 0);
+					if (this->_storage->truncate(0) < 0) {
+						log_err("failed to truncate storage before full dump", 0);
+						return -1;
+					}
 				}
 			}
 		}
 #endif
 
+		if (!via_snapshot) {
 		op_dump* p = new op_dump(c, this->_cluster, this->_storage);
 
 		p->set_thread(this->_thread);
@@ -228,6 +257,7 @@ int handler_reconstruction::_run_once() {
 		delete p;
 		log_notice("reconstruction via full dump completed (master=%s:%d, partition=%d, partition_size=%d, interval=%d, bwlimit=%d)",
 				   this->_node_server_name.c_str(), this->_node_server_port, this->_partition, this->_partition_size, this->_reconstruction_interval, this->_reconstruction_bwlimit);
+		}	// !via_snapshot
 	}
 
 #ifdef HAVE_LIBROCKSDB
@@ -240,7 +270,7 @@ int handler_reconstruction::_run_once() {
 	// lineage already matched by construction — that was a precondition.)
 	// We reuse the master_id captured by _try_wal_reconstruction's pre-dump
 	// probe rather than re-probing.
-	if (!via_wal && this->_storage->get_type() == storage::type_rocksdb) {
+	if (!via_wal && !via_snapshot && this->_storage->get_type() == storage::type_rocksdb) {
 		storage_rocksdb* rdb = dynamic_cast<storage_rocksdb*>(this->_storage);
 		if (rdb) {
 			if (!peer_master_id.empty()) {
@@ -259,7 +289,7 @@ int handler_reconstruction::_run_once() {
 	// Seed the replication cursor from the master's pre-dump latest_lsn so
 	// the NEXT reconstruction can use incremental WAL sync. Runs after the
 	// master_id adoption above so the lineage check inside passes.
-	if (!via_wal) {
+	if (!via_wal && !via_snapshot) {
 		this->_seed_repl_lsn_after_dump(c, peer_wal_supported, peer_latest_lsn);
 	}
 #endif
@@ -355,8 +385,9 @@ int handler_reconstruction::_activate_with_retry(bool skip_ready_state) {
  */
 bool handler_reconstruction::_try_wal_reconstruction(shared_connection c,
 		bool& peer_wal_supported, string& peer_master_id, uint64_t& peer_latest_lsn,
-		bool& peer_reachable) {
+		bool& peer_reachable, bool& peer_snapshot_supported) {
 	peer_wal_supported = false;
+	peer_snapshot_supported = false;
 	peer_master_id.clear();
 	peer_latest_lsn = 0;
 	peer_reachable = false;
@@ -378,6 +409,7 @@ bool handler_reconstruction::_try_wal_reconstruction(shared_connection c,
 	{
 		op_meta* meta = new op_meta(c, NULL, this->_storage);
 		int meta_rc = meta->run_client_features(peer_wal_supported, peer_master_id, peer_latest_lsn);
+		peer_snapshot_supported = meta->get_peer_snapshot_supported();
 		delete meta;
 		peer_reachable = (meta_rc == 0);
 		if (meta_rc != 0 || !peer_wal_supported) {

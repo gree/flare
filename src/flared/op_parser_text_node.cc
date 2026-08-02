@@ -31,6 +31,7 @@
 #include "op_stats_node.h"
 #include "op_show_node.h"
 #include "op_repl_sync_wal.h"
+#include "op_repl_snapshot.h"
 #include "op_orphan_scan.h"
 #include "op_orphan_purge.h"
 #include "op_backup.h"
@@ -126,6 +127,8 @@ op* op_parser_text_node::_determine_op(const char* first, const char* buf, int& 
 		r = new op_meta(this->_connection, singleton<flared>::instance().get_cluster(), singleton<flared>::instance().get_storage());
 	} else if (strcmp(first, "repl_sync_wal") == 0) {
 		r = new op_repl_sync_wal(this->_connection, singleton<flared>::instance().get_storage());
+	} else if (strcmp(first, "repl_snapshot") == 0) {
+		r = new op_repl_snapshot(this->_connection, singleton<flared>::instance().get_storage());
 	} else if (strcmp(first, "orphan_scan") == 0) {
 		r = new op_orphan_scan(this->_connection,
 			singleton<flared>::instance().get_cluster(),

@@ -43,6 +43,9 @@ protected:
 	cluster*	_cluster;
 	storage*	_storage;
 	string		_meta_key;  // "features" for capability negotiation, empty for cluster metadata
+	// Peer advertised the snapshot-bootstrap op (repl_snapshot) in its
+	// features reply. Populated by any run_client_features() call.
+	bool			_peer_snapshot_supported;
 
 public:
 	op_meta(shared_connection c, cluster* cl, storage* st = NULL);
@@ -58,6 +61,7 @@ public:
 	// sequence number (latest_lsn). 0 means "server did not advertise one"
 	// (non-RocksDB backend or older flared that predates the token).
 	virtual int run_client_features(bool& rocksdb_wal_supported, string& master_id, uint64_t& latest_lsn);
+	bool get_peer_snapshot_supported() const { return this->_peer_snapshot_supported; };
 
 protected:
 	virtual int _parse_text_server_parameters();

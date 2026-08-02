@@ -182,6 +182,7 @@ int op_stats::_send_stats(thread_pool* req_tp, thread_pool* other_tp, storage* s
 			_send_stat("rocksdb_wal_sync_other_error"       , rdb->get_wal_sync_other_error());
 			_send_stat("rocksdb_wal_fallback_to_dump"       , rdb->get_wal_fallback_to_dump());
 			_send_stat("rocksdb_expire_reaped"              , rdb->get_expire_reaped());
+			_send_stat("rocksdb_snapshot_bootstrap"         , rdb->get_snapshot_bootstrap());
 			_send_stat("rocksdb_resync_failure_count"       , rdb->get_resync_failure_count());
 			_send_stat("rocksdb_resync_failure_threshold"   , rdb->get_resync_failure_threshold());
 			_send_stat("rocksdb_wal_max_batch_bytes"        , rdb->get_wal_max_batch_bytes());

@@ -58,6 +58,31 @@ private def currentP0Master : IO (Option String) := do
   let sync ← operatorTcpCmd cfg.debugPod cfg.«namespace» cfg.operatorName cfg.operatorPort "node sync"
   return findMasterPod (parseNodeSync sync) 0
 
+/-- Post-failover key sweep with retries, RE-RESOLVING the master each attempt.
+    Right after a failover the master designation can still be settling, and a
+    just-recreated ex-master can be resolved while its LOCAL map is degenerate
+    ("no partition is available" → op_get answers `pretending not found` for a
+    few seconds until the next broadcast lands). Those reads are transient
+    routing misses, not data loss — observed as exactly the first N keys of a
+    sweep "missing" while the very next count-level test passes. Real loss
+    stays a failure: a key that never appears fails every attempt for the
+    whole window. -/
+private def assertAllKeysSurviveEventually (attempts : Nat) : IO TestResult := do
+  let mut last : TestResult := .fail "no attempt ran"
+  for n in List.range attempts do
+    match ← currentP0Master with
+    | none => last := .fail "no P0 master resolvable"
+    | some master =>
+      match ← getPodIp master cfg.«namespace» with
+      | none => last := .fail s!"no IP for P0 master {master}"
+      | some ip =>
+        last ← assertAllKeysSurvive ip
+        if let .pass := last then
+          return .pass
+        IO.eprintln s!"# readback attempt {n + 1}/{attempts} via {master} not clean yet — retrying"
+    IO.sleep 5000
+  return last
+
 def suite : TestSuite := {
   name := "data-survival-failover"
   setup := do
@@ -130,9 +155,10 @@ def suite : TestSuite := {
           | none => return .fail "P0 master missing after recovery"
           | some newMaster =>
             IO.eprintln s!"# P0 master after failover: {newMaster} (killed {oldMaster})"
-            match ← getPodIp newMaster cfg.«namespace» with
-            | none => return .fail s!"could not get IP for P0 master {newMaster}"
-            | some ip => assertAllKeysSurvive ip },
+            -- Retried sweep (re-resolving the master each attempt): the
+            -- designation can flap onto the just-recreated pod while its
+            -- local map is still degenerate; see assertAllKeysSurviveEventually.
+            assertAllKeysSurviveEventually 12 },
 
     -- Test 3: the new P0 master must actually hold data (count-level guard that
     -- complements the per-key check above and catches a wholesale wipe).

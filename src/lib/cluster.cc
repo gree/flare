@@ -1525,12 +1525,23 @@ cluster::proxy_request cluster::pre_proxy_write(op_proxy_write* op, shared_queue
 	}
 	this->_determine_partition(e, p_prepare, true, is_prepare);
 
-	if (p.master.node_key == this->_node_key || (op->is_proxy_request() && is_prepare && p_prepare.master.node_key == this->_node_key)) {
+	// Proxy marks mean "final delivery from within OUR cluster, apply
+	// locally" — honor them only when the marking node actually shares our
+	// node map. Cluster replication (and any external forwarder) delivers
+	// requests still carrying the SOURCE cluster's proxy list; an LB
+	// destination can pin such a stream to a slave, and treating the
+	// foreign marks as final delivery makes that slave hoard keys its own
+	// master never sees (invisible to reads via the master, wiped by the
+	// next reseed — observed live). Foreign-marked requests are routed
+	// like fresh client writes instead.
+	bool local_proxy_request = this->_is_local_proxy_request(op);
+
+	if (p.master.node_key == this->_node_key || (local_proxy_request && is_prepare && p_prepare.master.node_key == this->_node_key)) {
 		// should be write at this node
 		return proxy_request_continue;
 	}
 
-	if (op->is_proxy_request()) {
+	if (local_proxy_request) {
 		if (p.index.count(this->_node_key) > 0 || (is_prepare && p_prepare.index.count(this->_node_key) > 0)) {
 			return proxy_request_continue;
 		}
@@ -1579,7 +1590,7 @@ cluster::proxy_request cluster::post_proxy_write(op_proxy_write* op, bool sync) 
 	}
 	this->_determine_partition(e, p_prepare, true, is_prepare);
 
-	if ((p.master.node_key == this->_node_key) || (op->is_proxy_request() && is_prepare && p_prepare.master.node_key == this->_node_key)) {
+	if ((p.master.node_key == this->_node_key) || (this->_is_local_proxy_request(op) && is_prepare && p_prepare.master.node_key == this->_node_key)) {
 		// fall through
 	} else {
 		// nothing to do
@@ -1828,6 +1839,32 @@ int cluster::_shift_node_role(string node_key, role old_role, int old_partition,
 	}
 
 	return 0;
+}
+
+/**
+ *	see if a proxy-marked request originated inside THIS cluster.
+ *
+ *	True when at least one node on the request's proxy list exists in our
+ *	node map. A request whose proxy list names no node we know (typically
+ *	cluster replication from another cluster, which forwards each op with
+ *	the SOURCE cluster's hop list attached) must not get final-delivery
+ *	treatment here: its marks describe a foreign topology.
+ */
+bool cluster::_is_local_proxy_request(op_proxy_write* op) {
+	if (!op->is_proxy_request()) {
+		return false;
+	}
+	vector<string> proxy = op->get_proxy();
+	bool known = false;
+	pthread_rwlock_rdlock(&this->_mutex_node_map);
+	for (vector<string>::iterator it = proxy.begin(); it != proxy.end(); it++) {
+		if (this->_node_map.count(*it) > 0) {
+			known = true;
+			break;
+		}
+	}
+	pthread_rwlock_unlock(&this->_mutex_node_map);
+	return known;
 }
 
 int cluster::_enqueue(shared_thread_queue q, string node_key, int key_hash, bool sync) {

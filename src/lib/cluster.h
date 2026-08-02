@@ -409,6 +409,7 @@ protected:
 	int _check_node_partition(int node_partition, bool& preparing);
 	int _check_node_partition_for_new(int node_partition, bool& preparing);
 	int _determine_partition(storage::entry& e, partition& p, bool include_prepare, bool& is_preprare);
+	bool _is_local_proxy_request(op_proxy_write* op);
 	string _get_partition_key(string key);
 	int _get_proxy_thread(string node_key, int key_hash, shared_thread& t);
 	shared_connection _open_index();

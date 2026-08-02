@@ -177,6 +177,43 @@ def suite : TestSuite := {
 
     -- Test 6: user-controlled cutover — the operator does NOT auto-advance;
     -- the user flips mode to forward when ready (verified the dump landed above).
+    -- Regression for the foreign-proxy-mark hoarding bug: the replication
+    -- stream carries the SOURCE cluster's proxy list, and the headless-svc
+    -- destination can pin the connection to the v2 SLAVE. Pre-fix, that
+    -- slave treated the foreign marks as final delivery and hoarded the
+    -- keys locally (master never saw them; the migrate test above then
+    -- failed only when DNS happened to pick the slave). Post-fix the slave
+    -- routes foreign-marked writes to its master like fresh client writes,
+    -- and the master's relay brings the slave its own copy — so BOTH v2
+    -- nodes must converge to every migrated key, regardless of pinning.
+    { name := "v2 slave converges too (foreign-marked stream not hoarded)"
+      run := do
+        let sync ← operatorTcpCmd cfgV2.debugPod cfgV2.«namespace»
+                     cfgV2.operatorName cfgV2.operatorPort "node sync"
+        let entries := parseNodeSync sync
+        let slaveFqdn := entries.find? (fun e => e.role == 1 && e.state == 0 && e.partition == 0)
+          |>.map (·.fqdn)
+        match slaveFqdn with
+        | none => return .fail s!"no active v2 slave in node sync: {sync.take 300}"
+        | some fqdn =>
+          let pod := (fqdn.splitOn ".").headD fqdn
+          let some ip ← getPodIp pod cfgV2.«namespace»
+            | return .fail s!"no IP for v2 slave {pod}"
+          let mut present := 0
+          for _ in List.range 20 do
+            present := 0
+            for i in List.range shrinkKeys do
+              -- proxy-marked get = local read on the slave (no forwarding),
+              -- so this counts what the slave PHYSICALLY holds
+              let cmd := s!"printf '<e2e:0>get {shrinkPrefix}_{i}\\r\\n' | nc -w 3 {ip} {cfgV2.flarePort}"
+              match ← execInDebugPod cfgV2.debugPod cfgV2.«namespace» cmd with
+              | .ok output => if containsSubstr output "VALUE" then present := present + 1
+              | .error _ => pure ()
+            if present == shrinkKeys then break
+            IO.sleep 3000
+          if present == shrinkKeys then return .pass
+          else return .fail s!"v2 slave holds only {present}/{shrinkKeys} migrated keys" },
+
     { name := "user patches mode=forward to advance"
       run := do
         let v2Svc := s!"{cfgV2.name}-nodes.{cfgV2.«namespace»}.svc.cluster.local"

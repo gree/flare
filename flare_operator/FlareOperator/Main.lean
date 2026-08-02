@@ -330,7 +330,18 @@ private def handleClusterReplication
 
   if !repl.enabled then
     -- Disabled / cancelled: STOP flared, not just our bookkeeping (P1-4).
-    if phase != .None then
+    -- LEVEL-TRIGGERED, not phase-gated: the FSM also reacts to enabled=false
+    -- (computeNextReplicationPhase → PatchCRDStatus effect sets migrationRef
+    -- to .None) and runs EARLIER in the same tick, so by the time we get
+    -- here the phase guard alone is already .None and a phase-only check
+    -- skips the real work forever — flared keeps replicating on the stale
+    -- `cluster-replication = true` (caught by the disable E2E; also the
+    -- operator-restart case, where the in-memory phase is lost while the
+    -- ConfigMap still says true). Decide from the CM content itself.
+    let cmStillEnabled ← match ← readFlaredExtraConf crName ns with
+      | .ok data => pure (containsSubstr data "cluster-replication = true")
+      | .error _ => pure false
+    if phase != .None || cmStillEnabled then
       match ← clearFlaredReplicationConfig crName ns rocksdb with
       | .error e =>
         IO.eprintln s!"[flare-operator] ERROR: failed to clear replication config: {e} — retrying next tick"

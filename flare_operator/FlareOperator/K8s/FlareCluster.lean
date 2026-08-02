@@ -279,28 +279,29 @@ private def parseIntStr (s : String) : Option Int :=
     s.toNat?.map Int.ofNat
 
 /-- Parse a single serialized node-map line:
-    "host:port role=R state=S partition=P" → (key, FlareNode) -/
+    "host:port role=R state=S partition=P [lastMasterOf=L] [thread=T]"
+    → (key, FlareNode). Tokens after the fixed prefix are optional and
+    scanned by name, so older lines (without them) still parse:
+    - lastMasterOf: emitted only while a rejoined ex-master waits for the
+      masterless-partition refill, so an operator restart in exactly that
+      window no longer forgets which candidate holds the newest copy.
+    - thread: the node's UNIQUE proxy-channel number (flared keys its proxy
+      connection pools by it). Missing token (pre-thread persistence) falls
+      back to 16, the classic default_thread_type. -/
 def parseNodeMapLine (line : String) : Option (String × FlareNode) :=
   match line.trim.splitOn " " with
-  | [key, roleStr, stateStr, partStr] => do
+  | key :: roleStr :: stateStr :: partStr :: rest => do
     let roleVal ← stripPrefix roleStr "role=" >>= fun (s : String) => s.toNat? >>= FlareRole.fromNat
     let stateVal ← stripPrefix stateStr "state=" >>= fun (s : String) => s.toNat? >>= FlareState.fromNat
     let partVal ← stripPrefix partStr "partition=" >>= parseIntStr
     let (host, port) ← fromNodeKey key
-    return (key, { serverName := host, serverPort := port, role := roleVal, state := stateVal, partition := partVal })
-  | [key, roleStr, stateStr, partStr, lastMasterStr] => do
-    -- Optional 5th token: the lastMasterOf marker. Emitted only while a
-    -- rejoined ex-master waits for the masterless-partition refill, so an
-    -- operator restart in exactly that window no longer forgets which
-    -- candidate holds the newest copy. (A DOWNGRADED operator drops such
-    -- lines — acceptable: the marker is transient and pre-marker builds
-    -- behaved that way everywhere.)
-    let roleVal ← stripPrefix roleStr "role=" >>= fun (s : String) => s.toNat? >>= FlareRole.fromNat
-    let stateVal ← stripPrefix stateStr "state=" >>= fun (s : String) => s.toNat? >>= FlareState.fromNat
-    let partVal ← stripPrefix partStr "partition=" >>= parseIntStr
-    let lastMasterVal ← stripPrefix lastMasterStr "lastMasterOf=" >>= parseIntStr
-    let (host, port) ← fromNodeKey key
-    return (key, { serverName := host, serverPort := port, role := roleVal, state := stateVal, partition := partVal, lastMasterOf := lastMasterVal })
+    let lastMasterVal := (rest.findSome? fun t =>
+      stripPrefix t "lastMasterOf=" >>= parseIntStr).getD (-1)
+    let threadVal := (rest.findSome? fun t =>
+      stripPrefix t "thread=" >>= fun (s : String) => s.toNat?).getD 16
+    return (key, { serverName := host, serverPort := port, role := roleVal,
+                   state := stateVal, partition := partVal,
+                   lastMasterOf := lastMasterVal, threadType := threadVal })
   | _ => none
 
 /-- Serialize a node map to the ConfigMap line format that `fromNodeMapData`
@@ -310,10 +311,14 @@ def parseNodeMapLine (line : String) : Option (String × FlareNode) :=
     reloaded on operator restart and the in-memory topology is lost. -/
 def serializeNodeMap (state : FlareClusterState) : String :=
   let lines := state.nodeMap.map fun (key, node) =>
-    if node.lastMasterOf != -1 then
-      s!"{key} role={node.role.toNat} state={node.state.toNat} partition={node.partition} lastMasterOf={node.lastMasterOf}"
-    else
-      s!"{key} role={node.role.toNat} state={node.state.toNat} partition={node.partition}"
+    let base := s!"{key} role={node.role.toNat} state={node.state.toNat} partition={node.partition}"
+    let base := if node.lastMasterOf != -1 then base ++ s!" lastMasterOf={node.lastMasterOf}" else base
+    -- thread= is always emitted: threadType must survive the restart
+    -- roundtrip or every node degrades to the shared default 16 and the
+    -- proxy channels collapse again. (A DOWNGRADED operator's arity-based
+    -- parser drops lines carrying unknown tokens — acceptable; we only
+    -- roll forward.)
+    base ++ s!" thread={node.threadType}"
   -- The broadcast version MUST survive an operator restart. flared drops
   -- any `node sync` whose version is not newer than the last one it saw
   -- (cluster.cc reconstruct_node "ignored: ... newer than"); an operator
@@ -331,10 +336,26 @@ def fromNodeMapData (data : String) : FlareClusterState :=
   let nodes := lines.filterMap parseNodeMapLine
   { FlareClusterState.default with nodeMap := nodes, nodeMapVersion := version }
 
+/-- One-shot migration for node maps persisted by operators that hardcoded
+    threadType 16 for every node: flared keys its per-destination proxy
+    connection pools by thread_type, so DUPLICATE numbers collapse all
+    destinations into one pool and forwards/relays land on hash-picked wrong
+    peers. If (and only if) any duplicate exists, re-number every node
+    sequentially from 16 in map order and bump the version so the corrected
+    channels are re-broadcast; an already-unique map is returned unchanged. -/
+def normalizeThreadTypes (state : FlareClusterState) : FlareClusterState :=
+  let tts := state.nodeMap.map (·.2.threadType)
+  let hasDup := tts.length != tts.eraseDups.length
+  if !hasDup then state
+  else
+    let renumbered := state.nodeMap.zipIdx.map fun ((key, n), i) =>
+      (key, { n with threadType := 16 + i })
+    { state with nodeMap := renumbered, nodeMapVersion := state.nodeMapVersion + 1 }
+
 private def roundtripSample : FlareClusterState :=
   { FlareClusterState.default with
-    nodeMap := [("h:12121", { serverName := "h", serverPort := 12121, role := FlareRole.Master, state := FlareState.Active, partition := 0 }),
-                ("i:12121", { serverName := "i", serverPort := 12121, role := FlareRole.Slave, state := FlareState.Prepare, partition := 0, lastMasterOf := 0 })],
+    nodeMap := [("h:12121", { serverName := "h", serverPort := 12121, role := FlareRole.Master, state := FlareState.Active, partition := 0, threadType := 17 }),
+                ("i:12121", { serverName := "i", serverPort := 12121, role := FlareRole.Slave, state := FlareState.Prepare, partition := 0, lastMasterOf := 0, threadType := 18 })],
     nodeMapVersion := 10280 }
 
 /-- The broadcast version survives the persist/reload roundtrip. Regression
@@ -344,7 +365,11 @@ private def roundtripSample : FlareClusterState :=
 theorem nodeMapVersion_roundtrip :
     (fromNodeMapData (serializeNodeMap roundtripSample)).nodeMapVersion = 10280
       ∧ (fromNodeMapData (serializeNodeMap roundtripSample)).nodeMap.length = 2
-      ∧ ((fromNodeMapData (serializeNodeMap roundtripSample)).nodeMap.lookup "i:12121").map (·.lastMasterOf) = some 0 := by
+      ∧ ((fromNodeMapData (serializeNodeMap roundtripSample)).nodeMap.lookup "i:12121").map (·.lastMasterOf) = some 0
+      -- threadType must roundtrip too: degrading to the shared default 16 on
+      -- reload collapses every proxy channel into one pool (misrouted relays).
+      ∧ ((fromNodeMapData (serializeNodeMap roundtripSample)).nodeMap.lookup "h:12121").map (·.threadType) = some 17
+      ∧ ((fromNodeMapData (serializeNodeMap roundtripSample)).nodeMap.lookup "i:12121").map (·.threadType) = some 18 := by
   native_decide
 
 /-- FENCING ARITHMETIC: any version from generation `g` (base g·2³² plus a

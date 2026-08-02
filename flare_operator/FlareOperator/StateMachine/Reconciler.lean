@@ -410,7 +410,19 @@ def registerFreshNode (state : FlareClusterState) (crd : FlareClusterView)
     state := FlareState.Active
     partition := -1
     balance := 100
-    threadType := 16
+    -- UNIQUE per-node proxy channel number. flared keys its proxy-connection
+    -- pools by thread_type (cluster::_get_proxy_thread), so distinct nodes
+    -- MUST get distinct numbers — classic flare's index server allocates them
+    -- with an incrementing counter starting at 16 (default_thread_type).
+    -- Hardcoding 16 for every node collapsed ALL destinations into one shared
+    -- pool of proxy connections: every forward/relay went to a hash-picked
+    -- arbitrary peer (self-consistently per key, which is why per-key reads
+    -- still worked and E2E stayed green). Observed live on a 2-partition
+    -- cluster: keys proxied to "the P1 master" were stored on a P1 slave,
+    -- and master→slave relays never reached the real slaves.
+    -- max+1 over the current map mirrors the classic counter without extra
+    -- persisted state (the map itself round-trips through the ConfigMap).
+    threadType := (state.nodeMap.foldl (fun acc (_, n) => max acc n.threadType) 15) + 1
     -- Stamp the registration so a concurrent FSM commit (computed from a
     -- snapshot that predates this re-add) cannot resurrect the old role.
     regEpoch := state.nodeMapVersion + 1

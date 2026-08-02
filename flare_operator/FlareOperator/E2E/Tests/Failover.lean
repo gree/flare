@@ -49,6 +49,26 @@ def suite : TestSuite := {
         else
           return .fail s!"expected OK, got: {resp.trim}" },
 
+    -- flared keys its per-destination proxy connection pools by thread_type
+    -- (cluster::_get_proxy_thread), so every node MUST get a distinct number.
+    -- The operator used to hardcode 16 for all nodes, collapsing every
+    -- destination into ONE pool: forwards/relays went to hash-picked wrong
+    -- peers, self-consistently per key — which is exactly why per-key
+    -- get/set round-trips could not catch it and this needs its own assert.
+    { name := "node sync assigns a UNIQUE thread_type to every node"
+      run := do
+        let resp ← operatorTcpCmd cfg.debugPod cfg.«namespace» cfg.operatorName cfg.operatorPort "node sync"
+        let tts := resp.splitOn "\n" |>.filterMap fun line =>
+          match (line.trim.replace "\r" "").splitOn " " with
+          | ["NODE", _, _, _, _, _, _, tt] => tt.toNat?
+          | _ => none
+        if tts.length < 4 then
+          return .fail s!"expected >=4 NODE lines with thread_type, got {tts.length}: {resp.take 300}"
+        else if tts.eraseDups.length != tts.length then
+          return .fail s!"duplicate thread_type in node map: {tts}"
+        else
+          return .pass },
+
     -- Test 2: one-master-per-partition
     { name := "one-master-per-partition"
       run := do

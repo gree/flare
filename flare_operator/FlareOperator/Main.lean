@@ -1123,6 +1123,11 @@ def main (args : List String) : IO Unit := do
   | .ok data =>
     if data.trim != "" then
       let loaded := FlareClusterState.fromNodeMapData data
+      -- MIGRATION: maps persisted by pre-thread operators load every node at
+      -- the shared default 16, which collapses flared's per-destination proxy
+      -- pools into one (misrouted forwards/relays). Re-number duplicates once;
+      -- the version bump makes flared adopt the corrected channels.
+      let loaded := loaded.normalizeThreadTypes
       let loaded := loaded.rebuildPartitionMap
       stateRef.set loaded
       IO.eprintln s!"[flare-operator] loaded {loaded.nodeMap.length} nodes from ConfigMap (resuming at broadcast version {loaded.nodeMapVersion})"

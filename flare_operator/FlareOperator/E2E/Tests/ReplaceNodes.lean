@@ -44,7 +44,7 @@ def suite : TestSuite := {
     deploySecondCluster cfgNew
     let stable2 ← waitForStable cfgNew 50
     if !stable2 then throw (IO.userError "new cluster did not stabilize")
-  onFailure := dumpClusterDiagnostics cfgOld.«namespace»
+  onFailure := dumpClusterDiagnostics cfgOld.«namespace» s!"app={cfgOld.operatorName}"
   teardown := do
     cleanupCluster cfgOld
     cleanupCluster cfgNew

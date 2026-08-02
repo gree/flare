@@ -57,7 +57,7 @@ def suite : TestSuite := {
     deploySecondCluster cfgV2
     let stable2 ← waitForStable cfgV2 50
     if !stable2 then throw (IO.userError "v2 cluster did not stabilize")
-  onFailure := dumpClusterDiagnostics cfgV1.«namespace»
+  onFailure := dumpClusterDiagnostics cfgV1.«namespace» s!"app={cfgV1.operatorName}"
   teardown := do
     cleanupCluster cfgV1
     cleanupCluster cfgV2
@@ -254,13 +254,22 @@ def suite : TestSuite := {
         match ← kubectlPatch "flarecluster" cfgV1.name cfgV1.«namespace» patchJson with
         | .error e => return .fail s!"CR patch failed: {e}"
         | .ok _ =>
-          let ok ← waitForCondition "extra.conf has cluster-replication = false" 60 do
+          -- 120s: the write needs ONE reconcile tick, but ticks can stretch
+          -- to tens of seconds under CI load (kubectl subprocess storms)
+          let mut lastContent := ""
+          let mut found := false
+          for _ in List.range 40 do
             match ← kubectlGetJsonpath "configmap" s!"{cfgV1.name}-config" cfgV1.«namespace»
                       "{.data.extra\\.conf}" with
-            | .ok data => return containsSubstr data "cluster-replication = false"
-            | .error _ => return false
-          if ok then return .pass
-          else return .fail "extra.conf lacks explicit cluster-replication = false after disable" }
+            | .ok data =>
+              lastContent := data
+              if containsSubstr data "cluster-replication = false" then
+                found := true
+                break
+            | .error e => lastContent := s!"(unreadable: {e})"
+            IO.sleep 3000
+          if found then return .pass
+          else return .fail s!"extra.conf lacks explicit cluster-replication = false after disable; actual content: [{lastContent}]" }
   ]
 }
 

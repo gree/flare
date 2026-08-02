@@ -34,7 +34,7 @@ def suite : TestSuite := {
     deployCluster cfg
     let stable ← waitForStable cfg 50
     if !stable then throw (IO.userError "cluster did not stabilize")
-  onFailure := dumpClusterDiagnostics cfg.«namespace»
+  onFailure := dumpClusterDiagnostics cfg.«namespace» s!"app={cfg.operatorName}"
   teardown := cleanupCluster cfg
   tests := [
     -- Test 1: cluster is stable with 2 partitions

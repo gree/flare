@@ -64,7 +64,7 @@ def suite : TestSuite := {
     -- (Production operators are long-running, i.e. always post-grace.)
     let ok ← waitForStable cfg 130
     if !ok then throw (IO.userError "cluster did not stabilize")
-  onFailure := dumpClusterDiagnostics cfg.«namespace»
+  onFailure := dumpClusterDiagnostics cfg.«namespace» s!"app={cfg.operatorName}"
   teardown := do
     cleanupCluster cfg
   tests := [

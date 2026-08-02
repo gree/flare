@@ -46,7 +46,8 @@ static const size_t kSnapshotChunkBytes = 1024 * 1024;
 op_repl_snapshot::op_repl_snapshot(shared_connection c, storage* st):
 		op(c, "repl_snapshot"),
 		_storage(st),
-		_bwlimit(0) {
+		_bwlimit(0),
+		_peer_bwlimit_request(0) {
 }
 
 op_repl_snapshot::~op_repl_snapshot() {
@@ -59,7 +60,18 @@ int op_repl_snapshot::_parse_text_server_parameters() {
 	if (this->_connection->readline(&p) < 0) {
 		return -1;
 	}
-	// No parameters. Tolerate (and ignore) trailing junk for forward compat.
+	// Optional: the client's requested bandwidth cap in KB/s (0 = no
+	// preference). The effective cap is min(server-configured, requested).
+	// Unknown trailing tokens are ignored for forward compat.
+	char q[BUFSIZ];
+	util::next_word(p, q, sizeof(q));
+	if (q[0]) {
+		try {
+			this->_peer_bwlimit_request = boost::lexical_cast<uint64_t>(q);
+		} catch (...) {
+			// ignore malformed value; keep server default
+		}
+	}
 	delete[] p;
 	return 0;
 }
@@ -112,8 +124,19 @@ int op_repl_snapshot::_run_server() {
 		return -1;
 	}
 
+	// Never saturate the NIC against serving traffic: the SENDER throttles.
+	// Effective cap = min(this node's rocksdb-snapshot-bwlimit — default
+	// ~1/4 of a 1 Gbps link — and whatever the receiver asked for).
+	uint64_t effective_kbps = static_cast<uint64_t>(rdb->get_snapshot_bwlimit() < 0 ? 0 : rdb->get_snapshot_bwlimit());
+	if (this->_peer_bwlimit_request > 0
+			&& (effective_kbps == 0 || this->_peer_bwlimit_request < effective_kbps)) {
+		effective_kbps = this->_peer_bwlimit_request;
+	}
+	log_notice("snapshot stream bwlimit: %llu KB/s (server=%d, requested=%llu; 0=unlimited)",
+		(unsigned long long)effective_kbps, rdb->get_snapshot_bwlimit(),
+		(unsigned long long)this->_peer_bwlimit_request);
 	bwlimitter bw;
-	bw.set_bwlimit(this->_bwlimit);
+	bw.set_bwlimit(effective_kbps);
 
 	int r = 0;
 	char* buf = new char[kSnapshotChunkBytes];
@@ -197,8 +220,12 @@ int op_repl_snapshot::_run_client() {
 		return -1;
 	}
 
-	if (this->_connection->writeline("repl_snapshot") < 0) {
-		return -1;
+	{
+		char req[64];
+		snprintf(req, sizeof(req), "repl_snapshot %llu", (unsigned long long)this->_bwlimit);
+		if (this->_connection->writeline(req) < 0) {
+			return -1;
+		}
 	}
 
 	char* p;

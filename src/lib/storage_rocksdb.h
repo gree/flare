@@ -166,6 +166,10 @@ protected:
 	uint64_t                _wal_max_batch_bytes;
 	int                     _wal_sync_bwlimit;
 	int                     _wal_sync_interval;
+	// Snapshot-bootstrap stream cap in KB/s (0 = unlimited). Applied on the
+	// SENDING side; defaults to ~1/4 of a 1 Gbps link so a reseed never
+	// saturates the node NIC against serving traffic.
+	int                     _snapshot_bwlimit;
 
 	// Outstanding orphan scan token (at most one at a time). Guarded
 	// by its own mutex; expected contention is zero because scans are
@@ -320,9 +324,11 @@ public:
 	// and read by op_repl_sync_wal configured via handler_dump_replication.
 	void set_wal_max_batch_bytes(uint64_t n) { this->_wal_max_batch_bytes = n; }
 	void set_wal_sync_bwlimit(int kbps)      { this->_wal_sync_bwlimit    = kbps; }
+	void set_snapshot_bwlimit(int v)          { this->_snapshot_bwlimit = v; }
 	void set_wal_sync_interval(int usec)     { this->_wal_sync_interval   = usec; }
 	uint64_t get_wal_max_batch_bytes() const { return this->_wal_max_batch_bytes; }
 	int get_wal_sync_bwlimit() const         { return this->_wal_sync_bwlimit; }
+	int get_snapshot_bwlimit()                { return this->_snapshot_bwlimit; }
 	int get_wal_sync_interval() const        { return this->_wal_sync_interval; }
 
 	// Record a scan result and return the newly issued token. Any

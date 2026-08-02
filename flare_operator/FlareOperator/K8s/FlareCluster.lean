@@ -112,13 +112,17 @@ structure RocksdbConfigSpec where
   /-- Inter-batch delay (usec) for WAL-sync streaming.
       flared: `rocksdb-wal-sync-interval`. -/
   walSyncInterval : Option Nat := none
+  /-- Bandwidth cap (KB/s) for serving a snapshot-bootstrap stream; the SENDER
+      throttles. flared default is ~1/4 of a 1 Gbps link — override per
+      cluster to ~1/4 of the actual node NIC. flared: `rocksdb-snapshot-bwlimit`. -/
+  snapshotBwlimit : Option Nat := none
   deriving Repr, BEq
 
 /-- True when at least one rocksdb field has been set by the user. -/
 def RocksdbConfigSpec.hasAny (r : RocksdbConfigSpec) : Bool :=
   r.walTtlSeconds.isSome || r.walSizeLimitMb.isSome || r.syncWrites.isSome ||
   r.resyncFailureThreshold.isSome || r.walMaxBatchBytes.isSome ||
-  r.walSyncBwlimit.isSome || r.walSyncInterval.isSome
+  r.walSyncBwlimit.isSome || r.walSyncInterval.isSome || r.snapshotBwlimit.isSome
 
 /-- Render the rocksdb spec as `extra.conf` lines (one per set field).
     Returns an empty string when no fields are set. Lines are joined with "\n";
@@ -147,6 +151,9 @@ def RocksdbConfigSpec.toExtraConf (r : RocksdbConfigSpec) : String :=
     | none => lines
   let lines := match r.walSyncInterval with
     | some n => lines ++ [s!"rocksdb-wal-sync-interval = {n}"]
+    | none => lines
+  let lines := match r.snapshotBwlimit with
+    | some n => lines ++ [s!"rocksdb-snapshot-bwlimit = {n}"]
     | none => lines
   String.intercalate "\n" lines
 

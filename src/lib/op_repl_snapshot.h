@@ -52,7 +52,8 @@ namespace flare {
 class op_repl_snapshot : public op {
 protected:
 	storage*			_storage;
-	uint64_t			_bwlimit;			// bytes/sec cap for the file stream (0 = unlimited)
+	uint64_t			_bwlimit;					// KB/s: client's requested cap, sent with the request (0 = no preference)
+	uint64_t			_peer_bwlimit_request;		// KB/s: server side — what the client asked for
 
 public:
 	op_repl_snapshot(shared_connection c, storage* st);

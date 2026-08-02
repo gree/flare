@@ -95,6 +95,7 @@ storage_rocksdb::storage_rocksdb(
 	_wal_max_batch_bytes(0),
 	_wal_sync_bwlimit(0),
 	_wal_sync_interval(0),
+	_snapshot_bwlimit(32768),
 	_orphan_scan_valid(false),
 	_orphan_scan_ttl_seconds(300),
 	_backup_keep(7),

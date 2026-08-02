@@ -119,6 +119,7 @@ private:
 	int				_rocksdb_wal_sync_bwlimit;
 	int				_rocksdb_wal_sync_interval;
 	int				_rocksdb_backup_keep;
+	int				_rocksdb_snapshot_bwlimit;
 	// Background expire crawler (memcached lru_crawler equivalent): a
 	// master-only sweep that physically deletes past-expire keys so they are
 	// reclaimed and — being real deletes — replicate through the WAL to slaves.
@@ -162,6 +163,7 @@ public:
 	static const int      default_rocksdb_wal_sync_bwlimit         = 0;  // inherit
 	static const int      default_rocksdb_wal_sync_interval        = 0;  // inherit
 	static const int      default_rocksdb_backup_keep              = 7;
+	static const int      default_rocksdb_snapshot_bwlimit         = 32768;  // KB/s ~= 1/4 of 1 Gbps
 	static const bool     default_reap_expired                    = true;
 	static const int      default_reap_expired_interval           = 300;    // sec between full sweeps
 	static const int      default_reap_expired_chunk_size         = 10000;  // keys scanned per chunk
@@ -247,6 +249,7 @@ public:
 	int get_rocksdb_wal_sync_bwlimit() { return this->_rocksdb_wal_sync_bwlimit; }
 	int get_rocksdb_wal_sync_interval() { return this->_rocksdb_wal_sync_interval; }
 	int get_rocksdb_backup_keep() { return this->_rocksdb_backup_keep; }
+	int get_rocksdb_snapshot_bwlimit() { return this->_rocksdb_snapshot_bwlimit; }
 	bool is_reap_expired() { return this->_reap_expired; }
 	int get_reap_expired_interval() { return this->_reap_expired_interval; }
 	int get_reap_expired_chunk_size() { return this->_reap_expired_chunk_size; }

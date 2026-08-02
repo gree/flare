@@ -80,6 +80,10 @@ spec:
                       type: integer
                       minimum: 0
                       description: Inter-batch delay (usec) for WAL-sync streaming
+                    snapshotBwlimit:
+                      type: integer
+                      minimum: 0
+                      description: Bandwidth cap (KB/s) for serving snapshot-bootstrap streams (rocksdb-snapshot-bwlimit; sender-side, 0 = unlimited)
                 circuitBreaker:
                   type: object
                   description: >-

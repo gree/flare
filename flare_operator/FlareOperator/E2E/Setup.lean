@@ -183,9 +183,9 @@ def statefulSetYaml (cfg : ClusterConfig) : String :=
   -- replace the live DB with it and consume the marker, then start flared.
   -- Restore procedure: write the marker on each pod's PVC, delete the pods.
   let prep := if cfg.usePvc then
-      s!"if [ -f {dataDir}/RESTORE ]; then SRC=$(cat {dataDir}/RESTORE) && rm -rf {dataDir}/flare.rocksdb && cp -a $SRC {dataDir}/flare.rocksdb && rm -f {dataDir}/RESTORE; fi; mkdir -p {dataDir}"
+      s!"if [ -f {dataDir}/RESTORE ]; then SRC=$(cat {dataDir}/RESTORE) && rm -rf {dataDir}/flare.rocksdb && cp -a $SRC {dataDir}/flare.rocksdb && rm -f {dataDir}/RESTORE; fi; mkdir -p {dataDir}; rm -f {dataDir}/flared.pid"
     else
-      s!"rm -rf {dataDir}/*.hdb {dataDir}/*.hdb.wal {dataDir}/rocksdb && mkdir -p {dataDir}"
+      s!"rm -rf {dataDir}/*.hdb {dataDir}/*.hdb.wal {dataDir}/rocksdb && mkdir -p {dataDir} && rm -f {dataDir}/flared.pid"
   let storageFlag := s!"--storage-type={cfg.storageBackend}"
   -- preStop drain window: keep flared alive+Ready while Terminating so the
   -- operator's graceful drain is observable. grace must exceed drainSeconds.

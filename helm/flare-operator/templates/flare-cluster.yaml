@@ -160,12 +160,17 @@ spec:
                 rm -f /data/flare/RESTORE
               fi
               mkdir -p /data/flare
+              # A stale flared.pid survives unclean container death on a persistent
+              # data dir and used to wedge restarts (pid-1 self-check; fixed in
+              # flared too — this is belt-and-braces).
+              rm -f /data/flare/flared.pid
               exec flared --config=/etc/flared/extra.conf --data-dir /data/flare --server-port {{ $c.flarePort }} --index-server-name {{ include "flare-operator.fullname" . }}.{{ $ns }}.svc.cluster.local --index-server-port {{ .Values.service.port }} --storage-type={{ $c.storageBackend }} --stderr
               {{- else }}
               # tmpfs (emptyDir medium=Memory) or ephemeral node disk — either way
               # the data is lost on pod restart (no restore hook: tmpfs can't
               # retain a RESTORE marker across restarts anyway).
               mkdir -p {{ $dataDir }}
+              rm -f {{ $dataDir }}/flared.pid
               exec flared --config=/etc/flared/extra.conf --data-dir {{ $dataDir }} --server-port {{ $c.flarePort }} --index-server-name {{ include "flare-operator.fullname" . }}.{{ $ns }}.svc.cluster.local --index-server-port {{ .Values.service.port }} --storage-type={{ $c.storageBackend }} --stderr
               {{- end }}
           ports:

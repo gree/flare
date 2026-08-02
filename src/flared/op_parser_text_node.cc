@@ -32,6 +32,7 @@
 #include "op_show_node.h"
 #include "op_repl_sync_wal.h"
 #include "op_repl_snapshot.h"
+#include "ini_option.h"
 #include "op_orphan_scan.h"
 #include "op_orphan_purge.h"
 #include "op_backup.h"
@@ -112,7 +113,9 @@ op* op_parser_text_node::_determine_op(const char* first, const char* buf, int& 
 	} else if (strcmp(first, "dump_key") == 0) {
 		r = new op_dump_key(this->_connection, singleton<flared>::instance().get_cluster(), singleton<flared>::instance().get_storage());
 	} else if (strcmp(first, "flush_all") == 0) {
-		r = new op_flush_all(this->_connection, singleton<flared>::instance().get_storage());
+		op_flush_all* fa = new op_flush_all(this->_connection, singleton<flared>::instance().get_storage());
+		fa->set_flush_all_enabled(ini_option_object().is_flush_all_enabled());
+		r = fa;
 	} else if (strcmp(first, "kill") == 0) {
 		r = new op_kill(this->_connection, singleton<flared>::instance().get_req_thread_pool(), singleton<flared>::instance().get_other_thread_pool());
 	} else if (strcmp(first, "quit") == 0) {

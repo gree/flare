@@ -116,13 +116,21 @@ structure RocksdbConfigSpec where
       throttles. flared default is ~1/4 of a 1 Gbps link — override per
       cluster to ~1/4 of the actual node NIC. flared: `rocksdb-snapshot-bwlimit`. -/
   snapshotBwlimit : Option Nat := none
+  /-- Administrative gate for the (unauthenticated) flush_all op: false makes
+      flared refuse it with SERVER_ERROR. Toggle cluster-wide in seconds with
+      `kubectl patch flarecluster ... spec.rocksdb.flushAllEnabled` — the
+      operator rewrites extra.conf + SIGHUPs, no restarts. (The flared option
+      `flush-all-enabled` is backend-agnostic; it lives under `rocksdb` here
+      because this block is the CRD's flared-tuning passthrough.) -/
+  flushAllEnabled : Option Bool := none
   deriving Repr, BEq
 
 /-- True when at least one rocksdb field has been set by the user. -/
 def RocksdbConfigSpec.hasAny (r : RocksdbConfigSpec) : Bool :=
   r.walTtlSeconds.isSome || r.walSizeLimitMb.isSome || r.syncWrites.isSome ||
   r.resyncFailureThreshold.isSome || r.walMaxBatchBytes.isSome ||
-  r.walSyncBwlimit.isSome || r.walSyncInterval.isSome || r.snapshotBwlimit.isSome
+  r.walSyncBwlimit.isSome || r.walSyncInterval.isSome || r.snapshotBwlimit.isSome ||
+  r.flushAllEnabled.isSome
 
 /-- Render the rocksdb spec as `extra.conf` lines (one per set field).
     Returns an empty string when no fields are set. Lines are joined with "\n";
@@ -154,6 +162,11 @@ def RocksdbConfigSpec.toExtraConf (r : RocksdbConfigSpec) : String :=
     | none => lines
   let lines := match r.snapshotBwlimit with
     | some n => lines ++ [s!"rocksdb-snapshot-bwlimit = {n}"]
+    | none => lines
+  let lines := match r.flushAllEnabled with
+    | some b =>
+      let v := if b then "true" else "false"
+      lines ++ [s!"flush-all-enabled = {v}"]
     | none => lines
   String.intercalate "\n" lines
 

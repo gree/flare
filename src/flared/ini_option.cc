@@ -99,6 +99,7 @@ ini_option::ini_option():
 		_rocksdb_wal_sync_interval(default_rocksdb_wal_sync_interval),
 		_rocksdb_backup_keep(default_rocksdb_backup_keep),
 		_rocksdb_snapshot_bwlimit(default_rocksdb_snapshot_bwlimit),
+		_flush_all_enabled(default_flush_all_enabled),
 		_reap_expired(default_reap_expired),
 		_reap_expired_interval(default_reap_expired_interval),
 		_reap_expired_chunk_size(default_reap_expired_chunk_size),
@@ -449,6 +450,10 @@ int ini_option::load() {
 			this->_rocksdb_snapshot_bwlimit = opt_var_map["rocksdb-snapshot-bwlimit"].as<int>();
 		}
 
+		if (opt_var_map.count("flush-all-enabled")) {
+			this->_flush_all_enabled = opt_var_map["flush-all-enabled"].as<bool>();
+		}
+
 		if (opt_var_map.count("reap-expired")) {
 			this->_reap_expired = opt_var_map["reap-expired"].as<bool>();
 		}
@@ -571,6 +576,11 @@ int ini_option::reload() {
 		if (opt_var_map.count("rocksdb-snapshot-bwlimit")) {
 			log_notice("  rocksdb_snapshot_bwlimit: %d -> %d", this->_rocksdb_snapshot_bwlimit, opt_var_map["rocksdb-snapshot-bwlimit"].as<int>());
 			this->_rocksdb_snapshot_bwlimit = opt_var_map["rocksdb-snapshot-bwlimit"].as<int>();
+		}
+
+		if (opt_var_map.count("flush-all-enabled")) {
+			log_notice("  flush_all_enabled: %d -> %d", this->_flush_all_enabled, opt_var_map["flush-all-enabled"].as<bool>());
+			this->_flush_all_enabled = opt_var_map["flush-all-enabled"].as<bool>();
 		}
 
 		if (opt_var_map.count("reap-expired")) {
@@ -843,6 +853,7 @@ int ini_option::_setup_config_option(program_options::options_description& optio
 		("rocksdb-wal-sync-interval",			program_options::value<int>(),		"inter-batch delay in usec for WAL incremental sync; 0 inherits reconstruction-interval (default 0, rocksdb only)")
 		("rocksdb-backup-keep",					program_options::value<int>(),		"number of on-disk named backups (checkpoints) to retain under data-dir/backups/; oldest pruned by name order (default 7, dynamic, rocksdb only)")
 		("rocksdb-snapshot-bwlimit",			program_options::value<int>(),		"bandwidth cap in KB/s for serving a snapshot-bootstrap stream (repl_snapshot); 0 = unlimited (default 32768 = ~256 Mbps, dynamic, rocksdb only)")
+		("flush-all-enabled",					program_options::value<bool>(),		"administrative gate for the flush_all op; false refuses it with SERVER_ERROR (default true, dynamic)")
 		("reap-expired",						program_options::value<bool>(),		"enable the background expire crawler that physically deletes past-expire keys on the partition master (default true, dynamic, rocksdb only)")
 		("reap-expired-interval",				program_options::value<int>(),		"seconds between full expire sweeps (default 300, dynamic, rocksdb only)")
 		("reap-expired-chunk-size",				program_options::value<int>(),		"keys scanned per chunk before the throttle sleep (default 10000, dynamic, rocksdb only)")

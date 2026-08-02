@@ -84,6 +84,9 @@ spec:
                       type: integer
                       minimum: 0
                       description: Bandwidth cap (KB/s) for serving snapshot-bootstrap streams (rocksdb-snapshot-bwlimit; sender-side, 0 = unlimited)
+                    flushAllEnabled:
+                      type: boolean
+                      description: Administrative gate for the unauthenticated flush_all op (flared flush-all-enabled; false = refuse with SERVER_ERROR; hot-toggleable)
                 circuitBreaker:
                   type: object
                   description: >-

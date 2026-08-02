@@ -106,6 +106,7 @@ private def getFlareClusterFromJson (json : Lean.Json) (name ns : String)
     walMaxBatchBytes := rocksdbObj.getObjValD "walMaxBatchBytes" |>.getNat?.toOption
     walSyncBwlimit := rocksdbObj.getObjValD "walSyncBwlimit" |>.getNat?.toOption
     snapshotBwlimit := rocksdbObj.getObjValD "snapshotBwlimit" |>.getNat?.toOption
+    flushAllEnabled := rocksdbObj.getObjValD "flushAllEnabled" |>.getBool?.toOption
     walSyncInterval := rocksdbObj.getObjValD "walSyncInterval" |>.getNat?.toOption
   }
   -- The circuit breaker knobs were published in the CRD examples and the

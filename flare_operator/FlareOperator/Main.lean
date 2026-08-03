@@ -28,6 +28,7 @@ import FlareOperator.Server.TcpServer
 import FlareOperator.Server.TopologyBroadcast
 import FlareOperator.Metrics.Prometheus
 import FlareOperator.Metrics.HttpServer
+import FlareOperator.Migration.Controller
 import FlareOperator.Health.HealthCheck
 
 namespace FlareOperator
@@ -833,6 +834,14 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
   let crd ← crdRef.get
   handleRocksdbConfig crd crName ns pendingConfRef
   handleClusterReplication crd (← stateRef.get) migrationRef pendingConfRef masterSnapshotRef metrics crName ns
+
+  -- 5a. Blue/green migrations (FlareMigration CRs whose spec.source is this
+  -- cluster). One pure-FSM step per tick; all destructive transitions sit
+  -- behind explicit spec approvals (machine-checked in Migration/Types.lean).
+  try
+    Migration.Controller.tick crName ns
+  catch e =>
+    IO.eprintln s!"[migration] tick error: {e}"
   -- Publish the migration phase/desired to Prometheus (-> Grafana Cloud).
   let migPhase ← migrationRef.get
   let phaseNum : Float := match migPhase with

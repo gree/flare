@@ -29,6 +29,7 @@ import FlareOperator.E2E.Tests.BackupRestore
 import FlareOperator.E2E.Tests.CircuitBreaker
 import FlareOperator.E2E.Tests.OperatorRestart
 import FlareOperator.E2E.Tests.NativeMetrics
+import FlareOperator.E2E.Tests.BlueGreenMigration
 
 open FlareOperator.E2E
 
@@ -56,5 +57,6 @@ def main (args : List String) : IO UInt32 :=
     Tests.BackupRestore.suite,
     Tests.CircuitBreaker.suite,
     Tests.OperatorRestart.suite,
-    Tests.NativeMetrics.suite
+    Tests.NativeMetrics.suite,
+    Tests.BlueGreenMigration.suite
   ] args

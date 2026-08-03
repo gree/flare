@@ -217,15 +217,27 @@ int handler_reconstruction::_run_once() {
 				if (peer_snapshot_supported) {
 					this->_thread->set_op("repl_snapshot");
 					log_notice("attempting snapshot bootstrap (physical reseed + WAL catch-up) instead of truncate+full-dump", 0);
-					op_repl_snapshot* sp = new op_repl_snapshot(c, this->_storage);
-					sp->set_bwlimit(this->_reconstruction_bwlimit);
-					if (sp->run_client() == 0) {
-						via_snapshot = true;
-						log_notice("snapshot bootstrap succeeded; skipping full dump (cursor and lineage seeded by the swap)", 0);
+					// FRESH connection: the WAL sync attempt above may have
+					// aborted MID-STREAM, leaving unread stream bytes on `c`.
+					// Reusing it desynchronizes the snapshot protocol — at
+					// best the client misreads a stale line as the reply
+					// ("peer declined snapshot (reply=LSN 19)", observed
+					// live), at worst the per-file raw reads are OFFSET and
+					// shifted garbage gets installed as the live DB.
+					shared_connection cs(new connection_tcp(this->_node_server_name, this->_node_server_port));
+					if (cs->open() < 0) {
+						log_warning("could not open a fresh connection for snapshot bootstrap -> falling back to truncate+full-dump", 0);
 					} else {
-						log_warning("snapshot bootstrap failed -> falling back to truncate+full-dump", 0);
+						op_repl_snapshot* sp = new op_repl_snapshot(cs, this->_storage);
+						sp->set_bwlimit(this->_reconstruction_bwlimit);
+						if (sp->run_client() == 0) {
+							via_snapshot = true;
+							log_notice("snapshot bootstrap succeeded; skipping full dump (cursor and lineage seeded by the swap)", 0);
+						} else {
+							log_warning("snapshot bootstrap failed -> falling back to truncate+full-dump", 0);
+						}
+						delete sp;
 					}
-					delete sp;
 				}
 				if (!via_snapshot) {
 					log_notice("truncating local storage before full-dump reconstruction so deletions on the source propagate (WAL sync was unavailable; see previous log line)", 0);
@@ -239,6 +251,18 @@ int handler_reconstruction::_run_once() {
 #endif
 
 		if (!via_snapshot) {
+		// FRESH connection for the dump as well: `c` may carry residue from
+		// an aborted WAL stream (see the snapshot rationale above), and
+		// op_dump's streamed VALUE parsing is just as offset-sensitive.
+		{
+			shared_connection cd(new connection_tcp(this->_node_server_name, this->_node_server_port));
+			if (cd->open() < 0) {
+				log_err("failed to open a fresh connection for the full dump (name=%s, port=%d)", this->_node_server_name.c_str(), this->_node_server_port);
+				return -1;
+			}
+			c = cd;
+			this->_connection = c;
+		}
 		op_dump* p = new op_dump(c, this->_cluster, this->_storage);
 
 		p->set_thread(this->_thread);

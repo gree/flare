@@ -320,10 +320,13 @@ private def handleClusterReplication
     (migrationRef : IO.Ref MigrationPhase)
     (pendingConfRef : IO.Ref (Option (String × Nat)))
     (masterSnapshotRef : IO.Ref (Option (List String)))
+    (driftTickRef : IO.Ref Nat)
     (metrics : OperatorMetrics)
     (crName ns : String) : IO Unit := do
   let repl := crd.spec.clusterReplication
   let rocksdb := crd.spec.rocksdb
+  driftTickRef.modify (· + 1)
+  let driftTick ← driftTickRef.get
   let phase ← migrationRef.get
   -- Current master set (one "<partition>:<server>" per partition master).
   let masterSig : List String := state.getNodes.filterMap fun n =>
@@ -355,6 +358,13 @@ private def handleClusterReplication
         | .error e => IO.eprintln s!"[flare-operator] warning: failed to reset migrationPhase: {e}"
         | .ok () => pure ()
         IO.eprintln s!"[TRACE] ClusterReplication: {phase.toString}->None | replication disabled (config cleared, SIGHUP sent)"
+    else if repl.serverName != "" && driftTick % 12 == 0 then
+      -- Steady-state guard (~60s cadence, only for clusters that ever had
+      -- replication configured): a flared whose stop-SIGHUP was lost keeps
+      -- streaming forever with the CM already saying false. Compare the
+      -- APPLIED state from flared's own stats and nudge just the drifted
+      -- pods (pre-rc32 flared without the stat is skipped).
+      let _ ← resignalReplicationDrift crName ns "cluster-replication = false" false ""
     return
 
   -- ABORT-ON-MASTER-CHANGE: if we are mid-migration and the master set differs
@@ -409,6 +419,17 @@ private def handleClusterReplication
       | .error e => IO.eprintln s!"[flare-operator] warning: failed to patch status: {e}"
       | .ok () => pure ()
       IO.eprintln s!"[TRACE] ClusterReplication: phase now {desiredPhase.toString} (matches applied mode={desiredMode})"
+    -- LEVEL-TRIGGER (~30s cadence): the one-shot SIGHUP after the config
+    -- write can land BEFORE the kubelet propagates the ConfigMap mount, and
+    -- the in-memory pendingConf re-signal does not survive restarts or its
+    -- own 60-tick give-up. Compare flared's APPLIED state (its
+    -- cluster_replication stats) against the desired one and nudge exactly
+    -- the drifted pods — this is what turned a lost re-signal into a
+    -- 107-minute silent stall of a migration's Duplicating phase.
+    if driftTick % 6 == 0 then
+      let nudged ← resignalReplicationDrift crName ns needle true desiredMode
+      if nudged > 0 then
+        IO.eprintln s!"[flare-operator] ClusterReplication: re-signalled {nudged} drifted pod(s) (desired mode={desiredMode})"
     return
   -- Desired mode not yet applied: write it, SIGHUP, register the propagation-
   -- confirmed re-signal, and snapshot the master set as the migration baseline.
@@ -757,6 +778,7 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
     (prepareCyclesRef : IO.Ref (List (String × Nat)))
     (pendingConfRef : IO.Ref (Option (String × Nat)))
     (masterSnapshotRef : IO.Ref (Option (List String)))
+    (driftTickRef : IO.Ref Nat)
     (metrics : OperatorMetrics) (leaseName identity : String)
     (crName ns : String) : IO Unit := do
   -- 1. Fetch CRD (handled by FSM, but we need it early for partition reduction check)
@@ -833,7 +855,7 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
   -- 5. Handle rocksdb config propagation + cluster replication migration
   let crd ← crdRef.get
   handleRocksdbConfig crd crName ns pendingConfRef
-  handleClusterReplication crd (← stateRef.get) migrationRef pendingConfRef masterSnapshotRef metrics crName ns
+  handleClusterReplication crd (← stateRef.get) migrationRef pendingConfRef masterSnapshotRef driftTickRef metrics crName ns
 
   -- 5a. Blue/green migrations (FlareMigration CRs whose spec.source is this
   -- cluster). One pure-FSM step per tick; all destructive transitions sit
@@ -984,7 +1006,7 @@ private def reconcileOnce (stateRef : IO.Ref FlareClusterState) (crdRef : IO.Ref
   -- Legacy path: no pending-based re-signal (throwaway ref) — immediate
   -- SIGHUP only, i.e. the historical behavior. Production runs the FSM path.
   handleRocksdbConfig crd crName ns (← IO.mkRef none)
-  handleClusterReplication crd (← stateRef.get) migrationRef (← IO.mkRef none) (← IO.mkRef none) metrics crName ns
+  handleClusterReplication crd (← stateRef.get) migrationRef (← IO.mkRef none) (← IO.mkRef none) (← IO.mkRef 0) metrics crName ns
 
 -- ===========================================================================
 -- Leader Election Helpers
@@ -1241,6 +1263,7 @@ def main (args : List String) : IO Unit := do
   -- Persistent breaker-trip flag (input to the reset hysteresis).
   let trippedRef ← IO.mkRef false
   let pendingConfRef ← IO.mkRef (none : Option (String × Nat))
+  let driftTickRef ← IO.mkRef (0 : Nat)
   -- Master set captured when a cluster-replication migration starts; a change
   -- mid-migration triggers a fail-safe abort (see handleClusterReplication).
   let masterSnapshotRef ← IO.mkRef (none : Option (List String))
@@ -1276,7 +1299,7 @@ def main (args : List String) : IO Unit := do
     let startTime ← IO.monoMsNow
     try
       -- Use FSM-driven reconcile (complete implementation with all 5 requirements)
-      reconcileOnceFSM stateRef crdRef migrationRef graceCyclesRef trippedRef prepareCyclesRef pendingConfRef masterSnapshotRef metrics leaseName identity crName ns
+      reconcileOnceFSM stateRef crdRef migrationRef graceCyclesRef trippedRef prepareCyclesRef pendingConfRef masterSnapshotRef driftTickRef metrics leaseName identity crName ns
     catch e =>
       IO.eprintln s!"[flare-operator] reconcile error: {e}"
     let endTime ← IO.monoMsNow

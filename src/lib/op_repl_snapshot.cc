@@ -144,13 +144,36 @@ int op_repl_snapshot::_run_server() {
 		const string& name = files[i].first;
 		uint64_t size = files[i].second;
 
-		snprintf(line, sizeof(line), "FILE %s %llu\r\n", name.c_str(), (unsigned long long)size);
+		// Per-file CRC-32, announced IN the FILE header so the receiver can
+		// verify the raw byte stream end-to-end (a desynced/torn transport
+		// otherwise installs shifted garbage as the live DB — observed as
+		// sticky RocksDB "Corruption: unknown WriteBatch tag"). The header
+		// gains a 4th token, which pre-CRC receivers parse-and-ignore
+		// (next_word), so mixed-version reseeds keep working. Costs one
+		// extra sequential read of the (hardlinked, immutable) checkpoint
+		// file before streaming it.
+		string child = cp_path + "/" + name;
+		uint32_t crc = 0;
+		{
+			FILE* cf = fopen(child.c_str(), "rb");
+			if (cf == NULL) {
+				log_err("failed to open checkpoint file for checksum [%s]", child.c_str());
+				r = -1;
+				break;
+			}
+			size_t got;
+			while ((got = fread(buf, 1, kSnapshotChunkBytes, cf)) > 0) {
+				crc = util::crc32(crc, reinterpret_cast<const uint8_t*>(buf), got);
+			}
+			fclose(cf);
+		}
+
+		snprintf(line, sizeof(line), "FILE %s %llu %u\r\n", name.c_str(), (unsigned long long)size, crc);
 		if (this->_connection->write(line, strlen(line)) < 0) {
 			r = -1;
 			break;
 		}
 
-		string child = cp_path + "/" + name;
 		FILE* fp = fopen(child.c_str(), "rb");
 		if (fp == NULL) {
 			log_err("failed to open checkpoint file [%s]", child.c_str());
@@ -292,6 +315,19 @@ int op_repl_snapshot::_run_client() {
 			r = -1;
 			break;
 		}
+		// Optional 4th token (servers with per-file checksums): CRC-32 of the
+		// file's raw bytes. Absent on older senders -> no verification.
+		bool has_crc = false;
+		uint32_t want_crc = 0;
+		n += util::next_word(p + n, q, sizeof(q));
+		if (q[0] != '\0') {
+			try {
+				want_crc = boost::lexical_cast<uint32_t>(q);
+				has_crc = true;
+			} catch (...) {
+				// unknown extra token: ignore (forward compatibility)
+			}
+		}
 		delete[] p;
 
 		// Path-traversal guard: reject separators and dotfiles outright.
@@ -309,6 +345,7 @@ int op_repl_snapshot::_run_client() {
 			break;
 		}
 		uint64_t got_total = 0;
+		uint32_t got_crc = 0;
 		while (got_total < size) {
 			int want = static_cast<int>(min<uint64_t>(kSnapshotChunkBytes, size - got_total));
 			char* data = NULL;
@@ -316,6 +353,7 @@ int op_repl_snapshot::_run_client() {
 				r = -1;
 				break;
 			}
+			got_crc = util::crc32(got_crc, reinterpret_cast<const uint8_t*>(data), static_cast<size_t>(want));
 			size_t written = fwrite(data, 1, want, fp);
 			delete[] data;
 			if (written != static_cast<size_t>(want)) {
@@ -327,6 +365,15 @@ int op_repl_snapshot::_run_client() {
 		}
 		fclose(fp);
 		received += got_total;
+		if (r == 0 && has_crc && got_crc != want_crc) {
+			// A checksum mismatch means the transport delivered different
+			// bytes than the sender read from the checkpoint — installing
+			// them would corrupt the live DB. Abort; the caller falls back
+			// to the logical dump and the staging dir is discarded.
+			log_err("snapshot file checksum mismatch [%s] (want=%u, got=%u) -> aborting snapshot bootstrap",
+				name.c_str(), want_crc, got_crc);
+			r = -1;
+		}
 	}
 
 	if (r == 0) {

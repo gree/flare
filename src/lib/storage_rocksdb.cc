@@ -1030,6 +1030,32 @@ int storage_rocksdb::prepare_snapshot_staging(string& out_dir) {
 }
 
 int storage_rocksdb::swap_in_snapshot(const string& staging_dir, uint64_t checkpoint_seq) {
+	// STRUCTURAL VERIFICATION before the point of no return: open the staged
+	// checkpoint read-only (parses MANIFEST + replays its WAL) and touch one
+	// key. The per-file CRC in the transfer protocol catches transport
+	// corruption; this catches everything else (truncated files, a bad
+	// checkpoint). Refusing here keeps the CURRENT data intact and lets the
+	// caller fall back to the logical dump — swapping first and discovering
+	// corruption later leaves the node with a poisoned DB whose writes all
+	// fail with a sticky Corruption status (observed live).
+	{
+		rocksdb::DB* probe = NULL;
+		rocksdb::Options probe_options = this->_options;
+		probe_options.create_if_missing = false;
+		rocksdb::Status ps = rocksdb::DB::OpenForReadOnly(probe_options, staging_dir, &probe);
+		if (!ps.ok()) {
+			log_err("swap_in_snapshot: staged checkpoint failed verification (open: %s) -> refusing swap", ps.ToString().c_str());
+			return -1;
+		}
+		string tmp;
+		rocksdb::Status gs = probe->Get(rocksdb::ReadOptions(), storage_rocksdb::kReplMasterIdKey, &tmp);
+		delete probe;
+		if (!gs.ok() && !gs.IsNotFound()) {
+			log_err("swap_in_snapshot: staged checkpoint failed verification (read: %s) -> refusing swap", gs.ToString().c_str());
+			return -1;
+		}
+	}
+
 	// Exclusive access for the whole swap: writers/readers take the
 	// wholelock in read mode, so a write lock parks every op while the DB
 	// handle is torn down and rebuilt. The node is a Prepare slave during

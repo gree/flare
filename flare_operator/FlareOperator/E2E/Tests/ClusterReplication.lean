@@ -119,6 +119,26 @@ def suite : TestSuite := {
           | .ok data => return .fail s!"ConfigMap missing replication settings after 60s: {data}"
           | .error e => return .fail s!"could not read ConfigMap: {e}" },
 
+    -- flared exposes its APPLIED replication state via stats
+    -- (`cluster_replication` on/off + `cluster_replication_mode`). This is
+    -- the observable the operator's level-triggered drift re-signal keys on:
+    -- without it, a SIGHUP that raced the ConfigMap mount propagation left
+    -- flared silently running the OLD config (a migration's Duplicating
+    -- phase once sat at 0 keys for 107 minutes). Poll until some v1 pod
+    -- reports it applied — the drift re-signal itself is what converges this
+    -- when the first SIGHUP was too early.
+    { name := "flared stats report the APPLIED replication state (drift observable)"
+      run := do
+        let ok ← waitForCondition "stats cluster_replication on/duplicate" 120 do
+          let some ip ← getPodIp s!"{cfgV1.name}-nodes-0" cfgV1.«namespace» | return false
+          let cmd := s!"printf 'stats\\r\\n' | nc -w 3 {ip} {cfgV1.flarePort}"
+          match ← execInDebugPod cfgV1.debugPod cfgV1.«namespace» cmd with
+          | .ok out => return containsSubstr out "STAT cluster_replication on"
+                          && containsSubstr out "STAT cluster_replication_mode duplicate"
+          | .error _ => return false
+        if ok then return .pass
+        else return .fail "flared never reported applied replication state (stat missing or config never applied)" },
+
     -- Test 5: THE SHRINK — pre-existing keys from v1's two partitions migrate
     -- to v2's single partition via the DUPLICATE-mode dump (no manual step: the
     -- operator applies mode=duplicate on enable and re-SIGHUPs once it lands on

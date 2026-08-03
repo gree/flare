@@ -155,6 +155,11 @@ public:
 	static in_addr_t inet_addr(const char *cp, const uint32_t netmask = 0xffffffff);
 	static int get_fqdn(string& fqdn);
 	static inline unsigned int next_word(const char* src, char* dst, unsigned int dst_len);
+	// Incremental CRC-32 (IEEE 802.3, same polynomial/convention as zlib's
+	// crc32()): start with crc=0, feed chunks, the final value is the
+	// checksum. Used to protect raw file streaming (snapshot bootstrap)
+	// against transport-layer desync/corruption.
+	static uint32_t crc32(uint32_t crc, const uint8_t* data, size_t len);
 	static inline unsigned int next_digit(const char* src, char* dst, unsigned int dst_len);
 	static time_t realtime(time_t t);
 	static string base64_encode(const char* src, size_t src_size);

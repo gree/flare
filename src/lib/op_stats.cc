@@ -292,23 +292,6 @@ int op_stats::_send_stats_threads_queue() {
 	return 0;
 }
 
-template<typename T>
-int op_stats::_send_text_stat(const char* key, const T& value) {
-	_text_stream << "STAT " << key << ' ' << value << line_delimiter;
-	return 0;
-}
-
-template<typename T>
-int op_stats::_send_binary_stat(const char* key, const T& value) {
-	std::ostringstream body_os;
-	body_os << key << value;
-	const std::string& body = body_os.str();
-	binary_response_header header(this->_opcode);
-	header.set_key_length(strlen(key));
-	header.set_total_body_length(body.size());
-	return op::_send_binary_response(header, body.data(), true);
-}
-
 int op_stats::_send_text_result(result r, const char* message) {
 	int result = 0;
 	if (r == result_end) {

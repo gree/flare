@@ -284,6 +284,18 @@ namespace test_util
 		return NULL;
 	}
 
+	void test_crc32()
+	{
+		// IEEE 802.3 / zlib check vector: crc32("123456789") == 0xCBF43926
+		const uint8_t v[] = "123456789";
+		cut_assert_equal_uint(0xCBF43926u, util::crc32(0, v, 9));
+		// incremental feeding must equal one-shot
+		uint32_t inc = util::crc32(0, v, 4);
+		inc = util::crc32(inc, v + 4, 5);
+		cut_assert_equal_uint(0xCBF43926u, inc);
+		cut_assert_equal_uint(0u, util::crc32(0, v, 0));
+	}
+
 	void test_atomic_counter()
 	{
 		{

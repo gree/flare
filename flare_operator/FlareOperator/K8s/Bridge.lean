@@ -362,6 +362,54 @@ def patchFlareClusterStatus (crName ns : String) (phase : MigrationPhase)
 def queryPodStats (podName ns : String) (statsCmd : String) : IO (Except String String) :=
   execInPod podName ns ["bash", "-c", s!"exec 3<>/dev/tcp/localhost/12121; printf '{statsCmd}\\r\\n' >&3; timeout 3 cat <&3; exec 3>&-"]
 
+/-- LEVEL-TRIGGERED replication reconciliation: for every flared pod whose
+    MOUNTED extra.conf already carries `needle` but whose RUNTIME state
+    (per the `cluster_replication` / `cluster_replication_mode` stats) does
+    not match the desired (enabled, mode), send a targeted SIGHUP.
+
+    This is the durable replacement for relying solely on the one-shot
+    write+SIGHUP+pendingConf chain: that re-signal lives in operator memory,
+    and losing it (restart, give-up, leader change) used to leave flared
+    running the OLD replication config forever — observed live as a
+    migration's Duplicating phase sitting at 0 keys for 107 minutes because
+    flared had reloaded `cluster_replication: false -> false` moments before
+    the ConfigMap mount caught up, and no second SIGHUP ever came.
+
+    Returns the number of pods nudged. Safe to call every tick: a pod in
+    the desired state is never signalled, and a pod whose mount has not
+    propagated yet is skipped (SIGHUPing it would just re-apply old values;
+    the next tick retries). -/
+def resignalReplicationDrift (crName ns needle : String)
+    (wantEnabled : Bool) (wantMode : String) : IO Nat := do
+  let pods ← listFlaredPods crName ns
+  let mut nudged := 0
+  for pod in pods do
+    -- mounted file first: only pods that CAN apply the desired config
+    let mounted : Bool ← do
+      match ← execInPod pod.name ns ["sh", "-c", "cat /etc/flared/extra.conf 2>/dev/null || true"] with
+      | .ok content => pure (decide ((content.splitOn needle).length > 1))
+      | .error _ => pure false
+    if mounted then
+      match ← queryPodStats pod.name ns "stats" with
+      | .error _ => pure ()  -- unreadable pod: not ours to fix this tick
+      | .ok out =>
+        let lines := out.splitOn "\n" |>.map (fun l => l.trim.replace "\r" "")
+        let stat (k : String) : Option String :=
+          lines.findSome? fun l =>
+            if l.startsWith s!"STAT {k} " then some (l.drop (s!"STAT {k} ".length)) else none
+        -- flared without the stat (pre-rc32) is unobservable: skip rather
+        -- than SIGHUP-spamming it every pass on a permanent "mismatch".
+        let observable := (stat "cluster_replication").isSome
+        let appliedOn := (stat "cluster_replication").getD "off" == "on"
+        let appliedMode := (stat "cluster_replication_mode").getD ""
+        let ok := if wantEnabled then appliedOn && appliedMode == wantMode else !appliedOn
+        if observable && !ok then
+          IO.eprintln s!"[flare-operator] replication drift on {pod.name} (applied on={appliedOn} mode={appliedMode}, want enabled={wantEnabled} mode={wantMode}) -> SIGHUP"
+          match ← execInPod pod.name ns ["kill", "-HUP", "1"] with
+          | .error e => IO.eprintln s!"[flare-operator] warning: drift SIGHUP to {pod.name} failed: {e}"
+          | .ok _ => nudged := nudged + 1
+  return nudged
+
 -- ===========================================================================
 -- Convenience: extract live node keys from PodInfo list
 -- ===========================================================================

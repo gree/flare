@@ -1008,6 +1008,38 @@ int storage_rocksdb::create_snapshot_checkpoint(string& out_path, uint64_t& out_
 	return 0;
 }
 
+int storage_rocksdb::disable_file_deletions() {
+	pthread_rwlock_rdlock(&this->_mutex_wholelock);
+	int r = -1;
+	if (this->_db != NULL) {
+		rocksdb::Status s = this->_db->DisableFileDeletions();
+		if (s.ok()) {
+			r = 0;
+		} else {
+			log_err("DisableFileDeletions failed: %s", s.ToString().c_str());
+		}
+	}
+	pthread_rwlock_unlock(&this->_mutex_wholelock);
+	return r;
+}
+
+int storage_rocksdb::enable_file_deletions() {
+	pthread_rwlock_rdlock(&this->_mutex_wholelock);
+	int r = -1;
+	if (this->_db != NULL) {
+		// non-forced: balances nested disable/enable pairs (each caller
+		// releases only its own pin)
+		rocksdb::Status s = this->_db->EnableFileDeletions(false);
+		if (s.ok()) {
+			r = 0;
+		} else {
+			log_err("EnableFileDeletions failed: %s", s.ToString().c_str());
+		}
+	}
+	pthread_rwlock_unlock(&this->_mutex_wholelock);
+	return r;
+}
+
 int storage_rocksdb::remove_snapshot_checkpoint(const string& path) {
 	// Only ever remove our own staging dir — refuse anything else so a bug
 	// in the caller cannot escalate into deleting the live DB.

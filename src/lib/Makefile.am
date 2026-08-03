@@ -57,6 +57,7 @@ libflare_la_SOURCES = \
 	op_meta.h op_meta.cc \
 	op_repl_sync_wal.h op_repl_sync_wal.cc \
 	op_repl_snapshot.h op_repl_snapshot.cc \
+	op_repl_snapshot_push.h op_repl_snapshot_push.cc \
 	op_orphan_scan.h op_orphan_scan.cc \
 	op_orphan_purge.h op_orphan_purge.cc \
 	op_backup.h op_backup.cc \

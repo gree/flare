@@ -91,7 +91,15 @@ int op_repl_snapshot::_run_server() {
 
 	string cp_path;
 	uint64_t cp_seq = 0;
+	// PIN file deletions for the whole serve: the receiver's follow-up WAL
+	// catch-up needs the range (cp_seq, now] to still exist on THIS node when
+	// the transfer finishes; without the pin a small wal-ttl/size cap can
+	// purge it mid-stream on large transfers (unpinned in every exit path).
+	if (rdb->disable_file_deletions() < 0) {
+		return this->_send_result(result_server_error, "pin_failed");
+	}
 	if (rdb->create_snapshot_checkpoint(cp_path, cp_seq) < 0) {
+		rdb->enable_file_deletions();
 		return this->_send_result(result_server_error, "checkpoint_failed");
 	}
 
@@ -100,6 +108,7 @@ int op_repl_snapshot::_run_server() {
 	DIR* d = opendir(cp_path.c_str());
 	if (d == NULL) {
 		rdb->remove_snapshot_checkpoint(cp_path);
+		rdb->enable_file_deletions();
 		return this->_send_result(result_server_error, "checkpoint_unreadable");
 	}
 	struct dirent* ent;
@@ -121,6 +130,7 @@ int op_repl_snapshot::_run_server() {
 		(unsigned long long)cp_seq, rdb->get_master_id().c_str(), files.size());
 	if (this->_connection->write(line, strlen(line)) < 0) {
 		rdb->remove_snapshot_checkpoint(cp_path);
+		rdb->enable_file_deletions();
 		return -1;
 	}
 
@@ -205,6 +215,7 @@ int op_repl_snapshot::_run_server() {
 	delete[] buf;
 
 	rdb->remove_snapshot_checkpoint(cp_path);
+	rdb->enable_file_deletions();
 
 	if (r < 0) {
 		// The stream is torn mid-file; the peer detects the short read and

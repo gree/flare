@@ -233,6 +233,13 @@ public:
 	// Caller must remove_snapshot_checkpoint() when done streaming.
 	int create_snapshot_checkpoint(string& out_path, uint64_t& out_seq);
 	int remove_snapshot_checkpoint(const string& path);
+	// Pin SST + archived-WAL deletion while a snapshot (+ its WAL tail) is
+	// being streamed, so the needed range cannot be purged mid-transfer no
+	// matter how small wal-ttl/size caps are. MUST be paired with
+	// enable_file_deletions() on every exit path; the cost while held is
+	// disk growth bounded by the transfer duration.
+	int disable_file_deletions();
+	int enable_file_deletions();
 	// Slave side: replace the live DB with the received checkpoint (staging
 	// dir is renamed into place under the whole-storage write lock — readers
 	// and writers are excluded for the swap) and seed the replication cursor

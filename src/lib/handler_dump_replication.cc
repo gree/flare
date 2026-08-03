@@ -30,6 +30,7 @@
 #include "handler_dump_replication.h"
 #include "connection_tcp.h"
 #include "op_set.h"
+#include "op_repl_snapshot_push.h"
 #include "op_meta.h"
 #include <inttypes.h>
 
@@ -89,6 +90,7 @@ int handler_dump_replication::run() {
 		this->_replication_server_port,
 		storage::type_cast(this->_storage->get_type()).c_str());
 	bool use_wal_replication = false;
+	bool peer_snapshot_push_supported = false;
 #ifdef HAVE_LIBROCKSDB
 	// Check if local storage is RocksDB
 	if (this->_storage->get_type() == storage::type_rocksdb) {
@@ -105,6 +107,7 @@ int handler_dump_replication::run() {
 			} else {
 				log_info("master does not support RocksDB WAL, using full dump replication", 0);
 			}
+			peer_snapshot_push_supported = meta_op->get_peer_snapshot_push_supported();
 			delete meta_op;
 		}
 	}
@@ -176,10 +179,59 @@ int handler_dump_replication::run() {
 	}
 #endif
 
+	// Phase 2.5: physical initial transfer (snapshot push). Only when the
+	// destination advertises support; the receiver itself enforces the two
+	// preconditions (same partition COUNT and a fresh target) and redirects
+	// us to the right partition master behind a Service/LB. Any decline or
+	// failure falls through to the legacy merge dump below, unchanged.
+	bool via_snapshot_push = false;
+#ifdef HAVE_LIBROCKSDB
+	if (peer_snapshot_push_supported && this->_storage->get_type() == storage::type_rocksdb) {
+		cluster::node self = this->_cluster->get_node(this->_cluster->get_server_name(), this->_cluster->get_server_port());
+		int sp_partition = self.node_partition;
+		int sp_partition_size = this->_cluster->get_node_partition_map_size();
+		if (sp_partition >= 0) {
+			this->_thread->set_op("repl_snapshot_push");
+			string dest_name = this->_replication_server_name;
+			int dest_port = this->_replication_server_port;
+			for (int hops = 0; hops < 3; hops++) {
+				// FRESH connection per attempt: the shared handler connection
+				// may carry residue from the WAL exchange above, and a
+				// redirect needs a different peer anyway.
+				shared_connection cs(new connection_tcp(dest_name, dest_port));
+				if (cs->open() < 0) {
+					log_warning("snapshot push: cannot connect to %s:%d", dest_name.c_str(), dest_port);
+					break;
+				}
+				op_repl_snapshot_push* sp = new op_repl_snapshot_push(cs, this->_cluster, this->_storage);
+				int spr = sp->run_client(sp_partition, sp_partition_size);
+				op_repl_snapshot_push::client_result sp_rc = sp->get_client_result();
+				string redirect_host = sp->get_redirect_host();
+				int redirect_port = sp->get_redirect_port();
+				delete sp;
+				if (spr == 0) {
+					via_snapshot_push = true;
+					log_notice("initial transfer completed via snapshot push (partition=%d, dest=%s:%d) -> skipping full dump",
+						sp_partition, dest_name.c_str(), dest_port);
+					break;
+				}
+				if (sp_rc == op_repl_snapshot_push::client_result_redirect && redirect_port > 0) {
+					log_notice("snapshot push redirected to %s:%d", redirect_host.c_str(), redirect_port);
+					dest_name = redirect_host;
+					dest_port = redirect_port;
+					continue;
+				}
+				log_notice("snapshot push not applicable (declined or failed) -> full dump", 0);
+				break;
+			}
+		}
+	}
+#endif
+
 	// Phase 3: Full dump replication (legacy mode or fallback)
 	this->_thread->set_op("dump");
 
-	if (this->_storage->iter_begin() < 0) {
+	if (!via_snapshot_push && this->_storage->iter_begin() < 0) {
 		log_err("database busy", 0);
 		return -1;
 	}
@@ -195,7 +247,8 @@ int handler_dump_replication::run() {
 			   this->_replication_server_name.c_str(), this->_replication_server_port, partition, partition_size, wait, this->_bwlimitter.get_bwlimit());
 	storage::entry e;
 	storage::iteration i;
-	while ((i = this->_storage->iter_next(e.key)) == storage::iteration_continue
+	while (!via_snapshot_push
+			&& (i = this->_storage->iter_next(e.key)) == storage::iteration_continue
 			&& this->_thread && !this->_thread->is_shutdown_request()) {
 		if (partition >= 0) {
 			partition_size = this->_cluster->get_node_partition_map_size();
@@ -235,7 +288,9 @@ int handler_dump_replication::run() {
 		}
 	}
 
-	this->_storage->iter_end();
+	if (!via_snapshot_push) {
+		this->_storage->iter_end();
+	}
 	bool dump_succeeded = !this->_thread->is_shutdown_request();
 	if (dump_succeeded) {
 		log_notice("dump replication completed (dest=%s:%d, partition=%d, partition_size=%d, interval=%d, bwlimit=%" PRIu64 ")",

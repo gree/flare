@@ -86,6 +86,7 @@ storage_rocksdb::storage_rocksdb(
 	_wal_sync_master_id_mismatch(0),
 	_wal_sync_apply_failure(0),
 	_wal_sync_other_error(0),
+	_wal_sync_crc_mismatch(0),
 	_wal_fallback_to_dump(0),
 	_expire_reaped(0),
 	_snapshot_bootstrap(0),

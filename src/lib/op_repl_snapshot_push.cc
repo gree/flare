@@ -25,6 +25,7 @@
  */
 #include "op_repl_snapshot_push.h"
 #include "bwlimitter.h"
+#include "connection_tcp.h"
 #include "util.h"
 #include <boost/lexical_cast.hpp>
 #ifdef HAVE_LIBROCKSDB
@@ -49,6 +50,7 @@ op_repl_snapshot_push::op_repl_snapshot_push(shared_connection c, cluster* cl, s
 		_partition(0),
 		_partition_size(0),
 		_bwlimit(0),
+		_relay(false),
 		_client_result(client_result_none),
 		_redirect_port(0) {
 }
@@ -88,12 +90,22 @@ int op_repl_snapshot_push::_parse_text_server_parameters() {
 			return -1;
 		}
 	}
-	util::next_word(p + n, q, sizeof(q));
+	n += util::next_word(p + n, q, sizeof(q));
 	if (q[0]) {
 		try {
 			this->_bwlimit = boost::lexical_cast<uint64_t>(q);
 		} catch (...) {
 			// optional; ignore
+		}
+	}
+	// optional trailing tokens (any order, forward compatible)
+	for (;;) {
+		n += util::next_word(p + n, q, sizeof(q));
+		if (q[0] == '\0') {
+			break;
+		}
+		if (strcmp(q, "relay=1") == 0) {
+			this->_relay = true;
 		}
 	}
 	delete[] p;
@@ -126,32 +138,46 @@ int op_repl_snapshot_push::_run_server() {
 		return this->_send_result(result_server_error, "partition_count_mismatch");
 	}
 
-	// Route to the local master of the pushed partition: only the master may
-	// swap (its slaves then reseed from it through the normal intra-cluster
-	// path). A slave/proxy receiving the stream answers with a redirect.
+	// Route/authorize by role. A cross-cluster push must land on the local
+	// master of that partition (a Service/LB can pin the connection to any
+	// node -> redirect); an intra-destination RELAY hop (from our own master,
+	// fanning the seed out) is accepted only by an Active slave of the
+	// partition.
 	{
 		string self_key = this->_cluster->to_node_key(this->_cluster->get_server_name(), this->_cluster->get_server_port());
 		vector<cluster::node> nodes = this->_cluster->get_node();
 		string master_key;
+		bool self_is_partition_slave = false;
 		for (vector<cluster::node>::iterator it = nodes.begin(); it != nodes.end(); it++) {
-			if (it->node_role == cluster::role_master
-					&& it->node_partition == this->_partition
-					&& it->node_state == cluster::state_active) {
-				master_key = this->_cluster->to_node_key(it->node_server_name, it->node_server_port);
-				break;
+			if (it->node_partition != this->_partition || it->node_state != cluster::state_active) {
+				continue;
+			}
+			string key = this->_cluster->to_node_key(it->node_server_name, it->node_server_port);
+			if (it->node_role == cluster::role_master && master_key.empty()) {
+				master_key = key;
+			}
+			if (it->node_role == cluster::role_slave && key == self_key) {
+				self_is_partition_slave = true;
 			}
 		}
-		if (master_key.empty()) {
-			return this->_send_result(result_server_error, "no_active_master_for_partition");
-		}
-		if (master_key != self_key) {
-			string host;
-			int port = 0;
-			this->_cluster->from_node_key(master_key, host, port);
-			char line[BUFSIZ];
-			snprintf(line, sizeof(line), "REDIRECT %s %d\r\n", host.c_str(), port);
-			log_notice("redirecting snapshot push for partition %d to its master [%s]", this->_partition, master_key.c_str());
-			return this->_connection->write(line, strlen(line)) < 0 ? -1 : 0;
+		if (this->_relay) {
+			if (!self_is_partition_slave) {
+				log_warning("declining snapshot push relay hop: this node is not an Active slave of partition %d", this->_partition);
+				return this->_send_result(result_server_error, "bad_relay_target");
+			}
+		} else {
+			if (master_key.empty()) {
+				return this->_send_result(result_server_error, "no_active_master_for_partition");
+			}
+			if (master_key != self_key) {
+				string host;
+				int port = 0;
+				this->_cluster->from_node_key(master_key, host, port);
+				char line[BUFSIZ];
+				snprintf(line, sizeof(line), "REDIRECT %s %d\r\n", host.c_str(), port);
+				log_notice("redirecting snapshot push for partition %d to its master [%s]", this->_partition, master_key.c_str());
+				return this->_connection->write(line, strlen(line)) < 0 ? -1 : 0;
+			}
 		}
 	}
 
@@ -299,6 +325,16 @@ int op_repl_snapshot_push::_run_server() {
 		return -1;
 	}
 
+	// Intra-destination fan-out BEFORE our own swap: the seed arrives via
+	// files, not via the write path, so our Active slaves would otherwise
+	// silently stay empty (relay only ships normal writes). Best-effort per
+	// slave — a failed hop is logged loudly and that slave stays diverged
+	// until its next reconstruction; it never blocks the partition seed.
+	vector<shared_connection> slave_sessions;
+	if (!this->_relay) {
+		this->_relay_staging_to_slaves(staging, cp_seq, slave_sessions);
+	}
+
 	// verification (CRC above + read-only structural probe inside) and swap
 	if (rdb->swap_in_snapshot(staging, cp_seq) < 0) {
 		return -1;
@@ -308,7 +344,8 @@ int op_repl_snapshot_push::_run_server() {
 	}
 	log_notice("snapshot push: swapped in (seq=%llu); receiving WAL tail", (unsigned long long)cp_seq);
 
-	// ---- WAL tail: replay source-side writes committed since the checkpoint ----
+	// ---- WAL tail: replay source-side writes committed since the checkpoint,
+	// forwarding each batch to the slave sessions established above ----
 	uint64_t applied = 0;
 	for (;;) {
 		if (this->_connection->readline(&p) < 0) {
@@ -347,12 +384,45 @@ int op_repl_snapshot_push::_run_server() {
 			return -1;
 		}
 		rocksdb::WriteBatch batch(string(data, size));
-		delete[] data;
 		if (rdb->apply_batch_with_lsn(batch, lsn) < 0) {
 			log_err("snapshot push: failed to apply WAL batch (lsn=%llu)", (unsigned long long)lsn);
+			delete[] data;
 			return -1;
 		}
+		// forward the identical batch to each slave session (drop dead ones)
+		for (size_t si = 0; si < slave_sessions.size(); si++) {
+			if (!slave_sessions[si]) {
+				continue;
+			}
+			char wline[64];
+			snprintf(wline, sizeof(wline), "WBATCH %llu %llu\r\n",
+				(unsigned long long)lsn, (unsigned long long)size);
+			if (slave_sessions[si]->write(wline, strlen(wline)) < 0
+					|| slave_sessions[si]->write(data, static_cast<int>(size)) < 0) {
+				log_warning("snapshot push: slave session %zu died while forwarding WAL tail -> dropping it (that slave stays diverged until its next reconstruction)", si);
+				slave_sessions[si] = shared_connection();
+			}
+		}
+		delete[] data;
 		applied++;
+	}
+	// close out the slave sessions
+	for (size_t si = 0; si < slave_sessions.size(); si++) {
+		if (!slave_sessions[si]) {
+			continue;
+		}
+		if (slave_sessions[si]->write("WEND\r\n", 6) < 0) {
+			continue;
+		}
+		char* sp = NULL;
+		if (slave_sessions[si]->readline(&sp) >= 0 && sp != NULL) {
+			char sq[64];
+			util::next_word(sp, sq, sizeof(sq));
+			if (strcmp(sq, "STORED") != 0) {
+				log_warning("snapshot push: slave session %zu did not confirm STORED", si);
+			}
+			delete[] sp;
+		}
 	}
 
 	char line[64];
@@ -365,6 +435,151 @@ int op_repl_snapshot_push::_run_server() {
 	return 0;
 #else
 	return this->_send_result(result_server_error, "not_compiled");
+#endif
+}
+
+/**
+ *	Fan the staged checkpoint out to this partition's Active slaves (relay
+ *	hops). Each successful session has already verified + swapped its copy
+ *	and is left OPEN, waiting for the WAL-tail WBATCH forwards; failures are
+ *	logged and skipped (best-effort).
+ */
+int op_repl_snapshot_push::_relay_staging_to_slaves(const string& staging, uint64_t cp_seq,
+		vector<shared_connection>& slave_sessions) {
+#ifdef HAVE_LIBROCKSDB
+	storage_rocksdb* rdb = dynamic_cast<storage_rocksdb*>(this->_storage);
+	if (rdb == NULL) {
+		return -1;
+	}
+	string self_key = this->_cluster->to_node_key(this->_cluster->get_server_name(), this->_cluster->get_server_port());
+
+	// enumerate the staged files once
+	vector<pair<string, uint64_t> > files;
+	{
+		DIR* d = opendir(staging.c_str());
+		if (d == NULL) {
+			return -1;
+		}
+		struct dirent* ent;
+		while ((ent = readdir(d)) != NULL) {
+			string fn = ent->d_name;
+			if (fn == "." || fn == "..") {
+				continue;
+			}
+			struct stat st;
+			string child = staging + "/" + fn;
+			if (stat(child.c_str(), &st) == 0 && S_ISREG(st.st_mode)) {
+				files.push_back(make_pair(fn, static_cast<uint64_t>(st.st_size)));
+			}
+		}
+		closedir(d);
+	}
+
+	char* buf = new char[kPushChunkBytes];
+	vector<cluster::node> nodes = this->_cluster->get_node();
+	for (vector<cluster::node>::iterator it = nodes.begin(); it != nodes.end(); it++) {
+		if (it->node_role != cluster::role_slave
+				|| it->node_partition != this->_partition
+				|| it->node_state != cluster::state_active) {
+			continue;
+		}
+		string skey = this->_cluster->to_node_key(it->node_server_name, it->node_server_port);
+		if (skey == self_key) {
+			continue;
+		}
+		shared_connection sc(new connection_tcp(it->node_server_name, it->node_server_port));
+		if (sc->open() < 0) {
+			log_warning("snapshot push relay: cannot connect to slave [%s] -> skipped (it stays diverged until its next reconstruction)", skey.c_str());
+			continue;
+		}
+		char line[BUFSIZ];
+		snprintf(line, sizeof(line), "repl_snapshot_push %d %d 0 relay=1", this->_partition, this->_partition_size);
+		if (sc->writeline(line) < 0) {
+			continue;
+		}
+		char* p = NULL;
+		if (sc->readline(&p) < 0) {
+			continue;
+		}
+		char q[BUFSIZ];
+		util::next_word(p, q, sizeof(q));
+		bool ok = (strcmp(q, "OK") == 0);
+		if (!ok) {
+			log_warning("snapshot push relay: slave [%s] declined (%s) -> skipped", skey.c_str(), p);
+			delete[] p;
+			continue;
+		}
+		delete[] p;
+
+		int sr = 0;
+		snprintf(line, sizeof(line), "SNAPSHOT %llu %s %zu\r\n",
+			(unsigned long long)cp_seq, rdb->get_master_id().c_str(), files.size());
+		if (sc->write(line, strlen(line)) < 0) {
+			continue;
+		}
+		for (size_t i = 0; i < files.size() && sr == 0; i++) {
+			const string& name = files[i].first;
+			uint64_t size = files[i].second;
+			string child = staging + "/" + name;
+			uint32_t crc = 0;
+			{
+				FILE* cf = fopen(child.c_str(), "rb");
+				if (cf == NULL) {
+					sr = -1;
+					break;
+				}
+				size_t got;
+				while ((got = fread(buf, 1, kPushChunkBytes, cf)) > 0) {
+					crc = util::crc32(crc, reinterpret_cast<const uint8_t*>(buf), got);
+				}
+				fclose(cf);
+			}
+			snprintf(line, sizeof(line), "FILE %s %llu %u\r\n", name.c_str(), (unsigned long long)size, crc);
+			if (sc->write(line, strlen(line)) < 0) {
+				sr = -1;
+				break;
+			}
+			FILE* fp = fopen(child.c_str(), "rb");
+			if (fp == NULL) {
+				sr = -1;
+				break;
+			}
+			uint64_t sent = 0;
+			while (sent < size) {
+				size_t want = static_cast<size_t>(min<uint64_t>(kPushChunkBytes, size - sent));
+				size_t got = fread(buf, 1, want, fp);
+				if (got == 0 || sc->write(buf, static_cast<int>(got)) < 0) {
+					sr = -1;
+					break;
+				}
+				sent += got;
+			}
+			fclose(fp);
+		}
+		if (sr < 0) {
+			log_warning("snapshot push relay: streaming to slave [%s] failed -> skipped", skey.c_str());
+			continue;
+		}
+		if (sc->write("END\r\n", 5) < 0) {
+			continue;
+		}
+		if (sc->readline(&p) < 0) {
+			continue;
+		}
+		util::next_word(p, q, sizeof(q));
+		bool swapped = (strcmp(q, "SWAPPED") == 0);
+		delete[] p;
+		if (!swapped) {
+			log_warning("snapshot push relay: slave [%s] did not confirm swap -> skipped", skey.c_str());
+			continue;
+		}
+		log_notice("snapshot push relay: slave [%s] seeded (seq=%llu)", skey.c_str(), (unsigned long long)cp_seq);
+		slave_sessions.push_back(sc);
+	}
+	delete[] buf;
+	return 0;
+#else
+	return -1;
 #endif
 }
 

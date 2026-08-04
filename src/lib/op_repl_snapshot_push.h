@@ -54,6 +54,15 @@
  *	bounded by the transfer duration (bwlimit-bound; raise
  *	rocksdb-snapshot-bwlimit for large migrations).
  *
+ *	INTRA-DESTINATION FAN-OUT: files arrive via a checkpoint, not via the
+ *	write path, so the destination master's OWN slaves would silently stay
+ *	empty (relay only ships normal writes). The receiving master therefore
+ *	chains the same op to each Active slave of its partition (request flag
+ *	`relay=1`; a slave accepts a relay hop instead of redirecting) and
+ *	forwards the WAL-tail batches to them as it applies each one — every
+ *	replica ends on the same lineage and cursor, and the live duplicate
+ *	stream continues through the normal write relay afterwards.
+ *
  *	Safety: the destination accepts only when it is FRESH (at most a few
  *	thousand keys — the live-duplicate trickle that lands between `enable` and
  *	this push; everything it wipes is by construction contained in the
@@ -95,6 +104,7 @@ protected:
 	int					_partition;
 	int					_partition_size;
 	uint64_t			_bwlimit;			// KB/s the SOURCE throttles the file stream at
+	bool				_relay;				// server side: intra-destination hop (master -> its slave)
 	client_result		_client_result;
 	string				_redirect_host;
 	int					_redirect_port;
@@ -117,6 +127,8 @@ protected:
 	virtual int _parse_text_server_parameters();
 	virtual int _run_server();
 	virtual int _run_client(int partition, int partition_size);
+	int _relay_staging_to_slaves(const string& staging, uint64_t cp_seq,
+			vector<shared_connection>& slave_sessions);
 };
 
 }	// namespace flare

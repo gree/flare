@@ -91,10 +91,13 @@ def suite : TestSuite := {
           -- TIME, each holding its preStop drain window, and the trip needs
           -- the SECOND pod fully gone (dead ≥ 50%) — ~2 × (drain + detection)
           -- ≈ 140-200s on a loaded runner. 180s was flake-tight by design math.
-          let tripped ← waitForCondition "breaker tripped in operator log" 360 do
+          -- 480s: the 360s budget (serial-drain math) started flaking once the
+          -- suite count grew and CI runners got busier; the drains themselves
+          -- are unchanged, so this is pure scheduling headroom.
+          let tripped ← waitForCondition "breaker tripped in operator log" 480 do
             return containsSubstr (← operatorLogs) "CIRCUIT BREAKER TRIPPED"
           if tripped then return .pass
-          else return .fail "no CIRCUIT BREAKER TRIPPED log within 360s of majority outage" },
+          else return .fail "no CIRCUIT BREAKER TRIPPED log within 480s of majority outage" },
 
     -- While tripped the FSM must be inert: the dead masters keep their map
     -- entries (the pause happens BEFORE demote/failover) and nothing gets

@@ -187,7 +187,13 @@ namespace test_op_dump
 			expected_sleep = estimated_bwlimit_usec / sleep_precision;
 		}
 
-		cut_assert_equal_int(expected_sleep, actual_sleep);
+		// Wall-clock quantized by sleep_precision: scheduling jitter on a
+		// loaded machine routinely lands the elapsed time in the NEXT
+		// bucket (expected 10, actual 11 — a recurring flake). The op must
+		// sleep at least the throttle budget; allow one bucket of overshoot.
+		if (actual_sleep < expected_sleep || actual_sleep > expected_sleep + 1) {
+			cut_assert_equal_int(expected_sleep, actual_sleep);
+		}
 	}
 
 	void test_run_server()

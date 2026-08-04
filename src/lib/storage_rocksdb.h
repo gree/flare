@@ -126,6 +126,7 @@ protected:
 	AtomicCounter _wal_sync_master_id_mismatch;
 	AtomicCounter _wal_sync_apply_failure;
 	AtomicCounter _wal_sync_other_error;
+	AtomicCounter _wal_sync_crc_mismatch;
 	AtomicCounter _wal_fallback_to_dump;
 
 	// Total entries physically reaped by the background expire crawler
@@ -272,6 +273,7 @@ public:
 	int get_updates_since(uint64_t seq_number, vector<pair<uint64_t, rocksdb::WriteBatch>>& updates);
 	int apply_batch(const rocksdb::WriteBatch& batch);
 	int apply_batch_with_lsn(const rocksdb::WriteBatch& batch, uint64_t master_lsn);
+	static bool validate_batch_rep(const rocksdb::WriteBatch& batch);
 	uint64_t get_repl_last_lsn();
 	// Durably overwrite the replication cursor (kReplLastLsnKey). Used to
 	// seed the cursor after a full-dump reconstruction so the next WAL
@@ -305,6 +307,7 @@ public:
 	uint64_t get_wal_sync_master_id_mismatch(){ return this->_wal_sync_master_id_mismatch.fetch(); }
 	uint64_t get_wal_sync_apply_failure()     { return this->_wal_sync_apply_failure.fetch(); }
 	uint64_t get_wal_sync_other_error()       { return this->_wal_sync_other_error.fetch(); }
+	uint64_t get_wal_sync_crc_mismatch()      { return this->_wal_sync_crc_mismatch.fetch(); }
 	uint64_t get_wal_fallback_to_dump()       { return this->_wal_fallback_to_dump.fetch(); }
 	uint64_t get_expire_reaped()              { return this->_expire_reaped.fetch(); }
 	uint64_t get_snapshot_bootstrap()         { return this->_snapshot_bootstrap.fetch(); }
@@ -341,6 +344,7 @@ public:
 	void incr_wal_sync_master_id_mismatch(){ this->_wal_sync_master_id_mismatch.incr(); }
 	void incr_wal_sync_apply_failure()     { this->_wal_sync_apply_failure.incr(); }
 	void incr_wal_sync_other_error()       { this->_wal_sync_other_error.incr(); }
+	void incr_wal_sync_crc_mismatch()      { this->_wal_sync_crc_mismatch.incr(); }
 	void incr_wal_fallback_to_dump()       { this->_wal_fallback_to_dump.incr(); }
 
 	// Resync failure tracking. `notify_resync_result(true)` records a

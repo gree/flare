@@ -369,7 +369,7 @@ int op_repl_snapshot_push::_run_server() {
 			delete[] p;
 			return -1;
 		}
-		util::next_word(p + n, q, sizeof(q));
+		n += util::next_word(p + n, q, sizeof(q));
 		uint64_t size = 0;
 		try {
 			size = boost::lexical_cast<uint64_t>(q);
@@ -377,11 +377,36 @@ int op_repl_snapshot_push::_run_server() {
 			delete[] p;
 			return -1;
 		}
+		// Optional CRC-32 (3rd token; absent from older senders).
+		bool has_crc = false;
+		uint32_t want_crc = 0;
+		util::next_word(p + n, q, sizeof(q));
+		if (q[0] != '\0') {
+			try {
+				want_crc = boost::lexical_cast<uint32_t>(q);
+				has_crc = true;
+			} catch (...) {
+				// unknown extra token: ignore (forward compatibility)
+			}
+		}
 		delete[] p;
 
 		char* data = NULL;
 		if (this->_connection->readsize(static_cast<int>(size), &data) < 0 || data == NULL) {
 			return -1;
+		}
+		// Verify BEFORE Write(): RocksDB appends the batch to the local WAL
+		// ahead of memtable validation, so an unchecked corrupt batch can
+		// poison this node's storage even though the write is rejected.
+		if (has_crc) {
+			uint32_t got_crc = util::crc32(0, reinterpret_cast<const uint8_t*>(data), static_cast<size_t>(size));
+			if (got_crc != want_crc) {
+				log_err("snapshot push: WAL tail batch CRC mismatch (lsn=%llu want=%u got=%u size=%llu) -> aborting before apply",
+					(unsigned long long)lsn, want_crc, got_crc, (unsigned long long)size);
+				delete[] data;
+				rdb->incr_wal_sync_crc_mismatch();
+				return -1;
+			}
 		}
 		rocksdb::WriteBatch batch(string(data, size));
 		if (rdb->apply_batch_with_lsn(batch, lsn) < 0) {
@@ -394,9 +419,10 @@ int op_repl_snapshot_push::_run_server() {
 			if (!slave_sessions[si]) {
 				continue;
 			}
-			char wline[64];
-			snprintf(wline, sizeof(wline), "WBATCH %llu %llu\r\n",
-				(unsigned long long)lsn, (unsigned long long)size);
+			char wline[96];
+			uint32_t fwd_crc = util::crc32(0, reinterpret_cast<const uint8_t*>(data), static_cast<size_t>(size));
+			snprintf(wline, sizeof(wline), "WBATCH %llu %llu %u\r\n",
+				(unsigned long long)lsn, (unsigned long long)size, fwd_crc);
 			if (slave_sessions[si]->write(wline, strlen(wline)) < 0
 					|| slave_sessions[si]->write(data, static_cast<int>(size)) < 0) {
 				log_warning("snapshot push: slave session %zu died while forwarding WAL tail -> dropping it (that slave stays diverged until its next reconstruction)", si);
@@ -770,8 +796,19 @@ int op_repl_snapshot_push::_run_client(int partition, int partition_size) {
 			}
 			for (size_t i = 0; i < updates.size() && r == 0; i++) {
 				string data = updates[i].second.Data();
-				snprintf(line, sizeof(line), "WBATCH %llu %zu\r\n",
-					(unsigned long long)updates[i].first, data.size());
+				// A batch corrupt at read time would CRC-match in transit;
+				// refuse to stream it (destination keeps its dump fallback).
+				if (!storage_rocksdb::validate_batch_rep(updates[i].second)) {
+					log_err("snapshot push: WAL tail batch at LSN %llu failed structural validation -> aborting push",
+						(unsigned long long)updates[i].first);
+					r = -1;
+					break;
+				}
+				// CRC-32 as a 3rd token (older receivers ignore it) — same
+				// pre-apply integrity check as the WAL sync BATCH line.
+				uint32_t wcrc = util::crc32(0, reinterpret_cast<const uint8_t*>(data.data()), data.size());
+				snprintf(line, sizeof(line), "WBATCH %llu %zu %u\r\n",
+					(unsigned long long)updates[i].first, data.size(), wcrc);
 				if (this->_connection->write(line, strlen(line)) < 0
 						|| this->_connection->write(data.data(), static_cast<int>(data.size())) < 0) {
 					r = -1;

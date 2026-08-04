@@ -1179,6 +1179,12 @@ int storage_rocksdb::swap_in_snapshot(const string& staging_dir, uint64_t checkp
 		}
 
 		this->_clear_header_cache();
+		// The DB was replaced wholesale by a verified checkpoint, so a
+		// corruption latch set against the OLD db (e.g. a corrupt incoming
+		// batch during a preceding WAL-sync attempt) no longer describes
+		// this storage. Leaving it set kept healthy reseeded slaves paging
+		// rocksdb_corrupted=1 (observed live on wg-dev after the rc34 roll).
+		this->_corrupted = false;
 		this->incr_snapshot_bootstrap();
 		log_notice("snapshot bootstrap complete (seq=%llu, master_id=%s)",
 			(unsigned long long)checkpoint_seq, this->get_master_id().c_str());
@@ -1486,6 +1492,22 @@ int storage_rocksdb::apply_batch(const rocksdb::WriteBatch& batch) {
 		this->_curr_items.sub(static_cast<uint64_t>(-h.delta));
 	}
 	return 0;
+}
+
+bool storage_rocksdb::validate_batch_rep(const rocksdb::WriteBatch& batch) {
+	// Structural walk of the serialized rep WITHOUT applying anything.
+	// Senders call this before putting a batch on the wire: a batch that is
+	// already corrupt at read time (e.g. a torn read of the live WAL) would
+	// otherwise CRC-match in transit and poison the receiver at Write().
+	struct noop_handler : public rocksdb::WriteBatch::Handler {
+		rocksdb::Status PutCF(uint32_t, const rocksdb::Slice&, const rocksdb::Slice&) { return rocksdb::Status::OK(); }
+		rocksdb::Status DeleteCF(uint32_t, const rocksdb::Slice&) { return rocksdb::Status::OK(); }
+		rocksdb::Status SingleDeleteCF(uint32_t, const rocksdb::Slice&) { return rocksdb::Status::OK(); }
+		rocksdb::Status MergeCF(uint32_t, const rocksdb::Slice&, const rocksdb::Slice&) { return rocksdb::Status::OK(); }
+		rocksdb::Status DeleteRangeCF(uint32_t, const rocksdb::Slice&, const rocksdb::Slice&) { return rocksdb::Status::OK(); }
+		void LogData(const rocksdb::Slice&) {}
+	} h;
+	return batch.Iterate(&h).ok();
 }
 
 int storage_rocksdb::apply_batch_with_lsn(const rocksdb::WriteBatch& batch, uint64_t master_lsn) {

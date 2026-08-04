@@ -106,6 +106,18 @@ spec:
             summary: "Flare pod {{`{{ $labels.pod }}`}}: recurring storage corruption detections"
             runbook: docs/RUNBOOK.md#storage-corruption
 
+        # Replication transport corruption: a WAL sync / snapshot-push batch
+        # failed its CRC-32 check and was rejected BEFORE it could poison the
+        # receiver (the node fell back to a full dump instead). Recurrence
+        # points at flaky network gear or a bad source volume.
+        - alert: FlareReplicationCrcMismatch
+          expr: increase(flare_node_rocksdb_wal_sync_crc_mismatch[1h]) > 0
+          labels:
+            severity: warning
+          annotations:
+            summary: "Flare pod {{`{{ $labels.pod }}`}}: replication batch rejected by CRC check"
+            runbook: docs/RUNBOOK.md#storage-corruption
+
         # Backup freshness: rocksdb_last_backup_epoch is now a native flared
         # metric. Alert when the newest backup is older than 2x the interval.
         # Tune the threshold to your CronJob schedule.

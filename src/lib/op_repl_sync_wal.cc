@@ -210,6 +210,16 @@ int op_repl_sync_wal::_run_server() {
 		rocksdb::WriteBatch& batch = updates[i].second;
 		string batch_data = batch.Data();
 
+		// Do not put a structurally corrupt batch on the wire: it would
+		// CRC-match in transit and poison the slave at Write(). A bad read
+		// of our own WAL aborts the sync; the slave falls back to full dump.
+		if (!storage_rocksdb::validate_batch_rep(batch)) {
+			log_err("WAL batch at LSN %llu failed structural validation at read time -> aborting sync serve (slave falls back to full dump)",
+				(unsigned long long)seq);
+			rocksdb->incr_wal_sync_other_error();
+			return this->_send_result(result_server_error, "wal_read_error");
+		}
+
 		// Enforce the configured batch-size ceiling. A single huge
 		// WriteBatch (multi-megabyte append, or a burst bulk write)
 		// can outgrow the slave's receive buffer or the message-
@@ -237,8 +247,18 @@ int op_repl_sync_wal::_run_server() {
 		// We need to iterate through the batch and send each key-value pair
 		// For now, we'll send the raw batch data
 		// TODO: Implement proper batch iteration and send as memcached protocol
+		//
+		// CRC-32 of the raw batch bytes rides as a 3rd token (older slaves
+		// parse size and ignore the rest of the line). The receiver MUST be
+		// able to reject a corrupt batch BEFORE handing it to Write():
+		// RocksDB appends a batch to the local WAL before validating it in
+		// the memtable insert, so an unchecked corrupt batch poisons the
+		// receiver's own WAL even when the write is rejected (observed live
+		// on wg-dev: two slaves latched Corruption at different LSNs from
+		// the same source range = transport, not source, corruption).
+		uint32_t batch_crc = util::crc32(0, reinterpret_cast<const uint8_t*>(batch_data.data()), batch_data.size());
 		char batch_line[BUFSIZ];
-		snprintf(batch_line, sizeof(batch_line), "BATCH %zu%s", batch_data.size(), line_delimiter);
+		snprintf(batch_line, sizeof(batch_line), "BATCH %zu %u%s", batch_data.size(), batch_crc, line_delimiter);
 		this->_connection->write(batch_line, strlen(batch_line));
 		this->_connection->write(batch_data.data(), batch_data.size());
 		this->_connection->write(line_delimiter, strlen(line_delimiter));
@@ -381,6 +401,20 @@ int op_repl_sync_wal::_parse_text_client_parameters() {
 
 			n += util::next_digit(p+n, q, sizeof(q));
 			size_t batch_size = boost::lexical_cast<size_t>(q);
+
+			// Optional CRC-32 (3rd token; absent from older masters -> no
+			// verification, same compat scheme as the snapshot FILE header).
+			bool has_crc = false;
+			uint32_t want_crc = 0;
+			util::next_word(p+n, q, sizeof(q));
+			if (q[0] != '\0') {
+				try {
+					want_crc = boost::lexical_cast<uint32_t>(q);
+					has_crc = true;
+				} catch (...) {
+					// unknown extra token: ignore (forward compatibility)
+				}
+			}
 			delete[] p;
 
 			// Read batch data
@@ -398,6 +432,25 @@ int op_repl_sync_wal::_parse_text_client_parameters() {
 				return -1;
 			}
 			delete[] p;
+
+			// Verify BEFORE constructing/applying the batch. A corrupt
+			// batch handed to Write() is appended to the local RocksDB WAL
+			// ahead of memtable validation, so even a rejected write can
+			// poison this node's storage across a restart. On mismatch:
+			// abort the sync with NOTHING written; the caller falls back
+			// to the non-destructive full-dump path.
+			if (has_crc) {
+				uint32_t got_crc = util::crc32(0,
+					reinterpret_cast<const uint8_t*>(batch_data), batch_size);
+				if (got_crc != want_crc) {
+					log_err("WAL sync batch CRC mismatch at LSN %llu (want=%u got=%u size=%zu) -> aborting sync before apply (transport corruption; falling back to full dump)",
+						(unsigned long long)lsn, want_crc, got_crc, batch_size);
+					delete[] batch_data;
+					this->_client_result = client_protocol_error;
+					rocksdb->incr_wal_sync_crc_mismatch();
+					return -1;
+				}
+			}
 
 			// Apply batch
 			rocksdb::WriteBatch batch(string(batch_data, batch_size));

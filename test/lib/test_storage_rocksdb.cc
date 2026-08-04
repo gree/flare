@@ -1230,6 +1230,57 @@ void test_snapshot_bootstrap_checkpoint_swap_and_wal_catchup() {
 	drop_rocksdb(slave,  wal_slave_dir);
 }
 
+// validate_batch_rep(): structural walk without applying — senders use it to
+// refuse to stream a batch that was already corrupt at WAL-read time.
+void test_validate_batch_rep() {
+	rocksdb::WriteBatch good;
+	good.Put("k", "v");
+	good.Delete("gone");
+	cut_assert_true(storage_rocksdb::validate_batch_rep(good));
+
+	string rep(12, '\0');
+	rep[8] = 1;              // count = 1
+	rep += '\xf7';           // unknown record tag
+	rocksdb::WriteBatch bad(rep);
+	cut_assert_false(storage_rocksdb::validate_batch_rep(bad));
+}
+
+// A corrupt INCOMING batch latches the corruption flag, but a successful
+// snapshot swap replaces the DB wholesale — the latch must clear with it.
+// (Observed live: slaves that failed WAL sync on a corrupt batch, then
+// reseeded cleanly via snapshot bootstrap, kept paging rocksdb_corrupted=1.)
+void test_swap_in_snapshot_clears_corruption_latch() {
+	storage_rocksdb* master = make_rocksdb(wal_master_dir);
+	storage_rocksdb* slave  = make_rocksdb(wal_slave_dir);
+	cut_assert_equal_int(0, storage_set_string(master, "k1", "v1"));
+
+	// Garbage WriteBatch: valid 12-byte header (seq=0, count=1) + a bogus
+	// record tag. Write() rejects it with Corruption and the latch sets.
+	string rep(12, '\0');
+	rep[8] = 1;              // count = 1 (little-endian)
+	rep += '\xf7';           // unknown record tag
+	rocksdb::WriteBatch bad(rep);
+	cut_assert_operator(slave->apply_batch_with_lsn(bad, 1), <, 0);
+	cut_assert_true(slave->is_corrupted());
+	cut_assert_operator(slave->get_corruption_detected(), >, static_cast<uint64_t>(0));
+
+	// Clean snapshot swap-in -> latch must clear.
+	string cp_path;
+	uint64_t cp_seq = 0;
+	cut_assert_equal_int(0, master->create_snapshot_checkpoint(cp_path, cp_seq));
+	string staging;
+	cut_assert_equal_int(0, slave->prepare_snapshot_staging(staging));
+	cut_assert_equal_int(0, copy_dir_flat(cp_path, staging));
+	cut_assert_equal_int(0, master->remove_snapshot_checkpoint(cp_path));
+	cut_assert_equal_int(0, slave->swap_in_snapshot(staging, cp_seq));
+	cut_assert_false(slave->is_corrupted());
+	string out;
+	cut_assert_equal_int(0, storage_get_string(slave, "k1", out));
+
+	drop_rocksdb(master, wal_master_dir);
+	drop_rocksdb(slave,  wal_slave_dir);
+}
+
 // hard_reset(): the in-process Case-A recovery must wipe all data, clear the
 // corruption latch, keep the DB usable, and reset curr_items to 0.
 void test_hard_reset_wipes_and_recovers() {

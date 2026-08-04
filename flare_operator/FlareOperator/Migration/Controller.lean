@@ -182,6 +182,14 @@ private def buildPlan (mig : MigCR) (crName ns : String) : IO (Except String Tar
                      "-o", "jsonpath={.spec.serviceAccountName}"] with
     | .ok s => pure s.trim
     | .error e => return .error s!"cannot read own serviceAccount: {e}"
+  -- helm release owning this operator (empty when not helm-managed, e.g. E2E):
+  -- baked into the target resources as adoption metadata so the eventual
+  -- values switch adopts them instead of erroring on ownership metadata.
+  let helmRelease ← do
+    match ← kubectl ["get", "pod", hostname, "-n", ns,
+                     "-o", "jsonpath={.metadata.labels.app\\.kubernetes\\.io/instance}"] with
+    | .ok s => pure (if s.trim.isEmpty then none else some s.trim)
+    | .error _ => pure (none : Option String)
   -- rocksdb tuning: inherited from the source CR
   let rocksdb ← do
     match ← getFlareCluster crName ns with
@@ -190,6 +198,7 @@ private def buildPlan (mig : MigCR) (crName ns : String) : IO (Except String Tar
   return .ok {
     migName := mig.name
     ns := ns
+    helmRelease := helmRelease
     targetName := mig.spec.target.name
     partitions := mig.spec.target.partitions
     replicas := mig.spec.target.replicas
@@ -244,7 +253,10 @@ private def execAction (mig : MigCR) (crName ns : String) (act : MigAction)
     -- PVCs are deliberately left behind (last-resort recovery material).
     let _ ← kubectl ["delete", "statefulset", s!"{crName}-nodes", "-n", ns, "--ignore-not-found"]
     let _ ← kubectl ["delete", "flarecluster", crName, "-n", ns, "--ignore-not-found"]
-    return .ok s!"source {crName} retired (StatefulSet + CR deleted; PVCs kept)"
+    -- Self-documenting handoff: the ONE remaining manual step is the GitOps
+    -- values switch; everything else (helm adoption metadata, provisioned-
+    -- operator retirement) is already automatic. Shown in `kubectl get fmig`.
+    return .ok s!"source {crName} retired (PVCs kept). NEXT: set clusterName/cluster.name={target} (+partitions/replicas) in the helm values and upgrade; the provisioned {target}-operator then retires itself"
   | .doAbort =>
     -- stop the stream first, then delete everything the migration created
     let patch := "{\"spec\":{\"clusterReplication\":{\"enabled\":false}}}"

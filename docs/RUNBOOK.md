@@ -183,6 +183,42 @@ exporter).
 
 ## Reducing masters / partitions (shrink migration) {#shrink}
 
+**PREFERRED (rc31+): drive the whole sequence with a `FlareMigration` CR** —
+the manual choreography below still works but the CR automates it with
+proven gates. Same namespace, one release:
+
+```yaml
+apiVersion: flare.gree.net/v1
+kind: FlareMigration
+metadata: {name: shrink-1p, namespace: <ns>}
+spec:
+  source: <current clusterName>
+  target: {name: <new name>, partitions: M, replicas: R}
+  externalService: <client-facing Service to flip at cutover>
+```
+
+Phases (watch `kubectl get fmig`): Provisioning → Duplicating (with equal
+partition counts the initial transfer is a physical snapshot push; rc33) →
+Forwarding → **AwaitingCutover** (park; set `spec.approveCutover: true`) →
+CutOver (Service selector flip, same LB/IP) → **AwaitingRetire** (park; set
+`spec.approveRetire: true`) → Retired (source STS+CR deleted, PVCs kept).
+`spec.paused: true` freezes any phase; `spec.abort: true` rolls back
+(refused after cutover). All gates are machine-checked (Migration/Types.lean).
+
+**Post-migration handoff (rc35+, mostly automatic):** target resources are
+born with helm adoption metadata, so the ONE manual step is the GitOps
+values switch — set `clusterName`/`cluster.name` to the target (+ its
+partitions/replicas) and `helm upgrade`. The moment the release's operator
+pods restart with the new `--cluster-name`, the migration-provisioned
+`<target>-operator` detects the Ready successor and DELETES ITSELF,
+releasing `<target>-operator-lease` immediately. Do NOT delete it by hand
+before the upgrade, and do not skip the values switch: a release whose
+values still name the retired source will recreate it on the next upgrade.
+
+---
+
+The manual procedure (two releases, cross-namespace) remains valid:
+
 There is no in-place partition reduction (the operator refuses it). To go
 from N masters to M (M < N), migrate to a new, smaller cluster with
 `spec.clusterReplication` and cut over. Because one operator manages

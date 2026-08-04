@@ -193,6 +193,57 @@ def suite : TestSuite := {
           | .ok _ => return .fail "source StatefulSet still exists after retire"
           | .error _ => return .pass },
 
+    -- POST-MIGRATION HANDOFF: once a helm-managed successor operator for the
+    -- target cluster is Ready, the migration-provisioned operator must
+    -- delete its own Deployment (releasing the {cr}-operator-lease). Holding
+    -- it kept the successor pair leaderless -> no index Service endpoint ->
+    -- the re-pointed StatefulSet crashlooped (observed live). We simulate
+    -- the values switch by deploying a successor with the chart's labels.
+    { name := "provisioned operator self-retires when a helm successor appears"
+      run := do
+        let successor := s!"apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: successor-operator
+  namespace: {cfg.«namespace»}
+  labels:
+    app.kubernetes.io/name: flare-operator
+    app.kubernetes.io/instance: bg-test
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: successor-operator
+  template:
+    metadata:
+      labels:
+        app: successor-operator
+        app.kubernetes.io/name: flare-operator
+        app.kubernetes.io/instance: bg-test
+    spec:
+      serviceAccountName: flare-operator
+      containers:
+        - name: flare-operator
+          image: flare-operator:test
+          imagePullPolicy: Never
+          args:
+            - \"--namespace\"
+            - \"{cfg.«namespace»}\"
+            - \"--cluster-name\"
+            - \"{targetName}\"
+          ports:
+            - containerPort: 12120
+              name: flare-index"
+        match ← kubectlApplyStdin successor with
+        | .error e => return .fail s!"successor deploy failed: {e}"
+        | .ok _ =>
+          let gone ← waitForCondition "provisioned operator deleted itself" 180 do
+            match ← kubectlGetJsonpath "deployment" s!"{targetName}-operator" cfg.«namespace» "{.metadata.name}" with
+            | .ok _ => return false
+            | .error _ => return true
+          if gone then return .pass
+          else return .fail s!"{targetName}-operator still exists 180s after a Ready successor appeared" },
+
     -- Interruptibility: a second migration rolled back mid-flight.
     { name := "abort rolls a migration back (target resources deleted)"
       run := do

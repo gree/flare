@@ -50,6 +50,14 @@ def rocksdbSpecYaml (r : RocksdbConfigSpec) : String :=
 structure TargetPlan where
   migName : String
   ns : String
+  /-- The helm release that owns the SOURCE operator (from its own pod's
+      app.kubernetes.io/instance label), or none when not helm-managed
+      (E2E). When set, every target resource that the release's chart will
+      eventually template (CR, config CM, headless Service, StatefulSet) is
+      born with helm adoption metadata, so the post-migration values switch
+      adopts them cleanly instead of failing on "invalid ownership
+      metadata" — this used to be a hand-run annotate loop. -/
+  helmRelease : Option String := none
   targetName : String
   partitions : Nat
   replicas : Nat
@@ -65,6 +73,24 @@ structure TargetPlan where
 def commonLabels (p : TargetPlan) : String :=
   s!"flare.gree.net/migration: {p.migName}"
 
+/-- Extra metadata lines (labels continued + annotations block) for resources
+    the helm chart will adopt after the values switch. Callers splice
+    `adoptionLabels` right after `commonLabels` (same indent) and
+    `adoptionAnnotations` as a sibling of `labels:`. Empty when the source
+    operator is not helm-managed. -/
+def adoptionLabels (p : TargetPlan) : String :=
+  match p.helmRelease with
+  | some _ => "\n    app.kubernetes.io/managed-by: Helm"
+  | none => ""
+
+def adoptionAnnotations (p : TargetPlan) : String :=
+  match p.helmRelease with
+  | some rel => s!"
+  annotations:
+    meta.helm.sh/release-name: {rel}
+    meta.helm.sh/release-namespace: {p.ns}"
+  | none => ""
+
 def flareClusterYaml (p : TargetPlan) : String :=
   s!"apiVersion: flare.gree.net/v1alpha1
 kind: FlareCluster
@@ -72,7 +98,7 @@ metadata:
   name: {p.targetName}
   namespace: {p.ns}
   labels:
-    {commonLabels p}
+    {commonLabels p}{adoptionLabels p}{adoptionAnnotations p}
 spec:
   partitions: {p.partitions}
   replicas: {p.replicas}{rocksdbSpecYaml p.rocksdb}"
@@ -89,7 +115,7 @@ metadata:
   name: {p.targetName}-config
   namespace: {p.ns}
   labels:
-    {commonLabels p}
+    {commonLabels p}{adoptionLabels p}{adoptionAnnotations p}
 data:
   extra.conf: |
     {indented}"
@@ -124,6 +150,14 @@ spec:
             - \"{p.ns}\"
             - \"--cluster-name\"
             - \"{p.targetName}\"
+          env:
+            # Self-retire marker: once a helm-managed successor operator for
+            # the same cluster is Ready, this operator deletes its own
+            # Deployment+Service so the lease hands over IMMEDIATELY —
+            # holding it left the successor pair leaderless (no index
+            # Service endpoint) and crashlooped the re-pointed StatefulSet.
+            - name: FLARE_MIGRATION_PROVISIONED
+              value: \"{p.migName}\"
           ports:
             - containerPort: {p.operatorPort}
               name: flare-index
@@ -165,7 +199,7 @@ metadata:
   labels:
     app: flare
     cluster: {cluster}
-    {commonLabels p}
+    {commonLabels p}{adoptionLabels p}{adoptionAnnotations p}
 spec:
   clusterIP: None
   publishNotReadyAddresses: true
@@ -183,7 +217,7 @@ metadata:
   name: {cluster}-nodes
   namespace: {p.ns}
   labels:
-    {commonLabels p}
+    {commonLabels p}{adoptionLabels p}{adoptionAnnotations p}
 spec:
   serviceName: {cluster}-nodes
   replicas: {numPods}

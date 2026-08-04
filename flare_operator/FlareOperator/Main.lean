@@ -864,6 +864,39 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
     Migration.Controller.tick crName ns
   catch e =>
     IO.eprintln s!"[migration] tick error: {e}"
+
+  -- 5b'. Migration-provisioned SELF-RETIRE (post-migration handoff). When
+  -- this operator was created by a FlareMigration (marker env) and a
+  -- HELM-managed successor operating the SAME cluster is Ready, delete our
+  -- own Deployment+Service NOW: keeping the {cr}-operator-lease parked the
+  -- successor pair in standby, so the index Service had no leader endpoint
+  -- and the re-pointed StatefulSet crashlooped on "failed to connect to
+  -- index server" (observed live; the crashloop kills then corrupted a
+  -- replica's DB). Self-deletion releases the lease within one expiry.
+  if (← IO.getEnv "FLARE_MIGRATION_PROVISIONED").isSome then
+    try
+      let successors ← kubectl ["get", "pods", "-n", ns,
+        "-l", "app.kubernetes.io/name=flare-operator",
+        "-o", "jsonpath={range .items[*]}{.status.conditions[?(@.type==\"Ready\")].status}|{.spec.containers[0].args}{\"\\n\"}{end}"]
+      match successors with
+      | .error _ => pure ()
+      | .ok out =>
+        let found := out.splitOn "\n" |>.any fun line =>
+          let parts := line.splitOn "|"
+          match parts with
+          | [ready, argsStr] =>
+            -- args are rendered as a JSON array; require the exact adjacent
+            -- pair ["--cluster-name","<our cr>"] so a name that happens to
+            -- be a substring of another arg can't false-positive.
+            ready.trim == "True"
+              && (argsStr.splitOn s!"--cluster-name\",\"{crName}\"").length > 1
+          | _ => false
+        if found then
+          IO.eprintln s!"[migration] helm successor for '{crName}' is Ready -> SELF-RETIRING (deleting {crName}-operator Deployment+Service; the lease hands over within one expiry)"
+          let _ ← kubectl ["delete", "deployment", s!"{crName}-operator", "-n", ns, "--ignore-not-found"]
+          let _ ← kubectl ["delete", "service", s!"{crName}-operator", "-n", ns, "--ignore-not-found"]
+    catch e =>
+      IO.eprintln s!"[migration] self-retire check error: {e}"
   -- Publish the migration phase/desired to Prometheus (-> Grafana Cloud).
   let migPhase ← migrationRef.get
   let phaseNum : Float := match migPhase with

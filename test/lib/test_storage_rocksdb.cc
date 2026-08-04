@@ -1230,6 +1230,40 @@ void test_snapshot_bootstrap_checkpoint_swap_and_wal_catchup() {
 	drop_rocksdb(slave,  wal_slave_dir);
 }
 
+// hard_reset(): the in-process Case-A recovery must wipe all data, clear the
+// corruption latch, keep the DB usable, and reset curr_items to 0.
+void test_hard_reset_wipes_and_recovers() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	cut_assert_equal_int(0, storage_set_string(s, "a", "alpha"));
+	cut_assert_equal_int(0, storage_set_string(s, "b", "bravo"));
+	cut_assert_equal_int(2, static_cast<int>(s->count()));
+	cut_assert_false(s->is_corrupted());
+
+	cut_assert_equal_int(0, s->hard_reset());
+
+	// data gone, counter reset, DB still writable
+	cut_assert_equal_int(0, static_cast<int>(s->count()));
+	string out;
+	cut_assert_operator(storage_get_string(s, "a", out), !=, 0);
+	cut_assert_false(s->is_corrupted());
+	cut_assert_operator(s->get_hard_reset(), >, static_cast<uint64_t>(0));
+	cut_assert_equal_int(0, storage_set_string(s, "fresh", "value"));
+	cut_assert_equal_int(0, storage_get_string(s, "fresh", out));
+	cut_assert_equal_string("value", out.c_str());
+
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// verify_integrity() on a healthy DB reports clean and does not latch.
+void test_verify_integrity_clean() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	cut_assert_equal_int(0, storage_set_string(s, "k", "v"));
+	cut_assert_equal_int(0, s->verify_integrity());
+	cut_assert_false(s->is_corrupted());
+	cut_assert_equal_int(0, static_cast<int>(s->get_corruption_detected()));
+	drop_rocksdb(s, wal_master_dir);
+}
+
 	void teardown()
 	{
 		delete rocksdb_tester;

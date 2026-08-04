@@ -111,6 +111,27 @@ int handler_reconstruction::_run_once() {
 	this->_thread->set_peer(this->_node_server_name, this->_node_server_port);
 	this->_thread->set_state("connect");
 
+#ifdef HAVE_LIBROCKSDB
+	// CORRUPTION SELF-HEAL: a poisoned local DB rejects the truncate that
+	// precedes a full dump (and even the WAL apply), so an ordinary
+	// reconstruction retries forever ("failed to truncate ... Corruption",
+	// observed live twice). We are ALREADY a slave being reconstructed here
+	// (balance 0, serving nothing), so wiping is safe — do the in-process
+	// Case-A once up front, then reseed onto the clean empty DB. Never for a
+	// master reconstruction: its data may be the last surviving copy.
+	if (this->_role == cluster::role_slave
+			&& this->_storage->get_type() == storage::type_rocksdb) {
+		storage_rocksdb* rdb = dynamic_cast<storage_rocksdb*>(this->_storage);
+		if (rdb && rdb->is_corrupted()) {
+			log_warning("local storage is corrupted -> hard_reset before reseed (auto Case-A recovery)", 0);
+			if (rdb->hard_reset() < 0) {
+				log_err("hard_reset failed -> retrying reconstruction next cycle", 0);
+				return -1;
+			}
+		}
+	}
+#endif
+
 	shared_connection c(new connection_tcp(this->_node_server_name, this->_node_server_port));
 	this->_connection = c;
 	if (c->open() < 0) {
@@ -243,6 +264,16 @@ int handler_reconstruction::_run_once() {
 					log_notice("truncating local storage before full-dump reconstruction so deletions on the source propagate (WAL sync was unavailable; see previous log line)", 0);
 					if (this->_storage->truncate(0) < 0) {
 						log_err("failed to truncate storage before full dump", 0);
+#ifdef HAVE_LIBROCKSDB
+						// A truncate that fails because the DB is corrupt would
+						// loop forever; wipe it and let the NEXT cycle reseed
+						// onto the clean empty DB (slave only, guaranteed here).
+						storage_rocksdb* rdb = dynamic_cast<storage_rocksdb*>(this->_storage);
+						if (rdb && rdb->is_corrupted() && this->_role == cluster::role_slave) {
+							log_warning("truncate failed on a corrupted DB -> hard_reset (auto Case-A); reseeding next cycle", 0);
+							rdb->hard_reset();
+						}
+#endif
 						return -1;
 					}
 				}

@@ -105,6 +105,7 @@ ini_option::ini_option():
 		_reap_expired_chunk_size(default_reap_expired_chunk_size),
 		_reap_expired_chunk_sleep_msec(default_reap_expired_chunk_sleep_msec),
 		_metrics_server_port(default_metrics_server_port),
+		_storage_check_interval(default_storage_check_interval),
 		_log_stderr(false) {
 	pthread_mutex_init(&this->_mutex_index_servers, NULL);
 }
@@ -470,6 +471,9 @@ int ini_option::load() {
 		if (opt_var_map.count("metrics-server-port")) {
 			this->_metrics_server_port = opt_var_map["metrics-server-port"].as<int>();
 		}
+		if (opt_var_map.count("storage-check-interval")) {
+			this->_storage_check_interval = opt_var_map["storage-check-interval"].as<int>();
+		}
 	} catch (int e) {
 		cout << option << endl;
 		return -1;
@@ -602,6 +606,10 @@ int ini_option::reload() {
 		if (opt_var_map.count("reap-expired-chunk-sleep-msec")) {
 			log_notice("  reap_expired_chunk_sleep_msec: %d -> %d", this->_reap_expired_chunk_sleep_msec, opt_var_map["reap-expired-chunk-sleep-msec"].as<int>());
 			this->_reap_expired_chunk_sleep_msec = opt_var_map["reap-expired-chunk-sleep-msec"].as<int>();
+		}
+		if (opt_var_map.count("storage-check-interval")) {
+			log_notice("  storage_check_interval: %d -> %d", this->_storage_check_interval, opt_var_map["storage-check-interval"].as<int>());
+			this->_storage_check_interval = opt_var_map["storage-check-interval"].as<int>();
 		}
 
 		// The remaining rocksdb options require reopening the DB (block cache,
@@ -862,7 +870,8 @@ int ini_option::_setup_config_option(program_options::options_description& optio
 		("reap-expired-interval",				program_options::value<int>(),		"seconds between full expire sweeps (default 300, dynamic, rocksdb only)")
 		("reap-expired-chunk-size",				program_options::value<int>(),		"keys scanned per chunk before the throttle sleep (default 10000, dynamic, rocksdb only)")
 		("reap-expired-chunk-sleep-msec",		program_options::value<int>(),		"throttle sleep between chunks in msec (default 100, dynamic, rocksdb only)")
-		("metrics-server-port",					program_options::value<int>(),		"port for the native Prometheus /metrics endpoint; 0 = disabled (default 0, static)");
+		("metrics-server-port",					program_options::value<int>(),		"port for the native Prometheus /metrics endpoint; 0 = disabled (default 0, static)")
+		("storage-check-interval",				program_options::value<int>(),		"seconds between periodic full-checksum storage integrity checks; 0 = disabled (default 0, dynamic, rocksdb only)");
 
 	return 0;
 }

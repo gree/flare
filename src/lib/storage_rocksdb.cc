@@ -89,6 +89,9 @@ storage_rocksdb::storage_rocksdb(
 	_wal_fallback_to_dump(0),
 	_expire_reaped(0),
 	_snapshot_bootstrap(0),
+	_corruption_detected(0),
+	_hard_reset(0),
+	_corrupted(false),
 	_curr_items(0),
 	_resync_failure_count(0),
 	_resync_failure_threshold(0),
@@ -522,7 +525,7 @@ int storage_rocksdb::set(entry& e, result& r, int b) {
 		rocksdb::Slice value_slice(reinterpret_cast<char*>(p), entry::header_size + e.size);
 		rocksdb::Status status = this->_db->Put(this->_write_options, key_slice, value_slice);
 
-		if (!status.ok()) {
+		if (!this->_note_write_status(status, "set")) {
 			log_err("RocksDB::Put() failed: %s", status.ToString().c_str());
 			r = result_not_stored;
 			throw 0;
@@ -699,6 +702,7 @@ int storage_rocksdb::remove(entry& e, result& r, int b) {
 		}
 
 		rocksdb::Status status = this->_db->Delete(this->_write_options, e.key);
+		(void)this->_note_write_status(status, "remove");
 		if (status.ok()) {
 			r = expired ? result_not_found : result_deleted;
 			// O(1) curr_items bookkeeping: the not-found path threw before this
@@ -863,7 +867,7 @@ int storage_rocksdb::truncate(int b) {
 			continue;
 		}
 		rocksdb::Status status = this->_db->Delete(this->_write_options, k);
-		if (!status.ok()) {
+		if (!this->_note_write_status(status, "truncate")) {
 			log_err("RocksDB::Delete() failed during truncate: %s", status.ToString().c_str());
 			r = -1;
 			break;
@@ -1185,6 +1189,76 @@ int storage_rocksdb::swap_in_snapshot(const string& staging_dir, uint64_t checkp
 	return r;
 }
 
+bool storage_rocksdb::_note_write_status(const rocksdb::Status& status, const char* where) {
+	if (status.ok()) {
+		return true;
+	}
+	if (status.IsCorruption()) {
+		this->_corruption_detected.incr();
+		if (!this->_corrupted) {
+			// Log loudly ONCE per poison episode (a corrupt DB rejects every
+			// subsequent write, so unguarded logging would flood).
+			log_err("STORAGE CORRUPTION detected at %s: %s -> latching corrupted (a SLAVE self-heals via hard_reset on its next reconstruction; a MASTER needs operator attention)",
+				where, status.ToString().c_str());
+		}
+		this->_corrupted = true;
+	}
+	return false;
+}
+
+int storage_rocksdb::verify_integrity() {
+	pthread_rwlock_rdlock(&this->_mutex_wholelock);
+	int r = 0;
+	if (this->_db != NULL) {
+		rocksdb::Status s = this->_db->VerifyChecksum();
+		if (!s.ok()) {
+			this->_corruption_detected.incr();
+			if (!this->_corrupted) {
+				log_err("STORAGE CORRUPTION found by periodic verify: %s -> latching corrupted", s.ToString().c_str());
+			}
+			this->_corrupted = true;
+			r = -1;
+		}
+	}
+	pthread_rwlock_unlock(&this->_mutex_wholelock);
+	return r;
+}
+
+int storage_rocksdb::hard_reset() {
+	// In-process Case-A: discard the (corrupt) local DB entirely and reopen
+	// empty. Same teardown/reopen as swap_in_snapshot, minus the staging
+	// swap — reconstruction reseeds the data afterwards. The caller guarantees
+	// this is not the last good copy (slave / reconstructing node only).
+	pthread_rwlock_wrlock(&this->_mutex_wholelock);
+	int r = -1;
+	do {
+		if (this->_db != NULL) {
+			delete this->_db;
+			this->_db = NULL;
+		}
+		if (remove_tree(this->_data_path) != 0) {
+			log_err("hard_reset: failed to remove data dir [%s] -> reopen may still fail", this->_data_path.c_str());
+		}
+		rocksdb::Status status = rocksdb::DB::Open(this->_options, this->_data_path, &this->_db);
+		if (!status.ok()) {
+			log_err("hard_reset: reopen failed: %s", status.ToString().c_str());
+			this->_db = NULL;
+			break;
+		}
+		// Empty DB: reset the live-key counter and clear the corruption latch.
+		this->_curr_items.sub(this->_curr_items.fetch());
+		this->_clear_header_cache();
+		this->_corrupted = false;
+		this->_hard_reset.incr();
+		// A fresh empty DB has no lineage; repl_last_lsn is 0, so the next
+		// reconstruction takes the clean full/snapshot reseed path.
+		log_notice("hard_reset: wiped and reopened empty DB [%s]; reconstruction will reseed", this->_data_path.c_str());
+		r = 0;
+	} while (false);
+	pthread_rwlock_unlock(&this->_mutex_wholelock);
+	return r;
+}
+
 int storage_rocksdb::reap_expired(time_t now, uint32_t max_scan, const string& after_key,
 		string& last_key, bool& more, uint32_t& scanned, uint32_t& reaped) {
 	scanned = 0;
@@ -1436,7 +1510,7 @@ int storage_rocksdb::apply_batch_with_lsn(const rocksdb::WriteBatch& batch, uint
 	merged.Iterate(&h);
 
 	rocksdb::Status status = this->_db->Write(this->_write_options, &merged);
-	if (!status.ok()) {
+	if (!this->_note_write_status(status, "apply_batch_with_lsn")) {
 		log_err("apply_batch_with_lsn Write() failed (lsn=%llu): %s",
 			(unsigned long long)master_lsn, status.ToString().c_str());
 		return -1;

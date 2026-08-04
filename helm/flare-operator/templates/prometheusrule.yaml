@@ -75,10 +75,46 @@ spec:
             summary: "Flare cluster {{`{{ $labels.cluster }}`}}: repeated dead-node detections"
             runbook: docs/RUNBOOK.md#dead-node-churn
 
-        # NOTE (backup freshness): rocksdb_last_backup_epoch is exposed via
-        # flared's memcached `stats` (per data pod), not via the operator's
-        # Prometheus endpoint. To alert on stale backups, scrape flared with
-        # a memcached exporter mapping rocksdb_* stats, then:
-        #   time() - flare_rocksdb_last_backup_epoch > 2 * <backup interval>
-        # See docs/BACKUP_RESTORE.md#monitoring.
+    # flared data-plane alerts. Since rc29 each flared pod exports its own
+    # stats natively (PodMonitor), so these fire per pod with the pod label
+    # attached by Prometheus — independent of the operator's health.
+    - name: flare-nodes
+      rules:
+        # STORAGE CORRUPTION: a RocksDB write hit a Corruption status (the
+        # poison state where reads work but writes fail). `rocksdb_corrupted`
+        # latches on detection. A SLAVE self-heals on its next reconstruction
+        # (hard_reset + reseed); the fastest manual trigger is `kubectl delete
+        # pod <that pod>`. A MASTER needs a promotion decision (its data may be
+        # the last copy) — page. Runbook: docs/RUNBOOK.md#storage-corruption
+        - alert: FlareStorageCorruption
+          expr: flare_node_rocksdb_corrupted == 1
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Flare pod {{`{{ $labels.pod }}`}}: RocksDB corruption latched"
+            runbook: docs/RUNBOOK.md#storage-corruption
+
+        # New corruption detections over time — catches a pod that corrupted
+        # and recovered (hard_reset) so it no longer shows corrupted==1, but
+        # whose recurrence rate signals bad hardware/volume.
+        - alert: FlareStorageCorruptionRecurring
+          expr: increase(flare_node_rocksdb_corruption_detected[1h]) > 0
+          labels:
+            severity: warning
+          annotations:
+            summary: "Flare pod {{`{{ $labels.pod }}`}}: recurring storage corruption detections"
+            runbook: docs/RUNBOOK.md#storage-corruption
+
+        # Backup freshness: rocksdb_last_backup_epoch is now a native flared
+        # metric. Alert when the newest backup is older than 2x the interval.
+        # Tune the threshold to your CronJob schedule.
+        - alert: FlareBackupStale
+          expr: time() - flare_node_rocksdb_last_backup_epoch > 172800
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Flare pod {{`{{ $labels.pod }}`}}: last successful backup is stale"
+            runbook: docs/BACKUP_RESTORE.md#monitoring
 {{- end }}

@@ -136,6 +136,18 @@ protected:
 	// checkpoint reseed replaced the logical full dump). Monotonic.
 	AtomicCounter _snapshot_bootstrap;
 
+	// Corruption self-healing. `_corrupted` latches true the instant any
+	// write path (Put/Delete/Write) returns a RocksDB Corruption status —
+	// the poison state where reads still work but every write (and even
+	// truncate) fails, so a normal reconstruction retry loops forever.
+	// `_corruption_detected` counts detections (monotonic, for alerting);
+	// `_hard_reset` counts in-process wipe+reopen recoveries. Exposed via
+	// stats so the operator/alerts can act on the LATCH before an outage,
+	// instead of discovering it on a client write.
+	AtomicCounter _corruption_detected;
+	AtomicCounter _hard_reset;
+	volatile bool _corrupted;
+
 	// Live (non-reserved) key count, maintained incrementally so `stats`
 	// curr_items is O(1) instead of a full-keyspace iteration per call (the
 	// exporter polls stats periodically — the old scan burned a whole
@@ -297,6 +309,28 @@ public:
 	uint64_t get_expire_reaped()              { return this->_expire_reaped.fetch(); }
 	uint64_t get_snapshot_bootstrap()         { return this->_snapshot_bootstrap.fetch(); }
 	void incr_snapshot_bootstrap()            { this->_snapshot_bootstrap.incr(); }
+	uint64_t get_corruption_detected()        { return this->_corruption_detected.fetch(); }
+	uint64_t get_hard_reset()                 { return this->_hard_reset.fetch(); }
+	// True once a Corruption status has been seen on a write path; latched
+	// until a successful hard_reset()/reopen clears it.
+	bool is_corrupted()                       { return this->_corrupted; }
+	// Verify every SST/blob checksum (RocksDB DB::VerifyChecksum). Returns 0
+	// if clean, -1 on corruption (latches _corrupted + bumps the counter).
+	// Expensive (reads all files) — driven by the opt-in storage-check thread.
+	int verify_integrity();
+	// In-process Case-A recovery: close the DB, remove the data directory,
+	// reopen empty, reset counters, clear the corruption latch. Returns 0 on
+	// success. The CALLER must ensure this node is not the last good copy
+	// (only a SLAVE / a reconstructing node), because it discards all local
+	// data unconditionally — reconstruction reseeds it afterwards.
+	int hard_reset();
+
+protected:
+	// Latch corruption from a write-path status. Returns status.ok() so call
+	// sites can `if (!_note_write_status(st)) { ... }` inline.
+	bool _note_write_status(const rocksdb::Status& status, const char* where);
+
+public:
 	uint64_t get_resync_failure_count();
 
 	// Observability mutators. Callers on the sync code paths invoke

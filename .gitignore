@@ -22,3 +22,10 @@ Makefile.in
 
 # Lean build artifacts
 .lake/
+src/lib/a.svg
+src/lib/flamegraph.pl
+src/lib/out.perf
+src/lib/out.perf.flared
+src/lib/perf.pl
+src/.DS_Store
+.DS_Store

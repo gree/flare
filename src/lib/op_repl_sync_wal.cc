@@ -417,11 +417,18 @@ int op_repl_sync_wal::_parse_text_client_parameters() {
 			}
 			delete[] p;
 
-			// Read batch data
+			// Read batch data. MUST be readsize(): raw read() returns
+			// whatever the internal buffer happens to hold (a SHORT read)
+			// when a readline refill split the batch across a buffer
+			// boundary — the old code ignored the returned length and
+			// built a WriteBatch from batch_size bytes of a SHORTER
+			// allocation (heap overread). That garbage tail is what kept
+			// surfacing as "unknown WriteBatch tag" corruption at a
+			// different LSN every attempt.
 			char* batch_data = NULL;
-			bool actual = false;
-			if (this->_connection->read(&batch_data, batch_size, false, actual) < 0) {
-				log_err("failed to read batch data", 0);
+			if (this->_connection->readsize(static_cast<int>(batch_size), &batch_data) < 0
+					|| batch_data == NULL) {
+				log_err("failed to read batch data (size=%zu)", batch_size);
 				if (batch_data) delete[] batch_data;
 				return -1;
 			}

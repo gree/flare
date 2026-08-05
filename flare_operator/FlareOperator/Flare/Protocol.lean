@@ -33,6 +33,11 @@ inductive FlareEvent where
 inductive FlareResponse where
   | OK
   | End (lines : List String)
+  /-- Bare line(s) with NO trailing END terminator. flarei's `version` reply
+      is exactly one line; appending END desyncs clients that read one line
+      per response (flare-tools read the leftover END as the NEXT command's
+      reply — every subsequent response was off by one, observed live). -/
+  | Raw (lines : List String)
   | ServerError (msg : String)
   | Error
   | CloseConnection
@@ -123,6 +128,7 @@ def serializeResponse (resp : FlareResponse) : String :=
   match resp with
   | .OK => serializeOK
   | .End lines => String.join (lines.map (· ++ "\r\n")) ++ "END\r\n"
+  | .Raw lines => String.join (lines.map (· ++ "\r\n"))
   | .ServerError msg => serializeServerError msg
   | .Error => serializeError
   | .CloseConnection => ""

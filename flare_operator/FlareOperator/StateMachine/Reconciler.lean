@@ -499,7 +499,10 @@ def reconcileStep (state : FlareClusterState) (crd : FlareClusterView)
         :: acc) []
     (state, .End lines)
   | .Version =>
-    (state, .End ["VERSION flare-operator 1.0.0"])
+    -- ONE line, NO END: flarei's version reply is a single bare line.
+    -- (.End appended "END\r\n", which one-line readers like flare-tools
+    -- left in the buffer — every later response was then off by one.)
+    (state, .Raw ["VERSION flare-operator 1.0.0"])
   | .Quit =>
     (state, .CloseConnection)
   | .NodeAdd serverName serverPort =>

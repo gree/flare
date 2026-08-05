@@ -1,0 +1,33 @@
+# flare-tools (ruby: flare-stats / flare-admin) as an ephemeral debug image.
+#
+# The classic operational view of a flare cluster:
+#   kubectl debug -it <operator-pod> --image=ghcr.io/gree/flare-tools:<tag> \
+#     --target=flare-operator -- flare-stats
+# (an ephemeral container shares the pod's network namespace, so the default
+#  index server 127.0.0.1:12120 is the operator itself), or as a one-off pod:
+#   kubectl run flare-stats --rm -it --image=... -- \
+#     flare-stats --index-server=<release>-flare-operator.<ns>.svc --index-server-port=12120
+#
+# NOTE: use READ-ONLY commands only (flare-stats, flare-admin list/ping).
+# flare-admin's mutating subcommands (master/slave/balance/reconstruct/down)
+# fight the operator's reconcile loop, which owns role assignment here.
+#
+# ruby:2.7 on purpose: the flare-tools gem predates ruby 3's breaking changes.
+# The gem pulls in the `tokyocabinet` native extension, hence the build-deps
+# dance (installed, used for the gem build, then removed to keep the image small).
+FROM ruby:2.7-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+         build-essential libtokyocabinet-dev zlib1g-dev libbz2-dev netcat-openbsd \
+    && gem install flare-tools --no-document \
+    && apt-get purge -y build-essential libtokyocabinet-dev zlib1g-dev libbz2-dev \
+    && apt-get install -y --no-install-recommends libtokyocabinet9 \
+    && apt-get autoremove -y \
+    && rm -rf /var/lib/apt/lists/* \
+    # sanity: the gem loads (NOTE --help exits 1 by design in this old CLI)
+    && flare-stats --help 2>&1 | grep -q "Flare-tools version"
+
+# No entrypoint: kubectl debug/run passes the command.
+ENTRYPOINT []
+CMD ["flare-stats", "--help"]

@@ -185,37 +185,79 @@ cluster:
     enabled: true
     maxUnavailable: 1
   # Optional pod-level ServiceAccount for the flared pods (flared itself uses
-  # no K8s API; this exists for backupBootstrap's keyless object-storage auth,
-  # e.g. an SA your cloud maps to a read-only bucket role via OIDC).
+  # no K8s API). Defaults to backup.serviceAccount.name when backupBootstrap
+  # is enabled (the bucket-read identity).
   serviceAccountName: ""
-  # Automated failover-from-backup for replicas=1 (no-slave) clusters: an init
-  # container seeds an EMPTY data dir from the newest backup before flared
-  # starts (no-op when data exists). Loss window = your backup interval; a
-  # backup older than maxAgeSeconds is refused loudly instead of served.
-  # Requires partitions=1 and a data volume (persistence or tmpfs). For
-  # planned maintenance prefer a TEMPORARY slave (replicas 1->2->1); this flag
-  # covers the unplanned failures in between. See docs/BACKUP_RESTORE.md.
-  backupBootstrap:
-    enabled: false
-    # e.g. s3://my-bucket/flare-backups/<instance>   (no trailing slash; the
-    # init container reads <s3Url>/latest/p0/)
-    s3Url: ""
-    maxAgeSeconds: 7200
-    # image needs aws-cli; defaults to the flare-backup image at the flared tag
-    image:
-      repository: ghcr.io/gree/flare-backup
-      tag: ""
-    # keyless (web-identity) auth: set the token audience your cloud expects
-    # and pass the role via extraEnv; static-key setups can instead point
-    # extraEnv at a Secret. Example:
+
+  # ---- Object-storage backup (shared config) --------------------------------
+  # One block consumed by BOTH the backup CronJob (produce side) and
+  # backupBootstrap (restore side), so the location/auth can never drift
+  # apart. Everything cloud-specific (bucket, role ARN, audience, region,
+  # endpoint) is a DEPLOYMENT-side value — nothing vendor-flavored is
+  # committed to this chart.
+  objectStorage:
+    # s3://bucket/prefix — no trailing slash, no cluster name (consumers
+    # append /<cluster.name>/...). Required when backup or backupBootstrap
+    # is enabled.
+    url: ""
+    # non-AWS S3-compatible endpoint (COS, GCS, MinIO, ...); empty for AWS.
+    endpoint: ""
+    # keyless (web-identity) auth: the token audience your cloud expects; a
+    # projected ServiceAccount token is mounted at /var/run/secrets/sts/token.
+    # Pass the role via extraEnv; static-key setups can instead reference a
+    # Secret from extraEnv/credentialsSecret. Example:
     #   projectedTokenAudience: sts.amazonaws.com
     #   extraEnv:
     #     - name: AWS_ROLE_ARN
     #       value: arn:aws:iam::<acct>:role/<role>
     #     - name: AWS_WEB_IDENTITY_TOKEN_FILE
     #       value: /var/run/secrets/sts/token
+    #     - name: AWS_REGION
+    #       value: <region>
     projectedTokenAudience: ""
     extraEnv: []
+    # optional Secret with static credentials (envFrom) for non-OIDC setups
+    credentialsSecret: ""
+
+  # Backup CronJob: ONE strictly-ordered runner (flare-backup-run, baked into
+  # the flare-backup image): per-partition checkpoint -> pull -> restore-
+  # consistent 3-phase upload -> verify, then (first successful run of each
+  # UTC day) the retained generation copy + prune. In-process ordering means
+  # the daily generation can never race a running delta. RPO = the schedule
+  # interval. Creates the ServiceAccount/Role/RoleBinding (pods/get+exec) it
+  # needs. See docs/BACKUP_RESTORE.md.
+  backup:
+    enabled: false
+    schedule: "0 * * * *"        # hourly; every run is a delta
+    suspend: false
+    role: master                 # which copy to back up: master | slave
+    keepDays: 14                 # retained daily generations; 0 disables them
+    # HARD timeout below the cadence (a hung run dies before its next slot)
+    activeDeadlineSeconds: 3300
+    startingDeadlineSeconds: 900
+    serviceAccount:
+      create: true
+      name: flare-backup         # cloud OIDC trust policies bind ns:name — keep stable
+    # image needs kubectl+aws-cli+the runner; defaults to the flared tag
+    image:
+      repository: ghcr.io/gree/flare-backup
+      tag: ""
+
+  # Automated failover-from-backup: an init container seeds an EMPTY data dir
+  # from the newest backup (objectStorage.url/<cluster.name>/latest/p0/)
+  # before flared starts (no-op when data exists). Loss window = the backup
+  # interval; a backup older than maxAgeSeconds is refused loudly instead of
+  # served. Requires partitions=1 and a data volume. For planned maintenance
+  # prefer a TEMPORARY slave (replicas 1->2->1); this covers the unplanned
+  # failures (and whole-cluster tmpfs loss) in between. NOTE: keep the
+  # cluster's rocksdb walTtlSeconds above (backup interval + maxAgeSeconds)
+  # or a backup-seeded pod can never catch up via WAL incremental sync.
+  backupBootstrap:
+    enabled: false
+    maxAgeSeconds: 7200
+    image:
+      repository: ghcr.io/gree/flare-backup
+      tag: ""
   # Optional LoadBalancer in front of the flared DATA port (memcached
   # protocol). flared proxies keys to the owning partition, so one LB over
   # all nodes is a complete client entry point. The protocol has NO

@@ -30,15 +30,20 @@ Components:
   `rocksdb_last_backup_epoch` — **alert when
   `time() - rocksdb_last_backup_epoch` exceeds ~2 backup intervals**.
 - `rocksdb-backup-keep` (flared.conf, default 7, hot-reloadable via SIGHUP).
-- `deploy/backup-cronjob.yaml` — three independent CronJobs: `flare-backup`
-  (tier 1, local checkpoints via busybox+nc over the headless-service pod DNS),
-  `flare-backup-s3-delta` (tier 2a, frequent DELTA upload — `aws s3 sync
-  --size-only --delete` mirrors the newest checkpoint of ONE node per partition
-  to `<bucket>/<cluster>/latest/p<N>/`; immutable uniquely-named SSTs mean only
-  new ones cross the WAN), and `flare-backup-s3-daily` (tier 2b, once-a-day
-  server-side copy of `<cluster>/latest/` to a dated, pruned
-  `<cluster>/snapshots/<date>/` for point-in-time rollback). Both tier-2 jobs
-  start suspended; S3-compatible stores (GCS, MinIO, …) work via `S3_ENDPOINT`.
+- `cluster.backup` (helm values) — ONE CronJob running ONE strictly-ordered
+  script (`flare-backup-run`, baked into the `flare-backup` image): per
+  partition, checkpoint -> pull -> restore-consistent 3-phase upload to
+  `<url>/<cluster>/latest/p<N>/` -> verify; then, on the first successful run
+  of each UTC day, a server-side copy of `latest/` to a dated, pruned
+  `snapshots/<date>/` generation. In-process ordering means the daily
+  generation can never race a running delta; `concurrencyPolicy: Forbid` +
+  `activeDeadlineSeconds` below the cadence handle self-overlap and hangs.
+  Location/auth come from `cluster.objectStorage` (S3-compatible stores via
+  `endpoint`; keyless web-identity via `projectedTokenAudience` + `extraEnv`,
+  or a static `credentialsSecret`) — the SAME block `backupBootstrap` reads,
+  so produce and restore sides cannot drift apart. Immutable uniquely-named
+  SSTs mean only new ones cross the WAN on each delta. Local in-pod
+  generations are a byproduct of every run (pruned by `rocksdb-backup-keep`).
 - **One node per partition, not every replica.** Replicas hold identical data,
   so the jobs discover targets from the operator node map (`node sync` on
   `:12120`) and back up exactly one Active node per partition of a selectable
@@ -52,7 +57,8 @@ Components:
 
 ## Taking a backup
 
-Automatic: enable the `flare-backup` CronJob (adjust `BACKUP_ROLE`, schedule).
+Automatic: set `cluster.objectStorage.url` and `cluster.backup.enabled: true`
+(adjust `backup.role`, `backup.schedule`, `backup.keepDays`).
 
 Manual (one pod):
 
@@ -144,17 +150,19 @@ restarts and PVC survivors are untouched.
 
 ```yaml
 cluster:
-  serviceAccountName: <sa with read access to the bucket>
-  backupBootstrap:
-    enabled: true
-    s3Url: s3://<bucket>/flare-backups/<instance>
-    maxAgeSeconds: 7200
+  objectStorage:                # shared with cluster.backup — cannot drift
+    url: s3://<bucket>/flare-backups
     projectedTokenAudience: sts.amazonaws.com   # keyless web-identity auth
     extraEnv:
       - name: AWS_ROLE_ARN
         value: arn:aws:iam::<acct>:role/<role>
       - name: AWS_WEB_IDENTITY_TOKEN_FILE
         value: /var/run/secrets/sts/token
+  backup:
+    enabled: true
+  backupBootstrap:
+    enabled: true
+    maxAgeSeconds: 7200         # keep rocksdb walTtlSeconds above interval+this
 ```
 
 Semantics to be aware of:

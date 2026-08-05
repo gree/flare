@@ -33,10 +33,18 @@
        reconstruction just catches up the delta on top of it. */}}
 {{- $bb := dict "enabled" false }}
 {{- if $c.backupBootstrap }}{{- $bb = $c.backupBootstrap }}{{- end }}
+{{- $bk := dict "enabled" false }}
+{{- if $c.backup }}{{- $bk = $c.backup }}{{- end }}
+{{- $os := dict }}
+{{- if $c.objectStorage }}{{- $os = $c.objectStorage }}{{- end }}
+{{- $backupSaName := "flare-backup" }}
+{{- if $bk.serviceAccount }}{{- $backupSaName = $bk.serviceAccount.name | default "flare-backup" }}{{- end }}
+{{- if or $bb.enabled $bk.enabled }}
+{{- if not $os.url }}{{- fail "cluster.objectStorage.url is required by backup/backupBootstrap (s3://bucket/prefix, no trailing slash)" }}{{- end }}
+{{- end }}
 {{- if $bb.enabled }}
 {{- if ne (int $c.partitions) 1 }}{{- fail "cluster.backupBootstrap requires partitions=1 (pod->backup mapping is only defined there)" }}{{- end }}
 {{- if not $useDataVol }}{{- fail "cluster.backupBootstrap requires persistence or tmpfs (a data volume the init container can seed)" }}{{- end }}
-{{- if not $bb.s3Url }}{{- fail "cluster.backupBootstrap.s3Url is required (e.g. s3://bucket/flare-backups/<instance>, no trailing slash)" }}{{- end }}
 {{- end }}
 {{- /* flared mounts /etc/flared/extra.conf and exits immediately if the
        file is missing, so the ConfigMap must exist BEFORE the StatefulSet
@@ -147,8 +155,8 @@ spec:
       # SIGTERM. Must exceed drainSeconds or K8s SIGKILLs mid-drain.
       terminationGracePeriodSeconds: {{ add (int $drain) 30 }}
       {{- end }}
-      {{- if $c.serviceAccountName }}
-      serviceAccountName: {{ $c.serviceAccountName }}
+      {{- if or $c.serviceAccountName $bb.enabled }}
+      serviceAccountName: {{ $c.serviceAccountName | default $backupSaName }}
       {{- end }}
       {{- if $bb.enabled }}
       initContainers:
@@ -170,9 +178,10 @@ spec:
                 echo "backup-bootstrap: data present -> no-op"
                 exit 0
               fi
+              EP=""; [ -n "$S3_ENDPOINT" ] && EP="--endpoint-url $S3_ENDPOINT"
               SRC="${S3_URL}/latest/p0"
               REST="${SRC#s3://}"; BUCKET="${REST%%/*}"; KEY="${REST#*/}/CURRENT"
-              LM=$(aws s3api head-object --bucket "$BUCKET" --key "$KEY" --query LastModified --output text)
+              LM=$(aws s3api head-object $EP --bucket "$BUCKET" --key "$KEY" --query LastModified --output text)
               AGE=$(( $(date +%s) - $(date -d "$LM" +%s) ))
               if [ "$AGE" -gt "$MAX_AGE_SECONDS" ]; then
                 echo "backup-bootstrap: newest backup is ${AGE}s old (> ${MAX_AGE_SECONDS}s) -> REFUSING to seed; restore manually or raise maxAgeSeconds"
@@ -180,7 +189,7 @@ spec:
               fi
               mkdir -p "$DATA"
               rm -rf "$DATA/flare.rocksdb.restore"
-              aws s3 cp --recursive "$SRC" "$DATA/flare.rocksdb.restore" --no-progress
+              aws s3 cp --recursive $EP "$SRC" "$DATA/flare.rocksdb.restore" --no-progress
               M=$(tr -d '\r\n' < "$DATA/flare.rocksdb.restore/CURRENT")
               if [ ! -f "$DATA/flare.rocksdb.restore/$M" ]; then
                 echo "backup-bootstrap: CURRENT names missing $M -> backup mirror is torn, refusing"
@@ -189,17 +198,23 @@ spec:
               mv "$DATA/flare.rocksdb.restore" "$DATA/flare.rocksdb"
               echo "backup-bootstrap: seeded from $SRC (age ${AGE}s)"
           env:
+            # location/auth come from cluster.objectStorage — the SAME block
+            # the backup CronJob publishes to, so they cannot drift apart.
             - name: S3_URL
-              value: {{ $bb.s3Url | quote }}
+              value: {{ printf "%s/%s" $os.url $c.name | quote }}
             - name: MAX_AGE_SECONDS
               value: {{ $bb.maxAgeSeconds | default 7200 | quote }}
-            {{- with $bb.extraEnv }}
+            {{- with $os.endpoint }}
+            - name: S3_ENDPOINT
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with $os.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
           volumeMounts:
             - name: data
               mountPath: /data
-            {{- if $bb.projectedTokenAudience }}
+            {{- if $os.projectedTokenAudience }}
             - name: bootstrap-token
               mountPath: /var/run/secrets/sts
               readOnly: true
@@ -328,7 +343,7 @@ spec:
         - name: flared-config
           configMap:
             name: {{ $c.name }}-config
-        {{- if and $bb.enabled $bb.projectedTokenAudience }}
+        {{- if and $bb.enabled $os.projectedTokenAudience }}
         # Keyless object-storage auth for backup-bootstrap: a projected SA
         # token with the cloud-side audience (web-identity flow; pair with
         # extraEnv AWS_ROLE_ARN / AWS_WEB_IDENTITY_TOKEN_FILE=/var/run/secrets/sts/token
@@ -337,7 +352,7 @@ spec:
           projected:
             sources:
               - serviceAccountToken:
-                  audience: {{ $bb.projectedTokenAudience }}
+                  audience: {{ $os.projectedTokenAudience }}
                   expirationSeconds: 3600
                   path: token
         {{- end }}

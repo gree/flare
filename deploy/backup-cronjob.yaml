@@ -42,7 +42,11 @@ metadata:
   name: flare-backup
   namespace: flare-system
 spec:
-  schedule: "0 3 * * *"          # daily 03:00 UTC (local checkpoints)
+  # 02:30, OFF the delta job's minute (deltas run at :00 and create their own
+  # local checkpoints under the same flared retention — this job only matters
+  # for PVC clusters that want an extra in-pod restore point; on tmpfs it is
+  # pointless, drop it).
+  schedule: "30 2 * * *"
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 3
@@ -54,7 +58,7 @@ spec:
           restartPolicy: Never
           containers:
             - name: trigger
-              image: busybox:1.36
+              image: ghcr.io/gree/flare-backup:latest
               env:
                 - name: CLUSTER
                   value: "default"           # FlareCluster name
@@ -73,31 +77,7 @@ spec:
                   value: "flare-flare-operator.flare-system.svc.cluster.local"
                 - name: OPERATOR_PORT
                   value: "12120"
-              command:
-                - sh
-                - -c
-                - |
-                  set -e
-                  # Discover targets from the operator node map: one pod per partition
-                  # with the chosen role (role code: master=0, slave=1).
-                  RC=0; [ "$BACKUP_ROLE" = "slave" ] && RC=1
-                  # NODE <name> <port> <role> <state> <partition> ...; role master=0
-                  # slave=1, state Active=0. One Active node per partition ($6).
-                  TARGETS=$(printf 'node sync\r\n' | nc -w 5 "$OPERATOR_SVC" "$OPERATOR_PORT" \
-                    | awk -v rc="$RC" '/^NODE/ && $4==rc && $5==0 { part=$6; if (!(part in s)) { s[part]=1; split($2,a,"."); print a[1] } }')
-                  [ -z "$TARGETS" ] && { echo "no backup targets for role=$BACKUP_ROLE via node sync"; exit 1; }
-                  STAMP=$(date -u +%Y%m%d-%H%M%S)
-                  FAIL=0
-                  for POD in $TARGETS; do
-                    HOST="${POD}.${CLUSTER}-nodes.${NAMESPACE}.svc.cluster.local"
-                    echo "backing up ${POD} (role=$BACKUP_ROLE) -> ${STAMP}"
-                    REPLY=$(printf 'backup %s\r\n' "$STAMP" | nc -w 30 "$HOST" "$FLARE_PORT" || true)
-                    echo "  reply: ${REPLY}"
-                    case "$REPLY" in
-                      *ERROR*|"") echo "  BACKUP FAILED on ${POD}"; FAIL=1 ;;
-                    esac
-                  done
-                  exit "$FAIL"
+              command: ["flare-backup-checkpoint"]
 ---
 # Tier 2a: frequent DELTA upload to object storage (S3 / COS / GCS / MinIO).
 # Each run picks ONE node per partition (BACKUP_ROLE, discovered from the operator
@@ -134,9 +114,9 @@ spec:
           serviceAccountName: flare-backup   # needs pods/get + pods/exec
           containers:
             - name: upload
-              # Image needs kubectl AND aws-cli (build a small combined image;
-              # amazon/aws-cli alone has no kubectl).
-              image: YOUR-REGISTRY/kubectl-awscli:latest
+              # flare-backup = kubectl + aws-cli v2 + the backup scripts baked
+              # in (deploy/backup-scripts/); pin to your release tag.
+              image: ghcr.io/gree/flare-backup:latest
               envFrom:
                 - secretRef:
                     name: flare-backup-s3-credentials
@@ -161,46 +141,7 @@ spec:
                   value: ""
                 - name: DATA_DIR
                   value: "/data/flare"
-              command:
-                - sh
-                - -c
-                - |
-                  set -e
-                  EP=""; [ -n "$S3_ENDPOINT" ] && EP="--endpoint-url $S3_ENDPOINT"
-                  # One target pod per partition of the chosen role (master=0, slave=1),
-                  # discovered from the operator node map — no redundant per-replica
-                  # backups. Emit "<pod>:<partition>".
-                  RC=0; [ "$BACKUP_ROLE" = "slave" ] && RC=1
-                  # NODE <name> <port> <role> <state> <partition> ...; pick one Active
-                  # ($5==0) node of the role per partition ($6). Emit "<pod>:<partition>".
-                  TARGETS=$(printf 'node sync\r\n' | nc -w 5 "$OPERATOR_SVC" "$OPERATOR_PORT" \
-                    | awk -v rc="$RC" '/^NODE/ && $4==rc && $5==0 { part=$6; if (!(part in s)) { s[part]=1; split($2,a,"."); print a[1]":"part } }')
-                  [ -z "$TARGETS" ] && { echo "no backup targets for role=$BACKUP_ROLE via node sync"; exit 1; }
-                  FAIL=0
-                  for T in $TARGETS; do
-                    POD="${T%%:*}"; PART="${T##*:}"
-                    HOST="${POD}.${CLUSTER}-nodes.${NAMESPACE}.svc.cluster.local"
-                    STAMP=$(date -u +%Y%m%d-%H%M%S)
-                    # Generation-first layout: <cluster>/latest/p<N>/ (the daily job
-                    # snapshots it to <cluster>/snapshots/<date>/p<N>/). Keyed by
-                    # PARTITION so a master change keeps a stable path.
-                    DST="${BUCKET}/${CLUSTER}/latest/p${PART}"
-                    # 1) fresh consistent checkpoint (hard-links; near-instant)
-                    REPLY=$(printf 'backup %s\r\n' "$STAMP" | nc -w 30 "$HOST" "$FLARE_PORT" || true)
-                    case "$REPLY" in *ERROR*|"") echo "checkpoint FAILED on ${POD}"; FAIL=1; continue ;; esac
-                    # 2) copy the checkpoint out of the pod (intra-cluster)
-                    rm -rf "/tmp/${POD}"; mkdir -p "/tmp/${POD}"
-                    kubectl cp -n "$NAMESPACE" "${POD}:${DATA_DIR}/backups/${STAMP}" "/tmp/${POD}"
-                    # 3) DELTA upload: --size-only skips immutable SSTs already
-                    #    present; --delete prunes compaction leftovers. Result is
-                    #    a complete, current mirror at <bucket>/<cluster>/latest/p<N>/.
-                    #    (For the CURRENT-pointer restore hazard under --size-only, see
-                    #    the 3-phase upload + verify in the OIDC variant.)
-                    aws s3 sync "/tmp/${POD}" "${DST}/" --size-only --delete $EP || FAIL=1
-                    rm -rf "/tmp/${POD}"
-                    # 4) local checkpoint retention is flared's job (rocksdb-backup-keep)
-                  done
-                  exit "$FAIL"
+              command: ["flare-backup-delta"]
 ---
 # Tier 2b: once-a-day FULL retained snapshot, entirely server-side (no cluster
 # egress) — copies the current mirror to a dated prefix and prunes old ones.
@@ -210,7 +151,12 @@ metadata:
   name: flare-backup-s3-daily
   namespace: flare-system
 spec:
-  schedule: "0 3 * * *"          # daily 03:00 UTC (independent of the delta job)
+  # ORDER MATTERS: this job server-side-copies latest/ -> snapshots/<date>/,
+  # so it must NOT overlap a running delta (its recursive copy could list a
+  # MANIFEST that the delta's prune phase then deletes -> torn snapshot,
+  # caught by verify but the job fails). Deltas run at minute 0; 03:30 always
+  # snapshots the quiesced 03:00 mirror.
+  schedule: "30 3 * * *"
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 3
@@ -223,7 +169,7 @@ spec:
           restartPolicy: Never
           containers:
             - name: snapshot
-              image: amazon/aws-cli:2.15.0
+              image: ghcr.io/gree/flare-backup:latest
               envFrom:
                 - secretRef:
                     name: flare-backup-s3-credentials
@@ -236,26 +182,4 @@ spec:
                   value: ""
                 - name: KEEP_DAYS
                   value: "14"
-              command:
-                - sh
-                - -c
-                - |
-                  set -e
-                  EP=""; [ -n "$S3_ENDPOINT" ] && EP="--endpoint-url $S3_ENDPOINT"
-                  DATE=$(date -u +%Y%m%d)
-                  # Generation-first layout: snapshot the whole current mirror
-                  # (<cluster>/latest/p<N>/) into a dated, retained generation
-                  # (<cluster>/snapshots/<date>/p<N>/). Server-side copy within the
-                  # bucket (COS/S3) — no cluster egress.
-                  aws s3 cp --recursive $EP \
-                    "${BUCKET}/${CLUSTER}/latest/" \
-                    "${BUCKET}/${CLUSTER}/snapshots/${DATE}/"
-                  # Prune snapshot generations older than KEEP_DAYS (compare YYYYMMDD).
-                  CUTOFF=$(date -u -d "-${KEEP_DAYS} days" +%Y%m%d 2>/dev/null || date -u -v-${KEEP_DAYS}d +%Y%m%d)
-                  for d in $(aws s3 ls $EP "${BUCKET}/${CLUSTER}/snapshots/" | awk '{print $2}' | tr -d '/'); do
-                    case "$d" in ''|*[!0-9]*) continue ;; esac
-                    if [ "$d" -lt "$CUTOFF" ]; then
-                      echo "pruning old snapshot ${d}"
-                      aws s3 rm --recursive $EP "${BUCKET}/${CLUSTER}/snapshots/${d}/"
-                    fi
-                  done
+              command: ["flare-backup-snapshot-daily"]

@@ -1,39 +1,36 @@
 # Periodic flare backup via the flared `backup` op (RocksDB checkpoint).
 #
-# Three tiers, each an independent CronJob you enable/schedule to taste:
+# ONE CronJob running ONE strictly-ordered script (`flare-backup-run`, baked
+# into the flare-backup image):
 #
-#   Tier 1  flare-backup            local RocksDB checkpoint on each pod's PVC.
-#                                    Hard-linked, near-instant, survives
-#                                    flush_all. Retention: flared's
-#                                    `rocksdb-backup-keep` (default 7).
+#   per partition (one Active node of BACKUP_ROLE — replicas hold identical
+#   data, so backing up every pod is redundant):
+#     1. fresh local checkpoint (hard-linked, near-instant, survives
+#        flush_all; local generations pruned by flared's rocksdb-backup-keep)
+#     2. pull it out of the pod
+#     3. RESTORE-CONSISTENT 3-phase upload to <bucket>/<cluster>/latest/p<N>/
+#        (keyed by partition, stable across failover)
+#     4. verify CURRENT -> MANIFEST in the bucket
+#   once per UTC day (first successful run):
+#     5. server-side copy latest/ -> snapshots/<YYYYMMDD>/ (+ verify)
+#     6. prune generations older than KEEP_DAYS
 #
-#   Tier 2a flare-backup-s3-delta   frequent DELTA upload to object storage.
-#                                    Backs up ONE node per partition (the master,
-#                                    or a slave via BACKUP_ROLE — replicas hold
-#                                    identical data) and mirrors its newest
-#                                    checkpoint to <bucket>/<cluster>/latest/p<N>/
-#                                    (keyed by partition, stable across failover)
-#                                    with `aws s3 sync --size-only --delete`. RocksDB
-#                                    SSTs are immutable and uniquely named, so
-#                                    --size-only uploads only NEW SSTs (+ the
-#                                    small changed MANIFEST/CURRENT) and --delete
-#                                    prunes SSTs dropped by compaction. Every run
-#                                    is a delta; the WAN transfer is just the
-#                                    write delta since the previous run.
+# Everything runs in one process, in order — a separate daily CronJob could
+# race a running delta (its recursive copy lists a MANIFEST that the delta's
+# prune phase then deletes -> torn snapshot). Self-overlap is prevented by
+# concurrencyPolicy: Forbid + activeDeadlineSeconds BELOW the cadence (a hung
+# run is killed before its next slot instead of blocking it forever).
 #
-#   Tier 2b flare-backup-s3-daily   once-a-day FULL retained snapshot. A pure
-#                                    server-side copy of <cluster>/latest/ ->
-#                                    <cluster>/snapshots/<date>/
-#                                    inside the bucket (no cluster egress), plus
-#                                    pruning of snapshots older than KEEP_DAYS.
-#                                    Gives point-in-time rollback; the delta job
-#                                    only keeps the single most-recent state.
+# RPO = the schedule interval (writes since the last run are the exposure).
+# Tighten toward */5 as needed — every run is a delta upload. NOTE: keep the
+# cluster's rocksdb WAL retention (walTtlSeconds) comfortably ABOVE this
+# interval + backupBootstrap.maxAgeSeconds, or a backup-seeded pod can never
+# catch up via WAL incremental sync (its cursor is already purged on the
+# master) and always degrades to a full dump.
 #
-# RPO = the tier-2a interval (writes since the last delta are the exposure).
-# Object storage is S3-compatible: for a non-AWS S3-compatible store (GCS,
-# MinIO, …) set S3_ENDPOINT to that store's endpoint. Vendor endpoints,
-# buckets, and credentials are DEPLOYMENT-side (a Secret + these env values),
-# never committed here.
+# Object storage is S3-compatible: for a non-AWS store (COS, GCS, MinIO, …)
+# set S3_ENDPOINT. Vendor endpoints, buckets, and credentials are
+# DEPLOYMENT-side (a Secret + these env values), never committed here.
 #
 # Restore procedure: see docs/BACKUP_RESTORE.md.
 apiVersion: batch/v1
@@ -42,80 +39,27 @@ metadata:
   name: flare-backup
   namespace: flare-system
 spec:
-  # 02:30, OFF the delta job's minute (deltas run at :00 and create their own
-  # local checkpoints under the same flared retention — this job only matters
-  # for PVC clusters that want an extra in-pod restore point; on tmpfs it is
-  # pointless, drop it).
-  schedule: "30 2 * * *"
-  concurrencyPolicy: Forbid
-  successfulJobsHistoryLimit: 3
-  failedJobsHistoryLimit: 3
-  jobTemplate:
-    spec:
-      activeDeadlineSeconds: 600
-      template:
-        spec:
-          restartPolicy: Never
-          containers:
-            - name: trigger
-              image: ghcr.io/gree/flare-backup:latest
-              env:
-                - name: CLUSTER
-                  value: "default"           # FlareCluster name
-                - name: NAMESPACE
-                  value: "flare-system"
-                - name: FLARE_PORT
-                  value: "12121"
-                # Back up ONE node per partition, not every replica (replicas hold
-                # identical data — backing up all of them is redundant). BACKUP_ROLE
-                # picks which copy: master (freshest) or slave (offloads the master).
-                # Targets are discovered from the operator's node map, so this tracks
-                # failover automatically (no static NUM_PODS / pod-index assumptions).
-                - name: BACKUP_ROLE
-                  value: "master"            # master | slave
-                - name: OPERATOR_SVC         # operator flarei svc ({release}-flare-operator)
-                  value: "flare-flare-operator.flare-system.svc.cluster.local"
-                - name: OPERATOR_PORT
-                  value: "12120"
-              command: ["flare-backup-checkpoint"]
----
-# Tier 2a: frequent DELTA upload to object storage (S3 / COS / GCS / MinIO).
-# Each run picks ONE node per partition (BACKUP_ROLE, discovered from the operator
-# node map), takes a fresh checkpoint, copies it out, and mirrors it to
-# <bucket>/<cluster>/latest/p<N>/ with `aws s3 sync --size-only --delete` so
-# only newly-flushed SSTs cross the WAN. Requires:
-#   - a ServiceAccount bound to a Role allowing pods/get + pods/exec
-#   - an image with BOTH kubectl and aws-cli
-#   - a Secret `flare-backup-s3-credentials` with AWS_ACCESS_KEY_ID /
-#     AWS_SECRET_ACCESS_KEY (or IRSA/workload-identity — then drop envFrom)
-# For a non-AWS S3-compatible store set S3_ENDPOINT to that store's endpoint.
-# NOTE ON CADENCE: this job pulls each pod's checkpoint intra-cluster before the
-# delta upload, so at minute-cadence on a large dataset the intra-cluster copy
-# dominates. For true minute-level RPO on big data, run aws-cli as a sidecar in
-# the flared pod (PVC mounted read-only) and `sync` the checkpoint dir in place,
-# skipping the pull entirely. Hourly (the default here) is fine job-based.
-apiVersion: batch/v1
-kind: CronJob
-metadata:
-  name: flare-backup-s3-delta
-  namespace: flare-system
-spec:
-  schedule: "0 * * * *"          # hourly delta (tighten toward */5 or */1 as needed)
-  concurrencyPolicy: Forbid
+  schedule: "0 * * * *"          # hourly; every run is a delta
+  concurrencyPolicy: Forbid      # never two runners at once
+  # If a slot was skipped (previous run still active / controller hiccup),
+  # start up to 15 min late rather than not at all.
+  startingDeadlineSeconds: 900
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 3
   suspend: true                  # enable after configuring bucket + credentials
   jobTemplate:
     spec:
-      activeDeadlineSeconds: 3600
+      # HARD timeout, kept BELOW the hourly cadence: a hung run (stuck
+      # kubectl cp, stalled upload) dies before its next slot.
+      activeDeadlineSeconds: 3300
       template:
         spec:
           restartPolicy: Never
           serviceAccountName: flare-backup   # needs pods/get + pods/exec
           containers:
-            - name: upload
-              # flare-backup = kubectl + aws-cli v2 + the backup scripts baked
-              # in (deploy/backup-scripts/); pin to your release tag.
+            - name: backup
+              # kubectl + aws-cli v2 + the runner script baked in
+              # (deploy/backup-scripts/); pin to your release tag.
               image: ghcr.io/gree/flare-backup:latest
               envFrom:
                 - secretRef:
@@ -127,59 +71,19 @@ spec:
                   value: "flare-system"
                 - name: FLARE_PORT
                   value: "12121"
-                # Back up ONE node per partition (not every replica). master=freshest,
-                # slave=offloads the master. Targets discovered from the operator.
+                # master=freshest copy; slave=offloads the master.
                 - name: BACKUP_ROLE
                   value: "master"            # master | slave
-                - name: OPERATOR_SVC         # operator flarei svc ({release}-flare-operator)
+                - name: OPERATOR_SVC         # operator svc ({release}-flare-operator)
                   value: "flare-flare-operator.flare-system.svc.cluster.local"
                 - name: OPERATOR_PORT
                   value: "12120"
                 - name: BUCKET            # s3://bucket/prefix (no trailing slash)
                   value: "s3://YOUR-BUCKET/flare-backups"
-                - name: S3_ENDPOINT       # e.g. COS S3-compatible endpoint; empty for AWS
+                - name: S3_ENDPOINT       # e.g. an S3-compatible endpoint; empty for AWS
                   value: ""
                 - name: DATA_DIR
                   value: "/data/flare"
-              command: ["flare-backup-delta"]
----
-# Tier 2b: once-a-day FULL retained snapshot, entirely server-side (no cluster
-# egress) — copies the current mirror to a dated prefix and prunes old ones.
-apiVersion: batch/v1
-kind: CronJob
-metadata:
-  name: flare-backup-s3-daily
-  namespace: flare-system
-spec:
-  # ORDER MATTERS: this job server-side-copies latest/ -> snapshots/<date>/,
-  # so it must NOT overlap a running delta (its recursive copy could list a
-  # MANIFEST that the delta's prune phase then deletes -> torn snapshot,
-  # caught by verify but the job fails). Deltas run at minute 0; 03:30 always
-  # snapshots the quiesced 03:00 mirror.
-  schedule: "30 3 * * *"
-  concurrencyPolicy: Forbid
-  successfulJobsHistoryLimit: 3
-  failedJobsHistoryLimit: 3
-  suspend: true                  # enable after configuring bucket + credentials
-  jobTemplate:
-    spec:
-      activeDeadlineSeconds: 1800
-      template:
-        spec:
-          restartPolicy: Never
-          containers:
-            - name: snapshot
-              image: ghcr.io/gree/flare-backup:latest
-              envFrom:
-                - secretRef:
-                    name: flare-backup-s3-credentials
-              env:
-                - name: CLUSTER
-                  value: "default"
-                - name: BUCKET
-                  value: "s3://YOUR-BUCKET/flare-backups"
-                - name: S3_ENDPOINT
-                  value: ""
-                - name: KEEP_DAYS
+                - name: KEEP_DAYS         # retained daily generations; 0 disables them
                   value: "14"
-              command: ["flare-backup-snapshot-daily"]
+              command: ["flare-backup-run"]

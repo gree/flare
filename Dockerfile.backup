@@ -17,11 +17,12 @@ RUN yum install -y tar gzip nmap-ncat ca-certificates \
     && kubectl version --client=true --output=yaml >/dev/null 2>&1 || true \
     && yum clean all && rm -rf /var/cache/yum
 
-# Backup logic lives IN the image (env-driven), so the CronJob manifests are
-# just env + a command name instead of inline shell:
-#   flare-backup-checkpoint      tier-1 local checkpoint trigger
-#   flare-backup-delta           tier-2a delta upload (3-phase, verify)
-#   flare-backup-snapshot-daily  tier-2b dated server-side snapshot + prune
+# Backup logic lives IN the image (env-driven), so the CronJob manifest is
+# just env + a command name instead of inline shell. ONE strictly-ordered
+# runner (checkpoint -> pull -> 3-phase upload -> verify -> once-a-day
+# generation + prune) so the steps can never interleave the way separate
+# delta/daily CronJobs could:
+#   flare-backup-run
 COPY deploy/backup-scripts/ /usr/local/bin/
 RUN chmod +x /usr/local/bin/flare-backup-*
 

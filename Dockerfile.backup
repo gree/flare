@@ -17,6 +17,14 @@ RUN yum install -y tar gzip nmap-ncat ca-certificates \
     && kubectl version --client=true --output=yaml >/dev/null 2>&1 || true \
     && yum clean all && rm -rf /var/cache/yum
 
+# Backup logic lives IN the image (env-driven), so the CronJob manifests are
+# just env + a command name instead of inline shell:
+#   flare-backup-checkpoint      tier-1 local checkpoint trigger
+#   flare-backup-delta           tier-2a delta upload (3-phase, verify)
+#   flare-backup-snapshot-daily  tier-2b dated server-side snapshot + prune
+COPY deploy/backup-scripts/ /usr/local/bin/
+RUN chmod +x /usr/local/bin/flare-backup-*
+
 # The base image's ENTRYPOINT is ["aws"]; the CronJobs run `sh -c "..."` via
 # `command:`, which overrides it — reset here so the image is a generic shell too.
 ENTRYPOINT []

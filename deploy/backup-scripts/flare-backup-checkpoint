@@ -1,0 +1,27 @@
+#!/bin/sh
+# Tier-1: trigger a LOCAL checkpoint (flared `backup` op; hard-links, near-
+# instant) on one Active node per partition of BACKUP_ROLE. Discovery via the
+# operator's node map, so replicas are never redundantly checkpointed.
+#
+# env: CLUSTER NAMESPACE FLARE_PORT BACKUP_ROLE(master|slave) OPERATOR_SVC OPERATOR_PORT
+set -e
+
+RC=0; [ "$BACKUP_ROLE" = "slave" ] && RC=1
+# NODE <name> <port> <role> <state> <partition> ...; role master=0 slave=1,
+# state Active=0. One Active node per partition ($6).
+TARGETS=$(printf 'node sync\r\n' | nc -w 5 "$OPERATOR_SVC" "$OPERATOR_PORT" \
+  | awk -v rc="$RC" '/^NODE/ && $4==rc && $5==0 { part=$6; if (!(part in s)) { s[part]=1; split($2,a,"."); print a[1] } }')
+[ -z "$TARGETS" ] && { echo "no backup targets for role=$BACKUP_ROLE via node sync"; exit 1; }
+
+STAMP=$(date -u +%Y%m%d-%H%M%S)
+FAIL=0
+for POD in $TARGETS; do
+  HOST="${POD}.${CLUSTER}-nodes.${NAMESPACE}.svc.cluster.local"
+  echo "backing up ${POD} (role=$BACKUP_ROLE) -> ${STAMP}"
+  REPLY=$(printf 'backup %s\r\n' "$STAMP" | nc -w 30 "$HOST" "$FLARE_PORT" || true)
+  echo "  reply: ${REPLY}"
+  case "$REPLY" in
+    *ERROR*|"") echo "  BACKUP FAILED on ${POD}"; FAIL=1 ;;
+  esac
+done
+exit "$FAIL"

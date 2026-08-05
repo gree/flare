@@ -21,6 +21,9 @@
 #      OPERATOR_PORT BUCKET(s3://bucket/prefix, no trailing slash)
 #      S3_ENDPOINT(empty for AWS) DATA_DIR(default /data/flare)
 #      KEEP_DAYS(default 14; 0 disables the daily generation)
+#      SNAPSHOT_AFTER_HOUR_UTC(default 0): the daily generation is created by
+#        the first SUCCESSFUL run at-or-after this UTC hour (e.g. 18 = first
+#        run after 18:00 UTC / 03:00 JST). Generations are named by UTC date.
 # auth: keyless via AWS_ROLE_ARN + AWS_WEB_IDENTITY_TOKEN_FILE (OIDC), or any
 #       credentials aws-cli understands (env/secret).
 set -e
@@ -28,6 +31,7 @@ set -e
 EP=""; [ -n "$S3_ENDPOINT" ] && EP="--endpoint-url $S3_ENDPOINT"
 DATA_DIR="${DATA_DIR:-/data/flare}"
 KEEP_DAYS="${KEEP_DAYS:-14}"
+SNAPSHOT_AFTER_HOUR_UTC="${SNAPSHOT_AFTER_HOUR_UTC:-0}"
 
 # ---- delta: one target pod per partition of the chosen role ----
 RC=0; [ "$BACKUP_ROLE" = "slave" ] && RC=1
@@ -82,8 +86,13 @@ done
 [ "$FAIL" -ne 0 ] && exit "$FAIL"
 [ "$KEEP_DAYS" -eq 0 ] && exit 0
 
-# ---- daily generation: first successful run of the UTC day creates it ----
+# ---- daily generation: the first successful run at-or-after
+# SNAPSHOT_AFTER_HOUR_UTC creates it (named by UTC date) ----
 DATE=$(date -u +%Y%m%d)
+HOUR=$(date -u +%H); HOUR=${HOUR#0}   # strip the zero-pad ("08" -> "8")
+if [ "$HOUR" -lt "$SNAPSHOT_AFTER_HOUR_UTC" ]; then
+  exit 0   # before today's snapshot window
+fi
 if aws s3 ls $EP "${BUCKET}/${CLUSTER}/snapshots/${DATE}/" >/dev/null 2>&1; then
   exit 0   # today's generation already exists
 fi

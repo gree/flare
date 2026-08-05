@@ -232,6 +232,10 @@ cluster:
     suspend: false
     role: master                 # which copy to back up: master | slave
     keepDays: 14                 # retained daily generations; 0 disables them
+    # The daily generation is created by the first SUCCESSFUL run at-or-after
+    # this UTC hour (default 0 = the first run of the UTC day). Pick a
+    # low-traffic local hour, e.g. 18 = 03:00 JST. Named by UTC date.
+    snapshotAfterHourUtc: 0
     # HARD timeout below the cadence (a hung run dies before its next slot)
     activeDeadlineSeconds: 3300
     startingDeadlineSeconds: 900

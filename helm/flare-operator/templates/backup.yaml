@@ -131,6 +131,8 @@ spec:
                   value: {{ ternary "/data/flare" "/tmp/flare" (or $c.persistence.enabled (and $c.tmpfs $c.tmpfs.enabled)) | quote }}
                 - name: KEEP_DAYS
                   value: {{ $bk.keepDays | default 14 | quote }}
+                - name: SNAPSHOT_AFTER_HOUR_UTC
+                  value: {{ $bk.snapshotAfterHourUtc | default 0 | quote }}
                 {{- with $os.extraEnv }}
                 {{- toYaml . | nindent 16 }}
                 {{- end }}

@@ -133,6 +133,43 @@ from restored data — future work), multi-partition restore must be manual:
 5. Only after verifying every partition serves its own keys: re-enable
    traffic, then orphan scan/purge.
 
+## Automated bootstrap-from-backup (`cluster.backupBootstrap`)
+
+For **replicas=1** (no-slave) clusters, the chart can automate Case A/B: an
+init container seeds an EMPTY data dir from `<s3Url>/latest/p0/` before flared
+starts, verifies the CURRENT→MANIFEST pair, and refuses (loudly — the pod
+stays un-Ready and FlareMasterMissing fires) when the newest backup is older
+than `maxAgeSeconds`. It is a strict no-op whenever data exists, so normal
+restarts and PVC survivors are untouched.
+
+```yaml
+cluster:
+  serviceAccountName: <sa with read access to the bucket>
+  backupBootstrap:
+    enabled: true
+    s3Url: s3://<bucket>/flare-backups/<instance>
+    maxAgeSeconds: 7200
+    projectedTokenAudience: sts.amazonaws.com   # keyless web-identity auth
+    extraEnv:
+      - name: AWS_ROLE_ARN
+        value: arn:aws:iam::<acct>:role/<role>
+      - name: AWS_WEB_IDENTITY_TOKEN_FILE
+        value: /var/run/secrets/sts/token
+```
+
+Semantics to be aware of:
+- **This is the unplanned-failure path.** RPO = your delta interval, RTO =
+  pod reschedule + S3 pull. For PLANNED maintenance (node drains, K8s
+  upgrades) add a temporary slave instead (`replicas: 1 -> 2`, wait active,
+  do the maintenance, `-> 1`): zero loss, zero downtime, no new K8s node
+  needed (soft hostname spread lets the extra pod co-locate).
+- Restricted to `partitions=1` (the pod→backup mapping is only well-defined
+  there) and requires a data volume (persistence or tmpfs).
+- On clusters with live replicas it still behaves correctly (the restored
+  data carries the backup's lineage cursor, so reconstruction catches up the
+  delta on top) — but a live peer is fresher and usually faster; keep the
+  flag for replicas=1 topologies.
+
 ## What backups do NOT cover
 
 - Writes between the last upload and the incident are lost. RPO = the tier-2a

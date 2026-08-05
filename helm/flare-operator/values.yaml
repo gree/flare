@@ -184,6 +184,38 @@ cluster:
   pdb:
     enabled: true
     maxUnavailable: 1
+  # Optional pod-level ServiceAccount for the flared pods (flared itself uses
+  # no K8s API; this exists for backupBootstrap's keyless object-storage auth,
+  # e.g. an SA your cloud maps to a read-only bucket role via OIDC).
+  serviceAccountName: ""
+  # Automated failover-from-backup for replicas=1 (no-slave) clusters: an init
+  # container seeds an EMPTY data dir from the newest backup before flared
+  # starts (no-op when data exists). Loss window = your backup interval; a
+  # backup older than maxAgeSeconds is refused loudly instead of served.
+  # Requires partitions=1 and a data volume (persistence or tmpfs). For
+  # planned maintenance prefer a TEMPORARY slave (replicas 1->2->1); this flag
+  # covers the unplanned failures in between. See docs/BACKUP_RESTORE.md.
+  backupBootstrap:
+    enabled: false
+    # e.g. s3://my-bucket/flare-backups/<instance>   (no trailing slash; the
+    # init container reads <s3Url>/latest/p0/)
+    s3Url: ""
+    maxAgeSeconds: 7200
+    # image needs aws-cli; defaults to the flare-backup image at the flared tag
+    image:
+      repository: ghcr.io/gree/flare-backup
+      tag: ""
+    # keyless (web-identity) auth: set the token audience your cloud expects
+    # and pass the role via extraEnv; static-key setups can instead point
+    # extraEnv at a Secret. Example:
+    #   projectedTokenAudience: sts.amazonaws.com
+    #   extraEnv:
+    #     - name: AWS_ROLE_ARN
+    #       value: arn:aws:iam::<acct>:role/<role>
+    #     - name: AWS_WEB_IDENTITY_TOKEN_FILE
+    #       value: /var/run/secrets/sts/token
+    projectedTokenAudience: ""
+    extraEnv: []
   # Optional LoadBalancer in front of the flared DATA port (memcached
   # protocol). flared proxies keys to the owning partition, so one LB over
   # all nodes is a complete client entry point. The protocol has NO

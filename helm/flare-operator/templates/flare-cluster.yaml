@@ -22,6 +22,22 @@
 {{- if and $c.persistence.enabled $tmpfsEnabled }}{{- fail "cluster: set only one of persistence.enabled or tmpfs.enabled" }}{{- end }}
 {{- $useDataVol := or $c.persistence.enabled $tmpfsEnabled }}
 {{- $dataDir := ternary "/data/flare" "/tmp/flare" $useDataVol }}
+{{- /* backup-bootstrap: on a pod that boots with an EMPTY data dir, seed it
+       from the object-storage backup before flared starts. This is the
+       automated failover-from-backup for replicas=1 (no slave) clusters:
+       loss window = backup interval. Guarded to partitions=1 because the
+       init container maps its pod to a backup by partition and a fresh
+       multi-partition cluster's partition assignment is the operator's
+       call, not the pod ordinal's. When peers are alive this is still
+       correct — the restored data carries the backup's lineage cursor, so
+       reconstruction just catches up the delta on top of it. */}}
+{{- $bb := dict "enabled" false }}
+{{- if $c.backupBootstrap }}{{- $bb = $c.backupBootstrap }}{{- end }}
+{{- if $bb.enabled }}
+{{- if ne (int $c.partitions) 1 }}{{- fail "cluster.backupBootstrap requires partitions=1 (pod->backup mapping is only defined there)" }}{{- end }}
+{{- if not $useDataVol }}{{- fail "cluster.backupBootstrap requires persistence or tmpfs (a data volume the init container can seed)" }}{{- end }}
+{{- if not $bb.s3Url }}{{- fail "cluster.backupBootstrap.s3Url is required (e.g. s3://bucket/flare-backups/<instance>, no trailing slash)" }}{{- end }}
+{{- end }}
 {{- /* flared mounts /etc/flared/extra.conf and exits immediately if the
        file is missing, so the ConfigMap must exist BEFORE the StatefulSet
        pods start. It is a pre-install HOOK on purpose: hook resources are
@@ -130,6 +146,64 @@ spec:
       # Room for the preStop drain (below) + flared's own graceful shutdown after
       # SIGTERM. Must exceed drainSeconds or K8s SIGKILLs mid-drain.
       terminationGracePeriodSeconds: {{ add (int $drain) 30 }}
+      {{- end }}
+      {{- if $c.serviceAccountName }}
+      serviceAccountName: {{ $c.serviceAccountName }}
+      {{- end }}
+      {{- if $bb.enabled }}
+      initContainers:
+        # Seed an EMPTY data dir from the newest backup before flared starts.
+        # No-op whenever data exists (normal restarts, PVC survivors). A
+        # backup older than maxAgeSeconds is refused LOUDLY (init fails, pod
+        # stays Pending, FlareMasterMissing fires) — silently serving a stale
+        # dataset is worse than paging a human.
+        - name: backup-bootstrap
+          image: "{{ $bb.image.repository | default "ghcr.io/gree/flare-backup" }}:{{ $bb.image.tag | default $c.image.tag }}"
+          imagePullPolicy: {{ $c.image.pullPolicy }}
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              DATA={{ $dataDir }}
+              if [ -d "$DATA/flare.rocksdb" ] && [ -n "$(ls -A "$DATA/flare.rocksdb" 2>/dev/null)" ]; then
+                echo "backup-bootstrap: data present -> no-op"
+                exit 0
+              fi
+              SRC="${S3_URL}/latest/p0"
+              REST="${SRC#s3://}"; BUCKET="${REST%%/*}"; KEY="${REST#*/}/CURRENT"
+              LM=$(aws s3api head-object --bucket "$BUCKET" --key "$KEY" --query LastModified --output text)
+              AGE=$(( $(date +%s) - $(date -d "$LM" +%s) ))
+              if [ "$AGE" -gt "$MAX_AGE_SECONDS" ]; then
+                echo "backup-bootstrap: newest backup is ${AGE}s old (> ${MAX_AGE_SECONDS}s) -> REFUSING to seed; restore manually or raise maxAgeSeconds"
+                exit 1
+              fi
+              mkdir -p "$DATA"
+              rm -rf "$DATA/flare.rocksdb.restore"
+              aws s3 cp --recursive "$SRC" "$DATA/flare.rocksdb.restore" --no-progress
+              M=$(tr -d '\r\n' < "$DATA/flare.rocksdb.restore/CURRENT")
+              if [ ! -f "$DATA/flare.rocksdb.restore/$M" ]; then
+                echo "backup-bootstrap: CURRENT names missing $M -> backup mirror is torn, refusing"
+                exit 1
+              fi
+              mv "$DATA/flare.rocksdb.restore" "$DATA/flare.rocksdb"
+              echo "backup-bootstrap: seeded from $SRC (age ${AGE}s)"
+          env:
+            - name: S3_URL
+              value: {{ $bb.s3Url | quote }}
+            - name: MAX_AGE_SECONDS
+              value: {{ $bb.maxAgeSeconds | default 7200 | quote }}
+            {{- with $bb.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            {{- if $bb.projectedTokenAudience }}
+            - name: bootstrap-token
+              mountPath: /var/run/secrets/sts
+              readOnly: true
+            {{- end }}
       {{- end }}
       containers:
         - name: flared
@@ -254,6 +328,19 @@ spec:
         - name: flared-config
           configMap:
             name: {{ $c.name }}-config
+        {{- if and $bb.enabled $bb.projectedTokenAudience }}
+        # Keyless object-storage auth for backup-bootstrap: a projected SA
+        # token with the cloud-side audience (web-identity flow; pair with
+        # extraEnv AWS_ROLE_ARN / AWS_WEB_IDENTITY_TOKEN_FILE=/var/run/secrets/sts/token
+        # and cluster.serviceAccountName bound on the cloud side).
+        - name: bootstrap-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: {{ $bb.projectedTokenAudience }}
+                  expirationSeconds: 3600
+                  path: token
+        {{- end }}
         {{- if $tmpfsEnabled }}
         # tmpfs data dir: RAM-backed emptyDir, capped at sizeLimit (counts
         # against the pod's memory). Data is lost on pod restart — pair with

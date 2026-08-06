@@ -445,6 +445,53 @@ def demoteDuplicateMasters (nodeMap : List (String × FlareNode))
     : List (String × FlareNode) :=
   demoteDuplicateMastersGo [] nodeMap
 
+/-- Role-consistent read balance, enforced level-triggered at the commit
+    boundary: Master serves reads (100), Slave does not (0), Proxy keeps
+    whatever it carries (irrelevant — proxies own no partition).
+
+    Individual transitions (promotion, drain, autoAssign, rejoin, the
+    merge's stale-entry rules) each try to set balance correctly, but their
+    INTERLEAVINGS leaked: observed live after a rolling restart as the
+    promoted master carrying balance 0 while the demoted ex-master rejoined
+    as a slave still carrying 100 — silently flipping reads from the master
+    (read-your-writes) to a lagging slave. Normalizing every committed map
+    makes the policy hold no matter which path wrote the entry; it is
+    idempotent, so the version-bump quiescence is unaffected once clean. -/
+def normalizeBalanceEntry (n : FlareNode) : FlareNode :=
+  -- Down corpses are exempt: they serve nothing, their balance is inert,
+  -- and leaving them byte-identical keeps the no-corpse-resurrection
+  -- theorem (`mergeClusterState_down_survives`) literally true.
+  if n.state == FlareState.Down then n
+  else match n.role with
+    | FlareRole.Master => { n with balance := 100 }
+    | FlareRole.Slave  => { n with balance := 0 }
+    | _ => n
+
+def normalizeBalances (nodeMap : List (String × FlareNode))
+    : List (String × FlareNode) :=
+  nodeMap.map (fun kv => (kv.1, normalizeBalanceEntry kv.2))
+
+/-- Normalization preserves role and partition (balance-only rewrite). -/
+theorem normalizeBalanceEntry_role (n : FlareNode) :
+    (normalizeBalanceEntry n).role = n.role := by
+  unfold normalizeBalanceEntry
+  split
+  · rfl
+  · cases h : n.role <;> simp [h]
+
+theorem normalizeBalanceEntry_partition (n : FlareNode) :
+    (normalizeBalanceEntry n).partition = n.partition := by
+  unfold normalizeBalanceEntry
+  split
+  · rfl
+  · cases h : n.role <;> simp [h]
+
+/-- A Down entry is untouched by normalization (see the def's comment). -/
+theorem normalizeBalanceEntry_down (n : FlareNode)
+    (h : n.state = FlareState.Down) : normalizeBalanceEntry n = n := by
+  unfold normalizeBalanceEntry
+  rw [if_pos (by rw [h]; rfl)]
+
 /-- Per-key merge of the FSM's computed state (`ucs`) onto the live state
     (`current`). Lives in the pure layer (rather than Main) so its safety
     properties can be machine-checked.
@@ -502,8 +549,8 @@ def currentOnlyEntries (current ucs : FlareClusterState) : List (String × Flare
   current.nodeMap.filter (fun kv => !(ucs.nodeMap.map Prod.fst).contains kv.1)
 
 def mergeClusterState (current ucs : FlareClusterState) : FlareClusterState :=
-  let combined := demoteDuplicateMasters
-    (mergedUcsEntries current ucs ++ currentOnlyEntries current ucs)
+  let combined := normalizeBalances (demoteDuplicateMasters
+    (mergedUcsEntries current ucs ++ currentOnlyEntries current ucs))
   ({ ucs with
       nodeMap := combined
       nodeMapVersion := current.nodeMapVersion + 1 }).rebuildPartitionMap
@@ -531,6 +578,30 @@ theorem countMastersFor_cons (p : Int) (key : String) (node : FlareNode)
   split
   · simp
   · rfl
+
+/-- Balance normalization does not change the per-partition Master count —
+    the safety corollary below composes through it unchanged. -/
+theorem countMastersFor_normalizeBalances (p : Int)
+    (l : List (String × FlareNode)) :
+    countMastersFor p (normalizeBalances l) = countMastersFor p l := by
+  induction l with
+  | nil => rfl
+  | cons kv rest ih =>
+    obtain ⟨key, node⟩ := kv
+    simp only [normalizeBalances, List.map_cons]
+    rw [countMastersFor_cons, countMastersFor_cons,
+        normalizeBalanceEntry_role, normalizeBalanceEntry_partition]
+    simp only [normalizeBalances] at ih
+    rw [ih]
+
+/-- Normalization keeps the key list verbatim. -/
+theorem normalizeBalances_keys (l : List (String × FlareNode)) :
+    (normalizeBalances l).map Prod.fst = l.map Prod.fst := by
+  induction l with
+  | nil => rfl
+  | cons kv rest ih =>
+    simp only [normalizeBalances, List.map_cons] at *
+    simp [ih]
 
 /-- If partition `p` is already in `seen`, the worker never emits a Master
     for `p` (all further Masters of `p` are demoted). -/
@@ -621,6 +692,8 @@ theorem demoteDuplicateMasters_atMostOne (l : List (String × FlareNode)) (p : I
 theorem mergeClusterState_atMostOneMaster (current ucs : FlareClusterState) (p : Int) :
     countMastersFor p (mergeClusterState current ucs).nodeMap ≤ 1 := by
   unfold mergeClusterState
+  show countMastersFor p (normalizeBalances (demoteDuplicateMasters _)) ≤ 1
+  rw [countMastersFor_normalizeBalances]
   exact demoteDuplicateMasters_atMostOne _ p
 
 /-- The repair never drops or reorders an entry: the key list is preserved
@@ -673,7 +746,7 @@ theorem mergeClusterState_preserves_keys (current ucs : FlareClusterState)
   have hkeys : (mergeClusterState current ucs).nodeMap.map Prod.fst
       = (mergedUcsEntries current ucs ++ currentOnlyEntries current ucs).map Prod.fst := by
     unfold mergeClusterState
-    exact demoteDuplicateMasters_keys _
+    exact (normalizeBalances_keys _).trans (demoteDuplicateMasters_keys _)
   have hm : (mergedUcsEntries current ucs).map Prod.fst = ucs.nodeMap.map Prod.fst := by
     unfold mergedUcsEntries
     rw [List.map_map]
@@ -724,7 +797,14 @@ theorem mergeClusterState_down_survives (current ucs : FlareClusterState)
   have hcomb : (k, n) ∈ mergedUcsEntries current ucs ++ currentOnlyEntries current ucs :=
     List.mem_append_left _ hmerged
   unfold mergeClusterState
-  exact demoteDuplicateMastersGo_nonmaster_mem _ [] k n hcomb hrole
+  have hd := demoteDuplicateMastersGo_nonmaster_mem _ [] k n hcomb hrole
+  have hnorm : normalizeBalanceEntry n = n := normalizeBalanceEntry_down n hdown
+  have himg : (k, normalizeBalanceEntry n) ∈ normalizeBalances
+      (demoteDuplicateMastersGo []
+        (mergedUcsEntries current ucs ++ currentOnlyEntries current ucs)) :=
+    List.mem_map_of_mem (f := fun kv => (kv.1, normalizeBalanceEntry kv.2)) hd
+  rw [hnorm] at himg
+  exact himg
 
 /-- Pure dead-node detection (mirrors legacy `detectDeadNodes`, Main.lean:116-124).
     A node is dead only if its pod is gone AND it is a role/state that should be

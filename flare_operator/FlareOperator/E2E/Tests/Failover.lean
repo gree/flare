@@ -144,6 +144,26 @@ def suite : TestSuite := {
           else
             return .fail "no P0 master within 90s" },
 
+    -- Role-consistent read balance after failover: every Master must carry
+    -- balance 100 and every Slave 0 (normalizeBalances at the commit
+    -- boundary). Before that fix, transition interleavings left a promoted
+    -- master at balance 0 while the demoted ex-master rejoined as a slave
+    -- still carrying 100 — reads silently flipped to a lagging slave
+    -- (observed live after a rolling restart, surfaced by flare-stats).
+    { name := "failover: balance follows role (master=100, slaves=0)"
+      run := do
+        let ok ← waitForCondition "balances normalized" 60 do
+          let sync ← operatorTcpCmd cfg.debugPod cfg.«namespace» cfg.operatorName cfg.operatorPort "node sync"
+          let entries := parseNodeSync sync
+          return entries.all fun e =>
+            (e.role != 0 || e.balance == 100) && (e.role != 1 || e.balance == 0)
+        if ok then return .pass
+        else
+          let sync ← operatorTcpCmd cfg.debugPod cfg.«namespace» cfg.operatorName cfg.operatorPort "node sync"
+          let bad := (parseNodeSync sync).filter fun e =>
+            !((e.role != 0 || e.balance == 100) && (e.role != 1 || e.balance == 0))
+          return .fail s!"balance/role mismatch persisted: {bad.map (fun e => s!"{e.fqdn} role={e.role} balance={e.balance}")}" },
+
     -- Test 7: one-master-per-partition after failover
     { name := "failover: one-master-per-partition maintained"
       run := do

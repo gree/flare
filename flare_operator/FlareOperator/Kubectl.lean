@@ -129,12 +129,24 @@ private def getFlareClusterFromJson (json : Lean.Json) (name ns : String)
       { cbDefault with
         enabled := cbObj.getObjValD "enabled" |>.getBool?.toOption |>.getD cbDefault.enabled
         autoResetEnabled := cbObj.getObjValD "autoResetEnabled" |>.getBool?.toOption |>.getD cbDefault.autoResetEnabled }
+  let rbObj := spec.getObjValD "readBalance"
+  let standbySelectors : List StandbySelector :=
+    match rbObj.getObjValD "standby" |>.getArr?.toOption with
+    | some arr => arr.toList.map fun j =>
+        { podName := j.getObjValD "podName" |>.getStr?.toOption
+          zone := j.getObjValD "zone" |>.getStr?.toOption }
+    | none => []
+  let rb : ReadBalanceSpec := {
+    master := rbObj.getObjValD "master" |>.getNat?.toOption |>.getD 100
+    slave := rbObj.getObjValD "slave" |>.getNat?.toOption |>.getD 0
+    standby := standbySelectors
+  }
   .ok {
     metadata := { name := some name, «namespace» := some ns }
     spec := {
       partitions := partitions, replicas := replicas,
       clusterReplication := repl, rocksdb := rocksdb,
-      circuitBreaker := cb
+      circuitBreaker := cb, readBalance := rb
     }
   }
 

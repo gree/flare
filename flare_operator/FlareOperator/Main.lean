@@ -592,8 +592,9 @@ private def executeEffects (effects : List K8sReconciler.FlareEffect)
     logic (including the duplicate-master repair for the FSM-vs-TCP assignment
     race) lives in the pure layer so it can be machine-checked; see
     `K8sReconciler.mergeClusterState`. -/
-private def mergeClusterState (current ucs : FlareClusterState) : FlareClusterState :=
-  K8sReconciler.mergeClusterState current ucs
+private def mergeClusterState (current ucs : FlareClusterState)
+    (rb : ReadBalanceSpec) (standbyKeys : List String) : FlareClusterState :=
+  K8sReconciler.mergeClusterState current ucs rb.master rb.slave standbyKeys
 
 /-- Commit the FSM's computed cluster state by MERGING it onto the live ref inside
     a single atomic `modifyGet` (see `mergeClusterState`). The merge — not a version
@@ -628,9 +629,10 @@ private def mergeClusterState (current ucs : FlareClusterState) : FlareClusterSt
     on while eliminating the steady-state +7/tick churn. Returns whether the version
     advanced. -/
 private def commitClusterState (stateRef : IO.Ref FlareClusterState)
-    (_expectedVersion : Nat) (newState : FlareClusterState) : IO Bool := do
+    (_expectedVersion : Nat) (newState : FlareClusterState)
+    (rb : ReadBalanceSpec := {}) (standbyKeys : List String := []) : IO Bool := do
   stateRef.modifyGet fun current =>
-    let merged := mergeClusterState current newState
+    let merged := mergeClusterState current newState rb standbyKeys
     -- `partitionMap` is a pure function of `nodeMap` (rebuildPartitionMap), so
     -- comparing `nodeMap` detects a real topology change.
     let changed := merged.nodeMap != current.nodeMap
@@ -703,7 +705,8 @@ private partial def runReconcileFSMLoop
       -- Update cluster state if FSM produced a new one (merge onto the live ref so
       -- a TCP-driven Prepare→Active is preserved; see commitClusterState).
       if let some ucs := nextState.updatedClusterState then
-        let _ ← commitClusterState stateRef cs2Version ucs
+        let rb := (nextState.cachedCrd.map (·.spec.readBalance)).getD {}
+        let _ ← commitClusterState stateRef cs2Version ucs rb nextState.standbyNodeKeys
 
       -- CRITICAL FIX: Check if FSM issued another request.
       -- If yes, nextState is in a "waiting for response" state and must NOT be called
@@ -717,7 +720,8 @@ private partial def runReconcileFSMLoop
         let (finalState, _, finalEffects) := K8sReconciler.flareReconcileCore nextResp nextState cs3
         executeEffects finalEffects crName ns stateRef migrationRef
         if let some ucs := finalState.updatedClusterState then
-          let _ ← commitClusterState stateRef cs3Version ucs
+          let rb := (finalState.cachedCrd.map (·.spec.readBalance)).getD {}
+          let _ ← commitClusterState stateRef cs3Version ucs rb finalState.standbyNodeKeys
         runReconcileFSMLoop finalState stateRef migrationRef graceCyclesRef trippedRef crName ns
       | none =>
         -- No new request - safe to recurse (nextState is in an "action" state)
@@ -725,7 +729,8 @@ private partial def runReconcileFSMLoop
     | none =>
       -- No request: update cluster state if FSM produced one and continue
       if let some ucs := newState.updatedClusterState then
-        let _ ← commitClusterState stateRef csVersion ucs
+        let rb := (newState.cachedCrd.map (·.spec.readBalance)).getD {}
+        let _ ← commitClusterState stateRef csVersion ucs rb newState.standbyNodeKeys
       runReconcileFSMLoop newState stateRef migrationRef graceCyclesRef trippedRef crName ns
 
 /-- Run the FSM-driven reconcile loop.

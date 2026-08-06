@@ -45,6 +45,33 @@ spec:
                     concurrency:
                       type: integer
                       default: 2
+                readBalance:
+                  type: object
+                  description: >-
+                    Declarative read-routing policy. flared distributes reads
+                    by balance weight; the operator normalizes every committed
+                    node map to this policy (manual balance edits are
+                    reverted — change this spec instead, applies in seconds).
+                  properties:
+                    master:
+                      type: integer
+                      default: 100
+                    slave:
+                      type: integer
+                      default: 0
+                    standby:
+                      type: array
+                      description: >-
+                        Nodes forced to balance 0 and promoted only as a last
+                        resort. Match by pod name (STS ordinal, stable) or
+                        by zone.
+                      items:
+                        type: object
+                        properties:
+                          podName:
+                            type: string
+                          zone:
+                            type: string
                 rocksdb:
                   type: object
                   description: >-

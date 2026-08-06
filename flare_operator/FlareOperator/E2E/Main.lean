@@ -31,12 +31,14 @@ import FlareOperator.E2E.Tests.OperatorRestart
 import FlareOperator.E2E.Tests.NativeMetrics
 import FlareOperator.E2E.Tests.BlueGreenMigration
 import FlareOperator.E2E.Tests.SnapshotPushSeed
+import FlareOperator.E2E.Tests.ReadBalance
 
 open FlareOperator.E2E
 
 def main (args : List String) : IO UInt32 :=
   e2eMain [
     Tests.Failover.suite,
+    Tests.ReadBalance.suite,
     Tests.ScaleOutMaster.suite,
     Tests.ScaleOutSlave.suite,
     Tests.ScaleInSlave.suite,

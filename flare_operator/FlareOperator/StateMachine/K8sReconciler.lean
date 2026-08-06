@@ -110,6 +110,9 @@ structure FlareReconcileState where
   /-- Terminating nodes that are still Master/Slave and must be drained this
       tick: promote a replacement + demote them to a live proxy. -/
   drainNodeKeys : List String := []
+  /-- Node keys matched by spec.readBalance.standby this tick (by pod name or
+      zone). Forced to balance 0 at commit; deprioritized for promotion. -/
+  standbyNodeKeys : List String := []
   failoverTriggered : Bool := false
   -- Grace period for startup: 24 cycles × 5s = 120s (see Main.lean)
   graceCycles : Nat := 24
@@ -457,38 +460,49 @@ def demoteDuplicateMasters (nodeMap : List (String × FlareNode))
     (read-your-writes) to a lagging slave. Normalizing every committed map
     makes the policy hold no matter which path wrote the entry; it is
     idempotent, so the version-bump quiescence is unaffected once clean. -/
-def normalizeBalanceEntry (n : FlareNode) : FlareNode :=
+def normalizeBalanceEntry (mb sb : Nat) (standby : Bool) (n : FlareNode) : FlareNode :=
   -- Down corpses are exempt: they serve nothing, their balance is inert,
   -- and leaving them byte-identical keeps the no-corpse-resurrection
   -- theorem (`mergeClusterState_down_survives`) literally true.
   if n.state == FlareState.Down then n
-  else match n.role with
-    | FlareRole.Master => { n with balance := 100 }
+  else if standby then
+    -- standby nodes never serve reads regardless of role
+    match n.role with
+    | FlareRole.Master => { n with balance := 0 }
     | FlareRole.Slave  => { n with balance := 0 }
     | _ => n
+  else match n.role with
+    | FlareRole.Master => { n with balance := mb }
+    | FlareRole.Slave  => { n with balance := sb }
+    | _ => n
 
-def normalizeBalances (nodeMap : List (String × FlareNode))
-    : List (String × FlareNode) :=
-  nodeMap.map (fun kv => (kv.1, normalizeBalanceEntry kv.2))
+def normalizeBalances (mb sb : Nat) (standbyKeys : List String)
+    (nodeMap : List (String × FlareNode)) : List (String × FlareNode) :=
+  nodeMap.map (fun kv =>
+    (kv.1, normalizeBalanceEntry mb sb (standbyKeys.contains kv.1) kv.2))
 
 /-- Normalization preserves role and partition (balance-only rewrite). -/
-theorem normalizeBalanceEntry_role (n : FlareNode) :
-    (normalizeBalanceEntry n).role = n.role := by
+theorem normalizeBalanceEntry_role (mb sb : Nat) (st : Bool) (n : FlareNode) :
+    (normalizeBalanceEntry mb sb st n).role = n.role := by
   unfold normalizeBalanceEntry
   split
   · rfl
-  · cases h : n.role <;> simp [h]
+  · split
+    · cases h : n.role <;> simp [h]
+    · cases h : n.role <;> simp [h]
 
-theorem normalizeBalanceEntry_partition (n : FlareNode) :
-    (normalizeBalanceEntry n).partition = n.partition := by
+theorem normalizeBalanceEntry_partition (mb sb : Nat) (st : Bool) (n : FlareNode) :
+    (normalizeBalanceEntry mb sb st n).partition = n.partition := by
   unfold normalizeBalanceEntry
   split
   · rfl
-  · cases h : n.role <;> simp [h]
+  · split
+    · cases h : n.role <;> simp [h]
+    · cases h : n.role <;> simp [h]
 
 /-- A Down entry is untouched by normalization (see the def's comment). -/
-theorem normalizeBalanceEntry_down (n : FlareNode)
-    (h : n.state = FlareState.Down) : normalizeBalanceEntry n = n := by
+theorem normalizeBalanceEntry_down (mb sb : Nat) (st : Bool) (n : FlareNode)
+    (h : n.state = FlareState.Down) : normalizeBalanceEntry mb sb st n = n := by
   unfold normalizeBalanceEntry
   rw [if_pos (by rw [h]; rfl)]
 
@@ -548,8 +562,10 @@ def mergedUcsEntries (current ucs : FlareClusterState) : List (String × FlareNo
 def currentOnlyEntries (current ucs : FlareClusterState) : List (String × FlareNode) :=
   current.nodeMap.filter (fun kv => !(ucs.nodeMap.map Prod.fst).contains kv.1)
 
-def mergeClusterState (current ucs : FlareClusterState) : FlareClusterState :=
-  let combined := normalizeBalances (demoteDuplicateMasters
+def mergeClusterState (current ucs : FlareClusterState)
+    (mb : Nat := 100) (sb : Nat := 0) (standbyKeys : List String := [])
+    : FlareClusterState :=
+  let combined := normalizeBalances mb sb standbyKeys (demoteDuplicateMasters
     (mergedUcsEntries current ucs ++ currentOnlyEntries current ucs))
   ({ ucs with
       nodeMap := combined
@@ -581,9 +597,9 @@ theorem countMastersFor_cons (p : Int) (key : String) (node : FlareNode)
 
 /-- Balance normalization does not change the per-partition Master count —
     the safety corollary below composes through it unchanged. -/
-theorem countMastersFor_normalizeBalances (p : Int)
+theorem countMastersFor_normalizeBalances (mb sb : Nat) (sk : List String) (p : Int)
     (l : List (String × FlareNode)) :
-    countMastersFor p (normalizeBalances l) = countMastersFor p l := by
+    countMastersFor p (normalizeBalances mb sb sk l) = countMastersFor p l := by
   induction l with
   | nil => rfl
   | cons kv rest ih =>
@@ -595,8 +611,9 @@ theorem countMastersFor_normalizeBalances (p : Int)
     rw [ih]
 
 /-- Normalization keeps the key list verbatim. -/
-theorem normalizeBalances_keys (l : List (String × FlareNode)) :
-    (normalizeBalances l).map Prod.fst = l.map Prod.fst := by
+theorem normalizeBalances_keys (mb sb : Nat) (sk : List String)
+    (l : List (String × FlareNode)) :
+    (normalizeBalances mb sb sk l).map Prod.fst = l.map Prod.fst := by
   induction l with
   | nil => rfl
   | cons kv rest ih =>
@@ -689,10 +706,11 @@ theorem demoteDuplicateMasters_atMostOne (l : List (String × FlareNode)) (p : I
     contain two Masters for one partition — for ARBITRARY `current` and
     `ucs` states, i.e. regardless of how the FSM snapshot and the TCP
     server's live writes interleaved. -/
-theorem mergeClusterState_atMostOneMaster (current ucs : FlareClusterState) (p : Int) :
-    countMastersFor p (mergeClusterState current ucs).nodeMap ≤ 1 := by
+theorem mergeClusterState_atMostOneMaster (current ucs : FlareClusterState)
+    (mb sb : Nat) (sk : List String) (p : Int) :
+    countMastersFor p (mergeClusterState current ucs mb sb sk).nodeMap ≤ 1 := by
   unfold mergeClusterState
-  show countMastersFor p (normalizeBalances (demoteDuplicateMasters _)) ≤ 1
+  show countMastersFor p (normalizeBalances mb sb sk (demoteDuplicateMasters _)) ≤ 1
   rw [countMastersFor_normalizeBalances]
   exact demoteDuplicateMasters_atMostOne _ p
 
@@ -740,13 +758,13 @@ theorem demoteDuplicateMastersGo_nonmaster_mem (l : List (String × FlareNode))
     after the FSM snapshot, or present in the FSM's own output, is never
     dropped. General theorem over arbitrary states. -/
 theorem mergeClusterState_preserves_keys (current ucs : FlareClusterState)
-    (k : String)
+    (mb sb : Nat) (sk : List String) (k : String)
     (h : k ∈ ucs.nodeMap.map Prod.fst ∨ k ∈ current.nodeMap.map Prod.fst) :
-    k ∈ (mergeClusterState current ucs).nodeMap.map Prod.fst := by
-  have hkeys : (mergeClusterState current ucs).nodeMap.map Prod.fst
+    k ∈ (mergeClusterState current ucs mb sb sk).nodeMap.map Prod.fst := by
+  have hkeys : (mergeClusterState current ucs mb sb sk).nodeMap.map Prod.fst
       = (mergedUcsEntries current ucs ++ currentOnlyEntries current ucs).map Prod.fst := by
     unfold mergeClusterState
-    exact (normalizeBalances_keys _).trans (demoteDuplicateMasters_keys _)
+    exact (normalizeBalances_keys _ _ _ _).trans (demoteDuplicateMasters_keys _)
   have hm : (mergedUcsEntries current ucs).map Prod.fst = ucs.nodeMap.map Prod.fst := by
     unfold mergedUcsEntries
     rw [List.map_map]
@@ -775,13 +793,13 @@ theorem mergeClusterState_preserves_keys (current ucs : FlareClusterState)
     Masters, so a Proxy/Down corpse is untouched by both. General theorem
     over arbitrary states. -/
 theorem mergeClusterState_down_survives (current ucs : FlareClusterState)
-    (k : String) (n : FlareNode)
+    (mb sb : Nat) (sk : List String) (k : String) (n : FlareNode)
     (hmem : (k, n) ∈ ucs.nodeMap)
     (hrole : (n.role == FlareRole.Master) = false)
     (hdown : n.state = FlareState.Down)
     (hfresh : ∀ curNode, current.nodeMap.lookup k = some curNode →
       curNode.regEpoch ≤ n.regEpoch) :
-    (k, n) ∈ (mergeClusterState current ucs).nodeMap := by
+    (k, n) ∈ (mergeClusterState current ucs mb sb sk).nodeMap := by
   have hentry : mergeNodeEntry current k n = n := by
     unfold mergeNodeEntry
     cases hl : current.nodeMap.lookup k with
@@ -798,13 +816,51 @@ theorem mergeClusterState_down_survives (current ucs : FlareClusterState)
     List.mem_append_left _ hmerged
   unfold mergeClusterState
   have hd := demoteDuplicateMastersGo_nonmaster_mem _ [] k n hcomb hrole
-  have hnorm : normalizeBalanceEntry n = n := normalizeBalanceEntry_down n hdown
-  have himg : (k, normalizeBalanceEntry n) ∈ normalizeBalances
+  have hnorm : normalizeBalanceEntry mb sb (sk.contains k) n = n :=
+    normalizeBalanceEntry_down mb sb (sk.contains k) n hdown
+  have himg : (k, normalizeBalanceEntry mb sb (sk.contains k) n) ∈ normalizeBalances mb sb sk
       (demoteDuplicateMastersGo []
         (mergedUcsEntries current ucs ++ currentOnlyEntries current ucs)) :=
-    List.mem_map_of_mem (f := fun kv => (kv.1, normalizeBalanceEntry kv.2)) hd
+    List.mem_map_of_mem
+      (f := fun kv => (kv.1, normalizeBalanceEntry mb sb (sk.contains kv.1) kv.2)) hd
   rw [hnorm] at himg
   exact himg
+
+/-- Resolve spec.readBalance.standby selectors against this tick's pod list.
+    podName matches the first DNS label of the node key (the STS ordinal name,
+    stable across pod recreation); zone matches the podZones mapping. -/
+def resolveStandbyKeys (rb : ReadBalanceSpec) (livePodKeys : List String)
+    (podZones : List (String × String)) : List String :=
+  if rb.standby.isEmpty then []
+  else livePodKeys.filter fun key =>
+    rb.standby.any fun sel =>
+      (match sel.podName with
+       | some pn => key == pn || (key.splitOn ".").head? == some pn
+       | none => false)
+      || (match sel.zone with
+          | some z => podZones.lookup key == some z
+          | none => false)
+
+/-- Stable-reorder every partition's slave list so standby slaves come LAST.
+    All promotion paths pick `slaves.head?`, so this makes standby nodes the
+    promotion choice of last resort (availability still beats locality: with
+    only standby slaves left, one IS promoted) without touching any promotion
+    function or its safety proof — the nodeMap is untouched. -/
+def deprioritizeStandbySlaves (standbyKeys : List String)
+    (s : FlareClusterState) : FlareClusterState :=
+  if standbyKeys.isEmpty then s
+  else { s with partitionMap := s.partitionMap.map fun (idx, part) =>
+    (idx, { part with slaves :=
+      part.slaves.filter (fun k => !standbyKeys.contains k)
+        ++ part.slaves.filter (fun k => standbyKeys.contains k) }) }
+
+/-- The reorder never touches the node map (partitionMap only), so every
+    nodeMap-level safety metric is trivially preserved. -/
+theorem deprioritizeStandbySlaves_nodeMap (sk : List String)
+    (s : FlareClusterState) :
+    (deprioritizeStandbySlaves sk s).nodeMap = s.nodeMap := by
+  unfold deprioritizeStandbySlaves
+  split <;> rfl
 
 /-- Pure dead-node detection (mirrors legacy `detectDeadNodes`, Main.lean:116-124).
     A node is dead only if its pod is gone AND it is a role/state that should be
@@ -995,6 +1051,9 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
                   deadNodeKeys := [],
                   terminatingKeys := terminating,
                   drainNodeKeys := [],
+                  standbyNodeKeys := match s.cachedCrd with
+                    | some crd => resolveStandbyKeys crd.spec.readBalance pods zones
+                    | none => [],
                   graceCycles := s.graceCycles - 1 }, none,
          [.Log s!"[flare-operator] grace period: {s.graceCycles - 1} cycles remaining"])
       else
@@ -1007,7 +1066,10 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
                   podZones := zones,
                   deadNodeKeys := deadKeys,
                   terminatingKeys := terminating,
-                  drainNodeKeys := drainKeys }, none, [])
+                  drainNodeKeys := drainKeys,
+                  standbyNodeKeys := match s.cachedCrd with
+                    | some crd => resolveStandbyKeys crd.spec.readBalance pods zones
+                    | none => [] }, none, [])
     | other =>
       ({ s with reconcileStep := .Error s!"unexpected response at AfterListPods: {repr other}" }, none, [])
 
@@ -1044,7 +1106,9 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
     -- promotion sees an accurate master/slave grouping.
     let afterFailover :=
       if s.failoverTriggered then
-        handleFailoverWithPromotion clusterState.rebuildPartitionMap s.deadNodeKeys
+        handleFailoverWithPromotion
+          (deprioritizeStandbySlaves s.standbyNodeKeys clusterState.rebuildPartitionMap)
+          s.deadNodeKeys
       else
         clusterState
     -- Graceful drain: demote Terminating masters/slaves to a LIVE proxy and
@@ -1054,7 +1118,9 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
     -- for it). rebuildPartitionMap so the promotion sees post-failover grouping.
     let newState :=
       if s.drainNodeKeys.isEmpty then afterFailover
-      else handleDrainWithPromotion afterFailover.rebuildPartitionMap s.drainNodeKeys
+      else handleDrainWithPromotion
+        (deprioritizeStandbySlaves s.standbyNodeKeys afterFailover.rebuildPartitionMap)
+        s.drainNodeKeys
     let drainEffects :=
       if s.drainNodeKeys.isEmpty then []
       else [FlareEffect.Log s!"[flare-operator] graceful drain: demoting Terminating node(s) to live proxy + promoting replacement(s): {s.drainNodeKeys}"]

@@ -83,6 +83,10 @@ spec:
   rocksdb:
     {{- toYaml . | nindent 4 }}
   {{- end }}
+  {{- with $c.readBalance }}
+  readBalance:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 ---
 apiVersion: v1
 kind: Service

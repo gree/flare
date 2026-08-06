@@ -204,7 +204,27 @@ structure CircuitBreakerConfig where
   autoResetEnabled : Bool := true
   deriving Repr, BEq
 
-/-! ## Flare Cluster CRD Spec -/
+/-! ## Read-balance policy -/
+
+/-- One standby selector: matches a node by its pod name (the STS ordinal
+    name — stable across pod recreation) or by its zone. Matched nodes are
+    forced to balance 0 and are picked for promotion only when no
+    non-standby slave exists (availability still wins over locality). -/
+structure StandbySelector where
+  podName : Option String := none
+  zone : Option String := none
+  deriving Repr
+
+/-- Declarative read-routing policy. flared distributes reads by balance
+    weight, and the operator normalizes every committed node map to THIS
+    policy (level-triggered), so manual flare-admin balance edits are
+    intentionally reverted — change the CR instead (applies in seconds).
+    Defaults preserve the classic wg-dev shape: reads on the master only. -/
+structure ReadBalanceSpec where
+  master : Nat := 100
+  slave : Nat := 0
+  standby : List StandbySelector := []
+  deriving Repr
 
 structure FlareClusterSpecView where
   partitions : Nat := 1
@@ -212,6 +232,7 @@ structure FlareClusterSpecView where
   clusterReplication : ClusterReplicationSpec := {}
   circuitBreaker : CircuitBreakerConfig := {}
   rocksdb : RocksdbConfigSpec := {}
+  readBalance : ReadBalanceSpec := {}
   deriving Repr
 
 structure FlareClusterView where

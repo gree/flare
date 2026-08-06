@@ -159,6 +159,17 @@ cluster:
   # tmpfs.sizeLimit (rule of thumb ~5%) and add a short walTtlSeconds, e.g. for a
   # 10Gi tmpfs: {walSizeLimitMb: 512, walTtlSeconds: 3600}.
   rocksdb: {}
+  # Declarative read-routing policy (CRD spec.readBalance). flared routes
+  # reads by balance weight; the operator normalizes every node map to this
+  # policy, so manual flare-admin balance edits are reverted — change this
+  # instead (applies within a reconcile tick). Example:
+  #   readBalance:
+  #     master: 100
+  #     slave: 100            # reads distributed across master + slaves
+  #     standby:              # never serve reads; promoted only as last resort
+  #       - podName: mycluster-nodes-2
+  #       - zone: "250002"
+  readBalance: {}
   # glibc malloc arena cap for flared (MALLOC_ARENA_MAX). Bounds the per-thread
   # arena bloat that otherwise ratchets RSS to the write-burst high-water mark.
   mallocArenaMax: 2

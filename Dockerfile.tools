@@ -25,6 +25,15 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends libtokyocabinet9 \
     && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/* \
+    # Upstream gem bug: `threads.has_key?(k) || threads[k].has_key?(...)` —
+    # the || should be && (crashes with NoMethodError on nil when the index
+    # returns no `stats threads` entry for a node, which this operator
+    # legitimately does). Real flarei always returned an entry per node, so
+    # the short-circuit hid it. One-line patch in the installed gem.
+    && sed -i "s/threads.has_key?(k) || threads\[k\].has_key?('behind')/threads.has_key?(k) \&\& threads[k].has_key?('behind')/" \
+         /usr/local/bundle/gems/flare-tools-0.7.3/lib/flare/tools/cli/stats.rb \
+    && grep -c "threads.has_key?(k) && threads\[k\]" /usr/local/bundle/gems/flare-tools-0.7.3/lib/flare/tools/cli/stats.rb \
+    && ruby -c /usr/local/bundle/gems/flare-tools-0.7.3/lib/flare/tools/cli/stats.rb >/dev/null \
     # sanity: the gem loads (NOTE --help exits 1 by design in this old CLI)
     && flare-stats --help 2>&1 | grep -q "Flare-tools version"
 

@@ -162,6 +162,20 @@ def findPartitionNeedingSlaveZoneAware (state : FlareClusterState)
     | [] => needing.head?
     | p :: _ => some p
 
+/-- Standby test for one node key against the readBalance.standby selectors.
+    podName matches the key itself or its first DNS label (the STS ordinal
+    name); zone matches via the podZones mapping when topology is known
+    (TCP-context callers pass [] and only podName selectors apply). -/
+def isStandbyKey (rb : ReadBalanceSpec) (podZones : List (String × String))
+    (key : String) : Bool :=
+  rb.standby.any fun sel =>
+    (match sel.podName with
+     | some pn => key == pn || (key.splitOn ".").head? == some pn
+     | none => false)
+    || (match sel.zone with
+        | some z => podZones.lookup key == some z
+        | none => false)
+
 /-- Find a live replica of partition `pIdx`: a Slave in Active state (its
     reconstruction completed, so it holds a full copy of the partition's
     data) whose POD is actually alive. Prepare slaves are excluded —
@@ -176,10 +190,16 @@ def findPartitionNeedingSlaveZoneAware (state : FlareClusterState)
     DATA LOSS flake). Callers that genuinely know only about one live node
     (the TCP registration fast path) pass just that node's key. -/
 def findActiveSlaveForPartition (state : FlareClusterState) (pIdx : Nat)
-    (livePodKeys : List String) : Option String :=
-  state.nodeMap.find? (fun (key, n) =>
+    (livePodKeys : List String) (standbyKeys : List String := []) : Option String :=
+  let isCandidate := fun ((key, n) : String × FlareNode) =>
     n.role == FlareRole.Slave && n.state == FlareState.Active
-      && n.partition == Int.ofNat pIdx && livePodKeys.contains key) |>.map Prod.fst
+      && n.partition == Int.ofNat pIdx && livePodKeys.contains key
+  -- standby slaves are the promotion choice of LAST resort: prefer any
+  -- non-standby candidate; with only standby candidates left, availability
+  -- wins and one is still returned.
+  (state.nodeMap.find? (fun kv => isCandidate kv && !standbyKeys.contains kv.1)
+    |>.map Prod.fst).orElse fun _ =>
+      state.nodeMap.find? isCandidate |>.map Prod.fst
 
 /-- Auto-assign a proxy node to the first partition that needs filling.
     Returns updated state and the assigned role/partition.
@@ -189,6 +209,13 @@ def autoAssign (state : FlareClusterState) (crd : FlareClusterView) (nodeKey : S
     (livePodKeys : List String) (zones : List (String × String) := []) : FlareClusterState × FlareNode :=
   let numPartitions := crd.spec.partitions
   let maxSlaves := if crd.spec.replicas > 1 then crd.spec.replicas - 1 else 0
+  -- Standby slaves must be the zombie-guard's promotion choice of last
+  -- resort too (this TCP-side path promotes on ex-master re-registration,
+  -- BEFORE dead detection — the FSM's partition-list deprioritization never
+  -- sees it). Resolved over the whole node map: podName selectors always
+  -- work; zone selectors only when the caller knows the topology.
+  let standbyKeys := (state.nodeMap.map Prod.fst).filter
+    (isStandbyKey crd.spec.readBalance zones)
   -- Clear stale entry for this node before checking partition needs.
   -- A re-registering node enters as Proxy, so the old Master/Slave entry
   -- must not block the partition from being refilled.
@@ -205,7 +232,7 @@ def autoAssign (state : FlareClusterState) (crd : FlareClusterView) (nodeKey : S
     -- an empty node as Active master while the data-bearing slave keeps
     -- serving nothing — silent data loss. The proxy joins as a fresh slave
     -- of the same partition and reconstructs from the promoted master.
-    match findActiveSlaveForPartition cleanState pIdx livePodKeys with
+    match findActiveSlaveForPartition cleanState pIdx livePodKeys standbyKeys with
     | some slaveKey =>
       match cleanState.lookupNode slaveKey with
       | some slaveNode =>

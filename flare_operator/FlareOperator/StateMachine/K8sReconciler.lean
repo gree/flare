@@ -927,13 +927,17 @@ def assignProxiesPure (state : FlareClusterState) (crd : FlareClusterView)
     authoritative and skips reconstruction, so the local data keeps
     serving. -/
 def promoteMasterlessPartition (state : FlareClusterState) (pIdx : Nat)
-    (livePodKeys : List String) : FlareClusterState :=
+    (livePodKeys : List String) (standbyKeys : List String := []) : FlareClusterState :=
   if FlareOperator.Reconciler.hasMasterForPartition state pIdx then state
   else
+    let isActiveSlave := fun ((key, n) : String × FlareNode) =>
+      n.role == FlareRole.Slave && n.state == FlareState.Active
+        && n.partition == Int.ofNat pIdx && livePodKeys.contains key
     let candidate :=
-      (state.nodeMap.find? (fun (key, n) =>
-        n.role == FlareRole.Slave && n.state == FlareState.Active
-          && n.partition == Int.ofNat pIdx && livePodKeys.contains key)).orElse
+      -- standby slaves are the refill choice of LAST resort (availability
+      -- still wins over locality when only standby copies survive).
+      ((state.nodeMap.find? (fun kv => isActiveSlave kv && !standbyKeys.contains kv.1)).orElse
+        (fun _ => state.nodeMap.find? isActiveSlave)).orElse
       (fun _ => state.nodeMap.find? (fun (key, n) =>
         n.lastMasterOf == Int.ofNat pIdx && n.state != FlareState.Down
           && livePodKeys.contains key))
@@ -946,9 +950,9 @@ def promoteMasterlessPartition (state : FlareClusterState) (pIdx : Nat)
 
 /-- Run the masterless-partition refill over every partition of the CRD. -/
 def promoteMasterlessPartitions (state : FlareClusterState) (crd : FlareClusterView)
-    (livePodKeys : List String) : FlareClusterState :=
+    (livePodKeys : List String) (standbyKeys : List String := []) : FlareClusterState :=
   (List.range crd.spec.partitions).foldl
-    (fun s pIdx => promoteMasterlessPartition s pIdx livePodKeys) state
+    (fun s pIdx => promoteMasterlessPartition s pIdx livePodKeys standbyKeys) state
 
 /-- Pure replication phase computation (Main.lean:212-272).
     Determines next migration phase based on current phase and CRD spec.
@@ -1137,7 +1141,7 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
       -- Refill partitions that lost every master to a total restart (all
       -- replicas re-registered as Slave/Prepare, so no proxy exists for
       -- autoAssign and no Down entry exists for failover).
-      let stateWithMasters := promoteMasterlessPartitions stateWithProxies crd s.livePodKeys
+      let stateWithMasters := promoteMasterlessPartitions stateWithProxies crd s.livePodKeys s.standbyNodeKeys
       -- Persistent-violation detection: a partition whose copies all sit in
       -- one zone survives spread constraints (they place pods, not roles).
       -- Phase 1 warns; automated repair (slave migration) is future work.

@@ -40,6 +40,19 @@ helm.sh/chart: {{ include "flare-operator.chart" . }}
 app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 {{- end }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
+{{ include "flare-operator.clusterLabel" . }}
+{{- end }}
+
+{{/*
+Cluster-tracking label. Uniform key stamped on EVERY resource (control plane
+via `labels`, data plane + backup explicitly) so "all resources of cluster X"
+is one selector regardless of release name — the primitive that makes several
+independently-released operators/clusters coexist in one namespace. Distinct
+from the data plane's functional `cluster=<name>` label (which the operator's
+pod selector depends on and must not change); this is for humans/tooling.
+*/}}
+{{- define "flare-operator.clusterLabel" -}}
+flare.gree.net/cluster: {{ .Values.clusterName }}
 {{- end }}
 
 {{/*

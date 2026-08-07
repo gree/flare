@@ -37,8 +37,8 @@
 {{- if $c.backup }}{{- $bk = $c.backup }}{{- end }}
 {{- $os := dict }}
 {{- if $c.objectStorage }}{{- $os = $c.objectStorage }}{{- end }}
-{{- $backupSaName := "flare-backup" }}
-{{- if $bk.serviceAccount }}{{- $backupSaName = $bk.serviceAccount.name | default "flare-backup" }}{{- end }}
+{{- $backupSaName := printf "%s-backup" $c.name }}
+{{- if $bk.serviceAccount }}{{- $backupSaName = $bk.serviceAccount.name | default (printf "%s-backup" $c.name) }}{{- end }}
 {{- if or $bb.enabled $bk.enabled }}
 {{- if not $os.url }}{{- fail "cluster.objectStorage.url is required by backup/backupBootstrap (s3://bucket/prefix, no trailing slash)" }}{{- end }}
 {{- end }}
@@ -59,6 +59,8 @@ kind: ConfigMap
 metadata:
   name: {{ $c.name }}-config
   namespace: {{ $ns }}
+  labels:
+    {{- include "flare-operator.clusterLabel" . | nindent 4 }}
   annotations:
     "helm.sh/hook": pre-install
     "helm.sh/hook-weight": "-5"
@@ -70,6 +72,8 @@ kind: FlareCluster
 metadata:
   name: {{ $c.name }}
   namespace: {{ $ns }}
+  labels:
+    {{- include "flare-operator.clusterLabel" . | nindent 4 }}
 spec:
   partitions: {{ $c.partitions }}
   replicas: {{ $c.replicas }}
@@ -96,6 +100,7 @@ metadata:
   labels:
     app: flare
     cluster: {{ $c.name }}
+    {{- include "flare-operator.clusterLabel" . | nindent 4 }}
 spec:
   clusterIP: None
   # REQUIRED with the sync-gated readiness probe: a re-seeding slave is NotReady
@@ -116,6 +121,8 @@ kind: StatefulSet
 metadata:
   name: {{ $c.name }}-nodes
   namespace: {{ $ns }}
+  labels:
+    {{- include "flare-operator.clusterLabel" . | nindent 4 }}
 spec:
   serviceName: {{ $c.name }}-nodes
   replicas: {{ mul $c.partitions $c.replicas }}
@@ -128,6 +135,7 @@ spec:
       labels:
         app: flare
         cluster: {{ $c.name }}
+        {{- include "flare-operator.clusterLabel" . | nindent 8 }}
         {{- with $c.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -395,6 +403,7 @@ metadata:
   labels:
     app: flare
     cluster: {{ $c.name }}
+    {{- include "flare-operator.clusterLabel" . | nindent 4 }}
   {{- with $c.externalAccess.annotations }}
   annotations:
     {{- toYaml . | nindent 4 }}
@@ -423,6 +432,8 @@ kind: PodDisruptionBudget
 metadata:
   name: {{ $c.name }}-nodes
   namespace: {{ $ns }}
+  labels:
+    {{- include "flare-operator.clusterLabel" . | nindent 4 }}
 spec:
   maxUnavailable: {{ $c.pdb.maxUnavailable }}
   selector:

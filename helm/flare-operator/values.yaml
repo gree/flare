@@ -252,7 +252,12 @@ cluster:
     startingDeadlineSeconds: 900
     serviceAccount:
       create: true
-      name: flare-backup         # cloud OIDC trust policies bind ns:name — keep stable
+      # Empty ⇒ auto-derived "<cluster.name>-backup" so multiple clusters can
+      # share a namespace. The cloud OIDC trust policy must match it via a
+      # StringLike subject condition (e.g.
+      # system:serviceaccount:<ns>:*-backup). Set an explicit name only to
+      # pin it (then the trust policy can StringEquals that exact name).
+      name: ""
     # image needs kubectl+aws-cli+the runner; defaults to the flared tag
     image:
       repository: ghcr.io/gree/flare-backup

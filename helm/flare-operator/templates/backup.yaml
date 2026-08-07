@@ -14,20 +14,27 @@
 {{- if $bk.enabled }}
 {{- $os := $c.objectStorage | default dict }}
 {{- $sa := $bk.serviceAccount | default dict }}
-{{- $saName := $sa.name | default "flare-backup" }}
+{{- $saName := $sa.name | default (printf "%s-backup" $c.name) }}
 {{- if ne ($sa.create | default true) false }}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  # Cloud OIDC trust policies bind <namespace>:<this name> — keep it stable.
+  # Cluster-scoped name so multiple clusters can share a namespace. The cloud
+  # OIDC trust policy must match this via a StringLike subject condition
+  # (e.g. system:serviceaccount:<ns>:*-backup) so every cluster's SA is
+  # trusted without a per-cluster edit. Override with backup.serviceAccount.name.
   name: {{ $saName }}
   namespace: {{ $ns }}
+  labels:
+    {{- include "flare-operator.clusterLabel" . | nindent 4 }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: {{ $saName }}
   namespace: {{ $ns }}
+  labels:
+    {{- include "flare-operator.clusterLabel" . | nindent 4 }}
 rules:
   # kubectl cp of the checkpoint out of the flared pod
   - apiGroups: [""]
@@ -42,6 +49,8 @@ kind: RoleBinding
 metadata:
   name: {{ $saName }}
   namespace: {{ $ns }}
+  labels:
+    {{- include "flare-operator.clusterLabel" . | nindent 4 }}
 subjects:
   - kind: ServiceAccount
     name: {{ $saName }}
@@ -55,8 +64,10 @@ roleRef:
 apiVersion: batch/v1
 kind: CronJob
 metadata:
-  name: flare-backup
+  name: {{ $c.name }}-backup
   namespace: {{ $ns }}
+  labels:
+    {{- include "flare-operator.clusterLabel" . | nindent 4 }}
 spec:
   schedule: {{ $bk.schedule | default "0 * * * *" | quote }}
   concurrencyPolicy: Forbid      # never two runners at once
@@ -76,6 +87,7 @@ spec:
           labels:
             app: flare-backup
             cluster: {{ $c.name }}
+            {{- include "flare-operator.clusterLabel" . | nindent 12 }}
             {{- with $c.podLabels }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

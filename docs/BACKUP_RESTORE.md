@@ -60,6 +60,14 @@ Components:
 Automatic: set `cluster.objectStorage.url` and `cluster.backup.enabled: true`
 (adjust `backup.role`, `backup.schedule`, `backup.keepDays`).
 
+> **Backup ServiceAccount name & OIDC trust.** The chart names the backup SA
+> (and CronJob) `<cluster.name>-backup` so several clusters can share one
+> namespace without colliding. For keyless (web-identity) auth the cloud-side
+> IAM trust policy must therefore match the SA subject with a **StringLike**
+> condition, e.g. `system:serviceaccount:<ns>:*-backup`, rather than an exact
+> `StringEquals` on a fixed name — otherwise the renamed SA cannot assume the
+> role. Pin `backup.serviceAccount.name` if you prefer an exact-match policy.
+
 Manual (one pod):
 
 ```

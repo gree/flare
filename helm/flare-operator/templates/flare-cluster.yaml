@@ -180,6 +180,14 @@ spec:
         - name: backup-bootstrap
           image: "{{ $bb.image.repository | default "ghcr.io/gree/flare-backup" }}:{{ $bb.image.tag | default $c.image.tag }}"
           imagePullPolicy: {{ $c.image.pullPolicy }}
+          {{- if $os.credentialsSecret }}
+          # Static-credential stores (COS/MinIO): same Secret the backup
+          # CronJob uses, so produce and restore authenticate identically.
+          # (OIDC stores instead use the projected token volume below.)
+          envFrom:
+            - secretRef:
+                name: {{ $os.credentialsSecret }}
+          {{- end }}
           command:
             - sh
             - -c

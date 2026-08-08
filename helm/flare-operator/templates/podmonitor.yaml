@@ -21,4 +21,13 @@ spec:
   podMetricsEndpoints:
     - port: metrics
       interval: {{ .Values.monitoring.serviceMonitor.interval }}
+      relabelings:
+        # flared doesn't know its own cluster, so its native metrics carry
+        # only pod/namespace. Surface the pod's `cluster` label as a metric
+        # `cluster` label so flared series are separable per cluster — the
+        # SAME dimension the operator metrics already use — instead of a
+        # fragile pod-name prefix match. Essential when clusters share a
+        # namespace.
+        - sourceLabels: [__meta_kubernetes_pod_label_cluster]
+          targetLabel: cluster
 {{- end }}

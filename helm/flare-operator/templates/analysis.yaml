@@ -1,14 +1,20 @@
 {{- /* OFFLINE keyspace analysis CronJob (monthly by default). Runs entirely
        against the S3 BACKUP checkpoint — never touches the serving cluster.
-       Three phases in one pod, sequential:
-         1. initContainer pull    (flare-backup image, aws-cli): sync each
-            partition's newest checkpoint from object storage to an emptyDir
-         2. initContainer analyze (flared image): `flared --analyze-checkpoint`
-            streams key,expire,ttl,size CSV per partition (constant memory) ->
-            gzip on the emptyDir; a summary line goes to the pod log
-         3. container upload      (flare-backup image, aws-cli): put the gzip
-            reports under <url>/<cluster>/analysis/<date>/pN.csv.gz
-       Auth/location come from cluster.objectStorage (same block backup uses). */}}
+
+       IMPORTANT sizing: RocksDB can only open a checkpoint from a LOCAL
+       filesystem, so the pull stages the ENTIRE dataset (SST + blob files) to
+       the work volume — that is larger than the CSV output. Size the work
+       volume for the whole dataset: set analysis.workVolumeClaimName to a PVC
+       for big clusters; the default emptyDir uses node ephemeral disk (NOT
+       memory).
+
+       The OUTPUT is streamed to object storage, never staged: the analyze
+       container (flared image) gzips `flared --analyze-checkpoint` into a
+       per-partition FIFO on the shared volume, and the upload container
+       (flare-backup image, aws-cli) reads that FIFO straight into
+       `aws s3 cp -` (multipart from stdin). Constant memory + constant output
+       disk regardless of keyspace size. The two run CONCURRENTLY and rendezvous
+       per partition on the FIFO. */}}
 {{- if .Values.cluster.enabled }}
 {{- $c := .Values.cluster }}
 {{- $ns := .Values.namespace }}
@@ -28,6 +34,10 @@
 {{- $bkTag := $bkImg.tag | default $c.image.tag }}
 {{- $ep := $os.endpoint | default "" }}
 {{- $pmax := sub (int $c.partitions) 1 }}
+{{- /* hasKey, not `| default`: sprig's default treats false as empty and
+       would flip an explicit uploadReport:false back to true. */}}
+{{- $upload := true }}
+{{- if hasKey $an "uploadReport" }}{{- $upload = $an.uploadReport }}{{- end }}
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -59,7 +69,12 @@ spec:
           serviceAccountName: {{ $saName }}
           volumes:
             - name: work
-              emptyDir: {}
+              {{- if $an.workVolumeClaimName }}
+              persistentVolumeClaim:
+                claimName: {{ $an.workVolumeClaimName }}
+              {{- else }}
+              emptyDir: {}   # node ephemeral disk — must fit the whole dataset
+              {{- end }}
             {{- if $os.projectedTokenAudience }}
             - name: token
               projected:
@@ -70,6 +85,8 @@ spec:
                       path: token
             {{- end }}
           initContainers:
+            # Stage each partition's checkpoint locally (RocksDB needs local
+            # files) and create the per-partition output FIFO.
             - name: pull
               image: "{{ $bkRepo }}:{{ $bkTag }}"
               imagePullPolicy: {{ $c.image.pullPolicy }}
@@ -99,7 +116,14 @@ spec:
                   for p in $(seq 0 {{ $pmax }}); do
                     mkdir -p /work/p$p
                     aws s3 sync {{ $os.url }}/{{ $c.name }}/latest/p$p /work/p$p --no-progress $EP
+                    {{- if $upload }}
+                    rm -f /work/fifo$p; mkfifo /work/fifo$p
+                    {{- end }}
                   done
+          containers:
+            # Producer: stream key,expire,ttl,size CSV per partition. With
+            # uploadReport, gzip into the FIFO the upload container drains to
+            # S3; otherwise discard the body and keep only the log summary.
             - name: analyze
               image: "{{ $anRepo }}:{{ $anTag }}"
               imagePullPolicy: {{ $c.image.pullPolicy }}
@@ -107,15 +131,21 @@ spec:
                 - name: work
                   mountPath: /work
               command:
-                - sh
+                - bash
                 - -c
                 - |
-                  set -e
+                  set -eo pipefail
                   for p in $(seq 0 {{ $pmax }}); do
                     echo "== analyzing p$p =="
-                    flared --analyze-checkpoint /work/p$p | gzip > /work/p$p.csv.gz
+                    {{- if $upload }}
+                    flared --analyze-checkpoint /work/p$p | gzip > /work/fifo$p
+                    {{- else }}
+                    flared --analyze-checkpoint /work/p$p | gzip | wc -c
+                    {{- end }}
                   done
-          containers:
+            {{- if $upload }}
+            # Consumer: drain each FIFO straight into a multipart S3 upload —
+            # the CSV is never staged on disk.
             - name: upload
               image: "{{ $bkRepo }}:{{ $bkTag }}"
               imagePullPolicy: {{ $c.image.pullPolicy }}
@@ -137,19 +167,16 @@ spec:
                 {{- toYaml . | nindent 16 }}
               {{- end }}
               command:
-                - sh
+                - bash
                 - -c
                 - |
-                  set -e
-                  {{- if $an.uploadReport | default true }}
+                  set -eo pipefail
                   EP=""; [ -n "{{ $ep }}" ] && EP="--endpoint-url {{ $ep }}"
                   DATE=$(date -u +%Y%m%d)
                   for p in $(seq 0 {{ $pmax }}); do
-                    aws s3 cp /work/p$p.csv.gz {{ $os.url }}/{{ $c.name }}/analysis/${DATE}/p$p.csv.gz --no-progress $EP
+                    aws s3 cp - {{ $os.url }}/{{ $c.name }}/analysis/${DATE}/p$p.csv.gz --no-progress $EP < /work/fifo$p
                     echo "uploaded analysis p$p -> {{ $os.url }}/{{ $c.name }}/analysis/${DATE}/p$p.csv.gz"
                   done
-                  {{- else }}
-                  echo "uploadReport=false: reports left in the pod (analyze container log has the summary)"
-                  {{- end }}
+            {{- end }}
 {{- end }}
 {{- end }}

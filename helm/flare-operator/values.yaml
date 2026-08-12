@@ -290,6 +290,11 @@ cluster:
     suspend: false
     activeDeadlineSeconds: 21600
     uploadReport: true            # false = leave reports in the pod (log summary only)
+    # RocksDB opens the checkpoint from local disk, so the pull stages the
+    # WHOLE dataset (bigger than the CSV output). The default work volume is an
+    # emptyDir on node disk; for large clusters point it at a PVC sized for the
+    # dataset. The CSV OUTPUT is streamed to S3 (never staged) via a FIFO.
+    workVolumeClaimName: ""       # "" = emptyDir (node disk); else a PVC name
     image:                        # analyzer = flared (rocksdb); defaults to cluster.image
       repository: ""
       tag: ""

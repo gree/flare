@@ -195,16 +195,27 @@ plus a one-line summary (`keys / expired_unreaped / no_expire /
 total_value_bytes`) to stderr. Reserved replication keys are excluded.
 
 The `cluster.analysis` CronJob (monthly by default) runs this against the S3
-BACKUP checkpoint, never the serving cluster: an init container pulls each
-partition's `latest/pN` to an emptyDir, a second init container runs
-`flared --analyze-checkpoint` per partition and gzips the CSV, then the main
-container uploads to `<url>/<cluster>/analysis/<date>/pN.csv.gz`. Because it
-reads a backup copy, the expensive full-header scan (every value's header holds
-expire/size; large values ≥ min_blob_size are read from blob files) has zero
-impact on production. Useful for: expired-but-unreaped counts (reaper health),
-value-size distribution (capacity / `min_blob_size` tuning), key inventory, and
-cross-checkpoint key-set diffs. `uploadReport: false` keeps the report in the
-pod (summary in the analyze container log) instead of S3.
+BACKUP checkpoint, never the serving cluster. Because it reads a backup copy,
+the expensive full-header scan (every value's header holds expire/size; large
+values ≥ min_blob_size are read from blob files) has zero impact on production.
+Useful for: expired-but-unreaped counts (reaper health), value-size
+distribution (capacity / `min_blob_size` tuning), key inventory, and
+cross-checkpoint key-set diffs.
+
+Flow: an init container (`flare-backup`) `aws s3 sync`s each partition's
+`latest/pN` to a work volume and makes a per-partition FIFO; then two
+CONCURRENT containers stream — `analyze` (flared) gzips
+`flared --analyze-checkpoint` into the FIFO, `upload` (flare-backup) drains it
+straight into `aws s3 cp -` (multipart from stdin) at
+`<url>/<cluster>/analysis/<date>/pN.csv.gz`. The CSV **output is never staged**,
+so it stays constant-disk regardless of keyspace size.
+
+**Sizing.** RocksDB can only open a checkpoint from local files, so the pull
+stages the WHOLE dataset (SST + blobs — LARGER than the CSV output) to the work
+volume. The default is an `emptyDir` on node disk; for big clusters set
+`analysis.workVolumeClaimName` to a PVC sized for the dataset. `uploadReport:
+false` skips the upload container and FIFO (single `analyze` container, summary
+in its log) — no S3 write.
 
 ## What backups do NOT cover
 

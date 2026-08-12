@@ -61,6 +61,7 @@ metadata:
   namespace: {{ $ns }}
   labels:
     {{- include "flare-operator.clusterLabel" . | nindent 4 }}
+    {{- include "flare-operator.wellKnown" (dict "root" $ "name" "flared" "component" "node") | nindent 4 }}
   annotations:
     "helm.sh/hook": pre-install
     "helm.sh/hook-weight": "-5"
@@ -74,6 +75,7 @@ metadata:
   namespace: {{ $ns }}
   labels:
     {{- include "flare-operator.clusterLabel" . | nindent 4 }}
+    {{- include "flare-operator.wellKnown" (dict "root" $ "name" "flared" "component" "node") | nindent 4 }}
 spec:
   partitions: {{ $c.partitions }}
   replicas: {{ $c.replicas }}
@@ -101,6 +103,7 @@ metadata:
     app: flare
     cluster: {{ $c.name }}
     {{- include "flare-operator.clusterLabel" . | nindent 4 }}
+    {{- include "flare-operator.wellKnown" (dict "root" $ "name" "flared" "component" "node") | nindent 4 }}
 spec:
   clusterIP: None
   # REQUIRED with the sync-gated readiness probe: a re-seeding slave is NotReady
@@ -123,6 +126,7 @@ metadata:
   namespace: {{ $ns }}
   labels:
     {{- include "flare-operator.clusterLabel" . | nindent 4 }}
+    {{- include "flare-operator.wellKnown" (dict "root" $ "name" "flared" "component" "node") | nindent 4 }}
 spec:
   serviceName: {{ $c.name }}-nodes
   replicas: {{ mul $c.partitions $c.replicas }}
@@ -136,6 +140,7 @@ spec:
         app: flare
         cluster: {{ $c.name }}
         {{- include "flare-operator.clusterLabel" . | nindent 8 }}
+        {{- include "flare-operator.wellKnown" (dict "root" $ "name" "flared" "component" "node") | nindent 8 }}
         {{- with $c.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -412,6 +417,7 @@ metadata:
     app: flare
     cluster: {{ $c.name }}
     {{- include "flare-operator.clusterLabel" . | nindent 4 }}
+    {{- include "flare-operator.wellKnown" (dict "root" $ "name" "flared" "component" "node") | nindent 4 }}
   {{- with $c.externalAccess.annotations }}
   annotations:
     {{- toYaml . | nindent 4 }}
@@ -442,6 +448,7 @@ metadata:
   namespace: {{ $ns }}
   labels:
     {{- include "flare-operator.clusterLabel" . | nindent 4 }}
+    {{- include "flare-operator.wellKnown" (dict "root" $ "name" "flared" "component" "node") | nindent 4 }}
 spec:
   maxUnavailable: {{ $c.pdb.maxUnavailable }}
   selector:

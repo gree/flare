@@ -45,6 +45,7 @@ metadata:
   namespace: {{ $ns }}
   labels:
     {{- include "flare-operator.clusterLabel" . | nindent 4 }}
+    {{- include "flare-operator.wellKnown" (dict "root" $ "name" "flared" "component" "analysis") | nindent 4 }}
 spec:
   schedule: {{ $an.schedule | default "0 4 1 * *" | quote }}
   concurrencyPolicy: Forbid
@@ -61,6 +62,7 @@ spec:
             app: flare-analysis
             cluster: {{ $c.name }}
             {{- include "flare-operator.clusterLabel" . | nindent 12 }}
+            {{- include "flare-operator.wellKnown" (dict "root" $ "name" "flared" "component" "analysis") | nindent 12 }}
             {{- with $c.podLabels }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

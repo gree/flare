@@ -27,6 +27,7 @@ metadata:
   namespace: {{ $ns }}
   labels:
     {{- include "flare-operator.clusterLabel" . | nindent 4 }}
+    {{- include "flare-operator.wellKnown" (dict "root" $ "name" "flared" "component" "backup") | nindent 4 }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -35,6 +36,7 @@ metadata:
   namespace: {{ $ns }}
   labels:
     {{- include "flare-operator.clusterLabel" . | nindent 4 }}
+    {{- include "flare-operator.wellKnown" (dict "root" $ "name" "flared" "component" "backup") | nindent 4 }}
 rules:
   # kubectl cp of the checkpoint out of the flared pod
   - apiGroups: [""]
@@ -51,6 +53,7 @@ metadata:
   namespace: {{ $ns }}
   labels:
     {{- include "flare-operator.clusterLabel" . | nindent 4 }}
+    {{- include "flare-operator.wellKnown" (dict "root" $ "name" "flared" "component" "backup") | nindent 4 }}
 subjects:
   - kind: ServiceAccount
     name: {{ $saName }}
@@ -68,6 +71,7 @@ metadata:
   namespace: {{ $ns }}
   labels:
     {{- include "flare-operator.clusterLabel" . | nindent 4 }}
+    {{- include "flare-operator.wellKnown" (dict "root" $ "name" "flared" "component" "backup") | nindent 4 }}
 spec:
   schedule: {{ $bk.schedule | default "0 * * * *" | quote }}
   concurrencyPolicy: Forbid      # never two runners at once
@@ -88,6 +92,7 @@ spec:
             app: flare-backup
             cluster: {{ $c.name }}
             {{- include "flare-operator.clusterLabel" . | nindent 12 }}
+            {{- include "flare-operator.wellKnown" (dict "root" $ "name" "flared" "component" "backup") | nindent 12 }}
             {{- with $c.podLabels }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

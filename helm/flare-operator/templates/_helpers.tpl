@@ -40,6 +40,7 @@ helm.sh/chart: {{ include "flare-operator.chart" . }}
 app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 {{- end }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
+app.kubernetes.io/component: operator
 {{ include "flare-operator.clusterLabel" . }}
 {{- end }}
 
@@ -54,6 +55,20 @@ pod selector depends on and must not change); this is for humans/tooling.
 {{- define "flare-operator.clusterLabel" -}}
 app.kubernetes.io/part-of: flare
 flare.gree.net/cluster: {{ .Values.clusterName }}
+{{- end }}
+
+{{/*
+Well-known (recommended) labels for the DATA-plane / backup / analysis
+workloads, which otherwise carry only the legacy `app` label. The `app` label
+stays because the operator's pod selector, the STS matchLabels and the
+Monitor/PDB selectors depend on it (immutable), so these are ADDED alongside,
+not a replacement. Call with (dict "root" $ "name" "flared" "component" "node").
+*/}}
+{{- define "flare-operator.wellKnown" -}}
+app.kubernetes.io/name: {{ .name }}
+app.kubernetes.io/instance: {{ .root.Release.Name }}
+app.kubernetes.io/component: {{ .component }}
+app.kubernetes.io/managed-by: {{ .root.Release.Service }}
 {{- end }}
 
 {{/*

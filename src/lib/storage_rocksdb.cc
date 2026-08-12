@@ -1196,6 +1196,83 @@ int storage_rocksdb::swap_in_snapshot(const string& staging_dir, uint64_t checkp
 	return r;
 }
 
+int storage_rocksdb::analyze_checkpoint(const string& dir, FILE* out) {
+#ifdef HAVE_LIBROCKSDB
+	// Read-only open: no writes, no master-id minting, no counter seeding — the
+	// checkpoint (typically an S3 backup copy) is left byte-identical. Reading
+	// blob-indexed values does NOT require enable_blob_files; RocksDB
+	// dereferences blob files transparently on read.
+	rocksdb::DB* db = NULL;
+	rocksdb::Options opt;
+	opt.create_if_missing = false;
+	rocksdb::Status s = rocksdb::DB::OpenForReadOnly(opt, dir, &db);
+	if (!s.ok()) {
+		log_err("analyze_checkpoint: OpenForReadOnly(%s) failed: %s", dir.c_str(), s.ToString().c_str());
+		return -1;
+	}
+
+	rocksdb::ReadOptions ro;
+	ro.fill_cache = false;  // one-pass scan must not thrash the block cache
+	rocksdb::Iterator* it = db->NewIterator(ro);
+	if (it == NULL) {
+		delete db;
+		return -1;
+	}
+
+	time_t now = time(NULL);
+	uint64_t count = 0, expired = 0, no_expire = 0, total_bytes = 0;
+	fprintf(out, "key,expire,ttl,size\n");
+	for (it->SeekToFirst(); it->Valid(); it->Next()) {
+		const string k = it->key().ToString();
+		if (is_reserved_key(k)) {
+			continue;  // replication metadata keys are invisible to readers
+		}
+		rocksdb::Slice v = it->value();
+		entry e;
+		if (this->_unserialize_header(reinterpret_cast<const uint8_t*>(v.data()),
+				static_cast<int>(v.size()), e) < 0) {
+			continue;  // short/malformed value
+		}
+		long long ttl;
+		if (e.expire == 0) {
+			ttl = -1;  // no expiry
+			no_expire++;
+		} else {
+			ttl = static_cast<long long>(e.expire) - static_cast<long long>(now);
+			if (e.expire <= now) {
+				expired++;  // logically expired but not yet reaped
+			}
+		}
+		// Keys may legally contain commas, so quote. (Embedded double-quotes in
+		// keys are vanishingly rare — not escaped; note it if it ever matters.)
+		fprintf(out, "\"%s\",%lld,%lld,%llu\n",
+			k.c_str(), static_cast<long long>(e.expire), ttl,
+			static_cast<unsigned long long>(e.size));
+		count++;
+		total_bytes += e.size;
+	}
+
+	rocksdb::Status its = it->status();
+	delete it;
+	delete db;
+	if (!its.ok()) {
+		log_err("analyze_checkpoint: iteration error: %s", its.ToString().c_str());
+		return -1;
+	}
+	fprintf(stderr,
+		"analyze_checkpoint: keys=%llu expired_unreaped=%llu no_expire=%llu total_value_bytes=%llu\n",
+		static_cast<unsigned long long>(count),
+		static_cast<unsigned long long>(expired),
+		static_cast<unsigned long long>(no_expire),
+		static_cast<unsigned long long>(total_bytes));
+	return 0;
+#else
+	(void)dir; (void)out;
+	log_warning("analyze_checkpoint requested but RocksDB not compiled in", 0);
+	return -1;
+#endif
+}
+
 bool storage_rocksdb::_note_write_status(const rocksdb::Status& status, const char* where) {
 	if (status.ok()) {
 		return true;

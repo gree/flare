@@ -35,6 +35,7 @@
 # include <stdint.h>
 #endif // HAVE_STDINT_H
 
+#include <cstdio>
 #include <rocksdb/db.h>
 #include <rocksdb/options.h>
 #include <rocksdb/table.h>
@@ -233,6 +234,15 @@ public:
 	virtual int iter_begin();
 	virtual iteration iter_next(string& key);
 	virtual int iter_end();
+
+	// OFFLINE analysis: open a checkpoint dir READ-ONLY (no writes, no server,
+	// no lineage side effects) and stream one CSV row per live key —
+	// key,expire,ttl,size — to `out`, plus a one-line summary to stderr.
+	// Streaming (constant memory) over the RocksDB cursor; blob-indexed values
+	// are dereferenced transparently. Intended to run against an S3 BACKUP
+	// checkpoint off the serving cluster, so the expensive full-header scan
+	// never touches production. See docs/BACKUP_RESTORE.md.
+	int analyze_checkpoint(const string& dir, FILE* out);
 	virtual uint32_t count();
 	virtual uint64_t size();
 	virtual int reap_expired(time_t now, uint32_t max_scan, const string& after_key,

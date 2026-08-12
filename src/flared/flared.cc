@@ -26,6 +26,7 @@
  *
  *	$Id$
  */
+#include <cstring>
 #include "flared.h"
 #include "connection_tcp.h"
 #include "handler_alarm.h"
@@ -710,6 +711,23 @@ int flared::_set_signal_handler() {
 
 // {{{ ::main (entry point)
 int main(int argc, char **argv) {
+	// OFFLINE mode: `flared --analyze-checkpoint <dir>` opens a RocksDB
+	// checkpoint READ-ONLY and streams `key,expire,ttl,size` CSV to stdout,
+	// one row per live key, then exits — no server, no writes. For keyspace /
+	// expire / value-length analysis against an S3 backup checkpoint, OFF the
+	// serving cluster. See docs/BACKUP_RESTORE.md.
+	for (int i = 1; i + 1 < argc; i++) {
+		if (strcmp(argv[i], "--analyze-checkpoint") == 0) {
+#ifdef HAVE_LIBROCKSDB
+			gree::flare::storage_rocksdb st(argv[i + 1], 1, 0);
+			return st.analyze_checkpoint(argv[i + 1], stdout) == 0 ? 0 : 1;
+#else
+			fprintf(stderr, "flared built without RocksDB; --analyze-checkpoint unavailable\n");
+			return 1;
+#endif
+		}
+	}
+
 	gree::flare::flared& f = gree::flare::singleton<gree::flare::flared>::instance();
 	f.set_ident("flared");
 

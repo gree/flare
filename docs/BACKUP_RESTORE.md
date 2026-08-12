@@ -186,6 +186,26 @@ Semantics to be aware of:
   delta on top) — but a live peer is fresher and usually faster; keep the
   flag for replicas=1 topologies.
 
+## Offline keyspace analysis (`cluster.analysis`)
+
+`flared --analyze-checkpoint <dir>` opens a RocksDB checkpoint READ-ONLY and
+streams one CSV row per live key — `key,expire,ttl,size` — to stdout (constant
+memory over the cursor; blob-indexed values are dereferenced transparently),
+plus a one-line summary (`keys / expired_unreaped / no_expire /
+total_value_bytes`) to stderr. Reserved replication keys are excluded.
+
+The `cluster.analysis` CronJob (monthly by default) runs this against the S3
+BACKUP checkpoint, never the serving cluster: an init container pulls each
+partition's `latest/pN` to an emptyDir, a second init container runs
+`flared --analyze-checkpoint` per partition and gzips the CSV, then the main
+container uploads to `<url>/<cluster>/analysis/<date>/pN.csv.gz`. Because it
+reads a backup copy, the expensive full-header scan (every value's header holds
+expire/size; large values ≥ min_blob_size are read from blob files) has zero
+impact on production. Useful for: expired-but-unreaped counts (reaper health),
+value-size distribution (capacity / `min_blob_size` tuning), key inventory, and
+cross-checkpoint key-set diffs. `uploadReport: false` keeps the report in the
+pod (summary in the analyze container log) instead of S3.
+
 ## What backups do NOT cover
 
 - Writes between the last upload and the incident are lost. RPO = the tier-2a

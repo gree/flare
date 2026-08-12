@@ -1,0 +1,155 @@
+{{- /* OFFLINE keyspace analysis CronJob (monthly by default). Runs entirely
+       against the S3 BACKUP checkpoint — never touches the serving cluster.
+       Three phases in one pod, sequential:
+         1. initContainer pull    (flare-backup image, aws-cli): sync each
+            partition's newest checkpoint from object storage to an emptyDir
+         2. initContainer analyze (flared image): `flared --analyze-checkpoint`
+            streams key,expire,ttl,size CSV per partition (constant memory) ->
+            gzip on the emptyDir; a summary line goes to the pod log
+         3. container upload      (flare-backup image, aws-cli): put the gzip
+            reports under <url>/<cluster>/analysis/<date>/pN.csv.gz
+       Auth/location come from cluster.objectStorage (same block backup uses). */}}
+{{- if .Values.cluster.enabled }}
+{{- $c := .Values.cluster }}
+{{- $ns := .Values.namespace }}
+{{- $an := dict "enabled" false }}
+{{- if $c.analysis }}{{- $an = $c.analysis }}{{- end }}
+{{- if $an.enabled }}
+{{- $os := $c.objectStorage | default dict }}
+{{- if not $os.url }}{{- fail "cluster.analysis requires cluster.objectStorage.url" }}{{- end }}
+{{- $bk := $c.backup | default dict }}
+{{- $bsa := $bk.serviceAccount | default dict }}
+{{- $saName := $bsa.name | default (printf "%s-backup" $c.name) }}
+{{- $anImg := $an.image | default dict }}
+{{- $anRepo := $anImg.repository | default $c.image.repository }}
+{{- $anTag := $anImg.tag | default $c.image.tag }}
+{{- $bkImg := $bk.image | default dict }}
+{{- $bkRepo := $bkImg.repository | default "ghcr.io/gree/flare-backup" }}
+{{- $bkTag := $bkImg.tag | default $c.image.tag }}
+{{- $ep := $os.endpoint | default "" }}
+{{- $pmax := sub (int $c.partitions) 1 }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ $c.name }}-analysis
+  namespace: {{ $ns }}
+  labels:
+    {{- include "flare-operator.clusterLabel" . | nindent 4 }}
+spec:
+  schedule: {{ $an.schedule | default "0 4 1 * *" | quote }}
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 3600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  suspend: {{ $an.suspend | default false }}
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: {{ $an.activeDeadlineSeconds | default 21600 }}
+      template:
+        metadata:
+          labels:
+            app: flare-analysis
+            cluster: {{ $c.name }}
+            {{- include "flare-operator.clusterLabel" . | nindent 12 }}
+            {{- with $c.podLabels }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+        spec:
+          restartPolicy: Never
+          serviceAccountName: {{ $saName }}
+          volumes:
+            - name: work
+              emptyDir: {}
+            {{- if $os.projectedTokenAudience }}
+            - name: token
+              projected:
+                sources:
+                  - serviceAccountToken:
+                      audience: {{ $os.projectedTokenAudience }}
+                      expirationSeconds: 3600
+                      path: token
+            {{- end }}
+          initContainers:
+            - name: pull
+              image: "{{ $bkRepo }}:{{ $bkTag }}"
+              imagePullPolicy: {{ $c.image.pullPolicy }}
+              {{- if $os.credentialsSecret }}
+              envFrom:
+                - secretRef:
+                    name: {{ $os.credentialsSecret }}
+              {{- end }}
+              volumeMounts:
+                - name: work
+                  mountPath: /work
+                {{- if $os.projectedTokenAudience }}
+                - name: token
+                  mountPath: /var/run/secrets/sts
+                  readOnly: true
+                {{- end }}
+              {{- with $os.extraEnv }}
+              env:
+                {{- toYaml . | nindent 16 }}
+              {{- end }}
+              command:
+                - sh
+                - -c
+                - |
+                  set -e
+                  EP=""; [ -n "{{ $ep }}" ] && EP="--endpoint-url {{ $ep }}"
+                  for p in $(seq 0 {{ $pmax }}); do
+                    mkdir -p /work/p$p
+                    aws s3 sync {{ $os.url }}/{{ $c.name }}/latest/p$p /work/p$p --no-progress $EP
+                  done
+            - name: analyze
+              image: "{{ $anRepo }}:{{ $anTag }}"
+              imagePullPolicy: {{ $c.image.pullPolicy }}
+              volumeMounts:
+                - name: work
+                  mountPath: /work
+              command:
+                - sh
+                - -c
+                - |
+                  set -e
+                  for p in $(seq 0 {{ $pmax }}); do
+                    echo "== analyzing p$p =="
+                    flared --analyze-checkpoint /work/p$p | gzip > /work/p$p.csv.gz
+                  done
+          containers:
+            - name: upload
+              image: "{{ $bkRepo }}:{{ $bkTag }}"
+              imagePullPolicy: {{ $c.image.pullPolicy }}
+              {{- if $os.credentialsSecret }}
+              envFrom:
+                - secretRef:
+                    name: {{ $os.credentialsSecret }}
+              {{- end }}
+              volumeMounts:
+                - name: work
+                  mountPath: /work
+                {{- if $os.projectedTokenAudience }}
+                - name: token
+                  mountPath: /var/run/secrets/sts
+                  readOnly: true
+                {{- end }}
+              {{- with $os.extraEnv }}
+              env:
+                {{- toYaml . | nindent 16 }}
+              {{- end }}
+              command:
+                - sh
+                - -c
+                - |
+                  set -e
+                  {{- if $an.uploadReport | default true }}
+                  EP=""; [ -n "{{ $ep }}" ] && EP="--endpoint-url {{ $ep }}"
+                  DATE=$(date -u +%Y%m%d)
+                  for p in $(seq 0 {{ $pmax }}); do
+                    aws s3 cp /work/p$p.csv.gz {{ $os.url }}/{{ $c.name }}/analysis/${DATE}/p$p.csv.gz --no-progress $EP
+                    echo "uploaded analysis p$p -> {{ $os.url }}/{{ $c.name }}/analysis/${DATE}/p$p.csv.gz"
+                  done
+                  {{- else }}
+                  echo "uploadReport=false: reports left in the pod (analyze container log has the summary)"
+                  {{- end }}
+{{- end }}
+{{- end }}

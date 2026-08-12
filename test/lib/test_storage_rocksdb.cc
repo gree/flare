@@ -1281,6 +1281,51 @@ void test_swap_in_snapshot_clears_corruption_latch() {
 	drop_rocksdb(slave,  wal_slave_dir);
 }
 
+// analyze_checkpoint(): open a checkpoint READ-ONLY and stream one CSV row per
+// live key (key,expire,ttl,size). Exercises the inline path, the BLOB path
+// (values >= min_blob_size 4096 live in blob files and must be dereferenced),
+// an explicit expire, and reserved-key filtering.
+void test_analyze_checkpoint_streams_key_expire_size() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	cut_assert_equal_int(0, storage_set_string(s, "small", "hello"));   // inline, size 5
+	string big(5000, 'x');
+	cut_assert_equal_int(0, storage_set_string(s, "big", big));         // >=4096 -> blob file
+	{
+		storage::entry e;
+		e.key = "withexp"; e.flag = 0; e.expire = time(NULL) + 3600; e.version = 0;
+		e.size = 3;
+		shared_byte d(new uint8_t[3]); memcpy(d.get(), "abc", 3); e.data = d;
+		storage::result r;
+		cut_assert_equal_int(0, s->set(e, r, 0));
+	}
+
+	// The real analyze input is a checkpoint (an S3 backup copy in production).
+	string cp; uint64_t seq = 0;
+	cut_assert_equal_int(0, s->create_snapshot_checkpoint(cp, seq));
+
+	FILE* f = tmpfile();
+	cut_assert_not_null(f);
+	cut_assert_equal_int(0, s->analyze_checkpoint(cp, f));
+
+	rewind(f);
+	string out;
+	char buf[4096]; size_t n;
+	while ((n = fread(buf, 1, sizeof(buf), f)) > 0) out.append(buf, n);
+	fclose(f);
+
+	cut_assert_true(out.find("key,expire,ttl,size") != string::npos);
+	cut_assert_true(out.find("\"small\",0,-1,5") != string::npos);      // no expire -> ttl -1
+	cut_assert_true(out.find("\"big\",0,-1,5000") != string::npos);      // blob value, exact length
+	cut_assert_true(out.find("\"withexp\",") != string::npos);
+	// header + exactly 3 data rows: reserved replication keys are filtered out
+	int rows = 0; size_t pos = 0;
+	while ((pos = out.find('\n', pos)) != string::npos) { rows++; pos++; }
+	cppcut_assert_equal(4, rows);
+
+	s->remove_snapshot_checkpoint(cp);
+	drop_rocksdb(s, wal_master_dir);
+}
+
 // hard_reset(): the in-process Case-A recovery must wipe all data, clear the
 // corruption latch, keep the DB usable, and reset curr_items to 0.
 void test_hard_reset_wipes_and_recovers() {

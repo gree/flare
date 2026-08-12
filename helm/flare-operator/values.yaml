@@ -278,6 +278,24 @@ cluster:
     image:
       repository: ghcr.io/gree/flare-backup
       tag: ""
+
+  # Offline keyspace analysis (monthly by default): runs against the S3 BACKUP
+  # checkpoint — NOT the serving cluster — and emits key,expire,ttl,size CSV
+  # per partition (via `flared --analyze-checkpoint`, streaming/constant
+  # memory), gzipped to <objectStorage.url>/<cluster>/analysis/<date>/pN.csv.gz.
+  # Reuses cluster.objectStorage (auth/location) and the backup ServiceAccount.
+  analysis:
+    enabled: false
+    schedule: "0 4 1 * *"        # monthly, 1st, 04:00 UTC
+    suspend: false
+    activeDeadlineSeconds: 21600
+    uploadReport: true            # false = leave reports in the pod (log summary only)
+    image:                        # analyzer = flared (rocksdb); defaults to cluster.image
+      repository: ""
+      tag: ""
+    image:
+      repository: ghcr.io/gree/flare-backup
+      tag: ""
   # Optional LoadBalancer in front of the flared DATA port (memcached
   # protocol). flared proxies keys to the owning partition, so one LB over
   # all nodes is a complete client entry point. The protocol has NO

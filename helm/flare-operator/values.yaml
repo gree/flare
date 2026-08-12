@@ -23,6 +23,29 @@ namespace: flare-system
 # Default cluster name to manage (can be overridden per FlareCluster CR)
 clusterName: "default"
 
+# CRD lifecycle.
+#
+# The FlareCluster/FlareMigration CRDs are cluster-scoped and SHARED by every
+# flare instance in the cluster. In a multi-cluster / multi-operator layout
+# (20-30 instances) their ownership MUST be decoupled from any single instance's
+# lifecycle, otherwise deleting the "owning" instance orphans (or, without the
+# keep/Prune=false guards, cascade-deletes) every other instance's CRs.
+#
+# Pattern: one dedicated "flare-crds" release/app owns the CRDs
+# (crds.install=true, operator.enabled=false, cluster.enabled=false → renders
+# CRDs ONLY); every instance app sets crds.install=false and consumes them.
+# Standalone `helm install` keeps the default (true) for a self-contained
+# install. See docs/RUNBOOK.md#multi-cluster-crd-ownership.
+crds:
+  install: true
+
+# Control plane (operator Deployment + RBAC + Service + operator-scoped
+# monitoring). Set false in the dedicated flare-crds release so it emits the
+# CRDs and nothing else. Instance apps and standalone installs keep the
+# default (true).
+operator:
+  enabled: true
+
 serviceAccount:
   # Specifies whether a service account should be created
   create: true

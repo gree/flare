@@ -2,19 +2,25 @@
 
 ## Upgrading a release (READ THIS FIRST)
 
-Helm treats the chart's `crds/` directory as **install-only**: `helm
-upgrade` never touches CRDs. If a release adds CRD schema fields (the
-rocksdb block, circuitBreaker, …), an upgraded cluster silently rejects
-or PRUNES patches to those fields — `kubectl patch` appears to succeed
-while the field vanishes (observed live: circuitBreaker settings were
-dropped on a cluster whose CRD predated the schema).
+The CRDs live in `templates/crds.yaml`, gated by `crds.install` — **not** in
+Helm's install-only `crds/` dir. So whoever owns them (`crds.install=true`)
+carries schema changes on `helm upgrade`; the old trap where `helm upgrade`
+silently skipped CRDs (and patches to new fields like rocksdb/circuitBreaker
+were PRUNED) is gone. Which release owns the CRDs depends on the layout:
 
-Upgrade procedure, always:
+- **Standalone / single cluster** (`crds.install=true`, the default): `helm
+  upgrade` applies CRD schema changes in-band. Nothing extra to do.
+- **Multi-cluster / multi-operator**: a dedicated `flare-crds` release owns the
+  CRDs and every instance runs `crds.install=false`. **Upgrade `flare-crds`
+  FIRST, then the instances** — an instance upgrade cannot carry a schema
+  change. See [Multi-cluster CRD ownership](#multi-cluster-crd-ownership).
+
+Standalone upgrade:
 
 ```bash
-kubectl apply -f helm/flare-operator/crds/flarecluster.yaml   # CRDs first
 helm upgrade flare ./helm/flare-operator -n flare-system --reuse-values \
   --set image.tag=<version> --set cluster.image.tag=<version>
+# CRDs upgrade in-band because crds.install defaults to true.
 ```
 
 Verify the schema took: `kubectl patch flarecluster <name> --dry-run=server
@@ -180,6 +186,72 @@ exporter).
 - Blue/green cluster migration: `spec.clusterReplication` — validate on
   staging first; see the failover-during-replication e2e for the tested
   failure mode.
+
+## Multi-cluster CRD ownership {#multi-cluster-crd-ownership}
+
+Running many flare instances (multiple operators, one or many namespaces) on a
+single K8s cluster — the 20-30-instance target. **The `FlareCluster` /
+`FlareMigration` CRDs are cluster-scoped and SHARED by every instance.** They
+are one object per K8s cluster; you cannot give each instance its own copy
+without minting a new API group per instance (30 near-identical CRD types —
+rejected: `kubectl get fc -A` stops working, schemas drift, no single source of
+truth). So the rule is: **one shared CRD, owned by nobody's instance.**
+
+Layout:
+
+- **One dedicated `flare-crds` release** owns the CRDs. It renders CRDs and
+  nothing else:
+  ```bash
+  helm install flare-crds ./helm/flare-operator -n flare-system \
+    --set operator.enabled=false --set cluster.enabled=false --set crds.install=true
+  ```
+  (In GitOps: one Application pointing at the chart with those values. Give it a
+  sync-wave earlier than the instances so CRDs exist first.)
+- **Every instance release sets `crds.install=false`** and consumes the shared
+  CRDs. An instance never ships or owns a CRD:
+  ```bash
+  helm install flare-<name> ./helm/flare-operator -n <ns> \
+    --set crds.install=false --set clusterName=flare-<name> ...
+  ```
+
+Why this split (do not undo it):
+
+- **Deleting an instance is safe.** No instance owns the CRDs, so removing one
+  (or its whole namespace) cannot cascade-delete another instance's CRs. Belt
+  and braces: the CRDs also carry `helm.sh/resource-policy: keep` +
+  `argocd.argoproj.io/sync-options: Prune=false`, so even an accidental owner
+  teardown won't prune them.
+- **Adding instance #21..#30 is trivial** — `crds.install=false`, new
+  `clusterName`, done. No CRD coordination.
+
+### Schema changes across many instances
+
+- **Additive change (new optional field — the normal case):** bump and upgrade
+  the **`flare-crds` release FIRST**, then roll the instances at their own pace.
+  Old-version operators ignore the new field; new-version operators require the
+  CRD to already know it (the schema is strict — unknown fields are pruned), so
+  CRD-first ordering is mandatory. All prior changes (rocksdb, circuitBreaker,
+  readBalance, standby) were additive and safe this way.
+- **Breaking change (rename/retype/remove):** do NOT split the CRD per instance
+  to dodge it. Add a **new served API version** (`v1alpha1` → `v1beta1`) to the
+  shared CRD, serve BOTH during the transition, migrate instances onto the new
+  version as they upgrade, then drop the old served version once no CR uses it.
+  This is the "change the prefix/version only when you actually break" strategy —
+  it isolates the break without the 30-CRD sprawl. A conversion webhook is only
+  needed if old and new must be read interchangeably mid-flight; for a rolling
+  per-instance cutover, served-both-then-retire is enough.
+
+### Retiring flare from the whole K8s cluster
+
+The guards stop automatic deletion, so removal is deliberate:
+
+```bash
+# after every instance + the flare-crds release are gone:
+kubectl delete crd flareclusters.flare.gree.net flaremigrations.flare.gree.net
+```
+
+Only run this when retiring flare from the entire cluster — it removes the type
+and every remaining CR cluster-wide.
 
 ## Reducing masters / partitions (shrink migration) {#shrink}
 

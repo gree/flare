@@ -1,3 +1,13 @@
+{{- /*
+  FlareCluster + FlareMigration CRDs. Gated by crds.install so a dedicated
+  "flare-crds" release can own them (crds.install=true, operator.enabled=false,
+  cluster.enabled=false → CRDs only) while every instance app sets
+  crds.install=false. Moved out of the Helm crds/ dir on purpose: crds/ is
+  install-once / never-upgraded / values-blind, which cannot express single
+  ownership. As templates they upgrade with the chart; the keep + Prune=false
+  annotations below stop any owner’s teardown from deleting them.
+  See docs/RUNBOOK.md#multi-cluster-crd-ownership. */}}
+{{- if .Values.crds.install }}
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
@@ -195,3 +205,131 @@ spec:
     kind: FlareCluster
     shortNames:
       - fc
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: flaremigrations.flare.gree.net
+  annotations:
+    # A CRD is cluster-scoped and SHARED by every flare instance; deleting it
+    # cascade-deletes ALL FlareCluster/FlareMigration CRs cluster-wide. Protect
+    # it from automatic deletion so no single owner's lifecycle can take it
+    # down: helm never prunes it on uninstall, ArgoCD never prunes it on sync/
+    # app-deletion. Remove it deliberately (kubectl) only when retiring flare
+    # from the whole cluster.
+    "helm.sh/resource-policy": keep
+    argocd.argoproj.io/sync-options: Prune=false
+spec:
+  group: flare.gree.net
+  names:
+    kind: FlareMigration
+    listKind: FlareMigrationList
+    plural: flaremigrations
+    singular: flaremigration
+    shortNames: ["fmig"]
+  scope: Namespaced
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Source
+          type: string
+          jsonPath: .spec.source
+        - name: Target
+          type: string
+          jsonPath: .spec.target.name
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Progress
+          type: string
+          jsonPath: .status.progress
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required: ["source", "target"]
+              properties:
+                source:
+                  type: string
+                  description: >
+                    Name of the FlareCluster to migrate FROM (same namespace).
+                    The operator managing this cluster runs the migration.
+                target:
+                  type: object
+                  required: ["name"]
+                  properties:
+                    name:
+                      type: string
+                      description: Name for the new FlareCluster (same namespace).
+                    partitions:
+                      type: integer
+                      default: 1
+                    replicas:
+                      type: integer
+                      default: 2
+                      description: Replicas PER PARTITION (master + N-1 slaves).
+                    persistenceSize:
+                      type: string
+                      default: "10Gi"
+                      description: PVC size per target pod.
+                    drainSeconds:
+                      type: integer
+                      default: 60
+                paused:
+                  type: boolean
+                  default: false
+                  description: >
+                    Freeze the migration at its current phase. No actions are
+                    taken while true; flip back to false to resume.
+                approveCutover:
+                  type: boolean
+                  default: false
+                  description: >
+                    Human gate for the point of no return. The migration parks
+                    in AwaitingCutover until this is true; cutover flips the
+                    external Service selector to the target cluster.
+                approveRetire:
+                  type: boolean
+                  default: false
+                  description: >
+                    Human gate for deleting the SOURCE cluster's StatefulSet
+                    and FlareCluster CR (PVCs are always left in place).
+                abort:
+                  type: boolean
+                  default: false
+                  description: >
+                    Roll the migration back: stop replication, delete the
+                    target cluster. Refused after cutover (the external
+                    Service already points at the target).
+                externalService:
+                  type: string
+                  default: ""
+                  description: >
+                    Name of the client-facing Service whose selector is
+                    flipped to the target at cutover. Empty = no Service to
+                    flip (cutover is a no-op marker).
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                message:
+                  type: string
+                progress:
+                  type: string
+                sourceKeys:
+                  type: integer
+                targetKeys:
+                  type: integer
+                convergedTicks:
+                  type: integer
+{{- end }}

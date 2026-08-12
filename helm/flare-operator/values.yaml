@@ -298,9 +298,6 @@ cluster:
     image:                        # analyzer = flared (rocksdb); defaults to cluster.image
       repository: ""
       tag: ""
-    image:
-      repository: ghcr.io/gree/flare-backup
-      tag: ""
   # Optional LoadBalancer in front of the flared DATA port (memcached
   # protocol). flared proxies keys to the owning partition, so one LB over
   # all nodes is a complete client entry point. The protocol has NO

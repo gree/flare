@@ -52,6 +52,7 @@ from the data plane's functional `cluster=<name>` label (which the operator's
 pod selector depends on and must not change); this is for humans/tooling.
 */}}
 {{- define "flare-operator.clusterLabel" -}}
+app.kubernetes.io/part-of: flare
 flare.gree.net/cluster: {{ .Values.clusterName }}
 {{- end }}
 

@@ -62,7 +62,7 @@ spec:
       name: flare"
 
 private def migrationYaml : String :=
-  s!"apiVersion: flare.gree.net/v1
+  s!"apiVersion: flare.gree.net/v1alpha1
 kind: FlareMigration
 metadata:
   name: {migName}
@@ -247,7 +247,7 @@ spec:
     -- Interruptibility: a second migration rolled back mid-flight.
     { name := "abort rolls a migration back (target resources deleted)"
       run := do
-        let abortMig := s!"apiVersion: flare.gree.net/v1
+        let abortMig := s!"apiVersion: flare.gree.net/v1alpha1
 kind: FlareMigration
 metadata:
   name: abort-me

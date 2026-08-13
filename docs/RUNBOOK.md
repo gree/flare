@@ -260,7 +260,7 @@ the manual choreography below still works but the CR automates it with
 proven gates. Same namespace, one release:
 
 ```yaml
-apiVersion: flare.gree.net/v1
+apiVersion: flare.gree.net/v1alpha1
 kind: FlareMigration
 metadata: {name: shrink-1p, namespace: <ns>}
 spec:

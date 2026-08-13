@@ -199,7 +199,7 @@ helm install flare ./helm/flare-operator -n flare-system --create-namespace
 ### Deploy Flare Cluster
 
 ```yaml
-apiVersion: flare.gree.net/v1
+apiVersion: flare.gree.net/v1alpha1
 kind: FlareCluster
 metadata:
   name: my-cluster

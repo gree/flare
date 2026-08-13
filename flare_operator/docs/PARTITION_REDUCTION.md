@@ -33,7 +33,7 @@ The correct approach is to create a new cluster with fewer partitions and migrat
 Create a new FlareCluster CRD with the desired partition count:
 
 ```yaml
-apiVersion: flare.gree.net/v1
+apiVersion: flare.gree.net/v1alpha1
 kind: FlareCluster
 metadata:
   name: my-cluster-new
@@ -60,7 +60,7 @@ kubectl get pods -l cluster=my-cluster-new
 Update the **OLD** cluster to enable replication to the new cluster:
 
 ```yaml
-apiVersion: flare.gree.net/v1
+apiVersion: flare.gree.net/v1alpha1
 kind: FlareCluster
 metadata:
   name: my-cluster

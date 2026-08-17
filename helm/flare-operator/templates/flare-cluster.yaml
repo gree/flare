@@ -206,7 +206,24 @@ spec:
               EP=""; [ -n "$S3_ENDPOINT" ] && EP="--endpoint-url $S3_ENDPOINT"
               SRC="${S3_URL}/latest/p0"
               REST="${SRC#s3://}"; BUCKET="${REST%%/*}"; KEY="${REST#*/}/CURRENT"
-              LM=$(aws s3api head-object $EP --bucket "$BUCKET" --key "$KEY" --query LastModified --output text)
+              # Probe for a backup WITHOUT tripping `set -e`. A fresh bucket with
+              # no backup yet is the NORMAL first-boot state of a new cluster, not
+              # an error: seed-from-backup is a LAST RESORT, so an absent marker
+              # (404 / NoSuchKey) means "start empty" (exit 0), and the operator
+              # converges the pod off a live peer anyway. Only a genuine access/
+              # transport failure stays fatal (don't silently boot empty over a
+              # real backup we just failed to reach).
+              set +e
+              LM=$(aws s3api head-object $EP --bucket "$BUCKET" --key "$KEY" --query LastModified --output text 2>/tmp/bb.err)
+              rc=$?
+              set -e
+              if [ "$rc" -ne 0 ]; then
+                if grep -qiE '404|not found|nosuchkey' /tmp/bb.err; then
+                  echo "backup-bootstrap: no backup at $SRC -> starting empty (normal on first boot)"
+                  exit 0
+                fi
+                echo "backup-bootstrap: cannot read backup marker $SRC:" >&2; cat /tmp/bb.err >&2; exit 1
+              fi
               AGE=$(( $(date +%s) - $(date -d "$LM" +%s) ))
               if [ "$AGE" -gt "$MAX_AGE_SECONDS" ]; then
                 echo "backup-bootstrap: newest backup is ${AGE}s old (> ${MAX_AGE_SECONDS}s) -> REFUSING to seed; restore manually or raise maxAgeSeconds"

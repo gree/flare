@@ -121,6 +121,39 @@ and events; fix the underlying cause. Churn is safe for data (promotion
 only ever selects live, data-bearing replicas) but each cycle costs
 reconstruction bandwidth.
 
+## FlareDrainNoSuccessor (critical) {#drain-no-successor}
+
+A Terminating (draining) master has NO promotable slave. The operator keeps
+it as master so it serves until the very end of its grace period (demoting
+early would only make the partition masterless sooner), but **when the pod
+dies the partition loses its only data-bearing node and no automation can
+prevent it** — pod deletion cannot be cancelled (deletionTimestamp is
+irreversible). Typical trigger: deleting/evicting a partition's master and
+slave together (manual both-pod delete, node drain with co-located replicas,
+`rollout restart` of a 1p×2r StatefulSet).
+
+You have roughly the preStop window (`cluster.drainSeconds`, default 60s):
+
+1. **Trigger a final backup NOW** so the reseed rewinds minutes, not an hour:
+   `printf 'backup\r\n' | nc <master-pod-ip> 12121` (the backup CronJob's
+   runner does the S3 upload of the freshest checkpoint on its next run; if
+   time allows, fire the CronJob manually:
+   `kubectl create job --from=cronjob/<cluster>-backup drain-final -n <ns>`).
+2. If a slave is mid-reconstruction (Prepare), it may still reach Active in
+   time — watch `node sync`; promotion happens automatically if it does.
+
+What happens after the pod dies:
+- **PVC cluster**: the same-name pod returns with its data; `lastMasterOf`
+  re-promotes it. Recovery is automatic, the alert clears itself.
+- **tmpfs cluster**: the pod returns EMPTY; backupBootstrap reseeds from the
+  newest S3 backup (up to `backupBootstrap.maxAgeSeconds` old) and everything
+  written since that backup is LOST. The final backup from step 1 is what
+  bounds the loss.
+
+The end-state (masterless partition) also fires
+[FlareMasterMissing](#master-missing); this alert is the EARLY warning while
+the doomed master is still alive and a final backup is still possible.
+
 ## Replacing a node with corrupt data {#replace-corrupt}
 
 To service out a node whose local data looks corrupt and rebuild it from a

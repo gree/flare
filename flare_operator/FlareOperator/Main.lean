@@ -652,6 +652,7 @@ private partial def runReconcileFSMLoop
     (migrationRef : IO.Ref MigrationPhase)
     (graceCyclesRef : IO.Ref Nat)
     (trippedRef : IO.Ref Bool)
+    (drainBlockedRef : IO.Ref Nat)
     (crName ns : String) : IO Unit := do
   if K8sReconciler.flareReconcileTerminalBool s.reconcileStep then
     -- Record whether the breaker HELD during this pass (for hysteresis input
@@ -660,6 +661,9 @@ private partial def runReconcileFSMLoop
     -- RecoveryRefill ends in Done, yet must still count as tripped so the
     -- reset keeps requiring healthy% ≥ resetThresholdPercent.
     trippedRef.set (s.breakerHeld || s.reconcileStep == .EmergencyPaused)
+    -- CRITICAL drain-guard signal for the flare_operator_drain_no_successor
+    -- gauge (draining masters kept because no promotable successor exists).
+    drainBlockedRef.set s.drainBlockedCount
     -- Terminal state reached
     match s.reconcileStep with
     | .Done =>
@@ -722,16 +726,16 @@ private partial def runReconcileFSMLoop
         if let some ucs := finalState.updatedClusterState then
           let rb := (finalState.cachedCrd.map (·.spec.readBalance)).getD {}
           let _ ← commitClusterState stateRef cs3Version ucs rb finalState.standbyNodeKeys
-        runReconcileFSMLoop finalState stateRef migrationRef graceCyclesRef trippedRef crName ns
+        runReconcileFSMLoop finalState stateRef migrationRef graceCyclesRef trippedRef drainBlockedRef crName ns
       | none =>
         -- No new request - safe to recurse (nextState is in an "action" state)
-        runReconcileFSMLoop nextState stateRef migrationRef graceCyclesRef trippedRef crName ns
+        runReconcileFSMLoop nextState stateRef migrationRef graceCyclesRef trippedRef drainBlockedRef crName ns
     | none =>
       -- No request: update cluster state if FSM produced one and continue
       if let some ucs := newState.updatedClusterState then
         let rb := (newState.cachedCrd.map (·.spec.readBalance)).getD {}
         let _ ← commitClusterState stateRef csVersion ucs rb newState.standbyNodeKeys
-      runReconcileFSMLoop newState stateRef migrationRef graceCyclesRef trippedRef crName ns
+      runReconcileFSMLoop newState stateRef migrationRef graceCyclesRef trippedRef drainBlockedRef crName ns
 
 /-- Run the FSM-driven reconcile loop.
     Repeatedly calls flareReconcileCore, executing requests/effects until Done/Error.
@@ -740,6 +744,7 @@ private partial def runReconcileFSMLoop
 private def runReconcileDriver (stateRef : IO.Ref FlareClusterState)
     (migrationRef : IO.Ref MigrationPhase) (graceCyclesRef : IO.Ref Nat)
     (trippedRef : IO.Ref Bool)
+    (drainBlockedRef : IO.Ref Nat)
     (crName ns : String) : IO Unit := do
   let initialGrace ← graceCyclesRef.get
   let initialPhase ← migrationRef.get
@@ -751,7 +756,7 @@ private def runReconcileDriver (stateRef : IO.Ref FlareClusterState)
     wasTripped := (← trippedRef.get)
   }
 
-  runReconcileFSMLoop initialState stateRef migrationRef graceCyclesRef trippedRef crName ns
+  runReconcileFSMLoop initialState stateRef migrationRef graceCyclesRef trippedRef drainBlockedRef crName ns
 
 -- ===========================================================================
 -- FSM-Driven Reconcile (Complete with safety checks and metrics)
@@ -809,8 +814,14 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
 
   -- 2. Run the FSM driver
   let oldVersion := (← stateRef.get).nodeMapVersion
-  runReconcileDriver stateRef migrationRef graceCyclesRef trippedRef crName ns
+  let drainBlockedRef ← IO.mkRef 0
+  runReconcileDriver stateRef migrationRef graceCyclesRef trippedRef drainBlockedRef crName ns
   metrics.circuitBreakerTripped.set (if ← trippedRef.get then 1.0 else 0.0)
+  -- CRITICAL drain-guard gauge: >0 pages a human — a draining master has no
+  -- promotable successor and its partition dies with the pod (see RUNBOOK
+  -- #drain-no-successor). Gauge semantics: reflects the LAST completed pass,
+  -- clears once the doomed pod is gone (the key stops being Terminating).
+  metrics.drainNoSuccessor.set (← drainBlockedRef.get).toFloat
 
   -- 3. Post-FSM: Broadcast topology if version changed
   let finalState ← stateRef.get

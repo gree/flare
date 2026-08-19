@@ -575,9 +575,12 @@ theorem handleFailover_cle (s : FlareClusterState) (deadKeys : List String) :
 /-! ## Graceful drain preserves the bound (mirrors failover)
 
     `handleDrainWithPromotionSingleKey` is `handleFailoverWithPromotionSingleKey`
-    with the demoted node left state=Active (a live proxy) instead of Down. The
-    at-most-one-master count depends only on the `role` field, never `state`, so
-    the proof is identical to `handleFailoverSingle_cle`. -/
+    with (a) the demoted node left state=Active (a live proxy) instead of Down
+    and (b) a guard that demotes a Master ONLY together with a successful
+    promotion. The at-most-one-master count depends only on the `role` field,
+    never `state`; the guard branches that keep the state unchanged are
+    CLE-trivial, and the demote+promote branch is the same counting argument
+    as `handleFailoverSingle_cle`. -/
 theorem handleDrainSingle_cle (s : FlareClusterState) (key : String) :
     CLE s.nodeMap (handleDrainWithPromotionSingleKey s key).nodeMap := by
   unfold handleDrainWithPromotionSingleKey
@@ -590,13 +593,13 @@ theorem handleDrainSingle_cle (s : FlareClusterState) (key : String) :
     split
     next hM =>
       split
-      · exact CLE.of_le hdemote
+      · exact CLE.rfl _
       next part hfindp =>
         split
-        · exact CLE.of_le hdemote
+        · exact CLE.rfl _
         next slaveKey hhead =>
           split
-          · exact CLE.of_le hdemote
+          · exact CLE.rfl _
           next slaveNode hlook2 =>
             split
             next hguard =>
@@ -631,7 +634,7 @@ theorem handleDrainSingle_cle (s : FlareClusterState) (key : String) :
                   · omega
                 have h1 := count_addNode_le_succ p (s.addNode key { node with state := FlareState.Active, role := FlareRole.Proxy, partition := -1 }) slaveKey { slaveNode with role := FlareRole.Master, state := FlareState.Active, balance := 100 }
                 omega
-            next hguard => exact CLE.of_le hdemote
+            next hguard => exact CLE.rfl _
     next hM => exact CLE.of_le hdemote
 
 theorem handleDrain_cle (s : FlareClusterState) (drainKeys : List String) :

@@ -110,6 +110,11 @@ structure FlareReconcileState where
   /-- Terminating nodes that are still Master/Slave and must be drained this
       tick: promote a replacement + demote them to a live proxy. -/
   drainNodeKeys : List String := []
+  /-- Draining masters the drain guard REFUSED to demote (no promotable
+      successor). Carried to Done so the driver can export the
+      flare_operator_drain_no_successor gauge — this is a CRITICAL,
+      human-decision condition (see drainBlockedKeys). -/
+  drainBlockedCount : Nat := 0
   /-- Node keys matched by spec.readBalance.standby this tick (by pod name or
       zone). Forced to balance 0 at commit; deprioritized for promotion. -/
   standbyNodeKeys : List String := []
@@ -372,23 +377,35 @@ def handleFailoverWithPromotion (state : FlareClusterState) (deadKeys : List Str
     : FlareClusterState :=
   deadKeys.foldl handleFailoverWithPromotionSingleKey state
 
-/-- Graceful drain of a single Terminating node. Identical in shape to
+/-- Graceful drain of a single Terminating node. Same shape as
     `handleFailoverWithPromotionSingleKey` (demote the node to an unassigned
-    Proxy; if it was a Master, promote a live slave of its partition) with ONE
-    difference: the demoted node is left **state=Active**, not Down — it is a
-    LIVE proxy, still running for the rest of its preStop window, so flared keeps
-    serving and forwards its existing connections to the new master. (The
-    at-most-one-master count is unaffected by the state field, so the safety
-    proof mirrors `handleFailoverSingle_cle`.) -/
+    Proxy; if it was a Master, promote a live slave of its partition) with TWO
+    differences:
+    1. The demoted node is left **state=Active**, not Down — it is a LIVE
+       proxy, still running for the rest of its preStop window, so flared
+       keeps serving and forwards its existing connections to the new master.
+    2. A Master is demoted ONLY when a promotable successor actually exists.
+       Failover demotes unconditionally because the node is already a corpse;
+       here the node is still alive, and demoting the partition's only
+       data-bearing node buys nothing — the partition just goes masterless
+       (and stops taking writes) EARLIER than the pod's death. Observed live:
+       deleting both pods of a 1p×2r cluster drained the slave first (making
+       it a proxy), then the master found no promotable slave and was demoted
+       anyway — masterless with every node still running. With the guard the
+       doomed master keeps serving to the end of its grace period, maximizing
+       what WAL replication / a final backup can still capture; the caller
+       surfaces the no-successor condition as a CRITICAL signal (a human
+       decision point — see drainBlockedKeys).
+    (The at-most-one-master count is unaffected by the state field, and the
+    guard only ever demotes FEWER masters, so the safety proof mirrors
+    `handleFailoverSingle_cle`.) -/
 def handleDrainWithPromotionSingleKey (s : FlareClusterState) (key : String)
     : FlareClusterState :=
   match s.lookupNode key with
   | none => s
   | some node =>
-    let demoted : FlareNode :=
-      { node with state := FlareState.Active, role := FlareRole.Proxy, partition := -1 }
-    let s := s.addNode key demoted
     if node.role == FlareRole.Master then
+      -- Master: demote only together with a successful promotion.
       let partIdx := node.partition
       match s.partitionMap.find? (fun (idx, _) => Int.ofNat idx == partIdx) with
       | none => s
@@ -400,17 +417,39 @@ def handleDrainWithPromotionSingleKey (s : FlareClusterState) (key : String)
           | none => s
           | some slaveNode =>
             if slaveNode.role == FlareRole.Slave && slaveNode.partition == partIdx then
+              let demoted : FlareNode :=
+                { node with state := FlareState.Active, role := FlareRole.Proxy,
+                            partition := -1 }
+              let s := s.addNode key demoted
               let promoted := { slaveNode with role := FlareRole.Master,
                                                state := FlareState.Active, balance := 100 }
               let newPart := { part with master := some slaveKey, slaves := part.slaves.tail }
               (s.addNode slaveKey promoted).setPartition partIdx.toNat newPart
             else s
-    else s
+    else
+      -- Slave (or already-proxy): demoting to a live proxy is always safe.
+      s.addNode key
+        { node with state := FlareState.Active, role := FlareRole.Proxy, partition := -1 }
 
 /-- Drain every Terminating master/slave (see the single-key doc). -/
 def handleDrainWithPromotion (state : FlareClusterState) (drainKeys : List String)
     : FlareClusterState :=
   drainKeys.foldl handleDrainWithPromotionSingleKey state
+
+/-- Draining keys that are STILL Master after the drain pass = masters the
+    guard refused to demote because no promotable successor existed. Computed
+    on the POST-drain state so fold-order interactions are already settled
+    (e.g. the partition's only slave was itself drained earlier in the pass).
+    Each such key is a partition that will lose its only data-bearing node
+    when the pod's grace period expires — normally unrecoverable in place
+    (tmpfs: rewind to the last S3 backup; PVC: recovers when the pod returns).
+    The operator cannot fix this; it must be surfaced to a human as CRITICAL. -/
+def drainBlockedKeys (post : FlareClusterState) (drainKeys : List String)
+    : List String :=
+  drainKeys.filter fun key =>
+    match post.lookupNode key with
+    | some node => node.role == FlareRole.Master
+    | none => false
 
 /-- Demote every Master that duplicates an EARLIER Master of the same
     partition in the list (first Master for a partition wins; later ones are
@@ -1125,11 +1164,22 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
       else handleDrainWithPromotion
         (deprioritizeStandbySlaves s.standbyNodeKeys afterFailover.rebuildPartitionMap)
         s.drainNodeKeys
+    -- Masters the drain guard kept (no promotable successor): the partition
+    -- will lose its only data-bearing node at grace expiry and the operator
+    -- CANNOT fix that — surface it as CRITICAL (log here, gauge via
+    -- drainBlockedCount) so a human decides (trigger a final backup / accept
+    -- the S3 rewind). Deletion itself is irreversible (deletionTimestamp).
+    let blocked :=
+      if s.drainNodeKeys.isEmpty then []
+      else drainBlockedKeys newState s.drainNodeKeys
     let drainEffects :=
       if s.drainNodeKeys.isEmpty then []
       else [FlareEffect.Log s!"[flare-operator] graceful drain: demoting Terminating node(s) to live proxy + promoting replacement(s): {s.drainNodeKeys}"]
+    let blockedEffects := blocked.map fun k =>
+      FlareEffect.Log s!"[flare-operator] CRITICAL: draining master {k} has NO promotable successor — kept as master until its grace period expires; the partition then loses its only data-bearing node (tmpfs: rewind to last S3 backup on reseed). Operator cannot recover this. See RUNBOOK #drain-no-successor"
     ({ s with reconcileStep := .AfterAssignRoles,
-              updatedClusterState := some newState }, none, drainEffects)
+              updatedClusterState := some newState,
+              drainBlockedCount := blocked.length }, none, drainEffects ++ blockedEffects)
 
   | .AfterAssignRoles =>
     -- Assign proxy roles (Main.lean:323-330)

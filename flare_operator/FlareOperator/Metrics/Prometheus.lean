@@ -69,6 +69,13 @@ structure OperatorMetrics where
   -- human to investigate a stalled reconstruction.
   prepareStuckCount : Gauge
 
+  -- Gauge: draining masters the drain guard kept because NO promotable
+  -- successor exists. CRITICAL: each is a partition that loses its only
+  -- data-bearing node when the pod's grace period expires; the operator
+  -- cannot recover it (tmpfs reseeds rewind to the last S3 backup). A human
+  -- must decide (e.g. trigger a final backup) — page immediately.
+  drainNoSuccessor : Gauge
+
   -- Gauge: 1 while the blast-radius circuit breaker is tripped (the FSM's
   -- last pass ended in EmergencyPaused), else 0. Page on this: it means a
   -- suspected AZ-scale outage with automatic failover intentionally halted.
@@ -126,6 +133,7 @@ def initMetrics : IO OperatorMetrics := do
   let slavePrepareCount ← IO.mkRef 0.0
   let proxyCount ← IO.mkRef 0.0
   let prepareStuckCount ← IO.mkRef 0.0
+  let drainNoSuccessor ← IO.mkRef 0.0
   let circuitBreakerTripped ← IO.mkRef 0.0
   let partitionsDesired ← IO.mkRef 0.0
   let migrationPhase ← IO.mkRef 0.0
@@ -143,6 +151,7 @@ def initMetrics : IO OperatorMetrics := do
     slavePrepareCount := { value := slavePrepareCount }
     proxyCount := { value := proxyCount }
     prepareStuckCount := { value := prepareStuckCount }
+    drainNoSuccessor := { value := drainNoSuccessor }
     circuitBreakerTripped := { value := circuitBreakerTripped }
     partitionsDesired := { value := partitionsDesired }
     migrationPhase := { value := migrationPhase }
@@ -302,6 +311,12 @@ def exportMetrics (metrics : OperatorMetrics) (clusterName : String) : IO String
   output := output ++ "# TYPE flare_operator_nodes_prepare_stuck gauge\n"
   let prepareStuck ← metrics.prepareStuckCount.value.get
   output := output ++ formatGauge "flare_operator_nodes_prepare_stuck" labels prepareStuck
+
+  -- Drain-no-successor (gauge, CRITICAL)
+  output := output ++ "# HELP flare_operator_drain_no_successor Draining masters with no promotable successor (partition loses its only data-bearing node at grace expiry)\n"
+  output := output ++ "# TYPE flare_operator_drain_no_successor gauge\n"
+  let drainNoSucc ← metrics.drainNoSuccessor.value.get
+  output := output ++ formatGauge "flare_operator_drain_no_successor" labels drainNoSucc
 
   -- Circuit breaker state (gauge)
   output := output ++ "# HELP flare_operator_circuit_breaker_tripped 1 while failover is paused by the blast-radius breaker\n"

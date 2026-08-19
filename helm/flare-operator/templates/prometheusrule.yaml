@@ -41,6 +41,20 @@ spec:
             summary: "Flare operator {{`{{ $labels.cluster }}`}}: circuit breaker tripped (failover paused)"
             runbook: docs/RUNBOOK.md#circuit-breaker
 
+        # A draining (Terminating) master has NO promotable successor: the
+        # operator keeps it serving to the end of its grace period, but the
+        # partition loses its only data-bearing node when the pod dies and
+        # NOTHING automatic can prevent that (pod deletion is irreversible;
+        # tmpfs reseeds rewind to the last S3 backup). The grace window is
+        # short — page immediately, no `for` debounce.
+        - alert: FlareDrainNoSuccessor
+          expr: flare_operator_drain_no_successor > 0
+          labels:
+            severity: critical
+          annotations:
+            summary: "Flare cluster {{`{{ $labels.cluster }}`}}: draining master has NO successor — data-bearing node dies at grace expiry"
+            runbook: docs/RUNBOOK.md#drain-no-successor
+
         # A node stuck in Prepare is reconstructing forever — it will never
         # serve and never be failed over (Prepare is exempt from dead
         # detection by design). Runbook: docs/RUNBOOK.md#prepare-stuck

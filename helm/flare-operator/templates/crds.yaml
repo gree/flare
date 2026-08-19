@@ -133,6 +133,15 @@ spec:
                     flushAllEnabled:
                       type: boolean
                       description: Administrative gate for the unauthenticated flush_all op (flared flush-all-enabled; false = refuse with SERVER_ERROR; hot-toggleable)
+                    backupKeep:
+                      type: integer
+                      minimum: 1
+                      description: >-
+                        On-disk named backups (checkpoints) retained under
+                        data-dir/backups/ (rocksdb-backup-keep; flared default
+                        7, dynamic). On tmpfs the checkpoints live in RAM and
+                        hardlink-pin compacted-away SSTs — set 1-2 there or
+                        they balloon past the live DB size and OOM the pod.
                 circuitBreaker:
                   type: object
                   description: >-

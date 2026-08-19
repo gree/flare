@@ -181,6 +181,14 @@ cluster:
   # the archive alone can fill the tmpfs. On a tmpfs cluster cap it well under
   # tmpfs.sizeLimit (rule of thumb ~5%) and add a short walTtlSeconds, e.g. for a
   # 10Gi tmpfs: {walSizeLimitMb: 512, walTtlSeconds: 3600}.
+  # ALSO on tmpfs: each `backup` op leaves a named checkpoint under
+  # data-dir/backups/ and flared retains the newest backupKeep of them
+  # (default 7 — sized for PVC). Checkpoints hardlink-pin compacted-away SSTs,
+  # so 7 hourly generations grow past the live DB size — in RAM. That OOMed
+  # pf-dev live (DB ~2G, backups ~4G, limit 6Gi). On tmpfs set backupKeep: 1
+  # (S3 already holds the history; a local checkpoint on a RAM disk is not a
+  # durable restore point anyway). E.g. {walSizeLimitMb: 512, walTtlSeconds:
+  # 3600, backupKeep: 1}.
   rocksdb: {}
   # Declarative read-routing policy (CRD spec.readBalance). flared routes
   # reads by balance weight; the operator normalizes every node map to this

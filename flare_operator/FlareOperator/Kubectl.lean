@@ -108,6 +108,7 @@ private def getFlareClusterFromJson (json : Lean.Json) (name ns : String)
     snapshotBwlimit := rocksdbObj.getObjValD "snapshotBwlimit" |>.getNat?.toOption
     flushAllEnabled := rocksdbObj.getObjValD "flushAllEnabled" |>.getBool?.toOption
     walSyncInterval := rocksdbObj.getObjValD "walSyncInterval" |>.getNat?.toOption
+    backupKeep := rocksdbObj.getObjValD "backupKeep" |>.getNat?.toOption
   }
   -- The circuit breaker knobs were published in the CRD examples and the
   -- Runbook but never parsed — the safety valve silently ran on defaults

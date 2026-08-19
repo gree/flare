@@ -123,6 +123,13 @@ structure RocksdbConfigSpec where
       `flush-all-enabled` is backend-agnostic; it lives under `rocksdb` here
       because this block is the CRD's flared-tuning passthrough.) -/
   flushAllEnabled : Option Bool := none
+  /-- On-disk named backups (checkpoints) retained under data-dir/backups/;
+      flared prunes to the newest N after each `backup` op. flared default is
+      7 — sized for PVC. On tmpfs the checkpoints live in RAM and hardlink-pin
+      compacted-away SSTs, so 7 generations ballooned to >2x the live DB and
+      OOMed the pod (observed live on pf-dev); set 1-2 there.
+      flared: `rocksdb-backup-keep` (dynamic, SIGHUP). -/
+  backupKeep : Option Nat := none
   deriving Repr, BEq
 
 /-- True when at least one rocksdb field has been set by the user. -/
@@ -130,7 +137,7 @@ def RocksdbConfigSpec.hasAny (r : RocksdbConfigSpec) : Bool :=
   r.walTtlSeconds.isSome || r.walSizeLimitMb.isSome || r.syncWrites.isSome ||
   r.resyncFailureThreshold.isSome || r.walMaxBatchBytes.isSome ||
   r.walSyncBwlimit.isSome || r.walSyncInterval.isSome || r.snapshotBwlimit.isSome ||
-  r.flushAllEnabled.isSome
+  r.flushAllEnabled.isSome || r.backupKeep.isSome
 
 /-- Render the rocksdb spec as `extra.conf` lines (one per set field).
     Returns an empty string when no fields are set. Lines are joined with "\n";
@@ -167,6 +174,9 @@ def RocksdbConfigSpec.toExtraConf (r : RocksdbConfigSpec) : String :=
     | some b =>
       let v := if b then "true" else "false"
       lines ++ [s!"flush-all-enabled = {v}"]
+    | none => lines
+  let lines := match r.backupKeep with
+    | some n => lines ++ [s!"rocksdb-backup-keep = {n}"]
     | none => lines
   String.intercalate "\n" lines
 

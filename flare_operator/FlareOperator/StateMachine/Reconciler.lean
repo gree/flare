@@ -452,6 +452,14 @@ def registerFreshNode (state : FlareClusterState) (crd : FlareClusterView)
     threadType := (state.nodeMap.foldl (fun acc (_, n) => max acc n.threadType) 15) + 1
     -- Stamp the registration so a concurrent FSM commit (computed from a
     -- snapshot that predates this re-add) cannot resurrect the old role.
+    -- The registration below also BUMPS nodeMapVersion: commitClusterState
+    -- pins the version while the cluster is at rest, and a pinned version
+    -- made this stamp COLLIDE with epochs already carried by the FSM's
+    -- snapshot entries — the strict `>` merge tiebreak then let a stale
+    -- snapshot demotion clobber the fresh registration every tick (observed
+    -- live: all-proxy node map wedged for ~9 min after both pods of a
+    -- partition were recreated, until an operator restart). Bumping the
+    -- version at every registration keeps regEpoch strictly monotonic.
     regEpoch := state.nodeMapVersion + 1
   }
   -- SPECIAL CASE: P0 Master must be assigned immediately to avoid reconstruction.
@@ -470,18 +478,21 @@ def registerFreshNode (state : FlareClusterState) (crd : FlareClusterView)
     let (newState, assignedNode) := autoAssign state crd nodeKey newNode [nodeKey]
     if assignedNode.role == FlareRole.Master && assignedNode.partition == 0 then
       -- Successfully assigned as P0 Master - return immediately
+      let newState := { newState with nodeMapVersion := state.nodeMapVersion + 1 }
       let nodeList := newState.getNodes
       let lines := nodeList.map serializeNode
       (newState, .End (lines.map String.trim))
     else
       -- Not assigned as P0 Master - register as Proxy for later assignment
-      let newState := state.addNode nodeKey newNode
+      let newState := { state.addNode nodeKey newNode with
+                        nodeMapVersion := state.nodeMapVersion + 1 }
       let nodeList := newState.getNodes
       let lines := nodeList.map serializeNode
       (newState, .End (lines.map String.trim))
   else
     -- Not the first node or P0 already has master - register as Proxy
-    let newState := state.addNode nodeKey newNode
+    let newState := { state.addNode nodeKey newNode with
+                      nodeMapVersion := state.nodeMapVersion + 1 }
     let nodeList := newState.getNodes
     let lines := nodeList.map serializeNode
     (newState, .End (lines.map String.trim))
@@ -560,7 +571,9 @@ def reconcileStep (state : FlareClusterState) (crd : FlareClusterView)
                      lastMasterOf := if old.role == FlareRole.Master then
                        old.partition else old.lastMasterOf,
                      regEpoch := state.nodeMapVersion + 1 }
-        let newState := state.addNode nodeKey rejoined
+        -- Version bump keeps regEpoch monotonic (see registerFreshNode).
+        let newState := { state.addNode nodeKey rejoined with
+                          nodeMapVersion := state.nodeMapVersion + 1 }
         let lines := newState.getNodes.map serializeNode
         (newState, .End (lines.map String.trim))
       else

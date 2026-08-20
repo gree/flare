@@ -75,9 +75,26 @@ def sendNodeSyncToNode (ip : String) (port : Nat) (version : Nat) (nodes : List 
   let addr := SocketAddress.v4 (SocketAddressV4.mk ipAddr port.toUInt16)
 
   try
-    -- Connect to flared node's listening port 12121
+    -- Connect to flared node's listening port 12121 under a HARD deadline.
+    -- A deleted pod's IP blackholes the SYN and the kernel connect timeout
+    -- is ~2 minutes; blocking that long serialized the whole (sequential)
+    -- broadcast and starved the reconcile loop for minutes per dead target
+    -- (observed live: minutes of "time expired" to a recreated pod's old IP
+    -- while the cluster sat masterless). Poll the connect task with a 3s
+    -- budget instead — a live flared on the same VPC connects in <10ms, so
+    -- 3s only ever gives up on genuinely unreachable targets.
     let connectPromise ← sock.connect addr
-    let connectResult ← IO.wait connectPromise.result!
+    let connectTask := connectPromise.result!
+    let mut connected := false
+    for _ in [0:60] do
+      if (← IO.hasFinished connectTask) then
+        connected := true
+        break
+      IO.sleep 50
+    if !connected then
+      IO.eprintln s!"[TcpClient] connect to {ip}:{port} timed out after 3s — skipping target"
+      return ()
+    let connectResult := connectTask.get
     match connectResult with
     | .error e =>
       IO.eprintln s!"[TcpClient] Failed to connect to {ip}:{port}: {e}"

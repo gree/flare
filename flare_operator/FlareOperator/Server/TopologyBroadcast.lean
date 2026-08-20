@@ -47,9 +47,19 @@ def broadcastTopologyToAllPods (crName ns : String) (version : Nat) (nodes : Lis
 
   IO.eprintln s!"[TopologyBroadcast] Broadcasting node sync v{version} ({nodes.length} nodes) to {pods.length} pods"
 
-  -- Send to each pod sequentially (could be parallelized with IO.asTask if needed)
-  for pod in pods do
-    sendNodeSyncToNode pod.ip 12121 version nodes
+  -- Fan out per pod: one unreachable target (e.g. a just-recreated pod's
+  -- old IP still in the list) must not delay the others or the caller —
+  -- combined with the TcpClient 3s connect deadline this bounds the whole
+  -- broadcast to ~3s instead of minutes of serialized kernel timeouts.
+  -- Note: Terminating pods are INTENTIONALLY included (graceful drain sends
+  -- the demotion map to the still-alive leaving pod); the deadline is what
+  -- distinguishes "Terminating but reachable" from "gone".
+  let tasks ← pods.mapM fun pod =>
+    IO.asTask (sendNodeSyncToNode pod.ip 12121 version nodes)
+  for t in tasks do
+    match ← IO.wait t with
+    | .ok _ => pure ()
+    | .error e => IO.eprintln s!"[TopologyBroadcast] send task failed: {e}"
 
   IO.eprintln s!"[TopologyBroadcast] Broadcast complete (v{version})"
 

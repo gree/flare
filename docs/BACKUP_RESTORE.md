@@ -60,6 +60,11 @@ Components:
 Automatic: set `cluster.objectStorage.url` and `cluster.backup.enabled: true`
 (adjust `backup.role`, `backup.schedule`, `backup.keepDays`).
 
+> **Seeding a cluster over cluster replication? Keep backups OFF until the
+> catch-up plateaus** — a partial backup protects nothing and each hourly
+> checkpoint pins ~a full DB copy of compaction churn (RAM on tmpfs). Full
+> ordering: RUNBOOK.md#replication-seeding.
+
 > **Backup ServiceAccount name & OIDC trust.** The chart names the backup SA
 > (and CronJob) `<cluster.name>-backup` so several clusters can share one
 > namespace without colliding. For keyless (web-identity) auth the cloud-side

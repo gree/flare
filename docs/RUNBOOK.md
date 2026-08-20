@@ -218,7 +218,56 @@ exporter).
   masters), do a shrink migration — see below.
 - Blue/green cluster migration: `spec.clusterReplication` — validate on
   staging first; see the failover-during-replication e2e for the tested
-  failure mode.
+  failure mode. For seeding a NEW cluster from another flare, follow
+  [Seeding via cluster replication](#replication-seeding) — in particular
+  its backup ordering.
+
+## Seeding a new cluster via cluster replication {#replication-seeding}
+
+Standing up a cluster whose data comes from another flare (classic or
+operator-managed) over `cluster-replication`. The one rule that is easy to
+get wrong: **backups stay OFF until the replication catch-up plateaus, then
+get enabled.** Three reasons (all observed live on pf-dev, 2026-08-20):
+
+- During the transfer the SOURCE is authoritative. A backup of a
+  half-filled target protects nothing — recovery from a mid-transfer loss
+  is "redo the transfer from the source", never "restore the partial S3
+  backup" (which would seed stale, incomplete data under a fresher
+  bootstrap window).
+- `duplicate` mode only forwards writes issued AFTER it was enabled: a
+  target wiped mid-transfer cannot re-fill from the stream alone, so the
+  partial backup gives false confidence.
+- Backup checkpoints hardlink-pin the SST set of their creation moment.
+  Under bulk-influx compaction churn, nearly the whole DB diverges within
+  the hour (measured: 338MB of a 416MB checkpoint had become unique bytes
+  1h after creation), so every hourly checkpoint costs ~a full extra DB
+  copy — and on a tmpfs cluster that cost is RAM against the pod's memory
+  limit.
+
+Procedure:
+
+1. Deploy the target with `cluster.backup.enabled: false`. (For an
+   already-running cluster, `kubectl patch cronjob <cluster>-backup -p
+   '{"spec":{"suspend":true}}'` works immediately; note ArgoCD selfHeal may
+   revert a live patch — the values route is the durable one.)
+   `backupBootstrap` may stay enabled: with no backup in object storage the
+   init starts empty by design.
+2. If the source holds PRE-EXISTING data, run an initial bulk transfer
+   (snapshot-push / dump); the duplicate stream alone only carries new
+   writes.
+3. Enable replication on the source pointing at the target's LB VIP and
+   verify arrival: target master `curr_items` rising, slave tracking a few
+   hundred keys behind.
+4. Wait for catch-up: target `curr_items` ≈ source, lag stable. During this
+   window the WAL archive grows to its cap (`walSizeLimitMb`) — that is
+   sizing, not a leak.
+5. Enable backups (`backup.enabled: true` → sync, or unsuspend). A stale
+   pre-transfer checkpoint under `/data/flare/backups/` is pruned by the
+   next run (prune-before-create); `rm -rf` it to free the RAM immediately.
+6. Verify the safety net is live: backup Job `Complete` AND a fresh object
+   in the bucket (`latest/p0/CURRENT` LastModified). Only from this point
+   is `backupBootstrap` a real whole-cluster-loss net; before it, the
+   recovery path is step 2/3 again.
 
 ## Multi-cluster CRD ownership {#multi-cluster-crd-ownership}
 

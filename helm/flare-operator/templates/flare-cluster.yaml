@@ -172,9 +172,14 @@ spec:
       # SIGTERM. Must exceed drainSeconds or K8s SIGKILLs mid-drain.
       terminationGracePeriodSeconds: {{ add (int $drain) 30 }}
       {{- end }}
-      {{- if or $c.serviceAccountName $bb.enabled }}
-      serviceAccountName: {{ $c.serviceAccountName | default $backupSaName }}
-      {{- end }}
+      {{- /* ALWAYS render serviceAccountName (falling back to "default"):
+             `kubectl apply` / ArgoCD cannot UNSET a field that the desired
+             manifest merely omits, so gating this line left a live STS
+             pointing at the deleted backup SA when backupBootstrap was
+             toggled off (observed live: FailedCreate "serviceaccount not
+             found" — pods unschedulable until a manual patch). An explicit
+             value always overwrites cleanly on toggle in BOTH directions. */}}
+      serviceAccountName: {{ $c.serviceAccountName | default (ternary $backupSaName "default" $bb.enabled) }}
       {{- if $bb.enabled }}
       initContainers:
         # Seed an EMPTY data dir from the newest backup before flared starts.

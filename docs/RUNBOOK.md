@@ -246,12 +246,15 @@ get enabled.** Three reasons (all observed live on pf-dev, 2026-08-20):
 
 Procedure:
 
-1. Deploy the target with `cluster.backup.enabled: false`. (For an
-   already-running cluster, `kubectl patch cronjob <cluster>-backup -p
-   '{"spec":{"suspend":true}}'` works immediately; note ArgoCD selfHeal may
-   revert a live patch — the values route is the durable one.)
-   `backupBootstrap` may stay enabled: with no backup in object storage the
-   init starts empty by design.
+1. Deploy the target with `cluster.backup.enabled: false` **AND
+   `cluster.backupBootstrap.enabled: false`** — they go together: the
+   bootstrap init has nothing to restore until a backup exists, and the
+   nodes STS references the backup ServiceAccount whenever bootstrap is on,
+   so disabling backup alone removes an SA the pods still demand (pods
+   would fail to create). (For an already-running cluster,
+   `kubectl patch cronjob <cluster>-backup -p '{"spec":{"suspend":true}}'`
+   works immediately but ArgoCD selfHeal reverts live patches — the values
+   route is the durable one.)
 2. If the source holds PRE-EXISTING data, run an initial bulk transfer
    (snapshot-push / dump); the duplicate stream alone only carries new
    writes.
@@ -261,9 +264,10 @@ Procedure:
 4. Wait for catch-up: target `curr_items` ≈ source, lag stable. During this
    window the WAL archive grows to its cap (`walSizeLimitMb`) — that is
    sizing, not a leak.
-5. Enable backups (`backup.enabled: true` → sync, or unsuspend). A stale
-   pre-transfer checkpoint under `/data/flare/backups/` is pruned by the
-   next run (prune-before-create); `rm -rf` it to free the RAM immediately.
+5. Enable backups AND bootstrap together (`backup.enabled: true` +
+   `backupBootstrap.enabled: true` → sync). A stale pre-transfer checkpoint
+   under `/data/flare/backups/` is pruned by the next run
+   (prune-before-create); `rm -rf` it to free the RAM immediately.
 6. Verify the safety net is live: backup Job `Complete` AND a fresh object
    in the bucket (`latest/p0/CURRENT` LastModified). Only from this point
    is `backupBootstrap` a real whole-cluster-loss net; before it, the

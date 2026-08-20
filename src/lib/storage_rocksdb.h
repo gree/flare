@@ -343,6 +343,12 @@ protected:
 	// sites can `if (!_note_write_status(st)) { ... }` inline.
 	bool _note_write_status(const rocksdb::Status& status, const char* where);
 
+	// ENOSPC hardening (see the .cc docstrings): prune named backups to the
+	// newest `keep`, and the last-ditch empty-reopen used when a teardown/
+	// reopen (swap_in_snapshot / hard_reset) fails.
+	void _prune_named_backups(int keep);
+	int _emergency_reopen_empty(const char* who);
+
 public:
 	uint64_t get_resync_failure_count();
 

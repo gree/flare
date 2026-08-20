@@ -955,6 +955,32 @@ void test_backup_retention_prunes_oldest() {
 	drop_rocksdb(s, wal_master_dir);
 }
 
+// Pruning must run BEFORE checkpoint creation: on a nearly-full disk the
+// old checkpoints are exactly what blocks the new one, and a post-create
+// prune never runs when the create fails (observed live: hourly backups
+// wedged a 100%-full tmpfs forever). Force the create to fail by
+// pre-creating the target dir (CreateCheckpoint refuses to overwrite) and
+// assert the oldest backup was still pruned.
+void test_backup_prune_runs_before_create() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	s->set_backup_keep(2);
+	cut_assert_equal_int(0, storage_set_string(s, "k", "v"));
+
+	string out_path;
+	cut_assert_equal_int(0, s->create_named_backup("20260712-000001", out_path));
+
+	string backups = string(wal_master_dir) + "/backups";
+	// "zzz" sorts last (newest), so the pre-create prune (keep-1 = 1)
+	// removes 20260712-000001 before the create attempt fails on the
+	// pre-existing target dir.
+	cut_assert_equal_int(0, mkdir((backups + "/zzz-existing").c_str(), 0700));
+	cut_assert_equal_int(-1, s->create_named_backup("zzz-existing", out_path));
+
+	cut_assert_operator(path_exists(backups + "/20260712-000001"), ==, false);
+
+	drop_rocksdb(s, wal_master_dir);
+}
+
 // ---------------------------------------------------------------------------
 // Replication cursor seeding (set_repl_last_lsn)
 // ---------------------------------------------------------------------------

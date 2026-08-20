@@ -48,7 +48,8 @@ storage::storage(string data_dir, int mutex_slot_size, int header_cache_size):
 		_mutex_slot(NULL),
 		_iter_lock(false),
 		_header_cache_size(header_cache_size),
-		_header_cache_map(NULL) {
+		_header_cache_map(NULL),
+		_listener(NULL) {
 	this->_mutex_slot = new pthread_rwlock_t[mutex_slot_size];
 	int i;
 	for (i = 0; i < this->_mutex_slot_size; i++) {

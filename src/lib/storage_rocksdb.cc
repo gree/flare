@@ -25,6 +25,7 @@
  *  $Id$
  */
 #include "app.h"
+#include <sys/statvfs.h>
 #include "storage_rocksdb.h"
 
 #include <rocksdb/utilities/checkpoint.h>
@@ -175,6 +176,11 @@ int storage_rocksdb::_get_header(string key, entry& e) {
 	rocksdb::Status status;
 	string value;
 
+	if (this->_db == NULL) {
+		// Handle closed by a failed reopen (ENOSPC path) — report cleanly.
+		return -1;
+	}
+
 	status = this->_db->Get(this->_read_options, key, &value);
 
 	if (!status.ok()) {
@@ -256,6 +262,10 @@ string storage_rocksdb::get_master_id() const {
 int storage_rocksdb::set_master_id(const string& id) {
 	if (id.empty()) {
 		log_err("refusing to set empty master id", 0);
+		return -1;
+	}
+	if (this->_db == NULL) {
+		log_err("set_master_id: DB handle is closed (failed reopen)", 0);
 		return -1;
 	}
 	rocksdb::WriteOptions wo;
@@ -396,6 +406,12 @@ int storage_rocksdb::set(entry& e, result& r, int b) {
 		if ((b & behavior_skip_lock) == 0) {
 			pthread_rwlock_rdlock(&this->_mutex_wholelock);
 			pthread_rwlock_wrlock(&this->_mutex_slot[mutex_index]);
+		}
+
+		if (this->_db == NULL) {
+			// Handle closed by a failed reopen (ENOSPC path) — hard error,
+			// never dereference NULL.
+			throw -1;
 		}
 
 		// get current entry
@@ -584,6 +600,12 @@ int storage_rocksdb::get(entry& e, result& r, int b) {
 			pthread_rwlock_rdlock(&this->_mutex_slot[mutex_index]);
 		}
 
+		if (this->_db == NULL) {
+			// Handle closed by a failed reopen (ENOSPC path) — hard error,
+			// never dereference NULL.
+			throw -1;
+		}
+
 		string value;
 		rocksdb::Status status = this->_db->Get(this->_read_options, e.key, &value);
 
@@ -677,6 +699,12 @@ int storage_rocksdb::remove(entry& e, result& r, int b) {
 			pthread_rwlock_wrlock(&this->_mutex_slot[mutex_index]);
 		}
 
+		if (this->_db == NULL) {
+			// Handle closed by a failed reopen (ENOSPC path) — hard error,
+			// never dereference NULL.
+			throw -1;
+		}
+
 		entry e_current;
 		int e_current_exists = this->_get_header(e.key, e_current);
 		if ((b & behavior_skip_version) == 0 && e.version != 0) {
@@ -755,6 +783,12 @@ int storage_rocksdb::incr(entry& e, uint64_t value, result& r, bool increment, i
 		if ((b & behavior_skip_lock) == 0) {
 			pthread_rwlock_rdlock(&this->_mutex_wholelock);
 			pthread_rwlock_wrlock(&this->_mutex_slot[mutex_index]);
+		}
+
+		if (this->_db == NULL) {
+			// Handle closed by a failed reopen (ENOSPC path) — hard error,
+			// never dereference NULL.
+			throw -1;
 		}
 
 		// Get current entry
@@ -853,6 +887,15 @@ int storage_rocksdb::truncate(int b) {
 		this->_mutex_slot_wrlock_all();
 	}
 
+	if (this->_db == NULL) {
+		log_err("truncate: DB handle is closed (failed reopen) — refusing", 0);
+		if ((b & behavior_skip_lock) == 0) {
+			this->_mutex_slot_unlock_all();
+			pthread_rwlock_unlock(&this->_mutex_wholelock);
+		}
+		return -1;
+	}
+
 	int r = 0;
 
 	// Full table scan delete (RocksDB doesn't have fast truncate).
@@ -920,6 +963,11 @@ int storage_rocksdb::iter_begin() {
 		log_warning("iteration already in progress", 0);
 		// Release the wholelock acquired above: leaking a rdlock here
 		// would permanently block any later wrlock (e.g. truncate()).
+		pthread_rwlock_unlock(&this->_mutex_wholelock);
+		return -1;
+	}
+
+	if (this->_db == NULL) {
 		pthread_rwlock_unlock(&this->_mutex_wholelock);
 		return -1;
 	}
@@ -1123,6 +1171,7 @@ int storage_rocksdb::swap_in_snapshot(const string& staging_dir, uint64_t checkp
 		if (!status.ok()) {
 			log_err("swap_in_snapshot: reopen failed: %s", status.ToString().c_str());
 			this->_db = NULL;
+			this->_emergency_reopen_empty("swap_in_snapshot");
 			break;
 		}
 
@@ -1308,6 +1357,73 @@ int storage_rocksdb::verify_integrity() {
 	return r;
 }
 
+void storage_rocksdb::_prune_named_backups(int keep) {
+	// Keep only the newest `keep` named backups under <data_dir>/backups/.
+	// Names are timestamp-prefixed, so lexical order == chronological order
+	// and the oldest sort first.
+	const string backups_dir = this->_data_dir + "/backups";
+	vector<string> names;
+	DIR* d = opendir(backups_dir.c_str());
+	if (d == NULL) {
+		return;
+	}
+	struct dirent* ent;
+	while ((ent = readdir(d)) != NULL) {
+		string n = ent->d_name;
+		if (n == "." || n == "..") {
+			continue;
+		}
+		struct stat st;
+		string child = backups_dir + "/" + n;
+		if (lstat(child.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) {
+			names.push_back(n);
+		}
+	}
+	closedir(d);
+	if (keep < 0) {
+		keep = 0;
+	}
+	if (static_cast<int>(names.size()) <= keep) {
+		return;
+	}
+	sort(names.begin(), names.end());
+	int to_remove = static_cast<int>(names.size()) - keep;
+	for (int i = 0; i < to_remove; i++) {
+		string victim = backups_dir + "/" + names[i];
+		if (remove_tree(victim) == 0) {
+			log_notice("pruned old backup %s", victim.c_str());
+		} else {
+			log_warning("failed to fully prune old backup %s", victim.c_str());
+		}
+	}
+}
+
+int storage_rocksdb::_emergency_reopen_empty(const char* who) {
+	// Last-ditch recovery for a failed reopen (typically ENOSPC on a full
+	// data dir — observed live: hourly backup checkpoints hardlink-pinned
+	// compacted-away SSTs until a tmpfs hit 100%, and the post-crash reopen
+	// left _db NULL, turning every subsequent op into a SIGSEGV). Free
+	// everything redundant we own — the unopenable DB dir and every local
+	// backup checkpoint (tier-2 object storage holds the history; a local
+	// checkpoint is worthless if flared cannot even open a DB) — and try
+	// once more to come up EMPTY. Caller holds the wholelock in write mode
+	// and _db is NULL. Returns 0 when serving again on an empty DB.
+	remove_tree(this->_data_path);
+	this->_prune_named_backups(0);
+	rocksdb::Status status = rocksdb::DB::Open(this->_options, this->_data_path, &this->_db);
+	if (!status.ok()) {
+		log_err("%s: emergency empty reopen failed too (%s) — DB handle stays closed; ops fail cleanly and self-heal keeps retrying", who, status.ToString().c_str());
+		this->_db = NULL;
+		this->_corrupted = true;   // engage the slave self-heal retry loop
+		return -1;
+	}
+	this->_curr_items.sub(this->_curr_items.fetch());
+	this->_clear_header_cache();
+	this->_corrupted = false;
+	log_err("%s: reopen failed but recovered on an EMPTY DB (local backups pruned to free space); reconstruction must reseed", who);
+	return 0;
+}
+
 int storage_rocksdb::hard_reset() {
 	// In-process Case-A: discard the (corrupt) local DB entirely and reopen
 	// empty. Same teardown/reopen as swap_in_snapshot, minus the staging
@@ -1327,7 +1443,9 @@ int storage_rocksdb::hard_reset() {
 		if (!status.ok()) {
 			log_err("hard_reset: reopen failed: %s", status.ToString().c_str());
 			this->_db = NULL;
-			break;
+			if (this->_emergency_reopen_empty("hard_reset") != 0) {
+				break;
+			}
 		}
 		// Empty DB: reset the live-key counter and clear the corruption latch.
 		this->_curr_items.sub(this->_curr_items.fetch());
@@ -1356,6 +1474,9 @@ int storage_rocksdb::reap_expired(time_t now, uint32_t max_scan, const string& a
 	// blocking compaction from reclaiming space between chunks. A fresh
 	// iterator per chunk sees a slightly newer view each time, which is fine:
 	// reaping is idempotent and re-scanning a key is cheap.
+	if (this->_db == NULL) {
+		return -1;
+	}
 	rocksdb::ReadOptions ro = this->_read_options;
 	ro.fill_cache = false;                 // a full sweep must not thrash the block cache
 	rocksdb::Iterator* it = this->_db->NewIterator(ro);
@@ -1457,6 +1578,10 @@ uint64_t storage_rocksdb::size() {
 	uint64_t size = 0;
 	std::string value;
 
+	if (this->_db == NULL) {
+		return 0;
+	}
+
 	// Get approximate size from RocksDB property
 	if (this->_db->GetProperty("rocksdb.total-sst-files-size", &value)) {
 		size = boost::lexical_cast<uint64_t>(value);
@@ -1472,10 +1597,16 @@ bool storage_rocksdb::is_capable(capability c) {
 
 // WAL replication methods
 uint64_t storage_rocksdb::get_latest_sequence_number() {
+	if (this->_db == NULL) {
+		return 0;
+	}
 	return this->_db->GetLatestSequenceNumber();
 }
 
 int storage_rocksdb::get_updates_since(uint64_t seq_number, vector<pair<uint64_t, rocksdb::WriteBatch>>& updates) {
+	if (this->_db == NULL) {
+		return -1;
+	}
 	// Use RocksDB's GetUpdatesSince for WAL-based replication
 	std::unique_ptr<rocksdb::TransactionLogIterator> iter;
 	rocksdb::Status status = this->_db->GetUpdatesSince(seq_number, &iter);
@@ -1553,6 +1684,9 @@ private:
 }	// anonymous namespace
 
 int storage_rocksdb::apply_batch(const rocksdb::WriteBatch& batch) {
+	if (this->_db == NULL) {
+		return -1;
+	}
 	// O(1) curr_items bookkeeping for the replica path: replicated batches
 	// bypass set()/remove(), so walk the batch for its live-key delta first.
 	curr_items_delta_handler h(this->_db, &this->_read_options);
@@ -1589,6 +1723,9 @@ bool storage_rocksdb::validate_batch_rep(const rocksdb::WriteBatch& batch) {
 }
 
 int storage_rocksdb::apply_batch_with_lsn(const rocksdb::WriteBatch& batch, uint64_t master_lsn) {
+	if (this->_db == NULL) {
+		return -1;
+	}
 	// Atomic LSN tracking: copy the incoming batch, append the
 	// last-LSN marker update, and commit both in a single RocksDB
 	// Write(). RocksDB guarantees that either the whole merged batch
@@ -1628,6 +1765,10 @@ int storage_rocksdb::apply_batch_with_lsn(const rocksdb::WriteBatch& batch, uint
 uint64_t storage_rocksdb::get_repl_last_lsn() {
 	string value;
 
+	if (this->_db == NULL) {
+		return 0;
+	}
+
 	rocksdb::Status status = this->_db->Get(this->_read_options, kReplLastLsnKey, &value);
 	if (status.ok()) {
 		return boost::lexical_cast<uint64_t>(value);
@@ -1637,6 +1778,9 @@ uint64_t storage_rocksdb::get_repl_last_lsn() {
 }
 
 int storage_rocksdb::set_repl_last_lsn(uint64_t lsn) {
+	if (this->_db == NULL) {
+		return -1;
+	}
 	// Durable, WAL-logged Put so the seeded cursor survives a crash /
 	// restart just like the marker written by apply_batch_with_lsn. This
 	// is how a slave reconstructed by full dump acquires a nonzero
@@ -1841,6 +1985,32 @@ int storage_rocksdb::create_named_backup(const string& name, string& out_path) {
 		return -1;
 	}
 
+	// Prune BEFORE creating: on a nearly-full data dir the old checkpoints
+	// are exactly what blocks the new one, and a post-create prune never
+	// runs when the create fails — the disk stays wedged and every later
+	// hourly backup fails the same way (observed live on a tmpfs cluster).
+	// Prune down to keep-1 so the new checkpoint lands exactly at keep.
+	if (this->_backup_keep > 0) {
+		this->_prune_named_backups(this->_backup_keep - 1);
+	}
+
+	// Free-space floor: the checkpoint hardlinks SSTs (cheap) but its
+	// implied memtable flush + MANIFEST/OPTIONS/WAL copies need real space;
+	// refuse early with a clean error instead of wedging mid-checkpoint.
+	{
+		struct statvfs vfs;
+		if (statvfs(backups_dir.c_str(), &vfs) == 0) {
+			const uint64_t min_free = 64ULL << 20;
+			uint64_t free_bytes = static_cast<uint64_t>(vfs.f_bavail) * vfs.f_frsize;
+			if (free_bytes < min_free) {
+				log_err("create_named_backup refused: only %llu bytes free under %s (floor %llu)",
+					(unsigned long long)free_bytes, backups_dir.c_str(), (unsigned long long)min_free);
+				this->incr_backup_failure();
+				return -1;
+			}
+		}
+	}
+
 	rocksdb::Checkpoint* cp = NULL;
 	rocksdb::Status s = rocksdb::Checkpoint::Create(this->_db, &cp);
 	if (!s.ok() || cp == NULL) {
@@ -1864,41 +2034,6 @@ int storage_rocksdb::create_named_backup(const string& name, string& out_path) {
 	this->incr_backup_success();
 	this->_last_backup_epoch = time(NULL);
 	log_notice("backup created at %s (keep=%d)", path.c_str(), this->_backup_keep);
-
-	// Prune: keep the newest _backup_keep sibling directories under
-	// backups/. Names are expected to be sortable (timestamp-prefixed),
-	// so lexical order == chronological order and the oldest sort first.
-	if (this->_backup_keep > 0) {
-		vector<string> names;
-		DIR* d = opendir(backups_dir.c_str());
-		if (d != NULL) {
-			struct dirent* ent;
-			while ((ent = readdir(d)) != NULL) {
-				string n = ent->d_name;
-				if (n == "." || n == "..") {
-					continue;
-				}
-				struct stat st;
-				string child = backups_dir + "/" + n;
-				if (lstat(child.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) {
-					names.push_back(n);
-				}
-			}
-			closedir(d);
-		}
-		if (static_cast<int>(names.size()) > this->_backup_keep) {
-			sort(names.begin(), names.end());
-			int to_remove = static_cast<int>(names.size()) - this->_backup_keep;
-			for (int i = 0; i < to_remove; i++) {
-				string victim = backups_dir + "/" + names[i];
-				if (remove_tree(victim) == 0) {
-					log_notice("pruned old backup %s", victim.c_str());
-				} else {
-					log_warning("failed to fully prune old backup %s", victim.c_str());
-				}
-			}
-		}
-	}
 
 	return 0;
 }

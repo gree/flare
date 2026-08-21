@@ -118,6 +118,40 @@ spec:
   ports:
     - port: {{ $c.flarePort }}
       name: flare
+{{- /* Per-partition MASTER Services. The operator has always emitted a
+       PatchService effect pinning `<cluster>-<partition>`'s selector to the
+       partition's current master pod (servicePatchEffects; re-pointed within
+       a reconcile tick of any failover/assignment) — but the chart never
+       created the Service, so the patch warned into the void. Headless: the
+       Endpoints ARE the master pod's IP (TKE VPC-CNI pod IPs are routable
+       over VPC peering), giving external consumers — e.g. a source cluster's
+       cluster-replication sender — a master-direct target with no LB hop, no
+       LB idle-timeout, and no slave-proxy detour. An IP change here MEANS
+       the master moved. Look it up:
+         kubectl -n <ns> get endpoints <cluster>-<p> */}}
+{{- range $p := until (int $c.partitions) }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $c.name }}-{{ $p }}
+  namespace: {{ $ns }}
+  labels:
+    app: flare
+    cluster: {{ $c.name }}
+    {{- include "flare-operator.clusterLabel" $ | nindent 4 }}
+    {{- include "flare-operator.wellKnown" (dict "root" $ "name" "flared" "component" "master-endpoint") | nindent 4 }}
+spec:
+  clusterIP: None
+  # Bootstrap guess: ordinal <p>. The operator overwrites this selector with
+  # the real master's pod name every reconcile tick (strategic-merge keeps
+  # the key; the pod-name label is unique, so exactly one endpoint).
+  selector:
+    statefulset.kubernetes.io/pod-name: {{ $c.name }}-nodes-{{ $p }}
+  ports:
+    - port: {{ $c.flarePort }}
+      name: flare
+{{- end }}
 ---
 apiVersion: apps/v1
 kind: StatefulSet

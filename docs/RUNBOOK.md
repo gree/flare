@@ -258,7 +258,18 @@ Procedure:
 2. If the source holds PRE-EXISTING data, run an initial bulk transfer
    (snapshot-push / dump); the duplicate stream alone only carries new
    writes.
-3. Enable replication on the source pointing at the target's LB VIP and
+3. Enable replication on the source pointing at the TARGET MASTER directly —
+   not the client LB. Each partition has a master-pinned headless Service
+   `<cluster>-<partition>` whose Endpoints the operator re-points at the
+   current master within a reconcile tick; look up the address:
+   ```bash
+   kubectl -n <ns> get endpoints <cluster>-0 \
+     -o jsonpath='{.subsets[*].addresses[*].ip}'
+   ```
+   Pod IPs are VPC-routable (TKE VPC-CNI), so a peered source reaches them
+   without the LB — no LB idle-timeout mid-stream, no slave-proxy detour,
+   and an ADDRESS CHANGE MEANS THE MASTER MOVED (re-point the source and
+   restart its stream; the client LB VIP is unaffected either way). Then
    verify arrival: target master `curr_items` rising, slave tracking a few
    hundred keys behind.
 4. Wait for catch-up: target `curr_items` ≈ source, lag stable. During this

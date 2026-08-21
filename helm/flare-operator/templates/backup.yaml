@@ -11,10 +11,17 @@
 {{- $ns := .Values.namespace }}
 {{- $bk := dict "enabled" false }}
 {{- if $c.backup }}{{- $bk = $c.backup }}{{- end }}
-{{- if $bk.enabled }}
 {{- $os := $c.objectStorage | default dict }}
 {{- $sa := $bk.serviceAccount | default dict }}
 {{- $saName := $sa.name | default (printf "%s-backup" $c.name) }}
+{{- /* SA/RBAC are PROVISIONED whenever object storage is configured — the
+       nodes STS references this SA whenever the (always-provisioned)
+       backup-bootstrap plumbing exists, independent of backup.enabled, and
+       apply cannot restore an SA a toggle deleted while pods still demand
+       it (observed live: FailedCreate "serviceaccount not found"). Only the
+       CronJob below follows backup.enabled; use backup.suspend for a
+       roll-free, object-stable pause. */}}
+{{- if or $bk.enabled $os.url }}
 {{- if ne ($sa.create | default true) false }}
 apiVersion: v1
 kind: ServiceAccount
@@ -64,6 +71,8 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
 ---
 {{- end }}
+{{- end }}
+{{- if $bk.enabled }}
 apiVersion: batch/v1
 kind: CronJob
 metadata:

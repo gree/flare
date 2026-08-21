@@ -246,15 +246,16 @@ get enabled.** Three reasons (all observed live on pf-dev, 2026-08-20):
 
 Procedure:
 
-1. Deploy the target with `cluster.backup.enabled: false` **AND
-   `cluster.backupBootstrap.enabled: false`** — they go together: the
-   bootstrap init has nothing to restore until a backup exists, and the
-   nodes STS references the backup ServiceAccount whenever bootstrap is on,
-   so disabling backup alone removes an SA the pods still demand (pods
-   would fail to create). (For an already-running cluster,
-   `kubectl patch cronjob <cluster>-backup -p '{"spec":{"suspend":true}}'`
-   works immediately but ArgoCD selfHeal reverts live patches — the values
-   route is the durable one.)
+1. Pause backups and bootstrap ROLL-FREE: set
+   `cluster.backup.suspend: true` and `cluster.backupBootstrap.enabled:
+   false`. Both are runtime toggles — suspend is a CronJob field and the
+   bootstrap flag lives in the `<cluster>-flags` ConfigMap read at pod
+   start — so the pod template does not change: **no rolling restart, no
+   master handoff, the replication sender's target IP stays put**. Do NOT
+   set `backup.enabled: false` for a pause (that deletes/recreates the
+   CronJob object; suspend is strictly gentler), and never toggle anything
+   that edits the pod template mid-seed (image tags, resources, labels —
+   those ALWAYS roll pods; K8s pods are immutable).
 2. If the source holds PRE-EXISTING data, run an initial bulk transfer
    (snapshot-push / dump); the duplicate stream alone only carries new
    writes.
@@ -275,10 +276,13 @@ Procedure:
 4. Wait for catch-up: target `curr_items` ≈ source, lag stable. During this
    window the WAL archive grows to its cap (`walSizeLimitMb`) — that is
    sizing, not a leak.
-5. Enable backups AND bootstrap together (`backup.enabled: true` +
-   `backupBootstrap.enabled: true` → sync). A stale pre-transfer checkpoint
-   under `/data/flare/backups/` is pruned by the next run
-   (prune-before-create); `rm -rf` it to free the RAM immediately.
+5. Resume roll-free: `backup.suspend: false` + `backupBootstrap.enabled:
+   true` → sync (ConfigMap + CronJob field only; pods untouched). A stale
+   pre-transfer checkpoint under `/data/flare/backups/` is pruned by the
+   next run (prune-before-create); `rm -rf` it to free the RAM immediately.
+   Note the flags ConfigMap propagates to pods within ~1 min, and the init
+   only consults it at pod start anyway — bootstrap coverage begins with
+   the next pod (re)creation, which is exactly when it matters.
 6. Verify the safety net is live: backup Job `Complete` AND a fresh object
    in the bucket (`latest/p0/CURRENT` LastModified). Only from this point
    is `backupBootstrap` a real whole-cluster-loss net; before it, the

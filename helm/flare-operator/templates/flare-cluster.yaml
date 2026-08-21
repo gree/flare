@@ -39,6 +39,16 @@
 {{- if $c.objectStorage }}{{- $os = $c.objectStorage }}{{- end }}
 {{- $backupSaName := printf "%s-backup" $c.name }}
 {{- if $bk.serviceAccount }}{{- $backupSaName = $bk.serviceAccount.name | default (printf "%s-backup" $c.name) }}{{- end }}
+{{- /* ROLL-FREE TOGGLE: the bootstrap PLUMBING (init container, SA, token
+       volume) is provisioned whenever it COULD be enabled — object storage
+       configured on a 1-partition cluster with a data volume — and the
+       runtime on/off lives in the <cluster>-flags ConfigMap, which the init
+       reads at pod start. Flipping backupBootstrap.enabled therefore changes
+       ONLY the ConfigMap: the pod template stays byte-identical, no rolling
+       restart, no master handoff, no replication-sender break. (Learned the
+       hard way: gating the plumbing on enabled rolled the whole cluster for
+       a config toggle.) */}}
+{{- $bbProvision := and $os.url (eq (int $c.partitions) 1) $useDataVol }}
 {{- if or $bb.enabled $bk.enabled }}
 {{- if not $os.url }}{{- fail "cluster.objectStorage.url is required by backup/backupBootstrap (s3://bucket/prefix, no trailing slash)" }}{{- end }}
 {{- end }}
@@ -67,6 +77,23 @@ metadata:
     "helm.sh/hook-weight": "-5"
 data:
   extra.conf: ""
+{{- if $bbProvision }}
+---
+{{- /* Runtime flags: values that must be togglable WITHOUT touching the pod
+       template (ConfigMap data changes never restart pods). Consumers read
+       these at pod start (backup-bootstrap init). Managed by helm/ArgoCD —
+       unlike <cluster>-config, the operator never writes here. */}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $c.name }}-flags
+  namespace: {{ $ns }}
+  labels:
+    {{- include "flare-operator.clusterLabel" . | nindent 4 }}
+    {{- include "flare-operator.wellKnown" (dict "root" $ "name" "flared" "component" "node") | nindent 4 }}
+data:
+  backup-bootstrap-enabled: {{ $bb.enabled | default false | quote }}
+{{- end }}
 ---
 apiVersion: flare.gree.net/v1alpha1
 kind: FlareCluster
@@ -213,8 +240,8 @@ spec:
              toggled off (observed live: FailedCreate "serviceaccount not
              found" — pods unschedulable until a manual patch). An explicit
              value always overwrites cleanly on toggle in BOTH directions. */}}
-      serviceAccountName: {{ $c.serviceAccountName | default (ternary $backupSaName "default" $bb.enabled) }}
-      {{- if $bb.enabled }}
+      serviceAccountName: {{ $c.serviceAccountName | default (ternary $backupSaName "default" (not (not $bbProvision))) }}
+      {{- if $bbProvision }}
       initContainers:
         # Seed an EMPTY data dir from the newest backup before flared starts.
         # No-op whenever data exists (normal restarts, PVC survivors). A
@@ -237,6 +264,12 @@ spec:
             - -c
             - |
               set -e
+              # Runtime toggle (roll-free): the flags ConfigMap decides, not
+              # the pod template. Anything but "true" -> plain empty boot.
+              if [ "$(cat /etc/flare-flags/backup-bootstrap-enabled 2>/dev/null)" != "true" ]; then
+                echo "backup-bootstrap: disabled via {{ $c.name }}-flags -> skipping (empty boot)"
+                exit 0
+              fi
               DATA={{ $dataDir }}
               if [ -d "$DATA/flare.rocksdb" ] && [ -n "$(ls -A "$DATA/flare.rocksdb" 2>/dev/null)" ]; then
                 echo "backup-bootstrap: data present -> no-op"
@@ -295,6 +328,9 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
+            - name: flare-flags
+              mountPath: /etc/flare-flags
+              readOnly: true
             {{- if $os.projectedTokenAudience }}
             - name: bootstrap-token
               mountPath: /var/run/secrets/sts
@@ -424,7 +460,13 @@ spec:
         - name: flared-config
           configMap:
             name: {{ $c.name }}-config
-        {{- if and $bb.enabled $os.projectedTokenAudience }}
+        {{- if $bbProvision }}
+        # Runtime flags (roll-free toggles) — see the <cluster>-flags CM.
+        - name: flare-flags
+          configMap:
+            name: {{ $c.name }}-flags
+        {{- end }}
+        {{- if and $bbProvision $os.projectedTokenAudience }}
         # Keyless object-storage auth for backup-bootstrap: a projected SA
         # token with the cloud-side audience (web-identity flow; pair with
         # extraEnv AWS_ROLE_ARN / AWS_WEB_IDENTITY_TOKEN_FILE=/var/run/secrets/sts/token

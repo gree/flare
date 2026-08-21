@@ -269,6 +269,11 @@ cluster:
   # interval. Creates the ServiceAccount/Role/RoleBinding (pods/get+exec) it
   # needs. See docs/BACKUP_RESTORE.md.
   backup:
+    # enabled gates only the CronJob OBJECT; the SA/RBAC are provisioned
+    # whenever objectStorage is configured (the nodes STS references the SA
+    # whenever the bootstrap plumbing exists). To PAUSE backups (e.g. while
+    # seeding over cluster replication) prefer `suspend: true` — a CronJob
+    # field change, zero pod impact, zero object churn.
     enabled: false
     schedule: "0 * * * *"        # hourly; every run is a delta
     suspend: false
@@ -303,6 +308,12 @@ cluster:
   # failures (and whole-cluster tmpfs loss) in between. NOTE: keep the
   # cluster's rocksdb walTtlSeconds above (backup interval + maxAgeSeconds)
   # or a backup-seeded pod can never catch up via WAL incremental sync.
+  #
+  # ROLL-FREE TOGGLE: `enabled` is a RUNTIME flag (the <cluster>-flags
+  # ConfigMap, read by the init at pod start) — flipping it changes only that
+  # ConfigMap. The plumbing (init container, backup SA, token volume) is
+  # always provisioned when objectStorage is configured, so the pod template
+  # never changes on toggle: no rolling restart, no master handoff.
   backupBootstrap:
     enabled: false
     maxAgeSeconds: 7200

@@ -19,7 +19,10 @@ concurrency:
 jobs:
   e2e-test:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    # The full suite has grown to ~2h wall-clock on the stock runners (the
+    # circuit-breaker suite alone runs ~22 min); 120 was killing the LAST
+    # suite (blue-green) with exit 124 on otherwise-green runs.
+    timeout-minutes: 150
     steps:
       - name: Checkout
         uses: actions/checkout@v4

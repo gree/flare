@@ -55,6 +55,35 @@ spec:
             summary: "Flare cluster {{`{{ $labels.cluster }}`}}: draining master has NO successor — data-bearing node dies at grace expiry"
             runbook: docs/RUNBOOK.md#drain-no-successor
 
+        # Pod memory pressure vs the limit. The POD cgroup slice
+        # (container="") is what the OOM killer enforces and is the only
+        # series that includes the tmpfs data pages (container-level
+        # working_set misses most of them; kubectl top sums containers and
+        # misses reparented tmpfs charges after container restarts). On a
+        # tmpfs cluster OOM = data loss on that node, so page before it.
+        - alert: FlarePodMemoryHigh
+          expr: >-
+            100 * container_memory_working_set_bytes{container="", pod=~".+-nodes-.+"}
+              / on(namespace, pod) group_left()
+                cluster:namespace:pod_memory:active:kube_pod_container_resource_limits{container="flared"}
+            > 85
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Flare pod {{`{{ $labels.pod }}`}}: memory (incl. tmpfs data) above 85% of the limit"
+        - alert: FlarePodMemoryCritical
+          expr: >-
+            100 * container_memory_working_set_bytes{container="", pod=~".+-nodes-.+"}
+              / on(namespace, pod) group_left()
+                cluster:namespace:pod_memory:active:kube_pod_container_resource_limits{container="flared"}
+            > 95
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Flare pod {{`{{ $labels.pod }}`}}: memory above 95% of the limit — OOM (= tmpfs data loss) imminent"
+
         # A node stuck in Prepare is reconstructing forever — it will never
         # serve and never be failed over (Prepare is exempt from dead
         # detection by design). Runbook: docs/RUNBOOK.md#prepare-stuck

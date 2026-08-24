@@ -113,6 +113,16 @@ namespace test_metrics_formatter
 		cut_assert_true(contains(out, "flared_process_user_cpu_seconds_total 10.962023\n"));
 	}
 
+	// data-dir usage (statvfs): the tmpfs-RAM truth that container-level
+	// memory metrics miss — must reach /metrics for the dashboards.
+	void test_data_dir_usage_gauges() {
+		push("data_dir_used_bytes", "3340763136");
+		push("data_dir_capacity_bytes", "8589934592");
+		string out = metrics_formatter::format(stats);
+		cut_assert_true(contains(out, "flare_node_data_dir_used_bytes 3340763136\n"));
+		cut_assert_true(contains(out, "flare_node_data_dir_capacity_bytes 8589934592\n"));
+	}
+
 	// every rocksdb_* stat passes through without a per-key allowlist, so new
 	// flared stats show up in /metrics automatically
 	void test_rocksdb_passthrough() {

@@ -245,6 +245,14 @@ public:
 
 	virtual void set_listener(storage_listener* l) { this->_listener = l; };
 
+	// Filesystem usage of the data dir (statvfs; 0 on error). On a tmpfs
+	// cluster this is RAM the dataset occupies — the quantity that drives
+	// the pod's memory limit and that container-level memory metrics
+	// (working_set of the flared container) do NOT show. Exported via
+	// `stats` -> /metrics as flare_node_data_dir_{used,capacity}_bytes.
+	virtual uint64_t get_data_dir_used_bytes();
+	virtual uint64_t get_data_dir_capacity_bytes();
+
 	virtual type get_type() = 0;
 	virtual bool is_capable(capability c) = 0;
 

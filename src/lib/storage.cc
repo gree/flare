@@ -27,6 +27,7 @@
  *	$Id$
  */
 #include "app.h"
+#include <sys/statvfs.h>
 #include "storage.h"
 #include "binary_request_header.h"
 #include "binary_response_header.h"
@@ -344,6 +345,22 @@ int storage::_set_header_cache(string key, entry& e) {
 
 // {{{ private methods
 // }}}
+
+uint64_t storage::get_data_dir_used_bytes() {
+	struct statvfs vfs;
+	if (statvfs(this->_data_dir.c_str(), &vfs) != 0) {
+		return 0;
+	}
+	return static_cast<uint64_t>(vfs.f_blocks - vfs.f_bfree) * vfs.f_frsize;
+}
+
+uint64_t storage::get_data_dir_capacity_bytes() {
+	struct statvfs vfs;
+	if (statvfs(this->_data_dir.c_str(), &vfs) != 0) {
+		return 0;
+	}
+	return static_cast<uint64_t>(vfs.f_blocks) * vfs.f_frsize;
+}
 
 }	// namespace flare
 }	// namespace gree

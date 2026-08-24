@@ -164,6 +164,14 @@ int op_stats::_send_stats(thread_pool* req_tp, thread_pool* other_tp, storage* s
 	_send_stat("pool_threads" 				, stats_object->get_pool_threads(req_tp, other_tp));
 	_send_stat("node_map_version"		, cl->get_node_map_version());
 
+	// Data-dir filesystem usage (statvfs). On tmpfs clusters this is the RAM
+	// the dataset occupies — the quantity that drives the pod's memory limit —
+	// which container-level memory metrics (working_set) do not show.
+	if (st) {
+		_send_stat("data_dir_used_bytes"    , st->get_data_dir_used_bytes());
+		_send_stat("data_dir_capacity_bytes", st->get_data_dir_capacity_bytes());
+	}
+
 #ifdef HAVE_LIBROCKSDB
 	// RocksDB WAL-replication observability. Only emitted when the
 	// storage backend is actually RocksDB so non-RocksDB deployments

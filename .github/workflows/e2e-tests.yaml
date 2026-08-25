@@ -123,7 +123,12 @@ jobs:
         run: |
           cd flare_operator
           export KUBECONFIG=$HOME/.kube/config
-          timeout 5400 .lake/build/bin/flare_e2e
+          # THIS is the limit that produces "exit code 124" — timeout(1)'s
+          # own exit code — NOT timeout-minutes above (raising that twice
+          # fixed nothing). The suite now runs past 90 min on slow runners;
+          # give the binary 160 min and keep the job cap (180) as headroom
+          # for setup. TODO: matrix-split the suites.
+          timeout 9600 .lake/build/bin/flare_e2e
 
       - name: Dump operator logs on failure
         if: failure()

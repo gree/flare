@@ -583,7 +583,24 @@ def mergeNodeEntry (current : FlareClusterState) (key : String) (ucsNode : Flare
     -- churn). Ties (the common case: no re-registration happened) keep the
     -- established rules: FSM owns roles, TCP-driven Prepare→Active sticks.
     if curNode.regEpoch > ucsNode.regEpoch then
-      curNode
+      -- Carve-out: let the FSM SEAT AN UNASSIGNED PROXY AS A SLAVE even when
+      -- the live entry is newer. A freshly re-registered pod re-registers as
+      -- Proxy with a bumped epoch every reconnect, so the strict rule above
+      -- discarded the FSM's Slave assignment on every tick — and because the
+      -- committed entry stayed Proxy/-1, flared kept reconnecting and
+      -- re-bumping the epoch: a self-reinforcing wedge (observed live: a
+      -- 1p×2r cluster ran 14h with its second node stuck Proxy after a roll,
+      -- version pinned, no broadcasts; only an operator restart — which
+      -- resets the non-serialized epochs to 0 — healed it). Seating a Slave
+      -- is data-safe (Prepare → reconstructs from the master) and never
+      -- mints a Master, so the ghost-master protection this guard exists for
+      -- is untouched: a stale ucs MASTER still loses to the live entry.
+      if curNode.role == FlareRole.Proxy && curNode.partition < 0
+         && ucsNode.role == FlareRole.Slave then
+        { curNode with role := FlareRole.Slave, state := FlareState.Prepare,
+                       partition := ucsNode.partition, balance := 0 }
+      else
+        curNode
     else if curNode.role == ucsNode.role
        && curNode.state == FlareState.Active
        && ucsNode.state == FlareState.Prepare then

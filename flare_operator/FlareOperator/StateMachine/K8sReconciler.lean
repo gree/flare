@@ -57,7 +57,7 @@ inductive FlareReconcileStep where
 /-- Responses from the K8s API server. -/
 inductive K8sResponse where
   | CRDResponse (crd : Option FlareClusterView)
-  | PodListResponse (pods : List String) (zones : List (String × String)) (terminating : List String)
+  | PodListResponse (pods : List String) (zones : List (String × String)) (terminating : List String) (dataBearing : List String)
   | PatchResponse (success : Bool)
   | NoResponse
   deriving Repr
@@ -115,6 +115,13 @@ structure FlareReconcileState where
       flare_operator_drain_no_successor gauge — this is a CRITICAL,
       human-decision condition (see drainBlockedKeys). -/
   drainBlockedCount : Nat := 0
+  /-- Node keys whose flared reported curr_items > 0 this tick (queried by
+      the IO shell). Used by the masterless refill so an EMPTY ex-master is
+      never crowned over a data-bearing copy (observed live: a rolled-empty
+      lastMasterOf holder was promoted Master/Active — authoritative, skips
+      reconstruction — over a slave holding 15.8M keys). Empty list = no
+      information (fresh cluster or stats unavailable): behaves as before. -/
+  dataBearingKeys : List String := []
   /-- Node keys matched by spec.readBalance.standby this tick (by pod name or
       zone). Forced to balance 0 at commit; deprioritized for promotion. -/
   standbyNodeKeys : List String := []
@@ -983,12 +990,18 @@ def assignProxiesPure (state : FlareClusterState) (crd : FlareClusterView)
     authoritative and skips reconstruction, so the local data keeps
     serving. -/
 def promoteMasterlessPartition (state : FlareClusterState) (pIdx : Nat)
-    (livePodKeys : List String) (standbyKeys : List String := []) : FlareClusterState :=
+    (livePodKeys : List String) (standbyKeys : List String := [])
+    (dataBearingKeys : List String := []) : FlareClusterState :=
   if FlareOperator.Reconciler.hasMasterForPartition state pIdx then state
   else
     let isActiveSlave := fun ((key, n) : String × FlareNode) =>
       n.role == FlareRole.Slave && n.state == FlareState.Active
         && n.partition == Int.ofNat pIdx && livePodKeys.contains key
+    -- Data-bearing residents of THIS partition (slaves or the ex-master).
+    -- Scoped per partition so another partition's data never vetoes here.
+    let partitionHasData := state.nodeMap.any (fun (key, n) =>
+      (n.partition == Int.ofNat pIdx || n.lastMasterOf == Int.ofNat pIdx)
+        && dataBearingKeys.contains key && livePodKeys.contains key)
     let candidate :=
       -- standby slaves are the refill choice of LAST resort (availability
       -- still wins over locality when only standby copies survive).
@@ -996,7 +1009,21 @@ def promoteMasterlessPartition (state : FlareClusterState) (pIdx : Nat)
         (fun _ => state.nodeMap.find? isActiveSlave)).orElse
       (fun _ => state.nodeMap.find? (fun (key, n) =>
         n.lastMasterOf == Int.ofNat pIdx && n.state != FlareState.Down
-          && livePodKeys.contains key))
+          && livePodKeys.contains key
+          -- EMPTY-MASTER GUARD: the lastMasterOf holder is only "the newest
+          -- surviving copy" when it actually HAS data. A rolled-empty
+          -- ex-master must not be crowned (Master/Active is authoritative
+          -- and skips reconstruction — it would serve emptiness forever)
+          -- while a data-bearing copy exists in the partition.
+          && (dataBearingKeys.contains key || !partitionHasData)))
+      -- Last resort when the holder was vetoed: crown the data-bearing copy
+      -- itself, even mid-Prepare — partial data beats guaranteed emptiness,
+      -- and without a master a Prepare slave can never finish reconstructing
+      -- anyway (deadlock otherwise).
+      |>.orElse (fun _ => state.nodeMap.find? (fun (key, n) =>
+        (n.partition == Int.ofNat pIdx || n.lastMasterOf == Int.ofNat pIdx)
+          && n.state != FlareState.Down && n.role != FlareRole.Master
+          && livePodKeys.contains key && dataBearingKeys.contains key))
     match candidate with
     | some kv =>
       state.addNode kv.1 { kv.2 with
@@ -1006,9 +1033,10 @@ def promoteMasterlessPartition (state : FlareClusterState) (pIdx : Nat)
 
 /-- Run the masterless-partition refill over every partition of the CRD. -/
 def promoteMasterlessPartitions (state : FlareClusterState) (crd : FlareClusterView)
-    (livePodKeys : List String) (standbyKeys : List String := []) : FlareClusterState :=
+    (livePodKeys : List String) (standbyKeys : List String := [])
+    (dataBearingKeys : List String := []) : FlareClusterState :=
   (List.range crd.spec.partitions).foldl
-    (fun s pIdx => promoteMasterlessPartition s pIdx livePodKeys standbyKeys) state
+    (fun s pIdx => promoteMasterlessPartition s pIdx livePodKeys standbyKeys dataBearingKeys) state
 
 /-- Pure replication phase computation (Main.lean:212-272).
     Determines next migration phase based on current phase and CRD spec.
@@ -1101,13 +1129,14 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
 
   | .AfterListPods =>
     match resp with
-    | .PodListResponse pods zones terminating =>
+    | .PodListResponse pods zones terminating dataBearing =>
       -- CRITICAL: Check grace period (Main.lean:355-359)
       if s.graceCycles > 0 then
         -- Still in startup grace period - skip dead node detection AND drain
         ({ s with reconcileStep := .AfterDetectDead,
                   livePodKeys := pods,
                   podZones := zones,
+                  dataBearingKeys := dataBearing,
                   deadNodeKeys := [],
                   terminatingKeys := terminating,
                   drainNodeKeys := [],
@@ -1124,6 +1153,7 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
         ({ s with reconcileStep := .AfterDetectDead,
                   livePodKeys := pods,
                   podZones := zones,
+                  dataBearingKeys := dataBearing,
                   deadNodeKeys := deadKeys,
                   terminatingKeys := terminating,
                   drainNodeKeys := drainKeys,
@@ -1208,7 +1238,7 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
       -- Refill partitions that lost every master to a total restart (all
       -- replicas re-registered as Slave/Prepare, so no proxy exists for
       -- autoAssign and no Down entry exists for failover).
-      let stateWithMasters := promoteMasterlessPartitions stateWithProxies crd s.livePodKeys s.standbyNodeKeys
+      let stateWithMasters := promoteMasterlessPartitions stateWithProxies crd s.livePodKeys s.standbyNodeKeys s.dataBearingKeys
       -- Persistent-violation detection: a partition whose copies all sit in
       -- one zone survives spread constraints (they place pods, not roles).
       -- Phase 1 warns; automated repair (slave migration) is future work.
@@ -1319,7 +1349,7 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
       let afterFailover :=
         if s.deadNodeKeys.isEmpty then clusterState
         else handleFailoverWithPromotion clusterState.rebuildPartitionMap s.deadNodeKeys
-      let recovered := promoteMasterlessPartitions afterFailover crd s.livePodKeys
+      let recovered := promoteMasterlessPartitions afterFailover crd s.livePodKeys [] s.dataBearingKeys
       let refilled := (List.range crd.spec.partitions).filter (fun p =>
         !FlareOperator.Reconciler.hasMasterForPartition afterFailover p
           && FlareOperator.Reconciler.hasMasterForPartition recovered p)
@@ -1413,12 +1443,12 @@ theorem flareReconcileStep_decreases_measure (resp : K8sResponse)
       cases crd with
       | some c => left; simp [flareReconcileCore, h, flareReconcileMeasure]
       | none => right; simp [flareReconcileCore, h, flareReconcileTerminalBool]
-    | PodListResponse _ _ _ => right; simp [flareReconcileCore, h, flareReconcileTerminalBool]
+    | PodListResponse _ _ _ _ => right; simp [flareReconcileCore, h, flareReconcileTerminalBool]
     | PatchResponse _ => right; simp [flareReconcileCore, h, flareReconcileTerminalBool]
     | NoResponse => right; simp [flareReconcileCore, h, flareReconcileTerminalBool]
   | AfterListPods =>
     cases resp with
-    | PodListResponse pods zones terminating =>
+    | PodListResponse pods zones terminating dataBearing =>
       simp only [flareReconcileCore, h]
       split <;> (left; simp [flareReconcileMeasure])
     | CRDResponse _ => right; simp [flareReconcileCore, h, flareReconcileTerminalBool]

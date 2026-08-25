@@ -43,10 +43,21 @@ private def parseIPv4 (s : String) : Option IPv4Addr :=
         | [a, b, c, d] => some ⟨#v[a.toUInt8, b.toUInt8, c.toUInt8, d.toUInt8]⟩
         | _ => none
 
-/-- Send a string over the socket. -/
+/-- Send a string over the socket, with a HARD deadline. An accepted-but-
+    stalled peer used to park the unbounded wait forever — and because the
+    topology broadcast runs synchronously in the reconcile loop, ONE such
+    pod froze the whole control plane (observed live: 22 minutes with no
+    reconcile ticks — no failover, no drain, no refill — while a wedged
+    flared held the send). 3s dwarfs any healthy in-VPC send. -/
 private def sendString (sock : Socket) (s : String) : IO Unit := do
   let promise ← sock.send s.toUTF8
-  let _ ← IO.wait promise.result!
+  let t := promise.result!
+  for _ in [0:60] do
+    if (← IO.hasFinished t) then
+      let _ := t.get
+      return ()
+    IO.sleep 50
+  throw (IO.userError "send timed out after 3s (peer accepted but stalled)")
 
 -- ===========================================================================
 -- Topology Push (Node Sync)
@@ -111,10 +122,14 @@ def sendNodeSyncToNode (ip : String) (port : Nat) (version : Nat) (nodes : List 
   catch e =>
     IO.eprintln s!"[TcpClient] Error sending to {ip}:{port}: {e}"
   finally
-    -- Close connection
+    -- Close connection (bounded: best-effort — never park the caller)
     try
       let shutdownPromise ← sock.shutdown
-      let _ ← IO.wait shutdownPromise.result!
+      let t := shutdownPromise.result!
+      for _ in [0:20] do
+        if (← IO.hasFinished t) then
+          break
+        IO.sleep 50
     catch _ =>
       pure ()
 

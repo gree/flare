@@ -153,6 +153,7 @@ def listFlaredPodsE (crName ns : String) : IO (Except String (List PodInfo)) := 
 def terminatingPodKeys (pods : List PodInfo) : List String :=
   (pods.filter (·.terminating)).map (·.toNodeKey)
 
+
 /-- Failure-swallowing wrapper for callers where an empty answer is safe
     (topology broadcast just sends to nobody this tick). The RECONCILE path
     must NOT use this: an API failure fabricated as \"zero pods\" walks
@@ -361,6 +362,28 @@ def patchFlareClusterStatus (crName ns : String) (phase : MigrationPhase)
 /-- Query flared stats via kubectl exec and bash /dev/tcp. -/
 def queryPodStats (podName ns : String) (statsCmd : String) : IO (Except String String) :=
   execInPod podName ns ["bash", "-c", s!"exec 3<>/dev/tcp/localhost/12121; printf '{statsCmd}\\r\\n' >&3; timeout 3 cat <&3; exec 3>&-"]
+
+/-- Node keys of pods whose flared reports curr_items > 0 (a bounded stats
+    probe per pod: `timeout 3` inside the exec). Feeds the masterless
+    refill's empty-master guard — an ex-master that came back EMPTY must not
+    be crowned over a data-bearing copy. Best-effort: a pod whose probe
+    fails is simply not listed (the guard treats "no data-bearing nodes" as
+    "no information" and falls back to the old behavior), so a stats hiccup
+    can never brick the refill. -/
+def dataBearingPodKeys (pods : List PodInfo) (ns : String) : IO (List String) := do
+  let mut keys : List String := []
+  for pod in pods do
+    if pod.ready || pod.terminating then
+      match ← queryPodStats pod.name ns "stats" with
+      | .ok out =>
+        let hasData := out.splitOn "\n" |>.any fun line =>
+          match (line.trim.splitOn " ").filter (· != "") with
+          | ["STAT", "curr_items", v] => (v.trim.toNat?.getD 0) > 0
+          | _ => false
+        if hasData then
+          keys := keys ++ [pod.toNodeKey]
+      | .error _ => pure ()
+  return keys
 
 /-- LEVEL-TRIGGERED replication reconciliation: for every flared pod whose
     MOUNTED extra.conf already carries `needle` but whose RUNTIME state

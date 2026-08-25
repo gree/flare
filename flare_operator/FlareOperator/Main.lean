@@ -537,7 +537,10 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
       let nodeZones ← Bridge.listNodeZones
       -- Terminating (deletionTimestamp) pods → graceful drain in the FSM.
       let termKeys := Bridge.terminatingPodKeys pods
-      pure (.PodListResponse podKeys (Bridge.podZones pods nodeZones) termKeys)
+      -- Data-bearing probe (curr_items > 0 per pod) for the masterless
+      -- refill's empty-master guard. Bounded per pod; best-effort.
+      let dataKeys ← Bridge.dataBearingPodKeys pods ns
+      pure (.PodListResponse podKeys (Bridge.podZones pods nodeZones) termKeys dataKeys)
   | .PatchService =>
     -- Service patching happens in executeEffects (PatchService effect)
     -- This just signals completion

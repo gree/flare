@@ -56,10 +56,22 @@ def broadcastTopologyToAllPods (crName ns : String) (version : Nat) (nodes : Lis
   -- distinguishes "Terminating but reachable" from "gone".
   let tasks ← pods.mapM fun pod =>
     IO.asTask (sendNodeSyncToNode pod.ip 12121 version nodes)
+  -- Belt over TcpClient's own deadlines: the broadcast runs synchronously
+  -- in the reconcile loop, so NOTHING here may wait unboundedly (one stuck
+  -- pod froze the loop for 22 min live). 15s >> connect(3s)+sends(3s each).
   for t in tasks do
-    match ← IO.wait t with
-    | .ok _ => pure ()
-    | .error e => IO.eprintln s!"[TopologyBroadcast] send task failed: {e}"
+    let mut finished := false
+    for _ in [0:300] do
+      if (← IO.hasFinished t) then
+        finished := true
+        break
+      IO.sleep 50
+    if finished then
+      match t.get with
+      | .ok _ => pure ()
+      | .error e => IO.eprintln s!"[TopologyBroadcast] send task failed: {e}"
+    else
+      IO.eprintln "[TopologyBroadcast] WARNING: send task exceeded 15s — abandoning it (bounded broadcast)"
 
   IO.eprintln s!"[TopologyBroadcast] Broadcast complete (v{version})"
 

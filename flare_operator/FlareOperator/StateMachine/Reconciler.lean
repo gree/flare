@@ -469,7 +469,17 @@ def registerFreshNode (state : FlareClusterState) (crd : FlareClusterView)
   let numPartitions := crd.spec.partitions
   let p0 := state.lookupPartition 0
   let needsP0Master := match p0 with | some part => part.master.isNone | none => true
-  if needsP0Master && numPartitions > 0 then
+  -- BOOTSTRAP-ONLY guard for the instant-P0-master fast path: it exists so
+  -- the very first node of a brand-new cluster becomes the source of truth
+  -- without a reconstruction cycle. But it is DATA-BLIND — after a roll it
+  -- crowned a freshly-recreated EMPTY pod P0 master (authoritative, skips
+  -- reconstruction) while a slave held the full dataset. If ANY resident of
+  -- P0 (a slave or an ex-master) is already in the map, defer to the
+  -- reconcile loop's masterless refill, which sees pod liveness AND
+  -- data-bearing stats.
+  let p0HasResidents := state.nodeMap.any (fun (_, n) =>
+    n.partition == Int.ofNat 0 || n.lastMasterOf == Int.ofNat 0)
+  if needsP0Master && numPartitions > 0 && !p0HasResidents then
     -- Assign as P0 Master immediately - no role transition, no reconstruction
     -- TCP context knows nothing about pod liveness except the node that is
     -- registering right now, so only IT counts as live for the zombie

@@ -19,12 +19,26 @@ concurrency:
 jobs:
   e2e-test:
     runs-on: ubuntu-latest
-    # The full suite keeps growing (~2.5h on slow stock runners; the
-    # circuit-breaker suite alone runs ~22 min); 120 and then 150 both ended
-    # up killing the LAST suite (blue-green) with exit 124 on otherwise-green
-    # runs. TODO: split the suites into a matrix of parallel jobs instead of
-    # ratcheting this number forever.
-    timeout-minutes: 180
+    # The serial suite grew past 2.5h, so it is SHARDED into parallel matrix
+    # legs (each leg: ~30 min setup + its suite group). Groups are balanced
+    # by measured suite duration — circuit-breaker (~22 min) and blue-green
+    # (~15 min) anchor their own leg. Rebalance by editing the lists; add
+    # new suites to a group or `flare_e2e --list` drifts from reality (the
+    # aggregate job below fails if a suite is left out of every group).
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - group: topology
+            suites: "failover,read-balance,scale-out-master,scale-out-slave,scale-in-slave,scale-in-master"
+          - group: replication
+            suites: "replace-nodes,cluster-replication,partition-reduction,wal-retention-config,strict-durability,snapshot-push-seed"
+          - group: wal-recovery
+            suites: "wal-bandwidth-throttle,wal-incremental-sync,wal-purged-fallback,resync-failure-self-demote,orphan-scan-purge,terminating-pod-handling,failover-during-replication,data-survival-failover,pvc-data-survival,backup-restore"
+          - group: breaker-migration
+            suites: "circuit-breaker,operator-restart,native-metrics,blue-green-migration"
+    name: e2e-test (${{ matrix.group }})
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -119,16 +133,27 @@ jobs:
           echo "=== Operator logs (initial) ==="
           kubectl logs -n flare-system -l app=flare-operator --tail=50
 
-      - name: Run E2E tests
+      - name: Run E2E tests (${{ matrix.group }})
         run: |
           cd flare_operator
           export KUBECONFIG=$HOME/.kube/config
-          # THIS is the limit that produces "exit code 124" — timeout(1)'s
-          # own exit code — NOT timeout-minutes above (raising that twice
-          # fixed nothing). The suite now runs past 90 min on slow runners;
-          # give the binary 160 min and keep the job cap (180) as headroom
-          # for setup. TODO: matrix-split the suites.
-          timeout 9600 .lake/build/bin/flare_e2e
+          # timeout(1) produces "exit code 124" on expiry — this inner limit
+          # is what kills a leg, not timeout-minutes. 75 min per SHARDED leg
+          # (longest group ~45 min measured + slack).
+          timeout 4500 .lake/build/bin/flare_e2e --filter "${{ matrix.suites }}"
+
+      - name: Verify every suite is assigned to a shard
+        run: |
+          cd flare_operator
+          # Union of the matrix groups must equal --list, or a new suite
+          # silently never runs. Kept in ONE place here; compare as sets.
+          ALL_GROUPS="failover,read-balance,scale-out-master,scale-out-slave,scale-in-slave,scale-in-master,replace-nodes,cluster-replication,partition-reduction,wal-retention-config,strict-durability,snapshot-push-seed,wal-bandwidth-throttle,wal-incremental-sync,wal-purged-fallback,resync-failure-self-demote,orphan-scan-purge,terminating-pod-handling,failover-during-replication,data-survival-failover,pvc-data-survival,backup-restore,circuit-breaker,operator-restart,native-metrics,blue-green-migration"
+          LISTED=$(.lake/build/bin/flare_e2e --list | sed -n 's/^  \([a-z0-9-]*\) (.*/\1/p' | sort)
+          GROUPED=$(echo "$ALL_GROUPS" | tr ',' '\n' | sort)
+          if ! diff <(echo "$LISTED") <(echo "$GROUPED"); then
+            echo "::error::suite list and shard groups have drifted — update the matrix in e2e-tests.yaml"
+            exit 1
+          fi
 
       - name: Dump operator logs on failure
         if: failure()

@@ -87,11 +87,16 @@ def runSuite (suite : TestSuite) (startIndex : Nat) : IO (Nat × Nat) := do
 def totalTests (suites : List TestSuite) : Nat :=
   suites.foldl (fun acc s => acc + s.tests.length) 0
 
-/-- Run multiple suites. Supports --filter <name> to run one suite. -/
+/-- Run multiple suites. Supports --filter <names> to run a subset —
+    a comma-separated list of suite names, so CI can shard the (serial,
+    multi-hour) run across parallel matrix jobs with explicitly balanced
+    groups. A single name behaves as before. -/
 def runAll (suites : List TestSuite) (filter : Option String) : IO UInt32 := do
   let filtered := match filter with
     | none => suites
-    | some f => suites.filter (fun s => s.name == f)
+    | some f =>
+      let wanted := (f.splitOn ",").map (·.trim) |>.filter (· ≠ "")
+      suites.filter (fun s => wanted.contains s.name)
   if filtered.isEmpty then
     match filter with
     | some f =>

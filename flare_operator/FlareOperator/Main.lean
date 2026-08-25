@@ -888,6 +888,58 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
     if cycles == threshold + 1 || cycles % 120 == 0 then
       IO.eprintln s!"[flare-operator] WARNING: node {key} has been in Prepare for {cycles} cycles (~{cycles * 5 / 60} min). Reconstruction may have stalled; check that pod's flared logs. No automatic action is taken."
 
+  -- 4c. LEVEL-TRIGGERED Prepare repair. flared reports "reconstruction
+  -- complete" (Prepare→Active) as a ONE-SHOT TCP event; if the operator
+  -- misses it (mid-roll leader swap, a hung loop, a dropped connection) the
+  -- node sits Prepare forever: the sync-gated readiness probe reads the
+  -- operator's own broadcast back — circular — so the pod stays NotReady and
+  -- StatefulSet rolls block behind it (observed live: a slave with the FULL
+  -- dataset stuck Prepare for 7h27m). Repair by RE-DERIVING the fact from
+  -- ground truth: if a long-Prepare SLAVE's replication cursor
+  -- (rocksdb_repl_last_lsn) has caught up to its Active master's
+  -- latest_sequence_number, inject the same NodeState transition the lost
+  -- event would have driven (reconcileStep — the vacuous-activation guard
+  -- and merge rules apply exactly as for the real event). Lag-gated, so a
+  -- genuinely mid-reconstruction node is never touched no matter how long
+  -- it takes.
+  let repairAfter := ((← IO.getEnv "FLARE_PREPARE_REPAIR_CYCLES").bind (·.toNat?)).getD 36
+  let statOf := fun (out : String) (stat : String) =>
+    (out.splitOn "
+" |>.filterMap fun line =>
+      match (line.trim.splitOn " ").filter (· != "") with
+      | ["STAT", k, v] => if k == stat then v.trim.toNat? else none
+      | _ => none).head?
+  for (key, cycles) in newCycles do
+    if cycles >= repairAfter && cycles % 12 == 0 then
+      match finalState.lookupNode key with
+      | some node =>
+        if node.role == FlareRole.Slave && node.state == FlareState.Prepare then
+          match finalState.nodeMap.find? (fun kv =>
+              kv.2.role == FlareRole.Master && kv.2.state == FlareState.Active
+                && kv.2.partition == node.partition) with
+          | some (_, masterNode) =>
+            let slavePod := extractPodName node.serverName
+            let masterPod := extractPodName masterNode.serverName
+            let sOut ← Bridge.queryPodStats slavePod ns "stats"
+            let mOut ← Bridge.queryPodStats masterPod ns "stats"
+            match sOut, mOut with
+            | .ok so, .ok mo =>
+              match statOf so "rocksdb_repl_last_lsn", statOf mo "rocksdb_latest_sequence_number" with
+              | some slaveLsn, some masterSeq =>
+                -- Caught up = cursor within a small window of the master's
+                -- head (5000 sequence numbers ≈ seconds of writes).
+                if slaveLsn > 0 && masterSeq ≥ slaveLsn && masterSeq - slaveLsn < 5000 then
+                  let crdNow ← crdRef.get
+                  let ev := Flare.FlareEvent.NodeState node.serverName node.serverPort FlareState.Active
+                  let resp ← stateRef.modifyGet fun cs =>
+                    let (ns', r) := Reconciler.reconcileStep cs crdNow ev
+                    (r, ns')
+                  IO.eprintln s!"[flare-operator] PREPARE-REPAIR: {key} stuck Prepare {cycles} cycles but synced (slave lsn {slaveLsn} vs master seq {masterSeq}) -> re-derived Prepare→Active ({(toString (repr resp)).take 60})"
+              | _, _ => pure ()
+            | _, _ => pure ()
+          | none => pure ()
+      | none => pure ()
+
   -- 5. Handle rocksdb config propagation + cluster replication migration
   let crd ← crdRef.get
   handleRocksdbConfig crd crName ns pendingConfRef

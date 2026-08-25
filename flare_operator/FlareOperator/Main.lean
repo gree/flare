@@ -806,6 +806,8 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
     (migrationRef : IO.Ref MigrationPhase) (graceCyclesRef : IO.Ref Nat)
     (trippedRef : IO.Ref Bool)
     (prepareCyclesRef : IO.Ref (List (String × Nat)))
+    (emptyMasterStreakRef : IO.Ref (List (String × Nat)))
+    (probeSlotRef : IO.Ref Nat)
     (pendingConfRef : IO.Ref (Option (String × Nat)))
     (masterSnapshotRef : IO.Ref (Option (List String)))
     (driftTickRef : IO.Ref Nat)
@@ -939,6 +941,51 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
             | _, _ => pure ()
           | none => pure ()
       | none => pure ()
+
+  -- 4d. EMPTY-MASTER SELF-HEAL. rc55 prevents MINTING an empty master, but
+  -- one already seated is a stable fixed point: nothing re-evaluates a
+  -- sitting master's data (observed live: a rolled-empty ex-master served 0
+  -- keys over a slave holding 15.8M — writes proxied into it, reads missed).
+  -- Detect it from ground truth (curr_items probes, one burst per ~5 min)
+  -- and heal through the PROVEN drain path: gracefully delete the empty
+  -- master's pod — the drain guard demotes it and promotes the data-bearing
+  -- Active slave, and the pod returns as a slave and reseeds. Guards:
+  -- requires an Active data-bearing slave in the SAME partition, and the
+  -- condition must persist 3 consecutive probes (~15 min) before acting.
+  let probeSlot := (← IO.monoMsNow) / 300000
+  if probeSlot != (← probeSlotRef.get) then
+    probeSlotRef.set probeSlot
+    let streaks ← emptyMasterStreakRef.get
+    let mut newStreaks : List (String × Nat) := []
+    for (mKey, mNode) in finalState.nodeMap do
+      if mNode.role == FlareRole.Master && mNode.state == FlareState.Active then
+        -- an Active slave of the same partition to compare against / promote
+        match finalState.nodeMap.find? (fun kv =>
+            kv.2.role == FlareRole.Slave && kv.2.state == FlareState.Active
+              && kv.2.partition == mNode.partition) with
+        | some (_, sNode) =>
+          let mOut ← Bridge.queryPodStats (extractPodName mNode.serverName) ns "stats"
+          let sOut ← Bridge.queryPodStats (extractPodName sNode.serverName) ns "stats"
+          match mOut, sOut with
+          | .ok mo, .ok so =>
+            let items := fun (out : String) =>
+              ((out.splitOn "
+" |>.filterMap fun line =>
+                match (line.trim.splitOn " ").filter (· != "") with
+                | ["STAT", "curr_items", v] => v.trim.toNat?
+                | _ => none).head?).getD 0
+            if items mo == 0 && items so > 0 then
+              let streak := ((streaks.lookup mKey).getD 0) + 1
+              newStreaks := newStreaks ++ [(mKey, streak)]
+              IO.eprintln s!"[flare-operator] WARNING: master {mKey} is EMPTY (0 keys) while an Active slave holds {items so} keys (streak {streak}/3)"
+              if streak ≥ 3 then
+                IO.eprintln s!"[flare-operator] EMPTY-MASTER SELF-HEAL: gracefully deleting {extractPodName mNode.serverName} — the drain path will hand mastership to the data-bearing slave and the pod reseeds as a slave"
+                match ← Bridge.deletePodGraceful (extractPodName mNode.serverName) ns with
+                | .ok () => newStreaks := newStreaks.filter (·.1 != mKey)
+                | .error e => IO.eprintln s!"[flare-operator] empty-master self-heal delete failed: {e}"
+          | _, _ => pure ()
+        | none => pure ()
+    emptyMasterStreakRef.set newStreaks
 
   -- 5. Handle rocksdb config propagation + cluster replication migration
   let crd ← crdRef.get
@@ -1381,6 +1428,8 @@ def main (args : List String) : IO Unit := do
   -- by detectDeadNodes regardless of the grace period.
   let graceCyclesRef ← IO.mkRef (24 : Nat)
   let prepareCyclesRef ← IO.mkRef ([] : List (String × Nat))
+  let emptyMasterStreakRef ← IO.mkRef ([] : List (String × Nat))
+  let probeSlotRef ← IO.mkRef (0 : Nat)
   -- Persistent breaker-trip flag (input to the reset hysteresis).
   let trippedRef ← IO.mkRef false
   let pendingConfRef ← IO.mkRef (none : Option (String × Nat))
@@ -1420,7 +1469,7 @@ def main (args : List String) : IO Unit := do
     let startTime ← IO.monoMsNow
     try
       -- Use FSM-driven reconcile (complete implementation with all 5 requirements)
-      reconcileOnceFSM stateRef crdRef migrationRef graceCyclesRef trippedRef prepareCyclesRef pendingConfRef masterSnapshotRef driftTickRef metrics leaseName identity crName ns
+      reconcileOnceFSM stateRef crdRef migrationRef graceCyclesRef trippedRef prepareCyclesRef emptyMasterStreakRef probeSlotRef pendingConfRef masterSnapshotRef driftTickRef metrics leaseName identity crName ns
     catch e =>
       IO.eprintln s!"[flare-operator] reconcile error: {e}"
     let endTime ← IO.monoMsNow

@@ -181,6 +181,16 @@ def deletePod (podName ns : String) : IO (Except String Unit) := do
   | .error e => return .error e
   | .ok _ => return .ok ()
 
+/-- GRACEFUL pod deletion (no force, full grace period): the pod goes
+    Terminating with its full preStop window, so the operator's drain path
+    sees it and performs the demote+promote handoff. Used by the empty-master
+    self-heal — the whole point is to route through the PROVEN drain
+    machinery instead of yanking the pod out from under it. -/
+def deletePodGraceful (podName ns : String) : IO (Except String Unit) := do
+  match ← kubectl ["delete", "pod", podName, "-n", ns, "--wait=false"] with
+  | .error e => return .error e
+  | .ok _ => return .ok ()
+
 /-- Update (or create) a ConfigMap with the current node-map data.
     Used to persist the operator's view of the cluster for observability.
     Uses retry logic for resilience.

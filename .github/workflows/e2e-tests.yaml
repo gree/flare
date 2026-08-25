@@ -19,10 +19,12 @@ concurrency:
 jobs:
   e2e-test:
     runs-on: ubuntu-latest
-    # The full suite has grown to ~2h wall-clock on the stock runners (the
-    # circuit-breaker suite alone runs ~22 min); 120 was killing the LAST
-    # suite (blue-green) with exit 124 on otherwise-green runs.
-    timeout-minutes: 150
+    # The full suite keeps growing (~2.5h on slow stock runners; the
+    # circuit-breaker suite alone runs ~22 min); 120 and then 150 both ended
+    # up killing the LAST suite (blue-green) with exit 124 on otherwise-green
+    # runs. TODO: split the suites into a matrix of parallel jobs instead of
+    # ratcheting this number forever.
+    timeout-minutes: 180
     steps:
       - name: Checkout
         uses: actions/checkout@v4

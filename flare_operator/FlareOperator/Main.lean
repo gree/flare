@@ -516,6 +516,7 @@ private def assignProxies (state : FlareClusterState) (crd : FlareClusterView) :
 /-- Execute a K8s API request from the FSM.
     Maps K8sRequest to actual kubectl/K8s.Bridge calls. -/
 private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : String)
+    (stateRef : IO.Ref FlareClusterState)
     : IO K8sReconciler.K8sResponse := do
   match req with
   | .FetchCRD =>
@@ -538,8 +539,24 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
       -- Terminating (deletionTimestamp) pods → graceful drain in the FSM.
       let termKeys := Bridge.terminatingPodKeys pods
       -- Data-bearing probe (curr_items > 0 per pod) for the masterless
-      -- refill's empty-master guard. Bounded per pod; best-effort.
-      let dataKeys ← Bridge.dataBearingPodKeys pods ns
+      -- refill's empty-master guard. GATED: per-pod execs cost seconds on a
+      -- loaded node, and running them EVERY tick stretched the reconcile
+      -- past timing-sensitive windows (the drain E2E regressed: the demote
+      -- never landed inside its 25s window). Probe only on ticks where the
+      -- refill could actually act — a masterless partition exists, or a
+      -- mapped node's pod is gone (dead candidate: the failover this tick
+      -- may leave the partition masterless and the refill runs in the SAME
+      -- tick). Steady healthy ticks pay nothing; [] = "no information", the
+      -- guard's old-behavior fallback.
+      let cs ← stateRef.get
+      let csR := cs.rebuildPartitionMap
+      let masterless := csR.partitionMap.any (fun kv => kv.2.master.isNone)
+        || (csR.partitionMap.isEmpty && !csR.nodeMap.isEmpty)
+      let deadCandidate := csR.nodeMap.any (fun kv => !podKeys.contains kv.1)
+      let dataKeys ← if masterless || deadCandidate then
+          Bridge.dataBearingPodKeys pods ns
+        else
+          pure []
       pure (.PodListResponse podKeys (Bridge.podZones pods nodeZones) termKeys dataKeys)
   | .PatchService =>
     -- Service patching happens in executeEffects (PatchService effect)
@@ -703,7 +720,7 @@ private partial def runReconcileFSMLoop
     -- Execute K8s request if present
     match reqOpt with
     | some req =>
-      let resp ← executeK8sRequest req crName ns
+      let resp ← executeK8sRequest req crName ns stateRef
       let cs2 ← stateRef.get
       let cs2Version := cs2.nodeMapVersion
       let (nextState, nextReqOpt, moreEffects) := K8sReconciler.flareReconcileCore resp newState cs2
@@ -721,7 +738,7 @@ private partial def runReconcileFSMLoop
       match nextReqOpt with
       | some nextReq =>
         -- FSM issued another request - execute it before recursing
-        let nextResp ← executeK8sRequest nextReq crName ns
+        let nextResp ← executeK8sRequest nextReq crName ns stateRef
         let cs3 ← stateRef.get
         let cs3Version := cs3.nodeMapVersion
         let (finalState, _, finalEffects) := K8sReconciler.flareReconcileCore nextResp nextState cs3

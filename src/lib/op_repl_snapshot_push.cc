@@ -129,15 +129,6 @@ int op_repl_snapshot_push::_run_server() {
 		return this->_send_result(result_server_error, "no_cluster");
 	}
 
-	// Same partition layout on both sides or the per-partition key spaces
-	// do not line up and a physical copy is meaningless.
-	int local_partition_size = this->_cluster->get_node_partition_map_size();
-	if (local_partition_size != this->_partition_size) {
-		log_notice("declining snapshot push: partition count mismatch (source=%d, local=%d)",
-			this->_partition_size, local_partition_size);
-		return this->_send_result(result_server_error, "partition_count_mismatch");
-	}
-
 	// Route/authorize by role. A cross-cluster push must land on the local
 	// master of that partition (a Service/LB can pin the connection to any
 	// node -> redirect); an intra-destination RELAY hop (from our own master,
@@ -179,6 +170,22 @@ int op_repl_snapshot_push::_run_server() {
 				return this->_connection->write(line, strlen(line)) < 0 ? -1 : 0;
 			}
 		}
+	}
+
+	// Same partition layout on both sides or the per-partition key spaces do
+	// not line up and a physical copy is meaningless. Evaluated AFTER the
+	// role routing above ON PURPOSE: get_node_partition_map_size() counts
+	// partitions with an Active master in THIS node's own map, so a
+	// not-yet-converged node (e.g. a proxy wedged at partition=-1 after a
+	// roll) reports 0 and used to hard-decline "partition_count_mismatch"
+	// before the redirect could bounce the push to the real master
+	// (observed live: 1p<->1p seed declined with source=1, local=0). After
+	// the reorder only the partition's master answers this check.
+	int local_partition_size = this->_cluster->get_node_partition_map_size();
+	if (local_partition_size != this->_partition_size) {
+		log_notice("declining snapshot push: partition count mismatch (source=%d, local=%d)",
+			this->_partition_size, local_partition_size);
+		return this->_send_result(result_server_error, "partition_count_mismatch");
 	}
 
 	// Freshness guard: replacing real data is the operator's call, never an

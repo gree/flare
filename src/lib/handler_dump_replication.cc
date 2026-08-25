@@ -245,6 +245,8 @@ int handler_dump_replication::run() {
 
 	log_notice("starting dump replication (dest=%s:%d, partition=%d, partition_size=%d, interval=%d, bwlimit=%d)",
 			   this->_replication_server_name.c_str(), this->_replication_server_port, partition, partition_size, wait, this->_bwlimitter.get_bwlimit());
+	uint64_t set_failures = 0;
+	uint64_t consecutive_set_failures = 0;
 	storage::entry e;
 	storage::iteration i;
 	while (!via_snapshot_push
@@ -271,13 +273,38 @@ int handler_dump_replication::run() {
 			continue;
 		}
 
-		// replicate
+		// replicate — and CHECK the destination's verdict. run_client()
+		// returns 0 for ANY parsed reply (including SERVER_ERROR) and the
+		// per-key result was never inspected, so a destination that refused
+		// or mis-routed every key still ended in "dump replication
+		// completed" + a recorded resync SUCCESS (observed live: a 15.8M-key
+		// cross-cluster dump was ACKed key by key and silently stored
+		// nowhere). Any result other than STORED counts as a failure; a
+		// consecutive run means the destination is systemically not
+		// persisting -> abort loudly instead of completing a lie.
 		op_set* p = new op_set(this->_connection, NULL, NULL);
 		if (p->run_client(e) < 0) {
 			delete p;
+			set_failures++;
 			break;
 		}
-
+		if (p->get_result() == op::result_stored) {
+			consecutive_set_failures = 0;
+		} else {
+			set_failures++;
+			consecutive_set_failures++;
+			if (set_failures <= 5) {
+				log_warning("dump set not stored (key=%s, result=%d, msg=%s)",
+						   e.key.c_str(), static_cast<int>(p->get_result()), p->get_result_message().c_str());
+			}
+			if (consecutive_set_failures >= 64) {
+				log_err("aborting dump replication: %llu consecutive sets not stored (dest=%s:%d) -> destination is not persisting",
+						   (unsigned long long)consecutive_set_failures,
+						   this->_replication_server_name.c_str(), this->_replication_server_port);
+				delete p;
+				break;
+			}
+		}
 		delete p;
 
 		// wait
@@ -291,11 +318,16 @@ int handler_dump_replication::run() {
 	if (!via_snapshot_push) {
 		this->_storage->iter_end();
 	}
-	bool dump_succeeded = !this->_thread->is_shutdown_request();
+	bool dump_succeeded = !this->_thread->is_shutdown_request() && set_failures == 0;
+	if (set_failures > 0) {
+		log_err("dump replication FAILED: %llu set(s) not stored by the destination (dest=%s:%d) -> recorded as resync failure",
+				   (unsigned long long)set_failures,
+				   this->_replication_server_name.c_str(), this->_replication_server_port);
+	}
 	if (dump_succeeded) {
 		log_notice("dump replication completed (dest=%s:%d, partition=%d, partition_size=%d, interval=%d, bwlimit=%" PRIu64 ")",
 				   this->_replication_server_name.c_str(), this->_replication_server_port, partition, partition_size, wait, this->_bwlimitter.get_bwlimit());
-	} else {
+	} else if (this->_thread->is_shutdown_request()) {
 		this->_thread->set_state("shutdown");
 		log_warning("dump replication interruptted (dest=%s:%d, partition=%d, partition_size=%d, interval=%d, bwlimit=%" PRIu64 ")",
 				   this->_replication_server_name.c_str(), this->_replication_server_port, partition, partition_size, wait, this->_bwlimitter.get_bwlimit());

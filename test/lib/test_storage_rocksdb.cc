@@ -1147,6 +1147,34 @@ void test_expire_reap_chunked_sweep() {
 	drop_rocksdb(s, wal_master_dir);
 }
 
+// reap_expired reports every key it deleted, with the version it deleted at,
+// so handler_reaper can forward them as version-carrying deletes to slaves
+// (the storage-level remove itself is local). Refreshed keys are NOT reported.
+void test_expire_reap_reports_reaped_entries() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+
+	time_t now = stats_object->get_timestamp();
+	cut_assert_equal_int(0, storage_set_string_expire(s, "gone1", "v", now - 5));
+	cut_assert_equal_int(0, storage_set_string_expire(s, "gone2", "v", now - 5));
+	cut_assert_equal_int(0, storage_set_string_expire(s, "alive", "v", now + 3600));
+	cut_assert_equal_int(0, storage_set_string_expire(s, "never", "v", 0));
+
+	vector<storage::entry> reported;
+	string after = "", last;
+	bool more = true;
+	uint32_t scanned = 0, reaped = 0;
+	cut_assert_equal_int(0, s->reap_expired(now, 100, after, last, more, scanned, reaped, &reported));
+	cut_assert_equal_int(2, static_cast<int>(reaped));
+	cut_assert_equal_int(2, static_cast<int>(reported.size()));
+	for (size_t i = 0; i < reported.size(); i++) {
+		cut_assert_true(reported[i].key == "gone1" || reported[i].key == "gone2");
+		cut_assert_true(reported[i].version > 0);   // carries the version it deleted at
+	}
+	cut_assert_equal_int(2, static_cast<int>(s->count()));
+
+	drop_rocksdb(s, wal_master_dir);
+}
+
 // reap_expired must NOT delete a key whose expire was refreshed into the future
 // (a re-set before the sweep): only genuinely past-expire entries go.
 void test_expire_reap_skips_refreshed_key() {

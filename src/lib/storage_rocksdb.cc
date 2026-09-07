@@ -1462,7 +1462,8 @@ int storage_rocksdb::hard_reset() {
 }
 
 int storage_rocksdb::reap_expired(time_t now, uint32_t max_scan, const string& after_key,
-		string& last_key, bool& more, uint32_t& scanned, uint32_t& reaped) {
+		string& last_key, bool& more, uint32_t& scanned, uint32_t& reaped,
+		vector<entry>* reaped_entries) {
 	scanned = 0;
 	reaped = 0;
 	more = false;
@@ -1516,9 +1517,11 @@ int storage_rocksdb::reap_expired(time_t now, uint32_t max_scan, const string& a
 			this->_unserialize_header(value_ptr, value.size(), hdr);
 			if (hdr.expire > 0 && hdr.expire <= now) {
 				// Delete only if the version is unchanged since we read the header
-				// (a concurrent set may have refreshed / un-expired the key). The
-				// remove() goes through the normal write path -> RocksDB WAL ->
-				// replicas. remove() takes its own per-slot lock.
+				// (a concurrent set may have refreshed / un-expired the key).
+				// remove() is a LOCAL storage write (it lands in this node's WAL,
+				// which live slaves do NOT consume — WAL sync is reconstruction-
+				// only); replication is the caller's job via reaped_entries.
+				// remove() takes its own per-slot lock.
 				entry del;
 				del.key = key;
 				del.version = hdr.version;
@@ -1531,6 +1534,9 @@ int storage_rocksdb::reap_expired(time_t now, uint32_t max_scan, const string& a
 						&& r == result_deleted) {
 					reaped++;
 					this->_expire_reaped.incr();
+					if (reaped_entries != NULL) {
+						reaped_entries->push_back(del);   // key + the version we deleted at
+					}
 				}
 			}
 		}

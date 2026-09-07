@@ -246,7 +246,8 @@ public:
 	virtual uint32_t count();
 	virtual uint64_t size();
 	virtual int reap_expired(time_t now, uint32_t max_scan, const string& after_key,
-			string& last_key, bool& more, uint32_t& scanned, uint32_t& reaped);
+			string& last_key, bool& more, uint32_t& scanned, uint32_t& reaped,
+			vector<entry>* reaped_entries = NULL);
 
 	// Snapshot bootstrap (physical reseed = "snapshot + WAL catch-up" instead
 	// of the logical full dump). Master side: create a RocksDB checkpoint in a

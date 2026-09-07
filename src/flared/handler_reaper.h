@@ -56,6 +56,7 @@ public:
 
 protected:
 	bool _is_reap_target();
+	int _replicate_delete(const storage::entry& reaped);
 	bool _sleep_interruptible(int seconds);
 };
 

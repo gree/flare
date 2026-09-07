@@ -23,6 +23,7 @@
  *	implementation of gree::flare::handler_reaper
  */
 #include "handler_reaper.h"
+#include "op_delete.h"
 #include "ini_option.h"
 
 #include <unistd.h>
@@ -86,6 +87,7 @@ int handler_reaper::run() {
 		bool more = true;
 		uint64_t total_scanned = 0;
 		uint64_t total_reaped = 0;
+		uint64_t total_replicated = 0;
 		bool aborted = false;
 
 		while (more) {
@@ -103,7 +105,8 @@ int handler_reaper::run() {
 			uint32_t scanned = 0;
 			uint32_t reaped = 0;
 			string last;
-			if (this->_storage->reap_expired(now, max_scan, after, last, more, scanned, reaped) < 0) {
+			vector<storage::entry> reaped_entries;
+			if (this->_storage->reap_expired(now, max_scan, after, last, more, scanned, reaped, &reaped_entries) < 0) {
 				log_warning("reap_expired failed (after=%s) -> aborting this sweep", after.c_str());
 				aborted = true;
 				break;
@@ -111,6 +114,16 @@ int handler_reaper::run() {
 			total_scanned += scanned;
 			total_reaped += reaped;
 			after = last;
+			// Replicate every key we just deleted to this partition's slaves (and,
+			// through the proxy event listeners, to a cluster-replication
+			// destination) as a VERSION-CARRYING delete — the same wire op a
+			// client delete produces. Without this the reap stayed master-local
+			// (observed live: the slave carried ~10k more keys than its master).
+			for (vector<storage::entry>::const_iterator it = reaped_entries.begin(); it != reaped_entries.end(); it++) {
+				if (this->_replicate_delete(*it) == 0) {
+					total_replicated++;
+				}
+			}
 
 			if (more && chunk_sleep_msec > 0) {
 				usleep(static_cast<useconds_t>(chunk_sleep_msec) * 1000);
@@ -122,8 +135,9 @@ int handler_reaper::run() {
 		// emit a line every interval forever; the scanned count is still visible
 		// at debug level.
 		if (total_reaped > 0) {
-			log_info("reap_expired sweep done (reaped=%llu, scanned=%llu, aborted=%d)",
+			log_info("reap_expired sweep done (reaped=%llu, replicated=%llu, scanned=%llu, aborted=%d)",
 					(unsigned long long)total_reaped,
+					(unsigned long long)total_replicated,
 					(unsigned long long)total_scanned,
 					aborted ? 1 : 0);
 		} else {
@@ -143,7 +157,8 @@ int handler_reaper::run() {
 // {{{ protected methods
 /**
  *	true iff this node is the ACTIVE master of a partition — the only role that
- *	may issue reaping deletes (they replicate to slaves through the WAL).
+ *	may issue reaping deletes (each one is then forwarded to the slaves as a
+ *	version-carrying proxied delete, see _replicate_delete).
  */
 bool handler_reaper::_is_reap_target() {
 	if (this->_cluster == NULL) {
@@ -171,6 +186,37 @@ bool handler_reaper::_sleep_interruptible(int seconds) {
 	return !this->_thread->is_shutdown_request();
 }
 // }}}
+
+/**
+ *	forward one reaped key to the partition's slaves as a version-carrying
+ *	delete — the SAME thing op_delete::_run_server does after a client delete
+ *	is applied locally: cluster::post_proxy_write fans the op out to every
+ *	slave (and lets the proxy event listeners mirror it to a cluster-
+ *	replication destination). The version is the one the master deleted at,
+ *	so a slave applies it under remove()'s default rule — a delete older than
+ *	the slave's current version is ignored — and a newer set that raced ahead
+ *	is never clobbered. noreply/async: the sweep must not block per key.
+ *	Never call pre_proxy_write here: that would ROUTE the key to whatever
+ *	partition currently owns it, which for a not-yet-purged orphan would be a
+ *	foreign master holding a LIVE copy.
+ */
+int handler_reaper::_replicate_delete(const storage::entry& reaped) {
+	if (this->_cluster == NULL) {
+		return -1;
+	}
+	op_delete op(shared_connection(), this->_cluster, this->_storage);
+	storage::entry& e = op.get_entry();
+	e.key = reaped.key;
+	e.version = reaped.version;
+	e.expire = 0;
+	e.option = storage::option_noreply;
+	cluster::proxy_request r = this->_cluster->post_proxy_write(&op, false);
+	if (r == cluster::proxy_request_error_partition || r == cluster::proxy_request_error_enqueue) {
+		log_warning("reap replicate failed (key=%s, version=%u, r=%d)", reaped.key.c_str(), reaped.version, static_cast<int>(r));
+		return -1;
+	}
+	return 0;
+}
 
 }	// namespace flare
 }	// namespace gree

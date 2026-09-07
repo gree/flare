@@ -233,13 +233,18 @@ public:
 	// whose key is > after_key (empty = from the start), deletes the expired
 	// ones, sets last_key to the last key visited and more=true if further
 	// chunks remain. scanned/reaped are per-call counts. The deletes go
-	// through the normal write path so — on a WAL-replicated backend — they
-	// flow to the replicas (a RocksDB compaction filter would bypass the WAL
-	// and diverge followers). Default: not supported.
+	// through the normal write path (never a compaction filter, whose drops
+	// bypass the WAL and diverge followers). NOTE: a storage-level remove is
+	// LOCAL — live slaves are fed by op-level proxying, and WAL sync only runs
+	// at reconstruction — so the caller (handler_reaper) must replicate each
+	// reaped key itself: pass `reaped_entries` to receive (key, version) of
+	// every key actually deleted, and forward them as version-carrying
+	// deletes exactly like a client delete. Default: not supported.
 	virtual int reap_expired(time_t now, uint32_t max_scan, const string& after_key,
-			string& last_key, bool& more, uint32_t& scanned, uint32_t& reaped) {
+			string& last_key, bool& more, uint32_t& scanned, uint32_t& reaped,
+			vector<entry>* reaped_entries = NULL) {
 		(void)now; (void)max_scan; (void)after_key; (void)last_key; (void)more;
-		(void)scanned; (void)reaped;
+		(void)scanned; (void)reaped; (void)reaped_entries;
 		return -1;
 	}
 

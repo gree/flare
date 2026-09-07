@@ -104,6 +104,28 @@ namespace test_op_dump
 		}
 	}
 
+	// Regression: partition >= partition_size (incl. partition 0 with size 0,
+	// which dereferenced the resolver's NULL row 0) must be rejected at parse
+	// time, before run_server can reach the key resolver.
+	void test_parse_text_server_parameters_partition_out_of_range()
+	{
+		{
+			shared_connection c(new connection_sstream(" 0 0 0\r\n"));
+			test_op_dump op(c);
+			cut_assert_equal_int(-1, op._parse_text_server_parameters());
+		}
+		{
+			shared_connection c(new connection_sstream(" 1 2 2\r\n"));
+			test_op_dump op(c);
+			cut_assert_equal_int(-1, op._parse_text_server_parameters());
+		}
+		{
+			shared_connection c(new connection_sstream(" 1 5 2\r\n"));
+			test_op_dump op(c);
+			cut_assert_equal_int(-1, op._parse_text_server_parameters());
+		}
+	}
+
 	void test_parse_text_server_parameters_wait_partition_size_fail()
 	{
 		{

@@ -113,6 +113,14 @@ namespace test_metrics_formatter
 		cut_assert_true(contains(out, "flared_process_user_cpu_seconds_total 10.962023\n"));
 	}
 
+	// Replica writes the master gave up forwarding — silent divergence until
+	// the replica reconstructs, so it must be visible for alerting.
+	void test_proxy_write_dropped_gauge() {
+		push("proxy_write_dropped", "7");
+		string out = metrics_formatter::format(stats);
+		cut_assert_true(contains(out, "flare_node_proxy_write_dropped 7\n"));
+	}
+
 	// data-dir usage (statvfs): the tmpfs-RAM truth that container-level
 	// memory metrics miss — must reach /metrics for the dashboards.
 	void test_data_dir_usage_gauges() {

@@ -69,6 +69,20 @@ structure OperatorMetrics where
   -- human to investigate a stalled reconstruction.
   prepareStuckCount : Gauge
 
+  -- Gauge: nodes whose POD IS PRESENT but which stopped being Ready long
+  -- enough to be treated as dead (flared segfaulted or wedged). Pod
+  -- existence used to be the operator's only liveness signal, so these were
+  -- invisible AND undetected — a crashed master got no failover. Page on it:
+  -- unlike a vanished pod (rescheduling, routine) a live pod that stops
+  -- serving means the process itself is broken.
+  unhealthyNodes : Gauge
+
+  -- Gauge: nodes sitting Down while their pod is present. A Down node only
+  -- leaves that state by re-registering (i.e. flared restarting), so this is
+  -- the "stuck, needs a pod restart" population; the operator restarts them
+  -- itself once every partition has an Active master.
+  stuckDownNodes : Gauge
+
   -- Gauge: draining masters the drain guard kept because NO promotable
   -- successor exists. CRITICAL: each is a partition that loses its only
   -- data-bearing node when the pod's grace period expires; the operator
@@ -133,6 +147,8 @@ def initMetrics : IO OperatorMetrics := do
   let slavePrepareCount ← IO.mkRef 0.0
   let proxyCount ← IO.mkRef 0.0
   let prepareStuckCount ← IO.mkRef 0.0
+  let unhealthyNodes ← IO.mkRef 0.0
+  let stuckDownNodes ← IO.mkRef 0.0
   let drainNoSuccessor ← IO.mkRef 0.0
   let circuitBreakerTripped ← IO.mkRef 0.0
   let partitionsDesired ← IO.mkRef 0.0
@@ -151,6 +167,8 @@ def initMetrics : IO OperatorMetrics := do
     slavePrepareCount := { value := slavePrepareCount }
     proxyCount := { value := proxyCount }
     prepareStuckCount := { value := prepareStuckCount }
+    unhealthyNodes := { value := unhealthyNodes }
+    stuckDownNodes := { value := stuckDownNodes }
     drainNoSuccessor := { value := drainNoSuccessor }
     circuitBreakerTripped := { value := circuitBreakerTripped }
     partitionsDesired := { value := partitionsDesired }
@@ -311,6 +329,18 @@ def exportMetrics (metrics : OperatorMetrics) (clusterName : String) : IO String
   output := output ++ "# TYPE flare_operator_nodes_prepare_stuck gauge\n"
   let prepareStuck ← metrics.prepareStuckCount.value.get
   output := output ++ formatGauge "flare_operator_nodes_prepare_stuck" labels prepareStuck
+
+  -- Unhealthy nodes: pod present but not serving (gauge, CRITICAL)
+  output := output ++ "# HELP flare_operator_nodes_unhealthy Nodes whose pod is present but stopped being Ready long enough to be treated as dead (flared crashed or wedged)\n"
+  output := output ++ "# TYPE flare_operator_nodes_unhealthy gauge\n"
+  let unhealthy ← metrics.unhealthyNodes.value.get
+  output := output ++ formatGauge "flare_operator_nodes_unhealthy" labels unhealthy
+
+  -- Stuck Down nodes: Down but their pod is alive (gauge)
+  output := output ++ "# HELP flare_operator_nodes_down_stuck Nodes sitting Down while their pod is present (only a flared restart clears Down)\n"
+  output := output ++ "# TYPE flare_operator_nodes_down_stuck gauge\n"
+  let stuckDown ← metrics.stuckDownNodes.value.get
+  output := output ++ formatGauge "flare_operator_nodes_down_stuck" labels stuckDown
 
   -- Drain-no-successor (gauge, CRITICAL)
   output := output ++ "# HELP flare_operator_drain_no_successor Draining masters with no promotable successor (partition loses its only data-bearing node at grace expiry)\n"

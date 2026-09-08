@@ -57,7 +57,7 @@ inductive FlareReconcileStep where
 /-- Responses from the K8s API server. -/
 inductive K8sResponse where
   | CRDResponse (crd : Option FlareClusterView)
-  | PodListResponse (pods : List String) (zones : List (String × String)) (terminating : List String) (dataBearing : List String)
+  | PodListResponse (pods : List String) (zones : List (String × String)) (terminating : List String) (dataBearing : List String) (unhealthy : List String)
   | PatchResponse (success : Bool)
   | NoResponse
   deriving Repr
@@ -115,6 +115,15 @@ structure FlareReconcileState where
       flare_operator_drain_no_successor gauge — this is a CRITICAL,
       human-decision condition (see drainBlockedKeys). -/
   drainBlockedCount : Nat := 0
+  /-- Node keys whose POD IS PRESENT but has been NotReady long enough that
+      the IO shell considers the node not serving (see FLARE_UNREADY_DEAD_CYCLES).
+      Dead-node detection treats these exactly like a vanished pod: pod
+      EXISTENCE alone used to be the only liveness signal, so a flared that
+      segfaulted (container restarts, pod object stays with the same name and
+      IP) was never detected — it stayed Active in the committed map while the
+      master kept proxying writes into a dead socket, and a crashed MASTER got
+      no failover at all. Observed live 2026-09-07. -/
+  unhealthyKeys : List String := []
   /-- Node keys whose flared reported curr_items > 0 this tick (queried by
       the IO shell). Used by the masterless refill so an EMPTY ex-master is
       never crowned over a data-bearing copy (observed live: a rolled-empty
@@ -934,9 +943,10 @@ theorem deprioritizeStandbySlaves_nodeMap (sk : List String)
       pod may briefly drop from the ready list; marking them dead would abort the
       reconstruction and trigger a needless rebalance. -/
 def detectDeadNodesPure (state : FlareClusterState) (livePodKeys : List String)
+    (unhealthyKeys : List String := [])
     : List String :=
   state.nodeMap.filter (fun (key, node) =>
-    !livePodKeys.contains key
+    (!livePodKeys.contains key || unhealthyKeys.contains key)
     && node.role != FlareRole.Proxy
     && node.state != FlareState.Down
     && node.state != FlareState.Prepare) |>.map Prod.fst
@@ -1129,7 +1139,7 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
 
   | .AfterListPods =>
     match resp with
-    | .PodListResponse pods zones terminating dataBearing =>
+    | .PodListResponse pods zones terminating dataBearing unhealthy =>
       -- CRITICAL: Check grace period (Main.lean:355-359)
       if s.graceCycles > 0 then
         -- Still in startup grace period - skip dead node detection AND drain
@@ -1137,6 +1147,7 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
                   livePodKeys := pods,
                   podZones := zones,
                   dataBearingKeys := dataBearing,
+                  unhealthyKeys := unhealthy,
                   deadNodeKeys := [],
                   terminatingKeys := terminating,
                   drainNodeKeys := [],
@@ -1148,12 +1159,13 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
       else
         -- Grace period over - normal dead-node detection + graceful drain of
         -- any Terminating (deletionTimestamp) master/slave that is still alive.
-        let deadKeys := detectDeadNodesPure clusterState pods
+        let deadKeys := detectDeadNodesPure clusterState pods unhealthy
         let drainKeys := detectDrainingNodesPure clusterState terminating
         ({ s with reconcileStep := .AfterDetectDead,
                   livePodKeys := pods,
                   podZones := zones,
                   dataBearingKeys := dataBearing,
+                  unhealthyKeys := unhealthy,
                   deadNodeKeys := deadKeys,
                   terminatingKeys := terminating,
                   drainNodeKeys := drainKeys,
@@ -1181,7 +1193,16 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
     else
       -- Check circuit breaker
       let (nextStep, breakerEffects) := circuitBreakerDecision deadCount totalNodes breakerCfg s.wasTripped
-      let allEffects := .Log s!"[flare-operator] detected {deadCount} dead nodes: {s.deadNodeKeys}" :: breakerEffects
+      -- Split the reason: a vanished pod is routine (rescheduling), a PRESENT
+      -- pod that stopped being Ready means flared itself died or wedged.
+      let unhealthyDead := s.deadNodeKeys.filter (fun k => s.unhealthyKeys.contains k)
+      let allEffects :=
+        (if unhealthyDead.isEmpty then
+          [.Log s!"[flare-operator] detected {deadCount} dead nodes: {s.deadNodeKeys}"]
+        else
+          [.Log s!"[flare-operator] detected {deadCount} dead nodes: {s.deadNodeKeys}",
+           .Log s!"[flare-operator] CRITICAL: {unhealthyDead.length} of them are LIVE PODS that stopped serving (flared crashed/wedged, pod still present): {unhealthyDead}"])
+        ++ breakerEffects
       ({ s with reconcileStep := nextStep,
                 failoverTriggered := (nextStep == .AfterHandleFailover),
                 -- Tripped this pass (RecoveryRefill or EmergencyPaused): feed
@@ -1443,12 +1464,12 @@ theorem flareReconcileStep_decreases_measure (resp : K8sResponse)
       cases crd with
       | some c => left; simp [flareReconcileCore, h, flareReconcileMeasure]
       | none => right; simp [flareReconcileCore, h, flareReconcileTerminalBool]
-    | PodListResponse _ _ _ _ => right; simp [flareReconcileCore, h, flareReconcileTerminalBool]
+    | PodListResponse _ _ _ _ _ => right; simp [flareReconcileCore, h, flareReconcileTerminalBool]
     | PatchResponse _ => right; simp [flareReconcileCore, h, flareReconcileTerminalBool]
     | NoResponse => right; simp [flareReconcileCore, h, flareReconcileTerminalBool]
   | AfterListPods =>
     cases resp with
-    | PodListResponse pods zones terminating dataBearing =>
+    | PodListResponse pods zones terminating dataBearing unhealthy =>
       simp only [flareReconcileCore, h]
       split <;> (left; simp [flareReconcileMeasure])
     | CRDResponse _ => right; simp [flareReconcileCore, h, flareReconcileTerminalBool]

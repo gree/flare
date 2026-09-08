@@ -47,6 +47,50 @@ spec:
         # NOTHING automatic can prevent that (pod deletion is irreversible;
         # tmpfs reseeds rewind to the last S3 backup). The grace window is
         # short — page immediately, no `for` debounce.
+        # A node whose POD IS PRESENT but which stopped being Ready long
+        # enough that the operator treats it as dead. Distinct from a
+        # vanished pod (rescheduling, routine): the pod is there, so the
+        # PROCESS is broken — flared segfaulted, hung, or wedged. Before this
+        # detection existed, pod existence was the operator's only liveness
+        # signal and such a node stayed Active forever: writes were proxied
+        # into a dead socket and a crashed MASTER got no failover at all.
+        - alert: FlareNodeUnhealthy
+          expr: flare_operator_nodes_unhealthy > 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Flare cluster {{`{{ $labels.cluster }}`}}: a live pod stopped serving (flared crashed or wedged) — failed over"
+            runbook: docs/RUNBOOK.md#node-unhealthy
+
+        # A node sits Down while its pod is present. Down only clears by
+        # RE-REGISTERING, which needs a fresh flared process, so this is the
+        # "stuck" population. The operator restarts such a pod itself once
+        # every partition has an Active master; this firing for longer than
+        # that means the recovery is gated off (masterless partition or a
+        # tripped breaker) and a human should look.
+        - alert: FlareNodeDownStuck
+          expr: flare_operator_nodes_down_stuck > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Flare cluster {{`{{ $labels.cluster }}`}}: node Down with its pod alive for 15m — automatic restart is gated off"
+            runbook: docs/RUNBOOK.md#node-down-stuck
+
+        # The master GAVE UP forwarding a write to a replica (proxy retries
+        # exhausted). The client already got its success, so the replica now
+        # silently diverges until it reconstructs — this counter is the only
+        # signal. Live replication is op-level proxying with no per-write
+        # acknowledgement to fall back on.
+        - alert: FlareProxyWriteDropped
+          expr: increase(flare_node_proxy_write_dropped[10m]) > 0
+          labels:
+            severity: critical
+          annotations:
+            summary: "Flare node {{`{{ $labels.pod }}`}}: dropped replica write(s) — replica diverges until it reconstructs"
+            runbook: docs/RUNBOOK.md#proxy-write-dropped
+
         - alert: FlareDrainNoSuccessor
           expr: flare_operator_drain_no_successor > 0
           labels:

@@ -57,6 +57,11 @@ protected:
 	AtomicCounter _cmd_set;
 	AtomicCounter _get_hits;
 	AtomicCounter _get_misses;
+	// Writes the master gave up forwarding to a replica: queue_proxy_write
+	// exhausted its retries and DROPPED the op. The client already got its
+	// success (the master's own write succeeded), so this is silent replica
+	// divergence — the only signal that it happened. Monotonic.
+	AtomicCounter _proxy_write_dropped;
 	AtomicCounter _delete_hits;
 	AtomicCounter _delete_misses;
 	AtomicCounter _incr_hits;
@@ -84,6 +89,7 @@ public:
 	inline int increment_cmd_set()               { this->_cmd_set.incr();return 0; };
 	inline int increment_get_hits()              { this->_get_hits.incr();return 0; };
 	inline int increment_get_misses()            { this->_get_misses.incr();return 0; };
+	inline int increment_proxy_write_dropped()   { this->_proxy_write_dropped.incr();return 0; };
 	inline int increment_delete_hits()           { this->_delete_hits.incr();return 0; };
 	inline int increment_delete_misses()         { this->_delete_misses.incr();return 0; };
 	inline int increment_incr_hits()             { this->_incr_hits.incr();return 0; };
@@ -117,6 +123,7 @@ public:
 	uint64_t get_cmd_set();
 	uint64_t get_get_hits();
 	uint64_t get_get_misses();
+	uint64_t get_proxy_write_dropped();
 	uint64_t get_delete_hits();
 	uint64_t get_delete_misses();
 	uint64_t get_incr_hits();

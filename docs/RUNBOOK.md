@@ -121,6 +121,79 @@ and events; fix the underlying cause. Churn is safe for data (promotion
 only ever selects live, data-bearing replicas) but each cycle costs
 reconstruction bandwidth.
 
+## FlareNodeUnhealthy (critical) {#node-unhealthy}
+
+A node's POD IS PRESENT but it stopped being Ready long enough that the
+operator treated it as dead and failed over. This is NOT a rescheduling
+event — the pod is there, so the flared PROCESS is broken: segfault (the
+container restarts under the same pod name and IP), a hang, or a wedge.
+Before this detection existed the operator's only liveness signal was pod
+existence, so such a node stayed Active indefinitely: the master kept
+proxying writes into a dead socket and a crashed MASTER got no failover.
+
+1. Which node, and did the container restart?
+   `kubectl -n <ns> get pods -o wide` — a non-zero RESTARTS with
+   `lastState.terminated.exitCode` 139 (SIGSEGV) or 137 (OOMKill) tells you
+   which. Read that pod's previous logs: `kubectl logs <pod> -c flared
+   --previous`.
+2. Confirm the failover landed: `node sync` shows an Active master for the
+   partition, and the promoted node is the data-bearing one.
+3. Recovery is automatic — the container restarts (kubelet liveness is a
+   tcpSocket probe, ~30s), flared re-registers, goes Prepare, catches up via
+   WAL, and returns Active. If it does not, see
+   [node-down-stuck](#node-down-stuck).
+4. **Check for divergence caused by the outage**: while the node was dead the
+   master dropped the writes it could not forward. Look at
+   `flare_node_proxy_write_dropped` on the master over the incident window
+   (see [proxy-write-dropped](#proxy-write-dropped)).
+5. If the exit code was 139, capture the log line before the crash and file
+   it — flared should not segfault.
+
+## FlareNodeDownStuck (warning) {#node-down-stuck}
+
+A node sits Down while its pod is alive. Down does not clear itself: the
+operator only re-seats a node that RE-REGISTERS, and while the committed map
+says Down the readiness probe keeps failing (it asks flared for its own
+Active state), so only a fresh flared process breaks the loop.
+
+The operator restarts such a pod itself after ~5 min
+(`FLARE_DOWN_RESTART_CYCLES`), but only when **every partition already has an
+Active master** and the circuit breaker is not tripped — deleting a pod on a
+tmpfs cluster erases that node's copy, so the gate exists to never destroy
+the last one. This alert firing for 15 min means the gate is holding.
+
+1. Why is the gate closed? `node sync` — is a partition masterless
+   ([master-missing](#master-missing)), or is the breaker tripped
+   ([circuit-breaker](#circuit-breaker))? Fix that first; the restart then
+   happens on its own.
+2. If you must act manually, confirm another node holds the partition's data
+   (`printf 'stats\r\n' | nc <pod-ip> 12121`, compare `curr_items`) BEFORE
+   deleting the Down pod.
+3. Never delete both replicas of a partition on a tmpfs cluster.
+
+## FlareProxyWriteDropped (critical) {#proxy-write-dropped}
+
+A master GAVE UP forwarding writes to a replica: `queue_proxy_write`
+exhausted its retries and dropped the op. The client was already told the
+write succeeded (the master's own write did succeed), so **that replica now
+silently diverges until it reconstructs**. Live replication is op-level
+proxying with no per-write acknowledgement, so this counter is the only
+signal — see docs/STPA-node-state.md (gap G1).
+
+1. Scope it: `increase(flare_node_proxy_write_dropped[1h])` per pod, and
+   correlate with the replica's health over the same window (a
+   [node-unhealthy](#node-unhealthy) event, a pod restart, or a network
+   incident).
+2. The divergence does not repair itself. To force a clean copy, make the
+   replica reconstruct: delete the REPLICA's pod (never the master's), then
+   watch it go Prepare → Active. On a PVC cluster the WAL path makes this
+   incremental; on tmpfs it is a full reseed.
+3. Verify convergence: `curr_items` on master and replica should agree
+   (allow a small lag for in-flight writes).
+4. If drops recur without a node incident, suspect the network path
+   (cross-AZ / peering) and check the master's flared log for the
+   `proxy write DROPPED` lines — they name the destination and the key.
+
 ## FlareDrainNoSuccessor (critical) {#drain-no-successor}
 
 A Terminating (draining) master has NO promotable slave. The operator keeps

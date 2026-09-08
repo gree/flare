@@ -84,6 +84,7 @@ const command_mapping memcached_commands[] = {
 // pass the numeric check and are emitted verbatim as fixed-point seconds
 const stat_mapping flared_gauges[] = {
 	{ "node_map_version",   "flared_node_map_version",                 "gauge"   },
+	{ "proxy_write_dropped",     "flare_node_proxy_write_dropped",     "counter" },
 	{ "data_dir_used_bytes",     "flare_node_data_dir_used_bytes",     "gauge"   },
 	{ "data_dir_capacity_bytes", "flare_node_data_dir_capacity_bytes", "gauge"   },
 	{ "total_thread_queue", "flared_thread_queue_total",               "gauge"   },

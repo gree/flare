@@ -69,7 +69,16 @@ jobs:
       - name: Build Lean operator
         run: |
           cd flare_operator
-          lake build FlareOperator flare_operator flare_e2e
+          # Retry once: the runner's clang dies with SIGBUS (exit 135) partway
+          # through this build often enough to have failed two consecutive
+          # otherwise-green runs — a host-side fault (memory/disk pressure
+          # during heavy codegen), not a compile error. A second attempt with
+          # the partial build cached takes a couple of minutes and clears it.
+          # A REAL compile error fails both attempts and still fails the job.
+          lake build FlareOperator flare_operator flare_e2e || {
+            echo "::warning::lake build failed (likely the clang SIGBUS runner flake) — retrying once"
+            lake build FlareOperator flare_operator flare_e2e
+          }
 
       - name: Create kind cluster
         run: kind create cluster --name flare-e2e --wait 120s

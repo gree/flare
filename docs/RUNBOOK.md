@@ -142,6 +142,14 @@ proxying writes into a dead socket and a crashed MASTER got no failover.
    tcpSocket probe, ~30s), flared re-registers, goes Prepare, catches up via
    WAL, and returns Active. If it does not, see
    [node-down-stuck](#node-down-stuck).
+3b. **If the log says the master was KEPT** ("has NO promotable successor —
+   kept as master"), the partition has no replica to promote, so the
+   operator deliberately did not demote it: demoting would only make the
+   partition masterless sooner and break the returning process's clean
+   rejoin. Note `FlareMasterMissing` will NOT fire here (the map still shows
+   a master) — this alert is the signal. The partition serves nothing until
+   that process comes back; if it will not, restore from backup
+   (docs/BACKUP_RESTORE.md). Standing fix: run the partition with a replica.
 4. **Check for divergence caused by the outage**: while the node was dead the
    master dropped the writes it could not forward. Look at
    `flare_node_proxy_write_dropped` on the master over the incident window

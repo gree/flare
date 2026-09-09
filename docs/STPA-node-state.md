@@ -76,7 +76,7 @@ it can never report "flared is serving the wrong data".
 | # | Trigger | Detector | Condition | Action | How it leaves Down |
 |---|---|---|---|---|---|
 | D1 | Pod object gone (delete, evict, reschedule) | operator `detectDeadNodesPure` | key absent from F1, role≠Proxy, state∉{Down,Prepare} | demote to Proxy/Down/partition −1, promote a data-bearing slave | new pod registers (F3) → Prepare → catch up |
-| D2 | Pod present but not serving (segfault, hang, wedge) | operator, **rc59** | F2 NotReady for `FLARE_UNREADY_DEAD_CYCLES` ticks (default 6 ≈ 30s) on top of kubelet's 3 failures | same as D1 | container restart (kubelet liveness, or D6) → re-register |
+| D2 | Pod present but not serving (segfault, hang, wedge) | operator, **rc59** | F2 NotReady for `FLARE_UNREADY_DEAD_CYCLES` ticks (default 6 ≈ 30s) on top of kubelet's 3 failures | same as D1 — **except** a master with no promotable successor, which is KEPT as master (`unhealthyMastersKept`) and only logged CRITICAL | container restart (kubelet liveness, or D6) → re-register |
 | D3 | Repeated resync failure | flared itself | failure streak ≥ `rocksdb-resync-failure-threshold` | flared asks the index to mark it down (`request_down_node`) | human, or restart |
 | D4 | Graceful drain, no successor | operator drain guard | Terminating master, no promotable slave | **NOT demoted** — stays master to the end; CRITICAL alert | pod dies; partition is masterless until a copy returns |
 | D5 | Mass failure | operator circuit breaker | ≥ `tripThresholdPercent` of Active nodes dead at once | failover **paused**: no Down transitions | breaker clears when the fraction drops |
@@ -86,6 +86,67 @@ Invariant worth remembering: **Down never clears itself.** `assignProxiesPure`
 skips Down nodes, and readiness stays failed while the map says Down, so the
 only exit is a fresh flared process re-registering. D6 exists because D2
 introduced a new way in.
+
+### Why D2 does not demote a lone master
+
+Demoting a master that has no promotable successor achieves nothing — there
+is nobody to promote — while it actively hurts: the partition is declared
+masterless sooner, and the node loses the partition assignment that the
+rejoin path keys off (`old.partition >= 0` in `Reconciler.lean`), so a
+process that is very likely back within seconds takes the fresh-registration
+route instead of the clean rejoin. Keeping it master costs nothing, because
+a NotReady pod is already out of the client LB. This is the same decision
+the drain guard makes for a Terminating master
+(`handleDrainWithPromotionSingleKey` demotes ONLY together with a successful
+promotion). A vanished pod (D1) is different — nothing is coming back under
+that entry — and still fails over.
+
+Consequence for alerting: the partition serves nothing but still *has* a
+master in the map, so `FlareMasterMissing` does NOT fire. The signal is
+`FlareNodeUnhealthy` (critical) plus the CRITICAL log line naming the node.
+
+### R1 — recovery without ever going Down
+
+Not every failure produces a Down transition, and the most common one does
+not. When a container restarts, flared re-registers over TCP (F3) and the
+rejoin branch in `Reconciler.lean` puts the returning node back as
+**Slave/Prepare** with `lastMasterOf` stamped — deliberately never straight
+back to master, because on tmpfs it returns empty. Its partition is then
+masterless, so `promoteMasterlessPartitions` seats a data-bearing copy on
+the next tick (rc55 guards prefer one that actually holds data). This path
+is ~5–10s, faster than D2, and it is why the 2026-09-07 segfault recovered
+even though nothing detected it.
+
+## 4b. Failure patterns → which detector fires
+
+| Pattern | What K8s does | Signal the operator sees | Path | Latency |
+|---|---|---|---|---|
+| Process exits (segfault, panic) and restarts promptly | container restarts, pod keeps its name and IP | `node add` re-registration (F3) | **R1** — no Down at all | ~5–10s |
+| Same, but CrashLoopBackOff keeps it down | backoff grows, pod stays NotReady | Ready=False (F2) | **D2** | kubelet ~15s + operator ~30s ≈ 45s |
+| OOMKill, single | container restarts (exit 137) | as above | **R1** | ~5–10s |
+| OOMKill, repeating | CrashLoopBackOff | Ready=False | **D2** | ~45s |
+| flared hangs but the port still accepts | tcpSocket liveness **passes** | readiness exec times out → Ready=False | **D2** | ~45s (liveness cannot see this) |
+| Pod deleted / evicted / rescheduled | pod object disappears | key absent from the pod list (F1) | **D1** | 1 tick |
+| Graceful delete with preStop | Terminating, still Ready | deletionTimestamp | **D4** drain (demote + promote inside the window) | 1 tick |
+| Worker node unreachable (kubelet dead, VM hung) | node Ready→Unknown after the monitor grace period, then the node controller marks its pods NotReady; eviction adds a deletionTimestamp later (default 5 min) | Ready=False, then Terminating | **D2**, later **D4** | ≈ node grace + 30s (before rc59: only the 5-min eviction) |
+| Node object deleted / VM gone | pods garbage-collected | key absent from the pod list | **D1** | 1 tick |
+| Network partition: pod alive and Ready, operator cannot reach it | nothing — kubelet is local and keeps reporting Ready | none (broadcasts fail, bounded and logged) | **NOT DETECTED** | — |
+| flared alive and Ready but serving diverged data | nothing | none | **NOT DETECTED** (G2) | — |
+
+Terminating pods are excluded from the D2 population on purpose
+(`!p.terminating` in the pod scan): a draining pod belongs to D4, and on a
+lost node it can stay Terminating indefinitely, so D6 skips it too rather
+than re-issuing a delete that can never complete.
+
+The node-failure timings above are kube-controller-manager settings
+(`node-monitor-grace-period`, the unreachable toleration) on a managed
+control plane — we do not own them, so treat the numbers as the documented
+defaults rather than as measured on this cluster.
+
+The operator collects `PodInfo.nodeName` but does not use it: it cannot
+currently tell "one process died" from "every pod on node X went unhealthy
+at once". Correlating by node would make the second case identifiable
+(and is the natural place to be more conservative about failing over).
 
 ## 5. Unsafe Control Actions
 
@@ -97,6 +158,7 @@ introduced a new way in.
 | Not provided | Replica silently misses writes but answers probes | H3 | **GAP G1/G2** — no per-write ack, no anti-entropy |
 | Provided | Healthy replica demoted on a false positive | H5 if both replicas are hit | mitigated: kubelet 3 failures + 6 operator ticks; breaker (D5) caps mass demotion |
 | Wrong order | Master demoted before a data-bearing successor exists | H1, H2 | mitigated: drain guard (D4), promotion prefers an Active data-bearing slave (rc55) |
+| Provided | Lone master (no replica) demoted on D2 — strips the partition and breaks the clean rejoin for a process about to return | H1 | mitigated rc59: `unhealthyMastersKept` keeps it, CRITICAL log only |
 | Too long | Node left Down forever with a healthy process | L4 (capacity), H5 if the peer then fails | mitigated: D6 |
 
 ### A1b — promote a node to master

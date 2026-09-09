@@ -467,6 +467,38 @@ def drainBlockedKeys (post : FlareClusterState) (drainKeys : List String)
     | some node => node.role == FlareRole.Master
     | none => false
 
+/-- Dead keys we deliberately DO NOT fail over: a master that is STILL
+    PRESENT (flagged by the unhealthy path — its pod exists — rather than by
+    a vanished pod) and has no promotable successor.
+
+    Demoting it achieves nothing: there is nobody to promote, so the only
+    effects are harmful — the partition is declared masterless sooner, the
+    node loses the partition assignment the rejoin path keys off
+    (`old.partition >= 0`), so the process that will most likely be back in
+    seconds takes the messier fresh-registration route, and the cluster pays
+    a topology churn for it. Keeping it master costs nothing either: it is
+    NotReady, so K8s has already pulled it out of the client LB.
+
+    This is exactly the decision the drain guard already makes for a
+    Terminating master (handleDrainWithPromotionSingleKey demotes ONLY
+    together with a successful promotion). A VANISHED pod is a different
+    case — nothing is coming back under that entry — and still fails over.
+
+    A successor counts only if it is an Active Slave of the same partition
+    whose own pod is live and not itself unhealthy. -/
+def unhealthyMastersKept (state : FlareClusterState)
+    (deadKeys unhealthyKeys livePodKeys : List String) : List String :=
+  deadKeys.filter fun key =>
+    unhealthyKeys.contains key &&
+    (match state.lookupNode key with
+     | none => false
+     | some node =>
+       node.role == FlareRole.Master &&
+       !(state.nodeMap.any (fun kv =>
+           kv.2.role == FlareRole.Slave && kv.2.state == FlareState.Active
+             && kv.2.partition == node.partition
+             && livePodKeys.contains kv.1 && !unhealthyKeys.contains kv.1)))
+
 /-- Demote every Master that duplicates an EARLIER Master of the same
     partition in the list (first Master for a partition wins; later ones are
     demoted back to an unassigned Proxy and will be re-assigned by the next
@@ -1215,11 +1247,15 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
     -- master's live slave is promoted (preserving the partition's data), not left
     -- for the empty recreated pod to grab. rebuildPartitionMap first so the
     -- promotion sees an accurate master/slave grouping.
+    -- Keep an unhealthy-but-present master that has no successor (see
+    -- unhealthyMastersKept): failing it over would only strip the partition.
+    let keptMasters := unhealthyMastersKept clusterState s.deadNodeKeys s.unhealthyKeys s.livePodKeys
+    let failoverKeys := s.deadNodeKeys.filter (fun k => !keptMasters.contains k)
     let afterFailover :=
-      if s.failoverTriggered then
+      if s.failoverTriggered && !failoverKeys.isEmpty then
         handleFailoverWithPromotion
           (deprioritizeStandbySlaves s.standbyNodeKeys clusterState.rebuildPartitionMap)
-          s.deadNodeKeys
+          failoverKeys
       else
         clusterState
     -- Graceful drain: demote Terminating masters/slaves to a LIVE proxy and
@@ -1245,9 +1281,11 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
       else [FlareEffect.Log s!"[flare-operator] graceful drain: demoting Terminating node(s) to live proxy + promoting replacement(s): {s.drainNodeKeys}"]
     let blockedEffects := blocked.map fun k =>
       FlareEffect.Log s!"[flare-operator] CRITICAL: draining master {k} has NO promotable successor — kept as master until its grace period expires; the partition then loses its only data-bearing node (tmpfs: rewind to last S3 backup on reseed). Operator cannot recover this. See RUNBOOK #drain-no-successor"
+    let keptEffects := keptMasters.map fun k =>
+      FlareEffect.Log s!"[flare-operator] CRITICAL: master {k} is NOT SERVING (pod present, NotReady) and has NO promotable successor — kept as master rather than demoted, because demoting would only make the partition masterless sooner and break its clean rejoin. The partition is serving nothing until this process recovers. See RUNBOOK #node-unhealthy"
     ({ s with reconcileStep := .AfterAssignRoles,
               updatedClusterState := some newState,
-              drainBlockedCount := blocked.length }, none, drainEffects ++ blockedEffects)
+              drainBlockedCount := blocked.length }, none, drainEffects ++ blockedEffects ++ keptEffects)
 
   | .AfterAssignRoles =>
     -- Assign proxy roles (Main.lean:323-330)
@@ -1367,9 +1405,13 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
     -- EmergencyPaused terminal exactly as before.
     match s.cachedCrd with
     | some crd =>
+      -- Same guard as the normal path: an unhealthy-but-present master with
+      -- no successor is kept, not stripped (see unhealthyMastersKept).
+      let failoverKeys := s.deadNodeKeys.filter (fun k =>
+        !(unhealthyMastersKept clusterState s.deadNodeKeys s.unhealthyKeys s.livePodKeys).contains k)
       let afterFailover :=
-        if s.deadNodeKeys.isEmpty then clusterState
-        else handleFailoverWithPromotion clusterState.rebuildPartitionMap s.deadNodeKeys
+        if failoverKeys.isEmpty then clusterState
+        else handleFailoverWithPromotion clusterState.rebuildPartitionMap failoverKeys
       let recovered := promoteMasterlessPartitions afterFailover crd s.livePodKeys [] s.dataBearingKeys
       let refilled := (List.range crd.spec.partitions).filter (fun p =>
         !FlareOperator.Reconciler.hasMasterForPartition afterFailover p

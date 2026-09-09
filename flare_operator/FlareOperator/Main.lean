@@ -536,7 +536,11 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
     | .ok pods =>
       -- Convert pod names to node keys (FQDNs with port) to match nodeMap keys
       let podKeys := pods.map Bridge.PodInfo.toNodeKey
-      podKeysRef.set podKeys
+      -- Stuck-Down recovery reads this to answer "is there a pod to restart?".
+      -- Terminating pods are excluded: they are already on their way out (and
+      -- on a lost node they stay Terminating until the node object is
+      -- removed, so deleting them again would just repeat forever).
+      podKeysRef.set ((pods.filter (fun p => !p.terminating)).map Bridge.PodInfo.toNodeKey)
       -- LIVENESS BEYOND POD EXISTENCE. `podKeys` says the pod OBJECT exists,
       -- which a segfaulted flared still satisfies (the container restarts
       -- under the same pod name and IP) — so dead detection never fired and a

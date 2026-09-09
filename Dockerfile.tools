@@ -17,19 +17,30 @@
 # dance (installed, used for the gem build, then removed to keep the image small).
 FROM ruby:2.7-slim
 
-# Debian bullseye (what ruby:2.7-slim is built on) went EOL and its
-# bullseye-security Release file now fails apt's freshness check, which fails
-# the build outright. There is no non-EOL base for this image: ruby 2.7 never
-# got a bookworm variant, and the flare-tools gem predates ruby 3's breaking
-# changes (see the note above), so bumping the base means losing the tool.
+# Debian bullseye (what ruby:2.7-slim is built on) reached EOL: its packages
+# moved off deb.debian.org to archive.debian.org (404 on every .deb) and the
+# Release files there are permanently past Valid-Until. Both have to be
+# handled or this image cannot build at all.
 #
-# Check-Valid-Until=false disables only the EXPIRY check. Package signatures
-# are still verified, so this is not "install anything unsigned" — it is
-# "accept that this suite stopped being refreshed". Everything installed here
-# is either purged in the same layer or is a runtime lib for a read-only
-# debug tool that is never part of the serving path. Revisit if flare-tools
-# is ever ported to a supported ruby.
-RUN apt-get -o Acquire::Check-Valid-Until=false update \
+# There is no non-EOL base available: ruby 2.7 never got a bookworm variant,
+# and the flare-tools gem predates ruby 3's breaking changes (see the note
+# above), so bumping the base image means losing the tool.
+#
+# Check-Valid-Until=false disables only the EXPIRY check — package signatures
+# are still verified, so this accepts "this suite stopped being refreshed",
+# not "install anything unsigned".
+#
+# bullseye-security and bullseye-updates are dropped rather than redirected:
+# neither is published on the archive (the security suite 404s there), and
+# both stopped receiving anything at EOL, so they carry nothing the frozen
+# main archive lacks. Everything installed is either purged in the same layer
+# or is a runtime lib for a read-only debug tool that never sits in the
+# serving path. Revisit if flare-tools is ever ported to a supported ruby.
+RUN sed -i -e 's|http://deb.debian.org|http://archive.debian.org|g' \
+           -e '/-security/d' \
+           -e '/bullseye-updates/d' \
+           /etc/apt/sources.list \
+    && apt-get -o Acquire::Check-Valid-Until=false update \
     && apt-get install -y --no-install-recommends \
          build-essential libtokyocabinet-dev zlib1g-dev libbz2-dev netcat-openbsd \
     && gem install flare-tools --no-document \

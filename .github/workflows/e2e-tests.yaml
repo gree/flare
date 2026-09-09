@@ -69,15 +69,29 @@ jobs:
       - name: Build Lean operator
         run: |
           cd flare_operator
-          # Retry once: the runner's clang dies with SIGBUS (exit 135) partway
-          # through this build often enough to have failed two consecutive
-          # otherwise-green runs — a host-side fault (memory/disk pressure
-          # during heavy codegen), not a compile error. A second attempt with
-          # the partial build cached takes a couple of minutes and clears it.
-          # A REAL compile error fails both attempts and still fails the job.
-          lake build FlareOperator flare_operator flare_e2e || {
-            echo "::warning::lake build failed (likely the clang SIGBUS runner flake) — retrying once"
-            lake build FlareOperator flare_operator flare_e2e
+          # SEPARATE invocations on purpose. Naming the library and an
+          # executable whose root is one of its modules (flare_operator is
+          # rooted at FlareOperator.Main) in ONE parallel `lake build` races:
+          # lake can emit Main:c.o from the LIBRARY elaboration — which has no
+          # `main` entry point — before the executable-root elaboration runs,
+          # and the link then dies with `ld.lld: error: undefined symbol:
+          # main`. Seen 2026-09-09 after months of the combined command
+          # passing; the build order in a good run is Main → Main → Main:c.o,
+          # in the bad one Main → Main:c.o → Main.
+          build_all() {
+            lake build FlareOperator \
+              && lake build flare_operator \
+              && lake build flare_e2e
+          }
+          # Retry once from a CLEAN tree. The runner's clang also dies with
+          # SIGBUS (exit 135) occasionally (two consecutive otherwise-green
+          # runs); a plain retry would re-link whatever partial objects the
+          # first attempt left behind and fail the same way, so wipe them.
+          # A real compile error fails both attempts and still fails the job.
+          build_all || {
+            echo "::warning::lake build failed — cleaning and retrying once"
+            lake clean
+            build_all
           }
 
       - name: Create kind cluster

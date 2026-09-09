@@ -26,6 +26,30 @@ open FlareOperator.Reconciler (autoAssign)
 -- FSM Step Enumeration
 -- ===========================================================================
 
+/-- First slave of `partIdx` that is actually a promotable successor:
+    role Slave, that partition, and **Active**.
+
+    `rebuildPartitionMap` files every slave under its partition regardless of
+    state, so `part.slaves.head?` can hand back a slave that is still
+    reconstructing. Promoting one is not a small mistake: Master/Active is an
+    authoritative designation — the node STOPS reconstructing and starts
+    serving the partial copy it happens to hold — so a drain or a failover
+    could quietly install an under-filled master while the drain guard's
+    "no successor" CRITICAL stayed silent, because from its point of view a
+    successor existed.
+
+    Callers that find none fall back correctly: the drain guard keeps the
+    master (and reports it), and failover leaves the partition to
+    promoteMasterlessPartitions, which chooses with data-bearing
+    information rather than list order. -/
+def findActiveSuccessor (s : FlareClusterState) (part : FlarePartition) (partIdx : Int)
+    : Option String :=
+  part.slaves.find? (fun k =>
+    match s.lookupNode k with
+    | some n => n.role == FlareRole.Slave && n.partition == partIdx
+                  && n.state == FlareState.Active
+    | none => false)
+
 /-- Reconciler FSM states, modeling the complete steps of reconcileOnce.
     Models ALL steps from Main.lean:72-101 including previously missing ones:
     - Proxy Assignment (Main.lean:323)
@@ -366,18 +390,20 @@ def handleFailoverWithPromotionSingleKey (s : FlareClusterState) (key : String)
       match s.partitionMap.find? (fun (idx, _) => Int.ofNat idx == partIdx) with
       | none => s
       | some (_, part) =>
-        match part.slaves.head? with
-        | none => s  -- no slave to promote; slot stays empty until a node registers
+        match findActiveSuccessor s part partIdx with
+        | none => s  -- no IN-SYNC slave; the masterless refill decides, with data
         | some slaveKey =>
           match s.lookupNode slaveKey with
           | none => s
           | some slaveNode =>
-            -- Defensive: promote only a node that CURRENTLY has role Slave.
-            -- The partitionMap the caller rebuilt should guarantee this, but
-            -- checking here makes the precondition local — both hardening
-            -- against a stale map and letting the general safety proof read
-            -- the guarantee off this branch instead of trusting the caller.
-            if slaveNode.role == FlareRole.Slave && slaveNode.partition == partIdx then
+            -- Defensive: promote only a node that CURRENTLY has role Slave and
+            -- is Active. The partitionMap the caller rebuilt should guarantee
+            -- this, but checking here makes the precondition local — both
+            -- hardening against a stale map and letting the general safety
+            -- proof read the guarantee off this branch instead of trusting
+            -- the caller.
+            if slaveNode.role == FlareRole.Slave && slaveNode.partition == partIdx
+                && slaveNode.state == FlareState.Active then
               let promoted := { slaveNode with role := FlareRole.Master,
                                                state := FlareState.Active, balance := 100 }
               let newPart := { part with master := some slaveKey, slaves := part.slaves.tail }
@@ -426,13 +452,14 @@ def handleDrainWithPromotionSingleKey (s : FlareClusterState) (key : String)
       match s.partitionMap.find? (fun (idx, _) => Int.ofNat idx == partIdx) with
       | none => s
       | some (_, part) =>
-        match part.slaves.head? with
+        match findActiveSuccessor s part partIdx with
         | none => s
         | some slaveKey =>
           match s.lookupNode slaveKey with
           | none => s
           | some slaveNode =>
-            if slaveNode.role == FlareRole.Slave && slaveNode.partition == partIdx then
+            if slaveNode.role == FlareRole.Slave && slaveNode.partition == partIdx
+                && slaveNode.state == FlareState.Active then
               let demoted : FlareNode :=
                 { node with state := FlareState.Active, role := FlareRole.Proxy,
                             partition := -1 }

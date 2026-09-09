@@ -9,7 +9,6 @@
   - getFlareClusterCRD: fetch CRD spec as FlareClusterView
   - listFlaredPods: list pods with PodInfo (name, ip, port, ready)
   - patchClientServiceSelector: point a Service at a specific pod
-  - deletePod: force-delete a pod by name
   - updateFlaredConfigMap: update a ConfigMap with node-map data
 -/
 
@@ -170,16 +169,6 @@ def listFlaredPods (crName ns : String) : IO (List PodInfo) := do
 def patchClientServiceSelector (svcName ns podName : String) : IO (Except String Unit) := do
   retry s!"patch service {svcName}" do
     patchServiceSelector svcName ns podName
-
-/-- Force-delete a pod by name.
-
-    kubectl delete pod <podName> -n <ns> --grace-period=0 --force -/
-def deletePod (podName ns : String) : IO (Except String Unit) := do
-  let result ← kubectl ["delete", "pod", podName, "-n", ns,
-                         "--grace-period=0", "--force"]
-  match result with
-  | .error e => return .error e
-  | .ok _ => return .ok ()
 
 /-- GRACEFUL pod deletion (no force, full grace period): the pod goes
     Terminating with its full preStop window, so the operator's drain path

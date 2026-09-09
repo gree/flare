@@ -822,6 +822,7 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
     (podAddrsRef : IO.Ref (List (String × String)))
     (unreachCyclesRef : IO.Ref (List (String × Nat)))
     (reachSlotRef : IO.Ref Nat)
+    (dropSeenRef : IO.Ref (List (String × Nat)))
     (downCyclesRef : IO.Ref (List (String × Nat)))
     (emptyMasterStreakRef : IO.Ref (List (String × Nat)))
     (probeSlotRef : IO.Ref Nat)
@@ -976,6 +977,10 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
   -- self-heal may act while a partition is already unserved or while the
   -- blast-radius breaker says the cluster is in a mass-failure regime.
   let podDeletionAllowed := allPartitionsMastered && !breakerTripped
+  -- Same gates for the (much cheaper, non-destructive) replica resync: it
+  -- costs a reconstruction, so do not start one while a partition is
+  -- already unserved or the breaker says the cluster is in mass failure.
+  let resyncOnDrop := ((← IO.getEnv "FLARE_RESYNC_ON_DROP").map (· != "0")).getD true
 
   -- 4d. EMPTY-MASTER SELF-HEAL. rc55 prevents MINTING an empty master, but
   -- one already seated is a stable fixed point: nothing re-evaluates a
@@ -1026,6 +1031,59 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
                 maxKeyGap := gap
               if gap > 0.001 then
                 IO.eprintln s!"[flare-operator] replica divergence: master {mKey} has {mi} keys, slave has {si} ({(gap * 100.0).toString.take 5}% apart) — live replication has no per-write ack, so a gap here means writes were dropped or expired only on one side"
+            -- RESYNC ON DROPPED WRITES. The master reports, per destination,
+            -- how many replica writes it gave up forwarding. A count that
+            -- ROSE since the last round means that replica missed writes and
+            -- is now quietly behind — live replication has no per-write
+            -- acknowledgement, so nothing else will ever repair it.
+            -- Send it back through reconstruction the way every other
+            -- recovery does: demote it to an unassigned live Proxy. The next
+            -- tick's proxy assignment seats it as Slave/Prepare, flared sees
+            -- the ROLE shift (a state-only change dispatches nothing —
+            -- _shift_node_state is a stub) and runs its WAL-first resync,
+            -- reporting Prepare→Active when it has caught up.
+            let drops := (mo.splitOn "\n").filterMap fun line =>
+              match (line.trim.splitOn " ").filter (· != "") with
+              | ["STAT", k, v] =>
+                if k.startsWith "proxy_write_dropped[" && k.endsWith "]" then
+                  let dest := (k.drop "proxy_write_dropped[".length).dropRight 1
+                  match v.trim.toNat? with
+                  | some n => some (dest, n)
+                  | none => none
+                else none
+              | _ => none
+            let seen ← dropSeenRef.get
+            let mut nextSeen := seen
+            for (dest, n) in drops do
+              nextSeen := (nextSeen.filter (fun kv => kv.1 != dest)) ++ [(dest, n)]
+              match seen.lookup dest with
+              | none =>
+                -- First sighting (fresh operator). Record the baseline only:
+                -- acting here would resync every replica with a historical
+                -- drop each time the operator restarts.
+                IO.eprintln s!"[flare-operator] noting existing dropped-write count for {dest} ({n}) as the baseline; will resync only on an increase"
+              | some prev =>
+                if n > prev && resyncOnDrop && podDeletionAllowed then
+                  let destHost := (dest.splitOn ":").head?.getD dest
+                  match finalState.nodeMap.find? (fun kv =>
+                      (kv.1 == dest || kv.2.serverName == destHost)
+                        && kv.2.role == FlareRole.Slave) with
+                  | some (rKey, _) =>
+                    IO.eprintln s!"[flare-operator] REPLICA RESYNC: master {mKey} dropped {n - prev} more write(s) to {dest} since the last check — that replica is behind and nothing else repairs it. Demoting {rKey} to a live proxy so it is re-seated as Slave/Prepare and reconstructs (WAL-first)."
+                    stateRef.modify fun cs =>
+                      match cs.lookupNode rKey with
+                      | some rn =>
+                        let demoted : FlareNode :=
+                          { rn with role := FlareRole.Proxy,
+                                    state := FlareState.Active,
+                                    partition := -1 }
+                        let cs' := cs.addNode rKey demoted
+                        { cs' with nodeMapVersion := cs.nodeMapVersion + 1 }
+                      | none => cs
+                    metrics.replicaResyncs.inc
+                  | none =>
+                    IO.eprintln s!"[flare-operator] master {mKey} dropped writes to {dest} but no Slave node matches that address — cannot resync it automatically"
+            dropSeenRef.set nextSeen
             if items mo == 0 && items so > 0 then
               let streak := ((streaks.lookup mKey).getD 0) + 1
               newStreaks := newStreaks ++ [(mKey, streak)]
@@ -1430,6 +1488,7 @@ def main (args : List String) : IO Unit := do
   let podAddrsRef ← IO.mkRef ([] : List (String × String))
   let unreachCyclesRef ← IO.mkRef ([] : List (String × Nat))
   let reachSlotRef ← IO.mkRef (0 : Nat)
+  let dropSeenRef ← IO.mkRef ([] : List (String × Nat))
   let downCyclesRef ← IO.mkRef ([] : List (String × Nat))
   let emptyMasterStreakRef ← IO.mkRef ([] : List (String × Nat))
   let probeSlotRef ← IO.mkRef (0 : Nat)
@@ -1472,7 +1531,7 @@ def main (args : List String) : IO Unit := do
     let startTime ← IO.monoMsNow
     try
       -- Use FSM-driven reconcile (complete implementation with all 5 requirements)
-      reconcileOnceFSM stateRef crdRef migrationRef graceCyclesRef trippedRef prepareCyclesRef unreadyCyclesRef podKeysRef podAddrsRef unreachCyclesRef reachSlotRef downCyclesRef emptyMasterStreakRef probeSlotRef pendingConfRef masterSnapshotRef driftTickRef metrics leaseName identity crName ns
+      reconcileOnceFSM stateRef crdRef migrationRef graceCyclesRef trippedRef prepareCyclesRef unreadyCyclesRef podKeysRef podAddrsRef unreachCyclesRef reachSlotRef dropSeenRef downCyclesRef emptyMasterStreakRef probeSlotRef pendingConfRef masterSnapshotRef driftTickRef metrics leaseName identity crName ns
     catch e =>
       IO.eprintln s!"[flare-operator] reconcile error: {e}"
     let endTime ← IO.monoMsNow

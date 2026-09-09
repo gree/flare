@@ -147,6 +147,20 @@ int op_stats::_send_stats(thread_pool* req_tp, thread_pool* other_tp, storage* s
 	_send_stat("get_misses" 					, stats_object->get_get_misses());
 	_send_stat("delete_hits"					, stats_object->get_delete_hits());
 	_send_stat("proxy_write_dropped"	, stats_object->get_proxy_write_dropped());
+	// Per-destination breakdown, so a controller can resync exactly the
+	// replica that fell behind. Keys carry the destination in brackets and
+	// are therefore skipped by the Prometheus formatter (which only maps
+	// known names and the rocksdb_ prefix) — this is for the controller and
+	// for a human reading `stats`, not for a time series per replica.
+	{
+		map<string, uint64_t> dropped_by_dest = stats_object->get_proxy_write_dropped_by_dest();
+		for (map<string, uint64_t>::const_iterator it = dropped_by_dest.begin();
+				it != dropped_by_dest.end(); it++) {
+			char key[BUFSIZ];
+			snprintf(key, sizeof(key), "proxy_write_dropped[%s]", it->first.c_str());
+			_send_stat(key, it->second);
+		}
+	}
 	_send_stat("delete_misses"				, stats_object->get_delete_misses());
 	_send_stat("incr_hits"						, stats_object->get_incr_hits());
 	_send_stat("incr_misses"					, stats_object->get_incr_misses());

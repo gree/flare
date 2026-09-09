@@ -59,12 +59,14 @@ stats::stats():
 		_bytes_read(0),
 		_bytes_written(0),
 		_total_thread_queue(0) {
+	pthread_mutex_init(&this->_mutex_proxy_write_dropped_by_dest, NULL);
 }
 
 /**
  *	dtor for stats
  */
 stats::~stats() {
+	pthread_mutex_destroy(&this->_mutex_proxy_write_dropped_by_dest);
 }
 // }}}
 
@@ -153,6 +155,21 @@ uint64_t stats::get_cmd_set()											{ return this->_cmd_set.fetch(); }
 uint64_t stats::get_get_hits()											{ return this->_get_hits.fetch(); }
 uint64_t stats::get_get_misses()										{ return this->_get_misses.fetch(); }
 uint64_t stats::get_proxy_write_dropped()					{ return this->_proxy_write_dropped.fetch(); }
+
+int stats::increment_proxy_write_dropped(const string& dest) {
+	this->_proxy_write_dropped.incr();
+	pthread_mutex_lock(&this->_mutex_proxy_write_dropped_by_dest);
+	this->_proxy_write_dropped_by_dest[dest]++;
+	pthread_mutex_unlock(&this->_mutex_proxy_write_dropped_by_dest);
+	return 0;
+}
+
+map<string, uint64_t> stats::get_proxy_write_dropped_by_dest() {
+	pthread_mutex_lock(&this->_mutex_proxy_write_dropped_by_dest);
+	map<string, uint64_t> r = this->_proxy_write_dropped_by_dest;
+	pthread_mutex_unlock(&this->_mutex_proxy_write_dropped_by_dest);
+	return r;
+}
 uint64_t stats::get_delete_hits()									{ return this->_delete_hits.fetch(); }
 uint64_t stats::get_delete_misses()								{ return this->_delete_misses.fetch(); }
 uint64_t stats::get_incr_hits()										{ return this->_incr_hits.fetch(); }

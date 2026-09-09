@@ -108,6 +108,12 @@ structure OperatorMetrics where
   -- masterless partition. This counts the partitions themselves.
   masterlessPartitions : Gauge
 
+  -- Counter: replicas the operator sent back through reconstruction because
+  -- their master reported dropping writes to them. Live replication has no
+  -- per-write acknowledgement, so a replica that missed writes stays quietly
+  -- behind until something rebuilds it — this is that something.
+  replicaResyncs : Counter
+
   -- Gauge: draining masters the drain guard kept because NO promotable
   -- successor exists. CRITICAL: each is a partition that loses its only
   -- data-bearing node when the pod's grace period expires; the operator
@@ -177,6 +183,7 @@ def initMetrics : IO OperatorMetrics := do
   let unreachableNodes ← IO.mkRef 0.0
   let replicaKeyDelta ← IO.mkRef 0.0
   let masterlessPartitions ← IO.mkRef 0.0
+  let replicaResyncs ← IO.mkRef 0
   let drainNoSuccessor ← IO.mkRef 0.0
   let circuitBreakerTripped ← IO.mkRef 0.0
   let partitionsDesired ← IO.mkRef 0.0
@@ -200,6 +207,7 @@ def initMetrics : IO OperatorMetrics := do
     unreachableNodes := { value := unreachableNodes }
     replicaKeyDelta := { value := replicaKeyDelta }
     masterlessPartitions := { value := masterlessPartitions }
+    replicaResyncs := { value := replicaResyncs }
     drainNoSuccessor := { value := drainNoSuccessor }
     circuitBreakerTripped := { value := circuitBreakerTripped }
     partitionsDesired := { value := partitionsDesired }
@@ -390,6 +398,12 @@ def exportMetrics (metrics : OperatorMetrics) (clusterName : String) : IO String
   output := output ++ "# TYPE flare_operator_partitions_masterless gauge\n"
   let masterless ← metrics.masterlessPartitions.value.get
   output := output ++ formatGauge "flare_operator_partitions_masterless" labels masterless
+
+  -- Replica resyncs triggered by dropped proxy writes (counter)
+  output := output ++ "# HELP flare_operator_replica_resyncs_total Replicas sent back through reconstruction after their master reported dropping writes to them\n"
+  output := output ++ "# TYPE flare_operator_replica_resyncs_total counter\n"
+  let resyncs ← metrics.replicaResyncs.value.get
+  output := output ++ formatCounter "flare_operator_replica_resyncs_total" labels resyncs
 
   -- Drain-no-successor (gauge, CRITICAL)
   output := output ++ "# HELP flare_operator_drain_no_successor Draining masters with no promotable successor (partition loses its only data-bearing node at grace expiry)\n"

@@ -111,11 +111,16 @@ int queue_proxy_write::run(shared_connection c) {
 			log_err("proxy write DROPPED after %d retries (dest=%s:%d, op=%s, key=%s, version=%u): replica now diverges until it reconstructs",
 					queue_proxy_write::max_retry, ctp->get_host().c_str(), ctp->get_port(),
 					this->_op_ident.c_str(), this->_entry.key.c_str(), this->_entry.version);
+			// Attribute it: a controller needs to know WHICH replica fell
+			// behind so it can resync that one instead of guessing.
+			char dest[BUFSIZ];
+			snprintf(dest, sizeof(dest), "%s:%d", ctp->get_host().c_str(), ctp->get_port());
+			stats_object->increment_proxy_write_dropped(string(dest));
 		} else {
 			log_err("proxy write DROPPED after %d retries (op=%s, key=%s, version=%u): replica now diverges until it reconstructs",
 					queue_proxy_write::max_retry, this->_op_ident.c_str(), this->_entry.key.c_str(), this->_entry.version);
+			stats_object->increment_proxy_write_dropped();
 		}
-		stats_object->increment_proxy_write_dropped();
 		delete p;
 		return -1;
 	}

@@ -157,6 +157,41 @@ proxying writes into a dead socket and a crashed MASTER got no failover.
 5. If the exit code was 139, capture the log line before the crash and file
    it — flared should not segfault.
 
+## FlareNodeUnreachableFromOperator (critical) {#node-unreachable}
+
+The operator cannot open a TCP connection to a node that K8s still reports
+Ready. Almost certainly the node is serving clients normally — what is
+broken is the **operator→pod path**, so topology pushes are not landing and
+that node keeps running on whatever map it last received. Wrong roles
+(a demoted node still believing it is master, a promoted one not knowing it
+is) persist until the path heals.
+
+Nothing else sees this: the readiness probe runs inside the pod (kubelet
+asking flared about itself) and the operator's stats probes travel through
+the API server, so both stay green.
+
+**The operator deliberately does NOT fail the node over.** Unreachability is
+a loss of the operator's own feedback and the fault may be on the operator's
+side; demoting a master we merely cannot see would be the damaging move.
+
+1. Establish which side is broken. From the operator pod:
+   `kubectl -n <ns> exec deploy/<cluster>-flare-operator -- sh -c 'timeout 3
+   bash -c "</dev/tcp/<pod-ip>/12121" && echo ok'`. Then try the same from a
+   different pod in the namespace. If only the operator fails, suspect its
+   node's networking or a NetworkPolicy.
+2. Check whether the node is actually serving: `printf 'stats\r\n' | nc
+   <pod-ip> 12121` from a debug pod, and look at its request rate.
+3. Compare what that node believes with what the operator committed:
+   `printf 'stats nodes\r\n' | nc <pod-ip> 12121` versus
+   `kubectl -n <ns> get cm <cluster>-node-map -o jsonpath='{.data.nodeMap}'`.
+   A mismatch confirms it is running on a stale map.
+4. Fix the path (CNI, NetworkPolicy, node networking). Once reachable, the
+   next topology change is pushed automatically; force one sooner by
+   restarting the operator, which re-broadcasts on its first tick.
+5. If the path cannot be fixed quickly and the node's role is wrong in a way
+   that matters (it believes it is master for a partition someone else now
+   masters), delete that pod — it re-registers with a clean view.
+
 ## FlareNodeDownStuck (warning) {#node-down-stuck}
 
 A node sits Down while its pod is alive. Down does not clear itself: the
@@ -178,6 +213,57 @@ the last one. This alert firing for 15 min means the gate is holding.
    (`printf 'stats\r\n' | nc <pod-ip> 12121`, compare `curr_items`) BEFORE
    deleting the Down pod.
 3. Never delete both replicas of a partition on a tmpfs cluster.
+
+## FlareResyncFailing (critical) {#resync-failing}
+
+A node's reconstruction keeps failing and it has passed
+`rocksdb-resync-failure-threshold` consecutive failures.
+
+flared *would* take itself out of service here, and for years its log said
+it had — but that path (`request_down_node`) enqueues to a controller thread
+only the standalone index process runs. Under this operator it fails
+silently, so **nothing takes the node out of service**. It keeps its role
+and, if it is a master, keeps serving whatever data it has. The log now says
+so plainly; this alert is the signal.
+
+1. Read the node's flared log for why the resync fails: WAL purged
+   (`rocksdb_wal_sync_lsn_purged`), master_id mismatch, CRC mismatch, or a
+   connection error to its source. Each points somewhere different.
+2. Decide whether it is serving. `printf 'stats nodes\r\n' | nc <pod-ip>
+   12121` for its role, and `curr_items` versus its peers.
+3. Take it out yourself if it is a replica: delete that pod so it
+   reconstructs from scratch. If it is a master with a healthy replica,
+   deleting it hands over through the drain path.
+4. If a master has NO replica, do not delete it — that is the last copy.
+   Trigger a backup first (docs/BACKUP_RESTORE.md), then decide.
+
+## FlareReplicaDivergence (warning) {#replica-divergence}
+
+A replica's key count has differed from its master's by more than 0.5% for
+half an hour. Live replication is op-level proxying with no per-write
+acknowledgement, so a write the master could not forward is simply gone from
+that replica until it reconstructs — this gauge is the only routine
+comparison of the two copies.
+
+It is a coarse signal on purpose: equal counts do not prove equal content,
+and a small transient gap is normal (writes in flight, expiry timing). A gap
+that persists for 30 minutes is not.
+
+1. Get the real numbers: `printf 'stats\r\n' | nc <pod-ip> 12121` on the
+   master and on each replica; compare `curr_items`.
+2. Establish the direction. A replica with MORE keys is usually expired
+   residue (pre-rc58 the expire reaper deleted only on the master); a
+   replica with FEWER keys means it missed writes — check
+   `flare_node_proxy_write_dropped` on the master
+   ([proxy-write-dropped](#proxy-write-dropped)) and whether that replica had
+   a [node-unhealthy](#node-unhealthy) episode.
+3. Sample the content before assuming: pick keys via `dump_key <partition>
+   <partition_size>` (use the cluster's REAL partition count — a wrong
+   partition_size crashed a node pre-rc57) and `gets` the same keys on both
+   sides, comparing value size and CAS.
+4. Repair by making the replica reconstruct: delete the REPLICA's pod, never
+   the master's. On a PVC cluster the WAL path makes it incremental; on tmpfs
+   it is a full reseed. Verify the counts converge afterwards.
 
 ## FlareProxyWriteDropped (critical) {#proxy-write-dropped}
 

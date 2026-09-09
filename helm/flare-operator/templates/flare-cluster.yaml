@@ -21,6 +21,18 @@
 {{- if $c.tmpfs }}{{- if $c.tmpfs.enabled }}{{- $tmpfsEnabled = true }}{{- $tmpfsSize = ($c.tmpfs.sizeLimit | default "1Gi") }}{{- end }}{{- end }}
 {{- if and $c.persistence.enabled $tmpfsEnabled }}{{- fail "cluster: set only one of persistence.enabled or tmpfs.enabled" }}{{- end }}
 {{- $useDataVol := or $c.persistence.enabled $tmpfsEnabled }}
+{{- /* Probe timings. The READINESS numbers are also the client-LB ejection
+       window: K8s pulls a pod from the Service endpoints only after
+       periodSeconds x failureThreshold, so a crashed flared keeps receiving
+       (and refusing) client connections for that long. Exposed as values
+       rather than tuned globally, because tightening them costs an exec
+       probe per pod per period and the right trade-off differs per cluster.
+       See docs/STPA-node-state.md gap G4. */}}
+{{- $probes := dict "liveness" (dict "initialDelaySeconds" 10 "periodSeconds" 5 "failureThreshold" 6) "readiness" (dict "initialDelaySeconds" 5 "periodSeconds" 5 "timeoutSeconds" 4 "failureThreshold" 3) }}
+{{- if $c.probes }}
+{{- if $c.probes.liveness }}{{- $probes = merge (dict "liveness" $c.probes.liveness) $probes }}{{- end }}
+{{- if $c.probes.readiness }}{{- $probes = merge (dict "readiness" $c.probes.readiness) $probes }}{{- end }}
+{{- end }}
 {{- $dataDir := ternary "/data/flare" "/tmp/flare" $useDataVol }}
 {{- /* backup-bootstrap: on a pod that boots with an EMPTY data dir, seed it
        from the object-storage backup before flared starts. This is the
@@ -397,9 +409,9 @@ spec:
           livenessProbe:
             tcpSocket:
               port: {{ $c.flarePort }}
-            initialDelaySeconds: 10
-            periodSeconds: 5
-            failureThreshold: 6
+            initialDelaySeconds: {{ $probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ $probes.liveness.periodSeconds }}
+            failureThreshold: {{ $probes.liveness.failureThreshold }}
           # Readiness gates on SYNC COMPLETION, not process liveness: the pod is
           # Ready only when the operator has this node state=active in the node
           # map it broadcast to flared ("stats nodes" reflects flared's local
@@ -438,10 +450,10 @@ spec:
                     printf '%s\n' "$out" | grep -q "^STAT $key:state active$" && exit 1
                   done
                   exit 0
-            initialDelaySeconds: 5
-            periodSeconds: 5
-            timeoutSeconds: 4
-            failureThreshold: 3
+            initialDelaySeconds: {{ $probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ $probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ $probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ $probes.readiness.failureThreshold }}
           resources:
             {{- toYaml $c.resources | nindent 12 }}
           {{- if gt (int $drain) 0 }}

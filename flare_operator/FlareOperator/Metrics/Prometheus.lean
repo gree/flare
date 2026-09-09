@@ -83,6 +83,31 @@ structure OperatorMetrics where
   -- itself once every partition has an Active master.
   stuckDownNodes : Gauge
 
+  -- Gauge: nodes the OPERATOR cannot open a TCP connection to, while K8s
+  -- still reports their pod Ready. The node is probably serving clients
+  -- fine; what is broken is our ability to PUSH topology to it, so it runs
+  -- on a stale map (wrong roles) until the path heals. Never fed into dead
+  -- detection on purpose — the fault may be on the operator's side, and
+  -- failing over a master we merely cannot see is the unsafe action.
+  unreachableNodes : Gauge
+
+  -- Gauge: the largest master↔slave curr_items gap seen in the last probe,
+  -- as a FRACTION of the master's count. Live replication is op-level
+  -- proxying with no per-write acknowledgement, so a dropped or refused
+  -- replica write leaves the replica quietly behind until it reconstructs;
+  -- nothing else compares the two copies at all. A count comparison is
+  -- coarse — equal counts do not prove equal CONTENT — but it catches the
+  -- magnitude of a real divergence, which is what went unnoticed for 12
+  -- days on pf-dev (~10k stale keys on the slave).
+  replicaKeyDelta : Gauge
+
+  -- Gauge: CRD partitions with no Active master, counted per partition
+  -- index. The older signal for this was cluster-wide arithmetic
+  -- (desired_partitions - active_masters), which a stale master sitting at
+  -- an out-of-range partition index could offset — masking a genuinely
+  -- masterless partition. This counts the partitions themselves.
+  masterlessPartitions : Gauge
+
   -- Gauge: draining masters the drain guard kept because NO promotable
   -- successor exists. CRITICAL: each is a partition that loses its only
   -- data-bearing node when the pod's grace period expires; the operator
@@ -149,6 +174,9 @@ def initMetrics : IO OperatorMetrics := do
   let prepareStuckCount ← IO.mkRef 0.0
   let unhealthyNodes ← IO.mkRef 0.0
   let stuckDownNodes ← IO.mkRef 0.0
+  let unreachableNodes ← IO.mkRef 0.0
+  let replicaKeyDelta ← IO.mkRef 0.0
+  let masterlessPartitions ← IO.mkRef 0.0
   let drainNoSuccessor ← IO.mkRef 0.0
   let circuitBreakerTripped ← IO.mkRef 0.0
   let partitionsDesired ← IO.mkRef 0.0
@@ -169,6 +197,9 @@ def initMetrics : IO OperatorMetrics := do
     prepareStuckCount := { value := prepareStuckCount }
     unhealthyNodes := { value := unhealthyNodes }
     stuckDownNodes := { value := stuckDownNodes }
+    unreachableNodes := { value := unreachableNodes }
+    replicaKeyDelta := { value := replicaKeyDelta }
+    masterlessPartitions := { value := masterlessPartitions }
     drainNoSuccessor := { value := drainNoSuccessor }
     circuitBreakerTripped := { value := circuitBreakerTripped }
     partitionsDesired := { value := partitionsDesired }
@@ -341,6 +372,24 @@ def exportMetrics (metrics : OperatorMetrics) (clusterName : String) : IO String
   output := output ++ "# TYPE flare_operator_nodes_down_stuck gauge\n"
   let stuckDown ← metrics.stuckDownNodes.value.get
   output := output ++ formatGauge "flare_operator_nodes_down_stuck" labels stuckDown
+
+  -- Nodes unreachable from the operator (gauge)
+  output := output ++ "# HELP flare_operator_nodes_unreachable Ready nodes the operator cannot open a TCP connection to (topology pushes are not landing; the node runs on a stale map)\n"
+  output := output ++ "# TYPE flare_operator_nodes_unreachable gauge\n"
+  let unreachable ← metrics.unreachableNodes.value.get
+  output := output ++ formatGauge "flare_operator_nodes_unreachable" labels unreachable
+
+  -- Replica divergence: |master - slave| / master from the last probe (gauge)
+  output := output ++ "# HELP flare_operator_replica_key_delta Largest master-to-slave curr_items gap as a fraction of the master's count (coarse divergence signal; equal counts do not prove equal content)\n"
+  output := output ++ "# TYPE flare_operator_replica_key_delta gauge\n"
+  let keyDelta ← metrics.replicaKeyDelta.value.get
+  output := output ++ formatGauge "flare_operator_replica_key_delta" labels keyDelta
+
+  -- Masterless partitions, counted per partition index (gauge, CRITICAL)
+  output := output ++ "# HELP flare_operator_partitions_masterless CRD partitions with no Active master (per-partition; not cluster-wide arithmetic that a stale out-of-range master can offset)\n"
+  output := output ++ "# TYPE flare_operator_partitions_masterless gauge\n"
+  let masterless ← metrics.masterlessPartitions.value.get
+  output := output ++ formatGauge "flare_operator_partitions_masterless" labels masterless
 
   -- Drain-no-successor (gauge, CRITICAL)
   output := output ++ "# HELP flare_operator_drain_no_successor Draining masters with no promotable successor (partition loses its only data-bearing node at grace expiry)\n"

@@ -350,11 +350,25 @@ int handler_dump_replication::run() {
 			} else {
 				log_warning("resync failure streak now %llu", (unsigned long long)streak);
 				if (rdb->should_self_demote()) {
-					log_err("resync failure threshold reached (%llu) -> self-demoting to state_down",
-						(unsigned long long)streak);
-					this->_cluster->request_down_node(
-						this->_cluster->get_server_name(),
-						this->_cluster->get_server_port());
+					// request_down_node is an INDEX-side API: it enqueues to
+					// thread_type_controller, which only flarei starts (see
+					// src/flarei/flarei.cc). A flared under the Kubernetes
+					// operator has no such thread, so the enqueue fails and
+					// NOTHING is sent anywhere. Report what actually happened
+					// — the old message claimed a demotion that never
+					// occurred, which is worse than silence when someone is
+					// reading these logs during an incident. The condition is
+					// still exported as rocksdb_resync_failure_count and
+					// alerted on (FlareResyncFailing).
+					if (this->_cluster->request_down_node(
+							this->_cluster->get_server_name(),
+							this->_cluster->get_server_port()) < 0) {
+						log_err("resync failure threshold reached (%llu) but SELF-DEMOTE IS UNAVAILABLE in this process (no controller thread; that path exists only in index-managed deployments). This node keeps its role and may be serving stale data — an operator or a human must act.",
+							(unsigned long long)streak);
+					} else {
+						log_err("resync failure threshold reached (%llu) -> requested self-demote to state_down",
+							(unsigned long long)streak);
+					}
 				}
 			}
 		}

@@ -173,6 +173,33 @@ cluster:
   tmpfs:
     enabled: false
     sizeLimit: 10Gi
+  # Probe timings for the flared container. Override individual keys only;
+  # anything omitted keeps the default shown here.
+  #
+  # The READINESS numbers are also the CLIENT-LB EJECTION WINDOW: K8s removes
+  # a pod from the Service endpoints only after periodSeconds x
+  # failureThreshold, so a flared that just crashed keeps receiving (and
+  # refusing) client connections for roughly that long — 15s at the defaults,
+  # plus up to one period of detection lag. Tighten (e.g. failureThreshold 2)
+  # to shrink it, at the cost of one more exec probe per pod per period and a
+  # greater chance of ejecting a briefly-slow pod. See
+  # docs/STPA-node-state.md gap G4.
+  #
+  # LIVENESS is a plain tcpSocket check and is what restarts a flared whose
+  # port stops accepting; at the defaults that takes ~30s. It deliberately
+  # does NOT use the readiness command: a node that is merely out of the
+  # topology must not be restart-looped.
+  probes: {}
+  #  readiness:
+  #    initialDelaySeconds: 5
+  #    periodSeconds: 5
+  #    timeoutSeconds: 4
+  #    failureThreshold: 3
+  #  liveness:
+  #    initialDelaySeconds: 10
+  #    periodSeconds: 5
+  #    failureThreshold: 6
+
   # RocksDB backend tuning. Keys map 1:1 to the FlareCluster CRD's spec.rocksdb
   # (walSizeLimitMb, walTtlSeconds, syncWrites, walMaxBatchBytes, ...); only the
   # keys you set are emitted, everything else keeps flared's built-in default.

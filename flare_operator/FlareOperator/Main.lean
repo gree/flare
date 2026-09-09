@@ -519,6 +519,7 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
     (stateRef : IO.Ref FlareClusterState)
     (unreadyCyclesRef : IO.Ref (List (String × Nat)))
     (podKeysRef : IO.Ref (List String))
+    (podAddrsRef : IO.Ref (List (String × String)))
     : IO K8sReconciler.K8sResponse := do
   match req with
   | .FetchCRD =>
@@ -541,6 +542,11 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
       -- on a lost node they stay Terminating until the node object is
       -- removed, so deleting them again would just repeat forever).
       podKeysRef.set ((pods.filter (fun p => !p.terminating)).map Bridge.PodInfo.toNodeKey)
+      -- (key, ip) of pods K8s considers READY, for the operator-side
+      -- reachability probe: a node that is Ready but that WE cannot reach is
+      -- the network-partition case, invisible to every other signal.
+      podAddrsRef.set ((pods.filter (fun p => p.ready && !p.terminating)).map
+        (fun p => (Bridge.PodInfo.toNodeKey p, p.ip)))
       -- LIVENESS BEYOND POD EXISTENCE. `podKeys` says the pod OBJECT exists,
       -- which a segfaulted flared still satisfies (the container restarts
       -- under the same pod name and IP) — so dead detection never fired and a
@@ -580,7 +586,14 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
       let masterless := csR.partitionMap.any (fun kv => kv.2.master.isNone)
         || (csR.partitionMap.isEmpty && !csR.nodeMap.isEmpty)
       let deadCandidate := csR.nodeMap.any (fun kv => !podKeys.contains kv.1)
-      let dataKeys ← if masterless || deadCandidate then
+      -- A node flagged unhealthy is about to be failed over on THIS tick, and
+      -- the refill that reseats its partition runs in the same tick — so the
+      -- probe must cover that case too. It did not: `deadCandidate` only
+      -- looks for a MISSING pod object, which the D2 trigger (pod present,
+      -- NotReady) never satisfies, so the empty-master veto silently
+      -- degraded to its no-information fallback exactly when a master had
+      -- just died. Found by review, not by a test.
+      let dataKeys ← if masterless || deadCandidate || !unhealthyKeys.isEmpty then
           Bridge.dataBearingPodKeys pods ns
         else
           pure []
@@ -702,6 +715,7 @@ private partial def runReconcileFSMLoop
     (drainBlockedRef : IO.Ref Nat)
     (unreadyCyclesRef : IO.Ref (List (String × Nat)))
     (podKeysRef : IO.Ref (List String))
+    (podAddrsRef : IO.Ref (List (String × String)))
     (crName ns : String) : IO Unit := do
   if K8sReconciler.flareReconcileTerminalBool s.reconcileStep then
     -- Record whether the breaker HELD during this pass (for hysteresis input
@@ -749,7 +763,7 @@ private partial def runReconcileFSMLoop
     -- Execute K8s request if present
     match reqOpt with
     | some req =>
-      let resp ← executeK8sRequest req crName ns stateRef unreadyCyclesRef podKeysRef
+      let resp ← executeK8sRequest req crName ns stateRef unreadyCyclesRef podKeysRef podAddrsRef
       let cs2 ← stateRef.get
       let cs2Version := cs2.nodeMapVersion
       let (nextState, nextReqOpt, moreEffects) := K8sReconciler.flareReconcileCore resp newState cs2
@@ -767,7 +781,7 @@ private partial def runReconcileFSMLoop
       match nextReqOpt with
       | some nextReq =>
         -- FSM issued another request - execute it before recursing
-        let nextResp ← executeK8sRequest nextReq crName ns stateRef unreadyCyclesRef podKeysRef
+        let nextResp ← executeK8sRequest nextReq crName ns stateRef unreadyCyclesRef podKeysRef podAddrsRef
         let cs3 ← stateRef.get
         let cs3Version := cs3.nodeMapVersion
         let (finalState, _, finalEffects) := K8sReconciler.flareReconcileCore nextResp nextState cs3
@@ -775,16 +789,16 @@ private partial def runReconcileFSMLoop
         if let some ucs := finalState.updatedClusterState then
           let rb := (finalState.cachedCrd.map (·.spec.readBalance)).getD {}
           let _ ← commitClusterState stateRef cs3Version ucs rb finalState.standbyNodeKeys
-        runReconcileFSMLoop finalState stateRef migrationRef graceCyclesRef trippedRef drainBlockedRef unreadyCyclesRef podKeysRef crName ns
+        runReconcileFSMLoop finalState stateRef migrationRef graceCyclesRef trippedRef drainBlockedRef unreadyCyclesRef podKeysRef podAddrsRef crName ns
       | none =>
         -- No new request - safe to recurse (nextState is in an "action" state)
-        runReconcileFSMLoop nextState stateRef migrationRef graceCyclesRef trippedRef drainBlockedRef unreadyCyclesRef podKeysRef crName ns
+        runReconcileFSMLoop nextState stateRef migrationRef graceCyclesRef trippedRef drainBlockedRef unreadyCyclesRef podKeysRef podAddrsRef crName ns
     | none =>
       -- No request: update cluster state if FSM produced one and continue
       if let some ucs := newState.updatedClusterState then
         let rb := (newState.cachedCrd.map (·.spec.readBalance)).getD {}
         let _ ← commitClusterState stateRef csVersion ucs rb newState.standbyNodeKeys
-      runReconcileFSMLoop newState stateRef migrationRef graceCyclesRef trippedRef drainBlockedRef unreadyCyclesRef podKeysRef crName ns
+      runReconcileFSMLoop newState stateRef migrationRef graceCyclesRef trippedRef drainBlockedRef unreadyCyclesRef podKeysRef podAddrsRef crName ns
 
 /-- Run the FSM-driven reconcile loop.
     Repeatedly calls flareReconcileCore, executing requests/effects until Done/Error.
@@ -796,6 +810,7 @@ private def runReconcileDriver (stateRef : IO.Ref FlareClusterState)
     (drainBlockedRef : IO.Ref Nat)
     (unreadyCyclesRef : IO.Ref (List (String × Nat)))
     (podKeysRef : IO.Ref (List String))
+    (podAddrsRef : IO.Ref (List (String × String)))
     (crName ns : String) : IO Unit := do
   let initialGrace ← graceCyclesRef.get
   let initialPhase ← migrationRef.get
@@ -807,7 +822,7 @@ private def runReconcileDriver (stateRef : IO.Ref FlareClusterState)
     wasTripped := (← trippedRef.get)
   }
 
-  runReconcileFSMLoop initialState stateRef migrationRef graceCyclesRef trippedRef drainBlockedRef unreadyCyclesRef podKeysRef crName ns
+  runReconcileFSMLoop initialState stateRef migrationRef graceCyclesRef trippedRef drainBlockedRef unreadyCyclesRef podKeysRef podAddrsRef crName ns
 
 -- ===========================================================================
 -- FSM-Driven Reconcile (Complete with safety checks and metrics)
@@ -839,6 +854,9 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
     (prepareCyclesRef : IO.Ref (List (String × Nat)))
     (unreadyCyclesRef : IO.Ref (List (String × Nat)))
     (podKeysRef : IO.Ref (List String))
+    (podAddrsRef : IO.Ref (List (String × String)))
+    (unreachCyclesRef : IO.Ref (List (String × Nat)))
+    (reachSlotRef : IO.Ref Nat)
     (downCyclesRef : IO.Ref (List (String × Nat)))
     (emptyMasterStreakRef : IO.Ref (List (String × Nat)))
     (probeSlotRef : IO.Ref Nat)
@@ -871,7 +889,7 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
   -- 2. Run the FSM driver
   let oldVersion := (← stateRef.get).nodeMapVersion
   let drainBlockedRef ← IO.mkRef 0
-  runReconcileDriver stateRef migrationRef graceCyclesRef trippedRef drainBlockedRef unreadyCyclesRef podKeysRef crName ns
+  runReconcileDriver stateRef migrationRef graceCyclesRef trippedRef drainBlockedRef unreadyCyclesRef podKeysRef podAddrsRef crName ns
   metrics.circuitBreakerTripped.set (if ← trippedRef.get then 1.0 else 0.0)
   -- CRITICAL drain-guard gauge: >0 pages a human — a draining master has no
   -- promotable successor and its partition dies with the pod (see RUNBOOK
@@ -976,6 +994,24 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
           | none => pure ()
       | none => pure ()
 
+  -- Shared safety gates for the two paths below that DELETE pods, plus the
+  -- per-partition masterless gauge. Counting the partitions themselves is
+  -- the honest version of "is a partition unserved": the cluster-wide
+  -- desired-minus-active-masters arithmetic behind FlareMasterMissing can be
+  -- offset by a stale master parked at an out-of-range partition index.
+  let crdForGates ← crdRef.get
+  let masterlessIdxs := (List.range crdForGates.spec.partitions).filter (fun pIdx =>
+    !(finalState.nodeMap.any (fun kv =>
+        kv.2.role == FlareRole.Master && kv.2.state == FlareState.Active
+          && kv.2.partition == Int.ofNat pIdx)))
+  metrics.masterlessPartitions.set masterlessIdxs.length.toFloat
+  let allPartitionsMastered := masterlessIdxs.isEmpty
+  let breakerTripped ← trippedRef.get
+  -- Deleting a pod on a tmpfs cluster erases that node's copy, so NEITHER
+  -- self-heal may act while a partition is already unserved or while the
+  -- blast-radius breaker says the cluster is in a mass-failure regime.
+  let podDeletionAllowed := allPartitionsMastered && !breakerTripped
+
   -- 4d. EMPTY-MASTER SELF-HEAL. rc55 prevents MINTING an empty master, but
   -- one already seated is a stable fixed point: nothing re-evaluates a
   -- sitting master's data (observed live: a rolled-empty ex-master served 0
@@ -991,6 +1027,10 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
     probeSlotRef.set probeSlot
     let streaks ← emptyMasterStreakRef.get
     let mut newStreaks : List (String × Nat) := []
+    -- Largest divergence seen in THIS round; published once below so the
+    -- gauge reflects the latest probe rather than an all-time high-water
+    -- mark that could never recover.
+    let mut maxKeyGap : Float := 0.0
     for (mKey, mNode) in finalState.nodeMap do
       if mNode.role == FlareRole.Master && mNode.state == FlareState.Active then
         -- an Active slave of the same partition to compare against / promote
@@ -1008,11 +1048,24 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
                 match (line.trim.splitOn " ").filter (· != "") with
                 | ["STAT", "curr_items", v] => v.trim.toNat?
                 | _ => none).head?).getD 0
+            -- Both counts are already in hand: record the divergence while
+            -- we are here (no extra probe). Coarse by construction — equal
+            -- counts do not prove equal content — but a persistent gap is
+            -- the only cheap signal that live proxy replication has been
+            -- losing writes (nothing else compares the copies).
+            let mi := items mo
+            let si := items so
+            if mi > 0 then
+              let gap := (if mi > si then mi - si else si - mi).toFloat / mi.toFloat
+              if gap > maxKeyGap then
+                maxKeyGap := gap
+              if gap > 0.001 then
+                IO.eprintln s!"[flare-operator] replica divergence: master {mKey} has {mi} keys, slave has {si} ({(gap * 100.0).toString.take 5}% apart) — live replication has no per-write ack, so a gap here means writes were dropped or expired only on one side"
             if items mo == 0 && items so > 0 then
               let streak := ((streaks.lookup mKey).getD 0) + 1
               newStreaks := newStreaks ++ [(mKey, streak)]
               IO.eprintln s!"[flare-operator] WARNING: master {mKey} is EMPTY (0 keys) while an Active slave holds {items so} keys (streak {streak}/3)"
-              if streak ≥ 3 then
+              if streak ≥ 3 && podDeletionAllowed then
                 IO.eprintln s!"[flare-operator] EMPTY-MASTER SELF-HEAL: gracefully deleting {extractPodName mNode.serverName} — the drain path will hand mastership to the data-bearing slave and the pod reseeds as a slave"
                 match ← Bridge.deletePodGraceful (extractPodName mNode.serverName) ns with
                 | .ok () => newStreaks := newStreaks.filter (·.1 != mKey)
@@ -1020,6 +1073,7 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
           | _, _ => pure ()
         | none => pure ()
     emptyMasterStreakRef.set newStreaks
+    metrics.replicaKeyDelta.set maxKeyGap
 
   -- 4e. LIVENESS metrics + STUCK-DOWN recovery. A node leaves Down only by
   -- RE-REGISTERING, which needs a fresh flared process: while the committed
@@ -1043,14 +1097,8 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
   let newDown := downPresent.map (fun kv => (kv.1, ((prevDown.lookup kv.1).getD 0) + 1))
   downCyclesRef.set newDown
   let downRestartCycles := ((← IO.getEnv "FLARE_DOWN_RESTART_CYCLES").bind (·.toNat?)).getD 60
-  let breakerTripped ← trippedRef.get
-  if downRestartCycles > 0 && !breakerTripped then
-    let crdNow ← crdRef.get
-    let allMastered := (List.range crdNow.spec.partitions).all (fun pIdx =>
-      finalState.nodeMap.any (fun kv =>
-        kv.2.role == FlareRole.Master && kv.2.state == FlareState.Active
-          && kv.2.partition == Int.ofNat pIdx))
-    if allMastered then
+  if downRestartCycles > 0 then
+    if podDeletionAllowed then
       match newDown.find? (fun kv => kv.2 ≥ downRestartCycles) with
       | some (key, cycles) =>
         match finalState.lookupNode key with
@@ -1063,6 +1111,32 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
             | .error e => IO.eprintln s!"[flare-operator] stuck-down recovery: failed to delete {podName}: {e}"
         | none => pure ()
       | none => pure ()
+
+  -- 4f. OPERATOR-SIDE REACHABILITY. Every other liveness signal is blind to
+  -- the operator→pod path: the readiness probe runs inside the pod (kubelet
+  -- asking flared about itself) and the stats probes travel via the API
+  -- server. So a node can be Ready and serving clients perfectly while the
+  -- operator cannot push topology to it — it then runs on a STALE MAP (wrong
+  -- roles) until the path heals, which is hazard H4 with no detector.
+  -- ALERT ONLY, never fed into dead detection: unreachability is a loss of
+  -- OUR feedback and the fault may be on our side, so failing over a master
+  -- we merely cannot see is the unsafe control action (see
+  -- docs/STPA-node-state.md). Probed every ~30s, not per tick.
+  let reachSlot := (← IO.monoMsNow) / 30000
+  if reachSlot != (← reachSlotRef.get) then
+    reachSlotRef.set reachSlot
+    let addrs ← podAddrsRef.get
+    let prevUnreach ← unreachCyclesRef.get
+    let mut newUnreach : List (String × Nat) := []
+    for (key, ip) in addrs do
+      if ip != "" then
+        if !(← Server.probeNodeReachable ip 12121) then
+          let streak := ((prevUnreach.lookup key).getD 0) + 1
+          newUnreach := newUnreach ++ [(key, streak)]
+          if streak == 1 || streak % 10 == 0 then
+            IO.eprintln s!"[flare-operator] CRITICAL: node {key} ({ip}:12121) is READY but the OPERATOR cannot connect to it ({streak} consecutive probes, ~{streak * 30}s). Topology pushes are not landing — that node is running on a stale map. NOT failing it over: the fault may be on our side. See RUNBOOK #node-unreachable"
+    unreachCyclesRef.set newUnreach
+    metrics.unreachableNodes.set newUnreach.length.toFloat
 
   -- 5. Handle rocksdb config propagation + cluster replication migration
   let crd ← crdRef.get
@@ -1507,6 +1581,9 @@ def main (args : List String) : IO Unit := do
   let prepareCyclesRef ← IO.mkRef ([] : List (String × Nat))
   let unreadyCyclesRef ← IO.mkRef ([] : List (String × Nat))
   let podKeysRef ← IO.mkRef ([] : List String)
+  let podAddrsRef ← IO.mkRef ([] : List (String × String))
+  let unreachCyclesRef ← IO.mkRef ([] : List (String × Nat))
+  let reachSlotRef ← IO.mkRef (0 : Nat)
   let downCyclesRef ← IO.mkRef ([] : List (String × Nat))
   let emptyMasterStreakRef ← IO.mkRef ([] : List (String × Nat))
   let probeSlotRef ← IO.mkRef (0 : Nat)
@@ -1549,7 +1626,7 @@ def main (args : List String) : IO Unit := do
     let startTime ← IO.monoMsNow
     try
       -- Use FSM-driven reconcile (complete implementation with all 5 requirements)
-      reconcileOnceFSM stateRef crdRef migrationRef graceCyclesRef trippedRef prepareCyclesRef unreadyCyclesRef podKeysRef downCyclesRef emptyMasterStreakRef probeSlotRef pendingConfRef masterSnapshotRef driftTickRef metrics leaseName identity crName ns
+      reconcileOnceFSM stateRef crdRef migrationRef graceCyclesRef trippedRef prepareCyclesRef unreadyCyclesRef podKeysRef podAddrsRef unreachCyclesRef reachSlotRef downCyclesRef emptyMasterStreakRef probeSlotRef pendingConfRef masterSnapshotRef driftTickRef metrics leaseName identity crName ns
     catch e =>
       IO.eprintln s!"[flare-operator] reconcile error: {e}"
     let endTime ← IO.monoMsNow

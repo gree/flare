@@ -16,11 +16,15 @@ spec:
         # A partition without an Active master serves no writes for its key
         # range. 2m tolerates a normal failover window (dead detection +
         # promotion + broadcast). Runbook: docs/RUNBOOK.md#master-missing
+        # Counted PER PARTITION by the operator. The previous expression was
+        # cluster-wide arithmetic (desired partitions minus active masters),
+        # which a stale master parked at an out-of-range partition index
+        # could offset — masking a genuinely unserved partition.
+        # Still blind, by design, to a master that is kept in the map while
+        # not serving (see unhealthyMastersKept): FlareNodeUnhealthy covers
+        # that one.
         - alert: FlareMasterMissing
-          expr: >
-            flare_operator_partitions_desired
-              - on(cluster) flare_operator_nodes_total{role="master",state="active"}
-              > 0
+          expr: flare_operator_partitions_masterless > 0
           for: 2m
           labels:
             severity: critical
@@ -90,6 +94,55 @@ spec:
           annotations:
             summary: "Flare node {{`{{ $labels.pod }}`}}: dropped replica write(s) — replica diverges until it reconstructs"
             runbook: docs/RUNBOOK.md#proxy-write-dropped
+
+        # The operator cannot open a TCP connection to a node that K8s still
+        # reports Ready. The node is probably serving clients fine; what is
+        # broken is the operator→pod path, so topology pushes are not landing
+        # and that node runs on a STALE MAP (wrong roles) until it heals. No
+        # other signal sees this: the readiness probe runs inside the pod and
+        # the stats probes go through the API server. Deliberately does NOT
+        # trigger failover — the fault may be on the operator's side.
+        - alert: FlareNodeUnreachableFromOperator
+          expr: flare_operator_nodes_unreachable > 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Flare cluster {{`{{ $labels.cluster }}`}}: operator cannot reach a Ready node — it is running on a stale topology"
+            runbook: docs/RUNBOOK.md#node-unreachable
+
+        # Master and replica key counts have drifted apart. Live replication
+        # is op-level proxying with NO per-write acknowledgement, so a
+        # dropped or refused replica write leaves the replica quietly behind
+        # until it reconstructs — and nothing else compares the two copies.
+        # Coarse by construction (equal counts do not prove equal content),
+        # but it catches the magnitude: pf-dev carried ~10k stale keys on its
+        # slave for 12 days with every other signal green.
+        - alert: FlareReplicaDivergence
+          expr: flare_operator_replica_key_delta > 0.005
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Flare cluster {{`{{ $labels.cluster }}`}}: replica key count differs from the master by >0.5% for 30m"
+            runbook: docs/RUNBOOK.md#replica-divergence
+
+        # A node's reconstruction keeps failing. flared counts the streak and
+        # WOULD self-demote at the threshold — except that path enqueues to a
+        # controller thread only flarei runs, so under this operator it never
+        # fires (the flared log now says so instead of claiming otherwise).
+        # That makes this alert the only signal: the node keeps its role and
+        # may be serving stale data.
+        - alert: FlareResyncFailing
+          expr: >-
+            flare_node_rocksdb_resync_failure_threshold > 0
+            and flare_node_rocksdb_resync_failure_count >= flare_node_rocksdb_resync_failure_threshold
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Flare node {{`{{ $labels.pod }}`}}: reconstruction has failed past its threshold and cannot self-demote"
+            runbook: docs/RUNBOOK.md#resync-failing
 
         - alert: FlareDrainNoSuccessor
           expr: flare_operator_drain_no_successor > 0

@@ -59,6 +59,53 @@ private def sendString (sock : Socket) (s : String) : IO Unit := do
     IO.sleep 50
   throw (IO.userError "send timed out after 3s (peer accepted but stalled)")
 
+/-- Can the OPERATOR open a TCP connection to this flared? Connect-only,
+    bounded by the same 3s budget as the topology push, socket closed
+    immediately.
+
+    This tests the operator→pod path specifically, which nothing else does:
+    the readiness probe runs INSIDE the pod (kubelet asks flared about
+    itself) and `kubectl exec` stats probes travel via the API server. A
+    node can therefore be perfectly healthy for clients while the operator
+    cannot push topology to it — it then runs on a stale map indefinitely.
+
+    Deliberately NOT wired into dead detection: unreachability is a loss of
+    OUR feedback, and the fault may be on our side, so acting on it (failing
+    over a master we merely cannot see) is the unsafe control action. It is
+    an alerting signal only. -/
+def probeNodeReachable (ip : String) (port : Nat) : IO Bool := do
+  let ipAddr ← match parseIPv4 ip with
+    | some addr => pure addr
+    | none => return false
+  let sock ← Socket.new
+  let addr := SocketAddress.v4 (SocketAddressV4.mk ipAddr port.toUInt16)
+  try
+    let connectPromise ← sock.connect addr
+    let connectTask := connectPromise.result!
+    let mut connected := false
+    for _ in [0:60] do
+      if (← IO.hasFinished connectTask) then
+        connected := true
+        break
+      IO.sleep 50
+    if !connected then
+      return false
+    match connectTask.get with
+    | .error _ => return false
+    | .ok () => return true
+  catch _ =>
+    return false
+  finally
+    try
+      let shutdownPromise ← sock.shutdown
+      let t := shutdownPromise.result!
+      for _ in [0:20] do
+        if (← IO.hasFinished t) then
+          break
+        IO.sleep 50
+    catch _ =>
+      pure ()
+
 -- ===========================================================================
 -- Topology Push (Node Sync)
 -- ===========================================================================

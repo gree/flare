@@ -69,6 +69,9 @@ cluster::cluster(thread_pool* req_tp, thread_pool* other_tp, string server_name,
 		_storage(NULL),
 		_type(type_node),
 		_master_reconstruction(0),
+		_boot_shift_pending(false),
+		_reannounce_active(false),
+		_activation_pending(false),
 		_node_map_version(0),
 		_server_name(server_name),
 		_server_port(server_port),
@@ -1124,11 +1127,45 @@ int cluster::reconstruct_node(vector<node> v, uint64_t node_map_version) {
 				// - myself -> should be role=proxy
 				// - others -> this node does not have to care about anything
 				log_debug("-> new node", 0);
+				if (node_key == this->_node_key && it->node_role != role_proxy) {
+					// The very first map we receive can already assign us a
+					// role: the index re-registers a restarted node onto its
+					// old partition (slave/prepare) instead of demoting it to
+					// proxy. No later role DIFF will ever arrive, so without
+					// a synthesized boot transition the node sits in prepare
+					// forever and never reconstructs. The shift cannot run
+					// HERE: startup_node executes before flared wires the
+					// storage into the cluster, and handler_reconstruction
+					// with a null storage takes the process down. Record it;
+					// flared calls run_boot_shift() right after set_storage.
+					log_notice("boot map already assigns my role (role=%s, partition=%d) — deferring role shift until storage is attached", cluster::role_cast(it->node_role).c_str(), it->node_partition);
+					this->_boot_shift_pending = true;
+				}
 			} else {
 				log_debug("-> existing node", 0);
 				if (it->node_state != this->_node_map[node_key].node_state) {
-					node_shift_state tmp = { node_key, this->_node_map[node_key].node_state, it->node_state};
-					shift_state_stack.push(tmp);
+					if (node_key == this->_node_key
+							&& it->node_state == state_prepare
+							&& this->_node_map[node_key].node_state == state_active
+							&& it->node_role == this->_node_map[node_key].node_role
+							&& it->node_partition == this->_node_map[node_key].node_partition) {
+						// The index believes we are still syncing, but we
+						// completed reconstruction and ARE active with the
+						// same role/partition. This happens when the
+						// activation landed on an operator leader that died
+						// before persisting it (leader handover lost-update,
+						// observed live). Regressing to prepare would strand
+						// the node: no role diff ever arrives, so nothing
+						// would re-trigger reconstruction or activation.
+						// Keep active locally and re-announce it (after the
+						// locks are released).
+						log_notice("index map says prepare but local state is active (role/partition unchanged) — keeping active and re-announcing activation", 0);
+						it->node_state = state_active;
+						this->_reannounce_active = true;
+					} else {
+						node_shift_state tmp = { node_key, this->_node_map[node_key].node_state, it->node_state};
+						shift_state_stack.push(tmp);
+					}
 				}
 				if (it->node_role != this->_node_map[node_key].node_role || it->node_partition != this->_node_map[node_key].node_partition) {
 					node_shift_role tmp = {node_key, this->_node_map[node_key].node_role, this->_node_map[node_key].node_partition, it->node_role, it->node_partition};
@@ -1171,12 +1208,103 @@ int cluster::reconstruct_node(vector<node> v, uint64_t node_map_version) {
 		shift_role_stack.pop();
 	}
 
+	// retry a deferred/failed boot role shift now that this broadcast may
+	// have brought the missing reconstruction source (storage NULL = still
+	// inside startup_node; flared runs the first attempt via run_boot_shift
+	// right after set_storage).
+	if (this->_boot_shift_pending && this->_storage != NULL) {
+		this->_run_boot_shift_locked();
+	}
+
+	// Anti-entropy v2: our activation was ACKNOWLEDGED, yet accepted maps
+	// keep saying we are prepare. That means the ack landed on an index
+	// leader that died before persisting it (observed live): the activation
+	// RETRY cannot fire (the op succeeded) and the v1 re-announce above
+	// cannot fire either (local state only becomes active via the map echo
+	// that never came). Keep re-announcing on every accepted map until one
+	// shows us out of prepare.
+	{
+		node_map::iterator me = this->_node_map.find(this->_node_key);
+		if (me != this->_node_map.end() && me->second.node_role != role_proxy) {
+			if (me->second.node_state == state_prepare) {
+				if (this->_activation_pending) {
+					log_notice("activation was acknowledged but the map still says prepare — re-announcing (anti-entropy)", 0);
+					this->_reannounce_active = true;
+				}
+			} else {
+				this->_activation_pending = false;
+			}
+		}
+	}
+
 	this->_set_node_map_version(node_map_version);
 
 	pthread_rwlock_unlock(&this->_mutex_node_partition_map);
 	pthread_rwlock_unlock(&this->_mutex_node_map);
 
+	if (this->_reannounce_active) {
+		this->_reannounce_active = false;
+		// network IO — deliberately outside the map locks
+		this->activate_node(true);
+	}
+
 	return 0;
+}
+
+/**
+ *	[node] run the role shift synthesized at boot.
+ *	reconstruct_node cannot run it inline: startup_node executes before
+ *	flared attaches the storage to the cluster, and handler_reconstruction
+ *	with a null storage takes the process down. flared calls this right
+ *	after set_storage(). Reads the CURRENT map (not a recorded snapshot) so
+ *	a broadcast landing in between cannot make the shift stale.
+ */
+int cluster::run_boot_shift() {
+	if (!this->_boot_shift_pending) {
+		return 0;
+	}
+
+	pthread_rwlock_wrlock(&this->_mutex_node_map);
+	pthread_rwlock_wrlock(&this->_mutex_node_partition_map);
+	int result = this->_run_boot_shift_locked();
+	pthread_rwlock_unlock(&this->_mutex_node_partition_map);
+	pthread_rwlock_unlock(&this->_mutex_node_map);
+
+	return result;
+}
+
+/**
+ *	core of run_boot_shift; caller must hold _mutex_node_map and
+ *	_mutex_node_partition_map (write).
+ *
+ *	The pending flag is only cleared on SUCCESS: a node that reboots right
+ *	after its partition lost the master (rolling restart of a master) sees
+ *	no reconstruction source for a few seconds — the index promotes a new
+ *	master on its next reconcile tick. _shift_node_role returns -1 in that
+ *	window; keeping the flag set makes reconstruct_node retry on every
+ *	subsequent node map broadcast until a source exists. Without the retry
+ *	the node sits in prepare forever (observed live: rolled ex-master
+ *	rebooted 4s before the slave promotion landed).
+ */
+int cluster::_run_boot_shift_locked() {
+	role r = role_proxy;
+	int p = -1;
+	node_map::iterator me = this->_node_map.find(this->_node_key);
+	if (me != this->_node_map.end()) {
+		r = me->second.node_role;
+		p = me->second.node_partition;
+	}
+	if (r == role_proxy) {
+		// role was withdrawn in the meantime: nothing to synthesize
+		this->_boot_shift_pending = false;
+		return 0;
+	}
+	if (this->_shift_node_role(this->_node_key, role_proxy, -1, r, p) == 0) {
+		this->_boot_shift_pending = false;
+		return 0;
+	}
+	log_notice("boot role shift could not run yet (no reconstruction source for partition %d?) — retrying on the next node map broadcast", p);
+	return -1;
 }
 
 /**
@@ -1211,6 +1339,15 @@ int cluster::set_monitor_interval(int monitor_interval) {
  *	[index] set node server monitoring read timeout
  */
 int cluster::set_monitor_read_timeout(int monitor_read_timeout) {
+#ifdef ENABLE_K8S_OPERATOR
+	// In K8s operator mode, cap the monitor read timeout to 10 seconds.
+	// The operator handles node health monitoring via K8s pod readiness probes,
+	// so the in-process monitor only needs a short timeout as a secondary check.
+	if (monitor_read_timeout > 10) {
+		log_notice("K8s operator mode: capping monitor_read_timeout from %d to 10s", monitor_read_timeout);
+		monitor_read_timeout = 10;
+	}
+#endif
 	this->_monitor_read_timeout = monitor_read_timeout;
 
 	// notify current threads
@@ -1388,12 +1525,23 @@ cluster::proxy_request cluster::pre_proxy_write(op_proxy_write* op, shared_queue
 	}
 	this->_determine_partition(e, p_prepare, true, is_prepare);
 
-	if (p.master.node_key == this->_node_key || (op->is_proxy_request() && is_prepare && p_prepare.master.node_key == this->_node_key)) {
+	// Proxy marks mean "final delivery from within OUR cluster, apply
+	// locally" — honor them only when the marking node actually shares our
+	// node map. Cluster replication (and any external forwarder) delivers
+	// requests still carrying the SOURCE cluster's proxy list; an LB
+	// destination can pin such a stream to a slave, and treating the
+	// foreign marks as final delivery makes that slave hoard keys its own
+	// master never sees (invisible to reads via the master, wiped by the
+	// next reseed — observed live). Foreign-marked requests are routed
+	// like fresh client writes instead.
+	bool local_proxy_request = this->_is_local_proxy_request(op);
+
+	if (p.master.node_key == this->_node_key || (local_proxy_request && is_prepare && p_prepare.master.node_key == this->_node_key)) {
 		// should be write at this node
 		return proxy_request_continue;
 	}
 
-	if (op->is_proxy_request()) {
+	if (local_proxy_request) {
 		if (p.index.count(this->_node_key) > 0 || (is_prepare && p_prepare.index.count(this->_node_key) > 0)) {
 			return proxy_request_continue;
 		}
@@ -1442,7 +1590,7 @@ cluster::proxy_request cluster::post_proxy_write(op_proxy_write* op, bool sync) 
 	}
 	this->_determine_partition(e, p_prepare, true, is_prepare);
 
-	if ((p.master.node_key == this->_node_key) || (op->is_proxy_request() && is_prepare && p_prepare.master.node_key == this->_node_key)) {
+	if ((p.master.node_key == this->_node_key) || (this->_is_local_proxy_request(op) && is_prepare && p_prepare.master.node_key == this->_node_key)) {
 		// fall through
 	} else {
 		// nothing to do
@@ -1540,6 +1688,78 @@ int cluster::_shift_node_role(string node_key, role old_role, int old_partition,
 	// proxy -> slave or master: requesting reconstruction
 	// we intentionally do not truncate current database here (for safe)
 	// if user *really* want to reconstruct database, they can use "flush_all" op
+	// NOTE: the RocksDB reconstruction path (handler_reconstruction) now
+	// truncates its local storage before a FULL DUMP so deletions on the
+	// source propagate (otherwise a long-down replica would resurrect
+	// deleted keys). tch/tcb keep the legacy merge behavior. This comment
+	// still holds here: the truncate is done in the handler, not at this
+	// dispatch point.
+	// Our own broadcast state as just applied to the node map (this branch
+	// only runs for node_key == this->_node_key). The operator (index
+	// server) decides state: it assigns a freshly-recreated designated
+	// master directly to state=active when its data is authoritative (e.g.
+	// P0 on a persistent volume), and only uses state=prepare for a node
+	// that must reconstruct from a live source (scale-out P1+). Matching the
+	// Lean model (FlaredNode.lean): "assigned master with state active ->
+	// instant, no reconstruction".
+	cluster::state my_state = state_prepare;
+	{
+		node_map::iterator me = this->_node_map.find(node_key);
+		if (me != this->_node_map.end()) {
+			my_state = me->second.node_state;
+		}
+	}
+
+	// Fix A (repl_last_lsn / sequence-space inversion): a node promoted TO
+	// master may carry a repl_last_lsn cursor seeded from a FORMER master's
+	// sequence space during its own past full-dump reconstruction
+	// (handler_reconstruction seeds the cursor from the SOURCE's latest_lsn,
+	// not from records written locally). That cursor is meaningless in this
+	// DB instance and can exceed this instance's own GetLatestSequenceNumber.
+	// Once this node serves as master it advertises its OWN sequence, but
+	// same-lineage slaves compare their (equally inflated) cursor against it
+	// and wrongly conclude the master is "not newer" (#14 truncate-skip) or
+	// "lsn_ahead" (op_repl_sync_wal), stranding themselves in Prepare forever
+	// (observed live on dev: master repl_last_lsn=273 vs latest_seq=42).
+	// Two RocksDB instances never share a sequence space, so WAL-incremental
+	// across a master change was never sound; mint a fresh master_id here so
+	// same-lineage slaves see a clean lineage break (master_id_mismatch) and
+	// take a correct full dump. The #14 empty-master guard is untouched: a
+	// genuinely empty source still refuses to be a truncate source
+	// (peer_latest_lsn == 0), so this does not reopen the empty-master cascade.
+	// These accessors are virtual on the base storage (non-RocksDB backends
+	// return 0, so the guard is a no-op there); we deliberately avoid pulling
+	// the RocksDB headers into cluster.cc.
+	if (new_role == role_master && old_role != role_master && this->_storage != NULL) {
+		uint64_t cursor = this->_storage->get_repl_last_lsn();
+		uint64_t seq = this->_storage->get_latest_sequence_number();
+		if (cursor > seq) {
+			log_warning("promotion to master with replication cursor ahead of own sequence (repl_last_lsn=%llu > latest_sequence_number=%llu): cursor belongs to a former master's sequence space. Minting fresh master_id so same-lineage slaves take a clean full dump instead of stranding on lsn_ahead / #14 truncate-skip.",
+				(unsigned long long)cursor, (unsigned long long)seq);
+			this->_storage->regenerate_master_id();
+			this->_storage->set_repl_last_lsn(seq);
+		}
+	}
+
+	// Active means the operator has declared this node's local data
+	// authoritative / in-sync. Reconstructing anyway is not just wasteful:
+	// it picks a source from the churning ring (possibly the wrong
+	// partition's master), the dump contributes nothing or wrong data, the
+	// Active->Ready transition is rejected, and connect-failure
+	// deactivation amplifies churn until data is lost. So skip
+	// reconstruction entirely for an Active assignment (both master and
+	// slave) and keep the local data as-is.
+	if (my_state == state_active) {
+		if (new_role == role_master && old_role == role_proxy) {
+			log_notice("assigned master with state active — skipping reconstruction (operator designated this node the source of truth; local data is authoritative)", 0);
+			return 0;
+		}
+		if (new_role == role_slave) {
+			log_notice("assigned slave with state active — skipping reconstruction (operator declared this node in-sync per the node map)", 0);
+			return 0;
+		}
+	}
+
 	log_debug("creating reconstruction thread(s)... (type=%s)", cluster::role_cast(new_role).c_str());
 	if (new_role == role_master && old_role == role_proxy) {
 		int partition_size = this->_node_partition_map.size() + this->_node_partition_prepare_map.size();
@@ -1576,7 +1796,15 @@ int cluster::_shift_node_role(string node_key, role old_role, int old_partition,
 		pthread_mutex_lock(&this->_mutex_master_reconstruction);
 		log_notice("master reconstruction started (n=%d)", this->_master_reconstruction);
 		pthread_mutex_unlock(&this->_mutex_master_reconstruction);
-	} else if (new_role == role_slave && old_role == role_proxy) {
+	} else if (new_role == role_slave) {
+		// ANY shift into slave/prepare needs a resync, not just proxy->slave.
+		// The operator demotes masters to slaves routinely (duplicate-master
+		// repair after a leader handover, failover flip-back); legacy flare
+		// only ever produced proxy->slave here, so a demoted ex-master in
+		// prepare used to fall through with NO reconstruction and sit there
+		// forever (observed live). The ex-master's data may also contain
+		// keys deleted on the new master, so the gated truncate + dump in
+		// handler_reconstruction is exactly the right resync.
 		string master_node_key = "";
 		int partition_size = this->_node_partition_map.size();
 		if (this->_node_partition_map.count(new_partition) > 0) {
@@ -1598,9 +1826,45 @@ int cluster::_shift_node_role(string node_key, role old_role, int old_partition,
 		this->from_node_key(master_node_key, node_server_name, node_server_port);
 		handler_reconstruction* h = new handler_reconstruction(t, this, this->_storage, node_server_name, node_server_port, new_partition, partition_size, new_role, this->get_reconstruction_interval(), this->get_reconstruction_bwlimit());
 		t->trigger(h);
+	} else {
+		// Transition-matrix guard: every remaining combination reaches here
+		// (e.g. master assigned from a non-proxy role while in prepare).
+		// Today's operator never produces one, but two production
+		// incidents were exactly "a transition no branch handled, parked
+		// in prepare forever" — if a new combination ever appears, say so
+		// instead of silently doing nothing.
+		if (my_state == state_prepare) {
+			log_warning("unhandled role shift while in prepare (old_role=%s -> new_role=%s, partition=%d) — no reconstruction was dispatched; this node will NOT activate on its own", cluster::role_cast(old_role).c_str(), cluster::role_cast(new_role).c_str(), new_partition);
+		}
 	}
 
 	return 0;
+}
+
+/**
+ *	see if a proxy-marked request originated inside THIS cluster.
+ *
+ *	True when at least one node on the request's proxy list exists in our
+ *	node map. A request whose proxy list names no node we know (typically
+ *	cluster replication from another cluster, which forwards each op with
+ *	the SOURCE cluster's hop list attached) must not get final-delivery
+ *	treatment here: its marks describe a foreign topology.
+ */
+bool cluster::_is_local_proxy_request(op_proxy_write* op) {
+	if (!op->is_proxy_request()) {
+		return false;
+	}
+	vector<string> proxy = op->get_proxy();
+	bool known = false;
+	pthread_rwlock_rdlock(&this->_mutex_node_map);
+	for (vector<string>::iterator it = proxy.begin(); it != proxy.end(); it++) {
+		if (this->_node_map.count(*it) > 0) {
+			known = true;
+			break;
+		}
+	}
+	pthread_rwlock_unlock(&this->_mutex_node_map);
+	return known;
 }
 
 int cluster::_enqueue(shared_thread_queue q, string node_key, int key_hash, bool sync) {
@@ -2275,6 +2539,12 @@ shared_connection cluster::_open_index() {
 shared_connection cluster::_open_index_single_server() {
 	index_server server = this->_index_servers.front();
 	shared_connection_tcp ctp(new connection_tcp(server.index_server_name, server.index_server_port));
+#ifdef ENABLE_K8S_OPERATOR
+	// In K8s operator mode, reduce connect retry limit for faster startup.
+	// The operator pod is expected to be reachable via K8s Service ClusterIP
+	// with minimal latency. If it's not reachable, K8s will restart the pod.
+	ctp->set_connect_retry_limit(2);
+#endif
 	if (ctp && ctp->open() == 0) {
 		return ctp;
 	}

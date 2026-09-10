@@ -1,0 +1,167 @@
+{{- /* Object-storage backup CronJob: ONE strictly-ordered runner
+       (flare-backup-run, baked into the flare-backup image) — per-partition
+       checkpoint -> pull -> restore-consistent 3-phase upload -> verify,
+       then (first successful run of each UTC day) the retained generation
+       copy + prune. In-process ordering means the daily generation can
+       never race a running delta; self-overlap is prevented by Forbid + a
+       deadline below the cadence. Location/auth come from
+       cluster.objectStorage — the SAME block backupBootstrap reads. */}}
+{{- if .Values.cluster.enabled }}
+{{- $c := .Values.cluster }}
+{{- $ns := .Values.namespace }}
+{{- $bk := dict "enabled" false }}
+{{- if $c.backup }}{{- $bk = $c.backup }}{{- end }}
+{{- $os := $c.objectStorage | default dict }}
+{{- $sa := $bk.serviceAccount | default dict }}
+{{- $saName := $sa.name | default (printf "%s-backup" $c.name) }}
+{{- /* SA/RBAC are PROVISIONED whenever object storage is configured — the
+       nodes STS references this SA whenever the (always-provisioned)
+       backup-bootstrap plumbing exists, independent of backup.enabled, and
+       apply cannot restore an SA a toggle deleted while pods still demand
+       it (observed live: FailedCreate "serviceaccount not found"). Only the
+       CronJob below follows backup.enabled; use backup.suspend for a
+       roll-free, object-stable pause. */}}
+{{- if or $bk.enabled $os.url }}
+{{- if ne ($sa.create | default true) false }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  # Cluster-scoped name so multiple clusters can share a namespace. The cloud
+  # OIDC trust policy must match this via a StringLike subject condition
+  # (e.g. system:serviceaccount:<ns>:*-backup) so every cluster's SA is
+  # trusted without a per-cluster edit. Override with backup.serviceAccount.name.
+  name: {{ $saName }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "flare-operator.clusterLabel" . | nindent 4 }}
+    {{- include "flare-operator.wellKnown" (dict "root" $ "name" "flared" "component" "backup") | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $saName }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "flare-operator.clusterLabel" . | nindent 4 }}
+    {{- include "flare-operator.wellKnown" (dict "root" $ "name" "flared" "component" "backup") | nindent 4 }}
+rules:
+  # kubectl cp of the checkpoint out of the flared pod
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $saName }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "flare-operator.clusterLabel" . | nindent 4 }}
+    {{- include "flare-operator.wellKnown" (dict "root" $ "name" "flared" "component" "backup") | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $saName }}
+    namespace: {{ $ns }}
+roleRef:
+  kind: Role
+  name: {{ $saName }}
+  apiGroup: rbac.authorization.k8s.io
+---
+{{- end }}
+{{- end }}
+{{- if $bk.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ $c.name }}-backup
+  namespace: {{ $ns }}
+  labels:
+    {{- include "flare-operator.clusterLabel" . | nindent 4 }}
+    {{- include "flare-operator.wellKnown" (dict "root" $ "name" "flared" "component" "backup") | nindent 4 }}
+spec:
+  schedule: {{ $bk.schedule | default "0 * * * *" | quote }}
+  concurrencyPolicy: Forbid      # never two runners at once
+  # If a slot was skipped (previous run still active / controller hiccup),
+  # start up to this late rather than not at all.
+  startingDeadlineSeconds: {{ $bk.startingDeadlineSeconds | default 900 }}
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  suspend: {{ $bk.suspend | default false }}
+  jobTemplate:
+    spec:
+      # HARD timeout, kept BELOW the cadence: a hung run (stuck kubectl cp,
+      # stalled upload) dies before its next slot instead of blocking it.
+      activeDeadlineSeconds: {{ $bk.activeDeadlineSeconds | default 3300 }}
+      template:
+        metadata:
+          labels:
+            app: flare-backup
+            cluster: {{ $c.name }}
+            {{- include "flare-operator.clusterLabel" . | nindent 12 }}
+            {{- include "flare-operator.wellKnown" (dict "root" $ "name" "flared" "component" "backup") | nindent 12 }}
+            {{- with $c.podLabels }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+        spec:
+          restartPolicy: Never
+          serviceAccountName: {{ $saName }}
+          {{- if $os.projectedTokenAudience }}
+          volumes:
+            # Keyless (web-identity) auth: a projected SA token with the
+            # cloud-side audience; pair with objectStorage.extraEnv.
+            - name: token
+              projected:
+                sources:
+                  - serviceAccountToken:
+                      audience: {{ $os.projectedTokenAudience }}
+                      expirationSeconds: 3600
+                      path: token
+          {{- end }}
+          containers:
+            - name: backup
+              image: "{{ ($bk.image).repository | default "ghcr.io/gree/flare-backup" }}:{{ ($bk.image).tag | default $c.image.tag }}"
+              imagePullPolicy: {{ $c.image.pullPolicy }}
+              {{- if $os.credentialsSecret }}
+              envFrom:
+                - secretRef:
+                    name: {{ $os.credentialsSecret }}
+              {{- end }}
+              {{- if $os.projectedTokenAudience }}
+              volumeMounts:
+                - name: token
+                  mountPath: /var/run/secrets/sts
+                  readOnly: true
+              {{- end }}
+              env:
+                - name: CLUSTER
+                  value: {{ $c.name | quote }}
+                - name: NAMESPACE
+                  value: {{ $ns | quote }}
+                - name: FLARE_PORT
+                  value: {{ $c.flarePort | quote }}
+                # master=freshest copy; slave=offloads the master
+                - name: BACKUP_ROLE
+                  value: {{ $bk.role | default "master" | quote }}
+                - name: OPERATOR_SVC
+                  value: {{ include "flare-operator.fullname" . }}.{{ $ns }}.svc.cluster.local
+                - name: OPERATOR_PORT
+                  value: {{ .Values.service.port | quote }}
+                - name: BUCKET
+                  value: {{ $os.url | quote }}
+                - name: S3_ENDPOINT
+                  value: {{ $os.endpoint | default "" | quote }}
+                - name: DATA_DIR
+                  value: {{ ternary "/data/flare" "/tmp/flare" (or $c.persistence.enabled (and $c.tmpfs $c.tmpfs.enabled)) | quote }}
+                - name: KEEP_DAYS
+                  value: {{ $bk.keepDays | default 14 | quote }}
+                - name: SNAPSHOT_AFTER_HOUR_UTC
+                  value: {{ $bk.snapshotAfterHourUtc | default 0 | quote }}
+                {{- with $os.extraEnv }}
+                {{- toYaml . | nindent 16 }}
+                {{- end }}
+              command: ["flare-backup-run"]
+{{- end }}
+{{- end }}

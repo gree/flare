@@ -2,7 +2,19 @@ diff --git a/configure.ac b/configure.ac
 index 2956e3aa..17872aa6 100644
 --- a/configure.ac
 +++ b/configure.ac
-@@ -561,6 +561,9 @@ m4_ifdef([GTK_DOC_CHECK], [
+@@ -147,6 +147,11 @@ CHECK_BUILD_FLAG([-Wcast-align])
+ CHECK_CFLAG([-Wmissing-declarations])
+ CHECK_CFLAG([-Wmissing-prototypes])
+ CHECK_CFLAG([-fexceptions])
++
++dnl Disable warnings that are treated as errors in newer GCC versions
++CHECK_CFLAG([-Wno-format-overflow])
++CHECK_BUILD_FLAG([-Wno-deprecated-declarations])
++CHECK_CFLAG([-Wno-error=incompatible-pointer-types])
+
+ # Checks for headers
+ AC_HEADER_SYS_WAIT
+@@ -561,6 +566,9 @@ m4_ifdef([GTK_DOC_CHECK], [
  GTK_DOC_CHECK([1.16],[--flavour no-tmpl])
  ], [enable_gtk_doc=no
      AM_CONDITIONAL([GTK_DOC_USE_LIBTOOL], [false])
@@ -10,5 +22,5 @@ index 2956e3aa..17872aa6 100644
 +    AM_CONDITIONAL([GTK_DOC_BUILD_PDF], [false])
 +    AM_CONDITIONAL([HAVE_GTK_DOC], [false])
      AM_CONDITIONAL([ENABLE_GTK_DOC], [false])])
- 
+
  dnl **************************************************************

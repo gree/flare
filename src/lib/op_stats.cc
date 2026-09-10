@@ -30,6 +30,9 @@
 #include "op_stats.h"
 #include "binary_request_header.h"
 #include "binary_response_header.h"
+#ifdef HAVE_LIBROCKSDB
+#include "storage_rocksdb.h"
+#endif
 
 namespace gree {
 namespace flare {
@@ -143,6 +146,21 @@ int op_stats::_send_stats(thread_pool* req_tp, thread_pool* other_tp, storage* s
 	_send_stat("get_hits" 						, stats_object->get_get_hits());
 	_send_stat("get_misses" 					, stats_object->get_get_misses());
 	_send_stat("delete_hits"					, stats_object->get_delete_hits());
+	_send_stat("proxy_write_dropped"	, stats_object->get_proxy_write_dropped());
+	// Per-destination breakdown, so a controller can resync exactly the
+	// replica that fell behind. Keys carry the destination in brackets and
+	// are therefore skipped by the Prometheus formatter (which only maps
+	// known names and the rocksdb_ prefix) — this is for the controller and
+	// for a human reading `stats`, not for a time series per replica.
+	{
+		map<string, uint64_t> dropped_by_dest = stats_object->get_proxy_write_dropped_by_dest();
+		for (map<string, uint64_t>::const_iterator it = dropped_by_dest.begin();
+				it != dropped_by_dest.end(); it++) {
+			char key[BUFSIZ];
+			snprintf(key, sizeof(key), "proxy_write_dropped[%s]", it->first.c_str());
+			_send_stat(key, it->second);
+		}
+	}
 	_send_stat("delete_misses"				, stats_object->get_delete_misses());
 	_send_stat("incr_hits"						, stats_object->get_incr_hits());
 	_send_stat("incr_misses"					, stats_object->get_incr_misses());
@@ -160,6 +178,50 @@ int op_stats::_send_stats(thread_pool* req_tp, thread_pool* other_tp, storage* s
 	_send_stat("threads"							, stats_object->get_threads(req_tp, other_tp));
 	_send_stat("pool_threads" 				, stats_object->get_pool_threads(req_tp, other_tp));
 	_send_stat("node_map_version"		, cl->get_node_map_version());
+
+	// Data-dir filesystem usage (statvfs). On tmpfs clusters this is the RAM
+	// the dataset occupies — the quantity that drives the pod's memory limit —
+	// which container-level memory metrics (working_set) do not show.
+	if (st) {
+		_send_stat("data_dir_used_bytes"    , st->get_data_dir_used_bytes());
+		_send_stat("data_dir_capacity_bytes", st->get_data_dir_capacity_bytes());
+	}
+
+#ifdef HAVE_LIBROCKSDB
+	// RocksDB WAL-replication observability. Only emitted when the
+	// storage backend is actually RocksDB so non-RocksDB deployments
+	// see no change in `stats` output.
+	if (st && st->get_type() == storage::type_rocksdb) {
+		storage_rocksdb* rdb = dynamic_cast<storage_rocksdb*>(st);
+		if (rdb) {
+			_send_stat("rocksdb_master_id"                  , rdb->get_master_id());
+			_send_stat("rocksdb_repl_last_lsn"              , rdb->get_repl_last_lsn());
+			_send_stat("rocksdb_latest_sequence_number"     , rdb->get_latest_sequence_number());
+			_send_stat("rocksdb_wal_sync_success"           , rdb->get_wal_sync_success());
+			_send_stat("rocksdb_wal_sync_lsn_purged"        , rdb->get_wal_sync_lsn_purged());
+			_send_stat("rocksdb_wal_sync_lsn_ahead"         , rdb->get_wal_sync_lsn_ahead());
+			_send_stat("rocksdb_wal_sync_master_id_mismatch", rdb->get_wal_sync_master_id_mismatch());
+			_send_stat("rocksdb_wal_sync_apply_failure"     , rdb->get_wal_sync_apply_failure());
+			_send_stat("rocksdb_wal_sync_other_error"       , rdb->get_wal_sync_other_error());
+			_send_stat("rocksdb_wal_sync_crc_mismatch"      , rdb->get_wal_sync_crc_mismatch());
+			_send_stat("rocksdb_wal_fallback_to_dump"       , rdb->get_wal_fallback_to_dump());
+			_send_stat("rocksdb_expire_reaped"              , rdb->get_expire_reaped());
+			_send_stat("rocksdb_snapshot_bootstrap"         , rdb->get_snapshot_bootstrap());
+			_send_stat("rocksdb_corruption_detected"        , rdb->get_corruption_detected());
+			_send_stat("rocksdb_hard_reset"                 , rdb->get_hard_reset());
+			_send_stat("rocksdb_corrupted"                  , rdb->is_corrupted() ? 1 : 0);
+			_send_stat("rocksdb_resync_failure_count"       , rdb->get_resync_failure_count());
+			_send_stat("rocksdb_resync_failure_threshold"   , rdb->get_resync_failure_threshold());
+			_send_stat("rocksdb_wal_max_batch_bytes"        , rdb->get_wal_max_batch_bytes());
+			_send_stat("rocksdb_wal_sync_bwlimit"           , rdb->get_wal_sync_bwlimit());
+			_send_stat("rocksdb_snapshot_bwlimit"           , rdb->get_snapshot_bwlimit());
+			_send_stat("rocksdb_wal_sync_interval"          , rdb->get_wal_sync_interval());
+			_send_stat("rocksdb_backup_success"             , rdb->get_backup_success());
+			_send_stat("rocksdb_backup_failure"             , rdb->get_backup_failure());
+			_send_stat("rocksdb_last_backup_epoch"          , static_cast<uint64_t>(rdb->get_last_backup_epoch()));
+		}
+	}
+#endif
 
 	return 0;
 }
@@ -255,23 +317,6 @@ int op_stats::_send_stats_threads_queue() {
 	_send_stat("total_thread_queue", stats_object->get_total_thread_queue());
 
 	return 0;
-}
-
-template<typename T>
-int op_stats::_send_text_stat(const char* key, const T& value) {
-	_text_stream << "STAT " << key << ' ' << value << line_delimiter;
-	return 0;
-}
-
-template<typename T>
-int op_stats::_send_binary_stat(const char* key, const T& value) {
-	std::ostringstream body_os;
-	body_os << key << value;
-	const std::string& body = body_os.str();
-	binary_response_header header(this->_opcode);
-	header.set_key_length(strlen(key));
-	header.set_total_body_length(body.size());
-	return op::_send_binary_response(header, body.data(), true);
 }
 
 int op_stats::_send_text_result(result r, const char* message) {

@@ -1,0 +1,56 @@
+# Multi-stage build for the Lean 4 flare-operator
+# Stage 1: Build the operator binary with elan + lake
+FROM --platform=linux/amd64 ubuntu:noble AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=UTC
+ENV ELAN_HOME=/usr/local/elan
+ENV PATH="${ELAN_HOME}/bin:${PATH}"
+
+RUN apt-get update && apt-get install -y \
+    curl \
+    git \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install elan (Lean version manager)
+RUN curl -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y --default-toolchain none \
+    && elan --version
+
+WORKDIR /build
+
+# Copy lakefile and toolchain first for layer caching
+COPY flare_operator/lean-toolchain flare_operator/lakefile.lean /build/flare_operator/
+
+# Install the correct Lean toolchain
+RUN cd /build/flare_operator && elan toolchain install $(cat lean-toolchain)
+
+# Copy all Lean source
+COPY flare_operator/ /build/flare_operator/
+
+# Build the operator executable
+RUN cd /build/flare_operator && lake build flare_operator
+
+# Stage 2: Minimal runtime image
+FROM --platform=linux/amd64 ubuntu:noble
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install kubectl
+RUN curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" \
+    && install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl \
+    && rm kubectl
+
+# Copy the built operator binary
+COPY --from=builder /build/flare_operator/.lake/build/bin/flare_operator /usr/local/bin/flare_operator
+
+# Run as non-root user (let system auto-assign UID to avoid conflicts)
+RUN useradd -r -s /bin/false flare-operator
+USER flare-operator
+
+ENTRYPOINT ["/usr/local/bin/flare_operator"]

@@ -35,6 +35,7 @@ libflare_la_SOURCES = \
 	key_resolver_modular.h key_resolver_modular.cc \
 	ini.h ini.cc \
 	logger.h logger.cc \
+	metrics_formatter.h metrics_formatter.cc \
 	mysql_replication.h mysql_replication.cc \
 	op.cc op.h \
 	op_add.h op_add.cc \
@@ -54,6 +55,12 @@ libflare_la_SOURCES = \
 	op_keys.h op_keys.cc \
 	op_kill.h op_kill.cc \
 	op_meta.h op_meta.cc \
+	op_repl_sync_wal.h op_repl_sync_wal.cc \
+	op_repl_snapshot.h op_repl_snapshot.cc \
+	op_repl_snapshot_push.h op_repl_snapshot_push.cc \
+	op_orphan_scan.h op_orphan_scan.cc \
+	op_orphan_purge.h op_orphan_purge.cc \
+	op_backup.h op_backup.cc \
 	op_node_add.h op_node_add.cc \
 	op_node_remove.h op_node_remove.cc \
 	op_node_role.h op_node_role.cc \
@@ -108,4 +115,7 @@ libflare_la_SOURCES += zookeeper_lock.h zookeeper_lock.cc zookeeper_coordinator.
 endif
 if ENABLE_KYOTOCABINET
 libflare_la_SOURCES += storage_kch.h storage_kch.cc
+endif
+if ENABLE_ROCKSDB
+libflare_la_SOURCES += storage_rocksdb.h storage_rocksdb.cc
 endif

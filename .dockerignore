@@ -1,0 +1,20 @@
+# Keep build contexts small and force the docker builders to always
+# compile from source. Without this, Dockerfile.operator's COPY picks
+# up the host's Nix-built `.lake/build/bin/flare_operator` (which has
+# a /nix/store glibc interpreter baked into its ELF header) and simply
+# re-packages it, producing an image that crashes at startup with
+# "exec /usr/local/bin/flare_operator: no such file or directory".
+#
+# Excluding .lake/ forces lake to build inside the Ubuntu builder stage
+# with /lib64/ld-linux-x86-64.so.2, which is what actually exists in
+# the runtime image.
+flare_operator/.lake/
+flare_operator/.lake~/
+
+# Git metadata and editor/OS junk -- not useful inside any image and
+# wasteful to ship as build context.
+.git/
+.gitignore
+*.swp
+*~
+.DS_Store

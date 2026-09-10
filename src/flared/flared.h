@@ -72,6 +72,7 @@ public:
 	thread_pool* get_other_thread_pool() { return this->_other_thread_pool; };
 	cluster* get_cluster() { return this->_cluster; };
 	storage* get_storage() { return this->_storage; };
+	shared_cluster_replication get_cluster_replication() { return this->_cluster_replication; };
 
 	virtual void on_storage_error();
 

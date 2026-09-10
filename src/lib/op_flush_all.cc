@@ -131,6 +131,10 @@ int op_flush_all::_parse_text_server_parameters() {
  *	@todo support expire parameter
  */
 int op_flush_all::_run_server() {
+	if (!this->_flush_all_enabled) {
+		log_warning("flush_all refused (flush-all-enabled = false)", 0);
+		return this->_send_result(result_server_error, "flush_all disabled by configuration");
+	}
 	if (this->_storage->truncate() < 0) {
 		if (this->_option & storage::option_noreply) {
 			return 0;

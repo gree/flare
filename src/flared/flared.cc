@@ -26,9 +26,13 @@
  *
  *	$Id$
  */
+#include <cstring>
 #include "flared.h"
 #include "connection_tcp.h"
 #include "handler_alarm.h"
+#include "handler_metrics.h"
+#include "handler_reaper.h"
+#include "handler_storage_check.h"
 #include "handler_request.h"
 #ifdef ENABLE_MYSQL_REPLICATION
 # include "handler_mysql_replication.h"
@@ -41,6 +45,13 @@
 #include "storage_tcb.h"
 #ifdef HAVE_LIBKYOTOCABINET
 #include "storage_kch.h"
+#endif
+#ifdef HAVE_LIBROCKSDB
+#include "storage_rocksdb.h"
+#endif
+
+#ifdef ENABLE_K8S_OPERATOR
+# include <cstdlib>
 #endif
 
 namespace gree {
@@ -102,6 +113,20 @@ flared::flared():
  *	dtor for flared
  */
 flared::~flared() {
+	// Tear cluster_replication down FIRST, while its thread pool and the
+	// cluster are still alive. _cluster_replication is a shared_ptr member;
+	// left to itself it is destroyed only AFTER this dtor body returns, at
+	// which point _other_thread_pool (the pool it holds as _thread_pool) has
+	// already been delete'd below — so ~cluster_replication()->stop() would
+	// walk a freed thread pool and abort with "pure virtual method called".
+	// Stopping and releasing it here, before those deletes, keeps every
+	// pointer it touches valid. stop() is a no-op when replication was never
+	// started; when it was, this is the only place it can be stopped safely.
+	if (this->_cluster_replication) {
+		this->_cluster_replication->stop();
+		this->_cluster_replication.reset();
+	}
+
 	delete this->_storage;
 	this->_storage = NULL;
 
@@ -174,7 +199,13 @@ int flared::startup(int argc, char **argv) {
 	}
 
 	// application objects
+#ifdef ENABLE_K8S_OPERATOR
+	// In K8s operator mode, reduce read timeout for faster failover detection.
+	// The Lean 4 operator on :12120 responds much faster than the legacy flarei.
+	connection_tcp::read_timeout = 30 * 1000;		// 30s (vs default 600s)
+#else
 	connection_tcp::read_timeout = ini_option_object().get_net_read_timeout() * 1000;		// -> msec
+#endif
 	this->_server = new server();
 	this->_server->set_back_log(ini_option_object().get_back_log());
 	if (this->_server->listen(ini_option_object().get_server_port()) < 0) {
@@ -200,10 +231,35 @@ int flared::startup(int argc, char **argv) {
 	this->_cluster->set_max_total_thread_queue(ini_option_object().get_max_total_thread_queue());
 	this->_cluster->set_noreply_window_limit(ini_option_object().get_noreply_window_limit());
 	this->_cluster->add_proxy_event_listener(this->_cluster_replication);
+#ifdef ENABLE_K8S_OPERATOR
+	// In K8s operator mode, override the index server address from environment
+	// variables if set. This allows the operator pod's Service ClusterIP to be
+	// injected via K8s downward API or ConfigMap, so flared connects to the
+	// Lean 4 operator instead of the legacy flarei.
+	{
+		vector<cluster::index_server> k8s_index_servers = ini_option_object().get_index_servers();
+		const char* op_host = std::getenv("FLARE_OPERATOR_HOST");
+		const char* op_port = std::getenv("FLARE_OPERATOR_PORT");
+		if (op_host != NULL && op_port != NULL) {
+			k8s_index_servers.clear();
+			cluster::index_server s;
+			s.index_server_name = string(op_host);
+			s.index_server_port = atoi(op_port);
+			k8s_index_servers.push_back(s);
+			log_notice("K8s operator mode: using operator at %s:%d as index server",
+				op_host, atoi(op_port));
+		}
+		if (this->_cluster->startup_node(k8s_index_servers,
+																		 ini_option_object().get_proxy_prior_netmask()) < 0) {
+			return -1;
+		}
+	}
+#else
 	if (this->_cluster->startup_node(ini_option_object().get_index_servers(),
 																	 ini_option_object().get_proxy_prior_netmask()) < 0) {
 		return -1;
 	}
+#endif
 
 	storage::type t = storage::type_tch;
 	storage::type_cast(ini_option_object().get_storage_type(), t);
@@ -245,6 +301,34 @@ int flared::startup(int argc, char **argv) {
 				ini_option_object().get_storage_dfunit());
 		break;
 	#endif
+	#ifdef HAVE_LIBROCKSDB
+	case storage::type_rocksdb:
+		{
+			storage_rocksdb* rdb = new storage_rocksdb(ini_option_object().get_data_dir(),
+					ini_option_object().get_mutex_slot(),
+					ini_option_object().get_storage_cache_size(),
+					ini_option_object().get_rocksdb_block_cache_size_mb(),
+					ini_option_object().get_rocksdb_write_buffer_size_mb(),
+					ini_option_object().get_rocksdb_max_write_buffer_number(),
+					ini_option_object().get_rocksdb_wal_ttl_seconds(),
+					ini_option_object().get_rocksdb_wal_size_limit_mb(),
+					ini_option_object().is_rocksdb_sync_writes());
+			rdb->set_resync_failure_threshold(
+				ini_option_object().get_rocksdb_resync_failure_threshold());
+			rdb->set_wal_max_batch_bytes(
+				ini_option_object().get_rocksdb_wal_max_batch_bytes());
+			rdb->set_wal_sync_bwlimit(
+				ini_option_object().get_rocksdb_wal_sync_bwlimit());
+			rdb->set_wal_sync_interval(
+				ini_option_object().get_rocksdb_wal_sync_interval());
+			rdb->set_backup_keep(
+				ini_option_object().get_rocksdb_backup_keep());
+			rdb->set_snapshot_bwlimit(
+				ini_option_object().get_rocksdb_snapshot_bwlimit());
+			this->_storage = rdb;
+		}
+		break;
+	#endif
 	default:
 		log_err("unknown storage type [%s]", ini_option_object().get_storage_type().c_str());
 		return -1;
@@ -254,11 +338,44 @@ int flared::startup(int argc, char **argv) {
 	}
 	this->_storage->set_listener(this);
 	this->_cluster->set_storage(this->_storage);
+	// A restarted node's very first map can already assign it a role (the
+	// operator re-registers it onto its old partition); the shift was
+	// deferred until the storage exists — run it now or the node sits in
+	// prepare forever.
+	this->_cluster->run_boot_shift();
 
 	// creating alarm thread in advance
 	shared_thread th_alarm = this->_other_thread_pool->get(thread_pool::thread_type_alarm);
 	handler_alarm* h_alarm = new handler_alarm(th_alarm);
 	th_alarm->trigger(h_alarm);
+
+	// background expire crawler (master-only; deletes past-expire keys so their
+	// space is reclaimed and the deletes replicate through the WAL to slaves).
+	// It self-gates on role each cycle, so it is safe to start unconditionally;
+	// on non-rocksdb backends and non-master roles it simply no-ops.
+	shared_thread th_reaper = this->_other_thread_pool->get(thread_pool::thread_type_reaper);
+	handler_reaper* h_reaper = new handler_reaper(th_reaper, this->_cluster, this->_storage);
+	th_reaper->trigger(h_reaper);
+
+	// background storage integrity verifier (opt-in via storage-check-interval;
+	// latches rocksdb_corrupted for alerting — recovery is owned by
+	// reconstruction self-heal / the operator). Safe to start unconditionally:
+	// a zero interval makes it idle, and it no-ops on non-rocksdb backends.
+	shared_thread th_storage_check = this->_other_thread_pool->get(thread_pool::thread_type_storage_check);
+	handler_storage_check* h_storage_check = new handler_storage_check(th_storage_check, this->_cluster, this->_storage);
+	th_storage_check->trigger(h_storage_check);
+
+	// native Prometheus /metrics endpoint: every node exports its own metrics,
+	// so observability shares the node's fault domain instead of a central
+	// collector's (a collector outage is indistinguishable from a real outage
+	// during triage — see handler_metrics.h)
+	if (ini_option_object().get_metrics_server_port() > 0) {
+		shared_thread th_metrics = this->_other_thread_pool->get(thread_pool::thread_type_metrics);
+		handler_metrics* h_metrics = new handler_metrics(th_metrics,
+				ini_option_object().get_metrics_server_port(),
+				ini_option_object().get_server_port());
+		th_metrics->trigger(h_metrics);
+	}
 
 	time_watcher_object = new time_watcher();
 	time_watcher_observer::set_threshold_warn_msec(ini_option_object().get_storage_access_watch_threshold_warn_msec());
@@ -384,6 +501,29 @@ int flared::reload() {
 	// reconstruction_bwlimit
 	this->_cluster->set_reconstruction_bwlimit(ini_option_object().get_reconstruction_bwlimit());
 
+#ifdef HAVE_LIBROCKSDB
+	// RocksDB WAL streaming limits are runtime-tunable. Push the reloaded
+	// values onto the live storage instance. These setters only update
+	// plain members read per-batch by the WAL sync path, so no DB reopen
+	// is needed. DB-reopen-required rocksdb options are ignored here on
+	// purpose; ini_option::reload() already warned that a restart is needed.
+	if (this->_storage != NULL && this->_storage->get_type() == storage::type_rocksdb) {
+		storage_rocksdb* rdb = static_cast<storage_rocksdb*>(this->_storage);
+		rdb->set_resync_failure_threshold(
+			ini_option_object().get_rocksdb_resync_failure_threshold());
+		rdb->set_wal_max_batch_bytes(
+			ini_option_object().get_rocksdb_wal_max_batch_bytes());
+		rdb->set_wal_sync_bwlimit(
+			ini_option_object().get_rocksdb_wal_sync_bwlimit());
+		rdb->set_wal_sync_interval(
+			ini_option_object().get_rocksdb_wal_sync_interval());
+		rdb->set_backup_keep(
+			ini_option_object().get_rocksdb_backup_keep());
+		rdb->set_snapshot_bwlimit(
+			ini_option_object().get_rocksdb_snapshot_bwlimit());
+	}
+#endif
+
 	// replication_type
 	this->_cluster->set_replication_type(ini_option_object().get_replication_type());
 	
@@ -426,7 +566,16 @@ int flared::reload() {
 
 			this->_cluster_replication->start(cl_repl_server_name, cl_repl_server_port, cl_repl_concurrency,
 				   this->_storage, this->_cluster);
-		} else {
+		} else if (this->_cluster_replication->is_started()) {
+			// Only stop what was actually started. reload() runs on every
+			// SIGHUP, and the operator SIGHUPs a lot during churn (rolling
+			// restart); calling stop() unconditionally drove
+			// _stop_dump_replication over a recycling/tearing-down thread
+			// set and crashed flared with "pure virtual method called"
+			// (observed on a rolling restart, bug #15). Guarding on
+			// is_started() matches the start-side reconfigure branch above
+			// and makes a disabled-replication reload a no-op instead of a
+			// repeated teardown.
 			this->_cluster_replication->stop();
 		}
 	}
@@ -562,6 +711,23 @@ int flared::_set_signal_handler() {
 
 // {{{ ::main (entry point)
 int main(int argc, char **argv) {
+	// OFFLINE mode: `flared --analyze-checkpoint <dir>` opens a RocksDB
+	// checkpoint READ-ONLY and streams `key,expire,ttl,size` CSV to stdout,
+	// one row per live key, then exits — no server, no writes. For keyspace /
+	// expire / value-length analysis against an S3 backup checkpoint, OFF the
+	// serving cluster. See docs/BACKUP_RESTORE.md.
+	for (int i = 1; i + 1 < argc; i++) {
+		if (strcmp(argv[i], "--analyze-checkpoint") == 0) {
+#ifdef HAVE_LIBROCKSDB
+			gree::flare::storage_rocksdb st(argv[i + 1], 1, 0);
+			return st.analyze_checkpoint(argv[i + 1], stdout) == 0 ? 0 : 1;
+#else
+			fprintf(stderr, "flared built without RocksDB; --analyze-checkpoint unavailable\n");
+			return 1;
+#endif
+		}
+	}
+
 	gree::flare::flared& f = gree::flare::singleton<gree::flare::flared>::instance();
 	f.set_ident("flared");
 

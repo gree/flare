@@ -1,0 +1,77 @@
+# Build flared with RocksDB storage backend + --enable-k8s-operator
+# for use with the Lean 4 operator's RocksDB-specific E2E tests.
+#
+# This is a sibling of Dockerfile.flare-node. The only differences are:
+#   1. librocksdb-dev is installed in the builder stage so configure
+#      picks up RocksDB automatically (HAVE_LIBROCKSDB defined).
+#   2. librocksdb8.9 (the runtime shared library) is installed in the
+#      runtime stage.
+#   3. The image tag (set by the caller, conventionally flare-node-rocksdb:test)
+#      is what the operator's ClusterConfig.storageBackend=RocksDB path uses.
+#
+# flared selects the backend via the --storage-type flag (default tch).
+# For rocksdb, the operator launches flared with --storage-type=rocksdb.
+FROM --platform=linux/x86_64 ubuntu:noble AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=UTC
+
+RUN apt-get update && apt-get install -y \
+    git \
+    build-essential \
+    autoconf \
+    automake \
+    libtool \
+    libboost-all-dev \
+    libhashkit-dev \
+    libtokyocabinet-dev \
+    libkyotocabinet-dev \
+    librocksdb-dev \
+    uuid-dev \
+    pkg-config \
+    zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY . /build/flare/
+
+# No --with-rocksdb flag needed: configure.ac's AC_CHECK_LIB picks it up
+# automatically from the default paths when librocksdb-dev is installed.
+# We still set --enable-k8s-operator to match the non-RocksDB image.
+RUN cd /build/flare \
+    && ./autogen.sh \
+    && ./configure --enable-k8s-operator \
+    && make -j"$(nproc)" \
+    && make install DESTDIR=/build/install
+
+# Sanity check: the resulting binary must be linked against librocksdb,
+# otherwise the build silently fell back to the TCB-only path and the
+# RocksDB E2E tests would skip every time. Fail the build loudly if so.
+RUN ldd /build/install/usr/local/bin/flared | grep -q librocksdb \
+    || (echo "FATAL: flared was not linked against librocksdb" && \
+        ldd /build/install/usr/local/bin/flared && exit 1)
+
+# Stage 2: Minimal runtime image
+FROM --platform=linux/x86_64 ubuntu:noble
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y \
+    libboost-program-options1.83.0 \
+    libboost-regex1.83.0 \
+    libboost-serialization1.83.0 \
+    libboost-thread1.83.0 \
+    libboost-system1.83.0 \
+    libhashkit2 \
+    libtokyocabinet9 \
+    libkyotocabinet16v5 \
+    librocksdb8.9 \
+    libuuid1 \
+    zlib1g \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /build/install/usr/local/ /usr/local/
+
+EXPOSE 12121
+
+ENTRYPOINT ["/usr/local/bin/flared"]

@@ -29,6 +29,9 @@
 
 #include <boost/lexical_cast.hpp>
 
+#include <map>
+#include <pthread.h>
+
 #include <sys/resource.h>
 #include <sys/time.h>
 #include <sys/types.h>
@@ -57,6 +60,18 @@ protected:
 	AtomicCounter _cmd_set;
 	AtomicCounter _get_hits;
 	AtomicCounter _get_misses;
+	// Writes the master gave up forwarding to a replica: queue_proxy_write
+	// exhausted its retries and DROPPED the op. The client already got its
+	// success (the master's own write succeeded), so this is silent replica
+	// divergence — the only signal that it happened. Monotonic.
+	AtomicCounter _proxy_write_dropped;
+	// The same drops broken down BY DESTINATION, so a controller can tell
+	// WHICH replica is now behind and resync only that one. The aggregate
+	// counter above cannot: it says a replica diverged, not which. Drops are
+	// rare, so a mutex-guarded map costs nothing on the hot path (it is only
+	// touched after four failed retries).
+	pthread_mutex_t _mutex_proxy_write_dropped_by_dest;
+	map<string, uint64_t> _proxy_write_dropped_by_dest;
 	AtomicCounter _delete_hits;
 	AtomicCounter _delete_misses;
 	AtomicCounter _incr_hits;
@@ -84,6 +99,8 @@ public:
 	inline int increment_cmd_set()               { this->_cmd_set.incr();return 0; };
 	inline int increment_get_hits()              { this->_get_hits.incr();return 0; };
 	inline int increment_get_misses()            { this->_get_misses.incr();return 0; };
+	inline int increment_proxy_write_dropped()   { this->_proxy_write_dropped.incr();return 0; };
+	int increment_proxy_write_dropped(const string& dest);
 	inline int increment_delete_hits()           { this->_delete_hits.incr();return 0; };
 	inline int increment_delete_misses()         { this->_delete_misses.incr();return 0; };
 	inline int increment_incr_hits()             { this->_incr_hits.incr();return 0; };
@@ -117,6 +134,8 @@ public:
 	uint64_t get_cmd_set();
 	uint64_t get_get_hits();
 	uint64_t get_get_misses();
+	uint64_t get_proxy_write_dropped();
+	map<string, uint64_t> get_proxy_write_dropped_by_dest();
 	uint64_t get_delete_hits();
 	uint64_t get_delete_misses();
 	uint64_t get_incr_hits();

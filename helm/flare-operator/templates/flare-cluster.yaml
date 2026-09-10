@@ -1,0 +1,569 @@
+{{- if .Values.cluster.enabled }}
+{{- /* The operator manages exactly one FlareCluster: the one named by
+       .Values.clusterName in .Values.namespace. Rendering a managed
+       cluster under any other name would create a CR the operator
+       ignores — fail at template time instead. */}}
+{{- if and .Values.clusterName (ne .Values.cluster.name .Values.clusterName) }}
+{{- fail (printf "cluster.name (%s) must equal clusterName (%s): the operator only manages the FlareCluster named clusterName" .Values.cluster.name .Values.clusterName) }}
+{{- end }}
+{{- $c := .Values.cluster }}
+{{- $ns := .Values.namespace }}
+{{- /* Graceful-drain window. Computed via hasKey (NOT `| default`) so an
+       explicit drainSeconds: 0 disables the hook — sprig's `default` treats 0
+       as empty and would wrongly re-enable it. Absent (e.g. helm --reuse-values
+       from a release predating this key) falls back to 60. */}}
+{{- $drain := 60 }}
+{{- if hasKey $c "drainSeconds" }}{{- $drain = $c.drainSeconds }}{{- end }}
+{{- /* Storage mode: PVC (persistence.enabled) | tmpfs (memory emptyDir) |
+       ephemeral (node disk /tmp). tmpfs guarded for values without the key. */}}
+{{- $tmpfsEnabled := false }}
+{{- $tmpfsSize := "1Gi" }}
+{{- if $c.tmpfs }}{{- if $c.tmpfs.enabled }}{{- $tmpfsEnabled = true }}{{- $tmpfsSize = ($c.tmpfs.sizeLimit | default "1Gi") }}{{- end }}{{- end }}
+{{- if and $c.persistence.enabled $tmpfsEnabled }}{{- fail "cluster: set only one of persistence.enabled or tmpfs.enabled" }}{{- end }}
+{{- $useDataVol := or $c.persistence.enabled $tmpfsEnabled }}
+{{- /* Probe timings. The READINESS numbers are also the client-LB ejection
+       window: K8s pulls a pod from the Service endpoints only after
+       periodSeconds x failureThreshold, so a crashed flared keeps receiving
+       (and refusing) client connections for that long. Exposed as values
+       rather than tuned globally, because tightening them costs an exec
+       probe per pod per period and the right trade-off differs per cluster.
+       See docs/STPA-node-state.md gap G4. */}}
+{{- $probes := dict "liveness" (dict "initialDelaySeconds" 10 "periodSeconds" 5 "failureThreshold" 6) "readiness" (dict "initialDelaySeconds" 5 "periodSeconds" 5 "timeoutSeconds" 4 "failureThreshold" 3) }}
+{{- if $c.probes }}
+{{- if $c.probes.liveness }}{{- $probes = merge (dict "liveness" $c.probes.liveness) $probes }}{{- end }}
+{{- if $c.probes.readiness }}{{- $probes = merge (dict "readiness" $c.probes.readiness) $probes }}{{- end }}
+{{- end }}
+{{- $dataDir := ternary "/data/flare" "/tmp/flare" $useDataVol }}
+{{- /* backup-bootstrap: on a pod that boots with an EMPTY data dir, seed it
+       from the object-storage backup before flared starts. This is the
+       automated failover-from-backup for replicas=1 (no slave) clusters:
+       loss window = backup interval. Guarded to partitions=1 because the
+       init container maps its pod to a backup by partition and a fresh
+       multi-partition cluster's partition assignment is the operator's
+       call, not the pod ordinal's. When peers are alive this is still
+       correct — the restored data carries the backup's lineage cursor, so
+       reconstruction just catches up the delta on top of it. */}}
+{{- $bb := dict "enabled" false }}
+{{- if $c.backupBootstrap }}{{- $bb = $c.backupBootstrap }}{{- end }}
+{{- $bk := dict "enabled" false }}
+{{- if $c.backup }}{{- $bk = $c.backup }}{{- end }}
+{{- $os := dict }}
+{{- if $c.objectStorage }}{{- $os = $c.objectStorage }}{{- end }}
+{{- $backupSaName := printf "%s-backup" $c.name }}
+{{- if $bk.serviceAccount }}{{- $backupSaName = $bk.serviceAccount.name | default (printf "%s-backup" $c.name) }}{{- end }}
+{{- /* ROLL-FREE TOGGLE: the bootstrap PLUMBING (init container, SA, token
+       volume) is provisioned whenever it COULD be enabled — object storage
+       configured on a 1-partition cluster with a data volume — and the
+       runtime on/off lives in the <cluster>-flags ConfigMap, which the init
+       reads at pod start. Flipping backupBootstrap.enabled therefore changes
+       ONLY the ConfigMap: the pod template stays byte-identical, no rolling
+       restart, no master handoff, no replication-sender break. (Learned the
+       hard way: gating the plumbing on enabled rolled the whole cluster for
+       a config toggle.) */}}
+{{- $bbProvision := and $os.url (eq (int $c.partitions) 1) $useDataVol }}
+{{- if or $bb.enabled $bk.enabled }}
+{{- if not $os.url }}{{- fail "cluster.objectStorage.url is required by backup/backupBootstrap (s3://bucket/prefix, no trailing slash)" }}{{- end }}
+{{- end }}
+{{- if $bb.enabled }}
+{{- if ne (int $c.partitions) 1 }}{{- fail "cluster.backupBootstrap requires partitions=1 (pod->backup mapping is only defined there)" }}{{- end }}
+{{- if not $useDataVol }}{{- fail "cluster.backupBootstrap requires persistence or tmpfs (a data volume the init container can seed)" }}{{- end }}
+{{- end }}
+{{- /* flared mounts /etc/flared/extra.conf and exits immediately if the
+       file is missing, so the ConfigMap must exist BEFORE the StatefulSet
+       pods start. It is a pre-install HOOK on purpose: hook resources are
+       not tracked in the release, so `helm upgrade` neither resets the
+       content the operator wrote into it nor prunes it. (A lookup-guard
+       variant was tried first and backfired: on upgrade the skipped
+       render made helm DELETE the ConfigMap as removed-from-release.)
+       Trade-off: `helm uninstall` leaves it behind — harmless. */}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $c.name }}-config
+  namespace: {{ $ns }}
+  labels:
+    {{- include "flare-operator.clusterLabel" . | nindent 4 }}
+    {{- include "flare-operator.wellKnown" (dict "root" $ "name" "flared" "component" "node") | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install
+    "helm.sh/hook-weight": "-5"
+data:
+  extra.conf: ""
+{{- if $bbProvision }}
+---
+{{- /* Runtime flags: values that must be togglable WITHOUT touching the pod
+       template (ConfigMap data changes never restart pods). Consumers read
+       these at pod start (backup-bootstrap init). Managed by helm/ArgoCD —
+       unlike <cluster>-config, the operator never writes here. */}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $c.name }}-flags
+  namespace: {{ $ns }}
+  labels:
+    {{- include "flare-operator.clusterLabel" . | nindent 4 }}
+    {{- include "flare-operator.wellKnown" (dict "root" $ "name" "flared" "component" "node") | nindent 4 }}
+data:
+  backup-bootstrap-enabled: {{ $bb.enabled | default false | quote }}
+{{- end }}
+---
+apiVersion: flare.gree.net/v1alpha1
+kind: FlareCluster
+metadata:
+  name: {{ $c.name }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "flare-operator.clusterLabel" . | nindent 4 }}
+    {{- include "flare-operator.wellKnown" (dict "root" $ "name" "flared" "component" "node") | nindent 4 }}
+spec:
+  partitions: {{ $c.partitions }}
+  replicas: {{ $c.replicas }}
+  {{- /* RocksDB tuning passthrough. Fields map 1:1 to the CRD's spec.rocksdb
+         (walSizeLimitMb, walTtlSeconds, syncWrites, ...); the operator emits
+         only the ones set into the cluster ConfigMap. IMPORTANT for tmpfs: WAL
+         archive is retained up to walSizeLimitMb (flared default 10240=10Gi) on
+         the RAM-backed data dir, so on a tmpfs cluster cap it well under
+         tmpfs.sizeLimit (e.g. ~5%) or the archive can fill the RAM disk. */}}
+  {{- with $c.rocksdb }}
+  rocksdb:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with $c.readBalance }}
+  readBalance:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $c.name }}-nodes
+  namespace: {{ $ns }}
+  labels:
+    app: flare
+    cluster: {{ $c.name }}
+    {{- include "flare-operator.clusterLabel" . | nindent 4 }}
+    {{- include "flare-operator.wellKnown" (dict "root" $ "name" "flared" "component" "node") | nindent 4 }}
+spec:
+  clusterIP: None
+  # REQUIRED with the sync-gated readiness probe: a re-seeding slave is NotReady
+  # for the whole reconstruction, but the master pushes the dump to the slave's
+  # per-pod DNS name (its node_key). Without this, a NotReady pod has no DNS
+  # record -> the master can't reach it -> it can never finish seeding -> it can
+  # never become Ready (deadlock).
+  publishNotReadyAddresses: true
+  selector:
+    app: flare
+    cluster: {{ $c.name }}
+  ports:
+    - port: {{ $c.flarePort }}
+      name: flare
+{{- /* Per-partition MASTER Services. The operator has always emitted a
+       PatchService effect pinning `<cluster>-<partition>`'s selector to the
+       partition's current master pod (servicePatchEffects; re-pointed within
+       a reconcile tick of any failover/assignment) — but the chart never
+       created the Service, so the patch warned into the void. Headless: the
+       Endpoints ARE the master pod's IP (TKE VPC-CNI pod IPs are routable
+       over VPC peering), giving external consumers — e.g. a source cluster's
+       cluster-replication sender — a master-direct target with no LB hop, no
+       LB idle-timeout, and no slave-proxy detour. An IP change here MEANS
+       the master moved. Look it up:
+         kubectl -n <ns> get endpoints <cluster>-<p> */}}
+{{- range $p := until (int $c.partitions) }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $c.name }}-{{ $p }}
+  namespace: {{ $ns }}
+  labels:
+    app: flare
+    cluster: {{ $c.name }}
+    {{- include "flare-operator.clusterLabel" $ | nindent 4 }}
+    {{- include "flare-operator.wellKnown" (dict "root" $ "name" "flared" "component" "master-endpoint") | nindent 4 }}
+spec:
+  clusterIP: None
+  # Bootstrap guess: ordinal <p>. The operator overwrites this selector with
+  # the real master's pod name every reconcile tick (strategic-merge keeps
+  # the key; the pod-name label is unique, so exactly one endpoint).
+  selector:
+    statefulset.kubernetes.io/pod-name: {{ $c.name }}-nodes-{{ $p }}
+  ports:
+    - port: {{ $c.flarePort }}
+      name: flare
+{{- end }}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $c.name }}-nodes
+  namespace: {{ $ns }}
+  labels:
+    {{- include "flare-operator.clusterLabel" . | nindent 4 }}
+    {{- include "flare-operator.wellKnown" (dict "root" $ "name" "flared" "component" "node") | nindent 4 }}
+spec:
+  serviceName: {{ $c.name }}-nodes
+  replicas: {{ mul $c.partitions $c.replicas }}
+  selector:
+    matchLabels:
+      app: flare
+      cluster: {{ $c.name }}
+  template:
+    metadata:
+      labels:
+        app: flare
+        cluster: {{ $c.name }}
+        {{- include "flare-operator.clusterLabel" . | nindent 8 }}
+        {{- include "flare-operator.wellKnown" (dict "root" $ "name" "flared" "component" "node") | nindent 8 }}
+        {{- with $c.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- if or $c.zoneSpread $c.hostnameSpread }}
+      topologySpreadConstraints:
+        {{- if $c.zoneSpread }}
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: {{ eq $c.zoneSpread "hard" | ternary "DoNotSchedule" "ScheduleAnyway" }}
+          labelSelector:
+            matchLabels:
+              app: flare
+              cluster: {{ $c.name }}
+        {{- end }}
+        {{- if $c.hostnameSpread }}
+        # One node must never hold both copies of a partition; see values.
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: {{ eq $c.hostnameSpread "hard" | ternary "DoNotSchedule" "ScheduleAnyway" }}
+          labelSelector:
+            matchLabels:
+              app: flare
+              cluster: {{ $c.name }}
+        {{- end }}
+      {{- end }}
+      {{- if gt (int $drain) 0 }}
+      # Room for the preStop drain (below) + flared's own graceful shutdown after
+      # SIGTERM. Must exceed drainSeconds or K8s SIGKILLs mid-drain.
+      terminationGracePeriodSeconds: {{ add (int $drain) 30 }}
+      {{- end }}
+      {{- /* ALWAYS render serviceAccountName (falling back to "default"):
+             `kubectl apply` / ArgoCD cannot UNSET a field that the desired
+             manifest merely omits, so gating this line left a live STS
+             pointing at the deleted backup SA when backupBootstrap was
+             toggled off (observed live: FailedCreate "serviceaccount not
+             found" — pods unschedulable until a manual patch). An explicit
+             value always overwrites cleanly on toggle in BOTH directions. */}}
+      serviceAccountName: {{ $c.serviceAccountName | default (ternary $backupSaName "default" (not (not $bbProvision))) }}
+      {{- if $bbProvision }}
+      initContainers:
+        # Seed an EMPTY data dir from the newest backup before flared starts.
+        # No-op whenever data exists (normal restarts, PVC survivors). A
+        # backup older than maxAgeSeconds is refused LOUDLY (init fails, pod
+        # stays Pending, FlareMasterMissing fires) — silently serving a stale
+        # dataset is worse than paging a human.
+        - name: backup-bootstrap
+          image: "{{ $bb.image.repository | default "ghcr.io/gree/flare-backup" }}:{{ $bb.image.tag | default $c.image.tag }}"
+          imagePullPolicy: {{ $c.image.pullPolicy }}
+          {{- if $os.credentialsSecret }}
+          # Static-credential stores (COS/MinIO): same Secret the backup
+          # CronJob uses, so produce and restore authenticate identically.
+          # (OIDC stores instead use the projected token volume below.)
+          envFrom:
+            - secretRef:
+                name: {{ $os.credentialsSecret }}
+          {{- end }}
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              # Runtime toggle (roll-free): the flags ConfigMap decides, not
+              # the pod template. Anything but "true" -> plain empty boot.
+              if [ "$(cat /etc/flare-flags/backup-bootstrap-enabled 2>/dev/null)" != "true" ]; then
+                echo "backup-bootstrap: disabled via {{ $c.name }}-flags -> skipping (empty boot)"
+                exit 0
+              fi
+              DATA={{ $dataDir }}
+              if [ -d "$DATA/flare.rocksdb" ] && [ -n "$(ls -A "$DATA/flare.rocksdb" 2>/dev/null)" ]; then
+                echo "backup-bootstrap: data present -> no-op"
+                exit 0
+              fi
+              EP=""; [ -n "$S3_ENDPOINT" ] && EP="--endpoint-url $S3_ENDPOINT"
+              SRC="${S3_URL}/latest/p0"
+              REST="${SRC#s3://}"; BUCKET="${REST%%/*}"; KEY="${REST#*/}/CURRENT"
+              # Probe for a backup WITHOUT tripping `set -e`. A fresh bucket with
+              # no backup yet is the NORMAL first-boot state of a new cluster, not
+              # an error: seed-from-backup is a LAST RESORT, so an absent marker
+              # (404 / NoSuchKey) means "start empty" (exit 0), and the operator
+              # converges the pod off a live peer anyway. Only a genuine access/
+              # transport failure stays fatal (don't silently boot empty over a
+              # real backup we just failed to reach).
+              set +e
+              LM=$(aws s3api head-object $EP --bucket "$BUCKET" --key "$KEY" --query LastModified --output text 2>/tmp/bb.err)
+              rc=$?
+              set -e
+              if [ "$rc" -ne 0 ]; then
+                if grep -qiE '404|not found|nosuchkey' /tmp/bb.err; then
+                  echo "backup-bootstrap: no backup at $SRC -> starting empty (normal on first boot)"
+                  exit 0
+                fi
+                echo "backup-bootstrap: cannot read backup marker $SRC:" >&2; cat /tmp/bb.err >&2; exit 1
+              fi
+              AGE=$(( $(date +%s) - $(date -d "$LM" +%s) ))
+              if [ "$AGE" -gt "$MAX_AGE_SECONDS" ]; then
+                echo "backup-bootstrap: newest backup is ${AGE}s old (> ${MAX_AGE_SECONDS}s) -> REFUSING to seed; restore manually or raise maxAgeSeconds"
+                exit 1
+              fi
+              mkdir -p "$DATA"
+              rm -rf "$DATA/flare.rocksdb.restore"
+              aws s3 cp --recursive $EP "$SRC" "$DATA/flare.rocksdb.restore" --no-progress
+              M=$(tr -d '\r\n' < "$DATA/flare.rocksdb.restore/CURRENT")
+              if [ ! -f "$DATA/flare.rocksdb.restore/$M" ]; then
+                echo "backup-bootstrap: CURRENT names missing $M -> backup mirror is torn, refusing"
+                exit 1
+              fi
+              mv "$DATA/flare.rocksdb.restore" "$DATA/flare.rocksdb"
+              echo "backup-bootstrap: seeded from $SRC (age ${AGE}s)"
+          env:
+            # location/auth come from cluster.objectStorage — the SAME block
+            # the backup CronJob publishes to, so they cannot drift apart.
+            - name: S3_URL
+              value: {{ printf "%s/%s" $os.url $c.name | quote }}
+            - name: MAX_AGE_SECONDS
+              value: {{ $bb.maxAgeSeconds | default 7200 | quote }}
+            {{- with $os.endpoint }}
+            - name: S3_ENDPOINT
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with $os.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: flare-flags
+              mountPath: /etc/flare-flags
+              readOnly: true
+            {{- if $os.projectedTokenAudience }}
+            - name: bootstrap-token
+              mountPath: /var/run/secrets/sts
+              readOnly: true
+            {{- end }}
+      {{- end }}
+      containers:
+        - name: flared
+          image: "{{ $c.image.repository }}:{{ $c.image.tag }}"
+          imagePullPolicy: {{ $c.image.pullPolicy }}
+          env:
+            # Cap glibc malloc arenas. flared's worker threads otherwise get
+            # per-thread arenas (up to 8 x cores); under write bursts each arena
+            # balloons with freed-but-never-returned chunks and RSS ratchets to
+            # the traffic high-water mark (observed live: 69 arenas ~= 5.9 GiB
+            # resident with only ~38 MiB of live data). 2 arenas bound that
+            # bloat at a negligible allocation-contention cost for flared's
+            # thread counts.
+            - name: MALLOC_ARENA_MAX
+              value: {{ ($c.mallocArenaMax | default 2) | quote }}
+          command:
+            - sh
+            - -c
+            - |
+              {{- if $c.persistence.enabled }}
+              # Restore hook: if /data/flare/RESTORE names a checkpoint dir
+              # (created by the flared `backup` op), swap it in before start.
+              # See docs/BACKUP_RESTORE.md.
+              if [ -f /data/flare/RESTORE ]; then
+                SRC=$(cat /data/flare/RESTORE)
+                rm -rf /data/flare/flare.rocksdb
+                cp -a "$SRC" /data/flare/flare.rocksdb
+                rm -f /data/flare/RESTORE
+              fi
+              mkdir -p /data/flare
+              # A stale flared.pid survives unclean container death on a persistent
+              # data dir and used to wedge restarts (pid-1 self-check; fixed in
+              # flared too — this is belt-and-braces).
+              rm -f /data/flare/flared.pid
+              exec flared --config=/etc/flared/extra.conf --data-dir /data/flare --server-port {{ $c.flarePort }} --index-server-name {{ include "flare-operator.fullname" . }}.{{ $ns }}.svc.cluster.local --index-server-port {{ .Values.service.port }} --storage-type={{ $c.storageBackend }} --metrics-server-port {{ $c.metricsPort | default 9150 }} --stderr
+              {{- else }}
+              # tmpfs (emptyDir medium=Memory) or ephemeral node disk — either way
+              # the data is lost on pod restart (no restore hook: tmpfs can't
+              # retain a RESTORE marker across restarts anyway).
+              mkdir -p {{ $dataDir }}
+              rm -f {{ $dataDir }}/flared.pid
+              exec flared --config=/etc/flared/extra.conf --data-dir {{ $dataDir }} --server-port {{ $c.flarePort }} --index-server-name {{ include "flare-operator.fullname" . }}.{{ $ns }}.svc.cluster.local --index-server-port {{ .Values.service.port }} --storage-type={{ $c.storageBackend }} --metrics-server-port {{ $c.metricsPort | default 9150 }} --stderr
+              {{- end }}
+          ports:
+            - containerPort: {{ $c.flarePort }}
+              name: flare
+            # Native Prometheus exporter: each flared serves its own /metrics, so
+            # the metric's fault domain is the pod itself (no collector between
+            # the node and Prometheus). Scraped by the flared-metrics PodMonitor.
+            - containerPort: {{ $c.metricsPort | default 9150 }}
+              name: metrics
+          volumeMounts:
+            - name: flared-config
+              mountPath: /etc/flared
+            {{- if $useDataVol }}
+            - name: data
+              mountPath: /data
+            {{- end }}
+          livenessProbe:
+            tcpSocket:
+              port: {{ $c.flarePort }}
+            initialDelaySeconds: {{ $probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ $probes.liveness.periodSeconds }}
+            failureThreshold: {{ $probes.liveness.failureThreshold }}
+          # Readiness gates on SYNC COMPLETION, not process liveness: the pod is
+          # Ready only when the operator has this node state=active in the node
+          # map it broadcast to flared ("stats nodes" reflects flared's local
+          # copy; the operator flips a re-seeding slave prepare->active only when
+          # flared reports reconstruction complete). This is what makes a
+          # StatefulSet rolling update safe: the controller will not proceed to
+          # kill the next pod (ultimately the master) until the freshly restarted
+          # slave holds a full copy — combined with drain-to-proxy on Terminating,
+          # a rolling restart never destroys the last complete replica. A high
+          # failureThreshold is irrelevant here: readiness may legitimately stay
+          # false for many minutes while a large dataset re-seeds.
+          readinessProbe:
+            exec:
+              command:
+                - /bin/bash
+                - -c
+                - |
+                  exec 3<>/dev/tcp/127.0.0.1/{{ $c.flarePort }} || exit 1
+                  printf 'stats nodes\r\nquit\r\n' >&3
+                  out=$(tr -d '\r' <&3)
+                  me="$(hostname -f):{{ $c.flarePort }}"
+                  case "$out" in *"STAT $me:state active"*) exit 0;; esac
+                  # Limbo clause: a syncing (prepare) member of a partition with
+                  # NO active master has nothing to sync from — total-partition
+                  # recovery. Gating readiness there would deadlock the
+                  # OrderedReady StatefulSet (the peer that must become master
+                  # is a higher ordinal and is never recreated). Reporting Ready
+                  # is safe: it can only occur when the partition holds no data
+                  # to protect. Partitions WITH a live master keep the strict
+                  # sync gate.
+                  mypart=$(printf '%s\n' "$out" | sed -n "s/^STAT $me:partition //p")
+                  [ -n "$mypart" ] || exit 1
+                  [ "$mypart" != "-1" ] || exit 1
+                  for key in $(printf '%s\n' "$out" | sed -n "s/^STAT \(.*\):partition $mypart$/\1/p"); do
+                    printf '%s\n' "$out" | grep -q "^STAT $key:role master$" || continue
+                    printf '%s\n' "$out" | grep -q "^STAT $key:state active$" && exit 1
+                  done
+                  exit 0
+            initialDelaySeconds: {{ $probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ $probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ $probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ $probes.readiness.failureThreshold }}
+          resources:
+            {{- toYaml $c.resources | nindent 12 }}
+          {{- if gt (int $drain) 0 }}
+          lifecycle:
+            preStop:
+              exec:
+                # Graceful drain: once the pod is Terminating it is already out
+                # of the Service/CLB endpoints (no new connections) and the
+                # operator promotes a slave for any partition this pod mastered
+                # (TerminatingPodHandling). flared stays up for this window,
+                # continuing to serve/forward the connections it still holds, so
+                # clients drain or reconnect before SIGTERM. See cluster.drainSeconds.
+                command: ["sh", "-c", "sleep {{ int $drain }}"]
+          {{- end }}
+      volumes:
+        - name: flared-config
+          configMap:
+            name: {{ $c.name }}-config
+        {{- if $bbProvision }}
+        # Runtime flags (roll-free toggles) — see the <cluster>-flags CM.
+        - name: flare-flags
+          configMap:
+            name: {{ $c.name }}-flags
+        {{- end }}
+        {{- if and $bbProvision $os.projectedTokenAudience }}
+        # Keyless object-storage auth for backup-bootstrap: a projected SA
+        # token with the cloud-side audience (web-identity flow; pair with
+        # extraEnv AWS_ROLE_ARN / AWS_WEB_IDENTITY_TOKEN_FILE=/var/run/secrets/sts/token
+        # and cluster.serviceAccountName bound on the cloud side).
+        - name: bootstrap-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: {{ $os.projectedTokenAudience }}
+                  expirationSeconds: 3600
+                  path: token
+        {{- end }}
+        {{- if $tmpfsEnabled }}
+        # tmpfs data dir: RAM-backed emptyDir, capped at sizeLimit (counts
+        # against the pod's memory). Data is lost on pod restart — pair with
+        # replicas>=2 (slave promotion) and/or off-cluster backup.
+        - name: data
+          emptyDir:
+            medium: Memory
+            sizeLimit: {{ $tmpfsSize }}
+        {{- end }}
+  {{- if $c.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with $c.persistence.storageClassName }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ $c.persistence.size }}
+  {{- end }}
+{{- if $c.externalAccess.enabled }}
+---
+# Client entry point: LB over every flared pod's data port. Any node
+# proxies to the key's owning partition, so no per-node exposure is
+# needed. See values.yaml (cluster.externalAccess) for the security notes.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $c.name }}-nodes-external
+  namespace: {{ $ns }}
+  labels:
+    app: flare
+    cluster: {{ $c.name }}
+    {{- include "flare-operator.clusterLabel" . | nindent 4 }}
+    {{- include "flare-operator.wellKnown" (dict "root" $ "name" "flared" "component" "node") | nindent 4 }}
+  {{- with $c.externalAccess.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ $c.externalAccess.type }}
+  {{- with $c.externalAccess.loadBalancerSourceRanges }}
+  loadBalancerSourceRanges:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  selector:
+    app: flare
+    cluster: {{ $c.name }}
+  ports:
+    - port: {{ $c.externalAccess.port }}
+      targetPort: {{ $c.flarePort }}
+      name: flare
+{{- end }}
+{{- if $c.pdb.enabled }}
+---
+# Serializes voluntary disruptions: a rolling node drain can never evict a
+# partition's master and its slave at the same time. Combine with
+# zoneSpread so involuntary AZ loss also cannot take both.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ $c.name }}-nodes
+  namespace: {{ $ns }}
+  labels:
+    {{- include "flare-operator.clusterLabel" . | nindent 4 }}
+    {{- include "flare-operator.wellKnown" (dict "root" $ "name" "flared" "component" "node") | nindent 4 }}
+spec:
+  maxUnavailable: {{ $c.pdb.maxUnavailable }}
+  selector:
+    matchLabels:
+      app: flare
+      cluster: {{ $c.name }}
+{{- end }}
+{{- end }}

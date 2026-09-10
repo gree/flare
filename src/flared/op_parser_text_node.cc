@@ -30,6 +30,13 @@
 #include "op_parser_text_node.h"
 #include "op_stats_node.h"
 #include "op_show_node.h"
+#include "op_repl_sync_wal.h"
+#include "op_repl_snapshot.h"
+#include "op_repl_snapshot_push.h"
+#include "ini_option.h"
+#include "op_orphan_scan.h"
+#include "op_orphan_purge.h"
+#include "op_backup.h"
 
 namespace gree {
 namespace flare {
@@ -107,7 +114,9 @@ op* op_parser_text_node::_determine_op(const char* first, const char* buf, int& 
 	} else if (strcmp(first, "dump_key") == 0) {
 		r = new op_dump_key(this->_connection, singleton<flared>::instance().get_cluster(), singleton<flared>::instance().get_storage());
 	} else if (strcmp(first, "flush_all") == 0) {
-		r = new op_flush_all(this->_connection, singleton<flared>::instance().get_storage());
+		op_flush_all* fa = new op_flush_all(this->_connection, singleton<flared>::instance().get_storage());
+		fa->set_flush_all_enabled(ini_option_object().is_flush_all_enabled());
+		r = fa;
 	} else if (strcmp(first, "kill") == 0) {
 		r = new op_kill(this->_connection, singleton<flared>::instance().get_req_thread_pool(), singleton<flared>::instance().get_other_thread_pool());
 	} else if (strcmp(first, "quit") == 0) {
@@ -118,8 +127,27 @@ op* op_parser_text_node::_determine_op(const char* first, const char* buf, int& 
 		r = new op_version(this->_connection); 
 	} else if (strcmp(first, "show") == 0) {
 		r = new op_show_node(this->_connection);
+	} else if (strcmp(first, "meta") == 0) {
+		r = new op_meta(this->_connection, singleton<flared>::instance().get_cluster(), singleton<flared>::instance().get_storage());
+	} else if (strcmp(first, "repl_sync_wal") == 0) {
+		r = new op_repl_sync_wal(this->_connection, singleton<flared>::instance().get_storage());
+	} else if (strcmp(first, "repl_snapshot") == 0) {
+		r = new op_repl_snapshot(this->_connection, singleton<flared>::instance().get_storage());
+	} else if (strcmp(first, "repl_snapshot_push") == 0) {
+		r = new op_repl_snapshot_push(this->_connection, singleton<flared>::instance().get_cluster(), singleton<flared>::instance().get_storage());
+	} else if (strcmp(first, "orphan_scan") == 0) {
+		r = new op_orphan_scan(this->_connection,
+			singleton<flared>::instance().get_cluster(),
+			singleton<flared>::instance().get_storage());
+	} else if (strcmp(first, "orphan_purge") == 0) {
+		r = new op_orphan_purge(this->_connection,
+			singleton<flared>::instance().get_cluster(),
+			singleton<flared>::instance().get_storage());
+	} else if (strcmp(first, "backup") == 0) {
+		r = new op_backup(this->_connection,
+			singleton<flared>::instance().get_storage());
 	} else {
-		r = new op_error(this->_connection); 
+		r = new op_error(this->_connection);
 	}
 
 	return r;

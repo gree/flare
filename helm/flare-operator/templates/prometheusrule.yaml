@@ -1,0 +1,272 @@
+{{- if and .Values.operator.enabled .Values.monitoring.prometheusRule.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "flare-operator.fullname" . }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "flare-operator.labels" . | nindent 4 }}
+    {{- with .Values.monitoring.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: flare-operator
+      rules:
+        # A partition without an Active master serves no writes for its key
+        # range. 2m tolerates a normal failover window (dead detection +
+        # promotion + broadcast). Runbook: docs/RUNBOOK.md#master-missing
+        # Counted PER PARTITION by the operator. The previous expression was
+        # cluster-wide arithmetic (desired partitions minus active masters),
+        # which a stale master parked at an out-of-range partition index
+        # could offset — masking a genuinely unserved partition.
+        # Still blind, by design, to a master that is kept in the map while
+        # not serving (see unhealthyMastersKept): FlareNodeUnhealthy covers
+        # that one.
+        - alert: FlareMasterMissing
+          expr: flare_operator_partitions_masterless > 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Flare cluster {{`{{ $labels.cluster }}`}}: partition(s) without an active master"
+            runbook: docs/RUNBOOK.md#master-missing
+
+        # The blast-radius breaker halted failover: suspected AZ-scale
+        # outage. Surviving nodes keep serving; recovery resumes on its own
+        # when capacity returns — but a human MUST look at why half the
+        # cluster died. Runbook: docs/RUNBOOK.md#circuit-breaker
+        - alert: FlareCircuitBreakerTripped
+          expr: flare_operator_circuit_breaker_tripped == 1
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Flare operator {{`{{ $labels.cluster }}`}}: circuit breaker tripped (failover paused)"
+            runbook: docs/RUNBOOK.md#circuit-breaker
+
+        # A draining (Terminating) master has NO promotable successor: the
+        # operator keeps it serving to the end of its grace period, but the
+        # partition loses its only data-bearing node when the pod dies and
+        # NOTHING automatic can prevent that (pod deletion is irreversible;
+        # tmpfs reseeds rewind to the last S3 backup). The grace window is
+        # short — page immediately, no `for` debounce.
+        # A node whose POD IS PRESENT but which stopped being Ready long
+        # enough that the operator treats it as dead. Distinct from a
+        # vanished pod (rescheduling, routine): the pod is there, so the
+        # PROCESS is broken — flared segfaulted, hung, or wedged. Before this
+        # detection existed, pod existence was the operator's only liveness
+        # signal and such a node stayed Active forever: writes were proxied
+        # into a dead socket and a crashed MASTER got no failover at all.
+        - alert: FlareNodeUnhealthy
+          expr: flare_operator_nodes_unhealthy > 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Flare cluster {{`{{ $labels.cluster }}`}}: a live pod stopped serving (flared crashed or wedged) — failed over"
+            runbook: docs/RUNBOOK.md#node-unhealthy
+
+        # A node sits Down while its pod is present. Down only clears by
+        # RE-REGISTERING, which needs a fresh flared process, so this is the
+        # "stuck" population. The operator restarts such a pod itself once
+        # every partition has an Active master; this firing for longer than
+        # that means the recovery is gated off (masterless partition or a
+        # tripped breaker) and a human should look.
+        - alert: FlareNodeDownStuck
+          expr: flare_operator_nodes_down_stuck > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Flare cluster {{`{{ $labels.cluster }}`}}: node Down with its pod alive for 15m — automatic restart is gated off"
+            runbook: docs/RUNBOOK.md#node-down-stuck
+
+        # The master GAVE UP forwarding a write to a replica (proxy retries
+        # exhausted). The client already got its success, so the replica now
+        # silently diverges until it reconstructs — this counter is the only
+        # signal. Live replication is op-level proxying with no per-write
+        # acknowledgement to fall back on.
+        - alert: FlareProxyWriteDropped
+          expr: increase(flare_node_proxy_write_dropped[10m]) > 0
+          labels:
+            severity: critical
+          annotations:
+            summary: "Flare node {{`{{ $labels.pod }}`}}: dropped replica write(s) — replica diverges until it reconstructs"
+            runbook: docs/RUNBOOK.md#proxy-write-dropped
+
+        # The operator cannot open a TCP connection to a node that K8s still
+        # reports Ready. The node is probably serving clients fine; what is
+        # broken is the operator→pod path, so topology pushes are not landing
+        # and that node runs on a STALE MAP (wrong roles) until it heals. No
+        # other signal sees this: the readiness probe runs inside the pod and
+        # the stats probes go through the API server. Deliberately does NOT
+        # trigger failover — the fault may be on the operator's side.
+        - alert: FlareNodeUnreachableFromOperator
+          expr: flare_operator_nodes_unreachable > 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Flare cluster {{`{{ $labels.cluster }}`}}: operator cannot reach a Ready node — it is running on a stale topology"
+            runbook: docs/RUNBOOK.md#node-unreachable
+
+        # Master and replica key counts have drifted apart. Live replication
+        # is op-level proxying with NO per-write acknowledgement, so a
+        # dropped or refused replica write leaves the replica quietly behind
+        # until it reconstructs — and nothing else compares the two copies.
+        # Coarse by construction (equal counts do not prove equal content),
+        # but it catches the magnitude: pf-dev carried ~10k stale keys on its
+        # slave for 12 days with every other signal green.
+        - alert: FlareReplicaDivergence
+          expr: flare_operator_replica_key_delta > 0.005
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Flare cluster {{`{{ $labels.cluster }}`}}: replica key count differs from the master by >0.5% for 30m"
+            runbook: docs/RUNBOOK.md#replica-divergence
+
+        # A node's reconstruction keeps failing. flared counts the streak and
+        # WOULD self-demote at the threshold — except that path enqueues to a
+        # controller thread only flarei runs, so under this operator it never
+        # fires (the flared log now says so instead of claiming otherwise).
+        # That makes this alert the only signal: the node keeps its role and
+        # may be serving stale data.
+        - alert: FlareResyncFailing
+          expr: >-
+            flare_node_rocksdb_resync_failure_threshold > 0
+            and flare_node_rocksdb_resync_failure_count >= flare_node_rocksdb_resync_failure_threshold
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Flare node {{`{{ $labels.pod }}`}}: reconstruction has failed past its threshold and cannot self-demote"
+            runbook: docs/RUNBOOK.md#resync-failing
+
+        - alert: FlareDrainNoSuccessor
+          expr: flare_operator_drain_no_successor > 0
+          labels:
+            severity: critical
+          annotations:
+            summary: "Flare cluster {{`{{ $labels.cluster }}`}}: draining master has NO successor — data-bearing node dies at grace expiry"
+            runbook: docs/RUNBOOK.md#drain-no-successor
+
+        # Pod memory pressure vs the limit. The POD cgroup slice
+        # (container="") is what the OOM killer enforces and is the only
+        # series that includes the tmpfs data pages (container-level
+        # working_set misses most of them; kubectl top sums containers and
+        # misses reparented tmpfs charges after container restarts). On a
+        # tmpfs cluster OOM = data loss on that node, so page before it.
+        - alert: FlarePodMemoryHigh
+          expr: >-
+            100 * container_memory_working_set_bytes{container="", pod=~".+-nodes-.+"}
+              / on(namespace, pod) group_left()
+                cluster:namespace:pod_memory:active:kube_pod_container_resource_limits{container="flared"}
+            > 85
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Flare pod {{`{{ $labels.pod }}`}}: memory (incl. tmpfs data) above 85% of the limit"
+        - alert: FlarePodMemoryCritical
+          expr: >-
+            100 * container_memory_working_set_bytes{container="", pod=~".+-nodes-.+"}
+              / on(namespace, pod) group_left()
+                cluster:namespace:pod_memory:active:kube_pod_container_resource_limits{container="flared"}
+            > 95
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Flare pod {{`{{ $labels.pod }}`}}: memory above 95% of the limit — OOM (= tmpfs data loss) imminent"
+
+        # A node stuck in Prepare is reconstructing forever — it will never
+        # serve and never be failed over (Prepare is exempt from dead
+        # detection by design). Runbook: docs/RUNBOOK.md#prepare-stuck
+        - alert: FlarePrepareStuck
+          expr: flare_operator_nodes_prepare_stuck > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Flare cluster {{`{{ $labels.cluster }}`}}: node(s) stuck in Prepare beyond the watchdog threshold"
+            runbook: docs/RUNBOOK.md#prepare-stuck
+
+        # No metrics at all: the operator (or its scrape path) is down. The
+        # data plane keeps serving with the last topology, but failover and
+        # scaling are dead until it returns.
+        - alert: FlareOperatorAbsent
+          expr: absent(flare_operator_node_map_version)
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Flare operator metrics absent — control plane down or unscraped"
+            runbook: docs/RUNBOOK.md#operator-down
+
+        # Sustained node churn (well below the breaker threshold) usually
+        # means crash-looping flared pods or node pressure.
+        - alert: FlareDeadNodeChurn
+          expr: increase(flare_operator_dead_nodes_detected_total[15m]) > 3
+          labels:
+            severity: warning
+          annotations:
+            summary: "Flare cluster {{`{{ $labels.cluster }}`}}: repeated dead-node detections"
+            runbook: docs/RUNBOOK.md#dead-node-churn
+
+    # flared data-plane alerts. Since rc29 each flared pod exports its own
+    # stats natively (PodMonitor), so these fire per pod with the pod label
+    # attached by Prometheus — independent of the operator's health.
+    - name: flare-nodes
+      rules:
+        # STORAGE CORRUPTION: a RocksDB write hit a Corruption status (the
+        # poison state where reads work but writes fail). `rocksdb_corrupted`
+        # latches on detection. A SLAVE self-heals on its next reconstruction
+        # (hard_reset + reseed); the fastest manual trigger is `kubectl delete
+        # pod <that pod>`. A MASTER needs a promotion decision (its data may be
+        # the last copy) — page. Runbook: docs/RUNBOOK.md#storage-corruption
+        - alert: FlareStorageCorruption
+          expr: flare_node_rocksdb_corrupted == 1
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Flare pod {{`{{ $labels.pod }}`}}: RocksDB corruption latched"
+            runbook: docs/RUNBOOK.md#storage-corruption
+
+        # New corruption detections over time — catches a pod that corrupted
+        # and recovered (hard_reset) so it no longer shows corrupted==1, but
+        # whose recurrence rate signals bad hardware/volume.
+        - alert: FlareStorageCorruptionRecurring
+          expr: increase(flare_node_rocksdb_corruption_detected[1h]) > 0
+          labels:
+            severity: warning
+          annotations:
+            summary: "Flare pod {{`{{ $labels.pod }}`}}: recurring storage corruption detections"
+            runbook: docs/RUNBOOK.md#storage-corruption
+
+        # Replication transport corruption: a WAL sync / snapshot-push batch
+        # failed its CRC-32 check and was rejected BEFORE it could poison the
+        # receiver (the node fell back to a full dump instead). Recurrence
+        # points at flaky network gear or a bad source volume.
+        - alert: FlareReplicationCrcMismatch
+          expr: increase(flare_node_rocksdb_wal_sync_crc_mismatch[1h]) > 0
+          labels:
+            severity: warning
+          annotations:
+            summary: "Flare pod {{`{{ $labels.pod }}`}}: replication batch rejected by CRC check"
+            runbook: docs/RUNBOOK.md#storage-corruption
+
+        # Backup freshness: rocksdb_last_backup_epoch is now a native flared
+        # metric. Alert when the newest backup is older than 2x the interval.
+        # Tune the threshold to your CronJob schedule.
+        - alert: FlareBackupStale
+          expr: time() - flare_node_rocksdb_last_backup_epoch > 172800
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Flare pod {{`{{ $labels.pod }}`}}: last successful backup is stale"
+            runbook: docs/BACKUP_RESTORE.md#monitoring
+{{- end }}

@@ -180,7 +180,14 @@ class EvidenceTests(unittest.TestCase):
         # of the old path. No tracked project files are changed by this test.
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            for path in {p for c in self.data["controls"] for p in safety.referenced_paths(c)}:
+            # Every LOCAL path the register points at has to exist in the
+            # fixture, or the checker stops on a missing file before it can
+            # reach the behaviour under test. referenced_paths covers code
+            # and check references; run reports are local files too.
+            local_paths = {p for c in self.data["controls"] for p in safety.referenced_paths(c)}
+            local_paths |= {run["report"] for c in self.data["controls"] for run in c["runs"]
+                            if not run["report"].startswith("https://")}
+            for path in local_paths:
                 target = root / path
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text("fixture\n")

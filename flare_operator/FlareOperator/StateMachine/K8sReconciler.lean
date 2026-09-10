@@ -101,14 +101,13 @@ inductive K8sRequest where
 /-- Side effects that the pure FSM wants the IO shell to execute.
     Models all imperative operations from Main.lean reconcileOnce:
     - PatchService: Update K8s Service endpoints (Main.lean:333-338)
-    - BroadcastTopology: Send topology to all nodes (Main.lean:329-331)
+    (Topology is NOT sent from here — see AfterBroadcastTopology.)
     - UpdateConfigMap: Write node map to observability ConfigMap (Main.lean:325-327)
     - SendSighup: Signal nodes to transition replication phase (Main.lean:246-251)
     - PatchCRDStatus: Update migration phase in CRD status field (Main.lean:253-258)
     - Log: Emit diagnostic message -/
 inductive FlareEffect where
   | PatchService (svcName : String) (podName : String)
-  | BroadcastTopology (version : Nat) (nodes : List (String × FlareNode))
   | UpdateConfigMap (data : String)
   | SendSighup (podNames : List String)
   | PatchCRDStatus (phase : MigrationPhase)
@@ -1388,13 +1387,28 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
       ({ s with reconcileStep := .Error "missing CRD at AfterHandleReplication" }, none, [])
 
   | .AfterBroadcastTopology =>
-    -- Emit topology broadcast effect (Main.lean:329-331)
+    -- Deliberately emits NOTHING. The step is kept (it carries the measure
+    -- and the proofs' case analysis) but the topology send does not belong
+    -- here, for two reasons found in review:
+    --
+    --   1. AUTHORITY. Effects are executed by the IO shell as the FSM
+    --      produces them, and that executor performed no leadership check.
+    --      A reconcile that began as leader and lost the lease mid-pass
+    --      still pushed topology from here.
+    --   2. CONTENT. `updatedClusterState` is the FSM's own computed map,
+    --      BEFORE commitClusterState merges it with concurrent TCP
+    --      registrations and applies demoteDuplicateMasters. Sending it
+    --      publishes a map that was never committed — including, in
+    --      principle, a duplicate master that the merge would have
+    --      repaired. The at-most-one-master property is proved about the
+    --      COMMITTED map (SC-02); an unmerged outgoing snapshot is outside
+    --      it.
+    --
+    -- The single send now lives after the commit in reconcileOnceFSM, where
+    -- the state is the merged one and the lease is checked first (SC-01).
     match s.updatedClusterState with
-    | some state =>
-      let nodes := state.nodeMap
-      let version := state.nodeMapVersion
-      ({ s with reconcileStep := .AfterPatchService }, none,
-       [.BroadcastTopology version nodes])
+    | some _ =>
+      ({ s with reconcileStep := .AfterPatchService }, none, [])
     | none =>
       ({ s with reconcileStep := .Error "missing cluster state at AfterBroadcastTopology" }, none, [])
 

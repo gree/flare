@@ -1,0 +1,14 @@
+# === Suite: topology-authority ===
+# pushing a mutated map to topo-auth-nodes-0 at stale version 4294967302 (its current version is 4294967303)
+# survivor stayed at version 4294967303 while the lease was foreign
+# note: no LEASE FENCE line; the operator most likely never reached the send because it stopped reconciling as a follower
+1..2
+ok 1 - flared rejects a topology push carrying a stale version
+ok 2 - no topology reaches a surviving pod while another holder owns the lease
+
+--- environment ---
+runner: local kind (kind vv0.31.0), Docker Desktop on arm64 darwin
+images: flare-operator:test, flare-node:test built from the working tree
+note: the base operator in flare-system needed its memory limit raised to 1Gi by hand;
+      the per-suite harness limit is raised in this change (E2E/Setup.lean) for the same reason.
+command: .lake/build/bin/flare_e2e --filter topology-authority

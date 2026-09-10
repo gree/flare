@@ -108,7 +108,14 @@ subjects:
     name: flare-operator
     namespace: {ns}"
 
-/-- Generate operator Deployment + Service YAML. -/
+/-- Generate operator Deployment + Service YAML.
+
+    The memory LIMIT is a ceiling, not a reservation: 256Mi is enough for
+    the Lean runtime on the amd64 CI runners but OOMKills it on arm64
+    (Docker Desktop), where every suite then fails during setup with
+    "cluster did not stabilize" and no visible cause — the operator pod is
+    already gone by the time a test looks. Raising the ceiling costs
+    nothing on CI and makes a local run possible. -/
 def operatorDeploymentYaml (cfg : ClusterConfig) : String :=
   let name := cfg.operatorName
   let ns := cfg.«namespace»
@@ -149,7 +156,8 @@ spec:
               memory: 128Mi
             limits:
               cpu: 500m
-              memory: 256Mi
+              # ceiling, not a reservation - see operatorDeploymentYaml
+              memory: 768Mi
 ---
 apiVersion: v1
 kind: Service

@@ -586,11 +586,6 @@ private def executeEffects (effects : List K8sReconciler.FlareEffect)
       | .ok () => pure ()
       | .error e => IO.eprintln s!"[flare-operator] warning: failed to patch service {svcName}: {e}"
 
-    | .BroadcastTopology version nodes =>
-      -- Send topology to all flared nodes via TCP
-      let nodeList := nodes.map (·.snd)
-      broadcastTopologyToAllPods crName ns version nodeList
-
     | .UpdateConfigMap data =>
       -- Write node map to observability ConfigMap (Main.lean:174-178)
       let cmName := s!"{crName}-node-map"
@@ -863,11 +858,32 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
   -- clears once the doomed pod is gone (the key stops being Terminating).
   metrics.drainNoSuccessor.set (← drainBlockedRef.get).toFloat
 
-  -- 3. Post-FSM: Broadcast topology if version changed
+  -- 3. THE topology send. Single path on purpose (SC-01 / SAF-01).
+  --
+  -- It reads `stateRef` AFTER commitClusterState, so what goes on the wire
+  -- is the COMMITTED, merged map — the one the at-most-one-master property
+  -- is proved about (SC-02). The FSM used to emit a BroadcastTopology
+  -- effect as well, executed before the commit and without any leadership
+  -- check; that path published the FSM's own unmerged snapshot and has
+  -- been removed.
+  --
+  -- What the lease check below does and does not buy:
+  --   * It prevents a send that STARTS after a confirmed loss, and it
+  --     fails closed — a lease read error also suppresses the send.
+  --   * It cannot close the check/send race. The lease can be lost between
+  --     the read and the first packet, or while the broadcast is in
+  --     flight, and nothing here can retract what is already on the wire.
+  --   * The real bound on a stale leader is RECIPIENT-side: flared ignores
+  --     a node map whose version is not newer than its own
+  --     (cluster::reconstruct_node). That fences only a recipient which has
+  --     ALREADY observed the newer generation. A pod that missed the new
+  --     leader's broadcast — restarted, unreachable at the time, or simply
+  --     never sent to — has nothing to compare against and will accept the
+  --     old leader's map. Per-node applied-generation tracking is SAF-09.
+  -- Both halves are exercised by the topology-authority E2E suite.
   let finalState ← stateRef.get
   let finalVersion := finalState.nodeMapVersion
   if finalVersion != oldVersion then
-    -- Lease fence: never broadcast topology from a stale leader (see docstring).
     let stillLeader ← do
       match ← getLease leaseName ns with
       | .ok lease => pure (lease.holderIdentity == identity && !lease.expired)
@@ -879,6 +895,16 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
       broadcastTopologyToAllPods crName ns finalVersion finalState.getNodes
       recordTopologyBroadcast metrics
       updateNodeMapVersion metrics finalVersion
+      -- Re-read the lease AFTER the send. This cannot prevent the race
+      -- above, but it turns it from invisible into an incident record: if
+      -- we lost leadership during the broadcast, someone reading these
+      -- logs needs to know a stale map may have gone out.
+      match ← getLease leaseName ns with
+      | .ok l =>
+        if l.holderIdentity != identity then
+          IO.eprintln s!"[flare-operator] CRITICAL: lease holder changed to '{l.holderIdentity}' DURING a topology broadcast (v{finalVersion}); a map may have been published without authority. Recipients that already saw a newer version rejected it; others did not."
+      | .error e =>
+        IO.eprintln s!"[flare-operator] warning: could not confirm lease ownership after broadcasting v{finalVersion}: {e}"
     else
       IO.eprintln s!"[flare-operator] LEASE FENCE: not the lease holder anymore — suppressing topology broadcast (v{oldVersion} → v{finalVersion})"
 

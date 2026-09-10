@@ -47,6 +47,8 @@ documentation and still describes the protocol and storage semantics.
 |---|---|
 | [docs/REVIEW-GUIDE.md](docs/REVIEW-GUIDE.md) | You are reviewing the design or arriving for the first time |
 | [docs/STPA-node-state.md](docs/STPA-node-state.md) | You need to know when a node leaves the serving set, what detects each failure, and which hazards are still uncovered |
+| [docs/SAFETY-TODO.md](docs/SAFETY-TODO.md) | Current merge-blocking safety improvements, acceptance scenarios and the evidence review workflow |
+| [docs/safety-evidence.json](docs/safety-evidence.json) | Source of truth for bounded safety claims, implementation references and verification evidence |
 | [docs/RUNBOOK.md](docs/RUNBOOK.md) | An alert fired, or you are about to upgrade, reseed or migrate a cluster |
 | [docs/BACKUP_RESTORE.md](docs/BACKUP_RESTORE.md) | Backups, restores, and what replication does *not* protect against |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | You are about to change something |

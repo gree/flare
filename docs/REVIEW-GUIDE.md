@@ -6,10 +6,17 @@ I would push if I were reviewing rather than writing.
 
 Last checked against the code: 2026-09-10.
 
+Review follow-up: [SAFETY-TODO.md](SAFETY-TODO.md) records the open merge gates.
+The [evidence register](safety-evidence.json) distinguishes implementation from
+verification; the earlier countermeasure descriptions below are not execution
+evidence. New findings include a lease-check bypass, an undelivered resync
+transition, unqualified Prepare activation, unsafe stats defaults and lost
+repair-pending work. None of these runtime fixes ships with the documentation.
+
 ## 1. What the system is, in one page
 
-flared is unchanged upstream flare: a memcached-compatible store, here on a
-RocksDB backend. What replaces upstream's `flarei` index server is an
+flared is a modified upstream flare: a memcached-compatible store, here on a
+RocksDB backend with replication and recovery changes. What replaces upstream's `flarei` index server is an
 **operator** that owns cluster topology.
 
 ```
@@ -66,11 +73,11 @@ This section exists because the shape of the failures explains the shape of
 the engineering — including why a formally verified operator still needed a
 hazard analysis.
 
-**The proofs cover one class, and that class has stayed clean.** Split brain
-— two masters for one partition — is bounded by machine-checked properties
-over the commit path, plus a duplicate-master repair step. It has not bitten
-us in production. That is the good news and also the whole point of the next
-paragraph.
+**The proofs cover a narrower property than distributed split brain.** The
+commit path bounds masters in one node map, with duplicate-master repair.
+It does not establish that separate flared processes cannot serve as master
+under delayed delivery or leadership changes. No production split-brain
+incident is reported here; that observation is not proof of exclusion (EV-01/02).
 
 **Nearly every real incident came from two other classes.** Whether a node
 is *alive*, and whether a copy of the data is *good*. Proofs could not see
@@ -84,7 +91,7 @@ missing, late, or wrong. Hence
 
 | Pattern | What happened | Countermeasure | Kind of mechanism |
 |---|---|---|---|
-| **Split brain** | (none in production) | At-most-one-master bound over the commit path; duplicate-master repair | Proof |
+| **Split brain** | (none reported in production) | At-most-one-master bound in the committed map; distributed delivery/authority gaps remain (EV-01/02) | Bounded proof, not end-to-end exclusion |
 | **Liveness misjudged** | A segfaulted flared was never detected: pod existence was the only liveness signal, so the node stayed Active, the master proxied writes into a dead socket, and a crashed **master** would get no failover at all | Pod-Ready streak feeds the existing failover path; a lone master with no in-sync successor is kept rather than stripped | Detection |
 | | Nodes wedged as Proxy — once for 14 h — because a registration-epoch tiebreak discarded the assignment every tick, and once because a stale map and a tied epoch left the cluster all-proxy | Epoch monotonicity on registration; a carve-out so an unassigned Proxy may be seated as Slave | FSM guard |
 | | A slave sat in Prepare for 7 h 27 m because its one-shot "reconstruction complete" event was lost, blocking rolling updates | Re-derive the fact from the replication cursor instead of waiting for the event again | Level-triggered repair |
@@ -93,7 +100,7 @@ missing, late, or wrong. Hence
 | **Data health misjudged** | An empty master was crowned over a replica holding 15.8 M keys, and kept serving nothing | Promotion prefers a data-bearing copy; the fast path for the first node is bootstrap-only; a sitting empty master is handed off through the drain path | Guard + probe |
 | | Promotion accepted a slave that was still **reconstructing** — which stops its reconstruction and starts it serving a partial copy — while the drain guard's "no successor" alarm stayed silent because, to it, a successor existed | Only an Active successor counts | Guard |
 | | The expire reaper deleted on the master only. Its comment claimed the WAL carried the deletes to replicas; live replication is op-level proxying, so it did not. A replica accumulated ~10 k stale keys over 12 days | Reaped keys are forwarded as version-carrying deletes | Replication fix |
-| | Writes the master could not forward were dropped after four retries, silently, with the client already told the write succeeded | Counted per destination; the affected replica is sent back through reconstruction | Accounting + repair |
+| | Writes the master could not forward were dropped after four retries, silently, with the client already told the write succeeded | Counted per destination; automatic reconstruction is attempted but dispatch and pending-work retention need SAF-02/05 | Accounting + incomplete repair |
 | | A cross-cluster seed failed twice over: the physical push was declined by an unconverged node, and the fallback dump had every one of 15.8 M writes acknowledged and stored nowhere while reporting success | Route to the master before checking layout; check every write's result | Protocol fix |
 | **Resource exhaustion** | tmpfs clusters OOMed because backup checkpoints hardlink-pin compacted-away files, and a full data dir crashed flared through null-database dereferences | Retain one checkpoint on tmpfs; null guards and an emergency reopen; memory measured at the pod cgroup, where the OOM killer looks | Config + hardening |
 | **Untrusted input** | One `dump` request with an out-of-range partition size crashed a serving node — the value indexed a table unchecked | Bounds check, and reject inconsistent parameters at parse time | Input validation |
@@ -113,8 +120,8 @@ About two hours, in this order:
 
 1. **[STPA-node-state.md](STPA-node-state.md)** (20 min) — the hazard
    analysis. Losses, hazards, the control structure, the full table of what
-   makes a node leave the serving set, and the gaps. Every row carries a
-   status that was checked against the code. Start here even if you plan to
+   makes a node leave the serving set, and the gaps. Controls link to a
+   register with separate implementation and verification status. Start here even if you plan to
    read code: it is the map.
 2. **`StateMachine/K8sReconciler.lean`** (40 min) — the reconciler. The
    interesting functions are `detectDeadNodesPure`,
@@ -165,7 +172,8 @@ the operator.
 
 **Replication has no per-write acknowledgement.** Four retries, then the
 write is dropped and the client has already been told it succeeded. This is
-counted per destination and now triggers a resync of that replica, but the
+counted per destination and attempts a resync of that replica (SAF-02/05
+track why that attempt is not reliable), but the
 catch-up falls back to a full dump whenever the replica's cursor is not
 usable — which, under proxy replication, is most of the time. Carrying the
 master's LSN on proxied writes would make it incremental. The full fix is

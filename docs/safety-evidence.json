@@ -1,0 +1,1203 @@
+{
+  "schema_version": 1,
+  "hazards": [
+    "H1",
+    "H2",
+    "H3",
+    "H4",
+    "H5",
+    "H6"
+  ],
+  "ucas": [
+    {
+      "id": "UCA-01",
+      "action": "A1a",
+      "timing": "Not provided",
+      "description": "A non-serving node stays Active.",
+      "hazards": [
+        "H1",
+        "H3",
+        "H4"
+      ]
+    },
+    {
+      "id": "UCA-02",
+      "action": "A1a",
+      "timing": "Not provided",
+      "description": "A divergent replica remains eligible without repair.",
+      "hazards": [
+        "H2",
+        "H3"
+      ]
+    },
+    {
+      "id": "UCA-03",
+      "action": "A1a",
+      "timing": "Provided",
+      "description": "Healthy copies are demoted on false or correlated failure observations.",
+      "hazards": [
+        "H5"
+      ]
+    },
+    {
+      "id": "UCA-04",
+      "action": "A1a",
+      "timing": "Wrong order",
+      "description": "A master is demoted before a usable successor exists.",
+      "hazards": [
+        "H1",
+        "H2",
+        "H5"
+      ]
+    },
+    {
+      "id": "UCA-05",
+      "action": "A1a",
+      "timing": "Provided",
+      "description": "A lone unhealthy master loses its assignment without a successor.",
+      "hazards": [
+        "H1"
+      ]
+    },
+    {
+      "id": "UCA-06",
+      "action": "A1a",
+      "timing": "Too long",
+      "description": "A live node remains Down indefinitely.",
+      "hazards": [
+        "H4",
+        "H5"
+      ]
+    },
+    {
+      "id": "UCA-07",
+      "action": "A1b",
+      "timing": "Provided",
+      "description": "An empty or stale node is crowned master.",
+      "hazards": [
+        "H2",
+        "H5"
+      ]
+    },
+    {
+      "id": "UCA-08",
+      "action": "A1b",
+      "timing": "Provided",
+      "description": "Multiple processes serve as master for a partition.",
+      "hazards": [
+        "H6"
+      ]
+    },
+    {
+      "id": "UCA-09",
+      "action": "A1b",
+      "timing": "Not provided",
+      "description": "A masterless partition is never refilled.",
+      "hazards": [
+        "H1"
+      ]
+    },
+    {
+      "id": "UCA-10",
+      "action": "A1b",
+      "timing": "Wrong timing",
+      "description": "A replica is activated or promoted before completing synchronization.",
+      "hazards": [
+        "H2",
+        "H4"
+      ]
+    },
+    {
+      "id": "UCA-11",
+      "action": "A2",
+      "timing": "Provided",
+      "description": "Deletion destroys the last usable copy.",
+      "hazards": [
+        "H5"
+      ]
+    },
+    {
+      "id": "UCA-12",
+      "action": "A2",
+      "timing": "Wrong timing",
+      "description": "Deletion interrupts reconstruction or repeats on a terminating pod.",
+      "hazards": [
+        "H4",
+        "H5"
+      ]
+    },
+    {
+      "id": "UCA-13",
+      "action": "A2",
+      "timing": "Provided",
+      "description": "Force deletion bypasses evidence and drain conditions.",
+      "hazards": [
+        "H5"
+      ]
+    },
+    {
+      "id": "UCA-14",
+      "action": "A1c",
+      "timing": "Not provided",
+      "description": "Topology application is lost or never retried.",
+      "hazards": [
+        "H1",
+        "H2",
+        "H4"
+      ]
+    },
+    {
+      "id": "UCA-15",
+      "action": "A1c",
+      "timing": "Too late",
+      "description": "Delayed topology arrives after a newer authority or assignment.",
+      "hazards": [
+        "H4",
+        "H6"
+      ]
+    },
+    {
+      "id": "UCA-16",
+      "action": "A1c",
+      "timing": "Provided",
+      "description": "A deposed leader still issues topology commands.",
+      "hazards": [
+        "H6"
+      ]
+    },
+    {
+      "id": "UCA-17",
+      "action": "A1a",
+      "timing": "Not provided",
+      "description": "Repeated resync failure never removes an unsafe replica from serving.",
+      "hazards": [
+        "H3",
+        "H4"
+      ]
+    },
+    {
+      "id": "UCA-18",
+      "action": "A4",
+      "timing": "Provided",
+      "description": "Endpoint membership advertises an unserving node.",
+      "hazards": [
+        "H4"
+      ]
+    }
+  ],
+  "controls": [
+    {
+      "id": "EV-01",
+      "constraint": {
+        "id": "SC-01",
+        "text": "Only the current leader may issue topology changes; recipients must reject obsolete authority."
+      },
+      "title": "Authorize topology application",
+      "hazards": [
+        "H6",
+        "H4"
+      ],
+      "ucas": [
+        "UCA-14",
+        "UCA-15",
+        "UCA-16",
+        "UCA-08"
+      ],
+      "implementation": "partial",
+      "verification": "unverified",
+      "scenarios": [
+        "An old reconcile resumes after lease takeover; a node has not yet heard the new generation."
+      ],
+      "assumptions": [
+        "Lease availability and generation identity must be established; a newer generation fences only recipients that have observed it."
+      ],
+      "residual_risks": [
+        "The FSM BroadcastTopology effect bypasses the post-FSM lease check. A check before sending also leaves an in-flight race."
+      ],
+      "code": [
+        {
+          "path": "flare_operator/FlareOperator/Main.lean",
+          "symbol": "executeEffects"
+        },
+        {
+          "path": "flare_operator/FlareOperator/Main.lean",
+          "symbol": "reconcileOnceFSM"
+        },
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/K8sReconciler.lean",
+          "symbol": "flareReconcileCore"
+        },
+        {
+          "path": "src/lib/cluster.cc",
+          "symbol": "cluster::reconstruct_node"
+        }
+      ],
+      "call_path": "runReconcileFSMLoop -> flareReconcileCore.AfterBroadcastTopology -> executeEffects.BroadcastTopology; a second post-FSM path checks the lease.",
+      "checks": [
+        {
+          "id": "CHECK-01",
+          "kind": "scenario",
+          "procedure": "Pause and resume the old leader across takeover; assert outgoing control commands and recipient versions, including delayed delivery. Referenced suites are starting points to extend, not evidence that this scenario is already covered.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/OperatorRestart.lean",
+              "symbol": "suite"
+            }
+          ]
+        }
+      ],
+      "runs": [],
+      "tasks": [
+        "SAF-01",
+        "SAF-09"
+      ],
+      "review": {
+        "commit": "aaf0b8568b25b1be84c771fc4ea8b1118bee5ff7",
+        "date": "2026-09-10",
+        "note": "Initial static audit. Existing code and prospective checks are not archived execution evidence; no safety verification is claimed."
+      }
+    },
+    {
+      "id": "EV-02",
+      "constraint": {
+        "id": "SC-02",
+        "text": "mergeClusterState commits at most one Master per partition in its node map."
+      },
+      "title": "Bound committed master assignments",
+      "hazards": [
+        "H6"
+      ],
+      "ucas": [
+        "UCA-08",
+        "UCA-14"
+      ],
+      "implementation": "implemented",
+      "verification": "unverified",
+      "scenarios": [
+        "FSM and TCP registration update overlapping snapshots."
+      ],
+      "assumptions": [
+        "The claim applies to the committed map, not simultaneously serving flared processes or unmerged outgoing effects."
+      ],
+      "residual_risks": [
+        "Independent node maps, delivery loss and old leaders are outside this count property."
+      ],
+      "code": [
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/K8sReconciler.lean",
+          "symbol": "mergeClusterState"
+        },
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/K8sReconciler.lean",
+          "symbol": "demoteDuplicateMasters_atMostOne"
+        },
+        {
+          "path": "flare_operator/FlareOperator/Main.lean",
+          "symbol": "commitClusterState"
+        }
+      ],
+      "call_path": "runReconcileFSMLoop -> commitClusterState -> mergeClusterState -> demoteDuplicateMasters.",
+      "checks": [
+        {
+          "id": "CHECK-02",
+          "kind": "proof",
+          "procedure": "Elaborate the general commit/count proofs and review that production commits still use the proved functions; separately test outgoing snapshots.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/StateMachine/K8sReconciler.lean",
+              "symbol": "mergeClusterState_atMostOneMaster"
+            }
+          ]
+        }
+      ],
+      "runs": [],
+      "tasks": [
+        "SAF-01",
+        "SAF-07",
+        "SAF-09"
+      ],
+      "review": {
+        "commit": "aaf0b8568b25b1be84c771fc4ea8b1118bee5ff7",
+        "date": "2026-09-10",
+        "note": "Initial static audit. Existing code and prospective checks are not archived execution evidence; no safety verification is claimed."
+      }
+    },
+    {
+      "id": "EV-03",
+      "constraint": {
+        "id": "SC-03",
+        "text": "A replica with missed writes remains repair-pending until reconstruction completes and missing data is recovered."
+      },
+      "title": "Repair dropped replica writes",
+      "hazards": [
+        "H3",
+        "H2"
+      ],
+      "ucas": [
+        "UCA-02"
+      ],
+      "implementation": "partial",
+      "verification": "unverified",
+      "scenarios": [
+        "Drops during normal service, breaker hold, unmatched destinations, operator restart and master counter reset."
+      ],
+      "assumptions": [
+        "Drop counters describe a particular source/destination incarnation; reconstruction must actually reach flared."
+      ],
+      "residual_risks": [
+        "Proxy demotion is not broadcast before reassignment; counters are consumed even when repair is skipped, and initial nonzero counts are baselined."
+      ],
+      "code": [
+        {
+          "path": "flare_operator/FlareOperator/Main.lean",
+          "symbol": "reconcileOnceFSM"
+        },
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/K8sReconciler.lean",
+          "symbol": "assignProxiesPure"
+        },
+        {
+          "path": "src/lib/cluster.cc",
+          "symbol": "cluster::_shift_node_role"
+        },
+        {
+          "path": "src/lib/queue_proxy_write.cc",
+          "symbol": "queue_proxy_write::run"
+        },
+        {
+          "path": "src/lib/stats.cc",
+          "symbol": "stats::increment_proxy_write_dropped"
+        }
+      ],
+      "call_path": "queue_proxy_write records destination drops -> stats -> Main 4d -> stateRef demotion -> next FSM proxy assignment -> node sync -> role shift.",
+      "checks": [
+        {
+          "id": "CHECK-03",
+          "kind": "scenario",
+          "procedure": "Drop selected writes; require actual reconstruction and value recovery without new drops after each blocked/restart case. Referenced suites are starting points to extend, not evidence that this scenario is already covered.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/DataSurvivalFailover.lean",
+              "symbol": "suite"
+            }
+          ]
+        }
+      ],
+      "runs": [],
+      "tasks": [
+        "SAF-02",
+        "SAF-05",
+        "SAF-10"
+      ],
+      "review": {
+        "commit": "aaf0b8568b25b1be84c771fc4ea8b1118bee5ff7",
+        "date": "2026-09-10",
+        "note": "Initial static audit. Existing code and prospective checks are not archived execution evidence; no safety verification is claimed."
+      }
+    },
+    {
+      "id": "EV-04",
+      "constraint": {
+        "id": "SC-04",
+        "text": "Normal promotion and Prepare activation require a completed usable copy associated with the current source."
+      },
+      "title": "Require valid synchronization evidence",
+      "hazards": [
+        "H2",
+        "H4"
+      ],
+      "ucas": [
+        "UCA-10"
+      ],
+      "implementation": "partial",
+      "verification": "unverified",
+      "scenarios": [
+        "Prepare replica has a small nonzero LSN; source changes while stats are being sampled."
+      ],
+      "assumptions": [
+        "Active is an operator designation, not independent proof of complete data; LSNs require matching lineage."
+      ],
+      "residual_risks": [
+        "Prepare repair accepts a gap below 5000 without lineage/completion evidence; masterless emergency promotion is a separate exception (SC-06)."
+      ],
+      "code": [
+        {
+          "path": "flare_operator/FlareOperator/Main.lean",
+          "symbol": "reconcileOnceFSM"
+        },
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/Reconciler.lean",
+          "symbol": "reconcileStep"
+        },
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/K8sReconciler.lean",
+          "symbol": "findActiveSuccessor"
+        },
+        {
+          "path": "src/lib/handler_reconstruction.cc",
+          "symbol": "handler_reconstruction::"
+        }
+      ],
+      "call_path": "Main 4c stats -> NodeState Active -> reconcileStep; drain/failover -> findActiveSuccessor.",
+      "checks": [
+        {
+          "id": "CHECK-04",
+          "kind": "scenario",
+          "procedure": "Reject close-but-incomplete LSNs, mismatched lineage and a changed source; accept only a completed current reconstruction. Referenced suites are starting points to extend, not evidence that this scenario is already covered.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/Failover.lean",
+              "symbol": "suite"
+            }
+          ]
+        }
+      ],
+      "runs": [],
+      "tasks": [
+        "SAF-03",
+        "SAF-07",
+        "SAF-08"
+      ],
+      "review": {
+        "commit": "aaf0b8568b25b1be84c771fc4ea8b1118bee5ff7",
+        "date": "2026-09-10",
+        "note": "Initial static audit. Existing code and prospective checks are not archived execution evidence; no safety verification is claimed."
+      }
+    },
+    {
+      "id": "EV-05",
+      "constraint": {
+        "id": "SC-05",
+        "text": "Delete only a revalidated target when independent current evidence supports the surviving copy."
+      },
+      "title": "Protect copies before deleting Pods",
+      "hazards": [
+        "H5",
+        "H2"
+      ],
+      "ucas": [
+        "UCA-07",
+        "UCA-11",
+        "UCA-12",
+        "UCA-13"
+      ],
+      "implementation": "partial",
+      "verification": "unverified",
+      "scenarios": [
+        "Missing or malformed master stats; resync removes the successor in the same tick; Pod replacement or lease loss before deletion."
+      ],
+      "assumptions": [
+        "tmpfs data is lost on Pod deletion; Active-master presence alone is not data-integrity evidence."
+      ],
+      "residual_risks": [
+        "Missing curr_items defaults to zero; gates and successor probes use snapshots; graceful deletion does not guarantee successful handoff."
+      ],
+      "code": [
+        {
+          "path": "flare_operator/FlareOperator/Main.lean",
+          "symbol": "reconcileOnceFSM"
+        },
+        {
+          "path": "flare_operator/FlareOperator/K8s/Bridge.lean",
+          "symbol": "queryPodStats"
+        },
+        {
+          "path": "flare_operator/FlareOperator/K8s/Bridge.lean",
+          "symbol": "deletePodGraceful"
+        },
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/K8sReconciler.lean",
+          "symbol": "handleDrainWithPromotionSingleKey"
+        }
+      ],
+      "call_path": "Main 4d/4e -> podDeletionAllowed -> deletePodGraceful -> subsequent terminating detection/drain.",
+      "checks": [
+        {
+          "id": "CHECK-05",
+          "kind": "scenario",
+          "procedure": "Malformed/empty/truncated/stale stats must not delete; combine resync and empty-master repair, concurrent re-registration and leader loss. Referenced suites are starting points to extend, not evidence that this scenario is already covered.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/TerminatingPodHandling.lean",
+              "symbol": "suite"
+            }
+          ]
+        }
+      ],
+      "runs": [],
+      "tasks": [
+        "SAF-04",
+        "SAF-06",
+        "SAF-08"
+      ],
+      "review": {
+        "commit": "aaf0b8568b25b1be84c771fc4ea8b1118bee5ff7",
+        "date": "2026-09-10",
+        "note": "Initial static audit. Existing code and prospective checks are not archived execution evidence; no safety verification is claimed."
+      }
+    },
+    {
+      "id": "EV-06",
+      "constraint": {
+        "id": "SC-06",
+        "text": "Refill missing masters under an explicit emergency policy, with partial-copy promotion distinguished from normal successor promotion."
+      },
+      "title": "Make emergency refill tradeoffs explicit",
+      "hazards": [
+        "H1",
+        "H2",
+        "H5"
+      ],
+      "ucas": [
+        "UCA-04",
+        "UCA-07",
+        "UCA-09",
+        "UCA-10"
+      ],
+      "implementation": "partial",
+      "verification": "unverified",
+      "scenarios": [
+        "All copies restart; only a Prepare copy remains; probes fail or return empty data."
+      ],
+      "assumptions": [
+        "Availability may deliberately be chosen over completeness; data-bearing means nonzero count, not a complete or newest copy."
+      ],
+      "residual_risks": [
+        "Active candidates lack a data check; absent data-bearing observations fall back; Prepare partial copies can become authoritative."
+      ],
+      "code": [
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/K8sReconciler.lean",
+          "symbol": "promoteMasterlessPartition"
+        },
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/K8sReconciler.lean",
+          "symbol": "handleFailoverWithPromotionSingleKey"
+        },
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/Reconciler.lean",
+          "symbol": "reconcileStep"
+        },
+        {
+          "path": "flare_operator/FlareOperator/K8s/Bridge.lean",
+          "symbol": "dataBearingPodKeys"
+        }
+      ],
+      "call_path": "NodeAdd rejoin -> Slave/Prepare; FSM failover/RecoveryRefill -> promoteMasterlessPartitions -> promoteMasterlessPartition.",
+      "checks": [
+        {
+          "id": "CHECK-06",
+          "kind": "scenario",
+          "procedure": "Cover total restart, known empty vs unknown, surviving Active and Prepare copies; document expected loss/availability policy. Referenced suites are starting points to extend, not evidence that this scenario is already covered.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/PvcDataSurvival.lean",
+              "symbol": "suite"
+            },
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/DataSurvivalFailover.lean",
+              "symbol": "suite"
+            }
+          ]
+        }
+      ],
+      "runs": [],
+      "tasks": [
+        "SAF-07"
+      ],
+      "review": {
+        "commit": "aaf0b8568b25b1be84c771fc4ea8b1118bee5ff7",
+        "date": "2026-09-10",
+        "note": "Initial static audit. Existing code and prospective checks are not archived execution evidence; no safety verification is claimed."
+      }
+    },
+    {
+      "id": "EV-07",
+      "constraint": {
+        "id": "SC-07",
+        "text": "Use Pod existence/readiness streaks with guards, retaining an unhealthy lone master rather than stripping its assignment."
+      },
+      "title": "Use qualified failure observations",
+      "hazards": [
+        "H1",
+        "H4",
+        "H5"
+      ],
+      "ucas": [
+        "UCA-01",
+        "UCA-03",
+        "UCA-05",
+        "UCA-12"
+      ],
+      "implementation": "partial",
+      "verification": "unverified",
+      "scenarios": [
+        "Pod disappears, CrashLoopBackOff, process hang with listening socket, correlated worker failure."
+      ],
+      "assumptions": [
+        "Kubernetes observations can lag; unknown input must not become an empty Pod list; readiness is partly circular."
+      ],
+      "residual_risks": [
+        "Parallel string lists conflate observations; nodeName is unused; Ready does not prove data health."
+      ],
+      "code": [
+        {
+          "path": "flare_operator/FlareOperator/Main.lean",
+          "symbol": "executeK8sRequest"
+        },
+        {
+          "path": "flare_operator/FlareOperator/K8s/Bridge.lean",
+          "symbol": "listFlaredPodsE"
+        },
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/K8sReconciler.lean",
+          "symbol": "detectDeadNodesPure"
+        },
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/K8sReconciler.lean",
+          "symbol": "unhealthyMastersKept"
+        }
+      ],
+      "call_path": "ListPods -> executeK8sRequest -> PodListResponse -> detectDeadNodesPure -> unhealthyMastersKept -> failover.",
+      "checks": [
+        {
+          "id": "CHECK-07",
+          "kind": "scenario",
+          "procedure": "Exercise missing pods, sustained NotReady, failed API listing, lone unhealthy master and multiple pods on a lost worker. Referenced suites are starting points to extend, not evidence that this scenario is already covered.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/Failover.lean",
+              "symbol": "suite"
+            },
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/CircuitBreaker.lean",
+              "symbol": "suite"
+            }
+          ]
+        }
+      ],
+      "runs": [],
+      "tasks": [
+        "SAF-08"
+      ],
+      "review": {
+        "commit": "aaf0b8568b25b1be84c771fc4ea8b1118bee5ff7",
+        "date": "2026-09-10",
+        "note": "Initial static audit. Existing code and prospective checks are not archived execution evidence; no safety verification is claimed."
+      }
+    },
+    {
+      "id": "EV-08",
+      "constraint": {
+        "id": "SC-08",
+        "text": "The pure drain transform retains a master assignment if there is no Active slave successor."
+      },
+      "title": "Keep drain assignments without a successor",
+      "hazards": [
+        "H1",
+        "H5"
+      ],
+      "ucas": [
+        "UCA-04",
+        "UCA-05"
+      ],
+      "implementation": "implemented",
+      "verification": "unverified",
+      "scenarios": [
+        "Terminating master with only Prepare slaves, or its sole slave drained first."
+      ],
+      "assumptions": [
+        "The bound is on the transform, not on data completeness or Pod survival through its termination grace period."
+      ],
+      "residual_risks": [
+        "External deletion still finishes; an Active successor may be stale and delivery may fail."
+      ],
+      "code": [
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/K8sReconciler.lean",
+          "symbol": "handleDrainWithPromotionSingleKey"
+        },
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/K8sReconciler.lean",
+          "symbol": "findActiveSuccessor"
+        },
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/K8sReconciler.lean",
+          "symbol": "drainBlockedKeys"
+        },
+        {
+          "path": "helm/flare-operator/templates/prometheusrule.yaml",
+          "symbol": "FlareDrainNoSuccessor"
+        }
+      ],
+      "call_path": "detectDrainingNodesPure -> handleDrainWithPromotion -> drainBlockedKeys -> Main drainNoSuccessor metric.",
+      "checks": [
+        {
+          "id": "CHECK-08",
+          "kind": "scenario",
+          "procedure": "Test no successor, Prepare-only successor and both drain orders; assert the master remains assigned and the blocked signal is raised. Referenced suites are starting points to extend, not evidence that this scenario is already covered.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/TerminatingPodHandling.lean",
+              "symbol": "suite"
+            }
+          ]
+        }
+      ],
+      "runs": [],
+      "tasks": [],
+      "review": {
+        "commit": "aaf0b8568b25b1be84c771fc4ea8b1118bee5ff7",
+        "date": "2026-09-10",
+        "note": "Initial static audit. Existing code and prospective checks are not archived execution evidence; no safety verification is claimed."
+      }
+    },
+    {
+      "id": "EV-09",
+      "constraint": {
+        "id": "SC-09",
+        "text": "Circuit-breaker policy pauses mass failover; configured recovery refill is a separate path."
+      },
+      "title": "Limit mass-failure changes",
+      "hazards": [
+        "H1",
+        "H5"
+      ],
+      "ucas": [
+        "UCA-03"
+      ],
+      "implementation": "implemented",
+      "verification": "unverified",
+      "scenarios": [
+        "Many Active nodes become dead candidates; hysteresis holds; auto-reset disabled."
+      ],
+      "assumptions": [
+        "Breaker thresholds use observed Active/dead population, not actual data health."
+      ],
+      "residual_risks": [
+        "Correlated worker faults are not modeled explicitly; autoResetEnabled=false parks refill."
+      ],
+      "code": [
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/K8sReconciler.lean",
+          "symbol": "flareReconcileCore"
+        },
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/K8sReconciler.lean",
+          "symbol": "emergencyPaused_inert"
+        },
+        {
+          "path": "flare_operator/FlareOperator/E2E/Tests/CircuitBreaker.lean",
+          "symbol": "suite"
+        }
+      ],
+      "call_path": "AfterDetectDead computes breaker state -> EmergencyPaused or RecoveryRefill; trippedRef carries hysteresis.",
+      "checks": [
+        {
+          "id": "CHECK-09",
+          "kind": "scenario",
+          "procedure": "Run breaker scenarios including auto-reset disabled and recovery refill; confirm no unintended mass demotion. Referenced suites are starting points to extend, not evidence that this scenario is already covered.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/CircuitBreaker.lean",
+              "symbol": "suite"
+            }
+          ]
+        }
+      ],
+      "runs": [],
+      "tasks": [],
+      "review": {
+        "commit": "aaf0b8568b25b1be84c771fc4ea8b1118bee5ff7",
+        "date": "2026-09-10",
+        "note": "Initial static audit. Existing code and prospective checks are not archived execution evidence; no safety verification is claimed."
+      }
+    },
+    {
+      "id": "EV-10",
+      "constraint": {
+        "id": "SC-10",
+        "text": "Restart a stuck Proxy/Down only when current safety evidence permits deleting its copy."
+      },
+      "title": "Recover stuck Down without losing data",
+      "hazards": [
+        "H4",
+        "H5"
+      ],
+      "ucas": [
+        "UCA-06",
+        "UCA-11"
+      ],
+      "implementation": "partial",
+      "verification": "unverified",
+      "scenarios": [
+        "A live process remains Down; terminating pod remains on an unreachable worker."
+      ],
+      "assumptions": [
+        "One-per-tick deletion and mapped Active masters are preliminary gates, not evidence of a usable surviving copy."
+      ],
+      "residual_risks": [
+        "Deletion gates share stale-state/data-validity weaknesses with empty-master repair."
+      ],
+      "code": [
+        {
+          "path": "flare_operator/FlareOperator/Main.lean",
+          "symbol": "reconcileOnceFSM"
+        },
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/K8sReconciler.lean",
+          "symbol": "assignProxiesPure"
+        },
+        {
+          "path": "flare_operator/FlareOperator/K8s/Bridge.lean",
+          "symbol": "deletePodGraceful"
+        }
+      ],
+      "call_path": "Main 4e counts present non-terminating Down pods -> podDeletionAllowed -> graceful deletion -> NodeAdd rejoin.",
+      "checks": [
+        {
+          "id": "CHECK-10",
+          "kind": "scenario",
+          "procedure": "Keep unsafe or terminating copies; restart only eligible stuck Down pods and verify data after rejoin. Referenced suites are starting points to extend, not evidence that this scenario is already covered.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/TerminatingPodHandling.lean",
+              "symbol": "suite"
+            }
+          ]
+        }
+      ],
+      "runs": [],
+      "tasks": [
+        "SAF-04",
+        "SAF-06"
+      ],
+      "review": {
+        "commit": "aaf0b8568b25b1be84c771fc4ea8b1118bee5ff7",
+        "date": "2026-09-10",
+        "note": "Initial static audit. Existing code and prospective checks are not archived execution evidence; no safety verification is claimed."
+      }
+    },
+    {
+      "id": "EV-11",
+      "constraint": {
+        "id": "SC-11",
+        "text": "Expose masterless, unhealthy, unreachable, drain-blocked and resync-failure signals; reachability loss alone does not cause failover."
+      },
+      "title": "Detect failures without inventing recovery",
+      "hazards": [
+        "H1",
+        "H3",
+        "H4",
+        "H5"
+      ],
+      "ucas": [
+        "UCA-01",
+        "UCA-02",
+        "UCA-06",
+        "UCA-09",
+        "UCA-17"
+      ],
+      "implementation": "partial",
+      "verification": "unverified",
+      "scenarios": [
+        "Kept unhealthy master; operator-only network partition; repeated flared resync failure."
+      ],
+      "assumptions": [
+        "Chart rules must be enabled, scraped and routed in the deployment for an operational alert claim."
+      ],
+      "residual_risks": [
+        "No deployment/run evidence is archived here; flared request_down_node cannot self-demote through the absent flarei controller."
+      ],
+      "code": [
+        {
+          "path": "flare_operator/FlareOperator/Main.lean",
+          "symbol": "reconcileOnceFSM"
+        },
+        {
+          "path": "helm/flare-operator/templates/prometheusrule.yaml",
+          "symbol": "FlareMasterMissing"
+        },
+        {
+          "path": "helm/flare-operator/templates/prometheusrule.yaml",
+          "symbol": "FlareResyncFailing"
+        },
+        {
+          "path": "flare_operator/FlareOperator/Server/TcpClient.lean",
+          "symbol": "probeNodeReachable"
+        },
+        {
+          "path": "src/lib/handler_reconstruction.cc",
+          "symbol": "request_down_node"
+        }
+      ],
+      "call_path": "Main observations and flared stats -> metrics -> chart Prometheus rules -> deployment-specific routing; probe failures are alert-only.",
+      "checks": [
+        {
+          "id": "CHECK-11",
+          "kind": "scenario",
+          "procedure": "Assert per-partition masterless and retained-master alerts, operator partition behavior and actual routed alert receipt. Treat self-demotion test skips as missing evidence. Referenced suites are starting points to extend, not evidence that this scenario is already covered.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/NativeMetrics.lean",
+              "symbol": "suite"
+            },
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/ResyncFailureSelfDemote.lean",
+              "symbol": "suite"
+            }
+          ]
+        }
+      ],
+      "runs": [],
+      "tasks": [],
+      "review": {
+        "commit": "aaf0b8568b25b1be84c771fc4ea8b1118bee5ff7",
+        "date": "2026-09-10",
+        "note": "Initial static audit. Existing code and prospective checks are not archived execution evidence; no safety verification is claimed."
+      }
+    },
+    {
+      "id": "EV-12",
+      "constraint": {
+        "id": "SC-12",
+        "text": "Count comparison detects some replica divergence; content equality requires additional verification."
+      },
+      "title": "Detect content divergence",
+      "hazards": [
+        "H2",
+        "H3"
+      ],
+      "ucas": [
+        "UCA-02"
+      ],
+      "implementation": "partial",
+      "verification": "unverified",
+      "scenarios": [
+        "Missing and extra keys cancel; equal keys have different values; multiple replicas diverge."
+      ],
+      "assumptions": [
+        "curr_items is coarse and the current probe selects one Active slave per master."
+      ],
+      "residual_risks": [
+        "Equal counts cannot establish key/value equality; content anti-entropy is absent."
+      ],
+      "code": [
+        {
+          "path": "flare_operator/FlareOperator/Main.lean",
+          "symbol": "reconcileOnceFSM"
+        },
+        {
+          "path": "src/flared/handler_reaper.cc",
+          "symbol": "handler_reaper::"
+        },
+        {
+          "path": "src/lib/queue_proxy_write.cc",
+          "symbol": "queue_proxy_write::run"
+        }
+      ],
+      "call_path": "Main 4d stats -> replicaKeyDelta; master mutation paths -> proxy writes to replicas.",
+      "checks": [
+        {
+          "id": "CHECK-12",
+          "kind": "scenario",
+          "procedure": "Inject missing/extra keys with equal counts and differing values; measure detection/repair coverage and all-replica coverage. Referenced suites are starting points to extend, not evidence that this scenario is already covered.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/ReadBalance.lean",
+              "symbol": "suite"
+            }
+          ]
+        }
+      ],
+      "runs": [],
+      "tasks": [
+        "SAF-10"
+      ],
+      "review": {
+        "commit": "aaf0b8568b25b1be84c771fc4ea8b1118bee5ff7",
+        "date": "2026-09-10",
+        "note": "Initial static audit. Existing code and prospective checks are not archived execution evidence; no safety verification is claimed."
+      }
+    },
+    {
+      "id": "EV-13",
+      "constraint": {
+        "id": "SC-13",
+        "text": "A future replication design must specify what acknowledged writes survive and how replicas catch up after interruption."
+      },
+      "title": "Bound replication durability guarantees",
+      "hazards": [
+        "H2",
+        "H3",
+        "H5"
+      ],
+      "ucas": [
+        "UCA-02"
+      ],
+      "implementation": "gap",
+      "verification": "unverified",
+      "scenarios": [
+        "Replica unavailable through WAL retention; asynchronous drop after client success; master failover."
+      ],
+      "assumptions": [
+        "Current live replication is op-level forwarding; WAL is used for reconstruction/bootstrap only."
+      ],
+      "residual_risks": [
+        "No continuous WAL replication; adding master LSNs alone does not establish durable acknowledgement semantics."
+      ],
+      "code": [
+        {
+          "path": "src/lib/queue_proxy_write.cc",
+          "symbol": "queue_proxy_write::run"
+        },
+        {
+          "path": "src/lib/op_repl_sync_wal.cc",
+          "symbol": "op_repl_sync_wal::"
+        }
+      ],
+      "call_path": "Client write -> proxy queue; recovery -> handler_reconstruction -> op_repl_sync_wal; these are distinct paths.",
+      "checks": [
+        {
+          "id": "CHECK-13",
+          "kind": "scenario",
+          "procedure": "Compare candidate designs against acknowledged-write survival, expiry/delete propagation, replica reads and migration compatibility. Referenced suites are starting points to extend, not evidence that this scenario is already covered.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/StrictDurability.lean",
+              "symbol": "suite"
+            },
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/WalPurgedFallback.lean",
+              "symbol": "suite"
+            }
+          ]
+        }
+      ],
+      "runs": [],
+      "tasks": [
+        "SAF-10"
+      ],
+      "review": {
+        "commit": "aaf0b8568b25b1be84c771fc4ea8b1118bee5ff7",
+        "date": "2026-09-10",
+        "note": "Initial static audit. Existing code and prospective checks are not archived execution evidence; no safety verification is claimed."
+      }
+    },
+    {
+      "id": "EV-14",
+      "constraint": {
+        "id": "SC-14",
+        "text": "Endpoint readiness should reflect serving eligibility without preventing StatefulSet recovery."
+      },
+      "title": "Separate readiness from serving correctness",
+      "hazards": [
+        "H4",
+        "H1"
+      ],
+      "ucas": [
+        "UCA-01",
+        "UCA-18"
+      ],
+      "implementation": "partial",
+      "verification": "unverified",
+      "scenarios": [
+        "Masterless limbo; crashed process during probe detection window; replica is Active but has wrong data."
+      ],
+      "assumptions": [
+        "Readiness probes read assigned state and Kubernetes acts after configured delays."
+      ],
+      "residual_risks": [
+        "Limbo deliberately reports Ready to break OrderedReady deadlock; headless addresses include NotReady pods; no content guarantee."
+      ],
+      "code": [
+        {
+          "path": "helm/flare-operator/templates/flare-cluster.yaml",
+          "symbol": "readinessProbe"
+        },
+        {
+          "path": "helm/flare-operator/templates/flare-cluster.yaml",
+          "symbol": "publishNotReadyAddresses"
+        }
+      ],
+      "call_path": "kubelet exec readiness -> Pod Ready -> endpoint controller; OrderedReady also consumes readiness.",
+      "checks": [
+        {
+          "id": "CHECK-14",
+          "kind": "scenario",
+          "procedure": "Exercise limbo, restart ordering, direct headless clients and delayed endpoint removal; design an independent serving gate. Referenced suites are starting points to extend, not evidence that this scenario is already covered.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/TerminatingPodHandling.lean",
+              "symbol": "suite"
+            }
+          ]
+        }
+      ],
+      "runs": [],
+      "tasks": [],
+      "review": {
+        "commit": "aaf0b8568b25b1be84c771fc4ea8b1118bee5ff7",
+        "date": "2026-09-10",
+        "note": "Initial static audit. Existing code and prospective checks are not archived execution evidence; no safety verification is claimed."
+      }
+    },
+    {
+      "id": "EV-15",
+      "constraint": {
+        "id": "SC-15",
+        "text": "Operational comparison should identify current source and each replica rather than infer from cluster-wide counts."
+      },
+      "title": "Expose role-aware observations",
+      "hazards": [
+        "H3",
+        "H4"
+      ],
+      "ucas": [
+        "UCA-02"
+      ],
+      "implementation": "gap",
+      "verification": "unverified",
+      "scenarios": [
+        "Role changes after failover while existing time series persist."
+      ],
+      "assumptions": [
+        "Role metadata must track topology generations without mislabeling old samples."
+      ],
+      "residual_risks": [
+        "No flared role labels; operator count comparison is a limited substitute."
+      ],
+      "code": [
+        {
+          "path": "src/lib/metrics_formatter.cc",
+          "symbol": "metrics_formatter::"
+        },
+        {
+          "path": "flare_operator/FlareOperator/Main.lean",
+          "symbol": "reconcileOnceFSM"
+        }
+      ],
+      "call_path": "flared metrics exporter and operator topology metrics are separate sources; role-aware join is not implemented.",
+      "checks": [
+        {
+          "id": "CHECK-15",
+          "kind": "scenario",
+          "procedure": "Specify and test role changes in metrics, including stale series and all-replica comparison. Referenced suites are starting points to extend, not evidence that this scenario is already covered.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/NativeMetrics.lean",
+              "symbol": "suite"
+            }
+          ]
+        }
+      ],
+      "runs": [],
+      "tasks": [],
+      "review": {
+        "commit": "aaf0b8568b25b1be84c771fc4ea8b1118bee5ff7",
+        "date": "2026-09-10",
+        "note": "Initial static audit. Existing code and prospective checks are not archived execution evidence; no safety verification is claimed."
+      }
+    }
+  ]
+}

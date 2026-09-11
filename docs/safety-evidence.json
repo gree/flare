@@ -215,7 +215,9 @@
         "A check before sending cannot close the check/send race: the lease can be lost between the read and the first packet, or while the broadcast is in flight.",
         "Recipient-side version fencing only protects a node that has ALREADY observed the newer generation; a node that missed the new leader's broadcast will accept an older leader's map. Per-node applied-generation tracking is SAF-09.",
         "The post-send lease re-read records that the race occurred; it cannot retract what was sent.",
-        "Observed while building CHECK-01, not asserted on: after the lease is deleted and the SAME process re-acquires it, the operator was seen broadcasting a LOWER version than nodes already held, which their fencing rejects. The manipulation is cruder than a real takeover; treat as a lead for SAF-09."
+        "Observed while building CHECK-01, not asserted on: after the lease is deleted and the SAME process re-acquires it, the operator was seen broadcasting a LOWER version than nodes already held, which their fencing rejects. The manipulation is cruder than a real takeover; treat as a lead for SAF-09.",
+        "A suppressed broadcast is not retried: the committed version is already advanced, so the next pass finds nothing to send and the recipient never learns that map until something else changes it. Observed in the fence and read-failure tests; belongs to SAF-09.",
+        "The stop position is a test seam. It is inert without the environment variable and bounded at 120s, but it is production code that a misconfiguration could delay one broadcast with."
       ],
       "code": [
         {
@@ -236,11 +238,15 @@
         {
           "id": "CHECK-01",
           "kind": "scenario",
-          "procedure": "Push a mutated map at a stale version straight at a flared pod with the operator's own wire client; assert the map is not adopted AND that flared logged the version rejection (so the assertion cannot pass because the push never arrived). Then take the lease with a foreign identity, force a topology change, and assert a surviving pod's node_map_version does not advance; restore leadership and assert convergence. The second half tests SC-01 end to end, not the post-commit fence branch specifically: a follower also stops reconciling.",
+          "procedure": "Drive the production reconcile to a named stop position (committed, version advanced, pre-send lease check not yet made) using the FLARE_TEST_PRESEND_BARRIER seam, and confirm the position was reached by reading the held version the operator writes there. Then, for the same held pass: (a) retain the lease and require the release to broadcast that version - the control that proves the pass reaches the send at all; (b) hand the lease to another identity and require a fence log naming that version with no broadcast; (c) delete the lease and require the read-failure branch with no broadcast. A receiver whose version does not move is not accepted as evidence on its own: a crash, a timeout or an exit before the branch look the same. Separately, push a mutated map at a stale version from inside the cluster and require flared both to keep its map and to log the rejection.",
           "references": [
             {
               "path": "flare_operator/FlareOperator/E2E/Tests/TopologyAuthority.lean",
               "symbol": "suite"
+            },
+            {
+              "path": "flare_operator/FlareOperator/Main.lean",
+              "symbol": "preSendBarrier"
             }
           ]
         }
@@ -253,6 +259,14 @@
           "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter topology-authority",
           "result": "pass",
           "report": "docs/reports/2026-09-11-topology-authority.txt"
+        },
+        {
+          "check": "CHECK-01",
+          "commit": "5cce98f535da4f9d5a7551ad3430dee3727e04f2",
+          "date": "2026-09-11",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter topology-authority",
+          "result": "pass",
+          "report": "docs/reports/2026-09-11-topology-authority.txt"
         }
       ],
       "tasks": [
@@ -260,9 +274,9 @@
         "SAF-09"
       ],
       "review": {
-        "commit": "76ce851e335408f1cf096435ab128bac8e5956c7",
+        "commit": "5cce98f535da4f9d5a7551ad3430dee3727e04f2",
         "date": "2026-09-11",
-        "note": "SAF-01 implemented and CHECK-01 executed. The reported bypass was real and worse than recorded: effects ran before commitClusterState, so the FSM path published the FSM's own unmerged map with no leadership check. The effect constructor is deleted, so a second send path needs a type change to reappear. CHECK-01 passes on this revision (report archived), and it is a real assertion: an earlier run failed because the push never left the host, caught by the log assertion the check requires. Kept UNVERIFIED deliberately - the run is one half of the bar and no reviewer has yet assessed reachability, bypasses and assumptions. Implementation stays PARTIAL: the check/send race is documented, not closed, and recipient fencing still only protects nodes that already saw the newer generation (SAF-09). The second test covers SC-01 end to end, not the fence branch in isolation, because a follower also stops reconciling."
+        "note": "SAF-01's acceptance scenario is now executed rather than approximated. The earlier run asserted only that no topology reached a survivor while a foreign identity held the lease, which a follower that never reconciles also satisfies; review rejected that and was right. A named stop position inside the real send path now holds a pass after the commit and before the lease check, proves arrival by the version the operator writes there, and the three lease outcomes are asserted on the branch actually taken for that version, with a control case proving the pass would otherwise have sent. Implementation stays PARTIAL by intent: the check/send race is documented, not closed, and recipient fencing still protects only nodes that already saw the newer generation (SAF-09). Verification stays UNVERIFIED pending a reviewer's assessment of reachability, bypasses and assumptions - the runs are recorded, the judgement is not mine to record."
       }
     },
     {
@@ -335,9 +349,9 @@
         "SAF-09"
       ],
       "review": {
-        "commit": "76ce851e335408f1cf096435ab128bac8e5956c7",
+        "commit": "5cce98f535da4f9d5a7551ad3430dee3727e04f2",
         "date": "2026-09-11",
-        "note": "Elaboration re-run at this revision after the SAF-01 change and archived. The proof text is untouched; what changed is its reach. Previously the pre-commit BroadcastTopology effect could publish an unmerged map, so the proved property did not cover the wire; with the single post-commit send it does. Kept UNVERIFIED: CHECK-02 also asks a reviewer to confirm production commits still use the proved functions and to test outgoing snapshots separately, and neither has been done. Elaboration proves the stated model property under its assumptions, not distributed writer fencing."
+        "note": "The only change to Main.lean in this revision is the pre-send test seam (preSendBarrier): inert unless FLARE_TEST_PRESEND_BARRIER is set, and then it delays one pass between the commit and the lease check, bounded at 120s. No effect on the commit path this control bounds: the barrier sits AFTER commitClusterState, so what is committed and the property proved about it are untouched. Worth naming for a reviewer: the seam can delay a send, so the window in which a committed map is not yet on the wire can be widened deliberately in a test."
       }
     },
     {
@@ -408,9 +422,9 @@
         "SAF-10"
       ],
       "review": {
-        "commit": "76ce851e335408f1cf096435ab128bac8e5956c7",
+        "commit": "5cce98f535da4f9d5a7551ad3430dee3727e04f2",
         "date": "2026-09-11",
-        "note": "Impact review only; this control was not worked on. SAF-01 touched both referenced files by removing the pre-commit BroadcastTopology effect, so topology now reaches flared through one post-commit send instead of two sends per tick. Reconstruction is dispatched by flared on a ROLE shift carried in a node sync, so the delivery path for that trigger changed even though no reconstruction logic did. Two directions, both unmeasured: a role change the merge would have reverted is no longer delivered at all (an improvement), while a change present only in the unmerged map, on a tick where the committed version does not advance, is no longer delivered early - the desired-versus-applied gap SAF-09 tracks. CHECK-03 remains unrun and this control stays gap/unverified."
+        "note": "The only change to Main.lean in this revision is the pre-send test seam (preSendBarrier): inert unless FLARE_TEST_PRESEND_BARRIER is set, and then it delays one pass between the commit and the lease check, bounded at 120s. Reconstruction observability is unchanged. The seam can delay the node sync that carries a role shift, which is how flared learns to reconstruct - relevant only when the variable is set, and it is not set outside the topology-authority suite."
       }
     },
     {
@@ -477,9 +491,9 @@
         "SAF-08"
       ],
       "review": {
-        "commit": "76ce851e335408f1cf096435ab128bac8e5956c7",
+        "commit": "5cce98f535da4f9d5a7551ad3430dee3727e04f2",
         "date": "2026-09-11",
-        "note": "Impact review only; not worked on. SAF-01 removed the pre-commit topology send, so the promotion decisions this control covers are unchanged, but their RESULT now reaches flared only through the post-commit send. Prepare activation depends on flared receiving the role it is expected to act on, so the delivery path changed even though findActiveSuccessor and the NodeState guard did not. No sync-evidence semantics were touched; CHECK-04 remains unrun."
+        "note": "The only change to Main.lean in this revision is the pre-send test seam (preSendBarrier): inert unless FLARE_TEST_PRESEND_BARRIER is set, and then it delays one pass between the commit and the lease check, bounded at 120s. Sync-evidence semantics untouched. Same delay caveat as EV-03 applies to the delivery of a promotion, not to how it is decided."
       }
     },
     {
@@ -549,9 +563,9 @@
         "SAF-08"
       ],
       "review": {
-        "commit": "76ce851e335408f1cf096435ab128bac8e5956c7",
+        "commit": "5cce98f535da4f9d5a7551ad3430dee3727e04f2",
         "date": "2026-09-11",
-        "note": "Impact review only; not worked on. The pod-deletion gates and their inputs are untouched by SAF-01. The indirect link is that podDeletionAllowed is computed from the committed map, and the committed map is now the only thing published - so operator belief and node belief can no longer diverge because of an unmerged broadcast. That removes one way stale evidence could arise; it does nothing about the unknown/stale stats problem this control is actually about. CHECK-05 remains unrun."
+        "note": "The only change to Main.lean in this revision is the pre-send test seam (preSendBarrier): inert unless FLARE_TEST_PRESEND_BARRIER is set, and then it delays one pass between the commit and the lease check, bounded at 120s. Pod-deletion gates untouched; the barrier is not on that path."
       }
     },
     {
@@ -699,9 +713,9 @@
         "SAF-08"
       ],
       "review": {
-        "commit": "76ce851e335408f1cf096435ab128bac8e5956c7",
+        "commit": "5cce98f535da4f9d5a7551ad3430dee3727e04f2",
         "date": "2026-09-11",
-        "note": "Impact review only; not worked on. detectDeadNodesPure, the readiness streak and unhealthyMastersKept are unchanged. SAF-01 only alters how the resulting map is delivered. Worth noting for later verification: a lone unhealthy master that is deliberately RETAINED produces no committed change, so with the pre-commit send gone there is now no topology traffic at all in that state - correct, but it means the absence of a broadcast is not evidence the operator is idle. CHECK-07 remains unrun."
+        "note": "The only change to Main.lean in this revision is the pre-send test seam (preSendBarrier): inert unless FLARE_TEST_PRESEND_BARRIER is set, and then it delays one pass between the commit and the lease check, bounded at 120s. Failure observation and the retained-lone-master rule are untouched. Note the retained case still commits nothing and therefore still produces no send, with or without the seam."
       }
     },
     {
@@ -891,9 +905,9 @@
         "SAF-06"
       ],
       "review": {
-        "commit": "76ce851e335408f1cf096435ab128bac8e5956c7",
+        "commit": "5cce98f535da4f9d5a7551ad3430dee3727e04f2",
         "date": "2026-09-11",
-        "note": "Impact review only; not worked on. The stuck-Down restart path and its gates are unchanged. Its recovery depends on the restarted pod re-registering and then being told its role, which is now delivered only by the post-commit send; if that send is suppressed by the lease fence the node stays unassigned until leadership settles. That is correct behaviour but adds a dependency worth naming when CHECK-10 is designed. Remains unrun."
+        "note": "The only change to Main.lean in this revision is the pre-send test seam (preSendBarrier): inert unless FLARE_TEST_PRESEND_BARRIER is set, and then it delays one pass between the commit and the lease check, bounded at 120s. The stuck-Down restart path is untouched. Its dependency on the post-commit send to re-assign a restarted node is unchanged; the seam can delay that send in a test."
       }
     },
     {
@@ -970,9 +984,9 @@
       "runs": [],
       "tasks": [],
       "review": {
-        "commit": "76ce851e335408f1cf096435ab128bac8e5956c7",
+        "commit": "5cce98f535da4f9d5a7551ad3430dee3727e04f2",
         "date": "2026-09-11",
-        "note": "Impact review only; not worked on. No signal was removed. One was added by SAF-01 and is deliberately NOT part of this control's claim yet: a CRITICAL log emitted when the lease holder changes during a broadcast. It is a log line, not a metric or alert, so it is not detection under this control's bar - record it here so a later reviewer does not mistake it for coverage. CHECK-11 remains unrun."
+        "note": "The only change to Main.lean in this revision is the pre-send test seam (preSendBarrier): inert unless FLARE_TEST_PRESEND_BARRIER is set, and then it delays one pass between the commit and the lease check, bounded at 120s. No signal added or removed. The barrier writes two operator log lines when active; they are test instrumentation, not detection, and must not be counted as coverage."
       }
     },
     {
@@ -1033,9 +1047,9 @@
         "SAF-10"
       ],
       "review": {
-        "commit": "76ce851e335408f1cf096435ab128bac8e5956c7",
+        "commit": "5cce98f535da4f9d5a7551ad3430dee3727e04f2",
         "date": "2026-09-11",
-        "note": "Impact review only; not worked on. replicaKeyDelta and the proxy write paths are untouched. SAF-01 has no bearing on content divergence; noted only because it edited a referenced file. CHECK-12 remains unrun."
+        "note": "The only change to Main.lean in this revision is the pre-send test seam (preSendBarrier): inert unless FLARE_TEST_PRESEND_BARRIER is set, and then it delays one pass between the commit and the lease check, bounded at 120s. No bearing on content divergence."
       }
     },
     {
@@ -1212,9 +1226,9 @@
       "runs": [],
       "tasks": [],
       "review": {
-        "commit": "76ce851e335408f1cf096435ab128bac8e5956c7",
+        "commit": "5cce98f535da4f9d5a7551ad3430dee3727e04f2",
         "date": "2026-09-11",
-        "note": "Impact review only; not worked on. Still a gap. SAF-01 changed neither exporter nor the metric label set, so no role-aware join became possible. CHECK-15 remains unrun."
+        "note": "The only change to Main.lean in this revision is the pre-send test seam (preSendBarrier): inert unless FLARE_TEST_PRESEND_BARRIER is set, and then it delays one pass between the commit and the lease check, bounded at 120s. Still a gap; no metric or label changed."
       }
     }
   ]

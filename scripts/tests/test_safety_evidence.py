@@ -204,10 +204,18 @@ class EvidenceTests(unittest.TestCase):
             old_path = self.data["controls"][0]["code"][0]["path"]
             new_path = old_path + ".renamed"
             (root / old_path).rename(root / new_path)
+            # Rewrite EVERY reference to the renamed path, not just the ones
+            # under "code": a check may reference a source symbol too, and
+            # leaving one behind makes the checker stop on a missing file
+            # before it can report the drifted review note.
             for c in self.data["controls"]:
                 for ref in c["code"]:
                     if ref["path"] == old_path:
                         ref["path"] = new_path
+                for check in c["checks"]:
+                    for ref in check["references"]:
+                        if ref["path"] == old_path:
+                            ref["path"] = new_path
             (root / safety.REGISTER).write_text(json.dumps(self.data))
             (root / safety.STPA).write_text(safety.render(self.data))
             result = subprocess.run(["python3", str(ROOT / "scripts/check_safety_evidence.py"),

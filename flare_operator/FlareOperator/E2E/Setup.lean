@@ -32,6 +32,9 @@ structure ClusterConfig where
   operatorPort : Nat := 12120
   /-- Storage backend: "tch" (default, Tokyo Cabinet) or "rocksdb". -/
   storageBackend : String := "tch"
+  /-- Extra environment for the per-suite operator, as (name, value). Used
+      by suites that need a test seam the production default leaves off. -/
+  operatorEnv : List (String × String) := []
   /-- Persist flared data on a PVC (volumeClaimTemplates) instead of the
       pod-local tmpdir. With a PVC the data directory survives pod
       recreation, so a partition can recover its data even when the master
@@ -117,6 +120,10 @@ subjects:
     already gone by the time a test looks. Raising the ceiling costs
     nothing on CI and makes a local run possible. -/
 def operatorDeploymentYaml (cfg : ClusterConfig) : String :=
+  let envBlock :=
+    if cfg.operatorEnv.isEmpty then ""
+    else "\n          env:" ++ String.join (cfg.operatorEnv.map (fun (k, v) =>
+      s!"\n            - name: {k}\n              value: \"{v}\""))
   let name := cfg.operatorName
   let ns := cfg.«namespace»
   s!"apiVersion: apps/v1
@@ -149,7 +156,7 @@ spec:
           ports:
             - containerPort: {cfg.operatorPort}
               name: flare-index
-              protocol: TCP
+              protocol: TCP{envBlock}
           resources:
             requests:
               cpu: 100m

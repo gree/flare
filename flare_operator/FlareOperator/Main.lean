@@ -664,6 +664,48 @@ private def commitClusterState (stateRef : IO.Ref FlareClusterState)
     else
       (false, { merged with nodeMapVersion := current.nodeMapVersion })
 
+/-- Test seam used by the topology-authority E2E suite to stop a reconcile
+    at one exact point: after the topology change is committed and the
+    version has advanced, and before the pre-send lease check.
+
+    `FLARE_TEST_PRESEND_BARRIER` names a directory inside the container.
+    The barrier engages only when `<dir>/arm` exists, so the test chooses
+    WHICH pass is stopped; it then announces arrival by writing
+    `<dir>/reached` (that file is the test's proof the stop position was
+    hit, not merely that time passed), disarms itself, and waits for
+    `<dir>/release`. The wait is bounded: if nothing releases it the pass
+    continues anyway, so an environment variable left set by accident
+    delays one broadcast and cannot wedge an operator.
+
+    Deliberately NOT a second implementation of the send path — the pass
+    that resumes here is the same one that goes on to check the lease and
+    broadcast. -/
+private def preSendBarrier (version : Nat) : IO Unit := do
+  match ← IO.getEnv "FLARE_TEST_PRESEND_BARRIER" with
+  | none => pure ()
+  | some dir =>
+    let arm : System.FilePath := dir ++ "/arm"
+    if !(← arm.pathExists) then
+      pure ()
+    else
+      let reached : System.FilePath := dir ++ "/reached"
+      let release : System.FilePath := dir ++ "/release"
+      IO.eprintln s!"[flare-operator] TEST BARRIER: holding before the pre-send lease check (v{version})"
+      try IO.FS.writeFile reached s!"{version}\n" catch _ => pure ()
+      try IO.FS.removeFile arm catch _ => pure ()
+      let mut released := false
+      for _ in [0:1200] do        -- 1200 x 100ms = 120s ceiling
+        if (← release.pathExists) then
+          released := true
+          break
+        IO.sleep 100
+      if released then
+        IO.eprintln s!"[flare-operator] TEST BARRIER: released (v{version})"
+      else
+        IO.eprintln s!"[flare-operator] TEST BARRIER: timed out after 120s; continuing (v{version})"
+      try IO.FS.removeFile release catch _ => pure ()
+      try IO.FS.removeFile reached catch _ => pure ()
+
 /-- FSM driver loop helper.
     The FSM measure proves termination, but Lean can't see it through IO. -/
 private partial def runReconcileFSMLoop
@@ -884,6 +926,24 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
   let finalState ← stateRef.get
   let finalVersion := finalState.nodeMapVersion
   if finalVersion != oldVersion then
+    -- TEST SEAM (SAF-01 / CHECK-01). Unset in production, this is one
+    -- getEnv and nothing else.
+    --
+    -- The acceptance scenario for SC-01 is "an old reconcile resumes after
+    -- a lease takeover and must not send". Stopping the process at an
+    -- arbitrary moment cannot produce it: the send is gated on the version
+    -- having advanced, so a pass frozen during the tick sleep resumes into
+    -- the loop's own lease renewal and exits before this branch, and a pass
+    -- frozen after the check below is the in-flight race this change
+    -- documents as NOT closed. The only position that exercises the fence
+    -- is here — committed, version advanced, check not yet made — so the
+    -- test needs to name it rather than guess it.
+    --
+    -- One-shot and bounded by construction: it engages only while an `arm`
+    -- file exists, disarms itself immediately, and gives up waiting after
+    -- the timeout so a stale environment variable can never wedge a real
+    -- operator.
+    preSendBarrier finalVersion
     let stillLeader ← do
       match ← getLease leaseName ns with
       | .ok lease => pure (lease.holderIdentity == identity && !lease.expired)

@@ -39,6 +39,10 @@ open FlareOperator.E2E.Setup
 open FlareOperator.Kubectl
 open FlareOperator.K8s
 
+/-- Directory inside the operator container that drives the pre-send
+    barrier. See preSendBarrier in Main.lean. -/
+private def barrierDir : String := "/tmp/saf01"
+
 private def cfg : ClusterConfig := {
   name := "topo-auth"
   «namespace» := "flare-topo-auth"
@@ -46,6 +50,7 @@ private def cfg : ClusterConfig := {
   replicas := 2
   operatorName := "flare-operator"
   debugPod := "debug-topo-auth"
+  operatorEnv := [("FLARE_TEST_PRESEND_BARRIER", barrierDir)]
 }
 
 private def numPods : Nat := cfg.partitions * cfg.replicas
@@ -96,6 +101,59 @@ private def mutatedSyncPayload (entries : List NodeSyncEntry) (version : Nat) : 
        acc ++ [s!"NODE {e.fqdn} {e.port} {role} {e.state} {e.partition} 100 16"])
   let lines := (entries.foldl step (false, [])).2
   s!"node sync {version}\\r\\n" ++ String.join (lines.map (· ++ "\\r\\n")) ++ "END\\r\\n"
+
+/-- Run a shell command inside the operator pod. -/
+private def opExec (cmd : String) : IO (Except String String) := do
+  let pods ← getPodNames s!"app={cfg.operatorName}" cfg.«namespace»
+  match pods.head? with
+  | none => return .error "no operator pod"
+  | some pod => kubectl ["exec", "-n", cfg.«namespace», pod, "--", "sh", "-c", cmd]
+
+/-- Arm the barrier so the NEXT pass that gets past the version gate stops
+    before the lease check. One-shot: the operator removes the arm file. -/
+private def armBarrier : IO (Except String String) :=
+  opExec s!"mkdir -p {barrierDir} && rm -f {barrierDir}/reached {barrierDir}/release && touch {barrierDir}/arm"
+
+/-- The version of the pass that is currently held at the barrier, if any.
+    Its presence is the test's proof that the stop position was reached —
+    not that time passed, not that the process was busy. -/
+private def barrierHeldVersion : IO (Option Nat) := do
+  match ← opExec s!"cat {barrierDir}/reached 2>/dev/null || true" with
+  | .error _ => return none
+  | .ok out => return (out.trim.splitOn "\n").head?.bind (·.trim.toNat?)
+
+private def releaseBarrier : IO Unit := do
+  discard <| opExec s!"touch {barrierDir}/release"
+
+/-- Always leave the operator running and the barrier disarmed. -/
+private def disarmBarrier : IO Unit := do
+  discard <| opExec s!"rm -f {barrierDir}/arm {barrierDir}/release {barrierDir}/reached"
+
+private def leaseName : String := s!"{cfg.name}-operator-lease"
+
+/-- Survivor = a flared pod we do NOT disturb, so its node_map_version can
+    only move when a broadcast reaches it. -/
+private def survivorAndVictim : IO (Option (String × String)) := do
+  let pods ← getPodNames s!"app=flare,cluster={cfg.name}" cfg.«namespace»
+  match pods.head?, pods.reverse.head? with
+  | some a, some b => return (if a == b then none else some (a, b))
+  | _, _ => return none
+
+/-- Drive one pass to the barrier: arm, cause a topology change, and wait
+    until the operator reports it is holding. Returns the held version. -/
+private def stopOnePassBeforeLeaseCheck (victim : String) : IO (Except String Nat) := do
+  match ← armBarrier with
+  | .error e => return .error s!"could not arm the barrier: {e}"
+  | .ok _ =>
+    kubectlDelete "pod" victim cfg.«namespace»
+    let mut held : Option Nat := none
+    for _ in [0:90] do
+      held ← barrierHeldVersion
+      if held.isSome then break
+      IO.sleep 1000
+    match held with
+    | none => return .error "no pass reached the pre-send barrier within 90s; the stop position was never hit, so nothing below would prove anything"
+    | some v => return .ok v
 
 def suite : TestSuite := {
   name := "topology-authority"
@@ -153,65 +211,111 @@ def suite : TestSuite := {
               return .fail s!"node_map_version moved on a stale push: {version} -> {versionAfter}"
             return .pass },
 
-    { name := "no topology reaches a surviving pod while another holder owns the lease"
+    -- The three tests below all stop the SAME production pass at the same
+    -- point — committed, version advanced, lease not yet checked — and differ
+    -- only in what happens to the lease while it is held there. Passing
+    -- requires evidence the pass REACHED the fence branch, not merely that
+    -- a receiver stayed still: a receiver also stays still when the
+    -- operator crashed, timed out or never got that far.
+    { name := "control: holding the lease, the stopped pass does broadcast"
       run := do
-        let entries ← nodeView
-        if entries.length < numPods then
-          return .fail s!"cluster not converged: {entries.length}/{numPods}"
-        let pods ← getPodNames s!"app=flare,cluster={cfg.name}" cfg.«namespace»
-        match pods.head?, pods.reverse.head? with
-        | some survivor, some victim =>
-          if survivor == victim then
-            return .fail "need at least two flared pods for this test"
-          match ← getPodIp survivor cfg.«namespace» with
-          | none => return .fail s!"no IP for {survivor}"
-          | some survivorIp =>
-            match ← flaredStat survivorIp "node_map_version" with
-            | none => return .fail s!"could not read node_map_version from {survivor}"
-            | some v0 =>
-              let lease := s!"{cfg.name}-operator-lease"
+        match ← survivorAndVictim with
+        | none => return .fail "need two flared pods"
+        | some (survivor, victim) =>
+        match ← getPodIp survivor cfg.«namespace» with
+        | none => return .fail s!"no IP for {survivor}"
+        | some survivorIp =>
+          let v0 ← flaredStat survivorIp "node_map_version"
+          match ← stopOnePassBeforeLeaseCheck victim with
+          | .error e => disarmBarrier; return .fail e
+          | .ok held =>
+            IO.eprintln s!"# pass held at the pre-send point with version {held}"
+            releaseBarrier
+            IO.sleep 8000
+            let log ← kubectlLogsLabel s!"app={cfg.operatorName}" cfg.«namespace» 400
+            let v1 ← flaredStat survivorIp "node_map_version"
+            disarmBarrier
+            if !containsSubstr log s!"→ v{held}), broadcasting" then
+              return .fail s!"the released pass did not take the broadcast branch for v{held}; without this control the suppression tests could pass for the wrong reason"
+            if v1 != some held then
+              return .fail s!"survivor did not receive the broadcast: {v0} -> {v1}, expected {held}"
+            return .pass },
+
+    { name := "lease taken by another identity: the stopped pass reaches the fence and does not send"
+      run := do
+        match ← survivorAndVictim with
+        | none => return .fail "need two flared pods"
+        | some (survivor, victim) =>
+        match ← getPodIp survivor cfg.«namespace» with
+        | none => return .fail s!"no IP for {survivor}"
+        | some survivorIp =>
+          match ← flaredStat survivorIp "node_map_version" with
+          | none => return .fail "could not read the survivor's node_map_version"
+          | some v0 =>
+            match ← stopOnePassBeforeLeaseCheck victim with
+            | .error e => disarmBarrier; return .fail e
+            | .ok held =>
+              IO.eprintln s!"# pass held at the pre-send point with version {held}; taking the lease away now"
               let patch := "{\"spec\":{\"holderIdentity\":\"e2e-foreign-holder\",\"leaseDurationSeconds\":600,\"renewTime\":\"2999-01-01T00:00:00.000000Z\"}}"
-              match ← kubectlPatch "lease" lease cfg.«namespace» patch with
-              | .error e => return .fail s!"could not take the lease away: {e}"
+              match ← kubectlPatch "lease" leaseName cfg.«namespace» patch with
+              | .error e => releaseBarrier; disarmBarrier; return .fail s!"could not take the lease: {e}"
               | .ok _ =>
-                IO.eprintln s!"# lease {lease} now held by e2e-foreign-holder; forcing a topology change"
-                kubectlDelete "pod" victim cfg.«namespace»
-                -- Long enough for several reconcile ticks and for the
-                -- replacement pod to come back and re-register.
-                IO.sleep 45000
+                releaseBarrier
+                IO.sleep 8000
+                let log ← kubectlLogsLabel s!"app={cfg.operatorName}" cfg.«namespace» 400
                 let v1 ← flaredStat survivorIp "node_map_version"
-                let opLog ← kubectlLogsLabel "app=flare-operator" cfg.«namespace» 300
-                -- Restore leadership by deleting the lease AND restarting the
-                -- operator. Deleting the lease alone lets the SAME process
-                -- re-acquire, and in that path it was observed broadcasting a
-                -- LOWER version than the nodes already held — which flared
-                -- then fences off, so the cluster cannot converge. That is a
-                -- finding in its own right (recorded against SAF-09), not
-                -- something this test should assert on, so restore the way an
-                -- operator would: with a fresh process, which re-fences the
-                -- generation on startup.
-                match ← kubectl ["delete", "lease", lease, "-n", cfg.«namespace»] with
-                | .error e => IO.eprintln s!"# warning: could not delete the lease: {e}"
-                | .ok _ => pure ()
-                match ← kubectl ["delete", "pod", "-n", cfg.«namespace»,
-                                  "-l", s!"app={cfg.operatorName}", "--force", "--grace-period=0"] with
-                | .error e => IO.eprintln s!"# warning: could not restart the operator: {e}"
-                | .ok _ => pure ()
+                disarmBarrier
+                -- restore before judging, so a failure never leaves the
+                -- suite with a cluster nobody owns
+                discard <| kubectl ["delete", "lease", leaseName, "-n", cfg.«namespace»]
+                discard <| kubectl ["delete", "pod", "-n", cfg.«namespace»,
+                                     "-l", s!"app={cfg.operatorName}", "--force", "--grace-period=0"]
+                if !containsSubstr log s!"LEASE FENCE" then
+                  return .fail s!"the resumed pass never reported the fence for v{held}; it may have crashed, timed out or exited before the check — no suppression is proved"
+                if !containsSubstr log s!"→ v{held})" then
+                  return .fail s!"a fence line exists but not for the pass that was held (v{held})"
+                if containsSubstr log s!"→ v{held}), broadcasting" then
+                  return .fail s!"the pass both fenced and broadcast v{held}"
                 if v1 != some v0 then
-                  return .fail s!"a surviving pod's node_map_version advanced ({v0} -> {v1}) while a foreign identity held the lease — topology was published without authority"
-                IO.eprintln s!"# survivor stayed at version {v0} while the lease was foreign"
-                if containsSubstr opLog "LEASE FENCE" then
-                  IO.eprintln "# operator logged the post-commit lease fence"
-                else
-                  IO.eprintln "# note: no LEASE FENCE line; the operator most likely never reached the send because it stopped reconciling as a follower"
-                -- Leadership restored: the cluster must converge again,
-                -- otherwise this test has left a broken cluster behind.
+                  return .fail s!"survivor's version moved while the lease was foreign: {v0} -> {v1}"
                 let back ← waitForCondition "cluster converges after leadership is restored" 240 do
                   return (← nodeView).length ≥ numPods
                 if !back then
-                  return .fail "cluster did not converge after the lease was restored"
-                return .pass
-        | _, _ => return .fail "could not list two flared pods" }
+                  return .fail "cluster did not converge after restoring leadership"
+                return .pass },
+
+    { name := "lease unreadable: the stopped pass fails closed and does not send"
+      run := do
+        match ← survivorAndVictim with
+        | none => return .fail "need two flared pods"
+        | some (survivor, victim) =>
+        match ← getPodIp survivor cfg.«namespace» with
+        | none => return .fail s!"no IP for {survivor}"
+        | some survivorIp =>
+          match ← flaredStat survivorIp "node_map_version" with
+          | none => return .fail "could not read the survivor's node_map_version"
+          | some v0 =>
+            match ← stopOnePassBeforeLeaseCheck victim with
+            | .error e => disarmBarrier; return .fail e
+            | .ok held =>
+              IO.eprintln s!"# pass held at the pre-send point with version {held}; deleting the lease so the read fails"
+              discard <| kubectl ["delete", "lease", leaseName, "-n", cfg.«namespace»]
+              releaseBarrier
+              IO.sleep 8000
+              let log ← kubectlLogsLabel s!"app={cfg.operatorName}" cfg.«namespace» 400
+              let v1 ← flaredStat survivorIp "node_map_version"
+              disarmBarrier
+              if !containsSubstr log "lease fence: getLease failed" then
+                return .fail s!"no evidence the resumed pass hit the read-failure branch for v{held}"
+              if containsSubstr log s!"→ v{held}), broadcasting" then
+                return .fail s!"the pass broadcast v{held} despite an unreadable lease"
+              if v1 != some v0 then
+                return .fail s!"survivor's version moved on a pass whose lease read failed: {v0} -> {v1}"
+              let back ← waitForCondition "cluster converges after the lease is recreated" 240 do
+                return (← nodeView).length ≥ numPods
+              if !back then
+                return .fail "cluster did not converge after the lease was recreated"
+              return .pass }
   ]
 }
 

@@ -17,10 +17,10 @@
     1. the condition holds, via signals that PERSIST (so the check does not
        race the repair): the seam logged a dropped event, and the slave
        reports reconstruction_completed >= 1;
-    2. the repair activates the node and says WHY — the completion evidence
-       (N reconstruction(s) completed in this process, lineage matches the
-       master) — not a cursor distance; the node is Active in the operator's
-       map afterwards, applied through reconcileStep.
+    2. the repair activates the node and says WHY — the completion record
+       (the latest reconstruction succeeded from the current master) — not a
+       cursor distance; the node is Active in the operator's map afterwards,
+       applied through reconcileStep.
 
   The node's OWN active state is deliberately NOT used: flared sets it only
   from the operator's echo, which is the signal that is lost, so it is
@@ -130,8 +130,10 @@ def suite : TestSuite := {
           if !repaired then
             IO.eprintln s!"# operator tail:\n{← opLog 40}"
             return .fail "the repair path never activated the stuck slave within 300s"
-          if !containsSubstr log "reconstruction(s) completed in this process" then
-            return .fail "the repair activated but did not name the completion evidence; the log line is the audit trail"
+          -- The verdict names the completion RECORD: the latest reconstruction
+          -- succeeded from the current master (not a counter, not a distance).
+          if !containsSubstr log "succeeded from the current master" then
+            return .fail "the repair activated but did not name the completion evidence (latest reconstruction succeeded from the current master); the log line is the audit trail"
           if containsSubstr log "PREPARE-REPAIR" && containsSubstr log "but synced (slave lsn" then
             return .fail "the old proximity rule fired: activation must not be argued from a cursor distance"
           let active ← waitForCondition "slave Active in the operator's map" 60 do

@@ -25,17 +25,22 @@ All tasks below are open; record completion with evidence IDs and a PR reference
 | SAF-09 | Next stage | Separate desired topology from per-node applied generation. Retry failed application and expose lag; specify delayed command handling and verify reconnect convergence. | SC-01, SC-02 / EV-01, EV-02 | SAF-01 |
 | SAF-10 | Separate design | Compare content anti-entropy, master LSN on proxied writes and continuous WAL shipping by guarantees, compatibility and operating cost. Include write acknowledgements, replica reads and cross-cluster migration. | SC-03, SC-12, SC-13 / EV-03, EV-12, EV-13 | No dependency for the design |
 
-**Status (this branch).** SAF-01 through SAF-06 are implemented with tests on
-this branch; the evidence register owns their exact implementation and
-verification state, which stays `unverified` until a reviewer signs off.
-SAF-01 (topology authority), SAF-02/05 (replica-repair ledger) and SAF-03
-(sync-completion evidence) have passing E2E scenarios; SAF-04/06 (typed stats
-and delete revalidation) are covered by the pure `flare_unit` checks. SAF-07
-(this documentation pass) is folded into the same branch — see the
-"Guarantees, and what they are not" section of the [README](../README.md).
-SAF-08 through SAF-10 remain out of scope for this branch. Re-audit of older
-DONE claims lives in [STPA-node-state.md](STPA-node-state.md#8-what-this-document-got-wrong);
-no claim there survived unchecked into this branch.
+**Status (this branch).** SAF-01 through SAF-07 are implemented with tests on
+this branch. A review of the first cut (HEAD ffa2a05) reopened SAF-02 to
+SAF-06 with six findings, all confirmed and fixed on the same branch in three
+groups: sync-evidence generation (a past reconstruction credited as the
+current copy; missing RocksDB lineage/cursor accepted), ledger fault
+tolerance (late drops declared recovered; a failed save never retried; a
+failed or corrupt read treated as "no ledger"), and delete revalidation (live
+map read before the stats; no lease or pod-UID check). The evidence register
+owns exact implementation and verification state, which stays `unverified`
+until a reviewer signs off; EV-03 is held at `partial` because two scenarios
+are pinned only by `flare_unit` and not staged end to end (a drop in the last
+stretch of a reconstruction; a change interposed between the delete's
+observation and the delete). SAF-07 is the "Guarantees, and what they are
+not" section of the [README](../README.md). SAF-08 through SAF-10 remain out
+of scope. Re-audit of older DONE claims lives in
+[STPA-node-state.md](STPA-node-state.md#8-what-this-document-got-wrong).
 
 ## Evidence workflow
 

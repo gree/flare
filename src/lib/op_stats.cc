@@ -169,6 +169,13 @@ int op_stats::_send_stats(thread_pool* req_tp, thread_pool* other_tp, storage* s
 	_send_stat("reconstruction_started"		, stats_object->get_reconstruction_started());
 	_send_stat("reconstruction_completed"	, stats_object->get_reconstruction_completed());
 	_send_stat("reconstruction_failed"		, stats_object->get_reconstruction_failed());
+	// The completion RECORD (see stats.h): process identity, the latest
+	// reconstruction's id and state, and the id/source of the last success.
+	_send_stat("reconstruction_boot_id"				, stats_object->get_reconstruction_boot_id());
+	_send_stat("reconstruction_current_id"			, stats_object->get_reconstruction_current_id());
+	_send_stat("reconstruction_current_state"		, stats_object->get_reconstruction_current_state());
+	_send_stat("reconstruction_last_success_id"		, stats_object->get_reconstruction_last_success_id());
+	_send_stat("reconstruction_last_success_source"	, stats_object->get_reconstruction_last_success_source());
 	_send_stat("incr_hits"						, stats_object->get_incr_hits());
 	_send_stat("incr_misses"					, stats_object->get_incr_misses());
 	_send_stat("decr_hits"						, stats_object->get_decr_hits());

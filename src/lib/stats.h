@@ -83,6 +83,23 @@ protected:
 	AtomicCounter _reconstruction_started;
 	AtomicCounter _reconstruction_completed;
 	AtomicCounter _reconstruction_failed;
+	// ONE completion record, so a controller can tell "the current
+	// reconstruction of this process succeeded from this source" apart from
+	// cumulative counters (a failed or aborted handler leaves started and
+	// completed permanently unequal, and a restart resets both to values a
+	// previous process may also have shown):
+	//   boot_id           random per process — distinguishes processes even
+	//                     when every counter happens to match;
+	//   current_id        the id (= started ordinal) of the latest handler;
+	//   current_state     none / running / succeeded / failed / aborted;
+	//   last_success_id   id of the last handler that succeeded;
+	//   last_success_source  master host:port that handler copied from.
+	pthread_mutex_t _mutex_reconstruction;
+	uint64_t _reconstruction_boot_id;
+	uint64_t _reconstruction_current_id;
+	int _reconstruction_current_state;
+	uint64_t _reconstruction_last_success_id;
+	string _reconstruction_last_success_source;
 	AtomicCounter _delete_hits;
 	AtomicCounter _delete_misses;
 	AtomicCounter _incr_hits;
@@ -115,6 +132,16 @@ public:
 	inline int increment_reconstruction_started()   { this->_reconstruction_started.incr();return 0; };
 	inline int increment_reconstruction_completed() { this->_reconstruction_completed.incr();return 0; };
 	inline int increment_reconstruction_failed()    { this->_reconstruction_failed.incr();return 0; };
+	enum reconstruction_state { reconstruction_none = 0, reconstruction_running, reconstruction_succeeded, reconstruction_failed_state, reconstruction_aborted };
+	uint64_t reconstruction_begin();
+	int reconstruction_succeeded_from(const string& source);
+	int reconstruction_failed_final();
+	int reconstruction_aborted_by_shutdown();
+	uint64_t get_reconstruction_boot_id();
+	uint64_t get_reconstruction_current_id();
+	string get_reconstruction_current_state();
+	uint64_t get_reconstruction_last_success_id();
+	string get_reconstruction_last_success_source();
 	inline int increment_delete_hits()           { this->_delete_hits.incr();return 0; };
 	inline int increment_delete_misses()         { this->_delete_misses.incr();return 0; };
 	inline int increment_incr_hits()             { this->_incr_hits.incr();return 0; };

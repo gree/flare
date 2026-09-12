@@ -13,6 +13,7 @@
   Kept as many small definitions on purpose: one large `do` block of checks
   made the elaborator crawl.
 -/
+import Lean.Data.Json
 import FlareOperator.StateMachine.ReplicaRepair
 import FlareOperator.StateMachine.SyncEvidence
 import FlareOperator.StateMachine.StatsObservation
@@ -78,7 +79,7 @@ def firstPhase (l : Ledger) : Option Phase := l.entries.head?.map (·.phase)
 def firstDrops (l : Ledger) : Option Nat := l.entries.head?.map (·.drops)
 def firstNodeKey (l : Ledger) : Option String := l.entries.head?.bind (·.nodeKey)
 def firstHold (l : Ledger) : Option String := l.entries.head?.bind (·.hold)
-def firstStartedAtReseat (l : Ledger) : Option Nat := l.entries.head?.bind (·.startedAtReseat)
+def firstCurrentIdAtReseat (l : Ledger) : Option Nat := l.entries.head?.bind (·.currentIdAtReseat)
 
 def checkRequestResolve (ctx : Ctx) : IO Unit := do
   check ctx "a request is recorded once per destination"
@@ -119,65 +120,72 @@ def checkGate (ctx : Ctx) : IO Unit := do
   check ctx "plan does not act twice on a demoted entry"
     ((plan lDem true "").2.isEmpty)
 
-def obs (v : Option Nat) (st c : Option Nat) (m : Option (FlareRole × FlareState)) : Observation :=
-  { reportedVersion := v, reconstructionStarted := st, reconstructionCompleted := c, mapped := m }
+/-- An observation carrying flared's completion record. -/
+def obs (v : Option Nat) (boot cid : Option Nat) (st : Option String) (lsid : Option Nat)
+    (src master : Option String) (m : Option (FlareRole × FlareState)) : Observation :=
+  { reportedVersion := v, bootId := boot, currentId := cid, currentState := st,
+    lastSuccessId := lsid, lastSuccessSource := src, currentMaster := master, mapped := m }
 
 def stepsOf (l : Ledger) (o : Observation) : List Step :=
   (advance l [(slaveKey, o)]).2.map (·.2)
 
-/-- Released after confirming version 11; flared had started=completed=1
-    (its boot reconstruction) at that moment, and 3 drops were attributed. -/
-def lRel : Ledger := (advance lDem [(slaveKey, obs (some 11) (some 1) (some 1) (some (.Proxy, .Active)))]).1
+/-- Released after confirming version 11; at that moment flared was in
+    process boot 100 with reconstruction #1 (its boot one) succeeded from the
+    master, and 3 drops were attributed. -/
+def relObs : Observation := obs (some 11) (some 100) (some 1) (some "succeeded") (some 1) (some masterKey) (some masterKey) (some (.Proxy, .Active))
+def lRel : Ledger := (advance lDem [(slaveKey, relObs)]).1
 
 def checkAdvanceHold (ctx : Ctx) : IO Unit := do
-  let old := obs (some 10) (some 1) (some 1) (some (.Proxy, .Active))
+  let old := obs (some 10) (some 100) (some 1) (some "succeeded") (some 1) (some masterKey) (some masterKey) (some (.Proxy, .Active))
   check ctx "a node still reporting the OLD version stays held"
     (stepsOf lDem old == [] && heldKeys (advance lDem [(slaveKey, old)]).1 == [slaveKey])
-  let confirmed := obs (some 11) (some 1) (some 1) (some (.Proxy, .Active))
-  check ctx "a node reporting the demotion version is released, recording started and drops at reseat"
-    (stepsOf lDem confirmed == [.released] && heldKeys lRel == []
+  check ctx "a node reporting the demotion version is released, recording boot id, current id and drops at reseat"
+    (stepsOf lDem relObs == [.released] && heldKeys lRel == []
       && firstPhase lRel == some .reseated
-      && (lRel.entries.head?.bind (·.startedAtReseat)) == some 1
+      && (lRel.entries.head?.bind (·.bootIdAtReseat)) == some 100
+      && (lRel.entries.head?.bind (·.currentIdAtReseat)) == some 1
       && (lRel.entries.head?.map (·.dropsAtReseat)) == some 3)
-  let unread := obs none none none (some (.Proxy, .Active))
+  let unread := obs none none none none none none none (some (.Proxy, .Active))
   check ctx "unreadable stats change nothing (fail closed: stay held)"
     (stepsOf lDem unread == [] && heldKeys (advance lDem [(slaveKey, unread)]).1 == [slaveKey])
 
+/-- Same process (boot 100), reconstruction #2 succeeded from the master. -/
+def doneObs : Observation := obs (some 12) (some 100) (some 2) (some "succeeded") (some 2) (some masterKey) (some masterKey) (some (.Slave, .Active))
+
 def checkAdvanceComplete (ctx : Ctx) : IO Unit := do
   check ctx "Slave/Prepare is in progress, not complete"
-    (stepsOf lRel (obs (some 12) (some 2) (some 1) (some (.Slave, .Prepare))) == [])
-  check ctx "Slave/Active with NO new reconstruction since reseat (started unchanged) is NOT completion (re-announced Active)"
-    (stepsOf lRel (obs (some 12) (some 1) (some 1) (some (.Slave, .Active))) == [])
-  check ctx "a reconstruction that STARTED after the reseat but is still in flight (started 2, completed 1) is not completion"
-    (stepsOf lRel (obs (some 12) (some 2) (some 1) (some (.Slave, .Active))) == [])
-  let done := obs (some 12) (some 2) (some 2) (some (.Slave, .Active))
-  check ctx "a reconstruction that began after the reseat and finished (started 2 == completed 2 > baseline 1) completes and removes the entry"
-    (stepsOf lRel done == [.completed] && (advance lRel [(slaveKey, done)]).1.entries.isEmpty)
-  -- Item 6 (reviewer): a bare counter RESET (process restart, 7 → 0) must not
-  -- read as completion. It yields started == completed == 0, which is not a
-  -- reconstruction after the reseat; the baseline resets so the post-restart
-  -- reconstruction is what completes it.
-  let lHigh : Ledger := { lRel with entries := lRel.entries.map fun e => { e with startedAtReseat := some 7 } }
-  let reset := obs (some 12) (some 0) (some 0) (some (.Slave, .Active))
-  let (lAfterReset, stReset) := advance lHigh [(slaveKey, reset)]
-  check ctx "a counter reset to zero (restart) is NOT completion; the baseline resets to 0"
-    (stReset.isEmpty && (lAfterReset.entries.head?.bind (·.startedAtReseat)) == some 0)
-  check ctx "after the restart, the boot reconstruction (started 1 == completed 1) completes it — no waiting forever below the old baseline"
-    (stepsOf lAfterReset (obs (some 12) (some 1) (some 1) (some (.Slave, .Active))) == [.completed])
-  -- Item 3 (reviewer): drops that arrive AFTER the reconstruction began are
-  -- not necessarily in the copy. Completion then requeues the increment.
-  let lLate := request lRel masterKey slaveKey 2     -- 2 more drops while reseated (3 → 5)
-  let (lReq, stLate) := advance lLate [(slaveKey, done)]
+    (stepsOf lRel (obs (some 12) (some 100) (some 2) (some "running") (some 1) (some masterKey) (some masterKey) (some (.Slave, .Prepare))) == [])
+  check ctx "Slave/Active with NO reconstruction newer than the reseat one (same boot, same id) is NOT completion (re-announced Active)"
+    (stepsOf lRel (obs (some 12) (some 100) (some 1) (some "succeeded") (some 1) (some masterKey) (some masterKey) (some (.Slave, .Active))) == [])
+  check ctx "a newer reconstruction still RUNNING is not completion"
+    (stepsOf lRel (obs (some 12) (some 100) (some 2) (some "running") (some 1) (some masterKey) (some masterKey) (some (.Slave, .Active))) == [])
+  check ctx "a newer reconstruction that FAILED is not completion (last success is still #1)"
+    (stepsOf lRel (obs (some 12) (some 100) (some 2) (some "failed") (some 1) (some masterKey) (some masterKey) (some (.Slave, .Active))) == [])
+  check ctx "a newer success from a DIFFERENT source than the current master is not completion"
+    (stepsOf lRel (obs (some 12) (some 100) (some 2) (some "succeeded") (some 2) (some "old-master:12121") (some masterKey) (some (.Slave, .Active))) == [])
+  check ctx "a newer reconstruction that SUCCEEDED from the current master completes and removes the entry"
+    (stepsOf lRel doneObs == [.completed] && (advance lRel [(slaveKey, doneObs)]).1.entries.isEmpty)
+  -- Review item 3 (second round): failed then succeeded — #2 failed, #3 succeeded.
+  check ctx "failure then success: #3 succeeded after #2 failed → completion (cumulative counters would never match)"
+    (stepsOf lRel (obs (some 12) (some 100) (some 3) (some "succeeded") (some 3) (some masterKey) (some masterKey) (some (.Slave, .Active))) == [.completed])
+  -- Review item 4: restart whose counters equal the reseat baseline exactly.
+  check ctx "restart with IDENTICAL counters (new boot 200, #1 succeeded == baseline #1) completes: the boot id tells the processes apart"
+    (stepsOf lRel (obs (some 12) (some 200) (some 1) (some "succeeded") (some 1) (some masterKey) (some masterKey) (some (.Slave, .Active))) == [.completed])
+  check ctx "restart whose boot reconstruction is still running is not completion"
+    (stepsOf lRel (obs (some 12) (some 200) (some 1) (some "running") (some 0) (some masterKey) (some masterKey) (some (.Slave, .Active))) == [])
+  -- Late drops after the reseat are requeued as exactly the increment.
+  let lLate := request lRel masterKey slaveKey 2     -- 3 → 5 while reseated
+  let (lReq, stLate) := advance lLate [(slaveKey, doneObs)]
   check ctx "late drops after the reseat: completion requeues exactly the increment as a fresh request"
     (stLate.map (·.2) == [.completedRequeued] && firstPhase lReq == some .requested
-      && firstDrops lReq == some 2 && (lReq.entries.head?.bind (·.startedAtReseat)) == none
+      && firstDrops lReq == some 2 && (lReq.entries.head?.bind (·.currentIdAtReseat)) == none
       && firstNodeKey lReq == some slaveKey)
   check ctx "a node that became MASTER while reseated is voided"
-    (stepsOf lRel (obs (some 12) (some 2) (some 2) (some (.Master, .Active))) == [.voided])
-  let lNoBase : Ledger := { lRel with entries := lRel.entries.map fun e => { e with startedAtReseat := none } }
-  let (lNB, stNB) := advance lNoBase [(slaveKey, done)]
-  check ctx "with no baseline the first readable started value becomes the baseline; nothing completes yet"
-    (stNB.isEmpty && (lNB.entries.head?.bind (·.startedAtReseat)) == some 2)
+    (stepsOf lRel (obs (some 12) (some 100) (some 2) (some "succeeded") (some 2) (some masterKey) (some masterKey) (some (.Master, .Active))) == [.voided])
+  let lNoBase : Ledger := { lRel with entries := lRel.entries.map fun e => { e with bootIdAtReseat := none, currentIdAtReseat := none } }
+  let (lNB, stNB) := advance lNoBase [(slaveKey, doneObs)]
+  check ctx "with no baseline the first readable record becomes the baseline; nothing completes yet"
+    (stNB.isEmpty && (lNB.entries.head?.bind (·.currentIdAtReseat)) == some 2)
 
 def lFull : Ledger :=
   let l := markDemoted (request l1 masterKey slaveKey 3) slaveKey 11
@@ -195,10 +203,14 @@ open FlareOperator.SyncEvidence in
 def ep : Episode := { nodeKey := slaveKey, masterKey := masterKey }
 
 open FlareOperator.SyncEvidence in
-def rd (started completed : Option Nat) (sId mId : Option String) (sLsn mSeq : Option Nat)
-    (rocks : Option Bool) : Reading :=
-  { slaveStarted := started, slaveCompleted := completed, slaveMasterId := sId, masterId := mId,
-    slaveLsn := sLsn, masterSeq := mSeq, masterIsRocksdb := rocks }
+def rd (boot cid : Option Nat) (st : Option String) (lsid : Option Nat) (src : Option String)
+    (sId mId : Option String) (sLsn mSeq : Option Nat) (rocks : Option Bool) : Reading :=
+  { bootId := boot, currentId := cid, currentState := st, lastSuccessId := lsid, lastSuccessSource := src,
+    slaveMasterId := sId, masterId := mId, slaveLsn := sLsn, masterSeq := mSeq, masterIsRocksdb := rocks }
+
+-- A good RocksDB record: #1 succeeded from the master, lineage A, cursor seeded.
+open FlareOperator.SyncEvidence in
+def goodR : Reading := rd (some 100) (some 1) (some "succeeded") (some 1) (some masterKey) (some "A") (some "A") (some 990) (some 1000) (some true)
 
 open FlareOperator.SyncEvidence in
 def isActivate : Verdict → Bool | .activate _ => true | _ => false
@@ -216,7 +228,7 @@ def checkEpisodes (ctx : Ctx) : IO Unit := do
   check ctx "the same source keeps the episode and counts the pass"
     (e2.map (·.cycles) == [1])
   let e3 := reconcileEpisodes e2 [(slaveKey, "other:12121")]
-  check ctx "a different master between passes restarts the episode (lineage will re-gate activation)"
+  check ctx "a different master between passes restarts the episode"
     (e3.map (·.masterKey) == ["other:12121"] && e3.map (·.cycles) == [0] && e3.map (·.masterId) == [none])
   check ctx "a node no longer Slave/Prepare ends its episode"
     ((reconcileEpisodes e2 []).isEmpty)
@@ -224,62 +236,57 @@ def checkEpisodes (ctx : Ctx) : IO Unit := do
 open FlareOperator.SyncEvidence in
 def checkJudgeRefusals (ctx : Ctx) : IO Unit := do
   check ctx "a changed master key is a source change, not a wait"
-    (isSourceChanged (judge ep "other:12121" (rd (some 1) (some 1) none none none none (some false))).2)
-  let (pinned, _) := judge ep masterKey (rd (some 1) (some 1) (some "A") (some "A") (some 5) (some 9) (some true))
+    (isSourceChanged (judge ep "other:12121" goodR).2)
+  let (pinned, _) := judge ep masterKey goodR
   check ctx "the master lineage is pinned at first sight"
     (pinned.masterId == some "A")
   check ctx "a changed master lineage is a source change"
-    (isSourceChanged (judge pinned masterKey (rd (some 1) (some 1) (some "B") (some "B") (some 5) (some 9) (some true))).2)
-  check ctx "unreadable reconstruction counters are refused"
-    (isWait (judge ep masterKey (rd none none none none (some 995) (some 1000) (some true))).2)
-  check ctx "ZERO completions is refused, even with a near cursor (proximity is not completion)"
-    (isWait (judge ep masterKey (rd (some 0) (some 0) none none (some 999) (some 1000) (some false))).2)
-  -- Item 1 (reviewer): a PAST success (completed 1) while a NEW reconstruction is
-  -- in flight (started 2) — the store has been truncated and is being
-  -- copied — must not activate, whatever the lineage.
-  check ctx "past success + reconstruction IN FLIGHT (started 2 > completed 1) is refused"
-    (isWait (judge ep masterKey (rd (some 2) (some 1) (some "A") (some "A") (some 0) (some 10000) (some true))).2)
-  -- Item 1 (reviewer's exact input): completed 1, same lineage, slave LSN 0,
-  -- master 10000. On RocksDB a completed reconstruction seeds a nonzero
-  -- cursor; zero means no complete copy of this source — refused.
-  check ctx "reviewer input: completed 1, same lineage, slave LSN 0, master 10000 → refused (cursor not seeded)"
-    (isWait (judge ep masterKey (rd (some 1) (some 1) (some "A") (some "A") (some 0) (some 10000) (some true))).2)
-  check ctx "a lineage mismatch is refused however the cursor looks"
-    (isWait (judge ep masterKey (rd (some 1) (some 1) (some "A") (some "B") (some 1000) (some 1000) (some true))).2)
-  check ctx "a cursor AHEAD of the master's head is refused"
-    (isWait (judge ep masterKey (rd (some 1) (some 1) (some "A") (some "A") (some 1001) (some 1000) (some true))).2)
-  -- Item 2 (reviewer): on RocksDB, MISSING lineage or cursor is a truncated
-  -- reply, not a backend without them — refused, never "n/a matches".
-  check ctx "RocksDB with lineage missing → refused (truncated reply, not absence)"
-    (isWait (judge ep masterKey (rd (some 1) (some 1) none none (some 5) (some 9) (some true))).2)
+    (isSourceChanged (judge pinned masterKey { goodR with slaveMasterId := some "B", masterId := some "B" }).2)
+  check ctx "an unreadable record is refused"
+    (isWait (judge ep masterKey { goodR with currentId := none }).2)
+  check ctx "no reconstruction in this process (#0) is refused even with a near cursor"
+    (isWait (judge ep masterKey { goodR with currentId := some 0, lastSuccessId := some 0, currentState := some "none", slaveLsn := some 999 }).2)
+  check ctx "the latest reconstruction RUNNING is refused (past success is not the current copy)"
+    (isWait (judge ep masterKey { goodR with currentId := some 2, currentState := some "running", lastSuccessId := some 1 }).2)
+  check ctx "the latest reconstruction FAILED after an earlier success is refused (store may be partial)"
+    (isWait (judge ep masterKey { goodR with currentId := some 2, currentState := some "failed", lastSuccessId := some 1 }).2)
+  check ctx "the latest reconstruction ABORTED is refused"
+    (isWait (judge ep masterKey { goodR with currentId := some 2, currentState := some "aborted", lastSuccessId := some 1 }).2)
+  check ctx "a success from a DIFFERENT source than the current master is refused"
+    (isWait (judge ep masterKey { goodR with lastSuccessSource := some "former:12121" }).2)
+  check ctx "reviewer input (round 1): same lineage, slave LSN 0, master 10000 → refused (cursor not seeded)"
+    (isWait (judge ep masterKey { goodR with slaveLsn := some 0, masterSeq := some 10000 }).2)
+  check ctx "a lineage mismatch is refused"
+    (isWait (judge ep masterKey { goodR with slaveMasterId := some "Z" }).2)
+  check ctx "a cursor AHEAD of the head is refused"
+    (isWait (judge ep masterKey { goodR with slaveLsn := some 1001 }).2)
+  check ctx "RocksDB with lineage missing → refused (truncated reply)"
+    (isWait (judge ep masterKey { goodR with slaveMasterId := none, masterId := none }).2)
   check ctx "RocksDB with cursor missing → refused"
-    (isWait (judge ep masterKey (rd (some 1) (some 1) (some "A") (some "A") none none (some true))).2)
-  check ctx "reviewer input: completed 1 alone (everything else missing, backend unknown) → refused"
-    (isWait (judge ep masterKey (rd (some 1) (some 1) none none none none none)).2)
-  check ctx "an INCOMPLETE master stats reply (backend unknown) is refused even with everything else present"
-    (isWait (judge ep masterKey (rd (some 1) (some 1) (some "A") (some "A") (some 5) (some 9) none)).2)
-  check ctx "a fresh process (started 0, completed 0) is refused"
-    (isWait (judge ep masterKey (rd (some 0) (some 0) (some "A") (some "A") (some 5) (some 9) (some true))).2)
+    (isWait (judge ep masterKey { goodR with slaveLsn := none, masterSeq := none }).2)
+  check ctx "an INCOMPLETE master stats reply (backend unknown) is refused"
+    (isWait (judge ep masterKey { goodR with masterIsRocksdb := none }).2)
 
 open FlareOperator.SyncEvidence in
 def checkJudgeAcceptance (ctx : Ctx) : IO Unit := do
-  check ctx "RocksDB: a completion, none in flight, same lineage, seeded cursor ≤ head → activate"
-    (isActivate (judge ep masterKey (rd (some 1) (some 1) (some "A") (some "A") (some 990) (some 1000) (some true))).2)
-  check ctx "RocksDB: a FAR-behind but seeded cursor does not block (proximity is not the test)"
-    (isActivate (judge ep masterKey (rd (some 1) (some 1) (some "A") (some "A") (some 10) (some 1000000) (some true))).2)
-  check ctx "non-RocksDB backend (complete reply, no rocksdb keys) activates on completion + none in flight"
-    (isActivate (judge ep masterKey (rd (some 1) (some 1) none none none none (some false))).2)
-  check ctx "past success then re-reconstruction that FINISHED (started 2 == completed 2) activates"
-    (isActivate (judge ep masterKey (rd (some 2) (some 2) (some "A") (some "A") (some 990) (some 1000) (some true))).2)
-  check ctx "after a restart, the new process's own completed reconstruction (1 == 1) activates"
-    (isActivate (judge ep masterKey (rd (some 1) (some 1) (some "A") (some "A") (some 3) (some 9) (some true))).2)
-  -- Source change: a completion whose lineage is the OLD master is refused
-  -- until the node reconstructs from the new one.
-  let (afterChange, v1) := judge (ep.restart masterKey) masterKey (rd (some 5) (some 5) (some "OLD") (some "NEW") (some 5) (some 9) (some true))
-  check ctx "after a source change a completion whose lineage is the OLD master is refused"
+  check ctx "RocksDB: latest #1 succeeded from the current master, lineage matches, cursor seeded → activate"
+    (isActivate (judge ep masterKey goodR).2)
+  check ctx "a FAR-behind but seeded cursor does not block (proximity is not the test)"
+    (isActivate (judge ep masterKey { goodR with slaveLsn := some 10, masterSeq := some 1000000 }).2)
+  check ctx "non-RocksDB backend (complete reply, no rocksdb keys) activates on the record alone"
+    (isActivate (judge ep masterKey (rd (some 100) (some 1) (some "succeeded") (some 1) (some masterKey) none none none none (some false))).2)
+  -- Review item 3 (second round): "failure then success" — #1 failed, #2 succeeded.
+  check ctx "failure then success: #2 succeeded after #1 failed → activate (counters 2/1 would have said IN FLIGHT)"
+    (isActivate (judge ep masterKey { goodR with currentId := some 2, lastSuccessId := some 2 }).2)
+  check ctx "abort then success: #2 succeeded after #1 was aborted → activate"
+    (isActivate (judge ep masterKey { goodR with currentId := some 2, lastSuccessId := some 2, currentState := some "succeeded" }).2)
+  check ctx "after a restart, the new process's own #1 success activates"
+    (isActivate (judge ep masterKey { goodR with bootId := some 200 }).2)
+  let (afterChange, v1) := judge (ep.restart masterKey) masterKey { goodR with lastSuccessSource := some "old:12121", slaveMasterId := some "OLD", masterId := some "NEW" }
+  check ctx "after a source change a success from the OLD master is refused"
     (isWait v1)
-  check ctx "once the node's lineage matches the new master it activates"
-    (isActivate (judge afterChange masterKey (rd (some 6) (some 6) (some "NEW") (some "NEW") (some 5) (some 9) (some true))).2)
+  check ctx "once a success from the new master (matching lineage) is recorded it activates"
+    (isActivate (judge afterChange masterKey { goodR with currentId := some 2, lastSuccessId := some 2, slaveMasterId := some "NEW", masterId := some "NEW" }).2)
 
 -- ── StatsObservation (SAF-04 / SAF-06) ───────────────────────────────
 

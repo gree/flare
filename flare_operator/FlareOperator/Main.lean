@@ -1208,8 +1208,11 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
           let mOut ← Bridge.queryPodStats (extractPodName masterNode.serverName) ns "stats"
           let reading : SyncEvidence.Reading := match sOut, mOut with
             | .ok so, .ok mo =>
-              { slaveStarted := statNat so "reconstruction_started",
-                slaveCompleted := statNat so "reconstruction_completed",
+              { bootId := statNat so "reconstruction_boot_id",
+                currentId := statNat so "reconstruction_current_id",
+                currentState := statStr so "reconstruction_current_state",
+                lastSuccessId := statNat so "reconstruction_last_success_id",
+                lastSuccessSource := statStr so "reconstruction_last_success_source",
                 slaveMasterId := statStr so "rocksdb_master_id",
                 slaveLsn := statNat so "rocksdb_repl_last_lsn",
                 masterId := statStr mo "rocksdb_master_id",
@@ -1287,11 +1290,21 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
           | none => pure ()
           | some k =>
             let mapped := (finalState.lookupNode k).map fun n => (n.role, n.state)
-            let (rv, rs, rc) ← do
+            -- The success must have copied from the node's CURRENT master.
+            let currentMaster := (finalState.lookupNode k).bind fun n =>
+              (finalState.nodeMap.find? fun kv =>
+                kv.2.role == FlareRole.Master && kv.2.state == FlareState.Active && kv.2.partition == n.partition).map (·.1)
+            let o : ReplicaRepair.Observation ← do
               match ← Bridge.queryPodStats (extractPodName k) ns "stats" with
-              | .ok out => pure (statNat out "node_map_version", statNat out "reconstruction_started", statNat out "reconstruction_completed")
-              | .error _ => pure (none, none, none)
-            obs := obs ++ [(e.dest, { reportedVersion := rv, reconstructionStarted := rs, reconstructionCompleted := rc, mapped := mapped })]
+              | .ok out => pure { reportedVersion := statNat out "node_map_version",
+                                  bootId := statNat out "reconstruction_boot_id",
+                                  currentId := statNat out "reconstruction_current_id",
+                                  currentState := statStr out "reconstruction_current_state",
+                                  lastSuccessId := statNat out "reconstruction_last_success_id",
+                                  lastSuccessSource := statStr out "reconstruction_last_success_source",
+                                  currentMaster := currentMaster, mapped := mapped }
+              | .error _ => pure { mapped := mapped, currentMaster := currentMaster }
+            obs := obs ++ [(e.dest, o)]
         let (led1, steps) := ReplicaRepair.advance led0 obs
         for (e, st) in steps do
           let who := e.nodeKey.getD e.dest
@@ -1301,7 +1314,7 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
             IO.eprintln s!"[flare-operator] REPLICA REPAIR: {who} confirmed the demotion ({e.phase}); released to assignment — the next pass re-seats it as Slave/Prepare and flared reconstructs"
           | .completed =>
             metrics.replicaRepairCompleted.inc
-            IO.eprintln s!"[flare-operator] REPLICA REPAIR COMPLETE: {who} is Slave/Active; a reconstruction that began after the reseat (started > {e.startedAtReseat.getD 0}) finished with none in flight; {e.drops} dropped write(s) recovered by reconstruction"
+            IO.eprintln s!"[flare-operator] REPLICA REPAIR COMPLETE: {who} is Slave/Active; a reconstruction newer than the one current at reseat (#{e.currentIdAtReseat.getD 0}, boot {e.bootIdAtReseat.getD 0}) SUCCEEDED from its current master; {e.drops} dropped write(s) recovered"
           | .completedRequeued =>
             -- Item 3: drops kept arriving after the reconstruction began; the
             -- copy may not hold them. The first repair is complete, and the

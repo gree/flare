@@ -78,12 +78,14 @@ structure Entry where
   phase : Phase := .requested
   /-- Drops attributed so far (informational; the repair is the same). -/
   drops : Nat := 0
-  /-- flared `reconstruction_started` when the node was released to
-      assignment. Completion requires a reconstruction that BEGAN after that
-      (started > this) and finished (started == completed). A drop below it
-      is a process restart: the baseline resets to 0, because a restarted
-      node reconstructs from boot and that copy is what we need. -/
-  startedAtReseat : Option Nat := none
+  /-- flared's process boot id and latest reconstruction id when the node
+      was released to assignment. Completion is a reconstruction that
+      SUCCEEDED from the current master and is either NEWER than
+      `currentIdAtReseat` in the SAME process, or any success in a DIFFERENT
+      process (boot id changed: a restarted node reconstructs from boot, and
+      its counters may equal the old ones by coincidence — review item 4). -/
+  bootIdAtReseat : Option Nat := none
+  currentIdAtReseat : Option Nat := none
   /-- Drops attributed when the node was released. Drops that arrive AFTER
       the reconstruction began may not be in the copy (item 3): on
       completion the increment is requeued as a fresh request. -/
@@ -205,10 +207,16 @@ def markDemoted (l : Ledger) (dest : String) (version : Nat) : Ledger :=
 structure Observation where
   /-- The node's own `node_map_version`, if its stats could be read. -/
   reportedVersion : Option Nat := none
-  /-- The node's own `reconstruction_started`, if readable. -/
-  reconstructionStarted : Option Nat := none
-  /-- The node's own `reconstruction_completed`, if readable. -/
-  reconstructionCompleted : Option Nat := none
+  /-- flared's completion record (see stats.h): boot id, latest handler id
+      and state, last successful id and its source. -/
+  bootId : Option Nat := none
+  currentId : Option Nat := none
+  currentState : Option String := none
+  lastSuccessId : Option Nat := none
+  lastSuccessSource : Option String := none
+  /-- The current Active master key of the node's partition (what a success
+      must have copied from). -/
+  currentMaster : Option String := none
   /-- Role/state of the node in the committed map, if present. -/
   mapped : Option (FlareRole × FlareState) := none
 
@@ -231,37 +239,38 @@ def advanceEntry (e : Entry) (o : Observation) : Option Entry × Step :=
       match o.reportedVersion with
       | some rv =>
         if rv ≥ v then
-          (some { e with phase := .reseated, startedAtReseat := o.reconstructionStarted,
-                         dropsAtReseat := e.drops }, .released)
+          (some { e with phase := .reseated, bootIdAtReseat := o.bootId,
+                         currentIdAtReseat := o.currentId, dropsAtReseat := e.drops }, .released)
         else (some e, .none)
       | Option.none => (some e, .none)
   | .reseated =>
     match o.mapped with
     | some (FlareRole.Master, _) => (Option.none, .voided)
     | some (FlareRole.Slave, FlareState.Active) =>
-      match o.reconstructionStarted, o.reconstructionCompleted, e.startedAtReseat with
-      | some s, some c, some s0 =>
-        -- A drop below the reseat baseline is a process restart (counters
-        -- reset): the restarted node reconstructs from boot, so the
-        -- baseline becomes 0 and that reconstruction is the one to wait for.
-        -- Item 6: a bare reset (7 → 0) is therefore NOT completion — it
-        -- yields s == c == 0, which fails s > 0.
-        let s0' := if s < s0 then 0 else s0
-        if s > s0' && s == c then
-          -- A reconstruction that BEGAN after the reseat has FINISHED and
-          -- none is in flight. Drops that arrived after it began may not be
-          -- in the copy: requeue exactly that increment (item 3).
-          if e.drops > e.dropsAtReseat then
-            (some { e with phase := .requested, drops := e.drops - e.dropsAtReseat,
-                           startedAtReseat := Option.none, dropsAtReseat := 0, hold := Option.none },
-             .completedRequeued)
-          else (Option.none, .completed)
-        else
-          (some (if s < s0 then { e with startedAtReseat := some 0 } else e), .none)
-      -- No baseline was readable at release time: the first readable
-      -- started value becomes it, and the entry waits for a later one.
-      | some s, _, Option.none => (some { e with startedAtReseat := some s }, .none)
-      | _, _, _ => (some e, .none)
+      match o.bootId, o.currentId, o.currentState, o.lastSuccessId, o.lastSuccessSource, o.currentMaster with
+      | some boot, some cid, some st, some lsid, some src, some master =>
+        match e.bootIdAtReseat, e.currentIdAtReseat with
+        | some boot0, some cid0 =>
+          -- The copy that recovers the drops is a reconstruction that
+          -- SUCCEEDED (the latest handler, not an earlier one before a
+          -- failure), from the CURRENT master, and is either newer than the
+          -- one current at reseat in the same process, or belongs to a new
+          -- process (boot id changed) — which covers a restart whose
+          -- counters happen to equal the old ones (item 4), and a failure
+          -- followed by a success (item 3 of the second review).
+          let newEnough := (boot != boot0) || (cid > cid0)
+          if st == "succeeded" && lsid == cid && cid ≥ 1 && src == master && newEnough then
+            if e.drops > e.dropsAtReseat then
+              (some { e with phase := .requested, drops := e.drops - e.dropsAtReseat,
+                             bootIdAtReseat := Option.none, currentIdAtReseat := Option.none,
+                             dropsAtReseat := 0, hold := Option.none },
+               .completedRequeued)
+            else (Option.none, .completed)
+          else (some e, .none)
+        -- No baseline readable at release: record the first readable one
+        -- and wait for a later success.
+        | _, _ => (some { e with bootIdAtReseat := some boot, currentIdAtReseat := some cid }, .none)
+      | _, _, _, _, _, _ => (some e, .none)
     | _ => (some e, .none)
 
 /-- Advance every entry the caller could observe. Entries without an
@@ -307,7 +316,8 @@ def Entry.toJson (e : Entry) : Json :=
     ([("dest", Json.str e.dest), ("masterKey", Json.str e.masterKey),
       ("phase", e.phase.toJson), ("drops", Json.num e.drops)] : List (String × Json))
     ++ (match e.nodeKey with | some k => [("nodeKey", Json.str k)] | none => [])
-    ++ (match e.startedAtReseat with | some b => [("startedAtReseat", Json.num b)] | none => [])
+    ++ (match e.bootIdAtReseat with | some b => [("bootIdAtReseat", Json.num b)] | none => [])
+    ++ (match e.currentIdAtReseat with | some b => [("currentIdAtReseat", Json.num b)] | none => [])
     ++ [("dropsAtReseat", Json.num e.dropsAtReseat)]
     ++ (match e.hold with | some h => [("hold", Json.str h)] | none => [])
 
@@ -320,7 +330,8 @@ def Entry.fromJson? (j : Json) : Option Entry := do
     dest := dest, masterKey := masterKey, phase := phase,
     drops := (j.getObjValAs? Nat "drops").toOption.getD 0,
     nodeKey := (j.getObjValAs? String "nodeKey").toOption,
-    startedAtReseat := (j.getObjValAs? Nat "startedAtReseat").toOption,
+    bootIdAtReseat := (j.getObjValAs? Nat "bootIdAtReseat").toOption,
+    currentIdAtReseat := (j.getObjValAs? Nat "currentIdAtReseat").toOption,
     dropsAtReseat := (j.getObjValAs? Nat "dropsAtReseat").toOption.getD 0,
     hold := (j.getObjValAs? String "hold").toOption }
 

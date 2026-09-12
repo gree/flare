@@ -83,15 +83,20 @@ int handler_reconstruction::run() {
 	// forever. Retry here with backoff; every attempt re-resolves and
 	// reconnects from scratch.
 	int result = -1;
-	// One request = one handler; count it once, whatever the retries do.
+	// One request = one handler = one reconstruction id; retries inside do
+	// not start a new one. The completion record (id, state, source) is what
+	// a controller reads: cumulative counters cannot tell a failed-then-
+	// succeeded pair from one in flight.
 	if (stats_object != NULL) {
-		stats_object->increment_reconstruction_started();
+		stats_object->reconstruction_begin();
 	}
+	char source[BUFSIZ];
+	snprintf(source, sizeof(source), "%s:%d", this->_node_server_name.c_str(), this->_node_server_port);
 	for (int attempt = 0; ; attempt++) {
 		result = this->_run_once();
 		if (result == 0) {
 			if (stats_object != NULL) {
-				stats_object->increment_reconstruction_completed();
+				stats_object->reconstruction_succeeded_from(string(source));
 			}
 			return 0;
 		}
@@ -103,6 +108,9 @@ int handler_reconstruction::run() {
 		for (int i = 0; i < delay; i++) {
 			if (this->_thread->is_shutdown_request()) {
 				log_notice("shutdown requested -> abandoning reconstruction retry", 0);
+				if (stats_object != NULL) {
+					stats_object->reconstruction_aborted_by_shutdown();
+				}
 				return -1;
 			}
 			sleep(1);
@@ -112,7 +120,7 @@ int handler_reconstruction::run() {
 	// the K8s operator rejects this and keeps the node in prepare).
 	log_err("reconstruction failed permanently after retries -> deactivating node", 0);
 	if (stats_object != NULL) {
-		stats_object->increment_reconstruction_failed();
+		stats_object->reconstruction_failed_final();
 	}
 	this->_cluster->deactivate_node();
 	return result;

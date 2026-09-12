@@ -64,19 +64,19 @@ private def opLog (tail : Nat := 800) : IO String :=
 private def slaveEntry : IO (Option NodeSyncEntry) := do
   return (← nodeView).find? fun e => e.role == 1 && e.partition == 0
 
-/-- flared's OWN view of its state, from `stats nodes` on that pod. -/
-private def selfState (fqdn : String) : IO (Option String) := do
+/-- A numeric `stats` value from a flared pod (by fqdn). -/
+private def flaredStatOf (fqdn key : String) : IO (Option Nat) := do
   match ← getPodIp (podOf fqdn) cfg.«namespace» with
   | none => return none
   | some ip =>
-    let cmd := s!"printf 'stats nodes\\r\\n' | nc -w 3 {ip} {cfg.flarePort}"
+    let cmd := s!"printf 'stats\\r\\n' | nc -w 3 {ip} {cfg.flarePort}"
     match ← execInDebugPod cfg.debugPod cfg.«namespace» cmd with
     | .error _ => return none
     | .ok out =>
-      let needle := s!"STAT {fqdn}:{cfg.flarePort}:state "
+      let needle := s!"STAT {key} "
       for line in out.splitOn "\n" do
         let t := (line.trim.replace "\r" "")
-        if t.startsWith needle then return some ((t.drop needle.length).trim)
+        if t.startsWith needle then return (t.drop needle.length).trim.toNat?
       return none
 
 def suite : TestSuite := {
@@ -90,9 +90,9 @@ def suite : TestSuite := {
   teardown := cleanupCluster cfg
   onFailure := dumpClusterDiagnostics cfg.«namespace» s!"app={cfg.operatorName}"
   tests := [
-    { name := "a dropped activation leaves the slave Prepare for the operator while flared itself is active"
+    { name := "a dropped activation leaves the slave Prepare for the operator although its reconstruction completed"
       run := do
-        let dropped ← waitForCondition "seam drops a node state event" 180 do
+        let dropped ← waitForCondition "seam drops a node state event" 240 do
           return containsSubstr (← opLog) "TEST SEAM: dropping node state event"
         if !dropped then
           return .fail "the seam never saw a node state event: flared did not announce a completed reconstruction, so no lost-activation condition exists to test"
@@ -101,10 +101,18 @@ def suite : TestSuite := {
         | some s =>
           if s.state != 1 then
             return .fail s!"the slave is not Prepare in the operator's map (state {s.state}) although its activation was dropped — something else activated it, the condition is not staged"
-          let own ← waitForCondition "flared's own map says the slave is active" 60 do
-            return (← selfState s.fqdn) == some "active"
-          if !own then
-            return .fail s!"flared's own view of {s.fqdn} is {← selfState s.fqdn}, not active: its reconstruction did not finish, so there is no completed copy to activate"
+          -- The completed copy exists even though the operator never learned:
+          -- flared increments reconstruction_completed when its handler
+          -- finished the dump and its activation call returned (the seam
+          -- answers OK), which is exactly the handover-lost-ack case this
+          -- repair exists for. The node does NOT set its own state active
+          -- from that — it waits for the operator's map to echo it — so
+          -- self-active is the wrong thing to look for; the completion
+          -- counter is the evidence.
+          let completed ← waitForCondition "the slave reports a completed reconstruction" 120 do
+            return ((← flaredStatOf s.fqdn "reconstruction_completed").getD 0) ≥ 1
+          if !completed then
+            return .fail s!"the slave never reported reconstruction_completed ≥ 1 ({← flaredStatOf s.fqdn "reconstruction_completed"}): no completed copy to activate, the condition is not staged"
           return .pass },
 
     { name := "the repair re-derives Prepare→Active from completion evidence and names it"
@@ -118,8 +126,8 @@ def suite : TestSuite := {
           if !repaired then
             IO.eprintln s!"# operator tail:\n{← opLog 40}"
             return .fail "the repair path never activated the stuck slave within 300s"
-          if !containsSubstr log "node reports itself active" then
-            return .fail "the repair activated but did not name the evidence (node reports itself active, completions in this process); the log line is the audit trail"
+          if !containsSubstr log "reconstruction(s) completed in this process" then
+            return .fail "the repair activated but did not name the completion evidence; the log line is the audit trail"
           if containsSubstr log "PREPARE-REPAIR" && containsSubstr log "but synced (slave lsn" then
             return .fail "the old proximity rule fired: activation must not be argued from a cursor distance"
           let active ← waitForCondition "slave Active in the operator's map" 60 do

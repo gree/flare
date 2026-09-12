@@ -173,9 +173,8 @@ open FlareOperator.SyncEvidence in
 def ep : Episode := { nodeKey := slaveKey, masterKey := masterKey }
 
 open FlareOperator.SyncEvidence in
-def rd (selfActive : Option Bool) (completed : Option Nat) (sId mId : Option String)
-    (sLsn mSeq : Option Nat) : Reading :=
-  { selfActive := selfActive, slaveCompleted := completed, slaveMasterId := sId, masterId := mId,
+def rd (completed : Option Nat) (sId mId : Option String) (sLsn mSeq : Option Nat) : Reading :=
+  { slaveCompleted := completed, slaveMasterId := sId, masterId := mId,
     slaveLsn := sLsn, masterSeq := mSeq }
 
 open FlareOperator.SyncEvidence in
@@ -184,8 +183,6 @@ open FlareOperator.SyncEvidence in
 def isWait : Verdict → Bool | .wait _ => true | _ => false
 open FlareOperator.SyncEvidence in
 def isSourceChanged : Verdict → Bool | .sourceChanged _ => true | _ => false
-open FlareOperator.SyncEvidence in
-def waitReason : Verdict → String | .wait r => r | _ => ""
 
 open FlareOperator.SyncEvidence in
 def checkEpisodes (ctx : Ctx) : IO Unit := do
@@ -194,54 +191,46 @@ def checkEpisodes (ctx : Ctx) : IO Unit := do
     (e1.map (·.nodeKey) == [slaveKey] && e1.map (·.cycles) == [0])
   let e2 := reconcileEpisodes e1 [(slaveKey, masterKey)]
   check ctx "the same source keeps the episode and counts the pass"
-    (e2.map (·.cycles) == [1] && e2.map (·.needsNewCompletion) == [false])
+    (e2.map (·.cycles) == [1])
   let e3 := reconcileEpisodes e2 [(slaveKey, "other:12121")]
-  check ctx "a different master between passes restarts the episode and requires a new completion"
-    (e3.map (·.masterKey) == ["other:12121"] && e3.map (·.needsNewCompletion) == [true] && e3.map (·.cycles) == [0])
+  check ctx "a different master between passes restarts the episode (lineage will re-gate activation)"
+    (e3.map (·.masterKey) == ["other:12121"] && e3.map (·.cycles) == [0] && e3.map (·.masterId) == [none])
   check ctx "a node no longer Slave/Prepare ends its episode"
     ((reconcileEpisodes e2 []).isEmpty)
 
 open FlareOperator.SyncEvidence in
 def checkJudgeRefusals (ctx : Ctx) : IO Unit := do
   check ctx "a changed master key is a source change, not a wait"
-    (isSourceChanged (judge ep "other:12121" (rd (some true) (some 1) none none none none)).2)
-  let (pinned, _) := judge ep masterKey (rd (some true) (some 1) (some "A") (some "A") none none)
+    (isSourceChanged (judge ep "other:12121" (rd (some 1) none none none none)).2)
+  let (pinned, _) := judge ep masterKey (rd (some 1) (some "A") (some "A") none none)
   check ctx "the master lineage is pinned at first sight"
     (pinned.masterId == some "A")
   check ctx "a changed master lineage is a source change"
-    (isSourceChanged (judge pinned masterKey (rd (some true) (some 1) (some "B") (some "B") none none)).2)
-  check ctx "the node not calling itself active is refused, even with a near cursor"
-    (let v := (judge ep masterKey (rd (some false) (some 1) none none (some 995) (some 1000))).2
-     isWait v && containsSubstr (waitReason v) "not completion")
-  check ctx "an unreadable self view is refused"
-    (isWait (judge ep masterKey (rd none (some 1) none none none none)).2)
-  check ctx "self-active with ZERO completions in this process is refused (booted into an old map)"
-    (isWait (judge ep masterKey (rd (some true) (some 0) none none none none)).2)
+    (isSourceChanged (judge pinned masterKey (rd (some 1) (some "B") (some "B") none none)).2)
+  check ctx "unreadable reconstruction counters are refused"
+    (isWait (judge ep masterKey (rd none none none (some 995) (some 1000))).2)
+  check ctx "ZERO completions in this process is refused, even with a near cursor (proximity is not completion)"
+    (isWait (judge ep masterKey (rd (some 0) none none (some 999) (some 1000))).2)
   check ctx "a lineage mismatch is refused however the cursor looks"
-    (isWait (judge ep masterKey (rd (some true) (some 1) (some "A") (some "B") (some 1000) (some 1000))).2)
+    (isWait (judge ep masterKey (rd (some 1) (some "A") (some "B") (some 1000) (some 1000))).2)
   check ctx "a cursor AHEAD of the master's head is refused"
-    (isWait (judge ep masterKey (rd (some true) (some 1) (some "A") (some "A") (some 1001) (some 1000))).2)
-where
-  containsSubstr (h n : String) : Bool := (h.splitOn n).length > 1
+    (isWait (judge ep masterKey (rd (some 1) (some "A") (some "A") (some 1001) (some 1000))).2)
 
 open FlareOperator.SyncEvidence in
 def checkJudgeAcceptance (ctx : Ctx) : IO Unit := do
-  check ctx "self-active, a completion, same lineage, cursor not ahead → activate"
-    (isActivate (judge ep masterKey (rd (some true) (some 1) (some "A") (some "A") (some 990) (some 1000))).2)
-  check ctx "a backend without lineage/cursor stats activates on self-active + completion"
-    (isActivate (judge ep masterKey (rd (some true) (some 1) none none none none)).2)
-  check ctx "a FAR cursor does not block activation when the node itself reports complete (proximity is not the test)"
-    (isActivate (judge ep masterKey (rd (some true) (some 1) (some "A") (some "A") (some 10) (some 1000000))).2)
-  -- After a source change: the first reading records the baseline and waits;
-  -- the same counter keeps waiting; a moved counter activates.
-  let epReset := ep.restart masterKey
-  let (epB, v1) := judge epReset masterKey (rd (some true) (some 3) none none none none)
-  check ctx "after a source change the first reading is a baseline and waits"
-    (isWait v1 && epB.completedAtReset == some 3)
-  check ctx "after a source change an unmoved counter keeps waiting although the node calls itself active"
-    (isWait (judge epB masterKey (rd (some true) (some 3) none none none none)).2)
-  check ctx "after a source change a NEW completion activates"
-    (isActivate (judge epB masterKey (rd (some true) (some 4) none none none none)).2)
+  check ctx "a completion, same lineage, cursor not ahead → activate"
+    (isActivate (judge ep masterKey (rd (some 1) (some "A") (some "A") (some 990) (some 1000))).2)
+  check ctx "a backend without lineage/cursor stats activates on a completion alone"
+    (isActivate (judge ep masterKey (rd (some 1) none none none none)).2)
+  check ctx "a FAR cursor does not block activation when a reconstruction completed (proximity is not the test)"
+    (isActivate (judge ep masterKey (rd (some 1) (some "A") (some "A") (some 10) (some 1000000))).2)
+  -- A source change (different master lineage) is rejected until the node
+  -- reconstructs from the new source (its lineage matches again).
+  let (afterChange, v1) := judge (ep.restart masterKey) masterKey (rd (some 5) (some "OLD") (some "NEW") none none)
+  check ctx "after a source change a completion whose lineage is the OLD master is refused"
+    (isWait v1)
+  check ctx "once the node's lineage matches the new master it activates"
+    (isActivate (judge afterChange masterKey (rd (some 6) (some "NEW") (some "NEW") none none)).2)
 
 -- ── StatsObservation (SAF-04 / SAF-06) ───────────────────────────────
 

@@ -5,52 +5,55 @@
   associated with the current source."
 
   flared reports "reconstruction complete" (Prepare → Active) as a one-shot
-  TCP event. When the operator misses it, the node sits in Prepare and the
-  repair path re-derives the transition. The ground truth used to be LSN
-  PROXIMITY — the slave's replication cursor within 5000 sequence numbers
-  of the master's head — which accepts three things it should not: a copy
-  that is close but not finished, a cursor from another lineage that merely
-  happens to be numerically near, and a master that changed while the
-  numbers were being read.
+  TCP event. When the operator misses it — the classic case is a single-shot
+  activation that raced an index-leader handover: flared's activate_node got
+  its OK, but the leader died before persisting it, so the new leader's map
+  still says Prepare — the node sits in Prepare with a full, current copy and
+  nothing re-drives it. The repair path re-derives the transition.
 
-  This module decides from evidence bound to the node and the episode:
+  The ground truth used to be LSN PROXIMITY — the slave's replication cursor
+  within 5000 of the master's head — which accepts three things it should
+  not: a copy that is close but unfinished, a cursor from another lineage
+  that happens to be numerically near, and a master that changed while the
+  numbers were sampled.
 
-  * The node ITSELF must report active in its own node map (`stats nodes`,
-    its own entry). flared sets that only after its reconstruction handler
-    finished and activated, or when the operator designated it active —
-    and the latter is exactly what a Prepare node has not received.
-  * A reconstruction must actually have COMPLETED in this process
-    (`reconstruction_completed` ≥ 1). A restarted node that boots straight
-    into an old map never ran one.
-  * Lineage must match when the backend reports one: the slave's
-    `rocksdb_master_id` equals the master's. A different id is a copy of
-    something else, however close its cursor.
-  * The SOURCE must be the same for the whole episode. If the partition's
-    Active master, or its lineage id, differs from what was pinned when
-    the episode began, the episode restarts and — because the completion
-    that made the node call itself active may belong to the old source — a
-    NEW completion (counter moved past the value at the change) is
-    required before activation.
-  * The cursor may not be AHEAD of the master's head: a cursor from a
-    former master's sequence space is meaningless here.
-  * Proximity is no longer a reason to activate; it is mentioned in the
-    log when the node is refused, that is all.
+  This module decides from reconstruction-completion evidence bound to the
+  source, per the reviewer's SAF-03 requirement (completion bound to master
+  identity and sync generation), NOT from proximity:
 
-  Scope, stated plainly: this covers Prepare ACTIVATION by the operator's
-  repair path. Promotion (drain/failover successor choice) still trusts the
-  Active designation itself; making that designation carry its own evidence
-  is SAF-08. flared's own re-announce ("map says prepare but I am active")
-  is the first line for a lost event; this is the second. Pure code: the
-  readings come from Main.lean, the checks are in UnitTests.lean and the
-  prepare-evidence E2E suite.
+  * A reconstruction must have COMPLETED in this process
+    (`reconstruction_completed >= 1`). flared increments that only when its
+    handler finished the dump AND its activation call returned — exactly the
+    handover-lost-ack case — so it is real completion, not a cursor guess.
+  * That completion must be bound to THIS master's IDENTITY: the slave's
+    lineage id (`rocksdb_master_id`) equals the current master's. A copy
+    reconstructed from a former master carries a different id, however close
+    its cursor, and is rejected until it reconstructs from this one.
+  * It must be the current SYNC GENERATION: the cursor may not be AHEAD of
+    the master's head (a cursor from a former master's sequence space), and
+    the source must not have changed during observation — a different Active
+    master (pod identity) or a different lineage id restarts the episode, and
+    activation waits until the lineage matches the new source again.
+
+  What this deliberately does NOT use is the node's own map state. flared
+  sets its local state active only when the operator's map echoes the
+  activation back — precisely what is lost here — so "the node calls itself
+  active" is circular and can never hold in the case the repair exists for.
+  Completion + lineage is the non-circular evidence.
+
+  Scope: this covers Prepare ACTIVATION by the repair path. Promotion
+  (drain/failover successor choice) still trusts the Active designation
+  itself; making that designation carry its own evidence is SAF-08. flared's
+  own re-announce ("map says prepare but I am active") is a separate first
+  line for a different loss; this is the operator-side second line. Pure
+  code: the readings come from Main.lean, the checks are in UnitTests.lean
+  and the prepare-evidence E2E suite.
 -/
 namespace FlareOperator.SyncEvidence
 
 /-- What one pass could read about a Prepare slave and its master. `none`
     means "not readable", never zero. -/
 structure Reading where
-  /-- The slave's own map entry for itself says active. -/
-  selfActive : Option Bool := none
   /-- The slave's reconstruction_completed counter (this process). -/
   slaveCompleted : Option Nat := none
   /-- The slave's lineage id (rocksdb backend), if reported. -/
@@ -67,13 +70,9 @@ structure Reading where
 structure Episode where
   nodeKey : String
   masterKey : String
-  /-- Master lineage id pinned at first reading (none when not reported). -/
+  /-- Master lineage id pinned at first reading (none when not reported). A
+      later different id is a source change (the master pod re-seeded). -/
   masterId : Option String := none
-  /-- True when this episode began because the SOURCE changed: activation
-      then needs a completion newer than `completedAtReset`. -/
-  needsNewCompletion : Bool := false
-  /-- The slave's counter when the source change was first read. -/
-  completedAtReset : Option Nat := none
   /-- Passes observed in Prepare (informational). -/
   cycles : Nat := 0
   deriving Repr, BEq
@@ -87,9 +86,9 @@ inductive Verdict where
   | sourceChanged (reason : String)
   deriving Repr, BEq
 
-/-- A fresh episode after a source change. -/
+/-- A fresh episode after a source change (new master pod). -/
 def Episode.restart (e : Episode) (newMaster : String) : Episode :=
-  { nodeKey := e.nodeKey, masterKey := newMaster, needsNewCompletion := true }
+  { nodeKey := e.nodeKey, masterKey := newMaster }
 
 /-- Bring the episodes in line with the map this pass: `current` is
     (nodeKey, masterKey) for every Slave/Prepare node whose partition has an
@@ -106,35 +105,35 @@ def reconcileEpisodes (eps : List Episode) (current : List (String × String)) :
 private def nearNote (r : Reading) : String :=
   match r.slaveLsn, r.masterSeq with
   | some sl, some ms =>
-    if ms ≥ sl && ms - sl < 5000 then " (the cursor is near the master's head, which is not completion)" else ""
+    if ms ≥ sl && ms - sl < 5000 then " (the cursor is near the master's head, which is not by itself completion)" else ""
   | _, _ => ""
 
+/-- Judge one Prepare node from one reading, having already confirmed the
+    source is unchanged. -/
 private def evidence (e : Episode) (r : Reading) : Episode × Verdict :=
-  match r.selfActive with
-  | none => (e, .wait s!"the node's own node map could not be read{nearNote r}")
-  | some false => (e, .wait s!"the node itself does not report active: reconstruction not finished{nearNote r}")
-  | some true =>
-    match r.slaveCompleted with
-    | none => (e, .wait "reconstruction counters unreadable")
-    | some 0 => (e, .wait s!"the node reports active but no reconstruction completed in this process (booted into an old map?){nearNote r}")
-    | some n =>
-      match r.slaveMasterId, r.masterId with
-      | some sm, some mm =>
-        if sm != mm then
-          (e, .wait s!"reconstruction finished but the node's lineage {sm} differs from the master's {mm}: copy of another source")
-        else cursor e r n
-      | _, _ => cursor e r n
+  match r.slaveCompleted with
+  | none => (e, .wait "reconstruction counters unreadable")
+  | some 0 => (e, .wait s!"no reconstruction has completed in this process{nearNote r}")
+  | some n =>
+    match r.slaveMasterId, r.masterId with
+    | some sm, some mm =>
+      if sm != mm then
+        (e, .wait s!"a reconstruction completed but the node's lineage {sm} differs from the master's {mm}: copy of another source")
+      else cursor e r n
+    | _, _ => cursor e r n
 where
   cursor (e : Episode) (r : Reading) (n : Nat) : Episode × Verdict :=
     match r.slaveLsn, r.masterSeq with
     | some sl, some ms =>
       if sl > ms then
-        (e, .wait s!"reconstruction finished but the node's cursor {sl} is AHEAD of the master's head {ms}: cursor from another sequence space")
-      else (e, .activate s!"node reports itself active, {n} reconstruction(s) completed in this process, lineage {r.masterId.getD "n/a"} matches, cursor {sl} ≤ head {ms}")
-    | _, _ => (e, .activate s!"node reports itself active, {n} reconstruction(s) completed in this process (backend reports no lineage/cursor)")
+        (e, .wait s!"a reconstruction completed but the node's cursor {sl} is AHEAD of the master's head {ms}: cursor from another sequence space")
+      else (e, .activate s!"{n} reconstruction(s) completed in this process, lineage {r.masterId.getD "n/a"} matches the master, cursor {sl} ≤ head {ms}")
+    | _, _ => (e, .activate s!"{n} reconstruction(s) completed in this process, lineage {r.slaveMasterId.getD "n/a"} matches the master (backend reports no cursor)")
 
 /-- Fold one reading into the episode (pins the master lineage on first
-    sight, records the reset baseline) and judge it. -/
+    sight) and judge it. A changed master pod key or a changed master lineage
+    id is a source change: the episode restarts and nothing is activated
+    until a reconstruction from the new source is evidenced. -/
 def judge (e : Episode) (currentMasterKey : String) (r : Reading) : Episode × Verdict :=
   if currentMasterKey != e.masterKey then
     (e, .sourceChanged s!"partition master changed {e.masterKey} → {currentMasterKey} during observation")
@@ -146,19 +145,7 @@ def judge (e : Episode) (currentMasterKey : String) (r : Reading) : Episode × V
     | some pinned, some now =>
       if pinned != now then
         (e, .sourceChanged s!"master lineage changed {pinned} → {now} during observation")
-      else afterSource e r
-    | _, _ => afterSource e r
-where
-  afterSource (e : Episode) (r : Reading) : Episode × Verdict :=
-    if !e.needsNewCompletion then evidence e r
-    else
-      match e.completedAtReset, r.slaveCompleted with
-      | _, none => (e, .wait "source changed earlier; reconstruction counters unreadable")
-      | none, some c =>
-        ({ e with completedAtReset := some c },
-         .wait s!"source changed: the completion the node reports may belong to the old master; waiting for a new one (counter {c})")
-      | some b, some c =>
-        if c == b then (e, .wait s!"source changed: no reconstruction has completed since (counter {b}){nearNote r}")
-        else evidence e r
+      else evidence e r
+    | _, _ => evidence e r
 
 end FlareOperator.SyncEvidence

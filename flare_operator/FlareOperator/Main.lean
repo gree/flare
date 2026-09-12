@@ -1168,20 +1168,15 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
         | some (mKey, masterNode) =>
           let slavePod := extractPodName node.serverName
           let sOut ← Bridge.queryPodStats slavePod ns "stats"
-          let sNodes ← Bridge.queryPodStats slavePod ns "stats nodes"
           let mOut ← Bridge.queryPodStats (extractPodName masterNode.serverName) ns "stats"
-          let selfActive : Option Bool := match sNodes with
-            | .ok out => (statStr out s!"{node.serverName}:{node.serverPort}:state").map (· == "active")
-            | .error _ => none
           let reading : SyncEvidence.Reading := match sOut, mOut with
             | .ok so, .ok mo =>
-              { selfActive := selfActive,
-                slaveCompleted := statNat so "reconstruction_completed",
+              { slaveCompleted := statNat so "reconstruction_completed",
                 slaveMasterId := statStr so "rocksdb_master_id",
                 slaveLsn := statNat so "rocksdb_repl_last_lsn",
                 masterId := statStr mo "rocksdb_master_id",
                 masterSeq := statNat mo "rocksdb_latest_sequence_number" }
-            | _, _ => { selfActive := selfActive }
+            | _, _ => { }
           let (ep', verdict) := SyncEvidence.judge ep mKey reading
           episodes := episodes.map fun e => if e.nodeKey == key then ep' else e
           match verdict with

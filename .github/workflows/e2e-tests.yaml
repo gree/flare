@@ -37,7 +37,7 @@ jobs:
           - group: wal-recovery
             suites: "wal-bandwidth-throttle,wal-incremental-sync,wal-purged-fallback,resync-failure-self-demote,orphan-scan-purge,terminating-pod-handling,failover-during-replication,data-survival-failover,pvc-data-survival,backup-restore"
           - group: breaker-migration
-            suites: "circuit-breaker,operator-restart,topology-authority,replica-repair,native-metrics,blue-green-migration"
+            suites: "circuit-breaker,operator-restart,topology-authority,replica-repair,prepare-evidence,native-metrics,blue-green-migration"
     name: e2e-test (${{ matrix.group }})
     steps:
       - name: Checkout
@@ -170,7 +170,7 @@ jobs:
           cd flare_operator
           # Union of the matrix groups must equal --list, or a new suite
           # silently never runs. Kept in ONE place here; compare as sets.
-          ALL_GROUPS="failover,read-balance,scale-out-master,scale-out-slave,scale-in-slave,scale-in-master,replace-nodes,cluster-replication,partition-reduction,wal-retention-config,strict-durability,snapshot-push-seed,wal-bandwidth-throttle,wal-incremental-sync,wal-purged-fallback,resync-failure-self-demote,orphan-scan-purge,terminating-pod-handling,failover-during-replication,data-survival-failover,pvc-data-survival,backup-restore,circuit-breaker,operator-restart,topology-authority,replica-repair,native-metrics,blue-green-migration"
+          ALL_GROUPS="failover,read-balance,scale-out-master,scale-out-slave,scale-in-slave,scale-in-master,replace-nodes,cluster-replication,partition-reduction,wal-retention-config,strict-durability,snapshot-push-seed,wal-bandwidth-throttle,wal-incremental-sync,wal-purged-fallback,resync-failure-self-demote,orphan-scan-purge,terminating-pod-handling,failover-during-replication,data-survival-failover,pvc-data-survival,backup-restore,circuit-breaker,operator-restart,topology-authority,replica-repair,prepare-evidence,native-metrics,blue-green-migration"
           LISTED=$(.lake/build/bin/flare_e2e --list | sed -n 's/^  \([a-z0-9-]*\) (.*/\1/p' | sort)
           GROUPED=$(echo "$ALL_GROUPS" | tr ',' '\n' | sort)
           if ! diff <(echo "$LISTED") <(echo "$GROUPED"); then

@@ -162,6 +162,13 @@ int op_stats::_send_stats(thread_pool* req_tp, thread_pool* other_tp, storage* s
 		}
 	}
 	_send_stat("delete_misses"				, stats_object->get_delete_misses());
+	// Reconstruction lifecycle (see stats.h): a controller that requested a
+	// resync reads these back to tell "started and finished" from "never
+	// reached this node" — the map may have been ignored or carried only a
+	// state change, which dispatches nothing.
+	_send_stat("reconstruction_started"		, stats_object->get_reconstruction_started());
+	_send_stat("reconstruction_completed"	, stats_object->get_reconstruction_completed());
+	_send_stat("reconstruction_failed"		, stats_object->get_reconstruction_failed());
 	_send_stat("incr_hits"						, stats_object->get_incr_hits());
 	_send_stat("incr_misses"					, stats_object->get_incr_misses());
 	_send_stat("decr_hits"						, stats_object->get_decr_hits());

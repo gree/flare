@@ -15,6 +15,8 @@
 import FlareOperator.K8s.FlareCluster
 import FlareOperator.K8s.Retry
 import FlareOperator.Kubectl
+import Lean.Data.Json
+import FlareOperator.StateMachine.ReplicaRepair
 
 namespace FlareOperator.K8s.Bridge
 
@@ -355,6 +357,30 @@ def patchFlareClusterStatus (crName ns : String) (phase : MigrationPhase)
   let result ← kubectl ["patch", "flarecluster", crName, "-n", ns,
     "--subresource=status", "--type=merge", "-p", patch]
   match result with
+  | .error e => return .error e
+  | .ok _ => return .ok ()
+
+/-- The replica-repair ledger persisted in `status.replicaRepairs` (SC-03 /
+    SAF-05): pending requests AND last-seen drop counters, so an operator
+    restart neither forgets a repair nor re-baselines the counters. `none`
+    when the CR has no ledger yet or it does not parse. -/
+def readRepairLedger (crName ns : String) : IO (Option ReplicaRepair.Ledger) := do
+  match ← kubectl ["get", "flarecluster", crName, "-n", ns, "-o", "json"] with
+  | .error _ => return none
+  | .ok out =>
+    match Lean.Json.parse out with
+    | .error _ => return none
+    | .ok j =>
+      match j.getObjVal? "status" >>= (·.getObjVal? "replicaRepairs") with
+      | .ok r => return ReplicaRepair.Ledger.fromJson? r
+      | .error _ => return none
+
+/-- Persist the ledger (merge patch on the status subresource; the whole
+    object is rewritten, arrays included). -/
+def writeRepairLedger (crName ns : String) (l : ReplicaRepair.Ledger) : IO (Except String Unit) := do
+  let patch := (Lean.Json.mkObj [("status", Lean.Json.mkObj [("replicaRepairs", l.toJson)])]).compress
+  match ← kubectl ["patch", "flarecluster", crName, "-n", ns,
+      "--subresource=status", "--type=merge", "-p", patch] with
   | .error e => return .error e
   | .ok _ => return .ok ()
 

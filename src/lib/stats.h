@@ -72,6 +72,17 @@ protected:
 	// touched after four failed retries).
 	pthread_mutex_t _mutex_proxy_write_dropped_by_dest;
 	map<string, uint64_t> _proxy_write_dropped_by_dest;
+	// Reconstruction lifecycle of THIS node, counted once per request (a
+	// request is one handler_reconstruction; its internal retries are not
+	// separate requests). "started" is what a controller compares against
+	// after it asks for a resync: without it, a resync request that never
+	// reached flared (role diff lost, map ignored, state-only change) is
+	// indistinguishable from one that ran instantly. "completed" is the
+	// evidence that a full copy or WAL catch-up finished; "failed" is the
+	// permanent give-up after retries. Monotonic for the process lifetime.
+	AtomicCounter _reconstruction_started;
+	AtomicCounter _reconstruction_completed;
+	AtomicCounter _reconstruction_failed;
 	AtomicCounter _delete_hits;
 	AtomicCounter _delete_misses;
 	AtomicCounter _incr_hits;
@@ -101,6 +112,9 @@ public:
 	inline int increment_get_misses()            { this->_get_misses.incr();return 0; };
 	inline int increment_proxy_write_dropped()   { this->_proxy_write_dropped.incr();return 0; };
 	int increment_proxy_write_dropped(const string& dest);
+	inline int increment_reconstruction_started()   { this->_reconstruction_started.incr();return 0; };
+	inline int increment_reconstruction_completed() { this->_reconstruction_completed.incr();return 0; };
+	inline int increment_reconstruction_failed()    { this->_reconstruction_failed.incr();return 0; };
 	inline int increment_delete_hits()           { this->_delete_hits.incr();return 0; };
 	inline int increment_delete_misses()         { this->_delete_misses.incr();return 0; };
 	inline int increment_incr_hits()             { this->_incr_hits.incr();return 0; };
@@ -136,6 +150,9 @@ public:
 	uint64_t get_get_misses();
 	uint64_t get_proxy_write_dropped();
 	map<string, uint64_t> get_proxy_write_dropped_by_dest();
+	uint64_t get_reconstruction_started();
+	uint64_t get_reconstruction_completed();
+	uint64_t get_reconstruction_failed();
 	uint64_t get_delete_hits();
 	uint64_t get_delete_misses();
 	uint64_t get_incr_hits();

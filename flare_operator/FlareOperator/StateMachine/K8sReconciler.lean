@@ -81,7 +81,7 @@ inductive FlareReconcileStep where
 /-- Responses from the K8s API server. -/
 inductive K8sResponse where
   | CRDResponse (crd : Option FlareClusterView)
-  | PodListResponse (pods : List String) (zones : List (String × String)) (terminating : List String) (dataBearing : List String) (unhealthy : List String)
+  | PodListResponse (pods : List String) (zones : List (String × String)) (terminating : List String) (dataBearing : List String) (unhealthy : List String) (repairHeld : List String)
   | PatchResponse (success : Bool)
   | NoResponse
   deriving Repr
@@ -130,6 +130,12 @@ structure FlareReconcileState where
   /-- Node keys of Terminating pods (deletionTimestamp set) this tick. Used to
       exclude a draining node from role re-assignment (it must stay a proxy). -/
   terminatingKeys : List String := []
+  /-- Node keys under replica repair that were committed as Proxy and have not
+      yet reported that they applied it (StateMachine/ReplicaRepair.lean). Held
+      out of role assignment like a draining node: re-seating one before it
+      has seen the Proxy map gives flared a state-only change, which starts
+      no reconstruction (SC-03 / SAF-02). -/
+  repairHeldKeys : List String := []
   /-- Terminating nodes that are still Master/Slave and must be drained this
       tick: promote a replacement + demote them to a live proxy. -/
   drainNodeKeys : List String := []
@@ -1197,7 +1203,7 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
 
   | .AfterListPods =>
     match resp with
-    | .PodListResponse pods zones terminating dataBearing unhealthy =>
+    | .PodListResponse pods zones terminating dataBearing unhealthy repairHeld =>
       -- CRITICAL: Check grace period (Main.lean:355-359)
       if s.graceCycles > 0 then
         -- Still in startup grace period - skip dead node detection AND drain
@@ -1208,6 +1214,7 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
                   unhealthyKeys := unhealthy,
                   deadNodeKeys := [],
                   terminatingKeys := terminating,
+                  repairHeldKeys := repairHeld,
                   drainNodeKeys := [],
                   standbyNodeKeys := match s.cachedCrd with
                     | some crd => resolveStandbyKeys crd.spec.readBalance pods zones
@@ -1226,6 +1233,7 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
                   unhealthyKeys := unhealthy,
                   deadNodeKeys := deadKeys,
                   terminatingKeys := terminating,
+                  repairHeldKeys := repairHeld,
                   drainNodeKeys := drainKeys,
                   standbyNodeKeys := match s.cachedCrd with
                     | some crd => resolveStandbyKeys crd.spec.readBalance pods zones
@@ -1319,7 +1327,9 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
     | some state, some crd =>
       -- Exclude Terminating keys: a just-drained node is Proxy/Active and would
       -- otherwise be re-assigned a role here, undoing the drain (flapping).
-      let stateWithProxies := assignProxiesPure state crd s.livePodKeys s.podZones s.terminatingKeys
+      -- Also exclude nodes held by the replica-repair ledger: they must stay
+      -- Proxy until they have applied that map (see repairHeldKeys).
+      let stateWithProxies := assignProxiesPure state crd s.livePodKeys s.podZones (s.terminatingKeys ++ s.repairHeldKeys)
       -- Refill partitions that lost every master to a total restart (all
       -- replicas re-registered as Slave/Prepare, so no proxy exists for
       -- autoAssign and no Down entry exists for failover).
@@ -1547,12 +1557,12 @@ theorem flareReconcileStep_decreases_measure (resp : K8sResponse)
       cases crd with
       | some c => left; simp [flareReconcileCore, h, flareReconcileMeasure]
       | none => right; simp [flareReconcileCore, h, flareReconcileTerminalBool]
-    | PodListResponse _ _ _ _ _ => right; simp [flareReconcileCore, h, flareReconcileTerminalBool]
+    | PodListResponse _ _ _ _ _ _ => right; simp [flareReconcileCore, h, flareReconcileTerminalBool]
     | PatchResponse _ => right; simp [flareReconcileCore, h, flareReconcileTerminalBool]
     | NoResponse => right; simp [flareReconcileCore, h, flareReconcileTerminalBool]
   | AfterListPods =>
     cases resp with
-    | PodListResponse pods zones terminating dataBearing unhealthy =>
+    | PodListResponse pods zones terminating dataBearing unhealthy repairHeld =>
       simp only [flareReconcileCore, h]
       split <;> (left; simp [flareReconcileMeasure])
     | CRDResponse _ => right; simp [flareReconcileCore, h, flareReconcileTerminalBool]

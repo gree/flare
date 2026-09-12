@@ -114,6 +114,19 @@ structure OperatorMetrics where
   -- behind until something rebuilds it — this is that something.
   replicaResyncs : Counter
 
+  -- Replica repair ledger (SC-03 / SAF-02, SAF-05; StateMachine/ReplicaRepair).
+  -- requested = drop deltas attributed to a replica; started = the demoted
+  -- node confirmed the Proxy map and was released to be re-seated (flared
+  -- will reconstruct); completed = the node is Slave/Active AND its own
+  -- reconstruction_completed counter moved; voided = the destination became
+  -- a MASTER while under repair, so its missed writes sit on a primary
+  -- (CRITICAL); pending = ledger entries right now (gauge).
+  replicaRepairRequested : Counter
+  replicaRepairStarted : Counter
+  replicaRepairCompleted : Counter
+  replicaRepairVoided : Counter
+  replicaRepairsPending : Gauge
+
   -- Gauge: draining masters the drain guard kept because NO promotable
   -- successor exists. CRITICAL: each is a partition that loses its only
   -- data-bearing node when the pod's grace period expires; the operator
@@ -184,6 +197,11 @@ def initMetrics : IO OperatorMetrics := do
   let replicaKeyDelta ← IO.mkRef 0.0
   let masterlessPartitions ← IO.mkRef 0.0
   let replicaResyncs ← IO.mkRef 0
+  let replicaRepairRequested ← IO.mkRef 0
+  let replicaRepairStarted ← IO.mkRef 0
+  let replicaRepairCompleted ← IO.mkRef 0
+  let replicaRepairVoided ← IO.mkRef 0
+  let replicaRepairsPending ← IO.mkRef 0.0
   let drainNoSuccessor ← IO.mkRef 0.0
   let circuitBreakerTripped ← IO.mkRef 0.0
   let partitionsDesired ← IO.mkRef 0.0
@@ -208,6 +226,11 @@ def initMetrics : IO OperatorMetrics := do
     replicaKeyDelta := { value := replicaKeyDelta }
     masterlessPartitions := { value := masterlessPartitions }
     replicaResyncs := { value := replicaResyncs }
+    replicaRepairRequested := { value := replicaRepairRequested }
+    replicaRepairStarted := { value := replicaRepairStarted }
+    replicaRepairCompleted := { value := replicaRepairCompleted }
+    replicaRepairVoided := { value := replicaRepairVoided }
+    replicaRepairsPending := { value := replicaRepairsPending }
     drainNoSuccessor := { value := drainNoSuccessor }
     circuitBreakerTripped := { value := circuitBreakerTripped }
     partitionsDesired := { value := partitionsDesired }
@@ -404,6 +427,23 @@ def exportMetrics (metrics : OperatorMetrics) (clusterName : String) : IO String
   output := output ++ "# TYPE flare_operator_replica_resyncs_total counter\n"
   let resyncs ← metrics.replicaResyncs.value.get
   output := output ++ formatCounter "flare_operator_replica_resyncs_total" labels resyncs
+
+  -- Replica repair ledger (SC-03)
+  output := output ++ "# HELP flare_operator_replica_repair_requested_total Replica repair requests: drop deltas a master attributed to a replica\n"
+  output := output ++ "# TYPE flare_operator_replica_repair_requested_total counter\n"
+  output := output ++ formatCounter "flare_operator_replica_repair_requested_total" labels (← metrics.replicaRepairRequested.value.get)
+  output := output ++ "# HELP flare_operator_replica_repair_started_total Replica repairs whose demoted node confirmed the Proxy map and was released to re-seat (reconstruction follows)\n"
+  output := output ++ "# TYPE flare_operator_replica_repair_started_total counter\n"
+  output := output ++ formatCounter "flare_operator_replica_repair_started_total" labels (← metrics.replicaRepairStarted.value.get)
+  output := output ++ "# HELP flare_operator_replica_repair_completed_total Replica repairs completed: node Slave/Active with its own reconstruction_completed counter moved\n"
+  output := output ++ "# TYPE flare_operator_replica_repair_completed_total counter\n"
+  output := output ++ formatCounter "flare_operator_replica_repair_completed_total" labels (← metrics.replicaRepairCompleted.value.get)
+  output := output ++ "# HELP flare_operator_replica_repair_voided_total Replica repairs voided because the destination became a master (its missed writes are on a primary)\n"
+  output := output ++ "# TYPE flare_operator_replica_repair_voided_total counter\n"
+  output := output ++ formatCounter "flare_operator_replica_repair_voided_total" labels (← metrics.replicaRepairVoided.value.get)
+  output := output ++ "# HELP flare_operator_replica_repairs_pending Replica repair ledger entries not yet completed\n"
+  output := output ++ "# TYPE flare_operator_replica_repairs_pending gauge\n"
+  output := output ++ formatGauge "flare_operator_replica_repairs_pending" labels (← metrics.replicaRepairsPending.value.get)
 
   -- Drain-no-successor (gauge, CRITICAL)
   output := output ++ "# HELP flare_operator_drain_no_successor Draining masters with no promotable successor (partition loses its only data-bearing node at grace expiry)\n"

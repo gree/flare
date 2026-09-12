@@ -45,6 +45,9 @@ stats::stats():
 		_get_hits(0),
 		_get_misses(0),
 		_proxy_write_dropped(0),
+		_reconstruction_started(0),
+		_reconstruction_completed(0),
+		_reconstruction_failed(0),
 		_delete_hits(0),
 		_delete_misses(0),
 		_incr_hits(0),
@@ -155,6 +158,9 @@ uint64_t stats::get_cmd_set()											{ return this->_cmd_set.fetch(); }
 uint64_t stats::get_get_hits()											{ return this->_get_hits.fetch(); }
 uint64_t stats::get_get_misses()										{ return this->_get_misses.fetch(); }
 uint64_t stats::get_proxy_write_dropped()					{ return this->_proxy_write_dropped.fetch(); }
+uint64_t stats::get_reconstruction_started()			{ return this->_reconstruction_started.fetch(); }
+uint64_t stats::get_reconstruction_completed()		{ return this->_reconstruction_completed.fetch(); }
+uint64_t stats::get_reconstruction_failed()				{ return this->_reconstruction_failed.fetch(); }
 
 int stats::increment_proxy_write_dropped(const string& dest) {
 	this->_proxy_write_dropped.incr();

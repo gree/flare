@@ -27,6 +27,7 @@
  *	$Id$
  */
 #include "handler_reconstruction.h"
+#include "app.h"
 #include "connection_tcp.h"
 #include "op_dump.h"
 #include "op_meta.h"
@@ -82,9 +83,16 @@ int handler_reconstruction::run() {
 	// forever. Retry here with backoff; every attempt re-resolves and
 	// reconnects from scratch.
 	int result = -1;
+	// One request = one handler; count it once, whatever the retries do.
+	if (stats_object != NULL) {
+		stats_object->increment_reconstruction_started();
+	}
 	for (int attempt = 0; ; attempt++) {
 		result = this->_run_once();
 		if (result == 0) {
+			if (stats_object != NULL) {
+				stats_object->increment_reconstruction_completed();
+			}
 			return 0;
 		}
 		if (attempt >= 60) {
@@ -103,6 +111,9 @@ int handler_reconstruction::run() {
 	// legacy behavior on FINAL failure only (flarei marks the node down;
 	// the K8s operator rejects this and keeps the node in prepare).
 	log_err("reconstruction failed permanently after retries -> deactivating node", 0);
+	if (stats_object != NULL) {
+		stats_object->increment_reconstruction_failed();
+	}
 	this->_cluster->deactivate_node();
 	return result;
 }

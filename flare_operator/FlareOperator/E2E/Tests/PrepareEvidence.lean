@@ -7,23 +7,26 @@
   The lost activation is staged, not hoped for: the per-suite operator runs
   with FLARE_TEST_DROP_NODE_STATE set, so every `node state` event flared
   sends — the one-shot "reconstruction complete", and every re-announce of
-  it — is dropped at the TCP boundary and answered OK. The slave therefore
-  finishes its reconstruction, calls itself active in its OWN node map, and
-  stays Prepare in the operator's. That is the exact condition the repair
-  path exists for, and the only way to reach it on demand.
+  it — is dropped at the TCP boundary and answered OK. flared therefore
+  finishes its reconstruction (its reconstruction_completed counter moves,
+  because its activation call returned) yet stays Prepare in the operator's
+  map, which never learned. That is the handover-lost-ack condition the
+  repair path exists for, and the only way to reach it on demand.
 
   Asserted:
-    1. the condition holds: the seam logged a dropped event, the operator's
-       map says Prepare, flared's own `stats nodes` says active;
-    2. the repair activates the node and says WHY — the evidence line
-       (node reports itself active, a reconstruction completed in this
-       process, same source) — not a cursor distance; the node is Active in
-       the operator's map afterwards.
+    1. the condition holds, via signals that PERSIST (so the check does not
+       race the repair): the seam logged a dropped event, and the slave
+       reports reconstruction_completed >= 1;
+    2. the repair activates the node and says WHY — the completion evidence
+       (N reconstruction(s) completed in this process, lineage matches the
+       master) — not a cursor distance; the node is Active in the operator's
+       map afterwards, applied through reconcileStep.
 
-  The negative cases (near-but-unfinished cursor, mismatched lineage, a
-  master or lineage change during the episode, a node that booted into an
-  old map) cannot be staged deterministically against a tiny dataset; they
-  are pinned by flare_unit (StateMachine/SyncEvidence.lean).
+  The node's OWN active state is deliberately NOT used: flared sets it only
+  from the operator's echo, which is the signal that is lost, so it is
+  circular. The negative cases (zero completions, near-but-unfinished
+  cursor, mismatched lineage, cursor ahead, a master/lineage change during
+  the episode) are pinned by flare_unit (StateMachine/SyncEvidence.lean).
 -/
 import FlareOperator.E2E.Framework
 import FlareOperator.E2E.Helpers
@@ -120,7 +123,7 @@ def suite : TestSuite := {
       run := do
         match ← slaveEntry with
         | none => return .fail "no P0 slave in the operator's map"
-        | some s =>
+        | some _ =>
           let repaired ← waitForCondition "PREPARE-REPAIR activates on evidence" 300 do
             return containsSubstr (← opLog) "PREPARE-REPAIR:"
           let log ← opLog

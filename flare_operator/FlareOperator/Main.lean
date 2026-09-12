@@ -182,6 +182,14 @@ private def statNat (out key : String) : Option Nat :=
     | ["STAT", k, v] => if k == key then v.trim.toNat? else none
     | _ => none
 
+/-- A flared `stats` reply is complete only if the END terminator arrived;
+    a reply cut short (timeout, reset) lacks it and must not be read as "the
+    backend has no such field". -/
+private def statsReplyComplete (out : String) : Bool :=
+  (out.splitOn "\n").any fun l => (l.trim.replace "\r" "") == "END"
+
+private def hasSubstr (h needle : String) : Bool := (h.splitOn needle).length > 1
+
 /-- One string value out of a flared `stats` reply. -/
 private def statStr (out key : String) : Option String :=
   (out.splitOn "\n").findSome? fun line =>
@@ -1171,11 +1179,16 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
           let mOut ← Bridge.queryPodStats (extractPodName masterNode.serverName) ns "stats"
           let reading : SyncEvidence.Reading := match sOut, mOut with
             | .ok so, .ok mo =>
-              { slaveCompleted := statNat so "reconstruction_completed",
+              { slaveStarted := statNat so "reconstruction_started",
+                slaveCompleted := statNat so "reconstruction_completed",
                 slaveMasterId := statStr so "rocksdb_master_id",
                 slaveLsn := statNat so "rocksdb_repl_last_lsn",
                 masterId := statStr mo "rocksdb_master_id",
-                masterSeq := statNat mo "rocksdb_latest_sequence_number" }
+                masterSeq := statNat mo "rocksdb_latest_sequence_number",
+                -- Backend from the MASTER's reply, and only if that reply was
+                -- complete: "no rocksdb_ key in a truncated reply" is not
+                -- "this backend has no lineage".
+                masterIsRocksdb := if statsReplyComplete mo then some (hasSubstr mo "rocksdb_") else none }
             | _, _ => { }
           let (ep', verdict) := SyncEvidence.judge ep mKey reading
           episodes := episodes.map fun e => if e.nodeKey == key then ep' else e

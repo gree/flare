@@ -78,9 +78,16 @@ structure Entry where
   phase : Phase := .requested
   /-- Drops attributed so far (informational; the repair is the same). -/
   drops : Nat := 0
-  /-- The replica's `reconstruction_completed` when it was released to
-      assignment. Completion means the counter differs from this. -/
-  completedBaseline : Option Nat := none
+  /-- flared `reconstruction_started` when the node was released to
+      assignment. Completion requires a reconstruction that BEGAN after that
+      (started > this) and finished (started == completed). A drop below it
+      is a process restart: the baseline resets to 0, because a restarted
+      node reconstructs from boot and that copy is what we need. -/
+  startedAtReseat : Option Nat := none
+  /-- Drops attributed when the node was released. Drops that arrive AFTER
+      the reconstruction began may not be in the copy (item 3): on
+      completion the increment is requeued as a fresh request. -/
+  dropsAtReseat : Nat := 0
   /-- Why a resolved request is not being acted on this pass (gate reason). -/
   hold : Option String := none
   deriving Repr, BEq
@@ -198,6 +205,8 @@ def markDemoted (l : Ledger) (dest : String) (version : Nat) : Ledger :=
 structure Observation where
   /-- The node's own `node_map_version`, if its stats could be read. -/
   reportedVersion : Option Nat := none
+  /-- The node's own `reconstruction_started`, if readable. -/
+  reconstructionStarted : Option Nat := none
   /-- The node's own `reconstruction_completed`, if readable. -/
   reconstructionCompleted : Option Nat := none
   /-- Role/state of the node in the committed map, if present. -/
@@ -206,7 +215,8 @@ structure Observation where
 inductive Step where
   | none
   | released      -- demotion confirmed; node freed for assignment
-  | completed     -- Slave/Active with a moved reconstruction counter
+  | completed     -- Slave/Active with a reconstruction that began after the reseat and finished
+  | completedRequeued -- as `completed`, but drops arrived after the reconstruction began: the increment is requeued
   | voided        -- node became a Master while under repair
   deriving Repr, BEq
 
@@ -221,21 +231,37 @@ def advanceEntry (e : Entry) (o : Observation) : Option Entry × Step :=
       match o.reportedVersion with
       | some rv =>
         if rv ≥ v then
-          (some { e with phase := .reseated, completedBaseline := o.reconstructionCompleted }, .released)
+          (some { e with phase := .reseated, startedAtReseat := o.reconstructionStarted,
+                         dropsAtReseat := e.drops }, .released)
         else (some e, .none)
       | Option.none => (some e, .none)
   | .reseated =>
     match o.mapped with
     | some (FlareRole.Master, _) => (Option.none, .voided)
     | some (FlareRole.Slave, FlareState.Active) =>
-      match o.reconstructionCompleted, e.completedBaseline with
-      | some now, some base => if now != base then (Option.none, .completed) else (some e, .none)
-      -- No baseline was readable at release time: a moved counter cannot be
-      -- shown, so the first readable value becomes the baseline and the
-      -- entry waits for it to move. Better a repair that lingers than one
-      -- declared done on the strength of a re-announced Active.
-      | some now, Option.none => (some { e with completedBaseline := some now }, .none)
-      | Option.none, _ => (some e, .none)
+      match o.reconstructionStarted, o.reconstructionCompleted, e.startedAtReseat with
+      | some s, some c, some s0 =>
+        -- A drop below the reseat baseline is a process restart (counters
+        -- reset): the restarted node reconstructs from boot, so the
+        -- baseline becomes 0 and that reconstruction is the one to wait for.
+        -- Item 6: a bare reset (7 → 0) is therefore NOT completion — it
+        -- yields s == c == 0, which fails s > 0.
+        let s0' := if s < s0 then 0 else s0
+        if s > s0' && s == c then
+          -- A reconstruction that BEGAN after the reseat has FINISHED and
+          -- none is in flight. Drops that arrived after it began may not be
+          -- in the copy: requeue exactly that increment (item 3).
+          if e.drops > e.dropsAtReseat then
+            (some { e with phase := .requested, drops := e.drops - e.dropsAtReseat,
+                           startedAtReseat := Option.none, dropsAtReseat := 0, hold := Option.none },
+             .completedRequeued)
+          else (Option.none, .completed)
+        else
+          (some (if s < s0 then { e with startedAtReseat := some 0 } else e), .none)
+      -- No baseline was readable at release time: the first readable
+      -- started value becomes it, and the entry waits for a later one.
+      | some s, _, Option.none => (some { e with startedAtReseat := some s }, .none)
+      | _, _, _ => (some e, .none)
     | _ => (some e, .none)
 
 /-- Advance every entry the caller could observe. Entries without an
@@ -281,7 +307,8 @@ def Entry.toJson (e : Entry) : Json :=
     ([("dest", Json.str e.dest), ("masterKey", Json.str e.masterKey),
       ("phase", e.phase.toJson), ("drops", Json.num e.drops)] : List (String × Json))
     ++ (match e.nodeKey with | some k => [("nodeKey", Json.str k)] | none => [])
-    ++ (match e.completedBaseline with | some b => [("completedBaseline", Json.num b)] | none => [])
+    ++ (match e.startedAtReseat with | some b => [("startedAtReseat", Json.num b)] | none => [])
+    ++ [("dropsAtReseat", Json.num e.dropsAtReseat)]
     ++ (match e.hold with | some h => [("hold", Json.str h)] | none => [])
 
 open Lean in
@@ -293,7 +320,8 @@ def Entry.fromJson? (j : Json) : Option Entry := do
     dest := dest, masterKey := masterKey, phase := phase,
     drops := (j.getObjValAs? Nat "drops").toOption.getD 0,
     nodeKey := (j.getObjValAs? String "nodeKey").toOption,
-    completedBaseline := (j.getObjValAs? Nat "completedBaseline").toOption,
+    startedAtReseat := (j.getObjValAs? Nat "startedAtReseat").toOption,
+    dropsAtReseat := (j.getObjValAs? Nat "dropsAtReseat").toOption.getD 0,
     hold := (j.getObjValAs? String "hold").toOption }
 
 open Lean in

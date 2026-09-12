@@ -362,18 +362,28 @@ def patchFlareClusterStatus (crName ns : String) (phase : MigrationPhase)
 
 /-- The replica-repair ledger persisted in `status.replicaRepairs` (SC-03 /
     SAF-05): pending requests AND last-seen drop counters, so an operator
-    restart neither forgets a repair nor re-baselines the counters. `none`
-    when the CR has no ledger yet or it does not parse. -/
-def readRepairLedger (crName ns : String) : IO (Option ReplicaRepair.Ledger) := do
+    restart neither forgets a repair nor re-baselines the counters.
+
+    Three outcomes, kept distinct on purpose (item 4): `.ok none` = the CR
+    has no ledger (a fresh cluster: start with baselines); `.ok (some l)` =
+    restored; `.error` = the API call failed, the reply did not parse, or
+    the stored ledger is corrupt. An error must NOT be treated as absence —
+    starting from an empty ledger over a pending request loses the request
+    and re-baselines the counters, so the caller retries and holds repair
+    actions until a read succeeds. -/
+def readRepairLedger (crName ns : String) : IO (Except String (Option ReplicaRepair.Ledger)) := do
   match ← kubectl ["get", "flarecluster", crName, "-n", ns, "-o", "json"] with
-  | .error _ => return none
+  | .error e => return .error s!"ledger read failed: {e}"
   | .ok out =>
     match Lean.Json.parse out with
-    | .error _ => return none
+    | .error e => return .error s!"ledger read: CR JSON did not parse: {e}"
     | .ok j =>
       match j.getObjVal? "status" >>= (·.getObjVal? "replicaRepairs") with
-      | .ok r => return ReplicaRepair.Ledger.fromJson? r
-      | .error _ => return none
+      | .error _ => return .ok none
+      | .ok r =>
+        match ReplicaRepair.Ledger.fromJson? r with
+        | some l => return .ok (some l)
+        | none => return .error "ledger read: status.replicaRepairs is present but does not parse (corrupt); refusing to start from an empty ledger"
 
 /-- Persist the ledger (merge patch on the status subresource; the whole
     object is rewritten, arrays included). -/

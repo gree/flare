@@ -201,13 +201,17 @@ private def statStr (out key : String) : Option String :=
     keep the pending gauge current. Loud on failure: an unpersisted ledger is
     exactly what an operator restart would lose. -/
 private def persistLedger (crName ns : String) (before after : ReplicaRepair.Ledger)
-    (metrics : OperatorMetrics) : IO Unit := do
+    (metrics : OperatorMetrics) (dirtyRef : IO.Ref Bool) : IO Unit := do
   if before != after then
     metrics.replicaRepairsPending.set after.entries.length.toFloat
     match ← Bridge.writeRepairLedger crName ns after with
-    | .ok _ => pure ()
+    | .ok _ => dirtyRef.set false
     | .error e =>
-      IO.eprintln s!"[flare-operator] WARNING: could not persist the replica repair ledger ({e}); an operator restart now would lose: {after.summary}"
+      -- Item 4: the in-memory ledger is already updated, so a later pass
+      -- with no further change would never re-save. Mark it DIRTY; the
+      -- top of every pass retries the write until it lands.
+      dirtyRef.set true
+      IO.eprintln s!"[flare-operator] WARNING: could not persist the replica repair ledger ({e}); marked unsaved and will retry every pass — an operator restart before that lands would lose: {after.summary}"
 
 /-- Ensure K8s Service selectors point to the current Master for each partition. -/
 private def ensureServiceRouting (state : FlareClusterState) (crName ns : String)
@@ -900,6 +904,8 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
     (unreachCyclesRef : IO.Ref (List (String × Nat)))
     (reachSlotRef : IO.Ref Nat)
     (ledgerRef : IO.Ref ReplicaRepair.Ledger)
+    (ledgerAvailableRef : IO.Ref Bool)
+    (ledgerDirtyRef : IO.Ref Bool)
     (episodesRef : IO.Ref (List SyncEvidence.Episode))
     (pendingBroadcastRef : IO.Ref (Option Nat))
     (downCyclesRef : IO.Ref (List (String × Nat)))
@@ -934,57 +940,80 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
   -- 2. Run the FSM driver
   let oldVersion := (← stateRef.get).nodeMapVersion
 
+  -- 2a'. LEDGER FAULT TOLERANCE (item 4). If the ledger could not be read,
+  -- retry now and hold every repair action until it can; if the last save
+  -- failed, retry the save even though nothing changed since.
+  if !(← ledgerAvailableRef.get) then
+    match ← Bridge.readRepairLedger crName ns with
+    | .ok (some l) =>
+      ledgerRef.set l; ledgerAvailableRef.set true
+      IO.eprintln s!"[flare-operator] replica repair ledger RECOVERED from status: {l.summary}"
+    | .ok none =>
+      ledgerAvailableRef.set true
+      IO.eprintln "[flare-operator] replica repair ledger: status has none; starting with baselines"
+    | .error e =>
+      IO.eprintln s!"[flare-operator] WARNING: replica repair ledger still unavailable ({e}); repairs and drop accounting HELD this pass"
+  if (← ledgerDirtyRef.get) && (← ledgerAvailableRef.get) then
+    match ← Bridge.writeRepairLedger crName ns (← ledgerRef.get) with
+    | .ok _ => ledgerDirtyRef.set false; IO.eprintln "[flare-operator] replica repair ledger persisted on retry"
+    | .error e => IO.eprintln s!"[flare-operator] WARNING: replica repair ledger still unsaved ({e}); will retry next pass"
+
   -- 2a. REPLICA REPAIR, part 1 (SC-03 / SAF-02, SAF-05). Act on the ledger
   -- BEFORE the FSM runs, so a demotion is part of what this pass commits
   -- and sends, and the demoted node is held out of THIS pass's assignment.
   -- The decisions are pure (StateMachine/ReplicaRepair.lean); this block
   -- resolves, gates, applies demotions to stateRef and persists.
-  let heldKeys ← do
-    let led0 ← ledgerRef.get
-    let preState ← stateRef.get
-    let (led1, voided) := ReplicaRepair.resolve led0 preState
-    for e in voided do
-      IO.eprintln s!"[flare-operator] CRITICAL: replica repair VOIDED for {e.dest}: it is now a MASTER, so the {e.drops} write(s) master {e.masterKey} dropped to it are missing on a primary and demotion cannot recover them"
-      metrics.replicaRepairVoided.inc
-    -- Gate from the LAST committed map (this pass has not run yet) and the
-    -- breaker's last verdict. A gated request is HELD, not consumed.
-    let crdNow ← crdRef.get
-    let masterless := (List.range crdNow.spec.partitions).any fun pIdx =>
-      !(preState.nodeMap.any fun kv =>
-        kv.2.role == FlareRole.Master && kv.2.state == FlareState.Active
-          && kv.2.partition == Int.ofNat pIdx)
-    let tripped ← trippedRef.get
-    let resyncOnDrop := ((← IO.getEnv "FLARE_RESYNC_ON_DROP").map (· != "0")).getD true
-    let gate : Option String :=
-      if !resyncOnDrop then some "resync disabled (FLARE_RESYNC_ON_DROP=0)"
-      else if tripped then some "circuit breaker held"
-      else if masterless then some "a partition has no Active master"
-      else none
-    let (led2, acts) := ReplicaRepair.plan led1 gate.isNone (gate.getD "")
-    let mut led3 := led2
-    for (rKey, e) in acts do
-      let cs ← stateRef.get
-      match cs.lookupNode rKey with
-      | some rn =>
-        if rn.role == FlareRole.Slave then
-          let v := cs.nodeMapVersion + 1
-          let demoted : FlareNode :=
-            { rn with role := FlareRole.Proxy, state := FlareState.Active, partition := -1 }
-          stateRef.set { (cs.addNode rKey demoted) with nodeMapVersion := v }
-          led3 := ReplicaRepair.markDemoted led3 e.dest v
-          metrics.replicaResyncs.inc
-          IO.eprintln s!"[flare-operator] REPLICA REPAIR: demoting {rKey} to a live proxy at v{v} — master {e.masterKey} dropped {e.drops} write(s) to it. Held out of assignment until it reports v{v}; then re-seated as Slave/Prepare so flared reconstructs"
-        else
-          IO.eprintln s!"[flare-operator] replica repair: {rKey} is no longer a Slave; leaving the request pending"
-      | none =>
-        IO.eprintln s!"[flare-operator] replica repair: {rKey} is not in the map right now; leaving the request pending"
-    for e in led3.entries do
-      let prevHold := (led0.entries.find? (·.dest == e.dest)).bind (·.hold)
-      if e.hold.isSome && prevHold != e.hold then
-        IO.eprintln s!"[flare-operator] replica repair HELD for {e.nodeKey.getD e.dest}: {e.hold.getD ""} — the request is retained and runs when the gate opens"
-    ledgerRef.set led3
-    persistLedger crName ns led0 led3 metrics
-    pure (ReplicaRepair.heldKeys led3)
+  let heldKeys : List String ← do
+    let ledgerAvailable ← ledgerAvailableRef.get
+    if !ledgerAvailable then
+      IO.eprintln "[flare-operator] replica repair: ledger unavailable; holding all repair actions this pass"
+      pure []
+    else
+      let led0 ← ledgerRef.get
+      let preState ← stateRef.get
+      let (led1, voided) := ReplicaRepair.resolve led0 preState
+      for e in voided do
+        IO.eprintln s!"[flare-operator] CRITICAL: replica repair VOIDED for {e.dest}: it is now a MASTER, so the {e.drops} write(s) master {e.masterKey} dropped to it are missing on a primary and demotion cannot recover them"
+        metrics.replicaRepairVoided.inc
+      -- Gate from the LAST committed map (this pass has not run yet) and the
+      -- breaker's last verdict. A gated request is HELD, not consumed.
+      let crdNow ← crdRef.get
+      let masterless := (List.range crdNow.spec.partitions).any fun pIdx =>
+        !(preState.nodeMap.any fun kv =>
+          kv.2.role == FlareRole.Master && kv.2.state == FlareState.Active
+            && kv.2.partition == Int.ofNat pIdx)
+      let tripped ← trippedRef.get
+      let resyncOnDrop := ((← IO.getEnv "FLARE_RESYNC_ON_DROP").map (· != "0")).getD true
+      let gate : Option String :=
+        if !resyncOnDrop then some "resync disabled (FLARE_RESYNC_ON_DROP=0)"
+        else if tripped then some "circuit breaker held"
+        else if masterless then some "a partition has no Active master"
+        else none
+      let (led2, acts) := ReplicaRepair.plan led1 gate.isNone (gate.getD "")
+      let mut led3 := led2
+      for (rKey, e) in acts do
+        let cs ← stateRef.get
+        match cs.lookupNode rKey with
+        | some rn =>
+          if rn.role == FlareRole.Slave then
+            let v := cs.nodeMapVersion + 1
+            let demoted : FlareNode :=
+              { rn with role := FlareRole.Proxy, state := FlareState.Active, partition := -1 }
+            stateRef.set { (cs.addNode rKey demoted) with nodeMapVersion := v }
+            led3 := ReplicaRepair.markDemoted led3 e.dest v
+            metrics.replicaResyncs.inc
+            IO.eprintln s!"[flare-operator] REPLICA REPAIR: demoting {rKey} to a live proxy at v{v} — master {e.masterKey} dropped {e.drops} write(s) to it. Held out of assignment until it reports v{v}; then re-seated as Slave/Prepare so flared reconstructs"
+          else
+            IO.eprintln s!"[flare-operator] replica repair: {rKey} is no longer a Slave; leaving the request pending"
+        | none =>
+          IO.eprintln s!"[flare-operator] replica repair: {rKey} is not in the map right now; leaving the request pending"
+      for e in led3.entries do
+        let prevHold := (led0.entries.find? (·.dest == e.dest)).bind (·.hold)
+        if e.hold.isSome && prevHold != e.hold then
+          IO.eprintln s!"[flare-operator] replica repair HELD for {e.nodeKey.getD e.dest}: {e.hold.getD ""} — the request is retained and runs when the gate opens"
+      ledgerRef.set led3
+      persistLedger crName ns led0 led3 metrics ledgerDirtyRef
+      pure (ReplicaRepair.heldKeys led3)
 
   let drainBlockedRef ← IO.mkRef 0
   runReconcileDriver stateRef migrationRef graceCyclesRef trippedRef drainBlockedRef unreadyCyclesRef podKeysRef podAddrsRef heldKeys crName ns
@@ -1248,35 +1277,44 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
   -- rebuild). Runs every pass while anything is pending; one `stats` exec
   -- per pending replica, nothing when the ledger is empty.
   do
-    let led0 ← ledgerRef.get
-    if !led0.entries.isEmpty then
-      let mut obs : List (String × ReplicaRepair.Observation) := []
-      for e in led0.entries do
-        match e.nodeKey with
-        | none => pure ()
-        | some k =>
-          let mapped := (finalState.lookupNode k).map fun n => (n.role, n.state)
-          let (rv, rc) ← do
-            match ← Bridge.queryPodStats (extractPodName k) ns "stats" with
-            | .ok out => pure (statNat out "node_map_version", statNat out "reconstruction_completed")
-            | .error _ => pure (none, none)
-          obs := obs ++ [(e.dest, { reportedVersion := rv, reconstructionCompleted := rc, mapped := mapped })]
-      let (led1, steps) := ReplicaRepair.advance led0 obs
-      for (e, st) in steps do
-        let who := e.nodeKey.getD e.dest
-        match st with
-        | .released =>
-          metrics.replicaRepairStarted.inc
-          IO.eprintln s!"[flare-operator] REPLICA REPAIR: {who} confirmed the demotion ({e.phase}); released to assignment — the next pass re-seats it as Slave/Prepare and flared reconstructs"
-        | .completed =>
-          metrics.replicaRepairCompleted.inc
-          IO.eprintln s!"[flare-operator] REPLICA REPAIR COMPLETE: {who} is Slave/Active and its reconstruction_completed counter moved (baseline {e.completedBaseline.getD 0}); {e.drops} dropped write(s) recovered by reconstruction"
-        | .voided =>
-          metrics.replicaRepairVoided.inc
-          IO.eprintln s!"[flare-operator] CRITICAL: replica repair VOIDED for {who}: it became a MASTER while under repair; the {e.drops} write(s) it missed are now missing on a primary"
-        | .none => pure ()
-      ledgerRef.set led1
-      persistLedger crName ns led0 led1 metrics
+    let ledgerAvailable ← ledgerAvailableRef.get
+    if ledgerAvailable then
+      let led0 ← ledgerRef.get
+      if !led0.entries.isEmpty then
+        let mut obs : List (String × ReplicaRepair.Observation) := []
+        for e in led0.entries do
+          match e.nodeKey with
+          | none => pure ()
+          | some k =>
+            let mapped := (finalState.lookupNode k).map fun n => (n.role, n.state)
+            let (rv, rs, rc) ← do
+              match ← Bridge.queryPodStats (extractPodName k) ns "stats" with
+              | .ok out => pure (statNat out "node_map_version", statNat out "reconstruction_started", statNat out "reconstruction_completed")
+              | .error _ => pure (none, none, none)
+            obs := obs ++ [(e.dest, { reportedVersion := rv, reconstructionStarted := rs, reconstructionCompleted := rc, mapped := mapped })]
+        let (led1, steps) := ReplicaRepair.advance led0 obs
+        for (e, st) in steps do
+          let who := e.nodeKey.getD e.dest
+          match st with
+          | .released =>
+            metrics.replicaRepairStarted.inc
+            IO.eprintln s!"[flare-operator] REPLICA REPAIR: {who} confirmed the demotion ({e.phase}); released to assignment — the next pass re-seats it as Slave/Prepare and flared reconstructs"
+          | .completed =>
+            metrics.replicaRepairCompleted.inc
+            IO.eprintln s!"[flare-operator] REPLICA REPAIR COMPLETE: {who} is Slave/Active; a reconstruction that began after the reseat (started > {e.startedAtReseat.getD 0}) finished with none in flight; {e.drops} dropped write(s) recovered by reconstruction"
+          | .completedRequeued =>
+            -- Item 3: drops kept arriving after the reconstruction began; the
+            -- copy may not hold them. The first repair is complete, and the
+            -- increment is already back in the ledger as a fresh request.
+            metrics.replicaRepairCompleted.inc
+            metrics.replicaRepairRequested.inc
+            IO.eprintln s!"[flare-operator] REPLICA REPAIR COMPLETE (with late drops): {who} reconstructed, but {e.drops - e.dropsAtReseat} write(s) were dropped to it after the reconstruction began and may not be in the copy — REQUEUED as a new request"
+          | .voided =>
+            metrics.replicaRepairVoided.inc
+            IO.eprintln s!"[flare-operator] CRITICAL: replica repair VOIDED for {who}: it became a MASTER while under repair; the {e.drops} write(s) it missed are now missing on a primary"
+          | .none => pure ()
+        ledgerRef.set led1
+        persistLedger crName ns led0 led1 metrics ledgerDirtyRef
 
   -- Stats probe cadence. 5 minutes in production; the harness shortens it
   -- (FLARE_STATS_PROBE_INTERVAL_MS) so a repair can be watched in minutes.
@@ -1339,17 +1377,19 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
                   | none => none
                 else none
               | _ => none
-            let led0 ← ledgerRef.get
-            let (led1, newDrops) := ReplicaRepair.observe led0 mKey drops
-            let mut led2 := led1
-            for (dest, d) in newDrops do
-              IO.eprintln s!"[flare-operator] REPLICA REPAIR requested: master {mKey} dropped {d} more write(s) to {dest} — that replica is behind and nothing else repairs it"
-              metrics.replicaRepairRequested.inc
-              led2 := ReplicaRepair.request led2 mKey dest d
-            if !led0.initialized then
-              IO.eprintln s!"[flare-operator] replica repair ledger initialized from {mKey}: {drops.length} destination counter(s) recorded as baseline, none attributed"
-            ledgerRef.set led2
-            persistLedger crName ns led0 led2 metrics
+            -- Item 4: no accounting on a ledger we could not read.
+            if (← ledgerAvailableRef.get) then
+              let led0 ← ledgerRef.get
+              let (led1, newDrops) := ReplicaRepair.observe led0 mKey drops
+              let mut led2 := led1
+              for (dest, d) in newDrops do
+                IO.eprintln s!"[flare-operator] REPLICA REPAIR requested: master {mKey} dropped {d} more write(s) to {dest} — that replica is behind and nothing else repairs it"
+                metrics.replicaRepairRequested.inc
+                led2 := ReplicaRepair.request led2 mKey dest d
+              if !led0.initialized then
+                IO.eprintln s!"[flare-operator] replica repair ledger initialized from {mKey}: {drops.length} destination counter(s) recorded as baseline, none attributed"
+              ledgerRef.set led2
+              persistLedger crName ns led0 led2 metrics ledgerDirtyRef
             -- EMPTY-MASTER decision, typed (SC-05 / SAF-04). `items` returns
             -- 0 for a missing curr_items line as readily as for a real zero;
             -- a truncated stats reply must NOT read as "empty, delete it".
@@ -1793,14 +1833,28 @@ def main (args : List String) : IO Unit := do
   -- against, survive this process.
   -- Prepare episodes for the activation-evidence repair (SC-04 / SAF-03).
   let episodesRef ← IO.mkRef ([] : List SyncEvidence.Episode)
-  let ledgerRef ← IO.mkRef (← do
-    match ← Bridge.readRepairLedger crName ns with
-    | some l =>
-      IO.eprintln s!"[flare-operator] replica repair ledger restored from status: {l.summary} ({l.counters.length} counter(s))"
-      pure l
-    | none =>
-      IO.eprintln "[flare-operator] replica repair ledger: nothing in status, starting fresh (first observation will record baselines only)"
-      pure ({} : ReplicaRepair.Ledger))
+  -- Item 4: "no ledger" and "could not read the ledger" are different.
+  -- Starting from an empty ledger over a pending request would lose it and
+  -- re-baseline the counters, so a failed read leaves the ledger UNAVAILABLE:
+  -- no repair action and no drop accounting run until a read succeeds
+  -- (retried here briefly, then at the top of every pass).
+  let ledgerRef ← IO.mkRef ({} : ReplicaRepair.Ledger)
+  let ledgerAvailableRef ← IO.mkRef false
+  let ledgerDirtyRef ← IO.mkRef false
+  for attempt in [0:15] do
+    if !(← ledgerAvailableRef.get) then
+      match ← Bridge.readRepairLedger crName ns with
+      | .ok (some l) =>
+        ledgerRef.set l; ledgerAvailableRef.set true
+        IO.eprintln s!"[flare-operator] replica repair ledger restored from status: {l.summary} ({l.counters.length} counter(s))"
+      | .ok none =>
+        ledgerAvailableRef.set true
+        IO.eprintln "[flare-operator] replica repair ledger: nothing in status, starting fresh (first observation will record baselines only)"
+      | .error e =>
+        IO.eprintln s!"[flare-operator] replica repair ledger read failed (attempt {attempt + 1}/15): {e}"
+        IO.sleep 2000
+  if !(← ledgerAvailableRef.get) then
+    IO.eprintln "[flare-operator] WARNING: replica repair ledger UNAVAILABLE at start; repair actions and drop accounting are HELD until a read succeeds — never starting from an empty ledger over a possibly pending request"
   let pendingBroadcastRef ← IO.mkRef (none : Option Nat)
   let downCyclesRef ← IO.mkRef ([] : List (String × Nat))
   let emptyMasterStreakRef ← IO.mkRef ([] : List (String × Nat))
@@ -1855,7 +1909,7 @@ def main (args : List String) : IO Unit := do
     let startTime ← IO.monoMsNow
     try
       -- Use FSM-driven reconcile (complete implementation with all 5 requirements)
-      reconcileOnceFSM stateRef crdRef migrationRef graceCyclesRef trippedRef prepareCyclesRef unreadyCyclesRef podKeysRef podAddrsRef unreachCyclesRef reachSlotRef ledgerRef episodesRef pendingBroadcastRef downCyclesRef emptyMasterStreakRef probeSlotRef pendingConfRef masterSnapshotRef driftTickRef metrics leaseName identity crName ns
+      reconcileOnceFSM stateRef crdRef migrationRef graceCyclesRef trippedRef prepareCyclesRef unreadyCyclesRef podKeysRef podAddrsRef unreachCyclesRef reachSlotRef ledgerRef ledgerAvailableRef ledgerDirtyRef episodesRef pendingBroadcastRef downCyclesRef emptyMasterStreakRef probeSlotRef pendingConfRef masterSnapshotRef driftTickRef metrics leaseName identity crName ns
     catch e =>
       IO.eprintln s!"[flare-operator] reconcile error: {e}"
     let endTime ← IO.monoMsNow

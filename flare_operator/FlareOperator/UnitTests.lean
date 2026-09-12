@@ -78,7 +78,7 @@ def firstPhase (l : Ledger) : Option Phase := l.entries.head?.map (·.phase)
 def firstDrops (l : Ledger) : Option Nat := l.entries.head?.map (·.drops)
 def firstNodeKey (l : Ledger) : Option String := l.entries.head?.bind (·.nodeKey)
 def firstHold (l : Ledger) : Option String := l.entries.head?.bind (·.hold)
-def firstBaseline (l : Ledger) : Option Nat := l.entries.head?.bind (·.completedBaseline)
+def firstStartedAtReseat (l : Ledger) : Option Nat := l.entries.head?.bind (·.startedAtReseat)
 
 def checkRequestResolve (ctx : Ctx) : IO Unit := do
   check ctx "a request is recorded once per destination"
@@ -119,43 +119,65 @@ def checkGate (ctx : Ctx) : IO Unit := do
   check ctx "plan does not act twice on a demoted entry"
     ((plan lDem true "").2.isEmpty)
 
-def obs (v : Option Nat) (c : Option Nat) (m : Option (FlareRole × FlareState)) : Observation :=
-  { reportedVersion := v, reconstructionCompleted := c, mapped := m }
+def obs (v : Option Nat) (st c : Option Nat) (m : Option (FlareRole × FlareState)) : Observation :=
+  { reportedVersion := v, reconstructionStarted := st, reconstructionCompleted := c, mapped := m }
 
 def stepsOf (l : Ledger) (o : Observation) : List Step :=
   (advance l [(slaveKey, o)]).2.map (·.2)
 
-/-- Released after confirming version 11 with completion baseline 1. -/
-def lRel : Ledger := (advance lDem [(slaveKey, obs (some 11) (some 1) (some (.Proxy, .Active)))]).1
+/-- Released after confirming version 11; flared had started=completed=1
+    (its boot reconstruction) at that moment, and 3 drops were attributed. -/
+def lRel : Ledger := (advance lDem [(slaveKey, obs (some 11) (some 1) (some 1) (some (.Proxy, .Active)))]).1
 
 def checkAdvanceHold (ctx : Ctx) : IO Unit := do
-  let old := obs (some 10) (some 1) (some (.Proxy, .Active))
+  let old := obs (some 10) (some 1) (some 1) (some (.Proxy, .Active))
   check ctx "a node still reporting the OLD version stays held"
     (stepsOf lDem old == [] && heldKeys (advance lDem [(slaveKey, old)]).1 == [slaveKey])
-  let confirmed := obs (some 11) (some 1) (some (.Proxy, .Active))
-  check ctx "a node reporting the demotion version is released with a completion baseline"
+  let confirmed := obs (some 11) (some 1) (some 1) (some (.Proxy, .Active))
+  check ctx "a node reporting the demotion version is released, recording started and drops at reseat"
     (stepsOf lDem confirmed == [.released] && heldKeys lRel == []
-      && firstPhase lRel == some .reseated && firstBaseline lRel == some 1)
-  let unread := obs none none (some (.Proxy, .Active))
+      && firstPhase lRel == some .reseated
+      && (lRel.entries.head?.bind (·.startedAtReseat)) == some 1
+      && (lRel.entries.head?.map (·.dropsAtReseat)) == some 3)
+  let unread := obs none none none (some (.Proxy, .Active))
   check ctx "unreadable stats change nothing (fail closed: stay held)"
     (stepsOf lDem unread == [] && heldKeys (advance lDem [(slaveKey, unread)]).1 == [slaveKey])
 
 def checkAdvanceComplete (ctx : Ctx) : IO Unit := do
   check ctx "Slave/Prepare is in progress, not complete"
-    (stepsOf lRel (obs (some 12) (some 1) (some (.Slave, .Prepare))) == [])
-  check ctx "Slave/Active with an UNMOVED reconstruction counter is NOT completion (re-announced Active)"
-    (stepsOf lRel (obs (some 12) (some 1) (some (.Slave, .Active))) == [])
-  let done := obs (some 12) (some 2) (some (.Slave, .Active))
-  check ctx "Slave/Active with a MOVED reconstruction counter completes and removes the entry"
+    (stepsOf lRel (obs (some 12) (some 2) (some 1) (some (.Slave, .Prepare))) == [])
+  check ctx "Slave/Active with NO new reconstruction since reseat (started unchanged) is NOT completion (re-announced Active)"
+    (stepsOf lRel (obs (some 12) (some 1) (some 1) (some (.Slave, .Active))) == [])
+  check ctx "a reconstruction that STARTED after the reseat but is still in flight (started 2, completed 1) is not completion"
+    (stepsOf lRel (obs (some 12) (some 2) (some 1) (some (.Slave, .Active))) == [])
+  let done := obs (some 12) (some 2) (some 2) (some (.Slave, .Active))
+  check ctx "a reconstruction that began after the reseat and finished (started 2 == completed 2 > baseline 1) completes and removes the entry"
     (stepsOf lRel done == [.completed] && (advance lRel [(slaveKey, done)]).1.entries.isEmpty)
-  check ctx "a counter that reset to zero (node restarted, reconstructed at boot) counts as moved"
-    (stepsOf lRel (obs (some 12) (some 0) (some (.Slave, .Active))) == [.completed])
+  -- Item 6 (reviewer): a bare counter RESET (process restart, 7 → 0) must not
+  -- read as completion. It yields started == completed == 0, which is not a
+  -- reconstruction after the reseat; the baseline resets so the post-restart
+  -- reconstruction is what completes it.
+  let lHigh : Ledger := { lRel with entries := lRel.entries.map fun e => { e with startedAtReseat := some 7 } }
+  let reset := obs (some 12) (some 0) (some 0) (some (.Slave, .Active))
+  let (lAfterReset, stReset) := advance lHigh [(slaveKey, reset)]
+  check ctx "a counter reset to zero (restart) is NOT completion; the baseline resets to 0"
+    (stReset.isEmpty && (lAfterReset.entries.head?.bind (·.startedAtReseat)) == some 0)
+  check ctx "after the restart, the boot reconstruction (started 1 == completed 1) completes it — no waiting forever below the old baseline"
+    (stepsOf lAfterReset (obs (some 12) (some 1) (some 1) (some (.Slave, .Active))) == [.completed])
+  -- Item 3 (reviewer): drops that arrive AFTER the reconstruction began are
+  -- not necessarily in the copy. Completion then requeues the increment.
+  let lLate := request lRel masterKey slaveKey 2     -- 2 more drops while reseated (3 → 5)
+  let (lReq, stLate) := advance lLate [(slaveKey, done)]
+  check ctx "late drops after the reseat: completion requeues exactly the increment as a fresh request"
+    (stLate.map (·.2) == [.completedRequeued] && firstPhase lReq == some .requested
+      && firstDrops lReq == some 2 && (lReq.entries.head?.bind (·.startedAtReseat)) == none
+      && firstNodeKey lReq == some slaveKey)
   check ctx "a node that became MASTER while reseated is voided"
-    (stepsOf lRel (obs (some 12) (some 2) (some (.Master, .Active))) == [.voided])
-  let lNoBase : Ledger := { lRel with entries := lRel.entries.map fun e => { e with completedBaseline := none } }
+    (stepsOf lRel (obs (some 12) (some 2) (some 2) (some (.Master, .Active))) == [.voided])
+  let lNoBase : Ledger := { lRel with entries := lRel.entries.map fun e => { e with startedAtReseat := none } }
   let (lNB, stNB) := advance lNoBase [(slaveKey, done)]
-  check ctx "with no baseline the first readable counter becomes the baseline; nothing completes yet"
-    (stNB.isEmpty && firstBaseline lNB == some 2)
+  check ctx "with no baseline the first readable started value becomes the baseline; nothing completes yet"
+    (stNB.isEmpty && (lNB.entries.head?.bind (·.startedAtReseat)) == some 2)
 
 def lFull : Ledger :=
   let l := markDemoted (request l1 masterKey slaveKey 3) slaveKey 11
@@ -173,9 +195,10 @@ open FlareOperator.SyncEvidence in
 def ep : Episode := { nodeKey := slaveKey, masterKey := masterKey }
 
 open FlareOperator.SyncEvidence in
-def rd (completed : Option Nat) (sId mId : Option String) (sLsn mSeq : Option Nat) : Reading :=
-  { slaveCompleted := completed, slaveMasterId := sId, masterId := mId,
-    slaveLsn := sLsn, masterSeq := mSeq }
+def rd (started completed : Option Nat) (sId mId : Option String) (sLsn mSeq : Option Nat)
+    (rocks : Option Bool) : Reading :=
+  { slaveStarted := started, slaveCompleted := completed, slaveMasterId := sId, masterId := mId,
+    slaveLsn := sLsn, masterSeq := mSeq, masterIsRocksdb := rocks }
 
 open FlareOperator.SyncEvidence in
 def isActivate : Verdict → Bool | .activate _ => true | _ => false
@@ -201,36 +224,62 @@ def checkEpisodes (ctx : Ctx) : IO Unit := do
 open FlareOperator.SyncEvidence in
 def checkJudgeRefusals (ctx : Ctx) : IO Unit := do
   check ctx "a changed master key is a source change, not a wait"
-    (isSourceChanged (judge ep "other:12121" (rd (some 1) none none none none)).2)
-  let (pinned, _) := judge ep masterKey (rd (some 1) (some "A") (some "A") none none)
+    (isSourceChanged (judge ep "other:12121" (rd (some 1) (some 1) none none none none (some false))).2)
+  let (pinned, _) := judge ep masterKey (rd (some 1) (some 1) (some "A") (some "A") (some 5) (some 9) (some true))
   check ctx "the master lineage is pinned at first sight"
     (pinned.masterId == some "A")
   check ctx "a changed master lineage is a source change"
-    (isSourceChanged (judge pinned masterKey (rd (some 1) (some "B") (some "B") none none)).2)
+    (isSourceChanged (judge pinned masterKey (rd (some 1) (some 1) (some "B") (some "B") (some 5) (some 9) (some true))).2)
   check ctx "unreadable reconstruction counters are refused"
-    (isWait (judge ep masterKey (rd none none none (some 995) (some 1000))).2)
-  check ctx "ZERO completions in this process is refused, even with a near cursor (proximity is not completion)"
-    (isWait (judge ep masterKey (rd (some 0) none none (some 999) (some 1000))).2)
+    (isWait (judge ep masterKey (rd none none none none (some 995) (some 1000) (some true))).2)
+  check ctx "ZERO completions is refused, even with a near cursor (proximity is not completion)"
+    (isWait (judge ep masterKey (rd (some 0) (some 0) none none (some 999) (some 1000) (some false))).2)
+  -- Item 1 (reviewer): a PAST success (completed 1) while a NEW reconstruction is
+  -- in flight (started 2) — the store has been truncated and is being
+  -- copied — must not activate, whatever the lineage.
+  check ctx "past success + reconstruction IN FLIGHT (started 2 > completed 1) is refused"
+    (isWait (judge ep masterKey (rd (some 2) (some 1) (some "A") (some "A") (some 0) (some 10000) (some true))).2)
+  -- Item 1 (reviewer's exact input): completed 1, same lineage, slave LSN 0,
+  -- master 10000. On RocksDB a completed reconstruction seeds a nonzero
+  -- cursor; zero means no complete copy of this source — refused.
+  check ctx "reviewer input: completed 1, same lineage, slave LSN 0, master 10000 → refused (cursor not seeded)"
+    (isWait (judge ep masterKey (rd (some 1) (some 1) (some "A") (some "A") (some 0) (some 10000) (some true))).2)
   check ctx "a lineage mismatch is refused however the cursor looks"
-    (isWait (judge ep masterKey (rd (some 1) (some "A") (some "B") (some 1000) (some 1000))).2)
+    (isWait (judge ep masterKey (rd (some 1) (some 1) (some "A") (some "B") (some 1000) (some 1000) (some true))).2)
   check ctx "a cursor AHEAD of the master's head is refused"
-    (isWait (judge ep masterKey (rd (some 1) (some "A") (some "A") (some 1001) (some 1000))).2)
+    (isWait (judge ep masterKey (rd (some 1) (some 1) (some "A") (some "A") (some 1001) (some 1000) (some true))).2)
+  -- Item 2 (reviewer): on RocksDB, MISSING lineage or cursor is a truncated
+  -- reply, not a backend without them — refused, never "n/a matches".
+  check ctx "RocksDB with lineage missing → refused (truncated reply, not absence)"
+    (isWait (judge ep masterKey (rd (some 1) (some 1) none none (some 5) (some 9) (some true))).2)
+  check ctx "RocksDB with cursor missing → refused"
+    (isWait (judge ep masterKey (rd (some 1) (some 1) (some "A") (some "A") none none (some true))).2)
+  check ctx "reviewer input: completed 1 alone (everything else missing, backend unknown) → refused"
+    (isWait (judge ep masterKey (rd (some 1) (some 1) none none none none none)).2)
+  check ctx "an INCOMPLETE master stats reply (backend unknown) is refused even with everything else present"
+    (isWait (judge ep masterKey (rd (some 1) (some 1) (some "A") (some "A") (some 5) (some 9) none)).2)
+  check ctx "a fresh process (started 0, completed 0) is refused"
+    (isWait (judge ep masterKey (rd (some 0) (some 0) (some "A") (some "A") (some 5) (some 9) (some true))).2)
 
 open FlareOperator.SyncEvidence in
 def checkJudgeAcceptance (ctx : Ctx) : IO Unit := do
-  check ctx "a completion, same lineage, cursor not ahead → activate"
-    (isActivate (judge ep masterKey (rd (some 1) (some "A") (some "A") (some 990) (some 1000))).2)
-  check ctx "a backend without lineage/cursor stats activates on a completion alone"
-    (isActivate (judge ep masterKey (rd (some 1) none none none none)).2)
-  check ctx "a FAR cursor does not block activation when a reconstruction completed (proximity is not the test)"
-    (isActivate (judge ep masterKey (rd (some 1) (some "A") (some "A") (some 10) (some 1000000))).2)
-  -- A source change (different master lineage) is rejected until the node
-  -- reconstructs from the new source (its lineage matches again).
-  let (afterChange, v1) := judge (ep.restart masterKey) masterKey (rd (some 5) (some "OLD") (some "NEW") none none)
+  check ctx "RocksDB: a completion, none in flight, same lineage, seeded cursor ≤ head → activate"
+    (isActivate (judge ep masterKey (rd (some 1) (some 1) (some "A") (some "A") (some 990) (some 1000) (some true))).2)
+  check ctx "RocksDB: a FAR-behind but seeded cursor does not block (proximity is not the test)"
+    (isActivate (judge ep masterKey (rd (some 1) (some 1) (some "A") (some "A") (some 10) (some 1000000) (some true))).2)
+  check ctx "non-RocksDB backend (complete reply, no rocksdb keys) activates on completion + none in flight"
+    (isActivate (judge ep masterKey (rd (some 1) (some 1) none none none none (some false))).2)
+  check ctx "past success then re-reconstruction that FINISHED (started 2 == completed 2) activates"
+    (isActivate (judge ep masterKey (rd (some 2) (some 2) (some "A") (some "A") (some 990) (some 1000) (some true))).2)
+  check ctx "after a restart, the new process's own completed reconstruction (1 == 1) activates"
+    (isActivate (judge ep masterKey (rd (some 1) (some 1) (some "A") (some "A") (some 3) (some 9) (some true))).2)
+  -- Source change: a completion whose lineage is the OLD master is refused
+  -- until the node reconstructs from the new one.
+  let (afterChange, v1) := judge (ep.restart masterKey) masterKey (rd (some 5) (some 5) (some "OLD") (some "NEW") (some 5) (some 9) (some true))
   check ctx "after a source change a completion whose lineage is the OLD master is refused"
     (isWait v1)
   check ctx "once the node's lineage matches the new master it activates"
-    (isActivate (judge afterChange masterKey (rd (some 6) (some "NEW") (some "NEW") none none)).2)
+    (isActivate (judge afterChange masterKey (rd (some 6) (some 6) (some "NEW") (some "NEW") (some 5) (some 9) (some true))).2)
 
 -- ── StatsObservation (SAF-04 / SAF-06) ───────────────────────────────
 
@@ -279,6 +328,24 @@ def checkStatsObservation (ctx : Ctx) : IO Unit := do
   check ctx "successor INVALID when the target is no longer an Active master (leadership lost)"
     (successorStillValid noMaster mk sk [sk] == false)
 
+def okB : Except String Unit → Bool | .ok _ => true | .error _ => false
+
+open FlareOperator.StatsObservation in
+def checkDeleteGate (ctx : Ctx) : IO Unit := do
+  let ok := EmptyMasterVerdict.act
+  check ctx "delete gate: fresh verdict act, successor valid, UID stable, lease held → delete"
+    (okB (deleteGate ok true true true))
+  check ctx "delete gate: operator LOST THE LEASE → refuse (item 5)"
+    (okB (deleteGate ok true true false) == false)
+  check ctx "delete gate: target pod UID changed across the observation (replaced) → refuse"
+    (okB (deleteGate ok true false true) == false)
+  check ctx "delete gate: successor invalid on the post-read map → refuse"
+    (okB (deleteGate ok false true true) == false)
+  check ctx "delete gate: fresh verdict is skip → refuse regardless of the rest"
+    (okB (deleteGate (.skip "unknown") true true true) == false)
+  check ctx "delete gate: refusal reasons name the failing check"
+    (match deleteGate ok true true false with | .error r => (r.splitOn "lease").length > 1 | .ok _ => false)
+
 def run : IO UInt32 := do
   let ctx : Ctx := { failures := ← IO.mkRef [], count := ← IO.mkRef 0 }
   checkObserve ctx
@@ -291,6 +358,7 @@ def run : IO UInt32 := do
   checkJudgeRefusals ctx
   checkJudgeAcceptance ctx
   checkStatsObservation ctx
+  checkDeleteGate ctx
   let failures ← ctx.failures.get
   let n ← ctx.count.get
   IO.println s!"1..{n}"

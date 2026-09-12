@@ -25,10 +25,19 @@
        slave, and no further drop was needed;
     4. SAF-05: with resync disabled the same drop is HELD in the ledger (no
        demotion), the ledger survives an operator restart, and the restarted
-       operator with the gate open repairs it without another drop.
+       operator with the gate open repairs it without another drop;
+    5. SAF-05 (ledger persistence): with the operator's permission to write
+       flareclusters/status revoked, a new request is marked UNSAVED, retried
+       every pass, lands once the permission returns, and survives a restart;
+    6. SAF-05 (ledger read failure): a CORRUPT ledger in status is reported
+       unavailable — the operator never replaces it with an empty one — no
+       drop is accounted meanwhile, and once the ledger is repaired the drop
+       seen during the outage is requested and recovered (counters were not
+       re-baselined).
 
   Every fault-injecting step heals in every exit path.
 -/
+import Lean.Data.Json
 import FlareOperator.E2E.Framework
 import FlareOperator.E2E.Helpers
 import FlareOperator.E2E.Setup
@@ -251,6 +260,49 @@ private def awaitRepair (masterIp slaveIp : String)
     return .fail s!"the repair itself cost drops: proxy_write_dropped moved {droppedAfterHeal} → {dNow} after the link was healed"
   return .pass
 
+-- ─── ledger faults (tests 5 and 6) ─────────────────────────────────────
+
+/-- Rule 0 of the operator's ClusterRole grants both `flareclusters` and
+    `flareclusters/status`. Dropping the status resource makes the ledger's
+    status patch fail (403) while the CR stays readable: a clean persistence
+    fault, nothing else in the operator needs that write outside a migration. -/
+private def revokeStatusWrite : IO (Except String String) :=
+  kubectl ["patch", "clusterrole", "flare-operator", "--type=json", "-p",
+    "[{\"op\":\"replace\",\"path\":\"/rules/0/resources\",\"value\":[\"flareclusters\"]}]"]
+
+/-- Idempotent; safe on every exit path and in teardown. -/
+private def restoreStatusWrite : IO Unit := do
+  discard <| kubectl ["patch", "clusterrole", "flare-operator", "--type=json", "-p",
+    "[{\"op\":\"replace\",\"path\":\"/rules/0/resources\",\"value\":[\"flareclusters\",\"flareclusters/status\"]}]"]
+
+/-- status.replicaRepairs as compact JSON, to save and later restore. -/
+private def ledgerRawJson : IO (Option String) := do
+  match ← kubectl ["get", "flarecluster", cfg.name, "-n", cfg.«namespace», "-o", "json"] with
+  | .error _ => return none
+  | .ok out =>
+    match Lean.Json.parse out with
+    | .error _ => return none
+    | .ok j =>
+      match j.getObjVal? "status" >>= (·.getObjVal? "replicaRepairs") with
+      | .ok r => return some r.compress
+      | .error _ => return none
+
+private def patchLedgerRaw (raw : String) : IO (Except String String) :=
+  kubectl ["patch", "flarecluster", cfg.name, "-n", cfg.«namespace», "--subresource=status",
+           "--type=merge", "-p", s!"\{\"status\":\{\"replicaRepairs\":{raw}}}"]
+
+private def setGate (closed : Bool) : IO (Except String Unit) := do
+  let arg := if closed then "FLARE_RESYNC_ON_DROP=0" else "FLARE_RESYNC_ON_DROP-"
+  match ← kubectl ["set", "env", s!"deployment/{cfg.operatorName}", "-n", cfg.«namespace», arg] with
+  | .error e => return .error e
+  | .ok _ =>
+    if ← kubectlRolloutStatus s!"deployment/{cfg.operatorName}" cfg.«namespace» 240 then return .ok ()
+    else return .error "operator rollout did not complete"
+
+private def restartOperator : IO Bool := do
+  discard <| kubectl ["rollout", "restart", s!"deployment/{cfg.operatorName}", "-n", cfg.«namespace»]
+  kubectlRolloutStatus s!"deployment/{cfg.operatorName}" cfg.«namespace» 240
+
 def suite : TestSuite := {
   name := "replica-repair"
   setup := do
@@ -260,7 +312,8 @@ def suite : TestSuite := {
     if !stable then
       IO.eprintln "# WARNING: cluster did not stabilize during setup"
   teardown := do
-    -- Belt and braces: whatever happened, no rule survives the suite.
+    -- Belt and braces: whatever happened, no rule and no RBAC hole survives.
+    restoreStatusWrite
     match ← pair with
     | .ok (_, mIp, _, sIp) => heal mIp sIp
     | .error _ => pure ()
@@ -388,7 +441,116 @@ def suite : TestSuite := {
               diagnostics mIp sIp
               return .fail "the operator that should repair did not restore the pending request from status"
             awaitRepair mIp sIp (started0 := s0) (completed0 := c0)
-              (droppedAfterHeal := dAfterHeal) (budget := 360) }
+              (droppedAfterHeal := dAfterHeal) (budget := 360) },
+
+    { name := "SAF-05: a ledger save that fails is marked unsaved, retried every pass, lands when allowed, and survives a restart"
+      run := do
+        match ← pair with
+        | .error e => return .fail e
+        | .ok (_, mIp, _, sIp) =>
+          if !(← ledgerDests).isEmpty then
+            return .fail s!"precondition: the ledger is not empty ({← ledgerDests})"
+          -- Close the gate so the request stays PENDING (held) rather than
+          -- being repaired in memory before the save can be observed.
+          match ← setGate true with
+          | .error e => return .fail s!"could not close the gate: {e}"
+          | .ok _ => pure ()
+          match ← revokeStatusWrite with
+          | .error e => return .fail s!"could not revoke the status write: {e}"
+          | .ok _ => IO.eprintln "# fault: the operator may no longer patch flareclusters/status"
+          match ← writeUnderPartition mIp sIp "unsaved" 20 with
+          | .error e => restoreStatusWrite; return .fail e
+          | .ok burst =>
+            heal mIp sIp
+            if burst.gapWhileCut == 0 then restoreStatusWrite; return .fail "the burst left no local gap"
+            let unsaved ← waitForCondition "operator marks the ledger UNSAVED after the failed persist" 150 do
+              return containsSubstr (← opLog) "marked unsaved and will retry"
+            if !unsaved then
+              restoreStatusWrite; diagnostics mIp sIp
+              return .fail "a failed save was not marked unsaved (a restart now would silently lose the request)"
+            if !(← ledgerDests).isEmpty then
+              restoreStatusWrite
+              return .fail s!"status shows an entry although the write was forbidden: {← ledgerDests}"
+            let retried ← waitForCondition "operator retries the unsaved ledger on a later pass" 90 do
+              return containsSubstr (← opLog) "still unsaved"
+            if !retried then restoreStatusWrite; return .fail "no retry of the unsaved ledger was logged on a later pass"
+            restoreStatusWrite
+            IO.eprintln "# fault cleared: status write allowed again"
+            let landed ← waitForCondition "the unsaved ledger lands once the write is allowed" 120 do
+              return containsSubstr (← opLog) "ledger persisted on retry" && !(← ledgerDests).isEmpty
+            if !landed then
+              diagnostics mIp sIp
+              return .fail "the unsaved ledger never landed after the permission was restored"
+            -- Survives a restart: the entry must come back from status.
+            if !(← restartOperator) then return .fail "operator restart did not complete"
+            let restored ← waitForCondition "restarted operator restores the HELD request from status" 120 do
+              let l ← opLog
+              return containsSubstr l "restored from status" && containsSubstr l "requested"
+            if !restored then diagnostics mIp sIp; return .fail "the request that was saved on retry did not come back after a restart"
+            -- Open the gate; the restored request is repaired without another drop.
+            let s0 := (← flaredStat sIp "reconstruction_started").getD 0
+            let c0 := (← flaredStat sIp "reconstruction_completed").getD 0
+            let dAfterHeal ← droppedByMaster mIp
+            match ← setGate false with
+            | .error e => return .fail s!"could not open the gate: {e}"
+            | .ok _ => pure ()
+            awaitRepair mIp sIp (started0 := s0) (completed0 := c0)
+              (droppedAfterHeal := dAfterHeal) (budget := 360) },
+
+    { name := "SAF-05: a corrupt ledger is held as unavailable, never replaced by an empty one; the drop seen meanwhile is recovered once it is readable"
+      run := do
+        match ← pair with
+        | .error e => return .fail e
+        | .ok (_, mIp, _, sIp) =>
+          if !(← ledgerDests).isEmpty then
+            return .fail s!"precondition: the ledger is not empty ({← ledgerDests})"
+          match ← ledgerRawJson with
+          | none => return .fail "could not read the persisted ledger to save it"
+          | some raw =>
+            match ← patchLedgerRaw "{\"entries\":\"corrupt\"}" with
+            | .error e => return .fail s!"could not corrupt the ledger: {e}"
+            | .ok _ => IO.eprintln "# fault: status.replicaRepairs.entries is now a string (unparseable)"
+            if !(← restartOperator) then discard <| patchLedgerRaw raw; return .fail "operator restart did not complete"
+            let held ← waitForCondition "restarted operator reports the ledger UNAVAILABLE (not absent)" 180 do
+              return containsSubstr (← opLog) "ledger UNAVAILABLE at start"
+            if !held then
+              discard <| patchLedgerRaw raw; diagnostics mIp sIp
+              return .fail "the operator did not report the corrupt ledger as unavailable"
+            if containsSubstr (← opLog) "starting fresh" then
+              discard <| patchLedgerRaw raw
+              return .fail "the operator started from an EMPTY ledger over a corrupt one (pending requests and counters would be lost)"
+            -- While unavailable: a drop must NOT be accounted, and the hold is logged.
+            match ← writeUnderPartition mIp sIp "outage" 20 with
+            | .error e => discard <| patchLedgerRaw raw; return .fail e
+            | .ok burst =>
+              heal mIp sIp
+              if burst.gapWhileCut == 0 then discard <| patchLedgerRaw raw; return .fail "the burst left no local gap"
+              IO.sleep 45000
+              let during ← opLog
+              if containsSubstr during "REPLICA REPAIR requested" then
+                discard <| patchLedgerRaw raw
+                return .fail "a drop was accounted while the ledger was unavailable (it would have been baselined against nothing)"
+              if !containsSubstr during "holding all repair actions" then
+                discard <| patchLedgerRaw raw
+                return .fail "no hold was logged while the ledger was unavailable"
+              -- Repair the ledger. The counters it carries predate the outage
+              -- drop, so recovery must REQUEST it — nothing was re-baselined.
+              match ← patchLedgerRaw raw with
+              | .error e => return .fail s!"could not restore the ledger: {e}"
+              | .ok _ => IO.eprintln "# fault cleared: ledger restored to its pre-corruption content"
+              let recovered ← waitForCondition "ledger RECOVERED from status" 120 do
+                return containsSubstr (← opLog) "ledger RECOVERED from status"
+              if !recovered then diagnostics mIp sIp; return .fail "the operator did not recover the repaired ledger"
+              let requested ← waitForCondition "the drop seen during the outage is requested after recovery" 150 do
+                return containsSubstr (← opLog) "REPLICA REPAIR requested"
+              if !requested then
+                diagnostics mIp sIp
+                return .fail "the drop observed during the outage was lost: recovery re-baselined the counters"
+              let s0 := (← flaredStat sIp "reconstruction_started").getD 0
+              let c0 := (← flaredStat sIp "reconstruction_completed").getD 0
+              let dAfterHeal ← droppedByMaster mIp
+              awaitRepair mIp sIp (started0 := s0) (completed0 := c0)
+                (droppedAfterHeal := dAfterHeal) (budget := 360) }
   ]
 }
 

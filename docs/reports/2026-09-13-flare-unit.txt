@@ -1,0 +1,66 @@
+# flare_unit — pure decision checks for SAF-02/03/04/05/06
+# tested revision: bd8b213d791b3ce61f3cdee6c54474b1253c60c1
+# command: cd flare_operator && lake build flare_unit && .lake/build/bin/flare_unit
+# date: 2026-09-13
+
+ok - first observation is a baseline, attributes nothing
+ok - an increase attributes the delta
+ok - unchanged attributes nothing
+ok - a counter that went DOWN is a reset: the new count is all new drops
+ok - a reset to zero (fresh master, no drops yet) attributes nothing
+ok - a destination first seen on an INITIALIZED ledger counts fully
+ok - counters are keyed per master: another master's first sighting also counts
+ok - a request is recorded once per destination
+ok - more drops on the same destination extend the entry, not duplicate it
+ok - a destination matching a Slave resolves to its key
+ok - an unmatched destination stays requested and unresolved
+ok - a destination that is now a MASTER is voided, not demoted
+ok - resolution accepts the bare host as well as host:port
+ok - a gated request is HELD with its reason and produces no action
+ok - a held request is not excluded from assignment (only a demoted one is)
+ok - when the gate opens the held request becomes an action and the hold clears
+ok - a demoted node is held out of assignment
+ok - plan does not act twice on a demoted entry
+ok - a node still reporting the OLD version stays held
+ok - a node reporting the demotion version is released with a completion baseline
+ok - unreadable stats change nothing (fail closed: stay held)
+ok - Slave/Prepare is in progress, not complete
+ok - Slave/Active with an UNMOVED reconstruction counter is NOT completion (re-announced Active)
+ok - Slave/Active with a MOVED reconstruction counter completes and removes the entry
+ok - a counter that reset to zero (node restarted, reconstructed at boot) counts as moved
+ok - a node that became MASTER while reseated is voided
+ok - with no baseline the first readable counter becomes the baseline; nothing completes yet
+ok - ledger survives a JSON round trip
+ok - an empty ledger round-trips
+ok - a Slave/Prepare node under an Active master starts an episode
+ok - the same source keeps the episode and counts the pass
+ok - a different master between passes restarts the episode (lineage will re-gate activation)
+ok - a node no longer Slave/Prepare ends its episode
+ok - a changed master key is a source change, not a wait
+ok - the master lineage is pinned at first sight
+ok - a changed master lineage is a source change
+ok - unreadable reconstruction counters are refused
+ok - ZERO completions in this process is refused, even with a near cursor (proximity is not completion)
+ok - a lineage mismatch is refused however the cursor looks
+ok - a cursor AHEAD of the master's head is refused
+ok - a completion, same lineage, cursor not ahead → activate
+ok - a backend without lineage/cursor stats activates on a completion alone
+ok - a FAR cursor does not block activation when a reconstruction completed (proximity is not the test)
+ok - after a source change a completion whose lineage is the OLD master is refused
+ok - once the node's lineage matches the new master it activates
+ok - a well-formed curr_items line parses to known
+ok - a blank reply (dropped/reset connection) is unknown, not known 0
+ok - a reply that omits curr_items is unknown
+ok - a non-numeric curr_items is unknown
+ok - a genuine zero is known 0, distinct from unknown
+ok - known-0 master with a known data-bearing slave → act
+ok - a nonzero master is never empty
+ok - an UNKNOWN master is never treated as empty (the SAF-04 defect)
+ok - a known-0 master with an UNKNOWN slave does not delete (no confirmed successor)
+ok - both empty → skip (nothing to hand over)
+ok - successor still valid when it is a data-bearing Active slave in the master's partition
+ok - successor INVALID when it is not in the data-bearing set (a resync just demoted its data)
+ok - successor INVALID when it was demoted to Proxy in the same tick
+ok - successor INVALID when the target is no longer an Active master (leadership lost)
+1..59
+# 59 checks passed

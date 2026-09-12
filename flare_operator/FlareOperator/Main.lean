@@ -1025,7 +1025,28 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
   -- node that missed the push catches up on the next one.
   if !heldKeys.isEmpty && finalVersion == oldVersion && pendingBefore.isNone then
     IO.eprintln s!"[flare-operator] re-sending v{finalVersion}: replica repair holds {heldKeys.length} node(s) that have not confirmed the map yet"
-  if finalVersion != oldVersion || pendingBefore.isSome || !heldKeys.isEmpty then
+  -- KEEP BROADCASTING UNTIL A COMMITTED ACTIVE STATE IS CONFIRMED. A node's
+  -- activation reaches the operator over TCP (activate_node) and updates the
+  -- committed map directly — out of band from this loop. If that lands while
+  -- the map is otherwise at rest, commitClusterState sees "every node Active"
+  -- and pins the version, so the active map is NEVER broadcast back; flared
+  -- keeps its local state at prepare, waits for the map to echo its
+  -- activation, retries activate_node (which the operator now rejects,
+  -- state already Active → "not allowed"), and after ~30 failures
+  -- deactivates itself to Down. Result on a busy cluster: a reconstructed
+  -- replica wedged Down, its partition down to one copy. A pod is only
+  -- Ready once flared's OWN map says it is active (the sync-gated probe), so
+  -- an Active-in-the-map node whose pod is NOT Ready has not applied the
+  -- map. Re-broadcast the current map (flared reprocesses an equal version)
+  -- until it has. Bounded: the node either applies it and goes Ready, or is
+  -- marked Down by dead detection — both clear the condition.
+  let readyKeys := (← podAddrsRef.get).map (·.1)
+  let unconfirmedActive := finalState.nodeMap.filter (fun kv =>
+    (kv.2.role == FlareRole.Master || kv.2.role == FlareRole.Slave)
+      && kv.2.state == FlareState.Active && !readyKeys.contains kv.1)
+  if !unconfirmedActive.isEmpty && finalVersion == oldVersion && pendingBefore.isNone && heldKeys.isEmpty then
+    IO.eprintln s!"[flare-operator] re-sending v{finalVersion}: {unconfirmedActive.length} node(s) are Active in the map but their pods are not Ready yet (activation not applied locally)"
+  if finalVersion != oldVersion || pendingBefore.isSome || !heldKeys.isEmpty || !unconfirmedActive.isEmpty then
     -- TEST SEAM (SAF-01 / CHECK-01). Unset in production, this is one
     -- getEnv and nothing else.
     --

@@ -24,6 +24,8 @@ import FlareOperator.Flare.Protocol
 import FlareOperator.StateMachine.Reconciler
 import FlareOperator.StateMachine.K8sReconciler
 import FlareOperator.StateMachine.ReplicaRepair
+import FlareOperator.StateMachine.SyncEvidence
+import FlareOperator.StateMachine.StatsObservation
 import FlareOperator.Kubectl
 import FlareOperator.Server.TcpServer
 import FlareOperator.Server.TopologyBroadcast
@@ -1286,7 +1288,7 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
         match finalState.nodeMap.find? (fun kv =>
             kv.2.role == FlareRole.Slave && kv.2.state == FlareState.Active
               && kv.2.partition == mNode.partition) with
-        | some (_, sNode) =>
+        | some (sKey, sNode) =>
           let mOut ← Bridge.queryPodStats (extractPodName mNode.serverName) ns "stats"
           let sOut ← Bridge.queryPodStats (extractPodName sNode.serverName) ns "stats"
           match mOut, sOut with
@@ -1340,15 +1342,49 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
               IO.eprintln s!"[flare-operator] replica repair ledger initialized from {mKey}: {drops.length} destination counter(s) recorded as baseline, none attributed"
             ledgerRef.set led2
             persistLedger crName ns led0 led2 metrics
-            if items mo == 0 && items so > 0 then
+            -- EMPTY-MASTER decision, typed (SC-05 / SAF-04). `items` returns
+            -- 0 for a missing curr_items line as readily as for a real zero;
+            -- a truncated stats reply must NOT read as "empty, delete it".
+            -- StatsObservation makes an unreadable count `unknown`, and the
+            -- verdict deletes only on a KNOWN 0 master with a KNOWN nonzero
+            -- successor.
+            let mObs := StatsObservation.parseCurrItems mo
+            let sObs := StatsObservation.parseCurrItems so
+            match StatsObservation.emptyMasterVerdict mObs sObs with
+            | .act =>
               let streak := ((streaks.lookup mKey).getD 0) + 1
               newStreaks := newStreaks ++ [(mKey, streak)]
-              IO.eprintln s!"[flare-operator] WARNING: master {mKey} is EMPTY (0 keys) while an Active slave holds {items so} keys (streak {streak}/3)"
+              IO.eprintln s!"[flare-operator] WARNING: master {mKey} is EMPTY (0 keys) while an Active slave holds {sObs} keys (streak {streak}/3)"
               if streak ≥ 3 && podDeletionAllowed then
-                IO.eprintln s!"[flare-operator] EMPTY-MASTER SELF-HEAL: gracefully deleting {extractPodName mNode.serverName} — the drain path will hand mastership to the data-bearing slave and the pod reseeds as a slave"
-                match ← Bridge.deletePodGraceful (extractPodName mNode.serverName) ns with
-                | .ok () => newStreaks := newStreaks.filter (·.1 != mKey)
-                | .error e => IO.eprintln s!"[flare-operator] empty-master self-heal delete failed: {e}"
+                -- SAF-06 REVALIDATION. The streak decision rests on a
+                -- snapshot; between it and the delete a resync may have
+                -- demoted the successor, the pod may have been replaced, or
+                -- leadership lost. Re-read the master and the successor NOW
+                -- and re-check the live map: delete only if the same target
+                -- still reads empty AND a data-bearing Active successor still
+                -- exists in its partition. Any unknown aborts.
+                let liveState ← stateRef.get
+                let freshM ← Bridge.queryPodStats (extractPodName mNode.serverName) ns "stats"
+                let freshS ← Bridge.queryPodStats (extractPodName sNode.serverName) ns "stats"
+                let mNow := match freshM with | .ok o => StatsObservation.parseCurrItems o | .error _ => .unknown
+                let sNow := match freshS with | .ok o => StatsObservation.parseCurrItems o | .error _ => .unknown
+                let dataBearing := match sNow with | .known n => if n > 0 then [sKey] else [] | .unknown => []
+                let verdictNow := StatsObservation.emptyMasterVerdict mNow sNow
+                let successorOk := StatsObservation.successorStillValid liveState mKey sKey dataBearing
+                if verdictNow == .act && successorOk then
+                  IO.eprintln s!"[flare-operator] EMPTY-MASTER SELF-HEAL: revalidated (master still empty, successor {sKey} still an Active data-bearing slave); gracefully deleting {extractPodName mNode.serverName} — the drain path hands mastership to the slave and the pod reseeds as a slave"
+                  match ← Bridge.deletePodGraceful (extractPodName mNode.serverName) ns with
+                  | .ok () => newStreaks := newStreaks.filter (·.1 != mKey)
+                  | .error e => IO.eprintln s!"[flare-operator] empty-master self-heal delete failed: {e}"
+                else
+                  IO.eprintln s!"[flare-operator] EMPTY-MASTER SELF-HEAL ABORTED at revalidation: master now {mNow}, successor {sKey} now {sNow}, successor still valid: {successorOk} — NOT deleting {extractPodName mNode.serverName} (the snapshot the streak was built on no longer holds)"
+                  newStreaks := newStreaks.filter (·.1 != mKey)
+            | .skip reason =>
+              -- Not empty, or the observation was not clear enough to act on.
+              -- Clear any streak: an unknown or nonzero reading breaks it.
+              if StatsObservation.parseCurrItems mo == StatsObservation.Items.unknown then
+                IO.eprintln s!"[flare-operator] empty-master check: master {mKey} item count unreadable this pass — {reason}; streak reset"
+              newStreaks := newStreaks.filter (·.1 != mKey)
           | _, _ => pure ()
         | none => pure ()
     emptyMasterStreakRef.set newStreaks

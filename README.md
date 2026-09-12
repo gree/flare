@@ -27,6 +27,45 @@ owned by a separate index server, `flarei`. Here:
 Everything below the "Upstream flare" heading is the original project
 documentation and still describes the protocol and storage semantics.
 
+## Guarantees, and what they are not
+
+The proofs and the safety work buy specific, bounded properties. It is easy
+to read them as more than they are, so state the limits plainly:
+
+- **At most one master per partition — of the committed map.** The proved
+  property is about the node map the operator commits: the merge can never
+  emit two masters for one partition. This is **not distributed writer
+  fencing.** A leader that lost its lease can still put a map on the wire
+  between its own lease check and the first packet, and the only bound on a
+  stale leader is recipient-side: flared ignores a map whose version is not
+  newer than the one it already holds. That protects only a node that has
+  **already seen the newer generation**; a node that missed the new leader's
+  broadcast has nothing to compare against and will accept the old one.
+  Per-node applied-generation tracking is future work (SAF-09).
+- **Masterless refill trades consistency for availability, on purpose.**
+  When a partition loses every master, the operator may promote a node that
+  is still in `Prepare` — i.e. holding a partial copy — rather than leave the
+  partition unserved. That is a deliberate choice of availability over
+  completeness; it can surface stale or missing keys, and it is why the
+  empty-master and drain guards exist around it.
+- **Live replication is proxying, not a WAL stream.** A write is forwarded to
+  the replica op-by-op with no per-write acknowledgement; the WAL is used
+  only during reconstruction. A network blip therefore drops replica writes
+  **silently** until something rebuilds that replica. The operator now
+  detects those drops and repairs the replica after the fact (SAF-02/03), but
+  the durable fix — content anti-entropy or continuous WAL shipping — is a
+  separate design (SAF-10).
+- **A proof is about its model; an alert proves only detection.** The Lean
+  theorems hold under their stated assumptions about the committed map; they
+  say nothing about liveness or about data on disk. An alert demonstrates
+  that a condition is observable **only where it is deployed and routed.**
+
+The bounded claims, their assumptions and their residual risks are tracked
+per control in [docs/safety-evidence.json](docs/safety-evidence.json); the
+hazards these limits map to, and the six places an earlier version of the
+analysis credited protection it did not have, are in
+[docs/STPA-node-state.md](docs/STPA-node-state.md).
+
 ## Layout
 
 | Path | What lives there |
@@ -35,7 +74,7 @@ documentation and still describes the protocol and storage semantics.
 | `flare_operator/FlareOperator/StateMachine/` | The reconciler as pure functions, and the proofs about them |
 | `flare_operator/FlareOperator/Main.lean` | The IO shell: fetch state, run the machine, apply effects, export metrics |
 | `flare_operator/FlareOperator/Server/` | The flarei-compatible TCP surface |
-| `flare_operator/FlareOperator/E2E/` | 26 end-to-end suites, run against a kind cluster |
+| `flare_operator/FlareOperator/E2E/` | 28 end-to-end suites, run against a kind cluster |
 | `helm/flare-operator/` | The chart: CRDs, operator, cluster StatefulSet, backup, alerts |
 | `docs/` | Design, operations and hazard analysis — see the map below |
 

@@ -1449,7 +1449,7 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
                 match StatsObservation.deleteGate verdictNow successorOk uidStable holdsLease, uidBefore with
                 | .ok (), some uid =>
                   IO.eprintln s!"[flare-operator] EMPTY-MASTER SELF-HEAL: revalidated (master still empty, successor {sKey} still an Active data-bearing slave, pod UID {uid} stable, lease held); gracefully deleting {mPod} — the drain path hands mastership to the slave and the pod reseeds as a slave"
-                  match ← Bridge.deletePodGracefulIfUid mPod ns uid with
+                  match ← Bridge.deletePodWithUidPrecondition mPod ns uid with
                   | .ok () => newStreaks := newStreaks.filter (·.1 != mKey)
                   | .error e => IO.eprintln s!"[flare-operator] empty-master self-heal delete refused or failed: {e}"
                 | .ok (), none =>

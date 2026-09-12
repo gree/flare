@@ -33,7 +33,11 @@
        unavailable — the operator never replaces it with an empty one — no
        drop is accounted meanwhile, and once the ledger is repaired the drop
        seen during the outage is requested and recovered (counters were not
-       re-baselined).
+       re-baselined);
+    7. SAF-06 (delete precondition): the operator's own delete command carries
+       the observed pod UID as DeleteOptions.preconditions.uid; the apiserver
+       accepts it for the matching pod and REFUSES it (409) for a same-name
+       replacement with another UID, which survives.
 
   Every fault-injecting step heals in every exit path.
 -/
@@ -41,6 +45,7 @@ import Lean.Data.Json
 import FlareOperator.E2E.Framework
 import FlareOperator.E2E.Helpers
 import FlareOperator.E2E.Setup
+import FlareOperator.K8s.Bridge
 
 namespace FlareOperator.E2E.Tests.ReplicaRepair
 
@@ -550,7 +555,60 @@ def suite : TestSuite := {
               let c0 := (← flaredStat sIp "reconstruction_completed").getD 0
               let dAfterHeal ← droppedByMaster mIp
               awaitRepair mIp sIp (started0 := s0) (completed0 := c0)
-                (droppedAfterHeal := dAfterHeal) (budget := 360) }
+                (droppedAfterHeal := dAfterHeal) (budget := 360) },
+
+    { name := "SAF-06: the delete carries the observed pod UID as an API precondition; a same-name pod with another UID is refused by the apiserver"
+      run := do
+        -- Run the operator's EXACT delete command (Bridge.uidPreconditionDeleteCommand)
+        -- inside the operator pod, so the token, CA and RBAC are the real ones.
+        let ops ← getPodNames s!"app={cfg.operatorName}" cfg.«namespace»
+        match ops.head? with
+        | none => return .fail "no operator pod"
+        | some opPod =>
+          let victim := "uid-victim"
+          let mk : IO (Except String String) := kubectl ["run", victim, "-n", cfg.«namespace», "--image=busybox:1.36", "--restart=Never", "--command", "--", "sleep", "3600"]
+          let uidOf : IO (Option String) := do
+            match ← kubectlGetJsonpath "pod" victim cfg.«namespace» "{.metadata.uid}" with
+            | .ok u => return (if u.trim.isEmpty then none else some u.trim)
+            | .error _ => return none
+          let runDelete := fun (uid : String) => do
+            let out ← Bridge.execInPod opPod cfg.«namespace» ["sh", "-c", Bridge.uidPreconditionDeleteCommand victim cfg.«namespace» uid]
+            match out with
+            | .ok o => return (o.splitOn "\n" |>.filter (· != "") |>.getLast?.getD "").trim
+            | .error e => return s!"exec-error:{e}"
+          match ← mk with
+          | .error e => return .fail s!"could not create the victim pod: {e}"
+          | .ok _ => pure ()
+          let _ ← waitForCondition "victim pod has a UID" 60 do return (← uidOf).isSome
+          match ← uidOf with
+          | none => return .fail "victim pod never got a UID"
+          | some uid1 =>
+            -- Delete it with ITS uid: allowed.
+            let code1 ← runDelete uid1
+            if code1 != "200" && code1 != "202" then
+              discard <| kubectl ["delete", "pod", victim, "-n", cfg.«namespace», "--wait=false"]
+              return .fail s!"delete with the matching UID was not accepted (http {code1})"
+            let gone ← waitForCondition "victim pod gone" 90 do return (← uidOf).isNone
+            if !gone then return .fail "victim pod did not go away after the accepted delete"
+            -- Recreate under the SAME name: a different UID.
+            match ← mk with
+            | .error e => return .fail s!"could not recreate the victim pod: {e}"
+            | .ok _ => pure ()
+            let _ ← waitForCondition "replacement pod has a UID" 60 do return (← uidOf).isSome
+            match ← uidOf with
+            | none => return .fail "replacement pod never got a UID"
+            | some uid2 =>
+              if uid2 == uid1 then return .fail "replacement pod reused the UID (cannot test)"
+              -- Delete with the STALE uid: the apiserver must refuse and the pod must survive.
+              let code2 ← runDelete uid1
+              let still ← uidOf
+              discard <| kubectl ["delete", "pod", victim, "-n", cfg.«namespace», "--wait=false"]
+              if code2 != "409" then
+                return .fail s!"a delete carrying a stale UID was not refused with 409 (got http {code2}); a same-name replacement could be deleted"
+              if still != some uid2 then
+                return .fail s!"the replacement pod did not survive the stale-UID delete (uid now {still})"
+              IO.eprintln s!"# apiserver refused the stale-UID delete (409); replacement {uid2} untouched"
+              return .pass }
   ]
 }
 

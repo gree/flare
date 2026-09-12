@@ -188,17 +188,33 @@ def podUid (podName ns : String) : IO (Option String) := do
   | .ok out => let u := out.trim; return (if u.isEmpty then none else some u)
   | .error _ => return none
 
-/-- Delete a pod only if its UID still equals `expectedUid` at the moment of
-    deletion (SAF-06). A StatefulSet recreates a pod under the SAME name, so
-    a name-only delete can hit a replacement that was never observed; the
-    UID re-check closes that to the width of one API round trip. -/
-def deletePodGracefulIfUid (podName ns expectedUid : String) : IO (Except String Unit) := do
-  match ← podUid podName ns with
-  | none => return .error s!"pod {podName} has no readable UID (gone or API error); not deleting"
-  | some u =>
-    if u != expectedUid then
-      return .error s!"pod {podName} UID changed ({expectedUid} → {u}): replaced since observation; not deleting"
-    else deletePodGraceful podName ns
+/-- The shell command that deletes a pod with the observed UID as an API-side
+    PRECONDITION (DeleteOptions.preconditions.uid), so the apiserver itself
+    rejects the request (409 Conflict) if a pod of the same name now has a
+    different UID. `kubectl delete` cannot send a DeleteOptions body, so this
+    speaks to the API directly with the pod's service-account token. Exposed
+    as a pure string so the E2E harness can run the exact same command inside
+    the operator pod against a replaced pod and prove the refusal. Prints the
+    HTTP status on the last line. -/
+def uidPreconditionDeleteCommand (podName ns uid : String) : String :=
+  let sa := "/var/run/secrets/kubernetes.io/serviceaccount"
+  let body := s!"\{\"apiVersion\":\"meta.k8s.io/v1\",\"kind\":\"DeleteOptions\",\"preconditions\":\{\"uid\":\"{uid}\"},\"propagationPolicy\":\"Background\"}"
+  s!"curl -sS -X DELETE --cacert {sa}/ca.crt -H \"Authorization: Bearer $(cat {sa}/token)\" -H 'Content-Type: application/json' -d '{body}' -w '\n%\{http_code}' https://kubernetes.default.svc/api/v1/namespaces/{ns}/pods/{podName}"
+
+/-- Delete a pod ONLY IF its UID equals `expectedUid`, enforced by the API
+    server (review item 1: a client-side re-read followed by a name delete
+    still races a same-name replacement). 200/202 = deleted; 409 = the
+    precondition failed, i.e. a different pod now holds the name; 404 =
+    already gone. -/
+def deletePodWithUidPrecondition (podName ns expectedUid : String) : IO (Except String Unit) := do
+  let out ← IO.Process.output { cmd := "sh", args := #["-c", uidPreconditionDeleteCommand podName ns expectedUid] }
+  let lines := (out.stdout.splitOn "\n").filter (· != "")
+  let code := (lines.getLast?.getD "").trim
+  match code with
+  | "200" | "202" => return .ok ()
+  | "409" => return .error s!"apiserver refused: pod {podName} no longer has UID {expectedUid} (precondition failed; a replacement holds the name) — not deleted"
+  | "404" => return .error s!"pod {podName} is already gone"
+  | _ => return .error s!"delete with UID precondition failed (http {code}): {out.stderr.trim} {String.intercalate " " (lines.dropLast)}"
 
 /-- Update (or create) a ConfigMap with the current node-map data.
     Used to persist the operator's view of the cluster for observability.

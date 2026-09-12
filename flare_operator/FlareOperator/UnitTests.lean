@@ -196,6 +196,25 @@ def checkJson (ctx : Ctx) : IO Unit := do
     (Ledger.fromJson? lFull.toJson == some lFull)
   check ctx "an empty ledger round-trips"
     (Ledger.fromJson? empty.toJson == some empty)
+  -- Review item 2 (second round): a PARTIALLY corrupt ledger must fail as a
+  -- whole, never load as a smaller valid ledger that silently lost a request.
+  let good := Lean.Json.mkObj [("dest", Lean.Json.str slaveKey), ("masterKey", Lean.Json.str masterKey),
+                               ("phase", Lean.Json.mkObj [("kind", Lean.Json.str "requested")]), ("drops", Lean.Json.num 3)]
+  let noMaster := Lean.Json.mkObj [("dest", Lean.Json.str "x:12121"),
+                                   ("phase", Lean.Json.mkObj [("kind", Lean.Json.str "requested")]), ("drops", Lean.Json.num 1)]
+  let mk := fun (entries : List Lean.Json) (counters : List Lean.Json) =>
+    Lean.Json.mkObj [("initialized", Lean.Json.bool true), ("counters", Lean.Json.arr counters.toArray),
+                     ("entries", Lean.Json.arr entries.toArray)]
+  check ctx "strict parse: a valid entry loads"
+    ((Ledger.fromJson? (mk [good] [])).map (·.entries.length) == some 1)
+  check ctx "strict parse: an entry missing masterKey fails the WHOLE ledger (not an empty ledger)"
+    (Ledger.fromJson? (mk [noMaster] []) == none)
+  check ctx "strict parse: one valid + one invalid entry fails the whole ledger"
+    (Ledger.fromJson? (mk [good, noMaster] []) == none)
+  check ctx "strict parse: a malformed counter fails the whole ledger"
+    (Ledger.fromJson? (mk [good] [Lean.Json.mkObj [("key", Lean.Json.str "m|d")]]) == none)
+  check ctx "strict parse: an unknown phase kind fails the whole ledger"
+    (Ledger.fromJson? (mk [Lean.Json.mkObj [("dest", Lean.Json.str "y:1"), ("masterKey", Lean.Json.str "m"), ("phase", Lean.Json.mkObj [("kind", Lean.Json.str "bogus")])]] []) == none)
 
 -- ── SyncEvidence (SAF-03) ────────────────────────────────────────────
 

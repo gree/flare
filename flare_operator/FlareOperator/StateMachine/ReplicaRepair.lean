@@ -346,15 +346,18 @@ def Ledger.toJson (l : Ledger) : Json :=
 open Lean in
 def Ledger.fromJson? (j : Json) : Option Ledger := do
   let initialized := (j.getObjValAs? Bool "initialized").toOption.getD false
+  -- STRICT (review item 2): one malformed counter or entry fails the WHOLE
+  -- ledger, so the caller holds it unavailable rather than silently dropping
+  -- the bad element and proceeding on a ledger that lost a request.
   let counters ← match j.getObjVal? "counters" with
-    | .ok (Json.arr a) => some <| a.toList.filterMap fun c =>
+    | .ok (Json.arr a) => a.toList.mapM fun c =>
         match c.getObjValAs? String "key", c.getObjValAs? Nat "count" with
         | .ok k, .ok n => some (k, n)
         | _, _ => none
     | .ok _ => none
     | .error _ => some []
   let entries ← match j.getObjVal? "entries" with
-    | .ok (Json.arr a) => some (a.toList.filterMap Entry.fromJson?)
+    | .ok (Json.arr a) => a.toList.mapM Entry.fromJson?
     | .ok _ => none
     | .error _ => some []
   pure { initialized := initialized, counters := counters, entries := entries }

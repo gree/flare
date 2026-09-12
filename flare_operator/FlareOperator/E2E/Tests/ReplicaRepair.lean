@@ -91,6 +91,13 @@ private def flaredStat (targetIp key : String) : IO (Option Nat) := do
         return (t.drop s!"STAT {key} ".length).trim.toNat?
     return none
 
+/-- A flared node's LOCAL item count. Reads must not be trusted here: op_get
+    proxies a miss to the master (queue_proxy_read), so a `get` for a dropped
+    key returns the master's copy and hides the local gap. curr_items is
+    local storage and does not. -/
+private def currItems (ip : String) : IO Nat :=
+  return (← flaredStat ip "curr_items").getD 0
+
 /-- Sum of the master's per-destination dropped-write counters. -/
 private def droppedByMaster (masterIp : String) : IO Nat := do
   let cmd := s!"printf 'stats\\r\\n' | nc -w 3 {masterIp} {cfg.flarePort}"
@@ -109,9 +116,6 @@ private def droppedByMaster (masterIp : String) : IO Nat := do
 private def opLog (tail : Nat := 600) : IO String :=
   kubectlLogsLabel s!"app={cfg.operatorName}" cfg.«namespace» tail
 
-private def countLines (log needle : String) : Nat :=
-  (log.splitOn "\n").filter (fun l => containsSubstr l needle) |>.length
-
 /-- One operator metric value (counters render as integers). -/
 private def operatorMetric (name : String) : IO (Option Nat) := do
   let ips ← getPodIps s!"app={cfg.operatorName}" cfg.«namespace»
@@ -127,9 +131,10 @@ private def operatorMetric (name : String) : IO (Option Nat) := do
         if t.startsWith name && !(t.startsWith "#") then
           match (t.splitOn " ").getLast? with
           | some v =>
-            let v := v.trim
-            let v := if v.endsWith ".0" then v.dropRight 2 else v
-            return v.toNat?
+            -- Prometheus renders gauges as floats ("0.000000"); take the
+            -- integer part so both counters and gauges parse.
+            let intPart := (v.trim.splitOn ".").headD v.trim
+            return intPart.toNat?
           | none => pure ()
       return none
 
@@ -166,11 +171,18 @@ private def heal (masterIp slaveIp : String) : IO Unit := do
     | .error _ => break
   IO.eprintln s!"# fault cleared: {masterIp} → {slaveIp} forwards again"
 
-/-- Write keys while the link is cut and wait until the master has counted
-    at least one drop. Returns the keys written and the drop counter, or an
-    error (the link is healed on error). -/
+/-- What one partitioned write burst produced: the keys, the master's drop
+    counter afterwards, and the LOCAL item gap (master − slave) measured
+    WHILE the link was still cut — before any demote could reconstruct it
+    away. A positive gap is the proof that writes are locally missing on the
+    slave, which a proxied `get` cannot show. -/
+structure Burst where
+  keys : List String
+  droppedTotal : Nat
+  gapWhileCut : Nat
+
 private def writeUnderPartition (masterIp slaveIp keyPrefix : String) (count : Nat)
-    : IO (Except String (List String × Nat)) := do
+    : IO (Except String Burst) := do
   let d0 ← droppedByMaster masterIp
   match ← cutMasterToSlave masterIp slaveIp with
   | .error e => return .error s!"could not inject the fault: {e}"
@@ -184,16 +196,13 @@ private def writeUnderPartition (masterIp slaveIp keyPrefix : String) (count : N
     if !dropped then
       heal masterIp slaveIp
       return .error s!"the master never counted a dropped write while the link was cut (stored {stored}/{count} on the master; proxy_write_dropped stayed {d1}) — the fault did not reach the proxy path"
-    IO.eprintln s!"# stored {stored}/{count} on the master; the master dropped {d1 - d0} replica write(s)"
-    return .ok (keys, d1)
-
-private def missingOnSlave (slaveIp : String) (keys : List String) : IO Nat := do
-  let mut missing := 0
-  for k in keys do
-    match ← memcachedGet cfg.debugPod cfg.«namespace» slaveIp cfg.flarePort k with
-    | some _ => pure ()
-    | none => missing := missing + 1
-  return missing
+    -- Local gap NOW, link still cut: the slave has not been demoted or
+    -- reconstructed yet, so this is the honest count of writes it is missing.
+    let mItems ← currItems masterIp
+    let sItems ← currItems slaveIp
+    let gap := if mItems > sItems then mItems - sItems else 0
+    IO.eprintln s!"# stored {stored}/{count} on the master; master dropped {d1 - d0} write(s); local items master={mItems} slave={sItems} (gap {gap})"
+    return .ok { keys := keys, droppedTotal := d1, gapWhileCut := gap }
 
 private def diagnostics (masterIp slaveIp : String) : IO Unit := do
   IO.eprintln s!"# operator tail:\n{← opLog 40}"
@@ -203,9 +212,10 @@ private def diagnostics (masterIp slaveIp : String) : IO Unit := do
   IO.eprintln s!"# node view: {repr (← nodeView)}"
 
 /-- Wait for the whole repair to land: completion logged, ledger empty,
-    the slave's reconstruction counters moved past `started0/completed0`,
-    every key readable on the slave, and NO new drop since `droppedAfterHeal`. -/
-private def awaitRepair (masterIp slaveIp : String) (keys : List String)
+    the slave's reconstruction counters moved past `started0/completed0`, the
+    slave's LOCAL item count caught up to the master's, and NO new drop since
+    `droppedAfterHeal`. -/
+private def awaitRepair (masterIp slaveIp : String)
     (started0 completed0 droppedAfterHeal : Nat) (budget : Nat) : IO TestResult := do
   let done ← waitForCondition "operator records REPLICA REPAIR COMPLETE" budget do
     return containsSubstr (← opLog) "REPLICA REPAIR COMPLETE"
@@ -227,10 +237,15 @@ private def awaitRepair (masterIp slaveIp : String) (keys : List String)
     return (← ledgerDests).isEmpty
   if !emptied then
     return .fail s!"the ledger still lists {← ledgerDests} after completion"
-  let missing ← missingOnSlave slaveIp keys
-  if missing > 0 then
+  -- Recovery, proven from LOCAL storage: the slave's item count reaches the
+  -- master's. A proxied get would pass even with an empty slave.
+  let recovered ← waitForCondition "slave's local items catch up to the master's" 120 do
+    let m ← currItems masterIp
+    let sv ← currItems slaveIp
+    return sv ≥ m && m > 0
+  if !recovered then
     diagnostics masterIp slaveIp
-    return .fail s!"{missing}/{keys.length} dropped keys are still missing on the slave after the repair completed"
+    return .fail s!"the repair completed but the slave's local curr_items ({← currItems slaveIp}) did not reach the master's ({← currItems masterIp})"
   let dNow ← droppedByMaster masterIp
   if dNow != droppedAfterHeal then
     return .fail s!"the repair itself cost drops: proxy_write_dropped moved {droppedAfterHeal} → {dNow} after the link was healed"
@@ -257,13 +272,16 @@ def suite : TestSuite := {
         match ← pair with
         | .error e => return .fail e
         | .ok (_, mIp, _, sIp) =>
-          let keys := (List.range 40).map fun i => s!"base_{i}"
           let stored ← writeKeys cfg.debugPod cfg.«namespace» mIp cfg.flarePort "base" 40
           if stored < 40 then return .fail s!"only {stored}/40 stored on the master"
-          let replicated ← waitForCondition "all control keys readable on the slave" 60 do
-            return (← missingOnSlave sIp keys) == 0
+          -- LOCAL item counts must converge: a proxied get would pass even
+          -- if nothing replicated, so it proves nothing here.
+          let replicated ← waitForCondition "slave's local items reach the master's" 60 do
+            let m ← currItems mIp
+            let sv ← currItems sIp
+            return m > 0 && sv ≥ m
           if !replicated then
-            return .fail s!"{← missingOnSlave sIp keys}/40 control keys never reached the slave — live replication itself is broken, the repair tests would be meaningless"
+            return .fail s!"slave local items {← currItems sIp} never reached master {← currItems mIp} — live replication is broken, the repair tests would be meaningless"
           return .pass },
 
     { name := "cut link: the master drops replica writes and the operator requests a repair"
@@ -274,12 +292,11 @@ def suite : TestSuite := {
           let requested0 := (← operatorMetric "flare_operator_replica_repair_requested_total").getD 0
           match ← writeUnderPartition mIp sIp "dropped" 30 with
           | .error e => return .fail e
-          | .ok (keys, _) =>
-            let missing ← missingOnSlave sIp keys
+          | .ok burst =>
             heal mIp sIp
-            if missing == 0 then
-              return .fail "every key written under the partition is readable on the slave: nothing was actually dropped, so there is nothing to repair"
-            IO.eprintln s!"# {missing}/{keys.length} keys missing on the slave while it was cut off"
+            if burst.gapWhileCut == 0 then
+              return .fail "the master counted a drop but the slave's local item count did not fall behind: nothing was actually lost locally, so there is nothing to repair"
+            IO.eprintln s!"# slave was missing {burst.gapWhileCut} item(s) locally while cut off"
             let requested ← waitForCondition "operator requests a replica repair (probe interval 15s)" 150 do
               return containsSubstr (← opLog) "REPLICA REPAIR requested"
             if !requested then
@@ -306,8 +323,7 @@ def suite : TestSuite := {
           let s0 := (← flaredStat sIp "reconstruction_started").getD 0
           let c0 := (← flaredStat sIp "reconstruction_completed").getD 0
           let dAfterHeal ← droppedByMaster mIp
-          let keys := (List.range 30).map fun i => s!"dropped_{i}"
-          match ← awaitRepair mIp sIp keys (started0 := s0) (completed0 := c0)
+          match ← awaitRepair mIp sIp (started0 := s0) (completed0 := c0)
               (droppedAfterHeal := dAfterHeal) (budget := 300) with
           | .pass =>
             let completed := (← operatorMetric "flare_operator_replica_repair_completed_total").getD 0
@@ -335,8 +351,10 @@ def suite : TestSuite := {
           -- The gated drop.
           match ← writeUnderPartition mIp sIp "gated" 20 with
           | .error e => return .fail e
-          | .ok (keys, _) =>
+          | .ok burst =>
             heal mIp sIp
+            if burst.gapWhileCut == 0 then
+              return .fail "the gated burst left no local gap on the slave: nothing to hold"
             let dAfterHeal ← droppedByMaster mIp
             let held ← waitForCondition "operator HOLDS the repair (gate closed)" 150 do
               return containsSubstr (← opLog) "replica repair HELD"
@@ -369,7 +387,7 @@ def suite : TestSuite := {
             if !restored2 then
               diagnostics mIp sIp
               return .fail "the operator that should repair did not restore the pending request from status"
-            awaitRepair mIp sIp keys (started0 := s0) (completed0 := c0)
+            awaitRepair mIp sIp (started0 := s0) (completed0 := c0)
               (droppedAfterHeal := dAfterHeal) (budget := 360) }
   ]
 }

@@ -1608,7 +1608,18 @@ def main (args : List String) : IO Unit := do
       -- replacement leader labels itself. If the API is unreachable this
       -- fails too — the pod exits and the boot-time reset covers it.
       let _ ← setRoleLabel identity ns "standby"
-      throw (IO.userError "lease lost")
+      -- This has to END THE PROCESS, and `throw` did not. The generated C
+      -- `main` runs `lean_finalize_task_manager()` before it reports an
+      -- uncaught error, and that call waits for every outstanding task —
+      -- the TCP, health and metrics servers here, none of which return. The
+      -- result was a pod that logged "exiting", kept passing /healthz
+      -- (process-alive only) and /readyz (a non-leader is "ready"), owned no
+      -- lease and ran no reconcile loop, for ever: with one replica a
+      -- leaderless cluster, with two a silent loss of the standby. Found by
+      -- the SAF-01 takeover test (CHECK-01), which forces exactly this path
+      -- and then requires recovery. `exit` terminates regardless of threads.
+      (← IO.getStderr).flush
+      IO.Process.exit 1
     -- Self-healing label assert: a leader whose label patch failed (or was
     -- stripped externally) reclaims the index Service every tick.
     let _ ← setRoleLabel identity ns "leader"

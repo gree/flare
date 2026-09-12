@@ -216,8 +216,9 @@
         "Recipient-side version fencing only protects a node that has ALREADY observed the newer generation; a node that missed the new leader's broadcast will accept an older leader's map. Per-node applied-generation tracking is SAF-09.",
         "The post-send lease re-read records that the race occurred; it cannot retract what was sent.",
         "Observed while building CHECK-01, not asserted on: after the lease is deleted and the SAME process re-acquires it, the operator was seen broadcasting a LOWER version than nodes already held, which their fencing rejects. The manipulation is cruder than a real takeover; treat as a lead for SAF-09.",
-        "A suppressed broadcast is not retried: the committed version is already advanced, so the next pass finds nothing to send and the recipient never learns that map until something else changes it. Observed in the fence and read-failure tests; belongs to SAF-09.",
-        "The stop position is a test seam. It is inert without the environment variable and bounded at 120s, but it is production code that a misconfiguration could delay one broadcast with."
+        "The stop position is a test seam. It is inert without the environment variable and bounded at 120s, but it is production code that a misconfiguration could delay one broadcast with.",
+        "A suppressed send is retried only by a process that survives the suppression (lease read failure, momentarily foreign holder): the pending flag is in memory, and a confirmed lease loss ends the process, after which the next leader republishes from its own committed state. The retry test proves the flag was set by the withheld pass and consumed by the pass that published (that pass names the suppressed version); it does not prove the flag was NECESSARY for that send, because the committed version usually moves by itself within a pass.",
+        "Liveness (/healthz) is process-alive only and readiness treats a non-leader as ready. The operator that logged 'LOST LEASE -- exiting' and then hung — the Lean runtime waits for the never-ending server tasks before reporting the uncaught error — was therefore never restarted; that defect is fixed (IO.Process.exit) and CHECK-01 asserts the restart count moves, but a different stall of the main loop would still pass both probes."
       ],
       "code": [
         {
@@ -238,7 +239,7 @@
         {
           "id": "CHECK-01",
           "kind": "scenario",
-          "procedure": "Drive the production reconcile to a named stop position (committed, version advanced, pre-send lease check not yet made) using the FLARE_TEST_PRESEND_BARRIER seam, and confirm the position was reached by reading the held version the operator writes there. Then, for the same held pass: (a) retain the lease and require the release to broadcast that version - the control that proves the pass reaches the send at all; (b) hand the lease to another identity and require a fence log naming that version with no broadcast; (c) delete the lease and require the read-failure branch with no broadcast. A receiver whose version does not move is not accepted as evidence on its own: a crash, a timeout or an exit before the branch look the same. Separately, push a mutated map at a stale version from inside the cluster and require flared both to keep its map and to log the rejection.",
+          "procedure": "Drive the production reconcile to a named stop position (committed, version advanced, pre-send lease check not yet made) using the FLARE_TEST_PRESEND_BARRIER seam, and confirm the position was reached by reading the held version the operator writes there. Topology changes are triggered by patching the FlareCluster readBalance spec (non-destructive). Then, for the same held pass: (a) retain the lease and require the release to broadcast that version - the control that proves the pass reaches the send at all; (b) hand the lease to another identity and require a fence log naming that version with no broadcast, then require the container restart count to move (losing the lease is designed to end the process), the restarted process to log lease acquisition, and the topology to be applied - exactly one Active master, every node Active, each flared's own `stats nodes` naming that master; (c) delete the lease and require the read-failure branch with no broadcast, then a later pass of the SAME process that publishes and names the suppressed version, and the applied topology. A receiver whose version does not move is not accepted as evidence on its own: a crash, a timeout or an exit before the branch look the same. Separately, push a mutated map at a stale version from inside the cluster and require flared both to keep its map and to log the rejection. Every test releases the barrier and restores authority before judging.",
           "references": [
             {
               "path": "flare_operator/FlareOperator/E2E/Tests/TopologyAuthority.lean",
@@ -247,6 +248,10 @@
             {
               "path": "flare_operator/FlareOperator/Main.lean",
               "symbol": "preSendBarrier"
+            },
+            {
+              "path": "flare_operator/FlareOperator/Main.lean",
+              "symbol": "main"
             }
           ]
         }
@@ -267,6 +272,22 @@
           "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter topology-authority",
           "result": "pass",
           "report": "docs/reports/2026-09-11-topology-authority.txt"
+        },
+        {
+          "check": "CHECK-01",
+          "commit": "53488c40a5ca605abbf0baa4e19109c8cd74e1de",
+          "date": "2026-09-12",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter topology-authority",
+          "result": "fail",
+          "report": "docs/reports/2026-09-12-topology-authority-53488c4-fail.txt"
+        },
+        {
+          "check": "CHECK-01",
+          "commit": "ca56b0ecc8dd37056d7a14e86a6efee465f41265",
+          "date": "2026-09-12",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter topology-authority",
+          "result": "pass",
+          "report": "docs/reports/2026-09-12-topology-authority.txt"
         }
       ],
       "tasks": [
@@ -274,9 +295,9 @@
         "SAF-09"
       ],
       "review": {
-        "commit": "5cce98f535da4f9d5a7551ad3430dee3727e04f2",
-        "date": "2026-09-11",
-        "note": "SAF-01's acceptance scenario is now executed rather than approximated. The earlier run asserted only that no topology reached a survivor while a foreign identity held the lease, which a follower that never reconciles also satisfies; review rejected that and was right. A named stop position inside the real send path now holds a pass after the commit and before the lease check, proves arrival by the version the operator writes there, and the three lease outcomes are asserted on the branch actually taken for that version, with a control case proving the pass would otherwise have sent. Implementation stays PARTIAL by intent: the check/send race is documented, not closed, and recipient fencing still protects only nodes that already saw the newer generation (SAF-09). Verification stays UNVERIFIED pending a reviewer's assessment of reachability, bypasses and assumptions - the runs are recorded, the judgement is not mine to record."
+        "commit": "ca56b0ecc8dd37056d7a14e86a6efee465f41265",
+        "date": "2026-09-12",
+        "note": "SAF-01 finishing. Three things changed. (1) A suppressed send is now retried: the pending flag records the earliest suppressed version and the publishing pass names it; scope stated in code and in the residuals - it covers only a process that survives the suppression. (2) The takeover test exposed that the operator never actually exited on lease loss: `throw` from main is followed by lean_finalize_task_manager(), which waits for the TCP, health and metrics server tasks, none of which return; the pod stayed Running at RESTARTS 0, passing both probes, owning nothing. Replaced with IO.Process.exit; the test now asserts the restart count moves, the restarted process re-acquires, and the topology is applied (one Active master, all Active, each flared naming it) - not merely that the node count matches. (3) Barrier cleanup is deterministic (release-and-wait, then clear); the trigger is a readBalance patch instead of a pod delete, which had left flared crash-looping while the control plane was held. Failed attempt at 53488c4 is recorded: the retry line was logged only when the version had not moved, so the retry was invisible in a live cluster; that is a logging fix, not a behavior change. Implementation stays PARTIAL (check/send race open, recipient fencing limited to nodes that saw the newer generation - SAF-09). Verification stays UNVERIFIED pending the reviewer's assessment."
       }
     },
     {
@@ -349,9 +370,9 @@
         "SAF-09"
       ],
       "review": {
-        "commit": "5cce98f535da4f9d5a7551ad3430dee3727e04f2",
-        "date": "2026-09-11",
-        "note": "The only change to Main.lean in this revision is the pre-send test seam (preSendBarrier): inert unless FLARE_TEST_PRESEND_BARRIER is set, and then it delays one pass between the commit and the lease check, bounded at 120s. No effect on the commit path this control bounds: the barrier sits AFTER commitClusterState, so what is committed and the property proved about it are untouched. Worth naming for a reviewer: the seam can delay a send, so the window in which a committed map is not yet on the wire can be widened deliberately in a test."
+        "commit": "ca56b0ecc8dd37056d7a14e86a6efee465f41265",
+        "date": "2026-09-12",
+        "note": "Main.lean changed in two ways that touch SC-02 only indirectly. The lease-loss path now ends the process (IO.Process.exit) where before it hung with the role label already set to standby and no reconcile loop - a process that neither led nor exited. Commit and merge (commitClusterState, demoteDuplicateMasters) are untouched; the single post-commit send path is unchanged except for the retry flag, which publishes the CURRENT committed map, never a stored older one. No new evidence for SC-02 itself."
       }
     },
     {
@@ -422,9 +443,9 @@
         "SAF-10"
       ],
       "review": {
-        "commit": "5cce98f535da4f9d5a7551ad3430dee3727e04f2",
-        "date": "2026-09-11",
-        "note": "The only change to Main.lean in this revision is the pre-send test seam (preSendBarrier): inert unless FLARE_TEST_PRESEND_BARRIER is set, and then it delays one pass between the commit and the lease check, bounded at 120s. Reconstruction observability is unchanged. The seam can delay the node sync that carries a role shift, which is how flared learns to reconstruct - relevant only when the variable is set, and it is not set outside the topology-authority suite."
+        "commit": "ca56b0ecc8dd37056d7a14e86a6efee465f41265",
+        "date": "2026-09-12",
+        "note": "Main.lean changed for SAF-01 finishing (lease-loss exit, retry of a suppressed send, none of it in the drop-repair block) and the K8sReconciler gained nothing this control relies on. Reconstruction observability is unchanged at this revision. Relevant to SC-03 only in that a suppressed node-sync (which carries the role shift that starts a reconstruction) is now re-sent by a later pass instead of being lost until the version moved again. SAF-02/SAF-05 follow on this branch and will rewrite this entry."
       }
     },
     {
@@ -491,9 +512,9 @@
         "SAF-08"
       ],
       "review": {
-        "commit": "5cce98f535da4f9d5a7551ad3430dee3727e04f2",
-        "date": "2026-09-11",
-        "note": "The only change to Main.lean in this revision is the pre-send test seam (preSendBarrier): inert unless FLARE_TEST_PRESEND_BARRIER is set, and then it delays one pass between the commit and the lease check, bounded at 120s. Sync-evidence semantics untouched. Same delay caveat as EV-03 applies to the delivery of a promotion, not to how it is decided."
+        "commit": "ca56b0ecc8dd37056d7a14e86a6efee465f41265",
+        "date": "2026-09-12",
+        "note": "Main.lean changed for SAF-01 finishing: the lease-loss path now ends the process (IO.Process.exit; `throw` left a pod that neither led nor exited), and a topology send suppressed by the lease fence is retried by a later pass that names the suppressed version. Neither touches the mechanism EV-04 relies on (Require valid synchronization evidence); its code path and claim are unchanged at this revision, and no new evidence is recorded for it."
       }
     },
     {
@@ -563,9 +584,9 @@
         "SAF-08"
       ],
       "review": {
-        "commit": "5cce98f535da4f9d5a7551ad3430dee3727e04f2",
-        "date": "2026-09-11",
-        "note": "The only change to Main.lean in this revision is the pre-send test seam (preSendBarrier): inert unless FLARE_TEST_PRESEND_BARRIER is set, and then it delays one pass between the commit and the lease check, bounded at 120s. Pod-deletion gates untouched; the barrier is not on that path."
+        "commit": "ca56b0ecc8dd37056d7a14e86a6efee465f41265",
+        "date": "2026-09-12",
+        "note": "Main.lean changed for SAF-01 finishing: the lease-loss path now ends the process (IO.Process.exit; `throw` left a pod that neither led nor exited), and a topology send suppressed by the lease fence is retried by a later pass that names the suppressed version. Neither touches the mechanism EV-05 relies on (Protect copies before deleting Pods); its code path and claim are unchanged at this revision, and no new evidence is recorded for it."
       }
     },
     {
@@ -713,9 +734,9 @@
         "SAF-08"
       ],
       "review": {
-        "commit": "5cce98f535da4f9d5a7551ad3430dee3727e04f2",
-        "date": "2026-09-11",
-        "note": "The only change to Main.lean in this revision is the pre-send test seam (preSendBarrier): inert unless FLARE_TEST_PRESEND_BARRIER is set, and then it delays one pass between the commit and the lease check, bounded at 120s. Failure observation and the retained-lone-master rule are untouched. Note the retained case still commits nothing and therefore still produces no send, with or without the seam."
+        "commit": "ca56b0ecc8dd37056d7a14e86a6efee465f41265",
+        "date": "2026-09-12",
+        "note": "Main.lean changed for SAF-01 finishing: the lease-loss path now ends the process (IO.Process.exit; `throw` left a pod that neither led nor exited), and a topology send suppressed by the lease fence is retried by a later pass that names the suppressed version. Neither touches the mechanism EV-07 relies on (Use qualified failure observations); its code path and claim are unchanged at this revision, and no new evidence is recorded for it."
       }
     },
     {
@@ -905,9 +926,9 @@
         "SAF-06"
       ],
       "review": {
-        "commit": "5cce98f535da4f9d5a7551ad3430dee3727e04f2",
-        "date": "2026-09-11",
-        "note": "The only change to Main.lean in this revision is the pre-send test seam (preSendBarrier): inert unless FLARE_TEST_PRESEND_BARRIER is set, and then it delays one pass between the commit and the lease check, bounded at 120s. The stuck-Down restart path is untouched. Its dependency on the post-commit send to re-assign a restarted node is unchanged; the seam can delay that send in a test."
+        "commit": "ca56b0ecc8dd37056d7a14e86a6efee465f41265",
+        "date": "2026-09-12",
+        "note": "Main.lean changed for SAF-01 finishing: the lease-loss path now ends the process (IO.Process.exit; `throw` left a pod that neither led nor exited), and a topology send suppressed by the lease fence is retried by a later pass that names the suppressed version. Neither touches the mechanism EV-10 relies on (Recover stuck Down without losing data); its code path and claim are unchanged at this revision, and no new evidence is recorded for it."
       }
     },
     {
@@ -984,9 +1005,9 @@
       "runs": [],
       "tasks": [],
       "review": {
-        "commit": "5cce98f535da4f9d5a7551ad3430dee3727e04f2",
-        "date": "2026-09-11",
-        "note": "The only change to Main.lean in this revision is the pre-send test seam (preSendBarrier): inert unless FLARE_TEST_PRESEND_BARRIER is set, and then it delays one pass between the commit and the lease check, bounded at 120s. No signal added or removed. The barrier writes two operator log lines when active; they are test instrumentation, not detection, and must not be counted as coverage."
+        "commit": "ca56b0ecc8dd37056d7a14e86a6efee465f41265",
+        "date": "2026-09-12",
+        "note": "Main.lean changed for SAF-01 finishing: the lease-loss path now ends the process (IO.Process.exit; `throw` left a pod that neither led nor exited), and a topology send suppressed by the lease fence is retried by a later pass that names the suppressed version. Neither touches the mechanism EV-11 relies on (Detect failures without inventing recovery); its code path and claim are unchanged at this revision, and no new evidence is recorded for it."
       }
     },
     {
@@ -1047,9 +1068,9 @@
         "SAF-10"
       ],
       "review": {
-        "commit": "5cce98f535da4f9d5a7551ad3430dee3727e04f2",
-        "date": "2026-09-11",
-        "note": "The only change to Main.lean in this revision is the pre-send test seam (preSendBarrier): inert unless FLARE_TEST_PRESEND_BARRIER is set, and then it delays one pass between the commit and the lease check, bounded at 120s. No bearing on content divergence."
+        "commit": "ca56b0ecc8dd37056d7a14e86a6efee465f41265",
+        "date": "2026-09-12",
+        "note": "Main.lean changed for SAF-01 finishing: the lease-loss path now ends the process (IO.Process.exit; `throw` left a pod that neither led nor exited), and a topology send suppressed by the lease fence is retried by a later pass that names the suppressed version. Neither touches the mechanism EV-12 relies on (Detect content divergence); its code path and claim are unchanged at this revision, and no new evidence is recorded for it."
       }
     },
     {
@@ -1226,9 +1247,9 @@
       "runs": [],
       "tasks": [],
       "review": {
-        "commit": "5cce98f535da4f9d5a7551ad3430dee3727e04f2",
-        "date": "2026-09-11",
-        "note": "The only change to Main.lean in this revision is the pre-send test seam (preSendBarrier): inert unless FLARE_TEST_PRESEND_BARRIER is set, and then it delays one pass between the commit and the lease check, bounded at 120s. Still a gap; no metric or label changed."
+        "commit": "ca56b0ecc8dd37056d7a14e86a6efee465f41265",
+        "date": "2026-09-12",
+        "note": "Main.lean changed for SAF-01 finishing: the lease-loss path now ends the process (IO.Process.exit; `throw` left a pod that neither led nor exited), and a topology send suppressed by the lease fence is retried by a later pass that names the suppressed version. Neither touches the mechanism EV-15 relies on (Expose role-aware observations); its code path and claim are unchanged at this revision, and no new evidence is recorded for it."
       }
     }
   ]

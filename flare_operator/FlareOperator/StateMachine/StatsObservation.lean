@@ -107,4 +107,24 @@ def successorStillValid (state : FlareClusterState) (masterKey slaveKey : String
     dataBearing.contains slaveKey
   | _, _ => false
 
+/-- The final gate before deleting an empty master's pod (SAF-06). Every
+    input is a re-check made AFTER the fresh stats reads, so the decision
+    rests on the state the delete will act on, not on the streak's snapshot:
+    * `verdictNow`   — the empty-master verdict from the FRESH stats;
+    * `successorOk`  — successorStillValid on the map read AFTER those stats;
+    * `uidStable`    — the target pod's UID was the same before and after the
+                       stats read and matches the pod about to be deleted (the
+                       pod was not replaced under the name);
+    * `holdsLease`   — this operator still holds the leader lease.
+    Refuses with the first failing reason. -/
+def deleteGate (verdictNow : EmptyMasterVerdict) (successorOk uidStable holdsLease : Bool)
+    : Except String Unit :=
+  match verdictNow with
+  | .skip reason => .error s!"target no longer reads as an empty master with a data-bearing successor: {reason}"
+  | .act =>
+    if !holdsLease then .error "this operator no longer holds the leader lease; not deleting"
+    else if !uidStable then .error "the target pod's UID changed across the observation (pod replaced); not deleting"
+    else if !successorOk then .error "the successor is no longer a data-bearing Active slave of the same partition in the live map; not deleting"
+    else .ok ()
+
 end FlareOperator.StatsObservation

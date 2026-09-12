@@ -182,6 +182,24 @@ def deletePodGraceful (podName ns : String) : IO (Except String Unit) := do
   | .error e => return .error e
   | .ok _ => return .ok ()
 
+/-- metadata.uid of a pod, or none if it cannot be read (absent, API error). -/
+def podUid (podName ns : String) : IO (Option String) := do
+  match ← kubectl ["get", "pod", podName, "-n", ns, "-o", "jsonpath={.metadata.uid}"] with
+  | .ok out => let u := out.trim; return (if u.isEmpty then none else some u)
+  | .error _ => return none
+
+/-- Delete a pod only if its UID still equals `expectedUid` at the moment of
+    deletion (SAF-06). A StatefulSet recreates a pod under the SAME name, so
+    a name-only delete can hit a replacement that was never observed; the
+    UID re-check closes that to the width of one API round trip. -/
+def deletePodGracefulIfUid (podName ns expectedUid : String) : IO (Except String Unit) := do
+  match ← podUid podName ns with
+  | none => return .error s!"pod {podName} has no readable UID (gone or API error); not deleting"
+  | some u =>
+    if u != expectedUid then
+      return .error s!"pod {podName} UID changed ({expectedUid} → {u}): replaced since observation; not deleting"
+    else deletePodGraceful podName ns
+
 /-- Update (or create) a ConfigMap with the current node-map data.
     Used to persist the operator's view of the cluster for observability.
     Uses retry logic for resilience.

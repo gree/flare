@@ -1404,28 +1404,46 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
               newStreaks := newStreaks ++ [(mKey, streak)]
               IO.eprintln s!"[flare-operator] WARNING: master {mKey} is EMPTY (0 keys) while an Active slave holds {sObs} keys (streak {streak}/3)"
               if streak ≥ 3 && podDeletionAllowed then
-                -- SAF-06 REVALIDATION. The streak decision rests on a
+                -- SAF-06 REVALIDATION (item 5). The streak decision rests on a
                 -- snapshot; between it and the delete a resync may have
-                -- demoted the successor, the pod may have been replaced, or
-                -- leadership lost. Re-read the master and the successor NOW
-                -- and re-check the live map: delete only if the same target
-                -- still reads empty AND a data-bearing Active successor still
-                -- exists in its partition. Any unknown aborts.
-                let liveState ← stateRef.get
-                let freshM ← Bridge.queryPodStats (extractPodName mNode.serverName) ns "stats"
+                -- demoted the successor, the pod may have been REPLACED
+                -- under the same name, or leadership lost. Re-check
+                -- everything in an order that closes those windows:
+                --   1. the target pod's UID before the stats read,
+                --   2. FRESH stats for master and successor,
+                --   3. the UID again (same pod observed?),
+                --   4. the live map AFTER the stats (any change during the
+                --      reads is now visible),
+                --   5. the leader lease,
+                -- and delete through a UID-checked path so a pod replaced
+                -- after step 3 is not deleted either. One pure gate decides.
+                let mPod := extractPodName mNode.serverName
+                let uidBefore ← Bridge.podUid mPod ns
+                let freshM ← Bridge.queryPodStats mPod ns "stats"
                 let freshS ← Bridge.queryPodStats (extractPodName sNode.serverName) ns "stats"
+                let uidAfter ← Bridge.podUid mPod ns
+                let liveState ← stateRef.get
                 let mNow := match freshM with | .ok o => StatsObservation.parseCurrItems o | .error _ => .unknown
                 let sNow := match freshS with | .ok o => StatsObservation.parseCurrItems o | .error _ => .unknown
                 let dataBearing := match sNow with | .known n => if n > 0 then [sKey] else [] | .unknown => []
                 let verdictNow := StatsObservation.emptyMasterVerdict mNow sNow
                 let successorOk := StatsObservation.successorStillValid liveState mKey sKey dataBearing
-                if verdictNow == .act && successorOk then
-                  IO.eprintln s!"[flare-operator] EMPTY-MASTER SELF-HEAL: revalidated (master still empty, successor {sKey} still an Active data-bearing slave); gracefully deleting {extractPodName mNode.serverName} — the drain path hands mastership to the slave and the pod reseeds as a slave"
-                  match ← Bridge.deletePodGraceful (extractPodName mNode.serverName) ns with
+                let uidStable := match uidBefore, uidAfter with | some a, some b => a == b | _, _ => false
+                let holdsLease ← do
+                  match ← getLease leaseName ns with
+                  | .ok lease => pure (lease.holderIdentity == identity && !lease.expired)
+                  | .error _ => pure false
+                match StatsObservation.deleteGate verdictNow successorOk uidStable holdsLease, uidBefore with
+                | .ok (), some uid =>
+                  IO.eprintln s!"[flare-operator] EMPTY-MASTER SELF-HEAL: revalidated (master still empty, successor {sKey} still an Active data-bearing slave, pod UID {uid} stable, lease held); gracefully deleting {mPod} — the drain path hands mastership to the slave and the pod reseeds as a slave"
+                  match ← Bridge.deletePodGracefulIfUid mPod ns uid with
                   | .ok () => newStreaks := newStreaks.filter (·.1 != mKey)
-                  | .error e => IO.eprintln s!"[flare-operator] empty-master self-heal delete failed: {e}"
-                else
-                  IO.eprintln s!"[flare-operator] EMPTY-MASTER SELF-HEAL ABORTED at revalidation: master now {mNow}, successor {sKey} now {sNow}, successor still valid: {successorOk} — NOT deleting {extractPodName mNode.serverName} (the snapshot the streak was built on no longer holds)"
+                  | .error e => IO.eprintln s!"[flare-operator] empty-master self-heal delete refused or failed: {e}"
+                | .ok (), none =>
+                  IO.eprintln s!"[flare-operator] EMPTY-MASTER SELF-HEAL ABORTED: no readable UID for {mPod}; not deleting by name alone"
+                  newStreaks := newStreaks.filter (·.1 != mKey)
+                | .error why, _ =>
+                  IO.eprintln s!"[flare-operator] EMPTY-MASTER SELF-HEAL ABORTED at revalidation: {why} (master now {mNow}, successor {sKey} now {sNow}) — NOT deleting {mPod}"
                   newStreaks := newStreaks.filter (·.1 != mKey)
             | .skip reason =>
               -- Not empty, or the observation was not clear enough to act on.

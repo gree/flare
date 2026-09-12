@@ -90,8 +90,19 @@ def suite : TestSuite := {
   teardown := cleanupCluster cfg
   onFailure := dumpClusterDiagnostics cfg.«namespace» s!"app={cfg.operatorName}"
   tests := [
-    { name := "a dropped activation leaves the slave Prepare for the operator although its reconstruction completed"
+    { name := "the lost-activation condition is staged: the activation is dropped and a reconstruction completed"
       run := do
+        -- Two facts that PERSIST (so this does not race the repair, which
+        -- clears the transient Prepare state as soon as it fires): the seam
+        -- intercepted the slave's activation, and the slave holds a completed
+        -- reconstruction. flared increments reconstruction_completed when its
+        -- handler finished the dump and its activation call returned (the
+        -- seam answers OK) — the handover-lost-ack case this repair is for.
+        -- The node does NOT set its own state active from that; it waits for
+        -- the operator's map to echo it, which is exactly what is lost, so
+        -- self-active is the wrong signal — the completion counter is the
+        -- evidence, and the operator observing "stuck Prepare ... completed"
+        -- is confirmed by the repair test below.
         let dropped ← waitForCondition "seam drops a node state event" 240 do
           return containsSubstr (← opLog) "TEST SEAM: dropping node state event"
         if !dropped then
@@ -99,16 +110,6 @@ def suite : TestSuite := {
         match ← slaveEntry with
         | none => return .fail "no P0 slave in the operator's map"
         | some s =>
-          if s.state != 1 then
-            return .fail s!"the slave is not Prepare in the operator's map (state {s.state}) although its activation was dropped — something else activated it, the condition is not staged"
-          -- The completed copy exists even though the operator never learned:
-          -- flared increments reconstruction_completed when its handler
-          -- finished the dump and its activation call returned (the seam
-          -- answers OK), which is exactly the handover-lost-ack case this
-          -- repair exists for. The node does NOT set its own state active
-          -- from that — it waits for the operator's map to echo it — so
-          -- self-active is the wrong thing to look for; the completion
-          -- counter is the evidence.
           let completed ← waitForCondition "the slave reports a completed reconstruction" 120 do
             return ((← flaredStatOf s.fqdn "reconstruction_completed").getD 0) ≥ 1
           if !completed then

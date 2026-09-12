@@ -117,8 +117,11 @@ subjects:
     the Lean runtime on the amd64 CI runners but OOMKills it on arm64
     (Docker Desktop), where every suite then fails during setup with
     "cluster did not stabilize" and no visible cause — the operator pod is
-    already gone by the time a test looks. Raising the ceiling costs
-    nothing on CI and makes a local run possible. -/
+    already gone by the time a test looks. 768Mi was still marginal: a
+    restarted operator did not come back within a 240s recovery window,
+    while the same binary under 1Gi did. There is no architecture condition
+    here, so the higher ceiling applies on the amd64 runners too; a ceiling
+    that is not reached costs nothing. -/
 def operatorDeploymentYaml (cfg : ClusterConfig) : String :=
   let envBlock :=
     if cfg.operatorEnv.isEmpty then ""
@@ -164,7 +167,7 @@ spec:
             limits:
               cpu: 500m
               # ceiling, not a reservation - see operatorDeploymentYaml
-              memory: 768Mi
+              memory: 1Gi
 ---
 apiVersion: v1
 kind: Service

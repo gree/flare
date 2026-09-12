@@ -860,6 +860,7 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
     (unreachCyclesRef : IO.Ref (List (String × Nat)))
     (reachSlotRef : IO.Ref Nat)
     (dropSeenRef : IO.Ref (List (String × Nat)))
+    (pendingBroadcastRef : IO.Ref Bool)
     (downCyclesRef : IO.Ref (List (String × Nat)))
     (emptyMasterStreakRef : IO.Ref (List (String × Nat)))
     (probeSlotRef : IO.Ref Nat)
@@ -925,7 +926,21 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
   -- Both halves are exercised by the topology-authority E2E suite.
   let finalState ← stateRef.get
   let finalVersion := finalState.nodeMapVersion
-  if finalVersion != oldVersion then
+  -- RETRY A SUPPRESSED SEND. Suppression used to be terminal: the committed
+  -- version had already advanced, so the next pass found nothing to send and
+  -- the map never reached the nodes until some unrelated change moved the
+  -- version again. Carry a flag instead, and let a later pass that does hold
+  -- the lease publish the CURRENT committed map, which subsumes whatever was
+  -- suppressed.
+  --
+  -- Scope, because it is easy to over-read: this covers suppression that the
+  -- process SURVIVES — a lease read failure, a momentarily foreign holder.
+  -- It cannot cover a real takeover, because losing the lease ends the
+  -- process ("LOST LEASE -- exiting"); there the next leader republishes
+  -- from its own committed state on startup, and whether that reaches a node
+  -- still depends on its version being newer (SAF-09).
+  let pendingBefore ← pendingBroadcastRef.get
+  if finalVersion != oldVersion || pendingBefore then
     -- TEST SEAM (SAF-01 / CHECK-01). Unset in production, this is one
     -- getEnv and nothing else.
     --
@@ -951,6 +966,8 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
         IO.eprintln s!"[flare-operator] lease fence: getLease failed ({e}); skipping broadcast this tick"
         pure false
     if stillLeader then
+      if pendingBefore && finalVersion == oldVersion then
+        IO.eprintln s!"[flare-operator] retrying a suppressed topology send (v{finalVersion})"
       IO.eprintln s!"[flare-operator] topology changed (v{oldVersion} → v{finalVersion}), broadcasting"
       broadcastTopologyToAllPods crName ns finalVersion finalState.getNodes
       recordTopologyBroadcast metrics
@@ -965,8 +982,10 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
           IO.eprintln s!"[flare-operator] CRITICAL: lease holder changed to '{l.holderIdentity}' DURING a topology broadcast (v{finalVersion}); a map may have been published without authority. Recipients that already saw a newer version rejected it; others did not."
       | .error e =>
         IO.eprintln s!"[flare-operator] warning: could not confirm lease ownership after broadcasting v{finalVersion}: {e}"
+      pendingBroadcastRef.set false
     else
-      IO.eprintln s!"[flare-operator] LEASE FENCE: not the lease holder anymore — suppressing topology broadcast (v{oldVersion} → v{finalVersion})"
+      IO.eprintln s!"[flare-operator] LEASE FENCE: not the lease holder anymore — suppressing topology broadcast (v{oldVersion} → v{finalVersion}); held for retry once authority returns"
+      pendingBroadcastRef.set true
 
   -- 4. Update node counts
   updateNodeCounts metrics finalState
@@ -1575,6 +1594,7 @@ def main (args : List String) : IO Unit := do
   let unreachCyclesRef ← IO.mkRef ([] : List (String × Nat))
   let reachSlotRef ← IO.mkRef (0 : Nat)
   let dropSeenRef ← IO.mkRef ([] : List (String × Nat))
+  let pendingBroadcastRef ← IO.mkRef false
   let downCyclesRef ← IO.mkRef ([] : List (String × Nat))
   let emptyMasterStreakRef ← IO.mkRef ([] : List (String × Nat))
   let probeSlotRef ← IO.mkRef (0 : Nat)
@@ -1628,7 +1648,7 @@ def main (args : List String) : IO Unit := do
     let startTime ← IO.monoMsNow
     try
       -- Use FSM-driven reconcile (complete implementation with all 5 requirements)
-      reconcileOnceFSM stateRef crdRef migrationRef graceCyclesRef trippedRef prepareCyclesRef unreadyCyclesRef podKeysRef podAddrsRef unreachCyclesRef reachSlotRef dropSeenRef downCyclesRef emptyMasterStreakRef probeSlotRef pendingConfRef masterSnapshotRef driftTickRef metrics leaseName identity crName ns
+      reconcileOnceFSM stateRef crdRef migrationRef graceCyclesRef trippedRef prepareCyclesRef unreadyCyclesRef podKeysRef podAddrsRef unreachCyclesRef reachSlotRef dropSeenRef pendingBroadcastRef downCyclesRef emptyMasterStreakRef probeSlotRef pendingConfRef masterSnapshotRef driftTickRef metrics leaseName identity crName ns
     catch e =>
       IO.eprintln s!"[flare-operator] reconcile error: {e}"
     let endTime ← IO.monoMsNow

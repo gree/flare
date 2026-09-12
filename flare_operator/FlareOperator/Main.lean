@@ -860,7 +860,7 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
     (unreachCyclesRef : IO.Ref (List (String × Nat)))
     (reachSlotRef : IO.Ref Nat)
     (dropSeenRef : IO.Ref (List (String × Nat)))
-    (pendingBroadcastRef : IO.Ref Bool)
+    (pendingBroadcastRef : IO.Ref (Option Nat))
     (downCyclesRef : IO.Ref (List (String × Nat)))
     (emptyMasterStreakRef : IO.Ref (List (String × Nat)))
     (probeSlotRef : IO.Ref Nat)
@@ -939,8 +939,11 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
   -- process ("LOST LEASE -- exiting"); there the next leader republishes
   -- from its own committed state on startup, and whether that reaches a node
   -- still depends on its version being newer (SAF-09).
+  -- `some v` = a send of committed version v was suppressed and nothing
+  -- has published since. Kept as the EARLIEST suppressed version so the
+  -- log can name the pass that was withheld, not just the latest.
   let pendingBefore ← pendingBroadcastRef.get
-  if finalVersion != oldVersion || pendingBefore then
+  if finalVersion != oldVersion || pendingBefore.isSome then
     -- TEST SEAM (SAF-01 / CHECK-01). Unset in production, this is one
     -- getEnv and nothing else.
     --
@@ -966,8 +969,14 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
         IO.eprintln s!"[flare-operator] lease fence: getLease failed ({e}); skipping broadcast this tick"
         pure false
     if stillLeader then
-      if pendingBefore && finalVersion == oldVersion then
-        IO.eprintln s!"[flare-operator] retrying a suppressed topology send (v{finalVersion})"
+      -- Logged whenever a suppressed send is outstanding, whether or not
+      -- the version also moved: the published map subsumes the withheld
+      -- one either way, and the line names the withheld version so a test
+      -- can tie this send to that suppression. It does NOT claim the send
+      -- would not have happened without the flag — when the version moved
+      -- as well, it would have.
+      if let some suppressedV := pendingBefore then
+        IO.eprintln s!"[flare-operator] retrying a suppressed topology send (suppressed v{suppressedV}; publishing v{finalVersion})"
       IO.eprintln s!"[flare-operator] topology changed (v{oldVersion} → v{finalVersion}), broadcasting"
       broadcastTopologyToAllPods crName ns finalVersion finalState.getNodes
       recordTopologyBroadcast metrics
@@ -982,10 +991,10 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
           IO.eprintln s!"[flare-operator] CRITICAL: lease holder changed to '{l.holderIdentity}' DURING a topology broadcast (v{finalVersion}); a map may have been published without authority. Recipients that already saw a newer version rejected it; others did not."
       | .error e =>
         IO.eprintln s!"[flare-operator] warning: could not confirm lease ownership after broadcasting v{finalVersion}: {e}"
-      pendingBroadcastRef.set false
+      pendingBroadcastRef.set none
     else
       IO.eprintln s!"[flare-operator] LEASE FENCE: not the lease holder anymore — suppressing topology broadcast (v{oldVersion} → v{finalVersion}); held for retry once authority returns"
-      pendingBroadcastRef.set true
+      pendingBroadcastRef.modify fun p => match p with | some v => some v | none => some finalVersion
 
   -- 4. Update node counts
   updateNodeCounts metrics finalState
@@ -1594,7 +1603,7 @@ def main (args : List String) : IO Unit := do
   let unreachCyclesRef ← IO.mkRef ([] : List (String × Nat))
   let reachSlotRef ← IO.mkRef (0 : Nat)
   let dropSeenRef ← IO.mkRef ([] : List (String × Nat))
-  let pendingBroadcastRef ← IO.mkRef false
+  let pendingBroadcastRef ← IO.mkRef (none : Option Nat)
   let downCyclesRef ← IO.mkRef ([] : List (String × Nat))
   let emptyMasterStreakRef ← IO.mkRef ([] : List (String × Nat))
   let probeSlotRef ← IO.mkRef (0 : Nat)

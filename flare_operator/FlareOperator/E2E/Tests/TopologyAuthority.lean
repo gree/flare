@@ -20,12 +20,21 @@
   compare against and will accept the old leader's map. That limit is the
   reason SC-01 also requires the sender-side check below.
 
-  SENDER. The second test takes the lease away and asserts no topology
-  reaches a surviving pod while someone else holds it. It tests the
-  constraint end to end, NOT specifically the post-commit fence branch: a
-  follower also stops reconciling, so both mechanisms would satisfy it.
-  Isolating the fence needs the lease to change mid-pass, which is a race
-  this harness cannot schedule.
+  SENDER. The remaining tests drive ONE production reconcile pass to a
+  named stop position — after the commit, before the pre-send lease check
+  (preSendBarrier in Main.lean, inert without FLARE_TEST_PRESEND_BARRIER) —
+  prove the position was reached by the version the operator writes there,
+  change the lease while the pass is held, and then judge the branch that
+  pass takes when released:
+    * control (lease kept): the pass broadcasts that version;
+    * lease taken by another identity: fence log for that version, no
+      send, the process exits (the restart count moves), the restarted
+      leader re-acquires and re-applies the topology;
+    * lease unreadable: read-failure branch, no send, and the withheld
+      map is published by a later pass of the same process that names the
+      suppressed version.
+  A receiver whose version does not move is never accepted as evidence on
+  its own: a crash, a timeout, or an exit before the check look the same.
 -/
 import FlareOperator.E2E.Framework
 import FlareOperator.E2E.Helpers
@@ -432,8 +441,15 @@ def suite : TestSuite := {
               if !delivered then
                 let vNow ← flaredStat survivorIp "node_map_version"
                 return .fail s!"the withheld topology was never retried: survivor still at {vNow}, expected at least {held}"
-              if !containsSubstr log2 "retrying a suppressed topology send" then
-                return .fail "the survivor caught up, but not through the retry path — an unrelated change may have carried it, which would leave the original defect in place"
+              -- The sending pass must name THIS suppression. The line is
+              -- logged whether or not the version also moved, so what it
+              -- proves is that the flag was set by the withheld pass and
+              -- consumed by the pass that published; it does not isolate
+              -- the flag as the only reason that pass sent (in a live
+              -- cluster the version often moves by itself). Recorded as a
+              -- residual in the register rather than papered over here.
+              if !containsSubstr log2 s!"retrying a suppressed topology send (suppressed v{held}" then
+                return .fail s!"the survivor caught up, but no publishing pass named the suppressed v{held}: the withheld map was not what the retry carried"
               let back ← waitForCondition "topology re-applied after the lease is recreated" 240 do
                 return (← topologyApplied).toOption.isSome
               if !back then

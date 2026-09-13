@@ -39,8 +39,10 @@
        accepts it for the matching pod and REFUSES it (409) for a same-name
        replacement with another UID, which survives;
     8. SAF-06 (delete deadline): the same command against a server that
-       accepts and never answers returns within its deadline and reports the
-       transport failure, so a stalled API cannot stall the reconcile.
+       ACCEPTS the connection (proved server-side by the bytes it received)
+       and never answers ends by curl's timeout (exit 28) within the
+       deadline, so a stalled API cannot stall the reconcile; a refused
+       connection does not pass this test.
 
   Every fault-injecting step heals in every exit path.
 -/
@@ -638,7 +640,12 @@ def suite : TestSuite := {
         | none => return .fail "no operator pod"
         | some opPod =>
           let hole := "blackhole"
-          discard <| kubectl ["run", hole, "-n", cfg.«namespace», "--image=busybox:1.36", "--restart=Never", "--command", "--", "sh", "-c", "while true; do nc -lk -p 6443 -e sleep 3600; done"]
+          -- Accept, then say nothing: nc's stdin is a pipe held open for an
+          -- hour, so the connection stays up and silent; whatever the client
+          -- sends (the TLS ClientHello) is appended to /tmp/accepted, which
+          -- is the SERVER-SIDE proof that the connection was accepted — a
+          -- refused connection would leave it empty and is not this scenario.
+          discard <| kubectl ["run", hole, "-n", cfg.«namespace», "--image=busybox:1.36", "--restart=Never", "--command", "--", "sh", "-c", "while true; do sleep 3600 | nc -l -p 6443 >> /tmp/accepted; done"]
           let ready ← waitForCondition "blackhole pod has an IP" 60 do return (← getPodIp hole cfg.«namespace»).isSome
           match ready, ← getPodIp hole cfg.«namespace» with
           | true, some ip =>
@@ -649,11 +656,18 @@ def suite : TestSuite := {
             let elapsed := (← IO.monoMsNow) - t0
             discard <| kubectl ["delete", "pod", hole, "-n", cfg.«namespace», "--wait=false"]
             let text := match out with | .ok o => o | .error e => e
-            IO.eprintln s!"# black-hole delete returned in {elapsed}ms: {text.replace "\n" " | " |>.take 200}"
+            -- Server-side acceptance: bytes arrived on the black hole.
+            let accepted ← do
+              match ← Bridge.execInPod hole cfg.«namespace» ["sh", "-c", "wc -c < /tmp/accepted 2>/dev/null || echo 0"] with
+              | .ok o => pure ((o.trim.toNat?).getD 0)
+              | .error _ => pure 0
+            IO.eprintln s!"# black-hole delete returned in {elapsed}ms; server accepted {accepted} byte(s): {text.replace "\n" " | " |>.take 200}"
+            if accepted == 0 then
+              return .fail s!"the black hole never accepted the connection (0 bytes received): this was a refused connection, not a silent one — the scenario was not staged ({text.take 160})"
             if elapsed > 20000 then
               return .fail s!"the delete against a silent server took {elapsed}ms: no effective deadline"
-            if !(containsSubstr text "curl_exit=28" || containsSubstr text "curl_exit=35" || containsSubstr text "curl_exit=56" || containsSubstr text "curl_exit=7") then
-              return .fail s!"the command did not report a transport failure to its caller: {text.take 200}"
+            if !containsSubstr text "curl_exit=28" then
+              return .fail s!"the accepted-but-silent connection did not end by TIMEOUT (curl exit 28); got: {text.take 200}"
             return .pass
           | _, _ =>
             discard <| kubectl ["delete", "pod", hole, "-n", cfg.«namespace», "--wait=false"]

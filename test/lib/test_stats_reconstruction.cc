@@ -8,7 +8,7 @@
 #include <stats.h>
 
 using namespace std;
-using namespace flare;
+using namespace gree::flare;
 
 namespace test_stats_reconstruction {
 	stats* st = NULL;

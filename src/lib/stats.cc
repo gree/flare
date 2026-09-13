@@ -176,57 +176,74 @@ uint64_t stats::get_get_misses()										{ return this->_get_misses.fetch(); }
 uint64_t stats::get_proxy_write_dropped()					{ return this->_proxy_write_dropped.fetch(); }
 uint64_t stats::get_reconstruction_started()			{ return this->_reconstruction_started.fetch(); }
 
+static const char* _reconstruction_state_name(int s) {
+	switch (s) {
+	case stats::reconstruction_running: return "running";
+	case stats::reconstruction_succeeded: return "succeeded";
+	case stats::reconstruction_failed_state: return "failed";
+	case stats::reconstruction_aborted: return "aborted";
+	default: return "none";
+	}
+}
+
 uint64_t stats::reconstruction_begin() {
-	this->_reconstruction_started.incr();
 	pthread_mutex_lock(&this->_mutex_reconstruction);
+	this->_reconstruction_started.incr();
 	this->_reconstruction_current_id = this->_reconstruction_started.fetch();
 	this->_reconstruction_current_state = reconstruction_running;
 	uint64_t id = this->_reconstruction_current_id;
 	pthread_mutex_unlock(&this->_mutex_reconstruction);
 	return id;
 }
-int stats::reconstruction_succeeded_from(const string& source) {
+int stats::reconstruction_succeeded_from(uint64_t id, const string& source) {
 	this->_reconstruction_completed.incr();
 	pthread_mutex_lock(&this->_mutex_reconstruction);
-	this->_reconstruction_current_state = reconstruction_succeeded;
-	this->_reconstruction_last_success_id = this->_reconstruction_current_id;
-	this->_reconstruction_last_success_source = source;
+	// last_success only ADVANCES: a late success of an older handler never
+	// masks a newer one, and never claims the newer id.
+	if (id > this->_reconstruction_last_success_id) {
+		this->_reconstruction_last_success_id = id;
+		this->_reconstruction_last_success_source = source;
+	}
+	// The current state belongs to the CURRENT handler only.
+	if (id == this->_reconstruction_current_id) {
+		this->_reconstruction_current_state = reconstruction_succeeded;
+	}
 	pthread_mutex_unlock(&this->_mutex_reconstruction);
 	return 0;
 }
-int stats::reconstruction_failed_final() {
+int stats::reconstruction_failed_final(uint64_t id) {
 	this->_reconstruction_failed.incr();
 	pthread_mutex_lock(&this->_mutex_reconstruction);
-	this->_reconstruction_current_state = reconstruction_failed_state;
+	if (id == this->_reconstruction_current_id) {
+		this->_reconstruction_current_state = reconstruction_failed_state;
+	}
 	pthread_mutex_unlock(&this->_mutex_reconstruction);
 	return 0;
 }
-int stats::reconstruction_aborted_by_shutdown() {
+int stats::reconstruction_aborted_by_shutdown(uint64_t id) {
 	pthread_mutex_lock(&this->_mutex_reconstruction);
-	this->_reconstruction_current_state = reconstruction_aborted;
+	if (id == this->_reconstruction_current_id) {
+		this->_reconstruction_current_state = reconstruction_aborted;
+	}
 	pthread_mutex_unlock(&this->_mutex_reconstruction);
 	return 0;
+}
+stats::reconstruction_record stats::get_reconstruction_record() {
+	reconstruction_record r;
+	pthread_mutex_lock(&this->_mutex_reconstruction);
+	r.boot_id = this->_reconstruction_boot_id;
+	r.current_id = this->_reconstruction_current_id;
+	r.current_state = _reconstruction_state_name(this->_reconstruction_current_state);
+	r.last_success_id = this->_reconstruction_last_success_id;
+	r.last_success_source = this->_reconstruction_last_success_source;
+	pthread_mutex_unlock(&this->_mutex_reconstruction);
+	return r;
 }
 uint64_t stats::get_reconstruction_boot_id() { return this->_reconstruction_boot_id; }
-uint64_t stats::get_reconstruction_current_id() {
-	pthread_mutex_lock(&this->_mutex_reconstruction); uint64_t v = this->_reconstruction_current_id; pthread_mutex_unlock(&this->_mutex_reconstruction); return v;
-}
-string stats::get_reconstruction_current_state() {
-	pthread_mutex_lock(&this->_mutex_reconstruction); int s = this->_reconstruction_current_state; pthread_mutex_unlock(&this->_mutex_reconstruction);
-	switch (s) {
-	case reconstruction_running: return "running";
-	case reconstruction_succeeded: return "succeeded";
-	case reconstruction_failed_state: return "failed";
-	case reconstruction_aborted: return "aborted";
-	default: return "none";
-	}
-}
-uint64_t stats::get_reconstruction_last_success_id() {
-	pthread_mutex_lock(&this->_mutex_reconstruction); uint64_t v = this->_reconstruction_last_success_id; pthread_mutex_unlock(&this->_mutex_reconstruction); return v;
-}
-string stats::get_reconstruction_last_success_source() {
-	pthread_mutex_lock(&this->_mutex_reconstruction); string v = this->_reconstruction_last_success_source; pthread_mutex_unlock(&this->_mutex_reconstruction); return v;
-}
+uint64_t stats::get_reconstruction_current_id() { return this->get_reconstruction_record().current_id; }
+string stats::get_reconstruction_current_state() { return this->get_reconstruction_record().current_state; }
+uint64_t stats::get_reconstruction_last_success_id() { return this->get_reconstruction_record().last_success_id; }
+string stats::get_reconstruction_last_success_source() { return this->get_reconstruction_record().last_success_source; }
 uint64_t stats::get_reconstruction_completed()		{ return this->_reconstruction_completed.fetch(); }
 uint64_t stats::get_reconstruction_failed()				{ return this->_reconstruction_failed.fetch(); }
 

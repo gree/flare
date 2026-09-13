@@ -133,10 +133,25 @@ public:
 	inline int increment_reconstruction_completed() { this->_reconstruction_completed.incr();return 0; };
 	inline int increment_reconstruction_failed()    { this->_reconstruction_failed.incr();return 0; };
 	enum reconstruction_state { reconstruction_none = 0, reconstruction_running, reconstruction_succeeded, reconstruction_failed_state, reconstruction_aborted };
+	// Every notification carries the id the handler was GIVEN at begin(), so
+	// an older handler finishing after a newer one started cannot write the
+	// newer id into the record (review: A begins #1, B begins #2, A succeeds
+	// must not yield "latest #2 succeeded"). Only the CURRENT handler's
+	// notification changes the current state; last_success only advances.
+	// begin() allocates the id and updates the record under ONE lock.
 	uint64_t reconstruction_begin();
-	int reconstruction_succeeded_from(const string& source);
-	int reconstruction_failed_final();
-	int reconstruction_aborted_by_shutdown();
+	int reconstruction_succeeded_from(uint64_t id, const string& source);
+	int reconstruction_failed_final(uint64_t id);
+	int reconstruction_aborted_by_shutdown(uint64_t id);
+	struct reconstruction_record {
+		uint64_t boot_id;
+		uint64_t current_id;
+		string current_state;
+		uint64_t last_success_id;
+		string last_success_source;
+	};
+	/// One consistent snapshot under a single lock (for `stats`).
+	reconstruction_record get_reconstruction_record();
 	uint64_t get_reconstruction_boot_id();
 	uint64_t get_reconstruction_current_id();
 	string get_reconstruction_current_state();

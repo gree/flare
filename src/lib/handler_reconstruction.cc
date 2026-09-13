@@ -58,7 +58,8 @@ handler_reconstruction::handler_reconstruction(shared_thread t, cluster* cl, sto
 		_partition_size(partition_size),
 		_role(r),
 		_reconstruction_interval(reconstruction_interval),
-		_reconstruction_bwlimit(reconstruction_bwlimit) {
+		_reconstruction_bwlimit(reconstruction_bwlimit),
+		_reconstruction_id(0) {
 }
 
 /**
@@ -88,7 +89,7 @@ int handler_reconstruction::run() {
 	// a controller reads: cumulative counters cannot tell a failed-then-
 	// succeeded pair from one in flight.
 	if (stats_object != NULL) {
-		stats_object->reconstruction_begin();
+		this->_reconstruction_id = stats_object->reconstruction_begin();
 	}
 	char source[BUFSIZ];
 	snprintf(source, sizeof(source), "%s:%d", this->_node_server_name.c_str(), this->_node_server_port);
@@ -96,7 +97,7 @@ int handler_reconstruction::run() {
 		result = this->_run_once();
 		if (result == 0) {
 			if (stats_object != NULL) {
-				stats_object->reconstruction_succeeded_from(string(source));
+				stats_object->reconstruction_succeeded_from(this->_reconstruction_id, string(source));
 			}
 			return 0;
 		}
@@ -109,7 +110,7 @@ int handler_reconstruction::run() {
 			if (this->_thread->is_shutdown_request()) {
 				log_notice("shutdown requested -> abandoning reconstruction retry", 0);
 				if (stats_object != NULL) {
-					stats_object->reconstruction_aborted_by_shutdown();
+					stats_object->reconstruction_aborted_by_shutdown(this->_reconstruction_id);
 				}
 				return -1;
 			}
@@ -120,7 +121,7 @@ int handler_reconstruction::run() {
 	// the K8s operator rejects this and keeps the node in prepare).
 	log_err("reconstruction failed permanently after retries -> deactivating node", 0);
 	if (stats_object != NULL) {
-		stats_object->reconstruction_failed_final();
+		stats_object->reconstruction_failed_final(this->_reconstruction_id);
 	}
 	this->_cluster->deactivate_node();
 	return result;

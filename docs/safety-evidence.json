@@ -320,6 +320,14 @@
           "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter topology-authority,replica-repair,prepare-evidence",
           "result": "pass",
           "report": "docs/reports/2026-09-13-integrated-e2e-review3.txt"
+        },
+        {
+          "check": "CHECK-01",
+          "commit": "33205465691b0bf59dff1ad348ed810a5d20f24f",
+          "date": "2026-09-13",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter topology-authority,replica-repair,prepare-evidence",
+          "result": "pass",
+          "report": "docs/reports/2026-09-13-integrated-e2e-review4.txt"
         }
       ],
       "tasks": [
@@ -327,9 +335,9 @@
         "SAF-09"
       ],
       "review": {
-        "commit": "f7b68992643fb4a410e400d154572a7b982638ee",
+        "commit": "33205465691b0bf59dff1ad348ed810a5d20f24f",
         "date": "2026-09-13",
-        "note": "Re-run in the round-3 integrated pass; untouched by the handler-id binding and the delete deadline. PARTIAL / UNVERIFIED unchanged."
+        "note": "Re-run in the round-4 integrated pass; untouched by the delete-outcome wording. PARTIAL / UNVERIFIED unchanged."
       }
     },
     {
@@ -402,9 +410,9 @@
         "SAF-09"
       ],
       "review": {
-        "commit": "f7b68992643fb4a410e400d154572a7b982638ee",
+        "commit": "33205465691b0bf59dff1ad348ed810a5d20f24f",
         "date": "2026-09-13",
-        "note": "Bridge.lean changed for the delete deadline; commit/merge and broadcast untouched. No new evidence for SC-02."
+        "note": "Bridge.lean/Main.lean changed for the delete-outcome wording; commit/merge and broadcast untouched. No new evidence for SC-02."
       }
     },
     {
@@ -555,6 +563,14 @@
           "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter topology-authority,replica-repair,prepare-evidence",
           "result": "pass",
           "report": "docs/reports/2026-09-13-integrated-e2e-review3.txt"
+        },
+        {
+          "check": "CHECK-03",
+          "commit": "33205465691b0bf59dff1ad348ed810a5d20f24f",
+          "date": "2026-09-13",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter topology-authority,replica-repair,prepare-evidence",
+          "result": "pass",
+          "report": "docs/reports/2026-09-13-integrated-e2e-review4.txt"
         }
       ],
       "tasks": [
@@ -563,9 +579,9 @@
         "SAF-10"
       ],
       "review": {
-        "commit": "f7b68992643fb4a410e400d154572a7b982638ee",
+        "commit": "33205465691b0bf59dff1ad348ed810a5d20f24f",
         "date": "2026-09-13",
-        "note": "The ledger's completion judgement reads the same completion record; the handler-id binding fix (e1c1141) removes the case where an older handler's late success could have marked a newer reconstruction as the successful one. No ledger logic changed at this revision. Stays PARTIAL / UNVERIFIED."
+        "note": "Main.lean/Bridge.lean changed only in the empty-master delete's failure wording; the ledger path is untouched. Re-run in the round-4 integrated pass. PARTIAL / UNVERIFIED unchanged."
       }
     },
     {
@@ -733,6 +749,14 @@
           "command": "nix build .#test-flare -L   # the flare derivation (nix/default.nix, doCheck) runs make check with cutter in test/lib, which includes test_stats_reconstruction",
           "result": "pass",
           "report": "docs/reports/2026-09-13-cutter-stats-reconstruction.txt"
+        },
+        {
+          "check": "CHECK-04",
+          "commit": "33205465691b0bf59dff1ad348ed810a5d20f24f",
+          "date": "2026-09-13",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter topology-authority,replica-repair,prepare-evidence",
+          "result": "pass",
+          "report": "docs/reports/2026-09-13-integrated-e2e-review4.txt"
         }
       ],
       "tasks": [
@@ -741,9 +765,9 @@
         "SAF-08"
       ],
       "review": {
-        "commit": "f7b68992643fb4a410e400d154572a7b982638ee",
+        "commit": "33205465691b0bf59dff1ad348ed810a5d20f24f",
         "date": "2026-09-13",
-        "note": "Third review (of d08fe06) item 1 fixed: the completion record could be corrupted by an older handler finishing after a newer one began (its success wrote the shared current_id as last_success_id, i.e. 'latest #2 succeeded' while #2 was copying). Notifications now carry the handler's own id, last_success only advances, only the current handler changes current_state, begin() and the stats read each hold one lock. The interleaving is pinned by a cutter test that was executed at this revision through the nix flare derivation's make check (the same path the nix-linux CI job uses). Stays PARTIAL and UNVERIFIED."
+        "note": "Main.lean changed only in the empty-master delete's failure wording; the completion judgement is untouched. Re-run in the round-4 integrated pass. PARTIAL / UNVERIFIED unchanged."
       }
     },
     {
@@ -774,7 +798,7 @@
       "residual_risks": [
         "Graceful deletion still does not guarantee a successful handoff; the drain guard protects a master with no promotable successor.",
         "The successor/lease revalidation and the delete are not one atomic step; the pod-identity hole is closed by the API precondition, a successor demoted in the instant after the gate remains a window.",
-        "The direct-API delete is bounded (connect 3s, total 10s, outer wall 20s) and a transport failure is returned, not swallowed; a stalled API therefore costs one bounded pass, not the lease.",
+        "The direct-API delete is bounded (connect 3s, total 10s, outer wall 20s + 5s kill grace, ~25s worst case). A timeout or transport failure is an UNKNOWN deletion outcome — the API may have accepted the delete and only the reply was lost — and is reported as such; the caller keeps the streak and re-observes the pod on the next probe rather than assuming 'not deleted' or retrying blindly.",
         "A live empty master with a data-bearing successor and an interposed change is not staged end to end; the gate is unit-pinned, the precondition and the deadline are staged by E2E against a replaced pod and a black-hole server."
       ],
       "code": [
@@ -796,7 +820,7 @@
         {
           "id": "CHECK-05",
           "kind": "scenario",
-          "procedure": "Malformed/empty/truncated stats must not delete a master; act only on a confirmed empty master with a confirmed data-bearing successor; revalidate stats, then the live map, then the lease, with the target UID stable across the observation; the delete carries the observed UID as an API-side precondition. E2E (replica-repair test 7) runs the operator's exact delete command inside the operator pod: accepted (200/202) for the matching UID, and refused (409) for a same-name replacement with another UID, which survives. Deadline (test 12): the same command aimed at a server that accepts TCP and never answers returns within its deadline and reports curl's transport failure to the caller.",
+          "procedure": "Malformed/empty/truncated stats must not delete a master; act only on a confirmed empty master with a confirmed data-bearing successor; revalidate stats, then the live map, then the lease, with the target UID stable across the observation; the delete carries the observed UID as an API-side precondition. E2E (replica-repair test 7) runs the operator's exact delete command inside the operator pod: accepted (200/202) for the matching UID, and refused (409) for a same-name replacement with another UID, which survives. Deadline (test 12): the same command aimed at a server that ACCEPTS the connection — proved server-side by the bytes the black hole received — and never answers ends by curl's TIMEOUT (exit 28) within the deadline; a refused connection (exit 7) does not pass this test, and the caller is told the outcome is unknown, not 'not deleted'.",
           "references": [
             {
               "path": "flare_operator/FlareOperator/StateMachine/StatsObservation.lean",
@@ -872,6 +896,22 @@
           "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter topology-authority,replica-repair,prepare-evidence",
           "result": "pass",
           "report": "docs/reports/2026-09-13-integrated-e2e-review3.txt"
+        },
+        {
+          "check": "CHECK-05-unit",
+          "commit": "33205465691b0bf59dff1ad348ed810a5d20f24f",
+          "date": "2026-09-13",
+          "command": "cd flare_operator && lake build flare_unit && .lake/build/bin/flare_unit",
+          "result": "pass",
+          "report": "docs/reports/2026-09-13-flare-unit-review4.txt"
+        },
+        {
+          "check": "CHECK-05",
+          "commit": "33205465691b0bf59dff1ad348ed810a5d20f24f",
+          "date": "2026-09-13",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter topology-authority,replica-repair,prepare-evidence",
+          "result": "pass",
+          "report": "docs/reports/2026-09-13-integrated-e2e-review4.txt"
         }
       ],
       "tasks": [
@@ -880,9 +920,9 @@
         "SAF-08"
       ],
       "review": {
-        "commit": "f7b68992643fb4a410e400d154572a7b982638ee",
+        "commit": "33205465691b0bf59dff1ad348ed810a5d20f24f",
         "date": "2026-09-13",
-        "note": "Third review (of d08fe06) item 2 fixed: the direct-API DELETE had no connect or overall deadline and would have stalled the reconcile (and the lease renewal) on an apiserver that accepted and never answered. curl now runs with --connect-timeout 3 --max-time 10 inside the same `timeout -k 5 20` wall as kubectl and prints its exit code; a transport failure is returned to the caller. E2E stages a TCP black hole and confirms the bounded return and the reported failure. Stays PARTIAL / UNVERIFIED."
+        "note": "Fourth review (of 48245be) confirmed the round-3 implementation (handler-id binding, snapshot record, bounded delete) and asked for two finishing changes, made here: a timed-out or failed DELETE is reported as an UNKNOWN deletion outcome to be re-observed, not as 'not deleted' (the API may have accepted it and only the reply was lost; 409/404 remain definitive), with the wall stated as 20s + 5s kill grace; and the deadline E2E now proves the black hole accepted the connection (bytes received server-side) and requires curl exit 28, so a refused connection cannot stand in for a stalled one. Reviewer's assessment recorded: round-3 implementation confirmed; test proof strength and log wording corrected; this is not a blanket 'verified'. Stays PARTIAL / UNVERIFIED."
       }
     },
     {
@@ -955,9 +995,9 @@
         "SAF-07"
       ],
       "review": {
-        "commit": "f7b68992643fb4a410e400d154572a7b982638ee",
+        "commit": "33205465691b0bf59dff1ad348ed810a5d20f24f",
         "date": "2026-09-13",
-        "note": "Bridge.lean changed (delete deadline); refill untouched. Refreshed for the referenced-file check."
+        "note": "Main.lean/Bridge.lean changed only in the empty-master delete's failure wording (unknown outcome); this control's mechanism is untouched. Refreshed for the referenced-file check."
       }
     },
     {
@@ -1030,9 +1070,9 @@
         "SAF-08"
       ],
       "review": {
-        "commit": "f7b68992643fb4a410e400d154572a7b982638ee",
+        "commit": "33205465691b0bf59dff1ad348ed810a5d20f24f",
         "date": "2026-09-13",
-        "note": "Bridge.lean changed (delete deadline); failure qualification untouched. Refreshed for the referenced-file check."
+        "note": "Main.lean/Bridge.lean changed only in the empty-master delete's failure wording (unknown outcome); this control's mechanism is untouched. Refreshed for the referenced-file check."
       }
     },
     {
@@ -1222,9 +1262,9 @@
         "SAF-06"
       ],
       "review": {
-        "commit": "f7b68992643fb4a410e400d154572a7b982638ee",
+        "commit": "33205465691b0bf59dff1ad348ed810a5d20f24f",
         "date": "2026-09-13",
-        "note": "Bridge.lean changed (delete deadline); stuck-Down recovery untouched. Refreshed for the referenced-file check."
+        "note": "Main.lean/Bridge.lean changed only in the empty-master delete's failure wording (unknown outcome); this control's mechanism is untouched. Refreshed for the referenced-file check."
       }
     },
     {
@@ -1301,9 +1341,9 @@
       "runs": [],
       "tasks": [],
       "review": {
-        "commit": "f7b68992643fb4a410e400d154572a7b982638ee",
+        "commit": "33205465691b0bf59dff1ad348ed810a5d20f24f",
         "date": "2026-09-13",
-        "note": "handler_reconstruction.cc/stats.cc changed (completion record bound to the handler id — observability only); detection-only posture untouched. Refreshed for the referenced-file check."
+        "note": "Main.lean/Bridge.lean changed only in the empty-master delete's failure wording (unknown outcome); this control's mechanism is untouched. Refreshed for the referenced-file check."
       }
     },
     {
@@ -1364,9 +1404,9 @@
         "SAF-10"
       ],
       "review": {
-        "commit": "b739277aa50553bf88336e5642e6b1ab21161a4e",
+        "commit": "33205465691b0bf59dff1ad348ed810a5d20f24f",
         "date": "2026-09-13",
-        "note": "Main.lean changed for the round-2 fixes; the divergence gauge is untouched. Refreshed for the referenced-file check."
+        "note": "Main.lean/Bridge.lean changed only in the empty-master delete's failure wording (unknown outcome); this control's mechanism is untouched. Refreshed for the referenced-file check."
       }
     },
     {
@@ -1543,9 +1583,9 @@
       "runs": [],
       "tasks": [],
       "review": {
-        "commit": "f7b68992643fb4a410e400d154572a7b982638ee",
+        "commit": "33205465691b0bf59dff1ad348ed810a5d20f24f",
         "date": "2026-09-13",
-        "note": "op_stats.cc changed (record emitted as one snapshot); role-aware export untouched. Refreshed for the referenced-file check."
+        "note": "Main.lean/Bridge.lean changed only in the empty-master delete's failure wording (unknown outcome); this control's mechanism is untouched. Refreshed for the referenced-file check."
       }
     }
   ]

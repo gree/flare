@@ -46,7 +46,12 @@ notifications now carry the handler's own id (an older handler finishing
 after a newer one started can no longer record the newer id as succeeded;
 the record is read as one locked snapshot), and the direct-API UID-precondition
 delete has connect/overall deadlines and reports transport failures instead
-of stalling the reconcile. The evidence register
+of stalling the reconcile. A fourth review (HEAD 48245be) confirmed those two
+and asked for two finishing touches, done on the same branch: a timed-out or
+failed DELETE is reported as an UNKNOWN deletion outcome (the API may have
+accepted it and only the reply was lost; re-observe before retry), and the
+deadline E2E now requires a timeout (curl exit 28) on a connection the black
+hole provably accepted, so a refused connection no longer passes it. The evidence register
 owns exact implementation and verification state, which stays `unverified`
 until a reviewer signs off; EV-03 is held at `partial` because two scenarios
 are pinned only by `flare_unit` and not staged end to end (a drop in the last

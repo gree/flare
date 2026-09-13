@@ -1,8 +1,8 @@
 # cutter run of test/lib via the flare nix derivation's make check (doCheck) — includes test_stats_reconstruction (review round 3, item 1)
-# tested revision: f7b68992643fb4a410e400d154572a7b982638ee
+# tested revision: 33205465691b0bf59dff1ad348ed810a5d20f24f
 # command: nix build .#test-flare -L --print-build-logs   (builds the flare derivation, whose checkPhase runs make check -> test/run-tests.sh -> cutter over every check_LTLIBRARIES in test/lib)
 # date: 2026-09-13
-# provenance: executed at 55366c665dab010d5299ecdc7b8d44a812ddf78f; the recorded revision above differs from it only by E2E Lean test edits (f7b6899), the C++ tree and test/lib are byte-identical (git diff 55366c6..ad0872d -- src test).
+# provenance: executed at 55366c665dab010d5299ecdc7b8d44a812ddf78f; the recorded revision above differs from it only by Lean-side edits (operator log wording and E2E tests, up to 5578ae5), the C++ tree and test/lib are byte-identical (git diff 55366c6..ad0872d -- src test).
 #
 # GRANULARITY: the automake test driver reports the cutter run as ONE test (run-tests.sh); per-case output is not in the nix log.
 # What this run proves: test_stats_reconstruction.cc compiled into test_stats_reconstruction.la (registered in test/lib/Makefile.am) and the cutter run over test/lib, which includes it, exited PASS. The individual cases are listed below from the source; a failing case would have failed run-tests.sh.

@@ -234,17 +234,25 @@ private def diagnostics (masterIp slaveIp : String) : IO Unit := do
     `droppedAfterHeal`. -/
 private def awaitRepair (masterIp slaveIp : String)
     (started0 completed0 droppedAfterHeal : Nat) (budget : Nat) : IO TestResult := do
+  -- The path, not just the destination: demoted+held, confirmed, then done.
+  -- Those two lines precede completion by a minute or more of verbose
+  -- per-pass output, so they can scroll out of ANY fixed log tail before
+  -- COMPLETE appears; record them as they are seen during the poll instead
+  -- of looking for them in the final snapshot.
+  let sawDemote ← IO.mkRef false
+  let sawConfirm ← IO.mkRef false
   let done ← waitForCondition "operator records REPLICA REPAIR COMPLETE" budget do
-    return containsSubstr (← opLog) "REPLICA REPAIR COMPLETE"
+    let l ← opLog 2000
+    if containsSubstr l "REPLICA REPAIR: demoting" then sawDemote.set true
+    if containsSubstr l "confirmed the demotion" then sawConfirm.set true
+    return containsSubstr l "REPLICA REPAIR COMPLETE"
   if !done then
     diagnostics masterIp slaveIp
     return .fail s!"the repair did not complete within {budget}s (no REPLICA REPAIR COMPLETE in the operator log)"
-  let log ← opLog
-  -- The path, not just the destination: demoted+held, confirmed, then done.
-  if !containsSubstr log "REPLICA REPAIR: demoting" then
-    return .fail "completion was logged but no demotion was: the repair did not go through the hold"
-  if !containsSubstr log "confirmed the demotion" then
-    return .fail "completion was logged but the node never confirmed the demotion: the hold was skipped"
+  if !(← sawDemote.get) then
+    return .fail "completion was logged but no demotion was observed during the wait: the repair did not go through the hold"
+  if !(← sawConfirm.get) then
+    return .fail "completion was logged but the node was never observed confirming the demotion: the hold was skipped"
   let s1 := (← flaredStat slaveIp "reconstruction_started").getD 0
   let c1 := (← flaredStat slaveIp "reconstruction_completed").getD 0
   if !(s1 > started0 && c1 > completed0) then

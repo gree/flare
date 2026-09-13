@@ -304,6 +304,14 @@
           "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter topology-authority,replica-repair,prepare-evidence",
           "result": "pass",
           "report": "docs/reports/2026-09-13-integrated-e2e-review.txt"
+        },
+        {
+          "check": "CHECK-01",
+          "commit": "b739277aa50553bf88336e5642e6b1ab21161a4e",
+          "date": "2026-09-13",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter topology-authority,replica-repair,prepare-evidence",
+          "result": "pass",
+          "report": "docs/reports/2026-09-13-integrated-e2e-review2.txt"
         }
       ],
       "tasks": [
@@ -311,9 +319,9 @@
         "SAF-09"
       ],
       "review": {
-        "commit": "cc30633dfad681828db477d299a42069c7ce4cea",
+        "commit": "b739277aa50553bf88336e5642e6b1ab21161a4e",
         "date": "2026-09-13",
-        "note": "Re-run in the integrated pass at this revision after the review fixes; the topology-authority scenarios are unaffected by them (the changes are in the repair ledger, the completion judgement and the empty-master delete) and pass. Status unchanged: PARTIAL / UNVERIFIED."
+        "note": "Re-run in the round-2 integrated pass; topology-authority is untouched by the completion-record, strict-parse and UID-precondition changes and passes. PARTIAL / UNVERIFIED unchanged."
       }
     },
     {
@@ -386,9 +394,9 @@
         "SAF-09"
       ],
       "review": {
-        "commit": "cc30633dfad681828db477d299a42069c7ce4cea",
+        "commit": "b739277aa50553bf88336e5642e6b1ab21161a4e",
         "date": "2026-09-13",
-        "note": "Main.lean and Bridge.lean changed for the review fixes (ledger fault tolerance, delete revalidation, completion evidence); the commit/merge path and the broadcast decision this control rests on are untouched. No new evidence for SC-02."
+        "note": "Main.lean and Bridge.lean changed for the round-2 fixes (completion record readings, UID-precondition delete); the commit/merge path and broadcast decision are untouched. No new evidence for SC-02."
       }
     },
     {
@@ -411,13 +419,14 @@
         "Drops during normal service, a drop while the gate is held, an unresolved destination, operator restart with the ledger persisted, a master counter reset, drops arriving after a repair's reconstruction began, a failed ledger save, and a corrupt/unreadable ledger at start."
       ],
       "assumptions": [
-        "Drop counters describe a source/destination incarnation (a counter that went down is a restart whose count is entirely new drops). flared's reconstruction_started/reconstruction_completed are process-lifetime counters: a reconstruction that began after the reseat and finished (started > baseline, started == completed) is the copy that recovers the drops; a restart resets both."
+        "Drop counters describe a source/destination incarnation (a counter that went down is a restart whose count is entirely new drops). flared keeps one completion RECORD per process — a random boot id, the latest reconstruction's id and state, and the id and source of the last success — so a completion can be tied to a process and a source; cumulative started/completed counters cannot (a failed handler leaves them unequal forever, a restart may reproduce their values)."
       ],
       "residual_risks": [
         "A repair rebuilds the whole partition; there is no per-key repair.",
-        "Drops that arrive after a repair's reconstruction began are requeued as a fresh request on completion (they may not be in the copy). The decision is pinned by flare_unit; a drop in the LAST stretch of a live reconstruction is not staged end to end (a tiny dataset reconstructs in well under a pass).",
-        "Ledger fault tolerance covers a failed status write (dirty, retried every pass) and a failed or corrupt read (held unavailable, never replaced by an empty ledger). A write that keeps failing until a restart still loses the unsaved delta; the window is one pass.",
-        "A destination that became a MASTER while under repair is VOIDED, not repaired: its missed writes sit on a primary and are surfaced as CRITICAL."
+        "Drops attributed after the reseat are requeued on completion; a drop in the LAST stretch of a live reconstruction is pinned by flare_unit, not staged end to end (a tiny dataset reconstructs within one pass).",
+        "A write that keeps failing until a restart loses the unsaved delta; the window is one pass.",
+        "The completion record is read over the stats channel; an unreadable record holds the entry (fail closed) rather than completing it.",
+        "A destination that became a MASTER while under repair is VOIDED, not repaired."
       ],
       "code": [
         {
@@ -453,7 +462,7 @@
           "symbol": "stats::increment_proxy_write_dropped"
         }
       ],
-      "call_path": "queue_proxy_write records destination drops -> stats proxy_write_dropped[dest] -> Main observe (only while the ledger is AVAILABLE) -> ReplicaRepair ledger (persisted in FlareCluster status; failed writes retried while DIRTY; failed/corrupt reads hold the ledger UNAVAILABLE) -> demote to Proxy held out of assignment -> node confirms the map (startedAtReseat, dropsAtReseat recorded) -> FSM re-seats Slave/Prepare -> flared reconstructs -> complete when a reconstruction that began after the reseat finished (started > baseline, started == completed); late drops requeued.",
+      "call_path": "queue_proxy_write records destination drops -> stats proxy_write_dropped[dest] -> Main observe (only while the ledger is AVAILABLE; a partially corrupt ledger is unavailable, not smaller) -> ReplicaRepair ledger (persisted; dirty writes retried) -> demote to Proxy held out of assignment -> node confirms (boot id, current id, drops at reseat recorded) -> FSM re-seats Slave/Prepare -> flared reconstructs -> complete when the LATEST reconstruction SUCCEEDED from the current master and is newer than the reseat one in the same process, or in a new process (boot id changed); late drops requeued.",
       "checks": [
         {
           "id": "CHECK-03",
@@ -473,7 +482,7 @@
         {
           "id": "CHECK-03-unit",
           "kind": "scenario",
-          "procedure": "flare_unit pins the pure ledger decisions: baseline/delta/reset observation, per-master keying, resolve/unresolved/void, gate hold and release, demotion held out of assignment, release recording started and drops at reseat, a re-announced Active or an in-flight reconstruction is NOT completion, a bare counter reset (7 -> 0) is NOT completion and resets the baseline so the boot reconstruction completes it, late drops after the reseat requeue exactly the increment, JSON round trip.",
+          "procedure": "flare_unit pins the ledger decisions on flared's completion record: release records boot id/current id/drops; a re-announced Active, a newer reconstruction still running, a newer one that FAILED, or a success from another source is NOT completion; a success newer than the reseat one completes; failure-then-success completes; a RESTART with identical counters completes because the boot id differs; a restart still running does not; late drops requeue exactly the increment; a partially corrupt ledger (missing masterKey, malformed counter, unknown phase, one bad among good) fails as a whole.",
           "references": [
             {
               "path": "flare_operator/FlareOperator/UnitTests.lean",
@@ -514,6 +523,22 @@
           "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter topology-authority,replica-repair,prepare-evidence",
           "result": "pass",
           "report": "docs/reports/2026-09-13-integrated-e2e-review.txt"
+        },
+        {
+          "check": "CHECK-03-unit",
+          "commit": "b739277aa50553bf88336e5642e6b1ab21161a4e",
+          "date": "2026-09-13",
+          "command": "cd flare_operator && lake build flare_unit && .lake/build/bin/flare_unit",
+          "result": "pass",
+          "report": "docs/reports/2026-09-13-flare-unit-review2.txt"
+        },
+        {
+          "check": "CHECK-03",
+          "commit": "b739277aa50553bf88336e5642e6b1ab21161a4e",
+          "date": "2026-09-13",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter topology-authority,replica-repair,prepare-evidence",
+          "result": "pass",
+          "report": "docs/reports/2026-09-13-integrated-e2e-review2.txt"
         }
       ],
       "tasks": [
@@ -522,9 +547,9 @@
         "SAF-10"
       ],
       "review": {
-        "commit": "cc30633dfad681828db477d299a42069c7ce4cea",
+        "commit": "b739277aa50553bf88336e5642e6b1ab21161a4e",
         "date": "2026-09-13",
-        "note": "Reopened by review of ffa2a05 (items 3, 4, 6) and fixed: completion now requires a reconstruction that began after the reseat and finished (started > baseline, started == completed), so a counter reset is not completion and a restart resets the baseline instead of waiting forever; drops attributed after the reseat are requeued on completion; a failed status write marks the ledger dirty and is retried every pass; a failed or corrupt read holds the ledger unavailable rather than starting fresh. Two new E2E scenarios stage the write failure (ClusterRole status write revoked) and the corrupt ledger (status patched unparseable, operator restarted). Implementation held at PARTIAL on the reviewer's judgement: a late drop in the final stretch of a live reconstruction is pinned only by flare_unit. Verification UNVERIFIED pending sign-off."
+        "note": "Second review (of ccca200) items 2 and 4 fixed here: Ledger.fromJson? parses strictly (mapM), so one malformed element fails the whole ledger and it is held unavailable rather than loaded smaller; completion no longer compares cumulative counters but reads flared's completion record — a success from the current master newer than the reseat one in the same process, or any success in a new process (boot id) — so a restart whose counters equal the baseline completes, and a failed-then-succeeded pair is recognised. Stays PARTIAL (late-drop E2E not staged) and UNVERIFIED pending sign-off."
       }
     },
     {
@@ -547,7 +572,7 @@
         "A Prepare slave whose activation was lost to an index-leader handover (reconstruction finished, operator still sees Prepare); a node with a PAST success that is now re-reconstructing (in flight); a RocksDB reply missing lineage or cursor (truncated); a zero cursor; a mismatched lineage; a cursor ahead of the head; a master or lineage change mid-observation; a fresh process."
       ],
       "assumptions": [
-        "flared's reconstruction_started and reconstruction_completed are process-lifetime counters incremented when a handler begins and when it finishes with its activation call returned; started == completed >= 1 means a completed copy and none in flight in THIS process. On RocksDB a completed reconstruction seeds a nonzero repl_last_lsn and rocksdb_master_id identifies the source. The backend is told from a COMPLETE master stats reply (END present). The node's own active state is not usable: flared sets it only from the operator's echo."
+        "flared exposes a per-process completion record in stats: reconstruction_boot_id (random per process), reconstruction_current_id/_state (latest handler), reconstruction_last_success_id/_source. Activation requires the LATEST reconstruction to have succeeded from the current master; cumulative counters are not used (a failed or aborted handler would make them unequal forever). On RocksDB a completed reconstruction seeds a nonzero cursor and rocksdb_master_id identifies the source; the backend is told from a COMPLETE master reply. The node's own active state is not usable (set only from the operator's echo)."
       ],
       "residual_risks": [
         "Covers Prepare ACTIVATION by the repair path only; promotion still trusts the Active designation (SAF-08).",
@@ -592,7 +617,7 @@
         {
           "id": "CHECK-04-unit",
           "kind": "scenario",
-          "procedure": "flare_unit pins SyncEvidence.judge on the reviewer's inputs: in flight (started 2 > completed 1) refused; completed 1 with same lineage, slave LSN 0, master 10000 refused (cursor not seeded); RocksDB with lineage or cursor missing refused; 'completed 1 alone' refused; an incomplete master reply refused; a fresh process refused; lineage mismatch and cursor-ahead refused; a finished re-reconstruction (2 == 2), a fresh-process completion (1 == 1), a far-behind seeded cursor, and a non-RocksDB completion accepted; a source change refused until the lineage matches the new master.",
+          "procedure": "flare_unit pins SyncEvidence.judge on the completion record: latest running / failed / aborted refused; success from another source refused; #0 refused; the first review's LSN-0 input refused (cursor not seeded); lineage mismatch, cursor ahead, missing RocksDB lineage/cursor, and an incomplete master reply refused; failure-then-success (#2 succeeded after #1 failed) and abort-then-success ACCEPTED; a new process's own success accepted; a far-behind seeded cursor accepted; non-RocksDB accepted on the record; a source change refused until a success from the new master with matching lineage.",
           "references": [
             {
               "path": "flare_operator/FlareOperator/UnitTests.lean",
@@ -633,6 +658,22 @@
           "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter topology-authority,replica-repair,prepare-evidence",
           "result": "pass",
           "report": "docs/reports/2026-09-13-integrated-e2e-review.txt"
+        },
+        {
+          "check": "CHECK-04-unit",
+          "commit": "b739277aa50553bf88336e5642e6b1ab21161a4e",
+          "date": "2026-09-13",
+          "command": "cd flare_operator && lake build flare_unit && .lake/build/bin/flare_unit",
+          "result": "pass",
+          "report": "docs/reports/2026-09-13-flare-unit-review2.txt"
+        },
+        {
+          "check": "CHECK-04",
+          "commit": "b739277aa50553bf88336e5642e6b1ab21161a4e",
+          "date": "2026-09-13",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter topology-authority,replica-repair,prepare-evidence",
+          "result": "pass",
+          "report": "docs/reports/2026-09-13-integrated-e2e-review2.txt"
         }
       ],
       "tasks": [
@@ -641,9 +682,9 @@
         "SAF-08"
       ],
       "review": {
-        "commit": "cc30633dfad681828db477d299a42069c7ce4cea",
+        "commit": "b739277aa50553bf88336e5642e6b1ab21161a4e",
         "date": "2026-09-13",
-        "note": "Reopened by review of ffa2a05 (items 1, 2) and fixed: the judgement is bound to the current reconstruction generation (started == completed >= 1 in this process; in flight refused) and on RocksDB requires lineage match and a seeded, sane cursor (0 < lsn <= head); missing lineage/cursor on a RocksDB reply is a truncated reading and is refused, distinguished from a backend without them by the END terminator of a complete master reply. The reviewer's exact inputs are unit-pinned as refusals. Implementation stays PARTIAL (promotion trusts the Active designation, SAF-08; RocksDB path pinned by unit checks only). Verification UNVERIFIED pending sign-off."
+        "note": "Second review (of ccca200) item 3 fixed: the started == completed rule could never recognise a success after a failed or aborted handler (counters unequal forever). flared now exposes one completion record per process and the judgement requires the LATEST reconstruction to have succeeded from the current master (last_success_id == current_id, state not running, source == master key), then the RocksDB lineage/cursor checks. Failure-then-success and abort-then-success are unit-pinned as accepted; the prepare-evidence E2E exercises the record on the tch backend. Stays PARTIAL (promotion trusts Active, SAF-08; RocksDB path unit-pinned) and UNVERIFIED pending sign-off."
       }
     },
     {
@@ -673,8 +714,8 @@
       ],
       "residual_risks": [
         "Graceful deletion still does not guarantee a successful handoff; the drain guard protects a master with no promotable successor.",
-        "The delete is UID-checked at the moment of deletion but is not atomic with the drain: the window is one API round trip between the final UID read and the delete.",
-        "A live empty master with a data-bearing successor and a change interposed between observation and delete is not staged end to end; the decision is pinned by flare_unit (deleteGate)."
+        "The delete's UID check is enforced by the apiserver (DeleteOptions.preconditions.uid), so a same-name replacement cannot be deleted; what remains is that the successor/lease revalidation and the delete are not one atomic step — a successor demoted in the instant after the gate is still a window, now without the pod-identity hole.",
+        "A live empty master with a data-bearing successor and an interposed change is not staged end to end; the gate is pinned by flare_unit and the precondition by the E2E against a replaced pod."
       ],
       "code": [
         {
@@ -687,22 +728,26 @@
         },
         {
           "path": "flare_operator/FlareOperator/K8s/Bridge.lean",
-          "symbol": "deletePodGracefulIfUid"
+          "symbol": "deletePodWithUidPrecondition"
         }
       ],
-      "call_path": "Main 4d probes master/slave curr_items -> parseCurrItems (unknown vs known) -> emptyMasterVerdict -> streak >= 3 -> REVALIDATE in order: pod UID, fresh master+successor stats, UID again, live map AFTER the stats, leader lease -> deleteGate -> Bridge.deletePodGracefulIfUid (UID re-read at deletion) -> drain path.",
+      "call_path": "Main 4d probes master/slave curr_items -> parseCurrItems -> emptyMasterVerdict -> streak >= 3 -> REVALIDATE: pod UID, fresh stats, UID again, live map AFTER the stats, leader lease -> deleteGate -> Bridge.deletePodWithUidPrecondition: DELETE with DeleteOptions.preconditions.uid = the observed UID, refused by the apiserver (409) if another pod holds the name -> drain path.",
       "checks": [
         {
           "id": "CHECK-05",
           "kind": "scenario",
-          "procedure": "Malformed/empty/truncated stats must not delete a master; act only on a confirmed empty master with a confirmed data-bearing successor; before deleting, re-read stats, then the live map, then the lease, with the target pod's UID stable across the observation, and delete through a UID-checked path so a replacement pod is never deleted; a same-tick demotion of the successor, a re-registration, a pod replacement or a lost lease each abort. The empty-master path itself is exercised by existing suites; the gate and predicates are pinned by flare_unit.",
+          "procedure": "Malformed/empty/truncated stats must not delete a master; act only on a confirmed empty master with a confirmed data-bearing successor; revalidate stats, then the live map, then the lease, with the target UID stable across the observation; the delete carries the observed UID as an API-side precondition. E2E (replica-repair test 7) runs the operator's exact delete command inside the operator pod: accepted (200/202) for the matching UID, and refused (409) for a same-name replacement with another UID, which survives.",
           "references": [
             {
               "path": "flare_operator/FlareOperator/StateMachine/StatsObservation.lean",
               "symbol": "deleteGate"
             },
             {
-              "path": "flare_operator/FlareOperator/E2E/Tests/TerminatingPodHandling.lean",
+              "path": "flare_operator/FlareOperator/K8s/Bridge.lean",
+              "symbol": "uidPreconditionDeleteCommand"
+            },
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/ReplicaRepair.lean",
               "symbol": "suite"
             }
           ]
@@ -735,6 +780,22 @@
           "command": "cd flare_operator && lake build flare_unit && .lake/build/bin/flare_unit",
           "result": "pass",
           "report": "docs/reports/2026-09-13-flare-unit-review.txt"
+        },
+        {
+          "check": "CHECK-05-unit",
+          "commit": "b739277aa50553bf88336e5642e6b1ab21161a4e",
+          "date": "2026-09-13",
+          "command": "cd flare_operator && lake build flare_unit && .lake/build/bin/flare_unit",
+          "result": "pass",
+          "report": "docs/reports/2026-09-13-flare-unit-review2.txt"
+        },
+        {
+          "check": "CHECK-05",
+          "commit": "b739277aa50553bf88336e5642e6b1ab21161a4e",
+          "date": "2026-09-13",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter topology-authority,replica-repair,prepare-evidence",
+          "result": "pass",
+          "report": "docs/reports/2026-09-13-integrated-e2e-review2.txt"
         }
       ],
       "tasks": [
@@ -743,9 +804,9 @@
         "SAF-08"
       ],
       "review": {
-        "commit": "cc30633dfad681828db477d299a42069c7ce4cea",
+        "commit": "b739277aa50553bf88336e5642e6b1ab21161a4e",
         "date": "2026-09-13",
-        "note": "Reopened by review of ffa2a05 (item 5) and fixed: the live map is read AFTER the fresh stats, the target pod's UID is checked before and after the observation and again at deletion (deletePodGracefulIfUid), and the operator's own lease is checked; a single pure gate decides. The unit check the reviewer flagged (role change instead of lease loss) is replaced by an operator-lease-lost refusal. Implementation stays PARTIAL: the delete path with an interposed change is not staged end to end. Verification UNVERIFIED pending sign-off."
+        "note": "Second review (of ccca200) item 1 fixed: the UID is now a precondition of the delete request itself (DeleteOptions.preconditions.uid) rather than a client-side re-read followed by a name delete, so the apiserver refuses a same-name replacement with 409. kubectl cannot send a DeleteOptions body, so Bridge calls the API from inside the pod with curl; the E2E runs that exact command against a recreated pod and confirms the refusal. Stays PARTIAL (interposed-change E2E not staged) and UNVERIFIED pending sign-off."
       }
     },
     {
@@ -818,9 +879,9 @@
         "SAF-07"
       ],
       "review": {
-        "commit": "cc30633dfad681828db477d299a42069c7ce4cea",
+        "commit": "b739277aa50553bf88336e5642e6b1ab21161a4e",
         "date": "2026-09-13",
-        "note": "Main.lean/Bridge.lean/K8sReconciler.lean changed for the review fixes; the masterless-refill path and its tradeoff are untouched. Refreshed for the referenced-file check."
+        "note": "Referenced files changed for the round-2 fixes; the masterless-refill path is untouched. Refreshed for the referenced-file check."
       }
     },
     {
@@ -893,9 +954,9 @@
         "SAF-08"
       ],
       "review": {
-        "commit": "cc30633dfad681828db477d299a42069c7ce4cea",
+        "commit": "b739277aa50553bf88336e5642e6b1ab21161a4e",
         "date": "2026-09-13",
-        "note": "Referenced files changed for the review fixes (ledger, delete revalidation); dead/unhealthy qualification is untouched. Refreshed for the referenced-file check."
+        "note": "Referenced files changed for the round-2 fixes; failure qualification is untouched. Refreshed for the referenced-file check."
       }
     },
     {
@@ -1085,9 +1146,9 @@
         "SAF-06"
       ],
       "review": {
-        "commit": "cc30633dfad681828db477d299a42069c7ce4cea",
+        "commit": "b739277aa50553bf88336e5642e6b1ab21161a4e",
         "date": "2026-09-13",
-        "note": "Referenced files changed for the review fixes; stuck-Down recovery is untouched. Refreshed for the referenced-file check."
+        "note": "Referenced files changed for the round-2 fixes; stuck-Down recovery is untouched. Refreshed for the referenced-file check."
       }
     },
     {
@@ -1164,9 +1225,9 @@
       "runs": [],
       "tasks": [],
       "review": {
-        "commit": "cc30633dfad681828db477d299a42069c7ce4cea",
+        "commit": "b739277aa50553bf88336e5642e6b1ab21161a4e",
         "date": "2026-09-13",
-        "note": "Referenced files changed for the review fixes; detection-only posture is untouched (the ledger's unavailable-hold and the delete gate only ADD refusals). Refreshed for the referenced-file check."
+        "note": "handler_reconstruction.cc/Main.lean changed for the round-2 fixes (completion record is new observability, no new recovery action); detection-only posture untouched. Refreshed for the referenced-file check."
       }
     },
     {
@@ -1227,9 +1288,9 @@
         "SAF-10"
       ],
       "review": {
-        "commit": "cc30633dfad681828db477d299a42069c7ce4cea",
+        "commit": "b739277aa50553bf88336e5642e6b1ab21161a4e",
         "date": "2026-09-13",
-        "note": "Main.lean changed for the review fixes; the divergence gauge is untouched. Refreshed for the referenced-file check."
+        "note": "Main.lean changed for the round-2 fixes; the divergence gauge is untouched. Refreshed for the referenced-file check."
       }
     },
     {
@@ -1406,9 +1467,9 @@
       "runs": [],
       "tasks": [],
       "review": {
-        "commit": "cc30633dfad681828db477d299a42069c7ce4cea",
+        "commit": "b739277aa50553bf88336e5642e6b1ab21161a4e",
         "date": "2026-09-13",
-        "note": "Main.lean changed for the review fixes; metric export is untouched. Refreshed for the referenced-file check."
+        "note": "metrics_formatter.cc/Main.lean changed for the round-2 fixes (two new gauges for the completion record); role-aware export untouched. Refreshed for the referenced-file check."
       }
     }
   ]

@@ -32,7 +32,15 @@ groups: sync-evidence generation (a past reconstruction credited as the
 current copy; missing RocksDB lineage/cursor accepted), ledger fault
 tolerance (late drops declared recovered; a failed save never retried; a
 failed or corrupt read treated as "no ledger"), and delete revalidation (live
-map read before the stats; no lease or pod-UID check). The evidence register
+map read before the stats; no lease or pod-UID check). A second review (HEAD
+ccca200) found four more, fixed in three commits: the pod UID is now an
+API-side delete precondition (DeleteOptions.preconditions.uid, refused with
+409 for a same-name replacement) instead of a client re-read; a partially
+corrupt ledger fails as a whole instead of loading smaller; and completion is
+judged from an explicit per-process reconstruction record flared now exposes
+(boot id, latest id and state, last success id and source) instead of
+cumulative counters, which could neither recognise a success after a failure
+nor tell a restart with identical counters. The evidence register
 owns exact implementation and verification state, which stays `unverified`
 until a reviewer signs off; EV-03 is held at `partial` because two scenarios
 are pinned only by `flare_unit` and not staged end to end (a drop in the last

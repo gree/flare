@@ -498,11 +498,25 @@ def suite : TestSuite := {
             if !retried then restoreStatusWrite; return .fail "no retry of the unsaved ledger was logged on a later pass"
             restoreStatusWrite
             IO.eprintln "# fault cleared: status write allowed again"
+            -- The apiserver caches the prior DENY, so restoring the grant can
+            -- take a couple of minutes to take effect (observed ~131s on this
+            -- loaded kind host). That is the environment, not the operator, so
+            -- wait for the permission to be REAL before timing the retry —
+            -- otherwise the test measures the authorization cache. The operator
+            -- keeps the ledger dirty and retries every pass meanwhile.
+            let sa := s!"system:serviceaccount:{cfg.«namespace»}:flare-operator"
+            let allowed ← waitForCondition "operator SA may patch flareclusters/status again" 300 do
+              match ← kubectl ["auth", "can-i", "patch", "flareclusters/status", "-n", cfg.«namespace», s!"--as={sa}"] with
+              | .ok o => return (o.trim == "yes")
+              | .error _ => return false
+            if !allowed then
+              diagnostics mIp sIp
+              return .fail "RBAC restore did not propagate to the operator SA within 300s (apiserver authorization cache)"
             let landed ← waitForCondition "the unsaved ledger lands once the write is allowed" 120 do
               return containsSubstr (← opLog) "ledger persisted on retry" && !(← ledgerDests).isEmpty
             if !landed then
               diagnostics mIp sIp
-              return .fail "the unsaved ledger never landed after the permission was restored"
+              return .fail "the unsaved ledger never landed after the permission actually propagated"
             -- Survives a restart: the entry must come back from status.
             if !(← restartOperator) then return .fail "operator restart did not complete"
             let restored ← waitForCondition "restarted operator restores the HELD request from status" 120 do

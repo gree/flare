@@ -196,10 +196,16 @@ def podUid (podName ns : String) : IO (Option String) := do
     as a pure string so the E2E harness can run the exact same command inside
     the operator pod against a replaced pod and prove the refusal. Prints the
     HTTP status on the last line. -/
-def uidPreconditionDeleteCommand (podName ns uid : String) : String :=
+def uidPreconditionDeleteCommand (podName ns uid : String)
+    (apiBase : String := "https://kubernetes.default.svc") : String :=
   let sa := "/var/run/secrets/kubernetes.io/serviceaccount"
   let body := s!"\{\"apiVersion\":\"meta.k8s.io/v1\",\"kind\":\"DeleteOptions\",\"preconditions\":\{\"uid\":\"{uid}\"},\"propagationPolicy\":\"Background\"}"
-  s!"curl -sS -X DELETE --cacert {sa}/ca.crt -H \"Authorization: Bearer $(cat {sa}/token)\" -H 'Content-Type: application/json' -d '{body}' -w '\n%\{http_code}' https://kubernetes.default.svc/api/v1/namespaces/{ns}/pods/{podName}"
+  -- DEADLINES (review): --connect-timeout bounds the TCP/TLS connect,
+  -- --max-time bounds the whole exchange, so a server that accepts and then
+  -- never answers cannot stall the reconcile (and with it the lease renewal).
+  -- curl's own exit code is printed after the status so the caller can tell
+  -- "timed out" (28) from an HTTP refusal.
+  s!"curl -sS -X DELETE --connect-timeout 3 --max-time 10 --cacert {sa}/ca.crt -H \"Authorization: Bearer $(cat {sa}/token)\" -H 'Content-Type: application/json' -d '{body}' -w '\n%\{http_code}' {apiBase}/api/v1/namespaces/{ns}/pods/{podName}; echo \"\ncurl_exit=$?\""
 
 /-- Delete a pod ONLY IF its UID equals `expectedUid`, enforced by the API
     server (review item 1: a client-side re-read followed by a name delete
@@ -207,14 +213,21 @@ def uidPreconditionDeleteCommand (podName ns uid : String) : String :=
     precondition failed, i.e. a different pod now holds the name; 404 =
     already gone. -/
 def deletePodWithUidPrecondition (podName ns expectedUid : String) : IO (Except String Unit) := do
-  let out ← IO.Process.output { cmd := "sh", args := #["-c", uidPreconditionDeleteCommand podName ns expectedUid] }
+  -- Outer wall as well (same policy as the kubectl wrapper): whatever curl
+  -- does, this call returns within 20s and reports the failure.
+  let out ← IO.Process.output { cmd := "timeout", args := #["-k", "5", "20", "sh", "-c", uidPreconditionDeleteCommand podName ns expectedUid] }
+  if out.exitCode == 124 then
+    return .error s!"delete with UID precondition for {podName} hit the 20s wall (API did not answer); not deleted, will be re-evaluated next pass"
   let lines := (out.stdout.splitOn "\n").filter (· != "")
-  let code := (lines.getLast?.getD "").trim
+  let curlExit := (lines.find? (·.startsWith "curl_exit=")).map (·.drop "curl_exit=".length) |>.getD "?"
+  let code := ((lines.filter (fun l => !l.startsWith "curl_exit=")).getLast?.getD "").trim
+  if curlExit != "0" then
+    return .error s!"delete with UID precondition for {podName}: transport failure (curl exit {curlExit}: {out.stderr.trim}); not deleted"
   match code with
   | "200" | "202" => return .ok ()
   | "409" => return .error s!"apiserver refused: pod {podName} no longer has UID {expectedUid} (precondition failed; a replacement holds the name) — not deleted"
   | "404" => return .error s!"pod {podName} is already gone"
-  | _ => return .error s!"delete with UID precondition failed (http {code}): {out.stderr.trim} {String.intercalate " " (lines.dropLast)}"
+  | _ => return .error s!"delete with UID precondition failed (http {code}): {out.stderr.trim}"
 
 /-- Update (or create) a ConfigMap with the current node-map data.
     Used to persist the operator's view of the cluster for observability.

@@ -37,7 +37,10 @@
     7. SAF-06 (delete precondition): the operator's own delete command carries
        the observed pod UID as DeleteOptions.preconditions.uid; the apiserver
        accepts it for the matching pod and REFUSES it (409) for a same-name
-       replacement with another UID, which survives.
+       replacement with another UID, which survives;
+    8. SAF-06 (delete deadline): the same command against a server that
+       accepts and never answers returns within its deadline and reports the
+       transport failure, so a stalled API cannot stall the reconcile.
 
   Every fault-injecting step heals in every exit path.
 -/
@@ -571,10 +574,13 @@ def suite : TestSuite := {
             match ← kubectlGetJsonpath "pod" victim cfg.«namespace» "{.metadata.uid}" with
             | .ok u => return (if u.trim.isEmpty then none else some u.trim)
             | .error _ => return none
+          -- The command prints the HTTP status, then "curl_exit=N".
           let runDelete := fun (uid : String) => do
             let out ← Bridge.execInPod opPod cfg.«namespace» ["sh", "-c", Bridge.uidPreconditionDeleteCommand victim cfg.«namespace» uid]
             match out with
-            | .ok o => return (o.splitOn "\n" |>.filter (· != "") |>.getLast?.getD "").trim
+            | .ok o =>
+              let ls := o.splitOn "\n" |>.filter (· != "") |>.filter (fun l => !l.startsWith "curl_exit=")
+              return (ls.getLast?.getD "").trim
             | .error e => return s!"exec-error:{e}"
           match ← mk with
           | .error e => return .fail s!"could not create the victim pod: {e}"
@@ -608,7 +614,38 @@ def suite : TestSuite := {
               if still != some uid2 then
                 return .fail s!"the replacement pod did not survive the stale-UID delete (uid now {still})"
               IO.eprintln s!"# apiserver refused the stale-UID delete (409); replacement {uid2} untouched"
-              return .pass }
+              return .pass },
+
+    { name := "SAF-06: the UID-precondition delete has a deadline — a server that accepts and never answers returns within it"
+      run := do
+        -- A TCP black hole: accepts the connection and never speaks, so the
+        -- TLS handshake hangs. Without --connect-timeout/--max-time this
+        -- would block the reconcile (and the lease renewal) indefinitely.
+        let ops ← getPodNames s!"app={cfg.operatorName}" cfg.«namespace»
+        match ops.head? with
+        | none => return .fail "no operator pod"
+        | some opPod =>
+          let hole := "blackhole"
+          discard <| kubectl ["run", hole, "-n", cfg.«namespace», "--image=busybox:1.36", "--restart=Never", "--command", "--", "sh", "-c", "while true; do nc -lk -p 6443 -e sleep 3600; done"]
+          let ready ← waitForCondition "blackhole pod has an IP" 60 do return (← getPodIp hole cfg.«namespace»).isSome
+          match ready, ← getPodIp hole cfg.«namespace» with
+          | true, some ip =>
+            IO.sleep 3000
+            let cmd := Bridge.uidPreconditionDeleteCommand "nobody" cfg.«namespace» "00000000-0000-0000-0000-000000000000" (apiBase := s!"https://{ip}:6443")
+            let t0 ← IO.monoMsNow
+            let out ← Bridge.execInPod opPod cfg.«namespace» ["sh", "-c", cmd]
+            let elapsed := (← IO.monoMsNow) - t0
+            discard <| kubectl ["delete", "pod", hole, "-n", cfg.«namespace», "--wait=false"]
+            let text := match out with | .ok o => o | .error e => e
+            IO.eprintln s!"# black-hole delete returned in {elapsed}ms: {text.replace "\n" " | " |>.take 200}"
+            if elapsed > 20000 then
+              return .fail s!"the delete against a silent server took {elapsed}ms: no effective deadline"
+            if !(containsSubstr text "curl_exit=28" || containsSubstr text "curl_exit=35" || containsSubstr text "curl_exit=56" || containsSubstr text "curl_exit=7") then
+              return .fail s!"the command did not report a transport failure to its caller: {text.take 200}"
+            return .pass
+          | _, _ =>
+            discard <| kubectl ["delete", "pod", hole, "-n", cfg.«namespace», "--wait=false"]
+            return .fail "could not start the black-hole pod" }
   ]
 }
 

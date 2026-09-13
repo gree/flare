@@ -213,16 +213,19 @@ def uidPreconditionDeleteCommand (podName ns uid : String)
     precondition failed, i.e. a different pod now holds the name; 404 =
     already gone. -/
 def deletePodWithUidPrecondition (podName ns expectedUid : String) : IO (Except String Unit) := do
-  -- Outer wall as well (same policy as the kubectl wrapper): whatever curl
-  -- does, this call returns within 20s and reports the failure.
+  -- Outer wall as well (same policy as the kubectl wrapper): SIGTERM at 20s,
+  -- SIGKILL 5s later, so this call returns within ~25s whatever curl does.
+  -- A timeout or transport failure does NOT mean "not deleted": the API may
+  -- have accepted the delete and only the response was lost. The outcome is
+  -- UNKNOWN; the caller must re-observe the pod before deciding anything.
   let out ← IO.Process.output { cmd := "timeout", args := #["-k", "5", "20", "sh", "-c", uidPreconditionDeleteCommand podName ns expectedUid] }
   if out.exitCode == 124 then
-    return .error s!"delete with UID precondition for {podName} hit the 20s wall (API did not answer); not deleted, will be re-evaluated next pass"
+    return .error s!"delete with UID precondition for {podName} hit the wall (20s, +5s kill grace) with no answer from the API: deletion outcome UNKNOWN — re-observe the pod before any retry"
   let lines := (out.stdout.splitOn "\n").filter (· != "")
   let curlExit := (lines.find? (·.startsWith "curl_exit=")).map (·.drop "curl_exit=".length) |>.getD "?"
   let code := ((lines.filter (fun l => !l.startsWith "curl_exit=")).getLast?.getD "").trim
   if curlExit != "0" then
-    return .error s!"delete with UID precondition for {podName}: transport failure (curl exit {curlExit}: {out.stderr.trim}); not deleted"
+    return .error s!"delete with UID precondition for {podName}: transport failure (curl exit {curlExit}: {out.stderr.trim}); deletion outcome UNKNOWN — the API may have accepted it and only the answer was lost; re-observe the pod before any retry"
   match code with
   | "200" | "202" => return .ok ()
   | "409" => return .error s!"apiserver refused: pod {podName} no longer has UID {expectedUid} (precondition failed; a replacement holds the name) — not deleted"

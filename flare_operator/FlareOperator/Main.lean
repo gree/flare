@@ -1451,7 +1451,12 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
                   IO.eprintln s!"[flare-operator] EMPTY-MASTER SELF-HEAL: revalidated (master still empty, successor {sKey} still an Active data-bearing slave, pod UID {uid} stable, lease held); gracefully deleting {mPod} — the drain path hands mastership to the slave and the pod reseeds as a slave"
                   match ← Bridge.deletePodWithUidPrecondition mPod ns uid with
                   | .ok () => newStreaks := newStreaks.filter (·.1 != mKey)
-                  | .error e => IO.eprintln s!"[flare-operator] empty-master self-heal delete refused or failed: {e}"
+                  | .error e =>
+                    -- Refused (409/404) is definitive; a timeout/transport
+                    -- error is NOT "not deleted". Either way the streak is kept
+                    -- and the next probe re-observes the pod from scratch (if it
+                    -- was in fact deleted it is no longer an empty master).
+                    IO.eprintln s!"[flare-operator] empty-master self-heal delete not confirmed: {e}"
                 | .ok (), none =>
                   IO.eprintln s!"[flare-operator] EMPTY-MASTER SELF-HEAL ABORTED: no readable UID for {mPod}; not deleting by name alone"
                   newStreaks := newStreaks.filter (·.1 != mKey)

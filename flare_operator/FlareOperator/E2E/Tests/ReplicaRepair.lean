@@ -430,9 +430,13 @@ def suite : TestSuite := {
             if !held then
               diagnostics mIp sIp
               return .fail "with resync disabled the drop was neither held nor logged: it was consumed"
-            let holds ← ledgerHolds
-            if holds.isEmpty then
-              return .fail "the HELD entry is not persisted with its gate reason"
+            -- The HELD line is logged in the pass that decides it; the persist
+            -- (and its dirty retry) lands within a pass or two. Wait for it
+            -- rather than reading status once, immediately after the log line.
+            let persisted ← waitForCondition "HELD entry persisted to status with its gate reason" 90 do
+              return !(← ledgerHolds).isEmpty
+            if !persisted then
+              return .fail "the HELD entry was not persisted with its gate reason within 90s"
             -- Nothing may act while the gate is closed.
             IO.sleep 20000
             let logGated ← opLog

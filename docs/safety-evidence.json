@@ -312,6 +312,14 @@
           "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter topology-authority,replica-repair,prepare-evidence",
           "result": "pass",
           "report": "docs/reports/2026-09-13-integrated-e2e-review2.txt"
+        },
+        {
+          "check": "CHECK-01",
+          "commit": "f7b68992643fb4a410e400d154572a7b982638ee",
+          "date": "2026-09-13",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter topology-authority,replica-repair,prepare-evidence",
+          "result": "pass",
+          "report": "docs/reports/2026-09-13-integrated-e2e-review3.txt"
         }
       ],
       "tasks": [
@@ -319,9 +327,9 @@
         "SAF-09"
       ],
       "review": {
-        "commit": "b739277aa50553bf88336e5642e6b1ab21161a4e",
+        "commit": "f7b68992643fb4a410e400d154572a7b982638ee",
         "date": "2026-09-13",
-        "note": "Re-run in the round-2 integrated pass; topology-authority is untouched by the completion-record, strict-parse and UID-precondition changes and passes. PARTIAL / UNVERIFIED unchanged."
+        "note": "Re-run in the round-3 integrated pass; untouched by the handler-id binding and the delete deadline. PARTIAL / UNVERIFIED unchanged."
       }
     },
     {
@@ -394,9 +402,9 @@
         "SAF-09"
       ],
       "review": {
-        "commit": "b739277aa50553bf88336e5642e6b1ab21161a4e",
+        "commit": "f7b68992643fb4a410e400d154572a7b982638ee",
         "date": "2026-09-13",
-        "note": "Main.lean and Bridge.lean changed for the round-2 fixes (completion record readings, UID-precondition delete); the commit/merge path and broadcast decision are untouched. No new evidence for SC-02."
+        "note": "Bridge.lean changed for the delete deadline; commit/merge and broadcast untouched. No new evidence for SC-02."
       }
     },
     {
@@ -539,6 +547,14 @@
           "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter topology-authority,replica-repair,prepare-evidence",
           "result": "pass",
           "report": "docs/reports/2026-09-13-integrated-e2e-review2.txt"
+        },
+        {
+          "check": "CHECK-03",
+          "commit": "f7b68992643fb4a410e400d154572a7b982638ee",
+          "date": "2026-09-13",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter topology-authority,replica-repair,prepare-evidence",
+          "result": "pass",
+          "report": "docs/reports/2026-09-13-integrated-e2e-review3.txt"
         }
       ],
       "tasks": [
@@ -547,9 +563,9 @@
         "SAF-10"
       ],
       "review": {
-        "commit": "b739277aa50553bf88336e5642e6b1ab21161a4e",
+        "commit": "f7b68992643fb4a410e400d154572a7b982638ee",
         "date": "2026-09-13",
-        "note": "Second review (of ccca200) items 2 and 4 fixed here: Ledger.fromJson? parses strictly (mapM), so one malformed element fails the whole ledger and it is held unavailable rather than loaded smaller; completion no longer compares cumulative counters but reads flared's completion record — a success from the current master newer than the reseat one in the same process, or any success in a new process (boot id) — so a restart whose counters equal the baseline completes, and a failed-then-succeeded pair is recognised. Stays PARTIAL (late-drop E2E not staged) and UNVERIFIED pending sign-off."
+        "note": "The ledger's completion judgement reads the same completion record; the handler-id binding fix (e1c1141) removes the case where an older handler's late success could have marked a newer reconstruction as the successful one. No ledger logic changed at this revision. Stays PARTIAL / UNVERIFIED."
       }
     },
     {
@@ -572,7 +588,7 @@
         "A Prepare slave whose activation was lost to an index-leader handover (reconstruction finished, operator still sees Prepare); a node with a PAST success that is now re-reconstructing (in flight); a RocksDB reply missing lineage or cursor (truncated); a zero cursor; a mismatched lineage; a cursor ahead of the head; a master or lineage change mid-observation; a fresh process."
       ],
       "assumptions": [
-        "flared exposes a per-process completion record in stats: reconstruction_boot_id (random per process), reconstruction_current_id/_state (latest handler), reconstruction_last_success_id/_source. Activation requires the LATEST reconstruction to have succeeded from the current master; cumulative counters are not used (a failed or aborted handler would make them unequal forever). On RocksDB a completed reconstruction seeds a nonzero cursor and rocksdb_master_id identifies the source; the backend is told from a COMPLETE master reply. The node's own active state is not usable (set only from the operator's echo)."
+        "flared exposes a per-process completion record in stats, read as ONE locked snapshot: reconstruction_boot_id (random per process), reconstruction_current_id/_state (latest handler), reconstruction_last_success_id/_source. Every notification carries the id the handler was given at begin(), so an older handler finishing after a newer one started cannot record the newer id as succeeded; last_success only advances and only the current handler's notification changes current_state. Activation requires the LATEST reconstruction to have succeeded from the current master. On RocksDB a completed reconstruction seeds a nonzero cursor and rocksdb_master_id identifies the source; the backend is told from a COMPLETE master reply."
       ],
       "residual_risks": [
         "Covers Prepare ACTIVATION by the repair path only; promotion still trusts the Active designation (SAF-08).",
@@ -595,6 +611,10 @@
         {
           "path": "src/lib/handler_reconstruction.cc",
           "symbol": "handler_reconstruction::run"
+        },
+        {
+          "path": "src/lib/stats.cc",
+          "symbol": "stats::reconstruction_succeeded_from"
         }
       ],
       "call_path": "flared finishes reconstruction and calls activate_node; if the operator returned OK but did not persist it (leader handover) the node stays Prepare in the operator map. Main 4c builds a per-node episode, reads flared stats (reconstruction_completed, rocksdb_master_id, cursor + master head), SyncEvidence.judge requires a completed reconstruction bound to the current master's lineage with a sane cursor and unchanged source, and a positive verdict re-derives Prepare->Active through Reconciler.reconcileStep.",
@@ -622,6 +642,21 @@
             {
               "path": "flare_operator/FlareOperator/UnitTests.lean",
               "symbol": "checkJudgeRefusals"
+            }
+          ]
+        },
+        {
+          "id": "CHECK-04-cpp",
+          "kind": "scenario",
+          "procedure": "cutter test_stats_reconstruction pins the record's id binding: A begins #1, B begins #2, A succeeds -> current #2 still running, last_success #1 (not #2); a late success of an older handler does not regress a newer one; an older handler's failure or abort does not change the current state; a current failure after an earlier success leaves last_success != current so a controller must not activate.",
+          "references": [
+            {
+              "path": "test/lib/test_stats_reconstruction.cc",
+              "symbol": "test_older_handler_success_does_not_claim_the_newer_id"
+            },
+            {
+              "path": "src/lib/stats.cc",
+              "symbol": "stats::reconstruction_succeeded_from"
             }
           ]
         }
@@ -674,6 +709,30 @@
           "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter topology-authority,replica-repair,prepare-evidence",
           "result": "pass",
           "report": "docs/reports/2026-09-13-integrated-e2e-review2.txt"
+        },
+        {
+          "check": "CHECK-04-unit",
+          "commit": "f7b68992643fb4a410e400d154572a7b982638ee",
+          "date": "2026-09-13",
+          "command": "cd flare_operator && lake build flare_unit && .lake/build/bin/flare_unit",
+          "result": "pass",
+          "report": "docs/reports/2026-09-13-flare-unit-review3.txt"
+        },
+        {
+          "check": "CHECK-04",
+          "commit": "f7b68992643fb4a410e400d154572a7b982638ee",
+          "date": "2026-09-13",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter topology-authority,replica-repair,prepare-evidence",
+          "result": "pass",
+          "report": "docs/reports/2026-09-13-integrated-e2e-review3.txt"
+        },
+        {
+          "check": "CHECK-04-cpp",
+          "commit": "f7b68992643fb4a410e400d154572a7b982638ee",
+          "date": "2026-09-13",
+          "command": "nix build .#test-flare -L   # the flare derivation (nix/default.nix, doCheck) runs make check with cutter in test/lib, which includes test_stats_reconstruction",
+          "result": "pass",
+          "report": "docs/reports/2026-09-13-cutter-stats-reconstruction.txt"
         }
       ],
       "tasks": [
@@ -682,9 +741,9 @@
         "SAF-08"
       ],
       "review": {
-        "commit": "b739277aa50553bf88336e5642e6b1ab21161a4e",
+        "commit": "f7b68992643fb4a410e400d154572a7b982638ee",
         "date": "2026-09-13",
-        "note": "Second review (of ccca200) item 3 fixed: the started == completed rule could never recognise a success after a failed or aborted handler (counters unequal forever). flared now exposes one completion record per process and the judgement requires the LATEST reconstruction to have succeeded from the current master (last_success_id == current_id, state not running, source == master key), then the RocksDB lineage/cursor checks. Failure-then-success and abort-then-success are unit-pinned as accepted; the prepare-evidence E2E exercises the record on the tch backend. Stays PARTIAL (promotion trusts Active, SAF-08; RocksDB path unit-pinned) and UNVERIFIED pending sign-off."
+        "note": "Third review (of d08fe06) item 1 fixed: the completion record could be corrupted by an older handler finishing after a newer one began (its success wrote the shared current_id as last_success_id, i.e. 'latest #2 succeeded' while #2 was copying). Notifications now carry the handler's own id, last_success only advances, only the current handler changes current_state, begin() and the stats read each hold one lock. The interleaving is pinned by a cutter test that was executed at this revision through the nix flare derivation's make check (the same path the nix-linux CI job uses). Stays PARTIAL and UNVERIFIED."
       }
     },
     {
@@ -714,8 +773,9 @@
       ],
       "residual_risks": [
         "Graceful deletion still does not guarantee a successful handoff; the drain guard protects a master with no promotable successor.",
-        "The delete's UID check is enforced by the apiserver (DeleteOptions.preconditions.uid), so a same-name replacement cannot be deleted; what remains is that the successor/lease revalidation and the delete are not one atomic step — a successor demoted in the instant after the gate is still a window, now without the pod-identity hole.",
-        "A live empty master with a data-bearing successor and an interposed change is not staged end to end; the gate is pinned by flare_unit and the precondition by the E2E against a replaced pod."
+        "The successor/lease revalidation and the delete are not one atomic step; the pod-identity hole is closed by the API precondition, a successor demoted in the instant after the gate remains a window.",
+        "The direct-API delete is bounded (connect 3s, total 10s, outer wall 20s) and a transport failure is returned, not swallowed; a stalled API therefore costs one bounded pass, not the lease.",
+        "A live empty master with a data-bearing successor and an interposed change is not staged end to end; the gate is unit-pinned, the precondition and the deadline are staged by E2E against a replaced pod and a black-hole server."
       ],
       "code": [
         {
@@ -736,7 +796,7 @@
         {
           "id": "CHECK-05",
           "kind": "scenario",
-          "procedure": "Malformed/empty/truncated stats must not delete a master; act only on a confirmed empty master with a confirmed data-bearing successor; revalidate stats, then the live map, then the lease, with the target UID stable across the observation; the delete carries the observed UID as an API-side precondition. E2E (replica-repair test 7) runs the operator's exact delete command inside the operator pod: accepted (200/202) for the matching UID, and refused (409) for a same-name replacement with another UID, which survives.",
+          "procedure": "Malformed/empty/truncated stats must not delete a master; act only on a confirmed empty master with a confirmed data-bearing successor; revalidate stats, then the live map, then the lease, with the target UID stable across the observation; the delete carries the observed UID as an API-side precondition. E2E (replica-repair test 7) runs the operator's exact delete command inside the operator pod: accepted (200/202) for the matching UID, and refused (409) for a same-name replacement with another UID, which survives. Deadline (test 12): the same command aimed at a server that accepts TCP and never answers returns within its deadline and reports curl's transport failure to the caller.",
           "references": [
             {
               "path": "flare_operator/FlareOperator/StateMachine/StatsObservation.lean",
@@ -796,6 +856,22 @@
           "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter topology-authority,replica-repair,prepare-evidence",
           "result": "pass",
           "report": "docs/reports/2026-09-13-integrated-e2e-review2.txt"
+        },
+        {
+          "check": "CHECK-05-unit",
+          "commit": "f7b68992643fb4a410e400d154572a7b982638ee",
+          "date": "2026-09-13",
+          "command": "cd flare_operator && lake build flare_unit && .lake/build/bin/flare_unit",
+          "result": "pass",
+          "report": "docs/reports/2026-09-13-flare-unit-review3.txt"
+        },
+        {
+          "check": "CHECK-05",
+          "commit": "f7b68992643fb4a410e400d154572a7b982638ee",
+          "date": "2026-09-13",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter topology-authority,replica-repair,prepare-evidence",
+          "result": "pass",
+          "report": "docs/reports/2026-09-13-integrated-e2e-review3.txt"
         }
       ],
       "tasks": [
@@ -804,9 +880,9 @@
         "SAF-08"
       ],
       "review": {
-        "commit": "b739277aa50553bf88336e5642e6b1ab21161a4e",
+        "commit": "f7b68992643fb4a410e400d154572a7b982638ee",
         "date": "2026-09-13",
-        "note": "Second review (of ccca200) item 1 fixed: the UID is now a precondition of the delete request itself (DeleteOptions.preconditions.uid) rather than a client-side re-read followed by a name delete, so the apiserver refuses a same-name replacement with 409. kubectl cannot send a DeleteOptions body, so Bridge calls the API from inside the pod with curl; the E2E runs that exact command against a recreated pod and confirms the refusal. Stays PARTIAL (interposed-change E2E not staged) and UNVERIFIED pending sign-off."
+        "note": "Third review (of d08fe06) item 2 fixed: the direct-API DELETE had no connect or overall deadline and would have stalled the reconcile (and the lease renewal) on an apiserver that accepted and never answered. curl now runs with --connect-timeout 3 --max-time 10 inside the same `timeout -k 5 20` wall as kubectl and prints its exit code; a transport failure is returned to the caller. E2E stages a TCP black hole and confirms the bounded return and the reported failure. Stays PARTIAL / UNVERIFIED."
       }
     },
     {
@@ -879,9 +955,9 @@
         "SAF-07"
       ],
       "review": {
-        "commit": "b739277aa50553bf88336e5642e6b1ab21161a4e",
+        "commit": "f7b68992643fb4a410e400d154572a7b982638ee",
         "date": "2026-09-13",
-        "note": "Referenced files changed for the round-2 fixes; the masterless-refill path is untouched. Refreshed for the referenced-file check."
+        "note": "Bridge.lean changed (delete deadline); refill untouched. Refreshed for the referenced-file check."
       }
     },
     {
@@ -954,9 +1030,9 @@
         "SAF-08"
       ],
       "review": {
-        "commit": "b739277aa50553bf88336e5642e6b1ab21161a4e",
+        "commit": "f7b68992643fb4a410e400d154572a7b982638ee",
         "date": "2026-09-13",
-        "note": "Referenced files changed for the round-2 fixes; failure qualification is untouched. Refreshed for the referenced-file check."
+        "note": "Bridge.lean changed (delete deadline); failure qualification untouched. Refreshed for the referenced-file check."
       }
     },
     {
@@ -1146,9 +1222,9 @@
         "SAF-06"
       ],
       "review": {
-        "commit": "b739277aa50553bf88336e5642e6b1ab21161a4e",
+        "commit": "f7b68992643fb4a410e400d154572a7b982638ee",
         "date": "2026-09-13",
-        "note": "Referenced files changed for the round-2 fixes; stuck-Down recovery is untouched. Refreshed for the referenced-file check."
+        "note": "Bridge.lean changed (delete deadline); stuck-Down recovery untouched. Refreshed for the referenced-file check."
       }
     },
     {
@@ -1225,9 +1301,9 @@
       "runs": [],
       "tasks": [],
       "review": {
-        "commit": "b739277aa50553bf88336e5642e6b1ab21161a4e",
+        "commit": "f7b68992643fb4a410e400d154572a7b982638ee",
         "date": "2026-09-13",
-        "note": "handler_reconstruction.cc/Main.lean changed for the round-2 fixes (completion record is new observability, no new recovery action); detection-only posture untouched. Refreshed for the referenced-file check."
+        "note": "handler_reconstruction.cc/stats.cc changed (completion record bound to the handler id — observability only); detection-only posture untouched. Refreshed for the referenced-file check."
       }
     },
     {
@@ -1467,9 +1543,9 @@
       "runs": [],
       "tasks": [],
       "review": {
-        "commit": "b739277aa50553bf88336e5642e6b1ab21161a4e",
+        "commit": "f7b68992643fb4a410e400d154572a7b982638ee",
         "date": "2026-09-13",
-        "note": "metrics_formatter.cc/Main.lean changed for the round-2 fixes (two new gauges for the completion record); role-aware export untouched. Refreshed for the referenced-file check."
+        "note": "op_stats.cc changed (record emitted as one snapshot); role-aware export untouched. Refreshed for the referenced-file check."
       }
     }
   ]

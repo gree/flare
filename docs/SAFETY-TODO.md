@@ -40,7 +40,13 @@ corrupt ledger fails as a whole instead of loading smaller; and completion is
 judged from an explicit per-process reconstruction record flared now exposes
 (boot id, latest id and state, last success id and source) instead of
 cumulative counters, which could neither recognise a success after a failure
-nor tell a restart with identical counters. The evidence register
+nor tell a restart with identical counters. A third review (HEAD d08fe06)
+found two defects in that new code, fixed in two commits: flared's completion
+notifications now carry the handler's own id (an older handler finishing
+after a newer one started can no longer record the newer id as succeeded;
+the record is read as one locked snapshot), and the direct-API UID-precondition
+delete has connect/overall deadlines and reports transport failures instead
+of stalling the reconcile. The evidence register
 owns exact implementation and verification state, which stays `unverified`
 until a reviewer signs off; EV-03 is held at `partial` because two scenarios
 are pinned only by `flare_unit` and not staged end to end (a drop in the last

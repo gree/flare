@@ -122,6 +122,34 @@ private def operatorRestarts : IO (Option Nat) := do
   | .ok out => return out.trim.toNat?
   | .error _ => return none
 
+/-- The operator's log across the exit that losing the lease is designed to
+    cause. `kubectl logs` shows the CURRENT container only; once kubelet has
+    restarted the container the fence line lives in the previous one and a
+    single read after a fixed sleep misses it (CI run 34799233967: the
+    container was restarted within 8s, the fence line was gone, and the test
+    reported "never reported the fence" although the fence had happened —
+    the restarted container resumed at exactly the fenced version). Poll
+    from the release, reading the previous container's log as well once the
+    restart count moved, until the fence for the held version is seen or the
+    window closes. -/
+private def fenceEvidence (held restarts0 : Nat) (windowSec : Nat := 60) : IO String := do
+  let label := s!"app={cfg.operatorName}"
+  let mut acc := ""
+  let mut elapsed := 0
+  while elapsed < windowSec do
+    let cur ← kubectlLogsLabel label cfg.«namespace» 400
+    let prev ← do
+      if ((← operatorRestarts).getD 0) > restarts0 then
+        match ← kubectl ["logs", "-l", label, "-n", cfg.«namespace», "--previous", "--tail=400"] with
+        | .ok out => pure out
+        | .error _ => pure ""
+      else pure ""
+    acc := acc ++ "\n" ++ prev ++ "\n" ++ cur
+    if containsSubstr acc s!"→ v{held})" then break
+    IO.sleep 2000
+    elapsed := elapsed + 2
+  return acc
+
 /-- Run a shell command inside the operator pod. -/
 private def opExec (cmd : String) : IO (Except String String) := do
   let pods ← getPodNames s!"app={cfg.operatorName}" cfg.«namespace»
@@ -343,23 +371,35 @@ def suite : TestSuite := {
               | .ok _ =>
                 let restarts0 := (← operatorRestarts).getD 0
                 releaseAndWait
-                IO.sleep 8000
-                let log ← kubectlLogsLabel s!"app={cfg.operatorName}" cfg.«namespace» 400
+                -- The fence line may be in the container this pass ran in,
+                -- which the designed exit replaces; read across the restart.
+                let log ← fenceEvidence held restarts0
                 let v1 ← flaredStat survivorIp "node_map_version"
                 ensureBarrierClear
-                -- Hand authority back to the SAME process (this harness runs
-                -- one operator replica), before judging, so a failed
-                -- assertion never leaves a cluster nobody owns.
-                match ← kubectl ["delete", "lease", leaseName, "-n", cfg.«namespace»] with
-                | .error e => IO.eprintln s!"# WARNING: could not delete the lease to restore authority: {e}"
-                | .ok out => IO.eprintln s!"# lease deleted to restore authority: {out.trim}"
+                -- Authority goes back (this harness runs one operator
+                -- replica) on EVERY path below, so a failed assertion never
+                -- leaves a cluster nobody owns — but only after the exit has
+                -- been observed or ruled out: the process notices the foreign
+                -- holder at its next lease check, and deleting the lease
+                -- before that turns "lost to another identity" into
+                -- "unreadable", which is the read-failure branch (test 4),
+                -- not an exit. The first cut deleted it right after a fixed
+                -- 8s sleep and only passed because 8s outlasted the tick.
+                let restoreAuthority : IO Unit := do
+                  match ← kubectl ["delete", "lease", leaseName, "-n", cfg.«namespace»] with
+                  | .error e => IO.eprintln s!"# WARNING: could not delete the lease to restore authority: {e}"
+                  | .ok out => IO.eprintln s!"# lease deleted to restore authority: {out.trim}"
                 if !containsSubstr log s!"LEASE FENCE" then
+                  restoreAuthority
                   return .fail s!"the resumed pass never reported the fence for v{held}; it may have crashed, timed out or exited before the check — no suppression is proved"
                 if !containsSubstr log s!"→ v{held})" then
+                  restoreAuthority
                   return .fail s!"a fence line exists but not for the pass that was held (v{held})"
                 if containsSubstr log s!"→ v{held}), broadcasting" then
+                  restoreAuthority
                   return .fail s!"the pass both fenced and broadcast v{held}"
                 if v1 != some v0 then
+                  restoreAuthority
                   return .fail s!"survivor's version moved while the lease was foreign: {v0} -> {v1}"
                 -- Losing the lease ENDS the process ("LOST LEASE -- exiting"),
                 -- so nothing in that operator's memory can retry: the
@@ -376,7 +416,11 @@ def suite : TestSuite := {
                   | .error _ => pure ()
                   match ← kubectlLogsLabel s!"app={cfg.operatorName}" cfg.«namespace» 15 with
                   | out => IO.eprintln s!"# operator tail at failure:\n{out}"
+                  restoreAuthority
                   return .fail s!"the operator logged the fence but did not exit: restartCount stayed at {restarts0} for 180s (a process that neither leads nor exits leaves the cluster unowned)"
+                -- The exit is observed; the restarted process is waiting in
+                -- phase 1 on a lease that never expires. Give it back.
+                restoreAuthority
                 let relead ← waitForCondition "restarted operator acquired the lease" 120 do
                   let fresh ← kubectlLogsLabel s!"app={cfg.operatorName}" cfg.«namespace» 400
                   return containsSubstr fresh "phase 2: acquired lease"

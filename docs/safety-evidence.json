@@ -218,7 +218,8 @@
         "Observed while building CHECK-01, not asserted on: after the lease is deleted and the SAME process re-acquires it, the operator was seen broadcasting a LOWER version than nodes already held, which their fencing rejects. The manipulation is cruder than a real takeover; treat as a lead for SAF-09.",
         "The stop position is a test seam. It is inert without the environment variable and bounded at 120s, but it is production code that a misconfiguration could delay one broadcast with.",
         "A suppressed send is retried only by a process that survives the suppression (lease read failure, momentarily foreign holder): the pending flag is in memory, and a confirmed lease loss ends the process, after which the next leader republishes from its own committed state. The retry test proves the flag was set by the withheld pass and consumed by the pass that published (that pass names the suppressed version); it does not prove the flag was NECESSARY for that send, because the committed version usually moves by itself within a pass.",
-        "Liveness (/healthz) is process-alive only and readiness treats a non-leader as ready. The operator that logged 'LOST LEASE -- exiting' and then hung — the Lean runtime waits for the never-ending server tasks before reporting the uncaught error — was therefore never restarted; that defect is fixed (IO.Process.exit) and CHECK-01 asserts the restart count moves, but a different stall of the main loop would still pass both probes."
+        "Liveness (/healthz) is process-alive only and readiness treats a non-leader as ready. The operator that logged 'LOST LEASE -- exiting' and then hung — the Lean runtime waits for the never-ending server tasks before reporting the uncaught error — was therefore never restarted; that defect is fixed (IO.Process.exit) and CHECK-01 asserts the restart count moves, but a different stall of the main loop would still pass both probes.",
+        "The suite's evidence for 'the held pass did not send' is operator log lines read from the pod (across the designed restart); the checks are shape-based (fence for vHELD; a send line with old < new would be the held pass) rather than a wire-level capture. Two harness races (container replaced by the designed exit; retry line matching the negative check) were found by the CI runner's timing and fixed the same day; a third of the same family is plausible."
       ],
       "code": [
         {
@@ -344,6 +345,22 @@
           "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter topology-authority",
           "result": "pass",
           "report": "docs/reports/2026-09-14-topology-authority-final.txt"
+        },
+        {
+          "check": "CHECK-01",
+          "commit": "f87c2dce83ce7f68b1483b455a9bff161944125b",
+          "date": "2026-09-14",
+          "command": "GitHub Actions e2e-tests.yaml, leg breaker-migration: timeout 4500 .lake/build/bin/flare_e2e --filter circuit-breaker,operator-restart,topology-authority,replica-repair,prepare-evidence,native-metrics,blue-green-migration",
+          "result": "fail",
+          "report": "docs/reports/2026-09-14-ci-e2e-breaker-migration-f87c2dc-fail.txt"
+        },
+        {
+          "check": "CHECK-01",
+          "commit": "ceedc9bb0e069aa6b435ba01cdd994e6e4b58773",
+          "date": "2026-09-14",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter topology-authority",
+          "result": "pass",
+          "report": "docs/reports/2026-09-14-topology-authority-final2.txt"
         }
       ],
       "tasks": [
@@ -351,9 +368,9 @@
         "SAF-09"
       ],
       "review": {
-        "commit": "332cbf947c3e24181075bf1e67ad1e43cb1c0f6a",
+        "commit": "ceedc9bb0e069aa6b435ba01cdd994e6e4b58773",
         "date": "2026-09-14",
-        "note": "First CI run of the branch (PR #143, 22b4d03) failed test 3 of this suite: the harness read the operator log once, 8s after the release, from the current container, and the designed exit had already replaced that container on the CI runner, so the fence line (which the restarted container's own resume version shows had happened) was not seen. Two harness fixes: poll for the fence across the restart (previous container's log once the restart count moves), and keep the foreign lease until the exit is observed — the first cut deleted it as soon as the fence was seen, before the operator's next lease check, which made the process see an absent lease (test 4's branch) instead of a foreign holder and not exit. The intermediate state is recorded in the report, not as a run (it was not committed). Operator image unchanged since 3320546; the test's claims (fence for the held version, no send, exit, re-acquire, re-apply) are unchanged. PARTIAL / UNVERIFIED unchanged; the CI leg is re-running at this revision."
+        "note": "Second CI run (f87c2dc): test 3 passed with the previous harness fix; test 4 failed on a harness ambiguity — the negative check '→ vHELD), broadcasting' also matched the operator's legitimate RETRY of the suppressed map on the next tick (the behaviour the test itself requires), which landed inside the 8s read window on the CI runner. The held pass's own send has old < new; a retry or re-send has old == new; both tests now check that shape. Operator image unchanged since 3320546; in both CI runs the operator's logged behaviour was the specified one (fence for the held version, no send by that pass, exit on a foreign holder / survive and retry on a read failure). Two harness races in one suite in one day is itself a finding: the suite's proofs rest on log lines read in timing windows, recorded as a residual risk. PARTIAL / UNVERIFIED unchanged; CI re-running at this revision."
       }
     },
     {

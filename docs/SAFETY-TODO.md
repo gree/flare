@@ -56,8 +56,12 @@ harness-only fix (22fd148) captures that acceptance evidence before the black
 hole's pod is deleted, not after. The first CI run of the branch (PR #143)
 failed one test, the SAF-01 lease-takeover scenario, on a harness race
 (the fence line was read from the wrong container after the designed exit)
-fixed together with a second ordering fault it uncovered; both are
-harness-only and the runs are recorded under EV-01. The evidence register
+fixed together with a second ordering fault it uncovered; the second CI
+run failed the sibling read-failure scenario on a negative check that also
+matched the operator's legitimate retry. All three are harness-only, the
+operator's logged behaviour was the specified one in every run, and the runs
+are recorded under EV-01 with the log-timing dependence added as a residual
+risk. The evidence register
 owns exact implementation and verification state, which stays `unverified`
 until a reviewer signs off; EV-03 is held at `partial` because two scenarios
 are pinned only by `flare_unit` and not staged end to end (a drop in the last

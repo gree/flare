@@ -150,6 +150,19 @@ private def fenceEvidence (held restarts0 : Nat) (windowSec : Nat := 60) : IO St
     elapsed := elapsed + 2
   return acc
 
+/-- Did the HELD pass itself broadcast `held`? The held pass is stopped past
+    the version gate, so its send would log `topology changed (vOLD → vHELD),
+    broadcasting` with OLD < HELD. A later pass that re-sends or retries the
+    same committed map logs `(vHELD → vHELD), broadcasting` — legitimate, and
+    in the read-failure test REQUIRED (the retry). The plain substring
+    `→ vHELD), broadcasting` cannot tell the two apart; CI run 34802942000
+    failed on exactly that: the fence was logged, the retry happened within
+    the 8s window, and the retry's own line was read as the held pass
+    sending. -/
+private def heldPassBroadcast (log : String) (held : Nat) : Bool :=
+  (log.splitOn "\n").any fun line =>
+    containsSubstr line s!"→ v{held}), broadcasting" && !containsSubstr line s!"(v{held} → v{held})"
+
 /-- Run a shell command inside the operator pod. -/
 private def opExec (cmd : String) : IO (Except String String) := do
   let pods ← getPodNames s!"app={cfg.operatorName}" cfg.«namespace»
@@ -395,7 +408,7 @@ def suite : TestSuite := {
                 if !containsSubstr log s!"→ v{held})" then
                   restoreAuthority
                   return .fail s!"a fence line exists but not for the pass that was held (v{held})"
-                if containsSubstr log s!"→ v{held}), broadcasting" then
+                if heldPassBroadcast log held then
                   restoreAuthority
                   return .fail s!"the pass both fenced and broadcast v{held}"
                 if v1 != some v0 then
@@ -467,7 +480,10 @@ def suite : TestSuite := {
               ensureBarrierClear
               if !containsSubstr log "lease fence: getLease failed" then
                 return .fail s!"no evidence the resumed pass hit the read-failure branch for v{held}"
-              if containsSubstr log s!"→ v{held}), broadcasting" then
+              -- The retry below legitimately broadcasts v{held} from a LATER
+              -- pass (old == new); only a send with the held pass's own
+              -- old < new shape is the failure.
+              if heldPassBroadcast log held then
                 return .fail s!"the pass broadcast v{held} despite an unreadable lease"
               IO.eprintln s!"# read-failure pass suppressed v{held}; survivor version {v0} -> {v1} (any movement is post-restart recovery, not the suppressed pass)"
               -- What proves the suppressed pass failed closed is the pair of

@@ -61,7 +61,13 @@ run failed the sibling read-failure scenario on a negative check that also
 matched the operator's legitimate retry. All three are harness-only, the
 operator's logged behaviour was the specified one in every run, and the runs
 are recorded under EV-01 with the log-timing dependence added as a residual
-risk. The evidence register
+risk. The third CI run and its re-run (same revision) each failed one
+different thing: the pre-existing circuit-breaker E2E once (a FINDING, recorded
+under EV-09: the breaker counts nodes that became dead in one tick, not the
+cluster's dead fraction, so a 4→1 outage whose deaths straddle ticks never trips;
+not changed on this branch), and the replica-repair harness once (its `pair`
+helper required role Slave in the instant after the repair had demoted the
+replica to a held Proxy — fixed in the harness). The evidence register
 owns exact implementation and verification state, which stays `unverified`
 until a reviewer signs off; EV-03 is held at `partial` because two scenarios
 are pinned only by `flare_unit` and not staged end to end (a drop in the last

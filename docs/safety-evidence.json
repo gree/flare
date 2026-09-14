@@ -361,6 +361,14 @@
           "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter topology-authority",
           "result": "pass",
           "report": "docs/reports/2026-09-14-topology-authority-final2.txt"
+        },
+        {
+          "check": "CHECK-01",
+          "commit": "5e80d73c09385330c0ee897096bb86d28e32f728",
+          "date": "2026-09-14",
+          "command": "GitHub Actions e2e-tests.yaml, leg breaker-migration: timeout 4500 .lake/build/bin/flare_e2e --filter circuit-breaker,operator-restart,topology-authority,replica-repair,prepare-evidence,native-metrics,blue-green-migration",
+          "result": "pass",
+          "report": "docs/reports/2026-09-14-ci-e2e-breaker-migration-5e80d73-fail-circuit-breaker.txt"
         }
       ],
       "tasks": [
@@ -368,9 +376,9 @@
         "SAF-09"
       ],
       "review": {
-        "commit": "ceedc9bb0e069aa6b435ba01cdd994e6e4b58773",
+        "commit": "5e80d73c09385330c0ee897096bb86d28e32f728",
         "date": "2026-09-14",
-        "note": "Second CI run (f87c2dc): test 3 passed with the previous harness fix; test 4 failed on a harness ambiguity — the negative check '→ vHELD), broadcasting' also matched the operator's legitimate RETRY of the suppressed map on the next tick (the behaviour the test itself requires), which landed inside the 8s read window on the CI runner. The held pass's own send has old < new; a retry or re-send has old == new; both tests now check that shape. Operator image unchanged since 3320546; in both CI runs the operator's logged behaviour was the specified one (fence for the held version, no send by that pass, exit on a foreign holder / survive and retry on a read failure). Two harness races in one suite in one day is itself a finding: the suite's proofs rest on log lines read in timing windows, recorded as a residual risk. PARTIAL / UNVERIFIED unchanged; CI re-running at this revision."
+        "note": "topology-authority passed 4/4 in the third CI run and its re-run at this revision (both harness fixes in place). PARTIAL / UNVERIFIED unchanged."
       }
     },
     {
@@ -612,6 +620,22 @@
           "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter replica-repair",
           "result": "pass",
           "report": "docs/reports/2026-09-14-replica-repair-final.txt"
+        },
+        {
+          "check": "CHECK-03",
+          "commit": "5e80d73c09385330c0ee897096bb86d28e32f728",
+          "date": "2026-09-14",
+          "command": "GitHub Actions e2e-tests.yaml, leg breaker-migration: timeout 4500 .lake/build/bin/flare_e2e --filter circuit-breaker,operator-restart,topology-authority,replica-repair,prepare-evidence,native-metrics,blue-green-migration (job re-run)",
+          "result": "fail",
+          "report": "docs/reports/2026-09-14-ci-e2e-breaker-migration-5e80d73-rerun-fail-replica-repair.txt"
+        },
+        {
+          "check": "CHECK-03",
+          "commit": "c825fc05f2dd0a61f8ff738d73690bf453567acf",
+          "date": "2026-09-14",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter replica-repair",
+          "result": "pass",
+          "report": "docs/reports/2026-09-14-replica-repair-final2.txt"
         }
       ],
       "tasks": [
@@ -620,9 +644,9 @@
         "SAF-10"
       ],
       "review": {
-        "commit": "22fd1483ce76cdacd4ea6954f06dd324ab151219",
+        "commit": "c825fc05f2dd0a61f8ff738d73690bf453567acf",
         "date": "2026-09-14",
-        "note": "ReplicaRepair.lean (E2E) changed only in the deadline test's evidence ordering; ledger tests 5-10 untouched and re-run at this revision: pass. PARTIAL / UNVERIFIED unchanged. CI leg breaker-migration at 22b4d03 passed replica-repair (8) and prepare-evidence (2); the leg failed only on topology-authority test 3 (harness, see EV-01)."
+        "note": "CI re-run at 5e80d73 failed replica-repair tests 3-6 at once with 'no P0 slave in the operator's map': the harness helper `pair` required a node with role Slave, and the operator's pass right after test 2's request had just demoted that node to a live Proxy (held) — the specified first step of the repair, logged as such. The callers use only the replica's pod IP; `pair` now resolves the replica as the other node of the 2-node cluster whatever its current role. Harness only; operator image unchanged since 3320546. Local replica-repair re-run at this revision: pass. PARTIAL / UNVERIFIED unchanged."
       }
     },
     {
@@ -961,6 +985,22 @@
           "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter replica-repair",
           "result": "pass",
           "report": "docs/reports/2026-09-14-replica-repair-final.txt"
+        },
+        {
+          "check": "CHECK-05",
+          "commit": "5e80d73c09385330c0ee897096bb86d28e32f728",
+          "date": "2026-09-14",
+          "command": "GitHub Actions e2e-tests.yaml, leg breaker-migration: timeout 4500 .lake/build/bin/flare_e2e --filter circuit-breaker,operator-restart,topology-authority,replica-repair,prepare-evidence,native-metrics,blue-green-migration (job re-run)",
+          "result": "fail",
+          "report": "docs/reports/2026-09-14-ci-e2e-breaker-migration-5e80d73-rerun-fail-replica-repair.txt"
+        },
+        {
+          "check": "CHECK-05",
+          "commit": "c825fc05f2dd0a61f8ff738d73690bf453567acf",
+          "date": "2026-09-14",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter replica-repair",
+          "result": "pass",
+          "report": "docs/reports/2026-09-14-replica-repair-final2.txt"
         }
       ],
       "tasks": [
@@ -969,9 +1009,9 @@
         "SAF-08"
       ],
       "review": {
-        "commit": "22fd1483ce76cdacd4ea6954f06dd324ab151219",
+        "commit": "c825fc05f2dd0a61f8ff738d73690bf453567acf",
         "date": "2026-09-14",
-        "note": "Harness-only change after round 4: the deadline test read the black hole's accepted-byte count AFTER deleting its pod, so a failed exec into a terminating pod would have read as 0 bytes (a false 'refused' verdict, or a flaky pass). The evidence is now captured before the delete. Operator image unchanged; replica-repair re-run at this revision: pass. Stays PARTIAL / UNVERIFIED; opened as a Draft PR for review. CI leg breaker-migration at 22b4d03 passed replica-repair (8) and prepare-evidence (2); the leg failed only on topology-authority test 3 (harness, see EV-01)."
+        "note": "CI re-run at 5e80d73 failed replica-repair tests 3-6 at once with 'no P0 slave in the operator's map': the harness helper `pair` required a node with role Slave, and the operator's pass right after test 2's request had just demoted that node to a live Proxy (held) — the specified first step of the repair, logged as such. The callers use only the replica's pod IP; `pair` now resolves the replica as the other node of the 2-node cluster whatever its current role. Harness only; operator image unchanged since 3320546. Local replica-repair re-run at this revision: pass. PARTIAL / UNVERIFIED unchanged."
       }
     },
     {
@@ -1204,7 +1244,7 @@
       "ucas": [
         "UCA-03"
       ],
-      "implementation": "implemented",
+      "implementation": "partial",
       "verification": "unverified",
       "scenarios": [
         "Many Active nodes become dead candidates; hysteresis holds; auto-reset disabled."
@@ -1213,7 +1253,8 @@
         "Breaker thresholds use observed Active/dead population, not actual data health."
       ],
       "residual_risks": [
-        "Correlated worker faults are not modeled explicitly; autoResetEnabled=false parks refill."
+        "Correlated worker faults are not modeled explicitly; autoResetEnabled=false parks refill.",
+        "FINDING (2026-09-14, pre-existing, not changed by this branch): detectDeadNodesPure excludes nodes already Down and nodes in Prepare, so circuitBreakerDecision's deadCount is the number of nodes that became dead in THIS tick against the whole map; the 50% trip needs half the cluster to vanish inside one 5s tick. Deaths that straddle ticks (25% + 25% on a 4-node cluster) never trip and failover proceeds one node at a time. A pod-less node left in Prepare is never counted dead. Seen once in CI (third run at 5e80d73, no trip in 480s, steady M=2 S=0 D=2 P=1 with the map version advancing +7 per tick); the same leg tripped at 10-15s in three other runs and locally. Whether the breaker should count the cluster's dead fraction (Down included) is a design change outside SAF-01..07; not fixed here."
       ],
       "code": [
         {
@@ -1243,12 +1284,29 @@
           ]
         }
       ],
-      "runs": [],
+      "runs": [
+        {
+          "check": "CHECK-09",
+          "commit": "5e80d73c09385330c0ee897096bb86d28e32f728",
+          "date": "2026-09-14",
+          "command": "GitHub Actions e2e-tests.yaml, leg breaker-migration: timeout 4500 .lake/build/bin/flare_e2e --filter circuit-breaker,operator-restart,topology-authority,replica-repair,prepare-evidence,native-metrics,blue-green-migration",
+          "result": "fail",
+          "report": "docs/reports/2026-09-14-ci-e2e-breaker-migration-5e80d73-fail-circuit-breaker.txt"
+        },
+        {
+          "check": "CHECK-09",
+          "commit": "5e80d73c09385330c0ee897096bb86d28e32f728",
+          "date": "2026-09-14",
+          "command": "GitHub Actions e2e-tests.yaml, leg breaker-migration: timeout 4500 .lake/build/bin/flare_e2e --filter circuit-breaker,operator-restart,topology-authority,replica-repair,prepare-evidence,native-metrics,blue-green-migration (job re-run)",
+          "result": "pass",
+          "report": "docs/reports/2026-09-14-ci-e2e-breaker-migration-5e80d73-rerun-fail-replica-repair.txt"
+        }
+      ],
       "tasks": [],
       "review": {
-        "commit": "cc30633dfad681828db477d299a42069c7ce4cea",
-        "date": "2026-09-13",
-        "note": "Referenced files changed for the review fixes; the breaker is untouched and still gates the resync and the empty-master delete. Refreshed for the referenced-file check."
+        "commit": "5e80d73c09385330c0ee897096bb86d28e32f728",
+        "date": "2026-09-14",
+        "note": "First execution evidence for this control, from the PR #143 CI matrix: the circuit-breaker E2E failed once (no trip in 480s) and passed on re-run at the same revision. Root cause read from the code (see residual_risks): the trip counts newly-dead nodes per tick, not the dead fraction, so it is timing-dependent; this predates the branch (52d409e, 2026-07-03) and the branch's K8sReconciler.lean changes do not touch dead detection or the breaker. The implementation stays PARTIAL and the control UNVERIFIED; one fail and one pass at the same revision is not verification. A follow-up task is proposed, not filed, pending the reviewer's decision on scope."
       }
     },
     {

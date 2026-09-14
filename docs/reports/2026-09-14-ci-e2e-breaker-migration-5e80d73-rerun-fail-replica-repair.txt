@@ -1,0 +1,48 @@
+# GitHub Actions e2e-test (breaker-migration) leg on PR #143, re-run of the third run at the same revision — FAIL (4 of 37): replica-repair tests 3-6
+# tested revision: 5e80d73c09385330c0ee897096bb86d28e32f728
+# run: https://github.com/gree/flare/actions/runs/34806038692 (job re-run)
+# command: timeout 4500 .lake/build/bin/flare_e2e --filter "circuit-breaker,operator-restart,topology-authority,replica-repair,prepare-evidence,native-metrics,blue-green-migration"
+# date: 2026-09-14
+# circuit-breaker passed this time (trip after 15s); topology-authority 4/4; prepare-evidence 2/2; test 2 of replica-repair (cut link → drops → repair requested → ledger persisted) passed.
+# failure (harness): tests 3-6 each begin with `pair`, which required a node with role Slave in partition 0. The operator's pass right after test 2's request demoted that node to a live Proxy (held) — the specified first step of the repair, logged: "REPLICA REPAIR: demoting repl-repair-nodes-1 ... to a live proxy at v4294967305" then "confirmed the demotion ... released to assignment" — so the map had no Slave for a few passes and all four tests failed instantly with "no P0 slave in the operator's map". In the earlier runs test 3 started before that pass. The callers only use the replica's pod IP for flared stats, which does not depend on the role; `pair` now resolves the replica as the other node of this 2-node cluster whatever its current role, with a short retry. Operator image unchanged.
+
+# Tests: 37, Failures: 4
+# RESULT: FAIL
+ok 1 - baseline: two active masters
+ok 2 - wait out the operator startup grace period
+ok 3 - majority outage (scale 4→1) trips the breaker
+ok 4 - no live-topology churn while tripped
+ok 5 - restoring capacity resumes recovery automatically
+ok 6 - cluster shape survives an operator restart (state reload)
+ok 7 - writes still served after operator restart
+ok 8 - failover still works after the restart (reloaded state is live)
+ok 9 - flared rejects a topology push carrying a stale version
+ok 10 - control: holding the lease, the stopped pass does broadcast
+ok 11 - lease taken by another identity: the pass fences, the process exits, and the restarted leader re-applies the topology
+ok 12 - lease unreadable: the stopped pass fails closed and does not send
+ok 13 - control: writes to the master replicate to the slave
+ok 14 - cut link: the master drops replica writes and the operator requests a repair
+not ok 15 - the repair runs: held as proxy, confirmed, re-seated, reconstructed; keys recovered without another drop
+not ok 16 - SAF-05: a drop seen while resync is disabled is held, survives an operator restart, and is repaired once the gate opens
+not ok 17 - SAF-05: a ledger save that fails is marked unsaved, retried every pass, lands when allowed, and survives a restart
+not ok 18 - SAF-05: a corrupt ledger is held as unavailable, never replaced by an empty one; the drop seen meanwhile is recovered once it is readable
+ok 19 - SAF-06: the delete carries the observed pod UID as an API precondition; a same-name pod with another UID is refused by the apiserver
+ok 20 - SAF-06: the UID-precondition delete has a deadline — a server that accepts and never answers returns within it
+ok 21 - the lost-activation condition is staged: the activation is dropped and a reconstruction completed
+ok 22 - the repair re-derives Prepare→Active from completion evidence and names it
+ok 23 - GET /metrics answers HTTP 200 with Prometheus text
+# --- replica-repair harness lines ---
+# Waiting for: master counts dropped writes to the slave (was 0) (timeout: 120s)
+#   OK after 20s
+# stored 30/30 on the master; master dropped 2 write(s); local items master=70 slave=40 (gap 30)
+# Waiting for: operator requests a replica repair (probe interval 15s) (timeout: 150s)
+#   OK after 10s
+# Waiting for: ledger in status names the slave (timeout: 60s)
+#   reason: no P0 slave in the operator's map
+#   reason: no P0 slave in the operator's map
+#   reason: no P0 slave in the operator's map
+#   reason: no P0 slave in the operator's map
+# --- operator log: the repair's first steps ---
+[flare-operator] REPLICA REPAIR requested: master repl-repair-nodes-0.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121 dropped 2 more write(s) to repl-repair-nodes-1.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121 — that replica is behin
+[flare-operator] REPLICA REPAIR: demoting repl-repair-nodes-1.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121 to a live proxy at v4294967305 — master repl-repair-nodes-0.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121 dropped 2 write(s)
+[flare-operator] REPLICA REPAIR: repl-repair-nodes-1.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121 confirmed the demotion (demoted@4294967305); released to assignment — the next pass re-seats it as Slave/Prepare and flared reconstructs

@@ -668,13 +668,15 @@ def suite : TestSuite := {
             let t0 ← IO.monoMsNow
             let out ← Bridge.execInPod opPod cfg.«namespace» ["sh", "-c", cmd]
             let elapsed := (← IO.monoMsNow) - t0
-            discard <| kubectl ["delete", "pod", hole, "-n", cfg.«namespace», "--wait=false"]
             let text := match out with | .ok o => o | .error e => e
-            -- Server-side acceptance: bytes arrived on the black hole.
+            -- Server-side acceptance: bytes arrived on the black hole. Read it
+            -- BEFORE deleting the pod — an exec into a terminating pod can fail
+            -- and would read as "0 bytes accepted", i.e. a false verdict.
             let accepted ← do
               match ← Bridge.execInPod hole cfg.«namespace» ["sh", "-c", "wc -c < /tmp/accepted 2>/dev/null || echo 0"] with
               | .ok o => pure ((o.trim.toNat?).getD 0)
               | .error _ => pure 0
+            discard <| kubectl ["delete", "pod", hole, "-n", cfg.«namespace», "--wait=false"]
             IO.eprintln s!"# black-hole delete returned in {elapsed}ms; server accepted {accepted} byte(s): {text.replace "\n" " | " |>.take 200}"
             if accepted == 0 then
               return .fail s!"the black hole never accepted the connection (0 bytes received): this was a refused connection, not a silent one — the scenario was not staged ({text.take 160})"

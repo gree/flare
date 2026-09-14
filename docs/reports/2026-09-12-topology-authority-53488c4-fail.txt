@@ -1,0 +1,498 @@
+# topology-authority E2E — tested revision 53488c4 — FAILED (test 4: the retry line was only logged when the version had not moved; fixed in ca56b0e)
+# host: local kind cluster flare-e2e (single node, arm64), harness operator memory limit 1Gi
+# command: cd flare_operator && .lake/build/bin/flare_e2e --filter topology-authority
+# === Suite: topology-authority ===
+# Cleaning up cluster 'topo-auth'
+# Deploying cluster 'topo-auth' in namespace 'flare-topo-auth'
+# Waiting for: namespace flare-topo-auth not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-topo-auth (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap topo-auth-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting for StatefulSet topo-auth-nodes to be ready...
+# Waiting for: all 2 pods ready (timeout: 180s)
+#   OK after 0s
+# Waiting for: 2 nodes registered (timeout: 300s)
+#   OK after 0s
+# Waiting 50s grace period for operator reconciliation...
+# Checking operator activity...
+# --- Operator logs (flare-operator) ---
+#   [DEBUG] Sending response: NODE topo-auth-nodes-1.topo-auth-nodes.flare-topo-auth.svc.cluster.local 12121 2 0 -1 100 17 | NODE topo-auth-nodes-0.topo-auth-nodes.flare-topo-auth.svc.cluster.local 12121 0 0 0 100 16 | END | 
+#   [DEBUG] Received command: meta
+#   [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.Meta
+#   [TRACE] Event: Meta | CRD partitions=1 replicas=2 | State partitionSize=1024 | Returning partition-size 1024
+#   [DEBUG] Received command: node sync
+#   [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeSync none
+#   [DEBUG] Sending response: NODE topo-auth-nodes-1.topo-auth-nodes.flare-topo-auth.svc.cluster.local 12121 2 0 -1 100 17 | NODE topo-auth-nodes-0.topo-auth-nodes.flare-topo-auth.svc.cluster.local 12121 0 0 0 100 16 | END | 
+#   [flare-operator] grace period: 22 cycles remaining
+#   [flare-operator] topology changed (v4294967298 → v4294967303), broadcasting
+#   [TopologyBroadcast] Broadcasting node sync v4294967303 (2 nodes) to 2 pods
+#   [DEBUG] Received command: node state topo-auth-nodes-1.topo-auth-nodes.flare-topo-auth.svc.cluster.local 12121 active
+#   [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeState
+#     "topo-auth-nodes-1.topo-auth-nodes.flare-topo-auth.svc.cluster.local"
+#     12121
+#     (FlareOperator.K8s.FlareSta
+#   [TRACE] Event: NodeState topo-auth-nodes-1.topo-auth-nodes.flare-topo-auth.svc.cluster.local:12121 | Result: Prepare->Active | Reason: reconstruction complete
+#   [TcpClient] Sent node sync v4294967303 (2 nodes) to 10.244.0.23:12121
+#   [TcpClient] Sent node sync v4294967303 (2 nodes) to 10.244.0.24:12121
+#   [TopologyBroadcast] Broadcast complete (v4294967303)
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 7824ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 21 cycles remaining
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 5426ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 20 cycles remaining
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 5230ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 19 cycles remaining
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 5274ms (nodes=2 M=1 S=1 D=0 P=0)
+#   
+# pushing a mutated map to topo-auth-nodes-0 at stale version 4294967302 (its current version is 4294967303)
+# pass held at the pre-send point with version 4294967305
+# pass held at the pre-send point with version 4294967306; taking the lease away now
+# lease deleted to restore authority: lease.coordination.k8s.io "topo-auth-operator-lease" deleted from flare-topo-auth namespace
+# Waiting for: operator container restarted after losing the lease (timeout: 180s)
+#   OK after 5s
+# Waiting for: restarted operator acquired the lease (timeout: 120s)
+#   OK after 0s
+# Waiting for: topology re-applied after leadership is restored (timeout: 240s)
+#   OK after 5s
+# pass held at the pre-send point with version 4294967307; deleting the lease so the read fails
+# Waiting for: the withheld topology is retried by the same process (timeout: 180s)
+#   OK after 15s
+#   reason: the survivor caught up, but not through the retry path — an unrelated change may have carried it, which would leave the original defect in place
+# --- diagnostics for failing suite 'topology-authority' ---
+# === operator logs (flare-topo-auth, app=flare-operator) ===
+# [pod/flare-operator-6484ffdcdd-cktr2/flare-operator] [flare-operator] starting (namespace=flare-topo-auth, port=12120, interval=5s, identity=flare-operator-6484ffdcdd-cktr2)
+# [pod/flare-operator-6484ffdcdd-cktr2/flare-operator] [flare-operator] managing FlareCluster 'topo-auth' (from --cluster-name)
+# [pod/flare-operator-6484ffdcdd-cktr2/flare-operator] [flare-operator] health check server started on port 8080 (leader=false)
+# [pod/flare-operator-6484ffdcdd-cktr2/flare-operator] [HealthCheck] Starting health check server on 0.0.0.0:8080
+# [pod/flare-operator-6484ffdcdd-cktr2/flare-operator] [HealthCheck] Listening on port 8080
+# [pod/flare-operator-6484ffdcdd-cktr2/flare-operator] [HealthCheck] Endpoints: /healthz (liveness), /readyz (readiness)
+# [pod/flare-operator-6484ffdcdd-cktr2/flare-operator] [flare-operator] phase 1: attempting to acquire lease 'topo-auth-operator-lease'
+# [pod/flare-operator-6484ffdcdd-cktr2/flare-operator] [flare-operator] phase 2: acquired lease, entering leader mode
+# [pod/flare-operator-6484ffdcdd-cktr2/flare-operator] [flare-operator] health status: leader=true
+# [pod/flare-operator-6484ffdcdd-cktr2/flare-operator] [flare-operator] metrics initialized
+# [pod/flare-operator-6484ffdcdd-cktr2/flare-operator] [flare-operator] metrics server started on port 9090
+# [pod/flare-operator-6484ffdcdd-cktr2/flare-operator] [MetricsServer] Starting HTTP server on 0.0.0.0:9090
+# [pod/flare-operator-6484ffdcdd-cktr2/flare-operator] [MetricsServer] Listening on port 9090
+# [pod/flare-operator-6484ffdcdd-cktr2/flare-operator] [flare-operator] loaded 2 nodes from ConfigMap (resuming at broadcast version 4294967306)
+# [pod/flare-operator-6484ffdcdd-cktr2/flare-operator] [flare-operator] leadership generation 1 — broadcast versions fenced at ≥ 4294967306
+# [pod/flare-operator-6484ffdcdd-cktr2/flare-operator] [flare-operator] fetched CRD: partitions=1, replicas=2
+# [pod/flare-operator-6484ffdcdd-cktr2/flare-operator] [flare-operator] TCP server marked ready for health checks
+# [pod/flare-operator-6484ffdcdd-cktr2/flare-operator] [flare-operator] TCP server listening on port 12120
+# [pod/flare-operator-6484ffdcdd-cktr2/flare-operator] [DEBUG] Received command: node sync
+# [pod/flare-operator-6484ffdcdd-cktr2/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeSync none
+# [pod/flare-operator-6484ffdcdd-cktr2/flare-operator] [DEBUG] Sending response: NODE topo-auth-nodes-1.topo-auth-nodes.flare-topo-auth.svc.cluster.local 12121 1 0 0 100 17 | NODE topo-auth-nodes-0.topo-auth-nodes.flare-topo-auth.svc.cluster.local 12121 0 0 0 100 16 | END | 
+# [pod/flare-operator-6484ffdcdd-cktr2/flare-operator] [flare-operator] grace period: 23 cycles remaining
+# [pod/flare-operator-6484ffdcdd-cktr2/flare-operator] [flare-operator] TEST BARRIER: holding before the pre-send lease check (v4294967307)
+# [pod/flare-operator-6484ffdcdd-cktr2/flare-operator] [flare-operator] TEST BARRIER: released (v4294967307)
+# [pod/flare-operator-6484ffdcdd-cktr2/flare-operator] [flare-operator] lease fence: getLease failed (getLease failed (exit 1): Error from server (NotFound): leases.coordination.k8s.io "topo-auth-operator-lease" not found
+# [pod/flare-operator-6484ffdcdd-cktr2/flare-operator] ); skipping broadcast this tick
+# [pod/flare-operator-6484ffdcdd-cktr2/flare-operator] [flare-operator] LEASE FENCE: not the lease holder anymore — suppressing topology broadcast (v4294967306 → v4294967307); held for retry once authority returns
+# [pod/flare-operator-6484ffdcdd-cktr2/flare-operator] [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+# [pod/flare-operator-6484ffdcdd-cktr2/flare-operator] [flare-operator] reconcile slow: 13985ms (nodes=2 M=1 S=1 D=0 P=0)
+# [pod/flare-operator-6484ffdcdd-cktr2/flare-operator] [flare-operator] grace period: 22 cycles remaining
+# [pod/flare-operator-6484ffdcdd-cktr2/flare-operator] [flare-operator] topology changed (v4294967307 → v4294967308), broadcasting
+# [pod/flare-operator-6484ffdcdd-cktr2/flare-operator] [TopologyBroadcast] Broadcasting node sync v4294967308 (2 nodes) to 2 pods
+# [pod/flare-operator-6484ffdcdd-cktr2/flare-operator] [TcpClient] Sent node sync v4294967308 (2 nodes) to 10.244.0.24:12121
+# [pod/flare-operator-6484ffdcdd-cktr2/flare-operator] [TcpClient] Sent node sync v4294967308 (2 nodes) to 10.244.0.23:12121
+# [pod/flare-operator-6484ffdcdd-cktr2/flare-operator] [TopologyBroadcast] Broadcast complete (v4294967308)
+# [pod/flare-operator-6484ffdcdd-cktr2/flare-operator] [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+# [pod/flare-operator-6484ffdcdd-cktr2/flare-operator] [flare-operator] reconcile slow: 8572ms (nodes=2 M=1 S=1 D=0 P=0)
+# 
+# === flared logs (flare-topo-auth, tail 80 each) ===
+# [pod/topo-auth-nodes-1/flared] [140737465157440][NTC][flared.cc:183-startup]   back_log:               30
+# [pod/topo-auth-nodes-1/flared] [140737465157440][NTC][flared.cc:183-startup]   config_path:            /etc/flared/extra.conf
+# [pod/topo-auth-nodes-1/flared] [140737465157440][NTC][flared.cc:183-startup]   pid_path:               
+# [pod/topo-auth-nodes-1/flared] [140737465157440][NTC][flared.cc:183-startup]   daemonize:              false
+# [pod/topo-auth-nodes-1/flared] [140737465157440][NTC][flared.cc:183-startup]   data_dir:               /tmp/flare
+# [pod/topo-auth-nodes-1/flared] [140737465157440][NTC][flared.cc:183-startup]   index_server(s):        flare-operator.flare-topo-auth.svc.cluster.local:12120
+# [pod/topo-auth-nodes-1/flared] [140737465157440][NTC][flared.cc:183-startup]   max_connection:         128
+# [pod/topo-auth-nodes-1/flared] [140737465157440][NTC][flared.cc:183-startup]   mutex_slot:             64
+# [pod/topo-auth-nodes-1/flared] [140737465157440][NTC][flared.cc:183-startup]   noreply_window_limit:   0
+# [pod/topo-auth-nodes-1/flared] [140737465157440][NTC][flared.cc:183-startup]   net_read_timeout:       600
+# [pod/topo-auth-nodes-1/flared] [140737465157440][NTC][flared.cc:183-startup]   proxy_concurrency:      2
+# [pod/topo-auth-nodes-1/flared] [140737465157440][NTC][flared.cc:183-startup]   reconstruction_interval:0
+# [pod/topo-auth-nodes-1/flared] [140737465157440][NTC][flared.cc:183-startup]   reconstruction_bwlimit: 0
+# [pod/topo-auth-nodes-1/flared] [140737465157440][NTC][flared.cc:183-startup]   replication_type:       async
+# [pod/topo-auth-nodes-1/flared] [140737465157440][NTC][flared.cc:183-startup]   server_name:            topo-auth-nodes-1.topo-auth-nodes.flare-topo-auth.svc.cluster.local
+# [pod/topo-auth-nodes-1/flared] [140737465157440][NTC][flared.cc:183-startup]   server_port:            12121
+# [pod/topo-auth-nodes-1/flared] [140737465157440][NTC][flared.cc:183-startup]   server_socket:          
+# [pod/topo-auth-nodes-1/flared] [140737465157440][NTC][flared.cc:183-startup]   stack_size:             128
+# [pod/topo-auth-nodes-1/flared] [140737465157440][NTC][flared.cc:183-startup]   storage_ap:             4
+# [pod/topo-auth-nodes-1/flared] [140737465157440][NTC][flared.cc:183-startup]   storage_bucket_size:    131071
+# [pod/topo-auth-nodes-1/flared] [140737465157440][NTC][flared.cc:183-startup]   storage_cache_size:     65536
+# [pod/topo-auth-nodes-1/flared] [140737465157440][NTC][flared.cc:183-startup]   storage_compress:       
+# [pod/topo-auth-nodes-1/flared] [140737465157440][NTC][flared.cc:183-startup]   storage_large:          false
+# [pod/topo-auth-nodes-1/flared] [140737465157440][NTC][flared.cc:183-startup]   storage_lmemb:          128
+# [pod/topo-auth-nodes-1/flared] [140737465157440][NTC][flared.cc:183-startup]   storage_nmemb:          256
+# [pod/topo-auth-nodes-1/flared] [140737465157440][NTC][flared.cc:183-startup]   storage_dfunit:         0
+# [pod/topo-auth-nodes-1/flared] [140737465157440][NTC][flared.cc:183-startup]   storage_type:           tch
+# [pod/topo-auth-nodes-1/flared] [140737465157440][NTC][flared.cc:183-startup]   thread_pool_size:       5
+# [pod/topo-auth-nodes-1/flared] [140737465157440][NTC][flared.cc:183-startup]   proxy_prior_netmask:    0
+# [pod/topo-auth-nodes-1/flared] [140737465157440][NTC][flared.cc:183-startup]   max_total_thread_queue: 0
+# [pod/topo-auth-nodes-1/flared] [140737465157440][NTC][flared.cc:183-startup]   time_watcher_enabled:   false
+# [pod/topo-auth-nodes-1/flared] [140737465157440][NTC][flared.cc:183-startup]   time_watcher_polling_interval_msec: 0
+# [pod/topo-auth-nodes-1/flared] [140737465157440][NTC][flared.cc:183-startup]   storage_access_watch_threshold_warn_msec: 0
+# [pod/topo-auth-nodes-1/flared] [140737465157440][NTC][flared.cc:183-startup]   storage_access_watch_threshold_ping_ng_msec: 0
+# [pod/topo-auth-nodes-1/flared] [140737465157440][NTC][flared.cc:183-startup]   cluster_replication:    0
+# [pod/topo-auth-nodes-1/flared] [140737465157440][NTC][flared.cc:183-startup]   cluster_replication_server_name: 
+# [pod/topo-auth-nodes-1/flared] [140737465157440][NTC][flared.cc:183-startup]   cluster_replication_server_port: 12121
+# [pod/topo-auth-nodes-1/flared] [140737465157440][NTC][flared.cc:183-startup]   cluster_replication_concurrency: 2
+# [pod/topo-auth-nodes-1/flared] [140737465157440][NTC][flared.cc:183-startup]   cluster_replication_mode: duplicate
+# [pod/topo-auth-nodes-1/flared] [140737465157440][NTC][cluster.cc:272-startup_node] setting up cluster node... (type=1, index_server_name=flare-operator.flare-topo-auth.svc.cluster.local, index_server_port=12120)
+# [pod/topo-auth-nodes-1/flared] [140737465157440][NTC][cluster.cc:303-startup_node] meta data from index server:
+# [pod/topo-auth-nodes-1/flared] [140737465157440][NTC][cluster.cc:304-startup_node]   partition_size:                 1024
+# [pod/topo-auth-nodes-1/flared] [140737465157440][NTC][cluster.cc:305-startup_node]   key_hash_algorithm:             jenkins
+# [pod/topo-auth-nodes-1/flared] [140737465157440][NTC][cluster.cc:306-startup_node]   key_resolver_type:              modular
+# [pod/topo-auth-nodes-1/flared] [140737465157440][NTC][cluster.cc:307-startup_node]   key_resolver_modular_hint:      1
+# [pod/topo-auth-nodes-1/flared] [140737465157440][NTC][cluster.cc:308-startup_node]   key_resolver_modular_virtual:   4096
+# [pod/topo-auth-nodes-1/flared] [140737465157440][NTC][cluster.cc:1116-reconstruct_node] reconstructing node map... (2 entries)
+# [pod/topo-auth-nodes-1/flared] [140737465157440][NTC][cluster.cc:2146-_reconstruct_node_partition] reconstructing node partition map... (from 2 entries in node map)
+# [pod/topo-auth-nodes-1/flared] [140737465157440][NTC][cluster.cc:2279-_reconstruct_node_partition] node partition map:
+# [pod/topo-auth-nodes-1/flared] [140737465157440][NTC][cluster.cc:2284-_reconstruct_node_partition] 0: master (node_key=topo-auth-nodes-0.topo-auth-nodes.flare-topo-auth.svc.cluster.local:12121, node_balance=100)
+# [pod/topo-auth-nodes-1/flared] [140737465157440][NTC][cluster.cc:2298-_reconstruct_node_partition] node partition map (prepare):
+# [pod/topo-auth-nodes-1/flared] [140737397638848][NTC][handler_metrics.cc:69-run] metrics endpoint ready (port=9150, self-scrape port=12121)
+# [pod/topo-auth-nodes-1/flared] [140737465157440][NTC][flared.cc:424-run] entering running loop
+# [pod/topo-auth-nodes-1/flared] [140737397503680][NTC][cluster.cc:1116-reconstruct_node] reconstructing node map... (2 entries)
+# [pod/topo-auth-nodes-1/flared] [140737397503680][NTC][cluster.cc:1176-reconstruct_node] update: node_balance (100 -> 0)
+# [pod/topo-auth-nodes-1/flared] [140737397503680][NTC][cluster.cc:2146-_reconstruct_node_partition] reconstructing node partition map... (from 2 entries in node map)
+# [pod/topo-auth-nodes-1/flared] [140737397503680][NTC][cluster.cc:2279-_reconstruct_node_partition] node partition map:
+# [pod/topo-auth-nodes-1/flared] [140737397503680][NTC][cluster.cc:2284-_reconstruct_node_partition] 0: master (node_key=topo-auth-nodes-0.topo-auth-nodes.flare-topo-auth.svc.cluster.local:12121, node_balance=100)
+# [pod/topo-auth-nodes-1/flared] [140737397503680][NTC][cluster.cc:2288-_reconstruct_node_partition] 0: slave[0] (node_key=topo-auth-nodes-1.topo-auth-nodes.flare-topo-auth.svc.cluster.local:12121, node_balance=0)
+# [pod/topo-auth-nodes-1/flared] [140737397503680][NTC][cluster.cc:2298-_reconstruct_node_partition] node partition map (prepare):
+# [pod/topo-auth-nodes-1/flared] [140737397503680][NTC][cluster.cc:1660-_shift_node_state] shifting node_state (node_key=topo-auth-nodes-1.topo-auth-nodes.flare-topo-auth.svc.cluster.local:12121, old_state=active, new_state=prepare)
+# [pod/topo-auth-nodes-1/flared] [140737397503680][NTC][cluster.cc:1677-_shift_node_role] shifting node_role (node_key=topo-auth-nodes-1.topo-auth-nodes.flare-topo-auth.svc.cluster.local:12121, old_role=proxy, old_partition=-1, new_role=slave, new_partition=0)
+# [pod/topo-auth-nodes-1/flared] [140737397368512][NTC][handler_reconstruction.cc:303-_run_once] starting dump operation (master=topo-auth-nodes-0.topo-auth-nodes.flare-topo-auth.svc.cluster.local:12121, partition=0, partition_size=1, interval=0, bwlimit=0)
+# [pod/topo-auth-nodes-1/flared] [140737397368512][NTC][op_dump.cc:286-_parse_text_client_parameters] found delimiter, dump completed (items=0)
+# [pod/topo-auth-nodes-1/flared] [140737397368512][NTC][handler_reconstruction.cc:313-_run_once] reconstruction via full dump completed (master=topo-auth-nodes-0.topo-auth-nodes.flare-topo-auth.svc.cluster.local:12121, partition=0, partition_size=1, interval=0, bwlimit=0)
+# [pod/topo-auth-nodes-1/flared] [140737397503680][NTC][cluster.cc:1116-reconstruct_node] reconstructing node map... (2 entries)
+# [pod/topo-auth-nodes-1/flared] [140737397503680][NTC][cluster.cc:1176-reconstruct_node] update: node_balance (0 -> 40)
+# [pod/topo-auth-nodes-1/flared] [140737397503680][NTC][cluster.cc:2146-_reconstruct_node_partition] reconstructing node partition map... (from 2 entries in node map)
+# [pod/topo-auth-nodes-1/flared] [140737397503680][NTC][cluster.cc:2279-_reconstruct_node_partition] node partition map:
+# [pod/topo-auth-nodes-1/flared] [140737397503680][NTC][cluster.cc:2284-_reconstruct_node_partition] 0: master (node_key=topo-auth-nodes-0.topo-auth-nodes.flare-topo-auth.svc.cluster.local:12121, node_balance=100)
+# [pod/topo-auth-nodes-1/flared] [140737397503680][NTC][cluster.cc:2288-_reconstruct_node_partition] 0: slave[0] (node_key=topo-auth-nodes-1.topo-auth-nodes.flare-topo-auth.svc.cluster.local:12121, node_balance=40)
+# [pod/topo-auth-nodes-1/flared] [140737397503680][NTC][cluster.cc:2298-_reconstruct_node_partition] node partition map (prepare):
+# [pod/topo-auth-nodes-1/flared] [140737397503680][NTC][cluster.cc:1660-_shift_node_state] shifting node_state (node_key=topo-auth-nodes-1.topo-auth-nodes.flare-topo-auth.svc.cluster.local:12121, old_state=prepare, new_state=active)
+# [pod/topo-auth-nodes-1/flared] [140737397503680][NTC][cluster.cc:1116-reconstruct_node] reconstructing node map... (2 entries)
+# [pod/topo-auth-nodes-1/flared] [140737397503680][NTC][cluster.cc:1176-reconstruct_node] update: node_balance (40 -> 80)
+# [pod/topo-auth-nodes-1/flared] [140737397503680][NTC][cluster.cc:2146-_reconstruct_node_partition] reconstructing node partition map... (from 2 entries in node map)
+# [pod/topo-auth-nodes-1/flared] [140737397503680][NTC][cluster.cc:2279-_reconstruct_node_partition] node partition map:
+# [pod/topo-auth-nodes-1/flared] [140737397503680][NTC][cluster.cc:2284-_reconstruct_node_partition] 0: master (node_key=topo-auth-nodes-0.topo-auth-nodes.flare-topo-auth.svc.cluster.local:12121, node_balance=100)
+# [pod/topo-auth-nodes-1/flared] [140737397503680][NTC][cluster.cc:2288-_reconstruct_node_partition] 0: slave[0] (node_key=topo-auth-nodes-1.topo-auth-nodes.flare-topo-auth.svc.cluster.local:12121, node_balance=80)
+# [pod/topo-auth-nodes-1/flared] [140737397503680][NTC][cluster.cc:2298-_reconstruct_node_partition] node partition map (prepare):
+# [pod/topo-auth-nodes-0/flared] [140737465157440][NTC][flared.cc:183-startup]   daemonize:              false
+# [pod/topo-auth-nodes-0/flared] [140737465157440][NTC][flared.cc:183-startup]   data_dir:               /tmp/flare
+# [pod/topo-auth-nodes-0/flared] [140737465157440][NTC][flared.cc:183-startup]   index_server(s):        flare-operator.flare-topo-auth.svc.cluster.local:12120
+# [pod/topo-auth-nodes-0/flared] [140737465157440][NTC][flared.cc:183-startup]   max_connection:         128
+# [pod/topo-auth-nodes-0/flared] [140737465157440][NTC][flared.cc:183-startup]   mutex_slot:             64
+# [pod/topo-auth-nodes-0/flared] [140737465157440][NTC][flared.cc:183-startup]   noreply_window_limit:   0
+# [pod/topo-auth-nodes-0/flared] [140737465157440][NTC][flared.cc:183-startup]   net_read_timeout:       600
+# [pod/topo-auth-nodes-0/flared] [140737465157440][NTC][flared.cc:183-startup]   proxy_concurrency:      2
+# [pod/topo-auth-nodes-0/flared] [140737465157440][NTC][flared.cc:183-startup]   reconstruction_interval:0
+# [pod/topo-auth-nodes-0/flared] [140737465157440][NTC][flared.cc:183-startup]   reconstruction_bwlimit: 0
+# [pod/topo-auth-nodes-0/flared] [140737465157440][NTC][flared.cc:183-startup]   replication_type:       async
+# [pod/topo-auth-nodes-0/flared] [140737465157440][NTC][flared.cc:183-startup]   server_name:            topo-auth-nodes-0.topo-auth-nodes.flare-topo-auth.svc.cluster.local
+# [pod/topo-auth-nodes-0/flared] [140737465157440][NTC][flared.cc:183-startup]   server_port:            12121
+# [pod/topo-auth-nodes-0/flared] [140737465157440][NTC][flared.cc:183-startup]   server_socket:          
+# [pod/topo-auth-nodes-0/flared] [140737465157440][NTC][flared.cc:183-startup]   stack_size:             128
+# [pod/topo-auth-nodes-0/flared] [140737465157440][NTC][flared.cc:183-startup]   storage_ap:             4
+# [pod/topo-auth-nodes-0/flared] [140737465157440][NTC][flared.cc:183-startup]   storage_bucket_size:    131071
+# [pod/topo-auth-nodes-0/flared] [140737465157440][NTC][flared.cc:183-startup]   storage_cache_size:     65536
+# [pod/topo-auth-nodes-0/flared] [140737465157440][NTC][flared.cc:183-startup]   storage_compress:       
+# [pod/topo-auth-nodes-0/flared] [140737465157440][NTC][flared.cc:183-startup]   storage_large:          false
+# [pod/topo-auth-nodes-0/flared] [140737465157440][NTC][flared.cc:183-startup]   storage_lmemb:          128
+# [pod/topo-auth-nodes-0/flared] [140737465157440][NTC][flared.cc:183-startup]   storage_nmemb:          256
+# [pod/topo-auth-nodes-0/flared] [140737465157440][NTC][flared.cc:183-startup]   storage_dfunit:         0
+# [pod/topo-auth-nodes-0/flared] [140737465157440][NTC][flared.cc:183-startup]   storage_type:           tch
+# [pod/topo-auth-nodes-0/flared] [140737465157440][NTC][flared.cc:183-startup]   thread_pool_size:       5
+# [pod/topo-auth-nodes-0/flared] [140737465157440][NTC][flared.cc:183-startup]   proxy_prior_netmask:    0
+# [pod/topo-auth-nodes-0/flared] [140737465157440][NTC][flared.cc:183-startup]   max_total_thread_queue: 0
+# [pod/topo-auth-nodes-0/flared] [140737465157440][NTC][flared.cc:183-startup]   time_watcher_enabled:   false
+# [pod/topo-auth-nodes-0/flared] [140737465157440][NTC][flared.cc:183-startup]   time_watcher_polling_interval_msec: 0
+# [pod/topo-auth-nodes-0/flared] [140737465157440][NTC][flared.cc:183-startup]   storage_access_watch_threshold_warn_msec: 0
+# [pod/topo-auth-nodes-0/flared] [140737465157440][NTC][flared.cc:183-startup]   storage_access_watch_threshold_ping_ng_msec: 0
+# [pod/topo-auth-nodes-0/flared] [140737465157440][NTC][flared.cc:183-startup]   cluster_replication:    0
+# [pod/topo-auth-nodes-0/flared] [140737465157440][NTC][flared.cc:183-startup]   cluster_replication_server_name: 
+# [pod/topo-auth-nodes-0/flared] [140737465157440][NTC][flared.cc:183-startup]   cluster_replication_server_port: 12121
+# [pod/topo-auth-nodes-0/flared] [140737465157440][NTC][flared.cc:183-startup]   cluster_replication_concurrency: 2
+# [pod/topo-auth-nodes-0/flared] [140737465157440][NTC][flared.cc:183-startup]   cluster_replication_mode: duplicate
+# [pod/topo-auth-nodes-0/flared] [140737465157440][NTC][cluster.cc:272-startup_node] setting up cluster node... (type=1, index_server_name=flare-operator.flare-topo-auth.svc.cluster.local, index_server_port=12120)
+# [pod/topo-auth-nodes-0/flared] [140737465157440][NTC][cluster.cc:303-startup_node] meta data from index server:
+# [pod/topo-auth-nodes-0/flared] [140737465157440][NTC][cluster.cc:304-startup_node]   partition_size:                 1024
+# [pod/topo-auth-nodes-0/flared] [140737465157440][NTC][cluster.cc:305-startup_node]   key_hash_algorithm:             jenkins
+# [pod/topo-auth-nodes-0/flared] [140737465157440][NTC][cluster.cc:306-startup_node]   key_resolver_type:              modular
+# [pod/topo-auth-nodes-0/flared] [140737465157440][NTC][cluster.cc:307-startup_node]   key_resolver_modular_hint:      1
+# [pod/topo-auth-nodes-0/flared] [140737465157440][NTC][cluster.cc:308-startup_node]   key_resolver_modular_virtual:   4096
+# [pod/topo-auth-nodes-0/flared] [140737465157440][NTC][cluster.cc:1116-reconstruct_node] reconstructing node map... (1 entries)
+# [pod/topo-auth-nodes-0/flared] [140737465157440][NTC][cluster.cc:1141-reconstruct_node] boot map already assigns my role (role=master, partition=0) — deferring role shift until storage is attached
+# [pod/topo-auth-nodes-0/flared] [140737465157440][NTC][cluster.cc:2146-_reconstruct_node_partition] reconstructing node partition map... (from 1 entries in node map)
+# [pod/topo-auth-nodes-0/flared] [140737465157440][NTC][cluster.cc:2279-_reconstruct_node_partition] node partition map:
+# [pod/topo-auth-nodes-0/flared] [140737465157440][NTC][cluster.cc:2284-_reconstruct_node_partition] 0: master (node_key=topo-auth-nodes-0.topo-auth-nodes.flare-topo-auth.svc.cluster.local:12121, node_balance=100)
+# [pod/topo-auth-nodes-0/flared] [140737465157440][NTC][cluster.cc:2298-_reconstruct_node_partition] node partition map (prepare):
+# [pod/topo-auth-nodes-0/flared] [140737465157440][NTC][cluster.cc:1677-_shift_node_role] shifting node_role (node_key=topo-auth-nodes-0.topo-auth-nodes.flare-topo-auth.svc.cluster.local:12121, old_role=proxy, old_partition=-1, new_role=master, new_partition=0)
+# [pod/topo-auth-nodes-0/flared] [140737465157440][NTC][cluster.cc:1754-_shift_node_role] assigned master with state active — skipping reconstruction (operator designated this node the source of truth; local data is authoritative)
+# [pod/topo-auth-nodes-0/flared] [140737397638848][NTC][handler_metrics.cc:69-run] metrics endpoint ready (port=9150, self-scrape port=12121)
+# [pod/topo-auth-nodes-0/flared] [140737465157440][NTC][flared.cc:424-run] entering running loop
+# [pod/topo-auth-nodes-0/flared] [140737397503680][NTC][cluster.cc:1116-reconstruct_node] reconstructing node map... (1 entries)
+# [pod/topo-auth-nodes-0/flared] [140737397503680][NTC][cluster.cc:2146-_reconstruct_node_partition] reconstructing node partition map... (from 1 entries in node map)
+# [pod/topo-auth-nodes-0/flared] [140737397503680][NTC][cluster.cc:2279-_reconstruct_node_partition] node partition map:
+# [pod/topo-auth-nodes-0/flared] [140737397503680][NTC][cluster.cc:2284-_reconstruct_node_partition] 0: master (node_key=topo-auth-nodes-0.topo-auth-nodes.flare-topo-auth.svc.cluster.local:12121, node_balance=100)
+# [pod/topo-auth-nodes-0/flared] [140737397503680][NTC][cluster.cc:2298-_reconstruct_node_partition] node partition map (prepare):
+# [pod/topo-auth-nodes-0/flared] [140737397503680][NTC][cluster.cc:1116-reconstruct_node] reconstructing node map... (2 entries)
+# [pod/topo-auth-nodes-0/flared] [140737397503680][NTC][cluster.cc:2146-_reconstruct_node_partition] reconstructing node partition map... (from 2 entries in node map)
+# [pod/topo-auth-nodes-0/flared] [140737397503680][NTC][cluster.cc:2279-_reconstruct_node_partition] node partition map:
+# [pod/topo-auth-nodes-0/flared] [140737397503680][NTC][cluster.cc:2284-_reconstruct_node_partition] 0: master (node_key=topo-auth-nodes-0.topo-auth-nodes.flare-topo-auth.svc.cluster.local:12121, node_balance=100)
+# [pod/topo-auth-nodes-0/flared] [140737397503680][NTC][cluster.cc:2288-_reconstruct_node_partition] 0: slave[0] (node_key=topo-auth-nodes-1.topo-auth-nodes.flare-topo-auth.svc.cluster.local:12121, node_balance=0)
+# [pod/topo-auth-nodes-0/flared] [140737397503680][NTC][cluster.cc:2298-_reconstruct_node_partition] node partition map (prepare):
+# [pod/topo-auth-nodes-0/flared] [140737397503680][NTC][cluster.cc:1110-reconstruct_node] ignored: the current node_map_version (4294967303) is newer than (4294967302)
+# [pod/topo-auth-nodes-0/flared] [140737397503680][NTC][cluster.cc:1116-reconstruct_node] reconstructing node map... (2 entries)
+# [pod/topo-auth-nodes-0/flared] [140737397503680][NTC][cluster.cc:1176-reconstruct_node] update: node_balance (0 -> 40)
+# [pod/topo-auth-nodes-0/flared] [140737397503680][NTC][cluster.cc:2146-_reconstruct_node_partition] reconstructing node partition map... (from 2 entries in node map)
+# [pod/topo-auth-nodes-0/flared] [140737397503680][NTC][cluster.cc:2279-_reconstruct_node_partition] node partition map:
+# [pod/topo-auth-nodes-0/flared] [140737397503680][NTC][cluster.cc:2284-_reconstruct_node_partition] 0: master (node_key=topo-auth-nodes-0.topo-auth-nodes.flare-topo-auth.svc.cluster.local:12121, node_balance=100)
+# [pod/topo-auth-nodes-0/flared] [140737397503680][NTC][cluster.cc:2288-_reconstruct_node_partition] 0: slave[0] (node_key=topo-auth-nodes-1.topo-auth-nodes.flare-topo-auth.svc.cluster.local:12121, node_balance=40)
+# [pod/topo-auth-nodes-0/flared] [140737397503680][NTC][cluster.cc:2298-_reconstruct_node_partition] node partition map (prepare):
+# [pod/topo-auth-nodes-0/flared] [140737397503680][NTC][cluster.cc:1660-_shift_node_state] shifting node_state (node_key=topo-auth-nodes-1.topo-auth-nodes.flare-topo-auth.svc.cluster.local:12121, old_state=prepare, new_state=active)
+# [pod/topo-auth-nodes-0/flared] [140737397503680][NTC][cluster.cc:1116-reconstruct_node] reconstructing node map... (2 entries)
+# [pod/topo-auth-nodes-0/flared] [140737397503680][NTC][cluster.cc:1176-reconstruct_node] update: node_balance (40 -> 80)
+# [pod/topo-auth-nodes-0/flared] [140737397503680][NTC][cluster.cc:2146-_reconstruct_node_partition] reconstructing node partition map... (from 2 entries in node map)
+# [pod/topo-auth-nodes-0/flared] [140737397503680][NTC][cluster.cc:2279-_reconstruct_node_partition] node partition map:
+# [pod/topo-auth-nodes-0/flared] [140737397503680][NTC][cluster.cc:2284-_reconstruct_node_partition] 0: master (node_key=topo-auth-nodes-0.topo-auth-nodes.flare-topo-auth.svc.cluster.local:12121, node_balance=100)
+# [pod/topo-auth-nodes-0/flared] [140737397503680][NTC][cluster.cc:2288-_reconstruct_node_partition] 0: slave[0] (node_key=topo-auth-nodes-1.topo-auth-nodes.flare-topo-auth.svc.cluster.local:12121, node_balance=80)
+# [pod/topo-auth-nodes-0/flared] [140737397503680][NTC][cluster.cc:2298-_reconstruct_node_partition] node partition map (prepare):
+# 
+# === pods (flare-topo-auth) ===
+# NAME                              READY   STATUS    RESTARTS      AGE     IP            NODE                      NOMINATED NODE   READINESS GATES
+# debug-topo-auth                   1/1     Running   0             2m36s   10.244.0.21   flare-e2e-control-plane   <none>           <none>
+# flare-operator-6484ffdcdd-cktr2   1/1     Running   1 (40s ago)   2m35s   10.244.0.22   flare-e2e-control-plane   <none>           <none>
+# topo-auth-nodes-0                 1/1     Running   0             2m24s   10.244.0.23   flare-e2e-control-plane   <none>           <none>
+# topo-auth-nodes-1                 1/1     Running   0             2m17s   10.244.0.24   flare-e2e-control-plane   <none>           <none>
+# 
+# === events (flare-topo-auth, by time) ===
+# LAST SEEN   TYPE      REASON              OBJECT                                 MESSAGE
+# 2m36s       Normal    Scheduled           pod/debug-topo-auth                    Successfully assigned flare-topo-auth/debug-topo-auth to flare-e2e-control-plane
+# 2m35s       Normal    Scheduled           pod/flare-operator-6484ffdcdd-cktr2    Successfully assigned flare-topo-auth/flare-operator-6484ffdcdd-cktr2 to flare-e2e-control-plane
+# 2m24s       Normal    Scheduled           pod/topo-auth-nodes-0                  Successfully assigned flare-topo-auth/topo-auth-nodes-0 to flare-e2e-control-plane
+# 2m17s       Normal    Scheduled           pod/topo-auth-nodes-1                  Successfully assigned flare-topo-auth/topo-auth-nodes-1 to flare-e2e-control-plane
+# 2m37s       Normal    Pulled              pod/debug-topo-auth                    Container image "busybox:1.36" already present on machine and can be accessed by the pod
+# 2m37s       Normal    Created             pod/debug-topo-auth                    Container created
+# 2m37s       Normal    Started             pod/debug-topo-auth                    Container started
+# 2m36s       Normal    ScalingReplicaSet   deployment/flare-operator              Scaled up replica set flare-operator-6484ffdcdd from 0 to 1
+# 2m36s       Normal    SuccessfulCreate    replicaset/flare-operator-6484ffdcdd   Created pod: flare-operator-6484ffdcdd-cktr2
+# 2m25s       Normal    SuccessfulCreate    statefulset/topo-auth-nodes            Create Pod topo-auth-nodes-0 in StatefulSet topo-auth-nodes successful
+# 2m24s       Normal    Pulled              pod/topo-auth-nodes-0                  Container image "flare-node:test" already present on machine and can be accessed by the pod
+# 2m24s       Normal    Created             pod/topo-auth-nodes-0                  Container created
+# 2m24s       Normal    Started             pod/topo-auth-nodes-0                  Container started
+# 2m18s       Normal    SuccessfulCreate    statefulset/topo-auth-nodes            Create Pod topo-auth-nodes-1 in StatefulSet topo-auth-nodes successful
+# 2m17s       Normal    Pulled              pod/topo-auth-nodes-1                  Container image "flare-node:test" already present on machine and can be accessed by the pod
+# 2m17s       Normal    Created             pod/topo-auth-nodes-1                  Container created
+# 2m17s       Normal    Started             pod/topo-auth-nodes-1                  Container started
+# 65s         Warning   Unhealthy           pod/topo-auth-nodes-1                  Readiness probe failed:
+# 41s         Normal    Started             pod/flare-operator-6484ffdcdd-cktr2    Container started
+# 41s         Normal    Created             pod/flare-operator-6484ffdcdd-cktr2    Container created
+# 41s         Normal    Pulled              pod/flare-operator-6484ffdcdd-cktr2    Container image "flare-operator:test" already present on machine and can be accessed by the pod
+# 
+# === describe flared pods (flare-topo-auth) ===
+# Name:             topo-auth-nodes-0
+# Namespace:        flare-topo-auth
+# Priority:         0
+# Service Account:  default
+# Node:             flare-e2e-control-plane/172.18.0.2
+# Start Time:       Sat, 12 Sep 2026 23:04:11 +0900
+# Labels:           app=flare
+#                   apps.kubernetes.io/pod-index=0
+#                   cluster=topo-auth
+#                   controller-revision-hash=topo-auth-nodes-976d58974
+#                   statefulset.kubernetes.io/pod-name=topo-auth-nodes-0
+# Annotations:      <none>
+# Status:           Running
+# IP:               10.244.0.23
+# IPs:
+#   IP:           10.244.0.23
+# Controlled By:  StatefulSet/topo-auth-nodes
+# Containers:
+#   flared:
+#     Container ID:  containerd://7dd886006fe5bbe31898a07daa34eab5497c9e74409bf19191ab414fafefa4f2
+#     Image:         flare-node:test
+#     Image ID:      sha256:61248788e79b35f9319e1397b748d6e3d29a8bf927ba85278c0226618b3eec73
+#     Ports:         12121/TCP (flare), 9150/TCP (metrics)
+#     Host Ports:    0/TCP (flare), 0/TCP (metrics)
+#     Command:
+#       sh
+#       -c
+#       rm -rf /tmp/flare/*.hdb /tmp/flare/*.hdb.wal /tmp/flare/rocksdb && mkdir -p /tmp/flare && rm -f /tmp/flare/flared.pid && exec flared --config=/etc/flared/extra.conf --data-dir /tmp/flare --server-port 12121 --index-server-name flare-operator.flare-topo-auth.svc.cluster.local --index-server-port 12120 --storage-type=tch --metrics-server-port 9150 --stderr
+#     State:          Running
+#       Started:      Sat, 12 Sep 2026 23:04:12 +0900
+#     Ready:          True
+#     Restart Count:  0
+#     Limits:
+#       cpu:     500m
+#       memory:  512Mi
+#     Requests:
+#       cpu:      100m
+#       memory:   256Mi
+#     Liveness:   tcp-socket :12121 delay=10s timeout=1s period=5s #success=1 #failure=6
+#     Readiness:  exec [/bin/bash -c exec 3<>/dev/tcp/127.0.0.1/12121 || exit 1
+# printf 'stats nodes\r\nquit\r\n' >&3
+# out=$(tr -d '\r' <&3)
+# me="$(hostname -f):12121"
+# case "$out" in *"STAT $me:state active"*) exit 0;; esac
+# # Limbo clause (mirrors the helm chart): a syncing member of a
+# # partition with NO active master has nothing to sync from —
+# # total-partition recovery. Report Ready so the OrderedReady
+# # StatefulSet can recreate the peer that will become master.
+# mypart=$(printf '%s\n' "$out" | sed -n "s/^STAT $me:partition //p")
+# [ -n "$mypart" ] || exit 1
+# [ "$mypart" != "-1" ] || exit 1
+# for key in $(printf '%s\n' "$out" | sed -n "s/^STAT \(.*\):partition $mypart$/\1/p"); do
+#   printf '%s\n' "$out" | grep -q "^STAT $key:role master$" || continue
+#   printf '%s\n' "$out" | grep -q "^STAT $key:state active$" && exit 1
+# done
+# exit 0
+# ] delay=5s timeout=4s period=5s #success=1 #failure=3
+#     Environment:  <none>
+#     Mounts:
+#       /etc/flared from flared-config (rw)
+#       /var/run/secrets/kubernetes.io/serviceaccount from kube-api-access-dt27t (ro)
+# Conditions:
+#   Type                        Status
+#   PodReadyToStartContainers   True 
+#   Initialized                 True 
+#   Ready                       True 
+#   ContainersReady             True 
+#   PodScheduled                True 
+# Volumes:
+#   flared-config:
+#     Type:      ConfigMap (a volume populated by a ConfigMap)
+#     Name:      topo-auth-config
+#     Optional:  false
+#   kube-api-access-dt27t:
+#     Type:                    Projected (a volume that contains injected data from multiple sources)
+#     TokenExpirationSeconds:  3607
+#     ConfigMapName:           kube-root-ca.crt
+#     Optional:                false
+#     DownwardAPI:             true
+# QoS Class:                   Burstable
+# Node-Selectors:              <none>
+# Tolerations:                 node.kubernetes.io/not-ready:NoExecute op=Exists for 300s
+#                              node.kubernetes.io/unreachable:NoExecute op=Exists for 300s
+# Events:
+#   Type    Reason     Age    From               Message
+#   ----    ------     ----   ----               -------
+#   Normal  Scheduled  2m24s  default-scheduler  Successfully assigned flare-topo-auth/topo-auth-nodes-0 to flare-e2e-control-plane
+#   Normal  Pulled     2m24s  kubelet            Container image "flare-node:test" already present on machine and can be accessed by the pod
+#   Normal  Created    2m24s  kubelet            Container created
+#   Normal  Started    2m24s  kubelet            Container started
+# 
+# 
+# Name:             topo-auth-nodes-1
+# Namespace:        flare-topo-auth
+# Priority:         0
+# Service Account:  default
+# Node:             flare-e2e-control-plane/172.18.0.2
+# Start Time:       Sat, 12 Sep 2026 23:04:18 +0900
+# Labels:           app=flare
+#                   apps.kubernetes.io/pod-index=1
+#                   cluster=topo-auth
+#                   controller-revision-hash=topo-auth-nodes-976d58974
+#                   statefulset.kubernetes.io/pod-name=topo-auth-nodes-1
+# Annotations:      <none>
+# Status:           Running
+# IP:               10.244.0.24
+# IPs:
+#   IP:           10.244.0.24
+# Controlled By:  StatefulSet/topo-auth-nodes
+# Containers:
+#   flared:
+#     Container ID:  containerd://7af24a6831fc40eef16c826f950d8682aabff246e2a17c36488d3b9e00aa0acb
+#     Image:         flare-node:test
+#     Image ID:      sha256:61248788e79b35f9319e1397b748d6e3d29a8bf927ba85278c0226618b3eec73
+#     Ports:         12121/TCP (flare), 9150/TCP (metrics)
+#     Host Ports:    0/TCP (flare), 0/TCP (metrics)
+#     Command:
+#       sh
+#       -c
+#       rm -rf /tmp/flare/*.hdb /tmp/flare/*.hdb.wal /tmp/flare/rocksdb && mkdir -p /tmp/flare && rm -f /tmp/flare/flared.pid && exec flared --config=/etc/flared/extra.conf --data-dir /tmp/flare --server-port 12121 --index-server-name flare-operator.flare-topo-auth.svc.cluster.local --index-server-port 12120 --storage-type=tch --metrics-server-port 9150 --stderr
+#     State:          Running
+#       Started:      Sat, 12 Sep 2026 23:04:19 +0900
+#     Ready:          True
+#     Restart Count:  0
+#     Limits:
+#       cpu:     500m
+#       memory:  512Mi
+#     Requests:
+#       cpu:      100m
+#       memory:   256Mi
+#     Liveness:   tcp-socket :12121 delay=10s timeout=1s period=5s #success=1 #failure=6
+#     Readiness:  exec [/bin/bash -c exec 3<>/dev/tcp/127.0.0.1/12121 || exit 1
+# printf 'stats nodes\r\nquit\r\n' >&3
+# out=$(tr -d '\r' <&3)
+# me="$(hostname -f):12121"
+# case "$out" in *"STAT $me:state active"*) exit 0;; esac
+# # Limbo clause (mirrors the helm chart): a syncing member of a
+# # partition with NO active master has nothing to sync from —
+# # total-partition recovery. Report Ready so the OrderedReady
+# # StatefulSet can recreate the peer that will become master.
+# mypart=$(printf '%s\n' "$out" | sed -n "s/^STAT $me:partition //p")
+# [ -n "$mypart" ] || exit 1
+# [ "$mypart" != "-1" ] || exit 1
+# for key in $(printf '%s\n' "$out" | sed -n "s/^STAT \(.*\):partition $mypart$/\1/p"); do
+#   printf '%s\n' "$out" | grep -q "^STAT $key:role master$" || continue
+#   printf '%s\n' "$out" | grep -q "^STAT $key:state active$" && exit 1
+# done
+# exit 0
+# ] delay=5s timeout=4s period=5s #success=1 #failure=3
+#     Environment:  <none>
+#     Mounts:
+#       /etc/flared from flared-config (rw)
+#       /var/run/secrets/kubernetes.io/serviceaccount from kube-api-access-flqkj (ro)
+# Conditions:
+#   Type                        Status
+#   PodReadyToStartContainers   True 
+#   Initialized                 True 
+#   Ready                       True 
+#   ContainersReady             True 
+#   PodScheduled                True 
+# Volumes:
+#   flared-config:
+#     Type:      ConfigMap (a volume populated by a ConfigMap)
+#     Name:      topo-auth-config
+#     Optional:  false
+#   kube-api-access-flqkj:
+#     Type:                    Projected (a volume that contains injected data from multiple sources)
+#     TokenExpirationSeconds:  3607
+#     ConfigMapName:           kube-root-ca.crt
+#     Optional:                false
+#     DownwardAPI:             true
+# QoS Class:                   Burstable
+# Node-Selectors:              <none>
+# Tolerations:                 node.kubernetes.io/not-ready:NoExecute op=Exists for 300s
+#                              node.kubernetes.io/unreachable:NoExecute op=Exists for 300s
+# Events:
+#   Type     Reason     Age                  From               Message
+#   ----     ------     ----                 ----               -------
+#   Normal   Scheduled  2m17s                default-scheduler  Successfully assigned flare-topo-auth/topo-auth-nodes-1 to flare-e2e-control-plane
+#   Normal   Pulled     2m17s                kubelet            Container image "flare-node:test" already present on machine and can be accessed by the pod
+#   Normal   Created    2m17s                kubelet            Container created
+#   Normal   Started    2m17s                kubelet            Container started
+#   Warning  Unhealthy  65s (x13 over 2m1s)  kubelet            Readiness probe failed:
+# 
+# Cleaning up cluster 'topo-auth'
+# Tests: 4, Failures: 1
+# RESULT: FAIL
+1..4
+ok 1 - flared rejects a topology push carrying a stale version
+ok 2 - control: holding the lease, the stopped pass does broadcast
+ok 3 - lease taken by another identity: the pass fences, the process exits, and the restarted leader re-applies the topology
+not ok 4 - lease unreadable: the stopped pass fails closed and does not send
+EXIT=1

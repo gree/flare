@@ -32,6 +32,9 @@ structure ClusterConfig where
   operatorPort : Nat := 12120
   /-- Storage backend: "tch" (default, Tokyo Cabinet) or "rocksdb". -/
   storageBackend : String := "tch"
+  /-- Extra environment for the per-suite operator, as (name, value). Used
+      by suites that need a test seam the production default leaves off. -/
+  operatorEnv : List (String × String) := []
   /-- Persist flared data on a PVC (volumeClaimTemplates) instead of the
       pod-local tmpdir. With a PVC the data directory survives pod
       recreation, so a partition can recover its data even when the master
@@ -108,8 +111,22 @@ subjects:
     name: flare-operator
     namespace: {ns}"
 
-/-- Generate operator Deployment + Service YAML. -/
+/-- Generate operator Deployment + Service YAML.
+
+    The memory LIMIT is a ceiling, not a reservation: 256Mi is enough for
+    the Lean runtime on the amd64 CI runners but OOMKills it on arm64
+    (Docker Desktop), where every suite then fails during setup with
+    "cluster did not stabilize" and no visible cause — the operator pod is
+    already gone by the time a test looks. 768Mi was still marginal: a
+    restarted operator did not come back within a 240s recovery window,
+    while the same binary under 1Gi did. There is no architecture condition
+    here, so the higher ceiling applies on the amd64 runners too; a ceiling
+    that is not reached costs nothing. -/
 def operatorDeploymentYaml (cfg : ClusterConfig) : String :=
+  let envBlock :=
+    if cfg.operatorEnv.isEmpty then ""
+    else "\n          env:" ++ String.join (cfg.operatorEnv.map (fun (k, v) =>
+      s!"\n            - name: {k}\n              value: \"{v}\""))
   let name := cfg.operatorName
   let ns := cfg.«namespace»
   s!"apiVersion: apps/v1
@@ -142,14 +159,15 @@ spec:
           ports:
             - containerPort: {cfg.operatorPort}
               name: flare-index
-              protocol: TCP
+              protocol: TCP{envBlock}
           resources:
             requests:
               cpu: 100m
               memory: 128Mi
             limits:
               cpu: 500m
-              memory: 256Mi
+              # ceiling, not a reservation - see operatorDeploymentYaml
+              memory: 1Gi
 ---
 apiVersion: v1
 kind: Service

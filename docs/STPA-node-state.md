@@ -8,16 +8,43 @@ that a segfaulted flared was never detected at all.
 Method: STAMP/STPA — losses, hazards, control structure, then Unsafe Control
 Actions (UCA) and the scenarios that produce them.
 
-Every row carries a status, and every status was checked against the code
-rather than against memory. That check found four things this document had
-claimed and the code did not do; they are listed in section 8, and the ones
-worth fixing were fixed.
+## Evidence and status
 
-| Mark | Meaning |
-|---|---|
-| **DONE** | Implemented, wired, and reachable on the live path |
-| **PARTIAL** | Implemented with a stated limitation |
-| **GAP** | Not implemented; the hazard is currently uncovered |
+Control status is maintained in [safety-evidence.json](safety-evidence.json).
+The generated table below is the only status inventory in this document.
+Implementation and verification are separate: code existence, a comment, a
+test definition, or a passing library build does not establish end-to-end safety.
+All initial entries are unverified pending archived, scenario-specific evidence.
+See [SAFETY-TODO.md](SAFETY-TODO.md) for merge gates and the review workflow.
+
+Each EV record includes an SC safety constraint, stable UCA links, assumptions,
+residual risks, implementation symbols and production call paths, verification
+procedures and immutable execution evidence. A verified control only supports
+its bounded claim; it does not close every linked hazard. Alerts describe
+detection, not prevention, and depend on deployment enablement and routing.
+
+<!-- safety-evidence:begin -->
+
+<!-- Generated from safety-evidence.json; do not edit this table. -->
+| Evidence / constraint | Bounded claim | Hazards / UCA | Implementation | Verification | Code / candidate check |
+|---|---|---|---|---|---|
+| <a id="ev-01"></a>EV-01 / SC-01 | Only the current leader may issue topology changes; recipients must reject obsolete authority. | H6, H4, UCA-14, UCA-15, UCA-16, UCA-08 | partial | unverified | [code](../flare_operator/FlareOperator/Main.lean), [check](../flare_operator/FlareOperator/E2E/Tests/TopologyAuthority.lean) |
+| <a id="ev-02"></a>EV-02 / SC-02 | mergeClusterState commits at most one Master per partition in its node map. | H6, UCA-08, UCA-14 | implemented | unverified | [code](../flare_operator/FlareOperator/StateMachine/K8sReconciler.lean), [check](../flare_operator/FlareOperator/StateMachine/K8sReconciler.lean) |
+| <a id="ev-03"></a>EV-03 / SC-03 | A replica with missed writes remains repair-pending until reconstruction completes and missing data is recovered. | H3, H2, UCA-02 | partial | unverified | [code](../flare_operator/FlareOperator/StateMachine/ReplicaRepair.lean), [check](../flare_operator/FlareOperator/E2E/Tests/ReplicaRepair.lean) |
+| <a id="ev-04"></a>EV-04 / SC-04 | Normal promotion and Prepare activation require a completed usable copy associated with the current source. | H2, H4, UCA-10 | partial | unverified | [code](../flare_operator/FlareOperator/StateMachine/SyncEvidence.lean), [check](../flare_operator/FlareOperator/E2E/Tests/PrepareEvidence.lean) |
+| <a id="ev-05"></a>EV-05 / SC-05 | Delete only a revalidated target when independent current evidence supports the surviving copy. | H5, H2, UCA-07, UCA-11, UCA-12, UCA-13 | partial | unverified | [code](../flare_operator/FlareOperator/StateMachine/StatsObservation.lean), [check](../flare_operator/FlareOperator/StateMachine/StatsObservation.lean) |
+| <a id="ev-06"></a>EV-06 / SC-06 | Refill missing masters under an explicit emergency policy, with partial-copy promotion distinguished from normal successor promotion. | H1, H2, H5, UCA-04, UCA-07, UCA-09, UCA-10 | partial | unverified | [code](../flare_operator/FlareOperator/StateMachine/K8sReconciler.lean), [check](../flare_operator/FlareOperator/E2E/Tests/PvcDataSurvival.lean) |
+| <a id="ev-07"></a>EV-07 / SC-07 | Use Pod existence/readiness streaks with guards, retaining an unhealthy lone master rather than stripping its assignment. | H1, H4, H5, UCA-01, UCA-03, UCA-05, UCA-12 | partial | unverified | [code](../flare_operator/FlareOperator/Main.lean), [check](../flare_operator/FlareOperator/E2E/Tests/Failover.lean) |
+| <a id="ev-08"></a>EV-08 / SC-08 | The pure drain transform retains a master assignment if there is no Active slave successor. | H1, H5, UCA-04, UCA-05 | implemented | unverified | [code](../flare_operator/FlareOperator/StateMachine/K8sReconciler.lean), [check](../flare_operator/FlareOperator/E2E/Tests/TerminatingPodHandling.lean) |
+| <a id="ev-09"></a>EV-09 / SC-09 | Circuit-breaker policy pauses mass failover; configured recovery refill is a separate path. | H1, H5, UCA-03 | partial | unverified | [code](../flare_operator/FlareOperator/StateMachine/K8sReconciler.lean), [check](../flare_operator/FlareOperator/E2E/Tests/CircuitBreaker.lean) |
+| <a id="ev-10"></a>EV-10 / SC-10 | Restart a stuck Proxy/Down only when current safety evidence permits deleting its copy. | H4, H5, UCA-06, UCA-11 | partial | unverified | [code](../flare_operator/FlareOperator/Main.lean), [check](../flare_operator/FlareOperator/E2E/Tests/TerminatingPodHandling.lean) |
+| <a id="ev-11"></a>EV-11 / SC-11 | Expose masterless, unhealthy, unreachable, drain-blocked and resync-failure signals; reachability loss alone does not cause failover. | H1, H3, H4, H5, UCA-01, UCA-02, UCA-06, UCA-09, UCA-17 | partial | unverified | [code](../flare_operator/FlareOperator/Main.lean), [check](../flare_operator/FlareOperator/E2E/Tests/NativeMetrics.lean) |
+| <a id="ev-12"></a>EV-12 / SC-12 | Count comparison detects some replica divergence; content equality requires additional verification. | H2, H3, UCA-02 | partial | unverified | [code](../flare_operator/FlareOperator/Main.lean), [check](../flare_operator/FlareOperator/E2E/Tests/ReadBalance.lean) |
+| <a id="ev-13"></a>EV-13 / SC-13 | A future replication design must specify what acknowledged writes survive and how replicas catch up after interruption. | H2, H3, H5, UCA-02 | gap | unverified | [code](../src/lib/queue_proxy_write.cc), [check](../flare_operator/FlareOperator/E2E/Tests/StrictDurability.lean) |
+| <a id="ev-14"></a>EV-14 / SC-14 | Endpoint readiness should reflect serving eligibility without preventing StatefulSet recovery. | H4, H1, UCA-01, UCA-18 | partial | unverified | [code](../helm/flare-operator/templates/flare-cluster.yaml), [check](../flare_operator/FlareOperator/E2E/Tests/TerminatingPodHandling.lean) |
+| <a id="ev-15"></a>EV-15 / SC-15 | Operational comparison should identify current source and each replica rather than infer from cluster-wide counts. | H3, H4, UCA-02 | gap | unverified | [code](../src/lib/metrics_formatter.cc), [check](../flare_operator/FlareOperator/E2E/Tests/NativeMetrics.lean) |
+
+<!-- safety-evidence:end -->
 
 ## 1. Losses
 
@@ -31,14 +58,14 @@ worth fixing were fixed.
 
 ## 2. Hazards
 
-| ID | Hazard | Leads to | Detection | Mitigation |
-|---|---|---|---|---|
-| H1 | A partition has no Active master | L3 | **DONE** — `flare_operator_partitions_masterless`, counted per partition index, alert `FlareMasterMissing`. (Was cluster-wide arithmetic that a stale out-of-range master could offset; corrected.) | **DONE** — failover with promotion, then the masterless refill; both run on the normal path and on the breaker-tripped recovery path. **Except** `autoResetEnabled=false`, which parks in a fully inert state with no refill at all |
-| H2 | An Active master holds less data than a replica of the same partition | L2, then L1 when replicas reseed from it | **PARTIAL** — the self-heal fires only at *exactly zero* keys; a stale-but-non-empty master is caught only as a warning by `flare_operator_replica_key_delta` | **PARTIAL** — mint prevention (data-bearing veto in the refill, bootstrap-only P0 fast path), the empty-master self-heal, and promotion candidates must now be **Active** (drain and failover previously accepted the first slave in list order, including one still reconstructing). The veto covers the `lastMasterOf` candidate; the Active-slave candidate has no data check |
-| H3 | A replica diverges from its master with no detection | L5 now, L1/L2 when it is promoted | **PARTIAL** — `flare_node_proxy_write_dropped` (writes the master gave up on) and `flare_operator_replica_key_delta` (count comparison). Neither compares *content* | **GAP** — nothing repairs a diverged replica automatically; only a reconstruction does, and nothing triggers one. See G1/G2 |
-| H4 | A node is in the serving set (client LB or read balance) while not serving correctly | L2, L4 | **DONE** — readiness gate (client LB), `flare_operator_nodes_unhealthy`, and `flare_operator_nodes_unreachable` for the operator→pod path | **PARTIAL** — K8s ejects a NotReady pod from the client LB, and D2 takes an unhealthy node out of the topology. But read *balance* itself never reacts to health: only a demote or Down removes a node from it |
-| H5 | The last data-bearing copy of a partition is destroyed | L1 | **DONE** — `flare_operator_drain_no_successor` (CRITICAL) for the drain case | **DONE** — the drain guard refuses to demote a master with no successor; both pod-deleting self-heals are gated on every partition having an Active master and the breaker being clear |
-| H6 | Two nodes act as master for the same partition | L1, L2 | — | **DONE** — machine-checked bound (`CLE` / at-most-one-master) over the state transforms, plus `demoteDuplicateMasters` as the repair step for the merge race |
+| ID | Hazard | Leads to | Detection | Control and limitation | Evidence |
+|---|---|---|---|---|---|
+| H1 | A partition has no Active master | L3 | Per-partition masterless gauge; a kept unhealthy master needs the unhealthy signal instead. | Failover/refill exists; autoResetEnabled=false can park recovery. | [EV-06](#ev-06), [EV-07](#ev-07), [EV-11](#ev-11) |
+| H2 | An Active master holds less data than a replica | L2, L1 | Zero-count and count-delta probes only; missing stats currently become zero. | Active-successor checks are not independent sync evidence; Prepare repair and emergency refill have exceptions. | [EV-04](#ev-04), [EV-05](#ev-05), [EV-06](#ev-06), [EV-12](#ev-12) |
+| H3 | A replica diverges without reliable repair | L5, L1, L2 | Destination drop counters and one-slave count comparison. | Automatic resync is attempted, but intermediate role delivery and pending-work retention are defective (SAF-02/05). | [EV-03](#ev-03), [EV-11](#ev-11), [EV-12](#ev-12), [EV-13](#ev-13), [EV-15](#ev-15) |
+| H4 | An unfit node remains in the serving set | L2, L4 | Readiness, unhealthy and operator reachability signals. | Read balance follows topology; limbo readiness and headless access leave serving gaps. | [EV-04](#ev-04), [EV-07](#ev-07), [EV-10](#ev-10), [EV-11](#ev-11), [EV-14](#ev-14) |
+| H5 | The last usable copy is destroyed | L1 | Drain-no-successor signal covers one scenario. | Active-master/breaker gates exist but stale snapshots and unknown-as-zero stats can invalidate deletion decisions. | [EV-05](#ev-05), [EV-06](#ev-06), [EV-08](#ev-08), [EV-09](#ev-09), [EV-10](#ev-10) |
+| H6 | Two processes act as master for one partition | L1, L2 | No archived distributed-writer exclusion evidence. | The committed-map count proof is narrower than this hazard. Unfenced FSM broadcasts and partial delivery remain. | [EV-01](#ev-01), [EV-02](#ev-02) |
 
 Note for tmpfs clusters: a pod restart is equivalent to erasing that node's
 copy, so H5 is reachable by pod deletion alone.
@@ -83,14 +110,14 @@ it can never report "flared is serving the wrong data".
 
 ## 4. When does a node become Down?
 
-| # | Trigger | Detector | Condition | Action | How it leaves Down | Status |
+| # | Trigger | Detector | Condition | Action | How it leaves Down | Evidence / limitation |
 |---|---|---|---|---|---|---|
-| D1 | Pod object gone (delete, evict, reschedule) | operator `detectDeadNodesPure` | key absent from F1, role≠Proxy, state∉{Down,Prepare} | demote to Proxy/Down/partition −1, promote a data-bearing slave | new pod registers (F3) → Prepare → catch up | **DONE** |
-| D2 | Pod present but not serving (segfault, hang, wedge) | operator, **rc59** | F2 NotReady for `FLARE_UNREADY_DEAD_CYCLES` ticks (default 6 ≈ 30s) on top of kubelet's 3 failures | same as D1 — **except** a master with no promotable successor, which is KEPT as master (`unhealthyMastersKept`) and only logged CRITICAL | container restart (kubelet liveness, or D6) → re-register | **DONE** |
-| D3 | Repeated resync failure | flared itself | failure streak ≥ `rocksdb-resync-failure-threshold` | flared asks the index to mark it down (`request_down_node`) | human, or restart | **GAP → alert only.** `request_down_node` enqueues to a controller thread that only *flarei* starts, so under this operator the call fails and nothing happens. flared's log said it had self-demoted; corrected to say it could not. `FlareResyncFailing` is now the signal |
-| D4 | Graceful drain, no successor | operator drain guard | Terminating master, no promotable slave | **NOT demoted** — stays master to the end; CRITICAL alert | pod dies; partition is masterless until a copy returns | **DONE** |
-| D5 | Mass failure | operator circuit breaker | ≥ `tripThresholdPercent` of Active nodes dead at once | failover **paused**: no Down transitions | breaker clears when the fraction drops | **DONE** |
-| D6 | Stuck Down | operator, **rc59** | state Down + role Proxy + pod present for `FLARE_DOWN_RESTART_CYCLES` ticks (default 60 ≈ 5 min), every partition has an Active master, breaker not tripped | graceful pod delete (one per tick) | re-registration after restart | **DONE** |
+| D1 | Pod object gone (delete, evict, reschedule) | operator `detectDeadNodesPure` | key absent from F1, role≠Proxy, state∉{Down,Prepare} | demote to Proxy/Down/partition −1, promote an Active slave if one is found | new pod registers (F3) → Prepare → catch up | [EV-06](#ev-06), [EV-07](#ev-07) |
+| D2 | Pod present but not serving (segfault, hang, wedge) | operator, **rc59** | F2 NotReady for `FLARE_UNREADY_DEAD_CYCLES` ticks (default 6 ≈ 30s) on top of kubelet's 3 failures | same as D1 — **except** a master with no promotable successor, which is KEPT as master (`unhealthyMastersKept`) and only logged CRITICAL | container restart (kubelet liveness, or D6) → re-register | [EV-07](#ev-07) |
+| D3 | Repeated resync failure | flared itself | failure streak ≥ `rocksdb-resync-failure-threshold` | flared asks the index to mark it down (`request_down_node`) | human, or restart | [EV-11](#ev-11) — alert only; request_down_node has no flarei controller in flared |
+| D4 | Graceful drain, no successor | operator drain guard | Terminating master, no promotable slave | **NOT demoted** — stays master to the end; CRITICAL alert | pod dies; partition is masterless until a copy returns | [EV-08](#ev-08) |
+| D5 | Mass failure | operator circuit breaker | ≥ `tripThresholdPercent` of Active nodes dead at once | failover **paused**: no Down transitions | breaker clears when the fraction drops | [EV-09](#ev-09) |
+| D6 | Stuck Down | operator, **rc59** | state Down + role Proxy + pod present for `FLARE_DOWN_RESTART_CYCLES` ticks (default 60 ≈ 5 min), every partition has an Active master, breaker not tripped | graceful pod delete (one per tick) | re-registration after restart | [EV-05](#ev-05), [EV-10](#ev-10) |
 
 Invariant worth remembering: **Down never clears itself.** `assignProxiesPure`
 skips Down nodes, and readiness stays failed while the map says Down, so the
@@ -104,8 +131,9 @@ is nobody to promote — while it actively hurts: the partition is declared
 masterless sooner, and the node loses the partition assignment that the
 rejoin path keys off (`old.partition >= 0` in `Reconciler.lean`), so a
 process that is very likely back within seconds takes the fresh-registration
-route instead of the clean rejoin. Keeping it master costs nothing, because
-a NotReady pod is already out of the client LB. This is the same decision
+route instead of the clean rejoin. Keeping its assignment avoids an earlier masterless transition, but
+NotReady only excludes ordinary client endpoints; headless access and stale
+peer topology remain risks (EV-07/14). This is the same decision
 the drain guard makes for a Terminating master
 (`handleDrainWithPromotionSingleKey` demotes ONLY together with a successful
 promotion). A vanished pod (D1) is different — nothing is coming back under
@@ -122,26 +150,27 @@ not. When a container restarts, flared re-registers over TCP (F3) and the
 rejoin branch in `Reconciler.lean` puts the returning node back as
 **Slave/Prepare** with `lastMasterOf` stamped — deliberately never straight
 back to master, because on tmpfs it returns empty. Its partition is then
-masterless, so `promoteMasterlessPartitions` seats a data-bearing copy on
-the next tick (rc55 guards prefer one that actually holds data). This path
+masterless, so `promoteMasterlessPartitions` attempts refill on
+the next tick. The fallback may crown an unproven or partial Prepare copy;
+nonzero key count is not completion evidence (EV-06). This path
 is ~5–10s, faster than D2, and it is why the 2026-09-07 segfault recovered
 even though nothing detected it.
 
 ## 4b. Failure patterns → which detector fires
 
-| Pattern | What K8s does | Signal the operator sees | Path | Latency | Status |
+| Pattern | What K8s does | Signal the operator sees | Path | Latency | Evidence / limitation |
 |---|---|---|---|---|---|
-| Process exits (segfault, panic) and restarts promptly | container restarts, pod keeps its name and IP | `node add` re-registration (F3) | **R1** — no Down at all | ~5–10s | **DONE** |
-| Same, but CrashLoopBackOff keeps it down | backoff grows, pod stays NotReady | Ready=False (F2) | **D2** | kubelet ~15s + operator ~30s ≈ 45s | **DONE** |
-| OOMKill, single | container restarts (exit 137) | as above | **R1** | ~5–10s | **DONE** |
-| OOMKill, repeating | CrashLoopBackOff | Ready=False | **D2** | ~45s | **DONE** |
-| flared hangs but the port still accepts | tcpSocket liveness **passes** | readiness exec times out → Ready=False | **D2** | ~45s (liveness cannot see this) | **DONE** |
-| Pod deleted / evicted / rescheduled | pod object disappears | key absent from the pod list (F1) | **D1** | 1 tick | **DONE** |
-| Graceful delete with preStop | Terminating, still Ready | deletionTimestamp | **D4** drain (demote + promote inside the window) | 1 tick | **DONE** |
-| Worker node unreachable (kubelet dead, VM hung) | node Ready→Unknown after the monitor grace period, then the node controller marks its pods NotReady; eviction adds a deletionTimestamp later (default 5 min) | Ready=False, then Terminating | **D2**, later **D4** | ≈ node grace + 30s (before rc59: only the 5-min eviction) | **DONE** |
-| Node object deleted / VM gone | pods garbage-collected | key absent from the pod list | **D1** | 1 tick | **DONE** |
-| Network partition: pod alive and Ready, operator cannot reach it | nothing — kubelet is local and keeps reporting Ready | none (broadcasts fail, bounded and logged) | **NOT DETECTED** | — | **DONE (alert only)** — `flare_operator_nodes_unreachable`: the operator probes each Ready pod's flared port every ~30s. Never fed into failover, on purpose |
-| flared alive and Ready but serving diverged data | nothing | none | **NOT DETECTED** (G2) | — | **PARTIAL** — count-level only (G2) |
+| Process exits (segfault, panic) and restarts promptly | container restarts, pod keeps its name and IP | `node add` re-registration (F3) | **R1** — no Down at all | ~5–10s | [EV-06](#ev-06), [EV-07](#ev-07) |
+| Same, but CrashLoopBackOff keeps it down | backoff grows, pod stays NotReady | Ready=False (F2) | **D2** | kubelet ~15s + operator ~30s ≈ 45s | [EV-07](#ev-07) |
+| OOMKill, single | container restarts (exit 137) | as above | **R1** | ~5–10s | [EV-06](#ev-06), [EV-07](#ev-07) |
+| OOMKill, repeating | CrashLoopBackOff | Ready=False | **D2** | ~45s | [EV-07](#ev-07) |
+| flared hangs but the port still accepts | tcpSocket liveness **passes** | readiness exec times out → Ready=False | **D2** | ~45s (liveness cannot see this) | [EV-07](#ev-07) |
+| Pod deleted / evicted / rescheduled | pod object disappears | key absent from the pod list (F1) | **D1** | 1 tick | [EV-07](#ev-07) |
+| Graceful delete with preStop | Terminating, still Ready | deletionTimestamp | **D4** drain (demote + promote inside the window) | 1 tick | [EV-08](#ev-08) |
+| Worker node unreachable (kubelet dead, VM hung) | node Ready→Unknown after the monitor grace period, then the node controller marks its pods NotReady; eviction adds a deletionTimestamp later (default 5 min) | Ready=False, then Terminating | **D2**, later **D4** | ≈ node grace + 30s (before rc59: only the 5-min eviction) | [EV-07](#ev-07) |
+| Node object deleted / VM gone | pods garbage-collected | key absent from the pod list | **D1** | 1 tick | [EV-07](#ev-07) |
+| Network partition: pod alive and Ready, operator cannot reach it | nothing — kubelet is local and keeps reporting Ready | operator TCP probe failures | Reachability probe | ~30s sampling | [EV-01](#ev-01), [EV-11](#ev-11) — reachability alert only |
+| flared alive and Ready but serving diverged data | nothing | none | **NOT DETECTED** (G2) | — | [EV-12](#ev-12) — counts only |
 
 Terminating pods are excluded from the D2 population on purpose
 (`!p.terminating` in the pod scan): a draining pod belongs to D4, and on a
@@ -160,53 +189,44 @@ at once". Correlating by node would make the second case identifiable
 
 ## 5. Unsafe Control Actions
 
-### A1a — mark a node Down / fail over
+A1a = Down/failover; A1b = promotion; A1c = topology broadcast;
+A2 = Pod deletion; A4 = Service/endpoint membership. Stable UCA IDs map
+to safety constraints in the evidence register; the listed controls are
+not assertions that the hazards have been eliminated.
 
-| Type | UCA | Hazard | Status |
-|---|---|---|---|
-| Not provided | Node is not serving but stays Active (segfault with the pod present) | H1 (crashed master, no failover), H3, H4 | **was the 2026-09-07 bug**; fixed by D2 |
-| Not provided | Replica silently misses writes but answers probes | H3 | **GAP G1/G2** — no per-write ack, no anti-entropy |
-| Provided | Healthy replica demoted on a false positive | H5 if both replicas are hit | mitigated: kubelet 3 failures + 6 operator ticks; breaker (D5) caps mass demotion |
-| Wrong order | Master demoted before a data-bearing successor exists | H1, H2 | mitigated: drain guard (D4), promotion prefers an Active data-bearing slave (rc55) |
-| Provided | Lone master (no replica) demoted on D2 — strips the partition and breaks the clean rejoin for a process about to return | H1 | mitigated rc59: `unhealthyMastersKept` keeps it, CRITICAL log only |
-| Too long | Node left Down forever with a healthy process | L4 (capacity), H5 if the peer then fails | mitigated: D6 |
-
-### A1b — promote a node to master
-
-| Type | UCA | Hazard | Status |
-|---|---|---|---|
-| Provided | Empty or stale node crowned master | H2 | mitigated rc55: refill vetoes a non-data-bearing `lastMasterOf` holder; P0 fast path is bootstrap-only; rc56 demotes a sitting empty master via the drain path |
-| Provided | Two masters for one partition | H6 | proven bound: `CLE` / `atMostOneMaster` over the commit path; `demoteDuplicateMasters` downstream |
-| Not provided | Masterless partition never refilled | H1 | mitigated: masterless refill each tick; `FlareMasterMissing` alert |
-| Wrong timing | Promote a Prepare node that never synced | H2 | mitigated: vacuous-activation guard (refuse Prepare→Active with no Active master), **and** drain/failover promotion now requires an Active successor (`findActiveSuccessor`) instead of taking the first slave in list order |
-
-### A2 — delete a pod
-
-| Type | UCA | Hazard | Status |
-|---|---|---|---|
-| Provided | Deleting the last data-bearing copy (tmpfs ⇒ erase) | H5, L1 | mitigated: D6 requires every partition to have an Active master, breaker not tripped, one pod per tick |
-| Provided | Deleting a pod mid-reconstruction, looping | L4 | mitigated: Prepare nodes are excluded from dead detection; the Prepare watchdog only warns |
-| Provided | A force delete (`--grace-period=0 --force`) with no data check | H5 | **removed.** The helper and its only (already disabled) caller were dead code one uncommented line from being live; deleted along with the never-called legacy reconcile loop that held them |
-
-### A1c — broadcast topology
-
-| Type | UCA | Hazard | Status |
-|---|---|---|---|
-| Not provided | flared keeps an old map (master unaware it is master) | H1, H2, H4 | mitigated rc54/rc55: merge carve-out, all broadcast waits bounded (an unbounded one froze the loop 22 min) |
-| Too late | Map change not pushed because the version did not advance | H4 | mitigated rc54 (version bump on registration) — the underlying "broadcast only on version change" design remains |
+| ID | Action | Timing | Unsafe control action | Hazards | Controls |
+|---|---|---|---|---|---|
+| UCA-01 | A1a | Not provided | A non-serving node stays Active | H1, H3, H4 | [EV-07](#ev-07), [EV-11](#ev-11) |
+| UCA-02 | A1a | Not provided | A divergent replica remains eligible without repair | H2, H3 | [EV-03](#ev-03), [EV-12](#ev-12), [EV-13](#ev-13), [EV-15](#ev-15) |
+| UCA-03 | A1a | Provided | Healthy copies are demoted on false/correlated feedback | H5 | [EV-07](#ev-07), [EV-09](#ev-09) |
+| UCA-04 | A1a | Wrong order | Master demoted before a usable successor exists | H1, H2, H5 | [EV-06](#ev-06), [EV-08](#ev-08) |
+| UCA-05 | A1a | Provided | Lone unhealthy master loses its assignment without a successor | H1 | [EV-07](#ev-07), [EV-08](#ev-08) |
+| UCA-06 | A1a | Too long | Live node left Down indefinitely | H4, H5 | [EV-10](#ev-10), [EV-11](#ev-11) |
+| UCA-07 | A1b | Provided | Empty or stale node crowned master | H2, H5 | [EV-05](#ev-05), [EV-06](#ev-06) |
+| UCA-08 | A1b | Provided | Multiple processes serve as master | H6 | [EV-01](#ev-01), [EV-02](#ev-02) |
+| UCA-09 | A1b | Not provided | Masterless partition never refilled | H1 | [EV-06](#ev-06), [EV-11](#ev-11) |
+| UCA-10 | A1b | Wrong timing | Replica activated/promoted before completing synchronization | H2, H4 | [EV-04](#ev-04), [EV-06](#ev-06) |
+| UCA-11 | A2 | Provided | Deleting the last usable copy | H5 | [EV-05](#ev-05), [EV-10](#ev-10) |
+| UCA-12 | A2 | Wrong timing | Deleting during reconstruction or repeatedly while terminating | H4, H5 | [EV-05](#ev-05), [EV-07](#ev-07) |
+| UCA-13 | A2 | Provided | Force deletion bypasses evidence and drain conditions | H5 | [EV-05](#ev-05) |
+| UCA-14 | A1c | Not provided | Topology application lost or never retried | H1, H2, H4 | [EV-01](#ev-01), [EV-02](#ev-02) |
+| UCA-15 | A1c | Too late | Delayed topology arrives after newer authority/assignment | H4, H6 | [EV-01](#ev-01) |
+| UCA-16 | A1c | Provided | Deposed leader issues topology commands | H6 | [EV-01](#ev-01) |
+| UCA-17 | A1a | Not provided | Repeated resync failures never remove an unsafe replica | H3, H4 | [EV-11](#ev-11) |
+| UCA-18 | A4 | Provided | Endpoint membership advertises an unserving node | H4 | [EV-14](#ev-14) |
 
 ## 6. Gaps
 
-| ID | Gap | Status | What exists now | What is still missing |
+| ID | Gap | Evidence | What exists now | What is still missing |
 |---|---|---|---|---|
-| G1 | Live replication is op-level proxying with **no per-write acknowledgement**: after 4 retries the master drops the op, and the client has already been told the write succeeded | **PARTIAL** | `flare_node_proxy_write_dropped` counts the drops, names destination and key in the log, and pages via `FlareProxyWriteDropped` | Repair. Nothing reconstructs the replica that missed the writes. The counter is also unlabeled, so it cannot say *which* replica diverged (the log line can) |
-| G2 | No content-level comparison between master and replica | **PARTIAL** | `flare_operator_replica_key_delta` compares `curr_items` on the 5-minute probe and alerts past 0.5% for 30m | Content. Equal counts do not prove equal keys or values; a compensating pair of a missing and an extra key is invisible. Real coverage needs sampled key comparison or checksum ranges |
-| G3 | WAL sync runs **only** at reconstruction and cluster-replication initial transfer — it is not a live replication log, and the master's WAL retains only `walSizeLimitMb` / `walTtlSeconds` | **GAP** | Nothing | Continuous WAL shipping so a replica resumes from its cursor after a blip. This is the root fix for G1 as well, and a large redesign: the sync-write contract, replica reads, cluster replication and migration all assume proxy semantics |
-| G4 | A crashed pod stays in the client LB for the readiness detection window | **PARTIAL** | The window is now explicit and tunable per cluster (`cluster.probes`), and documented as the ejection window it is | A shorter default. Left alone deliberately: tightening costs an exec probe per pod per period and the right trade-off is per-cluster |
-| G5 | Readiness feedback is circular — the probe asks flared for the state the operator gave it | **PARTIAL** | Independent data-level feedback exists where it matters most: `curr_items` probes drive the empty-master guards, the divergence gauge and the Prepare repair (LSN comparison) | A general answer. Readiness still cannot report "flared believes it is fine but is serving the wrong data" |
-| G6 | flared metrics carry no **role** label, so no PromQL query can compare master against replica | **GAP** | The operator computes the comparison itself (G2) | A role label on the pods or on the scraped series, which would also make most per-role dashboards possible. The operator already patches a per-partition Service selector on every failover, so it knows the role; labelling pods would churn on failover |
-| G8 | The readiness probe's limbo clause reports Ready when the node's partition has **no Active master**, so a pod serving nothing stays in the client LB | **GAP (deliberate)** | The clause exists to break a real deadlock: gating readiness there would stop an OrderedReady StatefulSet from ever recreating the peer that must become master | A way to satisfy the StatefulSet without advertising an unserving pod to clients — e.g. splitting the readiness gate from the endpoint membership |
-| G7 | The operator cannot distinguish one dead process from a whole worker node going away | **GAP** | `PodInfo.nodeName` is collected | Correlation by node. Failing over every replica on a lost node one by one is not the same decision as failing over one process, and the breaker is a blunt substitute |
+| G1 | Live replication is op-level proxying with **no per-write acknowledgement**: after 4 retries the master drops the op, and the client has already been told the write succeeded | [EV-03](#ev-03), [EV-13](#ev-13) | Aggregate and per-destination drop counters; Main 4d attempts resync. Chart alerts require deployment routing. | Reliable reconstruction dispatch, persistent repair-pending state and completion evidence (SAF-02/05). |
+| G2 | No content-level comparison between master and replica | [EV-12](#ev-12) | `flare_operator_replica_key_delta` compares `curr_items` on the 5-minute probe and alerts past 0.5% for 30m | Content. Equal counts do not prove equal keys or values; a compensating pair of a missing and an extra key is invisible. Real coverage needs sampled key comparison or checksum ranges |
+| G3 | WAL sync runs **only** at reconstruction and cluster-replication initial transfer — it is not a live replication log, and the master's WAL retains only `walSizeLimitMb` / `walTtlSeconds` | [EV-13](#ev-13) | Nothing | Continuous WAL shipping so a replica resumes from its cursor after a blip. This is the root fix for G1 as well, and a large redesign: the sync-write contract, replica reads, cluster replication and migration all assume proxy semantics |
+| G4 | A crashed pod stays in the client LB for the readiness detection window | [EV-14](#ev-14) | The window is now explicit and tunable per cluster (`cluster.probes`), and documented as the ejection window it is | A shorter default. Left alone deliberately: tightening costs an exec probe per pod per period and the right trade-off is per-cluster |
+| G5 | Readiness feedback is circular — the probe asks flared for the state the operator gave it | [EV-04](#ev-04), [EV-05](#ev-05), [EV-14](#ev-14) | Independent data-level feedback exists where it matters most: `curr_items` probes drive the empty-master guards, the divergence gauge and the Prepare repair (LSN comparison) | A general answer. Readiness still cannot report "flared believes it is fine but is serving the wrong data" |
+| G6 | flared metrics carry no **role** label, so no PromQL query can compare master against replica | [EV-15](#ev-15) | The operator computes the comparison itself (G2) | A role label on the pods or on the scraped series, which would also make most per-role dashboards possible. The operator already patches a per-partition Service selector on every failover, so it knows the role; labelling pods would churn on failover |
+| G8 | The readiness probe's limbo clause reports Ready when the node's partition has **no Active master**, so a pod serving nothing stays in the client LB | [EV-14](#ev-14) | The clause exists to break a real deadlock: gating readiness there would stop an OrderedReady StatefulSet from ever recreating the peer that must become master | A way to satisfy the StatefulSet without advertising an unserving pod to clients — e.g. splitting the readiness gate from the endpoint membership |
+| G7 | The operator cannot distinguish one dead process from a whole worker node going away | [EV-07](#ev-07) | `PodInfo.nodeName` is collected | Correlation by node. Failing over every replica on a lost node one by one is not the same decision as failing over one process, and the breaker is a blunt substitute |
 
 ## 7. Measured baseline (2026-09-07/08, pf-dev, 1 master + 1 slave, 15.85M keys)
 
@@ -221,11 +241,14 @@ divergence rather than disproving it — which is exactly G1/G2.
 
 ## 8. What this document got wrong
 
-Every claim above was re-checked against the code. Four were wrong, in the
-direction that matters — the document credited the system with protection it
-did not have.
+Historical correction log from the earlier audit: six claims overstated
+protection. These resolutions explain changes made then; they are not current
+verification evidence. The new audit additionally found lease-fence bypass,
+undelivered resync transitions, unqualified Prepare activation, unknown-as-zero
+delete input and lost repair-pending state (SAF-01–06). All former DONE rows
+now refer to bounded controls with explicit verification status.
 
-| # | The document said | The code actually did | Resolution |
+| # | The document said | The code actually did | Historical correction (not verification) |
 |---|---|---|---|
 | 1 | A node with repeated resync failures self-demotes to Down (D3) | `request_down_node` enqueues to `thread_type_controller`, started only by *flarei*. Under this operator the enqueue fails and nothing is sent anywhere — while flared logged "self-demoting to state_down", which is worse than silence during an incident | flared now reports that self-demote is unavailable in this process; `FlareResyncFailing` alerts on the condition instead |
 | 2 | `FlareMasterMissing` detects a partition with no master | It compared cluster-wide counts: desired partitions minus active masters. A stale master parked at an out-of-range partition index offsets a genuinely masterless one and the alert stays silent | The operator now counts masterless partitions per index and the alert uses that gauge |

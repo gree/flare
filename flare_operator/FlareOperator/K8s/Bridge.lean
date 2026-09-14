@@ -15,6 +15,8 @@
 import FlareOperator.K8s.FlareCluster
 import FlareOperator.K8s.Retry
 import FlareOperator.Kubectl
+import Lean.Data.Json
+import FlareOperator.StateMachine.ReplicaRepair
 
 namespace FlareOperator.K8s.Bridge
 
@@ -179,6 +181,56 @@ def deletePodGraceful (podName ns : String) : IO (Except String Unit) := do
   match ← kubectl ["delete", "pod", podName, "-n", ns, "--wait=false"] with
   | .error e => return .error e
   | .ok _ => return .ok ()
+
+/-- metadata.uid of a pod, or none if it cannot be read (absent, API error). -/
+def podUid (podName ns : String) : IO (Option String) := do
+  match ← kubectl ["get", "pod", podName, "-n", ns, "-o", "jsonpath={.metadata.uid}"] with
+  | .ok out => let u := out.trim; return (if u.isEmpty then none else some u)
+  | .error _ => return none
+
+/-- The shell command that deletes a pod with the observed UID as an API-side
+    PRECONDITION (DeleteOptions.preconditions.uid), so the apiserver itself
+    rejects the request (409 Conflict) if a pod of the same name now has a
+    different UID. `kubectl delete` cannot send a DeleteOptions body, so this
+    speaks to the API directly with the pod's service-account token. Exposed
+    as a pure string so the E2E harness can run the exact same command inside
+    the operator pod against a replaced pod and prove the refusal. Prints the
+    HTTP status on the last line. -/
+def uidPreconditionDeleteCommand (podName ns uid : String)
+    (apiBase : String := "https://kubernetes.default.svc") : String :=
+  let sa := "/var/run/secrets/kubernetes.io/serviceaccount"
+  let body := s!"\{\"apiVersion\":\"meta.k8s.io/v1\",\"kind\":\"DeleteOptions\",\"preconditions\":\{\"uid\":\"{uid}\"},\"propagationPolicy\":\"Background\"}"
+  -- DEADLINES (review): --connect-timeout bounds the TCP/TLS connect,
+  -- --max-time bounds the whole exchange, so a server that accepts and then
+  -- never answers cannot stall the reconcile (and with it the lease renewal).
+  -- curl's own exit code is printed after the status so the caller can tell
+  -- "timed out" (28) from an HTTP refusal.
+  s!"curl -sS -X DELETE --connect-timeout 3 --max-time 10 --cacert {sa}/ca.crt -H \"Authorization: Bearer $(cat {sa}/token)\" -H 'Content-Type: application/json' -d '{body}' -w '\n%\{http_code}' {apiBase}/api/v1/namespaces/{ns}/pods/{podName}; echo \"\ncurl_exit=$?\""
+
+/-- Delete a pod ONLY IF its UID equals `expectedUid`, enforced by the API
+    server (review item 1: a client-side re-read followed by a name delete
+    still races a same-name replacement). 200/202 = deleted; 409 = the
+    precondition failed, i.e. a different pod now holds the name; 404 =
+    already gone. -/
+def deletePodWithUidPrecondition (podName ns expectedUid : String) : IO (Except String Unit) := do
+  -- Outer wall as well (same policy as the kubectl wrapper): SIGTERM at 20s,
+  -- SIGKILL 5s later, so this call returns within ~25s whatever curl does.
+  -- A timeout or transport failure does NOT mean "not deleted": the API may
+  -- have accepted the delete and only the response was lost. The outcome is
+  -- UNKNOWN; the caller must re-observe the pod before deciding anything.
+  let out ← IO.Process.output { cmd := "timeout", args := #["-k", "5", "20", "sh", "-c", uidPreconditionDeleteCommand podName ns expectedUid] }
+  if out.exitCode == 124 then
+    return .error s!"delete with UID precondition for {podName} hit the wall (20s, +5s kill grace) with no answer from the API: deletion outcome UNKNOWN — re-observe the pod before any retry"
+  let lines := (out.stdout.splitOn "\n").filter (· != "")
+  let curlExit := (lines.find? (·.startsWith "curl_exit=")).map (·.drop "curl_exit=".length) |>.getD "?"
+  let code := ((lines.filter (fun l => !l.startsWith "curl_exit=")).getLast?.getD "").trim
+  if curlExit != "0" then
+    return .error s!"delete with UID precondition for {podName}: transport failure (curl exit {curlExit}: {out.stderr.trim}); deletion outcome UNKNOWN — the API may have accepted it and only the answer was lost; re-observe the pod before any retry"
+  match code with
+  | "200" | "202" => return .ok ()
+  | "409" => return .error s!"apiserver refused: pod {podName} no longer has UID {expectedUid} (precondition failed; a replacement holds the name) — not deleted"
+  | "404" => return .error s!"pod {podName} is already gone"
+  | _ => return .error s!"delete with UID precondition failed (http {code}): {out.stderr.trim}"
 
 /-- Update (or create) a ConfigMap with the current node-map data.
     Used to persist the operator's view of the cluster for observability.
@@ -355,6 +407,40 @@ def patchFlareClusterStatus (crName ns : String) (phase : MigrationPhase)
   let result ← kubectl ["patch", "flarecluster", crName, "-n", ns,
     "--subresource=status", "--type=merge", "-p", patch]
   match result with
+  | .error e => return .error e
+  | .ok _ => return .ok ()
+
+/-- The replica-repair ledger persisted in `status.replicaRepairs` (SC-03 /
+    SAF-05): pending requests AND last-seen drop counters, so an operator
+    restart neither forgets a repair nor re-baselines the counters.
+
+    Three outcomes, kept distinct on purpose (item 4): `.ok none` = the CR
+    has no ledger (a fresh cluster: start with baselines); `.ok (some l)` =
+    restored; `.error` = the API call failed, the reply did not parse, or
+    the stored ledger is corrupt. An error must NOT be treated as absence —
+    starting from an empty ledger over a pending request loses the request
+    and re-baselines the counters, so the caller retries and holds repair
+    actions until a read succeeds. -/
+def readRepairLedger (crName ns : String) : IO (Except String (Option ReplicaRepair.Ledger)) := do
+  match ← kubectl ["get", "flarecluster", crName, "-n", ns, "-o", "json"] with
+  | .error e => return .error s!"ledger read failed: {e}"
+  | .ok out =>
+    match Lean.Json.parse out with
+    | .error e => return .error s!"ledger read: CR JSON did not parse: {e}"
+    | .ok j =>
+      match j.getObjVal? "status" >>= (·.getObjVal? "replicaRepairs") with
+      | .error _ => return .ok none
+      | .ok r =>
+        match ReplicaRepair.Ledger.fromJson? r with
+        | some l => return .ok (some l)
+        | none => return .error "ledger read: status.replicaRepairs is present but does not parse (corrupt); refusing to start from an empty ledger"
+
+/-- Persist the ledger (merge patch on the status subresource; the whole
+    object is rewritten, arrays included). -/
+def writeRepairLedger (crName ns : String) (l : ReplicaRepair.Ledger) : IO (Except String Unit) := do
+  let patch := (Lean.Json.mkObj [("status", Lean.Json.mkObj [("replicaRepairs", l.toJson)])]).compress
+  match ← kubectl ["patch", "flarecluster", crName, "-n", ns,
+      "--subresource=status", "--type=merge", "-p", patch] with
   | .error e => return .error e
   | .ok _ => return .ok ()
 

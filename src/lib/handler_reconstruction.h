@@ -56,6 +56,10 @@ protected:
 	cluster::role				_role;
 	int									_reconstruction_interval;
 	int									_reconstruction_bwlimit;
+	// The id this handler was given by stats::reconstruction_begin(); every
+	// completion notification carries it, so a late notification from an
+	// older handler cannot be attributed to a newer reconstruction.
+	uint64_t						_reconstruction_id;
 
 public:
 	handler_reconstruction(shared_thread t, cluster* cl, storage* st, string node_server_name, int node_server_port, int partition, int partition_size, cluster::role r, int reconstruction_interval, int reconstruction_bwlimit);

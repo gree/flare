@@ -85,6 +85,11 @@ const command_mapping memcached_commands[] = {
 const stat_mapping flared_gauges[] = {
 	{ "node_map_version",   "flared_node_map_version",                 "gauge"   },
 	{ "proxy_write_dropped",     "flare_node_proxy_write_dropped",     "counter" },
+	{ "reconstruction_started",   "flare_node_reconstruction_started_total",   "counter" },
+	{ "reconstruction_completed", "flare_node_reconstruction_completed_total", "counter" },
+	{ "reconstruction_failed",    "flare_node_reconstruction_failed_total",    "counter" },
+	{ "reconstruction_current_id",      "flare_node_reconstruction_current_id",      "gauge" },
+	{ "reconstruction_last_success_id", "flare_node_reconstruction_last_success_id", "gauge" },
 	{ "data_dir_used_bytes",     "flare_node_data_dir_used_bytes",     "gauge"   },
 	{ "data_dir_capacity_bytes", "flare_node_data_dir_capacity_bytes", "gauge"   },
 	{ "total_thread_queue", "flared_thread_queue_total",               "gauge"   },

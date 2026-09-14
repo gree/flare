@@ -28,6 +28,9 @@ import FlareOperator.E2E.Tests.PvcDataSurvival
 import FlareOperator.E2E.Tests.BackupRestore
 import FlareOperator.E2E.Tests.CircuitBreaker
 import FlareOperator.E2E.Tests.OperatorRestart
+import FlareOperator.E2E.Tests.TopologyAuthority
+import FlareOperator.E2E.Tests.ReplicaRepair
+import FlareOperator.E2E.Tests.PrepareEvidence
 import FlareOperator.E2E.Tests.NativeMetrics
 import FlareOperator.E2E.Tests.BlueGreenMigration
 import FlareOperator.E2E.Tests.SnapshotPushSeed
@@ -60,6 +63,9 @@ def main (args : List String) : IO UInt32 :=
     Tests.BackupRestore.suite,
     Tests.CircuitBreaker.suite,
     Tests.OperatorRestart.suite,
+    Tests.TopologyAuthority.suite,
+    Tests.ReplicaRepair.suite,
+    Tests.PrepareEvidence.suite,
     Tests.NativeMetrics.suite,
     Tests.BlueGreenMigration.suite,
     Tests.SnapshotPushSeed.suite

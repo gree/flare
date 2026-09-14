@@ -38,18 +38,22 @@ Rules that exist because breaking them cost us incidents:
    decision belongs in `StateMachine/` where it can be reasoned about.
 2. **Touching promotion, demotion or failover means re-reading the proofs.**
    `StateMachine/GeneralSafety.lean` bounds "at most one master per
-   partition" over the commit path. A change that only ever promotes *fewer*
-   nodes keeps the bound for free; anything else needs the proof re-checked,
-   not just re-run.
-3. **Never promote a node that is not Active.** The partition map lists
-   slaves of every state; a reconstructing one is not a successor. Use
-   `findActiveSuccessor`.
+   partition" over the commit path. This is a property of the committed map,
+   not proof that distributed flared processes cannot serve concurrently as
+   master. Reassess assumptions and production call paths as well as proofs.
+3. **Normal drain/failover promotion requires an Active successor.** Use
+   `findActiveSuccessor`. Emergency masterless refill currently permits a
+   partial Prepare copy to become authoritative to restore availability.
+   That exception can lose data and is tracked separately in SC-06; do not
+   generalize it to ordinary promotion. Active itself needs valid sync evidence.
 4. **Never take a destructive action on feedback you cannot trust.** If the
    operator cannot reach a node, the fault may be the operator's. Alert,
    do not fail over. See [STPA-node-state.md](docs/STPA-node-state.md).
 5. **Deleting a pod deletes data** on a tmpfs cluster. Every pod-delete path
    is gated on every partition having an Active master and the circuit
-   breaker being clear. Keep it that way.
+   breaker being clear. Those gates alone do not prove data preservation:
+   unknown/stale stats and changes to the successor can invalidate them.
+   SAF-04/06 track revalidation before deletion.
 6. **A log must not claim an action the code did not take.** We shipped a
    `self-demoting to state_down` line for a call that could never work; a
    misleading log during an incident is worse than silence.
@@ -75,7 +79,7 @@ deployment repository. The Helm chart takes them as values.
 
 ## Releasing
 
-1. Push to the working branch; wait for **both** CI workflows to go green.
+1. Push to the working branch; wait for build/E2E and safety-evidence CI to go green.
 2. Tag `v0.1.0-rcN` on the green commit. Tagging publishes the chart to
    `ghcr.io/gree/charts` and five images to `ghcr.io/gree`.
 3. Bump the deployment repository's overlay to the new chart version, render
@@ -93,5 +97,31 @@ Docs live in `docs/`. Keep [RUNBOOK.md](docs/RUNBOOK.md) in step with
 alerting: an alert without a runbook section is an alert nobody can act on.
 When an incident teaches something structural, write it into
 [STPA-node-state.md](docs/STPA-node-state.md) rather than a commit message,
-and mark what the code actually does — that document carries a status per
-row for exactly this reason.
+and mark what the code actually does. The evidence register owns control
+status; the STPA status table is generated from it.
+
+## Safety evidence review
+
+Use [SAFETY-TODO.md](docs/SAFETY-TODO.md) for the improvement backlog and full
+workflow. In every relevant PR, link the safety constraint (SC), evidence (EV)
+and task (SAF) IDs. Update the affected register entries with code symbols,
+production call paths, assumptions, residual risks and a new review impact note.
+If none apply, explain why in the PR template; reviewers check for missing coverage.
+
+Reference changes require a review even if they only change comments. Keep the
+inspection commit and verification commit distinct. Mark invalidated evidence
+`stale`; `verified` requires passing evidence for every listed check on a common
+tested revision. Record skipped/failed checks honestly. Never turn a source
+inspection, test name, or alert definition into proof of successful recovery.
+
+```sh
+python3 scripts/check_safety_evidence.py --write
+python3 scripts/check_safety_evidence.py --base <base-commit>
+python3 -m unittest discover -s scripts/tests -p 'test_safety_evidence.py'
+```
+
+The lightweight CI checks files, fields, generated content and review updates.
+It does not run evidence commands or certify their conclusions. A reviewer must
+check that the guard is reached on the live path and that failures or concurrent
+repairs cannot bypass it. Documentation-only edits need these checks, not an
+unrelated full E2E run. Operator runtime changes still need their relevant tests.

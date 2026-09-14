@@ -19,3 +19,7 @@ lean_exe flare_e2e where
 
 lean_exe circuit_breaker_sim where
   root := `FlareOperator.StateMachine.CircuitBreakerSimMain
+
+/-- Executable unit checks for the pure decision code (see UnitTests.lean). -/
+lean_exe flare_unit where
+  root := `FlareOperator.UnitTests

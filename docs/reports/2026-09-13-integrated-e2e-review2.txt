@@ -1,0 +1,25 @@
+# integrated E2E after review round 2 (items 1-4) — topology-authority (4), replica-repair (7 incl. ledger save-failure, corrupt ledger, API-side UID precondition), prepare-evidence (2)
+# tested revision: b739277aa50553bf88336e5642e6b1ab21161a4e
+# host: local kind cluster flare-e2e (single node, arm64); harness operator memory limit 1Gi
+# command: cd flare_operator && .lake/build/bin/flare_e2e --filter topology-authority,replica-repair,prepare-evidence
+# date: 2026-09-13
+
+# === Suite: topology-authority ===
+# === Suite: replica-repair ===
+# === Suite: prepare-evidence ===
+# Tests: 13, Failures: 0
+# RESULT: PASS
+1..13
+ok 1 - flared rejects a topology push carrying a stale version
+ok 2 - control: holding the lease, the stopped pass does broadcast
+ok 3 - lease taken by another identity: the pass fences, the process exits, and the restarted leader re-applies the topology
+ok 4 - lease unreadable: the stopped pass fails closed and does not send
+ok 5 - control: writes to the master replicate to the slave
+ok 6 - cut link: the master drops replica writes and the operator requests a repair
+ok 7 - the repair runs: held as proxy, confirmed, re-seated, reconstructed; keys recovered without another drop
+ok 8 - SAF-05: a drop seen while resync is disabled is held, survives an operator restart, and is repaired once the gate opens
+ok 9 - SAF-05: a ledger save that fails is marked unsaved, retried every pass, lands when allowed, and survives a restart
+ok 10 - SAF-05: a corrupt ledger is held as unavailable, never replaced by an empty one; the drop seen meanwhile is recovered once it is readable
+ok 11 - SAF-06: the delete carries the observed pod UID as an API precondition; a same-name pod with another UID is refused by the apiserver
+ok 12 - the lost-activation condition is staged: the activation is dropped and a reconstruction completed
+ok 13 - the repair re-derives Prepare→Active from completion evidence and names it

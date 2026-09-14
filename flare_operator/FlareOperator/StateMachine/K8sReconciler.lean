@@ -81,7 +81,7 @@ inductive FlareReconcileStep where
 /-- Responses from the K8s API server. -/
 inductive K8sResponse where
   | CRDResponse (crd : Option FlareClusterView)
-  | PodListResponse (pods : List String) (zones : List (String × String)) (terminating : List String) (dataBearing : List String) (unhealthy : List String)
+  | PodListResponse (pods : List String) (zones : List (String × String)) (terminating : List String) (dataBearing : List String) (unhealthy : List String) (repairHeld : List String)
   | PatchResponse (success : Bool)
   | NoResponse
   deriving Repr
@@ -101,14 +101,13 @@ inductive K8sRequest where
 /-- Side effects that the pure FSM wants the IO shell to execute.
     Models all imperative operations from Main.lean reconcileOnce:
     - PatchService: Update K8s Service endpoints (Main.lean:333-338)
-    - BroadcastTopology: Send topology to all nodes (Main.lean:329-331)
+    (Topology is NOT sent from here — see AfterBroadcastTopology.)
     - UpdateConfigMap: Write node map to observability ConfigMap (Main.lean:325-327)
     - SendSighup: Signal nodes to transition replication phase (Main.lean:246-251)
     - PatchCRDStatus: Update migration phase in CRD status field (Main.lean:253-258)
     - Log: Emit diagnostic message -/
 inductive FlareEffect where
   | PatchService (svcName : String) (podName : String)
-  | BroadcastTopology (version : Nat) (nodes : List (String × FlareNode))
   | UpdateConfigMap (data : String)
   | SendSighup (podNames : List String)
   | PatchCRDStatus (phase : MigrationPhase)
@@ -131,6 +130,12 @@ structure FlareReconcileState where
   /-- Node keys of Terminating pods (deletionTimestamp set) this tick. Used to
       exclude a draining node from role re-assignment (it must stay a proxy). -/
   terminatingKeys : List String := []
+  /-- Node keys under replica repair that were committed as Proxy and have not
+      yet reported that they applied it (StateMachine/ReplicaRepair.lean). Held
+      out of role assignment like a draining node: re-seating one before it
+      has seen the Proxy map gives flared a state-only change, which starts
+      no reconstruction (SC-03 / SAF-02). -/
+  repairHeldKeys : List String := []
   /-- Terminating nodes that are still Master/Slave and must be drained this
       tick: promote a replacement + demote them to a live proxy. -/
   drainNodeKeys : List String := []
@@ -1198,7 +1203,7 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
 
   | .AfterListPods =>
     match resp with
-    | .PodListResponse pods zones terminating dataBearing unhealthy =>
+    | .PodListResponse pods zones terminating dataBearing unhealthy repairHeld =>
       -- CRITICAL: Check grace period (Main.lean:355-359)
       if s.graceCycles > 0 then
         -- Still in startup grace period - skip dead node detection AND drain
@@ -1209,6 +1214,7 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
                   unhealthyKeys := unhealthy,
                   deadNodeKeys := [],
                   terminatingKeys := terminating,
+                  repairHeldKeys := repairHeld,
                   drainNodeKeys := [],
                   standbyNodeKeys := match s.cachedCrd with
                     | some crd => resolveStandbyKeys crd.spec.readBalance pods zones
@@ -1227,6 +1233,7 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
                   unhealthyKeys := unhealthy,
                   deadNodeKeys := deadKeys,
                   terminatingKeys := terminating,
+                  repairHeldKeys := repairHeld,
                   drainNodeKeys := drainKeys,
                   standbyNodeKeys := match s.cachedCrd with
                     | some crd => resolveStandbyKeys crd.spec.readBalance pods zones
@@ -1320,7 +1327,9 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
     | some state, some crd =>
       -- Exclude Terminating keys: a just-drained node is Proxy/Active and would
       -- otherwise be re-assigned a role here, undoing the drain (flapping).
-      let stateWithProxies := assignProxiesPure state crd s.livePodKeys s.podZones s.terminatingKeys
+      -- Also exclude nodes held by the replica-repair ledger: they must stay
+      -- Proxy until they have applied that map (see repairHeldKeys).
+      let stateWithProxies := assignProxiesPure state crd s.livePodKeys s.podZones (s.terminatingKeys ++ s.repairHeldKeys)
       -- Refill partitions that lost every master to a total restart (all
       -- replicas re-registered as Slave/Prepare, so no proxy exists for
       -- autoAssign and no Down entry exists for failover).
@@ -1388,13 +1397,28 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
       ({ s with reconcileStep := .Error "missing CRD at AfterHandleReplication" }, none, [])
 
   | .AfterBroadcastTopology =>
-    -- Emit topology broadcast effect (Main.lean:329-331)
+    -- Deliberately emits NOTHING. The step is kept (it carries the measure
+    -- and the proofs' case analysis) but the topology send does not belong
+    -- here, for two reasons found in review:
+    --
+    --   1. AUTHORITY. Effects are executed by the IO shell as the FSM
+    --      produces them, and that executor performed no leadership check.
+    --      A reconcile that began as leader and lost the lease mid-pass
+    --      still pushed topology from here.
+    --   2. CONTENT. `updatedClusterState` is the FSM's own computed map,
+    --      BEFORE commitClusterState merges it with concurrent TCP
+    --      registrations and applies demoteDuplicateMasters. Sending it
+    --      publishes a map that was never committed — including, in
+    --      principle, a duplicate master that the merge would have
+    --      repaired. The at-most-one-master property is proved about the
+    --      COMMITTED map (SC-02); an unmerged outgoing snapshot is outside
+    --      it.
+    --
+    -- The single send now lives after the commit in reconcileOnceFSM, where
+    -- the state is the merged one and the lease is checked first (SC-01).
     match s.updatedClusterState with
-    | some state =>
-      let nodes := state.nodeMap
-      let version := state.nodeMapVersion
-      ({ s with reconcileStep := .AfterPatchService }, none,
-       [.BroadcastTopology version nodes])
+    | some _ =>
+      ({ s with reconcileStep := .AfterPatchService }, none, [])
     | none =>
       ({ s with reconcileStep := .Error "missing cluster state at AfterBroadcastTopology" }, none, [])
 
@@ -1533,12 +1557,12 @@ theorem flareReconcileStep_decreases_measure (resp : K8sResponse)
       cases crd with
       | some c => left; simp [flareReconcileCore, h, flareReconcileMeasure]
       | none => right; simp [flareReconcileCore, h, flareReconcileTerminalBool]
-    | PodListResponse _ _ _ _ _ => right; simp [flareReconcileCore, h, flareReconcileTerminalBool]
+    | PodListResponse _ _ _ _ _ _ => right; simp [flareReconcileCore, h, flareReconcileTerminalBool]
     | PatchResponse _ => right; simp [flareReconcileCore, h, flareReconcileTerminalBool]
     | NoResponse => right; simp [flareReconcileCore, h, flareReconcileTerminalBool]
   | AfterListPods =>
     cases resp with
-    | PodListResponse pods zones terminating dataBearing unhealthy =>
+    | PodListResponse pods zones terminating dataBearing unhealthy repairHeld =>
       simp only [flareReconcileCore, h]
       split <;> (left; simp [flareReconcileMeasure])
     | CRDResponse _ => right; simp [flareReconcileCore, h, flareReconcileTerminalBool]

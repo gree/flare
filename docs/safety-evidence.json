@@ -571,6 +571,14 @@
           "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter topology-authority,replica-repair,prepare-evidence",
           "result": "pass",
           "report": "docs/reports/2026-09-13-integrated-e2e-review4.txt"
+        },
+        {
+          "check": "CHECK-03",
+          "commit": "22fd1483ce76cdacd4ea6954f06dd324ab151219",
+          "date": "2026-09-14",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter replica-repair",
+          "result": "pass",
+          "report": "docs/reports/2026-09-14-replica-repair-final.txt"
         }
       ],
       "tasks": [
@@ -579,9 +587,9 @@
         "SAF-10"
       ],
       "review": {
-        "commit": "33205465691b0bf59dff1ad348ed810a5d20f24f",
-        "date": "2026-09-13",
-        "note": "Main.lean/Bridge.lean changed only in the empty-master delete's failure wording; the ledger path is untouched. Re-run in the round-4 integrated pass. PARTIAL / UNVERIFIED unchanged."
+        "commit": "22fd1483ce76cdacd4ea6954f06dd324ab151219",
+        "date": "2026-09-14",
+        "note": "ReplicaRepair.lean (E2E) changed only in the deadline test's evidence ordering; ledger tests 5-10 untouched and re-run at this revision: pass. PARTIAL / UNVERIFIED unchanged."
       }
     },
     {
@@ -912,6 +920,14 @@
           "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter topology-authority,replica-repair,prepare-evidence",
           "result": "pass",
           "report": "docs/reports/2026-09-13-integrated-e2e-review4.txt"
+        },
+        {
+          "check": "CHECK-05",
+          "commit": "22fd1483ce76cdacd4ea6954f06dd324ab151219",
+          "date": "2026-09-14",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter replica-repair",
+          "result": "pass",
+          "report": "docs/reports/2026-09-14-replica-repair-final.txt"
         }
       ],
       "tasks": [
@@ -920,9 +936,9 @@
         "SAF-08"
       ],
       "review": {
-        "commit": "33205465691b0bf59dff1ad348ed810a5d20f24f",
-        "date": "2026-09-13",
-        "note": "Fourth review (of 48245be) confirmed the round-3 implementation (handler-id binding, snapshot record, bounded delete) and asked for two finishing changes, made here: a timed-out or failed DELETE is reported as an UNKNOWN deletion outcome to be re-observed, not as 'not deleted' (the API may have accepted it and only the reply was lost; 409/404 remain definitive), with the wall stated as 20s + 5s kill grace; and the deadline E2E now proves the black hole accepted the connection (bytes received server-side) and requires curl exit 28, so a refused connection cannot stand in for a stalled one. Reviewer's assessment recorded: round-3 implementation confirmed; test proof strength and log wording corrected; this is not a blanket 'verified'. Stays PARTIAL / UNVERIFIED."
+        "commit": "22fd1483ce76cdacd4ea6954f06dd324ab151219",
+        "date": "2026-09-14",
+        "note": "Harness-only change after round 4: the deadline test read the black hole's accepted-byte count AFTER deleting its pod, so a failed exec into a terminating pod would have read as 0 bytes (a false 'refused' verdict, or a flaky pass). The evidence is now captured before the delete. Operator image unchanged; replica-repair re-run at this revision: pass. Stays PARTIAL / UNVERIFIED; opened as a Draft PR for review."
       }
     },
     {

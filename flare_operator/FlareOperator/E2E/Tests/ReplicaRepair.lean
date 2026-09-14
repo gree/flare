@@ -85,18 +85,30 @@ private def nodeView : IO (List NodeSyncEntry) := do
   let sync ← operatorTcpCmd cfg.debugPod cfg.«namespace» cfg.operatorName cfg.operatorPort "node sync"
   return parseNodeSync sync
 
-/-- (masterPod, masterIp, slavePod, slaveIp) for partition 0, or an error. -/
+/-- (masterPod, masterIp, replicaPod, replicaIp) for partition 0, or an error.
+    The replica is THE OTHER NODE of this 1-partition, 2-node cluster, whatever
+    role the map gives it right now: a repair in flight legitimately cycles it
+    Slave → Proxy (held) → Slave/Prepare → Active, and a test that starts in
+    the instant after a demotion must still find it (CI run 34806038692:
+    tests 3-6 all failed at once with "no P0 slave" because the pass after
+    test 2's request had just demoted it). Every caller uses the pod IP for
+    flared stats, which does not depend on the role. Retried briefly: the map
+    is read over TCP mid-reconcile and can be one pass behind. -/
 private def pair : IO (Except String (String × String × String × String)) := do
-  let entries ← nodeView
-  match findMasterFqdn entries 0 with
-  | none => return .error "no Active P0 master in the operator's map"
-  | some mFqdn =>
-    match entries.find? (fun e => e.role == 1 && e.partition == 0) with
-    | none => return .error "no P0 slave in the operator's map"
-    | some s =>
-      match ← getPodIp (podOf mFqdn) cfg.«namespace», ← getPodIp (podOf s.fqdn) cfg.«namespace» with
-      | some mIp, some sIp => return .ok (podOf mFqdn, mIp, podOf s.fqdn, sIp)
-      | _, _ => return .error "could not resolve master/slave pod IPs"
+  let mut lastErr := ""
+  for _ in [0:6] do
+    let entries ← nodeView
+    match findMasterFqdn entries 0 with
+    | none => lastErr := "no Active P0 master in the operator's map"
+    | some mFqdn =>
+      match entries.find? (fun e => e.fqdn != mFqdn) with
+      | none => lastErr := "no second node (the replica under repair) in the operator's map"
+      | some s =>
+        match ← getPodIp (podOf mFqdn) cfg.«namespace», ← getPodIp (podOf s.fqdn) cfg.«namespace» with
+        | some mIp, some sIp => return .ok (podOf mFqdn, mIp, podOf s.fqdn, sIp)
+        | _, _ => lastErr := "could not resolve master/replica pod IPs"
+    IO.sleep 5000
+  return .error lastErr
 
 /-- One numeric `stats` value straight from a flared pod. -/
 private def flaredStat (targetIp key : String) : IO (Option Nat) := do

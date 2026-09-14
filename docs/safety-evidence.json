@@ -328,6 +328,22 @@
           "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter topology-authority,replica-repair,prepare-evidence",
           "result": "pass",
           "report": "docs/reports/2026-09-13-integrated-e2e-review4.txt"
+        },
+        {
+          "check": "CHECK-01",
+          "commit": "22b4d03a13ac2d5a14aab3aac80f79cd4e2083c2",
+          "date": "2026-09-14",
+          "command": "GitHub Actions e2e-tests.yaml, leg breaker-migration: timeout 4500 .lake/build/bin/flare_e2e --filter circuit-breaker,operator-restart,topology-authority,replica-repair,prepare-evidence,native-metrics,blue-green-migration",
+          "result": "fail",
+          "report": "docs/reports/2026-09-14-ci-e2e-breaker-migration-22b4d03-fail.txt"
+        },
+        {
+          "check": "CHECK-01",
+          "commit": "332cbf947c3e24181075bf1e67ad1e43cb1c0f6a",
+          "date": "2026-09-14",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter topology-authority",
+          "result": "pass",
+          "report": "docs/reports/2026-09-14-topology-authority-final.txt"
         }
       ],
       "tasks": [
@@ -335,9 +351,9 @@
         "SAF-09"
       ],
       "review": {
-        "commit": "33205465691b0bf59dff1ad348ed810a5d20f24f",
-        "date": "2026-09-13",
-        "note": "Re-run in the round-4 integrated pass; untouched by the delete-outcome wording. PARTIAL / UNVERIFIED unchanged."
+        "commit": "332cbf947c3e24181075bf1e67ad1e43cb1c0f6a",
+        "date": "2026-09-14",
+        "note": "First CI run of the branch (PR #143, 22b4d03) failed test 3 of this suite: the harness read the operator log once, 8s after the release, from the current container, and the designed exit had already replaced that container on the CI runner, so the fence line (which the restarted container's own resume version shows had happened) was not seen. Two harness fixes: poll for the fence across the restart (previous container's log once the restart count moves), and keep the foreign lease until the exit is observed — the first cut deleted it as soon as the fence was seen, before the operator's next lease check, which made the process see an absent lease (test 4's branch) instead of a foreign holder and not exit. The intermediate state is recorded in the report, not as a run (it was not committed). Operator image unchanged since 3320546; the test's claims (fence for the held version, no send, exit, re-acquire, re-apply) are unchanged. PARTIAL / UNVERIFIED unchanged; the CI leg is re-running at this revision."
       }
     },
     {
@@ -589,7 +605,7 @@
       "review": {
         "commit": "22fd1483ce76cdacd4ea6954f06dd324ab151219",
         "date": "2026-09-14",
-        "note": "ReplicaRepair.lean (E2E) changed only in the deadline test's evidence ordering; ledger tests 5-10 untouched and re-run at this revision: pass. PARTIAL / UNVERIFIED unchanged."
+        "note": "ReplicaRepair.lean (E2E) changed only in the deadline test's evidence ordering; ledger tests 5-10 untouched and re-run at this revision: pass. PARTIAL / UNVERIFIED unchanged. CI leg breaker-migration at 22b4d03 passed replica-repair (8) and prepare-evidence (2); the leg failed only on topology-authority test 3 (harness, see EV-01)."
       }
     },
     {
@@ -775,7 +791,7 @@
       "review": {
         "commit": "33205465691b0bf59dff1ad348ed810a5d20f24f",
         "date": "2026-09-13",
-        "note": "Main.lean changed only in the empty-master delete's failure wording; the completion judgement is untouched. Re-run in the round-4 integrated pass. PARTIAL / UNVERIFIED unchanged."
+        "note": "Main.lean changed only in the empty-master delete's failure wording; the completion judgement is untouched. Re-run in the round-4 integrated pass. PARTIAL / UNVERIFIED unchanged. CI leg breaker-migration at 22b4d03 passed replica-repair (8) and prepare-evidence (2); the leg failed only on topology-authority test 3 (harness, see EV-01)."
       }
     },
     {
@@ -938,7 +954,7 @@
       "review": {
         "commit": "22fd1483ce76cdacd4ea6954f06dd324ab151219",
         "date": "2026-09-14",
-        "note": "Harness-only change after round 4: the deadline test read the black hole's accepted-byte count AFTER deleting its pod, so a failed exec into a terminating pod would have read as 0 bytes (a false 'refused' verdict, or a flaky pass). The evidence is now captured before the delete. Operator image unchanged; replica-repair re-run at this revision: pass. Stays PARTIAL / UNVERIFIED; opened as a Draft PR for review."
+        "note": "Harness-only change after round 4: the deadline test read the black hole's accepted-byte count AFTER deleting its pod, so a failed exec into a terminating pod would have read as 0 bytes (a false 'refused' verdict, or a flaky pass). The evidence is now captured before the delete. Operator image unchanged; replica-repair re-run at this revision: pass. Stays PARTIAL / UNVERIFIED; opened as a Draft PR for review. CI leg breaker-migration at 22b4d03 passed replica-repair (8) and prepare-evidence (2); the leg failed only on topology-authority test 3 (harness, see EV-01)."
       }
     },
     {

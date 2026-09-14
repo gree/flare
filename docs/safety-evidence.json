@@ -369,6 +369,14 @@
           "command": "GitHub Actions e2e-tests.yaml, leg breaker-migration: timeout 4500 .lake/build/bin/flare_e2e --filter circuit-breaker,operator-restart,topology-authority,replica-repair,prepare-evidence,native-metrics,blue-green-migration",
           "result": "pass",
           "report": "docs/reports/2026-09-14-ci-e2e-breaker-migration-5e80d73-fail-circuit-breaker.txt"
+        },
+        {
+          "check": "CHECK-01",
+          "commit": "c148c6c006fc7c5ae98939acfcc8270ccb48f960",
+          "date": "2026-09-14",
+          "command": "GitHub Actions e2e-tests.yaml (4 legs) on PR #143",
+          "result": "pass",
+          "report": "docs/reports/2026-09-14-ci-e2e-matrix-c148c6c-pass.txt"
         }
       ],
       "tasks": [
@@ -376,9 +384,9 @@
         "SAF-09"
       ],
       "review": {
-        "commit": "5e80d73c09385330c0ee897096bb86d28e32f728",
+        "commit": "c148c6c006fc7c5ae98939acfcc8270ccb48f960",
         "date": "2026-09-14",
-        "note": "topology-authority passed 4/4 in the third CI run and its re-run at this revision (both harness fixes in place). PARTIAL / UNVERIFIED unchanged."
+        "note": "First fully green CI matrix at this revision; topology-authority 4/4 in CI for the third consecutive run since the two harness fixes. PARTIAL / UNVERIFIED."
       }
     },
     {
@@ -636,6 +644,14 @@
           "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter replica-repair",
           "result": "pass",
           "report": "docs/reports/2026-09-14-replica-repair-final2.txt"
+        },
+        {
+          "check": "CHECK-03",
+          "commit": "c148c6c006fc7c5ae98939acfcc8270ccb48f960",
+          "date": "2026-09-14",
+          "command": "GitHub Actions e2e-tests.yaml (4 legs) on PR #143",
+          "result": "pass",
+          "report": "docs/reports/2026-09-14-ci-e2e-matrix-c148c6c-pass.txt"
         }
       ],
       "tasks": [
@@ -644,9 +660,9 @@
         "SAF-10"
       ],
       "review": {
-        "commit": "c825fc05f2dd0a61f8ff738d73690bf453567acf",
+        "commit": "c148c6c006fc7c5ae98939acfcc8270ccb48f960",
         "date": "2026-09-14",
-        "note": "CI re-run at 5e80d73 failed replica-repair tests 3-6 at once with 'no P0 slave in the operator's map': the harness helper `pair` required a node with role Slave, and the operator's pass right after test 2's request had just demoted that node to a live Proxy (held) — the specified first step of the repair, logged as such. The callers use only the replica's pod IP; `pair` now resolves the replica as the other node of the 2-node cluster whatever its current role. Harness only; operator image unchanged since 3320546. Local replica-repair re-run at this revision: pass. PARTIAL / UNVERIFIED unchanged."
+        "note": "First fully green CI matrix at this revision; replica-repair 8/8 with the pair-by-identity harness. Reviewer's assessment recorded (2026-09-14): the round-4 fixes and the read-before-delete reorder are confirmed; the deadline report's account (517 bytes = TLS ClientHello, curl exit 28 at the connect phase under --connect-timeout 3, not the --max-time 10 path) is accurate and kept distinct; this is not a blanket 'verified' — the conditions listed as unit-pinned or unrun stay unverified. PARTIAL / UNVERIFIED."
       }
     },
     {
@@ -822,6 +838,22 @@
           "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter topology-authority,replica-repair,prepare-evidence",
           "result": "pass",
           "report": "docs/reports/2026-09-13-integrated-e2e-review4.txt"
+        },
+        {
+          "check": "CHECK-04",
+          "commit": "c148c6c006fc7c5ae98939acfcc8270ccb48f960",
+          "date": "2026-09-14",
+          "command": "GitHub Actions e2e-tests.yaml (4 legs) on PR #143",
+          "result": "pass",
+          "report": "docs/reports/2026-09-14-ci-e2e-matrix-c148c6c-pass.txt"
+        },
+        {
+          "check": "CHECK-04-cpp",
+          "commit": "c148c6c006fc7c5ae98939acfcc8270ccb48f960",
+          "date": "2026-09-14",
+          "command": "GitHub Actions nix-linux.yml 'Test Legacy Build' — nix flare derivation make check (cutter, includes test_stats_reconstruction)",
+          "result": "pass",
+          "report": "docs/reports/2026-09-14-ci-e2e-matrix-c148c6c-pass.txt"
         }
       ],
       "tasks": [
@@ -830,9 +862,9 @@
         "SAF-08"
       ],
       "review": {
-        "commit": "33205465691b0bf59dff1ad348ed810a5d20f24f",
-        "date": "2026-09-13",
-        "note": "Main.lean changed only in the empty-master delete's failure wording; the completion judgement is untouched. Re-run in the round-4 integrated pass. PARTIAL / UNVERIFIED unchanged. CI leg breaker-migration at 22b4d03 passed replica-repair (8) and prepare-evidence (2); the leg failed only on topology-authority test 3 (harness, see EV-01)."
+        "commit": "c148c6c006fc7c5ae98939acfcc8270ccb48f960",
+        "date": "2026-09-14",
+        "note": "First fully green CI matrix at this revision; prepare-evidence 2/2 in CI, and the cutter completion-record test executed in the nix-linux job (first CI execution recorded for CHECK-04-cpp). PARTIAL / UNVERIFIED."
       }
     },
     {
@@ -1001,6 +1033,14 @@
           "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter replica-repair",
           "result": "pass",
           "report": "docs/reports/2026-09-14-replica-repair-final2.txt"
+        },
+        {
+          "check": "CHECK-05",
+          "commit": "c148c6c006fc7c5ae98939acfcc8270ccb48f960",
+          "date": "2026-09-14",
+          "command": "GitHub Actions e2e-tests.yaml (4 legs) on PR #143",
+          "result": "pass",
+          "report": "docs/reports/2026-09-14-ci-e2e-matrix-c148c6c-pass.txt"
         }
       ],
       "tasks": [
@@ -1009,9 +1049,9 @@
         "SAF-08"
       ],
       "review": {
-        "commit": "c825fc05f2dd0a61f8ff738d73690bf453567acf",
+        "commit": "c148c6c006fc7c5ae98939acfcc8270ccb48f960",
         "date": "2026-09-14",
-        "note": "CI re-run at 5e80d73 failed replica-repair tests 3-6 at once with 'no P0 slave in the operator's map': the harness helper `pair` required a node with role Slave, and the operator's pass right after test 2's request had just demoted that node to a live Proxy (held) — the specified first step of the repair, logged as such. The callers use only the replica's pod IP; `pair` now resolves the replica as the other node of the 2-node cluster whatever its current role. Harness only; operator image unchanged since 3320546. Local replica-repair re-run at this revision: pass. PARTIAL / UNVERIFIED unchanged."
+        "note": "First fully green CI matrix of the branch at this revision (all 4 E2E legs, both builds, evidence job). Reviewer's assessment recorded (2026-09-14): the round-4 fixes and the read-before-delete reorder are confirmed; the deadline report's account (517 bytes = TLS ClientHello, curl exit 28 at the connect phase under --connect-timeout 3, not the --max-time 10 path) is accurate and kept distinct; this is not a blanket 'verified' — the conditions listed as unit-pinned or unrun stay unverified. PARTIAL / UNVERIFIED."
       }
     },
     {
@@ -1300,13 +1340,21 @@
           "command": "GitHub Actions e2e-tests.yaml, leg breaker-migration: timeout 4500 .lake/build/bin/flare_e2e --filter circuit-breaker,operator-restart,topology-authority,replica-repair,prepare-evidence,native-metrics,blue-green-migration (job re-run)",
           "result": "pass",
           "report": "docs/reports/2026-09-14-ci-e2e-breaker-migration-5e80d73-rerun-fail-replica-repair.txt"
+        },
+        {
+          "check": "CHECK-09",
+          "commit": "c148c6c006fc7c5ae98939acfcc8270ccb48f960",
+          "date": "2026-09-14",
+          "command": "GitHub Actions e2e-tests.yaml (4 legs) on PR #143",
+          "result": "pass",
+          "report": "docs/reports/2026-09-14-ci-e2e-matrix-c148c6c-pass.txt"
         }
       ],
       "tasks": [],
       "review": {
-        "commit": "5e80d73c09385330c0ee897096bb86d28e32f728",
+        "commit": "c148c6c006fc7c5ae98939acfcc8270ccb48f960",
         "date": "2026-09-14",
-        "note": "First execution evidence for this control, from the PR #143 CI matrix: the circuit-breaker E2E failed once (no trip in 480s) and passed on re-run at the same revision. Root cause read from the code (see residual_risks): the trip counts newly-dead nodes per tick, not the dead fraction, so it is timing-dependent; this predates the branch (52d409e, 2026-07-03) and the branch's K8sReconciler.lean changes do not touch dead detection or the breaker. The implementation stays PARTIAL and the control UNVERIFIED; one fail and one pass at the same revision is not verification. A follow-up task is proposed, not filed, pending the reviewer's decision on scope."
+        "note": "First execution evidence for this control, from the PR #143 CI matrix: the circuit-breaker E2E failed once (no trip in 480s) and passed on re-run at the same revision. Root cause read from the code (see residual_risks): the trip counts newly-dead nodes per tick, not the dead fraction, so it is timing-dependent; this predates the branch (52d409e, 2026-07-03) and the branch's K8sReconciler.lean changes do not touch dead detection or the breaker. The implementation stays PARTIAL and the control UNVERIFIED; one fail and one pass at the same revision is not verification. A follow-up task is proposed, not filed, pending the reviewer's decision on scope. Fourth run at c148c6c tripped normally (37/37); the finding stands — the trip is timing-dependent by construction, one green run does not remove it. PARTIAL / UNVERIFIED."
       }
     },
     {

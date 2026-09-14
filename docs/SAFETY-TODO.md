@@ -67,7 +67,10 @@ under EV-09: the breaker counts nodes that became dead in one tick, not the
 cluster's dead fraction, so a 4→1 outage whose deaths straddle ticks never trips;
 not changed on this branch), and the replica-repair harness once (its `pair`
 helper required role Slave in the instant after the repair had demoted the
-replica to a held Proxy — fixed in the harness). The evidence register
+replica to a held Proxy — fixed in the harness). The fourth CI run
+(c148c6c) was the branch's first fully green matrix; the register records it
+per control, with the reviewer's assessment of the round-4 fixes, and nothing
+is promoted to `verified` by it. The evidence register
 owns exact implementation and verification state, which stays `unverified`
 until a reviewer signs off; EV-03 is held at `partial` because two scenarios
 are pinned only by `flare_unit` and not staged end to end (a drop in the last

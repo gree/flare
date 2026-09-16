@@ -76,7 +76,10 @@ save-failure test had assumed a runner-side impersonated `can-i` mirrors the
 operator's authorization — it does not: the operator's own status patch stayed
 Forbidden for over two minutes after the grant returned. The test now probes
 from inside the operator pod as its own service account; the two-minute
-window is recorded as a residual risk under EV-03. The PR went back to draft. The evidence register
+window is recorded as a residual risk under EV-03. The PR went back to draft.
+The sixth run (f7d327f, 2026-09-16) was fully green; the two-minute RBAC
+latency did not occur in it, so the in-pod probe remains unexercised under
+that condition (noted in EV-03). Still nothing promoted to `verified`. The evidence register
 owns exact implementation and verification state, which stays `unverified`
 until a reviewer signs off; EV-03 is held at `partial` because two scenarios
 are pinned only by `flare_unit` and not staged end to end (a drop in the last

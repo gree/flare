@@ -79,7 +79,14 @@ from inside the operator pod as its own service account; the two-minute
 window is recorded as a residual risk under EV-03. The PR went back to draft.
 The sixth run (f7d327f, 2026-09-16) was fully green; the two-minute RBAC
 latency did not occur in it, so the in-pod probe remains unexercised under
-that condition (noted in EV-03). Still nothing promoted to `verified`. The evidence register
+that condition (noted in EV-03). Still nothing promoted to `verified`. The
+seventh run (evidence-only commit) failed a general E2E outside the SAF
+controls, partition-reduction test 5: a fixed 15s sleep raced a 14s reconcile
+tick, so the operator had not yet seen the patched CRD when the log was read
+once (the diagnostics confirm neither the 'CRD changed' line nor the warning
+existed yet). The suite now waits for the operator's own evidence; harness
+only (docs/reports/2026-09-16-ci-e2e-replication-685853e-fail.txt). The PR
+went back to draft again. The evidence register
 owns exact implementation and verification state, which stays `unverified`
 until a reviewer signs off; EV-03 is held at `partial` because two scenarios
 are pinned only by `flare_unit` and not staged end to end (a drop in the last

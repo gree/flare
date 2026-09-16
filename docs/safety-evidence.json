@@ -385,6 +385,14 @@
           "command": "GitHub Actions e2e-tests.yaml (4 legs) on PR #143",
           "result": "pass",
           "report": "docs/reports/2026-09-16-ci-e2e-matrix-f7d327f-pass.txt"
+        },
+        {
+          "check": "CHECK-01",
+          "commit": "da840c084fd5f5fc1b0f023b597e6378b8ee3582",
+          "date": "2026-09-16",
+          "command": "GitHub Actions e2e-tests.yaml (4 legs) on PR #143",
+          "result": "pass",
+          "report": "docs/reports/2026-09-16-ci-e2e-matrix-da840c0-pass.txt"
         }
       ],
       "tasks": [
@@ -392,9 +400,9 @@
         "SAF-09"
       ],
       "review": {
-        "commit": "f7d327fd24fc9310c3f2c4f13a8b50ebb1956a14",
+        "commit": "da840c084fd5f5fc1b0f023b597e6378b8ee3582",
         "date": "2026-09-16",
-        "note": "Second fully green CI matrix; topology-authority 4/4 for the fifth consecutive CI execution since the two harness fixes. PARTIAL / UNVERIFIED."
+        "note": "Third fully green CI matrix; topology-authority 4/4 for the sixth consecutive CI execution since the two harness fixes. PARTIAL / UNVERIFIED."
       }
     },
     {
@@ -702,6 +710,14 @@
           "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter replica-repair",
           "result": "pass",
           "report": "docs/reports/2026-09-16-replica-repair-final4.txt"
+        },
+        {
+          "check": "CHECK-03",
+          "commit": "da840c084fd5f5fc1b0f023b597e6378b8ee3582",
+          "date": "2026-09-16",
+          "command": "GitHub Actions e2e-tests.yaml (4 legs) on PR #143",
+          "result": "pass",
+          "report": "docs/reports/2026-09-16-ci-e2e-matrix-da840c0-pass.txt"
         }
       ],
       "tasks": [
@@ -710,9 +726,9 @@
         "SAF-10"
       ],
       "review": {
-        "commit": "27518a648c1601fb3e9dab9a1f3ca0f3399d0d4d",
+        "commit": "da840c084fd5f5fc1b0f023b597e6378b8ee3582",
         "date": "2026-09-16",
-        "note": "CI run 8 (d185039) failed the SAF-05 save-failure test after a 300s wait although the request HAD landed (the next test's precondition found it in status). Cause, and a correction of the round-6 reading: the test keyed on the log line 'ledger persisted on retry', which only the top-of-pass retry emits; Main.persistLedger (the normal per-pass persist, taken whenever the ledger changed) writes the same ledger and clears the dirty flag silently. In runs 5 and 8 the silent path landed the request within a pass or two of the grant's return — the operator log shows a single 'still unsaved' and then none for 20+ ticks — so the earlier statement that the operator's own patch 'stayed Forbidden for >124s' was wrong; the in-pod and impersonated can-i had been right. The only actual latency observation is the local one of 2026-09-13 (~131s, impersonated can-i, single observation). The test now judges landing by the outcome (entry in status), reports which path wrote it, and requires that no new 'still unsaved' follows. Local at this revision: pass, landed 20s via the top-of-pass retry. OBSERVABILITY GAP, not changed here: after 'marked unsaved ... a restart before that lands would lose', a landing via the normal persist is never announced; proposed as a one-line operator follow-up (image change), pending the reviewer's scope decision. PARTIAL / UNVERIFIED unchanged."
+        "note": "Third fully green CI matrix, and the first CI execution of the outcome-based landing check in the SAF-05 save-failure test: the landing is judged by the entry being in status and the writing path is reported, so the silent per-pass persist that produced the run-5 and run-8 failures can no longer be read as a failure. The corrected RBAC account (a single local latency observation; no operator-side latency seen in CI) stands. PARTIAL / UNVERIFIED."
       }
     },
     {
@@ -920,6 +936,22 @@
           "command": "GitHub Actions nix-linux.yml 'Test Legacy Build' — nix flare derivation make check (cutter, includes test_stats_reconstruction)",
           "result": "pass",
           "report": "docs/reports/2026-09-16-ci-e2e-matrix-f7d327f-pass.txt"
+        },
+        {
+          "check": "CHECK-04",
+          "commit": "da840c084fd5f5fc1b0f023b597e6378b8ee3582",
+          "date": "2026-09-16",
+          "command": "GitHub Actions e2e-tests.yaml (4 legs) on PR #143",
+          "result": "pass",
+          "report": "docs/reports/2026-09-16-ci-e2e-matrix-da840c0-pass.txt"
+        },
+        {
+          "check": "CHECK-04-cpp",
+          "commit": "da840c084fd5f5fc1b0f023b597e6378b8ee3582",
+          "date": "2026-09-16",
+          "command": "GitHub Actions nix-linux.yml 'Test Legacy Build' — nix flare derivation make check (cutter, includes test_stats_reconstruction)",
+          "result": "pass",
+          "report": "docs/reports/2026-09-16-ci-e2e-matrix-da840c0-pass.txt"
         }
       ],
       "tasks": [
@@ -928,9 +960,9 @@
         "SAF-08"
       ],
       "review": {
-        "commit": "f7d327fd24fc9310c3f2c4f13a8b50ebb1956a14",
+        "commit": "da840c084fd5f5fc1b0f023b597e6378b8ee3582",
         "date": "2026-09-16",
-        "note": "Second fully green CI matrix; prepare-evidence 2/2 and the cutter completion-record test executed again in nix-linux. PARTIAL / UNVERIFIED."
+        "note": "Third fully green CI matrix; prepare-evidence 2/2 and the cutter completion-record test executed again in nix-linux. PARTIAL / UNVERIFIED."
       }
     },
     {
@@ -1147,6 +1179,14 @@
           "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter replica-repair",
           "result": "pass",
           "report": "docs/reports/2026-09-16-replica-repair-final4.txt"
+        },
+        {
+          "check": "CHECK-05",
+          "commit": "da840c084fd5f5fc1b0f023b597e6378b8ee3582",
+          "date": "2026-09-16",
+          "command": "GitHub Actions e2e-tests.yaml (4 legs) on PR #143",
+          "result": "pass",
+          "report": "docs/reports/2026-09-16-ci-e2e-matrix-da840c0-pass.txt"
         }
       ],
       "tasks": [
@@ -1155,9 +1195,9 @@
         "SAF-08"
       ],
       "review": {
-        "commit": "27518a648c1601fb3e9dab9a1f3ca0f3399d0d4d",
+        "commit": "da840c084fd5f5fc1b0f023b597e6378b8ee3582",
         "date": "2026-09-16",
-        "note": "Same CI run 8 failure and harness fix as EV-03 (shared suite; test 6 cascaded on the precondition). Tests 7-8 passed. PARTIAL / UNVERIFIED unchanged."
+        "note": "Third fully green CI matrix; replica-repair 8/8 including the UID precondition and the bounded delete. PARTIAL / UNVERIFIED."
       }
     },
     {
@@ -1478,13 +1518,21 @@
           "command": "GitHub Actions e2e-tests.yaml, leg breaker-migration: timeout 4500 .lake/build/bin/flare_e2e --filter circuit-breaker,operator-restart,topology-authority,replica-repair,prepare-evidence,native-metrics,blue-green-migration",
           "result": "pass",
           "report": "docs/reports/2026-09-16-ci-e2e-breaker-migration-d185039-fail.txt"
+        },
+        {
+          "check": "CHECK-09",
+          "commit": "da840c084fd5f5fc1b0f023b597e6378b8ee3582",
+          "date": "2026-09-16",
+          "command": "GitHub Actions e2e-tests.yaml (4 legs) on PR #143",
+          "result": "pass",
+          "report": "docs/reports/2026-09-16-ci-e2e-matrix-da840c0-pass.txt"
         }
       ],
       "tasks": [],
       "review": {
-        "commit": "f7d327fd24fc9310c3f2c4f13a8b50ebb1956a14",
+        "commit": "da840c084fd5f5fc1b0f023b597e6378b8ee3582",
         "date": "2026-09-16",
-        "note": "First execution evidence for this control, from the PR #143 CI matrix: the circuit-breaker E2E failed once (no trip in 480s) and passed on re-run at the same revision. Root cause read from the code (see residual_risks): the trip counts newly-dead nodes per tick, not the dead fraction, so it is timing-dependent; this predates the branch (52d409e, 2026-07-03) and the branch's K8sReconciler.lean changes do not touch dead detection or the breaker. The implementation stays PARTIAL and the control UNVERIFIED; one fail and one pass at the same revision is not verification. A follow-up task is proposed, not filed, pending the reviewer's decision on scope. Fourth run at c148c6c tripped normally (37/37); the finding stands — the trip is timing-dependent by construction, one green run does not remove it. PARTIAL / UNVERIFIED. Run 5 at 72e5cca did not trip again: 2 of 6 executions on this PR failed to trip within 480s (the other four tripped in 5-15s), all on an unchanged operator image — consistent with the per-tick counting finding, and enough to call the E2E's proof of SC-09 timing-dependent rather than a flake. PARTIAL / UNVERIFIED. Run 6 at f7d327f tripped after 20s: tally on this PR 5 tripped / 2 did not, unchanged operator image. PARTIAL / UNVERIFIED. Run 8 (d185039) tripped after 10s: 6 tripped / 2 did not on this PR."
+        "note": "First execution evidence for this control, from the PR #143 CI matrix: the circuit-breaker E2E failed once (no trip in 480s) and passed on re-run at the same revision. Root cause read from the code (see residual_risks): the trip counts newly-dead nodes per tick, not the dead fraction, so it is timing-dependent; this predates the branch (52d409e, 2026-07-03) and the branch's K8sReconciler.lean changes do not touch dead detection or the breaker. The implementation stays PARTIAL and the control UNVERIFIED; one fail and one pass at the same revision is not verification. A follow-up task is proposed, not filed, pending the reviewer's decision on scope. Fourth run at c148c6c tripped normally (37/37); the finding stands — the trip is timing-dependent by construction, one green run does not remove it. PARTIAL / UNVERIFIED. Run 5 at 72e5cca did not trip again: 2 of 6 executions on this PR failed to trip within 480s (the other four tripped in 5-15s), all on an unchanged operator image — consistent with the per-tick counting finding, and enough to call the E2E's proof of SC-09 timing-dependent rather than a flake. PARTIAL / UNVERIFIED. Run 6 at f7d327f tripped after 20s: tally on this PR 5 tripped / 2 did not, unchanged operator image. PARTIAL / UNVERIFIED. Tally on this PR after run 9: 7 tripped / 2 did not, unchanged operator image. The finding is unchanged and is now filed as task SAF-11. PARTIAL / UNVERIFIED."
       }
     },
     {

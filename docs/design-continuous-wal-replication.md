@@ -11,6 +11,13 @@ forwarding for low-latency propagation, continuous WAL for gap-free recovery —
 it**. §3 is the common apply rule that decision requires and is the gate for
 SAF-10b.
 
+Revision 3 replaces the time-based tombstone GC with a **cursor-based
+rejection of old forwarded changes** (§3.5), specifies the **serialization
+from decision to apply** (§3.8), and states the **preconditions without which
+the sequence comparison is unsound, with the counterexamples that break it**
+(§3.9). The §9 policy questions are settled; what remains open there is listed
+as such.
+
 ---
 
 ## 0. What this is for
@@ -358,24 +365,35 @@ client conflict results). It is **not** the replication ordering key.
 
 ### 3.5 When delete history can be dropped
 
-A tombstone exists to reject a change that is older than the delete. It can be
-dropped for key `K` with delete sequence `D` only when no such change can
-still arrive:
+A tombstone exists to reject a change older than the delete. Rather than
+bounding how long such a change can still be *in flight* (a wall-clock
+argument, and therefore an assumption about timeouts and queue depths), the
+replica rejects it **by position**:
 
-1. **From the WAL path:** the applied cursor is `≥ D`. The stream is ordered
-   and is only ever fetched forward from the cursor, so no `src_seq < D` can
-   be delivered afterwards. (A rebuild resets the whole DB and is therefore
-   not a counter-example.)
-2. **From the forwarding path:** a forwarded change older than `D` can only be
-   in flight inside the bounded retry window of `queue_proxy_write`
-   (`max_retry` attempts with bounded connect/op timeouts, plus queue wait).
-   Define `T_inflight` as that bound; require `now − walltime(D) > T_inflight`.
+> **Cursor rule.** A change whose `src_seq ≤ applied_cursor` is **refused,
+> whichever path delivered it.** Everything up to the cursor has already been
+> fetched from the WAL and decided; re-deciding it can only undo a later
+> decision.
 
-Both conditions, and a persistent store: tombstones must survive a restart (an
-in-memory, count-bounded cache cannot carry this rule — §1.9). Sweeping is a
-background job over the tombstone space, with its own bound on size so a
-delete-heavy workload cannot grow it without limit; if the bound is hit, the
-safe action is to **rebuild the replica**, never to drop a tombstone early.
+The forwarding path is therefore subject to two tests, in this order: the
+cursor test above, then the per-key test of §3.3. The consequence is that a
+tombstone for key `K` with delete sequence `D` is needed only while
+`applied_cursor < D`, and may be dropped as soon as **`applied_cursor ≥ D`** —
+after that, any older forwarded change is refused by the cursor test alone.
+No wall clock, no `T_inflight`, no assumption about the retry window.
+
+Two further consequences worth stating:
+
+* **Metadata absence becomes safe.** After a snapshot restore the per-key
+  metadata is empty and the cursor is the checkpoint sequence, so every change
+  older than the restore point is refused by the cursor test and every newer
+  one is legitimately applied (see §3.9(D) for what must be cleared).
+* **Tombstone space is bounded by replication lag, not by delete volume.**
+  Only deletes in `(applied_cursor, master_latest]` need one. A replica that
+  follows closely holds almost none; a far-behind replica holds more, which is
+  itself a lag signal. The bound is still enforced (§4, condition 7): if it is
+  exceeded the replica goes to `needs_rebuild` rather than dropping a
+  tombstone early.
 
 ### 3.6 Reserved keys and lineage
 
@@ -402,6 +420,108 @@ decision is required before SAF-10b**:
 Recommendation: **the column family**, because it is atomic with the data
 write, invisible to the tch code path, and gives tombstone GC its own space.
 
+### 3.8 Serialization from decision to apply
+
+The cursor test is only sound if the position cannot move between the test and
+the write. This is part of the rule, not an implementation detail:
+
+* One `_repl_apply_lock` (rwlock) per node.
+  * The **WAL applier** takes it **exclusively** for its whole window:
+    decode → per-key decisions → build the batch → `Write()` (changes, per-key
+    metadata, tombstone updates and the cursor) → tombstone GC.
+  * A **forwarded change** takes it **shared**, plus the existing per-key slot
+    lock for the key it writes. Forwarded changes therefore stay concurrent
+    with one another and serialized per key exactly as today.
+* **The cursor value used by the test is read inside that critical section**,
+  never carried over from earlier in the request. A value read before a queue
+  wait, a retry or a lock acquisition is stale by definition and must not be
+  used.
+* Tombstone GC runs inside the WAL applier's exclusive window, so a tombstone
+  can never be dropped while a forwarded change admitted against an older
+  cursor is still between its decision and its write.
+* The applier's exclusive window is bounded by the per-response batch and byte
+  caps (§4, condition 7); that is what keeps this from becoming a write stall.
+
+What this does **not** provide: cross-key consistency. Forwarded changes are
+applied ahead of the cursor, so the replica's state is "newest per key", not a
+snapshot of any single master point in time. No multi-key atomicity is
+claimed, and none exists today either.
+
+### 3.9 Preconditions, and the counterexamples that break the rule without them
+
+The comparison rule is sound **only** under the four preconditions below. Each
+is stated with the concrete case that breaks it, because each is easy to get
+wrong and none of them shows up in a passing happy-path test.
+
+**(A) `master_id` alone is not a session identity — a generation token is
+required.**
+`regenerate_master_id()` runs at promotion **only when the replication cursor
+exceeds the node's own sequence** (src/lib/cluster.cc:1739). A replica rebuilt
+by snapshot has `cursor == checkpoint_seq`, which is not greater than its own
+latest sequence, so the condition is false and the token is **kept**. Promote
+that replica and two different DBs — the old master and the new one —
+advertise the **same `master_id` over unrelated sequence spaces**. A follower
+that treated `master_id` as the session would compare its cursor, expressed in
+the old master's space, against the new master's numbers: every comparison in
+§3.3 and §3.5 becomes meaningless, and both "skip as superseded" and "apply"
+can be wrong. *Required:* `session = (master_id, generation)` where the
+generation changes on **every** DB replacement and **every** promotion,
+unconditionally, and is compared before any number is.
+
+**(B) The forwarded sequence must be captured inside the key's critical
+section.**
+If the master reads `GetLatestSequenceNumber()` after `storage::set()` has
+returned — which is where forwarding happens today
+(`cluster::post_proxy_write`, src/lib/cluster.cc:1570, called from the op
+after the local write) — another operation on the same key can commit in
+between:
+
+> `set K=v1` commits at sequence 100 and releases the slot lock.
+> `delete K` commits at 101.
+> The set's forwarder now reads "latest = 101" and forwards `K=v1` stamped
+> **101**; the delete's forwarder reads 101 or later and forwards the delete
+> stamped **101** as well.
+> The replica applies whichever arrives first and skips the other as "not
+> greater". If the set wins, **the deleted key is resurrected**, and no later
+> WAL delivery repairs it: the WAL carries 100 and 101, both `≤` the applied
+> 101, so both are skipped.
+
+*Required:* the sequence is read **inside** `storage::set` / `remove` / `incr`
+while the key's slot lock is held, and travels with the entry. Under that rule
+the reported value can still be inflated by other keys' writes, but it is
+**strictly monotonic per key**: the next write to the same key must first take
+that lock, so its own sequence already exceeds anything visible at the earlier
+read.
+
+**(C) Per-entry numbering must count exactly the sequence-consuming
+operations.**
+A batch starting at sequence `S` gives its *i*-th sequence-consuming entry the
+identity `S + i`. If the decoder's count diverges from RocksDB's — an
+operation that consumes a sequence and is not decoded, or a marker that is
+decoded and does not — every change after the divergence in that batch is
+mis-numbered, and a mis-numbered change can beat a genuinely newer one for the
+same key. *Required:* the decoder handles exactly the sequence-consuming
+operations and **asserts** that its count equals the batch's own count; a
+mismatch refuses the batch and raises `needs_rebuild` (fail closed) instead of
+applying it. On the master the observed batch size is 1 (each op issues a
+single `Put`/`Delete`), so this is a guard against future change rather than a
+present defect.
+
+**(D) Inherited metadata must be cleared at a snapshot swap.**
+`swap_in_snapshot` replaces the whole DB directory with the source's
+checkpoint, so **the source's own replication metadata comes with it**: its
+per-key applied sequences (which belong to *its* source's space, if it was
+ever a follower) and its tombstones. Applying §3.3 against inherited values
+compares numbers from two unrelated spaces. *Required:* the swap clears the
+replication-metadata column family and the tombstone space and sets the cursor
+to the checkpoint sequence — after which the absence of per-key metadata is
+safe, because everything older than the restore point is refused by the cursor
+test (§3.5).
+
+No counterexample was found that breaks the rule **with** these four
+preconditions in place. The cases examined are pinned as T4, T5, T7 and
+T10–T13 so the claim is testable rather than asserted.
+
 ---
 
 ## 4. Safety conditions and how each is met
@@ -414,7 +534,8 @@ write, invisible to the tch code path, and gives tombstone GC its own space.
 | 4 | Missing history is never success | `lsn_purged` / `lsn_ahead` / `master_id_mismatch` ⇒ **needs_rebuild**, never "following"; such a node is not a healthy copy for promotion or deletion decisions | T6, T7 |
 | 5 | No gap between initial copy and continuous fetch | Snapshot path only: `create_snapshot_checkpoint` → `swap_in_snapshot` seeds the cursor with the checkpoint sequence; the dump path is not an entry into continuous mode (§1.7) | T1 |
 | 6 | Stale sources and stale sessions are refused | §3.3(a) at connect **and** per change at apply time | T7 |
-| 7 | Bounded resources | Per-response batch/byte caps replacing the unbounded `get_updates_since` vector, existing per-batch ceiling, bandwidth and interval limits, bounded reconnect backoff, tombstone-space bound, and a retention ceiling that prefers rebuilding a slow replica over exhausting the master's disk | T9 |
+| 7 | Bounded resources | Per-response batch/byte caps replacing the unbounded `get_updates_since` vector, existing per-batch ceiling, bandwidth and interval limits, bounded reconnect backoff, tombstone space bounded by replication lag (§3.5) with rebuild on overflow, and a retention ceiling that prefers rebuilding a slow replica over exhausting the master's disk | T9 |
+| 8 | Delete history is dropped only when an older delivery has become impossible, and no decision is made against a stale position | §3.5 cursor rule + §3.8 serialization: the position is read inside the same critical section as the write, and GC runs inside the applier's exclusive window | T11, T12, T13 |
 
 ---
 
@@ -497,6 +618,9 @@ Proposed new UCAs (next free IDs):
 | UCA-25 | A6 | Provided | A replica whose required history is gone is treated as synchronised | H2, H3 | `lsn_purged` ⇒ needs_rebuild |
 | UCA-26 | A1b/A4 | Provided | A lagging or unobservable replica is treated as safe for reads/promotion/deletion | H2, H4, H5 | §5.3 purpose-specific eligibility, Unknown handling |
 | UCA-27 | A5 | Not provided | WAL is retained until the master's disk is exhausted | H1, H5 | Retention ceiling with a safe switch to rebuild |
+| UCA-28 | A6 | Too early | **Delete history is discarded while a change older than the delete can still be applied** | H2, H3 | §3.5: drop a tombstone only once the cursor has passed the delete; a change at or below the cursor is refused whichever path delivered it |
+| UCA-29 | A6 | Wrong order | **The apply decision is made against a position read before a stall, retry or lock wait**, so a change admitted against an old cursor is written after the cursor moved | H2, H3 | §3.8: one critical section for read-decide-write; GC inside the applier's exclusive window |
+| UCA-30 | A6 | Provided | **After a rebuild, changes from the previous session, or metadata inherited from the source, are applied** | H2, H3, H6 | §3.9(A)(D): generation-bearing session compared first; metadata and tombstones cleared at the swap |
 
 Register: relate to **SC-03/EV-03**, **SC-04/EV-04**, **SC-13/EV-13**,
 observation to **EV-11/EV-15**, content verification to **EV-12**, deletion
@@ -504,8 +628,10 @@ impact to **EV-05**. New IDs proposed: **SC-14** (continuous fetch resumes
 without external intervention), **SC-15** (applied position is contiguous and
 crash-atomic, and no other path may advance it), **SC-16** (history loss is an
 explicit rebuild state), **SC-17** (both delivery paths apply through one
-identified-change rule; no path may reorder, duplicate or resurrect), each
-with a matching EV entry. **No existing ID's meaning is changed.**
+identified-change rule; no path may reorder, duplicate or resurrect) and
+**SC-18** (delete history is discarded only when the applied position makes an
+older delivery impossible, and the decision is serialized with the write),
+each with a matching EV entry. **No existing ID's meaning is changed.**
 
 ---
 
@@ -533,6 +659,9 @@ no "absence of a log line" is a pass condition.
 | T8 | Operator restart does not disturb replication progress |
 | T9 | A slow replica stays within the configured resource limits (master memory/disk, bandwidth, tombstone space) |
 | T10 | **Coexistence rule**: forwarded newer value then older WAL delivery leaves the newer value; delete then older put leaves the key deleted; the same change delivered by both paths is applied once (`repl_wal_skipped_superseded` moves); `touch` and `incr` cross-deliveries give the same result as a single application |
+| T11 | **Old put after tombstone GC**: delete a key, let the cursor pass the delete so the tombstone is collected, then deliver a forwarded put older than the delete — it is refused by the cursor test and the key stays deleted (`repl_forward_skipped` moves) |
+| T12 | **Stalled forwarded change across a GC**: hold a forwarded change before its decision, advance the WAL applier and tombstone GC past its sequence, then release it — it is refused, and nothing it carries resurrects or regresses a key. Proves the decision is not made against a position read before the stall (§3.8) |
+| T13 | **Old session after a snapshot restore**: rebuild the replica by snapshot, then deliver a forwarded change from the previous session, and one from the same session older than the restore point — the first is refused on session, the second on the cursor; inherited per-key metadata and tombstones are gone (§3.9(D)) |
 
 Expiry is verified under controlled time conditions.
 
@@ -558,19 +687,27 @@ feature branch, staged commits.
 
 ---
 
-## 9. Open questions for the reviewer
+## 9. Decisions, and what stays open
 
-1. **Metadata home** (§3.7): dedicated column family (recommended), header
-   extension, or parallel namespace?
-2. **`T_inflight`** (§3.5): the bound on how long a forwarded change can still
-   arrive. Derive it from `queue_proxy_write`'s retry and timeout settings and
-   make it configuration, or fix it conservatively?
-3. **Tombstone-space bound reached** (§3.5): rebuild the replica (proposed) or
-   refuse writes? Rebuild loses no data but costs availability of that copy.
-4. **`incr`/`decr` converted to values at the master** (§3.2): this changes
-   what a replica receives on the forwarding path. Acceptable, or must the op
-   form be preserved for compatibility?
-5. **Read eligibility** (§5.3): define the lag bound now, or keep the current
-   read balance until SAF-10c?
-6. **Failover** (§1.3): rebuild survivors for this stage — confirmed; revisit
-   per-source cursors later as a separate task?
+Settled by the reviewer (2026-09-16) and carried into SAF-10b:
+
+1. **Per-key metadata home**: dedicated RocksDB **column family** (§3.7).
+2. **Tombstone lifetime**: **no wall-clock bound** — the cursor rule of §3.5
+   replaces `T_inflight` entirely.
+3. **Tombstone space exceeded**: **rebuild the replica**; never drop early.
+4. **`incr`/`decr`** are converted to values at the master before forwarding.
+5. **Read eligibility**: decided separately in SAF-10c; coexistence alone is
+   never a freshness argument.
+6. **Failover**: survivors rebuild at this stage; per-source cursors stay a
+   separate task.
+
+Open, and to be answered inside SAF-10b rather than before it:
+
+* the exact **generation token** (§3.9(A)): where it is persisted and how it
+  is guaranteed to change on every DB replacement and every promotion — the
+  present `regenerate_master_id` fires only when the cursor exceeds the node's
+  own sequence, so it cannot serve as the token unchanged;
+* whether the applier's exclusive window (§3.8) needs a cap below the response
+  cap to bound write latency on a busy master;
+* how `needs_rebuild` meets the operator's existing demote/hold/reseat path —
+  SAF-10c's subject.

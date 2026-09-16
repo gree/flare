@@ -489,9 +489,10 @@
       "residual_risks": [
         "A repair rebuilds the whole partition; there is no per-key repair.",
         "Drops attributed after the reseat are requeued on completion; a drop in the LAST stretch of a live reconstruction is pinned by flare_unit, not staged end to end (a tiny dataset reconstructs within one pass).",
-        "A write that keeps failing until a restart loses the unsaved delta; the window is one pass.",
         "The completion record is read over the stats channel; an unreadable record holds the entry (fail closed) rather than completing it.",
-        "A destination that became a MASTER while under repair is VOIDED, not repaired."
+        "A destination that became a MASTER while under repair is VOIDED, not repaired.",
+        "A write that keeps failing until a restart loses the unsaved delta; the window is one pass of retries — and, after an RBAC revoke/restore, the ~2 minutes the restore takes to become effective for the operator (see the RBAC entry).",
+        "Restoring a revoked RBAC grant takes about two minutes to become effective for the operator's own service account (~131s local, >124s CI, mechanism on the token path not identified), while an impersonated `can-i` from outside flips at once; the operator retries every pass so this is latency, not loss, but any unsaved ledger delta is exposed to a restart for that whole window."
       ],
       "code": [
         {
@@ -652,6 +653,22 @@
           "command": "GitHub Actions e2e-tests.yaml (4 legs) on PR #143",
           "result": "pass",
           "report": "docs/reports/2026-09-14-ci-e2e-matrix-c148c6c-pass.txt"
+        },
+        {
+          "check": "CHECK-03",
+          "commit": "72e5ccaa48a6816d4825a8ab284d7aa7ae52bf12",
+          "date": "2026-09-14",
+          "command": "GitHub Actions e2e-tests.yaml, leg breaker-migration: timeout 4500 .lake/build/bin/flare_e2e --filter circuit-breaker,operator-restart,topology-authority,replica-repair,prepare-evidence,native-metrics,blue-green-migration",
+          "result": "fail",
+          "report": "docs/reports/2026-09-14-ci-e2e-breaker-migration-72e5cca-fail.txt"
+        },
+        {
+          "check": "CHECK-03",
+          "commit": "fab78d7e7d6896c2d40201583c481feca525c600",
+          "date": "2026-09-14",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter replica-repair",
+          "result": "pass",
+          "report": "docs/reports/2026-09-14-replica-repair-final3.txt"
         }
       ],
       "tasks": [
@@ -660,9 +677,9 @@
         "SAF-10"
       ],
       "review": {
-        "commit": "c148c6c006fc7c5ae98939acfcc8270ccb48f960",
+        "commit": "fab78d7e7d6896c2d40201583c481feca525c600",
         "date": "2026-09-14",
-        "note": "First fully green CI matrix at this revision; replica-repair 8/8 with the pair-by-identity harness. Reviewer's assessment recorded (2026-09-14): the round-4 fixes and the read-before-delete reorder are confirmed; the deadline report's account (517 bytes = TLS ClientHello, curl exit 28 at the connect phase under --connect-timeout 3, not the --max-time 10 path) is accurate and kept distinct; this is not a blanket 'verified' — the conditions listed as unit-pinned or unrun stay unverified. PARTIAL / UNVERIFIED."
+        "note": "CI run 5 (72e5cca, docs-only push, operator image unchanged since 3320546) failed the SAF-05 save-failure test on a harness assumption: a runner-side `kubectl auth can-i --as=<operator SA>` said 'yes' the instant the grant was restored, while the operator's own status patch stayed Forbidden for more than the 120s the test then allowed (>124s in CI; ~131s measured locally on the can-i itself earlier). The impersonated check is not the operator's authorization path. The test now probes the permission from inside the operator pod as its own service account and prints the propagation and landing times; at this revision locally: effective after 0s, landed 20s later, suite pass. The operator's behaviour in the failed run was the specified one (unsaved, retried every pass, still denied). Harness only. PARTIAL / UNVERIFIED unchanged. Caveat: in that local run the restore was effective for the operator after 0s, so the delayed condition was not exercised; the CI run at this revision is the first test of the in-pod probe under the ~2-minute latency."
       }
     },
     {
@@ -1041,6 +1058,22 @@
           "command": "GitHub Actions e2e-tests.yaml (4 legs) on PR #143",
           "result": "pass",
           "report": "docs/reports/2026-09-14-ci-e2e-matrix-c148c6c-pass.txt"
+        },
+        {
+          "check": "CHECK-05",
+          "commit": "72e5ccaa48a6816d4825a8ab284d7aa7ae52bf12",
+          "date": "2026-09-14",
+          "command": "GitHub Actions e2e-tests.yaml, leg breaker-migration: timeout 4500 .lake/build/bin/flare_e2e --filter circuit-breaker,operator-restart,topology-authority,replica-repair,prepare-evidence,native-metrics,blue-green-migration",
+          "result": "fail",
+          "report": "docs/reports/2026-09-14-ci-e2e-breaker-migration-72e5cca-fail.txt"
+        },
+        {
+          "check": "CHECK-05",
+          "commit": "fab78d7e7d6896c2d40201583c481feca525c600",
+          "date": "2026-09-14",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter replica-repair",
+          "result": "pass",
+          "report": "docs/reports/2026-09-14-replica-repair-final3.txt"
         }
       ],
       "tasks": [
@@ -1049,9 +1082,9 @@
         "SAF-08"
       ],
       "review": {
-        "commit": "c148c6c006fc7c5ae98939acfcc8270ccb48f960",
+        "commit": "fab78d7e7d6896c2d40201583c481feca525c600",
         "date": "2026-09-14",
-        "note": "First fully green CI matrix of the branch at this revision (all 4 E2E legs, both builds, evidence job). Reviewer's assessment recorded (2026-09-14): the round-4 fixes and the read-before-delete reorder are confirmed; the deadline report's account (517 bytes = TLS ClientHello, curl exit 28 at the connect phase under --connect-timeout 3, not the --max-time 10 path) is accurate and kept distinct; this is not a blanket 'verified' — the conditions listed as unit-pinned or unrun stay unverified. PARTIAL / UNVERIFIED."
+        "note": "Same CI run 5 failure and harness fix as EV-03 (replica-repair suite shared); tests 7-8 (UID precondition, deadline) passed in that run. PARTIAL / UNVERIFIED unchanged."
       }
     },
     {
@@ -1348,13 +1381,21 @@
           "command": "GitHub Actions e2e-tests.yaml (4 legs) on PR #143",
           "result": "pass",
           "report": "docs/reports/2026-09-14-ci-e2e-matrix-c148c6c-pass.txt"
+        },
+        {
+          "check": "CHECK-09",
+          "commit": "72e5ccaa48a6816d4825a8ab284d7aa7ae52bf12",
+          "date": "2026-09-14",
+          "command": "GitHub Actions e2e-tests.yaml, leg breaker-migration: timeout 4500 .lake/build/bin/flare_e2e --filter circuit-breaker,operator-restart,topology-authority,replica-repair,prepare-evidence,native-metrics,blue-green-migration",
+          "result": "fail",
+          "report": "docs/reports/2026-09-14-ci-e2e-breaker-migration-72e5cca-fail.txt"
         }
       ],
       "tasks": [],
       "review": {
-        "commit": "c148c6c006fc7c5ae98939acfcc8270ccb48f960",
+        "commit": "72e5ccaa48a6816d4825a8ab284d7aa7ae52bf12",
         "date": "2026-09-14",
-        "note": "First execution evidence for this control, from the PR #143 CI matrix: the circuit-breaker E2E failed once (no trip in 480s) and passed on re-run at the same revision. Root cause read from the code (see residual_risks): the trip counts newly-dead nodes per tick, not the dead fraction, so it is timing-dependent; this predates the branch (52d409e, 2026-07-03) and the branch's K8sReconciler.lean changes do not touch dead detection or the breaker. The implementation stays PARTIAL and the control UNVERIFIED; one fail and one pass at the same revision is not verification. A follow-up task is proposed, not filed, pending the reviewer's decision on scope. Fourth run at c148c6c tripped normally (37/37); the finding stands — the trip is timing-dependent by construction, one green run does not remove it. PARTIAL / UNVERIFIED."
+        "note": "First execution evidence for this control, from the PR #143 CI matrix: the circuit-breaker E2E failed once (no trip in 480s) and passed on re-run at the same revision. Root cause read from the code (see residual_risks): the trip counts newly-dead nodes per tick, not the dead fraction, so it is timing-dependent; this predates the branch (52d409e, 2026-07-03) and the branch's K8sReconciler.lean changes do not touch dead detection or the breaker. The implementation stays PARTIAL and the control UNVERIFIED; one fail and one pass at the same revision is not verification. A follow-up task is proposed, not filed, pending the reviewer's decision on scope. Fourth run at c148c6c tripped normally (37/37); the finding stands — the trip is timing-dependent by construction, one green run does not remove it. PARTIAL / UNVERIFIED. Run 5 at 72e5cca did not trip again: 2 of 6 executions on this PR failed to trip within 480s (the other four tripped in 5-15s), all on an unchanged operator image — consistent with the per-tick counting finding, and enough to call the E2E's proof of SC-09 timing-dependent rather than a flake. PARTIAL / UNVERIFIED."
       }
     },
     {

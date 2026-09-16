@@ -70,7 +70,13 @@ helper required role Slave in the instant after the repair had demoted the
 replica to a held Proxy — fixed in the harness). The fourth CI run
 (c148c6c) was the branch's first fully green matrix; the register records it
 per control, with the reviewer's assessment of the round-4 fixes, and nothing
-is promoted to `verified` by it. The evidence register
+is promoted to `verified` by it. The fifth run (docs-only) failed again: the
+breaker did not trip a second time (2 of 6 executions), and the SAF-05
+save-failure test had assumed a runner-side impersonated `can-i` mirrors the
+operator's authorization — it does not: the operator's own status patch stayed
+Forbidden for over two minutes after the grant returned. The test now probes
+from inside the operator pod as its own service account; the two-minute
+window is recorded as a residual risk under EV-03. The PR went back to draft. The evidence register
 owns exact implementation and verification state, which stays `unverified`
 until a reviewer signs off; EV-03 is held at `partial` because two scenarios
 are pinned only by `flare_unit` and not staged end to end (a drop in the last

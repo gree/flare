@@ -28,7 +28,8 @@
        operator with the gate open repairs it without another drop;
     5. SAF-05 (ledger persistence): with the operator's permission to write
        flareclusters/status revoked, a new request is marked UNSAVED, retried
-       every pass, lands once the permission returns, and survives a restart;
+       every pass, lands once the permission is effective FOR THE OPERATOR
+       (probed from inside its pod, as its own SA), and survives a restart;
     6. SAF-05 (ledger read failure): a CORRUPT ledger in status is reported
        unavailable — the operator never replaces it with an empty one — no
        drop is accounted meanwhile, and once the ledger is repaired the drop
@@ -510,25 +511,39 @@ def suite : TestSuite := {
             if !retried then restoreStatusWrite; return .fail "no retry of the unsaved ledger was logged on a later pass"
             restoreStatusWrite
             IO.eprintln "# fault cleared: status write allowed again"
-            -- The apiserver caches the prior DENY, so restoring the grant can
-            -- take a couple of minutes to take effect (observed ~131s on this
-            -- loaded kind host). That is the environment, not the operator, so
-            -- wait for the permission to be REAL before timing the retry —
-            -- otherwise the test measures the authorization cache. The operator
-            -- keeps the ledger dirty and retries every pass meanwhile.
-            let sa := s!"system:serviceaccount:{cfg.«namespace»}:flare-operator"
-            let allowed ← waitForCondition "operator SA may patch flareclusters/status again" 300 do
-              match ← kubectl ["auth", "can-i", "patch", "flareclusters/status", "-n", cfg.«namespace», s!"--as={sa}"] with
+            -- Restoring the grant takes effect for the OPERATOR only after a
+            -- delay of about two minutes (observed ~131s locally; >124s in CI
+            -- run 34818137311). A runner-side `kubectl auth can-i --as=<SA>`
+            -- is NOT a proxy for that: in that CI run it said "yes" at once
+            -- while the operator's own patch stayed Forbidden for the whole
+            -- 120s window, so the previous version of this step timed the
+            -- environment's latency and blamed the operator. Probe the
+            -- permission the way the operator exercises it — from inside its
+            -- pod, as its own service account, over its own token and CA —
+            -- and only then time the retry. The operator keeps the ledger
+            -- dirty and retries every pass meanwhile (asserted above).
+            let ops ← getPodNames s!"app={cfg.operatorName}" cfg.«namespace»
+            let opPod := ops.head?.getD ""
+            let tRestore ← IO.monoMsNow
+            let allowed ← waitForCondition "the operator's OWN service account may patch flareclusters/status again (probed from inside its pod)" 300 do
+              match ← Bridge.execInPod opPod cfg.«namespace» ["kubectl", "auth", "can-i", "patch", "flareclusters/status", "-n", cfg.«namespace»] with
               | .ok o => return (o.trim == "yes")
               | .error _ => return false
+            let propagation := ((← IO.monoMsNow) - tRestore) / 1000
+            IO.eprintln s!"# RBAC restore became effective for the operator's SA after {propagation}s"
             if !allowed then
               diagnostics mIp sIp
-              return .fail "RBAC restore did not propagate to the operator SA within 300s (apiserver authorization cache)"
-            let landed ← waitForCondition "the unsaved ledger lands once the write is allowed" 120 do
+              return .fail "RBAC restore did not become effective for the operator's own service account within 300s"
+            -- Now the write is possible for the operator. Landing should follow
+            -- within a pass or two; the budget is generous and the elapsed time
+            -- is printed so a slow landing is visible, not hidden.
+            let tAllowed ← IO.monoMsNow
+            let landed ← waitForCondition "the unsaved ledger lands once the write is allowed" 300 do
               return containsSubstr (← opLog) "ledger persisted on retry" && !(← ledgerDests).isEmpty
+            IO.eprintln s!"# unsaved ledger landed {((← IO.monoMsNow) - tAllowed) / 1000}s after the permission became effective for the operator"
             if !landed then
               diagnostics mIp sIp
-              return .fail "the unsaved ledger never landed after the permission actually propagated"
+              return .fail "the unsaved ledger never landed after the permission became effective for the operator's own service account"
             -- Survives a restart: the entry must come back from status.
             if !(← restartOperator) then return .fail "operator restart did not complete"
             let restored ← waitForCondition "restarted operator restores the HELD request from status" 120 do

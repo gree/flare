@@ -23,7 +23,12 @@ All tasks below are open; record completion with evidence IDs and a PR reference
 | SAF-07 | Before merge | Align documentation with actual guarantees: committed-map uniqueness is not distributed writer fencing; masterless refill can deliberately promote partial Prepare data. State the loss/availability tradeoff and residual risks. Re-audit all old DONE claims. | SC-01, SC-02, SC-04, SC-06 / EV-01, EV-02, EV-04, EV-06 | Final review after SAF-01–06 |
 | SAF-08 | Next stage | Type Pod observations, including identity, readiness, data knowledge and observation time; move repair decisions into pure functions. Unknown must not become healthy or empty. | SC-05, SC-07 / EV-05, EV-07 | SAF-03–06 |
 | SAF-09 | Next stage | Separate desired topology from per-node applied generation. Retry failed application and expose lag; specify delayed command handling and verify reconnect convergence. | SC-01, SC-02 / EV-01, EV-02 | SAF-01 |
-| SAF-10 | Separate design | Compare content anti-entropy, master LSN on proxied writes and continuous WAL shipping by guarantees, compatibility and operating cost. Include write acknowledgements, replica reads and cross-cluster migration. | SC-03, SC-12, SC-13 / EV-03, EV-12, EV-13 | No dependency for the design |
+| SAF-10 | Separate design | Parent task: continuous WAL replication for the RocksDB backend, so a replica that lost connectivity catches up automatically and without gaps while the master survives. Decomposed into SAF-10a..d below. Guarantees excluded up front: acknowledged-write survival against master data loss, synchronous ACK, cross-partition placement, Tokyo Cabinet. | SC-03, SC-04, SC-13 / EV-03, EV-04, EV-13 (+ proposed SC-14..16) | No dependency for the design |
+| SAF-10a | Separate design | Audit the existing recovery code with call paths and produce the continuous-replication design: replication path choice (WAL-only for WAL-mode replicas vs. coexistence with op-level proxy), guarantee scope, open hazards. Review gate before any implementation. | SC-13 / EV-13 | None |
+| SAF-10b | Next stage | flared: continuous fetch/apply — follow mode with bounded responses, contiguous cursor advance, crash-atomic position, self-driven reconnect that needs no new writes, session/lineage validation at apply time, explicit needs-rebuild on lost history, resource ceilings. | SC-03, SC-13 / EV-03, EV-13 (+ SC-14..16) | SAF-10a |
+| SAF-10c | Next stage | Operator interface: source/generation, contiguous applied position, master position with observation time, stream state, last progress, reason codes; purpose-specific eligibility for reads, promotion and copy deletion with Unknown handling; suppress the replica-repair ledger for WAL-mode nodes so only one rebuild runs. | SC-04, SC-05 / EV-04, EV-05, EV-11, EV-15 | SAF-10b |
+| SAF-10d | Next stage | Acceptance tests on RocksDB, inspecting the replica directly (never a proxied read): snapshot-to-continuous hand-off, link cut with create/update/delete, catch-up with no further writes, mid-batch disconnect and crash at an apply boundary, repeated cuts, retention overrun, stale source refusal, operator restart, resource limits under a slow replica. | SC-03, SC-04, SC-13 / EV-03, EV-04, EV-12, EV-13 | SAF-10b, SAF-10c |
+| SAF-11 | Next stage | Circuit breaker counts the nodes that became dead in ONE tick against the whole map, not the cluster's dead fraction (`detectDeadNodesPure` excludes Down and Prepare), so a majority outage whose pod deaths straddle 5s ticks never trips and is handled as serial failover. Found by CI on the SAF-01..07 branch (2 of 8 executions did not trip). Decide the intended semantics, then change the count or the claim. | SC-09 / EV-09 | None |
 
 **Status (this branch).** SAF-01 through SAF-07 are implemented with tests on
 this branch. A review of the first cut (HEAD ffa2a05) reopened SAF-02 to
@@ -101,7 +106,10 @@ are pinned only by `flare_unit` and not staged end to end (a drop in the last
 stretch of a reconstruction; a change interposed between the delete's
 observation and the delete). SAF-07 is the "Guarantees, and what they are
 not" section of the [README](../README.md). SAF-08 through SAF-10 remain out
-of scope. Re-audit of older DONE claims lives in
+of scope; SAF-10 is now decomposed (SAF-10a..d) and its design stage is
+[design-continuous-wal-replication.md](design-continuous-wal-replication.md),
+which is a DRAFT for review — audit and design only, no implementation, and
+no register entry is promoted by it. Re-audit of older DONE claims lives in
 [STPA-node-state.md](STPA-node-state.md#8-what-this-document-got-wrong).
 
 ## Evidence workflow

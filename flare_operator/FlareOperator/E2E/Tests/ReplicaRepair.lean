@@ -29,7 +29,9 @@
     5. SAF-05 (ledger persistence): with the operator's permission to write
        flareclusters/status revoked, a new request is marked UNSAVED, retried
        every pass, lands once the permission is effective FOR THE OPERATOR
-       (probed from inside its pod, as its own SA), and survives a restart;
+       (probed from inside its pod, as its own SA; landing judged by the
+       entry being in status, whichever persist path wrote it), and survives
+       a restart;
     6. SAF-05 (ledger read failure): a CORRUPT ledger in status is reported
        unavailable — the operator never replaces it with an empty one — no
        drop is accounted meanwhile, and once the ledger is repaired the drop
@@ -534,16 +536,38 @@ def suite : TestSuite := {
             if !allowed then
               diagnostics mIp sIp
               return .fail "RBAC restore did not become effective for the operator's own service account within 300s"
-            -- Now the write is possible for the operator. Landing should follow
-            -- within a pass or two; the budget is generous and the elapsed time
-            -- is printed so a slow landing is visible, not hidden.
+            -- Now the write is possible for the operator. The evidence that
+            -- the unsaved request LANDED is the OUTCOME — status holds the
+            -- entry — not a particular log line: two paths can write it. The
+            -- top-of-pass retry logs "ledger persisted on retry"; the normal
+            -- per-pass persist (Main.persistLedger, taken whenever the ledger
+            -- changed, e.g. a counter observation) writes the same ledger and
+            -- clears the dirty flag SILENTLY. CI runs 34818137311 and
+            -- 35091218808 landed by the silent path within a pass or two and
+            -- this step, then keyed on the retry line, waited 120s/300s for
+            -- a line that never came while the entry was already in status —
+            -- and the earlier reading of those runs as "~2 minutes of RBAC
+            -- latency for the operator" was wrong. That the operator does not
+            -- announce a landing that follows "marked unsaved ... a restart
+            -- would lose" is an observability gap recorded under EV-03.
             let tAllowed ← IO.monoMsNow
-            let landed ← waitForCondition "the unsaved ledger lands once the write is allowed" 300 do
-              return containsSubstr (← opLog) "ledger persisted on retry" && !(← ledgerDests).isEmpty
-            IO.eprintln s!"# unsaved ledger landed {((← IO.monoMsNow) - tAllowed) / 1000}s after the permission became effective for the operator"
+            let landed ← waitForCondition "the unsaved ledger lands once the write is allowed (entry present in status)" 300 do
+              return !(← ledgerDests).isEmpty
+            let landMs := (← IO.monoMsNow) - tAllowed
+            let viaRetry := containsSubstr (← opLog 2000) "ledger persisted on retry"
+            IO.eprintln s!"# unsaved ledger landed {landMs / 1000}s after the permission became effective for the operator (via {if viaRetry then "the top-of-pass retry" else "the silent per-pass persist"})"
             if !landed then
               diagnostics mIp sIp
               return .fail "the unsaved ledger never landed after the permission became effective for the operator's own service account"
+            -- And the operator must have stopped calling it unsaved: a landed
+            -- ledger that keeps being retried would mean the dirty flag was
+            -- not cleared. One probe interval later, no NEW "still unsaved".
+            let stillUnsaved (log : String) : Nat := ((log.splitOn "still unsaved").length) - 1
+            let n0 := stillUnsaved (← opLog 2000)
+            IO.sleep 25000
+            let n1 := stillUnsaved (← opLog 2000)
+            if n1 > n0 then
+              return .fail s!"the ledger landed in status but the operator kept reporting it unsaved ({n0} → {n1} lines): the dirty flag was not cleared by the write that landed it"
             -- Survives a restart: the entry must come back from status.
             if !(← restartOperator) then return .fail "operator restart did not complete"
             let restored ← waitForCondition "restarted operator restores the HELD request from status" 120 do

@@ -18,6 +18,14 @@ the sequence comparison is unsound, with the counterexamples that break it**
 (§3.9). The §9 policy questions are settled; what remains open there is listed
 as such.
 
+Revision 4 carries the reviewer's implementation conditions into the design:
+two distinct generations (§3.1), the capture rule extended to **every** write
+path with bulk operations handled by an epoch switch (§3.9(B)), the
+serialization requirements that go beyond the atomic write (§3.8), the read-set
+and repair-ownership corrections (§5.3, §5.4), and corrected constraint
+numbering (§6). It is **not** an approval that the preconditions have been
+shown safe; they are implementation conditions to be met and tested.
+
 ---
 
 ## 0. What this is for
@@ -262,39 +270,54 @@ one apply rule (§3).** SAF-10b does not start before that rule is reviewed.
 
 ## 3. Common change identity and apply rule
 
-### 3.1 Change identity
+### 3.1 Identity: two generations, and label vs identity
 
-The master's RocksDB sequence number is already a **total order over every
-change the master commits**, and both paths originate at that same commit:
+**Two generations, with different jobs.** Folding them into one token confuses
+"the history I am following changed" with "my own copy was replaced".
 
-* **WAL path:** a batch carries its sequence; RocksDB assigns consecutive
-  sequence numbers to the entries inside a batch, so the *i*-th decoded change
-  of a batch starting at `S` has identity `S + i`.
-* **Forwarding path:** the master reads its own sequence immediately after the
-  local write, while still holding that key's slot lock, and sends it with the
-  op.
+* **Source epoch** — identifies the **master's history**, i.e. the sequence
+  space the labels live in. It changes when that history is replaced or
+  reparented: promotion of a node to master, a DB swap on the master, a
+  truncate/`flush_all`-class bulk operation (§3.9(B)). It does **not** change
+  on an ordinary process restart: a restart preserves the same RocksDB and the
+  same sequence space, so a follower must be able to reconnect and resume from
+  its cursor without rebuilding.
+* **Receiver incarnation** — identifies **this replica's copy**. It changes
+  whenever the replica's own DB is replaced (snapshot swap, hard reset,
+  truncate-before-dump). Its job is to invalidate everything that belongs to
+  the previous copy: open streams, in-flight forwarded changes, and any apply
+  still pending. A forwarded change or a stream response stamped with an older
+  incarnation is refused. It, too, does not change on a plain restart.
 
-Identity of a change: **`(session, src_seq)`** where `session` is
-`(master_id, master boot/generation token)` and `src_seq` is that sequence.
-`session` makes sequences from different DBs or different processes
-incomparable instead of silently comparable.
+A stream is admissible only when the peer's **source epoch** equals the one
+the cursor belongs to; a delivery is admissible only when the **receiver
+incarnation** it was issued against is still current.
 
-*Why the forwarding path's `src_seq` is sound even though it is read after the
-write:* another key's write may bump the DB sequence between our write and our
-read, so the reported value can be **greater than** the change's true
-sequence. It can never be greater than the sequence of the **next write to the
-same key**, because that write must first take the same per-key slot lock,
-which we still hold. Per-key monotonicity — all the rule needs — is therefore
-preserved, and the WAL copy of the same change carries a value `≤` the
-forwarded one, which the rule treats as "already applied" (§3.3, case c).
-This argument is a precondition for SAF-10b and must be pinned by a test
-(T10), not assumed.
+**Change identity is not the same thing as the order label.** The forwarded
+path cannot carry the WAL's exact number (§3.9(B)): what it reports is read
+inside the key's critical section and may be **inflated** by other keys'
+writes committed in between.
+
+* **Order label** `L = (source_epoch, seq_label)`: comparable **per key**, and
+  strictly increasing for successive changes to the same key. This is what
+  §3.3 and §3.5 compare. It is an ordering device, **not** a position: the
+  stored label of a key may exceed the true sequence of the data it describes.
+* **Change identity** — "these two deliveries are the same change" — is
+  **not** established by the label, and this design does not claim exact
+  de-duplication. What the rule guarantees is weaker and sufficient:
+  *a delivery that is not strictly newer than what the key already has is never
+  applied*. The duplicate copy of a change is refused because it is not
+  strictly newer, which has the same effect for a key-value store and does not
+  require the two paths to agree on an identifier.
+* The only **positional** truth is the applied cursor, which comes from the WAL
+  alone. Lag and progress are computed from it, never from per-key labels.
 
 ### 3.2 What a change is
 
 Both paths are decoded into the same logical form before anything is written:
 
-    change := { key, type ∈ {put, delete}, value?, flag, expire, version, session, src_seq }
+    change := { key, type ∈ {put, delete}, value?, flag, expire, version,
+                source_epoch, seq_label, receiver_incarnation }
 
 * **WAL path:** `WriteBatch::Iterate` with a handler that turns `PutCF` /
   `DeleteCF` / `SingleDeleteCF` into changes, parsing flare's serialized entry
@@ -440,7 +463,33 @@ the write. This is part of the rule, not an implementation detail:
   can never be dropped while a forwarded change admitted against an older
   cursor is still between its decision and its write.
 * The applier's exclusive window is bounded by the per-response batch and byte
-  caps (§4, condition 7); that is what keeps this from becoming a write stall.
+  caps (§4, condition 7). **Byte caps alone do not bound lock hold time or
+  writer starvation**, so both are measured and tested (T17), and the window
+  carries its own cap independent of the response size.
+
+Further requirements on the critical section, all of them testable:
+
+* **One lock order, everywhere**: `_repl_apply_lock` → `_mutex_wholelock` →
+  per-key slot locks in ascending slot index. Every path that takes more than
+  one of these — the applier, forwarded apply, bulk operations, GC — uses that
+  order.
+* **Intra-batch visibility**: when a batch changes the same key more than
+  once, the decision for a later change must see the earlier ones. The applier
+  keeps an in-batch overlay (key → label, tombstone state) that is consulted
+  before the persisted metadata and merged into it by the same `Write()`.
+* **Release-build detection**: an operation the decoder does not support, or a
+  count that disagrees with the batch's own, is detected in **release builds**
+  — an explicit check with a counter, a log line and a transition to
+  `needs_rebuild`, never a bare `assert` that a production build compiles out.
+* **No network inside the exclusive section**: read and decode the response
+  outside it; only decide + write + GC run inside. A stalled peer must never
+  hold the write path.
+* **GC is chunked**: a bounded number of tombstones per pass, resumable, so a
+  large collection cannot extend one window.
+* **Starvation is bounded**: forwarded writes must not be blocked indefinitely
+  by a continuous stream of applier windows (writer-preference, or a cap on
+  consecutive windows). The maximum observed forwarded-write wait is part of
+  the acceptance evidence, not an assumption.
 
 What this does **not** provide: cross-key consistency. Forwarded changes are
 applied ahead of the cursor, so the replica's state is "newest per key", not a
@@ -486,12 +535,37 @@ between:
 > WAL delivery repairs it: the WAL carries 100 and 101, both `≤` the applied
 > 101, so both are skipped.
 
-*Required:* the sequence is read **inside** `storage::set` / `remove` / `incr`
-while the key's slot lock is held, and travels with the entry. Under that rule
-the reported value can still be inflated by other keys' writes, but it is
-**strictly monotonic per key**: the next write to the same key must first take
-that lock, so its own sequence already exceeds anything visible at the earlier
-read.
+*Required:* the label is read **inside** the storage call while the key's slot
+lock is held, and travels with the entry. Under that rule the reported value
+can still be inflated by other keys' writes, but it is **strictly monotonic
+per key**: the next write to the same key must first take that lock, so its
+own sequence already exceeds anything visible at the earlier read.
+
+**The rule binds every path that can change a key, not only `set`.** A single
+path that mutates a key while bypassing the label capture re-opens exactly the
+counterexample above:
+
+| Path | Entry point | How it complies |
+|---|---|---|
+| `set` / `add` / `replace` / `append` / `prepend` / `cas` | `storage::set` | label captured under the slot lock |
+| `delete` | `storage::remove` | same |
+| `touch` / `gat` | `storage::set` with `behavior_touch` | same; the label orders it even though the version is deliberately unchanged |
+| `incr` / `decr` | `storage::incr` | same; the **resulting value** is forwarded (§3.2) |
+| expire-driven lazy delete on read | the reaper's delete path | same — it is a `remove` |
+| reaper background crawler | `storage::remove` per key | same, per key |
+| `orphan_purge` | `storage::remove` per key | same, per key; it also becomes replicated, which it is not today |
+| `flush_all` / `truncate` | `storage_rocksdb::truncate` under the whole-lock | **not** per key: handled by an epoch switch (below) |
+| snapshot swap / hard reset | `swap_in_snapshot`, `hard_reset` | not per key: receiver incarnation changes (§3.1), deliveries for the old incarnation are refused |
+
+**Bulk operations take the exclusive route.** `truncate` and `flush_all`
+replace the history rather than edit keys within it: they take the whole-lock,
+so no per-key label is meaningful, and ordering a mass delete against in-flight
+forwarded changes by label would be guesswork. Instead the master **advances
+its source epoch** when it performs one; followers see an epoch change, refuse
+the old stream, and rebuild. That is a deliberate cost — a `flush_all` costs
+every replica a rebuild — and it is the honest alternative to silently
+diverging, which is what happens today (`flush_all` is not replicated at all,
+§1.8).
 
 **(C) Per-entry numbering must count exactly the sequence-consuming
 operations.**
@@ -517,6 +591,14 @@ replication-metadata column family and the tombstone space and sets the cursor
 to the checkpoint sequence — after which the absence of per-key metadata is
 safe, because everything older than the restore point is refused by the cursor
 test (§3.5).
+
+*Also required — the initialisation must be all-or-nothing.* Until the
+metadata is cleared, the cursor is set and both generations are written, the
+node **accepts no delivery on either path** and does not present itself as a
+copy. A crash part-way through must not leave a DB that is exposed with
+inherited metadata or an unset cursor: the swap writes a completion marker
+last, in the same batch as the cursor and the generations, and a DB whose
+marker is absent at open is treated as an incomplete restore and rebuilt.
 
 No counterexample was found that breaks the rule **with** these four
 preconditions in place. The cases examined are pinned as T4, T5, T7 and
@@ -566,9 +648,11 @@ flared owns delivery and reconnection; the operator observes and decides.
 
 ### 5.3 Separate eligibility
 
-* **Serving reads**: `following` **and** lag within a configured bound from a
-  fresh observation. Coexistence alone is explicitly not a freshness argument
-  (§0.2.3). Default for stage 1: unchanged read balance, decided separately.
+* **Serving reads**: a replica in this mode is **out of the read set** until
+  SAF-10c implements eligibility — balance 0, not a read target. Coexistence is
+  explicitly not a freshness argument (§0.2.3). When eligibility does arrive it
+  is `following` **and** lag within a configured bound from a fresh
+  observation; nothing weaker.
 * **Promotion**: `following`, fresh observation, lag under a promotion bound.
   Because replication is asynchronous, **it can never be proven that the
   replica held everything the master acknowledged**; when the master is
@@ -577,20 +661,29 @@ flared owns delivery and reconnection; the operator observes and decides.
 * **Deleting another copy**: the existing gate (EV-05) plus a requirement that
   another copy is `following` and fresh.
 
-### 5.4 Coordination with the replica-repair ledger
+### 5.4 Repair ownership versus transient connection state
 
-With both paths live, `proxy_write_dropped` still fires — and the continuous
-stream will repair the same gap by itself. To avoid two rebuilds of one
-replica:
+The whole point of this work is that a blip is recovered **without** a full
+rebuild, so the two must not be conflated:
 
-* the stream's `needs_rebuild` is the **only** owner of the rebuild decision
-  for a continuously replicating node;
-* a drop counted for such a node is recorded and **explicitly held** by the
-  ledger with a visible reason ("covered by continuous replication"), and
-  closed when the applied position passes the drop's sequence — which is the
-  same evidence the ledger already wants, expressed in sequences instead of
-  reconstruction counters;
-* if the stream is not `following`, the ledger keeps its current behaviour.
+* **Ownership is a mode, not a connection state.** While a node is in
+  continuous-replication mode, the stream owns its repair decision —
+  regardless of whether the stream is momentarily `disconnected`. The
+  replica-repair ledger records drops for such a node and **holds** them with a
+  visible reason ("owned by continuous replication"), closing them when the
+  applied position passes the drop's label. It does not start a
+  reconstruction.
+* **A disconnect is not a rebuild trigger.** `disconnected` means: reconnect,
+  resume **from the cursor**, keep the data. Only an explicit
+  `needs_rebuild` — history purged past the cursor, source epoch changed,
+  integrity failure, incomplete restore — hands the node to the rebuild path,
+  through the operator's existing demote → hold → reseat sequence so a single
+  reconstruction runs.
+* **Ownership ends only when the mode ends.** If continuous replication is
+  disabled for a node, or the node leaves the partition, the ledger resumes its
+  current behaviour. Losing the connection does not end ownership, and must not
+  be allowed to, or a flapping link would produce repeated full rebuilds — the
+  failure this design exists to remove.
 
 ---
 
@@ -621,17 +714,23 @@ Proposed new UCAs (next free IDs):
 | UCA-28 | A6 | Too early | **Delete history is discarded while a change older than the delete can still be applied** | H2, H3 | §3.5: drop a tombstone only once the cursor has passed the delete; a change at or below the cursor is refused whichever path delivered it |
 | UCA-29 | A6 | Wrong order | **The apply decision is made against a position read before a stall, retry or lock wait**, so a change admitted against an old cursor is written after the cursor moved | H2, H3 | §3.8: one critical section for read-decide-write; GC inside the applier's exclusive window |
 | UCA-30 | A6 | Provided | **After a rebuild, changes from the previous session, or metadata inherited from the source, are applied** | H2, H3, H6 | §3.9(A)(D): generation-bearing session compared first; metadata and tombstones cleared at the swap |
+| UCA-31 | A6 | Provided | A key is changed by a path that does not capture an order label (bulk operation, internal delete), so the change cannot be ordered against the other delivery path | H2, H3 | §3.9(B): every per-key path captures under the slot lock; bulk operations switch the source epoch instead |
+| UCA-32 | A6 | Provided | A transient disconnection is treated as a repair trigger and starts a full reconstruction | H3, H4 | §5.4: ownership is the mode, not the connection state; resume from the cursor first |
+| UCA-33 | A6 | Provided | A partially initialised copy (metadata cleared, cursor or generation not yet written) accepts deliveries or is presented as a copy | H2, H5 | §3.9(D): completion marker written last, in the same batch; an unmarked DB is rebuilt |
 
 Register: relate to **SC-03/EV-03**, **SC-04/EV-04**, **SC-13/EV-13**,
 observation to **EV-11/EV-15**, content verification to **EV-12**, deletion
-impact to **EV-05**. New IDs proposed: **SC-14** (continuous fetch resumes
-without external intervention), **SC-15** (applied position is contiguous and
-crash-atomic, and no other path may advance it), **SC-16** (history loss is an
-explicit rebuild state), **SC-17** (both delivery paths apply through one
-identified-change rule; no path may reorder, duplicate or resurrect) and
-**SC-18** (delete history is discarded only when the applied position makes an
-older delivery impossible, and the decision is serialized with the write),
-each with a matching EV entry. **No existing ID's meaning is changed.**
+impact to **EV-05**. New IDs proposed, starting after the
+highest in use (SC-15 / EV-15 exist today): **SC-16** (continuous fetch resumes
+without external intervention, and a lost connection alone never triggers a
+rebuild), **SC-17** (the applied position is contiguous and crash-atomic, and
+no other path may advance it), **SC-18** (history loss is an explicit rebuild
+state), **SC-19** (both delivery paths apply through one comparison rule; no
+path may reorder, duplicate or resurrect, and every path that can change a key
+participates in the label capture) and **SC-20** (delete history is discarded
+only when the applied position makes an older delivery impossible, and the
+decision is serialized with the write), each with a matching EV entry
+**EV-16 … EV-20**. **No existing ID's meaning is changed.**
 
 ---
 
@@ -662,6 +761,10 @@ no "absence of a log line" is a pass condition.
 | T11 | **Old put after tombstone GC**: delete a key, let the cursor pass the delete so the tombstone is collected, then deliver a forwarded put older than the delete — it is refused by the cursor test and the key stays deleted (`repl_forward_skipped` moves) |
 | T12 | **Stalled forwarded change across a GC**: hold a forwarded change before its decision, advance the WAL applier and tombstone GC past its sequence, then release it — it is refused, and nothing it carries resurrects or regresses a key. Proves the decision is not made against a position read before the stall (§3.8) |
 | T13 | **Old session after a snapshot restore**: rebuild the replica by snapshot, then deliver a forwarded change from the previous session, and one from the same session older than the restore point — the first is refused on session, the second on the cursor; inherited per-key metadata and tombstones are gone (§3.9(D)) |
+| T14 | **Bulk operation**: `flush_all` / `truncate` on the master advances the source epoch; the replica refuses the old stream and rebuilds rather than diverging silently, and no key survives on the replica that the master dropped |
+| T15 | **Intra-batch repetition**: one WAL batch changes the same key twice (and delete-then-put); the decision for the later change sees the earlier one, and the result equals applying them in order |
+| T16 | **Restart versus history change**: an ordinary process restart of master or replica resumes from the cursor with **no** rebuild; a history replacement (promotion, DB swap, bulk operation) does trigger one. Distinguishes the two generations (§3.1) |
+| T17 | **Critical-section behaviour under load**: maximum applier window hold time, maximum forwarded-write wait, and absence of writer starvation are measured while a far-behind replica catches up; unsupported operation and count mismatch are detected in a **release** build |
 
 Expiry is verified under controlled time conditions.
 
@@ -703,10 +806,11 @@ Settled by the reviewer (2026-09-16) and carried into SAF-10b:
 
 Open, and to be answered inside SAF-10b rather than before it:
 
-* the exact **generation token** (§3.9(A)): where it is persisted and how it
-  is guaranteed to change on every DB replacement and every promotion — the
-  present `regenerate_master_id` fires only when the cursor exceeds the node's
-  own sequence, so it cannot serve as the token unchanged;
+* where the **source epoch** and the **receiver incarnation** (§3.1) are
+  persisted and advertised, and the guarantee that each changes on exactly its
+  own events and not on a plain process restart — the present
+  `regenerate_master_id` fires only when the cursor exceeds the node's own
+  sequence, so it serves as neither;
 * whether the applier's exclusive window (§3.8) needs a cap below the response
   cap to bound write latency on a busy master;
 * how `needs_rebuild` meets the operator's existing demote/hold/reseat path —

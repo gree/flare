@@ -499,8 +499,9 @@
         "Drops attributed after the reseat are requeued on completion; a drop in the LAST stretch of a live reconstruction is pinned by flare_unit, not staged end to end (a tiny dataset reconstructs within one pass).",
         "The completion record is read over the stats channel; an unreadable record holds the entry (fail closed) rather than completing it.",
         "A destination that became a MASTER while under repair is VOIDED, not repaired.",
-        "A write that keeps failing until a restart loses the unsaved delta; the window is one pass of retries — and, after an RBAC revoke/restore, the ~2 minutes the restore takes to become effective for the operator (see the RBAC entry).",
-        "Restoring a revoked RBAC grant takes about two minutes to become effective for the operator's own service account (~131s local, >124s CI, mechanism on the token path not identified), while an impersonated `can-i` from outside flips at once; the operator retries every pass so this is latency, not loss, but any unsaved ledger delta is exposed to a restart for that whole window."
+        "A write that keeps failing until a restart loses the unsaved delta; the window is one pass of retries, extended by however long the cause (e.g. a revoked RBAC grant) persists.",
+        "The operator announces an unsaved ledger ('marked unsaved and will retry every pass — an operator restart before that lands would lose ...') but a landing through the normal per-pass persist is silent, so the log does not show when that exposure ended (only the retry path logs 'persisted on retry'). Observability gap; follow-up proposed.",
+        "RBAC grant propagation: one local observation (2026-09-13) of ~131s before an impersonated `can-i` flipped after a restore; CI runs 6 and 8 saw the grant effective for the operator's own SA within seconds (in-pod probe). Earlier attributions of >2 minutes to the operator's path were harness artefacts (see the round-8 review note)."
       ],
       "code": [
         {
@@ -685,6 +686,22 @@
           "command": "GitHub Actions e2e-tests.yaml (4 legs) on PR #143",
           "result": "pass",
           "report": "docs/reports/2026-09-16-ci-e2e-matrix-f7d327f-pass.txt"
+        },
+        {
+          "check": "CHECK-03",
+          "commit": "d185039c3fbe5e4099b7954371f2669e73ac8126",
+          "date": "2026-09-16",
+          "command": "GitHub Actions e2e-tests.yaml, leg breaker-migration: timeout 4500 .lake/build/bin/flare_e2e --filter circuit-breaker,operator-restart,topology-authority,replica-repair,prepare-evidence,native-metrics,blue-green-migration",
+          "result": "fail",
+          "report": "docs/reports/2026-09-16-ci-e2e-breaker-migration-d185039-fail.txt"
+        },
+        {
+          "check": "CHECK-03",
+          "commit": "27518a648c1601fb3e9dab9a1f3ca0f3399d0d4d",
+          "date": "2026-09-16",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter replica-repair",
+          "result": "pass",
+          "report": "docs/reports/2026-09-16-replica-repair-final4.txt"
         }
       ],
       "tasks": [
@@ -693,9 +710,9 @@
         "SAF-10"
       ],
       "review": {
-        "commit": "f7d327fd24fc9310c3f2c4f13a8b50ebb1956a14",
+        "commit": "27518a648c1601fb3e9dab9a1f3ca0f3399d0d4d",
         "date": "2026-09-16",
-        "note": "Second fully green CI matrix at this revision. First CI execution of the in-pod RBAC probe: the grant was effective for the operator's SA after 0s, ledger landed 15s later — the ~2-minute latency did not occur, so the probe is still unexercised under the delayed condition (delayed 2, immediate 2 across all observations). The SAF-05 properties held. PARTIAL / UNVERIFIED."
+        "note": "CI run 8 (d185039) failed the SAF-05 save-failure test after a 300s wait although the request HAD landed (the next test's precondition found it in status). Cause, and a correction of the round-6 reading: the test keyed on the log line 'ledger persisted on retry', which only the top-of-pass retry emits; Main.persistLedger (the normal per-pass persist, taken whenever the ledger changed) writes the same ledger and clears the dirty flag silently. In runs 5 and 8 the silent path landed the request within a pass or two of the grant's return — the operator log shows a single 'still unsaved' and then none for 20+ ticks — so the earlier statement that the operator's own patch 'stayed Forbidden for >124s' was wrong; the in-pod and impersonated can-i had been right. The only actual latency observation is the local one of 2026-09-13 (~131s, impersonated can-i, single observation). The test now judges landing by the outcome (entry in status), reports which path wrote it, and requires that no new 'still unsaved' follows. Local at this revision: pass, landed 20s via the top-of-pass retry. OBSERVABILITY GAP, not changed here: after 'marked unsaved ... a restart before that lands would lose', a landing via the normal persist is never announced; proposed as a one-line operator follow-up (image change), pending the reviewer's scope decision. PARTIAL / UNVERIFIED unchanged."
       }
     },
     {
@@ -1114,6 +1131,22 @@
           "command": "GitHub Actions e2e-tests.yaml (4 legs) on PR #143",
           "result": "pass",
           "report": "docs/reports/2026-09-16-ci-e2e-matrix-f7d327f-pass.txt"
+        },
+        {
+          "check": "CHECK-05",
+          "commit": "d185039c3fbe5e4099b7954371f2669e73ac8126",
+          "date": "2026-09-16",
+          "command": "GitHub Actions e2e-tests.yaml, leg breaker-migration: timeout 4500 .lake/build/bin/flare_e2e --filter circuit-breaker,operator-restart,topology-authority,replica-repair,prepare-evidence,native-metrics,blue-green-migration",
+          "result": "fail",
+          "report": "docs/reports/2026-09-16-ci-e2e-breaker-migration-d185039-fail.txt"
+        },
+        {
+          "check": "CHECK-05",
+          "commit": "27518a648c1601fb3e9dab9a1f3ca0f3399d0d4d",
+          "date": "2026-09-16",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter replica-repair",
+          "result": "pass",
+          "report": "docs/reports/2026-09-16-replica-repair-final4.txt"
         }
       ],
       "tasks": [
@@ -1122,9 +1155,9 @@
         "SAF-08"
       ],
       "review": {
-        "commit": "f7d327fd24fc9310c3f2c4f13a8b50ebb1956a14",
+        "commit": "27518a648c1601fb3e9dab9a1f3ca0f3399d0d4d",
         "date": "2026-09-16",
-        "note": "Second fully green CI matrix at this revision; replica-repair 8/8 including the UID precondition and the deadline test. PARTIAL / UNVERIFIED."
+        "note": "Same CI run 8 failure and harness fix as EV-03 (shared suite; test 6 cascaded on the precondition). Tests 7-8 passed. PARTIAL / UNVERIFIED unchanged."
       }
     },
     {
@@ -1437,13 +1470,21 @@
           "command": "GitHub Actions e2e-tests.yaml (4 legs) on PR #143",
           "result": "pass",
           "report": "docs/reports/2026-09-16-ci-e2e-matrix-f7d327f-pass.txt"
+        },
+        {
+          "check": "CHECK-09",
+          "commit": "d185039c3fbe5e4099b7954371f2669e73ac8126",
+          "date": "2026-09-16",
+          "command": "GitHub Actions e2e-tests.yaml, leg breaker-migration: timeout 4500 .lake/build/bin/flare_e2e --filter circuit-breaker,operator-restart,topology-authority,replica-repair,prepare-evidence,native-metrics,blue-green-migration",
+          "result": "pass",
+          "report": "docs/reports/2026-09-16-ci-e2e-breaker-migration-d185039-fail.txt"
         }
       ],
       "tasks": [],
       "review": {
         "commit": "f7d327fd24fc9310c3f2c4f13a8b50ebb1956a14",
         "date": "2026-09-16",
-        "note": "First execution evidence for this control, from the PR #143 CI matrix: the circuit-breaker E2E failed once (no trip in 480s) and passed on re-run at the same revision. Root cause read from the code (see residual_risks): the trip counts newly-dead nodes per tick, not the dead fraction, so it is timing-dependent; this predates the branch (52d409e, 2026-07-03) and the branch's K8sReconciler.lean changes do not touch dead detection or the breaker. The implementation stays PARTIAL and the control UNVERIFIED; one fail and one pass at the same revision is not verification. A follow-up task is proposed, not filed, pending the reviewer's decision on scope. Fourth run at c148c6c tripped normally (37/37); the finding stands — the trip is timing-dependent by construction, one green run does not remove it. PARTIAL / UNVERIFIED. Run 5 at 72e5cca did not trip again: 2 of 6 executions on this PR failed to trip within 480s (the other four tripped in 5-15s), all on an unchanged operator image — consistent with the per-tick counting finding, and enough to call the E2E's proof of SC-09 timing-dependent rather than a flake. PARTIAL / UNVERIFIED. Run 6 at f7d327f tripped after 20s: tally on this PR 5 tripped / 2 did not, unchanged operator image. PARTIAL / UNVERIFIED."
+        "note": "First execution evidence for this control, from the PR #143 CI matrix: the circuit-breaker E2E failed once (no trip in 480s) and passed on re-run at the same revision. Root cause read from the code (see residual_risks): the trip counts newly-dead nodes per tick, not the dead fraction, so it is timing-dependent; this predates the branch (52d409e, 2026-07-03) and the branch's K8sReconciler.lean changes do not touch dead detection or the breaker. The implementation stays PARTIAL and the control UNVERIFIED; one fail and one pass at the same revision is not verification. A follow-up task is proposed, not filed, pending the reviewer's decision on scope. Fourth run at c148c6c tripped normally (37/37); the finding stands — the trip is timing-dependent by construction, one green run does not remove it. PARTIAL / UNVERIFIED. Run 5 at 72e5cca did not trip again: 2 of 6 executions on this PR failed to trip within 480s (the other four tripped in 5-15s), all on an unchanged operator image — consistent with the per-tick counting finding, and enough to call the E2E's proof of SC-09 timing-dependent rather than a flake. PARTIAL / UNVERIFIED. Run 6 at f7d327f tripped after 20s: tally on this PR 5 tripped / 2 did not, unchanged operator image. PARTIAL / UNVERIFIED. Run 8 (d185039) tripped after 10s: 6 tripped / 2 did not on this PR."
       }
     },
     {

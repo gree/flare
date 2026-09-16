@@ -86,7 +86,15 @@ tick, so the operator had not yet seen the patched CRD when the log was read
 once (the diagnostics confirm neither the 'CRD changed' line nor the warning
 existed yet). The suite now waits for the operator's own evidence; harness
 only (docs/reports/2026-09-16-ci-e2e-replication-685853e-fail.txt). The PR
-went back to draft again. The evidence register
+went back to draft again. The eighth run failed the SAF-05 save-failure test
+again, and this time the cause corrects an earlier reading: the request HAD
+landed (silently, through the normal per-pass persist) while the test waited
+for the retry path's log line; the "~2 minutes of RBAC latency for the
+operator" attributed to CI runs 5 and 8 was that harness artefact, and the
+only real latency observation is a single local one. The test now judges the
+outcome. The operator's silence about a landing after it announced an
+unsaved ledger is recorded under EV-03 as an observability gap with a
+proposed one-line follow-up (not made here). The evidence register
 owns exact implementation and verification state, which stays `unverified`
 until a reviewer signs off; EV-03 is held at `partial` because two scenarios
 are pinned only by `flare_unit` and not staged end to end (a drop in the last

@@ -214,6 +214,11 @@ int op_stats::_send_stats(thread_pool* req_tp, thread_pool* other_tp, storage* s
 		storage_rocksdb* rdb = dynamic_cast<storage_rocksdb*>(st);
 		if (rdb) {
 			_send_stat("rocksdb_master_id"                  , rdb->get_master_id());
+			// Generations (SAF-10, design §3.1): the source epoch identifies
+			// the history a follower reads; the incarnation identifies this
+			// node's own copy. Neither moves on a plain process restart.
+			_send_stat("rocksdb_source_epoch"               , rdb->get_source_epoch());
+			_send_stat("rocksdb_incarnation"                , rdb->get_incarnation());
 			_send_stat("rocksdb_repl_last_lsn"              , rdb->get_repl_last_lsn());
 			_send_stat("rocksdb_latest_sequence_number"     , rdb->get_latest_sequence_number());
 			_send_stat("rocksdb_wal_sync_success"           , rdb->get_wal_sync_success());

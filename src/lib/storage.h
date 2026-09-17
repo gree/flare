@@ -138,11 +138,19 @@ public:
 		uint64_t						version;
 		uint32_t						option;
 		shared_byte					data;
+		// ORDER LABEL (SAF-10): the source's own commit position for this
+		// change, captured INSIDE the key's critical section by every path
+		// that can change a key. It orders two deliveries of the same key
+		// against each other across the forwarding and WAL paths; it is not
+		// a change identifier and not a position (it can be inflated by
+		// other keys' writes committed between our write and our read).
+		// In-memory only: never serialized into the value header.
+		uint64_t						seq_label;
 
 		static const int				header_size = sizeof(uint32_t) + sizeof(time_t) + sizeof(uint64_t) + sizeof(uint64_t);
 		static const uint64_t		max_data_size = 2147483647;
 
-		_entry() { flag = expire = size = version = option = 0; };
+		_entry() { flag = expire = size = version = option = 0; seq_label = 0; };
 
 		bool is_data_available() const { return this->data.get() != NULL; };
 
@@ -269,6 +277,24 @@ public:
 	virtual uint64_t get_repl_last_lsn() { return 0; }
 	virtual int set_repl_last_lsn(uint64_t lsn) { return 0; }
 	virtual uint64_t get_latest_sequence_number() { return 0; }
+
+	// GENERATIONS (SAF-10, design §3.1). Two tokens with different jobs:
+	//  - source epoch: identifies the MASTER'S HISTORY, i.e. the sequence
+	//    space order labels live in. Advanced on promotion, on a replacement
+	//    of this node's history (snapshot swap, hard reset) and on a bulk
+	//    operation that rewrites it (truncate / flush_all). NOT advanced by
+	//    an ordinary process restart, which keeps the same DB and sequence
+	//    space, so a follower can reconnect and resume from its cursor.
+	//  - receiver incarnation: identifies THIS NODE'S COPY. Advanced
+	//    whenever the local DB is replaced, so deliveries and streams issued
+	//    against the previous copy can be refused. Also not advanced by a
+	//    plain restart.
+	// Non-WAL backends report 0 and the callers treat that as "no
+	// generations" (today's behaviour).
+	virtual uint64_t get_source_epoch() { return 0; }
+	virtual uint64_t get_incarnation() { return 0; }
+	virtual uint64_t advance_source_epoch() { return 0; }
+	virtual uint64_t advance_incarnation() { return 0; }
 	virtual int regenerate_master_id() { return 0; }
 
 	static inline int option_cast(string s, option& r) {

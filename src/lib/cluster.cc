@@ -1731,6 +1731,15 @@ int cluster::_shift_node_role(string node_key, role old_role, int old_partition,
 	// return 0, so the guard is a no-op there); we deliberately avoid pulling
 	// the RocksDB headers into cluster.cc.
 	if (new_role == role_master && old_role != role_master && this->_storage != NULL) {
+		// SOURCE EPOCH (SAF-10, design §3.1): this node's history stops being
+		// a continuation of the one its followers were reading — its sequence
+		// space is its own DB's, unrelated to the previous master's. Advance
+		// the epoch UNCONDITIONALLY here, before the narrower cursor check
+		// below: master_id alone cannot carry this, because the check below
+		// only fires when the cursor exceeds our own sequence, so a
+		// snapshot-rebuilt replica (cursor == checkpoint sequence) would keep
+		// the old token over an unrelated sequence space.
+		this->_storage->advance_source_epoch();
 		uint64_t cursor = this->_storage->get_repl_last_lsn();
 		uint64_t seq = this->_storage->get_latest_sequence_number();
 		if (cursor > seq) {

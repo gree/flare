@@ -69,6 +69,9 @@ public:
 	// Defined in the .cc so they link once across TUs.
 	static const char* const kReplLastLsnKey;
 	static const char* const kReplMasterIdKey;
+	static const char* const kReplSourceEpochKey;
+	static const char* const kReplIncarnationKey;
+	static const char* const kReplRestoreDoneKey;
 
 	// Return true if key is a reserved replication metadata key.
 	static bool is_reserved_key(const string& key);
@@ -116,6 +119,11 @@ protected:
 	// not atomic.
 	mutable pthread_rwlock_t _mutex_master_id;
 	string _master_id;
+	// Generations (design §3.1). Guarded by _mutex_generations; persisted
+	// under the reserved keys above so they survive a restart unchanged.
+	uint64_t _source_epoch;
+	uint64_t _incarnation;
+	mutable pthread_rwlock_t _mutex_generations;
 
 	// WAL replication observability counters. Read-only after increment;
 	// exposed to `stats` via getter methods below. Incrementing happens
@@ -209,6 +217,12 @@ protected:
 	// Load or generate the master identity token. Called from open() after
 	// the DB handle is ready. Returns 0 on success, -1 on fatal I/O error.
 	int _load_or_generate_master_id();
+	// Load both generations, initialising them to 1 on a fresh DB. Called
+	// from open() after the master id.
+	int _load_or_init_generations();
+	string _restore_pending_path() const;
+	bool _discard_incomplete_restore();
+	int _persist_generation(const char* key, uint64_t value);
 
 public:
 	storage_rocksdb(
@@ -299,6 +313,11 @@ public:
 	// reference) because the token can be rewritten concurrently by the
 	// reconstruction thread; see _mutex_master_id.
 	string get_master_id() const;
+	uint64_t get_source_epoch();
+	uint64_t get_incarnation();
+	// Advance and persist. Both are monotonic and never reused.
+	uint64_t advance_source_epoch();
+	uint64_t advance_incarnation();
 	int set_master_id(const string& id);
 	// Mint and persist a brand-new master_id (fresh UUID). Called at
 	// promotion to master when this node carries a replication cursor from a

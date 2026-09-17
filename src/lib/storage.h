@@ -291,10 +291,20 @@ public:
 	//    plain restart.
 	// Non-WAL backends report 0 and the callers treat that as "no
 	// generations" (today's behaviour).
-	virtual uint64_t get_source_epoch() { return 0; }
-	virtual uint64_t get_incarnation() { return 0; }
-	virtual uint64_t advance_source_epoch() { return 0; }
-	virtual uint64_t advance_incarnation() { return 0; }
+	// Both are OPAQUE IDENTITIES compared for equality, never ordered: a
+	// per-node counter cannot distinguish two histories that advanced the
+	// same number of times (sequential promotion of two different copies
+	// would produce the same value for unrelated sequence spaces), so each
+	// value carries a freshly minted token. An empty string means
+	// "unavailable" — the node could not establish or persist its
+	// generations — and every replication path must refuse to serve or
+	// accept on that, rather than assuming a default.
+	virtual string get_source_epoch() { return ""; }
+	virtual string get_incarnation() { return ""; }
+	// 0 on success, -1 when the new value could not be persisted. A failure
+	// leaves the node with UNAVAILABLE generations (fail closed).
+	virtual int advance_source_epoch() { return 0; }
+	virtual int advance_incarnation() { return 0; }
 	virtual int regenerate_master_id() { return 0; }
 
 	static inline int option_cast(string s, option& r) {

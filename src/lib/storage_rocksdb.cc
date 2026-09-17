@@ -88,8 +88,9 @@ storage_rocksdb::storage_rocksdb(
 	_wal_size_limit_mb(wal_size_limit_mb),
 	_sync_writes(sync_writes),
 	_master_id(""),
-	_source_epoch(0),
-	_incarnation(0),
+	_source_epoch(""),
+	_incarnation(""),
+	_generations_broken(false),
 	_wal_sync_success(0),
 	_wal_sync_lsn_purged(0),
 	_wal_sync_lsn_ahead(0),
@@ -294,7 +295,7 @@ int storage_rocksdb::set_master_id(const string& id) {
 	return 0;
 }
 
-int storage_rocksdb::_persist_generation(const char* key, uint64_t value) {
+int storage_rocksdb::_persist_generation(const char* key, const string& value) {
 	if (this->_db == NULL) {
 		log_err("_persist_generation: DB handle is closed", 0);
 		return -1;
@@ -302,8 +303,7 @@ int storage_rocksdb::_persist_generation(const char* key, uint64_t value) {
 	rocksdb::WriteOptions wo;
 	wo.sync = true;			// a generation must never be lost by a crash
 	wo.disableWAL = false;
-	string v = boost::lexical_cast<string>(value);
-	rocksdb::Status st = this->_db->Put(wo, key, v);
+	rocksdb::Status st = this->_db->Put(wo, key, value);
 	if (!st.ok()) {
 		log_err("failed to persist %s: %s", key, st.ToString().c_str());
 		return -1;
@@ -312,101 +312,148 @@ int storage_rocksdb::_persist_generation(const char* key, uint64_t value) {
 }
 
 /**
- *	Load both generations, initialising a fresh DB to 1 (design §3.1).
- *	A plain process restart therefore keeps both values, which is the whole
- *	point: a restart is not a history change and must not cost a rebuild.
+ *	Mint a generation identity: "<n>:<uuid>".
+ *
+ *	The uuid is what makes it an IDENTITY. A bare counter is not sufficient:
+ *	two copies of the same data promoted one after the other would each
+ *	advance their own counter to the same value, so two unrelated sequence
+ *	spaces would advertise the same generation and a follower comparing them
+ *	would apply one history's numbers against another's. The same argument
+ *	applies to a repeated hard reset, which re-initialises a fresh DB every
+ *	time. The counter is kept only so a human can see how often it moved; it
+ *	is never compared alone.
+ */
+string storage_rocksdb::_mint_generation(const string& previous) {
+	uint64_t n = 0;
+	string::size_type colon = previous.find(':');
+	if (colon != string::npos) {
+		try {
+			n = boost::lexical_cast<uint64_t>(previous.substr(0, colon));
+		} catch (boost::bad_lexical_cast&) {
+			n = 0;
+		}
+	}
+	uuid_t uuid;
+	char buf[37];
+	uuid_generate(uuid);
+	uuid_unparse_lower(uuid, buf);
+	return boost::lexical_cast<string>(n + 1) + ":" + buf;
+}
+
+/**
+ *	Load both generations, minting them on a fresh DB (design §3.1).
+ *	A plain process restart keeps both values, which is the point: a restart
+ *	is not a history change and must not cost a rebuild.
  */
 int storage_rocksdb::_load_or_init_generations() {
-	struct { const char* key; uint64_t* slot; } gens[] = {
+	struct { const char* key; string* slot; } gens[] = {
 		{ kReplSourceEpochKey, &this->_source_epoch },
 		{ kReplIncarnationKey, &this->_incarnation },
 	};
+	pthread_rwlock_wrlock(&this->_mutex_generations);
+	int rc = 0;
 	for (size_t i = 0; i < sizeof(gens) / sizeof(gens[0]); i++) {
 		string value;
 		rocksdb::Status st = this->_db->Get(this->_read_options, gens[i].key, &value);
-		if (st.ok()) {
-			try {
-				*gens[i].slot = boost::lexical_cast<uint64_t>(value);
-				continue;
-			} catch (boost::bad_lexical_cast&) {
-				log_err("unparseable %s [%s] -> reinitialising", gens[i].key, value.c_str());
-			}
-		} else if (!st.IsNotFound()) {
+		if (st.ok() && !value.empty()) {
+			*gens[i].slot = value;
+			continue;
+		}
+		if (!st.ok() && !st.IsNotFound()) {
 			log_err("failed to read %s: %s", gens[i].key, st.ToString().c_str());
-			return -1;
+			rc = -1;
+			break;
 		}
-		*gens[i].slot = 1;
-		if (this->_persist_generation(gens[i].key, 1) < 0) {
-			return -1;
+		const string minted = _mint_generation("");
+		if (this->_persist_generation(gens[i].key, minted) < 0) {
+			rc = -1;
+			break;
 		}
+		*gens[i].slot = minted;
 	}
-	log_notice("replication generations (source_epoch=%llu, incarnation=%llu)",
-		(unsigned long long)this->_source_epoch, (unsigned long long)this->_incarnation);
+	this->_generations_broken = (rc != 0);
+	const string epoch = this->_source_epoch;
+	const string incarnation = this->_incarnation;
+	pthread_rwlock_unlock(&this->_mutex_generations);
+	if (rc != 0) {
+		log_err("replication generations UNAVAILABLE: this node will neither serve nor accept replication until they can be established", 0);
+		return -1;
+	}
+	log_notice("replication generations (source_epoch=%s, incarnation=%s)",
+		epoch.c_str(), incarnation.c_str());
 	return 0;
 }
 
-uint64_t storage_rocksdb::get_source_epoch() {
+string storage_rocksdb::get_source_epoch() {
 	pthread_rwlock_rdlock(&this->_mutex_generations);
-	uint64_t n = this->_source_epoch;
+	string v = this->_generations_broken ? string("") : this->_source_epoch;
 	pthread_rwlock_unlock(&this->_mutex_generations);
-	return n;
+	return v;
 }
 
-uint64_t storage_rocksdb::get_incarnation() {
+string storage_rocksdb::get_incarnation() {
 	pthread_rwlock_rdlock(&this->_mutex_generations);
-	uint64_t n = this->_incarnation;
+	string v = this->_generations_broken ? string("") : this->_incarnation;
 	pthread_rwlock_unlock(&this->_mutex_generations);
-	return n;
+	return v;
+}
+
+bool storage_rocksdb::generations_broken() const {
+	pthread_rwlock_rdlock(&this->_mutex_generations);
+	bool b = this->_generations_broken;
+	pthread_rwlock_unlock(&this->_mutex_generations);
+	return b;
 }
 
 /**
  *	Advance the SOURCE EPOCH: this node's history is no longer a continuation
  *	of what followers have been reading. Promotion, a replacement of the local
  *	history, and a bulk rewrite (truncate / flush_all) all qualify. Followers
- *	see the change, refuse the old stream and rebuild — deliberate, and the
- *	honest alternative to diverging silently.
+ *	see a different identity, refuse the old stream and rebuild.
+ *
+ *	FAIL CLOSED: if the new identity cannot be persisted, the node must not
+ *	keep advertising the old one over a changed history. The generations go
+ *	UNAVAILABLE, which every replication path refuses on.
  */
-uint64_t storage_rocksdb::advance_source_epoch() {
+int storage_rocksdb::advance_source_epoch() {
 	pthread_rwlock_wrlock(&this->_mutex_generations);
-	uint64_t n = this->_source_epoch + 1;
-	int r = this->_persist_generation(kReplSourceEpochKey, n);
+	const string minted = _mint_generation(this->_source_epoch);
+	int r = this->_persist_generation(kReplSourceEpochKey, minted);
 	if (r == 0) {
-		this->_source_epoch = n;
+		this->_source_epoch = minted;
 	} else {
-		n = this->_source_epoch;
+		this->_generations_broken = true;
 	}
 	pthread_rwlock_unlock(&this->_mutex_generations);
 	if (r == 0) {
-		log_notice("source epoch advanced to %llu (followers of the previous history must rebuild)",
-			(unsigned long long)n);
+		log_notice("source epoch advanced to %s (followers of the previous history must rebuild)", minted.c_str());
 	} else {
-		log_err("could not advance the source epoch; it stays at %llu", (unsigned long long)n);
+		log_err("could not persist the new source epoch: this node's history changed but the identity did not — replication is now UNAVAILABLE here (fail closed)", 0);
 	}
-	return n;
+	return r;
 }
 
 /**
  *	Advance the RECEIVER INCARNATION: this node's own copy was replaced, so
  *	streams and forwarded changes issued against the previous copy must be
- *	refused rather than applied onto the new one.
+ *	refused rather than applied onto the new one. Same fail-closed rule.
  */
-uint64_t storage_rocksdb::advance_incarnation() {
+int storage_rocksdb::advance_incarnation() {
 	pthread_rwlock_wrlock(&this->_mutex_generations);
-	uint64_t n = this->_incarnation + 1;
-	int r = this->_persist_generation(kReplIncarnationKey, n);
+	const string minted = _mint_generation(this->_incarnation);
+	int r = this->_persist_generation(kReplIncarnationKey, minted);
 	if (r == 0) {
-		this->_incarnation = n;
+		this->_incarnation = minted;
 	} else {
-		n = this->_incarnation;
+		this->_generations_broken = true;
 	}
 	pthread_rwlock_unlock(&this->_mutex_generations);
 	if (r == 0) {
-		log_notice("receiver incarnation advanced to %llu (deliveries for the previous copy are refused)",
-			(unsigned long long)n);
+		log_notice("receiver incarnation advanced to %s (deliveries for the previous copy are refused)", minted.c_str());
 	} else {
-		log_err("could not advance the receiver incarnation; it stays at %llu", (unsigned long long)n);
+		log_err("could not persist the new receiver incarnation: this node's copy was replaced but the identity did not change — replication is now UNAVAILABLE here (fail closed)", 0);
 	}
-	return n;
+	return r;
 }
 
 int storage_rocksdb::regenerate_master_id() {
@@ -433,7 +480,10 @@ int storage_rocksdb::open() {
 	}
 
 	// Never expose a half-restored copy (design §3.9(D)).
-	this->_discard_incomplete_restore();
+	if (this->_discard_incomplete_restore() < 0) {
+		log_err("storage open refused: an interrupted restore could not be cleaned up", 0);
+		return -1;
+	}
 
 	rocksdb::Status status = rocksdb::DB::Open(this->_options, this->_data_path, &this->_db);
 	if (!status.ok()) {
@@ -1192,21 +1242,29 @@ string storage_rocksdb::_restore_pending_path() const {
  *	source's data with our replication metadata unset. Wipe it and come up
  *	empty; reconstruction reseeds. Returns true when it wiped.
  */
-bool storage_rocksdb::_discard_incomplete_restore() {
+int storage_rocksdb::_discard_incomplete_restore() {
 	const string pending = this->_restore_pending_path();
 	struct stat sb;
 	if (stat(pending.c_str(), &sb) != 0) {
-		return false;
+		return 0;
 	}
 	log_err("an interrupted snapshot restore was found (sentinel=%s): the DB holds the source's data with our replication metadata unset -> discarding it and starting empty; reconstruction will reseed",
 		pending.c_str());
 	if (remove_tree(this->_data_path) != 0) {
-		log_err("failed to remove the half-restored DB dir [%s]", this->_data_path.c_str());
+		// FAIL CLOSED: opening the directory now would expose the source's
+		// data under this node's identity with no cursor and no generations.
+		// Refuse to open at all; the node stays down and is rebuilt.
+		log_err("failed to remove the half-restored DB dir [%s] -> refusing to open it", this->_data_path.c_str());
+		return -1;
 	}
 	if (unlink(pending.c_str()) != 0 && errno != ENOENT) {
-		log_warning("could not remove the restore sentinel: %s", util::strerror(errno));
+		// The data is gone, so opening is safe, but leaving the sentinel
+		// would discard the NEXT (good) restore as well.
+		log_err("the half-restored DB was removed but its sentinel [%s] could not be: %s -> refusing to open (the next restore would be discarded too)",
+			pending.c_str(), util::strerror(errno));
+		return -1;
 	}
-	return true;
+	return 0;
 }
 
 int storage_rocksdb::create_snapshot_checkpoint(string& out_path, uint64_t& out_seq) {
@@ -1424,24 +1482,28 @@ int storage_rocksdb::swap_in_snapshot(const string& staging_dir, uint64_t checkp
 				lsn_value = "0";
 			}
 
-			uint64_t inherited_epoch = 1;
+			// The SOURCE EPOCH is inherited from the checkpoint: we are now
+			// following that history, and its identity is what our cursor
+			// belongs to. A checkpoint without one is refused rather than
+			// guessed — an unidentified history cannot be compared later.
+			string inherited_epoch;
 			{
-				string v;
-				rocksdb::Status gs = this->_db->Get(this->_read_options, kReplSourceEpochKey, &v);
-				if (gs.ok()) {
-					try {
-						inherited_epoch = boost::lexical_cast<uint64_t>(v);
-					} catch (...) {
-						inherited_epoch = 1;
-					}
+				rocksdb::Status gs = this->_db->Get(this->_read_options, kReplSourceEpochKey, &inherited_epoch);
+				if (!gs.ok() || inherited_epoch.empty()) {
+					log_err("swap_in_snapshot: the checkpoint carries no source epoch -> refusing to complete the restore (the history could not be identified)", 0);
+					break;
 				}
 			}
-			uint64_t next_incarnation = this->get_incarnation() + 1;
+			// The RECEIVER INCARNATION is freshly minted, never derived from
+			// what the checkpoint carries: a repeated restore must produce a
+			// different identity every time, or a delivery issued against the
+			// previous copy would be accepted onto this one.
+			const string next_incarnation = _mint_generation(this->get_incarnation());
 
 			rocksdb::WriteBatch restore;
 			restore.Put(kReplLastLsnKey, lsn_value);
-			restore.Put(kReplSourceEpochKey, boost::lexical_cast<string>(inherited_epoch));
-			restore.Put(kReplIncarnationKey, boost::lexical_cast<string>(next_incarnation));
+			restore.Put(kReplSourceEpochKey, inherited_epoch);
+			restore.Put(kReplIncarnationKey, next_incarnation);
 			restore.Put(kReplRestoreDoneKey, boost::lexical_cast<string>(checkpoint_seq));
 			rocksdb::Status st = this->_db->Write(wo, &restore);
 			if (!st.ok()) {
@@ -1451,14 +1513,26 @@ int storage_rocksdb::swap_in_snapshot(const string& staging_dir, uint64_t checkp
 			pthread_rwlock_wrlock(&this->_mutex_generations);
 			this->_source_epoch = inherited_epoch;
 			this->_incarnation = next_incarnation;
+			this->_generations_broken = false;
 			pthread_rwlock_unlock(&this->_mutex_generations);
-			log_notice("restore completed (cursor=%llu, source_epoch=%llu, incarnation=%llu)",
+			log_notice("restore completed (cursor=%llu, source_epoch=%s, incarnation=%s)",
 				(unsigned long long)checkpoint_seq,
-				(unsigned long long)inherited_epoch,
-				(unsigned long long)next_incarnation);
-			// The restore is complete and durable: clear the sentinel.
-			if (unlink(this->_restore_pending_path().c_str()) != 0 && errno != ENOENT) {
-				log_warning("swap_in_snapshot: could not remove the restore sentinel: %s", util::strerror(errno));
+				inherited_epoch.c_str(), next_incarnation.c_str());
+			// The restore is complete and durable: clear the sentinel. If it
+			// cannot be removed the DB is GOOD but will be discarded and
+			// rebuilt at the next start — costly, never unsafe. Say so at
+			// error level so the cause is visible before that happens.
+			{
+				const string pending = this->_restore_pending_path();
+				int attempts = 0;
+				while (unlink(pending.c_str()) != 0 && errno != ENOENT && ++attempts < 3) {
+					usleep(10000);
+				}
+				struct stat sb;
+				if (stat(pending.c_str(), &sb) == 0) {
+					log_err("swap_in_snapshot: the restore completed but its sentinel [%s] could not be removed: this node will DISCARD this copy and reconstruct again at the next start",
+						pending.c_str());
+				}
 			}
 		}
 
@@ -1708,12 +1782,15 @@ int storage_rocksdb::hard_reset() {
 		this->_corrupted = false;
 		this->_hard_reset.incr();
 		// The local copy was replaced: deliveries and streams issued against
-		// the previous copy must be refused (design §3.1). The reopened DB is
-		// empty, so the generations were just re-initialised to 1 by
-		// _load_or_init_generations() only if open() ran; do it explicitly
-		// here because hard_reset reopens the handle directly.
-		this->_load_or_init_generations();
-		this->advance_incarnation();
+		// the previous copy must be refused (design §3.1). hard_reset reopens
+		// the handle directly, so establish the generations here. The DB is
+		// empty, so _load_or_init_generations() MINTS both — a fresh identity
+		// per reset, which is what makes a repeated hard reset distinguishable
+		// (a counter would return to the same value every time). Its history
+		// is gone too, so the source epoch is new as well.
+		if (this->_load_or_init_generations() < 0) {
+			log_err("hard_reset: could not establish replication generations; replication stays UNAVAILABLE on this node", 0);
+		}
 		// A fresh empty DB has no lineage; repl_last_lsn is 0, so the next
 		// reconstruction takes the clean full/snapshot reseed path.
 		log_notice("hard_reset: wiped and reopened empty DB [%s]; reconstruction will reseed", this->_data_path.c_str());

@@ -1739,7 +1739,12 @@ int cluster::_shift_node_role(string node_key, role old_role, int old_partition,
 		// only fires when the cursor exceeds our own sequence, so a
 		// snapshot-rebuilt replica (cursor == checkpoint sequence) would keep
 		// the old token over an unrelated sequence space.
-		this->_storage->advance_source_epoch();
+		if (this->_storage->advance_source_epoch() < 0) {
+			// Fail closed: the storage marks its generations unavailable and
+			// every replication path refuses on that, rather than this node
+			// serving a new history under the previous identity.
+			log_err("promotion: could not advance the source epoch -> replication is UNAVAILABLE on this node until it can be persisted", 0);
+		}
 		uint64_t cursor = this->_storage->get_repl_last_lsn();
 		uint64_t seq = this->_storage->get_latest_sequence_number();
 		if (cursor > seq) {

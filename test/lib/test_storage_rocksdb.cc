@@ -1414,6 +1414,252 @@ void test_verify_integrity_clean() {
 	drop_rocksdb(s, wal_master_dir);
 }
 
+// ---------------------------------------------------------------------------
+// SAF-10b stage 1: generation identities and the all-or-nothing restore.
+//
+// These pin the four defects found in review of the first cut: a per-node
+// counter cannot distinguish two histories (sequential promotion), a repeated
+// reset returns to the same value, a failed persist left the node advertising
+// an unchanged identity over changed data, and a failed cleanup at a restore
+// boundary could still expose a half-restored copy.
+// ---------------------------------------------------------------------------
+
+namespace {
+	// The sentinel swap_in_snapshot writes beside the DB directory.
+	string restore_sentinel(const char* dir) {
+		return string(dir) + "/.flare_restore_pending";
+	}
+}
+
+// Two SEPARATE copies, each promoted in turn, must never advertise the same
+// source epoch: their sequence spaces are unrelated, and a follower comparing
+// numbers across them would apply one history's positions against another's.
+void test_generation_epoch_unique_across_sequential_promotions() {
+	storage_rocksdb* a = make_rocksdb(wal_master_dir);
+	storage_rocksdb* b = make_rocksdb(wal_slave_dir);
+
+	const string a0 = a->get_source_epoch();
+	const string b0 = b->get_source_epoch();
+	cut_assert_operator(a0.size(), >, static_cast<size_t>(0));
+	cut_assert_operator(b0.size(), >, static_cast<size_t>(0));
+	cut_assert_not_equal_string(a0.c_str(), b0.c_str());
+
+	// Promote A, then promote B — the same number of advances on each.
+	cut_assert_equal_int(0, a->advance_source_epoch());
+	cut_assert_equal_int(0, b->advance_source_epoch());
+	const string a1 = a->get_source_epoch();
+	const string b1 = b->get_source_epoch();
+	cut_assert_not_equal_string(a1.c_str(), a0.c_str());
+	cut_assert_not_equal_string(b1.c_str(), b0.c_str());
+	// The point of the test: equal advance counts, different identities.
+	cut_assert_not_equal_string(a1.c_str(), b1.c_str());
+
+	drop_rocksdb(a, wal_master_dir);
+	drop_rocksdb(b, wal_slave_dir);
+}
+
+// A repeated hard reset must mint a NEW incarnation every time. With a
+// counter, each reset re-initialised an empty DB and produced the same value,
+// so a delivery issued against the previous copy would be accepted.
+void test_generation_incarnation_unique_across_repeated_hard_reset() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	const string i0 = s->get_incarnation();
+	const string e0 = s->get_source_epoch();
+	cut_assert_operator(i0.size(), >, static_cast<size_t>(0));
+
+	cut_assert_equal_int(0, s->hard_reset());
+	const string i1 = s->get_incarnation();
+	const string e1 = s->get_source_epoch();
+	cut_assert_not_equal_string(i1.c_str(), i0.c_str());
+	cut_assert_not_equal_string(e1.c_str(), e0.c_str());   // its history is gone too
+
+	cut_assert_equal_int(0, s->hard_reset());
+	const string i2 = s->get_incarnation();
+	cut_assert_not_equal_string(i2.c_str(), i1.c_str());
+	cut_assert_not_equal_string(i2.c_str(), i0.c_str());
+
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// Both identities survive a plain reopen unchanged: a process restart is not
+// a history change and must not cost a rebuild.
+void test_generations_survive_reopen() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	const string e = s->get_source_epoch();
+	const string i = s->get_incarnation();
+	drop_rocksdb_noremove(s);
+
+	s = make_rocksdb(wal_master_dir);
+	cut_assert_equal_string(e.c_str(), s->get_source_epoch().c_str());
+	cut_assert_equal_string(i.c_str(), s->get_incarnation().c_str());
+	cut_assert_false(s->generations_broken());
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// A generation that cannot be persisted must leave the node UNAVAILABLE for
+// replication, not advertising the old identity over changed data.
+void test_generation_persist_failure_is_fail_closed() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	cut_assert_operator(s->get_source_epoch().size(), >, static_cast<size_t>(0));
+
+	// Closing the handle makes every persist fail, which is the observable
+	// stand-in for a write error at the moment of the advance.
+	s->close();
+	cut_assert_equal_int(-1, s->advance_source_epoch());
+	cut_assert_true(s->generations_broken());
+	cut_assert_equal_string("", s->get_source_epoch().c_str());
+	cut_assert_equal_string("", s->get_incarnation().c_str());
+
+	delete s;
+	s = NULL;
+	cut_remove_path(wal_master_dir, NULL);
+}
+
+// A restore interrupted anywhere between "old copy destroyed" and "cursor,
+// generations and marker committed" leaves the sentinel behind; the next open
+// must discard that copy rather than expose the source's data with our
+// metadata unset.
+void test_restore_sentinel_discards_half_restored_copy() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	cut_assert_equal_int(0, storage_set_string(s, "survivor", "v"));
+	const string before = s->get_incarnation();
+	drop_rocksdb_noremove(s);
+
+	// Simulate the crash window: the sentinel is on disk, the DB is not ours.
+	FILE* fp = fopen(restore_sentinel(wal_master_dir).c_str(), "w");
+	cut_assert_not_null(fp);
+	fclose(fp);
+
+	s = make_rocksdb(wal_master_dir);
+	string out;
+	cut_assert_operator(storage_get_string(s, "survivor", out), !=, 0);   // discarded
+	cut_assert_equal_int(0, static_cast<int>(s->count()));
+	cut_assert_operator(s->get_incarnation().size(), >, static_cast<size_t>(0));
+	cut_assert_not_equal_string(before.c_str(), s->get_incarnation().c_str());
+	cut_assert_false(s->generations_broken());
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// If the sentinel itself cannot be cleared, opening would discard the NEXT
+// (good) restore as well, so open must refuse instead. A directory in its
+// place makes unlink() fail deterministically.
+void test_restore_sentinel_unremovable_refuses_open() {
+	mkdir(wal_master_dir, 0700);
+	cut_assert_equal_int(0, mkdir(restore_sentinel(wal_master_dir).c_str(), 0700));
+
+	storage_rocksdb* s = new storage_rocksdb(wal_master_dir, 32, 4, 16, 4, 2, 86400, 1024);
+	cut_assert_equal_int(-1, s->open());
+	delete s;
+
+	rmdir(restore_sentinel(wal_master_dir).c_str());
+	cut_remove_path(wal_master_dir, NULL);
+}
+
+// A checkpoint that carries no source epoch cannot be identified, so the
+// restore must be refused rather than completed against an unknown history.
+void test_swap_in_snapshot_refuses_checkpoint_without_source_epoch() {
+	storage_rocksdb* master = make_rocksdb(wal_master_dir);
+	storage_rocksdb* slave  = make_rocksdb(wal_slave_dir);
+	cut_assert_equal_int(0, storage_set_string(master, "k", "v"));
+
+	string cp_path;
+	uint64_t cp_seq = 0;
+	cut_assert_equal_int(0, master->create_snapshot_checkpoint(cp_path, cp_seq));
+
+	string staging;
+	cut_assert_equal_int(0, slave->prepare_snapshot_staging(staging));
+	cut_assert_equal_int(0, copy_dir_flat(cp_path, staging));
+	cut_assert_equal_int(0, master->remove_snapshot_checkpoint(cp_path));
+
+	// Strip the identity from the staged copy: open it and delete the key.
+	{
+		rocksdb::DB* db = NULL;
+		rocksdb::Options o;
+		o.create_if_missing = false;
+		cut_assert_true(rocksdb::DB::Open(o, staging, &db).ok());
+		cut_assert_true(db->Delete(rocksdb::WriteOptions(), storage_rocksdb::kReplSourceEpochKey).ok());
+		delete db;
+	}
+
+	const string before = slave->get_incarnation();
+	cut_assert_operator(slave->swap_in_snapshot(staging, cp_seq), <, 0);
+	// Refused: the identity did not move, and the node is not left claiming
+	// a cursor for a history it cannot name.
+	cut_assert_equal_string(before.c_str(), slave->get_incarnation().c_str());
+
+	drop_rocksdb(master, wal_master_dir);
+	drop_rocksdb(slave,  wal_slave_dir);
+}
+
+// A successful restore inherits the source's epoch and mints a FRESH
+// incarnation; restoring twice must not reuse the identity.
+void test_restore_inherits_epoch_and_mints_incarnation() {
+	storage_rocksdb* master = make_rocksdb(wal_master_dir);
+	storage_rocksdb* slave  = make_rocksdb(wal_slave_dir);
+	cut_assert_equal_int(0, storage_set_string(master, "k", "v"));
+
+	string incarnations[2];
+	for (int round = 0; round < 2; round++) {
+		string cp_path;
+		uint64_t cp_seq = 0;
+		cut_assert_equal_int(0, master->create_snapshot_checkpoint(cp_path, cp_seq));
+		string staging;
+		cut_assert_equal_int(0, slave->prepare_snapshot_staging(staging));
+		cut_assert_equal_int(0, copy_dir_flat(cp_path, staging));
+		cut_assert_equal_int(0, master->remove_snapshot_checkpoint(cp_path));
+		cut_assert_equal_int(0, slave->swap_in_snapshot(staging, cp_seq));
+
+		cut_assert_equal_string(master->get_source_epoch().c_str(), slave->get_source_epoch().c_str());
+		incarnations[round] = slave->get_incarnation();
+		cut_assert_operator(incarnations[round].size(), >, static_cast<size_t>(0));
+		// The sentinel must be gone once the restore completed.
+		struct stat sb;
+		cut_assert_operator(stat(restore_sentinel(wal_slave_dir).c_str(), &sb), !=, 0);
+	}
+	cut_assert_not_equal_string(incarnations[0].c_str(), incarnations[1].c_str());
+
+	drop_rocksdb(master, wal_master_dir);
+	drop_rocksdb(slave,  wal_slave_dir);
+}
+
+// truncate() replaces the history, so followers must see a different source
+// epoch rather than a silently rewritten one.
+void test_truncate_advances_source_epoch() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	cut_assert_equal_int(0, storage_set_string(s, "k", "v"));
+	const string before = s->get_source_epoch();
+	cut_assert_equal_int(0, s->truncate());
+	cut_assert_not_equal_string(before.c_str(), s->get_source_epoch().c_str());
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// The order label is captured inside the key's critical section, so the next
+// change to the SAME key always carries a strictly greater one — including
+// the delete that follows a set, which is the resurrection counterexample.
+void test_order_label_strictly_monotonic_per_key() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+
+	storage::entry e1;
+	e1.key = "k";
+	e1.size = 1;
+	e1.data = shared_byte(new uint8_t[1]);
+	e1.data.get()[0] = 'a';
+	storage::result r;
+	cut_assert_equal_int(0, s->set(e1, r));
+	cut_assert_operator(e1.seq_label, >, static_cast<uint64_t>(0));
+
+	// An unrelated key's write may inflate the label, which is allowed.
+	storage_set_string(s, "other", "x");
+
+	storage::entry e2;
+	e2.key = "k";
+	storage::result r2;
+	cut_assert_equal_int(0, s->remove(e2, r2));
+	cut_assert_operator(e2.seq_label, >, e1.seq_label);
+
+	drop_rocksdb(s, wal_master_dir);
+}
+
 	void teardown()
 	{
 		delete rocksdb_tester;

@@ -121,8 +121,13 @@ protected:
 	string _master_id;
 	// Generations (design §3.1). Guarded by _mutex_generations; persisted
 	// under the reserved keys above so they survive a restart unchanged.
-	uint64_t _source_epoch;
-	uint64_t _incarnation;
+	string _source_epoch;
+	string _incarnation;
+	// Set when a generation could not be established or persisted. The
+	// accessors then report "unavailable" and the replication paths refuse:
+	// serving a changed history under an unchanged token is the failure this
+	// guards against.
+	bool _generations_broken;
 	mutable pthread_rwlock_t _mutex_generations;
 
 	// WAL replication observability counters. Read-only after increment;
@@ -221,8 +226,13 @@ protected:
 	// from open() after the master id.
 	int _load_or_init_generations();
 	string _restore_pending_path() const;
-	bool _discard_incomplete_restore();
-	int _persist_generation(const char* key, uint64_t value);
+	// 0: nothing to do or discarded cleanly. -1: a half-restored DB is on
+	// disk and could NOT be removed — the caller must not open it.
+	int _discard_incomplete_restore();
+	int _persist_generation(const char* key, const string& value);
+	// "<n>:<uuid>": n is monotonic within this DB and for humans; the uuid
+	// makes the value unique across DBs and across repeated resets.
+	static string _mint_generation(const string& previous);
 
 public:
 	storage_rocksdb(
@@ -313,11 +323,13 @@ public:
 	// reference) because the token can be rewritten concurrently by the
 	// reconstruction thread; see _mutex_master_id.
 	string get_master_id() const;
-	uint64_t get_source_epoch();
-	uint64_t get_incarnation();
-	// Advance and persist. Both are monotonic and never reused.
-	uint64_t advance_source_epoch();
-	uint64_t advance_incarnation();
+	string get_source_epoch();
+	string get_incarnation();
+	// Mint, persist and publish a fresh identity. 0 on success; on failure
+	// the generations become UNAVAILABLE (fail closed) and -1 is returned.
+	int advance_source_epoch();
+	int advance_incarnation();
+	bool generations_broken() const;
 	int set_master_id(const string& id);
 	// Mint and persist a brand-new master_id (fresh UUID). Called at
 	// promotion to master when this node carries a replication cursor from a

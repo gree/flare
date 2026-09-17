@@ -60,6 +60,19 @@ namespace flare {
 class storage_rocksdb : public storage {
 public:
 	// Error codes for WAL operations
+	// Outcome of the COMMON APPLY RULE (design §3.3). Both delivery paths —
+	// op-level forwarding and the WAL stream — go through it, so a change
+	// that is not strictly newer than what the key already has is never
+	// applied, whichever path carried it.
+	enum apply_outcome {
+		apply_applied = 0,			// written
+		apply_skipped_superseded,	// the key already holds this or a newer change
+		apply_refused_cursor,		// at or below the applied position: already decided
+		apply_refused_session,		// different source history, or generations unavailable
+		apply_refused_incarnation,	// issued against a copy this node no longer is
+		apply_error,				// storage failure; nothing was written
+	};
+
 	static const int ERR_LSN_PURGED       = -1;
 	static const int ERR_LSN_INVALID      = -2;
 	static const int ERR_LSN_AHEAD        = -3;  // slave's LSN > master's latest
@@ -94,6 +107,29 @@ protected:
 	static const type _type = storage::type_rocksdb;
 
 	rocksdb::DB* _db;
+	// REPLICATION METADATA column family (design §3.7): one row per key that
+	// a delivery has been applied to, holding the source epoch, the order
+	// label and whether that label was a delete (a tombstone). Kept out of
+	// the default column family so it never shows up in iteration, dumps,
+	// counts or the key space, and so it can be dropped wholesale when this
+	// copy is replaced. Written ONLY by the apply paths — a master's own
+	// client writes do not need it, and a demoted master rebuilds anyway.
+	rocksdb::ColumnFamilyHandle* _cf_default;
+	rocksdb::ColumnFamilyHandle* _cf_meta;
+	// Serialization between the two delivery paths (design §3.8). The WAL
+	// applier takes this EXCLUSIVELY for decode->decide->write->GC; a
+	// forwarded change takes it SHARED and additionally the key's slot lock.
+	// Lock order everywhere: _repl_apply_lock -> _mutex_wholelock -> slot
+	// locks in ascending index.
+	pthread_rwlock_t _repl_apply_lock;
+	AtomicCounter _repl_forward_applied;
+	AtomicCounter _repl_forward_skipped;
+	AtomicCounter _repl_wal_applied;
+	AtomicCounter _repl_wal_skipped;
+	AtomicCounter _repl_decode_refused;
+	AtomicCounter _repl_tombstones_dropped;
+	// Resume point for the chunked tombstone sweep.
+	string _tombstone_sweep_cursor;
 	rocksdb::Options _options;
 	rocksdb::WriteOptions _write_options;
 	rocksdb::ReadOptions _read_options;
@@ -230,6 +266,27 @@ protected:
 	// disk and could NOT be removed — the caller must not open it.
 	int _discard_incomplete_restore();
 	int _persist_generation(const char* key, const string& value);
+	// Open/close the DB with both column families, creating the metadata one
+	// if the directory does not have it yet (an older DB, or a checkpoint
+	// taken from a node that never applied a delivery).
+	rocksdb::Status _open_db(const string& path);
+	// Per-key replication metadata (design §3.7): "<epoch>|<label>|<0|1>".
+	struct repl_meta {
+		string   epoch;
+		uint64_t label;
+		bool     deleted;
+		repl_meta(): label(0), deleted(false) {}
+	};
+	// 0: found. 1: absent. -1: read error.
+	int _read_repl_meta(const string& key, repl_meta& out);
+	void _stage_repl_meta(rocksdb::WriteBatch& batch, const string& key,
+		const string& epoch, uint64_t label, bool deleted);
+	// The rule itself, with no I/O: given what the key already carries, may a
+	// change with (epoch,label) be applied?
+	apply_outcome _decide_change(const string& epoch, uint64_t label,
+		bool have_meta, const repl_meta& current, uint64_t applied_cursor);
+	void _close_db();
+	static const char* const kReplMetaCfName;
 	// "<n>:<uuid>": n is monotonic within this DB and for humans; the uuid
 	// makes the value unique across DBs and across repeated resets.
 	static string _mint_generation(const string& previous);
@@ -306,6 +363,43 @@ public:
 	// RocksDB-specific methods for WAL replication
 	uint64_t get_latest_sequence_number();
 	int get_updates_since(uint64_t seq_number, vector<pair<uint64_t, rocksdb::WriteBatch>>& updates);
+	// ---- COMMON APPLY RULE (design §3.3, §3.4, §3.5, §3.8) ----------------
+	// Forwarded delivery of ONE change. Takes the apply lock in SHARED mode
+	// plus this key's slot lock: forwarded changes stay concurrent with one
+	// another and serialized per key, but never overlap the WAL applier's
+	// window. The applied position is read INSIDE that section.
+	apply_outcome apply_forwarded_change(const string& source_epoch,
+		const string& incarnation, uint64_t label, entry& e, bool is_delete);
+
+	// WAL delivery of one fetched batch, identified by the sequence RocksDB
+	// gave it. Takes the apply lock EXCLUSIVELY, decodes the batch into
+	// changes, decides each against the key's metadata and the earlier
+	// changes of the same batch, and commits the survivors, their metadata,
+	// the tombstone updates AND the new cursor in one WriteBatch — so a
+	// crash between applying and recording the position cannot happen.
+	// Returns 0 on success (counts filled), -1 when the batch was refused;
+	// `refusal` then says why and nothing was written.
+	int apply_wal_batch(const string& source_epoch, uint64_t base_seq,
+		const rocksdb::WriteBatch& batch, uint64_t& applied, uint64_t& skipped,
+		apply_outcome& refusal);
+
+	// Drop tombstones the applied position has passed (design §3.5). Bounded
+	// and resumable: called from inside the applier's window, never as a
+	// long sweep. Returns how many were dropped.
+	uint64_t collect_tombstones(uint64_t budget = 256);
+private:
+	// Same, with _repl_apply_lock already held exclusively.
+	uint64_t _collect_tombstones_locked(uint64_t budget);
+public:
+	uint64_t get_repl_tombstones();
+
+	uint64_t get_repl_forward_applied()   { return this->_repl_forward_applied.fetch(); }
+	uint64_t get_repl_forward_skipped()   { return this->_repl_forward_skipped.fetch(); }
+	uint64_t get_repl_wal_applied()       { return this->_repl_wal_applied.fetch(); }
+	uint64_t get_repl_wal_skipped()       { return this->_repl_wal_skipped.fetch(); }
+	uint64_t get_repl_decode_refused()    { return this->_repl_decode_refused.fetch(); }
+	uint64_t get_repl_tombstones_dropped(){ return this->_repl_tombstones_dropped.fetch(); }
+
 	int apply_batch(const rocksdb::WriteBatch& batch);
 	int apply_batch_with_lsn(const rocksdb::WriteBatch& batch, uint64_t master_lsn);
 	static bool validate_batch_rep(const rocksdb::WriteBatch& batch);

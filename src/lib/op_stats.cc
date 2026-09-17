@@ -222,6 +222,16 @@ int op_stats::_send_stats(thread_pool* req_tp, thread_pool* other_tp, storage* s
 			_send_stat("rocksdb_source_epoch"               , rdb->get_source_epoch());
 			_send_stat("rocksdb_incarnation"                , rdb->get_incarnation());
 			_send_stat("rocksdb_generations_broken"         , rdb->generations_broken() ? 1 : 0);
+			// Common apply rule (SAF-10b): what each delivery path did.
+			// repl_wal_skipped moving while repl_forward_applied moves is the
+			// healthy signal of coexistence — the WAL re-delivering changes
+			// that forwarding already applied.
+			_send_stat("repl_forward_applied"               , rdb->get_repl_forward_applied());
+			_send_stat("repl_forward_skipped"               , rdb->get_repl_forward_skipped());
+			_send_stat("repl_wal_applied"                   , rdb->get_repl_wal_applied());
+			_send_stat("repl_wal_skipped"                   , rdb->get_repl_wal_skipped());
+			_send_stat("repl_decode_refused"                , rdb->get_repl_decode_refused());
+			_send_stat("repl_tombstones_dropped"            , rdb->get_repl_tombstones_dropped());
 			_send_stat("rocksdb_repl_last_lsn"              , rdb->get_repl_last_lsn());
 			_send_stat("rocksdb_latest_sequence_number"     , rdb->get_latest_sequence_number());
 			_send_stat("rocksdb_wal_sync_success"           , rdb->get_wal_sync_success());

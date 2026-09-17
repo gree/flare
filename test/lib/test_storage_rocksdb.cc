@@ -1733,6 +1733,7 @@ void test_apply_rule_forwarded_newer_survives_older_wal() {
 	storage_rocksdb* s = make_rocksdb(wal_master_dir);
 	const string epoch = s->get_source_epoch();
 	const string inc = s->get_incarnation();
+	const string inc_for_batch = inc;
 
 	storage::entry e;
 	fill_entry(e, "k", "new");
@@ -1750,7 +1751,7 @@ void test_apply_rule_forwarded_newer_survives_older_wal() {
 	older.Put(rocksdb::Slice("k"), rocksdb::Slice(old_bytes));
 	uint64_t applied = 0, skipped = 0;
 	storage_rocksdb::apply_outcome refusal;
-	cut_assert_equal_int(0, s->apply_wal_batch(epoch, 90, older, applied, skipped, refusal));
+	cut_assert_equal_int(0, s->apply_wal_batch(epoch, inc_for_batch, 90, older, applied, skipped, refusal));
 	cppcut_assert_equal(static_cast<uint64_t>(0), applied);
 	cppcut_assert_equal(static_cast<uint64_t>(1), skipped);
 
@@ -1767,6 +1768,7 @@ void test_apply_rule_delete_then_older_put_does_not_resurrect() {
 	storage_rocksdb* s = make_rocksdb(wal_master_dir);
 	const string epoch = s->get_source_epoch();
 	const string inc = s->get_incarnation();
+	const string inc_for_batch = inc;
 
 	storage::entry put1;
 	fill_entry(put1, "k", "v1");
@@ -1796,6 +1798,7 @@ void test_apply_rule_old_put_refused_after_tombstone_collected() {
 	storage_rocksdb* s = make_rocksdb(wal_master_dir);
 	const string epoch = s->get_source_epoch();
 	const string inc = s->get_incarnation();
+	const string inc_for_batch = inc;
 
 	storage::entry del;
 	del.key = "k";
@@ -1810,7 +1813,7 @@ void test_apply_rule_old_put_refused_after_tombstone_collected() {
 	empty_batch.Put(rocksdb::Slice(storage_rocksdb::kReplLastLsnKey), rocksdb::Slice("30"));
 	uint64_t applied = 0, skipped = 0;
 	storage_rocksdb::apply_outcome refusal;
-	cut_assert_equal_int(0, s->apply_wal_batch(epoch, 30, empty_batch, applied, skipped, refusal));
+	cut_assert_equal_int(0, s->apply_wal_batch(epoch, inc_for_batch, 30, empty_batch, applied, skipped, refusal));
 	cut_assert_operator(s->get_repl_last_lsn(), >=, static_cast<uint64_t>(20));
 	cppcut_assert_equal(static_cast<uint64_t>(0), s->get_repl_tombstones());   // collected
 
@@ -1829,6 +1832,7 @@ void test_apply_rule_forwarded_change_does_not_advance_cursor() {
 	storage_rocksdb* s = make_rocksdb(wal_master_dir);
 	const string epoch = s->get_source_epoch();
 	const string inc = s->get_incarnation();
+	const string inc_for_batch = inc;
 	const uint64_t before = s->get_repl_last_lsn();
 
 	storage::entry e;
@@ -1844,6 +1848,7 @@ void test_apply_rule_refuses_foreign_session_and_stale_incarnation() {
 	storage_rocksdb* s = make_rocksdb(wal_master_dir);
 	const string epoch = s->get_source_epoch();
 	const string inc = s->get_incarnation();
+	const string inc_for_batch = inc;
 
 	storage::entry e;
 	fill_entry(e, "k", "v");
@@ -1862,6 +1867,7 @@ void test_apply_rule_refuses_foreign_session_and_stale_incarnation() {
 void test_apply_rule_intra_batch_same_key_twice() {
 	storage_rocksdb* s = make_rocksdb(wal_master_dir);
 	const string epoch = s->get_source_epoch();
+	const string inc_for_batch = s->get_incarnation();
 
 	storage_rocksdb* scratch = make_rocksdb(wal_slave_dir);
 	const string v1 = serialized_entry(scratch, "k", "v1");
@@ -1872,7 +1878,7 @@ void test_apply_rule_intra_batch_same_key_twice() {
 
 	uint64_t applied = 0, skipped = 0;
 	storage_rocksdb::apply_outcome refusal;
-	cut_assert_equal_int(0, s->apply_wal_batch(epoch, 1, batch, applied, skipped, refusal));
+	cut_assert_equal_int(0, s->apply_wal_batch(epoch, inc_for_batch, 1, batch, applied, skipped, refusal));
 	cppcut_assert_equal(static_cast<uint64_t>(2), applied);   // both, in order
 	string out;
 	cut_assert_equal_int(0, storage_get_string(s, "k", out));
@@ -1886,13 +1892,14 @@ void test_apply_rule_intra_batch_same_key_twice() {
 void test_apply_rule_refuses_undecodable_batch() {
 	storage_rocksdb* s = make_rocksdb(wal_master_dir);
 	const string epoch = s->get_source_epoch();
+	const string inc_for_batch = s->get_incarnation();
 	const uint64_t before_cursor = s->get_repl_last_lsn();
 
 	rocksdb::WriteBatch batch;
 	batch.Merge(rocksdb::Slice("k"), rocksdb::Slice("x"));   // not a flare operation
 	uint64_t applied = 0, skipped = 0;
 	storage_rocksdb::apply_outcome refusal;
-	cut_assert_equal_int(-1, s->apply_wal_batch(epoch, 1, batch, applied, skipped, refusal));
+	cut_assert_equal_int(-1, s->apply_wal_batch(epoch, inc_for_batch, 1, batch, applied, skipped, refusal));
 	cppcut_assert_equal(storage_rocksdb::apply_error, refusal);
 	cppcut_assert_equal(before_cursor, s->get_repl_last_lsn());
 	cut_assert_operator(s->get_repl_decode_refused(), >, static_cast<uint64_t>(0));
@@ -1904,6 +1911,7 @@ void test_apply_rule_refuses_undecodable_batch() {
 void test_apply_rule_refuses_gap_in_the_stream() {
 	storage_rocksdb* s = make_rocksdb(wal_master_dir);
 	const string epoch = s->get_source_epoch();
+	const string inc_for_batch = s->get_incarnation();
 
 	storage_rocksdb* scratch = make_rocksdb(wal_slave_dir);
 	const string v = serialized_entry(scratch, "k", "v");
@@ -1913,7 +1921,7 @@ void test_apply_rule_refuses_gap_in_the_stream() {
 	uint64_t applied = 0, skipped = 0;
 	storage_rocksdb::apply_outcome refusal;
 	// The position is 0; a batch starting at 50 leaves 1..49 unaccounted.
-	cut_assert_equal_int(-1, s->apply_wal_batch(epoch, 50, batch, applied, skipped, refusal));
+	cut_assert_equal_int(-1, s->apply_wal_batch(epoch, inc_for_batch, 50, batch, applied, skipped, refusal));
 	cppcut_assert_equal(static_cast<uint64_t>(0), s->get_repl_last_lsn());
 	drop_rocksdb(scratch, wal_slave_dir);
 	drop_rocksdb(s, wal_master_dir);
@@ -1949,6 +1957,241 @@ void test_apply_rule_restore_clears_inherited_metadata() {
 	cppcut_assert_equal(static_cast<uint64_t>(0), slave->get_repl_tombstones());
 	drop_rocksdb(master, wal_master_dir);
 	drop_rocksdb(slave,  wal_slave_dir);
+}
+
+// ---------------------------------------------------------------------------
+// SAF-10b stage 2, review fixes: the generation check inside the section, the
+// live-key count, metadata-only batches, and concurrent delivery.
+// ---------------------------------------------------------------------------
+
+namespace {
+	// Count the keys actually present in the default family, excluding the
+	// reserved replication keys — the independent truth curr_items must match.
+	uint64_t real_key_count(storage_rocksdb* s) {
+		uint64_t n = 0;
+		storage::entry e;
+		if (s->iter_begin() < 0) {
+			return 0;
+		}
+		while (s->iter_next(e.key) == storage::iteration_continue) {
+			n++;
+		}
+		s->iter_end();
+		return n;
+	}
+
+	struct forward_worker_arg {
+		storage_rocksdb* s;
+		string epoch;
+		string incarnation;
+		int base_label;
+		int count;
+		int applied;
+	};
+
+	void* forward_worker(void* raw) {
+		forward_worker_arg* a = static_cast<forward_worker_arg*>(raw);
+		for (int i = 0; i < a->count; i++) {
+			char k[32];
+			snprintf(k, sizeof(k), "conc%03d", i);
+			storage::entry e;
+			e.key = k;
+			e.size = 2;
+			e.data = shared_byte(new uint8_t[2]);
+			memcpy(e.data.get(), "vv", 2);
+			e.flag = 0;
+			e.expire = 0;
+			e.version = 1;
+			if (a->s->apply_forwarded_change(a->epoch, a->incarnation,
+					static_cast<uint64_t>(a->base_label + i), e, false) == storage_rocksdb::apply_applied) {
+				a->applied++;
+			}
+		}
+		return NULL;
+	}
+}
+
+// A WAL batch that carries ONLY metadata-family entries applies no data, but
+// its entries are still numbered, so the position moves past them. If they
+// were not counted, every later change in the stream would be mis-numbered.
+void test_apply_rule_metadata_only_batch_advances_position() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	const string epoch = s->get_source_epoch();
+	const string inc = s->get_incarnation();
+	cut_assert_equal_int(0, s->set_repl_last_lsn(10));
+
+	// Three entries in a family that is not the default one: exactly what a
+	// source that applied deliveries has in its own WAL.
+	rocksdb::WriteBatch batch;
+	rocksdb::DB* raw = NULL;      // handles come from the storage's own DB
+	(void)raw;
+	rocksdb::ColumnFamilyHandle* meta = s->debug_meta_cf();
+	cut_assert_not_null(meta);
+	batch.Put(meta, rocksdb::Slice("a"), rocksdb::Slice("1:x|5|0"));
+	batch.Put(meta, rocksdb::Slice("b"), rocksdb::Slice("1:x|6|0"));
+	batch.Put(meta, rocksdb::Slice("c"), rocksdb::Slice("1:x|7|1"));
+
+	uint64_t applied = 0, skipped = 0;
+	storage_rocksdb::apply_outcome refusal;
+	cut_assert_equal_int(0, s->apply_wal_batch(epoch, inc, 11, batch, applied, skipped, refusal));
+	cppcut_assert_equal(static_cast<uint64_t>(0), applied);     // no data applied
+	cppcut_assert_equal(static_cast<uint64_t>(0), skipped);
+	// 11, 12, 13 were consumed by the three entries.
+	cppcut_assert_equal(static_cast<uint64_t>(13), s->get_repl_last_lsn());
+	cppcut_assert_equal(static_cast<uint64_t>(0), real_key_count(s));
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// An empty batch covers no sequence and must not move the position.
+void test_apply_rule_empty_batch_does_not_move_position() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	const string epoch = s->get_source_epoch();
+	const string inc = s->get_incarnation();
+	cut_assert_equal_int(0, s->set_repl_last_lsn(10));
+
+	rocksdb::WriteBatch empty;
+	uint64_t applied = 0, skipped = 0;
+	storage_rocksdb::apply_outcome refusal;
+	cut_assert_equal_int(0, s->apply_wal_batch(epoch, inc, 11, empty, applied, skipped, refusal));
+	cppcut_assert_equal(static_cast<uint64_t>(10), s->get_repl_last_lsn());
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// curr_items must equal the real key count after both paths have run,
+// including a key created and deleted inside ONE batch and a key changed
+// twice in one batch — the cases a per-change probe counts twice.
+void test_apply_rule_curr_items_matches_real_key_count() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	storage_rocksdb* scratch = make_rocksdb(wal_slave_dir);
+	const string epoch = s->get_source_epoch();
+	const string inc = s->get_incarnation();
+
+	// Forwarded: two creations, one overwrite, one delete.
+	storage::entry a1; fill_entry(a1, "a", "1");
+	cppcut_assert_equal(storage_rocksdb::apply_applied, s->apply_forwarded_change(epoch, inc, 1, a1, false));
+	storage::entry b1; fill_entry(b1, "b", "1");
+	cppcut_assert_equal(storage_rocksdb::apply_applied, s->apply_forwarded_change(epoch, inc, 2, b1, false));
+	storage::entry a2; fill_entry(a2, "a", "2");
+	cppcut_assert_equal(storage_rocksdb::apply_applied, s->apply_forwarded_change(epoch, inc, 3, a2, false));
+	storage::entry bdel; bdel.key = "b";
+	cppcut_assert_equal(storage_rocksdb::apply_applied, s->apply_forwarded_change(epoch, inc, 4, bdel, true));
+	cut_assert_equal_int(static_cast<int>(real_key_count(s)), static_cast<int>(s->count()));
+
+	// WAL: one key written twice in a single batch, and one created then
+	// deleted in the same batch.
+	const string cv1 = serialized_entry(scratch, "c", "1");
+	const string cv2 = serialized_entry(scratch, "c", "2");
+	const string dv1 = serialized_entry(scratch, "d", "1");
+	rocksdb::WriteBatch batch;
+	batch.Put(rocksdb::Slice("c"), rocksdb::Slice(cv1));
+	batch.Put(rocksdb::Slice("c"), rocksdb::Slice(cv2));
+	batch.Put(rocksdb::Slice("d"), rocksdb::Slice(dv1));
+	batch.Delete(rocksdb::Slice("d"));
+
+	uint64_t applied = 0, skipped = 0;
+	storage_rocksdb::apply_outcome refusal;
+	cut_assert_equal_int(0, s->apply_wal_batch(epoch, inc, 1, batch, applied, skipped, refusal));
+	cppcut_assert_equal(static_cast<uint64_t>(4), applied);
+	cut_assert_equal_int(static_cast<int>(real_key_count(s)), static_cast<int>(s->count()));
+	cut_assert_equal_int(2, static_cast<int>(s->count()));   // a and c
+
+	drop_rocksdb(scratch, wal_slave_dir);
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// A delivery for a PREVIOUS copy must be refused even when the copy is
+// replaced after the delivery was issued: the check belongs inside the
+// applying section, not before it.
+void test_apply_rule_incarnation_checked_against_the_current_copy() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	const string epoch = s->get_source_epoch();
+	const string stale_inc = s->get_incarnation();
+
+	// The copy is replaced (a hard reset stands in for a snapshot restore).
+	cut_assert_equal_int(0, s->hard_reset());
+	const string fresh_inc = s->get_incarnation();
+	cut_assert_not_equal_string(stale_inc.c_str(), fresh_inc.c_str());
+	const string fresh_epoch = s->get_source_epoch();
+
+	storage::entry e;
+	fill_entry(e, "k", "v");
+	cppcut_assert_equal(storage_rocksdb::apply_refused_incarnation,
+		s->apply_forwarded_change(fresh_epoch, stale_inc, 100, e, false));
+
+	rocksdb::WriteBatch batch;
+	storage_rocksdb* scratch = make_rocksdb(wal_slave_dir);
+	const string v = serialized_entry(scratch, "k", "v");
+	batch.Put(rocksdb::Slice("k"), rocksdb::Slice(v));
+	uint64_t applied = 0, skipped = 0;
+	storage_rocksdb::apply_outcome refusal;
+	cut_assert_equal_int(-1, s->apply_wal_batch(fresh_epoch, stale_inc, 1, batch, applied, skipped, refusal));
+	cppcut_assert_equal(storage_rocksdb::apply_refused_incarnation, refusal);
+
+	string out;
+	cut_assert_operator(storage_get_string(s, "k", out), !=, 0);
+	drop_rocksdb(scratch, wal_slave_dir);
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// Concurrency: forwarded changes from several threads while the WAL applier
+// runs. The rule must hold under contention — no lost or double counting, no
+// key left with an older value, and the position only moved by the applier.
+void test_apply_rule_concurrent_forwarded_and_wal() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	storage_rocksdb* scratch = make_rocksdb(wal_slave_dir);
+	const string epoch = s->get_source_epoch();
+	const string inc = s->get_incarnation();
+	cut_assert_equal_int(0, s->set_repl_last_lsn(1000));
+
+	const int threads = 4;
+	const int per_thread = 40;
+	pthread_t tid[threads];
+	forward_worker_arg args[threads];
+	for (int t = 0; t < threads; t++) {
+		args[t].s = s;
+		args[t].epoch = epoch;
+		args[t].incarnation = inc;
+		// Every thread offers the SAME keys with different labels, so the
+		// rule has to arbitrate: only the highest label may survive.
+		args[t].base_label = 2000 + t * 1000;
+		args[t].count = per_thread;
+		args[t].applied = 0;
+		cut_assert_equal_int(0, pthread_create(&tid[t], NULL, forward_worker, &args[t]));
+	}
+
+	// Meanwhile the applier delivers its own batches for other keys.
+	for (int i = 0; i < 20; i++) {
+		char k[32];
+		snprintf(k, sizeof(k), "wal%03d", i);
+		const string v = serialized_entry(scratch, k, "w");
+		rocksdb::WriteBatch batch;
+		batch.Put(rocksdb::Slice(k), rocksdb::Slice(v));
+		uint64_t applied = 0, skipped = 0;
+		storage_rocksdb::apply_outcome refusal;
+		cut_assert_equal_int(0, s->apply_wal_batch(epoch, inc, 1001 + i, batch, applied, skipped, refusal));
+	}
+
+	for (int t = 0; t < threads; t++) {
+		cut_assert_equal_int(0, pthread_join(tid[t], NULL));
+	}
+
+	// The count never drifted from the key space, whatever the interleaving.
+	cut_assert_equal_int(static_cast<int>(real_key_count(s)), static_cast<int>(s->count()));
+	cut_assert_equal_int(per_thread + 20, static_cast<int>(s->count()));
+	// The position moved only by the applier's batches.
+	cppcut_assert_equal(static_cast<uint64_t>(1020), s->get_repl_last_lsn());
+	// Every contended key ends at the highest label offered for it.
+	for (int i = 0; i < per_thread; i++) {
+		char k[32];
+		snprintf(k, sizeof(k), "conc%03d", i);
+		storage::entry e;
+		fill_entry(e, k, "older");
+		cppcut_assert_equal(storage_rocksdb::apply_skipped_superseded,
+			s->apply_forwarded_change(epoch, inc, static_cast<uint64_t>(2000 + (threads - 1) * 1000 + i), e, false));
+	}
+
+	drop_rocksdb(scratch, wal_slave_dir);
+	drop_rocksdb(s, wal_master_dir);
 }
 
 	void teardown()

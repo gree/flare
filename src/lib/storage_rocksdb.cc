@@ -2294,13 +2294,6 @@ storage_rocksdb::apply_outcome storage_rocksdb::apply_forwarded_change(const str
 	if (is_reserved_key(e.key)) {
 		return apply_refused_session;
 	}
-	// A delivery issued against a copy this node no longer is must not land
-	// on the new one (design §3.1). Checked before anything is read.
-	const string local_incarnation = this->get_incarnation();
-	if (local_incarnation.empty() || (!incarnation.empty() && incarnation != local_incarnation)) {
-		return apply_refused_incarnation;
-	}
-
 	pthread_rwlock_rdlock(&this->_repl_apply_lock);
 	pthread_rwlock_rdlock(&this->_mutex_wholelock);
 	const int mutex_index = e.get_key_hash_value(hash_algorithm_murmur) % this->_mutex_slot_size;
@@ -2308,7 +2301,19 @@ storage_rocksdb::apply_outcome storage_rocksdb::apply_forwarded_change(const str
 
 	apply_outcome outcome = apply_error;
 	do {
+		// The DB handle is only valid while the whole-lock is held: a
+		// snapshot swap, a hard reset or a close takes it in write mode and
+		// destroys the handle. Check it here, never before.
 		if (this->_db == NULL || this->_cf_meta == NULL) {
+			break;
+		}
+		// A delivery issued against a copy this node no longer is must not
+		// land on the new one (design §3.1). Read INSIDE the section for the
+		// same reason the position is: the copy may have been replaced while
+		// this change waited for a connection, a retry or a lock.
+		const string local_incarnation = this->get_incarnation();
+		if (local_incarnation.empty() || (!incarnation.empty() && incarnation != local_incarnation)) {
+			outcome = apply_refused_incarnation;
 			break;
 		}
 		repl_meta current;
@@ -2322,6 +2327,15 @@ storage_rocksdb::apply_outcome storage_rocksdb::apply_forwarded_change(const str
 		outcome = this->_decide_change(source_epoch, label, mr == 0, current, cursor);
 		if (outcome != apply_applied) {
 			break;
+		}
+
+		// Live-key accounting: probe BEFORE staging, under this key's slot
+		// lock, so the count cannot drift from the key space (the forwarded
+		// path used to write without touching it at all).
+		bool existed = false;
+		{
+			string probe;
+			existed = this->_db->Get(this->_read_options, this->_cf_default, e.key, &probe).ok();
 		}
 
 		rocksdb::WriteBatch batch;
@@ -2354,6 +2368,11 @@ storage_rocksdb::apply_outcome storage_rocksdb::apply_forwarded_change(const str
 		// (design §3.4): a forwarded write says nothing about what the WAL
 		// has delivered, and treating it as progress would skip the range it
 		// never carried.
+		if (is_delete && existed) {
+			this->_curr_items.decr();
+		} else if (!is_delete && !existed) {
+			this->_curr_items.incr();
+		}
 		e.seq_label = label;
 	} while (0);
 
@@ -2515,20 +2534,28 @@ uint64_t storage_rocksdb::_collect_tombstones_locked(uint64_t budget) {
 }
 
 uint64_t storage_rocksdb::collect_tombstones(uint64_t budget) {
+	// The whole-lock is what keeps the DB handle alive: a snapshot swap, a
+	// hard reset or a close takes it in write mode and destroys the handle.
+	// Lock order is _repl_apply_lock -> _mutex_wholelock, as everywhere else.
 	pthread_rwlock_wrlock(&this->_repl_apply_lock);
+	pthread_rwlock_rdlock(&this->_mutex_wholelock);
 	const uint64_t n = this->_collect_tombstones_locked(budget);
+	pthread_rwlock_unlock(&this->_mutex_wholelock);
 	pthread_rwlock_unlock(&this->_repl_apply_lock);
 	return n;
 }
 
 uint64_t storage_rocksdb::get_repl_tombstones() {
+	pthread_rwlock_rdlock(&this->_mutex_wholelock);
 	if (this->_db == NULL || this->_cf_meta == NULL) {
+		pthread_rwlock_unlock(&this->_mutex_wholelock);
 		return 0;
 	}
 	rocksdb::ReadOptions ro = this->_read_options;
 	ro.fill_cache = false;
 	rocksdb::Iterator* it = this->_db->NewIterator(ro, this->_cf_meta);
 	if (it == NULL) {
+		pthread_rwlock_unlock(&this->_mutex_wholelock);
 		return 0;
 	}
 	uint64_t n = 0;
@@ -2539,12 +2566,13 @@ uint64_t storage_rocksdb::get_repl_tombstones() {
 		}
 	}
 	delete it;
+	pthread_rwlock_unlock(&this->_mutex_wholelock);
 	return n;
 }
 
-int storage_rocksdb::apply_wal_batch(const string& source_epoch, uint64_t base_seq,
-		const rocksdb::WriteBatch& batch, uint64_t& applied, uint64_t& skipped,
-		apply_outcome& refusal) {
+int storage_rocksdb::apply_wal_batch(const string& source_epoch, const string& incarnation,
+		uint64_t base_seq, const rocksdb::WriteBatch& batch,
+		uint64_t& applied, uint64_t& skipped, apply_outcome& refusal) {
 	applied = 0;
 	skipped = 0;
 	refusal = apply_applied;
@@ -2575,6 +2603,14 @@ int storage_rocksdb::apply_wal_batch(const string& source_epoch, uint64_t base_s
 			refusal = apply_error;
 			break;
 		}
+		// Same rule as the forwarded path: a response issued against a copy
+		// this node no longer is must not be applied onto the new one. The
+		// stream is long-lived, so this cannot be a connect-time check only.
+		const string local_incarnation = this->get_incarnation();
+		if (local_incarnation.empty() || (!incarnation.empty() && incarnation != local_incarnation)) {
+			refusal = apply_refused_incarnation;
+			break;
+		}
 		const uint64_t cursor = this->get_repl_last_lsn();
 		// Contiguity: the stream must continue where this node stopped. The
 		// batch that CONTAINS the cursor is re-delivered by design (RocksDB
@@ -2589,8 +2625,11 @@ int storage_rocksdb::apply_wal_batch(const string& source_epoch, uint64_t base_s
 
 		rocksdb::WriteBatch out;
 		// In-batch overlay (design §3.8): a later change to the same key must
-		// see the earlier ones of this batch, which are not in the DB yet.
+		// see the earlier ones of this batch, which are not in the DB yet —
+		// both for the ordering decision and for the live-key count, which
+		// would otherwise count the same creation twice.
 		std::map<string, repl_meta> overlay;
+		std::map<string, bool> exists_overlay;
 		int64_t items_delta = 0;
 		bool failed = false;
 
@@ -2622,18 +2661,26 @@ int storage_rocksdb::apply_wal_batch(const string& source_epoch, uint64_t base_s
 				continue;
 			}
 
-			if (c.is_delete) {
-				out.Delete(this->_cf_default, c.key);
-				string probe;
-				if (this->_db->Get(this->_read_options, this->_cf_default, c.key, &probe).ok()) {
-					items_delta--;
-				}
+			bool existed = false;
+			std::map<string, bool>::iterator eit = exists_overlay.find(c.key);
+			if (eit != exists_overlay.end()) {
+				existed = eit->second;
 			} else {
 				string probe;
-				if (!this->_db->Get(this->_read_options, this->_cf_default, c.key, &probe).ok()) {
+				existed = this->_db->Get(this->_read_options, this->_cf_default, c.key, &probe).ok();
+			}
+			if (c.is_delete) {
+				out.Delete(this->_cf_default, c.key);
+				if (existed) {
+					items_delta--;
+				}
+				exists_overlay[c.key] = false;
+			} else {
+				if (!existed) {
 					items_delta++;
 				}
 				out.Put(this->_cf_default, c.key, c.value);
+				exists_overlay[c.key] = true;
 			}
 			this->_stage_repl_meta(out, c.key, source_epoch, c.label, c.is_delete);
 			repl_meta staged;
@@ -2655,7 +2702,9 @@ int storage_rocksdb::apply_wal_batch(const string& source_epoch, uint64_t base_s
 		// so a crash after applying and before recording it is impossible
 		// (design §3.4). A batch in which everything was skipped still writes
 		// the position, alone.
-		const uint64_t new_cursor = base_seq + (decoder.index > 0 ? decoder.index - 1 : 0);
+		// An empty batch covers no sequence, so it must not claim one: the
+		// position may only move to a sequence this batch actually carried.
+		const uint64_t new_cursor = decoder.index > 0 ? base_seq + decoder.index - 1 : cursor;
 		if (new_cursor > cursor) {
 			out.Put(this->_cf_default, kReplLastLsnKey, boost::lexical_cast<string>(new_cursor));
 		}

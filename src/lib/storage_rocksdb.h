@@ -379,9 +379,9 @@ public:
 	// crash between applying and recording the position cannot happen.
 	// Returns 0 on success (counts filled), -1 when the batch was refused;
 	// `refusal` then says why and nothing was written.
-	int apply_wal_batch(const string& source_epoch, uint64_t base_seq,
-		const rocksdb::WriteBatch& batch, uint64_t& applied, uint64_t& skipped,
-		apply_outcome& refusal);
+	int apply_wal_batch(const string& source_epoch, const string& incarnation,
+		uint64_t base_seq, const rocksdb::WriteBatch& batch,
+		uint64_t& applied, uint64_t& skipped, apply_outcome& refusal);
 
 	// Drop tombstones the applied position has passed (design §3.5). Bounded
 	// and resumable: called from inside the applier's window, never as a
@@ -392,6 +392,10 @@ private:
 	uint64_t _collect_tombstones_locked(uint64_t budget);
 public:
 	uint64_t get_repl_tombstones();
+	// Test-only accessor: lets a unit test build a batch that targets the
+	// replication-metadata family, which is what a source that has applied
+	// deliveries carries in its own WAL.
+	rocksdb::ColumnFamilyHandle* debug_meta_cf() { return this->_cf_meta; }
 
 	uint64_t get_repl_forward_applied()   { return this->_repl_forward_applied.fetch(); }
 	uint64_t get_repl_forward_skipped()   { return this->_repl_forward_skipped.fetch(); }

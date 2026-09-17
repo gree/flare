@@ -27,6 +27,7 @@
 #include "common_storage_tests.h"
 #include <app.h>
 #include <storage_rocksdb.h>
+#include "mock_storage.h"
 
 #include <limits>
 #include <sys/stat.h>
@@ -2192,6 +2193,71 @@ void test_apply_rule_concurrent_forwarded_and_wal() {
 
 	drop_rocksdb(scratch, wal_slave_dir);
 	drop_rocksdb(s, wal_master_dir);
+}
+
+// The wire-level entry point: a forwarded change that arrived with an
+// identity is mapped onto the common rule, and each outcome is reported in
+// the form the source needs — "skipped" must not look like a failure, or the
+// source would count a drop and request a repair for nothing.
+void test_identified_change_maps_outcomes_for_the_source() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	const string epoch = s->get_source_epoch();
+
+	storage::entry e1;
+	fill_entry(e1, "k", "v1");
+	cut_assert_equal_int(storage::identified_applied,
+		s->apply_identified_change(epoch + "/10", e1, false));
+
+	// The same change again, and an older one: already superseded, which is
+	// a success from the source's point of view.
+	storage::entry e2;
+	fill_entry(e2, "k", "v1");
+	cut_assert_equal_int(storage::identified_skipped,
+		s->apply_identified_change(epoch + "/10", e2, false));
+	storage::entry e3;
+	fill_entry(e3, "k", "old");
+	cut_assert_equal_int(storage::identified_skipped,
+		s->apply_identified_change(epoch + "/9", e3, false));
+
+	// Another history: the source must hear about it.
+	storage::entry e4;
+	fill_entry(e4, "k", "foreign");
+	cut_assert_equal_int(storage::identified_refused,
+		s->apply_identified_change("9:another-history/11", e4, false));
+
+	// Malformed tags are refused, never guessed.
+	storage::entry e5;
+	fill_entry(e5, "k", "bad");
+	cut_assert_equal_int(storage::identified_refused, s->apply_identified_change("no-slash", e5, false));
+	cut_assert_equal_int(storage::identified_refused, s->apply_identified_change(epoch + "/notanumber", e5, false));
+	cut_assert_equal_int(storage::identified_refused, s->apply_identified_change(epoch + "/0", e5, false));
+
+	string out;
+	cut_assert_equal_int(0, storage_get_string(s, "k", out));
+	cut_assert_equal_string("v1", out.c_str());
+
+	// A delete through the same entry point leaves the tombstone that stops
+	// an older put from resurrecting the key.
+	storage::entry d;
+	d.key = "k";
+	cut_assert_equal_int(storage::identified_applied, s->apply_identified_change(epoch + "/20", d, true));
+	storage::entry late;
+	fill_entry(late, "k", "v1");
+	cut_assert_equal_int(storage::identified_skipped, s->apply_identified_change(epoch + "/10", late, false));
+	cut_assert_operator(storage_get_string(s, "k", out), !=, 0);
+
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// A backend without a replication identity reports "unsupported" so the
+// caller keeps doing what it always did.
+void test_identified_change_unsupported_on_a_plain_storage() {
+	storage::entry e;
+	fill_entry(e, "k", "v");
+	// The base implementation is what a non-WAL backend inherits.
+	storage* plain = new mock_storage("tmp_mock_storage", 8, 4);
+	cut_assert_equal_int(storage::identified_unsupported, plain->apply_identified_change("1:x/5", e, false));
+	delete plain;
 }
 
 	void teardown()

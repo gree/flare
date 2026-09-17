@@ -146,6 +146,12 @@ public:
 		// other keys' writes committed between our write and our read).
 		// In-memory only: never serialized into the value header.
 		uint64_t						seq_label;
+		// REPLICATION TAG (SAF-10b stage 3), wire form "rl=<epoch>/<label>".
+		// Present on a forwarded change whose source could identify itself;
+		// empty means "no identity travelled with this change", and the
+		// receiver then applies it the way it always has. Never serialized
+		// into the value header either.
+		string							repl_tag;
 
 		static const int				header_size = sizeof(uint32_t) + sizeof(time_t) + sizeof(uint64_t) + sizeof(uint64_t);
 		static const uint64_t		max_data_size = 2147483647;
@@ -299,6 +305,24 @@ public:
 	// "unavailable" — the node could not establish or persist its
 	// generations — and every replication path must refuse to serve or
 	// accept on that, rather than assuming a default.
+	// Apply a forwarded change that carries a replication identity
+	// ("rl=<epoch>/<label>", SAF-10b stage 3) through the COMMON APPLY RULE,
+	// so it is ordered against the same change arriving through the WAL
+	// stream instead of overwriting whatever is there. Backends without a
+	// replication identity return identified_unsupported and the caller does
+	// what it always did.
+	enum identified_apply {
+		identified_unsupported = -1,	// backend cannot order changes: fall back
+		identified_applied = 0,			// written
+		identified_skipped,				// already has this change or a newer one
+		identified_refused,				// not following this history / not this copy
+		identified_error,				// storage failure; nothing written
+	};
+	virtual int apply_identified_change(const string& tag, entry& e, bool is_delete) {
+		(void)tag; (void)e; (void)is_delete;
+		return identified_unsupported;
+	}
+
 	virtual string get_source_epoch() { return ""; }
 	virtual string get_incarnation() { return ""; }
 	// 0 on success, -1 when the new value could not be persisted. A failure

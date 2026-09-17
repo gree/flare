@@ -368,6 +368,8 @@ public:
 	// plus this key's slot lock: forwarded changes stay concurrent with one
 	// another and serialized per key, but never overlap the WAL applier's
 	// window. The applied position is read INSIDE that section.
+	virtual int apply_identified_change(const string& tag, entry& e, bool is_delete);
+
 	apply_outcome apply_forwarded_change(const string& source_epoch,
 		const string& incarnation, uint64_t label, entry& e, bool is_delete);
 

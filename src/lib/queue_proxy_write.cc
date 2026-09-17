@@ -27,6 +27,8 @@
  *	$Id$
  */
 #include "queue_proxy_write.h"
+
+#include <boost/lexical_cast.hpp>
 #include "app.h"
 #include "connection_tcp.h"
 #include "op_proxy_write.h"
@@ -85,6 +87,20 @@ int queue_proxy_write::run(shared_connection c) {
 		return -1;
 	}
 	p->set_proxy(this->_proxy);
+	// SAF-10b stage 3: carry the source's replication identity with the
+	// change, so the destination can order it against the same change
+	// arriving through the WAL stream instead of overwriting blindly. The
+	// label was captured inside the key's critical section when the master
+	// wrote locally (design §3.9(B)); an empty epoch means the source cannot
+	// identify its history, in which case nothing is sent and the receiver
+	// behaves exactly as before.
+	if (this->_cluster != NULL && this->_cluster->get_repl_identity_forward()
+			&& this->_storage != NULL && this->_entry.seq_label > 0) {
+		const string epoch = this->_storage->get_source_epoch();
+		if (!epoch.empty()) {
+			this->_entry.repl_tag = epoch + "/" + boost::lexical_cast<string>(this->_entry.seq_label);
+		}
+	}
 
 	int retry = queue_proxy_write::max_retry;
 	while (retry > 0) {

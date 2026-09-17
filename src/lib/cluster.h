@@ -212,6 +212,7 @@ protected:
 	int										_proxy_concurrency;
 	int										_reconstruction_interval;
 	int										_reconstruction_bwlimit;
+	bool									_repl_identity_forward;
 	replication						_replication_type;
 	uint32_t							_proxy_prior_netmask;
 	uint32_t							_max_total_thread_queue;
@@ -280,6 +281,13 @@ public:
 	int get_reconstruction_interval() { return this->_reconstruction_interval; };
 	int set_reconstruction_interval(int reconstruction_interval) { this->_reconstruction_interval = reconstruction_interval; return 0; };
 	int get_reconstruction_bwlimit() { return this->_reconstruction_bwlimit; };
+	// SAF-10b stage 3: when set, a forwarded write carries the source's
+	// replication identity ("rl=<epoch>/<label>") and the destination applies
+	// it through the common rule instead of a plain local set. OFF by default:
+	// a node that predates the tag would reject the request outright, so this
+	// may only be turned on once every node in the cluster understands it.
+	int set_repl_identity_forward(bool b) { this->_repl_identity_forward = b; return 0; };
+	bool get_repl_identity_forward() { return this->_repl_identity_forward; };
 	int set_reconstruction_bwlimit(int reconstruction_bwlimit) { this->_reconstruction_bwlimit = reconstruction_bwlimit; return 0; };
 	replication get_replication_type() { return this->_replication_type; };
 	int set_replication_type(string replication_type) { cluster::replication_cast(replication_type, this->_replication_type); return 0; };

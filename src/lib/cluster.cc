@@ -88,6 +88,7 @@ cluster::cluster(thread_pool* req_tp, thread_pool* other_tp, string server_name,
 		_proxy_concurrency(0),
 		_reconstruction_interval(0),
 		_reconstruction_bwlimit(0),
+		_repl_identity_forward(false),
 		_replication_type(replication_async),
 		_proxy_prior_netmask(0), 
 		_max_total_thread_queue(0) {

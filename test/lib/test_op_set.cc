@@ -70,6 +70,43 @@ namespace test_op_set
 		cut_assert_equal_memory("0123456789", 10, op._entry.data.get(), 10);
 	}
 
+	// SAF-10b stage 3: a forwarded change carries its source's replication
+	// identity as a trailing token. It must be recognised as an identity and
+	// not fall into the option parser, which rejects unknown words.
+	void test_parse_text_server_parameters_replication_tag()
+	{
+		stats_object->update_timestamp();
+		shared_connection c(new connection_sstream(" key 5 60 10 7 rl=3:1f2e/4242\r\n0123456789\r\n"));
+		test_op_set op(c);
+		cut_assert_equal_int(0, op._parse_text_server_parameters());
+		cut_assert_equal_string("key", op._entry.key.c_str());
+		cut_assert_equal_int(7, static_cast<int>(op._entry.version));
+		cut_assert_equal_string("3:1f2e/4242", op._entry.repl_tag.c_str());
+		cut_assert_equal_memory("0123456789", 10, op._entry.data.get(), 10);
+	}
+
+	// The identity may travel together with the ordinary options, in any
+	// position among them.
+	void test_parse_text_server_parameters_replication_tag_with_options()
+	{
+		stats_object->update_timestamp();
+		shared_connection c(new connection_sstream(" key 5 60 10 7 rl=3:1f2e/4242 noreply\r\n0123456789\r\n"));
+		test_op_set op(c);
+		cut_assert_equal_int(0, op._parse_text_server_parameters());
+		cut_assert_equal_string("3:1f2e/4242", op._entry.repl_tag.c_str());
+		cut_assert_equal_int(storage::option_noreply, op._entry.option & storage::option_noreply);
+	}
+
+	// A request without one is unchanged: no identity, no behaviour change.
+	void test_parse_text_server_parameters_without_replication_tag()
+	{
+		stats_object->update_timestamp();
+		shared_connection c(new connection_sstream(" key 5 60 10 7\r\n0123456789\r\n"));
+		test_op_set op(c);
+		cut_assert_equal_int(0, op._parse_text_server_parameters());
+		cut_assert_equal_string("", op._entry.repl_tag.c_str());
+	}
+
 	void test_parse_binary_server_parameters_empty()
 	{
 		binary_request_header header(binary_header::opcode_set);

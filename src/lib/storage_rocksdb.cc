@@ -2285,6 +2285,53 @@ storage_rocksdb::apply_outcome storage_rocksdb::_decide_change(const string& epo
 }
 
 /**
+ *	Entry point for a forwarded change that arrived with an identity on the
+ *	wire ("<epoch>/<label>"). Everything the rule needs travels with the
+ *	change except the receiver incarnation, which the source cannot know: the
+ *	protection against a delivery for a previous copy therefore rests on the
+ *	epoch and on the applied position, both of which a restore resets (design
+ *	§3.5), not on the incarnation for this path.
+ */
+int storage_rocksdb::apply_identified_change(const string& tag, entry& e, bool is_delete) {
+	const string::size_type slash = tag.rfind('/');
+	if (slash == string::npos || slash == 0 || slash + 1 >= tag.size()) {
+		log_warning("malformed replication tag [%s] on a forwarded change (key=%s)", tag.c_str(), e.key.c_str());
+		return identified_refused;
+	}
+	const string epoch = tag.substr(0, slash);
+	uint64_t label = 0;
+	try {
+		label = boost::lexical_cast<uint64_t>(tag.substr(slash + 1));
+	} catch (boost::bad_lexical_cast&) {
+		log_warning("unparseable label in replication tag [%s] (key=%s)", tag.c_str(), e.key.c_str());
+		return identified_refused;
+	}
+	if (label == 0) {
+		return identified_refused;
+	}
+
+	const apply_outcome outcome = this->apply_forwarded_change(epoch, "", label, e, is_delete);
+	switch (outcome) {
+		case apply_applied:
+			return identified_applied;
+		case apply_skipped_superseded:
+		case apply_refused_cursor:
+			// Not an error: this copy already holds this change or a newer
+			// one, so the source is not ahead of us and must not count a
+			// drop — that would request a repair for nothing.
+			return identified_skipped;
+		case apply_refused_session:
+		case apply_refused_incarnation:
+			// We are not following this history. The source must hear about
+			// it: its retry and drop accounting are what surface the
+			// divergence to the controller.
+			return identified_refused;
+		default:
+			return identified_error;
+	}
+}
+
+/**
  *	Forwarded delivery of one change (design §3.8: SHARED apply lock + the
  *	key's slot lock; the applied position is read inside that section, never
  *	carried over from before a queue wait or a retry).

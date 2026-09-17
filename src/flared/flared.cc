@@ -227,6 +227,7 @@ int flared::startup(int argc, char **argv) {
 	this->_cluster->set_proxy_concurrency(ini_option_object().get_proxy_concurrency());
 	this->_cluster->set_reconstruction_interval(ini_option_object().get_reconstruction_interval());
 	this->_cluster->set_reconstruction_bwlimit(ini_option_object().get_reconstruction_bwlimit());
+	this->_cluster->set_repl_identity_forward(ini_option_object().is_repl_identity_forward());
 	this->_cluster->set_replication_type(ini_option_object().get_replication_type());
 	this->_cluster->set_max_total_thread_queue(ini_option_object().get_max_total_thread_queue());
 	this->_cluster->set_noreply_window_limit(ini_option_object().get_noreply_window_limit());
@@ -500,6 +501,7 @@ int flared::reload() {
 
 	// reconstruction_bwlimit
 	this->_cluster->set_reconstruction_bwlimit(ini_option_object().get_reconstruction_bwlimit());
+	this->_cluster->set_repl_identity_forward(ini_option_object().is_repl_identity_forward());
 
 #ifdef HAVE_LIBROCKSDB
 	// RocksDB WAL streaming limits are runtime-tunable. Push the reloaded

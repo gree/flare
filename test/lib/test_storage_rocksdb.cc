@@ -27,6 +27,8 @@
 #include "common_storage_tests.h"
 #include <app.h>
 #include <storage_rocksdb.h>
+#include <handler_wal_follower.h>
+#include <op_repl_sync_wal.h>
 #include "mock_storage.h"
 
 #include <limits>
@@ -2258,6 +2260,98 @@ void test_identified_change_unsupported_on_a_plain_storage() {
 	storage* plain = new mock_storage("tmp_mock_storage", 8, 4);
 	cut_assert_equal_int(storage::identified_unsupported, plain->apply_identified_change("1:x/5", e, false));
 	delete plain;
+}
+
+// ---------------------------------------------------------------------------
+// SAF-10b stage 3b: the follower's decision table.
+//
+// The rule that matters most for the requirement this work exists for: a lost
+// connection must NEVER be a repair trigger. Only a position that can no
+// longer be satisfied — purged history, another history, a position ahead of
+// the source — hands the node to the rebuild path (design §5.4).
+// ---------------------------------------------------------------------------
+
+void test_follow_disconnect_is_not_a_rebuild() {
+	// Transport failure, whatever the last client result was.
+	cppcut_assert_equal(handler_wal_follower::attempt_disconnected,
+		handler_wal_follower::classify(op_repl_sync_wal::client_success, false));
+	cppcut_assert_equal(handler_wal_follower::attempt_disconnected,
+		handler_wal_follower::classify(op_repl_sync_wal::client_protocol_error, false));
+	// Even a result that WOULD mean rebuild is not acted on when we could not
+	// talk to the source: we did not learn anything about our position.
+	cppcut_assert_equal(handler_wal_follower::attempt_disconnected,
+		handler_wal_follower::classify(op_repl_sync_wal::client_lsn_purged, false));
+}
+
+void test_follow_only_unsatisfiable_positions_rebuild() {
+	cppcut_assert_equal(handler_wal_follower::attempt_needs_rebuild,
+		handler_wal_follower::classify(op_repl_sync_wal::client_lsn_purged, true));
+	cppcut_assert_equal(handler_wal_follower::attempt_needs_rebuild,
+		handler_wal_follower::classify(op_repl_sync_wal::client_epoch_mismatch, true));
+	cppcut_assert_equal(handler_wal_follower::attempt_needs_rebuild,
+		handler_wal_follower::classify(op_repl_sync_wal::client_master_id_mismatch, true));
+	cppcut_assert_equal(handler_wal_follower::attempt_needs_rebuild,
+		handler_wal_follower::classify(op_repl_sync_wal::client_lsn_ahead, true));
+
+	// A source that cannot identify its history, or does not speak the op, is
+	// an error to retry — not a reason to throw this copy away.
+	cppcut_assert_equal(handler_wal_follower::attempt_error,
+		handler_wal_follower::classify(op_repl_sync_wal::client_no_epoch, true));
+	cppcut_assert_equal(handler_wal_follower::attempt_error,
+		handler_wal_follower::classify(op_repl_sync_wal::client_not_supported, true));
+	cppcut_assert_equal(handler_wal_follower::attempt_error,
+		handler_wal_follower::classify(op_repl_sync_wal::client_apply_error, true));
+
+	cppcut_assert_equal(handler_wal_follower::attempt_progress,
+		handler_wal_follower::classify(op_repl_sync_wal::client_success, true));
+}
+
+// Every non-success carries a reason the operator can read; success carries
+// none, so a stale reason is never shown as current.
+void test_follow_reasons_are_named() {
+	cut_assert_equal_string("", handler_wal_follower::reason_for(op_repl_sync_wal::client_success));
+	cut_assert_equal_string("lsn_purged", handler_wal_follower::reason_for(op_repl_sync_wal::client_lsn_purged));
+	cut_assert_equal_string("epoch_mismatch", handler_wal_follower::reason_for(op_repl_sync_wal::client_epoch_mismatch));
+	cut_assert_equal_string("source_has_no_epoch", handler_wal_follower::reason_for(op_repl_sync_wal::client_no_epoch));
+}
+
+// The record the operator reads: state, reason, position and — always — the
+// time the source's position was observed.
+void test_follow_record_carries_state_reason_and_observation_time() {
+	stats_object->follow_set_source("10.0.0.1:12121", "3:abc");
+	stats_object->follow_set_state(stats::follow_initial_sync, "");
+	stats::follow_record r = stats_object->get_follow_record();
+	cut_assert_equal_string("10.0.0.1:12121", r.source.c_str());
+	cut_assert_equal_string("3:abc", r.source_epoch.c_str());
+	cut_assert_equal_string("initial_sync", r.state.c_str());
+
+	stats_object->follow_note_source_position(4242);
+	stats_object->follow_note_progress(4200);
+	r = stats_object->get_follow_record();
+	cppcut_assert_equal(static_cast<uint64_t>(4242), r.source_lsn);
+	cppcut_assert_equal(static_cast<uint64_t>(4200), r.applied_lsn);
+	cut_assert_operator(static_cast<int>(r.source_lsn_observed_at), >, 0);
+	cut_assert_operator(static_cast<int>(r.last_progress_at), >, 0);
+
+	// A position that does not advance does not refresh the progress time.
+	const time_t progressed_at = r.last_progress_at;
+	stats_object->follow_note_progress(4100);
+	r = stats_object->get_follow_record();
+	cppcut_assert_equal(static_cast<uint64_t>(4200), r.applied_lsn);
+	cppcut_assert_equal(progressed_at, r.last_progress_at);
+
+	stats_object->follow_set_state(stats::follow_disconnected, "peer_unreachable");
+	r = stats_object->get_follow_record();
+	cut_assert_equal_string("disconnected", r.state.c_str());
+	cut_assert_equal_string("peer_unreachable", r.last_reason.c_str());
+
+	// Back to following clears the reason, so a stale one is never read as
+	// the current condition.
+	stats_object->follow_set_state(stats::follow_following, "");
+	r = stats_object->get_follow_record();
+	cut_assert_equal_string("following", r.state.c_str());
+	cut_assert_equal_string("", r.last_reason.c_str());
+	stats_object->follow_set_state(stats::follow_idle, "");
 }
 
 	void teardown()

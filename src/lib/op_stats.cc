@@ -181,6 +181,20 @@ int op_stats::_send_stats(thread_pool* req_tp, thread_pool* other_tp, storage* s
 		_send_stat("reconstruction_last_success_id"		, rr.last_success_id);
 		_send_stat("reconstruction_last_success_source"	, rr.last_success_source);
 	}
+	{
+		// Continuous replication, follower side (SAF-10b). ONE snapshot: a
+		// position without the time it was observed, or a state without a
+		// reason, cannot be acted on (design §5.1).
+		stats::follow_record fr = stats_object->get_follow_record();
+		_send_stat("repl_follow_source"                 , fr.source);
+		_send_stat("repl_follow_source_epoch"           , fr.source_epoch);
+		_send_stat("repl_follow_state"                  , fr.state);
+		_send_stat("repl_follow_last_reason"            , fr.last_reason);
+		_send_stat("repl_applied_lsn"                   , fr.applied_lsn);
+		_send_stat("repl_source_lsn"                    , fr.source_lsn);
+		_send_stat("repl_source_lsn_observed_at"        , static_cast<uint64_t>(fr.source_lsn_observed_at));
+		_send_stat("repl_last_progress_at"              , static_cast<uint64_t>(fr.last_progress_at));
+	}
 	_send_stat("incr_hits"						, stats_object->get_incr_hits());
 	_send_stat("incr_misses"					, stats_object->get_incr_misses());
 	_send_stat("decr_hits"						, stats_object->get_decr_hits());
@@ -232,6 +246,7 @@ int op_stats::_send_stats(thread_pool* req_tp, thread_pool* other_tp, storage* s
 			_send_stat("repl_wal_skipped"                   , rdb->get_repl_wal_skipped());
 			_send_stat("repl_decode_refused"                , rdb->get_repl_decode_refused());
 			_send_stat("repl_tombstones_dropped"            , rdb->get_repl_tombstones_dropped());
+			_send_stat("repl_tombstones"                    , rdb->get_repl_tombstones());
 			_send_stat("rocksdb_repl_last_lsn"              , rdb->get_repl_last_lsn());
 			_send_stat("rocksdb_latest_sequence_number"     , rdb->get_latest_sequence_number());
 			_send_stat("rocksdb_wal_sync_success"           , rdb->get_wal_sync_success());

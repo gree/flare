@@ -2083,7 +2083,11 @@ uint64_t storage_rocksdb::get_latest_sequence_number() {
 	return this->_db->GetLatestSequenceNumber();
 }
 
-int storage_rocksdb::get_updates_since(uint64_t seq_number, vector<pair<uint64_t, rocksdb::WriteBatch>>& updates) {
+int storage_rocksdb::get_updates_since(uint64_t seq_number, vector<pair<uint64_t, rocksdb::WriteBatch>>& updates,
+		uint64_t max_batches, uint64_t max_bytes, bool* more) {
+	if (more != NULL) {
+		*more = false;
+	}
 	if (this->_db == NULL) {
 		return -1;
 	}
@@ -2100,8 +2104,20 @@ int storage_rocksdb::get_updates_since(uint64_t seq_number, vector<pair<uint64_t
 		return ERR_LSN_INVALID;
 	}
 
+	uint64_t bytes = 0;
 	while (iter->Valid()) {
+		if ((max_batches > 0 && updates.size() >= max_batches)
+				|| (max_bytes > 0 && bytes >= max_bytes)) {
+			// Stop READING, not just sending: the point of the bound is that
+			// a far-behind reader cannot make us materialise its whole
+			// backlog.
+			if (more != NULL) {
+				*more = true;
+			}
+			break;
+		}
 		rocksdb::BatchResult batch = iter->GetBatch();
+		bytes += batch.writeBatchPtr->Data().size();
 		// Copy the WriteBatch contents since writeBatchPtr is a unique_ptr
 		updates.push_back(std::make_pair(batch.sequence, *batch.writeBatchPtr));
 		iter->Next();

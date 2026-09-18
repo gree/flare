@@ -362,7 +362,13 @@ public:
 
 	// RocksDB-specific methods for WAL replication
 	uint64_t get_latest_sequence_number();
-	int get_updates_since(uint64_t seq_number, vector<pair<uint64_t, rocksdb::WriteBatch>>& updates);
+	// Read WAL updates from a sequence. max_batches/max_bytes bound what is
+	// materialised: without them the whole backlog of a far-behind reader is
+	// pulled into memory before a single byte is sent (design §4, condition
+	// 7). 0 means unbounded, which is what the reconstruction path still
+	// asks for. `more` says whether the iterator had further updates.
+	int get_updates_since(uint64_t seq_number, vector<pair<uint64_t, rocksdb::WriteBatch>>& updates,
+		uint64_t max_batches = 0, uint64_t max_bytes = 0, bool* more = NULL);
 	// ---- COMMON APPLY RULE (design §3.3, §3.4, §3.5, §3.8) ----------------
 	// Forwarded delivery of ONE change. Takes the apply lock in SHARED mode
 	// plus this key's slot lock: forwarded changes stay concurrent with one

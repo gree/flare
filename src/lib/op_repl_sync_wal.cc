@@ -42,7 +42,13 @@ op_repl_sync_wal::op_repl_sync_wal(shared_connection c, storage* st):
 		_client_result(client_server_error),
 		_max_batch_bytes(0),
 		_bwlimit_kbps(0),
-		_interval_usec(0) {
+		_interval_usec(0),
+		_max_batches(0),
+		_max_response_bytes(0),
+		_more_available(false),
+		_applied(0),
+		_skipped(0),
+		_server_latest_lsn(0) {
 }
 
 /**
@@ -116,10 +122,30 @@ int op_repl_sync_wal::_parse_text_server_parameters() {
 	log_debug("repl_sync_wal: lsn=%llu master_id=%s",
 		this->_lsn, this->_client_master_id.c_str());
 
-	// Check for extra parameters
+	// FOLLOW MODE (SAF-10b): optional trailing tokens
+	//   <expected_epoch|-> <max_batches> <max_bytes>
+	// A source that predates them ignores whatever it does not understand
+	// (this is where the old "bogus parameter" notice was), and a follower
+	// that gets no EPOCH line back refuses to follow — fail closed.
+	n += util::next_word(p+n, q, sizeof(q));
+	if (q[0] != '\0' && strcmp(q, "-") != 0) {
+		this->_client_epoch = q;
+	}
 	n += util::next_word(p+n, q, sizeof(q));
 	if (q[0] != '\0') {
-		log_notice("bogus parameter: %s -> ignoring", q);
+		try {
+			this->_max_batches = boost::lexical_cast<uint64_t>(q);
+		} catch (boost::bad_lexical_cast&) {
+			log_notice("bogus max_batches: %s -> ignoring", q);
+		}
+	}
+	n += util::next_word(p+n, q, sizeof(q));
+	if (q[0] != '\0') {
+		try {
+			this->_max_response_bytes = boost::lexical_cast<uint64_t>(q);
+		} catch (boost::bad_lexical_cast&) {
+			log_notice("bogus max_bytes: %s -> ignoring", q);
+		}
 	}
 
 	delete[] p;
@@ -169,9 +195,37 @@ int op_repl_sync_wal::_run_server() {
 		return this->_send_result(result_server_error, msg);
 	}
 
-	// Get updates since requested LSN
+	// HISTORY HANDSHAKE (SAF-10b). The follower's position is expressed in
+	// THIS source's sequence space, so the source must say which history it
+	// is serving and refuse a follower that belongs to another one. A source
+	// that cannot identify its history serves nobody.
+	const string server_epoch = rocksdb->get_source_epoch();
+	if (server_epoch.empty()) {
+		log_warning("repl_sync_wal refused: this node cannot identify its replication history", 0);
+		return this->_send_result(result_server_error, "generations_unavailable");
+	}
+	if (!this->_client_epoch.empty() && this->_client_epoch != server_epoch) {
+		log_notice("epoch mismatch (client=%s server=%s) -> the follower must rebuild",
+			this->_client_epoch.c_str(), server_epoch.c_str());
+		string msg = "epoch_mismatch " + server_epoch;
+		return this->_send_result(result_server_error, msg.c_str());
+	}
+	{
+		// Sent before any batch so the follower can bind what follows to a
+		// history, and carries this source's current position so the
+		// follower can report its lag with the time it was observed.
+		char line[BUFSIZ];
+		snprintf(line, sizeof(line), "EPOCH %s %llu%s", server_epoch.c_str(),
+			(unsigned long long)server_latest, line_delimiter);
+		this->_connection->write(line, strlen(line));
+	}
+
+	// Get updates since requested LSN, bounded when the caller asked for a
+	// slice (follow mode) and unbounded for the reconstruction path.
 	vector<pair<uint64_t, rocksdb::WriteBatch>> updates;
-	int result = rocksdb->get_updates_since(this->_lsn, updates);
+	bool more = false;
+	int result = rocksdb->get_updates_since(this->_lsn, updates,
+		this->_max_batches, this->_max_response_bytes, &more);
 
 	if (result == storage_rocksdb::ERR_LSN_PURGED) {
 		log_notice("LSN %llu purged from WAL, slave needs full sync", this->_lsn);
@@ -278,6 +332,14 @@ int op_repl_sync_wal::_run_server() {
 		}
 	}
 
+	if (more) {
+		// Say so explicitly instead of letting the follower infer from a full
+		// slice: the follower asks again immediately rather than sleeping.
+		static const char* const more_line = "MORE";
+		char line[BUFSIZ];
+		snprintf(line, sizeof(line), "%s%s", more_line, line_delimiter);
+		this->_connection->write(line, strlen(line));
+	}
 	return this->_send_result(result_end);
 #else
 	log_warning("repl_sync_wal requested but RocksDB not compiled in", 0);
@@ -349,6 +411,15 @@ int op_repl_sync_wal::_parse_text_client_parameters() {
 				this->_client_result = client_lsn_ahead;
 				rocksdb->incr_wal_sync_lsn_ahead();
 				log_warning("slave LSN ahead of master (%s)", body);
+			} else if (strncmp(body, "epoch_mismatch", 14) == 0) {
+				// The source is serving a different history: our position is not
+				// comparable to its sequence space, so this is a rebuild, not a
+				// retry.
+				this->_client_result = client_epoch_mismatch;
+				log_warning("source is serving a different history (%s)", body);
+			} else if (strncmp(body, "generations_unavailable", 23) == 0) {
+				this->_client_result = client_no_epoch;
+				log_warning("source cannot identify its replication history -> refusing to follow it", 0);
 			} else if (strncmp(body, "lsn_purged", 10) == 0) {
 				this->_client_result = client_lsn_purged;
 				rocksdb->incr_wal_sync_lsn_purged();

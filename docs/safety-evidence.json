@@ -183,6 +183,158 @@
       "hazards": [
         "H4"
       ]
+    },
+    {
+      "id": "UCA-19",
+      "action": "A6",
+      "timing": "Not provided",
+      "description": "Fetch is not resumed after a transient disconnection.",
+      "hazards": [
+        "H3"
+      ]
+    },
+    {
+      "id": "UCA-20",
+      "action": "A6",
+      "timing": "Provided",
+      "description": "The applied position advances past a range that was not applied (e.g. a forwarded write taken as WAL progress).",
+      "hazards": [
+        "H2",
+        "H3"
+      ]
+    },
+    {
+      "id": "UCA-21",
+      "action": "A6",
+      "timing": "Wrong order",
+      "description": "A newer value arrives by forwarding and an older WAL change is then applied over it.",
+      "hazards": [
+        "H2",
+        "H3"
+      ]
+    },
+    {
+      "id": "UCA-22",
+      "action": "A6",
+      "timing": "Wrong order",
+      "description": "A delete is applied and an older put then resurrects the key.",
+      "hazards": [
+        "H2",
+        "H3"
+      ]
+    },
+    {
+      "id": "UCA-23",
+      "action": "A6",
+      "timing": "Provided",
+      "description": "The process crashes after applying changes and before the position is saved, so the same range is re-applied or skipped inconsistently.",
+      "hazards": [
+        "H2",
+        "H3"
+      ]
+    },
+    {
+      "id": "UCA-24",
+      "action": "A6",
+      "timing": "Provided",
+      "description": "A batch from an old session or lineage is applied.",
+      "hazards": [
+        "H2",
+        "H3",
+        "H6"
+      ]
+    },
+    {
+      "id": "UCA-25",
+      "action": "A6",
+      "timing": "Provided",
+      "description": "A replica whose required history is gone is treated as synchronised.",
+      "hazards": [
+        "H2",
+        "H3"
+      ]
+    },
+    {
+      "id": "UCA-26",
+      "action": "A1b",
+      "timing": "Provided",
+      "description": "A lagging or unobservable replica is treated as safe for reads, promotion or deletion.",
+      "hazards": [
+        "H2",
+        "H4",
+        "H5"
+      ]
+    },
+    {
+      "id": "UCA-27",
+      "action": "A5",
+      "timing": "Not provided",
+      "description": "WAL is retained until the master's disk is exhausted.",
+      "hazards": [
+        "H1",
+        "H5"
+      ]
+    },
+    {
+      "id": "UCA-28",
+      "action": "A6",
+      "timing": "Too early",
+      "description": "Delete history is discarded while a change older than the delete can still be applied.",
+      "hazards": [
+        "H2",
+        "H3"
+      ]
+    },
+    {
+      "id": "UCA-29",
+      "action": "A6",
+      "timing": "Wrong order",
+      "description": "The apply decision is made against a position read before a stall, retry or lock wait, so a change admitted against an old cursor is written after the cursor moved.",
+      "hazards": [
+        "H2",
+        "H3"
+      ]
+    },
+    {
+      "id": "UCA-30",
+      "action": "A6",
+      "timing": "Provided",
+      "description": "After a rebuild, changes from the previous session, or metadata inherited from the source, are applied.",
+      "hazards": [
+        "H2",
+        "H3",
+        "H6"
+      ]
+    },
+    {
+      "id": "UCA-31",
+      "action": "A6",
+      "timing": "Provided",
+      "description": "A key is changed by a path that does not capture an order label (bulk operation, internal delete), so the change cannot be ordered against the other delivery path.",
+      "hazards": [
+        "H2",
+        "H3"
+      ]
+    },
+    {
+      "id": "UCA-32",
+      "action": "A6",
+      "timing": "Provided",
+      "description": "A transient disconnection is treated as a repair trigger and starts a full reconstruction.",
+      "hazards": [
+        "H3",
+        "H4"
+      ]
+    },
+    {
+      "id": "UCA-33",
+      "action": "A6",
+      "timing": "Provided",
+      "description": "A partially initialised copy (metadata cleared, cursor or generation not yet written) accepts deliveries or is presented as a copy.",
+      "hazards": [
+        "H2",
+        "H5"
+      ]
     }
   ],
   "controls": [
@@ -484,7 +636,8 @@
         "H2"
       ],
       "ucas": [
-        "UCA-02"
+        "UCA-02",
+        "UCA-32"
       ],
       "implementation": "partial",
       "verification": "unverified",
@@ -755,7 +908,8 @@
         "H4"
       ],
       "ucas": [
-        "UCA-10"
+        "UCA-10",
+        "UCA-26"
       ],
       "implementation": "partial",
       "verification": "unverified",
@@ -1017,7 +1171,8 @@
         "UCA-07",
         "UCA-11",
         "UCA-12",
-        "UCA-13"
+        "UCA-13",
+        "UCA-26"
       ],
       "implementation": "partial",
       "verification": "unverified",
@@ -1805,7 +1960,8 @@
         "H5"
       ],
       "ucas": [
-        "UCA-02"
+        "UCA-02",
+        "UCA-27"
       ],
       "implementation": "gap",
       "verification": "unverified",
@@ -1851,9 +2007,9 @@
         "SAF-10"
       ],
       "review": {
-        "commit": "aaf0b8568b25b1be84c771fc4ea8b1118bee5ff7",
-        "date": "2026-09-10",
-        "note": "Initial static audit. Existing code and prospective checks are not archived execution evidence; no safety verification is claimed."
+        "commit": "c96246cfc82e910bc2e12c2571177ad4bf90888a",
+        "date": "2026-09-20",
+        "note": "Linked UCA-27 (WAL retained until the disk is exhausted) from the SAF-10 STPA additions: the existing retention ceiling (walSizeLimitMb / walTtlSeconds) is the control; a follower that falls outside it gets lsn_purged and needs_rebuild (EV-18). No mechanism change; PARTIAL / UNVERIFIED unchanged."
       }
     },
     {
@@ -1969,6 +2125,445 @@
         "commit": "33205465691b0bf59dff1ad348ed810a5d20f24f",
         "date": "2026-09-13",
         "note": "Main.lean/Bridge.lean changed only in the empty-master delete's failure wording (unknown outcome); this control's mechanism is untouched. Refreshed for the referenced-file check."
+      }
+    },
+    {
+      "id": "EV-16",
+      "constraint": {
+        "id": "SC-16",
+        "text": "Continuous fetch resumes without external intervention, and a lost connection alone never triggers a rebuild."
+      },
+      "title": "Resume continuous fetch; a lost connection never rebuilds",
+      "hazards": [
+        "H3",
+        "H4"
+      ],
+      "ucas": [
+        "UCA-19",
+        "UCA-32"
+      ],
+      "implementation": "partial",
+      "verification": "unverified",
+      "scenarios": [
+        "Link cut and healed with no new writes: the follower reconnects with backoff and resumes from its applied position; the operator's ledger holds the counted drop under the follower's ownership and closes it by position; the follower's stats are unreadable to the operator while a drop is counted (Unknown holds, no demotion).",
+        "Repeated cuts, a mid-batch disconnect and an operator restart while cut are NOT yet staged."
+      ],
+      "assumptions": [
+        "flared owns delivery and reconnection; the operator only observes. Ownership is the mode (repl-follow-enabled), not the connection state."
+      ],
+      "residual_risks": [
+        "Failover: survivors rebuild rather than resume from a per-source cursor (design §9 decision 6).",
+        "Only one cut/heal cycle is staged; T5 (repeated cuts) and T8 (operator restart) remain.",
+        "The follower's backoff and poll interval are fixed configuration; no load measurement (T17 deferred)."
+      ],
+      "code": [
+        {
+          "path": "src/lib/handler_wal_follower.cc",
+          "symbol": "handler_wal_follower::classify"
+        },
+        {
+          "path": "src/lib/handler_wal_follower.cc",
+          "symbol": "handler_wal_follower::run"
+        },
+        {
+          "path": "src/lib/cluster.cc",
+          "symbol": "cluster::_reconcile_wal_follower_locked"
+        },
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/ReplicaRepair.lean",
+          "symbol": "advanceOwned"
+        }
+      ],
+      "call_path": "cluster::reconstruct_node -> _reconcile_wal_follower_locked starts handler_wal_follower on an Active RocksDB slave -> run(): op_repl_sync_wal::run_client_follow per poll -> classify(client_result, transport_ok): disconnected -> backoff and reconnect from the cursor; only lsn_purged/epoch_mismatch/master_id_mismatch/lsn_ahead -> needs_rebuild -> stats follow record -> operator (Main ListPods probe / followReadingOf) -> ReplicaRepair.holdOwned / advanceOwned.",
+      "checks": [
+        {
+          "id": "CHECK-16-unit",
+          "kind": "scenario",
+          "procedure": "cutter test_follow_disconnect_is_not_a_rebuild, test_follow_only_unsatisfiable_positions_rebuild, test_follow_reasons_are_named, test_follow_record_carries_state_reason_and_observation_time; flare_unit checkFollowOwnership (disconnected/error still own; unreadable is Unknown; close only by position in the same epoch).",
+          "references": [
+            {
+              "path": "test/lib/test_storage_rocksdb.cc",
+              "symbol": "test_follow_disconnect_is_not_a_rebuild"
+            },
+            {
+              "path": "flare_operator/FlareOperator/UnitTests.lean",
+              "symbol": "checkFollowOwnership"
+            }
+          ]
+        },
+        {
+          "id": "CHECK-16",
+          "kind": "scenario",
+          "procedure": "E2E continuous-replication tests 2-6 (following; cut with create/update/delete; heal with no new writes resumes from the applied position with no rebuild and no pod recreation; ledger held and closed; stats fetch failure held as Unknown).",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/ContinuousReplication.lean",
+              "symbol": "suite"
+            }
+          ]
+        }
+      ],
+      "runs": [
+        {
+          "check": "CHECK-16-unit",
+          "commit": "c96246cfc82e910bc2e12c2571177ad4bf90888a",
+          "date": "2026-09-20",
+          "command": "cd /tmp/flare-b17/test && cutter --keep-opening-modules -v v -s <repo>/test -n \"/(apply_rule|follow|generation|order_label|restore|identified_change|truncate_advances|swap_in_snapshot|hard_reset|repl_tag|replication_identity|epoch|client_follow|generations_unavailable|sync_wal)/\" lib (+ -n \"/replication_tag/\")",
+          "result": "pass",
+          "report": "docs/reports/2026-09-20-saf10-rocksdb-unit-head.txt"
+        },
+        {
+          "check": "CHECK-16-unit",
+          "commit": "c96246cfc82e910bc2e12c2571177ad4bf90888a",
+          "date": "2026-09-20",
+          "command": "cd flare_operator && lake build flare_unit && .lake/build/bin/flare_unit",
+          "result": "pass",
+          "report": "docs/reports/2026-09-20-saf10c-flare-unit-head.txt"
+        }
+      ],
+      "tasks": [
+        "SAF-10"
+      ],
+      "review": {
+        "commit": "c96246cfc82e910bc2e12c2571177ad4bf90888a",
+        "date": "2026-09-20",
+        "note": "New control from the SAF-10 design (§6); implementation on branch safety/saf-10-wal-replication. Unit evidence to be attached from the RocksDB cutter run on this revision and the flare_unit run; E2E from the continuous-replication suite. Author-run only; nothing verified."
+      }
+    },
+    {
+      "id": "EV-17",
+      "constraint": {
+        "id": "SC-17",
+        "text": "The applied position is contiguous and crash-atomic, and no other path may advance it."
+      },
+      "title": "Contiguous, crash-atomic applied position",
+      "hazards": [
+        "H2",
+        "H3"
+      ],
+      "ucas": [
+        "UCA-20",
+        "UCA-23"
+      ],
+      "implementation": "implemented",
+      "verification": "unverified",
+      "scenarios": [
+        "A forwarded change applied through the rule leaves the cursor unchanged; a WAL batch whose base is beyond cursor+1 is refused; an empty batch does not move the position; a metadata-only batch advances it; the cursor Put is in the same WriteBatch as the changes, metadata and tombstones."
+      ],
+      "assumptions": [
+        "RocksDB WriteBatch atomicity holds across the data and metadata column families."
+      ],
+      "residual_risks": [
+        "Crash at an apply boundary is exercised at the unit level (batch atomicity and re-decision), not by killing a process mid-apply (T4 E2E pending)."
+      ],
+      "code": [
+        {
+          "path": "src/lib/storage_rocksdb.cc",
+          "symbol": "storage_rocksdb::apply_wal_batch"
+        },
+        {
+          "path": "src/lib/storage_rocksdb.cc",
+          "symbol": "storage_rocksdb::apply_forwarded_change"
+        }
+      ],
+      "call_path": "op_repl_sync_wal client (follow) -> storage_rocksdb::apply_wal_batch(epoch, incarnation, base_seq, batch): contiguity check base_seq <= cursor+1 -> decode -> per-change decision under the exclusive section -> one WriteBatch with the cursor Put appended -> stats follow_note_progress after the write. apply_forwarded_change never touches the cursor.",
+      "checks": [
+        {
+          "id": "CHECK-17-unit",
+          "kind": "scenario",
+          "procedure": "cutter test_apply_rule_forwarded_change_does_not_advance_cursor, test_apply_rule_refuses_gap_in_the_stream, test_apply_rule_empty_batch_does_not_move_position, test_apply_rule_metadata_only_batch_advances_position, test_wal_get_repl_last_lsn_tracks_applied_batches.",
+          "references": [
+            {
+              "path": "test/lib/test_storage_rocksdb.cc",
+              "symbol": "test_apply_rule_refuses_gap_in_the_stream"
+            }
+          ]
+        }
+      ],
+      "runs": [
+        {
+          "check": "CHECK-17-unit",
+          "commit": "c96246cfc82e910bc2e12c2571177ad4bf90888a",
+          "date": "2026-09-20",
+          "command": "cd /tmp/flare-b17/test && cutter --keep-opening-modules -v v -s <repo>/test -n \"/(apply_rule|follow|generation|order_label|restore|identified_change|truncate_advances|swap_in_snapshot|hard_reset|repl_tag|replication_identity|epoch|client_follow|generations_unavailable|sync_wal)/\" lib (+ -n \"/replication_tag/\")",
+          "result": "pass",
+          "report": "docs/reports/2026-09-20-saf10-rocksdb-unit-head.txt"
+        }
+      ],
+      "tasks": [
+        "SAF-10"
+      ],
+      "review": {
+        "commit": "c96246cfc82e910bc2e12c2571177ad4bf90888a",
+        "date": "2026-09-20",
+        "note": "New control from the SAF-10 design (§6); implementation on branch safety/saf-10-wal-replication. Unit evidence to be attached from the RocksDB cutter run on this revision and the flare_unit run; E2E from the continuous-replication suite. Author-run only; nothing verified."
+      }
+    },
+    {
+      "id": "EV-18",
+      "constraint": {
+        "id": "SC-18",
+        "text": "History loss is an explicit rebuild state."
+      },
+      "title": "History loss is an explicit rebuild state",
+      "hazards": [
+        "H2",
+        "H3",
+        "H5"
+      ],
+      "ucas": [
+        "UCA-24",
+        "UCA-25",
+        "UCA-33"
+      ],
+      "implementation": "implemented",
+      "verification": "unverified",
+      "scenarios": [
+        "The source answers lsn_purged, epoch_mismatch, master_id_mismatch or the cursor is ahead of the source: the follower declares needs_rebuild with the reason and stops; the operator turns the declaration into a repair-ledger request (no drop counter needed) and runs demote -> hold -> reseat -> reconstruction; an incomplete snapshot restore (sentinel present) refuses to open; a copy in needs_rebuild/initial_sync is unfit for promotion."
+      ],
+      "assumptions": [
+        "flared reports the follower state truthfully in stats; the operator can read it (an unreadable state is Unknown, not synchronised)."
+      ],
+      "residual_risks": [
+        "lsn_purged is not staged end to end (retention purge cannot be forced deterministically in the harness; the wal-purged suite covers the dump path); epoch change is staged by flush_all.",
+        "A follower that declares needs_rebuild in the window between a completed reconstruction and its follower restart could be requested twice (bounded churn, not loss)."
+      ],
+      "code": [
+        {
+          "path": "src/lib/handler_wal_follower.cc",
+          "symbol": "handler_wal_follower::classify"
+        },
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/FollowEvidence.lean",
+          "symbol": "classify"
+        },
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/ReplicaRepair.lean",
+          "symbol": "requestRebuild"
+        },
+        {
+          "path": "src/lib/storage_rocksdb.cc",
+          "symbol": "storage_rocksdb::_discard_incomplete_restore"
+        }
+      ],
+      "call_path": "op_repl_sync_wal server replies lsn_purged / epoch_mismatch / generations_unavailable -> client_result -> handler_wal_follower::classify -> needs_rebuild + reason in the follow record -> operator ListPods probe -> FollowEvidence.classify.needsRebuild -> Main: ReplicaRepair.requestRebuild for the node's partition -> plan -> demote to Proxy -> reseat -> flared reconstruction (snapshot + WAL) -> swap_in_snapshot mints an incarnation, inherits the source epoch -> follower restarts.",
+      "checks": [
+        {
+          "id": "CHECK-18-unit",
+          "kind": "scenario",
+          "procedure": "cutter test_follow_only_unsatisfiable_positions_rebuild, test_restore_sentinel_discards_half_restored_copy, test_restore_sentinel_unremovable_refuses_open, test_apply_rule_refuses_foreign_session_and_stale_incarnation, test_swap_in_snapshot_refuses_checkpoint_without_source_epoch; flare_unit: classify reports needs_rebuild with the reason; requestRebuild is idempotent and plan demotes it; unfitReason for needs_rebuild/initial_sync.",
+          "references": [
+            {
+              "path": "test/lib/test_storage_rocksdb.cc",
+              "symbol": "test_follow_only_unsatisfiable_positions_rebuild"
+            },
+            {
+              "path": "flare_operator/FlareOperator/UnitTests.lean",
+              "symbol": "checkFollowShaping"
+            }
+          ]
+        },
+        {
+          "id": "CHECK-18",
+          "kind": "scenario",
+          "procedure": "E2E continuous-replication test 7: flush_all on the master advances the source epoch; the follower declares needs_rebuild (epoch_mismatch); the operator logs 'REPLICA REPAIR requested by the follower'; the replica is reconstructed IN PLACE (reconstruction_started moves, pod UID unchanged) and comes back following the new epoch; new writes arrive; the ledger empties.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/ContinuousReplication.lean",
+              "symbol": "suite"
+            }
+          ]
+        }
+      ],
+      "runs": [
+        {
+          "check": "CHECK-18-unit",
+          "commit": "c96246cfc82e910bc2e12c2571177ad4bf90888a",
+          "date": "2026-09-20",
+          "command": "cd /tmp/flare-b17/test && cutter --keep-opening-modules -v v -s <repo>/test -n \"/(apply_rule|follow|generation|order_label|restore|identified_change|truncate_advances|swap_in_snapshot|hard_reset|repl_tag|replication_identity|epoch|client_follow|generations_unavailable|sync_wal)/\" lib (+ -n \"/replication_tag/\")",
+          "result": "pass",
+          "report": "docs/reports/2026-09-20-saf10-rocksdb-unit-head.txt"
+        },
+        {
+          "check": "CHECK-18-unit",
+          "commit": "c96246cfc82e910bc2e12c2571177ad4bf90888a",
+          "date": "2026-09-20",
+          "command": "cd flare_operator && lake build flare_unit && .lake/build/bin/flare_unit",
+          "result": "pass",
+          "report": "docs/reports/2026-09-20-saf10c-flare-unit-head.txt"
+        }
+      ],
+      "tasks": [
+        "SAF-10"
+      ],
+      "review": {
+        "commit": "c96246cfc82e910bc2e12c2571177ad4bf90888a",
+        "date": "2026-09-20",
+        "note": "New control from the SAF-10 design (§6); implementation on branch safety/saf-10-wal-replication. Unit evidence to be attached from the RocksDB cutter run on this revision and the flare_unit run; E2E from the continuous-replication suite. Author-run only; nothing verified."
+      }
+    },
+    {
+      "id": "EV-19",
+      "constraint": {
+        "id": "SC-19",
+        "text": "Both delivery paths apply through one comparison rule; no path may reorder, duplicate or resurrect, and every path that can change a key participates in the label capture."
+      },
+      "title": "One comparison rule for both delivery paths",
+      "hazards": [
+        "H2",
+        "H3",
+        "H6"
+      ],
+      "ucas": [
+        "UCA-21",
+        "UCA-22",
+        "UCA-24",
+        "UCA-29",
+        "UCA-30",
+        "UCA-31"
+      ],
+      "implementation": "partial",
+      "verification": "unverified",
+      "scenarios": [
+        "Forwarded newer value then older WAL delivery leaves the newer value; the same change by both paths is applied once; a foreign session or stale incarnation is refused; a snapshot restore clears inherited metadata; the order label is captured under the slot lock for set/remove/incr; truncate/flush_all advance the source epoch instead of labelling; concurrent forwarded and WAL delivery decide under one lock; intra-batch repetition decides against the in-batch overlay; a batch with an unsupported operation or a count mismatch is refused."
+      ],
+      "assumptions": [
+        "Every per-key write path in flared goes through set/remove (incr via set) so the label capture is complete; any new path must be added to the capture or switch the epoch."
+      ],
+      "residual_risks": [
+        "Lock-hold time, forwarded-write wait and writer starvation under a far-behind replica are NOT measured (T17 deferred by agreement).",
+        "E2E coexistence scenarios T10-T13 are pinned by unit tests only; the minimal E2E shows forwarding-first then WAL re-delivery skipped."
+      ],
+      "code": [
+        {
+          "path": "src/lib/storage_rocksdb.cc",
+          "symbol": "storage_rocksdb::_decide_change"
+        },
+        {
+          "path": "src/lib/storage_rocksdb.cc",
+          "symbol": "storage_rocksdb::apply_identified_change"
+        },
+        {
+          "path": "src/lib/storage_rocksdb.cc",
+          "symbol": "storage_rocksdb::truncate"
+        },
+        {
+          "path": "src/lib/storage_rocksdb.cc",
+          "symbol": "storage_rocksdb::swap_in_snapshot"
+        },
+        {
+          "path": "src/lib/queue_proxy_write.cc",
+          "symbol": "queue_proxy_write::run"
+        },
+        {
+          "path": "src/lib/storage.cc",
+          "symbol": "entry::parse"
+        }
+      ],
+      "call_path": "Master: set/remove capture entry.seq_label inside the slot lock -> queue_proxy_write stamps rl=<epoch>/<label> when repl-identity-forward is on -> op_set/op_delete send it. Replica: entry::parse reads rl= -> storage::apply_identified_change -> storage_rocksdb::apply_forwarded_change (shared apply lock + slot lock) -> _decide_change (session, cursor, per-key label) -> WriteBatch. WAL path: apply_wal_batch (exclusive) -> same _decide_change with in-batch overlays.",
+      "checks": [
+        {
+          "id": "CHECK-19-unit",
+          "kind": "scenario",
+          "procedure": "cutter test_apply_rule_forwarded_newer_survives_older_wal, test_apply_rule_delete_then_older_put_does_not_resurrect, test_apply_rule_refuses_foreign_session_and_stale_incarnation, test_apply_rule_incarnation_checked_against_the_current_copy, test_apply_rule_restore_clears_inherited_metadata, test_apply_rule_concurrent_forwarded_and_wal, test_apply_rule_intra_batch_same_key_twice, test_apply_rule_refuses_undecodable_batch, test_apply_rule_curr_items_matches_real_key_count, test_order_label_strictly_monotonic_per_key, test_truncate_advances_source_epoch, test_generation_*, test_identified_change_*; test_op_set replication-tag parse tests.",
+          "references": [
+            {
+              "path": "test/lib/test_storage_rocksdb.cc",
+              "symbol": "test_apply_rule_forwarded_newer_survives_older_wal"
+            },
+            {
+              "path": "test/lib/test_op_set.cc",
+              "symbol": "test_parse_text_server_parameters_replication_tag"
+            }
+          ]
+        }
+      ],
+      "runs": [
+        {
+          "check": "CHECK-19-unit",
+          "commit": "c96246cfc82e910bc2e12c2571177ad4bf90888a",
+          "date": "2026-09-20",
+          "command": "cd /tmp/flare-b17/test && cutter --keep-opening-modules -v v -s <repo>/test -n \"/(apply_rule|follow|generation|order_label|restore|identified_change|truncate_advances|swap_in_snapshot|hard_reset|repl_tag|replication_identity|epoch|client_follow|generations_unavailable|sync_wal)/\" lib (+ -n \"/replication_tag/\")",
+          "result": "pass",
+          "report": "docs/reports/2026-09-20-saf10-rocksdb-unit-head.txt"
+        }
+      ],
+      "tasks": [
+        "SAF-10"
+      ],
+      "review": {
+        "commit": "c96246cfc82e910bc2e12c2571177ad4bf90888a",
+        "date": "2026-09-20",
+        "note": "New control from the SAF-10 design (§6); implementation on branch safety/saf-10-wal-replication. Unit evidence to be attached from the RocksDB cutter run on this revision and the flare_unit run; E2E from the continuous-replication suite. Author-run only; nothing verified."
+      }
+    },
+    {
+      "id": "EV-20",
+      "constraint": {
+        "id": "SC-20",
+        "text": "Delete history is discarded only when the applied position makes an older delivery impossible, and the decision is serialized with the write."
+      },
+      "title": "Delete history discarded only by applied position, decided under the write lock",
+      "hazards": [
+        "H2",
+        "H3"
+      ],
+      "ucas": [
+        "UCA-22",
+        "UCA-28"
+      ],
+      "implementation": "implemented",
+      "verification": "unverified",
+      "scenarios": [
+        "A tombstone is collected only once the applied cursor has passed the delete's label; an old put arriving afterwards is refused by the cursor test, not by the (now absent) tombstone; collection runs inside the applier's exclusive window, chunked; a forwarded change stalled across a collection is refused when released."
+      ],
+      "assumptions": [
+        "No wall-clock bound is used anywhere (design §9 decision 2)."
+      ],
+      "residual_risks": [
+        "The tombstone-space bound and its rebuild policy (design §9 decision 3) are not staged (T9 pending)."
+      ],
+      "code": [
+        {
+          "path": "src/lib/storage_rocksdb.cc",
+          "symbol": "storage_rocksdb::_collect_tombstones_locked"
+        },
+        {
+          "path": "src/lib/storage_rocksdb.cc",
+          "symbol": "storage_rocksdb::_decide_change"
+        }
+      ],
+      "call_path": "apply_wal_batch (exclusive section) -> after the batch is written, _collect_tombstones_locked drops metadata rows with deleted=1 and label <= applied cursor, in chunks -> later deliveries at or below the cursor are refused by _decide_change before any per-key lookup.",
+      "checks": [
+        {
+          "id": "CHECK-20-unit",
+          "kind": "scenario",
+          "procedure": "cutter test_apply_rule_old_put_refused_after_tombstone_collected, test_apply_rule_delete_then_older_put_does_not_resurrect, test_apply_rule_concurrent_forwarded_and_wal (stalled forwarded change across a collection), test_apply_rule_intra_batch_same_key_twice.",
+          "references": [
+            {
+              "path": "test/lib/test_storage_rocksdb.cc",
+              "symbol": "test_apply_rule_old_put_refused_after_tombstone_collected"
+            }
+          ]
+        }
+      ],
+      "runs": [
+        {
+          "check": "CHECK-20-unit",
+          "commit": "c96246cfc82e910bc2e12c2571177ad4bf90888a",
+          "date": "2026-09-20",
+          "command": "cd /tmp/flare-b17/test && cutter --keep-opening-modules -v v -s <repo>/test -n \"/(apply_rule|follow|generation|order_label|restore|identified_change|truncate_advances|swap_in_snapshot|hard_reset|repl_tag|replication_identity|epoch|client_follow|generations_unavailable|sync_wal)/\" lib (+ -n \"/replication_tag/\")",
+          "result": "pass",
+          "report": "docs/reports/2026-09-20-saf10-rocksdb-unit-head.txt"
+        }
+      ],
+      "tasks": [
+        "SAF-10"
+      ],
+      "review": {
+        "commit": "c96246cfc82e910bc2e12c2571177ad4bf90888a",
+        "date": "2026-09-20",
+        "note": "New control from the SAF-10 design (§6); implementation on branch safety/saf-10-wal-replication. Unit evidence to be attached from the RocksDB cutter run on this revision and the flare_unit run; E2E from the continuous-replication suite. Author-run only; nothing verified."
       }
     }
   ]

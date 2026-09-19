@@ -44,3 +44,20 @@ Whole tree: nix build .#flare pass.
   today that has to be done by configuration. Recorded as the remaining SAF-10c item.
 * The wire handshake (EPOCH / MORE / epoch_mismatch) still has unit coverage of the decision table only.
 * Lock-hold time and writer starvation bounds (design §3.8, T17): deferred by agreement.
+
+=== 2026-09-20 review fixes (two defects in the ownership rule) ===
+1. A TRANSIENT stats failure ended ownership: advanceOwned handed an owned entry to the ordinary path when the
+   follower's stats could not be read, and a request whose follower could not be read at observation time went
+   straight to the ordinary path. Both would have turned a probe hiccup into a demotion and a reconstruction —
+   the failure this design removes. Now: unreadable is Unknown. At request time the drop is HELD as
+   "follower state unknown (stats unreadable)"; at advance time the hold is kept and nothing is handed over. Only an
+   EXPLICIT reading (needs_rebuild, idle, mode off) ends ownership.
+2. Closing compared positions without the history they belong to: after a master change a follower can report a
+   large repl_applied_lsn from ANOTHER epoch. The bar now records the master's rocksdb_source_epoch and closing
+   requires the follower's repl_follow_source_epoch to match it; a later drop in a new epoch replaces the bar
+   instead of being max'd with an incomparable one. Ownership, bar and epoch are also persisted to status so an
+   operator restart cannot turn an owned entry into an ordinary request.
+New flare_unit checks: Unknown at request time; a held-unknown request is never planned; a transient failure keeps
+the hold and hands nothing over, and a later readable pass closes; a bigger position in another epoch does not
+close; a new epoch replaces the bar; the status round trip preserves ownership, bar and epoch.
+RESULT: flare_unit 101 checks passed, 0 failed.

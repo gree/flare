@@ -136,9 +136,12 @@ def relObs : Observation := obs (some 11) (some 100) (some 1) (some "succeeded")
 def lRel : Ledger := (advance lDem [(slaveKey, relObs)]).1
 
 /-- SAF-10c: a destination whose continuous follower owns the repair. -/
-def following (applied : Nat) : FollowReading := { enabled := true, state := some "following", appliedLsn := some applied }
-def disconnected : FollowReading := { enabled := true, state := some "disconnected", appliedLsn := some 5 }
-def rebuild : FollowReading := { enabled := true, state := some "needs_rebuild", appliedLsn := some 5 }
+def ownEp : String := "3:abc"
+def following (applied : Nat) (epoch : String := ownEp) : FollowReading :=
+  { enabled := true, state := some "following", appliedLsn := some applied, sourceEpoch := some epoch }
+def disconnected : FollowReading := { enabled := true, state := some "disconnected", appliedLsn := some 5, sourceEpoch := some ownEp }
+def rebuild : FollowReading := { enabled := true, state := some "needs_rebuild", appliedLsn := some 5, sourceEpoch := some ownEp }
+def unreadable : FollowReading := {}
 
 def checkFollowOwnership (ctx : Ctx) : IO Unit := do
   check ctx "the mode on and following/initial_sync/disconnected/error own; needs_rebuild, idle, off and unreadable do not"
@@ -148,36 +151,58 @@ def checkFollowOwnership (ctx : Ctx) : IO Unit := do
       && !ownedByFollower rebuild
       && !ownedByFollower { enabled := true, state := some "idle" }
       && !ownedByFollower { enabled := false, state := some "following" }
-      && !ownedByFollower { enabled := true, state := none })
-  -- A request for the slave, then held under ownership with the bar 100.
+      && !ownedByFollower unreadable)
+  check ctx "at request time an unreadable follower is Unknown: neither owned nor not-owned"
+    (ownershipAtRequest unreadable == none && ownershipAtRequest (following 1) == some true
+      && ownershipAtRequest rebuild == some false)
   let lReq := request l1 masterKey slaveKey 3
-  let lOwn := holdOwned lReq slaveKey (some 100)
+  let lOwn := holdOwned lReq slaveKey (some 100) (some ownEp)
   let e := lOwn.entries.head?
-  check ctx "holding records ownership, a visible reason and the bar"
+  check ctx "holding records ownership, a visible reason, the bar and its epoch"
     ((e.map (·.owned)) == some true && (e.bind (·.hold)) == some "owned by continuous replication"
-      && (e.bind (·.mustReach)) == some 100)
-  check ctx "a later drop raises the bar and never lowers it"
-    (((holdOwned lOwn slaveKey (some 150)).entries.head?.bind (·.mustReach)) == some 150
-      && ((holdOwned lOwn slaveKey (some 50)).entries.head?.bind (·.mustReach)) == some 100)
-  -- plan() never demotes an owned entry, even with the gate open.
+      && (e.bind (·.mustReach)) == some 100 && (e.bind (·.barEpoch)) == some ownEp)
+  check ctx "a later drop in the same epoch raises the bar and never lowers it; a new epoch replaces it"
+    (((holdOwned lOwn slaveKey (some 150) (some ownEp)).entries.head?.bind (·.mustReach)) == some 150
+      && ((holdOwned lOwn slaveKey (some 50) (some ownEp)).entries.head?.bind (·.mustReach)) == some 100
+      && ((holdOwned lOwn slaveKey (some 7) (some "4:new")).entries.head?.bind (·.mustReach)) == some 7
+      && ((holdOwned lOwn slaveKey (some 7) (some "4:new")).entries.head?.bind (·.barEpoch)) == some "4:new")
   let lRes := (resolve lOwn state).1
   check ctx "an owned request is never planned for demotion while the gate is open"
     ((plan lRes true "").2 == [] && ((plan lRes true "").1.entries.head?.bind (·.hold)) == some "owned by continuous replication")
-  -- Closing: only while following AND at or past the bar.
+  let lUnk := (resolve (holdOwned lReq slaveKey (some 100) (some ownEp) "follower state unknown (stats unreadable)") state).1
+  check ctx "a request held on an unreadable follower is not demoted either"
+    ((plan lUnk true "").2 == [])
   check ctx "following at 99 keeps; following at 100 closes without a rebuild"
     ((advanceOwnedAll lRes [(slaveKey, following 99)]).2 == []
       && (advanceOwnedAll lRes [(slaveKey, following 100)]).2.map (·.2) == [.closed]
       && (advanceOwnedAll lRes [(slaveKey, following 100)]).1.entries == [])
+  check ctx "a BIGGER position in ANOTHER epoch does not close: it is a different number line"
+    ((advanceOwnedAll lRes [(slaveKey, following 100000 "9:other")]).2 == []
+      && ((advanceOwnedAll lRes [(slaveKey, following 100000 "9:other")]).1.entries.head?.map (·.owned)) == some true)
   check ctx "a disconnected follower's position is not trusted for closing, but ownership continues"
     ((advanceOwnedAll lRes [(slaveKey, disconnected)]).2 == []
       && ((advanceOwnedAll lRes [(slaveKey, disconnected)]).1.entries.head?.map (·.owned)) == some true)
+  check ctx "a TRANSIENT stats failure keeps the hold and hands nothing over (no rebuild on a probe hiccup)"
+    ((advanceOwnedAll lRes [(slaveKey, unreadable)]).2 == []
+      && ((advanceOwnedAll lRes [(slaveKey, unreadable)]).1.entries.head?.map (·.owned)) == some true
+      && ((advanceOwnedAll lRes [(slaveKey, unreadable)]).1.entries.head?.bind (·.hold)) == some "follower state unknown (stats unreadable)"
+      && (plan (advanceOwnedAll lRes [(slaveKey, unreadable)]).1 true "").2 == [])
+  check ctx "after the hiccup a readable pass resumes: following past the bar closes"
+    ((advanceOwnedAll (advanceOwnedAll lRes [(slaveKey, unreadable)]).1 [(slaveKey, following 100)]).2.map (·.2) == [.closed])
   check ctx "needs_rebuild hands the entry to the ordinary path, keeping its drops and node key"
     ((advanceOwnedAll lRes [(slaveKey, rebuild)]).2.map (·.2) == [.handedOver]
       && ((advanceOwnedAll lRes [(slaveKey, rebuild)]).1.entries.head?.map (·.owned)) == some false
       && ((advanceOwnedAll lRes [(slaveKey, rebuild)]).1.entries.head?.map (·.drops)) == some 3
       && (plan (advanceOwnedAll lRes [(slaveKey, rebuild)]).1 true "").2.length == 1)
-  check ctx "an owned entry with no recorded bar cannot be closed by position and is handed over"
-    ((advanceOwnedAll (holdOwned lReq slaveKey none) [(slaveKey, following 1000)]).2.map (·.2) == [.handedOver])
+  check ctx "an owned entry with no recorded bar stays owned and is not closed by position"
+    ((advanceOwnedAll (holdOwned lReq slaveKey none none) [(slaveKey, following 1000)]).2 == []
+      && ((advanceOwnedAll (holdOwned lReq slaveKey none none) [(slaveKey, following 1000)]).1.entries.head?.map (·.owned)) == some true)
+  check ctx "ownership, bar and epoch survive the status round trip (an operator restart)"
+    (match Ledger.fromJson? (Ledger.toJson lRes) with
+      | some back => back == lRes && (back.entries.head?.map (·.owned)) == some true
+                     && (back.entries.head?.bind (·.mustReach)) == some 100
+                     && (back.entries.head?.bind (·.barEpoch)) == some ownEp
+      | none => false)
 
 def checkAdvanceHold (ctx : Ctx) : IO Unit := do
   let old := obs (some 10) (some 100) (some 1) (some "succeeded") (some 1) (some masterKey) (some masterKey) (some (.Proxy, .Active))

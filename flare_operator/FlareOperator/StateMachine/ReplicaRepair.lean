@@ -102,8 +102,11 @@ structure Entry where
   owned : Bool := false
   /-- The master's latest sequence when the drop was observed: the dropped
       write is at or below it, so a follower that has applied past it has the
-      write. -/
+      write. Only comparable within `barEpoch`: a position from another
+      history says nothing about this bar. -/
   mustReach : Option Nat := none
+  /-- The master's source epoch when the bar was taken. -/
+  barEpoch : Option String := none
   deriving Repr, BEq
 
 structure Ledger where
@@ -219,7 +222,13 @@ structure FollowReading where
   state : Option String := none
   /-- `repl_applied_lsn`: contiguously applied position. -/
   appliedLsn : Option Nat := none
+  /-- `repl_follow_source_epoch`: the history that position belongs to. -/
+  sourceEpoch : Option String := none
   deriving Repr, BEq
+
+/-- Nothing could be read. Unknown is Unknown: it neither claims nor ends
+    ownership, and it never drives a demotion (SAF-04 typing, applied here). -/
+def FollowReading.unreadable (r : FollowReading) : Bool := r.state.isNone
 
 /-- Does the follower own this destination's repair? The mode must be on and
     the follower must not have given up: `needs_rebuild` is the one state in
@@ -236,15 +245,29 @@ def ownedByFollower (r : FollowReading) : Bool :=
 /-- Hold `dest`'s request under the follower's ownership, recording the
     position the follower must reach. A later drop raises the bar, never
     lowers it. -/
-def holdOwned (l : Ledger) (dest : String) (masterSeq : Option Nat) : Ledger :=
+def holdOwned (l : Ledger) (dest : String) (masterSeq : Option Nat) (masterEpoch : Option String)
+    (reason : String := "owned by continuous replication") : Ledger :=
   { l with entries := l.entries.map fun e =>
       if e.dest == dest then
-        { e with owned := true, hold := some "owned by continuous replication",
-                 mustReach := match e.mustReach, masterSeq with
-                   | some a, some b => some (max a b)
-                   | some a, none => some a
-                   | none, b => b }
+        -- A bar from a DIFFERENT epoch than the one recorded is not
+        -- comparable: the newer epoch replaces it rather than being max'd.
+        let sameEpoch := e.barEpoch == masterEpoch || e.barEpoch.isNone
+        { e with owned := true, hold := some reason,
+                 mustReach := (if sameEpoch then
+                     (match e.mustReach, masterSeq with
+                       | some a, some b => some (max a b)
+                       | some a, none => some a
+                       | none, b => b)
+                   else masterSeq),
+                 barEpoch := (if masterEpoch.isSome then masterEpoch else e.barEpoch) }
       else e }
+
+/-- At request time: does the reading let the follower own this drop, and
+    what should the ledger do? `none` = the stats could not be read — then the
+    request is HELD as "follower state unknown", still owned in the sense
+    that nothing destructive happens to it, until a readable pass decides. -/
+def ownershipAtRequest (r : FollowReading) : Option Bool :=
+  if r.unreadable then none else some (ownedByFollower r)
 
 /-- Outcome of checking an owned entry against the follower's reading. -/
 inductive OwnedStep where
@@ -260,15 +283,31 @@ inductive OwnedStep where
     position and is handed over rather than trusted. -/
 def advanceOwned (e : Entry) (r : FollowReading) : Option Entry × OwnedStep :=
   if !e.owned then (some e, .keep)
+  else if r.unreadable then
+    -- A transient stats failure decides NOTHING: keep the hold, say why, and
+    -- try again next pass. Handing over here would turn a probe hiccup into
+    -- a demotion and a reconstruction.
+    (some { e with hold := some "follower state unknown (stats unreadable)" }, .keep)
   else if !(ownedByFollower r) then
-    -- needs_rebuild, idle, or unreadable: ownership ends, the entry becomes
-    -- an ordinary request again (drops and node key kept).
+    -- An EXPLICIT reading that the follower does not own it (needs_rebuild,
+    -- idle, mode off): ownership ends, the entry becomes an ordinary request
+    -- again (drops and node key kept).
     (some { e with owned := false, hold := none }, .handedOver)
   else
+    -- Readable and owning. Closing requires: following (a disconnected
+    -- follower's position is stale), a recorded bar, the SAME history as
+    -- the bar — a position from another epoch is a different number line —
+    -- and the position at or past the bar.
+    let e := { e with hold := some "owned by continuous replication" }
     match r.state, r.appliedLsn, e.mustReach with
     | some "following", some applied, some bar =>
-      if applied ≥ bar then (none, .closed) else (some e, .keep)
-    | _, _, none => (some { e with owned := false, hold := none }, .handedOver)
+      if r.sourceEpoch.isSome && r.sourceEpoch == e.barEpoch && applied ≥ bar then (none, .closed)
+      else (some e, .keep)
+    | _, _, none =>
+      -- No bar was ever recorded (the master's sequence was unreadable at
+      -- every observation): it cannot be closed by position. Keep it owned
+      -- rather than trust it; the next observed drop supplies a bar.
+      (some e, .keep)
     | _, _, _ => (some e, .keep)
 
 def advanceOwnedAll (l : Ledger) (readings : List (String × FollowReading)) : Ledger × List (Entry × OwnedStep) :=
@@ -405,6 +444,11 @@ def Entry.toJson (e : Entry) : Json :=
     ++ (match e.currentIdAtReseat with | some b => [("currentIdAtReseat", Json.num b)] | none => [])
     ++ [("dropsAtReseat", Json.num e.dropsAtReseat)]
     ++ (match e.hold with | some h => [("hold", Json.str h)] | none => [])
+    -- SAF-10c ownership must survive an operator restart: an owned entry that
+    -- came back as an ordinary request would be demoted on the next pass.
+    ++ (if e.owned then [("owned", Json.bool true)] else [])
+    ++ (match e.mustReach with | some b => [("mustReach", Json.num b)] | none => [])
+    ++ (match e.barEpoch with | some ep => [("barEpoch", Json.str ep)] | none => [])
 
 open Lean in
 def Entry.fromJson? (j : Json) : Option Entry := do
@@ -418,7 +462,10 @@ def Entry.fromJson? (j : Json) : Option Entry := do
     bootIdAtReseat := (j.getObjValAs? Nat "bootIdAtReseat").toOption,
     currentIdAtReseat := (j.getObjValAs? Nat "currentIdAtReseat").toOption,
     dropsAtReseat := (j.getObjValAs? Nat "dropsAtReseat").toOption.getD 0,
-    hold := (j.getObjValAs? String "hold").toOption }
+    hold := (j.getObjValAs? String "hold").toOption,
+    owned := (j.getObjValAs? Bool "owned").toOption.getD false,
+    mustReach := (j.getObjValAs? Nat "mustReach").toOption,
+    barEpoch := (j.getObjValAs? String "barEpoch").toOption }
 
 open Lean in
 def Ledger.toJson (l : Ledger) : Json :=

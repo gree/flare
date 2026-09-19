@@ -92,6 +92,18 @@ structure Entry where
   dropsAtReseat : Nat := 0
   /-- Why a resolved request is not being acted on this pass (gate reason). -/
   hold : Option String := none
+  /-- SAF-10c: the destination runs a continuous WAL follower, which OWNS the
+      repair of this drop (design §5.4). The ledger records the request and
+      HOLDS it — no demotion, no reconstruction — and closes it once the
+      follower's applied position has reached `mustReach`. Ownership is the
+      MODE, not the connection state: a follower that is momentarily
+      `disconnected` still owns it. Only the follower's own `needs_rebuild`
+      hands the entry back to the demote → hold → reseat path. -/
+  owned : Bool := false
+  /-- The master's latest sequence when the drop was observed: the dropped
+      write is at or below it, so a follower that has applied past it has the
+      write. -/
+  mustReach : Option Nat := none
   deriving Repr, BEq
 
 structure Ledger where
@@ -189,14 +201,87 @@ def plan (l : Ledger) (allowed : Bool) (gateReason : String) : Ledger × List (S
   if allowed then
     let acts := l.entries.filterMap fun e =>
       match e.phase, e.nodeKey with
-      | .requested, some k => some (k, e)
+      | .requested, some k => if e.owned then none else some (k, e)
       | _, _ => none
-    ({ l with entries := l.entries.map fun e => { e with hold := none } }, acts)
+    ({ l with entries := l.entries.map fun e => if e.owned then e else { e with hold := none } }, acts)
   else
     ({ l with entries := l.entries.map fun e =>
         match e.phase, e.nodeKey with
         | .requested, some _ => { e with hold := some gateReason }
         | _, _ => e }, [])
+
+/-- What the destination's own stats say about its continuous follower. -/
+structure FollowReading where
+  /-- `repl_follow_enabled`: the mode is on for that node. -/
+  enabled : Bool := false
+  /-- `repl_follow_state`: idle / initial_sync / following / disconnected /
+      needs_rebuild / error. `none` = the stats could not be read. -/
+  state : Option String := none
+  /-- `repl_applied_lsn`: contiguously applied position. -/
+  appliedLsn : Option Nat := none
+  deriving Repr, BEq
+
+/-- Does the follower own this destination's repair? The mode must be on and
+    the follower must not have given up: `needs_rebuild` is the one state in
+    which it hands over. `disconnected` and `error` still own — resuming from
+    the position is the follower's job, and starting a reconstruction there
+    would be exactly the blip-costs-a-rebuild failure this exists to remove.
+    Unreadable stats (`state = none`) do NOT claim ownership: fail closed to
+    the path that does not depend on the reading. -/
+def ownedByFollower (r : FollowReading) : Bool :=
+  r.enabled && (match r.state with
+    | some "following" | some "initial_sync" | some "disconnected" | some "error" => true
+    | _ => false)
+
+/-- Hold `dest`'s request under the follower's ownership, recording the
+    position the follower must reach. A later drop raises the bar, never
+    lowers it. -/
+def holdOwned (l : Ledger) (dest : String) (masterSeq : Option Nat) : Ledger :=
+  { l with entries := l.entries.map fun e =>
+      if e.dest == dest then
+        { e with owned := true, hold := some "owned by continuous replication",
+                 mustReach := match e.mustReach, masterSeq with
+                   | some a, some b => some (max a b)
+                   | some a, none => some a
+                   | none, b => b }
+      else e }
+
+/-- Outcome of checking an owned entry against the follower's reading. -/
+inductive OwnedStep where
+  | keep            -- still owned, not yet reached
+  | closed          -- the follower applied past the drop: repaired without a rebuild
+  | handedOver      -- the follower declared needs_rebuild (or the mode went off): the normal path takes it
+  deriving Repr, BEq
+
+/-- Advance one OWNED entry by the follower's reading. Closing requires the
+    follower to be `following` (connected and applying — a disconnected
+    follower's position is stale by definition) AND a recorded bar AND the
+    applied position at or past it. An entry with no bar cannot be closed by
+    position and is handed over rather than trusted. -/
+def advanceOwned (e : Entry) (r : FollowReading) : Option Entry × OwnedStep :=
+  if !e.owned then (some e, .keep)
+  else if !(ownedByFollower r) then
+    -- needs_rebuild, idle, or unreadable: ownership ends, the entry becomes
+    -- an ordinary request again (drops and node key kept).
+    (some { e with owned := false, hold := none }, .handedOver)
+  else
+    match r.state, r.appliedLsn, e.mustReach with
+    | some "following", some applied, some bar =>
+      if applied ≥ bar then (none, .closed) else (some e, .keep)
+    | _, _, none => (some { e with owned := false, hold := none }, .handedOver)
+    | _, _, _ => (some e, .keep)
+
+def advanceOwnedAll (l : Ledger) (readings : List (String × FollowReading)) : Ledger × List (Entry × OwnedStep) :=
+  let step := fun (acc : List Entry × List (Entry × OwnedStep)) (e : Entry) =>
+    let (kept, out) := acc
+    match readings.lookup e.dest with
+    | none => (kept ++ [e], out)
+    | some r =>
+      match advanceOwned e r with
+      | (some e', st) => (kept ++ [e'], if st == .keep then out else out ++ [(e', st)])
+      | (none, st) => (kept, out ++ [(e, st)])
+  let (kept, out) := l.entries.foldl step ([], [])
+  ({ l with entries := kept }, out)
 
 /-- The caller committed `dest`'s node as Proxy at `version`. -/
 def markDemoted (l : Ledger) (dest : String) (version : Nat) : Ledger :=

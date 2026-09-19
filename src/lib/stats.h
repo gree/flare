@@ -96,6 +96,7 @@ protected:
 	//   last_success_source  master host:port that handler copied from.
 	pthread_mutex_t _mutex_reconstruction;
 	pthread_mutex_t _mutex_follow;
+	bool _follow_enabled;
 	string _follow_source;
 	string _follow_source_epoch;
 	int _follow_state;
@@ -176,6 +177,7 @@ public:
 		follow_error,			// storage or protocol failure; retried
 	};
 	struct follow_record {
+		bool     enabled;				// the mode is on for this node
 		string   source;				// peer being followed, empty when idle
 		string   source_epoch;			// the history the position belongs to
 		string   state;
@@ -193,6 +195,7 @@ public:
 	int follow_set_source(const string& source, const string& source_epoch);
 	int follow_note_progress(uint64_t applied_lsn);
 	int follow_note_source_position(uint64_t source_lsn);
+	int follow_set_enabled(bool enabled);
 	uint64_t get_reconstruction_boot_id();
 	uint64_t get_reconstruction_current_id();
 	string get_reconstruction_current_state();

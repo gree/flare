@@ -49,6 +49,7 @@ stats::stats():
 		_reconstruction_started(0),
 		_reconstruction_completed(0),
 		_reconstruction_failed(0),
+		_follow_enabled(false),
 		_follow_state(follow_idle),
 		_follow_applied_lsn(0),
 		_follow_source_lsn(0),
@@ -250,6 +251,7 @@ namespace {
 stats::follow_record stats::get_follow_record() {
 	follow_record r;
 	pthread_mutex_lock(&this->_mutex_follow);
+	r.enabled = this->_follow_enabled;
 	r.source = this->_follow_source;
 	r.source_epoch = this->_follow_source_epoch;
 	r.state = _follow_state_name(this->_follow_state);
@@ -291,6 +293,13 @@ int stats::follow_note_progress(uint64_t applied_lsn) {
 		this->_follow_applied_lsn = applied_lsn;
 		this->_follow_last_progress_at = this->get_timestamp();
 	}
+	pthread_mutex_unlock(&this->_mutex_follow);
+	return 0;
+}
+
+int stats::follow_set_enabled(bool enabled) {
+	pthread_mutex_lock(&this->_mutex_follow);
+	this->_follow_enabled = enabled;
 	pthread_mutex_unlock(&this->_mutex_follow);
 	return 0;
 }

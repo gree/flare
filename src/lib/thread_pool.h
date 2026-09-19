@@ -54,6 +54,7 @@ public:
 		thread_type_reaper,
 		thread_type_metrics,
 		thread_type_storage_check,
+		thread_type_wal_follower,		// SAF-10b: continuous replication follower
 #ifdef ENABLE_MYSQL_REPLICATION
 		thread_type_mysql_replication,
 #endif

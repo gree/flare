@@ -186,6 +186,7 @@ int op_stats::_send_stats(thread_pool* req_tp, thread_pool* other_tp, storage* s
 		// position without the time it was observed, or a state without a
 		// reason, cannot be acted on (design §5.1).
 		stats::follow_record fr = stats_object->get_follow_record();
+		_send_stat("repl_follow_enabled"                , fr.enabled ? 1 : 0);
 		_send_stat("repl_follow_source"                 , fr.source);
 		_send_stat("repl_follow_source_epoch"           , fr.source_epoch);
 		_send_stat("repl_follow_state"                  , fr.state);

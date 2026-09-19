@@ -464,6 +464,22 @@ private def countActivePartitions (state : FlareClusterState) : Nat :=
   | none => 0
   | some maxIdx => maxIdx + 1
 
+/-- SAF-10c: what a destination's own stats say about its continuous
+    follower. Resolved through the committed map (the master reports the
+    address it connected to). Unreadable stats yield a reading that claims
+    NO ownership. -/
+def followReadingOf (state : FlareClusterState) (dest : String) (ns : String)
+    : IO ReplicaRepair.FollowReading := do
+  match ReplicaRepair.resolveKey state dest with
+  | none => pure {}
+  | some (_, n) =>
+    match ← Bridge.queryPodStats (extractPodName n.serverName) ns "stats" with
+    | .error _ => pure {}
+    | .ok out =>
+      pure { enabled := (statNat out "repl_follow_enabled") == some 1,
+             state := statStr out "repl_follow_state",
+             appliedLsn := statNat out "repl_applied_lsn" }
+
 /-- Detect unsafe partition reduction and warn the user.
     Returns true if partition reduction was detected (and blocked). -/
 private def detectPartitionReduction (state : FlareClusterState) (crd : FlareClusterView)
@@ -1305,7 +1321,24 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
                                   currentMaster := currentMaster, mapped := mapped }
               | .error _ => pure { mapped := mapped, currentMaster := currentMaster }
             obs := obs ++ [(e.dest, o)]
-        let (led1, steps) := ReplicaRepair.advance led0 obs
+        -- SAF-10c: owned entries first. The follower's own reading decides:
+        -- applied past the bar while `following` → closed WITHOUT a rebuild;
+        -- needs_rebuild (or the mode off) → handed over to the ordinary path.
+        let mut ownedReadings : List (String × ReplicaRepair.FollowReading) := []
+        for e in led0.entries do
+          if e.owned then
+            ownedReadings := ownedReadings ++ [(e.dest, ← followReadingOf finalState e.dest ns)]
+        let (ledOwned, ownedSteps) := ReplicaRepair.advanceOwnedAll led0 ownedReadings
+        for (e, st) in ownedSteps do
+          let who := e.nodeKey.getD e.dest
+          match st with
+          | .closed =>
+            metrics.replicaRepairCompleted.inc
+            IO.eprintln s!"[flare-operator] REPLICA REPAIR CLOSED by continuous replication: {who} applied past {e.mustReach.getD 0} while following; the {e.drops} dropped write(s) are covered and no reconstruction was needed"
+          | .handedOver =>
+            IO.eprintln s!"[flare-operator] REPLICA REPAIR handed over: {who}'s follower no longer owns it (needs_rebuild, mode off, or unreadable); the demote → hold → reseat path takes it from here"
+          | .keep => pure ()
+        let (led1, steps) := ReplicaRepair.advance ledOwned obs
         for (e, st) in steps do
           let who := e.nodeKey.getD e.dest
           match st with
@@ -1396,9 +1429,21 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
               let (led1, newDrops) := ReplicaRepair.observe led0 mKey drops
               let mut led2 := led1
               for (dest, d) in newDrops do
-                IO.eprintln s!"[flare-operator] REPLICA REPAIR requested: master {mKey} dropped {d} more write(s) to {dest} — that replica is behind and nothing else repairs it"
                 metrics.replicaRepairRequested.inc
                 led2 := ReplicaRepair.request led2 mKey dest d
+                -- SAF-10c: if the destination runs a continuous follower, the
+                -- follower OWNS this repair (design §5.4). Record the request,
+                -- hold it with a visible reason and the position it must
+                -- reach — the master's latest sequence now, which the dropped
+                -- write is at or below — and start no reconstruction. The
+                -- reading is the destination's own stats, never an
+                -- assumption; unreadable stats do not claim ownership.
+                let fr ← followReadingOf finalState dest ns
+                if ReplicaRepair.ownedByFollower fr then
+                  led2 := ReplicaRepair.holdOwned led2 dest (statNat mo "rocksdb_latest_sequence_number")
+                  IO.eprintln s!"[flare-operator] REPLICA REPAIR requested and HELD: master {mKey} dropped {d} more write(s) to {dest}; that replica's continuous follower ({fr.state.getD "?"}) owns the repair — it must apply past {(statNat mo "rocksdb_latest_sequence_number").getD 0} before this closes; no reconstruction is started"
+                else
+                  IO.eprintln s!"[flare-operator] REPLICA REPAIR requested: master {mKey} dropped {d} more write(s) to {dest} — that replica is behind and nothing else repairs it"
               if !led0.initialized then
                 IO.eprintln s!"[flare-operator] replica repair ledger initialized from {mKey}: {drops.length} destination counter(s) recorded as baseline, none attributed"
               ledgerRef.set led2

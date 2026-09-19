@@ -135,6 +135,50 @@ def stepsOf (l : Ledger) (o : Observation) : List Step :=
 def relObs : Observation := obs (some 11) (some 100) (some 1) (some "succeeded") (some 1) (some masterKey) (some masterKey) (some (.Proxy, .Active))
 def lRel : Ledger := (advance lDem [(slaveKey, relObs)]).1
 
+/-- SAF-10c: a destination whose continuous follower owns the repair. -/
+def following (applied : Nat) : FollowReading := { enabled := true, state := some "following", appliedLsn := some applied }
+def disconnected : FollowReading := { enabled := true, state := some "disconnected", appliedLsn := some 5 }
+def rebuild : FollowReading := { enabled := true, state := some "needs_rebuild", appliedLsn := some 5 }
+
+def checkFollowOwnership (ctx : Ctx) : IO Unit := do
+  check ctx "the mode on and following/initial_sync/disconnected/error own; needs_rebuild, idle, off and unreadable do not"
+    (ownedByFollower (following 1) && ownedByFollower disconnected
+      && ownedByFollower { enabled := true, state := some "error" }
+      && ownedByFollower { enabled := true, state := some "initial_sync" }
+      && !ownedByFollower rebuild
+      && !ownedByFollower { enabled := true, state := some "idle" }
+      && !ownedByFollower { enabled := false, state := some "following" }
+      && !ownedByFollower { enabled := true, state := none })
+  -- A request for the slave, then held under ownership with the bar 100.
+  let lReq := request l1 masterKey slaveKey 3
+  let lOwn := holdOwned lReq slaveKey (some 100)
+  let e := lOwn.entries.head?
+  check ctx "holding records ownership, a visible reason and the bar"
+    ((e.map (·.owned)) == some true && (e.bind (·.hold)) == some "owned by continuous replication"
+      && (e.bind (·.mustReach)) == some 100)
+  check ctx "a later drop raises the bar and never lowers it"
+    (((holdOwned lOwn slaveKey (some 150)).entries.head?.bind (·.mustReach)) == some 150
+      && ((holdOwned lOwn slaveKey (some 50)).entries.head?.bind (·.mustReach)) == some 100)
+  -- plan() never demotes an owned entry, even with the gate open.
+  let lRes := (resolve lOwn state).1
+  check ctx "an owned request is never planned for demotion while the gate is open"
+    ((plan lRes true "").2 == [] && ((plan lRes true "").1.entries.head?.bind (·.hold)) == some "owned by continuous replication")
+  -- Closing: only while following AND at or past the bar.
+  check ctx "following at 99 keeps; following at 100 closes without a rebuild"
+    ((advanceOwnedAll lRes [(slaveKey, following 99)]).2 == []
+      && (advanceOwnedAll lRes [(slaveKey, following 100)]).2.map (·.2) == [.closed]
+      && (advanceOwnedAll lRes [(slaveKey, following 100)]).1.entries == [])
+  check ctx "a disconnected follower's position is not trusted for closing, but ownership continues"
+    ((advanceOwnedAll lRes [(slaveKey, disconnected)]).2 == []
+      && ((advanceOwnedAll lRes [(slaveKey, disconnected)]).1.entries.head?.map (·.owned)) == some true)
+  check ctx "needs_rebuild hands the entry to the ordinary path, keeping its drops and node key"
+    ((advanceOwnedAll lRes [(slaveKey, rebuild)]).2.map (·.2) == [.handedOver]
+      && ((advanceOwnedAll lRes [(slaveKey, rebuild)]).1.entries.head?.map (·.owned)) == some false
+      && ((advanceOwnedAll lRes [(slaveKey, rebuild)]).1.entries.head?.map (·.drops)) == some 3
+      && (plan (advanceOwnedAll lRes [(slaveKey, rebuild)]).1 true "").2.length == 1)
+  check ctx "an owned entry with no recorded bar cannot be closed by position and is handed over"
+    ((advanceOwnedAll (holdOwned lReq slaveKey none) [(slaveKey, following 1000)]).2.map (·.2) == [.handedOver])
+
 def checkAdvanceHold (ctx : Ctx) : IO Unit := do
   let old := obs (some 10) (some 100) (some 1) (some "succeeded") (some 1) (some masterKey) (some masterKey) (some (.Proxy, .Active))
   check ctx "a node still reporting the OLD version stays held"
@@ -377,6 +421,7 @@ def run : IO UInt32 := do
   checkObserve ctx
   checkRequestResolve ctx
   checkGate ctx
+  checkFollowOwnership ctx
   checkAdvanceHold ctx
   checkAdvanceComplete ctx
   checkJson ctx

@@ -648,18 +648,49 @@ flared owns delivery and reconnection; the operator observes and decides.
 
 ### 5.3 Separate eligibility
 
-* **Serving reads**: a replica in this mode is **out of the read set** until
-  SAF-10c implements eligibility — balance 0, not a read target. Coexistence is
-  explicitly not a freshness argument (§0.2.3). When eligibility does arrive it
-  is `following` **and** lag within a configured bound from a fresh
-  observation; nothing weaker.
-* **Promotion**: `following`, fresh observation, lag under a promotion bound.
-  Because replication is asynchronous, **it can never be proven that the
-  replica held everything the master acknowledged**; when the master is
-  unreachable this stays unprovable, and availability-first promotion must not
-  be described as loss-free.
-* **Deleting another copy**: the existing gate (EV-05) plus a requirement that
-  another copy is `following` and fresh.
+Implemented in SAF-10c as one pure module,
+`flare_operator/FlareOperator/StateMachine/FollowEvidence.lean`
+(`judge`, `classify`), fed by the replica's own `stats` reply and the
+partition master's reply of the same pass. The verdict is one of
+`notInMode` (the node is not a WAL-mode follower: nothing below applies),
+`eligible`, `ineligible`, `unknown`. Unknown is never healthy.
+
+* **Serving reads**: a WAL-mode replica is **out of the read set** (balance 0
+  at commit, `K8sReconciler.withholdReads`, whatever `spec.readBalance.slave`
+  says) unless it is `following` the master's **current source epoch**, the
+  master's position was observed within `FLARE_FOLLOW_FRESH_SECS` (default 5)
+  **by the node's own clock** (both timestamps come from one reply, so clock
+  skew cancels), and `head − applied ≤ FLARE_FOLLOW_READ_LAG` (default 1000)
+  with the head read from the master this pass. Coexistence is explicitly not
+  a freshness argument (§0.2.3).
+* **Planned promotion (drain)**: the same, under `FLARE_FOLLOW_PROMOTE_LAG`
+  (default 100). A follower not proven is not a drain successor; the existing
+  drain guard then keeps the master and reports it.
+* **Failover (master gone)**: nothing can be proven — **it can never be proven
+  that the replica held everything the master acknowledged**. The FSM still
+  promotes for availability, but (a) a follower **known** to hold an unusable
+  copy (`needs_rebuild`, `initial_sync`, `idle`, another epoch) is excluded
+  from every promotion path, (b) proven-current followers are ordered first,
+  highest applied position first, and (c) a promotion of an unproven
+  follower is logged as **not loss-free** (`PROMOTION NOT LOSS-FREE`).
+  Candidate shaping is partitionMap-only (`shapePromotionCandidates`), the
+  same device as standby de-prioritisation, so the promotion functions and
+  their proofs are unchanged.
+* **Deleting another copy**: the existing gate (EV-05) plus
+  `survivorFollowOk`: from the SAME fresh stats read at revalidation, the
+  surviving follower must be `eligible` for survival (promotion bound) or not
+  in the mode; `unknown` refuses.
+* **Unknown handling**: an unreadable or incomplete reply withholds reads and
+  blocks planned promotion and deletion, but never makes a node unfit — a
+  stats hiccup must not remove the last failover candidate. The mode is
+  remembered per node; a node once seen in the mode whose stats become
+  unreadable is Unknown. **Residual**: a node never yet read is not withheld
+  (withholding on the first hiccup would flap every non-WAL cluster's read
+  balance at start-up); the TCP-side zombie-master guard
+  (`Reconciler.findActiveSlaveForPartition`) does not consult this evidence.
+* **Probe cost**: every non-Down Slave in the mode is probed each tick, the
+  master of each such partition too; a node known to be out of the mode is
+  re-probed every `FLARE_FOLLOW_PROBE_INTERVAL` ticks (default 30).
 
 ### 5.4 Repair ownership versus transient connection state
 

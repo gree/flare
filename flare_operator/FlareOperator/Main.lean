@@ -26,6 +26,7 @@ import FlareOperator.StateMachine.K8sReconciler
 import FlareOperator.StateMachine.ReplicaRepair
 import FlareOperator.StateMachine.SyncEvidence
 import FlareOperator.StateMachine.StatsObservation
+import FlareOperator.StateMachine.FollowEvidence
 import FlareOperator.Kubectl
 import FlareOperator.Server.TcpServer
 import FlareOperator.Server.TopologyBroadcast
@@ -196,6 +197,39 @@ private def statStr (out key : String) : Option String :=
     match (line.trim.splitOn " ").filter (· != "") with
     | ["STAT", k, v] => if k == key then some v.trim else none
     | _ => none
+
+/-- SAF-10c readings from a flared `stats` reply (StateMachine/FollowEvidence).
+    Every missing key stays `none`; the node's own clock (`STAT time`) is
+    read from the SAME reply as the observation time it is compared with. -/
+private def followReadingFrom (out : String) : FollowEvidence.Reading :=
+  { complete := statsReplyComplete out,
+    enabled := (statNat out "repl_follow_enabled").map (· == 1),
+    state := statStr out "repl_follow_state",
+    sourceEpoch := statStr out "repl_follow_source_epoch",
+    appliedLsn := statNat out "repl_applied_lsn",
+    sourceLsn := statNat out "repl_source_lsn",
+    sourceObservedAt := statNat out "repl_source_lsn_observed_at",
+    lastProgressAt := statNat out "repl_last_progress_at",
+    nodeTime := statNat out "time",
+    lastReason := statStr out "repl_follow_last_reason" }
+
+private def masterReadingFrom (out : String) : FollowEvidence.MasterReading :=
+  { complete := statsReplyComplete out,
+    epoch := statStr out "rocksdb_source_epoch",
+    head := statNat out "rocksdb_latest_sequence_number" }
+
+private def followBoundsFromEnv : IO FollowEvidence.Bounds := do
+  let envNat : String → Nat → IO Nat := fun name dflt => do
+    pure (((← IO.getEnv name).bind (·.toNat?)).getD dflt)
+  pure { freshSecs := ← envNat "FLARE_FOLLOW_FRESH_SECS" 5,
+         readLag := ← envNat "FLARE_FOLLOW_READ_LAG" 1000,
+         promoteLag := ← envNat "FLARE_FOLLOW_PROMOTE_LAG" 100 }
+
+/-- SAF-10c tracker between ticks: mode memory, tick counter, this tick's
+    classification (consumed by the commit path and the delete gate) and the
+    last logged judgement per node. -/
+instance : Inhabited FollowEvidence.Tracker := ⟨{}⟩
+initialize followRef : IO.Ref FollowEvidence.Tracker ← IO.mkRef {}
 
 /-- Persist the replica-repair ledger when it changed (SC-03 / SAF-05) and
     keep the pending gauge current. Loud on failure: an unpersisted ledger is
@@ -621,7 +655,49 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
           Bridge.dataBearingPodKeys pods ns
         else
           pure []
-      pure (.PodListResponse podKeys (Bridge.podZones pods nodeZones) termKeys dataKeys unhealthyKeys heldKeys)
+      -- SAF-10c: continuous-replication eligibility (StateMachine/FollowEvidence).
+      -- Probe every non-Down Slave in WAL mode each tick (a node known to be
+      -- out of the mode only every FLARE_FOLLOW_PROBE_INTERVAL ticks, a node
+      -- never read on its first tick), and the master of every partition
+      -- that has such a slave; then classify. Non-WAL clusters pay one probe
+      -- per slave at start and one every interval; nothing else changes for
+      -- them (every list stays empty).
+      let tr ← followRef.get
+      let bounds ← followBoundsFromEnv
+      let probeInterval := ((← IO.getEnv "FLARE_FOLLOW_PROBE_INTERVAL").bind (·.toNat?)).getD 30
+      let readyPods := pods.filter (fun p => p.ready && !p.terminating)
+      let mut slaveReadings : List (String × Int × Option FollowEvidence.Reading) := []
+      for (key, n) in cs.nodeMap do
+        if n.role == FlareRole.Slave && n.state != FlareState.Down then
+          match readyPods.find? (fun p => Bridge.PodInfo.toNodeKey p == key) with
+          | none => slaveReadings := slaveReadings ++ [(key, n.partition, none)]
+          | some p =>
+            if FollowEvidence.shouldProbe tr.mem key tr.tick probeInterval then
+              let r ← match ← Bridge.queryPodStats p.name ns "stats" with
+                | .ok out => pure (followReadingFrom out)
+                | .error _ => pure ({} : FollowEvidence.Reading)
+              slaveReadings := slaveReadings ++ [(key, n.partition, some r)]
+            else
+              slaveReadings := slaveReadings ++ [(key, n.partition, none)]
+      let inModeParts : List Int := slaveReadings.filterMap fun (k, part, r?) =>
+        if (r?.bind (·.mode)) == some true || FollowEvidence.knownInMode tr.mem k then some part else none
+      let mut masterReadings : List (Int × FollowEvidence.MasterReading) := []
+      for (key, n) in cs.nodeMap do
+        if n.role == FlareRole.Master && n.state != FlareState.Down && inModeParts.contains n.partition then
+          match readyPods.find? (fun p => Bridge.PodInfo.toNodeKey p == key) with
+          | none => pure ()
+          | some p =>
+            let m ← match ← Bridge.queryPodStats p.name ns "stats" with
+              | .ok out => pure (masterReadingFrom out)
+              | .error _ => pure ({} : FollowEvidence.MasterReading)
+            masterReadings := masterReadings ++ [(n.partition, m)]
+      let (cls, mem', judged) := FollowEvidence.classify bounds tr.mem slaveReadings masterReadings
+      let (changed, summaries) := FollowEvidence.changedSummaries tr.lastSummary judged
+      for (k, summary) in changed do
+        IO.eprintln s!"[flare-operator] CONTINUOUS REPLICATION eligibility {k}: {summary}"
+      followRef.set { mem := mem', tick := tr.tick + 1, classified := cls, lastSummary := summaries }
+      pure (.PodListResponse podKeys (Bridge.podZones pods nodeZones) termKeys dataKeys unhealthyKeys heldKeys
+              cls.unfit cls.unproven cls.ranked)
   | .PatchService =>
     -- Service patching happens in executeEffects (PatchService effect)
     -- This just signals completion
@@ -709,9 +785,13 @@ private def mergeClusterState (current ucs : FlareClusterState)
     advanced. -/
 private def commitClusterState (stateRef : IO.Ref FlareClusterState)
     (_expectedVersion : Nat) (newState : FlareClusterState)
-    (rb : ReadBalanceSpec := {}) (standbyKeys : List String := []) : IO Bool := do
+    (rb : ReadBalanceSpec := {}) (standbyKeys : List String := [])
+    (readWithheld : List String := []) : IO Bool := do
   stateRef.modifyGet fun current =>
-    let merged := mergeClusterState current newState rb standbyKeys
+    let merged0 := mergeClusterState current newState rb standbyKeys
+    -- SAF-10c: WAL-mode followers not proven eligible for reads are out of
+    -- the read set (balance 0) whatever spec.readBalance.slave says.
+    let merged := { merged0 with nodeMap := K8sReconciler.withholdReads readWithheld merged0.nodeMap }
     -- `partitionMap` is a pure function of `nodeMap` (rebuildPartitionMap), so
     -- comparing `nodeMap` detects a real topology change.
     let changed := merged.nodeMap != current.nodeMap
@@ -835,7 +915,7 @@ private partial def runReconcileFSMLoop
       -- a TCP-driven Prepare→Active is preserved; see commitClusterState).
       if let some ucs := nextState.updatedClusterState then
         let rb := (nextState.cachedCrd.map (·.spec.readBalance)).getD {}
-        let _ ← commitClusterState stateRef cs2Version ucs rb nextState.standbyNodeKeys
+        let _ ← commitClusterState stateRef cs2Version ucs rb nextState.standbyNodeKeys (← followRef.get).classified.readWithheld
 
       -- CRITICAL FIX: Check if FSM issued another request.
       -- If yes, nextState is in a "waiting for response" state and must NOT be called
@@ -850,7 +930,7 @@ private partial def runReconcileFSMLoop
         executeEffects finalEffects crName ns stateRef migrationRef
         if let some ucs := finalState.updatedClusterState then
           let rb := (finalState.cachedCrd.map (·.spec.readBalance)).getD {}
-          let _ ← commitClusterState stateRef cs3Version ucs rb finalState.standbyNodeKeys
+          let _ ← commitClusterState stateRef cs3Version ucs rb finalState.standbyNodeKeys (← followRef.get).classified.readWithheld
         runReconcileFSMLoop finalState stateRef migrationRef graceCyclesRef trippedRef drainBlockedRef unreadyCyclesRef podKeysRef podAddrsRef heldKeys crName ns
       | none =>
         -- No new request - safe to recurse (nextState is in an "action" state)
@@ -859,7 +939,7 @@ private partial def runReconcileFSMLoop
       -- No request: update cluster state if FSM produced one and continue
       if let some ucs := newState.updatedClusterState then
         let rb := (newState.cachedCrd.map (·.spec.readBalance)).getD {}
-        let _ ← commitClusterState stateRef csVersion ucs rb newState.standbyNodeKeys
+        let _ ← commitClusterState stateRef csVersion ucs rb newState.standbyNodeKeys (← followRef.get).classified.readWithheld
       runReconcileFSMLoop newState stateRef migrationRef graceCyclesRef trippedRef drainBlockedRef unreadyCyclesRef podKeysRef podAddrsRef heldKeys crName ns
 
 /-- Run the FSM-driven reconcile loop.
@@ -1495,14 +1575,25 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
                 let dataBearing := match sNow with | .known n => if n > 0 then [sKey] else [] | .unknown => []
                 let verdictNow := StatsObservation.emptyMasterVerdict mNow sNow
                 let successorOk := StatsObservation.successorStillValid liveState mKey sKey dataBearing
+                -- SAF-10c: if the survivor is a continuous-replication
+                -- follower, it must be proven current from the SAME fresh
+                -- stats (following the master's history, fresh, within the
+                -- promotion lag bound). Not in the mode = no constraint.
+                -- Unknown = not proven = no delete.
+                let survivorVerdict := FollowEvidence.judge .survive (← followBoundsFromEnv)
+                  (match freshS with | .ok o => followReadingFrom o | .error _ => {})
+                  (match freshM with | .ok o => masterReadingFrom o | .error _ => {})
+                let survivorFollowOk := match survivorVerdict with
+                  | .notInMode _ | .eligible _ => true
+                  | _ => false
                 let uidStable := match uidBefore, uidAfter with | some a, some b => a == b | _, _ => false
                 let holdsLease ← do
                   match ← getLease leaseName ns with
                   | .ok lease => pure (lease.holderIdentity == identity && !lease.expired)
                   | .error _ => pure false
-                match StatsObservation.deleteGate verdictNow successorOk uidStable holdsLease, uidBefore with
+                match StatsObservation.deleteGate verdictNow successorOk survivorFollowOk uidStable holdsLease, uidBefore with
                 | .ok (), some uid =>
-                  IO.eprintln s!"[flare-operator] EMPTY-MASTER SELF-HEAL: revalidated (master still empty, successor {sKey} still an Active data-bearing slave, pod UID {uid} stable, lease held); gracefully deleting {mPod} — the drain path hands mastership to the slave and the pod reseeds as a slave"
+                  IO.eprintln s!"[flare-operator] EMPTY-MASTER SELF-HEAL: revalidated (master still empty, successor {sKey} still an Active data-bearing slave, continuous replication {survivorVerdict.label}: {survivorVerdict.reason}, pod UID {uid} stable, lease held); gracefully deleting {mPod} — the drain path hands mastership to the slave and the pod reseeds as a slave"
                   match ← Bridge.deletePodWithUidPrecondition mPod ns uid with
                   | .ok () => newStreaks := newStreaks.filter (·.1 != mKey)
                   | .error e =>

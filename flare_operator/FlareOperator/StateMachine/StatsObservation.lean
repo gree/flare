@@ -112,12 +112,18 @@ def successorStillValid (state : FlareClusterState) (masterKey slaveKey : String
     rests on the state the delete will act on, not on the streak's snapshot:
     * `verdictNow`   — the empty-master verdict from the FRESH stats;
     * `successorOk`  — successorStillValid on the map read AFTER those stats;
+    * `survivorFollowOk` — SAF-10c: if the successor is a continuous-
+                       replication follower, FollowEvidence judged it
+                       eligible to SURVIVE (following the master's current
+                       history, fresh, within the promotion lag bound) from
+                       the same fresh stats; `true` also when it is not in
+                       that mode. Unknown is `false`;
     * `uidStable`    — the target pod's UID was the same before and after the
                        stats read and matches the pod about to be deleted (the
                        pod was not replaced under the name);
     * `holdsLease`   — this operator still holds the leader lease.
     Refuses with the first failing reason. -/
-def deleteGate (verdictNow : EmptyMasterVerdict) (successorOk uidStable holdsLease : Bool)
+def deleteGate (verdictNow : EmptyMasterVerdict) (successorOk survivorFollowOk uidStable holdsLease : Bool)
     : Except String Unit :=
   match verdictNow with
   | .skip reason => .error s!"target no longer reads as an empty master with a data-bearing successor: {reason}"
@@ -125,6 +131,7 @@ def deleteGate (verdictNow : EmptyMasterVerdict) (successorOk uidStable holdsLea
     if !holdsLease then .error "this operator no longer holds the leader lease; not deleting"
     else if !uidStable then .error "the target pod's UID changed across the observation (pod replaced); not deleting"
     else if !successorOk then .error "the successor is no longer a data-bearing Active slave of the same partition in the live map; not deleting"
+    else if !survivorFollowOk then .error "the successor is a continuous-replication follower whose currency could not be proven (following the master's current history, fresh observation, within the promotion lag bound); not deleting"
     else .ok ()
 
 end FlareOperator.StatsObservation

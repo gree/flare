@@ -760,7 +760,8 @@
       "implementation": "partial",
       "verification": "unverified",
       "scenarios": [
-        "A Prepare slave whose activation was lost to an index-leader handover (reconstruction finished, operator still sees Prepare); a node with a PAST success that is now re-reconstructing (in flight); a RocksDB reply missing lineage or cursor (truncated); a zero cursor; a mismatched lineage; a cursor ahead of the head; a master or lineage change mid-observation; a fresh process."
+        "A Prepare slave whose activation was lost to an index-leader handover (reconstruction finished, operator still sees Prepare); a node with a PAST success that is now re-reconstructing (in flight); a RocksDB reply missing lineage or cursor (truncated); a zero cursor; a mismatched lineage; a cursor ahead of the head; a master or lineage change mid-observation; a fresh process.",
+        "SAF-10c: a WAL-mode follower as promotion candidate — proven current (following the master's current epoch, fresh by the node's own clock, lag within the promotion bound) is preferred; disconnected/stale/lagging/unreadable is unproven (no planned promotion, last resort for failover, logged NOT LOSS-FREE); needs_rebuild/initial_sync/idle/another epoch is unfit (never promoted by the FSM paths)."
       ],
       "assumptions": [
         "flared exposes a per-process completion record in stats, read as ONE locked snapshot: reconstruction_boot_id (random per process), reconstruction_current_id/_state (latest handler), reconstruction_last_success_id/_source. Every notification carries the id the handler was given at begin(), so an older handler finishing after a newer one started cannot record the newer id as succeeded; last_success only advances and only the current handler's notification changes current_state. Activation requires the LATEST reconstruction to have succeeded from the current master. On RocksDB a completed reconstruction seeds a nonzero cursor and rocksdb_master_id identifies the source; the backend is told from a COMPLETE master reply."
@@ -768,7 +769,8 @@
       "residual_risks": [
         "Covers Prepare ACTIVATION by the repair path only; promotion still trusts the Active designation (SAF-08).",
         "On a backend that reports no lineage/cursor (complete reply, no rocksdb_ keys) a completion with none in flight is accepted; the vacuous-activation guard in reconcileStep still requires an Active master to have synced from.",
-        "The prepare-evidence E2E runs on the tch backend, so the RocksDB lineage/cursor requirement is pinned by flare_unit, not staged end to end."
+        "The prepare-evidence E2E runs on the tch backend, so the RocksDB lineage/cursor requirement is pinned by flare_unit, not staged end to end.",
+        "SAF-10c: failover with the master gone cannot prove currency (asynchronous replication); the FSM still promotes for availability and only logs that it is not loss-free. The TCP-side zombie-master guard (Reconciler.findActiveSlaveForPartition) does not consult follower evidence. A follower never yet read by the operator is not classified. Eligibility is unit-pinned only; no E2E stages a drain or failover on WAL-mode followers yet."
       ],
       "code": [
         {
@@ -790,6 +792,22 @@
         {
           "path": "src/lib/stats.cc",
           "symbol": "stats::reconstruction_succeeded_from"
+        },
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/FollowEvidence.lean",
+          "symbol": "judge"
+        },
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/FollowEvidence.lean",
+          "symbol": "classify"
+        },
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/K8sReconciler.lean",
+          "symbol": "shapePromotionCandidates"
+        },
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/K8sReconciler.lean",
+          "symbol": "withholdReads"
         }
       ],
       "call_path": "flared finishes reconstruction and calls activate_node; if the operator returned OK but did not persist it (leader handover) the node stays Prepare in the operator map. Main 4c builds a per-node episode, reads flared stats (reconstruction_completed, rocksdb_master_id, cursor + master head), SyncEvidence.judge requires a completed reconstruction bound to the current master's lineage with a sane cursor and unchanged source, and a positive verdict re-derives Prepare->Active through Reconciler.reconcileStep.",
@@ -832,6 +850,21 @@
             {
               "path": "src/lib/stats.cc",
               "symbol": "stats::reconstruction_succeeded_from"
+            }
+          ]
+        },
+        {
+          "id": "CHECK-04-eligibility",
+          "kind": "scenario",
+          "procedure": "flare_unit pins FollowEvidence.judge (unreadable → unknown; mode off → notInMode; not following, another epoch, stale observation, lag over the bound, applied ahead of the head → ineligible; unreadable master → unknown; lag at the bound eligible; read vs promotion bounds), unfitReason, classify (ranked highest-applied first; unproven vs unfit; withheld reads; mode memory; remembered-in-mode unreadable/not-probed → unproven and withheld, never unfit; no master reading → nothing proven), the probe policy, shapePromotionCandidates (unfit removed, ranked first, unproven last, nodeMap untouched, findActiveSuccessor sees the order, all-excluded leaves no successor), withholdReads (slave 0, master/Down/unlisted untouched, keys preserved) and the masterless refill's exclusion.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/UnitTests.lean",
+              "symbol": "checkFollowJudge"
+            },
+            {
+              "path": "flare_operator/FlareOperator/UnitTests.lean",
+              "symbol": "checkFollowShaping"
             }
           ]
         }
@@ -948,6 +981,14 @@
           "command": "GitHub Actions nix-linux.yml 'Test Legacy Build' — nix flare derivation make check (cutter, includes test_stats_reconstruction)",
           "result": "pass",
           "report": "docs/reports/2026-09-16-ci-e2e-matrix-f7d327f-pass.txt"
+        },
+        {
+          "check": "CHECK-04-eligibility",
+          "commit": "2c3bd87c741586583f78469e65f9c491c74c57b8",
+          "date": "2026-09-20",
+          "command": "cd flare_operator && lake build flare_unit && .lake/build/bin/flare_unit",
+          "result": "pass",
+          "report": "docs/reports/2026-09-20-saf10c-eligibility-unit.txt"
         }
       ],
       "tasks": [
@@ -956,9 +997,9 @@
         "SAF-08"
       ],
       "review": {
-        "commit": "f7d327fd24fc9310c3f2c4f13a8b50ebb1956a14",
-        "date": "2026-09-16",
-        "note": "Second fully green CI matrix; prepare-evidence 2/2 and the cutter completion-record test executed again in nix-linux. PARTIAL / UNVERIFIED."
+        "commit": "2c3bd87c741586583f78469e65f9c491c74c57b8",
+        "date": "2026-09-20",
+        "note": "SAF-10c eligibility added around the promotion paths without changing them: candidate shaping is partitionMap-only (same device as standby de-prioritisation; shapePromotionCandidates_nodeMap proves the node map is untouched) so handleFailover/DrainWithPromotion and their CLE proofs are unchanged; promoteMasterlessPartition gained an exclusion list for its Active-slave tiers (its CLE proof re-elaborated unchanged). Drain (planned) excludes unproven and unfit; failover excludes only unfit and logs an unproven promotion as NOT LOSS-FREE. Read withholding is applied at commit after normalization. 129 flare_unit checks pass. No E2E yet for these paths; nodes not in the mode are unaffected (all lists empty). PARTIAL / UNVERIFIED unchanged."
       }
     },
     {
@@ -981,7 +1022,8 @@
       "implementation": "partial",
       "verification": "unverified",
       "scenarios": [
-        "An empty-master candidate whose stats are missing/truncated (must not read as empty); a successor demoted by a resync between observation and delete; the target pod replaced under the same name; the operator losing its lease before the delete."
+        "An empty-master candidate whose stats are missing/truncated (must not read as empty); a successor demoted by a resync between observation and delete; the target pod replaced under the same name; the operator losing its lease before the delete.",
+        "SAF-10c: the surviving copy is a WAL-mode follower — the delete proceeds only if, from the same fresh stats read at revalidation, it is following the master's current epoch, fresh, and within the promotion lag bound; unknown or ineligible refuses."
       ],
       "assumptions": [
         "curr_items is local storage; a stats reply with no well-formed curr_items line carries no information. A StatefulSet reuses a pod NAME for a replacement, so identity is the pod UID. The leader lease is the operator's authority to act."
@@ -990,7 +1032,8 @@
         "Graceful deletion still does not guarantee a successful handoff; the drain guard protects a master with no promotable successor.",
         "The successor/lease revalidation and the delete are not one atomic step; the pod-identity hole is closed by the API precondition, a successor demoted in the instant after the gate remains a window.",
         "The direct-API delete is bounded (connect 3s, total 10s, outer wall 20s + 5s kill grace, ~25s worst case). A timeout or transport failure is an UNKNOWN deletion outcome — the API may have accepted the delete and only the reply was lost — and is reported as such; the caller keeps the streak and re-observes the pod on the next probe rather than assuming 'not deleted' or retrying blindly.",
-        "A live empty master with a data-bearing successor and an interposed change is not staged end to end; the gate is unit-pinned, the precondition and the deadline are staged by E2E against a replaced pod and a black-hole server."
+        "A live empty master with a data-bearing successor and an interposed change is not staged end to end; the gate is unit-pinned, the precondition and the deadline are staged by E2E against a replaced pod and a black-hole server.",
+        "SAF-10c: the survivor's currency is judged from one fresh reading at revalidation; a follower that disconnects in the instant after the gate remains a window (same shape as the successor-demotion window). Unit-pinned only."
       ],
       "code": [
         {
@@ -1004,6 +1047,10 @@
         {
           "path": "flare_operator/FlareOperator/K8s/Bridge.lean",
           "symbol": "deletePodWithUidPrecondition"
+        },
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/FollowEvidence.lean",
+          "symbol": "judge"
         }
       ],
       "call_path": "Main 4d probes master/slave curr_items -> parseCurrItems -> emptyMasterVerdict -> streak >= 3 -> REVALIDATE: pod UID, fresh stats, UID again, live map AFTER the stats, leader lease -> deleteGate -> Bridge.deletePodWithUidPrecondition: DELETE with DeleteOptions.preconditions.uid = the observed UID, refused by the apiserver (409) if another pod holds the name -> drain path.",
@@ -1035,6 +1082,21 @@
             {
               "path": "flare_operator/FlareOperator/UnitTests.lean",
               "symbol": "checkDeleteGate"
+            }
+          ]
+        },
+        {
+          "id": "CHECK-05-survivor",
+          "kind": "scenario",
+          "procedure": "flare_unit pins deleteGate's survivorFollowOk: an unproven surviving follower refuses the delete with a reason naming continuous replication; the survive purpose uses the promotion bound.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/UnitTests.lean",
+              "symbol": "checkFollowShaping"
+            },
+            {
+              "path": "flare_operator/FlareOperator/StateMachine/StatsObservation.lean",
+              "symbol": "deleteGate"
             }
           ]
         }
@@ -1175,6 +1237,14 @@
           "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter replica-repair",
           "result": "pass",
           "report": "docs/reports/2026-09-16-replica-repair-final4.txt"
+        },
+        {
+          "check": "CHECK-05-survivor",
+          "commit": "2c3bd87c741586583f78469e65f9c491c74c57b8",
+          "date": "2026-09-20",
+          "command": "cd flare_operator && lake build flare_unit && .lake/build/bin/flare_unit",
+          "result": "pass",
+          "report": "docs/reports/2026-09-20-saf10c-eligibility-unit.txt"
         }
       ],
       "tasks": [
@@ -1183,9 +1253,9 @@
         "SAF-08"
       ],
       "review": {
-        "commit": "27518a648c1601fb3e9dab9a1f3ca0f3399d0d4d",
-        "date": "2026-09-16",
-        "note": "Same CI run 8 failure and harness fix as EV-03 (shared suite; test 6 cascaded on the precondition). Tests 7-8 passed. PARTIAL / UNVERIFIED unchanged."
+        "commit": "2c3bd87c741586583f78469e65f9c491c74c57b8",
+        "date": "2026-09-20",
+        "note": "deleteGate gained survivorFollowOk (SAF-10c), judged in Main from the same fresh master/successor stats the revalidation already reads; not in the mode = unconstrained, unknown = refuse. Existing CHECK-05 paths unchanged for non-WAL clusters. PARTIAL / UNVERIFIED unchanged."
       }
     },
     {

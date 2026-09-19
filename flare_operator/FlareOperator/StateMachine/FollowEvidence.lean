@@ -238,6 +238,10 @@ structure Classified where
   /-- WAL-mode followers (or remembered) not eligible to serve reads:
       balance 0 at commit. -/
   readWithheld : List String := []
+  /-- Followers that DECLARED `needs_rebuild` this pass, with flared's
+      reason. The only follower state that hands a node to the rebuild path
+      (design §5.4); Main turns each into a repair-ledger request. -/
+  needsRebuild : List (String × String) := []
   deriving Repr, BEq
 
 /-- What one node was judged this pass (for change-only logging). -/
@@ -268,6 +272,7 @@ private structure Acc where
   unproven : List String := []
   unfit : List String := []
   readWithheld : List String := []
+  needsRebuild : List (String × String) := []
   mem : ModeMemory := []
   judged : List Judged := []
 
@@ -302,6 +307,8 @@ def classify (b : Bounds) (mem : ModeMemory)
         let pv := judge .promote b r m
         let unfit := unfitReason r m.epoch
         let a := if rv.isEligible then a else { a with readWithheld := a.readWithheld ++ [key] }
+        let a := if r.state == some "needs_rebuild"
+          then { a with needsRebuild := a.needsRebuild ++ [(key, (r.lastReason.getD "").trim)] } else a
         let a :=
           match unfit with
           | some _ => { a with unfit := a.unfit ++ [key] }
@@ -311,7 +318,7 @@ def classify (b : Bounds) (mem : ModeMemory)
             else { a with unproven := a.unproven ++ [key] }
         { a with judged := a.judged ++ [{ key, read := rv, promote := pv, unfit }] }
   ({ ranked := acc.rankedApplied.map Prod.fst, unproven := acc.unproven,
-     unfit := acc.unfit, readWithheld := acc.readWithheld },
+     unfit := acc.unfit, readWithheld := acc.readWithheld, needsRebuild := acc.needsRebuild },
    acc.mem, acc.judged)
 
 /-- Per-tick tracker kept by Main between passes. -/

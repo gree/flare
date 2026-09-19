@@ -569,6 +569,18 @@ def checkFollowShaping (ctx : Ctx) : IO Unit := do
     (let noMaster : FlareClusterState := { s3 with nodeMap := s3.nodeMap.filter (·.1 != "m") }
      let refilled := K8sReconciler.promoteMasterlessPartition noMaster 0 ["s1", "s2", "s3"] [] [] ["s1"]
      (refilled.nodeMap.find? (fun kv => kv.2.role == FlareRole.Master)).map (·.1) == some "s2")
+  check ctx "classify reports a follower that declared needs_rebuild, with flared's reason"
+    (let r := { fr "needs_rebuild" 1000 with lastReason := some "epoch_mismatch" }
+     (FollowEvidence.classify fb [] [("d", 0, some r)] [(0, fm)]).1.needsRebuild == [("d", "epoch_mismatch")])
+  check ctx "requestRebuild adds one un-owned, resolved request per node and is idempotent; plan then demotes it"
+    (let (l1, a1) := requestRebuild empty masterKey slaveKey
+     let (l2, a2) := requestRebuild l1 masterKey slaveKey
+     a1 && !a2 && l2.entries.length == 1
+       && (l1.entries.head?.map (fun e => e.nodeKey == some slaveKey && !e.owned && e.drops == 0)) == some true
+       && ((plan l1 true "").2.map Prod.fst) == [slaveKey])
+  check ctx "requestRebuild adds nothing for a node that already has an (owned) entry"
+    (let owned := holdOwned (resolve (request empty masterKey slaveKey 1) state).1 slaveKey (some 5) (some ownEp)
+     !(requestRebuild owned masterKey slaveKey).2)
   check ctx "deleteGate: an unproven surviving follower refuses the delete"
     (match StatsObservation.deleteGate .act true false true true with
      | .error r => (r.splitOn "continuous-replication").length > 1

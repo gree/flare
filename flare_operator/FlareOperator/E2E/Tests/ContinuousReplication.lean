@@ -406,7 +406,131 @@ def suite : TestSuite := {
             if !closed then return .fail s!"the request held as Unknown was not closed once the probe returned (holds: {← ledgerHolds})"
             if recon1 != recon0 then return .fail "a reconstruction ran during the operator's blindness"
             if uid1 != uid0 then return .fail "the replica pod was recreated"
-            return .pass }
+            return .pass },
+
+    -- SAF-10c / T14 + T16: a BULK operation on the master (flush_all →
+    -- truncate) advances the source epoch. The follower must refuse the old
+    -- stream (needs_rebuild, epoch_mismatch), the operator must put it
+    -- through the rebuild path from the FOLLOWER'S OWN declaration (no drop
+    -- counter is involved), and afterwards the follower must be following
+    -- the NEW epoch with new writes arriving. The pod is not recreated.
+    { name := "bulk operation: flush_all on the master advances the epoch; the follower declares needs_rebuild; the operator rebuilds it; it follows the new epoch"
+      run := do
+        match ← pair with
+        | .error e => return .fail e
+        | .ok (_, mIp, sPod, sIp) =>
+          let epoch0 := (← statStr mIp "rocksdb_source_epoch").getD "?"
+          let recon0 := (← statNat sIp "reconstruction_started").getD 0
+          let uid0 := (← podUid sPod).getD "?"
+          match ← execInDebugPod cfg.debugPod cfg.«namespace» s!"printf 'flush_all\\r\\n' | nc -w 3 {mIp} {cfg.flarePort}" with
+          | .error e => return .fail s!"flush_all failed: {e}"
+          | .ok o => if !containsSubstr o "OK" then return .fail s!"flush_all did not answer OK: {o.trim}"
+          let epoch1 := (← statStr mIp "rocksdb_source_epoch").getD "?"
+          IO.eprintln s!"# flush_all on the master: source_epoch {epoch0} → {epoch1}; master items={← currItems mIp}"
+          if epoch1 == epoch0 then return .fail "the master's source epoch did not advance on flush_all"
+          let declared ← waitForCondition "follower declares needs_rebuild" 90 do
+            return (← statStr sIp "repl_follow_state") == some "needs_rebuild"
+          IO.eprintln s!"# follower: state={← statStr sIp "repl_follow_state"} reason={← statStr sIp "repl_follow_last_reason"}"
+          let requested ← waitForCondition "operator requests the rebuild from the follower's declaration" 120 do
+            let log ← opLog 1500
+            return containsSubstr log "REPLICA REPAIR requested by the follower" && containsSubstr log sPod
+          if !declared && !requested then return .fail "the follower never declared needs_rebuild and no request was made"
+          let rebuilt ← waitForCondition "follower reconstructed and follows the new epoch" 420 do
+            let recon := (← statNat sIp "reconstruction_started").getD 0
+            return recon > recon0 && (← statStr sIp "repl_follow_state") == some "following"
+              && (← statStr sIp "repl_follow_source_epoch") == some epoch1
+          let recon1 := (← statNat sIp "reconstruction_started").getD 0
+          IO.eprintln s!"# after the rebuild: reconstruction_started {recon0}→{recon1}; state={← statStr sIp "repl_follow_state"} epoch={← statStr sIp "repl_follow_source_epoch"} (master {epoch1}); requested-by-follower logged={requested}"
+          if !rebuilt then return .fail s!"the follower did not come back following the new epoch (state {← statStr sIp "repl_follow_state"}, epoch {← statStr sIp "repl_follow_source_epoch"}, reason {← statStr sIp "repl_follow_last_reason"})"
+          if !requested then return .fail "the rebuild happened but not through the follower-declared ledger request"
+          let stored ← writeKeys cfg.debugPod cfg.«namespace» mIp cfg.flarePort "post_flush" 10
+          if stored != 10 then return .fail s!"stored only {stored}/10 after the flush"
+          let caught ← waitForCondition "new writes reach the rebuilt follower" 90 do
+            return (← currItems sIp) == (← currItems mIp) && (← currItems mIp) == 10
+          if !caught then return .fail s!"items master={← currItems mIp} replica={← currItems sIp}"
+          let empty ← waitForCondition "ledger persisted as empty" 180 do return (← ledgerDests).isEmpty
+          let uid1 := (← podUid sPod).getD "?"
+          IO.eprintln s!"# post-flush writes: master={← currItems mIp} replica={← currItems sIp}; ledger empty={empty}; pod uid {uid0}→{uid1}"
+          if !empty then return .fail s!"the ledger still holds {← ledgerDests}"
+          if uid1 != uid0 then return .fail "the replica pod was recreated (the rebuild must be in place)"
+          return .pass },
+
+    -- SAF-10c read eligibility: with spec.readBalance.slave = 50 the
+    -- FOLLOWING replica serves reads; while cut it is WITHHELD (balance 0,
+    -- whatever the spec says); after healing it is restored.
+    { name := "read eligibility: a following replica gets the spec's slave balance; a cut replica is withheld to 0; healing restores it"
+      run := do
+        match ← pair with
+        | .error e => return .fail e
+        | .ok (_, mIp, sPod, sIp) =>
+          let balanceOfReplica : IO (Option Nat) := do
+            let entries ← nodeView
+            return (entries.find? (fun e => (e.fqdn.splitOn ".").head? == some sPod)).map (·.balance)
+          match ← kubectlPatch "flarecluster" cfg.name cfg.«namespace» "{\"spec\":{\"readBalance\":{\"master\":100,\"slave\":50}}}" with
+          | .error e => return .fail s!"patch failed: {e}"
+          | .ok _ => pure ()
+          let served ← waitForCondition "following replica gets balance 50" 150 do
+            return (← balanceOfReplica) == some 50
+          IO.eprintln s!"# with slave=50: replica balance={← balanceOfReplica} state={← statStr sIp "repl_follow_state"}"
+          if !served then return .fail s!"the following replica never received balance 50 (got {← balanceOfReplica})"
+          match ← cut mIp sIp with
+          | .error e => return .fail e
+          | .ok () => pure ()
+          let withheld ← waitForCondition "cut replica is withheld from reads (balance 0)" 150 do
+            return (← balanceOfReplica) == some 0
+          let logged := containsSubstr (← opLog 1500) "eligibility"
+          IO.eprintln s!"# under the cut: replica balance={← balanceOfReplica} state={← statStr sIp "repl_follow_state"} eligibility-logged={logged}"
+          heal mIp sIp
+          if !withheld then return .fail "the disconnected replica kept its read balance"
+          let restored ← waitForCondition "healed replica is served again (balance 50)" 240 do
+            return (← balanceOfReplica) == some 50 && (← statStr sIp "repl_follow_state") == some "following"
+          IO.eprintln s!"# after the heal: replica balance={← balanceOfReplica} state={← statStr sIp "repl_follow_state"}"
+          discard <| kubectlPatch "flarecluster" cfg.name cfg.«namespace» "{\"spec\":{\"readBalance\":{\"master\":100,\"slave\":0}}}"
+          if !restored then return .fail "the healed, following replica was not restored to balance 50"
+          let back ← waitForCondition "spec restored to slave=0" 120 do return (← balanceOfReplica) == some 0
+          if !back then return .fail "balance did not return to 0 after restoring the spec"
+          return .pass },
+
+    -- SAF-10c promotion + T16 (history replacement): the master's pod is
+    -- deleted. The follower is the only candidate; whether it was proven
+    -- current on the tick the master vanished (ranked) or not (unproven,
+    -- logged NOT LOSS-FREE), it is promoted; promotion advances the source
+    -- epoch, and the returning ex-master must rebuild and then FOLLOW the
+    -- new master's epoch. Last test: it changes the partition's master.
+    { name := "failover: the master pod is deleted; the follower is promoted (evidence logged); the returning ex-master rebuilds and follows the new epoch"
+      run := do
+        match ← pair with
+        | .error e => return .fail e
+        | .ok (mPod, _, sPod, sIp) =>
+          let uid0 := (← podUid sPod).getD "?"
+          let epoch0 := (← statStr sIp "repl_follow_source_epoch").getD "?"
+          kubectlDelete "pod" mPod cfg.«namespace»
+          IO.eprintln s!"# deleted master pod {mPod}; follower {sPod} was following epoch {epoch0}"
+          let promoted ← waitForCondition "the follower is promoted to master" 300 do
+            let entries ← nodeView
+            return (findMasterFqdn entries 0).bind (fun f => (f.splitOn ".").head?) == some sPod
+          let log ← opLog 3000
+          let notLossFree := containsSubstr log "PROMOTION NOT LOSS-FREE" && containsSubstr log sPod
+          IO.eprintln s!"# promotion: follower promoted={promoted}; logged NOT LOSS-FREE={notLossFree}; new master epoch={← statStr sIp "rocksdb_source_epoch"}"
+          if !promoted then return .fail "the follower was not promoted"
+          if (← podUid sPod).getD "?" != uid0 then return .fail "the promoted pod was recreated"
+          let epoch1 := (← statStr sIp "rocksdb_source_epoch").getD "?"
+          if epoch1 == epoch0 then return .fail "promotion did not advance the source epoch"
+          let rejoined ← waitForCondition "ex-master returns, rebuilds and follows the new epoch" 480 do
+            match ← getPodIp mPod cfg.«namespace» with
+            | none => return false
+            | some ip =>
+              return (← statStr ip "repl_follow_state") == some "following"
+                && (← statStr ip "repl_follow_source_epoch") == some epoch1
+          let mIp2 := (← getPodIp mPod cfg.«namespace»).getD "?"
+          IO.eprintln s!"# ex-master {mPod}: state={← statStr mIp2 "repl_follow_state"} epoch={← statStr mIp2 "repl_follow_source_epoch"} (new master {epoch1}); items new-master={← currItems sIp} ex-master={← currItems mIp2}"
+          if !rejoined then return .fail "the ex-master did not come back following the new master's epoch"
+          let stored ← writeKeys cfg.debugPod cfg.«namespace» sIp cfg.flarePort "post_failover" 10
+          if stored != 10 then return .fail s!"stored only {stored}/10 on the new master"
+          let caught ← waitForCondition "new writes reach the ex-master as a follower" 90 do
+            return (← currItems mIp2) == (← currItems sIp)
+          if !caught then return .fail s!"items new-master={← currItems sIp} ex-master={← currItems mIp2}"
+          return .pass }
   ]
 }
 

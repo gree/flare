@@ -164,6 +164,19 @@ def request (l : Ledger) (masterKey dest : String) (drops : Nat) : Ledger :=
   | none =>
     { l with entries := l.entries ++ [{ dest := dest, masterKey := masterKey, drops := drops }] }
 
+/-- SAF-10c: the follower ITSELF declared `needs_rebuild` — history purged
+    past its position, the source epoch changed, an integrity failure, an
+    incomplete restore. No drop counter is involved and none may ever be:
+    the node must still take the rebuild path (demote → hold → reseat →
+    reconstruction), so it gets an ordinary, un-owned request keyed by its
+    own node key (which `resolveKey` accepts as a destination). Idempotent:
+    a node that already has an entry, owned or not, gets nothing new — an
+    owned entry is handed over by `advanceOwned` on the same reading.
+    Returns whether a request was added. -/
+def requestRebuild (l : Ledger) (masterKey nodeKey : String) : Ledger × Bool :=
+  if l.entries.any (fun e => e.nodeKey == some nodeKey || e.dest == nodeKey) then (l, false)
+  else ({ l with entries := l.entries ++ [{ dest := nodeKey, masterKey := masterKey, nodeKey := some nodeKey }] }, true)
+
 /-- Find the node a destination refers to. The master reports the address it
     connected to, which is the node's server name (and port); accept the
     full key or the host alone. -/

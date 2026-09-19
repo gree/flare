@@ -350,9 +350,43 @@ int op_repl_sync_wal::_run_server() {
 int op_repl_sync_wal::_run_client(uint64_t lsn, const string& master_id) {
 	char request[BUFSIZ];
 	const char* id = master_id.empty() ? "-" : master_id.c_str();
-	snprintf(request, sizeof(request), "repl_sync_wal %llu %s",
-		(unsigned long long)lsn, id);
+	if (this->_max_batches > 0 || this->_max_response_bytes > 0 || !this->_client_epoch.empty()) {
+		snprintf(request, sizeof(request), "repl_sync_wal %llu %s %s %llu %llu",
+			(unsigned long long)lsn, id,
+			this->_client_epoch.empty() ? "-" : this->_client_epoch.c_str(),
+			(unsigned long long)this->_max_batches,
+			(unsigned long long)this->_max_response_bytes);
+	} else {
+		snprintf(request, sizeof(request), "repl_sync_wal %llu %s",
+			(unsigned long long)lsn, id);
+	}
 	return this->_send_request(request);
+}
+
+/**
+ *	FOLLOW MODE (SAF-10b stage 3b).
+ *
+ *	Asks for a bounded slice of the stream and applies it through the COMMON
+ *	APPLY RULE — never verbatim — so a change that also arrived by forwarding
+ *	is skipped instead of overwriting the newer copy of itself. The caller
+ *	loops while more is available and reconnects on its own schedule; a lost
+ *	connection is not a rebuild (design §5.4).
+ */
+int op_repl_sync_wal::run_client_follow(uint64_t lsn, const string& master_id,
+		const string& expected_epoch, const string& incarnation,
+		uint64_t max_batches, uint64_t max_response_bytes) {
+	this->_client_epoch = expected_epoch;
+	this->_incarnation = incarnation;
+	this->_max_batches = max_batches;
+	this->_max_response_bytes = max_response_bytes;
+	this->_applied = 0;
+	this->_skipped = 0;
+	this->_more_available = false;
+	this->_server_epoch.clear();
+	if (this->_run_client(lsn, master_id) < 0) {
+		return -1;
+	}
+	return this->_parse_text_client_parameters();
 }
 
 int op_repl_sync_wal::_parse_text_client_parameters() {
@@ -450,6 +484,26 @@ int op_repl_sync_wal::_parse_text_client_parameters() {
 		// Parse LSN line
 		char q[BUFSIZ];
 		int n = util::next_word(p, q, sizeof(q));
+		if (strcmp(q, "EPOCH") == 0) {
+			// The history this source is serving, and its current position.
+			n += util::next_word(p+n, q, sizeof(q));
+			this->_server_epoch = q;
+			n += util::next_digit(p+n, q, sizeof(q));
+			if (q[0]) {
+				try {
+					this->_server_latest_lsn = boost::lexical_cast<uint64_t>(q);
+				} catch (boost::bad_lexical_cast&) {
+					this->_server_latest_lsn = 0;
+				}
+			}
+			delete[] p;
+			continue;
+		}
+		if (strcmp(q, "MORE") == 0) {
+			this->_more_available = true;
+			delete[] p;
+			continue;
+		}
 		if (strcmp(q, "LSN") == 0) {
 			n += util::next_digit(p+n, q, sizeof(q));
 			uint64_t lsn = boost::lexical_cast<uint64_t>(q);
@@ -530,11 +584,33 @@ int op_repl_sync_wal::_parse_text_client_parameters() {
 				}
 			}
 
-			// Apply batch
+			// Apply batch. In FOLLOW mode this goes through the common apply
+			// rule (decoded, ordered per key against what the forwarding path
+			// may already have written); the reconstruction path, where the
+			// node takes no forwarded writes at all, keeps the verbatim apply
+			// it has always used.
 			rocksdb::WriteBatch batch(string(batch_data, batch_size));
 			delete[] batch_data;
 
-			int result = rocksdb->apply_batch_with_lsn(batch, lsn);
+			int result = 0;
+			if (!this->_server_epoch.empty()) {
+				uint64_t applied = 0, skipped = 0;
+				storage_rocksdb::apply_outcome refusal = storage_rocksdb::apply_applied;
+				result = rocksdb->apply_wal_batch(this->_server_epoch, this->_incarnation,
+					lsn, batch, applied, skipped, refusal);
+				this->_applied += applied;
+				this->_skipped += skipped;
+				if (result < 0) {
+					log_err("follow apply refused at LSN %llu (outcome=%d)", (unsigned long long)lsn, static_cast<int>(refusal));
+					this->_client_result = (refusal == storage_rocksdb::apply_refused_session
+						|| refusal == storage_rocksdb::apply_refused_incarnation)
+						? client_epoch_mismatch : client_apply_error;
+					rocksdb->incr_wal_sync_apply_failure();
+					return -1;
+				}
+			} else {
+				result = rocksdb->apply_batch_with_lsn(batch, lsn);
+			}
 			if (result < 0) {
 				log_err("failed to apply batch for LSN %llu", lsn);
 				this->_client_result = client_apply_error;

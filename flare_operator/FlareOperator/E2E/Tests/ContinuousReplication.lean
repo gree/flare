@@ -491,6 +491,107 @@ def suite : TestSuite := {
           if !back then return .fail "balance did not return to 0 after restoring the spec"
           return .pass },
 
+    -- T5: repeated disconnections — no loss, no rollback, no resurrection,
+    -- and never a rebuild. Three cut/write/heal cycles; after each the
+    -- replica converges from its position; sampled keys read locally.
+    { name := "repeated cuts: three cut/write/heal cycles converge from the position each time; no rebuild, no pod recreation"
+      run := do
+        match ← pair with
+        | .error e => return .fail e
+        | .ok (_, mIp, sPod, sIp) =>
+          let recon0 := (← statNat sIp "reconstruction_started").getD 0
+          let uid0 := (← podUid sPod).getD "?"
+          for cyc in [0:3] do
+            match ← cut mIp sIp with
+            | .error e => return .fail e
+            | .ok () => pure ()
+            let stored ← writeKeys cfg.debugPod cfg.«namespace» mIp cfg.flarePort s!"cyc{cyc}" 10
+            -- also overwrite one key from the previous cycle and delete one
+            if cyc > 0 then
+              discard <| memcachedSet cfg.debugPod cfg.«namespace» mIp cfg.flarePort s!"cyc{cyc - 1}_0" s!"rewritten_{cyc}"
+              discard <| execInDebugPod cfg.debugPod cfg.«namespace» s!"printf 'delete cyc{cyc - 1}_1\\r\\n' | nc -w 3 {mIp} {cfg.flarePort}"
+            let d ← waitForCondition s!"cycle {cyc}: master counts a dropped forwarded write" 90 do
+              return (← droppedByMaster mIp) > 0
+            let applied := (← statNat sIp "repl_applied_lsn").getD 0
+            heal mIp sIp
+            let caught ← waitForCondition s!"cycle {cyc}: replica converges while following" 180 do
+              return (← statStr sIp "repl_follow_state") == some "following"
+                && (← currItems sIp) == (← currItems mIp)
+            IO.eprintln s!"# cycle {cyc}: stored {stored}/10, drop counted={d}, replica resumed from {applied} → {(← statNat sIp "repl_applied_lsn").getD 0}; items master={← currItems mIp} replica={← currItems sIp}; converged={caught}"
+            if stored != 10 then return .fail s!"cycle {cyc}: stored only {stored}/10"
+            if !caught then return .fail s!"cycle {cyc}: replica did not converge (state {← statStr sIp "repl_follow_state"}, items master={← currItems mIp} replica={← currItems sIp})"
+          -- Sampled content, read on the replica: a HIT is local. The
+          -- rewritten key must carry the last value; the deleted key must
+          -- be absent locally (a miss is proxied to the master, where it is
+          -- also gone, so END without VALUE is the expected answer).
+          let mut bad : List String := []
+          for (k, v) in [("cyc0_0", "rewritten_1"), ("cyc1_0", "rewritten_2"), ("cyc2_5", "cyc2_5")] do
+            match ← execInDebugPod cfg.debugPod cfg.«namespace» s!"printf 'get {k}\\r\\n' | nc -w 3 {sIp} {cfg.flarePort}" with
+            | .ok o => if !(containsSubstr o v) then bad := bad ++ [s!"{k} (want {v}, got {o.trim.take 60})"]
+            | .error e => bad := bad ++ [s!"{k}: {e}"]
+          for k in ["cyc0_1", "cyc1_1"] do
+            match ← execInDebugPod cfg.debugPod cfg.«namespace» s!"printf 'get {k}\\r\\n' | nc -w 3 {sIp} {cfg.flarePort}" with
+            | .ok o => if containsSubstr o "VALUE" then bad := bad ++ [s!"{k} resurrected"]
+            | .error e => bad := bad ++ [s!"{k}: {e}"]
+          let recon1 := (← statNat sIp "reconstruction_started").getD 0
+          let uid1 := (← podUid sPod).getD "?"
+          IO.eprintln s!"# after 3 cycles: content mismatches={bad}; reconstruction_started {recon0}→{recon1}; pod uid {uid0}→{uid1}; wal_applied={← statNat sIp "repl_wal_applied"} forward_applied={← statNat sIp "repl_forward_applied"}"
+          if !bad.isEmpty then return .fail s!"replica content wrong: {bad}"
+          if recon1 != recon0 then return .fail "a reconstruction ran during the cycles"
+          if uid1 != uid0 then return .fail "the replica pod was recreated"
+          let empty ← waitForCondition "ledger closes every counted drop by position" 300 do return (← ledgerDests).isEmpty
+          if !empty then return .fail s!"the ledger still holds {← ledgerDests} ({← ledgerHolds})"
+          return .pass },
+
+    -- T8: the OPERATOR restarts while the link is cut and a drop is held
+    -- under the follower's ownership. The persisted ledger must come back
+    -- with the owned hold, replication progress must not be disturbed, and
+    -- the entry must close by position after the heal — no rebuild.
+    { name := "operator restart during a cut: the owned hold survives the restart; the follower catches up; the entry closes; no rebuild"
+      run := do
+        match ← pair with
+        | .error e => return .fail e
+        | .ok (_, mIp, sPod, sIp) =>
+          let recon0 := (← statNat sIp "reconstruction_started").getD 0
+          let uid0 := (← podUid sPod).getD "?"
+          let d0 ← droppedByMaster mIp
+          match ← cut mIp sIp with
+          | .error e => return .fail e
+          | .ok () => pure ()
+          let stored ← writeKeys cfg.debugPod cfg.«namespace» mIp cfg.flarePort "oprestart" 10
+          let dropped ← waitForCondition "master counts a dropped forwarded write" 90 do
+            return (← droppedByMaster mIp) > d0
+          let held ← waitForCondition "operator holds the drop as owned" 120 do
+            return containsSubstr (← ledgerHolds) "owned"
+          IO.eprintln s!"# before the restart: stored {stored}/10, drop counted={dropped}, ledger holds: {← ledgerHolds}"
+          if !dropped || !held then heal mIp sIp; return .fail s!"no owned hold to carry across the restart (dropped={dropped}, holds={← ledgerHolds})"
+          let oldPod ← hostCmd "kubectl" ["get", "pods", "-n", cfg.«namespace», "-l", s!"app={cfg.operatorName}", "-o", "jsonpath={.items[0].metadata.name}"]
+          discard <| hostCmd "kubectl" ["delete", "pod", "-n", cfg.«namespace», "-l", s!"app={cfg.operatorName}", "--wait=false"]
+          let back ← waitForCondition "a new operator pod is Ready" 180 do
+            match ← hostCmd "kubectl" ["get", "pods", "-n", cfg.«namespace», "-l", s!"app={cfg.operatorName}", "-o", "jsonpath={range .items[*]}{.metadata.name}={.status.containerStatuses[0].ready} {end}"] with
+            | .ok o =>
+              let old := (oldPod.toOption.getD "").trim
+              return (o.splitOn " ").any (fun e => e.endsWith "=true" && !(e.startsWith old))
+                && !(o.splitOn " ").any (fun e => e.startsWith old && e != "")
+            | .error _ => return false
+          IO.eprintln s!"# operator restarted (old pod {oldPod.toOption.getD "?"}); ready={back}; ledger after restart: dests={← ledgerDests} holds={← ledgerHolds}"
+          if !back then heal mIp sIp; return .fail "the operator did not come back Ready"
+          let stillHeld := containsSubstr (← ledgerHolds) "owned" || containsSubstr (← ledgerHolds) "unknown"
+          heal mIp sIp
+          if !stillHeld then return .fail s!"the owned hold did not survive the restart (holds: {← ledgerHolds})"
+          let caught ← waitForCondition "replica converges while following" 180 do
+            return (← statStr sIp "repl_follow_state") == some "following" && (← currItems sIp) == (← currItems mIp)
+          let closed ← waitForCondition "the restarted operator closes the entry by position" 400 do
+            return (← ledgerDests).isEmpty
+          let recon1 := (← statNat sIp "reconstruction_started").getD 0
+          let uid1 := (← podUid sPod).getD "?"
+          IO.eprintln s!"# after the heal: converged={caught}; ledger empty={closed}; reconstruction_started {recon0}→{recon1}; pod uid {uid0}→{uid1}"
+          if !caught then return .fail "the replica did not converge after the heal"
+          if !closed then return .fail s!"the entry was not closed after the restart (holds: {← ledgerHolds})"
+          if recon1 != recon0 then return .fail "a reconstruction ran across the operator restart"
+          if uid1 != uid0 then return .fail "the replica pod was recreated"
+          return .pass },
+
     -- SAF-10c promotion + T16 (history replacement): the master's pod is
     -- deleted. The follower is the only candidate; whether it was proven
     -- current on the tick the master vanished (ranked) or not (unproven,
@@ -530,6 +631,53 @@ def suite : TestSuite := {
           let caught ← waitForCondition "new writes reach the ex-master as a follower" 90 do
             return (← currItems mIp2) == (← currItems sIp)
           if !caught then return .fail s!"items new-master={← currItems sIp} ex-master={← currItems mIp2}"
+          return .pass },
+
+    -- T1: a NEW replica joins (replicas 2 → 3) while writes continue on the
+    -- master. Its initial copy is snapshot + WAL; after the hand-off it must
+    -- be following the master's epoch and hold exactly the master's items.
+    { name := "initial copy under load: a third replica joins by snapshot while writes flow, then follows and matches"
+      run := do
+        match ← pair with
+        | .error e => return .fail e
+        | .ok (_, mIp, _, _) =>
+          let newPod := s!"{cfg.name}-nodes-2"
+          match ← kubectlPatch "flarecluster" cfg.name cfg.«namespace» "{\"spec\":{\"replicas\":3}}" with
+          | .error e => return .fail s!"patch failed: {e}"
+          | .ok _ => pure ()
+          match ← kubectlScale "statefulset" s!"{cfg.name}-nodes" cfg.«namespace» 3 with
+          | .error e => return .fail s!"scale failed: {e}"
+          | .ok _ => pure ()
+          -- Write continuously until the newcomer reports following (or the
+          -- budget runs out), so the copy is taken under load.
+          let mut batches := 0
+          let mut newIp : Option String := none
+          for i in [0:90] do
+            let _ ← writeKeys cfg.debugPod cfg.«namespace» mIp cfg.flarePort s!"t1_{i}" 20
+            batches := batches + 1
+            match ← getPodIp newPod cfg.«namespace» with
+            | none => pure ()
+            | some ip =>
+              newIp := some ip
+              if (← statStr ip "repl_follow_state") == some "following" then break
+          let some nIp := newIp | return .fail s!"{newPod} never got an IP"
+          let following ← waitForCondition "newcomer follows" 300 do
+            return (← statStr nIp "repl_follow_state") == some "following"
+          -- Writes stopped; the newcomer must reach the master's item count
+          -- and epoch by itself.
+          let caught ← waitForCondition "newcomer's local items match the master's" 180 do
+            return (← currItems nIp) == (← currItems mIp) && (← currItems mIp) > 0
+          let mEpoch ← statStr mIp "rocksdb_source_epoch"
+          let nEpoch ← statStr nIp "repl_follow_source_epoch"
+          IO.eprintln s!"# newcomer {newPod}: {batches} batches of 20 written during its copy; state={← statStr nIp "repl_follow_state"} epoch={nEpoch} (master {mEpoch}); items master={← currItems mIp} newcomer={← currItems nIp}; reconstruction_completed={← statNat nIp "reconstruction_completed"} wal_applied={← statNat nIp "repl_wal_applied"}"
+          if !following then return .fail s!"the newcomer never followed (state {← statStr nIp "repl_follow_state"}, reason {← statStr nIp "repl_follow_last_reason"})"
+          if !caught then return .fail s!"items master={← currItems mIp} newcomer={← currItems nIp}"
+          if nEpoch != mEpoch then return .fail s!"newcomer follows epoch {nEpoch}, master is at {mEpoch}"
+          -- Sampled content from the LAST batch written (during the copy).
+          let last := batches - 1
+          match ← execInDebugPod cfg.debugPod cfg.«namespace» s!"printf 'get t1_{last}_19\\r\\n' | nc -w 3 {nIp} {cfg.flarePort}" with
+          | .ok o => if !(containsSubstr o "VALUE") then return .fail s!"the last key written during the copy is missing on the newcomer: {o.trim.take 80}"
+          | .error e => return .fail e
           return .pass }
   ]
 }

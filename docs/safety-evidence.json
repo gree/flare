@@ -489,7 +489,8 @@
       "implementation": "partial",
       "verification": "unverified",
       "scenarios": [
-        "Drops during normal service, a drop while the gate is held, an unresolved destination, operator restart with the ledger persisted, a master counter reset, drops arriving after a repair's reconstruction began, a failed ledger save, and a corrupt/unreadable ledger at start."
+        "Drops during normal service, a drop while the gate is held, an unresolved destination, operator restart with the ledger persisted, a master counter reset, drops arriving after a repair's reconstruction began, a failed ledger save, and a corrupt/unreadable ledger at start.",
+        "A drop whose destination is a WAL-mode follower (SAF-10): the ledger entry is HELD under the follower's ownership (no demotion, no rebuild), CLOSED when the follower's contiguous applied position reaches the master's position at request time in the SAME source epoch, HANDED OVER to the rebuild path only if the follower explicitly stops owning; an unreadable follower state (stats fetch failure) keeps the hold."
       ],
       "assumptions": [
         "Drop counters describe a source/destination incarnation (a counter that went down is a restart whose count is entirely new drops). flared keeps one completion RECORD per process — a random boot id, the latest reconstruction's id and state, and the id and source of the last success — so a completion can be tied to a process and a source; cumulative started/completed counters cannot (a failed handler leaves them unequal forever, a restart may reproduce their values)."
@@ -535,6 +536,10 @@
         {
           "path": "src/lib/stats.cc",
           "symbol": "stats::increment_proxy_write_dropped"
+        },
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/ReplicaRepair.lean",
+          "symbol": "advanceOwned"
         }
       ],
       "call_path": "queue_proxy_write records destination drops -> stats proxy_write_dropped[dest] -> Main observe (only while the ledger is AVAILABLE; a partially corrupt ledger is unavailable, not smaller) -> ReplicaRepair ledger (persisted; dirty writes retried) -> demote to Proxy held out of assignment -> node confirms (boot id, current id, drops at reseat recorded) -> FSM re-seats Slave/Prepare -> flared reconstructs -> complete when the LATEST reconstruction SUCCEEDED from the current master and is newer than the reseat one in the same process, or in a new process (boot id changed); late drops requeued.",
@@ -562,6 +567,21 @@
             {
               "path": "flare_operator/FlareOperator/UnitTests.lean",
               "symbol": "checkAdvanceComplete"
+            }
+          ]
+        },
+        {
+          "id": "CHECK-03-follow",
+          "kind": "scenario",
+          "procedure": "RocksDB, repl-identity-forward and repl-follow-enabled on for every node, replica read balance 0: verify both flags on all pods; write and see the replica apply forwarded changes through the common rule while following; cut master<->replica (iptables REJECT both ways), create/update/delete on the master until proxy_write_dropped is counted and stops increasing, STOP writing; heal and require the replica to resume from its applied_lsn to the master's position at the cut while following, item counts equal and the updated/created keys read correctly by DIRECT replica reads, reconstruction_started unchanged and the pod uid unchanged; require the ledger entry to be logged HELD as owned by the follower and then CLOSED by continuous replication with no demotion and no hand-over, status.replicaRepairs empty. Separately, with the operator's pods/exec revoked (inert resource name, original list restored after), a new drop is HELD as 'follower state unknown (stats unreadable)', never demoted while blind, and CLOSED once the probe returns.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/ContinuousReplication.lean",
+              "symbol": "suite"
+            },
+            {
+              "path": "flare_operator/FlareOperator/StateMachine/ReplicaRepair.lean",
+              "symbol": "advanceOwned"
             }
           ]
         }
@@ -702,6 +722,14 @@
           "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter replica-repair",
           "result": "pass",
           "report": "docs/reports/2026-09-16-replica-repair-final4.txt"
+        },
+        {
+          "check": "CHECK-03-follow",
+          "commit": "dfe6e5eaab49298d56852b76c0f8d423ca40eaa7",
+          "date": "2026-09-20",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter continuous-replication (local kind flare-e2e; images flare-node-rocksdb:test and flare-operator:test built from this commit; the suite file itself landed in the following commit)",
+          "result": "pass",
+          "report": "docs/reports/2026-09-20-saf10d-minimal-e2e-continuous-replication.txt"
         }
       ],
       "tasks": [
@@ -710,9 +738,9 @@
         "SAF-10"
       ],
       "review": {
-        "commit": "27518a648c1601fb3e9dab9a1f3ca0f3399d0d4d",
-        "date": "2026-09-16",
-        "note": "CI run 8 (d185039) failed the SAF-05 save-failure test after a 300s wait although the request HAD landed (the next test's precondition found it in status). Cause, and a correction of the round-6 reading: the test keyed on the log line 'ledger persisted on retry', which only the top-of-pass retry emits; Main.persistLedger (the normal per-pass persist, taken whenever the ledger changed) writes the same ledger and clears the dirty flag silently. In runs 5 and 8 the silent path landed the request within a pass or two of the grant's return — the operator log shows a single 'still unsaved' and then none for 20+ ticks — so the earlier statement that the operator's own patch 'stayed Forbidden for >124s' was wrong; the in-pod and impersonated can-i had been right. The only actual latency observation is the local one of 2026-09-13 (~131s, impersonated can-i, single observation). The test now judges landing by the outcome (entry in status), reports which path wrote it, and requires that no new 'still unsaved' follows. Local at this revision: pass, landed 20s via the top-of-pass retry. OBSERVABILITY GAP, not changed here: after 'marked unsaved ... a restart before that lands would lose', a landing via the normal persist is never announced; proposed as a one-line operator follow-up (image change), pending the reviewer's scope decision. PARTIAL / UNVERIFIED unchanged."
+        "commit": "dfe6e5eaab49298d56852b76c0f8d423ca40eaa7",
+        "date": "2026-09-20",
+        "note": "SAF-10c ownership added to the ledger: a request whose destination is owned by a WAL follower is HELD (owned, mustReach, barEpoch persisted), advanced by position (close only when following, same source epoch, applied >= bar), handed over only on an explicit non-owning state, and kept on an unreadable state (stats failure is never a rebuild trigger). flare_unit pins those decisions (101 checks, docs/reports/2026-09-19-saf10c-lifecycle-and-ledger-ownership.txt). CHECK-03-follow ran once locally (run 1 tests 1-5 pass, test 6 harness bug; run 2 all 6 pass) — see the report for what the minimal E2E does NOT cover. The pre-existing CHECK-03 path (demote/reseat/rebuild) is unchanged for nodes not owned by a follower. PARTIAL / UNVERIFIED unchanged; author-run only."
       }
     },
     {

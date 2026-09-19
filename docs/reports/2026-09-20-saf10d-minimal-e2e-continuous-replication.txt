@@ -1,0 +1,59 @@
+# SAF-10d — minimal acceptance E2E for continuous WAL replication (RocksDB), isolated kind cluster
+# suite: flare_operator/FlareOperator/E2E/Tests/ContinuousReplication.lean   (flare_e2e --filter continuous-replication)
+# host: local kind cluster flare-e2e (single node, arm64); images rebuilt from this branch: flare-node-rocksdb:test, flare-operator:test
+# flags for this suite ONLY (extra.conf on every flared pod): repl-identity-forward = true, repl-follow-enabled = true; replica read balance 0
+# date: 2026-09-20
+
+=== run 1 (working tree at dfe6e5e + the suite; first execution on a real cluster) ===
+ok 1 precondition: extra.conf carries both flags; every flared pod reports repl_follow_enabled=1; the P0 slave's read balance is 0
+ok 2 normal following: 30 writes to the master; replica applied 30 forwarded changes THROUGH THE COMMON RULE (repl_forward_applied=30);
+     follower state=following; applied_lsn=34 == master latest 34; source_epoch=2:7b8f0ee7-...
+ok 3 cut (iptables REJECT both directions on the kind node): on the master created 10, updated 5, deleted 5 (all accepted);
+     master counted 2 dropped forwarded writes; master latest=54 items=35; replica items=30 applied_lsn=34 (unchanged) state=disconnected;
+     replica pod uid=530d8a73-..., reconstruction_started=1. NEW WRITES STOPPED HERE.
+ok 4 heal, with no new writes: replica RESUMED from applied_lsn=34 (the position at the cut) and reached 54 (the master's position at the cut)
+     while following; items master=35 replica=35; the 5 updated keys read the NEW value on the replica; the 10 created keys are present
+     on the replica; reconstruction_started 1→1 (NO rebuild); pod uid unchanged (NO recreation); last_reason none.
+     wal_applied=2, wal_skipped=81 — see the note below.
+ok 5 ledger: the operator logged the drop as "owns the repair" (held, no demotion), then "REPLICA REPAIR CLOSED by continuous replication";
+     no "demoting" and no "handed over" line; status.replicaRepairs emptied.
+not ok 6 operator stats fetch failure: HARNESS — revoking pods/exec by removing it left rule[5] with an empty resources list, which the API
+     refuses ("resource rules must supply at least one resource"). The scenario itself did not run. Fixed for run 2 by replacing the
+     resource with an inert name and restoring the exact original list.
+
+NOTE on run 1's wal_applied=2: only the 2 forwarded writes that had EXHAUSTED their retries were carried by the WAL path; the other 18
+staged operations were still in the master's forwarding retry queue when the link healed and landed by forwarding, after which the WAL
+re-delivered them and the rule skipped them (wal_skipped=81 includes metadata-family entries). The acceptance claims hold either way,
+but for the evidence to show the WAL path recovering the gap, run 2 lets the retries settle before healing.
+
+
+=== run 2 (flared/operator images from dfe6e5eaab49298d56852b76c0f8d423ca40eaa7; suite as committed right after this run; raw: docs/reports/2026-09-20-saf10d-run2-raw.log) ===
+command: cd flare_operator && .lake/build/bin/flare_e2e --filter continuous-replication      RESULT: PASS (Tests: 6, Failures: 0)
+ok 1 precondition: extra.conf carries both flags; every flared pod reports repl_follow_enabled=1; the P0 slave's read balance is 0.
+ok 2 normal following: 30 writes; replica repl_forward_applied=30 (common rule); state=following; applied_lsn=34 == master latest 34;
+     source_epoch=2:eda678c0-...
+ok 3 cut (iptables REJECT both directions): created 10/10, updated 5/5, deleted 5/5 on the master; first drop counted after 20s;
+     the suite then waited until proxy_write_dropped stopped increasing (10s quiet window) — settled at 2 dropped writes;
+     master latest=54 items=35; replica items=30 applied_lsn=34 (unchanged) state=disconnected; pod uid=2824ee6a-..., reconstruction_started=1.
+     NEW WRITES STOPPED HERE.
+ok 4 heal, no new writes: replica RESUMED from applied_lsn=34 and reached 54 after 5s while following; reason none;
+     items master=35 replica=35; the 5 updated keys read the NEW value and the 10 created keys are present on the replica (direct reads);
+     reconstruction_started 1→1 (NO rebuild); pod uid unchanged (NO recreation). wal_applied=17, wal_skipped=79.
+     Reading: 17 of the 20 staged changes were carried by the WAL path this time (run 1: 2 of 20). The remaining 3 are inferred to have
+     landed by late forwarding after the heal and then been SKIPPED by the rule when the WAL re-delivered them; the suite does not
+     capture repl_forward_applied/skipped after the heal, so that split is inferred, not measured. Follow-up: capture both counters.
+     Note on the drop counter: only 2 of the 20 forwarded ops exhausted their retries within the quiet window — the per-destination
+     forwarding queue drains slowly under REJECT, so "settled" is a heuristic, not proof that the queue was empty.
+ok 5 ledger: "REPLICA REPAIR requested and HELD ... owns the repair" logged at once; "REPLICA REPAIR CLOSED by continuous replication"
+     20s later; no "demoting" and no "handed over" line; status.replicaRepairs persisted empty.
+ok 6 operator stats fetch failure: ClusterRole rule 5 resources ["pods/exec"] → ["pods/e2e-revoked-exec"] (exact original list restored
+     afterwards); link cut again; the master counted new drops (was 4); the operator held the entry with reason
+     "follower state unknown (stats unreadable)" and did NOT demote while blind; link healed while still blind (replica caught up by WAL);
+     pods/exec restored → the entry CLOSED by position; reconstruction_started 1→1; pod uid unchanged.
+
+What this run does NOT show (scope of the minimal E2E): repeated cuts, mid-batch disconnect / crash at an apply boundary, retention
+overrun (lsn_purged → rebuild), stale-source refusal (epoch_mismatch), operator restart with an owned entry, the read/promotion/deletion
+eligibility (SAF-10c, not implemented yet — replica read balance was forced to 0), lock-hold/starvation measurement, and every coexistence
+scenario beyond "forwarded landed first, WAL re-delivery skipped". Those remain for the full acceptance suite (design §7 T1–T17).
+Evidence status: SAF-10b/10c code ran once on a real (single-node kind, arm64) cluster and behaved as specified; nothing promoted to
+`verified` — author-run, single revision, no reviewer assessment yet.

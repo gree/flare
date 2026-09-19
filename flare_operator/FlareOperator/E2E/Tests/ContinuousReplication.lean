@@ -174,10 +174,13 @@ private def execRuleIndex : IO (Option Nat) := do
   | .ok o => return o.trim.toNat?
   | .error _ => return none
 
-/-- Revoke pods/exec by REPLACING it with an inert resource name (a rule
-    with no resources is invalid, so it cannot simply be removed); the exact
-    original list is returned so restore puts back precisely what was there. -/
-private def revokeExec : IO (Except String (Nat × String)) := do
+/-- Make the operator unable to exec into the REPLICA while it can still
+    exec into the master (whose stats carry the drop counter): pods/exec in
+    the granting rule is replaced by an inert name (a rule with no resources
+    is invalid), and a new rule re-grants pods/exec restricted by
+    `resourceNames` to the master pod only. Restore puts the exact original
+    list back and drops the added rule. -/
+private def revokeExec (masterPod : String) : IO (Except String (Nat × String)) := do
   match ← execRuleIndex with
   | none => return .error "no ClusterRole rule grants pods/exec (nothing to revoke)"
   | some i =>
@@ -189,10 +192,24 @@ private def revokeExec : IO (Except String (Nat × String)) := do
       | .ok res =>
         match ← kubectl ["patch", "clusterrole", "flare-operator", "--type=json", "-p",
             ("[{\"op\":\"replace\",\"path\":\"/rules/" ++ toString i ++ "/resources\",\"value\":" ++ res.trim ++ "}]")] with
-        | .ok _ => IO.eprintln s!"# fault: the operator may no longer exec into pods (rule {i}: {original.trim} → {res.trim})"; return .ok (i, original.trim)
         | .error e => return .error e
+        | .ok _ =>
+          let verbs := (← hostCmd "sh" ["-c", s!"kubectl get clusterrole flare-operator -o json | jq -c '.rules[{i}].verbs'"]).toOption.getD "[\"create\",\"get\"]"
+          match ← kubectl ["patch", "clusterrole", "flare-operator", "--type=json", "-p",
+              ("[{\"op\":\"add\",\"path\":\"/rules/-\",\"value\":{\"apiGroups\":[\"\"],\"resources\":[\"pods/exec\"],\"resourceNames\":[\"" ++ masterPod ++ "\"],\"verbs\":" ++ verbs.trim ++ "}}]")] with
+          | .error e => return .error e
+          | .ok _ =>
+            IO.eprintln s!"# fault: the operator may exec only into the master {masterPod} (rule {i}: {original.trim} → {res.trim}; added a resourceNames-restricted pods/exec rule)"
+            return .ok (i, original.trim)
 
 private def restoreExec (i : Nat) (original : String) : IO Unit := do
+  -- The restricted rule was appended last: remove it, then put rule i back.
+  match ← hostCmd "sh" ["-c", "kubectl get clusterrole flare-operator -o json | jq -r '.rules | length'"] with
+  | .ok n =>
+    match n.trim.toNat? with
+    | some len => if len > 0 then discard <| kubectl ["patch", "clusterrole", "flare-operator", "--type=json", "-p", ("[{\"op\":\"remove\",\"path\":\"/rules/" ++ toString (len - 1) ++ "\"}]")]
+    | none => pure ()
+  | .error _ => pure ()
   discard <| kubectl ["patch", "clusterrole", "flare-operator", "--type=json", "-p",
     ("[{\"op\":\"replace\",\"path\":\"/rules/" ++ toString i ++ "/resources\",\"value\":" ++ original ++ "}]")]
   IO.eprintln "# fault cleared: pods/exec restored"
@@ -366,10 +383,10 @@ def suite : TestSuite := {
       run := do
         match ← pair with
         | .error e => return .fail e
-        | .ok (_, mIp, sPod, sIp) =>
+        | .ok (mPod, mIp, sPod, sIp) =>
           let recon0 := (← statNat sIp "reconstruction_started").getD 0
           let uid0 := (← podUid sPod).getD "?"
-          match ← revokeExec with
+          match ← revokeExec mPod with
           | .error e => return .fail s!"could not revoke pods/exec: {e}"
           | .ok (ruleIdx, originalRes) =>
             let d0 ← droppedByMaster mIp
@@ -419,6 +436,12 @@ def suite : TestSuite := {
         match ← pair with
         | .error e => return .fail e
         | .ok (_, mIp, sPod, sIp) =>
+          -- Precondition: no repair entry is pending (a leftover request from
+          -- an earlier scenario would rebuild the node by the drop path and
+          -- mask the follower-declared path this test is about).
+          let clean ← waitForCondition "no repair entry pending before the bulk operation" 180 do
+            return (← ledgerDests).isEmpty
+          if !clean then return .fail s!"a repair entry is still pending from an earlier scenario: {← ledgerDests} ({← ledgerHolds})"
           let epoch0 := (← statStr mIp "rocksdb_source_epoch").getD "?"
           let recon0 := (← statNat sIp "reconstruction_started").getD 0
           let uid0 := (← podUid sPod).getD "?"
@@ -441,7 +464,16 @@ def suite : TestSuite := {
               && (← statStr sIp "repl_follow_source_epoch") == some epoch1
           let recon1 := (← statNat sIp "reconstruction_started").getD 0
           IO.eprintln s!"# after the rebuild: reconstruction_started {recon0}→{recon1}; state={← statStr sIp "repl_follow_state"} epoch={← statStr sIp "repl_follow_source_epoch"} (master {epoch1}); requested-by-follower logged={requested}"
-          if !rebuilt then return .fail s!"the follower did not come back following the new epoch (state {← statStr sIp "repl_follow_state"}, epoch {← statStr sIp "repl_follow_source_epoch"}, reason {← statStr sIp "repl_follow_last_reason"})"
+          if !rebuilt then
+            -- Diagnostics: the replica's own view of the role shifts and any
+            -- reconstruction attempt, and the operator's repair lines.
+            match ← hostCmd "sh" ["-c", s!"kubectl logs -n {cfg.«namespace»} {sPod} --tail=800 | grep -E 'shift|reconstruct|proxy|follow|deactivat|snapshot|truncate|prepare' | grep -v _reconstruct_node_partition | tail -40"] with
+            | .ok o => IO.eprintln s!"# --- replica flared log (filtered) ---\n{o}"
+            | .error e => IO.eprintln s!"# (could not read the replica's log: {e})"
+            match ← hostCmd "sh" ["-c", s!"kubectl logs -n {cfg.«namespace»} -l app={cfg.operatorName} --tail=3000 | grep -E 'REPLICA REPAIR|NodeState|re-seat|autoAssign|assigned' | tail -30"] with
+            | .ok o => IO.eprintln s!"# --- operator log (filtered) ---\n{o}"
+            | .error e => IO.eprintln s!"# (could not read the operator's log: {e})"
+            return .fail s!"the follower did not come back following the new epoch (state {← statStr sIp "repl_follow_state"}, epoch {← statStr sIp "repl_follow_source_epoch"}, reason {← statStr sIp "repl_follow_last_reason"}); nodes: {(← nodeView).map (fun e => s!"{(e.fqdn.splitOn ".").head?.getD e.fqdn}:r{e.role}/s{e.state}/p{e.partition}/b{e.balance}")}"
           if !requested then return .fail "the rebuild happened but not through the follower-declared ledger request"
           let stored ← writeKeys cfg.debugPod cfg.«namespace» mIp cfg.flarePort "post_flush" 10
           if stored != 10 then return .fail s!"stored only {stored}/10 after the flush"
@@ -615,8 +647,12 @@ def suite : TestSuite := {
           IO.eprintln s!"# promotion: follower promoted={promoted}; logged NOT LOSS-FREE={notLossFree}; new master epoch={← statStr sIp "rocksdb_source_epoch"}"
           if !promoted then return .fail "the follower was not promoted"
           if (← podUid sPod).getD "?" != uid0 then return .fail "the promoted pod was recreated"
+          -- flared applies the promotion on its next accepted map; the epoch
+          -- advances inside that role shift.
+          let advanced ← waitForCondition "the promoted node advances its source epoch" 120 do
+            return ((← statStr sIp "rocksdb_source_epoch").getD "?") != epoch0
           let epoch1 := (← statStr sIp "rocksdb_source_epoch").getD "?"
-          if epoch1 == epoch0 then return .fail "promotion did not advance the source epoch"
+          if !advanced then return .fail s!"promotion did not advance the source epoch (still {epoch1})"
           let rejoined ← waitForCondition "ex-master returns, rebuilds and follows the new epoch" 480 do
             match ← getPodIp mPod cfg.«namespace» with
             | none => return false

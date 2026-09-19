@@ -1405,13 +1405,22 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
       FlareEffect.Log s!"[flare-operator] CRITICAL: master {k} is NOT SERVING (pod present, NotReady) and has NO promotable successor — kept as master rather than demoted, because demoting would only make the partition masterless sooner and break its clean rejoin. The partition is serving nothing until this process recovers. See RUNBOOK #node-unhealthy"
     -- SAF-10c: a WAL-mode follower promoted WITHOUT proof of currency. The
     -- design (§5.3) forbids describing such a promotion as loss-free.
+    let newlyMaster := fun (k : String) (n : FlareNode) =>
+      n.role == FlareRole.Master
+        && (match clusterState.lookupNode k with
+            | some o => o.role != FlareRole.Master
+            | none => true)
     let unprovenPromoted := (newState.nodeMap.filter (fun kv =>
-      kv.2.role == FlareRole.Master && s.followUnprovenKeys.contains kv.1
-        && (match clusterState.lookupNode kv.1 with
-            | some n => n.role != FlareRole.Master
-            | none => true))).map Prod.fst
+      newlyMaster kv.1 kv.2 && s.followUnprovenKeys.contains kv.1)).map Prod.fst
     let unprovenEffects := unprovenPromoted.map fun k =>
       FlareEffect.Log s!"[flare-operator] PROMOTION NOT LOSS-FREE: {k} was promoted for availability while its continuous replication could not be proven current (not following the master's current history with a fresh observation within the promotion bound). Replication is asynchronous: writes the old master acknowledged past this node's applied position are lost. See docs/design-continuous-wal-replication.md §5.3"
+    -- A follower KNOWN unusable can still be crowned by the masterless
+    -- refill's data-bearing last resort (partial data beats emptiness);
+    -- that too must be said out loud.
+    let unfitPromoted := (newState.nodeMap.filter (fun kv =>
+      newlyMaster kv.1 kv.2 && s.followUnfitKeys.contains kv.1)).map Prod.fst
+    let unprovenEffects := unprovenEffects ++ unfitPromoted.map fun k =>
+      FlareEffect.Log s!"[flare-operator] PROMOTION NOT LOSS-FREE: {k} was promoted as a LAST RESORT although its continuous replication had declared its copy unusable (needs_rebuild / incomplete initial copy / another history); it was the only data-bearing copy left. Expect data loss relative to the old master. See docs/design-continuous-wal-replication.md §5.3"
     ({ s with reconcileStep := .AfterAssignRoles,
               updatedClusterState := some newState,
               drainBlockedCount := blocked.length }, none,

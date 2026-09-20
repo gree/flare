@@ -110,3 +110,19 @@ whose session was still the old epoch, were retried and counted as drops within 
 request was an idempotent no-op. Both paths lead to the same demote → reseat → reconstruction; the node was rebuilt in place and
 followed the new epoch, post-flush writes arrived. The test now accepts either path and records which fired; the follower-declared
 path on its own (no drop ever counted) stays pinned by flare_unit (requestRebuild + plan).
+
+=== run 7 (operator eb2ba17, flared 325a2f8, suite 27eef78; raw: docs/reports/2026-09-20-saf10d-run7-raw.log) === RESULT: PASS (Tests: 12, Failures: 0)
+command: cd flare_operator && .lake/build/bin/flare_e2e --filter continuous-replication
+All 12 pass. Test 7: the request was again filed by the drop path (entry drops=2 "requested"; the master's counter went to 6 while the
+stale-session replica refused forwards), the node was rebuilt in place (reconstruction_started 1→2) and followed the new epoch.
+Test 9: three cycles converged from their positions; wal_applied=27, forward_applied=77; no rebuild; pod unchanged.
+Test 11: promoted follower's epoch advanced; ex-master rebuilt and followed. Test 12: 28 batches during the copy; 618 = 618.
+
+=== regression run 1 on the same images (raw: docs/reports/2026-09-20-saf10-regression-run1-raw.log) ===
+command: flare_e2e --filter replica-repair,failover,read-balance,prepare-evidence,operator-restart      RESULT: FAIL (30 tests, 6 failures)
+failover PASS; read-balance PASS; prepare-evidence PASS.
+operator-restart: tests 18-19 FAIL ("no P0 master after restart" on the node view read shortly after the restart).
+replica-repair: tests 23-26 FAIL — the repair never recorded COMPLETE within 300/360 s; 24-26 cascaded on the non-empty ledger.
+Common signature, absent from the 2026-09-16 passing run: "reconcile slow: 18000–31000 ms" on EVERY tick of a 2-node tch cluster.
+The SAF-10c operator changes are the suspect (per-tick probing or the restructured stats pass); the operator was instrumented
+with a per-tick probe timing line and the replica-repair suite is being rerun to locate the cost. Not resolved at this point.

@@ -895,7 +895,7 @@
       "review": {
         "commit": "2379cff5cc28ca160e2076ad2d9c690b0c90d417",
         "date": "2026-09-20",
-        "note": "ReplicaRepair.FollowReading gained  (END seen); unreadable = !complete; flare_unit pins that a complete reply without keys is 'not in the mode' (ordinary repair, hands an owned entry over). Bridge.queryPodStats returns at END instead of waiting out a 3 s timeout, which had made 2-node reconciles take 18-31 s and starved the repair paths. Regression suites (replica-repair, operator-restart, failover, read-balance, prepare-evidence) rerunning on this revision. PARTIAL / UNVERIFIED unchanged."
+        "note": "ReplicaRepair.FollowReading gained a completeness flag (END seen); unreadable = !complete; flare_unit pins that a complete reply without keys is 'not in the mode' (ordinary repair, hands an owned entry over). Bridge.queryPodStats returns at END instead of waiting out a 3 s timeout, which had made 2-node reconciles take 18-31 s and starved the repair paths. Regression suites (replica-repair, operator-restart, failover, read-balance, prepare-evidence) rerunning on this revision. PARTIAL / UNVERIFIED unchanged."
       }
     },
     {

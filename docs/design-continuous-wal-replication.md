@@ -807,6 +807,27 @@ no "absence of a log line" is a pass condition.
 
 Expiry is verified under controlled time conditions.
 
+**Where the evidence stands (2026-09-20, branch `safety/saf-10-wal-replication`,
+author-run only, nothing verified):** the E2E suite
+`flare_operator/FlareOperator/E2E/Tests/ContinuousReplication.lean`
+(`flare_e2e --filter continuous-replication`, RocksDB, PVC-backed, 1×2 then
+1×3) stages T1 (initial copy under load), T2/T3 (cut with create/update/
+delete, heal with no new writes), T4 (kill -9 of the replica with a backlog
+pending — the restart goes through the operator's rejoin and an
+**incremental** WAL reconstruction from the cursor, not a bare in-process
+resume; a full dump is asserted absent), T5 (three cut/heal cycles), T8
+(operator restart during a cut), T14 (`flush_all` → epoch → `needs_rebuild`
+→ in-place rebuild → following the new epoch), T16 (promotion advances the
+epoch; the ex-master rebuilds and follows), plus the operator scenarios of
+§5.3/§5.4 (read withholding, ledger ownership, stats-fetch failure held as
+Unknown). T10–T13 and T15 are pinned by the RocksDB cutter tests
+(`test/lib/test_storage_rocksdb.cc`, `test_apply_rule_*`). **Not staged:**
+T6 (a retention purge cannot be forced deterministically in the harness;
+`lsn_purged` → `needs_rebuild` is unit-pinned), T7 beyond the epoch check
+(an old-connection refusal is unit-pinned), T9 (resource limits under a slow
+replica) and T17 (lock-hold and starvation measurement, deferred by
+agreement). Run records: `docs/reports/2026-09-20-saf10d-*.txt`.
+
 ---
 
 ## 8. Staging, evidence and CI

@@ -115,6 +115,7 @@ int handler_wal_follower::run() {
 	if (rdb == NULL) {
 		log_warning("continuous replication requested on a backend without one -> not following", 0);
 		if (stats_object != NULL) stats_object->follow_set_state(stats::follow_error, "backend_without_wal");
+		this->_park();
 		return -1;
 	}
 	if (stats_object != NULL) stats_object->follow_set_source(string(source), rdb->get_source_epoch());
@@ -127,7 +128,15 @@ int handler_wal_follower::run() {
 
 		if (r == attempt_needs_rebuild) {
 			// Terminal for this handler: the node must be rebuilt, and that
-			// decision belongs to the controller, not to this thread.
+			// decision belongs to the controller, not to this thread. Do NOT
+			// return here: the controller still holds this thread and will
+			// shut it down when the role cycles. Returning would hand the
+			// thread back to the pool while cluster still references it; the
+			// later shutdown() then hits a POOLED thread, which exits without
+			// leaving the pool, and the next handler that pops it (observed:
+			// the reconstruction that was supposed to rebuild this very node)
+			// is triggered on a dead thread and never runs. Park instead.
+			this->_park();
 			return -1;
 		}
 		if (r == attempt_progress && more) {
@@ -163,6 +172,17 @@ int handler_wal_follower::run() {
 // }}}
 
 // {{{ private methods
+/**
+ *	Hold the thread, doing nothing, until the controller shuts it down.
+ *	Every early exit of run() goes through here so that the thread's
+ *	lifetime is exactly the controller's reference to it.
+ */
+void handler_wal_follower::_park() {
+	while (!this->_thread->is_shutdown_request()) {
+		sleep(1);
+	}
+}
+
 int handler_wal_follower::_follow_once(bool& more) {
 #ifdef HAVE_LIBROCKSDB
 	more = false;

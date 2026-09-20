@@ -1683,7 +1683,16 @@ int cluster::set_wal_follow_enabled(bool b) {
 int cluster::stop_wal_follower() {
 	if (this->_wal_follower_thread) {
 		log_notice("stopping continuous replication follower (source=%s)", this->_wal_follower_source.c_str());
-		this->_wal_follower_thread->shutdown(true, true);
+		// The handler parks instead of returning, so the thread is ours until
+		// this shutdown. Never shut down a thread that is no longer running a
+		// handler: a graceful request delivered to a POOLED thread makes it
+		// exit while its object stays in the pool, and the next get() hands
+		// out a dead thread (observed: the rebuild of this node never ran).
+		if (this->_wal_follower_thread->is_running()) {
+			this->_wal_follower_thread->shutdown(true, true);
+		} else {
+			log_warning("continuous replication follower thread is not running a handler; releasing the reference without a shutdown request", 0);
+		}
 		this->_wal_follower_thread.reset();
 		this->_wal_follower_source.clear();
 		if (stats_object != NULL) {

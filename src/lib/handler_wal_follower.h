@@ -88,6 +88,7 @@ public:
 
 private:
 	int _follow_once(bool& more);
+	void _park();
 };
 
 }	// namespace flare

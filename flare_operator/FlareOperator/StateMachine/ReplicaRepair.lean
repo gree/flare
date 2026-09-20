@@ -228,6 +228,13 @@ def plan (l : Ledger) (allowed : Bool) (gateReason : String) : Ledger × List (S
 
 /-- What the destination's own stats say about its continuous follower. -/
 structure FollowReading where
+  /-- The stats reply was read to its END. A COMPLETE reply without the
+      follower keys is a flared without a follower (tch/tcb, or an older
+      build): that is "not in the mode", not "unreadable". Only a failed or
+      truncated read is Unknown. (Regression found by the replica-repair
+      suite on tch: with `unreadable := state.isNone` every drop on a
+      non-RocksDB replica was held as "follower state unknown" forever.) -/
+  complete : Bool := false
   /-- `repl_follow_enabled`: the mode is on for that node. -/
   enabled : Bool := false
   /-- `repl_follow_state`: idle / initial_sync / following / disconnected /
@@ -241,7 +248,7 @@ structure FollowReading where
 
 /-- Nothing could be read. Unknown is Unknown: it neither claims nor ends
     ownership, and it never drives a demotion (SAF-04 typing, applied here). -/
-def FollowReading.unreadable (r : FollowReading) : Bool := r.state.isNone
+def FollowReading.unreadable (r : FollowReading) : Bool := !r.complete
 
 /-- Does the follower own this destination's repair? The mode must be on and
     the follower must not have given up: `needs_rebuild` is the one state in

@@ -446,7 +446,11 @@ def writeRepairLedger (crName ns : String) (l : ReplicaRepair.Ledger) : IO (Exce
 
 /-- Query flared stats via kubectl exec and bash /dev/tcp. -/
 def queryPodStats (podName ns : String) (statsCmd : String) : IO (Except String String) :=
-  execInPod podName ns ["bash", "-c", s!"exec 3<>/dev/tcp/localhost/12121; printf '{statsCmd}\\r\\n' >&3; timeout 3 cat <&3; exec 3>&-"]
+  -- Read until the END line and return at once; the connection would stay
+  -- open (memcached protocol), so a plain `cat` always ran into its 3 s
+  -- timeout and every stats probe cost ≥3 s of reconcile time. The overall
+  -- deadline stays (timeout 3), so a hung or silent flared still bounds it.
+  execInPod podName ns ["bash", "-c", s!"exec 3<>/dev/tcp/localhost/12121; printf '{statsCmd}\\r\\n' >&3; timeout 3 bash -c 'while IFS= read -r line; do printf \"%s\\n\" \"$line\"; case \"$line\" in END*) break;; esac; done' <&3; exec 3>&-"]
 
 /-- Node keys of pods whose flared reports curr_items > 0 (a bounded stats
     probe per pod: `timeout 3` inside the exec). Feeds the masterless

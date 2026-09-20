@@ -140,10 +140,12 @@ def lRel : Ledger := (advance lDem [(slaveKey, relObs)]).1
 /-- SAF-10c: a destination whose continuous follower owns the repair. -/
 def ownEp : String := "3:abc"
 def following (applied : Nat) (epoch : String := ownEp) : FollowReading :=
-  { enabled := true, state := some "following", appliedLsn := some applied, sourceEpoch := some epoch }
-def disconnected : FollowReading := { enabled := true, state := some "disconnected", appliedLsn := some 5, sourceEpoch := some ownEp }
-def rebuild : FollowReading := { enabled := true, state := some "needs_rebuild", appliedLsn := some 5, sourceEpoch := some ownEp }
+  { complete := true, enabled := true, state := some "following", appliedLsn := some applied, sourceEpoch := some epoch }
+def disconnected : FollowReading := { complete := true, enabled := true, state := some "disconnected", appliedLsn := some 5, sourceEpoch := some ownEp }
+def rebuild : FollowReading := { complete := true, enabled := true, state := some "needs_rebuild", appliedLsn := some 5, sourceEpoch := some ownEp }
 def unreadable : FollowReading := {}
+/-- A complete reply from a flared without a follower (tch): not in the mode. -/
+def noFollower : FollowReading := { complete := true }
 
 def checkFollowOwnership (ctx : Ctx) : IO Unit := do
   check ctx "the mode on and following/initial_sync/disconnected/error own; needs_rebuild, idle, off and unreadable do not"
@@ -154,6 +156,9 @@ def checkFollowOwnership (ctx : Ctx) : IO Unit := do
       && !ownedByFollower { enabled := true, state := some "idle" }
       && !ownedByFollower { enabled := false, state := some "following" }
       && !ownedByFollower unreadable)
+  check ctx "a COMPLETE reply without follower keys (tch, older flared) is NOT unreadable: not owned, ordinary repair"
+    (!noFollower.unreadable && ownershipAtRequest noFollower == some false
+      && (advanceOwned { dest := slaveKey, masterKey := masterKey, nodeKey := some slaveKey, owned := true } noFollower).2 == .handedOver)
   check ctx "at request time an unreadable follower is Unknown: neither owned nor not-owned"
     (ownershipAtRequest unreadable == none && ownershipAtRequest (following 1) == some true
       && ownershipAtRequest rebuild == some false)

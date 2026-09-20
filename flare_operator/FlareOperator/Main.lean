@@ -510,7 +510,8 @@ def followReadingOf (state : FlareClusterState) (dest : String) (ns : String)
     match ← Bridge.queryPodStats (extractPodName n.serverName) ns "stats" with
     | .error _ => pure {}
     | .ok out =>
-      pure { enabled := (statNat out "repl_follow_enabled") == some 1,
+      pure { complete := statsReplyComplete out,
+             enabled := (statNat out "repl_follow_enabled") == some 1,
              state := statStr out "repl_follow_state",
              appliedLsn := statNat out "repl_applied_lsn",
              sourceEpoch := statStr out "repl_follow_source_epoch" }
@@ -663,6 +664,7 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
       -- per slave at start and one every interval; nothing else changes for
       -- them (every list stays empty).
       let tr ← followRef.get
+      let probeT0 ← IO.monoMsNow
       let bounds ← followBoundsFromEnv
       let probeInterval := ((← IO.getEnv "FLARE_FOLLOW_PROBE_INTERVAL").bind (·.toNat?)).getD 30
       let readyPods := pods.filter (fun p => p.ready && !p.terminating)
@@ -691,6 +693,10 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
               | .ok out => pure (masterReadingFrom out)
               | .error _ => pure ({} : FollowEvidence.MasterReading)
             masterReadings := masterReadings ++ [(n.partition, m)]
+      let probed := (slaveReadings.filter (fun (_, _, r?) => r?.isSome)).length + masterReadings.length
+      let probeMs := (← IO.monoMsNow) - probeT0
+      if probed > 0 || probeMs > 1000 then
+        IO.eprintln s!"[flare-operator] continuous-replication probe: {probed} stats read(s) in {probeMs}ms (tick {tr.tick}; in-mode remembered: {(tr.mem.filter (·.2)).length}, out-of-mode remembered: {(tr.mem.filter (!·.2)).length})"
       let (cls, mem', judged) := FollowEvidence.classify bounds tr.mem slaveReadings masterReadings
       let (changed, summaries) := FollowEvidence.changedSummaries tr.lastSummary judged
       for (k, summary) in changed do

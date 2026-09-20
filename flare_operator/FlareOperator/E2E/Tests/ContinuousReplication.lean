@@ -50,6 +50,10 @@ private def cfg : ClusterConfig := {
   extraFlaredConf := "repl-identity-forward = true\nrepl-follow-enabled = true\nrepl-follow-poll-interval-usec = 200000"
   -- A repair must be watchable within a test.
   operatorEnv := [("FLARE_STATS_PROBE_INTERVAL_MS", "15000")]
+  -- PVC-backed data: the crash test (kill -9 of flared) needs the copy to
+  -- survive the container restart, and a returning ex-master then carries
+  -- its OLD history rather than an empty store (the more realistic case).
+  usePvc := true
 }
 
 private def kindNode : String := "flare-e2e-control-plane"
@@ -213,6 +217,19 @@ private def restoreExec (i : Nat) (original : String) : IO Unit := do
   discard <| kubectl ["patch", "clusterrole", "flare-operator", "--type=json", "-p",
     ("[{\"op\":\"replace\",\"path\":\"/rules/" ++ toString i ++ "/resources\",\"value\":" ++ original ++ "}]")]
   IO.eprintln "# fault cleared: pods/exec restored"
+
+/-- kill -9 the flared process of `pod` FROM THE KIND NODE (inside the pod
+    flared is pid 1 of its namespace, which ignores signals sent from within).
+    The process is found by its cgroup, which names the pod UID. -/
+private def killFlared (uid : String) : IO (Except String String) := do
+  let uidUnderscore := uid.replace "-" "_"
+  hostCmd "docker" ["exec", kindNode, "sh", "-c",
+    s!"n=0; for p in $(pgrep -x flared); do if grep -q -e '{uid}' -e '{uidUnderscore}' /proc/$p/cgroup 2>/dev/null; then kill -9 $p && n=$((n+1)); fi; done; echo killed=$n"]
+
+private def restartCountOf (pod : String) : IO Nat := do
+  match ← kubectlGetJsonpath "pod" pod cfg.«namespace» "{.status.containerStatuses[0].restartCount}" with
+  | .ok o => return o.trim.toNat?.getD 0
+  | .error _ => return 0
 
 -- ─── the suite ─────────────────────────────────────────────────────────
 
@@ -646,6 +663,71 @@ def suite : TestSuite := {
           if !closed then return .fail s!"the entry was not closed after the restart (holds: {← ledgerHolds})"
           if recon1 != recon0 then return .fail "a reconstruction ran across the operator restart"
           if uid1 != uid0 then return .fail "the replica pod was recreated"
+          return .pass },
+
+    -- T4/T16: the REPLICA PROCESS CRASHES (kill -9 from the node) right after
+    -- a heal, with a backlog of created/updated/deleted keys pending. Its
+    -- data is on a PVC, so the container restarts on the same copy. It must
+    -- converge to the master's content with no duplicate, no missing and no
+    -- resurrected key, without a full dump, and without the pod being
+    -- recreated. (The restart goes through the operator's rejoin: the node
+    -- re-registers, is seated Slave/Prepare, reconstructs INCREMENTALLY from
+    -- its cursor over the WAL, activates, and the follower resumes — not a
+    -- bare in-process resume; recorded as such.)
+    { name := "replica crash with a backlog pending: flared killed -9 after the heal; restarts on its PVC, converges without a full dump; pod not recreated"
+      run := do
+        match ← pair with
+        | .error e => return .fail e
+        | .ok (_, mIp, sPod, sIp) =>
+          let uid0 := (← podUid sPod).getD "?"
+          let rc0 ← restartCountOf sPod
+          let applied0 := (← statNat sIp "repl_applied_lsn").getD 0
+          match ← cut mIp sIp with
+          | .error e => return .fail e
+          | .ok () => pure ()
+          let stored ← writeKeys cfg.debugPod cfg.«namespace» mIp cfg.flarePort "crash" 300
+          let mut updated := 0
+          for i in [0:5] do
+            if ← memcachedSet cfg.debugPod cfg.«namespace» mIp cfg.flarePort s!"crash_{i}" s!"crash_updated_{i}" then updated := updated + 1
+          let mut deleted := 0
+          for i in [10:15] do
+            match ← execInDebugPod cfg.debugPod cfg.«namespace» s!"printf 'delete crash_{i}\\r\\n' | nc -w 3 {mIp} {cfg.flarePort}" with
+            | .ok o => if containsSubstr o "DELETED" then deleted := deleted + 1
+            | .error _ => pure ()
+          let mLatest := (← statNat mIp "rocksdb_latest_sequence_number").getD 0
+          heal mIp sIp
+          IO.sleep 300
+          let killed ← killFlared uid0
+          IO.eprintln s!"# backlog: stored {stored}/300, updated {updated}/5, deleted {deleted}/5 under the cut (master latest {mLatest}, replica applied {applied0}); healed; {killed.toOption.getD "kill failed"}"
+          match killed with
+          | .error e => return .fail s!"could not kill flared on the replica: {e}"
+          | .ok o => if !(containsSubstr o "killed=1") then return .fail s!"expected exactly one flared process for the replica's pod UID: {o.trim}"
+          let restarted ← waitForCondition "replica container restarted (restartCount +1) and Ready" 240 do
+            return (← restartCountOf sPod) == rc0 + 1
+              && (match ← kubectlGetJsonpath "pod" sPod cfg.«namespace» "{.status.containerStatuses[0].ready}" with
+                  | .ok o => o.trim == "true" | .error _ => false)
+          IO.eprintln s!"# after the kill: restartCount {rc0}→{← restartCountOf sPod}; ready-again={restarted}; pod uid {uid0}→{(← podUid sPod).getD "?"}"
+          if !restarted then return .fail "the replica container did not come back Ready once"
+          let caught ← waitForCondition "replica follows again and matches the master's items" 420 do
+            return (← statStr sIp "repl_follow_state") == some "following" && (← currItems sIp) == (← currItems mIp)
+          let dump := (← statNat sIp "rocksdb_wal_fallback_to_dump").getD 0
+          let recon := (← statNat sIp "reconstruction_completed").getD 0
+          IO.eprintln s!"# after the restart: state={← statStr sIp "repl_follow_state"} applied={← statNat sIp "repl_applied_lsn"} (master latest {← statNat mIp "rocksdb_latest_sequence_number"}); items master={← currItems mIp} replica={← currItems sIp}; new process: reconstruction_completed={recon} wal_fallback_to_dump={dump} wal_applied={← statNat sIp "repl_wal_applied"}"
+          if !caught then return .fail s!"the replica did not converge after the crash (state {← statStr sIp "repl_follow_state"}, reason {← statStr sIp "repl_follow_last_reason"}, items master={← currItems mIp} replica={← currItems sIp})"
+          if dump > 0 then return .fail "the restart fell back to a FULL DUMP: the crashed copy was not resumed from its position"
+          let mut bad : List String := []
+          for (k, v) in [("crash_0", "crash_updated_0"), ("crash_4", "crash_updated_4"), ("crash_299", "crash_299"), ("crash_150", "crash_150")] do
+            match ← execInDebugPod cfg.debugPod cfg.«namespace» s!"printf 'get {k}\\r\\n' | nc -w 3 {sIp} {cfg.flarePort}" with
+            | .ok o => if !(containsSubstr o v) then bad := bad ++ [s!"{k} (want {v}, got {o.trim.take 60})"]
+            | .error e => bad := bad ++ [s!"{k}: {e}"]
+          for k in ["crash_10", "crash_14"] do
+            match ← execInDebugPod cfg.debugPod cfg.«namespace» s!"printf 'get {k}\\r\\n' | nc -w 3 {sIp} {cfg.flarePort}" with
+            | .ok o => if containsSubstr o "VALUE" then bad := bad ++ [s!"{k} resurrected"]
+            | .error e => bad := bad ++ [s!"{k}: {e}"]
+          if !bad.isEmpty then return .fail s!"replica content wrong after the crash: {bad}"
+          if (← podUid sPod).getD "?" != uid0 then return .fail "the replica pod was recreated"
+          let empty ← waitForCondition "ledger closes the drops counted under the cut" 300 do return (← ledgerDests).isEmpty
+          if !empty then return .fail s!"the ledger still holds {← ledgerDests} ({← ledgerHolds})"
           return .pass },
 
     -- SAF-10c promotion + T16 (history replacement): the master's pod is

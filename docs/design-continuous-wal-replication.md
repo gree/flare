@@ -710,6 +710,14 @@ rebuild, so the two must not be conflated:
   integrity failure, incomplete restore — hands the node to the rebuild path,
   through the operator's existing demote → hold → reseat sequence so a single
   reconstruction runs.
+* **`needs_rebuild` reaches the ledger by two routes that race.** The
+  operator turns the follower's own declaration into an un-owned repair
+  request (`ReplicaRepair.requestRebuild`, idempotent per node), and — because
+  after a source-epoch change the master's forwarded ops are refused by the
+  stale-session replica, retried and counted as drops — the ordinary drop
+  path usually files the same request first (observed in the acceptance
+  E2E). Both converge on one demote → reseat → reconstruction; the
+  declaration route matters when no write traffic exists to be refused.
 * **Ownership ends only when the mode ends.** If continuous replication is
   disabled for a node, or the node leaves the partition, the ledger resumes its
   current behaviour. Losing the connection does not end ownership, and must not

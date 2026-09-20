@@ -102,3 +102,11 @@ ok 11 failover: master pod deleted → follower promoted (NOT LOSS-FREE line abs
      vanished) → epoch advanced 3:… → 4:… → the ex-master returned, rebuilt and FOLLOWED the new epoch; items 38 = 38.
 ok 12 initial copy under load: third replica joined by snapshot while 27 batches × 20 keys were written; following epoch 4:…;
      items 588 = 588; the last key written during the copy present.
+
+=== run 6 (operator eb2ba17, flared 325a2f8; suite 50a696d; raw: docs/reports/2026-09-20-saf10d-run6-raw.log) === RESULT: FAIL (Tests: 12, Failures: 1)
+Same 11 passes as run 5. not ok 7 again only on the request-path assertion, now with the decisive evidence: the persisted ledger entry
+for the replica read "drops=2, phase reseated" — the DROP PATH had requested the rebuild (two forwarded ops, refused by the replica
+whose session was still the old epoch, were retried and counted as drops within seconds of flush_all), so the follower-declared
+request was an idempotent no-op. Both paths lead to the same demote → reseat → reconstruction; the node was rebuilt in place and
+followed the new epoch, post-flush writes arrived. The test now accepts either path and records which fired; the follower-declared
+path on its own (no drop ever counted) stays pinned by flare_unit (requestRebuild + plan).

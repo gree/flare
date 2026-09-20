@@ -2329,7 +2329,8 @@
       "residual_risks": [
         "lsn_purged is not staged end to end (retention purge cannot be forced deterministically in the harness; the wal-purged suite covers the dump path); epoch change is staged by flush_all.",
         "A follower that declares needs_rebuild in the window between a completed reconstruction and its follower restart could be requested twice (bounded churn, not loss).",
-        "Until 325a2f8 the follower handler RETURNED on needs_rebuild, giving its thread back to the pool while cluster still referenced it; the later stop_wal_follower shut down a pooled thread, which exited without leaving the pool, and the reconstruction handler that was to rebuild the node was triggered on that dead thread and never ran (found by the SAF-10d bulk-operation scenario, runs 3-4). Fixed: terminal outcomes park the thread until the controller's shutdown. E2E confirmation pending (run 5)."
+        "Until 325a2f8 the follower handler RETURNED on needs_rebuild, giving its thread back to the pool while cluster still referenced it; the later stop_wal_follower shut down a pooled thread, which exited without leaving the pool, and the reconstruction handler that was to rebuild the node was triggered on that dead thread and never ran (found by the SAF-10d bulk-operation scenario, runs 3-4). Fixed: terminal outcomes park the thread until the controller's shutdown. E2E confirmation pending (run 5).",
+        "After a source-epoch change the master's forwarded ops are refused by the stale-session replica, retried and counted as drops, so in the E2E the DROP path requested the rebuild before the follower-declared request could (runs 5-6: entry with drops=2). The two paths race and converge on the same rebuild; the follower-declared path alone (no drop counted, e.g. a purge with no write traffic) is unit-pinned, not staged end to end."
       ],
       "code": [
         {
@@ -2400,9 +2401,9 @@
         "SAF-10"
       ],
       "review": {
-        "commit": "eb2ba176070650d9889ecd4770aaabac5104a258",
+        "commit": "27eef78e5f75655a256c1c3f157361f26ff28f88",
         "date": "2026-09-20",
-        "note": "handler_wal_follower.cc / cluster.cc: the follower thread parks on needs_rebuild (and on the backend-without-WAL error) instead of returning; stop_wal_follower refuses to send a shutdown request to a thread not running a handler. Found because the E2E rebuild after flush_all never started (reconstruction_started unchanged, follower idle 'stopped'). Unit tests (follow/apply, 24) pass on the fix; the E2E rerun is pending. PARTIAL / UNVERIFIED."
+        "note": "E2E runs 5 and 6 (both fixes in): flush_all → epoch advance → needs_rebuild (epoch_mismatch) → ledger request → in-place reconstruction (reconstruction_started 1→2, pod UID unchanged) → following the new epoch, post-flush writes arrive. The request was made by the drop path (refused forwards) in both runs; test changed to accept either path and record which. PARTIAL / UNVERIFIED; run records to be attached from the next full run."
       }
     },
     {

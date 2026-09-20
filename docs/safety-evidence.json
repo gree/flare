@@ -1233,7 +1233,8 @@
         "The successor/lease revalidation and the delete are not one atomic step; the pod-identity hole is closed by the API precondition, a successor demoted in the instant after the gate remains a window.",
         "The direct-API delete is bounded (connect 3s, total 10s, outer wall 20s + 5s kill grace, ~25s worst case). A timeout or transport failure is an UNKNOWN deletion outcome — the API may have accepted the delete and only the reply was lost — and is reported as such; the caller keeps the streak and re-observes the pod on the next probe rather than assuming 'not deleted' or retrying blindly.",
         "A live empty master with a data-bearing successor and an interposed change is not staged end to end; the gate is unit-pinned, the precondition and the deadline are staged by E2E against a replaced pod and a black-hole server.",
-        "SAF-10c: the survivor's currency is judged from one fresh reading at revalidation; a follower that disconnects in the instant after the gate remains a window (same shape as the successor-demotion window). Unit-pinned only."
+        "SAF-10c: the survivor's currency is judged from one fresh reading at revalidation; a follower that disconnects in the instant after the gate remains a window (same shape as the successor-demotion window). Unit-pinned only.",
+        "Until d9d1285 storage_rocksdb::open seeded curr_items from rocksdb.estimate-num-keys, which does not count keys recovered from the WAL: after a crash the count under-reported by the unflushed tail (SAF-10d run 9: 52 keys present, not counted), so a count-based comparison could read intact data as loss — or, on a small DB, an intact master as empty. Fixed by an exact scan at open; unit-pinned (test_reopen_counts_wal_only_keys_exactly) and observed in E2E run 10."
       ],
       "code": [
         {
@@ -1461,9 +1462,9 @@
         "SAF-08"
       ],
       "review": {
-        "commit": "2379cff5cc28ca160e2076ad2d9c690b0c90d417",
+        "commit": "d9d12852a24d8d0e998e1c9faf55202d8e0138c4",
         "date": "2026-09-20",
-        "note": "Runs on this revision: regression suites replica-repair/operator-restart/failover/read-balance/prepare-evidence 30/30 pass; continuous-replication 12/12 pass (second consecutive full pass, run 8). Previous note: deleteGate gained survivorFollowOk (SAF-10c), judged in Main from the same fresh master/successor stats the revalidation already reads; not in the mode = unconstrained, unknown = refuse. Existing CHECK-05 paths unchanged for non-WAL clusters. PARTIAL / UNVERIFIED unchanged."
+        "note": "Observation-integrity finding from the SAF-10d crash scenario: the item count after a reopen was an estimate blind to WAL-only keys. Fixed in flared (exact scan at open, boot-time O(n), logged). No change to this control's decision logic. PARTIAL / UNVERIFIED unchanged."
       }
     },
     {
@@ -1960,7 +1961,8 @@
         "curr_items is coarse and the current probe selects one Active slave per master."
       ],
       "residual_risks": [
-        "Equal counts cannot establish key/value equality; content anti-entropy is absent."
+        "Equal counts cannot establish key/value equality; content anti-entropy is absent.",
+        "Until d9d1285 storage_rocksdb::open seeded curr_items from rocksdb.estimate-num-keys, which does not count keys recovered from the WAL: after a crash the count under-reported by the unflushed tail (SAF-10d run 9: 52 keys present, not counted), so a count-based comparison could read intact data as loss — or, on a small DB, an intact master as empty. Fixed by an exact scan at open; unit-pinned (test_reopen_counts_wal_only_keys_exactly) and observed in E2E run 10."
       ],
       "code": [
         {
@@ -1995,9 +1997,9 @@
         "SAF-10"
       ],
       "review": {
-        "commit": "33205465691b0bf59dff1ad348ed810a5d20f24f",
-        "date": "2026-09-13",
-        "note": "Main.lean/Bridge.lean changed only in the empty-master delete's failure wording (unknown outcome); this control's mechanism is untouched. Refreshed for the referenced-file check."
+        "commit": "d9d12852a24d8d0e998e1c9faf55202d8e0138c4",
+        "date": "2026-09-20",
+        "note": "Observation-integrity finding from the SAF-10d crash scenario: the item count after a reopen was an estimate blind to WAL-only keys. Fixed in flared (exact scan at open, boot-time O(n), logged). No change to this control's decision logic. PARTIAL / UNVERIFIED unchanged."
       }
     },
     {
@@ -2316,7 +2318,7 @@
         "RocksDB WriteBatch atomicity holds across the data and metadata column families."
       ],
       "residual_risks": [
-        "Crash at an apply boundary is exercised at the unit level (batch atomicity and re-decision), not by killing a process mid-apply (T4 E2E pending)."
+        "The E2E crash lands at whatever boundary the kill hits (~300 ms after the heal); it is not steered to a specific mid-batch point. Recovery is observed through the operator's rejoin (Slave/Prepare, incremental WAL reconstruction from the cursor, activation, follower resume), so the design's 'plain restart resumes with no rebuild' (T16) holds for the data path (no truncate, no dump) but a reconstruction record is produced."
       ],
       "code": [
         {
@@ -2340,6 +2342,17 @@
               "symbol": "test_apply_rule_refuses_gap_in_the_stream"
             }
           ]
+        },
+        {
+          "id": "CHECK-17",
+          "kind": "scenario",
+          "procedure": "E2E continuous-replication test 11 (T4): with a backlog of created/updated/deleted keys pending after a heal, flared on the replica is killed -9 from the kind node; the container restarts on its PVC (pod UID unchanged, restartCount +1); the node comes back following at the master's position with equal item counts, updated values, deleted keys absent, and no full dump (rocksdb_wal_fallback_to_dump = 0 in the new process). The restart goes through the operator's rejoin and an incremental WAL reconstruction from the cursor, not a bare in-process resume.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/ContinuousReplication.lean",
+              "symbol": "suite"
+            }
+          ]
         }
       ],
       "runs": [
@@ -2350,15 +2363,23 @@
           "command": "cd /tmp/flare-b17/test && cutter --keep-opening-modules -v v -s <repo>/test -n \"/(apply_rule|follow|generation|order_label|restore|identified_change|truncate_advances|swap_in_snapshot|hard_reset|repl_tag|replication_identity|epoch|client_follow|generations_unavailable|sync_wal)/\" lib (+ -n \"/replication_tag/\")",
           "result": "pass",
           "report": "docs/reports/2026-09-20-saf10-rocksdb-unit-head.txt"
+        },
+        {
+          "check": "CHECK-17",
+          "commit": "d9d12852a24d8d0e998e1c9faf55202d8e0138c4",
+          "date": "2026-09-20",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter continuous-replication (run 10, local kind)",
+          "result": "pass",
+          "report": "docs/reports/2026-09-20-saf10d-minimal-e2e-continuous-replication.txt"
         }
       ],
       "tasks": [
         "SAF-10"
       ],
       "review": {
-        "commit": "2379cff5cc28ca160e2076ad2d9c690b0c90d417",
+        "commit": "d9d12852a24d8d0e998e1c9faf55202d8e0138c4",
         "date": "2026-09-20",
-        "note": "Runs on this revision: regression suites replica-repair/operator-restart/failover/read-balance/prepare-evidence 30/30 pass; continuous-replication 12/12 pass (second consecutive full pass, run 8). Previous note: New control from the SAF-10 design (§6); implementation on branch safety/saf-10-wal-replication. Unit evidence to be attached from the RocksDB cutter run on this revision and the flare_unit run; E2E from the continuous-replication suite. Author-run only; nothing verified."
+        "note": "T4 staged end to end (run 9 failed only on the item COUNT, which exposed the estimate-seeded curr_items after a reopen — fixed in this revision; run 10 passes 13/13). The applied position was consistent with the data in both runs. PARTIAL→IMPLEMENTED unchanged as 'implemented'; UNVERIFIED."
       }
     },
     {
@@ -2558,6 +2579,14 @@
           "command": "cd /tmp/flare-b17/test && cutter --keep-opening-modules -v v -s <repo>/test -n \"/(apply_rule|follow|generation|order_label|restore|identified_change|truncate_advances|swap_in_snapshot|hard_reset|repl_tag|replication_identity|epoch|client_follow|generations_unavailable|sync_wal)/\" lib (+ -n \"/replication_tag/\")",
           "result": "pass",
           "report": "docs/reports/2026-09-20-saf10-rocksdb-unit-head.txt"
+        },
+        {
+          "check": "CHECK-19-unit",
+          "commit": "d9d12852a24d8d0e998e1c9faf55202d8e0138c4",
+          "date": "2026-09-20",
+          "command": "cutter (reopen_counts|follow|apply_rule|generation|identified_change|snapshot|restore) on /tmp/flare-b17",
+          "result": "pass",
+          "report": "docs/reports/2026-09-20-saf10-rocksdb-unit-count-seed.txt"
         }
       ],
       "tasks": [

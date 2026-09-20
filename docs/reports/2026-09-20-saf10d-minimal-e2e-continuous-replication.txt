@@ -159,3 +159,15 @@ tail is recovered from the WAL but not counted. The newcomer's exact scan at its
 (boot-time O(n), duration logged); cutter test_reopen_counts_wal_only_keys_exactly pins it. This is a pre-existing observation
 defect that the SAF-10d crash scenario exposed; it affects every count-based comparison (replica divergence gauge, empty-master
 guard, the acceptance suite's own assertions). Rerun pending (run 10).
+
+=== run 10 (operator 2379cff, flared d9d1285 — exact count seed at open; suite d9d1285; raw: docs/reports/2026-09-20-saf10d-run10-raw.log) === RESULT: PASS (Tests: 13, Failures: 0)
+command: cd flare_operator && .lake/build/bin/flare_e2e --filter continuous-replication
+ok 11 replica crash (T4): 300 created / 5 updated / 5 deleted under the cut (master 165→475); healed; flared killed -9 from the node
+     300 ms later; container restarted once (restartCount 0→1, pod UID unchanged); new process: reconstruction_completed=1 (the
+     operator's rejoin re-seated the node and the reconstruction ran INCREMENTALLY from the cursor), wal_fallback_to_dump=0 (no full
+     dump), following, applied 475 = master latest; items 343 = 343; updated keys carry the new value, deleted keys are absent,
+     the first/last/middle created keys present; ledger closed the drops by position.
+ok 12: promoted follower's epoch advanced; the ex-master (PVC, old history) rebuilt and followed; items 343 = 343.
+ok 13: newcomer copied under load (20 batches × 20); items 753 = 753 (exact counts on both sides now).
+Unit: docs/reports/2026-09-20-saf10-rocksdb-unit-count-seed.txt (31 tests, 515 assertions, pass, incl. test_reopen_counts_wal_only_keys_exactly).
+Revision under test: flared/suite d9d12852a24d8d0e998e1c9faf55202d8e0138c4, operator 2379cff5cc28ca160e2076ad2d9c690b0c90d417.

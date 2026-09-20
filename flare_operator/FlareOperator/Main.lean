@@ -1464,27 +1464,13 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
         | some (sKey, sNode) =>
           let mOut ← Bridge.queryPodStats (extractPodName mNode.serverName) ns "stats"
           let sOut ← Bridge.queryPodStats (extractPodName sNode.serverName) ns "stats"
-          match mOut, sOut with
-          | .ok mo, .ok so =>
-            let items := fun (out : String) =>
-              ((out.splitOn "
-" |>.filterMap fun line =>
-                match (line.trim.splitOn " ").filter (· != "") with
-                | ["STAT", "curr_items", v] => v.trim.toNat?
-                | _ => none).head?).getD 0
-            -- Both counts are already in hand: record the divergence while
-            -- we are here (no extra probe). Coarse by construction — equal
-            -- counts do not prove equal content — but a persistent gap is
-            -- the only cheap signal that live proxy replication has been
-            -- losing writes (nothing else compares the copies).
-            let mi := items mo
-            let si := items so
-            if mi > 0 then
-              let gap := (if mi > si then mi - si else si - mi).toFloat / mi.toFloat
-              if gap > maxKeyGap then
-                maxKeyGap := gap
-              if gap > 0.001 then
-                IO.eprintln s!"[flare-operator] replica divergence: master {mKey} has {mi} keys, slave has {si} ({(gap * 100.0).toString.take 5}% apart) — live replication has no per-write ack, so a gap here means writes were dropped or expired only on one side"
+          -- DROPPED REPLICA WRITES → the repair ledger (SC-03), from the
+          -- MASTER's stats alone. This must not depend on the replica's
+          -- stats being readable: an unreadable replica hid the master's
+          -- drop counter for the whole partition (found by the SAF-10d
+          -- stats-fetch-failure scenario), so a drop seen while the replica
+          -- could not be probed was never even recorded.
+          let observeDrops : String → IO Unit := fun mo => do
             -- DROPPED REPLICA WRITES → the repair ledger (SC-03). The master
             -- reports, per destination, how many replica writes it gave up
             -- forwarding; live replication has no per-write acknowledgement,
@@ -1552,6 +1538,28 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
                 IO.eprintln s!"[flare-operator] replica repair ledger initialized from {mKey}: {drops.length} destination counter(s) recorded as baseline, none attributed"
               ledgerRef.set led2
               persistLedger crName ns led0 led2 metrics ledgerDirtyRef
+          match mOut, sOut with
+          | .ok mo, .ok so =>
+            observeDrops mo
+            let items := fun (out : String) =>
+              ((out.splitOn "
+" |>.filterMap fun line =>
+                match (line.trim.splitOn " ").filter (· != "") with
+                | ["STAT", "curr_items", v] => v.trim.toNat?
+                | _ => none).head?).getD 0
+            -- Both counts are already in hand: record the divergence while
+            -- we are here (no extra probe). Coarse by construction — equal
+            -- counts do not prove equal content — but a persistent gap is
+            -- the only cheap signal that live proxy replication has been
+            -- losing writes (nothing else compares the copies).
+            let mi := items mo
+            let si := items so
+            if mi > 0 then
+              let gap := (if mi > si then mi - si else si - mi).toFloat / mi.toFloat
+              if gap > maxKeyGap then
+                maxKeyGap := gap
+              if gap > 0.001 then
+                IO.eprintln s!"[flare-operator] replica divergence: master {mKey} has {mi} keys, slave has {si} ({(gap * 100.0).toString.take 5}% apart) — live replication has no per-write ack, so a gap here means writes were dropped or expired only on one side"
             -- EMPTY-MASTER decision, typed (SC-05 / SAF-04). `items` returns
             -- 0 for a missing curr_items line as readily as for a real zero;
             -- a truncated stats reply must NOT read as "empty, delete it".
@@ -1629,6 +1637,10 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
               if StatsObservation.parseCurrItems mo == StatsObservation.Items.unknown then
                 IO.eprintln s!"[flare-operator] empty-master check: master {mKey} item count unreadable this pass — {reason}; streak reset"
               newStreaks := newStreaks.filter (·.1 != mKey)
+          | .ok mo, .error e =>
+            IO.eprintln s!"[flare-operator] replica {sKey} stats unreadable this pass ({e}); the master's drop counter is still observed"
+            observeDrops mo
+            newStreaks := newStreaks.filter (·.1 != mKey)
           | _, _ => pure ()
         | none => pure ()
     emptyMasterStreakRef.set newStreaks

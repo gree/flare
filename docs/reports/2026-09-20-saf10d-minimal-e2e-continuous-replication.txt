@@ -57,3 +57,21 @@ eligibility (SAF-10c, not implemented yet — replica read balance was forced to
 scenario beyond "forwarded landed first, WAL re-delivery skipped". Those remain for the full acceptance suite (design §7 T1–T17).
 Evidence status: SAF-10b/10c code ran once on a real (single-node kind, arm64) cluster and behaved as specified; nothing promoted to
 `verified` — author-run, single revision, no reviewer assessment yet.
+
+=== run 3 (operator image from c96246c — SAF-10c eligibility + follower-declared rebuild; flared image from dfe6e5e; suite with tests 7-9 added; raw: docs/reports/2026-09-20-saf10d-run3-raw.log) ===
+command: cd flare_operator && .lake/build/bin/flare_e2e --filter continuous-replication      RESULT: FAIL (Tests: 9, Failures: 4)
+ok 1-5 as in run 2 (following 30 forwarded; cut 10/5/5 with 2 drops; heal resumed 34→54, wal_applied=17; ledger held then CLOSED).
+not ok 6 operator stats fetch failure — HARNESS: revoking pods/exec globally also blinds the operator to the MASTER's drop counter
+     (both stats reads go through exec), so no request was ever made ("held-as-unknown=false; ledger holds: <empty>"). Run 2 had
+     passed this test only because RBAC propagation lagged long enough for the master read to succeed. Fixed for run 4: the rule
+     re-grants pods/exec restricted by resourceNames to the master pod only. (Run 4 still failed this test — see run 4.)
+not ok 7 bulk operation: flush_all advanced the master's epoch (2:… → 3:…), the follower declared needs_rebuild (epoch_mismatch)
+     within 15 s — CORRECT — but no rebuild ran: reconstruction_started stayed 1, the node stayed Slave/Prepare, follower idle
+     ("stopped"). The "requested by the follower" line was not logged because a repair entry ALREADY existed from the drop the
+     operator observed once exec was restored after test 6 (drop path took the entry; the follower-declared request is
+     idempotent per node). ROOT CAUSE found from run 4's flared log (see run 4): a flared thread-lifecycle bug in the follower
+     handler — fixed in 325a2f8.
+not ok 8 read eligibility — consequence of 7 (follower idle → unfit → withheld; correct behaviour for that state).
+not ok 9 failover: the follower WAS promoted (35 s) although unfit/idle (masterless refill's data-bearing last resort — by design),
+     but the test read the source epoch immediately and found it unchanged; flared applies the promotion on its next accepted
+     map. Test fixed to wait for the epoch to advance; the FSM now also logs a last-resort promotion of an unfit follower.

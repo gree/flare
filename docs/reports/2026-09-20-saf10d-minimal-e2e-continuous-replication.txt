@@ -75,3 +75,30 @@ not ok 8 read eligibility — consequence of 7 (follower idle → unfit → with
 not ok 9 failover: the follower WAS promoted (35 s) although unfit/idle (masterless refill's data-bearing last resort — by design),
      but the test read the source epoch immediately and found it unchanged; flared applies the promotion on its next accepted
      map. Test fixed to wait for the epoch to advance; the FSM now also logs a last-resort promotion of an unfit follower.
+
+=== run 4 (operator 05ac279, flared dfe6e5e; 12 tests; raw: docs/reports/2026-09-20-saf10d-run4-raw.log) === RESULT: FAIL (Tests: 12, Failures: 7)
+ok 1-5. not ok 6: even with exec allowed on the MASTER only (resourceNames, verified to work in a scratch namespace), no request was
+made → operator defect: the drop observation required the REPLICA's stats read too (fixed eb2ba17). not ok 7: the replica's own log
+showed slave→proxy (follower stopped), active→prepare, proxy→slave and then NOTHING — no reconstruction handler ran → flared defect:
+the follower thread had returned to the pool on needs_rebuild and the later shutdown killed it while pooled; the reconstruction was
+triggered on a dead thread (fixed 325a2f8). Tests 8-12 failed as consequences of 7 (replica idle/unfit).
+
+=== run 5 (operator eb2ba17, flared 325a2f8 — both fixes; 12 tests; raw: docs/reports/2026-09-20-saf10d-run5-raw.log) === RESULT: FAIL (Tests: 12, Failures: 1)
+ok 1-5 as before.
+ok 6 stats fetch failure, replica-only: HELD "follower state unknown (stats unreadable)"; not demoted; CLOSED after the probe returned;
+     reconstruction_started 1→1; pod uid unchanged.
+not ok 7 bulk operation: flush_all advanced the epoch (2:… → 3:…); needs_rebuild (epoch_mismatch) within seconds; the node WAS
+     rebuilt in place (reconstruction_started 1→2, pod uid unchanged) and came back FOLLOWING the new epoch; post-flush writes
+     arrived (10 = 10). The single failing assertion: the "requested by the follower" log line was not found in a 1500-line tail
+     within 120 s, so whether the request came from the follower's declaration or from a residual drop could not be shown
+     (a repair entry from test 6 had still been pending 20 s into the test). Test changed to take the evidence from the persisted
+     ledger entry (drops = 0 ⇒ follower-declared) with a wider log tail; rerun pending.
+ok 8 read eligibility: slave=50 → replica balance 50 while following; 0 under the cut (eligibility logged); 50 again after healing.
+ok 9 repeated cuts: 3 cycles, each converged from its position (111→111, 121→133, 133→145); sampled rewritten/deleted keys correct on
+     the replica; reconstruction_started 2→2; pod uid unchanged; wal_applied=28 forward_applied=66; ledger empty.
+ok 10 operator restart during a cut: the owned hold survived the restart (status.replicaRepairs: owned by continuous replication);
+     converged after the heal; closed; no rebuild; pod uid unchanged.
+ok 11 failover: master pod deleted → follower promoted (NOT LOSS-FREE line absent: it was ranked/proven on the tick the master
+     vanished) → epoch advanced 3:… → 4:… → the ex-master returned, rebuilt and FOLLOWED the new epoch; items 38 = 38.
+ok 12 initial copy under load: third replica joined by snapshot while 27 batches × 20 keys were written; following epoch 4:…;
+     items 588 = 588; the last key written during the copy present.

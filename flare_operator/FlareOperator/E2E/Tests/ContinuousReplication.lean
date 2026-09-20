@@ -454,9 +454,24 @@ def suite : TestSuite := {
           let declared ← waitForCondition "follower declares needs_rebuild" 90 do
             return (← statStr sIp "repl_follow_state") == some "needs_rebuild"
           IO.eprintln s!"# follower: state={← statStr sIp "repl_follow_state"} reason={← statStr sIp "repl_follow_last_reason"}"
+          -- Evidence that the request came from the FOLLOWER's declaration,
+          -- not from a drop counter: the persisted ledger entry for this node
+          -- carries drops = 0 (a drop-path request carries the count), or
+          -- the operator's own line. The entry is short-lived (requested →
+          -- demoted → reseated → completed), so poll for either.
+          let seenEntry ← IO.mkRef ""
           let requested ← waitForCondition "operator requests the rebuild from the follower's declaration" 120 do
-            let log ← opLog 1500
-            return containsSubstr log "REPLICA REPAIR requested by the follower" && containsSubstr log sPod
+            let log ← opLog 4000
+            let byLog := containsSubstr log "REPLICA REPAIR requested by the follower" && containsSubstr log sPod
+            let byEntry ← do
+              match ← kubectlGetJsonpath "flarecluster" cfg.name cfg.«namespace» "{range .status.replicaRepairs.entries[*]}{.dest}={.drops}/{.phase} {end}" with
+              | .ok out =>
+                let mine := (out.trim.splitOn " ").filter (fun e => e.startsWith sPod)
+                pure (mine.any (fun e => (e.splitOn "=").getLast? |>.map (·.startsWith "0/") |>.getD false), String.intercalate " " mine)
+              | .error _ => pure (false, "")
+            if byEntry.2 != "" then seenEntry.set byEntry.2
+            return byLog || byEntry.1
+          IO.eprintln s!"# request evidence: ledger entry seen={← seenEntry.get}"
           if !declared && !requested then return .fail "the follower never declared needs_rebuild and no request was made"
           let rebuilt ← waitForCondition "follower reconstructed and follows the new epoch" 420 do
             let recon := (← statNat sIp "reconstruction_started").getD 0

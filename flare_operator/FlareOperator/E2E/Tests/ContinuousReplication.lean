@@ -460,25 +460,34 @@ def suite : TestSuite := {
           -- the operator's own line. The entry is short-lived (requested →
           -- demoted → reseated → completed), so poll for either.
           let seenEntry ← IO.mkRef ""
-          let requested ← waitForCondition "operator requests the rebuild from the follower's declaration" 120 do
+          -- Two paths can request this rebuild and they race: the follower's
+          -- own declaration (entry with drops = 0, or the operator's line) and
+          -- the drop path — after the epoch change the master's forwarded
+          -- ops are REFUSED by the stale-session replica, retried and counted
+          -- as drops (observed: 2 within seconds). Either is a ledger request
+          -- that takes the node through demote → reseat → reconstruction;
+          -- the follower-declared path alone is pinned by flare_unit
+          -- (requestRebuild). Record which one was seen.
+          let byFollower ← IO.mkRef false
+          let requested ← waitForCondition "operator requests the rebuild (ledger entry for the follower)" 120 do
             let log ← opLog 4000
             let byLog := containsSubstr log "REPLICA REPAIR requested by the follower" && containsSubstr log sPod
-            let byEntry ← do
-              match ← kubectlGetJsonpath "flarecluster" cfg.name cfg.«namespace» "{range .status.replicaRepairs.entries[*]}{.dest}={.drops}/{.phase} {end}" with
-              | .ok out =>
-                let mine := (out.trim.splitOn " ").filter (fun e => e.startsWith sPod)
-                pure (mine.any (fun e => (e.splitOn "=").getLast? |>.map (·.startsWith "0/") |>.getD false), String.intercalate " " mine)
-              | .error _ => pure (false, "")
-            if byEntry.2 != "" then seenEntry.set byEntry.2
-            return byLog || byEntry.1
-          IO.eprintln s!"# request evidence: ledger entry seen={← seenEntry.get}"
+            match ← kubectlGetJsonpath "flarecluster" cfg.name cfg.«namespace» "{range .status.replicaRepairs.entries[*]}{.dest}={.drops}/{.phase} {end}" with
+            | .ok out =>
+              let mine := (out.trim.splitOn " ").filter (fun e => e.startsWith sPod)
+              if !mine.isEmpty then seenEntry.set (String.intercalate " " mine)
+              let zeroDrops := mine.any (fun e => (e.splitOn "=").getLast? |>.map (·.startsWith "0/") |>.getD false)
+              if byLog || zeroDrops then byFollower.set true
+              return byLog || !mine.isEmpty
+            | .error _ => return byLog
+          IO.eprintln s!"# request evidence: ledger entry seen={← seenEntry.get}; follower-declared path={← byFollower.get} (false = the drop path won the race); master drops now={← droppedByMaster mIp}"
           if !declared && !requested then return .fail "the follower never declared needs_rebuild and no request was made"
           let rebuilt ← waitForCondition "follower reconstructed and follows the new epoch" 420 do
             let recon := (← statNat sIp "reconstruction_started").getD 0
             return recon > recon0 && (← statStr sIp "repl_follow_state") == some "following"
               && (← statStr sIp "repl_follow_source_epoch") == some epoch1
           let recon1 := (← statNat sIp "reconstruction_started").getD 0
-          IO.eprintln s!"# after the rebuild: reconstruction_started {recon0}→{recon1}; state={← statStr sIp "repl_follow_state"} epoch={← statStr sIp "repl_follow_source_epoch"} (master {epoch1}); requested-by-follower logged={requested}"
+          IO.eprintln s!"# after the rebuild: reconstruction_started {recon0}→{recon1}; state={← statStr sIp "repl_follow_state"} epoch={← statStr sIp "repl_follow_source_epoch"} (master {epoch1}); ledger request observed={requested}"
           if !rebuilt then
             -- Diagnostics: the replica's own view of the role shifts and any
             -- reconstruction attempt, and the operator's repair lines.
@@ -489,7 +498,7 @@ def suite : TestSuite := {
             | .ok o => IO.eprintln s!"# --- operator log (filtered) ---\n{o}"
             | .error e => IO.eprintln s!"# (could not read the operator's log: {e})"
             return .fail s!"the follower did not come back following the new epoch (state {← statStr sIp "repl_follow_state"}, epoch {← statStr sIp "repl_follow_source_epoch"}, reason {← statStr sIp "repl_follow_last_reason"}); nodes: {(← nodeView).map (fun e => s!"{(e.fqdn.splitOn ".").head?.getD e.fqdn}:r{e.role}/s{e.state}/p{e.partition}/b{e.balance}")}"
-          if !requested then return .fail "the rebuild happened but not through the follower-declared ledger request"
+          if !requested then return .fail "the rebuild happened without a repair-ledger request being observed"
           let stored ← writeKeys cfg.debugPod cfg.«namespace» mIp cfg.flarePort "post_flush" 10
           if stored != 10 then return .fail s!"stored only {stored}/10 after the flush"
           let caught ← waitForCondition "new writes reach the rebuilt follower" 90 do

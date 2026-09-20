@@ -565,33 +565,41 @@ int storage_rocksdb::open() {
 		return -1;
 	}
 
-	// Seed the O(1) curr_items counter (see storage_rocksdb.h). Exact 0 on a
-	// fresh DB (nothing persisted yet — the reserved master-id key is written
-	// AFTER this point and reserved keys are never counted); approximate on
-	// reopen of an existing directory.
+	// Seed the O(1) curr_items counter (see storage_rocksdb.h) with an EXACT
+	// scan of the data family. This used to read rocksdb.estimate-num-keys,
+	// which does not see keys that live only in the WAL: after a crash (or
+	// any reopen with an unflushed tail) the recovered keys were missing from
+	// the count, so curr_items under-reported by exactly the unflushed
+	// writes (observed by the SAF-10d crash test: 52 keys present, not
+	// counted, and every count-based comparison — replica divergence,
+	// empty-master guard, the acceptance suite — read it as data loss).
+	// The scan is O(n) at boot only (fill_cache=false), the same routine a
+	// snapshot swap already runs on a full copy; its duration is logged.
 	{
-		std::string est;
-		uint64_t seed_count = 0;
-		if (this->_db->GetProperty("rocksdb.estimate-num-keys", &est)) {
-			try {
-				seed_count = boost::lexical_cast<uint64_t>(est);
-			} catch (boost::bad_lexical_cast&) {
-				seed_count = 0;
+		struct timeval t0, t1;
+		gettimeofday(&t0, NULL);
+		uint64_t exact = 0;
+		rocksdb::ReadOptions ro = this->_read_options;
+		ro.fill_cache = false;
+		rocksdb::Iterator* it = this->_db->NewIterator(ro);
+		for (it->SeekToFirst(); it->Valid(); it->Next()) {
+			if (!is_reserved_key(it->key().ToString())) {
+				exact++;
 			}
 		}
-		// The estimate includes our reserved replication-metadata keys on a
-		// reopened DB — probe and exclude the ones actually present so a
-		// small dataset is not systematically over-counted.
-		std::string tmp;
-		if (seed_count > 0 && this->_db->Get(this->_read_options, kReplMasterIdKey, &tmp).ok()) {
-			seed_count--;
-		}
-		if (seed_count > 0 && this->_db->Get(this->_read_options, kReplLastLsnKey, &tmp).ok()) {
-			seed_count--;
+		const bool scan_ok = it->status().ok();
+		delete it;
+		gettimeofday(&t1, NULL);
+		const long ms = (t1.tv_sec - t0.tv_sec) * 1000L + (t1.tv_usec - t0.tv_usec) / 1000L;
+		if (!scan_ok) {
+			log_warning("curr_items seed: the open-time key scan failed (%s) -> seeding 0; the count is rebuilt by writes only", it == NULL ? "" : "iterator error");
+			exact = 0;
+		} else {
+			log_notice("curr_items seeded by an exact scan: %llu live key(s) in %ld ms", (unsigned long long)exact, ms);
 		}
 		this->_curr_items.sub(this->_curr_items.fetch());
-		if (seed_count > 0) {
-			this->_curr_items.add(seed_count);
+		if (exact > 0) {
+			this->_curr_items.add(exact);
 		}
 	}
 

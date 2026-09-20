@@ -215,6 +215,28 @@ void test_wal_get_latest_sequence_number_monotonic() {
 	drop_rocksdb(m, wal_master_dir);
 }
 
+/*
+ *	Reopen after writes that were never flushed to an SST: the counter must
+ *	be exact. The old seed read rocksdb.estimate-num-keys, which does not see
+ *	WAL-only keys — the SAF-10d crash test found curr_items short by exactly
+ *	the unflushed tail after a kill -9.
+ */
+void test_reopen_counts_wal_only_keys_exactly() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	for (int i = 0; i < 57; i++) {
+		std::ostringstream k; k << "k" << i;
+		cut_assert_equal_int(0, storage_set_string(s, k.str(), "v"));
+	}
+	cut_assert_equal_int(57, static_cast<int>(s->count()));
+	drop_rocksdb_noremove(s);
+
+	// Nothing was flushed: the 57 keys exist only in the WAL. The reopen
+	// recovers them and must COUNT them.
+	s = make_rocksdb(wal_master_dir);
+	cut_assert_equal_int(57, static_cast<int>(s->count()));
+	drop_rocksdb(s, wal_master_dir);
+}
+
 void test_wal_get_updates_since_empty() {
 	storage_rocksdb* m = make_rocksdb(wal_master_dir);
 

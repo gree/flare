@@ -713,7 +713,23 @@ def suite : TestSuite := {
           let dump := (← statNat sIp "rocksdb_wal_fallback_to_dump").getD 0
           let recon := (← statNat sIp "reconstruction_completed").getD 0
           IO.eprintln s!"# after the restart: state={← statStr sIp "repl_follow_state"} applied={← statNat sIp "repl_applied_lsn"} (master latest {← statNat mIp "rocksdb_latest_sequence_number"}); items master={← currItems mIp} replica={← currItems sIp}; new process: reconstruction_completed={recon} wal_fallback_to_dump={dump} wal_applied={← statNat sIp "repl_wal_applied"}"
-          if !caught then return .fail s!"the replica did not converge after the crash (state {← statStr sIp "repl_follow_state"}, reason {← statStr sIp "repl_follow_last_reason"}, items master={← currItems mIp} replica={← currItems sIp})"
+          if !caught then
+            -- Diagnostics: which sampled keys are missing on the replica (a
+            -- key is checked by a local HIT), the crashed container's last
+            -- lines and the restarted process's replication lines.
+            let mut missing : List String := []
+            for i in [0:300:10] do
+              match ← execInDebugPod cfg.debugPod cfg.«namespace» s!"printf 'get crash_{i}\\r\\n' | nc -w 3 {sIp} {cfg.flarePort}" with
+              | .ok o => if !(containsSubstr o "VALUE") then missing := missing ++ [s!"crash_{i}"]
+              | .error _ => missing := missing ++ [s!"crash_{i}?"]
+            IO.eprintln s!"# sampled keys missing on the replica (every 10th of 300): {missing}"
+            match ← hostCmd "sh" ["-c", s!"kubectl logs -n {cfg.«namespace»} {sPod} --previous 2>/dev/null | tail -12"] with
+            | .ok o => IO.eprintln s!"# --- crashed container, last lines ---\n{o}"
+            | .error e => IO.eprintln s!"# (no previous log: {e})"
+            match ← hostCmd "sh" ["-c", s!"kubectl logs -n {cfg.«namespace»} {sPod} | grep -iE 'curr_items seeded|recover|reconstruct|snapshot|truncate|follow|WAL' | grep -vE '_reconstruct_node_partition|reconstructing node map' | head -40"] with
+            | .ok o => IO.eprintln s!"# --- restarted replica (filtered) ---\n{o}"
+            | .error e => IO.eprintln s!"# (could not read the replica's log: {e})"
+            return .fail s!"the replica did not converge after the crash (state {← statStr sIp "repl_follow_state"}, reason {← statStr sIp "repl_follow_last_reason"}, items master={← currItems mIp} replica={← currItems sIp})"
           if dump > 0 then return .fail "the restart fell back to a FULL DUMP: the crashed copy was not resumed from its position"
           let mut bad : List String := []
           for (k, v) in [("crash_0", "crash_updated_0"), ("crash_4", "crash_updated_4"), ("crash_299", "crash_299"), ("crash_150", "crash_150")] do

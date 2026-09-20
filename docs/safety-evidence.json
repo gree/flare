@@ -885,6 +885,22 @@
           "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter continuous-replication (local kind flare-e2e; images flare-node-rocksdb:test and flare-operator:test built from this commit; the suite file itself landed in the following commit)",
           "result": "pass",
           "report": "docs/reports/2026-09-20-saf10d-minimal-e2e-continuous-replication.txt"
+        },
+        {
+          "check": "CHECK-03",
+          "commit": "2379cff5cc28ca160e2076ad2d9c690b0c90d417",
+          "date": "2026-09-20",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter replica-repair,operator-restart,failover,read-balance,prepare-evidence (local kind; images from this revision)",
+          "result": "pass",
+          "report": "docs/reports/2026-09-20-saf10d-minimal-e2e-continuous-replication.txt"
+        },
+        {
+          "check": "CHECK-03-follow",
+          "commit": "2379cff5cc28ca160e2076ad2d9c690b0c90d417",
+          "date": "2026-09-20",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter continuous-replication (run 8, local kind)",
+          "result": "pass",
+          "report": "docs/reports/2026-09-20-saf10d-minimal-e2e-continuous-replication.txt"
         }
       ],
       "tasks": [
@@ -895,7 +911,7 @@
       "review": {
         "commit": "2379cff5cc28ca160e2076ad2d9c690b0c90d417",
         "date": "2026-09-20",
-        "note": "ReplicaRepair.FollowReading gained a completeness flag (END seen); unreadable = !complete; flare_unit pins that a complete reply without keys is 'not in the mode' (ordinary repair, hands an owned entry over). Bridge.queryPodStats returns at END instead of waiting out a 3 s timeout, which had made 2-node reconciles take 18-31 s and starved the repair paths. Regression suites (replica-repair, operator-restart, failover, read-balance, prepare-evidence) rerunning on this revision. PARTIAL / UNVERIFIED unchanged."
+        "note": "Runs on this revision: regression suites replica-repair/operator-restart/failover/read-balance/prepare-evidence 30/30 pass; continuous-replication 12/12 pass (second consecutive full pass, run 8). Previous note: ReplicaRepair.FollowReading gained a completeness flag (END seen); unreadable = !complete; flare_unit pins that a complete reply without keys is 'not in the mode' (ordinary repair, hands an owned entry over). Bridge.queryPodStats returns at END instead of waiting out a 3 s timeout, which had made 2-node reconciles take 18-31 s and starved the repair paths. Regression suites (replica-repair, operator-restart, failover, read-balance, prepare-evidence) rerunning on this revision. PARTIAL / UNVERIFIED unchanged."
       }
     },
     {
@@ -1023,6 +1039,17 @@
               "symbol": "checkFollowShaping"
             }
           ]
+        },
+        {
+          "id": "CHECK-04-follow",
+          "kind": "scenario",
+          "procedure": "E2E continuous-replication tests 8 and 11: with spec.readBalance.slave=50 the following replica is served (balance 50), withheld to 0 while cut, restored after healing; the master pod is deleted, the follower is promoted, its source epoch advances, the returning ex-master rebuilds and follows the new epoch. Planned-promotion (drain) exclusion and the NOT LOSS-FREE line for an unproven promotion are not yet staged.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/ContinuousReplication.lean",
+              "symbol": "suite"
+            }
+          ]
         }
       ],
       "runs": [
@@ -1145,6 +1172,22 @@
           "command": "cd flare_operator && lake build flare_unit && .lake/build/bin/flare_unit",
           "result": "pass",
           "report": "docs/reports/2026-09-20-saf10c-eligibility-unit.txt"
+        },
+        {
+          "check": "CHECK-04",
+          "commit": "2379cff5cc28ca160e2076ad2d9c690b0c90d417",
+          "date": "2026-09-20",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter replica-repair,operator-restart,failover,read-balance,prepare-evidence (local kind)",
+          "result": "pass",
+          "report": "docs/reports/2026-09-20-saf10d-minimal-e2e-continuous-replication.txt"
+        },
+        {
+          "check": "CHECK-04-follow",
+          "commit": "2379cff5cc28ca160e2076ad2d9c690b0c90d417",
+          "date": "2026-09-20",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter continuous-replication (run 8, local kind)",
+          "result": "pass",
+          "report": "docs/reports/2026-09-20-saf10d-minimal-e2e-continuous-replication.txt"
         }
       ],
       "tasks": [
@@ -1153,9 +1196,9 @@
         "SAF-08"
       ],
       "review": {
-        "commit": "2c3bd87c741586583f78469e65f9c491c74c57b8",
+        "commit": "2379cff5cc28ca160e2076ad2d9c690b0c90d417",
         "date": "2026-09-20",
-        "note": "SAF-10c eligibility added around the promotion paths without changing them: candidate shaping is partitionMap-only (same device as standby de-prioritisation; shapePromotionCandidates_nodeMap proves the node map is untouched) so handleFailover/DrainWithPromotion and their CLE proofs are unchanged; promoteMasterlessPartition gained an exclusion list for its Active-slave tiers (its CLE proof re-elaborated unchanged). Drain (planned) excludes unproven and unfit; failover excludes only unfit and logs an unproven promotion as NOT LOSS-FREE. Read withholding is applied at commit after normalization. 129 flare_unit checks pass. No E2E yet for these paths; nodes not in the mode are unaffected (all lists empty). PARTIAL / UNVERIFIED unchanged."
+        "note": "Runs on this revision: regression suites replica-repair/operator-restart/failover/read-balance/prepare-evidence 30/30 pass; continuous-replication 12/12 pass (second consecutive full pass, run 8). Previous note: SAF-10c eligibility added around the promotion paths without changing them: candidate shaping is partitionMap-only (same device as standby de-prioritisation; shapePromotionCandidates_nodeMap proves the node map is untouched) so handleFailover/DrainWithPromotion and their CLE proofs are unchanged; promoteMasterlessPartition gained an exclusion list for its Active-slave tiers (its CLE proof re-elaborated unchanged). Drain (planned) excludes unproven and unfit; failover excludes only unfit and logs an unproven promotion as NOT LOSS-FREE. Read withholding is applied at commit after normalization. 129 flare_unit checks pass. No E2E yet for these paths; nodes not in the mode are unaffected (all lists empty). PARTIAL / UNVERIFIED unchanged."
       }
     },
     {
@@ -1402,6 +1445,14 @@
           "command": "cd flare_operator && lake build flare_unit && .lake/build/bin/flare_unit",
           "result": "pass",
           "report": "docs/reports/2026-09-20-saf10c-eligibility-unit.txt"
+        },
+        {
+          "check": "CHECK-05",
+          "commit": "2379cff5cc28ca160e2076ad2d9c690b0c90d417",
+          "date": "2026-09-20",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter replica-repair,operator-restart,failover,read-balance,prepare-evidence (local kind)",
+          "result": "pass",
+          "report": "docs/reports/2026-09-20-saf10d-minimal-e2e-continuous-replication.txt"
         }
       ],
       "tasks": [
@@ -1410,9 +1461,9 @@
         "SAF-08"
       ],
       "review": {
-        "commit": "2c3bd87c741586583f78469e65f9c491c74c57b8",
+        "commit": "2379cff5cc28ca160e2076ad2d9c690b0c90d417",
         "date": "2026-09-20",
-        "note": "deleteGate gained survivorFollowOk (SAF-10c), judged in Main from the same fresh master/successor stats the revalidation already reads; not in the mode = unconstrained, unknown = refuse. Existing CHECK-05 paths unchanged for non-WAL clusters. PARTIAL / UNVERIFIED unchanged."
+        "note": "Runs on this revision: regression suites replica-repair/operator-restart/failover/read-balance/prepare-evidence 30/30 pass; continuous-replication 12/12 pass (second consecutive full pass, run 8). Previous note: deleteGate gained survivorFollowOk (SAF-10c), judged in Main from the same fresh master/successor stats the revalidation already reads; not in the mode = unconstrained, unknown = refuse. Existing CHECK-05 paths unchanged for non-WAL clusters. PARTIAL / UNVERIFIED unchanged."
       }
     },
     {
@@ -2222,15 +2273,23 @@
           "command": "cd flare_operator && lake build flare_unit && .lake/build/bin/flare_unit",
           "result": "pass",
           "report": "docs/reports/2026-09-20-saf10c-flare-unit-head.txt"
+        },
+        {
+          "check": "CHECK-16",
+          "commit": "2379cff5cc28ca160e2076ad2d9c690b0c90d417",
+          "date": "2026-09-20",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter continuous-replication (run 8, local kind)",
+          "result": "pass",
+          "report": "docs/reports/2026-09-20-saf10d-minimal-e2e-continuous-replication.txt"
         }
       ],
       "tasks": [
         "SAF-10"
       ],
       "review": {
-        "commit": "eb2ba176070650d9889ecd4770aaabac5104a258",
+        "commit": "2379cff5cc28ca160e2076ad2d9c690b0c90d417",
         "date": "2026-09-20",
-        "note": "handler_wal_follower.cc / cluster.cc: the follower thread parks on needs_rebuild (and on the backend-without-WAL error) instead of returning; stop_wal_follower refuses to send a shutdown request to a thread not running a handler. Found because the E2E rebuild after flush_all never started (reconstruction_started unchanged, follower idle 'stopped'). Unit tests (follow/apply, 24) pass on the fix; the E2E rerun is pending. PARTIAL / UNVERIFIED."
+        "note": "Runs on this revision: regression suites replica-repair/operator-restart/failover/read-balance/prepare-evidence 30/30 pass; continuous-replication 12/12 pass (second consecutive full pass, run 8). Previous note: handler_wal_follower.cc / cluster.cc: the follower thread parks on needs_rebuild (and on the backend-without-WAL error) instead of returning; stop_wal_follower refuses to send a shutdown request to a thread not running a handler. Found because the E2E rebuild after flush_all never started (reconstruction_started unchanged, follower idle 'stopped'). Unit tests (follow/apply, 24) pass on the fix; the E2E rerun is pending. PARTIAL / UNVERIFIED."
       }
     },
     {
@@ -2297,9 +2356,9 @@
         "SAF-10"
       ],
       "review": {
-        "commit": "c96246cfc82e910bc2e12c2571177ad4bf90888a",
+        "commit": "2379cff5cc28ca160e2076ad2d9c690b0c90d417",
         "date": "2026-09-20",
-        "note": "New control from the SAF-10 design (§6); implementation on branch safety/saf-10-wal-replication. Unit evidence to be attached from the RocksDB cutter run on this revision and the flare_unit run; E2E from the continuous-replication suite. Author-run only; nothing verified."
+        "note": "Runs on this revision: regression suites replica-repair/operator-restart/failover/read-balance/prepare-evidence 30/30 pass; continuous-replication 12/12 pass (second consecutive full pass, run 8). Previous note: New control from the SAF-10 design (§6); implementation on branch safety/saf-10-wal-replication. Unit evidence to be attached from the RocksDB cutter run on this revision and the flare_unit run; E2E from the continuous-replication suite. Author-run only; nothing verified."
       }
     },
     {
@@ -2396,15 +2455,23 @@
           "command": "cd flare_operator && lake build flare_unit && .lake/build/bin/flare_unit",
           "result": "pass",
           "report": "docs/reports/2026-09-20-saf10c-flare-unit-head.txt"
+        },
+        {
+          "check": "CHECK-18",
+          "commit": "2379cff5cc28ca160e2076ad2d9c690b0c90d417",
+          "date": "2026-09-20",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter continuous-replication (run 8, local kind)",
+          "result": "pass",
+          "report": "docs/reports/2026-09-20-saf10d-minimal-e2e-continuous-replication.txt"
         }
       ],
       "tasks": [
         "SAF-10"
       ],
       "review": {
-        "commit": "27eef78e5f75655a256c1c3f157361f26ff28f88",
+        "commit": "2379cff5cc28ca160e2076ad2d9c690b0c90d417",
         "date": "2026-09-20",
-        "note": "E2E runs 5 and 6 (both fixes in): flush_all → epoch advance → needs_rebuild (epoch_mismatch) → ledger request → in-place reconstruction (reconstruction_started 1→2, pod UID unchanged) → following the new epoch, post-flush writes arrive. The request was made by the drop path (refused forwards) in both runs; test changed to accept either path and record which. PARTIAL / UNVERIFIED; run records to be attached from the next full run."
+        "note": "Runs on this revision: regression suites replica-repair/operator-restart/failover/read-balance/prepare-evidence 30/30 pass; continuous-replication 12/12 pass (second consecutive full pass, run 8). Previous note: E2E runs 5 and 6 (both fixes in): flush_all → epoch advance → needs_rebuild (epoch_mismatch) → ledger request → in-place reconstruction (reconstruction_started 1→2, pod UID unchanged) → following the new epoch, post-flush writes arrive. The request was made by the drop path (refused forwards) in both runs; test changed to accept either path and record which. PARTIAL / UNVERIFIED; run records to be attached from the next full run."
       }
     },
     {
@@ -2497,9 +2564,9 @@
         "SAF-10"
       ],
       "review": {
-        "commit": "c96246cfc82e910bc2e12c2571177ad4bf90888a",
+        "commit": "2379cff5cc28ca160e2076ad2d9c690b0c90d417",
         "date": "2026-09-20",
-        "note": "New control from the SAF-10 design (§6); implementation on branch safety/saf-10-wal-replication. Unit evidence to be attached from the RocksDB cutter run on this revision and the flare_unit run; E2E from the continuous-replication suite. Author-run only; nothing verified."
+        "note": "Runs on this revision: regression suites replica-repair/operator-restart/failover/read-balance/prepare-evidence 30/30 pass; continuous-replication 12/12 pass (second consecutive full pass, run 8). Previous note: New control from the SAF-10 design (§6); implementation on branch safety/saf-10-wal-replication. Unit evidence to be attached from the RocksDB cutter run on this revision and the flare_unit run; E2E from the continuous-replication suite. Author-run only; nothing verified."
       }
     },
     {
@@ -2566,9 +2633,9 @@
         "SAF-10"
       ],
       "review": {
-        "commit": "c96246cfc82e910bc2e12c2571177ad4bf90888a",
+        "commit": "2379cff5cc28ca160e2076ad2d9c690b0c90d417",
         "date": "2026-09-20",
-        "note": "New control from the SAF-10 design (§6); implementation on branch safety/saf-10-wal-replication. Unit evidence to be attached from the RocksDB cutter run on this revision and the flare_unit run; E2E from the continuous-replication suite. Author-run only; nothing verified."
+        "note": "Runs on this revision: regression suites replica-repair/operator-restart/failover/read-balance/prepare-evidence 30/30 pass; continuous-replication 12/12 pass (second consecutive full pass, run 8). Previous note: New control from the SAF-10 design (§6); implementation on branch safety/saf-10-wal-replication. Unit evidence to be attached from the RocksDB cutter run on this revision and the flare_unit run; E2E from the continuous-replication suite. Author-run only; nothing verified."
       }
     }
   ]

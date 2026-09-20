@@ -126,3 +126,20 @@ replica-repair: tests 23-26 FAIL — the repair never recorded COMPLETE within 3
 Common signature, absent from the 2026-09-16 passing run: "reconcile slow: 18000–31000 ms" on EVERY tick of a 2-node tch cluster.
 The SAF-10c operator changes are the suspect (per-tick probing or the restructured stats pass); the operator was instrumented
 with a per-tick probe timing line and the replica-repair suite is being rerun to locate the cost. Not resolved at this point.
+
+=== regression run 2 (operator 2379cff — follower-reading completeness + END-terminated probes; raw: docs/reports/2026-09-20-saf10-regression-run2-raw.log) ===
+command: flare_e2e --filter replica-repair,operator-restart,failover,read-balance,prepare-evidence      RESULT: PASS (30 tests, 0 failures)
+Root causes of regression run 1: (1) ReplicaRepair.FollowReading treated a COMPLETE stats reply without follower keys (tch) as
+unreadable, so every drop on a tch replica was held as "follower state unknown" and never repaired (replica-repair 3-6);
+(2) Bridge.queryPodStats waited out a 3 s timeout per probe, so with the extra per-node probes a 2-node reconcile took 18-31 s,
+the stats pass ran every tick and the restarted operator was too slow to re-serve its map before the flared pods' readiness
+failed (operator-restart 18-19). Both fixed in 2379cff: probes now take ~0.5 s ("continuous-replication probe: 2 stats read(s)
+in 1117ms"); the slowest tick in this run was 7710 ms (24 "reconcile slow" lines over 5 suites, all during repairs/restarts).
+
+=== run 8 (operator 2379cff, flared 325a2f8; raw: docs/reports/2026-09-20-saf10d-run8-raw.log) === RESULT: PASS (Tests: 12, Failures: 0)
+command: cd flare_operator && .lake/build/bin/flare_e2e --filter continuous-replication
+Second consecutive full pass. Test 7 this time: the FOLLOWER-DECLARED request won the race (persisted entry drops=0, "requested")
+— with fast probes the operator saw needs_rebuild before any refused forward was counted; rebuilt in place, followed the new epoch.
+Test 9: wal_applied=15 forward_applied=89, no rebuild. Test 11: epoch advanced to 4:…; ex-master rebuilt and followed.
+Test 12: 24 batches during the copy; items equal.
+Revision under test for the register: operator/suite 2379cff5cc28ca160e2076ad2d9c690b0c90d417 (flared sources unchanged since 325a2f8ad0b071f2c52fd43d70b063562631bf39).

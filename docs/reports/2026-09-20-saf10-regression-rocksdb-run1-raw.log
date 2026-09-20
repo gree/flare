@@ -1,0 +1,489 @@
+# === Suite: wal-incremental-sync ===
+# Cleaning up cluster 'wal-sync'
+# Deploying cluster 'wal-sync' in namespace 'flare-wal-sync'
+# Waiting for: namespace flare-wal-sync not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-wal-sync (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap wal-sync-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting for StatefulSet wal-sync-nodes to be ready...
+# Waiting for: all 4 pods ready (timeout: 180s)
+#   OK after 0s
+# Waiting for: 4 nodes registered (timeout: 300s)
+#   OK after 0s
+# Waiting 50s grace period for operator reconciliation...
+# Checking operator activity...
+# --- Operator logs (flare-operator-wal-sync) ---
+#   [flare-operator] reconcile slow: 6620ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] continuous-replication probe: 1 stats read(s) in 551ms (tick 4; in-mode remembered: 0, out-of-mode remembered: 0)
+#   [flare-operator] grace period: 19 cycles remaining
+#   [flare-operator] re-sending v4294967313: 1 node(s) are Active in the map but their pods are not Ready yet (activation not applied locally)
+#   [flare-operator] topology changed (v4294967313 → v4294967313), broadcasting
+#   [TopologyBroadcast] Broadcasting node sync v4294967313 (4 nodes) to 4 pods
+#   [TcpClient] Sent node sync v4294967313 (4 nodes) to 10.244.0.168:12121
+#   [TcpClient] Sent node sync v4294967313 (4 nodes) to 10.244.0.164:12121
+#   [TcpClient] Sent node sync v4294967313 (4 nodes) to 10.244.0.162:12121
+#   [TcpClient] Sent node sync v4294967313 (4 nodes) to 10.244.0.166:12121
+#   [TopologyBroadcast] Broadcast complete (v4294967313)
+#   [flare-operator] replica repair ledger initialized from wal-sync-nodes-1.wal-sync-nodes.flare-wal-sync.svc.cluster.local:12121: 0 destination counter(s) recorded as baseline, none attributed
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [DEBUG] Received command: node sync
+#   [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeSync none
+#   [DEBUG] Sending response: NODE wal-sync-nodes-2.wal-sync-nodes.flare-wal-sync.svc.cluster.local 12121 1 0 1 0 18 | NODE wal-sync-nodes-3.wal-sync-nodes.flare-wal-sync.svc.cluster.local 12121 1 0 0 0 19 | NODE wal-sync-nodes-1.wal-sync-nodes.flare-wal-sync.svc.cluster.local 12121 0 0 1 100 17 | NODE wal-sync-nodes-0.wal-sync-nodes.flare-wal-sync.svc.cluster.local 12121 0 0 0 100 16 | END | 
+#   [flare-operator] reconcile slow: 9501ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] continuous-replication probe: 1 stats read(s) in 522ms (tick 5; in-mode remembered: 0, out-of-mode remembered: 1)
+#   [flare-operator] grace period: 18 cycles remaining
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 4999ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 17 cycles remaining
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 4981ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 16 cycles remaining
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 4569ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 15 cycles remaining
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 4630ms (nodes=4 M=2 S=2 D=0 P=0)
+#   
+# Baseline: wal_sync_success=0, wal_fallback_to_dump=0
+# Deleting slave pod: wal-sync-nodes-3
+# Waiting for: all pods ready after slave restart (timeout: 180s)
+#   OK after 25s
+# After restart: wal_sync_success=1, wal_fallback_to_dump=0, master_id_mismatch=0, lsn_ahead=0
+# Cleaning up cluster 'wal-sync'
+# === Suite: wal-purged-fallback ===
+# Cleaning up cluster 'wal-purged'
+# Deploying cluster 'wal-purged' in namespace 'flare-wal-purged'
+# Waiting for: namespace flare-wal-purged not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-wal-purged (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap wal-purged-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting for StatefulSet wal-purged-nodes to be ready...
+# Waiting for: all 4 pods ready (timeout: 180s)
+#   OK after 0s
+# Waiting for: 4 nodes registered (timeout: 300s)
+#   OK after 0s
+# Waiting 50s grace period for operator reconciliation...
+# Checking operator activity...
+# --- Operator logs (flare-operator-wal-purged) ---
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 6785ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] continuous-replication probe: 1 stats read(s) in 518ms (tick 4; in-mode remembered: 0, out-of-mode remembered: 0)
+#   [flare-operator] grace period: 19 cycles remaining
+#   [flare-operator] re-sending v4294967313: 1 node(s) are Active in the map but their pods are not Ready yet (activation not applied locally)
+#   [flare-operator] topology changed (v4294967313 → v4294967313), broadcasting
+#   [TopologyBroadcast] Broadcasting node sync v4294967313 (4 nodes) to 4 pods
+#   [TcpClient] Sent node sync v4294967313 (4 nodes) to 10.244.0.179:12121
+#   [TcpClient] Sent node sync v4294967313 (4 nodes) to 10.244.0.177:12121
+#   [TcpClient] Sent node sync v4294967313 (4 nodes) to 10.244.0.181:12121
+#   [TcpClient] Sent node sync v4294967313 (4 nodes) to 10.244.0.183:12121
+#   [TopologyBroadcast] Broadcast complete (v4294967313)
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 7186ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [DEBUG] Received command: node sync
+#   [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeSync none
+#   [DEBUG] Sending response: NODE wal-purged-nodes-2.wal-purged-nodes.flare-wal-purged.svc.cluster.local 12121 1 0 1 0 18 | NODE wal-purged-nodes-3.wal-purged-nodes.flare-wal-purged.svc.cluster.local 12121 1 0 0 0 19 | NODE wal-purged-nodes-1.wal-purged-nodes.flare-wal-purged.svc.cluster.local 12121 0 0 1 100 17 | NODE wal-purged-nodes-0.wal-purged-nodes.flare-wal-purged.svc.cluster.local 12121 0 0 0 100 16 | END | 
+#   [flare-operator] continuous-replication probe: 1 stats read(s) in 504ms (tick 5; in-mode remembered: 0, out-of-mode remembered: 1)
+#   [flare-operator] grace period: 18 cycles remaining
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 5099ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 17 cycles remaining
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 4899ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 16 cycles remaining
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 4525ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 15 cycles remaining
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 4893ms (nodes=4 M=2 S=2 D=0 P=0)
+#   
+# Deleting slave pod: wal-purged-nodes-3
+# Waiting 15s for WAL files to be purged (TTL=1s)...
+# Waiting for: all pods ready (timeout: 180s)
+#   OK after 0s
+# wal_sync_lsn_purged=0, wal_fallback_to_dump=0
+# Cleaning up cluster 'wal-purged'
+# === Suite: orphan-scan-purge ===
+# Cleaning up cluster 'orphan-mgmt'
+# Deploying cluster 'orphan-mgmt' in namespace 'flare-orphan-mgmt'
+# Waiting for: namespace flare-orphan-mgmt not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-orphan-mgmt (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap orphan-mgmt-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting for StatefulSet orphan-mgmt-nodes to be ready...
+# Waiting for: all 4 pods ready (timeout: 180s)
+#   OK after 0s
+# Waiting for: 4 nodes registered (timeout: 300s)
+#   OK after 0s
+# Waiting 50s grace period for operator reconciliation...
+# Checking operator activity...
+# --- Operator logs (flare-operator-orphan-mgmt) ---
+#   [flare-operator] reconcile slow: 6815ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] continuous-replication probe: 1 stats read(s) in 578ms (tick 4; in-mode remembered: 0, out-of-mode remembered: 0)
+#   [flare-operator] grace period: 19 cycles remaining
+#   [flare-operator] re-sending v4294967313: 1 node(s) are Active in the map but their pods are not Ready yet (activation not applied locally)
+#   [flare-operator] topology changed (v4294967313 → v4294967313), broadcasting
+#   [TopologyBroadcast] Broadcasting node sync v4294967313 (4 nodes) to 4 pods
+#   [TcpClient] Sent node sync v4294967313 (4 nodes) to 10.244.0.192:12121
+#   [TcpClient] Sent node sync v4294967313 (4 nodes) to 10.244.0.198:12121
+#   [TcpClient] Sent node sync v4294967313 (4 nodes) to 10.244.0.196:12121
+#   [TcpClient] Sent node sync v4294967313 (4 nodes) to 10.244.0.194:12121
+#   [TopologyBroadcast] Broadcast complete (v4294967313)
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 6998ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [DEBUG] Received command: node sync
+#   [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeSync none
+#   [DEBUG] Sending response: NODE orphan-mgmt-nodes-2.orphan-mgmt-nodes.flare-orphan-mgmt.svc.cluster.local 12121 1 0 1 0 18 | NODE orphan-mgmt-nodes-3.orphan-mgmt-nodes.flare-orphan-mgmt.svc.cluster.local 12121 1 0 0 0 19 | NODE orphan-mgmt-nodes-1.orphan-mgmt-nodes.flare-orphan-mgmt.svc.cluster.local 12121 0 0 1 100 17 | NODE orphan-mgmt-nodes-0.orphan-mgmt-nodes.flare-orphan-mgmt.svc.cluster.local 12121 0 0 0 100 16 | END | 
+#   [flare-operator] continuous-replication probe: 1 stats read(s) in 614ms (tick 5; in-mode remembered: 0, out-of-mode remembered: 1)
+#   [flare-operator] grace period: 18 cycles remaining
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 5159ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 17 cycles remaining
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 4948ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 16 cycles remaining
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 4514ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 15 cycles remaining
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 4584ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 14 cycles remaining
+#   
+# Killing P0 master: orphan-mgmt-nodes-0
+# Waiting for: P0 master available (timeout: 90s)
+#   OK after 0s
+# Waiting for: all pods ready (timeout: 180s)
+#   OK after 25s
+# orphan_scan on orphan-mgmt-nodes-0:
+#   STAT orphan_scan_token 2c26f965-2b88-40a4-9555-c245488f6296
+#   STAT orphan_scan_node_map_version 4294967322
+#   STAT orphan_scan_scanned_keys 50
+#   STAT orphan_scan_orphan_count 0
+#   STAT orphan_scan_orphan_bytes 0
+#   STAT orphan_scan_partition 0
+#   END
+# orphan_scan on orphan-mgmt-nodes-1:
+#   STAT orphan_scan_token b0f93b3e-6839-4d23-94a4-ced58b0e526f
+#   STAT orphan_scan_node_map_version 4294967322
+#   STAT orphan_scan_scanned_keys 50
+#   STAT orphan_scan_orphan_count 0
+#   STAT orphan_scan_orphan_bytes 0
+#   STAT orphan_scan_partition 1
+#   END
+# orphan_scan on orphan-mgmt-nodes-2:
+#   STAT orphan_scan_token cd49c660-6d2f-449d-bc33-15966aaa48fd
+#   STAT orphan_scan_node_map_version 4294967322
+#   STAT orphan_scan_scanned_keys 50
+#   STAT orphan_scan_orphan_count 0
+#   STAT orphan_scan_orphan_bytes 0
+#   STAT orphan_scan_partition 1
+#   END
+# orphan_scan on orphan-mgmt-nodes-3:
+#   STAT orphan_scan_token 8c515911-99bf-4fa3-8a51-9a70dd4a0c17
+#   STAT orphan_scan_node_map_version 4294967322
+#   STAT orphan_scan_scanned_keys 50
+#   STAT orphan_scan_orphan_count 0
+#   STAT orphan_scan_orphan_bytes 0
+#   STAT orphan_scan_partition 0
+#   END
+# Cleaning up cluster 'orphan-mgmt'
+# === Suite: pvc-data-survival ===
+# Cleaning up cluster 'pvc-survival'
+# Deploying cluster 'pvc-survival' in namespace 'flare-pvc-survival'
+# Waiting for: namespace flare-pvc-survival not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-pvc-survival (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap pvc-survival-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting for StatefulSet pvc-survival-nodes to be ready...
+# Waiting for: all 4 pods ready (timeout: 180s)
+#   OK after 0s
+# Waiting for: 4 nodes registered (timeout: 300s)
+#   OK after 0s
+# Waiting 50s grace period for operator reconciliation...
+# Checking operator activity...
+# --- Operator logs (flare-operator) ---
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 7394ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 17 cycles remaining
+#   [flare-operator] re-sending v4294967318: 1 node(s) are Active in the map but their pods are not Ready yet (activation not applied locally)
+#   [flare-operator] topology changed (v4294967318 → v4294967318), broadcasting
+#   [TopologyBroadcast] Broadcasting node sync v4294967318 (4 nodes) to 4 pods
+#   [TcpClient] Sent node sync v4294967318 (4 nodes) to 10.244.0.209:12121
+#   [TcpClient] Sent node sync v4294967318 (4 nodes) to 10.244.0.211:12121
+#   [TcpClient] Sent node sync v4294967318 (4 nodes) to 10.244.0.213:12121
+#   [TcpClient] Sent node sync v4294967318 (4 nodes) to 10.244.0.207:12121
+#   [TopologyBroadcast] Broadcast complete (v4294967318)
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 6622ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [DEBUG] Received command: node sync
+#   [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeSync none
+#   [DEBUG] Sending response: NODE pvc-survival-nodes-3.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 1 0 1 0 19 | NODE pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 1 0 0 0 18 | NODE pvc-survival-nodes-1.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 0 0 1 100 17 | NODE pvc-survival-nodes-0.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 0 0 0 100 16 | END | 
+#   [flare-operator] continuous-replication probe: 1 stats read(s) in 564ms (tick 7; in-mode remembered: 0, out-of-mode remembered: 1)
+#   [flare-operator] grace period: 16 cycles remaining
+#   [flare-operator] replica repair ledger initialized from pvc-survival-nodes-1.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121: 0 destination counter(s) recorded as baseline, none attributed
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 7877ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 15 cycles remaining
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 4432ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 14 cycles remaining
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 4606ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 13 cycles remaining
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 4891ms (nodes=4 M=2 S=2 D=0 P=0)
+#   
+# Wrote via pvc-survival-nodes-0: stored 100/100
+# Killing ALL P0 nodes simultaneously: [pvc-survival-nodes-2, pvc-survival-nodes-0]
+# Waiting for: P0 master available after total P0 loss (timeout: 420s)
+#   OK after 35s
+# P0 master after total-P0 restart: pvc-survival-nodes-0
+# P0 curr_items: 49
+# Waiting for: all nodes Active (timeout: 180s)
+#   OK after 0s
+# Gracefully restarting P0 slave pvc-survival-nodes-2 (master pvc-survival-nodes-0 stays up)
+# Waiting for: cluster all-Active after slave restart (timeout: 240s)
+#   OK after 0s
+# Cleaning up cluster 'pvc-survival'
+# === Suite: backup-restore ===
+# Cleaning up cluster 'backup-restore'
+# Deploying cluster 'backup-restore' in namespace 'flare-backup-restore'
+# Waiting for: namespace flare-backup-restore not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-backup-restore (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap backup-restore-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting for StatefulSet backup-restore-nodes to be ready...
+# Waiting for: all 2 pods ready (timeout: 180s)
+#   OK after 0s
+# Waiting for: 2 nodes registered (timeout: 300s)
+#   OK after 0s
+# Waiting 50s grace period for operator reconciliation...
+# Checking operator activity...
+# --- Operator logs (flare-operator) ---
+#   [TopologyBroadcast] Broadcasting node sync v4294967303 (2 nodes) to 2 pods
+#   [TcpClient] Sent node sync v4294967303 (2 nodes) to 10.244.0.224:12121
+#   [TcpClient] Sent node sync v4294967303 (2 nodes) to 10.244.0.226:12121
+#   [DEBUG] Received command: node state backup-restore-nodes-1.backup-restore-nodes.flare-backup-restore.svc.cluster.local 12121 
+#   [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeState
+#     "backup-restore-nodes-1.backup-restore-nodes.flare-backup-restore.svc.cluster.local"
+#     12121
+#     (FlareOperat
+#   [TRACE] Event: NodeState backup-restore-nodes-1.backup-restore-nodes.flare-backup-restore.svc.cluster.local:12121 | Result: Prepare->Active | Reason: reconstruction complete
+#   [TopologyBroadcast] Broadcast complete (v4294967303)
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 6388ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] continuous-replication probe: 1 stats read(s) in 523ms (tick 3; in-mode remembered: 0, out-of-mode remembered: 0)
+#   [flare-operator] grace period: 20 cycles remaining
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 4700ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 19 cycles remaining
+#   [flare-operator] re-sending v4294967304: 1 node(s) are Active in the map but their pods are not Ready yet (activation not applied locally)
+#   [flare-operator] topology changed (v4294967304 → v4294967304), broadcasting
+#   [TopologyBroadcast] Broadcasting node sync v4294967304 (2 nodes) to 2 pods
+#   [TcpClient] Sent node sync v4294967304 (2 nodes) to 10.244.0.226:12121
+#   [TcpClient] Sent node sync v4294967304 (2 nodes) to 10.244.0.224:12121
+#   [TopologyBroadcast] Broadcast complete (v4294967304)
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 6316ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 18 cycles remaining
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 4174ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 17 cycles remaining
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   
+# backup on backup-restore-nodes-0: STAT backup_path /data/flare/backups/e2e-restore-point
+END
+# backup on backup-restore-nodes-1: STAT backup_path /data/flare/backups/e2e-restore-point
+END
+# Waiting for: cluster recovered after restore (timeout: 180s)
+#   OK after 30s
+# P0 master after restore: backup-restore-nodes-0
+# Cleaning up cluster 'backup-restore'
+# === Suite: snapshot-push-seed ===
+# Cleaning up cluster 'sps-src'
+# Cleaning up cluster 'sps-dst'
+# Deploying cluster 'sps-src' in namespace 'flare-sps-src'
+# Waiting for: namespace flare-sps-src not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-sps-src (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap sps-src-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Deploying cluster 'sps-dst' in namespace 'flare-sps-dst'
+# Waiting for: namespace flare-sps-dst not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-sps-dst (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap sps-dst-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting for StatefulSet sps-src-nodes to be ready...
+# Waiting for: all 1 pods ready (timeout: 180s)
+#   OK after 0s
+# Waiting for: 1 nodes registered (timeout: 300s)
+#   OK after 0s
+# Waiting 50s grace period for operator reconciliation...
+# Checking operator activity...
+# --- Operator logs (flare-operator-sps-src) ---
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [DEBUG] Received command: node add sps-src-nodes-0.sps-src-nodes.flare-sps-src.svc.cluster.local 12121
+#   [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeAdd "sps-src-nodes-0.sps-src-nodes.flare-sps-src.svc.cluster.local" 12121
+#   [TRACE] Event: NodeAdd sps-src-nodes-0.sps-src-nodes.flare-sps-src.svc.cluster.local:12121 | Result: Master P0 (Active) | Reason: partition needed master
+#   [DEBUG] Sending response: NODE sps-src-nodes-0.sps-src-nodes.flare-sps-src.svc.cluster.local 12121 0 0 0 100 16 | END | 
+#   [DEBUG] Received command: meta
+#   [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.Meta
+#   [TRACE] Event: Meta | CRD partitions=1 replicas=1 | State partitionSize=1024 | Returning partition-size 1024
+#   [flare-operator] reconcile slow: 3678ms (nodes=1 M=1 S=0 D=0 P=0)
+#   [flare-operator] grace period: 22 cycles remaining
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 3916ms (nodes=1 M=1 S=0 D=0 P=0)
+#   [DEBUG] Received command: node sync
+#   [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeSync none
+#   [DEBUG] Sending response: NODE sps-src-nodes-0.sps-src-nodes.flare-sps-src.svc.cluster.local 12121 0 0 0 100 16 | END | 
+#   [flare-operator] grace period: 21 cycles remaining
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 4001ms (nodes=1 M=1 S=0 D=0 P=0)
+#   [flare-operator] grace period: 20 cycles remaining
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 4111ms (nodes=1 M=1 S=0 D=0 P=0)
+#   [flare-operator] grace period: 19 cycles remaining
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 4173ms (nodes=1 M=1 S=0 D=0 P=0)
+#   [flare-operator] grace period: 18 cycles remaining
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 4210ms (nodes=1 M=1 S=0 D=0 P=0)
+#   [flare-operator] grace period: 17 cycles remaining
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 4110ms (nodes=1 M=1 S=0 D=0 P=0)
+#   
+# Waiting for StatefulSet sps-dst-nodes to be ready...
+# Waiting for: all 2 pods ready (timeout: 180s)
+#   OK after 0s
+# Waiting for: 2 nodes registered (timeout: 300s)
+#   OK after 0s
+# Waiting 50s grace period for operator reconciliation...
+# Checking operator activity...
+# --- Operator logs (flare-operator-sps-dst) ---
+#   [TcpClient] Sent node sync v4294967304 (2 nodes) to 10.244.0.237:12121
+#   [TcpClient] Sent node sync v4294967304 (2 nodes) to 10.244.0.236:12121
+#   [TopologyBroadcast] Broadcast complete (v4294967304)
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 6265ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] continuous-replication probe: 1 stats read(s) in 545ms (tick 3; in-mode remembered: 0, out-of-mode remembered: 0)
+#   [flare-operator] grace period: 20 cycles remaining
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 4682ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 19 cycles remaining
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 3997ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [DEBUG] Received command: node sync
+#   [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeSync none
+#   [DEBUG] Sending response: NODE sps-dst-nodes-1.sps-dst-nodes.flare-sps-dst.svc.cluster.local 12121 1 0 0 0 17 | NODE sps-dst-nodes-0.sps-dst-nodes.flare-sps-dst.svc.cluster.local 12121 0 0 0 100 16 | END | 
+#   [flare-operator] grace period: 18 cycles remaining
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 4283ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 17 cycles remaining
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 4252ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 16 cycles remaining
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 4124ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 15 cycles remaining
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 4108ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 14 cycles remaining
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 4226ms (nodes=2 M=1 S=1 D=0 P=0)
+#   
+# Waiting for: dst snapshot_bootstrap > 0 (timeout: 240s)
+#   OK after 0s
+# Waiting for: dst slave curr_items >= total (timeout: 120s)
+#   OK after 0s
+# Waiting for: src extra.conf has explicit false (timeout: 120s)
+#   OK after 15s
+# Cleaning up cluster 'sps-src'
+# Cleaning up cluster 'sps-dst'
+# Tests: 30, Failures: 0
+# RESULT: PASS
+1..30
+ok 1 - write keys to advance master LSN
+ok 2 - slave has RocksDB backend active
+ok 3 - record baseline WAL sync counters
+ok 4 - delete slave pod and wait for re-registration
+ok 5 - WAL sync success counter incremented after slave restart
+ok 6 - flared booted with rocksdb-wal-ttl-seconds=1 (boot config)
+ok 7 - write keys to advance master LSN
+ok 8 - delete slave pod
+ok 9 - slave pod recovers after WAL purge
+ok 10 - rocksdb_wal_fallback_to_dump incremented # SKIP slave recovered but WAL was not purged (TTL may not have taken effect via reload); purged=0, fallback=0
+ok 11 - write keys to both partitions
+ok 12 - kill P0 master and wait for failover
+ok 13 - killed pod restarts and rejoins cluster
+ok 14 - orphan_scan detects orphan keys # SKIP no orphan keys detected (may need longer reconstruction or different failover pattern)
+ok 15 - orphan_purge removes orphan keys # SKIP no orphans to purge (test 4 may have skipped)
+ok 16 - write 100 keys and verify baseline integrity (PVC, rocksdb)
+ok 17 - all 100 keys survive SIMULTANEOUS death of P0 master and slave
+ok 18 - P0 master holds data after total-P0 restart
+ok 19 - all replicas return to Active after total-P0 restart
+ok 20 - all 100 keys survive a graceful restart of the P0 slave
+ok 21 - write 50 keys and verify baseline
+ok 22 - checkpoint 'e2e-restore-point' created on every replica
+ok 23 - flush_all destroys live data on all replicas
+ok 24 - all 50 keys restored from checkpoint after pod recreation
+ok 25 - seed 500 keys into the source
+ok 26 - enable duplicate replication (equal partition counts)
+ok 27 - destination master seeded via snapshot push (rocksdb_snapshot_bootstrap > 0)
+ok 28 - all 500 keys present on the destination (via proxy reads)
+ok 29 - destination slave converges (relay from the swapped master)
+ok 30 - disable stops the stream declaratively
+EXIT=0

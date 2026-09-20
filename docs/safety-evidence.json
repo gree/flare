@@ -656,7 +656,8 @@
         "A write that keeps failing until a restart loses the unsaved delta; the window is one pass of retries, extended by however long the cause (e.g. a revoked RBAC grant) persists.",
         "The operator announces an unsaved ledger ('marked unsaved and will retry every pass — an operator restart before that lands would lose ...') but a landing through the normal per-pass persist is silent, so the log does not show when that exposure ended (only the retry path logs 'persisted on retry'). Observability gap; follow-up proposed.",
         "RBAC grant propagation: one local observation (2026-09-13) of ~131s before an impersonated `can-i` flipped after a restore; CI runs 6 and 8 saw the grant effective for the operator's own SA within seconds (in-pod probe). Earlier attributions of >2 minutes to the operator's path were harness artefacts (see the round-8 review note).",
-        "Until eb2ba17 the drop observation required the REPLICA's stats read to succeed as well as the master's, so an unreadable replica hid the master's drop counter for its partition (found by the SAF-10d stats-fetch-failure scenario, run 4). Fixed: the observation needs the master's reply only. E2E confirmation pending (run 5)."
+        "Until eb2ba17 the drop observation required the REPLICA's stats read to succeed as well as the master's, so an unreadable replica hid the master's drop counter for its partition (found by the SAF-10d stats-fetch-failure scenario, run 4). Fixed: the observation needs the master's reply only. E2E confirmation pending (run 5).",
+        "REGRESSION (found by rerunning replica-repair on tch after SAF-10c, fixed 2379cff): FollowReading treated a complete stats reply WITHOUT follower keys as unreadable, so every drop on a non-RocksDB replica was held as 'follower state unknown' and never repaired. Unknown now means a failed or truncated read only. The rerun of the non-WAL suites on the fix is pending."
       ],
       "code": [
         {
@@ -892,9 +893,9 @@
         "SAF-10"
       ],
       "review": {
-        "commit": "eb2ba176070650d9889ecd4770aaabac5104a258",
+        "commit": "2379cff5cc28ca160e2076ad2d9c690b0c90d417",
         "date": "2026-09-20",
-        "note": "Main.lean: the ledger observation moved into a closure fed by the master's stats alone; a new branch handles master-readable/replica-unreadable (logs, observes drops, resets the empty-master streak). Cause found by the replica-only pods/exec revocation (resourceNames) in the continuous-replication suite: with the replica unreadable no request was ever made, so the 'held as Unknown' path could not even be reached. Run 2's pass of that scenario had relied on RBAC propagation lag. PARTIAL / UNVERIFIED unchanged."
+        "note": "ReplicaRepair.FollowReading gained  (END seen); unreadable = !complete; flare_unit pins that a complete reply without keys is 'not in the mode' (ordinary repair, hands an owned entry over). Bridge.queryPodStats returns at END instead of waiting out a 3 s timeout, which had made 2-node reconciles take 18-31 s and starved the repair paths. Regression suites (replica-repair, operator-restart, failover, read-balance, prepare-evidence) rerunning on this revision. PARTIAL / UNVERIFIED unchanged."
       }
     },
     {

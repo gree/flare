@@ -143,3 +143,19 @@ Second consecutive full pass. Test 7 this time: the FOLLOWER-DECLARED request wo
 Test 9: wal_applied=15 forward_applied=89, no rebuild. Test 11: epoch advanced to 4:…; ex-master rebuilt and followed.
 Test 12: 24 batches during the copy; items equal.
 Revision under test for the register: operator/suite 2379cff5cc28ca160e2076ad2d9c690b0c90d417 (flared sources unchanged since 325a2f8ad0b071f2c52fd43d70b063562631bf39).
+
+=== run 9 (operator 2379cff, flared 325a2f8; suite 94691b2 — PVC-backed, 13 tests with T4 crash; raw: docs/reports/2026-09-20-saf10d-run9-raw.log) === RESULT: FAIL (Tests: 13, Failures: 3)
+ok 1-10 (test 7 again requested by the follower-declared path, entry drops=0).
+not ok 11 replica crash: under the cut 300 created / 5 updated / 5 deleted (master 165→475); healed; flared killed -9 from the kind
+     node 300 ms later (killed=1); the container restarted once on its PVC (restartCount 0→1, pod UID unchanged); the new process
+     reported reconstruction_completed=1, wal_fallback_to_dump=0 (no full dump), state following, applied 475 = master latest —
+     but curr_items master=343, replica=291 (52 fewer) and the test timed out on item equality.
+not ok 12, 13 cascaded: after the failover the new master (the crashed node) read 291/301 while the ex-master read 343/353, and the
+     newcomer that copied the new master by SNAPSHOT counted 833 against the master's 781 — 52 MORE keys than its source.
+DIAGNOSIS: the 52 keys are present; the COUNT is wrong. storage_rocksdb::open seeded curr_items from rocksdb.estimate-num-keys,
+which does not see keys that exist only in the WAL (the swap_in_snapshot code already documents this); after a crash the unflushed
+tail is recovered from the WAL but not counted. The newcomer's exact scan at its snapshot swap counted the same data correctly
+(833), and the ex-master's exact count (353) matches. Fix: open() now seeds the counter by an exact scan of the data family
+(boot-time O(n), duration logged); cutter test_reopen_counts_wal_only_keys_exactly pins it. This is a pre-existing observation
+defect that the SAF-10d crash scenario exposed; it affects every count-based comparison (replica divergence gauge, empty-master
+guard, the acceptance suite's own assertions). Rerun pending (run 10).

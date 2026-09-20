@@ -655,7 +655,8 @@
         "A destination that became a MASTER while under repair is VOIDED, not repaired.",
         "A write that keeps failing until a restart loses the unsaved delta; the window is one pass of retries, extended by however long the cause (e.g. a revoked RBAC grant) persists.",
         "The operator announces an unsaved ledger ('marked unsaved and will retry every pass — an operator restart before that lands would lose ...') but a landing through the normal per-pass persist is silent, so the log does not show when that exposure ended (only the retry path logs 'persisted on retry'). Observability gap; follow-up proposed.",
-        "RBAC grant propagation: one local observation (2026-09-13) of ~131s before an impersonated `can-i` flipped after a restore; CI runs 6 and 8 saw the grant effective for the operator's own SA within seconds (in-pod probe). Earlier attributions of >2 minutes to the operator's path were harness artefacts (see the round-8 review note)."
+        "RBAC grant propagation: one local observation (2026-09-13) of ~131s before an impersonated `can-i` flipped after a restore; CI runs 6 and 8 saw the grant effective for the operator's own SA within seconds (in-pod probe). Earlier attributions of >2 minutes to the operator's path were harness artefacts (see the round-8 review note).",
+        "Until eb2ba17 the drop observation required the REPLICA's stats read to succeed as well as the master's, so an unreadable replica hid the master's drop counter for its partition (found by the SAF-10d stats-fetch-failure scenario, run 4). Fixed: the observation needs the master's reply only. E2E confirmation pending (run 5)."
       ],
       "code": [
         {
@@ -891,9 +892,9 @@
         "SAF-10"
       ],
       "review": {
-        "commit": "dfe6e5eaab49298d56852b76c0f8d423ca40eaa7",
+        "commit": "eb2ba176070650d9889ecd4770aaabac5104a258",
         "date": "2026-09-20",
-        "note": "SAF-10c ownership added to the ledger: a request whose destination is owned by a WAL follower is HELD (owned, mustReach, barEpoch persisted), advanced by position (close only when following, same source epoch, applied >= bar), handed over only on an explicit non-owning state, and kept on an unreadable state (stats failure is never a rebuild trigger). flare_unit pins those decisions (101 checks, docs/reports/2026-09-19-saf10c-lifecycle-and-ledger-ownership.txt). CHECK-03-follow ran once locally (run 1 tests 1-5 pass, test 6 harness bug; run 2 all 6 pass) — see the report for what the minimal E2E does NOT cover. The pre-existing CHECK-03 path (demote/reseat/rebuild) is unchanged for nodes not owned by a follower. PARTIAL / UNVERIFIED unchanged; author-run only."
+        "note": "Main.lean: the ledger observation moved into a closure fed by the master's stats alone; a new branch handles master-readable/replica-unreadable (logs, observes drops, resets the empty-master streak). Cause found by the replica-only pods/exec revocation (resourceNames) in the continuous-replication suite: with the replica unreadable no request was ever made, so the 'held as Unknown' path could not even be reached. Run 2's pass of that scenario had relied on RBAC propagation lag. PARTIAL / UNVERIFIED unchanged."
       }
     },
     {
@@ -2154,7 +2155,8 @@
       "residual_risks": [
         "Failover: survivors rebuild rather than resume from a per-source cursor (design §9 decision 6).",
         "Only one cut/heal cycle is staged; T5 (repeated cuts) and T8 (operator restart) remain.",
-        "The follower's backoff and poll interval are fixed configuration; no load measurement (T17 deferred)."
+        "The follower's backoff and poll interval are fixed configuration; no load measurement (T17 deferred).",
+        "Until 325a2f8 the follower handler RETURNED on needs_rebuild, giving its thread back to the pool while cluster still referenced it; the later stop_wal_follower shut down a pooled thread, which exited without leaving the pool, and the reconstruction handler that was to rebuild the node was triggered on that dead thread and never ran (found by the SAF-10d bulk-operation scenario, runs 3-4). Fixed: terminal outcomes park the thread until the controller's shutdown. E2E confirmation pending (run 5)."
       ],
       "code": [
         {
@@ -2225,9 +2227,9 @@
         "SAF-10"
       ],
       "review": {
-        "commit": "c96246cfc82e910bc2e12c2571177ad4bf90888a",
+        "commit": "eb2ba176070650d9889ecd4770aaabac5104a258",
         "date": "2026-09-20",
-        "note": "New control from the SAF-10 design (§6); implementation on branch safety/saf-10-wal-replication. Unit evidence to be attached from the RocksDB cutter run on this revision and the flare_unit run; E2E from the continuous-replication suite. Author-run only; nothing verified."
+        "note": "handler_wal_follower.cc / cluster.cc: the follower thread parks on needs_rebuild (and on the backend-without-WAL error) instead of returning; stop_wal_follower refuses to send a shutdown request to a thread not running a handler. Found because the E2E rebuild after flush_all never started (reconstruction_started unchanged, follower idle 'stopped'). Unit tests (follow/apply, 24) pass on the fix; the E2E rerun is pending. PARTIAL / UNVERIFIED."
       }
     },
     {
@@ -2326,7 +2328,8 @@
       ],
       "residual_risks": [
         "lsn_purged is not staged end to end (retention purge cannot be forced deterministically in the harness; the wal-purged suite covers the dump path); epoch change is staged by flush_all.",
-        "A follower that declares needs_rebuild in the window between a completed reconstruction and its follower restart could be requested twice (bounded churn, not loss)."
+        "A follower that declares needs_rebuild in the window between a completed reconstruction and its follower restart could be requested twice (bounded churn, not loss).",
+        "Until 325a2f8 the follower handler RETURNED on needs_rebuild, giving its thread back to the pool while cluster still referenced it; the later stop_wal_follower shut down a pooled thread, which exited without leaving the pool, and the reconstruction handler that was to rebuild the node was triggered on that dead thread and never ran (found by the SAF-10d bulk-operation scenario, runs 3-4). Fixed: terminal outcomes park the thread until the controller's shutdown. E2E confirmation pending (run 5)."
       ],
       "code": [
         {
@@ -2397,9 +2400,9 @@
         "SAF-10"
       ],
       "review": {
-        "commit": "c96246cfc82e910bc2e12c2571177ad4bf90888a",
+        "commit": "eb2ba176070650d9889ecd4770aaabac5104a258",
         "date": "2026-09-20",
-        "note": "New control from the SAF-10 design (§6); implementation on branch safety/saf-10-wal-replication. Unit evidence to be attached from the RocksDB cutter run on this revision and the flare_unit run; E2E from the continuous-replication suite. Author-run only; nothing verified."
+        "note": "handler_wal_follower.cc / cluster.cc: the follower thread parks on needs_rebuild (and on the backend-without-WAL error) instead of returning; stop_wal_follower refuses to send a shutdown request to a thread not running a handler. Found because the E2E rebuild after flush_all never started (reconstruction_started unchanged, follower idle 'stopped'). Unit tests (follow/apply, 24) pass on the fix; the E2E rerun is pending. PARTIAL / UNVERIFIED."
       }
     },
     {

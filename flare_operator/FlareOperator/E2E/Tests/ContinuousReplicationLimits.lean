@@ -125,7 +125,7 @@ private def Ctx.rssKb (c : Ctx) (pod : String) : IO (Option Nat) := do
 private def Ctx.writeBig (c : Ctx) (ip : String) (pfx : String) (count bytes : Nat) : IO Nat := do
   let mut stored := 0
   for i in [0:count] do
-    let cmd := s!"v=$(head -c {bytes} /dev/zero | tr '\\\\0' x); printf 'set {pfx}_{i} 0 0 {bytes}\\r\\n%s\\r\\n' \"$v\" | nc -w 5 {ip} {c.cfg.flarePort}"
+    let cmd := s!"v=$(head -c {bytes} /dev/zero | tr '\\0' x); printf 'set {pfx}_{i} 0 0 {bytes}\\r\\n%s\\r\\n' \"$v\" | nc -w 5 {ip} {c.cfg.flarePort}"
     match ← execInDebugPod c.cfg.debugPod c.cfg.«namespace» cmd with
     | .ok o => if containsSubstr o "STORED" then stored := stored + 1
     | .error _ => pure ()

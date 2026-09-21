@@ -99,7 +99,10 @@ operator" attributed to CI runs 5 and 8 was that harness artefact, and the
 only real latency observation is a single local one. The test now judges the
 outcome. The operator's silence about a landing after it announced an
 unsaved ledger is recorded under EV-03 as an observability gap with a
-proposed one-line follow-up (not made here). The evidence register
+proposed one-line follow-up (not made here). The ninth run (da840c0) was
+green across all seven checks, the third green matrix and the second in a row
+for this operator image; the breaker tally on this PR is 7 tripped / 2 not,
+now tracked as SAF-11. The evidence register
 owns exact implementation and verification state, which stays `unverified`
 until a reviewer signs off; EV-03 is held at `partial` because two scenarios
 are pinned only by `flare_unit` and not staged end to end (a drop in the last

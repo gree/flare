@@ -537,6 +537,14 @@
           "command": "GitHub Actions e2e-tests.yaml (4 legs) on PR #143",
           "result": "pass",
           "report": "docs/reports/2026-09-16-ci-e2e-matrix-f7d327f-pass.txt"
+        },
+        {
+          "check": "CHECK-01",
+          "commit": "da840c084fd5f5fc1b0f023b597e6378b8ee3582",
+          "date": "2026-09-16",
+          "command": "GitHub Actions e2e-tests.yaml (4 legs) on PR #143",
+          "result": "pass",
+          "report": "docs/reports/2026-09-16-ci-e2e-matrix-da840c0-pass.txt"
         }
       ],
       "tasks": [
@@ -909,6 +917,14 @@
           "command": "GitHub Actions e2e-tests.yaml (workflow_dispatch), legs replication (continuous-replication-purge, continuous-replication-limits) and continuous-replication",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/35570216917"
+        },
+        {
+          "check": "CHECK-03",
+          "commit": "da840c084fd5f5fc1b0f023b597e6378b8ee3582",
+          "date": "2026-09-16",
+          "command": "GitHub Actions e2e-tests.yaml (4 legs) on PR #143",
+          "result": "pass",
+          "report": "docs/reports/2026-09-16-ci-e2e-matrix-da840c0-pass.txt"
         }
       ],
       "tasks": [
@@ -1204,6 +1220,22 @@
           "command": "GitHub Actions e2e-tests.yaml (workflow_dispatch), legs replication (continuous-replication-purge, continuous-replication-limits) and continuous-replication",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/35570216917"
+        },
+        {
+          "check": "CHECK-04",
+          "commit": "da840c084fd5f5fc1b0f023b597e6378b8ee3582",
+          "date": "2026-09-16",
+          "command": "GitHub Actions e2e-tests.yaml (4 legs) on PR #143",
+          "result": "pass",
+          "report": "docs/reports/2026-09-16-ci-e2e-matrix-da840c0-pass.txt"
+        },
+        {
+          "check": "CHECK-04-cpp",
+          "commit": "da840c084fd5f5fc1b0f023b597e6378b8ee3582",
+          "date": "2026-09-16",
+          "command": "GitHub Actions nix-linux.yml 'Test Legacy Build' — nix flare derivation make check (cutter, includes test_stats_reconstruction)",
+          "result": "pass",
+          "report": "docs/reports/2026-09-16-ci-e2e-matrix-da840c0-pass.txt"
         }
       ],
       "tasks": [
@@ -1470,6 +1502,14 @@
           "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter replica-repair,operator-restart,failover,read-balance,prepare-evidence (local kind)",
           "result": "pass",
           "report": "docs/reports/2026-09-20-saf10d-minimal-e2e-continuous-replication.txt"
+        },
+        {
+          "check": "CHECK-05",
+          "commit": "da840c084fd5f5fc1b0f023b597e6378b8ee3582",
+          "date": "2026-09-16",
+          "command": "GitHub Actions e2e-tests.yaml (4 legs) on PR #143",
+          "result": "pass",
+          "report": "docs/reports/2026-09-16-ci-e2e-matrix-da840c0-pass.txt"
         }
       ],
       "tasks": [
@@ -1801,6 +1841,14 @@
           "command": "GitHub Actions e2e-tests.yaml, leg breaker-migration: timeout 4500 .lake/build/bin/flare_e2e --filter circuit-breaker,operator-restart,topology-authority,replica-repair,prepare-evidence,native-metrics,blue-green-migration",
           "result": "pass",
           "report": "docs/reports/2026-09-16-ci-e2e-breaker-migration-d185039-fail.txt"
+        },
+        {
+          "check": "CHECK-09",
+          "commit": "da840c084fd5f5fc1b0f023b597e6378b8ee3582",
+          "date": "2026-09-16",
+          "command": "GitHub Actions e2e-tests.yaml (4 legs) on PR #143",
+          "result": "pass",
+          "report": "docs/reports/2026-09-16-ci-e2e-matrix-da840c0-pass.txt"
         }
       ],
       "tasks": [],

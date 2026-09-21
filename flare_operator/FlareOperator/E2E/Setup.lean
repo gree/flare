@@ -42,6 +42,12 @@ structure ClusterConfig where
       never cover. Mirrors the production example
       helm/flare-operator/examples/flare-cluster-persistent.yaml. -/
   usePvc : Bool := false
+  /-- flared container memory limit / request. The default fits the small
+      E2E datasets; the scale evaluation raises it (RocksDB's block cache
+      plus a 64 MB write buffer OOM-killed a 512Mi master under a 2M-key
+      load). -/
+  flaredMemoryLimit : String := "512Mi"
+  flaredMemoryRequest : String := "256Mi"
   /-- PVC size request (only used when usePvc). Kind's default storage
       class (local-path) ignores the size, so keep it small. -/
   pvcSize : String := "1Gi"
@@ -329,10 +335,10 @@ spec:
           resources:
             requests:
               cpu: 100m
-              memory: 256Mi
+              memory: {cfg.flaredMemoryRequest}
             limits:
               cpu: 500m
-              memory: 512Mi
+              memory: {cfg.flaredMemoryLimit}
       volumes:
         - name: flared-config
           configMap:

@@ -229,7 +229,13 @@ def purgeSuite : TestSuite := {
               && (← c.statStr sIp "repl_follow_last_reason") == some "lsn_purged"
           let st := (← c.statStr sIp "repl_follow_state").getD "?"
           let why := (← c.statStr sIp "repl_follow_last_reason").getD "?"
-          IO.eprintln s!"# after the heal: follower state={st} reason={why} applied={← c.statNat sIp "repl_applied_lsn"} items master={← c.currItems mIp} replica={← c.currItems sIp}"
+          IO.eprintln s!"# after the heal: follower state={st} reason={why} applied={← c.statNat sIp "repl_applied_lsn"} items master={← c.currItems mIp} replica={← c.currItems sIp} decode_refused={← c.statNat sIp "repl_decode_refused"}"
+          match ← hostCmd "sh" ["-c", s!"kubectl logs -n {purgeCfg.«namespace»} {sPod} | grep -E 'refused|follow apply|replication follow state|lsn_purged' | tail -12"] with
+          | .ok o => IO.eprintln s!"# --- replica follower lines (filtered) ---\n{o}"
+          | .error e => IO.eprintln s!"# (could not read the replica's log: {e})"
+          match ← hostCmd "sh" ["-c", s!"kubectl logs -n {purgeCfg.«namespace»} {(← c.pair).toOption.map (·.1) |>.getD "cont-repl-purge-nodes-0"} | grep -E 'streaming|purged|wal_read_error' | tail -6"] with
+          | .ok o => IO.eprintln s!"# --- master WAL-serve lines (filtered) ---\n{o}"
+          | .error e => IO.eprintln s!"# (could not read the master's log: {e})"
           if !declared then
             if st == "following" && (← c.currItems sIp) == (← c.currItems mIp) then
               return .fail s!"the WAL was NOT purged within the window (the follower caught up from {applied0}); retention knobs did not take effect — no lsn_purged staged"
@@ -347,9 +353,14 @@ private def scaleCfg : ClusterConfig := {
   operatorName := "flare-operator"
   debugPod := "debug-cont-repl-scale"
   storageBackend := "rocksdb"
-  extraFlaredConf := flags
+  -- A small block cache and a memory budget for millions of keys: with the
+  -- default cache the 512Mi master was OOMKilled 2m42s into a 2M-key load
+  -- and the operator failed over to the follower under test.
+  extraFlaredConf := flags ++ "\nrocksdb-block-cache-size-mb = 64"
   operatorEnv := [("FLARE_STATS_PROBE_INTERVAL_MS", "15000")]
   usePvc := true
+  flaredMemoryLimit := "2Gi"
+  flaredMemoryRequest := "1Gi"
 }
 
 private def scaleKeys : IO (Option Nat) := do
@@ -384,7 +395,8 @@ def scaleSuite : TestSuite := {
         | some n =>
           match ← c.pair with
           | .error e => return .fail e
-          | .ok (_, mIp, _, sIp) =>
+          | .ok (mPod, mIp, sPod, sIp) =>
+            let mRc0 ← c.restartCount mPod
             let chunk := 100000
             let mut loaded := 0
             let t0 ← IO.monoMsNow
@@ -419,6 +431,14 @@ def scaleSuite : TestSuite := {
                 break
               IO.sleep 60000
             IO.eprintln s!"# scale load: {loaded}/{n} STORED in {loadMs} ms; master items={← c.currItems mIp} replica={← c.currItems sIp}; follower converged={caught} {(← IO.monoMsNow) - t1} ms after the load ended; applied={← c.statNat sIp "repl_applied_lsn"} wal_applied={← c.statNat sIp "repl_wal_applied"} forward_applied={← c.statNat sIp "repl_forward_applied"}"
+            let mRc1 ← c.restartCount mPod
+            match ← kubectlGetJsonpath "pod" mPod scaleCfg.«namespace» "{.status.containerStatuses[0].lastState.terminated.reason}" with
+            | .ok r => IO.eprintln s!"# master {mPod}: restartCount {mRc0}→{mRc1}; last termination reason: {r.trim}"
+            | .error _ => pure ()
+            match ← hostCmd "sh" ["-c", s!"kubectl logs -n {scaleCfg.«namespace»} {sPod} | grep -E 'continuous replication follower|replication follow state|shifting node_role.*{sPod}|refused' | tail -15"] with
+            | .ok o => IO.eprintln s!"# --- replica follower lifecycle (filtered) ---\n{o}"
+            | .error e => IO.eprintln s!"# (could not read the replica's log: {e})"
+            if mRc1 != mRc0 then return .fail s!"the MASTER restarted during the load (restartCount {mRc0}→{mRc1}; see the termination reason above): the memory budget does not fit this key count, and the failover made the watched node the master — no follow measurement"
             if loaded < n * 99 / 100 then return .fail s!"loaded only {loaded}/{n}"
             if !caught then return .fail "the follower did not converge at scale"
             return .pass },

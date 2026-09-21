@@ -54,6 +54,12 @@ private def cfg : ClusterConfig := {
   -- survive the container restart, and a returning ex-master then carries
   -- its OLD history rather than an empty store (the more realistic case).
   usePvc := true
+  -- preStop sleep so a deleted master is Terminating long enough for the
+  -- operator's GRACEFUL DRAIN (planned promotion through the eligibility
+  -- gate) rather than a race between dead detection and the StatefulSet
+  -- recreating the pod (on CI the recreated master was back before it was
+  -- ever seen absent, so no failover happened at all).
+  drainSeconds := 30
 }
 
 private def kindNode : String := "flare-e2e-control-plane"
@@ -746,28 +752,35 @@ def suite : TestSuite := {
           if !empty then return .fail s!"the ledger still holds {← ledgerDests} ({← ledgerHolds})"
           return .pass },
 
-    -- SAF-10c promotion + T16 (history replacement): the master's pod is
-    -- deleted. The follower is the only candidate; whether it was proven
-    -- current on the tick the master vanished (ranked) or not (unproven,
-    -- logged NOT LOSS-FREE), it is promoted; promotion advances the source
-    -- epoch, and the returning ex-master must rebuild and then FOLLOW the
-    -- new master's epoch. Last test: it changes the partition's master.
-    { name := "failover: the master pod is deleted; the follower is promoted (evidence logged); the returning ex-master rebuilds and follows the new epoch"
+    -- SAF-10c planned promotion + T16 (history replacement): the master's
+    -- pod is deleted and stays Terminating for the preStop window, so the
+    -- operator DRAINS it: the follower is promoted only if the eligibility
+    -- gate proves it current (following, same epoch, fresh, within the
+    -- promotion bound) — an unproven follower would leave the master kept
+    -- with a CRITICAL "no promotable successor". Promotion advances the
+    -- source epoch; the returning ex-master (PVC, old history) must rebuild
+    -- and FOLLOW the new master's epoch. Changes the partition's master.
+    { name := "planned promotion: the master pod is deleted (graceful drain); the proven follower is promoted through the gate, its epoch advances; the returning ex-master rebuilds and follows the new epoch"
       run := do
         match ← pair with
         | .error e => return .fail e
         | .ok (mPod, _, sPod, sIp) =>
           let uid0 := (← podUid sPod).getD "?"
           let epoch0 := (← statStr sIp "repl_follow_source_epoch").getD "?"
-          kubectlDelete "pod" mPod cfg.«namespace»
-          IO.eprintln s!"# deleted master pod {mPod}; follower {sPod} was following epoch {epoch0}"
-          let promoted ← waitForCondition "the follower is promoted to master" 300 do
+          -- Async delete: the pod is Terminating for drainSeconds while the
+          -- operator drains it.
+          discard <| kubectl ["delete", "pod", mPod, "-n", cfg.«namespace», "--wait=false"]
+          IO.eprintln s!"# deleted master pod {mPod} (graceful, preStop {cfg.drainSeconds}s); follower {sPod} was following epoch {epoch0}"
+          let promoted ← waitForCondition "the follower is promoted to master (drain)" 180 do
             let entries ← nodeView
             return (findMasterFqdn entries 0).bind (fun f => (f.splitOn ".").head?) == some sPod
           let log ← opLog 3000
+          let drained := containsSubstr log "graceful drain"
+          let blocked := containsSubstr log "NO promotable successor"
           let notLossFree := containsSubstr log "PROMOTION NOT LOSS-FREE" && containsSubstr log sPod
-          IO.eprintln s!"# promotion: follower promoted={promoted}; logged NOT LOSS-FREE={notLossFree}; new master epoch={← statStr sIp "rocksdb_source_epoch"}"
-          if !promoted then return .fail "the follower was not promoted"
+          IO.eprintln s!"# promotion: follower promoted={promoted}; drain logged={drained}; drain blocked (guard refused)={blocked}; NOT LOSS-FREE logged={notLossFree}; new master epoch={← statStr sIp "rocksdb_source_epoch"}"
+          if !promoted then return .fail s!"the follower was not promoted (drain logged={drained}, guard refused={blocked})"
+          if notLossFree then return .fail "a PLANNED promotion went through as not loss-free: the eligibility gate did not prove the follower"
           if (← podUid sPod).getD "?" != uid0 then return .fail "the promoted pod was recreated"
           -- flared applies the promotion on its next accepted map; the epoch
           -- advances inside that role shift.

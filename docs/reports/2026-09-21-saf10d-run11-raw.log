@@ -1,0 +1,204 @@
+# === Suite: continuous-replication ===
+# Cleaning up cluster 'cont-repl'
+# Deploying cluster 'cont-repl' in namespace 'flare-cont-repl'
+# Waiting for: namespace flare-cont-repl not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-cont-repl (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap cont-repl-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting for StatefulSet cont-repl-nodes to be ready...
+# Waiting for: all 2 pods ready (timeout: 180s)
+#   OK after 0s
+# Waiting for: 2 nodes registered (timeout: 300s)
+#   OK after 0s
+# Waiting 50s grace period for operator reconciliation...
+# Checking operator activity...
+# --- Operator logs (flare-operator) ---
+#   [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeState
+#     "cont-repl-nodes-1.cont-repl-nodes.flare-cont-repl.svc.cluster.local"
+#     12121
+#     (FlareOperator.K8s.FlareSta
+#   [TRACE] Event: NodeState cont-repl-nodes-1.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121 | Result: Prepare->Active | Reason: reconstruction complete
+#   [TopologyBroadcast] Broadcast complete (v4294967303)
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 6303ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] continuous-replication probe: 2 stats read(s) in 1113ms (tick 3; in-mode remembered: 0, out-of-mode remembered: 0)
+#   [flare-operator] CONTINUOUS REPLICATION eligibility cont-repl-nodes-1.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121: UNFIT (the follower is idle: not following anyone); reads ineligible
+#   [flare-operator] grace period: 20 cycles remaining
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 5207ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] continuous-replication probe: 1 stats read(s) in 550ms (tick 4; in-mode remembered: 1, out-of-mode remembered: 0)
+#   [flare-operator] CONTINUOUS REPLICATION eligibility cont-repl-nodes-1.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121: reads unknown: not probed this pass; promotion unknown: not probed this pass
+#   [flare-operator] grace period: 19 cycles remaining
+#   [flare-operator] re-sending v4294967304: 1 node(s) are Active in the map but their pods are not Ready yet (activation not applied locally)
+#   [flare-operator] topology changed (v4294967304 → v4294967304), broadcasting
+#   [TopologyBroadcast] Broadcasting node sync v4294967304 (2 nodes) to 2 pods
+#   [TcpClient] Sent node sync v4294967304 (2 nodes) to 10.244.0.19:12121
+#   [TcpClient] Sent node sync v4294967304 (2 nodes) to 10.244.0.17:12121
+#   [TopologyBroadcast] Broadcast complete (v4294967304)
+#   [flare-operator] replica repair ledger initialized from cont-repl-nodes-0.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121: 0 destination counter(s) recorded as baseline, none attributed
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 8174ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] continuous-replication probe: 2 stats read(s) in 1025ms (tick 5; in-mode remembered: 1, out-of-mode remembered: 0)
+#   [flare-operator] CONTINUOUS REPLICATION eligibility cont-repl-nodes-1.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121: reads eligible: following epoch 2:79cf8c19-9151-4c15-bf65-df9803e01aa4; position observed 0s ago; lag 0 ≤ 1000 (read); promotion eligible: following epoch 2:79cf8c19-9151-4c15-bf65-df9803e01aa4; position observed 0s ago; lag 0 ≤ 100 (promotion)
+#   [flare-operator] grace period: 18 cycles remaining
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 6287ms (nodes=2 M=1 S=1 D=0 P=0)
+#   
+# Waiting for: replica's follower is following (timeout: 120s)
+#   OK after 0s
+# Waiting for: replica's local items match the master's (timeout: 60s)
+#   OK after 0s
+# following: replica applied 30 forwarded change(s); applied_lsn=(some 34) master latest=(some 34) source_epoch=(some 2:79cf8c19-9151-4c15-bf65-df9803e01aa4)
+# fault: rejecting 10.244.0.17 ⇄ 10.244.0.19:12121 on flare-e2e-control-plane (both directions)
+# Waiting for: master counts dropped forwarded writes (was 0) (timeout: 120s)
+#   OK after 20s
+# forwarding retries settled at 2 dropped write(s)
+# under the cut: created 10/10, updated 5/5, deleted 5/5; master dropped 2; master latest=54 items=35; replica items=30 applied_lsn=(some 34) (was 34) state=(some disconnected); replica pod uid=d35400df-e5f0-4a20-aba9-ce438d0397de reconstruction_started=1
+# fault cleared: 10.244.0.17 ⇄ 10.244.0.19 forwards again
+# Waiting for: replica applied past the master's position at the cut (54) while following (timeout: 240s)
+#   OK after 5s
+# after heal: resumed from applied_lsn=34 (cut started at 34) → 54 (bar 54); state=(some following) reason=none; wal_applied=(some 4) wal_skipped=(some 92); items master=35 replica=35; reconstruction_started 1→1; pod uid d35400df-e5f0-4a20-aba9-ce438d0397de→d35400df-e5f0-4a20-aba9-ce438d0397de
+# Waiting for: operator held the drop as owned by continuous replication (timeout: 60s)
+#   OK after 0s
+# Waiting for: operator closed the owned request by position (timeout: 240s)
+#   OK after 0s
+# Waiting for: ledger persisted as empty (timeout: 60s)
+#   OK after 15s
+# fault: the operator may exec only into the master cont-repl-nodes-0 (rule 5: ["pods/exec"] → ["pods/e2e-revoked-exec"]; added a resourceNames-restricted pods/exec rule)
+# fault: rejecting 10.244.0.17 ⇄ 10.244.0.19:12121 on flare-e2e-control-plane (both directions)
+# Waiting for: master counts dropped writes (was 4) (timeout: 120s)
+#   OK after 20s
+# Waiting for: operator holds the drop as follower-state-unknown (timeout: 150s)
+#   OK after 0s
+# with pods/exec revoked: held-as-unknown=true; ledger holds: follower state unknown (stats unreadable)
+# fault cleared: 10.244.0.17 ⇄ 10.244.0.19 forwards again
+# Waiting for: replica catches up (follower does not depend on the operator's probe) (timeout: 240s)
+#   OK after 0s
+# fault cleared: pods/exec restored
+# Waiting for: once the probe works again the owned request closes by position (timeout: 300s)
+#   OK after 0s
+# after restoring pods/exec: closed=true; reconstruction_started 1→1; pod uid d35400df-e5f0-4a20-aba9-ce438d0397de→d35400df-e5f0-4a20-aba9-ce438d0397de
+# Waiting for: no repair entry pending before the bulk operation (timeout: 180s)
+#   OK after 15s
+# flush_all on the master: source_epoch 2:79cf8c19-9151-4c15-bf65-df9803e01aa4 → 3:d11e5262-9c5b-441e-b886-1346e9e2fc9a; master items=0
+# Waiting for: follower declares needs_rebuild (timeout: 90s)
+#   OK after 0s
+# follower: state=(some needs_rebuild) reason=(some epoch_mismatch)
+# Waiting for: operator requests the rebuild (ledger entry for the follower) (timeout: 120s)
+#   OK after 10s
+# request evidence: ledger entry seen=cont-repl-nodes-1.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121=0/{"kind":"requested"}; follower-declared path=true (false = the drop path won the race); master drops now=6
+# Waiting for: follower reconstructed and follows the new epoch (timeout: 420s)
+#   OK after 50s
+# after the rebuild: reconstruction_started 1→2; state=(some following) epoch=(some 3:d11e5262-9c5b-441e-b886-1346e9e2fc9a) (master 3:d11e5262-9c5b-441e-b886-1346e9e2fc9a); ledger request observed=true
+# Waiting for: new writes reach the rebuilt follower (timeout: 90s)
+#   OK after 0s
+# Waiting for: ledger persisted as empty (timeout: 180s)
+#   OK after 0s
+# post-flush writes: master=10 replica=10; ledger empty=true; pod uid d35400df-e5f0-4a20-aba9-ce438d0397de→d35400df-e5f0-4a20-aba9-ce438d0397de
+# Waiting for: following replica gets balance 50 (timeout: 150s)
+#   OK after 10s
+# with slave=50: replica balance=(some 50) state=(some following)
+# fault: rejecting 10.244.0.17 ⇄ 10.244.0.19:12121 on flare-e2e-control-plane (both directions)
+# Waiting for: cut replica is withheld from reads (balance 0) (timeout: 150s)
+#   OK after 15s
+# under the cut: replica balance=(some 0) state=(some disconnected) eligibility-logged=true
+# fault cleared: 10.244.0.17 ⇄ 10.244.0.19 forwards again
+# Waiting for: healed replica is served again (balance 50) (timeout: 240s)
+#   OK after 10s
+# after the heal: replica balance=(some 50) state=(some following)
+# Waiting for: spec restored to slave=0 (timeout: 120s)
+#   OK after 15s
+# fault: rejecting 10.244.0.17 ⇄ 10.244.0.19:12121 on flare-e2e-control-plane (both directions)
+# Waiting for: cycle 0: master counts a dropped forwarded write (timeout: 90s)
+#   OK after 0s
+# fault cleared: 10.244.0.17 ⇄ 10.244.0.19 forwards again
+# Waiting for: cycle 0: replica converges while following (timeout: 180s)
+#   OK after 0s
+# cycle 0: stored 10/10, drop counted=true, replica resumed from 121 → 131; items master=20 replica=20; converged=true
+# fault: rejecting 10.244.0.17 ⇄ 10.244.0.19:12121 on flare-e2e-control-plane (both directions)
+# Waiting for: cycle 1: master counts a dropped forwarded write (timeout: 90s)
+#   OK after 0s
+# fault cleared: 10.244.0.17 ⇄ 10.244.0.19 forwards again
+# Waiting for: cycle 1: replica converges while following (timeout: 180s)
+#   OK after 0s
+# cycle 1: stored 10/10, drop counted=true, replica resumed from 131 → 143; items master=29 replica=29; converged=true
+# fault: rejecting 10.244.0.17 ⇄ 10.244.0.19:12121 on flare-e2e-control-plane (both directions)
+# Waiting for: cycle 2: master counts a dropped forwarded write (timeout: 90s)
+#   OK after 0s
+# fault cleared: 10.244.0.17 ⇄ 10.244.0.19 forwards again
+# Waiting for: cycle 2: replica converges while following (timeout: 180s)
+#   OK after 0s
+# cycle 2: stored 10/10, drop counted=true, replica resumed from 143 → 155; items master=38 replica=38; converged=true
+# after 3 cycles: content mismatches=[]; reconstruction_started 2→2; pod uid d35400df-e5f0-4a20-aba9-ce438d0397de→d35400df-e5f0-4a20-aba9-ce438d0397de; wal_applied=(some 20) forward_applied=(some 84)
+# Waiting for: ledger closes every counted drop by position (timeout: 300s)
+#   OK after 0s
+# fault: rejecting 10.244.0.17 ⇄ 10.244.0.19:12121 on flare-e2e-control-plane (both directions)
+# Waiting for: master counts a dropped forwarded write (timeout: 90s)
+#   OK after 20s
+# Waiting for: operator holds the drop as owned (timeout: 120s)
+#   OK after 15s
+# before the restart: stored 10/10, drop counted=true, ledger holds: owned by continuous replication
+# Waiting for: a new operator pod is Ready (timeout: 180s)
+#   OK after 35s
+# operator restarted (old pod flare-operator-6ccb48f487-bw9mc); ready=true; ledger after restart: dests=[cont-repl-nodes-1.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121] holds=owned by continuous replication
+# fault cleared: 10.244.0.17 ⇄ 10.244.0.19 forwards again
+# Waiting for: replica converges while following (timeout: 180s)
+#   OK after 20s
+# Waiting for: the restarted operator closes the entry by position (timeout: 400s)
+#   OK after 5s
+# after the heal: converged=true; ledger empty=true; reconstruction_started 2→2; pod uid d35400df-e5f0-4a20-aba9-ce438d0397de→d35400df-e5f0-4a20-aba9-ce438d0397de
+# fault: rejecting 10.244.0.17 ⇄ 10.244.0.19:12121 on flare-e2e-control-plane (both directions)
+# fault cleared: 10.244.0.17 ⇄ 10.244.0.19 forwards again
+# backlog: stored 300/300, updated 5/5, deleted 5/5 under the cut (master latest 475, replica applied 165); healed; killed=1
+
+# Waiting for: replica container restarted (restartCount +1) and Ready (timeout: 240s)
+#   OK after 15s
+# after the kill: restartCount 0→1; ready-again=true; pod uid d35400df-e5f0-4a20-aba9-ce438d0397de→d35400df-e5f0-4a20-aba9-ce438d0397de
+# Waiting for: replica follows again and matches the master's items (timeout: 420s)
+#   OK after 0s
+# after the restart: state=(some following) applied=(some 475) (master latest (some 475)); items master=343 replica=343; new process: reconstruction_completed=1 wal_fallback_to_dump=0 wal_applied=(some 0)
+# Waiting for: ledger closes the drops counted under the cut (timeout: 300s)
+#   OK after 0s
+# deleted master pod cont-repl-nodes-0 (graceful, preStop 30s); follower cont-repl-nodes-1 was following epoch 3:d11e5262-9c5b-441e-b886-1346e9e2fc9a
+# Waiting for: the follower is promoted to master (drain) (timeout: 180s)
+#   OK after 35s
+# promotion: follower promoted=true; drain logged=false; drain blocked (guard refused)=false; NOT LOSS-FREE logged=false; new master epoch=(some 4:f3d6e3b0-9224-4bc1-ab13-68ab16fe8b6a)
+# Waiting for: the promoted node advances its source epoch (timeout: 120s)
+#   OK after 0s
+# Waiting for: ex-master returns, rebuilds and follows the new epoch (timeout: 480s)
+#   OK after 15s
+# ex-master cont-repl-nodes-0: state=(some following) epoch=(some 4:f3d6e3b0-9224-4bc1-ab13-68ab16fe8b6a) (new master 4:f3d6e3b0-9224-4bc1-ab13-68ab16fe8b6a); items new-master=343 ex-master=343
+# Waiting for: new writes reach the ex-master as a follower (timeout: 90s)
+#   OK after 0s
+# Waiting for: newcomer follows (timeout: 300s)
+#   OK after 0s
+# Waiting for: newcomer's local items match the master's (timeout: 180s)
+#   OK after 0s
+# newcomer cont-repl-nodes-2: 21 batches of 20 written during its copy; state=(some following) epoch=(some 4:f3d6e3b0-9224-4bc1-ab13-68ab16fe8b6a) (master (some 4:f3d6e3b0-9224-4bc1-ab13-68ab16fe8b6a)); items master=773 newcomer=773; reconstruction_completed=(some 1) wal_applied=(some 1)
+# fault cleared: 10.244.0.19 ⇄ 10.244.0.22 forwards again
+# Cleaning up cluster 'cont-repl'
+# Tests: 13, Failures: 0
+# RESULT: PASS
+1..13
+ok 1 - precondition: both flags are on for every node and the replica's read balance is 0
+ok 2 - normal following: writes reach the replica and its follower reports following
+ok 3 - cut: create, update and delete on the master while the replica is unreachable; then new writes stop
+ok 4 - heal: with NO new writes the replica catches up from its position — no rebuild, no pod recreation
+ok 5 - ledger: the counted drop was HELD under the follower's ownership and CLOSED without a demotion
+ok 6 - operator stats fetch failure: a drop whose follower cannot be probed is held as Unknown, never demoted, and closes when the probe returns
+ok 7 - bulk operation: flush_all on the master advances the epoch; the follower declares needs_rebuild; the operator rebuilds it; it follows the new epoch
+ok 8 - read eligibility: a following replica gets the spec's slave balance; a cut replica is withheld to 0; healing restores it
+ok 9 - repeated cuts: three cut/write/heal cycles converge from the position each time; no rebuild, no pod recreation
+ok 10 - operator restart during a cut: the owned hold survives the restart; the follower catches up; the entry closes; no rebuild
+ok 11 - replica crash with a backlog pending: flared killed -9 after the heal; restarts on its PVC, converges without a full dump; pod not recreated
+ok 12 - planned promotion: the master pod is deleted (graceful drain); the proven follower is promoted through the gate, its epoch advances; the returning ex-master rebuilds and follows the new epoch
+ok 13 - initial copy under load: a third replica joins by snapshot while writes flow, then follows and matches
+EXIT=0

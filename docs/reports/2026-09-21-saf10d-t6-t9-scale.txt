@@ -42,3 +42,21 @@ Boot scan (exact curr_items seed at open, kill -9 of the PVC-backed replica): 79
   back following with equal items and no full dump (incremental WAL reconstruction from the cursor, reconstruction_completed=1).
 Operator probe cost at this size: 179 probe timing lines, max 5,452 ms for a pass (during the load; typical ~1 s), 182 "reconcile
   slow" lines over the run — CPU contention on a single-node kind while 800k keys were loaded; not separable from the load here.
+
+=== local run 2 of purge+limits @ 3f6b06b (writer fixed; raw: docs/reports/2026-09-21-saf10d-purge-limits-run2-raw.log) === RESULT: FAIL (1 of 4)
+T9 ok: 300 keys × 50 kB + 100 deletes under the cut (master 24→424); after the heal the replica converged 24→424 with no
+  reconstruction; master RSS 46,424 → max 75,992 kB (growth 29,568 kB, bound 131,072); every change arrived by forwarding first
+  (wal_applied=0), the WAL re-delivery was skipped, the 100 delete tombstones were collected by position (tombstones_dropped=100,
+  live 0); deleted keys absent on the replica; items 220 = 220.
+T6 NOT ok — and NOT the expected outcome: 40 × 100 kB written under the cut (master 24→64, several flushes against the 1 MB write
+  buffer, 8 s wait for the TTL purge); after the heal the follower reported state=error reason=apply_error with applied stuck at
+  24, while all 40 keys had arrived by FORWARDING (items 60 = 60). The follow stream refused a WAL batch and retried it forever
+  — the same signature as the scale run (applied frozen at 142,549 behind forwarding). Common factor in both: the master's memtable
+  was FLUSHED during the window. Root cause not yet identified (the replica's refusal line was not in the 80-line tail the harness
+  dumps); scale run 2 prints state/reason/refuse counters every minute. lsn_purged itself was therefore NOT staged: the refusal
+  happened before any purge could be observed.
+
+=== continuous-replication run 11 @ df1bb07 (drain-based planned promotion; raw: docs/reports/2026-09-21-saf10d-run11-raw.log) === RESULT: PASS (13/13)
+Test 12 now deletes the master with a 30 s preStop; the follower was promoted, the epoch advanced (3:… → 4:…), the ex-master
+rebuilt and followed (343 = 343), no NOT-LOSS-FREE line. The operator's "graceful drain" line was not found in the 3000-line log
+tail, so whether the promotion went through the drain path or through dead detection is not shown by this run (to be widened).

@@ -110,3 +110,14 @@ T6: 40 × 100 kB under the cut (master 24→64, flushes against the 1 MB write b
   needs_rebuild with reason lsn_purged (applied stayed 24, decode_refused 0 — no misdecode, the served history simply began beyond
   the position); the operator filed the repair request; reconstruction_started 1→2 by snapshot bootstrap (wal_fallback_to_dump=1,
   snapshot_bootstrap=2); the node came back FOLLOWING with items 60 = 60; pod UID unchanged; ledger empty. Same outcome as CI run 3.
+
+=== scale evaluation run 3 @ suite 58688c1, flared 3b7f38c (2Gi/1Gi memory budget, 64 MB block cache, 2M keys) — INTERRUPTED, log lost ===
+The host was restarted before the run finished; /tmp (the run log and the local VPATH build tree) was cleared and the kind cluster
+went down with Docker. Only the console readings taken during the run survive (from the per-minute follow lines):
+  load: 2,000,000 keys stored (master items 2,000,000, replica items 2,000,000 via forwarding — forward_applied=2000000); no master
+  restart this time (the 2Gi budget held).
+  follow stream draining behind forwarding: applied 1,379,554 → 1,430,299 in one minute (≈845 changes/s; every one skipped as
+  already applied by forwarding — wal_skipped 1,390,079 → 1,440,511, decode_refused 0), master latest 2,000,004; convergence was
+  projected at ≈11 more minutes when the host stopped. Throughput is bounded by repl-follow-max-batches (256) per poll round trip,
+  not by apply cost (all skips).
+  Boot-scan and probe numbers for this run were not reached. Rerun pending (numbers are console readings, not a recorded run).

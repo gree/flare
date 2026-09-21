@@ -60,3 +60,18 @@ T6 NOT ok — and NOT the expected outcome: 40 × 100 kB written under the cut (
 Test 12 now deletes the master with a 30 s preStop; the follower was promoted, the epoch advanced (3:… → 4:…), the ex-master
 rebuilt and followed (343 = 343), no NOT-LOSS-FREE line. The operator's "graceful drain" line was not found in the 3000-line log
 tail, so whether the promotion went through the drain path or through dead detection is not shown by this run (to be widened).
+
+CI run 2 @ df1bb07d89a5280c62917cd11d1489bc2e4f3e47: E2E matrix https://github.com/gree/flare/actions/runs/35565289216 FAIL (2 of 5 legs)
+  continuous-replication PASS (13/13 + 3 scale skips) — first CI pass of the full acceptance suite; topology PASS; wal-recovery PASS (48/48).
+  replication FAIL: T6 as locally (follow stream refuses after the master's flush; see below); the other 43 tests passed.
+  breaker-migration FAIL: replica-repair SAF-05 test 17 — "RBAC restore became effective for the operator's SA after 303s" against the
+    test's 300 s bound (test 18 cascaded). Environment latency of RBAC propagation on the GitHub kind runner (the same class of
+    failure recorded under EV-03 for PR #143); locally the restore was effective after 0 s. The test lives in PR #143's base and is
+    not changed here.
+Local purge run 3 @ 3f6b06b (raw: docs/reports/2026-09-21-saf10d-purge-run3-raw.log): T6 reproduced identically (state=error reason=apply_error, applied frozen at 24
+  while forwarding delivered all 40 keys). The refusal line could not be read before the harness tore the cluster down; the test now
+  dumps the replica's refusal lines itself.
+Scale run 2 (in progress, 2M keys): the follower is IDLE with reason "shutdown" and its applied position frozen at 102,259 while
+  forwarding keeps delivering (items equal at 1,539,525): the follower THREAD received a shutdown request from somewhere other than
+  cluster::stop_wal_follower (which records "stopped"), and nothing restarts it until the next node-map broadcast — a lifecycle gap
+  independent of the T6 refusal. Under investigation (call sites of thread shutdown in flared).

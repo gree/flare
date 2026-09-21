@@ -1,0 +1,29 @@
+# SAF-10d — T6 (retention purge), T9 (bounded backlog / positional GC), scale evaluation, and the first CI executions of PR #144
+# suites: flare_operator/FlareOperator/E2E/Tests/ContinuousReplicationLimits.lean
+#   flare_e2e --filter continuous-replication-purge | continuous-replication-limits | continuous-replication-scale (FLARE_E2E_SCALE_KEYS)
+# date: 2026-09-21   host: local kind flare-e2e (arm64) and GitHub Actions (ubuntu-latest, kind)
+
+=== CI, PR #144 (base safety/saf-01-topology-authority = PR #143's head) ===
+pull_request-triggered workflows created NO check suites for this stacked PR (0 check suites on the head commit; cause not yet
+identified). All CI evidence below comes from workflow_dispatch runs, which were added to the three workflows for that purpose.
+
+CI run 1 @ bbc9d5daef1101317c21e808e75af6da4fcb9ad1 (before the tr-escape and drain fixes):
+  nix-linux:        https://github.com/gree/flare/actions/runs/35561186289  success
+  safety-evidence:  https://github.com/gree/flare/actions/runs/35561188279  success
+  E2E matrix:       https://github.com/gree/flare/actions/runs/35561126678  FAIL (3 of 5 legs)
+    topology PASS; wal-recovery PASS.
+    breaker-migration FAIL: replica-repair SAF-05 test 17 "RBAC restore did not become effective for the operator's own service
+      account within 300s" (test 18 cascaded on the non-empty ledger). This is the RBAC-propagation flake already on record under
+      EV-03 (CI runs 4/6/8 of PR #143); the other 35 tests of the leg passed, incl. replica-repair 13-16 and operator-restart.
+    replication FAIL: continuous-replication-purge T6 — 0 of 40 big keys were written (the writer's tr escape reached the shell as a
+      doubled backslash), so nothing was purged and the follower simply caught up. Harness defect, fixed in 17b6b89; the other 43
+      tests passed, incl. continuous-replication-limits (which passed VACUOUSLY for the same reason — it now fails when no backlog
+      is produced, 3f6b06b).
+    continuous-replication FAIL: test 12 (failover by pod deletion) — "the follower was not promoted" within 300 s. On CI the
+      StatefulSet recreated the master pod before the operator ever saw it absent, so no failover happened (the ex-master resumed as
+      master from its PVC). Locally (run 10) the absence had been observed and the follower promoted in 35 s. Test rewritten (df1bb07)
+      as a PLANNED promotion: preStop 30 s keeps the deleted master Terminating, the operator drains it and promotes the follower only
+      through the eligibility gate. Tests 1-11 and 13 passed on CI (13 of 16 in the leg incl. the 3 scale skips).
+
+=== local run 1 of purge+limits @ 20c8df3 (tr-escape defect present) === RESULT: FAIL
+  T6 not ok (0/40 keys written, WAL not purged, follower caught up); T9 "ok" but vacuous (0 keys). Raw: docs/reports/2026-09-21-saf10d-purge-limits-run1-raw.log

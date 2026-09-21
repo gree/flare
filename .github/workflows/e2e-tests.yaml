@@ -11,6 +11,11 @@ on:
     branches:
       - flare-operator
       - master
+      # Stacked safety PRs (base = another safety/* branch, so the diff is
+      # only the new work) must still run the E2E matrix.
+      - 'safety/**'
+  # Manual run of a branch (e.g. re-running a leg for evidence).
+  workflow_dispatch:
 
 concurrency:
   group: e2e-${{ github.workflow }}-${{ github.head_ref || github.ref }}

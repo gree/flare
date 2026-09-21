@@ -552,9 +552,9 @@
         "SAF-09"
       ],
       "review": {
-        "commit": "f7d327fd24fc9310c3f2c4f13a8b50ebb1956a14",
-        "date": "2026-09-16",
-        "note": "Second fully green CI matrix; topology-authority 4/4 for the fifth consecutive CI execution since the two harness fixes. PARTIAL / UNVERIFIED."
+        "commit": "5e7a3df871fd667412b1623b3074b5b8849c2939",
+        "date": "2026-09-22",
+        "note": "SAF-10 (PR #144) changed Main.lean, K8sReconciler.lean and cluster.cc without touching this control's mechanism: Main gained the per-tick continuous-replication probe and read withholding at commit (after the fenced broadcast decision, not before it); K8sReconciler gained partitionMap-only candidate shaping and a PodListResponse field; cluster.cc gained the WAL follower lifecycle. The lease/fence path and its proofs are unchanged. PARTIAL / UNVERIFIED unchanged."
       }
     },
     {
@@ -627,9 +627,9 @@
         "SAF-09"
       ],
       "review": {
-        "commit": "33205465691b0bf59dff1ad348ed810a5d20f24f",
-        "date": "2026-09-13",
-        "note": "Bridge.lean/Main.lean changed for the delete-outcome wording; commit/merge and broadcast untouched. No new evidence for SC-02."
+        "commit": "5e7a3df871fd667412b1623b3074b5b8849c2939",
+        "date": "2026-09-22",
+        "note": "SAF-10 (PR #144): Main.lean and K8sReconciler.lean changed (eligibility probe, read withholding, candidate shaping, PodListResponse fields). The at-most-one-master merge (mergeClusterState, demoteDuplicateMasters) and its theorems are untouched; withholdReads rewrites balance only (withholdReads_keys). PARTIAL / UNVERIFIED unchanged."
       }
     },
     {
@@ -1593,9 +1593,9 @@
         "SAF-07"
       ],
       "review": {
-        "commit": "33205465691b0bf59dff1ad348ed810a5d20f24f",
-        "date": "2026-09-13",
-        "note": "Main.lean/Bridge.lean changed only in the empty-master delete's failure wording (unknown outcome); this control's mechanism is untouched. Refreshed for the referenced-file check."
+        "commit": "5e7a3df871fd667412b1623b3074b5b8849c2939",
+        "date": "2026-09-22",
+        "note": "SAF-10 (PR #144): Bridge.queryPodStats now returns at the END line (was a 3 s timeout per read); K8sReconciler.promoteMasterlessPartition gained an exclusion list for followers KNOWN unusable (Active-slave tiers only; the data-bearing last-resort tiers are unchanged) and the FSM logs a last-resort promotion of such a follower as NOT LOSS-FREE. Empty-master guard logic unchanged. PARTIAL / UNVERIFIED unchanged."
       }
     },
     {
@@ -1668,9 +1668,9 @@
         "SAF-08"
       ],
       "review": {
-        "commit": "33205465691b0bf59dff1ad348ed810a5d20f24f",
-        "date": "2026-09-13",
-        "note": "Main.lean/Bridge.lean changed only in the empty-master delete's failure wording (unknown outcome); this control's mechanism is untouched. Refreshed for the referenced-file check."
+        "commit": "5e7a3df871fd667412b1623b3074b5b8849c2939",
+        "date": "2026-09-22",
+        "note": "SAF-10 (PR #144): Main.lean/K8sReconciler.lean/Bridge.lean changed for the eligibility probe, read withholding, candidate shaping and the faster stats read. Dead-node detection (detectDeadNodesPure, unhealthy streak) is unchanged; failover candidates are only re-ordered/excluded by follower evidence (shapePromotionCandidates, partitionMap only). PARTIAL / UNVERIFIED unchanged."
       }
     },
     {
@@ -1734,9 +1734,9 @@
       "runs": [],
       "tasks": [],
       "review": {
-        "commit": "cc30633dfad681828db477d299a42069c7ce4cea",
-        "date": "2026-09-13",
-        "note": "Referenced files changed for the review fixes; the drain guard is untouched. Refreshed for the referenced-file check."
+        "commit": "5e7a3df871fd667412b1623b3074b5b8849c2939",
+        "date": "2026-09-22",
+        "note": "SAF-10 (PR #144): K8sReconciler.lean changed; the drain guard itself is unchanged, but its candidate list is now shaped: a WAL-mode follower not proven current is excluded from PLANNED promotion, so the guard keeps the master (and reports) in more cases. Exercised by the continuous-replication suite's drain-based promotion test (proven follower promoted). PARTIAL / UNVERIFIED unchanged."
       }
     },
     {
@@ -1853,9 +1853,9 @@
       ],
       "tasks": [],
       "review": {
-        "commit": "f7d327fd24fc9310c3f2c4f13a8b50ebb1956a14",
-        "date": "2026-09-16",
-        "note": "First execution evidence for this control, from the PR #143 CI matrix: the circuit-breaker E2E failed once (no trip in 480s) and passed on re-run at the same revision. Root cause read from the code (see residual_risks): the trip counts newly-dead nodes per tick, not the dead fraction, so it is timing-dependent; this predates the branch (52d409e, 2026-07-03) and the branch's K8sReconciler.lean changes do not touch dead detection or the breaker. The implementation stays PARTIAL and the control UNVERIFIED; one fail and one pass at the same revision is not verification. A follow-up task is proposed, not filed, pending the reviewer's decision on scope. Fourth run at c148c6c tripped normally (37/37); the finding stands — the trip is timing-dependent by construction, one green run does not remove it. PARTIAL / UNVERIFIED. Run 5 at 72e5cca did not trip again: 2 of 6 executions on this PR failed to trip within 480s (the other four tripped in 5-15s), all on an unchanged operator image — consistent with the per-tick counting finding, and enough to call the E2E's proof of SC-09 timing-dependent rather than a flake. PARTIAL / UNVERIFIED. Run 6 at f7d327f tripped after 20s: tally on this PR 5 tripped / 2 did not, unchanged operator image. PARTIAL / UNVERIFIED. Run 8 (d185039) tripped after 10s: 6 tripped / 2 did not on this PR."
+        "commit": "5e7a3df871fd667412b1623b3074b5b8849c2939",
+        "date": "2026-09-22",
+        "note": "SAF-10 (PR #144): K8sReconciler.lean changed (FSM fields, candidate shaping, PodListResponse); the circuit-breaker decision and recovery refill are untouched apart from passing the unfit-follower exclusion into the refill. PARTIAL / UNVERIFIED unchanged."
       }
     },
     {
@@ -1918,9 +1918,9 @@
         "SAF-06"
       ],
       "review": {
-        "commit": "33205465691b0bf59dff1ad348ed810a5d20f24f",
-        "date": "2026-09-13",
-        "note": "Main.lean/Bridge.lean changed only in the empty-master delete's failure wording (unknown outcome); this control's mechanism is untouched. Refreshed for the referenced-file check."
+        "commit": "5e7a3df871fd667412b1623b3074b5b8849c2939",
+        "date": "2026-09-22",
+        "note": "SAF-10 (PR #144): Main.lean/K8sReconciler.lean/Bridge.lean changed (see EV-07); the stuck-Down recovery delete path is unchanged. PARTIAL / UNVERIFIED unchanged."
       }
     },
     {
@@ -1997,9 +1997,9 @@
       "runs": [],
       "tasks": [],
       "review": {
-        "commit": "33205465691b0bf59dff1ad348ed810a5d20f24f",
-        "date": "2026-09-13",
-        "note": "Main.lean/Bridge.lean changed only in the empty-master delete's failure wording (unknown outcome); this control's mechanism is untouched. Refreshed for the referenced-file check."
+        "commit": "5e7a3df871fd667412b1623b3074b5b8849c2939",
+        "date": "2026-09-22",
+        "note": "SAF-10 (PR #144): Main.lean gained the continuous-replication eligibility probe and its change-only judgement log lines, and a per-tick probe timing line; existing failure signals unchanged. PARTIAL / UNVERIFIED unchanged."
       }
     },
     {
@@ -2241,9 +2241,9 @@
       "runs": [],
       "tasks": [],
       "review": {
-        "commit": "33205465691b0bf59dff1ad348ed810a5d20f24f",
-        "date": "2026-09-13",
-        "note": "Main.lean/Bridge.lean changed only in the empty-master delete's failure wording (unknown outcome); this control's mechanism is untouched. Refreshed for the referenced-file check."
+        "commit": "5e7a3df871fd667412b1623b3074b5b8849c2939",
+        "date": "2026-09-22",
+        "note": "SAF-10 (PR #144): Main.lean changed (eligibility probe, read withholding); the follower stats keys (repl_follow_*, repl_applied_lsn, repl_source_lsn*) are new role-aware observations but are not yet exported as metrics with a role label. GAP / UNVERIFIED unchanged."
       }
     },
     {

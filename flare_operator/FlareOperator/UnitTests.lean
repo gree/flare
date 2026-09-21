@@ -586,6 +586,28 @@ def checkFollowShaping (ctx : Ctx) : IO Unit := do
   check ctx "requestRebuild adds nothing for a node that already has an (owned) entry"
     (let owned := holdOwned (resolve (request empty masterKey slaveKey 1) state).1 slaveKey (some 5) (some ownEp)
      !(requestRebuild owned masterKey slaveKey).2)
+  -- The two routes to a rebuild request RACE (design §5.4): a drop counted
+  -- for the node (refused forwards after an epoch change) and the
+  -- follower's own needs_rebuild. In either order there is exactly one
+  -- entry, un-owned, resolved to the node, demoted once by plan.
+  check ctx "race: drop request first, then the follower's declaration → one entry, drops kept, one demotion"
+    (let l1 := (resolve (request empty masterKey slaveKey 2) state).1
+     let (l2, added) := requestRebuild l1 masterKey slaveKey
+     !added && l2.entries.length == 1 && (l2.entries.head?.map (·.drops)) == some 2
+       && ((plan l2 true "").2.map Prod.fst) == [slaveKey])
+  check ctx "race: the follower's declaration first, then a drop → one entry with the drops added, one demotion"
+    (let (l1, added) := requestRebuild empty masterKey slaveKey
+     let l2 := (resolve (request l1 masterKey slaveKey 3) state).1
+     added && l2.entries.length == 1 && (l2.entries.head?.map (·.drops)) == some 3
+       && (l2.entries.head?.map (·.owned)) == some false
+       && ((plan l2 true "").2.map Prod.fst) == [slaveKey])
+  check ctx "race: a drop on an OWNED entry and the follower's declaration in the same pass → hand-over, single un-owned request"
+    (let owned := holdOwned (resolve (request empty masterKey slaveKey 1) state).1 slaveKey (some 5) (some ownEp)
+     let (afterAdv, steps) := advanceOwnedAll owned [(slaveKey, rebuild)]
+     let (l2, added) := requestRebuild afterAdv masterKey slaveKey
+     steps.map (·.2) == [.handedOver] && !added && l2.entries.length == 1
+       && (l2.entries.head?.map (·.owned)) == some false
+       && ((plan l2 true "").2.map Prod.fst) == [slaveKey])
   check ctx "deleteGate: an unproven surviving follower refuses the delete"
     (match StatsObservation.deleteGate .act true false true true with
      | .error r => (r.splitOn "continuous-replication").length > 1

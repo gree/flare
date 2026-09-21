@@ -97,3 +97,10 @@ CI run 3 @ ecb1c40032d0e6a63acc413990bce68b2b8b37d0: E2E matrix https://github.c
     operator's own service account within 300s" (302-303 s observed each time), test 18 cascading. This is PR #143's test and bound;
     the GitHub kind runner's RBAC propagation sits right at it. Not changed in this PR (it would re-open #143's diff); to be handled
     in #143 (bound or environment-adaptive wait). Locally the restore has been effective within seconds in every run.
+
+Scale run 2 @ 20c8df3 final (raw: docs/reports/2026-09-21-saf10d-scale-run2-raw.log): RESULT FAIL (2 of 3) — invalid as a follow measurement (master
+  OOMKilled → failover, see above), but two numbers stand: exact key scan at open 1,539,525 live keys in 1,503 ms (≈0.98 µs/key;
+  with the 0.8M-key point, linear in the key count; extrapolation to 15.8M keys ≈ 15–17 s, NOT measured); operator probe pass max
+  4,461 ms (164 lines, 228 "reconcile slow" over the run, all during the load and the churn). The kill -9 hit the node the test
+  still believed to be the replica; it had become the master, the topology kept churning (stuck-Down pod recreation), and the
+  restarted node came back with 0 keys pending a rebuild — no conclusion beyond "the 512Mi budget does not fit 2M keys".

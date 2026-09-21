@@ -70,6 +70,7 @@ public:
 		apply_refused_cursor,		// at or below the applied position: already decided
 		apply_refused_session,		// different source history, or generations unavailable
 		apply_refused_incarnation,	// issued against a copy this node no longer is
+		apply_refused_gap,			// the batch does not continue the applied position: the history between is GONE (or was never served) — rebuild, not retry
 		apply_error,				// storage failure; nothing was written
 	};
 

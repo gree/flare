@@ -2688,9 +2688,9 @@ int storage_rocksdb::apply_wal_batch(const string& source_epoch, const string& i
 		// starts at the batch holding the requested sequence), so a base at
 		// or below the cursor is expected; a gap is not.
 		if (base_seq > cursor + 1) {
-			log_err("WAL batch at %llu refused: it does not continue the applied position %llu (a gap would advance the cursor over changes that were never applied)",
+			log_err("WAL batch at %llu refused: it does not continue the applied position %llu (a gap would advance the cursor over changes that were never applied; the history in between is not being served -> this copy must be rebuilt)",
 				(unsigned long long)base_seq, (unsigned long long)cursor);
-			refusal = apply_error;
+			refusal = apply_refused_gap;
 			break;
 		}
 

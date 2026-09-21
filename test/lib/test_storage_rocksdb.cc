@@ -1947,6 +1947,11 @@ void test_apply_rule_refuses_gap_in_the_stream() {
 	storage_rocksdb::apply_outcome refusal;
 	// The position is 0; a batch starting at 50 leaves 1..49 unaccounted.
 	cut_assert_equal_int(-1, s->apply_wal_batch(epoch, inc_for_batch, 50, batch, applied, skipped, refusal));
+	// A gap is HISTORY LOSS, distinguished from a transient error: the
+	// follower turns it into lsn_purged / needs_rebuild instead of retrying
+	// the same batch forever (found by the T6 E2E: RocksDB served the oldest
+	// surviving WAL file instead of reporting NotFound).
+	cut_assert_equal_int(static_cast<int>(storage_rocksdb::apply_refused_gap), static_cast<int>(refusal));
 	cppcut_assert_equal(static_cast<uint64_t>(0), s->get_repl_last_lsn());
 	drop_rocksdb(scratch, wal_slave_dir);
 	drop_rocksdb(s, wal_master_dir);

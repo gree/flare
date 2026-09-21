@@ -232,6 +232,18 @@ int op_repl_sync_wal::_run_server() {
 		rocksdb->incr_wal_sync_lsn_purged();
 		return this->_send_result(result_server_error, "lsn_purged");
 	}
+	// RocksDB does not always report a purged position as NotFound: when the
+	// WAL file holding the requested sequence is gone, GetUpdatesSince can
+	// start at the oldest file that is still there. The history between the
+	// requested position and that first batch has been purged all the same,
+	// so say so — a slave that applied the gap would silently lose it, and
+	// one that refuses it (as ours does) would retry forever.
+	if (result == 0 && !updates.empty() && this->_lsn > 0 && updates.front().first > this->_lsn + 1) {
+		log_notice("LSN %llu is no longer served: the oldest WAL batch available is %llu -> lsn_purged (slave needs a rebuild)",
+			(unsigned long long)this->_lsn, (unsigned long long)updates.front().first);
+		rocksdb->incr_wal_sync_lsn_purged();
+		return this->_send_result(result_server_error, "lsn_purged");
+	}
 
 	if (result < 0) {
 		log_err("get_updates_since failed for LSN %llu", this->_lsn);
@@ -602,9 +614,15 @@ int op_repl_sync_wal::_parse_text_client_parameters() {
 				this->_skipped += skipped;
 				if (result < 0) {
 					log_err("follow apply refused at LSN %llu (outcome=%d)", (unsigned long long)lsn, static_cast<int>(refusal));
+					// A gap is history loss, not a transient apply failure: the
+					// follower must declare needs_rebuild (lsn_purged), never retry.
 					this->_client_result = (refusal == storage_rocksdb::apply_refused_session
 						|| refusal == storage_rocksdb::apply_refused_incarnation)
-						? client_epoch_mismatch : client_apply_error;
+						? client_epoch_mismatch
+						: (refusal == storage_rocksdb::apply_refused_gap ? client_lsn_purged : client_apply_error);
+					if (refusal == storage_rocksdb::apply_refused_gap) {
+						rocksdb->incr_wal_sync_lsn_purged();
+					}
 					rocksdb->incr_wal_sync_apply_failure();
 					return -1;
 				}

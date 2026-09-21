@@ -2,6 +2,7 @@ name: Safety evidence
 
 on:
   pull_request:
+  workflow_dispatch:
   push:
     branches: [master, flare-operator]
 

@@ -821,12 +821,22 @@ resume; a full dump is asserted absent), T5 (three cut/heal cycles), T8
 epoch; the ex-master rebuilds and follows), plus the operator scenarios of
 §5.3/§5.4 (read withholding, ledger ownership, stats-fetch failure held as
 Unknown). T10–T13 and T15 are pinned by the RocksDB cutter tests
-(`test/lib/test_storage_rocksdb.cc`, `test_apply_rule_*`). **Not staged:**
-T6 (a retention purge cannot be forced deterministically in the harness;
-`lsn_purged` → `needs_rebuild` is unit-pinned), T7 beyond the epoch check
-(an old-connection refusal is unit-pinned), T9 (resource limits under a slow
-replica) and T17 (lock-hold and starvation measurement, deferred by
-agreement). Run records: `docs/reports/2026-09-20-saf10d-*.txt`.
+(`test/lib/test_storage_rocksdb.cc`, `test_apply_rule_*`). T6 is staged by
+`continuous-replication-purge` (1 MB write buffer, 1 s WAL TTL: the follower
+must declare `needs_rebuild`/`lsn_purged`; this found that RocksDB serves the
+oldest surviving WAL file instead of NotFound, so the master now answers
+`lsn_purged` when the first served batch is beyond the requested position
+and the follower maps a contiguity gap to history loss). T9 is staged in a
+bounded form by `continuous-replication-limits` (15 MB backlog with deletes,
+master RSS growth ≤ 128 MB, tombstones collected by position). **Not
+staged:** T7 beyond the epoch check (an old-connection refusal is
+unit-pinned) and T17 (lock-hold and starvation measurement, deferred by
+agreement). A scale evaluation suite (`continuous-replication-scale`,
+`FLARE_E2E_SCALE_KEYS`) records the follow throughput (≈255 changes per poll
+= `repl-follow-max-batches`; ≈1.3k changes/s against a 10k/s loader), the
+exact key scan at open (797,756 keys in 854 ms) and the operator's probe
+cost; its numbers are for extrapolation, not acceptance. Run records:
+`docs/reports/2026-09-20-saf10d-*.txt`, `docs/reports/2026-09-21-saf10d-*.txt`.
 
 ---
 

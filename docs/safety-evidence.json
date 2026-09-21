@@ -2257,6 +2257,21 @@
               "symbol": "suite"
             }
           ]
+        },
+        {
+          "id": "CHECK-16-limits",
+          "kind": "scenario",
+          "procedure": "E2E continuous-replication-limits (T9, bounded): the far-behind replica converges from the position in bounded polls (largest 1 s advance recorded), no reconstruction, master RSS growth within 128 MB. E2E continuous-replication-scale (evaluation, FLARE_E2E_SCALE_KEYS): follower convergence after a pipelined load, exact key scan duration at open after a kill -9 on a PVC, operator probe timing at that size.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/ContinuousReplicationLimits.lean",
+              "symbol": "limitsSuite"
+            },
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/ContinuousReplicationLimits.lean",
+              "symbol": "scaleSuite"
+            }
+          ]
         }
       ],
       "runs": [
@@ -2458,6 +2473,28 @@
               "symbol": "suite"
             }
           ]
+        },
+        {
+          "id": "CHECK-18-race",
+          "kind": "scenario",
+          "procedure": "flare_unit: the two routes to a rebuild request (a counted drop and the follower's needs_rebuild declaration) in either order, and a drop on an OWNED entry plus the declaration in one pass, yield exactly one un-owned entry for the node and one demotion.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/UnitTests.lean",
+              "symbol": "checkFollowShaping"
+            }
+          ]
+        },
+        {
+          "id": "CHECK-18-purge",
+          "kind": "scenario",
+          "procedure": "E2E continuous-replication-purge (T6): with a 1 MB write buffer, 1 s WAL TTL and 1 MB WAL cap, ~4 MB is written while the replica is cut; on healing the follower must declare needs_rebuild with reason lsn_purged and never report following/synchronised; the operator files a repair request and the node is rebuilt in place and follows again with equal items.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/ContinuousReplicationLimits.lean",
+              "symbol": "purgeSuite"
+            }
+          ]
         }
       ],
       "runs": [
@@ -2484,6 +2521,14 @@
           "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter continuous-replication (run 8, local kind)",
           "result": "pass",
           "report": "docs/reports/2026-09-20-saf10d-minimal-e2e-continuous-replication.txt"
+        },
+        {
+          "check": "CHECK-18-race",
+          "commit": "38b34b944055f68b71f0ab16a5dbf37ee5b6a26f",
+          "date": "2026-09-21",
+          "command": "cd flare_operator && lake build flare_unit && .lake/build/bin/flare_unit",
+          "result": "pass",
+          "report": "docs/reports/2026-09-21-saf10c-flare-unit-race.txt"
         }
       ],
       "tasks": [
@@ -2644,6 +2689,17 @@
             {
               "path": "test/lib/test_storage_rocksdb.cc",
               "symbol": "test_apply_rule_old_put_refused_after_tombstone_collected"
+            }
+          ]
+        },
+        {
+          "id": "CHECK-20",
+          "kind": "scenario",
+          "procedure": "E2E continuous-replication-limits (T9, bounded): a 15 MB backlog with 100 deletes accumulated while cut is drained after healing without a reconstruction; the replica's live tombstone count is sampled while draining and must return to 0 once the applied position passed the deletes (no wall clock); deleted keys are absent on the replica; the master's RSS growth is measured (bound 128 MB).",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/ContinuousReplicationLimits.lean",
+              "symbol": "limitsSuite"
             }
           ]
         }

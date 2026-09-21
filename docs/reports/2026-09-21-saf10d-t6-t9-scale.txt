@@ -87,3 +87,13 @@ Scale run 2, live-cluster reading (12 min in): the "idle/shutdown" follower was 
   smaller block cache), (2) detect a master restart/failover and report it instead of a follow stall, (3) record the follow
   throughput bound. Scale run 1's frozen position (142,549) most likely had the same cause (the master's restart count was not
   recorded then).
+
+CI run 3 @ ecb1c40032d0e6a63acc413990bce68b2b8b37d0: E2E matrix https://github.com/gree/flare/actions/runs/35570216917 — 4 of 5 legs PASS
+  replication PASS (44/44): T6 on CI with the served-gap fix — after the heal the follower reported needs_rebuild/lsn_purged (applied
+    24, decode_refused 0), the operator filed the repair request, reconstruction_started 1→2 (snapshot bootstrap), the node came back
+    FOLLOWING with items 60 = 60, pod UID unchanged. T9 (limits) PASS in the same leg.
+  continuous-replication PASS (13/13; scale skipped); topology PASS; wal-recovery PASS.
+  breaker-migration FAIL, third time in a row on CI: replica-repair SAF-05 test 17 "RBAC restore did not become effective for the
+    operator's own service account within 300s" (302-303 s observed each time), test 18 cascading. This is PR #143's test and bound;
+    the GitHub kind runner's RBAC propagation sits right at it. Not changed in this PR (it would re-open #143's diff); to be handled
+    in #143 (bound or environment-adaptive wait). Locally the restore has been effective within seconds in every run.

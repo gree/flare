@@ -901,6 +901,14 @@
           "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter continuous-replication (run 8, local kind)",
           "result": "pass",
           "report": "docs/reports/2026-09-20-saf10d-minimal-e2e-continuous-replication.txt"
+        },
+        {
+          "check": "CHECK-03-follow",
+          "commit": "ecb1c40032d0e6a63acc413990bce68b2b8b37d0",
+          "date": "2026-09-21",
+          "command": "GitHub Actions e2e-tests.yaml (workflow_dispatch), legs replication (continuous-replication-purge, continuous-replication-limits) and continuous-replication",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/35570216917"
         }
       ],
       "tasks": [
@@ -1188,6 +1196,14 @@
           "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter continuous-replication (run 8, local kind)",
           "result": "pass",
           "report": "docs/reports/2026-09-20-saf10d-minimal-e2e-continuous-replication.txt"
+        },
+        {
+          "check": "CHECK-04-follow",
+          "commit": "ecb1c40032d0e6a63acc413990bce68b2b8b37d0",
+          "date": "2026-09-21",
+          "command": "GitHub Actions e2e-tests.yaml (workflow_dispatch), legs replication (continuous-replication-purge, continuous-replication-limits) and continuous-replication",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/35570216917"
         }
       ],
       "tasks": [
@@ -2298,6 +2314,22 @@
           "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter continuous-replication (run 8, local kind)",
           "result": "pass",
           "report": "docs/reports/2026-09-20-saf10d-minimal-e2e-continuous-replication.txt"
+        },
+        {
+          "check": "CHECK-16-limits",
+          "commit": "ecb1c40032d0e6a63acc413990bce68b2b8b37d0",
+          "date": "2026-09-21",
+          "command": "GitHub Actions e2e-tests.yaml (workflow_dispatch), legs replication (continuous-replication-purge, continuous-replication-limits) and continuous-replication",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/35570216917"
+        },
+        {
+          "check": "CHECK-16",
+          "commit": "ecb1c40032d0e6a63acc413990bce68b2b8b37d0",
+          "date": "2026-09-21",
+          "command": "GitHub Actions e2e-tests.yaml (workflow_dispatch), legs replication (continuous-replication-purge, continuous-replication-limits) and continuous-replication",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/35570216917"
         }
       ],
       "tasks": [
@@ -2386,6 +2418,14 @@
           "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter continuous-replication (run 10, local kind)",
           "result": "pass",
           "report": "docs/reports/2026-09-20-saf10d-minimal-e2e-continuous-replication.txt"
+        },
+        {
+          "check": "CHECK-17",
+          "commit": "ecb1c40032d0e6a63acc413990bce68b2b8b37d0",
+          "date": "2026-09-21",
+          "command": "GitHub Actions e2e-tests.yaml (workflow_dispatch), legs replication (continuous-replication-purge, continuous-replication-limits) and continuous-replication",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/35570216917"
         }
       ],
       "tasks": [
@@ -2537,6 +2577,22 @@
           "command": "cutter (reopen_counts|follow|apply_rule|generation|identified_change|snapshot|restore) on /tmp/flare-b17",
           "result": "pass",
           "report": "docs/reports/2026-09-21-saf10-rocksdb-unit-gap.txt"
+        },
+        {
+          "check": "CHECK-18-purge",
+          "commit": "ecb1c40032d0e6a63acc413990bce68b2b8b37d0",
+          "date": "2026-09-21",
+          "command": "GitHub Actions e2e-tests.yaml (workflow_dispatch), legs replication (continuous-replication-purge, continuous-replication-limits) and continuous-replication",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/35570216917"
+        },
+        {
+          "check": "CHECK-18",
+          "commit": "ecb1c40032d0e6a63acc413990bce68b2b8b37d0",
+          "date": "2026-09-21",
+          "command": "GitHub Actions e2e-tests.yaml (workflow_dispatch), legs replication (continuous-replication-purge, continuous-replication-limits) and continuous-replication",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/35570216917"
         }
       ],
       "tasks": [
@@ -2720,6 +2776,14 @@
           "command": "cd /tmp/flare-b17/test && cutter --keep-opening-modules -v v -s <repo>/test -n \"/(apply_rule|follow|generation|order_label|restore|identified_change|truncate_advances|swap_in_snapshot|hard_reset|repl_tag|replication_identity|epoch|client_follow|generations_unavailable|sync_wal)/\" lib (+ -n \"/replication_tag/\")",
           "result": "pass",
           "report": "docs/reports/2026-09-20-saf10-rocksdb-unit-head.txt"
+        },
+        {
+          "check": "CHECK-20",
+          "commit": "ecb1c40032d0e6a63acc413990bce68b2b8b37d0",
+          "date": "2026-09-21",
+          "command": "GitHub Actions e2e-tests.yaml (workflow_dispatch), legs replication (continuous-replication-purge, continuous-replication-limits) and continuous-replication",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/35570216917"
         }
       ],
       "tasks": [

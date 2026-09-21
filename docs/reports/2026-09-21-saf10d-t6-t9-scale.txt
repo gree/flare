@@ -75,3 +75,15 @@ Scale run 2 (in progress, 2M keys): the follower is IDLE with reason "shutdown" 
   forwarding keeps delivering (items equal at 1,539,525): the follower THREAD received a shutdown request from somewhere other than
   cluster::stop_wal_follower (which records "stopped"), and nothing restarts it until the next node-map broadcast — a lifecycle gap
   independent of the T6 refusal. Under investigation (call sites of thread shutdown in flared).
+
+Scale run 2, live-cluster reading (12 min in): the "idle/shutdown" follower was NOT a follow defect. The MASTER pod was OOMKilled
+  (exit 137, 2 m 42 s after start, pod limit 512 Mi; RocksDB block cache default plus a 64 MB write buffer under a 10k-writes/s load),
+  the operator failed over and PROMOTED the follower (its own log: "shifting node_role … slave → master" then
+  stop_wal_follower), so the node the test was watching had become the master. Before that the follower was catching up at ~255
+  changes per poll (≈1,300 changes/s, bounded by repl-follow-max-batches and the round trip), lagging behind a ~10k/s loader while
+  forwarding carried the live writes — the operator's eligibility lines show the lag growing 82k → 816k (reads/promotion
+  ineligible, as designed). One "disconnected — protocol_error" poll recovered on the next attempt.
+  Consequences for the evaluation: the scale suite must (1) give the flared pods a memory budget that fits the key count (or a
+  smaller block cache), (2) detect a master restart/failover and report it instead of a follow stall, (3) record the follow
+  throughput bound. Scale run 1's frozen position (142,549) most likely had the same cause (the master's restart count was not
+  recorded then).

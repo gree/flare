@@ -27,3 +27,18 @@ CI run 1 @ bbc9d5daef1101317c21e808e75af6da4fcb9ad1 (before the tr-escape and dr
 
 === local run 1 of purge+limits @ 20c8df3 (tr-escape defect present) === RESULT: FAIL
   T6 not ok (0/40 keys written, WAL not purged, follower caught up); T9 "ok" but vacuous (0 keys). Raw: docs/reports/2026-09-21-saf10d-purge-limits-run1-raw.log
+
+=== scale evaluation run 1 @ 20c8df3 (FLARE_E2E_SCALE_KEYS=2000000; raw: docs/reports/2026-09-21-saf10d-scale-run1-raw.log) === RESULT: FAIL (1 of 3)
+Load: the pipelined loader reported 1,223,165 STORED of 2,000,000 requested in 151 s, but the master held 797,756 items — the
+  loader (awk | nc, 100k-key chunks) is lossy: nc closed before the tail of each chunk was acknowledged. Loader fixed (sleep before
+  closing) for run 2. The numbers below are for 797,756 keys.
+FINDING (follow mode at scale): all 797,756 keys reached the replica by FORWARDING (repl_forward_applied=797756, items equal), but the
+  follower's applied position stayed at 142,549 for the whole 30-minute wait (wal_applied=0) and never reached the master's head:
+  the continuous stream did not drain the WAL behind the forwarding path. State/reason were not sampled in this run (the wait only
+  logged its end); the suite now prints state, reason, positions and skip/refuse counters every minute and stops after a 5-minute
+  stall. To be reproduced at 300k keys with those diagnostics; the flared logs were lost with the cluster.
+Boot scan (exact curr_items seed at open, kill -9 of the PVC-backed replica): 797,756 live keys in 854 ms (≈1.07 µs/key; linear
+  extrapolation to the 15.8M-key production case ≈ 17 s — an extrapolation, not a measurement). After the restart the node came
+  back following with equal items and no full dump (incremental WAL reconstruction from the cursor, reconstruction_completed=1).
+Operator probe cost at this size: 179 probe timing lines, max 5,452 ms for a pass (during the load; typical ~1 s), 182 "reconcile
+  slow" lines over the run — CPU contention on a single-node kind while 800k keys were loaded; not separable from the load here.

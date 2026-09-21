@@ -391,15 +391,33 @@ def scaleSuite : TestSuite := {
             let mut i := 0
             while i < n do
               let m := min chunk (n - i)
-              let cmd := s!"awk -v s={i} -v m={m} 'BEGIN\{for(k=s;k<s+m;k++) printf \"set s%d 0 0 16\\r\\n0123456789abcdef\\r\\n\", k}' | nc -w 30 {mIp} {scaleCfg.flarePort} | grep -c STORED"
+              let cmd := s!"(awk -v s={i} -v m={m} 'BEGIN\{for(k=s;k<s+m;k++) printf \"set s%d 0 0 16\\r\\n0123456789abcdef\\r\\n\", k}'; sleep 8) | nc -w 30 {mIp} {scaleCfg.flarePort} | grep -c STORED"
               match ← execInDebugPod scaleCfg.debugPod scaleCfg.«namespace» cmd with
               | .ok o => loaded := loaded + (o.trim.toNat?.getD 0)
               | .error e => IO.eprintln s!"# chunk at {i} failed: {e}"
               i := i + m
             let loadMs := (← IO.monoMsNow) - t0
             let t1 ← IO.monoMsNow
-            let caught ← waitForCondition "follower converges at scale" 1800 do
-              return (← c.statStr sIp "repl_follow_state") == some "following" && (← c.currItems sIp) == (← c.currItems mIp)
+            -- Progress is reported every minute so a stall is diagnosable
+            -- (state, reason, positions, skip/refuse counters), and the wait
+            -- ends early when the applied position stops moving for 5 min.
+            let mut caught := false
+            let mut lastApplied := 0
+            let mut stallMin := 0
+            for _ in [0:40] do
+              let st := (← c.statStr sIp "repl_follow_state").getD "?"
+              let applied := (← c.statNat sIp "repl_applied_lsn").getD 0
+              let mLatest := (← c.statNat mIp "rocksdb_latest_sequence_number").getD 0
+              IO.eprintln s!"# scale follow: state={st} reason={(← c.statStr sIp "repl_follow_last_reason").getD ""} applied={applied} source_lsn={(← c.statNat sIp "repl_source_lsn").getD 0} master latest={mLatest} items master={← c.currItems mIp} replica={← c.currItems sIp} wal_applied={(← c.statNat sIp "repl_wal_applied").getD 0} wal_skipped={(← c.statNat sIp "repl_wal_skipped").getD 0} decode_refused={(← c.statNat sIp "repl_decode_refused").getD 0} forward_applied={(← c.statNat sIp "repl_forward_applied").getD 0} forward_skipped={(← c.statNat sIp "repl_forward_skipped").getD 0}"
+              if st == "following" && (← c.currItems sIp) == (← c.currItems mIp) && applied ≥ mLatest then
+                caught := true
+                break
+              if applied == lastApplied then stallMin := stallMin + 1 else stallMin := 0
+              lastApplied := applied
+              if stallMin ≥ 5 then
+                IO.eprintln "# scale follow: the applied position has not moved for 5 min — stopping the wait"
+                break
+              IO.sleep 60000
             IO.eprintln s!"# scale load: {loaded}/{n} STORED in {loadMs} ms; master items={← c.currItems mIp} replica={← c.currItems sIp}; follower converged={caught} {(← IO.monoMsNow) - t1} ms after the load ended; applied={← c.statNat sIp "repl_applied_lsn"} wal_applied={← c.statNat sIp "repl_wal_applied"} forward_applied={← c.statNat sIp "repl_forward_applied"}"
             if loaded < n * 99 / 100 then return .fail s!"loaded only {loaded}/{n}"
             if !caught then return .fail "the follower did not converge at scale"

@@ -104,3 +104,9 @@ Scale run 2 @ 20c8df3 final (raw: docs/reports/2026-09-21-saf10d-scale-run2-raw.
   4,461 ms (164 lines, 228 "reconcile slow" over the run, all during the load and the churn). The kill -9 hit the node the test
   still believed to be the replica; it had become the master, the topology kept churning (stuck-Down pod recreation), and the
   restarted node came back with 0 keys pending a rebuild — no conclusion beyond "the 512Mi budget does not fit 2M keys".
+
+=== local purge run 4 @ flared 3b7f38c (served-gap fix), suite 58688c1 (raw: docs/reports/2026-09-21-saf10d-purge-run4-raw.log) === RESULT: PASS (2/2)
+T6: 40 × 100 kB under the cut (master 24→64, flushes against the 1 MB write buffer, 8 s wait); after the heal the follower declared
+  needs_rebuild with reason lsn_purged (applied stayed 24, decode_refused 0 — no misdecode, the served history simply began beyond
+  the position); the operator filed the repair request; reconstruction_started 1→2 by snapshot bootstrap (wal_fallback_to_dump=1,
+  snapshot_bootstrap=2); the node came back FOLLOWING with items 60 = 60; pod UID unchanged; ledger empty. Same outcome as CI run 3.

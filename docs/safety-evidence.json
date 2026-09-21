@@ -2593,6 +2593,14 @@
           "command": "GitHub Actions e2e-tests.yaml (workflow_dispatch), legs replication (continuous-replication-purge, continuous-replication-limits) and continuous-replication",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/35570216917"
+        },
+        {
+          "check": "CHECK-18-purge",
+          "commit": "3b7f38ce8ff230df5973c70c61d2f146155e92bd",
+          "date": "2026-09-22",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter continuous-replication-purge (local kind; node image from this commit, suite 58688c1)",
+          "result": "pass",
+          "report": "docs/reports/2026-09-21-saf10d-t6-t9-scale.txt"
         }
       ],
       "tasks": [

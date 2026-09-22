@@ -497,4 +497,111 @@ def scaleSuite : TestSuite := {
   ]
 }
 
+
+-- ─── sustained-load evaluation (skipped unless FLARE_E2E_SUSTAINED is set) ─
+
+private def sustainedCfg : ClusterConfig := {
+  name := "cont-repl-sustained"
+  «namespace» := "flare-cont-repl-sustained"
+  partitions := 1
+  replicas := 2
+  operatorName := "flare-operator"
+  debugPod := "debug-cont-repl-sustained"
+  storageBackend := "rocksdb"
+  extraFlaredConf := flags ++ "\nrocksdb-block-cache-size-mb = 64"
+  operatorEnv := [("FLARE_STATS_PROBE_INTERVAL_MS", "15000")]
+  usePvc := true
+  flaredMemoryLimit := "2Gi"
+  flaredMemoryRequest := "1Gi"
+}
+
+private def sustainedOn : IO Bool := return (← IO.getEnv "FLARE_E2E_SUSTAINED").isSome
+
+/-- WAL bytes (kB) and data-dir bytes (kB) of a flared pod's RocksDB. -/
+private def Ctx.walKb (c : Ctx) (pod : String) : IO (Option Nat) := do
+  match ← kubectl ["exec", "-n", c.cfg.«namespace», pod, "--", "sh", "-c", "du -ck /data/flare/flare.rocksdb/*.log 2>/dev/null | tail -1 | awk '{print $1}'"] with
+  | .ok o => return o.trim.toNat?
+  | .error _ => return none
+private def Ctx.dataKb (c : Ctx) (pod : String) : IO (Option Nat) := do
+  match ← kubectl ["exec", "-n", c.cfg.«namespace», pod, "--", "sh", "-c", "du -sk /data/flare 2>/dev/null | awk '{print $1}'"] with
+  | .ok o => return o.trim.toNat?
+  | .error _ => return none
+
+/-- One 30 s window at `rate` keys/s: pipeline rate*30 sets, then sleep the
+    remainder. Returns keys attempted. -/
+private def Ctx.loadWindow (c : Ctx) (ip : String) (start rate : Nat) : IO Nat := do
+  let n := rate * 30
+  let t0 ← IO.monoMsNow
+  let cmd := s!"(awk -v s={start} -v m={n} 'BEGIN\{for(k=s;k<s+m;k++) printf \"set w%d 0 0 16\\r\\n0123456789abcdef\\r\\n\", k}'; sleep 3) | nc -w 40 {ip} {c.cfg.flarePort} | grep -c STORED"
+  discard <| execInDebugPod c.cfg.debugPod c.cfg.«namespace» cmd
+  let spent := (← IO.monoMsNow) - t0
+  if spent < 30000 then IO.sleep (30000 - spent).toUInt32
+  return n
+
+/-- Run `minutes` of load at `rate`, sampling every 30 s. Returns the lag
+    samples (master latest − replica applied) and the last item counts. -/
+private def Ctx.sustain (c : Ctx) (mPod mIp sPod sIp : String) (start rate minutes : Nat)
+    : IO (List Nat × Nat) := do
+  let mut lags : List Nat := []
+  let mut k := start
+  for w in [0:minutes * 2] do
+    k := k + (← c.loadWindow mIp k rate)
+    let head := (← c.statNat mIp "rocksdb_latest_sequence_number").getD 0
+    let applied := (← c.statNat sIp "repl_applied_lsn").getD 0
+    let lag := if head > applied then head - applied else 0
+    lags := lags ++ [lag]
+    IO.eprintln s!"# sustain {rate}/s window {w}: state={(← c.statStr sIp "repl_follow_state").getD "?"} lag={lag} (head {head}, applied {applied}) items master={← c.currItems mIp} replica={← c.currItems sIp} master RSS={(← c.rssKb mPod).getD 0}kB WAL={(← c.walKb mPod).getD 0}kB data={(← c.dataKb mPod).getD 0}kB replica RSS={(← c.rssKb sPod).getD 0}kB tombstones={(← c.statNat sIp "repl_tombstones").getD 0} wal_skipped={(← c.statNat sIp "repl_wal_skipped").getD 0}"
+  return (lags, k)
+
+def sustainedSuite : TestSuite := {
+  name := "continuous-replication-sustained"
+  setup := do
+    if ← sustainedOn then
+      deployCluster sustainedCfg
+      IO.eprintln "# Waiting 50s grace period for operator reconciliation..."
+      IO.sleep 50000
+    else IO.eprintln "# FLARE_E2E_SUSTAINED unset: the sustained-load evaluation deploys nothing and its tests are skipped"
+  teardown := do
+    if ← sustainedOn then cleanupCluster sustainedCfg
+  tests :=
+    let c : Ctx := { cfg := sustainedCfg }
+    [
+    { name := "sustained load: does the follow stream keep up at a steady write rate, and do WAL/RSS/disk stay bounded until it does? (evaluation)"
+      run := do
+        if !(← sustainedOn) then return .skip "FLARE_E2E_SUSTAINED unset (evaluation only)"
+        match ← c.pair with
+        | .error e => return .fail e
+        | .ok (mPod, mIp, sPod, sIp) =>
+          let following ← waitForCondition "replica following" 120 do
+            return (← c.statStr sIp "repl_follow_state") == some "following"
+          if !following then return .fail "replica never followed"
+          let recon0 := (← c.statNat sIp "reconstruction_started").getD 0
+          let mRc0 ← c.restartCount mPod
+          let rss0 := (← c.rssKb mPod).getD 0
+          let mut verdicts : List String := []
+          let mut k := 0
+          for rate in [300, 900, 2000] do
+            let (lags, k') ← c.sustain mPod mIp sPod sIp k rate 4
+            k := k'
+            let firstMin := (lags.take 2).foldl max 0
+            let lastMin := (lags.drop (lags.length - 2)).foldl max 0
+            let kept := lastMin ≤ max 2000 (firstMin * 3 / 2)
+            verdicts := verdicts ++ [s!"{rate}/s: lag first-minute max {firstMin}, last-minute max {lastMin} → {if kept then "KEPT UP (bounded)" else "FELL BEHIND (growing)"}"]
+            IO.eprintln s!"# sustain {rate}/s: {verdicts.getLast?.getD ""}"
+          -- Load stops: the backlog must drain; record how long.
+          let t0 ← IO.monoMsNow
+          let drained ← waitForCondition "follow stream drains the backlog after the load stops" 1200 do
+            let head := (← c.statNat mIp "rocksdb_latest_sequence_number").getD 0
+            let applied := (← c.statNat sIp "repl_applied_lsn").getD 0
+            return (← c.statStr sIp "repl_follow_state") == some "following" && applied ≥ head && (← c.currItems sIp) == (← c.currItems mIp)
+          let drainS := ((← IO.monoMsNow) - t0) / 1000
+          let mRc1 ← c.restartCount mPod
+          IO.eprintln s!"# sustained summary: {String.intercalate " | " verdicts}; drained after the load stopped={drained} in {drainS}s; master RSS {rss0}→{(← c.rssKb mPod).getD 0} kB; WAL {(← c.walKb mPod).getD 0} kB; data {(← c.dataKb mPod).getD 0} kB; items master={← c.currItems mIp} replica={← c.currItems sIp}; master restarts {mRc0}→{mRc1}; reconstruction_started {recon0}→{(← c.statNat sIp "reconstruction_started").getD 0}; wal_applied={← c.statNat sIp "repl_wal_applied"} wal_skipped={← c.statNat sIp "repl_wal_skipped"} forward_applied={← c.statNat sIp "repl_forward_applied"}"
+          if mRc1 != mRc0 then return .fail "the master restarted during the load"
+          if (← c.statNat sIp "reconstruction_started").getD 0 != recon0 then return .fail "a reconstruction ran during the load"
+          if !drained then return .fail "the backlog did not drain within 20 min after the load stopped"
+          return .pass }
+  ]
+}
+
 end FlareOperator.E2E.Tests.ContinuousReplicationLimits

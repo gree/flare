@@ -527,38 +527,42 @@ def suite : TestSuite := {
             let ops ← getPodNames s!"app={cfg.operatorName}" cfg.«namespace»
             let opPod := ops.head?.getD ""
             let tRestore ← IO.monoMsNow
-            let allowed ← waitForCondition "the operator's OWN service account may patch flareclusters/status again (probed from inside its pod)" 300 do
-              match ← Bridge.execInPod opPod cfg.«namespace» ["kubectl", "auth", "can-i", "patch", "flareclusters/status", "-n", cfg.«namespace»] with
-              | .ok o => return (o.trim == "yes")
-              | .error _ => return false
-            let propagation := ((← IO.monoMsNow) - tRestore) / 1000
-            IO.eprintln s!"# RBAC restore became effective for the operator's SA after {propagation}s"
-            if !allowed then
-              diagnostics mIp sIp
-              return .fail "RBAC restore did not become effective for the operator's own service account within 300s"
-            -- Now the write is possible for the operator. The evidence that
-            -- the unsaved request LANDED is the OUTCOME — status holds the
-            -- entry — not a particular log line: two paths can write it. The
-            -- top-of-pass retry logs "ledger persisted on retry"; the normal
-            -- per-pass persist (Main.persistLedger, taken whenever the ledger
-            -- changed, e.g. a counter observation) writes the same ledger and
-            -- clears the dirty flag SILENTLY. CI runs 34818137311 and
-            -- 35091218808 landed by the silent path within a pass or two and
-            -- this step, then keyed on the retry line, waited 120s/300s for
-            -- a line that never came while the entry was already in status —
-            -- and the earlier reading of those runs as "~2 minutes of RBAC
-            -- latency for the operator" was wrong. That the operator does not
-            -- announce a landing that follows "marked unsaved ... a restart
-            -- would lose" is an observability gap recorded under EV-03.
-            let tAllowed ← IO.monoMsNow
-            let landed ← waitForCondition "the unsaved ledger lands once the write is allowed (entry present in status)" 300 do
+            -- Where does the time go? Three clocks from the restore: (1) the
+            -- permission as the operator sees it (in-pod can-i, its own SA and
+            -- token), (2) the OUTCOME — the unsaved entry lands in status —
+            -- and (3) the deadline. CI runs 35561126678/35565289216/
+            -- 35570216917 spent the whole 300 s with the probe answering
+            -- "no" while locally it says "yes" at once; the probe alone
+            -- cannot tell an authorization delay from a probe fault. So the
+            -- deadline is on the outcome, both clocks are recorded, and a
+            -- probe that never says yes while the ledger landed is reported
+            -- as a probe/harness discrepancy with its raw output.
+            let probeYesAt ← IO.mkRef (none : Option Nat)
+            let probeRaw ← IO.mkRef ""
+            let landed ← waitForCondition "the unsaved ledger lands once the write is allowed (entry present in status; in-pod can-i sampled alongside)" 300 do
+              if (← probeYesAt.get).isNone then
+                match ← Bridge.execInPod opPod cfg.«namespace» ["sh", "-c", s!"kubectl auth can-i patch flareclusters/status -n {cfg.«namespace»} 2>&1; echo rc=$?"] with
+                | .ok o =>
+                  probeRaw.set o.trim
+                  if (o.splitOn "\n").any (fun l => l.trim == "yes") then probeYesAt.set (some ((← IO.monoMsNow) - tRestore))
+                | .error e => probeRaw.set s!"exec failed: {e}"
               return !(← ledgerDests).isEmpty
-            let landMs := (← IO.monoMsNow) - tAllowed
+            let landMs := (← IO.monoMsNow) - tRestore
+            let authMs := (← probeYesAt.get)
+            let raw := (← probeRaw.get).take 200
+            let authText := match authMs with
+              | some ms => s!"{ms / 1000}s"
+              | none => s!"NEVER (raw: {raw})"
             let viaRetry := containsSubstr (← opLog 2000) "ledger persisted on retry"
-            IO.eprintln s!"# unsaved ledger landed {landMs / 1000}s after the permission became effective for the operator (via {if viaRetry then "the top-of-pass retry" else "the silent per-pass persist"})"
+            IO.eprintln s!"# timeline from the restore: in-pod can-i said yes after {authText}; unsaved ledger landed after {landMs / 1000}s (via {if viaRetry then "the top-of-pass retry" else "the silent per-pass persist"}); landed={landed}"
+            if landed && authMs.isNone then
+              -- Runner-side view for the discrepancy report only.
+              let asSa := (← kubectl ["auth", "can-i", "patch", "flareclusters/status", "-n", cfg.«namespace», s!"--as=system:serviceaccount:{cfg.«namespace»}:flare-operator"]).toOption.getD "?"
+              let rule0 := (← kubectl ["get", "clusterrole", "flare-operator", "-o", "jsonpath={.rules[0]}"]).toOption.getD "?"
+              IO.eprintln s!"# PROBE DISCREPANCY: the operator's own write landed but the in-pod can-i never said yes; runner-side can-i --as=SA: {asSa.trim}; rule[0]: {rule0.trim}"
             if !landed then
               diagnostics mIp sIp
-              return .fail "the unsaved ledger never landed after the permission became effective for the operator's own service account"
+              return .fail s!"the unsaved ledger never landed within 300s of the restore (in-pod can-i: {authText})"
             -- And the operator must have stopped calling it unsaved: a landed
             -- ledger that keeps being retried would mean the dirty flag was
             -- not cleared. One probe interval later, no NEW "still unsaved".

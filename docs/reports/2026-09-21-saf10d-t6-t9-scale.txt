@@ -203,3 +203,32 @@ NOT VERIFIED: true concurrency. The unit checks are sequential applications of t
 whichever order the scheduler produced; nothing exercises the two routes racing inside one reconcile pass against the real
 ledger-persist path, and the operator is single-threaded per pass so the race window is between passes, not inside one. Stated as
 a residual under EV-18 rather than claimed as covered.
+
+=== sustained-load evaluation run 1 @ suite 41ea98e, flared 3b7f38c, operator 2379cff (raw: docs/reports/2026-09-24-saf10d-sustained-run1-raw.log) === RESULT: PASS (the evaluation completed; the verdicts below are its output, not a pass/fail claim about the design)
+command: FLARE_E2E_SUSTAINED=1 flare_e2e --filter continuous-replication-sustained
+Method: three steady rates, 4 minutes each (eight 30 s windows), sampling at every window the follower's state and applied
+position, the master's head, item counts on both nodes, both RSS figures, the master's WAL bytes and data-dir bytes, and the live
+tombstone count. Then the load STOPS and the backlog must drain.
+
+| rate      | lag, first minute | lag, last minute | verdict            |
+|-----------|-------------------|------------------|--------------------|
+| 300 keys/s  | 0               | 0                | KEPT UP (bounded)  |
+| 900 keys/s  | 0               | 0                | KEPT UP (bounded)  |
+| 2000 keys/s | 70,020          | 294,615          | FELL BEHIND (growing) |
+
+At 300 and 900 keys/s the applied position equalled the master's head in EVERY window (lag exactly 0): the stream is not merely
+bounded, it is caught up continuously. At 2000 keys/s the lag grew monotonically (35,265 at the first sample to 294,615 at the
+last) — consistent with the ≈1,280 changes/s ceiling measured in scale run 5, which lies between 900 and 2000.
+After the load stopped the backlog DRAINED in 442 s and the follower returned to following with equal items; reconstruction_started
+1→1 (no rebuild at any point) and the master did not restart (restartCount 0→0).
+Master RSS 46,664 → 158,056 kB across the whole 12-minute run (memtable fill plus the 64 MB block cache this suite configures).
+Replica RSS peaked at 115,224 kB.
+Content never diverged: items master = replica = 768,000 at every sample, because FORWARDING carried every write (wal_applied=0,
+wal_skipped=772,031 — the WAL stream re-delivered the same changes and the rule skipped them). So "falling behind" at 2000 keys/s
+is a POSITION problem, not a data-loss problem: reads stay withheld (lag bound), a repair entry would stay open longer, and a cut
+taken at that moment needs a longer catch-up.
+LIMIT OF THIS RUN — the disk figures establish nothing: the master's WAL stayed at exactly 72,092 kB and the data dir grew only
+76,288 → 76,500 kB, both flat from the first window. 768,000 small records did not fill the 64 MB write buffer, so no memtable
+flush occurred and the WAL files were already preallocated at their steady size. WAL retention and SST/compaction behaviour under
+sustained load are therefore NOT covered; a run long enough to force repeated flushes (and one with a replica cut, so the master
+must retain WAL for a trailing follower) is still needed before any production judgement.

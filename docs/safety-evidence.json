@@ -2279,7 +2279,8 @@
         "The follower's backoff and poll interval are fixed configuration; no load measurement (T17 deferred).",
         "Until 325a2f8 the follower handler RETURNED on needs_rebuild, giving its thread back to the pool while cluster still referenced it; the later stop_wal_follower shut down a pooled thread, which exited without leaving the pool, and the reconstruction handler that was to rebuild the node was triggered on that dead thread and never ran (found by the SAF-10d bulk-operation scenario, runs 3-4). Fixed: terminal outcomes park the thread until the controller's shutdown. E2E confirmation pending (run 5).",
         "THROUGHPUT CEILING (scale run 5, 2M keys): the follower requests at most repl-follow-max-batches (256) batches per poll every repl-follow-poll-interval-usec (200 ms), so the stream cannot exceed ≈1,280 changes/s at the default settings — measured 650-1,270 changes/s while draining. Forwarding carried the data throughout (wal_applied=0, wal_skipped=2,008,010), but a trailing applied position withholds replica reads (lag bound), keeps a repair entry open and lengthens the post-cut catch-up. Whether the stream keeps up at a steady write rate is the separate continuous-replication-sustained evaluation; the defaults are not tuned in this PR.",
-        "Boot cost of the exact key scan at open: 0.48-0.98 us/key measured at 0.8M / 1.5M / 2.0M keys (854 / 1503 / 960 ms); a 15.8M-key DB extrapolates to ≈8-16 s of extra start-up. Extrapolation, not a measurement."
+        "Boot cost of the exact key scan at open: 0.48-0.98 us/key measured at 0.8M / 1.5M / 2.0M keys (854 / 1503 / 960 ms); a 15.8M-key DB extrapolates to ≈8-16 s of extra start-up. Extrapolation, not a measurement.",
+        "SUSTAINED-RATE RESULT (evaluation run 1): the stream stays exactly caught up (lag 0 every window) at 300 and 900 keys/s and FALLS BEHIND monotonically at 2000 keys/s (lag 35,265 → 294,615 over four minutes), draining in 442 s once the load stops. Content never diverges — forwarding carries every write — so this is a POSITION deficit: withheld replica reads, repair entries open longer, longer post-cut catch-up. The run does NOT establish disk behaviour: no memtable flush occurred (768k small records under a 64 MB write buffer), so the flat WAL and data-dir figures are an artefact of the window, and WAL retention for a TRAILING follower was never exercised."
       ],
       "code": [
         {
@@ -2330,7 +2331,7 @@
         {
           "id": "CHECK-16-limits",
           "kind": "scenario",
-          "procedure": "E2E continuous-replication-limits (T9, bounded): the far-behind replica converges from the position in bounded polls (largest 1 s advance recorded), no reconstruction, master RSS growth within 128 MB. E2E continuous-replication-scale (evaluation, FLARE_E2E_SCALE_KEYS): follower convergence after a pipelined load, exact key scan duration at open after a kill -9 on a PVC, operator probe timing at that size.",
+          "procedure": "E2E continuous-replication-limits (T9, bounded): the far-behind replica converges from the position in bounded polls (largest 1 s advance recorded), no reconstruction, master RSS growth within 128 MB. E2E continuous-replication-scale (evaluation, FLARE_E2E_SCALE_KEYS): follower convergence after a pipelined load, exact key scan duration at open after a kill -9 on a PVC, operator probe timing at that size. E2E continuous-replication-sustained (evaluation, FLARE_E2E_SUSTAINED): three steady write rates for four minutes each, sampling lag, both RSS figures, the master's WAL and data-dir bytes and the tombstone count every 30 s, then the drain after the load stops.",
           "references": [
             {
               "path": "flare_operator/FlareOperator/E2E/Tests/ContinuousReplicationLimits.lean",
@@ -2389,6 +2390,14 @@
           "commit": "58688c1593e8a5ea30f78e08cd51b7770ca10218",
           "date": "2026-09-22",
           "command": "FLARE_E2E_SCALE_KEYS=2000000 flare_e2e --filter continuous-replication-scale (local kind; node image from 3b7f38c; 2Gi/64MB block cache)",
+          "result": "pass",
+          "report": "docs/reports/2026-09-21-saf10d-t6-t9-scale.txt"
+        },
+        {
+          "check": "CHECK-16-limits",
+          "commit": "41ea98ea6be0063047a3cb8526afac2784b5456f",
+          "date": "2026-09-24",
+          "command": "FLARE_E2E_SUSTAINED=1 flare_e2e --filter continuous-replication-sustained (local kind; flared 3b7f38c, operator 2379cff)",
           "result": "pass",
           "report": "docs/reports/2026-09-21-saf10d-t6-t9-scale.txt"
         }

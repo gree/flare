@@ -2082,16 +2082,19 @@
         "UCA-02",
         "UCA-27"
       ],
-      "implementation": "gap",
+      "implementation": "partial",
       "verification": "unverified",
       "scenarios": [
-        "Replica unavailable through WAL retention; asynchronous drop after client success; master failover."
+        "Replica unavailable through WAL retention; asynchronous drop after client success; master failover.",
+        "SAF-10 answers this control's subject on the RocksDB backend: the design states what a replica may claim (a contiguous applied position, never a connection or a past reconstruction) and how it catches up after an interruption (resume from the cursor; explicit needs_rebuild when the history is gone). Implementation and evidence live under EV-16..EV-20; acknowledged-write semantics are UNCHANGED — forwarding is still asynchronous and a write acknowledged to the client can still be lost if the master dies before the follower applies it."
       ],
       "assumptions": [
         "Current live replication is op-level forwarding; WAL is used for reconstruction/bootstrap only."
       ],
       "residual_risks": [
-        "No continuous WAL replication; adding master LSNs alone does not establish durable acknowledgement semantics."
+        "No continuous WAL replication; adding master LSNs alone does not establish durable acknowledgement semantics.",
+        "Replication is still asynchronous end to end: the master answers the client before the follower has applied, so continuous WAL replication removes the SILENT-gap failure, not the loss window on master death (design §5.3; the FSM logs an unproven promotion as NOT LOSS-FREE).",
+        "RESOURCE FLOOR, found by the scale evaluation (report 2026-09-21-saf10d-t6-t9-scale.txt): flared's RocksDB defaults budget ≈704 MB (512 MB block cache + 3 × 64 MB write buffers) before flared's own memory, so a 512Mi container is OOMKilled under write load (observed, exit 137 at 2m42s of a 2M-key load). The shipped chart's node default is limits.memory 1Gi and the FlareCluster CRD exposes no blockCacheSizeMb / writeBufferSizeMb / maxWriteBufferNumber, so the floor cannot be lowered through the chart. Not fixed in this PR."
       ],
       "code": [
         {
@@ -2126,9 +2129,9 @@
         "SAF-10"
       ],
       "review": {
-        "commit": "c96246cfc82e910bc2e12c2571177ad4bf90888a",
-        "date": "2026-09-20",
-        "note": "Linked UCA-27 (WAL retained until the disk is exhausted) from the SAF-10 STPA additions: the existing retention ceiling (walSizeLimitMb / walTtlSeconds) is the control; a follower that falls outside it gets lsn_purged and needs_rebuild (EV-18). No mechanism change; PARTIAL / UNVERIFIED unchanged."
+        "commit": "c84c8c481fcc4160273e6aa928a45a189c036421",
+        "date": "2026-09-24",
+        "note": "Moved gap → partial: SAF-10 (branch safety/saf-10-wal-replication, PR #144) supplies the design and a working implementation of continuous WAL replication with catch-up semantics, carried by the new controls EV-16..EV-20; this entry keeps the durability claim itself, which is UNCHANGED (asynchronous acknowledgement). Two residuals added: the loss window on master death, and the RocksDB memory floor the scale evaluation surfaced. UNVERIFIED."
       }
     },
     {
@@ -2274,7 +2277,9 @@
         "Failover: survivors rebuild rather than resume from a per-source cursor (design §9 decision 6).",
         "Only one cut/heal cycle is staged; T5 (repeated cuts) and T8 (operator restart) remain.",
         "The follower's backoff and poll interval are fixed configuration; no load measurement (T17 deferred).",
-        "Until 325a2f8 the follower handler RETURNED on needs_rebuild, giving its thread back to the pool while cluster still referenced it; the later stop_wal_follower shut down a pooled thread, which exited without leaving the pool, and the reconstruction handler that was to rebuild the node was triggered on that dead thread and never ran (found by the SAF-10d bulk-operation scenario, runs 3-4). Fixed: terminal outcomes park the thread until the controller's shutdown. E2E confirmation pending (run 5)."
+        "Until 325a2f8 the follower handler RETURNED on needs_rebuild, giving its thread back to the pool while cluster still referenced it; the later stop_wal_follower shut down a pooled thread, which exited without leaving the pool, and the reconstruction handler that was to rebuild the node was triggered on that dead thread and never ran (found by the SAF-10d bulk-operation scenario, runs 3-4). Fixed: terminal outcomes park the thread until the controller's shutdown. E2E confirmation pending (run 5).",
+        "THROUGHPUT CEILING (scale run 5, 2M keys): the follower requests at most repl-follow-max-batches (256) batches per poll every repl-follow-poll-interval-usec (200 ms), so the stream cannot exceed ≈1,280 changes/s at the default settings — measured 650-1,270 changes/s while draining. Forwarding carried the data throughout (wal_applied=0, wal_skipped=2,008,010), but a trailing applied position withholds replica reads (lag bound), keeps a repair entry open and lengthens the post-cut catch-up. Whether the stream keeps up at a steady write rate is the separate continuous-replication-sustained evaluation; the defaults are not tuned in this PR.",
+        "Boot cost of the exact key scan at open: 0.48-0.98 us/key measured at 0.8M / 1.5M / 2.0M keys (854 / 1503 / 960 ms); a 15.8M-key DB extrapolates to ≈8-16 s of extra start-up. Extrapolation, not a measurement."
       ],
       "code": [
         {
@@ -2514,7 +2519,8 @@
         "A follower that declares needs_rebuild in the window between a completed reconstruction and its follower restart could be requested twice (bounded churn, not loss).",
         "Until 325a2f8 the follower handler RETURNED on needs_rebuild, giving its thread back to the pool while cluster still referenced it; the later stop_wal_follower shut down a pooled thread, which exited without leaving the pool, and the reconstruction handler that was to rebuild the node was triggered on that dead thread and never ran (found by the SAF-10d bulk-operation scenario, runs 3-4). Fixed: terminal outcomes park the thread until the controller's shutdown. E2E confirmation pending (run 5).",
         "After a source-epoch change the master's forwarded ops are refused by the stale-session replica, retried and counted as drops, so in the E2E the DROP path requested the rebuild before the follower-declared request could (runs 5-6: entry with drops=2). The two paths race and converge on the same rebuild; the follower-declared path alone (no drop counted, e.g. a purge with no write traffic) is unit-pinned, not staged end to end.",
-        "RocksDB does not always report a purged position as NotFound: with the requested WAL file gone, GetUpdatesSince serves from the oldest surviving file. Before 3b7f38c the follower refused that first batch as a contiguity violation mapped to a TRANSIENT apply error and retried it forever (T6 E2E: state=error/apply_error, applied position frozen while forwarding delivered). Fixed: the server answers lsn_purged when the first served batch is beyond lsn+1, and the client maps a gap refusal to lsn_purged → needs_rebuild. E2E confirmation (T6 purge suite) pending."
+        "RocksDB does not always report a purged position as NotFound: with the requested WAL file gone, GetUpdatesSince serves from the oldest surviving file. Before 3b7f38c the follower refused that first batch as a contiguity violation mapped to a TRANSIENT apply error and retried it forever (T6 E2E: state=error/apply_error, applied position frozen while forwarding delivered). Fixed: the server answers lsn_purged when the first served batch is beyond lsn+1, and the client maps a gap refusal to lsn_purged → needs_rebuild. E2E confirmation (T6 purge suite) pending.",
+        "The two routes to a rebuild request (a counted drop and the follower's own needs_rebuild declaration) have each been OBSERVED to win in E2E and both orders are pinned sequentially by flare_unit, but true concurrency is NOT verified: nothing exercises them racing within one reconcile pass against the real persist path."
       ],
       "code": [
         {

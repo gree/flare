@@ -145,3 +145,61 @@ Boot-time exact key scan (kill -9 on the PVC-backed replica, then reopen): 2,000
   with equal items, reconstruction_completed=1 and wal_fallback_to_dump=0 (incremental, no full dump).
 Operator probe cost at 2M keys: 187 probe passes, max 7,413 ms, typical ≈0.6 s; 190 "reconcile slow" lines — all during the load
   (single-node kind, flared and the operator sharing 500m CPU), not separable from the load here.
+
+=== resource finding (kept as a failure record; item 2 of the reviewer's list) ===
+Observation: in scale run 2 the MASTER pod was OOMKilled (exit 137) 2 m 42 s into a 2M-key load at the harness default limit
+512Mi, and the operator failed over to the node under test — which is why that run is void as a follow measurement. Run 5 with a
+2 Gi limit and rocksdb-block-cache-size-mb = 64 completed the same load with restartCount 0→0.
+What used the memory (from the code, not inferred from the RSS curve): storage_rocksdb sizes an LRU block cache of
+rocksdb-block-cache-size-mb (flared default 512) and write buffers of rocksdb-write-buffer-size-mb (64) × rocksdb-max-write-buffer-number
+(3). So RocksDB's own budget at flared's defaults is ≈704 MB before any of flared's heap, threads, connection buffers or the
+replication metadata column family — i.e. a 512Mi container cannot hold a defaulted flared under write load at all, and the
+observed kill is the expected outcome rather than a replication effect.
+CONSEQUENCE FOR DEPLOYMENT, not fixed here: the shipped chart's node default is `limits.memory: 1Gi`
+(helm/flare-operator/values.yaml), which leaves ≈320 MB above that ≈704 MB floor; and the FlareCluster CRD's spec.rocksdb exposes
+walTtlSeconds / walSizeLimitMb / syncWrites / backupKeep (+ a few WAL knobs) but NOT blockCacheSizeMb, writeBufferSizeMb or
+maxWriteBufferNumber, so through the chart an operator cannot lower that floor — only raise the limit. Before enabling continuous
+replication anywhere real, either the CRD must expose the cache/write-buffer knobs or the chart's memory floor must be restated
+(and the tmpfs guidance in values.yaml, which already covers WAL archive and backup checkpoints, extended to say the cache and
+write buffers are NOT part of the data dir but are part of the container's memory).
+SCOPE OF T9 AS IT STANDS: "bounded backlog" only — 15 MB of backlog with 100 deletes, master RSS growth 29.5 MB against a 128 MB
+bound, tombstones collected by position. It is NOT a sustained-load resource test; that is the separate
+continuous-replication-sustained evaluation (300/900/2000 keys/s with lag, RSS, WAL and data-dir sampling), first run below.
+
+=== CI trigger investigation (item 4) — ROOT CAUSE FOUND ===
+No pull_request-triggered workflow run had been created for PR #144 since it was opened, while workflow_dispatch runs worked.
+Cause: the PR was UNMERGEABLE. `gh api repos/gree/flare/pulls/144` reported mergeable=false, mergeable_state=dirty — the SAF-10
+branch and its base (PR #143's head) had both appended run records to docs/safety-evidence.json and the merge conflicted. GitHub
+cannot compute the merge commit for such a PR, and the pull_request event (which tests the merge result) is not delivered, so no
+check suite is created — the head commit's /check-suites was 0 the whole time.
+Fix and confirmation: merging origin/safety/saf-01-topology-authority into the branch (5e7a3df, register conflict resolved by
+replaying #143's run records onto ours) made the PR mergeable=true, and pull_request runs started immediately — nix-linux, Safety
+evidence and E2E Tests on 5e7a3df, then full green matrices on 04c332d and 41ea98e (all 5 legs, run 35688265796).
+Branch protection / required checks: `gh api .../branches/safety%2Fsaf-01-topology-authority/protection` returns 404 "Branch not
+protected" and `gh api repos/gree/flare/rulesets` returns [] — there are NO required checks on either branch, so a green matrix is
+evidence, not a merge gate. The workflow_dispatch additions made for this investigation stay (they are how a leg is re-run for
+evidence on a chosen SHA), but automatic pull_request CI is what now covers the PR.
+
+=== #143 SAF-05 RBAC step (item 3) — reworked and green ===
+Three consecutive CI runs (35561126678, 35565289216, 35570216917) failed with "RBAC restore did not become effective ... within
+300s" after 302-303 s, while locally the same probe answered within seconds. The old step's deadline sat on the PROBE
+(`kubectl auth can-i` inside the operator pod, judged by `output.trim == "yes"`), not on the outcome, so it could not distinguish
+an authorization delay from a probe fault — and an exact-match on the whole output fails if the runner's kubectl prints anything
+alongside (the operator image installs whatever dl.k8s.io/release/stable.txt points to AT BUILD TIME, so CI and local images do
+not carry the same kubectl).
+Rework (32ec64a, committed on PR #143's branch and merged here): from the restore the step samples the in-pod probe (raw output
+and rc kept, any line equal to "yes" accepted) AND the outcome (the unsaved entry appearing in status), with the 300 s deadline on
+the OUTCOME; both clocks are printed, and a landing without the probe ever saying yes is reported as a probe/harness discrepancy
+together with the runner-side `can-i --as=SA` and rule[0]. First CI execution (run 35688265796, 41ea98e): "in-pod can-i said yes
+after 0s; unsaved ledger landed after 10s (via the top-of-pass retry)" — breaker-migration 37/37 PASS.
+
+=== rebuild-request routes: what is and is not verified ===
+OBSERVED (E2E): both orders occur in practice — runs 5-7 and CI runs 1-2 had the DROP path file the request first (entry with
+drops=2, the master's forwarded ops being refused by the stale-session replica and retried), runs 8, 10 and 11 had the
+FOLLOWER-DECLARED path win (entry with drops=0). Either way exactly one entry existed and one demotion followed.
+PINNED (flare_unit, 136 checks): drop-then-declaration, declaration-then-drop, and a drop on an already-OWNED entry plus the
+declaration in the same pass — each yields one un-owned entry for the node and one demotion.
+NOT VERIFIED: true concurrency. The unit checks are sequential applications of the pure functions and the E2E observations are
+whichever order the scheduler produced; nothing exercises the two routes racing inside one reconcile pass against the real
+ledger-persist path, and the operator is single-threaded per pass so the race window is between passes, not inside one. Stated as
+a residual under EV-18 rather than claimed as covered.

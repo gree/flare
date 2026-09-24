@@ -1476,20 +1476,34 @@ cluster::proxy_request cluster::pre_proxy_read(op_proxy_read* op, storage::entry
 	if (p.master.node_key == this->_node_key) {
 		return proxy_request_continue;
 	}
+	bool follow_proxy_to_master = false;
 	for (vector<partition_node>::iterator it = p.slave.begin(); it != p.slave.end(); it++) {
-		if (it->node_balance > 0 && it->node_key == this->_node_key) {
-			return proxy_request_continue;
+		if (it->node_key == this->_node_key) {
+			if (stats_object != NULL) {
+				const stats::follow_record follow = stats_object->get_follow_record();
+				follow_proxy_to_master = follow.enabled
+					&& (!stats::follow_allows_local_read(follow, stats_object->get_timestamp())
+						|| follow.source != p.master.node_key);
+			}
+			if (it->node_balance > 0 && !follow_proxy_to_master) {
+				return proxy_request_continue;
+			}
 		}
 	}
 
 	// select one (rand() will do)
-	if (p.balance.size() == 0) {
+	if (p.balance.size() == 0 && !follow_proxy_to_master) {
 		log_err("no node is available for this partition (all balances are set to 0)", 0);
 		return proxy_request_error_partition;
 	}
 
 	string node_key;
-	if (p.prior_balance.size() > 0) {
+	if (follow_proxy_to_master) {
+		// Do not select this stale replica again from an old balance map.
+		// Keep its Slave role so the follower can continue catching up.
+		if (p.master.node_key.empty()) return proxy_request_error_partition;
+		node_key = p.master.node_key;
+	} else if (p.prior_balance.size() > 0) {
 		node_key = p.prior_balance[rand() % p.prior_balance.size()];
 	} else {
 		node_key = p.balance[rand() % p.balance.size()];

@@ -31,10 +31,10 @@
   has no such stat) are `notInMode`: this module has no say and every
   pre-existing rule stands unchanged. The mode is remembered per node so a
   node once seen in WAL mode whose stats then become unreadable is treated as
-  Unknown (withheld), not as "not in mode". A node NEVER yet read is not
-  withheld — that is a stated residual risk, not an accident (see the
-  register): withholding on the first hiccup would flap the read balance of
-  every non-WAL cluster at start-up.
+  Unknown (withheld), not as "not in mode". A node NEVER yet read is also
+  withheld until a complete reply establishes its mode. This can temporarily
+  route reads to masters at start-up, including in non-WAL clusters, but an
+  operator restart must not re-admit a disconnected WAL replica.
 
   Pure. Main.lean reads the stats and applies the lists to the FSM
   (K8sReconciler.shapePromotionCandidates / promoteMasterlessPartition's
@@ -173,7 +173,9 @@ def judge (p : Purpose) (b : Bounds) (r : Reading) (m : MasterReading) : Verdict
             match r.nodeTime, r.sourceObservedAt with
             | some now, some seen =>
               let age := now - seen
-              if age > b.freshSecs then
+              if seen > now then
+                .unknown "the source observation is in the future of the node clock"
+              else if age > b.freshSecs then
                 .ineligible s!"the master's position was last observed {age}s ago (bound {b.freshSecs}s): stale"
               else
                 match m.head, r.appliedLsn with
@@ -290,17 +292,18 @@ def classify (b : Bounds) (mem : ModeMemory)
     let m : MasterReading := (masters.lookup part).getD {}
     match r? with
     | none =>
-      -- Not probed this pass (pod not ready, or a known out-of-mode node on
-      -- an off tick). Remembered in the mode ⇒ Unknown: withheld, unproven.
-      if knownInMode a.mem key then a.unknownFor key "not probed this pass" else a
+      -- Only a previously observed non-WAL node may retain legacy policy.
+      -- Never-observed nodes must not regain reads on operator restart.
+      if a.mem.lookup key == some false then a
+      else a.unknownFor key "not probed this pass"
     | some r =>
       let wasInMode := knownInMode a.mem key
       let a := { a with mem := remember a.mem key r.mode }
       match r.mode with
       | none =>
-        -- Unreadable: Unknown if the node was in the mode; a node never read
-        -- gets no say (stated residual risk, see the module header).
-        if wasInMode then a.unknownFor key "stats unreadable (no complete reply)" else a
+        if wasInMode || a.mem.lookup key != some false then
+          a.unknownFor key "stats unreadable (no complete reply)"
+        else a
       | some false => a
       | some true =>
         let rv := judge .read b r m

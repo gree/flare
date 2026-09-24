@@ -188,6 +188,15 @@ public:
 		time_t   last_progress_at;		// last time the position advanced
 	};
 	follow_record get_follow_record();
+	// Local read guard, independent of delayed operator/map delivery. A WAL
+	// replica only serves locally after reaching its last observed head.
+	// This is not a linearizable-read guarantee: the source can write again.
+	static bool follow_allows_local_read(const follow_record& r, time_t now) {
+		return !r.enabled || (r.state == "following" && !r.source_epoch.empty()
+			&& r.source_lsn > 0 && r.applied_lsn >= r.source_lsn
+			&& r.source_lsn_observed_at > 0 && now >= r.source_lsn_observed_at
+			&& now - r.source_lsn_observed_at <= 5);
+	}
 	// Transitions. follow_note_progress() is the only one that moves the
 	// applied position, and it is called after the position was durably
 	// recorded, never before.

@@ -2383,6 +2383,14 @@
           "command": "GitHub Actions e2e-tests.yaml (workflow_dispatch), legs replication (continuous-replication-purge, continuous-replication-limits) and continuous-replication",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/35570216917"
+        },
+        {
+          "check": "CHECK-16-limits",
+          "commit": "58688c1593e8a5ea30f78e08cd51b7770ca10218",
+          "date": "2026-09-22",
+          "command": "FLARE_E2E_SCALE_KEYS=2000000 flare_e2e --filter continuous-replication-scale (local kind; node image from 3b7f38c; 2Gi/64MB block cache)",
+          "result": "pass",
+          "report": "docs/reports/2026-09-21-saf10d-t6-t9-scale.txt"
         }
       ],
       "tasks": [

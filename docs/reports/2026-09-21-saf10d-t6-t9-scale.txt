@@ -121,3 +121,27 @@ went down with Docker. Only the console readings taken during the run survive (f
   projected at ≈11 more minutes when the host stopped. Throughput is bounded by repl-follow-max-batches (256) per poll round trip,
   not by apply cost (all skips).
   Boot-scan and probe numbers for this run were not reached. Rerun pending (numbers are console readings, not a recorded run).
+
+=== scale evaluation run 5 @ suite 58688c1, flared 3b7f38c (2Gi/1Gi budget, 64 MB block cache, 2,000,000 keys; raw: docs/reports/2026-09-22-saf10d-scale-run5-raw.log) === RESULT: PASS (3/3)
+NOTE ON ELAPSED TIMES: the host slept during this run, so every wall-clock figure the suite printed (load 40,811 s, convergence
+4,095 s) is contaminated and MUST NOT be read as a measurement. The per-sample deltas below are taken from consecutive follow
+samples (~60 s apart while the host was awake) and are the only rate figures used.
+
+Load: 2,000,000 keys stored; master items 2,000,000; no master restart (restartCount 0→0) — the 2Gi budget with a 64 MB block
+  cache held where 512Mi with the default 512 MB cache did not (see the OOM entry below).
+Follow stream, draining a ~1.24M-change backlog behind forwarding (22 samples, applied 761,179 → 2,000,004):
+  per-sample deltas 41,055 / 61,455 / 75,990 / 72,675 / 69,615 / 66,810 / 63,750 / 59,925 / 57,375 / 55,080 / 51,510 / 49,980 /
+  47,685 / 47,175 / 44,370 / 58,905 / 75,735 / 72,675 / 70,635 / 65,790 / 30,635 → ≈650–1,270 changes/s.
+  CEILING, not a load result: the follower asks for at most repl-follow-max-batches (256) batches per poll and polls every
+  repl-follow-poll-interval-usec (200 ms), so with one change per WAL batch the stream cannot exceed ≈1,280 changes/s at the
+  default settings, whatever the master's write rate. Raising max_batches or shortening the poll are the knobs; neither is tuned
+  here. wal_applied=0 / wal_skipped=2,008,010: every change had already been applied by FORWARDING, so the WAL stream did
+  verification work only — the data was never at risk, but the APPLIED POSITION is what the read-eligibility bound, the repair
+  ledger's close and the post-cut catch-up all key on, so a position that trails the head by hundreds of thousands means: no
+  replica reads (lag bound 1000), a repair entry that stays open, and more WAL the master must retain for a cut to be recoverable.
+Boot-time exact key scan (kill -9 on the PVC-backed replica, then reopen): 2,000,000 live keys in 960 ms. With the earlier points
+  (797,756 in 854 ms; 1,539,525 in 1,503 ms) the range is 0.48–0.98 µs/key, i.e. ≈1–2 s per million keys; a 15.8M-key production
+  DB extrapolates to ≈8–16 s of extra start-up. Extrapolation, not a measurement. After the restart the node came back FOLLOWING
+  with equal items, reconstruction_completed=1 and wal_fallback_to_dump=0 (incremental, no full dump).
+Operator probe cost at 2M keys: 187 probe passes, max 7,413 ms, typical ≈0.6 s; 190 "reconcile slow" lines — all during the load
+  (single-node kind, flared and the operator sharing 500m CPU), not separable from the load here.

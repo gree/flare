@@ -552,9 +552,9 @@
         "SAF-09"
       ],
       "review": {
-        "commit": "5e7a3df871fd667412b1623b3074b5b8849c2939",
-        "date": "2026-09-22",
-        "note": "SAF-10 (PR #144) changed Main.lean, K8sReconciler.lean and cluster.cc without touching this control's mechanism: Main gained the per-tick continuous-replication probe and read withholding at commit (after the fenced broadcast decision, not before it); K8sReconciler gained partitionMap-only candidate shaping and a PodListResponse field; cluster.cc gained the WAL follower lifecycle. The lease/fence path and its proofs are unchanged. PARTIAL / UNVERIFIED unchanged."
+        "commit": "e2ca4c6821fa27d935c783aefd814afa3802ff52",
+        "date": "2026-09-24",
+        "note": "Audit follow-up: inspected e2ca4c6 plus working-tree tests/docs. cluster::pre_proxy_read now routes an ineligible local follower to the master; topology send authority and lease checks are unchanged. See docs/reports/2026-09-24-saf10-audit-followups.md; runs are not attributed to an uncommitted SHA, verification remains unverified. Prior assessment: SAF-10 (PR #144) changed Main.lean, K8sReconciler.lean and cluster.cc without touching this control's mechanism: Main gained the per-tick continuous-replication probe and read withholding at commit (after the fenced broadcast decision, not before it); K8sReconciler gained partitionMap-only candidate shaping and a PodListResponse field; cluster.cc gained the WAL follower lifecycle. The lease/fence path and its proofs are unchanged. PARTIAL / UNVERIFIED unchanged."
       }
     },
     {
@@ -933,9 +933,9 @@
         "SAF-10"
       ],
       "review": {
-        "commit": "2379cff5cc28ca160e2076ad2d9c690b0c90d417",
-        "date": "2026-09-20",
-        "note": "Runs on this revision: regression suites replica-repair/operator-restart/failover/read-balance/prepare-evidence 30/30 pass; continuous-replication 12/12 pass (second consecutive full pass, run 8). Previous note: ReplicaRepair.FollowReading gained a completeness flag (END seen); unreadable = !complete; flare_unit pins that a complete reply without keys is 'not in the mode' (ordinary repair, hands an owned entry over). Bridge.queryPodStats returns at END instead of waiting out a 3 s timeout, which had made 2-node reconciles take 18-31 s and starved the repair paths. Regression suites (replica-repair, operator-restart, failover, read-balance, prepare-evidence) rerunning on this revision. PARTIAL / UNVERIFIED unchanged."
+        "commit": "e2ca4c6821fa27d935c783aefd814afa3802ff52",
+        "date": "2026-09-24",
+        "note": "Audit follow-up: inspected e2ca4c6 plus working-tree tests/docs. Shared unit/e2e test files gained read-routing and catch-up scheduling checks; the persisted repair ledger and reconstruction transitions are unchanged. See docs/reports/2026-09-24-saf10-audit-followups.md; runs are not attributed to an uncommitted SHA, verification remains unverified. Prior assessment: Runs on this revision: regression suites replica-repair/operator-restart/failover/read-balance/prepare-evidence 30/30 pass; continuous-replication 12/12 pass (second consecutive full pass, run 8). Previous note: ReplicaRepair.FollowReading gained a completeness flag (END seen); unreadable = !complete; flare_unit pins that a complete reply without keys is 'not in the mode' (ordinary repair, hands an owned entry over). Bridge.queryPodStats returns at END instead of waiting out a 3 s timeout, which had made 2-node reconciles take 18-31 s and starved the repair paths. Regression suites (replica-repair, operator-restart, failover, read-balance, prepare-evidence) rerunning on this revision. PARTIAL / UNVERIFIED unchanged."
       }
     },
     {
@@ -966,7 +966,7 @@
         "Covers Prepare ACTIVATION by the repair path only; promotion still trusts the Active designation (SAF-08).",
         "On a backend that reports no lineage/cursor (complete reply, no rocksdb_ keys) a completion with none in flight is accepted; the vacuous-activation guard in reconcileStep still requires an Active master to have synced from.",
         "The prepare-evidence E2E runs on the tch backend, so the RocksDB lineage/cursor requirement is pinned by flare_unit, not staged end to end.",
-        "SAF-10c: failover with the master gone cannot prove currency (asynchronous replication); the FSM still promotes for availability and only logs that it is not loss-free. The TCP-side zombie-master guard (Reconciler.findActiveSlaveForPartition) does not consult follower evidence. A follower never yet read by the operator is not classified. Eligibility is unit-pinned only; no E2E stages a drain or failover on WAL-mode followers yet."
+        "SAF-10c: failover with the master gone cannot prove currency (asynchronous replication); the FSM still promotes for availability and only logs that it is not loss-free. The TCP-side zombie-master guard (Reconciler.findActiveSlaveForPartition) does not consult follower evidence. Audit follow-up withholds never-read replicas until their mode is established (unit tested); independent stale-map routing and the amended read-value E2E are not yet executed. Prior E2E evidence does not validate this new local read guard."
       ],
       "code": [
         {
@@ -1004,6 +1004,14 @@
         {
           "path": "flare_operator/FlareOperator/StateMachine/K8sReconciler.lean",
           "symbol": "withholdReads"
+        },
+        {
+          "path": "src/lib/cluster.cc",
+          "symbol": "cluster::pre_proxy_read"
+        },
+        {
+          "path": "src/lib/stats.h",
+          "symbol": "stats::follow_allows_local_read"
         }
       ],
       "call_path": "flared finishes reconstruction and calls activate_node; if the operator returned OK but did not persist it (leader handover) the node stays Prepare in the operator map. Main 4c builds a per-node episode, reads flared stats (reconstruction_completed, rocksdb_master_id, cursor + master head), SyncEvidence.judge requires a completed reconstruction bound to the current master's lineage with a sane cursor and unchanged source, and a positive verdict re-derives Prepare->Active through Reconciler.reconcileStep.",
@@ -1061,6 +1069,21 @@
             {
               "path": "flare_operator/FlareOperator/UnitTests.lean",
               "symbol": "checkFollowShaping"
+            }
+          ]
+        },
+        {
+          "id": "CHECK-04-routing",
+          "kind": "scenario",
+          "procedure": "Invoke production pre_proxy_read with a stale positive slave balance: caught-up permits local read, disconnected and lagging attempt master enqueue rather than local read, recovery permits local read again, wrong source refuses local read. A deliberately unavailable transport proves fail-closed branch selection, not successful network delivery; real socket E2E remains required.",
+          "references": [
+            {
+              "path": "test/lib/test_handler_proxy.cc",
+              "symbol": "test_stale_balance_read_guard_uses_production_routing_and_recovers"
+            },
+            {
+              "path": "test/lib/test_stats_reconstruction.cc",
+              "symbol": "test_local_read_guard_disconnect_lag_and_recovery"
             }
           ]
         },
@@ -1244,9 +1267,9 @@
         "SAF-08"
       ],
       "review": {
-        "commit": "2379cff5cc28ca160e2076ad2d9c690b0c90d417",
-        "date": "2026-09-20",
-        "note": "Runs on this revision: regression suites replica-repair/operator-restart/failover/read-balance/prepare-evidence 30/30 pass; continuous-replication 12/12 pass (second consecutive full pass, run 8). Previous note: SAF-10c eligibility added around the promotion paths without changing them: candidate shaping is partitionMap-only (same device as standby de-prioritisation; shapePromotionCandidates_nodeMap proves the node map is untouched) so handleFailover/DrainWithPromotion and their CLE proofs are unchanged; promoteMasterlessPartition gained an exclusion list for its Active-slave tiers (its CLE proof re-elaborated unchanged). Drain (planned) excludes unproven and unfit; failover excludes only unfit and logs an unproven promotion as NOT LOSS-FREE. Read withholding is applied at commit after normalization. 129 flare_unit checks pass. No E2E yet for these paths; nodes not in the mode are unaffected (all lists empty). PARTIAL / UNVERIFIED unchanged."
+        "commit": "e2ca4c6821fa27d935c783aefd814afa3802ff52",
+        "date": "2026-09-24",
+        "note": "Audit follow-up: inspected e2ca4c6 plus working-tree tests/docs. Cold-start unknown replicas are withheld and future observation timestamps are Unknown. Added local flared read guard; the E2E now checks values across a cut, but has not been executed for this patch. No new promotion guarantee. See docs/reports/2026-09-24-saf10-audit-followups.md; runs are not attributed to an uncommitted SHA, verification remains unverified. Prior assessment: Runs on this revision: regression suites replica-repair/operator-restart/failover/read-balance/prepare-evidence 30/30 pass; continuous-replication 12/12 pass (second consecutive full pass, run 8). Previous note: SAF-10c eligibility added around the promotion paths without changing them: candidate shaping is partitionMap-only (same device as standby de-prioritisation; shapePromotionCandidates_nodeMap proves the node map is untouched) so handleFailover/DrainWithPromotion and their CLE proofs are unchanged; promoteMasterlessPartition gained an exclusion list for its Active-slave tiers (its CLE proof re-elaborated unchanged). Drain (planned) excludes unproven and unfit; failover excludes only unfit and logs an unproven promotion as NOT LOSS-FREE. Read withholding is applied at commit after normalization. 129 flare_unit checks pass. No E2E yet for these paths; nodes not in the mode are unaffected (all lists empty). PARTIAL / UNVERIFIED unchanged."
       }
     },
     {
@@ -1518,9 +1541,9 @@
         "SAF-08"
       ],
       "review": {
-        "commit": "d9d12852a24d8d0e998e1c9faf55202d8e0138c4",
-        "date": "2026-09-20",
-        "note": "Observation-integrity finding from the SAF-10d crash scenario: the item count after a reopen was an estimate blind to WAL-only keys. Fixed in flared (exact scan at open, boot-time O(n), logged). No change to this control's decision logic. PARTIAL / UNVERIFIED unchanged."
+        "commit": "e2ca4c6821fa27d935c783aefd814afa3802ff52",
+        "date": "2026-09-24",
+        "note": "Audit follow-up: inspected e2ca4c6 plus working-tree tests/docs. Future timestamps no longer authorize survivor eligibility; deletion still uses the existing gate. New unit checks pass, but no new delete E2E was run. See docs/reports/2026-09-24-saf10-audit-followups.md; runs are not attributed to an uncommitted SHA, verification remains unverified. Prior assessment: Observation-integrity finding from the SAF-10d crash scenario: the item count after a reopen was an estimate blind to WAL-only keys. Fixed in flared (exact scan at open, boot-time O(n), logged). No change to this control's decision logic. PARTIAL / UNVERIFIED unchanged."
       }
     },
     {
@@ -2397,9 +2420,9 @@
         "SAF-10"
       ],
       "review": {
-        "commit": "2379cff5cc28ca160e2076ad2d9c690b0c90d417",
-        "date": "2026-09-20",
-        "note": "Runs on this revision: regression suites replica-repair/operator-restart/failover/read-balance/prepare-evidence 30/30 pass; continuous-replication 12/12 pass (second consecutive full pass, run 8). Previous note: handler_wal_follower.cc / cluster.cc: the follower thread parks on needs_rebuild (and on the backend-without-WAL error) instead of returning; stop_wal_follower refuses to send a shutdown request to a thread not running a handler. Found because the E2E rebuild after flush_all never started (reconstruction_started unchanged, follower idle 'stopped'). Unit tests (follow/apply, 24) pass on the fix; the E2E rerun is pending. PARTIAL / UNVERIFIED."
+        "commit": "e2ca4c6821fa27d935c783aefd814afa3802ff52",
+        "date": "2026-09-24",
+        "note": "Audit follow-up: inspected e2ca4c6 plus working-tree tests/docs. handler_wal_follower::run now retries successful MORE slices immediately even with zero newly applied changes; errors retain backoff. Production-used pure scheduling test passed in cutter. See docs/reports/2026-09-24-saf10-audit-followups.md; runs are not attributed to an uncommitted SHA, verification remains unverified. Prior assessment: Runs on this revision: regression suites replica-repair/operator-restart/failover/read-balance/prepare-evidence 30/30 pass; continuous-replication 12/12 pass (second consecutive full pass, run 8). Previous note: handler_wal_follower.cc / cluster.cc: the follower thread parks on needs_rebuild (and on the backend-without-WAL error) instead of returning; stop_wal_follower refuses to send a shutdown request to a thread not running a handler. Found because the E2E rebuild after flush_all never started (reconstruction_started unchanged, follower idle 'stopped'). Unit tests (follow/apply, 24) pass on the fix; the E2E rerun is pending. PARTIAL / UNVERIFIED."
       }
     },
     {
@@ -2493,9 +2516,9 @@
         "SAF-10"
       ],
       "review": {
-        "commit": "d9d12852a24d8d0e998e1c9faf55202d8e0138c4",
-        "date": "2026-09-20",
-        "note": "T4 staged end to end (run 9 failed only on the item COUNT, which exposed the estimate-seeded curr_items after a reopen — fixed in this revision; run 10 passes 13/13). The applied position was consistent with the data in both runs. PARTIAL→IMPLEMENTED unchanged as 'implemented'; UNVERIFIED."
+        "commit": "e2ca4c6821fa27d935c783aefd814afa3802ff52",
+        "date": "2026-09-24",
+        "note": "Audit follow-up: inspected e2ca4c6 plus working-tree tests/docs. Only shared test sources changed; atomic data/metadata/cursor write path was not modified. No new crash-consistency claim. See docs/reports/2026-09-24-saf10-audit-followups.md; runs are not attributed to an uncommitted SHA, verification remains unverified. Prior assessment: T4 staged end to end (run 9 failed only on the item COUNT, which exposed the estimate-seeded curr_items after a reopen — fixed in this revision; run 10 passes 13/13). The applied position was consistent with the data in both runs. PARTIAL→IMPLEMENTED unchanged as 'implemented'; UNVERIFIED."
       }
     },
     {
@@ -2669,9 +2692,9 @@
         "SAF-10"
       ],
       "review": {
-        "commit": "3b7f38ce8ff230df5973c70c61d2f146155e92bd",
-        "date": "2026-09-21",
-        "note": "Served-gap handling: op_repl_sync_wal server returns lsn_purged when the oldest served batch is beyond the requested position; storage_rocksdb exposes apply_refused_gap; the follow client maps it to client_lsn_purged (needs_rebuild). Unit: 31 tests / 516 assertions pass incl. the gap test pinning the outcome. The T6 purge suite rerun on this revision is pending; the earlier T6 failures (runs 1-3, CI runs 1-2) were this defect plus a harness escape bug. PARTIAL / UNVERIFIED."
+        "commit": "e2ca4c6821fa27d935c783aefd814afa3802ff52",
+        "date": "2026-09-24",
+        "note": "Audit follow-up: inspected e2ca4c6 plus working-tree tests/docs. Unknown-at-startup read exclusion and the local read guard do not demote the replica, preserving catch-up ownership. needs_rebuild handling is unchanged; amended E2E unexecuted. See docs/reports/2026-09-24-saf10-audit-followups.md; runs are not attributed to an uncommitted SHA, verification remains unverified. Prior assessment: Served-gap handling: op_repl_sync_wal server returns lsn_purged when the oldest served batch is beyond the requested position; storage_rocksdb exposes apply_refused_gap; the follow client maps it to client_lsn_purged (needs_rebuild). Unit: 31 tests / 516 assertions pass incl. the gap test pinning the outcome. The T6 purge suite rerun on this revision is pending; the earlier T6 failures (runs 1-3, CI runs 1-2) were this defect plus a harness escape bug. PARTIAL / UNVERIFIED."
       }
     },
     {
@@ -2772,9 +2795,9 @@
         "SAF-10"
       ],
       "review": {
-        "commit": "2379cff5cc28ca160e2076ad2d9c690b0c90d417",
-        "date": "2026-09-20",
-        "note": "Runs on this revision: regression suites replica-repair/operator-restart/failover/read-balance/prepare-evidence 30/30 pass; continuous-replication 12/12 pass (second consecutive full pass, run 8). Previous note: New control from the SAF-10 design (§6); implementation on branch safety/saf-10-wal-replication. Unit evidence to be attached from the RocksDB cutter run on this revision and the flare_unit run; E2E from the continuous-replication suite. Author-run only; nothing verified."
+        "commit": "e2ca4c6821fa27d935c783aefd814afa3802ff52",
+        "date": "2026-09-24",
+        "note": "Audit follow-up: inspected e2ca4c6 plus working-tree tests/docs. Shared test sources extended; ordering, generation and apply-rule production code unchanged. No new replay/deduplication claim. See docs/reports/2026-09-24-saf10-audit-followups.md; runs are not attributed to an uncommitted SHA, verification remains unverified. Prior assessment: Runs on this revision: regression suites replica-repair/operator-restart/failover/read-balance/prepare-evidence 30/30 pass; continuous-replication 12/12 pass (second consecutive full pass, run 8). Previous note: New control from the SAF-10 design (§6); implementation on branch safety/saf-10-wal-replication. Unit evidence to be attached from the RocksDB cutter run on this revision and the flare_unit run; E2E from the continuous-replication suite. Author-run only; nothing verified."
       }
     },
     {
@@ -2860,9 +2883,9 @@
         "SAF-10"
       ],
       "review": {
-        "commit": "2379cff5cc28ca160e2076ad2d9c690b0c90d417",
-        "date": "2026-09-20",
-        "note": "Runs on this revision: regression suites replica-repair/operator-restart/failover/read-balance/prepare-evidence 30/30 pass; continuous-replication 12/12 pass (second consecutive full pass, run 8). Previous note: New control from the SAF-10 design (§6); implementation on branch safety/saf-10-wal-replication. Unit evidence to be attached from the RocksDB cutter run on this revision and the flare_unit run; E2E from the continuous-replication suite. Author-run only; nothing verified."
+        "commit": "e2ca4c6821fa27d935c783aefd814afa3802ff52",
+        "date": "2026-09-24",
+        "note": "Audit follow-up: inspected e2ca4c6 plus working-tree tests/docs. Shared test sources extended; positional tombstone GC and its locking are unchanged. No new GC concurrency evidence. See docs/reports/2026-09-24-saf10-audit-followups.md; runs are not attributed to an uncommitted SHA, verification remains unverified. Prior assessment: Runs on this revision: regression suites replica-repair/operator-restart/failover/read-balance/prepare-evidence 30/30 pass; continuous-replication 12/12 pass (second consecutive full pass, run 8). Previous note: New control from the SAF-10 design (§6); implementation on branch safety/saf-10-wal-replication. Unit evidence to be attached from the RocksDB cutter run on this revision and the flare_unit run; E2E from the continuous-replication suite. Author-run only; nothing verified."
       }
     }
   ]

@@ -16,6 +16,7 @@ jobs:
   test-legacy:
     name: Test Legacy Build (without RocksDB)
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v3
       - uses: cachix/install-nix-action@v22
@@ -24,8 +25,18 @@ jobs:
             experimental-features = nix-command flakes
           nix_path: nixpkgs=channel:nixos-unstable
       - name: Build and test legacy Flare
+        shell: bash
         run: |
-          nix build .#test-flare -L
+          set -euo pipefail
+          mkdir -p ci-results
+          git rev-parse HEAD > ci-results/tested-sha.txt
+          timeout --kill-after=30 3000 nix build .#test-flare -L 2>&1 | tee ci-results/nix.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nix-legacy-${{ github.run_attempt }}
+          path: ci-results/
+          retention-days: 30
       - name: Verify RocksDB is NOT compiled
         run: |
           nix build .#flare -L
@@ -38,6 +49,7 @@ jobs:
   test-rocksdb:
     name: Test RocksDB Build
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v3
       - uses: cachix/install-nix-action@v22
@@ -46,8 +58,18 @@ jobs:
             experimental-features = nix-command flakes
           nix_path: nixpkgs=channel:nixos-unstable
       - name: Build and test Flare with RocksDB
+        shell: bash
         run: |
-          nix build .#test-flare-rocksdb -L
+          set -euo pipefail
+          mkdir -p ci-results
+          git rev-parse HEAD > ci-results/tested-sha.txt
+          timeout --kill-after=30 3000 nix build .#test-flare-rocksdb -L 2>&1 | tee ci-results/nix.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nix-rocksdb-${{ github.run_attempt }}
+          path: ci-results/
+          retention-days: 30
       - name: Verify RocksDB is compiled
         run: |
           nix build .#flare-rocksdb -L

@@ -27,6 +27,7 @@
  *	$Id$
  */
 #include "app.h"
+#include <sys/statvfs.h>
 #include "storage.h"
 #include "binary_request_header.h"
 #include "binary_response_header.h"
@@ -48,7 +49,8 @@ storage::storage(string data_dir, int mutex_slot_size, int header_cache_size):
 		_mutex_slot(NULL),
 		_iter_lock(false),
 		_header_cache_size(header_cache_size),
-		_header_cache_map(NULL) {
+		_header_cache_map(NULL),
+		_listener(NULL) {
 	this->_mutex_slot = new pthread_rwlock_t[mutex_slot_size];
 	int i;
 	for (i = 0; i < this->_mutex_slot_size; i++) {
@@ -343,6 +345,22 @@ int storage::_set_header_cache(string key, entry& e) {
 
 // {{{ private methods
 // }}}
+
+uint64_t storage::get_data_dir_used_bytes() {
+	struct statvfs vfs;
+	if (statvfs(this->_data_dir.c_str(), &vfs) != 0) {
+		return 0;
+	}
+	return static_cast<uint64_t>(vfs.f_blocks - vfs.f_bfree) * vfs.f_frsize;
+}
+
+uint64_t storage::get_data_dir_capacity_bytes() {
+	struct statvfs vfs;
+	if (statvfs(this->_data_dir.c_str(), &vfs) != 0) {
+		return 0;
+	}
+	return static_cast<uint64_t>(vfs.f_blocks) * vfs.f_frsize;
+}
 
 }	// namespace flare
 }	// namespace gree

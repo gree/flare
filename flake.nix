@@ -26,10 +26,19 @@
       let pkgs = import nixpkgs {inherit system;};
           flare-tests-exe = flare-tests.packages.${system}.flare-tests;
           flare-tools-exe = flare-tools.packages.${system}.flare-tools;
+          # Legacy build (default, no RocksDB)
           flare = import ./nix/default.nix {
             inherit pkgs;
             inherit system;
             flare-tests = flare-tests-exe;
+            enableRocksdb = false;
+          };
+          # RocksDB-enabled build
+          flare-rocksdb = import ./nix/default.nix {
+            inherit pkgs;
+            inherit system;
+            flare-tests = flare-tests-exe;
+            enableRocksdb = true;
           };
           shell = import ./nix/shell.nix {
             inherit pkgs;
@@ -41,12 +50,31 @@
             buildInputs = [
               flare
               flare-tests-exe
+              coreutils
             ];
           } ''
               mkdir -p $out/
               export NIX_REDIRECTS=/etc/protocols=${iana-etc}/etc/protocols
               export LD_PRELOAD=${libredirect}/lib/libredirect.so
-              flare-tests
+              # Bound the run so a hung/looping test fails in minutes instead of
+              # burning the 6h GitHub job limit with no output.
+              timeout --signal=TERM --kill-after=30 1200 flare-tests
+              unset NIX_REDIRECTS LD_PRELOAD
+              touch $out/done
+          '';
+          test-flare-rocksdb = with pkgs; runCommand "test-flare-rocksdb" {
+            buildInputs = [
+              flare-rocksdb
+              flare-tests-exe
+              coreutils
+            ];
+          } ''
+              mkdir -p $out/
+              export NIX_REDIRECTS=/etc/protocols=${iana-etc}/etc/protocols
+              export LD_PRELOAD=${libredirect}/lib/libredirect.so
+              # Bound the run so a hung/looping test fails in minutes instead of
+              # burning the 6h GitHub job limit with no output.
+              timeout --signal=TERM --kill-after=30 1200 flare-tests
               unset NIX_REDIRECTS LD_PRELOAD
               touch $out/done
           '';
@@ -55,7 +83,9 @@
         defaultPackage = flare;
         packages = {
           inherit flare;
+          inherit flare-rocksdb;
           inherit test-flare;
+          inherit test-flare-rocksdb;
         };
         devShell = shell;
       }

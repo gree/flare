@@ -53,6 +53,11 @@ public:
 	virtual int startup() = 0;
 	virtual type get_type() = 0;
 	virtual int resolve(int key_hash_value, int partition_size) = 0;
+	// Largest partition_size this resolver can answer for, EXCLUSIVE (valid
+	// range is 1 .. capacity-1); 0 = unknown/unbounded. Lets wire-facing ops
+	// (dump, dump_key) reject an out-of-range partition_size at parse time
+	// instead of letting it index the resolving table out of bounds.
+	virtual int get_partition_size_capacity() { return 0; }
 
 	static inline int type_cast(string s, type& t) {
 		if (s == "modular") {

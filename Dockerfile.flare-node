@@ -1,0 +1,57 @@
+# Build flared with --enable-k8s-operator for use with the Lean 4 operator
+FROM --platform=linux/x86_64 ubuntu:noble AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=UTC
+
+RUN apt-get update && apt-get install -y \
+    git \
+    build-essential \
+    autoconf \
+    automake \
+    libtool \
+    libboost-all-dev \
+    libhashkit-dev \
+    libtokyocabinet-dev \
+    libkyotocabinet-dev \
+    uuid-dev \
+    pkg-config \
+    zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY . /build/flare/
+
+RUN cd /build/flare \
+    && ./autogen.sh \
+    && ./configure --enable-k8s-operator \
+    && make -j"$(nproc)" \
+    && make install DESTDIR=/build/install
+
+# Stage 2: Minimal runtime image
+FROM --platform=linux/x86_64 ubuntu:noble
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y \
+    libboost-program-options1.83.0 \
+    libboost-regex1.83.0 \
+    libboost-serialization1.83.0 \
+    libboost-thread1.83.0 \
+    libboost-system1.83.0 \
+    libhashkit2 \
+    libtokyocabinet9 \
+    libkyotocabinet16v5 \
+    libuuid1 \
+    zlib1g \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /build/install/usr/local/ /usr/local/
+
+# flared listens on 12121 by default
+EXPOSE 12121
+
+# FLARE_OPERATOR_HOST and FLARE_OPERATOR_PORT are set at deployment time
+# to point flared at the Lean 4 operator instead of flarei
+
+ENTRYPOINT ["/usr/local/bin/flared"]

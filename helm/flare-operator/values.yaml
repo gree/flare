@@ -1,0 +1,405 @@
+# Default values for flare-operator.
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+# Number of operator replicas (leader election handles HA)
+replicaCount: 2
+
+image:
+  # Published by .github/workflows/publish-images.yaml on version tags.
+  repository: ghcr.io/gree/flare-operator
+  pullPolicy: IfNotPresent
+  # Overrides the image tag whose default is the chart appVersion.
+  tag: ""
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# Namespace where the operator will run
+# Note: The operator can manage FlareCluster resources across all namespaces
+namespace: flare-system
+
+# Default cluster name to manage (can be overridden per FlareCluster CR)
+clusterName: "default"
+
+# CRD lifecycle.
+#
+# The FlareCluster/FlareMigration CRDs are cluster-scoped and SHARED by every
+# flare instance in the cluster. In a multi-cluster / multi-operator layout
+# (20-30 instances) their ownership MUST be decoupled from any single instance's
+# lifecycle, otherwise deleting the "owning" instance orphans (or, without the
+# keep/Prune=false guards, cascade-deletes) every other instance's CRs.
+#
+# Pattern: one dedicated "flare-crds" release/app owns the CRDs
+# (crds.install=true, operator.enabled=false, cluster.enabled=false → renders
+# CRDs ONLY); every instance app sets crds.install=false and consumes them.
+# Standalone `helm install` keeps the default (true) for a self-contained
+# install. See docs/RUNBOOK.md#multi-cluster-crd-ownership.
+crds:
+  install: true
+
+# Control plane (operator Deployment + RBAC + Service + operator-scoped
+# monitoring). Set false in the dedicated flare-crds release so it emits the
+# CRDs and nothing else. Instance apps and standalone installs keep the
+# default (true).
+operator:
+  enabled: true
+
+serviceAccount:
+  # Specifies whether a service account should be created
+  create: true
+  # Annotations to add to the service account
+  annotations: {}
+  # The name of the service account to use.
+  # If not set and create is true, a name is generated using the fullname template
+  name: ""
+
+rbac:
+  # Specifies whether RBAC resources should be created
+  create: true
+
+podAnnotations: {}
+
+# Extra labels for the operator pods (merged into the pod template).
+# Typical use: organization-wide cost-allocation / ownership labels that a
+# billing pipeline expects on every pod.
+podLabels: {}
+
+podSecurityContext: {}
+  # fsGroup: 2000
+
+securityContext: {}
+  # capabilities:
+  #   drop:
+  #   - ALL
+  # readOnlyRootFilesystem: true
+  # runAsNonRoot: true
+  # runAsUser: 1000
+
+service:
+  type: ClusterIP
+  port: 12120
+  targetPort: flare-index
+
+# Operator TCP server port for flared index server protocol
+operatorPort: 12120
+
+# Metrics server port (Prometheus)
+metricsPort: 9090
+
+# Health check port
+healthPort: 8080
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 256Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+
+# Liveness probe configuration
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: 8080
+  initialDelaySeconds: 5
+  periodSeconds: 10
+
+# Readiness probe configuration
+readinessProbe:
+  httpGet:
+    path: /readyz
+    port: 8080
+  initialDelaySeconds: 3
+  periodSeconds: 5
+
+# Additional environment variables for the operator
+env: []
+  # - name: CUSTOM_VAR
+  #   value: "custom-value"
+
+# Additional arguments for the operator
+extraArgs: []
+
+# ---------------------------------------------------------------------------
+# Managed Flare data cluster (FlareCluster CR + StatefulSet + PDB).
+# Disabled by default: enable to have the chart own the workload too.
+# ---------------------------------------------------------------------------
+cluster:
+  enabled: false
+  name: "default"
+  partitions: 2
+  replicas: 2
+  image:
+    repository: ghcr.io/gree/flare-node-rocksdb
+    tag: latest
+    pullPolicy: IfNotPresent
+  flarePort: 12121
+  storageBackend: rocksdb
+  # Port for flared's NATIVE Prometheus /metrics endpoint (each pod exports its
+  # own stats; scraped directly by the flared-metrics PodMonitor, so metrics
+  # share the pod's fault domain instead of the operator's).
+  metricsPort: 9150
+  # Graceful-drain window (seconds) before a terminating flared is stopped.
+  # A preStop hook sleeps this long AFTER the pod enters Terminating (so it is
+  # already out of the Service/CLB endpoints and the operator has promoted a
+  # slave for any partition this pod mastered — see TerminatingPodHandling),
+  # while flared stays alive and keeps serving/forwarding the connections it
+  # still holds. It approximates flare's old "demote to proxy, then drain"
+  # behaviour: no NEW connections arrive, existing clients finish or reconnect,
+  # and only then is flared sent SIGTERM. terminationGracePeriodSeconds is
+  # drainSeconds + 30 (headroom for flared's own graceful shutdown after SIGTERM).
+  # Cost: each pod takes ~drainSeconds longer to roll — a full 6-pod rolling
+  # restart is +6×drainSeconds. Set 0 to disable the hook (abrupt stop).
+  drainSeconds: 60
+  persistence:
+    # PVC-backed data dirs: REQUIRED for production. Survives pod loss and
+    # enables the backup/restore flow (docs/BACKUP_RESTORE.md).
+    enabled: true
+    size: 10Gi
+    # storageClassName: fast-ssd
+  # tmpfs (RAM-backed emptyDir) data dir — MUTUALLY EXCLUSIVE with persistence.
+  # Fast and node-disk-free, but data is lost on pod restart, so rely on
+  # replicas>=2 (slave promotion) + off-cluster backup. sizeLimit counts against
+  # the pod's memory. To use: persistence.enabled=false + tmpfs.enabled=true.
+  tmpfs:
+    enabled: false
+    sizeLimit: 10Gi
+  # Probe timings for the flared container. Override individual keys only;
+  # anything omitted keeps the default shown here.
+  #
+  # The READINESS numbers are also the CLIENT-LB EJECTION WINDOW: K8s removes
+  # a pod from the Service endpoints only after periodSeconds x
+  # failureThreshold, so a flared that just crashed keeps receiving (and
+  # refusing) client connections for roughly that long — 15s at the defaults,
+  # plus up to one period of detection lag. Tighten (e.g. failureThreshold 2)
+  # to shrink it, at the cost of one more exec probe per pod per period and a
+  # greater chance of ejecting a briefly-slow pod. See
+  # docs/STPA-node-state.md gap G4.
+  #
+  # LIVENESS is a plain tcpSocket check and is what restarts a flared whose
+  # port stops accepting; at the defaults that takes ~30s. It deliberately
+  # does NOT use the readiness command: a node that is merely out of the
+  # topology must not be restart-looped.
+  probes: {}
+  #  readiness:
+  #    initialDelaySeconds: 5
+  #    periodSeconds: 5
+  #    timeoutSeconds: 4
+  #    failureThreshold: 3
+  #  liveness:
+  #    initialDelaySeconds: 10
+  #    periodSeconds: 5
+  #    failureThreshold: 6
+
+  # RocksDB backend tuning. Keys map 1:1 to the FlareCluster CRD's spec.rocksdb
+  # (walSizeLimitMb, walTtlSeconds, syncWrites, walMaxBatchBytes, ...); only the
+  # keys you set are emitted, everything else keeps flared's built-in default.
+  # IMPORTANT on tmpfs: RocksDB keeps a WAL archive (for slave catch-up) up to
+  # walSizeLimitMb (flared default 10240 = 10Gi) on the RAM-backed data dir, so
+  # the archive alone can fill the tmpfs. On a tmpfs cluster cap it well under
+  # tmpfs.sizeLimit (rule of thumb ~5%) and add a short walTtlSeconds, e.g. for a
+  # 10Gi tmpfs: {walSizeLimitMb: 512, walTtlSeconds: 3600}.
+  # ALSO on tmpfs: each `backup` op leaves a named checkpoint under
+  # data-dir/backups/ and flared retains the newest backupKeep of them
+  # (default 7 — sized for PVC). Checkpoints hardlink-pin compacted-away SSTs,
+  # so 7 hourly generations grow past the live DB size — in RAM. That OOMed
+  # pf-dev live (DB ~2G, backups ~4G, limit 6Gi). On tmpfs set backupKeep: 1
+  # (S3 already holds the history; a local checkpoint on a RAM disk is not a
+  # durable restore point anyway). E.g. {walSizeLimitMb: 512, walTtlSeconds:
+  # 3600, backupKeep: 1}.
+  rocksdb: {}
+  # Declarative read-routing policy (CRD spec.readBalance). flared routes
+  # reads by balance weight; the operator normalizes every node map to this
+  # policy, so manual flare-admin balance edits are reverted — change this
+  # instead (applies within a reconcile tick). Example:
+  #   readBalance:
+  #     master: 100
+  #     slave: 100            # reads distributed across master + slaves
+  #     standby:              # never serve reads; promoted only as last resort
+  #       - podName: mycluster-nodes-2
+  #       - zone: "250002"
+  readBalance: {}
+  # glibc malloc arena cap for flared (MALLOC_ARENA_MAX). Bounds the per-thread
+  # arena bloat that otherwise ratchets RSS to the write-burst high-water mark.
+  mallocArenaMax: 2
+  # Spread flared pods across zones so one AZ cannot take a whole
+  # partition's master AND slave together. "soft" uses ScheduleAnyway
+  # (small/dev clusters), "hard" uses DoNotSchedule (production).
+  zoneSpread: soft
+  # Never stack two flared pods on one K8s node: a single node holding BOTH
+  # copies of a partition turns one node failure into a full partition
+  # outage (observed live: the scheduler happily co-located each
+  # partition's pair — zone balance was satisfied, node placement wasn't
+  # constrained). Enabled ("soft") by default so it works on small/dev
+  # clusters too; use "hard" in production to refuse such placement
+  # outright. NOTE: spread constraints separate PODS; which pod is a
+  # partition's master/slave is the operator's assignment. Node-level
+  # separation of pods therefore separates every partition's copies across
+  # nodes, but per-partition cross-AZ placement additionally needs the
+  # topology-aware assignment (planned) or replicas: 3.
+  hostnameSpread: soft
+  # PodDisruptionBudget: maxUnavailable 1 serializes voluntary disruptions
+  # (node drains), so rolling node maintenance can never evict a
+  # partition's master and slave at the same time.
+  pdb:
+    enabled: true
+    maxUnavailable: 1
+  # Optional pod-level ServiceAccount for the flared pods (flared itself uses
+  # no K8s API). Defaults to backup.serviceAccount.name when backupBootstrap
+  # is enabled (the bucket-read identity).
+  serviceAccountName: ""
+
+  # ---- Object-storage backup (shared config) --------------------------------
+  # One block consumed by BOTH the backup CronJob (produce side) and
+  # backupBootstrap (restore side), so the location/auth can never drift
+  # apart. Everything cloud-specific (bucket, role ARN, audience, region,
+  # endpoint) is a DEPLOYMENT-side value — nothing vendor-flavored is
+  # committed to this chart.
+  objectStorage:
+    # s3://bucket/prefix — no trailing slash, no cluster name (consumers
+    # append /<cluster.name>/...). Required when backup or backupBootstrap
+    # is enabled.
+    url: ""
+    # non-AWS S3-compatible endpoint (COS, GCS, MinIO, ...); empty for AWS.
+    endpoint: ""
+    # keyless (web-identity) auth: the token audience your cloud expects; a
+    # projected ServiceAccount token is mounted at /var/run/secrets/sts/token.
+    # Pass the role via extraEnv; static-key setups can instead reference a
+    # Secret from extraEnv/credentialsSecret. Example:
+    #   projectedTokenAudience: sts.amazonaws.com
+    #   extraEnv:
+    #     - name: AWS_ROLE_ARN
+    #       value: arn:aws:iam::<acct>:role/<role>
+    #     - name: AWS_WEB_IDENTITY_TOKEN_FILE
+    #       value: /var/run/secrets/sts/token
+    #     - name: AWS_REGION
+    #       value: <region>
+    projectedTokenAudience: ""
+    extraEnv: []
+    # optional Secret with static credentials (envFrom) for non-OIDC setups
+    credentialsSecret: ""
+
+  # Backup CronJob: ONE strictly-ordered runner (flare-backup-run, baked into
+  # the flare-backup image): per-partition checkpoint -> pull -> restore-
+  # consistent 3-phase upload -> verify, then (first successful run of each
+  # UTC day) the retained generation copy + prune. In-process ordering means
+  # the daily generation can never race a running delta. RPO = the schedule
+  # interval. Creates the ServiceAccount/Role/RoleBinding (pods/get+exec) it
+  # needs. See docs/BACKUP_RESTORE.md.
+  backup:
+    # enabled gates only the CronJob OBJECT; the SA/RBAC are provisioned
+    # whenever objectStorage is configured (the nodes STS references the SA
+    # whenever the bootstrap plumbing exists). To PAUSE backups (e.g. while
+    # seeding over cluster replication) prefer `suspend: true` — a CronJob
+    # field change, zero pod impact, zero object churn.
+    enabled: false
+    schedule: "0 * * * *"        # hourly; every run is a delta
+    suspend: false
+    role: master                 # which copy to back up: master | slave
+    keepDays: 14                 # retained daily generations; 0 disables them
+    # The daily generation is created by the first SUCCESSFUL run at-or-after
+    # this UTC hour (default 0 = the first run of the UTC day). Pick a
+    # low-traffic local hour, e.g. 18 = 03:00 JST. Named by UTC date.
+    snapshotAfterHourUtc: 0
+    # HARD timeout below the cadence (a hung run dies before its next slot)
+    activeDeadlineSeconds: 3300
+    startingDeadlineSeconds: 900
+    serviceAccount:
+      create: true
+      # Empty ⇒ auto-derived "<cluster.name>-backup" so multiple clusters can
+      # share a namespace. The cloud OIDC trust policy must match it via a
+      # StringLike subject condition (e.g.
+      # system:serviceaccount:<ns>:*-backup). Set an explicit name only to
+      # pin it (then the trust policy can StringEquals that exact name).
+      name: ""
+    # image needs kubectl+aws-cli+the runner; defaults to the flared tag
+    image:
+      repository: ghcr.io/gree/flare-backup
+      tag: ""
+
+  # Automated failover-from-backup: an init container seeds an EMPTY data dir
+  # from the newest backup (objectStorage.url/<cluster.name>/latest/p0/)
+  # before flared starts (no-op when data exists). Loss window = the backup
+  # interval; a backup older than maxAgeSeconds is refused loudly instead of
+  # served. Requires partitions=1 and a data volume. For planned maintenance
+  # prefer a TEMPORARY slave (replicas 1->2->1); this covers the unplanned
+  # failures (and whole-cluster tmpfs loss) in between. NOTE: keep the
+  # cluster's rocksdb walTtlSeconds above (backup interval + maxAgeSeconds)
+  # or a backup-seeded pod can never catch up via WAL incremental sync.
+  #
+  # ROLL-FREE TOGGLE: `enabled` is a RUNTIME flag (the <cluster>-flags
+  # ConfigMap, read by the init at pod start) — flipping it changes only that
+  # ConfigMap. The plumbing (init container, backup SA, token volume) is
+  # always provisioned when objectStorage is configured, so the pod template
+  # never changes on toggle: no rolling restart, no master handoff.
+  backupBootstrap:
+    enabled: false
+    maxAgeSeconds: 7200
+    image:
+      repository: ghcr.io/gree/flare-backup
+      tag: ""
+
+  # Offline keyspace analysis (monthly by default): runs against the S3 BACKUP
+  # checkpoint — NOT the serving cluster — and emits key,expire,ttl,size CSV
+  # per partition (via `flared --analyze-checkpoint`, streaming/constant
+  # memory), gzipped to <objectStorage.url>/<cluster>/analysis/<date>/pN.csv.gz.
+  # Reuses cluster.objectStorage (auth/location) and the backup ServiceAccount.
+  analysis:
+    enabled: false
+    schedule: "0 4 1 * *"        # monthly, 1st, 04:00 UTC
+    suspend: false
+    activeDeadlineSeconds: 21600
+    uploadReport: true            # false = leave reports in the pod (log summary only)
+    # RocksDB opens the checkpoint from local disk, so the pull stages the
+    # WHOLE dataset (bigger than the CSV output). The default work volume is an
+    # emptyDir on node disk; for large clusters point it at a PVC sized for the
+    # dataset. The CSV OUTPUT is streamed to S3 (never staged) via a FIFO.
+    workVolumeClaimName: ""       # "" = emptyDir (node disk); else a PVC name
+    image:                        # analyzer = flared (rocksdb); defaults to cluster.image
+      repository: ""
+      tag: ""
+  # Optional LoadBalancer in front of the flared DATA port (memcached
+  # protocol). flared proxies keys to the owning partition, so one LB over
+  # all nodes is a complete client entry point. The protocol has NO
+  # authentication: keep the LB internal to your network (most cloud
+  # providers select an internal LB via a Service annotation) and never
+  # expose it publicly. Disabled by default — nothing is created unless
+  # explicitly enabled.
+  # Extra labels for the flared pods (merged into the pod template) —
+  # same purpose as the top-level podLabels (cost allocation etc.).
+  podLabels: {}
+  externalAccess:
+    enabled: false
+    type: LoadBalancer
+    # Cloud-specific Service annotations (e.g. your provider's
+    # internal-load-balancer selector).
+    annotations: {}
+    # Optional CIDR allow-list enforced by the cloud LB.
+    loadBalancerSourceRanges: []
+    port: 12121
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+
+# Monitoring objects (require the Prometheus Operator CRDs).
+monitoring:
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+  prometheusRule:
+    enabled: false
+    # Extra labels so your Prometheus picks the rules up (e.g. release: prom)
+    labels: {}

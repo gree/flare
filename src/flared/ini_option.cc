@@ -87,6 +87,25 @@ ini_option::ini_option():
 		_cluster_replication_server_port(default_server_port),
 		_cluster_replication_concurrency(default_proxy_concurrency),
 		_cluster_replication_mode(""),
+		_rocksdb_block_cache_size_mb(default_rocksdb_block_cache_size_mb),
+		_rocksdb_write_buffer_size_mb(default_rocksdb_write_buffer_size_mb),
+		_rocksdb_max_write_buffer_number(default_rocksdb_max_write_buffer_number),
+		_rocksdb_wal_ttl_seconds(default_rocksdb_wal_ttl_seconds),
+		_rocksdb_wal_size_limit_mb(default_rocksdb_wal_size_limit_mb),
+		_rocksdb_sync_writes(false),
+		_rocksdb_resync_failure_threshold(default_rocksdb_resync_failure_threshold),
+		_rocksdb_wal_max_batch_bytes(default_rocksdb_wal_max_batch_bytes),
+		_rocksdb_wal_sync_bwlimit(default_rocksdb_wal_sync_bwlimit),
+		_rocksdb_wal_sync_interval(default_rocksdb_wal_sync_interval),
+		_rocksdb_backup_keep(default_rocksdb_backup_keep),
+		_rocksdb_snapshot_bwlimit(default_rocksdb_snapshot_bwlimit),
+		_flush_all_enabled(default_flush_all_enabled),
+		_reap_expired(default_reap_expired),
+		_reap_expired_interval(default_reap_expired_interval),
+		_reap_expired_chunk_size(default_reap_expired_chunk_size),
+		_reap_expired_chunk_sleep_msec(default_reap_expired_chunk_sleep_msec),
+		_metrics_server_port(default_metrics_server_port),
+		_storage_check_interval(default_storage_check_interval),
 		_log_stderr(false) {
 	pthread_mutex_init(&this->_mutex_index_servers, NULL);
 }
@@ -393,6 +412,68 @@ int ini_option::load() {
 		} else {
 			this->_cluster_replication_mode = cluster_replication::mode_cast(cluster_replication::mode_duplicate);
 		}
+
+		if (opt_var_map.count("rocksdb-block-cache-size-mb")) {
+			this->_rocksdb_block_cache_size_mb = opt_var_map["rocksdb-block-cache-size-mb"].as<uint64_t>();
+		}
+		if (opt_var_map.count("rocksdb-write-buffer-size-mb")) {
+			this->_rocksdb_write_buffer_size_mb = opt_var_map["rocksdb-write-buffer-size-mb"].as<uint64_t>();
+		}
+		if (opt_var_map.count("rocksdb-max-write-buffer-number")) {
+			this->_rocksdb_max_write_buffer_number = opt_var_map["rocksdb-max-write-buffer-number"].as<int>();
+		}
+		if (opt_var_map.count("rocksdb-wal-ttl-seconds")) {
+			this->_rocksdb_wal_ttl_seconds = opt_var_map["rocksdb-wal-ttl-seconds"].as<uint64_t>();
+		}
+		if (opt_var_map.count("rocksdb-wal-size-limit-mb")) {
+			this->_rocksdb_wal_size_limit_mb = opt_var_map["rocksdb-wal-size-limit-mb"].as<uint64_t>();
+		}
+		if (opt_var_map.count("rocksdb-sync-writes")) {
+			this->_rocksdb_sync_writes = opt_var_map["rocksdb-sync-writes"].as<bool>();
+		}
+		if (opt_var_map.count("rocksdb-resync-failure-threshold")) {
+			this->_rocksdb_resync_failure_threshold = opt_var_map["rocksdb-resync-failure-threshold"].as<int>();
+		}
+		if (opt_var_map.count("rocksdb-wal-max-batch-bytes")) {
+			this->_rocksdb_wal_max_batch_bytes = opt_var_map["rocksdb-wal-max-batch-bytes"].as<uint64_t>();
+		}
+		if (opt_var_map.count("rocksdb-wal-sync-bwlimit")) {
+			this->_rocksdb_wal_sync_bwlimit = opt_var_map["rocksdb-wal-sync-bwlimit"].as<int>();
+		}
+		if (opt_var_map.count("rocksdb-wal-sync-interval")) {
+			this->_rocksdb_wal_sync_interval = opt_var_map["rocksdb-wal-sync-interval"].as<int>();
+		}
+
+		if (opt_var_map.count("rocksdb-backup-keep")) {
+			this->_rocksdb_backup_keep = opt_var_map["rocksdb-backup-keep"].as<int>();
+		}
+
+		if (opt_var_map.count("rocksdb-snapshot-bwlimit")) {
+			this->_rocksdb_snapshot_bwlimit = opt_var_map["rocksdb-snapshot-bwlimit"].as<int>();
+		}
+
+		if (opt_var_map.count("flush-all-enabled")) {
+			this->_flush_all_enabled = opt_var_map["flush-all-enabled"].as<bool>();
+		}
+
+		if (opt_var_map.count("reap-expired")) {
+			this->_reap_expired = opt_var_map["reap-expired"].as<bool>();
+		}
+		if (opt_var_map.count("reap-expired-interval")) {
+			this->_reap_expired_interval = opt_var_map["reap-expired-interval"].as<int>();
+		}
+		if (opt_var_map.count("reap-expired-chunk-size")) {
+			this->_reap_expired_chunk_size = opt_var_map["reap-expired-chunk-size"].as<int>();
+		}
+		if (opt_var_map.count("reap-expired-chunk-sleep-msec")) {
+			this->_reap_expired_chunk_sleep_msec = opt_var_map["reap-expired-chunk-sleep-msec"].as<int>();
+		}
+		if (opt_var_map.count("metrics-server-port")) {
+			this->_metrics_server_port = opt_var_map["metrics-server-port"].as<int>();
+		}
+		if (opt_var_map.count("storage-check-interval")) {
+			this->_storage_check_interval = opt_var_map["storage-check-interval"].as<int>();
+		}
 	} catch (int e) {
 		cout << option << endl;
 		return -1;
@@ -470,6 +551,109 @@ int ini_option::reload() {
 			this->_reconstruction_bwlimit = opt_var_map["reconstruction-bwlimit"].as<int>();
 		}
 
+		// RocksDB WAL streaming limits are runtime-tunable: they are only
+		// read per-batch by the WAL sync path, so a plain setter propagation
+		// (see flared::reload()) is enough. Reload them here.
+		if (opt_var_map.count("rocksdb-wal-sync-bwlimit")) {
+			log_notice("  rocksdb_wal_sync_bwlimit: %d -> %d", this->_rocksdb_wal_sync_bwlimit, opt_var_map["rocksdb-wal-sync-bwlimit"].as<int>());
+			this->_rocksdb_wal_sync_bwlimit = opt_var_map["rocksdb-wal-sync-bwlimit"].as<int>();
+		}
+
+		if (opt_var_map.count("rocksdb-wal-sync-interval")) {
+			log_notice("  rocksdb_wal_sync_interval: %d -> %d", this->_rocksdb_wal_sync_interval, opt_var_map["rocksdb-wal-sync-interval"].as<int>());
+			this->_rocksdb_wal_sync_interval = opt_var_map["rocksdb-wal-sync-interval"].as<int>();
+		}
+
+		if (opt_var_map.count("rocksdb-wal-max-batch-bytes")) {
+			log_notice("  rocksdb_wal_max_batch_bytes: %llu -> %llu",
+					(unsigned long long)this->_rocksdb_wal_max_batch_bytes,
+					(unsigned long long)opt_var_map["rocksdb-wal-max-batch-bytes"].as<uint64_t>());
+			this->_rocksdb_wal_max_batch_bytes = opt_var_map["rocksdb-wal-max-batch-bytes"].as<uint64_t>();
+		}
+
+		if (opt_var_map.count("rocksdb-resync-failure-threshold")) {
+			log_notice("  rocksdb_resync_failure_threshold: %d -> %d", this->_rocksdb_resync_failure_threshold, opt_var_map["rocksdb-resync-failure-threshold"].as<int>());
+			this->_rocksdb_resync_failure_threshold = opt_var_map["rocksdb-resync-failure-threshold"].as<int>();
+		}
+
+		if (opt_var_map.count("rocksdb-backup-keep")) {
+			log_notice("  rocksdb_backup_keep: %d -> %d", this->_rocksdb_backup_keep, opt_var_map["rocksdb-backup-keep"].as<int>());
+			this->_rocksdb_backup_keep = opt_var_map["rocksdb-backup-keep"].as<int>();
+		}
+
+		if (opt_var_map.count("rocksdb-snapshot-bwlimit")) {
+			log_notice("  rocksdb_snapshot_bwlimit: %d -> %d", this->_rocksdb_snapshot_bwlimit, opt_var_map["rocksdb-snapshot-bwlimit"].as<int>());
+			this->_rocksdb_snapshot_bwlimit = opt_var_map["rocksdb-snapshot-bwlimit"].as<int>();
+		}
+
+		if (opt_var_map.count("flush-all-enabled")) {
+			log_notice("  flush_all_enabled: %d -> %d", this->_flush_all_enabled, opt_var_map["flush-all-enabled"].as<bool>());
+			this->_flush_all_enabled = opt_var_map["flush-all-enabled"].as<bool>();
+		}
+
+		if (opt_var_map.count("reap-expired")) {
+			log_notice("  reap_expired: %d -> %d", this->_reap_expired, opt_var_map["reap-expired"].as<bool>());
+			this->_reap_expired = opt_var_map["reap-expired"].as<bool>();
+		}
+		if (opt_var_map.count("reap-expired-interval")) {
+			log_notice("  reap_expired_interval: %d -> %d", this->_reap_expired_interval, opt_var_map["reap-expired-interval"].as<int>());
+			this->_reap_expired_interval = opt_var_map["reap-expired-interval"].as<int>();
+		}
+		if (opt_var_map.count("reap-expired-chunk-size")) {
+			log_notice("  reap_expired_chunk_size: %d -> %d", this->_reap_expired_chunk_size, opt_var_map["reap-expired-chunk-size"].as<int>());
+			this->_reap_expired_chunk_size = opt_var_map["reap-expired-chunk-size"].as<int>();
+		}
+		if (opt_var_map.count("reap-expired-chunk-sleep-msec")) {
+			log_notice("  reap_expired_chunk_sleep_msec: %d -> %d", this->_reap_expired_chunk_sleep_msec, opt_var_map["reap-expired-chunk-sleep-msec"].as<int>());
+			this->_reap_expired_chunk_sleep_msec = opt_var_map["reap-expired-chunk-sleep-msec"].as<int>();
+		}
+		if (opt_var_map.count("storage-check-interval")) {
+			log_notice("  storage_check_interval: %d -> %d", this->_storage_check_interval, opt_var_map["storage-check-interval"].as<int>());
+			this->_storage_check_interval = opt_var_map["storage-check-interval"].as<int>();
+		}
+
+		// The remaining rocksdb options require reopening the DB (block cache,
+		// write buffers, WAL retention, sync-writes, storage-type). We do NOT
+		// hot-reload them; instead warn that a restart is required if the
+		// config value differs from the running value. This mirrors how
+		// non-reloadable options are treated (cf. storage-type in load()).
+		if (opt_var_map.count("rocksdb-block-cache-size-mb")
+				&& opt_var_map["rocksdb-block-cache-size-mb"].as<uint64_t>() != this->_rocksdb_block_cache_size_mb) {
+			log_warning("rocksdb-block-cache-size-mb changed in config (%llu -> %llu) but requires reopening the DB; restart flared to apply",
+					(unsigned long long)this->_rocksdb_block_cache_size_mb,
+					(unsigned long long)opt_var_map["rocksdb-block-cache-size-mb"].as<uint64_t>());
+		}
+		if (opt_var_map.count("rocksdb-write-buffer-size-mb")
+				&& opt_var_map["rocksdb-write-buffer-size-mb"].as<uint64_t>() != this->_rocksdb_write_buffer_size_mb) {
+			log_warning("rocksdb-write-buffer-size-mb changed in config (%llu -> %llu) but requires reopening the DB; restart flared to apply",
+					(unsigned long long)this->_rocksdb_write_buffer_size_mb,
+					(unsigned long long)opt_var_map["rocksdb-write-buffer-size-mb"].as<uint64_t>());
+		}
+		if (opt_var_map.count("rocksdb-max-write-buffer-number")
+				&& opt_var_map["rocksdb-max-write-buffer-number"].as<int>() != this->_rocksdb_max_write_buffer_number) {
+			log_warning("rocksdb-max-write-buffer-number changed in config (%d -> %d) but requires reopening the DB; restart flared to apply",
+					this->_rocksdb_max_write_buffer_number,
+					opt_var_map["rocksdb-max-write-buffer-number"].as<int>());
+		}
+		if (opt_var_map.count("rocksdb-wal-ttl-seconds")
+				&& opt_var_map["rocksdb-wal-ttl-seconds"].as<uint64_t>() != this->_rocksdb_wal_ttl_seconds) {
+			log_warning("rocksdb-wal-ttl-seconds changed in config (%llu -> %llu) but requires reopening the DB; restart flared to apply",
+					(unsigned long long)this->_rocksdb_wal_ttl_seconds,
+					(unsigned long long)opt_var_map["rocksdb-wal-ttl-seconds"].as<uint64_t>());
+		}
+		if (opt_var_map.count("rocksdb-wal-size-limit-mb")
+				&& opt_var_map["rocksdb-wal-size-limit-mb"].as<uint64_t>() != this->_rocksdb_wal_size_limit_mb) {
+			log_warning("rocksdb-wal-size-limit-mb changed in config (%llu -> %llu) but requires reopening the DB; restart flared to apply",
+					(unsigned long long)this->_rocksdb_wal_size_limit_mb,
+					(unsigned long long)opt_var_map["rocksdb-wal-size-limit-mb"].as<uint64_t>());
+		}
+		if (opt_var_map.count("rocksdb-sync-writes")
+				&& opt_var_map["rocksdb-sync-writes"].as<bool>() != this->_rocksdb_sync_writes) {
+			log_warning("rocksdb-sync-writes changed in config (%s -> %s) but requires reopening the DB; restart flared to apply",
+					this->_rocksdb_sync_writes ? "true" : "false",
+					opt_var_map["rocksdb-sync-writes"].as<bool>() ? "true" : "false");
+		}
+
 		if (opt_var_map.count("replication-type")) {
 			log_notice("  replication_type:       %s -> %s", this->_replication_type.c_str(), opt_var_map["replication-type"].as<string>().c_str());
 
@@ -508,8 +692,22 @@ int ini_option::reload() {
 			}
 		}
 
-		if (this->_process_index_servers(opt_var_map) < 0) {
-			throw -1;
+		// Index servers are provided on the COMMAND LINE (--index-server-name /
+		// --index-server-port), not in the reloadable config file, and do not
+		// change at runtime. reload() re-parses only the config FILE, so on a
+		// normal SIGHUP opt_var_map has no index-server entries and
+		// _process_index_servers() would fail its "index-server-name is required"
+		// check, throw, and make reload() reject the WHOLE file as invalid —
+		// silently discarding every runtime-tunable change (rocksdb WAL settings,
+		// cluster-replication mode, ...). That is why config changes never took
+		// effect at runtime. Only re-process index servers when the reloaded file
+		// actually specifies them; otherwise keep the ones set at startup.
+		if (opt_var_map.count("index-servers")
+				|| opt_var_map.count("index-server-name")
+				|| opt_var_map.count("index-server-port")) {
+			if (this->_process_index_servers(opt_var_map) < 0) {
+				throw -1;
+			}
 		}
 
 		if (opt_var_map.count("max-total-thread-queue")) {
@@ -654,7 +852,26 @@ int ini_option::_setup_config_option(program_options::options_description& optio
 		("cluster-replication-server-name",	program_options::value<string>(),	"destination server name to replicate over cluster (dynamic)")
 		("cluster-replication-server-port",	program_options::value<int>(),		"destination server port to replicate over cluster (dynamic)")
 		("cluster-replication-concurrency",	program_options::value<int>(),		"concurrency to replicate over cluster")
-		("cluster-replication-mode",				program_options::value<string>(),	"cluster replication mode (write, read, both) (write)");
+		("cluster-replication-mode",				program_options::value<string>(),	"cluster replication mode (write, read, both) (write)")
+		("rocksdb-block-cache-size-mb",		program_options::value<uint64_t>(),	"RocksDB block cache size in MB (default 512, rocksdb only)")
+		("rocksdb-write-buffer-size-mb",	program_options::value<uint64_t>(),	"RocksDB memtable write buffer size in MB (default 64, rocksdb only)")
+		("rocksdb-max-write-buffer-number",	program_options::value<int>(),		"RocksDB max number of memtables (default 3, rocksdb only)")
+		("rocksdb-wal-ttl-seconds",				program_options::value<uint64_t>(),	"RocksDB WAL retention window in seconds; controls how far a slave may fall behind before full-dump is forced (default 86400, rocksdb only)")
+		("rocksdb-wal-size-limit-mb",			program_options::value<uint64_t>(),	"RocksDB WAL retention size cap in MB (default 10240, rocksdb only)")
+		("rocksdb-sync-writes",						program_options::value<bool>(),		"force fsync on every RocksDB write for strict durability (default false, rocksdb only)")
+		("rocksdb-resync-failure-threshold",program_options::value<int>(),		"consecutive WAL/dump resync failures before the slave self-demotes to down state; data is preserved (default 3, rocksdb only)")
+		("rocksdb-wal-max-batch-bytes",		program_options::value<uint64_t>(),	"max size of a single replicated RocksDB WriteBatch; batches beyond this abort WAL sync and fall back to full dump (default 16MB, 0 disables, rocksdb only)")
+		("rocksdb-wal-sync-bwlimit",			program_options::value<int>(),		"bandwidth limit in KB/s for WAL incremental sync; 0 inherits reconstruction-bwlimit (default 0, rocksdb only)")
+		("rocksdb-wal-sync-interval",			program_options::value<int>(),		"inter-batch delay in usec for WAL incremental sync; 0 inherits reconstruction-interval (default 0, rocksdb only)")
+		("rocksdb-backup-keep",					program_options::value<int>(),		"number of on-disk named backups (checkpoints) to retain under data-dir/backups/; oldest pruned by name order (default 7, dynamic, rocksdb only)")
+		("rocksdb-snapshot-bwlimit",			program_options::value<int>(),		"bandwidth cap in KB/s for serving a snapshot-bootstrap stream (repl_snapshot); 0 = unlimited (default 32768 = ~256 Mbps, dynamic, rocksdb only)")
+		("flush-all-enabled",					program_options::value<bool>(),		"administrative gate for the flush_all op; false refuses it with SERVER_ERROR (default true, dynamic)")
+		("reap-expired",						program_options::value<bool>(),		"enable the background expire crawler that physically deletes past-expire keys on the partition master (default true, dynamic, rocksdb only)")
+		("reap-expired-interval",				program_options::value<int>(),		"seconds between full expire sweeps (default 300, dynamic, rocksdb only)")
+		("reap-expired-chunk-size",				program_options::value<int>(),		"keys scanned per chunk before the throttle sleep (default 10000, dynamic, rocksdb only)")
+		("reap-expired-chunk-sleep-msec",		program_options::value<int>(),		"throttle sleep between chunks in msec (default 100, dynamic, rocksdb only)")
+		("metrics-server-port",					program_options::value<int>(),		"port for the native Prometheus /metrics endpoint; 0 = disabled (default 0, static)")
+		("storage-check-interval",				program_options::value<int>(),		"seconds between periodic full-checksum storage integrity checks; 0 = disabled (default 0, dynamic, rocksdb only)");
 
 	return 0;
 }

@@ -1,0 +1,17 @@
+# topology-authority suite (SAF-01) after the negative-check fix (held pass vs retry/re-send) — harness only, operator image unchanged
+# tested revision: ceedc9bb0e069aa6b435ba01cdd994e6e4b58773
+# host: local kind cluster flare-e2e (single node, arm64); harness operator memory limit 1Gi
+# command: cd flare_operator && .lake/build/bin/flare_e2e --filter topology-authority
+# date: 2026-09-14
+# note: tests 3 and 4 now fail only on a broadcast line of the held pass's own shape (old < new); a retry/re-send line (old == new) is not the held pass sending (CI failure at f87c2dc, see 2026-09-14-ci-e2e-breaker-migration-f87c2dc-fail.txt).
+
+# === Suite: topology-authority ===
+# Waiting for: operator container restarted after losing the lease (timeout: 180s)
+# lease deleted to restore authority: lease.coordination.k8s.io "topo-auth-operator-lease" deleted from flare-topo-auth namespace
+# read-failure pass suppressed v4294967308; survivor version 4294967305 -> (some 4294967307) (any movement is post-restart recovery, not the suppressed pass)
+# Tests: 4, Failures: 0
+# RESULT: PASS
+ok 1 - flared rejects a topology push carrying a stale version
+ok 2 - control: holding the lease, the stopped pass does broadcast
+ok 3 - lease taken by another identity: the pass fences, the process exits, and the restarted leader re-applies the topology
+ok 4 - lease unreadable: the stopped pass fails closed and does not send

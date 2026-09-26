@@ -1,0 +1,87 @@
+# Publish the flare-operator stack images to GitHub Packages (ghcr.io/gree/*).
+#
+# Triggers:
+#   - version tags (v*): publishes vX.Y.Z + latest
+#   - manual dispatch: publishes the given tag (default "edge") from any ref
+#   - push to master: publishes "latest"
+#
+# The same three Dockerfiles are built by every e2e run, so a publish can
+# only fail on registry/permission issues, not on the build itself.
+#
+# First publish creates the packages under the gree org (private by
+# default — flip visibility in each package's settings if they should be
+# public). If the org restricts GITHUB_TOKEN package writes, add a PAT with
+# write:packages as a repo secret and swap it into the login step.
+name: publish-images
+
+on:
+  push:
+    tags:
+      - "v*"
+    branches:
+      - master
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Image tag to publish (e.g. edge, rc1)"
+        required: false
+        default: "edge"
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - name: flare-operator
+            dockerfile: Dockerfile.operator
+          - name: flare-node
+            dockerfile: Dockerfile.flare-node
+          - name: flare-node-rocksdb
+            dockerfile: Dockerfile.flare-node-rocksdb
+          - name: flare-backup
+            dockerfile: Dockerfile.backup
+          - name: flare-tools
+            dockerfile: Dockerfile.tools
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/${{ matrix.image.name }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v') }}
+            type=raw,value=${{ inputs.tag }},enable=${{ github.event_name == 'workflow_dispatch' }}
+            type=sha
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.image.dockerfile }}
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}

@@ -1,0 +1,65 @@
+# GitHub Actions e2e-test (breaker-migration) leg on PR #143 — FAIL (1 of 37)
+# tested revision: 22b4d03a13ac2d5a14aab3aac80f79cd4e2083c2
+# run: https://github.com/gree/flare/actions/runs/34799233967/job/103838341620
+# command: timeout 4500 .lake/build/bin/flare_e2e --filter "circuit-breaker,operator-restart,topology-authority,replica-repair,prepare-evidence,native-metrics,blue-green-migration"
+# date: 2026-09-14
+# other legs (topology, replication, wal-recovery), both builds (cutter make check included) and the evidence job passed on the same run.
+# failure: topology-authority test 3 (TAP 11), "the resumed pass never reported the fence for v4294967306".
+# cause (harness): the test read the operator log ONCE, 8s after releasing the barrier, from the CURRENT container. Losing the lease is designed to end the process; on the CI runner kubelet restarted the container within those 8s, so the fence line was in the previous container and the read saw only the new one. The new container's own first line ("resuming at broadcast version 4294967306", then fencing and retrying v4294967307 in test 4) shows the fenced pass had not broadcast. Locally the container sat in the restart backoff long enough for the terminated container's log to still be returned. Fixed in the harness by polling for the fence across the restart (kubectl logs --previous once restartCount moves); operator image unchanged.
+
+# Tests: 37, Failures: 1
+ok 1 - baseline: two active masters
+ok 2 - wait out the operator startup grace period
+ok 3 - majority outage (scale 4→1) trips the breaker
+ok 4 - no live-topology churn while tripped
+ok 5 - restoring capacity resumes recovery automatically
+ok 6 - cluster shape survives an operator restart (state reload)
+ok 7 - writes still served after operator restart
+ok 8 - failover still works after the restart (reloaded state is live)
+ok 9 - flared rejects a topology push carrying a stale version
+ok 10 - control: holding the lease, the stopped pass does broadcast
+not ok 11 - lease taken by another identity: the pass fences, the process exits, and the restarted leader re-applies the topology
+ok 12 - lease unreadable: the stopped pass fails closed and does not send
+ok 13 - control: writes to the master replicate to the slave
+ok 14 - cut link: the master drops replica writes and the operator requests a repair
+ok 15 - the repair runs: held as proxy, confirmed, re-seated, reconstructed; keys recovered without another drop
+ok 16 - SAF-05: a drop seen while resync is disabled is held, survives an operator restart, and is repaired once the gate opens
+ok 17 - SAF-05: a ledger save that fails is marked unsaved, retried every pass, lands when allowed, and survives a restart
+ok 18 - SAF-05: a corrupt ledger is held as unavailable, never replaced by an empty one; the drop seen meanwhile is recovered once it is readable
+ok 19 - SAF-06: the delete carries the observed pod UID as an API precondition; a same-name pod with another UID is refused by the apiserver
+ok 20 - SAF-06: the UID-precondition delete has a deadline — a server that accepts and never answers returns within it
+ok 21 - the lost-activation condition is staged: the activation is dropped and a reconstruction completed
+# RESULT: FAIL
+ok 22 - the repair re-derives Prepare→Active from completion evidence and names it
+ok 23 - GET /metrics answers HTTP 200 with Prometheus text
+ok 24 - memcached_current_items equals stats curr_items verbatim
+ok 25 - writes are reflected in /metrics (curr_items grows, set counter present)
+ok 26 - flared_version and rocksdb passthrough are exported
+ok 27 - /metrics still answers with the operator scaled to 0 (SPOF removed)
+ok 28 - seed 60 keys across both source partitions
+ok 29 - migration CR accepted; target provisioned and Ready (phase Duplicating)
+ok 30 - counts converge and source flips to forward (phase AwaitingCutover)
+ok 31 - every key re-hashed into the 1-partition target (master AND slave)
+ok 32 - parked at AwaitingCutover until approval (gate honored)
+ok 33 - approveCutover flips the entry Service to the target
+ok 34 - reads through the entry Service hit the target cluster
+ok 35 - approveRetire deletes the source StatefulSet (phase Retired)
+ok 36 - provisioned operator self-retires when a helm successor appears
+ok 37 - abort rolls a migration back (target resources deleted)
+
+# --- topology-authority harness lines around the failure ---
+# pass held at the pre-send point with version 4294967305
+# pass held at the pre-send point with version 4294967306; taking the lease away now
+# lease deleted to restore authority: lease.coordination.k8s.io "topo-auth-operator-lease" deleted from flare-topo-auth namespace
+#   reason: the resumed pass never reported the fence for v4294967306; it may have crashed, timed out or exited before the check — no suppression is proved
+# pass held at the pre-send point with version 4294967307; deleting the lease so the read fails
+# read-failure pass suppressed v4294967307; survivor version 4294967305 -> (some 4294967305) (any movement is post-restart recovery, not the suppressed pass)
+
+# --- restarted operator container (kubectl logs, current container only) ---
+# [pod/flare-operator-768fdbb4cb-xwjx9/flare-operator] [flare-operator] starting (namespace=flare-topo-auth, port=12120, interval=5s, identity=flare-operator-768fdbb4cb-xwjx9)
+# [pod/flare-operator-768fdbb4cb-xwjx9/flare-operator] [flare-operator] loaded 2 nodes from ConfigMap (resuming at broadcast version 4294967306)
+# [pod/flare-operator-768fdbb4cb-xwjx9/flare-operator] [flare-operator] leadership generation 1 — broadcast versions fenced at ≥ 4294967306
+# [pod/flare-operator-768fdbb4cb-xwjx9/flare-operator] [flare-operator] TEST BARRIER: holding before the pre-send lease check (v4294967307)
+# [pod/flare-operator-768fdbb4cb-xwjx9/flare-operator] [flare-operator] TEST BARRIER: released (v4294967307)
+# [pod/flare-operator-768fdbb4cb-xwjx9/flare-operator] [flare-operator] LEASE FENCE: not the lease holder anymore — suppressing topology broadcast (v4294967306 → v4294967307); held for retry once authority returns
+# [pod/flare-operator-768fdbb4cb-xwjx9/flare-operator] [flare-operator] retrying a suppressed topology send (suppressed v4294967307; publishing v4294967307)

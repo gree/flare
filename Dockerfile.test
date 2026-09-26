@@ -1,0 +1,29 @@
+FROM ubuntu:latest
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=UTC
+
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    autoconf \
+    automake \
+    libtool \
+    pkg-config \
+    libboost-all-dev \
+    libtokyocabinet-dev \
+    libkyotocabinet-dev \
+    libhashkit-dev \
+    libmemcached-dev \
+    uuid-dev \
+    zlib1g-dev \
+    librocksdb-dev \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace
+
+# Copy the source code
+COPY . .
+
+# Build and test
+CMD ["sh", "-c", "./autogen.sh && ./configure --with-rocksdb=/usr && make -j4 && make check"]

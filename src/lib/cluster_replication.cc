@@ -111,6 +111,29 @@ int cluster_replication::start(string server_name, int server_port, int concurre
  *	stop cluster replication.
  */
 int cluster_replication::stop() {
+	// Clean no-op when nothing was ever started. This guard belongs HERE, at
+	// the source, not at every call site: stop() is reached from three places
+	// (the two flared.cc reload() branches AND ~cluster_replication()), and
+	// the destructor path is the dangerous one. cluster_replication is held
+	// by two owners — flared::_cluster_replication and the cluster's proxy
+	// event-listener list — so ~cluster_replication() only runs during flared
+	// static teardown, which delete's _other_thread_pool (this->_thread_pool)
+	// BEFORE the member shared_ptr is released. Walking a torn-down thread
+	// pool (get_active over a freed std::map, then shutdown()/shared_thread
+	// release over freed control blocks) is exactly what triggers the
+	// "pure virtual method called" abort during a rolling restart. When
+	// replication was never start()ed there is provably nothing to tear down
+	// (no threads dispatched, _thread_pool never touched), so return early and
+	// never dereference _thread_pool. A started replication is still stopped
+	// in full below; flared's dtor now also stops it while the pool is alive.
+	pthread_mutex_lock(&this->_mutex_started);
+	bool was_started = this->_started;
+	pthread_mutex_unlock(&this->_mutex_started);
+	if (!was_started) {
+		log_debug("cluster replication was never started -> stop() is a no-op", 0);
+		return 0;
+	}
+
 	log_notice("stop cluster replication", 0);
 
 	pthread_mutex_lock(&this->_mutex_started);

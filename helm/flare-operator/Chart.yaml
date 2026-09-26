@@ -1,0 +1,16 @@
+apiVersion: v2
+name: flare-operator
+description: A Kubernetes operator for managing Flare distributed key-value store clusters
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - flare
+  - operator
+  - key-value
+  - distributed-system
+maintainers:
+  - name: Flare Team
+home: https://github.com/gree/flare
+sources:
+  - https://github.com/gree/flare

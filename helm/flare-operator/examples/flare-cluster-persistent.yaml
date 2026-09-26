@@ -1,0 +1,97 @@
+# Example FlareCluster deployment using persistent volumes
+# This configuration is suitable for production workloads with data persistence
+
+apiVersion: flare.gree.net/v1alpha1
+kind: FlareCluster
+metadata:
+  name: my-flare-cluster
+  namespace: default
+spec:
+  partitions: 4
+  replicas: 2
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: my-flare-cluster-nodes
+  namespace: default
+spec:
+  clusterIP: None
+  selector:
+    app: flare
+    cluster: my-flare-cluster
+  ports:
+    - port: 12121
+      name: flare
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: my-flare-cluster-nodes
+  namespace: default
+spec:
+  serviceName: my-flare-cluster-nodes
+  replicas: 8  # partitions * replicas = 4 * 2
+  selector:
+    matchLabels:
+      app: flare
+      cluster: my-flare-cluster
+  template:
+    metadata:
+      labels:
+        app: flare
+        cluster: my-flare-cluster
+    spec:
+      containers:
+        - name: flared
+          image: flare-node:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              # Restore hook: if /data/flare/RESTORE names a checkpoint dir
+              # (created by the flared `backup` op), swap it in before start.
+              # See docs/BACKUP_RESTORE.md.
+              if [ -f /data/flare/RESTORE ]; then
+                SRC=$(cat /data/flare/RESTORE)
+                rm -rf /data/flare/flare.rocksdb
+                cp -a "$SRC" /data/flare/flare.rocksdb
+                rm -f /data/flare/RESTORE
+              fi
+              mkdir -p /data/flare
+              exec flared --data-dir /data/flare --server-port 12121 --index-server-name flare-operator.flare-system.svc.cluster.local --index-server-port 12120 --stderr
+          ports:
+            - containerPort: 12121
+              name: flare
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            tcpSocket:
+              port: 12121
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          readinessProbe:
+            tcpSocket:
+              port: 12121
+            initialDelaySeconds: 5
+            periodSeconds: 3
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        # storageClassName: fast-ssd  # Optional: specify storage class
+        resources:
+          requests:
+            storage: 10Gi

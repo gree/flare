@@ -31,6 +31,7 @@
 #include <string>
 
 #include "op.h"
+#include "binary_response_header.h"
 #include "cluster.h"
 #include "storage.h"
 #include "thread_pool.h"
@@ -81,10 +82,13 @@ protected:
 	virtual int _send_text_result(result r, const char* message = NULL);
 	virtual int _send_binary_result(result r, const char* message = NULL);
 
+protected:
+	// subclasses (op_stats_node) emit their own daemon-specific stats
+	template<typename T> inline int _send_stat(const char* key, const T& value);
+
 private:
 	stats_type _parse_stats_type(const char* body) const;
 
-	template<typename T> inline int _send_stat(const char* key, const T& value);
 	template<typename T> int _send_text_stat(const char* key, const T& value);
 	template<typename T> int _send_binary_stat(const char* key, const T& value);
 	int _send_stats(const thread::thread_info&);
@@ -97,6 +101,24 @@ template<typename T> int op_stats::_send_stat(const char* key, const T& value) {
 		? _send_text_stat<T>(key, value)
 		: _send_binary_stat<T>(key, value);
 }
+
+template<typename T>
+int op_stats::_send_text_stat(const char* key, const T& value) {
+	_text_stream << "STAT " << key << ' ' << value << line_delimiter;
+	return 0;
+}
+
+template<typename T>
+int op_stats::_send_binary_stat(const char* key, const T& value) {
+	std::ostringstream body_os;
+	body_os << key << value;
+	const std::string& body = body_os.str();
+	binary_response_header header(this->_opcode);
+	header.set_key_length(strlen(key));
+	header.set_total_body_length(body.size());
+	return op::_send_binary_response(header, body.data(), true);
+}
+
 
 }	// namespace flare
 }	// namespace gree

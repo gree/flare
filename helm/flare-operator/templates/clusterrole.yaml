@@ -1,0 +1,53 @@
+{{- if and .Values.operator.enabled .Values.rbac.create -}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "flare-operator.fullname" . }}
+  labels:
+    {{- include "flare-operator.labels" . | nindent 4 }}
+rules:
+  # FlareCluster CRD
+  - apiGroups: ["flare.gree.net"]
+    resources: ["flareclusters", "flareclusters/status"]
+    # create/delete: blue/green migrations provision a target FlareCluster
+    # and retire (or abort-delete) one — see FlareMigration.
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # FlareMigrations (blue/green shrink/reshape orchestration)
+  - apiGroups: ["flare.gree.net"]
+    resources: ["flaremigrations", "flaremigrations/status"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  # StatefulSets + Deployments: the migration controller provisions the
+  # target cluster's STS and its dedicated operator Deployment, and deletes
+  # them on retire/abort.
+  - apiGroups: ["apps"]
+    resources: ["statefulsets", "deployments"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Pods (list flared pods, delete dead pods, self-label leader/standby)
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "delete", "patch"]
+  # Nodes (read zone labels for topology-aware role placement)
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+  # Pods/exec (exec into pods for replication control)
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+  # Services (patch selectors for routing)
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # ConfigMaps (observability / node-map)
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Events (emit K8s events for operator actions)
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+  # Leases (leader election)
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+{{- end }}

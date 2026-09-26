@@ -115,6 +115,28 @@ int util::gethostbyname(const std::string& host, int port, sa_family_t family, s
 /**
  *	thread safe inet_ntoa()
  */
+uint32_t util::crc32(uint32_t crc, const uint8_t* data, size_t len) {
+	// Lazily built table for the reflected IEEE polynomial (0xEDB88320);
+	// function-local static init is thread-safe under gcc/clang.
+	static uint32_t table[256];
+	static bool table_ready = false;
+	if (!table_ready) {
+		for (uint32_t i = 0; i < 256; i++) {
+			uint32_t c = i;
+			for (int k = 0; k < 8; k++) {
+				c = (c & 1) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
+			}
+			table[i] = c;
+		}
+		table_ready = true;
+	}
+	crc ^= 0xFFFFFFFFu;
+	for (size_t i = 0; i < len; i++) {
+		crc = table[(crc ^ data[i]) & 0xFFu] ^ (crc >> 8);
+	}
+	return crc ^ 0xFFFFFFFFu;
+}
+
 int util::inet_ntoa(struct in_addr in, char* dst) {
 	static pthread_mutex_t m = PTHREAD_MUTEX_INITIALIZER;
 

@@ -51,6 +51,9 @@ public:
 		thread_type_controller,
 		thread_type_cluster_replication,
 		thread_type_dump_replication,
+		thread_type_reaper,
+		thread_type_metrics,
+		thread_type_storage_check,
 #ifdef ENABLE_MYSQL_REPLICATION
 		thread_type_mysql_replication,
 #endif

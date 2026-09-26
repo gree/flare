@@ -1,0 +1,6 @@
+# replica-repair suite (SAF-02/05), from the integrated run at bd8b213d791b3ce61f3cdee6c54474b1253c60c1 — see 2026-09-13-integrated-e2e.txt
+# === Suite: replica-repair ===
+ok 5 - control: writes to the master replicate to the slave
+ok 6 - cut link: the master drops replica writes and the operator requests a repair
+ok 7 - the repair runs: held as proxy, confirmed, re-seated, reconstructed; keys recovered without another drop
+ok 8 - SAF-05: a drop seen while resync is disabled is held, survives an operator restart, and is repaired once the gate opens

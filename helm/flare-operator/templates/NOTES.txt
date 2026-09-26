@@ -1,0 +1,45 @@
+Thank you for installing {{ .Chart.Name }}!
+
+Your release is named {{ .Release.Name }}.
+
+The Flare Operator has been deployed to namespace: {{ .Values.namespace }}
+
+To check the operator status:
+
+  kubectl get deployment {{ include "flare-operator.fullname" . }} -n {{ .Values.namespace }}
+  kubectl logs -n {{ .Values.namespace }} -l app.kubernetes.io/name={{ include "flare-operator.name" . }} -f
+
+To create a FlareCluster:
+
+  cat <<EOF | kubectl apply -f -
+  apiVersion: flare.gree.net/v1alpha1
+  kind: FlareCluster
+  metadata:
+    name: my-flare-cluster
+    namespace: default
+  spec:
+    partitions: 2
+    replicas: 2
+  EOF
+
+To view FlareCluster resources:
+
+  kubectl get flareclusters -A
+
+{{ if .Values.metricsPort }}
+To access Prometheus metrics:
+
+  kubectl port-forward -n {{ .Values.namespace }} svc/{{ include "flare-operator.fullname" . }} {{ .Values.metricsPort }}:{{ .Values.metricsPort }}
+  curl http://localhost:{{ .Values.metricsPort }}/metrics
+{{ end }}
+
+{{ if .Values.healthPort }}
+To check health status:
+
+  kubectl port-forward -n {{ .Values.namespace }} svc/{{ include "flare-operator.fullname" . }} {{ .Values.healthPort }}:{{ .Values.healthPort }}
+  curl http://localhost:{{ .Values.healthPort }}/healthz
+  curl http://localhost:{{ .Values.healthPort }}/readyz
+{{ end }}
+
+For more information, see the documentation at:
+https://github.com/gree/flare

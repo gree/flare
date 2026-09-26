@@ -40,6 +40,16 @@ namespace flare {
  */
 class op_flush_all : public op {
 protected:
+	// Administrative gate: when false the op is refused with SERVER_ERROR.
+	// memcached has no authentication, so an exposed flared answers
+	// flush_all from ANY client that can reach it — a one-line total data
+	// wipe. The gate is pushed in by the parser from flared's
+	// `flush-all-enabled` config (SIGHUP-hot-reloadable; in K8s mode
+	// toggleable cluster-wide in seconds via the FlareCluster CRD).
+	bool _flush_all_enabled = true;
+public:
+	void set_flush_all_enabled(bool b) { this->_flush_all_enabled = b; };
+protected:
 	storage*					_storage;
 	int								_expire;
 	int								_option;

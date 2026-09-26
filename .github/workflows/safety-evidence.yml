@@ -1,0 +1,30 @@
+name: Safety evidence
+
+on:
+  pull_request:
+  push:
+    branches: [master, flare-operator]
+
+permissions:
+  contents: read
+
+jobs:
+  evidence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Test bookkeeping checks
+        run: python3 -m unittest discover -s scripts/tests -p 'test_safety_evidence.py'
+      - name: Validate register and generated STPA table
+        run: python3 scripts/check_safety_evidence.py
+      - name: Check evidence impact against PR base
+        if: github.event_name == 'pull_request'
+        env:
+          SAFETY_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: python3 scripts/check_safety_evidence.py --base "$SAFETY_BASE_SHA"

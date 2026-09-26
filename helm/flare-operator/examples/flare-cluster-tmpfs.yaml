@@ -1,0 +1,86 @@
+# Example FlareCluster deployment using tmpfs (in-memory storage)
+# This configuration is suitable for testing or high-performance ephemeral workloads
+# WARNING: Data will be lost on pod restart
+
+apiVersion: flare.gree.net/v1alpha1
+kind: FlareCluster
+metadata:
+  name: my-flare-cluster
+  namespace: default
+spec:
+  partitions: 4
+  replicas: 2
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: my-flare-cluster-nodes
+  namespace: default
+spec:
+  clusterIP: None
+  selector:
+    app: flare
+    cluster: my-flare-cluster
+  ports:
+    - port: 12121
+      name: flare
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: my-flare-cluster-nodes
+  namespace: default
+spec:
+  serviceName: my-flare-cluster-nodes
+  replicas: 8  # partitions * replicas = 4 * 2
+  selector:
+    matchLabels:
+      app: flare
+      cluster: my-flare-cluster
+  template:
+    metadata:
+      labels:
+        app: flare
+        cluster: my-flare-cluster
+    spec:
+      containers:
+        - name: flared
+          image: flare-node:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              rm -rf /data/flare/*.hdb /data/flare/*.hdb.wal
+              mkdir -p /data/flare
+              exec flared --data-dir /data/flare --server-port 12121 --index-server-name flare-operator.flare-system.svc.cluster.local --index-server-port 12120 --stderr
+          ports:
+            - containerPort: 12121
+              name: flare
+          volumeMounts:
+            - name: tmpfs-data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              cpu: 500m
+              memory: 2Gi  # Must be higher than tmpfs sizeLimit
+          livenessProbe:
+            tcpSocket:
+              port: 12121
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          readinessProbe:
+            tcpSocket:
+              port: 12121
+            initialDelaySeconds: 5
+            periodSeconds: 3
+      volumes:
+        - name: tmpfs-data
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Gi  # Maximum tmpfs size (optional)

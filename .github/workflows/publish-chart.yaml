@@ -1,0 +1,52 @@
+# Publish the helm chart as an OCI artifact to ghcr, versioned like the
+# images (v0.1.0-rcN tag -> chart version 0.1.0-rcN). Consumers reference it
+# from kustomize/ArgoCD as:
+#
+#   helmCharts:
+#     - name: flare-operator
+#       repo: oci://ghcr.io/gree/charts
+#       version: 0.1.0-rcN
+#
+# NOTE first-time setup: a freshly created ghcr package is PRIVATE; an org
+# admin must flip ghcr.io/gree/charts/flare-operator to public (same as the
+# image packages) or anonymous pulls from ArgoCD will 403.
+name: publish-chart
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Chart version to publish (e.g. 0.1.0-rc37); packages HEAD of the chosen ref'
+        required: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish-chart:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: ver
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            ref="${GITHUB_REF#refs/tags/v}"
+            echo "version=${ref}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Package and push
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+          helm package helm/flare-operator --version "$VERSION" --app-version "$VERSION" -d /tmp/chart-pkg
+          helm push "/tmp/chart-pkg/flare-operator-${VERSION}.tgz" "oci://ghcr.io/${{ github.repository_owner }}/charts"

@@ -86,6 +86,7 @@ public:
 		type_tch,
 		type_tcb,
 		type_kch,
+		type_rocksdb,
 	};
 
 	enum									capability {
@@ -227,10 +228,48 @@ public:
 	virtual uint64_t size() = 0;
 	virtual int get_key(string key, int limit, vector<string>& r) { return -1; };
 
+	// Physically reap entries whose expire is in the past. Chunked so the
+	// caller can throttle a full-keyspace sweep: scans up to max_scan keys
+	// whose key is > after_key (empty = from the start), deletes the expired
+	// ones, sets last_key to the last key visited and more=true if further
+	// chunks remain. scanned/reaped are per-call counts. The deletes go
+	// through the normal write path (never a compaction filter, whose drops
+	// bypass the WAL and diverge followers). NOTE: a storage-level remove is
+	// LOCAL — live slaves are fed by op-level proxying, and WAL sync only runs
+	// at reconstruction — so the caller (handler_reaper) must replicate each
+	// reaped key itself: pass `reaped_entries` to receive (key, version) of
+	// every key actually deleted, and forward them as version-carrying
+	// deletes exactly like a client delete. Default: not supported.
+	virtual int reap_expired(time_t now, uint32_t max_scan, const string& after_key,
+			string& last_key, bool& more, uint32_t& scanned, uint32_t& reaped,
+			vector<entry>* reaped_entries = NULL) {
+		(void)now; (void)max_scan; (void)after_key; (void)last_key; (void)more;
+		(void)scanned; (void)reaped; (void)reaped_entries;
+		return -1;
+	}
+
 	virtual void set_listener(storage_listener* l) { this->_listener = l; };
+
+	// Filesystem usage of the data dir (statvfs; 0 on error). On a tmpfs
+	// cluster this is RAM the dataset occupies — the quantity that drives
+	// the pod's memory limit and that container-level memory metrics
+	// (working_set of the flared container) do NOT show. Exported via
+	// `stats` -> /metrics as flare_node_data_dir_{used,capacity}_bytes.
+	virtual uint64_t get_data_dir_used_bytes();
+	virtual uint64_t get_data_dir_capacity_bytes();
 
 	virtual type get_type() = 0;
 	virtual bool is_capable(capability c) = 0;
+
+	// Replication-cursor / lineage accessors. Meaningful only for WAL-capable
+	// backends (storage_rocksdb overrides these); the base defaults let
+	// backend-agnostic callers (e.g. cluster::_shift_node_role) query them via
+	// a storage* without pulling in backend-specific headers. Non-WAL backends
+	// report 0, so cursor-vs-sequence logic is a safe no-op there.
+	virtual uint64_t get_repl_last_lsn() { return 0; }
+	virtual int set_repl_last_lsn(uint64_t lsn) { return 0; }
+	virtual uint64_t get_latest_sequence_number() { return 0; }
+	virtual int regenerate_master_id() { return 0; }
 
 	static inline int option_cast(string s, option& r) {
 		if (s == "") {
@@ -313,6 +352,8 @@ public:
 			t = type_tcb;
 		} else if (s == "kch") {
 			t = type_kch;
+		} else if (s == "rocksdb") {
+			t = type_rocksdb;
 		} else {
 			return -1;
 		}
@@ -327,6 +368,8 @@ public:
 			return "tcb";
 		case type_kch:
 			return "kch";
+		case type_rocksdb:
+			return "rocksdb";
 		}
 		return "";
 	};

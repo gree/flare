@@ -152,8 +152,26 @@ int app::_set_pid() {
 	if (ifs.fail() == false) {
 		string s;
 		ifs >> s;
-		pid_t pid_current = boost::lexical_cast<pid_t>(s);
-		if (kill(pid_current, 0) < 0 && errno == ESRCH) {
+		pid_t pid_current = -1;
+		try {
+			pid_current = boost::lexical_cast<pid_t>(s);
+		} catch (boost::bad_lexical_cast&) {
+			log_info("pid file contains garbage [%s] -> treating as stale, ignoring", s.c_str());
+		}
+		if (pid_current == pid) {
+			// A containerized flared always runs as the same PID (PID 1 in the
+			// container), so a stale pid file left by an uncleanly-killed
+			// predecessor (SIGKILL, force-deleted pod, node crash) "matches"
+			// the liveness check against OURSELVES and wedges every restart
+			// into a permanent crash loop — the file never goes away and each
+			// new instance sees its own pid as "another live process".
+			// Observed live as an 8-hour CrashLoopBackOff; deleting the pod
+			// only helped because a fresh emptyDir dropped the file. We cannot
+			// be the process that wrote it — it is stale by definition.
+			log_info("pid file [%d] matches our own pid -> stale leftover from an unclean shutdown, ignoring", pid_current);
+		} else if (pid_current < 0) {
+			// garbage content handled above
+		} else if (kill(pid_current, 0) < 0 && errno == ESRCH) {
 			log_info("logged pid [%d] seems not to exist (%s) -> ignoring", pid_current, util::strerror(errno));
 		} else {
 			// seems to another process exists

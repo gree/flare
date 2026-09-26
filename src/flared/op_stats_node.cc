@@ -96,6 +96,24 @@ int op_stats_node::_run_server() {
 		this->_send_stats(singleton<flared>::instance().get_req_thread_pool(),singleton<flared>::instance().get_other_thread_pool(),
 				singleton<flared>::instance().get_storage(),
 				singleton<flared>::instance().get_cluster());
+		// APPLIED cluster-replication state (not the config file's desired
+		// state): the operator level-triggers on the difference — a SIGHUP
+		// that raced the ConfigMap mount propagation leaves flared running
+		// the old config with no observable signal otherwise (a lost
+		// re-signal once kept a stream configured-but-dead for 107 min,
+		// and the reverse, configured-off-but-streaming, on a live stop).
+		{
+			shared_cluster_replication repl = singleton<flared>::instance().get_cluster_replication();
+			if (repl) {
+				this->_send_stat("cluster_replication", repl->is_started() ? "on" : "off");
+				if (repl->is_started()) {
+					this->_send_stat("cluster_replication_mode", cluster_replication::mode_cast(repl->get_mode()));
+					char repl_dest[BUFSIZ];
+					snprintf(repl_dest, sizeof(repl_dest), "%s:%d", repl->get_server_name().c_str(), repl->get_server_port());
+					this->_send_stat("cluster_replication_destination", repl_dest);
+				}
+			}
+		}
 		break;
 	}
 	this->_send_result(result_end);

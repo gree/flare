@@ -122,6 +122,11 @@ private:
 	int				_rocksdb_snapshot_bwlimit;
 	// Administrative gate for the (unauthenticated) flush_all op.
 	bool			_flush_all_enabled;
+	bool			_repl_identity_forward;
+	bool			_wal_follow_enabled;
+	int				_wal_follow_max_batches;
+	int				_wal_follow_max_bytes;
+	int				_wal_follow_poll_interval_usec;
 	// Background expire crawler (memcached lru_crawler equivalent): a
 	// master-only sweep that physically deletes past-expire keys so they are
 	// reclaimed and — being real deletes — replicate through the WAL to slaves.
@@ -173,6 +178,16 @@ public:
 	static const int      default_rocksdb_backup_keep              = 7;
 	static const int      default_rocksdb_snapshot_bwlimit         = 32768;  // KB/s ~= 1/4 of 1 Gbps
 	static const bool     default_flush_all_enabled               = true;   // memcached compat; disable in exposed clusters
+	// SAF-10b stage 3. OFF until every node in the cluster understands the
+	// tag: a node that predates it rejects the request outright, so enabling
+	// it mid-upgrade would turn every forwarded write into a dropped one.
+	static const bool     default_repl_identity_forward            = false;
+	// SAF-10c. The follower only ever applies through the common rule, so it
+	// must not be enabled before repl-identity-forward is on cluster-wide.
+	static const bool     default_wal_follow_enabled               = false;
+	static const int      default_wal_follow_max_batches           = 256;
+	static const int      default_wal_follow_max_bytes             = 4 * 1024 * 1024;
+	static const int      default_wal_follow_poll_interval_usec    = 200 * 1000;
 	static const bool     default_reap_expired                    = true;
 	static const int      default_reap_expired_interval           = 300;    // sec between full sweeps
 	static const int      default_reap_expired_chunk_size         = 10000;  // keys scanned per chunk
@@ -262,6 +277,11 @@ public:
 	int get_rocksdb_backup_keep() { return this->_rocksdb_backup_keep; }
 	int get_rocksdb_snapshot_bwlimit() { return this->_rocksdb_snapshot_bwlimit; }
 	bool is_flush_all_enabled() { return this->_flush_all_enabled; }
+	bool is_repl_identity_forward() { return this->_repl_identity_forward; }
+	bool is_wal_follow_enabled() { return this->_wal_follow_enabled; }
+	int get_wal_follow_max_batches() { return this->_wal_follow_max_batches; }
+	int get_wal_follow_max_bytes() { return this->_wal_follow_max_bytes; }
+	int get_wal_follow_poll_interval_usec() { return this->_wal_follow_poll_interval_usec; }
 	bool is_reap_expired() { return this->_reap_expired; }
 	int get_reap_expired_interval() { return this->_reap_expired_interval; }
 	int get_reap_expired_chunk_size() { return this->_reap_expired_chunk_size; }

@@ -93,6 +93,12 @@ structure ClusterReplicationSpec where
     flared's built-in defaults. See `ROCKSDB_REPLICATION.md` for semantics. -/
 
 structure RocksdbConfigSpec where
+  /-- Startup-only block cache budget in MiB; requires DB reopen. -/
+  blockCacheSizeMb : Option Nat := none
+  /-- Startup-only per-memtable size in MiB; requires DB reopen. -/
+  writeBufferSizeMb : Option Nat := none
+  /-- Startup-only maximum write buffers per column family. -/
+  maxWriteBufferNumber : Option Nat := none
   /-- WAL retention time in seconds. flared: `rocksdb-wal-ttl-seconds`. -/
   walTtlSeconds : Option Nat := none
   /-- WAL size cap in megabytes. flared: `rocksdb-wal-size-limit-mb`. -/
@@ -134,6 +140,7 @@ structure RocksdbConfigSpec where
 
 /-- True when at least one rocksdb field has been set by the user. -/
 def RocksdbConfigSpec.hasAny (r : RocksdbConfigSpec) : Bool :=
+  r.blockCacheSizeMb.isSome || r.writeBufferSizeMb.isSome || r.maxWriteBufferNumber.isSome ||
   r.walTtlSeconds.isSome || r.walSizeLimitMb.isSome || r.syncWrites.isSome ||
   r.resyncFailureThreshold.isSome || r.walMaxBatchBytes.isSome ||
   r.walSyncBwlimit.isSome || r.walSyncInterval.isSome || r.snapshotBwlimit.isSome ||
@@ -144,6 +151,15 @@ def RocksdbConfigSpec.hasAny (r : RocksdbConfigSpec) : Bool :=
     the caller is responsible for joining with other sections. -/
 def RocksdbConfigSpec.toExtraConf (r : RocksdbConfigSpec) : String :=
   let lines : List String := []
+  let lines := match r.blockCacheSizeMb with
+    | some n => lines ++ [s!"rocksdb-block-cache-size-mb = {n}"]
+    | none => lines
+  let lines := match r.writeBufferSizeMb with
+    | some n => lines ++ [s!"rocksdb-write-buffer-size-mb = {n}"]
+    | none => lines
+  let lines := match r.maxWriteBufferNumber with
+    | some n => lines ++ [s!"rocksdb-max-write-buffer-number = {n}"]
+    | none => lines
   let lines := match r.walTtlSeconds with
     | some n => lines ++ [s!"rocksdb-wal-ttl-seconds = {n}"]
     | none => lines

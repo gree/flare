@@ -1,0 +1,234 @@
+# SAF-10d — T6 (retention purge), T9 (bounded backlog / positional GC), scale evaluation, and the first CI executions of PR #144
+# suites: flare_operator/FlareOperator/E2E/Tests/ContinuousReplicationLimits.lean
+#   flare_e2e --filter continuous-replication-purge | continuous-replication-limits | continuous-replication-scale (FLARE_E2E_SCALE_KEYS)
+# date: 2026-09-21   host: local kind flare-e2e (arm64) and GitHub Actions (ubuntu-latest, kind)
+
+=== CI, PR #144 (base safety/saf-01-topology-authority = PR #143's head) ===
+pull_request-triggered workflows created NO check suites for this stacked PR (0 check suites on the head commit; cause not yet
+identified). All CI evidence below comes from workflow_dispatch runs, which were added to the three workflows for that purpose.
+
+CI run 1 @ bbc9d5daef1101317c21e808e75af6da4fcb9ad1 (before the tr-escape and drain fixes):
+  nix-linux:        https://github.com/gree/flare/actions/runs/35561186289  success
+  safety-evidence:  https://github.com/gree/flare/actions/runs/35561188279  success
+  E2E matrix:       https://github.com/gree/flare/actions/runs/35561126678  FAIL (3 of 5 legs)
+    topology PASS; wal-recovery PASS.
+    breaker-migration FAIL: replica-repair SAF-05 test 17 "RBAC restore did not become effective for the operator's own service
+      account within 300s" (test 18 cascaded on the non-empty ledger). This is the RBAC-propagation flake already on record under
+      EV-03 (CI runs 4/6/8 of PR #143); the other 35 tests of the leg passed, incl. replica-repair 13-16 and operator-restart.
+    replication FAIL: continuous-replication-purge T6 — 0 of 40 big keys were written (the writer's tr escape reached the shell as a
+      doubled backslash), so nothing was purged and the follower simply caught up. Harness defect, fixed in 17b6b89; the other 43
+      tests passed, incl. continuous-replication-limits (which passed VACUOUSLY for the same reason — it now fails when no backlog
+      is produced, 3f6b06b).
+    continuous-replication FAIL: test 12 (failover by pod deletion) — "the follower was not promoted" within 300 s. On CI the
+      StatefulSet recreated the master pod before the operator ever saw it absent, so no failover happened (the ex-master resumed as
+      master from its PVC). Locally (run 10) the absence had been observed and the follower promoted in 35 s. Test rewritten (df1bb07)
+      as a PLANNED promotion: preStop 30 s keeps the deleted master Terminating, the operator drains it and promotes the follower only
+      through the eligibility gate. Tests 1-11 and 13 passed on CI (13 of 16 in the leg incl. the 3 scale skips).
+
+=== local run 1 of purge+limits @ 20c8df3 (tr-escape defect present) === RESULT: FAIL
+  T6 not ok (0/40 keys written, WAL not purged, follower caught up); T9 "ok" but vacuous (0 keys). Raw: docs/reports/2026-09-21-saf10d-purge-limits-run1-raw.log
+
+=== scale evaluation run 1 @ 20c8df3 (FLARE_E2E_SCALE_KEYS=2000000; raw: docs/reports/2026-09-21-saf10d-scale-run1-raw.log) === RESULT: FAIL (1 of 3)
+Load: the pipelined loader reported 1,223,165 STORED of 2,000,000 requested in 151 s, but the master held 797,756 items — the
+  loader (awk | nc, 100k-key chunks) is lossy: nc closed before the tail of each chunk was acknowledged. Loader fixed (sleep before
+  closing) for run 2. The numbers below are for 797,756 keys.
+FINDING (follow mode at scale): all 797,756 keys reached the replica by FORWARDING (repl_forward_applied=797756, items equal), but the
+  follower's applied position stayed at 142,549 for the whole 30-minute wait (wal_applied=0) and never reached the master's head:
+  the continuous stream did not drain the WAL behind the forwarding path. State/reason were not sampled in this run (the wait only
+  logged its end); the suite now prints state, reason, positions and skip/refuse counters every minute and stops after a 5-minute
+  stall. To be reproduced at 300k keys with those diagnostics; the flared logs were lost with the cluster.
+Boot scan (exact curr_items seed at open, kill -9 of the PVC-backed replica): 797,756 live keys in 854 ms (≈1.07 µs/key; linear
+  extrapolation to the 15.8M-key production case ≈ 17 s — an extrapolation, not a measurement). After the restart the node came
+  back following with equal items and no full dump (incremental WAL reconstruction from the cursor, reconstruction_completed=1).
+Operator probe cost at this size: 179 probe timing lines, max 5,452 ms for a pass (during the load; typical ~1 s), 182 "reconcile
+  slow" lines over the run — CPU contention on a single-node kind while 800k keys were loaded; not separable from the load here.
+
+=== local run 2 of purge+limits @ 3f6b06b (writer fixed; raw: docs/reports/2026-09-21-saf10d-purge-limits-run2-raw.log) === RESULT: FAIL (1 of 4)
+T9 ok: 300 keys × 50 kB + 100 deletes under the cut (master 24→424); after the heal the replica converged 24→424 with no
+  reconstruction; master RSS 46,424 → max 75,992 kB (growth 29,568 kB, bound 131,072); every change arrived by forwarding first
+  (wal_applied=0), the WAL re-delivery was skipped, the 100 delete tombstones were collected by position (tombstones_dropped=100,
+  live 0); deleted keys absent on the replica; items 220 = 220.
+T6 NOT ok — and NOT the expected outcome: 40 × 100 kB written under the cut (master 24→64, several flushes against the 1 MB write
+  buffer, 8 s wait for the TTL purge); after the heal the follower reported state=error reason=apply_error with applied stuck at
+  24, while all 40 keys had arrived by FORWARDING (items 60 = 60). The follow stream refused a WAL batch and retried it forever
+  — the same signature as the scale run (applied frozen at 142,549 behind forwarding). Common factor in both: the master's memtable
+  was FLUSHED during the window. Root cause not yet identified (the replica's refusal line was not in the 80-line tail the harness
+  dumps); scale run 2 prints state/reason/refuse counters every minute. lsn_purged itself was therefore NOT staged: the refusal
+  happened before any purge could be observed.
+
+=== continuous-replication run 11 @ df1bb07 (drain-based planned promotion; raw: docs/reports/2026-09-21-saf10d-run11-raw.log) === RESULT: PASS (13/13)
+Test 12 now deletes the master with a 30 s preStop; the follower was promoted, the epoch advanced (3:… → 4:…), the ex-master
+rebuilt and followed (343 = 343), no NOT-LOSS-FREE line. The operator's "graceful drain" line was not found in the 3000-line log
+tail, so whether the promotion went through the drain path or through dead detection is not shown by this run (to be widened).
+
+CI run 2 @ df1bb07d89a5280c62917cd11d1489bc2e4f3e47: E2E matrix https://github.com/gree/flare/actions/runs/35565289216 FAIL (2 of 5 legs)
+  continuous-replication PASS (13/13 + 3 scale skips) — first CI pass of the full acceptance suite; topology PASS; wal-recovery PASS (48/48).
+  replication FAIL: T6 as locally (follow stream refuses after the master's flush; see below); the other 43 tests passed.
+  breaker-migration FAIL: replica-repair SAF-05 test 17 — "RBAC restore became effective for the operator's SA after 303s" against the
+    test's 300 s bound (test 18 cascaded). Environment latency of RBAC propagation on the GitHub kind runner (the same class of
+    failure recorded under EV-03 for PR #143); locally the restore was effective after 0 s. The test lives in PR #143's base and is
+    not changed here.
+Local purge run 3 @ 3f6b06b (raw: docs/reports/2026-09-21-saf10d-purge-run3-raw.log): T6 reproduced identically (state=error reason=apply_error, applied frozen at 24
+  while forwarding delivered all 40 keys). The refusal line could not be read before the harness tore the cluster down; the test now
+  dumps the replica's refusal lines itself.
+Scale run 2 (in progress, 2M keys): the follower is IDLE with reason "shutdown" and its applied position frozen at 102,259 while
+  forwarding keeps delivering (items equal at 1,539,525): the follower THREAD received a shutdown request from somewhere other than
+  cluster::stop_wal_follower (which records "stopped"), and nothing restarts it until the next node-map broadcast — a lifecycle gap
+  independent of the T6 refusal. Under investigation (call sites of thread shutdown in flared).
+
+Scale run 2, live-cluster reading (12 min in): the "idle/shutdown" follower was NOT a follow defect. The MASTER pod was OOMKilled
+  (exit 137, 2 m 42 s after start, pod limit 512 Mi; RocksDB block cache default plus a 64 MB write buffer under a 10k-writes/s load),
+  the operator failed over and PROMOTED the follower (its own log: "shifting node_role … slave → master" then
+  stop_wal_follower), so the node the test was watching had become the master. Before that the follower was catching up at ~255
+  changes per poll (≈1,300 changes/s, bounded by repl-follow-max-batches and the round trip), lagging behind a ~10k/s loader while
+  forwarding carried the live writes — the operator's eligibility lines show the lag growing 82k → 816k (reads/promotion
+  ineligible, as designed). One "disconnected — protocol_error" poll recovered on the next attempt.
+  Consequences for the evaluation: the scale suite must (1) give the flared pods a memory budget that fits the key count (or a
+  smaller block cache), (2) detect a master restart/failover and report it instead of a follow stall, (3) record the follow
+  throughput bound. Scale run 1's frozen position (142,549) most likely had the same cause (the master's restart count was not
+  recorded then).
+
+CI run 3 @ ecb1c40032d0e6a63acc413990bce68b2b8b37d0: E2E matrix https://github.com/gree/flare/actions/runs/35570216917 — 4 of 5 legs PASS
+  replication PASS (44/44): T6 on CI with the served-gap fix — after the heal the follower reported needs_rebuild/lsn_purged (applied
+    24, decode_refused 0), the operator filed the repair request, reconstruction_started 1→2 (snapshot bootstrap), the node came back
+    FOLLOWING with items 60 = 60, pod UID unchanged. T9 (limits) PASS in the same leg.
+  continuous-replication PASS (13/13; scale skipped); topology PASS; wal-recovery PASS.
+  breaker-migration FAIL, third time in a row on CI: replica-repair SAF-05 test 17 "RBAC restore did not become effective for the
+    operator's own service account within 300s" (302-303 s observed each time), test 18 cascading. This is PR #143's test and bound;
+    the GitHub kind runner's RBAC propagation sits right at it. Not changed in this PR (it would re-open #143's diff); to be handled
+    in #143 (bound or environment-adaptive wait). Locally the restore has been effective within seconds in every run.
+
+Scale run 2 @ 20c8df3 final (raw: docs/reports/2026-09-21-saf10d-scale-run2-raw.log): RESULT FAIL (2 of 3) — invalid as a follow measurement (master
+  OOMKilled → failover, see above), but two numbers stand: exact key scan at open 1,539,525 live keys in 1,503 ms (≈0.98 µs/key;
+  with the 0.8M-key point, linear in the key count; extrapolation to 15.8M keys ≈ 15–17 s, NOT measured); operator probe pass max
+  4,461 ms (164 lines, 228 "reconcile slow" over the run, all during the load and the churn). The kill -9 hit the node the test
+  still believed to be the replica; it had become the master, the topology kept churning (stuck-Down pod recreation), and the
+  restarted node came back with 0 keys pending a rebuild — no conclusion beyond "the 512Mi budget does not fit 2M keys".
+
+=== local purge run 4 @ flared 3b7f38c (served-gap fix), suite 58688c1 (raw: docs/reports/2026-09-21-saf10d-purge-run4-raw.log) === RESULT: PASS (2/2)
+T6: 40 × 100 kB under the cut (master 24→64, flushes against the 1 MB write buffer, 8 s wait); after the heal the follower declared
+  needs_rebuild with reason lsn_purged (applied stayed 24, decode_refused 0 — no misdecode, the served history simply began beyond
+  the position); the operator filed the repair request; reconstruction_started 1→2 by snapshot bootstrap (wal_fallback_to_dump=1,
+  snapshot_bootstrap=2); the node came back FOLLOWING with items 60 = 60; pod UID unchanged; ledger empty. Same outcome as CI run 3.
+
+=== scale evaluation run 3 @ suite 58688c1, flared 3b7f38c (2Gi/1Gi memory budget, 64 MB block cache, 2M keys) — INTERRUPTED, log lost ===
+The host was restarted before the run finished; /tmp (the run log and the local VPATH build tree) was cleared and the kind cluster
+went down with Docker. Only the console readings taken during the run survive (from the per-minute follow lines):
+  load: 2,000,000 keys stored (master items 2,000,000, replica items 2,000,000 via forwarding — forward_applied=2000000); no master
+  restart this time (the 2Gi budget held).
+  follow stream draining behind forwarding: applied 1,379,554 → 1,430,299 in one minute (≈845 changes/s; every one skipped as
+  already applied by forwarding — wal_skipped 1,390,079 → 1,440,511, decode_refused 0), master latest 2,000,004; convergence was
+  projected at ≈11 more minutes when the host stopped. Throughput is bounded by repl-follow-max-batches (256) per poll round trip,
+  not by apply cost (all skips).
+  Boot-scan and probe numbers for this run were not reached. Rerun pending (numbers are console readings, not a recorded run).
+
+=== scale evaluation run 5 @ suite 58688c1, flared 3b7f38c (2Gi/1Gi budget, 64 MB block cache, 2,000,000 keys; raw: docs/reports/2026-09-22-saf10d-scale-run5-raw.log) === RESULT: PASS (3/3)
+NOTE ON ELAPSED TIMES: the host slept during this run, so every wall-clock figure the suite printed (load 40,811 s, convergence
+4,095 s) is contaminated and MUST NOT be read as a measurement. The per-sample deltas below are taken from consecutive follow
+samples (~60 s apart while the host was awake) and are the only rate figures used.
+
+Load: 2,000,000 keys stored; master items 2,000,000; no master restart (restartCount 0→0) — the 2Gi budget with a 64 MB block
+  cache held where 512Mi with the default 512 MB cache did not (see the OOM entry below).
+Follow stream, draining a ~1.24M-change backlog behind forwarding (22 samples, applied 761,179 → 2,000,004):
+  per-sample deltas 41,055 / 61,455 / 75,990 / 72,675 / 69,615 / 66,810 / 63,750 / 59,925 / 57,375 / 55,080 / 51,510 / 49,980 /
+  47,685 / 47,175 / 44,370 / 58,905 / 75,735 / 72,675 / 70,635 / 65,790 / 30,635 → ≈650–1,270 changes/s.
+  CEILING, not a load result: the follower asks for at most repl-follow-max-batches (256) batches per poll and polls every
+  repl-follow-poll-interval-usec (200 ms), so with one change per WAL batch the stream cannot exceed ≈1,280 changes/s at the
+  default settings, whatever the master's write rate. Raising max_batches or shortening the poll are the knobs; neither is tuned
+  here. wal_applied=0 / wal_skipped=2,008,010: every change had already been applied by FORWARDING, so the WAL stream did
+  verification work only — the data was never at risk, but the APPLIED POSITION is what the read-eligibility bound, the repair
+  ledger's close and the post-cut catch-up all key on, so a position that trails the head by hundreds of thousands means: no
+  replica reads (lag bound 1000), a repair entry that stays open, and more WAL the master must retain for a cut to be recoverable.
+Boot-time exact key scan (kill -9 on the PVC-backed replica, then reopen): 2,000,000 live keys in 960 ms. With the earlier points
+  (797,756 in 854 ms; 1,539,525 in 1,503 ms) the range is 0.48–0.98 µs/key, i.e. ≈1–2 s per million keys; a 15.8M-key production
+  DB extrapolates to ≈8–16 s of extra start-up. Extrapolation, not a measurement. After the restart the node came back FOLLOWING
+  with equal items, reconstruction_completed=1 and wal_fallback_to_dump=0 (incremental, no full dump).
+Operator probe cost at 2M keys: 187 probe passes, max 7,413 ms, typical ≈0.6 s; 190 "reconcile slow" lines — all during the load
+  (single-node kind, flared and the operator sharing 500m CPU), not separable from the load here.
+
+=== resource finding (kept as a failure record; item 2 of the reviewer's list) ===
+Observation: in scale run 2 the MASTER pod was OOMKilled (exit 137) 2 m 42 s into a 2M-key load at the harness default limit
+512Mi, and the operator failed over to the node under test — which is why that run is void as a follow measurement. Run 5 with a
+2 Gi limit and rocksdb-block-cache-size-mb = 64 completed the same load with restartCount 0→0.
+What used the memory (from the code, not inferred from the RSS curve): storage_rocksdb sizes an LRU block cache of
+rocksdb-block-cache-size-mb (flared default 512) and write buffers of rocksdb-write-buffer-size-mb (64) × rocksdb-max-write-buffer-number
+(3). So RocksDB's own budget at flared's defaults is ≈704 MB before any of flared's heap, threads, connection buffers or the
+replication metadata column family — i.e. a 512Mi container cannot hold a defaulted flared under write load at all, and the
+observed kill is the expected outcome rather than a replication effect.
+CONSEQUENCE FOR DEPLOYMENT, not fixed here: the shipped chart's node default is `limits.memory: 1Gi`
+(helm/flare-operator/values.yaml), which leaves ≈320 MB above that ≈704 MB floor; and the FlareCluster CRD's spec.rocksdb exposes
+walTtlSeconds / walSizeLimitMb / syncWrites / backupKeep (+ a few WAL knobs) but NOT blockCacheSizeMb, writeBufferSizeMb or
+maxWriteBufferNumber, so through the chart an operator cannot lower that floor — only raise the limit. Before enabling continuous
+replication anywhere real, either the CRD must expose the cache/write-buffer knobs or the chart's memory floor must be restated
+(and the tmpfs guidance in values.yaml, which already covers WAL archive and backup checkpoints, extended to say the cache and
+write buffers are NOT part of the data dir but are part of the container's memory).
+SCOPE OF T9 AS IT STANDS: "bounded backlog" only — 15 MB of backlog with 100 deletes, master RSS growth 29.5 MB against a 128 MB
+bound, tombstones collected by position. It is NOT a sustained-load resource test; that is the separate
+continuous-replication-sustained evaluation (300/900/2000 keys/s with lag, RSS, WAL and data-dir sampling), first run below.
+
+=== CI trigger investigation (item 4) — ROOT CAUSE FOUND ===
+No pull_request-triggered workflow run had been created for PR #144 since it was opened, while workflow_dispatch runs worked.
+Cause: the PR was UNMERGEABLE. `gh api repos/gree/flare/pulls/144` reported mergeable=false, mergeable_state=dirty — the SAF-10
+branch and its base (PR #143's head) had both appended run records to docs/safety-evidence.json and the merge conflicted. GitHub
+cannot compute the merge commit for such a PR, and the pull_request event (which tests the merge result) is not delivered, so no
+check suite is created — the head commit's /check-suites was 0 the whole time.
+Fix and confirmation: merging origin/safety/saf-01-topology-authority into the branch (5e7a3df, register conflict resolved by
+replaying #143's run records onto ours) made the PR mergeable=true, and pull_request runs started immediately — nix-linux, Safety
+evidence and E2E Tests on 5e7a3df, then full green matrices on 04c332d and 41ea98e (all 5 legs, run 35688265796).
+Branch protection / required checks: `gh api .../branches/safety%2Fsaf-01-topology-authority/protection` returns 404 "Branch not
+protected" and `gh api repos/gree/flare/rulesets` returns [] — there are NO required checks on either branch, so a green matrix is
+evidence, not a merge gate. The workflow_dispatch additions made for this investigation stay (they are how a leg is re-run for
+evidence on a chosen SHA), but automatic pull_request CI is what now covers the PR.
+
+=== #143 SAF-05 RBAC step (item 3) — reworked and green ===
+Three consecutive CI runs (35561126678, 35565289216, 35570216917) failed with "RBAC restore did not become effective ... within
+300s" after 302-303 s, while locally the same probe answered within seconds. The old step's deadline sat on the PROBE
+(`kubectl auth can-i` inside the operator pod, judged by `output.trim == "yes"`), not on the outcome, so it could not distinguish
+an authorization delay from a probe fault — and an exact-match on the whole output fails if the runner's kubectl prints anything
+alongside (the operator image installs whatever dl.k8s.io/release/stable.txt points to AT BUILD TIME, so CI and local images do
+not carry the same kubectl).
+Rework (32ec64a, committed on PR #143's branch and merged here): from the restore the step samples the in-pod probe (raw output
+and rc kept, any line equal to "yes" accepted) AND the outcome (the unsaved entry appearing in status), with the 300 s deadline on
+the OUTCOME; both clocks are printed, and a landing without the probe ever saying yes is reported as a probe/harness discrepancy
+together with the runner-side `can-i --as=SA` and rule[0]. First CI execution (run 35688265796, 41ea98e): "in-pod can-i said yes
+after 0s; unsaved ledger landed after 10s (via the top-of-pass retry)" — breaker-migration 37/37 PASS.
+
+=== rebuild-request routes: what is and is not verified ===
+OBSERVED (E2E): both orders occur in practice — runs 5-7 and CI runs 1-2 had the DROP path file the request first (entry with
+drops=2, the master's forwarded ops being refused by the stale-session replica and retried), runs 8, 10 and 11 had the
+FOLLOWER-DECLARED path win (entry with drops=0). Either way exactly one entry existed and one demotion followed.
+PINNED (flare_unit, 136 checks): drop-then-declaration, declaration-then-drop, and a drop on an already-OWNED entry plus the
+declaration in the same pass — each yields one un-owned entry for the node and one demotion.
+NOT VERIFIED: true concurrency. The unit checks are sequential applications of the pure functions and the E2E observations are
+whichever order the scheduler produced; nothing exercises the two routes racing inside one reconcile pass against the real
+ledger-persist path, and the operator is single-threaded per pass so the race window is between passes, not inside one. Stated as
+a residual under EV-18 rather than claimed as covered.
+
+=== sustained-load evaluation run 1 @ suite 41ea98e, flared 3b7f38c, operator 2379cff (raw: docs/reports/2026-09-24-saf10d-sustained-run1-raw.log) === RESULT: PASS (the evaluation completed; the verdicts below are its output, not a pass/fail claim about the design)
+command: FLARE_E2E_SUSTAINED=1 flare_e2e --filter continuous-replication-sustained
+Method: three steady rates, 4 minutes each (eight 30 s windows), sampling at every window the follower's state and applied
+position, the master's head, item counts on both nodes, both RSS figures, the master's WAL bytes and data-dir bytes, and the live
+tombstone count. Then the load STOPS and the backlog must drain.
+
+| rate      | lag, first minute | lag, last minute | verdict            |
+|-----------|-------------------|------------------|--------------------|
+| 300 keys/s  | 0               | 0                | KEPT UP (bounded)  |
+| 900 keys/s  | 0               | 0                | KEPT UP (bounded)  |
+| 2000 keys/s | 70,020          | 294,615          | FELL BEHIND (growing) |
+
+At 300 and 900 keys/s the applied position equalled the master's head in EVERY window (lag exactly 0): the stream is not merely
+bounded, it is caught up continuously. At 2000 keys/s the lag grew monotonically (35,265 at the first sample to 294,615 at the
+last) — consistent with the ≈1,280 changes/s ceiling measured in scale run 5, which lies between 900 and 2000.
+After the load stopped the backlog DRAINED in 442 s and the follower returned to following with equal items; reconstruction_started
+1→1 (no rebuild at any point) and the master did not restart (restartCount 0→0).
+Master RSS 46,664 → 158,056 kB across the whole 12-minute run (memtable fill plus the 64 MB block cache this suite configures).
+Replica RSS peaked at 115,224 kB.
+Content never diverged: items master = replica = 768,000 at every sample, because FORWARDING carried every write (wal_applied=0,
+wal_skipped=772,031 — the WAL stream re-delivered the same changes and the rule skipped them). So "falling behind" at 2000 keys/s
+is a POSITION problem, not a data-loss problem: reads stay withheld (lag bound), a repair entry would stay open longer, and a cut
+taken at that moment needs a longer catch-up.
+LIMIT OF THIS RUN — the disk figures establish nothing: the master's WAL stayed at exactly 72,092 kB and the data dir grew only
+76,288 → 76,500 kB, both flat from the first window. 768,000 small records did not fill the 64 MB write buffer, so no memtable
+flush occurred and the WAL files were already preallocated at their steady size. WAL retention and SST/compaction behaviour under
+sustained load are therefore NOT covered; a run long enough to force repeated flushes (and one with a replica cut, so the master
+must retain WAL for a trailing follower) is still needed before any production judgement.

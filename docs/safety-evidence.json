@@ -183,6 +183,158 @@
       "hazards": [
         "H4"
       ]
+    },
+    {
+      "id": "UCA-19",
+      "action": "A6",
+      "timing": "Not provided",
+      "description": "Fetch is not resumed after a transient disconnection.",
+      "hazards": [
+        "H3"
+      ]
+    },
+    {
+      "id": "UCA-20",
+      "action": "A6",
+      "timing": "Provided",
+      "description": "The applied position advances past a range that was not applied (e.g. a forwarded write taken as WAL progress).",
+      "hazards": [
+        "H2",
+        "H3"
+      ]
+    },
+    {
+      "id": "UCA-21",
+      "action": "A6",
+      "timing": "Wrong order",
+      "description": "A newer value arrives by forwarding and an older WAL change is then applied over it.",
+      "hazards": [
+        "H2",
+        "H3"
+      ]
+    },
+    {
+      "id": "UCA-22",
+      "action": "A6",
+      "timing": "Wrong order",
+      "description": "A delete is applied and an older put then resurrects the key.",
+      "hazards": [
+        "H2",
+        "H3"
+      ]
+    },
+    {
+      "id": "UCA-23",
+      "action": "A6",
+      "timing": "Provided",
+      "description": "The process crashes after applying changes and before the position is saved, so the same range is re-applied or skipped inconsistently.",
+      "hazards": [
+        "H2",
+        "H3"
+      ]
+    },
+    {
+      "id": "UCA-24",
+      "action": "A6",
+      "timing": "Provided",
+      "description": "A batch from an old session or lineage is applied.",
+      "hazards": [
+        "H2",
+        "H3",
+        "H6"
+      ]
+    },
+    {
+      "id": "UCA-25",
+      "action": "A6",
+      "timing": "Provided",
+      "description": "A replica whose required history is gone is treated as synchronised.",
+      "hazards": [
+        "H2",
+        "H3"
+      ]
+    },
+    {
+      "id": "UCA-26",
+      "action": "A1b",
+      "timing": "Provided",
+      "description": "A lagging or unobservable replica is treated as safe for reads, promotion or deletion.",
+      "hazards": [
+        "H2",
+        "H4",
+        "H5"
+      ]
+    },
+    {
+      "id": "UCA-27",
+      "action": "A5",
+      "timing": "Not provided",
+      "description": "WAL is retained until the master's disk is exhausted.",
+      "hazards": [
+        "H1",
+        "H5"
+      ]
+    },
+    {
+      "id": "UCA-28",
+      "action": "A6",
+      "timing": "Too early",
+      "description": "Delete history is discarded while a change older than the delete can still be applied.",
+      "hazards": [
+        "H2",
+        "H3"
+      ]
+    },
+    {
+      "id": "UCA-29",
+      "action": "A6",
+      "timing": "Wrong order",
+      "description": "The apply decision is made against a position read before a stall, retry or lock wait, so a change admitted against an old cursor is written after the cursor moved.",
+      "hazards": [
+        "H2",
+        "H3"
+      ]
+    },
+    {
+      "id": "UCA-30",
+      "action": "A6",
+      "timing": "Provided",
+      "description": "After a rebuild, changes from the previous session, or metadata inherited from the source, are applied.",
+      "hazards": [
+        "H2",
+        "H3",
+        "H6"
+      ]
+    },
+    {
+      "id": "UCA-31",
+      "action": "A6",
+      "timing": "Provided",
+      "description": "A key is changed by a path that does not capture an order label (bulk operation, internal delete), so the change cannot be ordered against the other delivery path.",
+      "hazards": [
+        "H2",
+        "H3"
+      ]
+    },
+    {
+      "id": "UCA-32",
+      "action": "A6",
+      "timing": "Provided",
+      "description": "A transient disconnection is treated as a repair trigger and starts a full reconstruction.",
+      "hazards": [
+        "H3",
+        "H4"
+      ]
+    },
+    {
+      "id": "UCA-33",
+      "action": "A6",
+      "timing": "Provided",
+      "description": "A partially initialised copy (metadata cleared, cursor or generation not yet written) accepts deliveries or is presented as a copy.",
+      "hazards": [
+        "H2",
+        "H5"
+      ]
     }
   ],
   "controls": [
@@ -400,9 +552,9 @@
         "SAF-09"
       ],
       "review": {
-        "commit": "da840c084fd5f5fc1b0f023b597e6378b8ee3582",
-        "date": "2026-09-16",
-        "note": "Third fully green CI matrix; topology-authority 4/4 for the sixth consecutive CI execution since the two harness fixes. PARTIAL / UNVERIFIED."
+        "commit": "e2ca4c6821fa27d935c783aefd814afa3802ff52",
+        "date": "2026-09-24",
+        "note": "2026-09-27 working-tree review on 41db502: Topology authority production code is unchanged; the read-guard harness now isolates both directions of operator/replica TCP, since matching only pushed node-sync requests did not reliably retain the map. New runtime evidence pending CI; verification unchanged. Previous review: Audit follow-up: inspected e2ca4c6 plus working-tree tests/docs. cluster::pre_proxy_read now routes an ineligible local follower to the master; topology send authority and lease checks are unchanged. See docs/reports/2026-09-24-saf10-audit-followups.md; runs are not attributed to an uncommitted SHA, verification remains unverified. Prior assessment: SAF-10 (PR #144) changed Main.lean, K8sReconciler.lean and cluster.cc without touching this control's mechanism: Main gained the per-tick continuous-replication probe and read withholding at commit (after the fenced broadcast decision, not before it); K8sReconciler gained partitionMap-only candidate shaping and a PodListResponse field; cluster.cc gained the WAL follower lifecycle. The lease/fence path and its proofs are unchanged. PARTIAL / UNVERIFIED unchanged."
       }
     },
     {
@@ -475,9 +627,9 @@
         "SAF-09"
       ],
       "review": {
-        "commit": "33205465691b0bf59dff1ad348ed810a5d20f24f",
-        "date": "2026-09-13",
-        "note": "Bridge.lean/Main.lean changed for the delete-outcome wording; commit/merge and broadcast untouched. No new evidence for SC-02."
+        "commit": "5e7a3df871fd667412b1623b3074b5b8849c2939",
+        "date": "2026-09-22",
+        "note": "2026-09-27 working-tree review on 41db502: Only configuration/logging changed in Main; committed-map normalization and its uniqueness proof are unchanged. New runtime evidence pending CI; verification unchanged. Previous review: SAF-10 (PR #144): Main.lean and K8sReconciler.lean changed (eligibility probe, read withholding, candidate shaping, PodListResponse fields). The at-most-one-master merge (mergeClusterState, demoteDuplicateMasters) and its theorems are untouched; withholdReads rewrites balance only (withholdReads_keys). PARTIAL / UNVERIFIED unchanged."
       }
     },
     {
@@ -492,12 +644,14 @@
         "H2"
       ],
       "ucas": [
-        "UCA-02"
+        "UCA-02",
+        "UCA-32"
       ],
       "implementation": "partial",
       "verification": "unverified",
       "scenarios": [
-        "Drops during normal service, a drop while the gate is held, an unresolved destination, operator restart with the ledger persisted, a master counter reset, drops arriving after a repair's reconstruction began, a failed ledger save, and a corrupt/unreadable ledger at start."
+        "Drops during normal service, a drop while the gate is held, an unresolved destination, operator restart with the ledger persisted, a master counter reset, drops arriving after a repair's reconstruction began, a failed ledger save, and a corrupt/unreadable ledger at start.",
+        "A drop whose destination is a WAL-mode follower (SAF-10): the ledger entry is HELD under the follower's ownership (no demotion, no rebuild), CLOSED when the follower's contiguous applied position reaches the master's position at request time in the SAME source epoch, HANDED OVER to the rebuild path only if the follower explicitly stops owning; an unreadable follower state (stats fetch failure) keeps the hold."
       ],
       "assumptions": [
         "Drop counters describe a source/destination incarnation (a counter that went down is a restart whose count is entirely new drops). flared keeps one completion RECORD per process — a random boot id, the latest reconstruction's id and state, and the id and source of the last success — so a completion can be tied to a process and a source; cumulative started/completed counters cannot (a failed handler leaves them unequal forever, a restart may reproduce their values)."
@@ -509,7 +663,9 @@
         "A destination that became a MASTER while under repair is VOIDED, not repaired.",
         "A write that keeps failing until a restart loses the unsaved delta; the window is one pass of retries, extended by however long the cause (e.g. a revoked RBAC grant) persists.",
         "The operator announces an unsaved ledger ('marked unsaved and will retry every pass — an operator restart before that lands would lose ...') but a landing through the normal per-pass persist is silent, so the log does not show when that exposure ended (only the retry path logs 'persisted on retry'). Observability gap; follow-up proposed.",
-        "RBAC grant propagation: one local observation (2026-09-13) of ~131s before an impersonated `can-i` flipped after a restore; CI runs 6 and 8 saw the grant effective for the operator's own SA within seconds (in-pod probe). Earlier attributions of >2 minutes to the operator's path were harness artefacts (see the round-8 review note)."
+        "RBAC grant propagation: one local observation (2026-09-13) of ~131s before an impersonated `can-i` flipped after a restore; CI runs 6 and 8 saw the grant effective for the operator's own SA within seconds (in-pod probe). Earlier attributions of >2 minutes to the operator's path were harness artefacts (see the round-8 review note).",
+        "Until eb2ba17 the drop observation required the REPLICA's stats read to succeed as well as the master's, so an unreadable replica hid the master's drop counter for its partition (found by the SAF-10d stats-fetch-failure scenario, run 4). Fixed: the observation needs the master's reply only. E2E confirmation pending (run 5).",
+        "REGRESSION (found by rerunning replica-repair on tch after SAF-10c, fixed 2379cff): FollowReading treated a complete stats reply WITHOUT follower keys as unreadable, so every drop on a non-RocksDB replica was held as 'follower state unknown' and never repaired. Unknown now means a failed or truncated read only. The rerun of the non-WAL suites on the fix is pending."
       ],
       "code": [
         {
@@ -543,6 +699,10 @@
         {
           "path": "src/lib/stats.cc",
           "symbol": "stats::increment_proxy_write_dropped"
+        },
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/ReplicaRepair.lean",
+          "symbol": "advanceOwned"
         }
       ],
       "call_path": "queue_proxy_write records destination drops -> stats proxy_write_dropped[dest] -> Main observe (only while the ledger is AVAILABLE; a partially corrupt ledger is unavailable, not smaller) -> ReplicaRepair ledger (persisted; dirty writes retried) -> demote to Proxy held out of assignment -> node confirms (boot id, current id, drops at reseat recorded) -> FSM re-seats Slave/Prepare -> flared reconstructs -> complete when the LATEST reconstruction SUCCEEDED from the current master and is newer than the reseat one in the same process, or in a new process (boot id changed); late drops requeued.",
@@ -570,6 +730,21 @@
             {
               "path": "flare_operator/FlareOperator/UnitTests.lean",
               "symbol": "checkAdvanceComplete"
+            }
+          ]
+        },
+        {
+          "id": "CHECK-03-follow",
+          "kind": "scenario",
+          "procedure": "RocksDB, repl-identity-forward and repl-follow-enabled on for every node, replica read balance 0: verify both flags on all pods; write and see the replica apply forwarded changes through the common rule while following; cut master<->replica (iptables REJECT both ways), create/update/delete on the master until proxy_write_dropped is counted and stops increasing, STOP writing; heal and require the replica to resume from its applied_lsn to the master's position at the cut while following, item counts equal and the updated/created keys read correctly by DIRECT replica reads, reconstruction_started unchanged and the pod uid unchanged; require the ledger entry to be logged HELD as owned by the follower and then CLOSED by continuous replication with no demotion and no hand-over, status.replicaRepairs empty. Separately, with the operator's pods/exec revoked (inert resource name, original list restored after), a new drop is HELD as 'follower state unknown (stats unreadable)', never demoted while blind, and CLOSED once the probe returns.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/ContinuousReplication.lean",
+              "symbol": "suite"
+            },
+            {
+              "path": "flare_operator/FlareOperator/StateMachine/ReplicaRepair.lean",
+              "symbol": "advanceOwned"
             }
           ]
         }
@@ -712,6 +887,38 @@
           "report": "docs/reports/2026-09-16-replica-repair-final4.txt"
         },
         {
+          "check": "CHECK-03-follow",
+          "commit": "dfe6e5eaab49298d56852b76c0f8d423ca40eaa7",
+          "date": "2026-09-20",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter continuous-replication (local kind flare-e2e; images flare-node-rocksdb:test and flare-operator:test built from this commit; the suite file itself landed in the following commit)",
+          "result": "pass",
+          "report": "docs/reports/2026-09-20-saf10d-minimal-e2e-continuous-replication.txt"
+        },
+        {
+          "check": "CHECK-03",
+          "commit": "2379cff5cc28ca160e2076ad2d9c690b0c90d417",
+          "date": "2026-09-20",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter replica-repair,operator-restart,failover,read-balance,prepare-evidence (local kind; images from this revision)",
+          "result": "pass",
+          "report": "docs/reports/2026-09-20-saf10d-minimal-e2e-continuous-replication.txt"
+        },
+        {
+          "check": "CHECK-03-follow",
+          "commit": "2379cff5cc28ca160e2076ad2d9c690b0c90d417",
+          "date": "2026-09-20",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter continuous-replication (run 8, local kind)",
+          "result": "pass",
+          "report": "docs/reports/2026-09-20-saf10d-minimal-e2e-continuous-replication.txt"
+        },
+        {
+          "check": "CHECK-03-follow",
+          "commit": "ecb1c40032d0e6a63acc413990bce68b2b8b37d0",
+          "date": "2026-09-21",
+          "command": "GitHub Actions e2e-tests.yaml (workflow_dispatch), legs replication (continuous-replication-purge, continuous-replication-limits) and continuous-replication",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/35570216917"
+        },
+        {
           "check": "CHECK-03",
           "commit": "da840c084fd5f5fc1b0f023b597e6378b8ee3582",
           "date": "2026-09-16",
@@ -726,9 +933,9 @@
         "SAF-10"
       ],
       "review": {
-        "commit": "da840c084fd5f5fc1b0f023b597e6378b8ee3582",
-        "date": "2026-09-16",
-        "note": "Third fully green CI matrix, and the first CI execution of the outcome-based landing check in the SAF-05 save-failure test: the landing is judged by the entry being in status and the writing path is reported, so the silent per-pass persist that produced the run-5 and run-8 failures can no longer be read as a failure. The corrected RBAC account (a single local latency observation; no operator-side latency seen in CI) stands. PARTIAL / UNVERIFIED."
+        "commit": "e2ca4c6821fa27d935c783aefd814afa3802ff52",
+        "date": "2026-09-24",
+        "note": "2026-09-27 working-tree review on 41db502: Repair ledger code is unchanged. Config budgets are retained in migration target specs; no automatic deletion/restart is introduced. The selective read test still demands actual dropped forwarding. New runtime evidence pending CI; verification unchanged. Previous review: CI 36228379804 at 0ed3193: selective routing assertion passed but scenario FAILED in cleanup; corrected cleanup to wait for balance 50 recovery before requesting 0, exposing rather than claiming to fix the SAF-09 retransmission residual. Revised E2E pending. 2026-09-26 follow-up on 3cb1d5a plus working-tree test: Added a selective read-routing E2E; repair ledger production code is unchanged. Dropped forwarding is staged while WAL fetch is blocked, with cleanup in finally. Lean E2E build passed; runtime result pending CI, verification unchanged. Earlier review: Audit follow-up: inspected e2ca4c6 plus working-tree tests/docs. Shared unit/e2e test files gained read-routing and catch-up scheduling checks; the persisted repair ledger and reconstruction transitions are unchanged. See docs/reports/2026-09-24-saf10-audit-followups.md; runs are not attributed to an uncommitted SHA, verification remains unverified. Prior assessment: Runs on this revision: regression suites replica-repair/operator-restart/failover/read-balance/prepare-evidence 30/30 pass; continuous-replication 12/12 pass (second consecutive full pass, run 8). Previous note: ReplicaRepair.FollowReading gained a completeness flag (END seen); unreadable = !complete; flare_unit pins that a complete reply without keys is 'not in the mode' (ordinary repair, hands an owned entry over). Bridge.queryPodStats returns at END instead of waiting out a 3 s timeout, which had made 2-node reconciles take 18-31 s and starved the repair paths. Regression suites (replica-repair, operator-restart, failover, read-balance, prepare-evidence) rerunning on this revision. PARTIAL / UNVERIFIED unchanged."
       }
     },
     {
@@ -743,12 +950,14 @@
         "H4"
       ],
       "ucas": [
-        "UCA-10"
+        "UCA-10",
+        "UCA-26"
       ],
       "implementation": "partial",
       "verification": "unverified",
       "scenarios": [
-        "A Prepare slave whose activation was lost to an index-leader handover (reconstruction finished, operator still sees Prepare); a node with a PAST success that is now re-reconstructing (in flight); a RocksDB reply missing lineage or cursor (truncated); a zero cursor; a mismatched lineage; a cursor ahead of the head; a master or lineage change mid-observation; a fresh process."
+        "A Prepare slave whose activation was lost to an index-leader handover (reconstruction finished, operator still sees Prepare); a node with a PAST success that is now re-reconstructing (in flight); a RocksDB reply missing lineage or cursor (truncated); a zero cursor; a mismatched lineage; a cursor ahead of the head; a master or lineage change mid-observation; a fresh process.",
+        "SAF-10c: a WAL-mode follower as promotion candidate — proven current (following the master's current epoch, fresh by the node's own clock, lag within the promotion bound) is preferred; disconnected/stale/lagging/unreadable is unproven (no planned promotion, last resort for failover, logged NOT LOSS-FREE); needs_rebuild/initial_sync/idle/another epoch is unfit (never promoted by the FSM paths)."
       ],
       "assumptions": [
         "flared exposes a per-process completion record in stats, read as ONE locked snapshot: reconstruction_boot_id (random per process), reconstruction_current_id/_state (latest handler), reconstruction_last_success_id/_source. Every notification carries the id the handler was given at begin(), so an older handler finishing after a newer one started cannot record the newer id as succeeded; last_success only advances and only the current handler's notification changes current_state. Activation requires the LATEST reconstruction to have succeeded from the current master. On RocksDB a completed reconstruction seeds a nonzero cursor and rocksdb_master_id identifies the source; the backend is told from a COMPLETE master reply."
@@ -756,7 +965,8 @@
       "residual_risks": [
         "Covers Prepare ACTIVATION by the repair path only; promotion still trusts the Active designation (SAF-08).",
         "On a backend that reports no lineage/cursor (complete reply, no rocksdb_ keys) a completion with none in flight is accepted; the vacuous-activation guard in reconcileStep still requires an Active master to have synced from.",
-        "The prepare-evidence E2E runs on the tch backend, so the RocksDB lineage/cursor requirement is pinned by flare_unit, not staged end to end."
+        "The prepare-evidence E2E runs on the tch backend, so the RocksDB lineage/cursor requirement is pinned by flare_unit, not staged end to end.",
+        "SAF-10c: failover with the master gone cannot prove currency (asynchronous replication); the FSM still promotes for availability and only logs that it is not loss-free. The TCP-side zombie-master guard (Reconciler.findActiveSlaveForPartition) does not consult follower evidence. Audit follow-up withholds never-read replicas until their mode is established (unit tested); independent stale-map routing and the amended read-value E2E are not yet executed. Prior E2E evidence does not validate this new local read guard."
       ],
       "code": [
         {
@@ -778,6 +988,30 @@
         {
           "path": "src/lib/stats.cc",
           "symbol": "stats::reconstruction_succeeded_from"
+        },
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/FollowEvidence.lean",
+          "symbol": "judge"
+        },
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/FollowEvidence.lean",
+          "symbol": "classify"
+        },
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/K8sReconciler.lean",
+          "symbol": "shapePromotionCandidates"
+        },
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/K8sReconciler.lean",
+          "symbol": "withholdReads"
+        },
+        {
+          "path": "src/lib/cluster.cc",
+          "symbol": "cluster::pre_proxy_read"
+        },
+        {
+          "path": "src/lib/stats.h",
+          "symbol": "stats::follow_allows_local_read"
         }
       ],
       "call_path": "flared finishes reconstruction and calls activate_node; if the operator returned OK but did not persist it (leader handover) the node stays Prepare in the operator map. Main 4c builds a per-node episode, reads flared stats (reconstruction_completed, rocksdb_master_id, cursor + master head), SyncEvidence.judge requires a completed reconstruction bound to the current master's lineage with a sane cursor and unchanged source, and a positive verdict re-derives Prepare->Active through Reconciler.reconcileStep.",
@@ -820,6 +1054,47 @@
             {
               "path": "src/lib/stats.cc",
               "symbol": "stats::reconstruction_succeeded_from"
+            }
+          ]
+        },
+        {
+          "id": "CHECK-04-eligibility",
+          "kind": "scenario",
+          "procedure": "flare_unit pins FollowEvidence.judge (unreadable → unknown; mode off → notInMode; not following, another epoch, stale observation, lag over the bound, applied ahead of the head → ineligible; unreadable master → unknown; lag at the bound eligible; read vs promotion bounds), unfitReason, classify (ranked highest-applied first; unproven vs unfit; withheld reads; mode memory; remembered-in-mode unreadable/not-probed → unproven and withheld, never unfit; no master reading → nothing proven), the probe policy, shapePromotionCandidates (unfit removed, ranked first, unproven last, nodeMap untouched, findActiveSuccessor sees the order, all-excluded leaves no successor), withholdReads (slave 0, master/Down/unlisted untouched, keys preserved) and the masterless refill's exclusion.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/UnitTests.lean",
+              "symbol": "checkFollowJudge"
+            },
+            {
+              "path": "flare_operator/FlareOperator/UnitTests.lean",
+              "symbol": "checkFollowShaping"
+            }
+          ]
+        },
+        {
+          "id": "CHECK-04-routing",
+          "kind": "scenario",
+          "procedure": "Invoke production pre_proxy_read with a stale positive slave balance: caught-up permits local read, disconnected and lagging attempt master enqueue rather than local read, recovery permits local read again, wrong source refuses local read. A deliberately unavailable transport proves fail-closed branch selection, not successful network delivery; real socket E2E remains required.",
+          "references": [
+            {
+              "path": "test/lib/test_handler_proxy.cc",
+              "symbol": "test_stale_balance_read_guard_uses_production_routing_and_recovers"
+            },
+            {
+              "path": "test/lib/test_stats_reconstruction.cc",
+              "symbol": "test_local_read_guard_disconnect_lag_and_recovery"
+            }
+          ]
+        },
+        {
+          "id": "CHECK-04-follow",
+          "kind": "scenario",
+          "procedure": "E2E continuous-replication tests 8 and 11: with spec.readBalance.slave=50 the following replica is served (balance 50), withheld to 0 while cut, restored after healing; the master pod is deleted, the follower is promoted, its source epoch advances, the returning ex-master rebuilds and follows the new epoch. Planned-promotion (drain) exclusion and the NOT LOSS-FREE line for an unproven promotion are not yet staged.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/ContinuousReplication.lean",
+              "symbol": "suite"
             }
           ]
         }
@@ -938,6 +1213,38 @@
           "report": "docs/reports/2026-09-16-ci-e2e-matrix-f7d327f-pass.txt"
         },
         {
+          "check": "CHECK-04-eligibility",
+          "commit": "2c3bd87c741586583f78469e65f9c491c74c57b8",
+          "date": "2026-09-20",
+          "command": "cd flare_operator && lake build flare_unit && .lake/build/bin/flare_unit",
+          "result": "pass",
+          "report": "docs/reports/2026-09-20-saf10c-eligibility-unit.txt"
+        },
+        {
+          "check": "CHECK-04",
+          "commit": "2379cff5cc28ca160e2076ad2d9c690b0c90d417",
+          "date": "2026-09-20",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter replica-repair,operator-restart,failover,read-balance,prepare-evidence (local kind)",
+          "result": "pass",
+          "report": "docs/reports/2026-09-20-saf10d-minimal-e2e-continuous-replication.txt"
+        },
+        {
+          "check": "CHECK-04-follow",
+          "commit": "2379cff5cc28ca160e2076ad2d9c690b0c90d417",
+          "date": "2026-09-20",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter continuous-replication (run 8, local kind)",
+          "result": "pass",
+          "report": "docs/reports/2026-09-20-saf10d-minimal-e2e-continuous-replication.txt"
+        },
+        {
+          "check": "CHECK-04-follow",
+          "commit": "ecb1c40032d0e6a63acc413990bce68b2b8b37d0",
+          "date": "2026-09-21",
+          "command": "GitHub Actions e2e-tests.yaml (workflow_dispatch), legs replication (continuous-replication-purge, continuous-replication-limits) and continuous-replication",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/35570216917"
+        },
+        {
           "check": "CHECK-04",
           "commit": "da840c084fd5f5fc1b0f023b597e6378b8ee3582",
           "date": "2026-09-16",
@@ -960,9 +1267,9 @@
         "SAF-08"
       ],
       "review": {
-        "commit": "da840c084fd5f5fc1b0f023b597e6378b8ee3582",
-        "date": "2026-09-16",
-        "note": "Third fully green CI matrix; prepare-evidence 2/2 and the cutter completion-record test executed again in nix-linux. PARTIAL / UNVERIFIED."
+        "commit": "e2ca4c6821fa27d935c783aefd814afa3802ff52",
+        "date": "2026-09-24",
+        "note": "2026-09-27 working-tree review on 41db502: Read-guard E2E at 41db502 failed because local balance changed, not because stale reads passed. The revised fault now blocks operator/replica traffic in both directions; promotion/Prepare logic is unchanged. New runtime evidence pending CI; verification unchanged. Previous review: CI 36228379804 at 0ed3193: selective routing assertion passed but scenario FAILED in cleanup; corrected cleanup to wait for balance 50 recovery before requesting 0, exposing rather than claiming to fix the SAF-09 retransmission residual. Revised E2E pending. 2026-09-26 follow-up on 3cb1d5a plus working-tree test: Added an E2E requiring the replica's own stats nodes balance to stay 50 through a successful GET of a new master value, while applied cursor and forwarded-apply counter remain unchanged. This isolates the local read guard from operator withholding; does not claim promotion safety. Lean E2E build passed; runtime result pending CI, verification unchanged. Earlier review: Audit follow-up: inspected e2ca4c6 plus working-tree tests/docs. Cold-start unknown replicas are withheld and future observation timestamps are Unknown. Added local flared read guard; the E2E now checks values across a cut, but has not been executed for this patch. No new promotion guarantee. See docs/reports/2026-09-24-saf10-audit-followups.md; runs are not attributed to an uncommitted SHA, verification remains unverified. Prior assessment: Runs on this revision: regression suites replica-repair/operator-restart/failover/read-balance/prepare-evidence 30/30 pass; continuous-replication 12/12 pass (second consecutive full pass, run 8). Previous note: SAF-10c eligibility added around the promotion paths without changing them: candidate shaping is partitionMap-only (same device as standby de-prioritisation; shapePromotionCandidates_nodeMap proves the node map is untouched) so handleFailover/DrainWithPromotion and their CLE proofs are unchanged; promoteMasterlessPartition gained an exclusion list for its Active-slave tiers (its CLE proof re-elaborated unchanged). Drain (planned) excludes unproven and unfit; failover excludes only unfit and logs an unproven promotion as NOT LOSS-FREE. Read withholding is applied at commit after normalization. 129 flare_unit checks pass. No E2E yet for these paths; nodes not in the mode are unaffected (all lists empty). PARTIAL / UNVERIFIED unchanged."
       }
     },
     {
@@ -980,12 +1287,14 @@
         "UCA-07",
         "UCA-11",
         "UCA-12",
-        "UCA-13"
+        "UCA-13",
+        "UCA-26"
       ],
       "implementation": "partial",
       "verification": "unverified",
       "scenarios": [
-        "An empty-master candidate whose stats are missing/truncated (must not read as empty); a successor demoted by a resync between observation and delete; the target pod replaced under the same name; the operator losing its lease before the delete."
+        "An empty-master candidate whose stats are missing/truncated (must not read as empty); a successor demoted by a resync between observation and delete; the target pod replaced under the same name; the operator losing its lease before the delete.",
+        "SAF-10c: the surviving copy is a WAL-mode follower — the delete proceeds only if, from the same fresh stats read at revalidation, it is following the master's current epoch, fresh, and within the promotion lag bound; unknown or ineligible refuses."
       ],
       "assumptions": [
         "curr_items is local storage; a stats reply with no well-formed curr_items line carries no information. A StatefulSet reuses a pod NAME for a replacement, so identity is the pod UID. The leader lease is the operator's authority to act."
@@ -994,7 +1303,9 @@
         "Graceful deletion still does not guarantee a successful handoff; the drain guard protects a master with no promotable successor.",
         "The successor/lease revalidation and the delete are not one atomic step; the pod-identity hole is closed by the API precondition, a successor demoted in the instant after the gate remains a window.",
         "The direct-API delete is bounded (connect 3s, total 10s, outer wall 20s + 5s kill grace, ~25s worst case). A timeout or transport failure is an UNKNOWN deletion outcome — the API may have accepted the delete and only the reply was lost — and is reported as such; the caller keeps the streak and re-observes the pod on the next probe rather than assuming 'not deleted' or retrying blindly.",
-        "A live empty master with a data-bearing successor and an interposed change is not staged end to end; the gate is unit-pinned, the precondition and the deadline are staged by E2E against a replaced pod and a black-hole server."
+        "A live empty master with a data-bearing successor and an interposed change is not staged end to end; the gate is unit-pinned, the precondition and the deadline are staged by E2E against a replaced pod and a black-hole server.",
+        "SAF-10c: the survivor's currency is judged from one fresh reading at revalidation; a follower that disconnects in the instant after the gate remains a window (same shape as the successor-demotion window). Unit-pinned only.",
+        "Until d9d1285 storage_rocksdb::open seeded curr_items from rocksdb.estimate-num-keys, which does not count keys recovered from the WAL: after a crash the count under-reported by the unflushed tail (SAF-10d run 9: 52 keys present, not counted), so a count-based comparison could read intact data as loss — or, on a small DB, an intact master as empty. Fixed by an exact scan at open; unit-pinned (test_reopen_counts_wal_only_keys_exactly) and observed in E2E run 10."
       ],
       "code": [
         {
@@ -1008,6 +1319,10 @@
         {
           "path": "flare_operator/FlareOperator/K8s/Bridge.lean",
           "symbol": "deletePodWithUidPrecondition"
+        },
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/FollowEvidence.lean",
+          "symbol": "judge"
         }
       ],
       "call_path": "Main 4d probes master/slave curr_items -> parseCurrItems -> emptyMasterVerdict -> streak >= 3 -> REVALIDATE: pod UID, fresh stats, UID again, live map AFTER the stats, leader lease -> deleteGate -> Bridge.deletePodWithUidPrecondition: DELETE with DeleteOptions.preconditions.uid = the observed UID, refused by the apiserver (409) if another pod holds the name -> drain path.",
@@ -1039,6 +1354,21 @@
             {
               "path": "flare_operator/FlareOperator/UnitTests.lean",
               "symbol": "checkDeleteGate"
+            }
+          ]
+        },
+        {
+          "id": "CHECK-05-survivor",
+          "kind": "scenario",
+          "procedure": "flare_unit pins deleteGate's survivorFollowOk: an unproven surviving follower refuses the delete with a reason naming continuous replication; the survive purpose uses the promotion bound.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/UnitTests.lean",
+              "symbol": "checkFollowShaping"
+            },
+            {
+              "path": "flare_operator/FlareOperator/StateMachine/StatsObservation.lean",
+              "symbol": "deleteGate"
             }
           ]
         }
@@ -1181,6 +1511,22 @@
           "report": "docs/reports/2026-09-16-replica-repair-final4.txt"
         },
         {
+          "check": "CHECK-05-survivor",
+          "commit": "2c3bd87c741586583f78469e65f9c491c74c57b8",
+          "date": "2026-09-20",
+          "command": "cd flare_operator && lake build flare_unit && .lake/build/bin/flare_unit",
+          "result": "pass",
+          "report": "docs/reports/2026-09-20-saf10c-eligibility-unit.txt"
+        },
+        {
+          "check": "CHECK-05",
+          "commit": "2379cff5cc28ca160e2076ad2d9c690b0c90d417",
+          "date": "2026-09-20",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter replica-repair,operator-restart,failover,read-balance,prepare-evidence (local kind)",
+          "result": "pass",
+          "report": "docs/reports/2026-09-20-saf10d-minimal-e2e-continuous-replication.txt"
+        },
+        {
           "check": "CHECK-05",
           "commit": "da840c084fd5f5fc1b0f023b597e6378b8ee3582",
           "date": "2026-09-16",
@@ -1195,9 +1541,9 @@
         "SAF-08"
       ],
       "review": {
-        "commit": "da840c084fd5f5fc1b0f023b597e6378b8ee3582",
-        "date": "2026-09-16",
-        "note": "Third fully green CI matrix; replica-repair 8/8 including the UID precondition and the bounded delete. PARTIAL / UNVERIFIED."
+        "commit": "e2ca4c6821fa27d935c783aefd814afa3802ff52",
+        "date": "2026-09-24",
+        "note": "2026-09-27 working-tree review on 41db502: Memory settings explicitly require a planned restart; this patch never invokes deletion or changes survivor checks. New runtime evidence pending CI; verification unchanged. Previous review: Audit follow-up: inspected e2ca4c6 plus working-tree tests/docs. Future timestamps no longer authorize survivor eligibility; deletion still uses the existing gate. New unit checks pass, but no new delete E2E was run. See docs/reports/2026-09-24-saf10-audit-followups.md; runs are not attributed to an uncommitted SHA, verification remains unverified. Prior assessment: Observation-integrity finding from the SAF-10d crash scenario: the item count after a reopen was an estimate blind to WAL-only keys. Fixed in flared (exact scan at open, boot-time O(n), logged). No change to this control's decision logic. PARTIAL / UNVERIFIED unchanged."
       }
     },
     {
@@ -1270,9 +1616,9 @@
         "SAF-07"
       ],
       "review": {
-        "commit": "33205465691b0bf59dff1ad348ed810a5d20f24f",
-        "date": "2026-09-13",
-        "note": "Main.lean/Bridge.lean changed only in the empty-master delete's failure wording (unknown outcome); this control's mechanism is untouched. Refreshed for the referenced-file check."
+        "commit": "5e7a3df871fd667412b1623b3074b5b8849c2939",
+        "date": "2026-09-22",
+        "note": "SAF-10 (PR #144): Bridge.queryPodStats now returns at the END line (was a 3 s timeout per read); K8sReconciler.promoteMasterlessPartition gained an exclusion list for followers KNOWN unusable (Active-slave tiers only; the data-bearing last-resort tiers are unchanged) and the FSM logs a last-resort promotion of such a follower as NOT LOSS-FREE. Empty-master guard logic unchanged. PARTIAL / UNVERIFIED unchanged."
       }
     },
     {
@@ -1345,9 +1691,9 @@
         "SAF-08"
       ],
       "review": {
-        "commit": "33205465691b0bf59dff1ad348ed810a5d20f24f",
-        "date": "2026-09-13",
-        "note": "Main.lean/Bridge.lean changed only in the empty-master delete's failure wording (unknown outcome); this control's mechanism is untouched. Refreshed for the referenced-file check."
+        "commit": "5e7a3df871fd667412b1623b3074b5b8849c2939",
+        "date": "2026-09-22",
+        "note": "2026-09-27 working-tree review on 41db502: Memory settings do not alter existence/readiness streaks or lone-master retention. Smaller configured budgets need workload validation. New runtime evidence pending CI; verification unchanged. Previous review: SAF-10 (PR #144): Main.lean/K8sReconciler.lean/Bridge.lean changed for the eligibility probe, read withholding, candidate shaping and the faster stats read. Dead-node detection (detectDeadNodesPure, unhealthy streak) is unchanged; failover candidates are only re-ordered/excluded by follower evidence (shapePromotionCandidates, partitionMap only). PARTIAL / UNVERIFIED unchanged."
       }
     },
     {
@@ -1411,9 +1757,9 @@
       "runs": [],
       "tasks": [],
       "review": {
-        "commit": "cc30633dfad681828db477d299a42069c7ce4cea",
-        "date": "2026-09-13",
-        "note": "Referenced files changed for the review fixes; the drain guard is untouched. Refreshed for the referenced-file check."
+        "commit": "5e7a3df871fd667412b1623b3074b5b8849c2939",
+        "date": "2026-09-22",
+        "note": "SAF-10 (PR #144): K8sReconciler.lean changed; the drain guard itself is unchanged, but its candidate list is now shaped: a WAL-mode follower not proven current is excluded from PLANNED promotion, so the guard keeps the master (and reports) in more cases. Exercised by the continuous-replication suite's drain-based promotion test (proven follower promoted). PARTIAL / UNVERIFIED unchanged."
       }
     },
     {
@@ -1530,9 +1876,9 @@
       ],
       "tasks": [],
       "review": {
-        "commit": "da840c084fd5f5fc1b0f023b597e6378b8ee3582",
-        "date": "2026-09-16",
-        "note": "First execution evidence for this control, from the PR #143 CI matrix: the circuit-breaker E2E failed once (no trip in 480s) and passed on re-run at the same revision. Root cause read from the code (see residual_risks): the trip counts newly-dead nodes per tick, not the dead fraction, so it is timing-dependent; this predates the branch (52d409e, 2026-07-03) and the branch's K8sReconciler.lean changes do not touch dead detection or the breaker. The implementation stays PARTIAL and the control UNVERIFIED; one fail and one pass at the same revision is not verification. A follow-up task is proposed, not filed, pending the reviewer's decision on scope. Fourth run at c148c6c tripped normally (37/37); the finding stands — the trip is timing-dependent by construction, one green run does not remove it. PARTIAL / UNVERIFIED. Run 5 at 72e5cca did not trip again: 2 of 6 executions on this PR failed to trip within 480s (the other four tripped in 5-15s), all on an unchanged operator image — consistent with the per-tick counting finding, and enough to call the E2E's proof of SC-09 timing-dependent rather than a flake. PARTIAL / UNVERIFIED. Run 6 at f7d327f tripped after 20s: tally on this PR 5 tripped / 2 did not, unchanged operator image. PARTIAL / UNVERIFIED. Tally on this PR after run 9: 7 tripped / 2 did not, unchanged operator image. The finding is unchanged and is now filed as task SAF-11. PARTIAL / UNVERIFIED."
+        "commit": "5e7a3df871fd667412b1623b3074b5b8849c2939",
+        "date": "2026-09-22",
+        "note": "SAF-10 (PR #144): K8sReconciler.lean changed (FSM fields, candidate shaping, PodListResponse); the circuit-breaker decision and recovery refill are untouched apart from passing the unfit-follower exclusion into the refill. PARTIAL / UNVERIFIED unchanged."
       }
     },
     {
@@ -1595,9 +1941,9 @@
         "SAF-06"
       ],
       "review": {
-        "commit": "33205465691b0bf59dff1ad348ed810a5d20f24f",
-        "date": "2026-09-13",
-        "note": "Main.lean/Bridge.lean changed only in the empty-master delete's failure wording (unknown outcome); this control's mechanism is untouched. Refreshed for the referenced-file check."
+        "commit": "5e7a3df871fd667412b1623b3074b5b8849c2939",
+        "date": "2026-09-22",
+        "note": "2026-09-27 working-tree review on 41db502: No automatic restart is added when memory settings change. Proxy/Down restart decisions remain unchanged. New runtime evidence pending CI; verification unchanged. Previous review: SAF-10 (PR #144): Main.lean/K8sReconciler.lean/Bridge.lean changed (see EV-07); the stuck-Down recovery delete path is unchanged. PARTIAL / UNVERIFIED unchanged."
       }
     },
     {
@@ -1674,9 +2020,9 @@
       "runs": [],
       "tasks": [],
       "review": {
-        "commit": "33205465691b0bf59dff1ad348ed810a5d20f24f",
-        "date": "2026-09-13",
-        "note": "Main.lean/Bridge.lean changed only in the empty-master delete's failure wording (unknown outcome); this control's mechanism is untouched. Refreshed for the referenced-file check."
+        "commit": "5e7a3df871fd667412b1623b3074b5b8849c2939",
+        "date": "2026-09-22",
+        "note": "2026-09-27 working-tree review on 41db502: Main logs distinguish writing memory config from live application, which requires restart. Existing health and drain metrics are unchanged. New runtime evidence pending CI; verification unchanged. Previous review: SAF-10 (PR #144): Main.lean gained the continuous-replication eligibility probe and its change-only judgement log lines, and a per-tick probe timing line; existing failure signals unchanged. PARTIAL / UNVERIFIED unchanged."
       }
     },
     {
@@ -1702,7 +2048,8 @@
         "curr_items is coarse and the current probe selects one Active slave per master."
       ],
       "residual_risks": [
-        "Equal counts cannot establish key/value equality; content anti-entropy is absent."
+        "Equal counts cannot establish key/value equality; content anti-entropy is absent.",
+        "Until d9d1285 storage_rocksdb::open seeded curr_items from rocksdb.estimate-num-keys, which does not count keys recovered from the WAL: after a crash the count under-reported by the unflushed tail (SAF-10d run 9: 52 keys present, not counted), so a count-based comparison could read intact data as loss — or, on a small DB, an intact master as empty. Fixed by an exact scan at open; unit-pinned (test_reopen_counts_wal_only_keys_exactly) and observed in E2E run 10."
       ],
       "code": [
         {
@@ -1737,9 +2084,9 @@
         "SAF-10"
       ],
       "review": {
-        "commit": "33205465691b0bf59dff1ad348ed810a5d20f24f",
-        "date": "2026-09-13",
-        "note": "Main.lean/Bridge.lean changed only in the empty-master delete's failure wording (unknown outcome); this control's mechanism is untouched. Refreshed for the referenced-file check."
+        "commit": "d9d12852a24d8d0e998e1c9faf55202d8e0138c4",
+        "date": "2026-09-20",
+        "note": "2026-09-27 working-tree review on 41db502: Configuration tests assert admitted CR fields and rendered config, not data equality or live memory consumption; divergence comparison is unchanged. New runtime evidence pending CI; verification unchanged. Previous review: Observation-integrity finding from the SAF-10d crash scenario: the item count after a reopen was an estimate blind to WAL-only keys. Fixed in flared (exact scan at open, boot-time O(n), logged). No change to this control's decision logic. PARTIAL / UNVERIFIED unchanged."
       }
     },
     {
@@ -1755,18 +2102,22 @@
         "H5"
       ],
       "ucas": [
-        "UCA-02"
+        "UCA-02",
+        "UCA-27"
       ],
-      "implementation": "gap",
+      "implementation": "partial",
       "verification": "unverified",
       "scenarios": [
-        "Replica unavailable through WAL retention; asynchronous drop after client success; master failover."
+        "Replica unavailable through WAL retention; asynchronous drop after client success; master failover.",
+        "SAF-10 answers this control's subject on the RocksDB backend: the design states what a replica may claim (a contiguous applied position, never a connection or a past reconstruction) and how it catches up after an interruption (resume from the cursor; explicit needs_rebuild when the history is gone). Implementation and evidence live under EV-16..EV-20; acknowledged-write semantics are UNCHANGED — forwarding is still asynchronous and a write acknowledged to the client can still be lost if the master dies before the follower applies it."
       ],
       "assumptions": [
         "Current live replication is op-level forwarding; WAL is used for reconstruction/bootstrap only."
       ],
       "residual_risks": [
-        "No continuous WAL replication; adding master LSNs alone does not establish durable acknowledgement semantics."
+        "No continuous WAL replication; adding master LSNs alone does not establish durable acknowledgement semantics.",
+        "Replication is still asynchronous end to end: the master answers the client before the follower has applied, so continuous WAL replication removes the SILENT-gap failure, not the loss window on master death (design §5.3; the FSM logs an unproven promotion as NOT LOSS-FREE).",
+        "RESOURCE FLOOR, found by the scale evaluation (report 2026-09-21-saf10d-t6-t9-scale.txt): flared's RocksDB defaults budget ≈704 MB (512 MB block cache + 3 × 64 MB write buffers) before flared's own memory, so a 512Mi container is OOMKilled under write load (observed, exit 137 at 2m42s of a 2M-key load). The shipped chart's node default is limits.memory 1Gi and the FlareCluster CRD exposes no blockCacheSizeMb / writeBufferSizeMb / maxWriteBufferNumber, so the floor cannot be lowered through the chart. Not fixed in this PR."
       ],
       "code": [
         {
@@ -1801,9 +2152,9 @@
         "SAF-10"
       ],
       "review": {
-        "commit": "aaf0b8568b25b1be84c771fc4ea8b1118bee5ff7",
-        "date": "2026-09-10",
-        "note": "Initial static audit. Existing code and prospective checks are not archived execution evidence; no safety verification is claimed."
+        "commit": "c84c8c481fcc4160273e6aa928a45a189c036421",
+        "date": "2026-09-24",
+        "note": "2026-09-27 working-tree review on 41db502: Added optional CRD/Helm blockCacheSizeMb, writeBufferSizeMb and maxWriteBufferNumber, initial Helm ConfigMap seeding, and migration propagation. These are not an RSS cap and do not resolve async acknowledged-write loss. Runtime RSS/boot validation remains pending. New runtime evidence pending CI; verification unchanged. Previous review: Moved gap → partial: SAF-10 (branch safety/saf-10-wal-replication, PR #144) supplies the design and a working implementation of continuous WAL replication with catch-up semantics, carried by the new controls EV-16..EV-20; this entry keeps the durability claim itself, which is UNCHANGED (asynchronous acknowledgement). Two residuals added: the loss window on master death, and the RocksDB memory floor the scale evaluation surfaced. UNVERIFIED."
       }
     },
     {
@@ -1861,7 +2212,7 @@
       "review": {
         "commit": "aaf0b8568b25b1be84c771fc4ea8b1118bee5ff7",
         "date": "2026-09-10",
-        "note": "Initial static audit. Existing code and prospective checks are not archived execution evidence; no safety verification is claimed."
+        "note": "2026-09-27 working-tree review on 41db502: Helm seeds memory options before the first DB open to avoid starting with larger defaults; readiness and pod rollout policies are unchanged. New runtime evidence pending CI; verification unchanged. Previous review: Initial static audit. Existing code and prospective checks are not archived execution evidence; no safety verification is claimed."
       }
     },
     {
@@ -1916,9 +2267,634 @@
       "runs": [],
       "tasks": [],
       "review": {
-        "commit": "33205465691b0bf59dff1ad348ed810a5d20f24f",
-        "date": "2026-09-13",
-        "note": "Main.lean/Bridge.lean changed only in the empty-master delete's failure wording (unknown outcome); this control's mechanism is untouched. Refreshed for the referenced-file check."
+        "commit": "5e7a3df871fd667412b1623b3074b5b8849c2939",
+        "date": "2026-09-22",
+        "note": "2026-09-27 working-tree review on 41db502: The read-guard test inspects the replica-local map plus apply counters; monitoring/source attribution production logic is unchanged. New runtime evidence pending CI; verification unchanged. Previous review: SAF-10 (PR #144): Main.lean changed (eligibility probe, read withholding); the follower stats keys (repl_follow_*, repl_applied_lsn, repl_source_lsn*) are new role-aware observations but are not yet exported as metrics with a role label. GAP / UNVERIFIED unchanged."
+      }
+    },
+    {
+      "id": "EV-16",
+      "constraint": {
+        "id": "SC-16",
+        "text": "Continuous fetch resumes without external intervention, and a lost connection alone never triggers a rebuild."
+      },
+      "title": "Resume continuous fetch; a lost connection never rebuilds",
+      "hazards": [
+        "H3",
+        "H4"
+      ],
+      "ucas": [
+        "UCA-19",
+        "UCA-32"
+      ],
+      "implementation": "partial",
+      "verification": "unverified",
+      "scenarios": [
+        "Link cut and healed with no new writes: the follower reconnects with backoff and resumes from its applied position; the operator's ledger holds the counted drop under the follower's ownership and closes it by position; the follower's stats are unreadable to the operator while a drop is counted (Unknown holds, no demotion).",
+        "Repeated cuts, a mid-batch disconnect and an operator restart while cut are NOT yet staged."
+      ],
+      "assumptions": [
+        "flared owns delivery and reconnection; the operator only observes. Ownership is the mode (repl-follow-enabled), not the connection state."
+      ],
+      "residual_risks": [
+        "Failover: survivors rebuild rather than resume from a per-source cursor (design §9 decision 6).",
+        "Only one cut/heal cycle is staged; T5 (repeated cuts) and T8 (operator restart) remain.",
+        "The follower's backoff and poll interval are fixed configuration; no load measurement (T17 deferred).",
+        "Until 325a2f8 the follower handler RETURNED on needs_rebuild, giving its thread back to the pool while cluster still referenced it; the later stop_wal_follower shut down a pooled thread, which exited without leaving the pool, and the reconstruction handler that was to rebuild the node was triggered on that dead thread and never ran (found by the SAF-10d bulk-operation scenario, runs 3-4). Fixed: terminal outcomes park the thread until the controller's shutdown. E2E confirmation pending (run 5).",
+        "THROUGHPUT CEILING (scale run 5, 2M keys): the follower requests at most repl-follow-max-batches (256) batches per poll every repl-follow-poll-interval-usec (200 ms), so the stream cannot exceed ≈1,280 changes/s at the default settings — measured 650-1,270 changes/s while draining. Forwarding carried the data throughout (wal_applied=0, wal_skipped=2,008,010), but a trailing applied position withholds replica reads (lag bound), keeps a repair entry open and lengthens the post-cut catch-up. Whether the stream keeps up at a steady write rate is the separate continuous-replication-sustained evaluation; the defaults are not tuned in this PR.",
+        "Boot cost of the exact key scan at open: 0.48-0.98 us/key measured at 0.8M / 1.5M / 2.0M keys (854 / 1503 / 960 ms); a 15.8M-key DB extrapolates to ≈8-16 s of extra start-up. Extrapolation, not a measurement.",
+        "SUSTAINED-RATE RESULT (evaluation run 1): the stream stays exactly caught up (lag 0 every window) at 300 and 900 keys/s and FALLS BEHIND monotonically at 2000 keys/s (lag 35,265 → 294,615 over four minutes), draining in 442 s once the load stops. Content never diverges — forwarding carries every write — so this is a POSITION deficit: withheld replica reads, repair entries open longer, longer post-cut catch-up. The run does NOT establish disk behaviour: no memtable flush occurred (768k small records under a 64 MB write buffer), so the flat WAL and data-dir figures are an artefact of the window, and WAL retention for a TRAILING follower was never exercised."
+      ],
+      "code": [
+        {
+          "path": "src/lib/handler_wal_follower.cc",
+          "symbol": "handler_wal_follower::classify"
+        },
+        {
+          "path": "src/lib/handler_wal_follower.cc",
+          "symbol": "handler_wal_follower::run"
+        },
+        {
+          "path": "src/lib/cluster.cc",
+          "symbol": "cluster::_reconcile_wal_follower_locked"
+        },
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/ReplicaRepair.lean",
+          "symbol": "advanceOwned"
+        }
+      ],
+      "call_path": "cluster::reconstruct_node -> _reconcile_wal_follower_locked starts handler_wal_follower on an Active RocksDB slave -> run(): op_repl_sync_wal::run_client_follow per poll -> classify(client_result, transport_ok): disconnected -> backoff and reconnect from the cursor; only lsn_purged/epoch_mismatch/master_id_mismatch/lsn_ahead -> needs_rebuild -> stats follow record -> operator (Main ListPods probe / followReadingOf) -> ReplicaRepair.holdOwned / advanceOwned.",
+      "checks": [
+        {
+          "id": "CHECK-16-unit",
+          "kind": "scenario",
+          "procedure": "cutter test_follow_disconnect_is_not_a_rebuild, test_follow_only_unsatisfiable_positions_rebuild, test_follow_reasons_are_named, test_follow_record_carries_state_reason_and_observation_time; flare_unit checkFollowOwnership (disconnected/error still own; unreadable is Unknown; close only by position in the same epoch).",
+          "references": [
+            {
+              "path": "test/lib/test_storage_rocksdb.cc",
+              "symbol": "test_follow_disconnect_is_not_a_rebuild"
+            },
+            {
+              "path": "flare_operator/FlareOperator/UnitTests.lean",
+              "symbol": "checkFollowOwnership"
+            }
+          ]
+        },
+        {
+          "id": "CHECK-16",
+          "kind": "scenario",
+          "procedure": "E2E continuous-replication tests 2-6 (following; cut with create/update/delete; heal with no new writes resumes from the applied position with no rebuild and no pod recreation; ledger held and closed; stats fetch failure held as Unknown).",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/ContinuousReplication.lean",
+              "symbol": "suite"
+            }
+          ]
+        },
+        {
+          "id": "CHECK-16-limits",
+          "kind": "scenario",
+          "procedure": "E2E continuous-replication-limits (T9, bounded): the far-behind replica converges from the position in bounded polls (largest 1 s advance recorded), no reconstruction, master RSS growth within 128 MB. E2E continuous-replication-scale (evaluation, FLARE_E2E_SCALE_KEYS): follower convergence after a pipelined load, exact key scan duration at open after a kill -9 on a PVC, operator probe timing at that size. E2E continuous-replication-sustained (evaluation, FLARE_E2E_SUSTAINED): three steady write rates for four minutes each, sampling lag, both RSS figures, the master's WAL and data-dir bytes and the tombstone count every 30 s, then the drain after the load stops.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/ContinuousReplicationLimits.lean",
+              "symbol": "limitsSuite"
+            },
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/ContinuousReplicationLimits.lean",
+              "symbol": "scaleSuite"
+            }
+          ]
+        }
+      ],
+      "runs": [
+        {
+          "check": "CHECK-16-unit",
+          "commit": "c96246cfc82e910bc2e12c2571177ad4bf90888a",
+          "date": "2026-09-20",
+          "command": "cd /tmp/flare-b17/test && cutter --keep-opening-modules -v v -s <repo>/test -n \"/(apply_rule|follow|generation|order_label|restore|identified_change|truncate_advances|swap_in_snapshot|hard_reset|repl_tag|replication_identity|epoch|client_follow|generations_unavailable|sync_wal)/\" lib (+ -n \"/replication_tag/\")",
+          "result": "pass",
+          "report": "docs/reports/2026-09-20-saf10-rocksdb-unit-head.txt"
+        },
+        {
+          "check": "CHECK-16-unit",
+          "commit": "c96246cfc82e910bc2e12c2571177ad4bf90888a",
+          "date": "2026-09-20",
+          "command": "cd flare_operator && lake build flare_unit && .lake/build/bin/flare_unit",
+          "result": "pass",
+          "report": "docs/reports/2026-09-20-saf10c-flare-unit-head.txt"
+        },
+        {
+          "check": "CHECK-16",
+          "commit": "2379cff5cc28ca160e2076ad2d9c690b0c90d417",
+          "date": "2026-09-20",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter continuous-replication (run 8, local kind)",
+          "result": "pass",
+          "report": "docs/reports/2026-09-20-saf10d-minimal-e2e-continuous-replication.txt"
+        },
+        {
+          "check": "CHECK-16-limits",
+          "commit": "ecb1c40032d0e6a63acc413990bce68b2b8b37d0",
+          "date": "2026-09-21",
+          "command": "GitHub Actions e2e-tests.yaml (workflow_dispatch), legs replication (continuous-replication-purge, continuous-replication-limits) and continuous-replication",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/35570216917"
+        },
+        {
+          "check": "CHECK-16",
+          "commit": "ecb1c40032d0e6a63acc413990bce68b2b8b37d0",
+          "date": "2026-09-21",
+          "command": "GitHub Actions e2e-tests.yaml (workflow_dispatch), legs replication (continuous-replication-purge, continuous-replication-limits) and continuous-replication",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/35570216917"
+        },
+        {
+          "check": "CHECK-16-limits",
+          "commit": "58688c1593e8a5ea30f78e08cd51b7770ca10218",
+          "date": "2026-09-22",
+          "command": "FLARE_E2E_SCALE_KEYS=2000000 flare_e2e --filter continuous-replication-scale (local kind; node image from 3b7f38c; 2Gi/64MB block cache)",
+          "result": "pass",
+          "report": "docs/reports/2026-09-21-saf10d-t6-t9-scale.txt"
+        },
+        {
+          "check": "CHECK-16-limits",
+          "commit": "41ea98ea6be0063047a3cb8526afac2784b5456f",
+          "date": "2026-09-24",
+          "command": "FLARE_E2E_SUSTAINED=1 flare_e2e --filter continuous-replication-sustained (local kind; flared 3b7f38c, operator 2379cff)",
+          "result": "pass",
+          "report": "docs/reports/2026-09-21-saf10d-t6-t9-scale.txt"
+        }
+      ],
+      "tasks": [
+        "SAF-10"
+      ],
+      "review": {
+        "commit": "e2ca4c6821fa27d935c783aefd814afa3802ff52",
+        "date": "2026-09-24",
+        "note": "2026-09-27 working-tree review on 41db502: The selective fault now also blocks replica-initiated index traffic to preserve a stale map; WAL reconnect code is unchanged. New runtime evidence pending CI; verification unchanged. Previous review: CI 36228379804 at 0ed3193: selective routing assertion passed but scenario FAILED in cleanup; corrected cleanup to wait for balance 50 recovery before requesting 0, exposing rather than claiming to fix the SAF-09 retransmission residual. Revised E2E pending. 2026-09-26 follow-up on 3cb1d5a plus working-tree test: Selective WAL-request rejection now has an explicit disconnected-state assertion before GET; ordinary proxy reads remain allowed. No follower production change. Lean E2E build passed; runtime result pending CI, verification unchanged. Earlier review: Audit follow-up: inspected e2ca4c6 plus working-tree tests/docs. handler_wal_follower::run now retries successful MORE slices immediately even with zero newly applied changes; errors retain backoff. Production-used pure scheduling test passed in cutter. See docs/reports/2026-09-24-saf10-audit-followups.md; runs are not attributed to an uncommitted SHA, verification remains unverified. Prior assessment: Runs on this revision: regression suites replica-repair/operator-restart/failover/read-balance/prepare-evidence 30/30 pass; continuous-replication 12/12 pass (second consecutive full pass, run 8). Previous note: handler_wal_follower.cc / cluster.cc: the follower thread parks on needs_rebuild (and on the backend-without-WAL error) instead of returning; stop_wal_follower refuses to send a shutdown request to a thread not running a handler. Found because the E2E rebuild after flush_all never started (reconstruction_started unchanged, follower idle 'stopped'). Unit tests (follow/apply, 24) pass on the fix; the E2E rerun is pending. PARTIAL / UNVERIFIED."
+      }
+    },
+    {
+      "id": "EV-17",
+      "constraint": {
+        "id": "SC-17",
+        "text": "The applied position is contiguous and crash-atomic, and no other path may advance it."
+      },
+      "title": "Contiguous, crash-atomic applied position",
+      "hazards": [
+        "H2",
+        "H3"
+      ],
+      "ucas": [
+        "UCA-20",
+        "UCA-23"
+      ],
+      "implementation": "implemented",
+      "verification": "unverified",
+      "scenarios": [
+        "A forwarded change applied through the rule leaves the cursor unchanged; a WAL batch whose base is beyond cursor+1 is refused; an empty batch does not move the position; a metadata-only batch advances it; the cursor Put is in the same WriteBatch as the changes, metadata and tombstones."
+      ],
+      "assumptions": [
+        "RocksDB WriteBatch atomicity holds across the data and metadata column families."
+      ],
+      "residual_risks": [
+        "The E2E crash lands at whatever boundary the kill hits (~300 ms after the heal); it is not steered to a specific mid-batch point. Recovery is observed through the operator's rejoin (Slave/Prepare, incremental WAL reconstruction from the cursor, activation, follower resume), so the design's 'plain restart resumes with no rebuild' (T16) holds for the data path (no truncate, no dump) but a reconstruction record is produced."
+      ],
+      "code": [
+        {
+          "path": "src/lib/storage_rocksdb.cc",
+          "symbol": "storage_rocksdb::apply_wal_batch"
+        },
+        {
+          "path": "src/lib/storage_rocksdb.cc",
+          "symbol": "storage_rocksdb::apply_forwarded_change"
+        }
+      ],
+      "call_path": "op_repl_sync_wal client (follow) -> storage_rocksdb::apply_wal_batch(epoch, incarnation, base_seq, batch): contiguity check base_seq <= cursor+1 -> decode -> per-change decision under the exclusive section -> one WriteBatch with the cursor Put appended -> stats follow_note_progress after the write. apply_forwarded_change never touches the cursor.",
+      "checks": [
+        {
+          "id": "CHECK-17-unit",
+          "kind": "scenario",
+          "procedure": "cutter test_apply_rule_forwarded_change_does_not_advance_cursor, test_apply_rule_refuses_gap_in_the_stream, test_apply_rule_empty_batch_does_not_move_position, test_apply_rule_metadata_only_batch_advances_position, test_wal_get_repl_last_lsn_tracks_applied_batches.",
+          "references": [
+            {
+              "path": "test/lib/test_storage_rocksdb.cc",
+              "symbol": "test_apply_rule_refuses_gap_in_the_stream"
+            }
+          ]
+        },
+        {
+          "id": "CHECK-17",
+          "kind": "scenario",
+          "procedure": "E2E continuous-replication test 11 (T4): with a backlog of created/updated/deleted keys pending after a heal, flared on the replica is killed -9 from the kind node; the container restarts on its PVC (pod UID unchanged, restartCount +1); the node comes back following at the master's position with equal item counts, updated values, deleted keys absent, and no full dump (rocksdb_wal_fallback_to_dump = 0 in the new process). The restart goes through the operator's rejoin and an incremental WAL reconstruction from the cursor, not a bare in-process resume.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/ContinuousReplication.lean",
+              "symbol": "suite"
+            }
+          ]
+        }
+      ],
+      "runs": [
+        {
+          "check": "CHECK-17-unit",
+          "commit": "c96246cfc82e910bc2e12c2571177ad4bf90888a",
+          "date": "2026-09-20",
+          "command": "cd /tmp/flare-b17/test && cutter --keep-opening-modules -v v -s <repo>/test -n \"/(apply_rule|follow|generation|order_label|restore|identified_change|truncate_advances|swap_in_snapshot|hard_reset|repl_tag|replication_identity|epoch|client_follow|generations_unavailable|sync_wal)/\" lib (+ -n \"/replication_tag/\")",
+          "result": "pass",
+          "report": "docs/reports/2026-09-20-saf10-rocksdb-unit-head.txt"
+        },
+        {
+          "check": "CHECK-17",
+          "commit": "d9d12852a24d8d0e998e1c9faf55202d8e0138c4",
+          "date": "2026-09-20",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter continuous-replication (run 10, local kind)",
+          "result": "pass",
+          "report": "docs/reports/2026-09-20-saf10d-minimal-e2e-continuous-replication.txt"
+        },
+        {
+          "check": "CHECK-17",
+          "commit": "ecb1c40032d0e6a63acc413990bce68b2b8b37d0",
+          "date": "2026-09-21",
+          "command": "GitHub Actions e2e-tests.yaml (workflow_dispatch), legs replication (continuous-replication-purge, continuous-replication-limits) and continuous-replication",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/35570216917"
+        }
+      ],
+      "tasks": [
+        "SAF-10"
+      ],
+      "review": {
+        "commit": "e2ca4c6821fa27d935c783aefd814afa3802ff52",
+        "date": "2026-09-24",
+        "note": "2026-09-27 working-tree review on 41db502: No apply/cursor production change. The read-guard test still refuses success if WAL cursor or forwarded-apply counters advance. New runtime evidence pending CI; verification unchanged. Previous review: CI 36228379804 at 0ed3193: selective routing assertion passed but scenario FAILED in cleanup; corrected cleanup to wait for balance 50 recovery before requesting 0, exposing rather than claiming to fix the SAF-09 retransmission residual. Revised E2E pending. 2026-09-26 follow-up on 3cb1d5a plus working-tree test: The added test samples the applied cursor to exclude WAL-delivered data as the cause of a successful read. No new crash-atomicity evidence or production changes. Lean E2E build passed; runtime result pending CI, verification unchanged. Earlier review: Audit follow-up: inspected e2ca4c6 plus working-tree tests/docs. Only shared test sources changed; atomic data/metadata/cursor write path was not modified. No new crash-consistency claim. See docs/reports/2026-09-24-saf10-audit-followups.md; runs are not attributed to an uncommitted SHA, verification remains unverified. Prior assessment: T4 staged end to end (run 9 failed only on the item COUNT, which exposed the estimate-seeded curr_items after a reopen — fixed in this revision; run 10 passes 13/13). The applied position was consistent with the data in both runs. PARTIAL→IMPLEMENTED unchanged as 'implemented'; UNVERIFIED."
+      }
+    },
+    {
+      "id": "EV-18",
+      "constraint": {
+        "id": "SC-18",
+        "text": "History loss is an explicit rebuild state."
+      },
+      "title": "History loss is an explicit rebuild state",
+      "hazards": [
+        "H2",
+        "H3",
+        "H5"
+      ],
+      "ucas": [
+        "UCA-24",
+        "UCA-25",
+        "UCA-33"
+      ],
+      "implementation": "implemented",
+      "verification": "unverified",
+      "scenarios": [
+        "The source answers lsn_purged, epoch_mismatch, master_id_mismatch or the cursor is ahead of the source: the follower declares needs_rebuild with the reason and stops; the operator turns the declaration into a repair-ledger request (no drop counter needed) and runs demote -> hold -> reseat -> reconstruction; an incomplete snapshot restore (sentinel present) refuses to open; a copy in needs_rebuild/initial_sync is unfit for promotion."
+      ],
+      "assumptions": [
+        "flared reports the follower state truthfully in stats; the operator can read it (an unreadable state is Unknown, not synchronised)."
+      ],
+      "residual_risks": [
+        "A follower that declares needs_rebuild in the window between a completed reconstruction and its follower restart could be requested twice (bounded churn, not loss).",
+        "Until 325a2f8 the follower handler RETURNED on needs_rebuild, giving its thread back to the pool while cluster still referenced it; the later stop_wal_follower shut down a pooled thread, which exited without leaving the pool, and the reconstruction handler that was to rebuild the node was triggered on that dead thread and never ran (found by the SAF-10d bulk-operation scenario, runs 3-4). Fixed: terminal outcomes park the thread until the controller's shutdown. E2E confirmation pending (run 5).",
+        "After a source-epoch change the master's forwarded ops are refused by the stale-session replica, retried and counted as drops, so in the E2E the DROP path requested the rebuild before the follower-declared request could (runs 5-6: entry with drops=2). The two paths race and converge on the same rebuild; the follower-declared path alone (no drop counted, e.g. a purge with no write traffic) is unit-pinned, not staged end to end.",
+        "RocksDB does not always report a purged position as NotFound: with the requested WAL file gone, GetUpdatesSince serves from the oldest surviving file. Before 3b7f38c the follower refused that first batch as a contiguity violation mapped to a TRANSIENT apply error and retried it forever (T6 E2E: state=error/apply_error, applied position frozen while forwarding delivered). Fixed: the server answers lsn_purged when the first served batch is beyond lsn+1, and the client maps a gap refusal to lsn_purged → needs_rebuild. E2E confirmation (T6 purge suite) pending.",
+        "The two routes to a rebuild request (a counted drop and the follower's own needs_rebuild declaration) have each been OBSERVED to win in E2E and both orders are pinned sequentially by flare_unit, but true concurrency is NOT verified: nothing exercises them racing within one reconcile pass against the real persist path."
+      ],
+      "code": [
+        {
+          "path": "src/lib/handler_wal_follower.cc",
+          "symbol": "handler_wal_follower::classify"
+        },
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/FollowEvidence.lean",
+          "symbol": "classify"
+        },
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/ReplicaRepair.lean",
+          "symbol": "requestRebuild"
+        },
+        {
+          "path": "src/lib/storage_rocksdb.cc",
+          "symbol": "storage_rocksdb::_discard_incomplete_restore"
+        }
+      ],
+      "call_path": "op_repl_sync_wal server replies lsn_purged / epoch_mismatch / generations_unavailable -> client_result -> handler_wal_follower::classify -> needs_rebuild + reason in the follow record -> operator ListPods probe -> FollowEvidence.classify.needsRebuild -> Main: ReplicaRepair.requestRebuild for the node's partition -> plan -> demote to Proxy -> reseat -> flared reconstruction (snapshot + WAL) -> swap_in_snapshot mints an incarnation, inherits the source epoch -> follower restarts.",
+      "checks": [
+        {
+          "id": "CHECK-18-unit",
+          "kind": "scenario",
+          "procedure": "cutter test_follow_only_unsatisfiable_positions_rebuild, test_restore_sentinel_discards_half_restored_copy, test_restore_sentinel_unremovable_refuses_open, test_apply_rule_refuses_foreign_session_and_stale_incarnation, test_swap_in_snapshot_refuses_checkpoint_without_source_epoch; flare_unit: classify reports needs_rebuild with the reason; requestRebuild is idempotent and plan demotes it; unfitReason for needs_rebuild/initial_sync.",
+          "references": [
+            {
+              "path": "test/lib/test_storage_rocksdb.cc",
+              "symbol": "test_follow_only_unsatisfiable_positions_rebuild"
+            },
+            {
+              "path": "flare_operator/FlareOperator/UnitTests.lean",
+              "symbol": "checkFollowShaping"
+            }
+          ]
+        },
+        {
+          "id": "CHECK-18",
+          "kind": "scenario",
+          "procedure": "E2E continuous-replication test 7: flush_all on the master advances the source epoch; the follower declares needs_rebuild (epoch_mismatch); the operator logs 'REPLICA REPAIR requested by the follower'; the replica is reconstructed IN PLACE (reconstruction_started moves, pod UID unchanged) and comes back following the new epoch; new writes arrive; the ledger empties.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/ContinuousReplication.lean",
+              "symbol": "suite"
+            }
+          ]
+        },
+        {
+          "id": "CHECK-18-race",
+          "kind": "scenario",
+          "procedure": "flare_unit: the two routes to a rebuild request (a counted drop and the follower's needs_rebuild declaration) in either order, and a drop on an OWNED entry plus the declaration in one pass, yield exactly one un-owned entry for the node and one demotion.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/UnitTests.lean",
+              "symbol": "checkFollowShaping"
+            }
+          ]
+        },
+        {
+          "id": "CHECK-18-purge",
+          "kind": "scenario",
+          "procedure": "E2E continuous-replication-purge (T6): with a 1 MB write buffer, 1 s WAL TTL and 1 MB WAL cap, ~4 MB is written while the replica is cut; on healing the follower must declare needs_rebuild with reason lsn_purged and never report following/synchronised; the operator files a repair request and the node is rebuilt in place and follows again with equal items.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/ContinuousReplicationLimits.lean",
+              "symbol": "purgeSuite"
+            }
+          ]
+        }
+      ],
+      "runs": [
+        {
+          "check": "CHECK-18-unit",
+          "commit": "c96246cfc82e910bc2e12c2571177ad4bf90888a",
+          "date": "2026-09-20",
+          "command": "cd /tmp/flare-b17/test && cutter --keep-opening-modules -v v -s <repo>/test -n \"/(apply_rule|follow|generation|order_label|restore|identified_change|truncate_advances|swap_in_snapshot|hard_reset|repl_tag|replication_identity|epoch|client_follow|generations_unavailable|sync_wal)/\" lib (+ -n \"/replication_tag/\")",
+          "result": "pass",
+          "report": "docs/reports/2026-09-20-saf10-rocksdb-unit-head.txt"
+        },
+        {
+          "check": "CHECK-18-unit",
+          "commit": "c96246cfc82e910bc2e12c2571177ad4bf90888a",
+          "date": "2026-09-20",
+          "command": "cd flare_operator && lake build flare_unit && .lake/build/bin/flare_unit",
+          "result": "pass",
+          "report": "docs/reports/2026-09-20-saf10c-flare-unit-head.txt"
+        },
+        {
+          "check": "CHECK-18",
+          "commit": "2379cff5cc28ca160e2076ad2d9c690b0c90d417",
+          "date": "2026-09-20",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter continuous-replication (run 8, local kind)",
+          "result": "pass",
+          "report": "docs/reports/2026-09-20-saf10d-minimal-e2e-continuous-replication.txt"
+        },
+        {
+          "check": "CHECK-18-race",
+          "commit": "38b34b944055f68b71f0ab16a5dbf37ee5b6a26f",
+          "date": "2026-09-21",
+          "command": "cd flare_operator && lake build flare_unit && .lake/build/bin/flare_unit",
+          "result": "pass",
+          "report": "docs/reports/2026-09-21-saf10c-flare-unit-race.txt"
+        },
+        {
+          "check": "CHECK-18-unit",
+          "commit": "3b7f38ce8ff230df5973c70c61d2f146155e92bd",
+          "date": "2026-09-21",
+          "command": "cutter (reopen_counts|follow|apply_rule|generation|identified_change|snapshot|restore) on /tmp/flare-b17",
+          "result": "pass",
+          "report": "docs/reports/2026-09-21-saf10-rocksdb-unit-gap.txt"
+        },
+        {
+          "check": "CHECK-18-purge",
+          "commit": "ecb1c40032d0e6a63acc413990bce68b2b8b37d0",
+          "date": "2026-09-21",
+          "command": "GitHub Actions e2e-tests.yaml (workflow_dispatch), legs replication (continuous-replication-purge, continuous-replication-limits) and continuous-replication",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/35570216917"
+        },
+        {
+          "check": "CHECK-18",
+          "commit": "ecb1c40032d0e6a63acc413990bce68b2b8b37d0",
+          "date": "2026-09-21",
+          "command": "GitHub Actions e2e-tests.yaml (workflow_dispatch), legs replication (continuous-replication-purge, continuous-replication-limits) and continuous-replication",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/35570216917"
+        },
+        {
+          "check": "CHECK-18-purge",
+          "commit": "3b7f38ce8ff230df5973c70c61d2f146155e92bd",
+          "date": "2026-09-22",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter continuous-replication-purge (local kind; node image from this commit, suite 58688c1)",
+          "result": "pass",
+          "report": "docs/reports/2026-09-21-saf10d-t6-t9-scale.txt"
+        }
+      ],
+      "tasks": [
+        "SAF-10"
+      ],
+      "review": {
+        "commit": "e2ca4c6821fa27d935c783aefd814afa3802ff52",
+        "date": "2026-09-24",
+        "note": "2026-09-27 working-tree review on 41db502: History-loss classification and repair ownership are unchanged; selective-fault cleanup removes the added operator isolation before recovery. New runtime evidence pending CI; verification unchanged. Previous review: CI 36228379804 at 0ed3193: selective routing assertion passed but scenario FAILED in cleanup; corrected cleanup to wait for balance 50 recovery before requesting 0, exposing rather than claiming to fix the SAF-09 retransmission residual. Revised E2E pending. 2026-09-26 follow-up on 3cb1d5a plus working-tree test: The new selective-fault test keeps the replica role/map intact and restores all firewall rules in finally. No changes to repair ownership logic. Lean E2E build passed; runtime result pending CI, verification unchanged. Earlier review: Audit follow-up: inspected e2ca4c6 plus working-tree tests/docs. Unknown-at-startup read exclusion and the local read guard do not demote the replica, preserving catch-up ownership. needs_rebuild handling is unchanged; amended E2E unexecuted. See docs/reports/2026-09-24-saf10-audit-followups.md; runs are not attributed to an uncommitted SHA, verification remains unverified. Prior assessment: Served-gap handling: op_repl_sync_wal server returns lsn_purged when the oldest served batch is beyond the requested position; storage_rocksdb exposes apply_refused_gap; the follow client maps it to client_lsn_purged (needs_rebuild). Unit: 31 tests / 516 assertions pass incl. the gap test pinning the outcome. The T6 purge suite rerun on this revision is pending; the earlier T6 failures (runs 1-3, CI runs 1-2) were this defect plus a harness escape bug. PARTIAL / UNVERIFIED."
+      }
+    },
+    {
+      "id": "EV-19",
+      "constraint": {
+        "id": "SC-19",
+        "text": "Both delivery paths apply through one comparison rule; no path may reorder, duplicate or resurrect, and every path that can change a key participates in the label capture."
+      },
+      "title": "One comparison rule for both delivery paths",
+      "hazards": [
+        "H2",
+        "H3",
+        "H6"
+      ],
+      "ucas": [
+        "UCA-21",
+        "UCA-22",
+        "UCA-24",
+        "UCA-29",
+        "UCA-30",
+        "UCA-31"
+      ],
+      "implementation": "partial",
+      "verification": "unverified",
+      "scenarios": [
+        "Forwarded newer value then older WAL delivery leaves the newer value; the same change by both paths is applied once; a foreign session or stale incarnation is refused; a snapshot restore clears inherited metadata; the order label is captured under the slot lock for set/remove/incr; truncate/flush_all advance the source epoch instead of labelling; concurrent forwarded and WAL delivery decide under one lock; intra-batch repetition decides against the in-batch overlay; a batch with an unsupported operation or a count mismatch is refused."
+      ],
+      "assumptions": [
+        "Every per-key write path in flared goes through set/remove (incr via set) so the label capture is complete; any new path must be added to the capture or switch the epoch."
+      ],
+      "residual_risks": [
+        "Lock-hold time, forwarded-write wait and writer starvation under a far-behind replica are NOT measured (T17 deferred by agreement).",
+        "E2E coexistence scenarios T10-T13 are pinned by unit tests only; the minimal E2E shows forwarding-first then WAL re-delivery skipped."
+      ],
+      "code": [
+        {
+          "path": "src/lib/storage_rocksdb.cc",
+          "symbol": "storage_rocksdb::_decide_change"
+        },
+        {
+          "path": "src/lib/storage_rocksdb.cc",
+          "symbol": "storage_rocksdb::apply_identified_change"
+        },
+        {
+          "path": "src/lib/storage_rocksdb.cc",
+          "symbol": "storage_rocksdb::truncate"
+        },
+        {
+          "path": "src/lib/storage_rocksdb.cc",
+          "symbol": "storage_rocksdb::swap_in_snapshot"
+        },
+        {
+          "path": "src/lib/queue_proxy_write.cc",
+          "symbol": "queue_proxy_write::run"
+        },
+        {
+          "path": "src/lib/storage.cc",
+          "symbol": "entry::parse"
+        }
+      ],
+      "call_path": "Master: set/remove capture entry.seq_label inside the slot lock -> queue_proxy_write stamps rl=<epoch>/<label> when repl-identity-forward is on -> op_set/op_delete send it. Replica: entry::parse reads rl= -> storage::apply_identified_change -> storage_rocksdb::apply_forwarded_change (shared apply lock + slot lock) -> _decide_change (session, cursor, per-key label) -> WriteBatch. WAL path: apply_wal_batch (exclusive) -> same _decide_change with in-batch overlays.",
+      "checks": [
+        {
+          "id": "CHECK-19-unit",
+          "kind": "scenario",
+          "procedure": "cutter test_apply_rule_forwarded_newer_survives_older_wal, test_apply_rule_delete_then_older_put_does_not_resurrect, test_apply_rule_refuses_foreign_session_and_stale_incarnation, test_apply_rule_incarnation_checked_against_the_current_copy, test_apply_rule_restore_clears_inherited_metadata, test_apply_rule_concurrent_forwarded_and_wal, test_apply_rule_intra_batch_same_key_twice, test_apply_rule_refuses_undecodable_batch, test_apply_rule_curr_items_matches_real_key_count, test_order_label_strictly_monotonic_per_key, test_truncate_advances_source_epoch, test_generation_*, test_identified_change_*; test_op_set replication-tag parse tests.",
+          "references": [
+            {
+              "path": "test/lib/test_storage_rocksdb.cc",
+              "symbol": "test_apply_rule_forwarded_newer_survives_older_wal"
+            },
+            {
+              "path": "test/lib/test_op_set.cc",
+              "symbol": "test_parse_text_server_parameters_replication_tag"
+            }
+          ]
+        }
+      ],
+      "runs": [
+        {
+          "check": "CHECK-19-unit",
+          "commit": "c96246cfc82e910bc2e12c2571177ad4bf90888a",
+          "date": "2026-09-20",
+          "command": "cd /tmp/flare-b17/test && cutter --keep-opening-modules -v v -s <repo>/test -n \"/(apply_rule|follow|generation|order_label|restore|identified_change|truncate_advances|swap_in_snapshot|hard_reset|repl_tag|replication_identity|epoch|client_follow|generations_unavailable|sync_wal)/\" lib (+ -n \"/replication_tag/\")",
+          "result": "pass",
+          "report": "docs/reports/2026-09-20-saf10-rocksdb-unit-head.txt"
+        },
+        {
+          "check": "CHECK-19-unit",
+          "commit": "d9d12852a24d8d0e998e1c9faf55202d8e0138c4",
+          "date": "2026-09-20",
+          "command": "cutter (reopen_counts|follow|apply_rule|generation|identified_change|snapshot|restore) on /tmp/flare-b17",
+          "result": "pass",
+          "report": "docs/reports/2026-09-20-saf10-rocksdb-unit-count-seed.txt"
+        }
+      ],
+      "tasks": [
+        "SAF-10"
+      ],
+      "review": {
+        "commit": "e2ca4c6821fa27d935c783aefd814afa3802ff52",
+        "date": "2026-09-24",
+        "note": "Audit follow-up: inspected e2ca4c6 plus working-tree tests/docs. Shared test sources extended; ordering, generation and apply-rule production code unchanged. No new replay/deduplication claim. See docs/reports/2026-09-24-saf10-audit-followups.md; runs are not attributed to an uncommitted SHA, verification remains unverified. Prior assessment: Runs on this revision: regression suites replica-repair/operator-restart/failover/read-balance/prepare-evidence 30/30 pass; continuous-replication 12/12 pass (second consecutive full pass, run 8). Previous note: New control from the SAF-10 design (§6); implementation on branch safety/saf-10-wal-replication. Unit evidence to be attached from the RocksDB cutter run on this revision and the flare_unit run; E2E from the continuous-replication suite. Author-run only; nothing verified."
+      }
+    },
+    {
+      "id": "EV-20",
+      "constraint": {
+        "id": "SC-20",
+        "text": "Delete history is discarded only when the applied position makes an older delivery impossible, and the decision is serialized with the write."
+      },
+      "title": "Delete history discarded only by applied position, decided under the write lock",
+      "hazards": [
+        "H2",
+        "H3"
+      ],
+      "ucas": [
+        "UCA-22",
+        "UCA-28"
+      ],
+      "implementation": "implemented",
+      "verification": "unverified",
+      "scenarios": [
+        "A tombstone is collected only once the applied cursor has passed the delete's label; an old put arriving afterwards is refused by the cursor test, not by the (now absent) tombstone; collection runs inside the applier's exclusive window, chunked; a forwarded change stalled across a collection is refused when released."
+      ],
+      "assumptions": [
+        "No wall-clock bound is used anywhere (design §9 decision 2)."
+      ],
+      "residual_risks": [
+        "The tombstone-space bound and its rebuild policy (design §9 decision 3) are not staged (T9 pending)."
+      ],
+      "code": [
+        {
+          "path": "src/lib/storage_rocksdb.cc",
+          "symbol": "storage_rocksdb::_collect_tombstones_locked"
+        },
+        {
+          "path": "src/lib/storage_rocksdb.cc",
+          "symbol": "storage_rocksdb::_decide_change"
+        }
+      ],
+      "call_path": "apply_wal_batch (exclusive section) -> after the batch is written, _collect_tombstones_locked drops metadata rows with deleted=1 and label <= applied cursor, in chunks -> later deliveries at or below the cursor are refused by _decide_change before any per-key lookup.",
+      "checks": [
+        {
+          "id": "CHECK-20-unit",
+          "kind": "scenario",
+          "procedure": "cutter test_apply_rule_old_put_refused_after_tombstone_collected, test_apply_rule_delete_then_older_put_does_not_resurrect, test_apply_rule_concurrent_forwarded_and_wal (stalled forwarded change across a collection), test_apply_rule_intra_batch_same_key_twice.",
+          "references": [
+            {
+              "path": "test/lib/test_storage_rocksdb.cc",
+              "symbol": "test_apply_rule_old_put_refused_after_tombstone_collected"
+            }
+          ]
+        },
+        {
+          "id": "CHECK-20",
+          "kind": "scenario",
+          "procedure": "E2E continuous-replication-limits (T9, bounded): a 15 MB backlog with 100 deletes accumulated while cut is drained after healing without a reconstruction; the replica's live tombstone count is sampled while draining and must return to 0 once the applied position passed the deletes (no wall clock); deleted keys are absent on the replica; the master's RSS growth is measured (bound 128 MB).",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/ContinuousReplicationLimits.lean",
+              "symbol": "limitsSuite"
+            }
+          ]
+        }
+      ],
+      "runs": [
+        {
+          "check": "CHECK-20-unit",
+          "commit": "c96246cfc82e910bc2e12c2571177ad4bf90888a",
+          "date": "2026-09-20",
+          "command": "cd /tmp/flare-b17/test && cutter --keep-opening-modules -v v -s <repo>/test -n \"/(apply_rule|follow|generation|order_label|restore|identified_change|truncate_advances|swap_in_snapshot|hard_reset|repl_tag|replication_identity|epoch|client_follow|generations_unavailable|sync_wal)/\" lib (+ -n \"/replication_tag/\")",
+          "result": "pass",
+          "report": "docs/reports/2026-09-20-saf10-rocksdb-unit-head.txt"
+        },
+        {
+          "check": "CHECK-20",
+          "commit": "ecb1c40032d0e6a63acc413990bce68b2b8b37d0",
+          "date": "2026-09-21",
+          "command": "GitHub Actions e2e-tests.yaml (workflow_dispatch), legs replication (continuous-replication-purge, continuous-replication-limits) and continuous-replication",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/35570216917"
+        }
+      ],
+      "tasks": [
+        "SAF-10"
+      ],
+      "review": {
+        "commit": "e2ca4c6821fa27d935c783aefd814afa3802ff52",
+        "date": "2026-09-24",
+        "note": "Audit follow-up: inspected e2ca4c6 plus working-tree tests/docs. Shared test sources extended; positional tombstone GC and its locking are unchanged. No new GC concurrency evidence. See docs/reports/2026-09-24-saf10-audit-followups.md; runs are not attributed to an uncommitted SHA, verification remains unverified. Prior assessment: Runs on this revision: regression suites replica-repair/operator-restart/failover/read-balance/prepare-evidence 30/30 pass; continuous-replication 12/12 pass (second consecutive full pass, run 8). Previous note: New control from the SAF-10 design (§6); implementation on branch safety/saf-10-wal-replication. Unit evidence to be attached from the RocksDB cutter run on this revision and the flare_unit run; E2E from the continuous-replication suite. Author-run only; nothing verified."
       }
     }
   ]

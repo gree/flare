@@ -27,6 +27,9 @@
 #include "common_storage_tests.h"
 #include <app.h>
 #include <storage_rocksdb.h>
+#include <handler_wal_follower.h>
+#include <op_repl_sync_wal.h>
+#include "mock_storage.h"
 
 #include <limits>
 #include <sys/stat.h>
@@ -210,6 +213,28 @@ void test_wal_get_latest_sequence_number_monotonic() {
 	cut_assert_operator(s2, >, s1);
 
 	drop_rocksdb(m, wal_master_dir);
+}
+
+/*
+ *	Reopen after writes that were never flushed to an SST: the counter must
+ *	be exact. The old seed read rocksdb.estimate-num-keys, which does not see
+ *	WAL-only keys — the SAF-10d crash test found curr_items short by exactly
+ *	the unflushed tail after a kill -9.
+ */
+void test_reopen_counts_wal_only_keys_exactly() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	for (int i = 0; i < 57; i++) {
+		std::ostringstream k; k << "k" << i;
+		cut_assert_equal_int(0, storage_set_string(s, k.str(), "v"));
+	}
+	cut_assert_equal_int(57, static_cast<int>(s->count()));
+	drop_rocksdb_noremove(s);
+
+	// Nothing was flushed: the 57 keys exist only in the WAL. The reopen
+	// recovers them and must COUNT them.
+	s = make_rocksdb(wal_master_dir);
+	cut_assert_equal_int(57, static_cast<int>(s->count()));
+	drop_rocksdb(s, wal_master_dir);
 }
 
 void test_wal_get_updates_since_empty() {
@@ -1412,6 +1437,979 @@ void test_verify_integrity_clean() {
 	cut_assert_false(s->is_corrupted());
 	cut_assert_equal_int(0, static_cast<int>(s->get_corruption_detected()));
 	drop_rocksdb(s, wal_master_dir);
+}
+
+// ---------------------------------------------------------------------------
+// SAF-10b stage 1: generation identities and the all-or-nothing restore.
+//
+// These pin the four defects found in review of the first cut: a per-node
+// counter cannot distinguish two histories (sequential promotion), a repeated
+// reset returns to the same value, a failed persist left the node advertising
+// an unchanged identity over changed data, and a failed cleanup at a restore
+// boundary could still expose a half-restored copy.
+// ---------------------------------------------------------------------------
+
+namespace {
+	// The sentinel swap_in_snapshot writes beside the DB directory.
+	string restore_sentinel(const char* dir) {
+		return string(dir) + "/.flare_restore_pending";
+	}
+}
+
+// Two SEPARATE copies, each promoted in turn, must never advertise the same
+// source epoch: their sequence spaces are unrelated, and a follower comparing
+// numbers across them would apply one history's positions against another's.
+void test_generation_epoch_unique_across_sequential_promotions() {
+	storage_rocksdb* a = make_rocksdb(wal_master_dir);
+	storage_rocksdb* b = make_rocksdb(wal_slave_dir);
+
+	const string a0 = a->get_source_epoch();
+	const string b0 = b->get_source_epoch();
+	cut_assert_operator(a0.size(), >, static_cast<size_t>(0));
+	cut_assert_operator(b0.size(), >, static_cast<size_t>(0));
+	cut_assert_not_equal_string(a0.c_str(), b0.c_str());
+
+	// Promote A, then promote B — the same number of advances on each.
+	cut_assert_equal_int(0, a->advance_source_epoch());
+	cut_assert_equal_int(0, b->advance_source_epoch());
+	const string a1 = a->get_source_epoch();
+	const string b1 = b->get_source_epoch();
+	cut_assert_not_equal_string(a1.c_str(), a0.c_str());
+	cut_assert_not_equal_string(b1.c_str(), b0.c_str());
+	// The point of the test: equal advance counts, different identities.
+	cut_assert_not_equal_string(a1.c_str(), b1.c_str());
+
+	drop_rocksdb(a, wal_master_dir);
+	drop_rocksdb(b, wal_slave_dir);
+}
+
+// A repeated hard reset must mint a NEW incarnation every time. With a
+// counter, each reset re-initialised an empty DB and produced the same value,
+// so a delivery issued against the previous copy would be accepted.
+void test_generation_incarnation_unique_across_repeated_hard_reset() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	const string i0 = s->get_incarnation();
+	const string e0 = s->get_source_epoch();
+	cut_assert_operator(i0.size(), >, static_cast<size_t>(0));
+
+	cut_assert_equal_int(0, s->hard_reset());
+	const string i1 = s->get_incarnation();
+	const string e1 = s->get_source_epoch();
+	cut_assert_not_equal_string(i1.c_str(), i0.c_str());
+	cut_assert_not_equal_string(e1.c_str(), e0.c_str());   // its history is gone too
+
+	cut_assert_equal_int(0, s->hard_reset());
+	const string i2 = s->get_incarnation();
+	cut_assert_not_equal_string(i2.c_str(), i1.c_str());
+	cut_assert_not_equal_string(i2.c_str(), i0.c_str());
+
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// Both identities survive a plain reopen unchanged: a process restart is not
+// a history change and must not cost a rebuild.
+void test_generations_survive_reopen() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	const string e = s->get_source_epoch();
+	const string i = s->get_incarnation();
+	drop_rocksdb_noremove(s);
+
+	s = make_rocksdb(wal_master_dir);
+	cut_assert_equal_string(e.c_str(), s->get_source_epoch().c_str());
+	cut_assert_equal_string(i.c_str(), s->get_incarnation().c_str());
+	cut_assert_false(s->generations_broken());
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// A generation that cannot be persisted must leave the node UNAVAILABLE for
+// replication, not advertising the old identity over changed data.
+void test_generation_persist_failure_is_fail_closed() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	cut_assert_operator(s->get_source_epoch().size(), >, static_cast<size_t>(0));
+
+	// Closing the handle makes every persist fail, which is the observable
+	// stand-in for a write error at the moment of the advance.
+	s->close();
+	cut_assert_equal_int(-1, s->advance_source_epoch());
+	cut_assert_true(s->generations_broken());
+	cut_assert_equal_string("", s->get_source_epoch().c_str());
+	cut_assert_equal_string("", s->get_incarnation().c_str());
+
+	delete s;
+	s = NULL;
+	cut_remove_path(wal_master_dir, NULL);
+}
+
+// A restore interrupted anywhere between "old copy destroyed" and "cursor,
+// generations and marker committed" leaves the sentinel behind; the next open
+// must discard that copy rather than expose the source's data with our
+// metadata unset.
+void test_restore_sentinel_discards_half_restored_copy() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	cut_assert_equal_int(0, storage_set_string(s, "survivor", "v"));
+	const string before = s->get_incarnation();
+	drop_rocksdb_noremove(s);
+
+	// Simulate the crash window: the sentinel is on disk, the DB is not ours.
+	FILE* fp = fopen(restore_sentinel(wal_master_dir).c_str(), "w");
+	cut_assert_not_null(fp);
+	fclose(fp);
+
+	s = make_rocksdb(wal_master_dir);
+	string out;
+	cut_assert_operator(storage_get_string(s, "survivor", out), !=, 0);   // discarded
+	cut_assert_equal_int(0, static_cast<int>(s->count()));
+	cut_assert_operator(s->get_incarnation().size(), >, static_cast<size_t>(0));
+	cut_assert_not_equal_string(before.c_str(), s->get_incarnation().c_str());
+	cut_assert_false(s->generations_broken());
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// If the sentinel itself cannot be cleared, opening would discard the NEXT
+// (good) restore as well, so open must refuse instead. A directory in its
+// place makes unlink() fail deterministically.
+void test_restore_sentinel_unremovable_refuses_open() {
+	mkdir(wal_master_dir, 0700);
+	cut_assert_equal_int(0, mkdir(restore_sentinel(wal_master_dir).c_str(), 0700));
+
+	storage_rocksdb* s = new storage_rocksdb(wal_master_dir, 32, 4, 16, 4, 2, 86400, 1024);
+	cut_assert_equal_int(-1, s->open());
+	delete s;
+
+	rmdir(restore_sentinel(wal_master_dir).c_str());
+	cut_remove_path(wal_master_dir, NULL);
+}
+
+// A checkpoint that carries no source epoch cannot be identified, so the
+// restore must be refused rather than completed against an unknown history.
+void test_swap_in_snapshot_refuses_checkpoint_without_source_epoch() {
+	storage_rocksdb* master = make_rocksdb(wal_master_dir);
+	storage_rocksdb* slave  = make_rocksdb(wal_slave_dir);
+	cut_assert_equal_int(0, storage_set_string(master, "k", "v"));
+
+	string cp_path;
+	uint64_t cp_seq = 0;
+	cut_assert_equal_int(0, master->create_snapshot_checkpoint(cp_path, cp_seq));
+
+	string staging;
+	cut_assert_equal_int(0, slave->prepare_snapshot_staging(staging));
+	cut_assert_equal_int(0, copy_dir_flat(cp_path, staging));
+	cut_assert_equal_int(0, master->remove_snapshot_checkpoint(cp_path));
+
+	// Strip the identity from the staged copy: open it and delete the key.
+	// Every column family the checkpoint carries must be listed — it now has
+	// the replication-metadata one as well.
+	{
+		rocksdb::DB* db = NULL;
+		rocksdb::Options o;
+		o.create_if_missing = false;
+		vector<string> names;
+		cut_assert_true(rocksdb::DB::ListColumnFamilies(rocksdb::DBOptions(o), staging, &names).ok());
+		vector<rocksdb::ColumnFamilyDescriptor> descriptors;
+		for (size_t i = 0; i < names.size(); i++) {
+			descriptors.push_back(rocksdb::ColumnFamilyDescriptor(names[i], rocksdb::ColumnFamilyOptions(o)));
+		}
+		vector<rocksdb::ColumnFamilyHandle*> handles;
+		cut_assert_true(rocksdb::DB::Open(rocksdb::DBOptions(o), staging, descriptors, &handles, &db).ok());
+		cut_assert_true(db->Delete(rocksdb::WriteOptions(), storage_rocksdb::kReplSourceEpochKey).ok());
+		for (size_t i = 0; i < handles.size(); i++) {
+			db->DestroyColumnFamilyHandle(handles[i]);
+		}
+		delete db;
+	}
+
+	const string before = slave->get_incarnation();
+	cut_assert_operator(slave->swap_in_snapshot(staging, cp_seq), <, 0);
+	// Refused: the identity did not move, and the node is not left claiming
+	// a cursor for a history it cannot name.
+	cut_assert_equal_string(before.c_str(), slave->get_incarnation().c_str());
+
+	drop_rocksdb(master, wal_master_dir);
+	drop_rocksdb(slave,  wal_slave_dir);
+}
+
+// A successful restore inherits the source's epoch and mints a FRESH
+// incarnation; restoring twice must not reuse the identity.
+void test_restore_inherits_epoch_and_mints_incarnation() {
+	storage_rocksdb* master = make_rocksdb(wal_master_dir);
+	storage_rocksdb* slave  = make_rocksdb(wal_slave_dir);
+	cut_assert_equal_int(0, storage_set_string(master, "k", "v"));
+
+	string incarnations[2];
+	for (int round = 0; round < 2; round++) {
+		string cp_path;
+		uint64_t cp_seq = 0;
+		cut_assert_equal_int(0, master->create_snapshot_checkpoint(cp_path, cp_seq));
+		string staging;
+		cut_assert_equal_int(0, slave->prepare_snapshot_staging(staging));
+		cut_assert_equal_int(0, copy_dir_flat(cp_path, staging));
+		cut_assert_equal_int(0, master->remove_snapshot_checkpoint(cp_path));
+		cut_assert_equal_int(0, slave->swap_in_snapshot(staging, cp_seq));
+
+		cut_assert_equal_string(master->get_source_epoch().c_str(), slave->get_source_epoch().c_str());
+		incarnations[round] = slave->get_incarnation();
+		cut_assert_operator(incarnations[round].size(), >, static_cast<size_t>(0));
+		// The sentinel must be gone once the restore completed.
+		struct stat sb;
+		cut_assert_operator(stat(restore_sentinel(wal_slave_dir).c_str(), &sb), !=, 0);
+	}
+	cut_assert_not_equal_string(incarnations[0].c_str(), incarnations[1].c_str());
+
+	drop_rocksdb(master, wal_master_dir);
+	drop_rocksdb(slave,  wal_slave_dir);
+}
+
+// truncate() replaces the history, so followers must see a different source
+// epoch rather than a silently rewritten one.
+void test_truncate_advances_source_epoch() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	cut_assert_equal_int(0, storage_set_string(s, "k", "v"));
+	const string before = s->get_source_epoch();
+	cut_assert_equal_int(0, s->truncate());
+	cut_assert_not_equal_string(before.c_str(), s->get_source_epoch().c_str());
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// The order label is captured inside the key's critical section, so the next
+// change to the SAME key always carries a strictly greater one — including
+// the delete that follows a set, which is the resurrection counterexample.
+void test_order_label_strictly_monotonic_per_key() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+
+	storage::entry e1;
+	e1.key = "k";
+	e1.size = 1;
+	e1.data = shared_byte(new uint8_t[1]);
+	e1.data.get()[0] = 'a';
+	storage::result r;
+	cut_assert_equal_int(0, s->set(e1, r));
+	cut_assert_operator(e1.seq_label, >, static_cast<uint64_t>(0));
+
+	// An unrelated key's write may inflate the label, which is allowed.
+	storage_set_string(s, "other", "x");
+
+	storage::entry e2;
+	e2.key = "k";
+	storage::result r2;
+	cut_assert_equal_int(0, s->remove(e2, r2));
+	cut_assert_operator(e2.seq_label, >, e1.seq_label);
+
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// ---------------------------------------------------------------------------
+// SAF-10b stage 2: the common apply rule (design §3.3 / §3.4 / §3.5).
+//
+// Both delivery paths reach storage through it, so these pin the three
+// hazards the reviewer named: a newer forwarded value overtaken by an older
+// WAL delivery, a delete followed by an older put, and the position never
+// advancing over something that was not applied.
+// ---------------------------------------------------------------------------
+
+namespace {
+	// Build the serialized entry a forwarded change carries.
+	void fill_entry(storage::entry& e, const char* key, const char* value) {
+		e.key = key;
+		e.size = strlen(value);
+		e.data = shared_byte(new uint8_t[e.size > 0 ? e.size : 1]);
+		memcpy(e.data.get(), value, e.size);
+		e.flag = 0;
+		e.expire = 0;
+		e.version = 1;
+	}
+
+	// Pull the value bytes a real write produced out of the WAL, so a batch
+	// built here carries exactly what the stream would carry — no assumption
+	// about the on-disk header layout is baked into the tests.
+	struct value_grabber : public rocksdb::WriteBatch::Handler {
+		string want_key;
+		string value;
+		bool found;
+		value_grabber(const string& k): want_key(k), found(false) {}
+		rocksdb::Status PutCF(uint32_t cf, const rocksdb::Slice& key, const rocksdb::Slice& v) {
+			if (cf == 0 && key.ToString() == this->want_key) {
+				this->value = v.ToString();
+				this->found = true;
+			}
+			return rocksdb::Status::OK();
+		}
+		rocksdb::Status DeleteCF(uint32_t, const rocksdb::Slice&) { return rocksdb::Status::OK(); }
+		rocksdb::Status SingleDeleteCF(uint32_t, const rocksdb::Slice&) { return rocksdb::Status::OK(); }
+		void LogData(const rocksdb::Slice&) {}
+	};
+
+	string serialized_entry(storage_rocksdb* scratch, const char* key, const char* value) {
+		const uint64_t before = scratch->get_latest_sequence_number();
+		cut_assert_equal_int(0, storage_set_string(scratch, key, value));
+		vector<pair<uint64_t, rocksdb::WriteBatch> > updates;
+		cut_assert_equal_int(0, scratch->get_updates_since(before + 1, updates));
+		value_grabber g(key);
+		for (size_t i = 0; i < updates.size(); i++) {
+			updates[i].second.Iterate(&g);
+		}
+		cut_assert_true(g.found);
+		return g.value;
+	}
+}
+
+// A newer value arrives by forwarding; the WAL then delivers an older change
+// for the same key. The newer value must stand.
+void test_apply_rule_forwarded_newer_survives_older_wal() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	const string epoch = s->get_source_epoch();
+	const string inc = s->get_incarnation();
+	const string inc_for_batch = inc;
+
+	storage::entry e;
+	fill_entry(e, "k", "new");
+	cppcut_assert_equal(storage_rocksdb::apply_applied,
+		s->apply_forwarded_change(epoch, inc, 100, e, false));
+
+	// The stream has already been followed up to 89, so a batch at 90
+	// continues it (a gap would be refused — see the gap test).
+	cut_assert_equal_int(0, s->set_repl_last_lsn(89));
+
+	// An older WAL change for the same key, delivered afterwards.
+	storage_rocksdb* scratch = make_rocksdb(wal_slave_dir);
+	const string old_bytes = serialized_entry(scratch, "k", "old");
+	rocksdb::WriteBatch older;
+	older.Put(rocksdb::Slice("k"), rocksdb::Slice(old_bytes));
+	uint64_t applied = 0, skipped = 0;
+	storage_rocksdb::apply_outcome refusal;
+	cut_assert_equal_int(0, s->apply_wal_batch(epoch, inc_for_batch, 90, older, applied, skipped, refusal));
+	cppcut_assert_equal(static_cast<uint64_t>(0), applied);
+	cppcut_assert_equal(static_cast<uint64_t>(1), skipped);
+
+	string out;
+	cut_assert_equal_int(0, storage_get_string(s, "k", out));
+	cut_assert_equal_string("new", out.c_str());
+	drop_rocksdb(scratch, wal_slave_dir);
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// A delete, then an older put for the same key: the key stays deleted. This
+// is the resurrection the in-memory header cache could not prevent.
+void test_apply_rule_delete_then_older_put_does_not_resurrect() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	const string epoch = s->get_source_epoch();
+	const string inc = s->get_incarnation();
+	const string inc_for_batch = inc;
+
+	storage::entry put1;
+	fill_entry(put1, "k", "v1");
+	cppcut_assert_equal(storage_rocksdb::apply_applied, s->apply_forwarded_change(epoch, inc, 10, put1, false));
+
+	storage::entry del;
+	del.key = "k";
+	cppcut_assert_equal(storage_rocksdb::apply_applied, s->apply_forwarded_change(epoch, inc, 20, del, true));
+
+	// The late copy of the ORIGINAL put arrives again (a retry of the
+	// forwarded change, or the WAL copy of it).
+	storage::entry late;
+	fill_entry(late, "k", "v1");
+	cppcut_assert_equal(storage_rocksdb::apply_skipped_superseded,
+		s->apply_forwarded_change(epoch, inc, 10, late, false));
+
+	string out;
+	cut_assert_operator(storage_get_string(s, "k", out), !=, 0);   // still gone
+	cut_assert_operator(s->get_repl_tombstones(), >, static_cast<uint64_t>(0));
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// Once the applied position has passed the delete, the tombstone may be
+// collected — and an older put is then refused by the POSITION instead
+// (design §3.5). This is the case a wall-clock window could not decide.
+void test_apply_rule_old_put_refused_after_tombstone_collected() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	const string epoch = s->get_source_epoch();
+	const string inc = s->get_incarnation();
+	const string inc_for_batch = inc;
+
+	storage::entry del;
+	del.key = "k";
+	cppcut_assert_equal(storage_rocksdb::apply_applied, s->apply_forwarded_change(epoch, inc, 20, del, true));
+	cppcut_assert_equal(static_cast<uint64_t>(1), s->get_repl_tombstones());
+
+	// Advance the applied position past the delete with an empty WAL batch,
+	// which also runs the bounded collection.
+	cut_assert_equal_int(0, s->set_repl_last_lsn(29));
+	rocksdb::WriteBatch empty_batch;
+	// A reserved key: numbered by the decoder, never applied as data (§3.6).
+	empty_batch.Put(rocksdb::Slice(storage_rocksdb::kReplLastLsnKey), rocksdb::Slice("30"));
+	uint64_t applied = 0, skipped = 0;
+	storage_rocksdb::apply_outcome refusal;
+	cut_assert_equal_int(0, s->apply_wal_batch(epoch, inc_for_batch, 30, empty_batch, applied, skipped, refusal));
+	cut_assert_operator(s->get_repl_last_lsn(), >=, static_cast<uint64_t>(20));
+	cppcut_assert_equal(static_cast<uint64_t>(0), s->get_repl_tombstones());   // collected
+
+	storage::entry late;
+	fill_entry(late, "k", "v1");
+	cppcut_assert_equal(storage_rocksdb::apply_refused_cursor,
+		s->apply_forwarded_change(epoch, inc, 10, late, false));
+	string out;
+	cut_assert_operator(storage_get_string(s, "k", out), !=, 0);   // still gone
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// A forwarded change never advances the replication position: it says nothing
+// about what the WAL has delivered (design §3.4).
+void test_apply_rule_forwarded_change_does_not_advance_cursor() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	const string epoch = s->get_source_epoch();
+	const string inc = s->get_incarnation();
+	const string inc_for_batch = inc;
+	const uint64_t before = s->get_repl_last_lsn();
+
+	storage::entry e;
+	fill_entry(e, "k", "v");
+	cppcut_assert_equal(storage_rocksdb::apply_applied, s->apply_forwarded_change(epoch, inc, 500, e, false));
+	cppcut_assert_equal(before, s->get_repl_last_lsn());
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// A change from another history, or issued against a previous copy, is
+// refused before anything is compared.
+void test_apply_rule_refuses_foreign_session_and_stale_incarnation() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	const string epoch = s->get_source_epoch();
+	const string inc = s->get_incarnation();
+	const string inc_for_batch = inc;
+
+	storage::entry e;
+	fill_entry(e, "k", "v");
+	cppcut_assert_equal(storage_rocksdb::apply_refused_session,
+		s->apply_forwarded_change("9:not-our-history", inc, 10, e, false));
+	cppcut_assert_equal(storage_rocksdb::apply_refused_incarnation,
+		s->apply_forwarded_change(epoch, "9:not-our-copy", 10, e, false));
+
+	string out;
+	cut_assert_operator(storage_get_string(s, "k", out), !=, 0);   // nothing written
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// Within one WAL batch the same key may change twice; the later change must
+// see the earlier one, and the result must equal applying them in order.
+void test_apply_rule_intra_batch_same_key_twice() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	const string epoch = s->get_source_epoch();
+	const string inc_for_batch = s->get_incarnation();
+
+	storage_rocksdb* scratch = make_rocksdb(wal_slave_dir);
+	const string v1 = serialized_entry(scratch, "k", "v1");
+	const string v2 = serialized_entry(scratch, "k", "v2");
+	rocksdb::WriteBatch batch;
+	batch.Put(rocksdb::Slice("k"), rocksdb::Slice(v1));
+	batch.Put(rocksdb::Slice("k"), rocksdb::Slice(v2));
+
+	uint64_t applied = 0, skipped = 0;
+	storage_rocksdb::apply_outcome refusal;
+	cut_assert_equal_int(0, s->apply_wal_batch(epoch, inc_for_batch, 1, batch, applied, skipped, refusal));
+	cppcut_assert_equal(static_cast<uint64_t>(2), applied);   // both, in order
+	string out;
+	cut_assert_equal_int(0, storage_get_string(s, "k", out));
+	cut_assert_equal_string("v2", out.c_str());
+	drop_rocksdb(scratch, wal_slave_dir);
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// A batch the decoder cannot number is refused in a RELEASE build, with
+// nothing written and nothing skipped — never applied partially.
+void test_apply_rule_refuses_undecodable_batch() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	const string epoch = s->get_source_epoch();
+	const string inc_for_batch = s->get_incarnation();
+	const uint64_t before_cursor = s->get_repl_last_lsn();
+
+	rocksdb::WriteBatch batch;
+	batch.Merge(rocksdb::Slice("k"), rocksdb::Slice("x"));   // not a flare operation
+	uint64_t applied = 0, skipped = 0;
+	storage_rocksdb::apply_outcome refusal;
+	cut_assert_equal_int(-1, s->apply_wal_batch(epoch, inc_for_batch, 1, batch, applied, skipped, refusal));
+	cppcut_assert_equal(storage_rocksdb::apply_error, refusal);
+	cppcut_assert_equal(before_cursor, s->get_repl_last_lsn());
+	cut_assert_operator(s->get_repl_decode_refused(), >, static_cast<uint64_t>(0));
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// A batch that does not continue the applied position is refused: advancing
+// over a gap would record changes as applied that never were.
+void test_apply_rule_refuses_gap_in_the_stream() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	const string epoch = s->get_source_epoch();
+	const string inc_for_batch = s->get_incarnation();
+
+	storage_rocksdb* scratch = make_rocksdb(wal_slave_dir);
+	const string v = serialized_entry(scratch, "k", "v");
+	rocksdb::WriteBatch batch;
+	batch.Put(rocksdb::Slice("k"), rocksdb::Slice(v));
+
+	uint64_t applied = 0, skipped = 0;
+	storage_rocksdb::apply_outcome refusal;
+	// The position is 0; a batch starting at 50 leaves 1..49 unaccounted.
+	cut_assert_equal_int(-1, s->apply_wal_batch(epoch, inc_for_batch, 50, batch, applied, skipped, refusal));
+	// A gap is HISTORY LOSS, distinguished from a transient error: the
+	// follower turns it into lsn_purged / needs_rebuild instead of retrying
+	// the same batch forever (found by the T6 E2E: RocksDB served the oldest
+	// surviving WAL file instead of reporting NotFound).
+	cut_assert_equal_int(static_cast<int>(storage_rocksdb::apply_refused_gap), static_cast<int>(refusal));
+	cppcut_assert_equal(static_cast<uint64_t>(0), s->get_repl_last_lsn());
+	drop_rocksdb(scratch, wal_slave_dir);
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// The metadata family is per-copy: a restore must not inherit the source's
+// rows, or labels from two histories would be compared.
+void test_apply_rule_restore_clears_inherited_metadata() {
+	storage_rocksdb* master = make_rocksdb(wal_master_dir);
+	storage_rocksdb* slave  = make_rocksdb(wal_slave_dir);
+
+	// Give the SLAVE some metadata of its own, then restore over it.
+	const string sepoch = slave->get_source_epoch();
+	const string sinc = slave->get_incarnation();
+	storage::entry e;
+	fill_entry(e, "own", "v");
+	cppcut_assert_equal(storage_rocksdb::apply_applied, slave->apply_forwarded_change(sepoch, sinc, 5, e, false));
+	storage::entry d;
+	d.key = "own";
+	cppcut_assert_equal(storage_rocksdb::apply_applied, slave->apply_forwarded_change(sepoch, sinc, 6, d, true));
+	cut_assert_operator(slave->get_repl_tombstones(), >, static_cast<uint64_t>(0));
+
+	cut_assert_equal_int(0, storage_set_string(master, "k", "v"));
+	string cp_path;
+	uint64_t cp_seq = 0;
+	cut_assert_equal_int(0, master->create_snapshot_checkpoint(cp_path, cp_seq));
+	string staging;
+	cut_assert_equal_int(0, slave->prepare_snapshot_staging(staging));
+	cut_assert_equal_int(0, copy_dir_flat(cp_path, staging));
+	cut_assert_equal_int(0, master->remove_snapshot_checkpoint(cp_path));
+	cut_assert_equal_int(0, slave->swap_in_snapshot(staging, cp_seq));
+
+	cppcut_assert_equal(static_cast<uint64_t>(0), slave->get_repl_tombstones());
+	drop_rocksdb(master, wal_master_dir);
+	drop_rocksdb(slave,  wal_slave_dir);
+}
+
+// ---------------------------------------------------------------------------
+// SAF-10b stage 2, review fixes: the generation check inside the section, the
+// live-key count, metadata-only batches, and concurrent delivery.
+// ---------------------------------------------------------------------------
+
+namespace {
+	// Count the keys actually present in the default family, excluding the
+	// reserved replication keys — the independent truth curr_items must match.
+	uint64_t real_key_count(storage_rocksdb* s) {
+		uint64_t n = 0;
+		storage::entry e;
+		if (s->iter_begin() < 0) {
+			return 0;
+		}
+		while (s->iter_next(e.key) == storage::iteration_continue) {
+			n++;
+		}
+		s->iter_end();
+		return n;
+	}
+
+	struct forward_worker_arg {
+		storage_rocksdb* s;
+		string epoch;
+		string incarnation;
+		int base_label;
+		int count;
+		int applied;
+	};
+
+	void* forward_worker(void* raw) {
+		forward_worker_arg* a = static_cast<forward_worker_arg*>(raw);
+		for (int i = 0; i < a->count; i++) {
+			char k[32];
+			snprintf(k, sizeof(k), "conc%03d", i);
+			storage::entry e;
+			e.key = k;
+			e.size = 2;
+			e.data = shared_byte(new uint8_t[2]);
+			memcpy(e.data.get(), "vv", 2);
+			e.flag = 0;
+			e.expire = 0;
+			e.version = 1;
+			if (a->s->apply_forwarded_change(a->epoch, a->incarnation,
+					static_cast<uint64_t>(a->base_label + i), e, false) == storage_rocksdb::apply_applied) {
+				a->applied++;
+			}
+		}
+		return NULL;
+	}
+}
+
+// A WAL batch that carries ONLY metadata-family entries applies no data, but
+// its entries are still numbered, so the position moves past them. If they
+// were not counted, every later change in the stream would be mis-numbered.
+void test_apply_rule_metadata_only_batch_advances_position() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	const string epoch = s->get_source_epoch();
+	const string inc = s->get_incarnation();
+	cut_assert_equal_int(0, s->set_repl_last_lsn(10));
+
+	// Three entries in a family that is not the default one: exactly what a
+	// source that applied deliveries has in its own WAL.
+	rocksdb::WriteBatch batch;
+	rocksdb::DB* raw = NULL;      // handles come from the storage's own DB
+	(void)raw;
+	rocksdb::ColumnFamilyHandle* meta = s->debug_meta_cf();
+	cut_assert_not_null(meta);
+	batch.Put(meta, rocksdb::Slice("a"), rocksdb::Slice("1:x|5|0"));
+	batch.Put(meta, rocksdb::Slice("b"), rocksdb::Slice("1:x|6|0"));
+	batch.Put(meta, rocksdb::Slice("c"), rocksdb::Slice("1:x|7|1"));
+
+	uint64_t applied = 0, skipped = 0;
+	storage_rocksdb::apply_outcome refusal;
+	cut_assert_equal_int(0, s->apply_wal_batch(epoch, inc, 11, batch, applied, skipped, refusal));
+	cppcut_assert_equal(static_cast<uint64_t>(0), applied);     // no data applied
+	cppcut_assert_equal(static_cast<uint64_t>(0), skipped);
+	// 11, 12, 13 were consumed by the three entries.
+	cppcut_assert_equal(static_cast<uint64_t>(13), s->get_repl_last_lsn());
+	cppcut_assert_equal(static_cast<uint64_t>(0), real_key_count(s));
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// An empty batch covers no sequence and must not move the position.
+void test_apply_rule_empty_batch_does_not_move_position() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	const string epoch = s->get_source_epoch();
+	const string inc = s->get_incarnation();
+	cut_assert_equal_int(0, s->set_repl_last_lsn(10));
+
+	rocksdb::WriteBatch empty;
+	uint64_t applied = 0, skipped = 0;
+	storage_rocksdb::apply_outcome refusal;
+	cut_assert_equal_int(0, s->apply_wal_batch(epoch, inc, 11, empty, applied, skipped, refusal));
+	cppcut_assert_equal(static_cast<uint64_t>(10), s->get_repl_last_lsn());
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// curr_items must equal the real key count after both paths have run,
+// including a key created and deleted inside ONE batch and a key changed
+// twice in one batch — the cases a per-change probe counts twice.
+void test_apply_rule_curr_items_matches_real_key_count() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	storage_rocksdb* scratch = make_rocksdb(wal_slave_dir);
+	const string epoch = s->get_source_epoch();
+	const string inc = s->get_incarnation();
+
+	// Forwarded: two creations, one overwrite, one delete.
+	storage::entry a1; fill_entry(a1, "a", "1");
+	cppcut_assert_equal(storage_rocksdb::apply_applied, s->apply_forwarded_change(epoch, inc, 1, a1, false));
+	storage::entry b1; fill_entry(b1, "b", "1");
+	cppcut_assert_equal(storage_rocksdb::apply_applied, s->apply_forwarded_change(epoch, inc, 2, b1, false));
+	storage::entry a2; fill_entry(a2, "a", "2");
+	cppcut_assert_equal(storage_rocksdb::apply_applied, s->apply_forwarded_change(epoch, inc, 3, a2, false));
+	storage::entry bdel; bdel.key = "b";
+	cppcut_assert_equal(storage_rocksdb::apply_applied, s->apply_forwarded_change(epoch, inc, 4, bdel, true));
+	cut_assert_equal_int(static_cast<int>(real_key_count(s)), static_cast<int>(s->count()));
+
+	// WAL: one key written twice in a single batch, and one created then
+	// deleted in the same batch.
+	const string cv1 = serialized_entry(scratch, "c", "1");
+	const string cv2 = serialized_entry(scratch, "c", "2");
+	const string dv1 = serialized_entry(scratch, "d", "1");
+	rocksdb::WriteBatch batch;
+	batch.Put(rocksdb::Slice("c"), rocksdb::Slice(cv1));
+	batch.Put(rocksdb::Slice("c"), rocksdb::Slice(cv2));
+	batch.Put(rocksdb::Slice("d"), rocksdb::Slice(dv1));
+	batch.Delete(rocksdb::Slice("d"));
+
+	uint64_t applied = 0, skipped = 0;
+	storage_rocksdb::apply_outcome refusal;
+	cut_assert_equal_int(0, s->apply_wal_batch(epoch, inc, 1, batch, applied, skipped, refusal));
+	cppcut_assert_equal(static_cast<uint64_t>(4), applied);
+	cut_assert_equal_int(static_cast<int>(real_key_count(s)), static_cast<int>(s->count()));
+	cut_assert_equal_int(2, static_cast<int>(s->count()));   // a and c
+
+	drop_rocksdb(scratch, wal_slave_dir);
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// A delivery for a PREVIOUS copy must be refused even when the copy is
+// replaced after the delivery was issued: the check belongs inside the
+// applying section, not before it.
+void test_apply_rule_incarnation_checked_against_the_current_copy() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	const string epoch = s->get_source_epoch();
+	const string stale_inc = s->get_incarnation();
+
+	// The copy is replaced (a hard reset stands in for a snapshot restore).
+	cut_assert_equal_int(0, s->hard_reset());
+	const string fresh_inc = s->get_incarnation();
+	cut_assert_not_equal_string(stale_inc.c_str(), fresh_inc.c_str());
+	const string fresh_epoch = s->get_source_epoch();
+
+	storage::entry e;
+	fill_entry(e, "k", "v");
+	cppcut_assert_equal(storage_rocksdb::apply_refused_incarnation,
+		s->apply_forwarded_change(fresh_epoch, stale_inc, 100, e, false));
+
+	rocksdb::WriteBatch batch;
+	storage_rocksdb* scratch = make_rocksdb(wal_slave_dir);
+	const string v = serialized_entry(scratch, "k", "v");
+	batch.Put(rocksdb::Slice("k"), rocksdb::Slice(v));
+	uint64_t applied = 0, skipped = 0;
+	storage_rocksdb::apply_outcome refusal;
+	cut_assert_equal_int(-1, s->apply_wal_batch(fresh_epoch, stale_inc, 1, batch, applied, skipped, refusal));
+	cppcut_assert_equal(storage_rocksdb::apply_refused_incarnation, refusal);
+
+	string out;
+	cut_assert_operator(storage_get_string(s, "k", out), !=, 0);
+	drop_rocksdb(scratch, wal_slave_dir);
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// Concurrency: forwarded changes from several threads while the WAL applier
+// runs. The rule must hold under contention — no lost or double counting, no
+// key left with an older value, and the position only moved by the applier.
+void test_apply_rule_concurrent_forwarded_and_wal() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	storage_rocksdb* scratch = make_rocksdb(wal_slave_dir);
+	const string epoch = s->get_source_epoch();
+	const string inc = s->get_incarnation();
+	cut_assert_equal_int(0, s->set_repl_last_lsn(1000));
+
+	const int threads = 4;
+	const int per_thread = 40;
+	pthread_t tid[threads];
+	forward_worker_arg args[threads];
+	for (int t = 0; t < threads; t++) {
+		args[t].s = s;
+		args[t].epoch = epoch;
+		args[t].incarnation = inc;
+		// Every thread offers the SAME keys with different labels, so the
+		// rule has to arbitrate: only the highest label may survive.
+		args[t].base_label = 2000 + t * 1000;
+		args[t].count = per_thread;
+		args[t].applied = 0;
+		cut_assert_equal_int(0, pthread_create(&tid[t], NULL, forward_worker, &args[t]));
+	}
+
+	// Meanwhile the applier delivers its own batches for other keys.
+	for (int i = 0; i < 20; i++) {
+		char k[32];
+		snprintf(k, sizeof(k), "wal%03d", i);
+		const string v = serialized_entry(scratch, k, "w");
+		rocksdb::WriteBatch batch;
+		batch.Put(rocksdb::Slice(k), rocksdb::Slice(v));
+		uint64_t applied = 0, skipped = 0;
+		storage_rocksdb::apply_outcome refusal;
+		cut_assert_equal_int(0, s->apply_wal_batch(epoch, inc, 1001 + i, batch, applied, skipped, refusal));
+	}
+
+	for (int t = 0; t < threads; t++) {
+		cut_assert_equal_int(0, pthread_join(tid[t], NULL));
+	}
+
+	// The count never drifted from the key space, whatever the interleaving.
+	cut_assert_equal_int(static_cast<int>(real_key_count(s)), static_cast<int>(s->count()));
+	cut_assert_equal_int(per_thread + 20, static_cast<int>(s->count()));
+	// The position moved only by the applier's batches.
+	cppcut_assert_equal(static_cast<uint64_t>(1020), s->get_repl_last_lsn());
+	// Every contended key ends at the highest label offered for it.
+	for (int i = 0; i < per_thread; i++) {
+		char k[32];
+		snprintf(k, sizeof(k), "conc%03d", i);
+		storage::entry e;
+		fill_entry(e, k, "older");
+		cppcut_assert_equal(storage_rocksdb::apply_skipped_superseded,
+			s->apply_forwarded_change(epoch, inc, static_cast<uint64_t>(2000 + (threads - 1) * 1000 + i), e, false));
+	}
+
+	drop_rocksdb(scratch, wal_slave_dir);
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// The wire-level entry point: a forwarded change that arrived with an
+// identity is mapped onto the common rule, and each outcome is reported in
+// the form the source needs — "skipped" must not look like a failure, or the
+// source would count a drop and request a repair for nothing.
+void test_identified_change_maps_outcomes_for_the_source() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	const string epoch = s->get_source_epoch();
+
+	storage::entry e1;
+	fill_entry(e1, "k", "v1");
+	cut_assert_equal_int(storage::identified_applied,
+		s->apply_identified_change(epoch + "/10", e1, false));
+
+	// The same change again, and an older one: already superseded, which is
+	// a success from the source's point of view.
+	storage::entry e2;
+	fill_entry(e2, "k", "v1");
+	cut_assert_equal_int(storage::identified_skipped,
+		s->apply_identified_change(epoch + "/10", e2, false));
+	storage::entry e3;
+	fill_entry(e3, "k", "old");
+	cut_assert_equal_int(storage::identified_skipped,
+		s->apply_identified_change(epoch + "/9", e3, false));
+
+	// Another history: the source must hear about it.
+	storage::entry e4;
+	fill_entry(e4, "k", "foreign");
+	cut_assert_equal_int(storage::identified_refused,
+		s->apply_identified_change("9:another-history/11", e4, false));
+
+	// Malformed tags are refused, never guessed.
+	storage::entry e5;
+	fill_entry(e5, "k", "bad");
+	cut_assert_equal_int(storage::identified_refused, s->apply_identified_change("no-slash", e5, false));
+	cut_assert_equal_int(storage::identified_refused, s->apply_identified_change(epoch + "/notanumber", e5, false));
+	cut_assert_equal_int(storage::identified_refused, s->apply_identified_change(epoch + "/0", e5, false));
+
+	string out;
+	cut_assert_equal_int(0, storage_get_string(s, "k", out));
+	cut_assert_equal_string("v1", out.c_str());
+
+	// A delete through the same entry point leaves the tombstone that stops
+	// an older put from resurrecting the key.
+	storage::entry d;
+	d.key = "k";
+	cut_assert_equal_int(storage::identified_applied, s->apply_identified_change(epoch + "/20", d, true));
+	storage::entry late;
+	fill_entry(late, "k", "v1");
+	cut_assert_equal_int(storage::identified_skipped, s->apply_identified_change(epoch + "/10", late, false));
+	cut_assert_operator(storage_get_string(s, "k", out), !=, 0);
+
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// A backend without a replication identity reports "unsupported" so the
+// caller keeps doing what it always did.
+void test_identified_change_unsupported_on_a_plain_storage() {
+	storage::entry e;
+	fill_entry(e, "k", "v");
+	// The base implementation is what a non-WAL backend inherits.
+	storage* plain = new mock_storage("tmp_mock_storage", 8, 4);
+	cut_assert_equal_int(storage::identified_unsupported, plain->apply_identified_change("1:x/5", e, false));
+	delete plain;
+}
+
+// ---------------------------------------------------------------------------
+// SAF-10b stage 3b: the follower's decision table.
+//
+// The rule that matters most for the requirement this work exists for: a lost
+// connection must NEVER be a repair trigger. Only a position that can no
+// longer be satisfied — purged history, another history, a position ahead of
+// the source — hands the node to the rebuild path (design §5.4).
+// ---------------------------------------------------------------------------
+
+void test_follow_disconnect_is_not_a_rebuild() {
+	// Transport failure, whatever the last client result was.
+	cppcut_assert_equal(handler_wal_follower::attempt_disconnected,
+		handler_wal_follower::classify(op_repl_sync_wal::client_success, false));
+	cppcut_assert_equal(handler_wal_follower::attempt_disconnected,
+		handler_wal_follower::classify(op_repl_sync_wal::client_protocol_error, false));
+	// Even a result that WOULD mean rebuild is not acted on when we could not
+	// talk to the source: we did not learn anything about our position.
+	cppcut_assert_equal(handler_wal_follower::attempt_disconnected,
+		handler_wal_follower::classify(op_repl_sync_wal::client_lsn_purged, false));
+}
+
+void test_follow_more_drains_even_when_forwarding_already_applied_slice() {
+	cut_assert_true(handler_wal_follower::retry_immediately(handler_wal_follower::attempt_idle, true));
+	cut_assert_true(handler_wal_follower::retry_immediately(handler_wal_follower::attempt_progress, true));
+	cut_assert_false(handler_wal_follower::retry_immediately(handler_wal_follower::attempt_idle, false));
+	cut_assert_false(handler_wal_follower::retry_immediately(handler_wal_follower::attempt_progress, false));
+	cut_assert_false(handler_wal_follower::retry_immediately(handler_wal_follower::attempt_disconnected, true));
+	cut_assert_false(handler_wal_follower::retry_immediately(handler_wal_follower::attempt_error, true));
+	cut_assert_false(handler_wal_follower::retry_immediately(handler_wal_follower::attempt_needs_rebuild, true));
+}
+
+void test_follow_local_read_guard_until_caught_up() {
+	stats::follow_record r = stats_object->get_follow_record();
+	r.enabled = true;
+	r.source_epoch = "epoch";
+	r.state = "following";
+	r.source_lsn = 100;
+	r.applied_lsn = 99;
+	r.source_lsn_observed_at = 1000;
+	cut_assert_false(stats::follow_allows_local_read(r, 1000));
+	r.applied_lsn = 100;
+	cut_assert_true(stats::follow_allows_local_read(r, 1000));
+	cut_assert_false(stats::follow_allows_local_read(r, 1006));
+	cut_assert_false(stats::follow_allows_local_read(r, 999));
+	r.state = "disconnected";
+	cut_assert_false(stats::follow_allows_local_read(r, 1000));
+	r.state = "needs_rebuild";
+	cut_assert_false(stats::follow_allows_local_read(r, 1000));
+	r.enabled = false;
+	cut_assert_true(stats::follow_allows_local_read(r, 1000));
+}
+
+void test_follow_only_unsatisfiable_positions_rebuild() {
+	cppcut_assert_equal(handler_wal_follower::attempt_needs_rebuild,
+		handler_wal_follower::classify(op_repl_sync_wal::client_lsn_purged, true));
+	cppcut_assert_equal(handler_wal_follower::attempt_needs_rebuild,
+		handler_wal_follower::classify(op_repl_sync_wal::client_epoch_mismatch, true));
+	cppcut_assert_equal(handler_wal_follower::attempt_needs_rebuild,
+		handler_wal_follower::classify(op_repl_sync_wal::client_master_id_mismatch, true));
+	cppcut_assert_equal(handler_wal_follower::attempt_needs_rebuild,
+		handler_wal_follower::classify(op_repl_sync_wal::client_lsn_ahead, true));
+
+	// A source that cannot identify its history, or does not speak the op, is
+	// an error to retry — not a reason to throw this copy away.
+	cppcut_assert_equal(handler_wal_follower::attempt_error,
+		handler_wal_follower::classify(op_repl_sync_wal::client_no_epoch, true));
+	cppcut_assert_equal(handler_wal_follower::attempt_error,
+		handler_wal_follower::classify(op_repl_sync_wal::client_not_supported, true));
+	cppcut_assert_equal(handler_wal_follower::attempt_error,
+		handler_wal_follower::classify(op_repl_sync_wal::client_apply_error, true));
+
+	cppcut_assert_equal(handler_wal_follower::attempt_progress,
+		handler_wal_follower::classify(op_repl_sync_wal::client_success, true));
+}
+
+// Every non-success carries a reason the operator can read; success carries
+// none, so a stale reason is never shown as current.
+void test_follow_reasons_are_named() {
+	cut_assert_equal_string("", handler_wal_follower::reason_for(op_repl_sync_wal::client_success));
+	cut_assert_equal_string("lsn_purged", handler_wal_follower::reason_for(op_repl_sync_wal::client_lsn_purged));
+	cut_assert_equal_string("epoch_mismatch", handler_wal_follower::reason_for(op_repl_sync_wal::client_epoch_mismatch));
+	cut_assert_equal_string("source_has_no_epoch", handler_wal_follower::reason_for(op_repl_sync_wal::client_no_epoch));
+}
+
+// The record the operator reads: state, reason, position and — always — the
+// time the source's position was observed.
+void test_follow_record_carries_state_reason_and_observation_time() {
+	stats_object->follow_set_source("10.0.0.1:12121", "3:abc");
+	stats_object->follow_set_state(stats::follow_initial_sync, "");
+	stats::follow_record r = stats_object->get_follow_record();
+	cut_assert_equal_string("10.0.0.1:12121", r.source.c_str());
+	cut_assert_equal_string("3:abc", r.source_epoch.c_str());
+	cut_assert_equal_string("initial_sync", r.state.c_str());
+
+	stats_object->follow_note_source_position(4242);
+	stats_object->follow_note_progress(4200);
+	r = stats_object->get_follow_record();
+	cppcut_assert_equal(static_cast<uint64_t>(4242), r.source_lsn);
+	cppcut_assert_equal(static_cast<uint64_t>(4200), r.applied_lsn);
+	cut_assert_operator(static_cast<int>(r.source_lsn_observed_at), >, 0);
+	cut_assert_operator(static_cast<int>(r.last_progress_at), >, 0);
+
+	// A position that does not advance does not refresh the progress time.
+	const time_t progressed_at = r.last_progress_at;
+	stats_object->follow_note_progress(4100);
+	r = stats_object->get_follow_record();
+	cppcut_assert_equal(static_cast<uint64_t>(4200), r.applied_lsn);
+	cppcut_assert_equal(progressed_at, r.last_progress_at);
+
+	stats_object->follow_set_state(stats::follow_disconnected, "peer_unreachable");
+	r = stats_object->get_follow_record();
+	cut_assert_equal_string("disconnected", r.state.c_str());
+	cut_assert_equal_string("peer_unreachable", r.last_reason.c_str());
+
+	// Back to following clears the reason, so a stale one is never read as
+	// the current condition.
+	stats_object->follow_set_state(stats::follow_following, "");
+	r = stats_object->get_follow_record();
+	cut_assert_equal_string("following", r.state.c_str());
+	cut_assert_equal_string("", r.last_reason.c_str());
+	stats_object->follow_set_state(stats::follow_idle, "");
 }
 
 	void teardown()

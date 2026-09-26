@@ -11,9 +11,23 @@ on:
     branches:
       - flare-operator
       - master
+      # Stacked safety PRs (base = another safety/* branch, so the diff is
+      # only the new work) must still run the E2E matrix.
+      - 'safety/**'
+  # Manual run of a branch (e.g. re-running a leg for evidence).
+  workflow_dispatch:
+    inputs:
+      evaluation:
+        description: 'Optional evaluation on the continuous-replication leg (PR runs use none)'
+        type: choice
+        options: [none, sustained, scale-2m, scale-15m8]
+        default: none
+
+permissions:
+  contents: read
 
 concurrency:
-  group: e2e-${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  group: e2e-${{ github.workflow }}-${{ github.head_ref || github.ref }}-${{ inputs.evaluation || 'none' }}
   cancel-in-progress: true
 
 jobs:
@@ -25,7 +39,7 @@ jobs:
     # (~15 min) anchor their own leg. Rebalance by editing the lists; add
     # new suites to a group or `flare_e2e --list` drifts from reality (the
     # aggregate job below fails if a suite is left out of every group).
-    timeout-minutes: 120
+    timeout-minutes: ${{ inputs.evaluation != '' && inputs.evaluation != 'none' && 240 || 120 }}
     strategy:
       fail-fast: false
       matrix:
@@ -33,11 +47,17 @@ jobs:
           - group: topology
             suites: "failover,read-balance,scale-out-master,scale-out-slave,scale-in-slave,scale-in-master"
           - group: replication
-            suites: "replace-nodes,cluster-replication,partition-reduction,wal-retention-config,strict-durability,snapshot-push-seed"
+            suites: "replace-nodes,cluster-replication,partition-reduction,wal-retention-config,strict-durability,snapshot-push-seed,continuous-replication-purge,continuous-replication-limits"
           - group: wal-recovery
             suites: "wal-bandwidth-throttle,wal-incremental-sync,wal-purged-fallback,resync-failure-self-demote,orphan-scan-purge,terminating-pod-handling,failover-during-replication,data-survival-failover,pvc-data-survival,backup-restore"
           - group: breaker-migration
             suites: "circuit-breaker,operator-restart,topology-authority,replica-repair,prepare-evidence,native-metrics,blue-green-migration"
+          # SAF-10d acceptance. Scale/sustained suites are opt-in evaluations;
+          # their default SKIP is not evidence that performance was tested.
+          # with real link cuts, an operator restart, a failover and a
+          # scale-out; ~50 min locally, so it anchors its own leg.
+          - group: continuous-replication
+            suites: "continuous-replication,continuous-replication-scale,continuous-replication-sustained"
     name: e2e-test (${{ matrix.group }})
     steps:
       - name: Checkout
@@ -66,7 +86,13 @@ jobs:
         run: |
           curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
 
-      - name: Build Lean operator
+      - name: Test Helm startup memory configuration
+        # Helm is installed above; test startup ConfigMap seeding before builds.
+        # Full runtime/config admission tests run in the replication shard.
+        # Keep this a separate step so a render failure cannot hide in a pipe.
+        run: python3 -m unittest discover -s scripts/tests -p 'test_helm_memory.py'
+
+      - name: Build Lean operator and tests
         run: |
           cd flare_operator
           # SEPARATE invocations on purpose. Naming the library and an
@@ -81,6 +107,7 @@ jobs:
           build_all() {
             lake build FlareOperator \
               && lake build flare_operator \
+              && lake build flare_unit \
               && lake build flare_e2e
           }
           # Retry once from a CLEAN tree. The runner's clang also dies with
@@ -93,6 +120,14 @@ jobs:
             lake clean
             build_all
           }
+
+      - name: Run pure safety tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ci-results
+          git rev-parse HEAD > ci-results/tested-sha.txt
+          timeout --kill-after=10 120 flare_operator/.lake/build/bin/flare_unit 2>&1 | tee ci-results/flare-unit.log
 
       - name: Create kind cluster
         run: kind create cluster --name flare-e2e --wait 120s
@@ -157,20 +192,47 @@ jobs:
           kubectl logs -n flare-system -l app=flare-operator --tail=50
 
       - name: Run E2E tests (${{ matrix.group }})
+        shell: bash
+        env:
+          EVALUATION: ${{ inputs.evaluation || 'none' }}
+          SUITE_GROUP: ${{ matrix.group }}
+          SUITES: ${{ matrix.suites }}
         run: |
+          set -euo pipefail
+          mkdir -p ci-results
+          git rev-parse HEAD > ci-results/tested-sha.txt
+          echo "$EVALUATION" > ci-results/evaluation.txt
           cd flare_operator
           export KUBECONFIG=$HOME/.kube/config
           # timeout(1) produces "exit code 124" on expiry — this inner limit
           # is what kills a leg, not timeout-minutes. 75 min per SHARDED leg
           # (longest group ~45 min measured + slack).
-          timeout 4500 .lake/build/bin/flare_e2e --filter "${{ matrix.suites }}"
+          limit=4500
+          if [ "$SUITE_GROUP" = continuous-replication ]; then
+            case "$EVALUATION" in
+              sustained) export FLARE_E2E_SUSTAINED=1; limit=10800 ;;
+              scale-2m) export FLARE_E2E_SCALE_KEYS=2000000; limit=10800 ;;
+              scale-15m8) export FLARE_E2E_SCALE_KEYS=15800000; limit=10800 ;;
+              none) ;;
+              *) echo "Unknown evaluation profile"; exit 1 ;;
+            esac
+          fi
+          timeout --kill-after=30 "$limit" .lake/build/bin/flare_e2e --filter "$SUITES" 2>&1 | tee ../ci-results/e2e.log
+
+      - name: Preserve tested revision and results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-${{ matrix.group }}-${{ inputs.evaluation || 'none' }}-${{ github.run_attempt }}
+          path: ci-results/
+          retention-days: 30
 
       - name: Verify every suite is assigned to a shard
         run: |
           cd flare_operator
           # Union of the matrix groups must equal --list, or a new suite
           # silently never runs. Kept in ONE place here; compare as sets.
-          ALL_GROUPS="failover,read-balance,scale-out-master,scale-out-slave,scale-in-slave,scale-in-master,replace-nodes,cluster-replication,partition-reduction,wal-retention-config,strict-durability,snapshot-push-seed,wal-bandwidth-throttle,wal-incremental-sync,wal-purged-fallback,resync-failure-self-demote,orphan-scan-purge,terminating-pod-handling,failover-during-replication,data-survival-failover,pvc-data-survival,backup-restore,circuit-breaker,operator-restart,topology-authority,replica-repair,prepare-evidence,native-metrics,blue-green-migration"
+          ALL_GROUPS="failover,read-balance,scale-out-master,scale-out-slave,scale-in-slave,scale-in-master,replace-nodes,cluster-replication,partition-reduction,wal-retention-config,strict-durability,snapshot-push-seed,wal-bandwidth-throttle,wal-incremental-sync,wal-purged-fallback,resync-failure-self-demote,orphan-scan-purge,terminating-pod-handling,failover-during-replication,data-survival-failover,pvc-data-survival,backup-restore,circuit-breaker,operator-restart,topology-authority,replica-repair,prepare-evidence,native-metrics,blue-green-migration,continuous-replication,continuous-replication-purge,continuous-replication-limits,continuous-replication-scale,continuous-replication-sustained"
           LISTED=$(.lake/build/bin/flare_e2e --list | sed -n 's/^  \([a-z0-9-]*\) (.*/\1/p' | sort)
           GROUPED=$(echo "$ALL_GROUPS" | tr ',' '\n' | sort)
           if ! diff <(echo "$LISTED") <(echo "$GROUPED"); then

@@ -113,6 +113,27 @@ int op_delete::_run_server() {
 	// storage i/o
 	storage::result r_storage;
 	int retcode;
+	// SAF-10b stage 3: see op_set::_run_server. A forwarded delete with an
+	// identity leaves a tombstone carrying its position, which is what stops
+	// an older put from resurrecting the key.
+	if (!this->_entry.repl_tag.empty() && this->is_proxy_request()) {
+		storage_access_info info = { this->_thread };
+		time_watcher_scoped_observer ob(info);
+		const int applied = this->_storage->apply_identified_change(this->_entry.repl_tag, this->_entry, true);
+		switch (applied) {
+			case storage::identified_applied:
+				stats_object->increment_delete_hits();
+				return this->_send_result(result_deleted);
+			case storage::identified_skipped:
+				return this->_send_result(result_deleted);
+			case storage::identified_refused:
+				return this->_send_result(result_server_error, "replication identity refused");
+			case storage::identified_error:
+				return this->_send_result(result_server_error, "i/o error");
+			default:
+				break;		// identified_unsupported: fall through
+		}
+	}
 	{
 		storage_access_info info = { this->_thread };
 		time_watcher_scoped_observer ob(info);
@@ -156,6 +177,10 @@ int op_delete::_run_client(storage::entry& e) {
 	}
 	if (e.option & storage::option_async) {
 		offset += snprintf(request+offset, request_len-offset, " %s", storage::option_cast(storage::option_async).c_str());
+	}
+	// SAF-10b: replication identity of this change (see op_set::_run_client).
+	if (!e.repl_tag.empty()) {
+		offset += snprintf(request+offset, request_len-offset, " rl=%s", e.repl_tag.c_str());
 	}
 	offset += snprintf(request+offset, request_len-offset, "%s", line_delimiter);
 	if (this->_connection->write(request, offset) < 0) {

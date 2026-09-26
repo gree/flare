@@ -1,0 +1,68 @@
+# SAF-10 (b/c) flared RocksDB unit tests — cutter run at HEAD
+# commit: c96246cfc82e910bc2e12c2571177ad4bf90888a   date: 2026-09-20   host: local darwin arm64, nix devShell, VPATH build /tmp/flare-b17 (make -C src/lib; make -C test/lib clean; make -C test/lib)
+# build flags: CXXFLAGS="-std=c++17 -g -O0 -D_LIBCPP_ENABLE_CXX17_REMOVED_RANDOM_SHUFFLE -D_LIBCPP_ENABLE_CXX17_REMOVED_AUTO_PTR" (rocksdb 8.3.2 headers need C++17; pre-existing)
+# run 1 command: cutter --keep-opening-modules -v v -s test -n "/(apply_rule|follow|generation|order_label|restore|identified_change|truncate_advances|swap_in_snapshot|hard_reset|repl_tag|replication_identity|epoch|client_follow|generations_unavailable|sync_wal)/" lib
+# run 2 command: cutter --keep-opening-modules -v v -s test -n "/replication_tag/" lib   (test_op_set: rl= tag parse)
+# scope: SAF-10 tests only (the non-RocksDB cutter suite is recorded separately by nix build .#flare); the full suite hangs on network tests and is not run here
+
+=== run 1 ===
+[01;42mtest_storage_rocksdb[00m:
+  test_storage_rocksdb::test_follow_reasons_are_named:	[01;32m.[00m: (0.000063)
+  test_storage_rocksdb::test_generations_survive_reopen:[01;32m.[00m: (0.127597)
+  test_storage_rocksdb::test_hard_reset_wipes_and_recovers:[01;32m.[00m: (0.169997)
+  test_storage_rocksdb::test_truncate_advances_source_epoch:[01;32m.[00m: (0.080106)
+  test_storage_rocksdb::test_follow_disconnect_is_not_a_rebuild:[01;32m.[00m: (0.000014)
+  test_storage_rocksdb::test_apply_rule_refuses_gap_in_the_stream:[01;32m.[00m: (0.162040)
+  test_storage_rocksdb::test_apply_rule_refuses_undecodable_batch:[01;32m.[00m: (0.076393)
+  test_storage_rocksdb::test_apply_rule_intra_batch_same_key_twice:[01;32m.[00m: (0.152659)
+  test_storage_rocksdb::test_order_label_strictly_monotonic_per_key:[01;32m.[00m: (0.083836)
+  test_storage_rocksdb::test_apply_rule_concurrent_forwarded_and_wal:[01;32m.[00m: (0.152655)
+  test_storage_rocksdb::test_swap_in_snapshot_clears_corruption_latch:[01;32m.[00m: (0.255139)
+  test_storage_rocksdb::test_generation_persist_failure_is_fail_closed:[01;32m.[00m: (0.077555)
+  test_storage_rocksdb::test_restore_sentinel_unremovable_refuses_open:[01;32m.[00m: (0.000689)
+  test_storage_rocksdb::test_follow_only_unsatisfiable_positions_rebuild:[01;32m.[00m: (0.000020)
+  test_storage_rocksdb::test_apply_rule_curr_items_matches_real_key_count:[01;32m.[00m: (0.138390)
+  test_storage_rocksdb::test_apply_rule_restore_clears_inherited_metadata:[01;32m.[00m: (0.278033)
+  test_storage_rocksdb::test_restore_inherits_epoch_and_mints_incarnation:[01;32m.[00m: (0.430573)
+  test_storage_rocksdb::test_restore_sentinel_discards_half_restored_copy:[01;32m.[00m: (0.177477)
+  test_storage_rocksdb::test_apply_rule_empty_batch_does_not_move_position:[01;32m.[00m: (0.088389)
+  test_storage_rocksdb::test_apply_rule_forwarded_newer_survives_older_wal:[01;32m.[00m: (0.207873)
+  test_storage_rocksdb::test_identified_change_maps_outcomes_for_the_source:[01;32m.[00m: (0.100601)
+  test_storage_rocksdb::test_apply_rule_metadata_only_batch_advances_position:[01;32m.[00m: (0.109946)
+  test_storage_rocksdb::test_identified_change_unsupported_on_a_plain_storage:[01;32m.[00m: (0.000372)
+  test_storage_rocksdb::test_apply_rule_delete_then_older_put_does_not_resurrect:[01;32m.[00m: (0.094740)
+  test_storage_rocksdb::test_apply_rule_forwarded_change_does_not_advance_cursor:[01;32m.[00m: (0.100623)
+  test_storage_rocksdb::test_apply_rule_old_put_refused_after_tombstone_collected:[01;32m.[00m: (0.091679)
+  test_storage_rocksdb::test_generation_epoch_unique_across_sequential_promotions:[01;32m.[00m: (0.184605)
+  test_storage_rocksdb::test_apply_rule_incarnation_checked_against_the_current_copy:[01;32m.[00m: (0.290571)
+  test_storage_rocksdb::test_follow_record_carries_state_reason_and_observation_time:[01;32m.[00m: (0.000775)
+  test_storage_rocksdb::test_apply_rule_refuses_foreign_session_and_stale_incarnation:[01;32m.[00m: (0.095159)
+  test_storage_rocksdb::test_generation_incarnation_unique_across_repeated_hard_reset:[01;32m.[00m: (0.233176)
+  test_storage_rocksdb::test_swap_in_snapshot_refuses_checkpoint_without_source_epoch:[01;32m.[00m: (0.379164)
+[01;42mtest_op_repl_sync_wal[00m:
+  test_op_repl_sync_wal::test_parse_text_server_parameters_empty:[01;32m.[00m: (0.000341)
+  test_op_repl_sync_wal::test_parse_text_server_parameters_huge_lsn:[01;32m.[00m: (0.000026)
+  test_op_repl_sync_wal::test_parse_text_server_parameters_lsn_only:[01;32m.[00m: (0.000008)
+  test_op_repl_sync_wal::test_parse_text_server_parameters_blank_line:[01;32m.[00m: (0.000046)
+  test_op_repl_sync_wal::test_parse_text_server_parameters_no_lineage:[01;32m.[00m: (0.000008)
+  test_op_repl_sync_wal::test_parse_text_server_parameters_extra_ignored:[01;32m.[00m: (0.000185)
+  test_op_repl_sync_wal::test_parse_text_server_parameters_non_numeric_lsn:[01;32m.[00m: (0.000044)
+  test_op_repl_sync_wal::test_parse_text_server_parameters_lsn_and_master_id:[01;32m.[00m: (0.000008)
+
+Finished in 7.170043 seconds (total: 4.341575 seconds)
+
+[01;32m40 test(s), 375 assertion(s), 0 failure(s), 0 error(s), 0 pending(s), 0 omission(s), 0 notification(s)[00m
+[01;32m100% passed[00m
+EXIT=0
+
+=== run 2 ===
+[01;42mtest_op_set[00m:
+  test_op_set::test_parse_text_server_parameters_replication_tag:[01;32m.[00m: (0.000457)
+  test_op_set::test_parse_text_server_parameters_without_replication_tag:[01;32m.[00m: (0.000034)
+  test_op_set::test_parse_text_server_parameters_replication_tag_with_options:[01;32m.[00m: (0.000029)
+
+Finished in 0.004563 seconds (total: 0.000520 seconds)
+
+[01;32m3 test(s), 10 assertion(s), 0 failure(s), 0 error(s), 0 pending(s), 0 omission(s), 0 notification(s)[00m
+[01;32m100% passed[00m
+EXIT=0

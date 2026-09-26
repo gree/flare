@@ -31,6 +31,8 @@
 #include "handler_monitor.h"
 #include "handler_proxy.h"
 #include "handler_reconstruction.h"
+#include "handler_wal_follower.h"
+#include "app.h"
 #include "key_resolver_modular.h"
 #include "op_meta.h"
 #include "op_node_add.h"
@@ -88,6 +90,11 @@ cluster::cluster(thread_pool* req_tp, thread_pool* other_tp, string server_name,
 		_proxy_concurrency(0),
 		_reconstruction_interval(0),
 		_reconstruction_bwlimit(0),
+		_repl_identity_forward(false),
+		_wal_follow_enabled(false),
+		_wal_follow_max_batches(256),
+		_wal_follow_max_bytes(4 * 1024 * 1024),
+		_wal_follow_poll_interval_usec(200 * 1000),
 		_replication_type(replication_async),
 		_proxy_prior_netmask(0), 
 		_max_total_thread_queue(0) {
@@ -1208,6 +1215,10 @@ int cluster::reconstruct_node(vector<node> v, uint64_t node_map_version) {
 		shift_role_stack.pop();
 	}
 
+	// CONTINUOUS REPLICATION (SAF-10c): the maps are final for this
+	// broadcast, so decide whether this node should be following, and whom.
+	this->_reconcile_wal_follower_locked();
+
 	// retry a deferred/failed boot role shift now that this broadcast may
 	// have brought the missing reconstruction source (storage NULL = still
 	// inside startup_node; flared runs the first attempt via run_boot_shift
@@ -1465,20 +1476,34 @@ cluster::proxy_request cluster::pre_proxy_read(op_proxy_read* op, storage::entry
 	if (p.master.node_key == this->_node_key) {
 		return proxy_request_continue;
 	}
+	bool follow_proxy_to_master = false;
 	for (vector<partition_node>::iterator it = p.slave.begin(); it != p.slave.end(); it++) {
-		if (it->node_balance > 0 && it->node_key == this->_node_key) {
-			return proxy_request_continue;
+		if (it->node_key == this->_node_key) {
+			if (stats_object != NULL) {
+				const stats::follow_record follow = stats_object->get_follow_record();
+				follow_proxy_to_master = follow.enabled
+					&& (!stats::follow_allows_local_read(follow, stats_object->get_timestamp())
+						|| follow.source != p.master.node_key);
+			}
+			if (it->node_balance > 0 && !follow_proxy_to_master) {
+				return proxy_request_continue;
+			}
 		}
 	}
 
 	// select one (rand() will do)
-	if (p.balance.size() == 0) {
+	if (p.balance.size() == 0 && !follow_proxy_to_master) {
 		log_err("no node is available for this partition (all balances are set to 0)", 0);
 		return proxy_request_error_partition;
 	}
 
 	string node_key;
-	if (p.prior_balance.size() > 0) {
+	if (follow_proxy_to_master) {
+		// Do not select this stale replica again from an old balance map.
+		// Keep its Slave role so the follower can continue catching up.
+		if (p.master.node_key.empty()) return proxy_request_error_partition;
+		node_key = p.master.node_key;
+	} else if (p.prior_balance.size() > 0) {
 		node_key = p.prior_balance[rand() % p.prior_balance.size()];
 	} else {
 		node_key = p.balance[rand() % p.balance.size()];
@@ -1656,6 +1681,107 @@ int cluster::get_node_partition_map_size() {
  *
  *	assumes that node_map and node_partition_map is alreadby write locked
  */
+int cluster::set_wal_follow_enabled(bool b) {
+	pthread_rwlock_wrlock(&this->_mutex_node_map);
+	pthread_rwlock_wrlock(&this->_mutex_node_partition_map);
+	this->_wal_follow_enabled = b;
+	if (stats_object != NULL) {
+		stats_object->follow_set_enabled(b);
+	}
+	this->_reconcile_wal_follower_locked();
+	pthread_rwlock_unlock(&this->_mutex_node_partition_map);
+	pthread_rwlock_unlock(&this->_mutex_node_map);
+	return 0;
+}
+
+int cluster::stop_wal_follower() {
+	if (this->_wal_follower_thread) {
+		log_notice("stopping continuous replication follower (source=%s)", this->_wal_follower_source.c_str());
+		// The handler parks instead of returning, so the thread is ours until
+		// this shutdown. Never shut down a thread that is no longer running a
+		// handler: a graceful request delivered to a POOLED thread makes it
+		// exit while its object stays in the pool, and the next get() hands
+		// out a dead thread (observed: the rebuild of this node never ran).
+		if (this->_wal_follower_thread->is_running()) {
+			this->_wal_follower_thread->shutdown(true, true);
+		} else {
+			log_warning("continuous replication follower thread is not running a handler; releasing the reference without a shutdown request", 0);
+		}
+		this->_wal_follower_thread.reset();
+		this->_wal_follower_source.clear();
+		if (stats_object != NULL) {
+			stats_object->follow_set_state(stats::follow_idle, "stopped");
+		}
+	}
+	return 0;
+}
+
+/**
+ *	Decide from the CURRENT maps whether this node follows, and whom:
+ *	an active slave on a WAL-capable backend follows its partition's master.
+ *	Anything else — a master, a proxy, a preparing slave, a partition without
+ *	a master — does not. A follower that declared needs_rebuild is NOT
+ *	restarted on the same source: the rebuild path (demote -> hold -> reseat)
+ *	cycles this node's role, and that cycle is what produces a fresh start.
+ */
+int cluster::_reconcile_wal_follower_locked() {
+	bool desired = this->_wal_follow_enabled
+		&& this->_storage != NULL
+		&& this->_storage->get_type() == storage::type_rocksdb;
+	string source_key;
+	if (desired) {
+		node_map::iterator me = this->_node_map.find(this->_node_key);
+		if (me == this->_node_map.end()
+				|| me->second.node_role != role_slave
+				|| me->second.node_state != state_active
+				|| me->second.node_partition < 0) {
+			desired = false;
+		} else {
+			node_partition_map::iterator p = this->_node_partition_map.find(me->second.node_partition);
+			if (p == this->_node_partition_map.end() || p->second.master.node_key.empty()
+					|| p->second.master.node_key == this->_node_key) {
+				desired = false;
+			} else {
+				source_key = p->second.master.node_key;
+			}
+		}
+	}
+
+	if (!desired) {
+		this->stop_wal_follower();
+		return 0;
+	}
+
+	const bool running = this->_wal_follower_thread
+		&& this->_wal_follower_thread->is_shutdown_request() == thread::shutdown_request_none
+		&& this->_wal_follower_source == source_key;
+	if (running) {
+		// Same source, still ours. If it has declared needs_rebuild it stays
+		// stopped until the role cycles; nothing to do here either way.
+		return 0;
+	}
+	if (this->_wal_follower_thread && this->_wal_follower_source == source_key && stats_object != NULL
+			&& stats_object->get_follow_record().state == "needs_rebuild") {
+		return 0;
+	}
+
+	this->stop_wal_follower();
+
+	string host;
+	int port = 0;
+	this->from_node_key(source_key, host, port);
+	shared_thread t = this->_other_thread_pool->get(thread_pool::thread_type_wal_follower);
+	handler_wal_follower* h = new handler_wal_follower(t, this, this->_storage, host, port,
+		this->_wal_follow_max_batches, this->_wal_follow_max_bytes, this->_wal_follow_poll_interval_usec);
+	this->_wal_follower_thread = t;
+	this->_wal_follower_source = source_key;
+	log_notice("starting continuous replication follower (source=%s, max_batches=%llu, max_bytes=%llu, poll=%dus)",
+		source_key.c_str(), (unsigned long long)this->_wal_follow_max_batches,
+		(unsigned long long)this->_wal_follow_max_bytes, this->_wal_follow_poll_interval_usec);
+	t->trigger(h);
+	return 0;
+}
+
 int cluster::_shift_node_state(string node_key, state old_state, state new_state) {
 	log_notice("shifting node_state (node_key=%s, old_state=%s, new_state=%s)", node_key.c_str(), cluster::state_cast(old_state).c_str(), cluster::state_cast(new_state).c_str());
 
@@ -1731,6 +1857,20 @@ int cluster::_shift_node_role(string node_key, role old_role, int old_partition,
 	// return 0, so the guard is a no-op there); we deliberately avoid pulling
 	// the RocksDB headers into cluster.cc.
 	if (new_role == role_master && old_role != role_master && this->_storage != NULL) {
+		// SOURCE EPOCH (SAF-10, design §3.1): this node's history stops being
+		// a continuation of the one its followers were reading — its sequence
+		// space is its own DB's, unrelated to the previous master's. Advance
+		// the epoch UNCONDITIONALLY here, before the narrower cursor check
+		// below: master_id alone cannot carry this, because the check below
+		// only fires when the cursor exceeds our own sequence, so a
+		// snapshot-rebuilt replica (cursor == checkpoint sequence) would keep
+		// the old token over an unrelated sequence space.
+		if (this->_storage->advance_source_epoch() < 0) {
+			// Fail closed: the storage marks its generations unavailable and
+			// every replication path refuses on that, rather than this node
+			// serving a new history under the previous identity.
+			log_err("promotion: could not advance the source epoch -> replication is UNAVAILABLE on this node until it can be persisted", 0);
+		}
 		uint64_t cursor = this->_storage->get_repl_last_lsn();
 		uint64_t seq = this->_storage->get_latest_sequence_number();
 		if (cursor > seq) {

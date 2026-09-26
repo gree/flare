@@ -33,6 +33,7 @@
 #include <uuid/uuid.h>
 #include <pthread.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #include <sys/types.h>
 #include <dirent.h>
 #include <algorithm>
@@ -48,9 +49,17 @@ namespace flare {
 // operations cannot accidentally clobber or observe them.
 const char* const storage_rocksdb::kReplLastLsnKey  = "__flare_repl_last_lsn";
 const char* const storage_rocksdb::kReplMasterIdKey = "__flare_repl_master_id";
+// Generations (design §3.1) and the restore completion marker (§3.9(D)).
+const char* const storage_rocksdb::kReplSourceEpochKey = "__flare_repl_source_epoch";
+const char* const storage_rocksdb::kReplIncarnationKey = "__flare_repl_incarnation";
+const char* const storage_rocksdb::kReplRestoreDoneKey = "__flare_repl_restore_done";
+// Name of the replication-metadata column family (design §3.7).
+const char* const storage_rocksdb::kReplMetaCfName = "flare_repl_meta";
 
 bool storage_rocksdb::is_reserved_key(const string& key) {
-	return key == kReplLastLsnKey || key == kReplMasterIdKey;
+	return key == kReplLastLsnKey || key == kReplMasterIdKey
+		|| key == kReplSourceEpochKey || key == kReplIncarnationKey
+		|| key == kReplRestoreDoneKey;
 }
 // }}}
 
@@ -71,6 +80,8 @@ storage_rocksdb::storage_rocksdb(
 ):
 	storage(data_dir, mutex_slot_size, header_cache_size),
 	_db(NULL),
+	_cf_default(NULL),
+	_cf_meta(NULL),
 	_iter_snapshot(NULL),
 	_iter(NULL),
 	_iter_first(false),
@@ -81,6 +92,15 @@ storage_rocksdb::storage_rocksdb(
 	_wal_size_limit_mb(wal_size_limit_mb),
 	_sync_writes(sync_writes),
 	_master_id(""),
+	_source_epoch(""),
+	_incarnation(""),
+	_generations_broken(false),
+	_repl_forward_applied(0),
+	_repl_forward_skipped(0),
+	_repl_wal_applied(0),
+	_repl_wal_skipped(0),
+	_repl_decode_refused(0),
+	_repl_tombstones_dropped(0),
 	_wal_sync_success(0),
 	_wal_sync_lsn_purged(0),
 	_wal_sync_lsn_ahead(0),
@@ -108,6 +128,8 @@ storage_rocksdb::storage_rocksdb(
 	_backup_success(0),
 	_backup_failure(0) {
 	pthread_mutex_init(&this->_resync_failure_mutex, NULL);
+	pthread_rwlock_init(&this->_mutex_generations, NULL);
+	pthread_rwlock_init(&this->_repl_apply_lock, NULL);
 	pthread_mutex_init(&this->_orphan_scan_mutex, NULL);
 	pthread_rwlock_init(&this->_mutex_master_id, NULL);
 	this->_data_path = this->_data_dir + "/flare.rocksdb";
@@ -121,10 +143,9 @@ storage_rocksdb::~storage_rocksdb() {
 	if (this->_open) {
 		this->close();
 	}
-	if (this->_db) {
-		delete this->_db;
-		this->_db = NULL;
-	}
+	this->_close_db();
+	pthread_rwlock_destroy(&this->_repl_apply_lock);
+	pthread_rwlock_destroy(&this->_mutex_generations);
 	pthread_mutex_destroy(&this->_resync_failure_mutex);
 	pthread_mutex_destroy(&this->_orphan_scan_mutex);
 	pthread_rwlock_destroy(&this->_mutex_master_id);
@@ -284,6 +305,167 @@ int storage_rocksdb::set_master_id(const string& id) {
 	return 0;
 }
 
+int storage_rocksdb::_persist_generation(const char* key, const string& value) {
+	if (this->_db == NULL) {
+		log_err("_persist_generation: DB handle is closed", 0);
+		return -1;
+	}
+	rocksdb::WriteOptions wo;
+	wo.sync = true;			// a generation must never be lost by a crash
+	wo.disableWAL = false;
+	rocksdb::Status st = this->_db->Put(wo, key, value);
+	if (!st.ok()) {
+		log_err("failed to persist %s: %s", key, st.ToString().c_str());
+		return -1;
+	}
+	return 0;
+}
+
+/**
+ *	Mint a generation identity: "<n>:<uuid>".
+ *
+ *	The uuid is what makes it an IDENTITY. A bare counter is not sufficient:
+ *	two copies of the same data promoted one after the other would each
+ *	advance their own counter to the same value, so two unrelated sequence
+ *	spaces would advertise the same generation and a follower comparing them
+ *	would apply one history's numbers against another's. The same argument
+ *	applies to a repeated hard reset, which re-initialises a fresh DB every
+ *	time. The counter is kept only so a human can see how often it moved; it
+ *	is never compared alone.
+ */
+string storage_rocksdb::_mint_generation(const string& previous) {
+	uint64_t n = 0;
+	string::size_type colon = previous.find(':');
+	if (colon != string::npos) {
+		try {
+			n = boost::lexical_cast<uint64_t>(previous.substr(0, colon));
+		} catch (boost::bad_lexical_cast&) {
+			n = 0;
+		}
+	}
+	uuid_t uuid;
+	char buf[37];
+	uuid_generate(uuid);
+	uuid_unparse_lower(uuid, buf);
+	return boost::lexical_cast<string>(n + 1) + ":" + buf;
+}
+
+/**
+ *	Load both generations, minting them on a fresh DB (design §3.1).
+ *	A plain process restart keeps both values, which is the point: a restart
+ *	is not a history change and must not cost a rebuild.
+ */
+int storage_rocksdb::_load_or_init_generations() {
+	struct { const char* key; string* slot; } gens[] = {
+		{ kReplSourceEpochKey, &this->_source_epoch },
+		{ kReplIncarnationKey, &this->_incarnation },
+	};
+	pthread_rwlock_wrlock(&this->_mutex_generations);
+	int rc = 0;
+	for (size_t i = 0; i < sizeof(gens) / sizeof(gens[0]); i++) {
+		string value;
+		rocksdb::Status st = this->_db->Get(this->_read_options, gens[i].key, &value);
+		if (st.ok() && !value.empty()) {
+			*gens[i].slot = value;
+			continue;
+		}
+		if (!st.ok() && !st.IsNotFound()) {
+			log_err("failed to read %s: %s", gens[i].key, st.ToString().c_str());
+			rc = -1;
+			break;
+		}
+		const string minted = _mint_generation("");
+		if (this->_persist_generation(gens[i].key, minted) < 0) {
+			rc = -1;
+			break;
+		}
+		*gens[i].slot = minted;
+	}
+	this->_generations_broken = (rc != 0);
+	const string epoch = this->_source_epoch;
+	const string incarnation = this->_incarnation;
+	pthread_rwlock_unlock(&this->_mutex_generations);
+	if (rc != 0) {
+		log_err("replication generations UNAVAILABLE: this node will neither serve nor accept replication until they can be established", 0);
+		return -1;
+	}
+	log_notice("replication generations (source_epoch=%s, incarnation=%s)",
+		epoch.c_str(), incarnation.c_str());
+	return 0;
+}
+
+string storage_rocksdb::get_source_epoch() {
+	pthread_rwlock_rdlock(&this->_mutex_generations);
+	string v = this->_generations_broken ? string("") : this->_source_epoch;
+	pthread_rwlock_unlock(&this->_mutex_generations);
+	return v;
+}
+
+string storage_rocksdb::get_incarnation() {
+	pthread_rwlock_rdlock(&this->_mutex_generations);
+	string v = this->_generations_broken ? string("") : this->_incarnation;
+	pthread_rwlock_unlock(&this->_mutex_generations);
+	return v;
+}
+
+bool storage_rocksdb::generations_broken() const {
+	pthread_rwlock_rdlock(&this->_mutex_generations);
+	bool b = this->_generations_broken;
+	pthread_rwlock_unlock(&this->_mutex_generations);
+	return b;
+}
+
+/**
+ *	Advance the SOURCE EPOCH: this node's history is no longer a continuation
+ *	of what followers have been reading. Promotion, a replacement of the local
+ *	history, and a bulk rewrite (truncate / flush_all) all qualify. Followers
+ *	see a different identity, refuse the old stream and rebuild.
+ *
+ *	FAIL CLOSED: if the new identity cannot be persisted, the node must not
+ *	keep advertising the old one over a changed history. The generations go
+ *	UNAVAILABLE, which every replication path refuses on.
+ */
+int storage_rocksdb::advance_source_epoch() {
+	pthread_rwlock_wrlock(&this->_mutex_generations);
+	const string minted = _mint_generation(this->_source_epoch);
+	int r = this->_persist_generation(kReplSourceEpochKey, minted);
+	if (r == 0) {
+		this->_source_epoch = minted;
+	} else {
+		this->_generations_broken = true;
+	}
+	pthread_rwlock_unlock(&this->_mutex_generations);
+	if (r == 0) {
+		log_notice("source epoch advanced to %s (followers of the previous history must rebuild)", minted.c_str());
+	} else {
+		log_err("could not persist the new source epoch: this node's history changed but the identity did not — replication is now UNAVAILABLE here (fail closed)", 0);
+	}
+	return r;
+}
+
+/**
+ *	Advance the RECEIVER INCARNATION: this node's own copy was replaced, so
+ *	streams and forwarded changes issued against the previous copy must be
+ *	refused rather than applied onto the new one. Same fail-closed rule.
+ */
+int storage_rocksdb::advance_incarnation() {
+	pthread_rwlock_wrlock(&this->_mutex_generations);
+	const string minted = _mint_generation(this->_incarnation);
+	int r = this->_persist_generation(kReplIncarnationKey, minted);
+	if (r == 0) {
+		this->_incarnation = minted;
+	} else {
+		this->_generations_broken = true;
+	}
+	pthread_rwlock_unlock(&this->_mutex_generations);
+	if (r == 0) {
+		log_notice("receiver incarnation advanced to %s (deliveries for the previous copy are refused)", minted.c_str());
+	} else {
+		log_err("could not persist the new receiver incarnation: this node's copy was replaced but the identity did not change — replication is now UNAVAILABLE here (fail closed)", 0);
+	}
+	return r;
+}
+
 int storage_rocksdb::regenerate_master_id() {
 	// Mint a fresh UUID (same generator as _load_or_generate_master_id) and
 	// persist it via set_master_id (durable Put + in-memory swap under
@@ -301,45 +483,123 @@ int storage_rocksdb::regenerate_master_id() {
 // }}}
 
 // {{{ public methods
+/**
+ *	Open the DB with the default column family and the replication-metadata
+ *	one, creating the latter when the directory predates it. Every open site
+ *	goes through here: RocksDB refuses to open a directory whose column
+ *	families are not all listed, so a single place has to know about them.
+ */
+rocksdb::Status storage_rocksdb::_open_db(const string& path) {
+	vector<string> existing;
+	rocksdb::Status ls = rocksdb::DB::ListColumnFamilies(rocksdb::DBOptions(this->_options), path, &existing);
+	bool has_meta = false;
+	if (ls.ok()) {
+		for (size_t i = 0; i < existing.size(); i++) {
+			if (existing[i] == kReplMetaCfName) {
+				has_meta = true;
+			}
+		}
+	}
+
+	vector<rocksdb::ColumnFamilyDescriptor> descriptors;
+	descriptors.push_back(rocksdb::ColumnFamilyDescriptor(
+		rocksdb::kDefaultColumnFamilyName, rocksdb::ColumnFamilyOptions(this->_options)));
+	if (has_meta) {
+		descriptors.push_back(rocksdb::ColumnFamilyDescriptor(
+			kReplMetaCfName, rocksdb::ColumnFamilyOptions(this->_options)));
+	}
+
+	vector<rocksdb::ColumnFamilyHandle*> handles;
+	rocksdb::Status st = rocksdb::DB::Open(rocksdb::DBOptions(this->_options), path, descriptors, &handles, &this->_db);
+	if (!st.ok()) {
+		return st;
+	}
+	this->_cf_default = handles[0];
+	this->_cf_meta = NULL;
+	if (has_meta) {
+		this->_cf_meta = handles[1];
+	} else {
+		rocksdb::ColumnFamilyHandle* cf = NULL;
+		rocksdb::Status cs = this->_db->CreateColumnFamily(
+			rocksdb::ColumnFamilyOptions(this->_options), kReplMetaCfName, &cf);
+		if (!cs.ok()) {
+			log_err("failed to create the replication metadata column family: %s", cs.ToString().c_str());
+			return cs;
+		}
+		this->_cf_meta = cf;
+	}
+	return rocksdb::Status::OK();
+}
+
+void storage_rocksdb::_close_db() {
+	if (this->_db != NULL) {
+		if (this->_cf_meta != NULL) {
+			this->_db->DestroyColumnFamilyHandle(this->_cf_meta);
+			this->_cf_meta = NULL;
+		}
+		if (this->_cf_default != NULL) {
+			this->_db->DestroyColumnFamilyHandle(this->_cf_default);
+			this->_cf_default = NULL;
+		}
+		delete this->_db;
+		this->_db = NULL;
+	}
+}
+
 int storage_rocksdb::open() {
 	if (this->_open) {
 		log_warning("storage has been already opened", 0);
 		return -1;
 	}
 
-	rocksdb::Status status = rocksdb::DB::Open(this->_options, this->_data_path, &this->_db);
-	if (!status.ok()) {
-		log_err("RocksDB::Open() failed: %s", status.ToString().c_str());
+	// Never expose a half-restored copy (design §3.9(D)).
+	if (this->_discard_incomplete_restore() < 0) {
+		log_err("storage open refused: an interrupted restore could not be cleaned up", 0);
 		return -1;
 	}
 
-	// Seed the O(1) curr_items counter (see storage_rocksdb.h). Exact 0 on a
-	// fresh DB (nothing persisted yet — the reserved master-id key is written
-	// AFTER this point and reserved keys are never counted); approximate on
-	// reopen of an existing directory.
+	rocksdb::Status status = this->_open_db(this->_data_path);
+	if (!status.ok()) {
+		log_err("RocksDB::Open() failed: %s", status.ToString().c_str());
+		this->_close_db();
+		return -1;
+	}
+
+	// Seed the O(1) curr_items counter (see storage_rocksdb.h) with an EXACT
+	// scan of the data family. This used to read rocksdb.estimate-num-keys,
+	// which does not see keys that live only in the WAL: after a crash (or
+	// any reopen with an unflushed tail) the recovered keys were missing from
+	// the count, so curr_items under-reported by exactly the unflushed
+	// writes (observed by the SAF-10d crash test: 52 keys present, not
+	// counted, and every count-based comparison — replica divergence,
+	// empty-master guard, the acceptance suite — read it as data loss).
+	// The scan is O(n) at boot only (fill_cache=false), the same routine a
+	// snapshot swap already runs on a full copy; its duration is logged.
 	{
-		std::string est;
-		uint64_t seed_count = 0;
-		if (this->_db->GetProperty("rocksdb.estimate-num-keys", &est)) {
-			try {
-				seed_count = boost::lexical_cast<uint64_t>(est);
-			} catch (boost::bad_lexical_cast&) {
-				seed_count = 0;
+		struct timeval t0, t1;
+		gettimeofday(&t0, NULL);
+		uint64_t exact = 0;
+		rocksdb::ReadOptions ro = this->_read_options;
+		ro.fill_cache = false;
+		rocksdb::Iterator* it = this->_db->NewIterator(ro);
+		for (it->SeekToFirst(); it->Valid(); it->Next()) {
+			if (!is_reserved_key(it->key().ToString())) {
+				exact++;
 			}
 		}
-		// The estimate includes our reserved replication-metadata keys on a
-		// reopened DB — probe and exclude the ones actually present so a
-		// small dataset is not systematically over-counted.
-		std::string tmp;
-		if (seed_count > 0 && this->_db->Get(this->_read_options, kReplMasterIdKey, &tmp).ok()) {
-			seed_count--;
-		}
-		if (seed_count > 0 && this->_db->Get(this->_read_options, kReplLastLsnKey, &tmp).ok()) {
-			seed_count--;
+		const bool scan_ok = it->status().ok();
+		delete it;
+		gettimeofday(&t1, NULL);
+		const long ms = (t1.tv_sec - t0.tv_sec) * 1000L + (t1.tv_usec - t0.tv_usec) / 1000L;
+		if (!scan_ok) {
+			log_warning("curr_items seed: the open-time key scan failed (%s) -> seeding 0; the count is rebuilt by writes only", it == NULL ? "" : "iterator error");
+			exact = 0;
+		} else {
+			log_notice("curr_items seeded by an exact scan: %llu live key(s) in %ld ms", (unsigned long long)exact, ms);
 		}
 		this->_curr_items.sub(this->_curr_items.fetch());
-		if (seed_count > 0) {
-			this->_curr_items.add(seed_count);
+		if (exact > 0) {
+			this->_curr_items.add(exact);
 		}
 	}
 
@@ -347,8 +607,11 @@ int storage_rocksdb::open() {
 	// the WAL replication subsystem cannot detect cross-lineage sync
 	// attempts, so we fail closed.
 	if (this->_load_or_generate_master_id() < 0) {
-		delete this->_db;
-		this->_db = NULL;
+		this->_close_db();
+		return -1;
+	}
+	if (this->_load_or_init_generations() < 0) {
+		log_err("failed to initialise replication generations", 0);
 		return -1;
 	}
 
@@ -373,8 +636,7 @@ int storage_rocksdb::close() {
 		this->iter_end();
 	}
 
-	delete this->_db;
-	this->_db = NULL;
+	this->_close_db();
 
 	log_debug("storage close", 0);
 	this->_open = false;
@@ -549,6 +811,13 @@ int storage_rocksdb::set(entry& e, result& r, int b) {
 		}
 
 		r = (b & behavior_touch) ? result_touched : result_stored;
+		// ORDER LABEL (design §3.9(B)): read INSIDE the key's critical
+		// section. Read after the write and while the slot lock is still
+		// held, so the next change to this key — which must take the same
+		// lock — is guaranteed a strictly greater value. Reading it after
+		// the lock is released is the counterexample that resurrects a
+		// deleted key, so this must not be moved into the caller.
+		e.seq_label = this->_db->GetLatestSequenceNumber();
 
 		// O(1) curr_items bookkeeping: this Put created a key that was not
 		// physically present (e_current_exists reflects a real Get above).
@@ -734,6 +1003,8 @@ int storage_rocksdb::remove(entry& e, result& r, int b) {
 		(void)this->_note_write_status(status, "remove");
 		if (status.ok()) {
 			r = expired ? result_not_found : result_deleted;
+			// ORDER LABEL: same rule as set() — inside the slot lock.
+			e.seq_label = this->_db->GetLatestSequenceNumber();
 			// O(1) curr_items bookkeeping: the not-found path threw before this
 			// point, so a physically present key was just deleted.
 			this->_curr_items.decr();
@@ -857,7 +1128,11 @@ int storage_rocksdb::incr(entry& e, uint64_t value, result& r, bool increment, i
 			throw 0;
 		}
 
-		r = result_stored;
+r = result_stored;
+		// ORDER LABEL: the nested set() captured it inside the slot lock we
+		// are already holding (behavior_skip_lock), so it is this change's
+		// label; incr/decr are forwarded as the RESULTING VALUE (design
+		// §3.2), never re-computed on a replica.
 
 	} catch (int e) {
 		if ((b & behavior_skip_lock) == 0) {
@@ -877,6 +1152,13 @@ int storage_rocksdb::incr(entry& e, uint64_t value, result& r, bool increment, i
 
 int storage_rocksdb::truncate(int b) {
 	log_notice("truncating storage (this may take a while)", 0);
+	// BULK OPERATION (design §3.9(B)): truncate / flush_all replace the
+	// history rather than edit keys inside it, so no per-key order label is
+	// meaningful and ordering a mass delete against in-flight forwarded
+	// changes by label would be guesswork. Advance the SOURCE EPOCH instead:
+	// followers refuse the old stream and rebuild. Done at the END of a
+	// successful truncate (see below) so a failed truncate does not cost
+	// every replica a rebuild.
 
 	// Exclude every concurrent get/set/remove/incr (they hold the
 	// wholelock in read mode plus a slot lock) while we scan-delete and
@@ -940,6 +1222,13 @@ int storage_rocksdb::truncate(int b) {
 	// drift, but the storage error listener escalates anyway.
 	if (r == 0) {
 		this->_curr_items.sub(this->_curr_items.fetch());
+	}
+
+	// Advance the epoch BEFORE releasing the whole-lock, so no reader can
+	// observe the truncated history still carrying the old epoch. Lock order
+	// is whole-lock -> generations, the same as hard_reset().
+	if (r == 0) {
+		this->advance_source_epoch();
 	}
 
 	if ((b & behavior_skip_lock) == 0) {
@@ -1020,6 +1309,42 @@ namespace {
 	// uses it (anonymous namespaces in one TU merge, so this forward
 	// declaration binds to that definition).
 	int remove_tree(const string& path);
+}
+
+string storage_rocksdb::_restore_pending_path() const {
+	return this->_data_dir + "/.flare_restore_pending";
+}
+
+/**
+ *	A restore that did not finish must never be exposed (design §3.9(D)).
+ *	Called from open() BEFORE the DB is opened: if the sentinel is present, the
+ *	previous snapshot restore was interrupted and the directory holds the
+ *	source's data with our replication metadata unset. Wipe it and come up
+ *	empty; reconstruction reseeds. Returns true when it wiped.
+ */
+int storage_rocksdb::_discard_incomplete_restore() {
+	const string pending = this->_restore_pending_path();
+	struct stat sb;
+	if (stat(pending.c_str(), &sb) != 0) {
+		return 0;
+	}
+	log_err("an interrupted snapshot restore was found (sentinel=%s): the DB holds the source's data with our replication metadata unset -> discarding it and starting empty; reconstruction will reseed",
+		pending.c_str());
+	if (remove_tree(this->_data_path) != 0) {
+		// FAIL CLOSED: opening the directory now would expose the source's
+		// data under this node's identity with no cursor and no generations.
+		// Refuse to open at all; the node stays down and is rebuilt.
+		log_err("failed to remove the half-restored DB dir [%s] -> refusing to open it", this->_data_path.c_str());
+		return -1;
+	}
+	if (unlink(pending.c_str()) != 0 && errno != ENOENT) {
+		// The data is gone, so opening is safe, but leaving the sentinel
+		// would discard the NEXT (good) restore as well.
+		log_err("the half-restored DB was removed but its sentinel [%s] could not be: %s -> refusing to open (the next restore would be discarded too)",
+			pending.c_str(), util::strerror(errno));
+		return -1;
+	}
+	return 0;
 }
 
 int storage_rocksdb::create_snapshot_checkpoint(string& out_path, uint64_t& out_seq) {
@@ -1114,6 +1439,43 @@ int storage_rocksdb::prepare_snapshot_staging(string& out_dir) {
 	return 0;
 }
 
+namespace {
+	/**
+	 *	Open a directory READ-ONLY with every column family it contains.
+	 *	RocksDB refuses to open a directory whose families are not all listed,
+	 *	and a checkpoint taken from a node that has applied deliveries carries
+	 *	the replication-metadata family, so probes cannot use the one-argument
+	 *	form any more.
+	 */
+	rocksdb::Status open_read_only_all_cfs(const rocksdb::Options& options,
+			const string& dir, rocksdb::DB** db,
+			vector<rocksdb::ColumnFamilyHandle*>& handles) {
+		vector<string> names;
+		rocksdb::Status ls = rocksdb::DB::ListColumnFamilies(rocksdb::DBOptions(options), dir, &names);
+		if (!ls.ok() || names.empty()) {
+			names.clear();
+			names.push_back(rocksdb::kDefaultColumnFamilyName);
+		}
+		vector<rocksdb::ColumnFamilyDescriptor> descriptors;
+		for (size_t i = 0; i < names.size(); i++) {
+			descriptors.push_back(rocksdb::ColumnFamilyDescriptor(
+				names[i], rocksdb::ColumnFamilyOptions(options)));
+		}
+		return rocksdb::DB::OpenForReadOnly(rocksdb::DBOptions(options), dir, descriptors, &handles, db);
+	}
+
+	void close_read_only(rocksdb::DB* db, vector<rocksdb::ColumnFamilyHandle*>& handles) {
+		if (db == NULL) {
+			return;
+		}
+		for (size_t i = 0; i < handles.size(); i++) {
+			db->DestroyColumnFamilyHandle(handles[i]);
+		}
+		handles.clear();
+		delete db;
+	}
+}
+
 int storage_rocksdb::swap_in_snapshot(const string& staging_dir, uint64_t checkpoint_seq) {
 	// STRUCTURAL VERIFICATION before the point of no return: open the staged
 	// checkpoint read-only (parses MANIFEST + replays its WAL) and touch one
@@ -1127,14 +1489,15 @@ int storage_rocksdb::swap_in_snapshot(const string& staging_dir, uint64_t checkp
 		rocksdb::DB* probe = NULL;
 		rocksdb::Options probe_options = this->_options;
 		probe_options.create_if_missing = false;
-		rocksdb::Status ps = rocksdb::DB::OpenForReadOnly(probe_options, staging_dir, &probe);
+		vector<rocksdb::ColumnFamilyHandle*> probe_handles;
+		rocksdb::Status ps = open_read_only_all_cfs(probe_options, staging_dir, &probe, probe_handles);
 		if (!ps.ok()) {
 			log_err("swap_in_snapshot: staged checkpoint failed verification (open: %s) -> refusing swap", ps.ToString().c_str());
 			return -1;
 		}
 		string tmp;
 		rocksdb::Status gs = probe->Get(rocksdb::ReadOptions(), storage_rocksdb::kReplMasterIdKey, &tmp);
-		delete probe;
+		close_read_only(probe, probe_handles);
 		if (!gs.ok() && !gs.IsNotFound()) {
 			log_err("swap_in_snapshot: staged checkpoint failed verification (read: %s) -> refusing swap", gs.ToString().c_str());
 			return -1;
@@ -1152,9 +1515,28 @@ int storage_rocksdb::swap_in_snapshot(const string& staging_dir, uint64_t checkp
 	do {
 		if (this->_db != NULL) {
 			// Flush is unnecessary (the DB is about to be discarded); just
-			// close the handle so the directory can be replaced.
-			delete this->_db;
-			this->_db = NULL;
+			// close the handle (and its column family handles) so the
+			// directory can be replaced.
+			this->_close_db();
+		}
+
+		// INCOMPLETE-RESTORE SENTINEL (design §3.9(D)). Written as a sibling
+		// of the DB directory — not inside it, so RocksDB never sees it —
+		// BEFORE the old copy is destroyed, and removed only once the restore
+		// batch has committed. A crash anywhere in between leaves it on disk,
+		// and open() then refuses to expose the half-restored DB and wipes it
+		// so reconstruction runs again. Reserved keys inherited from the
+		// source cannot serve this purpose: the checkpoint carries the
+		// SOURCE's copies of them.
+		{
+			const string pending = this->_restore_pending_path();
+			FILE* fp = fopen(pending.c_str(), "w");
+			if (fp == NULL) {
+				log_err("swap_in_snapshot: could not create the restore sentinel [%s]: %s -> refusing the swap",
+					pending.c_str(), util::strerror(errno));
+				break;
+			}
+			fclose(fp);
 		}
 
 		if (remove_tree(this->_data_path) != 0) {
@@ -1167,7 +1549,7 @@ int storage_rocksdb::swap_in_snapshot(const string& staging_dir, uint64_t checkp
 			// reconstruction will retry with a full dump.
 		}
 
-		rocksdb::Status status = rocksdb::DB::Open(this->_options, this->_data_path, &this->_db);
+		rocksdb::Status status = this->_open_db(this->_data_path);
 		if (!status.ok()) {
 			log_err("swap_in_snapshot: reopen failed: %s", status.ToString().c_str());
 			this->_db = NULL;
@@ -1191,8 +1573,25 @@ int storage_rocksdb::swap_in_snapshot(const string& staging_dir, uint64_t checkp
 		// after it is in the source's WAL; the follow-up incremental sync
 		// starts here. (Write the marker with WAL enabled like set_repl_last_lsn.)
 		{
+			// ALL-OR-NOTHING RESTORE (design §3.9(D)). The checkpoint carries
+			// the SOURCE's replication metadata — its cursor, its generations
+			// and (once the metadata column family exists) its per-key labels
+			// and tombstones. Those describe the source's relationship to ITS
+			// source, not ours, so they are cleared here and replaced in ONE
+			// batch that ends with a completion marker:
+			//   - cursor := the checkpoint's exact sequence,
+			//   - source epoch := the source's (we are now following that
+			//     history),
+			//   - incarnation := ours + 1 (our copy was replaced, so anything
+			//     issued against the previous copy must be refused),
+			//   - restore-done marker, written last IN THE SAME BATCH.
+			// A crash before the batch commits leaves no marker, and an
+			// unmarked DB is treated as an incomplete restore at open() and
+			// rebuilt rather than exposed. Until this batch commits the node
+			// accepts no delivery: it is inside the whole-lock and is a
+			// Prepare slave with balance 0.
 			rocksdb::WriteOptions wo;
-			wo.sync = this->_sync_writes;
+			wo.sync = true;			// the marker must not outlive a crash unwritten
 			wo.disableWAL = false;
 			string lsn_value;
 			try {
@@ -1200,10 +1599,83 @@ int storage_rocksdb::swap_in_snapshot(const string& staging_dir, uint64_t checkp
 			} catch (...) {
 				lsn_value = "0";
 			}
-			rocksdb::Status st = this->_db->Put(wo, kReplLastLsnKey, lsn_value);
+
+			// The checkpoint carries the SOURCE's replication metadata — its
+			// per-key labels and tombstones, expressed in ITS source's
+			// sequence space (design §3.9(D)). Drop the whole family and
+			// recreate it empty: an absent row is safe here because the
+			// cursor is about to be set to the checkpoint sequence, and the
+			// positional rule refuses everything at or below it.
+			if (this->_cf_meta != NULL) {
+				rocksdb::Status ds = this->_db->DropColumnFamily(this->_cf_meta);
+				this->_db->DestroyColumnFamilyHandle(this->_cf_meta);
+				this->_cf_meta = NULL;
+				if (!ds.ok()) {
+					log_err("swap_in_snapshot: could not drop the inherited replication metadata: %s -> refusing to complete the restore", ds.ToString().c_str());
+					break;
+				}
+				rocksdb::ColumnFamilyHandle* fresh = NULL;
+				rocksdb::Status cs = this->_db->CreateColumnFamily(
+					rocksdb::ColumnFamilyOptions(this->_options), kReplMetaCfName, &fresh);
+				if (!cs.ok()) {
+					log_err("swap_in_snapshot: could not recreate the replication metadata family: %s", cs.ToString().c_str());
+					break;
+				}
+				this->_cf_meta = fresh;
+			}
+			this->_tombstone_sweep_cursor.clear();
+
+			// The SOURCE EPOCH is inherited from the checkpoint: we are now
+			// following that history, and its identity is what our cursor
+			// belongs to. A checkpoint without one is refused rather than
+			// guessed — an unidentified history cannot be compared later.
+			string inherited_epoch;
+			{
+				rocksdb::Status gs = this->_db->Get(this->_read_options, kReplSourceEpochKey, &inherited_epoch);
+				if (!gs.ok() || inherited_epoch.empty()) {
+					log_err("swap_in_snapshot: the checkpoint carries no source epoch -> refusing to complete the restore (the history could not be identified)", 0);
+					break;
+				}
+			}
+			// The RECEIVER INCARNATION is freshly minted, never derived from
+			// what the checkpoint carries: a repeated restore must produce a
+			// different identity every time, or a delivery issued against the
+			// previous copy would be accepted onto this one.
+			const string next_incarnation = _mint_generation(this->get_incarnation());
+
+			rocksdb::WriteBatch restore;
+			restore.Put(kReplLastLsnKey, lsn_value);
+			restore.Put(kReplSourceEpochKey, inherited_epoch);
+			restore.Put(kReplIncarnationKey, next_incarnation);
+			restore.Put(kReplRestoreDoneKey, boost::lexical_cast<string>(checkpoint_seq));
+			rocksdb::Status st = this->_db->Write(wo, &restore);
 			if (!st.ok()) {
-				log_err("swap_in_snapshot: failed to seed repl_last_lsn: %s", st.ToString().c_str());
+				log_err("swap_in_snapshot: failed to complete the restore batch: %s", st.ToString().c_str());
 				break;
+			}
+			pthread_rwlock_wrlock(&this->_mutex_generations);
+			this->_source_epoch = inherited_epoch;
+			this->_incarnation = next_incarnation;
+			this->_generations_broken = false;
+			pthread_rwlock_unlock(&this->_mutex_generations);
+			log_notice("restore completed (cursor=%llu, source_epoch=%s, incarnation=%s)",
+				(unsigned long long)checkpoint_seq,
+				inherited_epoch.c_str(), next_incarnation.c_str());
+			// The restore is complete and durable: clear the sentinel. If it
+			// cannot be removed the DB is GOOD but will be discarded and
+			// rebuilt at the next start — costly, never unsafe. Say so at
+			// error level so the cause is visible before that happens.
+			{
+				const string pending = this->_restore_pending_path();
+				int attempts = 0;
+				while (unlink(pending.c_str()) != 0 && errno != ENOENT && ++attempts < 3) {
+					usleep(10000);
+				}
+				struct stat sb;
+				if (stat(pending.c_str(), &sb) == 0) {
+					log_err("swap_in_snapshot: the restore completed but its sentinel [%s] could not be removed: this node will DISCARD this copy and reconstruct again at the next start",
+						pending.c_str());
+				}
 			}
 		}
 
@@ -1254,7 +1726,8 @@ int storage_rocksdb::analyze_checkpoint(const string& dir, FILE* out) {
 	rocksdb::DB* db = NULL;
 	rocksdb::Options opt;
 	opt.create_if_missing = false;
-	rocksdb::Status s = rocksdb::DB::OpenForReadOnly(opt, dir, &db);
+	vector<rocksdb::ColumnFamilyHandle*> cf_handles;
+	rocksdb::Status s = open_read_only_all_cfs(opt, dir, &db, cf_handles);
 	if (!s.ok()) {
 		log_err("analyze_checkpoint: OpenForReadOnly(%s) failed: %s", dir.c_str(), s.ToString().c_str());
 		return -1;
@@ -1264,7 +1737,7 @@ int storage_rocksdb::analyze_checkpoint(const string& dir, FILE* out) {
 	ro.fill_cache = false;  // one-pass scan must not thrash the block cache
 	rocksdb::Iterator* it = db->NewIterator(ro);
 	if (it == NULL) {
-		delete db;
+		close_read_only(db, cf_handles);
 		return -1;
 	}
 
@@ -1303,7 +1776,7 @@ int storage_rocksdb::analyze_checkpoint(const string& dir, FILE* out) {
 
 	rocksdb::Status its = it->status();
 	delete it;
-	delete db;
+	close_read_only(db, cf_handles);
 	if (!its.ok()) {
 		log_err("analyze_checkpoint: iteration error: %s", its.ToString().c_str());
 		return -1;
@@ -1410,7 +1883,7 @@ int storage_rocksdb::_emergency_reopen_empty(const char* who) {
 	// and _db is NULL. Returns 0 when serving again on an empty DB.
 	remove_tree(this->_data_path);
 	this->_prune_named_backups(0);
-	rocksdb::Status status = rocksdb::DB::Open(this->_options, this->_data_path, &this->_db);
+	rocksdb::Status status = this->_open_db(this->_data_path);
 	if (!status.ok()) {
 		log_err("%s: emergency empty reopen failed too (%s) — DB handle stays closed; ops fail cleanly and self-heal keeps retrying", who, status.ToString().c_str());
 		this->_db = NULL;
@@ -1433,13 +1906,12 @@ int storage_rocksdb::hard_reset() {
 	int r = -1;
 	do {
 		if (this->_db != NULL) {
-			delete this->_db;
-			this->_db = NULL;
+			this->_close_db();
 		}
 		if (remove_tree(this->_data_path) != 0) {
 			log_err("hard_reset: failed to remove data dir [%s] -> reopen may still fail", this->_data_path.c_str());
 		}
-		rocksdb::Status status = rocksdb::DB::Open(this->_options, this->_data_path, &this->_db);
+		rocksdb::Status status = this->_open_db(this->_data_path);
 		if (!status.ok()) {
 			log_err("hard_reset: reopen failed: %s", status.ToString().c_str());
 			this->_db = NULL;
@@ -1452,6 +1924,16 @@ int storage_rocksdb::hard_reset() {
 		this->_clear_header_cache();
 		this->_corrupted = false;
 		this->_hard_reset.incr();
+		// The local copy was replaced: deliveries and streams issued against
+		// the previous copy must be refused (design §3.1). hard_reset reopens
+		// the handle directly, so establish the generations here. The DB is
+		// empty, so _load_or_init_generations() MINTS both — a fresh identity
+		// per reset, which is what makes a repeated hard reset distinguishable
+		// (a counter would return to the same value every time). Its history
+		// is gone too, so the source epoch is new as well.
+		if (this->_load_or_init_generations() < 0) {
+			log_err("hard_reset: could not establish replication generations; replication stays UNAVAILABLE on this node", 0);
+		}
 		// A fresh empty DB has no lineage; repl_last_lsn is 0, so the next
 		// reconstruction takes the clean full/snapshot reseed path.
 		log_notice("hard_reset: wiped and reopened empty DB [%s]; reconstruction will reseed", this->_data_path.c_str());
@@ -1609,7 +2091,11 @@ uint64_t storage_rocksdb::get_latest_sequence_number() {
 	return this->_db->GetLatestSequenceNumber();
 }
 
-int storage_rocksdb::get_updates_since(uint64_t seq_number, vector<pair<uint64_t, rocksdb::WriteBatch>>& updates) {
+int storage_rocksdb::get_updates_since(uint64_t seq_number, vector<pair<uint64_t, rocksdb::WriteBatch>>& updates,
+		uint64_t max_batches, uint64_t max_bytes, bool* more) {
+	if (more != NULL) {
+		*more = false;
+	}
 	if (this->_db == NULL) {
 		return -1;
 	}
@@ -1626,8 +2112,20 @@ int storage_rocksdb::get_updates_since(uint64_t seq_number, vector<pair<uint64_t
 		return ERR_LSN_INVALID;
 	}
 
+	uint64_t bytes = 0;
 	while (iter->Valid()) {
+		if ((max_batches > 0 && updates.size() >= max_batches)
+				|| (max_bytes > 0 && bytes >= max_bytes)) {
+			// Stop READING, not just sending: the point of the bound is that
+			// a far-behind reader cannot make us materialise its whole
+			// backlog.
+			if (more != NULL) {
+				*more = true;
+			}
+			break;
+		}
 		rocksdb::BatchResult batch = iter->GetBatch();
+		bytes += batch.writeBatchPtr->Data().size();
 		// Copy the WriteBatch contents since writeBatchPtr is a unique_ptr
 		updates.push_back(std::make_pair(batch.sequence, *batch.writeBatchPtr));
 		iter->Next();
@@ -1726,6 +2224,595 @@ bool storage_rocksdb::validate_batch_rep(const rocksdb::WriteBatch& batch) {
 		void LogData(const rocksdb::Slice&) {}
 	} h;
 	return batch.Iterate(&h).ok();
+}
+
+// ===========================================================================
+// COMMON APPLY RULE (SAF-10b, design §3.3 / §3.4 / §3.5 / §3.8)
+//
+// Both delivery paths reach storage through this section. Nothing here
+// applies a raw WriteBatch: the WAL stream is DECODED into changes first, so
+// a forwarded change and its WAL copy are compared by the same rule instead
+// of one silently overwriting the other.
+// ===========================================================================
+
+int storage_rocksdb::_read_repl_meta(const string& key, repl_meta& out) {
+	if (this->_db == NULL || this->_cf_meta == NULL) {
+		return -1;
+	}
+	string value;
+	rocksdb::Status st = this->_db->Get(this->_read_options, this->_cf_meta, key, &value);
+	if (st.IsNotFound()) {
+		return 1;
+	}
+	if (!st.ok()) {
+		log_err("failed to read replication metadata for [%s]: %s", key.c_str(), st.ToString().c_str());
+		return -1;
+	}
+	// "<epoch>|<label>|<deleted>" — the epoch is "<n>:<uuid>" and carries no
+	// separator, so two splits from the right are unambiguous.
+	string::size_type p2 = value.rfind('|');
+	if (p2 == string::npos || p2 == 0) {
+		log_err("malformed replication metadata for [%s]", key.c_str());
+		return -1;
+	}
+	string::size_type p1 = value.rfind('|', p2 - 1);
+	if (p1 == string::npos) {
+		log_err("malformed replication metadata for [%s]", key.c_str());
+		return -1;
+	}
+	try {
+		out.epoch = value.substr(0, p1);
+		out.label = boost::lexical_cast<uint64_t>(value.substr(p1 + 1, p2 - p1 - 1));
+		out.deleted = (value.substr(p2 + 1) == "1");
+	} catch (boost::bad_lexical_cast&) {
+		log_err("unparseable replication metadata for [%s]", key.c_str());
+		return -1;
+	}
+	return 0;
+}
+
+void storage_rocksdb::_stage_repl_meta(rocksdb::WriteBatch& batch, const string& key,
+		const string& epoch, uint64_t label, bool deleted) {
+	string value = epoch + "|" + boost::lexical_cast<string>(label) + "|" + (deleted ? "1" : "0");
+	batch.Put(this->_cf_meta, key, value);
+}
+
+/**
+ *	The rule, with no I/O so it can be reasoned about and tested directly.
+ *
+ *	Order of the tests matters:
+ *	  1. the change must belong to the history this node is following;
+ *	  2. a change at or below the applied position has already been fetched
+ *	     from the WAL and decided — re-deciding it could only undo a later
+ *	     decision, and this is what lets a tombstone be dropped once the
+ *	     position passes the delete (§3.5);
+ *	  3. otherwise compare against what this key already carries.
+ *	Metadata that belongs to another epoch is treated as ABSENT rather than
+ *	compared: labels from two histories are not comparable.
+ */
+storage_rocksdb::apply_outcome storage_rocksdb::_decide_change(const string& epoch,
+		uint64_t label, bool have_meta, const repl_meta& current, uint64_t applied_cursor) {
+	if (epoch.empty()) {
+		return apply_refused_session;
+	}
+	const string local_epoch = this->get_source_epoch();
+	if (local_epoch.empty() || local_epoch != epoch) {
+		return apply_refused_session;
+	}
+	if (label <= applied_cursor) {
+		return apply_refused_cursor;
+	}
+	if (have_meta && current.epoch == epoch && label <= current.label) {
+		return apply_skipped_superseded;
+	}
+	return apply_applied;
+}
+
+/**
+ *	Entry point for a forwarded change that arrived with an identity on the
+ *	wire ("<epoch>/<label>"). Everything the rule needs travels with the
+ *	change except the receiver incarnation, which the source cannot know: the
+ *	protection against a delivery for a previous copy therefore rests on the
+ *	epoch and on the applied position, both of which a restore resets (design
+ *	§3.5), not on the incarnation for this path.
+ */
+int storage_rocksdb::apply_identified_change(const string& tag, entry& e, bool is_delete) {
+	const string::size_type slash = tag.rfind('/');
+	if (slash == string::npos || slash == 0 || slash + 1 >= tag.size()) {
+		log_warning("malformed replication tag [%s] on a forwarded change (key=%s)", tag.c_str(), e.key.c_str());
+		return identified_refused;
+	}
+	const string epoch = tag.substr(0, slash);
+	uint64_t label = 0;
+	try {
+		label = boost::lexical_cast<uint64_t>(tag.substr(slash + 1));
+	} catch (boost::bad_lexical_cast&) {
+		log_warning("unparseable label in replication tag [%s] (key=%s)", tag.c_str(), e.key.c_str());
+		return identified_refused;
+	}
+	if (label == 0) {
+		return identified_refused;
+	}
+
+	const apply_outcome outcome = this->apply_forwarded_change(epoch, "", label, e, is_delete);
+	switch (outcome) {
+		case apply_applied:
+			return identified_applied;
+		case apply_skipped_superseded:
+		case apply_refused_cursor:
+			// Not an error: this copy already holds this change or a newer
+			// one, so the source is not ahead of us and must not count a
+			// drop — that would request a repair for nothing.
+			return identified_skipped;
+		case apply_refused_session:
+		case apply_refused_incarnation:
+			// We are not following this history. The source must hear about
+			// it: its retry and drop accounting are what surface the
+			// divergence to the controller.
+			return identified_refused;
+		default:
+			return identified_error;
+	}
+}
+
+/**
+ *	Forwarded delivery of one change (design §3.8: SHARED apply lock + the
+ *	key's slot lock; the applied position is read inside that section, never
+ *	carried over from before a queue wait or a retry).
+ */
+storage_rocksdb::apply_outcome storage_rocksdb::apply_forwarded_change(const string& source_epoch,
+		const string& incarnation, uint64_t label, entry& e, bool is_delete) {
+	if (is_reserved_key(e.key)) {
+		return apply_refused_session;
+	}
+	pthread_rwlock_rdlock(&this->_repl_apply_lock);
+	pthread_rwlock_rdlock(&this->_mutex_wholelock);
+	const int mutex_index = e.get_key_hash_value(hash_algorithm_murmur) % this->_mutex_slot_size;
+	pthread_rwlock_wrlock(&this->_mutex_slot[mutex_index]);
+
+	apply_outcome outcome = apply_error;
+	do {
+		// The DB handle is only valid while the whole-lock is held: a
+		// snapshot swap, a hard reset or a close takes it in write mode and
+		// destroys the handle. Check it here, never before.
+		if (this->_db == NULL || this->_cf_meta == NULL) {
+			break;
+		}
+		// A delivery issued against a copy this node no longer is must not
+		// land on the new one (design §3.1). Read INSIDE the section for the
+		// same reason the position is: the copy may have been replaced while
+		// this change waited for a connection, a retry or a lock.
+		const string local_incarnation = this->get_incarnation();
+		if (local_incarnation.empty() || (!incarnation.empty() && incarnation != local_incarnation)) {
+			outcome = apply_refused_incarnation;
+			break;
+		}
+		repl_meta current;
+		const int mr = this->_read_repl_meta(e.key, current);
+		if (mr < 0) {
+			break;
+		}
+		// Read INSIDE the critical section: the applier may have advanced it
+		// while this change was waiting for a connection, a retry or a lock.
+		const uint64_t cursor = this->get_repl_last_lsn();
+		outcome = this->_decide_change(source_epoch, label, mr == 0, current, cursor);
+		if (outcome != apply_applied) {
+			break;
+		}
+
+		// Live-key accounting: probe BEFORE staging, under this key's slot
+		// lock, so the count cannot drift from the key space (the forwarded
+		// path used to write without touching it at all).
+		bool existed = false;
+		{
+			string probe;
+			existed = this->_db->Get(this->_read_options, this->_cf_default, e.key, &probe).ok();
+		}
+
+		rocksdb::WriteBatch batch;
+		if (is_delete) {
+			batch.Delete(this->_cf_default, e.key);
+		} else {
+			uint8_t* p = new uint8_t[entry::header_size + e.size];
+			this->_serialize_header(e, p);
+			if (e.size > 0 && e.data.get() != NULL) {
+				memcpy(p + entry::header_size, e.data.get(), e.size);
+			}
+			batch.Put(this->_cf_default, e.key,
+				rocksdb::Slice(reinterpret_cast<char*>(p), entry::header_size + e.size));
+			delete[] p;
+		}
+		// The tombstone IS the metadata row: a delete leaves the key's label
+		// behind so an older change is refused by the per-key test until the
+		// position passes it (§3.5).
+		this->_stage_repl_meta(batch, e.key, source_epoch, label, is_delete);
+
+		// Data and metadata in ONE write: they can never disagree.
+		rocksdb::Status st = this->_db->Write(this->_write_options, &batch);
+		if (!this->_note_write_status(st, "apply_forwarded_change")) {
+			log_err("forwarded apply failed (key=%s, label=%llu): %s",
+				e.key.c_str(), (unsigned long long)label, st.ToString().c_str());
+			outcome = apply_error;
+			break;
+		}
+		// The forwarded path does NOT advance the replication cursor
+		// (design §3.4): a forwarded write says nothing about what the WAL
+		// has delivered, and treating it as progress would skip the range it
+		// never carried.
+		if (is_delete && existed) {
+			this->_curr_items.decr();
+		} else if (!is_delete && !existed) {
+			this->_curr_items.incr();
+		}
+		e.seq_label = label;
+	} while (0);
+
+	pthread_rwlock_unlock(&this->_mutex_slot[mutex_index]);
+	pthread_rwlock_unlock(&this->_mutex_wholelock);
+	pthread_rwlock_unlock(&this->_repl_apply_lock);
+
+	if (outcome == apply_applied) {
+		this->_repl_forward_applied.incr();
+	} else if (outcome == apply_skipped_superseded || outcome == apply_refused_cursor) {
+		this->_repl_forward_skipped.incr();
+	}
+	return outcome;
+}
+
+namespace {
+	/**
+	 *	Decode a WAL WriteBatch into changes (design §3.2).
+	 *
+	 *	Numbering: RocksDB gives the i-th sequence-consuming entry of a batch
+	 *	starting at S the sequence S+i, so entries of EVERY column family are
+	 *	counted even though only the default one carries data. An operation
+	 *	this decoder does not understand is not silently skipped — it would
+	 *	shift every later number in the batch — it fails the whole batch.
+	 */
+	struct wal_decoder : public rocksdb::WriteBatch::Handler {
+		struct change {
+			string   key;
+			string   value;
+			bool     is_delete;
+			uint64_t label;
+		};
+		vector<change> changes;
+		uint64_t base_seq;
+		uint64_t index;
+		bool     unsupported;
+
+		wal_decoder(uint64_t base): base_seq(base), index(0), unsupported(false) {}
+
+		void _record(const rocksdb::Slice& key, const rocksdb::Slice* value, bool is_delete, uint32_t cf_id) {
+			const uint64_t label = this->base_seq + this->index;
+			this->index++;
+			if (cf_id != 0) {
+				return;			// another column family: numbered, not data
+			}
+			const string k = key.ToString();
+			if (storage_rocksdb::is_reserved_key(k)) {
+				return;			// reserved keys are managed explicitly (§3.6)
+			}
+			change c;
+			c.key = k;
+			c.is_delete = is_delete;
+			c.label = label;
+			if (value != NULL) {
+				c.value = value->ToString();
+			}
+			this->changes.push_back(c);
+		}
+
+		rocksdb::Status PutCF(uint32_t cf, const rocksdb::Slice& key, const rocksdb::Slice& value) {
+			this->_record(key, &value, false, cf);
+			return rocksdb::Status::OK();
+		}
+		rocksdb::Status DeleteCF(uint32_t cf, const rocksdb::Slice& key) {
+			this->_record(key, NULL, true, cf);
+			return rocksdb::Status::OK();
+		}
+		rocksdb::Status SingleDeleteCF(uint32_t cf, const rocksdb::Slice& key) {
+			this->_record(key, NULL, true, cf);
+			return rocksdb::Status::OK();
+		}
+		rocksdb::Status MergeCF(uint32_t, const rocksdb::Slice&, const rocksdb::Slice&) {
+			this->unsupported = true;
+			this->index++;
+			return rocksdb::Status::OK();
+		}
+		rocksdb::Status DeleteRangeCF(uint32_t, const rocksdb::Slice&, const rocksdb::Slice&) {
+			this->unsupported = true;
+			this->index++;
+			return rocksdb::Status::OK();
+		}
+		void LogData(const rocksdb::Slice&) {}		// consumes no sequence
+	};
+}
+
+/**
+ *	Drop tombstones the applied position has passed (design §3.5).
+ *
+ *	A tombstone is only needed while a change older than its delete could
+ *	still be admitted, and the positional rule refuses anything at or below
+ *	the applied position whichever path delivered it. So once the position has
+ *	passed the delete, the row can go — no wall-clock window, no assumption
+ *	about how long a forwarded change can still be in flight.
+ *
+ *	Bounded and resumable: it runs inside the applier's exclusive window, so a
+ *	large collection must not extend that window (design §3.8).
+ */
+uint64_t storage_rocksdb::_collect_tombstones_locked(uint64_t budget) {
+	if (this->_db == NULL || this->_cf_meta == NULL || budget == 0) {
+		return 0;
+	}
+	const uint64_t cursor = this->get_repl_last_lsn();
+	rocksdb::ReadOptions ro = this->_read_options;
+	ro.fill_cache = false;
+	rocksdb::Iterator* it = this->_db->NewIterator(ro, this->_cf_meta);
+	if (it == NULL) {
+		return 0;
+	}
+	if (this->_tombstone_sweep_cursor.empty()) {
+		it->SeekToFirst();
+	} else {
+		it->Seek(this->_tombstone_sweep_cursor);
+	}
+
+	rocksdb::WriteBatch batch;
+	uint64_t seen = 0;
+	uint64_t dropped = 0;
+	string last;
+	for (; it->Valid() && seen < budget; it->Next(), seen++) {
+		last = it->key().ToString();
+		repl_meta m;
+		// Parse inline: the same format _read_repl_meta writes.
+		const string v = it->value().ToString();
+		string::size_type p2 = v.rfind('|');
+		if (p2 == string::npos || p2 == 0) {
+			continue;
+		}
+		string::size_type p1 = v.rfind('|', p2 - 1);
+		if (p1 == string::npos) {
+			continue;
+		}
+		if (v.substr(p2 + 1) != "1") {
+			continue;					// not a tombstone
+		}
+		uint64_t label = 0;
+		try {
+			label = boost::lexical_cast<uint64_t>(v.substr(p1 + 1, p2 - p1 - 1));
+		} catch (boost::bad_lexical_cast&) {
+			continue;
+		}
+		if (label <= cursor) {
+			batch.Delete(this->_cf_meta, last);
+			dropped++;
+		}
+	}
+	// Resume where this pass stopped; wrap when the family is exhausted.
+	this->_tombstone_sweep_cursor = it->Valid() ? last : string("");
+	delete it;
+
+	if (dropped > 0) {
+		rocksdb::Status st = this->_db->Write(this->_write_options, &batch);
+		if (!st.ok()) {
+			log_warning("tombstone collection failed to commit: %s", st.ToString().c_str());
+			return 0;
+		}
+		this->_repl_tombstones_dropped.add(dropped);
+	}
+	return dropped;
+}
+
+uint64_t storage_rocksdb::collect_tombstones(uint64_t budget) {
+	// The whole-lock is what keeps the DB handle alive: a snapshot swap, a
+	// hard reset or a close takes it in write mode and destroys the handle.
+	// Lock order is _repl_apply_lock -> _mutex_wholelock, as everywhere else.
+	pthread_rwlock_wrlock(&this->_repl_apply_lock);
+	pthread_rwlock_rdlock(&this->_mutex_wholelock);
+	const uint64_t n = this->_collect_tombstones_locked(budget);
+	pthread_rwlock_unlock(&this->_mutex_wholelock);
+	pthread_rwlock_unlock(&this->_repl_apply_lock);
+	return n;
+}
+
+uint64_t storage_rocksdb::get_repl_tombstones() {
+	pthread_rwlock_rdlock(&this->_mutex_wholelock);
+	if (this->_db == NULL || this->_cf_meta == NULL) {
+		pthread_rwlock_unlock(&this->_mutex_wholelock);
+		return 0;
+	}
+	rocksdb::ReadOptions ro = this->_read_options;
+	ro.fill_cache = false;
+	rocksdb::Iterator* it = this->_db->NewIterator(ro, this->_cf_meta);
+	if (it == NULL) {
+		pthread_rwlock_unlock(&this->_mutex_wholelock);
+		return 0;
+	}
+	uint64_t n = 0;
+	for (it->SeekToFirst(); it->Valid(); it->Next()) {
+		const string v = it->value().ToString();
+		if (v.size() >= 2 && v.substr(v.size() - 2) == "|1") {
+			n++;
+		}
+	}
+	delete it;
+	pthread_rwlock_unlock(&this->_mutex_wholelock);
+	return n;
+}
+
+int storage_rocksdb::apply_wal_batch(const string& source_epoch, const string& incarnation,
+		uint64_t base_seq, const rocksdb::WriteBatch& batch,
+		uint64_t& applied, uint64_t& skipped, apply_outcome& refusal) {
+	applied = 0;
+	skipped = 0;
+	refusal = apply_applied;
+
+	// Decoding touches no shared state and must not happen while the write
+	// path is blocked (design §3.8: no work that can wait inside the
+	// exclusive window; the network read happens even further out).
+	wal_decoder decoder(base_seq);
+	rocksdb::Status ds = batch.Iterate(&decoder);
+	if (!ds.ok() || decoder.unsupported || decoder.index != batch.Count()) {
+		// RELEASE-BUILD detection, not an assert: an operation we cannot
+		// number or apply makes every later label in this batch wrong, so the
+		// batch is refused and the caller must rebuild rather than continue.
+		log_err("WAL batch at %llu refused: decode status=%s unsupported=%d decoded=%llu batch_count=%u (a change that cannot be numbered would mis-order every later one)",
+			(unsigned long long)base_seq, ds.ToString().c_str(), decoder.unsupported ? 1 : 0,
+			(unsigned long long)decoder.index, batch.Count());
+		this->_repl_decode_refused.incr();
+		refusal = apply_error;
+		return -1;
+	}
+
+	pthread_rwlock_wrlock(&this->_repl_apply_lock);
+	pthread_rwlock_rdlock(&this->_mutex_wholelock);
+
+	int rc = -1;
+	do {
+		if (this->_db == NULL || this->_cf_meta == NULL) {
+			refusal = apply_error;
+			break;
+		}
+		// Same rule as the forwarded path: a response issued against a copy
+		// this node no longer is must not be applied onto the new one. The
+		// stream is long-lived, so this cannot be a connect-time check only.
+		const string local_incarnation = this->get_incarnation();
+		if (local_incarnation.empty() || (!incarnation.empty() && incarnation != local_incarnation)) {
+			refusal = apply_refused_incarnation;
+			break;
+		}
+		const uint64_t cursor = this->get_repl_last_lsn();
+		// Contiguity: the stream must continue where this node stopped. The
+		// batch that CONTAINS the cursor is re-delivered by design (RocksDB
+		// starts at the batch holding the requested sequence), so a base at
+		// or below the cursor is expected; a gap is not.
+		if (base_seq > cursor + 1) {
+			log_err("WAL batch at %llu refused: it does not continue the applied position %llu (a gap would advance the cursor over changes that were never applied; the history in between is not being served -> this copy must be rebuilt)",
+				(unsigned long long)base_seq, (unsigned long long)cursor);
+			refusal = apply_refused_gap;
+			break;
+		}
+
+		rocksdb::WriteBatch out;
+		// In-batch overlay (design §3.8): a later change to the same key must
+		// see the earlier ones of this batch, which are not in the DB yet —
+		// both for the ordering decision and for the live-key count, which
+		// would otherwise count the same creation twice.
+		std::map<string, repl_meta> overlay;
+		std::map<string, bool> exists_overlay;
+		int64_t items_delta = 0;
+		bool failed = false;
+
+		for (size_t i = 0; i < decoder.changes.size(); i++) {
+			const wal_decoder::change& c = decoder.changes[i];
+			repl_meta current;
+			bool have = false;
+			std::map<string, repl_meta>::iterator it = overlay.find(c.key);
+			if (it != overlay.end()) {
+				current = it->second;
+				have = true;
+			} else {
+				const int mr = this->_read_repl_meta(c.key, current);
+				if (mr < 0) {
+					failed = true;
+					break;
+				}
+				have = (mr == 0);
+			}
+
+			const apply_outcome d = this->_decide_change(source_epoch, c.label, have, current, cursor);
+			if (d == apply_refused_session) {
+				refusal = d;
+				failed = true;
+				break;
+			}
+			if (d != apply_applied) {
+				skipped++;
+				continue;
+			}
+
+			bool existed = false;
+			std::map<string, bool>::iterator eit = exists_overlay.find(c.key);
+			if (eit != exists_overlay.end()) {
+				existed = eit->second;
+			} else {
+				string probe;
+				existed = this->_db->Get(this->_read_options, this->_cf_default, c.key, &probe).ok();
+			}
+			if (c.is_delete) {
+				out.Delete(this->_cf_default, c.key);
+				if (existed) {
+					items_delta--;
+				}
+				exists_overlay[c.key] = false;
+			} else {
+				if (!existed) {
+					items_delta++;
+				}
+				out.Put(this->_cf_default, c.key, c.value);
+				exists_overlay[c.key] = true;
+			}
+			this->_stage_repl_meta(out, c.key, source_epoch, c.label, c.is_delete);
+			repl_meta staged;
+			staged.epoch = source_epoch;
+			staged.label = c.label;
+			staged.deleted = c.is_delete;
+			overlay[c.key] = staged;
+			applied++;
+		}
+
+		if (failed) {
+			if (refusal == apply_applied) {
+				refusal = apply_error;
+			}
+			break;
+		}
+
+		// The new position goes in the SAME batch as the changes it covers,
+		// so a crash after applying and before recording it is impossible
+		// (design §3.4). A batch in which everything was skipped still writes
+		// the position, alone.
+		// An empty batch covers no sequence, so it must not claim one: the
+		// position may only move to a sequence this batch actually carried.
+		const uint64_t new_cursor = decoder.index > 0 ? base_seq + decoder.index - 1 : cursor;
+		if (new_cursor > cursor) {
+			out.Put(this->_cf_default, kReplLastLsnKey, boost::lexical_cast<string>(new_cursor));
+		}
+
+		rocksdb::Status st = this->_db->Write(this->_write_options, &out);
+		if (!this->_note_write_status(st, "apply_wal_batch")) {
+			log_err("WAL batch at %llu failed to commit: %s", (unsigned long long)base_seq, st.ToString().c_str());
+			refusal = apply_error;
+			break;
+		}
+		if (items_delta > 0) {
+			this->_curr_items.add(static_cast<uint64_t>(items_delta));
+		} else if (items_delta < 0) {
+			this->_curr_items.sub(static_cast<uint64_t>(-items_delta));
+		}
+		rc = 0;
+	} while (0);
+
+	// Tombstone GC runs INSIDE this window (design §3.8), so a tombstone can
+	// never be dropped while a forwarded change admitted against an older
+	// position is still between its decision and its write.
+	uint64_t dropped = 0;
+	if (rc == 0) {
+		dropped = this->_collect_tombstones_locked(256);
+	}
+
+	pthread_rwlock_unlock(&this->_mutex_wholelock);
+	pthread_rwlock_unlock(&this->_repl_apply_lock);
+
+	if (rc == 0) {
+		this->_repl_wal_applied.add(applied);
+		this->_repl_wal_skipped.add(skipped);
+		if (dropped > 0) {
+			log_debug("dropped %llu tombstone(s) the applied position has passed", (unsigned long long)dropped);
+		}
+	}
+	return rc;
 }
 
 int storage_rocksdb::apply_batch_with_lsn(const rocksdb::WriteBatch& batch, uint64_t master_lsn) {

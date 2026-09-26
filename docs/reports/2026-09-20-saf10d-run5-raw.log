@@ -1,0 +1,950 @@
+# === Suite: continuous-replication ===
+# Cleaning up cluster 'cont-repl'
+# Deploying cluster 'cont-repl' in namespace 'flare-cont-repl'
+# Waiting for: namespace flare-cont-repl not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-cont-repl (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap cont-repl-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting for StatefulSet cont-repl-nodes to be ready...
+# Waiting for: all 2 pods ready (timeout: 180s)
+#   OK after 0s
+# Waiting for: 2 nodes registered (timeout: 300s)
+#   OK after 0s
+# Waiting 50s grace period for operator reconciliation...
+# Checking operator activity...
+# --- Operator logs (flare-operator) ---
+#   [DEBUG] Received command: node state cont-repl-nodes-1.cont-repl-nodes.flare-cont-repl.svc.cluster.local 12121 active
+#   [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeState
+#     "cont-repl-nodes-1.cont-repl-nodes.flare-cont-repl.svc.cluster.local"
+#     12121
+#     (FlareOperator.K8s.FlareSta
+#   [TRACE] Event: NodeState cont-repl-nodes-1.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121 | Result: Prepare->Active | Reason: reconstruction complete
+#   [TcpClient] Sent node sync v4294967303 (2 nodes) to 10.244.0.29:12121
+#   [TopologyBroadcast] Broadcast complete (v4294967303)
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 6239ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 21 cycles remaining
+#   [flare-operator] re-sending v4294967304: 1 node(s) are Active in the map but their pods are not Ready yet (activation not applied locally)
+#   [flare-operator] topology changed (v4294967304 → v4294967304), broadcasting
+#   [TopologyBroadcast] Broadcasting node sync v4294967304 (2 nodes) to 2 pods
+#   [TcpClient] Sent node sync v4294967304 (2 nodes) to 10.244.0.30:12121
+#   [TcpClient] Sent node sync v4294967304 (2 nodes) to 10.244.0.29:12121
+#   [TopologyBroadcast] Broadcast complete (v4294967304)
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 6115ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [DEBUG] Received command: node sync
+#   [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeSync none
+#   [DEBUG] Sending response: NODE cont-repl-nodes-1.cont-repl-nodes.flare-cont-repl.svc.cluster.local 12121 1 0 0 0 17 | NODE cont-repl-nodes-0.cont-repl-nodes.flare-cont-repl.svc.cluster.local 12121 0 0 0 100 16 | END | 
+#   [flare-operator] CONTINUOUS REPLICATION eligibility cont-repl-nodes-1.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121: reads eligible: following epoch 2:b42a8877-0af0-46b3-aba4-189b5918548a; position observed 0s ago; lag 0 ≤ 1000 (read); promotion eligible: following epoch 2:b42a8877-0af0-46b3-aba4-189b5918548a; position observed 0s ago; lag 0 ≤ 100 (promotion)
+#   [flare-operator] grace period: 20 cycles remaining
+#   [flare-operator] replica repair ledger initialized from cont-repl-nodes-0.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121: 0 destination counter(s) recorded as baseline, none attributed
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 18593ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 19 cycles remaining
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 18109ms (nodes=2 M=1 S=1 D=0 P=0)
+#   
+# Waiting for: replica's follower is following (timeout: 120s)
+#   OK after 0s
+# Waiting for: replica's local items match the master's (timeout: 60s)
+#   OK after 0s
+# following: replica applied 30 forwarded change(s); applied_lsn=(some 34) master latest=(some 34) source_epoch=(some 2:b42a8877-0af0-46b3-aba4-189b5918548a)
+# fault: rejecting 10.244.0.29 ⇄ 10.244.0.30:12121 on flare-e2e-control-plane (both directions)
+# Waiting for: master counts dropped forwarded writes (was 0) (timeout: 120s)
+#   OK after 20s
+# forwarding retries settled at 2 dropped write(s)
+# under the cut: created 10/10, updated 5/5, deleted 5/5; master dropped 2; master latest=54 items=35; replica items=30 applied_lsn=(some 34) (was 34) state=(some disconnected); replica pod uid=e65f9d55-b0cd-4feb-bdd5-6918841b56de reconstruction_started=1
+# fault cleared: 10.244.0.29 ⇄ 10.244.0.30 forwards again
+# Waiting for: replica applied past the master's position at the cut (54) while following (timeout: 240s)
+#   OK after 0s
+# after heal: resumed from applied_lsn=34 (cut started at 34) → 54 (bar 54); state=(some following) reason=none; wal_applied=(some 20) wal_skipped=(some 52); items master=35 replica=35; reconstruction_started 1→1; pod uid e65f9d55-b0cd-4feb-bdd5-6918841b56de→e65f9d55-b0cd-4feb-bdd5-6918841b56de
+# Waiting for: operator held the drop as owned by continuous replication (timeout: 60s)
+#   OK after 10s
+# Waiting for: operator closed the owned request by position (timeout: 240s)
+#   OK after 20s
+# Waiting for: ledger persisted as empty (timeout: 60s)
+#   OK after 0s
+# fault: the operator may exec only into the master cont-repl-nodes-0 (rule 5: ["pods/exec"] → ["pods/e2e-revoked-exec"]; added a resourceNames-restricted pods/exec rule)
+# fault: rejecting 10.244.0.29 ⇄ 10.244.0.30:12121 on flare-e2e-control-plane (both directions)
+# Waiting for: master counts dropped writes (was 4) (timeout: 120s)
+#   OK after 20s
+# Waiting for: operator holds the drop as follower-state-unknown (timeout: 150s)
+#   OK after 0s
+# with pods/exec revoked: held-as-unknown=true; ledger holds: follower state unknown (stats unreadable)
+# fault cleared: 10.244.0.29 ⇄ 10.244.0.30 forwards again
+# Waiting for: replica catches up (follower does not depend on the operator's probe) (timeout: 240s)
+#   OK after 5s
+# fault cleared: pods/exec restored
+# Waiting for: once the probe works again the owned request closes by position (timeout: 300s)
+#   OK after 0s
+# after restoring pods/exec: closed=true; reconstruction_started 1→1; pod uid e65f9d55-b0cd-4feb-bdd5-6918841b56de→e65f9d55-b0cd-4feb-bdd5-6918841b56de
+# Waiting for: no repair entry pending before the bulk operation (timeout: 180s)
+#   OK after 20s
+# flush_all on the master: source_epoch 2:b42a8877-0af0-46b3-aba4-189b5918548a → 3:a5f7f2b2-3f95-4526-bace-e534a6b4deaf; master items=0
+# Waiting for: follower declares needs_rebuild (timeout: 90s)
+#   OK after 0s
+# follower: state=(some needs_rebuild) reason=(some epoch_mismatch)
+# Waiting for: operator requests the rebuild from the follower's declaration (timeout: 120s)
+#   TIMEOUT after 120s waiting for: operator requests the rebuild from the follower's declaration
+# Waiting for: follower reconstructed and follows the new epoch (timeout: 420s)
+#   OK after 0s
+# after the rebuild: reconstruction_started 1→2; state=(some following) epoch=(some 3:a5f7f2b2-3f95-4526-bace-e534a6b4deaf) (master 3:a5f7f2b2-3f95-4526-bace-e534a6b4deaf); requested-by-follower logged=false
+#   reason: the rebuild happened but not through the follower-declared ledger request
+# Waiting for: following replica gets balance 50 (timeout: 150s)
+#   OK after 30s
+# with slave=50: replica balance=(some 50) state=(some following)
+# fault: rejecting 10.244.0.29 ⇄ 10.244.0.30:12121 on flare-e2e-control-plane (both directions)
+# Waiting for: cut replica is withheld from reads (balance 0) (timeout: 150s)
+#   OK after 25s
+# under the cut: replica balance=(some 0) state=(some disconnected) eligibility-logged=true
+# fault cleared: 10.244.0.29 ⇄ 10.244.0.30 forwards again
+# Waiting for: healed replica is served again (balance 50) (timeout: 240s)
+#   OK after 25s
+# after the heal: replica balance=(some 50) state=(some following)
+# Waiting for: spec restored to slave=0 (timeout: 120s)
+#   OK after 25s
+# fault: rejecting 10.244.0.29 ⇄ 10.244.0.30:12121 on flare-e2e-control-plane (both directions)
+# Waiting for: cycle 0: master counts a dropped forwarded write (timeout: 90s)
+#   OK after 0s
+# fault cleared: 10.244.0.29 ⇄ 10.244.0.30 forwards again
+# Waiting for: cycle 0: replica converges while following (timeout: 180s)
+#   OK after 0s
+# cycle 0: stored 10/10, drop counted=true, replica resumed from 111 → 111; items master=10 replica=10; converged=true
+# fault: rejecting 10.244.0.29 ⇄ 10.244.0.30:12121 on flare-e2e-control-plane (both directions)
+# Waiting for: cycle 1: master counts a dropped forwarded write (timeout: 90s)
+#   OK after 0s
+# fault cleared: 10.244.0.29 ⇄ 10.244.0.30 forwards again
+# Waiting for: cycle 1: replica converges while following (timeout: 180s)
+#   OK after 0s
+# cycle 1: stored 10/10, drop counted=true, replica resumed from 121 → 133; items master=19 replica=19; converged=true
+# fault: rejecting 10.244.0.29 ⇄ 10.244.0.30:12121 on flare-e2e-control-plane (both directions)
+# Waiting for: cycle 2: master counts a dropped forwarded write (timeout: 90s)
+#   OK after 0s
+# fault cleared: 10.244.0.29 ⇄ 10.244.0.30 forwards again
+# Waiting for: cycle 2: replica converges while following (timeout: 180s)
+#   OK after 0s
+# cycle 2: stored 10/10, drop counted=true, replica resumed from 133 → 145; items master=28 replica=28; converged=true
+# after 3 cycles: content mismatches=[]; reconstruction_started 2→2; pod uid e65f9d55-b0cd-4feb-bdd5-6918841b56de→e65f9d55-b0cd-4feb-bdd5-6918841b56de; wal_applied=(some 28) forward_applied=(some 66)
+# Waiting for: ledger closes every counted drop by position (timeout: 300s)
+#   OK after 0s
+# fault: rejecting 10.244.0.29 ⇄ 10.244.0.30:12121 on flare-e2e-control-plane (both directions)
+# Waiting for: master counts a dropped forwarded write (timeout: 90s)
+#   OK after 20s
+# Waiting for: operator holds the drop as owned (timeout: 120s)
+#   OK after 10s
+# before the restart: stored 10/10, drop counted=true, ledger holds: owned by continuous replication
+# Waiting for: a new operator pod is Ready (timeout: 180s)
+#   OK after 35s
+# operator restarted (old pod flare-operator-6ccb48f487-svlrb); ready=true; ledger after restart: dests=[cont-repl-nodes-1.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121] holds=owned by continuous replication
+# fault cleared: 10.244.0.29 ⇄ 10.244.0.30 forwards again
+# Waiting for: replica converges while following (timeout: 180s)
+#   OK after 25s
+# Waiting for: the restarted operator closes the entry by position (timeout: 400s)
+#   OK after 20s
+# after the heal: converged=true; ledger empty=true; reconstruction_started 2→2; pod uid e65f9d55-b0cd-4feb-bdd5-6918841b56de→e65f9d55-b0cd-4feb-bdd5-6918841b56de
+# deleted master pod cont-repl-nodes-0; follower cont-repl-nodes-1 was following epoch 3:a5f7f2b2-3f95-4526-bace-e534a6b4deaf
+# Waiting for: the follower is promoted to master (timeout: 300s)
+#   OK after 30s
+# promotion: follower promoted=true; logged NOT LOSS-FREE=false; new master epoch=(some 3:a5f7f2b2-3f95-4526-bace-e534a6b4deaf)
+# Waiting for: the promoted node advances its source epoch (timeout: 120s)
+#   OK after 20s
+# Waiting for: ex-master returns, rebuilds and follows the new epoch (timeout: 480s)
+#   OK after 40s
+# ex-master cont-repl-nodes-0: state=(some following) epoch=(some 4:a9cd38e7-cf4e-4a06-ad12-89853554633a) (new master 4:a9cd38e7-cf4e-4a06-ad12-89853554633a); items new-master=38 ex-master=38
+# Waiting for: new writes reach the ex-master as a follower (timeout: 90s)
+#   OK after 0s
+# Waiting for: newcomer follows (timeout: 300s)
+#   OK after 0s
+# Waiting for: newcomer's local items match the master's (timeout: 180s)
+#   OK after 0s
+# newcomer cont-repl-nodes-2: 27 batches of 20 written during its copy; state=(some following) epoch=(some 4:a9cd38e7-cf4e-4a06-ad12-89853554633a) (master (some 4:a9cd38e7-cf4e-4a06-ad12-89853554633a)); items master=588 newcomer=588; reconstruction_completed=(some 1) wal_applied=(some 0)
+# --- diagnostics for failing suite 'continuous-replication' ---
+# === operator logs (flare-cont-repl, app=flare-operator) ===
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [flare-operator] starting (namespace=flare-cont-repl, port=12120, interval=5s, identity=flare-operator-6ccb48f487-cgk7f)
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [flare-operator] managing FlareCluster 'cont-repl' (from --cluster-name)
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [flare-operator] health check server started on port 8080 (leader=false)
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [HealthCheck] Starting health check server on 0.0.0.0:8080
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [HealthCheck] Listening on port 8080
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [HealthCheck] Endpoints: /healthz (liveness), /readyz (readiness)
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [flare-operator] phase 1: attempting to acquire lease 'cont-repl-operator-lease'
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [flare-operator] phase 2: acquired lease, entering leader mode
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [flare-operator] health status: leader=true
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [flare-operator] metrics initialized
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [flare-operator] metrics server started on port 9090
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [MetricsServer] Starting HTTP server on 0.0.0.0:9090
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [MetricsServer] Listening on port 9090
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [flare-operator] loaded 2 nodes from ConfigMap (resuming at broadcast version 4294967315)
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [flare-operator] leadership generation 2 — broadcast versions fenced at ≥ 8589934592
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [flare-operator] fetched CRD: partitions=1, replicas=2
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [flare-operator] replica repair ledger restored from status: cont-repl-nodes-1.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121 requested drops=1 (held: owned by continuous replication) (1 counter(s))
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [flare-operator] TCP server marked ready for health checks
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [flare-operator] TCP server listening on port 12120
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [flare-operator] CONTINUOUS REPLICATION eligibility cont-repl-nodes-1.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121: reads ineligible: follower state is disconnected, not following (last reason: peer_unreachable); promotion ineligible: follower state is disconnected, not following (last reason: peer_unreachable)
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [flare-operator] grace period: 23 cycles remaining
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [flare-operator] topology changed (v8589934592 → v8589934593), broadcasting
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [TopologyBroadcast] Broadcasting node sync v8589934593 (2 nodes) to 2 pods
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [TcpClient] Sent node sync v8589934593 (2 nodes) to 10.244.0.29:12121
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [TcpClient] Sent node sync v8589934593 (2 nodes) to 10.244.0.30:12121
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [TopologyBroadcast] Broadcast complete (v8589934593)
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [flare-operator] REPLICA REPAIR requested and HELD: master cont-repl-nodes-0.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121 dropped 7 more write(s) to cont-repl-nodes-1.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121; that replica's continuous follower (disconnected) owns the repair — it must apply past 155 in epoch 3:a5f7f2b2-3f95-4526-bace-e534a6b4deaf before this closes; no reconstruction is started
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [flare-operator] replica divergence: master cont-repl-nodes-0.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121 has 38 keys, slave has 30 (21.05% apart) — live replication has no per-write ack, so a gap here means writes were dropped or expired only on one side
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [flare-operator] reconcile slow: 31103ms (nodes=2 M=1 S=1 D=0 P=0)
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [flare-operator] CONTINUOUS REPLICATION eligibility cont-repl-nodes-1.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121: reads eligible: following epoch 3:a5f7f2b2-3f95-4526-bace-e534a6b4deaf; position observed 0s ago; lag 0 ≤ 1000 (read); promotion eligible: following epoch 3:a5f7f2b2-3f95-4526-bace-e534a6b4deaf; position observed 0s ago; lag 0 ≤ 100 (promotion)
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [flare-operator] grace period: 22 cycles remaining
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [flare-operator] REPLICA REPAIR CLOSED by continuous replication: cont-repl-nodes-1.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121 applied past 155 while following; the 8 dropped write(s) are covered and no reconstruction was needed
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [DEBUG] Received command: node sync
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeSync none
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [DEBUG] Sending response: NODE cont-repl-nodes-1.cont-repl-nodes.flare-cont-repl.svc.cluster.local 12121 1 0 0 0 17 | NODE cont-repl-nodes-0.cont-repl-nodes.flare-cont-repl.svc.cluster.local 12121 0 0 0 100 16 | END | 
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [DEBUG] Received command: shutdown cont-repl-nodes-0.cont-repl-nodes.flare-cont-repl.svc.cluster.local 12121
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.ParseError
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator]   "shutdown cont-repl-nodes-0.cont-repl-nodes.flare-cont-repl.svc.cluster.local 12121"
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [DEBUG] Received command: node sync
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeSync none
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [DEBUG] Sending response: NODE cont-repl-nodes-1.cont-repl-nodes.flare-cont-repl.svc.cluster.local 12121 1 0 0 0 17 | NODE cont-repl-nodes-0.cont-repl-nodes.flare-cont-repl.svc.cluster.local 12121 0 0 0 100 16 | END | 
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [DEBUG] Received command: node add cont-repl-nodes-0.cont-repl-nodes.flare-cont-repl.svc.cluster.local 12121
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeAdd "cont-repl-nodes-0.cont-repl-nodes.flare-cont-repl.svc.cluster.local" 12121
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [TRACE] Event: NodeAdd cont-repl-nodes-0.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121 | Result: Slave P0 (Prepare) | Reason: partition needed slave
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [DEBUG] Sending response: NODE cont-repl-nodes-0.cont-repl-nodes.flare-cont-repl.svc.cluster.local 12121 1 1 0 100 16 | NODE cont-repl-nodes-1.cont-repl-nodes.flare-cont-repl.svc.cluster.local 12121 1 0 0 0 17 | END | 
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [DEBUG] Received command: meta
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.Meta
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [TRACE] Event: Meta | CRD partitions=1 replicas=2 | State partitionSize=1024 | Returning partition-size 1024
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [DEBUG] Received command: node role cont-repl-nodes-0.cont-repl-nodes.flare-cont-repl.svc.cluster.local 12121 proxy 0 -1
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.MutationAttempt
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator]   "node role cont-repl-nodes-0.cont-repl-nodes.flare-cont-repl.svc.cluster.local 12121 proxy 0 -1"
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [DEBUG] Received command: node sync
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeSync none
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [DEBUG] Sending response: NODE cont-repl-nodes-0.cont-repl-nodes.flare-cont-repl.svc.cluster.local 12121 1 1 0 100 16 | NODE cont-repl-nodes-1.cont-repl-nodes.flare-cont-repl.svc.cluster.local 12121 1 0 0 0 17 | END | 
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [flare-operator] CRITICAL: node cont-repl-nodes-0.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121 (10.244.0.29:12121) is READY but the OPERATOR cannot connect to it (1 consecutive probes, ~30s). Topology pushes are not landing — that node is running on a stale map. NOT failing it over: the fault may be on our side. See RUNBOOK #node-unreachable
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [flare-operator] reconcile slow: 29718ms (nodes=2 M=0 S=2 D=0 P=1)
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [DEBUG] Received command: node sync
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeSync none
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [DEBUG] Sending response: NODE cont-repl-nodes-0.cont-repl-nodes.flare-cont-repl.svc.cluster.local 12121 1 1 0 100 16 | NODE cont-repl-nodes-1.cont-repl-nodes.flare-cont-repl.svc.cluster.local 12121 1 0 0 0 17 | END | 
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [DEBUG] Received command: node sync
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeSync none
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [DEBUG] Sending response: NODE cont-repl-nodes-0.cont-repl-nodes.flare-cont-repl.svc.cluster.local 12121 1 1 0 100 16 | NODE cont-repl-nodes-1.cont-repl-nodes.flare-cont-repl.svc.cluster.local 12121 1 0 0 0 17 | END | 
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [DEBUG] Received command: node sync
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeSync none
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [DEBUG] Sending response: NODE cont-repl-nodes-0.cont-repl-nodes.flare-cont-repl.svc.cluster.local 12121 1 1 0 100 16 | NODE cont-repl-nodes-1.cont-repl-nodes.flare-cont-repl.svc.cluster.local 12121 1 0 0 0 17 | END | 
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [DEBUG] Received command: node sync
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeSync none
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [DEBUG] Sending response: NODE cont-repl-nodes-0.cont-repl-nodes.flare-cont-repl.svc.cluster.local 12121 1 1 0 100 16 | NODE cont-repl-nodes-1.cont-repl-nodes.flare-cont-repl.svc.cluster.local 12121 1 0 0 0 17 | END | 
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [flare-operator] CONTINUOUS REPLICATION eligibility cont-repl-nodes-0.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121: UNFIT (the follower is idle: not following anyone); reads ineligible
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [flare-operator] CONTINUOUS REPLICATION eligibility cont-repl-nodes-1.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121: UNFIT (the follower declared needs_rebuild (last reason: master_id_mismatch)); reads ineligible
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [flare-operator] grace period: 21 cycles remaining
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [DEBUG] Received command: node sync
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeSync none
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [DEBUG] Sending response: NODE cont-repl-nodes-1.cont-repl-nodes.flare-cont-repl.svc.cluster.local 12121 0 0 0 100 17 | NODE cont-repl-nodes-0.cont-repl-nodes.flare-cont-repl.svc.cluster.local 12121 1 1 0 0 16 | END | 
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [flare-operator] LEASE FENCE: not the lease holder anymore — suppressing topology broadcast (v8589934594 → v8589934601); held for retry once authority returns
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [flare-operator] reconcile slow: 18221ms (nodes=2 M=1 S=1 D=0 P=1)
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [flare-operator] grace period: 20 cycles remaining
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [flare-operator] retrying a suppressed topology send (suppressed v8589934601; publishing v8589934608)
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [flare-operator] topology changed (v8589934601 → v8589934608), broadcasting
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [TopologyBroadcast] Broadcasting node sync v8589934608 (2 nodes) to 2 pods
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [TcpClient] Sent node sync v8589934608 (2 nodes) to 10.244.0.32:12121
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [TcpClient] Sent node sync v8589934608 (2 nodes) to 10.244.0.30:12121
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [DEBUG] Received command: node state cont-repl-nodes-0.cont-repl-nodes.flare-cont-repl.svc.cluster.local 12121 active
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeState
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator]   "cont-repl-nodes-0.cont-repl-nodes.flare-cont-repl.svc.cluster.local"
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator]   12121
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator]   (FlareOperator.K8s.FlareSta
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [TRACE] Event: NodeState cont-repl-nodes-0.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121 | Result: Prepare->Active | Reason: reconstruction complete
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [TopologyBroadcast] Broadcast complete (v8589934608)
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [flare-operator] reconcile slow: 13085ms (nodes=2 M=1 S=1 D=0 P=0)
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [flare-operator] grace period: 19 cycles remaining
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [flare-operator] reconcile slow: 18292ms (nodes=2 M=1 S=1 D=0 P=0)
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [flare-operator] CONTINUOUS REPLICATION eligibility cont-repl-nodes-0.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121: reads unknown: not probed this pass; promotion unknown: not probed this pass
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [flare-operator] grace period: 18 cycles remaining
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [flare-operator] re-sending v8589934609: 1 node(s) are Active in the map but their pods are not Ready yet (activation not applied locally)
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [flare-operator] topology changed (v8589934609 → v8589934609), broadcasting
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [TopologyBroadcast] Broadcasting node sync v8589934609 (2 nodes) to 2 pods
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [TcpClient] Sent node sync v8589934609 (2 nodes) to 10.244.0.30:12121
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [TcpClient] Sent node sync v8589934609 (2 nodes) to 10.244.0.32:12121
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [TopologyBroadcast] Broadcast complete (v8589934609)
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [DEBUG] Received command: node sync
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeSync none
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [DEBUG] Sending response: NODE cont-repl-nodes-0.cont-repl-nodes.flare-cont-repl.svc.cluster.local 12121 1 0 0 0 16 | NODE cont-repl-nodes-1.cont-repl-nodes.flare-cont-repl.svc.cluster.local 12121 0 0 0 100 17 | END | 
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [DEBUG] Received command: node add cont-repl-nodes-2.cont-repl-nodes.flare-cont-repl.svc.cluster.local 12121
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeAdd "cont-repl-nodes-2.cont-repl-nodes.flare-cont-repl.svc.cluster.local" 12121
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [TRACE] Event: NodeAdd cont-repl-nodes-2.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121 | Result: Proxy | Reason: all partitions full
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [DEBUG] Sending response: NODE cont-repl-nodes-2.cont-repl-nodes.flare-cont-repl.svc.cluster.local 12121 2 0 -1 100 18 | NODE cont-repl-nodes-0.cont-repl-nodes.flare-cont-repl.svc.cluster.local 12121 1 0 0 0 16 | NODE cont-repl-nodes-1.cont-repl-nodes.flare-cont-repl.svc.cluster.local 12121 0 0 0 100 17 | END | 
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [DEBUG] Received command: meta
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.Meta
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [TRACE] Event: Meta | CRD partitions=1 replicas=2 | State partitionSize=1024 | Returning partition-size 1024
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [flare-operator] replica divergence: master cont-repl-nodes-1.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121 has 38 keys, slave has 46 (21.05% apart) — live replication has no per-write ack, so a gap here means writes were dropped or expired only on one side
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [flare-operator] reconcile slow: 16483ms (nodes=3 M=1 S=1 D=0 P=0)
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [flare-operator] CRD changed: partitions 1→1, replicas 2→3
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [flare-operator] CONTINUOUS REPLICATION eligibility cont-repl-nodes-0.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121: reads eligible: following epoch 4:a9cd38e7-cf4e-4a06-ad12-89853554633a; position observed 0s ago; lag 41 ≤ 1000 (read); promotion eligible: following epoch 4:a9cd38e7-cf4e-4a06-ad12-89853554633a; position observed 0s ago; lag 41 ≤ 100 (promotion)
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [flare-operator] grace period: 17 cycles remaining
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [flare-operator] topology changed (v8589934610 → v8589934615), broadcasting
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [TopologyBroadcast] Broadcasting node sync v8589934615 (3 nodes) to 3 pods
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [TcpClient] Sent node sync v8589934615 (3 nodes) to 10.244.0.33:12121
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [TcpClient] Sent node sync v8589934615 (3 nodes) to 10.244.0.30:12121
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [TcpClient] Sent node sync v8589934615 (3 nodes) to 10.244.0.32:12121
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [TopologyBroadcast] Broadcast complete (v8589934615)
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [DEBUG] Received command: node state cont-repl-nodes-2.cont-repl-nodes.flare-cont-repl.svc.cluster.local 12121 active
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeState
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator]   "cont-repl-nodes-2.cont-repl-nodes.flare-cont-repl.svc.cluster.local"
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator]   12121
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator]   (FlareOperator.K8s.FlareSta
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [TRACE] Event: NodeState cont-repl-nodes-2.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121 | Result: Prepare->Active | Reason: reconstruction complete
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [flare-operator] replica divergence: master cont-repl-nodes-1.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121 has 298 keys, slave has 336 (12.75% apart) — live replication has no per-write ack, so a gap here means writes were dropped or expired only on one side
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [flare-operator] reconcile slow: 20484ms (nodes=3 M=1 S=2 D=0 P=0)
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [flare-operator] CONTINUOUS REPLICATION eligibility cont-repl-nodes-0.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121: reads eligible: following epoch 4:a9cd38e7-cf4e-4a06-ad12-89853554633a; position observed 0s ago; lag 40 ≤ 1000 (read); promotion eligible: following epoch 4:a9cd38e7-cf4e-4a06-ad12-89853554633a; position observed 0s ago; lag 40 ≤ 100 (promotion)
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [flare-operator] grace period: 16 cycles remaining
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [flare-operator] re-sending v8589934616: 1 node(s) are Active in the map but their pods are not Ready yet (activation not applied locally)
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [flare-operator] topology changed (v8589934616 → v8589934616), broadcasting
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [TopologyBroadcast] Broadcasting node sync v8589934616 (3 nodes) to 3 pods
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [TcpClient] Sent node sync v8589934616 (3 nodes) to 10.244.0.33:12121
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [TcpClient] Sent node sync v8589934616 (3 nodes) to 10.244.0.30:12121
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [TcpClient] Sent node sync v8589934616 (3 nodes) to 10.244.0.32:12121
+# [pod/flare-operator-6ccb48f487-cgk7f/flare-operator] [TopologyBroadcast] Broadcast complete (v8589934616)
+# 
+# === flared logs (flare-cont-repl, tail 80 each) ===
+# [pod/cont-repl-nodes-2/flared] [140737454126464][NTC][flared.cc:183-startup]   reconstruction_bwlimit: 0
+# [pod/cont-repl-nodes-2/flared] [140737454126464][NTC][flared.cc:183-startup]   replication_type:       async
+# [pod/cont-repl-nodes-2/flared] [140737454126464][NTC][flared.cc:183-startup]   server_name:            cont-repl-nodes-2.cont-repl-nodes.flare-cont-repl.svc.cluster.local
+# [pod/cont-repl-nodes-2/flared] [140737454126464][NTC][flared.cc:183-startup]   server_port:            12121
+# [pod/cont-repl-nodes-2/flared] [140737454126464][NTC][flared.cc:183-startup]   server_socket:          
+# [pod/cont-repl-nodes-2/flared] [140737454126464][NTC][flared.cc:183-startup]   stack_size:             128
+# [pod/cont-repl-nodes-2/flared] [140737454126464][NTC][flared.cc:183-startup]   storage_ap:             4
+# [pod/cont-repl-nodes-2/flared] [140737454126464][NTC][flared.cc:183-startup]   storage_bucket_size:    131071
+# [pod/cont-repl-nodes-2/flared] [140737454126464][NTC][flared.cc:183-startup]   storage_cache_size:     65536
+# [pod/cont-repl-nodes-2/flared] [140737454126464][NTC][flared.cc:183-startup]   storage_compress:       
+# [pod/cont-repl-nodes-2/flared] [140737454126464][NTC][flared.cc:183-startup]   storage_large:          false
+# [pod/cont-repl-nodes-2/flared] [140737454126464][NTC][flared.cc:183-startup]   storage_lmemb:          128
+# [pod/cont-repl-nodes-2/flared] [140737454126464][NTC][flared.cc:183-startup]   storage_nmemb:          256
+# [pod/cont-repl-nodes-2/flared] [140737454126464][NTC][flared.cc:183-startup]   storage_dfunit:         0
+# [pod/cont-repl-nodes-2/flared] [140737454126464][NTC][flared.cc:183-startup]   storage_type:           rocksdb
+# [pod/cont-repl-nodes-2/flared] [140737454126464][NTC][flared.cc:183-startup]   thread_pool_size:       5
+# [pod/cont-repl-nodes-2/flared] [140737454126464][NTC][flared.cc:183-startup]   proxy_prior_netmask:    0
+# [pod/cont-repl-nodes-2/flared] [140737454126464][NTC][flared.cc:183-startup]   max_total_thread_queue: 0
+# [pod/cont-repl-nodes-2/flared] [140737454126464][NTC][flared.cc:183-startup]   time_watcher_enabled:   false
+# [pod/cont-repl-nodes-2/flared] [140737454126464][NTC][flared.cc:183-startup]   time_watcher_polling_interval_msec: 0
+# [pod/cont-repl-nodes-2/flared] [140737454126464][NTC][flared.cc:183-startup]   storage_access_watch_threshold_warn_msec: 0
+# [pod/cont-repl-nodes-2/flared] [140737454126464][NTC][flared.cc:183-startup]   storage_access_watch_threshold_ping_ng_msec: 0
+# [pod/cont-repl-nodes-2/flared] [140737454126464][NTC][flared.cc:183-startup]   cluster_replication:    0
+# [pod/cont-repl-nodes-2/flared] [140737454126464][NTC][flared.cc:183-startup]   cluster_replication_server_name: 
+# [pod/cont-repl-nodes-2/flared] [140737454126464][NTC][flared.cc:183-startup]   cluster_replication_server_port: 12121
+# [pod/cont-repl-nodes-2/flared] [140737454126464][NTC][flared.cc:183-startup]   cluster_replication_concurrency: 2
+# [pod/cont-repl-nodes-2/flared] [140737454126464][NTC][flared.cc:183-startup]   cluster_replication_mode: duplicate
+# [pod/cont-repl-nodes-2/flared] [140737454126464][NTC][cluster.cc:279-startup_node] setting up cluster node... (type=1, index_server_name=flare-operator.flare-cont-repl.svc.cluster.local, index_server_port=12120)
+# [pod/cont-repl-nodes-2/flared] [140737454126464][NTC][cluster.cc:310-startup_node] meta data from index server:
+# [pod/cont-repl-nodes-2/flared] [140737454126464][NTC][cluster.cc:311-startup_node]   partition_size:                 1024
+# [pod/cont-repl-nodes-2/flared] [140737454126464][NTC][cluster.cc:312-startup_node]   key_hash_algorithm:             jenkins
+# [pod/cont-repl-nodes-2/flared] [140737454126464][NTC][cluster.cc:313-startup_node]   key_resolver_type:              modular
+# [pod/cont-repl-nodes-2/flared] [140737454126464][NTC][cluster.cc:314-startup_node]   key_resolver_modular_hint:      1
+# [pod/cont-repl-nodes-2/flared] [140737454126464][NTC][cluster.cc:315-startup_node]   key_resolver_modular_virtual:   4096
+# [pod/cont-repl-nodes-2/flared] [140737454126464][NTC][cluster.cc:1123-reconstruct_node] reconstructing node map... (3 entries)
+# [pod/cont-repl-nodes-2/flared] [140737454126464][NTC][cluster.cc:2272-_reconstruct_node_partition] reconstructing node partition map... (from 3 entries in node map)
+# [pod/cont-repl-nodes-2/flared] [140737454126464][NTC][cluster.cc:2405-_reconstruct_node_partition] node partition map:
+# [pod/cont-repl-nodes-2/flared] [140737454126464][NTC][cluster.cc:2410-_reconstruct_node_partition] 0: master (node_key=cont-repl-nodes-1.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121, node_balance=100)
+# [pod/cont-repl-nodes-2/flared] [140737454126464][NTC][cluster.cc:2414-_reconstruct_node_partition] 0: slave[0] (node_key=cont-repl-nodes-0.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121, node_balance=0)
+# [pod/cont-repl-nodes-2/flared] [140737454126464][NTC][cluster.cc:2424-_reconstruct_node_partition] node partition map (prepare):
+# [pod/cont-repl-nodes-2/flared] [140737454126464][NTC][storage_rocksdb.cc:272-_load_or_generate_master_id] generated new master id (id=959af140-1a92-40a5-b340-cbc9dc47b37f)
+# [pod/cont-repl-nodes-2/flared] [140737454126464][NTC][storage_rocksdb.cc:392-_load_or_init_generations] replication generations (source_epoch=1:22308adf-3e16-4032-8efe-4cdfa3024575, incarnation=1:f1f1206b-2919-4e58-a3bf-07e988446b12)
+# [pod/cont-repl-nodes-2/flared] [140737454126464][NTC][storage_rocksdb.cc:610-open] storage open (path=/tmp/flare/flare.rocksdb, type=rocksdb, master_id=959af140-1a92-40a5-b340-cbc9dc47b37f, sync_writes=false, wal_ttl=86400s, wal_size_limit=10240MB)
+# [pod/cont-repl-nodes-2/flared] [140737436919488][NTC][handler_metrics.cc:69-run] metrics endpoint ready (port=9150, self-scrape port=12121)
+# [pod/cont-repl-nodes-2/flared] [140737454126464][NTC][flared.cc:428-run] entering running loop
+# [pod/cont-repl-nodes-2/flared] [140737436784320][NTC][cluster.cc:1123-reconstruct_node] reconstructing node map... (3 entries)
+# [pod/cont-repl-nodes-2/flared] [140737436784320][NTC][cluster.cc:1183-reconstruct_node] update: node_balance (100 -> 0)
+# [pod/cont-repl-nodes-2/flared] [140737436784320][NTC][cluster.cc:2272-_reconstruct_node_partition] reconstructing node partition map... (from 3 entries in node map)
+# [pod/cont-repl-nodes-2/flared] [140737436784320][NTC][cluster.cc:2405-_reconstruct_node_partition] node partition map:
+# [pod/cont-repl-nodes-2/flared] [140737436784320][NTC][cluster.cc:2410-_reconstruct_node_partition] 0: master (node_key=cont-repl-nodes-1.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121, node_balance=100)
+# [pod/cont-repl-nodes-2/flared] [140737436784320][NTC][cluster.cc:2414-_reconstruct_node_partition] 0: slave[0] (node_key=cont-repl-nodes-0.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121, node_balance=0)
+# [pod/cont-repl-nodes-2/flared] [140737436784320][NTC][cluster.cc:2414-_reconstruct_node_partition] 0: slave[1] (node_key=cont-repl-nodes-2.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121, node_balance=0)
+# [pod/cont-repl-nodes-2/flared] [140737436784320][NTC][cluster.cc:2424-_reconstruct_node_partition] node partition map (prepare):
+# [pod/cont-repl-nodes-2/flared] [140737436784320][NTC][cluster.cc:1772-_shift_node_state] shifting node_state (node_key=cont-repl-nodes-2.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121, old_state=active, new_state=prepare)
+# [pod/cont-repl-nodes-2/flared] [140737436784320][NTC][cluster.cc:1789-_shift_node_role] shifting node_role (node_key=cont-repl-nodes-2.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121, old_role=proxy, old_partition=-1, new_role=slave, new_partition=0)
+# [pod/cont-repl-nodes-2/flared] [140737436649152][NTC][handler_reconstruction.cc:260-_run_once] attempting snapshot bootstrap (physical reseed + WAL catch-up) instead of truncate+full-dump
+# [pod/cont-repl-nodes-2/flared] [140737436649152][NTC][op_repl_snapshot.cc:301-_run_client] snapshot bootstrap: receiving 8 files (seq=499, source master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-2/flared] [140737436649152][NTC][storage_rocksdb.cc:1653-swap_in_snapshot] restore completed (cursor=499, source_epoch=4:a9cd38e7-cf4e-4a06-ad12-89853554633a, incarnation=2:4a8f2faa-2270-4cc3-bd34-5abdc39c677b)
+# [pod/cont-repl-nodes-2/flared] [140737436649152][NTC][storage_rocksdb.cc:1703-swap_in_snapshot] snapshot bootstrap complete (seq=499, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-2/flared] [140737436649152][NTC][op_repl_snapshot.cc:412-_run_client] snapshot bootstrap: swapped in 22368 bytes, replication cursor at 499
+# [pod/cont-repl-nodes-2/flared] [140737436649152][NTC][handler_reconstruction.cc:276-_run_once] snapshot bootstrap succeeded; skipping full dump (cursor and lineage seeded by the swap)
+# [pod/cont-repl-nodes-2/flared] [140737436378816][NTC][cluster.cc:1123-reconstruct_node] reconstructing node map... (3 entries)
+# [pod/cont-repl-nodes-2/flared] [140737436378816][NTC][cluster.cc:2272-_reconstruct_node_partition] reconstructing node partition map... (from 3 entries in node map)
+# [pod/cont-repl-nodes-2/flared] [140737436378816][NTC][cluster.cc:2405-_reconstruct_node_partition] node partition map:
+# [pod/cont-repl-nodes-2/flared] [140737436378816][NTC][cluster.cc:2410-_reconstruct_node_partition] 0: master (node_key=cont-repl-nodes-1.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121, node_balance=100)
+# [pod/cont-repl-nodes-2/flared] [140737436378816][NTC][cluster.cc:2414-_reconstruct_node_partition] 0: slave[0] (node_key=cont-repl-nodes-0.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121, node_balance=0)
+# [pod/cont-repl-nodes-2/flared] [140737436378816][NTC][cluster.cc:2414-_reconstruct_node_partition] 0: slave[1] (node_key=cont-repl-nodes-2.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121, node_balance=0)
+# [pod/cont-repl-nodes-2/flared] [140737436378816][NTC][cluster.cc:2424-_reconstruct_node_partition] node partition map (prepare):
+# [pod/cont-repl-nodes-2/flared] [140737436378816][NTC][cluster.cc:1772-_shift_node_state] shifting node_state (node_key=cont-repl-nodes-2.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121, old_state=prepare, new_state=active)
+# [pod/cont-repl-nodes-2/flared] [140737436378816][NTC][cluster.cc:1764-_reconcile_wal_follower_locked] starting continuous replication follower (source=cont-repl-nodes-1.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121, max_batches=256, max_bytes=4194304, poll=200000us)
+# [pod/cont-repl-nodes-2/flared] [140737436649152][NTC][stats.cc:276-follow_set_state] replication follow state: initial_sync
+# [pod/cont-repl-nodes-2/flared] [140737436649152][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=754, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-2/flared] [140737436649152][NTC][stats.cc:276-follow_set_state] replication follow state: following
+# [pod/cont-repl-nodes-2/flared] [140737436649152][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=798, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-2/flared] [140737436649152][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=800, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-2/flared] [140737436649152][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=800, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-2/flared] [140737436649152][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=800, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-2/flared] [140737436649152][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=800, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-2/flared] [140737436649152][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=800, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-2/flared] [140737436649152][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=800, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=653, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=656, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=658, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=660, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=662, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=664, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=667, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=669, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=672, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=674, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=676, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=679, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=680, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=683, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=685, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=687, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=690, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=692, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=695, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=697, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=700, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=701, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=703, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=705, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=708, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=710, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=713, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=715, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=718, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=720, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=721, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=723, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=726, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=728, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=730, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=733, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=735, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=738, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=740, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=740, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=743, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=745, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=747, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=750, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=752, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=754, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=757, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=759, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=760, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=762, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=764, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=767, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=769, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=771, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=774, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=776, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=779, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=780, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=782, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=784, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=787, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=789, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=792, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=794, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436378816][NTC][cluster.cc:1123-reconstruct_node] reconstructing node map... (3 entries)
+# [pod/cont-repl-nodes-0/flared] [140737436378816][NTC][cluster.cc:2272-_reconstruct_node_partition] reconstructing node partition map... (from 3 entries in node map)
+# [pod/cont-repl-nodes-0/flared] [140737436378816][NTC][cluster.cc:2405-_reconstruct_node_partition] node partition map:
+# [pod/cont-repl-nodes-0/flared] [140737436378816][NTC][cluster.cc:2410-_reconstruct_node_partition] 0: master (node_key=cont-repl-nodes-1.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121, node_balance=100)
+# [pod/cont-repl-nodes-0/flared] [140737436378816][NTC][cluster.cc:2414-_reconstruct_node_partition] 0: slave[0] (node_key=cont-repl-nodes-0.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121, node_balance=0)
+# [pod/cont-repl-nodes-0/flared] [140737436378816][NTC][cluster.cc:2414-_reconstruct_node_partition] 0: slave[1] (node_key=cont-repl-nodes-2.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121, node_balance=0)
+# [pod/cont-repl-nodes-0/flared] [140737436378816][NTC][cluster.cc:2424-_reconstruct_node_partition] node partition map (prepare):
+# [pod/cont-repl-nodes-0/flared] [140737436378816][NTC][cluster.cc:1772-_shift_node_state] shifting node_state (node_key=cont-repl-nodes-2.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121, old_state=prepare, new_state=active)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=796, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=798, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=800, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=800, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=800, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=800, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=800, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-0/flared] [140737436513984][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=800, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-1/flared] [140737436649152][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=155, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-1/flared] [140737436649152][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=155, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-1/flared] [140737436649152][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=155, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-1/flared] [140737436649152][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=155, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-1/flared] [140737436649152][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=155, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-1/flared] [140737436649152][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=155, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-1/flared] [140737436649152][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=155, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-1/flared] [140737436649152][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=155, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-1/flared] [140737436649152][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=155, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-1/flared] [140737436649152][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=155, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-1/flared] [140737436649152][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=155, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-1/flared] [140737436649152][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=155, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-1/flared] [140737436649152][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=155, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-1/flared] [140737436649152][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=155, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-1/flared] [140737436649152][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=155, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-1/flared] [140737436649152][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=155, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-1/flared] [140737436649152][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=155, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-1/flared] [140737436649152][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=155, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-1/flared] [140737436649152][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=155, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-1/flared] [140737436649152][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=155, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-1/flared] [140737436649152][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=155, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-1/flared] [140737436649152][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=155, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-1/flared] [140737436649152][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=155, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-1/flared] [140737436649152][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=155, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-1/flared] [140737436649152][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=155, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-1/flared] [140737436649152][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=155, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-1/flared] [140737436649152][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=155, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-1/flared] [140737436649152][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=155, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-1/flared] [140737436649152][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=155, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-1/flared] [140737436649152][NTC][op_repl_sync_wal.cc:628-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=155, master_id=36462dae-523a-40b2-8359-a3a207bbce61)
+# [pod/cont-repl-nodes-1/flared] [140737436649152][ERR][util.cc:104-gethostbyname] getaddrinfo() failed: Name or service not known (-2)
+# [pod/cont-repl-nodes-1/flared] [140737436649152][NTC][stats.cc:276-follow_set_state] replication follow state: disconnected — peer_unreachable
+# [pod/cont-repl-nodes-1/flared] [140737436649152][ERR][util.cc:104-gethostbyname] getaddrinfo() failed: Name or service not known (-2)
+# [pod/cont-repl-nodes-1/flared] [140737436649152][WRN][op_repl_sync_wal.cc:443-_parse_text_client_parameters] master_id mismatch (server reports d430904b-13de-495b-8abf-ee9be7f68af6)
+# [pod/cont-repl-nodes-1/flared] [140737436649152][NTC][stats.cc:276-follow_set_state] replication follow state: needs_rebuild — master_id_mismatch
+# [pod/cont-repl-nodes-1/flared] [140737436784320][NTC][cluster.cc:1123-reconstruct_node] reconstructing node map... (2 entries)
+# [pod/cont-repl-nodes-1/flared] [140737436784320][NTC][cluster.cc:1183-reconstruct_node] update: node_balance (0 -> 100)
+# [pod/cont-repl-nodes-1/flared] [140737436784320][NTC][cluster.cc:1183-reconstruct_node] update: node_balance (100 -> 0)
+# [pod/cont-repl-nodes-1/flared] [140737436784320][NTC][cluster.cc:2272-_reconstruct_node_partition] reconstructing node partition map... (from 2 entries in node map)
+# [pod/cont-repl-nodes-1/flared] [140737436784320][NTC][cluster.cc:2405-_reconstruct_node_partition] node partition map:
+# [pod/cont-repl-nodes-1/flared] [140737436784320][NTC][cluster.cc:2410-_reconstruct_node_partition] 0: master (node_key=cont-repl-nodes-1.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121, node_balance=100)
+# [pod/cont-repl-nodes-1/flared] [140737436784320][NTC][cluster.cc:2414-_reconstruct_node_partition] 0: slave[0] (node_key=cont-repl-nodes-0.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121, node_balance=0)
+# [pod/cont-repl-nodes-1/flared] [140737436784320][NTC][cluster.cc:2424-_reconstruct_node_partition] node partition map (prepare):
+# [pod/cont-repl-nodes-1/flared] [140737436784320][NTC][cluster.cc:1772-_shift_node_state] shifting node_state (node_key=cont-repl-nodes-0.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121, old_state=active, new_state=prepare)
+# [pod/cont-repl-nodes-1/flared] [140737436784320][NTC][cluster.cc:1789-_shift_node_role] shifting node_role (node_key=cont-repl-nodes-0.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121, old_role=master, old_partition=0, new_role=slave, new_partition=0)
+# [pod/cont-repl-nodes-1/flared] [140737436784320][NTC][cluster.cc:1789-_shift_node_role] shifting node_role (node_key=cont-repl-nodes-1.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121, old_role=slave, old_partition=0, new_role=master, new_partition=0)
+# [pod/cont-repl-nodes-1/flared] [140737436784320][NTC][storage_rocksdb.cc:439-advance_source_epoch] source epoch advanced to 4:a9cd38e7-cf4e-4a06-ad12-89853554633a (followers of the previous history must rebuild)
+# [pod/cont-repl-nodes-1/flared] [140737436784320][NTC][cluster.cc:1685-stop_wal_follower] stopping continuous replication follower (source=cont-repl-nodes-0.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121)
+# [pod/cont-repl-nodes-1/flared] [140737436784320][NTC][stats.cc:276-follow_set_state] replication follow state: idle — stopped
+# [pod/cont-repl-nodes-1/flared] [140737436649152][NTC][flared.cc:93-sa_usr1_handler] received signal [SIGUSR1]
+# [pod/cont-repl-nodes-1/flared] [140737434138304][NTC][storage_rocksdb.cc:1377-create_snapshot_checkpoint] snapshot checkpoint created (path=/tmp/flare/snapshot.serve.tmp, seq=250)
+# [pod/cont-repl-nodes-1/flared] [140737434138304][NTC][op_repl_snapshot.cc:145-_run_server] snapshot stream bwlimit: 32768 KB/s (server=32768, requested=0; 0=unlimited)
+# [pod/cont-repl-nodes-1/flared] [140737434138304][NTC][op_repl_snapshot.cc:229-_run_server] snapshot streamed to peer (files=7, seq=250)
+# [pod/cont-repl-nodes-1/flared] [140737434273472][NTC][cluster.cc:1123-reconstruct_node] reconstructing node map... (2 entries)
+# [pod/cont-repl-nodes-1/flared] [140737434273472][NTC][cluster.cc:2272-_reconstruct_node_partition] reconstructing node partition map... (from 2 entries in node map)
+# [pod/cont-repl-nodes-1/flared] [140737434273472][NTC][cluster.cc:2405-_reconstruct_node_partition] node partition map:
+# [pod/cont-repl-nodes-1/flared] [140737434273472][NTC][cluster.cc:2410-_reconstruct_node_partition] 0: master (node_key=cont-repl-nodes-1.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121, node_balance=100)
+# [pod/cont-repl-nodes-1/flared] [140737434273472][NTC][cluster.cc:2414-_reconstruct_node_partition] 0: slave[0] (node_key=cont-repl-nodes-0.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121, node_balance=0)
+# [pod/cont-repl-nodes-1/flared] [140737434273472][NTC][cluster.cc:2424-_reconstruct_node_partition] node partition map (prepare):
+# [pod/cont-repl-nodes-1/flared] [140737434273472][NTC][cluster.cc:1772-_shift_node_state] shifting node_state (node_key=cont-repl-nodes-0.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121, old_state=prepare, new_state=active)
+# [pod/cont-repl-nodes-1/flared] [140737434003136][ERR][connection_tcp.cc:518-write] write() failed: Broken pipe (32) -> closing socket
+# [pod/cont-repl-nodes-1/flared] [140737433867968][ERR][connection_tcp.cc:518-write] write() failed: Broken pipe (32) -> closing socket
+# [pod/cont-repl-nodes-1/flared] [140737434138304][NTC][cluster.cc:1123-reconstruct_node] reconstructing node map... (3 entries)
+# [pod/cont-repl-nodes-1/flared] [140737434138304][NTC][cluster.cc:2272-_reconstruct_node_partition] reconstructing node partition map... (from 3 entries in node map)
+# [pod/cont-repl-nodes-1/flared] [140737434138304][NTC][cluster.cc:2405-_reconstruct_node_partition] node partition map:
+# [pod/cont-repl-nodes-1/flared] [140737434138304][NTC][cluster.cc:2410-_reconstruct_node_partition] 0: master (node_key=cont-repl-nodes-1.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121, node_balance=100)
+# [pod/cont-repl-nodes-1/flared] [140737434138304][NTC][cluster.cc:2414-_reconstruct_node_partition] 0: slave[0] (node_key=cont-repl-nodes-0.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121, node_balance=0)
+# [pod/cont-repl-nodes-1/flared] [140737434138304][NTC][cluster.cc:2414-_reconstruct_node_partition] 0: slave[1] (node_key=cont-repl-nodes-2.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121, node_balance=0)
+# [pod/cont-repl-nodes-1/flared] [140737434138304][NTC][cluster.cc:2424-_reconstruct_node_partition] node partition map (prepare):
+# [pod/cont-repl-nodes-1/flared] [140737436784320][NTC][storage_rocksdb.cc:1377-create_snapshot_checkpoint] snapshot checkpoint created (path=/tmp/flare/snapshot.serve.tmp, seq=499)
+# [pod/cont-repl-nodes-1/flared] [140737436784320][NTC][op_repl_snapshot.cc:145-_run_server] snapshot stream bwlimit: 32768 KB/s (server=32768, requested=0; 0=unlimited)
+# [pod/cont-repl-nodes-1/flared] [140737436784320][NTC][op_repl_snapshot.cc:229-_run_server] snapshot streamed to peer (files=8, seq=499)
+# [pod/cont-repl-nodes-1/flared] [140737436784320][NTC][cluster.cc:1123-reconstruct_node] reconstructing node map... (3 entries)
+# [pod/cont-repl-nodes-1/flared] [140737436784320][NTC][cluster.cc:2272-_reconstruct_node_partition] reconstructing node partition map... (from 3 entries in node map)
+# [pod/cont-repl-nodes-1/flared] [140737436784320][NTC][cluster.cc:2405-_reconstruct_node_partition] node partition map:
+# [pod/cont-repl-nodes-1/flared] [140737436784320][NTC][cluster.cc:2410-_reconstruct_node_partition] 0: master (node_key=cont-repl-nodes-1.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121, node_balance=100)
+# [pod/cont-repl-nodes-1/flared] [140737436784320][NTC][cluster.cc:2414-_reconstruct_node_partition] 0: slave[0] (node_key=cont-repl-nodes-0.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121, node_balance=0)
+# [pod/cont-repl-nodes-1/flared] [140737436784320][NTC][cluster.cc:2414-_reconstruct_node_partition] 0: slave[1] (node_key=cont-repl-nodes-2.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121, node_balance=0)
+# [pod/cont-repl-nodes-1/flared] [140737436784320][NTC][cluster.cc:2424-_reconstruct_node_partition] node partition map (prepare):
+# [pod/cont-repl-nodes-1/flared] [140737436784320][NTC][cluster.cc:1772-_shift_node_state] shifting node_state (node_key=cont-repl-nodes-2.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121, old_state=prepare, new_state=active)
+# 
+# === pods (flare-cont-repl) ===
+# NAME                              READY   STATUS    RESTARTS   AGE     IP            NODE                      NOMINATED NODE   READINESS GATES
+# cont-repl-nodes-0                 1/1     Running   0          2m26s   10.244.0.32   flare-e2e-control-plane   <none>           <none>
+# cont-repl-nodes-1                 1/1     Running   0          11m     10.244.0.30   flare-e2e-control-plane   <none>           <none>
+# cont-repl-nodes-2                 0/1     Running   0          50s     10.244.0.33   flare-e2e-control-plane   <none>           <none>
+# debug-cont-repl                   1/1     Running   0          12m     10.244.0.27   flare-e2e-control-plane   <none>           <none>
+# flare-operator-6ccb48f487-cgk7f   1/1     Running   0          3m50s   10.244.0.31   flare-e2e-control-plane   <none>           <none>
+# 
+# === events (flare-cont-repl, by time) ===
+# LAST SEEN   TYPE      REASON                         OBJECT                                 MESSAGE
+# 6h46m       Warning   Unhealthy                      pod/cont-repl-nodes-1                  Readiness probe failed:
+# 6h43m       Normal    Killing                        pod/cont-repl-nodes-0                  Stopping container flared
+# 6h43m       Normal    Scheduled                      pod/cont-repl-nodes-0                  Successfully assigned flare-cont-repl/cont-repl-nodes-0 to flare-e2e-control-plane
+# 6h43m       Normal    Pulled                         pod/cont-repl-nodes-0                  Container image "flare-node-rocksdb:test" already present on machine and can be accessed by the pod
+# 6h43m       Normal    Created                        pod/cont-repl-nodes-0                  Container created
+# 6h43m       Normal    Started                        pod/cont-repl-nodes-0                  Container started
+# 6h43m       Normal    SuccessfulCreate               statefulset/cont-repl-nodes            Create Pod cont-repl-nodes-0 in StatefulSet cont-repl-nodes successful
+# 6h42m       Normal    Killing                        pod/flare-operator-6ccb48f487-2nx7l    Stopping container flare-operator
+# 6h42m       Normal    Killing                        pod/cont-repl-nodes-0                  Stopping container flared
+# 6h42m       Normal    Killing                        pod/cont-repl-nodes-1                  Stopping container flared
+# 6h42m       Normal    Killing                        pod/debug-cont-repl                    Stopping container debug-cont-repl
+# 4h39m       Normal    Created                        pod/debug-cont-repl                    Container created
+# 4h39m       Normal    Started                        pod/debug-cont-repl                    Container started
+# 4h39m       Normal    Scheduled                      pod/debug-cont-repl                    Successfully assigned flare-cont-repl/debug-cont-repl to flare-e2e-control-plane
+# 4h39m       Normal    Pulled                         pod/debug-cont-repl                    Container image "busybox:1.36" already present on machine and can be accessed by the pod
+# 4h39m       Normal    ScalingReplicaSet              deployment/flare-operator              Scaled up replica set flare-operator-6ccb48f487 from 0 to 1
+# 4h39m       Normal    Started                        pod/flare-operator-6ccb48f487-w568m    Container started
+# 4h39m       Normal    SuccessfulCreate               replicaset/flare-operator-6ccb48f487   Created pod: flare-operator-6ccb48f487-w568m
+# 4h39m       Normal    Created                        pod/flare-operator-6ccb48f487-w568m    Container created
+# 4h39m       Normal    Scheduled                      pod/flare-operator-6ccb48f487-w568m    Successfully assigned flare-cont-repl/flare-operator-6ccb48f487-w568m to flare-e2e-control-plane
+# 4h39m       Normal    Pulled                         pod/flare-operator-6ccb48f487-w568m    Container image "flare-operator:test" already present on machine and can be accessed by the pod
+# 4h24m       Normal    Scheduled                      pod/cont-repl-nodes-0                  Successfully assigned flare-cont-repl/cont-repl-nodes-0 to flare-e2e-control-plane
+# 4h24m       Normal    Created                        pod/cont-repl-nodes-0                  Container created
+# 4h24m       Normal    Started                        pod/cont-repl-nodes-0                  Container started
+# 4h24m       Normal    Pulled                         pod/cont-repl-nodes-0                  Container image "flare-node-rocksdb:test" already present on machine and can be accessed by the pod
+# 4h24m       Normal    Created                        pod/cont-repl-nodes-1                  Container created
+# 4h24m       Normal    SuccessfulCreate               statefulset/cont-repl-nodes            Create Pod cont-repl-nodes-1 in StatefulSet cont-repl-nodes successful
+# 4h24m       Normal    Scheduled                      pod/cont-repl-nodes-1                  Successfully assigned flare-cont-repl/cont-repl-nodes-1 to flare-e2e-control-plane
+# 4h24m       Normal    Pulled                         pod/cont-repl-nodes-1                  Container image "flare-node-rocksdb:test" already present on machine and can be accessed by the pod
+# 4h24m       Normal    Started                        pod/cont-repl-nodes-1                  Container started
+# 23m         Normal    Killing                        pod/cont-repl-nodes-0                  Stopping container flared
+# 23m         Normal    SuccessfulCreate               statefulset/cont-repl-nodes            Create Pod cont-repl-nodes-0 in StatefulSet cont-repl-nodes successful
+# 23m         Normal    Scheduled                      pod/cont-repl-nodes-0                  Successfully assigned flare-cont-repl/cont-repl-nodes-0 to flare-e2e-control-plane
+# 23m         Normal    Pulled                         pod/cont-repl-nodes-0                  Container image "flare-node-rocksdb:test" already present on machine and can be accessed by the pod
+# 23m         Normal    Created                        pod/cont-repl-nodes-0                  Container created
+# 23m         Normal    Started                        pod/cont-repl-nodes-0                  Container started
+# 18m         Warning   Unhealthy                      pod/cont-repl-nodes-1                  Readiness probe failed:
+# 15m         Normal    Killing                        pod/cont-repl-nodes-1                  Stopping container flared
+# 15m         Warning   FailedToUpdateEndpointSlices   service/cont-repl-0                    Error updating Endpoint Slices for Service flare-cont-repl/cont-repl-0: failed to update cont-repl-0-wzh22 EndpointSlice for Service flare-cont-repl/cont-repl-0: Unauthorized
+# 15m         Normal    Killing                        pod/debug-cont-repl                    Stopping container debug-cont-repl
+# 15m         Normal    Killing                        pod/flare-operator-6ccb48f487-w568m    Stopping container flare-operator
+# 15m         Warning   FailedToUpdateEndpointSlices   service/cont-repl-nodes                Error updating Endpoint Slices for Service flare-cont-repl/cont-repl-nodes: failed to update cont-repl-nodes-qbktg EndpointSlice for Service flare-cont-repl/cont-repl-nodes: Unauthorized
+# 15m         Normal    Killing                        pod/cont-repl-nodes-0                  Stopping container flared
+# 12m         Normal    Created                        pod/debug-cont-repl                    Container created
+# 12m         Normal    Scheduled                      pod/debug-cont-repl                    Successfully assigned flare-cont-repl/debug-cont-repl to flare-e2e-control-plane
+# 12m         Normal    Pulled                         pod/debug-cont-repl                    Container image "busybox:1.36" already present on machine and can be accessed by the pod
+# 12m         Normal    Started                        pod/debug-cont-repl                    Container started
+# 12m         Normal    Created                        pod/flare-operator-6ccb48f487-svlrb    Container created
+# 12m         Normal    Scheduled                      pod/flare-operator-6ccb48f487-svlrb    Successfully assigned flare-cont-repl/flare-operator-6ccb48f487-svlrb to flare-e2e-control-plane
+# 12m         Normal    ScalingReplicaSet              deployment/flare-operator              Scaled up replica set flare-operator-6ccb48f487 from 0 to 1
+# 12m         Normal    Pulled                         pod/flare-operator-6ccb48f487-svlrb    Container image "flare-operator:test" already present on machine and can be accessed by the pod
+# 12m         Normal    SuccessfulCreate               replicaset/flare-operator-6ccb48f487   Created pod: flare-operator-6ccb48f487-svlrb
+# 12m         Normal    Started                        pod/flare-operator-6ccb48f487-svlrb    Container started
+# 11m         Normal    Created                        pod/cont-repl-nodes-0                  Container created
+# 11m         Normal    Pulled                         pod/cont-repl-nodes-0                  Container image "flare-node-rocksdb:test" already present on machine and can be accessed by the pod
+# 11m         Normal    Scheduled                      pod/cont-repl-nodes-0                  Successfully assigned flare-cont-repl/cont-repl-nodes-0 to flare-e2e-control-plane
+# 11m         Normal    Started                        pod/cont-repl-nodes-0                  Container started
+# 11m         Normal    Scheduled                      pod/cont-repl-nodes-1                  Successfully assigned flare-cont-repl/cont-repl-nodes-1 to flare-e2e-control-plane
+# 11m         Normal    SuccessfulCreate               statefulset/cont-repl-nodes            Create Pod cont-repl-nodes-1 in StatefulSet cont-repl-nodes successful
+# 11m         Normal    Created                        pod/cont-repl-nodes-1                  Container created
+# 11m         Normal    Pulled                         pod/cont-repl-nodes-1                  Container image "flare-node-rocksdb:test" already present on machine and can be accessed by the pod
+# 11m         Normal    Started                        pod/cont-repl-nodes-1                  Container started
+# 7m6s        Warning   Unhealthy                      pod/cont-repl-nodes-1                  Readiness probe failed:
+# 3m50s       Normal    Killing                        pod/flare-operator-6ccb48f487-svlrb    Stopping container flare-operator
+# 3m50s       Normal    Pulled                         pod/flare-operator-6ccb48f487-cgk7f    Container image "flare-operator:test" already present on machine and can be accessed by the pod
+# 3m50s       Normal    Created                        pod/flare-operator-6ccb48f487-cgk7f    Container created
+# 3m50s       Normal    Started                        pod/flare-operator-6ccb48f487-cgk7f    Container started
+# 3m50s       Normal    Scheduled                      pod/flare-operator-6ccb48f487-cgk7f    Successfully assigned flare-cont-repl/flare-operator-6ccb48f487-cgk7f to flare-e2e-control-plane
+# 3m50s       Warning   FailedCreate                   replicaset/flare-operator-6ccb48f487   Error creating: Unauthorized
+# 3m50s       Normal    SuccessfulCreate               replicaset/flare-operator-6ccb48f487   Created pod: flare-operator-6ccb48f487-cgk7f
+# 3m50s       Warning   FailedToUpdateEndpoint         endpoints/flare-operator               Failed to update endpoint flare-cont-repl/flare-operator: Unauthorized
+# 2m26s       Normal    Killing                        pod/cont-repl-nodes-0                  Stopping container flared
+# 2m26s       Normal    SuccessfulCreate               statefulset/cont-repl-nodes            Create Pod cont-repl-nodes-0 in StatefulSet cont-repl-nodes successful
+# 2m26s       Normal    Scheduled                      pod/cont-repl-nodes-0                  Successfully assigned flare-cont-repl/cont-repl-nodes-0 to flare-e2e-control-plane
+# 2m25s       Normal    Started                        pod/cont-repl-nodes-0                  Container started
+# 2m25s       Normal    Created                        pod/cont-repl-nodes-0                  Container created
+# 2m25s       Normal    Pulled                         pod/cont-repl-nodes-0                  Container image "flare-node-rocksdb:test" already present on machine and can be accessed by the pod
+# 58s         Warning   Unhealthy                      pod/cont-repl-nodes-0                  Readiness probe failed:
+# 50s         Normal    SuccessfulCreate               statefulset/cont-repl-nodes            Create Pod cont-repl-nodes-2 in StatefulSet cont-repl-nodes successful
+# 50s         Normal    Scheduled                      pod/cont-repl-nodes-2                  Successfully assigned flare-cont-repl/cont-repl-nodes-2 to flare-e2e-control-plane
+# 49s         Normal    Started                        pod/cont-repl-nodes-2                  Container started
+# 49s         Normal    Created                        pod/cont-repl-nodes-2                  Container created
+# 49s         Normal    Pulled                         pod/cont-repl-nodes-2                  Container image "flare-node-rocksdb:test" already present on machine and can be accessed by the pod
+# 3s          Warning   Unhealthy                      pod/cont-repl-nodes-2                  Readiness probe failed:
+# 
+# === describe flared pods (flare-cont-repl) ===
+# Name:             cont-repl-nodes-0
+# Namespace:        flare-cont-repl
+# Priority:         0
+# Service Account:  default
+# Node:             flare-e2e-control-plane/172.18.0.2
+# Start Time:       Sun, 20 Sep 2026 10:49:18 +0900
+# Labels:           app=flare
+#                   apps.kubernetes.io/pod-index=0
+#                   cluster=cont-repl
+#                   controller-revision-hash=cont-repl-nodes-648b4bf8ff
+#                   statefulset.kubernetes.io/pod-name=cont-repl-nodes-0
+# Annotations:      <none>
+# Status:           Running
+# IP:               10.244.0.32
+# IPs:
+#   IP:           10.244.0.32
+# Controlled By:  StatefulSet/cont-repl-nodes
+# Containers:
+#   flared:
+#     Container ID:  containerd://99dac83c66bc5a80e78753086dd2f59a447847f46e2927b91dc09fbda8950cf4
+#     Image:         flare-node-rocksdb:test
+#     Image ID:      sha256:2f6dc1cb73e446cb4bdd721aefc888f0fafdbd2f3f054819c0bb190fd492d3f2
+#     Ports:         12121/TCP (flare), 9150/TCP (metrics)
+#     Host Ports:    0/TCP (flare), 0/TCP (metrics)
+#     Command:
+#       sh
+#       -c
+#       rm -rf /tmp/flare/*.hdb /tmp/flare/*.hdb.wal /tmp/flare/rocksdb && mkdir -p /tmp/flare && rm -f /tmp/flare/flared.pid && exec flared --config=/etc/flared/extra.conf --data-dir /tmp/flare --server-port 12121 --index-server-name flare-operator.flare-cont-repl.svc.cluster.local --index-server-port 12120 --storage-type=rocksdb --metrics-server-port 9150 --stderr
+#     State:          Running
+#       Started:      Sun, 20 Sep 2026 10:49:19 +0900
+#     Ready:          True
+#     Restart Count:  0
+#     Limits:
+#       cpu:     500m
+#       memory:  512Mi
+#     Requests:
+#       cpu:      100m
+#       memory:   256Mi
+#     Liveness:   tcp-socket :12121 delay=10s timeout=1s period=5s #success=1 #failure=6
+#     Readiness:  exec [/bin/bash -c exec 3<>/dev/tcp/127.0.0.1/12121 || exit 1
+# printf 'stats nodes\r\nquit\r\n' >&3
+# out=$(tr -d '\r' <&3)
+# me="$(hostname -f):12121"
+# case "$out" in *"STAT $me:state active"*) exit 0;; esac
+# # Limbo clause (mirrors the helm chart): a syncing member of a
+# # partition with NO active master has nothing to sync from —
+# # total-partition recovery. Report Ready so the OrderedReady
+# # StatefulSet can recreate the peer that will become master.
+# mypart=$(printf '%s\n' "$out" | sed -n "s/^STAT $me:partition //p")
+# [ -n "$mypart" ] || exit 1
+# [ "$mypart" != "-1" ] || exit 1
+# for key in $(printf '%s\n' "$out" | sed -n "s/^STAT \(.*\):partition $mypart$/\1/p"); do
+#   printf '%s\n' "$out" | grep -q "^STAT $key:role master$" || continue
+#   printf '%s\n' "$out" | grep -q "^STAT $key:state active$" && exit 1
+# done
+# exit 0
+# ] delay=5s timeout=4s period=5s #success=1 #failure=3
+#     Environment:  <none>
+#     Mounts:
+#       /etc/flared from flared-config (rw)
+#       /var/run/secrets/kubernetes.io/serviceaccount from kube-api-access-2lv2p (ro)
+# Conditions:
+#   Type                        Status
+#   PodReadyToStartContainers   True 
+#   Initialized                 True 
+#   Ready                       True 
+#   ContainersReady             True 
+#   PodScheduled                True 
+# Volumes:
+#   flared-config:
+#     Type:      ConfigMap (a volume populated by a ConfigMap)
+#     Name:      cont-repl-config
+#     Optional:  false
+#   kube-api-access-2lv2p:
+#     Type:                    Projected (a volume that contains injected data from multiple sources)
+#     TokenExpirationSeconds:  3607
+#     ConfigMapName:           kube-root-ca.crt
+#     Optional:                false
+#     DownwardAPI:             true
+# QoS Class:                   Burstable
+# Node-Selectors:              <none>
+# Tolerations:                 node.kubernetes.io/not-ready:NoExecute op=Exists for 300s
+#                              node.kubernetes.io/unreachable:NoExecute op=Exists for 300s
+# Events:
+#   Type     Reason     Age                From               Message
+#   ----     ------     ----               ----               -------
+#   Normal   Scheduled  2m26s              default-scheduler  Successfully assigned flare-cont-repl/cont-repl-nodes-0 to flare-e2e-control-plane
+#   Normal   Pulled     2m25s              kubelet            Container image "flare-node-rocksdb:test" already present on machine and can be accessed by the pod
+#   Normal   Created    2m25s              kubelet            Container created
+#   Normal   Started    2m25s              kubelet            Container started
+#   Warning  Unhealthy  58s (x9 over 93s)  kubelet            Readiness probe failed:
+# 
+# 
+# Name:             cont-repl-nodes-1
+# Namespace:        flare-cont-repl
+# Priority:         0
+# Service Account:  default
+# Node:             flare-e2e-control-plane/172.18.0.2
+# Start Time:       Sun, 20 Sep 2026 10:39:56 +0900
+# Labels:           app=flare
+#                   apps.kubernetes.io/pod-index=1
+#                   cluster=cont-repl
+#                   controller-revision-hash=cont-repl-nodes-648b4bf8ff
+#                   statefulset.kubernetes.io/pod-name=cont-repl-nodes-1
+# Annotations:      <none>
+# Status:           Running
+# IP:               10.244.0.30
+# IPs:
+#   IP:           10.244.0.30
+# Controlled By:  StatefulSet/cont-repl-nodes
+# Containers:
+#   flared:
+#     Container ID:  containerd://0b8c9e767aaafc5c660515cace287eebf9018cf651b9ec9e9eb86f73e7fdfba0
+#     Image:         flare-node-rocksdb:test
+#     Image ID:      sha256:2f6dc1cb73e446cb4bdd721aefc888f0fafdbd2f3f054819c0bb190fd492d3f2
+#     Ports:         12121/TCP (flare), 9150/TCP (metrics)
+#     Host Ports:    0/TCP (flare), 0/TCP (metrics)
+#     Command:
+#       sh
+#       -c
+#       rm -rf /tmp/flare/*.hdb /tmp/flare/*.hdb.wal /tmp/flare/rocksdb && mkdir -p /tmp/flare && rm -f /tmp/flare/flared.pid && exec flared --config=/etc/flared/extra.conf --data-dir /tmp/flare --server-port 12121 --index-server-name flare-operator.flare-cont-repl.svc.cluster.local --index-server-port 12120 --storage-type=rocksdb --metrics-server-port 9150 --stderr
+#     State:          Running
+#       Started:      Sun, 20 Sep 2026 10:39:56 +0900
+#     Ready:          True
+#     Restart Count:  0
+#     Limits:
+#       cpu:     500m
+#       memory:  512Mi
+#     Requests:
+#       cpu:      100m
+#       memory:   256Mi
+#     Liveness:   tcp-socket :12121 delay=10s timeout=1s period=5s #success=1 #failure=6
+#     Readiness:  exec [/bin/bash -c exec 3<>/dev/tcp/127.0.0.1/12121 || exit 1
+# printf 'stats nodes\r\nquit\r\n' >&3
+# out=$(tr -d '\r' <&3)
+# me="$(hostname -f):12121"
+# case "$out" in *"STAT $me:state active"*) exit 0;; esac
+# # Limbo clause (mirrors the helm chart): a syncing member of a
+# # partition with NO active master has nothing to sync from —
+# # total-partition recovery. Report Ready so the OrderedReady
+# # StatefulSet can recreate the peer that will become master.
+# mypart=$(printf '%s\n' "$out" | sed -n "s/^STAT $me:partition //p")
+# [ -n "$mypart" ] || exit 1
+# [ "$mypart" != "-1" ] || exit 1
+# for key in $(printf '%s\n' "$out" | sed -n "s/^STAT \(.*\):partition $mypart$/\1/p"); do
+#   printf '%s\n' "$out" | grep -q "^STAT $key:role master$" || continue
+#   printf '%s\n' "$out" | grep -q "^STAT $key:state active$" && exit 1
+# done
+# exit 0
+# ] delay=5s timeout=4s period=5s #success=1 #failure=3
+#     Environment:  <none>
+#     Mounts:
+#       /etc/flared from flared-config (rw)
+#       /var/run/secrets/kubernetes.io/serviceaccount from kube-api-access-l4qkt (ro)
+# Conditions:
+#   Type                        Status
+#   PodReadyToStartContainers   True 
+#   Initialized                 True 
+#   Ready                       True 
+#   ContainersReady             True 
+#   PodScheduled                True 
+# Volumes:
+#   flared-config:
+#     Type:      ConfigMap (a volume populated by a ConfigMap)
+#     Name:      cont-repl-config
+#     Optional:  false
+#   kube-api-access-l4qkt:
+#     Type:                    Projected (a volume that contains injected data from multiple sources)
+#     TokenExpirationSeconds:  3607
+#     ConfigMapName:           kube-root-ca.crt
+#     Optional:                false
+#     DownwardAPI:             true
+# QoS Class:                   Burstable
+# Node-Selectors:              <none>
+# Tolerations:                 node.kubernetes.io/not-ready:NoExecute op=Exists for 300s
+#                              node.kubernetes.io/unreachable:NoExecute op=Exists for 300s
+# Events:
+#   Type     Reason     Age                  From               Message
+#   ----     ------     ----                 ----               -------
+#   Normal   Scheduled  11m                  default-scheduler  Successfully assigned flare-cont-repl/cont-repl-nodes-1 to flare-e2e-control-plane
+#   Normal   Pulled     11m                  kubelet            Container image "flare-node-rocksdb:test" already present on machine and can be accessed by the pod
+#   Normal   Created    11m                  kubelet            Container created
+#   Normal   Started    11m                  kubelet            Container started
+#   Warning  Unhealthy  7m6s (x14 over 11m)  kubelet            Readiness probe failed:
+# 
+# 
+# Name:             cont-repl-nodes-2
+# Namespace:        flare-cont-repl
+# Priority:         0
+# Service Account:  default
+# Node:             flare-e2e-control-plane/172.18.0.2
+# Start Time:       Sun, 20 Sep 2026 10:50:54 +0900
+# Labels:           app=flare
+#                   apps.kubernetes.io/pod-index=2
+#                   cluster=cont-repl
+#                   controller-revision-hash=cont-repl-nodes-648b4bf8ff
+#                   statefulset.kubernetes.io/pod-name=cont-repl-nodes-2
+# Annotations:      <none>
+# Status:           Running
+# IP:               10.244.0.33
+# IPs:
+#   IP:           10.244.0.33
+# Controlled By:  StatefulSet/cont-repl-nodes
+# Containers:
+#   flared:
+#     Container ID:  containerd://3c4638f7d4d88d4613228ef90d6634da41d0ac790b17b1e064232ce94b58b9d4
+#     Image:         flare-node-rocksdb:test
+#     Image ID:      sha256:2f6dc1cb73e446cb4bdd721aefc888f0fafdbd2f3f054819c0bb190fd492d3f2
+#     Ports:         12121/TCP (flare), 9150/TCP (metrics)
+#     Host Ports:    0/TCP (flare), 0/TCP (metrics)
+#     Command:
+#       sh
+#       -c
+#       rm -rf /tmp/flare/*.hdb /tmp/flare/*.hdb.wal /tmp/flare/rocksdb && mkdir -p /tmp/flare && rm -f /tmp/flare/flared.pid && exec flared --config=/etc/flared/extra.conf --data-dir /tmp/flare --server-port 12121 --index-server-name flare-operator.flare-cont-repl.svc.cluster.local --index-server-port 12120 --storage-type=rocksdb --metrics-server-port 9150 --stderr
+#     State:          Running
+#       Started:      Sun, 20 Sep 2026 10:50:55 +0900
+#     Ready:          False
+#     Restart Count:  0
+#     Limits:
+#       cpu:     500m
+#       memory:  512Mi
+#     Requests:
+#       cpu:      100m
+#       memory:   256Mi
+#     Liveness:   tcp-socket :12121 delay=10s timeout=1s period=5s #success=1 #failure=6
+#     Readiness:  exec [/bin/bash -c exec 3<>/dev/tcp/127.0.0.1/12121 || exit 1
+# printf 'stats nodes\r\nquit\r\n' >&3
+# out=$(tr -d '\r' <&3)
+# me="$(hostname -f):12121"
+# case "$out" in *"STAT $me:state active"*) exit 0;; esac
+# # Limbo clause (mirrors the helm chart): a syncing member of a
+# # partition with NO active master has nothing to sync from —
+# # total-partition recovery. Report Ready so the OrderedReady
+# # StatefulSet can recreate the peer that will become master.
+# mypart=$(printf '%s\n' "$out" | sed -n "s/^STAT $me:partition //p")
+# [ -n "$mypart" ] || exit 1
+# [ "$mypart" != "-1" ] || exit 1
+# for key in $(printf '%s\n' "$out" | sed -n "s/^STAT \(.*\):partition $mypart$/\1/p"); do
+#   printf '%s\n' "$out" | grep -q "^STAT $key:role master$" || continue
+#   printf '%s\n' "$out" | grep -q "^STAT $key:state active$" && exit 1
+# done
+# exit 0
+# ] delay=5s timeout=4s period=5s #success=1 #failure=3
+#     Environment:  <none>
+#     Mounts:
+#       /etc/flared from flared-config (rw)
+#       /var/run/secrets/kubernetes.io/serviceaccount from kube-api-access-lv58w (ro)
+# Conditions:
+#   Type                        Status
+#   PodReadyToStartContainers   True 
+#   Initialized                 True 
+#   Ready                       False 
+#   ContainersReady             False 
+#   PodScheduled                True 
+# Volumes:
+#   flared-config:
+#     Type:      ConfigMap (a volume populated by a ConfigMap)
+#     Name:      cont-repl-config
+#     Optional:  false
+#   kube-api-access-lv58w:
+#     Type:                    Projected (a volume that contains injected data from multiple sources)
+#     TokenExpirationSeconds:  3607
+#     ConfigMapName:           kube-root-ca.crt
+#     Optional:                false
+#     DownwardAPI:             true
+# QoS Class:                   Burstable
+# Node-Selectors:              <none>
+# Tolerations:                 node.kubernetes.io/not-ready:NoExecute op=Exists for 300s
+#                              node.kubernetes.io/unreachable:NoExecute op=Exists for 300s
+# Events:
+#   Type     Reason     Age               From               Message
+#   ----     ------     ----              ----               -------
+#   Normal   Scheduled  50s               default-scheduler  Successfully assigned flare-cont-repl/cont-repl-nodes-2 to flare-e2e-control-plane
+#   Normal   Pulled     49s               kubelet            Container image "flare-node-rocksdb:test" already present on machine and can be accessed by the pod
+#   Normal   Created    49s               kubelet            Container created
+#   Normal   Started    49s               kubelet            Container started
+#   Warning  Unhealthy  3s (x7 over 28s)  kubelet            Readiness probe failed:
+# 
+# fault cleared: 10.244.0.30 ⇄ 10.244.0.33 forwards again
+# Cleaning up cluster 'cont-repl'
+# Tests: 12, Failures: 1
+# RESULT: FAIL
+1..12
+ok 1 - precondition: both flags are on for every node and the replica's read balance is 0
+ok 2 - normal following: writes reach the replica and its follower reports following
+ok 3 - cut: create, update and delete on the master while the replica is unreachable; then new writes stop
+ok 4 - heal: with NO new writes the replica catches up from its position — no rebuild, no pod recreation
+ok 5 - ledger: the counted drop was HELD under the follower's ownership and CLOSED without a demotion
+ok 6 - operator stats fetch failure: a drop whose follower cannot be probed is held as Unknown, never demoted, and closes when the probe returns
+not ok 7 - bulk operation: flush_all on the master advances the epoch; the follower declares needs_rebuild; the operator rebuilds it; it follows the new epoch
+ok 8 - read eligibility: a following replica gets the spec's slave balance; a cut replica is withheld to 0; healing restores it
+ok 9 - repeated cuts: three cut/write/heal cycles converge from the position each time; no rebuild, no pod recreation
+ok 10 - operator restart during a cut: the owned hold survives the restart; the follower catches up; the entry closes; no rebuild
+ok 11 - failover: the master pod is deleted; the follower is promoted (evidence logged); the returning ex-master rebuilds and follows the new epoch
+ok 12 - initial copy under load: a third replica joins by snapshot while writes flow, then follows and matches
+EXIT=1

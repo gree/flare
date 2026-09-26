@@ -99,6 +99,9 @@ private def getFlareClusterFromJson (json : Lean.Json) (name ns : String)
   }
   let rocksdbObj := spec.getObjValD "rocksdb"
   let rocksdb : RocksdbConfigSpec := {
+    blockCacheSizeMb := rocksdbObj.getObjValD "blockCacheSizeMb" |>.getNat?.toOption
+    writeBufferSizeMb := rocksdbObj.getObjValD "writeBufferSizeMb" |>.getNat?.toOption
+    maxWriteBufferNumber := rocksdbObj.getObjValD "maxWriteBufferNumber" |>.getNat?.toOption
     walTtlSeconds := rocksdbObj.getObjValD "walTtlSeconds" |>.getNat?.toOption
     walSizeLimitMb := rocksdbObj.getObjValD "walSizeLimitMb" |>.getNat?.toOption
     syncWrites := rocksdbObj.getObjValD "syncWrites" |>.getBool?.toOption

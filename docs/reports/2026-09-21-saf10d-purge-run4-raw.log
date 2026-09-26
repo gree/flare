@@ -1,0 +1,55 @@
+# === Suite: continuous-replication-purge ===
+# Deploying cluster 'cont-repl-purge' in namespace 'flare-cont-repl-purge'
+# Waiting for: namespace flare-cont-repl-purge not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-cont-repl-purge (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap cont-repl-purge-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting 50s grace period for operator reconciliation...
+# Waiting for: replica following and matching (timeout: 120s)
+#   OK after 0s
+# following: state=(some following) applied=(some 24) master latest=(some 24)
+# fault: rejecting 10.244.0.40 ⇄ 10.244.0.41:12121 on flare-e2e-control-plane (both directions)
+# under the cut: 40/40 keys of 100 kB written (master latest 64, replica applied 24); waited 8 s for the WAL purge
+# fault cleared: 10.244.0.40 ⇄ 10.244.0.41 forwards again
+# Waiting for: follower declares needs_rebuild with reason lsn_purged (timeout: 120s)
+#   OK after 5s
+# after the heal: follower state=needs_rebuild reason=lsn_purged applied=(some 24) items master=60 replica=60 decode_refused=(some 0)
+# --- replica follower lines (filtered) ---
+[140737436649152][NTC][stats.cc:276-follow_set_state] replication follow state: disconnected — peer_unreachable
+[140737436649152][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+[140737436649152][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+[140737436649152][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+[140737436649152][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+[140737436649152][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+[140737436649152][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+[140737436649152][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+[140737436649152][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+[140737436649152][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+[140737436649152][NTC][op_repl_sync_wal.cc:472-_parse_text_client_parameters] master reports lsn_purged -> full dump required
+[140737436649152][NTC][stats.cc:276-follow_set_state] replication follow state: needs_rebuild — lsn_purged
+
+# --- master WAL-serve lines (filtered) ---
+[140737436649152][NTC][op_repl_sync_wal.cc:242-_run_server] LSN 24 is no longer served: the oldest WAL batch available is 45 -> lsn_purged (slave needs a rebuild)
+
+# Waiting for: operator files a repair request for the follower (timeout: 150s)
+#   OK after 10s
+# Waiting for: follower reconstructed and following at the master's position (timeout: 480s)
+#   OK after 50s
+# rebuild: requested=true; reconstruction_started 1→2; state=(some following); items master=60 replica=60; wal_fallback_to_dump=(some 1) snapshot_bootstrap=(some 2); pod uid 08a22160-ad75-4180-a8a7-a55c9b6af793→08a22160-ad75-4180-a8a7-a55c9b6af793
+# Waiting for: ledger empty (timeout: 240s)
+#   OK after 0s
+# Cleaning up cluster 'cont-repl-purge'
+# Tests: 2, Failures: 0
+# RESULT: PASS
+1..2
+ok 1 - precondition: both flags on, retention knobs baked, replica following
+ok 2 - T6: history purged while cut → the follower declares needs_rebuild (lsn_purged), never synchronised; the operator rebuilds it; it follows again
+EXIT=0

@@ -14,9 +14,12 @@
   made the elaborator crawl.
 -/
 import Lean.Data.Json
+import FlareOperator.Migration.Provision
 import FlareOperator.StateMachine.ReplicaRepair
 import FlareOperator.StateMachine.SyncEvidence
 import FlareOperator.StateMachine.StatsObservation
+import FlareOperator.StateMachine.FollowEvidence
+import FlareOperator.StateMachine.K8sReconciler
 
 open FlareOperator.K8s
 open FlareOperator.ReplicaRepair
@@ -134,6 +137,80 @@ def stepsOf (l : Ledger) (o : Observation) : List Step :=
     master, and 3 drops were attributed. -/
 def relObs : Observation := obs (some 11) (some 100) (some 1) (some "succeeded") (some 1) (some masterKey) (some masterKey) (some (.Proxy, .Active))
 def lRel : Ledger := (advance lDem [(slaveKey, relObs)]).1
+
+/-- SAF-10c: a destination whose continuous follower owns the repair. -/
+def ownEp : String := "3:abc"
+def following (applied : Nat) (epoch : String := ownEp) : FollowReading :=
+  { complete := true, enabled := true, state := some "following", appliedLsn := some applied, sourceEpoch := some epoch }
+def disconnected : FollowReading := { complete := true, enabled := true, state := some "disconnected", appliedLsn := some 5, sourceEpoch := some ownEp }
+def rebuild : FollowReading := { complete := true, enabled := true, state := some "needs_rebuild", appliedLsn := some 5, sourceEpoch := some ownEp }
+def unreadable : FollowReading := {}
+/-- A complete reply from a flared without a follower (tch): not in the mode. -/
+def noFollower : FollowReading := { complete := true }
+
+def checkFollowOwnership (ctx : Ctx) : IO Unit := do
+  check ctx "the mode on and following/initial_sync/disconnected/error own; needs_rebuild, idle, off and unreadable do not"
+    (ownedByFollower (following 1) && ownedByFollower disconnected
+      && ownedByFollower { enabled := true, state := some "error" }
+      && ownedByFollower { enabled := true, state := some "initial_sync" }
+      && !ownedByFollower rebuild
+      && !ownedByFollower { enabled := true, state := some "idle" }
+      && !ownedByFollower { enabled := false, state := some "following" }
+      && !ownedByFollower unreadable)
+  check ctx "a COMPLETE reply without follower keys (tch, older flared) is NOT unreadable: not owned, ordinary repair"
+    (!noFollower.unreadable && ownershipAtRequest noFollower == some false
+      && (advanceOwned { dest := slaveKey, masterKey := masterKey, nodeKey := some slaveKey, owned := true } noFollower).2 == .handedOver)
+  check ctx "at request time an unreadable follower is Unknown: neither owned nor not-owned"
+    (ownershipAtRequest unreadable == none && ownershipAtRequest (following 1) == some true
+      && ownershipAtRequest rebuild == some false)
+  let lReq := request l1 masterKey slaveKey 3
+  let lOwn := holdOwned lReq slaveKey (some 100) (some ownEp)
+  let e := lOwn.entries.head?
+  check ctx "holding records ownership, a visible reason, the bar and its epoch"
+    ((e.map (·.owned)) == some true && (e.bind (·.hold)) == some "owned by continuous replication"
+      && (e.bind (·.mustReach)) == some 100 && (e.bind (·.barEpoch)) == some ownEp)
+  check ctx "a later drop in the same epoch raises the bar and never lowers it; a new epoch replaces it"
+    (((holdOwned lOwn slaveKey (some 150) (some ownEp)).entries.head?.bind (·.mustReach)) == some 150
+      && ((holdOwned lOwn slaveKey (some 50) (some ownEp)).entries.head?.bind (·.mustReach)) == some 100
+      && ((holdOwned lOwn slaveKey (some 7) (some "4:new")).entries.head?.bind (·.mustReach)) == some 7
+      && ((holdOwned lOwn slaveKey (some 7) (some "4:new")).entries.head?.bind (·.barEpoch)) == some "4:new")
+  let lRes := (resolve lOwn state).1
+  check ctx "an owned request is never planned for demotion while the gate is open"
+    ((plan lRes true "").2 == [] && ((plan lRes true "").1.entries.head?.bind (·.hold)) == some "owned by continuous replication")
+  let lUnk := (resolve (holdOwned lReq slaveKey (some 100) (some ownEp) "follower state unknown (stats unreadable)") state).1
+  check ctx "a request held on an unreadable follower is not demoted either"
+    ((plan lUnk true "").2 == [])
+  check ctx "following at 99 keeps; following at 100 closes without a rebuild"
+    ((advanceOwnedAll lRes [(slaveKey, following 99)]).2 == []
+      && (advanceOwnedAll lRes [(slaveKey, following 100)]).2.map (·.2) == [.closed]
+      && (advanceOwnedAll lRes [(slaveKey, following 100)]).1.entries == [])
+  check ctx "a BIGGER position in ANOTHER epoch does not close: it is a different number line"
+    ((advanceOwnedAll lRes [(slaveKey, following 100000 "9:other")]).2 == []
+      && ((advanceOwnedAll lRes [(slaveKey, following 100000 "9:other")]).1.entries.head?.map (·.owned)) == some true)
+  check ctx "a disconnected follower's position is not trusted for closing, but ownership continues"
+    ((advanceOwnedAll lRes [(slaveKey, disconnected)]).2 == []
+      && ((advanceOwnedAll lRes [(slaveKey, disconnected)]).1.entries.head?.map (·.owned)) == some true)
+  check ctx "a TRANSIENT stats failure keeps the hold and hands nothing over (no rebuild on a probe hiccup)"
+    ((advanceOwnedAll lRes [(slaveKey, unreadable)]).2 == []
+      && ((advanceOwnedAll lRes [(slaveKey, unreadable)]).1.entries.head?.map (·.owned)) == some true
+      && ((advanceOwnedAll lRes [(slaveKey, unreadable)]).1.entries.head?.bind (·.hold)) == some "follower state unknown (stats unreadable)"
+      && (plan (advanceOwnedAll lRes [(slaveKey, unreadable)]).1 true "").2 == [])
+  check ctx "after the hiccup a readable pass resumes: following past the bar closes"
+    ((advanceOwnedAll (advanceOwnedAll lRes [(slaveKey, unreadable)]).1 [(slaveKey, following 100)]).2.map (·.2) == [.closed])
+  check ctx "needs_rebuild hands the entry to the ordinary path, keeping its drops and node key"
+    ((advanceOwnedAll lRes [(slaveKey, rebuild)]).2.map (·.2) == [.handedOver]
+      && ((advanceOwnedAll lRes [(slaveKey, rebuild)]).1.entries.head?.map (·.owned)) == some false
+      && ((advanceOwnedAll lRes [(slaveKey, rebuild)]).1.entries.head?.map (·.drops)) == some 3
+      && (plan (advanceOwnedAll lRes [(slaveKey, rebuild)]).1 true "").2.length == 1)
+  check ctx "an owned entry with no recorded bar stays owned and is not closed by position"
+    ((advanceOwnedAll (holdOwned lReq slaveKey none none) [(slaveKey, following 1000)]).2 == []
+      && ((advanceOwnedAll (holdOwned lReq slaveKey none none) [(slaveKey, following 1000)]).1.entries.head?.map (·.owned)) == some true)
+  check ctx "ownership, bar and epoch survive the status round trip (an operator restart)"
+    (match Ledger.fromJson? (Ledger.toJson lRes) with
+      | some back => back == lRes && (back.entries.head?.map (·.owned)) == some true
+                     && (back.entries.head?.bind (·.mustReach)) == some 100
+                     && (back.entries.head?.bind (·.barEpoch)) == some ownEp
+      | none => false)
 
 def checkAdvanceHold (ctx : Ctx) : IO Unit := do
   let old := obs (some 10) (some 100) (some 1) (some "succeeded") (some 1) (some masterKey) (some masterKey) (some (.Proxy, .Active))
@@ -360,23 +437,222 @@ open FlareOperator.StatsObservation in
 def checkDeleteGate (ctx : Ctx) : IO Unit := do
   let ok := EmptyMasterVerdict.act
   check ctx "delete gate: fresh verdict act, successor valid, UID stable, lease held → delete"
-    (okB (deleteGate ok true true true))
+    (okB (deleteGate ok true true true true))
   check ctx "delete gate: operator LOST THE LEASE → refuse (item 5)"
-    (okB (deleteGate ok true true false) == false)
+    (okB (deleteGate ok true true true false) == false)
   check ctx "delete gate: target pod UID changed across the observation (replaced) → refuse"
-    (okB (deleteGate ok true false true) == false)
+    (okB (deleteGate ok true true false true) == false)
   check ctx "delete gate: successor invalid on the post-read map → refuse"
-    (okB (deleteGate ok false true true) == false)
+    (okB (deleteGate ok false true true true) == false)
   check ctx "delete gate: fresh verdict is skip → refuse regardless of the rest"
-    (okB (deleteGate (.skip "unknown") true true true) == false)
+    (okB (deleteGate (.skip "unknown") true true true true) == false)
   check ctx "delete gate: refusal reasons name the failing check"
-    (match deleteGate ok true true false with | .error r => (r.splitOn "lease").length > 1 | .ok _ => false)
+    (match deleteGate ok true true true false with | .error r => (r.splitOn "lease").length > 1 | .ok _ => false)
+
+
+-- ===========================================================================
+-- SAF-10c: FollowEvidence — purpose-specific eligibility, Unknown handling,
+-- failover ranking; and the FSM-side shaping / read withholding.
+-- ===========================================================================
+
+def fb : FollowEvidence.Bounds := {}   -- fresh 5 s, read lag 1000, promotion lag 100
+def fm : FollowEvidence.MasterReading := { complete := true, epoch := some "2:abc", head := some 1000 }
+def fmUnreadable : FollowEvidence.MasterReading := {}
+def fmNoEpoch : FollowEvidence.MasterReading := { complete := true, head := some 1000 }
+
+/-- A follower reading: `st` state, `applied` position, `seenAgo` seconds
+    since the master's position was observed (node clock 1000). -/
+def fr (st : String) (applied : Nat) (seenAgo : Nat := 0) (ep : String := "2:abc")
+    : FollowEvidence.Reading :=
+  { complete := true, enabled := some true, state := some st, sourceEpoch := some ep,
+    appliedLsn := some applied, sourceLsn := some 1000, sourceObservedAt := some (1000 - seenAgo),
+    lastProgressAt := some 1000, nodeTime := some 1000 }
+def frOff : FollowEvidence.Reading := { complete := true, enabled := some false, state := some "idle" }
+def frCut : FollowEvidence.Reading := {}
+def frNoState : FollowEvidence.Reading := { complete := true, enabled := some true }
+
+def judgeR (r : FollowEvidence.Reading) (m : FollowEvidence.MasterReading := fm) :=
+  FollowEvidence.judge .read fb r m
+def judgeP (r : FollowEvidence.Reading) (m : FollowEvidence.MasterReading := fm) :=
+  FollowEvidence.judge .promote fb r m
+def hasWord (v : FollowEvidence.Verdict) (w : String) : Bool := (v.reason.splitOn w).length > 1
+
+def checkFollowJudge (ctx : Ctx) : IO Unit := do
+  check ctx "an unreadable reply is Unknown for reads and promotion (never healthy, never unfit)"
+    ((judgeR frCut).isUnknown && (judgeP frCut).isUnknown
+      && FollowEvidence.unfitReason frCut (some "2:abc") == none)
+  check ctx "a complete reply with the mode off is not-in-mode: this module has no say"
+    (match judgeR frOff, judgeP frOff with | .notInMode _, .notInMode _ => true | _, _ => false)
+  check ctx "a complete reply in the mode without a state is Unknown"
+    ((judgeR frNoState).isUnknown)
+  check ctx "following, same epoch, fresh, caught up: eligible for reads and promotion"
+    ((judgeR (fr "following" 1000)).isEligible && (judgeP (fr "following" 1000)).isEligible)
+  check ctx "disconnected is ineligible (not unfit): resuming is the follower's job, but nothing is proven"
+    (!(judgeR (fr "disconnected" 1000)).isEligible && !(judgeR (fr "disconnected" 1000)).isUnknown
+      && FollowEvidence.unfitReason (fr "disconnected" 1000) (some "2:abc") == none)
+  check ctx "following another epoch is ineligible AND unfit (a copy of another history)"
+    (hasWord (judgeR (fr "following" 1000 0 "1:old")) "another history"
+      && (FollowEvidence.unfitReason (fr "following" 1000 0 "1:old") (some "2:abc")).isSome)
+  check ctx "a stale observation (6 s > 5 s) is ineligible; 5 s is still fresh"
+    (hasWord (judgeR (fr "following" 1000 6)) "stale" && (judgeR (fr "following" 1000 5)).isEligible)
+  check ctx "clock rollback cannot turn an old observation into fresh evidence"
+    ((judgeR { fr "following" 1000 with sourceObservedAt := some 1001 }).isUnknown)
+  check ctx "lag 500: within the read bound (1000) but over the promotion bound (100)"
+    ((judgeR (fr "following" 500)).isEligible && hasWord (judgeP (fr "following" 500)) "bound")
+  check ctx "lag exactly at the promotion bound is eligible"
+    ((judgeP (fr "following" 900)).isEligible)
+  check ctx "an applied position AHEAD of the master's head is ineligible (another sequence space)"
+    (hasWord (judgeR (fr "following" 1100)) "ahead")
+  check ctx "an unreadable master, or a master without a source epoch, makes the verdict Unknown"
+    ((judgeR (fr "following" 1000) fmUnreadable).isUnknown && (judgeR (fr "following" 1000) fmNoEpoch).isUnknown)
+  check ctx "needs_rebuild, initial_sync and idle are unfit; following the master's epoch is not"
+    ((FollowEvidence.unfitReason (fr "needs_rebuild" 1000) (some "2:abc")).isSome
+      && (FollowEvidence.unfitReason (fr "initial_sync" 1000) (some "2:abc")).isSome
+      && (FollowEvidence.unfitReason (fr "idle" 1000) (some "2:abc")).isSome
+      && FollowEvidence.unfitReason (fr "following" 1000) (some "2:abc") == none)
+  check ctx "survival uses the promotion bound"
+    ((FollowEvidence.judge .survive fb (fr "following" 900) fm).isEligible
+      && !(FollowEvidence.judge .survive fb (fr "following" 500) fm).isEligible)
+
+def cNodes : List (String × Int × Option FollowEvidence.Reading) :=
+  [("a", 0, some (fr "following" 900)), ("b", 0, some (fr "following" 1000)),
+   ("c", 0, some (fr "disconnected" 1000)), ("d", 0, some (fr "needs_rebuild" 1000)),
+   ("e", 0, some frOff), ("f", 0, some frCut), ("g", 0, none)]
+
+def cls1 := FollowEvidence.classify fb [] cNodes [(0, fm)]
+
+def checkFollowClassify (ctx : Ctx) : IO Unit := do
+  check ctx "ranked = proven-current followers, highest applied position first"
+    (cls1.1.ranked == ["b", "a"])
+  check ctx "disconnected and never-observed nodes are unproven; only needs_rebuild is unfit"
+    (cls1.1.unproven == ["c", "f", "g"] && cls1.1.unfit == ["d"]
+      && cls1.1.readWithheld == ["c", "d", "f", "g"])
+  check ctx "operator cold start withholds unknown replicas but preserves explicit non-WAL policy"
+    (!cls1.1.readWithheld.contains "e" && cls1.1.readWithheld.contains "f"
+      && cls1.1.readWithheld.contains "g" && cls1.1.unproven.contains "f")
+  let recovered := FollowEvidence.classify fb cls1.2.1
+    [("f", 0, some (fr "following" 1000)), ("g", 0, some frOff)] [(0, fm)]
+  check ctx "fresh catch-up or confirmed non-WAL mode restores eligibility after cold-start withholding"
+    (recovered.1.readWithheld == [] && recovered.1.ranked == ["f"])
+  let cutAgain := FollowEvidence.classify fb recovered.2.1
+    [("f", 0, some frCut), ("g", 0, none)] [(0, fm)]
+  check ctx "a recovered WAL follower is withheld on the next stats failure without marking its copy unfit"
+    (cutAgain.1.readWithheld == ["f"] && cutAgain.1.unfit == [])
+  check ctx "the mode memory records what was readable: a-d in the mode, e out, f and g unchanged"
+    (cls1.2.1.lookup "a" == some true && cls1.2.1.lookup "d" == some true
+      && cls1.2.1.lookup "e" == some false && cls1.2.1.lookup "f" == none && cls1.2.1.lookup "g" == none)
+  let cls2 := FollowEvidence.classify fb [("f", true), ("g", true)] cNodes [(0, fm)]
+  check ctx "a node remembered in the mode that is unreadable or not probed is Unknown: unproven and withheld, never unfit"
+    (cls2.1.unproven.contains "f" && cls2.1.unproven.contains "g"
+      && cls2.1.readWithheld.contains "f" && cls2.1.readWithheld.contains "g"
+      && !cls2.1.unfit.contains "f" && !cls2.1.unfit.contains "g")
+  let cls3 := FollowEvidence.classify fb [] cNodes []
+  check ctx "without a master reading nothing is proven: no ranked, following nodes unproven and withheld"
+    (cls3.1.ranked == [] && cls3.1.unproven.contains "a" && cls3.1.readWithheld.contains "a"
+      && cls3.1.unfit == ["d"])
+  check ctx "probe policy: in the mode every tick; out of the mode every interval; never read: now"
+    (FollowEvidence.shouldProbe [("x", true)] "x" 7 30 && !FollowEvidence.shouldProbe [("x", false)] "x" 7 30
+      && FollowEvidence.shouldProbe [("x", false)] "x" 60 30 && FollowEvidence.shouldProbe [] "x" 7 30)
+  let (changed, now) := FollowEvidence.changedSummaries [("a", (cls1.2.2.head?.map (·.summary)).getD "")] cls1.2.2
+  check ctx "only changed judgements are reported; the summaries are carried forward"
+    (!(changed.map Prod.fst).contains "a" && (changed.map Prod.fst).contains "b" && now.length == cls1.2.2.length)
+
+def s3 : FlareClusterState :=
+  ({ nodeMap := [("m", node .Master .Active 0 "m"), ("s1", node .Slave .Active 0 "s1"),
+                 ("s2", node .Slave .Active 0 "s2"), ("s3", node .Slave .Active 0 "s3"),
+                 ("dn", node .Slave .Down 0 "dn")],
+     nodeMapVersion := 1 } : FlareClusterState).rebuildPartitionMap
+
+def slavesOf (s : FlareClusterState) : List String :=
+  ((s.partitionMap.find? (·.1 == 0)).map (·.2.slaves)).getD []
+
+def checkFollowShaping (ctx : Ctx) : IO Unit := do
+  let shaped := K8sReconciler.shapePromotionCandidates ["s2"] ["s3"] [] s3
+  check ctx "shaping: excluded removed, ranked first, the rest in map order; nodeMap untouched"
+    (slavesOf shaped == ["s3", "s1", "dn"] && shaped.nodeMap == s3.nodeMap)
+  check ctx "shaping: unproven go last; empty lists are the identity"
+    (slavesOf (K8sReconciler.shapePromotionCandidates [] [] ["s1"] s3) == ["s2", "s3", "dn", "s1"]
+      && (K8sReconciler.shapePromotionCandidates [] [] [] s3).partitionMap == s3.partitionMap)
+  check ctx "the successor search sees the shaped order (proven follower first)"
+    ((shaped.partitionMap.find? (·.1 == 0)).bind (fun (_, p) => K8sReconciler.findActiveSuccessor shaped p 0) == some "s3")
+  check ctx "drain shaping (unfit ++ unproven excluded) can leave NO successor: the guard then keeps the master"
+    (slavesOf (K8sReconciler.shapePromotionCandidates ["s1", "s2", "s3", "dn"] [] [] s3) == [])
+  let held := K8sReconciler.withholdReads ["s1", "m", "dn"] s3.nodeMap
+  check ctx "withholding: a listed Slave gets balance 0; master, Down corpse and unlisted slaves untouched; keys preserved"
+    ((held.lookup "s1").map (·.balance) == some 0 && (held.lookup "m").map (·.balance) == some 100
+      && (held.lookup "dn") == s3.nodeMap.lookup "dn" && (held.lookup "s2").map (·.balance) == some 100
+      && held.map Prod.fst == s3.nodeMap.map Prod.fst)
+  check ctx "the masterless refill skips an excluded (unfit) Active slave"
+    (let noMaster : FlareClusterState := { s3 with nodeMap := s3.nodeMap.filter (·.1 != "m") }
+     let refilled := K8sReconciler.promoteMasterlessPartition noMaster 0 ["s1", "s2", "s3"] [] [] ["s1"]
+     (refilled.nodeMap.find? (fun kv => kv.2.role == FlareRole.Master)).map (·.1) == some "s2")
+  check ctx "classify reports a follower that declared needs_rebuild, with flared's reason"
+    (let r := { fr "needs_rebuild" 1000 with lastReason := some "epoch_mismatch" }
+     (FollowEvidence.classify fb [] [("d", 0, some r)] [(0, fm)]).1.needsRebuild == [("d", "epoch_mismatch")])
+  check ctx "requestRebuild adds one un-owned, resolved request per node and is idempotent; plan then demotes it"
+    (let (l1, a1) := requestRebuild empty masterKey slaveKey
+     let (l2, a2) := requestRebuild l1 masterKey slaveKey
+     a1 && !a2 && l2.entries.length == 1
+       && (l1.entries.head?.map (fun e => e.nodeKey == some slaveKey && !e.owned && e.drops == 0)) == some true
+       && ((plan l1 true "").2.map Prod.fst) == [slaveKey])
+  check ctx "requestRebuild adds nothing for a node that already has an (owned) entry"
+    (let owned := holdOwned (resolve (request empty masterKey slaveKey 1) state).1 slaveKey (some 5) (some ownEp)
+     !(requestRebuild owned masterKey slaveKey).2)
+  -- The two routes to a rebuild request RACE (design §5.4): a drop counted
+  -- for the node (refused forwards after an epoch change) and the
+  -- follower's own needs_rebuild. In either order there is exactly one
+  -- entry, un-owned, resolved to the node, demoted once by plan.
+  check ctx "race: drop request first, then the follower's declaration → one entry, drops kept, one demotion"
+    (let l1 := (resolve (request empty masterKey slaveKey 2) state).1
+     let (l2, added) := requestRebuild l1 masterKey slaveKey
+     !added && l2.entries.length == 1 && (l2.entries.head?.map (·.drops)) == some 2
+       && ((plan l2 true "").2.map Prod.fst) == [slaveKey])
+  check ctx "race: the follower's declaration first, then a drop → one entry with the drops added, one demotion"
+    (let (l1, added) := requestRebuild empty masterKey slaveKey
+     let l2 := (resolve (request l1 masterKey slaveKey 3) state).1
+     added && l2.entries.length == 1 && (l2.entries.head?.map (·.drops)) == some 3
+       && (l2.entries.head?.map (·.owned)) == some false
+       && ((plan l2 true "").2.map Prod.fst) == [slaveKey])
+  check ctx "race: a drop on an OWNED entry and the follower's declaration in the same pass → hand-over, single un-owned request"
+    (let owned := holdOwned (resolve (request empty masterKey slaveKey 1) state).1 slaveKey (some 5) (some ownEp)
+     let (afterAdv, steps) := advanceOwnedAll owned [(slaveKey, rebuild)]
+     let (l2, added) := requestRebuild afterAdv masterKey slaveKey
+     steps.map (·.2) == [.handedOver] && !added && l2.entries.length == 1
+       && (l2.entries.head?.map (·.owned)) == some false
+       && ((plan l2 true "").2.map Prod.fst) == [slaveKey])
+  check ctx "deleteGate: an unproven surviving follower refuses the delete"
+    (match StatsObservation.deleteGate .act true false true true with
+     | .error r => (r.splitOn "continuous-replication").length > 1
+     | .ok _ => false)
+
+private def checkMemoryConfig (ctx : Ctx) : IO Unit := do
+  let empty : RocksdbConfigSpec := {}
+  check ctx "unset memory settings preserve flared defaults" (!empty.hasAny && empty.toExtraConf == "")
+  let r : RocksdbConfigSpec := {
+    blockCacheSizeMb := some 64
+    writeBufferSizeMb := some 16
+    maxWriteBufferNumber := some 3
+    walTtlSeconds := some 900 }
+  let text := r.toExtraConf
+  check ctx "memory config renders all three options alongside WAL retention"
+    (r.hasAny && text.splitOn "\n" == ["rocksdb-block-cache-size-mb = 64",
+      "rocksdb-write-buffer-size-mb = 16", "rocksdb-max-write-buffer-number = 3",
+      "rocksdb-wal-ttl-seconds = 900"])
+  for r in ([{ blockCacheSizeMb := some 64 }, { writeBufferSizeMb := some 16 },
+      { maxWriteBufferNumber := some 3 }] : List RocksdbConfigSpec) do
+    check ctx "a memory-only spec is not ignored" r.hasAny
+  let yaml := FlareOperator.Migration.Provision.rocksdbSpecYaml r
+  check ctx "migration preserves the memory budget"
+    ((yaml.splitOn "blockCacheSizeMb: 64").length == 2 &&
+     (yaml.splitOn "writeBufferSizeMb: 16").length == 2 &&
+     (yaml.splitOn "maxWriteBufferNumber: 3").length == 2)
 
 def run : IO UInt32 := do
   let ctx : Ctx := { failures := ← IO.mkRef [], count := ← IO.mkRef 0 }
   checkObserve ctx
   checkRequestResolve ctx
   checkGate ctx
+  checkFollowOwnership ctx
   checkAdvanceHold ctx
   checkAdvanceComplete ctx
   checkJson ctx
@@ -385,6 +661,10 @@ def run : IO UInt32 := do
   checkJudgeAcceptance ctx
   checkStatsObservation ctx
   checkDeleteGate ctx
+  checkFollowJudge ctx
+  checkFollowClassify ctx
+  checkFollowShaping ctx
+  checkMemoryConfig ctx
   let failures ← ctx.failures.get
   let n ← ctx.count.get
   IO.println s!"1..{n}"

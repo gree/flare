@@ -144,6 +144,23 @@ def suite : TestSuite := {
             return .fail s!"Stale walTtlSeconds=1800 still present in extra.conf; actual: {content}"
           return .pass },
 
+    { name := "memory knobs survive CR admission and reach extra.conf (restart required)"
+      run := do
+        let patch := "{\"spec\":{\"rocksdb\":{\"blockCacheSizeMb\":64,\"writeBufferSizeMb\":16,\"maxWriteBufferNumber\":3}}}"
+        match ← kubectlPatch "flarecluster" cfg.name cfg.«namespace» patch with
+        | .error e => return .fail s!"memory patch failed: {e}"
+        | .ok _ => pure ()
+        -- An unknown CRD field could be silently pruned; require readback.
+        for (field, value) in [("blockCacheSizeMb", "64"), ("writeBufferSizeMb", "16"), ("maxWriteBufferNumber", "3")] do
+          match ← kubectlGetJsonpath "flarecluster" cfg.name cfg.«namespace» ("{.spec.rocksdb." ++ field ++ "}") with
+          | .error e => return .fail e
+          | .ok out => if out.trim != value then return .fail s!"CRD pruned/changed {field}: {out}"
+        for line in ["rocksdb-block-cache-size-mb = 64", "rocksdb-write-buffer-size-mb = 16", "rocksdb-max-write-buffer-number = 3", "rocksdb-wal-ttl-seconds = 600"] do
+          let (found, content) ← waitForConfigLine cfg.name cfg.«namespace» line 120
+          if !found then return .fail s!"missing {line}: {content}"
+        -- This verifies delivery, not live reconfiguration or measured RSS.
+        return .pass },
+
     -- Test 5: flared is running with RocksDB backend (best-effort)
     --
     -- flared's `stats` command exposes runtime counters like

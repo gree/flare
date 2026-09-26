@@ -212,6 +212,13 @@ protected:
 	int										_proxy_concurrency;
 	int										_reconstruction_interval;
 	int										_reconstruction_bwlimit;
+	bool									_repl_identity_forward;
+	bool									_wal_follow_enabled;
+	uint64_t								_wal_follow_max_batches;
+	uint64_t								_wal_follow_max_bytes;
+	int										_wal_follow_poll_interval_usec;
+	shared_thread							_wal_follower_thread;
+	string									_wal_follower_source;	// node key being followed
 	replication						_replication_type;
 	uint32_t							_proxy_prior_netmask;
 	uint32_t							_max_total_thread_queue;
@@ -280,6 +287,31 @@ public:
 	int get_reconstruction_interval() { return this->_reconstruction_interval; };
 	int set_reconstruction_interval(int reconstruction_interval) { this->_reconstruction_interval = reconstruction_interval; return 0; };
 	int get_reconstruction_bwlimit() { return this->_reconstruction_bwlimit; };
+	// SAF-10b stage 3: when set, a forwarded write carries the source's
+	// replication identity ("rl=<epoch>/<label>") and the destination applies
+	// it through the common rule instead of a plain local set. OFF by default:
+	// a node that predates the tag would reject the request outright, so this
+	// may only be turned on once every node in the cluster understands it.
+	int set_repl_identity_forward(bool b) { this->_repl_identity_forward = b; return 0; };
+	bool get_repl_identity_forward() { return this->_repl_identity_forward; };
+
+	// CONTINUOUS REPLICATION lifecycle (SAF-10c). When enabled, a node that is
+	// an ACTIVE SLAVE on a RocksDB backend runs one follower against its
+	// partition's master, started and stopped from the node map: it is
+	// (re)evaluated after every accepted map, and on every change of this
+	// flag. OFF by default; the follower applies only through the common
+	// rule, so it is safe to enable only once repl-identity-forward is on
+	// cluster-wide as well.
+	int set_wal_follow_enabled(bool b);
+	bool get_wal_follow_enabled() { return this->_wal_follow_enabled; };
+	int set_wal_follow_limits(uint64_t max_batches, uint64_t max_bytes, int poll_interval_usec) {
+		this->_wal_follow_max_batches = max_batches;
+		this->_wal_follow_max_bytes = max_bytes;
+		this->_wal_follow_poll_interval_usec = poll_interval_usec;
+		return 0;
+	};
+	// Stop the follower (shutdown path).
+	int stop_wal_follower();
 	int set_reconstruction_bwlimit(int reconstruction_bwlimit) { this->_reconstruction_bwlimit = reconstruction_bwlimit; return 0; };
 	replication get_replication_type() { return this->_replication_type; };
 	int set_replication_type(string replication_type) { cluster::replication_cast(replication_type, this->_replication_type); return 0; };
@@ -409,6 +441,10 @@ protected:
 	int _check_node_partition(int node_partition, bool& preparing);
 	int _check_node_partition_for_new(int node_partition, bool& preparing);
 	int _determine_partition(storage::entry& e, partition& p, bool include_prepare, bool& is_preprare);
+	// Start/stop/restart the follower to match this node's role in the
+	// current maps. Assumes node_map and node_partition_map are locked by the
+	// caller (it only reads them).
+	int _reconcile_wal_follower_locked();
 	bool _is_local_proxy_request(op_proxy_write* op);
 	string _get_partition_key(string key);
 	int _get_proxy_thread(string node_key, int key_hash, shared_thread& t);

@@ -646,12 +646,19 @@ def suite : TestSuite := {
             return .pass
           finally
             heal mIp sIp
-            discard <| kubectlPatch "flarecluster" cfg.name cfg.«namespace» "{\"spec\":{\"readBalance\":{\"master\":100,\"slave\":0}}}"
+            -- First let eligibility restore 50. Setting spec=0 immediately
+            -- can leave the operator's map unchanged at its withheld 0, so
+            -- the map rejected during the fault is never retransmitted
+            -- (the separate SAF-09 residual). Require recovery, then force
+            -- a distinct 50→0 commit for the next test.
             let recovered ← waitForCondition "isolated read-guard fault is fully restored" 240 do
-              return (← localBalance) == some "0" &&
+              return (← localBalance) == some "50" &&
                 (← statStr sIp "repl_follow_state") == some "following" &&
                 (← statNat sIp "repl_applied_lsn") == (← statNat mIp "rocksdb_latest_sequence_number")
-            if !recovered then throw (IO.userError "read-guard cleanup did not restore balance and catch-up")
+            discard <| kubectlPatch "flarecluster" cfg.name cfg.«namespace» "{\"spec\":{\"readBalance\":{\"master\":100,\"slave\":0}}}"
+            let reset ← waitForCondition "read-guard cleanup delivers balance 0" 120 do
+              return (← localBalance) == some "0"
+            if !recovered || !reset then throw (IO.userError "read-guard cleanup did not restore balance and catch-up")
     },
 
     -- T5: repeated disconnections — no loss, no rollback, no resurrection,

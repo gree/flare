@@ -27,3 +27,17 @@ Limits: this is not a linearizable-read proof, a master-unreachable error
 semantics test, or the operator-restart/non-WAL recovery acceptance scenario.
 Those remain separate tasks. The string rules target small plaintext protocol
 requests in kind, not a production network-fault mechanism.
+
+## First CI execution: routing passed, cleanup failed
+
+Head `0ed3193`, E2E run 36228379804, scenario 9: local balance stayed 50,
+cursor stayed 123, forward-applied stayed 58, master head was 124, and GET
+returned `from_master`. The routing assertion passed. Cleanup timed out,
+so the scenario and overall run are FAIL, not a passing acceptance run.
+
+The initial cleanup immediately set spec.slave=0 while the operator could
+already have committed withheld balance 0 during the fault. This is consistent
+with the known SAF-09 lost-map retransmission gap. Cleanup now waits for
+following/caught-up at balance 50 before requesting a distinct 50-to-0
+transition. This is a harness recovery change, not a SAF-09 production fix;
+the revised scenario requires another CI run.

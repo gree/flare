@@ -169,8 +169,20 @@ private def cut (masterIp slaveIp : String) : IO (Except String Unit) := do
       IO.eprintln s!"# fault: rejecting {masterIp} ⇄ {slaveIp}:{cfg.flarePort} on {kindNode} (both directions)"
       return .ok ()
 
+-- Match only the small protocol request, leaving proxied GET connections
+-- usable. If packet matching fails, the test's state/cursor assertions fail;
+-- a missing fault must never turn into a passing routing test.
+private def readGuardRules (masterIp slaveIp : String) : List (List String) :=
+  [ruleSpec masterIp slaveIp,
+   ["FORWARD", "-s", slaveIp, "-d", masterIp, "-p", "tcp", "--dport", toString cfg.flarePort,
+    "-m", "string", "--algo", "bm", "--string", "repl_sync_wal",
+    "-j", "REJECT", "--reject-with", "tcp-reset"],
+   ["FORWARD", "-d", slaveIp, "-p", "tcp", "--dport", toString cfg.flarePort,
+    "-m", "string", "--algo", "bm", "--string", "node sync",
+    "-j", "REJECT", "--reject-with", "tcp-reset"]]
+
 private def heal (masterIp slaveIp : String) : IO Unit := do
-  for spec in [ruleSpec masterIp slaveIp, ruleSpecBack masterIp slaveIp] do
+  for spec in [ruleSpec masterIp slaveIp, ruleSpecBack masterIp slaveIp] ++ readGuardRules masterIp slaveIp do
     for _ in [0:5] do
       match ← hostCmd "docker" (["exec", kindNode, "iptables", "-D"] ++ spec) with
       | .ok _ => pure ()
@@ -582,6 +594,65 @@ def suite : TestSuite := {
           let back ← waitForCondition "spec restored to slave=0" 120 do return (← balanceOfReplica) == some 0
           if !back then return .fail "balance did not return to 0 after restoring the spec"
           return .pass },
+
+    { name := "local read guard: stale positive balance proxies a missing value to the master while WAL remains blocked"
+      run := do
+        match ← pair with
+        | .error e => return .fail e
+        | .ok (_, mIp, sPod, sIp) =>
+          let entries ← nodeView
+          let some slave := entries.find? (fun e => podOf e.fqdn == sPod)
+            | return .fail "replica missing from map"
+          let localBalance : IO (Option String) := do
+            match ← execInDebugPod cfg.debugPod cfg.«namespace» s!"printf 'stats nodes\\r\\n' | nc -w 3 {sIp} {cfg.flarePort}" with
+            | .error _ => return none
+            | .ok out => return statVal out s!"{slave.fqdn}:{cfg.flarePort}:balance"
+          try
+            match ← kubectlPatch "flarecluster" cfg.name cfg.«namespace» "{\"spec\":{\"readBalance\":{\"master\":100,\"slave\":50}}}" with
+            | .error e => return .fail e
+            | .ok _ => pure ()
+            let ready ← waitForCondition "replica itself has balance 50 and a caught-up follower" 150 do
+              return (← localBalance) == some "50" &&
+                (← statStr sIp "repl_follow_state") == some "following" &&
+                (← statNat sIp "repl_applied_lsn") == (← statNat mIp "rocksdb_latest_sequence_number")
+            if !ready then return .fail "positive local balance / caught-up precondition not reached"
+            for spec in readGuardRules mIp sIp do
+              match ← hostCmd "docker" (["exec", kindNode, "iptables", "-I", "FORWARD", "1"] ++ spec.drop 1) with
+              | .error e => return .fail e
+              | .ok _ => pure ()
+            let disconnected ← waitForCondition "WAL requests actually rejected" 90 do
+              return (← statStr sIp "repl_follow_state") == some "disconnected"
+            if !disconnected then return .fail "selective WAL fault did not reach disconnected state"
+            let some cursor ← statNat sIp "repl_applied_lsn" | return .fail "missing cursor"
+            let some forwarded ← statNat sIp "repl_forward_applied" | return .fail "missing forward counter"
+            let drops ← droppedByMaster mIp
+            let key := s!"guard_missing_{cursor}"
+            if !(← memcachedSet cfg.debugPod cfg.«namespace» mIp cfg.flarePort key "from_master") then
+              return .fail "master did not accept the test value"
+            let dropped ← waitForCondition "forwarded test write is dropped" 90 do
+              return (← droppedByMaster mIp) > drops
+            if !dropped then return .fail "write fault did not cause a dropped forward"
+            let some head ← statNat mIp "rocksdb_latest_sequence_number" | return .fail "missing master head"
+            if head <= cursor then return .fail "no WAL backlog was staged"
+            if (← localBalance) != some "50" then return .fail "map changed: this would only test operator withholding"
+            let value ← memcachedGet cfg.debugPod cfg.«namespace» sIp cfg.flarePort key
+            let after ← statNat sIp "repl_applied_lsn"
+            let forwardedAfter ← statNat sIp "repl_forward_applied"
+            IO.eprintln s!"# isolated read guard: local balance={← localBalance}, cursor={cursor}→{after}, head={head}, forwards={forwarded}→{forwardedAfter}, read={value}"
+            if value != some "from_master" then return .fail "slave did not return the master's new value"
+            if after != some cursor || forwardedAfter != some forwarded then
+              return .fail "replication advanced: successful GET does not isolate the proxy path"
+            if (← localBalance) != some "50" then return .fail "positive balance was not retained through the GET"
+            return .pass
+          finally
+            heal mIp sIp
+            discard <| kubectlPatch "flarecluster" cfg.name cfg.«namespace» "{\"spec\":{\"readBalance\":{\"master\":100,\"slave\":0}}}"
+            let recovered ← waitForCondition "isolated read-guard fault is fully restored" 240 do
+              return (← localBalance) == some "0" &&
+                (← statStr sIp "repl_follow_state") == some "following" &&
+                (← statNat sIp "repl_applied_lsn") == (← statNat mIp "rocksdb_latest_sequence_number")
+            if !recovered then throw (IO.userError "read-guard cleanup did not restore balance and catch-up")
+    },
 
     -- T5: repeated disconnections — no loss, no rollback, no resurrection,
     -- and never a rebuild. Three cut/write/heal cycles; after each the

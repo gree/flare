@@ -16,6 +16,12 @@ remeasured after the MORE scheduling fix. Merge-revision CI is still pending;
 this integration does not mark any EV verified or approve PR #144 for merge.
 See [working-tree report](reports/2026-09-24-saf10-audit-followups.md).
 
+2026-09-26: added the isolated stale-positive-balance read-routing E2E
+([scenario and limitations](reports/2026-09-26-local-read-guard-e2e.md)).
+It requires the master's new value while both replication apply paths remain
+stopped, and observes the replica's local map before and after GET. Implemented
+and compiled, not yet executed in CI; the acceptance item below remains open.
+
 | Ordinary failure | Required behavior / current audit change | Remaining acceptance |
 |---|---|---|
 | Forwarding succeeded but WAL cursor trails | Drain MORE without a 200ms sleep even when all values were skipped as superseded | Rerun sustained 900/2000 writes/s and backlog drain |

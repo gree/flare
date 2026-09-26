@@ -139,7 +139,7 @@ int handler_wal_follower::run() {
 			this->_park();
 			return -1;
 		}
-		if (r == attempt_progress && more) {
+		if (retry_immediately(static_cast<attempt_outcome>(r), more)) {
 			backoff = 1;
 			continue;					// more is waiting: ask again at once
 		}

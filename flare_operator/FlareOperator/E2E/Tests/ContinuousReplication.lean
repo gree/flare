@@ -552,20 +552,33 @@ def suite : TestSuite := {
             return (← balanceOfReplica) == some 50
           IO.eprintln s!"# with slave=50: replica balance={← balanceOfReplica} state={← statStr sIp "repl_follow_state"}"
           if !served then return .fail s!"the following replica never received balance 50 (got {← balanceOfReplica})"
+          if !(← memcachedSet cfg.debugPod cfg.«namespace» mIp cfg.flarePort "read_guard" "before_cut") then
+            return .fail "could not seed the read-guard control key"
+          let control ← waitForCondition "read control succeeds before the cut" 120 do
+            return (← memcachedGet cfg.debugPod cfg.«namespace» sIp cfg.flarePort "read_guard") == some "before_cut"
+          if !control then return .fail "the read control did not succeed before the fault"
           match ← cut mIp sIp with
           | .error e => return .fail e
           | .ok () => pure ()
           let withheld ← waitForCondition "cut replica is withheld from reads (balance 0)" 150 do
             return (← balanceOfReplica) == some 0
           let logged := containsSubstr (← opLog 1500) "eligibility"
+          let updated ← memcachedSet cfg.debugPod cfg.«namespace» mIp cfg.flarePort "read_guard" "after_cut"
+          -- Both directions are cut: forwarding to the master may fail, but
+          -- returning the old locally stored value is never acceptable.
+          let duringCut ← memcachedGet cfg.debugPod cfg.«namespace» sIp cfg.flarePort "read_guard"
           IO.eprintln s!"# under the cut: replica balance={← balanceOfReplica} state={← statStr sIp "repl_follow_state"} eligibility-logged={logged}"
           heal mIp sIp
+          if !updated then return .fail "the master did not accept the update during the cut"
+          if duringCut == some "before_cut" then return .fail "the disconnected replica served its stale local value"
           if !withheld then return .fail "the disconnected replica kept its read balance"
           let restored ← waitForCondition "healed replica is served again (balance 50)" 240 do
             return (← balanceOfReplica) == some 50 && (← statStr sIp "repl_follow_state") == some "following"
           IO.eprintln s!"# after the heal: replica balance={← balanceOfReplica} state={← statStr sIp "repl_follow_state"}"
           discard <| kubectlPatch "flarecluster" cfg.name cfg.«namespace» "{\"spec\":{\"readBalance\":{\"master\":100,\"slave\":0}}}"
           if !restored then return .fail "the healed, following replica was not restored to balance 50"
+          let fresh ← memcachedGet cfg.debugPod cfg.«namespace» sIp cfg.flarePort "read_guard"
+          if fresh != some "after_cut" then return .fail "reads did not return the updated value after healing"
           let back ← waitForCondition "spec restored to slave=0" 120 do return (← balanceOfReplica) == some 0
           if !back then return .fail "balance did not return to 0 after restoring the spec"
           return .pass },

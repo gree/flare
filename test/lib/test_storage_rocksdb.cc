@@ -2310,6 +2310,37 @@ void test_follow_disconnect_is_not_a_rebuild() {
 		handler_wal_follower::classify(op_repl_sync_wal::client_lsn_purged, false));
 }
 
+void test_follow_more_drains_even_when_forwarding_already_applied_slice() {
+	cut_assert_true(handler_wal_follower::retry_immediately(handler_wal_follower::attempt_idle, true));
+	cut_assert_true(handler_wal_follower::retry_immediately(handler_wal_follower::attempt_progress, true));
+	cut_assert_false(handler_wal_follower::retry_immediately(handler_wal_follower::attempt_idle, false));
+	cut_assert_false(handler_wal_follower::retry_immediately(handler_wal_follower::attempt_progress, false));
+	cut_assert_false(handler_wal_follower::retry_immediately(handler_wal_follower::attempt_disconnected, true));
+	cut_assert_false(handler_wal_follower::retry_immediately(handler_wal_follower::attempt_error, true));
+	cut_assert_false(handler_wal_follower::retry_immediately(handler_wal_follower::attempt_needs_rebuild, true));
+}
+
+void test_follow_local_read_guard_until_caught_up() {
+	stats::follow_record r = stats_object->get_follow_record();
+	r.enabled = true;
+	r.source_epoch = "epoch";
+	r.state = "following";
+	r.source_lsn = 100;
+	r.applied_lsn = 99;
+	r.source_lsn_observed_at = 1000;
+	cut_assert_false(stats::follow_allows_local_read(r, 1000));
+	r.applied_lsn = 100;
+	cut_assert_true(stats::follow_allows_local_read(r, 1000));
+	cut_assert_false(stats::follow_allows_local_read(r, 1006));
+	cut_assert_false(stats::follow_allows_local_read(r, 999));
+	r.state = "disconnected";
+	cut_assert_false(stats::follow_allows_local_read(r, 1000));
+	r.state = "needs_rebuild";
+	cut_assert_false(stats::follow_allows_local_read(r, 1000));
+	r.enabled = false;
+	cut_assert_true(stats::follow_allows_local_read(r, 1000));
+}
+
 void test_follow_only_unsatisfiable_positions_rebuild() {
 	cppcut_assert_equal(handler_wal_follower::attempt_needs_rebuild,
 		handler_wal_follower::classify(op_repl_sync_wal::client_lsn_purged, true));

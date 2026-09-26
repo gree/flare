@@ -684,15 +684,34 @@ partition master's reply of the same pass. The verdict is one of
   blocks planned promotion and deletion, but never makes a node unfit — a
   stats hiccup must not remove the last failover candidate. The mode is
   remembered per node; a node once seen in the mode whose stats become
-  unreadable is Unknown. **Residual**: a node never yet read is not withheld
-  (withholding on the first hiccup would flap every non-WAL cluster's read
-  balance at start-up); the TCP-side zombie-master guard
+  unreadable is Unknown. The audit follow-up also withholds a never-read node
+  until its mode is established; this can temporarily route non-WAL reads to
+  masters at operator startup. A future-dated source observation is Unknown,
+  not fresh. **Residual**: the TCP-side zombie-master guard
   (`Reconciler.findActiveSlaveForPartition`) does not consult this evidence.
 * **Probe cost**: every non-Down Slave in the mode is probed each tick, the
   master of each such partition too; a node known to be out of the mode is
   re-probed every `FLARE_FOLLOW_PROBE_INTERVAL` ticks (default 30).
 
 ### 5.4 Repair ownership versus transient connection state
+
+Audit follow-up (2026-09-24): flared's `cluster::pre_proxy_read` additionally
+guards local reads, independently of operator propagation. A WAL-mode slave
+must be following the map's master, have reached its last observed source
+position, and have an observation no older than five seconds (and not in the
+future). Otherwise it forwards the read to the master rather than selecting
+itself again from a stale balance map. It remains a Slave so WAL catch-up
+continues; changing the role to Proxy would stop the follower. This local
+guard is intentionally stricter than the operator's configurable lag bound.
+It is not linearizability: writes after the observed head can still be absent.
+If the master is unreachable, the legacy read error path can produce a miss;
+it must not be described as successful fresh service.
+
+Backlog scheduling: a successful slice with MORE is drained immediately even
+if every change was already applied through forwarding (zero new applies).
+Polling sleeps only when there is no MORE; transport/storage errors still
+back off. The previously observed 256/200ms ceiling must be remeasured: it
+was not necessarily a fundamental configured throughput ceiling.
 
 The whole point of this work is that a blip is recovered **without** a full
 rebuild, so the two must not be conflated:

@@ -494,6 +494,8 @@ def checkFollowJudge (ctx : Ctx) : IO Unit := do
       && (FollowEvidence.unfitReason (fr "following" 1000 0 "1:old") (some "2:abc")).isSome)
   check ctx "a stale observation (6 s > 5 s) is ineligible; 5 s is still fresh"
     (hasWord (judgeR (fr "following" 1000 6)) "stale" && (judgeR (fr "following" 1000 5)).isEligible)
+  check ctx "clock rollback cannot turn an old observation into fresh evidence"
+    ((judgeR { fr "following" 1000 with sourceObservedAt := some 1001 }).isUnknown)
   check ctx "lag 500: within the read bound (1000) but over the promotion bound (100)"
     ((judgeR (fr "following" 500)).isEligible && hasWord (judgeP (fr "following" 500)) "bound")
   check ctx "lag exactly at the promotion bound is eligible"
@@ -521,11 +523,20 @@ def cls1 := FollowEvidence.classify fb [] cNodes [(0, fm)]
 def checkFollowClassify (ctx : Ctx) : IO Unit := do
   check ctx "ranked = proven-current followers, highest applied position first"
     (cls1.1.ranked == ["b", "a"])
-  check ctx "unproven = disconnected; unfit = needs_rebuild; both withheld from reads"
-    (cls1.1.unproven == ["c"] && cls1.1.unfit == ["d"] && cls1.1.readWithheld == ["c", "d"])
-  check ctx "mode off, never-read unreadable and not-probed nodes get no say on the first pass"
-    (!cls1.1.readWithheld.contains "e" && !cls1.1.readWithheld.contains "f"
-      && !cls1.1.readWithheld.contains "g" && !cls1.1.unproven.contains "f")
+  check ctx "disconnected and never-observed nodes are unproven; only needs_rebuild is unfit"
+    (cls1.1.unproven == ["c", "f", "g"] && cls1.1.unfit == ["d"]
+      && cls1.1.readWithheld == ["c", "d", "f", "g"])
+  check ctx "operator cold start withholds unknown replicas but preserves explicit non-WAL policy"
+    (!cls1.1.readWithheld.contains "e" && cls1.1.readWithheld.contains "f"
+      && cls1.1.readWithheld.contains "g" && cls1.1.unproven.contains "f")
+  let recovered := FollowEvidence.classify fb cls1.2.1
+    [("f", 0, some (fr "following" 1000)), ("g", 0, some frOff)] [(0, fm)]
+  check ctx "fresh catch-up or confirmed non-WAL mode restores eligibility after cold-start withholding"
+    (recovered.1.readWithheld == [] && recovered.1.ranked == ["f"])
+  let cutAgain := FollowEvidence.classify fb recovered.2.1
+    [("f", 0, some frCut), ("g", 0, none)] [(0, fm)]
+  check ctx "a recovered WAL follower is withheld on the next stats failure without marking its copy unfit"
+    (cutAgain.1.readWithheld == ["f"] && cutAgain.1.unfit == [])
   check ctx "the mode memory records what was readable: a-d in the mode, e out, f and g unchanged"
     (cls1.2.1.lookup "a" == some true && cls1.2.1.lookup "d" == some true
       && cls1.2.1.lookup "e" == some false && cls1.2.1.lookup "f" == none && cls1.2.1.lookup "g" == none)

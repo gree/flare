@@ -67,6 +67,11 @@ public:
 	// "a disconnect is not a rebuild" rule is testable directly.
 	static attempt_outcome classify(int client_result, bool transport_ok);
 	static const char* reason_for(int client_result);
+	// MORE describes backlog, even when every change in the slice was
+	// already delivered by forwarding. Do not poll-sleep while draining it.
+	static bool retry_immediately(attempt_outcome outcome, bool more) {
+		return more && (outcome == attempt_progress || outcome == attempt_idle);
+	}
 
 protected:
 	cluster*			_cluster;

@@ -7,6 +7,29 @@ status; [STPA-node-state.md](STPA-node-state.md) owns the hazard analysis.
 
 ## Merge gate
 
+### SAF-10 audit follow-ups (2026-09-24)
+
+Integrated `saf-10-audit-followups` through `89f3cff` into the PR #144 branch
+on 2026-09-26. The earlier SAF-10d status below describes the pre-integration
+evaluation: its "parked" follow-ups are now included, but performance must be
+remeasured after the MORE scheduling fix. Merge-revision CI is still pending;
+this integration does not mark any EV verified or approve PR #144 for merge.
+See [working-tree report](reports/2026-09-24-saf10-audit-followups.md).
+
+| Ordinary failure | Required behavior / current audit change | Remaining acceptance |
+|---|---|---|
+| Forwarding succeeded but WAL cursor trails | Drain MORE without a 200ms sleep even when all values were skipped as superseded | Rerun sustained 900/2000 writes/s and backlog drain |
+| Slave disconnected or lagging | Keep Slave role and cursor; local reads proxy to master, operator withholds read balance; no automatic full rebuild for a blip | Execute updated read-value E2E and isolate local guard with stale positive-balance map |
+| Master unreachable from slave | Do not return known-stale local content; forwarding can fail | Legacy read errors may appear as cache misses; protocol compatibility decision remains |
+| Operator restart with unreadable stats | Never-observed replicas are Unknown, not read-eligible; restore after a complete eligible reading | Cold-start unit tests pass; stage the combined restart/stats-failure E2E |
+| Source observation lies in the future | Unknown, not fresh via saturating subtraction | Unit-pinned; no clock-fault E2E |
+| WAL purged / source history changed | Explicit needs_rebuild with safe reseed, no retry forever | Preserve existing T6 evidence; re-run regressions after integrating changes |
+
+Before production enablement: T17, large-DB boot/probes, RocksDB memory-budget
+configuration, WAL retention/compaction under sustained lag, simultaneous
+repair-request staging, and remaining promotion/deletion safety gaps remain
+open. No asynchronous-failover loss-free guarantee is added by these changes.
+
 SAF-01 through SAF-07 block the operator merge until their acceptance scenarios
 have passed on the candidate implementation and a reviewer has assessed the
 linked safety constraints. A library build alone does not close these tasks.

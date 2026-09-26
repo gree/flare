@@ -1,5 +1,10 @@
 # TODO & Future Improvements
 
+> Historical snapshot: the completion and verification claims below describe
+> earlier work, not current merge readiness. Use the current
+> [safety backlog](../../docs/SAFETY-TODO.md) and
+> [STPA evidence inventory](../../docs/STPA-node-state.md#evidence-and-status).
+
 ## Current Status
 
 ✅ **Core Functionality Complete** (as of commit `1c9dd44`)

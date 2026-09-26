@@ -72,6 +72,34 @@ protected:
 	// touched after four failed retries).
 	pthread_mutex_t _mutex_proxy_write_dropped_by_dest;
 	map<string, uint64_t> _proxy_write_dropped_by_dest;
+	// Reconstruction lifecycle of THIS node, counted once per request (a
+	// request is one handler_reconstruction; its internal retries are not
+	// separate requests). "started" is what a controller compares against
+	// after it asks for a resync: without it, a resync request that never
+	// reached flared (role diff lost, map ignored, state-only change) is
+	// indistinguishable from one that ran instantly. "completed" is the
+	// evidence that a full copy or WAL catch-up finished; "failed" is the
+	// permanent give-up after retries. Monotonic for the process lifetime.
+	AtomicCounter _reconstruction_started;
+	AtomicCounter _reconstruction_completed;
+	AtomicCounter _reconstruction_failed;
+	// ONE completion record, so a controller can tell "the current
+	// reconstruction of this process succeeded from this source" apart from
+	// cumulative counters (a failed or aborted handler leaves started and
+	// completed permanently unequal, and a restart resets both to values a
+	// previous process may also have shown):
+	//   boot_id           random per process — distinguishes processes even
+	//                     when every counter happens to match;
+	//   current_id        the id (= started ordinal) of the latest handler;
+	//   current_state     none / running / succeeded / failed / aborted;
+	//   last_success_id   id of the last handler that succeeded;
+	//   last_success_source  master host:port that handler copied from.
+	pthread_mutex_t _mutex_reconstruction;
+	uint64_t _reconstruction_boot_id;
+	uint64_t _reconstruction_current_id;
+	int _reconstruction_current_state;
+	uint64_t _reconstruction_last_success_id;
+	string _reconstruction_last_success_source;
 	AtomicCounter _delete_hits;
 	AtomicCounter _delete_misses;
 	AtomicCounter _incr_hits;
@@ -101,6 +129,34 @@ public:
 	inline int increment_get_misses()            { this->_get_misses.incr();return 0; };
 	inline int increment_proxy_write_dropped()   { this->_proxy_write_dropped.incr();return 0; };
 	int increment_proxy_write_dropped(const string& dest);
+	inline int increment_reconstruction_started()   { this->_reconstruction_started.incr();return 0; };
+	inline int increment_reconstruction_completed() { this->_reconstruction_completed.incr();return 0; };
+	inline int increment_reconstruction_failed()    { this->_reconstruction_failed.incr();return 0; };
+	enum reconstruction_state { reconstruction_none = 0, reconstruction_running, reconstruction_succeeded, reconstruction_failed_state, reconstruction_aborted };
+	// Every notification carries the id the handler was GIVEN at begin(), so
+	// an older handler finishing after a newer one started cannot write the
+	// newer id into the record (review: A begins #1, B begins #2, A succeeds
+	// must not yield "latest #2 succeeded"). Only the CURRENT handler's
+	// notification changes the current state; last_success only advances.
+	// begin() allocates the id and updates the record under ONE lock.
+	uint64_t reconstruction_begin();
+	int reconstruction_succeeded_from(uint64_t id, const string& source);
+	int reconstruction_failed_final(uint64_t id);
+	int reconstruction_aborted_by_shutdown(uint64_t id);
+	struct reconstruction_record {
+		uint64_t boot_id;
+		uint64_t current_id;
+		string current_state;
+		uint64_t last_success_id;
+		string last_success_source;
+	};
+	/// One consistent snapshot under a single lock (for `stats`).
+	reconstruction_record get_reconstruction_record();
+	uint64_t get_reconstruction_boot_id();
+	uint64_t get_reconstruction_current_id();
+	string get_reconstruction_current_state();
+	uint64_t get_reconstruction_last_success_id();
+	string get_reconstruction_last_success_source();
 	inline int increment_delete_hits()           { this->_delete_hits.incr();return 0; };
 	inline int increment_delete_misses()         { this->_delete_misses.incr();return 0; };
 	inline int increment_incr_hits()             { this->_incr_hits.incr();return 0; };
@@ -136,6 +192,9 @@ public:
 	uint64_t get_get_misses();
 	uint64_t get_proxy_write_dropped();
 	map<string, uint64_t> get_proxy_write_dropped_by_dest();
+	uint64_t get_reconstruction_started();
+	uint64_t get_reconstruction_completed();
+	uint64_t get_reconstruction_failed();
 	uint64_t get_delete_hits();
 	uint64_t get_delete_misses();
 	uint64_t get_incr_hits();

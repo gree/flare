@@ -55,11 +55,20 @@ def suite : TestSuite := {
           return .pass
         | .error e => return .fail s!"patch failed: {e}" },
 
-    -- Test 3: wait for operator to process the reduction attempt
+    -- Test 3: wait for operator to process the reduction attempt.
+    -- Not a fixed sleep: the warning (and the "CRD changed" line) are emitted
+    -- at the top of the first reconcile that fetches the patched CRD, and a
+    -- reconcile on a loaded runner can take 14s on top of the 5s interval
+    -- (CI run 35083558955: patch at :21, one read at :36, no reconcile had
+    -- seen the new CRD yet — the diagnostics taken at the failure had neither
+    -- line). Wait for the operator's own evidence that it saw the change.
     { name := "wait for operator to detect reduction"
       run := do
-        IO.sleep 15000  -- 15 seconds for operator to process (2-3 reconcile cycles)
-        return .pass },
+        let seen ← waitForCondition "operator reconciles with the patched CRD (CRD changed / reduction warning logged)" 120 do
+          let logs ← kubectlLogsLabel s!"app={cfg.operatorName}" cfg.«namespace» 1000
+          return containsSubstr logs "CRD changed: partitions 2→1" || containsSubstr logs "UNSAFE PARTITION REDUCTION DETECTED"
+        if seen then return .pass
+        else return .fail "no reconcile fetched the patched CRD within 120s (neither 'CRD changed' nor the reduction warning was logged)" },
 
     -- Test 4: verify cluster still has 2 partitions (reduction was blocked)
     { name := "verify cluster still has 2 partitions (reduction blocked)"
@@ -79,15 +88,17 @@ def suite : TestSuite := {
         match opPods.head? with
         | none => return .fail "operator pod not found"
         | some opPod =>
-          -- Get operator logs (more lines to ensure we catch the warning)
-          let logs ← kubectlLogs opPod cfg.«namespace» 200
-          -- Check for warning message (check if log contains substring)
-          let hasWarning := (logs.splitOn "UNSAFE PARTITION REDUCTION DETECTED").length > 1
+          -- Poll rather than read once: the operator is chatty (stats probes,
+          -- ledger, broadcasts), so a short tail read at one instant can miss
+          -- a block logged one tick later. 1000 lines covers many ticks.
+          let hasWarning ← waitForCondition "operator logs the partition reduction warning" 60 do
+            let logs ← kubectlLogs opPod cfg.«namespace» 1000
+            return containsSubstr logs "UNSAFE PARTITION REDUCTION DETECTED"
           if hasWarning then do
             IO.eprintln "# Operator logged partition reduction warning ✓"
             return .pass
           else
-            return .fail "operator did not log partition reduction warning" },
+            return .fail "operator did not log partition reduction warning within 60s of reconciling the patched CRD" },
 
     -- Test 6: restore CRD to correct state (2 partitions)
     { name := "restore CRD to 2 partitions"

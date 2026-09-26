@@ -1,0 +1,27 @@
+# integrated E2E after review round 4 (unknown-outcome wording; deadline test requires an accepted connection + curl exit 28) — topology-authority (4), replica-repair (8), prepare-evidence (2)
+# tested revision: 33205465691b0bf59dff1ad348ed810a5d20f24f
+# host: local kind cluster flare-e2e (single node, arm64); harness operator memory limit 1Gi
+# command: cd flare_operator && .lake/build/bin/flare_e2e --filter topology-authority,replica-repair,prepare-evidence
+# date: 2026-09-13
+# note: the ledger-save-failure test now waits for the operator SA's flareclusters/status grant to actually propagate (apiserver caches the prior deny; ~131s observed on a loaded host) before timing the operator's retry. Earlier attempts at this operator code that failed on that propagation window / on harness log-tail and status-read races are recorded as e2e-only fixes (ad0872d, f7b6899, 3320546); the operator image is unchanged across them.
+
+# === Suite: topology-authority ===
+# === Suite: replica-repair ===
+# === Suite: prepare-evidence ===
+# Tests: 14, Failures: 0
+# RESULT: PASS
+1..14
+ok 1 - flared rejects a topology push carrying a stale version
+ok 2 - control: holding the lease, the stopped pass does broadcast
+ok 3 - lease taken by another identity: the pass fences, the process exits, and the restarted leader re-applies the topology
+ok 4 - lease unreadable: the stopped pass fails closed and does not send
+ok 5 - control: writes to the master replicate to the slave
+ok 6 - cut link: the master drops replica writes and the operator requests a repair
+ok 7 - the repair runs: held as proxy, confirmed, re-seated, reconstructed; keys recovered without another drop
+ok 8 - SAF-05: a drop seen while resync is disabled is held, survives an operator restart, and is repaired once the gate opens
+ok 9 - SAF-05: a ledger save that fails is marked unsaved, retried every pass, lands when allowed, and survives a restart
+ok 10 - SAF-05: a corrupt ledger is held as unavailable, never replaced by an empty one; the drop seen meanwhile is recovered once it is readable
+ok 11 - SAF-06: the delete carries the observed pod UID as an API precondition; a same-name pod with another UID is refused by the apiserver
+ok 12 - SAF-06: the UID-precondition delete has a deadline — a server that accepts and never answers returns within it
+ok 13 - the lost-activation condition is staged: the activation is dropped and a reconstruction completed
+ok 14 - the repair re-derives Prepare→Active from completion evidence and names it

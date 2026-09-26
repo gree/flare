@@ -136,9 +136,29 @@ def handleConnection (sock : Socket) (state : ServerState) : IO Unit := do
       -- Atomic read-modify-write: modifyGet uses Ref.take (destructive read)
       -- to prevent lost updates from concurrent handlers.
       let crd ← state.crdSpec.get
-      let (newState, response) ← state.clusterState.modifyGet fun cs =>
-        let (newState, resp) := reconcileStep cs crd event
-        ((newState, resp), newState)
+      -- TEST SEAM (SAF-03 / CHECK-04). Unset in production, this is one
+      -- getEnv per `node state` event and nothing else. With
+      -- FLARE_TEST_DROP_NODE_STATE set, inbound `node state` events are
+      -- dropped before they reach the state machine and answered OK — the
+      -- lost activation the Prepare repair exists for, made reproducible.
+      -- Answering OK (not an error) matters: flared would otherwise retry
+      -- the activation 30 times and then treat the reconstruction as
+      -- failed, which is a different condition.
+      let dropForTest ← match event with
+        | .NodeState sn sp _ =>
+          match ← IO.getEnv "FLARE_TEST_DROP_NODE_STATE" with
+          | some v =>
+            if v != "" && v != "0" then
+              IO.eprintln s!"[flare-operator] TEST SEAM: dropping node state event from {sn}:{sp} (FLARE_TEST_DROP_NODE_STATE)"
+              pure true
+            else pure false
+          | none => pure false
+        | _ => pure false
+      let (newState, response) ← if dropForTest then do
+          pure ((← state.clusterState.get), (FlareResponse.OK : FlareResponse))
+        else state.clusterState.modifyGet fun cs =>
+          let (newState, resp) := reconcileStep cs crd event
+          ((newState, resp), newState)
       -- Trace logging + register socket after first NodeAdd
       match event with
       | .Meta =>

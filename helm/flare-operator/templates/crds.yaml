@@ -186,6 +186,15 @@ spec:
                 migrationPhase:
                   type: string
                   enum: [None, Dumping, Forwarding]
+                replicaRepairs:
+                  description: |
+                    Replica-repair ledger (SC-03): reconstruction requests
+                    pending for replicas whose master dropped writes to them,
+                    plus the last-seen drop counters. Written by the operator
+                    and read back on start, so a repair survives an operator
+                    restart and counters are not re-baselined.
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
       subresources:
         status: {}
       additionalPrinterColumns:

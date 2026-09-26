@@ -1,0 +1,4 @@
+# prepare-evidence suite (SAF-03), from the integrated run at bd8b213d791b3ce61f3cdee6c54474b1253c60c1 — see 2026-09-13-integrated-e2e.txt
+# === Suite: prepare-evidence ===
+ok 9 - the lost-activation condition is staged: the activation is dropped and a reconstruction completed
+ok 10 - the repair re-derives Prepare→Active from completion evidence and names it

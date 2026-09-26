@@ -1,0 +1,1925 @@
+{
+  "schema_version": 1,
+  "hazards": [
+    "H1",
+    "H2",
+    "H3",
+    "H4",
+    "H5",
+    "H6"
+  ],
+  "ucas": [
+    {
+      "id": "UCA-01",
+      "action": "A1a",
+      "timing": "Not provided",
+      "description": "A non-serving node stays Active.",
+      "hazards": [
+        "H1",
+        "H3",
+        "H4"
+      ]
+    },
+    {
+      "id": "UCA-02",
+      "action": "A1a",
+      "timing": "Not provided",
+      "description": "A divergent replica remains eligible without repair.",
+      "hazards": [
+        "H2",
+        "H3"
+      ]
+    },
+    {
+      "id": "UCA-03",
+      "action": "A1a",
+      "timing": "Provided",
+      "description": "Healthy copies are demoted on false or correlated failure observations.",
+      "hazards": [
+        "H5"
+      ]
+    },
+    {
+      "id": "UCA-04",
+      "action": "A1a",
+      "timing": "Wrong order",
+      "description": "A master is demoted before a usable successor exists.",
+      "hazards": [
+        "H1",
+        "H2",
+        "H5"
+      ]
+    },
+    {
+      "id": "UCA-05",
+      "action": "A1a",
+      "timing": "Provided",
+      "description": "A lone unhealthy master loses its assignment without a successor.",
+      "hazards": [
+        "H1"
+      ]
+    },
+    {
+      "id": "UCA-06",
+      "action": "A1a",
+      "timing": "Too long",
+      "description": "A live node remains Down indefinitely.",
+      "hazards": [
+        "H4",
+        "H5"
+      ]
+    },
+    {
+      "id": "UCA-07",
+      "action": "A1b",
+      "timing": "Provided",
+      "description": "An empty or stale node is crowned master.",
+      "hazards": [
+        "H2",
+        "H5"
+      ]
+    },
+    {
+      "id": "UCA-08",
+      "action": "A1b",
+      "timing": "Provided",
+      "description": "Multiple processes serve as master for a partition.",
+      "hazards": [
+        "H6"
+      ]
+    },
+    {
+      "id": "UCA-09",
+      "action": "A1b",
+      "timing": "Not provided",
+      "description": "A masterless partition is never refilled.",
+      "hazards": [
+        "H1"
+      ]
+    },
+    {
+      "id": "UCA-10",
+      "action": "A1b",
+      "timing": "Wrong timing",
+      "description": "A replica is activated or promoted before completing synchronization.",
+      "hazards": [
+        "H2",
+        "H4"
+      ]
+    },
+    {
+      "id": "UCA-11",
+      "action": "A2",
+      "timing": "Provided",
+      "description": "Deletion destroys the last usable copy.",
+      "hazards": [
+        "H5"
+      ]
+    },
+    {
+      "id": "UCA-12",
+      "action": "A2",
+      "timing": "Wrong timing",
+      "description": "Deletion interrupts reconstruction or repeats on a terminating pod.",
+      "hazards": [
+        "H4",
+        "H5"
+      ]
+    },
+    {
+      "id": "UCA-13",
+      "action": "A2",
+      "timing": "Provided",
+      "description": "Force deletion bypasses evidence and drain conditions.",
+      "hazards": [
+        "H5"
+      ]
+    },
+    {
+      "id": "UCA-14",
+      "action": "A1c",
+      "timing": "Not provided",
+      "description": "Topology application is lost or never retried.",
+      "hazards": [
+        "H1",
+        "H2",
+        "H4"
+      ]
+    },
+    {
+      "id": "UCA-15",
+      "action": "A1c",
+      "timing": "Too late",
+      "description": "Delayed topology arrives after a newer authority or assignment.",
+      "hazards": [
+        "H4",
+        "H6"
+      ]
+    },
+    {
+      "id": "UCA-16",
+      "action": "A1c",
+      "timing": "Provided",
+      "description": "A deposed leader still issues topology commands.",
+      "hazards": [
+        "H6"
+      ]
+    },
+    {
+      "id": "UCA-17",
+      "action": "A1a",
+      "timing": "Not provided",
+      "description": "Repeated resync failure never removes an unsafe replica from serving.",
+      "hazards": [
+        "H3",
+        "H4"
+      ]
+    },
+    {
+      "id": "UCA-18",
+      "action": "A4",
+      "timing": "Provided",
+      "description": "Endpoint membership advertises an unserving node.",
+      "hazards": [
+        "H4"
+      ]
+    }
+  ],
+  "controls": [
+    {
+      "id": "EV-01",
+      "constraint": {
+        "id": "SC-01",
+        "text": "Only the current leader may issue topology changes; recipients must reject obsolete authority."
+      },
+      "title": "Authorize topology application",
+      "hazards": [
+        "H6",
+        "H4"
+      ],
+      "ucas": [
+        "UCA-14",
+        "UCA-15",
+        "UCA-16",
+        "UCA-08"
+      ],
+      "implementation": "partial",
+      "verification": "unverified",
+      "scenarios": [
+        "An old reconcile resumes after lease takeover; a node has not yet heard the new generation."
+      ],
+      "assumptions": [
+        "Lease availability and generation identity must be established; a newer generation fences only recipients that have observed it."
+      ],
+      "residual_risks": [
+        "A check before sending cannot close the check/send race: the lease can be lost between the read and the first packet, or while the broadcast is in flight.",
+        "Recipient-side version fencing only protects a node that has ALREADY observed the newer generation; a node that missed the new leader's broadcast will accept an older leader's map. Per-node applied-generation tracking is SAF-09.",
+        "The post-send lease re-read records that the race occurred; it cannot retract what was sent.",
+        "Observed while building CHECK-01, not asserted on: after the lease is deleted and the SAME process re-acquires it, the operator was seen broadcasting a LOWER version than nodes already held, which their fencing rejects. The manipulation is cruder than a real takeover; treat as a lead for SAF-09.",
+        "The stop position is a test seam. It is inert without the environment variable and bounded at 120s, but it is production code that a misconfiguration could delay one broadcast with.",
+        "A suppressed send is retried only by a process that survives the suppression (lease read failure, momentarily foreign holder): the pending flag is in memory, and a confirmed lease loss ends the process, after which the next leader republishes from its own committed state. The retry test proves the flag was set by the withheld pass and consumed by the pass that published (that pass names the suppressed version); it does not prove the flag was NECESSARY for that send, because the committed version usually moves by itself within a pass.",
+        "Liveness (/healthz) is process-alive only and readiness treats a non-leader as ready. The operator that logged 'LOST LEASE -- exiting' and then hung — the Lean runtime waits for the never-ending server tasks before reporting the uncaught error — was therefore never restarted; that defect is fixed (IO.Process.exit) and CHECK-01 asserts the restart count moves, but a different stall of the main loop would still pass both probes.",
+        "The suite's evidence for 'the held pass did not send' is operator log lines read from the pod (across the designed restart); the checks are shape-based (fence for vHELD; a send line with old < new would be the held pass) rather than a wire-level capture. Two harness races (container replaced by the designed exit; retry line matching the negative check) were found by the CI runner's timing and fixed the same day; a third of the same family is plausible."
+      ],
+      "code": [
+        {
+          "path": "flare_operator/FlareOperator/Main.lean",
+          "symbol": "reconcileOnceFSM"
+        },
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/K8sReconciler.lean",
+          "symbol": "flareReconcileCore"
+        },
+        {
+          "path": "src/lib/cluster.cc",
+          "symbol": "cluster::reconstruct_node"
+        }
+      ],
+      "call_path": "runReconcileFSMLoop -> commitClusterState -> (post-commit) lease check -> broadcastTopologyToAllPods. The FSM BroadcastTopology effect, which sent the unmerged map without a leadership check, has been removed; the effect constructor no longer exists.",
+      "checks": [
+        {
+          "id": "CHECK-01",
+          "kind": "scenario",
+          "procedure": "Drive the production reconcile to a named stop position (committed, version advanced, pre-send lease check not yet made) using the FLARE_TEST_PRESEND_BARRIER seam, and confirm the position was reached by reading the held version the operator writes there. Topology changes are triggered by patching the FlareCluster readBalance spec (non-destructive). Then, for the same held pass: (a) retain the lease and require the release to broadcast that version - the control that proves the pass reaches the send at all; (b) hand the lease to another identity and require a fence log naming that version with no broadcast, then require the container restart count to move (losing the lease is designed to end the process), the restarted process to log lease acquisition, and the topology to be applied - exactly one Active master, every node Active, each flared's own `stats nodes` naming that master; (c) delete the lease and require the read-failure branch with no broadcast, then a later pass of the SAME process that publishes and names the suppressed version, and the applied topology. A receiver whose version does not move is not accepted as evidence on its own: a crash, a timeout or an exit before the branch look the same. Separately, push a mutated map at a stale version from inside the cluster and require flared both to keep its map and to log the rejection. Every test releases the barrier and restores authority before judging.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/TopologyAuthority.lean",
+              "symbol": "suite"
+            },
+            {
+              "path": "flare_operator/FlareOperator/Main.lean",
+              "symbol": "preSendBarrier"
+            },
+            {
+              "path": "flare_operator/FlareOperator/Main.lean",
+              "symbol": "main"
+            }
+          ]
+        }
+      ],
+      "runs": [
+        {
+          "check": "CHECK-01",
+          "commit": "76ce851e335408f1cf096435ab128bac8e5956c7",
+          "date": "2026-09-11",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter topology-authority",
+          "result": "pass",
+          "report": "docs/reports/2026-09-11-topology-authority.txt"
+        },
+        {
+          "check": "CHECK-01",
+          "commit": "5cce98f535da4f9d5a7551ad3430dee3727e04f2",
+          "date": "2026-09-11",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter topology-authority",
+          "result": "pass",
+          "report": "docs/reports/2026-09-11-topology-authority.txt"
+        },
+        {
+          "check": "CHECK-01",
+          "commit": "53488c40a5ca605abbf0baa4e19109c8cd74e1de",
+          "date": "2026-09-12",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter topology-authority",
+          "result": "fail",
+          "report": "docs/reports/2026-09-12-topology-authority-53488c4-fail.txt"
+        },
+        {
+          "check": "CHECK-01",
+          "commit": "ca56b0ecc8dd37056d7a14e86a6efee465f41265",
+          "date": "2026-09-12",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter topology-authority",
+          "result": "pass",
+          "report": "docs/reports/2026-09-12-topology-authority.txt"
+        },
+        {
+          "check": "CHECK-01",
+          "commit": "bd8b213d791b3ce61f3cdee6c54474b1253c60c1",
+          "date": "2026-09-13",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter topology-authority,replica-repair,prepare-evidence",
+          "result": "pass",
+          "report": "docs/reports/2026-09-13-integrated-e2e.txt"
+        },
+        {
+          "check": "CHECK-01",
+          "commit": "cc30633dfad681828db477d299a42069c7ce4cea",
+          "date": "2026-09-13",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter topology-authority,replica-repair,prepare-evidence",
+          "result": "pass",
+          "report": "docs/reports/2026-09-13-integrated-e2e-review.txt"
+        },
+        {
+          "check": "CHECK-01",
+          "commit": "b739277aa50553bf88336e5642e6b1ab21161a4e",
+          "date": "2026-09-13",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter topology-authority,replica-repair,prepare-evidence",
+          "result": "pass",
+          "report": "docs/reports/2026-09-13-integrated-e2e-review2.txt"
+        },
+        {
+          "check": "CHECK-01",
+          "commit": "f7b68992643fb4a410e400d154572a7b982638ee",
+          "date": "2026-09-13",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter topology-authority,replica-repair,prepare-evidence",
+          "result": "pass",
+          "report": "docs/reports/2026-09-13-integrated-e2e-review3.txt"
+        },
+        {
+          "check": "CHECK-01",
+          "commit": "33205465691b0bf59dff1ad348ed810a5d20f24f",
+          "date": "2026-09-13",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter topology-authority,replica-repair,prepare-evidence",
+          "result": "pass",
+          "report": "docs/reports/2026-09-13-integrated-e2e-review4.txt"
+        },
+        {
+          "check": "CHECK-01",
+          "commit": "22b4d03a13ac2d5a14aab3aac80f79cd4e2083c2",
+          "date": "2026-09-14",
+          "command": "GitHub Actions e2e-tests.yaml, leg breaker-migration: timeout 4500 .lake/build/bin/flare_e2e --filter circuit-breaker,operator-restart,topology-authority,replica-repair,prepare-evidence,native-metrics,blue-green-migration",
+          "result": "fail",
+          "report": "docs/reports/2026-09-14-ci-e2e-breaker-migration-22b4d03-fail.txt"
+        },
+        {
+          "check": "CHECK-01",
+          "commit": "332cbf947c3e24181075bf1e67ad1e43cb1c0f6a",
+          "date": "2026-09-14",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter topology-authority",
+          "result": "pass",
+          "report": "docs/reports/2026-09-14-topology-authority-final.txt"
+        },
+        {
+          "check": "CHECK-01",
+          "commit": "f87c2dce83ce7f68b1483b455a9bff161944125b",
+          "date": "2026-09-14",
+          "command": "GitHub Actions e2e-tests.yaml, leg breaker-migration: timeout 4500 .lake/build/bin/flare_e2e --filter circuit-breaker,operator-restart,topology-authority,replica-repair,prepare-evidence,native-metrics,blue-green-migration",
+          "result": "fail",
+          "report": "docs/reports/2026-09-14-ci-e2e-breaker-migration-f87c2dc-fail.txt"
+        },
+        {
+          "check": "CHECK-01",
+          "commit": "ceedc9bb0e069aa6b435ba01cdd994e6e4b58773",
+          "date": "2026-09-14",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter topology-authority",
+          "result": "pass",
+          "report": "docs/reports/2026-09-14-topology-authority-final2.txt"
+        },
+        {
+          "check": "CHECK-01",
+          "commit": "5e80d73c09385330c0ee897096bb86d28e32f728",
+          "date": "2026-09-14",
+          "command": "GitHub Actions e2e-tests.yaml, leg breaker-migration: timeout 4500 .lake/build/bin/flare_e2e --filter circuit-breaker,operator-restart,topology-authority,replica-repair,prepare-evidence,native-metrics,blue-green-migration",
+          "result": "pass",
+          "report": "docs/reports/2026-09-14-ci-e2e-breaker-migration-5e80d73-fail-circuit-breaker.txt"
+        },
+        {
+          "check": "CHECK-01",
+          "commit": "c148c6c006fc7c5ae98939acfcc8270ccb48f960",
+          "date": "2026-09-14",
+          "command": "GitHub Actions e2e-tests.yaml (4 legs) on PR #143",
+          "result": "pass",
+          "report": "docs/reports/2026-09-14-ci-e2e-matrix-c148c6c-pass.txt"
+        },
+        {
+          "check": "CHECK-01",
+          "commit": "f7d327fd24fc9310c3f2c4f13a8b50ebb1956a14",
+          "date": "2026-09-16",
+          "command": "GitHub Actions e2e-tests.yaml (4 legs) on PR #143",
+          "result": "pass",
+          "report": "docs/reports/2026-09-16-ci-e2e-matrix-f7d327f-pass.txt"
+        },
+        {
+          "check": "CHECK-01",
+          "commit": "da840c084fd5f5fc1b0f023b597e6378b8ee3582",
+          "date": "2026-09-16",
+          "command": "GitHub Actions e2e-tests.yaml (4 legs) on PR #143",
+          "result": "pass",
+          "report": "docs/reports/2026-09-16-ci-e2e-matrix-da840c0-pass.txt"
+        }
+      ],
+      "tasks": [
+        "SAF-01",
+        "SAF-09"
+      ],
+      "review": {
+        "commit": "da840c084fd5f5fc1b0f023b597e6378b8ee3582",
+        "date": "2026-09-16",
+        "note": "Third fully green CI matrix; topology-authority 4/4 for the sixth consecutive CI execution since the two harness fixes. PARTIAL / UNVERIFIED."
+      }
+    },
+    {
+      "id": "EV-02",
+      "constraint": {
+        "id": "SC-02",
+        "text": "mergeClusterState commits at most one Master per partition in its node map."
+      },
+      "title": "Bound committed master assignments",
+      "hazards": [
+        "H6"
+      ],
+      "ucas": [
+        "UCA-08",
+        "UCA-14"
+      ],
+      "implementation": "implemented",
+      "verification": "unverified",
+      "scenarios": [
+        "FSM and TCP registration update overlapping snapshots."
+      ],
+      "assumptions": [
+        "The claim applies to the committed map, not simultaneously serving flared processes or unmerged outgoing effects."
+      ],
+      "residual_risks": [
+        "Independent node maps, delivery loss and old leaders are outside this count property.",
+        "The property covers the committed map only. Before SAF-01 an outgoing snapshot could bypass it entirely; that path is removed, but any future send that does not read the committed state would be outside the proof again."
+      ],
+      "code": [
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/K8sReconciler.lean",
+          "symbol": "mergeClusterState"
+        },
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/K8sReconciler.lean",
+          "symbol": "demoteDuplicateMasters_atMostOne"
+        },
+        {
+          "path": "flare_operator/FlareOperator/Main.lean",
+          "symbol": "commitClusterState"
+        }
+      ],
+      "call_path": "runReconcileFSMLoop -> commitClusterState -> mergeClusterState -> demoteDuplicateMasters.",
+      "checks": [
+        {
+          "id": "CHECK-02",
+          "kind": "proof",
+          "procedure": "Elaborate the general commit/count proofs and review that production commits still use the proved functions; separately test outgoing snapshots.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/StateMachine/K8sReconciler.lean",
+              "symbol": "mergeClusterState_atMostOneMaster"
+            }
+          ]
+        }
+      ],
+      "runs": [
+        {
+          "check": "CHECK-02",
+          "commit": "76ce851e335408f1cf096435ab128bac8e5956c7",
+          "date": "2026-09-11",
+          "command": "cd flare_operator && lake build FlareOperator",
+          "result": "pass",
+          "report": "docs/reports/2026-09-11-proof-elaboration.txt"
+        }
+      ],
+      "tasks": [
+        "SAF-01",
+        "SAF-07",
+        "SAF-09"
+      ],
+      "review": {
+        "commit": "33205465691b0bf59dff1ad348ed810a5d20f24f",
+        "date": "2026-09-13",
+        "note": "Bridge.lean/Main.lean changed for the delete-outcome wording; commit/merge and broadcast untouched. No new evidence for SC-02."
+      }
+    },
+    {
+      "id": "EV-03",
+      "constraint": {
+        "id": "SC-03",
+        "text": "A replica with missed writes remains repair-pending until reconstruction completes and missing data is recovered."
+      },
+      "title": "Repair dropped replica writes",
+      "hazards": [
+        "H3",
+        "H2"
+      ],
+      "ucas": [
+        "UCA-02"
+      ],
+      "implementation": "partial",
+      "verification": "unverified",
+      "scenarios": [
+        "Drops during normal service, a drop while the gate is held, an unresolved destination, operator restart with the ledger persisted, a master counter reset, drops arriving after a repair's reconstruction began, a failed ledger save, and a corrupt/unreadable ledger at start."
+      ],
+      "assumptions": [
+        "Drop counters describe a source/destination incarnation (a counter that went down is a restart whose count is entirely new drops). flared keeps one completion RECORD per process — a random boot id, the latest reconstruction's id and state, and the id and source of the last success — so a completion can be tied to a process and a source; cumulative started/completed counters cannot (a failed handler leaves them unequal forever, a restart may reproduce their values)."
+      ],
+      "residual_risks": [
+        "A repair rebuilds the whole partition; there is no per-key repair.",
+        "Drops attributed after the reseat are requeued on completion; a drop in the LAST stretch of a live reconstruction is pinned by flare_unit, not staged end to end (a tiny dataset reconstructs within one pass).",
+        "The completion record is read over the stats channel; an unreadable record holds the entry (fail closed) rather than completing it.",
+        "A destination that became a MASTER while under repair is VOIDED, not repaired.",
+        "A write that keeps failing until a restart loses the unsaved delta; the window is one pass of retries, extended by however long the cause (e.g. a revoked RBAC grant) persists.",
+        "The operator announces an unsaved ledger ('marked unsaved and will retry every pass — an operator restart before that lands would lose ...') but a landing through the normal per-pass persist is silent, so the log does not show when that exposure ended (only the retry path logs 'persisted on retry'). Observability gap; follow-up proposed.",
+        "RBAC grant propagation: one local observation (2026-09-13) of ~131s before an impersonated `can-i` flipped after a restore; CI runs 6 and 8 saw the grant effective for the operator's own SA within seconds (in-pod probe). Earlier attributions of >2 minutes to the operator's path were harness artefacts (see the round-8 review note)."
+      ],
+      "code": [
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/ReplicaRepair.lean",
+          "symbol": "advanceEntry"
+        },
+        {
+          "path": "flare_operator/FlareOperator/Main.lean",
+          "symbol": "reconcileOnceFSM"
+        },
+        {
+          "path": "flare_operator/FlareOperator/Main.lean",
+          "symbol": "persistLedger"
+        },
+        {
+          "path": "flare_operator/FlareOperator/K8s/Bridge.lean",
+          "symbol": "readRepairLedger"
+        },
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/K8sReconciler.lean",
+          "symbol": "assignProxiesPure"
+        },
+        {
+          "path": "src/lib/handler_reconstruction.cc",
+          "symbol": "handler_reconstruction::run"
+        },
+        {
+          "path": "src/lib/queue_proxy_write.cc",
+          "symbol": "queue_proxy_write::run"
+        },
+        {
+          "path": "src/lib/stats.cc",
+          "symbol": "stats::increment_proxy_write_dropped"
+        }
+      ],
+      "call_path": "queue_proxy_write records destination drops -> stats proxy_write_dropped[dest] -> Main observe (only while the ledger is AVAILABLE; a partially corrupt ledger is unavailable, not smaller) -> ReplicaRepair ledger (persisted; dirty writes retried) -> demote to Proxy held out of assignment -> node confirms (boot id, current id, drops at reseat recorded) -> FSM re-seats Slave/Prepare -> flared reconstructs -> complete when the LATEST reconstruction SUCCEEDED from the current master and is newer than the reseat one in the same process, or in a new process (boot id changed); late drops requeued.",
+      "checks": [
+        {
+          "id": "CHECK-03",
+          "kind": "scenario",
+          "procedure": "Against real flared: cut master->slave traffic on the node (iptables REJECT), write keys, confirm the master counts proxy_write_dropped and the slave's LOCAL curr_items falls behind. Heal, then require REQUEST (log, status entry, metric), DEMOTE and HOLD, the node's CONFIRMATION, RE-SEAT and a reconstruction that began after it and finished (flared started/completed), COMPLETE, empty ledger, slave curr_items reaching the master's, no further drop. SAF-05: with FLARE_RESYNC_ON_DROP=0 the drop is HELD, survives an operator restart, and is repaired once the gate opens. Ledger faults: with the operator's write to flareclusters/status revoked, a new request is marked UNSAVED, retried each pass, absent from status, lands when the permission returns, and survives a restart; with status.replicaRepairs corrupted, the restarted operator reports the ledger UNAVAILABLE (never starts fresh), accounts no drop meanwhile, and once the ledger is repaired requests and recovers the drop seen during the outage.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/ReplicaRepair.lean",
+              "symbol": "suite"
+            },
+            {
+              "path": "flare_operator/FlareOperator/StateMachine/ReplicaRepair.lean",
+              "symbol": "Ledger"
+            }
+          ]
+        },
+        {
+          "id": "CHECK-03-unit",
+          "kind": "scenario",
+          "procedure": "flare_unit pins the ledger decisions on flared's completion record: release records boot id/current id/drops; a re-announced Active, a newer reconstruction still running, a newer one that FAILED, or a success from another source is NOT completion; a success newer than the reseat one completes; failure-then-success completes; a RESTART with identical counters completes because the boot id differs; a restart still running does not; late drops requeue exactly the increment; a partially corrupt ledger (missing masterKey, malformed counter, unknown phase, one bad among good) fails as a whole.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/UnitTests.lean",
+              "symbol": "checkAdvanceComplete"
+            }
+          ]
+        }
+      ],
+      "runs": [
+        {
+          "check": "CHECK-03-unit",
+          "commit": "bd8b213d791b3ce61f3cdee6c54474b1253c60c1",
+          "date": "2026-09-13",
+          "command": "cd flare_operator && lake build flare_unit && .lake/build/bin/flare_unit",
+          "result": "pass",
+          "report": "docs/reports/2026-09-13-flare-unit.txt"
+        },
+        {
+          "check": "CHECK-03",
+          "commit": "bd8b213d791b3ce61f3cdee6c54474b1253c60c1",
+          "date": "2026-09-13",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter replica-repair",
+          "result": "pass",
+          "report": "docs/reports/2026-09-13-replica-repair.txt"
+        },
+        {
+          "check": "CHECK-03-unit",
+          "commit": "cc30633dfad681828db477d299a42069c7ce4cea",
+          "date": "2026-09-13",
+          "command": "cd flare_operator && lake build flare_unit && .lake/build/bin/flare_unit",
+          "result": "pass",
+          "report": "docs/reports/2026-09-13-flare-unit-review.txt"
+        },
+        {
+          "check": "CHECK-03",
+          "commit": "cc30633dfad681828db477d299a42069c7ce4cea",
+          "date": "2026-09-13",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter topology-authority,replica-repair,prepare-evidence",
+          "result": "pass",
+          "report": "docs/reports/2026-09-13-integrated-e2e-review.txt"
+        },
+        {
+          "check": "CHECK-03-unit",
+          "commit": "b739277aa50553bf88336e5642e6b1ab21161a4e",
+          "date": "2026-09-13",
+          "command": "cd flare_operator && lake build flare_unit && .lake/build/bin/flare_unit",
+          "result": "pass",
+          "report": "docs/reports/2026-09-13-flare-unit-review2.txt"
+        },
+        {
+          "check": "CHECK-03",
+          "commit": "b739277aa50553bf88336e5642e6b1ab21161a4e",
+          "date": "2026-09-13",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter topology-authority,replica-repair,prepare-evidence",
+          "result": "pass",
+          "report": "docs/reports/2026-09-13-integrated-e2e-review2.txt"
+        },
+        {
+          "check": "CHECK-03",
+          "commit": "f7b68992643fb4a410e400d154572a7b982638ee",
+          "date": "2026-09-13",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter topology-authority,replica-repair,prepare-evidence",
+          "result": "pass",
+          "report": "docs/reports/2026-09-13-integrated-e2e-review3.txt"
+        },
+        {
+          "check": "CHECK-03",
+          "commit": "33205465691b0bf59dff1ad348ed810a5d20f24f",
+          "date": "2026-09-13",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter topology-authority,replica-repair,prepare-evidence",
+          "result": "pass",
+          "report": "docs/reports/2026-09-13-integrated-e2e-review4.txt"
+        },
+        {
+          "check": "CHECK-03",
+          "commit": "22fd1483ce76cdacd4ea6954f06dd324ab151219",
+          "date": "2026-09-14",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter replica-repair",
+          "result": "pass",
+          "report": "docs/reports/2026-09-14-replica-repair-final.txt"
+        },
+        {
+          "check": "CHECK-03",
+          "commit": "5e80d73c09385330c0ee897096bb86d28e32f728",
+          "date": "2026-09-14",
+          "command": "GitHub Actions e2e-tests.yaml, leg breaker-migration: timeout 4500 .lake/build/bin/flare_e2e --filter circuit-breaker,operator-restart,topology-authority,replica-repair,prepare-evidence,native-metrics,blue-green-migration (job re-run)",
+          "result": "fail",
+          "report": "docs/reports/2026-09-14-ci-e2e-breaker-migration-5e80d73-rerun-fail-replica-repair.txt"
+        },
+        {
+          "check": "CHECK-03",
+          "commit": "c825fc05f2dd0a61f8ff738d73690bf453567acf",
+          "date": "2026-09-14",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter replica-repair",
+          "result": "pass",
+          "report": "docs/reports/2026-09-14-replica-repair-final2.txt"
+        },
+        {
+          "check": "CHECK-03",
+          "commit": "c148c6c006fc7c5ae98939acfcc8270ccb48f960",
+          "date": "2026-09-14",
+          "command": "GitHub Actions e2e-tests.yaml (4 legs) on PR #143",
+          "result": "pass",
+          "report": "docs/reports/2026-09-14-ci-e2e-matrix-c148c6c-pass.txt"
+        },
+        {
+          "check": "CHECK-03",
+          "commit": "72e5ccaa48a6816d4825a8ab284d7aa7ae52bf12",
+          "date": "2026-09-14",
+          "command": "GitHub Actions e2e-tests.yaml, leg breaker-migration: timeout 4500 .lake/build/bin/flare_e2e --filter circuit-breaker,operator-restart,topology-authority,replica-repair,prepare-evidence,native-metrics,blue-green-migration",
+          "result": "fail",
+          "report": "docs/reports/2026-09-14-ci-e2e-breaker-migration-72e5cca-fail.txt"
+        },
+        {
+          "check": "CHECK-03",
+          "commit": "fab78d7e7d6896c2d40201583c481feca525c600",
+          "date": "2026-09-14",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter replica-repair",
+          "result": "pass",
+          "report": "docs/reports/2026-09-14-replica-repair-final3.txt"
+        },
+        {
+          "check": "CHECK-03",
+          "commit": "f7d327fd24fc9310c3f2c4f13a8b50ebb1956a14",
+          "date": "2026-09-16",
+          "command": "GitHub Actions e2e-tests.yaml (4 legs) on PR #143",
+          "result": "pass",
+          "report": "docs/reports/2026-09-16-ci-e2e-matrix-f7d327f-pass.txt"
+        },
+        {
+          "check": "CHECK-03",
+          "commit": "d185039c3fbe5e4099b7954371f2669e73ac8126",
+          "date": "2026-09-16",
+          "command": "GitHub Actions e2e-tests.yaml, leg breaker-migration: timeout 4500 .lake/build/bin/flare_e2e --filter circuit-breaker,operator-restart,topology-authority,replica-repair,prepare-evidence,native-metrics,blue-green-migration",
+          "result": "fail",
+          "report": "docs/reports/2026-09-16-ci-e2e-breaker-migration-d185039-fail.txt"
+        },
+        {
+          "check": "CHECK-03",
+          "commit": "27518a648c1601fb3e9dab9a1f3ca0f3399d0d4d",
+          "date": "2026-09-16",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter replica-repair",
+          "result": "pass",
+          "report": "docs/reports/2026-09-16-replica-repair-final4.txt"
+        },
+        {
+          "check": "CHECK-03",
+          "commit": "da840c084fd5f5fc1b0f023b597e6378b8ee3582",
+          "date": "2026-09-16",
+          "command": "GitHub Actions e2e-tests.yaml (4 legs) on PR #143",
+          "result": "pass",
+          "report": "docs/reports/2026-09-16-ci-e2e-matrix-da840c0-pass.txt"
+        }
+      ],
+      "tasks": [
+        "SAF-02",
+        "SAF-05",
+        "SAF-10"
+      ],
+      "review": {
+        "commit": "da840c084fd5f5fc1b0f023b597e6378b8ee3582",
+        "date": "2026-09-16",
+        "note": "Third fully green CI matrix, and the first CI execution of the outcome-based landing check in the SAF-05 save-failure test: the landing is judged by the entry being in status and the writing path is reported, so the silent per-pass persist that produced the run-5 and run-8 failures can no longer be read as a failure. The corrected RBAC account (a single local latency observation; no operator-side latency seen in CI) stands. PARTIAL / UNVERIFIED."
+      }
+    },
+    {
+      "id": "EV-04",
+      "constraint": {
+        "id": "SC-04",
+        "text": "Normal promotion and Prepare activation require a completed usable copy associated with the current source."
+      },
+      "title": "Require valid synchronization evidence",
+      "hazards": [
+        "H2",
+        "H4"
+      ],
+      "ucas": [
+        "UCA-10"
+      ],
+      "implementation": "partial",
+      "verification": "unverified",
+      "scenarios": [
+        "A Prepare slave whose activation was lost to an index-leader handover (reconstruction finished, operator still sees Prepare); a node with a PAST success that is now re-reconstructing (in flight); a RocksDB reply missing lineage or cursor (truncated); a zero cursor; a mismatched lineage; a cursor ahead of the head; a master or lineage change mid-observation; a fresh process."
+      ],
+      "assumptions": [
+        "flared exposes a per-process completion record in stats, read as ONE locked snapshot: reconstruction_boot_id (random per process), reconstruction_current_id/_state (latest handler), reconstruction_last_success_id/_source. Every notification carries the id the handler was given at begin(), so an older handler finishing after a newer one started cannot record the newer id as succeeded; last_success only advances and only the current handler's notification changes current_state. Activation requires the LATEST reconstruction to have succeeded from the current master. On RocksDB a completed reconstruction seeds a nonzero cursor and rocksdb_master_id identifies the source; the backend is told from a COMPLETE master reply."
+      ],
+      "residual_risks": [
+        "Covers Prepare ACTIVATION by the repair path only; promotion still trusts the Active designation (SAF-08).",
+        "On a backend that reports no lineage/cursor (complete reply, no rocksdb_ keys) a completion with none in flight is accepted; the vacuous-activation guard in reconcileStep still requires an Active master to have synced from.",
+        "The prepare-evidence E2E runs on the tch backend, so the RocksDB lineage/cursor requirement is pinned by flare_unit, not staged end to end."
+      ],
+      "code": [
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/SyncEvidence.lean",
+          "symbol": "judge"
+        },
+        {
+          "path": "flare_operator/FlareOperator/Main.lean",
+          "symbol": "reconcileOnceFSM"
+        },
+        {
+          "path": "flare_operator/FlareOperator/Server/TcpServer.lean",
+          "symbol": "handleConnection"
+        },
+        {
+          "path": "src/lib/handler_reconstruction.cc",
+          "symbol": "handler_reconstruction::run"
+        },
+        {
+          "path": "src/lib/stats.cc",
+          "symbol": "stats::reconstruction_succeeded_from"
+        }
+      ],
+      "call_path": "flared finishes reconstruction and calls activate_node; if the operator returned OK but did not persist it (leader handover) the node stays Prepare in the operator map. Main 4c builds a per-node episode, reads flared stats (reconstruction_completed, rocksdb_master_id, cursor + master head), SyncEvidence.judge requires a completed reconstruction bound to the current master's lineage with a sane cursor and unchanged source, and a positive verdict re-derives Prepare->Active through Reconciler.reconcileStep.",
+      "checks": [
+        {
+          "id": "CHECK-04",
+          "kind": "scenario",
+          "procedure": "Stage the lost activation with the TCP-server seam (FLARE_TEST_DROP_NODE_STATE) so the slave's reconstruction completes while the operator keeps it Prepare; assert the seam dropped an event and reconstruction_completed >= 1 (persistent signals), then that the repair activates on the NAMED evidence (N reconstruction(s) completed, none in flight; backend classification) and not on a cursor distance, applied through reconcileStep.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/PrepareEvidence.lean",
+              "symbol": "suite"
+            },
+            {
+              "path": "flare_operator/FlareOperator/StateMachine/SyncEvidence.lean",
+              "symbol": "judge"
+            }
+          ]
+        },
+        {
+          "id": "CHECK-04-unit",
+          "kind": "scenario",
+          "procedure": "flare_unit pins SyncEvidence.judge on the completion record: latest running / failed / aborted refused; success from another source refused; #0 refused; the first review's LSN-0 input refused (cursor not seeded); lineage mismatch, cursor ahead, missing RocksDB lineage/cursor, and an incomplete master reply refused; failure-then-success (#2 succeeded after #1 failed) and abort-then-success ACCEPTED; a new process's own success accepted; a far-behind seeded cursor accepted; non-RocksDB accepted on the record; a source change refused until a success from the new master with matching lineage.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/UnitTests.lean",
+              "symbol": "checkJudgeRefusals"
+            }
+          ]
+        },
+        {
+          "id": "CHECK-04-cpp",
+          "kind": "scenario",
+          "procedure": "cutter test_stats_reconstruction pins the record's id binding: A begins #1, B begins #2, A succeeds -> current #2 still running, last_success #1 (not #2); a late success of an older handler does not regress a newer one; an older handler's failure or abort does not change the current state; a current failure after an earlier success leaves last_success != current so a controller must not activate.",
+          "references": [
+            {
+              "path": "test/lib/test_stats_reconstruction.cc",
+              "symbol": "test_older_handler_success_does_not_claim_the_newer_id"
+            },
+            {
+              "path": "src/lib/stats.cc",
+              "symbol": "stats::reconstruction_succeeded_from"
+            }
+          ]
+        }
+      ],
+      "runs": [
+        {
+          "check": "CHECK-04-unit",
+          "commit": "bd8b213d791b3ce61f3cdee6c54474b1253c60c1",
+          "date": "2026-09-13",
+          "command": "cd flare_operator && lake build flare_unit && .lake/build/bin/flare_unit",
+          "result": "pass",
+          "report": "docs/reports/2026-09-13-flare-unit.txt"
+        },
+        {
+          "check": "CHECK-04",
+          "commit": "bd8b213d791b3ce61f3cdee6c54474b1253c60c1",
+          "date": "2026-09-13",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter prepare-evidence",
+          "result": "pass",
+          "report": "docs/reports/2026-09-13-prepare-evidence.txt"
+        },
+        {
+          "check": "CHECK-04-unit",
+          "commit": "cc30633dfad681828db477d299a42069c7ce4cea",
+          "date": "2026-09-13",
+          "command": "cd flare_operator && lake build flare_unit && .lake/build/bin/flare_unit",
+          "result": "pass",
+          "report": "docs/reports/2026-09-13-flare-unit-review.txt"
+        },
+        {
+          "check": "CHECK-04",
+          "commit": "cc30633dfad681828db477d299a42069c7ce4cea",
+          "date": "2026-09-13",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter topology-authority,replica-repair,prepare-evidence",
+          "result": "pass",
+          "report": "docs/reports/2026-09-13-integrated-e2e-review.txt"
+        },
+        {
+          "check": "CHECK-04-unit",
+          "commit": "b739277aa50553bf88336e5642e6b1ab21161a4e",
+          "date": "2026-09-13",
+          "command": "cd flare_operator && lake build flare_unit && .lake/build/bin/flare_unit",
+          "result": "pass",
+          "report": "docs/reports/2026-09-13-flare-unit-review2.txt"
+        },
+        {
+          "check": "CHECK-04",
+          "commit": "b739277aa50553bf88336e5642e6b1ab21161a4e",
+          "date": "2026-09-13",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter topology-authority,replica-repair,prepare-evidence",
+          "result": "pass",
+          "report": "docs/reports/2026-09-13-integrated-e2e-review2.txt"
+        },
+        {
+          "check": "CHECK-04-unit",
+          "commit": "f7b68992643fb4a410e400d154572a7b982638ee",
+          "date": "2026-09-13",
+          "command": "cd flare_operator && lake build flare_unit && .lake/build/bin/flare_unit",
+          "result": "pass",
+          "report": "docs/reports/2026-09-13-flare-unit-review3.txt"
+        },
+        {
+          "check": "CHECK-04",
+          "commit": "f7b68992643fb4a410e400d154572a7b982638ee",
+          "date": "2026-09-13",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter topology-authority,replica-repair,prepare-evidence",
+          "result": "pass",
+          "report": "docs/reports/2026-09-13-integrated-e2e-review3.txt"
+        },
+        {
+          "check": "CHECK-04-cpp",
+          "commit": "f7b68992643fb4a410e400d154572a7b982638ee",
+          "date": "2026-09-13",
+          "command": "nix build .#test-flare -L   # the flare derivation (nix/default.nix, doCheck) runs make check with cutter in test/lib, which includes test_stats_reconstruction",
+          "result": "pass",
+          "report": "docs/reports/2026-09-13-cutter-stats-reconstruction.txt"
+        },
+        {
+          "check": "CHECK-04",
+          "commit": "33205465691b0bf59dff1ad348ed810a5d20f24f",
+          "date": "2026-09-13",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter topology-authority,replica-repair,prepare-evidence",
+          "result": "pass",
+          "report": "docs/reports/2026-09-13-integrated-e2e-review4.txt"
+        },
+        {
+          "check": "CHECK-04",
+          "commit": "c148c6c006fc7c5ae98939acfcc8270ccb48f960",
+          "date": "2026-09-14",
+          "command": "GitHub Actions e2e-tests.yaml (4 legs) on PR #143",
+          "result": "pass",
+          "report": "docs/reports/2026-09-14-ci-e2e-matrix-c148c6c-pass.txt"
+        },
+        {
+          "check": "CHECK-04-cpp",
+          "commit": "c148c6c006fc7c5ae98939acfcc8270ccb48f960",
+          "date": "2026-09-14",
+          "command": "GitHub Actions nix-linux.yml 'Test Legacy Build' — nix flare derivation make check (cutter, includes test_stats_reconstruction)",
+          "result": "pass",
+          "report": "docs/reports/2026-09-14-ci-e2e-matrix-c148c6c-pass.txt"
+        },
+        {
+          "check": "CHECK-04",
+          "commit": "f7d327fd24fc9310c3f2c4f13a8b50ebb1956a14",
+          "date": "2026-09-16",
+          "command": "GitHub Actions e2e-tests.yaml (4 legs) on PR #143",
+          "result": "pass",
+          "report": "docs/reports/2026-09-16-ci-e2e-matrix-f7d327f-pass.txt"
+        },
+        {
+          "check": "CHECK-04-cpp",
+          "commit": "f7d327fd24fc9310c3f2c4f13a8b50ebb1956a14",
+          "date": "2026-09-16",
+          "command": "GitHub Actions nix-linux.yml 'Test Legacy Build' — nix flare derivation make check (cutter, includes test_stats_reconstruction)",
+          "result": "pass",
+          "report": "docs/reports/2026-09-16-ci-e2e-matrix-f7d327f-pass.txt"
+        },
+        {
+          "check": "CHECK-04",
+          "commit": "da840c084fd5f5fc1b0f023b597e6378b8ee3582",
+          "date": "2026-09-16",
+          "command": "GitHub Actions e2e-tests.yaml (4 legs) on PR #143",
+          "result": "pass",
+          "report": "docs/reports/2026-09-16-ci-e2e-matrix-da840c0-pass.txt"
+        },
+        {
+          "check": "CHECK-04-cpp",
+          "commit": "da840c084fd5f5fc1b0f023b597e6378b8ee3582",
+          "date": "2026-09-16",
+          "command": "GitHub Actions nix-linux.yml 'Test Legacy Build' — nix flare derivation make check (cutter, includes test_stats_reconstruction)",
+          "result": "pass",
+          "report": "docs/reports/2026-09-16-ci-e2e-matrix-da840c0-pass.txt"
+        }
+      ],
+      "tasks": [
+        "SAF-03",
+        "SAF-07",
+        "SAF-08"
+      ],
+      "review": {
+        "commit": "da840c084fd5f5fc1b0f023b597e6378b8ee3582",
+        "date": "2026-09-16",
+        "note": "Third fully green CI matrix; prepare-evidence 2/2 and the cutter completion-record test executed again in nix-linux. PARTIAL / UNVERIFIED."
+      }
+    },
+    {
+      "id": "EV-05",
+      "constraint": {
+        "id": "SC-05",
+        "text": "Delete only a revalidated target when independent current evidence supports the surviving copy."
+      },
+      "title": "Protect copies before deleting Pods",
+      "hazards": [
+        "H5",
+        "H2"
+      ],
+      "ucas": [
+        "UCA-07",
+        "UCA-11",
+        "UCA-12",
+        "UCA-13"
+      ],
+      "implementation": "partial",
+      "verification": "unverified",
+      "scenarios": [
+        "An empty-master candidate whose stats are missing/truncated (must not read as empty); a successor demoted by a resync between observation and delete; the target pod replaced under the same name; the operator losing its lease before the delete."
+      ],
+      "assumptions": [
+        "curr_items is local storage; a stats reply with no well-formed curr_items line carries no information. A StatefulSet reuses a pod NAME for a replacement, so identity is the pod UID. The leader lease is the operator's authority to act."
+      ],
+      "residual_risks": [
+        "Graceful deletion still does not guarantee a successful handoff; the drain guard protects a master with no promotable successor.",
+        "The successor/lease revalidation and the delete are not one atomic step; the pod-identity hole is closed by the API precondition, a successor demoted in the instant after the gate remains a window.",
+        "The direct-API delete is bounded (connect 3s, total 10s, outer wall 20s + 5s kill grace, ~25s worst case). A timeout or transport failure is an UNKNOWN deletion outcome — the API may have accepted the delete and only the reply was lost — and is reported as such; the caller keeps the streak and re-observes the pod on the next probe rather than assuming 'not deleted' or retrying blindly.",
+        "A live empty master with a data-bearing successor and an interposed change is not staged end to end; the gate is unit-pinned, the precondition and the deadline are staged by E2E against a replaced pod and a black-hole server."
+      ],
+      "code": [
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/StatsObservation.lean",
+          "symbol": "deleteGate"
+        },
+        {
+          "path": "flare_operator/FlareOperator/Main.lean",
+          "symbol": "reconcileOnceFSM"
+        },
+        {
+          "path": "flare_operator/FlareOperator/K8s/Bridge.lean",
+          "symbol": "deletePodWithUidPrecondition"
+        }
+      ],
+      "call_path": "Main 4d probes master/slave curr_items -> parseCurrItems -> emptyMasterVerdict -> streak >= 3 -> REVALIDATE: pod UID, fresh stats, UID again, live map AFTER the stats, leader lease -> deleteGate -> Bridge.deletePodWithUidPrecondition: DELETE with DeleteOptions.preconditions.uid = the observed UID, refused by the apiserver (409) if another pod holds the name -> drain path.",
+      "checks": [
+        {
+          "id": "CHECK-05",
+          "kind": "scenario",
+          "procedure": "Malformed/empty/truncated stats must not delete a master; act only on a confirmed empty master with a confirmed data-bearing successor; revalidate stats, then the live map, then the lease, with the target UID stable across the observation; the delete carries the observed UID as an API-side precondition. E2E (replica-repair test 7) runs the operator's exact delete command inside the operator pod: accepted (200/202) for the matching UID, and refused (409) for a same-name replacement with another UID, which survives. Deadline (test 12): the same command aimed at a server that ACCEPTS the connection — proved server-side by the bytes the black hole received — and never answers ends by curl's TIMEOUT (exit 28) within the deadline; a refused connection (exit 7) does not pass this test, and the caller is told the outcome is unknown, not 'not deleted'.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/StateMachine/StatsObservation.lean",
+              "symbol": "deleteGate"
+            },
+            {
+              "path": "flare_operator/FlareOperator/K8s/Bridge.lean",
+              "symbol": "uidPreconditionDeleteCommand"
+            },
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/ReplicaRepair.lean",
+              "symbol": "suite"
+            }
+          ]
+        },
+        {
+          "id": "CHECK-05-unit",
+          "kind": "scenario",
+          "procedure": "flare_unit pins parseCurrItems (blank/missing/non-numeric are unknown, genuine 0 is known 0), emptyMasterVerdict (act only on known-0 + known data-bearing), successorStillValid (invalid when not data-bearing, demoted to Proxy, or the target is no longer an Active master), and deleteGate (refuses when the OPERATOR lost its lease, the pod UID changed, the successor is invalid on the post-read map, or the fresh verdict is skip).",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/UnitTests.lean",
+              "symbol": "checkDeleteGate"
+            }
+          ]
+        }
+      ],
+      "runs": [
+        {
+          "check": "CHECK-05-unit",
+          "commit": "bd8b213d791b3ce61f3cdee6c54474b1253c60c1",
+          "date": "2026-09-13",
+          "command": "cd flare_operator && lake build flare_unit && .lake/build/bin/flare_unit",
+          "result": "pass",
+          "report": "docs/reports/2026-09-13-flare-unit.txt"
+        },
+        {
+          "check": "CHECK-05-unit",
+          "commit": "cc30633dfad681828db477d299a42069c7ce4cea",
+          "date": "2026-09-13",
+          "command": "cd flare_operator && lake build flare_unit && .lake/build/bin/flare_unit",
+          "result": "pass",
+          "report": "docs/reports/2026-09-13-flare-unit-review.txt"
+        },
+        {
+          "check": "CHECK-05-unit",
+          "commit": "b739277aa50553bf88336e5642e6b1ab21161a4e",
+          "date": "2026-09-13",
+          "command": "cd flare_operator && lake build flare_unit && .lake/build/bin/flare_unit",
+          "result": "pass",
+          "report": "docs/reports/2026-09-13-flare-unit-review2.txt"
+        },
+        {
+          "check": "CHECK-05",
+          "commit": "b739277aa50553bf88336e5642e6b1ab21161a4e",
+          "date": "2026-09-13",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter topology-authority,replica-repair,prepare-evidence",
+          "result": "pass",
+          "report": "docs/reports/2026-09-13-integrated-e2e-review2.txt"
+        },
+        {
+          "check": "CHECK-05-unit",
+          "commit": "f7b68992643fb4a410e400d154572a7b982638ee",
+          "date": "2026-09-13",
+          "command": "cd flare_operator && lake build flare_unit && .lake/build/bin/flare_unit",
+          "result": "pass",
+          "report": "docs/reports/2026-09-13-flare-unit-review3.txt"
+        },
+        {
+          "check": "CHECK-05",
+          "commit": "f7b68992643fb4a410e400d154572a7b982638ee",
+          "date": "2026-09-13",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter topology-authority,replica-repair,prepare-evidence",
+          "result": "pass",
+          "report": "docs/reports/2026-09-13-integrated-e2e-review3.txt"
+        },
+        {
+          "check": "CHECK-05-unit",
+          "commit": "33205465691b0bf59dff1ad348ed810a5d20f24f",
+          "date": "2026-09-13",
+          "command": "cd flare_operator && lake build flare_unit && .lake/build/bin/flare_unit",
+          "result": "pass",
+          "report": "docs/reports/2026-09-13-flare-unit-review4.txt"
+        },
+        {
+          "check": "CHECK-05",
+          "commit": "33205465691b0bf59dff1ad348ed810a5d20f24f",
+          "date": "2026-09-13",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter topology-authority,replica-repair,prepare-evidence",
+          "result": "pass",
+          "report": "docs/reports/2026-09-13-integrated-e2e-review4.txt"
+        },
+        {
+          "check": "CHECK-05",
+          "commit": "22fd1483ce76cdacd4ea6954f06dd324ab151219",
+          "date": "2026-09-14",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter replica-repair",
+          "result": "pass",
+          "report": "docs/reports/2026-09-14-replica-repair-final.txt"
+        },
+        {
+          "check": "CHECK-05",
+          "commit": "5e80d73c09385330c0ee897096bb86d28e32f728",
+          "date": "2026-09-14",
+          "command": "GitHub Actions e2e-tests.yaml, leg breaker-migration: timeout 4500 .lake/build/bin/flare_e2e --filter circuit-breaker,operator-restart,topology-authority,replica-repair,prepare-evidence,native-metrics,blue-green-migration (job re-run)",
+          "result": "fail",
+          "report": "docs/reports/2026-09-14-ci-e2e-breaker-migration-5e80d73-rerun-fail-replica-repair.txt"
+        },
+        {
+          "check": "CHECK-05",
+          "commit": "c825fc05f2dd0a61f8ff738d73690bf453567acf",
+          "date": "2026-09-14",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter replica-repair",
+          "result": "pass",
+          "report": "docs/reports/2026-09-14-replica-repair-final2.txt"
+        },
+        {
+          "check": "CHECK-05",
+          "commit": "c148c6c006fc7c5ae98939acfcc8270ccb48f960",
+          "date": "2026-09-14",
+          "command": "GitHub Actions e2e-tests.yaml (4 legs) on PR #143",
+          "result": "pass",
+          "report": "docs/reports/2026-09-14-ci-e2e-matrix-c148c6c-pass.txt"
+        },
+        {
+          "check": "CHECK-05",
+          "commit": "72e5ccaa48a6816d4825a8ab284d7aa7ae52bf12",
+          "date": "2026-09-14",
+          "command": "GitHub Actions e2e-tests.yaml, leg breaker-migration: timeout 4500 .lake/build/bin/flare_e2e --filter circuit-breaker,operator-restart,topology-authority,replica-repair,prepare-evidence,native-metrics,blue-green-migration",
+          "result": "fail",
+          "report": "docs/reports/2026-09-14-ci-e2e-breaker-migration-72e5cca-fail.txt"
+        },
+        {
+          "check": "CHECK-05",
+          "commit": "fab78d7e7d6896c2d40201583c481feca525c600",
+          "date": "2026-09-14",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter replica-repair",
+          "result": "pass",
+          "report": "docs/reports/2026-09-14-replica-repair-final3.txt"
+        },
+        {
+          "check": "CHECK-05",
+          "commit": "f7d327fd24fc9310c3f2c4f13a8b50ebb1956a14",
+          "date": "2026-09-16",
+          "command": "GitHub Actions e2e-tests.yaml (4 legs) on PR #143",
+          "result": "pass",
+          "report": "docs/reports/2026-09-16-ci-e2e-matrix-f7d327f-pass.txt"
+        },
+        {
+          "check": "CHECK-05",
+          "commit": "d185039c3fbe5e4099b7954371f2669e73ac8126",
+          "date": "2026-09-16",
+          "command": "GitHub Actions e2e-tests.yaml, leg breaker-migration: timeout 4500 .lake/build/bin/flare_e2e --filter circuit-breaker,operator-restart,topology-authority,replica-repair,prepare-evidence,native-metrics,blue-green-migration",
+          "result": "fail",
+          "report": "docs/reports/2026-09-16-ci-e2e-breaker-migration-d185039-fail.txt"
+        },
+        {
+          "check": "CHECK-05",
+          "commit": "27518a648c1601fb3e9dab9a1f3ca0f3399d0d4d",
+          "date": "2026-09-16",
+          "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter replica-repair",
+          "result": "pass",
+          "report": "docs/reports/2026-09-16-replica-repair-final4.txt"
+        },
+        {
+          "check": "CHECK-05",
+          "commit": "da840c084fd5f5fc1b0f023b597e6378b8ee3582",
+          "date": "2026-09-16",
+          "command": "GitHub Actions e2e-tests.yaml (4 legs) on PR #143",
+          "result": "pass",
+          "report": "docs/reports/2026-09-16-ci-e2e-matrix-da840c0-pass.txt"
+        }
+      ],
+      "tasks": [
+        "SAF-04",
+        "SAF-06",
+        "SAF-08"
+      ],
+      "review": {
+        "commit": "da840c084fd5f5fc1b0f023b597e6378b8ee3582",
+        "date": "2026-09-16",
+        "note": "Third fully green CI matrix; replica-repair 8/8 including the UID precondition and the bounded delete. PARTIAL / UNVERIFIED."
+      }
+    },
+    {
+      "id": "EV-06",
+      "constraint": {
+        "id": "SC-06",
+        "text": "Refill missing masters under an explicit emergency policy, with partial-copy promotion distinguished from normal successor promotion."
+      },
+      "title": "Make emergency refill tradeoffs explicit",
+      "hazards": [
+        "H1",
+        "H2",
+        "H5"
+      ],
+      "ucas": [
+        "UCA-04",
+        "UCA-07",
+        "UCA-09",
+        "UCA-10"
+      ],
+      "implementation": "partial",
+      "verification": "unverified",
+      "scenarios": [
+        "All copies restart; only a Prepare copy remains; probes fail or return empty data."
+      ],
+      "assumptions": [
+        "Availability may deliberately be chosen over completeness; data-bearing means nonzero count, not a complete or newest copy."
+      ],
+      "residual_risks": [
+        "Active candidates lack a data check; absent data-bearing observations fall back; Prepare partial copies can become authoritative."
+      ],
+      "code": [
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/K8sReconciler.lean",
+          "symbol": "promoteMasterlessPartition"
+        },
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/K8sReconciler.lean",
+          "symbol": "handleFailoverWithPromotionSingleKey"
+        },
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/Reconciler.lean",
+          "symbol": "reconcileStep"
+        },
+        {
+          "path": "flare_operator/FlareOperator/K8s/Bridge.lean",
+          "symbol": "dataBearingPodKeys"
+        }
+      ],
+      "call_path": "NodeAdd rejoin -> Slave/Prepare; FSM failover/RecoveryRefill -> promoteMasterlessPartitions -> promoteMasterlessPartition.",
+      "checks": [
+        {
+          "id": "CHECK-06",
+          "kind": "scenario",
+          "procedure": "Cover total restart, known empty vs unknown, surviving Active and Prepare copies; document expected loss/availability policy. Referenced suites are starting points to extend, not evidence that this scenario is already covered.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/PvcDataSurvival.lean",
+              "symbol": "suite"
+            },
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/DataSurvivalFailover.lean",
+              "symbol": "suite"
+            }
+          ]
+        }
+      ],
+      "runs": [],
+      "tasks": [
+        "SAF-07"
+      ],
+      "review": {
+        "commit": "33205465691b0bf59dff1ad348ed810a5d20f24f",
+        "date": "2026-09-13",
+        "note": "Main.lean/Bridge.lean changed only in the empty-master delete's failure wording (unknown outcome); this control's mechanism is untouched. Refreshed for the referenced-file check."
+      }
+    },
+    {
+      "id": "EV-07",
+      "constraint": {
+        "id": "SC-07",
+        "text": "Use Pod existence/readiness streaks with guards, retaining an unhealthy lone master rather than stripping its assignment."
+      },
+      "title": "Use qualified failure observations",
+      "hazards": [
+        "H1",
+        "H4",
+        "H5"
+      ],
+      "ucas": [
+        "UCA-01",
+        "UCA-03",
+        "UCA-05",
+        "UCA-12"
+      ],
+      "implementation": "partial",
+      "verification": "unverified",
+      "scenarios": [
+        "Pod disappears, CrashLoopBackOff, process hang with listening socket, correlated worker failure."
+      ],
+      "assumptions": [
+        "Kubernetes observations can lag; unknown input must not become an empty Pod list; readiness is partly circular."
+      ],
+      "residual_risks": [
+        "Parallel string lists conflate observations; nodeName is unused; Ready does not prove data health."
+      ],
+      "code": [
+        {
+          "path": "flare_operator/FlareOperator/Main.lean",
+          "symbol": "executeK8sRequest"
+        },
+        {
+          "path": "flare_operator/FlareOperator/K8s/Bridge.lean",
+          "symbol": "listFlaredPodsE"
+        },
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/K8sReconciler.lean",
+          "symbol": "detectDeadNodesPure"
+        },
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/K8sReconciler.lean",
+          "symbol": "unhealthyMastersKept"
+        }
+      ],
+      "call_path": "ListPods -> executeK8sRequest -> PodListResponse -> detectDeadNodesPure -> unhealthyMastersKept -> failover.",
+      "checks": [
+        {
+          "id": "CHECK-07",
+          "kind": "scenario",
+          "procedure": "Exercise missing pods, sustained NotReady, failed API listing, lone unhealthy master and multiple pods on a lost worker. Referenced suites are starting points to extend, not evidence that this scenario is already covered.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/Failover.lean",
+              "symbol": "suite"
+            },
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/CircuitBreaker.lean",
+              "symbol": "suite"
+            }
+          ]
+        }
+      ],
+      "runs": [],
+      "tasks": [
+        "SAF-08"
+      ],
+      "review": {
+        "commit": "33205465691b0bf59dff1ad348ed810a5d20f24f",
+        "date": "2026-09-13",
+        "note": "Main.lean/Bridge.lean changed only in the empty-master delete's failure wording (unknown outcome); this control's mechanism is untouched. Refreshed for the referenced-file check."
+      }
+    },
+    {
+      "id": "EV-08",
+      "constraint": {
+        "id": "SC-08",
+        "text": "The pure drain transform retains a master assignment if there is no Active slave successor."
+      },
+      "title": "Keep drain assignments without a successor",
+      "hazards": [
+        "H1",
+        "H5"
+      ],
+      "ucas": [
+        "UCA-04",
+        "UCA-05"
+      ],
+      "implementation": "implemented",
+      "verification": "unverified",
+      "scenarios": [
+        "Terminating master with only Prepare slaves, or its sole slave drained first."
+      ],
+      "assumptions": [
+        "The bound is on the transform, not on data completeness or Pod survival through its termination grace period."
+      ],
+      "residual_risks": [
+        "External deletion still finishes; an Active successor may be stale and delivery may fail."
+      ],
+      "code": [
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/K8sReconciler.lean",
+          "symbol": "handleDrainWithPromotionSingleKey"
+        },
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/K8sReconciler.lean",
+          "symbol": "findActiveSuccessor"
+        },
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/K8sReconciler.lean",
+          "symbol": "drainBlockedKeys"
+        },
+        {
+          "path": "helm/flare-operator/templates/prometheusrule.yaml",
+          "symbol": "FlareDrainNoSuccessor"
+        }
+      ],
+      "call_path": "detectDrainingNodesPure -> handleDrainWithPromotion -> drainBlockedKeys -> Main drainNoSuccessor metric.",
+      "checks": [
+        {
+          "id": "CHECK-08",
+          "kind": "scenario",
+          "procedure": "Test no successor, Prepare-only successor and both drain orders; assert the master remains assigned and the blocked signal is raised. Referenced suites are starting points to extend, not evidence that this scenario is already covered.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/TerminatingPodHandling.lean",
+              "symbol": "suite"
+            }
+          ]
+        }
+      ],
+      "runs": [],
+      "tasks": [],
+      "review": {
+        "commit": "cc30633dfad681828db477d299a42069c7ce4cea",
+        "date": "2026-09-13",
+        "note": "Referenced files changed for the review fixes; the drain guard is untouched. Refreshed for the referenced-file check."
+      }
+    },
+    {
+      "id": "EV-09",
+      "constraint": {
+        "id": "SC-09",
+        "text": "Circuit-breaker policy pauses mass failover; configured recovery refill is a separate path."
+      },
+      "title": "Limit mass-failure changes",
+      "hazards": [
+        "H1",
+        "H5"
+      ],
+      "ucas": [
+        "UCA-03"
+      ],
+      "implementation": "partial",
+      "verification": "unverified",
+      "scenarios": [
+        "Many Active nodes become dead candidates; hysteresis holds; auto-reset disabled."
+      ],
+      "assumptions": [
+        "Breaker thresholds use observed Active/dead population, not actual data health."
+      ],
+      "residual_risks": [
+        "Correlated worker faults are not modeled explicitly; autoResetEnabled=false parks refill.",
+        "FINDING (2026-09-14, pre-existing, not changed by this branch): detectDeadNodesPure excludes nodes already Down and nodes in Prepare, so circuitBreakerDecision's deadCount is the number of nodes that became dead in THIS tick against the whole map; the 50% trip needs half the cluster to vanish inside one 5s tick. Deaths that straddle ticks (25% + 25% on a 4-node cluster) never trip and failover proceeds one node at a time. A pod-less node left in Prepare is never counted dead. Seen once in CI (third run at 5e80d73, no trip in 480s, steady M=2 S=0 D=2 P=1 with the map version advancing +7 per tick); the same leg tripped at 10-15s in three other runs and locally. Whether the breaker should count the cluster's dead fraction (Down included) is a design change outside SAF-01..07; not fixed here."
+      ],
+      "code": [
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/K8sReconciler.lean",
+          "symbol": "flareReconcileCore"
+        },
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/K8sReconciler.lean",
+          "symbol": "emergencyPaused_inert"
+        },
+        {
+          "path": "flare_operator/FlareOperator/E2E/Tests/CircuitBreaker.lean",
+          "symbol": "suite"
+        }
+      ],
+      "call_path": "AfterDetectDead computes breaker state -> EmergencyPaused or RecoveryRefill; trippedRef carries hysteresis.",
+      "checks": [
+        {
+          "id": "CHECK-09",
+          "kind": "scenario",
+          "procedure": "Run breaker scenarios including auto-reset disabled and recovery refill; confirm no unintended mass demotion. Referenced suites are starting points to extend, not evidence that this scenario is already covered.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/CircuitBreaker.lean",
+              "symbol": "suite"
+            }
+          ]
+        }
+      ],
+      "runs": [
+        {
+          "check": "CHECK-09",
+          "commit": "5e80d73c09385330c0ee897096bb86d28e32f728",
+          "date": "2026-09-14",
+          "command": "GitHub Actions e2e-tests.yaml, leg breaker-migration: timeout 4500 .lake/build/bin/flare_e2e --filter circuit-breaker,operator-restart,topology-authority,replica-repair,prepare-evidence,native-metrics,blue-green-migration",
+          "result": "fail",
+          "report": "docs/reports/2026-09-14-ci-e2e-breaker-migration-5e80d73-fail-circuit-breaker.txt"
+        },
+        {
+          "check": "CHECK-09",
+          "commit": "5e80d73c09385330c0ee897096bb86d28e32f728",
+          "date": "2026-09-14",
+          "command": "GitHub Actions e2e-tests.yaml, leg breaker-migration: timeout 4500 .lake/build/bin/flare_e2e --filter circuit-breaker,operator-restart,topology-authority,replica-repair,prepare-evidence,native-metrics,blue-green-migration (job re-run)",
+          "result": "pass",
+          "report": "docs/reports/2026-09-14-ci-e2e-breaker-migration-5e80d73-rerun-fail-replica-repair.txt"
+        },
+        {
+          "check": "CHECK-09",
+          "commit": "c148c6c006fc7c5ae98939acfcc8270ccb48f960",
+          "date": "2026-09-14",
+          "command": "GitHub Actions e2e-tests.yaml (4 legs) on PR #143",
+          "result": "pass",
+          "report": "docs/reports/2026-09-14-ci-e2e-matrix-c148c6c-pass.txt"
+        },
+        {
+          "check": "CHECK-09",
+          "commit": "72e5ccaa48a6816d4825a8ab284d7aa7ae52bf12",
+          "date": "2026-09-14",
+          "command": "GitHub Actions e2e-tests.yaml, leg breaker-migration: timeout 4500 .lake/build/bin/flare_e2e --filter circuit-breaker,operator-restart,topology-authority,replica-repair,prepare-evidence,native-metrics,blue-green-migration",
+          "result": "fail",
+          "report": "docs/reports/2026-09-14-ci-e2e-breaker-migration-72e5cca-fail.txt"
+        },
+        {
+          "check": "CHECK-09",
+          "commit": "f7d327fd24fc9310c3f2c4f13a8b50ebb1956a14",
+          "date": "2026-09-16",
+          "command": "GitHub Actions e2e-tests.yaml (4 legs) on PR #143",
+          "result": "pass",
+          "report": "docs/reports/2026-09-16-ci-e2e-matrix-f7d327f-pass.txt"
+        },
+        {
+          "check": "CHECK-09",
+          "commit": "d185039c3fbe5e4099b7954371f2669e73ac8126",
+          "date": "2026-09-16",
+          "command": "GitHub Actions e2e-tests.yaml, leg breaker-migration: timeout 4500 .lake/build/bin/flare_e2e --filter circuit-breaker,operator-restart,topology-authority,replica-repair,prepare-evidence,native-metrics,blue-green-migration",
+          "result": "pass",
+          "report": "docs/reports/2026-09-16-ci-e2e-breaker-migration-d185039-fail.txt"
+        },
+        {
+          "check": "CHECK-09",
+          "commit": "da840c084fd5f5fc1b0f023b597e6378b8ee3582",
+          "date": "2026-09-16",
+          "command": "GitHub Actions e2e-tests.yaml (4 legs) on PR #143",
+          "result": "pass",
+          "report": "docs/reports/2026-09-16-ci-e2e-matrix-da840c0-pass.txt"
+        }
+      ],
+      "tasks": [],
+      "review": {
+        "commit": "da840c084fd5f5fc1b0f023b597e6378b8ee3582",
+        "date": "2026-09-16",
+        "note": "First execution evidence for this control, from the PR #143 CI matrix: the circuit-breaker E2E failed once (no trip in 480s) and passed on re-run at the same revision. Root cause read from the code (see residual_risks): the trip counts newly-dead nodes per tick, not the dead fraction, so it is timing-dependent; this predates the branch (52d409e, 2026-07-03) and the branch's K8sReconciler.lean changes do not touch dead detection or the breaker. The implementation stays PARTIAL and the control UNVERIFIED; one fail and one pass at the same revision is not verification. A follow-up task is proposed, not filed, pending the reviewer's decision on scope. Fourth run at c148c6c tripped normally (37/37); the finding stands — the trip is timing-dependent by construction, one green run does not remove it. PARTIAL / UNVERIFIED. Run 5 at 72e5cca did not trip again: 2 of 6 executions on this PR failed to trip within 480s (the other four tripped in 5-15s), all on an unchanged operator image — consistent with the per-tick counting finding, and enough to call the E2E's proof of SC-09 timing-dependent rather than a flake. PARTIAL / UNVERIFIED. Run 6 at f7d327f tripped after 20s: tally on this PR 5 tripped / 2 did not, unchanged operator image. PARTIAL / UNVERIFIED. Tally on this PR after run 9: 7 tripped / 2 did not, unchanged operator image. The finding is unchanged and is now filed as task SAF-11. PARTIAL / UNVERIFIED."
+      }
+    },
+    {
+      "id": "EV-10",
+      "constraint": {
+        "id": "SC-10",
+        "text": "Restart a stuck Proxy/Down only when current safety evidence permits deleting its copy."
+      },
+      "title": "Recover stuck Down without losing data",
+      "hazards": [
+        "H4",
+        "H5"
+      ],
+      "ucas": [
+        "UCA-06",
+        "UCA-11"
+      ],
+      "implementation": "partial",
+      "verification": "unverified",
+      "scenarios": [
+        "A live process remains Down; terminating pod remains on an unreachable worker."
+      ],
+      "assumptions": [
+        "One-per-tick deletion and mapped Active masters are preliminary gates, not evidence of a usable surviving copy."
+      ],
+      "residual_risks": [
+        "Deletion gates share stale-state/data-validity weaknesses with empty-master repair."
+      ],
+      "code": [
+        {
+          "path": "flare_operator/FlareOperator/Main.lean",
+          "symbol": "reconcileOnceFSM"
+        },
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/K8sReconciler.lean",
+          "symbol": "assignProxiesPure"
+        },
+        {
+          "path": "flare_operator/FlareOperator/K8s/Bridge.lean",
+          "symbol": "deletePodGraceful"
+        }
+      ],
+      "call_path": "Main 4e counts present non-terminating Down pods -> podDeletionAllowed -> graceful deletion -> NodeAdd rejoin.",
+      "checks": [
+        {
+          "id": "CHECK-10",
+          "kind": "scenario",
+          "procedure": "Keep unsafe or terminating copies; restart only eligible stuck Down pods and verify data after rejoin. Referenced suites are starting points to extend, not evidence that this scenario is already covered.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/TerminatingPodHandling.lean",
+              "symbol": "suite"
+            }
+          ]
+        }
+      ],
+      "runs": [],
+      "tasks": [
+        "SAF-04",
+        "SAF-06"
+      ],
+      "review": {
+        "commit": "33205465691b0bf59dff1ad348ed810a5d20f24f",
+        "date": "2026-09-13",
+        "note": "Main.lean/Bridge.lean changed only in the empty-master delete's failure wording (unknown outcome); this control's mechanism is untouched. Refreshed for the referenced-file check."
+      }
+    },
+    {
+      "id": "EV-11",
+      "constraint": {
+        "id": "SC-11",
+        "text": "Expose masterless, unhealthy, unreachable, drain-blocked and resync-failure signals; reachability loss alone does not cause failover."
+      },
+      "title": "Detect failures without inventing recovery",
+      "hazards": [
+        "H1",
+        "H3",
+        "H4",
+        "H5"
+      ],
+      "ucas": [
+        "UCA-01",
+        "UCA-02",
+        "UCA-06",
+        "UCA-09",
+        "UCA-17"
+      ],
+      "implementation": "partial",
+      "verification": "unverified",
+      "scenarios": [
+        "Kept unhealthy master; operator-only network partition; repeated flared resync failure."
+      ],
+      "assumptions": [
+        "Chart rules must be enabled, scraped and routed in the deployment for an operational alert claim."
+      ],
+      "residual_risks": [
+        "No deployment/run evidence is archived here; flared request_down_node cannot self-demote through the absent flarei controller."
+      ],
+      "code": [
+        {
+          "path": "flare_operator/FlareOperator/Main.lean",
+          "symbol": "reconcileOnceFSM"
+        },
+        {
+          "path": "helm/flare-operator/templates/prometheusrule.yaml",
+          "symbol": "FlareMasterMissing"
+        },
+        {
+          "path": "helm/flare-operator/templates/prometheusrule.yaml",
+          "symbol": "FlareResyncFailing"
+        },
+        {
+          "path": "flare_operator/FlareOperator/Server/TcpClient.lean",
+          "symbol": "probeNodeReachable"
+        },
+        {
+          "path": "src/lib/handler_reconstruction.cc",
+          "symbol": "request_down_node"
+        }
+      ],
+      "call_path": "Main observations and flared stats -> metrics -> chart Prometheus rules -> deployment-specific routing; probe failures are alert-only.",
+      "checks": [
+        {
+          "id": "CHECK-11",
+          "kind": "scenario",
+          "procedure": "Assert per-partition masterless and retained-master alerts, operator partition behavior and actual routed alert receipt. Treat self-demotion test skips as missing evidence. Referenced suites are starting points to extend, not evidence that this scenario is already covered.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/NativeMetrics.lean",
+              "symbol": "suite"
+            },
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/ResyncFailureSelfDemote.lean",
+              "symbol": "suite"
+            }
+          ]
+        }
+      ],
+      "runs": [],
+      "tasks": [],
+      "review": {
+        "commit": "33205465691b0bf59dff1ad348ed810a5d20f24f",
+        "date": "2026-09-13",
+        "note": "Main.lean/Bridge.lean changed only in the empty-master delete's failure wording (unknown outcome); this control's mechanism is untouched. Refreshed for the referenced-file check."
+      }
+    },
+    {
+      "id": "EV-12",
+      "constraint": {
+        "id": "SC-12",
+        "text": "Count comparison detects some replica divergence; content equality requires additional verification."
+      },
+      "title": "Detect content divergence",
+      "hazards": [
+        "H2",
+        "H3"
+      ],
+      "ucas": [
+        "UCA-02"
+      ],
+      "implementation": "partial",
+      "verification": "unverified",
+      "scenarios": [
+        "Missing and extra keys cancel; equal keys have different values; multiple replicas diverge."
+      ],
+      "assumptions": [
+        "curr_items is coarse and the current probe selects one Active slave per master."
+      ],
+      "residual_risks": [
+        "Equal counts cannot establish key/value equality; content anti-entropy is absent."
+      ],
+      "code": [
+        {
+          "path": "flare_operator/FlareOperator/Main.lean",
+          "symbol": "reconcileOnceFSM"
+        },
+        {
+          "path": "src/flared/handler_reaper.cc",
+          "symbol": "handler_reaper::"
+        },
+        {
+          "path": "src/lib/queue_proxy_write.cc",
+          "symbol": "queue_proxy_write::run"
+        }
+      ],
+      "call_path": "Main 4d stats -> replicaKeyDelta; master mutation paths -> proxy writes to replicas.",
+      "checks": [
+        {
+          "id": "CHECK-12",
+          "kind": "scenario",
+          "procedure": "Inject missing/extra keys with equal counts and differing values; measure detection/repair coverage and all-replica coverage. Referenced suites are starting points to extend, not evidence that this scenario is already covered.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/ReadBalance.lean",
+              "symbol": "suite"
+            }
+          ]
+        }
+      ],
+      "runs": [],
+      "tasks": [
+        "SAF-10"
+      ],
+      "review": {
+        "commit": "33205465691b0bf59dff1ad348ed810a5d20f24f",
+        "date": "2026-09-13",
+        "note": "Main.lean/Bridge.lean changed only in the empty-master delete's failure wording (unknown outcome); this control's mechanism is untouched. Refreshed for the referenced-file check."
+      }
+    },
+    {
+      "id": "EV-13",
+      "constraint": {
+        "id": "SC-13",
+        "text": "A future replication design must specify what acknowledged writes survive and how replicas catch up after interruption."
+      },
+      "title": "Bound replication durability guarantees",
+      "hazards": [
+        "H2",
+        "H3",
+        "H5"
+      ],
+      "ucas": [
+        "UCA-02"
+      ],
+      "implementation": "gap",
+      "verification": "unverified",
+      "scenarios": [
+        "Replica unavailable through WAL retention; asynchronous drop after client success; master failover."
+      ],
+      "assumptions": [
+        "Current live replication is op-level forwarding; WAL is used for reconstruction/bootstrap only."
+      ],
+      "residual_risks": [
+        "No continuous WAL replication; adding master LSNs alone does not establish durable acknowledgement semantics."
+      ],
+      "code": [
+        {
+          "path": "src/lib/queue_proxy_write.cc",
+          "symbol": "queue_proxy_write::run"
+        },
+        {
+          "path": "src/lib/op_repl_sync_wal.cc",
+          "symbol": "op_repl_sync_wal::"
+        }
+      ],
+      "call_path": "Client write -> proxy queue; recovery -> handler_reconstruction -> op_repl_sync_wal; these are distinct paths.",
+      "checks": [
+        {
+          "id": "CHECK-13",
+          "kind": "scenario",
+          "procedure": "Compare candidate designs against acknowledged-write survival, expiry/delete propagation, replica reads and migration compatibility. Referenced suites are starting points to extend, not evidence that this scenario is already covered.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/StrictDurability.lean",
+              "symbol": "suite"
+            },
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/WalPurgedFallback.lean",
+              "symbol": "suite"
+            }
+          ]
+        }
+      ],
+      "runs": [],
+      "tasks": [
+        "SAF-10"
+      ],
+      "review": {
+        "commit": "aaf0b8568b25b1be84c771fc4ea8b1118bee5ff7",
+        "date": "2026-09-10",
+        "note": "Initial static audit. Existing code and prospective checks are not archived execution evidence; no safety verification is claimed."
+      }
+    },
+    {
+      "id": "EV-14",
+      "constraint": {
+        "id": "SC-14",
+        "text": "Endpoint readiness should reflect serving eligibility without preventing StatefulSet recovery."
+      },
+      "title": "Separate readiness from serving correctness",
+      "hazards": [
+        "H4",
+        "H1"
+      ],
+      "ucas": [
+        "UCA-01",
+        "UCA-18"
+      ],
+      "implementation": "partial",
+      "verification": "unverified",
+      "scenarios": [
+        "Masterless limbo; crashed process during probe detection window; replica is Active but has wrong data."
+      ],
+      "assumptions": [
+        "Readiness probes read assigned state and Kubernetes acts after configured delays."
+      ],
+      "residual_risks": [
+        "Limbo deliberately reports Ready to break OrderedReady deadlock; headless addresses include NotReady pods; no content guarantee."
+      ],
+      "code": [
+        {
+          "path": "helm/flare-operator/templates/flare-cluster.yaml",
+          "symbol": "readinessProbe"
+        },
+        {
+          "path": "helm/flare-operator/templates/flare-cluster.yaml",
+          "symbol": "publishNotReadyAddresses"
+        }
+      ],
+      "call_path": "kubelet exec readiness -> Pod Ready -> endpoint controller; OrderedReady also consumes readiness.",
+      "checks": [
+        {
+          "id": "CHECK-14",
+          "kind": "scenario",
+          "procedure": "Exercise limbo, restart ordering, direct headless clients and delayed endpoint removal; design an independent serving gate. Referenced suites are starting points to extend, not evidence that this scenario is already covered.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/TerminatingPodHandling.lean",
+              "symbol": "suite"
+            }
+          ]
+        }
+      ],
+      "runs": [],
+      "tasks": [],
+      "review": {
+        "commit": "aaf0b8568b25b1be84c771fc4ea8b1118bee5ff7",
+        "date": "2026-09-10",
+        "note": "Initial static audit. Existing code and prospective checks are not archived execution evidence; no safety verification is claimed."
+      }
+    },
+    {
+      "id": "EV-15",
+      "constraint": {
+        "id": "SC-15",
+        "text": "Operational comparison should identify current source and each replica rather than infer from cluster-wide counts."
+      },
+      "title": "Expose role-aware observations",
+      "hazards": [
+        "H3",
+        "H4"
+      ],
+      "ucas": [
+        "UCA-02"
+      ],
+      "implementation": "gap",
+      "verification": "unverified",
+      "scenarios": [
+        "Role changes after failover while existing time series persist."
+      ],
+      "assumptions": [
+        "Role metadata must track topology generations without mislabeling old samples."
+      ],
+      "residual_risks": [
+        "No flared role labels; operator count comparison is a limited substitute."
+      ],
+      "code": [
+        {
+          "path": "src/lib/metrics_formatter.cc",
+          "symbol": "metrics_formatter::"
+        },
+        {
+          "path": "flare_operator/FlareOperator/Main.lean",
+          "symbol": "reconcileOnceFSM"
+        }
+      ],
+      "call_path": "flared metrics exporter and operator topology metrics are separate sources; role-aware join is not implemented.",
+      "checks": [
+        {
+          "id": "CHECK-15",
+          "kind": "scenario",
+          "procedure": "Specify and test role changes in metrics, including stale series and all-replica comparison. Referenced suites are starting points to extend, not evidence that this scenario is already covered.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/NativeMetrics.lean",
+              "symbol": "suite"
+            }
+          ]
+        }
+      ],
+      "runs": [],
+      "tasks": [],
+      "review": {
+        "commit": "33205465691b0bf59dff1ad348ed810a5d20f24f",
+        "date": "2026-09-13",
+        "note": "Main.lean/Bridge.lean changed only in the empty-master delete's failure wording (unknown outcome); this control's mechanism is untouched. Refreshed for the referenced-file check."
+      }
+    }
+  ]
+}

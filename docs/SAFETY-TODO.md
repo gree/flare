@@ -7,6 +7,12 @@ status; [STPA-node-state.md](STPA-node-state.md) owns the hazard analysis.
 
 ## Merge gate
 
+2026-09-27: memory-budget CRD/Helm configuration and initial startup seeding
+are implemented; existing pods require a planned restart/migration. Runtime
+budget validation is still open, and these knobs are not an RSS cap. See
+[scope and tests](reports/2026-09-27-memory-config.md). The selective read
+E2E now isolates both index request replies and topology pushes; CI pending.
+
 ### SAF-10 audit follow-ups (2026-09-24)
 
 Integrated `saf-10-audit-followups` through `89f3cff` into the PR #144 branch

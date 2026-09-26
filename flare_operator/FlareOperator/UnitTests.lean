@@ -14,6 +14,7 @@
   made the elaborator crawl.
 -/
 import Lean.Data.Json
+import FlareOperator.Migration.Provision
 import FlareOperator.StateMachine.ReplicaRepair
 import FlareOperator.StateMachine.SyncEvidence
 import FlareOperator.StateMachine.StatsObservation
@@ -624,6 +625,28 @@ def checkFollowShaping (ctx : Ctx) : IO Unit := do
      | .error r => (r.splitOn "continuous-replication").length > 1
      | .ok _ => false)
 
+private def checkMemoryConfig (ctx : Ctx) : IO Unit := do
+  let empty : RocksdbConfigSpec := {}
+  check ctx "unset memory settings preserve flared defaults" (!empty.hasAny && empty.toExtraConf == "")
+  let r : RocksdbConfigSpec := {
+    blockCacheSizeMb := some 64
+    writeBufferSizeMb := some 16
+    maxWriteBufferNumber := some 3
+    walTtlSeconds := some 900 }
+  let text := r.toExtraConf
+  check ctx "memory config renders all three options alongside WAL retention"
+    (r.hasAny && text.splitOn "\n" == ["rocksdb-block-cache-size-mb = 64",
+      "rocksdb-write-buffer-size-mb = 16", "rocksdb-max-write-buffer-number = 3",
+      "rocksdb-wal-ttl-seconds = 900"])
+  for r in ([{ blockCacheSizeMb := some 64 }, { writeBufferSizeMb := some 16 },
+      { maxWriteBufferNumber := some 3 }] : List RocksdbConfigSpec) do
+    check ctx "a memory-only spec is not ignored" r.hasAny
+  let yaml := FlareOperator.Migration.Provision.rocksdbSpecYaml r
+  check ctx "migration preserves the memory budget"
+    ((yaml.splitOn "blockCacheSizeMb: 64").length == 2 &&
+     (yaml.splitOn "writeBufferSizeMb: 16").length == 2 &&
+     (yaml.splitOn "maxWriteBufferNumber: 3").length == 2)
+
 def run : IO UInt32 := do
   let ctx : Ctx := { failures := ← IO.mkRef [], count := ← IO.mkRef 0 }
   checkObserve ctx
@@ -641,6 +664,7 @@ def run : IO UInt32 := do
   checkFollowJudge ctx
   checkFollowClassify ctx
   checkFollowShaping ctx
+  checkMemoryConfig ctx
   let failures ← ctx.failures.get
   let n ← ctx.count.get
   IO.println s!"1..{n}"

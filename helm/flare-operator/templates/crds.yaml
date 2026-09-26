@@ -99,6 +99,21 @@ spec:
                     cluster ConfigMap when explicitly set. See
                     ROCKSDB_REPLICATION.md for semantics.
                   properties:
+                    blockCacheSizeMb:
+                      type: integer
+                      minimum: 1
+                      maximum: 1048576
+                      description: Block cache size in MiB (rocksdb-block-cache-size-mb). Requires flared restart; not a total memory limit.
+                    writeBufferSizeMb:
+                      type: integer
+                      minimum: 1
+                      maximum: 1048576
+                      description: Per-memtable size in MiB (rocksdb-write-buffer-size-mb). Requires flared restart; each column family has write buffers.
+                    maxWriteBufferNumber:
+                      type: integer
+                      minimum: 2
+                      maximum: 2147483647
+                      description: Maximum write buffers per column family (rocksdb-max-write-buffer-number). Requires flared restart.
                     walTtlSeconds:
                       type: integer
                       minimum: 0

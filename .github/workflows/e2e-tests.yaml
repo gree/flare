@@ -86,7 +86,13 @@ jobs:
         run: |
           curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
 
-      - name: Build Lean operator
+      - name: Test Helm startup memory configuration
+        # Helm is installed above; test startup ConfigMap seeding before builds.
+        # Full runtime/config admission tests run in the replication shard.
+        # Keep this a separate step so a render failure cannot hide in a pipe.
+        run: python3 -m unittest discover -s scripts/tests -p 'test_helm_memory.py'
+
+      - name: Build Lean operator and tests
         run: |
           cd flare_operator
           # SEPARATE invocations on purpose. Naming the library and an

@@ -322,6 +322,8 @@ private def handleRocksdbConfig (crd : FlareClusterView) (crName ns : String)
     sendSighupToPods crName ns
     pendingConfRef.set (some (desired.trim, 0))
     IO.eprintln s!"[TRACE] RocksdbConfig: applied {rocksdb.toExtraConf.length} bytes, SIGHUP sent, verification pending"
+    if rocksdb.blockCacheSizeMb.isSome || rocksdb.writeBufferSizeMb.isSome || rocksdb.maxWriteBufferNumber.isSome then
+      IO.eprintln "[flare-operator] RocksDB memory options written to config only: running DB budgets require a planned restart/migration after file propagation; no automatic pod restart performed"
 
 /-- Order-independent equality of two master signatures ("<partition>:<server>").
     One master per partition, so the entries are unique and a set-compare (equal

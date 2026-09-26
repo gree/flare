@@ -603,6 +603,13 @@ def suite : TestSuite := {
           let entries ← nodeView
           let some slave := entries.find? (fun e => podOf e.fqdn == sPod)
             | return .fail "replica missing from map"
+          let operatorIps ← getPodIps s!"app={cfg.operatorName}" cfg.«namespace»
+          if operatorIps.isEmpty then return .fail "no operator IP to isolate topology delivery"
+          -- Block both pushed maps and replies to replica-initiated index
+          -- requests. Matching only 'node sync' misses the latter path.
+          let topologyRules := operatorIps.flatMap fun opIp =>
+            [["FORWARD", "-s", opIp, "-d", sIp, "-p", "tcp", "-j", "REJECT", "--reject-with", "tcp-reset"],
+             ["FORWARD", "-s", sIp, "-d", opIp, "-p", "tcp", "-j", "REJECT", "--reject-with", "tcp-reset"]]
           let localBalance : IO (Option String) := do
             match ← execInDebugPod cfg.debugPod cfg.«namespace» s!"printf 'stats nodes\\r\\n' | nc -w 3 {sIp} {cfg.flarePort}" with
             | .error _ => return none
@@ -616,7 +623,7 @@ def suite : TestSuite := {
                 (← statStr sIp "repl_follow_state") == some "following" &&
                 (← statNat sIp "repl_applied_lsn") == (← statNat mIp "rocksdb_latest_sequence_number")
             if !ready then return .fail "positive local balance / caught-up precondition not reached"
-            for spec in readGuardRules mIp sIp do
+            for spec in topologyRules ++ readGuardRules mIp sIp do
               match ← hostCmd "docker" (["exec", kindNode, "iptables", "-I", "FORWARD", "1"] ++ spec.drop 1) with
               | .error e => return .fail e
               | .ok _ => pure ()
@@ -645,6 +652,8 @@ def suite : TestSuite := {
             if (← localBalance) != some "50" then return .fail "positive balance was not retained through the GET"
             return .pass
           finally
+            for spec in topologyRules do
+              discard <| hostCmd "docker" (["exec", kindNode, "iptables", "-D"] ++ spec)
             heal mIp sIp
             -- First let eligibility restore 50. Setting spec=0 immediately
             -- can leave the operator's map unchanged at its withheld 0, so

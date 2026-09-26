@@ -216,6 +216,12 @@ cluster:
   # (S3 already holds the history; a local checkpoint on a RAM disk is not a
   # durable restore point anyway). E.g. {walSizeLimitMb: 512, walTtlSeconds:
   # 3600, backupKeep: 1}.
+  # Startup-only memory knobs, for example:
+  # rocksdb: {blockCacheSizeMb: 64, writeBufferSizeMb: 16, maxWriteBufferNumber: 3}
+  # These are NOT an RSS cap: allow for all column families, compaction,
+  # replication, process overhead and tmpfs if used. SIGHUP cannot apply them;
+  # wait for extra.conf propagation, then use a planned safe restart/migration.
+  # The operator does not automatically delete/restart data pods for this change.
   rocksdb: {}
   # Declarative read-routing policy (CRD spec.readBalance). flared routes
   # reads by balance weight; the operator normalizes every node map to this

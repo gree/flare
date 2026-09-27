@@ -16,6 +16,7 @@
 import Lean.Data.Json
 import FlareOperator.Migration.Provision
 import FlareOperator.Server.TopologyBroadcast
+import FlareOperator.StateMachine.TopologyObservation
 import FlareOperator.StateMachine.ReplicaRepair
 import FlareOperator.StateMachine.SyncEvidence
 import FlareOperator.StateMachine.StatsObservation
@@ -661,6 +662,34 @@ private def checkTopologyDelivery (ctx : Ctx) : IO Unit := do
   check ctx "confirmed latest map clears pending delivery"
     (FlareOperator.Server.pendingTopologyAfterAttempt (some 100) 110 true == none)
 
+private def checkTopologyObservation (ctx : Ctx) : IO Unit := do
+  let parse := FlareOperator.TopologyObservation.reportedVersion
+  let judge := FlareOperator.TopologyObservation.judge
+  check ctx "complete stats expose the applied topology version"
+    (parse "STAT node_map_version 42\r\nEND\r\n" == some 42)
+  for reply in ["STAT node_map_version 42\r\n", "END\r\n", "STAT node_map_version bad\r\nEND\r\n",
+      "STAT node_map_version 42\r\nSTAT node_map_version 43\r\nEND\r\n"] do
+    check ctx "missing, truncated, invalid or duplicate versions are Unknown" (parse reply == none)
+  check ctx "observed older map needs delivery, not failover"
+    (judge 42 (some "uid-a") (some "uid-a") (some 41) == .behind)
+  check ctx "same-version observation is current"
+    (judge 42 (some "uid-a") (some "uid-a") (some 42) == .current)
+  check ctx "newer recipient is an authority mismatch, not a lagging recipient"
+    (judge 42 (some "uid-a") (some "uid-a") (some 43) == .ahead)
+  check ctx "same-name Pod replacement invalidates the reply"
+    (judge 42 (some "uid-a") (some "uid-b") (some 42) == .unknown)
+  check ctx "missing UID cannot confirm application"
+    (judge 42 none none (some 42) == .unknown)
+  let old : FlareOperator.TopologyObservation.Sample := {
+    nodeKey := "n", uid := some "old", reportedVersion := some 42
+    observedAtMs := 1, verdict := .current }
+  let fresh := { old with uid := some "new", reportedVersion := none, verdict := .unknown }
+  let audit := FlareOperator.TopologyObservation.record { samples := [old, { old with nodeKey := "gone" }] } ["n"] fresh
+  check ctx "fresh Unknown replaces old confirmation and removed nodes are pruned"
+    (match audit.samples with
+     | [s] => s.uid == some "new" && s.verdict == .unknown
+     | _ => false)
+
 def run : IO UInt32 := do
   let ctx : Ctx := { failures := ← IO.mkRef [], count := ← IO.mkRef 0 }
   checkObserve ctx
@@ -680,6 +709,7 @@ def run : IO UInt32 := do
   checkFollowShaping ctx
   checkMemoryConfig ctx
   checkTopologyDelivery ctx
+  checkTopologyObservation ctx
   let failures ← ctx.failures.get
   let n ← ctx.count.get
   IO.println s!"1..{n}"

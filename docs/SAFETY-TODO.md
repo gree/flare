@@ -7,6 +7,12 @@ status; [STPA-node-state.md](STPA-node-state.md) owns the hazard analysis.
 
 ## Merge gate
 
+2026-09-27: added fresh round-robin recipient topology observations bracketed
+by Pod UID reads, and startup republish through the existing lease fence.
+Lower applied versions request retry; Unknown/ahead do not trigger destructive
+actions. [Scope and residuals](reports/2026-09-27-topology-observation.md).
+SAF-09 remains partial (generation recovery and isolated restart E2E pending).
+
 2026-09-27: SAF-09 transport increment implemented: explicit node-sync reply
 confirmation, propagated send errors, and retention of failed deliveries for
 retry through the existing lease fence. [Scope and residuals](reports/2026-09-27-topology-delivery-retry.md).

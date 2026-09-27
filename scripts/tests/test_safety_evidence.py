@@ -62,7 +62,7 @@ class EvidenceTests(unittest.TestCase):
     def test_complete_passing_record_is_structurally_valid(self):
         c = self.data["controls"][0]
         c["verification"] = "verified"
-        c["runs"] = [self.run_record()]
+        c["runs"] = [self.run_record(check=k["id"]) for k in c["checks"]]
         safety.validate(self.data, ROOT)
 
     def test_branch_sha_missing_report_and_static_evidence_rejected(self):
@@ -146,11 +146,13 @@ class EvidenceTests(unittest.TestCase):
     def test_verified_impact_accepts_complete_new_evidence(self):
         old = copy.deepcopy(self.data)
         old["controls"][0]["verification"] = "verified"
-        old["controls"][0]["runs"] = [self.run_record()]
+        old["controls"][0]["runs"] = [self.run_record(check=k["id"])
+                                       for k in old["controls"][0]["checks"]]
         new = copy.deepcopy(old)
         new["controls"][0]["constraint"]["text"] += " Clarified scope."
         new["controls"][0]["review"]["note"] = "Revalidated clarified scope on new revision."
-        new["controls"][0]["runs"].append(self.run_record(commit="2" * 40))
+        new["controls"][0]["runs"].extend(self.run_record(check=k["id"], commit="2" * 40)
+                                          for k in new["controls"][0]["checks"])
         safety.validate(new, ROOT)
         safety.check_impact(old, new, set())
 

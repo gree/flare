@@ -305,6 +305,12 @@ def suite : TestSuite := {
           let fwd := (← statNat sIp "repl_forward_applied").getD 0
           IO.eprintln s!"# following: replica applied {fwd} forwarded change(s); applied_lsn={← statNat sIp "repl_applied_lsn"} master latest={← statNat mIp "rocksdb_latest_sequence_number"} source_epoch={← statStr sIp "repl_follow_source_epoch"}"
           if fwd == 0 then return .fail "no forwarded change was applied through the common rule (repl_forward_applied is 0): identity forwarding is not in effect"
+          let audited ← waitForCondition "operator observes applied topology with Pod identity" 90 do
+            let log ← opLog 800
+            return (log.splitOn "\n").any fun line =>
+              containsSubstr line "[TopologyAudit] node=" &&
+              containsSubstr line "uid=(some " && containsSubstr line "verdict=current"
+          if !audited then return .fail "no UID-bound current topology observation reached the operator"
           return .pass },
 
     { name := "cut: create, update and delete on the master while the replica is unreachable; then new writes stop"

@@ -188,6 +188,27 @@ def podUid (podName ns : String) : IO (Option String) := do
   | .ok out => let u := out.trim; return (if u.isEmpty then none else some u)
   | .error _ => return none
 
+/-- Short-budget, read-only API calls for the round-robin topology audit.
+    Do not inherit the generic kubectl 30-second budget three times per pass. -/
+private def topologyProbeCommand (seconds : Nat) (args : Array String) : IO (Option String) := do
+  try
+    let r ← IO.Process.output {
+      cmd := "timeout"
+      args := #["-k", "1", toString seconds, "kubectl"] ++ args }
+    return if r.exitCode == 0 then some r.stdout else none
+  catch _ => return none
+
+/-- Bracket a stats reply with Pod UID reads. No cached result is reused.
+    Command payload is fixed; pod/namespace are separate argv elements. -/
+def topologyProbe (podName ns : String) : IO (Option String × Option String × Option String) := do
+  let args := #["get", "pod", podName, "-n", ns, "-o", "jsonpath={.metadata.uid}"]
+  let before := (← topologyProbeCommand 2 args).map String.trim
+  if before.isNone || before == some "" then return (none, none, none)
+  let reply ← topologyProbeCommand 3 #["exec", "-n", ns, podName, "--", "bash", "-c",
+    "exec 3<>/dev/tcp/localhost/12121; printf 'stats\\r\\n' >&3; while IFS= read -r line; do printf '%s\\n' \"$line\"; case \"$line\" in END*) break;; esac; done <&3; exec 3>&-"]
+  let after := (← topologyProbeCommand 2 args).map String.trim
+  return (before, after, reply)
+
 /-- The shell command that deletes a pod with the observed UID as an API-side
     PRECONDITION (DeleteOptions.preconditions.uid), so the apiserver itself
     rejects the request (409 Conflict) if a pod of the same name now has a

@@ -19,6 +19,7 @@
 -/
 
 import FlareOperator.K8s.FlareCluster
+import FlareOperator.StateMachine.TopologyObservation
 import FlareOperator.K8s.Bridge
 import FlareOperator.Flare.Protocol
 import FlareOperator.StateMachine.Reconciler
@@ -1013,6 +1014,7 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
     (ledgerDirtyRef : IO.Ref Bool)
     (episodesRef : IO.Ref (List SyncEvidence.Episode))
     (pendingBroadcastRef : IO.Ref (Option Nat))
+    (topologyAuditRef : IO.Ref TopologyObservation.Audit)
     (downCyclesRef : IO.Ref (List (String × Nat)))
     (emptyMasterStreakRef : IO.Ref (List (String × Nat)))
     (probeSlotRef : IO.Ref Nat)
@@ -1154,6 +1156,31 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
   -- Both halves are exercised by the topology-authority E2E suite.
   let finalState ← stateRef.get
   let finalVersion := finalState.nodeMapVersion
+  -- One fresh observation per pass: bounded work rather than an N-pod
+  -- serial stats sweep. UID checks bracket the reply; never carry evidence
+  -- across a same-name replacement. This affects delivery only, not health.
+  let audit ← topologyAuditRef.get
+  let auditKeys := finalState.nodeMap.map (·.1)
+  if auditKeys.isEmpty then
+    topologyAuditRef.set {}
+  else
+    let key := auditKeys[audit.next % auditKeys.length]!
+    let pod := extractPodName key
+    let (before, after, reply) ← Bridge.topologyProbe pod ns
+    let version := reply.bind TopologyObservation.reportedVersion
+    let verdict := TopologyObservation.judge finalVersion before after version
+    let sample : TopologyObservation.Sample := {
+      nodeKey := key, uid := after, reportedVersion := version
+      observedAtMs := ← IO.monoMsNow
+      verdict := verdict }
+    topologyAuditRef.set (TopologyObservation.record audit auditKeys sample)
+    IO.eprintln s!"[TopologyAudit] node={key} uid={after} desired={finalVersion} reported={version} verdict={verdict.label}"
+    match verdict with
+    | .behind =>
+      pendingBroadcastRef.modify fun p => some (p.getD finalVersion)
+    | .ahead =>
+      IO.eprintln s!"[TopologyAudit] CRITICAL: recipient {key} reports newer authority than committed v{finalVersion}; not inventing a generation or declaring it unhealthy"
+    | .unknown | .current => pure ()
   -- RETRY A SUPPRESSED SEND. Suppression used to be terminal: the committed
   -- version had already advanced, so the next pass found nothing to send and
   -- the map never reached the nodes until some unrelated change moved the
@@ -2073,7 +2100,10 @@ def main (args : List String) : IO Unit := do
         IO.sleep 2000
   if !(← ledgerAvailableRef.get) then
     IO.eprintln "[flare-operator] WARNING: replica repair ledger UNAVAILABLE at start; repair actions and drop accounting are HELD until a read succeeds — never starting from an empty ledger over a possibly pending request"
-  let pendingBroadcastRef ← IO.mkRef (none : Option Nat)
+  -- Do not rely on an in-memory pending flag surviving the old process.
+  -- Republish the current committed map on startup through the same fence.
+  let pendingBroadcastRef ← IO.mkRef (some (← stateRef.get).nodeMapVersion)
+  let topologyAuditRef ← IO.mkRef ({} : TopologyObservation.Audit)
   let downCyclesRef ← IO.mkRef ([] : List (String × Nat))
   let emptyMasterStreakRef ← IO.mkRef ([] : List (String × Nat))
   let probeSlotRef ← IO.mkRef (0 : Nat)
@@ -2127,7 +2157,7 @@ def main (args : List String) : IO Unit := do
     let startTime ← IO.monoMsNow
     try
       -- Use FSM-driven reconcile (complete implementation with all 5 requirements)
-      reconcileOnceFSM stateRef crdRef migrationRef graceCyclesRef trippedRef prepareCyclesRef unreadyCyclesRef podKeysRef podAddrsRef unreachCyclesRef reachSlotRef ledgerRef ledgerAvailableRef ledgerDirtyRef episodesRef pendingBroadcastRef downCyclesRef emptyMasterStreakRef probeSlotRef pendingConfRef masterSnapshotRef driftTickRef metrics leaseName identity crName ns
+      reconcileOnceFSM stateRef crdRef migrationRef graceCyclesRef trippedRef prepareCyclesRef unreadyCyclesRef podKeysRef podAddrsRef unreachCyclesRef reachSlotRef ledgerRef ledgerAvailableRef ledgerDirtyRef episodesRef pendingBroadcastRef topologyAuditRef downCyclesRef emptyMasterStreakRef probeSlotRef pendingConfRef masterSnapshotRef driftTickRef metrics leaseName identity crName ns
     catch e =>
       IO.eprintln s!"[flare-operator] reconcile error: {e}"
     let endTime ← IO.monoMsNow

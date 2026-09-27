@@ -1167,9 +1167,9 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
   -- process ("LOST LEASE -- exiting"); there the next leader republishes
   -- from its own committed state on startup, and whether that reaches a node
   -- still depends on its version being newer (SAF-09).
-  -- `some v` = a send of committed version v was suppressed and nothing
-  -- has published since. Kept as the EARLIEST suppressed version so the
-  -- log can name the pass that was withheld, not just the latest.
+  -- `some v` = a committed send was suppressed OR lacked confirmation from
+  -- at least one listed target. Kept as the earliest outstanding version;
+  -- retries always send the latest committed map, not a queued stale map.
   let pendingBefore ← pendingBroadcastRef.get
   -- A node held by the replica-repair ledger has not yet reported the map
   -- that demoted it; re-send the current map every pass until it does.
@@ -1231,9 +1231,9 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
       -- would not have happened without the flag — when the version moved
       -- as well, it would have.
       if let some suppressedV := pendingBefore then
-        IO.eprintln s!"[flare-operator] retrying a suppressed topology send (suppressed v{suppressedV}; publishing v{finalVersion})"
+        IO.eprintln s!"[flare-operator] retrying an unconfirmed topology send (pending v{suppressedV}; publishing v{finalVersion})"
       IO.eprintln s!"[flare-operator] topology changed (v{oldVersion} → v{finalVersion}), broadcasting"
-      broadcastTopologyToAllPods crName ns finalVersion finalState.getNodes
+      let confirmed ← broadcastTopologyToAllPods crName ns finalVersion finalState.getNodes
       recordTopologyBroadcast metrics
       updateNodeMapVersion metrics finalVersion
       -- Re-read the lease AFTER the send. This cannot prevent the race
@@ -1246,7 +1246,9 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
           IO.eprintln s!"[flare-operator] CRITICAL: lease holder changed to '{l.holderIdentity}' DURING a topology broadcast (v{finalVersion}); a map may have been published without authority. Recipients that already saw a newer version rejected it; others did not."
       | .error e =>
         IO.eprintln s!"[flare-operator] warning: could not confirm lease ownership after broadcasting v{finalVersion}: {e}"
-      pendingBroadcastRef.set none
+      pendingBroadcastRef.set (pendingTopologyAfterAttempt pendingBefore finalVersion confirmed)
+      if !confirmed then
+        IO.eprintln s!"[flare-operator] topology delivery unconfirmed (v{finalVersion}); retained for retry through the lease fence"
     else
       IO.eprintln s!"[flare-operator] LEASE FENCE: not the lease holder anymore — suppressing topology broadcast (v{oldVersion} → v{finalVersion}); held for retry once authority returns"
       pendingBroadcastRef.modify fun p => match p with | some v => some v | none => some finalVersion

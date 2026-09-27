@@ -15,6 +15,7 @@
 -/
 import Lean.Data.Json
 import FlareOperator.Migration.Provision
+import FlareOperator.Server.TopologyBroadcast
 import FlareOperator.StateMachine.ReplicaRepair
 import FlareOperator.StateMachine.SyncEvidence
 import FlareOperator.StateMachine.StatsObservation
@@ -647,6 +648,19 @@ private def checkMemoryConfig (ctx : Ctx) : IO Unit := do
      (yaml.splitOn "writeBufferSizeMb: 16").length == 2 &&
      (yaml.splitOn "maxWriteBufferNumber: 3").length == 2)
 
+private def checkTopologyDelivery (ctx : Ctx) : IO Unit := do
+  check ctx "only a complete OK response confirms topology delivery"
+    (FlareOperator.Server.topologyAckAccepted "OK\r\n")
+  for reply in ["", "OK", "SERVER_ERROR node sync error\r\n", "CLIENT_ERROR format error\r\n", "OK\r\nextra"] do
+    check ctx "missing, truncated or rejected topology reply remains unconfirmed"
+      (!FlareOperator.Server.topologyAckAccepted reply)
+  check ctx "first failed send retains its committed version"
+    (FlareOperator.Server.pendingTopologyAfterAttempt none 100 false == some 100)
+  check ctx "subsequent failures retain earliest pending version even as map advances"
+    (FlareOperator.Server.pendingTopologyAfterAttempt (some 100) 110 false == some 100)
+  check ctx "confirmed latest map clears pending delivery"
+    (FlareOperator.Server.pendingTopologyAfterAttempt (some 100) 110 true == none)
+
 def run : IO UInt32 := do
   let ctx : Ctx := { failures := ← IO.mkRef [], count := ← IO.mkRef 0 }
   checkObserve ctx
@@ -665,6 +679,7 @@ def run : IO UInt32 := do
   checkFollowClassify ctx
   checkFollowShaping ctx
   checkMemoryConfig ctx
+  checkTopologyDelivery ctx
   let failures ← ctx.failures.get
   let n ← ctx.count.get
   IO.println s!"1..{n}"

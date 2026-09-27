@@ -7,6 +7,11 @@ status; [STPA-node-state.md](STPA-node-state.md) owns the hazard analysis.
 
 ## Merge gate
 
+2026-09-27: SAF-09 transport increment implemented: explicit node-sync reply
+confirmation, propagated send errors, and retention of failed deliveries for
+retry through the existing lease fence. [Scope and residuals](reports/2026-09-27-topology-delivery-retry.md).
+Per-Pod applied-generation tracking and restart/generation recovery remain open.
+
 2026-09-27: memory-budget CRD/Helm configuration and initial startup seeding
 are implemented; existing pods require a planned restart/migration. Runtime
 budget validation is still open, and these knobs are not an RSS cap. See

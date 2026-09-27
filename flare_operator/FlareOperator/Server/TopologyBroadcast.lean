@@ -37,13 +37,21 @@ open FlareOperator.K8s.Bridge
     The port is hardcoded to 12121 (flared's protocol listening port).
     This matches C++ flarei's behavior where the coordinator actively
     pushes topology changes to all nodes via queue_node_sync. -/
-def broadcastTopologyToAllPods (crName ns : String) (version : Nat) (nodes : List FlareNode) : IO Unit := do
+def pendingTopologyAfterAttempt (previous : Option Nat) (version : Nat)
+    (confirmed : Bool) : Option Nat :=
+  if confirmed then none else some (previous.getD version)
+
+def broadcastTopologyToAllPods (crName ns : String) (version : Nat) (nodes : List FlareNode) : IO Bool := do
   -- Get current pod list with IP addresses from K8s
-  let pods ← listFlaredPods crName ns
+  let pods ← match ← listFlaredPodsE crName ns with
+    | .ok ps => pure ps
+    | .error e =>
+      IO.eprintln s!"[TopologyBroadcast] Pod list unavailable; delivery unconfirmed: {e}"
+      return false
 
   if pods.isEmpty then
     IO.eprintln "[TopologyBroadcast] No pods found to broadcast to"
-    return ()
+    return nodes.isEmpty
 
   IO.eprintln s!"[TopologyBroadcast] Broadcasting node sync v{version} ({nodes.length} nodes) to {pods.length} pods"
 
@@ -56,6 +64,8 @@ def broadcastTopologyToAllPods (crName ns : String) (version : Nat) (nodes : Lis
   -- distinguishes "Terminating but reachable" from "gone".
   let tasks ← pods.mapM fun pod =>
     IO.asTask (sendNodeSyncToNode pod.ip 12121 version nodes)
+  let deadline := (← IO.monoMsNow) + 15000
+  let mut confirmed := true
   -- Belt over TcpClient's own deadlines: the broadcast runs synchronously
   -- in the reconcile loop, so NOTHING here may wait unboundedly (one stuck
   -- pod froze the loop for 22 min live). 15s >> connect(3s)+sends(3s each).
@@ -65,14 +75,19 @@ def broadcastTopologyToAllPods (crName ns : String) (version : Nat) (nodes : Lis
       if (← IO.hasFinished t) then
         finished := true
         break
+      if (← IO.monoMsNow) >= deadline then break
       IO.sleep 50
     if finished then
       match t.get with
-      | .ok _ => pure ()
-      | .error e => IO.eprintln s!"[TopologyBroadcast] send task failed: {e}"
+      | .ok ok => confirmed := confirmed && ok
+      | .error e =>
+        confirmed := false
+        IO.eprintln s!"[TopologyBroadcast] send task failed: {e}"
     else
+      confirmed := false
       IO.eprintln "[TopologyBroadcast] WARNING: send task exceeded 15s — abandoning it (bounded broadcast)"
 
-  IO.eprintln s!"[TopologyBroadcast] Broadcast complete (v{version})"
+  IO.eprintln s!"[TopologyBroadcast] Broadcast attempt complete (v{version}); all targets reply-confirmed={confirmed}"
+  return confirmed
 
 end FlareOperator.Server

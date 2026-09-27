@@ -650,24 +650,29 @@ def suite : TestSuite := {
             if after != some cursor || forwardedAfter != some forwarded then
               return .fail "replication advanced: successful GET does not isolate the proxy path"
             if (← localBalance) != some "50" then return .fail "positive balance was not retained through the GET"
+            -- Hold desired balance at 0 BEFORE healing: recovery must not
+            -- depend on the old harness's forced 50→0 map change.
+            match ← kubectlPatch "flarecluster" cfg.name cfg.«namespace» "{\"spec\":{\"readBalance\":{\"master\":100,\"slave\":0}}}" with
+            | .error e => return .fail e
+            | .ok _ => pure ()
+            let pending ← waitForCondition "blocked topology is retained for retry" 90 do
+              let current ← nodeView
+              return (current.find? (fun e => podOf e.fqdn == sPod)).map (·.balance) == some 0 &&
+                containsSubstr (← opLog 500) "topology delivery unconfirmed"
+            if !pending then return .fail "operator never recorded unconfirmed delivery of the withheld map"
             return .pass
           finally
             for spec in topologyRules do
               discard <| hostCmd "docker" (["exec", kindNode, "iptables", "-D"] ++ spec)
             heal mIp sIp
-            -- First let eligibility restore 50. Setting spec=0 immediately
-            -- can leave the operator's map unchanged at its withheld 0, so
-            -- the map rejected during the fault is never retransmitted
-            -- (the separate SAF-09 residual). Require recovery, then force
-            -- a distinct 50→0 commit for the next test.
+            discard <| kubectlPatch "flarecluster" cfg.name cfg.«namespace» "{\"spec\":{\"readBalance\":{\"master\":100,\"slave\":0}}}"
+            -- The failed transport now stays pending through the lease
+            -- fence. No explicit 50→0 recovery transition is needed.
             let recovered ← waitForCondition "isolated read-guard fault is fully restored" 240 do
-              return (← localBalance) == some "50" &&
+              return (← localBalance) == some "0" &&
                 (← statStr sIp "repl_follow_state") == some "following" &&
                 (← statNat sIp "repl_applied_lsn") == (← statNat mIp "rocksdb_latest_sequence_number")
-            discard <| kubectlPatch "flarecluster" cfg.name cfg.«namespace» "{\"spec\":{\"readBalance\":{\"master\":100,\"slave\":0}}}"
-            let reset ← waitForCondition "read-guard cleanup delivers balance 0" 120 do
-              return (← localBalance) == some "0"
-            if !recovered || !reset then throw (IO.userError "read-guard cleanup did not restore balance and catch-up")
+            if !recovered then throw (IO.userError "read-guard cleanup did not restore balance and catch-up")
     },
 
     -- T5: repeated disconnections — no loss, no rollback, no resurrection,

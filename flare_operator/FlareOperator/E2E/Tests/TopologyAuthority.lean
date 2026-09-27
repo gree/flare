@@ -516,7 +516,7 @@ def suite : TestSuite := {
               -- the flag as the only reason that pass sent (in a live
               -- cluster the version often moves by itself). Recorded as a
               -- residual in the register rather than papered over here.
-              if !containsSubstr log2 s!"retrying a suppressed topology send (suppressed v{held}" then
+              if !containsSubstr log2 s!"retrying an unconfirmed topology send (pending v{held}" then
                 return .fail s!"the survivor caught up, but no publishing pass named the suppressed v{held}: the withheld map was not what the retry carried"
               let back ← waitForCondition "topology re-applied after the lease is recreated" 240 do
                 return (← topologyApplied).toOption.isSome

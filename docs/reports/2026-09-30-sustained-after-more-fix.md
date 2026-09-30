@@ -146,3 +146,33 @@ test passed at b5f1c45 minutes before on the same code. Recorded as a FAIL on
 CHECK-09; not a regression of this commit and not erased by the earlier
 pass. The fix needs the intended definition (dead fraction over a window vs
 per-tick deaths) to be fixed first — see SAF-11.
+
+## Long-outage retention evaluation, run 1 (CI 36725778961, evaluation=outage, tested-sha c33fe5d)
+
+Suite `continuous-replication-outage` (e316232): 256 MB WAL cap, 3600 s TTL,
+PVC 4Gi, 2Gi memory, 64 MB block cache; 50 kB values. Log archived as
+`2026-09-30-ci-36725778961-continuous-replication-outage-e2e.log`.
+
+**Phase A (150 MB written while cut) — PASS.** Three flushes (SST 1→3), live
+WAL constant at 72 MB (preallocated file), archived WAL 8 kB → 124.8 MB,
+data dir 4 MB → 326 MB, master RSS 33 → 236 MB. On healing the follower
+caught up from its cursor (applied 4 → 3004) in **11 s** with no
+reconstruction; items 3000 = 3000; wal_applied 16, wal_skipped 3044. The
+retained archive was served as designed.
+
+**Phase B (400 MB written while cut) — FAIL on the expectation, and that is
+the finding.** The archive grew to **499 MB against the 256 MB cap** (SSTs
+rotated 4→5→2→3→4→5 as compaction ran; data dir 1.07 GB; RSS 557 MB, no
+restart) and, healed a few minutes after passing the cap, the follower was
+still served every byte: it caught up from 3004 to 11004 instead of being
+told `lsn_purged`. RocksDB enforces `WAL_size_limit_MB` on a periodic check,
+not at the moment the cap is crossed, so **the cap is an eventual bound with
+an overshoot that depends on the write rate between checks** — here at
+least 243 MB. For capacity planning the archive must be budgeted as cap +
+(write rate × purge interval), not as the cap. The suite now keeps the cut
+after the load and watches the archive until it falls under the cap (up to
+20 min), recording that time, before healing.
+
+Not established: the actual purge interval and overshoot ceiling (next run),
+compaction's effect on the data-dir high-water beyond this 1.07 GB point, and
+anything about production hardware.

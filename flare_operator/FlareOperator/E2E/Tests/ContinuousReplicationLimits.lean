@@ -770,6 +770,20 @@ def outageSuite : TestSuite := {
           let head := (← c.statNat mIp "rocksdb_latest_sequence_number").getD 0
           IO.eprintln s!"# phase B written: {stored} keys (~{stored * 50 / 1000} MB); master latest={head}; replica applied={applied0}; high-water: {hw.line}"
           if stored < 7800 then heal mIp sIp; return .fail s!"only {stored}/8000 keys stored under the cut"
+          -- The cap is not enforced synchronously: RocksDB purges the archive
+          -- on a periodic check, so right after the load the archive sits
+          -- well past the cap and is still fully served (first CI run:
+          -- 499 MB against 256 MB, follower caught up). Keep the cut and
+          -- watch the archive until it drops under the cap, up to 20 min;
+          -- the time it takes and the overshoot are the measurement.
+          let tp ← IO.monoMsNow
+          let purged ← waitForCondition "archived WAL falls under the 256 MB cap while the replica is still cut" 1200 do
+            let d ← c.diskSample mPod
+            IO.eprintln s!"# purge watch: archive={d.archiveKb}kB data={d.dataKb}kB RSS={d.rssKb}kB"
+            return d.archiveKb < 256 * 1024
+          let purgeS := ((← IO.monoMsNow) - tp) / 1000
+          let dAfter ← c.diskSample mPod
+          IO.eprintln s!"# purge watch ended after {purgeS}s: under cap={purged}; archive now={dAfter.archiveKb}kB (high-water {hw.archiveKb}kB, cap 262144kB)"
           heal mIp sIp
           let declared ← waitForCondition "follower declares needs_rebuild with reason lsn_purged" 300 do
             return (← c.statStr sIp "repl_follow_state") == some "needs_rebuild"
@@ -778,7 +792,7 @@ def outageSuite : TestSuite := {
           IO.eprintln s!"# phase B heal: declared lsn_purged={declared}; state={st} reason={(← c.statStr sIp "repl_follow_last_reason").getD ""}; applied={← c.statNat sIp "repl_applied_lsn"} (head {head}); archive now={(← c.diskSample mPod).archiveKb}kB"
           if !declared then
             if st == "following" && (← c.statNat sIp "repl_applied_lsn").getD 0 ≥ head then
-              return .fail s!"the WAL past the 256 MB cap was still served: the follower caught up from {applied0} instead of being told lsn_purged (retention cap not effective, archive high-water {hw.archiveKb} kB)"
+              return .fail s!"the WAL past the 256 MB cap was still served: the follower caught up from {applied0} instead of being told lsn_purged (archive under cap before the heal={purged} after {purgeS}s; high-water {hw.archiveKb} kB)"
             return .fail s!"expected needs_rebuild/lsn_purged, got {st}/{(← c.statStr sIp "repl_follow_last_reason").getD ""}"
           let t0 ← IO.monoMsNow
           let rebuilt ← waitForCondition "follower rebuilt (reconstruction ran) and following at the head with equal items" 1500 do

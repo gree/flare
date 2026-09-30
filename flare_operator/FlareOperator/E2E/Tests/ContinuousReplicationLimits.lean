@@ -604,4 +604,197 @@ def sustainedSuite : TestSuite := {
   ]
 }
 
+
+-- ─── long-outage retention evaluation (skipped unless FLARE_E2E_OUTAGE is set) ─
+--
+-- The sustained and limits runs never filled a write buffer, so they say
+-- nothing about WAL rotation, flush, compaction or retention. Here the
+-- replica is held offline long enough for the master to flush several
+-- times, twice:
+--   phase A — ~150 MB written while cut, under a 256 MB WAL cap: the WAL
+--             the follower needs is still retained, so on healing it must
+--             catch up FROM ITS CURSOR (no reconstruction);
+--   phase B — ~400 MB written while cut, past the cap: the archived WAL is
+--             purged, so the follower must declare needs_rebuild /
+--             lsn_purged and be rebuilt by the operator.
+-- Disk (live WAL, archived WAL, SST count, data dir) and RSS are sampled
+-- every 50 MB written and the high-water marks are recorded. Evaluation:
+-- the assertions are the classification (catch-up vs rebuild), content
+-- equality, no master restart and the disk ceiling; the numbers are the
+-- product.
+
+private def outageCfg : ClusterConfig := {
+  name := "cont-repl-outage"
+  «namespace» := "flare-cont-repl-outage"
+  partitions := 1
+  replicas := 2
+  operatorName := "flare-operator"
+  debugPod := "debug-cont-repl-outage"
+  storageBackend := "rocksdb"
+  -- production-shaped retention: bounded by SIZE (256 MB) so the two phases
+  -- are deterministic; the TTL is long enough not to interfere.
+  extraFlaredConf := flags ++ "\nrocksdb-block-cache-size-mb = 64\nrocksdb-wal-size-limit-mb = 256\nrocksdb-wal-ttl-seconds = 3600"
+  operatorEnv := [("FLARE_STATS_PROBE_INTERVAL_MS", "15000")]
+  usePvc := true
+  pvcSize := "4Gi"
+  flaredMemoryLimit := "2Gi"
+  flaredMemoryRequest := "1Gi"
+}
+
+private def outageOn : IO Bool := return (← IO.getEnv "FLARE_E2E_OUTAGE").isSome
+
+/-- Pipelined big-value loader: `count` keys of `bytes` bytes, 100 keys per
+    connection. Returns the number the master reported STORED. -/
+private def Ctx.loadBig (c : Ctx) (ip : String) (pfx : String) (start count bytes : Nat) : IO Nat := do
+  let mut stored := 0
+  let mut k := start
+  while k < start + count do
+    let m := min 100 (start + count - k)
+    let cmd := s!"v=$(head -c {bytes} /dev/zero | tr '\\0' x); (awk -v s={k} -v m={m} -v v=\"$v\" 'BEGIN\{for(i=s;i<s+m;i++) printf \"set {pfx}%d 0 0 {bytes}\\r\\n%s\\r\\n\", i, v}'; sleep 5) | nc -w 180 {ip} {c.cfg.flarePort} | grep -c STORED"
+    match ← execInDebugPod c.cfg.debugPod c.cfg.«namespace» cmd with
+    | .ok o => stored := stored + (o.trim.toNat?.getD 0)
+    | .error e => IO.eprintln s!"# loadBig chunk at {k} failed: {e}"
+    k := k + m
+  return stored
+
+private structure DiskSample where
+  walKb : Nat := 0
+  archiveKb : Nat := 0
+  sst : Nat := 0
+  dataKb : Nat := 0
+  rssKb : Nat := 0
+  deriving Repr
+
+private def Ctx.diskSample (c : Ctx) (pod : String) : IO DiskSample := do
+  let q := fun (sh : String) => do
+    match ← kubectl ["exec", "-n", c.cfg.«namespace», pod, "--", "sh", "-c", sh] with
+    | .ok o => pure (o.trim.toNat?.getD 0)
+    | .error _ => pure 0
+  return { walKb := ← q "du -ck /data/flare/flare.rocksdb/*.log 2>/dev/null | tail -1 | awk '{print $1}'",
+           archiveKb := ← q "du -sk /data/flare/flare.rocksdb/archive 2>/dev/null | awk '{print $1}'",
+           sst := ← q "ls /data/flare/flare.rocksdb/*.sst 2>/dev/null | wc -l",
+           dataKb := ← q "du -sk /data/flare 2>/dev/null | awk '{print $1}'",
+           rssKb := ← q "grep VmRSS /proc/1/status | awk '{print $2}'" }
+
+private def DiskSample.line (d : DiskSample) : String :=
+  s!"WAL live={d.walKb}kB archive={d.archiveKb}kB sst={d.sst} data={d.dataKb}kB RSS={d.rssKb}kB"
+
+private def DiskSample.highWater (a b : DiskSample) : DiskSample :=
+  { walKb := Nat.max a.walKb b.walKb, archiveKb := Nat.max a.archiveKb b.archiveKb, sst := Nat.max a.sst b.sst,
+    dataKb := Nat.max a.dataKb b.dataKb, rssKb := Nat.max a.rssKb b.rssKb }
+
+/-- Write `mb` megabytes of 50 kB values while sampling the master every
+    50 MB. Returns (stored keys, next key index, high-water sample). -/
+private def Ctx.writeUnderCut (c : Ctx) (mPod mIp : String) (pfx : String) (start mb : Nat)
+    : IO (Nat × Nat × DiskSample) := do
+  let keysPer50Mb := 1000            -- 1000 × 50 kB
+  let rounds := mb / 50
+  let mut stored := 0
+  let mut k := start
+  let mut hw : DiskSample := {}
+  for r in [0:rounds] do
+    stored := stored + (← c.loadBig mIp pfx k keysPer50Mb 50000)
+    k := k + keysPer50Mb
+    let d ← c.diskSample mPod
+    hw := hw.highWater d
+    IO.eprintln s!"# under the cut, after {(r + 1) * 50} MB: {d.line}; master latest={(← c.statNat mIp "rocksdb_latest_sequence_number").getD 0}"
+  return (stored, k, hw)
+
+def outageSuite : TestSuite := {
+  name := "continuous-replication-outage"
+  setup := do
+    if ← outageOn then
+      deployCluster outageCfg
+      IO.eprintln "# Waiting 50s grace period for operator reconciliation..."
+      IO.sleep 50000
+    else IO.eprintln "# FLARE_E2E_OUTAGE unset: the long-outage evaluation deploys nothing and its tests are skipped"
+  teardown := do
+    if ← outageOn then cleanupCluster outageCfg
+  tests :=
+    let c : Ctx := { cfg := outageCfg }
+    [
+    { name := "outage phase A: ~150 MB written while cut under a 256 MB WAL cap — several flushes, WAL retained; on healing the follower catches up from its cursor (no rebuild); disk/RSS high-water recorded"
+      run := do
+        if !(← outageOn) then return .skip "FLARE_E2E_OUTAGE unset (evaluation only)"
+        match ← c.pair with
+        | .error e => return .fail e
+        | .ok (mPod, mIp, sPod, sIp) =>
+          let following ← waitForCondition "replica following" 120 do
+            return (← c.statStr sIp "repl_follow_state") == some "following"
+          if !following then return .fail "replica never followed"
+          let recon0 := (← c.statNat sIp "reconstruction_started").getD 0
+          let mRc0 ← c.restartCount mPod
+          let applied0 := (← c.statNat sIp "repl_applied_lsn").getD 0
+          let d0 ← c.diskSample mPod
+          IO.eprintln s!"# before the cut: {d0.line}; applied={applied0}"
+          match ← cut mIp sIp with
+          | .error e => return .fail e
+          | .ok () => pure ()
+          let (stored, _, hw) ← c.writeUnderCut mPod mIp "oa" 0 150
+          let head := (← c.statNat mIp "rocksdb_latest_sequence_number").getD 0
+          IO.eprintln s!"# phase A written: {stored} keys (~{stored * 50 / 1000} MB); master latest={head}; replica applied={← c.statNat sIp "repl_applied_lsn"} state={(← c.statStr sIp "repl_follow_state").getD "?"}; high-water: {hw.line}"
+          if stored < 2900 then heal mIp sIp; return .fail s!"only {stored}/3000 keys stored under the cut"
+          if hw.sst == 0 then heal mIp sIp; return .fail "no SST was produced under the cut: the write buffer never flushed, so this run does not exercise WAL rotation"
+          heal mIp sIp
+          let t0 ← IO.monoMsNow
+          let caught ← waitForCondition "follower catches up FROM ITS CURSOR to the master's head with equal items" 900 do
+            return (← c.statStr sIp "repl_follow_state") == some "following"
+              && (← c.statNat sIp "repl_applied_lsn").getD 0 ≥ head
+              && (← c.currItems sIp) == (← c.currItems mIp)
+          let catchS := ((← IO.monoMsNow) - t0) / 1000
+          let recon1 := (← c.statNat sIp "reconstruction_started").getD 0
+          let d1 ← c.diskSample mPod
+          IO.eprintln s!"# phase A heal: caught up={caught} in {catchS}s; state={(← c.statStr sIp "repl_follow_state").getD "?"} reason={(← c.statStr sIp "repl_follow_last_reason").getD ""}; applied {applied0}→{(← c.statNat sIp "repl_applied_lsn").getD 0} (head {head}); items master={← c.currItems mIp} replica={← c.currItems sIp}; reconstruction_started {recon0}→{recon1}; wal_applied={← c.statNat sIp "repl_wal_applied"} wal_skipped={← c.statNat sIp "repl_wal_skipped"}; master after: {d1.line}; master restarts {mRc0}→{← c.restartCount mPod}"
+          if (← c.restartCount mPod) != mRc0 then return .fail "the master restarted"
+          if !caught then return .fail s!"the follower did not catch up (state {(← c.statStr sIp "repl_follow_state").getD "?"}, reason {(← c.statStr sIp "repl_follow_last_reason").getD ""}, items master={← c.currItems mIp} replica={← c.currItems sIp})"
+          if recon1 != recon0 then return .fail "a reconstruction ran: the retained WAL was not used to catch up from the cursor"
+          if hw.dataKb > 3500000 then return .fail s!"data dir high-water {hw.dataKb} kB exceeded the 3.5 GB ceiling"
+          return .pass },
+
+    { name := "outage phase B: ~400 MB written while cut, past the 256 MB WAL cap — archived WAL purged; the follower declares needs_rebuild/lsn_purged, is rebuilt and converges; disk/RSS high-water recorded"
+      run := do
+        if !(← outageOn) then return .skip "FLARE_E2E_OUTAGE unset (evaluation only)"
+        match ← c.pair with
+        | .error e => return .fail e
+        | .ok (mPod, mIp, sPod, sIp) =>
+          let clean ← waitForCondition "no repair entry pending" 180 do return (← c.ledgerDests).isEmpty
+          if !clean then return .fail s!"repair entry pending from phase A: {← c.ledgerDests}"
+          let recon0 := (← c.statNat sIp "reconstruction_started").getD 0
+          let mRc0 ← c.restartCount mPod
+          let uid0 := (← c.podUid sPod).getD "?"
+          let applied0 := (← c.statNat sIp "repl_applied_lsn").getD 0
+          match ← cut mIp sIp with
+          | .error e => return .fail e
+          | .ok () => pure ()
+          let (stored, _, hw) ← c.writeUnderCut mPod mIp "ob" 0 400
+          let head := (← c.statNat mIp "rocksdb_latest_sequence_number").getD 0
+          IO.eprintln s!"# phase B written: {stored} keys (~{stored * 50 / 1000} MB); master latest={head}; replica applied={applied0}; high-water: {hw.line}"
+          if stored < 7800 then heal mIp sIp; return .fail s!"only {stored}/8000 keys stored under the cut"
+          heal mIp sIp
+          let declared ← waitForCondition "follower declares needs_rebuild with reason lsn_purged" 300 do
+            return (← c.statStr sIp "repl_follow_state") == some "needs_rebuild"
+              && (← c.statStr sIp "repl_follow_last_reason") == some "lsn_purged"
+          let st := (← c.statStr sIp "repl_follow_state").getD "?"
+          IO.eprintln s!"# phase B heal: declared lsn_purged={declared}; state={st} reason={(← c.statStr sIp "repl_follow_last_reason").getD ""}; applied={← c.statNat sIp "repl_applied_lsn"} (head {head}); archive now={(← c.diskSample mPod).archiveKb}kB"
+          if !declared then
+            if st == "following" && (← c.statNat sIp "repl_applied_lsn").getD 0 ≥ head then
+              return .fail s!"the WAL past the 256 MB cap was still served: the follower caught up from {applied0} instead of being told lsn_purged (retention cap not effective, archive high-water {hw.archiveKb} kB)"
+            return .fail s!"expected needs_rebuild/lsn_purged, got {st}/{(← c.statStr sIp "repl_follow_last_reason").getD ""}"
+          let t0 ← IO.monoMsNow
+          let rebuilt ← waitForCondition "follower rebuilt (reconstruction ran) and following at the head with equal items" 1500 do
+            return (← c.statNat sIp "reconstruction_started").getD 0 > recon0
+              && (← c.statStr sIp "repl_follow_state") == some "following"
+              && (← c.currItems sIp) == (← c.currItems mIp)
+          let rebuildS := ((← IO.monoMsNow) - t0) / 1000
+          let d1 ← c.diskSample mPod
+          IO.eprintln s!"# phase B rebuild: rebuilt={rebuilt} in {rebuildS}s; reconstruction_started {recon0}→{(← c.statNat sIp "reconstruction_started").getD 0}; snapshot_bootstrap={← c.statNat sIp "rocksdb_snapshot_bootstrap"} wal_fallback_to_dump={← c.statNat sIp "rocksdb_wal_fallback_to_dump"}; items master={← c.currItems mIp} replica={← c.currItems sIp}; pod uid {uid0}→{(← c.podUid sPod).getD "?"}; master after: {d1.line}; master restarts {mRc0}→{← c.restartCount mPod}"
+          if (← c.restartCount mPod) != mRc0 then return .fail "the master restarted"
+          if !rebuilt then return .fail s!"the follower was not rebuilt (state {(← c.statStr sIp "repl_follow_state").getD "?"}, items master={← c.currItems mIp} replica={← c.currItems sIp})"
+          if hw.dataKb > 3500000 then return .fail s!"data dir high-water {hw.dataKb} kB exceeded the 3.5 GB ceiling"
+          let empty ← waitForCondition "ledger empty" 300 do return (← c.ledgerDests).isEmpty
+          if !empty then return .fail s!"ledger still holds {← c.ledgerDests}"
+          return .pass }
+  ]
+}
+
 end FlareOperator.E2E.Tests.ContinuousReplicationLimits

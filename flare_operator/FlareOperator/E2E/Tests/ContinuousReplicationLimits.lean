@@ -770,20 +770,34 @@ def outageSuite : TestSuite := {
           let head := (← c.statNat mIp "rocksdb_latest_sequence_number").getD 0
           IO.eprintln s!"# phase B written: {stored} keys (~{stored * 50 / 1000} MB); master latest={head}; replica applied={applied0}; high-water: {hw.line}"
           if stored < 7800 then heal mIp sIp; return .fail s!"only {stored}/8000 keys stored under the cut"
-          -- The cap is not enforced synchronously: RocksDB purges the archive
-          -- on a periodic check, so right after the load the archive sits
-          -- well past the cap and is still fully served (first CI run:
-          -- 499 MB against 256 MB, follower caught up). Keep the cut and
-          -- watch the archive until it drops under the cap, up to 20 min;
-          -- the time it takes and the overshoot are the measurement.
+          -- The cap is not enforced synchronously, and on an IDLE master it
+          -- is not enforced at all: run 1 healed a few minutes after the load
+          -- and found 499 MB served against 256 MB; run 2 kept the cut and
+          -- watched an idle master for 22 minutes — the archive never moved.
+          -- RocksDB's archive purge runs from its obsolete-file cleanup,
+          -- i.e. on flush/compaction, rate-limited (documented: every 10
+          -- min when TTL and size cap are both set). So keep the cut AND
+          -- keep writing: 50 MB bursts every two minutes (each one a flush)
+          -- for up to 20 min, watching the archive after each. The time
+          -- and bytes it takes for the archive to fall under the cap are
+          -- the measurement; the follower is healed only afterwards.
           let tp ← IO.monoMsNow
-          let purged ← waitForCondition "archived WAL falls under the 256 MB cap while the replica is still cut" 1200 do
+          let mut k2 := 8000
+          let mut purged := false
+          let mut extraMb := 0
+          for _ in [0:10] do
             let d ← c.diskSample mPod
-            IO.eprintln s!"# purge watch: archive={d.archiveKb}kB data={d.dataKb}kB RSS={d.rssKb}kB"
-            return d.archiveKb < 256 * 1024
+            IO.eprintln s!"# purge watch (+{extraMb} MB after the cap crossing, {((← IO.monoMsNow) - tp) / 1000}s): archive={d.archiveKb}kB sst={d.sst} data={d.dataKb}kB RSS={d.rssKb}kB; master latest={(← c.statNat mIp "rocksdb_latest_sequence_number").getD 0}"
+            if d.archiveKb < 256 * 1024 then purged := true; break
+            let _ ← c.loadBig mIp "ob" k2 1000 50000
+            k2 := k2 + 1000
+            extraMb := extraMb + 50
+            IO.sleep 120000
           let purgeS := ((← IO.monoMsNow) - tp) / 1000
+          let head := (← c.statNat mIp "rocksdb_latest_sequence_number").getD 0
           let dAfter ← c.diskSample mPod
-          IO.eprintln s!"# purge watch ended after {purgeS}s: under cap={purged}; archive now={dAfter.archiveKb}kB (high-water {hw.archiveKb}kB, cap 262144kB)"
+          let hw := hw.highWater dAfter
+          IO.eprintln s!"# purge watch ended after {purgeS}s and {extraMb} MB more: under cap={purged}; archive now={dAfter.archiveKb}kB (high-water {hw.archiveKb}kB, cap 262144kB); data high-water {hw.dataKb}kB; RSS high-water {hw.rssKb}kB; master latest={head}"
           heal mIp sIp
           let declared ← waitForCondition "follower declares needs_rebuild with reason lsn_purged" 300 do
             return (← c.statStr sIp "repl_follow_state") == some "needs_rebuild"

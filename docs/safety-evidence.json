@@ -371,7 +371,8 @@
         "The stop position is a test seam. It is inert without the environment variable and bounded at 120s, but it is production code that a misconfiguration could delay one broadcast with.",
         "A suppressed send is retried only by a process that survives the suppression (lease read failure, momentarily foreign holder): the pending flag is in memory, and a confirmed lease loss ends the process, after which the next leader republishes from its own committed state. The retry test proves the flag was set by the withheld pass and consumed by the pass that published (that pass names the suppressed version); it does not prove the flag was NECESSARY for that send, because the committed version usually moves by itself within a pass.",
         "Liveness (/healthz) is process-alive only and readiness treats a non-leader as ready. The operator that logged 'LOST LEASE -- exiting' and then hung — the Lean runtime waits for the never-ending server tasks before reporting the uncaught error — was therefore never restarted; that defect is fixed (IO.Process.exit) and CHECK-01 asserts the restart count moves, but a different stall of the main loop would still pass both probes.",
-        "The suite's evidence for 'the held pass did not send' is operator log lines read from the pod (across the designed restart); the checks are shape-based (fence for vHELD; a send line with old < new would be the held pass) rather than a wire-level capture. Two harness races (container replaced by the designed exit; retry line matching the negative check) were found by the CI runner's timing and fixed the same day; a third of the same family is plausible."
+        "The suite's evidence for 'the held pass did not send' is operator log lines read from the pod (across the designed restart); the checks are shape-based (fence for vHELD; a send line with old < new would be the held pass) rather than a wire-level capture. Two harness races (container replaced by the designed exit; retry line matching the negative check) were found by the CI runner's timing and fixed the same day; a third of the same family is plausible.",
+        "2026-10-01 (CI 36731888436): after the lease fence suppressed a broadcast, a newer commit superseded it before the retry, and the retry published the successor version instead of the withheld one; the test that names the suppressed version failed. Not data loss (survivors got the superseding map); the semantics of 'retry the withheld map' vs 'retry the current desired map' need the SAF-09 decision."
       ],
       "code": [
         {
@@ -568,6 +569,14 @@
           "command": "GitHub Actions e2e-tests.yaml (4 legs) on PR #143",
           "result": "pass",
           "report": "docs/reports/2026-09-16-ci-e2e-matrix-da840c0-pass.txt"
+        },
+        {
+          "check": "CHECK-01",
+          "commit": "8691be63864a010ba0ffdec8a8a2138dbfd858f6",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request, leg breaker-migration (topology-authority test 12)",
+          "result": "fail",
+          "report": "docs/reports/2026-09-30-sustained-after-more-fix.md"
         }
       ],
       "tasks": [
@@ -988,6 +997,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of c33fe5d; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36725742993"
+        },
+        {
+          "check": "CHECK-03-follow",
+          "commit": "8691be63864a010ba0ffdec8a8a2138dbfd858f6",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of 0e49cc7; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36731888436"
         }
       ],
       "tasks": [
@@ -1362,6 +1379,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of c33fe5d; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36725742993"
+        },
+        {
+          "check": "CHECK-04-follow",
+          "commit": "8691be63864a010ba0ffdec8a8a2138dbfd858f6",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of 0e49cc7; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36731888436"
         }
       ],
       "tasks": [
@@ -1763,6 +1788,14 @@
           "command": "GitHub Actions e2e-tests.yaml workflow_dispatch evaluation=outage — legs replication / wal-recovery / breaker-migration",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36725778961"
+        },
+        {
+          "check": "CHECK-06",
+          "commit": "8691be63864a010ba0ffdec8a8a2138dbfd858f6",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of 0e49cc7; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36731888436"
         }
       ],
       "tasks": [
@@ -2049,6 +2082,14 @@
           "command": "GitHub Actions e2e-tests.yaml workflow_dispatch evaluation=outage — legs replication / wal-recovery / breaker-migration",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36725778961"
+        },
+        {
+          "check": "CHECK-09",
+          "commit": "8691be63864a010ba0ffdec8a8a2138dbfd858f6",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of 0e49cc7; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36731888436"
         }
       ],
       "tasks": [],
@@ -2483,7 +2524,8 @@
         "Boot cost of the exact key scan at open: 0.48-0.98 us/key measured at 0.8M / 1.5M / 2.0M keys (854 / 1503 / 960 ms); a 15.8M-key DB extrapolates to ≈8-16 s of extra start-up. Extrapolation, not a measurement.",
         "SUSTAINED-RATE RESULT (evaluation run 1): the stream stays exactly caught up (lag 0 every window) at 300 and 900 keys/s and FALLS BEHIND monotonically at 2000 keys/s (lag 35,265 → 294,615 over four minutes), draining in 442 s once the load stops. Content never diverges — forwarding carries every write — so this is a POSITION deficit: withheld replica reads, repair entries open longer, longer post-cut catch-up. The run does NOT establish disk behaviour: no memtable flush occurred (768k small records under a 64 MB write buffer), so the flat WAL and data-dir figures are an artefact of the window, and WAL retention for a TRAILING follower was never exercised.",
         "SUSTAINED-RATE RESULT after the MORE scheduling fix (7e979b0, CI run 36707861123, report 2026-09-30-sustained-after-more-fix.md): lag 0 at 300 and 900 keys/s; at 2000 keys/s the stream held for ~90 s then fell behind at ≈+18k/min (≈1,700 changes/s sustained; lag 67,016 after four minutes, drained in 35-43 s). Run 1's 294,615 / 442 s are history of the old code. Disk behaviour is still not established (no flush in the window).",
-        "LONG-OUTAGE RESULT, run 1 (c33fe5d, CI 36725778961): phase A (150 MB while cut, three flushes) caught up from the cursor in 11 s with no reconstruction. Phase B: the archived WAL reached 499 MB against a 256 MB WAL_size_limit_MB and was still fully served when healed a few minutes later — RocksDB purges the archive on a periodic check, so the cap is an eventual bound with an overshoot of at least write-rate × purge-interval (≥243 MB here). Capacity must be budgeted as cap + overshoot; the purge interval itself is measured in the next run."
+        "LONG-OUTAGE RESULT, run 1 (c33fe5d, CI 36725778961): phase A (150 MB while cut, three flushes) caught up from the cursor in 11 s with no reconstruction. Phase B: the archived WAL reached 499 MB against a 256 MB WAL_size_limit_MB and was still fully served when healed a few minutes later — RocksDB purges the archive on a periodic check, so the cap is an eventual bound with an overshoot of at least write-rate × purge-interval (≥243 MB here). Capacity must be budgeted as cap + overshoot; the purge interval itself is measured in the next run.",
+        "LONG-OUTAGE run 2 (0e49cc7, CI 36731930552): on an IDLE master the archived WAL stayed at 499 MB (cap 256 MB) for 22 minutes with no purge; the purge is driven by flush/compaction cleanup, not by time. Capacity: a master that goes quiet after a burst keeps the overshoot until it writes again."
       ],
       "code": [
         {
@@ -2659,6 +2701,22 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of c33fe5d; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36725742993"
+        },
+        {
+          "check": "CHECK-16",
+          "commit": "8691be63864a010ba0ffdec8a8a2138dbfd858f6",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of 0e49cc7; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36731888436"
+        },
+        {
+          "check": "CHECK-16-limits",
+          "commit": "0e49cc7eacaa9c3c5441c67d33f169d1f61f0512",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml workflow_dispatch evaluation=outage, leg continuous-replication (run 2)",
+          "result": "fail",
+          "report": "docs/reports/2026-09-30-sustained-after-more-fix.md"
         }
       ],
       "tasks": [
@@ -2795,6 +2853,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of c33fe5d; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36725742993"
+        },
+        {
+          "check": "CHECK-17",
+          "commit": "8691be63864a010ba0ffdec8a8a2138dbfd858f6",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of 0e49cc7; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36731888436"
         }
       ],
       "tasks": [
@@ -3059,6 +3125,22 @@
           "command": "GitHub Actions e2e-tests.yaml workflow_dispatch evaluation=outage — legs replication / wal-recovery / breaker-migration",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36725778961"
+        },
+        {
+          "check": "CHECK-18",
+          "commit": "8691be63864a010ba0ffdec8a8a2138dbfd858f6",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of 0e49cc7; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36731888436"
+        },
+        {
+          "check": "CHECK-18-purge",
+          "commit": "8691be63864a010ba0ffdec8a8a2138dbfd858f6",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of 0e49cc7; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36731888436"
         }
       ],
       "tasks": [
@@ -3298,6 +3380,14 @@
           "command": "GitHub Actions e2e-tests.yaml workflow_dispatch evaluation=outage — legs replication / wal-recovery / breaker-migration",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36725778961"
+        },
+        {
+          "check": "CHECK-20",
+          "commit": "8691be63864a010ba0ffdec8a8a2138dbfd858f6",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of 0e49cc7; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36731888436"
         }
       ],
       "tasks": [

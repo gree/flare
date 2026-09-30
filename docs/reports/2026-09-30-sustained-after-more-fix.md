@@ -178,3 +178,36 @@ compaction's effect on the data-dir high-water beyond this 1.07 GB point, and
 anything about production hardware.
 
 ### PR run 36725742993 on c33fe5d — PASS, all five legs (tested-sha 8f0a4654cd1ee8515a4283142001bebb5912abbe); outage run 36725778961's other four legs PASS at c33fe5d (breaker-migration included: the SAF-11 no-trip did not recur this time).
+
+## 2026-10-01: outage run 2 and the PR run on 0e49cc7
+
+### Long-outage evaluation run 2 (CI 36731930552, tested-sha 0e49cc7) — phase A PASS, phase B FAIL on the expectation
+Log `2026-10-01-ci-36731930552-continuous-replication-outage-e2e.log`. Phase A
+again caught up from the cursor in 11 s (archive 124.8 MB retained, no
+reconstruction). Phase B wrote 400 MB (archive 499 MB, data 1.07 GB, RSS
+556 MB) and then — new in this run — kept the cut and watched an IDLE master
+for **1,312 s (22 min): the archive did not move at all** (499 MB the whole
+time, cap 256 MB). Healed afterwards, the follower again caught up from its
+cursor (3004 → 11004) instead of `lsn_purged`. Conclusion for capacity:
+RocksDB's archive purge is driven by its obsolete-file cleanup (flush /
+compaction) and rate-limited (documented: every 10 min when both TTL and size
+cap are set); on a master that stops writing, the archive stays past the cap
+indefinitely. On tmpfs that is pinned RAM. Suite changed once more: after the
+cap crossing it keeps writing 50 MB bursts every two minutes (each a flush)
+for up to 20 min and records when the archive falls under the cap; run 3
+dispatched.
+
+### PR run 36731888436 on 0e49cc7 — 4 of 5 legs PASS (tested-sha 8691be6, merge revision)
+breaker-migration FAIL, one test, topology-authority "lease unreadable: the
+stopped pass fails closed and does not send": the lease-fence correctly
+suppressed v…307 ("held for retry once authority returns"), but before the
+retry a new commit produced v…308; the retry then published and confirmed
+v…308 ("retrying an unconfirmed topology send (pending v…306; publishing
+v…308)") and the test's assertion — that a publishing pass names the
+suppressed v…307 — found nothing. Data-wise the survivors received the newer
+superseding map (308 ⊇ 307); no node was left behind. Whether the retry must
+carry the withheld map itself or may carry its successor is a semantics
+question for the delivery-retry work (87f1728 / 4a516e6; SAF-09 lease and
+generation recovery) — not changed here. Passed on 7e979b0, b5f1c45 and
+c33fe5d; recorded as a FAIL on the topology-authority check with this
+classification. Log `2026-10-01-ci-36731888436-breaker-migration-e2e.log`.

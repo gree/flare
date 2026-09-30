@@ -237,3 +237,14 @@ therefore cap + (bytes written between cleanups), and on a quiet master the
 overshoot persists until the next write burst. Not measured: production
 hardware, tmpfs, compaction's steady-state disk high-water beyond ~1.07 GB
 for 550 MB of values.
+
+### PR run 36741543371 on 6e757cb — 4 of 5 legs PASS (tested-sha 6025c4e, merge revision)
+breaker-migration FAIL: circuit-breaker "majority outage (scale 4→1) trips
+the breaker" — the SAF-11 per-tick dead-count no-trip, **fourth CI
+occurrence** (5e80d73, 72e5cca, 12886a4/cb2d51c, now 6025c4e) and the second
+in the last three PR runs. Same test passed in outage run 3 at 6e757cb on the
+same code minutes earlier. Recorded as FAIL on CHECK-09; no code on this
+branch touches circuitBreakerDecision. Log
+`2026-10-01-ci-36741543371-breaker-migration-e2e.log`.
+Outage run 36741586970's other four legs PASS at 6e757cb (recorded on the
+acceptance checks).

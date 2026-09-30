@@ -577,6 +577,22 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request, leg breaker-migration (topology-authority test 12)",
           "result": "fail",
           "report": "docs/reports/2026-09-30-sustained-after-more-fix.md"
+        },
+        {
+          "check": "CHECK-01",
+          "commit": "6025c4e8a730ef79ad118fe6493947827af51417",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of 6e757cb; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36741543371"
+        },
+        {
+          "check": "CHECK-01",
+          "commit": "6e757cbbba2c73eb9113d7fc8fd36ba36d124a8f",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml workflow_dispatch evaluation=outage (run 3) — legs replication / wal-recovery / breaker-migration",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36741586970"
         }
       ],
       "tasks": [
@@ -1005,6 +1021,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of 0e49cc7; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36731888436"
+        },
+        {
+          "check": "CHECK-03-follow",
+          "commit": "6025c4e8a730ef79ad118fe6493947827af51417",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of 6e757cb; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36741543371"
         }
       ],
       "tasks": [
@@ -1387,6 +1411,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of 0e49cc7; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36731888436"
+        },
+        {
+          "check": "CHECK-04-follow",
+          "commit": "6025c4e8a730ef79ad118fe6493947827af51417",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of 6e757cb; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36741543371"
         }
       ],
       "tasks": [
@@ -1796,6 +1828,22 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of 0e49cc7; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36731888436"
+        },
+        {
+          "check": "CHECK-06",
+          "commit": "6025c4e8a730ef79ad118fe6493947827af51417",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of 6e757cb; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36741543371"
+        },
+        {
+          "check": "CHECK-06",
+          "commit": "6e757cbbba2c73eb9113d7fc8fd36ba36d124a8f",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml workflow_dispatch evaluation=outage (run 3) — legs replication / wal-recovery / breaker-migration",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36741586970"
         }
       ],
       "tasks": [
@@ -2090,13 +2138,29 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of 0e49cc7; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36731888436"
+        },
+        {
+          "check": "CHECK-09",
+          "commit": "6025c4e8a730ef79ad118fe6493947827af51417",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of 6e757cb; artifact tested-sha.txt",
+          "result": "fail",
+          "report": "docs/reports/2026-09-30-sustained-after-more-fix.md"
+        },
+        {
+          "check": "CHECK-09",
+          "commit": "6e757cbbba2c73eb9113d7fc8fd36ba36d124a8f",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml workflow_dispatch evaluation=outage (run 3) — legs replication / wal-recovery / breaker-migration",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36741586970"
         }
       ],
       "tasks": [],
       "review": {
-        "commit": "12886a4f4a2492d32420b9e158846ea84c7b4bcb",
-        "date": "2026-09-30",
-        "note": "Third CI occurrence of the per-tick dead-count no-trip (SAF-11) on run 36719136539 at merge rev cb2d51c: 'majority outage (scale 4→1) trips the breaker' saw no CIRCUIT BREAKER TRIPPED within 480 s; the same test passed at b5f1c45 on the same code. No code change on this branch touches circuitBreakerDecision. The intended definition (dead fraction over a window) is still to be fixed by the reviewer before the pure-layer change. PARTIAL / UNVERIFIED unchanged."
+        "commit": "6e757cbbba2c73eb9113d7fc8fd36ba36d124a8f",
+        "date": "2026-10-01",
+        "note": "Fourth CI occurrence of the SAF-11 no-trip (PR run 36741543371 at merge rev 6025c4e), second in the last three PR runs; passed in the same-code outage run minutes earlier. Frequency is rising enough that the definition decision (dead fraction over a window) should not wait. No code change. PARTIAL / UNVERIFIED unchanged."
       }
     },
     {
@@ -2726,6 +2790,14 @@
           "command": "GitHub Actions e2e-tests.yaml workflow_dispatch evaluation=outage, leg continuous-replication (run 3)",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36741586970"
+        },
+        {
+          "check": "CHECK-16",
+          "commit": "6025c4e8a730ef79ad118fe6493947827af51417",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of 6e757cb; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36741543371"
         }
       ],
       "tasks": [
@@ -2870,6 +2942,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of 0e49cc7; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36731888436"
+        },
+        {
+          "check": "CHECK-17",
+          "commit": "6025c4e8a730ef79ad118fe6493947827af51417",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of 6e757cb; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36741543371"
         }
       ],
       "tasks": [
@@ -3159,6 +3239,30 @@
           "command": "GitHub Actions e2e-tests.yaml workflow_dispatch evaluation=outage — continuous-replication-outage phase B (history purged under a 256 MB WAL_size_limit_MB; needs_rebuild/lsn_purged; snapshot rebuild)",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36741586970"
+        },
+        {
+          "check": "CHECK-18",
+          "commit": "6025c4e8a730ef79ad118fe6493947827af51417",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of 6e757cb; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36741543371"
+        },
+        {
+          "check": "CHECK-18-purge",
+          "commit": "6025c4e8a730ef79ad118fe6493947827af51417",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of 6e757cb; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36741543371"
+        },
+        {
+          "check": "CHECK-18-purge",
+          "commit": "6e757cbbba2c73eb9113d7fc8fd36ba36d124a8f",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml workflow_dispatch evaluation=outage (run 3) — legs replication / wal-recovery / breaker-migration",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36741586970"
         }
       ],
       "tasks": [
@@ -3406,6 +3510,22 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of 0e49cc7; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36731888436"
+        },
+        {
+          "check": "CHECK-20",
+          "commit": "6025c4e8a730ef79ad118fe6493947827af51417",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of 6e757cb; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36741543371"
+        },
+        {
+          "check": "CHECK-20",
+          "commit": "6e757cbbba2c73eb9113d7fc8fd36ba36d124a8f",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml workflow_dispatch evaluation=outage (run 3) — legs replication / wal-recovery / breaker-migration",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36741586970"
         }
       ],
       "tasks": [

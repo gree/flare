@@ -964,6 +964,14 @@
           "command": "GitHub Actions e2e-tests.yaml workflow_dispatch evaluation=sustained (5 legs)",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36707861123"
+        },
+        {
+          "check": "CHECK-03-follow",
+          "commit": "89b8cdb484ee0573f4970de3ce4d7233b3a3fd41",
+          "date": "2026-09-30",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of b5f1c45 onto flare-operator; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36713376306"
         }
       ],
       "tasks": [
@@ -1314,6 +1322,14 @@
           "command": "GitHub Actions e2e-tests.yaml workflow_dispatch evaluation=sustained (5 legs)",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36707861123"
+        },
+        {
+          "check": "CHECK-04-follow",
+          "commit": "89b8cdb484ee0573f4970de3ce4d7233b3a3fd41",
+          "date": "2026-09-30",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of b5f1c45 onto flare-operator; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36713376306"
         }
       ],
       "tasks": [
@@ -1683,15 +1699,23 @@
           "command": "GitHub Actions e2e-tests.yaml workflow_dispatch evaluation=sustained (5 legs)",
           "result": "fail",
           "report": "docs/reports/2026-09-30-sustained-after-more-fix.md"
+        },
+        {
+          "check": "CHECK-06",
+          "commit": "89b8cdb484ee0573f4970de3ce4d7233b3a3fd41",
+          "date": "2026-09-30",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of b5f1c45 onto flare-operator; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36713376306"
         }
       ],
       "tasks": [
         "SAF-07"
       ],
       "review": {
-        "commit": "7e979b0cba45dc103bcad083c2a688941cd77b8a",
+        "commit": "b5f1c45c23d75d1f01bf01cc33fa94172cc8c351",
         "date": "2026-09-30",
-        "note": "Test-only change in E2E/Tests/PvcDataSurvival.lean (recovery wait precondition). Empty-master guard / deletion mechanism untouched. Same-SHA PR run passed the test; the failing sustained-run leg is recorded as fail with its classification. PARTIAL / UNVERIFIED unchanged."
+        "note": "The fixed pvc-data-survival recovery wait (replaced pod UIDs + Ready replicas + master answering stats) passed on its first CI execution (run 36713376306 at merge rev 89b8cdb, wait ended after 21 s, 100/100 keys). The earlier FAIL at 7e979b0 stays recorded as a harness precondition fault. Mechanism untouched. PARTIAL / UNVERIFIED unchanged."
       }
     },
     {
@@ -2521,6 +2545,14 @@
           "command": "GitHub Actions e2e-tests.yaml workflow_dispatch evaluation=sustained (5 legs)",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36707861123"
+        },
+        {
+          "check": "CHECK-16",
+          "commit": "89b8cdb484ee0573f4970de3ce4d7233b3a3fd41",
+          "date": "2026-09-30",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of b5f1c45 onto flare-operator; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36713376306"
         }
       ],
       "tasks": [
@@ -2633,6 +2665,14 @@
           "command": "GitHub Actions e2e-tests.yaml workflow_dispatch evaluation=sustained (5 legs)",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36707861123"
+        },
+        {
+          "check": "CHECK-17",
+          "commit": "89b8cdb484ee0573f4970de3ce4d7233b3a3fd41",
+          "date": "2026-09-30",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of b5f1c45 onto flare-operator; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36713376306"
         }
       ],
       "tasks": [
@@ -2841,6 +2881,22 @@
           "command": "GitHub Actions e2e-tests.yaml workflow_dispatch evaluation=sustained (5 legs)",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36707861123"
+        },
+        {
+          "check": "CHECK-18",
+          "commit": "89b8cdb484ee0573f4970de3ce4d7233b3a3fd41",
+          "date": "2026-09-30",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of b5f1c45 onto flare-operator; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36713376306"
+        },
+        {
+          "check": "CHECK-18-purge",
+          "commit": "89b8cdb484ee0573f4970de3ce4d7233b3a3fd41",
+          "date": "2026-09-30",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of b5f1c45 onto flare-operator; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36713376306"
         }
       ],
       "tasks": [
@@ -3048,6 +3104,14 @@
           "command": "GitHub Actions e2e-tests.yaml workflow_dispatch evaluation=sustained (5 legs)",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36707861123"
+        },
+        {
+          "check": "CHECK-20",
+          "commit": "89b8cdb484ee0573f4970de3ce4d7233b3a3fd41",
+          "date": "2026-09-30",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of b5f1c45 onto flare-operator; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36713376306"
         }
       ],
       "tasks": [

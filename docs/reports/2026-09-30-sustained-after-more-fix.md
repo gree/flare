@@ -114,3 +114,18 @@ the log shows:
 No EV verification state changes. The register records the sustained leg
 under CHECK-16-limits at 7e979b0 and the acceptance legs of the PR run at the
 merge revision 4c78aba.
+
+### PR run 36713376306 on b5f1c45 (the recovery-wait fix) — PASS, all five legs
+https://github.com/gree/flare/actions/runs/36713376306, event pull_request;
+artifact `tested-sha.txt` = `89b8cdb484ee0573f4970de3ce4d7233b3a3fd41` (merge
+revision of b5f1c45 onto `flare-operator`). nix-linux 36713376269 and Safety
+evidence 36713376405 also PASS on b5f1c45.
+
+wal-recovery 48/48: the fixed pvc-data-survival wait ended after **21 s**
+with every killed pod replaced (new UID), all replicas Ready and the P0
+master answering stats; the exact-value readback then found all 100 keys
+(P0 item count 49, as in every run). Log archived as
+`2026-09-30-ci-36713376306-wal-recovery-e2e.log`. One pass of the fixed
+wait on one revision; the earlier failure record on CHECK-06 stays.
+continuous-replication 18/18 (13 acceptance tests; evaluations SKIP by
+design in PR runs). The other three legs PASS.

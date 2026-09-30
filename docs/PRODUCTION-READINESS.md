@@ -2,8 +2,10 @@
 
 Status as of 2026-09-30: development/integration, not production-approved.
 PR #144 integration and production WAL enablement are separate decisions.
-Latest inspected baseline `7e979b0`: PR E2E 36707836842 (all five legs, tested
-at the merge revision 4c78aba), nix-linux 36707836926, evidence 36707837351;
+Latest inspected baseline `b5f1c45` (test-fix + evidence commits on 7e979b0): PR E2E
+36713376306 (all five legs, tested at the merge revision 89b8cdb), nix-linux
+36713376269, evidence 36713376405; at 7e979b0: PR E2E 36707836842 (merge rev
+4c78aba), nix-linux 36707836926, evidence 36707837351;
 manual `evaluation=sustained` run 36707861123 (sustained lag 0 at 300/900
 keys/s, falls behind at 2000 keys/s; one harness-precondition failure in
 wal-recovery, see docs/reports/2026-09-30-sustained-after-more-fix.md). These

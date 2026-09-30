@@ -972,6 +972,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of b5f1c45 onto flare-operator; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36713376306"
+        },
+        {
+          "check": "CHECK-03-follow",
+          "commit": "cb2d51cb840fa7b6f0ab0e46741ce8b7a4401711",
+          "date": "2026-09-30",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of 12886a4; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36719136539"
         }
       ],
       "tasks": [
@@ -1330,6 +1338,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of b5f1c45 onto flare-operator; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36713376306"
+        },
+        {
+          "check": "CHECK-04-follow",
+          "commit": "cb2d51cb840fa7b6f0ab0e46741ce8b7a4401711",
+          "date": "2026-09-30",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of 12886a4; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36719136539"
         }
       ],
       "tasks": [
@@ -1707,6 +1723,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of b5f1c45 onto flare-operator; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36713376306"
+        },
+        {
+          "check": "CHECK-06",
+          "commit": "cb2d51cb840fa7b6f0ab0e46741ce8b7a4401711",
+          "date": "2026-09-30",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of 12886a4; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36719136539"
         }
       ],
       "tasks": [
@@ -1969,13 +1993,21 @@
           "command": "GitHub Actions e2e-tests.yaml (4 legs) on PR #143",
           "result": "pass",
           "report": "docs/reports/2026-09-16-ci-e2e-matrix-da840c0-pass.txt"
+        },
+        {
+          "check": "CHECK-09",
+          "commit": "cb2d51cb840fa7b6f0ab0e46741ce8b7a4401711",
+          "date": "2026-09-30",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of 12886a4; artifact tested-sha.txt",
+          "result": "fail",
+          "report": "docs/reports/2026-09-30-sustained-after-more-fix.md"
         }
       ],
       "tasks": [],
       "review": {
-        "commit": "5e7a3df871fd667412b1623b3074b5b8849c2939",
-        "date": "2026-09-22",
-        "note": "SAF-10 (PR #144): K8sReconciler.lean changed (FSM fields, candidate shaping, PodListResponse); the circuit-breaker decision and recovery refill are untouched apart from passing the unfit-follower exclusion into the refill. PARTIAL / UNVERIFIED unchanged."
+        "commit": "12886a4f4a2492d32420b9e158846ea84c7b4bcb",
+        "date": "2026-09-30",
+        "note": "Third CI occurrence of the per-tick dead-count no-trip (SAF-11) on run 36719136539 at merge rev cb2d51c: 'majority outage (scale 4→1) trips the breaker' saw no CIRCUIT BREAKER TRIPPED within 480 s; the same test passed at b5f1c45 on the same code. No code change on this branch touches circuitBreakerDecision. The intended definition (dead fraction over a window) is still to be fixed by the reviewer before the pure-layer change. PARTIAL / UNVERIFIED unchanged."
       }
     },
     {
@@ -2553,6 +2585,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of b5f1c45 onto flare-operator; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36713376306"
+        },
+        {
+          "check": "CHECK-16",
+          "commit": "cb2d51cb840fa7b6f0ab0e46741ce8b7a4401711",
+          "date": "2026-09-30",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of 12886a4; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36719136539"
         }
       ],
       "tasks": [
@@ -2673,6 +2713,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of b5f1c45 onto flare-operator; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36713376306"
+        },
+        {
+          "check": "CHECK-17",
+          "commit": "cb2d51cb840fa7b6f0ab0e46741ce8b7a4401711",
+          "date": "2026-09-30",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of 12886a4; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36719136539"
         }
       ],
       "tasks": [
@@ -2897,6 +2945,22 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of b5f1c45 onto flare-operator; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36713376306"
+        },
+        {
+          "check": "CHECK-18",
+          "commit": "cb2d51cb840fa7b6f0ab0e46741ce8b7a4401711",
+          "date": "2026-09-30",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of 12886a4; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36719136539"
+        },
+        {
+          "check": "CHECK-18-purge",
+          "commit": "cb2d51cb840fa7b6f0ab0e46741ce8b7a4401711",
+          "date": "2026-09-30",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of 12886a4; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36719136539"
         }
       ],
       "tasks": [
@@ -3112,6 +3176,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of b5f1c45 onto flare-operator; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36713376306"
+        },
+        {
+          "check": "CHECK-20",
+          "commit": "cb2d51cb840fa7b6f0ab0e46741ce8b7a4401711",
+          "date": "2026-09-30",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of 12886a4; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36719136539"
         }
       ],
       "tasks": [

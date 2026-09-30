@@ -129,3 +129,20 @@ master answering stats; the exact-value readback then found all 100 keys
 wait on one revision; the earlier failure record on CHECK-06 stays.
 continuous-replication 18/18 (13 acceptance tests; evaluations SKIP by
 design in PR runs). The other three legs PASS.
+
+### PR run 36719136539 on 12886a4 (docs-only commit) — 4 of 5 legs PASS
+https://github.com/gree/flare/actions/runs/36719136539; artifact tested-sha
+`cb2d51cb840fa7b6f0ab0e46741ce8b7a4401711` (merge revision of 12886a4; code
+identical to 89b8cdb apart from documentation). nix-linux 36719136541 and
+Safety evidence 36719136627 PASS.
+
+breaker-migration FAIL, one test: circuit-breaker "majority outage (scale
+4→1) trips the breaker" — "no CIRCUIT BREAKER TRIPPED log within 480s".
+This is the KNOWN intermittent finding filed as SAF-11 (register EV-09:
+`circuitBreakerDecision` counts the nodes that became dead in ONE tick, so a
+scale-down whose deaths land on different ticks never reaches the threshold).
+Third CI occurrence (earlier: 5e80d73 and 72e5cca on 2026-09-14); the same
+test passed at b5f1c45 minutes before on the same code. Recorded as a FAIL on
+CHECK-09; not a regression of this commit and not erased by the earlier
+pass. The fix needs the intended definition (dead fraction over a window vs
+per-tick deaths) to be fixed first — see SAF-11.

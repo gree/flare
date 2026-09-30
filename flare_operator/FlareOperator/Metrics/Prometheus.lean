@@ -90,6 +90,10 @@ structure OperatorMetrics where
   -- detection on purpose — the fault may be on the operator's side, and
   -- failing over a master we merely cannot see is the unsafe action.
   unreachableNodes : Gauge
+  -- Last observed topology, with a 60s freshness bound. Diagnostics only.
+  topologyBehindNodes : Gauge
+  topologyAheadNodes : Gauge
+  topologyUnknownNodes : Gauge
 
   -- Gauge: the largest master↔slave curr_items gap seen in the last probe,
   -- as a FRACTION of the master's count. Live replication is op-level
@@ -194,6 +198,9 @@ def initMetrics : IO OperatorMetrics := do
   let unhealthyNodes ← IO.mkRef 0.0
   let stuckDownNodes ← IO.mkRef 0.0
   let unreachableNodes ← IO.mkRef 0.0
+  let topologyBehindNodes ← IO.mkRef 0.0
+  let topologyAheadNodes ← IO.mkRef 0.0
+  let topologyUnknownNodes ← IO.mkRef 0.0
   let replicaKeyDelta ← IO.mkRef 0.0
   let masterlessPartitions ← IO.mkRef 0.0
   let replicaResyncs ← IO.mkRef 0
@@ -223,6 +230,9 @@ def initMetrics : IO OperatorMetrics := do
     unhealthyNodes := { value := unhealthyNodes }
     stuckDownNodes := { value := stuckDownNodes }
     unreachableNodes := { value := unreachableNodes }
+    topologyBehindNodes := { value := topologyBehindNodes }
+    topologyAheadNodes := { value := topologyAheadNodes }
+    topologyUnknownNodes := { value := topologyUnknownNodes }
     replicaKeyDelta := { value := replicaKeyDelta }
     masterlessPartitions := { value := masterlessPartitions }
     replicaResyncs := { value := replicaResyncs }
@@ -409,6 +419,13 @@ def exportMetrics (metrics : OperatorMetrics) (clusterName : String) : IO String
   output := output ++ "# TYPE flare_operator_nodes_unreachable gauge\n"
   let unreachable ← metrics.unreachableNodes.value.get
   output := output ++ formatGauge "flare_operator_nodes_unreachable" labels unreachable
+
+  for (name, help, gauge) in [
+      ("flare_operator_topology_observed_behind_nodes", "Mapped nodes last observed below committed topology version within 60s", metrics.topologyBehindNodes),
+      ("flare_operator_topology_observed_ahead_nodes", "Mapped nodes last observed above committed topology version within 60s; authority mismatch", metrics.topologyAheadNodes),
+      ("flare_operator_topology_unknown_nodes", "Mapped nodes with absent invalid or older-than-60s topology feedback; not a dead-node count", metrics.topologyUnknownNodes)] do
+    output := output ++ s!"# HELP {name} {help}\n# TYPE {name} gauge\n"
+    output := output ++ formatGauge name labels (← gauge.value.get)
 
   -- Replica divergence: |master - slave| / master from the last probe (gauge)
   output := output ++ "# HELP flare_operator_replica_key_delta Largest master-to-slave curr_items gap as a fraction of the master's count (coarse divergence signal; equal counts do not prove equal content)\n"

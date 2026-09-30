@@ -17,6 +17,7 @@ import Lean.Data.Json
 import FlareOperator.Migration.Provision
 import FlareOperator.Server.TopologyBroadcast
 import FlareOperator.StateMachine.TopologyObservation
+import FlareOperator.Metrics.Prometheus
 import FlareOperator.StateMachine.ReplicaRepair
 import FlareOperator.StateMachine.SyncEvidence
 import FlareOperator.StateMachine.StatsObservation
@@ -690,6 +691,33 @@ private def checkTopologyObservation (ctx : Ctx) : IO Unit := do
      | [s] => s.uid == some "new" && s.verdict == .unknown
      | _ => false)
 
+private def checkTopologyMetrics (ctx : Ctx) : IO Unit := do
+  let s : FlareOperator.TopologyObservation.Sample := {
+    nodeKey := "n", uid := some "uid", reportedVersion := some 42
+    observedAtMs := 1000, verdict := .current }
+  let classify := FlareOperator.TopologyObservation.observedVerdict
+  check ctx "new desired version invalidates old current verdict"
+    (classify 43 1001 60000 (some s) == .behind)
+  check ctx "expired current observation becomes Unknown"
+    (classify 42 61001 60000 (some s) == .unknown)
+  check ctx "future timestamp is Unknown"
+    (classify 42 999 60000 (some s) == .unknown)
+  check ctx "UID-invalid observation is not rehabilitated by a matching number"
+    (classify 42 1001 60000 (some { s with verdict := .unknown }) == .unknown)
+  let counts := FlareOperator.TopologyObservation.summarize { samples := [s] } ["n", "unseen"] 43 1001 60000
+  check ctx "summary counts fresh lag and missing feedback separately"
+    (counts.behind == 1 && counts.unknown == 1 && counts.ahead == 0)
+  check ctx "removed recipients do not remain in counts"
+    (FlareOperator.TopologyObservation.summarize { samples := [s] } [] 43 1001 60000 == {})
+  let metrics ← FlareOperator.Metrics.Prometheus.initMetrics
+  metrics.topologyBehindNodes.set 2
+  metrics.topologyAheadNodes.set 1
+  metrics.topologyUnknownNodes.set 3
+  let out ← FlareOperator.Metrics.Prometheus.exportMetrics metrics "unit"
+  for name in ["flare_operator_topology_observed_behind_nodes", "flare_operator_topology_observed_ahead_nodes", "flare_operator_topology_unknown_nodes"] do
+    check ctx "topology gauge is present in actual metrics exporter"
+      ((out.splitOn s!"# TYPE {name} gauge").length == 2)
+
 def run : IO UInt32 := do
   let ctx : Ctx := { failures := ← IO.mkRef [], count := ← IO.mkRef 0 }
   checkObserve ctx
@@ -710,6 +738,7 @@ def run : IO UInt32 := do
   checkMemoryConfig ctx
   checkTopologyDelivery ctx
   checkTopologyObservation ctx
+  checkTopologyMetrics ctx
   let failures ← ctx.failures.get
   let n ← ctx.count.get
   IO.println s!"1..{n}"

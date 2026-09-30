@@ -7,6 +7,10 @@ status; [STPA-node-state.md](STPA-node-state.md) owns the hazard analysis.
 
 ## Merge gate
 
+For deployment rather than code integration, use the consolidated
+[production enablement gate](PRODUCTION-READINESS.md). It separates guarantee
+decisions, incomplete implementation, missing runtime evidence and rollout work.
+
 2026-09-27: added fresh round-robin recipient topology observations bracketed
 by Pod UID reads, and startup republish through the existing lease fence.
 Lower applied versions request retry; Unknown/ahead do not trigger destructive

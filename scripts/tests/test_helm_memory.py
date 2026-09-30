@@ -22,6 +22,17 @@ class MemoryConfigTest(unittest.TestCase):
         self.assertNotIn("rocksdb-write-buffer-size-mb =", text)
         self.assertNotIn("rocksdb-max-write-buffer-number =", text)
 
+    def test_topology_alerts_render_with_runbooks(self):
+        text = self.render("monitoring.prometheusRule.enabled=true")
+        for alert, metric in [
+            ("FlareTopologyDeliveryLag", "flare_operator_topology_observed_behind_nodes"),
+            ("FlareTopologyGenerationMismatch", "flare_operator_topology_observed_ahead_nodes"),
+            ("FlareTopologyFeedbackUnknown", "flare_operator_topology_unknown_nodes"),
+        ]:
+            self.assertIn(f"alert: {alert}", text)
+            self.assertIn(f"expr: {metric} > 0", text)
+        self.assertEqual(text.count("runbook: docs/RUNBOOK.md#topology-observation"), 3)
+
     def test_initial_config_and_cr_both_have_memory_settings(self):
         text = self.render("cluster.rocksdb.blockCacheSizeMb=64",
                            "cluster.rocksdb.writeBufferSizeMb=16",

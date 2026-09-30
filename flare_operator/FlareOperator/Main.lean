@@ -1181,6 +1181,11 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
     | .ahead =>
       IO.eprintln s!"[TopologyAudit] CRITICAL: recipient {key} reports newer authority than committed v{finalVersion}; not inventing a generation or declaring it unhealthy"
     | .unknown | .current => pure ()
+  let observed := TopologyObservation.summarize (← topologyAuditRef.get) auditKeys
+    finalVersion (← IO.monoMsNow) 60000
+  metrics.topologyBehindNodes.set observed.behind.toFloat
+  metrics.topologyAheadNodes.set observed.ahead.toFloat
+  metrics.topologyUnknownNodes.set observed.unknown.toFloat
   -- RETRY A SUPPRESSED SEND. Suppression used to be terminal: the committed
   -- version had already advanced, so the next pass found nothing to send and
   -- the map never reached the nodes until some unrelated change moved the

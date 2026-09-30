@@ -102,6 +102,33 @@ spec:
         # other signal sees this: the readiness probe runs inside the pod and
         # the stats probes go through the API server. Deliberately does NOT
         # trigger failover — the fault may be on the operator's side.
+        - alert: FlareTopologyDeliveryLag
+          expr: flare_operator_topology_observed_behind_nodes > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Flare: recipient topology observations remain behind the committed map"
+            runbook: docs/RUNBOOK.md#topology-observation
+
+        - alert: FlareTopologyGenerationMismatch
+          expr: flare_operator_topology_observed_ahead_nodes > 0
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Flare: a recipient reports a newer topology generation than the operator"
+            runbook: docs/RUNBOOK.md#topology-observation
+
+        - alert: FlareTopologyFeedbackUnknown
+          expr: flare_operator_topology_unknown_nodes > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Flare: topology feedback is missing or stale; this does not establish node failure"
+            runbook: docs/RUNBOOK.md#topology-observation
+
         - alert: FlareNodeUnreachableFromOperator
           expr: flare_operator_nodes_unreachable > 0
           for: 5m

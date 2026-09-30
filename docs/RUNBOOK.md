@@ -611,6 +611,31 @@ CAUTION: cluster replication is the least-hardened path in this operator
 staging with a representative data set and confirm per-key survival on v2
 before doing it in production.
 
+## Topology observation
+
+Alerts: `FlareTopologyDeliveryLag`, `FlareTopologyGenerationMismatch`,
+`FlareTopologyFeedbackUnknown`. Gauges count mapped nodes whose last usable
+observation is behind/ahead of the committed version, or whose feedback is
+missing, invalid, or over 60 seconds old. Counts are refreshed each reconcile;
+an operator stall can freeze them. Monitor operator availability and reconcile
+progress as well. A zero count is not proof of data equality or safe promotion.
+
+1. Inspect `[TopologyAudit]` logs for node key, Pod UID, desired/reported
+   version, and verdict. Check that the operator still holds its Lease.
+2. For lag, inspect delivery/retry logs and the operator-to-node network path.
+   Restoring connectivity should allow fenced retry; do not delete the copy.
+3. For Unknown, check API/exec permissions, stats completeness, Pod replacement,
+   and reconcile duration. One node is audited per pass: large clusters can
+   exceed the 60-second coverage window even without a failed node. Measure
+   audit coverage before deployment; do not suppress the alert as "healthy".
+4. For ahead, investigate competing leaders, Lease deletion/recreation and
+   persisted map history. Preserve evidence and stop rollout. Do not reset
+   recipient versions or force a larger operator version to silence the alert.
+   Generation recovery remains an open SAF-09 task.
+
+These signals must not automatically cause failover, promotion, Pod deletion
+or data reconstruction. Missing observations are not proof of node failure.
+
 ## Known limits (do not be surprised by)
 
 - Selective network partition (pod alive, TCP to operator blocked) is

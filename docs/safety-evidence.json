@@ -980,6 +980,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of 12886a4; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36719136539"
+        },
+        {
+          "check": "CHECK-03-follow",
+          "commit": "8f0a4654cd1ee8515a4283142001bebb5912abbe",
+          "date": "2026-09-30",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of c33fe5d; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36725742993"
         }
       ],
       "tasks": [
@@ -1346,6 +1354,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of 12886a4; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36719136539"
+        },
+        {
+          "check": "CHECK-04-follow",
+          "commit": "8f0a4654cd1ee8515a4283142001bebb5912abbe",
+          "date": "2026-09-30",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of c33fe5d; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36725742993"
         }
       ],
       "tasks": [
@@ -1731,6 +1747,22 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of 12886a4; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36719136539"
+        },
+        {
+          "check": "CHECK-06",
+          "commit": "8f0a4654cd1ee8515a4283142001bebb5912abbe",
+          "date": "2026-09-30",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of c33fe5d; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36725742993"
+        },
+        {
+          "check": "CHECK-06",
+          "commit": "c33fe5db7622b4aa643c8e9ae1d044b4141cc06b",
+          "date": "2026-09-30",
+          "command": "GitHub Actions e2e-tests.yaml workflow_dispatch evaluation=outage — legs replication / wal-recovery / breaker-migration",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36725778961"
         }
       ],
       "tasks": [
@@ -2001,6 +2033,22 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of 12886a4; artifact tested-sha.txt",
           "result": "fail",
           "report": "docs/reports/2026-09-30-sustained-after-more-fix.md"
+        },
+        {
+          "check": "CHECK-09",
+          "commit": "8f0a4654cd1ee8515a4283142001bebb5912abbe",
+          "date": "2026-09-30",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of c33fe5d; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36725742993"
+        },
+        {
+          "check": "CHECK-09",
+          "commit": "c33fe5db7622b4aa643c8e9ae1d044b4141cc06b",
+          "date": "2026-09-30",
+          "command": "GitHub Actions e2e-tests.yaml workflow_dispatch evaluation=outage — legs replication / wal-recovery / breaker-migration",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36725778961"
         }
       ],
       "tasks": [],
@@ -2603,6 +2651,14 @@
           "command": "GitHub Actions e2e-tests.yaml workflow_dispatch evaluation=outage, leg continuous-replication",
           "result": "fail",
           "report": "docs/reports/2026-09-30-sustained-after-more-fix.md"
+        },
+        {
+          "check": "CHECK-16",
+          "commit": "8f0a4654cd1ee8515a4283142001bebb5912abbe",
+          "date": "2026-09-30",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of c33fe5d; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36725742993"
         }
       ],
       "tasks": [
@@ -2731,6 +2787,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of 12886a4; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36719136539"
+        },
+        {
+          "check": "CHECK-17",
+          "commit": "8f0a4654cd1ee8515a4283142001bebb5912abbe",
+          "date": "2026-09-30",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of c33fe5d; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36725742993"
         }
       ],
       "tasks": [
@@ -2971,6 +3035,30 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of 12886a4; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36719136539"
+        },
+        {
+          "check": "CHECK-18",
+          "commit": "8f0a4654cd1ee8515a4283142001bebb5912abbe",
+          "date": "2026-09-30",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of c33fe5d; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36725742993"
+        },
+        {
+          "check": "CHECK-18-purge",
+          "commit": "8f0a4654cd1ee8515a4283142001bebb5912abbe",
+          "date": "2026-09-30",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of c33fe5d; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36725742993"
+        },
+        {
+          "check": "CHECK-18-purge",
+          "commit": "c33fe5db7622b4aa643c8e9ae1d044b4141cc06b",
+          "date": "2026-09-30",
+          "command": "GitHub Actions e2e-tests.yaml workflow_dispatch evaluation=outage — legs replication / wal-recovery / breaker-migration",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36725778961"
         }
       ],
       "tasks": [
@@ -3194,6 +3282,22 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of 12886a4; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36719136539"
+        },
+        {
+          "check": "CHECK-20",
+          "commit": "8f0a4654cd1ee8515a4283142001bebb5912abbe",
+          "date": "2026-09-30",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of c33fe5d; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36725742993"
+        },
+        {
+          "check": "CHECK-20",
+          "commit": "c33fe5db7622b4aa643c8e9ae1d044b4141cc06b",
+          "date": "2026-09-30",
+          "command": "GitHub Actions e2e-tests.yaml workflow_dispatch evaluation=outage — legs replication / wal-recovery / breaker-migration",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36725778961"
         }
       ],
       "tasks": [

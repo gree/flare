@@ -176,3 +176,5 @@ after the load and watches the archive until it falls under the cap (up to
 Not established: the actual purge interval and overshoot ceiling (next run),
 compaction's effect on the data-dir high-water beyond this 1.07 GB point, and
 anything about production hardware.
+
+### PR run 36725742993 on c33fe5d — PASS, all five legs (tested-sha 8f0a4654cd1ee8515a4283142001bebb5912abbe); outage run 36725778961's other four legs PASS at c33fe5d (breaker-migration included: the SAF-11 no-trip did not recur this time).

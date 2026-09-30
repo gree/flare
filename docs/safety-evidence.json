@@ -2525,7 +2525,8 @@
         "SUSTAINED-RATE RESULT (evaluation run 1): the stream stays exactly caught up (lag 0 every window) at 300 and 900 keys/s and FALLS BEHIND monotonically at 2000 keys/s (lag 35,265 → 294,615 over four minutes), draining in 442 s once the load stops. Content never diverges — forwarding carries every write — so this is a POSITION deficit: withheld replica reads, repair entries open longer, longer post-cut catch-up. The run does NOT establish disk behaviour: no memtable flush occurred (768k small records under a 64 MB write buffer), so the flat WAL and data-dir figures are an artefact of the window, and WAL retention for a TRAILING follower was never exercised.",
         "SUSTAINED-RATE RESULT after the MORE scheduling fix (7e979b0, CI run 36707861123, report 2026-09-30-sustained-after-more-fix.md): lag 0 at 300 and 900 keys/s; at 2000 keys/s the stream held for ~90 s then fell behind at ≈+18k/min (≈1,700 changes/s sustained; lag 67,016 after four minutes, drained in 35-43 s). Run 1's 294,615 / 442 s are history of the old code. Disk behaviour is still not established (no flush in the window).",
         "LONG-OUTAGE RESULT, run 1 (c33fe5d, CI 36725778961): phase A (150 MB while cut, three flushes) caught up from the cursor in 11 s with no reconstruction. Phase B: the archived WAL reached 499 MB against a 256 MB WAL_size_limit_MB and was still fully served when healed a few minutes later — RocksDB purges the archive on a periodic check, so the cap is an eventual bound with an overshoot of at least write-rate × purge-interval (≥243 MB here). Capacity must be budgeted as cap + overshoot; the purge interval itself is measured in the next run.",
-        "LONG-OUTAGE run 2 (0e49cc7, CI 36731930552): on an IDLE master the archived WAL stayed at 499 MB (cap 256 MB) for 22 minutes with no purge; the purge is driven by flush/compaction cleanup, not by time. Capacity: a master that goes quiet after a burst keeps the overshoot until it writes again."
+        "LONG-OUTAGE run 2 (0e49cc7, CI 36731930552): on an IDLE master the archived WAL stayed at 499 MB (cap 256 MB) for 22 minutes with no purge; the purge is driven by flush/compaction cleanup, not by time. Capacity: a master that goes quiet after a burst keeps the overshoot until it writes again.",
+        "LONG-OUTAGE run 3 (6e757cb, CI 36741586970): with writes continuing past the cap, one flush cut the archive 499 → 250 MB within 172 s; the follower whose cursor lay in the purged range was told lsn_purged and rebuilt by snapshot in 59 s (items equal, pod unchanged). Archive budget = cap + bytes written between flush/compaction cleanups; an idle master keeps the overshoot (run 2)."
       ],
       "code": [
         {
@@ -2717,15 +2718,23 @@
           "command": "GitHub Actions e2e-tests.yaml workflow_dispatch evaluation=outage, leg continuous-replication (run 2)",
           "result": "fail",
           "report": "docs/reports/2026-09-30-sustained-after-more-fix.md"
+        },
+        {
+          "check": "CHECK-16-limits",
+          "commit": "6e757cbbba2c73eb9113d7fc8fd36ba36d124a8f",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml workflow_dispatch evaluation=outage, leg continuous-replication (run 3)",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36741586970"
         }
       ],
       "tasks": [
         "SAF-10"
       ],
       "review": {
-        "commit": "7e979b0cba45dc103bcad083c2a688941cd77b8a",
-        "date": "2026-09-30",
-        "note": "Sustained evaluation re-run on CI at 7e979b0 with the MORE backlog fix in: the follower keeps up at 300/900 keys/s and its 2000 keys/s deficit shrank from ≈+56k/min to ≈+18k/min with a 10x faster drain. Content equal throughout (forwarding); position deficit only. Retention/flush/compaction under a long outage remain unmeasured. PARTIAL / UNVERIFIED unchanged."
+        "commit": "6e757cbbba2c73eb9113d7fc8fd36ba36d124a8f",
+        "date": "2026-10-01",
+        "note": "Long-outage evaluation complete on CI (runs 1-3): retained-WAL catch-up from the cursor (150 MB, 11 s, no rebuild) and the purge → lsn_purged → snapshot rebuild path (59 s) both observed under a production-shaped 256 MB cap; the cap's enforcement is flush-driven, not time-driven. PARTIAL / UNVERIFIED unchanged; production hardware and tmpfs budgets not measured."
       }
     },
     {
@@ -2902,7 +2911,8 @@
         "Until 325a2f8 the follower handler RETURNED on needs_rebuild, giving its thread back to the pool while cluster still referenced it; the later stop_wal_follower shut down a pooled thread, which exited without leaving the pool, and the reconstruction handler that was to rebuild the node was triggered on that dead thread and never ran (found by the SAF-10d bulk-operation scenario, runs 3-4). Fixed: terminal outcomes park the thread until the controller's shutdown. E2E confirmation pending (run 5).",
         "After a source-epoch change the master's forwarded ops are refused by the stale-session replica, retried and counted as drops, so in the E2E the DROP path requested the rebuild before the follower-declared request could (runs 5-6: entry with drops=2). The two paths race and converge on the same rebuild; the follower-declared path alone (no drop counted, e.g. a purge with no write traffic) is unit-pinned, not staged end to end.",
         "RocksDB does not always report a purged position as NotFound: with the requested WAL file gone, GetUpdatesSince serves from the oldest surviving file. Before 3b7f38c the follower refused that first batch as a contiguity violation mapped to a TRANSIENT apply error and retried it forever (T6 E2E: state=error/apply_error, applied position frozen while forwarding delivered). Fixed: the server answers lsn_purged when the first served batch is beyond lsn+1, and the client maps a gap refusal to lsn_purged → needs_rebuild. E2E confirmation (T6 purge suite) pending.",
-        "The two routes to a rebuild request (a counted drop and the follower's own needs_rebuild declaration) have each been OBSERVED to win in E2E and both orders are pinned sequentially by flare_unit, but true concurrency is NOT verified: nothing exercises them racing within one reconcile pass against the real persist path."
+        "The two routes to a rebuild request (a counted drop and the follower's own needs_rebuild declaration) have each been OBSERVED to win in E2E and both orders are pinned sequentially by flare_unit, but true concurrency is NOT verified: nothing exercises them racing within one reconcile pass against the real persist path.",
+        "lsn_purged after an actual size-cap purge (not the 1 MB/1 s harness knobs) is now staged once: outage run 3 (6e757cb) — declared and rebuilt in 59 s. Single execution."
       ],
       "code": [
         {
@@ -3141,6 +3151,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of 0e49cc7; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36731888436"
+        },
+        {
+          "check": "CHECK-18",
+          "commit": "6e757cbbba2c73eb9113d7fc8fd36ba36d124a8f",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml workflow_dispatch evaluation=outage — continuous-replication-outage phase B (history purged under a 256 MB WAL_size_limit_MB; needs_rebuild/lsn_purged; snapshot rebuild)",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36741586970"
         }
       ],
       "tasks": [

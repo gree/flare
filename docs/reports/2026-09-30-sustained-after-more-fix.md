@@ -211,3 +211,29 @@ question for the delivery-retry work (87f1728 / 4a516e6; SAF-09 lease and
 generation recovery) — not changed here. Passed on 7e979b0, b5f1c45 and
 c33fe5d; recorded as a FAIL on the topology-authority check with this
 classification. Log `2026-10-01-ci-36731888436-breaker-migration-e2e.log`.
+
+### Long-outage evaluation run 3 (CI 36741586970, tested-sha 6e757cb) — PASS, both phases
+Log `2026-10-01-ci-36741586970-continuous-replication-outage-e2e.log`.
+
+Phase A as before: 150 MB retained, caught up from the cursor in 11 s, no
+reconstruction.
+
+Phase B, now with writes continuing after the cap crossing: after ONE more
+50 MB burst (one flush), 172 s after the load ended, the archive dropped
+**499 MB → 250 MB** (under the 256 MB cap; data dir 1.07 → 0.89 GB). Healed
+then, the follower declared `needs_rebuild` with reason `lsn_purged` (its
+cursor 3004 lay in the purged range; head 12004), the operator filed the
+request and the node was rebuilt by snapshot bootstrap in **59 s**
+(reconstruction_started 1→2, snapshot_bootstrap 2, pod UID unchanged), items
+12,000 = 12,000, master RSS high-water 620 MB, no master restart.
+
+What the three runs establish together: the WAL size cap is enforced only
+when the master's flush/compaction cleanup runs (run 2: an idle master kept a
+499 MB archive for 22 min past a 256 MB cap); once it runs, the archive is
+cut to the cap and a follower whose cursor lies in the purged range is told
+lsn_purged and rebuilt — the history-loss path works end to end under a
+production-shaped configuration. Capacity budget for the archive is
+therefore cap + (bytes written between cleanups), and on a quiet master the
+overshoot persists until the next write burst. Not measured: production
+hardware, tmpfs, compaction's steady-state disk high-water beyond ~1.07 GB
+for 550 MB of values.

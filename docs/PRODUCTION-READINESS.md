@@ -48,12 +48,13 @@ that gap. Record the agreed failure model and RPO/RTO before approval.
   acceptable replication lag and recovery time from production traffic, and
   re-measure on production-like hardware; the kind figure bounds nothing.
 - Hold a replica offline long enough to force WAL rotation, flush and compaction:
-  measured once on CI (outage evaluation run 1): 150 MB of retained WAL caught up
-  from the cursor in 11 s; 400 MB overshot a 256 MB cap to 499 MB and was still
-  served (RocksDB purges periodically), data dir 1.07 GB, RSS 557 MB. Still
-  needed: the purge interval/overshoot ceiling, the lsn_purged → rebuild path
-  after an actual purge (next run), and the same on production hardware and
-  tmpfs budgets.
+  measured on CI (outage evaluation runs 1-3, 256 MB cap, PVC): 150 MB of retained
+  WAL caught up from the cursor in 11 s; 400 MB overshot the cap to 499 MB and stayed
+  there on an idle master for 22 min (the cap is enforced by flush/compaction
+  cleanup, not by time); with writes continuing, one flush cut it to 250 MB and the
+  follower was told lsn_purged and rebuilt by snapshot in 59 s. Data dir 1.07 GB,
+  RSS 620 MB high-water. Still needed: the same on production hardware and tmpfs,
+  and an archive budget of cap + bytes-between-cleanups in the sizing rule.
 - Measure T17 lock hold time/starvation, read/proxy latency and control-loop
   lease renewal under load, including actual configured memory limits.
 - Measure startup and probes with production-scale data; test backup restoration

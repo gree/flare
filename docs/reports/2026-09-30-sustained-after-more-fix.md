@@ -67,6 +67,50 @@ Old numbers stay as history of the old code; they are not measurements of
   the 2000 keys/s phase onward, by construction.
 - Nothing here is a linearizable-read or zero-acknowledged-loss statement.
 
-## The two CI runs at 7e979b0
+## The two CI runs
 
-Filled in below once both runs completed (see the register for run records).
+### Normal PR run 36707836842 — PASS, all five legs
+https://github.com/gree/flare/actions/runs/36707836842 (event pull_request on
+head 7e979b0). Artifact `tested-sha.txt` = `4c78abac0cdb31c82255012b4c7d3837034aa3ab`:
+the PR checkout is the MERGE revision of 7e979b0 onto `flare-operator`
+(which at that time contained a8763cb, the #143 merge), not 7e979b0 itself.
+Legs: topology, replication (incl. continuous-replication-purge and
+-limits), wal-recovery (48/48), breaker-migration, continuous-replication
+(13 acceptance tests + evaluation SKIPs) — all success. The SKIPs of the
+opt-in evaluations are not performance passes.
+
+### Manual run 36707861123 (`evaluation=sustained`) — 4 of 5 legs PASS
+https://github.com/gree/flare/actions/runs/36707861123, tested-sha 7e979b0
+on every leg. continuous-replication (18 tests incl. the sustained
+evaluation above), replication, topology, breaker-migration: success.
+
+**wal-recovery FAIL — one test, classified as a HARNESS PRECONDITION fault,
+not data loss.** `pvc-data-survival` test "all 100 keys survive SIMULTANEOUS
+death of P0 master and slave" reported `DATA LOSS: 10 missing (0..9)`. The
+same test passed in the normal run minutes earlier on equivalent code. What
+the log shows:
+
+- The recovery wait ("P0 master available after total P0 loss") returned
+  after **15 s** of a force-delete of both P0 pods. Recovery is serial and
+  takes minutes (pod-0 re-activates, then pod-2 is recreated and reseeds), so
+  the wait was satisfied by STALE state: `statefulset.status.readyReplicas`
+  still showed the pre-kill 4 and the operator's map still named nodes-0 as
+  P0 master. The pod list in the diagnostics shows nodes-0 at 46 s old and
+  nodes-2 at 10 s old, still not Ready.
+- The exact-value readback therefore ran against a nodes-0 that had just
+  restarted (flared log: "boot map already assigns my role … deferring role
+  shift", "could not find reconstruction source node", then "assigned master
+  with state active"). The missing keys are exactly the FIRST TEN in read
+  order (0..9), then 90 consecutive hits — a boot window, not a hash pattern.
+- The P0 item count after recovery was 49 in BOTH runs (49 of the 100 keys
+  hash to P0), and both P0 pods reopened their PVCs with "curr_items seeded
+  by an exact scan: 49 live key(s)". Nothing on disk was lost. The later
+  test in the same suite (graceful slave restart, 100 keys) passed.
+- Fix (this commit, harness only): the wait now requires every killed pod to
+  carry a NEW UID, all replicas Ready, and the P0 master answering `stats`,
+  and it logs how long recovery took. The exact-value assertion is unchanged.
+  Re-execution on CI follows the push; the failure itself is kept here.
+
+No EV verification state changes. The register records the sustained leg
+under CHECK-16-limits at 7e979b0 and the acceptance legs of the PR run at the
+merge revision 4c78aba.

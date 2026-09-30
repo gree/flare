@@ -2,9 +2,13 @@
 
 Status as of 2026-09-30: development/integration, not production-approved.
 PR #144 integration and production WAL enablement are separate decisions.
-Latest inspected baseline `4a516e6` passed E2E 36290501385, nix-linux
-36290501295 and evidence 36290501403. These passes do not cover new commits,
-opt-in performance evaluations, or every condition below. All EV verification
+Latest inspected baseline `7e979b0`: PR E2E 36707836842 (all five legs, tested
+at the merge revision 4c78aba), nix-linux 36707836926, evidence 36707837351;
+manual `evaluation=sustained` run 36707861123 (sustained lag 0 at 300/900
+keys/s, falls behind at 2000 keys/s; one harness-precondition failure in
+wal-recovery, see docs/reports/2026-09-30-sustained-after-more-fix.md). These
+passes do not cover later commits, the other opt-in evaluations, or every
+condition below. All EV verification
 states remain unchanged; the evidence register owns their status.
 
 ## First decide the required data-loss guarantee
@@ -37,8 +41,10 @@ that gap. Record the agreed failure model and RPO/RTO before approval.
 - Run CI at the actual release candidate and assess relevant controls. Stage
   startup republish and same-name Pod replacement independently, including
   stats failures and non-WAL read eligibility recovery.
-- Rerun sustained 900/2000 writes/s after the MORE scheduling fix. Define target
-  rate, acceptable replication lag and recovery time using production traffic.
+- Sustained 900/2000 writes/s after the MORE fix: measured once on CI (lag 0 at
+  900, ≈+18k/min deficit at 2000, drain 35–43 s). Still define the target rate,
+  acceptable replication lag and recovery time from production traffic, and
+  re-measure on production-like hardware; the kind figure bounds nothing.
 - Hold a replica offline long enough to force WAL rotation, flush and compaction;
   prove memory/disk bounds, history-purge classification, rebuild and convergence.
   A small backlog test or flat disk usage before the first flush is insufficient.

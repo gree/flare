@@ -117,6 +117,19 @@ def suite : TestSuite := {
         if p0Pods.length < 2 then
           return .fail s!"expected P0 master+slave, found {p0Pods}"
         IO.eprintln s!"# Killing ALL P0 nodes simultaneously: {p0Pods}"
+        -- Pod UIDs before the kill: the recovery wait below must see NEW
+        -- pods. Right after a --force delete the StatefulSet's
+        -- status.readyReplicas and the operator's map are still the
+        -- pre-kill values for several seconds, so a wait on those alone
+        -- returned after 15 s (CI run 36707861123) and the exact-value
+        -- readback hit a flared that was still booting: the first ten GETs
+        -- in sequence missed, the rest passed, and the P0 item count matched
+        -- the passing run — a precondition fault reported as DATA LOSS.
+        let mut uidsBefore : List (String × String) := []
+        for p in p0Pods do
+          match ← kubectlGetJsonpath "pod" p cfg.«namespace» "{.metadata.uid}" with
+          | .ok u => uidsBefore := uidsBefore ++ [(p, u.trim)]
+          | .error _ => pure ()
         let _ ← kubectl (["delete", "pod"] ++ p0Pods ++
                          ["-n", cfg.«namespace», "--force", "--grace-period=0"])
         -- 420s: readiness is sync-gated (Ready = state=active) and the STS is
@@ -124,14 +137,32 @@ def suite : TestSuite := {
         -- (register + promote + probe) before pod-2 is even recreated, and
         -- pod-2 then needs a full prepare->active reseed. The old 180s budget
         -- assumed Ready = "port open" and parallel recreation.
-        let recovered ← waitForCondition "P0 master available after total P0 loss" 420 do
+        let t0 ← IO.monoMsNow
+        let recovered ← waitForCondition "P0 master available after total P0 loss (every killed pod recreated with a new UID, all pods Ready, P0 master serving stats)" 420 do
+          -- (1) every killed pod has been REPLACED (new UID)
+          let mut replaced := true
+          for (p, u0) in uidsBefore do
+            match ← kubectlGetJsonpath "pod" p cfg.«namespace» "{.metadata.uid}" with
+            | .ok u => if u.trim == u0 then replaced := false
+            | .error _ => replaced := false
+          if !replaced then return false
+          -- (2) the StatefulSet reports every pod Ready
+          let rr ← kubectlGetJsonpath "statefulset" s!"{cfg.name}-nodes" cfg.«namespace» "{.status.readyReplicas}"
+          let ready := match rr with
+            | .ok val => val.trim.toNat?.getD 0 >= numPods
+            | .error _ => false
+          if !ready then return false
+          -- (3) the operator names a P0 master and that node answers stats
           match ← currentP0Master with
           | none => return false
-          | some _ =>
-            match ← kubectlGetJsonpath "statefulset" s!"{cfg.name}-nodes" cfg.«namespace»
-                      "{.status.readyReplicas}" with
-            | .ok val => return (val.toNat?.getD 0 >= numPods)
-            | .error _ => return false
+          | some m =>
+            match ← getPodIp m cfg.«namespace» with
+            | none => return false
+            | some ip =>
+              match ← execInDebugPod cfg.debugPod cfg.«namespace» s!"printf 'stats\\r\\n' | nc -w 3 {ip} {cfg.flarePort}" with
+              | .ok o => return containsSubstr o "STAT curr_items"
+              | .error _ => return false
+        IO.eprintln s!"# recovery wait ended after {((← IO.monoMsNow) - t0) / 1000}s (recovered={recovered})"
         if !recovered then
           return .fail s!"P0 master not re-established within 420s after killing {p0Pods}"
         match ← currentP0Master with

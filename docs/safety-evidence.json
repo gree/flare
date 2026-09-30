@@ -948,6 +948,22 @@
           "command": "GitHub Actions e2e-tests.yaml (4 legs) on PR #143",
           "result": "pass",
           "report": "docs/reports/2026-09-16-ci-e2e-matrix-da840c0-pass.txt"
+        },
+        {
+          "check": "CHECK-03-follow",
+          "commit": "4c78abac0cdb31c82255012b4c7d3837034aa3ab",
+          "date": "2026-09-30",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of 7e979b0 onto flare-operator; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36707836842"
+        },
+        {
+          "check": "CHECK-03-follow",
+          "commit": "7e979b0cba45dc103bcad083c2a688941cd77b8a",
+          "date": "2026-09-30",
+          "command": "GitHub Actions e2e-tests.yaml workflow_dispatch evaluation=sustained (5 legs)",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36707861123"
         }
       ],
       "tasks": [
@@ -1282,6 +1298,22 @@
           "command": "GitHub Actions nix-linux.yml 'Test Legacy Build' — nix flare derivation make check (cutter, includes test_stats_reconstruction)",
           "result": "pass",
           "report": "docs/reports/2026-09-16-ci-e2e-matrix-da840c0-pass.txt"
+        },
+        {
+          "check": "CHECK-04-follow",
+          "commit": "4c78abac0cdb31c82255012b4c7d3837034aa3ab",
+          "date": "2026-09-30",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of 7e979b0 onto flare-operator; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36707836842"
+        },
+        {
+          "check": "CHECK-04-follow",
+          "commit": "7e979b0cba45dc103bcad083c2a688941cd77b8a",
+          "date": "2026-09-30",
+          "command": "GitHub Actions e2e-tests.yaml workflow_dispatch evaluation=sustained (5 legs)",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36707861123"
         }
       ],
       "tasks": [
@@ -1596,7 +1628,8 @@
         "Availability may deliberately be chosen over completeness; data-bearing means nonzero count, not a complete or newest copy."
       ],
       "residual_risks": [
-        "Active candidates lack a data check; absent data-bearing observations fall back; Prepare partial copies can become authoritative."
+        "Active candidates lack a data check; absent data-bearing observations fall back; Prepare partial copies can become authoritative.",
+        "pvc-data-survival's total-P0-loss test (CHECK-06) failed once on CI (run 36707861123) with 'DATA LOSS: 10 missing' that was a HARNESS precondition fault: the recovery wait was satisfied by stale StatefulSet/operator state 15 s after a force delete, and the readback hit a booting pod (first ten GETs in order missed; P0 count 49 = passing run). The wait now requires replaced pod UIDs, Ready replicas and a stats-answering master (report 2026-09-30-sustained-after-more-fix.md). The failure is kept; the fix is re-executed by the next PR run."
       ],
       "code": [
         {
@@ -1634,14 +1667,31 @@
           ]
         }
       ],
-      "runs": [],
+      "runs": [
+        {
+          "check": "CHECK-06",
+          "commit": "4c78abac0cdb31c82255012b4c7d3837034aa3ab",
+          "date": "2026-09-30",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of 7e979b0 onto flare-operator; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36707836842"
+        },
+        {
+          "check": "CHECK-06",
+          "commit": "7e979b0cba45dc103bcad083c2a688941cd77b8a",
+          "date": "2026-09-30",
+          "command": "GitHub Actions e2e-tests.yaml workflow_dispatch evaluation=sustained (5 legs)",
+          "result": "fail",
+          "report": "docs/reports/2026-09-30-sustained-after-more-fix.md"
+        }
+      ],
       "tasks": [
         "SAF-07"
       ],
       "review": {
-        "commit": "5e7a3df871fd667412b1623b3074b5b8849c2939",
-        "date": "2026-09-22",
-        "note": "2026-09-27 applied-topology audit on 87f1728 plus working tree: The new round-robin probe changes delivery feedback only. Unknown/current/ahead samples never authorize deletion, promotion, rebuild, failover or completion of data repair; this control's decision rules are unchanged. Probe budgets are 2s/3s/2s plus kill grace; scale latency unmeasured. 165 unit checks and operator/E2E builds pass; runtime CI pending. See docs/reports/2026-09-27-topology-observation.md. Verification unchanged. Previous: SAF-10 (PR #144): Bridge.queryPodStats now returns at the END line (was a 3 s timeout per read); K8sReconciler.promoteMasterlessPartition gained an exclusion list for followers KNOWN unusable (Active-slave tiers only; the data-bearing last-resort tiers are unchanged) and the FSM logs a last-resort promotion of such a follower as NOT LOSS-FREE. Empty-master guard logic unchanged. PARTIAL / UNVERIFIED unchanged."
+        "commit": "7e979b0cba45dc103bcad083c2a688941cd77b8a",
+        "date": "2026-09-30",
+        "note": "Test-only change in E2E/Tests/PvcDataSurvival.lean (recovery wait precondition). Empty-master guard / deletion mechanism untouched. Same-SHA PR run passed the test; the failing sustained-run leg is recorded as fail with its classification. PARTIAL / UNVERIFIED unchanged."
       }
     },
     {
@@ -2455,6 +2505,22 @@
           "command": "GitHub Actions e2e-tests.yaml workflow_dispatch evaluation=sustained, leg continuous-replication (FLARE_E2E_SUSTAINED=1 flare_e2e --filter continuous-replication,continuous-replication-scale,continuous-replication-sustained)",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36707861123"
+        },
+        {
+          "check": "CHECK-16",
+          "commit": "4c78abac0cdb31c82255012b4c7d3837034aa3ab",
+          "date": "2026-09-30",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of 7e979b0 onto flare-operator; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36707836842"
+        },
+        {
+          "check": "CHECK-16",
+          "commit": "7e979b0cba45dc103bcad083c2a688941cd77b8a",
+          "date": "2026-09-30",
+          "command": "GitHub Actions e2e-tests.yaml workflow_dispatch evaluation=sustained (5 legs)",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36707861123"
         }
       ],
       "tasks": [
@@ -2551,6 +2617,22 @@
           "command": "GitHub Actions e2e-tests.yaml (workflow_dispatch), legs replication (continuous-replication-purge, continuous-replication-limits) and continuous-replication",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/35570216917"
+        },
+        {
+          "check": "CHECK-17",
+          "commit": "4c78abac0cdb31c82255012b4c7d3837034aa3ab",
+          "date": "2026-09-30",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of 7e979b0 onto flare-operator; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36707836842"
+        },
+        {
+          "check": "CHECK-17",
+          "commit": "7e979b0cba45dc103bcad083c2a688941cd77b8a",
+          "date": "2026-09-30",
+          "command": "GitHub Actions e2e-tests.yaml workflow_dispatch evaluation=sustained (5 legs)",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36707861123"
         }
       ],
       "tasks": [
@@ -2727,6 +2809,38 @@
           "command": "cd flare_operator && .lake/build/bin/flare_e2e --filter continuous-replication-purge (local kind; node image from this commit, suite 58688c1)",
           "result": "pass",
           "report": "docs/reports/2026-09-21-saf10d-t6-t9-scale.txt"
+        },
+        {
+          "check": "CHECK-18",
+          "commit": "4c78abac0cdb31c82255012b4c7d3837034aa3ab",
+          "date": "2026-09-30",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of 7e979b0 onto flare-operator; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36707836842"
+        },
+        {
+          "check": "CHECK-18",
+          "commit": "7e979b0cba45dc103bcad083c2a688941cd77b8a",
+          "date": "2026-09-30",
+          "command": "GitHub Actions e2e-tests.yaml workflow_dispatch evaluation=sustained (5 legs)",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36707861123"
+        },
+        {
+          "check": "CHECK-18-purge",
+          "commit": "4c78abac0cdb31c82255012b4c7d3837034aa3ab",
+          "date": "2026-09-30",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of 7e979b0 onto flare-operator; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36707836842"
+        },
+        {
+          "check": "CHECK-18-purge",
+          "commit": "7e979b0cba45dc103bcad083c2a688941cd77b8a",
+          "date": "2026-09-30",
+          "command": "GitHub Actions e2e-tests.yaml workflow_dispatch evaluation=sustained (5 legs)",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36707861123"
         }
       ],
       "tasks": [
@@ -2918,6 +3032,22 @@
           "command": "GitHub Actions e2e-tests.yaml (workflow_dispatch), legs replication (continuous-replication-purge, continuous-replication-limits) and continuous-replication",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/35570216917"
+        },
+        {
+          "check": "CHECK-20",
+          "commit": "4c78abac0cdb31c82255012b4c7d3837034aa3ab",
+          "date": "2026-09-30",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of 7e979b0 onto flare-operator; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36707836842"
+        },
+        {
+          "check": "CHECK-20",
+          "commit": "7e979b0cba45dc103bcad083c2a688941cd77b8a",
+          "date": "2026-09-30",
+          "command": "GitHub Actions e2e-tests.yaml workflow_dispatch evaluation=sustained (5 legs)",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36707861123"
         }
       ],
       "tasks": [

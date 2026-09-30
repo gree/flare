@@ -47,9 +47,13 @@ that gap. Record the agreed failure model and RPO/RTO before approval.
   900, ≈+18k/min deficit at 2000, drain 35–43 s). Still define the target rate,
   acceptable replication lag and recovery time from production traffic, and
   re-measure on production-like hardware; the kind figure bounds nothing.
-- Hold a replica offline long enough to force WAL rotation, flush and compaction;
-  prove memory/disk bounds, history-purge classification, rebuild and convergence.
-  A small backlog test or flat disk usage before the first flush is insufficient.
+- Hold a replica offline long enough to force WAL rotation, flush and compaction:
+  measured once on CI (outage evaluation run 1): 150 MB of retained WAL caught up
+  from the cursor in 11 s; 400 MB overshot a 256 MB cap to 499 MB and was still
+  served (RocksDB purges periodically), data dir 1.07 GB, RSS 557 MB. Still
+  needed: the purge interval/overshoot ceiling, the lsn_purged → rebuild path
+  after an actual purge (next run), and the same on production hardware and
+  tmpfs budgets.
 - Measure T17 lock hold time/starvation, read/proxy latency and control-loop
   lease renewal under load, including actual configured memory limits.
 - Measure startup and probes with production-scale data; test backup restoration

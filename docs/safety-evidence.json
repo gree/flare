@@ -2246,7 +2246,8 @@
       "residual_risks": [
         "No continuous WAL replication; adding master LSNs alone does not establish durable acknowledgement semantics.",
         "Replication is still asynchronous end to end: the master answers the client before the follower has applied, so continuous WAL replication removes the SILENT-gap failure, not the loss window on master death (design §5.3; the FSM logs an unproven promotion as NOT LOSS-FREE).",
-        "RESOURCE FLOOR, found by the scale evaluation (report 2026-09-21-saf10d-t6-t9-scale.txt): flared's RocksDB defaults budget ≈704 MB (512 MB block cache + 3 × 64 MB write buffers) before flared's own memory, so a 512Mi container is OOMKilled under write load (observed, exit 137 at 2m42s of a 2M-key load). The shipped chart's node default is limits.memory 1Gi and the FlareCluster CRD exposes no blockCacheSizeMb / writeBufferSizeMb / maxWriteBufferNumber, so the floor cannot be lowered through the chart. Not fixed in this PR."
+        "RESOURCE FLOOR, found by the scale evaluation (report 2026-09-21-saf10d-t6-t9-scale.txt): flared's RocksDB defaults budget ≈704 MB (512 MB block cache + 3 × 64 MB write buffers) before flared's own memory, so a 512Mi container is OOMKilled under write load (observed, exit 137 at 2m42s of a 2M-key load). The shipped chart's node default is limits.memory 1Gi and the FlareCluster CRD exposes no blockCacheSizeMb / writeBufferSizeMb / maxWriteBufferNumber, so the floor cannot be lowered through the chart. Not fixed in this PR.",
+        "WAL retention cap overshoot (from the SAF-10 long-outage evaluation, report 2026-09-30-sustained-after-more-fix.md): with a trailing follower the archive grew to 499 MB past a 256 MB cap before any purge; on tmpfs this is RAM. The chart's tmpfs guidance ('cap it well under tmpfs.sizeLimit') must account for the overshoot, not just the cap."
       ],
       "code": [
         {
@@ -2433,7 +2434,8 @@
         "THROUGHPUT CEILING (scale run 5, 2M keys): the follower requests at most repl-follow-max-batches (256) batches per poll every repl-follow-poll-interval-usec (200 ms), so the stream cannot exceed ≈1,280 changes/s at the default settings — measured 650-1,270 changes/s while draining. Forwarding carried the data throughout (wal_applied=0, wal_skipped=2,008,010), but a trailing applied position withholds replica reads (lag bound), keeps a repair entry open and lengthens the post-cut catch-up. Whether the stream keeps up at a steady write rate is the separate continuous-replication-sustained evaluation; the defaults are not tuned in this PR.",
         "Boot cost of the exact key scan at open: 0.48-0.98 us/key measured at 0.8M / 1.5M / 2.0M keys (854 / 1503 / 960 ms); a 15.8M-key DB extrapolates to ≈8-16 s of extra start-up. Extrapolation, not a measurement.",
         "SUSTAINED-RATE RESULT (evaluation run 1): the stream stays exactly caught up (lag 0 every window) at 300 and 900 keys/s and FALLS BEHIND monotonically at 2000 keys/s (lag 35,265 → 294,615 over four minutes), draining in 442 s once the load stops. Content never diverges — forwarding carries every write — so this is a POSITION deficit: withheld replica reads, repair entries open longer, longer post-cut catch-up. The run does NOT establish disk behaviour: no memtable flush occurred (768k small records under a 64 MB write buffer), so the flat WAL and data-dir figures are an artefact of the window, and WAL retention for a TRAILING follower was never exercised.",
-        "SUSTAINED-RATE RESULT after the MORE scheduling fix (7e979b0, CI run 36707861123, report 2026-09-30-sustained-after-more-fix.md): lag 0 at 300 and 900 keys/s; at 2000 keys/s the stream held for ~90 s then fell behind at ≈+18k/min (≈1,700 changes/s sustained; lag 67,016 after four minutes, drained in 35-43 s). Run 1's 294,615 / 442 s are history of the old code. Disk behaviour is still not established (no flush in the window)."
+        "SUSTAINED-RATE RESULT after the MORE scheduling fix (7e979b0, CI run 36707861123, report 2026-09-30-sustained-after-more-fix.md): lag 0 at 300 and 900 keys/s; at 2000 keys/s the stream held for ~90 s then fell behind at ≈+18k/min (≈1,700 changes/s sustained; lag 67,016 after four minutes, drained in 35-43 s). Run 1's 294,615 / 442 s are history of the old code. Disk behaviour is still not established (no flush in the window).",
+        "LONG-OUTAGE RESULT, run 1 (c33fe5d, CI 36725778961): phase A (150 MB while cut, three flushes) caught up from the cursor in 11 s with no reconstruction. Phase B: the archived WAL reached 499 MB against a 256 MB WAL_size_limit_MB and was still fully served when healed a few minutes later — RocksDB purges the archive on a periodic check, so the cap is an eventual bound with an overshoot of at least write-rate × purge-interval (≥243 MB here). Capacity must be budgeted as cap + overshoot; the purge interval itself is measured in the next run."
       ],
       "code": [
         {
@@ -2484,7 +2486,7 @@
         {
           "id": "CHECK-16-limits",
           "kind": "scenario",
-          "procedure": "E2E continuous-replication-limits (T9, bounded): the far-behind replica converges from the position in bounded polls (largest 1 s advance recorded), no reconstruction, master RSS growth within 128 MB. E2E continuous-replication-scale (evaluation, FLARE_E2E_SCALE_KEYS): follower convergence after a pipelined load, exact key scan duration at open after a kill -9 on a PVC, operator probe timing at that size. E2E continuous-replication-sustained (evaluation, FLARE_E2E_SUSTAINED): three steady write rates for four minutes each, sampling lag, both RSS figures, the master's WAL and data-dir bytes and the tombstone count every 30 s, then the drain after the load stops.",
+          "procedure": "E2E continuous-replication-limits (T9, bounded): the far-behind replica converges from the position in bounded polls (largest 1 s advance recorded), no reconstruction, master RSS growth within 128 MB. E2E continuous-replication-scale (evaluation, FLARE_E2E_SCALE_KEYS): follower convergence after a pipelined load, exact key scan duration at open after a kill -9 on a PVC, operator probe timing at that size. E2E continuous-replication-sustained (evaluation, FLARE_E2E_SUSTAINED): three steady write rates for four minutes each, sampling lag, both RSS figures, the master's WAL and data-dir bytes and the tombstone count every 30 s, then the drain after the load stops. E2E continuous-replication-outage (evaluation, FLARE_E2E_OUTAGE): ~150 MB then ~400 MB written while the replica is cut under a 256 MB WAL cap; phase A must catch up from the cursor with no reconstruction, phase B must be told lsn_purged once the archive has been purged and be rebuilt; live/archived WAL, SST count, data dir and RSS sampled every 50 MB.",
           "references": [
             {
               "path": "flare_operator/FlareOperator/E2E/Tests/ContinuousReplicationLimits.lean",
@@ -2593,6 +2595,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of 12886a4; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36719136539"
+        },
+        {
+          "check": "CHECK-16-limits",
+          "commit": "c33fe5db7622b4aa643c8e9ae1d044b4141cc06b",
+          "date": "2026-09-30",
+          "command": "GitHub Actions e2e-tests.yaml workflow_dispatch evaluation=outage, leg continuous-replication",
+          "result": "fail",
+          "report": "docs/reports/2026-09-30-sustained-after-more-fix.md"
         }
       ],
       "tasks": [

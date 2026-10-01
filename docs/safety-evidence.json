@@ -4167,7 +4167,8 @@
         "LONG-OUTAGE run 2 (0e49cc7, CI 36731930552): on an IDLE master the archived WAL stayed at 499 MB (cap 256 MB) for 22 minutes with no purge; the purge is driven by flush/compaction cleanup, not by time. Capacity: a master that goes quiet after a burst keeps the overshoot until it writes again.",
         "LONG-OUTAGE run 3 (6e757cb, CI 36741586970): with writes continuing past the cap, one flush cut the archive 499 → 250 MB within 172 s; the follower whose cursor lay in the purged range was told lsn_purged and rebuilt by snapshot in 59 s (items equal, pod unchanged). Archive budget = cap + bytes written between flush/compaction cleanups; an idle master keeps the overshoot (run 2).",
         "2026-10-02 (manual run 36899086870, evaluation=scale-15m8), classified as HARNESS + capacity: the loader stored 4.6M of 15.8M keys in 3573 s (~1300 keys/s) and then the E2E debug pod exited (it ran `sleep 3600`); every later chunk and every stats read went through the dead pod, so 'master items 0' and 'no Active P0 master' are artifacts, not a master failure (restartCount 0). Fix: debug pod sleeps 86400 s. At this loader rate 15.8M keys needs ~3.4 h, beyond the 240 min evaluation limit with setup; until the loader is faster, scale-2m is the feasible profile. Production-scale startup/probe timing remains unmeasured.",
-        "2026-10-02 measurements on kind. Sustained run 36914118326: lag 0 at 300 and 900 writes/s, growing at 2000/s (62k->274k). T17 control loop: mean reconcile pass ~2.2 s at 300/s, ~2.5 s at 900/s, ~3.4 s at 2000/s; operator lease age at most 8 s of its 15 s duration. T17 get latency NOT measured: the busybox debug pod has no nanosecond clock (the probe now runs inside the flared pod over one connection; re-run pending). tmpfs outage run 36914124394: phase A 150 MB caught up in 11 s; phase B archive 499 MB -> 250 MB after one flush, lsn_purged, snapshot rebuild 59 s; data high-water 1.07 GB on tmpfs + RSS 0.54 GB, within the 4Gi limit."
+        "2026-10-02 measurements on kind. Sustained run 36914118326: lag 0 at 300 and 900 writes/s, growing at 2000/s (62k->274k). T17 control loop: mean reconcile pass ~2.2 s at 300/s, ~2.5 s at 900/s, ~3.4 s at 2000/s; operator lease age at most 8 s of its 15 s duration. T17 get latency NOT measured: the busybox debug pod has no nanosecond clock (the probe now runs inside the flared pod over one connection; re-run pending). tmpfs outage run 36914124394: phase A 150 MB caught up in 11 s; phase B archive 499 MB -> 250 MB after one flush, lsn_purged, snapshot rebuild 59 s; data high-water 1.07 GB on tmpfs + RSS 0.54 GB, within the 4Gi limit.",
+        "2026-10-02 measurements on kind (bound nothing for production hardware). T17 get latency (run 36918289515, from inside the master pod over one persistent connection, includes two `date` process starts per sample): p50 2.2-3.6 ms and p99 50-98 ms at 300/900/2000 writes/s, replica and master alike; the follow lag again 0 at 300/900/s and growing at 2000/s; reconcile 2.1-3.1 s per pass, lease age <= 8 s of 15 s. Scale (run 36914128803, 2M keys): load 1542 s at the loader's ~1300 keys/s; the follower converged only 1060 s (17.7 min) AFTER the load ended (forward_applied 1.95M, wal_applied 48k): at that sustained rate the follower fell behind and needed ~18 min to drain; kill -9 reopen exact key scan 2M keys in 1.46 s (linear estimate ~11.5 s at 15.8M); operator probe max 3.46 s."
       ],
       "code": [
         {
@@ -4599,6 +4600,22 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of 022c11b; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36922262408"
+        },
+        {
+          "check": "CHECK-16-limits",
+          "commit": "cf90600c6f36f73df46cf3d22737672cb63ac595",
+          "date": "2026-10-02",
+          "command": "GitHub Actions workflow_dispatch evaluation=sustained suites=continuous-replication-sustained (run 36918289515)",
+          "result": "pass",
+          "report": "docs/reports/2026-10-02-ci-36918289515-sustained-e2e.log"
+        },
+        {
+          "check": "CHECK-16-limits",
+          "commit": "67fa13483839216e60c31dc911e953978183cf3d",
+          "date": "2026-10-02",
+          "command": "GitHub Actions workflow_dispatch evaluation=scale-2m suites=continuous-replication-scale (run 36914128803)",
+          "result": "pass",
+          "report": "docs/reports/2026-10-02-ci-36914128803-scale-2m-e2e.log"
         }
       ],
       "tasks": [

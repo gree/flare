@@ -83,8 +83,22 @@ that gap. Record the agreed failure model and RPO/RTO before approval.
   and an archive budget of cap + bytes-between-cleanups in the sizing rule.
 - Measure T17 lock hold time/starvation, read/proxy latency and control-loop
   lease renewal under load, including actual configured memory limits.
+  Measured on kind on 2026-10-02 (run 36918289515):
+  - get p50 2.2–3.6 ms and p99 50–98 ms, the same on replica and master;
+  - reconcile 2.1–3.1 s per pass;
+  - lease age at most 8 s of 15 s.
+
+  Lock hold time itself is not instrumented. Re-measure on production
+  hardware.
 - Measure startup and probes with production-scale data; test backup restoration
   and large failover rebuilds rather than extrapolating small-dataset timing.
+  At 2M keys on kind (run 36914128803):
+  - the reopen exact scan took 1.46 s;
+  - the probe took at most 3.46 s;
+  - the follower needed 17.7 min after a 26 min load to drain.
+
+  Size follow throughput against the real write rate. 15.8M keys needs a
+  faster loader.
 - Stage both repair triggers concurrently and lagged/unknown promotion and
   deletion gates. Record failures, not just successful reruns.
 

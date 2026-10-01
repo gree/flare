@@ -146,7 +146,10 @@ jobs:
   e2e-not-run:
     needs: plan
     if: needs.plan.outputs.run_e2e == 'false'
-    name: "E2E NOT RUN (docs-only push; tests passed in run ${{ needs.plan.outputs.prev_run }})"
+    # Static name: GitHub shows a skipped job's name unevaluated, so an
+    # expression here appeared as a raw ${{ }} on every code push. The run
+    # that covers the commit is named in this job's summary and notice.
+    name: "E2E NOT RUN (docs-only push)"
     runs-on: ubuntu-latest
     steps:
       - name: Explain the skip

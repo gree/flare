@@ -24,7 +24,7 @@ on:
       evaluation:
         description: 'Optional evaluation on the continuous-replication leg (PR runs use none)'
         type: choice
-        options: [none, sustained, outage, scale-2m, scale-15m8]
+        options: [none, sustained, outage, outage-tmpfs, scale-2m, scale-15m8]
         default: none
       suites:
         description: 'Optional: run ONLY these suites (comma-separated, e.g. topology-authority) in one leg; empty = full matrix'
@@ -83,7 +83,7 @@ jobs:
             {"group":"breaker-migration","suites":"circuit-breaker,operator-restart,blue-green-migration"},
             {"group":"authority","suites":"topology-authority,resync-failure-self-demote,snapshot-push-seed,partition-reduction"},
             {"group":"repair","suites":"replica-repair,prepare-evidence,native-metrics"},
-            {"group":"continuous-replication","suites":"continuous-replication,continuous-replication-scale,continuous-replication-sustained,continuous-replication-outage"}
+            {"group":"continuous-replication","suites":"continuous-replication,continuous-replication-scale,continuous-replication-sustained,continuous-replication-outage,continuous-replication-outage-tmpfs"}
           ]'
           all=$(echo "$default" | jq -r '[.[].suites] | join(",")')
           if [ -n "$SUITES_INPUT" ]; then
@@ -405,6 +405,7 @@ jobs:
             case "$EVALUATION" in
               sustained) export FLARE_E2E_SUSTAINED=1; limit=10800 ;;
               outage) export FLARE_E2E_OUTAGE=1; limit=10800 ;;
+              outage-tmpfs) export FLARE_E2E_OUTAGE_TMPFS=1; limit=10800 ;;
               scale-2m) export FLARE_E2E_SCALE_KEYS=2000000; limit=10800 ;;
               scale-15m8) export FLARE_E2E_SCALE_KEYS=15800000; limit=10800 ;;
               none) ;;

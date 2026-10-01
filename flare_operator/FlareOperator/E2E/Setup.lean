@@ -42,6 +42,13 @@ structure ClusterConfig where
       never cover. Mirrors the production example
       helm/flare-operator/examples/flare-cluster-persistent.yaml. -/
   usePvc : Bool := false
+  /-- Keep flared data on tmpfs: a memory-backed emptyDir (medium: Memory)
+      mounted where the PVC would be. Mirrors a production tmpfs cluster:
+      the data counts against the pod's memory, survives a container
+      restart inside the pod, and is gone when the pod is deleted.
+      Mutually exclusive with usePvc. -/
+  useTmpfs : Bool := false
+  tmpfsSize : String := "2Gi"
   /-- flared container memory limit / request. The default fits the small
       E2E datasets; the scale evaluation raises it (RocksDB's block cache
       plus a 64 MB write buffer OOM-killed a 512Mi master under a 2M-key
@@ -201,12 +208,13 @@ def statefulSetYaml (cfg : ClusterConfig) : String :=
   -- with an empty data directory (TCH stores a single `.hdb` file; RocksDB
   -- stores a directory). WITH a PVC the whole point is that data survives
   -- pod recreation, so we only mkdir and never wipe.
-  let dataDir := if cfg.usePvc then "/data/flare" else "/tmp/flare"
+  let persistent := cfg.usePvc || cfg.useTmpfs
+  let dataDir := if persistent then "/data/flare" else "/tmp/flare"
   -- RESTORE hook (PVC only): if the marker file exists it names a checkpoint
   -- directory (created by the flared `backup` op, a complete RocksDB dir);
   -- replace the live DB with it and consume the marker, then start flared.
   -- Restore procedure: write the marker on each pod's PVC, delete the pods.
-  let prep := if cfg.usePvc then
+  let prep := if persistent then
       s!"if [ -f {dataDir}/RESTORE ]; then SRC=$(cat {dataDir}/RESTORE) && rm -rf {dataDir}/flare.rocksdb && cp -a $SRC {dataDir}/flare.rocksdb && rm -f {dataDir}/RESTORE; fi; mkdir -p {dataDir}; rm -f {dataDir}/flared.pid"
     else
       s!"rm -rf {dataDir}/*.hdb {dataDir}/*.hdb.wal {dataDir}/rocksdb && mkdir -p {dataDir} && rm -f {dataDir}/flared.pid"
@@ -221,9 +229,14 @@ def statefulSetYaml (cfg : ClusterConfig) : String :=
               exec:
                 command: [\"sh\", \"-c\", \"sleep {cfg.drainSeconds}\"]"
     else ""
-  let pvcMount := if cfg.usePvc then "
+  let pvcMount := if persistent then "
             - name: data
               mountPath: /data" else ""
+  let tmpfsVolume := if cfg.useTmpfs && !cfg.usePvc then s!"
+        - name: data
+          emptyDir:
+            medium: Memory
+            sizeLimit: {cfg.tmpfsSize}" else ""
   let pvcTemplates := if cfg.usePvc then s!"
   volumeClaimTemplates:
     - metadata:
@@ -342,7 +355,7 @@ spec:
       volumes:
         - name: flared-config
           configMap:
-            name: {cluster}-config{pvcTemplates}"
+            name: {cluster}-config{tmpfsVolume}{pvcTemplates}"
 
 /-- Generate FlareCluster CRD YAML. -/
 def flareClusterCrdYaml (cfg : ClusterConfig) : String :=

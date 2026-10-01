@@ -758,6 +758,12 @@ def sustainedSuite : TestSuite := {
 -- equality, no master restart and the disk ceiling; the numbers are the
 -- product.
 
+/-- The outage evaluation on tmpfs (FLARE_E2E_OUTAGE_TMPFS): the same two
+    phases with the data dir in a memory-backed emptyDir. The WAL cap is the
+    values.yaml rule of thumb for tmpfs (well under the tmpfs size), and the
+    memory limit has to hold the RocksDB floor PLUS the data. -/
+private def outageTmpfs : IO Bool := return (← IO.getEnv "FLARE_E2E_OUTAGE_TMPFS").isSome
+
 private def outageCfg : ClusterConfig := {
   name := "cont-repl-outage"
   «namespace» := "flare-cont-repl-outage"
@@ -835,22 +841,22 @@ private def Ctx.writeUnderCut (c : Ctx) (mPod mIp : String) (pfx : String) (star
     IO.eprintln s!"# under the cut, after {(r + 1) * 50} MB: {d.line}; master latest={(← c.statNat mIp "rocksdb_latest_sequence_number").getD 0}"
   return (stored, k, hw)
 
-def outageSuite : TestSuite := {
-  name := "continuous-replication-outage"
+def mkOutageSuite (suiteName : String) (cfg : ClusterConfig) (gate : IO Bool) (gateName : String) : TestSuite := {
+  name := suiteName
   setup := do
-    if ← outageOn then
-      deployCluster outageCfg
+    if ← gate then
+      deployCluster cfg
       IO.eprintln "# Waiting 50s grace period for operator reconciliation..."
       IO.sleep 50000
-    else IO.eprintln "# FLARE_E2E_OUTAGE unset: the long-outage evaluation deploys nothing and its tests are skipped"
+    else IO.eprintln s!"# {gateName} unset: the long-outage evaluation deploys nothing and its tests are skipped"
   teardown := do
-    if ← outageOn then cleanupCluster outageCfg
+    if ← gate then cleanupCluster cfg
   tests :=
-    let c : Ctx := { cfg := outageCfg }
+    let c : Ctx := { cfg := cfg }
     [
     { name := "outage phase A: ~150 MB written while cut under a 256 MB WAL cap — several flushes, WAL retained; on healing the follower catches up from its cursor (no rebuild); disk/RSS high-water recorded"
       run := do
-        if !(← outageOn) then return .skip "FLARE_E2E_OUTAGE unset (evaluation only)"
+        if !(← gate) then return .skip s!"{gateName} unset (evaluation only)"
         match ← c.pair with
         | .error e => return .fail e
         | .ok (mPod, mIp, sPod, sIp) =>
@@ -888,7 +894,7 @@ def outageSuite : TestSuite := {
 
     { name := "outage phase B: ~400 MB written while cut, past the 256 MB WAL cap — archived WAL purged; the follower declares needs_rebuild/lsn_purged, is rebuilt and converges; disk/RSS high-water recorded"
       run := do
-        if !(← outageOn) then return .skip "FLARE_E2E_OUTAGE unset (evaluation only)"
+        if !(← gate) then return .skip s!"{gateName} unset (evaluation only)"
         match ← c.pair with
         | .error e => return .fail e
         | .ok (mPod, mIp, sPod, sIp) =>
@@ -959,5 +965,25 @@ def outageSuite : TestSuite := {
           return .pass }
   ]
 }
+
+def outageSuite : TestSuite :=
+  mkOutageSuite "continuous-replication-outage" outageCfg outageOn "FLARE_E2E_OUTAGE"
+
+private def outageTmpfsCfg : ClusterConfig := {
+  outageCfg with
+  name := "cont-repl-outage-tmpfs"
+  «namespace» := "flare-cont-repl-outage-tmpfs"
+  debugPod := "debug-cont-repl-outage-tmpfs"
+  usePvc := false
+  useTmpfs := true
+  tmpfsSize := "3Gi"
+  -- the limit must hold the RocksDB floor (64 + 2 x 64 x 3 MiB) PLUS the data
+  flaredMemoryLimit := "4Gi"
+  flaredMemoryRequest := "2Gi"
+}
+
+/-- Plan item 9: the outage evaluation with the data dir on tmpfs. -/
+def outageTmpfsSuite : TestSuite :=
+  mkOutageSuite "continuous-replication-outage-tmpfs" outageTmpfsCfg outageTmpfs "FLARE_E2E_OUTAGE_TMPFS"
 
 end FlareOperator.E2E.Tests.ContinuousReplicationLimits

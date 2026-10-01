@@ -82,3 +82,28 @@ consequences:
 - PR runs read the PR-scope cache, so the cached case is measured on the
   next PR run.
 - The operator image build now retries up to three times.
+
+## Cached case measured — PR run 36866790112 on fcbf98d
+
+The flared images came from the cache, at about 6 s each against 3-6 min
+before. Seven legs passed and finished in 18.5-22.7 min:
+
+| Leg | Finished after |
+|---|---|
+| continuous-replication | 18.5 min |
+| replication | 19.4 min |
+| topology | 19.9 min |
+| authority | 21.3 min |
+| failover-data | 21.6 min |
+| wal-recovery | 21.9 min |
+| repair | 22.7 min |
+
+A full run with the C++ sources unchanged takes about 23 min, against about
+48 before, which is the estimate.
+
+breaker-migration failed after 3 min for an environment reason, before any
+test ran. Docker Hub returned HTTP 503 while buildx resolved `ubuntu:noble`.
+Even a cached build resolves the base image's manifest. No test result
+exists for that leg, so CHECK-09 has no record from this run. Each flared
+image build now retries once after 30 s. The operator image build already
+retries three times.

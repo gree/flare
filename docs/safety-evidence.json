@@ -764,6 +764,22 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (new 8-leg layout, all green, 198 tests) — PR #144 merge revision of 477fc22; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36860948511"
+        },
+        {
+          "check": "CHECK-01",
+          "commit": "6fc5a5348ebfa588e4bc20059c1e252f065740c6",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, breaker-migration did not run its tests: Docker Hub 503 while building an image) — PR #144 merge revision of fcbf98d; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36866790112"
+        },
+        {
+          "check": "CHECK-01-startup",
+          "commit": "6fc5a5348ebfa588e4bc20059c1e252f065740c6",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, breaker-migration did not run its tests: Docker Hub 503 while building an image) — PR #144 merge revision of fcbf98d; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36866790112"
         }
       ],
       "tasks": [
@@ -1296,6 +1312,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (new 8-leg layout, all green, 198 tests) — PR #144 merge revision of 477fc22; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36860948511"
+        },
+        {
+          "check": "CHECK-03-follow",
+          "commit": "6fc5a5348ebfa588e4bc20059c1e252f065740c6",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, breaker-migration did not run its tests: Docker Hub 503 while building an image) — PR #144 merge revision of fcbf98d; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36866790112"
         }
       ],
       "tasks": [
@@ -1790,6 +1814,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (new 8-leg layout, all green, 198 tests) — PR #144 merge revision of 477fc22; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36860948511"
+        },
+        {
+          "check": "CHECK-04-follow",
+          "commit": "6fc5a5348ebfa588e4bc20059c1e252f065740c6",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, breaker-migration did not run its tests: Docker Hub 503 while building an image) — PR #144 merge revision of fcbf98d; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36866790112"
         }
       ],
       "tasks": [
@@ -2303,6 +2335,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (new 8-leg layout, all green, 198 tests) — PR #144 merge revision of 477fc22; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36860948511"
+        },
+        {
+          "check": "CHECK-06",
+          "commit": "6fc5a5348ebfa588e4bc20059c1e252f065740c6",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, breaker-migration did not run its tests: Docker Hub 503 while building an image) — PR #144 merge revision of fcbf98d; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36866790112"
         }
       ],
       "tasks": [
@@ -3446,6 +3486,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (new 8-leg layout, all green, 198 tests) — PR #144 merge revision of 477fc22; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36860948511"
+        },
+        {
+          "check": "CHECK-16",
+          "commit": "6fc5a5348ebfa588e4bc20059c1e252f065740c6",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, breaker-migration did not run its tests: Docker Hub 503 while building an image) — PR #144 merge revision of fcbf98d; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36866790112"
         }
       ],
       "tasks": [
@@ -3694,6 +3742,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (new 8-leg layout, all green, 198 tests) — PR #144 merge revision of 477fc22; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36860948511"
+        },
+        {
+          "check": "CHECK-17",
+          "commit": "6fc5a5348ebfa588e4bc20059c1e252f065740c6",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, breaker-migration did not run its tests: Docker Hub 503 while building an image) — PR #144 merge revision of fcbf98d; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36866790112"
         }
       ],
       "tasks": [
@@ -4191,6 +4247,22 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (new 8-leg layout, all green, 198 tests) — PR #144 merge revision of 477fc22; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36860948511"
+        },
+        {
+          "check": "CHECK-18",
+          "commit": "6fc5a5348ebfa588e4bc20059c1e252f065740c6",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, breaker-migration did not run its tests: Docker Hub 503 while building an image) — PR #144 merge revision of fcbf98d; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36866790112"
+        },
+        {
+          "check": "CHECK-18-purge",
+          "commit": "6fc5a5348ebfa588e4bc20059c1e252f065740c6",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, breaker-migration did not run its tests: Docker Hub 503 while building an image) — PR #144 merge revision of fcbf98d; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36866790112"
         }
       ],
       "tasks": [
@@ -4542,6 +4614,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (new 8-leg layout, all green, 198 tests) — PR #144 merge revision of 477fc22; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36860948511"
+        },
+        {
+          "check": "CHECK-20",
+          "commit": "6fc5a5348ebfa588e4bc20059c1e252f065740c6",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, breaker-migration did not run its tests: Docker Hub 503 while building an image) — PR #144 merge revision of fcbf98d; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36866790112"
         }
       ],
       "tasks": [

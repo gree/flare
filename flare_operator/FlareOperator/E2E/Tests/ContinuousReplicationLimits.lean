@@ -225,6 +225,13 @@ def purgeSuite : TestSuite := {
           IO.sleep 8000
           IO.eprintln s!"# under the cut: {big}/40 keys of 100 kB written (master latest {mLatest}, replica applied {applied0}); waited 8 s for the WAL purge"
           if big < 40 then heal mIp sIp; return .fail s!"only {big}/40 big keys were stored under the cut: no history to purge was produced"
+          -- Keep the link cut until the master has COUNTED dropped forwards
+          -- (a forward counts only once its retries are exhausted; CI
+          -- 36904379135/36909742559 healed after 8 s and the counter stayed
+          -- 0, so only the follower route fired). Then both triggers race.
+          let dropsSeen ← waitForCondition "master counts dropped forwards while cut" 120 do
+            return (← c.statNat mIp "proxy_write_dropped").getD 0 > drops0
+          IO.eprintln s!"# drop route armed before the heal: {dropsSeen} (proxy_write_dropped {drops0}→{(← c.statNat mIp "proxy_write_dropped").getD 0})"
           heal mIp sIp
           let declared ← waitForCondition "follower declares needs_rebuild with reason lsn_purged" 120 do
             return (← c.statStr sIp "repl_follow_state") == some "needs_rebuild"

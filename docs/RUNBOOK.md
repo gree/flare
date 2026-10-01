@@ -402,6 +402,47 @@ Monitoring: alert when `time() - rocksdb_last_backup_epoch` exceeds twice
 the backup interval (exposed via flared `stats`; needs a memcached
 exporter).
 
+## Sizing flared memory and storage {#sizing}
+
+These are floors, not bounds. The kind measurements bound nothing for
+production hardware.
+
+**Memory per flared pod.**
+
+    floor = blockCacheSizeMb + 2 × writeBufferSizeMb × maxWriteBufferNumber
+
+The 2 is the column families: default plus replication meta. The defaults
+are 512 + 2 × 64 × 3 = 896 MiB. On top of the floor come compaction,
+continuous-replication buffers, allocator fragmentation (`MALLOC_ARENA_MAX`
+is set) and, **on tmpfs, the data itself**. A tmpfs emptyDir counts against
+the pod's memory limit. The chart fails the render when the floor reaches
+`cluster.resources.limits.memory`. It warns above 70% of the limit, and when
+floor + `tmpfs.sizeLimit` exceeds it. Measured once on kind during the outage
+evaluation: RSS high-water 620 MB with a 64 MB block cache under a 2Gi limit.
+A 512Mi limit was OOM-killed in the scale evaluation.
+
+**WAL archive (retention for followers).**
+
+    archive budget ≈ walSizeLimitMb + bytes written between two cleanups
+
+The cap is enforced when a flush or compaction runs cleanup, not by time. On
+an idle master the archive stayed at 499 MB under a 256 MB cap for 22 min.
+One flush cut it to 250 MB. Size the data volume for the budget above, not
+for the cap. Outages within the retained WAL catch up from the cursor: 150 MB
+took 11 s on kind. Longer outages lose the history (`lsn_purged`), and the
+follower is rebuilt by snapshot: 59 s for about 1 GB on kind.
+
+**Data volume.**
+
+    volume ≥ live data × compaction headroom (about 2×) + archive budget
+
+On tmpfs, keep `walSizeLimitMb` around 5% of `tmpfs.sizeLimit` and set a
+short `walTtlSeconds` (see values.yaml).
+
+**Follow throughput.** Lag stayed at 0 at 900 writes/s and grew at 2000
+writes/s on kind. Measure on production-like hardware against the real write
+rate before relying on reads from followers.
+
 ## Scaling
 
 - Scale OUT (more partitions/replicas): edit the FlareCluster spec;

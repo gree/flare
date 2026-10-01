@@ -107,3 +107,21 @@ Even a cached build resolves the base image's manifest. No test result
 exists for that leg, so CHECK-09 has no record from this run. Each flared
 image build now retries once after 30 s. The operator image build already
 retries three times.
+
+## First complete cached run — PR run 36869793917 on fd76eed: all 8 legs PASS in 22.1 min
+
+All 198 tests passed. Every leg finished between 18.0 min (continuous-replication)
+and 22.1 min (wal-recovery). The breaker tripped 10 s after the scale-down.
+The image retries were in place and none was needed.
+
+| Case | Before | Measured |
+|---|---|---|
+| Docs-only push | ~48 min | skipped (e188ee5) |
+| C++ unchanged, cache hit | ~48 min | 22.1 min (36869793917) |
+| Empty cache, or C++ changed | ~48 min | 32.3 min (36860948511) |
+| Single suite, manual | ~48 min | not yet measured |
+
+A manual run on the branch cannot read the PR-scope cache, so a single-suite
+run rebuilds the flared images. Expect about 10 min of setup plus the suite
+until the branch-scope cache is written. The topology leg of a full manual
+run writes it.

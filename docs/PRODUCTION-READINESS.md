@@ -2,7 +2,7 @@
 
 Status as of 2026-10-01: development/integration, not production-approved.
 PR #144 integration and production WAL enablement are separate decisions.
-Latest inspected baseline `630ccec`: PR E2E 36820029377 (all five legs, tested at
+Latest inspected baseline `fd76eed`: PR E2E 36869793917 (new 8-leg layout, all 198 tests, merge rev 13f8fe9) after the 2026-10-01 fixes (balance persisted across restart, SAF-11 breaker count, drain proof of the follower, startup-republish E2E); earlier baseline: `630ccec`: PR E2E 36820029377 (all five legs, tested at
 the merge revision 9dc131f), 36816259807 at 0d29589 (merge rev b706686) and
 36812371158 at e611531 (merge rev 80e466b), three green matrices in a row on
 docs-only commits; the breaker tripped in 5 s, 5 s and 20 s in these runs —

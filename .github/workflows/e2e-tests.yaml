@@ -1,4 +1,8 @@
 name: E2E Tests
+# The base commit is part of the title so a later docs-only push can check
+# that the previous run was tested against the SAME base (the title is fixed
+# when the run is created; the API's pull_requests[].base is the current one).
+run-name: "E2E Tests (base ${{ github.event.pull_request.base.sha || 'none' }})"
 
 on:
   # Feature branches are covered by their pull_request runs; running the same
@@ -38,10 +42,14 @@ permissions:
 jobs:
   plan:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read   # read the previous run's conclusion and title
     outputs:
       run_e2e: ${{ steps.plan.outputs.run_e2e }}
       matrix: ${{ steps.plan.outputs.matrix }}
       all_suites: ${{ steps.plan.outputs.all_suites }}
+      prev_run: ${{ steps.plan.outputs.prev_run }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -56,6 +64,9 @@ jobs:
           BEFORE: ${{ github.event.before }}
           AFTER: ${{ github.event.pull_request.head.sha }}
           SUITES_INPUT: ${{ inputs.suites }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           # Legs balanced by measured suite time (CI 36846255460, minutes):
@@ -80,24 +91,74 @@ jobs:
           else
             matrix=$(echo "$default" | jq -c .)
           fi
-          # Skip the matrix only when THIS push touched nothing but docs. The
-          # pull_request paths filter cannot do this: it looks at the whole
-          # PR diff. Anything uncertain (first push, force-push to an unknown
-          # base, other events) runs.
+          # Skip the matrix only when ALL of these hold, otherwise run it:
+          #  1. this push (before..after) touched nothing but docs/ or *.md;
+          #     the pull_request paths filter cannot tell, it looks at the
+          #     whole PR diff;
+          #  2. the run for the previous push (head = before) completed with
+          #     conclusion success, so a docs push never turns a failing or
+          #     unfinished PR head green;
+          #  3. that run was for the same base commit (from its title), so
+          #     the merge revision has no base change the earlier run did
+          #     not test.
+          # A skipped earlier run satisfies 2 and 3 only because it met the
+          # same rule, so the chain always ends at a run that tested this code.
           run_e2e=true
+          prev_run=""
+          reason="not a docs-only push"
           if [ "$EVENT" = pull_request ] && [ "$ACTION" = synchronize ] && [ -n "$BEFORE" ] \
-             && files=$(git diff --name-only "$BEFORE" "$AFTER" 2>/dev/null) && [ -n "$files" ]; then
-            if ! echo "$files" | grep -qvE '^docs/|\.md$'; then
+             && files=$(git diff --name-only "$BEFORE" "$AFTER" 2>/dev/null) && [ -n "$files" ] \
+             && ! echo "$files" | grep -qvE '^docs/|\.md$'; then
+            prev=$(gh api "repos/$REPO/actions/workflows/e2e-tests.yaml/runs?head_sha=$BEFORE&event=pull_request&per_page=20" \
+              --jq '[.workflow_runs[] | select(.status == "completed")] | sort_by(.created_at) | last | select(. != null) | "\(.conclusion)\t\(.id)\t\(.display_title)"' 2>/dev/null || true)
+            p_concl=$(printf '%s' "$prev" | cut -f1)
+            p_id=$(printf '%s' "$prev" | cut -f2)
+            p_title=$(printf '%s' "$prev" | cut -f3-)
+            if [ -z "$prev" ]; then
+              reason="docs-only push, but no completed run found for the previous head $BEFORE"
+            elif [ "$p_concl" != success ]; then
+              reason="docs-only push, but the previous run $p_id concluded $p_concl"
+            elif [ -z "$BASE" ] || ! printf '%s' "$p_title" | grep -qF "base $BASE"; then
+              reason="docs-only push, but the previous run $p_id was not for base $BASE (title: $p_title)"
+            else
               run_e2e=false
-              echo "::notice::docs-only push ($(echo "$files" | wc -l) file(s)); E2E skipped"
+              prev_run="$p_id"
+              reason="docs-only push; previous run $p_id on $BEFORE passed against the same base $BASE"
             fi
           fi
+          if [ "$run_e2e" = true ]; then
+            echo "::notice::E2E runs: $reason"
+          else
+            echo "::notice::E2E NOT RUN: $reason"
+          fi
+          echo "### E2E plan: run=$run_e2e" >> "$GITHUB_STEP_SUMMARY"
+          echo "$reason" >> "$GITHUB_STEP_SUMMARY"
           {
             echo "run_e2e=$run_e2e"
             echo "matrix=$matrix"
             echo "all_suites=$all"
+            echo "prev_run=$prev_run"
           } >> "$GITHUB_OUTPUT"
           echo "run_e2e=$run_e2e"; echo "matrix=$matrix"
+
+  # Make a skip visible on the PR: without this job a docs-only run is just
+  # "success" and reads as if the tests had passed on this commit.
+  e2e-not-run:
+    needs: plan
+    if: needs.plan.outputs.run_e2e == 'false'
+    name: "E2E NOT RUN (docs-only push; tests passed in run ${{ needs.plan.outputs.prev_run }})"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Explain the skip
+        env:
+          PREV: ${{ needs.plan.outputs.prev_run }}
+        run: |
+          {
+            echo "### E2E NOT RUN on this commit"
+            echo "This push changed only docs/ or *.md. The previous push's run $PREV passed against the same base, and the code under test is unchanged since then."
+            echo "Evidence for this commit is that run, not this one."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice::E2E NOT RUN on this commit; see run $PREV"
 
   e2e-test:
     needs: plan

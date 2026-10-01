@@ -125,3 +125,40 @@ A manual run on the branch cannot read the PR-scope cache, so a single-suite
 run rebuilds the flared images. Expect about 10 min of setup plus the suite
 until the branch-scope cache is written. The topology leg of a full manual
 run writes it.
+
+## Fix (2026-10-02): a docs-only skip can no longer look like a pass
+
+Problem, raised by the user. A skipped run finished in 12-17 s as "success",
+with nothing saying that no tests ran. The skip rule also looked only at the
+push's own files. Two consequences:
+
+- A docs push after a failed run would have turned the PR head green.
+- A docs push after a base-branch change would have skipped merged base code
+  nobody tested.
+
+Neither had happened. The three skipped commits (e188ee5, 6bbdaa5, be382ee)
+each differ from the last tested commit only under `docs/`. The base has not
+moved since 2026-09-26.
+
+Now:
+
+- Every run's title records its base commit:
+  `E2E Tests (base <sha>)`.
+- The matrix is skipped only when three things hold:
+  - the push touched only docs;
+  - the previous push's run completed with conclusion success;
+  - that run's title names the same base.
+  Anything else runs the full matrix. The plan job logs the reason.
+- A skipped run shows a separate check,
+  `E2E NOT RUN (docs-only push; tests passed in run <id>)`, and a step
+  summary pointing to the run whose result covers the commit.
+
+Dry run of the plan step: skip only for "previous run passed, same base".
+It runs for:
+
+- a failed previous run;
+- no previous run;
+- another base;
+- a previous run whose title carries no base, which covers every run before
+  this change;
+- a code push.

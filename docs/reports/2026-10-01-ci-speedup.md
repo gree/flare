@@ -68,3 +68,17 @@ leg rebuilt both flared images. Under the Buildx builder those builds took
 about 5 min each, slower than the 3 min of the classic builder. All 198 tests
 ran, the same count as before, with none failing. The narrowed Dockerfiles
 build. A manual full run follows to measure the cached case.
+
+## Manual run 36864650674: no cache hit, by GitHub's cache scoping; cancelled
+
+Every leg rebuilt the flared images in 3-6 min. The previous PR run had saved
+its layers under `refs/pull/144/merge`. A `workflow_dispatch` run on the
+branch (`refs/heads/...`) cannot read caches of a pull-request ref, so this
+run could only miss. It measured nothing new. Its topology leg failed for an
+environment reason: the Lean release server returned HTTP 504 while the
+operator image build downloaded the toolchain. The run was cancelled. Two
+consequences:
+
+- PR runs read the PR-scope cache, so the cached case is measured on the
+  next PR run.
+- The operator image build now retries up to three times.

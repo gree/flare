@@ -215,8 +215,17 @@ jobs:
           cache-from: type=gha,scope=flare-node-rocksdb
           cache-to: ${{ matrix.group == 'topology' && 'type=gha,mode=max,scope=flare-node-rocksdb' || '' }}
 
+      # Retried: the builder downloads the Lean toolchain from
+      # releases.lean-lang.org, which returned HTTP 504 once (manual run
+      # 36864650674). A real build error fails all three attempts.
       - name: Build operator image
-        run: docker build -t flare-operator:test -f Dockerfile.operator .
+        run: |
+          for attempt in 1 2 3; do
+            docker build -t flare-operator:test -f Dockerfile.operator . && exit 0
+            echo "::warning::operator image build failed (attempt $attempt/3); retrying in 30 s"
+            sleep 30
+          done
+          exit 1
 
       - name: Load images into kind
         run: |

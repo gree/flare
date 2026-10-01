@@ -22,42 +22,95 @@ on:
         type: choice
         options: [none, sustained, outage, scale-2m, scale-15m8]
         default: none
+      suites:
+        description: 'Optional: run ONLY these suites (comma-separated, e.g. topology-authority) in one leg; empty = full matrix'
+        type: string
+        default: ''
 
 permissions:
   contents: read
 
-concurrency:
-  group: e2e-${{ github.workflow }}-${{ github.head_ref || github.ref }}-${{ inputs.evaluation || 'none' }}
-  cancel-in-progress: true
+# Concurrency is per LEG (on the e2e-test job), not per workflow: a
+# docs-only push creates a run whose legs are skipped, and a workflow-level
+# group with cancel-in-progress would have cancelled the running matrix of
+# the previous code push for nothing.
 
 jobs:
-  e2e-test:
+  plan:
     runs-on: ubuntu-latest
-    # The serial suite grew past 2.5h, so it is SHARDED into parallel matrix
-    # legs (each leg: ~30 min setup + its suite group). Groups are balanced
-    # by measured suite duration — circuit-breaker (~22 min) and blue-green
-    # (~15 min) anchor their own leg. Rebalance by editing the lists; add
-    # new suites to a group or `flare_e2e --list` drifts from reality (the
-    # aggregate job below fails if a suite is left out of every group).
+    outputs:
+      run_e2e: ${{ steps.plan.outputs.run_e2e }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+      all_suites: ${{ steps.plan.outputs.all_suites }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Decide what to run
+        id: plan
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          ACTION: ${{ github.event.action }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.event.pull_request.head.sha }}
+          SUITES_INPUT: ${{ inputs.suites }}
+        run: |
+          set -euo pipefail
+          # Legs balanced by measured suite time (CI 36846255460, minutes):
+          # each ~10-16 min of tests, so wall-clock ~= setup + 16 min. The
+          # longest single suites (replica-repair 11.5, continuous-replication
+          # 10.7) bound it from below. The union must equal `flare_e2e --list`
+          # (checked in every leg). Evaluation profiles run in the
+          # continuous-replication leg only.
+          default='[
+            {"group":"topology","suites":"failover,read-balance,scale-out-master,scale-out-slave,scale-in-slave,scale-in-master"},
+            {"group":"replication","suites":"cluster-replication,wal-retention-config,strict-durability,continuous-replication-purge,continuous-replication-limits"},
+            {"group":"wal-recovery","suites":"wal-bandwidth-throttle,wal-incremental-sync,wal-purged-fallback,orphan-scan-purge,terminating-pod-handling"},
+            {"group":"failover-data","suites":"replace-nodes,failover-during-replication,data-survival-failover,pvc-data-survival,backup-restore"},
+            {"group":"breaker-migration","suites":"circuit-breaker,operator-restart,blue-green-migration"},
+            {"group":"authority","suites":"topology-authority,resync-failure-self-demote,snapshot-push-seed,partition-reduction"},
+            {"group":"repair","suites":"replica-repair,prepare-evidence,native-metrics"},
+            {"group":"continuous-replication","suites":"continuous-replication,continuous-replication-scale,continuous-replication-sustained,continuous-replication-outage"}
+          ]'
+          all=$(echo "$default" | jq -r '[.[].suites] | join(",")')
+          if [ -n "$SUITES_INPUT" ]; then
+            matrix=$(jq -cn --arg s "$SUITES_INPUT" '[{"group":"custom","suites":$s}]')
+          else
+            matrix=$(echo "$default" | jq -c .)
+          fi
+          # Skip the matrix only when THIS push touched nothing but docs. The
+          # pull_request paths filter cannot do this: it looks at the whole
+          # PR diff. Anything uncertain (first push, force-push to an unknown
+          # base, other events) runs.
+          run_e2e=true
+          if [ "$EVENT" = pull_request ] && [ "$ACTION" = synchronize ] && [ -n "$BEFORE" ] \
+             && files=$(git diff --name-only "$BEFORE" "$AFTER" 2>/dev/null) && [ -n "$files" ]; then
+            if ! echo "$files" | grep -qvE '^docs/|\.md$'; then
+              run_e2e=false
+              echo "::notice::docs-only push ($(echo "$files" | wc -l) file(s)); E2E skipped"
+            fi
+          fi
+          {
+            echo "run_e2e=$run_e2e"
+            echo "matrix=$matrix"
+            echo "all_suites=$all"
+          } >> "$GITHUB_OUTPUT"
+          echo "run_e2e=$run_e2e"; echo "matrix=$matrix"
+
+  e2e-test:
+    needs: plan
+    if: needs.plan.outputs.run_e2e == 'true'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: e2e-${{ github.head_ref || github.ref }}-${{ inputs.evaluation || 'none' }}-${{ matrix.group }}
+      cancel-in-progress: true
     timeout-minutes: ${{ inputs.evaluation != '' && inputs.evaluation != 'none' && 240 || 120 }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - group: topology
-            suites: "failover,read-balance,scale-out-master,scale-out-slave,scale-in-slave,scale-in-master"
-          - group: replication
-            suites: "replace-nodes,cluster-replication,partition-reduction,wal-retention-config,strict-durability,snapshot-push-seed,continuous-replication-purge,continuous-replication-limits"
-          - group: wal-recovery
-            suites: "wal-bandwidth-throttle,wal-incremental-sync,wal-purged-fallback,resync-failure-self-demote,orphan-scan-purge,terminating-pod-handling,failover-during-replication,data-survival-failover,pvc-data-survival,backup-restore"
-          - group: breaker-migration
-            suites: "circuit-breaker,operator-restart,topology-authority,replica-repair,prepare-evidence,native-metrics,blue-green-migration"
-          # SAF-10d acceptance. Scale/sustained suites are opt-in evaluations;
-          # their default SKIP is not evidence that performance was tested.
-          # with real link cuts, an operator restart, a failover and a
-          # scale-out; ~50 min locally, so it anchors its own leg.
-          - group: continuous-replication
-            suites: "continuous-replication,continuous-replication-scale,continuous-replication-sustained,continuous-replication-outage"
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
     name: e2e-test (${{ matrix.group }})
     steps:
       - name: Checkout
@@ -132,11 +185,38 @@ jobs:
       - name: Create kind cluster
         run: kind create cluster --name flare-e2e --wait 120s
 
-      - name: Build Docker images
-        run: |
-          docker build -t flare-operator:test -f Dockerfile.operator .
-          docker build -t flare-node:test -f Dockerfile.flare-node .
-          docker build -t flare-node-rocksdb:test -f Dockerfile.flare-node-rocksdb .
+      # The two flared images are C++ builds (~3 min each) whose builder
+      # stage copies only the C++ build inputs, so their layers are cached
+      # in the GitHub Actions cache and reused while those inputs are
+      # unchanged. One leg writes the cache; the others only read it, so
+      # eight legs do not upload the same layers. The operator image (~1
+      # min) is built uncached, as before: it pulls the current stable
+      # kubectl, which a cache would freeze.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build flare-node image (cached)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.flare-node
+          tags: flare-node:test
+          load: true
+          cache-from: type=gha,scope=flare-node
+          cache-to: ${{ matrix.group == 'topology' && 'type=gha,mode=max,scope=flare-node' || '' }}
+
+      - name: Build flare-node-rocksdb image (cached)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.flare-node-rocksdb
+          tags: flare-node-rocksdb:test
+          load: true
+          cache-from: type=gha,scope=flare-node-rocksdb
+          cache-to: ${{ matrix.group == 'topology' && 'type=gha,mode=max,scope=flare-node-rocksdb' || '' }}
+
+      - name: Build operator image
+        run: docker build -t flare-operator:test -f Dockerfile.operator .
 
       - name: Load images into kind
         run: |
@@ -233,7 +313,9 @@ jobs:
           cd flare_operator
           # Union of the matrix groups must equal --list, or a new suite
           # silently never runs. Kept in ONE place here; compare as sets.
-          ALL_GROUPS="failover,read-balance,scale-out-master,scale-out-slave,scale-in-slave,scale-in-master,replace-nodes,cluster-replication,partition-reduction,wal-retention-config,strict-durability,snapshot-push-seed,wal-bandwidth-throttle,wal-incremental-sync,wal-purged-fallback,resync-failure-self-demote,orphan-scan-purge,terminating-pod-handling,failover-during-replication,data-survival-failover,pvc-data-survival,backup-restore,circuit-breaker,operator-restart,topology-authority,replica-repair,prepare-evidence,native-metrics,blue-green-migration,continuous-replication,continuous-replication-purge,continuous-replication-limits,continuous-replication-scale,continuous-replication-sustained,continuous-replication-outage"
+          # Single source: the plan job's default matrix. A custom
+          # (suites=...) run still checks the full list.
+          ALL_GROUPS="${{ needs.plan.outputs.all_suites }}"
           LISTED=$(.lake/build/bin/flare_e2e --list | sed -n 's/^  \([a-z0-9-]*\) (.*/\1/p' | sort)
           GROUPED=$(echo "$ALL_GROUPS" | tr ',' '\n' | sort)
           if ! diff <(echo "$LISTED") <(echo "$GROUPED"); then

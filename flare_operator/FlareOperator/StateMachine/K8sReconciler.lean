@@ -1080,6 +1080,35 @@ def detectDeadNodesPure (state : FlareClusterState) (livePodKeys : List String)
     && node.state != FlareState.Down
     && node.state != FlareState.Prepare) |>.map Prod.fst
 
+/-- Nodes the circuit breaker counts as UNAVAILABLE now (SAF-11).
+
+    `detectDeadNodesPure` reports only nodes that became dead in THIS tick:
+    it skips nodes already Down (failover demotes a dead node to Proxy+Down)
+    and nodes in Prepare. Feeding that to the breaker made the 50% trip need
+    half the cluster to vanish inside one 5 s tick; a majority outage spread
+    over two ticks (25% + 25% on four nodes) never tripped and failover went
+    on one node at a time (5 CI occurrences). The breaker is about capacity
+    lost NOW, so it counts:
+      * the nodes dead this tick (`deadKeys`), plus
+      * nodes already Down, whatever their role, plus
+      * nodes in Prepare whose pod is not live (a pod-less Prepare node was
+        never counted at all).
+    Dead-node detection itself, and so failover, is unchanged. The trip and
+    reset thresholds and their hysteresis proofs apply to this count as
+    before. -/
+def breakerUnavailableKeys (state : FlareClusterState) (deadKeys livePodKeys : List String)
+    : List String :=
+  deadKeys ++ (state.nodeMap.filter (fun (key, node) =>
+    !deadKeys.contains key &&
+    (node.state == FlareState.Down ||
+     (node.state == FlareState.Prepare && !livePodKeys.contains key))) |>.map Prod.fst)
+
+/-- The breaker never counts FEWER nodes than are dead this tick, so every
+    outage that tripped it before still trips it. -/
+theorem breakerUnavailable_ge_dead (state : FlareClusterState) (deadKeys livePodKeys : List String) :
+    deadKeys.length ≤ (breakerUnavailableKeys state deadKeys livePodKeys).length := by
+  simp [breakerUnavailableKeys]
+
 /-- Pure draining-node detection: a node whose pod is Terminating
     (deletionTimestamp set) but STILL present+alive in the pod list, and still
     an authoritative Master or replica Slave. Unlike `detectDeadNodesPure` this
@@ -1320,7 +1349,10 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
   | .AfterDetectDead =>
     -- Blast Radius Circuit Breaker: Check if failure is too large (AZ-level)
     let totalNodes := clusterState.nodeMap.length
-    let deadCount := s.deadNodeKeys.length
+    -- SAF-11: the breaker counts capacity unavailable NOW (dead this tick +
+    -- already Down + pod-less Prepare), not only this tick's new deaths.
+    let unavailable := breakerUnavailableKeys clusterState s.deadNodeKeys s.livePodKeys
+    let deadCount := unavailable.length
 
     -- Get circuit breaker config from CRD (default if not available)
     let breakerCfg := match s.cachedCrd with
@@ -1338,11 +1370,13 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
       -- Split the reason: a vanished pod is routine (rescheduling), a PRESENT
       -- pod that stopped being Ready means flared itself died or wedged.
       let unhealthyDead := s.deadNodeKeys.filter (fun k => s.unhealthyKeys.contains k)
+      let earlier := unavailable.filter (fun k => !s.deadNodeKeys.contains k)
       let allEffects :=
-        (if unhealthyDead.isEmpty then
-          [.Log s!"[flare-operator] detected {deadCount} dead nodes: {s.deadNodeKeys}"]
+        (if s.deadNodeKeys.isEmpty then []
+        else if unhealthyDead.isEmpty then
+          [.Log s!"[flare-operator] detected {s.deadNodeKeys.length} dead nodes: {s.deadNodeKeys} (breaker counts {deadCount}/{totalNodes} unavailable; earlier: {earlier})"]
         else
-          [.Log s!"[flare-operator] detected {deadCount} dead nodes: {s.deadNodeKeys}",
+          [.Log s!"[flare-operator] detected {s.deadNodeKeys.length} dead nodes: {s.deadNodeKeys} (breaker counts {deadCount}/{totalNodes} unavailable; earlier: {earlier})",
            .Log s!"[flare-operator] CRITICAL: {unhealthyDead.length} of them are LIVE PODS that stopped serving (flared crashed/wedged, pod still present): {unhealthyDead}"])
         ++ breakerEffects
       ({ s with reconcileStep := nextStep,
@@ -1679,7 +1713,7 @@ theorem flareReconcileStep_decreases_measure (resp : K8sResponse)
     · left; simp [flareReconcileMeasure]  -- deadCount == 0
     · -- deadCount > 0, check circuit breaker decision
       have h_decision := circuitBreakerDecision_only_returns_emergency_or_failover
-        s.deadNodeKeys.length cs.nodeMap.length
+        (breakerUnavailableKeys cs s.deadNodeKeys s.livePodKeys).length cs.nodeMap.length
         (match s.cachedCrd with | some crd => crd.spec.circuitBreaker | none => {})
         s.wasTripped
       rcases h_decision with hd | hd | hd

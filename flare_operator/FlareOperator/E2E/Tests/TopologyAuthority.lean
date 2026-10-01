@@ -335,6 +335,22 @@ private def podIps : IO (List (String × String)) := do
   let pods ← getPodNames s!"app=flare,cluster={cfg.name}" cfg.«namespace»
   pods.filterMapM fun p => do return (← getPodIp p cfg.«namespace»).map (p, ·)
 
+/-- Some `retrying an unconfirmed topology send (pending vP; publishing vQ)`
+    line with P ≤ held ≤ Q: a retry whose pending flag was set no later than
+    the withheld pass and whose published map subsumes it. -/
+private def retryCovers (log : String) (held : Nat) : Bool :=
+  (log.splitOn "\n").any fun l =>
+    match (l.splitOn "retrying an unconfirmed topology send (pending v").getLast? with
+    | none => false
+    | some rest =>
+      if !containsSubstr l "retrying an unconfirmed topology send (pending v" then false
+      else
+        let p := (rest.takeWhile Char.isDigit).toNat?
+        let q := ((rest.splitOn "publishing v").getLast?.map (·.takeWhile Char.isDigit)).bind (·.toNat?)
+        match p, q with
+        | some p, some q => p ≤ held && held ≤ q
+        | _, _ => false
+
 def suite : TestSuite := {
   name := "topology-authority"
   setup := do
@@ -574,8 +590,16 @@ def suite : TestSuite := {
               -- the flag as the only reason that pass sent (in a live
               -- cluster the version often moves by itself). Recorded as a
               -- residual in the register rather than papered over here.
-              if !containsSubstr log2 s!"retrying an unconfirmed topology send (pending v{held}" then
-                return .fail s!"the survivor caught up, but no publishing pass named the suppressed v{held}: the withheld map was not what the retry carried"
+              -- The pending flag keeps the EARLIEST outstanding version and a
+              -- retry publishes the LATEST committed map (TopologyBroadcast:
+              -- pendingTopologyAfterAttempt). So the retry that covers v{held}
+              -- names some pending vP ≤ held and publishes some vQ ≥ held. P
+              -- is below held when an earlier send was already outstanding:
+              -- CI 36731888436, where this pass was the restarted process's
+              -- first, so its startup seed (v…306) was still pending when the
+              -- fence withheld v…307, and the retry published v…308.
+              if !(retryCovers log2 held) then
+                return .fail s!"the survivor caught up, but no retry line covers the suppressed v{held} (pending ≤ {held} ≤ publishing): the withheld map was not what the retry carried"
               let back ← waitForCondition "topology re-applied after the lease is recreated" 240 do
                 return (← topologyApplied).toOption.isSome
               if !back then

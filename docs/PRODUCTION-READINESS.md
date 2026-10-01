@@ -37,8 +37,8 @@ that gap. Record the agreed failure model and RPO/RTO before approval.
   restart/lease-loss recovery is not established.
 - SAF-08: finish auditing typed observations and promotion/deletion decisions.
   Unit coverage does not close untested concurrent survivor changes.
-- SAF-11: decide and implement circuit-breaker semantics for a majority outage
-  spread over multiple reconcile ticks, not just deaths in one tick.
+- SAF-11: implemented 2026-10-01 (breaker counts nodes unavailable now, not only
+  this tick's deaths); CI and reviewer confirmation of the definition pending.
 - Specify the client-visible result when a stale slave cannot reach its master:
   legacy GET failure can look like a cache miss. Verify client fallback behavior.
 - Memory knobs are implemented; automatic memory-limit validation and proof of

@@ -650,6 +650,41 @@ private def checkMemoryConfig (ctx : Ctx) : IO Unit := do
      (yaml.splitOn "writeBufferSizeMb: 16").length == 2 &&
      (yaml.splitOn "maxWriteBufferNumber: 3").length == 2)
 
+/-- SAF-11: the breaker counts capacity unavailable NOW, so a majority
+    outage spread over ticks trips it. -/
+private def checkBreakerUnavailable (ctx : Ctx) : IO Unit := do
+  let node := fun (h : String) (role : FlareRole) (st : FlareState) =>
+    (s!"{h}:12121", ({ serverName := h, serverPort := 12121, role, state := st, partition := 0 } : FlareNode))
+  let cs := fun (ns : List (String × FlareNode)) =>
+    ({ FlareClusterState.default with nodeMap := ns } : FlareClusterState)
+  let cfg : CircuitBreakerConfig := {}
+  let unavail := K8sReconciler.breakerUnavailableKeys
+  let trips := fun (st : FlareClusterState) (dead live : List String) =>
+    (K8sReconciler.circuitBreakerDecision (unavail st dead live).length st.nodeMap.length cfg false).1
+      == .RecoveryRefill
+  let k := fun (h : String) => s!"{h}:12121"
+  -- 4 nodes, one partition master + 3 slaves (the 4→1 E2E shape).
+  let t1 := cs [node "a" .Master .Active, node "b" .Slave .Active, node "c" .Slave .Active, node "d" .Slave .Active]
+  check ctx "tick 1: one of four dead (25%) does not trip"
+    (!trips t1 [k "b"] [k "a", k "c", k "d"])
+  -- After failover b is Proxy+Down; c dies in the next tick.
+  let t2 := cs [node "a" .Master .Active, node "b" .Proxy .Down, node "c" .Slave .Active, node "d" .Slave .Active]
+  check ctx "tick 2: a second death with the first already Down (50%) trips"
+    (trips t2 [k "c"] [k "a", k "d"])
+  check ctx "the old per-tick count (1 of 4 in tick 2) would not have tripped"
+    ((K8sReconciler.circuitBreakerDecision 1 4 cfg false).1 == .AfterHandleFailover)
+  check ctx "a Prepare node with no live pod counts; one with a live pod does not"
+    (unavail (cs [node "a" .Master .Active, node "p" .Slave .Prepare, node "q" .Slave .Prepare]) [] [k "a", k "q"]
+      == [k "p"])
+  check ctx "a healthy proxy is not unavailable"
+    (unavail (cs [node "a" .Master .Active, node "x" .Proxy .Active]) [] [k "a", k "x"] == [])
+  check ctx "a node dead this tick is counted once even if also Down-eligible"
+    ((unavail (cs [node "a" .Master .Active, node "b" .Slave .Active]) [k "b"] [k "a"]).length == 1)
+  let big := cs ((List.range 8).map fun i =>
+    node s!"n{i}" (if i == 0 then .Master else .Slave) (if i == 7 then .Down else .Active))
+  check ctx "one long-Down node in eight (12%) does not trip"
+    (!trips big [] ((List.range 7).map fun i => k s!"n{i}"))
+
 private def checkTopologyDelivery (ctx : Ctx) : IO Unit := do
   check ctx "only a complete OK response confirms topology delivery"
     (FlareOperator.Server.topologyAckAccepted "OK\r\n")
@@ -752,6 +787,7 @@ def run : IO UInt32 := do
   checkFollowShaping ctx
   checkMemoryConfig ctx
   checkTopologyDelivery ctx
+  checkBreakerUnavailable ctx
   checkTopologyObservation ctx
   checkTopologyMetrics ctx
   let failures ← ctx.failures.get

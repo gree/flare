@@ -68,3 +68,40 @@ up to 180 s for the old pod to disappear before reading logs. Log
 `2026-10-01-ci-36826494031-breaker-migration-e2e.log`. Recorded as FAIL on
 CHECK-01-startup with this classification. The other nine checks are recorded
 as PASS at 6f1edf0.
+
+## Second CI execution — PR run 36831110279 on 098c00b (merge rev 8ed8f1d): FAIL, test premise
+
+The other four legs passed again (20/20, 47/47, 45/45, 48/48), as did the
+other breaker-migration tests (37 of 38, breaker tripped in 5 s). This time
+the old pod was gone before the logs were read, and the new test reached its
+attribution check:
+
+    resumed at v4294967309; first send:
+    [versionMoved=true pending=v8589934592 repairHeld=0 activeNotReady=0]
+    topology changed (v8589934592 → v8589934593), broadcasting
+
+The fresh process raised its version to the new leadership generation's base
+and seeded pending with it, as designed. Its first pass then advanced the
+version again. Cause: the persisted node map carries no read balance, so
+the reloaded map has every node at balance 100. The first pass re-applies
+spec.readBalance (slave 25 in this test), sees a changed map and advances
+the version. The startup seed was therefore one of two reasons for the send.
+
+The test now holds a change to slave weight 100, the one weight a reloaded
+map already has, so the reload changes nothing and the seed is the only
+reason left. The content marker still moves, 80 to 100. Recorded as FAIL on
+CHECK-01-startup with this classification. Log
+`2026-10-01-ci-36831110279-breaker-migration-e2e.log`.
+
+### Finding recorded under EV-01 (no code change)
+
+Read balance, including the SAF-10c withholding of non-following replicas,
+does not survive an operator restart. Until the first pass, the in-memory map
+gives every node balance 100. The operator answers `node add` from that map.
+After a takeover its version is the new generation base, newer than any pod
+holds. A flared pod that boots in that window adopts a map in which withheld
+followers carry balance 100, until the first pass pushes the corrected map a
+few seconds later. Running pods are not affected, because flared requests
+the map only at boot. Persisting the balance, or holding `node add` replies
+until the first pass, would close it. Either is a design change for the
+reviewer.

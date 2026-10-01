@@ -1061,6 +1061,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of fcf3667; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36796752122"
+        },
+        {
+          "check": "CHECK-03-follow",
+          "commit": "497c1fd56fd4548fa5180d558f1c7190286a047a",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request, leg continuous-replication only (the replication / wal-recovery / breaker-migration legs of this run never concluded) — PR #144 merge revision of 97baa7f; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36801238966"
         }
       ],
       "tasks": [
@@ -1469,6 +1477,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of fcf3667; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36796752122"
+        },
+        {
+          "check": "CHECK-04-follow",
+          "commit": "497c1fd56fd4548fa5180d558f1c7190286a047a",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request, leg continuous-replication only (the replication / wal-recovery / breaker-migration legs of this run never concluded) — PR #144 merge revision of 97baa7f; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36801238966"
         }
       ],
       "tasks": [
@@ -2896,6 +2912,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of fcf3667; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36796752122"
+        },
+        {
+          "check": "CHECK-16",
+          "commit": "497c1fd56fd4548fa5180d558f1c7190286a047a",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request, leg continuous-replication only (the replication / wal-recovery / breaker-migration legs of this run never concluded) — PR #144 merge revision of 97baa7f; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36801238966"
         }
       ],
       "tasks": [
@@ -3064,6 +3088,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of fcf3667; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36796752122"
+        },
+        {
+          "check": "CHECK-17",
+          "commit": "497c1fd56fd4548fa5180d558f1c7190286a047a",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request, leg continuous-replication only (the replication / wal-recovery / breaker-migration legs of this run never concluded) — PR #144 merge revision of 97baa7f; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36801238966"
         }
       ],
       "tasks": [
@@ -3409,6 +3441,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs) — PR #144 merge revision of fcf3667; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36796752122"
+        },
+        {
+          "check": "CHECK-18",
+          "commit": "497c1fd56fd4548fa5180d558f1c7190286a047a",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request, leg continuous-replication only (the replication / wal-recovery / breaker-migration legs of this run never concluded) — PR #144 merge revision of 97baa7f; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36801238966"
         }
       ],
       "tasks": [

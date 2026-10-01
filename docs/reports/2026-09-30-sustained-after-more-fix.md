@@ -276,3 +276,12 @@ window versus failover after it) carried the promotion.
 breaker-migration FAIL: circuit-breaker no-trip — SAF-11, **fifth CI
 occurrence** (three of the last four PR runs). Recorded as FAIL on CHECK-09.
 Logs `2026-10-01-ci-36796752122-{continuous-replication,breaker-migration}-e2e.log`.
+
+### PR run 36801238966 on 97baa7f (docs-only commit) — 2 legs PASS, 3 legs never concluded by GitHub
+tested-sha 497c1fd (merge revision). continuous-replication 20/20 and
+topology 47/47 PASS (artifacts collected). replication, wal-recovery and
+breaker-migration stayed "in_progress" with no unfinished step for more than
+25 minutes past the job's 120-minute limit (started 01:28Z, still in_progress
+at 03:49Z); no artifact and no conclusion. Recorded as not concluded — not as
+a pass and not as a failure of any test. The next push cancels it through the
+workflow's concurrency group and re-runs the matrix on the new head.

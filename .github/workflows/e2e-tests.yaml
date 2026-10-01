@@ -399,7 +399,9 @@ jobs:
           # is what kills a leg, not timeout-minutes. 75 min per SHARDED leg
           # (longest group ~45 min measured + slack).
           limit=4500
-          if [ "$SUITE_GROUP" = continuous-replication ]; then
+          # A single-suite manual run (group "custom") takes the profile too;
+          # otherwise suites=... with an evaluation silently measured nothing.
+          if [ "$SUITE_GROUP" = continuous-replication ] || [ "$SUITE_GROUP" = custom ]; then
             case "$EVALUATION" in
               sustained) export FLARE_E2E_SUSTAINED=1; limit=10800 ;;
               outage) export FLARE_E2E_OUTAGE=1; limit=10800 ;;

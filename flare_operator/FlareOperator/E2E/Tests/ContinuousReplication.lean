@@ -880,6 +880,21 @@ def suite : TestSuite := {
           let epoch0 := (← statStr sIp "repl_follow_source_epoch").getD "?"
           -- Async delete: the pod is Terminating for drainSeconds while the
           -- operator drains it.
+          -- The operator skips BOTH graceful drain and dead detection during
+          -- its 120 s startup grace period, and the operator-restart test two
+          -- tests earlier leaves a freshly started operator behind. On CI
+          -- (run 36748059941) the master was deleted ~2 min after that
+          -- restart: no drain, no failover, the StatefulSet recreated the
+          -- master and it re-registered as master — "not promoted". Wait
+          -- until the operator pod is past its grace period first.
+          let jp := "{.items[0].status.startTime}"
+          let opAge : IO (Option Nat) := do
+            match ← hostCmd "sh" ["-c", s!"st=$(kubectl get pod -n {cfg.«namespace»} -l app={cfg.operatorName} -o jsonpath='{jp}'); now=$(date +%s); t=$(date -d \"$st\" +%s 2>/dev/null || date -j -f %Y-%m-%dT%H:%M:%SZ \"$st\" +%s); echo $((now - t))"] with
+            | .ok o => return o.trim.toNat?
+            | .error _ => return none
+          let pastGrace ← waitForCondition "operator past its startup grace period (pod older than 150 s)" 240 do
+            return (← opAge).getD 0 ≥ 150
+          IO.eprintln s!"# operator pod age before the delete: {← opAge}s (past grace={pastGrace})"
           discard <| kubectl ["delete", "pod", mPod, "-n", cfg.«namespace», "--wait=false"]
           IO.eprintln s!"# deleted master pod {mPod} (graceful, preStop {cfg.drainSeconds}s); follower {sPod} was following epoch {epoch0}"
           let promoted ← waitForCondition "the follower is promoted to master (drain)" 180 do

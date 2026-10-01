@@ -248,3 +248,19 @@ branch touches circuitBreakerDecision. Log
 `2026-10-01-ci-36741543371-breaker-migration-e2e.log`.
 Outage run 36741586970's other four legs PASS at 6e757cb (recorded on the
 acceptance checks).
+
+### PR run 36748059941 on 8e96789 (docs-only commit) — 4 of 5 legs PASS (tested-sha 8a351b8, merge revision)
+continuous-replication FAIL, one test: "planned promotion: the master pod is
+deleted (graceful drain) …" — the follower was never promoted within 180 s,
+with neither a "graceful drain" nor a "NO promotable successor" line. Cause,
+from the pod ages in the diagnostics: the operator-restart test two tests
+earlier leaves a freshly started operator, and this test deleted the master
+about two minutes after that restart — inside the operator's 120 s startup
+grace period, during which it skips BOTH the graceful drain and dead
+detection. Nothing promoted the follower; the StatefulSet recreated the
+master and it re-registered as master. Harness precondition, not a gate
+failure: the eligibility probe had the follower eligible (lag 0) right up to
+the delete. The test now waits until the operator pod is older than 150 s
+before deleting the master and logs the age. Passed in all seven earlier CI
+executions (timing-dependent). Recorded as FAIL on CHECK-04-follow with this
+classification. Log `2026-10-01-ci-36748059941-continuous-replication-e2e.log`.

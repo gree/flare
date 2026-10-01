@@ -58,3 +58,22 @@ promoted the follower about 35 s after the delete. The test now waits for the
 operator's own `grace period: 0 cycles remaining` line plus one cycle, and it
 now requires the drain line. Earlier passes proved the promotion and the
 epoch advance, not the drain path.
+
+### Follow-up finding (CI 36841064685): the drain refused the proven follower
+
+With the grace wait fixed, the drain ran on CI for the first time, and its
+guard refused the follower:
+
+    promotion: follower promoted=true; drain logged=true;
+    drain blocked (guard refused)=true
+
+The follower was then promoted about 35 s later by dead-node failover. The
+probe that proves a follower current read the master's head only from pods
+that were Ready and not Terminating. During a drain the master is
+Terminating by definition, so no follower could be proven and every planned
+promotion in follow mode was refused. In production, a planned restart of a
+master in follow mode would not hand off during preStop.
+
+Fix: the master's head is read from any Ready pod, Terminating included. A
+Terminating slave is still not read, because it is not a candidate. The
+planned-promotion test now fails when the guard refuses. CI pending.

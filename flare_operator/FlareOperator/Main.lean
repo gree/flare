@@ -686,10 +686,20 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
               slaveReadings := slaveReadings ++ [(key, n.partition, none)]
       let inModeParts : List Int := slaveReadings.filterMap fun (k, part, r?) =>
         if (r?.bind (·.mode)) == some true || FollowEvidence.knownInMode tr.mem k then some part else none
+      -- The master's head is read from any READY pod, Terminating included.
+      -- A graceful drain happens exactly while the master pod is Terminating
+      -- (preStop window, still Ready and serving). Reading it only from
+      -- non-terminating pods left the drain with no source head, so the
+      -- follower was never proven current, the planned-promotion guard
+      -- refused every drain in this mode ("NO promotable successor"), and the
+      -- follower was promoted by dead-node failover after the pod was gone
+      -- (CI 36841064685). A Terminating SLAVE is still not read: it is not a
+      -- promotion candidate.
+      let masterPods := pods.filter (fun p => p.ready)
       let mut masterReadings : List (Int × FollowEvidence.MasterReading) := []
       for (key, n) in cs.nodeMap do
         if n.role == FlareRole.Master && n.state != FlareState.Down && inModeParts.contains n.partition then
-          match readyPods.find? (fun p => Bridge.PodInfo.toNodeKey p == key) with
+          match masterPods.find? (fun p => Bridge.PodInfo.toNodeKey p == key) with
           | none => pure ()
           | some p =>
             let m ← match ← Bridge.queryPodStats p.name ns "stats" with

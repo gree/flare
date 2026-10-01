@@ -922,6 +922,12 @@ def suite : TestSuite := {
           -- is what makes it PLANNED. Before the grace wait above was fixed,
           -- every CI run promoted by failover and this was only a caveat.
           if !drained then return .fail "the follower was promoted, but not by the graceful drain (no drain line): this was dead-node failover after the pod was gone"
+          -- The drain must also SUCCEED: a refused drain keeps the master
+          -- until its grace expires and failover then promotes the follower,
+          -- which is not a planned promotion (CI 36841064685: the master's
+          -- head was not read while it was Terminating, so the follower was
+          -- never proven current and every drain was refused).
+          if blocked then return .fail "the drain guard refused the proven follower (NO promotable successor); the promotion came from failover after the grace, not from the drain"
           if (← podUid sPod).getD "?" != uid0 then return .fail "the promoted pod was recreated"
           -- flared applies the promotion on its next accepted map; the epoch
           -- advances inside that role shift.

@@ -700,6 +700,22 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request, leg breaker-migration (topology-authority test 5, second execution) — PR #144 merge revision of 098c00b; artifact tested-sha.txt",
           "result": "fail",
           "report": "docs/reports/2026-10-01-startup-republish-e2e.md"
+        },
+        {
+          "check": "CHECK-01",
+          "commit": "37bcb3e226f201341db212104d61cc1f2c825807",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs, all green) — PR #144 merge revision of fbb3860; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36835797814"
+        },
+        {
+          "check": "CHECK-01-startup",
+          "commit": "37bcb3e226f201341db212104d61cc1f2c825807",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs, all green) — PR #144 merge revision of fbb3860; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36835797814"
         }
       ],
       "tasks": [
@@ -1200,6 +1216,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs; breaker-migration failed on the startup-republish test only) — PR #144 merge revision of 098c00b; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36831110279"
+        },
+        {
+          "check": "CHECK-03-follow",
+          "commit": "37bcb3e226f201341db212104d61cc1f2c825807",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs, all green) — PR #144 merge revision of fbb3860; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36835797814"
         }
       ],
       "tasks": [
@@ -1657,6 +1681,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs; breaker-migration failed on the startup-republish test only) — PR #144 merge revision of 098c00b; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36831110279"
+        },
+        {
+          "check": "CHECK-04-follow",
+          "commit": "37bcb3e226f201341db212104d61cc1f2c825807",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs, all green) — PR #144 merge revision of fbb3860; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36835797814"
         }
       ],
       "tasks": [
@@ -2138,6 +2170,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs; breaker-migration failed on the startup-republish test only) — PR #144 merge revision of 098c00b; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36831110279"
+        },
+        {
+          "check": "CHECK-06",
+          "commit": "37bcb3e226f201341db212104d61cc1f2c825807",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs, all green) — PR #144 merge revision of fbb3860; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36835797814"
         }
       ],
       "tasks": [
@@ -2509,13 +2549,21 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs; breaker-migration failed on the startup-republish test only) — PR #144 merge revision of 098c00b; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36831110279"
+        },
+        {
+          "check": "CHECK-09",
+          "commit": "37bcb3e226f201341db212104d61cc1f2c825807",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs, all green) — PR #144 merge revision of fbb3860; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36835797814"
         }
       ],
       "tasks": [],
       "review": {
         "commit": "80e466bcbb5cabb9505ee9cf7e086e69750e1640",
         "date": "2026-10-01",
-        "note": "Run 36812371158 (merge rev 80e466b): the breaker tripped 20 s after the 4->1 scale-down, so CHECK-09 passed. This is the timing-dependent outcome the SAF-11 finding already describes (per-tick dead count; trip needs half the cluster to die inside one tick) and does not close it; the no-trip tally stays at 5 CI occurrences. No code change; the window definition is awaiting the reviewer. PARTIAL / UNVERIFIED unchanged. Run 36816259807 (merge rev b706686) tripped at 5 s; same assessment. Run 36820029377 (merge rev 9dc131f) tripped at 5 s; same assessment. Run 36826494031 (merge rev 6f1edf0) tripped at 5 s; same assessment. Run 36831110279 (merge rev 8ed8f1d) tripped in its leg; same assessment."
+        "note": "Run 36812371158 (merge rev 80e466b): the breaker tripped 20 s after the 4->1 scale-down, so CHECK-09 passed. This is the timing-dependent outcome the SAF-11 finding already describes (per-tick dead count; trip needs half the cluster to die inside one tick) and does not close it; the no-trip tally stays at 5 CI occurrences. No code change; the window definition is awaiting the reviewer. PARTIAL / UNVERIFIED unchanged. Run 36816259807 (merge rev b706686) tripped at 5 s; same assessment. Run 36820029377 (merge rev 9dc131f) tripped at 5 s; same assessment. Run 36826494031 (merge rev 6f1edf0) tripped at 5 s; same assessment. Run 36831110279 (merge rev 8ed8f1d) tripped in its leg; same assessment. Run 36835797814 (merge rev 37bcb3e, pre-SAF-11-fix code) tripped at 5 s."
       }
     },
     {
@@ -3217,6 +3265,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs; breaker-migration failed on the startup-republish test only) — PR #144 merge revision of 098c00b; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36831110279"
+        },
+        {
+          "check": "CHECK-16",
+          "commit": "37bcb3e226f201341db212104d61cc1f2c825807",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs, all green) — PR #144 merge revision of fbb3860; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36835797814"
         }
       ],
       "tasks": [
@@ -3433,6 +3489,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs; breaker-migration failed on the startup-republish test only) — PR #144 merge revision of 098c00b; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36831110279"
+        },
+        {
+          "check": "CHECK-17",
+          "commit": "37bcb3e226f201341db212104d61cc1f2c825807",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs, all green) — PR #144 merge revision of fbb3860; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36835797814"
         }
       ],
       "tasks": [
@@ -3866,6 +3930,22 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs; breaker-migration failed on the startup-republish test only) — PR #144 merge revision of 098c00b; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36831110279"
+        },
+        {
+          "check": "CHECK-18",
+          "commit": "37bcb3e226f201341db212104d61cc1f2c825807",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs, all green) — PR #144 merge revision of fbb3860; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36835797814"
+        },
+        {
+          "check": "CHECK-18-purge",
+          "commit": "37bcb3e226f201341db212104d61cc1f2c825807",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs, all green) — PR #144 merge revision of fbb3860; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36835797814"
         }
       ],
       "tasks": [
@@ -4185,6 +4265,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs; breaker-migration failed on the startup-republish test only) — PR #144 merge revision of 098c00b; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36831110279"
+        },
+        {
+          "check": "CHECK-20",
+          "commit": "37bcb3e226f201341db212104d61cc1f2c825807",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs, all green) — PR #144 merge revision of fbb3860; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36835797814"
         }
       ],
       "tasks": [

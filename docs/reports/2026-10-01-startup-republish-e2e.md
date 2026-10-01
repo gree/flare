@@ -118,3 +118,22 @@ at 0, until the first pass re-applies the spec. Two proofs cover it:
 `legacy_line_balance_fallback`. The startup-republish E2E uses slave weight
 25 again. With the fix its first pass should not move the version, so the
 test now also guards the persistence.
+
+## Third CI execution — PR run 36835797814 on fbb3860 (merge rev 37bcb3e): PASS
+
+All five legs passed (20/20, 47/47, 45/45, 48/48, 38/38). The new test, with
+slave weight 100 and before the balance-persistence fix:
+
+    before: both pods at node_map_version 4294967308, slave balance 80
+    operator pods before [flare-operator-768fdbb4cb-9q6k9],
+                  after  [flare-operator-76c4d9c66f-sf675]
+    resumed at v4294967309; first send:
+      [versionMoved=false pending=v8589934592 repairHeld=0 activeNotReady=0]
+      topology changed (v8589934592 → v8589934592), broadcasting
+    after: both pods at 8589934592, slave balance 100 (committed 100)
+
+The fresh process's first send was pending-only, with the audit off. It
+delivered the withheld weight to both pods. The startup seed alone recovered
+a map that was committed and never sent. The test at weight 25, which also
+checks balance persistence, is in the next push. Recorded as PASS on
+CHECK-01-startup and the nine other checks at 37bcb3e.

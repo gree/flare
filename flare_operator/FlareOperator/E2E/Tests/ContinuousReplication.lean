@@ -681,6 +681,73 @@ def suite : TestSuite := {
             if !recovered then throw (IO.userError "read-guard cleanup did not restore balance and catch-up")
     },
 
+    -- read-unavailable-error (user decision 2026-10-02, item 5): when a
+    -- replica cannot serve a get — its local read is withheld (follower
+    -- disconnected) AND the forward to the master fails — it answers a miss
+    -- by default, and SERVER_ERROR with the option on. Each switch is
+    -- confirmed by flared's own reload notice, not by timing.
+    { name := "read-unavailable-error: with the forward to the master cut, a replica answers SERVER_ERROR with the option on and the legacy miss with it off"
+      run := do
+        match ← pair with
+        | .error e => return .fail e
+        | .ok (_, mIp, sPod, sIp) =>
+          let key := "rue_probe"
+          if !(← memcachedSet cfg.debugPod cfg.«namespace» mIp cfg.flarePort key "present") then
+            return .fail "precondition: master did not accept the probe key"
+          let settle ← waitForCondition "replica following and the key replicated" 120 do
+            return (← statStr sIp "repl_follow_state") == some "following"
+          if !settle then return .fail "precondition: replica not following"
+          let reloadSeen := fun (needle : String) => do
+            match ← hostCmd "kubectl" ["logs", "-n", cfg.«namespace», sPod, "--tail=3000"] with
+            | .ok o => return containsSubstr o needle
+            | .error _ => return false
+          -- The follow flags are declared with the option: the operator
+          -- rewrites the whole extra.conf from spec.rocksdb, and the flags
+          -- baked into this suite's initial config would otherwise vanish
+          -- from the file (a later restart would come up without follow).
+          let setOpt := fun (on : Bool) => kubectlPatch "flarecluster" cfg.name cfg.«namespace»
+            s!"\{\"spec\":\{\"rocksdb\":\{\"replIdentityForward\":true,\"replFollowEnabled\":true,\"replFollowPollIntervalUsec\":200000,\"readUnavailableError\":{if on then "true" else "false"}}}}"
+          let rule := ["FORWARD", "-s", sIp, "-d", mIp, "-p", "tcp", "--dport", toString cfg.flarePort, "-j", "REJECT", "--reject-with", "tcp-reset"]
+          let rawGet : IO String := do
+            match ← execInDebugPod cfg.debugPod cfg.«namespace» s!"printf 'get {key}\\r\\n' | nc -w 5 {sIp} {cfg.flarePort}" with
+            | .ok o => return o.trim
+            | .error e => return s!"(error {e})"
+          try
+            match ← setOpt true with
+            | .error e => return .fail s!"patch failed: {e}"
+            | .ok _ => pure ()
+            let on ← waitForCondition "replica flared reloads read-unavailable-error = true" 240 do
+              reloadSeen "read_unavailable_error: 0 -> 1"
+            if !on then return .fail "the replica never reported read_unavailable_error 0 -> 1 (config not applied)"
+            match ← hostCmd "docker" (["exec", kindNode, "iptables", "-I", "FORWARD", "1"] ++ rule.drop 1) with
+            | .error e => return .fail e
+            | .ok _ => pure ()
+            let disconnected ← waitForCondition "the replica's follower is disconnected (its local read is withheld)" 90 do
+              return (← statStr sIp "repl_follow_state") == some "disconnected"
+            if !disconnected then return .fail "precondition: the follower did not disconnect under the cut"
+            let withOpt ← rawGet
+            IO.eprintln s!"# option on, forward cut: get on the replica -> {withOpt}"
+            if !containsSubstr withOpt "SERVER_ERROR" then
+              return .fail s!"with read-unavailable-error on, a get the replica cannot serve did not answer SERVER_ERROR: {withOpt}"
+            match ← setOpt false with
+            | .error e => return .fail s!"patch failed: {e}"
+            | .ok _ => pure ()
+            let off ← waitForCondition "replica flared reloads read-unavailable-error = false" 240 do
+              reloadSeen "read_unavailable_error: 1 -> 0"
+            if !off then return .fail "the replica never reported read_unavailable_error 1 -> 0"
+            let withoutOpt ← rawGet
+            IO.eprintln s!"# option off, forward cut: get on the replica -> {withoutOpt}"
+            if containsSubstr withoutOpt "SERVER_ERROR" || containsSubstr withoutOpt "VALUE" then
+              return .fail s!"with the option off the legacy reply is a miss (END); got {withoutOpt}"
+            return .pass
+          finally
+            discard <| hostCmd "docker" (["exec", kindNode, "iptables", "-D"] ++ rule)
+            discard <| setOpt false
+            let back ← waitForCondition "replica follows again after the cut" 240 do
+              return (← statStr sIp "repl_follow_state") == some "following"
+            if !back then throw (IO.userError "read-unavailable-error cleanup: the replica did not follow again")
+    },
+
     -- T5: repeated disconnections — no loss, no rollback, no resurrection,
     -- and never a rebuild. Three cut/write/heal cycles; after each the
     -- replica converges from its position; sampled keys read locally.

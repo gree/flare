@@ -142,6 +142,16 @@ structure RocksdbConfigSpec where
       "the key does not exist". Backend-agnostic like flushAllEnabled.
       flared: `read-unavailable-error` (dynamic, SIGHUP; default false). -/
   readUnavailableError : Option Bool := none
+  /-- Continuous WAL replication flags (SAF-10). The operator owns
+      `extra.conf` and rewrites the whole file from this spec, so these must
+      be declared here or a later spec change drops them from the file (a
+      SIGHUP keeps the in-memory value, the next restart loses it). Enable
+      identity forwarding on every node BEFORE following. flared:
+      `repl-identity-forward`, `repl-follow-enabled`,
+      `repl-follow-poll-interval-usec` (dynamic). -/
+  replIdentityForward : Option Bool := none
+  replFollowEnabled : Option Bool := none
+  replFollowPollIntervalUsec : Option Nat := none
   deriving Repr, BEq
 
 /-- True when at least one rocksdb field has been set by the user. -/
@@ -150,7 +160,8 @@ def RocksdbConfigSpec.hasAny (r : RocksdbConfigSpec) : Bool :=
   r.walTtlSeconds.isSome || r.walSizeLimitMb.isSome || r.syncWrites.isSome ||
   r.resyncFailureThreshold.isSome || r.walMaxBatchBytes.isSome ||
   r.walSyncBwlimit.isSome || r.walSyncInterval.isSome || r.snapshotBwlimit.isSome ||
-  r.flushAllEnabled.isSome || r.backupKeep.isSome || r.readUnavailableError.isSome
+  r.flushAllEnabled.isSome || r.backupKeep.isSome || r.readUnavailableError.isSome ||
+  r.replIdentityForward.isSome || r.replFollowEnabled.isSome || r.replFollowPollIntervalUsec.isSome
 
 /-- Render the rocksdb spec as `extra.conf` lines (one per set field).
     Returns an empty string when no fields are set. Lines are joined with "\n";
@@ -204,6 +215,16 @@ def RocksdbConfigSpec.toExtraConf (r : RocksdbConfigSpec) : String :=
     | some b =>
       let v := if b then "true" else "false"
       lines ++ [s!"read-unavailable-error = {v}"]
+    | none => lines
+  let boolLine := fun (key : String) (b : Bool) => s!"{key} = {if b then "true" else "false"}"
+  let lines := match r.replIdentityForward with
+    | some b => lines ++ [boolLine "repl-identity-forward" b]
+    | none => lines
+  let lines := match r.replFollowEnabled with
+    | some b => lines ++ [boolLine "repl-follow-enabled" b]
+    | none => lines
+  let lines := match r.replFollowPollIntervalUsec with
+    | some n => lines ++ [s!"repl-follow-poll-interval-usec = {n}"]
     | none => lines
   String.intercalate "\n" lines
 

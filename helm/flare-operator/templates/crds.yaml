@@ -148,6 +148,23 @@ spec:
                     flushAllEnabled:
                       type: boolean
                       description: Administrative gate for the unauthenticated flush_all op (flared flush-all-enabled; false = refuse with SERVER_ERROR; hot-toggleable)
+                    replIdentityForward:
+                      type: boolean
+                      description: >-
+                        Continuous replication: forward writes with their
+                        source identity (flared repl-identity-forward).
+                        Enable on every node before replFollowEnabled.
+                    replFollowEnabled:
+                      type: boolean
+                      description: >-
+                        Continuous replication: run a WAL follower on each
+                        active RocksDB slave (flared repl-follow-enabled;
+                        dynamic). Declare here: the operator rewrites
+                        extra.conf from this spec.
+                    replFollowPollIntervalUsec:
+                      type: integer
+                      minimum: 1000
+                      description: Follower poll interval in microseconds (flared repl-follow-poll-interval-usec)
                     readUnavailableError:
                       type: boolean
                       description: >-

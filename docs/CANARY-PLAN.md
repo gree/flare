@@ -14,7 +14,10 @@ clients treat a miss as a cache miss. Where flare is the primary store, set
 
 - PR #144 merged and an image built from the merged commit, with CI green at
   that commit.
-- `repl-identity-forward` on for every node before `repl-follow-enabled`.
+- Follow mode declared in the CR, not hand-edited into `extra.conf`, which
+  the operator rewrites. First set `spec.rocksdb.replIdentityForward: true`
+  on every node, then `spec.rocksdb.replFollowEnabled: true`. Both are
+  dynamic.
 - Alerts installed, each with its runbook:
   - `FlareReplicaFollowLag` and `FlareReplicaNotFollowing`;
   - `FlareTopology*`;
@@ -45,8 +48,8 @@ clients treat a miss as a cache miss. Where flare is the primary store, set
   load: up to 3.4 s per pass, and lease age up to 8 s of 15 s.
 - The data volume or RSS exceeds the sizing rule in RUNBOOK.md#sizing.
 
-**Rollback.** Set `repl-follow-enabled = false` with a SIGHUP; it is
-dynamic. The live op-forwarding path keeps replicating. Do not delete tmpfs
+**Rollback.** Set `spec.rocksdb.replFollowEnabled: false`. The operator
+rewrites the config and sends SIGHUP; the option is dynamic. The live op-forwarding path keeps replicating. Do not delete tmpfs
 pods: that deletes their data.
 
 ## Sign-off

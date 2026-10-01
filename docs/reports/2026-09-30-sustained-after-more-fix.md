@@ -285,3 +285,21 @@ breaker-migration stayed "in_progress" with no unfinished step for more than
 at 03:49Z); no artifact and no conclusion. Recorded as not concluded — not as
 a pass and not as a failure of any test. The next push cancels it through the
 workflow's concurrency group and re-runs the matrix on the new head.
+
+### PR run 36812371158 on e611531 (docs-only commit) — all 5 legs PASS (tested-sha 80e466b, merge revision)
+Started 03:50Z, all legs concluded by 04:39Z (continuous-replication 25 min,
+topology 28 min, replication 36 min, wal-recovery 47 min, breaker-migration
+48 min). continuous-replication 20/20 (planned promotion with "operator pod
+age before the delete: 151s", promoted through the gate; the "graceful
+drain" line again not found, caveat on EV-04 unchanged), topology 47/47,
+replication 45/45 (T6 lsn_purged rebuild and T9 bounded drain both ok),
+wal-recovery 48/48 (pvc-data-survival "recovery wait ended after 36s",
+100/100), breaker-migration 37/37 — the breaker tripped 20 s after the
+4→1 scale-down this time ("OK after 20s"), topology-authority test 12 (lease
+unreadable → fails closed) ok. First fully green PR matrix since
+36725742993 at c33fe5d. The SAF-11 no-trip tally stays at 5 CI occurrences;
+a green run of the same test is the timing-dependent outcome the finding
+already describes (the trip needs half the cluster to die inside one tick)
+and does not close it. Recorded as PASS on CHECK-01, -03-follow, -04-follow,
+-06, -09, -16, -17, -18, -18-purge and -20 at 80e466b. No logs archived
+(no failure).

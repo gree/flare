@@ -36,6 +36,13 @@
   A receiver whose version does not move is never accepted as evidence on
   its own: a crash, a timeout, or an exit before the check look the same.
 
+  SAME-NAME REPLACEMENT (SAF-08). The topology audit brackets each stats
+  reply with two Pod UID reads. A test seam (FLARE_TEST_PROBE_BARRIER) holds
+  the probe of one pod after its first UID read; the test replaces that pod
+  under the same name, releases the probe, and requires the reply to be
+  judged Unknown, then requires a later probe to observe the new pod as
+  current (Unknown clears by fresh evidence, it does not stick).
+
   STARTUP REPUBLISH (SAF-09). The last test holds a committed pass before
   its send and replaces the operator while it is held, so the map is
   persisted and never sent. The fresh process seeds its pending flag with
@@ -72,7 +79,7 @@ private def cfg : ClusterConfig := {
   replicas := 2
   operatorName := "flare-operator"
   debugPod := "debug-topo-auth"
-  operatorEnv := [("FLARE_TEST_PRESEND_BARRIER", barrierDir)]
+  operatorEnv := [("FLARE_TEST_PRESEND_BARRIER", barrierDir), ("FLARE_TEST_PROBE_BARRIER", barrierDir)]
 }
 
 private def numPods : Nat := cfg.partitions * cfg.replicas
@@ -607,6 +614,92 @@ def suite : TestSuite := {
                 | .error why => return .fail s!"topology was not re-applied after the lease was recreated: {why}"
                 | .ok _ => return .fail "topology check flapped"
               return .pass },
+
+    { name := "same-name Pod replacement during the topology probe: the probe is held after its first UID read, the pod is replaced under the same name, and the reply is judged Unknown (never current or behind); the new pod is later observed current"
+      run := do
+        let settled ← waitForCondition "topology applied before the replacement test" 240 do
+          return (← topologyApplied).toOption.isSome
+        if !settled then return .fail "precondition: topology not applied before the test"
+        let entries ← nodeView
+        match entries.find? (·.role == 1) with
+        | none => return .fail "precondition: no slave in the operator's view"
+        | some sl =>
+        let pod := (sl.fqdn.splitOn ".").headD sl.fqdn
+        let uidOf : IO (Option String) := do
+          match ← kubectlGetJsonpath "pod" pod cfg.«namespace» "{.metadata.uid}" with
+          | .ok u => return (if u.trim.isEmpty then none else some u.trim)
+          | .error _ => return none
+        match ← uidOf with
+        | none => return .fail s!"precondition: no UID for {pod}"
+        | some uid0 =>
+        let release : IO Unit := do
+          discard <| opExec s!"touch {barrierDir}/probe-release"
+          for _ in [0:40] do
+            match ← opExec s!"test -f {barrierDir}/probe-reached && echo held || echo free" with
+            | .ok out => if containsSubstr out "free" then break
+            | .error _ => break
+            IO.sleep 500
+        match ← opExec s!"mkdir -p {barrierDir} && rm -f {barrierDir}/probe-reached {barrierDir}/probe-release && touch {barrierDir}/probe-arm-{pod}" with
+        | .error e => return .fail s!"could not arm the probe barrier: {e}"
+        | .ok _ => pure ()
+        -- The audit probes one node per pass, round robin, so the slave's
+        -- turn comes within a few passes.
+        let mut heldUid : Option String := none
+        for _ in [0:90] do
+          match ← opExec s!"cat {barrierDir}/probe-reached 2>/dev/null || true" with
+          | .ok out => if !out.trim.isEmpty then heldUid := some out.trim
+          | .error _ => pure ()
+          if heldUid.isSome then break
+          IO.sleep 1000
+        match heldUid with
+        | none =>
+          discard <| opExec s!"rm -f {barrierDir}/probe-arm-{pod}"
+          return .fail s!"the probe of {pod} never reached the hold within 90 s; nothing below would prove anything"
+        | some h =>
+        if h != uid0 then
+          release
+          return .fail s!"the held probe read uid {h}, not {pod}'s uid {uid0}"
+        IO.eprintln s!"# probe of {pod} held after reading uid {uid0}; replacing the pod under the same name"
+        discard <| kubectl ["delete", "pod", pod, "-n", cfg.«namespace», "--grace-period=0", "--force", "--wait=false"]
+        -- Release as soon as the replacement exists: the hold blocks the
+        -- loop that renews the 15 s lease.
+        let mut uid1 : Option String := none
+        for _ in [0:40] do
+          let u ← uidOf
+          if u.isSome && u != some uid0 then
+            uid1 := u
+            break
+          IO.sleep 500
+        release
+        match uid1 with
+        | none => return .fail s!"precondition: {pod} was not replaced under the same name within 20 s"
+        | some newUid =>
+        IO.eprintln s!"# {pod} replaced: uid {uid0} -> {newUid}; probe released"
+        let verdictLine : IO (Option String) := do
+          let log ← kubectlLogsLabel s!"app={cfg.operatorName}" cfg.«namespace» 3000
+          let lines := log.splitOn "\n"
+          let after := lines.dropWhile (fun l => !containsSubstr l s!"TEST SEAM: topology probe of {pod} released")
+          return (after.find? (fun l => containsSubstr l s!"[TopologyAudit] node={pod}.")).map String.trim
+        let judged ← waitForCondition "the held probe's verdict is logged" 30 do
+          return (← verdictLine).isSome
+        let line := (← verdictLine).getD ""
+        IO.eprintln s!"# verdict of the held probe: {line}"
+        if !judged then
+          return .fail "no audit line for the held probe after its release"
+        if !containsSubstr line "verdict=unknown" then
+          return .fail s!"the probe bracketed by two different UIDs was not judged Unknown: {line}"
+        -- Control: once the replacement has registered, the audit observes
+        -- it normally. Unknown must clear by a fresh observation, not stick.
+        let current ← waitForCondition "the replaced pod is observed current by a later probe" 240 do
+          let log ← kubectlLogsLabel s!"app={cfg.operatorName}" cfg.«namespace» 3000
+          return (log.splitOn "\n").any (fun l =>
+            containsSubstr l s!"[TopologyAudit] node={pod}." && containsSubstr l newUid && containsSubstr l "verdict=current")
+        if !current then
+          return .fail s!"the replaced pod {pod} (uid {newUid}) was never observed current afterwards"
+        let back ← waitForCondition "topology applied after the replacement" 240 do
+          return (← topologyApplied).toOption.isSome
+        if !back then return .fail "topology was not re-applied after the replacement"
+        return .pass },
 
     { name := "startup republish alone: a map committed but never sent (operator replaced while the pass is held before the send) reaches every pod from the fresh process's first pass, topology audit off"
       run := do

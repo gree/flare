@@ -376,7 +376,8 @@
         "2026-10-01: the takeover test (b) ends on a check that every pod names the same master. Its held change is a read-balance weight, so the pre-takeover map already satisfies that check: it proves the exit and re-acquisition, not that the withheld map reached any pod or which path sent it. CHECK-01-startup adds the content and attribution check; the takeover test itself is unchanged.",
         "Startup republish is tested only with the topology audit OFF (test seam FLARE_TEST_TOPOLOGY_AUDIT_OFF, inert when unset). With the audit on, a fresh process has two independent reasons to republish to a behind pod (startup seed, audit verdict=behind); the test shows the seed suffices, not how the two interact.",
         "The send-reason record (broadcast trigger: ...) is logged with every send and is the attribution evidence; it is derived from the same four values the send condition uses (BroadcastTriggers.any), so it cannot disagree with the branch taken, but it is still a log line rather than a wire capture.",
-        "FINDING 2026-10-01 (CI 36831110279, not changed here): the persisted node map (serializeNodeMap) carries no read balance, so a reloaded map has every node at balance 100 until the first reconcile pass re-applies spec.readBalance and the SAF-10c read withholding. The operator answers node add from that in-memory map, and after a takeover the reloaded version is raised to the new generation base, newer than any pod holds. A flared pod that boots in that window adopts a map in which slaves, including WAL followers withheld from reads, carry balance 100, until the first pass pushes the corrected map seconds later. Running pods are not affected: flared requests the map only at boot. Side effect: with any slave weight other than 100, the first pass after a restart always advances the version, so the startup seed is rarely the only republish reason in practice. FIX (2026-10-01, CI pending): serializeNodeMap now persists each node's committed balance (balance=, including the SAF-10c withholding) and parseNodeMapLine restores it; a legacy line without the token loads as master 100 / others 0. Proved by nodeMapVersion_roundtrip (balances 100/0/25) and legacy_line_balance_fallback. The startup-republish E2E uses slave weight 25 again, so it fails if the reload changes the map."
+        "FINDING 2026-10-01 (CI 36831110279, not changed here): the persisted node map (serializeNodeMap) carries no read balance, so a reloaded map has every node at balance 100 until the first reconcile pass re-applies spec.readBalance and the SAF-10c read withholding. The operator answers node add from that in-memory map, and after a takeover the reloaded version is raised to the new generation base, newer than any pod holds. A flared pod that boots in that window adopts a map in which slaves, including WAL followers withheld from reads, carry balance 100, until the first pass pushes the corrected map seconds later. Running pods are not affected: flared requests the map only at boot. Side effect: with any slave weight other than 100, the first pass after a restart always advances the version, so the startup seed is rarely the only republish reason in practice. FIX (2026-10-01, CI pending): serializeNodeMap now persists each node's committed balance (balance=, including the SAF-10c withholding) and parseNodeMapLine restores it; a legacy line without the token loads as master 100 / others 0. Proved by nodeMapVersion_roundtrip (balances 100/0/25) and legacy_line_balance_fallback. The startup-republish E2E uses slave weight 25 again, so it fails if the reload changes the map.",
+        "Same-name replacement is staged E2E only for the topology audit probe (UID-bracketed). The follow-evidence stats reads (read/promotion eligibility) are NOT UID-bracketed: they are per-pass and by pod name, so a reply from a pod replaced right after the read is used for that pass. The flared-side local read guard (follow_allows_local_read) and the pass-by-pass re-evaluation bound the effect; a UID bracket there is a possible follow-up, not done."
       ],
       "code": [
         {
@@ -413,7 +414,7 @@
         {
           "id": "CHECK-01-observation",
           "kind": "scenario",
-          "procedure": "Run flare_unit observation cases: complete/truncated/duplicate stats; older/equal/newer version; missing/changing UID; new Unknown replaces old confirmation. Continuous-replication requires a UID-bound current observation from the production audit. Replacement during probe and startup republish as sole recovery remain unstaged.",
+          "procedure": "Run flare_unit observation cases: complete/truncated/duplicate stats; older/equal/newer version; missing/changing UID; new Unknown replaces old confirmation. Continuous-replication requires a UID-bound current observation from the production audit. Replacement during probe and startup republish as sole recovery remain unstaged. E2E (2026-10-01, CI pending): topology-authority test 'same-name Pod replacement during the topology probe' holds the probe of the slave after its first UID read (test seam FLARE_TEST_PROBE_BARRIER, 30 s ceiling), force-replaces the pod under the same name, releases, and requires the first audit line for that pod after the release to carry verdict=unknown; then requires a later probe of the new UID to report verdict=current and the topology to be applied.",
           "references": [
             {
               "path": "flare_operator/FlareOperator/UnitTests.lean",
@@ -422,6 +423,14 @@
             {
               "path": "flare_operator/FlareOperator/E2E/Tests/ContinuousReplication.lean",
               "symbol": "suite"
+            },
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/TopologyAuthority.lean",
+              "symbol": "suite"
+            },
+            {
+              "path": "flare_operator/FlareOperator/K8s/Bridge.lean",
+              "symbol": "topologyProbe"
             }
           ]
         },

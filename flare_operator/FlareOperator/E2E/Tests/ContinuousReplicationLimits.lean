@@ -284,14 +284,16 @@ def purgeSuite : TestSuite := {
 
 -- ─── T9 (bounded): a far-behind replica, master memory, tombstone GC ────
 
--- Two partitions: the lagged-successor test loses one master, which must be
--- 25% of the nodes. In a 1-partition x 2-replica cluster one master is 50%,
--- which trips the circuit breaker at its default threshold, and failover is
--- then paused by design (finding recorded under EV-09, 2026-10-02).
+-- One partition x two replicas on purpose. The lagged-successor test loses
+-- one master, which is 50% of this cluster: it tripped the breaker before
+-- the minUnavailableToTrip floor (default 2, user decision 2026-10-02), so
+-- the test is also the E2E for that floor. (Two partitions were tried in CI
+-- 36904379135 and broke the suite: Ctx.pair takes partition 0's master but
+-- can return the other partition's slave.)
 private def limitsCfg : ClusterConfig := {
   name := "cont-repl-limits"
   «namespace» := "flare-cont-repl-limits"
-  partitions := 2
+  partitions := 1
   replicas := 2
   operatorName := "flare-operator"
   debugPod := "debug-cont-repl-limits"

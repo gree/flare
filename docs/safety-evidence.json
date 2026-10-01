@@ -985,6 +985,38 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green, 202 tests) — PR #144 merge revision of 76fbf86; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36901004232"
+        },
+        {
+          "check": "CHECK-01",
+          "commit": "727b963cb0ed924601acbe77553a0ae6ffc65110",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, replication leg FAIL on continuous-replication-limits, harness) — PR #144 merge revision of 779513b; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36904379135"
+        },
+        {
+          "check": "CHECK-01-startup",
+          "commit": "727b963cb0ed924601acbe77553a0ae6ffc65110",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, replication leg FAIL on continuous-replication-limits, harness) — PR #144 merge revision of 779513b; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36904379135"
+        },
+        {
+          "check": "CHECK-01-observation",
+          "commit": "727b963cb0ed924601acbe77553a0ae6ffc65110",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, replication leg FAIL on continuous-replication-limits, harness) — PR #144 merge revision of 779513b; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36904379135"
+        },
+        {
+          "check": "CHECK-01-generation",
+          "commit": "727b963cb0ed924601acbe77553a0ae6ffc65110",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, replication leg FAIL on continuous-replication-limits, harness) — PR #144 merge revision of 779513b; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36904379135"
         }
       ],
       "tasks": [
@@ -1614,6 +1646,22 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green, 202 tests) — PR #144 merge revision of 76fbf86; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36901004232"
+        },
+        {
+          "check": "CHECK-03",
+          "commit": "727b963cb0ed924601acbe77553a0ae6ffc65110",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, replication leg FAIL on continuous-replication-limits, harness) — PR #144 merge revision of 779513b; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36904379135"
+        },
+        {
+          "check": "CHECK-03-follow",
+          "commit": "727b963cb0ed924601acbe77553a0ae6ffc65110",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, replication leg FAIL on continuous-replication-limits, harness) — PR #144 merge revision of 779513b; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36904379135"
         }
       ],
       "tasks": [
@@ -2225,6 +2273,22 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green, 202 tests) — PR #144 merge revision of 76fbf86; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36901004232"
+        },
+        {
+          "check": "CHECK-04-follow",
+          "commit": "727b963cb0ed924601acbe77553a0ae6ffc65110",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, replication leg FAIL on continuous-replication-limits, harness) — PR #144 merge revision of 779513b; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36904379135"
+        },
+        {
+          "check": "CHECK-04-eligibility",
+          "commit": "727b963cb0ed924601acbe77553a0ae6ffc65110",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, replication leg FAIL on continuous-replication-limits, harness) — PR #144 merge revision of 779513b; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36904379135"
         }
       ],
       "tasks": [
@@ -2802,6 +2866,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green, 202 tests) — PR #144 merge revision of 76fbf86; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36901004232"
+        },
+        {
+          "check": "CHECK-06",
+          "commit": "727b963cb0ed924601acbe77553a0ae6ffc65110",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, replication leg FAIL on continuous-replication-limits, harness) — PR #144 merge revision of 779513b; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36904379135"
         }
       ],
       "tasks": [
@@ -3263,6 +3335,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green, 202 tests) — PR #144 merge revision of 76fbf86; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36901004232"
+        },
+        {
+          "check": "CHECK-09",
+          "commit": "727b963cb0ed924601acbe77553a0ae6ffc65110",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, replication leg FAIL on continuous-replication-limits, harness) — PR #144 merge revision of 779513b; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36904379135"
         }
       ],
       "tasks": [],
@@ -3682,7 +3762,16 @@
           ]
         }
       ],
-      "runs": [],
+      "runs": [
+        {
+          "check": "CHECK-15",
+          "commit": "727b963cb0ed924601acbe77553a0ae6ffc65110",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, replication leg FAIL on continuous-replication-limits, harness) — PR #144 merge revision of 779513b; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36904379135"
+        }
+      ],
       "tasks": [],
       "review": {
         "commit": "5e7a3df871fd667412b1623b3074b5b8849c2939",
@@ -4093,6 +4182,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green, 202 tests) — PR #144 merge revision of 76fbf86; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36901004232"
+        },
+        {
+          "check": "CHECK-16",
+          "commit": "727b963cb0ed924601acbe77553a0ae6ffc65110",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, replication leg FAIL on continuous-replication-limits, harness) — PR #144 merge revision of 779513b; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36904379135"
         }
       ],
       "tasks": [
@@ -4405,6 +4502,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green, 202 tests) — PR #144 merge revision of 76fbf86; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36901004232"
+        },
+        {
+          "check": "CHECK-17",
+          "commit": "727b963cb0ed924601acbe77553a0ae6ffc65110",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, replication leg FAIL on continuous-replication-limits, harness) — PR #144 merge revision of 779513b; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36904379135"
         }
       ],
       "tasks": [
@@ -4447,7 +4552,8 @@
         "After a source-epoch change the master's forwarded ops are refused by the stale-session replica, retried and counted as drops, so in the E2E the DROP path requested the rebuild before the follower-declared request could (runs 5-6: entry with drops=2). The two paths race and converge on the same rebuild; the follower-declared path alone (no drop counted, e.g. a purge with no write traffic) is unit-pinned, not staged end to end.",
         "RocksDB does not always report a purged position as NotFound: with the requested WAL file gone, GetUpdatesSince serves from the oldest surviving file. Before 3b7f38c the follower refused that first batch as a contiguity violation mapped to a TRANSIENT apply error and retried it forever (T6 E2E: state=error/apply_error, applied position frozen while forwarding delivered). Fixed: the server answers lsn_purged when the first served batch is beyond lsn+1, and the client maps a gap refusal to lsn_purged → needs_rebuild. E2E confirmation (T6 purge suite) pending.",
         "The two routes to a rebuild request (a counted drop and the follower's own needs_rebuild declaration) have each been OBSERVED to win in E2E and both orders are pinned sequentially by flare_unit, but true concurrency is NOT verified: nothing exercises them racing within one reconcile pass against the real persist path.",
-        "lsn_purged after an actual size-cap purge (not the 1 MB/1 s harness knobs) is now staged once: outage run 3 (6e757cb) — declared and rebuilt in 59 s. Single execution."
+        "lsn_purged after an actual size-cap purge (not the 1 MB/1 s harness knobs) is now staged once: outage run 3 (6e757cb) — declared and rebuilt in 59 s. Single execution.",
+        "2026-10-02 (CI 36904379135): T6 passed with exactly one reconstruction (1->2) and at most one ledger entry, but the master counted no dropped forwards during the cut (0->0), so only the follower route fired: the concurrent case of both repair triggers was NOT shown by this run."
       ],
       "code": [
         {
@@ -5030,6 +5136,22 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green, 202 tests) — PR #144 merge revision of 76fbf86; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36901004232"
+        },
+        {
+          "check": "CHECK-18",
+          "commit": "727b963cb0ed924601acbe77553a0ae6ffc65110",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, replication leg FAIL on continuous-replication-limits, harness) — PR #144 merge revision of 779513b; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36904379135"
+        },
+        {
+          "check": "CHECK-18-purge",
+          "commit": "727b963cb0ed924601acbe77553a0ae6ffc65110",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, replication leg FAIL on continuous-replication-limits, harness) — PR #144 merge revision of 779513b; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36904379135"
         }
       ],
       "tasks": [
@@ -5168,7 +5290,8 @@
         "No wall-clock bound is used anywhere (design §9 decision 2)."
       ],
       "residual_risks": [
-        "The tombstone-space bound and its rebuild policy (design §9 decision 3) are not staged (T9 pending)."
+        "The tombstone-space bound and its rebuild policy (design §9 decision 3) are not staged (T9 pending).",
+        "2026-10-02 (CI 36904379135), classified as HARNESS: the limits cluster was changed to 2 partitions for the lagged-successor test; Ctx.pair takes partition 0's master but can return the other partition's slave, so the precondition, T9 and the lagged-successor test compared unrelated copies (T9 'items master=121 replica=99', lagged 'not promoted'). Reverted to 1 partition: with the breaker floor (minUnavailableToTrip 2) a single death in 1p x 2r no longer trips, so the lagged-successor test now also covers that decision. Re-run pending."
       ],
       "code": [
         {
@@ -5445,6 +5568,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green, 202 tests) — PR #144 merge revision of 76fbf86; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36901004232"
+        },
+        {
+          "check": "CHECK-20",
+          "commit": "727b963cb0ed924601acbe77553a0ae6ffc65110",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request, leg replication (continuous-replication-limits: precondition, T9 and lagged successor failed after the cluster was changed to 2 partitions)",
+          "result": "fail",
+          "report": "docs/reports/2026-10-02-ci-36904379135-replication-e2e.log"
         }
       ],
       "tasks": [

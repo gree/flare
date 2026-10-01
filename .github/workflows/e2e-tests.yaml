@@ -195,7 +195,11 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # One retry: even a cached build resolves the base image's manifest
+      # from Docker Hub, which returned HTTP 503 once (PR run 36866790112).
       - name: Build flare-node image (cached)
+        id: build_flare_node
+        continue-on-error: true
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -205,7 +209,41 @@ jobs:
           cache-from: type=gha,scope=flare-node
           cache-to: ${{ matrix.group == 'topology' && 'type=gha,mode=max,scope=flare-node' || '' }}
 
+      - name: Wait before retrying flare-node
+        if: steps.build_flare_node.outcome == 'failure'
+        run: sleep 30
+
+      - name: Build flare-node image (cached, retry)
+        if: steps.build_flare_node.outcome == 'failure'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.flare-node
+          tags: flare-node:test
+          load: true
+          cache-from: type=gha,scope=flare-node
+          cache-to: ${{ matrix.group == 'topology' && 'type=gha,mode=max,scope=flare-node' || '' }}
+
+      # One retry: even a cached build resolves the base image's manifest
+      # from Docker Hub, which returned HTTP 503 once (PR run 36866790112).
       - name: Build flare-node-rocksdb image (cached)
+        id: build_flare_node_rocksdb
+        continue-on-error: true
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.flare-node-rocksdb
+          tags: flare-node-rocksdb:test
+          load: true
+          cache-from: type=gha,scope=flare-node-rocksdb
+          cache-to: ${{ matrix.group == 'topology' && 'type=gha,mode=max,scope=flare-node-rocksdb' || '' }}
+
+      - name: Wait before retrying flare-node-rocksdb
+        if: steps.build_flare_node_rocksdb.outcome == 'failure'
+        run: sleep 30
+
+      - name: Build flare-node-rocksdb image (cached, retry)
+        if: steps.build_flare_node_rocksdb.outcome == 'failure'
         uses: docker/build-push-action@v6
         with:
           context: .

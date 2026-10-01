@@ -612,8 +612,17 @@ def suite : TestSuite := {
           | .error e => ensureBarrierClear; return .fail s!"could not roll the operator: {e}"
           | .ok _ => pure ()
           let rolled ← kubectlRolloutStatus s!"deployment/{cfg.operatorName}" cfg.«namespace» 300
+          -- `rollout status` returns once the NEW pod is available, and the
+          -- operator reports Ready before it holds the lease, so the old pod
+          -- can still be terminating here (CI 36826494031). Wait for it to be
+          -- gone: until then the label selects both pods and the log read
+          -- below would mix the two processes.
+          let oldGone ← waitForCondition "the old operator pod is gone" 180 do
+            let now ← getPodNames s!"app={cfg.operatorName}" cfg.«namespace»
+            return !now.isEmpty && !now.any (opPods0.contains ·)
           let opPods1 ← getPodNames s!"app={cfg.operatorName}" cfg.«namespace»
-          if !rolled || opPods1.any (opPods0.contains ·) then
+          IO.eprintln s!"# operator pods before {opPods0}, after {opPods1} (rollout complete={rolled})"
+          if !rolled || !oldGone then
             return .fail s!"precondition: operator was not replaced (rollout complete={rolled}, pods before {opPods0}, after {opPods1})"
           let sent ← waitForCondition "the fresh operator's first broadcast" 180 do
             let log ← kubectlLogsLabel s!"app={cfg.operatorName}" cfg.«namespace» 3000

@@ -47,3 +47,24 @@ process meets a foreign holder and fences.
 - The first pass could legitimately move the version (for example a
   re-registration). The test then fails as "not attributable"; that outcome
   would be a finding about the test's premise, not a delivery failure.
+
+## First CI execution — PR run 36826494031 on a87aea3 (merge rev 6f1edf0): FAIL, harness precondition
+
+The other four legs passed (continuous-replication 20/20, topology 47/47,
+replication 45/45, wal-recovery 48/48), and breaker-migration passed 37 of 38;
+its breaker tripped in 5 s. The new test failed before any delivery assertion:
+
+    precondition: operator was not replaced (rollout complete=true,
+    pods before [flare-operator-768fdbb4cb-vdcb7],
+    after [flare-operator-768fdbb4cb-vdcb7, flare-operator-76c4d9c66f-f5j99])
+
+`kubectl rollout status` returns once the new pod is available. The operator
+reports Ready before it holds the lease, so the old pod was still terminating
+when the test listed pods. The old process's last line is
+`TEST BARRIER: holding before the pre-send lease check (v4294967309)`, so it
+never sent the held version. This is a test-premise failure, not a delivery
+failure, and says nothing yet about the startup republish. Fix: wait
+up to 180 s for the old pod to disappear before reading logs. Log
+`2026-10-01-ci-36826494031-breaker-migration-e2e.log`. Recorded as FAIL on
+CHECK-01-startup with this classification. The other nine checks are recorded
+as PASS at 6f1edf0.

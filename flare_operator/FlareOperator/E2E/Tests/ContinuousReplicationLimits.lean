@@ -618,6 +618,49 @@ private def Ctx.loadWindow (c : Ctx) (ip : String) (start rate : Nat) : IO Nat :
   if spent < 30000 then IO.sleep (30000 - spent).toUInt32
   return n
 
+/-- T17: client-side latency of single `get`s while the load runs, from the
+    debug pod. Each timing includes starting `nc`, so it is an UPPER bound on
+    the request latency, comparable between master and replica and between
+    rates, not an absolute service time. Returns "p50=… p99=… max=… n=…" in
+    microseconds, or why it could not measure. -/
+private def Ctx.latencyProbe (c : Ctx) (ip key : String) (n : Nat := 50) : IO String := do
+  let cmd := s!"t=$(date +%s%N); case \"$t\" in *N*) echo 'no nanosecond clock in the debug pod'; exit 0;; esac; i=0; while [ $i -lt {n} ]; do s=$(date +%s%N); printf 'get {key}\\r\\n' | nc -w 2 {ip} {c.cfg.flarePort} >/dev/null 2>&1; e=$(date +%s%N); echo $(( (e - s) / 1000 )); i=$((i+1)); done | sort -n | awk '\{a[NR]=$1} END \{if (NR==0) \{print \"no samples\"} else \{p=int((NR+1)/2); q=int(NR*0.99); if (q<1) q=1; print \"p50=\" a[p] \"us p99=\" a[q] \"us max=\" a[NR] \"us n=\" NR}}'"
+  match ← execInDebugPod c.cfg.debugPod c.cfg.«namespace» cmd with
+  | .ok out => return out.trim
+  | .error e => return s!"probe failed: {e}"
+
+/-- T17: (sum, count) of the operator's reconcile-duration histogram, read
+    from its own /metrics. -/
+private def Ctx.reconcileSumCount (c : Ctx) : IO (Option (Float × Nat)) := do
+  let pods ← getPodNames s!"app={c.cfg.operatorName}" c.cfg.«namespace»
+  match pods.head? with
+  | none => return none
+  | some pod =>
+    match ← getPodIp pod c.cfg.«namespace» with
+    | none => return none
+    | some ip =>
+      match ← execInDebugPod c.cfg.debugPod c.cfg.«namespace» s!"wget -qO- -T 5 http://{ip}:9090/metrics | grep -E '^flare_operator_reconcile_duration_seconds_(sum|count)'" with
+      | .error _ => return none
+      | .ok out =>
+        let val := fun (suffix : String) => (out.splitOn "\n").findSome? fun l =>
+          if containsSubstr l s!"_{suffix}" then ((l.splitOn " ").getLast?.map String.trim) else none
+        match val "sum", val "count" with
+        | some sv, some cv =>
+          let sf := (sv.splitOn ".")
+          let whole := (sf.headD "0").toNat?.getD 0
+          let frac := (sf.getD 1 "0")
+          let fracF := (frac.take 6).toNat?.getD 0
+          let digits := (frac.take 6).length
+          let f := whole.toFloat + fracF.toFloat / (10.0 ^ digits.toFloat)
+          return (cv.toNat?).map (f, ·)
+        | _, _ => return none
+
+/-- T17: seconds since the operator lease was last renewed. -/
+private def Ctx.leaseAgeS (c : Ctx) : IO (Option Nat) := do
+  match ← hostCmd "sh" ["-c", s!"r=$(kubectl get lease {c.cfg.name}-operator-lease -n {c.cfg.«namespace»} -o jsonpath='\{.spec.renewTime}'); now=$(date +%s); t=$(date -d \"$r\" +%s 2>/dev/null || date -j -f %Y-%m-%dT%H:%M:%S \"$\{r%%.*}\" +%s); echo $((now - t))"] with
+  | .ok o => return o.trim.toNat?
+  | .error _ => return none
+
 /-- Run `minutes` of load at `rate`, sampling every 30 s. Returns the lag
     samples (master latest − replica applied) and the last item counts. -/
 private def Ctx.sustain (c : Ctx) (mPod mIp sPod sIp : String) (start rate minutes : Nat)
@@ -625,7 +668,19 @@ private def Ctx.sustain (c : Ctx) (mPod mIp sPod sIp : String) (start rate minut
   let mut lags : List Nat := []
   let mut k := start
   for w in [0:minutes * 2] do
+    -- T17: probe both copies and the control loop WHILE this window loads.
+    let rc0 ← c.reconcileSumCount
+    let probeS ← IO.asTask (c.latencyProbe sIp "w1")
+    let probeM ← IO.asTask (c.latencyProbe mIp "w1")
     k := k + (← c.loadWindow mIp k rate)
+    let latS := match ← IO.wait probeS with | .ok v => v | .error e => s!"probe error: {e}"
+    let latM := match ← IO.wait probeM with | .ok v => v | .error e => s!"probe error: {e}"
+    let rc1 ← c.reconcileSumCount
+    let recon := match rc0, rc1 with
+      | some (s0, n0), some (s1, n1) =>
+        if n1 > n0 then s!"{n1 - n0} passes, mean {((s1 - s0) * 1000.0 / (n1 - n0).toFloat).floor}ms" else "no pass completed"
+      | _, _ => "unreadable"
+    IO.eprintln s!"# T17 {rate}/s window {w}: get latency replica [{latS}] master [{latM}]; reconcile {recon}; lease age {(← c.leaseAgeS).map toString |>.getD "?"}s"
     let head := (← c.statNat mIp "rocksdb_latest_sequence_number").getD 0
     let applied := (← c.statNat sIp "repl_applied_lsn").getD 0
     let lag := if head > applied then head - applied else 0

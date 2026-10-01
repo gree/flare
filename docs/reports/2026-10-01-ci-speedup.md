@@ -162,3 +162,19 @@ It runs for:
 - a previous run whose title carries no base, which covers every run before
   this change;
 - a code push.
+
+### Confirmed on CI (2026-10-02)
+
+- **Code push 6866c95, PR run 36882921953.** The title was
+  `E2E Tests (base a8763cb…)`, and the full matrix ran.
+- **Docs-only push a032812, PR run 36895413680.** The plan job logged:
+
+      E2E NOT RUN: docs-only push; previous run 36892024759 on ddeb06e
+        passed against the same base a8763cb…
+
+  The test legs were skipped. The run shows the check
+  `E2E NOT RUN (docs-only push)` with the notice
+  `see run 36892024759`.
+
+The name of that check is static, because GitHub shows a skipped job's
+name unevaluated (fixed in aa2262a).

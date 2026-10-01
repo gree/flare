@@ -8,6 +8,10 @@
 {{- end }}
 {{- $c := .Values.cluster }}
 {{- $ns := .Values.namespace }}
+{{- $memWarn := include "flare-operator.memoryBudgetWarning" . }}
+{{- if $memWarn }}
+# {{ $memWarn | replace "\n" "\n# " }}
+{{- end }}
 {{- /* Graceful-drain window. Computed via hasKey (NOT `| default`) so an
        explicit drainSeconds: 0 disables the hook — sprig's `default` treats 0
        as empty and would wrongly re-enable it. Absent (e.g. helm --reuse-values

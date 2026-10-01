@@ -46,3 +46,21 @@ payload rule alone did not reliably isolate topology. Revised test blocks
 both directions between operator pod IPs and the replica, covering index
 request replies as well as pushed maps. All rules are removed in finally.
 This is a harness fix and is NOT a passing read-guard acceptance result.
+
+## Render-time budget check (2026-10-02)
+
+`flare-operator.memoryBudgetWarning` in the chart computes the RocksDB
+floor. The floor is the block cache plus 2 column families (default and
+replication meta) × the write buffer size × the number of buffers, using
+flared's defaults of 512 / 64 / 3 for unset fields.
+
+- **Fail.** The render fails when the floor is at or above
+  `cluster.resources.limits.memory`.
+- **Warn.** A warning goes into the rendered manifest and into NOTES when the
+  floor is above 70% of the limit, or when floor plus `tmpfs.sizeLimit`
+  exceeds it.
+
+With the chart defaults (1Gi limit) the floor is 896 MiB, so the defaults
+warn. The 512Mi limit that OOM-killed flared in the scale evaluation now
+fails the render. The floor is not an RSS bound. Tests are in
+`scripts/tests/test_helm_memory.py`.

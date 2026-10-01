@@ -58,5 +58,42 @@ class MemoryConfigTest(unittest.TestCase):
             self.assertIn(f"{field}: {value}", cr)
 
 
+@unittest.skipUnless(shutil.which("helm"), "helm is required")
+class MemoryBudgetCheckTest(unittest.TestCase):
+    """Render-time memory budget check for the flared container (plan item 4)."""
+
+    def render(self, *settings, check=True):
+        args = ["helm", "template", "t", str(ROOT / "helm/flare-operator"), "--set", "cluster.enabled=true",
+                "--set", "namespace=ns"]
+        for setting in settings:
+            args.extend(["--set", setting])
+        return subprocess.run(args, text=True, capture_output=True)
+
+    def test_defaults_warn_above_70_percent(self):
+        r = self.render()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("RocksDB memory floor (896 MiB) is above 70% of the flared memory limit (1024 MiB)", r.stdout)
+
+    def test_floor_at_or_above_limit_fails(self):
+        r = self.render("cluster.resources.limits.memory=512Mi")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("at or below the RocksDB memory floor of 896 MiB", r.stderr)
+
+    def test_small_budgets_under_small_limit_pass_quietly(self):
+        r = self.render("cluster.resources.limits.memory=512Mi",
+                        "cluster.rocksdb.blockCacheSizeMb=64",
+                        "cluster.rocksdb.writeBufferSizeMb=16",
+                        "cluster.rocksdb.maxWriteBufferNumber=3")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("WARNING: the RocksDB memory floor", r.stdout)
+
+    def test_tmpfs_counts_against_memory(self):
+        r = self.render("cluster.resources.limits.memory=4Gi",
+                        "cluster.persistence.enabled=false",
+                        "cluster.tmpfs.enabled=true", "cluster.tmpfs.sizeLimit=4Gi")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("RocksDB floor 896 MiB + tmpfs.sizeLimit 4096 MiB exceeds the memory limit 4096 MiB", r.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

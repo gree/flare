@@ -41,15 +41,19 @@ that gap. Record the agreed failure model and RPO/RTO before approval.
   this tick's deaths); CI and reviewer confirmation of the definition pending.
 - Specify the client-visible result when a stale slave cannot reach its master:
   legacy GET failure can look like a cache miss. Verify client fallback behavior.
-- Memory knobs are implemented; automatic memory-limit validation and proof of
-  the effective running budgets are not. No automatic restart is performed.
+- Memory knobs are implemented. Render-time validation exists since
+  2026-10-02. The chart fails when the RocksDB floor reaches the flared memory
+  limit. The floor is block cache plus 2 column families × write buffer ×
+  buffers. The chart warns when the floor is above 70% of the limit, or when
+  floor plus tmpfs size exceeds it. Proof of the effective running budgets
+  (RSS under load) is still missing. No automatic restart is performed.
 
 ## Required acceptance and capacity evidence
 
 - Run CI at the actual release candidate and assess relevant controls. Stage
   startup republish and same-name Pod replacement independently, including
   stats failures and non-WAL read eligibility recovery. Startup republish
-  alone now has an E2E (CHECK-01-startup, audit off); it has not run yet.
+  alone has an E2E (CHECK-01-startup, audit off) that passes on CI.
   Same-name Pod replacement (topology probe), an operator restart while stats
   are unreadable, and non-WAL read recovery after a restart now have E2E tests
   that pass on CI (PR runs 36874157713 and 36877273395). Follow-evidence reads

@@ -2,10 +2,11 @@
 
 Status as of 2026-10-01: development/integration, not production-approved.
 PR #144 integration and production WAL enablement are separate decisions.
-Latest inspected baseline `e611531`: PR E2E 36812371158 (all five legs, tested at
-the merge revision 80e466b; the breaker tripped in 20 s this run — the SAF-11
-no-trip finding, 5 CI occurrences, the latest at 36796752122, stays open),
-outage evaluation 36741586970 at 6e757cb all five legs; previous fully green
+Latest inspected baseline `0d29589`: PR E2E 36816259807 (all five legs, tested at
+the merge revision b706686) and 36812371158 at e611531 (all five legs, merge
+rev 80e466b); the breaker tripped in 5 s and 20 s in these runs — the SAF-11
+no-trip finding, 5 CI occurrences, the latest at 36796752122, stays open.
+Outage evaluation 36741586970 at 6e757cb all five legs; earlier fully green
 PR matrix 36725742993 at c33fe5d. At b5f1c45: PR E2E 36713376306 (all five
 legs, merge rev 89b8cdb), nix-linux 36713376269, evidence 36713376405; at 7e979b0: PR E2E 36707836842 (merge rev
 4c78aba), nix-linux 36707836926, evidence 36707837351;

@@ -303,3 +303,19 @@ already describes (the trip needs half the cluster to die inside one tick)
 and does not close it. Recorded as PASS on CHECK-01, -03-follow, -04-follow,
 -06, -09, -16, -17, -18, -18-purge and -20 at 80e466b. No logs archived
 (no failure).
+
+### PR run 36816259807 on 0d29589 (docs-only commit) — all 5 legs PASS (tested-sha b706686, merge revision)
+Started 04:41Z, concluded 05:28Z (continuous-replication 24 min, topology
+28 min, replication 39 min, wal-recovery 46 min, breaker-migration 47 min).
+continuous-replication 20/20 (operator age 151 s before the planned-promotion
+delete; "graceful drain" line still absent), topology 47/47, replication
+45/45, wal-recovery 48/48 (pvc-data-survival recovery wait 15 s, 100/100),
+breaker-migration 37/37 — the breaker tripped 5 s after the scale-down.
+Second fully green matrix in a row (after 36812371158). SAF-11 tally
+unchanged at 5 no-trip occurrences; the trip latency across the last two
+green runs (20 s, 5 s) versus 480 s timeouts in the no-trip runs is the
+timing spread the finding describes. Recorded as PASS on the same ten checks
+at b706686. To stop docs-only commits from re-running the matrix for their
+own record, later green runs on record-only commits are summarised in this
+file with the next substantive commit rather than pushed one by one; a
+failure is still recorded immediately.

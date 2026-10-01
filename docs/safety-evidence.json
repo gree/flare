@@ -1113,6 +1113,38 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of cf90600; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36918285987"
+        },
+        {
+          "check": "CHECK-01",
+          "commit": "6dcc029bc06791ddc35fc0c89501fb3f03156c0a",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of 022c11b; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36922262408"
+        },
+        {
+          "check": "CHECK-01-startup",
+          "commit": "6dcc029bc06791ddc35fc0c89501fb3f03156c0a",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of 022c11b; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36922262408"
+        },
+        {
+          "check": "CHECK-01-observation",
+          "commit": "6dcc029bc06791ddc35fc0c89501fb3f03156c0a",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of 022c11b; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36922262408"
+        },
+        {
+          "check": "CHECK-01-generation",
+          "commit": "6dcc029bc06791ddc35fc0c89501fb3f03156c0a",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of 022c11b; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36922262408"
         }
       ],
       "tasks": [
@@ -1806,6 +1838,22 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of cf90600; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36918285987"
+        },
+        {
+          "check": "CHECK-03",
+          "commit": "6dcc029bc06791ddc35fc0c89501fb3f03156c0a",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of 022c11b; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36922262408"
+        },
+        {
+          "check": "CHECK-03-follow",
+          "commit": "6dcc029bc06791ddc35fc0c89501fb3f03156c0a",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of 022c11b; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36922262408"
         }
       ],
       "tasks": [
@@ -2482,6 +2530,22 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of cf90600; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36918285987"
+        },
+        {
+          "check": "CHECK-04-follow",
+          "commit": "6dcc029bc06791ddc35fc0c89501fb3f03156c0a",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of 022c11b; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36922262408"
+        },
+        {
+          "check": "CHECK-04-eligibility",
+          "commit": "6dcc029bc06791ddc35fc0c89501fb3f03156c0a",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of 022c11b; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36922262408"
         }
       ],
       "tasks": [
@@ -3092,6 +3156,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of cf90600; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36918285987"
+        },
+        {
+          "check": "CHECK-06",
+          "commit": "6dcc029bc06791ddc35fc0c89501fb3f03156c0a",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of 022c11b; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36922262408"
         }
       ],
       "tasks": [
@@ -3590,6 +3662,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of cf90600; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36918285987"
+        },
+        {
+          "check": "CHECK-09",
+          "commit": "6dcc029bc06791ddc35fc0c89501fb3f03156c0a",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of 022c11b; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36922262408"
         }
       ],
       "tasks": [],
@@ -4033,6 +4113,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of cf90600; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36918285987"
+        },
+        {
+          "check": "CHECK-15",
+          "commit": "6dcc029bc06791ddc35fc0c89501fb3f03156c0a",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of 022c11b; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36922262408"
         }
       ],
       "tasks": [],
@@ -4503,6 +4591,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of cf90600; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36918285987"
+        },
+        {
+          "check": "CHECK-16",
+          "commit": "6dcc029bc06791ddc35fc0c89501fb3f03156c0a",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of 022c11b; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36922262408"
         }
       ],
       "tasks": [
@@ -4847,6 +4943,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of cf90600; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36918285987"
+        },
+        {
+          "check": "CHECK-17",
+          "commit": "6dcc029bc06791ddc35fc0c89501fb3f03156c0a",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of 022c11b; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36922262408"
         }
       ],
       "tasks": [
@@ -4890,7 +4994,8 @@
         "RocksDB does not always report a purged position as NotFound: with the requested WAL file gone, GetUpdatesSince serves from the oldest surviving file. Before 3b7f38c the follower refused that first batch as a contiguity violation mapped to a TRANSIENT apply error and retried it forever (T6 E2E: state=error/apply_error, applied position frozen while forwarding delivered). Fixed: the server answers lsn_purged when the first served batch is beyond lsn+1, and the client maps a gap refusal to lsn_purged → needs_rebuild. E2E confirmation (T6 purge suite) pending.",
         "The two routes to a rebuild request (a counted drop and the follower's own needs_rebuild declaration) have each been OBSERVED to win in E2E and both orders are pinned sequentially by flare_unit, but true concurrency is NOT verified: nothing exercises them racing within one reconcile pass against the real persist path.",
         "lsn_purged after an actual size-cap purge (not the 1 MB/1 s harness knobs) is now staged once: outage run 3 (6e757cb) — declared and rebuilt in 59 s. Single execution.",
-        "2026-10-02 (CI 36904379135): T6 passed with exactly one reconstruction (1->2) and at most one ledger entry, but the master counted no dropped forwards during the cut (0->0), so only the follower route fired: the concurrent case of both repair triggers was NOT shown by this run."
+        "2026-10-02 (CI 36904379135): T6 passed with exactly one reconstruction (1->2) and at most one ledger entry, but the master counted no dropped forwards during the cut (0->0), so only the follower route fired: the concurrent case of both repair triggers was NOT shown by this run.",
+        "2026-10-02 (CI 36922262408): the concurrent case is now shown. With the cut kept until the master counted dropped forwards (0->2), BOTH repair routes logged a request for the same replica in the same run (drop route and follower needs_rebuild), the ledger held at most one entry, and exactly one reconstruction started and completed (1->2), none more within 30 s. One run."
       ],
       "code": [
         {
@@ -5537,6 +5642,22 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of cf90600; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36918285987"
+        },
+        {
+          "check": "CHECK-18",
+          "commit": "6dcc029bc06791ddc35fc0c89501fb3f03156c0a",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of 022c11b; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36922262408"
+        },
+        {
+          "check": "CHECK-18-purge",
+          "commit": "6dcc029bc06791ddc35fc0c89501fb3f03156c0a",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of 022c11b; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36922262408"
         }
       ],
       "tasks": [
@@ -5985,6 +6106,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of cf90600; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36918285987"
+        },
+        {
+          "check": "CHECK-20",
+          "commit": "6dcc029bc06791ddc35fc0c89501fb3f03156c0a",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of 022c11b; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36922262408"
         }
       ],
       "tasks": [

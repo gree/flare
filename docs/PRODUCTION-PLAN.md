@@ -29,7 +29,7 @@ at phase 1 and a separate design starts.
 |---|---|---|
 | 6 | Startup, probe and kill-9 reopen at scale | 15.8M not feasible yet: the loader does about 1300 keys/s and the debug pod expired. The 2M-key run is pending (36914128803) |
 | 7 | T17: read and proxy latency, reconcile and lease renewal under load | Control loop measured: reconcile 2.2–3.4 s, lease age ≤ 8 s of 15 s. Get latency re-run pending (36918289515) |
-| 8 | Both repair triggers at the same time; lagged or Unknown successor gates | Lagged successor PASS (gap 21 within the bound). T6 one-rebuild PASS, but only the follower route fired, so concurrency is not yet shown |
+| 8 | Both repair triggers at the same time; lagged or Unknown successor gates | **Done.** Both triggers fired in one run with one ledger entry and one rebuild (PR run 36922262408). Lagged successor PASS (gap 21, within the bound) |
 | 9 | Outage and resource evaluation on tmpfs | **Done**, run 36914124394: 11 s catch-up, 59 s snapshot rebuild, 1.07 GB data plus 0.54 GB RSS |
 
 ## Phase 3: operations (staging needs the user's go-ahead)

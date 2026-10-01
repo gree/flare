@@ -372,7 +372,10 @@
         "A suppressed send is retried only by a process that survives the suppression (lease read failure, momentarily foreign holder): the pending flag is in memory, and a confirmed lease loss ends the process, after which the next leader republishes from its own committed state. The retry test proves the flag was set by the withheld pass and consumed by the pass that published (that pass names the suppressed version); it does not prove the flag was NECESSARY for that send, because the committed version usually moves by itself within a pass.",
         "Liveness (/healthz) is process-alive only and readiness treats a non-leader as ready. The operator that logged 'LOST LEASE -- exiting' and then hung — the Lean runtime waits for the never-ending server tasks before reporting the uncaught error — was therefore never restarted; that defect is fixed (IO.Process.exit) and CHECK-01 asserts the restart count moves, but a different stall of the main loop would still pass both probes.",
         "The suite's evidence for 'the held pass did not send' is operator log lines read from the pod (across the designed restart); the checks are shape-based (fence for vHELD; a send line with old < new would be the held pass) rather than a wire-level capture. Two harness races (container replaced by the designed exit; retry line matching the negative check) were found by the CI runner's timing and fixed the same day; a third of the same family is plausible.",
-        "2026-10-01 (CI 36731888436): after the lease fence suppressed a broadcast, a newer commit superseded it before the retry, and the retry published the successor version instead of the withheld one; the test that names the suppressed version failed. Not data loss (survivors got the superseding map); the semantics of 'retry the withheld map' vs 'retry the current desired map' need the SAF-09 decision."
+        "2026-10-01 (CI 36731888436): after the lease fence suppressed a broadcast, a newer commit superseded it before the retry, and the retry published the successor version instead of the withheld one; the test that names the suppressed version failed. Not data loss (survivors got the superseding map); the semantics of 'retry the withheld map' vs 'retry the current desired map' need the SAF-09 decision.",
+        "2026-10-01: the takeover test (b) ends on a check that every pod names the same master. Its held change is a read-balance weight, so the pre-takeover map already satisfies that check: it proves the exit and re-acquisition, not that the withheld map reached any pod or which path sent it. CHECK-01-startup adds the content and attribution check; the takeover test itself is unchanged.",
+        "Startup republish is tested only with the topology audit OFF (test seam FLARE_TEST_TOPOLOGY_AUDIT_OFF, inert when unset). With the audit on, a fresh process has two independent reasons to republish to a behind pod (startup seed, audit verdict=behind); the test shows the seed suffices, not how the two interact.",
+        "The send-reason record (broadcast trigger: ...) is logged with every send and is the attribution evidence; it is derived from the same four values the send condition uses (BroadcastTriggers.any), so it cannot disagree with the branch taken, but it is still a log line rather than a wire capture."
       ],
       "code": [
         {
@@ -394,6 +397,10 @@
         {
           "path": "src/lib/cluster.cc",
           "symbol": "cluster::reconstruct_node"
+        },
+        {
+          "path": "flare_operator/FlareOperator/Server/TopologyBroadcast.lean",
+          "symbol": "BroadcastTriggers"
         }
       ],
       "call_path": "runReconcileFSMLoop -> commitClusterState -> (post-commit) lease check -> broadcastTopologyToAllPods. The FSM BroadcastTopology effect, which sent the unmerged map without a leadership check, has been removed; the effect constructor no longer exists.",
@@ -429,6 +436,29 @@
             {
               "path": "flare_operator/FlareOperator/Main.lean",
               "symbol": "main"
+            }
+          ]
+        },
+        {
+          "id": "CHECK-01-startup",
+          "kind": "scenario",
+          "procedure": "E2E topology-authority, test 'startup republish alone': hold one committed pass at the pre-send barrier (version H, a read-balance weight change), then replace the operator with a Deployment rollout that sets FLARE_TEST_TOPOLOGY_AUDIT_OFF=1 while the pass is held, so the map is persisted and never sent. Require: the operator pod was replaced; the fresh process logs the audit seam and no [TopologyAudit] probe; it resumed from the persisted map at a version >= H; its FIRST send's logged trigger record is pending-only (versionMoved=false, repairHeld=0, activeNotReady=0, pending=vX) and the matching broadcast line is (vX -> vX); every flared pod then reports node_map_version X AND the operator's committed slave balance in its own `stats nodes`, which must differ from what the pods showed before. Unit: BroadcastTriggers.any / pendingOnly / label cases in flare_unit.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/TopologyAuthority.lean",
+              "symbol": "suite"
+            },
+            {
+              "path": "flare_operator/FlareOperator/Server/TopologyBroadcast.lean",
+              "symbol": "BroadcastTriggers"
+            },
+            {
+              "path": "flare_operator/FlareOperator/UnitTests.lean",
+              "symbol": "checkTopologyDelivery"
+            },
+            {
+              "path": "flare_operator/FlareOperator/Main.lean",
+              "symbol": "pendingBroadcastRef"
             }
           ]
         }

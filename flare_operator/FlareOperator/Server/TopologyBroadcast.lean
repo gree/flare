@@ -41,6 +41,30 @@ def pendingTopologyAfterAttempt (previous : Option Nat) (version : Nat)
     (confirmed : Bool) : Option Nat :=
   if confirmed then none else some (previous.getD version)
 
+/-- Why a reconcile pass pushes the committed map. The pass sends exactly
+    when `any` holds; the record is logged with every send so a test (and an
+    incident reader) can tell WHICH reason carried a given push instead of
+    inferring it from the absence of other lines. In a fresh process
+    `pending` is seeded with the committed version (startup republish); the
+    topology audit can also set it when a recipient reports an older map. -/
+structure BroadcastTriggers where
+  versionMoved : Bool
+  pending : Option Nat
+  repairHeld : Nat
+  activeNotReady : Nat
+  deriving Repr, BEq
+
+def BroadcastTriggers.any (t : BroadcastTriggers) : Bool :=
+  t.versionMoved || t.pending.isSome || t.repairHeld > 0 || t.activeNotReady > 0
+
+/-- Only the pending flag, nothing else, asks for this send. -/
+def BroadcastTriggers.pendingOnly (t : BroadcastTriggers) : Bool :=
+  t.pending.isSome && !t.versionMoved && t.repairHeld == 0 && t.activeNotReady == 0
+
+def BroadcastTriggers.label (t : BroadcastTriggers) : String :=
+  let p := match t.pending with | some v => s!"v{v}" | none => "none"
+  s!"versionMoved={t.versionMoved} pending={p} repairHeld={t.repairHeld} activeNotReady={t.activeNotReady}"
+
 def broadcastTopologyToAllPods (crName ns : String) (version : Nat) (nodes : List FlareNode) : IO Bool := do
   -- Get current pod list with IP addresses from K8s
   let pods ← match ← listFlaredPodsE crName ns with

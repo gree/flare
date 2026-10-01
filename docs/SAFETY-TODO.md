@@ -11,6 +11,12 @@ For deployment rather than code integration, use the consolidated
 [production enablement gate](PRODUCTION-READINESS.md). It separates guarantee
 decisions, incomplete implementation, missing runtime evidence and rollout work.
 
+2026-10-01: startup-republish-alone E2E added to topology-authority (operator
+replaced while a committed pass is held before its send; audit off via a test
+seam; first send must be pending-only and every pod must adopt the withheld
+read-balance weight), plus a logged send-trigger record. CI pending.
+[Scope and residuals](reports/2026-10-01-startup-republish-e2e.md).
+
 2026-09-27: added fresh round-robin recipient topology observations bracketed
 by Pod UID reads, and startup republish through the existing lease fence.
 Lower applied versions request retry; Unknown/ahead do not trigger destructive

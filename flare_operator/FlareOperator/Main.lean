@@ -1161,7 +1161,14 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
   -- across a same-name replacement. This affects delivery only, not health.
   let audit ← topologyAuditRef.get
   let auditKeys := finalState.nodeMap.map (·.1)
-  if auditKeys.isEmpty then
+  -- TEST SEAM (SAF-09, startup-republish E2E). Unset in production, this is
+  -- one getEnv. The audit can mark a behind recipient as pending, which is a
+  -- second way to republish; the startup-republish test turns it off so the
+  -- only remaining reason to send in a fresh process is the startup seed.
+  let auditOff := (← IO.getEnv "FLARE_TEST_TOPOLOGY_AUDIT_OFF").isSome
+  if auditOff then
+    IO.eprintln "[flare-operator] TEST SEAM: topology audit disabled (FLARE_TEST_TOPOLOGY_AUDIT_OFF)"
+  else if auditKeys.isEmpty then
     topologyAuditRef.set {}
   else
     let key := auditKeys[audit.next % auditKeys.length]!
@@ -1230,7 +1237,12 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
       && kv.2.state == FlareState.Active && !readyKeys.contains kv.1)
   if !unconfirmedActive.isEmpty && finalVersion == oldVersion && pendingBefore.isNone && heldKeys.isEmpty then
     IO.eprintln s!"[flare-operator] re-sending v{finalVersion}: {unconfirmedActive.length} node(s) are Active in the map but their pods are not Ready yet (activation not applied locally)"
-  if finalVersion != oldVersion || pendingBefore.isSome || !heldKeys.isEmpty || !unconfirmedActive.isEmpty then
+  let triggers : BroadcastTriggers := {
+    versionMoved := finalVersion != oldVersion
+    pending := pendingBefore
+    repairHeld := heldKeys.length
+    activeNotReady := unconfirmedActive.length }
+  if triggers.any then
     -- TEST SEAM (SAF-01 / CHECK-01). Unset in production, this is one
     -- getEnv and nothing else.
     --
@@ -1264,6 +1276,7 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
       -- as well, it would have.
       if let some suppressedV := pendingBefore then
         IO.eprintln s!"[flare-operator] retrying an unconfirmed topology send (pending v{suppressedV}; publishing v{finalVersion})"
+      IO.eprintln s!"[flare-operator] broadcast trigger: {triggers.label}"
       IO.eprintln s!"[flare-operator] topology changed (v{oldVersion} → v{finalVersion}), broadcasting"
       let confirmed ← broadcastTopologyToAllPods crName ns finalVersion finalState.getNodes
       recordTopologyBroadcast metrics

@@ -662,6 +662,21 @@ private def checkTopologyDelivery (ctx : Ctx) : IO Unit := do
     (FlareOperator.Server.pendingTopologyAfterAttempt (some 100) 110 false == some 100)
   check ctx "confirmed latest map clears pending delivery"
     (FlareOperator.Server.pendingTopologyAfterAttempt (some 100) 110 true == none)
+  let trig := fun (moved : Bool) (pending : Option Nat) (held active : Nat) =>
+    ({ versionMoved := moved, pending, repairHeld := held, activeNotReady := active } :
+      FlareOperator.Server.BroadcastTriggers)
+  check ctx "a pass at rest with nothing pending does not send"
+    (!(trig false none 0 0).any)
+  check ctx "each trigger alone sends"
+    ((trig true none 0 0).any && (trig false (some 7) 0 0).any &&
+     (trig false none 1 0).any && (trig false none 0 1).any)
+  check ctx "startup republish shape: pending only, version unchanged"
+    ((trig false (some 7) 0 0).pendingOnly)
+  check ctx "pending plus any other reason is not attributable to pending alone"
+    (!(trig true (some 7) 0 0).pendingOnly && !(trig false (some 7) 1 0).pendingOnly &&
+     !(trig false (some 7) 0 1).pendingOnly && !(trig false none 0 0).pendingOnly)
+  check ctx "trigger label names every reason"
+    ((trig false (some 7) 0 0).label == "versionMoved=false pending=v7 repairHeld=0 activeNotReady=0")
 
 private def checkTopologyObservation (ctx : Ctx) : IO Unit := do
   let parse := FlareOperator.TopologyObservation.reportedVersion

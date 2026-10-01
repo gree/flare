@@ -48,7 +48,9 @@ that gap. Record the agreed failure model and RPO/RTO before approval.
 
 - Run CI at the actual release candidate and assess relevant controls. Stage
   startup republish and same-name Pod replacement independently, including
-  stats failures and non-WAL read eligibility recovery.
+  stats failures and non-WAL read eligibility recovery. Startup republish
+  alone now has an E2E (CHECK-01-startup, audit off); it has not run yet.
+  Same-name Pod replacement, stats failures and non-WAL read recovery remain.
 - Sustained 900/2000 writes/s after the MORE fix: measured once on CI (lag 0 at
   900, ≈+18k/min deficit at 2000, drain 35–43 s). Still define the target rate,
   acceptable replication lag and recovery time from production traffic, and

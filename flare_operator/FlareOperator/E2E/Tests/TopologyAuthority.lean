@@ -35,6 +35,19 @@
       suppressed version.
   A receiver whose version does not move is never accepted as evidence on
   its own: a crash, a timeout, or an exit before the check look the same.
+
+  STARTUP REPUBLISH (SAF-09). The last test holds a committed pass before
+  its send and replaces the operator while it is held, so the map is
+  persisted and never sent. The fresh process seeds its pending flag with
+  the committed version on startup; that seed must deliver the map on its
+  own. Two other things could also send and would hide a missing seed: a
+  version change in the first pass, and the topology audit marking a behind
+  pod as pending. The test turns the audit off (FLARE_TEST_TOPOLOGY_AUDIT_OFF,
+  a test-only seam) and requires the first send's logged trigger record to
+  be pending-only, then requires every pod to adopt the withheld read-balance
+  weight, not just the version. The takeover test above does not show this:
+  its final check accepts any map that names the same master, which the old
+  map already did.
 -/
 import FlareOperator.E2E.Framework
 import FlareOperator.E2E.Helpers
@@ -276,6 +289,51 @@ private def stopOnePassBeforeLeaseCheck (weight : Nat) : IO (Except String Nat) 
     match held with
     | none => return .error "no pass reached the pre-send barrier within 90s; the stop position was never hit, so nothing below would prove anything"
     | some v => return .ok v
+
+/-- The slave's balance as one flared pod sees it in its own map (`stats
+    nodes`), or none if the pod does not list a slave. This is the CONTENT
+    marker for the startup-republish test: the held change is a read-balance
+    weight, so a pod that still shows the old weight has not applied the
+    withheld map, whatever its version says. -/
+private def flaredSlaveBalance (targetIp : String) : IO (Option Nat) := do
+  let cmd := s!"printf 'stats nodes\\r\\n' | nc -w 3 {targetIp} {cfg.flarePort}"
+  match ← execInDebugPod cfg.debugPod cfg.«namespace» cmd with
+  | .error _ => return none
+  | .ok output =>
+    let lines := (output.splitOn "\n").map (fun l => (l.trim.replace "\r" ""))
+    let slaveKey := lines.findSome? fun t =>
+      if t.startsWith "STAT " && (t.endsWith ":role slave") then
+        some ((t.drop 5).dropRight ":role slave".length)
+      else none
+    match slaveKey with
+    | none => return none
+    | some k =>
+      return lines.findSome? fun t =>
+        if t.startsWith s!"STAT {k}:balance " then (t.drop s!"STAT {k}:balance ".length).trim.toNat?
+        else none
+
+/-- The first `broadcast trigger:` record and the first broadcast line of a
+    log, in order of appearance. -/
+private def firstSend (log : String) : Option (String × String) :=
+  let lines := log.splitOn "\n"
+  let trig := lines.find? (containsSubstr · "broadcast trigger: ")
+  let send := lines.find? (containsSubstr · "), broadcasting")
+  match trig, send with
+  | some t, some b =>
+    some (((t.splitOn "broadcast trigger: ").getLast!).trim, b.trim)
+  | _, _ => none
+
+/-- "resuming at broadcast version N" from the operator's startup log. -/
+private def resumedVersion (log : String) : Option Nat :=
+  (log.splitOn "\n").findSome? fun l =>
+    match (l.splitOn "resuming at broadcast version ").getLast? with
+    | some rest => if containsSubstr l "resuming at broadcast version " then
+        (rest.takeWhile Char.isDigit).toNat? else none
+    | none => none
+
+private def podIps : IO (List (String × String)) := do
+  let pods ← getPodNames s!"app=flare,cluster={cfg.name}" cfg.«namespace»
+  pods.filterMapM fun p => do return (← getPodIp p cfg.«namespace»).map (p, ·)
 
 def suite : TestSuite := {
   name := "topology-authority"
@@ -524,7 +582,85 @@ def suite : TestSuite := {
                 match ← topologyApplied with
                 | .error why => return .fail s!"topology was not re-applied after the lease was recreated: {why}"
                 | .ok _ => return .fail "topology check flapped"
-              return .pass }
+              return .pass },
+
+    { name := "startup republish alone: a map committed but never sent (operator replaced while the pass is held before the send) reaches every pod from the fresh process's first pass, topology audit off"
+      run := do
+        -- Precondition: the previous test leaves a re-created lease and a
+        -- converged map. Start from the same place every time.
+        let settled ← waitForCondition "topology applied before the startup-republish test" 240 do
+          return (← topologyApplied).toOption.isSome
+        if !settled then return .fail "precondition: topology not applied before the test"
+        let ips ← podIps
+        if ips.length < numPods then return .fail s!"precondition: {ips.length}/{numPods} flared pods have an IP"
+        let before ← ips.mapM fun (pod, ip) => do
+          return (pod, ← flaredStat ip "node_map_version", ← flaredSlaveBalance ip)
+        IO.eprintln s!"# before: {before}"
+        let opPods0 ← getPodNames s!"app={cfg.operatorName}" cfg.«namespace»
+        match ← stopOnePassBeforeLeaseCheck 25 with
+        | .error e => ensureBarrierClear; return .fail e
+        | .ok held =>
+          IO.eprintln s!"# pass held at the pre-send point with version {held}; replacing the operator (rollout with FLARE_TEST_TOPOLOGY_AUDIT_OFF=1) while it is held"
+          -- The held pass is committed and persisted but has not sent. Lease
+          -- renewal runs in the same loop, so the held process stops
+          -- renewing; the new pod takes the lease once it expires, and the
+          -- old process, if its barrier times out first, finds a foreign
+          -- holder and fences. Either way it never sends.
+          let persisted ← kubectlGetJsonpath "configmap" s!"{cfg.name}-node-map" cfg.«namespace» "{.metadata.resourceVersion}"
+          IO.eprintln s!"# node-map ConfigMap resourceVersion at hold: {persisted.toOption.getD "?"}"
+          match ← kubectl ["set", "env", s!"deployment/{cfg.operatorName}", "-n", cfg.«namespace», "FLARE_TEST_TOPOLOGY_AUDIT_OFF=1"] with
+          | .error e => ensureBarrierClear; return .fail s!"could not roll the operator: {e}"
+          | .ok _ => pure ()
+          let rolled ← kubectlRolloutStatus s!"deployment/{cfg.operatorName}" cfg.«namespace» 300
+          let opPods1 ← getPodNames s!"app={cfg.operatorName}" cfg.«namespace»
+          if !rolled || opPods1.any (opPods0.contains ·) then
+            return .fail s!"precondition: operator was not replaced (rollout complete={rolled}, pods before {opPods0}, after {opPods1})"
+          let sent ← waitForCondition "the fresh operator's first broadcast" 180 do
+            let log ← kubectlLogsLabel s!"app={cfg.operatorName}" cfg.«namespace» 3000
+            return (firstSend log).isSome
+          let log ← kubectlLogsLabel s!"app={cfg.operatorName}" cfg.«namespace» 3000
+          if !sent then
+            let tail := String.intercalate "\n" ((log.splitOn "\n").reverse.take 40).reverse
+            IO.eprintln s!"# fresh operator tail:\n{tail}"
+            return .fail "the fresh operator never broadcast within 180s"
+          if !containsSubstr log "TEST SEAM: topology audit disabled" then
+            return .fail "precondition: the fresh operator does not report the audit seam; a behind recipient could have triggered the send"
+          if containsSubstr log "[TopologyAudit] node=" then
+            return .fail "precondition: the topology audit ran in the fresh operator despite the seam"
+          match resumedVersion log with
+          | none => return .fail "the fresh operator did not report resuming from the persisted map"
+          | some r =>
+          if r < held then
+            return .fail s!"the fresh operator resumed at v{r}, below the held v{held}: the held map was not persisted before the send"
+          match firstSend log with
+          | none => return .fail "unreachable: first send vanished"
+          | some (trig, line) =>
+          IO.eprintln s!"# resumed at v{r}; first send: [{trig}] {line}"
+          -- Startup republish ALONE: the pending flag is the only reason, and
+          -- with the audit off the startup seed is the only thing that sets
+          -- it in a fresh process.
+          let pendingOnly := containsSubstr trig "versionMoved=false" &&
+            containsSubstr trig "repairHeld=0" && containsSubstr trig "activeNotReady=0" &&
+            !containsSubstr trig "pending=none"
+          if !pendingOnly then
+            return .fail s!"the fresh operator's first send is not attributable to the startup republish alone: [{trig}]"
+          let x := (((trig.splitOn "pending=v").getLast!).takeWhile Char.isDigit).toNat!
+          if !containsSubstr line s!"(v{x} → v{x}), broadcasting" then
+            return .fail s!"trigger names pending v{x} but the broadcast line is {line}"
+          let expected := (← nodeView).find? (·.role == 1) |>.map (·.balance)
+          let applied ← waitForCondition "every pod adopts the republished map" 60 do
+            let now ← ips.mapM fun (_, ip) => do return (← flaredStat ip "node_map_version", ← flaredSlaveBalance ip)
+            return now.all fun (v, b) => v == some x && b == expected
+          let after ← ips.mapM fun (pod, ip) => do
+            return (pod, ← flaredStat ip "node_map_version", ← flaredSlaveBalance ip)
+          IO.eprintln s!"# after: {after}; committed slave balance {expected}"
+          if !applied then
+            return .fail s!"not every pod applied the republished v{x} with slave balance {expected}: {after}"
+          -- The content must actually have changed, otherwise the version
+          -- moving is all this proves.
+          if before.all (fun (_, _, b) => b == expected) then
+            return .fail s!"precondition: the held change is not visible in the slave balance (before {before}, committed {expected}); the content marker proves nothing"
+          return .pass }
   ]
 }
 

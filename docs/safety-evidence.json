@@ -1049,6 +1049,38 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; failover-data and replication legs FAIL, harness/test premise) — PR #144 merge revision of 8829657; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36909742559"
+        },
+        {
+          "check": "CHECK-01",
+          "commit": "bb522105c9560514dea5ab9f42ae6ffc61ed7fce",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, repair leg FAIL: functional finding, NotReady streak) — PR #144 merge revision of 67fa134; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36914077401"
+        },
+        {
+          "check": "CHECK-01-startup",
+          "commit": "bb522105c9560514dea5ab9f42ae6ffc61ed7fce",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, repair leg FAIL: functional finding, NotReady streak) — PR #144 merge revision of 67fa134; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36914077401"
+        },
+        {
+          "check": "CHECK-01-observation",
+          "commit": "bb522105c9560514dea5ab9f42ae6ffc61ed7fce",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, repair leg FAIL: functional finding, NotReady streak) — PR #144 merge revision of 67fa134; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36914077401"
+        },
+        {
+          "check": "CHECK-01-generation",
+          "commit": "bb522105c9560514dea5ab9f42ae6ffc61ed7fce",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, repair leg FAIL: functional finding, NotReady streak) — PR #144 merge revision of 67fa134; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36914077401"
         }
       ],
       "tasks": [
@@ -1710,6 +1742,22 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; failover-data and replication legs FAIL, harness/test premise) — PR #144 merge revision of 8829657; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36909742559"
+        },
+        {
+          "check": "CHECK-03-follow",
+          "commit": "bb522105c9560514dea5ab9f42ae6ffc61ed7fce",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, repair leg FAIL: functional finding, NotReady streak) — PR #144 merge revision of 67fa134; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36914077401"
+        },
+        {
+          "check": "CHECK-03",
+          "commit": "bb522105c9560514dea5ab9f42ae6ffc61ed7fce",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request, leg repair (prepare-evidence test 10: the slave activated by PREPARE-REPAIR was failed over in the next pass)",
+          "result": "fail",
+          "report": "docs/reports/2026-10-02-ci-36914077401-repair-e2e.log"
         }
       ],
       "tasks": [
@@ -2354,6 +2402,22 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request, leg replication (continuous-replication-limits lagged-successor test)",
           "result": "fail",
           "report": "docs/reports/2026-10-02-ci-36909742559-replication-e2e.log"
+        },
+        {
+          "check": "CHECK-04-follow",
+          "commit": "bb522105c9560514dea5ab9f42ae6ffc61ed7fce",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, repair leg FAIL: functional finding, NotReady streak) — PR #144 merge revision of 67fa134; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36914077401"
+        },
+        {
+          "check": "CHECK-04-eligibility",
+          "commit": "bb522105c9560514dea5ab9f42ae6ffc61ed7fce",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, repair leg FAIL: functional finding, NotReady streak) — PR #144 merge revision of 67fa134; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36914077401"
         }
       ],
       "tasks": [
@@ -2948,6 +3012,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request, leg failover-data (pvc-data-survival test 2)",
           "result": "fail",
           "report": "docs/reports/2026-10-02-ci-36909742559-failover-data-e2e.log"
+        },
+        {
+          "check": "CHECK-06",
+          "commit": "bb522105c9560514dea5ab9f42ae6ffc61ed7fce",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, repair leg FAIL: functional finding, NotReady streak) — PR #144 merge revision of 67fa134; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36914077401"
         }
       ],
       "tasks": [
@@ -3430,6 +3502,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; failover-data and replication legs FAIL, harness/test premise) — PR #144 merge revision of 8829657; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36909742559"
+        },
+        {
+          "check": "CHECK-09",
+          "commit": "bb522105c9560514dea5ab9f42ae6ffc61ed7fce",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, repair leg FAIL: functional finding, NotReady streak) — PR #144 merge revision of 67fa134; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36914077401"
         }
       ],
       "tasks": [],
@@ -3910,7 +3990,8 @@
         "LONG-OUTAGE RESULT, run 1 (c33fe5d, CI 36725778961): phase A (150 MB while cut, three flushes) caught up from the cursor in 11 s with no reconstruction. Phase B: the archived WAL reached 499 MB against a 256 MB WAL_size_limit_MB and was still fully served when healed a few minutes later — RocksDB purges the archive on a periodic check, so the cap is an eventual bound with an overshoot of at least write-rate × purge-interval (≥243 MB here). Capacity must be budgeted as cap + overshoot; the purge interval itself is measured in the next run.",
         "LONG-OUTAGE run 2 (0e49cc7, CI 36731930552): on an IDLE master the archived WAL stayed at 499 MB (cap 256 MB) for 22 minutes with no purge; the purge is driven by flush/compaction cleanup, not by time. Capacity: a master that goes quiet after a burst keeps the overshoot until it writes again.",
         "LONG-OUTAGE run 3 (6e757cb, CI 36741586970): with writes continuing past the cap, one flush cut the archive 499 → 250 MB within 172 s; the follower whose cursor lay in the purged range was told lsn_purged and rebuilt by snapshot in 59 s (items equal, pod unchanged). Archive budget = cap + bytes written between flush/compaction cleanups; an idle master keeps the overshoot (run 2).",
-        "2026-10-02 (manual run 36899086870, evaluation=scale-15m8), classified as HARNESS + capacity: the loader stored 4.6M of 15.8M keys in 3573 s (~1300 keys/s) and then the E2E debug pod exited (it ran `sleep 3600`); every later chunk and every stats read went through the dead pod, so 'master items 0' and 'no Active P0 master' are artifacts, not a master failure (restartCount 0). Fix: debug pod sleeps 86400 s. At this loader rate 15.8M keys needs ~3.4 h, beyond the 240 min evaluation limit with setup; until the loader is faster, scale-2m is the feasible profile. Production-scale startup/probe timing remains unmeasured."
+        "2026-10-02 (manual run 36899086870, evaluation=scale-15m8), classified as HARNESS + capacity: the loader stored 4.6M of 15.8M keys in 3573 s (~1300 keys/s) and then the E2E debug pod exited (it ran `sleep 3600`); every later chunk and every stats read went through the dead pod, so 'master items 0' and 'no Active P0 master' are artifacts, not a master failure (restartCount 0). Fix: debug pod sleeps 86400 s. At this loader rate 15.8M keys needs ~3.4 h, beyond the 240 min evaluation limit with setup; until the loader is faster, scale-2m is the feasible profile. Production-scale startup/probe timing remains unmeasured.",
+        "2026-10-02 measurements on kind. Sustained run 36914118326: lag 0 at 300 and 900 writes/s, growing at 2000/s (62k->274k). T17 control loop: mean reconcile pass ~2.2 s at 300/s, ~2.5 s at 900/s, ~3.4 s at 2000/s; operator lease age at most 8 s of its 15 s duration. T17 get latency NOT measured: the busybox debug pod has no nanosecond clock (the probe now runs inside the flared pod over one connection; re-run pending). tmpfs outage run 36914124394: phase A 150 MB caught up in 11 s; phase B archive 499 MB -> 250 MB after one flush, lsn_purged, snapshot rebuild 59 s; data high-water 1.07 GB on tmpfs + RSS 0.54 GB, within the 4Gi limit."
       ],
       "code": [
         {
@@ -4302,6 +4383,30 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; failover-data and replication legs FAIL, harness/test premise) — PR #144 merge revision of 8829657; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36909742559"
+        },
+        {
+          "check": "CHECK-16",
+          "commit": "bb522105c9560514dea5ab9f42ae6ffc61ed7fce",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, repair leg FAIL: functional finding, NotReady streak) — PR #144 merge revision of 67fa134; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36914077401"
+        },
+        {
+          "check": "CHECK-16-limits",
+          "commit": "67fa13483839216e60c31dc911e953978183cf3d",
+          "date": "2026-10-02",
+          "command": "GitHub Actions workflow_dispatch evaluation=sustained suites=continuous-replication-sustained (run 36914118326)",
+          "result": "pass",
+          "report": "docs/reports/2026-10-02-ci-36914118326-sustained-e2e.log"
+        },
+        {
+          "check": "CHECK-16-limits",
+          "commit": "67fa13483839216e60c31dc911e953978183cf3d",
+          "date": "2026-10-02",
+          "command": "GitHub Actions workflow_dispatch evaluation=outage-tmpfs suites=continuous-replication-outage-tmpfs (run 36914124394)",
+          "result": "pass",
+          "report": "docs/reports/2026-10-02-ci-36914124394-outage-tmpfs-e2e.log"
         }
       ],
       "tasks": [
@@ -4630,6 +4735,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; failover-data and replication legs FAIL, harness/test premise) — PR #144 merge revision of 8829657; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36909742559"
+        },
+        {
+          "check": "CHECK-17",
+          "commit": "bb522105c9560514dea5ab9f42ae6ffc61ed7fce",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, repair leg FAIL: functional finding, NotReady streak) — PR #144 merge revision of 67fa134; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36914077401"
         }
       ],
       "tasks": [
@@ -5288,6 +5401,22 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; failover-data and replication legs FAIL, harness/test premise) — PR #144 merge revision of 8829657; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36909742559"
+        },
+        {
+          "check": "CHECK-18",
+          "commit": "bb522105c9560514dea5ab9f42ae6ffc61ed7fce",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, repair leg FAIL: functional finding, NotReady streak) — PR #144 merge revision of 67fa134; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36914077401"
+        },
+        {
+          "check": "CHECK-18-purge",
+          "commit": "bb522105c9560514dea5ab9f42ae6ffc61ed7fce",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, repair leg FAIL: functional finding, NotReady streak) — PR #144 merge revision of 67fa134; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36914077401"
         }
       ],
       "tasks": [
@@ -5720,6 +5849,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; failover-data and replication legs FAIL, harness/test premise) — PR #144 merge revision of 8829657; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36909742559"
+        },
+        {
+          "check": "CHECK-20",
+          "commit": "bb522105c9560514dea5ab9f42ae6ffc61ed7fce",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, repair leg FAIL: functional finding, NotReady streak) — PR #144 merge revision of 67fa134; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36914077401"
         }
       ],
       "tasks": [

@@ -637,14 +637,14 @@ private def Ctx.loadWindow (c : Ctx) (ip : String) (start rate : Nat) : IO Nat :
   if spent < 30000 then IO.sleep (30000 - spent).toUInt32
   return n
 
-/-- T17: client-side latency of single `get`s while the load runs, from the
-    debug pod. Each timing includes starting `nc`, so it is an UPPER bound on
-    the request latency, comparable between master and replica and between
-    rates, not an absolute service time. Returns "p50=… p99=… max=… n=…" in
-    microseconds, or why it could not measure. -/
-private def Ctx.latencyProbe (c : Ctx) (ip key : String) (n : Nat := 50) : IO String := do
-  let cmd := s!"t=$(date +%s%N); case \"$t\" in *N*) echo 'no nanosecond clock in the debug pod'; exit 0;; esac; i=0; while [ $i -lt {n} ]; do s=$(date +%s%N); printf 'get {key}\\r\\n' | nc -w 2 {ip} {c.cfg.flarePort} >/dev/null 2>&1; e=$(date +%s%N); echo $(( (e - s) / 1000 )); i=$((i+1)); done | sort -n | awk '\{a[NR]=$1} END \{if (NR==0) \{print \"no samples\"} else \{p=int((NR+1)/2); q=int(NR*0.99); if (q<1) q=1; print \"p50=\" a[p] \"us p99=\" a[q] \"us max=\" a[NR] \"us n=\" NR}}'"
-  match ← execInDebugPod c.cfg.debugPod c.cfg.«namespace» cmd with
+/-- T17: latency of single `get`s while the load runs, measured from inside
+    a flared pod (`fromPod`, which has bash and a nanosecond clock; the busybox
+    debug pod has neither) over ONE persistent TCP connection to `ip`, so
+    each sample is one request/response, not a process start. Returns
+    "p50=… p99=… max=… n=…" in microseconds, or why it could not measure. -/
+private def Ctx.latencyProbe (c : Ctx) (fromPod ip key : String) (n : Nat := 50) : IO String := do
+  let script := s!"exec 3<>/dev/tcp/{ip}/{c.cfg.flarePort} || exit 0; i=0; while [ $i -lt {n} ]; do s=$(date +%s%N); printf 'get {key}\\r\\n' >&3; while IFS= read -r line <&3; do case \"$line\" in END*|SERVER_ERROR*|ERROR*) break;; esac; done; e=$(date +%s%N); echo $(( (e - s) / 1000 )); i=$((i+1)); done | sort -n | awk '\{a[NR]=$1} END \{if (NR==0) \{print \"no samples\"} else \{p=int((NR+1)/2); q=int(NR*0.99); if (q<1) q=1; print \"p50=\" a[p] \"us p99=\" a[q] \"us max=\" a[NR] \"us n=\" NR}}'"
+  match ← kubectl ["exec", "-n", c.cfg.«namespace», fromPod, "--", "timeout", "60", "bash", "-c", script] with
   | .ok out => return out.trim
   | .error e => return s!"probe failed: {e}"
 
@@ -689,8 +689,8 @@ private def Ctx.sustain (c : Ctx) (mPod mIp sPod sIp : String) (start rate minut
   for w in [0:minutes * 2] do
     -- T17: probe both copies and the control loop WHILE this window loads.
     let rc0 ← c.reconcileSumCount
-    let probeS ← IO.asTask (c.latencyProbe sIp "w1")
-    let probeM ← IO.asTask (c.latencyProbe mIp "w1")
+    let probeS ← IO.asTask (c.latencyProbe mPod sIp "w1")
+    let probeM ← IO.asTask (c.latencyProbe mPod mIp "w1")
     k := k + (← c.loadWindow mIp k rate)
     let latS := match ← IO.wait probeS with | .ok v => v | .error e => s!"probe error: {e}"
     let latM := match ← IO.wait probeM with | .ok v => v | .error e => s!"probe error: {e}"

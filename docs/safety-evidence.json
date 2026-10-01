@@ -3814,7 +3814,8 @@
         "SUSTAINED-RATE RESULT after the MORE scheduling fix (7e979b0, CI run 36707861123, report 2026-09-30-sustained-after-more-fix.md): lag 0 at 300 and 900 keys/s; at 2000 keys/s the stream held for ~90 s then fell behind at ≈+18k/min (≈1,700 changes/s sustained; lag 67,016 after four minutes, drained in 35-43 s). Run 1's 294,615 / 442 s are history of the old code. Disk behaviour is still not established (no flush in the window).",
         "LONG-OUTAGE RESULT, run 1 (c33fe5d, CI 36725778961): phase A (150 MB while cut, three flushes) caught up from the cursor in 11 s with no reconstruction. Phase B: the archived WAL reached 499 MB against a 256 MB WAL_size_limit_MB and was still fully served when healed a few minutes later — RocksDB purges the archive on a periodic check, so the cap is an eventual bound with an overshoot of at least write-rate × purge-interval (≥243 MB here). Capacity must be budgeted as cap + overshoot; the purge interval itself is measured in the next run.",
         "LONG-OUTAGE run 2 (0e49cc7, CI 36731930552): on an IDLE master the archived WAL stayed at 499 MB (cap 256 MB) for 22 minutes with no purge; the purge is driven by flush/compaction cleanup, not by time. Capacity: a master that goes quiet after a burst keeps the overshoot until it writes again.",
-        "LONG-OUTAGE run 3 (6e757cb, CI 36741586970): with writes continuing past the cap, one flush cut the archive 499 → 250 MB within 172 s; the follower whose cursor lay in the purged range was told lsn_purged and rebuilt by snapshot in 59 s (items equal, pod unchanged). Archive budget = cap + bytes written between flush/compaction cleanups; an idle master keeps the overshoot (run 2)."
+        "LONG-OUTAGE run 3 (6e757cb, CI 36741586970): with writes continuing past the cap, one flush cut the archive 499 → 250 MB within 172 s; the follower whose cursor lay in the purged range was told lsn_purged and rebuilt by snapshot in 59 s (items equal, pod unchanged). Archive budget = cap + bytes written between flush/compaction cleanups; an idle master keeps the overshoot (run 2).",
+        "2026-10-02 (manual run 36899086870, evaluation=scale-15m8), classified as HARNESS + capacity: the loader stored 4.6M of 15.8M keys in 3573 s (~1300 keys/s) and then the E2E debug pod exited (it ran `sleep 3600`); every later chunk and every stats read went through the dead pod, so 'master items 0' and 'no Active P0 master' are artifacts, not a master failure (restartCount 0). Fix: debug pod sleeps 86400 s. At this loader rate 15.8M keys needs ~3.4 h, beyond the 240 min evaluation limit with setup; until the loader is faster, scale-2m is the feasible profile. Production-scale startup/probe timing remains unmeasured."
       ],
       "code": [
         {
@@ -4190,6 +4191,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, replication leg FAIL on continuous-replication-limits, harness) — PR #144 merge revision of 779513b; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36904379135"
+        },
+        {
+          "check": "CHECK-16-limits",
+          "commit": "88f08fc0a864e04340562a396ecb2dbbde71eee0",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml workflow_dispatch evaluation=scale-15m8 (run 36899086870), leg continuous-replication; tested-sha = branch head 88f08fc",
+          "result": "fail",
+          "report": "docs/reports/2026-10-02-ci-36899086870-scale-15m8-e2e.log"
         }
       ],
       "tasks": [

@@ -525,7 +525,10 @@ def deployCluster (cfg : ClusterConfig) : IO Unit := do
   -- Create debug pod (direct kubectl so errors are visible)
   match ← kubectl ["run", cfg.debugPod, s!"--namespace={cfg.«namespace»}",
                     "--image=busybox:1.36", "--restart=Never", "--command", "--",
-                    "sleep", "3600"] with
+                    -- 1 day, not 1 h: the scale evaluation's load ran past an
+                    -- hour and every chunk after 3573 s failed with
+                    -- "container not found" (manual run 36899086870).
+                    "sleep", "86400"] with
   | .ok _ => pure ()
   | .error e =>
     if containsSubstr e "AlreadyExists" then pure ()
@@ -605,7 +608,7 @@ def deploySecondCluster (cfg : ClusterConfig) : IO Unit := do
   try
     let result ← IO.Process.output {
       cmd := "sh"
-      args := #["-c", s!"kubectl run {cfg.debugPod} --namespace={cfg.«namespace»} --image=busybox:1.36 --restart=Never --command -- sleep 3600 2>/dev/null || true"]
+      args := #["-c", s!"kubectl run {cfg.debugPod} --namespace={cfg.«namespace»} --image=busybox:1.36 --restart=Never --command -- sleep 86400 2>/dev/null || true"]
     }
     let _ := result
     pure ()

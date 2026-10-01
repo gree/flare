@@ -801,7 +801,14 @@ private def checkTopologyMetrics (ctx : Ctx) : IO Unit := do
   metrics.topologyBehindNodes.set 2
   metrics.topologyAheadNodes.set 1
   metrics.topologyUnknownNodes.set 3
+  let rolesState : FlareClusterState := { FlareClusterState.default with nodeMap := [
+    ("c-nodes-0.c-nodes.ns.svc.cluster.local:12121", { serverName := "c-nodes-0.c-nodes.ns.svc.cluster.local", serverPort := 12121, role := FlareRole.Master, state := FlareState.Active, partition := 0 }),
+    ("c-nodes-1.c-nodes.ns.svc.cluster.local:12121", { serverName := "c-nodes-1.c-nodes.ns.svc.cluster.local", serverPort := 12121, role := FlareRole.Slave, state := FlareState.Prepare, partition := 0 })] }
+  FlareOperator.Metrics.Prometheus.updateNodeCounts metrics rolesState
   let out ← FlareOperator.Metrics.Prometheus.exportMetrics metrics "unit"
+  check ctx "EV-15: one role sample per node, labelled with pod, partition, role and state"
+    ((out.splitOn "flare_operator_node_role{cluster=\"unit\",pod=\"c-nodes-0\",partition=\"0\",role=\"master\",state=\"active\"} 1\n").length == 2
+      && (out.splitOn "flare_operator_node_role{cluster=\"unit\",pod=\"c-nodes-1\",partition=\"0\",role=\"slave\",state=\"prepare\"} 1\n").length == 2)
   for name in ["flare_operator_topology_observed_behind_nodes", "flare_operator_topology_observed_ahead_nodes", "flare_operator_topology_unknown_nodes"] do
     check ctx "topology gauge is present in actual metrics exporter"
       ((out.splitOn s!"# TYPE {name} gauge").length == 2)

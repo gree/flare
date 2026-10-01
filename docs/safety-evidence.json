@@ -3538,7 +3538,7 @@
       "ucas": [
         "UCA-02"
       ],
-      "implementation": "gap",
+      "implementation": "partial",
       "verification": "unverified",
       "scenarios": [
         "Role changes after failover while existing time series persist."
@@ -3547,7 +3547,8 @@
         "Role metadata must track topology generations without mislabeling old samples."
       ],
       "residual_risks": [
-        "No flared role labels; operator count comparison is a limited substitute."
+        "No flared role labels; operator count comparison is a limited substitute.",
+        "2026-10-02: flared still has no self role label; the role comes from the operator's committed map (joined on pod), so when the operator is down the role samples freeze with its other gauges. The NotFollowing alert's role join therefore needs the operator to be up; the lag alert does not. Alert thresholds (1000 positions, 5m/15m) are defaults from the read bound, not from production traffic."
       ],
       "code": [
         {
@@ -3557,6 +3558,14 @@
         {
           "path": "flare_operator/FlareOperator/Main.lean",
           "symbol": "reconcileOnceFSM"
+        },
+        {
+          "path": "src/lib/metrics_formatter.cc",
+          "symbol": "metrics_formatter::format"
+        },
+        {
+          "path": "flare_operator/FlareOperator/Metrics/Prometheus.lean",
+          "symbol": "formatNodeRoles"
         }
       ],
       "call_path": "flared metrics exporter and operator topology metrics are separate sources; role-aware join is not implemented.",
@@ -3564,11 +3573,27 @@
         {
           "id": "CHECK-15",
           "kind": "scenario",
-          "procedure": "Specify and test role changes in metrics, including stale series and all-replica comparison. Referenced suites are starting points to extend, not evidence that this scenario is already covered.",
+          "procedure": "Specify and test role changes in metrics, including stale series and all-replica comparison. Referenced suites are starting points to extend, not evidence that this scenario is already covered. Per-replica observation (2026-10-02, CI pending). flared /metrics exports its own follow state: numeric repl_* stats as flare_node_repl_*, flare_node_repl_follow_lag (source minus applied, never negative) and flare_node_repl_follow_info{state,source,epoch}; cutter cases test_repl_follow_metrics / test_repl_follow_lag_never_negative (nix-linux). The operator exports flare_operator_node_role{pod,partition,role,state} per mapped node from the committed map (flare_unit EV-15 case). Alerts FlareReplicaFollowLag (lag > 1000 for 5m) and FlareReplicaNotFollowing (Active slave in follow mode not following for 15m, masters excluded by the role join) render with runbook anchors (test_helm_memory). E2E native-metrics requires the three flared follow metrics on a pod.",
           "references": [
             {
               "path": "flare_operator/FlareOperator/E2E/Tests/NativeMetrics.lean",
               "symbol": "suite"
+            },
+            {
+              "path": "src/lib/metrics_formatter.cc",
+              "symbol": "metrics_formatter::format"
+            },
+            {
+              "path": "test/lib/test_metrics_formatter.cc",
+              "symbol": "test_repl_follow_metrics"
+            },
+            {
+              "path": "flare_operator/FlareOperator/Metrics/Prometheus.lean",
+              "symbol": "nodeRoleSamples"
+            },
+            {
+              "path": "helm/flare-operator/templates/prometheusrule.yaml",
+              "symbol": "FlareReplicaFollowLag"
             }
           ]
         }

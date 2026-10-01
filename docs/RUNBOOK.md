@@ -265,6 +265,34 @@ that persists for 30 minutes is not.
    the master's. On a PVC cluster the WAL path makes it incremental; on tmpfs
    it is a full reseed. Verify the counts converge afterwards.
 
+## FlareReplicaFollowLag / FlareReplicaNotFollowing (warning) {#replica-follow}
+
+Per-replica signals from the replica's own `/metrics`:
+
+- `flare_node_repl_follow_lag`: the source position minus the applied position.
+- `flare_node_repl_follow_info{state,source,epoch}`: the follower's state and
+  the source it is following.
+
+`flare_operator_node_role{pod,partition,role,state}` says which pod the
+operator has as master and slave.
+
+1. **Lag above 1000 for 5 min.** The replica is withheld from reads, so
+   clients go to the master. Check write rate against follow throughput, and
+   check the network between the replica and its master. The sustained
+   evaluation measured lag 0 at 900 writes/s, and a deficit at 2000 writes/s
+   on kind. A lag that keeps growing means the follower cannot keep up. Find
+   the cause before the master's WAL cap purges the history, which turns this
+   into a rebuild (`needs_rebuild`, reason `lsn_purged`).
+2. **Not following for 15 min.** Read `state` and `repl_follow_last_reason`
+   in the replica's `stats`.
+   - `disconnected`: the replica cannot reach its source.
+   - `needs_rebuild`: the operator should already be rebuilding it; see
+     FlareResyncFailing if it is not.
+   - `initial_sync` for a long time: a large initial copy. Compare against
+     the expected copy time for the data size.
+3. Do not delete the pod as a first step. On tmpfs that deletes its data. On
+   PVC it forces a reconstruction that following would have avoided.
+
 ## FlareProxyWriteDropped (critical) {#proxy-write-dropped}
 
 A master GAVE UP forwarding writes to a replica: `queue_proxy_write`

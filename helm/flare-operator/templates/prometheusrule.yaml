@@ -160,6 +160,31 @@ spec:
         # fires (the flared log now says so instead of claiming otherwise).
         # That makes this alert the only signal: the node keeps its role and
         # may be serving stale data.
+        # EV-15: one replica's continuous follower, compared with ITS source
+        # (flared's own metrics), not inferred from cluster-wide counts.
+        # 1000 positions is the operator's default read bound
+        # (FLARE_FOLLOW_READ_LAG): above it the replica is withheld from reads.
+        - alert: FlareReplicaFollowLag
+          expr: flare_node_repl_follow_enabled == 1 and flare_node_repl_follow_lag > 1000
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Flare pod {{`{{ $labels.pod }}`}}: continuous follower is more than 1000 positions behind its source for 5m; its reads are withheld"
+            runbook: docs/RUNBOOK.md#replica-follow
+
+        # An Active slave in follow mode that is not following (disconnected,
+        # needs_rebuild, initial_sync, error) for 15m. Masters are excluded by
+        # the operator's role metric: they run with the flag on and are idle.
+        - alert: FlareReplicaNotFollowing
+          expr: (flare_node_repl_follow_info{state!="following"} == 1) and on(pod) (flare_node_repl_follow_enabled == 1) and on(pod) (flare_operator_node_role{role="slave",state="active"} == 1)
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Flare pod {{`{{ $labels.pod }}`}}: Active slave in follow mode is {{`{{ $labels.state }}`}}, not following, for 15m"
+            runbook: docs/RUNBOOK.md#replica-follow
+
         - alert: FlareResyncFailing
           expr: >-
             flare_node_rocksdb_resync_failure_threshold > 0

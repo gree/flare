@@ -42,6 +42,14 @@ structure Histogram where
 
 /-! ## Metric Collection -/
 
+/-- One mapped node as the operator's committed map has it (EV-15). -/
+structure NodeRoleSample where
+  pod : String
+  partition : Int
+  role : String
+  state : String
+  deriving Repr, BEq
+
 /-- All operator metrics -/
 structure OperatorMetrics where
   -- Histogram: reconcile loop duration in seconds
@@ -157,6 +165,13 @@ structure OperatorMetrics where
   migrationPhase : Gauge
   migrationDesired : Gauge
 
+  -- EV-15 (role-aware observation): one sample per mapped node, labelled
+  -- with its pod, partition, role and state, so a dashboard can join the
+  -- operator's view of WHO is master/slave with each pod's own flared
+  -- metrics (flare_node_repl_follow_lag, ...) instead of inferring it from
+  -- cluster-wide counts. Set from the committed map every reconcile.
+  nodeRoles : IO.Ref (List NodeRoleSample)
+
   -- Counter: cluster-replication migrations aborted because a partition master
   -- changed (failover/promotion) mid-migration. The operator NEVER blocks
   -- source-cluster failover; it fail-safe aborts the migration instead (a
@@ -198,6 +213,7 @@ def initMetrics : IO OperatorMetrics := do
   let unhealthyNodes ← IO.mkRef 0.0
   let stuckDownNodes ← IO.mkRef 0.0
   let unreachableNodes ← IO.mkRef 0.0
+  let nodeRoles ← IO.mkRef ([] : List NodeRoleSample)
   let topologyBehindNodes ← IO.mkRef 0.0
   let topologyAheadNodes ← IO.mkRef 0.0
   let topologyUnknownNodes ← IO.mkRef 0.0
@@ -247,6 +263,7 @@ def initMetrics : IO OperatorMetrics := do
     migrationPhase := { value := migrationPhase }
     migrationDesired := { value := migrationDesired }
     migrationAborted := { value := migrationAborted }
+    nodeRoles := nodeRoles
   }
 
 /-! ## Metric Update Functions -/
@@ -287,6 +304,30 @@ def recordTopologyBroadcast (metrics : OperatorMetrics) : IO Unit := do
   metrics.topologyBroadcasts.inc
 
 /-- Update node counts from cluster state -/
+private def roleName : FlareRole → String
+  | .Master => "master"
+  | .Slave => "slave"
+  | .Proxy => "proxy"
+
+private def stateName : FlareState → String
+  | .Active => "active"
+  | .Prepare => "prepare"
+  | .Down => "down"
+  | .Ready => "ready"
+
+/-- EV-15: the committed map as one sample per node. The pod name is the
+    first label of the node's FQDN, matching the `pod` label a PodMonitor
+    attaches to that pod's own flared metrics. -/
+def nodeRoleSamples (state : FlareClusterState) : List NodeRoleSample :=
+  state.nodeMap.map fun (key, n) =>
+    { pod := (key.splitOn ".").headD key, partition := n.partition,
+      role := roleName n.role, state := stateName n.state }
+
+/-- Exposition lines for the role samples (value 1 each). -/
+def formatNodeRoles (labels : String) (samples : List NodeRoleSample) : String :=
+  String.join (samples.map fun r =>
+    s!"flare_operator_node_role\{{labels},pod=\"{r.pod}\",partition=\"{r.partition}\",role=\"{r.role}\",state=\"{r.state}\"} 1\n")
+
 def updateNodeCounts (metrics : OperatorMetrics) (state : FlareClusterState) : IO Unit := do
   let nodes := state.nodeMap.map Prod.snd
 
@@ -301,6 +342,7 @@ def updateNodeCounts (metrics : OperatorMetrics) (state : FlareClusterState) : I
   metrics.slaveActiveCount.set slaveActive.length.toFloat
   metrics.slavePrepareCount.set slavePrepare.length.toFloat
   metrics.proxyCount.set proxy.length.toFloat
+  metrics.nodeRoles.set (nodeRoleSamples state)
 
 /-- Set the cluster-replication phase/desired gauges. Callers pass the numeric
     encodings (phase: 0=none 1=dumping 2=forwarding; desired: 0=none 1=duplicate
@@ -426,6 +468,11 @@ def exportMetrics (metrics : OperatorMetrics) (clusterName : String) : IO String
       ("flare_operator_topology_unknown_nodes", "Mapped nodes with absent invalid or older-than-60s topology feedback; not a dead-node count", metrics.topologyUnknownNodes)] do
     output := output ++ s!"# HELP {name} {help}\n# TYPE {name} gauge\n"
     output := output ++ formatGauge name labels (← gauge.value.get)
+
+  -- EV-15: who is master/slave per node, from the committed map
+  output := output ++ "# HELP flare_operator_node_role Mapped node by pod, partition, role and state in the operator's committed map (1 per node); join with the pod's flared metrics\n"
+  output := output ++ "# TYPE flare_operator_node_role gauge\n"
+  output := output ++ formatNodeRoles labels (← metrics.nodeRoles.get)
 
   -- Replica divergence: |master - slave| / master from the last probe (gauge)
   output := output ++ "# HELP flare_operator_replica_key_delta Largest master-to-slave curr_items gap as a fraction of the master's count (coarse divergence signal; equal counts do not prove equal content)\n"

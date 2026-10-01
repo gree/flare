@@ -33,6 +33,14 @@ class MemoryConfigTest(unittest.TestCase):
             self.assertIn(f"expr: {metric} > 0", text)
         self.assertEqual(text.count("runbook: docs/RUNBOOK.md#topology-observation"), 3)
 
+    def test_replica_follow_alerts_render_with_runbooks(self):
+        text = self.render("monitoring.prometheusRule.enabled=true")
+        self.assertIn("alert: FlareReplicaFollowLag", text)
+        self.assertIn("expr: flare_node_repl_follow_enabled == 1 and flare_node_repl_follow_lag > 1000", text)
+        self.assertIn("alert: FlareReplicaNotFollowing", text)
+        self.assertIn('flare_operator_node_role{role="slave",state="active"} == 1', text)
+        self.assertEqual(text.count("runbook: docs/RUNBOOK.md#replica-follow"), 2)
+
     def test_initial_config_and_cr_both_have_memory_settings(self):
         text = self.render("cluster.rocksdb.blockCacheSizeMb=64",
                            "cluster.rocksdb.writeBufferSizeMb=16",

@@ -211,6 +211,8 @@ def purgeSuite : TestSuite := {
         | .ok (_, mIp, sPod, sIp) =>
           let applied0 := (← c.statNat sIp "repl_applied_lsn").getD 0
           let recon0 := (← c.statNat sIp "reconstruction_started").getD 0
+          let done0 := (← c.statNat sIp "reconstruction_completed").getD 0
+          let drops0 := (← c.statNat mIp "proxy_write_dropped").getD 0
           let uid0 := (← c.podUid sPod).getD "?"
           match ← cut mIp sIp with
           | .error e => return .fail e
@@ -240,18 +242,42 @@ def purgeSuite : TestSuite := {
             if st == "following" && (← c.currItems sIp) == (← c.currItems mIp) then
               return .fail s!"the WAL was NOT purged within the window (the follower caught up from {applied0}); retention knobs did not take effect — no lsn_purged staged"
             return .fail s!"expected needs_rebuild/lsn_purged, got {st}/{why}"
+          -- BOTH repair triggers fire for this one replica (handoff §3: the
+          -- true concurrency, not two orders observed separately): the
+          -- master counted forwards it dropped while the link was cut, and
+          -- the follower declared needs_rebuild. They must merge into ONE
+          -- ledger entry and ONE reconstruction.
+          let drops1 := (← c.statNat mIp "proxy_write_dropped").getD 0
+          let maxEntries ← IO.mkRef 0
           let requested ← waitForCondition "operator files a repair request for the follower" 150 do
-            return !(← c.ledgerDests).isEmpty || containsSubstr (← c.opLog) "REPLICA REPAIR requested"
+            let d ← c.ledgerDests
+            maxEntries.modify (max d.length)
+            return !d.isEmpty || containsSubstr (← c.opLog) "REPLICA REPAIR requested"
           let rebuilt ← waitForCondition "follower reconstructed and following at the master's position" 480 do
+            maxEntries.modify (max (← c.ledgerDests).length)
             return (← c.statNat sIp "reconstruction_started").getD 0 > recon0
               && (← c.statStr sIp "repl_follow_state") == some "following"
               && (← c.currItems sIp) == (← c.currItems mIp)
+          let log ← c.opLog 200000
+          let viaDrops := containsSubstr log "more write(s) to"
+          let viaFollower := containsSubstr log "declared needs_rebuild"
+          IO.eprintln s!"# triggers: master dropped {drops0}→{drops1} forward(s); drop-route request logged={viaDrops}; follower-route request logged={viaFollower}; most ledger entries at once={← maxEntries.get}"
           IO.eprintln s!"# rebuild: requested={requested}; reconstruction_started {recon0}→{(← c.statNat sIp "reconstruction_started").getD 0}; state={← c.statStr sIp "repl_follow_state"}; items master={← c.currItems mIp} replica={← c.currItems sIp}; wal_fallback_to_dump={← c.statNat sIp "rocksdb_wal_fallback_to_dump"} snapshot_bootstrap={← c.statNat sIp "rocksdb_snapshot_bootstrap"}; pod uid {uid0}→{(← c.podUid sPod).getD "?"}"
           if !requested then return .fail "no repair request was observed for the follower"
           if !rebuilt then return .fail s!"the follower was not rebuilt (state {← c.statStr sIp "repl_follow_state"}, items master={← c.currItems mIp} replica={← c.currItems sIp})"
           if (← c.podUid sPod).getD "?" != uid0 then return .fail "the replica pod was recreated"
           let empty ← waitForCondition "ledger empty" 240 do return (← c.ledgerDests).isEmpty
           if !empty then return .fail s!"ledger still holds {← c.ledgerDests}"
+          -- One rebuild, not one per trigger: give a second one time to start.
+          IO.sleep 30000
+          let recon1 := (← c.statNat sIp "reconstruction_started").getD 0
+          let done1 := (← c.statNat sIp "reconstruction_completed").getD 0
+          IO.eprintln s!"# after the ledger emptied (+30 s): reconstruction_started {recon0}→{recon1}, completed {done0}→{done1}"
+          if drops1 ≤ drops0 then
+            IO.eprintln "# NOTE: the master counted no dropped forwards during the cut; only the follower route fired, so this run does not show the concurrent case"
+          if (← maxEntries.get) > 1 then return .fail s!"the two triggers produced {← maxEntries.get} ledger entries for one replica"
+          if recon1 != recon0 + 1 then return .fail s!"expected exactly one reconstruction for the two triggers, got {recon1 - recon0}"
+          if done1 != done0 + 1 then return .fail s!"expected exactly one completed reconstruction, got {done1 - done0}"
           return .pass }
   ]
 }

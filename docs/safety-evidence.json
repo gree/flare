@@ -4409,7 +4409,7 @@
         {
           "id": "CHECK-18-purge",
           "kind": "scenario",
-          "procedure": "E2E continuous-replication-purge (T6): with a 1 MB write buffer, 1 s WAL TTL and 1 MB WAL cap, ~4 MB is written while the replica is cut; on healing the follower must declare needs_rebuild with reason lsn_purged and never report following/synchronised; the operator files a repair request and the node is rebuilt in place and follows again with equal items.",
+          "procedure": "E2E continuous-replication-purge (T6): with a 1 MB write buffer, 1 s WAL TTL and 1 MB WAL cap, ~4 MB is written while the replica is cut; on healing the follower must declare needs_rebuild with reason lsn_purged and never report following/synchronised; the operator files a repair request and the node is rebuilt in place and follows again with equal items. Concurrency of the two repair triggers (2026-10-02, CI pending): the same run records the master's proxy_write_dropped across the cut (drop route) and the follower's needs_rebuild (follower route), samples the ledger throughout, and requires at most one ledger entry for the replica, exactly one started and one completed reconstruction, and no second one within 30 s after the ledger empties. A run in which the master counted no drop is logged as not showing the concurrent case.",
           "references": [
             {
               "path": "flare_operator/FlareOperator/E2E/Tests/ContinuousReplicationLimits.lean",

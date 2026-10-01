@@ -1145,6 +1145,38 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of 022c11b; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36922262408"
+        },
+        {
+          "check": "CHECK-01",
+          "commit": "76571a06f5c7e0dabf2f9c958ff63470ae8226ff",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, continuous-replication leg FAIL on the new read-unavailable-error test only) — PR #144 merge revision of 7ba234b; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36938834526"
+        },
+        {
+          "check": "CHECK-01-startup",
+          "commit": "76571a06f5c7e0dabf2f9c958ff63470ae8226ff",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, continuous-replication leg FAIL on the new read-unavailable-error test only) — PR #144 merge revision of 7ba234b; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36938834526"
+        },
+        {
+          "check": "CHECK-01-observation",
+          "commit": "76571a06f5c7e0dabf2f9c958ff63470ae8226ff",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, continuous-replication leg FAIL on the new read-unavailable-error test only) — PR #144 merge revision of 7ba234b; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36938834526"
+        },
+        {
+          "check": "CHECK-01-generation",
+          "commit": "76571a06f5c7e0dabf2f9c958ff63470ae8226ff",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, continuous-replication leg FAIL on the new read-unavailable-error test only) — PR #144 merge revision of 7ba234b; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36938834526"
         }
       ],
       "tasks": [
@@ -1854,6 +1886,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of 022c11b; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36922262408"
+        },
+        {
+          "check": "CHECK-03",
+          "commit": "76571a06f5c7e0dabf2f9c958ff63470ae8226ff",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, continuous-replication leg FAIL on the new read-unavailable-error test only) — PR #144 merge revision of 7ba234b; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36938834526"
         }
       ],
       "tasks": [
@@ -2546,6 +2586,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of 022c11b; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36922262408"
+        },
+        {
+          "check": "CHECK-04-follow",
+          "commit": "76571a06f5c7e0dabf2f9c958ff63470ae8226ff",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request, leg continuous-replication (all tests but the new read-unavailable-error one passed)",
+          "result": "fail",
+          "report": "docs/reports/2026-10-02-ci-36938834526-continuous-replication-e2e.log"
         }
       ],
       "tasks": [
@@ -3164,6 +3212,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of 022c11b; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36922262408"
+        },
+        {
+          "check": "CHECK-06",
+          "commit": "76571a06f5c7e0dabf2f9c958ff63470ae8226ff",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, continuous-replication leg FAIL on the new read-unavailable-error test only) — PR #144 merge revision of 7ba234b; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36938834526"
         }
       ],
       "tasks": [
@@ -3670,6 +3726,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of 022c11b; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36922262408"
+        },
+        {
+          "check": "CHECK-09",
+          "commit": "76571a06f5c7e0dabf2f9c958ff63470ae8226ff",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, continuous-replication leg FAIL on the new read-unavailable-error test only) — PR #144 merge revision of 7ba234b; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36938834526"
         }
       ],
       "tasks": [],
@@ -3918,7 +3982,8 @@
         "RESOURCE FLOOR, found by the scale evaluation (report 2026-09-21-saf10d-t6-t9-scale.txt): flared's RocksDB defaults budget ≈704 MB (512 MB block cache + 3 × 64 MB write buffers) before flared's own memory, so a 512Mi container is OOMKilled under write load (observed, exit 137 at 2m42s of a 2M-key load). The shipped chart's node default is limits.memory 1Gi and the FlareCluster CRD exposes no blockCacheSizeMb / writeBufferSizeMb / maxWriteBufferNumber, so the floor cannot be lowered through the chart. Not fixed in this PR.",
         "WAL retention cap overshoot (from the SAF-10 long-outage evaluation, report 2026-09-30-sustained-after-more-fix.md): with a trailing follower the archive grew to 499 MB past a 256 MB cap before any purge; on tmpfs this is RAM. The chart's tmpfs guidance ('cap it well under tmpfs.sizeLimit') must account for the overshoot, not just the cap.",
         "DECISION 2026-10-02 (user): asynchronous durability is accepted for production; RPO = replication lag at master data loss. The lagged-successor E2E records the gap. Client-visible behaviour: flared option read-unavailable-error (CR spec.rocksdb.readUnavailableError, default false) answers SERVER_ERROR instead of a miss when a get cannot be served; enable it where flare is the primary store. op_get change compiled only by the CI image and nix builds; no E2E exercises the option yet.",
-        "2026-10-02: E2E for read-unavailable-error added (continuous-replication suite): with replica->master traffic to 12121 rejected and the follower disconnected, a get on the replica must answer SERVER_ERROR with the option on and END (miss) with it off; each switch confirmed by flared's reload notice. CI pending."
+        "2026-10-02: E2E for read-unavailable-error added (continuous-replication suite): with replica->master traffic to 12121 rejected and the follower disconnected, a get on the replica must answer SERVER_ERROR with the option on and END (miss) with it off; each switch confirmed by flared's reload notice. CI pending.",
+        "2026-10-02 (CI 36938834526), INCONCLUSIVE: the first read-unavailable-error E2E got an EMPTY reply from the replica within nc's 5 s idle timeout (option confirmed on by the reload notice, follower disconnected). Most likely the forward to the master was still retrying with reconnects; the test now waits up to 40 s, times the reply and prints the replica's flared lines on failure. Not recorded as a pass."
       ],
       "code": [
         {
@@ -4122,6 +4187,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of 022c11b; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36922262408"
+        },
+        {
+          "check": "CHECK-15",
+          "commit": "76571a06f5c7e0dabf2f9c958ff63470ae8226ff",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, continuous-replication leg FAIL on the new read-unavailable-error test only) — PR #144 merge revision of 7ba234b; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36938834526"
         }
       ],
       "tasks": [],
@@ -5677,6 +5750,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of 022c11b; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36922262408"
+        },
+        {
+          "check": "CHECK-18-purge",
+          "commit": "76571a06f5c7e0dabf2f9c958ff63470ae8226ff",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, continuous-replication leg FAIL on the new read-unavailable-error test only) — PR #144 merge revision of 7ba234b; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36938834526"
         }
       ],
       "tasks": [
@@ -6133,6 +6214,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of 022c11b; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36922262408"
+        },
+        {
+          "check": "CHECK-20",
+          "commit": "76571a06f5c7e0dabf2f9c958ff63470ae8226ff",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, continuous-replication leg FAIL on the new read-unavailable-error test only) — PR #144 merge revision of 7ba234b; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36938834526"
         }
       ],
       "tasks": [

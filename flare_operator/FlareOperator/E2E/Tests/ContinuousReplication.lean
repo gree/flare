@@ -708,10 +708,19 @@ def suite : TestSuite := {
           let setOpt := fun (on : Bool) => kubectlPatch "flarecluster" cfg.name cfg.«namespace»
             s!"\{\"spec\":\{\"rocksdb\":\{\"replIdentityForward\":true,\"replFollowEnabled\":true,\"replFollowPollIntervalUsec\":200000,\"readUnavailableError\":{if on then "true" else "false"}}}}"
           let rule := ["FORWARD", "-s", sIp, "-d", mIp, "-p", "tcp", "--dport", toString cfg.flarePort, "-j", "REJECT", "--reject-with", "tcp-reset"]
+          -- The forward to the master retries with reconnects before it is
+          -- given up, which outlasted a 5 s nc idle timeout (CI 36938834526:
+          -- empty reply). Wait up to 40 s and report how long it took.
           let rawGet : IO String := do
-            match ← execInDebugPod cfg.debugPod cfg.«namespace» s!"printf 'get {key}\\r\\n' | nc -w 5 {sIp} {cfg.flarePort}" with
-            | .ok o => return o.trim
-            | .error e => return s!"(error {e})"
+            let t0 ← IO.monoMsNow
+            let r ← match ← execInDebugPod cfg.debugPod cfg.«namespace» s!"printf 'get {key}\\r\\n' | nc -w 40 {sIp} {cfg.flarePort}" with
+              | .ok o => pure o.trim
+              | .error e => pure s!"(error {e})"
+            return s!"{r} [{((← IO.monoMsNow) - t0) / 1000}s]"
+          let replicaLines : IO String := do
+            match ← hostCmd "sh" ["-c", s!"kubectl logs -n {cfg.«namespace»} {sPod} --tail=400 | grep -E 'rue_probe|read-unavailable|could not be served|pretending not found|proxy' | tail -8"] with
+            | .ok o => return o
+            | .error _ => return ""
           try
             match ← setOpt true with
             | .error e => return .fail s!"patch failed: {e}"
@@ -728,6 +737,7 @@ def suite : TestSuite := {
             let withOpt ← rawGet
             IO.eprintln s!"# option on, forward cut: get on the replica -> {withOpt}"
             if !containsSubstr withOpt "SERVER_ERROR" then
+              IO.eprintln s!"# replica flared lines:\n{← replicaLines}"
               return .fail s!"with read-unavailable-error on, a get the replica cannot serve did not answer SERVER_ERROR: {withOpt}"
             match ← setOpt false with
             | .error e => return .fail s!"patch failed: {e}"

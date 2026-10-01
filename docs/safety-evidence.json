@@ -748,6 +748,22 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs, all green) — PR #144 merge revision of 3067cb4; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36846255460"
+        },
+        {
+          "check": "CHECK-01",
+          "commit": "f65a68fa7e03563e6bdce6386b90674f62406414",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (new 8-leg layout, all green, 198 tests) — PR #144 merge revision of 477fc22; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36860948511"
+        },
+        {
+          "check": "CHECK-01-startup",
+          "commit": "f65a68fa7e03563e6bdce6386b90674f62406414",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (new 8-leg layout, all green, 198 tests) — PR #144 merge revision of 477fc22; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36860948511"
         }
       ],
       "tasks": [
@@ -1272,6 +1288,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs, all green) — PR #144 merge revision of 3067cb4; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36846255460"
+        },
+        {
+          "check": "CHECK-03-follow",
+          "commit": "f65a68fa7e03563e6bdce6386b90674f62406414",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (new 8-leg layout, all green, 198 tests) — PR #144 merge revision of 477fc22; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36860948511"
         }
       ],
       "tasks": [
@@ -1758,6 +1782,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs, all green) — PR #144 merge revision of 3067cb4; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36846255460"
+        },
+        {
+          "check": "CHECK-04-follow",
+          "commit": "f65a68fa7e03563e6bdce6386b90674f62406414",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (new 8-leg layout, all green, 198 tests) — PR #144 merge revision of 477fc22; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36860948511"
         }
       ],
       "tasks": [
@@ -1768,7 +1800,7 @@
       "review": {
         "commit": "035096360e75b6041cae45846046baff73deaabf",
         "date": "2026-10-01",
-        "note": "Run 36846255460 (merge rev 0350963): first CI execution where the planned promotion went through the graceful drain — follower promoted 10 s after the delete (inside the 30 s preStop), drain logged, guard did not refuse, no NOT-LOSS-FREE line. Earlier CHECK-04-follow passes showed promotion via failover, not the drain. One run. PARTIAL / UNVERIFIED unchanged."
+        "note": "Run 36846255460 (merge rev 0350963): first CI execution where the planned promotion went through the graceful drain — follower promoted 10 s after the delete (inside the 30 s preStop), drain logged, guard did not refuse, no NOT-LOSS-FREE line. Earlier CHECK-04-follow passes showed promotion via failover, not the drain. One run. PARTIAL / UNVERIFIED unchanged. Run 36860948511 (merge rev f65a68f): drain promotion again without refusal (second run)."
       }
     },
     {
@@ -2263,6 +2295,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs, all green) — PR #144 merge revision of 3067cb4; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36846255460"
+        },
+        {
+          "check": "CHECK-06",
+          "commit": "f65a68fa7e03563e6bdce6386b90674f62406414",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (new 8-leg layout, all green, 198 tests) — PR #144 merge revision of 477fc22; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36860948511"
         }
       ],
       "tasks": [
@@ -2658,13 +2698,21 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs, all green) — PR #144 merge revision of 3067cb4; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36846255460"
+        },
+        {
+          "check": "CHECK-09",
+          "commit": "f65a68fa7e03563e6bdce6386b90674f62406414",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (new 8-leg layout, all green, 198 tests) — PR #144 merge revision of 477fc22; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36860948511"
         }
       ],
       "tasks": [],
       "review": {
         "commit": "80e466bcbb5cabb9505ee9cf7e086e69750e1640",
         "date": "2026-10-01",
-        "note": "Run 36812371158 (merge rev 80e466b): the breaker tripped 20 s after the 4->1 scale-down, so CHECK-09 passed. This is the timing-dependent outcome the SAF-11 finding already describes (per-tick dead count; trip needs half the cluster to die inside one tick) and does not close it; the no-trip tally stays at 5 CI occurrences. No code change; the window definition is awaiting the reviewer. PARTIAL / UNVERIFIED unchanged. Run 36816259807 (merge rev b706686) tripped at 5 s; same assessment. Run 36820029377 (merge rev 9dc131f) tripped at 5 s; same assessment. Run 36826494031 (merge rev 6f1edf0) tripped at 5 s; same assessment. Run 36831110279 (merge rev 8ed8f1d) tripped in its leg; same assessment. Run 36835797814 (merge rev 37bcb3e, pre-SAF-11-fix code) tripped at 5 s. Run 36841064685 (merge rev b5bb4a9) is the first run with the SAF-11 count: tripped at 5 s. One run; the no-trip was intermittent, so this alone does not show the fix. Run 36846255460 (merge rev 0350963, SAF-11 count) tripped at 10 s."
+        "note": "Run 36812371158 (merge rev 80e466b): the breaker tripped 20 s after the 4->1 scale-down, so CHECK-09 passed. This is the timing-dependent outcome the SAF-11 finding already describes (per-tick dead count; trip needs half the cluster to die inside one tick) and does not close it; the no-trip tally stays at 5 CI occurrences. No code change; the window definition is awaiting the reviewer. PARTIAL / UNVERIFIED unchanged. Run 36816259807 (merge rev b706686) tripped at 5 s; same assessment. Run 36820029377 (merge rev 9dc131f) tripped at 5 s; same assessment. Run 36826494031 (merge rev 6f1edf0) tripped at 5 s; same assessment. Run 36831110279 (merge rev 8ed8f1d) tripped in its leg; same assessment. Run 36835797814 (merge rev 37bcb3e, pre-SAF-11-fix code) tripped at 5 s. Run 36841064685 (merge rev b5bb4a9) is the first run with the SAF-11 count: tripped at 5 s. One run; the no-trip was intermittent, so this alone does not show the fix. Run 36846255460 (merge rev 0350963, SAF-11 count) tripped at 10 s. Run 36860948511 (merge rev f65a68f, SAF-11 count) tripped at 10 s."
       }
     },
     {
@@ -3390,6 +3438,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs, all green) — PR #144 merge revision of 3067cb4; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36846255460"
+        },
+        {
+          "check": "CHECK-16",
+          "commit": "f65a68fa7e03563e6bdce6386b90674f62406414",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (new 8-leg layout, all green, 198 tests) — PR #144 merge revision of 477fc22; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36860948511"
         }
       ],
       "tasks": [
@@ -3630,6 +3686,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs, all green) — PR #144 merge revision of 3067cb4; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36846255460"
+        },
+        {
+          "check": "CHECK-17",
+          "commit": "f65a68fa7e03563e6bdce6386b90674f62406414",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (new 8-leg layout, all green, 198 tests) — PR #144 merge revision of 477fc22; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36860948511"
         }
       ],
       "tasks": [
@@ -4111,6 +4175,22 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs, all green) — PR #144 merge revision of 3067cb4; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36846255460"
+        },
+        {
+          "check": "CHECK-18",
+          "commit": "f65a68fa7e03563e6bdce6386b90674f62406414",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (new 8-leg layout, all green, 198 tests) — PR #144 merge revision of 477fc22; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36860948511"
+        },
+        {
+          "check": "CHECK-18-purge",
+          "commit": "f65a68fa7e03563e6bdce6386b90674f62406414",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (new 8-leg layout, all green, 198 tests) — PR #144 merge revision of 477fc22; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36860948511"
         }
       ],
       "tasks": [
@@ -4454,6 +4534,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs, all green) — PR #144 merge revision of 3067cb4; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36846255460"
+        },
+        {
+          "check": "CHECK-20",
+          "commit": "f65a68fa7e03563e6bdce6386b90674f62406414",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (new 8-leg layout, all green, 198 tests) — PR #144 merge revision of 477fc22; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36860948511"
         }
       ],
       "tasks": [

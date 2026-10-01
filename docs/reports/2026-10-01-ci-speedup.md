@@ -49,3 +49,22 @@ tests), 112 min of test time in total.
 
 Artifact names keep the pattern `e2e-<leg>-<evaluation>-<attempt>`, and
 `tested-sha.txt` is unchanged.
+
+## First run — PR run 36860948511 on 477fc22: all 8 legs PASS, 32 min with an empty cache
+
+| Leg | Finished after |
+|---|---|
+| continuous-replication | 24.2 min |
+| wal-recovery | 27.4 min |
+| replication | 29.7 min |
+| breaker-migration | 30.2 min |
+| failover-data | 30.2 min |
+| topology | 31.2 min |
+| authority | 31.2 min |
+| repair | 32.3 min |
+
+The run took 32 min against about 48 before. The cache was empty, so every
+leg rebuilt both flared images. Under the Buildx builder those builds took
+about 5 min each, slower than the 3 min of the classic builder. All 198 tests
+ran, the same count as before, with none failing. The narrowed Dockerfiles
+build. A manual full run follows to measure the cached case.

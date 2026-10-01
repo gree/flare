@@ -319,3 +319,12 @@ at b706686. To stop docs-only commits from re-running the matrix for their
 own record, later green runs on record-only commits are summarised in this
 file with the next substantive commit rather than pushed one by one; a
 failure is still recorded immediately.
+
+### PR run 36820029377 on 630ccec (docs-only commit) — all 5 legs PASS (tested-sha 9dc131f, merge revision)
+Started 05:29Z, concluded 06:17Z. continuous-replication 20/20 (operator age
+151 s before the planned-promotion delete), topology 47/47, replication
+45/45, wal-recovery 48/48 (pvc-data-survival recovery wait 16 s, 100/100),
+breaker-migration 37/37 (breaker tripped 5 s after the scale-down). Third
+fully green matrix in a row. Recorded as PASS on the same ten checks at
+9dc131f; committed with the next push rather than pushed on its own, as
+noted above.

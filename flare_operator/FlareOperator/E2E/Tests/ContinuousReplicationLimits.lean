@@ -510,7 +510,12 @@ def scaleSuite : TestSuite := {
             let mut i := 0
             while i < n do
               let m := min chunk (n - i)
-              let cmd := s!"(awk -v s={i} -v m={m} 'BEGIN\{for(k=s;k<s+m;k++) printf \"set s%d 0 0 16\\r\\n0123456789abcdef\\r\\n\", k}'; sleep 15) | nc -w 60 {mIp} {scaleCfg.flarePort} | grep -c STORED"
+              -- End the chunk with `quit`: flared answers every set, then
+              -- closes, and nc exits on that close. The fixed `sleep 15` that
+              -- used to wait for the replies capped the loader at ~1300
+              -- keys/s, too slow for 15.8M keys in one evaluation leg
+              -- (run 36899086870).
+              let cmd := s!"(awk -v s={i} -v m={m} 'BEGIN\{for(k=s;k<s+m;k++) printf \"set s%d 0 0 16\\r\\n0123456789abcdef\\r\\n\", k; printf \"quit\\r\\n\"}') | nc -w 60 {mIp} {scaleCfg.flarePort} | grep -c STORED"
               match ← execInDebugPod scaleCfg.debugPod scaleCfg.«namespace» cmd with
               | .ok o => loaded := loaded + (o.trim.toNat?.getD 0)
               | .error e => IO.eprintln s!"# chunk at {i} failed: {e}"

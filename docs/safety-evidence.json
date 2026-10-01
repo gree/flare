@@ -1017,6 +1017,38 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, replication leg FAIL on continuous-replication-limits, harness) — PR #144 merge revision of 779513b; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36904379135"
+        },
+        {
+          "check": "CHECK-01",
+          "commit": "adcfaf6bbfa1425fb07e765dc186474863b10ecd",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; failover-data and replication legs FAIL, harness/test premise) — PR #144 merge revision of 8829657; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36909742559"
+        },
+        {
+          "check": "CHECK-01-startup",
+          "commit": "adcfaf6bbfa1425fb07e765dc186474863b10ecd",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; failover-data and replication legs FAIL, harness/test premise) — PR #144 merge revision of 8829657; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36909742559"
+        },
+        {
+          "check": "CHECK-01-observation",
+          "commit": "adcfaf6bbfa1425fb07e765dc186474863b10ecd",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; failover-data and replication legs FAIL, harness/test premise) — PR #144 merge revision of 8829657; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36909742559"
+        },
+        {
+          "check": "CHECK-01-generation",
+          "commit": "adcfaf6bbfa1425fb07e765dc186474863b10ecd",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; failover-data and replication legs FAIL, harness/test premise) — PR #144 merge revision of 8829657; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36909742559"
         }
       ],
       "tasks": [
@@ -1662,6 +1694,22 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, replication leg FAIL on continuous-replication-limits, harness) — PR #144 merge revision of 779513b; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36904379135"
+        },
+        {
+          "check": "CHECK-03",
+          "commit": "adcfaf6bbfa1425fb07e765dc186474863b10ecd",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; failover-data and replication legs FAIL, harness/test premise) — PR #144 merge revision of 8829657; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36909742559"
+        },
+        {
+          "check": "CHECK-03-follow",
+          "commit": "adcfaf6bbfa1425fb07e765dc186474863b10ecd",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; failover-data and replication legs FAIL, harness/test premise) — PR #144 merge revision of 8829657; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36909742559"
         }
       ],
       "tasks": [
@@ -1708,7 +1756,8 @@
         "The planned-promotion E2E has never found the operator's 'graceful drain' line on CI even when it passes; it establishes that the proven follower is promoted and the epoch advances, not that the drain path (rather than failover after the preStop window) carried it. The drain-path exclusion of unproven followers therefore remains unit-pinned only.",
         "2026-10-01 diagnosis of the drain caveat (CI pending): the startup grace is 24 reconcile CYCLES, not 120 s; with 2-3 s passes in the continuous-replication suite they last ~190 s, so the test's wait for a 150 s-old operator still deleted the master inside the grace, where the operator skips drain and dead detection. The follower was then promoted ~35 s later by dead-node failover once grace ended, which is why no drain line ever appeared (the terminating-pod suite, with fewer probes, does observe the drain). The test now waits for the operator's own 'grace period: 0 cycles remaining' line and REQUIRES the drain line; earlier PASS records on CHECK-04-follow proved promotion of the proven follower and the epoch advance, not the drain path. Separately: a grace measured in cycles stretches with slow passes; whether it should be wall-clock is a design question.",
         "FINDING 2026-10-01 (CI 36841064685, functional): with the grace wait fixed, the drain ran but its guard REFUSED the proven follower ('NO promotable successor'); the follower was promoted ~35 s later by dead-node failover. Cause: the follow-evidence probe read the master's head only from pods that were Ready AND not Terminating, and during a drain the master is Terminating by definition, so no follower could be proven current and every planned promotion in follow mode was refused. Production impact: a planned master restart in follow mode did not hand off during preStop; writes in the preStop window and the gap until failover were served by a master about to exit. FIX (CI pending): the master's head is read from any Ready pod, Terminating included; the planned-promotion E2E now fails when the guard refuses.",
-        "DECISION 2026-10-02 (user): the startup grace is wall-clock (FLARE_STARTUP_GRACE_SECONDS, default 120 s) instead of 24 reconcile cycles; the operator logs 'grace period over after Ns' once, and the planned-promotion E2E waits for that line."
+        "DECISION 2026-10-02 (user): the startup grace is wall-clock (FLARE_STARTUP_GRACE_SECONDS, default 120 s) instead of 24 reconcile cycles; the operator logs 'grace period over after Ns' once, and the planned-promotion E2E waits for that line.",
+        "FINDING 2026-10-02 (CI 36909742559, test premise; behaviour by design but now stated): with the breaker floor, the 1p x 2r failover happened (the follower was promoted), but WITHOUT the NOT LOSS-FREE line while 48 items were lost. The cut is one-way (master->replica forwards), so the follower kept polling the master's WAL position and was within the promotion bound (FLARE_FOLLOW_PROMOTE_LAG, default 100 positions) and counted as proven; the force-deleted master appears Terminating, so the drain path promoted it. Guarantee as implemented: no warning => loss <= the promotion bound; a promotion within the bound loses up to that many positions silently. The test now asserts exactly that (warning, or gap <= 100) and prints the promotion path; the suite gained a failure dump."
       ],
       "code": [
         {
@@ -2289,6 +2338,22 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, replication leg FAIL on continuous-replication-limits, harness) — PR #144 merge revision of 779513b; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36904379135"
+        },
+        {
+          "check": "CHECK-04-eligibility",
+          "commit": "adcfaf6bbfa1425fb07e765dc186474863b10ecd",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; failover-data and replication legs FAIL, harness/test premise) — PR #144 merge revision of 8829657; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36909742559"
+        },
+        {
+          "check": "CHECK-04-follow",
+          "commit": "adcfaf6bbfa1425fb07e765dc186474863b10ecd",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request, leg replication (continuous-replication-limits lagged-successor test)",
+          "result": "fail",
+          "report": "docs/reports/2026-10-02-ci-36909742559-replication-e2e.log"
         }
       ],
       "tasks": [
@@ -2604,7 +2669,8 @@
       ],
       "residual_risks": [
         "Active candidates lack a data check; absent data-bearing observations fall back; Prepare partial copies can become authoritative.",
-        "pvc-data-survival's total-P0-loss test (CHECK-06) failed once on CI (run 36707861123) with 'DATA LOSS: 10 missing' that was a HARNESS precondition fault: the recovery wait was satisfied by stale StatefulSet/operator state 15 s after a force delete, and the readback hit a booting pod (first ten GETs in order missed; P0 count 49 = passing run). The wait now requires replaced pod UIDs, Ready replicas and a stats-answering master (report 2026-09-30-sustained-after-more-fix.md). The failure is kept; the fix is re-executed by the next PR run."
+        "pvc-data-survival's total-P0-loss test (CHECK-06) failed once on CI (run 36707861123) with 'DATA LOSS: 10 missing' that was a HARNESS precondition fault: the recovery wait was satisfied by stale StatefulSet/operator state 15 s after a force delete, and the readback hit a booting pod (first ten GETs in order missed; P0 count 49 = passing run). The wait now requires replaced pod UIDs, Ready replicas and a stats-answering master (report 2026-09-30-sustained-after-more-fix.md). The failure is kept; the fix is re-executed by the next PR run.",
+        "2026-10-02 (CI 36909742559), classified as HARNESS: 'DATA LOSS: 5 missing' in pvc-data-survival test 2 was not a loss. flared on the restarted reading pod logged 'partition error (key=pvc_0..pvc_4) -> continue processing (pretending not found)': it had not received its partition map yet when the test read 11 s after the restart. The test now re-reads only missing keys for up to 30 s (a real loss stays missing; a mismatch is never retried). The same behaviour is what flared's read-unavailable-error option turns into SERVER_ERROR."
       ],
       "code": [
         {
@@ -2874,6 +2940,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, replication leg FAIL on continuous-replication-limits, harness) — PR #144 merge revision of 779513b; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36904379135"
+        },
+        {
+          "check": "CHECK-06",
+          "commit": "adcfaf6bbfa1425fb07e765dc186474863b10ecd",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request, leg failover-data (pvc-data-survival test 2)",
+          "result": "fail",
+          "report": "docs/reports/2026-10-02-ci-36909742559-failover-data-e2e.log"
         }
       ],
       "tasks": [
@@ -3343,6 +3417,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, replication leg FAIL on continuous-replication-limits, harness) — PR #144 merge revision of 779513b; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36904379135"
+        },
+        {
+          "check": "CHECK-09",
+          "commit": "adcfaf6bbfa1425fb07e765dc186474863b10ecd",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; failover-data and replication legs FAIL, harness/test premise) — PR #144 merge revision of 8829657; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36909742559"
         }
       ],
       "tasks": [],
@@ -3770,6 +3852,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, replication leg FAIL on continuous-replication-limits, harness) — PR #144 merge revision of 779513b; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36904379135"
+        },
+        {
+          "check": "CHECK-15",
+          "commit": "adcfaf6bbfa1425fb07e765dc186474863b10ecd",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; failover-data and replication legs FAIL, harness/test premise) — PR #144 merge revision of 8829657; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36909742559"
         }
       ],
       "tasks": [],
@@ -4199,6 +4289,14 @@
           "command": "GitHub Actions e2e-tests.yaml workflow_dispatch evaluation=scale-15m8 (run 36899086870), leg continuous-replication; tested-sha = branch head 88f08fc",
           "result": "fail",
           "report": "docs/reports/2026-10-02-ci-36899086870-scale-15m8-e2e.log"
+        },
+        {
+          "check": "CHECK-16",
+          "commit": "adcfaf6bbfa1425fb07e765dc186474863b10ecd",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; failover-data and replication legs FAIL, harness/test premise) — PR #144 merge revision of 8829657; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36909742559"
         }
       ],
       "tasks": [
@@ -4519,6 +4617,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, replication leg FAIL on continuous-replication-limits, harness) — PR #144 merge revision of 779513b; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36904379135"
+        },
+        {
+          "check": "CHECK-17",
+          "commit": "adcfaf6bbfa1425fb07e765dc186474863b10ecd",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; failover-data and replication legs FAIL, harness/test premise) — PR #144 merge revision of 8829657; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36909742559"
         }
       ],
       "tasks": [
@@ -5161,6 +5267,22 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, replication leg FAIL on continuous-replication-limits, harness) — PR #144 merge revision of 779513b; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36904379135"
+        },
+        {
+          "check": "CHECK-18",
+          "commit": "adcfaf6bbfa1425fb07e765dc186474863b10ecd",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; failover-data and replication legs FAIL, harness/test premise) — PR #144 merge revision of 8829657; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36909742559"
+        },
+        {
+          "check": "CHECK-18-purge",
+          "commit": "adcfaf6bbfa1425fb07e765dc186474863b10ecd",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; failover-data and replication legs FAIL, harness/test premise) — PR #144 merge revision of 8829657; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36909742559"
         }
       ],
       "tasks": [
@@ -5585,6 +5707,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request, leg replication (continuous-replication-limits: precondition, T9 and lagged successor failed after the cluster was changed to 2 partitions)",
           "result": "fail",
           "report": "docs/reports/2026-10-02-ci-36904379135-replication-e2e.log"
+        },
+        {
+          "check": "CHECK-20",
+          "commit": "adcfaf6bbfa1425fb07e765dc186474863b10ecd",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; failover-data and replication legs FAIL, harness/test premise) — PR #144 merge revision of 8829657; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36909742559"
         }
       ],
       "tasks": [

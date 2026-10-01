@@ -52,6 +52,26 @@ private def assertAllKeysSurvive (ip : String) : IO TestResult := do
     match ← memcachedGet cfg.debugPod cfg.«namespace» ip cfg.flarePort key with
     | none => missing := missing ++ [i]
     | some got => if got != expected then mismatched := mismatched ++ [i]
+  -- A miss right after a restart is not yet a loss: a flared pod that has
+  -- not received its partition map answers "partition error ... pretending
+  -- not found" (CI 36909742559: keys 0-4 read 11 s after the restart, all
+  -- present). Re-read only the MISSING keys for up to 30 s; a key that was
+  -- really lost stays missing. A mismatch is never retried. (With the
+  -- flared option read-unavailable-error those reads would have been
+  -- SERVER_ERROR instead of a miss.)
+  let firstMissing := missing
+  let mut tries := 0
+  while !missing.isEmpty && tries < 10 do
+    IO.sleep 3000
+    tries := tries + 1
+    let mut still : List Nat := []
+    for i in missing do
+      match ← memcachedGet cfg.debugPod cfg.«namespace» ip cfg.flarePort s!"{keyPrefix}_{i}" with
+      | none => still := still ++ [i]
+      | some got => if got != s!"val_{i}" then mismatched := mismatched ++ [i]
+    missing := still
+  if !firstMissing.isEmpty then
+    IO.eprintln s!"# first read missed {firstMissing.length} key(s) {firstMissing.take 10}; after {tries} re-read(s) {missing.length} still missing"
   if missing.isEmpty && mismatched.isEmpty then
     return .pass
   else

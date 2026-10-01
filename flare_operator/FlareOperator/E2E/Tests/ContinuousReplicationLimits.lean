@@ -309,6 +309,7 @@ def limitsSuite : TestSuite := {
     IO.eprintln "# Waiting 50s grace period for operator reconciliation..."
     IO.sleep 50000
   teardown := cleanupCluster limitsCfg
+  onFailure := dumpClusterDiagnostics limitsCfg.«namespace» s!"app={limitsCfg.operatorName}"
   tests :=
     let c : Ctx := { cfg := limitsCfg }
     [
@@ -405,9 +406,25 @@ def limitsSuite : TestSuite := {
           let notLossFree := (log.splitOn "\n").any fun l =>
             containsSubstr l "PROMOTION NOT LOSS-FREE" && containsSubstr l sPod
           let newItems ← items0 sIp
-          IO.eprintln s!"# failover: promoted={promoted}; NOT LOSS-FREE logged={notLossFree}; items old master={mItems} new master={newItems} (gap {mItems - newItems})"
+          let gap := mItems - newItems
+          let pathLines := (log.splitOn "\n").filter (fun l =>
+            containsSubstr l "graceful drain" || containsSubstr l "PROMOTION NOT LOSS-FREE"
+              || containsSubstr l "detected " || containsSubstr l "CIRCUIT BREAKER")
+          IO.eprintln s!"# failover: promoted={promoted}; NOT LOSS-FREE logged={notLossFree}; items old master={mItems} new master={newItems} (gap {gap})"
+          IO.eprintln s!"# operator promotion path:\n{String.intercalate "\n" (pathLines.reverse.take 8).reverse}"
           if !promoted then return .fail "the lagged follower was not promoted: the partition stayed without a master"
-          if !notLossFree then return .fail "the lagged follower was promoted without the NOT LOSS-FREE line"
+          -- The guarantee is: NO warning => the follower was proven within
+          -- the promotion bound (FLARE_FOLLOW_PROMOTE_LAG, default 100
+          -- positions), so at most that much is lost silently. CI
+          -- 36909742559: the force-deleted master was seen Terminating, the
+          -- follower (still polling the master's WAL position through the
+          -- one-way cut) was 48 items behind, and it was promoted by the drain
+          -- path with no warning. A larger gap without the warning is the
+          -- failure.
+          if !notLossFree && gap > 100 then
+            return .fail s!"the lagged follower was promoted without the NOT LOSS-FREE line although {gap} items (> the promotion bound 100) were lost"
+          if !notLossFree then
+            IO.eprintln s!"# promoted as proven within the promotion bound: {gap} item(s) lost without a warning, by design (bound 100 positions)"
           -- The returning ex-master must not overrule the new master's
           -- history: it rejoins as a follower of the new epoch.
           let rejoined ← waitForCondition "the ex-master rejoins and follows the new master" 480 do

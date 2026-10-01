@@ -24,8 +24,13 @@ states remain unchanged; the evidence register owns their status.
 **Decided 2026-10-02 by the user: asynchronous durability is accepted.**
 A write the master acknowledged but had not delivered to a replica is lost
 if the master's data is lost. RPO equals the replication lag at that moment.
-The lagged-successor E2E records that gap. The text below is kept as the
-statement of what was decided.
+The lagged-successor E2E records that gap.
+
+A promotion that logs no `PROMOTION NOT LOSS-FREE` warning was proven within
+the promotion bound (`FLARE_FOLLOW_PROMOTE_LAG`, default 100 positions). It
+can still lose up to that many positions without a warning (48 items in CI
+36909742559). Set the bound to the loss you accept silently. The text below
+is kept as the statement of what was decided.
 
 Continuous replication repairs transient delivery gaps while the authoritative
 master/history survives. It does NOT guarantee that a successfully acknowledged

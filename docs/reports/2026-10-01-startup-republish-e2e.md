@@ -137,3 +137,11 @@ delivered the withheld weight to both pods. The startup seed alone recovered
 a map that was committed and never sent. The test at weight 25, which also
 checks balance persistence, is in the next push. Recorded as PASS on
 CHECK-01-startup and the nine other checks at 37bcb3e.
+
+## Fourth CI execution — PR run 36841064685 on 5147e98 (merge rev b5bb4a9): PASS, with balance persisted
+
+At slave weight 25 the fresh process's first send was again pending-only
+(`versionMoved=false pending=v8589934592`), and both pods went from balance
+80 to 25. Before the persistence fix the same weight produced
+`versionMoved=true` (CI 36831110279). The reloaded map now equals the
+committed one. Recorded as PASS on CHECK-01-startup at b5bb4a9.

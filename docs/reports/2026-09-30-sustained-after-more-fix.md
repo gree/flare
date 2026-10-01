@@ -264,3 +264,15 @@ the delete. The test now waits until the operator pod is older than 150 s
 before deleting the master and logs the age. Passed in all seven earlier CI
 executions (timing-dependent). Recorded as FAIL on CHECK-04-follow with this
 classification. Log `2026-10-01-ci-36748059941-continuous-replication-e2e.log`.
+
+### PR run 36796752122 on fcf3667 — 4 of 5 legs PASS (tested-sha 2897949, merge revision)
+continuous-replication 20/20: the planned-promotion test with the grace-period
+wait ("operator pod age before the delete: 150s") promoted the follower, the
+epoch advanced 3→4, the ex-master rebuilt and followed (345 = 345). Caveat
+kept with the record: the "graceful drain" log line was not found in the
+tail on any CI execution, so the evidence shows the proven follower being
+promoted and the epoch advancing, not which path (drain inside the preStop
+window versus failover after it) carried the promotion.
+breaker-migration FAIL: circuit-breaker no-trip — SAF-11, **fifth CI
+occurrence** (three of the last four PR runs). Recorded as FAIL on CHECK-09.
+Logs `2026-10-01-ci-36796752122-{continuous-replication,breaker-migration}-e2e.log`.

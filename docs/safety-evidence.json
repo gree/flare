@@ -1081,6 +1081,38 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, repair leg FAIL: functional finding, NotReady streak) — PR #144 merge revision of 67fa134; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36914077401"
+        },
+        {
+          "check": "CHECK-01",
+          "commit": "702a3525dfe900c93ca878a83f9cd44b9b3643c7",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of cf90600; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36918285987"
+        },
+        {
+          "check": "CHECK-01-startup",
+          "commit": "702a3525dfe900c93ca878a83f9cd44b9b3643c7",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of cf90600; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36918285987"
+        },
+        {
+          "check": "CHECK-01-observation",
+          "commit": "702a3525dfe900c93ca878a83f9cd44b9b3643c7",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of cf90600; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36918285987"
+        },
+        {
+          "check": "CHECK-01-generation",
+          "commit": "702a3525dfe900c93ca878a83f9cd44b9b3643c7",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of cf90600; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36918285987"
         }
       ],
       "tasks": [
@@ -1758,6 +1790,22 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request, leg repair (prepare-evidence test 10: the slave activated by PREPARE-REPAIR was failed over in the next pass)",
           "result": "fail",
           "report": "docs/reports/2026-10-02-ci-36914077401-repair-e2e.log"
+        },
+        {
+          "check": "CHECK-03",
+          "commit": "702a3525dfe900c93ca878a83f9cd44b9b3643c7",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of cf90600; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36918285987"
+        },
+        {
+          "check": "CHECK-03-follow",
+          "commit": "702a3525dfe900c93ca878a83f9cd44b9b3643c7",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of cf90600; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36918285987"
         }
       ],
       "tasks": [
@@ -2418,6 +2466,22 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, repair leg FAIL: functional finding, NotReady streak) — PR #144 merge revision of 67fa134; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36914077401"
+        },
+        {
+          "check": "CHECK-04-follow",
+          "commit": "702a3525dfe900c93ca878a83f9cd44b9b3643c7",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of cf90600; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36918285987"
+        },
+        {
+          "check": "CHECK-04-eligibility",
+          "commit": "702a3525dfe900c93ca878a83f9cd44b9b3643c7",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of cf90600; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36918285987"
         }
       ],
       "tasks": [
@@ -3020,6 +3084,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, repair leg FAIL: functional finding, NotReady streak) — PR #144 merge revision of 67fa134; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36914077401"
+        },
+        {
+          "check": "CHECK-06",
+          "commit": "702a3525dfe900c93ca878a83f9cd44b9b3643c7",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of cf90600; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36918285987"
         }
       ],
       "tasks": [
@@ -3059,7 +3131,7 @@
       ],
       "residual_risks": [
         "Parallel string lists conflate observations; nodeName is unused; Ready does not prove data health.",
-        "FINDING 2026-10-02 (CI 36914077401, functional, fixed CI pending): the NotReady streak that turns a present-but-NotReady pod into a dead node was counted regardless of the node's state. A node is NotReady for its whole Prepare/reconstruction (sync-gated readiness), so it carried a long streak and was declared dead in the very pass it became Active, before its pod could observe the activation. Seen in prepare-evidence: PREPARE-REPAIR activated the slave, the wall-clock grace ended 124 s in, and the next pass failed the slave over (it was masked before by the longer cycle-based grace and by the breaker tripping at 1 of 2). Fix: K8sReconciler.unreadyStreaks counts only while the node is an Active master/slave in the committed map; a Prepare node's streak restarts at 0. Three unit cases."
+        "FINDING 2026-10-02 (CI 36914077401, functional, fixed; PR run 36918285987 green incl. prepare-evidence): the NotReady streak that turns a present-but-NotReady pod into a dead node was counted regardless of the node's state. A node is NotReady for its whole Prepare/reconstruction (sync-gated readiness), so it carried a long streak and was declared dead in the very pass it became Active, before its pod could observe the activation. Seen in prepare-evidence: PREPARE-REPAIR activated the slave, the wall-clock grace ended 124 s in, and the next pass failed the slave over (it was masked before by the longer cycle-based grace and by the breaker tripping at 1 of 2). Fix: K8sReconciler.unreadyStreaks counts only while the node is an Active master/slave in the committed map; a Prepare node's streak restarts at 0. Three unit cases."
       ],
       "code": [
         {
@@ -3510,6 +3582,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, repair leg FAIL: functional finding, NotReady streak) — PR #144 merge revision of 67fa134; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36914077401"
+        },
+        {
+          "check": "CHECK-09",
+          "commit": "702a3525dfe900c93ca878a83f9cd44b9b3643c7",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of cf90600; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36918285987"
         }
       ],
       "tasks": [],
@@ -3945,6 +4025,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; failover-data and replication legs FAIL, harness/test premise) — PR #144 merge revision of 8829657; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36909742559"
+        },
+        {
+          "check": "CHECK-15",
+          "commit": "702a3525dfe900c93ca878a83f9cd44b9b3643c7",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of cf90600; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36918285987"
         }
       ],
       "tasks": [],
@@ -4407,6 +4495,14 @@
           "command": "GitHub Actions workflow_dispatch evaluation=outage-tmpfs suites=continuous-replication-outage-tmpfs (run 36914124394)",
           "result": "pass",
           "report": "docs/reports/2026-10-02-ci-36914124394-outage-tmpfs-e2e.log"
+        },
+        {
+          "check": "CHECK-16",
+          "commit": "702a3525dfe900c93ca878a83f9cd44b9b3643c7",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of cf90600; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36918285987"
         }
       ],
       "tasks": [
@@ -4743,6 +4839,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, repair leg FAIL: functional finding, NotReady streak) — PR #144 merge revision of 67fa134; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36914077401"
+        },
+        {
+          "check": "CHECK-17",
+          "commit": "702a3525dfe900c93ca878a83f9cd44b9b3643c7",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of cf90600; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36918285987"
         }
       ],
       "tasks": [
@@ -5417,6 +5521,22 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, repair leg FAIL: functional finding, NotReady streak) — PR #144 merge revision of 67fa134; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36914077401"
+        },
+        {
+          "check": "CHECK-18",
+          "commit": "702a3525dfe900c93ca878a83f9cd44b9b3643c7",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of cf90600; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36918285987"
+        },
+        {
+          "check": "CHECK-18-purge",
+          "commit": "702a3525dfe900c93ca878a83f9cd44b9b3643c7",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of cf90600; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36918285987"
         }
       ],
       "tasks": [
@@ -5857,6 +5977,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, repair leg FAIL: functional finding, NotReady streak) — PR #144 merge revision of 67fa134; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36914077401"
+        },
+        {
+          "check": "CHECK-20",
+          "commit": "702a3525dfe900c93ca878a83f9cd44b9b3643c7",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of cf90600; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36918285987"
         }
       ],
       "tasks": [

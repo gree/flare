@@ -717,6 +717,14 @@ private def checkBreakerUnavailable (ctx : Ctx) : IO Unit := do
     ((K8sReconciler.circuitBreakerDecision 1 2 { cfg with minUnavailableToTrip := 1 } false).1 == .RecoveryRefill)
   check ctx "breaker floor: two unavailable of four (50%) still trips"
     ((K8sReconciler.circuitBreakerDecision 2 4 cfg false).1 == .RecoveryRefill)
+  let st := cs [node "a" .Master .Active, node "b" .Slave .Prepare, node "c" .Slave .Active]
+  check ctx "NotReady streaks: an Active node's streak grows; a Prepare node's restarts at 0"
+    (K8sReconciler.unreadyStreaks [(k "b", 9), (k "c", 2)] [k "b", k "c"] st == [(k "c", 3)])
+  let stAct := cs [node "a" .Master .Active, node "b" .Slave .Active, node "c" .Slave .Active]
+  check ctx "NotReady streaks: a node that just became Active starts from 1, not from its Prepare streak"
+    (K8sReconciler.unreadyStreaks (K8sReconciler.unreadyStreaks [] [k "b"] st) [k "b"] stAct == [(k "b", 1)])
+  check ctx "NotReady streaks: a node that turns Ready drops out"
+    (K8sReconciler.unreadyStreaks [(k "c", 4)] [] stAct == [])
   check ctx "one long-Down node in eight (12%) does not trip"
     (!trips big [] ((List.range 7).map fun i => k s!"n{i}"))
 

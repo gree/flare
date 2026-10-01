@@ -2986,7 +2986,8 @@
         "Kubernetes observations can lag; unknown input must not become an empty Pod list; readiness is partly circular."
       ],
       "residual_risks": [
-        "Parallel string lists conflate observations; nodeName is unused; Ready does not prove data health."
+        "Parallel string lists conflate observations; nodeName is unused; Ready does not prove data health.",
+        "FINDING 2026-10-02 (CI 36914077401, functional, fixed CI pending): the NotReady streak that turns a present-but-NotReady pod into a dead node was counted regardless of the node's state. A node is NotReady for its whole Prepare/reconstruction (sync-gated readiness), so it carried a long streak and was declared dead in the very pass it became Active, before its pod could observe the activation. Seen in prepare-evidence: PREPARE-REPAIR activated the slave, the wall-clock grace ended 124 s in, and the next pass failed the slave over (it was masked before by the longer cycle-based grace and by the breaker tripping at 1 of 2). Fix: K8sReconciler.unreadyStreaks counts only while the node is an Active master/slave in the committed map; a Prepare node's streak restarts at 0. Three unit cases."
       ],
       "code": [
         {
@@ -3004,6 +3005,10 @@
         {
           "path": "flare_operator/FlareOperator/StateMachine/K8sReconciler.lean",
           "symbol": "unhealthyMastersKept"
+        },
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/K8sReconciler.lean",
+          "symbol": "unreadyStreaks"
         }
       ],
       "call_path": "ListPods -> executeK8sRequest -> PodListResponse -> detectDeadNodesPure -> unhealthyMastersKept -> failover.",

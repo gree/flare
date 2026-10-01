@@ -1125,6 +1125,24 @@ theorem breakerUnavailable_ge_dead (state : FlareClusterState) (deadKeys livePod
     deadKeys.length ≤ (breakerUnavailableKeys state deadKeys livePodKeys).length := by
   simp [breakerUnavailableKeys]
 
+/-- NotReady streaks, counted only while the node is an Active master or
+    slave in the committed map. A node in Prepare is NotReady by design (the
+    readiness probe turns green only once flared's own map says it is
+    active), so its streak restarts at 0 instead of carrying over: before
+    this, a node accumulated a long streak during its reconstruction and was
+    declared dead in the very pass it became Active, before its pod could
+    observe the activation (CI 36914077401: PREPARE-REPAIR activated the
+    slave, the next pass failed it over). Nodes not in the map, proxies and
+    Down nodes are not counted either; dead detection ignores them. -/
+def unreadyStreaks (prev : List (String × Nat)) (notReady : List String)
+    (state : FlareClusterState) : List (String × Nat) :=
+  notReady.filterMap fun k =>
+    match state.lookupNode k with
+    | some n =>
+      if n.state == FlareState.Active && (n.role == FlareRole.Master || n.role == FlareRole.Slave)
+      then some (k, (prev.lookup k).getD 0 + 1) else none
+    | none => none
+
 /-- Pure draining-node detection: a node whose pod is Terminating
     (deletionTimestamp set) but STILL present+alive in the pod list, and still
     an authoritative Master or replica Slave. Unlike `detectDeadNodesPure` this

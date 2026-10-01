@@ -246,6 +246,12 @@ int op_stats::_send_stats(thread_pool* req_tp, thread_pool* other_tp, storage* s
 			_send_stat("repl_wal_applied"                   , rdb->get_repl_wal_applied());
 			_send_stat("repl_wal_skipped"                   , rdb->get_repl_wal_skipped());
 			_send_stat("repl_decode_refused"                , rdb->get_repl_decode_refused());
+			// T17: apply-lock timing (microseconds; maxima since start)
+			_send_stat("repl_apply_lock_count"              , rdb->get_repl_apply_lock_count());
+			_send_stat("repl_apply_lock_hold_us_total"      , rdb->get_repl_apply_lock_hold_us());
+			_send_stat("repl_apply_lock_hold_us_max"        , rdb->get_repl_apply_lock_hold_us_max());
+			_send_stat("repl_apply_lock_wait_us_max"        , rdb->get_repl_apply_lock_wait_us_max());
+			_send_stat("repl_forward_lock_wait_us_max"      , rdb->get_repl_forward_lock_wait_us_max());
 			_send_stat("repl_tombstones_dropped"            , rdb->get_repl_tombstones_dropped());
 			_send_stat("repl_tombstones"                    , rdb->get_repl_tombstones());
 			_send_stat("rocksdb_repl_last_lsn"              , rdb->get_repl_last_lsn());

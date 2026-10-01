@@ -27,6 +27,7 @@
 #include "app.h"
 #include <sys/statvfs.h>
 #include "storage_rocksdb.h"
+#include <time.h>
 
 #include <rocksdb/utilities/checkpoint.h>
 
@@ -42,6 +43,19 @@
 
 namespace gree {
 namespace flare {
+
+// T17 lock timing helpers (diagnostic only).
+static inline uint64_t repl_now_us() {
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
+}
+static inline void repl_atomic_max(uint64_t* p, uint64_t v) {
+	uint64_t cur = __sync_fetch_and_add(p, 0);
+	while (v > cur && !__sync_bool_compare_and_swap(p, cur, v)) {
+		cur = __sync_fetch_and_add(p, 0);
+	}
+}
 
 // {{{ reserved keys
 // Keys used by the WAL replication subsystem for per-slave metadata.
@@ -100,6 +114,11 @@ storage_rocksdb::storage_rocksdb(
 	_repl_wal_applied(0),
 	_repl_wal_skipped(0),
 	_repl_decode_refused(0),
+	_repl_apply_lock_count(0),
+	_repl_apply_lock_hold_us(0),
+	_repl_apply_lock_hold_us_max(0),
+	_repl_apply_lock_wait_us_max(0),
+	_repl_forward_lock_wait_us_max(0),
 	_repl_tombstones_dropped(0),
 	_wal_sync_success(0),
 	_wal_sync_lsn_purged(0),
@@ -2365,7 +2384,9 @@ storage_rocksdb::apply_outcome storage_rocksdb::apply_forwarded_change(const str
 	if (is_reserved_key(e.key)) {
 		return apply_refused_session;
 	}
+	const uint64_t fw0 = repl_now_us();
 	pthread_rwlock_rdlock(&this->_repl_apply_lock);
+	repl_atomic_max(&this->_repl_forward_lock_wait_us_max, repl_now_us() - fw0);
 	pthread_rwlock_rdlock(&this->_mutex_wholelock);
 	const int mutex_index = e.get_key_hash_value(hash_algorithm_murmur) % this->_mutex_slot_size;
 	pthread_rwlock_wrlock(&this->_mutex_slot[mutex_index]);
@@ -2665,7 +2686,10 @@ int storage_rocksdb::apply_wal_batch(const string& source_epoch, const string& i
 		return -1;
 	}
 
+	const uint64_t lk0 = repl_now_us();
 	pthread_rwlock_wrlock(&this->_repl_apply_lock);
+	const uint64_t lk1 = repl_now_us();
+	repl_atomic_max(&this->_repl_apply_lock_wait_us_max, lk1 - lk0);
 	pthread_rwlock_rdlock(&this->_mutex_wholelock);
 
 	int rc = -1;
@@ -2803,6 +2827,12 @@ int storage_rocksdb::apply_wal_batch(const string& source_epoch, const string& i
 	}
 
 	pthread_rwlock_unlock(&this->_mutex_wholelock);
+	{
+		const uint64_t held = repl_now_us() - lk1;
+		this->_repl_apply_lock_count.incr();
+		this->_repl_apply_lock_hold_us.add(held);
+		repl_atomic_max(&this->_repl_apply_lock_hold_us_max, held);
+	}
 	pthread_rwlock_unlock(&this->_repl_apply_lock);
 
 	if (rc == 0) {

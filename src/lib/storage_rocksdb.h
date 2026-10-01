@@ -128,6 +128,14 @@ protected:
 	AtomicCounter _repl_wal_applied;
 	AtomicCounter _repl_wal_skipped;
 	AtomicCounter _repl_decode_refused;
+	// T17 (2026-10-02): _repl_apply_lock hold and wait times, diagnostic
+	// only. The follower applies a WAL batch holding the lock EXCLUSIVELY;
+	// forwarded (live) writes take it SHARED and wait while a batch applies.
+	AtomicCounter _repl_apply_lock_count;
+	AtomicCounter _repl_apply_lock_hold_us;
+	uint64_t _repl_apply_lock_hold_us_max;
+	uint64_t _repl_apply_lock_wait_us_max;
+	uint64_t _repl_forward_lock_wait_us_max;
 	AtomicCounter _repl_tombstones_dropped;
 	// Resume point for the chunked tombstone sweep.
 	string _tombstone_sweep_cursor;
@@ -411,6 +419,11 @@ public:
 	uint64_t get_repl_wal_applied()       { return this->_repl_wal_applied.fetch(); }
 	uint64_t get_repl_wal_skipped()       { return this->_repl_wal_skipped.fetch(); }
 	uint64_t get_repl_decode_refused()    { return this->_repl_decode_refused.fetch(); }
+	uint64_t get_repl_apply_lock_count()   { return this->_repl_apply_lock_count.fetch(); }
+	uint64_t get_repl_apply_lock_hold_us() { return this->_repl_apply_lock_hold_us.fetch(); }
+	uint64_t get_repl_apply_lock_hold_us_max()   { return __sync_fetch_and_add(&this->_repl_apply_lock_hold_us_max, 0); }
+	uint64_t get_repl_apply_lock_wait_us_max()   { return __sync_fetch_and_add(&this->_repl_apply_lock_wait_us_max, 0); }
+	uint64_t get_repl_forward_lock_wait_us_max() { return __sync_fetch_and_add(&this->_repl_forward_lock_wait_us_max, 0); }
 	uint64_t get_repl_tombstones_dropped(){ return this->_repl_tombstones_dropped.fetch(); }
 
 	int apply_batch(const rocksdb::WriteBatch& batch);

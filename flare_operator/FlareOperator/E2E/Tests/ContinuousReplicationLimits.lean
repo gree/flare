@@ -763,6 +763,7 @@ def sustainedSuite : TestSuite := {
           let drainS := ((← IO.monoMsNow) - t0) / 1000
           let mRc1 ← c.restartCount mPod
           IO.eprintln s!"# sustained summary: {String.intercalate " | " verdicts}; drained after the load stopped={drained} in {drainS}s; master RSS {rss0}→{(← c.rssKb mPod).getD 0} kB; WAL {(← c.walKb mPod).getD 0} kB; data {(← c.dataKb mPod).getD 0} kB; items master={← c.currItems mIp} replica={← c.currItems sIp}; master restarts {mRc0}→{mRc1}; reconstruction_started {recon0}→{(← c.statNat sIp "reconstruction_started").getD 0}; wal_applied={← c.statNat sIp "repl_wal_applied"} wal_skipped={← c.statNat sIp "repl_wal_skipped"} forward_applied={← c.statNat sIp "repl_forward_applied"}"
+          IO.eprintln s!"# T17 apply lock on the replica: batches={(← c.statNat sIp "repl_apply_lock_count").getD 0} hold total={(← c.statNat sIp "repl_apply_lock_hold_us_total").getD 0}us hold max={(← c.statNat sIp "repl_apply_lock_hold_us_max").getD 0}us exclusive-acquire wait max={(← c.statNat sIp "repl_apply_lock_wait_us_max").getD 0}us forwarded-write wait max={(← c.statNat sIp "repl_forward_lock_wait_us_max").getD 0}us"
           if mRc1 != mRc0 then return .fail "the master restarted during the load"
           if (← c.statNat sIp "reconstruction_started").getD 0 != recon0 then return .fail "a reconstruction ran during the load"
           if !drained then return .fail "the backlog did not drain within 20 min after the load stopped"

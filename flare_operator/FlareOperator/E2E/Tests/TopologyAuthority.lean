@@ -615,6 +615,62 @@ def suite : TestSuite := {
                 | .ok _ => return .fail "topology check flapped"
               return .pass },
 
+    { name := "SAF-09: the Lease is deleted and the operator replaced; the new leader's generation is above the persisted record's even though the Lease count restarted, and its maps are accepted"
+      run := do
+        let settled ← waitForCondition "topology applied before the generation test" 240 do
+          return (← topologyApplied).toOption.isSome
+        if !settled then return .fail "precondition: topology not applied before the test"
+        let persistedVersion : IO (Option Nat) := do
+          match ← kubectlGetJsonpath "configmap" s!"{cfg.name}-node-map" cfg.«namespace» "{.data.nodeMap}" with
+          | .ok d => return (d.splitOn "\n").findSome? fun l =>
+              if l.startsWith "version=" then (l.drop "version=".length).trim.toNat? else none
+          | .error _ => return none
+        match ← persistedVersion with
+        | none => return .fail "precondition: no persisted node-map version"
+        | some vP =>
+        let ips ← podIps
+        let before ← ips.mapM fun (_, ip) => flaredStat ip "node_map_version"
+        IO.eprintln s!"# persisted version {vP} (generation {vP / 4294967296}); pods at {before}"
+        let opPods0 ← getPodNames s!"app={cfg.operatorName}" cfg.«namespace»
+        -- Delete the Lease and replace the operator: the new process finds no
+        -- Lease, creates one, and its Lease count starts again.
+        discard <| kubectl ["delete", "lease", leaseName, "-n", cfg.«namespace»]
+        discard <| kubectl ["delete", "pod", "-n", cfg.«namespace», "-l", s!"app={cfg.operatorName}", "--wait=false"]
+        let replaced ← waitForCondition "the operator pod is replaced and the old one is gone" 240 do
+          let now ← getPodNames s!"app={cfg.operatorName}" cfg.«namespace»
+          return !now.isEmpty && !now.any (opPods0.contains ·)
+        if !replaced then return .fail "precondition: the operator pod was not replaced"
+        let genLine : IO (Option String) := do
+          let log ← kubectlLogsLabel s!"app={cfg.operatorName}" cfg.«namespace» 3000
+          return ((log.splitOn "\n").find? (containsSubstr · "leadership generation ")).map String.trim
+        let logged ← waitForCondition "the new leader logs its generation" 180 do
+          return (← genLine).isSome
+        let line := (← genLine).getD ""
+        IO.eprintln s!"# {line}"
+        if !logged then return .fail "the new leader never logged its generation"
+        let num := fun (key : String) =>
+          ((line.splitOn key).getLast?.map (fun r => r.takeWhile Char.isDigit)).bind (·.toNat?)
+        match num "leadership generation ", num "lease transitions " with
+        | some g, some t =>
+          if g ≤ vP / 4294967296 then
+            return .fail s!"the new leader's generation {g} is not above the persisted generation {vP / 4294967296} (lease transitions {t}): it could rank below maps already issued"
+          -- Its maps must actually be accepted: a change made now reaches
+          -- every pod at a version above what they held.
+          match ← triggerTopologyChange 45 with
+          | .error e => return .fail s!"could not trigger a topology change: {e}"
+          | .ok _ => pure ()
+          let accepted ← waitForCondition "every pod accepts the new leader's map" 180 do
+            let now ← ips.mapM fun (_, ip) => flaredStat ip "node_map_version"
+            return now.all fun v => match v with | some n => n ≥ g * 4294967296 | none => false
+          let after ← ips.mapM fun (_, ip) => flaredStat ip "node_map_version"
+          IO.eprintln s!"# generation {g} (lease transitions {t}); pods {before} -> {after}"
+          if !accepted then return .fail s!"the pods did not accept the new leader's maps: {before} -> {after}"
+          let back ← waitForCondition "topology applied under the new leader" 240 do
+            return (← topologyApplied).toOption.isSome
+          if !back then return .fail "topology not applied under the new leader"
+          return .pass
+        | _, _ => return .fail s!"could not parse the generation line: {line}" },
+
     { name := "same-name Pod replacement during the topology probe: the probe is held after its first UID read, the pod is replaced under the same name, and the reply is judged Unknown (never current or behind); the new pod is later observed current"
       run := do
         let settled ← waitForCondition "topology applied before the replacement test" 240 do

@@ -70,6 +70,11 @@ structure Reading where
   nodeTime : Option Nat := none
   /-- repl_follow_last_reason. -/
   lastReason : Option String := none
+  /-- reconstruction_boot_id: random per flared process, never persisted. -/
+  bootId : Option Nat := none
+  /-- Set by `markProcessChanges`: this reply comes from a different flared
+      process than the previous pass's reply for the same node. -/
+  processChanged : Bool := false
   deriving Repr, BEq
 
 /-- The partition master's own `stats` reply, typed. -/
@@ -282,6 +287,29 @@ private def Acc.unknownFor (a : Acc) (key why : String) : Acc :=
   { a with unproven := a.unproven ++ [key], readWithheld := a.readWithheld ++ [key],
            judged := a.judged ++ [{ key, read := .unknown why, promote := .unknown why }] }
 
+/-- SAF-08: bind evidence to the process that produced it. The stats reply
+    names its flared process (`reconstruction_boot_id`, random per process).
+    A reply whose process differs from the previous pass's reply for the
+    same node is marked `processChanged`, and `classify` then treats it as
+    Unknown for that pass: a replaced or restarted process needs a second,
+    consistent reading before it can serve reads or be promoted. This is
+    the per-pass counterpart of the topology probe's UID bracket, without
+    the extra API calls per replica per pass. A node seen for the first time
+    (prev none, e.g. after an operator restart) is not marked. Returns the
+    marked readings and the boot memory for the next pass (unprobed nodes
+    keep their last value). -/
+def markProcessChanges (prev : List (String × Nat))
+    (nodes : List (String × Int × Option Reading))
+    : List (String × Int × Option Reading) × List (String × Nat) :=
+  let marked := nodes.map fun (k, part, r?) =>
+    (k, part, r?.map fun r =>
+      match prev.lookup k, r.bootId with
+      | some b0, some b => { r with processChanged := b0 != b }
+      | _, _ => r)
+  let seen := nodes.filterMap fun (k, _, r?) => (r?.bind (·.bootId)).map (k, ·)
+  let kept := prev.filter fun (k, _) => !(seen.any (·.1 == k)) && nodes.any (·.1 == k)
+  (marked, seen ++ kept)
+
 /-- Classify one pass. `nodes` are the (key, partition, reading-if-probed)
     of every non-Down Slave; `masters` the master readings by partition. -/
 def classify (b : Bounds) (mem : ModeMemory)
@@ -306,6 +334,9 @@ def classify (b : Bounds) (mem : ModeMemory)
         else a
       | some false => a
       | some true =>
+        if r.processChanged then
+          a.unknownFor key "the flared process changed since the previous pass (boot id); a new process needs a second reading"
+        else
         let rv := judge .read b r m
         let pv := judge .promote b r m
         let unfit := unfitReason r m.epoch
@@ -327,6 +358,8 @@ def classify (b : Bounds) (mem : ModeMemory)
 /-- Per-tick tracker kept by Main between passes. -/
 structure Tracker where
   mem : ModeMemory := []
+  /-- Last boot id seen per node (`markProcessChanges`). -/
+  boots : List (String × Nat) := []
   tick : Nat := 0
   classified : Classified := {}
   /-- Last logged summary per node, to log only changes. -/

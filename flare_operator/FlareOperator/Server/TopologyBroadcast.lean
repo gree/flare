@@ -41,6 +41,53 @@ def pendingTopologyAfterAttempt (previous : Option Nat) (version : Nat)
     (confirmed : Bool) : Option Nat :=
   if confirmed then none else some (previous.getD version)
 
+/-! ## Durable authority (SAF-09)
+
+The broadcast version carries the leadership generation in its high 32 bits
+(`generation * 2^32 + counter`). flared ignores any map older than the one it
+holds, so a recipient that has heard generation g rejects every map of a
+generation below g. That fence fails if a new leader can take a LOWER
+generation than one already issued, and it could: the generation came from the
+Lease's `transitions`, which restarts from 0 when the Lease is deleted and
+recreated. A deposed leader still inside its check/send window then outranks
+the new leader at every node that heard it.
+
+The operator-owned durable record is the persisted node map (`{cr}-node-map`):
+it holds the highest version this cluster's operators have committed. A new
+leader process therefore takes a generation strictly above that record's,
+whatever the Lease says, and a version is sent only once it is persisted, so
+the record is never behind what any node has seen. Recipients' reported
+versions are NOT used: an arbitrary recipient's high number is not authority. -/
+
+def generationUnit : Nat := 4294967296
+
+/-- Generation for a new leader process. -/
+def startupGeneration (leaseTransitions resumedVersion : Nat) : Nat :=
+  max leaseTransitions (resumedVersion / generationUnit + 1)
+
+/-- First version of a new leader process. -/
+def startupVersion (leaseTransitions resumedVersion : Nat) : Nat :=
+  startupGeneration leaseTransitions resumedVersion * generationUnit
+
+/-- Every version a new leader issues is above every persisted version, so
+    no map it sends can be older than one an earlier leader committed —
+    whatever happened to the Lease. -/
+theorem startupVersion_gt_resumed (t r : Nat) : r < startupVersion t r := by
+  unfold startupVersion startupGeneration generationUnit
+  have h : r < (r / 4294967296 + 1) * 4294967296 := by
+    have := Nat.lt_mul_div_succ r (show 0 < 4294967296 by decide)
+    rw [Nat.mul_comm] at this
+    exact this
+  exact Nat.lt_of_lt_of_le h (Nat.mul_le_mul_right _ (Nat.le_max_right _ _))
+
+/-- A new leader's generation also never goes below the Lease's own count. -/
+theorem startupGeneration_ge_lease (t r : Nat) : t ≤ startupGeneration t r :=
+  Nat.le_max_left _ _
+
+/-- A version may be sent only when the durable record already holds it. -/
+def persistedCovers (persistedVersion sendVersion : Nat) : Bool :=
+  sendVersion ≤ persistedVersion
+
 /-- Why a reconcile pass pushes the committed map. The pass sends exactly
     when `any` holds; the record is logged with every send so a test (and an
     incident reader) can tell WHICH reason carried a given push instead of

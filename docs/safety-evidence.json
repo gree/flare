@@ -367,7 +367,7 @@
         "A check before sending cannot close the check/send race: the lease can be lost between the read and the first packet, or while the broadcast is in flight.",
         "Recipient-side version fencing only protects a node that has ALREADY observed the newer generation; a node that missed the new leader's broadcast will accept an older leader's map. Per-node applied-generation tracking is SAF-09.",
         "The post-send lease re-read records that the race occurred; it cannot retract what was sent.",
-        "Observed while building CHECK-01, not asserted on: after the lease is deleted and the SAME process re-acquires it, the operator was seen broadcasting a LOWER version than nodes already held, which their fencing rejects. The manipulation is cruder than a real takeover; treat as a lead for SAF-09.",
+        "Observed while building CHECK-01, not asserted on: after the lease is deleted and the SAME process re-acquires it, the operator was seen broadcasting a LOWER version than nodes already held, which their fencing rejects. The manipulation is cruder than a real takeover; treat as a lead for SAF-09. ADDRESSED 2026-10-02 (CI pending): the generation came from Lease.transitions, which restarts when the Lease is deleted; a new leader now takes max(transitions, persisted generation + 1) and sends only versions already persisted (CHECK-01-generation).",
         "The stop position is a test seam. It is inert without the environment variable and bounded at 120s, but it is production code that a misconfiguration could delay one broadcast with.",
         "A suppressed send is retried only by a process that survives the suppression (lease read failure, momentarily foreign holder): the pending flag is in memory, and a confirmed lease loss ends the process, after which the next leader republishes from its own committed state. The retry test proves the flag was set by the withheld pass and consumed by the pass that published (that pass names the suppressed version); it does not prove the flag was NECESSARY for that send, because the committed version usually moves by itself within a pass.",
         "Liveness (/healthz) is process-alive only and readiness treats a non-leader as ready. The operator that logged 'LOST LEASE -- exiting' and then hung — the Lean runtime waits for the never-ending server tasks before reporting the uncaught error — was therefore never restarted; that defect is fixed (IO.Process.exit) and CHECK-01 asserts the restart count moves, but a different stall of the main loop would still pass both probes.",
@@ -377,7 +377,8 @@
         "Startup republish is tested only with the topology audit OFF (test seam FLARE_TEST_TOPOLOGY_AUDIT_OFF, inert when unset). With the audit on, a fresh process has two independent reasons to republish to a behind pod (startup seed, audit verdict=behind); the test shows the seed suffices, not how the two interact.",
         "The send-reason record (broadcast trigger: ...) is logged with every send and is the attribution evidence; it is derived from the same four values the send condition uses (BroadcastTriggers.any), so it cannot disagree with the branch taken, but it is still a log line rather than a wire capture.",
         "FINDING 2026-10-01 (CI 36831110279, not changed here): the persisted node map (serializeNodeMap) carries no read balance, so a reloaded map has every node at balance 100 until the first reconcile pass re-applies spec.readBalance and the SAF-10c read withholding. The operator answers node add from that in-memory map, and after a takeover the reloaded version is raised to the new generation base, newer than any pod holds. A flared pod that boots in that window adopts a map in which slaves, including WAL followers withheld from reads, carry balance 100, until the first pass pushes the corrected map seconds later. Running pods are not affected: flared requests the map only at boot. Side effect: with any slave weight other than 100, the first pass after a restart always advances the version, so the startup seed is rarely the only republish reason in practice. FIX (2026-10-01, CI pending): serializeNodeMap now persists each node's committed balance (balance=, including the SAF-10c withholding) and parseNodeMapLine restores it; a legacy line without the token loads as master 100 / others 0. Proved by nodeMapVersion_roundtrip (balances 100/0/25) and legacy_line_balance_fallback. The startup-republish E2E uses slave weight 25 again, so it fails if the reload changes the map.",
-        "Same-name replacement is staged E2E only for the topology audit probe (UID-bracketed). The follow-evidence stats reads (read/promotion eligibility) are NOT UID-bracketed: they are per-pass and by pod name, so a reply from a pod replaced right after the read is used for that pass. The flared-side local read guard (follow_allows_local_read) and the pass-by-pass re-evaluation bound the effect; a UID bracket there is a possible follow-up, not done."
+        "Same-name replacement is staged E2E only for the topology audit probe (UID-bracketed). The follow-evidence stats reads (read/promotion eligibility) are NOT UID-bracketed: they are per-pass and by pod name, so a reply from a pod replaced right after the read is used for that pass. The flared-side local read guard (follow_allows_local_read) and the pass-by-pass re-evaluation bound the effect; a UID bracket there is a possible follow-up, not done. ADDRESSED 2026-10-02 (CI pending) without per-read UID calls: follow-evidence replies carry the flared process boot id; a reply whose process differs from the previous pass is Unknown for that pass (FollowEvidence.markProcessChanges). A replacement within one pass (between the read and the commit) is still not detected.",
+        "SAF-09 scope (2026-10-02): the durable authority is the operator's own persisted node map. If that ConfigMap is deleted or restored from an older copy, a new leader again starts from the Lease count alone; the check/send race of a deposed leader inside one pass (already a residual) is unchanged; per-node applied generation is observed by the topology audit, not persisted."
       ],
       "code": [
         {
@@ -407,6 +408,10 @@
         {
           "path": "flare_operator/FlareOperator/K8s/FlareCluster.lean",
           "symbol": "serializeNodeMap"
+        },
+        {
+          "path": "flare_operator/FlareOperator/Server/TopologyBroadcast.lean",
+          "symbol": "startupVersion"
         }
       ],
       "call_path": "runReconcileFSMLoop -> commitClusterState -> (post-commit) lease check -> broadcastTopologyToAllPods. The FSM BroadcastTopology effect, which sent the unmerged map without a leadership check, has been removed; the effect constructor no longer exists.",
@@ -473,6 +478,29 @@
             {
               "path": "flare_operator/FlareOperator/Main.lean",
               "symbol": "pendingBroadcastRef"
+            }
+          ]
+        },
+        {
+          "id": "CHECK-01-generation",
+          "kind": "scenario",
+          "procedure": "SAF-09 durable authority. Proofs startupVersion_gt_resumed (a new leader's first version is above every persisted version) and startupGeneration_ge_lease; flare_unit cases for a recreated Lease (transitions 0), a Lease count above the persisted generation, equal counts, a fresh cluster, and persistedCovers. E2E topology-authority test 'SAF-09: the Lease is deleted and the operator replaced': read the persisted node-map version, delete the Lease and the operator pod, require the new leader's logged generation to exceed the persisted generation although its Lease count restarted, then require a topology change to reach every pod at a version at or above generation*2^32 and the topology to be applied. The persist fence (no send above the durable record; a failed write suppresses the send and keeps it pending) is exercised by every send; its failure branch is unit-level only.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/Server/TopologyBroadcast.lean",
+              "symbol": "startupGeneration"
+            },
+            {
+              "path": "flare_operator/FlareOperator/Main.lean",
+              "symbol": "persistedVersionRef"
+            },
+            {
+              "path": "flare_operator/FlareOperator/UnitTests.lean",
+              "symbol": "checkTopologyDelivery"
+            },
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/TopologyAuthority.lean",
+              "symbol": "suite"
             }
           ]
         }
@@ -1681,7 +1709,7 @@
         {
           "id": "CHECK-04-eligibility",
           "kind": "scenario",
-          "procedure": "flare_unit pins FollowEvidence.judge (unreadable → unknown; mode off → notInMode; not following, another epoch, stale observation, lag over the bound, applied ahead of the head → ineligible; unreadable master → unknown; lag at the bound eligible; read vs promotion bounds), unfitReason, classify (ranked highest-applied first; unproven vs unfit; withheld reads; mode memory; remembered-in-mode unreadable/not-probed → unproven and withheld, never unfit; no master reading → nothing proven), the probe policy, shapePromotionCandidates (unfit removed, ranked first, unproven last, nodeMap untouched, findActiveSuccessor sees the order, all-excluded leaves no successor), withholdReads (slave 0, master/Down/unlisted untouched, keys preserved) and the masterless refill's exclusion. E2E (2026-10-01, CI pending): continuous-replication test 'operator restart while the replica's stats cannot be read' sets spec slave=50 and waits for the following replica to be served, revokes the operator's pods/exec on the replica, replaces the operator pod, and requires the fresh process to withhold the replica (committed balance 0), the follower to keep following, the master unchanged and no demotion; after pods/exec is restored the replica must be served at 50 again with no reconstruction and the same pod UID. E2E (2026-10-01, CI pending), non-follow-mode recovery: read-balance test 'operator restart in a cluster without follow mode' replaces the operator with spec slave=100 and a standby, and requires the fresh operator to log its stats probe, every regular slave to be back at 100 and the standby at 0 within 120 s, and no follow-eligibility decision in that cluster.",
+          "procedure": "flare_unit pins FollowEvidence.judge (unreadable → unknown; mode off → notInMode; not following, another epoch, stale observation, lag over the bound, applied ahead of the head → ineligible; unreadable master → unknown; lag at the bound eligible; read vs promotion bounds), unfitReason, classify (ranked highest-applied first; unproven vs unfit; withheld reads; mode memory; remembered-in-mode unreadable/not-probed → unproven and withheld, never unfit; no master reading → nothing proven), the probe policy, shapePromotionCandidates (unfit removed, ranked first, unproven last, nodeMap untouched, findActiveSuccessor sees the order, all-excluded leaves no successor), withholdReads (slave 0, master/Down/unlisted untouched, keys preserved) and the masterless refill's exclusion. E2E (2026-10-01, CI pending): continuous-replication test 'operator restart while the replica's stats cannot be read' sets spec slave=50 and waits for the following replica to be served, revokes the operator's pods/exec on the replica, replaces the operator pod, and requires the fresh process to withhold the replica (committed balance 0), the follower to keep following, the master unchanged and no demotion; after pods/exec is restored the replica must be served at 50 again with no reconstruction and the same pod UID. E2E (2026-10-01, CI pending), non-follow-mode recovery: read-balance test 'operator restart in a cluster without follow mode' replaces the operator with spec slave=100 and a standby, and requires the fresh operator to log its stats probe, every regular slave to be back at 100 and the standby at 0 within 120 s, and no follow-eligibility decision in that cluster. SAF-08 (2026-10-02): flare_unit cases for markProcessChanges — first sighting not marked; a changed boot id makes an eligible follower Unknown (withheld, unproven, not unfit); the second consistent reading restores eligibility; unprobed nodes keep their boot id; a node out of the mode keeps the legacy policy.",
           "references": [
             {
               "path": "flare_operator/FlareOperator/UnitTests.lean",
@@ -1698,6 +1726,10 @@
             {
               "path": "flare_operator/FlareOperator/E2E/Tests/ReadBalance.lean",
               "symbol": "suite"
+            },
+            {
+              "path": "flare_operator/FlareOperator/StateMachine/FollowEvidence.lean",
+              "symbol": "markProcessChanges"
             }
           ]
         },

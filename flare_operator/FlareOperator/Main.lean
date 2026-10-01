@@ -212,7 +212,8 @@ private def followReadingFrom (out : String) : FollowEvidence.Reading :=
     sourceObservedAt := statNat out "repl_source_lsn_observed_at",
     lastProgressAt := statNat out "repl_last_progress_at",
     nodeTime := statNat out "time",
-    lastReason := statStr out "repl_follow_last_reason" }
+    lastReason := statStr out "repl_follow_last_reason",
+    bootId := statNat out "reconstruction_boot_id" }
 
 private def masterReadingFrom (out : String) : FollowEvidence.MasterReading :=
   { complete := statsReplyComplete out,
@@ -231,6 +232,12 @@ private def followBoundsFromEnv : IO FollowEvidence.Bounds := do
     last logged judgement per node. -/
 instance : Inhabited FollowEvidence.Tracker := ⟨{}⟩
 initialize followRef : IO.Ref FollowEvidence.Tracker ← IO.mkRef {}
+
+/-- SAF-09: the highest node-map version known to be in the persisted
+    `{cr}-node-map` ConfigMap (the durable authority record). Set from the
+    reload at startup and after every successful write; a version above it
+    is persisted before it is sent (TopologyBroadcast.persistedCovers). -/
+initialize persistedVersionRef : IO.Ref Nat ← IO.mkRef 0
 
 /-- Persist the replica-repair ledger when it changed (SC-03 / SAF-05) and
     keep the pending gauge current. Loud on failure: an unpersisted ledger is
@@ -710,11 +717,12 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
       let probeMs := (← IO.monoMsNow) - probeT0
       if probed > 0 || probeMs > 1000 then
         IO.eprintln s!"[flare-operator] continuous-replication probe: {probed} stats read(s) in {probeMs}ms (tick {tr.tick}; in-mode remembered: {(tr.mem.filter (·.2)).length}, out-of-mode remembered: {(tr.mem.filter (!·.2)).length})"
-      let (cls, mem', judged) := FollowEvidence.classify bounds tr.mem slaveReadings masterReadings
+      let (markedReadings, boots') := FollowEvidence.markProcessChanges tr.boots slaveReadings
+      let (cls, mem', judged) := FollowEvidence.classify bounds tr.mem markedReadings masterReadings
       let (changed, summaries) := FollowEvidence.changedSummaries tr.lastSummary judged
       for (k, summary) in changed do
         IO.eprintln s!"[flare-operator] CONTINUOUS REPLICATION eligibility {k}: {summary}"
-      followRef.set { mem := mem', tick := tr.tick + 1, classified := cls, lastSummary := summaries }
+      followRef.set { mem := mem', boots := boots', tick := tr.tick + 1, classified := cls, lastSummary := summaries }
       pure (.PodListResponse podKeys (Bridge.podZones pods nodeZones) termKeys dataKeys unhealthyKeys heldKeys
               cls.unfit cls.unproven cls.ranked)
   | .PatchService =>
@@ -744,7 +752,9 @@ private def executeEffects (effects : List K8sReconciler.FlareEffect)
       -- Write node map to observability ConfigMap (Main.lean:174-178)
       let cmName := s!"{crName}-node-map"
       match ← updateFlaredConfigMap cmName ns data with
-      | .ok () => pure ()
+      | .ok () =>
+        let v := (FlareClusterState.fromNodeMapData data).nodeMapVersion
+        persistedVersionRef.modify (max v)
       | .error e => IO.eprintln s!"[flare-operator] warning: failed to update ConfigMap: {e}"
 
     | .SendSighup _podNames =>
@@ -1277,7 +1287,23 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
       | .error e =>
         IO.eprintln s!"[flare-operator] lease fence: getLease failed ({e}); skipping broadcast this tick"
         pure false
-    if stillLeader then
+    -- SAF-09 persist fence: never send a version the durable record does
+    -- not hold, so a later leader always starts above anything a node has
+    -- seen. Normally the FSM wrote it earlier in this pass; this write only
+    -- happens when that one failed or the version moved after it.
+    let persisted ← if !stillLeader then pure true
+      else if persistedCovers (← persistedVersionRef.get) finalVersion then pure true
+      else
+        match ← updateFlaredConfigMap s!"{crName}-node-map" ns (serializeNodeMap finalState) with
+        | .ok () =>
+          persistedVersionRef.modify (max finalVersion)
+          pure true
+        | .error e =>
+          IO.eprintln s!"[flare-operator] PERSIST FENCE: could not persist v{finalVersion} ({e}); suppressing the broadcast, held for retry"
+          pure false
+    if !persisted then
+      pendingBroadcastRef.modify fun p => match p with | some v => some v | none => some finalVersion
+    else if stillLeader then
       -- Logged whenever a suppressed send is outstanding, whether or not
       -- the version also moved: the published map subsumes the withheld
       -- one either way, and the line names the withheld version so a test
@@ -2022,15 +2048,22 @@ def main (args : List String) : IO Unit := do
   -- landing on a dying leader) loses its ability to influence flared maps
   -- — no wire-format change, old flared gets the fence for free. The low
   -- 32 bits allow ~95 years of ticks per generation before overflow.
-  match ← getLease leaseName ns with
-  | .error e =>
-    IO.eprintln s!"[flare-operator] WARNING: could not read lease generation ({e}) — broadcasts stay in the resumed version space"
-  | .ok lease =>
-    let genBase := lease.transitions * 4294967296
-    let cur ← stateRef.get
-    if genBase > cur.nodeMapVersion then
-      stateRef.set { cur with nodeMapVersion := genBase }
-    IO.eprintln s!"[flare-operator] leadership generation {lease.transitions} — broadcast versions fenced at ≥ {max genBase cur.nodeMapVersion}"
+  --
+  -- SAF-09: the generation is also kept strictly above the persisted
+  -- record's (startupGeneration). `transitions` restarts from 0 when the
+  -- Lease is deleted, so on its own it let a new leader rank BELOW versions
+  -- an earlier leader had already issued.
+  let resumed := (← stateRef.get).nodeMapVersion
+  persistedVersionRef.set resumed
+  let transitions ← match ← getLease leaseName ns with
+    | .error e =>
+      IO.eprintln s!"[flare-operator] WARNING: could not read lease generation ({e}); generation taken from the persisted record alone"
+      pure 0
+    | .ok lease => pure lease.transitions
+  let gen := startupGeneration transitions resumed
+  let cur ← stateRef.get
+  stateRef.set { cur with nodeMapVersion := startupVersion transitions resumed }
+  IO.eprintln s!"[flare-operator] leadership generation {gen} (lease transitions {transitions}, persisted generation {resumed / generationUnit}) — broadcast versions fenced at ≥ {startupVersion transitions resumed}"
   -- Fetch CRD BEFORE starting TCP server so META returns correct partition-size
   -- from the very first request. Without this, flared nodes connecting early
   -- would get partition-size=1 and operate in single-partition mode permanently.

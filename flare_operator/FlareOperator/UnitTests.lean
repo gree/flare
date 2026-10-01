@@ -553,6 +553,29 @@ def checkFollowClassify (ctx : Ctx) : IO Unit := do
   check ctx "without a master reading nothing is proven: no ranked, following nodes unproven and withheld"
     (cls3.1.ranked == [] && cls3.1.unproven.contains "a" && cls3.1.readWithheld.contains "a"
       && cls3.1.unfit == ["d"])
+  -- SAF-08: a reply from a different flared process than last pass is Unknown.
+  let withBoot := fun (r : FollowEvidence.Reading) (b : Nat) => { r with bootId := some b }
+  let (m1, boots1) := FollowEvidence.markProcessChanges []
+    [("b", 0, some (withBoot (fr "following" 1000) 7))]
+  check ctx "SAF-08: a node seen for the first time is not marked (an operator restart does not withhold everyone)"
+    (m1.all (fun (_, _, r?) => !((r?.map (·.processChanged)).getD false)) && boots1 == [("b", 7)])
+  let (m2, boots2) := FollowEvidence.markProcessChanges boots1
+    [("b", 0, some (withBoot (fr "following" 1000) 8))]
+  let c2 := FollowEvidence.classify fb [("b", true)] m2 [(0, fm)]
+  check ctx "SAF-08: a changed boot id makes an otherwise eligible follower Unknown: withheld and not promotable"
+    (c2.1.readWithheld == ["b"] && c2.1.unproven == ["b"] && c2.1.ranked == [] && c2.1.unfit == [])
+  let (m3, _) := FollowEvidence.markProcessChanges boots2
+    [("b", 0, some (withBoot (fr "following" 1000) 8))]
+  let c3 := FollowEvidence.classify fb [("b", true)] m3 [(0, fm)]
+  check ctx "SAF-08: the second consistent reading of the new process restores eligibility"
+    (c3.1.readWithheld == [] && c3.1.ranked == ["b"])
+  let (_, boots4) := FollowEvidence.markProcessChanges [("b", 8), ("z", 3)]
+    [("b", 0, none)]
+  check ctx "SAF-08: an unprobed node keeps its last boot id; a node no longer listed is forgotten"
+    (boots4 == [("b", 8)])
+  let (m5, _) := FollowEvidence.markProcessChanges [("e", 1)] [("e", 0, some (withBoot frOff 2))]
+  check ctx "SAF-08: a process change of a node out of the mode keeps the legacy policy"
+    (!(FollowEvidence.classify fb [("e", false)] m5 [(0, fm)]).1.readWithheld.contains "e")
   check ctx "probe policy: in the mode every tick; out of the mode every interval; never read: now"
     (FollowEvidence.shouldProbe [("x", true)] "x" 7 30 && !FollowEvidence.shouldProbe [("x", false)] "x" 7 30
       && FollowEvidence.shouldProbe [("x", false)] "x" 60 30 && FollowEvidence.shouldProbe [] "x" 7 30)
@@ -710,6 +733,21 @@ private def checkTopologyDelivery (ctx : Ctx) : IO Unit := do
   check ctx "pending plus any other reason is not attributable to pending alone"
     (!(trig true (some 7) 0 0).pendingOnly && !(trig false (some 7) 1 0).pendingOnly &&
      !(trig false (some 7) 0 1).pendingOnly && !(trig false none 0 0).pendingOnly)
+  let g := FlareOperator.Server.startupGeneration
+  let u := FlareOperator.Server.generationUnit
+  check ctx "SAF-09: a recreated Lease (transitions 0) still yields a generation above the persisted one"
+    (g 0 (2 * u + 9) == 3)
+  check ctx "SAF-09: a Lease count above the persisted generation wins"
+    (g 5 (3 * u + 7) == 5)
+  check ctx "SAF-09: equal Lease count and persisted generation still move up by one"
+    (g 3 (3 * u + 1) == 4)
+  check ctx "SAF-09: a fresh cluster starts at generation 1"
+    (g 0 0 == 1)
+  check ctx "SAF-09: the first version of a new leader is above the persisted version"
+    (FlareOperator.Server.startupVersion 0 (2 * u + 9) > 2 * u + 9)
+  check ctx "SAF-09: a version is sent only when the durable record holds it"
+    (FlareOperator.Server.persistedCovers 10 10 && FlareOperator.Server.persistedCovers 11 10
+      && !FlareOperator.Server.persistedCovers 9 10)
   check ctx "trigger label names every reason"
     ((trig false (some 7) 0 0).label == "versionMoved=false pending=v7 repairHeld=0 activeNotReady=0")
 

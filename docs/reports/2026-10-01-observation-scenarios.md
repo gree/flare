@@ -25,7 +25,7 @@ eligibility, are not bracketed by UID reads. They are re-evaluated every pass
 and bounded by flared's local read guard. Recorded as a residual risk under
 EV-01.
 
-## 2. Operator restart while the replica's stats cannot be read — CI pending
+## 2. Operator restart while the replica's stats cannot be read — PASS (PR run 36877273395, merge rev bff234e)
 
 In continuous-replication, with spec slave=50 and the replica served, the
 operator loses `pods/exec` on the replica and its pod is replaced. The test
@@ -39,7 +39,7 @@ requires:
 
 Registered under CHECK-04-eligibility.
 
-## 3. Read recovery without follow mode — CI pending
+## 3. Read recovery without follow mode — PASS (PR run 36877273395, merge rev bff234e)
 
 In read-balance, with spec slave=100 and a standby, the operator pod is
 replaced. The test requires:
@@ -49,3 +49,18 @@ replaced. The test requires:
 - no follow-eligibility decision appears in that cluster.
 
 Registered under CHECK-04-eligibility.
+
+## CI evidence for 2 and 3 — PR run 36877273395 on 4f0c9b7: all 8 legs, 201 tests PASS
+
+Scenario 2:
+
+    blind fresh operator: replica balance=0 withheld=true; stored 10/10;
+      follower caught up=true; master=cont-repl-nodes-0
+    after restoring pods/exec: balance=50 restored=true;
+      reconstruction_started 2→2; pod uid unchanged
+
+Scenario 3:
+
+    after the operator restart: probed=true; balances
+      rb-test-nodes-0 slave 100, rb-test-nodes-1 master 100,
+      rb-test-nodes-2 (standby) slave 0

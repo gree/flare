@@ -829,6 +829,30 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green, 199 tests) — PR #144 merge revision of bbe9369; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36874157713"
+        },
+        {
+          "check": "CHECK-01",
+          "commit": "bff234eb1f57db28ab5ab5afa0eaa4573d50ffbc",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green, 201 tests) — PR #144 merge revision of 4f0c9b7; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36877273395"
+        },
+        {
+          "check": "CHECK-01-startup",
+          "commit": "bff234eb1f57db28ab5ab5afa0eaa4573d50ffbc",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green, 201 tests) — PR #144 merge revision of 4f0c9b7; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36877273395"
+        },
+        {
+          "check": "CHECK-01-observation",
+          "commit": "bff234eb1f57db28ab5ab5afa0eaa4573d50ffbc",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green, 201 tests) — PR #144 merge revision of 4f0c9b7; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36877273395"
         }
       ],
       "tasks": [
@@ -1385,6 +1409,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green, 199 tests) — PR #144 merge revision of bbe9369; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36874157713"
+        },
+        {
+          "check": "CHECK-03-follow",
+          "commit": "bff234eb1f57db28ab5ab5afa0eaa4573d50ffbc",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green, 201 tests) — PR #144 merge revision of 4f0c9b7; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36877273395"
         }
       ],
       "tasks": [
@@ -1911,6 +1943,22 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green, 199 tests) — PR #144 merge revision of bbe9369; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36874157713"
+        },
+        {
+          "check": "CHECK-04-follow",
+          "commit": "bff234eb1f57db28ab5ab5afa0eaa4573d50ffbc",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green, 201 tests) — PR #144 merge revision of 4f0c9b7; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36877273395"
+        },
+        {
+          "check": "CHECK-04-eligibility",
+          "commit": "bff234eb1f57db28ab5ab5afa0eaa4573d50ffbc",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green, 201 tests) — PR #144 merge revision of 4f0c9b7; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36877273395"
         }
       ],
       "tasks": [
@@ -2448,6 +2496,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green, 199 tests) — PR #144 merge revision of bbe9369; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36874157713"
+        },
+        {
+          "check": "CHECK-06",
+          "commit": "bff234eb1f57db28ab5ab5afa0eaa4573d50ffbc",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green, 201 tests) — PR #144 merge revision of 4f0c9b7; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36877273395"
         }
       ],
       "tasks": [
@@ -2867,6 +2923,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green, 199 tests) — PR #144 merge revision of bbe9369; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36874157713"
+        },
+        {
+          "check": "CHECK-09",
+          "commit": "bff234eb1f57db28ab5ab5afa0eaa4573d50ffbc",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green, 201 tests) — PR #144 merge revision of 4f0c9b7; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36877273395"
         }
       ],
       "tasks": [],
@@ -3631,6 +3695,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green, 199 tests) — PR #144 merge revision of bbe9369; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36874157713"
+        },
+        {
+          "check": "CHECK-16",
+          "commit": "bff234eb1f57db28ab5ab5afa0eaa4573d50ffbc",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green, 201 tests) — PR #144 merge revision of 4f0c9b7; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36877273395"
         }
       ],
       "tasks": [
@@ -3903,6 +3975,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green, 199 tests) — PR #144 merge revision of bbe9369; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36874157713"
+        },
+        {
+          "check": "CHECK-17",
+          "commit": "bff234eb1f57db28ab5ab5afa0eaa4573d50ffbc",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green, 201 tests) — PR #144 merge revision of 4f0c9b7; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36877273395"
         }
       ],
       "tasks": [
@@ -4448,6 +4528,22 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green, 199 tests) — PR #144 merge revision of bbe9369; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36874157713"
+        },
+        {
+          "check": "CHECK-18",
+          "commit": "bff234eb1f57db28ab5ab5afa0eaa4573d50ffbc",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green, 201 tests) — PR #144 merge revision of 4f0c9b7; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36877273395"
+        },
+        {
+          "check": "CHECK-18-purge",
+          "commit": "bff234eb1f57db28ab5ab5afa0eaa4573d50ffbc",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green, 201 tests) — PR #144 merge revision of 4f0c9b7; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36877273395"
         }
       ],
       "tasks": [
@@ -4823,6 +4919,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green, 199 tests) — PR #144 merge revision of bbe9369; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36874157713"
+        },
+        {
+          "check": "CHECK-20",
+          "commit": "bff234eb1f57db28ab5ab5afa0eaa4573d50ffbc",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green, 201 tests) — PR #144 merge revision of 4f0c9b7; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36877273395"
         }
       ],
       "tasks": [

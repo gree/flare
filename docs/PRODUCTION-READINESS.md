@@ -50,7 +50,10 @@ that gap. Record the agreed failure model and RPO/RTO before approval.
   startup republish and same-name Pod replacement independently, including
   stats failures and non-WAL read eligibility recovery. Startup republish
   alone now has an E2E (CHECK-01-startup, audit off); it has not run yet.
-  Same-name Pod replacement, stats failures and non-WAL read recovery remain.
+  Same-name Pod replacement (topology probe), an operator restart while stats
+  are unreadable, and non-WAL read recovery after a restart now have E2E tests
+  that pass on CI (PR runs 36874157713 and 36877273395). Follow-evidence reads
+  are not UID-bracketed.
 - Sustained 900/2000 writes/s after the MORE fix: measured once on CI (lag 0 at
   900, ≈+18k/min deficit at 2000, drain 35–43 s). Still define the target rate,
   acceptable replication lag and recovery time from production traffic, and

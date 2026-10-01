@@ -78,6 +78,7 @@ ini_option::ini_option():
 		_thread_pool_size(default_thread_pool_size),
 		_proxy_prior_netmask(default_proxy_prior_netmask),
 		_max_total_thread_queue(default_max_total_thread_queue),
+		_read_unavailable_error(default_read_unavailable_error),
 		_time_watcher_enabled(false),
 		_time_watcher_polling_interval_msec(default_time_watcher_polling_interval_msec),
 		_storage_access_watch_threshold_warn_msec(0),
@@ -369,6 +370,9 @@ int ini_option::load() {
 			this->_proxy_prior_netmask = opt_var_map["proxy-prior-netmask"].as<uint32_t>();
 		}
 
+		if (opt_var_map.count("read-unavailable-error")) {
+			this->_read_unavailable_error = opt_var_map["read-unavailable-error"].as<bool>();
+		}
 		if (opt_var_map.count("max-total-thread-queue")) {
 			this->_max_total_thread_queue = opt_var_map["max-total-thread-queue"].as<uint32_t>();
 		}
@@ -749,6 +753,10 @@ int ini_option::reload() {
 			}
 		}
 
+		if (opt_var_map.count("read-unavailable-error")) {
+			log_notice("  read_unavailable_error: %d -> %d", this->_read_unavailable_error, opt_var_map["read-unavailable-error"].as<bool>());
+			this->_read_unavailable_error = opt_var_map["read-unavailable-error"].as<bool>();
+		}
 		if (opt_var_map.count("max-total-thread-queue")) {
 			log_notice("  max_total_thread_queue: %u -> %u", this->_max_total_thread_queue, opt_var_map["max-total-thread-queue"].as<uint32_t>());
 			this->_max_total_thread_queue = opt_var_map["max-total-thread-queue"].as<uint32_t>();
@@ -883,6 +891,7 @@ int ini_option::_setup_config_option(program_options::options_description& optio
 		("thread-pool-size",				program_options::value<int>(),			"thread pool size (dynamic)")
 		("proxy-prior-netmask",			program_options::value<uint32_t>(),	"proxy prior netmask")
 		("max-total-thread-queue",	program_options::value<uint32_t>(),	"max thread queue length (dynamic)")
+		("read-unavailable-error",	program_options::value<bool>(),	"answer SERVER_ERROR instead of a miss when a get cannot be served (forward to the master failed, no partition, enqueue or storage error); for flare used as the primary store (default false = legacy miss, dynamic)")
 		("time-watcher-enabled",												program_options::value<bool>(),			"time watcher enabled")
 		("time-watcher-polling-interval-msec",					program_options::value<uint32_t>(),	"time watcher polling interval (msec)")
 		("storage-access-watch-threshold-warn-msec",		program_options::value<uint32_t>(),	"threshold to log error when a thread accessing storage long time (msec)")

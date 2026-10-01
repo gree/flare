@@ -233,6 +233,7 @@ int flared::startup(int argc, char **argv) {
 	this->_cluster->set_wal_follow_enabled(ini_option_object().is_wal_follow_enabled());
 	this->_cluster->set_replication_type(ini_option_object().get_replication_type());
 	this->_cluster->set_max_total_thread_queue(ini_option_object().get_max_total_thread_queue());
+	this->_cluster->set_read_unavailable_error(ini_option_object().is_read_unavailable_error());
 	this->_cluster->set_noreply_window_limit(ini_option_object().get_noreply_window_limit());
 	this->_cluster->add_proxy_event_listener(this->_cluster_replication);
 #ifdef ENABLE_K8S_OPERATOR
@@ -546,6 +547,7 @@ int flared::reload() {
 
 	// max_total_thread_queue
 	this->_cluster->set_max_total_thread_queue(ini_option_object().get_max_total_thread_queue());
+	this->_cluster->set_read_unavailable_error(ini_option_object().is_read_unavailable_error());
 
 	// re-setup resource limit (do not care about return value here)
 	this->_set_resource_limit();

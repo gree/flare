@@ -705,6 +705,18 @@ private def checkBreakerUnavailable (ctx : Ctx) : IO Unit := do
     ((unavail (cs [node "a" .Master .Active, node "b" .Slave .Active]) [k "b"] [k "a"]).length == 1)
   let big := cs ((List.range 8).map fun i =>
     node s!"n{i}" (if i == 0 then .Master else .Slave) (if i == 7 then .Down else .Active))
+  let pair := cs [node "a" .Master .Active, node "b" .Slave .Active]
+  check ctx "read-unavailable-error renders into extra.conf only when set"
+    (({ readUnavailableError := some true } : RocksdbConfigSpec).toExtraConf == "read-unavailable-error = true"
+      && ({ readUnavailableError := some false } : RocksdbConfigSpec).toExtraConf == "read-unavailable-error = false"
+      && ({} : RocksdbConfigSpec).toExtraConf == ""
+      && ({ readUnavailableError := some true } : RocksdbConfigSpec).hasAny)
+  check ctx "breaker floor: one dead node of two (50%) does not trip with the default minimum of 2"
+    (!trips pair [k "a"] [k "b"])
+  check ctx "breaker floor: minUnavailableToTrip = 1 restores tripping on a single death"
+    ((K8sReconciler.circuitBreakerDecision 1 2 { cfg with minUnavailableToTrip := 1 } false).1 == .RecoveryRefill)
+  check ctx "breaker floor: two unavailable of four (50%) still trips"
+    ((K8sReconciler.circuitBreakerDecision 2 4 cfg false).1 == .RecoveryRefill)
   check ctx "one long-Down node in eight (12%) does not trip"
     (!trips big [] ((List.range 7).map fun i => k s!"n{i}"))
 

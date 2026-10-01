@@ -112,6 +112,7 @@ private def getFlareClusterFromJson (json : Lean.Json) (name ns : String)
     flushAllEnabled := rocksdbObj.getObjValD "flushAllEnabled" |>.getBool?.toOption
     walSyncInterval := rocksdbObj.getObjValD "walSyncInterval" |>.getNat?.toOption
     backupKeep := rocksdbObj.getObjValD "backupKeep" |>.getNat?.toOption
+    readUnavailableError := rocksdbObj.getObjValD "readUnavailableError" |>.getBool?.toOption
   }
   -- The circuit breaker knobs were published in the CRD examples and the
   -- Runbook but never parsed — the safety valve silently ran on defaults
@@ -128,11 +129,13 @@ private def getFlareClusterFromJson (json : Lean.Json) (name ns : String)
       { enabled := cbObj.getObjValD "enabled" |>.getBool?.toOption |>.getD cbDefault.enabled
         tripThresholdPercent := trip
         resetThresholdPercent := reset
-        autoResetEnabled := cbObj.getObjValD "autoResetEnabled" |>.getBool?.toOption |>.getD cbDefault.autoResetEnabled }
+        autoResetEnabled := cbObj.getObjValD "autoResetEnabled" |>.getBool?.toOption |>.getD cbDefault.autoResetEnabled
+        minUnavailableToTrip := cbObj.getObjValD "minUnavailableToTrip" |>.getNat?.toOption |>.getD cbDefault.minUnavailableToTrip }
     else
       { cbDefault with
         enabled := cbObj.getObjValD "enabled" |>.getBool?.toOption |>.getD cbDefault.enabled
-        autoResetEnabled := cbObj.getObjValD "autoResetEnabled" |>.getBool?.toOption |>.getD cbDefault.autoResetEnabled }
+        autoResetEnabled := cbObj.getObjValD "autoResetEnabled" |>.getBool?.toOption |>.getD cbDefault.autoResetEnabled
+        minUnavailableToTrip := cbObj.getObjValD "minUnavailableToTrip" |>.getNat?.toOption |>.getD cbDefault.minUnavailableToTrip }
   let rbObj := spec.getObjValD "readBalance"
   let standbySelectors : List StandbySelector :=
     match rbObj.getObjValD "standby" |>.getArr?.toOption with

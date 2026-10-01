@@ -88,6 +88,7 @@ private:
 	int					_thread_pool_size;
 	uint32_t 		_proxy_prior_netmask;
 	uint32_t 		_max_total_thread_queue;
+	bool				_read_unavailable_error;
 	bool				_time_watcher_enabled;
 	uint32_t 		_time_watcher_polling_interval_msec;
 	uint32_t 		_storage_access_watch_threshold_warn_msec;
@@ -197,6 +198,7 @@ public:
 	static const int default_thread_pool_size = 5;
 	static const uint32_t default_proxy_prior_netmask = 0x00;
 	static const uint32_t default_max_total_thread_queue = 0;				// unlimited
+	static const bool default_read_unavailable_error = false;
 	static const uint32_t default_time_watcher_polling_interval_msec = 0; // disabled
 	static const uint32_t default_cluster_replication_concurrency = 1;
 
@@ -254,6 +256,7 @@ public:
 	int get_thread_pool_size() { return this->_thread_pool_size; };
 	uint32_t get_proxy_prior_netmask() { return this->_proxy_prior_netmask; };
 	uint32_t get_max_total_thread_queue() { return this->_max_total_thread_queue; };
+	bool is_read_unavailable_error() { return this->_read_unavailable_error; };
 	bool get_time_watcher_enabled() { return this->_time_watcher_enabled; };
 	uint32_t get_time_watcher_polling_interval_msec() { return this->_time_watcher_polling_interval_msec; };
 	uint32_t get_storage_access_watch_threshold_warn_msec() { return this->_storage_access_watch_threshold_warn_msec; };

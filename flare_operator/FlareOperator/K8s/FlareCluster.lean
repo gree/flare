@@ -136,6 +136,12 @@ structure RocksdbConfigSpec where
       OOMed the pod (observed live on pf-dev); set 1-2 there.
       flared: `rocksdb-backup-keep` (dynamic, SIGHUP). -/
   backupKeep : Option Nat := none
+  /-- Answer SERVER_ERROR instead of a miss when a `get` cannot be served
+      (forward to the master failed, no partition, enqueue or storage
+      error). For flare used as the primary store, where a miss reads as
+      "the key does not exist". Backend-agnostic like flushAllEnabled.
+      flared: `read-unavailable-error` (dynamic, SIGHUP; default false). -/
+  readUnavailableError : Option Bool := none
   deriving Repr, BEq
 
 /-- True when at least one rocksdb field has been set by the user. -/
@@ -144,7 +150,7 @@ def RocksdbConfigSpec.hasAny (r : RocksdbConfigSpec) : Bool :=
   r.walTtlSeconds.isSome || r.walSizeLimitMb.isSome || r.syncWrites.isSome ||
   r.resyncFailureThreshold.isSome || r.walMaxBatchBytes.isSome ||
   r.walSyncBwlimit.isSome || r.walSyncInterval.isSome || r.snapshotBwlimit.isSome ||
-  r.flushAllEnabled.isSome || r.backupKeep.isSome
+  r.flushAllEnabled.isSome || r.backupKeep.isSome || r.readUnavailableError.isSome
 
 /-- Render the rocksdb spec as `extra.conf` lines (one per set field).
     Returns an empty string when no fields are set. Lines are joined with "\n";
@@ -194,6 +200,11 @@ def RocksdbConfigSpec.toExtraConf (r : RocksdbConfigSpec) : String :=
   let lines := match r.backupKeep with
     | some n => lines ++ [s!"rocksdb-backup-keep = {n}"]
     | none => lines
+  let lines := match r.readUnavailableError with
+    | some b =>
+      let v := if b then "true" else "false"
+      lines ++ [s!"read-unavailable-error = {v}"]
+    | none => lines
   String.intercalate "\n" lines
 
 inductive MigrationPhase where
@@ -228,6 +239,12 @@ structure CircuitBreakerConfig where
       If false, breaker requires manual pod restart even after recovery.
       Default: true -/
   autoResetEnabled : Bool := true
+
+  /-- Fewest unavailable nodes that can trip the breaker (default 2). A
+      single node failing is never an AZ-scale event; without this floor a
+      1-partition x 2-replica cluster tripped on one death (1 of 2 = 50%)
+      and never failed over (user decision 2026-10-02). -/
+  minUnavailableToTrip : Nat := 2
   deriving Repr, BEq
 
 /-! ## Read-balance policy -/

@@ -116,6 +116,8 @@ int op_get::_run_server() {
 	map<string, shared_queue_proxy_read> q_map;
 	// Results
 	map<string, storage::result> r_map;
+	// keys answered as "not found" only because they could not be read
+	int unavailable_keys = 0;
 
 	for (list<storage::entry>::iterator it = this->_entry_list.begin(); it != this->_entry_list.end(); it++) {
 		stats_object->increment_cmd_get();
@@ -127,9 +129,11 @@ int op_get::_run_server() {
 		} else if (r_proxy == cluster::proxy_request_error_enqueue) {
 			log_warning("proxy error (key=%s) -> continue processing (pretending not found)", it->key.c_str());
 			r_map[it->key] = storage::result_not_found;
+			unavailable_keys++;
 		} else if (r_proxy == cluster::proxy_request_error_partition) {
 			log_warning("partition error (key=%s) -> continue processing (pretending not found)", it->key.c_str());
 			r_map[it->key] = storage::result_not_found;
+			unavailable_keys++;
 		} else {
 			// storage i/o
 			storage::result r_storage;
@@ -142,9 +146,30 @@ int op_get::_run_server() {
 			if (retcode < 0) {
 				log_warning("storage i/o error (key=%s) -> continue processing (pretending not found)", it->key.c_str());
 				r_map[it->key] = storage::result_not_found;
+				unavailable_keys++;
 				continue;
 			}
 			r_map[it->key] = r_storage;
+		}
+	}
+
+	// read-unavailable-error (2026-10-02): a key that could not be READ
+	// (forward failed, no partition, enqueue or storage error) has been
+	// answered as a miss ("pretending not found"). Where flare is the
+	// primary store a miss means "the key does not exist", so with the
+	// option on the whole response is SERVER_ERROR instead; a real miss
+	// stays a miss.
+	if (this->_cluster->is_read_unavailable_error()) {
+		bool unavailable = unavailable_keys > 0;
+		for (map<string, shared_queue_proxy_read>::iterator qi = q_map.begin(); qi != q_map.end(); qi++) {
+			qi->second->sync();
+			if (!qi->second->is_success()) {
+				unavailable = true;
+			}
+		}
+		if (unavailable) {
+			log_warning("get could not be served (%d local key(s) unreadable or a forward failed) -> SERVER_ERROR (read-unavailable-error)", unavailable_keys);
+			return this->_send_result(result_server_error, "read unavailable");
 		}
 	}
 

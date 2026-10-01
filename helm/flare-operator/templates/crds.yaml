@@ -148,6 +148,14 @@ spec:
                     flushAllEnabled:
                       type: boolean
                       description: Administrative gate for the unauthenticated flush_all op (flared flush-all-enabled; false = refuse with SERVER_ERROR; hot-toggleable)
+                    readUnavailableError:
+                      type: boolean
+                      description: >-
+                        Answer SERVER_ERROR instead of a miss when a get
+                        cannot be served (forward to the master failed, no
+                        partition, enqueue or storage error). Enable where
+                        flare is the primary store (flared
+                        read-unavailable-error; default false; hot-toggleable)
                     backupKeep:
                       type: integer
                       minimum: 1
@@ -186,6 +194,13 @@ spec:
                       description: >-
                         Auto-resume when healthy capacity returns (default
                         true). false holds the trip until an operator restart.
+                    minUnavailableToTrip:
+                      type: integer
+                      minimum: 1
+                      description: >-
+                        Fewest unavailable nodes that can trip the breaker
+                        (default 2): a single failed node never pauses
+                        failover, so 1 master + 1 slave clusters fail over.
             status:
               type: object
               properties:

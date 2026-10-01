@@ -177,7 +177,8 @@ structure FlareReconcileState where
       position first). Placed first among a partition's candidates. -/
   followRankedKeys : List String := []
   failoverTriggered : Bool := false
-  -- Grace period for startup: 24 cycles × 5s = 120s (see Main.lean)
+  -- Startup grace: remaining seconds + 1 while > 0, set by Main from the
+  -- wall clock before every pass (default 120 s; it was 24 cycles).
   graceCycles : Nat := 24
   /-- Whether the breaker was tripped at the END of the previous cycle
       (persisted via trippedRef in the IO shell — FSM state itself resets
@@ -241,7 +242,7 @@ def circuitBreakerDecision
         -- fraction can never fall below the reset threshold.
         (.RecoveryRefill,
          [.Log s!"[flare-operator] circuit breaker holding: {100 - deadPercent}% healthy < reset threshold {breakerCfg.resetThresholdPercent}% (masterless-refill-only recovery)"])
-    else if deadPercent >= breakerCfg.tripThresholdPercent then
+    else if deadPercent >= breakerCfg.tripThresholdPercent && deadCount >= breakerCfg.minUnavailableToTrip then
       (.RecoveryRefill,
        [.Log s!"[flare-operator] 🚨 CIRCUIT BREAKER TRIPPED: {deadCount}/{totalNodes} nodes dead ({deadPercent}% ≥ {breakerCfg.tripThresholdPercent}%)",
         .Log s!"[flare-operator] Suspected AZ failure - failover/reassignment PAUSED (masterless-refill-only recovery continues)",
@@ -254,13 +255,28 @@ def circuitBreakerDecision
     cluster, not already tripped). -/
 theorem circuitBreakerDecision_trips (deadCount totalNodes : Nat)
     (cfg : CircuitBreakerConfig) (hen : cfg.enabled = true) (htot : 0 < totalNodes)
-    (h : cfg.tripThresholdPercent ≤ (deadCount * 100) / totalNodes) :
+    (h : cfg.tripThresholdPercent ≤ (deadCount * 100) / totalNodes)
+    (hmin : cfg.minUnavailableToTrip ≤ deadCount) :
     (circuitBreakerDecision deadCount totalNodes cfg false).1 = .RecoveryRefill := by
   unfold circuitBreakerDecision
   simp only [hen, Bool.not_true, Bool.false_eq_true, if_false]
   have ht : (0 < totalNodes) = True := eq_true htot
   simp only [show (totalNodes > 0) = True from ht, if_true]
-  rw [if_pos h]
+  rw [if_pos (by simp [h, hmin])]
+
+/-- Fewer unavailable nodes than `minUnavailableToTrip` never trip a fresh
+    breaker, whatever fraction of the cluster they are (user decision
+    2026-10-02: one dead node in a 1-partition x 2-replica cluster must not
+    pause failover). -/
+theorem circuitBreakerDecision_below_min_no_trip (deadCount totalNodes : Nat)
+    (cfg : CircuitBreakerConfig) (hmin : deadCount < cfg.minUnavailableToTrip) :
+    (circuitBreakerDecision deadCount totalNodes cfg false).1 = .AfterHandleFailover := by
+  unfold circuitBreakerDecision
+  cases hen : cfg.enabled with
+  | false => simp
+  | true =>
+    have hm : ¬ (cfg.minUnavailableToTrip ≤ deadCount) := by omega
+    simp [hm]
 
 /-- Below the threshold a fresh (not-tripped) breaker NEVER trips:
     failover proceeds. -/
@@ -275,7 +291,7 @@ theorem circuitBreakerDecision_no_trip (deadCount totalNodes : Nat)
     simp only [Bool.not_true, Bool.false_eq_true, if_false]
     have ht : (0 < totalNodes) = True := eq_true htot
     simp only [show (totalNodes > 0) = True from ht, if_true]
-    rw [if_neg (by omega)]
+    rw [if_neg (by simp; omega)]
 
 /-- HYSTERESIS, holding side: a tripped breaker stays tripped while the
     healthy fraction is below the reset threshold — even when the dead
@@ -1322,7 +1338,7 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
                     | some crd => resolveStandbyKeys crd.spec.readBalance pods zones
                     | none => [],
                   graceCycles := s.graceCycles - 1 }, none,
-         [.Log s!"[flare-operator] grace period: {s.graceCycles - 1} cycles remaining"])
+         [.Log s!"[flare-operator] grace period: {s.graceCycles - 1}s remaining"])
       else
         -- Grace period over - normal dead-node detection + graceful drain of
         -- any Terminating (deletionTimestamp) master/slave that is still alive.

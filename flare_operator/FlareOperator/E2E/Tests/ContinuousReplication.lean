@@ -963,9 +963,10 @@ def suite : TestSuite := {
           -- 150 s-old pod still deleted the master inside the grace: no drain
           -- line on any CI run, and the follower was promoted ~35 s later by
           -- dead-node failover once grace ended (EV-04 caveat). Wait for the
-          -- operator's own last grace line instead, then one more cycle.
+          -- operator's own end-of-grace line instead, then one more cycle. (The
+          -- grace is wall-clock since 2026-10-02; the line is still the signal.)
           let pastGrace ← waitForCondition "operator logged the end of its startup grace period" 360 do
-            return containsSubstr (← opLog 200000) "grace period: 0 cycles remaining"
+            return containsSubstr (← opLog 200000) "grace period over after"
           if pastGrace then IO.sleep 10000
           IO.eprintln s!"# operator pod age before the delete: {← opAge}s (grace ended per its log={pastGrace})"
           if !pastGrace then

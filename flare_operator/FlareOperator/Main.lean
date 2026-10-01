@@ -239,6 +239,16 @@ initialize followRef : IO.Ref FollowEvidence.Tracker ← IO.mkRef {}
     is persisted before it is sent (TopologyBroadcast.persistedCovers). -/
 initialize persistedVersionRef : IO.Ref Nat ← IO.mkRef 0
 
+/-- Monotonic time (ms) at which this process entered leader mode; the
+    startup grace is measured from it in wall-clock seconds. -/
+initialize leaderSinceMsRef : IO.Ref Nat ← IO.mkRef 0
+
+/-- Startup grace in seconds (FLARE_STARTUP_GRACE_SECONDS, default 120).
+    It used to be 24 reconcile CYCLES, which stretched with slow passes to
+    ~190 s in the continuous-replication suite (user decision 2026-10-02). -/
+private def startupGraceSeconds : IO Nat := do
+  return ((← IO.getEnv "FLARE_STARTUP_GRACE_SECONDS").bind (·.toNat?)).getD 120
+
 /-- Persist the replica-repair ledger when it changed (SC-03 / SAF-05) and
     keep the pending gauge current. Loud on failure: an unpersisted ledger is
     exactly what an operator restart would lose. -/
@@ -984,6 +994,15 @@ private def runReconcileDriver (stateRef : IO.Ref FlareClusterState)
     (podAddrsRef : IO.Ref (List (String × String)))
     (heldKeys : List String)
     (crName ns : String) : IO Unit := do
+  -- Wall-clock grace: the FSM keeps skipping dead detection and drain while
+  -- graceCycles > 0, and reads it as remaining seconds + 1.
+  let graceS ← startupGraceSeconds
+  let elapsedS := ((← IO.monoMsNow) - (← leaderSinceMsRef.get)) / 1000
+  let remaining := if elapsedS < graceS then graceS - elapsedS else 0
+  let prevGrace ← graceCyclesRef.get
+  graceCyclesRef.set (if remaining > 0 then remaining + 1 else 0)
+  if remaining == 0 && prevGrace > 0 then
+    IO.eprintln s!"[flare-operator] grace period over after {elapsedS}s: dead-node detection and graceful drain active"
   let initialGrace ← graceCyclesRef.get
   let initialPhase ← migrationRef.get
   let initialState : K8sReconciler.FlareReconcileState := {
@@ -2127,7 +2146,8 @@ def main (args : List String) : IO Unit := do
   -- Note: this grace period only affects dead-node detection at startup.
   -- Nodes in Prepare state (actively reconstructing) are separately protected
   -- by detectDeadNodes regardless of the grace period.
-  let graceCyclesRef ← IO.mkRef (24 : Nat)
+  let graceCyclesRef ← IO.mkRef (1 : Nat)
+  leaderSinceMsRef.set (← IO.monoMsNow)
   let prepareCyclesRef ← IO.mkRef ([] : List (String × Nat))
   let unreadyCyclesRef ← IO.mkRef ([] : List (String × Nat))
   let podKeysRef ← IO.mkRef ([] : List String)

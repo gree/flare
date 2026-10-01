@@ -222,6 +222,7 @@ protected:
 	replication						_replication_type;
 	uint32_t							_proxy_prior_netmask;
 	uint32_t							_max_total_thread_queue;
+	bool								_read_unavailable_error;
 
 	list<shared_proxy_event_listener>			_proxy_event_listeners;
 	vector<shared_proxy_event_listener>		_fixed_proxy_event_listeners;
@@ -325,6 +326,8 @@ public:
 	};
 	uint32_t get_max_total_thread_queue() { return this->_max_total_thread_queue; };
 	uint32_t set_max_total_thread_queue(uint32_t max_total_thread_queue) { this->_max_total_thread_queue = max_total_thread_queue; return 0; };
+	bool is_read_unavailable_error() { return this->_read_unavailable_error; };
+	void set_read_unavailable_error(bool b) { this->_read_unavailable_error = b; };
 
 #ifdef ENABLE_MYSQL_REPLICATION
 	int set_mysql_replication(bool mysql_replication) { this->_mysql_replication = mysql_replication; return 0; };

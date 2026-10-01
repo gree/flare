@@ -97,7 +97,8 @@ cluster::cluster(thread_pool* req_tp, thread_pool* other_tp, string server_name,
 		_wal_follow_poll_interval_usec(200 * 1000),
 		_replication_type(replication_async),
 		_proxy_prior_netmask(0), 
-		_max_total_thread_queue(0) {
+		_max_total_thread_queue(0),
+		_read_unavailable_error(false) {
 	this->_node_key = this->to_node_key(server_name, server_port);
 	pthread_mutex_init(&this->_mutex_serialization, NULL);
 	pthread_mutex_init(&this->_mutex_master_reconstruction, NULL);

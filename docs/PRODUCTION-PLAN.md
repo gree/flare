@@ -19,18 +19,18 @@ at phase 1 and a separate design starts.
 |---|---|---|
 | 1 | SAF-09: a new leader's generation exceeds every persisted version; a map is sent only after its version is persisted | **Done 2026-10-02.** Proofs, unit cases, Lease-deletion E2E PASS in PR run 36901004232 |
 | 2 | SAF-08: bind follow evidence to the flared process. A boot-id change makes a reading Unknown, with no extra API calls per replica | **Done 2026-10-02.** Unit cases; the PR runs pass. A replacement within one pass is not detected |
-| 3 | EV-15: per-node role and replication lag as metrics, with an alert on lag | **Implemented**, CI pending (PR run on 779513b) |
-| 4 | Memory budget validation: the render fails when the floor reaches the limit, and warns above 70% or when tmpfs plus the floor exceeds the limit | **Implemented** at chart render time, with 4 render tests. CI pending |
-| 5 | Client result when a stale slave cannot reach the master | Needs the user's decision; a specification is proposed with item 3 |
+| 3 | EV-15: per-node role and replication lag as metrics, with an alert on lag | **Done.** Follow metrics seen on a pod by native-metrics; PR run 36918285987 green |
+| 4 | Memory budget validation: the render fails when the floor reaches the limit, and warns above 70% or when tmpfs plus the floor exceeds the limit | **Done** at chart render time; the render tests run in every E2E leg |
+| 5 | Client result when a stale slave cannot reach the master | **Implemented** as `read-unavailable-error`, default off. It compiles and CI is green, but no E2E exercises it yet |
 
 ## Phase 2: measurements (CI evaluations, run in parallel)
 
 | # | Measurement | How |
 |---|---|---|
-| 6 | Startup, probe and kill-9 reopen at 15.8M keys | `evaluation=scale-15m8` (started 2026-10-02) |
-| 7 | T17: read and proxy latency, reconcile and lease renewal under load | Measurements added to `evaluation=sustained`. Run pending |
-| 8 | Both repair triggers at the same time; lagged or Unknown successor gates | T6 extended, plus a lagged-successor failover E2E. CI pending |
-| 9 | Outage and resource evaluation on tmpfs | `evaluation=outage-tmpfs` added. Run pending |
+| 6 | Startup, probe and kill-9 reopen at scale | 15.8M not feasible yet: the loader does about 1300 keys/s and the debug pod expired. The 2M-key run is pending (36914128803) |
+| 7 | T17: read and proxy latency, reconcile and lease renewal under load | Control loop measured: reconcile 2.2–3.4 s, lease age ≤ 8 s of 15 s. Get latency re-run pending (36918289515) |
+| 8 | Both repair triggers at the same time; lagged or Unknown successor gates | Lagged successor PASS (gap 21 within the bound). T6 one-rebuild PASS, but only the follower route fired, so concurrency is not yet shown |
+| 9 | Outage and resource evaluation on tmpfs | **Done**, run 36914124394: 11 s catch-up, 59 s snapshot rebuild, 1.07 GB data plus 0.54 GB RSS |
 
 ## Phase 3: operations (staging needs the user's go-ahead)
 
@@ -38,7 +38,7 @@ at phase 1 and a separate design starts.
 |---|---|
 | 10 | Runbook for every alert, and a sizing rule (WAL cap plus bytes between cleanups, memory). Sizing and replica-follow sections written 2026-10-02 |
 | 11 | Backup restore and rollback rehearsal in staging |
-| 12 | Canary definition with stop and rollback criteria, and a reviewer sign-off on residual risks |
+| 12 | Canary definition with stop and rollback criteria, and a reviewer sign-off on residual risks. Draft in [CANARY-PLAN.md](CANARY-PLAN.md) |
 
 ## Decisions taken (user, 2026-10-02)
 

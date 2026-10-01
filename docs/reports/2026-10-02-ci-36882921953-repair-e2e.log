@@ -1,0 +1,701 @@
+# === Suite: replica-repair ===
+# Cleaning up cluster 'repl-repair'
+# Deploying cluster 'repl-repair' in namespace 'flare-repl-repair'
+# Waiting for: namespace flare-repl-repair not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-repl-repair (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap repl-repair-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting for StatefulSet repl-repair-nodes to be ready...
+# Waiting for: all 2 pods ready (timeout: 180s)
+#   OK after 0s
+# Waiting for: 2 nodes registered (timeout: 300s)
+#   OK after 0s
+# Waiting 50s grace period for operator reconciliation...
+# Checking operator activity...
+# --- Operator logs (flare-operator) ---
+#   [TcpClient] node sync v4294967304 to 10.244.0.10:12121: reply-confirmed=true
+#   [TcpClient] node sync v4294967304 to 10.244.0.9:12121: reply-confirmed=true
+#   [TopologyBroadcast] Broadcast attempt complete (v4294967304); all targets reply-confirmed=true
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1907ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 18 cycles remaining
+#   [TopologyAudit] node=repl-repair-nodes-0.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121 uid=(some ec0ea529-396b-4aa5-99bf-a0de4785226a) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [flare-operator] replica repair ledger initialized from repl-repair-nodes-0.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121: 0 destination counter(s) recorded as baseline, none attributed
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1711ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 17 cycles remaining
+#   [TopologyAudit] node=repl-repair-nodes-1.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121 uid=(some b6a7e819-b8e3-4b79-82e6-891c075600a5) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1244ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 16 cycles remaining
+#   [TopologyAudit] node=repl-repair-nodes-0.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121 uid=(some ec0ea529-396b-4aa5-99bf-a0de4785226a) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1585ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 15 cycles remaining
+#   [TopologyAudit] node=repl-repair-nodes-1.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121 uid=(some b6a7e819-b8e3-4b79-82e6-891c075600a5) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1239ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 14 cycles remaining
+#   [TopologyAudit] node=repl-repair-nodes-0.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121 uid=(some ec0ea529-396b-4aa5-99bf-a0de4785226a) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1483ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 13 cycles remaining
+#   [TopologyAudit] node=repl-repair-nodes-1.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121 uid=(some b6a7e819-b8e3-4b79-82e6-891c075600a5) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1206ms (nodes=2 M=1 S=1 D=0 P=0)
+#   
+# Waiting for: slave's local items reach the master's (timeout: 60s)
+#   OK after 0s
+# fault: rejecting 10.244.0.9 → 10.244.0.10:12121 on flare-e2e-control-plane
+# Waiting for: master counts dropped writes to the slave (was 0) (timeout: 120s)
+#   OK after 20s
+# stored 30/30 on the master; master dropped 2 write(s); local items master=70 slave=40 (gap 30)
+# fault cleared: 10.244.0.9 → 10.244.0.10 forwards again
+# slave was missing 30 item(s) locally while cut off
+# Waiting for: operator requests a replica repair (probe interval 15s) (timeout: 150s)
+#   OK after 0s
+# Waiting for: ledger in status names the slave (timeout: 60s)
+#   OK after 0s
+# Waiting for: operator records REPLICA REPAIR COMPLETE (timeout: 300s)
+#   OK after 15s
+# Waiting for: ledger persisted as empty (timeout: 60s)
+#   OK after 0s
+# Waiting for: slave's local items catch up to the master's (timeout: 120s)
+#   OK after 0s
+# Waiting for: restarted operator restores the ledger from status (timeout: 120s)
+#   OK after 40s
+# fault: rejecting 10.244.0.9 → 10.244.0.10:12121 on flare-e2e-control-plane
+# Waiting for: master counts dropped writes to the slave (was 2) (timeout: 120s)
+#   OK after 20s
+# stored 20/20 on the master; master dropped 2 write(s); local items master=90 slave=70 (gap 20)
+# fault cleared: 10.244.0.9 → 10.244.0.10 forwards again
+# Waiting for: operator HOLDS the repair (gate closed) (timeout: 150s)
+#   OK after 20s
+# Waiting for: HELD entry persisted to status with its gate reason (timeout: 90s)
+#   OK after 0s
+# Waiting for: restarted operator restores the HELD request (timeout: 120s)
+#   OK after 0s
+# Waiting for: operator records REPLICA REPAIR COMPLETE (timeout: 360s)
+#   OK after 0s
+#   reason: completion was logged but no demotion was observed during the wait: the repair did not go through the hold
+#   reason: no Active P0 master in the operator's map
+#   reason: precondition: the ledger is not empty ([repl-repair-nodes-1.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121])
+# Waiting for: victim pod has a UID (timeout: 60s)
+#   OK after 0s
+# Waiting for: victim pod gone (timeout: 90s)
+#   OK after 5s
+# Waiting for: replacement pod has a UID (timeout: 60s)
+#   OK after 0s
+# apiserver refused the stale-UID delete (409); replacement 3f1d57c7-a8f9-4667-b1ed-b17f6547a083 untouched
+# Waiting for: blackhole pod has an IP (timeout: 60s)
+#   OK after 5s
+# black-hole delete returned in 3130ms; server accepted 517 byte(s):  | 000 | curl_exit=28 | 
+# --- diagnostics for failing suite 'replica-repair' ---
+# === operator logs (flare-repl-repair, app=flare-operator) ===
+# [pod/flare-operator-5f7984d775-v796f/flare-operator] [flare-operator] starting (namespace=flare-repl-repair, port=12120, interval=5s, identity=flare-operator-5f7984d775-v796f)
+# [pod/flare-operator-5f7984d775-v796f/flare-operator] [flare-operator] managing FlareCluster 'repl-repair' (from --cluster-name)
+# [pod/flare-operator-5f7984d775-v796f/flare-operator] [flare-operator] health check server started on port 8080 (leader=false)
+# [pod/flare-operator-5f7984d775-v796f/flare-operator] [HealthCheck] Starting health check server on 0.0.0.0:8080
+# [pod/flare-operator-5f7984d775-v796f/flare-operator] [HealthCheck] Listening on port 8080
+# [pod/flare-operator-5f7984d775-v796f/flare-operator] [HealthCheck] Endpoints: /healthz (liveness), /readyz (readiness)
+# [pod/flare-operator-5f7984d775-v796f/flare-operator] [flare-operator] phase 1: attempting to acquire lease 'repl-repair-operator-lease'
+# [pod/flare-operator-5f7984d775-v796f/flare-operator] [flare-operator] phase 2: acquired lease, entering leader mode
+# [pod/flare-operator-5f7984d775-v796f/flare-operator] [flare-operator] health status: leader=true
+# [pod/flare-operator-5f7984d775-v796f/flare-operator] [flare-operator] metrics initialized
+# [pod/flare-operator-5f7984d775-v796f/flare-operator] [flare-operator] metrics server started on port 9090
+# [pod/flare-operator-5f7984d775-v796f/flare-operator] [MetricsServer] Starting HTTP server on 0.0.0.0:9090
+# [pod/flare-operator-5f7984d775-v796f/flare-operator] [MetricsServer] Listening on port 9090
+# [pod/flare-operator-5f7984d775-v796f/flare-operator] [flare-operator] loaded 2 nodes from ConfigMap (resuming at broadcast version 8589934600)
+# [pod/flare-operator-5f7984d775-v796f/flare-operator] [flare-operator] leadership generation 3 — broadcast versions fenced at ≥ 12884901888
+# [pod/flare-operator-5f7984d775-v796f/flare-operator] [flare-operator] fetched CRD: partitions=1, replicas=2
+# [pod/flare-operator-5f7984d775-v796f/flare-operator] [flare-operator] replica repair ledger restored from status: repl-repair-nodes-1.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121 requested drops=2 (held: resync disabled (FLARE_RESYNC_ON_DROP=0)) (1 counter(s))
+# [pod/flare-operator-5f7984d775-v796f/flare-operator] [flare-operator] TCP server marked ready for health checks
+# [pod/flare-operator-5f7984d775-v796f/flare-operator] [flare-operator] TCP server listening on port 12120
+# [pod/flare-operator-5f7984d775-v796f/flare-operator] [flare-operator] REPLICA REPAIR: demoting repl-repair-nodes-1.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121 to a live proxy at v12884901889 — master repl-repair-nodes-0.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121 dropped 2 write(s) to it. Held out of assignment until it reports v12884901889; then re-seated as Slave/Prepare so flared reconstructs
+# [pod/flare-operator-5f7984d775-v796f/flare-operator] [flare-operator] grace period: 23 cycles remaining
+# [pod/flare-operator-5f7984d775-v796f/flare-operator] [DEBUG] Received command: node sync
+# [pod/flare-operator-5f7984d775-v796f/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeSync none
+# [pod/flare-operator-5f7984d775-v796f/flare-operator] [DEBUG] Sending response: NODE repl-repair-nodes-1.repl-repair-nodes.flare-repl-repair.svc.cluster.local 12121 2 0 -1 0 17 | NODE repl-repair-nodes-0.repl-repair-nodes.flare-repl-repair.svc.cluster.local 12121 0 0 0 100 16 | END | 
+# [pod/flare-operator-5f7984d775-v796f/flare-operator] [TopologyAudit] node=repl-repair-nodes-1.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121 uid=(some b6a7e819-b8e3-4b79-82e6-891c075600a5) desired=12884901889 reported=(some 8589934600) verdict=behind
+# [pod/flare-operator-5f7984d775-v796f/flare-operator] [flare-operator] retrying an unconfirmed topology send (pending v12884901888; publishing v12884901889)
+# [pod/flare-operator-5f7984d775-v796f/flare-operator] [flare-operator] broadcast trigger: versionMoved=true pending=v12884901888 repairHeld=1 activeNotReady=0
+# [pod/flare-operator-5f7984d775-v796f/flare-operator] [flare-operator] topology changed (v12884901888 → v12884901889), broadcasting
+# [pod/flare-operator-5f7984d775-v796f/flare-operator] [TopologyBroadcast] Broadcasting node sync v12884901889 (2 nodes) to 2 pods
+# [pod/flare-operator-5f7984d775-v796f/flare-operator] [TcpClient] node sync v12884901889 to 10.244.0.10:12121: reply-confirmed=true
+# [pod/flare-operator-5f7984d775-v796f/flare-operator] [TcpClient] node sync v12884901889 to 10.244.0.9:12121: reply-confirmed=true
+# [pod/flare-operator-5f7984d775-v796f/flare-operator] [TopologyBroadcast] Broadcast attempt complete (v12884901889); all targets reply-confirmed=true
+# [pod/flare-operator-5f7984d775-v796f/flare-operator] [flare-operator] REPLICA REPAIR: repl-repair-nodes-1.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121 confirmed the demotion (demoted@12884901889); released to assignment — the next pass re-seats it as Slave/Prepare and flared reconstructs
+# [pod/flare-operator-5f7984d775-v796f/flare-operator] [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+# [pod/flare-operator-5f7984d775-v796f/flare-operator] [flare-operator] reconcile slow: 2292ms (nodes=2 M=1 S=0 D=0 P=0)
+# [pod/flare-operator-5f7984d775-v796f/flare-operator] [flare-operator] grace period: 22 cycles remaining
+# [pod/flare-operator-5f7984d775-v796f/flare-operator] [TopologyAudit] node=repl-repair-nodes-0.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121 uid=(some ec0ea529-396b-4aa5-99bf-a0de4785226a) desired=12884901894 reported=(some 12884901889) verdict=behind
+# [pod/flare-operator-5f7984d775-v796f/flare-operator] [flare-operator] retrying an unconfirmed topology send (pending v12884901894; publishing v12884901894)
+# [pod/flare-operator-5f7984d775-v796f/flare-operator] [flare-operator] broadcast trigger: versionMoved=true pending=v12884901894 repairHeld=0 activeNotReady=0
+# [pod/flare-operator-5f7984d775-v796f/flare-operator] [flare-operator] topology changed (v12884901889 → v12884901894), broadcasting
+# [pod/flare-operator-5f7984d775-v796f/flare-operator] [TopologyBroadcast] Broadcasting node sync v12884901894 (2 nodes) to 2 pods
+# [pod/flare-operator-5f7984d775-v796f/flare-operator] [DEBUG] Received command: node state repl-repair-nodes-1.repl-repair-nodes.flare-repl-repair.svc.cluster.local 12121 active
+# [pod/flare-operator-5f7984d775-v796f/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeState
+# [pod/flare-operator-5f7984d775-v796f/flare-operator]   "repl-repair-nodes-1.repl-repair-nodes.flare-repl-repair.svc.cluster.local"
+# [pod/flare-operator-5f7984d775-v796f/flare-operator]   12121
+# [pod/flare-operator-5f7984d775-v796f/flare-operator]   (FlareOperator.K8s.Fl
+# [pod/flare-operator-5f7984d775-v796f/flare-operator] [TRACE] Event: NodeState repl-repair-nodes-1.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121 | Result: Prepare->Active | Reason: reconstruction complete
+# [pod/flare-operator-5f7984d775-v796f/flare-operator] [TcpClient] node sync v12884901894 to 10.244.0.10:12121: reply-confirmed=true
+# [pod/flare-operator-5f7984d775-v796f/flare-operator] [TcpClient] node sync v12884901894 to 10.244.0.9:12121: reply-confirmed=true
+# [pod/flare-operator-5f7984d775-v796f/flare-operator] [TopologyBroadcast] Broadcast attempt complete (v12884901894); all targets reply-confirmed=true
+# [pod/flare-operator-5f7984d775-v796f/flare-operator] [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+# [pod/flare-operator-5f7984d775-v796f/flare-operator] [flare-operator] reconcile slow: 2045ms (nodes=2 M=1 S=1 D=0 P=0)
+# [pod/flare-operator-5f7984d775-v796f/flare-operator] [flare-operator] continuous-replication probe: 1 stats read(s) in 132ms (tick 2; in-mode remembered: 0, out-of-mode remembered: 0)
+# [pod/flare-operator-5f7984d775-v796f/flare-operator] [flare-operator] grace period: 21 cycles remaining
+# [pod/flare-operator-5f7984d775-v796f/flare-operator] [TopologyAudit] node=repl-repair-nodes-1.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121 uid=(some b6a7e819-b8e3-4b79-82e6-891c075600a5) desired=12884901895 reported=(some 12884901894) verdict=behind
+# [pod/flare-operator-5f7984d775-v796f/flare-operator] [flare-operator] retrying an unconfirmed topology send (pending v12884901895; publishing v12884901895)
+# [pod/flare-operator-5f7984d775-v796f/flare-operator] [flare-operator] broadcast trigger: versionMoved=false pending=v12884901895 repairHeld=0 activeNotReady=0
+# [pod/flare-operator-5f7984d775-v796f/flare-operator] [flare-operator] topology changed (v12884901895 → v12884901895), broadcasting
+# [pod/flare-operator-5f7984d775-v796f/flare-operator] [TopologyBroadcast] Broadcasting node sync v12884901895 (2 nodes) to 2 pods
+# [pod/flare-operator-5f7984d775-v796f/flare-operator] [TcpClient] node sync v12884901895 to 10.244.0.10:12121: reply-confirmed=true
+# [pod/flare-operator-5f7984d775-v796f/flare-operator] [TcpClient] node sync v12884901895 to 10.244.0.9:12121: reply-confirmed=true
+# [pod/flare-operator-5f7984d775-v796f/flare-operator] [TopologyBroadcast] Broadcast attempt complete (v12884901895); all targets reply-confirmed=true
+# [pod/flare-operator-5f7984d775-v796f/flare-operator] [flare-operator] REPLICA REPAIR COMPLETE: repl-repair-nodes-1.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121 is Slave/Active; a reconstruction newer than the one current at reseat (#3, boot 7691724097462093159) SUCCEEDED from its current master; 2 dropped write(s) recovered
+# [pod/flare-operator-5f7984d775-v796f/flare-operator] [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+# [pod/flare-operator-5f7984d775-v796f/flare-operator] [flare-operator] reconcile slow: 2100ms (nodes=2 M=1 S=1 D=0 P=0)
+# 
+# === flared logs (flare-repl-repair, tail 80 each) ===
+# [pod/repl-repair-nodes-0/flared] [139833215035072][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-0/flared] [139833214899904][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-0/flared] [139833215035072][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-0/flared] [139833214899904][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-0/flared] [139833215035072][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-0/flared] [139833214899904][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-0/flared] [139833215035072][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-0/flared] [139833214899904][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-0/flared] [139833215035072][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-0/flared] [139833214899904][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-0/flared] [139833215035072][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-0/flared] [139833214899904][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-0/flared] [139833215035072][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-0/flared] [139833214899904][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-0/flared] [139833215035072][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-0/flared] [139833214899904][ERR][connection_tcp.cc:163-_open] connect() failed
+# [pod/repl-repair-nodes-0/flared] [139833214899904][WRN][connection_tcp.cc:472-write] connection seems to be already closed (sock=-1)
+# [pod/repl-repair-nodes-0/flared] [139833214899904][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-0/flared] [139833215035072][ERR][connection_tcp.cc:163-_open] connect() failed
+# [pod/repl-repair-nodes-0/flared] [139833215035072][WRN][connection_tcp.cc:472-write] connection seems to be already closed (sock=-1)
+# [pod/repl-repair-nodes-0/flared] [139833215035072][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-0/flared] [139833214899904][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-0/flared] [139833215035072][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-0/flared] [139833214899904][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-0/flared] [139833215035072][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-0/flared] [139833214899904][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-0/flared] [139833215035072][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-0/flared] [139833214899904][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-0/flared] [139833215035072][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-0/flared] [139833214899904][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-0/flared] [139833215035072][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-0/flared] [139833214899904][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-0/flared] [139833215035072][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-0/flared] [139833214899904][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-0/flared] [139833215035072][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-0/flared] [139833214899904][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-0/flared] [139833215035072][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-0/flared] [139833214899904][ERR][connection_tcp.cc:163-_open] connect() failed
+# [pod/repl-repair-nodes-0/flared] [139833214899904][ERR][queue_proxy_write.cc:127-run] proxy write DROPPED after 4 retries (dest=repl-repair-nodes-1.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121, op=set, key=gated_0, version=1): replica now diverges until it reconstructs
+# [pod/repl-repair-nodes-0/flared] [139833214899904][WRN][connection_tcp.cc:472-write] connection seems to be already closed (sock=-1)
+# [pod/repl-repair-nodes-0/flared] [139833214899904][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-0/flared] [139833215035072][ERR][connection_tcp.cc:163-_open] connect() failed
+# [pod/repl-repair-nodes-0/flared] [139833215035072][ERR][queue_proxy_write.cc:127-run] proxy write DROPPED after 4 retries (dest=repl-repair-nodes-1.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121, op=set, key=gated_1, version=1): replica now diverges until it reconstructs
+# [pod/repl-repair-nodes-0/flared] [139833215035072][WRN][connection_tcp.cc:472-write] connection seems to be already closed (sock=-1)
+# [pod/repl-repair-nodes-0/flared] [139833215035072][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-0/flared] [139833214899904][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-0/flared] [139833215035072][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-0/flared] [139833214899904][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-0/flared] [139833215035072][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-0/flared] [139833214899904][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-0/flared] [139833215035072][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-0/flared] [139833214899904][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-0/flared] [139833215035072][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-0/flared] [139833214899904][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-0/flared] [139833215035072][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-0/flared] [139833214899904][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-0/flared] [139833215035072][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-0/flared] [139833214899904][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-0/flared] [139833215035072][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-0/flared] [139833215170240][NTC][cluster.cc:1123-reconstruct_node] reconstructing node map... (2 entries)
+# [pod/repl-repair-nodes-0/flared] [139833215170240][NTC][cluster.cc:2286-_reconstruct_node_partition] reconstructing node partition map... (from 2 entries in node map)
+# [pod/repl-repair-nodes-0/flared] [139833215170240][NTC][cluster.cc:2419-_reconstruct_node_partition] node partition map:
+# [pod/repl-repair-nodes-0/flared] [139833215170240][NTC][cluster.cc:2424-_reconstruct_node_partition] 0: master (node_key=repl-repair-nodes-0.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121, node_balance=100)
+# [pod/repl-repair-nodes-0/flared] [139833215170240][NTC][cluster.cc:2438-_reconstruct_node_partition] node partition map (prepare):
+# [pod/repl-repair-nodes-0/flared] [139833215170240][NTC][cluster.cc:1803-_shift_node_role] shifting node_role (node_key=repl-repair-nodes-1.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121, old_role=slave, old_partition=0, new_role=proxy, new_partition=-1)
+# [pod/repl-repair-nodes-0/flared] [139833215170240][NTC][cluster.cc:1123-reconstruct_node] reconstructing node map... (2 entries)
+# [pod/repl-repair-nodes-0/flared] [139833215170240][NTC][cluster.cc:2286-_reconstruct_node_partition] reconstructing node partition map... (from 2 entries in node map)
+# [pod/repl-repair-nodes-0/flared] [139833215170240][NTC][cluster.cc:2419-_reconstruct_node_partition] node partition map:
+# [pod/repl-repair-nodes-0/flared] [139833215170240][NTC][cluster.cc:2424-_reconstruct_node_partition] 0: master (node_key=repl-repair-nodes-0.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121, node_balance=100)
+# [pod/repl-repair-nodes-0/flared] [139833215170240][NTC][cluster.cc:2428-_reconstruct_node_partition] 0: slave[0] (node_key=repl-repair-nodes-1.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121, node_balance=0)
+# [pod/repl-repair-nodes-0/flared] [139833215170240][NTC][cluster.cc:2438-_reconstruct_node_partition] node partition map (prepare):
+# [pod/repl-repair-nodes-0/flared] [139833215170240][NTC][cluster.cc:1786-_shift_node_state] shifting node_state (node_key=repl-repair-nodes-1.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121, old_state=active, new_state=prepare)
+# [pod/repl-repair-nodes-0/flared] [139833215170240][NTC][cluster.cc:1803-_shift_node_role] shifting node_role (node_key=repl-repair-nodes-1.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121, old_role=proxy, old_partition=-1, new_role=slave, new_partition=0)
+# [pod/repl-repair-nodes-0/flared] [139833215170240][NTC][cluster.cc:1123-reconstruct_node] reconstructing node map... (2 entries)
+# [pod/repl-repair-nodes-0/flared] [139833215170240][NTC][cluster.cc:2286-_reconstruct_node_partition] reconstructing node partition map... (from 2 entries in node map)
+# [pod/repl-repair-nodes-0/flared] [139833215170240][NTC][cluster.cc:2419-_reconstruct_node_partition] node partition map:
+# [pod/repl-repair-nodes-0/flared] [139833215170240][NTC][cluster.cc:2424-_reconstruct_node_partition] 0: master (node_key=repl-repair-nodes-0.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121, node_balance=100)
+# [pod/repl-repair-nodes-0/flared] [139833215170240][NTC][cluster.cc:2428-_reconstruct_node_partition] 0: slave[0] (node_key=repl-repair-nodes-1.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121, node_balance=0)
+# [pod/repl-repair-nodes-0/flared] [139833215170240][NTC][cluster.cc:2438-_reconstruct_node_partition] node partition map (prepare):
+# [pod/repl-repair-nodes-0/flared] [139833215170240][NTC][cluster.cc:1786-_shift_node_state] shifting node_state (node_key=repl-repair-nodes-1.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121, old_state=prepare, new_state=active)
+# [pod/repl-repair-nodes-1/flared] [140027727214272][NTC][cluster.cc:2428-_reconstruct_node_partition] 0: slave[0] (node_key=repl-repair-nodes-1.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121, node_balance=0)
+# [pod/repl-repair-nodes-1/flared] [140027727214272][NTC][cluster.cc:2438-_reconstruct_node_partition] node partition map (prepare):
+# [pod/repl-repair-nodes-1/flared] [140027727619776][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-1/flared] [140027727619776][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-1/flared] [140027727619776][ERR][connection_tcp.cc:163-_open] connect() failed
+# [pod/repl-repair-nodes-1/flared] [140027727619776][ERR][cluster.cc:1378-activate_node] failed to connect to index server
+# [pod/repl-repair-nodes-1/flared] [140027727619776][WRN][handler_reconstruction.cc:420-_activate_with_retry] node activation failed (attempt 3) -> retrying in 2 seconds
+# [pod/repl-repair-nodes-1/flared] [140027727619776][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-1/flared] [140027727619776][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-1/flared] [140027727619776][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-1/flared] [140027727619776][ERR][connection_tcp.cc:163-_open] connect() failed
+# [pod/repl-repair-nodes-1/flared] [140027727619776][ERR][cluster.cc:1378-activate_node] failed to connect to index server
+# [pod/repl-repair-nodes-1/flared] [140027727619776][WRN][handler_reconstruction.cc:420-_activate_with_retry] node activation failed (attempt 4) -> retrying in 2 seconds
+# [pod/repl-repair-nodes-1/flared] [140027727619776][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-1/flared] [140027727619776][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-1/flared] [140027727619776][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-1/flared] [140027727619776][ERR][connection_tcp.cc:163-_open] connect() failed
+# [pod/repl-repair-nodes-1/flared] [140027727619776][ERR][cluster.cc:1378-activate_node] failed to connect to index server
+# [pod/repl-repair-nodes-1/flared] [140027727619776][WRN][handler_reconstruction.cc:420-_activate_with_retry] node activation failed (attempt 5) -> retrying in 2 seconds
+# [pod/repl-repair-nodes-1/flared] [140027727619776][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-1/flared] [140027727619776][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-1/flared] [140027727619776][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-1/flared] [140027727619776][ERR][connection_tcp.cc:163-_open] connect() failed
+# [pod/repl-repair-nodes-1/flared] [140027727619776][ERR][cluster.cc:1378-activate_node] failed to connect to index server
+# [pod/repl-repair-nodes-1/flared] [140027727619776][WRN][handler_reconstruction.cc:420-_activate_with_retry] node activation failed (attempt 6) -> retrying in 2 seconds
+# [pod/repl-repair-nodes-1/flared] [140027727619776][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-1/flared] [140027727619776][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-1/flared] [140027727619776][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-1/flared] [140027727619776][ERR][connection_tcp.cc:163-_open] connect() failed
+# [pod/repl-repair-nodes-1/flared] [140027727619776][ERR][cluster.cc:1378-activate_node] failed to connect to index server
+# [pod/repl-repair-nodes-1/flared] [140027727619776][WRN][handler_reconstruction.cc:420-_activate_with_retry] node activation failed (attempt 7) -> retrying in 2 seconds
+# [pod/repl-repair-nodes-1/flared] [140027727619776][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-1/flared] [140027727619776][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-1/flared] [140027727619776][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-1/flared] [140027727619776][ERR][connection_tcp.cc:163-_open] connect() failed
+# [pod/repl-repair-nodes-1/flared] [140027727619776][ERR][cluster.cc:1378-activate_node] failed to connect to index server
+# [pod/repl-repair-nodes-1/flared] [140027727619776][WRN][handler_reconstruction.cc:420-_activate_with_retry] node activation failed (attempt 8) -> retrying in 2 seconds
+# [pod/repl-repair-nodes-1/flared] [140027727619776][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-1/flared] [140027727619776][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-1/flared] [140027727619776][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+# [pod/repl-repair-nodes-1/flared] [140027727619776][ERR][connection_tcp.cc:163-_open] connect() failed
+# [pod/repl-repair-nodes-1/flared] [140027727619776][ERR][cluster.cc:1378-activate_node] failed to connect to index server
+# [pod/repl-repair-nodes-1/flared] [140027727619776][WRN][handler_reconstruction.cc:420-_activate_with_retry] node activation failed (attempt 9) -> retrying in 2 seconds
+# [pod/repl-repair-nodes-1/flared] [140027727214272][NTC][cluster.cc:1123-reconstruct_node] reconstructing node map... (2 entries)
+# [pod/repl-repair-nodes-1/flared] [140027727214272][NTC][cluster.cc:2286-_reconstruct_node_partition] reconstructing node partition map... (from 2 entries in node map)
+# [pod/repl-repair-nodes-1/flared] [140027727214272][NTC][cluster.cc:2419-_reconstruct_node_partition] node partition map:
+# [pod/repl-repair-nodes-1/flared] [140027727214272][NTC][cluster.cc:2424-_reconstruct_node_partition] 0: master (node_key=repl-repair-nodes-0.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121, node_balance=100)
+# [pod/repl-repair-nodes-1/flared] [140027727214272][NTC][cluster.cc:2428-_reconstruct_node_partition] 0: slave[0] (node_key=repl-repair-nodes-1.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121, node_balance=0)
+# [pod/repl-repair-nodes-1/flared] [140027727214272][NTC][cluster.cc:2438-_reconstruct_node_partition] node partition map (prepare):
+# [pod/repl-repair-nodes-1/flared] [140027727214272][NTC][cluster.cc:1123-reconstruct_node] reconstructing node map... (2 entries)
+# [pod/repl-repair-nodes-1/flared] [140027727214272][NTC][cluster.cc:2286-_reconstruct_node_partition] reconstructing node partition map... (from 2 entries in node map)
+# [pod/repl-repair-nodes-1/flared] [140027727214272][NTC][cluster.cc:2419-_reconstruct_node_partition] node partition map:
+# [pod/repl-repair-nodes-1/flared] [140027727214272][NTC][cluster.cc:2424-_reconstruct_node_partition] 0: master (node_key=repl-repair-nodes-0.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121, node_balance=100)
+# [pod/repl-repair-nodes-1/flared] [140027727214272][NTC][cluster.cc:2428-_reconstruct_node_partition] 0: slave[0] (node_key=repl-repair-nodes-1.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121, node_balance=0)
+# [pod/repl-repair-nodes-1/flared] [140027727214272][NTC][cluster.cc:2438-_reconstruct_node_partition] node partition map (prepare):
+# [pod/repl-repair-nodes-1/flared] [140027727214272][NTC][cluster.cc:1786-_shift_node_state] shifting node_state (node_key=repl-repair-nodes-1.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121, old_state=prepare, new_state=active)
+# [pod/repl-repair-nodes-1/flared] [140027727349440][NTC][cluster.cc:1123-reconstruct_node] reconstructing node map... (2 entries)
+# [pod/repl-repair-nodes-1/flared] [140027727349440][NTC][cluster.cc:2286-_reconstruct_node_partition] reconstructing node partition map... (from 2 entries in node map)
+# [pod/repl-repair-nodes-1/flared] [140027727349440][NTC][cluster.cc:2419-_reconstruct_node_partition] node partition map:
+# [pod/repl-repair-nodes-1/flared] [140027727349440][NTC][cluster.cc:2424-_reconstruct_node_partition] 0: master (node_key=repl-repair-nodes-0.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121, node_balance=100)
+# [pod/repl-repair-nodes-1/flared] [140027727349440][NTC][cluster.cc:2438-_reconstruct_node_partition] node partition map (prepare):
+# [pod/repl-repair-nodes-1/flared] [140027727349440][NTC][cluster.cc:1803-_shift_node_role] shifting node_role (node_key=repl-repair-nodes-1.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121, old_role=slave, old_partition=0, new_role=proxy, new_partition=-1)
+# [pod/repl-repair-nodes-1/flared] [140027727349440][NTC][cluster.cc:1123-reconstruct_node] reconstructing node map... (2 entries)
+# [pod/repl-repair-nodes-1/flared] [140027727349440][NTC][cluster.cc:2286-_reconstruct_node_partition] reconstructing node partition map... (from 2 entries in node map)
+# [pod/repl-repair-nodes-1/flared] [140027727349440][NTC][cluster.cc:2419-_reconstruct_node_partition] node partition map:
+# [pod/repl-repair-nodes-1/flared] [140027727349440][NTC][cluster.cc:2424-_reconstruct_node_partition] 0: master (node_key=repl-repair-nodes-0.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121, node_balance=100)
+# [pod/repl-repair-nodes-1/flared] [140027727349440][NTC][cluster.cc:2428-_reconstruct_node_partition] 0: slave[0] (node_key=repl-repair-nodes-1.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121, node_balance=0)
+# [pod/repl-repair-nodes-1/flared] [140027727349440][NTC][cluster.cc:2438-_reconstruct_node_partition] node partition map (prepare):
+# [pod/repl-repair-nodes-1/flared] [140027727349440][NTC][cluster.cc:1786-_shift_node_state] shifting node_state (node_key=repl-repair-nodes-1.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121, old_state=active, new_state=prepare)
+# [pod/repl-repair-nodes-1/flared] [140027727349440][NTC][cluster.cc:1803-_shift_node_role] shifting node_role (node_key=repl-repair-nodes-1.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121, old_role=proxy, old_partition=-1, new_role=slave, new_partition=0)
+# [pod/repl-repair-nodes-1/flared] [140027727619776][NTC][handler_reconstruction.cc:323-_run_once] starting dump operation (master=repl-repair-nodes-0.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121, partition=0, partition_size=1, interval=0, bwlimit=0)
+# [pod/repl-repair-nodes-1/flared] [140027727619776][NTC][op_dump.cc:286-_parse_text_client_parameters] found delimiter, dump completed (items=90)
+# [pod/repl-repair-nodes-1/flared] [140027727619776][NTC][handler_reconstruction.cc:333-_run_once] reconstruction via full dump completed (master=repl-repair-nodes-0.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121, partition=0, partition_size=1, interval=0, bwlimit=0)
+# [pod/repl-repair-nodes-1/flared] [140027727349440][NTC][cluster.cc:1123-reconstruct_node] reconstructing node map... (2 entries)
+# [pod/repl-repair-nodes-1/flared] [140027727349440][NTC][cluster.cc:2286-_reconstruct_node_partition] reconstructing node partition map... (from 2 entries in node map)
+# [pod/repl-repair-nodes-1/flared] [140027727349440][NTC][cluster.cc:2419-_reconstruct_node_partition] node partition map:
+# [pod/repl-repair-nodes-1/flared] [140027727349440][NTC][cluster.cc:2424-_reconstruct_node_partition] 0: master (node_key=repl-repair-nodes-0.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121, node_balance=100)
+# [pod/repl-repair-nodes-1/flared] [140027727349440][NTC][cluster.cc:2428-_reconstruct_node_partition] 0: slave[0] (node_key=repl-repair-nodes-1.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121, node_balance=0)
+# [pod/repl-repair-nodes-1/flared] [140027727349440][NTC][cluster.cc:2438-_reconstruct_node_partition] node partition map (prepare):
+# [pod/repl-repair-nodes-1/flared] [140027727349440][NTC][cluster.cc:1786-_shift_node_state] shifting node_state (node_key=repl-repair-nodes-1.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121, old_state=prepare, new_state=active)
+# 
+# === pods (flare-repl-repair) ===
+# NAME                              READY   STATUS        RESTARTS   AGE     IP            NODE                      NOMINATED NODE   READINESS GATES
+# blackhole                         1/1     Terminating   0          12s     10.244.0.14   flare-e2e-control-plane   <none>           <none>
+# debug-repl-repair                 1/1     Running       0          5m1s    10.244.0.7    flare-e2e-control-plane   <none>           <none>
+# flare-operator-5f7984d775-v796f   1/1     Running       0          66s     10.244.0.12   flare-e2e-control-plane   <none>           <none>
+# repl-repair-nodes-0               1/1     Running       0          4m48s   10.244.0.9    flare-e2e-control-plane   <none>           <none>
+# repl-repair-nodes-1               1/1     Running       0          4m43s   10.244.0.10   flare-e2e-control-plane   <none>           <none>
+# uid-victim                        1/1     Terminating   0          12s     10.244.0.13   flare-e2e-control-plane   <none>           <none>
+# 
+# === events (flare-repl-repair, by time) ===
+# LAST SEEN   TYPE      REASON              OBJECT                                 MESSAGE
+# 5m1s        Normal    Scheduled           pod/debug-repl-repair                  Successfully assigned flare-repl-repair/debug-repl-repair to flare-e2e-control-plane
+# 5m          Normal    Pulling             pod/debug-repl-repair                  Pulling image "busybox:1.36"
+# 5m          Normal    Pulled              pod/debug-repl-repair                  Successfully pulled image "busybox:1.36" in 428ms (428ms including waiting). Image size: 2217006 bytes.
+# 5m          Normal    Created             pod/debug-repl-repair                  Created container debug-repl-repair
+# 5m          Normal    Started             pod/debug-repl-repair                  Started container debug-repl-repair
+# 4m59s       Normal    Pulled              pod/flare-operator-5f7984d775-d6vpj    Container image "flare-operator:test" already present on machine
+# 4m59s       Normal    ScalingReplicaSet   deployment/flare-operator              Scaled up replica set flare-operator-5f7984d775 to 1
+# 4m59s       Normal    SuccessfulCreate    replicaset/flare-operator-5f7984d775   Created pod: flare-operator-5f7984d775-d6vpj
+# 4m59s       Normal    Started             pod/flare-operator-5f7984d775-d6vpj    Started container flare-operator
+# 4m59s       Normal    Created             pod/flare-operator-5f7984d775-d6vpj    Created container flare-operator
+# 4m59s       Normal    Scheduled           pod/flare-operator-5f7984d775-d6vpj    Successfully assigned flare-repl-repair/flare-operator-5f7984d775-d6vpj to flare-e2e-control-plane
+# 4m48s       Normal    Created             pod/repl-repair-nodes-0                Created container flared
+# 4m48s       Normal    Scheduled           pod/repl-repair-nodes-0                Successfully assigned flare-repl-repair/repl-repair-nodes-0 to flare-e2e-control-plane
+# 4m48s       Normal    SuccessfulCreate    statefulset/repl-repair-nodes          create Pod repl-repair-nodes-0 in StatefulSet repl-repair-nodes successful
+# 4m48s       Normal    Started             pod/repl-repair-nodes-0                Started container flared
+# 4m48s       Normal    Pulled              pod/repl-repair-nodes-0                Container image "flare-node:test" already present on machine
+# 4m43s       Normal    SuccessfulCreate    statefulset/repl-repair-nodes          create Pod repl-repair-nodes-1 in StatefulSet repl-repair-nodes successful
+# 4m43s       Normal    Started             pod/repl-repair-nodes-1                Started container flared
+# 4m43s       Normal    Created             pod/repl-repair-nodes-1                Created container flared
+# 4m43s       Normal    Pulled              pod/repl-repair-nodes-1                Container image "flare-node:test" already present on machine
+# 4m43s       Normal    Scheduled           pod/repl-repair-nodes-1                Successfully assigned flare-repl-repair/repl-repair-nodes-1 to flare-e2e-control-plane
+# 2m58s       Normal    ScalingReplicaSet   deployment/flare-operator              Scaled up replica set flare-operator-66d5694b85 to 1
+# 2m58s       Normal    Scheduled           pod/flare-operator-66d5694b85-jmw5c    Successfully assigned flare-repl-repair/flare-operator-66d5694b85-jmw5c to flare-e2e-control-plane
+# 2m58s       Normal    SuccessfulCreate    replicaset/flare-operator-66d5694b85   Created pod: flare-operator-66d5694b85-jmw5c
+# 2m57s       Normal    Pulled              pod/flare-operator-66d5694b85-jmw5c    Container image "flare-operator:test" already present on machine
+# 2m57s       Normal    Created             pod/flare-operator-66d5694b85-jmw5c    Created container flare-operator
+# 2m57s       Normal    Started             pod/flare-operator-66d5694b85-jmw5c    Started container flare-operator
+# 2m56s       Normal    Killing             pod/flare-operator-5f7984d775-d6vpj    Stopping container flare-operator
+# 2m56s       Normal    SuccessfulDelete    replicaset/flare-operator-5f7984d775   Deleted pod: flare-operator-5f7984d775-d6vpj
+# 2m56s       Normal    ScalingReplicaSet   deployment/flare-operator              Scaled down replica set flare-operator-5f7984d775 to 0 from 1
+# 66s         Normal    SuccessfulCreate    replicaset/flare-operator-5f7984d775   Created pod: flare-operator-5f7984d775-v796f
+# 66s         Normal    ScalingReplicaSet   deployment/flare-operator              Scaled up replica set flare-operator-5f7984d775 to 1 from 0
+# 66s         Normal    Scheduled           pod/flare-operator-5f7984d775-v796f    Successfully assigned flare-repl-repair/flare-operator-5f7984d775-v796f to flare-e2e-control-plane
+# 65s         Normal    Pulled              pod/flare-operator-5f7984d775-v796f    Container image "flare-operator:test" already present on machine
+# 65s         Normal    Started             pod/flare-operator-5f7984d775-v796f    Started container flare-operator
+# 65s         Normal    Created             pod/flare-operator-5f7984d775-v796f    Created container flare-operator
+# 64s         Normal    ScalingReplicaSet   deployment/flare-operator              Scaled down replica set flare-operator-66d5694b85 to 0 from 1
+# 64s         Normal    SuccessfulDelete    replicaset/flare-operator-66d5694b85   Deleted pod: flare-operator-66d5694b85-jmw5c
+# 64s         Normal    Killing             pod/flare-operator-66d5694b85-jmw5c    Stopping container flare-operator
+# 17s         Normal    Scheduled           pod/uid-victim                         Successfully assigned flare-repl-repair/uid-victim to flare-e2e-control-plane
+# 12s         Normal    Scheduled           pod/blackhole                          Successfully assigned flare-repl-repair/blackhole to flare-e2e-control-plane
+# 12s         Normal    Scheduled           pod/uid-victim                         Successfully assigned flare-repl-repair/uid-victim to flare-e2e-control-plane
+# 12s         Normal    Pulled              pod/uid-victim                         Container image "busybox:1.36" already present on machine
+# 12s         Normal    Created             pod/uid-victim                         Created container uid-victim
+# 12s         Normal    Started             pod/uid-victim                         Started container uid-victim
+# 11s         Normal    Created             pod/blackhole                          Created container blackhole
+# 11s         Normal    Started             pod/blackhole                          Started container blackhole
+# 11s         Normal    Pulled              pod/blackhole                          Container image "busybox:1.36" already present on machine
+# 11s         Normal    Killing             pod/uid-victim                         Stopping container uid-victim
+# 3s          Warning   Unhealthy           pod/repl-repair-nodes-1                Readiness probe failed:
+# 0s          Normal    Killing             pod/blackhole                          Stopping container blackhole
+# 
+# === describe flared pods (flare-repl-repair) ===
+# Name:             repl-repair-nodes-0
+# Namespace:        flare-repl-repair
+# Priority:         0
+# Service Account:  default
+# Node:             flare-e2e-control-plane/172.18.0.2
+# Start Time:       Thu, 01 Oct 2026 15:37:47 +0000
+# Labels:           app=flare
+#                   apps.kubernetes.io/pod-index=0
+#                   cluster=repl-repair
+#                   controller-revision-hash=repl-repair-nodes-74b9cfb7fb
+#                   statefulset.kubernetes.io/pod-name=repl-repair-nodes-0
+# Annotations:      <none>
+# Status:           Running
+# IP:               10.244.0.9
+# IPs:
+#   IP:           10.244.0.9
+# Controlled By:  StatefulSet/repl-repair-nodes
+# Containers:
+#   flared:
+#     Container ID:  containerd://30db4b73330d347e6f3f4e04d08f6f609a600c3d6c34e6653a771ff51157fa72
+#     Image:         flare-node:test
+#     Image ID:      docker.io/library/import-2026-10-01@sha256:a562d16d26a08b7094593b5c1723e5d0be1f3c86759135be7bb42f79bbc3fbf6
+#     Ports:         12121/TCP (flare), 9150/TCP (metrics)
+#     Host Ports:    0/TCP (flare), 0/TCP (metrics)
+#     Command:
+#       sh
+#       -c
+#       rm -rf /tmp/flare/*.hdb /tmp/flare/*.hdb.wal /tmp/flare/rocksdb && mkdir -p /tmp/flare && rm -f /tmp/flare/flared.pid && exec flared --config=/etc/flared/extra.conf --data-dir /tmp/flare --server-port 12121 --index-server-name flare-operator.flare-repl-repair.svc.cluster.local --index-server-port 12120 --storage-type=tch --metrics-server-port 9150 --stderr
+#     State:          Running
+#       Started:      Thu, 01 Oct 2026 15:37:47 +0000
+#     Ready:          True
+#     Restart Count:  0
+#     Limits:
+#       cpu:     500m
+#       memory:  512Mi
+#     Requests:
+#       cpu:      100m
+#       memory:   256Mi
+#     Liveness:   tcp-socket :12121 delay=10s timeout=1s period=5s successThreshold=1 failureThreshold=6
+#     Readiness:  exec [/bin/bash -c exec 3<>/dev/tcp/127.0.0.1/12121 || exit 1
+# printf 'stats nodes\r\nquit\r\n' >&3
+# out=$(tr -d '\r' <&3)
+# me="$(hostname -f):12121"
+# case "$out" in *"STAT $me:state active"*) exit 0;; esac
+# # Limbo clause (mirrors the helm chart): a syncing member of a
+# # partition with NO active master has nothing to sync from —
+# # total-partition recovery. Report Ready so the OrderedReady
+# # StatefulSet can recreate the peer that will become master.
+# mypart=$(printf '%s\n' "$out" | sed -n "s/^STAT $me:partition //p")
+# [ -n "$mypart" ] || exit 1
+# [ "$mypart" != "-1" ] || exit 1
+# for key in $(printf '%s\n' "$out" | sed -n "s/^STAT \(.*\):partition $mypart$/\1/p"); do
+#   printf '%s\n' "$out" | grep -q "^STAT $key:role master$" || continue
+#   printf '%s\n' "$out" | grep -q "^STAT $key:state active$" && exit 1
+# done
+# exit 0
+# ] delay=5s timeout=4s period=5s successThreshold=1 failureThreshold=3
+#     Environment:  <none>
+#     Mounts:
+#       /etc/flared from flared-config (rw)
+#       /var/run/secrets/kubernetes.io/serviceaccount from kube-api-access-xjprm (ro)
+# Conditions:
+#   Type                        Status
+#   PodReadyToStartContainers   True 
+#   Initialized                 True 
+#   Ready                       True 
+#   ContainersReady             True 
+#   PodScheduled                True 
+# Volumes:
+#   flared-config:
+#     Type:      ConfigMap (a volume populated by a ConfigMap)
+#     Name:      repl-repair-config
+#     Optional:  false
+#   kube-api-access-xjprm:
+#     Type:                    Projected (a volume that contains injected data from multiple sources)
+#     TokenExpirationSeconds:  3607
+#     ConfigMapName:           kube-root-ca.crt
+#     Optional:                false
+#     DownwardAPI:             true
+# QoS Class:                   Burstable
+# Node-Selectors:              <none>
+# Tolerations:                 node.kubernetes.io/not-ready:NoExecute op=Exists for 300s
+#                              node.kubernetes.io/unreachable:NoExecute op=Exists for 300s
+# 
+# 
+# Name:             repl-repair-nodes-1
+# Namespace:        flare-repl-repair
+# Priority:         0
+# Service Account:  default
+# Node:             flare-e2e-control-plane/172.18.0.2
+# Start Time:       Thu, 01 Oct 2026 15:37:52 +0000
+# Labels:           app=flare
+#                   apps.kubernetes.io/pod-index=1
+#                   cluster=repl-repair
+#                   controller-revision-hash=repl-repair-nodes-74b9cfb7fb
+#                   statefulset.kubernetes.io/pod-name=repl-repair-nodes-1
+# Annotations:      <none>
+# Status:           Running
+# IP:               10.244.0.10
+# IPs:
+#   IP:           10.244.0.10
+# Controlled By:  StatefulSet/repl-repair-nodes
+# Containers:
+#   flared:
+#     Container ID:  containerd://35c15b2fec3b2355863d00bc6557e63ac70ffb36c4f1383562371c320dad9be9
+#     Image:         flare-node:test
+#     Image ID:      docker.io/library/import-2026-10-01@sha256:a562d16d26a08b7094593b5c1723e5d0be1f3c86759135be7bb42f79bbc3fbf6
+#     Ports:         12121/TCP (flare), 9150/TCP (metrics)
+#     Host Ports:    0/TCP (flare), 0/TCP (metrics)
+#     Command:
+#       sh
+#       -c
+#       rm -rf /tmp/flare/*.hdb /tmp/flare/*.hdb.wal /tmp/flare/rocksdb && mkdir -p /tmp/flare && rm -f /tmp/flare/flared.pid && exec flared --config=/etc/flared/extra.conf --data-dir /tmp/flare --server-port 12121 --index-server-name flare-operator.flare-repl-repair.svc.cluster.local --index-server-port 12120 --storage-type=tch --metrics-server-port 9150 --stderr
+#     State:          Running
+#       Started:      Thu, 01 Oct 2026 15:37:52 +0000
+#     Ready:          True
+#     Restart Count:  0
+#     Limits:
+#       cpu:     500m
+#       memory:  512Mi
+#     Requests:
+#       cpu:      100m
+#       memory:   256Mi
+#     Liveness:   tcp-socket :12121 delay=10s timeout=1s period=5s successThreshold=1 failureThreshold=6
+#     Readiness:  exec [/bin/bash -c exec 3<>/dev/tcp/127.0.0.1/12121 || exit 1
+# printf 'stats nodes\r\nquit\r\n' >&3
+# out=$(tr -d '\r' <&3)
+# me="$(hostname -f):12121"
+# case "$out" in *"STAT $me:state active"*) exit 0;; esac
+# # Limbo clause (mirrors the helm chart): a syncing member of a
+# # partition with NO active master has nothing to sync from —
+# # total-partition recovery. Report Ready so the OrderedReady
+# # StatefulSet can recreate the peer that will become master.
+# mypart=$(printf '%s\n' "$out" | sed -n "s/^STAT $me:partition //p")
+# [ -n "$mypart" ] || exit 1
+# [ "$mypart" != "-1" ] || exit 1
+# for key in $(printf '%s\n' "$out" | sed -n "s/^STAT \(.*\):partition $mypart$/\1/p"); do
+#   printf '%s\n' "$out" | grep -q "^STAT $key:role master$" || continue
+#   printf '%s\n' "$out" | grep -q "^STAT $key:state active$" && exit 1
+# done
+# exit 0
+# ] delay=5s timeout=4s period=5s successThreshold=1 failureThreshold=3
+#     Environment:  <none>
+#     Mounts:
+#       /etc/flared from flared-config (rw)
+#       /var/run/secrets/kubernetes.io/serviceaccount from kube-api-access-g9b6w (ro)
+# Conditions:
+#   Type                        Status
+#   PodReadyToStartContainers   True 
+#   Initialized                 True 
+#   Ready                       True 
+#   ContainersReady             True 
+#   PodScheduled                True 
+# Volumes:
+#   flared-config:
+#     Type:      ConfigMap (a volume populated by a ConfigMap)
+#     Name:      repl-repair-config
+#     Optional:  false
+#   kube-api-access-g9b6w:
+#     Type:                    Projected (a volume that contains injected data from multiple sources)
+#     TokenExpirationSeconds:  3607
+#     ConfigMapName:           kube-root-ca.crt
+#     Optional:                false
+#     DownwardAPI:             true
+# QoS Class:                   Burstable
+# Node-Selectors:              <none>
+# Tolerations:                 node.kubernetes.io/not-ready:NoExecute op=Exists for 300s
+#                              node.kubernetes.io/unreachable:NoExecute op=Exists for 300s
+# 
+# fault cleared: 10.244.0.9 → 10.244.0.10 forwards again
+# Cleaning up cluster 'repl-repair'
+# === Suite: prepare-evidence ===
+# Cleaning up cluster 'prep-evid'
+# Deploying cluster 'prep-evid' in namespace 'flare-prep-evid'
+# Waiting for: namespace flare-prep-evid not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-prep-evid (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap prep-evid-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting for StatefulSet prep-evid-nodes to be ready...
+# Waiting for: all 2 pods ready (timeout: 180s)
+#   OK after 0s
+# Waiting for: 2 nodes registered (timeout: 300s)
+#   OK after 0s
+# Waiting 20s grace period for operator reconciliation...
+# Checking operator activity...
+# --- Operator logs (flare-operator) ---
+#   [DEBUG] Received command: node state prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local 12121 active
+#   [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeState
+#     "prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local"
+#     12121
+#     (FlareOperator.K8s.FlareSta
+#   [flare-operator] TEST SEAM: dropping node state event from prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121 (FLARE_TEST_DROP_NODE_STATE)
+#   [TRACE] Event: NodeState prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121 | Result: Prepare->Active | Reason: reconstruction complete
+#   [TcpClient] node sync v4294967310 to 10.244.0.17:12121: reply-confirmed=true
+#   [TcpClient] node sync v4294967310 to 10.244.0.18:12121: reply-confirmed=true
+#   [TopologyBroadcast] Broadcast attempt complete (v4294967310); all targets reply-confirmed=true
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1893ms (nodes=2 M=1 S=1 D=0 P=1)
+#   [flare-operator] grace period: 18 cycles remaining
+#   [TopologyAudit] node=prep-evid-nodes-0.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121 uid=(some a0971422-a0e0-482e-8878-c55acf490657) desired=4294967317 reported=(some 4294967310) verdict=behind
+#   [flare-operator] retrying an unconfirmed topology send (pending v4294967317; publishing v4294967317)
+#   [flare-operator] broadcast trigger: versionMoved=true pending=v4294967317 repairHeld=0 activeNotReady=0
+#   [flare-operator] topology changed (v4294967310 → v4294967317), broadcasting
+#   [TopologyBroadcast] Broadcasting node sync v4294967317 (2 nodes) to 2 pods
+#   [DEBUG] Received command: node state prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local 12121 active
+#   [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeState
+#     "prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local"
+#     12121
+#     (FlareOperator.K8s.FlareSta
+#   [flare-operator] TEST SEAM: dropping node state event from prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121 (FLARE_TEST_DROP_NODE_STATE)
+#   [TRACE] Event: NodeState prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121 | Result: Prepare->Active | Reason: reconstruction complete
+#   [TcpClient] node sync v4294967317 to 10.244.0.18:12121: reply-confirmed=true
+#   [TcpClient] node sync v4294967317 to 10.244.0.17:12121: reply-confirmed=true
+#   [TopologyBroadcast] Broadcast attempt complete (v4294967317); all targets reply-confirmed=true
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1759ms (nodes=2 M=1 S=1 D=0 P=1)
+#   
+# Waiting for: seam drops a node state event (timeout: 240s)
+#   OK after 0s
+# Waiting for: the slave reports a completed reconstruction (timeout: 120s)
+#   OK after 0s
+# Waiting for: PREPARE-REPAIR activates on evidence (timeout: 300s)
+#   OK after 55s
+# Waiting for: slave Active in the operator's map (timeout: 60s)
+#   OK after 0s
+# Cleaning up cluster 'prep-evid'
+# === Suite: native-metrics ===
+# Cleaning up cluster 'native-metrics'
+# Deploying cluster 'native-metrics' in namespace 'flare-native-metrics'
+# Waiting for: namespace flare-native-metrics not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-native-metrics (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap native-metrics-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting for StatefulSet native-metrics-nodes to be ready...
+# Waiting for: all 2 pods ready (timeout: 180s)
+#   OK after 0s
+# Waiting for: 2 nodes registered (timeout: 300s)
+#   OK after 0s
+# Waiting 50s grace period for operator reconciliation...
+# Checking operator activity...
+# --- Operator logs (flare-operator-native-metrics) ---
+#   [TopologyBroadcast] Broadcasting node sync v4294967304 (2 nodes) to 2 pods
+#   [TcpClient] node sync v4294967304 to 10.244.0.21:12121: reply-confirmed=true
+#   [TcpClient] node sync v4294967304 to 10.244.0.22:12121: reply-confirmed=true
+#   [TopologyBroadcast] Broadcast attempt complete (v4294967304); all targets reply-confirmed=true
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1866ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 18 cycles remaining
+#   [TopologyAudit] node=native-metrics-nodes-0.native-metrics-nodes.flare-native-metrics.svc.cluster.local:12121 uid=(some c5c739d2-8e47-4773-baaa-a689f54b7027) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1234ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 17 cycles remaining
+#   [TopologyAudit] node=native-metrics-nodes-1.native-metrics-nodes.flare-native-metrics.svc.cluster.local:12121 uid=(some 82757906-609a-4005-b728-3f3bd1f081ea) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1380ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 16 cycles remaining
+#   [TopologyAudit] node=native-metrics-nodes-0.native-metrics-nodes.flare-native-metrics.svc.cluster.local:12121 uid=(some c5c739d2-8e47-4773-baaa-a689f54b7027) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1215ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 15 cycles remaining
+#   [TopologyAudit] node=native-metrics-nodes-1.native-metrics-nodes.flare-native-metrics.svc.cluster.local:12121 uid=(some 82757906-609a-4005-b728-3f3bd1f081ea) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1209ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 14 cycles remaining
+#   [TopologyAudit] node=native-metrics-nodes-0.native-metrics-nodes.flare-native-metrics.svc.cluster.local:12121 uid=(some c5c739d2-8e47-4773-baaa-a689f54b7027) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1215ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 13 cycles remaining
+#   [TopologyAudit] node=native-metrics-nodes-1.native-metrics-nodes.flare-native-metrics.svc.cluster.local:12121 uid=(some 82757906-609a-4005-b728-3f3bd1f081ea) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1215ms (nodes=2 M=1 S=1 D=0 P=0)
+#   
+# Cleaning up cluster 'native-metrics'
+# Tests: 15, Failures: 3
+# RESULT: FAIL
+1..15
+ok 1 - control: writes to the master replicate to the slave
+ok 2 - cut link: the master drops replica writes and the operator requests a repair
+ok 3 - the repair runs: held as proxy, confirmed, re-seated, reconstructed; keys recovered without another drop
+not ok 4 - SAF-05: a drop seen while resync is disabled is held, survives an operator restart, and is repaired once the gate opens
+not ok 5 - SAF-05: a ledger save that fails is marked unsaved, retried every pass, lands when allowed, and survives a restart
+not ok 6 - SAF-05: a corrupt ledger is held as unavailable, never replaced by an empty one; the drop seen meanwhile is recovered once it is readable
+ok 7 - SAF-06: the delete carries the observed pod UID as an API precondition; a same-name pod with another UID is refused by the apiserver
+ok 8 - SAF-06: the UID-precondition delete has a deadline — a server that accepts and never answers returns within it
+ok 9 - the lost-activation condition is staged: the activation is dropped and a reconstruction completed
+ok 10 - the repair re-derives Prepare→Active from completion evidence and names it
+ok 11 - GET /metrics answers HTTP 200 with Prometheus text
+ok 12 - memcached_current_items equals stats curr_items verbatim
+ok 13 - writes are reflected in /metrics (curr_items grows, set counter present)
+ok 14 - flared_version and rocksdb passthrough are exported
+ok 15 - /metrics still answers with the operator scaled to 0 (SPOF removed)

@@ -284,10 +284,14 @@ def purgeSuite : TestSuite := {
 
 -- ─── T9 (bounded): a far-behind replica, master memory, tombstone GC ────
 
+-- Two partitions: the lagged-successor test loses one master, which must be
+-- 25% of the nodes. In a 1-partition x 2-replica cluster one master is 50%,
+-- which trips the circuit breaker at its default threshold, and failover is
+-- then paused by design (finding recorded under EV-09, 2026-10-02).
 private def limitsCfg : ClusterConfig := {
   name := "cont-repl-limits"
   «namespace» := "flare-cont-repl-limits"
-  partitions := 1
+  partitions := 2
   replicas := 2
   operatorName := "flare-operator"
   debugPod := "debug-cont-repl-limits"
@@ -365,6 +369,56 @@ def limitsSuite : TestSuite := {
             match ← execInDebugPod limitsCfg.debugPod limitsCfg.«namespace» s!"printf 'get {k}\\r\\n' | nc -w 3 {sIp} {limitsCfg.flarePort}" with
             | .ok o => if containsSubstr o "VALUE" then return .fail s!"{k} resurrected on the replica"
             | .error e => return .fail e
+          return .pass },
+
+    -- Handoff §3: promotion with a LAGGED successor. The master is lost
+    -- while its only follower is cut off and behind. Failover still
+    -- promotes the follower (availability over the gap: replication is
+    -- asynchronous, design §5.3) and must say so; the writes it missed are
+    -- the RPO this deployment accepts, and the test records how many.
+    { name := "lagged successor: the master is lost while its follower is cut off and behind; failover promotes it as not loss-free, logs that, and the gap is the writes it never received"
+      run := do
+        match ← c.pair with
+        | .error e => return .fail e
+        | .ok (mPod, mIp, sPod, sIp) =>
+          let items0 := c.currItems
+          match ← cut mIp sIp with
+          | .error e => return .fail e
+          | .ok () => pure ()
+          IO.sleep 2000
+          let stored ← writeKeys limitsCfg.debugPod limitsCfg.«namespace» mIp limitsCfg.flarePort "lagged" 50
+          let mItems ← items0 mIp
+          let sItems ← items0 sIp
+          IO.eprintln s!"# under the cut: stored {stored}/50 on the master; items master={mItems} replica={sItems}"
+          if stored == 0 || sItems ≥ mItems then
+            heal mIp sIp; return .fail "precondition: the follower is not behind the master"
+          -- Lose the master. The replica stays cut off from the old master's IP;
+          -- the replacement pod gets a new IP, so heal right after the kill.
+          discard <| kubectl ["delete", "pod", mPod, "-n", limitsCfg.«namespace», "--grace-period=0", "--force", "--wait=false"]
+          heal mIp sIp
+          let promoted ← waitForCondition "failover promotes the lagged follower" 240 do
+            let entries ← c.nodeView
+            return (findMasterFqdn entries 0).bind (fun f => (f.splitOn ".").head?) == some sPod
+          let log ← c.opLog 200000
+          let notLossFree := (log.splitOn "\n").any fun l =>
+            containsSubstr l "PROMOTION NOT LOSS-FREE" && containsSubstr l sPod
+          let newItems ← items0 sIp
+          IO.eprintln s!"# failover: promoted={promoted}; NOT LOSS-FREE logged={notLossFree}; items old master={mItems} new master={newItems} (gap {mItems - newItems})"
+          if !promoted then return .fail "the lagged follower was not promoted: the partition stayed without a master"
+          if !notLossFree then return .fail "the lagged follower was promoted without the NOT LOSS-FREE line"
+          -- The returning ex-master must not overrule the new master's
+          -- history: it rejoins as a follower of the new epoch.
+          let rejoined ← waitForCondition "the ex-master rejoins and follows the new master" 480 do
+            let entries ← c.nodeView
+            match entries.find? (fun e => (e.fqdn.splitOn ".").head? == some mPod) with
+            | none => return false
+            | some e =>
+              if e.role != 1 || e.state != 0 then return false
+              match ← getPodIp mPod limitsCfg.«namespace» with
+              | none => return false
+              | some ip => return (← c.statStr ip "repl_follow_state") == some "following"
+          IO.eprintln s!"# ex-master {mPod} rejoined as a follower={rejoined}; items now new master={← items0 sIp}"
+          if !rejoined then return .fail "the ex-master did not rejoin as a follower of the new master"
           return .pass }
   ]
 }

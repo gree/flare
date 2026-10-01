@@ -732,6 +732,22 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs, all green by test assertions) — PR #144 merge revision of 5147e98; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36841064685"
+        },
+        {
+          "check": "CHECK-01",
+          "commit": "035096360e75b6041cae45846046baff73deaabf",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs, all green) — PR #144 merge revision of 3067cb4; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36846255460"
+        },
+        {
+          "check": "CHECK-01-startup",
+          "commit": "035096360e75b6041cae45846046baff73deaabf",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs, all green) — PR #144 merge revision of 3067cb4; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36846255460"
         }
       ],
       "tasks": [
@@ -1248,6 +1264,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs, all green by test assertions) — PR #144 merge revision of 5147e98; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36841064685"
+        },
+        {
+          "check": "CHECK-03-follow",
+          "commit": "035096360e75b6041cae45846046baff73deaabf",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs, all green) — PR #144 merge revision of 3067cb4; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36846255460"
         }
       ],
       "tasks": [
@@ -1726,6 +1750,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request, leg continuous-replication (planned promotion; the test passed by its assertions at this commit, but its log shows the drain guard refused the proven follower and failover promoted it)",
           "result": "fail",
           "report": "docs/reports/2026-10-01-saf11-breaker-unavailable.md"
+        },
+        {
+          "check": "CHECK-04-follow",
+          "commit": "035096360e75b6041cae45846046baff73deaabf",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs, all green) — PR #144 merge revision of 3067cb4; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36846255460"
         }
       ],
       "tasks": [
@@ -1734,9 +1766,9 @@
         "SAF-08"
       ],
       "review": {
-        "commit": "e2ca4c6821fa27d935c783aefd814afa3802ff52",
-        "date": "2026-09-24",
-        "note": "2026-09-30 production-observability increment on 4a516e6 plus working tree: Changed shared metrics/test/runbook surfaces only: topology summary cannot authorize promotion, deletion, rebuild or data-repair completion. This control's runtime decision path is unchanged. 174 unit checks, 3 Helm rendering checks and operator build pass. Prometheus evaluation and runtime CI pending; no EV promoted. See docs/PRODUCTION-READINESS.md and docs/reports/2026-09-30-topology-monitoring.md. Previous: 2026-09-27 applied-topology audit on 87f1728 plus working tree: The new round-robin probe changes delivery feedback only. Unknown/current/ahead samples never authorize deletion, promotion, rebuild, failover or completion of data repair; this control's decision rules are unchanged. Probe budgets are 2s/3s/2s plus kill grace; scale latency unmeasured. 165 unit checks and operator/E2E builds pass; runtime CI pending. See docs/reports/2026-09-27-topology-observation.md. Verification unchanged. Previous: 2026-09-27 SAF-09 increment on 92a46c4 plus working tree: Read-guard E2E now requires blocked-map delivery to be logged and recovery with desired balance already zero. This is not new promotion or source-lineage evidence. 154 unit checks pass; runtime CI pending. See docs/reports/2026-09-27-topology-delivery-retry.md. Verification unchanged. Previous: 2026-09-27 working-tree review on 41db502: Read-guard E2E at 41db502 failed because local balance changed, not because stale reads passed. The revised fault now blocks operator/replica traffic in both directions; promotion/Prepare logic is unchanged. New runtime evidence pending CI; verification unchanged. Previous review: CI 36228379804 at 0ed3193: selective routing assertion passed but scenario FAILED in cleanup; corrected cleanup to wait for balance 50 recovery before requesting 0, exposing rather than claiming to fix the SAF-09 retransmission residual. Revised E2E pending. 2026-09-26 follow-up on 3cb1d5a plus working-tree test: Added an E2E requiring the replica's own stats nodes balance to stay 50 through a successful GET of a new master value, while applied cursor and forwarded-apply counter remain unchanged. This isolates the local read guard from operator withholding; does not claim promotion safety. Lean E2E build passed; runtime result pending CI, verification unchanged. Earlier review: Audit follow-up: inspected e2ca4c6 plus working-tree tests/docs. Cold-start unknown replicas are withheld and future observation timestamps are Unknown. Added local flared read guard; the E2E now checks values across a cut, but has not been executed for this patch. No new promotion guarantee. See docs/reports/2026-09-24-saf10-audit-followups.md; runs are not attributed to an uncommitted SHA, verification remains unverified. Prior assessment: Runs on this revision: regression suites replica-repair/operator-restart/failover/read-balance/prepare-evidence 30/30 pass; continuous-replication 12/12 pass (second consecutive full pass, run 8). Previous note: SAF-10c eligibility added around the promotion paths without changing them: candidate shaping is partitionMap-only (same device as standby de-prioritisation; shapePromotionCandidates_nodeMap proves the node map is untouched) so handleFailover/DrainWithPromotion and their CLE proofs are unchanged; promoteMasterlessPartition gained an exclusion list for its Active-slave tiers (its CLE proof re-elaborated unchanged). Drain (planned) excludes unproven and unfit; failover excludes only unfit and logs an unproven promotion as NOT LOSS-FREE. Read withholding is applied at commit after normalization. 129 flare_unit checks pass. No E2E yet for these paths; nodes not in the mode are unaffected (all lists empty). PARTIAL / UNVERIFIED unchanged."
+        "commit": "035096360e75b6041cae45846046baff73deaabf",
+        "date": "2026-10-01",
+        "note": "Run 36846255460 (merge rev 0350963): first CI execution where the planned promotion went through the graceful drain — follower promoted 10 s after the delete (inside the 30 s preStop), drain logged, guard did not refuse, no NOT-LOSS-FREE line. Earlier CHECK-04-follow passes showed promotion via failover, not the drain. One run. PARTIAL / UNVERIFIED unchanged."
       }
     },
     {
@@ -2223,6 +2255,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs, all green by test assertions) — PR #144 merge revision of 5147e98; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36841064685"
+        },
+        {
+          "check": "CHECK-06",
+          "commit": "035096360e75b6041cae45846046baff73deaabf",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs, all green) — PR #144 merge revision of 3067cb4; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36846255460"
         }
       ],
       "tasks": [
@@ -2610,13 +2650,21 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs, all green by test assertions) — PR #144 merge revision of 5147e98; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36841064685"
+        },
+        {
+          "check": "CHECK-09",
+          "commit": "035096360e75b6041cae45846046baff73deaabf",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs, all green) — PR #144 merge revision of 3067cb4; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36846255460"
         }
       ],
       "tasks": [],
       "review": {
         "commit": "80e466bcbb5cabb9505ee9cf7e086e69750e1640",
         "date": "2026-10-01",
-        "note": "Run 36812371158 (merge rev 80e466b): the breaker tripped 20 s after the 4->1 scale-down, so CHECK-09 passed. This is the timing-dependent outcome the SAF-11 finding already describes (per-tick dead count; trip needs half the cluster to die inside one tick) and does not close it; the no-trip tally stays at 5 CI occurrences. No code change; the window definition is awaiting the reviewer. PARTIAL / UNVERIFIED unchanged. Run 36816259807 (merge rev b706686) tripped at 5 s; same assessment. Run 36820029377 (merge rev 9dc131f) tripped at 5 s; same assessment. Run 36826494031 (merge rev 6f1edf0) tripped at 5 s; same assessment. Run 36831110279 (merge rev 8ed8f1d) tripped in its leg; same assessment. Run 36835797814 (merge rev 37bcb3e, pre-SAF-11-fix code) tripped at 5 s. Run 36841064685 (merge rev b5bb4a9) is the first run with the SAF-11 count: tripped at 5 s. One run; the no-trip was intermittent, so this alone does not show the fix."
+        "note": "Run 36812371158 (merge rev 80e466b): the breaker tripped 20 s after the 4->1 scale-down, so CHECK-09 passed. This is the timing-dependent outcome the SAF-11 finding already describes (per-tick dead count; trip needs half the cluster to die inside one tick) and does not close it; the no-trip tally stays at 5 CI occurrences. No code change; the window definition is awaiting the reviewer. PARTIAL / UNVERIFIED unchanged. Run 36816259807 (merge rev b706686) tripped at 5 s; same assessment. Run 36820029377 (merge rev 9dc131f) tripped at 5 s; same assessment. Run 36826494031 (merge rev 6f1edf0) tripped at 5 s; same assessment. Run 36831110279 (merge rev 8ed8f1d) tripped in its leg; same assessment. Run 36835797814 (merge rev 37bcb3e, pre-SAF-11-fix code) tripped at 5 s. Run 36841064685 (merge rev b5bb4a9) is the first run with the SAF-11 count: tripped at 5 s. One run; the no-trip was intermittent, so this alone does not show the fix. Run 36846255460 (merge rev 0350963, SAF-11 count) tripped at 10 s."
       }
     },
     {
@@ -3334,6 +3382,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs, all green by test assertions) — PR #144 merge revision of 5147e98; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36841064685"
+        },
+        {
+          "check": "CHECK-16",
+          "commit": "035096360e75b6041cae45846046baff73deaabf",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs, all green) — PR #144 merge revision of 3067cb4; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36846255460"
         }
       ],
       "tasks": [
@@ -3566,6 +3622,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs, all green by test assertions) — PR #144 merge revision of 5147e98; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36841064685"
+        },
+        {
+          "check": "CHECK-17",
+          "commit": "035096360e75b6041cae45846046baff73deaabf",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs, all green) — PR #144 merge revision of 3067cb4; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36846255460"
         }
       ],
       "tasks": [
@@ -4031,6 +4095,22 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs, all green by test assertions) — PR #144 merge revision of 5147e98; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36841064685"
+        },
+        {
+          "check": "CHECK-18",
+          "commit": "035096360e75b6041cae45846046baff73deaabf",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs, all green) — PR #144 merge revision of 3067cb4; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36846255460"
+        },
+        {
+          "check": "CHECK-18-purge",
+          "commit": "035096360e75b6041cae45846046baff73deaabf",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs, all green) — PR #144 merge revision of 3067cb4; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36846255460"
         }
       ],
       "tasks": [
@@ -4366,6 +4446,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs, all green by test assertions) — PR #144 merge revision of 5147e98; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36841064685"
+        },
+        {
+          "check": "CHECK-20",
+          "commit": "035096360e75b6041cae45846046baff73deaabf",
+          "date": "2026-10-01",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (5 legs, all green) — PR #144 merge revision of 3067cb4; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36846255460"
         }
       ],
       "tasks": [

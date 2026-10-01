@@ -77,3 +77,17 @@ master in follow mode would not hand off during preStop.
 Fix: the master's head is read from any Ready pod, Terminating included. A
 Terminating slave is still not read, because it is not a candidate. The
 planned-promotion test now fails when the guard refuses. CI pending.
+
+## CI after the fixes — PR run 36846255460 on 3067cb4 (merge rev 0350963): all five legs PASS
+
+- **Planned promotion through the drain, first time on CI.** The follower was
+  promoted 10 s after the master was deleted, inside the 30 s preStop. The
+  drain was logged, the guard did not refuse, and no not-loss-free line
+  appeared. Before the fix the same test promoted by failover after 35 s.
+- **Breaker (SAF-11 count).** Tripped at 10 s. With 5 s in the previous run,
+  that makes two runs with the new count and no no-trip. The old no-trip was
+  intermittent, so this is consistent with the fix, not proof of it.
+- **Startup republish.** The first send was again pending-only at weight 25.
+
+Legs: continuous-replication 20/20, topology 47/47, replication 45/45,
+wal-recovery 48/48, breaker-migration 38/38.

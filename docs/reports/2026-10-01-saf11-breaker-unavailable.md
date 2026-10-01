@@ -45,3 +45,16 @@ Behavioural consequences:
   and the old count for the same tick. 186/186 pass locally.
 - The circuit-breaker E2E is unchanged; it should now trip on every run.
   CI pending.
+
+## Related fix in the same push: planned-promotion E2E (EV-04)
+
+The planned-promotion test never logged the graceful drain on CI. Cause: the
+operator's startup grace is 24 reconcile cycles, not 120 s. In the
+continuous-replication suite a pass takes 2-3 s on top of the 5 s interval,
+so the grace lasts about 190 s. The test's wait for a 150 s-old operator
+deleted the master inside the grace, where drain and dead detection are
+skipped. Once the grace ended, the pod was gone and dead-node failover
+promoted the follower about 35 s after the delete. The test now waits for the
+operator's own `grace period: 0 cycles remaining` line plus one cycle, and it
+now requires the drain line. Earlier passes proved the promotion and the
+epoch advance, not the drain path.

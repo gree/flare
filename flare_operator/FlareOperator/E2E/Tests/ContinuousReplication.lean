@@ -886,15 +886,25 @@ def suite : TestSuite := {
           -- (run 36748059941) the master was deleted ~2 min after that
           -- restart: no drain, no failover, the StatefulSet recreated the
           -- master and it re-registered as master — "not promoted". Wait
-          -- until the operator pod is past its grace period first.
+          -- until the operator is past its grace period first.
           let jp := "{.items[0].status.startTime}"
           let opAge : IO (Option Nat) := do
             match ← hostCmd "sh" ["-c", s!"st=$(kubectl get pod -n {cfg.«namespace»} -l app={cfg.operatorName} -o jsonpath='{jp}'); now=$(date +%s); t=$(date -d \"$st\" +%s 2>/dev/null || date -j -f %Y-%m-%dT%H:%M:%SZ \"$st\" +%s); echo $((now - t))"] with
             | .ok o => return o.trim.toNat?
             | .error _ => return none
-          let pastGrace ← waitForCondition "operator past its startup grace period (pod older than 150 s)" 240 do
-            return (← opAge).getD 0 ≥ 150
-          IO.eprintln s!"# operator pod age before the delete: {← opAge}s (past grace={pastGrace})"
+          -- The grace period is 24 reconcile CYCLES, not 120 s: each cycle is
+          -- the 5 s interval plus the pass itself, and passes here take 2-3 s
+          -- (stats probes), so 24 cycles last ~190 s. The earlier wait for a
+          -- 150 s-old pod still deleted the master inside the grace: no drain
+          -- line on any CI run, and the follower was promoted ~35 s later by
+          -- dead-node failover once grace ended (EV-04 caveat). Wait for the
+          -- operator's own last grace line instead, then one more cycle.
+          let pastGrace ← waitForCondition "operator logged the end of its startup grace period" 360 do
+            return containsSubstr (← opLog 200000) "grace period: 0 cycles remaining"
+          if pastGrace then IO.sleep 10000
+          IO.eprintln s!"# operator pod age before the delete: {← opAge}s (grace ended per its log={pastGrace})"
+          if !pastGrace then
+            return .fail "precondition: the operator never logged the end of its startup grace period within 360 s; a delete now would skip the drain"
           discard <| kubectl ["delete", "pod", mPod, "-n", cfg.«namespace», "--wait=false"]
           IO.eprintln s!"# deleted master pod {mPod} (graceful, preStop {cfg.drainSeconds}s); follower {sPod} was following epoch {epoch0}"
           let promoted ← waitForCondition "the follower is promoted to master (drain)" 180 do
@@ -907,6 +917,11 @@ def suite : TestSuite := {
           IO.eprintln s!"# promotion: follower promoted={promoted}; drain logged={drained}; drain blocked (guard refused)={blocked}; NOT LOSS-FREE logged={notLossFree}; new master epoch={← statStr sIp "rocksdb_source_epoch"}"
           if !promoted then return .fail s!"the follower was not promoted (drain logged={drained}, guard refused={blocked})"
           if notLossFree then return .fail "a PLANNED promotion went through as not loss-free: the eligibility gate did not prove the follower"
+          -- The promotion must come from the drain path (inside the preStop
+          -- window), not from dead-node failover after the pod is gone; that
+          -- is what makes it PLANNED. Before the grace wait above was fixed,
+          -- every CI run promoted by failover and this was only a caveat.
+          if !drained then return .fail "the follower was promoted, but not by the graceful drain (no drain line): this was dead-node failover after the pod was gone"
           if (← podUid sPod).getD "?" != uid0 then return .fail "the promoted pod was recreated"
           -- flared applies the promotion on its next accepted map; the epoch
           -- advances inside that role shift.

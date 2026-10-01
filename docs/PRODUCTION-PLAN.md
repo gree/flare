@@ -40,7 +40,17 @@ at phase 1 and a separate design starts.
 | 11 | Backup restore and rollback rehearsal in staging |
 | 12 | Canary definition with stop and rollback criteria, and a reviewer sign-off on residual risks |
 
-## Decisions needed from the user (with options)
+## Decisions taken (user, 2026-10-02)
+
+| Decision | Choice |
+|---|---|
+| A0, data-loss guarantee | Asynchronous loss accepted. RPO equals the replication lag. |
+| Item 5, client result | flared option `read-unavailable-error`, default off (keeps the miss). Enable it where flare is the primary store. |
+| 1p × 2r and the breaker | Never trip with fewer than 2 unavailable nodes. CR `circuitBreaker.minUnavailableToTrip`, default 2. |
+| SAF-11 definition | Confirmed as implemented. |
+| Startup grace | Wall-clock, 120 s. |
+
+## Decisions needed from the user (with options, as asked on 2026-10-02)
 
 1. **A0, data-loss guarantee.**
    - (a) Accept asynchronous loss on master data loss. RPO equals the
@@ -69,8 +79,4 @@ at phase 1 and a separate design starts.
 
 ## Not decided by this plan
 
-- A0 above.
-- The SAF-11 breaker definition.
-- Item 5.
-- Whether the startup grace should be counted in seconds.
 - Any production change, merge of PR #144, or staging deployment.

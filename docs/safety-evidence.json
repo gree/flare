@@ -376,7 +376,7 @@
         "2026-10-01: the takeover test (b) ends on a check that every pod names the same master. Its held change is a read-balance weight, so the pre-takeover map already satisfies that check: it proves the exit and re-acquisition, not that the withheld map reached any pod or which path sent it. CHECK-01-startup adds the content and attribution check; the takeover test itself is unchanged.",
         "Startup republish is tested only with the topology audit OFF (test seam FLARE_TEST_TOPOLOGY_AUDIT_OFF, inert when unset). With the audit on, a fresh process has two independent reasons to republish to a behind pod (startup seed, audit verdict=behind); the test shows the seed suffices, not how the two interact.",
         "The send-reason record (broadcast trigger: ...) is logged with every send and is the attribution evidence; it is derived from the same four values the send condition uses (BroadcastTriggers.any), so it cannot disagree with the branch taken, but it is still a log line rather than a wire capture.",
-        "FINDING 2026-10-01 (CI 36831110279, not changed here): the persisted node map (serializeNodeMap) carries no read balance, so a reloaded map has every node at balance 100 until the first reconcile pass re-applies spec.readBalance and the SAF-10c read withholding. The operator answers node add from that in-memory map, and after a takeover the reloaded version is raised to the new generation base, newer than any pod holds. A flared pod that boots in that window adopts a map in which slaves, including WAL followers withheld from reads, carry balance 100, until the first pass pushes the corrected map seconds later. Running pods are not affected: flared requests the map only at boot. Side effect: with any slave weight other than 100, the first pass after a restart always advances the version, so the startup seed is rarely the only republish reason in practice."
+        "FINDING 2026-10-01 (CI 36831110279, not changed here): the persisted node map (serializeNodeMap) carries no read balance, so a reloaded map has every node at balance 100 until the first reconcile pass re-applies spec.readBalance and the SAF-10c read withholding. The operator answers node add from that in-memory map, and after a takeover the reloaded version is raised to the new generation base, newer than any pod holds. A flared pod that boots in that window adopts a map in which slaves, including WAL followers withheld from reads, carry balance 100, until the first pass pushes the corrected map seconds later. Running pods are not affected: flared requests the map only at boot. Side effect: with any slave weight other than 100, the first pass after a restart always advances the version, so the startup seed is rarely the only republish reason in practice. FIX (2026-10-01, CI pending): serializeNodeMap now persists each node's committed balance (balance=, including the SAF-10c withholding) and parseNodeMapLine restores it; a legacy line without the token loads as master 100 / others 0. Proved by nodeMapVersion_roundtrip (balances 100/0/25) and legacy_line_balance_fallback. The startup-republish E2E uses slave weight 25 again, so it fails if the reload changes the map."
       ],
       "code": [
         {
@@ -402,6 +402,10 @@
         {
           "path": "flare_operator/FlareOperator/Server/TopologyBroadcast.lean",
           "symbol": "BroadcastTriggers"
+        },
+        {
+          "path": "flare_operator/FlareOperator/K8s/FlareCluster.lean",
+          "symbol": "serializeNodeMap"
         }
       ],
       "call_path": "runReconcileFSMLoop -> commitClusterState -> (post-commit) lease check -> broadcastTopologyToAllPods. The FSM BroadcastTopology effect, which sent the unmerged map without a leadership check, has been removed; the effect constructor no longer exists.",

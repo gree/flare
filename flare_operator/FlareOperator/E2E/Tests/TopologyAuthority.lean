@@ -43,8 +43,7 @@
   own. Two other things could also send and would hide a missing seed: a
   version change in the first pass, and the topology audit marking a behind
   pod as pending. The test turns the audit off (FLARE_TEST_TOPOLOGY_AUDIT_OFF,
-  a test-only seam), holds a change to slave weight 100 (the only weight a
-  reloaded map, which persists no balance, already has), and requires the first send's logged trigger record to
+  a test-only seam) and requires the first send's logged trigger record to
   be pending-only, then requires every pod to adopt the withheld read-balance
   weight, not just the version. The takeover test above does not show this:
   its final check accepts any map that names the same master, which the old
@@ -598,15 +597,15 @@ def suite : TestSuite := {
           return (pod, ← flaredStat ip "node_map_version", ← flaredSlaveBalance ip)
         IO.eprintln s!"# before: {before}"
         let opPods0 ← getPodNames s!"app={cfg.operatorName}" cfg.«namespace»
-        -- Slave weight 100, on purpose. The persisted node map carries no
-        -- balance, so a reloaded map has every node at 100 and the first pass
-        -- re-applies spec.readBalance. Any other slave weight makes that pass
-        -- see a changed map and advance the version (CI 36831110279: weight
-        -- 25, first send versionMoved=true), which is a second reason to
-        -- send. At 100 the reload changes nothing, so the startup seed is
-        -- the only reason left. The previous test leaves the weight at 80, so
-        -- the content marker still moves (80 → 100).
-        match ← stopOnePassBeforeLeaseCheck 100 with
+        -- Slave weight 25, on purpose. Before the node map persisted each
+        -- node's balance, a reloaded map had every node at 100 and the first
+        -- pass, re-applying spec.readBalance, saw a changed map and advanced
+        -- the version (CI 36831110279: first send versionMoved=true), a
+        -- second reason to send. With balance persisted the reload changes
+        -- nothing, so the startup seed is the only reason left; a weight
+        -- other than 100 keeps this test a regression guard for that. The
+        -- previous test leaves the weight at 80, so the content marker moves.
+        match ← stopOnePassBeforeLeaseCheck 25 with
         | .error e => ensureBarrierClear; return .fail e
         | .ok held =>
           IO.eprintln s!"# pass held at the pre-send point with version {held}; replacing the operator (rollout with FLARE_TEST_TOPOLOGY_AUDIT_OFF=1) while it is held"

@@ -105,3 +105,16 @@ few seconds later. Running pods are not affected, because flared requests
 the map only at boot. Persisting the balance, or holding `node add` replies
 until the first pass, would close it. Either is a design change for the
 reviewer.
+
+## Fix for the finding (2026-10-01, CI pending)
+
+The node-map ConfigMap now stores each node's committed balance
+(`balance=`), which already includes the SAF-10c withholding. A reloaded
+map is therefore the last committed map, and a withheld follower stays at 0
+across a restart. A line written before this change has no `balance=`
+token. It loads conservatively, with the master at 100 and every other node
+at 0, until the first pass re-applies the spec. Two proofs cover it:
+`nodeMapVersion_roundtrip` (balances 100, 0 and 25 survive) and
+`legacy_line_balance_fallback`. The startup-republish E2E uses slave weight
+25 again. With the fix its first pass should not move the version, so the
+test now also guards the persistence.

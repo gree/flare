@@ -782,6 +782,71 @@ def suite : TestSuite := {
           if uid1 != uid0 then return .fail "the replica pod was recreated"
           return .pass },
 
+    -- Operator restart while the replica's stats cannot be read (handoff
+    -- §3). The fresh process has no reading of the replica, so it must not
+    -- treat the copy as eligible: reads withheld (Unknown), and no demotion,
+    -- promotion or rebuild may come out of the blindness. When stats return,
+    -- the replica is served again. The follower itself (flared→flared) does
+    -- not depend on the operator and keeps following throughout.
+    { name := "operator restart while the replica's stats cannot be read: the fresh operator withholds its reads (Unknown) and demotes, promotes and rebuilds nothing; once stats return the replica is served again"
+      run := do
+        match ← pair with
+        | .error e => return .fail e
+        | .ok (mPod, mIp, sPod, sIp) =>
+          let balanceOfReplica : IO (Option Nat) := do
+            let entries ← nodeView
+            return (entries.find? (fun e => (e.fqdn.splitOn ".").head? == some sPod)).map (·.balance)
+          let resetSpec : IO Unit := do
+            discard <| kubectlPatch "flarecluster" cfg.name cfg.«namespace» "{\"spec\":{\"readBalance\":{\"master\":100,\"slave\":0}}}"
+          let recon0 := (← statNat sIp "reconstruction_started").getD 0
+          let uid0 := (← podUid sPod).getD "?"
+          match ← kubectlPatch "flarecluster" cfg.name cfg.«namespace» "{\"spec\":{\"readBalance\":{\"master\":100,\"slave\":50}}}" with
+          | .error e => return .fail s!"patch failed: {e}"
+          | .ok _ => pure ()
+          let served ← waitForCondition "precondition: following replica gets balance 50" 150 do
+            return (← balanceOfReplica) == some 50
+          if !served then resetSpec; return .fail s!"precondition: the following replica never received balance 50 (got {← balanceOfReplica})"
+          match ← revokeExec mPod with
+          | .error e => resetSpec; return .fail s!"could not revoke pods/exec: {e}"
+          | .ok (ruleIdx, originalRes) =>
+          let oldPod := ((← hostCmd "kubectl" ["get", "pods", "-n", cfg.«namespace», "-l", s!"app={cfg.operatorName}", "-o", "jsonpath={.items[0].metadata.name}"]).toOption.getD "").trim
+          discard <| hostCmd "kubectl" ["delete", "pod", "-n", cfg.«namespace», "-l", s!"app={cfg.operatorName}", "--wait=false"]
+          let back ← waitForCondition "a new operator pod is Ready and the old one is gone" 180 do
+            match ← hostCmd "kubectl" ["get", "pods", "-n", cfg.«namespace», "-l", s!"app={cfg.operatorName}", "-o", "jsonpath={range .items[*]}{.metadata.name}={.status.containerStatuses[0].ready} {end}"] with
+            | .ok o =>
+              return (o.splitOn " ").any (fun e => e.endsWith "=true" && !(e.startsWith oldPod))
+                && !(o.splitOn " ").any (fun e => e.startsWith oldPod && e != "")
+            | .error _ => return false
+          if !back then restoreExec ruleIdx originalRes; resetSpec; return .fail "the operator did not come back Ready"
+          -- The fresh process cannot read the replica: its reads must be
+          -- withheld, whatever balance the reloaded map carried.
+          let withheld ← waitForCondition "the fresh operator withholds the unreadable replica (balance 0)" 150 do
+            return (← balanceOfReplica) == some 0
+          let stored ← writeKeys cfg.debugPod cfg.«namespace» mIp cfg.flarePort "blindrestart" 10
+          let mLatest := (← statNat mIp "rocksdb_latest_sequence_number").getD 0
+          let follows ← waitForCondition "the follower keeps following without the operator" 120 do
+            return (← statNat sIp "repl_applied_lsn").getD 0 ≥ mLatest
+          let logBlind ← opLog 3000
+          let masterNow := (findMasterFqdn (← nodeView) 0).bind (fun f => (f.splitOn ".").head?)
+          IO.eprintln s!"# blind fresh operator: replica balance={← balanceOfReplica} withheld={withheld}; stored {stored}/10; follower caught up={follows}; master={masterNow}"
+          restoreExec ruleIdx originalRes
+          if !withheld then resetSpec; return .fail s!"the fresh operator kept a read balance for a replica it could not read (balance {← balanceOfReplica})"
+          if containsSubstr logBlind "REPLICA REPAIR: demoting" then resetSpec; return .fail "the blind operator demoted the replica"
+          if masterNow != some mPod then resetSpec; return .fail s!"the master changed while the operator was blind ({masterNow})"
+          if !follows then resetSpec; return .fail "the follower stopped following while the operator was blind"
+          let restored ← waitForCondition "once stats return the replica is served again (balance 50)" 240 do
+            return (← balanceOfReplica) == some 50 && (← statStr sIp "repl_follow_state") == some "following"
+          let recon1 := (← statNat sIp "reconstruction_started").getD 0
+          let uid1 := (← podUid sPod).getD "?"
+          IO.eprintln s!"# after restoring pods/exec: balance={← balanceOfReplica} restored={restored}; reconstruction_started {recon0}→{recon1}; pod uid {uid0}→{uid1}"
+          resetSpec
+          if !restored then return .fail "the replica was not served again after its stats became readable"
+          if recon1 != recon0 then return .fail "a reconstruction ran because of the blindness"
+          if uid1 != uid0 then return .fail "the replica pod was recreated"
+          let zero ← waitForCondition "spec restored to slave=0" 120 do return (← balanceOfReplica) == some 0
+          if !zero then return .fail "balance did not return to 0 after restoring the spec"
+          return .pass },
+
     -- T4/T16: the REPLICA PROCESS CRASHES (kill -9 from the node) right after
     -- a heal, with a backlog of created/updated/deleted keys pending. Its
     -- data is on a PVC, so the container restarts on the same copy. It must

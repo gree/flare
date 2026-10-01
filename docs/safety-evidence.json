@@ -1496,7 +1496,7 @@
         {
           "id": "CHECK-04-eligibility",
           "kind": "scenario",
-          "procedure": "flare_unit pins FollowEvidence.judge (unreadable → unknown; mode off → notInMode; not following, another epoch, stale observation, lag over the bound, applied ahead of the head → ineligible; unreadable master → unknown; lag at the bound eligible; read vs promotion bounds), unfitReason, classify (ranked highest-applied first; unproven vs unfit; withheld reads; mode memory; remembered-in-mode unreadable/not-probed → unproven and withheld, never unfit; no master reading → nothing proven), the probe policy, shapePromotionCandidates (unfit removed, ranked first, unproven last, nodeMap untouched, findActiveSuccessor sees the order, all-excluded leaves no successor), withholdReads (slave 0, master/Down/unlisted untouched, keys preserved) and the masterless refill's exclusion.",
+          "procedure": "flare_unit pins FollowEvidence.judge (unreadable → unknown; mode off → notInMode; not following, another epoch, stale observation, lag over the bound, applied ahead of the head → ineligible; unreadable master → unknown; lag at the bound eligible; read vs promotion bounds), unfitReason, classify (ranked highest-applied first; unproven vs unfit; withheld reads; mode memory; remembered-in-mode unreadable/not-probed → unproven and withheld, never unfit; no master reading → nothing proven), the probe policy, shapePromotionCandidates (unfit removed, ranked first, unproven last, nodeMap untouched, findActiveSuccessor sees the order, all-excluded leaves no successor), withholdReads (slave 0, master/Down/unlisted untouched, keys preserved) and the masterless refill's exclusion. E2E (2026-10-01, CI pending): continuous-replication test 'operator restart while the replica's stats cannot be read' sets spec slave=50 and waits for the following replica to be served, revokes the operator's pods/exec on the replica, replaces the operator pod, and requires the fresh process to withhold the replica (committed balance 0), the follower to keep following, the master unchanged and no demotion; after pods/exec is restored the replica must be served at 50 again with no reconstruction and the same pod UID.",
           "references": [
             {
               "path": "flare_operator/FlareOperator/UnitTests.lean",
@@ -1505,6 +1505,10 @@
             {
               "path": "flare_operator/FlareOperator/UnitTests.lean",
               "symbol": "checkFollowShaping"
+            },
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/ContinuousReplication.lean",
+              "symbol": "suite"
             }
           ]
         },

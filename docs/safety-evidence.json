@@ -877,6 +877,30 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, repair leg FAIL on replica-repair tests 4-6, harness) — PR #144 merge revision of 6866c95; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36882921953"
+        },
+        {
+          "check": "CHECK-01",
+          "commit": "40716046b754b2277abce349432ecbd0fe456e81",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green, 201 tests) — PR #144 merge revision of d34c139; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36887321961"
+        },
+        {
+          "check": "CHECK-01-startup",
+          "commit": "40716046b754b2277abce349432ecbd0fe456e81",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green, 201 tests) — PR #144 merge revision of d34c139; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36887321961"
+        },
+        {
+          "check": "CHECK-01-observation",
+          "commit": "40716046b754b2277abce349432ecbd0fe456e81",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green, 201 tests) — PR #144 merge revision of d34c139; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36887321961"
         }
       ],
       "tasks": [
@@ -998,7 +1022,7 @@
         "RBAC grant propagation: one local observation (2026-09-13) of ~131s before an impersonated `can-i` flipped after a restore; CI runs 6 and 8 saw the grant effective for the operator's own SA within seconds (in-pod probe). Earlier attributions of >2 minutes to the operator's path were harness artefacts (see the round-8 review note).",
         "Until eb2ba17 the drop observation required the REPLICA's stats read to succeed as well as the master's, so an unreadable replica hid the master's drop counter for its partition (found by the SAF-10d stats-fetch-failure scenario, run 4). Fixed: the observation needs the master's reply only. E2E confirmation pending (run 5).",
         "REGRESSION (found by rerunning replica-repair on tch after SAF-10c, fixed 2379cff): FollowReading treated a complete stats reply WITHOUT follower keys as unreadable, so every drop on a non-RocksDB replica was held as 'follower state unknown' and never repaired. Unknown now means a failed or truncated read only. The rerun of the non-WAL suites on the fix is pending.",
-        "2026-10-02 (CI 36882921953), classified as HARNESS: replica-repair test 4 failed 'completion was logged but no demotion was observed'. The operator log shows the new process demoted, saw the demotion confirmed and completed, in that order. The completion wait began only after the new process had finished the whole repair, about 60 s earlier than in the passing runs (55-65 s). Cause in the harness: `kubectl rollout status` returns while the old operator pod is still terminating, so the 'restores the HELD request' check passed on the OLD pod's log; the completion wait then read a 2000-line tail. Tests 5 and 6 failed on preconditions left by 4. Fix: every operator rollout in the suite waits until the previous pod is gone, and the completion wait reads the full log. Re-run pending."
+        "2026-10-02 (CI 36882921953), classified as HARNESS: replica-repair test 4 failed 'completion was logged but no demotion was observed'. The operator log shows the new process demoted, saw the demotion confirmed and completed, in that order. The completion wait began only after the new process had finished the whole repair, about 60 s earlier than in the passing runs (55-65 s). Cause in the harness: `kubectl rollout status` returns while the old operator pod is still terminating, so the 'restores the HELD request' check passed on the OLD pod's log; the completion wait then read a 2000-line tail. Tests 5 and 6 failed on preconditions left by 4. Fix: every operator rollout in the suite waits until the previous pod is gone, and the completion wait reads the full log. Re-run 36887321961: replica-repair 15/15; the previous operator pod outlived `rollout status` by 35 s at every rollout, and the HELD-restore check now takes 15 s on the new pod instead of passing at once on the old one."
       ],
       "code": [
         {
@@ -1458,6 +1482,22 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request, leg repair (replica-repair test 4 SAF-05 gate held across restart; 5 and 6 failed on preconditions left by 4)",
           "result": "fail",
           "report": "docs/reports/2026-10-02-ci-36882921953-repair-e2e.log"
+        },
+        {
+          "check": "CHECK-03",
+          "commit": "40716046b754b2277abce349432ecbd0fe456e81",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green, 201 tests) — PR #144 merge revision of d34c139; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36887321961"
+        },
+        {
+          "check": "CHECK-03-follow",
+          "commit": "40716046b754b2277abce349432ecbd0fe456e81",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green, 201 tests) — PR #144 merge revision of d34c139; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36887321961"
         }
       ],
       "tasks": [
@@ -2016,6 +2056,22 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, repair leg FAIL on replica-repair tests 4-6, harness) — PR #144 merge revision of 6866c95; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36882921953"
+        },
+        {
+          "check": "CHECK-04-follow",
+          "commit": "40716046b754b2277abce349432ecbd0fe456e81",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green, 201 tests) — PR #144 merge revision of d34c139; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36887321961"
+        },
+        {
+          "check": "CHECK-04-eligibility",
+          "commit": "40716046b754b2277abce349432ecbd0fe456e81",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green, 201 tests) — PR #144 merge revision of d34c139; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36887321961"
         }
       ],
       "tasks": [
@@ -2569,6 +2625,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, repair leg FAIL on replica-repair tests 4-6, harness) — PR #144 merge revision of 6866c95; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36882921953"
+        },
+        {
+          "check": "CHECK-06",
+          "commit": "40716046b754b2277abce349432ecbd0fe456e81",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green, 201 tests) — PR #144 merge revision of d34c139; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36887321961"
         }
       ],
       "tasks": [
@@ -3004,6 +3068,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, repair leg FAIL on replica-repair tests 4-6, harness) — PR #144 merge revision of 6866c95; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36882921953"
+        },
+        {
+          "check": "CHECK-09",
+          "commit": "40716046b754b2277abce349432ecbd0fe456e81",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green, 201 tests) — PR #144 merge revision of d34c139; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36887321961"
         }
       ],
       "tasks": [],
@@ -3784,6 +3856,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, repair leg FAIL on replica-repair tests 4-6, harness) — PR #144 merge revision of 6866c95; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36882921953"
+        },
+        {
+          "check": "CHECK-16",
+          "commit": "40716046b754b2277abce349432ecbd0fe456e81",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green, 201 tests) — PR #144 merge revision of d34c139; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36887321961"
         }
       ],
       "tasks": [
@@ -4072,6 +4152,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, repair leg FAIL on replica-repair tests 4-6, harness) — PR #144 merge revision of 6866c95; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36882921953"
+        },
+        {
+          "check": "CHECK-17",
+          "commit": "40716046b754b2277abce349432ecbd0fe456e81",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green, 201 tests) — PR #144 merge revision of d34c139; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36887321961"
         }
       ],
       "tasks": [
@@ -4649,6 +4737,22 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, repair leg FAIL on replica-repair tests 4-6, harness) — PR #144 merge revision of 6866c95; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36882921953"
+        },
+        {
+          "check": "CHECK-18",
+          "commit": "40716046b754b2277abce349432ecbd0fe456e81",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green, 201 tests) — PR #144 merge revision of d34c139; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36887321961"
+        },
+        {
+          "check": "CHECK-18-purge",
+          "commit": "40716046b754b2277abce349432ecbd0fe456e81",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green, 201 tests) — PR #144 merge revision of d34c139; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36887321961"
         }
       ],
       "tasks": [
@@ -5040,6 +5144,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs; 7 PASS, repair leg FAIL on replica-repair tests 4-6, harness) — PR #144 merge revision of 6866c95; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36882921953"
+        },
+        {
+          "check": "CHECK-20",
+          "commit": "40716046b754b2277abce349432ecbd0fe456e81",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green, 201 tests) — PR #144 merge revision of d34c139; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36887321961"
         }
       ],
       "tasks": [

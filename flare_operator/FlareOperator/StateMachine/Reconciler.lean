@@ -624,6 +624,17 @@ def reconcileStep (state : FlareClusterState) (crd : FlareClusterView)
           let updatedNode := { node with state := FlareState.Active }
           let newClusterState := state.addNode nodeKey updatedNode
           (newClusterState, .OK)
+      else if node.state == FlareState.Active && (newState == FlareState.Active || newState == FlareState.Ready) then
+        -- IDEMPOTENT RE-ACTIVATION: the node is already Active, so its
+        -- report changes nothing and is acknowledged. Two paths reach this:
+        -- the operator's own PREPARE-REPAIR activated the node from sync
+        -- evidence while flared was still finishing its reconstruction, or
+        -- an earlier activate_node was applied but its reply was lost.
+        -- Rejecting it made flared fail the attempt, retry 30 times, and
+        -- restart the whole reconstruction (CI run 37007523101: a kill -9'd
+        -- replica looped to attempt 7, its repair entry never closed, and a
+        -- later promotion landed on a node still inside that loop).
+        (state, .OK)
       else
         (state, .ServerError s!"node state: transition {node.state.toNat}→{newState.toNat} not allowed")
   | .NodeRemove _ _ =>

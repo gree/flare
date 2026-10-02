@@ -1262,9 +1262,10 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
   -- the map is otherwise at rest, commitClusterState sees "every node Active"
   -- and pins the version, so the active map is NEVER broadcast back; flared
   -- keeps its local state at prepare, waits for the map to echo its
-  -- activation, retries activate_node (which the operator now rejects,
-  -- state already Active → "not allowed"), and after ~30 failures
-  -- deactivates itself to Down. Result on a busy cluster: a reconstructed
+  -- activation, and retries activate_node (once rejected as "not allowed"
+  -- for an Active node; now acknowledged without change, Reconciler
+  -- IDEMPOTENT RE-ACTIVATION). Before that fix, ~30 failures made it
+  -- deactivate itself to Down. Result on a busy cluster: a reconstructed
   -- replica wedged Down, its partition down to one copy. A pod is only
   -- Ready once flared's OWN map says it is active (the sync-gated probe), so
   -- an Active-in-the-map node whose pod is NOT Ready has not applied the

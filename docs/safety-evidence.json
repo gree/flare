@@ -1458,7 +1458,8 @@
         "RBAC grant propagation: one local observation (2026-09-13) of ~131s before an impersonated `can-i` flipped after a restore; CI runs 6 and 8 saw the grant effective for the operator's own SA within seconds (in-pod probe). Earlier attributions of >2 minutes to the operator's path were harness artefacts (see the round-8 review note).",
         "Until eb2ba17 the drop observation required the REPLICA's stats read to succeed as well as the master's, so an unreadable replica hid the master's drop counter for its partition (found by the SAF-10d stats-fetch-failure scenario, run 4). Fixed: the observation needs the master's reply only. E2E confirmation pending (run 5).",
         "REGRESSION (found by rerunning replica-repair on tch after SAF-10c, fixed 2379cff): FollowReading treated a complete stats reply WITHOUT follower keys as unreadable, so every drop on a non-RocksDB replica was held as 'follower state unknown' and never repaired. Unknown now means a failed or truncated read only. The rerun of the non-WAL suites on the fix is pending.",
-        "2026-10-02 (CI 36882921953), classified as HARNESS: replica-repair test 4 failed 'completion was logged but no demotion was observed'. The operator log shows the new process demoted, saw the demotion confirmed and completed, in that order. The completion wait began only after the new process had finished the whole repair, about 60 s earlier than in the passing runs (55-65 s). Cause in the harness: `kubectl rollout status` returns while the old operator pod is still terminating, so the 'restores the HELD request' check passed on the OLD pod's log; the completion wait then read a 2000-line tail. Tests 5 and 6 failed on preconditions left by 4. Fix: every operator rollout in the suite waits until the previous pod is gone, and the completion wait reads the full log. Re-run 36887321961: replica-repair 15/15; the previous operator pod outlived `rollout status` by 35 s at every rollout, and the HELD-restore check now takes 15 s on the new pod instead of passing at once on the old one."
+        "2026-10-02 (CI 36882921953), classified as HARNESS: replica-repair test 4 failed 'completion was logged but no demotion was observed'. The operator log shows the new process demoted, saw the demotion confirmed and completed, in that order. The completion wait began only after the new process had finished the whole repair, about 60 s earlier than in the passing runs (55-65 s). Cause in the harness: `kubectl rollout status` returns while the old operator pod is still terminating, so the 'restores the HELD request' check passed on the OLD pod's log; the completion wait then read a 2000-line tail. Tests 5 and 6 failed on preconditions left by 4. Fix: every operator rollout in the suite waits until the previous pod is gone, and the completion wait reads the full log. Re-run 36887321961: replica-repair 15/15; the previous operator pod outlived `rollout status` by 35 s at every rollout, and the HELD-restore check now takes 15 s on the new pod instead of passing at once on the old one.",
+        "2026-10-02 (PR run 37007523101 on b01ff4d), classified as FUNCTIONAL (operator), fix pending CI: after the kill -9 in continuous-replication test 14 the replica restarted on its PVC, followed and matched the master (items 356/356), but the ledger entry (an ordinary request, no hold) never closed within 300 s. The replica's flared log shows why: its reconstruction finished, then activate_node was refused 30 times as 'node state: transition 0→0 not allowed', the attempt was failed and the whole reconstruction restarted, up to attempt 7. The operator already had the node Active: either its PREPARE-REPAIR activated it from sync evidence while flared was finishing, or an earlier activate was applied and its reply lost. Since the reconstruction never returned success, the 'reconstruction newer than at reseat SUCCEEDED' completion the entry waits for never came. Test 15 (planned promotion, 'did not advance the source epoch') then promoted the same node while it was still inside that retry loop, so it is a consequence of the same defect. Fix: Reconciler.reconcileStep acknowledges an Active/Ready report for a node that is already Active without changing the state (IDEMPOTENT RE-ACTIVATION); Down and other states are still refused. flare_unit checkReactivation (4 cases) and GeneralSafety's CLE proof cover it; the E2E re-run is pending. The 9 earlier PR runs passed this test, so the race is intermittent."
       ],
       "code": [
         {
@@ -1496,6 +1497,10 @@
         {
           "path": "flare_operator/FlareOperator/StateMachine/ReplicaRepair.lean",
           "symbol": "advanceOwned"
+        },
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/Reconciler.lean",
+          "symbol": "reconcileStep"
         }
       ],
       "call_path": "queue_proxy_write records destination drops -> stats proxy_write_dropped[dest] -> Main observe (only while the ledger is AVAILABLE; a partially corrupt ledger is unavailable, not smaller) -> ReplicaRepair ledger (persisted; dirty writes retried) -> demote to Proxy held out of assignment -> node confirms (boot id, current id, drops at reseat recorded) -> FSM re-seats Slave/Prepare -> flared reconstructs -> complete when the LATEST reconstruction SUCCEEDED from the current master and is newer than the reseat one in the same process, or in a new process (boot id changed); late drops requeued.",
@@ -1523,6 +1528,10 @@
             {
               "path": "flare_operator/FlareOperator/UnitTests.lean",
               "symbol": "checkAdvanceComplete"
+            },
+            {
+              "path": "flare_operator/FlareOperator/UnitTests.lean",
+              "symbol": "checkReactivation"
             }
           ]
         },
@@ -2134,6 +2143,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of ea99601; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36985417000"
+        },
+        {
+          "check": "CHECK-03-follow",
+          "commit": "e312c677776b1b9d68b665c050b361277589baf4",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request — PR #144 merge revision of b01ff4d; continuous-replication leg FAILED tests 14 and 15 (the other 7 legs passed); artifact tested-sha.txt",
+          "result": "fail",
+          "report": "docs/reports/2026-10-02-ci-37007523101-continuous-replication-e2e.log"
         }
       ],
       "tasks": [
@@ -4693,7 +4710,8 @@
         "2026-10-02 memory diagnosis, step 1 (run 36975811333, 2M keys at ~3200 keys/s, E2E pods now with MALLOC_ARENA_MAX=2 like production): master RSS 184/229/329 MB at 0.5/1.0/1.5M keys versus 258/373/568 MB without the arena cap (run 36949992433), so glibc arena fragmentation was ~40% of the growth and the earlier OOM at 4.45M keys was largely a test-environment artifact (production pods already set 2). Heap IN USE still grows with keys (117/137/272 MB, ~180 B/key) while free heap stays 40-75 MB: consistent with RocksDB write buffers filling (budget ~384 MB = 64 MB x 3 x 2 CFs, plus 64 MB block cache) but not yet distinguishable from a leak at 2M keys; a 6M-key memory-only run decides. Unrelated to memory: the follower still needed 18.5 min after the load to drain (replica apply ~1.8k forwarded writes/s). Earlier at 0c9be92 every leg of PR run 36973191774 and dispatch 36973187800 failed to BUILD (mallinfo2 without <malloc.h> in the non-RocksDB image, fixed in 431b183); no test ran there.",
         "ROOT CAUSE 2026-10-02 (run 36981303601, 6M keys, MALLOC_ARENA_MAX=2): the master's heap IN USE grows linearly with no plateau (244 MB at 1M, 800 MB at 3M, 1714 MB at 5.5M keys, ~300 B/key, far past the ~450 MB RocksDB budget) while the replica stays ~100-200 MB, and after the load it falls as the follower catches up (1.75 -> 1.49 GB in 3 min): the master buffers every forward its follower has not taken yet. post_proxy_write enqueues each forward on the replica's proxy thread, and flared's max-total-thread-queue defaults to 0 = unbounded. CORRECTION: the earlier 'forward queue ruled out (total_thread_queue = 0)' was wrong - that stat is sent only by `stats threads queue`, so plain-stats sampling read a missing value as 0. Fix (CI pending): total_thread_queue is now in plain stats; a forward rejected at the bound is counted as proxy_write_dropped for that replica (the repair path sees it, the follower fills it from the WAL) with rate-limited logs; CR spec.rocksdb.maxTotalThreadQueue renders max-total-thread-queue; the chart defaults it to 200000 (~120 MB). Evaluation scale-6m-mem-cap repeats the 6M load with the bound.",
         "2026-10-02 (run 36985410132, 6M keys, max-total-thread-queue = 200000 via the CR): the bound holds. The queue rises to the cap at ~2M keys and stays at ~199k; master heap in use stays 170-235 MB (against 1714 MB unbounded at 5.5M keys) and RSS levels at ~450 MB; no master restart; 3.01M forwards over the cap were counted as proxy_write_dropped. NOT yet shown: that the follower then fills the dropped forwards from the WAL (the memory-only profile does not wait; scale-2m-cap runs the full test with convergence). Also observed: the load took 2495 s against 1179 s unbounded (~2400 vs ~5100 keys/s); the cause of the slowdown is not identified.",
-        "2026-10-02 (run 36991784765, 2M keys, cap 100000): the dropped forwards are repaired without a rebuild. 237k forwards were counted dropped by 1.5M keys while master heap in use stayed 104-146 MB; the follower converged to 2,000,000 items equal to the master, taking 527k changes from the WAL (the dropped ones) and 1.47M by forward; reconstruction_completed stayed 1 (the initial copy) and wal_fallback_to_dump 0; kill -9 reopen scanned 2M keys in 1.4 s, data equal. Costs: convergence took 28 min after the load (18.5 min without the cap) and the load ran at ~2060 keys/s (~3200 without the cap): the cause of the slower load is not identified. The bound therefore turns an OOM plus a lossy failover into a slower, complete catch-up; the follower's apply rate (~1.2-1.8k/s on kind) remains the throughput limit."
+        "2026-10-02 (run 36991784765, 2M keys, cap 100000): the dropped forwards are repaired without a rebuild. 237k forwards were counted dropped by 1.5M keys while master heap in use stayed 104-146 MB; the follower converged to 2,000,000 items equal to the master, taking 527k changes from the WAL (the dropped ones) and 1.47M by forward; reconstruction_completed stayed 1 (the initial copy) and wal_fallback_to_dump 0; kill -9 reopen scanned 2M keys in 1.4 s, data equal. Costs: convergence took 28 min after the load (18.5 min without the cap) and the load ran at ~2060 keys/s (~3200 without the cap): the cause of the slower load is not identified. The bound therefore turns an OOM plus a lossy failover into a slower, complete catch-up; the follower's apply rate (~1.2-1.8k/s on kind) remains the throughput limit.",
+        "2026-10-02 throughput variants on b01ff4d (evaluations, not gates). sustained-cpu2 (run 37007519007, flared CPU limit 2): lag 0 in the first and last minute at 300, 900 and 2000 writes/s, KEPT UP at every rate (with the E2E default 500m the run 36941386693 fell behind at 2000/s); replica get p99 per 30 s window 2.9-20.2 ms (max 32.5 ms), reconcile mean 1.6-2.1 s, lease age <= 7 s of 15 s; apply lock hold max 22.8 ms (was 294.5 ms at 500m), forwarded-write wait max 5.6 ms, exclusive-acquire wait max 133 ms. sustained-nrw (run 37007523321, CPU 2 plus noreply-window-limit 16): 300 and 900/s kept up, but 2000/s ended with last-minute lag max 2115 (FELL BEHIND) and reconcile means were higher (1.9-2.6 s); hold max 5.8 ms. Conclusion: the 2000/s ceiling seen earlier was the 500m CPU limit, not the protocol; the noreply window gives no gain and stays off. Sizing: give flared at least 2 cores where sustained writes reach ~2000/s per partition. One run of each, so the numbers are indicative."
       ],
       "code": [
         {
@@ -5237,6 +5255,22 @@
           "command": "GitHub Actions workflow_dispatch evaluation=scale-2m-cap (run 36991784765, max-total-thread-queue 100000, full scale test)",
           "result": "pass",
           "report": "docs/reports/2026-10-02-ci-36991784765-scale-2m-cap-e2e.log"
+        },
+        {
+          "check": "CHECK-16-limits",
+          "commit": "b01ff4d8cc3d23d6d4655ab4ab3d656efe1a295f",
+          "date": "2026-10-02",
+          "command": "GitHub Actions workflow_dispatch evaluation=sustained-cpu2 suites=continuous-replication-sustained (run 37007519007, flared CPU limit 2, noreply window off)",
+          "result": "pass",
+          "report": "docs/reports/2026-10-02-ci-37007519007-sustained-cpu2-e2e.log"
+        },
+        {
+          "check": "CHECK-16-limits",
+          "commit": "b01ff4d8cc3d23d6d4655ab4ab3d656efe1a295f",
+          "date": "2026-10-02",
+          "command": "GitHub Actions workflow_dispatch evaluation=sustained-nrw suites=continuous-replication-sustained (run 37007523321, flared CPU limit 2, noreply-window-limit 16 for forwards)",
+          "result": "pass",
+          "report": "docs/reports/2026-10-02-ci-37007523321-sustained-nrw-e2e.log"
         }
       ],
       "tasks": [

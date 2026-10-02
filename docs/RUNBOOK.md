@@ -280,7 +280,8 @@ operator has as master and slave.
    clients go to the master. Check write rate against follow throughput, and
    check the network between the replica and its master. The sustained
    evaluation measured lag 0 at 900 writes/s, and a deficit at 2000 writes/s
-   on kind. A lag that keeps growing means the follower cannot keep up. Find
+   on kind with flared at 500m CPU (lag 0 at 2000 writes/s with 2 cores), so
+   check the replica's CPU throttling first. A lag that keeps growing means the follower cannot keep up. Find
    the cause before the master's WAL cap purges the history, which turns this
    into a rebuild (`needs_rebuild`, reason `lsn_purged`).
 2. **Not following for 15 min.** Read `state` and `repl_follow_last_reason`
@@ -439,8 +440,11 @@ follower is rebuilt by snapshot: 59 s for about 1 GB on kind.
 On tmpfs, keep `walSizeLimitMb` around 5% of `tmpfs.sizeLimit` and set a
 short `walTtlSeconds` (see values.yaml).
 
-**Follow throughput.** Lag stayed at 0 at 900 writes/s and grew at 2000
-writes/s on kind. Measure on production-like hardware against the real write
+**Follow throughput.** On kind, with flared at 500m CPU, lag stayed at 0 at
+900 writes/s and grew at 2000 writes/s. With 2 cores it stayed at 0 at 2000
+writes/s (run 37007519007). Give flared at least 2 cores where a partition
+takes about 2000 writes/s. Leave `noreplyWindowLimit` unset: it gave no gain
+(run 37007523321). Measure on production-like hardware against the real write
 rate before relying on reads from followers.
 
 **Forward queue.** Keep `maxTotalThreadQueue` set (chart default 200000,

@@ -38,7 +38,8 @@ clients treat a miss as a cache miss. Where flare is the primary store, set
 ## Stop and roll back when
 
 - `flare_node_repl_follow_lag` grows for 15 min at normal write rate.
-  Measured on kind: kept up at 900 writes/s, fell behind at 2000 writes/s.
+  Measured on kind: kept up at 900 writes/s and fell behind at 2000 writes/s
+  with flared at 500m CPU; kept up at 2000 writes/s with 2 cores.
 - `FlareReplicaNotFollowing` fires and the follower does not recover
   without a rebuild.
 - Any `PROMOTION NOT LOSS-FREE`, `CRITICAL`, `PERSIST FENCE` or

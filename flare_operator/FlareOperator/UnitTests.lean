@@ -848,6 +848,35 @@ private def checkTopologyMetrics (ctx : Ctx) : IO Unit := do
     check ctx "topology gauge is present in actual metrics exporter"
       ((out.splitOn s!"# TYPE {name} gauge").length == 2)
 
+def activationCrd : FlareClusterView :=
+  { metadata := { name := some "unit", «namespace» := some "default" }
+    spec := { partitions := 1, replicas := 2 } }
+
+def activationState (st : FlareState) : FlareClusterState :=
+  { nodeMap := [("a:12121", node .Master .Active 0 "a"), ("b:12121", node .Slave st 0 "b")],
+    nodeMapVersion := 7 }
+
+def isOk : Flare.FlareResponse → Bool
+  | .OK => true
+  | _ => false
+
+def checkReactivation (ctx : Ctx) : IO Unit := do
+  -- CI run 37007523101: the operator's PREPARE-REPAIR activated a replica
+  -- while flared was still finishing its reconstruction; flared's own report
+  -- was then rejected as 0→0, and it retried the whole reconstruction.
+  let s := activationState .Active
+  let (s', r) := Reconciler.reconcileStep s activationCrd (.NodeState "b" 12121 .Active)
+  check ctx "re-activation of an Active node is acknowledged and changes nothing"
+    (isOk r && s'.nodeMap == s.nodeMap && s'.nodeMapVersion == s.nodeMapVersion)
+  let (_, rReady) := Reconciler.reconcileStep s activationCrd (.NodeState "a" 12121 .Ready)
+  check ctx "an Active master reporting Ready again is acknowledged" (isOk rReady)
+  let (sd, rDown) := Reconciler.reconcileStep (activationState .Down) activationCrd (.NodeState "b" 12121 .Active)
+  check ctx "a Down node still cannot report itself Active"
+    (!isOk rDown && sd.nodeMap == (activationState .Down).nodeMap)
+  let (sp, rPrep) := Reconciler.reconcileStep (activationState .Prepare) activationCrd (.NodeState "b" 12121 .Active)
+  check ctx "Prepare → Active under an Active master is still applied"
+    (isOk rPrep && (sp.lookupNode "b:12121").map (·.state) == some .Active)
+
 def run : IO UInt32 := do
   let ctx : Ctx := { failures := ← IO.mkRef [], count := ← IO.mkRef 0 }
   checkObserve ctx
@@ -870,6 +899,7 @@ def run : IO UInt32 := do
   checkBreakerUnavailable ctx
   checkTopologyObservation ctx
   checkTopologyMetrics ctx
+  checkReactivation ctx
   let failures ← ctx.failures.get
   let n ← ctx.count.get
   IO.println s!"1..{n}"

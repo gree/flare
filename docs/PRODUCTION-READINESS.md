@@ -70,7 +70,11 @@ that gap. Record the agreed failure model and RPO/RTO before approval.
   that pass on CI (PR runs 36874157713 and 36877273395). Follow-evidence reads
   are not UID-bracketed.
 - Sustained 900/2000 writes/s after the MORE fix: measured once on CI (lag 0 at
-  900, ≈+18k/min deficit at 2000, drain 35–43 s). Still define the target rate,
+  900, ≈+18k/min deficit at 2000, drain 35–43 s). With flared at 2 CPU cores
+  instead of the E2E default 500m (run 37007519007) lag stayed 0 at 2000/s and
+  apply-lock hold max fell from 295 ms to 23 ms, so the deficit was the CPU
+  limit. The noreply window for forwards gave no gain (run 37007523321: fell
+  behind at 2000/s with CPU 2) and stays off. Still define the target rate,
   acceptable replication lag and recovery time from production traffic, and
   re-measure on production-like hardware; the kind figure bounds nothing.
 - Hold a replica offline long enough to force WAL rotation, flush and compaction:

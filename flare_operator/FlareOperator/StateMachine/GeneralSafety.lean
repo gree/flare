@@ -495,7 +495,9 @@ theorem reconcileStep_cle (s : FlareClusterState) (crd : FlareClusterView)
           apply count_addNode_replace_le
           intro hM
           exact ⟨node, mem_of_lookupNode hlook, hM⟩
-      · exact CLE.rfl _
+      · -- idempotent re-activation of an Active node, or a rejected
+        -- transition: state unchanged either way
+        split <;> exact CLE.rfl _
 
 /-! ## Failover promotion satisfies the bound -/
 

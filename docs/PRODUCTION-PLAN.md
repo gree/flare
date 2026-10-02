@@ -28,9 +28,16 @@ at phase 1 and a separate design starts.
 | # | Measurement | How |
 |---|---|---|
 | 6 | Startup, probe and kill-9 reopen at scale; master memory under a lagging follower | **Measured and fixed.** Without a bound the master buffered every pending forward: 1.7 GB at 6M keys, then OOM and a lossy failover. With `maxTotalThreadQueue`: master heap about 200 MB, dropped forwards repaired from the WAL with no rebuild (runs 36985410132 and 36991784765). The reopen scan took 1.4 s at 2M keys |
-| 7 | T17: read and proxy latency, reconcile and lease renewal under load | **Done.** get p50 2–3 ms, p99 50–98 ms; reconcile 1.9–3.1 s; lease age ≤ 8 s of 15 s; apply-lock hold max 295 ms, forwarded-write wait max 81 ms |
+| 7 | T17: read and proxy latency, reconcile and lease renewal under load | **Done.** At 500m CPU: get p50 2–3 ms, p99 50–98 ms; reconcile 1.9–3.1 s; lease age ≤ 8 s of 15 s; apply-lock hold max 295 ms. At 2 cores (run 37007519007): lag 0 at 2000 writes/s, get p99 ≤ 20 ms, hold max 23 ms. Noreply window: no gain, stays off (run 37007523321) |
 | 8 | Both repair triggers at the same time; lagged or Unknown successor gates | **Done.** Both triggers fired in one run with one ledger entry and one rebuild (PR run 36922262408). Lagged successor PASS (gap 21, within the bound) |
 | 9 | Outage and resource evaluation on tmpfs | **Done**, run 36914124394: 11 s catch-up, 59 s snapshot rebuild, 1.07 GB data plus 0.54 GB RSS |
+
+## Open CI findings
+
+- PR run 37007523101 (b01ff4d): continuous-replication tests 14 and 15
+  failed. Cause in the operator: a repeated activation from a node it already
+  had Active was refused, so flared kept restarting its reconstruction. Fixed
+  by acknowledging it without change; the re-run is pending.
 
 ## Phase 3: operations (staging needs the user's go-ahead)
 

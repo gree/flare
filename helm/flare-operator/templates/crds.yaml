@@ -161,6 +161,14 @@ spec:
                         active RocksDB slave (flared repl-follow-enabled;
                         dynamic). Declare here: the operator rewrites
                         extra.conf from this spec.
+                    maxTotalThreadQueue:
+                      type: integer
+                      minimum: 0
+                      description: >-
+                        Upper bound on queued proxy requests (forwards to
+                        replicas included); 0 = unbounded. At the bound a
+                        forward is dropped and counted, and the follower
+                        fills it from the WAL (flared max-total-thread-queue)
                     replFollowPollIntervalUsec:
                       type: integer
                       minimum: 1000

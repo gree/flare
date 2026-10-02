@@ -1273,6 +1273,38 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of 431b183; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36975816899"
+        },
+        {
+          "check": "CHECK-01",
+          "commit": "094c11fd4724e92f1adafed4b357bf1ace312484",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of 8837f11; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36981307437"
+        },
+        {
+          "check": "CHECK-01-startup",
+          "commit": "094c11fd4724e92f1adafed4b357bf1ace312484",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of 8837f11; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36981307437"
+        },
+        {
+          "check": "CHECK-01-observation",
+          "commit": "094c11fd4724e92f1adafed4b357bf1ace312484",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of 8837f11; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36981307437"
+        },
+        {
+          "check": "CHECK-01-generation",
+          "commit": "094c11fd4724e92f1adafed4b357bf1ace312484",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of 8837f11; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36981307437"
         }
       ],
       "tasks": [
@@ -2038,6 +2070,22 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of 431b183; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36975816899"
+        },
+        {
+          "check": "CHECK-03",
+          "commit": "094c11fd4724e92f1adafed4b357bf1ace312484",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of 8837f11; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36981307437"
+        },
+        {
+          "check": "CHECK-03-follow",
+          "commit": "094c11fd4724e92f1adafed4b357bf1ace312484",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of 8837f11; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36981307437"
         }
       ],
       "tasks": [
@@ -2787,6 +2835,22 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of 431b183; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36975816899"
+        },
+        {
+          "check": "CHECK-04-follow",
+          "commit": "094c11fd4724e92f1adafed4b357bf1ace312484",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of 8837f11; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36981307437"
+        },
+        {
+          "check": "CHECK-04-eligibility",
+          "commit": "094c11fd4724e92f1adafed4b357bf1ace312484",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of 8837f11; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36981307437"
         }
       ],
       "tasks": [
@@ -3437,6 +3501,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of 431b183; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36975816899"
+        },
+        {
+          "check": "CHECK-06",
+          "commit": "094c11fd4724e92f1adafed4b357bf1ace312484",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of 8837f11; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36981307437"
         }
       ],
       "tasks": [
@@ -3975,6 +4047,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of 431b183; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36975816899"
+        },
+        {
+          "check": "CHECK-09",
+          "commit": "094c11fd4724e92f1adafed4b357bf1ace312484",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of 8837f11; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36981307437"
         }
       ],
       "tasks": [],
@@ -4461,6 +4541,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of 431b183; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36975816899"
+        },
+        {
+          "check": "CHECK-15",
+          "commit": "094c11fd4724e92f1adafed4b357bf1ace312484",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of 8837f11; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36981307437"
         }
       ],
       "tasks": [],
@@ -4514,7 +4602,8 @@
         "FINDING 2026-10-02 (run 36941383859, cancelled by the user: 'it takes too long'): with the faster loader the master took ~4.44M keys in ~12 min (~6000 keys/s), then every chunk stored 0 within milliseconds (connections refused: the master most likely restarted, probably OOM at its 2Gi limit), and a `kubectl exec` without a timeout hung the evaluation for 75 min. Suspected, not confirmed: the master forwards every write to a follower that keeps up only to ~2000 writes/s, and the forward queue (max-total-thread-queue default 0 = unlimited) grows in memory. The earlier 15.8M run stopped at ~4.6M too. The evaluation now has a per-chunk timeout, stops after 3 empty chunks and logs the master's restart count, termination reason, RSS and thread queue, and samples them every 500k keys.",
         "FINDING 2026-10-02 (run 36949992433, scale-15m8, FUNCTIONAL — production-relevant): under a ~6000 writes/s load the master's RSS grew linearly with the keys written (44 MB at start, 0.94 GB at 2M, 1.94 GB at 4M; ~470 B per key) while the follower fell far behind (replica forward_applied ~2.57M vs master 4.45M), and the master restarted at ~4.45M keys (restartCount 0 -> 1, almost certainly OOM at the 2Gi limit). Afterwards the master held ~2.62M keys, the follower's count: the far-behind follower was most likely promoted and the old master rebuilt from it, losing ~1.83M acknowledged writes. thread_queue stayed 0, so the growth is not in that counted queue; the suspected holder is the master's buffering of forwards to the slow replica (unconfirmed). This is the asynchronous RPO accepted under A0, but unbounded: memory grows until OOM and the loss is the whole follower backlog. The fail-fast did not trigger because writes kept succeeding on the promoted node, so the evaluation ran 3 h 15 min. Needs: identify the memory holder (heap profile / per-queue stats), bound it so a slow follower costs drops repaired by follow/rebuild instead of an OOM, and cap the backlog at which promotion is allowed.",
         "2026-10-02 diagnosis in progress for the scale memory finding: the forward queue is ruled out (total_thread_queue stayed 0); the sustained run shows RSS growing with keys on BOTH master and replica (~200 B/key at lag 0). The E2E flared pods ran WITHOUT MALLOC_ARENA_MAX (production sets 2 via the chart), so part or all of the growth may be glibc arena fragmentation. E2E pods now set MALLOC_ARENA_MAX=2, flared exports malloc_in_use_bytes / malloc_free_bytes / malloc_arena_bytes (mallinfo2), the scale evaluation samples them for both nodes, and it stops as soon as the master restarts.",
-        "2026-10-02 memory diagnosis, step 1 (run 36975811333, 2M keys at ~3200 keys/s, E2E pods now with MALLOC_ARENA_MAX=2 like production): master RSS 184/229/329 MB at 0.5/1.0/1.5M keys versus 258/373/568 MB without the arena cap (run 36949992433), so glibc arena fragmentation was ~40% of the growth and the earlier OOM at 4.45M keys was largely a test-environment artifact (production pods already set 2). Heap IN USE still grows with keys (117/137/272 MB, ~180 B/key) while free heap stays 40-75 MB: consistent with RocksDB write buffers filling (budget ~384 MB = 64 MB x 3 x 2 CFs, plus 64 MB block cache) but not yet distinguishable from a leak at 2M keys; a 6M-key memory-only run decides. Unrelated to memory: the follower still needed 18.5 min after the load to drain (replica apply ~1.8k forwarded writes/s). Earlier at 0c9be92 every leg of PR run 36973191774 and dispatch 36973187800 failed to BUILD (mallinfo2 without <malloc.h> in the non-RocksDB image, fixed in 431b183); no test ran there."
+        "2026-10-02 memory diagnosis, step 1 (run 36975811333, 2M keys at ~3200 keys/s, E2E pods now with MALLOC_ARENA_MAX=2 like production): master RSS 184/229/329 MB at 0.5/1.0/1.5M keys versus 258/373/568 MB without the arena cap (run 36949992433), so glibc arena fragmentation was ~40% of the growth and the earlier OOM at 4.45M keys was largely a test-environment artifact (production pods already set 2). Heap IN USE still grows with keys (117/137/272 MB, ~180 B/key) while free heap stays 40-75 MB: consistent with RocksDB write buffers filling (budget ~384 MB = 64 MB x 3 x 2 CFs, plus 64 MB block cache) but not yet distinguishable from a leak at 2M keys; a 6M-key memory-only run decides. Unrelated to memory: the follower still needed 18.5 min after the load to drain (replica apply ~1.8k forwarded writes/s). Earlier at 0c9be92 every leg of PR run 36973191774 and dispatch 36973187800 failed to BUILD (mallinfo2 without <malloc.h> in the non-RocksDB image, fixed in 431b183); no test ran there.",
+        "ROOT CAUSE 2026-10-02 (run 36981303601, 6M keys, MALLOC_ARENA_MAX=2): the master's heap IN USE grows linearly with no plateau (244 MB at 1M, 800 MB at 3M, 1714 MB at 5.5M keys, ~300 B/key, far past the ~450 MB RocksDB budget) while the replica stays ~100-200 MB, and after the load it falls as the follower catches up (1.75 -> 1.49 GB in 3 min): the master buffers every forward its follower has not taken yet. post_proxy_write enqueues each forward on the replica's proxy thread, and flared's max-total-thread-queue defaults to 0 = unbounded. CORRECTION: the earlier 'forward queue ruled out (total_thread_queue = 0)' was wrong - that stat is sent only by `stats threads queue`, so plain-stats sampling read a missing value as 0. Fix (CI pending): total_thread_queue is now in plain stats; a forward rejected at the bound is counted as proxy_write_dropped for that replica (the repair path sees it, the follower fills it from the WAL) with rate-limited logs; CR spec.rocksdb.maxTotalThreadQueue renders max-total-thread-queue; the chart defaults it to 200000 (~120 MB). Evaluation scale-6m-mem-cap repeats the 6M load with the bound."
       ],
       "code": [
         {
@@ -5018,6 +5107,22 @@
           "command": "GitHub Actions workflow_dispatch evaluation=scale-2m suites=continuous-replication-scale (run 36975811333, MALLOC_ARENA_MAX=2, heap stats)",
           "result": "pass",
           "report": "docs/reports/2026-10-02-ci-36975811333-scale-2m-memory-e2e.log"
+        },
+        {
+          "check": "CHECK-16",
+          "commit": "094c11fd4724e92f1adafed4b357bf1ace312484",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of 8837f11; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36981307437"
+        },
+        {
+          "check": "CHECK-16-limits",
+          "commit": "8837f11689ca68c278b6033f91a2fcb9f79f45b5",
+          "date": "2026-10-02",
+          "command": "GitHub Actions workflow_dispatch evaluation=scale-6m-mem (run 36981303601)",
+          "result": "fail",
+          "report": "docs/reports/2026-10-02-ci-36981303601-scale-6m-mem-e2e.log"
         }
       ],
       "tasks": [
@@ -5394,6 +5499,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of 431b183; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36975816899"
+        },
+        {
+          "check": "CHECK-17",
+          "commit": "094c11fd4724e92f1adafed4b357bf1ace312484",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of 8837f11; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36981307437"
         }
       ],
       "tasks": [
@@ -6157,6 +6270,22 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of 431b183; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36975816899"
+        },
+        {
+          "check": "CHECK-18",
+          "commit": "094c11fd4724e92f1adafed4b357bf1ace312484",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of 8837f11; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36981307437"
+        },
+        {
+          "check": "CHECK-18-purge",
+          "commit": "094c11fd4724e92f1adafed4b357bf1ace312484",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of 8837f11; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36981307437"
         }
       ],
       "tasks": [
@@ -6645,6 +6774,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of 431b183; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36975816899"
+        },
+        {
+          "check": "CHECK-20",
+          "commit": "094c11fd4724e92f1adafed4b357bf1ace312484",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of 8837f11; artifact tested-sha.txt",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/36981307437"
         }
       ],
       "tasks": [

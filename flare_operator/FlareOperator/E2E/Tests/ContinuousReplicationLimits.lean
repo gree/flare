@@ -503,6 +503,19 @@ def scaleSuite : TestSuite := {
           | .error e => return .fail e
           | .ok (mPod, mIp, sPod, sIp) =>
             let mRc0 ← c.restartCount mPod
+            -- Capped variant (scale-6m-mem-cap): bound the proxy queue through
+            -- the CR. The follow flags and the block cache are declared with
+            -- it because the operator rewrites the whole extra.conf.
+            match (← IO.getEnv "FLARE_E2E_SCALE_QUEUE_CAP").bind (·.toNat?) with
+            | none => pure ()
+            | some cap =>
+              discard <| kubectlPatch "flarecluster" scaleCfg.name scaleCfg.«namespace»
+                s!"\{\"spec\":\{\"rocksdb\":\{\"maxTotalThreadQueue\":{cap},\"replIdentityForward\":true,\"replFollowEnabled\":true,\"replFollowPollIntervalUsec\":200000,\"blockCacheSizeMb\":64}}}"
+              let applied ← waitForCondition s!"the master reloads max-total-thread-queue = {cap}" 240 do
+                match ← hostCmd "kubectl" ["logs", "-n", scaleCfg.«namespace», mPod, "--tail=2000"] with
+                | .ok o => return containsSubstr o s!"max_total_thread_queue: 0 -> {cap}"
+                | .error _ => return false
+              if !applied then return .fail s!"the master never reloaded max-total-thread-queue = {cap}"
             let chunk := 20000
             let items0 ← c.currItems mIp
             let mut loaded := 0
@@ -527,7 +540,7 @@ def scaleSuite : TestSuite := {
                 IO.eprintln s!"# chunk at {i} stored 0 ({match r with | .ok _ => "no STORED" | .error e => e})"
               else failedRun := 0
               if i % 500000 == 0 || failedRun == 1 then
-                IO.eprintln s!"# load at {i}: stored so far {loaded}; master RSS={(← c.rssKb mPod).getD 0}kB heap in-use={((← c.statNat mIp "malloc_in_use_bytes").getD 0) / 1024}kB heap free={((← c.statNat mIp "malloc_free_bytes").getD 0) / 1024}kB restarts={← c.restartCount mPod} thread_queue={(← c.statNat mIp "total_thread_queue").getD 0} items={← c.currItems mIp}; replica applied={(← c.statNat sIp "repl_applied_lsn").getD 0} forward_applied={(← c.statNat sIp "repl_forward_applied").getD 0} RSS={(← c.rssKb sPod).getD 0}kB heap in-use={((← c.statNat sIp "malloc_in_use_bytes").getD 0) / 1024}kB"
+                IO.eprintln s!"# load at {i}: stored so far {loaded}; master RSS={(← c.rssKb mPod).getD 0}kB heap in-use={((← c.statNat mIp "malloc_in_use_bytes").getD 0) / 1024}kB heap free={((← c.statNat mIp "malloc_free_bytes").getD 0) / 1024}kB restarts={← c.restartCount mPod} thread_queue={(← c.statNat mIp "total_thread_queue").getD 0} dropped={(← c.statNat mIp "proxy_write_dropped").getD 0} items={← c.currItems mIp}; replica applied={(← c.statNat sIp "repl_applied_lsn").getD 0} forward_applied={(← c.statNat sIp "repl_forward_applied").getD 0} RSS={(← c.rssKb sPod).getD 0}kB heap in-use={((← c.statNat sIp "malloc_in_use_bytes").getD 0) / 1024}kB"
               -- Fail fast: 3 chunks in a row with nothing stored means the
               -- master is not taking writes (run 36941383859: from 4.44M keys
               -- on). Record why and stop instead of retrying for hours.
@@ -554,7 +567,7 @@ def scaleSuite : TestSuite := {
             if (← IO.getEnv "FLARE_E2E_SCALE_MEMORY_ONLY").isSome then
               for k in [1, 2, 3] do
                 IO.sleep 60000
-                IO.eprintln s!"# memory after the load +{k} min: master RSS={(← c.rssKb mPod).getD 0}kB heap in-use={((← c.statNat mIp "malloc_in_use_bytes").getD 0) / 1024}kB heap free={((← c.statNat mIp "malloc_free_bytes").getD 0) / 1024}kB restarts={← c.restartCount mPod} items={← c.currItems mIp}; replica RSS={(← c.rssKb sPod).getD 0}kB heap in-use={((← c.statNat sIp "malloc_in_use_bytes").getD 0) / 1024}kB"
+                IO.eprintln s!"# memory after the load +{k} min: master RSS={(← c.rssKb mPod).getD 0}kB heap in-use={((← c.statNat mIp "malloc_in_use_bytes").getD 0) / 1024}kB heap free={((← c.statNat mIp "malloc_free_bytes").getD 0) / 1024}kB restarts={← c.restartCount mPod} items={← c.currItems mIp} thread_queue={(← c.statNat mIp "total_thread_queue").getD 0} dropped={(← c.statNat mIp "proxy_write_dropped").getD 0}; follower state={(← c.statStr sIp "repl_follow_state").getD "?"} applied={(← c.statNat sIp "repl_applied_lsn").getD 0} master head={(← c.statNat mIp "rocksdb_latest_sequence_number").getD 0}; replica RSS={(← c.rssKb sPod).getD 0}kB heap in-use={((← c.statNat sIp "malloc_in_use_bytes").getD 0) / 1024}kB"
               IO.eprintln s!"# memory-only: loaded {loaded}/{n} in {loadMs} ms; master restarts {mRc0}→{← c.restartCount mPod}"
               if (← c.restartCount mPod) > mRc0 then return .fail "the master restarted during the memory-only load"
               return .pass

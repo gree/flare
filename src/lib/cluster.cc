@@ -1642,7 +1642,16 @@ cluster::proxy_request cluster::post_proxy_write(op_proxy_write* op, bool sync) 
 		// proxy request to slave
 		log_debug("proxy request to slave (node_key=%s, ident=%s)", it->node_key.c_str(), op->get_ident().c_str());
 		if (this->_enqueue(q, it->node_key, key_hash_value, sync) < 0) {
-			log_warning("enqueue failed (node_key=%s) -> continue processing", it->node_key.c_str());
+			// The forward was not queued (max-total-thread-queue reached, or the
+			// proxy thread is exiting): the replica will miss this write. Count
+			// it as a dropped forward to that replica so the repair path sees it
+			// (with continuous replication the follower fills it from the WAL).
+			// Rate-limited: at the cap this fires for every write.
+			stats_object->increment_proxy_write_dropped(it->node_key);
+			static AtomicCounter dropped_logged(0);
+			if (dropped_logged.incr() % 1000 == 1) {
+				log_warning("enqueue failed (node_key=%s) -> forward dropped (logged every 1000th)", it->node_key.c_str());
+			}
 			continue;
 		}
 	}

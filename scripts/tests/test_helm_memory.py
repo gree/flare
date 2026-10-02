@@ -58,6 +58,11 @@ class MemoryConfigTest(unittest.TestCase):
             self.assertIn(f"{field}: {value}", cr)
 
 
+    def test_forward_queue_bounded_by_default(self):
+        text = self.render()
+        cr = next(doc for doc in text.split("\n---") if "kind: FlareCluster" in doc.splitlines())
+        self.assertIn("maxTotalThreadQueue: 200000", cr)
+
 @unittest.skipUnless(shutil.which("helm"), "helm is required")
 class MemoryBudgetCheckTest(unittest.TestCase):
     """Render-time memory budget check for the flared container (plan item 4)."""

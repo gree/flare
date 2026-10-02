@@ -131,6 +131,10 @@ int op_stats::_send_stats(thread_pool* req_tp, thread_pool* other_tp, storage* s
 
 	_send_stat("pid"									, stats_object->get_pid());
 	_send_stat("uptime" 							, stats_object->get_uptime());
+	// Queued proxy requests (forwards to replicas, proxied reads). Only
+	// `stats threads queue` carried it before, so plain `stats` readers saw
+	// nothing while millions of forwards were queued (2026-10-02).
+	_send_stat("total_thread_queue"					, stats_object->get_total_thread_queue());
 #if defined(__GLIBC__) && (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 33))
 	{
 		// Heap accounting (2026-10-02): in-use bytes grow on a leak, free

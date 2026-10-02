@@ -724,6 +724,8 @@ private def checkBreakerUnavailable (ctx : Ctx) : IO Unit := do
   check ctx "continuous replication flags render into extra.conf, so a spec change cannot drop them"
     (({ replIdentityForward := some true, replFollowEnabled := some true, replFollowPollIntervalUsec := some 200000 } : RocksdbConfigSpec).toExtraConf
       == "repl-identity-forward = true\nrepl-follow-enabled = true\nrepl-follow-poll-interval-usec = 200000")
+  check ctx "maxTotalThreadQueue renders into extra.conf"
+    (({ maxTotalThreadQueue := some 200000 } : RocksdbConfigSpec).toExtraConf == "max-total-thread-queue = 200000")
   check ctx "breaker floor: one dead node of two (50%) does not trip with the default minimum of 2"
     (!trips pair [k "a"] [k "b"])
   check ctx "breaker floor: minUnavailableToTrip = 1 restores tripping on a single death"

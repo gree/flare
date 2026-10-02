@@ -152,6 +152,13 @@ structure RocksdbConfigSpec where
   replIdentityForward : Option Bool := none
   replFollowEnabled : Option Bool := none
   replFollowPollIntervalUsec : Option Nat := none
+  /-- Upper bound on queued proxy requests in flared (forwards to replicas
+      included). Unbounded (flared default 0) the master buffered every
+      forward a slow follower could not take: ~600 B each, 1.7 GB at 6M keys
+      (scale evaluation 2026-10-02). At the bound a forward is dropped and
+      counted (proxy_write_dropped), and the follower fills it from the WAL.
+      flared: `max-total-thread-queue` (dynamic). -/
+  maxTotalThreadQueue : Option Nat := none
   deriving Repr, BEq
 
 /-- True when at least one rocksdb field has been set by the user. -/
@@ -161,7 +168,8 @@ def RocksdbConfigSpec.hasAny (r : RocksdbConfigSpec) : Bool :=
   r.resyncFailureThreshold.isSome || r.walMaxBatchBytes.isSome ||
   r.walSyncBwlimit.isSome || r.walSyncInterval.isSome || r.snapshotBwlimit.isSome ||
   r.flushAllEnabled.isSome || r.backupKeep.isSome || r.readUnavailableError.isSome ||
-  r.replIdentityForward.isSome || r.replFollowEnabled.isSome || r.replFollowPollIntervalUsec.isSome
+  r.replIdentityForward.isSome || r.replFollowEnabled.isSome || r.replFollowPollIntervalUsec.isSome ||
+  r.maxTotalThreadQueue.isSome
 
 /-- Render the rocksdb spec as `extra.conf` lines (one per set field).
     Returns an empty string when no fields are set. Lines are joined with "\n";
@@ -225,6 +233,9 @@ def RocksdbConfigSpec.toExtraConf (r : RocksdbConfigSpec) : String :=
     | none => lines
   let lines := match r.replFollowPollIntervalUsec with
     | some n => lines ++ [s!"repl-follow-poll-interval-usec = {n}"]
+    | none => lines
+  let lines := match r.maxTotalThreadQueue with
+    | some n => lines ++ [s!"max-total-thread-queue = {n}"]
     | none => lines
   String.intercalate "\n" lines
 

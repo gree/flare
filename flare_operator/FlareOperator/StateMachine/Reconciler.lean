@@ -190,10 +190,12 @@ def isStandbyKey (rb : ReadBalanceSpec) (podZones : List (String × String))
     DATA LOSS flake). Callers that genuinely know only about one live node
     (the TCP registration fast path) pass just that node's key. -/
 def findActiveSlaveForPartition (state : FlareClusterState) (pIdx : Nat)
-    (livePodKeys : List String) (standbyKeys : List String := []) : Option String :=
+    (livePodKeys : List String) (standbyKeys : List String := [])
+    (excludedKeys : List String := []) : Option String :=
   let isCandidate := fun ((key, n) : String × FlareNode) =>
     n.role == FlareRole.Slave && n.state == FlareState.Active
       && n.partition == Int.ofNat pIdx && livePodKeys.contains key
+      && !excludedKeys.contains key
   -- standby slaves are the promotion choice of LAST resort: prefer any
   -- non-standby candidate; with only standby candidates left, availability
   -- wins and one is still returned.
@@ -206,7 +208,8 @@ def findActiveSlaveForPartition (state : FlareClusterState) (pIdx : Nat)
     First clears any stale entry for this nodeKey so re-registering nodes
     don't block their own partition from being filled. -/
 def autoAssign (state : FlareClusterState) (crd : FlareClusterView) (nodeKey : String) (node : FlareNode)
-    (livePodKeys : List String) (zones : List (String × String) := []) : FlareClusterState × FlareNode :=
+    (livePodKeys : List String) (zones : List (String × String) := [])
+    (excludedKeys : List String := []) : FlareClusterState × FlareNode :=
   let numPartitions := crd.spec.partitions
   let maxSlaves := if crd.spec.replicas > 1 then crd.spec.replicas - 1 else 0
   -- Standby slaves must be the zombie-guard's promotion choice of last
@@ -232,7 +235,16 @@ def autoAssign (state : FlareClusterState) (crd : FlareClusterView) (nodeKey : S
     -- an empty node as Active master while the data-bearing slave keeps
     -- serving nothing — silent data loss. The proxy joins as a fresh slave
     -- of the same partition and reconstructs from the promoted master.
-    match findActiveSlaveForPartition cleanState pIdx livePodKeys standbyKeys with
+    --
+    -- `excludedKeys` (SAF-10c unfit followers, from the reconcile pass) are
+    -- not promoted here: an unfit follower is too far behind, or its copy is
+    -- unusable. If the partition's only live Active slaves are excluded, the
+    -- proxy is LEFT AS IT IS — neither is it made master over them (it may
+    -- be empty) — and the masterless refill decides, with its ex-master
+    -- hold (CI 37025254148 follow-up: this guard crowned the far-behind
+    -- follower when the ex-master came back, and the ex-master would then
+    -- have rebuilt from it).
+    match findActiveSlaveForPartition cleanState pIdx livePodKeys standbyKeys excludedKeys with
     | some slaveKey =>
       match cleanState.lookupNode slaveKey with
       | some slaveNode =>
@@ -265,6 +277,11 @@ def autoAssign (state : FlareClusterState) (crd : FlareClusterView) (nodeKey : S
         let newState := (cleanState.addNode nodeKey newNode).setPartition pIdx newPart
         (newState, newNode)
     | none =>
+      if !excludedKeys.isEmpty
+          && (findActiveSlaveForPartition cleanState pIdx livePodKeys standbyKeys).isSome then
+        -- Only excluded (unfit) Active slaves: leave the proxy as it is.
+        (state, node)
+      else
       -- Mimic C++ flarei state assignment logic (cluster.cc:1010):
       -- Partition 0: always Active (special case, no reconstruction needed)
       -- Partition 1+: always Prepare (must reconstruct from P0 before becoming Active)
@@ -566,7 +583,18 @@ def reconcileStep (state : FlareClusterState) (crd : FlareClusterView)
     -- (dead detection suppressed, stale entries still Active).
     match state.lookupNode nodeKey with
     | some old =>
-      if old.partition >= 0 then
+      -- A FAILED-OVER ex-master's entry is Proxy/Down with partition -1, so
+      -- it used to fall through to fresh registration, which drops its
+      -- lastMasterOf marker. Its PVC still holds that partition's newest
+      -- copy; rejoin it like a restart so the refill can re-seat it (CI
+      -- 37030725289: as a fresh proxy the zombie guard crowned the far-behind
+      -- follower instead, and the ex-master would have rebuilt from it).
+      let rejoinPart : Int :=
+        if old.partition >= 0 then old.partition
+        else if old.state == FlareState.Down && old.lastMasterOf >= 0
+            && old.lastMasterOf < Int.ofNat crd.spec.partitions then old.lastMasterOf
+        else -1
+      if rejoinPart >= 0 then
         -- Rejoin the OLD partition as a syncing slave — deliberately the
         -- most conservative role. The TCP context cannot tell a zombie
         -- (an in-sync Active slave is alive and must be promoted instead)
@@ -578,6 +606,7 @@ def reconcileStep (state : FlareClusterState) (crd : FlareClusterView)
         -- partition's newest copy (see promoteMasterlessPartitions).
         let rejoined : FlareNode :=
           { old with role := FlareRole.Slave, state := FlareState.Prepare,
+                     partition := rejoinPart,
                      lastMasterOf := if old.role == FlareRole.Master then
                        old.partition else old.lastMasterOf,
                      regEpoch := state.nodeMapVersion + 1 }
@@ -621,7 +650,12 @@ def reconcileStep (state : FlareClusterState) (crd : FlareClusterView)
                     && kv.2.partition == node.partition)) then
           (state, .ServerError s!"node state: refusing Prepare→Active for slave {nodeKey}: partition {node.partition} has no Active master to have synced from")
         else
-          let updatedNode := { node with state := FlareState.Active }
+          -- A slave that activates has synced from the partition's current
+          -- master, so it no longer holds "the newest surviving copy": drop
+          -- its lastMasterOf marker (kept by a rejoined ex-master), or a stale
+          -- marker could end a later failover-lag hold early.
+          let updatedNode := { node with state := FlareState.Active,
+                                         lastMasterOf := if node.role == FlareRole.Slave then -1 else node.lastMasterOf }
           let newClusterState := state.addNode nodeKey updatedNode
           (newClusterState, .OK)
       else if node.state == FlareState.Active && (newState == FlareState.Active || newState == FlareState.Ready) then

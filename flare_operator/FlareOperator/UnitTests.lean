@@ -922,6 +922,38 @@ def checkFailoverLagHold (ctx : Ctx) : IO Unit := do
   check ctx "a FIT follower is crowned at once with the hold on"
     (masterOf (K8sReconciler.promoteMasterlessPartition holdState 0 ["f"] [] ["f"] [] true) == some "f")
 
+/-- CI 37030725289 sequence: after failover the ex-master entry is
+    Proxy/Down, partition -1, lastMasterOf 0; the unfit follower is Active. -/
+def holdKeyed : FlareClusterState :=
+  ({ nodeMap := [("m:12121", holdNode .Proxy .Down (-1) "m" 0), ("f:12121", holdNode .Slave .Active 0 "f")],
+     nodeMapVersion := 5 } : FlareClusterState).rebuildPartitionMap
+
+def checkExMasterReturn (ctx : Ctx) : IO Unit := do
+  let (s1, _) := Reconciler.reconcileStep holdKeyed activationCrd (.NodeAdd "m" 12121)
+  let m1 := s1.lookupNode "m:12121"
+  check ctx "a failed-over ex-master re-registers as a syncing slave of its old partition, keeping lastMasterOf"
+    (m1.map (fun n => (n.role == .Slave, n.state == .Prepare, n.partition, n.lastMasterOf)) == some (true, true, 0, 0))
+  let s2 := K8sReconciler.assignProxiesPure s1 activationCrd ["m:12121", "f:12121"] [] [] ["f:12121"]
+  check ctx "the zombie guard does not promote an excluded (unfit) Active slave"
+    (masterOf s2 == none)
+  let s3 := K8sReconciler.promoteMasterlessPartition s2 0 ["m:12121", "f:12121"] [] ["m:12121", "f:12121"] ["f:12121", "m:12121"] true
+  check ctx "the refill re-seats the returning data-bearing ex-master, not the unfit follower"
+    (masterOf s3 == some "m:12121")
+  let px : FlareClusterState :=
+    ({ nodeMap := [("p:12121", holdNode .Proxy .Active (-1) "p"), ("f:12121", holdNode .Slave .Active 0 "f")],
+       nodeMapVersion := 5 } : FlareClusterState).rebuildPartitionMap
+  let (pa, _) := Reconciler.autoAssign px activationCrd "p:12121" (holdNode .Proxy .Active (-1) "p") ["p:12121", "f:12121"] [] ["f:12121"]
+  check ctx "a proxy is neither crowned over nor used to promote an unfit-only partition (left to the refill)"
+    (masterOf pa == none && pa.nodeMap == px.nodeMap)
+  let (pb, _) := Reconciler.autoAssign px activationCrd "p:12121" (holdNode .Proxy .Active (-1) "p") ["p:12121", "f:12121"]
+  check ctx "without exclusions the zombie guard still promotes the Active slave"
+    (masterOf pb == some "f:12121")
+  let act : FlareClusterState :=
+    { nodeMap := [("a:12121", holdNode .Master .Active 0 "a"), ("m:12121", holdNode .Slave .Prepare 0 "m" 0)], nodeMapVersion := 7 }
+  let (sa, _) := Reconciler.reconcileStep act activationCrd (.NodeState "m" 12121 .Active)
+  check ctx "a slave that activates under an Active master drops its lastMasterOf marker"
+    ((sa.lookupNode "m:12121").map (·.lastMasterOf) == some (-1))
+
 def run : IO UInt32 := do
   let ctx : Ctx := { failures := ← IO.mkRef [], count := ← IO.mkRef 0 }
   checkObserve ctx
@@ -946,6 +978,7 @@ def run : IO UInt32 := do
   checkTopologyMetrics ctx
   checkReactivation ctx
   checkFailoverLagHold ctx
+  checkExMasterReturn ctx
   let failures ← ctx.failures.get
   let n ← ctx.count.get
   IO.println s!"1..{n}"

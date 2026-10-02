@@ -1176,11 +1176,11 @@ def detectDrainingNodesPure (state : FlareClusterState) (terminatingKeys : List 
     never by the corpse of the node that just failed. -/
 def assignProxiesPure (state : FlareClusterState) (crd : FlareClusterView)
     (livePodKeys : List String) (zones : List (String × String) := [])
-    (terminatingKeys : List String := []) : FlareClusterState :=
+    (terminatingKeys : List String := []) (excludedKeys : List String := []) : FlareClusterState :=
   state.nodeMap.foldl (init := state) fun currentState (nodeKey, node) =>
     if node.role == FlareRole.Proxy && node.state != FlareState.Down
         && !terminatingKeys.contains nodeKey then
-      let (newState, _) := autoAssign currentState crd nodeKey node livePodKeys zones
+      let (newState, _) := autoAssign currentState crd nodeKey node livePodKeys zones excludedKeys
       newState
     else
       currentState
@@ -1572,7 +1572,7 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
       -- otherwise be re-assigned a role here, undoing the drain (flapping).
       -- Also exclude nodes held by the replica-repair ledger: they must stay
       -- Proxy until they have applied that map (see repairHeldKeys).
-      let stateWithProxies := assignProxiesPure state crd s.livePodKeys s.podZones (s.terminatingKeys ++ s.repairHeldKeys)
+      let stateWithProxies := assignProxiesPure state crd s.livePodKeys s.podZones (s.terminatingKeys ++ s.repairHeldKeys) s.followUnfitKeys
       -- Refill partitions that lost every master to a total restart (all
       -- replicas re-registered as Slave/Prepare, so no proxy exists for
       -- autoAssign and no Down entry exists for failover).

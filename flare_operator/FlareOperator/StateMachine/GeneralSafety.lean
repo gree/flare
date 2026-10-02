@@ -209,8 +209,9 @@ private theorem count_assign_master_le (s target : FlareClusterState)
 
 theorem autoAssign_cle (s : FlareClusterState) (crd : FlareClusterView)
     (k : String) (n : FlareNode) (live : List String)
-    (hn : (n.role == FlareRole.Master) = false) :
-    CLE s.nodeMap (autoAssign s crd k n live).1.nodeMap := by
+    (hn : (n.role == FlareRole.Master) = false)
+    (zones : List (String × String) := []) (ex : List String := []) :
+    CLE s.nodeMap (autoAssign s crd k n live zones ex).1.nodeMap := by
   have hnM : ∀ p, isM p n = false := fun p => by simp [isM, hn]
   have hclean : ∀ p,
       countMastersFor p ((s.addNode k n).rebuildPartitionMap).nodeMap
@@ -257,10 +258,13 @@ theorem autoAssign_cle (s : FlareClusterState) (crd : FlareClusterView)
         rw [setPartition_nodeMap]
         exact count_assign_master_le s _ k _ pIdx hclean hzero rfl p
     next hguard =>
-      intro p
-      dsimp only
-      rw [setPartition_nodeMap]
-      exact count_assign_master_le s _ k _ pIdx hclean hzero rfl p
+      split
+      · -- only excluded (unfit) Active slaves: the proxy is left as it is
+        exact CLE.rfl _
+      · intro p
+        dsimp only
+        rw [setPartition_nodeMap]
+        exact count_assign_master_le s _ k _ pIdx hclean hzero rfl p
   next hfind =>
     split
     next pIdx hslave =>
@@ -319,8 +323,9 @@ theorem count_addNode_replace_le (p : Int) (s : FlareClusterState)
 /-! ## assignProxiesPure satisfies the bound -/
 
 theorem assignProxiesPure_cle (s : FlareClusterState) (crd : FlareClusterView)
-    (live : List String) (term : List String) :
-    CLE s.nodeMap (assignProxiesPure s crd live [] term).nodeMap := by
+    (live : List String) (term : List String)
+    (zones : List (String × String) := []) (ex : List String := []) :
+    CLE s.nodeMap (assignProxiesPure s crd live zones term ex).nodeMap := by
   unfold assignProxiesPure
   -- generalize the fold: from any accumulator the bound holds w.r.t. it.
   -- The Terminating-exclusion conjunct only ADDS identity steps, so the bound
@@ -330,7 +335,7 @@ theorem assignProxiesPure_cle (s : FlareClusterState) (crd : FlareClusterView)
         (items.foldl (fun currentState kv =>
           if kv.2.role == FlareRole.Proxy && kv.2.state != FlareState.Down
               && !term.contains kv.1 then
-            (autoAssign currentState crd kv.1 kv.2 live).1
+            (autoAssign currentState crd kv.1 kv.2 live zones ex).1
           else currentState) acc).nodeMap by
     exact hgen s.nodeMap s
   intro items
@@ -341,7 +346,7 @@ theorem assignProxiesPure_cle (s : FlareClusterState) (crd : FlareClusterView)
     rw [List.foldl_cons]
     refine CLE.trans (b := (if hd.2.role == FlareRole.Proxy
         && hd.2.state != FlareState.Down && !term.contains hd.1 then
-          (autoAssign acc crd hd.1 hd.2 live).1 else acc).nodeMap) ?_ (ih _)
+          (autoAssign acc crd hd.1 hd.2 live zones ex).1 else acc).nodeMap) ?_ (ih _)
     split
     · next hguard =>
       have hrole : (hd.2.role == FlareRole.Proxy) = true := by
@@ -352,7 +357,7 @@ theorem assignProxiesPure_cle (s : FlareClusterState) (crd : FlareClusterView)
       have hnm : (hd.2.role == FlareRole.Master) = false := by
         have : hd.2.role = FlareRole.Proxy := eq_of_beq hrole
         rw [this]; rfl
-      exact autoAssign_cle acc crd hd.1 hd.2 live hnm
+      exact autoAssign_cle acc crd hd.1 hd.2 live hnm zones ex
     · exact CLE.rfl _
 
 /-! ## promoteMasterlessPartitions satisfies the bound -/
@@ -476,10 +481,12 @@ theorem reconcileStep_cle (s : FlareClusterState) (crd : FlareClusterView)
     dsimp only
     split
     · next old hlook =>
-      split
-      · -- old.partition ≥ 0: rejoin as syncing slave, a non-master insert
-        exact CLE.of_le (fun p => count_addNode_nonmaster p _ _ _ rfl)
-      · exact registerFreshNode_cle s crd _ serverName serverPort
+      -- rejoin (old partition ≥ 0, or a Down ex-master's lastMasterOf) as a
+      -- syncing slave — a non-master insert — or fresh registration
+      repeat' split
+      all_goals first
+        | exact CLE.of_le (fun p => count_addNode_nonmaster p _ _ _ rfl)
+        | exact registerFreshNode_cle s crd _ serverName serverPort
     · exact registerFreshNode_cle s crd _ serverName serverPort
   | NodeState serverName serverPort newState =>
     dsimp only

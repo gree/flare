@@ -43,8 +43,11 @@ at phase 1 and a separate design starts.
 - Failover lag bound (2026-10-03): found without CI that the masterless
   refill's last resort crowned the far-behind follower in the same pass, so
   the bound protected nothing. Fixed by a bounded hold (wait for the ex-master
-  up to `FLARE_FOLLOW_FAILOVER_WAIT_SECONDS`, default 300). Unit-tested; E2E
-  `continuous-replication-lag-hold` CI pending.
+  up to `FLARE_FOLLOW_FAILOVER_WAIT_SECONDS`, default 300). The first E2E runs
+  found two more defects (a false NOT LOSS-FREE line; a returning ex-master
+  overruled by the zombie guard promoting the follower), fixed in 79bf29c and
+  267a196. E2E `continuous-replication-lag-hold` PASS, PR run 37035470146,
+  all 8 legs green.
 
 ## Phase 3: operations (staging needs the user's go-ahead)
 

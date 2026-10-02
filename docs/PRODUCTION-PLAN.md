@@ -21,14 +21,14 @@ at phase 1 and a separate design starts.
 | 2 | SAF-08: bind follow evidence to the flared process. A boot-id change makes a reading Unknown, with no extra API calls per replica | **Done 2026-10-02.** Unit cases; the PR runs pass. A replacement within one pass is not detected |
 | 3 | EV-15: per-node role and replication lag as metrics, with an alert on lag | **Done.** Follow metrics seen on a pod by native-metrics; PR run 36918285987 green |
 | 4 | Memory budget validation: the render fails when the floor reaches the limit, and warns above 70% or when tmpfs plus the floor exceeds the limit | **Done** at chart render time; the render tests run in every E2E leg |
-| 5 | Client result when a stale slave cannot reach the master | **Implemented** as `read-unavailable-error`, default off. It compiles and CI is green, but no E2E exercises it yet |
+| 5 | Client result when a stale slave cannot reach the master | **Done.** `read-unavailable-error` E2E PASS: `SERVER_ERROR` with the option on, a miss with it off. Both replies took 18 s, the forward retry budget |
 
 ## Phase 2: measurements (CI evaluations, run in parallel)
 
 | # | Measurement | How |
 |---|---|---|
 | 6 | Startup, probe and kill-9 reopen at scale | **Measured at 2M keys** (run 36914128803): reopen scan 1.46 s, probe max 3.46 s; the follower drained **17.7 min** after a 26 min load. 15.8M needs a faster loader |
-| 7 | T17: read and proxy latency, reconcile and lease renewal under load | **Measured** (run 36918289515): get p50 2.2–3.6 ms, p99 50–98 ms; reconcile 2.1–3.1 s; lease age ≤ 8 s of 15 s |
+| 7 | T17: read and proxy latency, reconcile and lease renewal under load | **Done.** get p50 2–3 ms, p99 50–98 ms; reconcile 1.9–3.1 s; lease age ≤ 8 s of 15 s; apply-lock hold max 295 ms, forwarded-write wait max 81 ms |
 | 8 | Both repair triggers at the same time; lagged or Unknown successor gates | **Done.** Both triggers fired in one run with one ledger entry and one rebuild (PR run 36922262408). Lagged successor PASS (gap 21, within the bound) |
 | 9 | Outage and resource evaluation on tmpfs | **Done**, run 36914124394: 11 s catch-up, 59 s snapshot rebuild, 1.07 GB data plus 0.54 GB RSS |
 

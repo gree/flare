@@ -1459,7 +1459,7 @@
         "Until eb2ba17 the drop observation required the REPLICA's stats read to succeed as well as the master's, so an unreadable replica hid the master's drop counter for its partition (found by the SAF-10d stats-fetch-failure scenario, run 4). Fixed: the observation needs the master's reply only. E2E confirmation pending (run 5).",
         "REGRESSION (found by rerunning replica-repair on tch after SAF-10c, fixed 2379cff): FollowReading treated a complete stats reply WITHOUT follower keys as unreadable, so every drop on a non-RocksDB replica was held as 'follower state unknown' and never repaired. Unknown now means a failed or truncated read only. The rerun of the non-WAL suites on the fix is pending.",
         "2026-10-02 (CI 36882921953), classified as HARNESS: replica-repair test 4 failed 'completion was logged but no demotion was observed'. The operator log shows the new process demoted, saw the demotion confirmed and completed, in that order. The completion wait began only after the new process had finished the whole repair, about 60 s earlier than in the passing runs (55-65 s). Cause in the harness: `kubectl rollout status` returns while the old operator pod is still terminating, so the 'restores the HELD request' check passed on the OLD pod's log; the completion wait then read a 2000-line tail. Tests 5 and 6 failed on preconditions left by 4. Fix: every operator rollout in the suite waits until the previous pod is gone, and the completion wait reads the full log. Re-run 36887321961: replica-repair 15/15; the previous operator pod outlived `rollout status` by 35 s at every rollout, and the HELD-restore check now takes 15 s on the new pod instead of passing at once on the old one.",
-        "2026-10-02 (PR run 37007523101 on b01ff4d), classified as FUNCTIONAL (operator), fix pending CI: after the kill -9 in continuous-replication test 14 the replica restarted on its PVC, followed and matched the master (items 356/356), but the ledger entry (an ordinary request, no hold) never closed within 300 s. The replica's flared log shows why: its reconstruction finished, then activate_node was refused 30 times as 'node state: transition 0→0 not allowed', the attempt was failed and the whole reconstruction restarted, up to attempt 7. The operator already had the node Active: either its PREPARE-REPAIR activated it from sync evidence while flared was finishing, or an earlier activate was applied and its reply lost. Since the reconstruction never returned success, the 'reconstruction newer than at reseat SUCCEEDED' completion the entry waits for never came. Test 15 (planned promotion, 'did not advance the source epoch') then promoted the same node while it was still inside that retry loop, so it is a consequence of the same defect. Fix: Reconciler.reconcileStep acknowledges an Active/Ready report for a node that is already Active without changing the state (IDEMPOTENT RE-ACTIVATION); Down and other states are still refused. flare_unit checkReactivation (4 cases) and GeneralSafety's CLE proof cover it; the E2E re-run is pending. The 9 earlier PR runs passed this test, so the race is intermittent."
+        "2026-10-02 (PR run 37007523101 on b01ff4d), classified as FUNCTIONAL (operator), fixed in 713bf8c: after the kill -9 in continuous-replication test 14 the replica restarted on its PVC, followed and matched the master (items 356/356), but the ledger entry (an ordinary request, no hold) never closed within 300 s. The replica's flared log shows why: its reconstruction finished, then activate_node was refused 30 times as 'node state: transition 0→0 not allowed', the attempt was failed and the whole reconstruction restarted, up to attempt 7. The operator already had the node Active: either its PREPARE-REPAIR activated it from sync evidence while flared was finishing, or an earlier activate was applied and its reply lost. Since the reconstruction never returned success, the 'reconstruction newer than at reseat SUCCEEDED' completion the entry waits for never came. Test 15 (planned promotion, 'did not advance the source epoch') then promoted the same node while it was still inside that retry loop, so it is a consequence of the same defect. Fix: Reconciler.reconcileStep acknowledges an Active/Ready report for a node that is already Active without changing the state (IDEMPOTENT RE-ACTIVATION); Down and other states are still refused. flare_unit checkReactivation (4 cases) and GeneralSafety's CLE proof cover it; re-run PASS: PR run 37014778271 (merge revision 35818b4 of 713bf8c), all 8 legs green, continuous-replication tests 14 and 15 pass and the 'not allowed' refusal does not occur in the leg's log. One passing run does not show the race is gone, only that the fixed path works. The 9 earlier PR runs passed this test, so the race is intermittent."
       ],
       "code": [
         {
@@ -2151,6 +2151,22 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request — PR #144 merge revision of b01ff4d; continuous-replication leg FAILED tests 14 and 15 (the other 7 legs passed); artifact tested-sha.txt",
           "result": "fail",
           "report": "docs/reports/2026-10-02-ci-37007523101-continuous-replication-e2e.log"
+        },
+        {
+          "check": "CHECK-03",
+          "commit": "35818b495ce7899a0b235f0ee47d8d3c71d92674",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of 713bf8c (idempotent re-activation fix)",
+          "result": "pass",
+          "report": "https://github.com/gree/flare/actions/runs/37014778271"
+        },
+        {
+          "check": "CHECK-03-follow",
+          "commit": "35818b495ce7899a0b235f0ee47d8d3c71d92674",
+          "date": "2026-10-02",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of 713bf8c (idempotent re-activation fix)",
+          "result": "pass",
+          "report": "docs/reports/2026-10-02-ci-37014778271-continuous-replication-job.log"
         }
       ],
       "tasks": [

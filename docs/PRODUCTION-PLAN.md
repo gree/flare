@@ -37,7 +37,8 @@ at phase 1 and a separate design starts.
 - PR run 37007523101 (b01ff4d): continuous-replication tests 14 and 15
   failed. Cause in the operator: a repeated activation from a node it already
   had Active was refused, so flared kept restarting its reconstruction. Fixed
-  by acknowledging it without change; the re-run is pending.
+  by acknowledging it without change (713bf8c); re-run PASS, PR run 37014778271,
+  all 8 legs green.
 
 ## Phase 3: operations (staging needs the user's go-ahead)
 

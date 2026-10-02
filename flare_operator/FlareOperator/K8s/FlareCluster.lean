@@ -159,6 +159,12 @@ structure RocksdbConfigSpec where
       counted (proxy_write_dropped), and the follower fills it from the WAL.
       flared: `max-total-thread-queue` (dynamic). -/
   maxTotalThreadQueue : Option Nat := none
+  /-- Pipeline forwards to a replica: send up to N-1 without waiting for a
+      reply, then one with a reply. Raises forward throughput, but a forward
+      that fails inside the window is not counted as dropped, so enable it
+      only with continuous replication (the follower repairs from the WAL).
+      flared: `noreply-window-limit` (dynamic; 0 = off). -/
+  noreplyWindowLimit : Option Nat := none
   deriving Repr, BEq
 
 /-- True when at least one rocksdb field has been set by the user. -/
@@ -169,7 +175,7 @@ def RocksdbConfigSpec.hasAny (r : RocksdbConfigSpec) : Bool :=
   r.walSyncBwlimit.isSome || r.walSyncInterval.isSome || r.snapshotBwlimit.isSome ||
   r.flushAllEnabled.isSome || r.backupKeep.isSome || r.readUnavailableError.isSome ||
   r.replIdentityForward.isSome || r.replFollowEnabled.isSome || r.replFollowPollIntervalUsec.isSome ||
-  r.maxTotalThreadQueue.isSome
+  r.maxTotalThreadQueue.isSome || r.noreplyWindowLimit.isSome
 
 /-- Render the rocksdb spec as `extra.conf` lines (one per set field).
     Returns an empty string when no fields are set. Lines are joined with "\n";
@@ -236,6 +242,9 @@ def RocksdbConfigSpec.toExtraConf (r : RocksdbConfigSpec) : String :=
     | none => lines
   let lines := match r.maxTotalThreadQueue with
     | some n => lines ++ [s!"max-total-thread-queue = {n}"]
+    | none => lines
+  let lines := match r.noreplyWindowLimit with
+    | some n => lines ++ [s!"noreply-window-limit = {n}"]
     | none => lines
   String.intercalate "\n" lines
 

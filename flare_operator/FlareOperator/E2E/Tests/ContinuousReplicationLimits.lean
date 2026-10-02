@@ -775,7 +775,16 @@ def sustainedSuite : TestSuite := {
   name := "continuous-replication-sustained"
   setup := do
     if ← sustainedOn then
-      deployCluster sustainedCfg
+      -- Throughput variants (2026-10-02): a CPU limit and a noreply window
+      -- for forwards, baked into the initial config (this cluster sets no
+      -- spec.rocksdb, so the operator does not rewrite it).
+      let cpu := (← IO.getEnv "FLARE_E2E_SUSTAINED_CPU").getD "500m"
+      let nrw := (← IO.getEnv "FLARE_E2E_SUSTAINED_NRW").bind (·.toNat?)
+      let extra := match nrw with
+        | some n => sustainedCfg.extraFlaredConf ++ s!"\nnoreply-window-limit = {n}"
+        | none => sustainedCfg.extraFlaredConf
+      IO.eprintln s!"# sustained variant: flared cpu limit {cpu}, noreply-window-limit {nrw.map toString |>.getD "off"}"
+      deployCluster { sustainedCfg with flaredCpuLimit := cpu, extraFlaredConf := extra }
       IO.eprintln "# Waiting 50s grace period for operator reconciliation..."
       IO.sleep 50000
     else IO.eprintln "# FLARE_E2E_SUSTAINED unset: the sustained-load evaluation deploys nothing and its tests are skipped"

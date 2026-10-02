@@ -169,6 +169,14 @@ spec:
                         replicas included); 0 = unbounded. At the bound a
                         forward is dropped and counted, and the follower
                         fills it from the WAL (flared max-total-thread-queue)
+                    noreplyWindowLimit:
+                      type: integer
+                      minimum: 0
+                      description: >-
+                        Pipeline forwards to replicas, N-1 without waiting for
+                        a reply (flared noreply-window-limit; 0 = off). A
+                        failure inside the window is not counted as a drop:
+                        enable only with replFollowEnabled.
                     replFollowPollIntervalUsec:
                       type: integer
                       minimum: 1000

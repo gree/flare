@@ -24,7 +24,7 @@ on:
       evaluation:
         description: 'Optional evaluation on the continuous-replication leg (PR runs use none)'
         type: choice
-        options: [none, sustained, outage, outage-tmpfs, scale-2m, scale-6m-mem, scale-6m-mem-cap, scale-2m-cap, scale-15m8]
+        options: [none, sustained, sustained-cpu2, sustained-nrw, outage, outage-tmpfs, scale-2m, scale-6m-mem, scale-6m-mem-cap, scale-2m-cap, scale-15m8]
         default: none
       suites:
         description: 'Optional: run ONLY these suites (comma-separated, e.g. topology-authority) in one leg; empty = full matrix'
@@ -404,6 +404,8 @@ jobs:
           if [ "$SUITE_GROUP" = continuous-replication ] || [ "$SUITE_GROUP" = custom ]; then
             case "$EVALUATION" in
               sustained) export FLARE_E2E_SUSTAINED=1; limit=10800 ;;
+              sustained-cpu2) export FLARE_E2E_SUSTAINED=1 FLARE_E2E_SUSTAINED_CPU=2; limit=10800 ;;
+              sustained-nrw) export FLARE_E2E_SUSTAINED=1 FLARE_E2E_SUSTAINED_CPU=2 FLARE_E2E_SUSTAINED_NRW=16; limit=10800 ;;
               outage) export FLARE_E2E_OUTAGE=1; limit=10800 ;;
               outage-tmpfs) export FLARE_E2E_OUTAGE_TMPFS=1; limit=10800 ;;
               scale-2m) export FLARE_E2E_SCALE_KEYS=2000000; limit=10800 ;;

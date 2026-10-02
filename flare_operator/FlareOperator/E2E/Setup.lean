@@ -54,6 +54,9 @@ structure ClusterConfig where
       plus a 64 MB write buffer OOM-killed a 512Mi master under a 2M-key
       load). -/
   flaredMemoryLimit : String := "512Mi"
+  /-- flared container CPU limit. 500m on CI; evaluations raise it to tell
+      CPU throttling apart from protocol limits. -/
+  flaredCpuLimit : String := "500m"
   flaredMemoryRequest : String := "256Mi"
   /-- PVC size request (only used when usePvc). Kind's default storage
       class (local-path) ignores the size, so keep it small. -/
@@ -356,7 +359,7 @@ spec:
               cpu: 100m
               memory: {cfg.flaredMemoryRequest}
             limits:
-              cpu: 500m
+              cpu: {cfg.flaredCpuLimit}
               memory: {cfg.flaredMemoryLimit}
       volumes:
         - name: flared-config

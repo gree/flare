@@ -350,6 +350,34 @@ The end-state (masterless partition) also fires
 [FlareMasterMissing](#master-missing); this alert is the EARLY warning while
 the doomed master is still alive and a final backup is still possible.
 
+## Partition held for its ex-master (failover lag bound) {#failover-lag-hold}
+
+Log line: `CRITICAL: partition N has NO master: its only data-bearing copy
+[...] is unfit ... waiting for the ex-master to return`. Also fires
+[FlareMasterMissing](#master-missing).
+
+The master died while its follower was further behind than
+`FLARE_FOLLOW_FAILOVER_MAX_LAG` (operator env, default 100000 positions), or
+had declared its copy unusable. Promoting it would discard everything it
+never received, so the operator leaves the partition WITHOUT a master and
+waits for the ex-master. Writes to the partition fail meanwhile.
+
+- **PVC cluster**: the same-name pod returns with its data and is master
+  again; the follower then rebuilds or catches up from it. Nothing to do
+  unless the pod cannot come back (node lost, PVC stuck): fix that first.
+- **tmpfs cluster**: the ex-master returns empty, so there is nothing to
+  wait for and the follower is seated at once (logged `PROMOTION NOT
+  LOSS-FREE ... LAST RESORT`).
+- **The wait is bounded**: after `FLARE_FOLLOW_FAILOVER_WAIT_SECONDS` (default
+  300, counted from the first pass that sees the partition masterless) the
+  follower is seated anyway with the same NOT LOSS-FREE line. The writes it
+  never received are lost. Set the variable to 0 to never wait (the behaviour
+  before 2026-10-03); raise it where losing writes is worse than a longer
+  write outage.
+
+To shorten the outage by hand, accepting the loss, set the variable lower
+and restart the operator.
+
 ## Replacing a node with corrupt data {#replace-corrupt}
 
 To service out a node whose local data looks corrupt and rebuild it from a

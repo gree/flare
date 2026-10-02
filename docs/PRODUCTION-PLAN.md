@@ -40,6 +40,12 @@ at phase 1 and a separate design starts.
   by acknowledging it without change (713bf8c); re-run PASS, PR run 37014778271,
   all 8 legs green.
 
+- Failover lag bound (2026-10-03): found without CI that the masterless
+  refill's last resort crowned the far-behind follower in the same pass, so
+  the bound protected nothing. Fixed by a bounded hold (wait for the ex-master
+  up to `FLARE_FOLLOW_FAILOVER_WAIT_SECONDS`, default 300). Unit-tested; E2E
+  `continuous-replication-lag-hold` CI pending.
+
 ## Phase 3: operations (staging needs the user's go-ahead)
 
 | # | Item |

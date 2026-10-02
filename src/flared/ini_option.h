@@ -128,6 +128,7 @@ private:
 	int				_wal_follow_max_batches;
 	int				_wal_follow_max_bytes;
 	int				_wal_follow_poll_interval_usec;
+	int				_wal_follow_batch_delay_usec;
 	// Background expire crawler (memcached lru_crawler equivalent): a
 	// master-only sweep that physically deletes past-expire keys so they are
 	// reclaimed and — being real deletes — replicate through the WAL to slaves.
@@ -285,6 +286,7 @@ public:
 	int get_wal_follow_max_batches() { return this->_wal_follow_max_batches; }
 	int get_wal_follow_max_bytes() { return this->_wal_follow_max_bytes; }
 	int get_wal_follow_poll_interval_usec() { return this->_wal_follow_poll_interval_usec; }
+	int get_wal_follow_batch_delay_usec() { return this->_wal_follow_batch_delay_usec; }
 	bool is_reap_expired() { return this->_reap_expired; }
 	int get_reap_expired_interval() { return this->_reap_expired_interval; }
 	int get_reap_expired_chunk_size() { return this->_reap_expired_chunk_size; }

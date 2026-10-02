@@ -244,6 +244,31 @@ initialize persistedVersionRef : IO.Ref Nat ← IO.mkRef 0
     startup grace is measured from it in wall-clock seconds. -/
 initialize leaderSinceMsRef : IO.Ref Nat ← IO.mkRef 0
 
+/-- When each partition was first seen without a master (monotonic ms),
+    for the failover-lag hold's wait budget. Cleared once it has one. -/
+initialize masterlessSinceRef : IO.Ref (List (Nat × Nat)) ← IO.mkRef []
+
+/-- How long a partition stays masterless waiting for its ex-master when the
+    only data-bearing copy left is an unfit follower
+    (FLARE_FOLLOW_FAILOVER_WAIT_SECONDS, default 300; 0 = do not wait). -/
+private def failoverWaitSeconds : IO Nat := do
+  return ((← IO.getEnv "FLARE_FOLLOW_FAILOVER_WAIT_SECONDS").bind (·.toNat?)).getD 300
+
+/-- Update the masterless clock from the committed map and return the
+    partitions whose wait is over. The pass that kills a master still sees it
+    in the committed map, so the clock starts on the next pass: the hold
+    lasts at least the budget. -/
+private def masterlessExpired (cs : FlareClusterState) (waitS : Nat) : IO (List Nat) := do
+  let now ← IO.monoMsNow
+  let parts := (cs.nodeMap.filterMap fun (_, n) =>
+      if n.partition ≥ 0 then some n.partition.toNat
+      else if n.lastMasterOf ≥ 0 then some n.lastMasterOf.toNat else none).eraseDups
+  let masterless := parts.filter (fun p => !FlareOperator.Reconciler.hasMasterForPartition cs p)
+  let prev ← masterlessSinceRef.get
+  let next := masterless.map fun p => (p, (prev.lookup p).getD now)
+  masterlessSinceRef.set next
+  return (next.filter (fun (_, t0) => now - t0 ≥ waitS * 1000)).map Prod.fst
+
 /-- Startup grace in seconds (FLARE_STARTUP_GRACE_SECONDS, default 120).
     It used to be 24 reconcile CYCLES, which stretched with slow passes to
     ~190 s in the continuous-replication suite (user decision 2026-10-02). -/
@@ -674,7 +699,10 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
       -- degraded to its no-information fallback exactly when a master had
       -- just died. Found by review, not by a test.
       let dataKeys ← if masterless || deadCandidate || !unhealthyKeys.isEmpty then
-          Bridge.dataBearingPodKeys pods ns
+          -- Ex-masters (lastMasterOf holders, not master now) are read even
+          -- while NotReady: see Bridge.dataBearingPodKeys.
+          Bridge.dataBearingPodKeys pods ns (cs.nodeMap.filterMap fun (k, n) =>
+            if n.lastMasterOf ≥ 0 && n.role != FlareRole.Master then some k else none)
         else
           pure []
       -- SAF-10c: continuous-replication eligibility (StateMachine/FollowEvidence).
@@ -1006,8 +1034,12 @@ private def runReconcileDriver (stateRef : IO.Ref FlareClusterState)
     IO.eprintln s!"[flare-operator] grace period over after {elapsedS}s: dead-node detection and graceful drain active"
   let initialGrace ← graceCyclesRef.get
   let initialPhase ← migrationRef.get
+  let waitS ← failoverWaitSeconds
+  let holdExpired ← masterlessExpired (← stateRef.get) waitS
   let initialState : K8sReconciler.FlareReconcileState := {
     graceCycles := initialGrace,
+    followHoldEnabled := waitS > 0,
+    followHoldExpiredParts := holdExpired,
     currentMigrationPhase := initialPhase,
     -- Seed the breaker hysteresis from the persistent ref: FSM state
     -- resets every tick, so "was tripped last cycle" must ride in here.

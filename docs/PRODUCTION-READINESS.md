@@ -116,7 +116,11 @@ that gap. Record the agreed failure model and RPO/RTO before approval.
 
   The cost is slower convergence: 28 min after a 2M-key load, against
   18.5 min without the bound. Failover also refuses a follower more than
-  `FLARE_FOLLOW_FAILOVER_MAX_LAG` (default 100000) behind.
+  `FLARE_FOLLOW_FAILOVER_MAX_LAG` (default 100000) behind. Until 2026-10-03 the
+  masterless refill crowned that follower in the same pass anyway, so the
+  bound protected nothing. The refill now holds the partition masterless for
+  up to `FLARE_FOLLOW_FAILOVER_WAIT_SECONDS` (default 300) while the
+  ex-master is away; E2E `continuous-replication-lag-hold`, CI pending.
 - Stage both repair triggers concurrently and lagged/unknown promotion and
   deletion gates. Record failures, not just successful reruns.
 

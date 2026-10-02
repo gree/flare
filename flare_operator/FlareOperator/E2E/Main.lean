@@ -70,6 +70,7 @@ def main (args : List String) : IO UInt32 :=
     Tests.ContinuousReplication.suite,
     Tests.ContinuousReplicationLimits.purgeSuite,
     Tests.ContinuousReplicationLimits.limitsSuite,
+    Tests.ContinuousReplicationLimits.lagHoldSuite,
     Tests.ContinuousReplicationLimits.scaleSuite,
     Tests.ContinuousReplicationLimits.sustainedSuite,
     Tests.ContinuousReplicationLimits.outageSuite,

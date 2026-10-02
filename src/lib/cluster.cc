@@ -95,6 +95,7 @@ cluster::cluster(thread_pool* req_tp, thread_pool* other_tp, string server_name,
 		_wal_follow_max_batches(256),
 		_wal_follow_max_bytes(4 * 1024 * 1024),
 		_wal_follow_poll_interval_usec(200 * 1000),
+		_wal_follow_batch_delay_usec(0),
 		_replication_type(replication_async),
 		_proxy_prior_netmask(0), 
 		_max_total_thread_queue(0),
@@ -1782,12 +1783,14 @@ int cluster::_reconcile_wal_follower_locked() {
 	this->from_node_key(source_key, host, port);
 	shared_thread t = this->_other_thread_pool->get(thread_pool::thread_type_wal_follower);
 	handler_wal_follower* h = new handler_wal_follower(t, this, this->_storage, host, port,
-		this->_wal_follow_max_batches, this->_wal_follow_max_bytes, this->_wal_follow_poll_interval_usec);
+		this->_wal_follow_max_batches, this->_wal_follow_max_bytes, this->_wal_follow_poll_interval_usec,
+		this->_wal_follow_batch_delay_usec);
 	this->_wal_follower_thread = t;
 	this->_wal_follower_source = source_key;
-	log_notice("starting continuous replication follower (source=%s, max_batches=%llu, max_bytes=%llu, poll=%dus)",
+	log_notice("starting continuous replication follower (source=%s, max_batches=%llu, max_bytes=%llu, poll=%dus, batch_delay=%dus)",
 		source_key.c_str(), (unsigned long long)this->_wal_follow_max_batches,
-		(unsigned long long)this->_wal_follow_max_bytes, this->_wal_follow_poll_interval_usec);
+		(unsigned long long)this->_wal_follow_max_bytes, this->_wal_follow_poll_interval_usec,
+		this->_wal_follow_batch_delay_usec);
 	t->trigger(h);
 	return 0;
 }

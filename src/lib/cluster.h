@@ -217,6 +217,7 @@ protected:
 	uint64_t								_wal_follow_max_batches;
 	uint64_t								_wal_follow_max_bytes;
 	int										_wal_follow_poll_interval_usec;
+	int										_wal_follow_batch_delay_usec;
 	shared_thread							_wal_follower_thread;
 	string									_wal_follower_source;	// node key being followed
 	replication						_replication_type;
@@ -305,10 +306,12 @@ public:
 	// cluster-wide as well.
 	int set_wal_follow_enabled(bool b);
 	bool get_wal_follow_enabled() { return this->_wal_follow_enabled; };
-	int set_wal_follow_limits(uint64_t max_batches, uint64_t max_bytes, int poll_interval_usec) {
+	int set_wal_follow_limits(uint64_t max_batches, uint64_t max_bytes, int poll_interval_usec,
+			int batch_delay_usec = 0) {
 		this->_wal_follow_max_batches = max_batches;
 		this->_wal_follow_max_bytes = max_bytes;
 		this->_wal_follow_poll_interval_usec = poll_interval_usec;
+		this->_wal_follow_batch_delay_usec = batch_delay_usec;
 		return 0;
 	};
 	// Stop the follower (shutdown path).

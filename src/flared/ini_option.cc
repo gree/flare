@@ -106,6 +106,7 @@ ini_option::ini_option():
 		_wal_follow_max_batches(default_wal_follow_max_batches),
 		_wal_follow_max_bytes(default_wal_follow_max_bytes),
 		_wal_follow_poll_interval_usec(default_wal_follow_poll_interval_usec),
+		_wal_follow_batch_delay_usec(0),
 		_reap_expired(default_reap_expired),
 		_reap_expired_interval(default_reap_expired_interval),
 		_reap_expired_chunk_size(default_reap_expired_chunk_size),
@@ -476,6 +477,9 @@ int ini_option::load() {
 		if (opt_var_map.count("repl-follow-poll-interval-usec")) {
 			this->_wal_follow_poll_interval_usec = opt_var_map["repl-follow-poll-interval-usec"].as<int>();
 		}
+		if (opt_var_map.count("repl-follow-batch-delay-usec")) {
+			this->_wal_follow_batch_delay_usec = opt_var_map["repl-follow-batch-delay-usec"].as<int>();
+		}
 
 		if (opt_var_map.count("flush-all-enabled")) {
 			this->_flush_all_enabled = opt_var_map["flush-all-enabled"].as<bool>();
@@ -627,6 +631,9 @@ int ini_option::reload() {
 		}
 		if (opt_var_map.count("repl-follow-poll-interval-usec")) {
 			this->_wal_follow_poll_interval_usec = opt_var_map["repl-follow-poll-interval-usec"].as<int>();
+		}
+		if (opt_var_map.count("repl-follow-batch-delay-usec")) {
+			this->_wal_follow_batch_delay_usec = opt_var_map["repl-follow-batch-delay-usec"].as<int>();
 		}
 
 		if (opt_var_map.count("flush-all-enabled")) {
@@ -919,6 +926,7 @@ int ini_option::_setup_config_option(program_options::options_description& optio
 		("repl-follow-max-batches",			program_options::value<int>(),		"bound on WAL batches per follow response (default 256, dynamic)")
 		("repl-follow-max-bytes",			program_options::value<int>(),		"bound on WAL bytes per follow response (default 4194304, dynamic)")
 		("repl-follow-poll-interval-usec",	program_options::value<int>(),		"how often an idle follower asks its source again (default 200000, dynamic)")
+		("repl-follow-batch-delay-usec",	program_options::value<int>(),		"pause after every follow response that applied changes, throttling catch-up (default 0 = none, dynamic)")
 		("reap-expired",						program_options::value<bool>(),		"enable the background expire crawler that physically deletes past-expire keys on the partition master (default true, dynamic, rocksdb only)")
 		("reap-expired-interval",				program_options::value<int>(),		"seconds between full expire sweeps (default 300, dynamic, rocksdb only)")
 		("reap-expired-chunk-size",				program_options::value<int>(),		"keys scanned per chunk before the throttle sleep (default 10000, dynamic, rocksdb only)")

@@ -3256,7 +3256,8 @@
       "implementation": "partial",
       "verification": "unverified",
       "scenarios": [
-        "All copies restart; only a Prepare copy remains; probes fail or return empty data."
+        "All copies restart; only a Prepare copy remains; probes fail or return empty data.",
+        "The master dies while its only follower is connected but further behind than the failover lag bound (or declared its copy unusable): the follower is not seated while the ex-master is away; the partition waits, bounded, for the ex-master's copy; an ex-master back without data, or an exhausted wait, seats the follower as an explicit NOT LOSS-FREE last resort."
       ],
       "assumptions": [
         "Availability may deliberately be chosen over completeness; data-bearing means nonzero count, not a complete or newest copy."
@@ -3264,7 +3265,8 @@
       "residual_risks": [
         "Active candidates lack a data check; absent data-bearing observations fall back; Prepare partial copies can become authoritative.",
         "pvc-data-survival's total-P0-loss test (CHECK-06) failed once on CI (run 36707861123) with 'DATA LOSS: 10 missing' that was a HARNESS precondition fault: the recovery wait was satisfied by stale StatefulSet/operator state 15 s after a force delete, and the readback hit a booting pod (first ten GETs in order missed; P0 count 49 = passing run). The wait now requires replaced pod UIDs, Ready replicas and a stats-answering master (report 2026-09-30-sustained-after-more-fix.md). The failure is kept; the fix is re-executed by the next PR run.",
-        "2026-10-02 (CI 36909742559), classified as HARNESS: 'DATA LOSS: 5 missing' in pvc-data-survival test 2 was not a loss. flared on the restarted reading pod logged 'partition error (key=pvc_0..pvc_4) -> continue processing (pretending not found)': it had not received its partition map yet when the test read 11 s after the restart. The test now re-reads only missing keys for up to 30 s (a real loss stays missing; a mismatch is never retried). The same behaviour is what flared's read-unavailable-error option turns into SERVER_ERROR."
+        "2026-10-02 (CI 36909742559), classified as HARNESS: 'DATA LOSS: 5 missing' in pvc-data-survival test 2 was not a loss. flared on the restarted reading pod logged 'partition error (key=pvc_0..pvc_4) -> continue processing (pretending not found)': it had not received its partition map yet when the test read 11 s after the restart. The test now re-reads only missing keys for up to 30 s (a real loss stays missing; a mismatch is never retried). The same behaviour is what flared's read-unavailable-error option turns into SERVER_ERROR.",
+        "2026-10-03, found by reading the code, then reproduced in a pure check (no CI run): the failover lag bound (FLARE_FOLLOW_FAILOVER_MAX_LAG, added after the scale evaluation lost ~1.83M acknowledged writes) only kept the unfit follower out of handleFailoverWithPromotion. In the same pass promoteMasterlessPartition's data-bearing last resort crowned it, and that crowning logged no NOT LOSS-FREE line, so the bound protected nothing. A second gap: dataBearingPodKeys read only Ready pods, and a returning ex-master is NotReady in Prepare, so it would have looked empty. Fix: the refill holds an unfit follower while the partition's ex-master is away, up to FLARE_FOLLOW_FAILOVER_WAIT_SECONDS (default 300, counted from the first masterless pass; 0 = old behaviour); an ex-master back without data ends the hold at once; both the hold (CRITICAL) and a last-resort crowning (NOT LOSS-FREE) are logged; ex-masters (lastMasterOf holders) are read for data even while NotReady. Trade-off: the partition takes no writes during the hold. The hold covers only a follower that KNOWS its backlog: a follower cut off from its master never sees the head advance, so it is unproven, not unfit, and is still promoted (async loss, accepted as A0). E2E continuous-replication-lag-hold pending CI."
       ],
       "code": [
         {
@@ -3282,6 +3284,22 @@
         {
           "path": "flare_operator/FlareOperator/K8s/Bridge.lean",
           "symbol": "dataBearingPodKeys"
+        },
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/K8sReconciler.lean",
+          "symbol": "exMasterBackEmpty"
+        },
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/K8sReconciler.lean",
+          "symbol": "refillHoldEffects"
+        },
+        {
+          "path": "flare_operator/FlareOperator/Main.lean",
+          "symbol": "masterlessExpired"
+        },
+        {
+          "path": "src/lib/handler_wal_follower.cc",
+          "symbol": "handler_wal_follower::run"
         }
       ],
       "call_path": "NodeAdd rejoin -> Slave/Prepare; FSM failover/RecoveryRefill -> promoteMasterlessPartitions -> promoteMasterlessPartition.",
@@ -3298,6 +3316,25 @@
             {
               "path": "flare_operator/FlareOperator/E2E/Tests/DataSurvivalFailover.lean",
               "symbol": "suite"
+            }
+          ]
+        },
+        {
+          "id": "CHECK-06-laghold",
+          "kind": "scenario",
+          "procedure": "Failover lag bound end to end and in the pure refill. flare_unit checkFailoverLagHold: hold off crowns the unfit follower (previous behaviour); hold on with the ex-master away leaves the partition masterless and reports it; an ex-master back with data is crowned; back empty, or the partition in the expired list, crowns the follower; a fit follower is crowned at once. E2E continuous-replication-lag-hold (PVC, 1p x 2r, bound 20 positions, wait 900 s): the follower is throttled to one WAL batch per second (repl-follow-max-batches 1, repl-follow-batch-delay-usec 1000000) with the master's forwards cut, so it stays connected and knows its backlog; once the operator judges it unfit the master pod is force-deleted; the follower must never become master, the CRITICAL 'has NO master' line must appear, the ex-master must be master again with every acknowledged write, and the follower must follow it again.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/ContinuousReplicationLimits.lean",
+              "symbol": "lagHoldSuite"
+            },
+            {
+              "path": "flare_operator/FlareOperator/UnitTests.lean",
+              "symbol": "checkFailoverLagHold"
+            },
+            {
+              "path": "flare_operator/FlareOperator/StateMachine/K8sReconciler.lean",
+              "symbol": "heldForExMaster"
             }
           ]
         }

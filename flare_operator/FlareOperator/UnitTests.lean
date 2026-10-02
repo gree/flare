@@ -877,6 +877,41 @@ def checkReactivation (ctx : Ctx) : IO Unit := do
   check ctx "Prepare → Active under an Active master is still applied"
     (isOk rPrep && (sp.lookupNode "b:12121").map (·.state) == some .Active)
 
+def holdNode (r : FlareRole) (st : FlareState) (p : Int) (nm : String) (lmo : Int := -1) : FlareNode :=
+  { serverName := nm, serverPort := 12121, role := r, state := st, partition := p, lastMasterOf := lmo }
+
+/-- After failover: the dead master is Proxy/Down (lastMasterOf 0), its only
+    follower is Active but unfit (too far behind). -/
+def holdState : FlareClusterState :=
+  ({ nodeMap := [("m", holdNode .Proxy .Down (-1) "m" 0), ("f", holdNode .Slave .Active 0 "f")],
+     nodeMapVersion := 5 } : FlareClusterState).rebuildPartitionMap
+
+def masterOf (s : FlareClusterState) : Option String :=
+  (s.nodeMap.find? (fun kv => kv.2.role == FlareRole.Master)).map (·.1)
+
+def checkFailoverLagHold (ctx : Ctx) : IO Unit := do
+  -- CI-free reproduction (2026-10-03): without the hold, the refill's
+  -- last-resort tier crowned the unfit follower in the pass that failed its
+  -- master over, so failoverMaxLag protected nothing.
+  check ctx "lag hold off: the refill crowns the unfit follower as before"
+    (masterOf (K8sReconciler.promoteMasterlessPartition holdState 0 ["f"] [] ["f"] ["f"]) == some "f")
+  check ctx "lag hold on, ex-master away: the unfit follower is NOT crowned; the partition stays masterless"
+    (masterOf (K8sReconciler.promoteMasterlessPartition holdState 0 ["f"] [] ["f"] ["f"] true) == none)
+  check ctx "the held partition is reported with its follower"
+    (K8sReconciler.heldForExMaster (K8sReconciler.promoteMasterlessPartition holdState 0 ["f"] [] ["f"] ["f"] true)
+      activationCrd ["f"] ["f"] ["f"] == [(0, ["f"])])
+  let back : FlareClusterState :=
+    ({ holdState with nodeMap := [("m", holdNode .Slave .Prepare 0 "m" 0), ("f", holdNode .Slave .Active 0 "f")] }).rebuildPartitionMap
+  check ctx "ex-master back WITH data: it is crowned, not the unfit follower"
+    (masterOf (K8sReconciler.promoteMasterlessPartition back 0 ["m", "f"] [] ["m", "f"] ["f"] true) == some "m")
+  check ctx "ex-master back EMPTY: nothing to wait for, the unfit follower is crowned"
+    (masterOf (K8sReconciler.promoteMasterlessPartition back 0 ["m", "f"] [] ["f"] ["f"] true) == some "f")
+  check ctx "wait budget over (partition in the expired list): the unfit follower is crowned"
+    (masterOf (K8sReconciler.promoteMasterlessPartitions holdState activationCrd ["f"] [] ["f"] ["f"] true [0]) == some "f"
+      && masterOf (K8sReconciler.promoteMasterlessPartitions holdState activationCrd ["f"] [] ["f"] ["f"] true []) == none)
+  check ctx "a FIT follower is crowned at once with the hold on"
+    (masterOf (K8sReconciler.promoteMasterlessPartition holdState 0 ["f"] [] ["f"] [] true) == some "f")
+
 def run : IO UInt32 := do
   let ctx : Ctx := { failures := ← IO.mkRef [], count := ← IO.mkRef 0 }
   checkObserve ctx
@@ -900,6 +935,7 @@ def run : IO UInt32 := do
   checkTopologyObservation ctx
   checkTopologyMetrics ctx
   checkReactivation ctx
+  checkFailoverLagHold ctx
   let failures ← ctx.failures.get
   let n ← ctx.count.get
   IO.println s!"1..{n}"

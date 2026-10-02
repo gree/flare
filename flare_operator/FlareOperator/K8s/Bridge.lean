@@ -512,10 +512,14 @@ def queryPodStats (podName ns : String) (statsCmd : String) : IO (Except String 
     fails is simply not listed (the guard treats "no data-bearing nodes" as
     "no information" and falls back to the old behavior), so a stats hiccup
     can never brick the refill. -/
-def dataBearingPodKeys (pods : List PodInfo) (ns : String) : IO (List String) := do
+def dataBearingPodKeys (pods : List PodInfo) (ns : String) (alsoProbe : List String := []) : IO (List String) := do
   let mut keys : List String := []
   for pod in pods do
-    if pod.ready || pod.terminating then
+    -- `alsoProbe`: node keys read even while NotReady. A returning ex-master
+    -- stays NotReady in Prepare (sync-gated readiness) although its PVC
+    -- holds the partition's newest copy; without reading it the refill took
+    -- it for empty (failover-lag hold, 2026-10-03).
+    if pod.ready || pod.terminating || alsoProbe.contains pod.toNodeKey then
       match ← queryPodStats pod.name ns "stats" with
       | .ok out =>
         let hasData := out.splitOn "\n" |>.any fun line =>

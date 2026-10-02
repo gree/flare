@@ -449,6 +449,128 @@ def limitsSuite : TestSuite := {
   ]
 }
 
+-- ─── failover lag bound: the far-behind follower is held, not crowned ───
+
+-- The follower is CONNECTED but slow: one WAL batch per response and a 1 s
+-- pause after each (repl-follow-batch-delay-usec), with the master's
+-- forwards cut, so its backlog is known to it and to the operator. The bound
+-- is 20 positions (FLARE_FOLLOW_FAILOVER_MAX_LAG) and the wait 900 s. A cut
+-- follower would not do: it never learns the master's head, so it is
+-- unproven, not unfit. On a PVC, so the ex-master returns with its data.
+private def holdCfg : ClusterConfig := {
+  name := "cont-repl-hold"
+  «namespace» := "flare-cont-repl-hold"
+  partitions := 1
+  replicas := 2
+  operatorName := "flare-operator"
+  debugPod := "debug-cont-repl-hold"
+  storageBackend := "rocksdb"
+  usePvc := true
+  extraFlaredConf := flags ++ "\nrepl-follow-max-batches = 1\nrepl-follow-batch-delay-usec = 1000000"
+  operatorEnv := [("FLARE_FOLLOW_FAILOVER_MAX_LAG", "20"), ("FLARE_FOLLOW_FAILOVER_WAIT_SECONDS", "900")]
+}
+
+/-- Reject only the master's forwards to the replica (master → replica:12121);
+    the replica's own fetches from the master stay up. -/
+private def cutForwards (masterIp slaveIp : String) : IO (Except String Unit) := do
+  match ← hostCmd "docker" (["exec", kindNode, "iptables", "-I", "FORWARD", "1"] ++ ruleSpec masterIp slaveIp) with
+  | .error e => return .error e
+  | .ok _ => IO.eprintln s!"# fault: rejecting forwards {masterIp} → {slaveIp}:12121 (the replica's fetches stay up)"; return .ok ()
+
+private def healForwards (masterIp slaveIp : String) : IO Unit := do
+  for _ in [0:3] do
+    discard <| hostCmd "docker" (["exec", kindNode, "iptables", "-D", "FORWARD"] ++ ruleSpec masterIp slaveIp)
+  IO.eprintln s!"# fault cleared: forwards {masterIp} → {slaveIp} again"
+
+def lagHoldSuite : TestSuite := {
+  name := "continuous-replication-lag-hold"
+  setup := do
+    deployCluster holdCfg
+    IO.eprintln "# Waiting 50s grace period for operator reconciliation..."
+    IO.sleep 50000
+  teardown := cleanupCluster holdCfg
+  onFailure := dumpClusterDiagnostics holdCfg.«namespace» s!"app={holdCfg.operatorName}"
+  tests :=
+    let c : Ctx := { cfg := holdCfg }
+    [
+    { name := "precondition: replica following"
+      run := do
+        match ← c.pair with
+        | .error e => return .fail e
+        | .ok (_, mIp, _, sIp) =>
+          let stored ← writeKeys holdCfg.debugPod holdCfg.«namespace» mIp holdCfg.flarePort "base" 20
+          if stored != 20 then return .fail s!"stored only {stored}/20"
+          let following ← waitForCondition "replica following and matching" 180 do
+            return (← c.statStr sIp "repl_follow_state") == some "following" && (← c.currItems sIp) == (← c.currItems mIp)
+          if !following then return .fail s!"replica never followed (state {← c.statStr sIp "repl_follow_state"})"
+          return .pass },
+
+    -- SAF-10c failover lag bound, end to end. Without the refill hold the
+    -- masterless refill crowned the unfit follower in the same pass that
+    -- failed its master over (pure reproduction 2026-10-03), so the bound
+    -- protected nothing.
+    { name := "failover lag bound: the master is lost while its follower is connected but further behind than the bound; the follower is NOT promoted, the partition waits, the ex-master returns on its PVC and is master again with every write"
+      run := do
+        let graceOver ← waitForCondition "operator past its startup grace period" 240 do
+          return containsSubstr (← c.opLog 400) "grace period over"
+        if !graceOver then return .fail "the operator never logged the end of its startup grace period"
+        match ← c.pair with
+        | .error e => return .fail e
+        | .ok (mPod, mIp, sPod, sIp) =>
+          match ← cutForwards mIp sIp with
+          | .error e => return .fail e
+          | .ok () => pure ()
+          let stored ← writeKeys holdCfg.debugPod holdCfg.«namespace» mIp holdCfg.flarePort "hold" 120
+          let mItems ← c.currItems mIp
+          IO.eprintln s!"# under the forward cut: stored {stored}/120; items master={mItems} replica={← c.currItems sIp}; replica source={← c.statNat sIp "repl_source_lsn"} applied={← c.statNat sIp "repl_applied_lsn"} state={← c.statStr sIp "repl_follow_state"}"
+          let unfitSeen ← waitForCondition "the operator judges the follower unfit (behind more than the bound)" 120 do
+            return ((← c.opLog 2000).splitOn "\n").any fun l =>
+              containsSubstr l s!"eligibility {sPod}" && containsSubstr l "more than the failover bound"
+          IO.eprintln s!"# before the kill: unfit judged={unfitSeen}; replica source={← c.statNat sIp "repl_source_lsn"} applied={← c.statNat sIp "repl_applied_lsn"}"
+          if !unfitSeen then
+            healForwards mIp sIp
+            return .fail "precondition: the operator never judged the follower further behind than the bound"
+          discard <| kubectl ["delete", "pod", mPod, "-n", holdCfg.«namespace», "--grace-period=0", "--force", "--wait=false"]
+          healForwards mIp sIp
+          -- Watch the map: the follower must never become master.
+          let mut follower_promoted := false
+          let mut exMasterBack := false
+          for _ in [0:150] do
+            IO.sleep 2000
+            let entries ← c.nodeView
+            match (findMasterFqdn entries 0).bind (fun f => (f.splitOn ".").head?) with
+            | some m =>
+              if m == sPod then follower_promoted := true; break
+              if m == mPod then exMasterBack := true; break
+            | none => pure ()
+          let log ← c.opLog 200000
+          let lines := log.splitOn "\n"
+          let holdLogged := lines.any fun l => containsSubstr l "has NO master" && containsSubstr l sPod
+          let notLossFree := lines.any fun l => containsSubstr l "PROMOTION NOT LOSS-FREE" && containsSubstr l sPod
+          let pathLines := lines.filter (fun l =>
+            containsSubstr l "has NO master" || containsSubstr l "PROMOTION NOT LOSS-FREE"
+              || containsSubstr l "detected " || containsSubstr l "graceful drain")
+          IO.eprintln s!"# after the kill: follower promoted={follower_promoted}; ex-master master again={exMasterBack}; hold logged={holdLogged}; NOT LOSS-FREE for the follower={notLossFree}"
+          IO.eprintln s!"# operator promotion path:\n{String.intercalate "\n" (pathLines.reverse.take 8).reverse}"
+          if follower_promoted then
+            return .fail s!"the follower {sPod} was promoted although it was further behind than the failover bound"
+          if !exMasterBack then return .fail "the ex-master did not become master again within 300 s"
+          if !holdLogged then return .fail "the partition was held without the CRITICAL 'has NO master' line"
+          let back ← waitForCondition "the ex-master serves every write it acknowledged" 120 do
+            match ← getPodIp mPod holdCfg.«namespace» with
+            | none => return false
+            | some ip => return (← c.currItems ip) == mItems
+          let newIp := (← getPodIp mPod holdCfg.«namespace»).getD ""
+          IO.eprintln s!"# ex-master {mPod}: items={← c.currItems newIp} (acknowledged before the kill {mItems})"
+          if !back then return .fail s!"the ex-master returned with {← c.currItems newIp} items, {mItems} were acknowledged"
+          let rejoined ← waitForCondition "the follower follows the ex-master again and matches" 480 do
+            return (← c.statStr sIp "repl_follow_state") == some "following" && (← c.currItems sIp) == mItems
+          IO.eprintln s!"# follower {sPod}: state={← c.statStr sIp "repl_follow_state"} items={← c.currItems sIp} reconstruction_started={← c.statNat sIp "reconstruction_started"}"
+          if !rejoined then return .fail "the follower did not follow the ex-master again"
+          return .pass }
+  ]
+}
+
 -- ─── scale evaluation (skipped unless FLARE_E2E_SCALE_KEYS is set) ──────
 
 private def scaleCfg : ClusterConfig := {

@@ -229,7 +229,8 @@ int flared::startup(int argc, char **argv) {
 	this->_cluster->set_reconstruction_bwlimit(ini_option_object().get_reconstruction_bwlimit());
 	this->_cluster->set_repl_identity_forward(ini_option_object().is_repl_identity_forward());
 	this->_cluster->set_wal_follow_limits(ini_option_object().get_wal_follow_max_batches(),
-		ini_option_object().get_wal_follow_max_bytes(), ini_option_object().get_wal_follow_poll_interval_usec());
+		ini_option_object().get_wal_follow_max_bytes(), ini_option_object().get_wal_follow_poll_interval_usec(),
+		ini_option_object().get_wal_follow_batch_delay_usec());
 	this->_cluster->set_wal_follow_enabled(ini_option_object().is_wal_follow_enabled());
 	this->_cluster->set_replication_type(ini_option_object().get_replication_type());
 	this->_cluster->set_max_total_thread_queue(ini_option_object().get_max_total_thread_queue());
@@ -510,7 +511,8 @@ int flared::reload() {
 	this->_cluster->set_reconstruction_bwlimit(ini_option_object().get_reconstruction_bwlimit());
 	this->_cluster->set_repl_identity_forward(ini_option_object().is_repl_identity_forward());
 	this->_cluster->set_wal_follow_limits(ini_option_object().get_wal_follow_max_batches(),
-		ini_option_object().get_wal_follow_max_bytes(), ini_option_object().get_wal_follow_poll_interval_usec());
+		ini_option_object().get_wal_follow_max_bytes(), ini_option_object().get_wal_follow_poll_interval_usec(),
+		ini_option_object().get_wal_follow_batch_delay_usec());
 	this->_cluster->set_wal_follow_enabled(ini_option_object().is_wal_follow_enabled());
 
 #ifdef HAVE_LIBROCKSDB

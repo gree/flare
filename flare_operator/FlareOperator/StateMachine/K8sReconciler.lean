@@ -168,6 +168,15 @@ structure FlareReconcileState where
       idle, another source epoch). Excluded from every promotion path this
       tick. Empty = no information: behaves as before. -/
   followUnfitKeys : List String := []
+  /-- Partitions whose wait for a returning ex-master is OVER (masterless for
+      longer than FLARE_FOLLOW_FAILOVER_WAIT_SECONDS, set by Main). In every
+      other partition the refill's data-bearing last resort does not crown a
+      follower in `followUnfitKeys` while the ex-master is away; see
+      `promoteMasterlessPartition`'s `holdUnfit`. -/
+  followHoldExpiredParts : List Nat := []
+  /-- false = never hold (FLARE_FOLLOW_FAILOVER_WAIT_SECONDS=0): the refill
+      may crown an unfit follower at once, as before. -/
+  followHoldEnabled : Bool := false
   /-- Followers (or nodes remembered in the mode) whose currency could NOT be
       proven this tick — disconnected, stale, lagging, or unreadable. No
       PLANNED promotion (drain) picks them; failover may, as a last resort,
@@ -1176,6 +1185,14 @@ def assignProxiesPure (state : FlareClusterState) (crd : FlareClusterView)
     else
       currentState
 
+/-- The partition's ex-master (`lastMasterOf` holder) is live again and holds
+    no data: waiting longer for its copy gains nothing. -/
+def exMasterBackEmpty (state : FlareClusterState) (pIdx : Nat)
+    (livePodKeys dataBearingKeys : List String) : Bool :=
+  state.nodeMap.any (fun (key, n) =>
+    n.lastMasterOf == Int.ofNat pIdx && n.state != FlareState.Down
+      && livePodKeys.contains key && !dataBearingKeys.contains key)
+
 /-- Refill a partition that has lost EVERY master entry. Total-partition
     restart re-registers every replica as a syncing Slave/Prepare (never
     Proxy — see the NodeAdd rejoin path in Reconciler.lean), so neither
@@ -1193,7 +1210,8 @@ def assignProxiesPure (state : FlareClusterState) (crd : FlareClusterView)
     serving. -/
 def promoteMasterlessPartition (state : FlareClusterState) (pIdx : Nat)
     (livePodKeys : List String) (standbyKeys : List String := [])
-    (dataBearingKeys : List String := []) (excludedKeys : List String := []) : FlareClusterState :=
+    (dataBearingKeys : List String := []) (excludedKeys : List String := [])
+    (holdUnfit : Bool := false) : FlareClusterState :=
   if FlareOperator.Reconciler.hasMasterForPartition state pIdx then state
   else
     -- SAF-10c: `excludedKeys` are followers KNOWN to hold an unusable copy
@@ -1227,10 +1245,23 @@ def promoteMasterlessPartition (state : FlareClusterState) (pIdx : Nat)
       -- itself, even mid-Prepare — partial data beats guaranteed emptiness,
       -- and without a master a Prepare slave can never finish reconstructing
       -- anyway (deadlock otherwise).
+      --
+      -- FAILOVER LAG BOUND (`holdUnfit`): an excluded follower is not crowned
+      -- here while the partition's ex-master is away. It is unfit because it
+      -- is too far behind (or declared its copy unusable), and crowning it
+      -- discards everything it never received (scale evaluation 2026-10-02:
+      -- ~1.83M acknowledged writes); the ex-master returning on its PVC holds
+      -- them. Before this guard the bound only kept the follower out of
+      -- failover, and this tier crowned it in the same pass. The hold ends
+      -- when the ex-master is back WITHOUT data (nothing left to wait for)
+      -- or when Main's wait budget for the partition runs out
+      -- (`holdUnfit` false); either way the crowning is logged NOT LOSS-FREE.
       |>.orElse (fun _ => state.nodeMap.find? (fun (key, n) =>
         (n.partition == Int.ofNat pIdx || n.lastMasterOf == Int.ofNat pIdx)
           && n.state != FlareState.Down && n.role != FlareRole.Master
-          && livePodKeys.contains key && dataBearingKeys.contains key))
+          && livePodKeys.contains key && dataBearingKeys.contains key
+          && !(holdUnfit && excludedKeys.contains key
+                && !exMasterBackEmpty state pIdx livePodKeys dataBearingKeys)))
     match candidate with
     | some kv =>
       state.addNode kv.1 { kv.2 with
@@ -1241,9 +1272,25 @@ def promoteMasterlessPartition (state : FlareClusterState) (pIdx : Nat)
 /-- Run the masterless-partition refill over every partition of the CRD. -/
 def promoteMasterlessPartitions (state : FlareClusterState) (crd : FlareClusterView)
     (livePodKeys : List String) (standbyKeys : List String := [])
-    (dataBearingKeys : List String := []) (excludedKeys : List String := []) : FlareClusterState :=
+    (dataBearingKeys : List String := []) (excludedKeys : List String := [])
+    (holdEnabled : Bool := false) (holdExpiredParts : List Nat := []) : FlareClusterState :=
   (List.range crd.spec.partitions).foldl
-    (fun s pIdx => promoteMasterlessPartition s pIdx livePodKeys standbyKeys dataBearingKeys excludedKeys) state
+    (fun s pIdx => promoteMasterlessPartition s pIdx livePodKeys standbyKeys dataBearingKeys excludedKeys
+      (holdEnabled && !holdExpiredParts.contains pIdx)) state
+
+/-- Partitions left masterless because the refill held an unfit follower
+    (see `promoteMasterlessPartition`): (partition, held follower keys). -/
+def heldForExMaster (state : FlareClusterState) (crd : FlareClusterView)
+    (livePodKeys dataBearingKeys excludedKeys : List String) : List (Nat × List String) :=
+  (List.range crd.spec.partitions).filterMap fun pIdx =>
+    if FlareOperator.Reconciler.hasMasterForPartition state pIdx then none
+    else
+      let held := (state.nodeMap.filter (fun (key, n) =>
+        (n.partition == Int.ofNat pIdx || n.lastMasterOf == Int.ofNat pIdx)
+          && n.state != FlareState.Down && n.role != FlareRole.Master
+          && livePodKeys.contains key && dataBearingKeys.contains key
+          && excludedKeys.contains key)).map Prod.fst
+      if held.isEmpty then none else some (pIdx, held)
 
 /-- Pure replication phase computation (Main.lean:212-272).
     Determines next migration phase based on current phase and CRD spec.
@@ -1302,6 +1349,25 @@ def servicePatchEffects (state : FlareClusterState) (crName : String)
 -- ===========================================================================
 -- Core Transition Function
 -- ===========================================================================
+
+/-- Log lines for the refill's failover-lag hold: a partition kept
+    masterless while its only data-bearing copy is an unfit follower
+    (CRITICAL: writes to it fail until the ex-master returns), and an unfit
+    follower crowned after all (NOT LOSS-FREE, last resort). -/
+def refillHoldEffects (before after : FlareClusterState) (crd : FlareClusterView)
+    (s : FlareReconcileState) : List FlareEffect :=
+  let crowned := (after.nodeMap.filter (fun kv =>
+    kv.2.role == FlareRole.Master && s.followUnfitKeys.contains kv.1
+      && (match before.lookupNode kv.1 with
+          | some o => o.role != FlareRole.Master
+          | none => true))).map Prod.fst
+  let held := if s.followHoldEnabled
+    then heldForExMaster after crd s.livePodKeys s.dataBearingKeys s.followUnfitKeys
+    else []
+  held.map (fun (p, ks) =>
+    FlareEffect.Log s!"[flare-operator] CRITICAL: partition {p} has NO master: its only data-bearing copy {ks} is unfit (too far behind its source, or its copy is unusable), so it is NOT promoted while the ex-master is away; waiting for the ex-master to return with its data (FLARE_FOLLOW_FAILOVER_WAIT_SECONDS). Writes to this partition fail meanwhile. See RUNBOOK #failover-lag-hold")
+  ++ crowned.map (fun k =>
+    FlareEffect.Log s!"[flare-operator] PROMOTION NOT LOSS-FREE: {k} was seated by the masterless refill as a LAST RESORT although its continuous replication judged it unfit (too far behind, or an unusable copy): the wait for the ex-master ended or the ex-master came back empty. Writes it never received are lost. See RUNBOOK #failover-lag-hold")
 
 /-- The core reconciler transition function.
     Each step processes a K8s API response and produces a new state,
@@ -1507,6 +1573,8 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
       -- replicas re-registered as Slave/Prepare, so no proxy exists for
       -- autoAssign and no Down entry exists for failover).
       let stateWithMasters := promoteMasterlessPartitions stateWithProxies crd s.livePodKeys s.standbyNodeKeys s.dataBearingKeys s.followUnfitKeys
+        s.followHoldEnabled s.followHoldExpiredParts
+      let holdEffects := refillHoldEffects stateWithProxies stateWithMasters crd s
       -- Persistent-violation detection: a partition whose copies all sit in
       -- one zone survives spread constraints (they place pods, not roles).
       -- Phase 1 warns; automated repair (slave migration) is future work.
@@ -1531,7 +1599,7 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
         | none => (stateWithMasters, [])
       ({ s with reconcileStep := .AfterUpdateConfigMap,
                 updatedClusterState := some stateFinal }, none,
-       warnEffects ++ repairEffects)
+       holdEffects ++ warnEffects ++ repairEffects)
     | _, _ =>
       ({ s with reconcileStep := .Error "missing cluster state or CRD at AfterAssignRoles" }, none, [])
 
@@ -1637,6 +1705,7 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
         if failoverKeys.isEmpty then clusterState
         else handleFailoverWithPromotion clusterState.rebuildPartitionMap failoverKeys
       let recovered := promoteMasterlessPartitions afterFailover crd s.livePodKeys [] s.dataBearingKeys s.followUnfitKeys
+        s.followHoldEnabled s.followHoldExpiredParts
       let refilled := (List.range crd.spec.partitions).filter (fun p =>
         !FlareOperator.Reconciler.hasMasterForPartition afterFailover p
           && FlareOperator.Reconciler.hasMasterForPartition recovered p)

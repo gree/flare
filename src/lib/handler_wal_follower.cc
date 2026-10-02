@@ -39,7 +39,8 @@ namespace flare {
 // {{{ ctor/dtor
 handler_wal_follower::handler_wal_follower(shared_thread t, cluster* cl, storage* st,
 		string source_name, int source_port,
-		uint64_t max_batches, uint64_t max_response_bytes, int poll_interval_usec):
+		uint64_t max_batches, uint64_t max_response_bytes, int poll_interval_usec,
+		int batch_delay_usec):
 		thread_handler(t),
 		_cluster(cl),
 		_storage(st),
@@ -47,7 +48,8 @@ handler_wal_follower::handler_wal_follower(shared_thread t, cluster* cl, storage
 		_source_port(source_port),
 		_max_batches(max_batches),
 		_max_response_bytes(max_response_bytes),
-		_poll_interval_usec(poll_interval_usec) {
+		_poll_interval_usec(poll_interval_usec),
+		_batch_delay_usec(batch_delay_usec) {
 }
 
 handler_wal_follower::~handler_wal_follower() {
@@ -138,6 +140,14 @@ int handler_wal_follower::run() {
 			// is triggered on a dead thread and never runs. Park instead.
 			this->_park();
 			return -1;
+		}
+		if (r == attempt_progress && this->_batch_delay_usec > 0) {
+			// Catch-up throttle (repl-follow-batch-delay-usec): pause after
+			// every response that applied something, so a long catch-up does
+			// not take the replica's whole I/O budget. The follower stays
+			// connected and its source position stays fresh, so a throttled
+			// backlog is reported as such (the failover lag bound sees it).
+			usleep(this->_batch_delay_usec);
 		}
 		if (retry_immediately(static_cast<attempt_outcome>(r), more)) {
 			backoff = 1;

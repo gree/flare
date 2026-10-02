@@ -300,6 +300,12 @@ spec:
           image: {image}
           imagePullPolicy: Never
           command: [\"sh\", \"-c\", \"{prep} && exec flared --config=/etc/flared/extra.conf --data-dir {dataDir} --server-port {cfg.flarePort} --index-server-name {operatorSvc} --index-server-port {cfg.operatorPort} {storageFlag} --metrics-server-port 9150 --stderr\"]{preStopBlock}
+          # Same allocator setting as the chart (cluster.mallocArenaMax,
+          # default 2). Without it glibc keeps up to 8 arenas per core and the
+          # test pods fragment memory in a way production pods do not.
+          env:
+            - name: MALLOC_ARENA_MAX
+              value: \"2\"
           ports:
             - containerPort: {cfg.flarePort}
               name: flare

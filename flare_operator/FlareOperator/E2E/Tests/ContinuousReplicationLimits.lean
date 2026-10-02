@@ -527,10 +527,19 @@ def scaleSuite : TestSuite := {
                 IO.eprintln s!"# chunk at {i} stored 0 ({match r with | .ok _ => "no STORED" | .error e => e})"
               else failedRun := 0
               if i % 500000 == 0 || failedRun == 1 then
-                IO.eprintln s!"# load at {i}: stored so far {loaded}; master RSS={(← c.rssKb mPod).getD 0}kB restarts={← c.restartCount mPod} thread_queue={(← c.statNat mIp "total_thread_queue").getD 0} items={← c.currItems mIp}; replica applied={(← c.statNat sIp "repl_applied_lsn").getD 0} forward_applied={(← c.statNat sIp "repl_forward_applied").getD 0}"
+                IO.eprintln s!"# load at {i}: stored so far {loaded}; master RSS={(← c.rssKb mPod).getD 0}kB heap in-use={((← c.statNat mIp "malloc_in_use_bytes").getD 0) / 1024}kB heap free={((← c.statNat mIp "malloc_free_bytes").getD 0) / 1024}kB restarts={← c.restartCount mPod} thread_queue={(← c.statNat mIp "total_thread_queue").getD 0} items={← c.currItems mIp}; replica applied={(← c.statNat sIp "repl_applied_lsn").getD 0} forward_applied={(← c.statNat sIp "repl_forward_applied").getD 0} RSS={(← c.rssKb sPod).getD 0}kB heap in-use={((← c.statNat sIp "malloc_in_use_bytes").getD 0) / 1024}kB"
               -- Fail fast: 3 chunks in a row with nothing stored means the
               -- master is not taking writes (run 36941383859: from 4.44M keys
               -- on). Record why and stop instead of retrying for hours.
+              -- Stop as soon as the master restarts (run 36949992433: the
+              -- writes kept succeeding on the promoted follower, so the
+              -- empty-chunk rule never fired and the run went on 3 h).
+              let restartedNow := (← c.restartCount mPod) > mRc0
+              if restartedNow then
+                match ← hostCmd "kubectl" ["get", "pod", mPod, "-n", scaleCfg.«namespace», "-o", "jsonpath={.status.containerStatuses[0].restartCount} {.status.containerStatuses[0].lastState.terminated.reason}"] with
+                | .ok o => IO.eprintln s!"# load stopped at {i}: the master restarted (restartCount / last termination = {o.trim}); RSS before was the last sample above"
+                | .error e => IO.eprintln s!"# load stopped at {i}: the master restarted ({e})"
+                break
               if failedRun ≥ 3 then
                 match ← hostCmd "kubectl" ["get", "pod", mPod, "-n", scaleCfg.«namespace», "-o", "jsonpath={.status.containerStatuses[0].restartCount} {.status.containerStatuses[0].lastState.terminated.reason} {.status.containerStatuses[0].state}"] with
                 | .ok o => IO.eprintln s!"# load stopped at {i}: master {mPod} restartCount/last termination/state = {o.trim}"

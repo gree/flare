@@ -99,6 +99,14 @@ structure Bounds where
   /-- Max lag for a planned promotion and for a copy that must survive a
       deletion. -/
   promoteLag : Nat := 100
+  /-- Largest backlog (source position last observed minus applied
+      position) at which a follower may still be promoted by FAILOVER.
+      Beyond it the follower is unfit: failover waits for the old master to
+      return with its data instead of discarding the whole backlog (scale
+      evaluation 2026-10-02: a follower ~1.8M behind was promoted and ~1.83M
+      acknowledged writes were lost). The last-resort refill, when no other
+      data-bearing copy exists, may still seat it and says so. -/
+  failoverMaxLag : Nat := 100000
   deriving Repr, BEq
 
 inductive Purpose where
@@ -201,7 +209,13 @@ def judge (p : Purpose) (b : Bounds) (r : Reading) (m : MasterReading) : Verdict
 /-- A follower whose copy is KNOWN not to be a usable copy of the master's
     current history. This is deliberately narrower than "not eligible": a
     disconnected or stale follower is unproven, not unfit. -/
-def unfitReason (r : Reading) (masterEpoch : Option String) : Option String :=
+def unfitReason (r : Reading) (masterEpoch : Option String) (failoverMaxLag : Nat := 0) : Option String :=
+  let backlog := match r.sourceLsn, r.appliedLsn with
+    | some s, some a => if s > a then s - a else 0
+    | _, _ => 0
+  if failoverMaxLag > 0 && backlog > failoverMaxLag then
+    some s!"the follower is {backlog} positions behind its source, more than the failover bound {failoverMaxLag}"
+  else
   match r.state with
   | some "needs_rebuild" => some s!"the follower declared needs_rebuild{reasonNote r}"
   | some "initial_sync" => some "the initial copy is not complete"
@@ -339,7 +353,7 @@ def classify (b : Bounds) (mem : ModeMemory)
         else
         let rv := judge .read b r m
         let pv := judge .promote b r m
-        let unfit := unfitReason r m.epoch
+        let unfit := unfitReason r m.epoch b.failoverMaxLag
         let a := if rv.isEligible then a else { a with readWithheld := a.readWithheld ++ [key] }
         let a := if r.state == some "needs_rebuild"
           then { a with needsRebuild := a.needsRebuild ++ [(key, (r.lastReason.getD "").trim)] } else a

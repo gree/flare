@@ -225,7 +225,8 @@ private def followBoundsFromEnv : IO FollowEvidence.Bounds := do
     pure (((← IO.getEnv name).bind (·.toNat?)).getD dflt)
   pure { freshSecs := ← envNat "FLARE_FOLLOW_FRESH_SECS" 5,
          readLag := ← envNat "FLARE_FOLLOW_READ_LAG" 1000,
-         promoteLag := ← envNat "FLARE_FOLLOW_PROMOTE_LAG" 100 }
+         promoteLag := ← envNat "FLARE_FOLLOW_PROMOTE_LAG" 100,
+         failoverMaxLag := ← envNat "FLARE_FOLLOW_FAILOVER_MAX_LAG" 100000 }
 
 /-- SAF-10c tracker between ticks: mode memory, tick counter, this tick's
     classification (consumed by the commit path and the delete gate) and the

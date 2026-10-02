@@ -93,6 +93,9 @@ const stat_mapping flared_gauges[] = {
 	{ "data_dir_used_bytes",     "flare_node_data_dir_used_bytes",     "gauge"   },
 	{ "data_dir_capacity_bytes", "flare_node_data_dir_capacity_bytes", "gauge"   },
 	{ "total_thread_queue", "flared_thread_queue_total",               "gauge"   },
+	{ "malloc_in_use_bytes", "flared_malloc_in_use_bytes",             "gauge"   },
+	{ "malloc_free_bytes",   "flared_malloc_free_bytes",               "gauge"   },
+	{ "malloc_arena_bytes",  "flared_malloc_arena_bytes",              "gauge"   },
 	{ "rusage_user",        "flared_process_user_cpu_seconds_total",   "counter" },
 	{ "rusage_system",      "flared_process_system_cpu_seconds_total", "counter" },
 };

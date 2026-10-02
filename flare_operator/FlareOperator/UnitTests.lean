@@ -576,6 +576,16 @@ def checkFollowClassify (ctx : Ctx) : IO Unit := do
   let (m5, _) := FollowEvidence.markProcessChanges [("e", 1)] [("e", 0, some (withBoot frOff 2))]
   check ctx "SAF-08: a process change of a node out of the mode keeps the legacy policy"
     (!(FollowEvidence.classify fb [("e", false)] m5 [(0, fm)]).1.readWithheld.contains "e")
+  let farBehind : FollowEvidence.Reading := { fr "disconnected" 1000 with sourceLsn := some 500000, appliedLsn := some 1000 }
+  check ctx "failover bound: a follower more backlog than the bound behind is unfit (no failover promotion)"
+    ((FollowEvidence.unfitReason farBehind (some "2:abc") 100000).isSome
+      && (FollowEvidence.unfitReason farBehind (some "2:abc") 0).isNone)
+  let nearBehind : FollowEvidence.Reading := { fr "disconnected" 1000 with sourceLsn := some 50000, appliedLsn := some 1000 }
+  check ctx "failover bound: a follower within the bound stays a last-resort candidate (unproven, not unfit)"
+    ((FollowEvidence.unfitReason nearBehind (some "2:abc") 100000).isNone)
+  let clsFar := FollowEvidence.classify { fb with failoverMaxLag := 100000 } [("b", true)] [("b", 0, some farBehind)] [(0, fm)]
+  check ctx "failover bound: classify lists the far-behind follower as unfit"
+    (clsFar.1.unfit == ["b"] && clsFar.1.ranked == [])
   check ctx "probe policy: in the mode every tick; out of the mode every interval; never read: now"
     (FollowEvidence.shouldProbe [("x", true)] "x" 7 30 && !FollowEvidence.shouldProbe [("x", false)] "x" 7 30
       && FollowEvidence.shouldProbe [("x", false)] "x" 60 30 && FollowEvidence.shouldProbe [] "x" 7 30)

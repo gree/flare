@@ -443,6 +443,13 @@ short `walTtlSeconds` (see values.yaml).
 writes/s on kind. Measure on production-like hardware against the real write
 rate before relying on reads from followers.
 
+**Forward queue.** Keep `maxTotalThreadQueue` set (chart default 200000,
+about 600 B per queued forward, so about 120 MB). Without it, a master whose
+follower falls behind buffers every pending forward until it is OOM-killed.
+At the bound, forwards are dropped and counted in `proxy_write_dropped`, and
+the follower repairs them from the WAL. That repair needs WAL retention, so
+`walSizeLimitMb` must cover the backlog.
+
 ## Scaling
 
 - Scale OUT (more partitions/replicas): edit the FlareCluster spec;

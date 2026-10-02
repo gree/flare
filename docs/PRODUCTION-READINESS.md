@@ -99,6 +99,20 @@ that gap. Record the agreed failure model and RPO/RTO before approval.
 
   Size follow throughput against the real write rate. 15.8M keys needs a
   faster loader.
+
+  Master memory, 2026-10-02. Without a bound, a master whose follower is
+  slower than the write rate buffered every pending forward: 1.7 GB at 6M
+  keys, then an OOM and a failover that lost about 1.83M acknowledged
+  writes. The chart now defaults `cluster.rocksdb.maxTotalThreadQueue` to
+  200000. With the bound:
+  - master heap stays at about 200 MB;
+  - forwards over the bound are dropped and counted;
+  - the follower fills them from the WAL with no rebuild (runs 36985410132
+    and 36991784765).
+
+  The cost is slower convergence: 28 min after a 2M-key load, against
+  18.5 min without the bound. Failover also refuses a follower more than
+  `FLARE_FOLLOW_FAILOVER_MAX_LAG` (default 100000) behind.
 - Stage both repair triggers concurrently and lagged/unknown promotion and
   deletion gates. Record failures, not just successful reruns.
 

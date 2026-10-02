@@ -32,10 +32,8 @@
 #include "binary_response_header.h"
 #ifdef HAVE_LIBROCKSDB
 #include "storage_rocksdb.h"
-#ifdef __GLIBC__
+#endif
 #include <malloc.h>
-#endif
-#endif
 
 namespace gree {
 namespace flare {
@@ -138,7 +136,7 @@ int op_stats::_send_stats(thread_pool* req_tp, thread_pool* other_tp, storage* s
 		// Heap accounting (2026-10-02): in-use bytes grow on a leak, free
 		// bytes held by the allocator grow on fragmentation. Both are
 		// needed to tell them apart when RSS rises with the data.
-		struct mallinfo2 mi = mallinfo2();
+		struct mallinfo2 mi = ::mallinfo2();
 		_send_stat("malloc_in_use_bytes"			, static_cast<uint64_t>(mi.uordblks + mi.hblkhd));
 		_send_stat("malloc_free_bytes"				, static_cast<uint64_t>(mi.fordblks));
 		_send_stat("malloc_arena_bytes"				, static_cast<uint64_t>(mi.arena));

@@ -547,6 +547,17 @@ def scaleSuite : TestSuite := {
                 break
               i := i + m
             let loadMs := (← IO.monoMsNow) - t0
+            -- Memory-only profile (scale-6m-mem): does the master's heap in
+            -- use flatten at the RocksDB write-buffer budget or keep growing?
+            -- Sample after the load, skip the follower drain (hours at this
+            -- size) and the later tests.
+            if (← IO.getEnv "FLARE_E2E_SCALE_MEMORY_ONLY").isSome then
+              for k in [1, 2, 3] do
+                IO.sleep 60000
+                IO.eprintln s!"# memory after the load +{k} min: master RSS={(← c.rssKb mPod).getD 0}kB heap in-use={((← c.statNat mIp "malloc_in_use_bytes").getD 0) / 1024}kB heap free={((← c.statNat mIp "malloc_free_bytes").getD 0) / 1024}kB restarts={← c.restartCount mPod} items={← c.currItems mIp}; replica RSS={(← c.rssKb sPod).getD 0}kB heap in-use={((← c.statNat sIp "malloc_in_use_bytes").getD 0) / 1024}kB"
+              IO.eprintln s!"# memory-only: loaded {loaded}/{n} in {loadMs} ms; master restarts {mRc0}→{← c.restartCount mPod}"
+              if (← c.restartCount mPod) > mRc0 then return .fail "the master restarted during the memory-only load"
+              return .pass
             let t1 ← IO.monoMsNow
             -- Progress is reported every minute so a stall is diagnosable
             -- (state, reason, positions, skip/refuse counters), and the wait
@@ -588,6 +599,7 @@ def scaleSuite : TestSuite := {
 
     { name := "scale: exact key scan at open (kill -9 on the PVC-backed replica) — duration recorded"
       run := do
+        if (← IO.getEnv "FLARE_E2E_SCALE_MEMORY_ONLY").isSome then return .skip "memory-only profile"
         match ← scaleKeys with
         | none => return .skip "FLARE_E2E_SCALE_KEYS unset (evaluation only)"
         | some _ =>
@@ -616,6 +628,7 @@ def scaleSuite : TestSuite := {
 
     { name := "scale: operator probe cost at this size — recorded from the operator's own timing lines"
       run := do
+        if (← IO.getEnv "FLARE_E2E_SCALE_MEMORY_ONLY").isSome then return .skip "memory-only profile"
         match ← scaleKeys with
         | none => return .skip "FLARE_E2E_SCALE_KEYS unset (evaluation only)"
         | some _ =>

@@ -4333,7 +4333,8 @@
         "2026-10-02 measurements on kind. Sustained run 36914118326: lag 0 at 300 and 900 writes/s, growing at 2000/s (62k->274k). T17 control loop: mean reconcile pass ~2.2 s at 300/s, ~2.5 s at 900/s, ~3.4 s at 2000/s; operator lease age at most 8 s of its 15 s duration. T17 get latency NOT measured: the busybox debug pod has no nanosecond clock (the probe now runs inside the flared pod over one connection; re-run pending). tmpfs outage run 36914124394: phase A 150 MB caught up in 11 s; phase B archive 499 MB -> 250 MB after one flush, lsn_purged, snapshot rebuild 59 s; data high-water 1.07 GB on tmpfs + RSS 0.54 GB, within the 4Gi limit.",
         "2026-10-02 measurements on kind (bound nothing for production hardware). T17 get latency (run 36918289515, from inside the master pod over one persistent connection, includes two `date` process starts per sample): p50 2.2-3.6 ms and p99 50-98 ms at 300/900/2000 writes/s, replica and master alike; the follow lag again 0 at 300/900/s and growing at 2000/s; reconcile 2.1-3.1 s per pass, lease age <= 8 s of 15 s. Scale (run 36914128803, 2M keys): load 1542 s at the loader's ~1300 keys/s; the follower converged only 1060 s (17.7 min) AFTER the load ended (forward_applied 1.95M, wal_applied 48k): at that sustained rate the follower fell behind and needed ~18 min to drain; kill -9 reopen exact key scan 2M keys in 1.46 s (linear estimate ~11.5 s at 15.8M); operator probe max 3.46 s.",
         "FINDING 2026-10-02 (production enablement gap, fixed CI pending): the continuous-replication flags (repl-identity-forward, repl-follow-enabled, repl-follow-poll-interval-usec) had no CR field. The operator owns extra.conf and rewrites the whole file from spec.rocksdb, so the flags existed only in the E2E seed config; in production there was no supported way to enable follow mode, and any spec.rocksdb change would drop hand-added flags from the file (SIGHUP keeps the in-memory value, the next restart loses it). Now spec.rocksdb.replIdentityForward / replFollowEnabled / replFollowPollIntervalUsec are rendered by the operator (unit case; CRD schema).",
-        "2026-10-02 T17 lock hold (run 36941386693, kind): over the whole sustained evaluation the follower applied 772,867 WAL batches under the exclusive _repl_apply_lock for 64.8 s in total (~84 us each); the longest single hold was 294.5 ms, the longest wait to take it exclusively 79 ms, and the longest wait of a forwarded write on it 81 ms. Forwarded writes are therefore delayed by at most ~0.3 s by the follower, not starved. Lag again 0 at 300/900 writes/s and growing at 2000/s."
+        "2026-10-02 T17 lock hold (run 36941386693, kind): over the whole sustained evaluation the follower applied 772,867 WAL batches under the exclusive _repl_apply_lock for 64.8 s in total (~84 us each); the longest single hold was 294.5 ms, the longest wait to take it exclusively 79 ms, and the longest wait of a forwarded write on it 81 ms. Forwarded writes are therefore delayed by at most ~0.3 s by the follower, not starved. Lag again 0 at 300/900 writes/s and growing at 2000/s.",
+        "FINDING 2026-10-02 (run 36941383859, cancelled by the user: 'it takes too long'): with the faster loader the master took ~4.44M keys in ~12 min (~6000 keys/s), then every chunk stored 0 within milliseconds (connections refused: the master most likely restarted, probably OOM at its 2Gi limit), and a `kubectl exec` without a timeout hung the evaluation for 75 min. Suspected, not confirmed: the master forwards every write to a follower that keeps up only to ~2000 writes/s, and the forward queue (max-total-thread-queue default 0 = unlimited) grows in memory. The earlier 15.8M run stopped at ~4.6M too. The evaluation now has a per-chunk timeout, stops after 3 empty chunks and logs the master's restart count, termination reason, RSS and thread queue, and samples them every 500k keys."
       ],
       "code": [
         {
@@ -4797,6 +4798,14 @@
           "command": "GitHub Actions workflow_dispatch evaluation=sustained suites=continuous-replication-sustained (run 36941386693)",
           "result": "pass",
           "report": "docs/reports/2026-10-02-ci-36941386693-sustained-e2e.log"
+        },
+        {
+          "check": "CHECK-16-limits",
+          "commit": "ea69da56dcce7bbde490f3f15400c0d767a4fd6b",
+          "date": "2026-10-02",
+          "command": "GitHub Actions workflow_dispatch evaluation=scale-15m8 suites=continuous-replication-scale (run 36941383859), cancelled by the user after 2 h",
+          "result": "fail",
+          "report": "docs/reports/2026-10-02-ci-36941383859-scale-15m8-cancelled-e2e.log"
         }
       ],
       "tasks": [

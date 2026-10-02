@@ -506,6 +506,7 @@ def scaleSuite : TestSuite := {
             let chunk := 20000
             let items0 ← c.currItems mIp
             let mut loaded := 0
+            let mut failedRun := 0
             let t0 ← IO.monoMsNow
             let mut i := 0
             while i < n do
@@ -516,9 +517,25 @@ def scaleSuite : TestSuite := {
               -- keys/s, too slow for 15.8M keys in one evaluation leg
               -- (run 36899086870).
               let cmd := s!"(awk -v s={i} -v m={m} 'BEGIN\{for(k=s;k<s+m;k++) printf \"set s%d 0 0 16\\r\\n0123456789abcdef\\r\\n\", k; printf \"quit\\r\\n\"}') | nc -w 60 {mIp} {scaleCfg.flarePort} | grep -c STORED"
-              match ← execInDebugPod scaleCfg.debugPod scaleCfg.«namespace» cmd with
-              | .ok o => loaded := loaded + (o.trim.toNat?.getD 0)
-              | .error e => IO.eprintln s!"# chunk at {i} failed: {e}"
+              -- Host-side timeout: a hung `kubectl exec` stalled the whole
+              -- evaluation for 75 min (run 36941383859, cancelled).
+              let r ← hostCmd "timeout" ["150", "kubectl", "exec", "-n", scaleCfg.«namespace», scaleCfg.debugPod, "--", "sh", "-c", cmd]
+              let stored := match r with | .ok o => o.trim.toNat?.getD 0 | .error _ => 0
+              loaded := loaded + stored
+              if stored == 0 then
+                failedRun := failedRun + 1
+                IO.eprintln s!"# chunk at {i} stored 0 ({match r with | .ok _ => "no STORED" | .error e => e})"
+              else failedRun := 0
+              if i % 500000 == 0 || failedRun == 1 then
+                IO.eprintln s!"# load at {i}: stored so far {loaded}; master RSS={(← c.rssKb mPod).getD 0}kB restarts={← c.restartCount mPod} thread_queue={(← c.statNat mIp "total_thread_queue").getD 0} items={← c.currItems mIp}; replica applied={(← c.statNat sIp "repl_applied_lsn").getD 0} forward_applied={(← c.statNat sIp "repl_forward_applied").getD 0}"
+              -- Fail fast: 3 chunks in a row with nothing stored means the
+              -- master is not taking writes (run 36941383859: from 4.44M keys
+              -- on). Record why and stop instead of retrying for hours.
+              if failedRun ≥ 3 then
+                match ← hostCmd "kubectl" ["get", "pod", mPod, "-n", scaleCfg.«namespace», "-o", "jsonpath={.status.containerStatuses[0].restartCount} {.status.containerStatuses[0].lastState.terminated.reason} {.status.containerStatuses[0].state}"] with
+                | .ok o => IO.eprintln s!"# load stopped at {i}: master {mPod} restartCount/last termination/state = {o.trim}"
+                | .error e => IO.eprintln s!"# load stopped at {i}: could not read the master pod ({e})"
+                break
               i := i + m
             let loadMs := (← IO.monoMsNow) - t0
             let t1 ← IO.monoMsNow

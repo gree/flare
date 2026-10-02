@@ -488,7 +488,9 @@ def lagHoldSuite : TestSuite := {
     deployCluster holdCfg
     IO.eprintln "# Waiting 50s grace period for operator reconciliation..."
     IO.sleep 50000
-  teardown := cleanupCluster holdCfg
+  teardown := do
+    discard <| kubectl ["uncordon", kindNode]
+    cleanupCluster holdCfg
   onFailure := dumpClusterDiagnostics holdCfg.«namespace» s!"app={holdCfg.operatorName}"
   tests :=
     let c : Ctx := { cfg := holdCfg }
@@ -530,32 +532,60 @@ def lagHoldSuite : TestSuite := {
           if !unfitSeen then
             healForwards mIp sIp
             return .fail "precondition: the operator never judged the follower further behind than the bound"
+          -- Keep the ex-master away: cordon the (single) kind node first, so
+          -- the StatefulSet's replacement pod stays Pending. Without this the
+          -- replacement re-registered before dead detection and was re-seated
+          -- in the same pass (CI 37025254148): correct, but the hold itself
+          -- never ran.
+          match ← kubectl ["cordon", kindNode] with
+          | .error e => healForwards mIp sIp; return .fail s!"could not cordon {kindNode}: {e}"
+          | .ok _ => IO.eprintln s!"# cordoned {kindNode}: the master's replacement pod stays Pending"
           discard <| kubectl ["delete", "pod", mPod, "-n", holdCfg.«namespace», "--grace-period=0", "--force", "--wait=false"]
           healForwards mIp sIp
-          -- Watch the map: the follower must never become master.
-          let mut follower_promoted := false
+          -- Phase 1, ex-master away: the follower must never become master and
+          -- the hold must be logged.
+          let mut followerPromoted := false
+          let mut holdLogged := false
+          for _ in [0:60] do
+            IO.sleep 2000
+            let entries ← c.nodeView
+            if (findMasterFqdn entries 0).bind (fun f => (f.splitOn ".").head?) == some sPod then
+              followerPromoted := true; break
+            if ((← c.opLog 3000).splitOn "\n").any (fun l => containsSubstr l "has NO master" && containsSubstr l sPod) then
+              holdLogged := true; break
+          -- Hold a little longer than the first line, then let the pod back.
+          if holdLogged && !followerPromoted then
+            for _ in [0:10] do
+              IO.sleep 2000
+              let entries ← c.nodeView
+              if (findMasterFqdn entries 0).bind (fun f => (f.splitOn ".").head?) == some sPod then
+                followerPromoted := true; break
+          discard <| kubectl ["uncordon", kindNode]
+          IO.eprintln s!"# uncordoned {kindNode}; while the ex-master was away: follower promoted={followerPromoted}; hold logged={holdLogged}"
+          if followerPromoted then
+            return .fail s!"the follower {sPod} was promoted although it was further behind than the failover bound"
+          if !holdLogged then return .fail "the ex-master was away but the CRITICAL 'has NO master' hold line never appeared"
+          -- Phase 2, the ex-master returns on its PVC.
           let mut exMasterBack := false
           for _ in [0:150] do
             IO.sleep 2000
             let entries ← c.nodeView
             match (findMasterFqdn entries 0).bind (fun f => (f.splitOn ".").head?) with
             | some m =>
-              if m == sPod then follower_promoted := true; break
+              if m == sPod then followerPromoted := true; break
               if m == mPod then exMasterBack := true; break
             | none => pure ()
           let log ← c.opLog 200000
           let lines := log.splitOn "\n"
-          let holdLogged := lines.any fun l => containsSubstr l "has NO master" && containsSubstr l sPod
           let notLossFree := lines.any fun l => containsSubstr l "PROMOTION NOT LOSS-FREE" && containsSubstr l sPod
           let pathLines := lines.filter (fun l =>
             containsSubstr l "has NO master" || containsSubstr l "PROMOTION NOT LOSS-FREE"
               || containsSubstr l "detected " || containsSubstr l "graceful drain")
-          IO.eprintln s!"# after the kill: follower promoted={follower_promoted}; ex-master master again={exMasterBack}; hold logged={holdLogged}; NOT LOSS-FREE for the follower={notLossFree}"
+          IO.eprintln s!"# after the return: follower promoted={followerPromoted}; ex-master master again={exMasterBack}; NOT LOSS-FREE for the follower={notLossFree}"
           IO.eprintln s!"# operator promotion path:\n{String.intercalate "\n" (pathLines.reverse.take 8).reverse}"
-          if follower_promoted then
+          if followerPromoted || notLossFree then
             return .fail s!"the follower {sPod} was promoted although it was further behind than the failover bound"
-          if !exMasterBack then return .fail "the ex-master did not become master again within 300 s"
-          if !holdLogged then return .fail "the partition was held without the CRITICAL 'has NO master' line"
+          if !exMasterBack then return .fail "the ex-master did not become master again within 300 s of the uncordon"
           let back ← waitForCondition "the ex-master serves every write it acknowledged" 120 do
             match ← getPodIp mPod holdCfg.«namespace» with
             | none => return false

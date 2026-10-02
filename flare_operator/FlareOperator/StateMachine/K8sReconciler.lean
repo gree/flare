@@ -1356,10 +1356,14 @@ def servicePatchEffects (state : FlareClusterState) (crName : String)
     follower crowned after all (NOT LOSS-FREE, last resort). -/
 def refillHoldEffects (before after : FlareClusterState) (crd : FlareClusterView)
     (s : FlareReconcileState) : List FlareEffect :=
+  -- An ex-master re-seated on its own partition is not a last resort: a
+  -- returning ex-master is probed as an idle follower and so counts as unfit,
+  -- but its copy is the newest (CI 37025254148 logged a false NOT LOSS-FREE
+  -- for exactly that).
   let crowned := (after.nodeMap.filter (fun kv =>
     kv.2.role == FlareRole.Master && s.followUnfitKeys.contains kv.1
       && (match before.lookupNode kv.1 with
-          | some o => o.role != FlareRole.Master
+          | some o => o.role != FlareRole.Master && o.lastMasterOf != kv.2.partition
           | none => true))).map Prod.fst
   let held := if s.followHoldEnabled
     then heldForExMaster after crd s.livePodKeys s.dataBearingKeys s.followUnfitKeys

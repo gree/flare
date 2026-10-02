@@ -909,6 +909,16 @@ def checkFailoverLagHold (ctx : Ctx) : IO Unit := do
   check ctx "wait budget over (partition in the expired list): the unfit follower is crowned"
     (masterOf (K8sReconciler.promoteMasterlessPartitions holdState activationCrd ["f"] [] ["f"] ["f"] true [0]) == some "f"
       && masterOf (K8sReconciler.promoteMasterlessPartitions holdState activationCrd ["f"] [] ["f"] ["f"] true []) == none)
+  let crdHold : K8sReconciler.FlareReconcileState :=
+    { followUnfitKeys := ["m", "f"], followHoldEnabled := true, livePodKeys := ["m", "f"], dataBearingKeys := ["m", "f"] }
+  check ctx "an ex-master re-seated on its partition is not reported NOT LOSS-FREE, even when probed unfit"
+    (K8sReconciler.refillHoldEffects back
+      (K8sReconciler.promoteMasterlessPartition back 0 ["m", "f"] [] ["m", "f"] ["f"] true) activationCrd crdHold
+      |>.isEmpty)
+  check ctx "an unfit follower crowned after the wait is reported NOT LOSS-FREE"
+    ((K8sReconciler.refillHoldEffects holdState
+      (K8sReconciler.promoteMasterlessPartitions holdState activationCrd ["f"] [] ["f"] ["f"] true [0]) activationCrd
+      { crdHold with livePodKeys := ["f"], dataBearingKeys := ["f"] }).length == 1)
   check ctx "a FIT follower is crowned at once with the hold on"
     (masterOf (K8sReconciler.promoteMasterlessPartition holdState 0 ["f"] [] ["f"] [] true) == some "f")
 

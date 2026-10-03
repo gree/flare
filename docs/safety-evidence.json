@@ -5917,7 +5917,8 @@
         "lsn_purged after an actual size-cap purge (not the 1 MB/1 s harness knobs) is now staged once: outage run 3 (6e757cb) — declared and rebuilt in 59 s. Single execution.",
         "2026-10-02 (CI 36904379135): T6 passed with exactly one reconstruction (1->2) and at most one ledger entry, but the master counted no dropped forwards during the cut (0->0), so only the follower route fired: the concurrent case of both repair triggers was NOT shown by this run.",
         "2026-10-02 (CI 36922262408): the concurrent case is now shown. With the cut kept until the master counted dropped forwards (0->2), BOTH repair routes logged a request for the same replica in the same run (drop route and follower needs_rebuild), the ledger held at most one entry, and exactly one reconstruction started and completed (1->2), none more within 30 s. One run.",
-        "2026-10-04, found by reading pf-dev (read-only) and the code: a physical reseed stages the source's copy in snapshot.recv.tmp NEXT TO the replica's own and swaps at the end, so a live rebuild needs room for two copies, with no free-space check. On tmpfs that room is RAM charged to the container's memory cgroup: pf-dev's replica holds 5.6 GB in an 8Gi pod (tmpfs sizeLimit = memory limit = 8Gi, container already at 6.67 GB on the master), so any live rebuild there would be OOM-killed mid-transfer on every retry. Fix: before staging (the truncate window — slave, source reachable and newer; the fallback truncates anyway), flared compares the local copy (+10% +64 MiB) with the space available (filesystem free and, on tmpfs, cgroup memory.max − memory.current − 256 MiB) and, when two copies do not fit, discards the stale copy with hard_reset() first (rocksdb_rebuild_stale_discarded). Cost: during the transfer the replica holds nothing; if the source dies then, that stale copy is no longer a last-resort partial copy. Peak is still one full copy plus flared: a tmpfs sized below ~1.1× data + flared + 256 MiB cannot be rebuilt at all. CI pending."
+        "2026-10-04, found by reading pf-dev (read-only) and the code: a physical reseed stages the source's copy in snapshot.recv.tmp NEXT TO the replica's own and swaps at the end, so a live rebuild needs room for two copies, with no free-space check. On tmpfs that room is RAM charged to the container's memory cgroup: pf-dev's replica holds 5.6 GB in an 8Gi pod (tmpfs sizeLimit = memory limit = 8Gi, container already at 6.67 GB on the master), so any live rebuild there would be OOM-killed mid-transfer on every retry. Fix: before staging (the truncate window — slave, source reachable and newer; the fallback truncates anyway), flared compares the local copy (+10% +64 MiB) with the space available (filesystem free and, on tmpfs, cgroup memory.max − memory.current − 256 MiB) and, when two copies do not fit, discards the stale copy with hard_reset() first (rocksdb_rebuild_stale_discarded). Cost: during the transfer the replica holds nothing; if the source dies then, that stale copy is no longer a last-resort partial copy. Peak is still one full copy plus flared: a tmpfs sized below ~1.1× data + flared + 256 MiB cannot be rebuilt at all. CI pending.",
+        "2026-10-04 (PR run 37135485637 on 467e947, all 8 legs green; nix-linux 37135485646 green): space-aware rebuild PASS. tmpfs = memory limit = 384Mi; the replica held 136 MB (2,550 keys, ~120 MB incompressible). On enabling following it went idle → needs_rebuild(lsn_purged) → following; flared logged 'the new copy will not fit next to ours (local copy 133278373 bytes, available 0 incl. memory headroom on tmpfs) -> discarding this replica's stale copy before staging'; rocksdb_rebuild_stale_discarded 0→1, snapshot bootstraps 1→2, container restarts 0→0; items and sampled values equal; master unchanged. The cgroup-headroom path decided (available 0), not the filesystem free space."
       ],
       "code": [
         {
@@ -6691,6 +6692,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of ea99601; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36985417000"
+        },
+        {
+          "check": "CHECK-18-rbtmpfs",
+          "commit": "661acef9fe0615c99e071b34b79364b4b82274c0",
+          "date": "2026-10-04",
+          "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of 467e947; continuous-replication-rebuild-tmpfs in the replication leg; nix-linux (same head) built flared with RocksDB and passed run-tests.sh (cutter, incl. test_storage_rocksdb; names not printed)",
+          "result": "pass",
+          "report": "docs/reports/2026-10-04-ci-37135485637-replication-job.log"
         }
       ],
       "tasks": [

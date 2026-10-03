@@ -99,6 +99,22 @@ class MemoryBudgetCheckTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("RocksDB floor 896 MiB + tmpfs.sizeLimit 4096 MiB exceeds the memory limit 4096 MiB", r.stdout)
 
+    def test_small_absolute_headroom_warns(self):
+        # 448 MiB floor (block cache 64, the scale/outage evaluations) under a
+        # 640 MiB limit: exactly 70%, so the percentage check is quiet, but
+        # the outage evaluation measured RSS 620 MB on that floor.
+        r = self.render("cluster.resources.limits.memory=640Mi",
+                        "cluster.rocksdb.blockCacheSizeMb=64")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("is above 70%", r.stdout)
+        self.assertIn("only 192 MiB of the flared memory limit (640 MiB) is left above the RocksDB floor (448 MiB)", r.stdout)
+
+    def test_enough_absolute_headroom_is_quiet(self):
+        r = self.render("cluster.resources.limits.memory=1Gi",
+                        "cluster.rocksdb.blockCacheSizeMb=64")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("is left above the RocksDB floor", r.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

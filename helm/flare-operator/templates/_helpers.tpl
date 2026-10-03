@@ -154,6 +154,13 @@ WARNING: the RocksDB memory floor ({{ $floor }} MiB) is above 70% of the flared 
 {{- if and (gt $tmpfs 0) (gt (add $floor $tmpfs) $limit) }}
 WARNING: on tmpfs the data counts against the pod's memory: RocksDB floor {{ $floor }} MiB + tmpfs.sizeLimit {{ $tmpfs }} MiB exceeds the memory limit {{ $limit }} MiB; a full tmpfs would OOM the pod.
 {{- end -}}
+{{- /* Absolute headroom: on CI flared's RSS rose up to ~170-260 MiB above the
+       floor (allocator retention, large values in flight; see RUNBOOK
+       #sizing), so a percentage alone leaves small floors without margin. */ -}}
+{{- $headroom := sub $limit (add $floor $tmpfs) -}}
+{{- if and (ge $headroom 0) (lt $headroom 256) }}
+WARNING: only {{ $headroom }} MiB of the flared memory limit ({{ $limit }} MiB) is left above the RocksDB floor ({{ $floor }} MiB){{ if gt $tmpfs 0 }} + tmpfs.sizeLimit ({{ $tmpfs }} MiB){{ end }}; RSS was measured up to ~260 MiB above the floor (allocator retention, values in flight). Keep at least 256 MiB.
+{{- end -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}

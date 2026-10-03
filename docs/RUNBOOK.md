@@ -477,10 +477,26 @@ are 512 + 2 × 64 × 3 = 896 MiB. On top of the floor come compaction,
 continuous-replication buffers, allocator fragmentation (`MALLOC_ARENA_MAX`
 is set) and, **on tmpfs, the data itself**. A tmpfs emptyDir counts against
 the pod's memory limit. The chart fails the render when the floor reaches
-`cluster.resources.limits.memory`. It warns above 70% of the limit, and when
-floor + `tmpfs.sizeLimit` exceeds it. Measured once on kind during the outage
-evaluation: RSS high-water 620 MB with a 64 MB block cache under a 2Gi limit.
-A 512Mi limit was OOM-killed in the scale evaluation.
+`cluster.resources.limits.memory`. It warns above 70% of the limit, when
+floor + `tmpfs.sizeLimit` exceeds it, and when less than 256 MiB is left
+above floor + tmpfs.
+
+Measured RSS against the floor on kind (floor 448 MiB: block cache 64,
+write buffers at their defaults):
+
+| Run | RSS high-water | Above the floor |
+|---|---|---|
+| outage, 400 MB of 50 kB values, PVC (36741586970) | 620 MB | +172 MiB |
+| outage on tmpfs (36914124394; tmpfs pages are not in RSS) | 543 MB | +95 MiB |
+| 6M keys, forward queue capped (36985410132) | 457 MB (heap in use 182 MB, 259 MB freed but kept by the allocator) | +9 MiB |
+| 2M keys, queue capped (36991784765) | 250 MB | below |
+| 6M keys, queue NOT capped (36981303601) | 2.0 GB, then OOM | unbounded: keep `maxTotalThreadQueue` set |
+
+Size the limit as **floor + tmpfs.sizeLimit + at least 256 MiB**. Below a
+256 MiB margin the chart warns. Small-data E2E pods stay near 35 MB because
+the floor is a ceiling the caches grow towards, not an up-front allocation.
+The RSS above excludes tmpfs pages, which the cgroup still charges to the
+pod. A 512Mi limit was OOM-killed in the scale evaluation.
 
 **WAL archive (retention for followers).**
 

@@ -63,8 +63,12 @@ that gap. Record the agreed failure model and RPO/RTO before approval.
   2026-10-02. The chart fails when the RocksDB floor reaches the flared memory
   limit. The floor is block cache plus 2 column families × write buffer ×
   buffers. The chart warns when the floor is above 70% of the limit, or when
-  floor plus tmpfs size exceeds it. Proof of the effective running budgets
-  (RSS under load) is still missing. No automatic restart is performed.
+  floor plus tmpfs size exceeds it. RSS under load against the floor
+  (2026-10-03, from the scale/outage evaluations): up to +172 MiB above a
+  448 MiB floor, mostly allocator retention and values in flight; the chart
+  now also warns below a 256 MiB absolute margin (RUNBOOK #sizing). Still
+  missing: the cgroup working set (RSS + tmpfs + page cache) on production
+  hardware. No automatic restart is performed.
 
 ## Required acceptance and capacity evidence
 

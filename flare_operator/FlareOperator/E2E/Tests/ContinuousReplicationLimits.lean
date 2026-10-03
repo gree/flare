@@ -737,6 +737,230 @@ def enableSuite : TestSuite := {
   ]
 }
 
+-- ─── failover lag hold: the two release paths, end to end ─────────────────
+
+/-- Shared precondition for the lag-hold variants: past the operator's
+    startup grace, forwards cut, 120 writes the throttled follower is behind
+    on, and the operator has judged it unfit. Returns
+    (mPod, mIp, sPod, sIp, master items, replica items). -/
+private def lagPrepare (c : Ctx) : IO (Except String (String × String × String × String × Nat × Nat)) := do
+  let graceOver ← waitForCondition "operator past its startup grace period" 240 do
+    return containsSubstr (← c.opLog 400) "grace period over"
+  if !graceOver then return .error "the operator never logged the end of its startup grace period"
+  match ← c.pair with
+  | .error e => return .error e
+  | .ok (mPod, mIp, sPod, sIp) =>
+    let stored ← writeKeys c.cfg.debugPod c.cfg.«namespace» mIp c.cfg.flarePort "base" 20
+    let synced ← waitForCondition "replica following and matching" 180 do
+      return (← c.statStr sIp "repl_follow_state") == some "following" && (← c.currItems sIp) == (← c.currItems mIp)
+    if stored != 20 || !synced then return .error s!"precondition: replica not following (stored {stored}/20)"
+    match ← cutForwards mIp sIp with
+    | .error e => return .error e
+    | .ok () => pure ()
+    let w ← writeKeys c.cfg.debugPod c.cfg.«namespace» mIp c.cfg.flarePort "hold" 120
+    let unfit ← waitForCondition "the operator judges the follower unfit" 120 do
+      return ((← c.opLog 2000).splitOn "\n").any fun l =>
+        containsSubstr l s!"eligibility {sPod}" && containsSubstr l "more than the failover bound"
+    let mItems ← c.currItems mIp
+    let sItems ← c.currItems sIp
+    IO.eprintln s!"# before the kill: stored {w}/120; items master={mItems} replica={sItems}; replica source={← c.statNat sIp "repl_source_lsn"} applied={← c.statNat sIp "repl_applied_lsn"}; unfit judged={unfit}"
+    if !unfit then healForwards mIp sIp; return .error "precondition: the follower was never judged unfit"
+    return .ok (mPod, mIp, sPod, sIp, mItems, sItems)
+
+private def masterPodOf (c : Ctx) : IO (Option String) := do
+  return (findMasterFqdn (← c.nodeView) 0).bind (fun f => (f.splitOn ".").head?)
+
+private def notLossFreeFor (c : Ctx) (pod : String) : IO Bool := do
+  return ((← c.opLog 200000).splitOn "\n").any fun l => containsSubstr l "PROMOTION NOT LOSS-FREE" && containsSubstr l pod
+
+private def holdFlags : String := flags ++ "\nrepl-follow-max-batches = 1\nrepl-follow-batch-delay-usec = 1000000"
+
+-- A: tmpfs. The ex-master's pod is recreated EMPTY, so there is nothing to
+-- wait for: the far-behind follower is seated at once, loudly.
+private def holdTmpfsCfg : ClusterConfig := {
+  name := "cont-repl-hold-tmpfs"
+  «namespace» := "flare-cont-repl-hold-tmpfs"
+  partitions := 1
+  replicas := 2
+  operatorName := "flare-operator"
+  debugPod := "debug-cont-repl-hold-tmpfs"
+  storageBackend := "rocksdb"
+  useTmpfs := true
+  tmpfsSize := "512Mi"
+  extraFlaredConf := holdFlags
+  operatorEnv := [("FLARE_FOLLOW_FAILOVER_MAX_LAG", "20"), ("FLARE_FOLLOW_FAILOVER_WAIT_SECONDS", "900")]
+}
+
+def lagHoldTmpfsSuite : TestSuite := {
+  name := "continuous-replication-lag-hold-tmpfs"
+  setup := do
+    deployCluster holdTmpfsCfg
+    IO.sleep 50000
+  teardown := cleanupCluster holdTmpfsCfg
+  onFailure := dumpClusterDiagnostics holdTmpfsCfg.«namespace» s!"app={holdTmpfsCfg.operatorName}"
+  tests :=
+    let c : Ctx := { cfg := holdTmpfsCfg }
+    [
+    { name := "failover lag bound on tmpfs: the master pod is deleted and returns EMPTY; nothing to wait for, so the far-behind follower is seated at once and logged NOT LOSS-FREE; the empty ex-master rebuilds from it"
+      run := do
+        match ← lagPrepare c with
+        | .error e => return .fail e
+        | .ok (mPod, mIp, sPod, sIp, mItems, sItems) =>
+          discard <| kubectl ["delete", "pod", mPod, "-n", holdTmpfsCfg.«namespace», "--grace-period=0", "--force", "--wait=false"]
+          healForwards mIp sIp
+          let seated ← waitForCondition "the follower is seated once the ex-master is back empty" 300 do
+            return (← masterPodOf c) == some sPod
+          let loud ← notLossFreeFor c sPod
+          IO.eprintln s!"# after the kill: follower seated={seated}; NOT LOSS-FREE logged={loud}; items new master={← c.currItems sIp} (follower had {sItems}, old master acknowledged {mItems})"
+          if !seated then return .fail s!"the follower was not seated after the empty ex-master returned (master now {← masterPodOf c})"
+          if !loud then return .fail "the far-behind follower was seated without the NOT LOSS-FREE line"
+          let rejoined ← waitForCondition "the empty ex-master follows the new master and matches" 420 do
+            match ← getPodIp mPod holdTmpfsCfg.«namespace» with
+            | none => return false
+            | some ip => return (← c.statStr ip "repl_follow_state") == some "following" && (← c.currItems ip) == (← c.currItems sIp)
+          IO.eprintln s!"# ex-master {mPod} rejoined as a follower={rejoined}; items={← c.currItems sIp}"
+          if !rejoined then return .fail "the empty ex-master did not rebuild from and follow the new master"
+          return .pass }
+  ]
+}
+
+-- B: the wait runs out. The ex-master is kept away (node cordoned) past
+-- FLARE_FOLLOW_FAILOVER_WAIT_SECONDS = 60, so the follower is seated after
+-- the wait, loudly; the ex-master then returns WITH data and follows it.
+private def holdExpiryCfg : ClusterConfig := {
+  name := "cont-repl-hold-exp"
+  «namespace» := "flare-cont-repl-hold-exp"
+  partitions := 1
+  replicas := 2
+  operatorName := "flare-operator"
+  debugPod := "debug-cont-repl-hold-exp"
+  storageBackend := "rocksdb"
+  usePvc := true
+  extraFlaredConf := holdFlags
+  operatorEnv := [("FLARE_FOLLOW_FAILOVER_MAX_LAG", "20"), ("FLARE_FOLLOW_FAILOVER_WAIT_SECONDS", "60")]
+}
+
+def lagHoldExpirySuite : TestSuite := {
+  name := "continuous-replication-lag-hold-expiry"
+  setup := do
+    deployCluster holdExpiryCfg
+    IO.sleep 50000
+  teardown := do
+    discard <| kubectl ["uncordon", kindNode]
+    cleanupCluster holdExpiryCfg
+  onFailure := dumpClusterDiagnostics holdExpiryCfg.«namespace» s!"app={holdExpiryCfg.operatorName}"
+  tests :=
+    let c : Ctx := { cfg := holdExpiryCfg }
+    [
+    { name := "failover lag bound, wait expiry: the ex-master stays away past the 60 s wait; the far-behind follower is then seated and logged NOT LOSS-FREE, not before; the returning ex-master follows it"
+      run := do
+        match ← lagPrepare c with
+        | .error e => return .fail e
+        | .ok (mPod, mIp, sPod, sIp, _, sItems) =>
+          match ← kubectl ["cordon", kindNode] with
+          | .error e => healForwards mIp sIp; return .fail s!"could not cordon {kindNode}: {e}"
+          | .ok _ => pure ()
+          let t0 ← IO.monoMsNow
+          discard <| kubectl ["delete", "pod", mPod, "-n", holdExpiryCfg.«namespace», "--grace-period=0", "--force", "--wait=false"]
+          healForwards mIp sIp
+          let seated ← waitForCondition "the follower is seated after the wait runs out" 300 do
+            return (← masterPodOf c) == some sPod
+          let tookS := ((← IO.monoMsNow) - t0) / 1000
+          let loud ← notLossFreeFor c sPod
+          let held := ((← c.opLog 200000).splitOn "\n").any fun l => containsSubstr l "has NO master" && containsSubstr l sPod
+          discard <| kubectl ["uncordon", kindNode]
+          IO.eprintln s!"# with the ex-master away: held first={held}; follower seated={seated} after {tookS}s (wait 60 s); NOT LOSS-FREE logged={loud}"
+          if !seated then return .fail "the follower was never seated although the wait ran out"
+          if tookS < 60 then return .fail s!"the follower was seated after {tookS}s, before the 60 s wait ran out"
+          if !held || !loud then return .fail s!"expected the hold line and then the NOT LOSS-FREE line (held={held}, loud={loud})"
+          let rejoined ← waitForCondition "the returning ex-master follows the new master and matches" 480 do
+            match ← getPodIp mPod holdExpiryCfg.«namespace» with
+            | none => return false
+            | some ip => return (← c.statStr ip "repl_follow_state") == some "following" && (← c.currItems ip) == (← c.currItems sIp)
+          IO.eprintln s!"# ex-master {mPod} follows the new master={rejoined}; items={← c.currItems sIp} (the follower had {sItems} at the kill)"
+          if !rejoined then return .fail "the returning ex-master did not follow the new master"
+          return .pass }
+  ]
+}
+
+-- C: enablement after the WAL since the replica's last copy was purged.
+private def enablePurgedCfg : ClusterConfig := {
+  name := "cont-repl-enable-p"
+  «namespace» := "flare-cont-repl-enable-p"
+  partitions := 1
+  replicas := 2
+  operatorName := "flare-operator"
+  debugPod := "debug-cont-repl-enable-p"
+  storageBackend := "rocksdb"
+  usePvc := true
+  extraFlaredConf := "rocksdb-write-buffer-size-mb = 4\nrocksdb-wal-ttl-seconds = 60\nrocksdb-wal-size-limit-mb = 16"
+}
+
+private def enablePurgedPatch (identity follow : Bool) : String :=
+  s!"\{\"spec\":\{\"rocksdb\":\{\"writeBufferSizeMb\":4,\"walTtlSeconds\":60,\"walSizeLimitMb\":16,\"replIdentityForward\":{identity},\"replFollowEnabled\":{follow},\"replFollowPollIntervalUsec\":200000}}}"
+
+/-- `count` keys of `bytes` each in ONE exec (a shell loop in the debug pod). -/
+private def Ctx.bulkWrite (c : Ctx) (ip pfx : String) (count bytes : Nat) : IO Nat := do
+  let cmd := s!"v=$(head -c {bytes} /dev/zero | tr '\\0' x); n=0; for i in $(seq 0 {count - 1}); do printf 'set {pfx}_%s 0 0 {bytes}\\r\\n%s\\r\\n' $i \"$v\" | nc -w 5 {ip} {c.cfg.flarePort} | grep -q STORED && n=$((n+1)); done; echo $n"
+  match ← execInDebugPod c.cfg.debugPod c.cfg.«namespace» cmd with
+  | .ok o => return ((o.trim.splitOn "\n").getLast?.getD "0").trim.toNat?.getD 0
+  | .error _ => return 0
+
+def enablePurgedSuite : TestSuite := {
+  name := "continuous-replication-enable-purged"
+  setup := do
+    deployCluster enablePurgedCfg
+    IO.sleep 50000
+  teardown := cleanupCluster enablePurgedCfg
+  onFailure := dumpClusterDiagnostics enablePurgedCfg.«namespace» s!"app={enablePurgedCfg.operatorName}"
+  tests :=
+    let c : Ctx := { cfg := enablePurgedCfg }
+    [
+    { name := "enablement after the master purged the WAL since the replica's last copy: the replica declares lsn_purged, is rebuilt once, then follows; data equal, no failover"
+      run := do
+        match ← c.pair with
+        | .error e => return .fail e
+        | .ok (mPod, mIp, _, sIp) =>
+          let w0 ← writeKeys enablePurgedCfg.debugPod enablePurgedCfg.«namespace» mIp enablePurgedCfg.flarePort "legacy" 100
+          let big ← c.bulkWrite mIp "bulk" 1000 50000
+          if w0 != 100 || big < 1000 then return .fail s!"legacy writes: stored {w0}/100 and {big}/1000 bulk"
+          if !(← convergedItems c mIp sIp "legacy: replica matches the master") then
+            return .fail s!"legacy: items master={← c.currItems mIp} replica={← c.currItems sIp}"
+          -- Let the 60 s TTL pass with more flushes, so the archived WAL from
+          -- the replica's copy position is purged.
+          IO.sleep 90000
+          let big2 ← c.bulkWrite mIp "bulk2" 200 50000
+          let recon0 := (← c.statNat sIp "reconstruction_started").getD 0
+          IO.eprintln s!"# legacy: {big}+{big2} keys of 50 kB; items {← c.currItems mIp}; replica repl_last_lsn={← c.statNat sIp "rocksdb_repl_last_lsn"}; master latest={← c.statNat mIp "rocksdb_latest_sequence_number"}; reconstruction_started={recon0}"
+          match ← kubectlPatch "flarecluster" enablePurgedCfg.name enablePurgedCfg.«namespace» (enablePurgedPatch true false) with
+          | .error e => return .fail s!"patch (identity on) failed: {e}"
+          | .ok _ => pure ()
+          if !(← waitForCondition "both nodes reload repl_identity_forward 0 -> 1" 240 do bothReloaded c "repl_identity_forward: 0 -> 1") then
+            return .fail "identity forwarding was not applied on both nodes"
+          match ← kubectlPatch "flarecluster" enablePurgedCfg.name enablePurgedCfg.«namespace» (enablePurgedPatch true true) with
+          | .error e => return .fail s!"patch (follow on) failed: {e}"
+          | .ok _ => pure ()
+          let states ← IO.mkRef ([] : List String)
+          let following ← waitForCondition "the replica follows after enablement" 420 do
+            let st := (← c.statStr sIp "repl_follow_state").getD "?"
+            let reason := (← c.statStr sIp "repl_follow_last_reason").getD ""
+            let entry := if reason.isEmpty then st else s!"{st}({reason})"
+            states.modify fun l => if l.getLast? == some entry then l else l ++ [entry]
+            return st == "following" && (← c.statNat sIp "reconstruction_started").getD 0 > recon0
+          let recon1 := (← c.statNat sIp "reconstruction_started").getD 0
+          let purgedSeen := (← states.get).any (containsSubstr · "lsn_purged")
+          IO.eprintln s!"# follow on: states seen {← states.get}; lsn_purged seen={purgedSeen}; reconstruction_started {recon0}→{recon1}; following={following}"
+          if !following then return .fail s!"expected one rebuild then following; states {← states.get}, reconstruction_started {recon0}→{recon1}"
+          if !(← convergedItems c mIp sIp "after the rebuild: replica matches the master") then
+            return .fail s!"after the rebuild: items master={← c.currItems mIp} replica={← c.currItems sIp}"
+          if let some bad ← sampleEqual c mIp sIp [("legacy", 100)] then return .fail s!"value mismatch: {bad}"
+          let master ← masterPodOf c
+          IO.eprintln s!"# after: items {← c.currItems mIp}; master {master} (was {mPod})"
+          if master != some mPod then return .fail s!"the master moved during enablement ({mPod} → {master})"
+          return .pass }
+  ]
+}
+
 -- ─── scale evaluation (skipped unless FLARE_E2E_SCALE_KEYS is set) ──────
 
 private def scaleCfg : ClusterConfig := {

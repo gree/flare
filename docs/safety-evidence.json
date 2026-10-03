@@ -3340,6 +3340,28 @@
               "symbol": "heldForExMaster"
             }
           ]
+        },
+        {
+          "id": "CHECK-06-holdtmpfs",
+          "kind": "scenario",
+          "procedure": "E2E continuous-replication-lag-hold-tmpfs (replication leg): tmpfs, 1p x 2r, bound 20, wait 900 s; the throttled follower is judged unfit, then the master pod is deleted and returns EMPTY. The follower must be seated (nothing to wait for), the NOT LOSS-FREE line must be logged for it, and the empty ex-master must rebuild from it and follow with equal items.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/ContinuousReplicationLimits.lean",
+              "symbol": "lagHoldTmpfsSuite"
+            }
+          ]
+        },
+        {
+          "id": "CHECK-06-holdexpiry",
+          "kind": "scenario",
+          "procedure": "E2E continuous-replication-lag-hold-expiry (breaker-migration leg): PVC, bound 20, wait 60 s; the node is cordoned so the ex-master stays away. The hold must be logged first, the follower must be seated only after at least 60 s, with the NOT LOSS-FREE line; after the uncordon the ex-master (with the writes the follower never got) must follow the new master with equal items — the accepted loss.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/ContinuousReplicationLimits.lean",
+              "symbol": "lagHoldExpirySuite"
+            }
+          ]
         }
       ],
       "runs": [
@@ -4865,6 +4887,17 @@
             {
               "path": "flare_operator/FlareOperator/E2E/Tests/ContinuousReplicationLimits.lean",
               "symbol": "enableSuite"
+            }
+          ]
+        },
+        {
+          "id": "CHECK-16-enablepurged",
+          "kind": "scenario",
+          "procedure": "E2E continuous-replication-enable-purged (topology leg): legacy PVC cluster with a 4 MB write buffer, WAL TTL 60 s and size cap 16 MB; 100 keys plus ~60 MB of 50 kB values written in legacy mode, 90 s for the TTL, more writes; then identity forwarding and following are enabled through the CR. The replica must be rebuilt once (reconstruction_started +1; lsn_purged recorded if seen), then follow with items and sampled values equal; the master must not move.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/ContinuousReplicationLimits.lean",
+              "symbol": "enablePurgedSuite"
             }
           ]
         }

@@ -2,8 +2,8 @@
 
 Status as of 2026-10-01: development/integration, not production-approved.
 PR #144 integration and production WAL enablement are separate decisions.
-Latest baseline (2026-10-03): `1c861e8`, PR E2E 37107011336, all 8 legs green
-(merge rev fe9b8c6). Since 2026-10-01 the E2E set also covers: idempotent
+Latest baseline (2026-10-03): `f78e4c8`, PR E2E 37112623660, all 8 legs green
+(adds the chart's 256 MiB headroom warning; previous: `1c861e8`, 37107011336). Since 2026-10-01 the E2E set also covers: idempotent
 re-activation (713bf8c), the failover lag hold and both its release paths
 (tmpfs empty ex-master, wait expiry), a returning ex-master re-seated over a
 far-behind follower, live enablement and rollback on 1p and 2p clusters,

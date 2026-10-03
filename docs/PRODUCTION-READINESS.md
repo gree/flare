@@ -2,6 +2,13 @@
 
 Status as of 2026-10-01: development/integration, not production-approved.
 PR #144 integration and production WAL enablement are separate decisions.
+Latest baseline (2026-10-03): `1c861e8`, PR E2E 37107011336, all 8 legs green
+(merge rev fe9b8c6). Since 2026-10-01 the E2E set also covers: idempotent
+re-activation (713bf8c), the failover lag hold and both its release paths
+(tmpfs empty ex-master, wait expiry), a returning ex-master re-seated over a
+far-behind follower, live enablement and rollback on 1p and 2p clusters,
+enablement after a purged WAL (one rebuild per replica), and a per-partition
+hold on 2p. Older baselines follow.
 Latest inspected baseline `fd76eed`: PR E2E 36869793917 (new 8-leg layout, all 198 tests, merge rev 13f8fe9) after the 2026-10-01 fixes (balance persisted across restart, SAF-11 breaker count, drain proof of the follower, startup-republish E2E); earlier baseline: `630ccec`: PR E2E 36820029377 (all five legs, tested at
 the merge revision 9dc131f), 36816259807 at 0d29589 (merge rev b706686) and
 36812371158 at e611531 (merge rev 80e466b), three green matrices in a row on

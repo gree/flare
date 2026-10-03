@@ -726,7 +726,9 @@ def enableSuite : TestSuite := {
           -- the procedure never moved the master
           let log ← c.opLog 200000
           let moved := (log.splitOn "\n").filter fun l =>
-            containsSubstr l "detected " || containsSubstr l "PROMOTION" || containsSubstr l "graceful drain" || containsSubstr l "CIRCUIT BREAKER"
+            -- "dead nodes:" not "detected ": the grace-period line says
+            -- "dead-node detection" (CI 37081571564 matched it).
+            containsSubstr l "dead nodes:" || containsSubstr l "PROMOTION" || containsSubstr l "graceful drain:" || containsSubstr l "CIRCUIT BREAKER"
           let master := (findMasterFqdn (← c.nodeView) 0).bind (fun f => (f.splitOn ".").head?)
           IO.eprintln s!"# master throughout: {master} (was {mPod}); replica {sPod}; failover/promotion lines: {moved.length}"
           if master != some mPod then return .fail s!"the master moved during enablement ({mPod} → {master})"

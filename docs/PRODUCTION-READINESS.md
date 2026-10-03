@@ -133,9 +133,11 @@ that gap. Record the agreed failure model and RPO/RTO before approval.
   Pod deletion on tmpfs deletes data; a configuration rollback cannot recover it.
 - Enable identity-aware forwarding on every relevant node before continuous
   following. Verify the mixed-version rollout path and runtime settings.
-  E2E `continuous-replication-enable` (2026-10-03, CI pending) runs this on a
-  live legacy cluster through the CR, and back, and records whether enabling
-  following rebuilds the replica.
+  E2E `continuous-replication-enable` PASS (PR run 37084337267): on a live
+  legacy cluster through the CR, and back, data stayed equal and the master
+  never moved. The replica caught up from its last copy position with no
+  rebuild because the master still had that WAL; in production expect one
+  rebuild per replica (RUNBOOK #enable-follow).
 - Install and exercise alerts/runbooks, including topology feedback. Audit one
   node per pass must cover the intended cluster within the freshness window.
 - Start with a bounded canary, define stop/rollback criteria, and record an

@@ -961,6 +961,181 @@ def enablePurgedSuite : TestSuite := {
   ]
 }
 
+-- ─── two partitions: enablement and the lag hold are per partition ───────
+
+/-- (masterPod, masterIp, replicaPod, replicaIp) of partition `p`, the replica
+    taken from the SAME partition (Ctx.pair could return another partition's
+    slave, CI 36904379135). -/
+private def Ctx.pairOf (c : Ctx) (p : Nat) : IO (Except String (String × String × String × String)) := do
+  let mut lastErr := ""
+  for _ in [0:6] do
+    let entries ← c.nodeView
+    match findMasterFqdn entries p with
+    | none => lastErr := s!"no Active P{p} master in the operator's map"
+    | some mFqdn =>
+      match entries.find? (fun e => e.fqdn != mFqdn && e.role == 1 && e.partition == Int.ofNat p) with
+      | none => lastErr := s!"no slave of P{p} in the operator's map"
+      | some sl =>
+        match ← getPodIp (podOf mFqdn) c.cfg.«namespace», ← getPodIp (podOf sl.fqdn) c.cfg.«namespace» with
+        | some mIp, some sIp => return .ok (podOf mFqdn, mIp, podOf sl.fqdn, sIp)
+        | _, _ => lastErr := "could not resolve pod IPs"
+    IO.sleep 5000
+  return .error lastErr
+
+private def multiEnableCfg : ClusterConfig := {
+  name := "cont-repl-mp-enable"
+  «namespace» := "flare-cont-repl-mp-enable"
+  partitions := 2
+  replicas := 2
+  operatorName := "flare-operator"
+  debugPod := "debug-cont-repl-mp-enable"
+  storageBackend := "rocksdb"
+  usePvc := true
+}
+
+def multiEnableSuite : TestSuite := {
+  name := "continuous-replication-multipart-enable"
+  setup := do
+    deployCluster multiEnableCfg
+    IO.sleep 60000
+  teardown := cleanupCluster multiEnableCfg
+  onFailure := dumpClusterDiagnostics multiEnableCfg.«namespace» s!"app={multiEnableCfg.operatorName}"
+  tests :=
+    let c : Ctx := { cfg := multiEnableCfg }
+    [
+    { name := "enablement on 2 partitions, live: a legacy 2p x 2r cluster switches on identity forwarding then following through the CR; every partition's replica follows, each partition's copies stay equal, no master moves"
+      run := do
+        match ← c.pairOf 0, ← c.pairOf 1 with
+        | .error e, _ | _, .error e => return .fail e
+        | .ok (m0, m0Ip, s0, s0Ip), .ok (m1, m1Ip, s1, s1Ip) =>
+          let w0 ← writeKeys multiEnableCfg.debugPod multiEnableCfg.«namespace» m0Ip multiEnableCfg.flarePort "legacy" 300
+          let eqBoth : String → IO Bool := fun label => waitForCondition label 180 do
+            let a ← c.currItems m0Ip
+            let b ← c.currItems m1Ip
+            return a > 0 && b > 0 && (← c.currItems s0Ip) == a && (← c.currItems s1Ip) == b
+          if w0 != 300 then return .fail s!"legacy writes: stored {w0}/300"
+          if !(← eqBoth "legacy: each partition's replica matches its master") then
+            return .fail s!"legacy: P0 {← c.currItems m0Ip}/{← c.currItems s0Ip}, P1 {← c.currItems m1Ip}/{← c.currItems s1Ip}"
+          let recon0 := (← c.statNat s0Ip "reconstruction_started").getD 0
+          let recon1 := (← c.statNat s1Ip "reconstruction_started").getD 0
+          IO.eprintln s!"# legacy: P0 {m0}/{s0} items {← c.currItems m0Ip}; P1 {m1}/{s1} items {← c.currItems m1Ip}"
+          match ← kubectlPatch "flarecluster" multiEnableCfg.name multiEnableCfg.«namespace» (enablePatch true false) with
+          | .error e => return .fail s!"patch (identity on) failed: {e}"
+          | .ok _ => pure ()
+          if !(← waitForCondition "all four nodes reload repl_identity_forward 0 -> 1" 240 do bothReloaded c "repl_identity_forward: 0 -> 1") then
+            return .fail "identity forwarding was not applied on every node"
+          match ← kubectlPatch "flarecluster" multiEnableCfg.name multiEnableCfg.«namespace» (enablePatch true true) with
+          | .error e => return .fail s!"patch (follow on) failed: {e}"
+          | .ok _ => pure ()
+          let both ← waitForCondition "both partitions' replicas follow" 300 do
+            return (← c.statStr s0Ip "repl_follow_state") == some "following" && (← c.statStr s1Ip "repl_follow_state") == some "following"
+          IO.eprintln s!"# follow on: P0 replica {← c.statStr s0Ip "repl_follow_state"} source epoch {← c.statStr s0Ip "repl_follow_source_epoch"}; P1 replica {← c.statStr s1Ip "repl_follow_state"} source epoch {← c.statStr s1Ip "repl_follow_source_epoch"}; rebuilds P0 {recon0}→{(← c.statNat s0Ip "reconstruction_started").getD 0} P1 {recon1}→{(← c.statNat s1Ip "reconstruction_started").getD 0}"
+          if !both then return .fail "not every partition's replica followed after enablement"
+          let w1 ← writeKeys multiEnableCfg.debugPod multiEnableCfg.«namespace» m1Ip multiEnableCfg.flarePort "follow" 200
+          if !(← eqBoth "following: each partition's replica matches its master") then
+            return .fail s!"following: P0 {← c.currItems m0Ip}/{← c.currItems s0Ip}, P1 {← c.currItems m1Ip}/{← c.currItems s1Ip}"
+          for (pfx, n) in [("legacy", 300), ("follow", 200)] do
+            for i in [0, n / 2, n - 1] do
+              let v0 ← memcachedGet multiEnableCfg.debugPod multiEnableCfg.«namespace» s0Ip multiEnableCfg.flarePort s!"{pfx}_{i}"
+              let v1 ← memcachedGet multiEnableCfg.debugPod multiEnableCfg.«namespace» s1Ip multiEnableCfg.flarePort s!"{pfx}_{i}"
+              if v0 != some s!"val_{i}" || v1 != v0 then return .fail s!"{pfx}_{i}: via P0 replica {v0}, via P1 replica {v1}"
+          let total := (← c.currItems m0Ip) + (← c.currItems m1Ip)
+          let n0 ← masterPodOf c
+          let n1 := (findMasterFqdn (← c.nodeView) 1).bind (fun f => (f.splitOn ".").head?)
+          IO.eprintln s!"# following: stored {w1}/200; items P0 {← c.currItems m0Ip} P1 {← c.currItems m1Ip} (total {total}); masters now {n0}/{n1}"
+          if total != 500 then return .fail s!"expected 500 keys across both partitions, found {total}"
+          if n0 != some m0 || n1 != some m1 then return .fail s!"a master moved during enablement ({m0}/{m1} → {n0}/{n1})"
+          return .pass }
+  ]
+}
+
+private def multiHoldCfg : ClusterConfig := {
+  name := "cont-repl-mp-hold"
+  «namespace» := "flare-cont-repl-mp-hold"
+  partitions := 2
+  replicas := 2
+  operatorName := "flare-operator"
+  debugPod := "debug-cont-repl-mp-hold"
+  storageBackend := "rocksdb"
+  usePvc := true
+  extraFlaredConf := holdFlags
+  operatorEnv := [("FLARE_FOLLOW_FAILOVER_MAX_LAG", "20"), ("FLARE_FOLLOW_FAILOVER_WAIT_SECONDS", "900")]
+}
+
+def multiHoldSuite : TestSuite := {
+  name := "continuous-replication-multipart-lag-hold"
+  setup := do
+    deployCluster multiHoldCfg
+    IO.sleep 60000
+  teardown := do
+    discard <| kubectl ["uncordon", kindNode]
+    cleanupCluster multiHoldCfg
+  onFailure := dumpClusterDiagnostics multiHoldCfg.«namespace» s!"app={multiHoldCfg.operatorName}"
+  tests :=
+    let c : Ctx := { cfg := multiHoldCfg }
+    [
+    { name := "lag hold on 2 partitions: P1's follower is far behind and P1's master is lost; P1 is held (follower not promoted), P0 keeps its master and takes writes, the breaker does not trip, and P1's ex-master returns with every write"
+      run := do
+        let graceOver ← waitForCondition "operator past its startup grace period" 240 do
+          return containsSubstr (← c.opLog 400) "grace period over"
+        if !graceOver then return .fail "the operator never logged the end of its startup grace period"
+        match ← c.pairOf 0, ← c.pairOf 1 with
+        | .error e, _ | _, .error e => return .fail e
+        | .ok (m0, m0Ip, _, _), .ok (m1, m1Ip, s1, s1Ip) =>
+          let synced ← waitForCondition "P1 replica following" 180 do
+            return (← c.statStr s1Ip "repl_follow_state") == some "following"
+          if !synced then return .fail "precondition: P1's replica not following"
+          match ← cutForwards m1Ip s1Ip with
+          | .error e => return .fail e
+          | .ok () => pure ()
+          -- through P1's master: keys of both partitions, about half land on P1
+          let w ← writeKeys multiHoldCfg.debugPod multiHoldCfg.«namespace» m1Ip multiHoldCfg.flarePort "hold" 240
+          let unfit ← waitForCondition "the operator judges P1's follower unfit" 120 do
+            return ((← c.opLog 2000).splitOn "\n").any fun l =>
+              containsSubstr l s!"eligibility {s1}" && containsSubstr l "more than the failover bound"
+          let p1Items ← c.currItems m1Ip
+          IO.eprintln s!"# before the kill: stored {w}/240; P1 items master={p1Items} replica={← c.currItems s1Ip}; P1 replica source={← c.statNat s1Ip "repl_source_lsn"} applied={← c.statNat s1Ip "repl_applied_lsn"}; unfit judged={unfit}"
+          if !unfit then healForwards m1Ip s1Ip; return .fail "precondition: P1's follower was never judged unfit"
+          match ← kubectl ["cordon", kindNode] with
+          | .error e => healForwards m1Ip s1Ip; return .fail s!"could not cordon {kindNode}: {e}"
+          | .ok _ => pure ()
+          discard <| kubectl ["delete", "pod", m1, "-n", multiHoldCfg.«namespace», "--grace-period=0", "--force", "--wait=false"]
+          healForwards m1Ip s1Ip
+          let mut promoted := false
+          let mut held := false
+          for _ in [0:60] do
+            IO.sleep 2000
+            let entries ← c.nodeView
+            if (findMasterFqdn entries 1).bind (fun f => (f.splitOn ".").head?) == some s1 then promoted := true; break
+            if ((← c.opLog 3000).splitOn "\n").any (fun l => containsSubstr l "partition 1 has NO master" && containsSubstr l s1) then
+              held := true; break
+          -- P0 during P1's hold: same master, accepts writes to its keys
+          let p0Before ← c.currItems m0Ip
+          let p0w ← writeKeys multiHoldCfg.debugPod multiHoldCfg.«namespace» m0Ip multiHoldCfg.flarePort "p0during" 40
+          let p0After ← c.currItems m0Ip
+          let p0Master ← masterPodOf c
+          let tripped := ((← c.opLog 200000).splitOn "\n").any (containsSubstr · "CIRCUIT BREAKER")
+          discard <| kubectl ["uncordon", kindNode]
+          IO.eprintln s!"# P1 away: follower promoted={promoted}; held={held}; P0 master {p0Master} (was {m0}); P0 items {p0Before}→{p0After} while writing 40 keys through it ({p0w} STORED: keys of P1 fail meanwhile); breaker tripped={tripped}"
+          if promoted then return .fail s!"P1's follower {s1} was promoted although it was further behind than the bound"
+          if !held then return .fail "P1 was not held (no 'partition 1 has NO master' line)"
+          if p0Master != some m0 then return .fail s!"P0's master moved during P1's hold ({m0} → {p0Master})"
+          if p0After ≤ p0Before then return .fail "P0 took no writes during P1's hold"
+          if tripped then return .fail "the circuit breaker tripped on one unavailable node of four"
+          let back ← waitForCondition "P1's ex-master is master again with every write" 300 do
+            let entries ← c.nodeView
+            if (findMasterFqdn entries 1).bind (fun f => (f.splitOn ".").head?) != some m1 then return false
+            match ← getPodIp m1 multiHoldCfg.«namespace» with
+            | none => return false
+            | some ip => return (← c.currItems ip) == p1Items
+          let p1Now := (findMasterFqdn (← c.nodeView) 1).bind (fun f => (f.splitOn ".").head?)
+          IO.eprintln s!"# P1 ex-master {m1} master again with {p1Items} items={back}; P1 master now {p1Now}"
+          if !back then return .fail "P1's ex-master did not return as master with every write"
+          if ← notLossFreeFor c s1 then return .fail "a NOT LOSS-FREE line was logged for P1's follower"
+          return .pass }
+  ]
+}
+
 -- ─── scale evaluation (skipped unless FLARE_E2E_SCALE_KEYS is set) ──────
 
 private def scaleCfg : ClusterConfig := {

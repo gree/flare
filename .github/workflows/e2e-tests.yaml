@@ -78,8 +78,8 @@ jobs:
           default='[
             {"group":"topology","suites":"failover,read-balance,scale-out-master,scale-out-slave,scale-in-slave,scale-in-master,continuous-replication-enable-purged"},
             {"group":"replication","suites":"cluster-replication,wal-retention-config,strict-durability,continuous-replication-purge,continuous-replication-limits,continuous-replication-lag-hold-tmpfs"},
-            {"group":"wal-recovery","suites":"wal-bandwidth-throttle,wal-incremental-sync,wal-purged-fallback,orphan-scan-purge,terminating-pod-handling"},
-            {"group":"failover-data","suites":"replace-nodes,failover-during-replication,data-survival-failover,pvc-data-survival,backup-restore,continuous-replication-enable"},
+            {"group":"wal-recovery","suites":"wal-bandwidth-throttle,wal-incremental-sync,wal-purged-fallback,orphan-scan-purge,terminating-pod-handling,continuous-replication-multipart-lag-hold"},
+            {"group":"failover-data","suites":"replace-nodes,failover-during-replication,data-survival-failover,pvc-data-survival,backup-restore,continuous-replication-enable,continuous-replication-multipart-enable"},
             {"group":"breaker-migration","suites":"circuit-breaker,operator-restart,blue-green-migration,continuous-replication-lag-hold-expiry"},
             {"group":"authority","suites":"topology-authority,resync-failure-self-demote,snapshot-push-seed,partition-reduction,continuous-replication-lag-hold"},
             {"group":"repair","suites":"replica-repair,prepare-evidence,native-metrics"},

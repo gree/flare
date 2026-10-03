@@ -3363,6 +3363,17 @@
               "symbol": "lagHoldExpirySuite"
             }
           ]
+        },
+        {
+          "id": "CHECK-06-holdmp",
+          "kind": "scenario",
+          "procedure": "E2E continuous-replication-multipart-lag-hold (wal-recovery leg): 2p x 2r PVC, bound 20, wait 900 s, throttled followers; only P1's forwards are cut, so only P1's follower falls behind and is judged unfit; the node is cordoned and P1's master is force-deleted. P1 must be held (its follower not promoted, 'partition 1 has NO master' logged); P0 must keep its master and take writes meanwhile; the breaker must not trip (1 of 4 unavailable); after the uncordon P1's ex-master must be master again with every acknowledged item, with no NOT LOSS-FREE line for P1's follower.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/ContinuousReplicationLimits.lean",
+              "symbol": "multiHoldSuite"
+            }
+          ]
         }
       ],
       "runs": [
@@ -4916,6 +4927,17 @@
             {
               "path": "flare_operator/FlareOperator/E2E/Tests/ContinuousReplicationLimits.lean",
               "symbol": "enablePurgedSuite"
+            }
+          ]
+        },
+        {
+          "id": "CHECK-16-enablemp",
+          "kind": "scenario",
+          "procedure": "E2E continuous-replication-multipart-enable (failover-data leg): a legacy 2p x 2r PVC cluster; 300 keys; identity forwarding then following switched on through the CR (all four nodes must log the reload); both partitions' replicas must follow; 200 more keys; each partition's replica must match its master's items, sampled values equal via both replicas, 500 keys in total, and neither master may move.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/ContinuousReplicationLimits.lean",
+              "symbol": "multiEnableSuite"
             }
           ]
         }

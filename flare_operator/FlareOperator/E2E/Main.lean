@@ -75,6 +75,8 @@ def main (args : List String) : IO UInt32 :=
     Tests.ContinuousReplicationLimits.lagHoldTmpfsSuite,
     Tests.ContinuousReplicationLimits.lagHoldExpirySuite,
     Tests.ContinuousReplicationLimits.enablePurgedSuite,
+    Tests.ContinuousReplicationLimits.multiEnableSuite,
+    Tests.ContinuousReplicationLimits.multiHoldSuite,
     Tests.ContinuousReplicationLimits.scaleSuite,
     Tests.ContinuousReplicationLimits.sustainedSuite,
     Tests.ContinuousReplicationLimits.outageSuite,

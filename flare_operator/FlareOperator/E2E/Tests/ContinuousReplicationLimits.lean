@@ -601,6 +601,140 @@ def lagHoldSuite : TestSuite := {
   ]
 }
 
+-- ─── production enablement: legacy cluster → continuous replication, live ──
+
+-- Starts exactly like a production cluster today: RocksDB on a PVC, NO
+-- follow settings. Continuous replication is then switched on through the
+-- CR in the documented order (identity forwarding on every node first, then
+-- following), with writes between every step, and rolled back in reverse.
+private def enableCfg : ClusterConfig := {
+  name := "cont-repl-enable"
+  «namespace» := "flare-cont-repl-enable"
+  partitions := 1
+  replicas := 2
+  operatorName := "flare-operator"
+  debugPod := "debug-cont-repl-enable"
+  storageBackend := "rocksdb"
+  usePvc := true
+}
+
+private def enablePatch (identity follow : Bool) : String :=
+  s!"\{\"spec\":\{\"rocksdb\":\{\"replIdentityForward\":{identity},\"replFollowEnabled\":{follow},\"replFollowPollIntervalUsec\":200000}}}"
+
+/-- Both flared pods logged this reload line (the operator rewrote
+    extra.conf and signalled them). -/
+private def bothReloaded (c : Ctx) (needle : String) : IO Bool := do
+  let pods ← getPodNames s!"app=flare,cluster={c.cfg.name}" c.cfg.«namespace»
+  if pods.length < 2 then return false
+  let mut all := true
+  for p in pods do
+    match ← kubectl ["logs", "-n", c.cfg.«namespace», p, "--tail=5000"] with
+    | .ok o => if !containsSubstr o needle then all := false
+    | .error _ => all := false
+  return all
+
+/-- Every key of every prefix written so far reads back with its value on
+    both copies (sampled: first, middle, last). -/
+private def sampleEqual (c : Ctx) (mIp sIp : String) (written : List (String × Nat)) : IO (Option String) := do
+  for (pfx, n) in written do
+    for i in [0, n / 2, n - 1] do
+      let k := s!"{pfx}_{i}"
+      let mv ← memcachedGet c.cfg.debugPod c.cfg.«namespace» mIp c.cfg.flarePort k
+      let sv ← memcachedGet c.cfg.debugPod c.cfg.«namespace» sIp c.cfg.flarePort k
+      if mv != some s!"val_{i}" || sv != mv then
+        return some s!"{k}: master={mv} replica={sv}"
+  return none
+
+private def convergedItems (c : Ctx) (mIp sIp : String) (label : String) : IO Bool :=
+  waitForCondition label 180 do
+    let m ← c.currItems mIp
+    return m > 0 && (← c.currItems sIp) == m
+
+def enableSuite : TestSuite := {
+  name := "continuous-replication-enable"
+  setup := do
+    deployCluster enableCfg
+    IO.eprintln "# Waiting 50s grace period for operator reconciliation..."
+    IO.sleep 50000
+  teardown := cleanupCluster enableCfg
+  onFailure := dumpClusterDiagnostics enableCfg.«namespace» s!"app={enableCfg.operatorName}"
+  tests :=
+    let c : Ctx := { cfg := enableCfg }
+    [
+    { name := "enablement, live: a legacy RocksDB cluster (no follow settings) switches on identity forwarding, then continuous following, through the CR with writes between the steps; data stays equal, no failover; the replica's path to following (catch-up or rebuild) is recorded"
+      run := do
+        match ← c.pair with
+        | .error e => return .fail e
+        | .ok (mPod, mIp, sPod, sIp) =>
+          -- legacy baseline
+          let w0 ← writeKeys enableCfg.debugPod enableCfg.«namespace» mIp enableCfg.flarePort "legacy" 200
+          if w0 != 200 then return .fail s!"legacy writes: stored {w0}/200"
+          if !(← convergedItems c mIp sIp "legacy: replica matches the master") then
+            return .fail s!"legacy baseline: items master={← c.currItems mIp} replica={← c.currItems sIp}"
+          let recon0 := (← c.statNat sIp "reconstruction_started").getD 0
+          let drops0 := (← c.statNat mIp "proxy_write_dropped").getD 0
+          IO.eprintln s!"# legacy: items {← c.currItems mIp}; replica follow state={← c.statStr sIp "repl_follow_state"} applied={← c.statNat sIp "repl_applied_lsn"} repl_last_lsn={← c.statNat sIp "rocksdb_repl_last_lsn"}; master latest={← c.statNat mIp "rocksdb_latest_sequence_number"}; reconstruction_started={recon0}"
+          -- step 1: identity forwarding on every node
+          match ← kubectlPatch "flarecluster" enableCfg.name enableCfg.«namespace» (enablePatch true false) with
+          | .error e => return .fail s!"patch (identity on) failed: {e}"
+          | .ok _ => pure ()
+          if !(← waitForCondition "both nodes reload repl_identity_forward 0 -> 1" 240 do bothReloaded c "repl_identity_forward: 0 -> 1") then
+            return .fail "identity forwarding was not applied on both nodes"
+          let w1 ← writeKeys enableCfg.debugPod enableCfg.«namespace» mIp enableCfg.flarePort "idfwd" 100
+          if !(← convergedItems c mIp sIp "identity on: replica matches the master") then
+            return .fail s!"after identity forwarding: items master={← c.currItems mIp} replica={← c.currItems sIp}"
+          IO.eprintln s!"# identity forwarding on: stored {w1}/100; items {← c.currItems mIp}; replica repl_last_lsn={← c.statNat sIp "rocksdb_repl_last_lsn"} master latest={← c.statNat mIp "rocksdb_latest_sequence_number"}"
+          -- step 2: continuous following
+          match ← kubectlPatch "flarecluster" enableCfg.name enableCfg.«namespace» (enablePatch true true) with
+          | .error e => return .fail s!"patch (follow on) failed: {e}"
+          | .ok _ => pure ()
+          let states ← IO.mkRef ([] : List String)
+          let following ← waitForCondition "the replica follows after enablement" 300 do
+            let st := (← c.statStr sIp "repl_follow_state").getD "?"
+            let reason := (← c.statStr sIp "repl_follow_last_reason").getD ""
+            let entry := if reason.isEmpty then st else s!"{st}({reason})"
+            states.modify fun l => if l.getLast? == some entry then l else l ++ [entry]
+            return st == "following"
+          let recon1 := (← c.statNat sIp "reconstruction_started").getD 0
+          IO.eprintln s!"# follow on: states seen {← states.get}; following={following}; reconstruction_started {recon0}→{recon1} (rebuild on enablement={decide (recon1 > recon0)}); applied={← c.statNat sIp "repl_applied_lsn"} source={← c.statNat sIp "repl_source_lsn"}"
+          if !following then return .fail s!"the replica never followed after enablement (states {← states.get})"
+          let w2 ← writeKeys enableCfg.debugPod enableCfg.«namespace» mIp enableCfg.flarePort "follow" 100
+          if !(← convergedItems c mIp sIp "follow on: replica matches the master") then
+            return .fail s!"while following: items master={← c.currItems mIp} replica={← c.currItems sIp}"
+          if let some bad ← sampleEqual c mIp sIp [("legacy", 200), ("idfwd", 100), ("follow", 100)] then
+            return .fail s!"value mismatch after enablement: {bad}"
+          let drops1 := (← c.statNat mIp "proxy_write_dropped").getD 0
+          IO.eprintln s!"# while following: stored {w2}/100; items {← c.currItems mIp}; master proxy_write_dropped {drops0}→{drops1}"
+          -- rollback, reverse order
+          match ← kubectlPatch "flarecluster" enableCfg.name enableCfg.«namespace» (enablePatch true false) with
+          | .error e => return .fail s!"patch (follow off) failed: {e}"
+          | .ok _ => pure ()
+          if !(← waitForCondition "both nodes reload repl_follow_enabled 1 -> 0" 240 do bothReloaded c "repl_follow_enabled: 1 -> 0") then
+            return .fail "following was not switched off on both nodes"
+          let w3 ← writeKeys enableCfg.debugPod enableCfg.«namespace» mIp enableCfg.flarePort "followoff" 50
+          match ← kubectlPatch "flarecluster" enableCfg.name enableCfg.«namespace» (enablePatch false false) with
+          | .error e => return .fail s!"patch (identity off) failed: {e}"
+          | .ok _ => pure ()
+          if !(← waitForCondition "both nodes reload repl_identity_forward 1 -> 0" 240 do bothReloaded c "repl_identity_forward: 1 -> 0") then
+            return .fail "identity forwarding was not switched off on both nodes"
+          let w4 ← writeKeys enableCfg.debugPod enableCfg.«namespace» mIp enableCfg.flarePort "legacy2" 50
+          if !(← convergedItems c mIp sIp "rolled back: replica matches the master") then
+            return .fail s!"after the rollback: items master={← c.currItems mIp} replica={← c.currItems sIp}"
+          if let some bad ← sampleEqual c mIp sIp [("legacy", 200), ("idfwd", 100), ("follow", 100), ("followoff", 50), ("legacy2", 50)] then
+            return .fail s!"value mismatch after the rollback: {bad}"
+          IO.eprintln s!"# rolled back: stored {w3}/50 + {w4}/50; items {← c.currItems mIp}; replica follow state={← c.statStr sIp "repl_follow_state"}; reconstruction_started {recon0}→{(← c.statNat sIp "reconstruction_started").getD 0}"
+          -- the procedure never moved the master
+          let log ← c.opLog 200000
+          let moved := (log.splitOn "\n").filter fun l =>
+            containsSubstr l "detected " || containsSubstr l "PROMOTION" || containsSubstr l "graceful drain" || containsSubstr l "CIRCUIT BREAKER"
+          let master := (findMasterFqdn (← c.nodeView) 0).bind (fun f => (f.splitOn ".").head?)
+          IO.eprintln s!"# master throughout: {master} (was {mPod}); replica {sPod}; failover/promotion lines: {moved.length}"
+          if master != some mPod then return .fail s!"the master moved during enablement ({mPod} → {master})"
+          if !moved.isEmpty then return .fail s!"the operator logged failover/promotion during enablement: {moved.take 3}"
+          return .pass }
+  ]
+}
+
 -- ─── scale evaluation (skipped unless FLARE_E2E_SCALE_KEYS is set) ──────
 
 private def scaleCfg : ClusterConfig := {

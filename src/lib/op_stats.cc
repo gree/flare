@@ -284,6 +284,7 @@ int op_stats::_send_stats(thread_pool* req_tp, thread_pool* other_tp, storage* s
 			_send_stat("rocksdb_snapshot_bootstrap"         , rdb->get_snapshot_bootstrap());
 			_send_stat("rocksdb_corruption_detected"        , rdb->get_corruption_detected());
 			_send_stat("rocksdb_hard_reset"                 , rdb->get_hard_reset());
+			_send_stat("rocksdb_rebuild_stale_discarded"    , rdb->get_rebuild_stale_discarded());
 			_send_stat("rocksdb_corrupted"                  , rdb->is_corrupted() ? 1 : 0);
 			_send_stat("rocksdb_resync_failure_count"       , rdb->get_resync_failure_count());
 			_send_stat("rocksdb_resync_failure_threshold"   , rdb->get_resync_failure_threshold());

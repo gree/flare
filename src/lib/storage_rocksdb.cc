@@ -26,6 +26,7 @@
  */
 #include "app.h"
 #include <sys/statvfs.h>
+#include <sys/vfs.h>
 #include "storage_rocksdb.h"
 #include <time.h>
 
@@ -132,6 +133,7 @@ storage_rocksdb::storage_rocksdb(
 	_snapshot_bootstrap(0),
 	_corruption_detected(0),
 	_hard_reset(0),
+	_rebuild_stale_discarded(0),
 	_corrupted(false),
 	_curr_items(0),
 	_resync_failure_count(0),
@@ -1328,6 +1330,102 @@ namespace {
 	// uses it (anonymous namespaces in one TU merge, so this forward
 	// declaration binds to that definition).
 	int remove_tree(const string& path);
+
+	// Recursive byte size of a directory tree (regular files; hardlinks are
+	// counted once per name, an over-estimate, which is the safe side).
+	uint64_t tree_bytes(const string& path) {
+		DIR* d = opendir(path.c_str());
+		if (d == NULL) {
+			return 0;
+		}
+		uint64_t total = 0;
+		struct dirent* ent;
+		while ((ent = readdir(d)) != NULL) {
+			string n = ent->d_name;
+			if (n == "." || n == "..") {
+				continue;
+			}
+			string child = path + "/" + n;
+			struct stat st;
+			if (lstat(child.c_str(), &st) != 0) {
+				continue;
+			}
+			if (S_ISDIR(st.st_mode)) {
+				total += tree_bytes(child);
+			} else if (S_ISREG(st.st_mode)) {
+				total += static_cast<uint64_t>(st.st_size);
+			}
+		}
+		closedir(d);
+		return total;
+	}
+
+	// First number in a one-line file, or -1 ("max" or unreadable).
+	int64_t read_cgroup_number(const char* path) {
+		FILE* fp = fopen(path, "r");
+		if (fp == NULL) {
+			return -1;
+		}
+		char buf[64] = {0};
+		const char* got = fgets(buf, sizeof(buf), fp);
+		fclose(fp);
+		if (got == NULL || strncmp(buf, "max", 3) == 0) {
+			return -1;
+		}
+		char* end = NULL;
+		unsigned long long v = strtoull(buf, &end, 10);
+		if (end == buf) {
+			return -1;
+		}
+		return static_cast<int64_t>(v);
+	}
+}
+
+uint64_t storage_rocksdb::local_copy_bytes() {
+	return tree_bytes(this->_data_path);
+}
+
+int64_t storage_rocksdb::rebuild_space_available() {
+	struct statvfs vfs;
+	if (statvfs(this->_data_dir.c_str(), &vfs) != 0) {
+		return -1;
+	}
+	int64_t avail = static_cast<int64_t>(static_cast<uint64_t>(vfs.f_bavail) * vfs.f_frsize);
+	// tmpfs (TMPFS_MAGIC): the staged files are RAM charged to this
+	// container's memory cgroup, so the binding limit is usually the cgroup,
+	// not the tmpfs size (a pod whose tmpfs sizeLimit equals its memory limit
+	// is OOM-killed long before the tmpfs is full).
+	struct statfs fs;
+	if (statfs(this->_data_dir.c_str(), &fs) == 0 && static_cast<unsigned long>(fs.f_type) == 0x01021994UL) {
+		int64_t limit = read_cgroup_number("/sys/fs/cgroup/memory.max");
+		int64_t used = read_cgroup_number("/sys/fs/cgroup/memory.current");
+		if (limit < 0 || used < 0) {
+			limit = read_cgroup_number("/sys/fs/cgroup/memory/memory.limit_in_bytes");
+			used = read_cgroup_number("/sys/fs/cgroup/memory/memory.usage_in_bytes");
+		}
+		// cgroup v1 reports "no limit" as a huge number: treat as unlimited.
+		if (limit > 0 && used >= 0 && limit < (static_cast<int64_t>(1) << 60)) {
+			const int64_t margin = static_cast<int64_t>(256) << 20;	// flared's own growth during the transfer
+			int64_t headroom = limit - used - margin;
+			if (headroom < 0) {
+				headroom = 0;
+			}
+			if (headroom < avail) {
+				avail = headroom;
+			}
+		}
+	}
+	return avail;
+}
+
+bool storage_rocksdb::rebuild_must_discard(uint64_t local_bytes, int64_t available) {
+	if (available < 0 || local_bytes == 0) {
+		return false;	// unknown, or nothing to discard
+	}
+	// The incoming copy is estimated at the local copy's size plus 10% and a
+	// 64 MiB allowance for MANIFEST/WAL/OPTIONS.
+	const uint64_t need = local_bytes + local_bytes / 10 + (static_cast<uint64_t>(64) << 20);
+	return static_cast<uint64_t>(available) < need;
 }
 
 string storage_rocksdb::_restore_pending_path() const {

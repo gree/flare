@@ -961,6 +961,101 @@ def enablePurgedSuite : TestSuite := {
   ]
 }
 
+-- ─── space-aware rebuild: two copies do not fit on tmpfs ──────────────────
+
+-- pf-dev's shape in miniature: the tmpfs size equals the memory limit, so
+-- staging a second copy next to the replica's own would be charged to the
+-- same memory cgroup. ~120 MB of incompressible data per copy in 384Mi.
+private def rebuildTmpfsCfg : ClusterConfig := {
+  name := "cont-repl-rb-tmpfs"
+  «namespace» := "flare-cont-repl-rb-tmpfs"
+  partitions := 1
+  replicas := 2
+  operatorName := "flare-operator"
+  debugPod := "debug-cont-repl-rb-tmpfs"
+  storageBackend := "rocksdb"
+  useTmpfs := true
+  tmpfsSize := "384Mi"
+  flaredMemoryLimit := "384Mi"
+  flaredMemoryRequest := "256Mi"
+  extraFlaredConf := "rocksdb-block-cache-size-mb = 16\nrocksdb-write-buffer-size-mb = 4\nrocksdb-wal-ttl-seconds = 60\nrocksdb-wal-size-limit-mb = 16"
+}
+
+private def rebuildTmpfsPatch (identity follow : Bool) : String :=
+  s!"\{\"spec\":\{\"rocksdb\":\{\"blockCacheSizeMb\":16,\"writeBufferSizeMb\":4,\"walTtlSeconds\":60,\"walSizeLimitMb\":16,\"replIdentityForward\":{identity},\"replFollowEnabled\":{follow},\"replFollowPollIntervalUsec\":200000}}}"
+
+/-- `count` keys of one INCOMPRESSIBLE value (random bytes, base64) of about
+    `bytes` each, in one exec. RocksDB compresses per block, so a repeated
+    random value still occupies its full size on disk. -/
+private def Ctx.bulkWriteRandom (c : Ctx) (ip pfx : String) (count bytes : Nat) : IO Nat := do
+  let raw := bytes * 3 / 4
+  let cmd := s!"v=$(head -c {raw} /dev/urandom | base64 | tr -d '\\n'); len=$(printf %s \"$v\" | wc -c); n=0; for i in $(seq 0 {count - 1}); do printf 'set {pfx}_%s 0 0 %s\\r\\n%s\\r\\n' $i $len \"$v\" | nc -w 5 {ip} {c.cfg.flarePort} | grep -q STORED && n=$((n+1)); done; echo $n"
+  match ← execInDebugPod c.cfg.debugPod c.cfg.«namespace» cmd with
+  | .ok o => return ((o.trim.splitOn "\n").getLast?.getD "0").trim.toNat?.getD 0
+  | .error _ => return 0
+
+def rebuildTmpfsSuite : TestSuite := {
+  name := "continuous-replication-rebuild-tmpfs"
+  setup := do
+    deployCluster rebuildTmpfsCfg
+    IO.sleep 50000
+  teardown := cleanupCluster rebuildTmpfsCfg
+  onFailure := dumpClusterDiagnostics rebuildTmpfsCfg.«namespace» s!"app={rebuildTmpfsCfg.operatorName}"
+  tests :=
+    let c : Ctx := { cfg := rebuildTmpfsCfg }
+    [
+    { name := "space-aware rebuild on tmpfs: a live replica rebuild where two copies do not fit (tmpfs = memory limit, like pf-dev) discards the stale copy before staging; the rebuild succeeds without an OOM restart and the data is equal"
+      run := do
+        match ← c.pair with
+        | .error e => return .fail e
+        | .ok (mPod, mIp, sPod, sIp) =>
+          let w0 ← writeKeys rebuildTmpfsCfg.debugPod rebuildTmpfsCfg.«namespace» mIp rebuildTmpfsCfg.flarePort "legacy" 50
+          let big ← c.bulkWriteRandom mIp "rnd" 2400 50000
+          if w0 != 50 || big < 2400 then return .fail s!"legacy writes: stored {w0}/50 and {big}/2400 random"
+          if !(← convergedItems c mIp sIp "legacy: replica matches the master") then
+            return .fail s!"legacy: items master={← c.currItems mIp} replica={← c.currItems sIp}"
+          IO.sleep 90000
+          let big2 ← c.bulkWriteRandom mIp "rnd2" 100 50000
+          let rc0 ← c.restartCount sPod
+          let disc0 := (← c.statNat sIp "rocksdb_rebuild_stale_discarded").getD 0
+          let snap0 := (← c.statNat sIp "rocksdb_snapshot_bootstrap").getD 0
+          let data0 ← match ← kubectl ["exec", "-n", rebuildTmpfsCfg.«namespace», sPod, "--", "sh", "-c", "du -sm /data | cut -f1"] with
+            | .ok o => pure o.trim
+            | .error _ => pure "?"
+          IO.eprintln s!"# legacy: {big}+{big2} random values of ~50 kB; items {← c.currItems mIp}; replica data dir {data0} MB in a 384Mi tmpfs/memory limit; restarts {rc0}; discarded {disc0}; snapshot bootstraps {snap0}"
+          match ← kubectlPatch "flarecluster" rebuildTmpfsCfg.name rebuildTmpfsCfg.«namespace» (rebuildTmpfsPatch true false) with
+          | .error e => return .fail s!"patch (identity on) failed: {e}"
+          | .ok _ => pure ()
+          if !(← waitForCondition "both nodes reload repl_identity_forward 0 -> 1" 240 do bothReloaded c "repl_identity_forward: 0 -> 1") then
+            return .fail "identity forwarding was not applied on both nodes"
+          match ← kubectlPatch "flarecluster" rebuildTmpfsCfg.name rebuildTmpfsCfg.«namespace» (rebuildTmpfsPatch true true) with
+          | .error e => return .fail s!"patch (follow on) failed: {e}"
+          | .ok _ => pure ()
+          let states ← IO.mkRef ([] : List String)
+          let following ← waitForCondition "the replica is rebuilt and follows" 480 do
+            let st := (← c.statStr sIp "repl_follow_state").getD "?"
+            let reason := (← c.statStr sIp "repl_follow_last_reason").getD ""
+            let entry := if reason.isEmpty then st else s!"{st}({reason})"
+            states.modify fun l => if l.getLast? == some entry then l else l ++ [entry]
+            return st == "following" && (← c.statNat sIp "rocksdb_snapshot_bootstrap").getD 0 > snap0
+          let rc1 ← c.restartCount sPod
+          let disc1 := (← c.statNat sIp "rocksdb_rebuild_stale_discarded").getD 0
+          let snap1 := (← c.statNat sIp "rocksdb_snapshot_bootstrap").getD 0
+          let discLine := match ← kubectl ["logs", "-n", rebuildTmpfsCfg.«namespace», sPod, "--tail=5000"] with
+            | .ok o => (o.splitOn "\n").find? (containsSubstr · "will not fit next to ours")
+            | .error _ => none
+          IO.eprintln s!"# follow on: states {← states.get}; following={following}; replica restarts {rc0}→{rc1}; stale copy discarded {disc0}→{disc1}; snapshot bootstraps {snap0}→{snap1}\n# {discLine.getD "(no discard line)"}"
+          if rc1 != rc0 then return .fail s!"the replica's container restarted during the rebuild ({rc0}→{rc1}): two copies did not fit"
+          if disc1 != disc0 + 1 then return .fail s!"expected the stale copy to be discarded once before staging ({disc0}→{disc1})"
+          if !following then return .fail s!"the replica was not rebuilt by snapshot and following (states {← states.get})"
+          if !(← convergedItems c mIp sIp "after the rebuild: replica matches the master") then
+            return .fail s!"after the rebuild: items master={← c.currItems mIp} replica={← c.currItems sIp}"
+          if let some bad ← sampleEqual c mIp sIp [("legacy", 50)] then return .fail s!"value mismatch: {bad}"
+          if (← masterPodOf c) != some mPod then return .fail "the master moved during the rebuild"
+          return .pass }
+  ]
+}
+
 -- ─── two partitions: enablement and the lag hold are per partition ───────
 
 /-- (masterPod, masterIp, replicaPod, replicaIp) of partition `p`, the replica

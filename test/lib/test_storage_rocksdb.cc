@@ -1405,6 +1405,36 @@ void test_analyze_checkpoint_streams_key_expire_size() {
 	drop_rocksdb(s, wal_master_dir);
 }
 
+// SPACE-AWARE REBUILD (2026-10-04): a reseed stages the new copy next to the
+// old one. The rule drops the stale copy only when two do not fit; unknown
+// space or an empty local copy never discard.
+void test_rebuild_must_discard_rule() {
+	const uint64_t MB = 1024ULL * 1024ULL;
+	// 5.6 GB local copy with 1.3 GB of headroom (the pf-dev case): discard.
+	cut_assert_true(storage_rocksdb::rebuild_must_discard(5600 * MB, static_cast<int64_t>(1300 * MB)));
+	// plenty of room: keep the copy until the swap
+	cut_assert_false(storage_rocksdb::rebuild_must_discard(100 * MB, static_cast<int64_t>(1000 * MB)));
+	// need = local + 10% + 64 MiB: exactly at the edge keeps, one byte short discards
+	const uint64_t local = 100 * MB;
+	const int64_t need = static_cast<int64_t>(local + local / 10 + 64 * MB);
+	cut_assert_false(storage_rocksdb::rebuild_must_discard(local, need));
+	cut_assert_true(storage_rocksdb::rebuild_must_discard(local, need - 1));
+	// unknown space, or nothing local: never discard
+	cut_assert_false(storage_rocksdb::rebuild_must_discard(5600 * MB, -1));
+	cut_assert_false(storage_rocksdb::rebuild_must_discard(0, 0));
+}
+
+// The inputs of the rule are real: a DB with data has a non-zero local copy,
+// and the space reading is known on a normal filesystem.
+void test_rebuild_space_inputs() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	cut_assert_equal_int(0, storage_set_string(s, "a", "alpha"));
+	cut_assert_operator(s->local_copy_bytes(), >, static_cast<uint64_t>(0));
+	cut_assert_operator(s->rebuild_space_available(), >, static_cast<int64_t>(0));
+	cut_assert_equal_int(0, static_cast<int>(s->get_rebuild_stale_discarded()));
+	drop_rocksdb(s, wal_master_dir);
+}
+
 // hard_reset(): the in-process Case-A recovery must wipe all data, clear the
 // corruption latch, keep the DB usable, and reset curr_items to 0.
 void test_hard_reset_wipes_and_recovers() {

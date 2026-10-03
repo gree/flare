@@ -206,6 +206,7 @@ protected:
 	// instead of discovering it on a client write.
 	AtomicCounter _corruption_detected;
 	AtomicCounter _hard_reset;
+	AtomicCounter _rebuild_stale_discarded;
 	volatile bool _corrupted;
 
 	// Live (non-reserved) key count, maintained incrementally so `stats`
@@ -476,6 +477,19 @@ public:
 	void incr_snapshot_bootstrap()            { this->_snapshot_bootstrap.incr(); }
 	uint64_t get_corruption_detected()        { return this->_corruption_detected.fetch(); }
 	uint64_t get_hard_reset()                 { return this->_hard_reset.fetch(); }
+	uint64_t get_rebuild_stale_discarded()    { return this->_rebuild_stale_discarded.fetch(); }
+	void incr_rebuild_stale_discarded()       { this->_rebuild_stale_discarded.incr(); }
+	// SPACE-AWARE REBUILD. A physical reseed stages the incoming copy next to
+	// the local one, so a rebuild in place needs room for two copies; on tmpfs
+	// that room is RAM counted against the container's memory limit.
+	// Bytes of the local DB directory (the estimate of the incoming copy).
+	uint64_t local_copy_bytes();
+	// Bytes a staging copy may use: free space under the data dir and, when
+	// the data dir is tmpfs, the cgroup memory headroom minus a safety margin
+	// for flared's own growth. -1 = unknown (no decision possible).
+	int64_t rebuild_space_available();
+	// Pure rule: must the stale local copy be discarded before staging?
+	static bool rebuild_must_discard(uint64_t local_bytes, int64_t available);
 	// True once a Corruption status has been seen on a write path; latched
 	// until a successful hard_reset()/reopen clears it.
 	bool is_corrupted()                       { return this->_corrupted; }

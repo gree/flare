@@ -77,7 +77,7 @@ jobs:
           # continuous-replication leg only.
           default='[
             {"group":"topology","suites":"failover,read-balance,scale-out-master,scale-out-slave,scale-in-slave,scale-in-master,continuous-replication-enable-purged"},
-            {"group":"replication","suites":"cluster-replication,wal-retention-config,strict-durability,continuous-replication-purge,continuous-replication-limits,continuous-replication-lag-hold-tmpfs"},
+            {"group":"replication","suites":"cluster-replication,wal-retention-config,strict-durability,continuous-replication-purge,continuous-replication-limits,continuous-replication-lag-hold-tmpfs,continuous-replication-rebuild-tmpfs"},
             {"group":"wal-recovery","suites":"wal-bandwidth-throttle,wal-incremental-sync,wal-purged-fallback,orphan-scan-purge,terminating-pod-handling,continuous-replication-multipart-lag-hold"},
             {"group":"failover-data","suites":"replace-nodes,failover-during-replication,data-survival-failover,pvc-data-survival,backup-restore,continuous-replication-enable,continuous-replication-multipart-enable"},
             {"group":"breaker-migration","suites":"circuit-breaker,operator-restart,blue-green-migration,continuous-replication-lag-hold-expiry"},

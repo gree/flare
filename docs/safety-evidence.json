@@ -5916,7 +5916,8 @@
         "The two routes to a rebuild request (a counted drop and the follower's own needs_rebuild declaration) have each been OBSERVED to win in E2E and both orders are pinned sequentially by flare_unit, but true concurrency is NOT verified: nothing exercises them racing within one reconcile pass against the real persist path.",
         "lsn_purged after an actual size-cap purge (not the 1 MB/1 s harness knobs) is now staged once: outage run 3 (6e757cb) — declared and rebuilt in 59 s. Single execution.",
         "2026-10-02 (CI 36904379135): T6 passed with exactly one reconstruction (1->2) and at most one ledger entry, but the master counted no dropped forwards during the cut (0->0), so only the follower route fired: the concurrent case of both repair triggers was NOT shown by this run.",
-        "2026-10-02 (CI 36922262408): the concurrent case is now shown. With the cut kept until the master counted dropped forwards (0->2), BOTH repair routes logged a request for the same replica in the same run (drop route and follower needs_rebuild), the ledger held at most one entry, and exactly one reconstruction started and completed (1->2), none more within 30 s. One run."
+        "2026-10-02 (CI 36922262408): the concurrent case is now shown. With the cut kept until the master counted dropped forwards (0->2), BOTH repair routes logged a request for the same replica in the same run (drop route and follower needs_rebuild), the ledger held at most one entry, and exactly one reconstruction started and completed (1->2), none more within 30 s. One run.",
+        "2026-10-04, found by reading pf-dev (read-only) and the code: a physical reseed stages the source's copy in snapshot.recv.tmp NEXT TO the replica's own and swaps at the end, so a live rebuild needs room for two copies, with no free-space check. On tmpfs that room is RAM charged to the container's memory cgroup: pf-dev's replica holds 5.6 GB in an 8Gi pod (tmpfs sizeLimit = memory limit = 8Gi, container already at 6.67 GB on the master), so any live rebuild there would be OOM-killed mid-transfer on every retry. Fix: before staging (the truncate window — slave, source reachable and newer; the fallback truncates anyway), flared compares the local copy (+10% +64 MiB) with the space available (filesystem free and, on tmpfs, cgroup memory.max − memory.current − 256 MiB) and, when two copies do not fit, discards the stale copy with hard_reset() first (rocksdb_rebuild_stale_discarded). Cost: during the transfer the replica holds nothing; if the source dies then, that stale copy is no longer a last-resort partial copy. Peak is still one full copy plus flared: a tmpfs sized below ~1.1× data + flared + 256 MiB cannot be rebuilt at all. CI pending."
       ],
       "code": [
         {
@@ -5934,6 +5935,14 @@
         {
           "path": "src/lib/storage_rocksdb.cc",
           "symbol": "storage_rocksdb::_discard_incomplete_restore"
+        },
+        {
+          "path": "src/lib/storage_rocksdb.cc",
+          "symbol": "storage_rocksdb::rebuild_space_available"
+        },
+        {
+          "path": "src/lib/storage_rocksdb.cc",
+          "symbol": "storage_rocksdb::rebuild_must_discard"
         }
       ],
       "call_path": "op_repl_sync_wal server replies lsn_purged / epoch_mismatch / generations_unavailable -> client_result -> handler_wal_follower::classify -> needs_rebuild + reason in the follow record -> operator ListPods probe -> FollowEvidence.classify.needsRebuild -> Main: ReplicaRepair.requestRebuild for the node's partition -> plan -> demote to Proxy -> reseat -> flared reconstruction (snapshot + WAL) -> swap_in_snapshot mints an incarnation, inherits the source epoch -> follower restarts.",
@@ -5983,6 +5992,21 @@
             {
               "path": "flare_operator/FlareOperator/E2E/Tests/ContinuousReplicationLimits.lean",
               "symbol": "purgeSuite"
+            }
+          ]
+        },
+        {
+          "id": "CHECK-18-rbtmpfs",
+          "kind": "scenario",
+          "procedure": "Space-aware rebuild. cutter test_rebuild_must_discard_rule (need = local + 10% + 64 MiB; unknown space or an empty copy never discard; the pf-dev case 5.6 GB vs 1.3 GB discards) and test_rebuild_space_inputs. E2E continuous-replication-rebuild-tmpfs (replication leg): tmpfs sizeLimit = memory limit = 384Mi like pf-dev, ~120 MB of incompressible values per copy, legacy mode, WAL purged, then following enabled: the replica must discard its stale copy once before staging (rocksdb_rebuild_stale_discarded +1, log 'will not fit next to ours'), be rebuilt by snapshot (rocksdb_snapshot_bootstrap +1) WITHOUT a container restart, then follow with equal items and values; the master must not move.",
+          "references": [
+            {
+              "path": "test/lib/test_storage_rocksdb.cc",
+              "symbol": "test_rebuild_must_discard_rule"
+            },
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/ContinuousReplicationLimits.lean",
+              "symbol": "rebuildTmpfsSuite"
             }
           ]
         }

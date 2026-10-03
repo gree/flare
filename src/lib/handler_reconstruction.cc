@@ -257,6 +257,25 @@ int handler_reconstruction::_run_once() {
 				// reseed. Try it first; fall back to truncate+dump on failure.
 				if (peer_snapshot_supported) {
 					this->_thread->set_op("repl_snapshot");
+					// SPACE-AWARE REBUILD: the reseed stages the source's copy
+					// NEXT TO ours and swaps at the end, so it needs room for
+					// two copies. On tmpfs that is RAM under the memory limit:
+					// a 5.6 GB replica in an 8Gi pod would be OOM-killed
+					// mid-transfer on every retry. Our copy is about to be
+					// replaced anyway (this is the truncate window: slave,
+					// source reachable and newer — the fallback truncates it
+					// too), so when two do not fit, drop it first.
+					if (rdb != NULL) {
+						uint64_t local_bytes = rdb->local_copy_bytes();
+						int64_t available = rdb->rebuild_space_available();
+						if (storage_rocksdb::rebuild_must_discard(local_bytes, available)) {
+							log_warning("snapshot bootstrap: the new copy will not fit next to ours (local copy %llu bytes, available %lld incl. memory headroom on tmpfs) -> discarding this replica's stale copy before staging (the source holds the data)",
+								(unsigned long long)local_bytes, (long long)available);
+							if (rdb->hard_reset() == 0) {
+								rdb->incr_rebuild_stale_discarded();
+							}
+						}
+					}
 					log_notice("attempting snapshot bootstrap (physical reseed + WAL catch-up) instead of truncate+full-dump", 0);
 					// FRESH connection: the WAL sync attempt above may have
 					// aborted MID-STREAM, leaving unread stream bytes on `c`.

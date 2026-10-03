@@ -431,6 +431,36 @@ Monitoring: alert when `time() - rocksdb_last_backup_epoch` exceeds twice
 the backup interval (exposed via flared `stats`; needs a memcached
 exporter).
 
+## Enabling continuous replication on an existing cluster {#enable-follow}
+
+Rehearsed by E2E `continuous-replication-enable` (a legacy cluster switched
+on live through the CR, and back). Do one cluster at a time.
+
+1. **Identity forwarding first, on every node:** set
+   `spec.rocksdb.replIdentityForward: true`. The operator rewrites
+   `extra.conf` and signals the pods. Check that every flared pod logged
+   `repl_identity_forward: 0 -> 1` before going on.
+2. **Then following:** also set `replFollowEnabled: true` (keep
+   `replIdentityForward: true` in the same patch: the operator rewrites the
+   whole file from `spec.rocksdb`). Each replica goes `idle` → `following`.
+3. **Check:** `repl_follow_state` is `following` on every replica,
+   `flare_node_repl_follow_lag` falls to about 0, and
+   FlareReplicaNotFollowing stays quiet.
+
+What the replica does on step 2: it fetches the master's WAL from its own
+position, which dates from its last full copy (legacy forwards do not move
+it). On kind the master still held that WAL, so the replica caught up with
+no rebuild and the data stayed equal. On a long-running production cluster
+that WAL will usually be purged already: the replica then declares
+`needs_rebuild` (`lsn_purged`) and is rebuilt once (snapshot reseed). Plan
+for one rebuild per replica, with its reads withheld (clients go to the
+master) until it follows. No stat shows the oldest WAL position the master
+still holds, so this cannot be checked beforehand.
+
+**Rollback**, reverse order: `replFollowEnabled: false` (wait for
+`repl_follow_enabled: 1 -> 0` on every pod), then
+`replIdentityForward: false`. Data stays as it is; nothing is rebuilt.
+
 ## Sizing flared memory and storage {#sizing}
 
 These are floors, not bounds. The kind measurements bound nothing for

@@ -369,7 +369,8 @@ waits for the ex-master. Writes to the partition fail meanwhile.
   wait for and the follower is seated at once (logged `PROMOTION NOT
   LOSS-FREE ... LAST RESORT`).
 - **The wait is bounded**: after `FLARE_FOLLOW_FAILOVER_WAIT_SECONDS` (default
-  300, counted from the first pass that sees the partition masterless) the
+  300, counted from the first pass that sees the partition masterless, so
+  about one minute more in all: 117 s for a 60 s wait on CI) the
   follower is seated anyway with the same NOT LOSS-FREE line. The writes it
   never received are lost. Set the variable to 0 to never wait (the behaviour
   before 2026-10-03); raise it where losing writes is worse than a longer
@@ -452,7 +453,8 @@ position, which dates from its last full copy (legacy forwards do not move
 it). On kind the master still held that WAL, so the replica caught up with
 no rebuild and the data stayed equal. On a long-running production cluster
 that WAL will usually be purged already: the replica then declares
-`needs_rebuild` (`lsn_purged`) and is rebuilt once (snapshot reseed). Plan
+`needs_rebuild` (`lsn_purged`) and is rebuilt once (snapshot reseed;
+E2E `continuous-replication-enable-purged` shows exactly this). Plan
 for one rebuild per replica, with its reads withheld (clients go to the
 master) until it follows. No stat shows the oldest WAL position the master
 still holds, so this cannot be checked beforehand.

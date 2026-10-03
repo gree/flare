@@ -66,6 +66,8 @@ at phase 1 and a separate design starts.
 | 1p × 2r and the breaker | Never trip with fewer than 2 unavailable nodes. CR `circuitBreaker.minUnavailableToTrip`, default 2. |
 | SAF-11 definition | Confirmed as implemented. |
 | Startup grace | Wall-clock, 120 s. |
+| Failover lag hold wait (2026-10-04) | 300 s (`FLARE_FOLLOW_FAILOVER_WAIT_SECONDS` default kept). |
+| Staging rehearsal (2026-10-04) | On pf-dev. Every apply needs the user's explicit go-ahead. |
 
 ## Decisions needed from the user (with options, as asked on 2026-10-02)
 

@@ -55,6 +55,7 @@ at phase 1 and a separate design starts.
 |---|---|
 | 10 | Runbook for every alert, and a sizing rule (WAL cap plus bytes between cleanups, memory). Sizing and replica-follow sections written 2026-10-02 |
 | 11 | Backup restore and rollback rehearsal in staging |
+| 11a | pf-dev rehearsal (user decision 2026-10-04; pf-dev data is disposable). `v0.1.0-rc64` tagged at 5c879ea (all CI green), images and chart published. moc2-k8s PR #9362 bumps pf-dev rc56 → rc64 with following off (supersedes #8698); awaiting review and merge. Next: observe the roll, then a separate PR to switch identity forwarding and following on (RUNBOOK #enable-follow; expect one rebuild of the replica, now space-aware) |
 | 12 | Canary definition with stop and rollback criteria, and a reviewer sign-off on residual risks. Draft in [CANARY-PLAN.md](CANARY-PLAN.md) |
 
 ## Decisions taken (user, 2026-10-02)

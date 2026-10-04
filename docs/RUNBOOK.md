@@ -27,6 +27,18 @@ Verify the schema took: `kubectl patch flarecluster <name> --dry-run=server
 --type=merge -p '{"spec":{"circuitBreaker":{"tripThresholdPercent":50}}}'`
 must NOT warn about unknown fields.
 
+**Argo CD with server-side diff: a new chart DEFAULT on the CR breaks the
+sync.** Argo CD dry-runs the new FlareCluster against the CRD that is
+installed now, before it applies anything. When the new chart both adds a
+field to the CRD and fills it by default (rc64: `spec.rocksdb.maxTotalThreadQueue:
+200000`), the dry run against the old CRD fails with `field not declared in
+schema`, the app is stuck in a comparison error, and the CRD never gets
+installed. Roll in two steps: first the new version with the field removed
+from the CR (a kustomize JSON patch `op: remove`; a values `null` is not
+enough, the chart renders `spec.rocksdb` with `toYaml` and keeps the key),
+then drop the patch once the new CRD is in. Check the PR's diff report for
+the instance before merging (pf-dev PR moc2-k8s#9362).
+
 On-call procedures for the Lean-operator-managed Flare cluster. Alert names
 match `deploy/monitoring/prometheus-rules.yaml` /
 `helm/flare-operator/templates/prometheusrule.yaml`.

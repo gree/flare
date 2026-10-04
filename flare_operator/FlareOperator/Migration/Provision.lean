@@ -34,6 +34,9 @@ open FlareOperator.K8s
     `rocksdb:`). Empty string when nothing is set. -/
 def rocksdbSpecYaml (r : RocksdbConfigSpec) : String :=
   let fields : List (Option String) := [
+    r.blockCacheSizeMb.map (s!"    blockCacheSizeMb: {·}"),
+    r.writeBufferSizeMb.map (s!"    writeBufferSizeMb: {·}"),
+    r.maxWriteBufferNumber.map (s!"    maxWriteBufferNumber: {·}"),
     r.walTtlSeconds.map (s!"    walTtlSeconds: {·}"),
     r.walSizeLimitMb.map (s!"    walSizeLimitMb: {·}"),
     r.syncWrites.map (fun b => s!"    syncWrites: {if b then "true" else "false"}"),

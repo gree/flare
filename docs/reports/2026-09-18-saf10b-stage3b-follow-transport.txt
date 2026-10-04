@@ -1,0 +1,43 @@
+# SAF-10b stage 3b — follow-mode transport, the follower controller and its observations
+# host: local darwin arm64, nix devShell
+# build (RocksDB unit tests): ~/git/flare/configure --with-rocksdb=<rocksdb-8.3.2> CXXFLAGS="-std=c++17 -g -O0 -D_LIBCPP_ENABLE_CXX17_REMOVED_RANDOM_SHUFFLE -D_LIBCPP_ENABLE_CXX17_REMOVED_AUTO_PTR"
+# build (whole tree): nix build .#flare — pass, its cutter suite reports ERROR: 0
+# date: 2026-09-18
+
+=== what was built ===
+* Protocol: repl_sync_wal takes optional "<expected_epoch> <max_batches> <max_bytes>". The source answers with
+  "EPOCH <source_epoch> <latest_lsn>" BEFORE any batch, refuses a follower of another history with
+  epoch_mismatch, refuses to serve at all when it cannot identify its history (generations_unavailable), and ends
+  the slice with MORE when further updates are waiting. A source that predates the tokens ignores them and sends
+  no EPOCH line, and the follower then refuses to follow it — fail closed.
+* Master memory: get_updates_since now STOPS READING at the caller's bounds instead of materialising a far-behind
+  reader's whole backlog (design §4, condition 7); the reconstruction path still asks for an unbounded read.
+* Follow applies through the COMMON APPLY RULE (apply_wal_batch), never verbatim. The reconstruction path, where
+  the node takes no forwarded writes, keeps its verbatim apply.
+* handler_wal_follower: resumes from the applied position, polls on its own schedule so a replica catches up after
+  a blip WITHOUT any new write arriving, reconnects with bounded backoff, and hands the node to the rebuild path
+  ONLY on a position that can never be satisfied again.
+* stats gains the follower record as ONE snapshot: source, source epoch, state
+  (idle/initial_sync/following/disconnected/needs_rebuild/error), last reason, applied position, the source's
+  position AND the time it was observed, and the time the position last advanced. Exposed as repl_follow_*,
+  repl_applied_lsn, repl_source_lsn, repl_source_lsn_observed_at, repl_last_progress_at.
+
+=== tests ===
+test_follow_disconnect_is_not_a_rebuild                          pass   a transport failure is always a reconnect — even when the last result would otherwise mean rebuild, because nothing was learned about our position
+test_follow_only_unsatisfiable_positions_rebuild                 pass   lsn_purged / epoch_mismatch / master_id_mismatch / lsn_ahead rebuild; a source without an epoch, or one that does not speak the op, is an error to retry, not a reason to discard this copy
+test_follow_reasons_are_named                                    pass   every non-success carries a reason; success carries none
+test_follow_record_carries_state_reason_and_observation_time     pass   the record's positions, observation time, progress time (which does not move backwards) and the reason being cleared when following resumes
+
+=== results ===
+new stage-3b tests: 4 test(s), 28 assertion(s), 0 failure(s) — 100% passed
+full RocksDB + op-level regression set: 88 test(s), 906 assertion(s), 0 failure(s) — 100% passed
+whole tree: nix build .#flare pass (ERROR: 0)
+
+=== NOT executed / still open ===
+* The follower is NOT started by any lifecycle yet: nothing constructs handler_wal_follower in cluster's role
+  transitions, so continuous replication does not run in a real node. That wiring, and the operator-side
+  eligibility and ledger coordination, are SAF-10c.
+* repl-identity-forward is still OFF by default; no E2E exercises either path yet (SAF-10d).
+* Lock-hold time and writer starvation bounds (design §3.8, T17): still deferred by agreement.
+* The follow transport has only unit-level coverage of its decision table; the wire handshake itself (EPOCH line,
+  MORE, epoch_mismatch) is exercised only through code review so far.

@@ -8,6 +8,10 @@
 {{- end }}
 {{- $c := .Values.cluster }}
 {{- $ns := .Values.namespace }}
+{{- $memWarn := include "flare-operator.memoryBudgetWarning" . }}
+{{- if $memWarn }}
+# {{ $memWarn | replace "\n" "\n# " }}
+{{- end }}
 {{- /* Graceful-drain window. Computed via hasKey (NOT `| default`) so an
        explicit drainSeconds: 0 disables the hook — sprig's `default` treats 0
        as empty and would wrongly re-enable it. Absent (e.g. helm --reuse-values
@@ -88,7 +92,20 @@ metadata:
     "helm.sh/hook": pre-install
     "helm.sh/hook-weight": "-5"
 data:
-  extra.conf: ""
+  # Seed startup-only options before the first pod opens its DB. Waiting for
+  # operator reconciliation would boot once with the larger built-in defaults.
+  extra.conf: |-
+    {{- with $c.rocksdb }}
+    {{- if hasKey . "blockCacheSizeMb" }}
+    rocksdb-block-cache-size-mb = {{ .blockCacheSizeMb }}
+    {{- end }}
+    {{- if hasKey . "writeBufferSizeMb" }}
+    rocksdb-write-buffer-size-mb = {{ .writeBufferSizeMb }}
+    {{- end }}
+    {{- if hasKey . "maxWriteBufferNumber" }}
+    rocksdb-max-write-buffer-number = {{ .maxWriteBufferNumber }}
+    {{- end }}
+    {{- end }}
 {{- if $bbProvision }}
 ---
 {{- /* Runtime flags: values that must be togglable WITHOUT touching the pod

@@ -188,6 +188,59 @@ def podUid (podName ns : String) : IO (Option String) := do
   | .ok out => let u := out.trim; return (if u.isEmpty then none else some u)
   | .error _ => return none
 
+/-- Short-budget, read-only API calls for the round-robin topology audit.
+    Do not inherit the generic kubectl 30-second budget three times per pass. -/
+private def topologyProbeCommand (seconds : Nat) (args : Array String) : IO (Option String) := do
+  try
+    let r ← IO.Process.output {
+      cmd := "timeout"
+      args := #["-k", "1", toString seconds, "kubectl"] ++ args }
+    return if r.exitCode == 0 then some r.stdout else none
+  catch _ => return none
+
+/-- TEST SEAM (SAF-08 / CHECK-01-observation E2E). Unset in production, this
+    is one getEnv per probe. When `FLARE_TEST_PROBE_BARRIER` names a
+    directory and `<dir>/probe-arm-<pod>` exists, the probe of THAT pod stops
+    after its first UID read: it writes the UID it read to
+    `<dir>/probe-reached`, removes the arm file, and waits for
+    `<dir>/probe-release` (at most 30 s, so a stale arm file cannot wedge the
+    loop that also renews the lease). The E2E replaces the pod under the same
+    name while the probe is held, which is the race the UID bracket exists
+    for. -/
+private def probeBarrier (podName uid : String) : IO Unit := do
+  match ← IO.getEnv "FLARE_TEST_PROBE_BARRIER" with
+  | none => pure ()
+  | some dir =>
+    let arm : System.FilePath := dir ++ s!"/probe-arm-{podName}"
+    if !(← arm.pathExists) then pure ()
+    else
+      let reached : System.FilePath := dir ++ "/probe-reached"
+      let release : System.FilePath := dir ++ "/probe-release"
+      IO.eprintln s!"[flare-operator] TEST SEAM: topology probe of {podName} held after the first UID read (uid={uid})"
+      try IO.FS.writeFile reached s!"{uid}\n" catch _ => pure ()
+      try IO.FS.removeFile arm catch _ => pure ()
+      let mut released := false
+      for _ in [0:300] do        -- 300 x 100ms = 30s ceiling
+        if (← release.pathExists) then
+          released := true
+          break
+        IO.sleep 100
+      IO.eprintln s!"[flare-operator] TEST SEAM: topology probe of {podName} {if released then "released" else "timed out after 30s"}"
+      try IO.FS.removeFile release catch _ => pure ()
+      try IO.FS.removeFile reached catch _ => pure ()
+
+/-- Bracket a stats reply with Pod UID reads. No cached result is reused.
+    Command payload is fixed; pod/namespace are separate argv elements. -/
+def topologyProbe (podName ns : String) : IO (Option String × Option String × Option String) := do
+  let args := #["get", "pod", podName, "-n", ns, "-o", "jsonpath={.metadata.uid}"]
+  let before := (← topologyProbeCommand 2 args).map String.trim
+  if before.isNone || before == some "" then return (none, none, none)
+  probeBarrier podName (before.getD "")
+  let reply ← topologyProbeCommand 3 #["exec", "-n", ns, podName, "--", "bash", "-c",
+    "exec 3<>/dev/tcp/localhost/12121; printf 'stats\\r\\n' >&3; while IFS= read -r line; do printf '%s\\n' \"$line\"; case \"$line\" in END*) break;; esac; done <&3; exec 3>&-"]
+  let after := (← topologyProbeCommand 2 args).map String.trim
+  return (before, after, reply)
+
 /-- The shell command that deletes a pod with the observed UID as an API-side
     PRECONDITION (DeleteOptions.preconditions.uid), so the apiserver itself
     rejects the request (409 Conflict) if a pod of the same name now has a
@@ -446,7 +499,11 @@ def writeRepairLedger (crName ns : String) (l : ReplicaRepair.Ledger) : IO (Exce
 
 /-- Query flared stats via kubectl exec and bash /dev/tcp. -/
 def queryPodStats (podName ns : String) (statsCmd : String) : IO (Except String String) :=
-  execInPod podName ns ["bash", "-c", s!"exec 3<>/dev/tcp/localhost/12121; printf '{statsCmd}\\r\\n' >&3; timeout 3 cat <&3; exec 3>&-"]
+  -- Read until the END line and return at once; the connection would stay
+  -- open (memcached protocol), so a plain `cat` always ran into its 3 s
+  -- timeout and every stats probe cost ≥3 s of reconcile time. The overall
+  -- deadline stays (timeout 3), so a hung or silent flared still bounds it.
+  execInPod podName ns ["bash", "-c", s!"exec 3<>/dev/tcp/localhost/12121; printf '{statsCmd}\\r\\n' >&3; timeout 3 bash -c 'while IFS= read -r line; do printf \"%s\\n\" \"$line\"; case \"$line\" in END*) break;; esac; done' <&3; exec 3>&-"]
 
 /-- Node keys of pods whose flared reports curr_items > 0 (a bounded stats
     probe per pod: `timeout 3` inside the exec). Feeds the masterless
@@ -455,10 +512,14 @@ def queryPodStats (podName ns : String) (statsCmd : String) : IO (Except String 
     fails is simply not listed (the guard treats "no data-bearing nodes" as
     "no information" and falls back to the old behavior), so a stats hiccup
     can never brick the refill. -/
-def dataBearingPodKeys (pods : List PodInfo) (ns : String) : IO (List String) := do
+def dataBearingPodKeys (pods : List PodInfo) (ns : String) (alsoProbe : List String := []) : IO (List String) := do
   let mut keys : List String := []
   for pod in pods do
-    if pod.ready || pod.terminating then
+    -- `alsoProbe`: node keys read even while NotReady. A returning ex-master
+    -- stays NotReady in Prepare (sync-gated readiness) although its PVC
+    -- holds the partition's newest copy; without reading it the refill took
+    -- it for empty (failover-lag hold, 2026-10-03).
+    if pod.ready || pod.terminating || alsoProbe.contains pod.toNodeKey then
       match ← queryPodStats pod.name ns "stats" with
       | .ok out =>
         let hasData := out.splitOn "\n" |>.any fun line =>

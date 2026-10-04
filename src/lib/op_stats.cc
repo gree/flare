@@ -33,6 +33,7 @@
 #ifdef HAVE_LIBROCKSDB
 #include "storage_rocksdb.h"
 #endif
+#include <malloc.h>
 
 namespace gree {
 namespace flare {
@@ -130,6 +131,21 @@ int op_stats::_send_stats(thread_pool* req_tp, thread_pool* other_tp, storage* s
 
 	_send_stat("pid"									, stats_object->get_pid());
 	_send_stat("uptime" 							, stats_object->get_uptime());
+	// Queued proxy requests (forwards to replicas, proxied reads). Only
+	// `stats threads queue` carried it before, so plain `stats` readers saw
+	// nothing while millions of forwards were queued (2026-10-02).
+	_send_stat("total_thread_queue"					, stats_object->get_total_thread_queue());
+#if defined(__GLIBC__) && (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 33))
+	{
+		// Heap accounting (2026-10-02): in-use bytes grow on a leak, free
+		// bytes held by the allocator grow on fragmentation. Both are
+		// needed to tell them apart when RSS rises with the data.
+		struct mallinfo2 mi = ::mallinfo2();
+		_send_stat("malloc_in_use_bytes"			, static_cast<uint64_t>(mi.uordblks + mi.hblkhd));
+		_send_stat("malloc_free_bytes"				, static_cast<uint64_t>(mi.fordblks));
+		_send_stat("malloc_arena_bytes"				, static_cast<uint64_t>(mi.arena));
+	}
+#endif
 	_send_stat("time" 								, stats_object->get_timestamp());
 	_send_stat("version"							, stats_object->get_version());
 	_send_stat("pointer_size" 				, stats_object->get_pointer_size());
@@ -181,6 +197,21 @@ int op_stats::_send_stats(thread_pool* req_tp, thread_pool* other_tp, storage* s
 		_send_stat("reconstruction_last_success_id"		, rr.last_success_id);
 		_send_stat("reconstruction_last_success_source"	, rr.last_success_source);
 	}
+	{
+		// Continuous replication, follower side (SAF-10b). ONE snapshot: a
+		// position without the time it was observed, or a state without a
+		// reason, cannot be acted on (design §5.1).
+		stats::follow_record fr = stats_object->get_follow_record();
+		_send_stat("repl_follow_enabled"                , fr.enabled ? 1 : 0);
+		_send_stat("repl_follow_source"                 , fr.source);
+		_send_stat("repl_follow_source_epoch"           , fr.source_epoch);
+		_send_stat("repl_follow_state"                  , fr.state);
+		_send_stat("repl_follow_last_reason"            , fr.last_reason);
+		_send_stat("repl_applied_lsn"                   , fr.applied_lsn);
+		_send_stat("repl_source_lsn"                    , fr.source_lsn);
+		_send_stat("repl_source_lsn_observed_at"        , static_cast<uint64_t>(fr.source_lsn_observed_at));
+		_send_stat("repl_last_progress_at"              , static_cast<uint64_t>(fr.last_progress_at));
+	}
 	_send_stat("incr_hits"						, stats_object->get_incr_hits());
 	_send_stat("incr_misses"					, stats_object->get_incr_misses());
 	_send_stat("decr_hits"						, stats_object->get_decr_hits());
@@ -214,6 +245,31 @@ int op_stats::_send_stats(thread_pool* req_tp, thread_pool* other_tp, storage* s
 		storage_rocksdb* rdb = dynamic_cast<storage_rocksdb*>(st);
 		if (rdb) {
 			_send_stat("rocksdb_master_id"                  , rdb->get_master_id());
+			// Generations (SAF-10, design §3.1): the source epoch identifies
+			// the history a follower reads; the incarnation identifies this
+			// node's own copy. Neither moves on a plain process restart.
+			// Empty means UNAVAILABLE: the node could not establish or persist
+			// its identities and refuses to serve or accept replication.
+			_send_stat("rocksdb_source_epoch"               , rdb->get_source_epoch());
+			_send_stat("rocksdb_incarnation"                , rdb->get_incarnation());
+			_send_stat("rocksdb_generations_broken"         , rdb->generations_broken() ? 1 : 0);
+			// Common apply rule (SAF-10b): what each delivery path did.
+			// repl_wal_skipped moving while repl_forward_applied moves is the
+			// healthy signal of coexistence — the WAL re-delivering changes
+			// that forwarding already applied.
+			_send_stat("repl_forward_applied"               , rdb->get_repl_forward_applied());
+			_send_stat("repl_forward_skipped"               , rdb->get_repl_forward_skipped());
+			_send_stat("repl_wal_applied"                   , rdb->get_repl_wal_applied());
+			_send_stat("repl_wal_skipped"                   , rdb->get_repl_wal_skipped());
+			_send_stat("repl_decode_refused"                , rdb->get_repl_decode_refused());
+			// T17: apply-lock timing (microseconds; maxima since start)
+			_send_stat("repl_apply_lock_count"              , rdb->get_repl_apply_lock_count());
+			_send_stat("repl_apply_lock_hold_us_total"      , rdb->get_repl_apply_lock_hold_us());
+			_send_stat("repl_apply_lock_hold_us_max"        , rdb->get_repl_apply_lock_hold_us_max());
+			_send_stat("repl_apply_lock_wait_us_max"        , rdb->get_repl_apply_lock_wait_us_max());
+			_send_stat("repl_forward_lock_wait_us_max"      , rdb->get_repl_forward_lock_wait_us_max());
+			_send_stat("repl_tombstones_dropped"            , rdb->get_repl_tombstones_dropped());
+			_send_stat("repl_tombstones"                    , rdb->get_repl_tombstones());
 			_send_stat("rocksdb_repl_last_lsn"              , rdb->get_repl_last_lsn());
 			_send_stat("rocksdb_latest_sequence_number"     , rdb->get_latest_sequence_number());
 			_send_stat("rocksdb_wal_sync_success"           , rdb->get_wal_sync_success());
@@ -228,6 +284,7 @@ int op_stats::_send_stats(thread_pool* req_tp, thread_pool* other_tp, storage* s
 			_send_stat("rocksdb_snapshot_bootstrap"         , rdb->get_snapshot_bootstrap());
 			_send_stat("rocksdb_corruption_detected"        , rdb->get_corruption_detected());
 			_send_stat("rocksdb_hard_reset"                 , rdb->get_hard_reset());
+			_send_stat("rocksdb_rebuild_stale_discarded"    , rdb->get_rebuild_stale_discarded());
 			_send_stat("rocksdb_corrupted"                  , rdb->is_corrupted() ? 1 : 0);
 			_send_stat("rocksdb_resync_failure_count"       , rdb->get_resync_failure_count());
 			_send_stat("rocksdb_resync_failure_threshold"   , rdb->get_resync_failure_threshold());

@@ -122,7 +122,43 @@ def suite : TestSuite := {
         if ok then return .pass
         else
           let entries ← nodeSync
-          return .fail s!"standby state: role={roleOf entries standbyPod} balance={balanceOf entries standbyPod}" }
+          return .fail s!"standby state: role={roleOf entries standbyPod} balance={balanceOf entries standbyPod}" },
+
+    -- Non-follow-mode read recovery across an operator restart (handoff §3).
+    -- FollowEvidence keeps the legacy policy only for a node it has SEEN out
+    -- of follow mode; a fresh operator has seen nothing, so its first pass
+    -- must probe the slaves before their reads come back. The requirement:
+    -- reads do come back (a never-observed node is not withheld forever)
+    -- and the standby stays at 0.
+    { name := "operator restart in a cluster without follow mode: slave reads return after the fresh operator observes the slaves; the standby stays 0"
+      run := do
+        let settled : IO Bool := do
+          let entries ← nodeSync
+          let others := entries.filter fun e => (e.fqdn.splitOn ".").head? != some standbyPod
+          return entries.length >= 3 && balanceOf entries standbyPod == some 0
+            && others.all (fun e => (e.role != 0 || e.balance == 100) && (e.role != 1 || e.balance == 100))
+        let pre ← waitForCondition "precondition: patched balances in place" 120 settled
+        if !pre then return .fail "precondition: slave=100 / standby=0 balances not in place"
+        let label := s!"app={cfg.operatorName}"
+        let oldPod := ((← kubectl ["get", "pods", "-n", cfg.«namespace», "-l", label, "-o", "jsonpath={.items[0].metadata.name}"]).toOption.getD "").trim
+        discard <| kubectl ["delete", "pod", "-n", cfg.«namespace», "-l", label, "--wait=false"]
+        let back ← waitForCondition "a new operator pod is Ready and the old one is gone" 180 do
+          match ← kubectl ["get", "pods", "-n", cfg.«namespace», "-l", label, "-o", "jsonpath={range .items[*]}{.metadata.name}={.status.containerStatuses[0].ready} {end}"] with
+          | .ok o =>
+            return (o.splitOn " ").any (fun e => e.endsWith "=true" && !(e.startsWith oldPod))
+              && !(o.splitOn " ").any (fun e => e.startsWith oldPod && e != "")
+          | .error _ => return false
+        if !back then return .fail "the operator did not come back Ready"
+        let probed ← waitForCondition "the fresh operator probed the slaves" 120 do
+          return containsSubstr (← kubectlLogsLabel label cfg.«namespace» 2000) "continuous-replication probe:"
+        let ok ← waitForCondition "slave reads back after the restart" 120 settled
+        let entries ← nodeSync
+        IO.eprintln s!"# after the operator restart (old pod {oldPod}): probed={probed}; balances {entries.map (fun e => (e.fqdn.splitOn "." |>.headD "?", e.role, e.balance))}"
+        if !probed then return .fail "the fresh operator never logged a stats probe of the slaves"
+        if !ok then return .fail s!"slave reads did not come back after the restart: {entries.map (fun e => (e.fqdn.splitOn "." |>.headD "?", e.role, e.balance))}"
+        if containsSubstr (← kubectlLogsLabel label cfg.«namespace» 2000) "CONTINUOUS REPLICATION eligibility" then
+          return .fail "a cluster without follow mode produced follow-eligibility decisions"
+        return .pass }
   ]
 }
 

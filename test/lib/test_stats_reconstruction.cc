@@ -6,6 +6,7 @@
  */
 #include <cppcutter.h>
 #include <stats.h>
+#include <handler_wal_follower.h>
 
 using namespace std;
 using namespace gree::flare;
@@ -15,6 +16,37 @@ namespace test_stats_reconstruction {
 
 	void setup() { st = new stats(); }
 	void teardown() { delete st; st = NULL; }
+
+	void test_follow_backlog_does_not_poll_sleep_after_superseded_slice() {
+		cut_assert_true(handler_wal_follower::retry_immediately(handler_wal_follower::attempt_idle, true));
+		cut_assert_true(handler_wal_follower::retry_immediately(handler_wal_follower::attempt_progress, true));
+		cut_assert_false(handler_wal_follower::retry_immediately(handler_wal_follower::attempt_idle, false));
+		cut_assert_false(handler_wal_follower::retry_immediately(handler_wal_follower::attempt_error, true));
+		cut_assert_false(handler_wal_follower::retry_immediately(handler_wal_follower::attempt_disconnected, true));
+	}
+
+	void test_local_read_guard_disconnect_lag_and_recovery() {
+		stats::follow_record r = st->get_follow_record();
+		r.enabled = true;
+		r.source_epoch = "epoch";
+		r.state = "following";
+		r.source_lsn = 100;
+		r.applied_lsn = 99;
+		r.source_lsn_observed_at = 1000;
+		cut_assert_false(stats::follow_allows_local_read(r, 1000));
+		r.applied_lsn = 100;
+		cut_assert_true(stats::follow_allows_local_read(r, 1000));
+		cut_assert_false(stats::follow_allows_local_read(r, 1006));
+		cut_assert_false(stats::follow_allows_local_read(r, 999));
+		r.state = "disconnected";
+		cut_assert_false(stats::follow_allows_local_read(r, 1000));
+		r.state = "needs_rebuild";
+		cut_assert_false(stats::follow_allows_local_read(r, 1000));
+		r.state = "following";
+		cut_assert_true(stats::follow_allows_local_read(r, 1000));
+		r.enabled = false;
+		cut_assert_true(stats::follow_allows_local_read(r, 1006));
+	}
 
 	void test_fresh_process_has_no_record() {
 		stats::reconstruction_record r = st->get_reconstruction_record();

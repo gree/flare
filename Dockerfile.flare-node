@@ -20,7 +20,15 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
-COPY . /build/flare/
+# Copy ONLY the C++ build inputs (autotools files, src/, test/). With the
+# whole repository here, any docs or Lean change invalidated this layer and
+# forced a full C++ rebuild on every CI leg; now the CI layer cache is reused
+# while these inputs are unchanged. A file the build needs but that is not
+# listed fails the build loudly rather than producing a stale image.
+COPY autogen.sh configure.ac Makefile.am config.guess config.sub depcomp install-sh missing mkinstalldirs \
+     AUTHORS ChangeLog COPYING INSTALL NEWS /build/flare/
+COPY src/ /build/flare/src/
+COPY test/ /build/flare/test/
 
 RUN cd /build/flare \
     && ./autogen.sh \

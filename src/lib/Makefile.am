@@ -30,6 +30,7 @@ libflare_la_SOURCES = \
 	handler_monitor.h handler_monitor.cc \
 	handler_proxy.h handler_proxy.cc \
 	handler_reconstruction.h handler_reconstruction.cc \
+	handler_wal_follower.h handler_wal_follower.cc \
 	htonll.h \
 	key_resolver.h key_resolver.cc \
 	key_resolver_modular.h key_resolver_modular.cc \

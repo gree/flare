@@ -78,6 +78,7 @@ ini_option::ini_option():
 		_thread_pool_size(default_thread_pool_size),
 		_proxy_prior_netmask(default_proxy_prior_netmask),
 		_max_total_thread_queue(default_max_total_thread_queue),
+		_read_unavailable_error(default_read_unavailable_error),
 		_time_watcher_enabled(false),
 		_time_watcher_polling_interval_msec(default_time_watcher_polling_interval_msec),
 		_storage_access_watch_threshold_warn_msec(0),
@@ -100,6 +101,12 @@ ini_option::ini_option():
 		_rocksdb_backup_keep(default_rocksdb_backup_keep),
 		_rocksdb_snapshot_bwlimit(default_rocksdb_snapshot_bwlimit),
 		_flush_all_enabled(default_flush_all_enabled),
+		_repl_identity_forward(default_repl_identity_forward),
+		_wal_follow_enabled(default_wal_follow_enabled),
+		_wal_follow_max_batches(default_wal_follow_max_batches),
+		_wal_follow_max_bytes(default_wal_follow_max_bytes),
+		_wal_follow_poll_interval_usec(default_wal_follow_poll_interval_usec),
+		_wal_follow_batch_delay_usec(0),
 		_reap_expired(default_reap_expired),
 		_reap_expired_interval(default_reap_expired_interval),
 		_reap_expired_chunk_size(default_reap_expired_chunk_size),
@@ -364,6 +371,9 @@ int ini_option::load() {
 			this->_proxy_prior_netmask = opt_var_map["proxy-prior-netmask"].as<uint32_t>();
 		}
 
+		if (opt_var_map.count("read-unavailable-error")) {
+			this->_read_unavailable_error = opt_var_map["read-unavailable-error"].as<bool>();
+		}
 		if (opt_var_map.count("max-total-thread-queue")) {
 			this->_max_total_thread_queue = opt_var_map["max-total-thread-queue"].as<uint32_t>();
 		}
@@ -450,6 +460,25 @@ int ini_option::load() {
 
 		if (opt_var_map.count("rocksdb-snapshot-bwlimit")) {
 			this->_rocksdb_snapshot_bwlimit = opt_var_map["rocksdb-snapshot-bwlimit"].as<int>();
+		}
+
+		if (opt_var_map.count("repl-identity-forward")) {
+			this->_repl_identity_forward = opt_var_map["repl-identity-forward"].as<bool>();
+		}
+		if (opt_var_map.count("repl-follow-enabled")) {
+			this->_wal_follow_enabled = opt_var_map["repl-follow-enabled"].as<bool>();
+		}
+		if (opt_var_map.count("repl-follow-max-batches")) {
+			this->_wal_follow_max_batches = opt_var_map["repl-follow-max-batches"].as<int>();
+		}
+		if (opt_var_map.count("repl-follow-max-bytes")) {
+			this->_wal_follow_max_bytes = opt_var_map["repl-follow-max-bytes"].as<int>();
+		}
+		if (opt_var_map.count("repl-follow-poll-interval-usec")) {
+			this->_wal_follow_poll_interval_usec = opt_var_map["repl-follow-poll-interval-usec"].as<int>();
+		}
+		if (opt_var_map.count("repl-follow-batch-delay-usec")) {
+			this->_wal_follow_batch_delay_usec = opt_var_map["repl-follow-batch-delay-usec"].as<int>();
 		}
 
 		if (opt_var_map.count("flush-all-enabled")) {
@@ -586,6 +615,27 @@ int ini_option::reload() {
 			this->_rocksdb_snapshot_bwlimit = opt_var_map["rocksdb-snapshot-bwlimit"].as<int>();
 		}
 
+		if (opt_var_map.count("repl-identity-forward")) {
+			log_notice("  repl_identity_forward: %d -> %d", this->_repl_identity_forward, opt_var_map["repl-identity-forward"].as<bool>());
+			this->_repl_identity_forward = opt_var_map["repl-identity-forward"].as<bool>();
+		}
+		if (opt_var_map.count("repl-follow-enabled")) {
+			log_notice("  repl_follow_enabled: %d -> %d", this->_wal_follow_enabled, opt_var_map["repl-follow-enabled"].as<bool>());
+			this->_wal_follow_enabled = opt_var_map["repl-follow-enabled"].as<bool>();
+		}
+		if (opt_var_map.count("repl-follow-max-batches")) {
+			this->_wal_follow_max_batches = opt_var_map["repl-follow-max-batches"].as<int>();
+		}
+		if (opt_var_map.count("repl-follow-max-bytes")) {
+			this->_wal_follow_max_bytes = opt_var_map["repl-follow-max-bytes"].as<int>();
+		}
+		if (opt_var_map.count("repl-follow-poll-interval-usec")) {
+			this->_wal_follow_poll_interval_usec = opt_var_map["repl-follow-poll-interval-usec"].as<int>();
+		}
+		if (opt_var_map.count("repl-follow-batch-delay-usec")) {
+			this->_wal_follow_batch_delay_usec = opt_var_map["repl-follow-batch-delay-usec"].as<int>();
+		}
+
 		if (opt_var_map.count("flush-all-enabled")) {
 			log_notice("  flush_all_enabled: %d -> %d", this->_flush_all_enabled, opt_var_map["flush-all-enabled"].as<bool>());
 			this->_flush_all_enabled = opt_var_map["flush-all-enabled"].as<bool>();
@@ -710,6 +760,10 @@ int ini_option::reload() {
 			}
 		}
 
+		if (opt_var_map.count("read-unavailable-error")) {
+			log_notice("  read_unavailable_error: %d -> %d", this->_read_unavailable_error, opt_var_map["read-unavailable-error"].as<bool>());
+			this->_read_unavailable_error = opt_var_map["read-unavailable-error"].as<bool>();
+		}
 		if (opt_var_map.count("max-total-thread-queue")) {
 			log_notice("  max_total_thread_queue: %u -> %u", this->_max_total_thread_queue, opt_var_map["max-total-thread-queue"].as<uint32_t>());
 			this->_max_total_thread_queue = opt_var_map["max-total-thread-queue"].as<uint32_t>();
@@ -844,6 +898,7 @@ int ini_option::_setup_config_option(program_options::options_description& optio
 		("thread-pool-size",				program_options::value<int>(),			"thread pool size (dynamic)")
 		("proxy-prior-netmask",			program_options::value<uint32_t>(),	"proxy prior netmask")
 		("max-total-thread-queue",	program_options::value<uint32_t>(),	"max thread queue length (dynamic)")
+		("read-unavailable-error",	program_options::value<bool>(),	"answer SERVER_ERROR instead of a miss when a get cannot be served (forward to the master failed, no partition, enqueue or storage error); for flare used as the primary store (default false = legacy miss, dynamic)")
 		("time-watcher-enabled",												program_options::value<bool>(),			"time watcher enabled")
 		("time-watcher-polling-interval-msec",					program_options::value<uint32_t>(),	"time watcher polling interval (msec)")
 		("storage-access-watch-threshold-warn-msec",		program_options::value<uint32_t>(),	"threshold to log error when a thread accessing storage long time (msec)")
@@ -866,6 +921,12 @@ int ini_option::_setup_config_option(program_options::options_description& optio
 		("rocksdb-backup-keep",					program_options::value<int>(),		"number of on-disk named backups (checkpoints) to retain under data-dir/backups/; oldest pruned by name order (default 7, dynamic, rocksdb only)")
 		("rocksdb-snapshot-bwlimit",			program_options::value<int>(),		"bandwidth cap in KB/s for serving a snapshot-bootstrap stream (repl_snapshot); 0 = unlimited (default 32768 = ~256 Mbps, dynamic, rocksdb only)")
 		("flush-all-enabled",					program_options::value<bool>(),		"administrative gate for the flush_all op; false refuses it with SERVER_ERROR (default true, dynamic)")
+		("repl-identity-forward",			program_options::value<bool>(),		"carry the source's replication identity on forwarded writes so the destination orders them against the WAL stream (SAF-10b); enable only when every node understands it (default false, dynamic)")
+		("repl-follow-enabled",				program_options::value<bool>(),		"run a continuous WAL follower on an active RocksDB slave so a blip is recovered from the applied position without a rebuild (SAF-10c); requires repl-identity-forward cluster-wide (default false, dynamic)")
+		("repl-follow-max-batches",			program_options::value<int>(),		"bound on WAL batches per follow response (default 256, dynamic)")
+		("repl-follow-max-bytes",			program_options::value<int>(),		"bound on WAL bytes per follow response (default 4194304, dynamic)")
+		("repl-follow-poll-interval-usec",	program_options::value<int>(),		"how often an idle follower asks its source again (default 200000, dynamic)")
+		("repl-follow-batch-delay-usec",	program_options::value<int>(),		"pause after every follow response that applied changes, throttling catch-up (default 0 = none, dynamic)")
 		("reap-expired",						program_options::value<bool>(),		"enable the background expire crawler that physically deletes past-expire keys on the partition master (default true, dynamic, rocksdb only)")
 		("reap-expired-interval",				program_options::value<int>(),		"seconds between full expire sweeps (default 300, dynamic, rocksdb only)")
 		("reap-expired-chunk-size",				program_options::value<int>(),		"keys scanned per chunk before the throttle sleep (default 10000, dynamic, rocksdb only)")

@@ -57,6 +57,8 @@ public:
 		client_server_error     = 5,  // any other server-side failure
 		client_apply_error      = 6,  // slave failed to apply a batch
 		client_protocol_error   = 7,  // unparseable response
+		client_epoch_mismatch   = 8,  // the source is serving a different history
+		client_no_epoch         = 9,  // the source does not identify its history
 	};
 
 protected:
@@ -72,6 +74,22 @@ protected:
 	uint64_t	_max_batch_bytes;   // 0 = unlimited
 	int			_bwlimit_kbps;      // 0 = no rate limit
 	int			_interval_usec;     // 0 = no per-batch sleep
+	// FOLLOW MODE (SAF-10b stage 3b). A follower asks for a BOUNDED slice of
+	// the stream and is told whether more is waiting, so one response can
+	// never materialise a far-behind reader's whole backlog, and the server
+	// never holds the write path while a slow reader drains.
+	string		_client_epoch;      // the history the follower's position belongs to
+	uint64_t	_max_batches;       // 0 = unbounded (the reconstruction path)
+	uint64_t	_max_response_bytes;
+	// Server -> client: the history this source is serving, and whether more
+	// updates are waiting after this response.
+	string		_server_epoch;
+	bool		_more_available;
+	// Client side, for the follower's bookkeeping.
+	string		_incarnation;       // the copy this apply belongs to
+	uint64_t	_applied;
+	uint64_t	_skipped;
+	uint64_t	_server_latest_lsn;
 
 public:
 	op_repl_sync_wal(shared_connection c, storage* st);
@@ -82,6 +100,16 @@ public:
 	// believes its master has. An empty token means "I have no prior
 	// lineage, treat me as fresh".
 	virtual int run_client(uint64_t lsn, const string& master_id);
+	// Follow-mode entry point. Applies through the COMMON APPLY RULE
+	// (storage_rocksdb::apply_wal_batch), never verbatim, and stops at the
+	// bounds the caller set. Returns 0 when the slice was consumed.
+	int run_client_follow(uint64_t lsn, const string& master_id, const string& expected_epoch,
+		const string& incarnation, uint64_t max_batches, uint64_t max_response_bytes);
+	bool get_more_available() const { return this->_more_available; }
+	const string& get_server_epoch() const { return this->_server_epoch; }
+	uint64_t get_applied() const { return this->_applied; }
+	uint64_t get_skipped() const { return this->_skipped; }
+	uint64_t get_server_latest_lsn() const { return this->_server_latest_lsn; }
 
 	// Result inspectors populated after run_client() returns.
 	client_result get_client_result() const { return this->_client_result; }

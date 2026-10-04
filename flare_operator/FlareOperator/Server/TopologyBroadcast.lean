@@ -37,13 +37,92 @@ open FlareOperator.K8s.Bridge
     The port is hardcoded to 12121 (flared's protocol listening port).
     This matches C++ flarei's behavior where the coordinator actively
     pushes topology changes to all nodes via queue_node_sync. -/
-def broadcastTopologyToAllPods (crName ns : String) (version : Nat) (nodes : List FlareNode) : IO Unit := do
+def pendingTopologyAfterAttempt (previous : Option Nat) (version : Nat)
+    (confirmed : Bool) : Option Nat :=
+  if confirmed then none else some (previous.getD version)
+
+/-! ## Durable authority (SAF-09)
+
+The broadcast version carries the leadership generation in its high 32 bits
+(`generation * 2^32 + counter`). flared ignores any map older than the one it
+holds, so a recipient that has heard generation g rejects every map of a
+generation below g. That fence fails if a new leader can take a LOWER
+generation than one already issued, and it could: the generation came from the
+Lease's `transitions`, which restarts from 0 when the Lease is deleted and
+recreated. A deposed leader still inside its check/send window then outranks
+the new leader at every node that heard it.
+
+The operator-owned durable record is the persisted node map (`{cr}-node-map`):
+it holds the highest version this cluster's operators have committed. A new
+leader process therefore takes a generation strictly above that record's,
+whatever the Lease says, and a version is sent only once it is persisted, so
+the record is never behind what any node has seen. Recipients' reported
+versions are NOT used: an arbitrary recipient's high number is not authority. -/
+
+def generationUnit : Nat := 4294967296
+
+/-- Generation for a new leader process. -/
+def startupGeneration (leaseTransitions resumedVersion : Nat) : Nat :=
+  max leaseTransitions (resumedVersion / generationUnit + 1)
+
+/-- First version of a new leader process. -/
+def startupVersion (leaseTransitions resumedVersion : Nat) : Nat :=
+  startupGeneration leaseTransitions resumedVersion * generationUnit
+
+/-- Every version a new leader issues is above every persisted version, so
+    no map it sends can be older than one an earlier leader committed —
+    whatever happened to the Lease. -/
+theorem startupVersion_gt_resumed (t r : Nat) : r < startupVersion t r := by
+  unfold startupVersion startupGeneration generationUnit
+  have h : r < (r / 4294967296 + 1) * 4294967296 := by
+    have := Nat.lt_mul_div_succ r (show 0 < 4294967296 by decide)
+    rw [Nat.mul_comm] at this
+    exact this
+  exact Nat.lt_of_lt_of_le h (Nat.mul_le_mul_right _ (Nat.le_max_right _ _))
+
+/-- A new leader's generation also never goes below the Lease's own count. -/
+theorem startupGeneration_ge_lease (t r : Nat) : t ≤ startupGeneration t r :=
+  Nat.le_max_left _ _
+
+/-- A version may be sent only when the durable record already holds it. -/
+def persistedCovers (persistedVersion sendVersion : Nat) : Bool :=
+  sendVersion ≤ persistedVersion
+
+/-- Why a reconcile pass pushes the committed map. The pass sends exactly
+    when `any` holds; the record is logged with every send so a test (and an
+    incident reader) can tell WHICH reason carried a given push instead of
+    inferring it from the absence of other lines. In a fresh process
+    `pending` is seeded with the committed version (startup republish); the
+    topology audit can also set it when a recipient reports an older map. -/
+structure BroadcastTriggers where
+  versionMoved : Bool
+  pending : Option Nat
+  repairHeld : Nat
+  activeNotReady : Nat
+  deriving Repr, BEq
+
+def BroadcastTriggers.any (t : BroadcastTriggers) : Bool :=
+  t.versionMoved || t.pending.isSome || t.repairHeld > 0 || t.activeNotReady > 0
+
+/-- Only the pending flag, nothing else, asks for this send. -/
+def BroadcastTriggers.pendingOnly (t : BroadcastTriggers) : Bool :=
+  t.pending.isSome && !t.versionMoved && t.repairHeld == 0 && t.activeNotReady == 0
+
+def BroadcastTriggers.label (t : BroadcastTriggers) : String :=
+  let p := match t.pending with | some v => s!"v{v}" | none => "none"
+  s!"versionMoved={t.versionMoved} pending={p} repairHeld={t.repairHeld} activeNotReady={t.activeNotReady}"
+
+def broadcastTopologyToAllPods (crName ns : String) (version : Nat) (nodes : List FlareNode) : IO Bool := do
   -- Get current pod list with IP addresses from K8s
-  let pods ← listFlaredPods crName ns
+  let pods ← match ← listFlaredPodsE crName ns with
+    | .ok ps => pure ps
+    | .error e =>
+      IO.eprintln s!"[TopologyBroadcast] Pod list unavailable; delivery unconfirmed: {e}"
+      return false
 
   if pods.isEmpty then
     IO.eprintln "[TopologyBroadcast] No pods found to broadcast to"
-    return ()
+    return nodes.isEmpty
 
   IO.eprintln s!"[TopologyBroadcast] Broadcasting node sync v{version} ({nodes.length} nodes) to {pods.length} pods"
 
@@ -56,6 +135,8 @@ def broadcastTopologyToAllPods (crName ns : String) (version : Nat) (nodes : Lis
   -- distinguishes "Terminating but reachable" from "gone".
   let tasks ← pods.mapM fun pod =>
     IO.asTask (sendNodeSyncToNode pod.ip 12121 version nodes)
+  let deadline := (← IO.monoMsNow) + 15000
+  let mut confirmed := true
   -- Belt over TcpClient's own deadlines: the broadcast runs synchronously
   -- in the reconcile loop, so NOTHING here may wait unboundedly (one stuck
   -- pod froze the loop for 22 min live). 15s >> connect(3s)+sends(3s each).
@@ -65,14 +146,19 @@ def broadcastTopologyToAllPods (crName ns : String) (version : Nat) (nodes : Lis
       if (← IO.hasFinished t) then
         finished := true
         break
+      if (← IO.monoMsNow) >= deadline then break
       IO.sleep 50
     if finished then
       match t.get with
-      | .ok _ => pure ()
-      | .error e => IO.eprintln s!"[TopologyBroadcast] send task failed: {e}"
+      | .ok ok => confirmed := confirmed && ok
+      | .error e =>
+        confirmed := false
+        IO.eprintln s!"[TopologyBroadcast] send task failed: {e}"
     else
+      confirmed := false
       IO.eprintln "[TopologyBroadcast] WARNING: send task exceeded 15s — abandoning it (bounded broadcast)"
 
-  IO.eprintln s!"[TopologyBroadcast] Broadcast complete (v{version})"
+  IO.eprintln s!"[TopologyBroadcast] Broadcast attempt complete (v{version}); all targets reply-confirmed={confirmed}"
+  return confirmed
 
 end FlareOperator.Server

@@ -1,0 +1,859 @@
+# === Suite: replica-repair ===
+# Cleaning up cluster 'repl-repair'
+# Deploying cluster 'repl-repair' in namespace 'flare-repl-repair'
+# Waiting for: namespace flare-repl-repair not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-repl-repair (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap repl-repair-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting for StatefulSet repl-repair-nodes to be ready...
+# Waiting for: all 2 pods ready (timeout: 180s)
+#   OK after 0s
+# Waiting for: 2 nodes registered (timeout: 300s)
+#   OK after 0s
+# Waiting 50s grace period for operator reconciliation...
+# Checking operator activity...
+# --- Operator logs (flare-operator) ---
+#   [DEBUG] Sending response: NODE repl-repair-nodes-1.repl-repair-nodes.flare-repl-repair.svc.cluster.local 12121 1 0 0 0 17 | NODE repl-repair-nodes-0.repl-repair-nodes.flare-repl-repair.svc.cluster.local 12121 0 0 0 100 16 | END | 
+#   [flare-operator] continuous-replication probe: 1 stats read(s) in 163ms (tick 5; in-mode remembered: 0, out-of-mode remembered: 0)
+#   [flare-operator] grace period: 82s remaining
+#   [TopologyAudit] node=repl-repair-nodes-0.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121 uid=(some de2c2960-65c3-4a50-83f0-c7ace636a832) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1889ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 75s remaining
+#   [TopologyAudit] node=repl-repair-nodes-1.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121 uid=(some 088470c4-0ad4-4ce7-9512-077ef021333a) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 2115ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 68s remaining
+#   [TopologyAudit] node=repl-repair-nodes-0.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121 uid=(some de2c2960-65c3-4a50-83f0-c7ace636a832) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1813ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 61s remaining
+#   [TopologyAudit] node=repl-repair-nodes-1.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121 uid=(some 088470c4-0ad4-4ce7-9512-077ef021333a) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 2004ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 53s remaining
+#   [TopologyAudit] node=repl-repair-nodes-0.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121 uid=(some de2c2960-65c3-4a50-83f0-c7ace636a832) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1895ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 46s remaining
+#   [TopologyAudit] node=repl-repair-nodes-1.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121 uid=(some 088470c4-0ad4-4ce7-9512-077ef021333a) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 2279ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 39s remaining
+#   [TopologyAudit] node=repl-repair-nodes-0.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121 uid=(some de2c2960-65c3-4a50-83f0-c7ace636a832) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1810ms (nodes=2 M=1 S=1 D=0 P=0)
+#   
+# Waiting for: slave's local items reach the master's (timeout: 60s)
+#   OK after 0s
+# fault: rejecting 10.244.0.9 → 10.244.0.10:12121 on flare-e2e-control-plane
+# Waiting for: master counts dropped writes to the slave (was 0) (timeout: 120s)
+#   OK after 15s
+# stored 30/30 on the master; master dropped 2 write(s); local items master=70 slave=40 (gap 30)
+# fault cleared: 10.244.0.9 → 10.244.0.10 forwards again
+# slave was missing 30 item(s) locally while cut off
+# Waiting for: operator requests a replica repair (probe interval 15s) (timeout: 150s)
+#   OK after 10s
+# Waiting for: ledger in status names the slave (timeout: 60s)
+#   OK after 0s
+# Waiting for: operator records REPLICA REPAIR COMPLETE (timeout: 300s)
+#   OK after 20s
+# Waiting for: ledger persisted as empty (timeout: 60s)
+#   OK after 0s
+# Waiting for: slave's local items catch up to the master's (timeout: 120s)
+#   OK after 0s
+# Waiting for: the previous operator pod is gone (timeout: 180s)
+#   OK after 35s
+# Waiting for: restarted operator restores the ledger from status (timeout: 120s)
+#   OK after 10s
+# fault: rejecting 10.244.0.9 → 10.244.0.10:12121 on flare-e2e-control-plane
+# Waiting for: master counts dropped writes to the slave (was 2) (timeout: 120s)
+#   OK after 20s
+# stored 20/20 on the master; master dropped 2 write(s); local items master=90 slave=70 (gap 20)
+# fault cleared: 10.244.0.9 → 10.244.0.10 forwards again
+# Waiting for: operator HOLDS the repair (gate closed) (timeout: 150s)
+#   OK after 5s
+# Waiting for: HELD entry persisted to status with its gate reason (timeout: 90s)
+#   OK after 0s
+# Waiting for: the previous operator pod is gone (timeout: 180s)
+#   OK after 35s
+# Waiting for: restarted operator restores the HELD request (timeout: 120s)
+#   OK after 15s
+# Waiting for: operator records REPLICA REPAIR COMPLETE (timeout: 360s)
+#   OK after 20s
+# Waiting for: ledger persisted as empty (timeout: 60s)
+#   OK after 0s
+# Waiting for: slave's local items catch up to the master's (timeout: 120s)
+#   OK after 0s
+# Waiting for: the previous operator pod is gone (timeout: 180s)
+#   OK after 35s
+# fault: the operator may no longer patch flareclusters/status
+# fault: rejecting 10.244.0.9 → 10.244.0.10:12121 on flare-e2e-control-plane
+# Waiting for: master counts dropped writes to the slave (was 4) (timeout: 120s)
+#   OK after 20s
+# stored 20/20 on the master; master dropped 2 write(s); local items master=110 slave=90 (gap 20)
+# fault cleared: 10.244.0.9 → 10.244.0.10 forwards again
+# Waiting for: operator marks the ledger UNSAVED after the failed persist (timeout: 150s)
+#   OK after 5s
+# Waiting for: operator retries the unsaved ledger on a later pass (timeout: 90s)
+#   OK after 5s
+# fault cleared: status write allowed again
+# Waiting for: the unsaved ledger lands once the write is allowed (entry present in status; in-pod can-i sampled alongside) (timeout: 300s)
+#   OK after 10s
+# timeline from the restore: in-pod can-i said yes after 0s; unsaved ledger landed after 10s (via the top-of-pass retry); landed=true
+# Waiting for: the previous operator pod is gone (timeout: 180s)
+#   OK after 35s
+# Waiting for: restarted operator restores the HELD request from status (timeout: 120s)
+#   OK after 15s
+# Waiting for: the previous operator pod is gone (timeout: 180s)
+#   OK after 35s
+# Waiting for: operator records REPLICA REPAIR COMPLETE (timeout: 360s)
+#   OK after 30s
+# Waiting for: ledger persisted as empty (timeout: 60s)
+#   OK after 0s
+# Waiting for: slave's local items catch up to the master's (timeout: 120s)
+#   OK after 0s
+# fault: status.replicaRepairs.entries is now a string (unparseable)
+# Waiting for: the previous operator pod is gone (timeout: 180s)
+#   OK after 35s
+# Waiting for: restarted operator reports the ledger UNAVAILABLE (not absent) (timeout: 180s)
+#   OK after 45s
+# fault: rejecting 10.244.0.9 → 10.244.0.10:12121 on flare-e2e-control-plane
+# Waiting for: master counts dropped writes to the slave (was 6) (timeout: 120s)
+#   OK after 20s
+# stored 20/20 on the master; master dropped 2 write(s); local items master=130 slave=110 (gap 20)
+# fault cleared: 10.244.0.9 → 10.244.0.10 forwards again
+# fault cleared: ledger restored to its pre-corruption content
+# Waiting for: ledger RECOVERED from status (timeout: 120s)
+#   OK after 5s
+# Waiting for: the drop seen during the outage is requested after recovery (timeout: 150s)
+#   OK after 10s
+# Waiting for: operator records REPLICA REPAIR COMPLETE (timeout: 360s)
+#   OK after 15s
+# Waiting for: ledger persisted as empty (timeout: 60s)
+#   OK after 0s
+# Waiting for: slave's local items catch up to the master's (timeout: 120s)
+#   OK after 0s
+# Waiting for: victim pod has a UID (timeout: 60s)
+#   OK after 0s
+# Waiting for: victim pod gone (timeout: 90s)
+#   OK after 5s
+# Waiting for: replacement pod has a UID (timeout: 60s)
+#   OK after 0s
+# apiserver refused the stale-UID delete (409); replacement fd1152c7-64d1-4027-8b98-c51fd8088581 untouched
+# Waiting for: blackhole pod has an IP (timeout: 60s)
+#   OK after 5s
+# black-hole delete returned in 3105ms; server accepted 517 byte(s):  | 000 | curl_exit=28 | 
+# fault cleared: 10.244.0.9 → 10.244.0.10 forwards again
+# Cleaning up cluster 'repl-repair'
+# === Suite: prepare-evidence ===
+# Cleaning up cluster 'prep-evid'
+# Deploying cluster 'prep-evid' in namespace 'flare-prep-evid'
+# Waiting for: namespace flare-prep-evid not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-prep-evid (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap prep-evid-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting for StatefulSet prep-evid-nodes to be ready...
+# Waiting for: all 2 pods ready (timeout: 180s)
+#   OK after 0s
+# Waiting for: 2 nodes registered (timeout: 300s)
+#   OK after 0s
+# Waiting 20s grace period for operator reconciliation...
+# Checking operator activity...
+# --- Operator logs (flare-operator) ---
+#     12121
+#     (FlareOperator.K8s.FlareSta
+#   [flare-operator] TEST SEAM: dropping node state event from prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121 (FLARE_TEST_DROP_NODE_STATE)
+#   [TRACE] Event: NodeState prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121 | Result: Prepare->Active | Reason: reconstruction complete
+#   [TcpClient] node sync v4294967303 to 10.244.0.21:12121: reply-confirmed=true
+#   [TcpClient] node sync v4294967303 to 10.244.0.22:12121: reply-confirmed=true
+#   [TopologyBroadcast] Broadcast attempt complete (v4294967303); all targets reply-confirmed=true
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 3047ms (nodes=2 M=1 S=1 D=0 P=1)
+#   [flare-operator] continuous-replication probe: 1 stats read(s) in 200ms (tick 4; in-mode remembered: 0, out-of-mode remembered: 0)
+#   [flare-operator] grace period: 90s remaining
+#   [TopologyAudit] node=prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121 uid=(some e4f9df61-418d-47be-9270-19784d9278c0) desired=4294967310 reported=(some 4294967303) verdict=behind
+#   [flare-operator] retrying an unconfirmed topology send (pending v4294967310; publishing v4294967310)
+#   [flare-operator] broadcast trigger: versionMoved=true pending=v4294967310 repairHeld=0 activeNotReady=0
+#   [flare-operator] topology changed (v4294967303 → v4294967310), broadcasting
+#   [TopologyBroadcast] Broadcasting node sync v4294967310 (2 nodes) to 2 pods
+#   [DEBUG] Received command: node state prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local 12121 active
+#   [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeState
+#     "prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local"
+#     12121
+#     (FlareOperator.K8s.FlareSta
+#   [flare-operator] TEST SEAM: dropping node state event from prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121 (FLARE_TEST_DROP_NODE_STATE)
+#   [TRACE] Event: NodeState prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121 | Result: Prepare->Active | Reason: reconstruction complete
+#   [TcpClient] node sync v4294967310 to 10.244.0.21:12121: reply-confirmed=true
+#   [TcpClient] node sync v4294967310 to 10.244.0.22:12121: reply-confirmed=true
+#   [TopologyBroadcast] Broadcast attempt complete (v4294967310); all targets reply-confirmed=true
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 3323ms (nodes=2 M=1 S=1 D=0 P=1)
+#   [flare-operator] grace period: 82s remaining
+#   [TopologyAudit] node=prep-evid-nodes-0.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121 uid=(some 93cf56d7-2487-442e-a55b-8ddeca662026) desired=4294967317 reported=(some 4294967310) verdict=behind
+#   
+# Waiting for: seam drops a node state event (timeout: 240s)
+#   OK after 0s
+# Waiting for: the slave reports a completed reconstruction (timeout: 120s)
+#   OK after 0s
+# Waiting for: PREPARE-REPAIR activates on evidence (timeout: 300s)
+#   OK after 70s
+# Waiting for: slave Active in the operator's map (timeout: 60s)
+#   TIMEOUT after 60s waiting for: slave Active in the operator's map
+#   reason: the repair logged an activation but the slave is still state none in the operator's map
+# --- diagnostics for failing suite 'prepare-evidence' ---
+# === operator logs (flare-prep-evid, app=flare-operator) ===
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TcpClient] node sync v4294967352 to 10.244.0.22:12121: reply-confirmed=true
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TcpClient] node sync v4294967352 to 10.244.0.21:12121: reply-confirmed=true
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TopologyBroadcast] Broadcast attempt complete (v4294967352); all targets reply-confirmed=true
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [flare-operator] reconcile slow: 3153ms (nodes=2 M=1 S=1 D=0 P=1)
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [flare-operator] grace period: 31s remaining
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TopologyAudit] node=prep-evid-nodes-0.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121 uid=(some 93cf56d7-2487-442e-a55b-8ddeca662026) desired=4294967359 reported=(some 4294967352) verdict=behind
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [flare-operator] retrying an unconfirmed topology send (pending v4294967359; publishing v4294967359)
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [flare-operator] broadcast trigger: versionMoved=true pending=v4294967359 repairHeld=0 activeNotReady=0
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [flare-operator] topology changed (v4294967352 → v4294967359), broadcasting
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TopologyBroadcast] Broadcasting node sync v4294967359 (2 nodes) to 2 pods
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [DEBUG] Received command: node state prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local 12121 active
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeState
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator]   "prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local"
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator]   12121
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator]   (FlareOperator.K8s.FlareSta
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [flare-operator] TEST SEAM: dropping node state event from prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121 (FLARE_TEST_DROP_NODE_STATE)
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TRACE] Event: NodeState prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121 | Result: Prepare->Active | Reason: reconstruction complete
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TcpClient] node sync v4294967359 to 10.244.0.22:12121: reply-confirmed=true
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TcpClient] node sync v4294967359 to 10.244.0.21:12121: reply-confirmed=true
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TopologyBroadcast] Broadcast attempt complete (v4294967359); all targets reply-confirmed=true
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [flare-operator] reconcile slow: 3194ms (nodes=2 M=1 S=1 D=0 P=1)
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [flare-operator] grace period: 22s remaining
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TopologyAudit] node=prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121 uid=(some e4f9df61-418d-47be-9270-19784d9278c0) desired=4294967366 reported=(some 4294967359) verdict=behind
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [flare-operator] retrying an unconfirmed topology send (pending v4294967366; publishing v4294967366)
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [flare-operator] broadcast trigger: versionMoved=true pending=v4294967366 repairHeld=0 activeNotReady=0
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [flare-operator] topology changed (v4294967359 → v4294967366), broadcasting
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TopologyBroadcast] Broadcasting node sync v4294967366 (2 nodes) to 2 pods
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [DEBUG] Received command: node state prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local 12121 active
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeState
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator]   "prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local"
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator]   12121
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator]   (FlareOperator.K8s.FlareSta
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [flare-operator] TEST SEAM: dropping node state event from prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121 (FLARE_TEST_DROP_NODE_STATE)
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TRACE] Event: NodeState prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121 | Result: Prepare->Active | Reason: reconstruction complete
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TcpClient] node sync v4294967366 to 10.244.0.21:12121: reply-confirmed=true
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TcpClient] node sync v4294967366 to 10.244.0.22:12121: reply-confirmed=true
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TopologyBroadcast] Broadcast attempt complete (v4294967366); all targets reply-confirmed=true
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [flare-operator] reconcile slow: 3214ms (nodes=2 M=1 S=1 D=0 P=1)
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [flare-operator] grace period: 14s remaining
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TopologyAudit] node=prep-evid-nodes-0.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121 uid=(some 93cf56d7-2487-442e-a55b-8ddeca662026) desired=4294967373 reported=(some 4294967366) verdict=behind
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [flare-operator] retrying an unconfirmed topology send (pending v4294967373; publishing v4294967373)
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [flare-operator] broadcast trigger: versionMoved=true pending=v4294967373 repairHeld=0 activeNotReady=0
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [flare-operator] topology changed (v4294967366 → v4294967373), broadcasting
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TopologyBroadcast] Broadcasting node sync v4294967373 (2 nodes) to 2 pods
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [DEBUG] Received command: node state prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local 12121 active
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeState
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator]   "prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local"
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator]   12121
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator]   (FlareOperator.K8s.FlareSta
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [flare-operator] TEST SEAM: dropping node state event from prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121 (FLARE_TEST_DROP_NODE_STATE)
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TRACE] Event: NodeState prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121 | Result: Prepare->Active | Reason: reconstruction complete
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TcpClient] node sync v4294967373 to 10.244.0.21:12121: reply-confirmed=true
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TcpClient] node sync v4294967373 to 10.244.0.22:12121: reply-confirmed=true
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TopologyBroadcast] Broadcast attempt complete (v4294967373); all targets reply-confirmed=true
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [flare-operator] reconcile slow: 3298ms (nodes=2 M=1 S=1 D=0 P=1)
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [flare-operator] grace period: 5s remaining
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TopologyAudit] node=prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121 uid=(some e4f9df61-418d-47be-9270-19784d9278c0) desired=4294967380 reported=(some 4294967373) verdict=behind
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [flare-operator] retrying an unconfirmed topology send (pending v4294967380; publishing v4294967380)
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [flare-operator] broadcast trigger: versionMoved=true pending=v4294967380 repairHeld=0 activeNotReady=0
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [flare-operator] topology changed (v4294967373 → v4294967380), broadcasting
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TopologyBroadcast] Broadcasting node sync v4294967380 (2 nodes) to 2 pods
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [DEBUG] Received command: node state prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local 12121 active
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeState
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator]   "prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local"
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator]   12121
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator]   (FlareOperator.K8s.FlareSta
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [flare-operator] TEST SEAM: dropping node state event from prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121 (FLARE_TEST_DROP_NODE_STATE)
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TRACE] Event: NodeState prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121 | Result: Prepare->Active | Reason: reconstruction complete
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TcpClient] node sync v4294967380 to 10.244.0.21:12121: reply-confirmed=true
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TcpClient] node sync v4294967380 to 10.244.0.22:12121: reply-confirmed=true
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TopologyBroadcast] Broadcast attempt complete (v4294967380); all targets reply-confirmed=true
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [flare-operator] PREPARE-REPAIR: prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121 stuck Prepare 12 cycles; reconstruction #1 succeeded from the current master prep-evid-nodes-0.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121 and none is running (backend reports no lineage/cursor to check) -> re-derived Prepare→Active under master prep-evid-nodes-0.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [flare-operator] reconcile slow: 3614ms (nodes=2 M=1 S=1 D=0 P=0)
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [flare-operator] grace period over after 124s: dead-node detection and graceful drain active
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [flare-operator] detected 1 dead nodes: [prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121] (breaker counts 1/2 unavailable; earlier: [])
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [flare-operator] CRITICAL: 1 of them are LIVE PODS that stopped serving (flared crashed/wedged, pod still present): [prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121]
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TopologyAudit] node=prep-evid-nodes-0.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121 uid=(some 93cf56d7-2487-442e-a55b-8ddeca662026) desired=4294967387 reported=(some 4294967380) verdict=behind
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [flare-operator] retrying an unconfirmed topology send (pending v4294967387; publishing v4294967387)
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [flare-operator] broadcast trigger: versionMoved=true pending=v4294967387 repairHeld=0 activeNotReady=0
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [flare-operator] topology changed (v4294967381 → v4294967387), broadcasting
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TopologyBroadcast] Broadcasting node sync v4294967387 (2 nodes) to 2 pods
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TcpClient] node sync v4294967387 to 10.244.0.21:12121: reply-confirmed=true
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TcpClient] node sync v4294967387 to 10.244.0.22:12121: reply-confirmed=true
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TopologyBroadcast] Broadcast attempt complete (v4294967387); all targets reply-confirmed=true
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [flare-operator] reconcile slow: 3417ms (nodes=2 M=1 S=0 D=1 P=0)
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [DEBUG] Received command: node sync
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeSync none
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [DEBUG] Sending response: NODE prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local 12121 2 2 -1 0 17 | NODE prep-evid-nodes-0.prep-evid-nodes.flare-prep-evid.svc.cluster.local 12121 0 0 0 100 16 | END | 
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [DEBUG] Received command: node sync
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeSync none
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [DEBUG] Sending response: NODE prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local 12121 2 2 -1 0 17 | NODE prep-evid-nodes-0.prep-evid-nodes.flare-prep-evid.svc.cluster.local 12121 0 0 0 100 16 | END | 
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TopologyAudit] node=prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121 uid=(some e4f9df61-418d-47be-9270-19784d9278c0) desired=4294967393 reported=(some 4294967387) verdict=behind
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [flare-operator] retrying an unconfirmed topology send (pending v4294967393; publishing v4294967393)
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [flare-operator] broadcast trigger: versionMoved=true pending=v4294967393 repairHeld=0 activeNotReady=0
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [flare-operator] topology changed (v4294967387 → v4294967393), broadcasting
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TopologyBroadcast] Broadcasting node sync v4294967393 (2 nodes) to 2 pods
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TcpClient] node sync v4294967393 to 10.244.0.22:12121: reply-confirmed=true
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TcpClient] node sync v4294967393 to 10.244.0.21:12121: reply-confirmed=true
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TopologyBroadcast] Broadcast attempt complete (v4294967393); all targets reply-confirmed=true
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [flare-operator] reconcile slow: 3276ms (nodes=2 M=1 S=0 D=1 P=0)
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [DEBUG] Received command: node sync
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeSync none
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [DEBUG] Sending response: NODE prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local 12121 2 2 -1 0 17 | NODE prep-evid-nodes-0.prep-evid-nodes.flare-prep-evid.svc.cluster.local 12121 0 0 0 100 16 | END | 
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [DEBUG] Received command: node sync
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeSync none
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [DEBUG] Sending response: NODE prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local 12121 2 2 -1 0 17 | NODE prep-evid-nodes-0.prep-evid-nodes.flare-prep-evid.svc.cluster.local 12121 0 0 0 100 16 | END | 
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TopologyAudit] node=prep-evid-nodes-0.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121 uid=(some 93cf56d7-2487-442e-a55b-8ddeca662026) desired=4294967399 reported=(some 4294967393) verdict=behind
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [flare-operator] retrying an unconfirmed topology send (pending v4294967399; publishing v4294967399)
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [flare-operator] broadcast trigger: versionMoved=true pending=v4294967399 repairHeld=0 activeNotReady=0
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [flare-operator] topology changed (v4294967393 → v4294967399), broadcasting
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TopologyBroadcast] Broadcasting node sync v4294967399 (2 nodes) to 2 pods
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TcpClient] node sync v4294967399 to 10.244.0.22:12121: reply-confirmed=true
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TcpClient] node sync v4294967399 to 10.244.0.21:12121: reply-confirmed=true
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TopologyBroadcast] Broadcast attempt complete (v4294967399); all targets reply-confirmed=true
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [flare-operator] reconcile slow: 3247ms (nodes=2 M=1 S=0 D=1 P=0)
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [DEBUG] Received command: node sync
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeSync none
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [DEBUG] Sending response: NODE prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local 12121 2 2 -1 0 17 | NODE prep-evid-nodes-0.prep-evid-nodes.flare-prep-evid.svc.cluster.local 12121 0 0 0 100 16 | END | 
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TopologyAudit] node=prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121 uid=(some e4f9df61-418d-47be-9270-19784d9278c0) desired=4294967405 reported=(some 4294967399) verdict=behind
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [flare-operator] retrying an unconfirmed topology send (pending v4294967405; publishing v4294967405)
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [flare-operator] broadcast trigger: versionMoved=true pending=v4294967405 repairHeld=0 activeNotReady=0
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [flare-operator] topology changed (v4294967399 → v4294967405), broadcasting
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TopologyBroadcast] Broadcasting node sync v4294967405 (2 nodes) to 2 pods
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TcpClient] node sync v4294967405 to 10.244.0.21:12121: reply-confirmed=true
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TcpClient] node sync v4294967405 to 10.244.0.22:12121: reply-confirmed=true
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [DEBUG] Received command: node sync
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeSync none
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [DEBUG] Sending response: NODE prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local 12121 2 2 -1 0 17 | NODE prep-evid-nodes-0.prep-evid-nodes.flare-prep-evid.svc.cluster.local 12121 0 0 0 100 16 | END | 
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TopologyBroadcast] Broadcast attempt complete (v4294967405); all targets reply-confirmed=true
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [flare-operator] reconcile slow: 3396ms (nodes=2 M=1 S=0 D=1 P=0)
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [DEBUG] Received command: node sync
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeSync none
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [DEBUG] Sending response: NODE prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local 12121 2 2 -1 0 17 | NODE prep-evid-nodes-0.prep-evid-nodes.flare-prep-evid.svc.cluster.local 12121 0 0 0 100 16 | END | 
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TopologyAudit] node=prep-evid-nodes-0.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121 uid=(some 93cf56d7-2487-442e-a55b-8ddeca662026) desired=4294967411 reported=(some 4294967405) verdict=behind
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [flare-operator] retrying an unconfirmed topology send (pending v4294967411; publishing v4294967411)
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [flare-operator] broadcast trigger: versionMoved=true pending=v4294967411 repairHeld=0 activeNotReady=0
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [flare-operator] topology changed (v4294967405 → v4294967411), broadcasting
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TopologyBroadcast] Broadcasting node sync v4294967411 (2 nodes) to 2 pods
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TcpClient] node sync v4294967411 to 10.244.0.21:12121: reply-confirmed=true
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TcpClient] node sync v4294967411 to 10.244.0.22:12121: reply-confirmed=true
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TopologyBroadcast] Broadcast attempt complete (v4294967411); all targets reply-confirmed=true
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [flare-operator] reconcile slow: 3200ms (nodes=2 M=1 S=0 D=1 P=0)
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [DEBUG] Received command: node sync
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeSync none
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [DEBUG] Sending response: NODE prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local 12121 2 2 -1 0 17 | NODE prep-evid-nodes-0.prep-evid-nodes.flare-prep-evid.svc.cluster.local 12121 0 0 0 100 16 | END | 
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [DEBUG] Received command: node sync
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeSync none
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [DEBUG] Sending response: NODE prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local 12121 2 2 -1 0 17 | NODE prep-evid-nodes-0.prep-evid-nodes.flare-prep-evid.svc.cluster.local 12121 0 0 0 100 16 | END | 
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TopologyAudit] node=prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121 uid=(some e4f9df61-418d-47be-9270-19784d9278c0) desired=4294967417 reported=(some 4294967411) verdict=behind
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [flare-operator] retrying an unconfirmed topology send (pending v4294967417; publishing v4294967417)
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [flare-operator] broadcast trigger: versionMoved=true pending=v4294967417 repairHeld=0 activeNotReady=0
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [flare-operator] topology changed (v4294967411 → v4294967417), broadcasting
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TopologyBroadcast] Broadcasting node sync v4294967417 (2 nodes) to 2 pods
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TcpClient] node sync v4294967417 to 10.244.0.21:12121: reply-confirmed=true
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TcpClient] node sync v4294967417 to 10.244.0.22:12121: reply-confirmed=true
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TopologyBroadcast] Broadcast attempt complete (v4294967417); all targets reply-confirmed=true
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [flare-operator] reconcile slow: 3233ms (nodes=2 M=1 S=0 D=1 P=0)
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [DEBUG] Received command: node sync
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeSync none
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [DEBUG] Sending response: NODE prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local 12121 2 2 -1 0 17 | NODE prep-evid-nodes-0.prep-evid-nodes.flare-prep-evid.svc.cluster.local 12121 0 0 0 100 16 | END | 
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TopologyAudit] node=prep-evid-nodes-0.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121 uid=(some 93cf56d7-2487-442e-a55b-8ddeca662026) desired=4294967423 reported=(some 4294967417) verdict=behind
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [flare-operator] retrying an unconfirmed topology send (pending v4294967423; publishing v4294967423)
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [flare-operator] broadcast trigger: versionMoved=true pending=v4294967423 repairHeld=0 activeNotReady=0
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [flare-operator] topology changed (v4294967417 → v4294967423), broadcasting
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TopologyBroadcast] Broadcasting node sync v4294967423 (2 nodes) to 2 pods
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TcpClient] node sync v4294967423 to 10.244.0.22:12121: reply-confirmed=true
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TcpClient] node sync v4294967423 to 10.244.0.21:12121: reply-confirmed=true
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TopologyBroadcast] Broadcast attempt complete (v4294967423); all targets reply-confirmed=true
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [DEBUG] Received command: node sync
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeSync none
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [DEBUG] Sending response: NODE prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local 12121 2 2 -1 0 17 | NODE prep-evid-nodes-0.prep-evid-nodes.flare-prep-evid.svc.cluster.local 12121 0 0 0 100 16 | END | 
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [flare-operator] reconcile slow: 3100ms (nodes=2 M=1 S=0 D=1 P=0)
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [DEBUG] Received command: node sync
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeSync none
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [DEBUG] Sending response: NODE prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local 12121 2 2 -1 0 17 | NODE prep-evid-nodes-0.prep-evid-nodes.flare-prep-evid.svc.cluster.local 12121 0 0 0 100 16 | END | 
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TopologyAudit] node=prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121 uid=(some e4f9df61-418d-47be-9270-19784d9278c0) desired=4294967429 reported=(some 4294967423) verdict=behind
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [flare-operator] retrying an unconfirmed topology send (pending v4294967429; publishing v4294967429)
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [flare-operator] broadcast trigger: versionMoved=true pending=v4294967429 repairHeld=0 activeNotReady=0
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [flare-operator] topology changed (v4294967423 → v4294967429), broadcasting
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TopologyBroadcast] Broadcasting node sync v4294967429 (2 nodes) to 2 pods
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TcpClient] node sync v4294967429 to 10.244.0.21:12121: reply-confirmed=true
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TcpClient] node sync v4294967429 to 10.244.0.22:12121: reply-confirmed=true
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [TopologyBroadcast] Broadcast attempt complete (v4294967429); all targets reply-confirmed=true
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [flare-operator] reconcile slow: 3267ms (nodes=2 M=1 S=0 D=1 P=0)
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [DEBUG] Received command: node sync
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeSync none
+# [pod/flare-operator-97fc9d7f9-p6jm4/flare-operator] [DEBUG] Sending response: NODE prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local 12121 2 2 -1 0 17 | NODE prep-evid-nodes-0.prep-evid-nodes.flare-prep-evid.svc.cluster.local 12121 0 0 0 100 16 | END | 
+# 
+# === flared logs (flare-prep-evid, tail 80 each) ===
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2429-_reconstruct_node_partition] 0: slave[0] (node_key=prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121, node_balance=0)
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2439-_reconstruct_node_partition] node partition map (prepare):
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:1124-reconstruct_node] reconstructing node map... (2 entries)
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2287-_reconstruct_node_partition] reconstructing node partition map... (from 2 entries in node map)
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2420-_reconstruct_node_partition] node partition map:
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2425-_reconstruct_node_partition] 0: master (node_key=prep-evid-nodes-0.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121, node_balance=100)
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2429-_reconstruct_node_partition] 0: slave[0] (node_key=prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121, node_balance=0)
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2439-_reconstruct_node_partition] node partition map (prepare):
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:1124-reconstruct_node] reconstructing node map... (2 entries)
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2287-_reconstruct_node_partition] reconstructing node partition map... (from 2 entries in node map)
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2420-_reconstruct_node_partition] node partition map:
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2425-_reconstruct_node_partition] 0: master (node_key=prep-evid-nodes-0.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121, node_balance=100)
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2429-_reconstruct_node_partition] 0: slave[0] (node_key=prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121, node_balance=0)
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2439-_reconstruct_node_partition] node partition map (prepare):
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:1124-reconstruct_node] reconstructing node map... (2 entries)
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2287-_reconstruct_node_partition] reconstructing node partition map... (from 2 entries in node map)
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2420-_reconstruct_node_partition] node partition map:
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2425-_reconstruct_node_partition] 0: master (node_key=prep-evid-nodes-0.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121, node_balance=100)
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2429-_reconstruct_node_partition] 0: slave[0] (node_key=prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121, node_balance=0)
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2439-_reconstruct_node_partition] node partition map (prepare):
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:1124-reconstruct_node] reconstructing node map... (2 entries)
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2287-_reconstruct_node_partition] reconstructing node partition map... (from 2 entries in node map)
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2420-_reconstruct_node_partition] node partition map:
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2425-_reconstruct_node_partition] 0: master (node_key=prep-evid-nodes-0.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121, node_balance=100)
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2429-_reconstruct_node_partition] 0: slave[0] (node_key=prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121, node_balance=0)
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2439-_reconstruct_node_partition] node partition map (prepare):
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:1124-reconstruct_node] reconstructing node map... (2 entries)
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2287-_reconstruct_node_partition] reconstructing node partition map... (from 2 entries in node map)
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2420-_reconstruct_node_partition] node partition map:
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2425-_reconstruct_node_partition] 0: master (node_key=prep-evid-nodes-0.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121, node_balance=100)
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2429-_reconstruct_node_partition] 0: slave[0] (node_key=prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121, node_balance=0)
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2439-_reconstruct_node_partition] node partition map (prepare):
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:1124-reconstruct_node] reconstructing node map... (2 entries)
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2287-_reconstruct_node_partition] reconstructing node partition map... (from 2 entries in node map)
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2420-_reconstruct_node_partition] node partition map:
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2425-_reconstruct_node_partition] 0: master (node_key=prep-evid-nodes-0.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121, node_balance=100)
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2429-_reconstruct_node_partition] 0: slave[0] (node_key=prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121, node_balance=0)
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2439-_reconstruct_node_partition] node partition map (prepare):
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:1124-reconstruct_node] reconstructing node map... (2 entries)
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2287-_reconstruct_node_partition] reconstructing node partition map... (from 2 entries in node map)
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2420-_reconstruct_node_partition] node partition map:
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2425-_reconstruct_node_partition] 0: master (node_key=prep-evid-nodes-0.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121, node_balance=100)
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2439-_reconstruct_node_partition] node partition map (prepare):
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:1787-_shift_node_state] shifting node_state (node_key=prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121, old_state=prepare, new_state=down)
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:1804-_shift_node_role] shifting node_role (node_key=prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121, old_role=slave, old_partition=0, new_role=proxy, new_partition=-1)
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:1124-reconstruct_node] reconstructing node map... (2 entries)
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2287-_reconstruct_node_partition] reconstructing node partition map... (from 2 entries in node map)
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2420-_reconstruct_node_partition] node partition map:
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2425-_reconstruct_node_partition] 0: master (node_key=prep-evid-nodes-0.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121, node_balance=100)
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2439-_reconstruct_node_partition] node partition map (prepare):
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:1124-reconstruct_node] reconstructing node map... (2 entries)
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2287-_reconstruct_node_partition] reconstructing node partition map... (from 2 entries in node map)
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2420-_reconstruct_node_partition] node partition map:
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2425-_reconstruct_node_partition] 0: master (node_key=prep-evid-nodes-0.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121, node_balance=100)
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2439-_reconstruct_node_partition] node partition map (prepare):
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:1124-reconstruct_node] reconstructing node map... (2 entries)
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2287-_reconstruct_node_partition] reconstructing node partition map... (from 2 entries in node map)
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2420-_reconstruct_node_partition] node partition map:
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2425-_reconstruct_node_partition] 0: master (node_key=prep-evid-nodes-0.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121, node_balance=100)
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2439-_reconstruct_node_partition] node partition map (prepare):
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:1124-reconstruct_node] reconstructing node map... (2 entries)
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2287-_reconstruct_node_partition] reconstructing node partition map... (from 2 entries in node map)
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2420-_reconstruct_node_partition] node partition map:
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2425-_reconstruct_node_partition] 0: master (node_key=prep-evid-nodes-0.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121, node_balance=100)
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2439-_reconstruct_node_partition] node partition map (prepare):
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:1124-reconstruct_node] reconstructing node map... (2 entries)
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2287-_reconstruct_node_partition] reconstructing node partition map... (from 2 entries in node map)
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2420-_reconstruct_node_partition] node partition map:
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2425-_reconstruct_node_partition] 0: master (node_key=prep-evid-nodes-0.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121, node_balance=100)
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2439-_reconstruct_node_partition] node partition map (prepare):
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:1124-reconstruct_node] reconstructing node map... (2 entries)
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2287-_reconstruct_node_partition] reconstructing node partition map... (from 2 entries in node map)
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2420-_reconstruct_node_partition] node partition map:
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2425-_reconstruct_node_partition] 0: master (node_key=prep-evid-nodes-0.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121, node_balance=100)
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2439-_reconstruct_node_partition] node partition map (prepare):
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:1124-reconstruct_node] reconstructing node map... (2 entries)
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2287-_reconstruct_node_partition] reconstructing node partition map... (from 2 entries in node map)
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2420-_reconstruct_node_partition] node partition map:
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2425-_reconstruct_node_partition] 0: master (node_key=prep-evid-nodes-0.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121, node_balance=100)
+# [pod/prep-evid-nodes-0/flared] [139886648096448][NTC][cluster.cc:2439-_reconstruct_node_partition] node partition map (prepare):
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:2429-_reconstruct_node_partition] 0: slave[0] (node_key=prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121, node_balance=0)
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:2439-_reconstruct_node_partition] node partition map (prepare):
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:1243-reconstruct_node] activation was acknowledged but the map still says prepare — re-announcing (anti-entropy)
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:1124-reconstruct_node] reconstructing node map... (2 entries)
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:2287-_reconstruct_node_partition] reconstructing node partition map... (from 2 entries in node map)
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:2420-_reconstruct_node_partition] node partition map:
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:2425-_reconstruct_node_partition] 0: master (node_key=prep-evid-nodes-0.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121, node_balance=100)
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:2429-_reconstruct_node_partition] 0: slave[0] (node_key=prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121, node_balance=0)
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:2439-_reconstruct_node_partition] node partition map (prepare):
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:1243-reconstruct_node] activation was acknowledged but the map still says prepare — re-announcing (anti-entropy)
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:1124-reconstruct_node] reconstructing node map... (2 entries)
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:2287-_reconstruct_node_partition] reconstructing node partition map... (from 2 entries in node map)
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:2420-_reconstruct_node_partition] node partition map:
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:2425-_reconstruct_node_partition] 0: master (node_key=prep-evid-nodes-0.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121, node_balance=100)
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:2429-_reconstruct_node_partition] 0: slave[0] (node_key=prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121, node_balance=0)
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:2439-_reconstruct_node_partition] node partition map (prepare):
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:1243-reconstruct_node] activation was acknowledged but the map still says prepare — re-announcing (anti-entropy)
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:1124-reconstruct_node] reconstructing node map... (2 entries)
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:2287-_reconstruct_node_partition] reconstructing node partition map... (from 2 entries in node map)
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:2420-_reconstruct_node_partition] node partition map:
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:2425-_reconstruct_node_partition] 0: master (node_key=prep-evid-nodes-0.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121, node_balance=100)
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:2429-_reconstruct_node_partition] 0: slave[0] (node_key=prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121, node_balance=0)
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:2439-_reconstruct_node_partition] node partition map (prepare):
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:1243-reconstruct_node] activation was acknowledged but the map still says prepare — re-announcing (anti-entropy)
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:1124-reconstruct_node] reconstructing node map... (2 entries)
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:2287-_reconstruct_node_partition] reconstructing node partition map... (from 2 entries in node map)
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:2420-_reconstruct_node_partition] node partition map:
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:2425-_reconstruct_node_partition] 0: master (node_key=prep-evid-nodes-0.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121, node_balance=100)
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:2429-_reconstruct_node_partition] 0: slave[0] (node_key=prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121, node_balance=0)
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:2439-_reconstruct_node_partition] node partition map (prepare):
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:1243-reconstruct_node] activation was acknowledged but the map still says prepare — re-announcing (anti-entropy)
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:1124-reconstruct_node] reconstructing node map... (2 entries)
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:2287-_reconstruct_node_partition] reconstructing node partition map... (from 2 entries in node map)
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:2420-_reconstruct_node_partition] node partition map:
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:2425-_reconstruct_node_partition] 0: master (node_key=prep-evid-nodes-0.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121, node_balance=100)
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:2429-_reconstruct_node_partition] 0: slave[0] (node_key=prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121, node_balance=0)
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:2439-_reconstruct_node_partition] node partition map (prepare):
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:1243-reconstruct_node] activation was acknowledged but the map still says prepare — re-announcing (anti-entropy)
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:1124-reconstruct_node] reconstructing node map... (2 entries)
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:2287-_reconstruct_node_partition] reconstructing node partition map... (from 2 entries in node map)
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:2420-_reconstruct_node_partition] node partition map:
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:2425-_reconstruct_node_partition] 0: master (node_key=prep-evid-nodes-0.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121, node_balance=100)
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:2439-_reconstruct_node_partition] node partition map (prepare):
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:1787-_shift_node_state] shifting node_state (node_key=prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121, old_state=prepare, new_state=down)
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:1804-_shift_node_role] shifting node_role (node_key=prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121, old_role=slave, old_partition=0, new_role=proxy, new_partition=-1)
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:1124-reconstruct_node] reconstructing node map... (2 entries)
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:2287-_reconstruct_node_partition] reconstructing node partition map... (from 2 entries in node map)
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:2420-_reconstruct_node_partition] node partition map:
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:2425-_reconstruct_node_partition] 0: master (node_key=prep-evid-nodes-0.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121, node_balance=100)
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:2439-_reconstruct_node_partition] node partition map (prepare):
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:1124-reconstruct_node] reconstructing node map... (2 entries)
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:2287-_reconstruct_node_partition] reconstructing node partition map... (from 2 entries in node map)
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:2420-_reconstruct_node_partition] node partition map:
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:2425-_reconstruct_node_partition] 0: master (node_key=prep-evid-nodes-0.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121, node_balance=100)
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:2439-_reconstruct_node_partition] node partition map (prepare):
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:1124-reconstruct_node] reconstructing node map... (2 entries)
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:2287-_reconstruct_node_partition] reconstructing node partition map... (from 2 entries in node map)
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:2420-_reconstruct_node_partition] node partition map:
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:2425-_reconstruct_node_partition] 0: master (node_key=prep-evid-nodes-0.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121, node_balance=100)
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:2439-_reconstruct_node_partition] node partition map (prepare):
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:1124-reconstruct_node] reconstructing node map... (2 entries)
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:2287-_reconstruct_node_partition] reconstructing node partition map... (from 2 entries in node map)
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:2420-_reconstruct_node_partition] node partition map:
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:2425-_reconstruct_node_partition] 0: master (node_key=prep-evid-nodes-0.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121, node_balance=100)
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:2439-_reconstruct_node_partition] node partition map (prepare):
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:1124-reconstruct_node] reconstructing node map... (2 entries)
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:2287-_reconstruct_node_partition] reconstructing node partition map... (from 2 entries in node map)
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:2420-_reconstruct_node_partition] node partition map:
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:2425-_reconstruct_node_partition] 0: master (node_key=prep-evid-nodes-0.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121, node_balance=100)
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:2439-_reconstruct_node_partition] node partition map (prepare):
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:1124-reconstruct_node] reconstructing node map... (2 entries)
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:2287-_reconstruct_node_partition] reconstructing node partition map... (from 2 entries in node map)
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:2420-_reconstruct_node_partition] node partition map:
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:2425-_reconstruct_node_partition] 0: master (node_key=prep-evid-nodes-0.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121, node_balance=100)
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:2439-_reconstruct_node_partition] node partition map (prepare):
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:1124-reconstruct_node] reconstructing node map... (2 entries)
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:2287-_reconstruct_node_partition] reconstructing node partition map... (from 2 entries in node map)
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:2420-_reconstruct_node_partition] node partition map:
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:2425-_reconstruct_node_partition] 0: master (node_key=prep-evid-nodes-0.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121, node_balance=100)
+# [pod/prep-evid-nodes-1/flared] [140027867420352][NTC][cluster.cc:2439-_reconstruct_node_partition] node partition map (prepare):
+# 
+# === pods (flare-prep-evid) ===
+# NAME                             READY   STATUS    RESTARTS   AGE     IP            NODE                      NOMINATED NODE   READINESS GATES
+# debug-prep-evid                  1/1     Running   0          3m11s   10.244.0.19   flare-e2e-control-plane   <none>           <none>
+# flare-operator-97fc9d7f9-p6jm4   1/1     Running   0          3m11s   10.244.0.20   flare-e2e-control-plane   <none>           <none>
+# prep-evid-nodes-0                1/1     Running   0          3m      10.244.0.21   flare-e2e-control-plane   <none>           <none>
+# prep-evid-nodes-1                0/1     Running   0          2m54s   10.244.0.22   flare-e2e-control-plane   <none>           <none>
+# 
+# === events (flare-prep-evid, by time) ===
+# LAST SEEN   TYPE      REASON              OBJECT                                MESSAGE
+# 3m11s       Normal    Scheduled           pod/debug-prep-evid                   Successfully assigned flare-prep-evid/debug-prep-evid to flare-e2e-control-plane
+# 3m11s       Normal    Pulled              pod/debug-prep-evid                   Container image "busybox:1.36" already present on machine
+# 3m11s       Normal    Created             pod/debug-prep-evid                   Created container debug-prep-evid
+# 3m11s       Normal    Started             pod/debug-prep-evid                   Started container debug-prep-evid
+# 3m11s       Normal    Scheduled           pod/flare-operator-97fc9d7f9-p6jm4    Successfully assigned flare-prep-evid/flare-operator-97fc9d7f9-p6jm4 to flare-e2e-control-plane
+# 3m11s       Normal    SuccessfulCreate    replicaset/flare-operator-97fc9d7f9   Created pod: flare-operator-97fc9d7f9-p6jm4
+# 3m11s       Normal    ScalingReplicaSet   deployment/flare-operator             Scaled up replica set flare-operator-97fc9d7f9 to 1
+# 3m10s       Normal    Pulled              pod/flare-operator-97fc9d7f9-p6jm4    Container image "flare-operator:test" already present on machine
+# 3m10s       Normal    Created             pod/flare-operator-97fc9d7f9-p6jm4    Created container flare-operator
+# 3m10s       Normal    Started             pod/flare-operator-97fc9d7f9-p6jm4    Started container flare-operator
+# 3m          Normal    Scheduled           pod/prep-evid-nodes-0                 Successfully assigned flare-prep-evid/prep-evid-nodes-0 to flare-e2e-control-plane
+# 3m          Normal    SuccessfulCreate    statefulset/prep-evid-nodes           create Pod prep-evid-nodes-0 in StatefulSet prep-evid-nodes successful
+# 2m59s       Normal    Pulled              pod/prep-evid-nodes-0                 Container image "flare-node:test" already present on machine
+# 2m59s       Normal    Created             pod/prep-evid-nodes-0                 Created container flared
+# 2m59s       Normal    Started             pod/prep-evid-nodes-0                 Started container flared
+# 2m54s       Normal    Scheduled           pod/prep-evid-nodes-1                 Successfully assigned flare-prep-evid/prep-evid-nodes-1 to flare-e2e-control-plane
+# 2m54s       Normal    Pulled              pod/prep-evid-nodes-1                 Container image "flare-node:test" already present on machine
+# 2m54s       Normal    Created             pod/prep-evid-nodes-1                 Created container flared
+# 2m54s       Normal    Started             pod/prep-evid-nodes-1                 Started container flared
+# 2m54s       Normal    SuccessfulCreate    statefulset/prep-evid-nodes           create Pod prep-evid-nodes-1 in StatefulSet prep-evid-nodes successful
+# 69s         Warning   Unhealthy           pod/prep-evid-nodes-1                 Readiness probe failed:
+# 
+# === describe flared pods (flare-prep-evid) ===
+# Name:             prep-evid-nodes-0
+# Namespace:        flare-prep-evid
+# Priority:         0
+# Service Account:  default
+# Node:             flare-e2e-control-plane/172.18.0.2
+# Start Time:       Thu, 01 Oct 2026 19:44:20 +0000
+# Labels:           app=flare
+#                   apps.kubernetes.io/pod-index=0
+#                   cluster=prep-evid
+#                   controller-revision-hash=prep-evid-nodes-7d7cf48f45
+#                   statefulset.kubernetes.io/pod-name=prep-evid-nodes-0
+# Annotations:      <none>
+# Status:           Running
+# IP:               10.244.0.21
+# IPs:
+#   IP:           10.244.0.21
+# Controlled By:  StatefulSet/prep-evid-nodes
+# Containers:
+#   flared:
+#     Container ID:  containerd://033e6dca73364a6581adf908d514a56f1433ea382cde466e4e76de7cd449a03a
+#     Image:         flare-node:test
+#     Image ID:      docker.io/library/import-2026-10-01@sha256:f8687b75fd38c99fbf3a8115954f3ecf35bfa08345c6383aa30b54acf7a8660c
+#     Ports:         12121/TCP (flare), 9150/TCP (metrics)
+#     Host Ports:    0/TCP (flare), 0/TCP (metrics)
+#     Command:
+#       sh
+#       -c
+#       rm -rf /tmp/flare/*.hdb /tmp/flare/*.hdb.wal /tmp/flare/rocksdb && mkdir -p /tmp/flare && rm -f /tmp/flare/flared.pid && exec flared --config=/etc/flared/extra.conf --data-dir /tmp/flare --server-port 12121 --index-server-name flare-operator.flare-prep-evid.svc.cluster.local --index-server-port 12120 --storage-type=tch --metrics-server-port 9150 --stderr
+#     State:          Running
+#       Started:      Thu, 01 Oct 2026 19:44:21 +0000
+#     Ready:          True
+#     Restart Count:  0
+#     Limits:
+#       cpu:     500m
+#       memory:  512Mi
+#     Requests:
+#       cpu:      100m
+#       memory:   256Mi
+#     Liveness:   tcp-socket :12121 delay=10s timeout=1s period=5s successThreshold=1 failureThreshold=6
+#     Readiness:  exec [/bin/bash -c exec 3<>/dev/tcp/127.0.0.1/12121 || exit 1
+# printf 'stats nodes\r\nquit\r\n' >&3
+# out=$(tr -d '\r' <&3)
+# me="$(hostname -f):12121"
+# case "$out" in *"STAT $me:state active"*) exit 0;; esac
+# # Limbo clause (mirrors the helm chart): a syncing member of a
+# # partition with NO active master has nothing to sync from —
+# # total-partition recovery. Report Ready so the OrderedReady
+# # StatefulSet can recreate the peer that will become master.
+# mypart=$(printf '%s\n' "$out" | sed -n "s/^STAT $me:partition //p")
+# [ -n "$mypart" ] || exit 1
+# [ "$mypart" != "-1" ] || exit 1
+# for key in $(printf '%s\n' "$out" | sed -n "s/^STAT \(.*\):partition $mypart$/\1/p"); do
+#   printf '%s\n' "$out" | grep -q "^STAT $key:role master$" || continue
+#   printf '%s\n' "$out" | grep -q "^STAT $key:state active$" && exit 1
+# done
+# exit 0
+# ] delay=5s timeout=4s period=5s successThreshold=1 failureThreshold=3
+#     Environment:  <none>
+#     Mounts:
+#       /etc/flared from flared-config (rw)
+#       /var/run/secrets/kubernetes.io/serviceaccount from kube-api-access-mxrm4 (ro)
+# Conditions:
+#   Type                        Status
+#   PodReadyToStartContainers   True 
+#   Initialized                 True 
+#   Ready                       True 
+#   ContainersReady             True 
+#   PodScheduled                True 
+# Volumes:
+#   flared-config:
+#     Type:      ConfigMap (a volume populated by a ConfigMap)
+#     Name:      prep-evid-config
+#     Optional:  false
+#   kube-api-access-mxrm4:
+#     Type:                    Projected (a volume that contains injected data from multiple sources)
+#     TokenExpirationSeconds:  3607
+#     ConfigMapName:           kube-root-ca.crt
+#     Optional:                false
+#     DownwardAPI:             true
+# QoS Class:                   Burstable
+# Node-Selectors:              <none>
+# Tolerations:                 node.kubernetes.io/not-ready:NoExecute op=Exists for 300s
+#                              node.kubernetes.io/unreachable:NoExecute op=Exists for 300s
+# 
+# 
+# Name:             prep-evid-nodes-1
+# Namespace:        flare-prep-evid
+# Priority:         0
+# Service Account:  default
+# Node:             flare-e2e-control-plane/172.18.0.2
+# Start Time:       Thu, 01 Oct 2026 19:44:26 +0000
+# Labels:           app=flare
+#                   apps.kubernetes.io/pod-index=1
+#                   cluster=prep-evid
+#                   controller-revision-hash=prep-evid-nodes-7d7cf48f45
+#                   statefulset.kubernetes.io/pod-name=prep-evid-nodes-1
+# Annotations:      <none>
+# Status:           Running
+# IP:               10.244.0.22
+# IPs:
+#   IP:           10.244.0.22
+# Controlled By:  StatefulSet/prep-evid-nodes
+# Containers:
+#   flared:
+#     Container ID:  containerd://492a4d30ccb545fc0d77f07016e831a1b9b58fb626e59511d90af13a227f15e8
+#     Image:         flare-node:test
+#     Image ID:      docker.io/library/import-2026-10-01@sha256:f8687b75fd38c99fbf3a8115954f3ecf35bfa08345c6383aa30b54acf7a8660c
+#     Ports:         12121/TCP (flare), 9150/TCP (metrics)
+#     Host Ports:    0/TCP (flare), 0/TCP (metrics)
+#     Command:
+#       sh
+#       -c
+#       rm -rf /tmp/flare/*.hdb /tmp/flare/*.hdb.wal /tmp/flare/rocksdb && mkdir -p /tmp/flare && rm -f /tmp/flare/flared.pid && exec flared --config=/etc/flared/extra.conf --data-dir /tmp/flare --server-port 12121 --index-server-name flare-operator.flare-prep-evid.svc.cluster.local --index-server-port 12120 --storage-type=tch --metrics-server-port 9150 --stderr
+#     State:          Running
+#       Started:      Thu, 01 Oct 2026 19:44:26 +0000
+#     Ready:          False
+#     Restart Count:  0
+#     Limits:
+#       cpu:     500m
+#       memory:  512Mi
+#     Requests:
+#       cpu:      100m
+#       memory:   256Mi
+#     Liveness:   tcp-socket :12121 delay=10s timeout=1s period=5s successThreshold=1 failureThreshold=6
+#     Readiness:  exec [/bin/bash -c exec 3<>/dev/tcp/127.0.0.1/12121 || exit 1
+# printf 'stats nodes\r\nquit\r\n' >&3
+# out=$(tr -d '\r' <&3)
+# me="$(hostname -f):12121"
+# case "$out" in *"STAT $me:state active"*) exit 0;; esac
+# # Limbo clause (mirrors the helm chart): a syncing member of a
+# # partition with NO active master has nothing to sync from —
+# # total-partition recovery. Report Ready so the OrderedReady
+# # StatefulSet can recreate the peer that will become master.
+# mypart=$(printf '%s\n' "$out" | sed -n "s/^STAT $me:partition //p")
+# [ -n "$mypart" ] || exit 1
+# [ "$mypart" != "-1" ] || exit 1
+# for key in $(printf '%s\n' "$out" | sed -n "s/^STAT \(.*\):partition $mypart$/\1/p"); do
+#   printf '%s\n' "$out" | grep -q "^STAT $key:role master$" || continue
+#   printf '%s\n' "$out" | grep -q "^STAT $key:state active$" && exit 1
+# done
+# exit 0
+# ] delay=5s timeout=4s period=5s successThreshold=1 failureThreshold=3
+#     Environment:  <none>
+#     Mounts:
+#       /etc/flared from flared-config (rw)
+#       /var/run/secrets/kubernetes.io/serviceaccount from kube-api-access-cdgp8 (ro)
+# Conditions:
+#   Type                        Status
+#   PodReadyToStartContainers   True 
+#   Initialized                 True 
+#   Ready                       False 
+#   ContainersReady             False 
+#   PodScheduled                True 
+# Volumes:
+#   flared-config:
+#     Type:      ConfigMap (a volume populated by a ConfigMap)
+#     Name:      prep-evid-config
+#     Optional:  false
+#   kube-api-access-cdgp8:
+#     Type:                    Projected (a volume that contains injected data from multiple sources)
+#     TokenExpirationSeconds:  3607
+#     ConfigMapName:           kube-root-ca.crt
+#     Optional:                false
+#     DownwardAPI:             true
+# QoS Class:                   Burstable
+# Node-Selectors:              <none>
+# Tolerations:                 node.kubernetes.io/not-ready:NoExecute op=Exists for 300s
+#                              node.kubernetes.io/unreachable:NoExecute op=Exists for 300s
+# 
+# Cleaning up cluster 'prep-evid'
+# === Suite: native-metrics ===
+# Cleaning up cluster 'native-metrics'
+# Deploying cluster 'native-metrics' in namespace 'flare-native-metrics'
+# Waiting for: namespace flare-native-metrics not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-native-metrics (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap native-metrics-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting for StatefulSet native-metrics-nodes to be ready...
+# Waiting for: all 2 pods ready (timeout: 180s)
+#   OK after 0s
+# Waiting for: 2 nodes registered (timeout: 300s)
+#   OK after 0s
+# Waiting 50s grace period for operator reconciliation...
+# Checking operator activity...
+# --- Operator logs (flare-operator-native-metrics) ---
+#   [DEBUG] Sending response: NODE native-metrics-nodes-1.native-metrics-nodes.flare-native-metrics.svc.cluster.local 12121 1 0 0 0 17 | NODE native-metrics-nodes-0.native-metrics-nodes.flare-native-metrics.svc.cluster.local 12121 0 0 0 100 16 | END | 
+#   [flare-operator] continuous-replication probe: 1 stats read(s) in 165ms (tick 5; in-mode remembered: 0, out-of-mode remembered: 0)
+#   [flare-operator] grace period: 82s remaining
+#   [TopologyAudit] node=native-metrics-nodes-0.native-metrics-nodes.flare-native-metrics.svc.cluster.local:12121 uid=(some 290c5ba4-7559-4bcc-9147-1689b302d6c6) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1971ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 75s remaining
+#   [TopologyAudit] node=native-metrics-nodes-1.native-metrics-nodes.flare-native-metrics.svc.cluster.local:12121 uid=(some 7cbcb988-21ad-4ce6-820e-db8c7265d4a6) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1886ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 68s remaining
+#   [TopologyAudit] node=native-metrics-nodes-0.native-metrics-nodes.flare-native-metrics.svc.cluster.local:12121 uid=(some 290c5ba4-7559-4bcc-9147-1689b302d6c6) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1894ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 61s remaining
+#   [TopologyAudit] node=native-metrics-nodes-1.native-metrics-nodes.flare-native-metrics.svc.cluster.local:12121 uid=(some 7cbcb988-21ad-4ce6-820e-db8c7265d4a6) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1715ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 54s remaining
+#   [TopologyAudit] node=native-metrics-nodes-0.native-metrics-nodes.flare-native-metrics.svc.cluster.local:12121 uid=(some 290c5ba4-7559-4bcc-9147-1689b302d6c6) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1801ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 47s remaining
+#   [TopologyAudit] node=native-metrics-nodes-1.native-metrics-nodes.flare-native-metrics.svc.cluster.local:12121 uid=(some 7cbcb988-21ad-4ce6-820e-db8c7265d4a6) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1715ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 40s remaining
+#   [TopologyAudit] node=native-metrics-nodes-0.native-metrics-nodes.flare-native-metrics.svc.cluster.local:12121 uid=(some 290c5ba4-7559-4bcc-9147-1689b302d6c6) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1812ms (nodes=2 M=1 S=1 D=0 P=0)
+#   
+# Cleaning up cluster 'native-metrics'
+# Tests: 15, Failures: 1
+# RESULT: FAIL
+1..15
+ok 1 - control: writes to the master replicate to the slave
+ok 2 - cut link: the master drops replica writes and the operator requests a repair
+ok 3 - the repair runs: held as proxy, confirmed, re-seated, reconstructed; keys recovered without another drop
+ok 4 - SAF-05: a drop seen while resync is disabled is held, survives an operator restart, and is repaired once the gate opens
+ok 5 - SAF-05: a ledger save that fails is marked unsaved, retried every pass, lands when allowed, and survives a restart
+ok 6 - SAF-05: a corrupt ledger is held as unavailable, never replaced by an empty one; the drop seen meanwhile is recovered once it is readable
+ok 7 - SAF-06: the delete carries the observed pod UID as an API precondition; a same-name pod with another UID is refused by the apiserver
+ok 8 - SAF-06: the UID-precondition delete has a deadline — a server that accepts and never answers returns within it
+ok 9 - the lost-activation condition is staged: the activation is dropped and a reconstruction completed
+not ok 10 - the repair re-derives Prepare→Active from completion evidence and names it
+ok 11 - GET /metrics answers HTTP 200 with Prometheus text
+ok 12 - memcached_current_items equals stats curr_items verbatim
+ok 13 - writes are reflected in /metrics (curr_items grows, set counter present)
+ok 14 - flared_version and rocksdb passthrough are exported
+ok 15 - /metrics still answers with the operator scaled to 0 (SPOF removed)

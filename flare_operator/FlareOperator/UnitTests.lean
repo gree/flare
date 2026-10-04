@@ -14,9 +14,15 @@
   made the elaborator crawl.
 -/
 import Lean.Data.Json
+import FlareOperator.Migration.Provision
+import FlareOperator.Server.TopologyBroadcast
+import FlareOperator.StateMachine.TopologyObservation
+import FlareOperator.Metrics.Prometheus
 import FlareOperator.StateMachine.ReplicaRepair
 import FlareOperator.StateMachine.SyncEvidence
 import FlareOperator.StateMachine.StatsObservation
+import FlareOperator.StateMachine.FollowEvidence
+import FlareOperator.StateMachine.K8sReconciler
 
 open FlareOperator.K8s
 open FlareOperator.ReplicaRepair
@@ -134,6 +140,80 @@ def stepsOf (l : Ledger) (o : Observation) : List Step :=
     master, and 3 drops were attributed. -/
 def relObs : Observation := obs (some 11) (some 100) (some 1) (some "succeeded") (some 1) (some masterKey) (some masterKey) (some (.Proxy, .Active))
 def lRel : Ledger := (advance lDem [(slaveKey, relObs)]).1
+
+/-- SAF-10c: a destination whose continuous follower owns the repair. -/
+def ownEp : String := "3:abc"
+def following (applied : Nat) (epoch : String := ownEp) : FollowReading :=
+  { complete := true, enabled := true, state := some "following", appliedLsn := some applied, sourceEpoch := some epoch }
+def disconnected : FollowReading := { complete := true, enabled := true, state := some "disconnected", appliedLsn := some 5, sourceEpoch := some ownEp }
+def rebuild : FollowReading := { complete := true, enabled := true, state := some "needs_rebuild", appliedLsn := some 5, sourceEpoch := some ownEp }
+def unreadable : FollowReading := {}
+/-- A complete reply from a flared without a follower (tch): not in the mode. -/
+def noFollower : FollowReading := { complete := true }
+
+def checkFollowOwnership (ctx : Ctx) : IO Unit := do
+  check ctx "the mode on and following/initial_sync/disconnected/error own; needs_rebuild, idle, off and unreadable do not"
+    (ownedByFollower (following 1) && ownedByFollower disconnected
+      && ownedByFollower { enabled := true, state := some "error" }
+      && ownedByFollower { enabled := true, state := some "initial_sync" }
+      && !ownedByFollower rebuild
+      && !ownedByFollower { enabled := true, state := some "idle" }
+      && !ownedByFollower { enabled := false, state := some "following" }
+      && !ownedByFollower unreadable)
+  check ctx "a COMPLETE reply without follower keys (tch, older flared) is NOT unreadable: not owned, ordinary repair"
+    (!noFollower.unreadable && ownershipAtRequest noFollower == some false
+      && (advanceOwned { dest := slaveKey, masterKey := masterKey, nodeKey := some slaveKey, owned := true } noFollower).2 == .handedOver)
+  check ctx "at request time an unreadable follower is Unknown: neither owned nor not-owned"
+    (ownershipAtRequest unreadable == none && ownershipAtRequest (following 1) == some true
+      && ownershipAtRequest rebuild == some false)
+  let lReq := request l1 masterKey slaveKey 3
+  let lOwn := holdOwned lReq slaveKey (some 100) (some ownEp)
+  let e := lOwn.entries.head?
+  check ctx "holding records ownership, a visible reason, the bar and its epoch"
+    ((e.map (·.owned)) == some true && (e.bind (·.hold)) == some "owned by continuous replication"
+      && (e.bind (·.mustReach)) == some 100 && (e.bind (·.barEpoch)) == some ownEp)
+  check ctx "a later drop in the same epoch raises the bar and never lowers it; a new epoch replaces it"
+    (((holdOwned lOwn slaveKey (some 150) (some ownEp)).entries.head?.bind (·.mustReach)) == some 150
+      && ((holdOwned lOwn slaveKey (some 50) (some ownEp)).entries.head?.bind (·.mustReach)) == some 100
+      && ((holdOwned lOwn slaveKey (some 7) (some "4:new")).entries.head?.bind (·.mustReach)) == some 7
+      && ((holdOwned lOwn slaveKey (some 7) (some "4:new")).entries.head?.bind (·.barEpoch)) == some "4:new")
+  let lRes := (resolve lOwn state).1
+  check ctx "an owned request is never planned for demotion while the gate is open"
+    ((plan lRes true "").2 == [] && ((plan lRes true "").1.entries.head?.bind (·.hold)) == some "owned by continuous replication")
+  let lUnk := (resolve (holdOwned lReq slaveKey (some 100) (some ownEp) "follower state unknown (stats unreadable)") state).1
+  check ctx "a request held on an unreadable follower is not demoted either"
+    ((plan lUnk true "").2 == [])
+  check ctx "following at 99 keeps; following at 100 closes without a rebuild"
+    ((advanceOwnedAll lRes [(slaveKey, following 99)]).2 == []
+      && (advanceOwnedAll lRes [(slaveKey, following 100)]).2.map (·.2) == [.closed]
+      && (advanceOwnedAll lRes [(slaveKey, following 100)]).1.entries == [])
+  check ctx "a BIGGER position in ANOTHER epoch does not close: it is a different number line"
+    ((advanceOwnedAll lRes [(slaveKey, following 100000 "9:other")]).2 == []
+      && ((advanceOwnedAll lRes [(slaveKey, following 100000 "9:other")]).1.entries.head?.map (·.owned)) == some true)
+  check ctx "a disconnected follower's position is not trusted for closing, but ownership continues"
+    ((advanceOwnedAll lRes [(slaveKey, disconnected)]).2 == []
+      && ((advanceOwnedAll lRes [(slaveKey, disconnected)]).1.entries.head?.map (·.owned)) == some true)
+  check ctx "a TRANSIENT stats failure keeps the hold and hands nothing over (no rebuild on a probe hiccup)"
+    ((advanceOwnedAll lRes [(slaveKey, unreadable)]).2 == []
+      && ((advanceOwnedAll lRes [(slaveKey, unreadable)]).1.entries.head?.map (·.owned)) == some true
+      && ((advanceOwnedAll lRes [(slaveKey, unreadable)]).1.entries.head?.bind (·.hold)) == some "follower state unknown (stats unreadable)"
+      && (plan (advanceOwnedAll lRes [(slaveKey, unreadable)]).1 true "").2 == [])
+  check ctx "after the hiccup a readable pass resumes: following past the bar closes"
+    ((advanceOwnedAll (advanceOwnedAll lRes [(slaveKey, unreadable)]).1 [(slaveKey, following 100)]).2.map (·.2) == [.closed])
+  check ctx "needs_rebuild hands the entry to the ordinary path, keeping its drops and node key"
+    ((advanceOwnedAll lRes [(slaveKey, rebuild)]).2.map (·.2) == [.handedOver]
+      && ((advanceOwnedAll lRes [(slaveKey, rebuild)]).1.entries.head?.map (·.owned)) == some false
+      && ((advanceOwnedAll lRes [(slaveKey, rebuild)]).1.entries.head?.map (·.drops)) == some 3
+      && (plan (advanceOwnedAll lRes [(slaveKey, rebuild)]).1 true "").2.length == 1)
+  check ctx "an owned entry with no recorded bar stays owned and is not closed by position"
+    ((advanceOwnedAll (holdOwned lReq slaveKey none none) [(slaveKey, following 1000)]).2 == []
+      && ((advanceOwnedAll (holdOwned lReq slaveKey none none) [(slaveKey, following 1000)]).1.entries.head?.map (·.owned)) == some true)
+  check ctx "ownership, bar and epoch survive the status round trip (an operator restart)"
+    (match Ledger.fromJson? (Ledger.toJson lRes) with
+      | some back => back == lRes && (back.entries.head?.map (·.owned)) == some true
+                     && (back.entries.head?.bind (·.mustReach)) == some 100
+                     && (back.entries.head?.bind (·.barEpoch)) == some ownEp
+      | none => false)
 
 def checkAdvanceHold (ctx : Ctx) : IO Unit := do
   let old := obs (some 10) (some 100) (some 1) (some "succeeded") (some 1) (some masterKey) (some masterKey) (some (.Proxy, .Active))
@@ -360,23 +440,526 @@ open FlareOperator.StatsObservation in
 def checkDeleteGate (ctx : Ctx) : IO Unit := do
   let ok := EmptyMasterVerdict.act
   check ctx "delete gate: fresh verdict act, successor valid, UID stable, lease held → delete"
-    (okB (deleteGate ok true true true))
+    (okB (deleteGate ok true true true true))
   check ctx "delete gate: operator LOST THE LEASE → refuse (item 5)"
-    (okB (deleteGate ok true true false) == false)
+    (okB (deleteGate ok true true true false) == false)
   check ctx "delete gate: target pod UID changed across the observation (replaced) → refuse"
-    (okB (deleteGate ok true false true) == false)
+    (okB (deleteGate ok true true false true) == false)
   check ctx "delete gate: successor invalid on the post-read map → refuse"
-    (okB (deleteGate ok false true true) == false)
+    (okB (deleteGate ok false true true true) == false)
   check ctx "delete gate: fresh verdict is skip → refuse regardless of the rest"
-    (okB (deleteGate (.skip "unknown") true true true) == false)
+    (okB (deleteGate (.skip "unknown") true true true true) == false)
   check ctx "delete gate: refusal reasons name the failing check"
-    (match deleteGate ok true true false with | .error r => (r.splitOn "lease").length > 1 | .ok _ => false)
+    (match deleteGate ok true true true false with | .error r => (r.splitOn "lease").length > 1 | .ok _ => false)
+
+
+-- ===========================================================================
+-- SAF-10c: FollowEvidence — purpose-specific eligibility, Unknown handling,
+-- failover ranking; and the FSM-side shaping / read withholding.
+-- ===========================================================================
+
+def fb : FollowEvidence.Bounds := {}   -- fresh 5 s, read lag 1000, promotion lag 100
+def fm : FollowEvidence.MasterReading := { complete := true, epoch := some "2:abc", head := some 1000 }
+def fmUnreadable : FollowEvidence.MasterReading := {}
+def fmNoEpoch : FollowEvidence.MasterReading := { complete := true, head := some 1000 }
+
+/-- A follower reading: `st` state, `applied` position, `seenAgo` seconds
+    since the master's position was observed (node clock 1000). -/
+def fr (st : String) (applied : Nat) (seenAgo : Nat := 0) (ep : String := "2:abc")
+    : FollowEvidence.Reading :=
+  { complete := true, enabled := some true, state := some st, sourceEpoch := some ep,
+    appliedLsn := some applied, sourceLsn := some 1000, sourceObservedAt := some (1000 - seenAgo),
+    lastProgressAt := some 1000, nodeTime := some 1000 }
+def frOff : FollowEvidence.Reading := { complete := true, enabled := some false, state := some "idle" }
+def frCut : FollowEvidence.Reading := {}
+def frNoState : FollowEvidence.Reading := { complete := true, enabled := some true }
+
+def judgeR (r : FollowEvidence.Reading) (m : FollowEvidence.MasterReading := fm) :=
+  FollowEvidence.judge .read fb r m
+def judgeP (r : FollowEvidence.Reading) (m : FollowEvidence.MasterReading := fm) :=
+  FollowEvidence.judge .promote fb r m
+def hasWord (v : FollowEvidence.Verdict) (w : String) : Bool := (v.reason.splitOn w).length > 1
+
+def checkFollowJudge (ctx : Ctx) : IO Unit := do
+  check ctx "an unreadable reply is Unknown for reads and promotion (never healthy, never unfit)"
+    ((judgeR frCut).isUnknown && (judgeP frCut).isUnknown
+      && FollowEvidence.unfitReason frCut (some "2:abc") == none)
+  check ctx "a complete reply with the mode off is not-in-mode: this module has no say"
+    (match judgeR frOff, judgeP frOff with | .notInMode _, .notInMode _ => true | _, _ => false)
+  check ctx "a complete reply in the mode without a state is Unknown"
+    ((judgeR frNoState).isUnknown)
+  check ctx "following, same epoch, fresh, caught up: eligible for reads and promotion"
+    ((judgeR (fr "following" 1000)).isEligible && (judgeP (fr "following" 1000)).isEligible)
+  check ctx "disconnected is ineligible (not unfit): resuming is the follower's job, but nothing is proven"
+    (!(judgeR (fr "disconnected" 1000)).isEligible && !(judgeR (fr "disconnected" 1000)).isUnknown
+      && FollowEvidence.unfitReason (fr "disconnected" 1000) (some "2:abc") == none)
+  check ctx "following another epoch is ineligible AND unfit (a copy of another history)"
+    (hasWord (judgeR (fr "following" 1000 0 "1:old")) "another history"
+      && (FollowEvidence.unfitReason (fr "following" 1000 0 "1:old") (some "2:abc")).isSome)
+  check ctx "a stale observation (6 s > 5 s) is ineligible; 5 s is still fresh"
+    (hasWord (judgeR (fr "following" 1000 6)) "stale" && (judgeR (fr "following" 1000 5)).isEligible)
+  check ctx "clock rollback cannot turn an old observation into fresh evidence"
+    ((judgeR { fr "following" 1000 with sourceObservedAt := some 1001 }).isUnknown)
+  check ctx "lag 500: within the read bound (1000) but over the promotion bound (100)"
+    ((judgeR (fr "following" 500)).isEligible && hasWord (judgeP (fr "following" 500)) "bound")
+  check ctx "lag exactly at the promotion bound is eligible"
+    ((judgeP (fr "following" 900)).isEligible)
+  check ctx "an applied position AHEAD of the master's head is ineligible (another sequence space)"
+    (hasWord (judgeR (fr "following" 1100)) "ahead")
+  check ctx "an unreadable master, or a master without a source epoch, makes the verdict Unknown"
+    ((judgeR (fr "following" 1000) fmUnreadable).isUnknown && (judgeR (fr "following" 1000) fmNoEpoch).isUnknown)
+  check ctx "needs_rebuild, initial_sync and idle are unfit; following the master's epoch is not"
+    ((FollowEvidence.unfitReason (fr "needs_rebuild" 1000) (some "2:abc")).isSome
+      && (FollowEvidence.unfitReason (fr "initial_sync" 1000) (some "2:abc")).isSome
+      && (FollowEvidence.unfitReason (fr "idle" 1000) (some "2:abc")).isSome
+      && FollowEvidence.unfitReason (fr "following" 1000) (some "2:abc") == none)
+  check ctx "survival uses the promotion bound"
+    ((FollowEvidence.judge .survive fb (fr "following" 900) fm).isEligible
+      && !(FollowEvidence.judge .survive fb (fr "following" 500) fm).isEligible)
+
+def cNodes : List (String × Int × Option FollowEvidence.Reading) :=
+  [("a", 0, some (fr "following" 900)), ("b", 0, some (fr "following" 1000)),
+   ("c", 0, some (fr "disconnected" 1000)), ("d", 0, some (fr "needs_rebuild" 1000)),
+   ("e", 0, some frOff), ("f", 0, some frCut), ("g", 0, none)]
+
+def cls1 := FollowEvidence.classify fb [] cNodes [(0, fm)]
+
+def checkFollowClassify (ctx : Ctx) : IO Unit := do
+  check ctx "ranked = proven-current followers, highest applied position first"
+    (cls1.1.ranked == ["b", "a"])
+  check ctx "disconnected and never-observed nodes are unproven; only needs_rebuild is unfit"
+    (cls1.1.unproven == ["c", "f", "g"] && cls1.1.unfit == ["d"]
+      && cls1.1.readWithheld == ["c", "d", "f", "g"])
+  check ctx "operator cold start withholds unknown replicas but preserves explicit non-WAL policy"
+    (!cls1.1.readWithheld.contains "e" && cls1.1.readWithheld.contains "f"
+      && cls1.1.readWithheld.contains "g" && cls1.1.unproven.contains "f")
+  let recovered := FollowEvidence.classify fb cls1.2.1
+    [("f", 0, some (fr "following" 1000)), ("g", 0, some frOff)] [(0, fm)]
+  check ctx "fresh catch-up or confirmed non-WAL mode restores eligibility after cold-start withholding"
+    (recovered.1.readWithheld == [] && recovered.1.ranked == ["f"])
+  let cutAgain := FollowEvidence.classify fb recovered.2.1
+    [("f", 0, some frCut), ("g", 0, none)] [(0, fm)]
+  check ctx "a recovered WAL follower is withheld on the next stats failure without marking its copy unfit"
+    (cutAgain.1.readWithheld == ["f"] && cutAgain.1.unfit == [])
+  check ctx "the mode memory records what was readable: a-d in the mode, e out, f and g unchanged"
+    (cls1.2.1.lookup "a" == some true && cls1.2.1.lookup "d" == some true
+      && cls1.2.1.lookup "e" == some false && cls1.2.1.lookup "f" == none && cls1.2.1.lookup "g" == none)
+  let cls2 := FollowEvidence.classify fb [("f", true), ("g", true)] cNodes [(0, fm)]
+  check ctx "a node remembered in the mode that is unreadable or not probed is Unknown: unproven and withheld, never unfit"
+    (cls2.1.unproven.contains "f" && cls2.1.unproven.contains "g"
+      && cls2.1.readWithheld.contains "f" && cls2.1.readWithheld.contains "g"
+      && !cls2.1.unfit.contains "f" && !cls2.1.unfit.contains "g")
+  let cls3 := FollowEvidence.classify fb [] cNodes []
+  check ctx "without a master reading nothing is proven: no ranked, following nodes unproven and withheld"
+    (cls3.1.ranked == [] && cls3.1.unproven.contains "a" && cls3.1.readWithheld.contains "a"
+      && cls3.1.unfit == ["d"])
+  -- SAF-08: a reply from a different flared process than last pass is Unknown.
+  let withBoot := fun (r : FollowEvidence.Reading) (b : Nat) => { r with bootId := some b }
+  let (m1, boots1) := FollowEvidence.markProcessChanges []
+    [("b", 0, some (withBoot (fr "following" 1000) 7))]
+  check ctx "SAF-08: a node seen for the first time is not marked (an operator restart does not withhold everyone)"
+    (m1.all (fun (_, _, r?) => !((r?.map (·.processChanged)).getD false)) && boots1 == [("b", 7)])
+  let (m2, boots2) := FollowEvidence.markProcessChanges boots1
+    [("b", 0, some (withBoot (fr "following" 1000) 8))]
+  let c2 := FollowEvidence.classify fb [("b", true)] m2 [(0, fm)]
+  check ctx "SAF-08: a changed boot id makes an otherwise eligible follower Unknown: withheld and not promotable"
+    (c2.1.readWithheld == ["b"] && c2.1.unproven == ["b"] && c2.1.ranked == [] && c2.1.unfit == [])
+  let (m3, _) := FollowEvidence.markProcessChanges boots2
+    [("b", 0, some (withBoot (fr "following" 1000) 8))]
+  let c3 := FollowEvidence.classify fb [("b", true)] m3 [(0, fm)]
+  check ctx "SAF-08: the second consistent reading of the new process restores eligibility"
+    (c3.1.readWithheld == [] && c3.1.ranked == ["b"])
+  let (_, boots4) := FollowEvidence.markProcessChanges [("b", 8), ("z", 3)]
+    [("b", 0, none)]
+  check ctx "SAF-08: an unprobed node keeps its last boot id; a node no longer listed is forgotten"
+    (boots4 == [("b", 8)])
+  let (m5, _) := FollowEvidence.markProcessChanges [("e", 1)] [("e", 0, some (withBoot frOff 2))]
+  check ctx "SAF-08: a process change of a node out of the mode keeps the legacy policy"
+    (!(FollowEvidence.classify fb [("e", false)] m5 [(0, fm)]).1.readWithheld.contains "e")
+  let farBehind : FollowEvidence.Reading := { fr "disconnected" 1000 with sourceLsn := some 500000, appliedLsn := some 1000 }
+  check ctx "failover bound: a follower more backlog than the bound behind is unfit (no failover promotion)"
+    ((FollowEvidence.unfitReason farBehind (some "2:abc") 100000).isSome
+      && (FollowEvidence.unfitReason farBehind (some "2:abc") 0).isNone)
+  let nearBehind : FollowEvidence.Reading := { fr "disconnected" 1000 with sourceLsn := some 50000, appliedLsn := some 1000 }
+  check ctx "failover bound: a follower within the bound stays a last-resort candidate (unproven, not unfit)"
+    ((FollowEvidence.unfitReason nearBehind (some "2:abc") 100000).isNone)
+  let clsFar := FollowEvidence.classify { fb with failoverMaxLag := 100000 } [("b", true)] [("b", 0, some farBehind)] [(0, fm)]
+  check ctx "failover bound: classify lists the far-behind follower as unfit"
+    (clsFar.1.unfit == ["b"] && clsFar.1.ranked == [])
+  check ctx "probe policy: in the mode every tick; out of the mode every interval; never read: now"
+    (FollowEvidence.shouldProbe [("x", true)] "x" 7 30 && !FollowEvidence.shouldProbe [("x", false)] "x" 7 30
+      && FollowEvidence.shouldProbe [("x", false)] "x" 60 30 && FollowEvidence.shouldProbe [] "x" 7 30)
+  let (changed, now) := FollowEvidence.changedSummaries [("a", (cls1.2.2.head?.map (·.summary)).getD "")] cls1.2.2
+  check ctx "only changed judgements are reported; the summaries are carried forward"
+    (!(changed.map Prod.fst).contains "a" && (changed.map Prod.fst).contains "b" && now.length == cls1.2.2.length)
+
+def s3 : FlareClusterState :=
+  ({ nodeMap := [("m", node .Master .Active 0 "m"), ("s1", node .Slave .Active 0 "s1"),
+                 ("s2", node .Slave .Active 0 "s2"), ("s3", node .Slave .Active 0 "s3"),
+                 ("dn", node .Slave .Down 0 "dn")],
+     nodeMapVersion := 1 } : FlareClusterState).rebuildPartitionMap
+
+def slavesOf (s : FlareClusterState) : List String :=
+  ((s.partitionMap.find? (·.1 == 0)).map (·.2.slaves)).getD []
+
+def checkFollowShaping (ctx : Ctx) : IO Unit := do
+  let shaped := K8sReconciler.shapePromotionCandidates ["s2"] ["s3"] [] s3
+  check ctx "shaping: excluded removed, ranked first, the rest in map order; nodeMap untouched"
+    (slavesOf shaped == ["s3", "s1", "dn"] && shaped.nodeMap == s3.nodeMap)
+  check ctx "shaping: unproven go last; empty lists are the identity"
+    (slavesOf (K8sReconciler.shapePromotionCandidates [] [] ["s1"] s3) == ["s2", "s3", "dn", "s1"]
+      && (K8sReconciler.shapePromotionCandidates [] [] [] s3).partitionMap == s3.partitionMap)
+  check ctx "the successor search sees the shaped order (proven follower first)"
+    ((shaped.partitionMap.find? (·.1 == 0)).bind (fun (_, p) => K8sReconciler.findActiveSuccessor shaped p 0) == some "s3")
+  check ctx "drain shaping (unfit ++ unproven excluded) can leave NO successor: the guard then keeps the master"
+    (slavesOf (K8sReconciler.shapePromotionCandidates ["s1", "s2", "s3", "dn"] [] [] s3) == [])
+  let held := K8sReconciler.withholdReads ["s1", "m", "dn"] s3.nodeMap
+  check ctx "withholding: a listed Slave gets balance 0; master, Down corpse and unlisted slaves untouched; keys preserved"
+    ((held.lookup "s1").map (·.balance) == some 0 && (held.lookup "m").map (·.balance) == some 100
+      && (held.lookup "dn") == s3.nodeMap.lookup "dn" && (held.lookup "s2").map (·.balance) == some 100
+      && held.map Prod.fst == s3.nodeMap.map Prod.fst)
+  check ctx "the masterless refill skips an excluded (unfit) Active slave"
+    (let noMaster : FlareClusterState := { s3 with nodeMap := s3.nodeMap.filter (·.1 != "m") }
+     let refilled := K8sReconciler.promoteMasterlessPartition noMaster 0 ["s1", "s2", "s3"] [] [] ["s1"]
+     (refilled.nodeMap.find? (fun kv => kv.2.role == FlareRole.Master)).map (·.1) == some "s2")
+  check ctx "classify reports a follower that declared needs_rebuild, with flared's reason"
+    (let r := { fr "needs_rebuild" 1000 with lastReason := some "epoch_mismatch" }
+     (FollowEvidence.classify fb [] [("d", 0, some r)] [(0, fm)]).1.needsRebuild == [("d", "epoch_mismatch")])
+  check ctx "requestRebuild adds one un-owned, resolved request per node and is idempotent; plan then demotes it"
+    (let (l1, a1) := requestRebuild empty masterKey slaveKey
+     let (l2, a2) := requestRebuild l1 masterKey slaveKey
+     a1 && !a2 && l2.entries.length == 1
+       && (l1.entries.head?.map (fun e => e.nodeKey == some slaveKey && !e.owned && e.drops == 0)) == some true
+       && ((plan l1 true "").2.map Prod.fst) == [slaveKey])
+  check ctx "requestRebuild adds nothing for a node that already has an (owned) entry"
+    (let owned := holdOwned (resolve (request empty masterKey slaveKey 1) state).1 slaveKey (some 5) (some ownEp)
+     !(requestRebuild owned masterKey slaveKey).2)
+  -- The two routes to a rebuild request RACE (design §5.4): a drop counted
+  -- for the node (refused forwards after an epoch change) and the
+  -- follower's own needs_rebuild. In either order there is exactly one
+  -- entry, un-owned, resolved to the node, demoted once by plan.
+  check ctx "race: drop request first, then the follower's declaration → one entry, drops kept, one demotion"
+    (let l1 := (resolve (request empty masterKey slaveKey 2) state).1
+     let (l2, added) := requestRebuild l1 masterKey slaveKey
+     !added && l2.entries.length == 1 && (l2.entries.head?.map (·.drops)) == some 2
+       && ((plan l2 true "").2.map Prod.fst) == [slaveKey])
+  check ctx "race: the follower's declaration first, then a drop → one entry with the drops added, one demotion"
+    (let (l1, added) := requestRebuild empty masterKey slaveKey
+     let l2 := (resolve (request l1 masterKey slaveKey 3) state).1
+     added && l2.entries.length == 1 && (l2.entries.head?.map (·.drops)) == some 3
+       && (l2.entries.head?.map (·.owned)) == some false
+       && ((plan l2 true "").2.map Prod.fst) == [slaveKey])
+  check ctx "race: a drop on an OWNED entry and the follower's declaration in the same pass → hand-over, single un-owned request"
+    (let owned := holdOwned (resolve (request empty masterKey slaveKey 1) state).1 slaveKey (some 5) (some ownEp)
+     let (afterAdv, steps) := advanceOwnedAll owned [(slaveKey, rebuild)]
+     let (l2, added) := requestRebuild afterAdv masterKey slaveKey
+     steps.map (·.2) == [.handedOver] && !added && l2.entries.length == 1
+       && (l2.entries.head?.map (·.owned)) == some false
+       && ((plan l2 true "").2.map Prod.fst) == [slaveKey])
+  check ctx "deleteGate: an unproven surviving follower refuses the delete"
+    (match StatsObservation.deleteGate .act true false true true with
+     | .error r => (r.splitOn "continuous-replication").length > 1
+     | .ok _ => false)
+
+private def checkMemoryConfig (ctx : Ctx) : IO Unit := do
+  let empty : RocksdbConfigSpec := {}
+  check ctx "unset memory settings preserve flared defaults" (!empty.hasAny && empty.toExtraConf == "")
+  let r : RocksdbConfigSpec := {
+    blockCacheSizeMb := some 64
+    writeBufferSizeMb := some 16
+    maxWriteBufferNumber := some 3
+    walTtlSeconds := some 900 }
+  let text := r.toExtraConf
+  check ctx "memory config renders all three options alongside WAL retention"
+    (r.hasAny && text.splitOn "\n" == ["rocksdb-block-cache-size-mb = 64",
+      "rocksdb-write-buffer-size-mb = 16", "rocksdb-max-write-buffer-number = 3",
+      "rocksdb-wal-ttl-seconds = 900"])
+  for r in ([{ blockCacheSizeMb := some 64 }, { writeBufferSizeMb := some 16 },
+      { maxWriteBufferNumber := some 3 }] : List RocksdbConfigSpec) do
+    check ctx "a memory-only spec is not ignored" r.hasAny
+  let yaml := FlareOperator.Migration.Provision.rocksdbSpecYaml r
+  check ctx "migration preserves the memory budget"
+    ((yaml.splitOn "blockCacheSizeMb: 64").length == 2 &&
+     (yaml.splitOn "writeBufferSizeMb: 16").length == 2 &&
+     (yaml.splitOn "maxWriteBufferNumber: 3").length == 2)
+
+/-- SAF-11: the breaker counts capacity unavailable NOW, so a majority
+    outage spread over ticks trips it. -/
+private def checkBreakerUnavailable (ctx : Ctx) : IO Unit := do
+  let node := fun (h : String) (role : FlareRole) (st : FlareState) =>
+    (s!"{h}:12121", ({ serverName := h, serverPort := 12121, role, state := st, partition := 0 } : FlareNode))
+  let cs := fun (ns : List (String × FlareNode)) =>
+    ({ FlareClusterState.default with nodeMap := ns } : FlareClusterState)
+  let cfg : CircuitBreakerConfig := {}
+  let unavail := K8sReconciler.breakerUnavailableKeys
+  let trips := fun (st : FlareClusterState) (dead live : List String) =>
+    (K8sReconciler.circuitBreakerDecision (unavail st dead live).length st.nodeMap.length cfg false).1
+      == .RecoveryRefill
+  let k := fun (h : String) => s!"{h}:12121"
+  -- 4 nodes, one partition master + 3 slaves (the 4→1 E2E shape).
+  let t1 := cs [node "a" .Master .Active, node "b" .Slave .Active, node "c" .Slave .Active, node "d" .Slave .Active]
+  check ctx "tick 1: one of four dead (25%) does not trip"
+    (!trips t1 [k "b"] [k "a", k "c", k "d"])
+  -- After failover b is Proxy+Down; c dies in the next tick.
+  let t2 := cs [node "a" .Master .Active, node "b" .Proxy .Down, node "c" .Slave .Active, node "d" .Slave .Active]
+  check ctx "tick 2: a second death with the first already Down (50%) trips"
+    (trips t2 [k "c"] [k "a", k "d"])
+  check ctx "the old per-tick count (1 of 4 in tick 2) would not have tripped"
+    ((K8sReconciler.circuitBreakerDecision 1 4 cfg false).1 == .AfterHandleFailover)
+  check ctx "a Prepare node with no live pod counts; one with a live pod does not"
+    (unavail (cs [node "a" .Master .Active, node "p" .Slave .Prepare, node "q" .Slave .Prepare]) [] [k "a", k "q"]
+      == [k "p"])
+  check ctx "a healthy proxy is not unavailable"
+    (unavail (cs [node "a" .Master .Active, node "x" .Proxy .Active]) [] [k "a", k "x"] == [])
+  check ctx "a node dead this tick is counted once even if also Down-eligible"
+    ((unavail (cs [node "a" .Master .Active, node "b" .Slave .Active]) [k "b"] [k "a"]).length == 1)
+  let big := cs ((List.range 8).map fun i =>
+    node s!"n{i}" (if i == 0 then .Master else .Slave) (if i == 7 then .Down else .Active))
+  let pair := cs [node "a" .Master .Active, node "b" .Slave .Active]
+  check ctx "read-unavailable-error renders into extra.conf only when set"
+    (({ readUnavailableError := some true } : RocksdbConfigSpec).toExtraConf == "read-unavailable-error = true"
+      && ({ readUnavailableError := some false } : RocksdbConfigSpec).toExtraConf == "read-unavailable-error = false"
+      && ({} : RocksdbConfigSpec).toExtraConf == ""
+      && ({ readUnavailableError := some true } : RocksdbConfigSpec).hasAny)
+  check ctx "continuous replication flags render into extra.conf, so a spec change cannot drop them"
+    (({ replIdentityForward := some true, replFollowEnabled := some true, replFollowPollIntervalUsec := some 200000 } : RocksdbConfigSpec).toExtraConf
+      == "repl-identity-forward = true\nrepl-follow-enabled = true\nrepl-follow-poll-interval-usec = 200000")
+  check ctx "maxTotalThreadQueue renders into extra.conf"
+    (({ maxTotalThreadQueue := some 200000 } : RocksdbConfigSpec).toExtraConf == "max-total-thread-queue = 200000")
+  check ctx "breaker floor: one dead node of two (50%) does not trip with the default minimum of 2"
+    (!trips pair [k "a"] [k "b"])
+  check ctx "breaker floor: minUnavailableToTrip = 1 restores tripping on a single death"
+    ((K8sReconciler.circuitBreakerDecision 1 2 { cfg with minUnavailableToTrip := 1 } false).1 == .RecoveryRefill)
+  check ctx "breaker floor: two unavailable of four (50%) still trips"
+    ((K8sReconciler.circuitBreakerDecision 2 4 cfg false).1 == .RecoveryRefill)
+  let st := cs [node "a" .Master .Active, node "b" .Slave .Prepare, node "c" .Slave .Active]
+  check ctx "NotReady streaks: an Active node's streak grows; a Prepare node's restarts at 0"
+    (K8sReconciler.unreadyStreaks [(k "b", 9), (k "c", 2)] [k "b", k "c"] st == [(k "c", 3)])
+  let stAct := cs [node "a" .Master .Active, node "b" .Slave .Active, node "c" .Slave .Active]
+  check ctx "NotReady streaks: a node that just became Active starts from 1, not from its Prepare streak"
+    (K8sReconciler.unreadyStreaks (K8sReconciler.unreadyStreaks [] [k "b"] st) [k "b"] stAct == [(k "b", 1)])
+  check ctx "NotReady streaks: a node that turns Ready drops out"
+    (K8sReconciler.unreadyStreaks [(k "c", 4)] [] stAct == [])
+  check ctx "one long-Down node in eight (12%) does not trip"
+    (!trips big [] ((List.range 7).map fun i => k s!"n{i}"))
+
+private def checkTopologyDelivery (ctx : Ctx) : IO Unit := do
+  check ctx "only a complete OK response confirms topology delivery"
+    (FlareOperator.Server.topologyAckAccepted "OK\r\n")
+  for reply in ["", "OK", "SERVER_ERROR node sync error\r\n", "CLIENT_ERROR format error\r\n", "OK\r\nextra"] do
+    check ctx "missing, truncated or rejected topology reply remains unconfirmed"
+      (!FlareOperator.Server.topologyAckAccepted reply)
+  check ctx "first failed send retains its committed version"
+    (FlareOperator.Server.pendingTopologyAfterAttempt none 100 false == some 100)
+  check ctx "subsequent failures retain earliest pending version even as map advances"
+    (FlareOperator.Server.pendingTopologyAfterAttempt (some 100) 110 false == some 100)
+  check ctx "confirmed latest map clears pending delivery"
+    (FlareOperator.Server.pendingTopologyAfterAttempt (some 100) 110 true == none)
+  let trig := fun (moved : Bool) (pending : Option Nat) (held active : Nat) =>
+    ({ versionMoved := moved, pending, repairHeld := held, activeNotReady := active } :
+      FlareOperator.Server.BroadcastTriggers)
+  check ctx "a pass at rest with nothing pending does not send"
+    (!(trig false none 0 0).any)
+  check ctx "each trigger alone sends"
+    ((trig true none 0 0).any && (trig false (some 7) 0 0).any &&
+     (trig false none 1 0).any && (trig false none 0 1).any)
+  check ctx "startup republish shape: pending only, version unchanged"
+    ((trig false (some 7) 0 0).pendingOnly)
+  check ctx "pending plus any other reason is not attributable to pending alone"
+    (!(trig true (some 7) 0 0).pendingOnly && !(trig false (some 7) 1 0).pendingOnly &&
+     !(trig false (some 7) 0 1).pendingOnly && !(trig false none 0 0).pendingOnly)
+  let g := FlareOperator.Server.startupGeneration
+  let u := FlareOperator.Server.generationUnit
+  check ctx "SAF-09: a recreated Lease (transitions 0) still yields a generation above the persisted one"
+    (g 0 (2 * u + 9) == 3)
+  check ctx "SAF-09: a Lease count above the persisted generation wins"
+    (g 5 (3 * u + 7) == 5)
+  check ctx "SAF-09: equal Lease count and persisted generation still move up by one"
+    (g 3 (3 * u + 1) == 4)
+  check ctx "SAF-09: a fresh cluster starts at generation 1"
+    (g 0 0 == 1)
+  check ctx "SAF-09: the first version of a new leader is above the persisted version"
+    (FlareOperator.Server.startupVersion 0 (2 * u + 9) > 2 * u + 9)
+  check ctx "SAF-09: a version is sent only when the durable record holds it"
+    (FlareOperator.Server.persistedCovers 10 10 && FlareOperator.Server.persistedCovers 11 10
+      && !FlareOperator.Server.persistedCovers 9 10)
+  check ctx "trigger label names every reason"
+    ((trig false (some 7) 0 0).label == "versionMoved=false pending=v7 repairHeld=0 activeNotReady=0")
+
+private def checkTopologyObservation (ctx : Ctx) : IO Unit := do
+  let parse := FlareOperator.TopologyObservation.reportedVersion
+  let judge := FlareOperator.TopologyObservation.judge
+  check ctx "complete stats expose the applied topology version"
+    (parse "STAT node_map_version 42\r\nEND\r\n" == some 42)
+  for reply in ["STAT node_map_version 42\r\n", "END\r\n", "STAT node_map_version bad\r\nEND\r\n",
+      "STAT node_map_version 42\r\nSTAT node_map_version 43\r\nEND\r\n"] do
+    check ctx "missing, truncated, invalid or duplicate versions are Unknown" (parse reply == none)
+  check ctx "observed older map needs delivery, not failover"
+    (judge 42 (some "uid-a") (some "uid-a") (some 41) == .behind)
+  check ctx "same-version observation is current"
+    (judge 42 (some "uid-a") (some "uid-a") (some 42) == .current)
+  check ctx "newer recipient is an authority mismatch, not a lagging recipient"
+    (judge 42 (some "uid-a") (some "uid-a") (some 43) == .ahead)
+  check ctx "same-name Pod replacement invalidates the reply"
+    (judge 42 (some "uid-a") (some "uid-b") (some 42) == .unknown)
+  check ctx "missing UID cannot confirm application"
+    (judge 42 none none (some 42) == .unknown)
+  let old : FlareOperator.TopologyObservation.Sample := {
+    nodeKey := "n", uid := some "old", reportedVersion := some 42
+    observedAtMs := 1, verdict := .current }
+  let fresh := { old with uid := some "new", reportedVersion := none, verdict := .unknown }
+  let audit := FlareOperator.TopologyObservation.record { samples := [old, { old with nodeKey := "gone" }] } ["n"] fresh
+  check ctx "fresh Unknown replaces old confirmation and removed nodes are pruned"
+    (match audit.samples with
+     | [s] => s.uid == some "new" && s.verdict == .unknown
+     | _ => false)
+
+private def checkTopologyMetrics (ctx : Ctx) : IO Unit := do
+  let s : FlareOperator.TopologyObservation.Sample := {
+    nodeKey := "n", uid := some "uid", reportedVersion := some 42
+    observedAtMs := 1000, verdict := .current }
+  let classify := FlareOperator.TopologyObservation.observedVerdict
+  check ctx "new desired version invalidates old current verdict"
+    (classify 43 1001 60000 (some s) == .behind)
+  check ctx "expired current observation becomes Unknown"
+    (classify 42 61001 60000 (some s) == .unknown)
+  check ctx "future timestamp is Unknown"
+    (classify 42 999 60000 (some s) == .unknown)
+  check ctx "UID-invalid observation is not rehabilitated by a matching number"
+    (classify 42 1001 60000 (some { s with verdict := .unknown }) == .unknown)
+  let counts := FlareOperator.TopologyObservation.summarize { samples := [s] } ["n", "unseen"] 43 1001 60000
+  check ctx "summary counts fresh lag and missing feedback separately"
+    (counts.behind == 1 && counts.unknown == 1 && counts.ahead == 0)
+  check ctx "removed recipients do not remain in counts"
+    (FlareOperator.TopologyObservation.summarize { samples := [s] } [] 43 1001 60000 == {})
+  let metrics ← FlareOperator.Metrics.Prometheus.initMetrics
+  metrics.topologyBehindNodes.set 2
+  metrics.topologyAheadNodes.set 1
+  metrics.topologyUnknownNodes.set 3
+  let rolesState : FlareClusterState := { FlareClusterState.default with nodeMap := [
+    ("c-nodes-0.c-nodes.ns.svc.cluster.local:12121", { serverName := "c-nodes-0.c-nodes.ns.svc.cluster.local", serverPort := 12121, role := FlareRole.Master, state := FlareState.Active, partition := 0 }),
+    ("c-nodes-1.c-nodes.ns.svc.cluster.local:12121", { serverName := "c-nodes-1.c-nodes.ns.svc.cluster.local", serverPort := 12121, role := FlareRole.Slave, state := FlareState.Prepare, partition := 0 })] }
+  FlareOperator.Metrics.Prometheus.updateNodeCounts metrics rolesState
+  let out ← FlareOperator.Metrics.Prometheus.exportMetrics metrics "unit"
+  check ctx "EV-15: one role sample per node, labelled with pod, partition, role and state"
+    ((out.splitOn "flare_operator_node_role{cluster=\"unit\",pod=\"c-nodes-0\",partition=\"0\",role=\"master\",state=\"active\"} 1\n").length == 2
+      && (out.splitOn "flare_operator_node_role{cluster=\"unit\",pod=\"c-nodes-1\",partition=\"0\",role=\"slave\",state=\"prepare\"} 1\n").length == 2)
+  for name in ["flare_operator_topology_observed_behind_nodes", "flare_operator_topology_observed_ahead_nodes", "flare_operator_topology_unknown_nodes"] do
+    check ctx "topology gauge is present in actual metrics exporter"
+      ((out.splitOn s!"# TYPE {name} gauge").length == 2)
+
+def activationCrd : FlareClusterView :=
+  { metadata := { name := some "unit", «namespace» := some "default" }
+    spec := { partitions := 1, replicas := 2 } }
+
+def activationState (st : FlareState) : FlareClusterState :=
+  { nodeMap := [("a:12121", node .Master .Active 0 "a"), ("b:12121", node .Slave st 0 "b")],
+    nodeMapVersion := 7 }
+
+def isOk : Flare.FlareResponse → Bool
+  | .OK => true
+  | _ => false
+
+def checkReactivation (ctx : Ctx) : IO Unit := do
+  -- CI run 37007523101: the operator's PREPARE-REPAIR activated a replica
+  -- while flared was still finishing its reconstruction; flared's own report
+  -- was then rejected as 0→0, and it retried the whole reconstruction.
+  let s := activationState .Active
+  let (s', r) := Reconciler.reconcileStep s activationCrd (.NodeState "b" 12121 .Active)
+  check ctx "re-activation of an Active node is acknowledged and changes nothing"
+    (isOk r && s'.nodeMap == s.nodeMap && s'.nodeMapVersion == s.nodeMapVersion)
+  let (_, rReady) := Reconciler.reconcileStep s activationCrd (.NodeState "a" 12121 .Ready)
+  check ctx "an Active master reporting Ready again is acknowledged" (isOk rReady)
+  let (sd, rDown) := Reconciler.reconcileStep (activationState .Down) activationCrd (.NodeState "b" 12121 .Active)
+  check ctx "a Down node still cannot report itself Active"
+    (!isOk rDown && sd.nodeMap == (activationState .Down).nodeMap)
+  let (sp, rPrep) := Reconciler.reconcileStep (activationState .Prepare) activationCrd (.NodeState "b" 12121 .Active)
+  check ctx "Prepare → Active under an Active master is still applied"
+    (isOk rPrep && (sp.lookupNode "b:12121").map (·.state) == some .Active)
+
+def holdNode (r : FlareRole) (st : FlareState) (p : Int) (nm : String) (lmo : Int := -1) : FlareNode :=
+  { serverName := nm, serverPort := 12121, role := r, state := st, partition := p, lastMasterOf := lmo }
+
+/-- After failover: the dead master is Proxy/Down (lastMasterOf 0), its only
+    follower is Active but unfit (too far behind). -/
+def holdState : FlareClusterState :=
+  ({ nodeMap := [("m", holdNode .Proxy .Down (-1) "m" 0), ("f", holdNode .Slave .Active 0 "f")],
+     nodeMapVersion := 5 } : FlareClusterState).rebuildPartitionMap
+
+def masterOf (s : FlareClusterState) : Option String :=
+  (s.nodeMap.find? (fun kv => kv.2.role == FlareRole.Master)).map (·.1)
+
+def checkFailoverLagHold (ctx : Ctx) : IO Unit := do
+  -- CI-free reproduction (2026-10-03): without the hold, the refill's
+  -- last-resort tier crowned the unfit follower in the pass that failed its
+  -- master over, so failoverMaxLag protected nothing.
+  check ctx "lag hold off: the refill crowns the unfit follower as before"
+    (masterOf (K8sReconciler.promoteMasterlessPartition holdState 0 ["f"] [] ["f"] ["f"]) == some "f")
+  check ctx "lag hold on, ex-master away: the unfit follower is NOT crowned; the partition stays masterless"
+    (masterOf (K8sReconciler.promoteMasterlessPartition holdState 0 ["f"] [] ["f"] ["f"] true) == none)
+  check ctx "the held partition is reported with its follower"
+    (K8sReconciler.heldForExMaster (K8sReconciler.promoteMasterlessPartition holdState 0 ["f"] [] ["f"] ["f"] true)
+      activationCrd ["f"] ["f"] ["f"] == [(0, ["f"])])
+  let back : FlareClusterState :=
+    ({ holdState with nodeMap := [("m", holdNode .Slave .Prepare 0 "m" 0), ("f", holdNode .Slave .Active 0 "f")] }).rebuildPartitionMap
+  check ctx "ex-master back WITH data: it is crowned, not the unfit follower"
+    (masterOf (K8sReconciler.promoteMasterlessPartition back 0 ["m", "f"] [] ["m", "f"] ["f"] true) == some "m")
+  check ctx "ex-master back EMPTY: nothing to wait for, the unfit follower is crowned"
+    (masterOf (K8sReconciler.promoteMasterlessPartition back 0 ["m", "f"] [] ["f"] ["f"] true) == some "f")
+  check ctx "wait budget over (partition in the expired list): the unfit follower is crowned"
+    (masterOf (K8sReconciler.promoteMasterlessPartitions holdState activationCrd ["f"] [] ["f"] ["f"] true [0]) == some "f"
+      && masterOf (K8sReconciler.promoteMasterlessPartitions holdState activationCrd ["f"] [] ["f"] ["f"] true []) == none)
+  let crdHold : K8sReconciler.FlareReconcileState :=
+    { followUnfitKeys := ["m", "f"], followHoldEnabled := true, livePodKeys := ["m", "f"], dataBearingKeys := ["m", "f"] }
+  check ctx "an ex-master re-seated on its partition is not reported NOT LOSS-FREE, even when probed unfit"
+    (K8sReconciler.refillHoldEffects back
+      (K8sReconciler.promoteMasterlessPartition back 0 ["m", "f"] [] ["m", "f"] ["f"] true) activationCrd crdHold
+      |>.isEmpty)
+  check ctx "an unfit follower crowned after the wait is reported NOT LOSS-FREE"
+    ((K8sReconciler.refillHoldEffects holdState
+      (K8sReconciler.promoteMasterlessPartitions holdState activationCrd ["f"] [] ["f"] ["f"] true [0]) activationCrd
+      { crdHold with livePodKeys := ["f"], dataBearingKeys := ["f"] }).length == 1)
+  check ctx "a FIT follower is crowned at once with the hold on"
+    (masterOf (K8sReconciler.promoteMasterlessPartition holdState 0 ["f"] [] ["f"] [] true) == some "f")
+
+/-- CI 37030725289 sequence: after failover the ex-master entry is
+    Proxy/Down, partition -1, lastMasterOf 0; the unfit follower is Active. -/
+def holdKeyed : FlareClusterState :=
+  ({ nodeMap := [("m:12121", holdNode .Proxy .Down (-1) "m" 0), ("f:12121", holdNode .Slave .Active 0 "f")],
+     nodeMapVersion := 5 } : FlareClusterState).rebuildPartitionMap
+
+def checkExMasterReturn (ctx : Ctx) : IO Unit := do
+  let (s1, _) := Reconciler.reconcileStep holdKeyed activationCrd (.NodeAdd "m" 12121)
+  let m1 := s1.lookupNode "m:12121"
+  check ctx "a failed-over ex-master re-registers as a syncing slave of its old partition, keeping lastMasterOf"
+    (m1.map (fun n => (n.role == .Slave, n.state == .Prepare, n.partition, n.lastMasterOf)) == some (true, true, 0, 0))
+  let s2 := K8sReconciler.assignProxiesPure s1 activationCrd ["m:12121", "f:12121"] [] [] ["f:12121"]
+  check ctx "the zombie guard does not promote an excluded (unfit) Active slave"
+    (masterOf s2 == none)
+  let s3 := K8sReconciler.promoteMasterlessPartition s2 0 ["m:12121", "f:12121"] [] ["m:12121", "f:12121"] ["f:12121", "m:12121"] true
+  check ctx "the refill re-seats the returning data-bearing ex-master, not the unfit follower"
+    (masterOf s3 == some "m:12121")
+  let px : FlareClusterState :=
+    ({ nodeMap := [("p:12121", holdNode .Proxy .Active (-1) "p"), ("f:12121", holdNode .Slave .Active 0 "f")],
+       nodeMapVersion := 5 } : FlareClusterState).rebuildPartitionMap
+  let (pa, _) := Reconciler.autoAssign px activationCrd "p:12121" (holdNode .Proxy .Active (-1) "p") ["p:12121", "f:12121"] [] ["f:12121"]
+  check ctx "a proxy is neither crowned over nor used to promote an unfit-only partition (left to the refill)"
+    (masterOf pa == none && pa.nodeMap == px.nodeMap)
+  let (pb, _) := Reconciler.autoAssign px activationCrd "p:12121" (holdNode .Proxy .Active (-1) "p") ["p:12121", "f:12121"]
+  check ctx "without exclusions the zombie guard still promotes the Active slave"
+    (masterOf pb == some "f:12121")
+  let act : FlareClusterState :=
+    { nodeMap := [("a:12121", holdNode .Master .Active 0 "a"), ("m:12121", holdNode .Slave .Prepare 0 "m" 0)], nodeMapVersion := 7 }
+  let (sa, _) := Reconciler.reconcileStep act activationCrd (.NodeState "m" 12121 .Active)
+  check ctx "a slave that activates under an Active master drops its lastMasterOf marker"
+    ((sa.lookupNode "m:12121").map (·.lastMasterOf) == some (-1))
 
 def run : IO UInt32 := do
   let ctx : Ctx := { failures := ← IO.mkRef [], count := ← IO.mkRef 0 }
   checkObserve ctx
   checkRequestResolve ctx
   checkGate ctx
+  checkFollowOwnership ctx
   checkAdvanceHold ctx
   checkAdvanceComplete ctx
   checkJson ctx
@@ -385,6 +968,17 @@ def run : IO UInt32 := do
   checkJudgeAcceptance ctx
   checkStatsObservation ctx
   checkDeleteGate ctx
+  checkFollowJudge ctx
+  checkFollowClassify ctx
+  checkFollowShaping ctx
+  checkMemoryConfig ctx
+  checkTopologyDelivery ctx
+  checkBreakerUnavailable ctx
+  checkTopologyObservation ctx
+  checkTopologyMetrics ctx
+  checkReactivation ctx
+  checkFailoverLagHold ctx
+  checkExMasterReturn ctx
   let failures ← ctx.failures.get
   let n ← ctx.count.get
   IO.println s!"1..{n}"

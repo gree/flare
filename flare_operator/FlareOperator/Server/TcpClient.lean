@@ -54,8 +54,9 @@ private def sendString (sock : Socket) (s : String) : IO Unit := do
   let t := promise.result!
   for _ in [0:60] do
     if (← IO.hasFinished t) then
-      let _ := t.get
-      return ()
+      match t.get with
+      | .ok _ => return ()
+      | .error e => throw (IO.userError s!"socket send failed: {e}")
     IO.sleep 50
   throw (IO.userError "send timed out after 3s (peer accepted but stalled)")
 
@@ -117,16 +118,41 @@ def probeNodeReachable (ip : String) (port : Nat) : IO Bool := do
       Operator → flared: "node sync <version>\r\n"
       Operator → flared: "NODE <name> <port> <role> <state> <partition> <balance> <thread>\r\n" (repeated)
       Operator → flared: "END\r\n"
+      flared → Operator: "OK\r\n" (or error, which remains retry-pending)
       <operator disconnects>
 
     Reference: C++ src/lib/queue_node_sync.cc::run_client() -/
-def sendNodeSyncToNode (ip : String) (port : Nat) (version : Nat) (nodes : List FlareNode) : IO Unit := do
+def topologyAckAccepted (reply : String) : Bool := reply == "OK\r\n"
+
+/-- One bounded protocol response, including fragmented reads. An EOF,
+    malformed response or server rejection is not a delivery confirmation. -/
+private def receiveTopologyAck (sock : Socket) : IO Bool := do
+  let deadline := (← IO.monoMsNow) + 3000
+  let mut bytes := ByteArray.empty
+  while (← IO.monoMsNow) < deadline do
+    let p ← sock.recv? 64
+    let t := p.result!
+    while !(← IO.hasFinished t) && (← IO.monoMsNow) < deadline do
+      IO.sleep 25
+    if !(← IO.hasFinished t) then return false
+    match t.get with
+    | .error _ => return false
+    | .ok none => return false
+    | .ok (some chunk) =>
+      if chunk.isEmpty then return false
+      bytes := bytes ++ chunk
+      if bytes.size > 64 then return false
+      let reply := String.fromUTF8! bytes
+      if reply.contains '\n' then return topologyAckAccepted reply
+  return false
+
+def sendNodeSyncToNode (ip : String) (port : Nat) (version : Nat) (nodes : List FlareNode) : IO Bool := do
   -- Parse IP address
   let ipAddr ← match parseIPv4 ip with
     | some addr => pure addr
     | none =>
       IO.eprintln s!"[TcpClient] Invalid IP address: {ip}"
-      return ()
+      return false
 
   -- Create socket and connect
   let sock ← Socket.new
@@ -151,12 +177,12 @@ def sendNodeSyncToNode (ip : String) (port : Nat) (version : Nat) (nodes : List 
       IO.sleep 50
     if !connected then
       IO.eprintln s!"[TcpClient] connect to {ip}:{port} timed out after 3s — skipping target"
-      return ()
+      return false
     let connectResult := connectTask.get
     match connectResult with
     | .error e =>
       IO.eprintln s!"[TcpClient] Failed to connect to {ip}:{port}: {e}"
-      return ()
+      return false
     | .ok () =>
       -- Send "node sync <version>" command
       sendString sock s!"node sync {version}\r\n"
@@ -165,9 +191,12 @@ def sendNodeSyncToNode (ip : String) (port : Nat) (version : Nat) (nodes : List 
       let nodeListPayload := serializeNodeList nodes
       sendString sock nodeListPayload
 
-      IO.eprintln s!"[TcpClient] Sent node sync v{version} ({nodes.length} nodes) to {ip}:{port}"
+      let confirmed ← receiveTopologyAck sock
+      IO.eprintln s!"[TcpClient] node sync v{version} to {ip}:{port}: reply-confirmed={confirmed}"
+      return confirmed
   catch e =>
     IO.eprintln s!"[TcpClient] Error sending to {ip}:{port}: {e}"
+    return false
   finally
     -- Close connection (bounded: best-effort — never park the caller)
     try

@@ -42,6 +42,22 @@ structure ClusterConfig where
       never cover. Mirrors the production example
       helm/flare-operator/examples/flare-cluster-persistent.yaml. -/
   usePvc : Bool := false
+  /-- Keep flared data on tmpfs: a memory-backed emptyDir (medium: Memory)
+      mounted where the PVC would be. Mirrors a production tmpfs cluster:
+      the data counts against the pod's memory, survives a container
+      restart inside the pod, and is gone when the pod is deleted.
+      Mutually exclusive with usePvc. -/
+  useTmpfs : Bool := false
+  tmpfsSize : String := "2Gi"
+  /-- flared container memory limit / request. The default fits the small
+      E2E datasets; the scale evaluation raises it (RocksDB's block cache
+      plus a 64 MB write buffer OOM-killed a 512Mi master under a 2M-key
+      load). -/
+  flaredMemoryLimit : String := "512Mi"
+  /-- flared container CPU limit. 500m on CI; evaluations raise it to tell
+      CPU throttling apart from protocol limits. -/
+  flaredCpuLimit : String := "500m"
+  flaredMemoryRequest : String := "256Mi"
   /-- PVC size request (only used when usePvc). Kind's default storage
       class (local-path) ignores the size, so keep it small. -/
   pvcSize : String := "1Gi"
@@ -195,12 +211,13 @@ def statefulSetYaml (cfg : ClusterConfig) : String :=
   -- with an empty data directory (TCH stores a single `.hdb` file; RocksDB
   -- stores a directory). WITH a PVC the whole point is that data survives
   -- pod recreation, so we only mkdir and never wipe.
-  let dataDir := if cfg.usePvc then "/data/flare" else "/tmp/flare"
+  let persistent := cfg.usePvc || cfg.useTmpfs
+  let dataDir := if persistent then "/data/flare" else "/tmp/flare"
   -- RESTORE hook (PVC only): if the marker file exists it names a checkpoint
   -- directory (created by the flared `backup` op, a complete RocksDB dir);
   -- replace the live DB with it and consume the marker, then start flared.
   -- Restore procedure: write the marker on each pod's PVC, delete the pods.
-  let prep := if cfg.usePvc then
+  let prep := if persistent then
       s!"if [ -f {dataDir}/RESTORE ]; then SRC=$(cat {dataDir}/RESTORE) && rm -rf {dataDir}/flare.rocksdb && cp -a $SRC {dataDir}/flare.rocksdb && rm -f {dataDir}/RESTORE; fi; mkdir -p {dataDir}; rm -f {dataDir}/flared.pid"
     else
       s!"rm -rf {dataDir}/*.hdb {dataDir}/*.hdb.wal {dataDir}/rocksdb && mkdir -p {dataDir} && rm -f {dataDir}/flared.pid"
@@ -215,9 +232,14 @@ def statefulSetYaml (cfg : ClusterConfig) : String :=
               exec:
                 command: [\"sh\", \"-c\", \"sleep {cfg.drainSeconds}\"]"
     else ""
-  let pvcMount := if cfg.usePvc then "
+  let pvcMount := if persistent then "
             - name: data
               mountPath: /data" else ""
+  let tmpfsVolume := if cfg.useTmpfs && !cfg.usePvc then s!"
+        - name: data
+          emptyDir:
+            medium: Memory
+            sizeLimit: {cfg.tmpfsSize}" else ""
   let pvcTemplates := if cfg.usePvc then s!"
   volumeClaimTemplates:
     - metadata:
@@ -281,6 +303,12 @@ spec:
           image: {image}
           imagePullPolicy: Never
           command: [\"sh\", \"-c\", \"{prep} && exec flared --config=/etc/flared/extra.conf --data-dir {dataDir} --server-port {cfg.flarePort} --index-server-name {operatorSvc} --index-server-port {cfg.operatorPort} {storageFlag} --metrics-server-port 9150 --stderr\"]{preStopBlock}
+          # Same allocator setting as the chart (cluster.mallocArenaMax,
+          # default 2). Without it glibc keeps up to 8 arenas per core and the
+          # test pods fragment memory in a way production pods do not.
+          env:
+            - name: MALLOC_ARENA_MAX
+              value: \"2\"
           ports:
             - containerPort: {cfg.flarePort}
               name: flare
@@ -329,14 +357,14 @@ spec:
           resources:
             requests:
               cpu: 100m
-              memory: 256Mi
+              memory: {cfg.flaredMemoryRequest}
             limits:
-              cpu: 500m
-              memory: 512Mi
+              cpu: {cfg.flaredCpuLimit}
+              memory: {cfg.flaredMemoryLimit}
       volumes:
         - name: flared-config
           configMap:
-            name: {cluster}-config{pvcTemplates}"
+            name: {cluster}-config{tmpfsVolume}{pvcTemplates}"
 
 /-- Generate FlareCluster CRD YAML. -/
 def flareClusterCrdYaml (cfg : ClusterConfig) : String :=
@@ -506,7 +534,10 @@ def deployCluster (cfg : ClusterConfig) : IO Unit := do
   -- Create debug pod (direct kubectl so errors are visible)
   match ← kubectl ["run", cfg.debugPod, s!"--namespace={cfg.«namespace»}",
                     "--image=busybox:1.36", "--restart=Never", "--command", "--",
-                    "sleep", "3600"] with
+                    -- 1 day, not 1 h: the scale evaluation's load ran past an
+                    -- hour and every chunk after 3573 s failed with
+                    -- "container not found" (manual run 36899086870).
+                    "sleep", "86400"] with
   | .ok _ => pure ()
   | .error e =>
     if containsSubstr e "AlreadyExists" then pure ()
@@ -586,7 +617,7 @@ def deploySecondCluster (cfg : ClusterConfig) : IO Unit := do
   try
     let result ← IO.Process.output {
       cmd := "sh"
-      args := #["-c", s!"kubectl run {cfg.debugPod} --namespace={cfg.«namespace»} --image=busybox:1.36 --restart=Never --command -- sleep 3600 2>/dev/null || true"]
+      args := #["-c", s!"kubectl run {cfg.debugPod} --namespace={cfg.«namespace»} --image=busybox:1.36 --restart=Never --command -- sleep 86400 2>/dev/null || true"]
     }
     let _ := result
     pure ()

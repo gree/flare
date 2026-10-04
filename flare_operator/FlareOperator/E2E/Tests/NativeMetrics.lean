@@ -130,6 +130,13 @@ def suite : TestSuite := {
             return .fail "missing flared_version"
           else if !containsSubstr payload "flare_node_rocksdb_" then
             return .fail "missing flare_node_rocksdb_* passthrough"
+          -- EV-15: the replica's own follow state is exported per pod
+          else if !containsSubstr payload "flare_node_repl_follow_enabled " then
+            return .fail "missing flare_node_repl_follow_enabled"
+          else if !containsSubstr payload "flare_node_repl_follow_info{state=" then
+            return .fail "missing flare_node_repl_follow_info"
+          else if !containsSubstr payload "flare_node_repl_follow_lag " then
+            return .fail "missing flare_node_repl_follow_lag"
           else return .pass },
 
     -- The design goal itself: metrics survive a control-plane outage.

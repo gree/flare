@@ -27,6 +27,18 @@ Verify the schema took: `kubectl patch flarecluster <name> --dry-run=server
 --type=merge -p '{"spec":{"circuitBreaker":{"tripThresholdPercent":50}}}'`
 must NOT warn about unknown fields.
 
+**Argo CD with server-side diff: a new chart DEFAULT on the CR breaks the
+sync.** Argo CD dry-runs the new FlareCluster against the CRD that is
+installed now, before it applies anything. When the new chart both adds a
+field to the CRD and fills it by default (rc64: `spec.rocksdb.maxTotalThreadQueue:
+200000`), the dry run against the old CRD fails with `field not declared in
+schema`, the app is stuck in a comparison error, and the CRD never gets
+installed. Roll in two steps: first the new version with the field removed
+from the CR (a kustomize JSON patch `op: remove`; a values `null` is not
+enough, the chart renders `spec.rocksdb` with `toYaml` and keeps the key),
+then drop the patch once the new CRD is in. Check the PR's diff report for
+the instance before merging (pf-dev PR moc2-k8s#9362).
+
 On-call procedures for the Lean-operator-managed Flare cluster. Alert names
 match `deploy/monitoring/prometheus-rules.yaml` /
 `helm/flare-operator/templates/prometheusrule.yaml`.
@@ -265,6 +277,35 @@ that persists for 30 minutes is not.
    the master's. On a PVC cluster the WAL path makes it incremental; on tmpfs
    it is a full reseed. Verify the counts converge afterwards.
 
+## FlareReplicaFollowLag / FlareReplicaNotFollowing (warning) {#replica-follow}
+
+Per-replica signals from the replica's own `/metrics`:
+
+- `flare_node_repl_follow_lag`: the source position minus the applied position.
+- `flare_node_repl_follow_info{state,source,epoch}`: the follower's state and
+  the source it is following.
+
+`flare_operator_node_role{pod,partition,role,state}` says which pod the
+operator has as master and slave.
+
+1. **Lag above 1000 for 5 min.** The replica is withheld from reads, so
+   clients go to the master. Check write rate against follow throughput, and
+   check the network between the replica and its master. The sustained
+   evaluation measured lag 0 at 900 writes/s, and a deficit at 2000 writes/s
+   on kind with flared at 500m CPU (lag 0 at 2000 writes/s with 2 cores), so
+   check the replica's CPU throttling first. A lag that keeps growing means the follower cannot keep up. Find
+   the cause before the master's WAL cap purges the history, which turns this
+   into a rebuild (`needs_rebuild`, reason `lsn_purged`).
+2. **Not following for 15 min.** Read `state` and `repl_follow_last_reason`
+   in the replica's `stats`.
+   - `disconnected`: the replica cannot reach its source.
+   - `needs_rebuild`: the operator should already be rebuilding it; see
+     FlareResyncFailing if it is not.
+   - `initial_sync` for a long time: a large initial copy. Compare against
+     the expected copy time for the data size.
+3. Do not delete the pod as a first step. On tmpfs that deletes its data. On
+   PVC it forces a reconstruction that following would have avoided.
+
 ## FlareProxyWriteDropped (critical) {#proxy-write-dropped}
 
 A master GAVE UP forwarding writes to a replica: `queue_proxy_write`
@@ -321,6 +362,35 @@ The end-state (masterless partition) also fires
 [FlareMasterMissing](#master-missing); this alert is the EARLY warning while
 the doomed master is still alive and a final backup is still possible.
 
+## Partition held for its ex-master (failover lag bound) {#failover-lag-hold}
+
+Log line: `CRITICAL: partition N has NO master: its only data-bearing copy
+[...] is unfit ... waiting for the ex-master to return`. Also fires
+[FlareMasterMissing](#master-missing).
+
+The master died while its follower was further behind than
+`FLARE_FOLLOW_FAILOVER_MAX_LAG` (operator env, default 100000 positions), or
+had declared its copy unusable. Promoting it would discard everything it
+never received, so the operator leaves the partition WITHOUT a master and
+waits for the ex-master. Writes to the partition fail meanwhile.
+
+- **PVC cluster**: the same-name pod returns with its data and is master
+  again; the follower then rebuilds or catches up from it. Nothing to do
+  unless the pod cannot come back (node lost, PVC stuck): fix that first.
+- **tmpfs cluster**: the ex-master returns empty, so there is nothing to
+  wait for and the follower is seated at once (logged `PROMOTION NOT
+  LOSS-FREE ... LAST RESORT`).
+- **The wait is bounded**: after `FLARE_FOLLOW_FAILOVER_WAIT_SECONDS` (default
+  300, counted from the first pass that sees the partition masterless, so
+  about one minute more in all: 117 s for a 60 s wait on CI) the
+  follower is seated anyway with the same NOT LOSS-FREE line. The writes it
+  never received are lost. Set the variable to 0 to never wait (the behaviour
+  before 2026-10-03); raise it where losing writes is worse than a longer
+  write outage.
+
+To shorten the outage by hand, accepting the loss, set the variable lower
+and restart the operator.
+
 ## Replacing a node with corrupt data {#replace-corrupt}
 
 To service out a node whose local data looks corrupt and rebuild it from a
@@ -373,6 +443,104 @@ S3 tier-2, single-partition vs multi-partition restore and its caveats).
 Monitoring: alert when `time() - rocksdb_last_backup_epoch` exceeds twice
 the backup interval (exposed via flared `stats`; needs a memcached
 exporter).
+
+## Enabling continuous replication on an existing cluster {#enable-follow}
+
+Rehearsed by E2E `continuous-replication-enable` (a legacy cluster switched
+on live through the CR, and back). Do one cluster at a time.
+
+1. **Identity forwarding first, on every node:** set
+   `spec.rocksdb.replIdentityForward: true`. The operator rewrites
+   `extra.conf` and signals the pods. Check that every flared pod logged
+   `repl_identity_forward: 0 -> 1` before going on.
+2. **Then following:** also set `replFollowEnabled: true` (keep
+   `replIdentityForward: true` in the same patch: the operator rewrites the
+   whole file from `spec.rocksdb`). Each replica goes `idle` → `following`.
+3. **Check:** `repl_follow_state` is `following` on every replica,
+   `flare_node_repl_follow_lag` falls to about 0, and
+   FlareReplicaNotFollowing stays quiet.
+
+What the replica does on step 2: it fetches the master's WAL from its own
+position, which dates from its last full copy (legacy forwards do not move
+it). On kind the master still held that WAL, so the replica caught up with
+no rebuild and the data stayed equal. On a long-running production cluster
+that WAL will usually be purged already: the replica then declares
+`needs_rebuild` (`lsn_purged`) and is rebuilt once (snapshot reseed;
+E2E `continuous-replication-enable-purged` shows exactly this). Plan
+for one rebuild per replica, with its reads withheld (clients go to the
+master) until it follows. No stat shows the oldest WAL position the master
+still holds, so this cannot be checked beforehand.
+
+**Rollback**, reverse order: `replFollowEnabled: false` (wait for
+`repl_follow_enabled: 1 -> 0` on every pod), then
+`replIdentityForward: false`. Data stays as it is; nothing is rebuilt.
+
+## Sizing flared memory and storage {#sizing}
+
+These are floors, not bounds. The kind measurements bound nothing for
+production hardware.
+
+**Memory per flared pod.**
+
+    floor = blockCacheSizeMb + 2 × writeBufferSizeMb × maxWriteBufferNumber
+
+The 2 is the column families: default plus replication meta. The defaults
+are 512 + 2 × 64 × 3 = 896 MiB. On top of the floor come compaction,
+continuous-replication buffers, allocator fragmentation (`MALLOC_ARENA_MAX`
+is set) and, **on tmpfs, the data itself**. A tmpfs emptyDir counts against
+the pod's memory limit. The chart fails the render when the floor reaches
+`cluster.resources.limits.memory`. It warns above 70% of the limit, when
+floor + `tmpfs.sizeLimit` exceeds it, and when less than 256 MiB is left
+above floor + tmpfs.
+
+Measured RSS against the floor on kind (floor 448 MiB: block cache 64,
+write buffers at their defaults):
+
+| Run | RSS high-water | Above the floor |
+|---|---|---|
+| outage, 400 MB of 50 kB values, PVC (36741586970) | 620 MB | +172 MiB |
+| outage on tmpfs (36914124394; tmpfs pages are not in RSS) | 543 MB | +95 MiB |
+| 6M keys, forward queue capped (36985410132) | 457 MB (heap in use 182 MB, 259 MB freed but kept by the allocator) | +9 MiB |
+| 2M keys, queue capped (36991784765) | 250 MB | below |
+| 6M keys, queue NOT capped (36981303601) | 2.0 GB, then OOM | unbounded: keep `maxTotalThreadQueue` set |
+
+Size the limit as **floor + tmpfs.sizeLimit + at least 256 MiB**. Below a
+256 MiB margin the chart warns. Small-data E2E pods stay near 35 MB because
+the floor is a ceiling the caches grow towards, not an up-front allocation.
+The RSS above excludes tmpfs pages, which the cgroup still charges to the
+pod. A 512Mi limit was OOM-killed in the scale evaluation.
+
+**WAL archive (retention for followers).**
+
+    archive budget ≈ walSizeLimitMb + bytes written between two cleanups
+
+The cap is enforced when a flush or compaction runs cleanup, not by time. On
+an idle master the archive stayed at 499 MB under a 256 MB cap for 22 min.
+One flush cut it to 250 MB. Size the data volume for the budget above, not
+for the cap. Outages within the retained WAL catch up from the cursor: 150 MB
+took 11 s on kind. Longer outages lose the history (`lsn_purged`), and the
+follower is rebuilt by snapshot: 59 s for about 1 GB on kind.
+
+**Data volume.**
+
+    volume ≥ live data × compaction headroom (about 2×) + archive budget
+
+On tmpfs, keep `walSizeLimitMb` around 5% of `tmpfs.sizeLimit` and set a
+short `walTtlSeconds` (see values.yaml).
+
+**Follow throughput.** On kind, with flared at 500m CPU, lag stayed at 0 at
+900 writes/s and grew at 2000 writes/s. With 2 cores it stayed at 0 at 2000
+writes/s (run 37007519007). Give flared at least 2 cores where a partition
+takes about 2000 writes/s. Leave `noreplyWindowLimit` unset: it gave no gain
+(run 37007523321). Measure on production-like hardware against the real write
+rate before relying on reads from followers.
+
+**Forward queue.** Keep `maxTotalThreadQueue` set (chart default 200000,
+about 600 B per queued forward, so about 120 MB). Without it, a master whose
+follower falls behind buffers every pending forward until it is OOM-killed.
+At the bound, forwards are dropped and counted in `proxy_write_dropped`, and
+the follower repairs them from the WAL. That repair needs WAL retention, so
+`walSizeLimitMb` must cover the backlog.
 
 ## Scaling
 
@@ -610,6 +778,31 @@ CAUTION: cluster replication is the least-hardened path in this operator
 (several bugs were found and fixed here). Rehearse the whole sequence on
 staging with a representative data set and confirm per-key survival on v2
 before doing it in production.
+
+## Topology observation
+
+Alerts: `FlareTopologyDeliveryLag`, `FlareTopologyGenerationMismatch`,
+`FlareTopologyFeedbackUnknown`. Gauges count mapped nodes whose last usable
+observation is behind/ahead of the committed version, or whose feedback is
+missing, invalid, or over 60 seconds old. Counts are refreshed each reconcile;
+an operator stall can freeze them. Monitor operator availability and reconcile
+progress as well. A zero count is not proof of data equality or safe promotion.
+
+1. Inspect `[TopologyAudit]` logs for node key, Pod UID, desired/reported
+   version, and verdict. Check that the operator still holds its Lease.
+2. For lag, inspect delivery/retry logs and the operator-to-node network path.
+   Restoring connectivity should allow fenced retry; do not delete the copy.
+3. For Unknown, check API/exec permissions, stats completeness, Pod replacement,
+   and reconcile duration. One node is audited per pass: large clusters can
+   exceed the 60-second coverage window even without a failed node. Measure
+   audit coverage before deployment; do not suppress the alert as "healthy".
+4. For ahead, investigate competing leaders, Lease deletion/recreation and
+   persisted map history. Preserve evidence and stop rollout. Do not reset
+   recipient versions or force a larger operator version to silence the alert.
+   Generation recovery remains an open SAF-09 task.
+
+These signals must not automatically cause failover, promotion, Pod deletion
+or data reconstruction. Missing observations are not proof of node failure.
 
 ## Known limits (do not be surprised by)
 

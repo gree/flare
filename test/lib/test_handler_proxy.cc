@@ -32,6 +32,7 @@
 #include "queue_proxy_read.h"
 #include "queue_proxy_write.h"
 #include "server.h"
+#include "op_get.h"
 
 #include <cppcutter.h>
 
@@ -42,6 +43,18 @@ using namespace gree::flare;
 
 namespace test_handler_proxy {
 	static const int wait_retry_num = 10;
+
+	// Let the kernel reserve a port instead of guessing one and ignoring
+	// bind failure. Keep the listener open until the handler connects.
+	struct test_server : server {
+		int bound_port() {
+			struct sockaddr_in addr;
+			socklen_t size = sizeof(addr);
+			if (_listen_socket_index == 0 ||
+				getsockname(_listen_socket[0], reinterpret_cast<struct sockaddr*>(&addr), &size) != 0) return -1;
+			return ntohs(addr.sin_port);
+		}
+	};
 
 	void sa_usr1_handler(int sig) {
 		// just ignore
@@ -70,8 +83,11 @@ namespace test_handler_proxy {
 		stats_object = new stats();
 		stats_object->update_timestamp();
 
-		port = rand() % (65535 - 1024) + 1024;
-		s = new server();
+		test_server* listener = new test_server();
+		s = listener;
+		cut_assert_equal_int(0, s->listen(0));
+		port = listener->bound_port();
+		cut_assert_true(port > 0);
 
 		cl = new mock_cluster("localhost", port);
 		thread_idx = new AtomicCounter(1);
@@ -127,7 +143,6 @@ namespace test_handler_proxy {
 	}
 
 	shared_thread start_handler_proxy(int thread_type) {
-		s->listen(port);
 		shared_thread t = tp->get(thread_type);
 		handler_proxy* h = new handler_proxy(t, cl, "localhost", port);
 		t->trigger(h, true, false);
@@ -267,11 +282,44 @@ namespace test_handler_proxy {
 		shared_thread t = start_handler_proxy(n.node_thread_type);
 
 		shared_queue_proxy_read q = get_proxy_queue_read();
-		proxy_request(t, q, "");  // proxy request should be skipped so no reponse
+		// A skipped request must complete its queue reference. It does not
+		// require successful transport: run() skips it before _process_queue.
+		q->sync_ref();
+		shared_thread_queue queued = q;
+		cut_assert_equal_int(0, t->enqueue(queued));
+		q->sync();
 
 		cut_assert_equal_boolean(false, q->is_success());
 		cut_assert_equal_int(op::result_none, q->get_result());
 		cut_assert_equal_int(0, stats_object->get_total_thread_queue());
+	}
+
+	void test_stale_balance_read_guard_uses_production_routing_and_recovers() {
+		cluster::node master = cl->set_node("master", 12121, cluster::role_master, cluster::state_active, 0, 100);
+		cluster::node slave = cl->set_node("localhost", port, cluster::role_slave, cluster::state_active, 0, 50);
+		cl->set_partition(0, master, &slave, 1);
+		// Keep the stale positive-balance partition, but no transport target:
+		// forced master routing must return enqueue failure, never local read.
+		cl->clear_node_map();
+		stats_object->follow_set_enabled(true);
+		stats_object->follow_set_source("master:12121", "epoch");
+		stats_object->follow_note_source_position(100);
+		stats_object->follow_note_progress(100);
+		stats_object->follow_set_state(stats::follow_following, "");
+		shared_connection c;
+		op_get op(c, cl, NULL);
+		storage::entry e = get_entry(" key", storage::parse_type_get);
+		shared_queue_proxy_read q;
+		cut_assert_equal_int(cluster::proxy_request_continue, cl->pre_proxy_read(&op, e, NULL, q));
+		stats_object->follow_set_state(stats::follow_disconnected, "test-cut");
+		cut_assert_equal_int(cluster::proxy_request_error_enqueue, cl->pre_proxy_read(&op, e, NULL, q));
+		stats_object->follow_set_state(stats::follow_following, "");
+		stats_object->follow_note_source_position(101);
+		cut_assert_equal_int(cluster::proxy_request_error_enqueue, cl->pre_proxy_read(&op, e, NULL, q));
+		stats_object->follow_note_progress(101);
+		cut_assert_equal_int(cluster::proxy_request_continue, cl->pre_proxy_read(&op, e, NULL, q));
+		stats_object->follow_set_source("other-master:12121", "other-epoch");
+		cut_assert_equal_int(cluster::proxy_request_error_enqueue, cl->pre_proxy_read(&op, e, NULL, q));
 	}
 
 	void test_proxy_read_to_prepare_node() {

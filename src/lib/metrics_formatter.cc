@@ -93,6 +93,9 @@ const stat_mapping flared_gauges[] = {
 	{ "data_dir_used_bytes",     "flare_node_data_dir_used_bytes",     "gauge"   },
 	{ "data_dir_capacity_bytes", "flare_node_data_dir_capacity_bytes", "gauge"   },
 	{ "total_thread_queue", "flared_thread_queue_total",               "gauge"   },
+	{ "malloc_in_use_bytes", "flared_malloc_in_use_bytes",             "gauge"   },
+	{ "malloc_free_bytes",   "flared_malloc_free_bytes",               "gauge"   },
+	{ "malloc_arena_bytes",  "flared_malloc_arena_bytes",              "gauge"   },
 	{ "rusage_user",        "flared_process_user_cpu_seconds_total",   "counter" },
 	{ "rusage_system",      "flared_process_system_cpu_seconds_total", "counter" },
 };
@@ -100,6 +103,20 @@ const stat_mapping flared_gauges[] = {
 void append_header(string& out, const string& name, const char* prom_type) {
 	out += "# HELP " + name + " flared stat\n";
 	out += "# TYPE " + name + " " + prom_type + "\n";
+}
+
+// Prometheus label values: escape backslash, double quote and newline.
+string label_escape(const string& v) {
+	string r;
+	r.reserve(v.size());
+	for (string::size_type i = 0; i < v.size(); i++) {
+		char c = v[i];
+		if (c == '\\') { r += "\\\\"; }
+		else if (c == '"') { r += "\\\""; }
+		else if (c == '\n') { r += "\\n"; }
+		else { r += c; }
+	}
+	return r;
 }
 
 }	// anonymous namespace
@@ -206,6 +223,43 @@ string metrics_formatter::format(const stats_list& stats) {
 			string name = "flare_node_" + it->first;
 			append_header(out, name, "gauge");
 			_append_sample(out, name, "", it->second);
+		}
+	}
+
+	// continuous replication, follower side (SAF-10 / EV-15): this replica's
+	// own follow state, so operations compare each replica with its source
+	// instead of inferring from cluster-wide counts. Numeric repl_* stats
+	// pass through as flare_node_repl_*; the lag and the state/source/epoch
+	// strings are derived below.
+	for (stats_list::const_iterator it = stats.begin(); it != stats.end(); it++) {
+		if (it->first.compare(0, 5, "repl_") == 0 && is_numeric(it->second)) {
+			string name = "flare_node_" + it->first;
+			append_header(out, name, "gauge");
+			_append_sample(out, name, "", it->second);
+		}
+	}
+	{
+		const string* applied = _lookup(stats, "repl_applied_lsn");
+		const string* source = _lookup(stats, "repl_source_lsn");
+		if (applied != NULL && source != NULL && is_numeric(*applied) && is_numeric(*source)
+				&& applied->find('.') == string::npos && source->find('.') == string::npos
+				&& (*applied)[0] != '-' && (*source)[0] != '-') {
+			unsigned long long a = strtoull(applied->c_str(), NULL, 10);
+			unsigned long long sv = strtoull(source->c_str(), NULL, 10);
+			char buf[32];
+			snprintf(buf, sizeof(buf), "%llu", sv > a ? sv - a : 0ULL);
+			append_header(out, "flare_node_repl_follow_lag", "gauge");
+			_append_sample(out, "flare_node_repl_follow_lag", "", buf);
+		}
+		const string* state = _lookup(stats, "repl_follow_state");
+		if (state != NULL) {
+			const string* src = _lookup(stats, "repl_follow_source");
+			const string* epoch = _lookup(stats, "repl_follow_source_epoch");
+			string labels = "state=\"" + label_escape(*state) + "\""
+				+ ",source=\"" + label_escape(src != NULL ? *src : string()) + "\""
+				+ ",epoch=\"" + label_escape(epoch != NULL ? *epoch : string()) + "\"";
+			append_header(out, "flare_node_repl_follow_info", "gauge");
+			_append_sample(out, "flare_node_repl_follow_info", labels, "1");
 		}
 	}
 

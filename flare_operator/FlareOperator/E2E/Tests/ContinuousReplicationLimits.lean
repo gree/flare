@@ -941,12 +941,24 @@ def enablePurgedSuite : TestSuite := {
           | .error e => return .fail s!"patch (follow on) failed: {e}"
           | .ok _ => pure ()
           let states ← IO.mkRef ([] : List String)
+          -- Timeline (review 2026-10-05: confirm the needs_rebuild → ledger
+          -- request → reconstruction path and its timing on the new SHA).
+          let t0 ← IO.monoMsNow
+          let tDeclared ← IO.mkRef (none : Option Nat)
+          let tRebuild ← IO.mkRef (none : Option Nat)
           let following ← waitForCondition "the replica follows after enablement" 420 do
             let st := (← c.statStr sIp "repl_follow_state").getD "?"
             let reason := (← c.statStr sIp "repl_follow_last_reason").getD ""
             let entry := if reason.isEmpty then st else s!"{st}({reason})"
             states.modify fun l => if l.getLast? == some entry then l else l ++ [entry]
+            let now := ((← IO.monoMsNow) - t0) / 1000
+            if st == "needs_rebuild" && (← tDeclared.get).isNone then tDeclared.set (some now)
+            if (← c.statNat sIp "reconstruction_started").getD 0 > recon0 && (← tRebuild.get).isNone then tRebuild.set (some now)
             return st == "following" && (← c.statNat sIp "reconstruction_started").getD 0 > recon0
+          let opLines := match ← kubectl ["logs", "-n", enablePurgedCfg.«namespace», "-l", s!"app={enablePurgedCfg.operatorName}", "--timestamps", "--tail=20000"] with
+            | .ok o => (o.splitOn "\n").filter (fun l => containsSubstr l "REPLICA REPAIR requested by the follower" || containsSubstr l "REPLICA REPAIR: demoting" || containsSubstr l "replica repair DEFERRED" || containsSubstr l "replica repair HELD")
+            | .error _ => []
+          IO.eprintln s!"# timeline: needs_rebuild first seen at +{(← tDeclared.get)}s, reconstruction started by +{(← tRebuild.get)}s (since follow was enabled)\n# operator repair lines:\n{String.intercalate "\n" (opLines.take 6)}"
           let recon1 := (← c.statNat sIp "reconstruction_started").getD 0
           let purgedSeen := (← states.get).any (containsSubstr · "lsn_purged")
           IO.eprintln s!"# follow on: states seen {← states.get}; lsn_purged seen={purgedSeen}; reconstruction_started {recon0}→{recon1}; following={following}"
@@ -1255,6 +1267,12 @@ def identitySuite : TestSuite := {
   name := "copy-identity"
   setup := do
     deployCluster identityCfg
+    -- The post-observation tests compose two faults at once (a drained
+    -- master + a restarted/replaced successor): 2 of 3 unavailable trips the
+    -- breaker by design (minUnavailableToTrip 2), and a tripped breaker holds
+    -- until a human acts — CI 37278389267 stalled there. The breaker is not
+    -- what these tests examine, so raise its floor for this suite only.
+    discard <| kubectlPatch "flarecluster" identityCfg.name identityCfg.«namespace» "{\"spec\":{\"circuitBreaker\":{\"minUnavailableToTrip\":3}}}"
     IO.sleep 60000
   teardown := do
     discard <| kubectl ["uncordon", kindNode]
@@ -1311,6 +1329,8 @@ def identitySuite : TestSuite := {
 
     { name := "SAF-08 process restart: a slave whose flared is killed (same pod, new process) right before the master is drained is not promoted on its old process's standing; the other slave is"
       run := do
+        -- the previous test's pods must be back as Active slaves first
+        discard <| c.threeInSync
         match ← c.p0Roles with
         | (some m, [a, b]) =>
           let mIp := (← getPodIp m ns).getD ""
@@ -1384,12 +1404,16 @@ def identitySuite : TestSuite := {
           | some keys =>
             let target := podOf (keys.head!)
             let other := if target == a then b else a
+            let uid0 := (← c.podUid target).getD ""
             discard <| kubectl ["cordon", kindNode]
             discard <| kubectl ["delete", "pod", target, "-n", ns, "--grace-period=0", "--force", "--wait=false"]
-            let replaced ← waitForCondition s!"{target} is replaced under the same name" 60 do
-              match ← kubectlGetJsonpath "pod" target ns "{.status.phase}" with
-              | .ok ph => return ph.trim == "Pending"
-              | .error _ => return false
+            -- Replaced = the observed incarnation is gone: the pod is absent
+            -- (OrderedReady holds the recreation while the drained master is
+            -- terminating, CI 37278389267) or present under a new UID.
+            let replaced ← waitForCondition s!"{target}'s observed pod is gone (absent or a new UID)" 60 do
+              match ← c.podUid target with
+              | none => return true
+              | some u => return !u.isEmpty && u != uid0
             c.releasePromotion
             let aborted ← waitForCondition "the operator aborts the held promotion" 60 do
               return ((← c.opLog 3000).splitOn "\n").any fun l => containsSubstr l "PROMOTION ABORTED" && containsSubstr l target

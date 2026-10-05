@@ -736,6 +736,16 @@ private def assignProxies (state : FlareClusterState) (crd : FlareClusterView) :
 -- FSM IO Interpreters (Phase 3)
 -- ===========================================================================
 
+/-- The pod's incarnation now: (UID, flared restart count). -/
+private def podIdentityNow (podName ns : String) : IO (Option (String × Option Nat)) := do
+  match ← kubectl ["get", "pod", podName, "-n", ns, "-o",
+      "jsonpath={.metadata.uid}|{.status.containerStatuses[0].restartCount}"] with
+  | .ok out =>
+    match out.trim.splitOn "|" with
+    | [uid, rc] => return if uid.trim.isEmpty then none else some (uid.trim, rc.trim.toNat?)
+    | _ => return none
+  | .error _ => return none
+
 /-- Execute a K8s API request from the FSM.
     Maps K8sRequest to actual kubectl/K8s.Bridge calls. -/
 private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : String)
@@ -817,13 +827,38 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
       -- NotReady) never satisfies, so the empty-master veto silently
       -- degraded to its no-information fallback exactly when a master had
       -- just died. Found by review, not by a test.
-      let dataKeys ← if masterless || deadCandidate || !unhealthyKeys.isEmpty then
+      -- TEST SEAM (FLARE_TEST_STATS_BLOCK=<dir>): pod names listed in
+      -- <dir>/stats-block are treated as unreadable by the data probe.
+      let blocked ← match ← IO.getEnv "FLARE_TEST_STATS_BLOCK" with
+        | some dir =>
+          try pure (((← IO.FS.readFile s!"{dir}/stats-block").splitOn "\n").map String.trim |>.filter (· != ""))
+          catch _ => pure []
+        | none => pure []
+      let (dataKeys, emptyRead) ← if masterless || deadCandidate || !unhealthyKeys.isEmpty then
           -- Ex-masters (lastMasterOf holders, not master now) are read even
-          -- while NotReady: see Bridge.dataBearingPodKeys.
-          Bridge.dataBearingPodKeys pods ns (cs.nodeMap.filterMap fun (k, n) =>
-            if n.lastMasterOf ≥ 0 && n.role != FlareRole.Master then some k else none)
+          -- while NotReady: see Bridge.dataPresencePodKeys.
+          Bridge.dataPresencePodKeys pods ns (cs.nodeMap.filterMap fun (k, n) =>
+            if n.lastMasterOf ≥ 0 && n.role != FlareRole.Master then some k else none) blocked
         else
-          pure []
+          pure ([], [])
+      -- A KNOWN-empty reading counts only for the pod incarnation it was
+      -- taken from: the pod's UID and restart count after the probe must be
+      -- the ones listed this pass (a replaced or restarted pod is Unknown).
+      let mut knownEmpty : List String := []
+      for k in emptyRead do
+        match pods.find? (fun p => Bridge.PodInfo.toNodeKey p == k) with
+        | some p =>
+          match ← podIdentityNow p.name ns with
+          | some (u, r) =>
+            -- a missing restart count is not a match (either side)
+            let sameRestarts := match r, p.restarts with
+              | some a, some b => a == b
+              | _, _ => false
+            if !p.uid.isEmpty && u == p.uid && sameRestarts then knownEmpty := knownEmpty ++ [k]
+          | none => pure ()
+        | none => pure ()
+      if !emptyRead.isEmpty || !blocked.isEmpty then
+        IO.eprintln s!"[flare-operator] data probe: data-bearing {dataKeys}; read empty {emptyRead}, bound to an unchanged pod {knownEmpty}; blocked by test seam {blocked}" 
       -- SAF-10c: continuous-replication eligibility (StateMachine/FollowEvidence).
       -- Probe every non-Down Slave in WAL mode each tick (a node known to be
       -- out of the mode only every FLARE_FOLLOW_PROBE_INTERVAL ticks, a node
@@ -937,7 +972,7 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
       pinnedSuccessorRef.set keptPins
       let ranked := pinnedFirst ++ cls.ranked.filter (!pinnedFirst.contains ·)
       pure (.PodListResponse podKeys (Bridge.podZones pods nodeZones) termKeys dataKeys unhealthyKeys heldKeys
-              (cls.unfit ++ notReadyActive.filter (!cls.unfit.contains ·)) cls.unproven ranked)
+              (cls.unfit ++ notReadyActive.filter (!cls.unfit.contains ·)) cls.unproven ranked knownEmpty)
   | .PatchService =>
     -- Service patching happens in executeEffects (PatchService effect)
     -- This just signals completion
@@ -1117,16 +1152,6 @@ private def promotionBarrier (keys : List String) : IO Unit := do
       IO.eprintln s!"[flare-operator] TEST SEAM: promotion {if released then "released" else "timed out after 60s"}"
       try IO.FS.removeFile release catch _ => pure ()
       try IO.FS.removeFile (dir ++ "/promote-reached") catch _ => pure ()
-
-/-- The pod's incarnation now: (UID, flared restart count). -/
-private def podIdentityNow (podName ns : String) : IO (Option (String × Option Nat)) := do
-  match ← kubectl ["get", "pod", podName, "-n", ns, "-o",
-      "jsonpath={.metadata.uid}|{.status.containerStatuses[0].restartCount}"] with
-  | .ok out =>
-    match out.trim.splitOn "|" with
-    | [uid, rc] => return if uid.trim.isEmpty then none else some (uid.trim, rc.trim.toNat?)
-    | _ => return none
-  | .error _ => return none
 
 /-- SAF-08: commit the FSM's state only if every node it PROMOTES is still
     the incarnation that was observed this pass. Readiness and stats are

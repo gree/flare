@@ -773,6 +773,11 @@ private def masterPodOf (c : Ctx) : IO (Option String) := do
 private def notLossFreeFor (c : Ctx) (pod : String) : IO Bool := do
   return ((← c.opLog 200000).splitOn "\n").any fun l => containsSubstr l "PROMOTION NOT LOSS-FREE" && containsSubstr l pod
 
+/-- The NOT LOSS-FREE line logged for `pod`, if any (its reason is checked:
+    a known-empty ex-master and an expired wait are different reasons). -/
+private def notLossFreeLine (c : Ctx) (pod : String) : IO (Option String) := do
+  return ((← c.opLog 200000).splitOn "\n").find? fun l => containsSubstr l "PROMOTION NOT LOSS-FREE" && containsSubstr l pod
+
 private def holdFlags : String := flags ++ "\nrepl-follow-max-batches = 1\nrepl-follow-batch-delay-usec = 1000000"
 
 -- A: tmpfs. The ex-master's pod is recreated EMPTY, so there is nothing to
@@ -814,6 +819,9 @@ def lagHoldTmpfsSuite : TestSuite := {
           IO.eprintln s!"# after the kill: follower seated={seated}; NOT LOSS-FREE logged={loud}; items new master={← c.currItems sIp} (follower had {sItems}, old master acknowledged {mItems})"
           if !seated then return .fail s!"the follower was not seated after the empty ex-master returned (master now {← masterPodOf c})"
           if !loud then return .fail "the far-behind follower was seated without the NOT LOSS-FREE line"
+          let why := (← notLossFreeLine c sPod).getD ""
+          if !containsSubstr why "READ empty" then
+            return .fail s!"the hold ended without a KNOWN-empty ex-master reading (logged reason: {why})"
           let rejoined ← waitForCondition "the empty ex-master follows the new master and matches" 420 do
             match ← getPodIp mPod holdTmpfsCfg.«namespace» with
             | none => return false
@@ -873,12 +881,106 @@ def lagHoldExpirySuite : TestSuite := {
           if !seated then return .fail "the follower was never seated although the wait ran out"
           if tookS < 60 then return .fail s!"the follower was seated after {tookS}s, before the 60 s wait ran out"
           if !held || !loud then return .fail s!"expected the hold line and then the NOT LOSS-FREE line (held={held}, loud={loud})"
+          let why := (← notLossFreeLine c sPod).getD ""
+          if !containsSubstr why "EXPIRED" then
+            return .fail s!"the crowning after the wait was not logged as the expiry policy (logged reason: {why})"
           let rejoined ← waitForCondition "the returning ex-master follows the new master and matches" 480 do
             match ← getPodIp mPod holdExpiryCfg.«namespace» with
             | none => return false
             | some ip => return (← c.statStr ip "repl_follow_state") == some "following" && (← c.currItems ip) == (← c.currItems sIp)
           IO.eprintln s!"# ex-master {mPod} follows the new master={rejoined}; items={← c.currItems sIp} (the follower had {sItems} at the kill)"
           if !rejoined then return .fail "the returning ex-master did not follow the new master"
+          return .pass }
+  ]
+}
+
+-- D: the ex-master returns but CANNOT BE READ (CI 37296281060: an
+-- unreadable returning ex-master was taken as "back empty" and the
+-- far-behind follower was crowned). The test seam FLARE_TEST_STATS_BLOCK
+-- makes the operator's data probe treat the returning pod as unreadable.
+private def holdUnreadableCfg : ClusterConfig := {
+  name := "cont-repl-hold-unr"
+  «namespace» := "flare-cont-repl-hold-unr"
+  partitions := 1
+  replicas := 2
+  operatorName := "flare-operator"
+  debugPod := "debug-cont-repl-hold-unr"
+  storageBackend := "rocksdb"
+  usePvc := true
+  extraFlaredConf := holdFlags
+  operatorEnv := [("FLARE_FOLLOW_FAILOVER_MAX_LAG", "20"), ("FLARE_FOLLOW_FAILOVER_WAIT_SECONDS", "900"),
+                  ("FLARE_TEST_STATS_BLOCK", "/tmp/stb")]
+}
+
+private def opShell (c : Ctx) (cmd : String) : IO (Except String String) := do
+  match (← getPodNames s!"app={c.cfg.operatorName}" c.cfg.«namespace»).head? with
+  | none => return .error "no operator pod"
+  | some pod => kubectl ["exec", "-n", c.cfg.«namespace», pod, "--", "sh", "-c", cmd]
+
+def lagHoldUnreadableSuite : TestSuite := {
+  name := "continuous-replication-lag-hold-unreadable"
+  setup := do
+    deployCluster holdUnreadableCfg
+    IO.sleep 50000
+  teardown := do
+    discard <| kubectl ["uncordon", kindNode]
+    cleanupCluster holdUnreadableCfg
+  onFailure := dumpClusterDiagnostics holdUnreadableCfg.«namespace» s!"app={holdUnreadableCfg.operatorName}"
+  tests :=
+    let c : Ctx := { cfg := holdUnreadableCfg }
+    let ns := holdUnreadableCfg.«namespace»
+    [
+    { name := "failover lag bound, ex-master back but UNREADABLE: while its stats are blocked the far-behind follower is never crowned (the hold continues, the wait has not expired); once readable the ex-master is master again with every write it acknowledged"
+      run := do
+        match ← lagPrepare c with
+        | .error e => return .fail e
+        | .ok (mPod, mIp, sPod, sIp, mItems, _) =>
+          match ← opShell c s!"mkdir -p /tmp/stb && echo {mPod} > /tmp/stb/stats-block" with
+          | .error e => healForwards mIp sIp; return .fail s!"could not arm the stats block: {e}"
+          | .ok _ => pure ()
+          match ← kubectl ["cordon", kindNode] with
+          | .error e => healForwards mIp sIp; return .fail s!"could not cordon {kindNode}: {e}"
+          | .ok _ => pure ()
+          discard <| kubectl ["delete", "pod", mPod, "-n", ns, "--grace-period=0", "--force", "--wait=false"]
+          healForwards mIp sIp
+          let held ← waitForCondition "the hold is logged while the ex-master is away" 180 do
+            return ((← c.opLog 3000).splitOn "\n").any fun l => containsSubstr l "has NO master" && containsSubstr l sPod
+          discard <| kubectl ["uncordon", kindNode]
+          if !held then return .fail "precondition: the hold line never appeared while the ex-master was away"
+          -- the ex-master comes back and registers, but cannot be read
+          let registered ← waitForCondition "the ex-master re-registers (Prepare) while its stats are blocked" 300 do
+            let entries ← c.nodeView
+            return entries.any fun e => (e.fqdn.splitOn ".").head? == some mPod && e.state != 2
+          let blockedSeen ← waitForCondition "the operator's data probe reports the ex-master blocked" 120 do
+            return ((← c.opLog 3000).splitOn "\n").any fun l => containsSubstr l "blocked by test seam" && containsSubstr l mPod
+          if !registered || !blockedSeen then
+            discard <| opShell c "rm -f /tmp/stb/stats-block"
+            return .fail s!"precondition: the ex-master did not come back unreadable (registered={registered}, blocked seen={blockedSeen})"
+          -- 90 s with the ex-master live and unreadable: no crowning
+          let mut crowned := false
+          let mut passesBlocked := 0
+          for _ in [0:45] do
+            IO.sleep 2000
+            if (← masterPodOf c) == some sPod then crowned := true; break
+          passesBlocked := (((← c.opLog 20000).splitOn "\n").filter fun l => containsSubstr l "blocked by test seam" && containsSubstr l mPod).length
+          let loudEarly ← notLossFreeFor c sPod
+          IO.eprintln s!"# ex-master {mPod} live and unreadable for 90 s ({passesBlocked} blocked probe passes): follower crowned={crowned}; NOT LOSS-FREE logged={loudEarly}"
+          discard <| opShell c "rm -f /tmp/stb/stats-block"
+          if crowned || loudEarly then
+            return .fail s!"the far-behind follower {sPod} was crowned while the returning ex-master could not be read (wait not expired)"
+          if passesBlocked < 3 then return .fail s!"precondition: only {passesBlocked} probe pass(es) saw the ex-master blocked"
+          -- readable again: the ex-master holds its data and is re-seated
+          let exBack ← waitForCondition "the ex-master is master again once readable" 300 do
+            return (← masterPodOf c) == some mPod
+          let back ← waitForCondition "the ex-master serves every write it acknowledged" 120 do
+            match ← getPodIp mPod ns with
+            | none => return false
+            | some ip => return (← c.currItems ip) == mItems
+          let newIp := (← getPodIp mPod ns).getD ""
+          IO.eprintln s!"# after unblocking: ex-master master again={exBack}; items={← c.currItems newIp} (acknowledged {mItems}); NOT LOSS-FREE for the follower={← notLossFreeFor c sPod}"
+          if !exBack then return .fail s!"the ex-master was not re-seated after it became readable (master {← masterPodOf c})"
+          if !back then return .fail s!"the ex-master holds {← c.currItems newIp} items, {mItems} were acknowledged"
+          if ← notLossFreeFor c sPod then return .fail "a NOT LOSS-FREE crowning of the follower was logged"
           return .pass }
   ]
 }

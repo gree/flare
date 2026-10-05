@@ -459,31 +459,38 @@ def queryPodStats (podName ns : String) (statsCmd : String) : IO (Except String 
   -- deadline stays (timeout 3), so a hung or silent flared still bounds it.
   execInPod podName ns ["bash", "-c", s!"exec 3<>/dev/tcp/localhost/12121; printf '{statsCmd}\\r\\n' >&3; timeout 3 bash -c 'while IFS= read -r line; do printf \"%s\\n\" \"$line\"; case \"$line\" in END*) break;; esac; done' <&3; exec 3>&-"]
 
-/-- Node keys of pods whose flared reports curr_items > 0 (a bounded stats
-    probe per pod: `timeout 3` inside the exec). Feeds the masterless
-    refill's empty-master guard — an ex-master that came back EMPTY must not
-    be crowned over a data-bearing copy. Best-effort: a pod whose probe
-    fails is simply not listed (the guard treats "no data-bearing nodes" as
-    "no information" and falls back to the old behavior), so a stats hiccup
-    can never brick the refill. -/
-def dataBearingPodKeys (pods : List PodInfo) (ns : String) (alsoProbe : List String := []) : IO (List String) := do
+/-- What a bounded stats probe (`timeout 3` inside the exec) says about a
+    pod's data: `(hasData, knownEmpty)`. A pod lands in `knownEmpty` ONLY when
+    the reply was complete (ended with END) and carried a well-formed
+    `curr_items 0`. A pod that could not be read — no IP yet, exec or stats
+    failure, truncated or malformed reply, or listed in `blocked` (test seam)
+    — is in NEITHER list: Unknown is never emptiness (CI 37296281060). The
+    caller binds `knownEmpty` to the pod incarnation it listed. -/
+def dataPresencePodKeys (pods : List PodInfo) (ns : String) (alsoProbe : List String := [])
+    (blocked : List String := []) : IO (List String × List String) := do
   let mut keys : List String := []
+  let mut empty : List String := []
   for pod in pods do
     -- `alsoProbe`: node keys read even while NotReady. A returning ex-master
     -- stays NotReady in Prepare (sync-gated readiness) although its PVC
     -- holds the partition's newest copy; without reading it the refill took
     -- it for empty (failover-lag hold, 2026-10-03).
-    if pod.ready || pod.terminating || alsoProbe.contains pod.toNodeKey then
+    if (pod.ready || pod.terminating || alsoProbe.contains pod.toNodeKey) && !blocked.contains pod.name then
       match ← queryPodStats pod.name ns "stats" with
       | .ok out =>
-        let hasData := out.splitOn "\n" |>.any fun line =>
-          match (line.trim.splitOn " ").filter (· != "") with
-          | ["STAT", "curr_items", v] => (v.trim.toNat?.getD 0) > 0
-          | _ => false
-        if hasData then
-          keys := keys ++ [pod.toNodeKey]
+        let lines := out.splitOn "\n" |>.map (fun l => l.trim.replace "\r" "")
+        let complete := lines.any (· == "END")
+        let items : Option Nat := lines.findSome? fun line =>
+          match (line.splitOn " ").filter (· != "") with
+          | ["STAT", "curr_items", v] => v.toNat?
+          | _ => none
+        match items with
+        | some n =>
+          if n > 0 then keys := keys ++ [pod.toNodeKey]
+          else if complete then empty := empty ++ [pod.toNodeKey]
+        | none => pure ()
       | .error _ => pure ()
-  return keys
+  return (keys, empty)
 
 /-- LEVEL-TRIGGERED replication reconciliation: for every flared pod whose
     MOUNTED extra.conf already carries `needle` but whose RUNTIME state

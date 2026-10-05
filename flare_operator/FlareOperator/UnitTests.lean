@@ -882,6 +882,8 @@ def checkReactivation (ctx : Ctx) : IO Unit := do
 def holdNode (r : FlareRole) (st : FlareState) (p : Int) (nm : String) (lmo : Int := -1) : FlareNode :=
   { serverName := nm, serverPort := 12121, role := r, state := st, partition := p, lastMasterOf := lmo }
 
+def containsSub (h n : String) : Bool := (h.splitOn n).length > 1
+
 /-- After failover: the dead master is Proxy/Down (lastMasterOf 0), its only
     follower is Active but unfit (too far behind). -/
 def holdState : FlareClusterState :=
@@ -906,8 +908,14 @@ def checkFailoverLagHold (ctx : Ctx) : IO Unit := do
     ({ holdState with nodeMap := [("m", holdNode .Slave .Prepare 0 "m" 0), ("f", holdNode .Slave .Active 0 "f")] }).rebuildPartitionMap
   check ctx "ex-master back WITH data: it is crowned, not the unfit follower"
     (masterOf (K8sReconciler.promoteMasterlessPartition back 0 ["m", "f"] [] ["m", "f"] ["f"] true) == some "m")
-  check ctx "ex-master back EMPTY: nothing to wait for, the unfit follower is crowned"
-    (masterOf (K8sReconciler.promoteMasterlessPartition back 0 ["m", "f"] [] ["f"] ["f"] true) == some "f")
+  check ctx "ex-master back and READ empty (known-empty): nothing to wait for, the unfit follower is crowned"
+    (masterOf (K8sReconciler.promoteMasterlessPartition back 0 ["m", "f"] [] ["f"] ["f"] true ["m"]) == some "f")
+  check ctx "ex-master back but UNREADABLE (neither data-bearing nor known-empty): the hold continues, the unfit follower is NOT crowned (CI 37296281060)"
+    (masterOf (K8sReconciler.promoteMasterlessPartition back 0 ["m", "f"] [] ["f"] ["f"] true) == none
+      && masterOf (K8sReconciler.promoteMasterlessPartitions back activationCrd ["m", "f"] [] ["f"] ["f"] true [] []) == none
+      && !K8sReconciler.exMasterBackEmpty back 0 ["m", "f"] [])
+  check ctx "a known-empty reading of a pod that is not live does not end the hold"
+    (masterOf (K8sReconciler.promoteMasterlessPartition back 0 ["f"] [] ["f"] ["f"] true ["m"]) == none)
   check ctx "wait budget over (partition in the expired list): the unfit follower is crowned"
     (masterOf (K8sReconciler.promoteMasterlessPartitions holdState activationCrd ["f"] [] ["f"] ["f"] true [0]) == some "f"
       && masterOf (K8sReconciler.promoteMasterlessPartitions holdState activationCrd ["f"] [] ["f"] ["f"] true []) == none)
@@ -917,10 +925,19 @@ def checkFailoverLagHold (ctx : Ctx) : IO Unit := do
     (K8sReconciler.refillHoldEffects back
       (K8sReconciler.promoteMasterlessPartition back 0 ["m", "f"] [] ["m", "f"] ["f"] true) activationCrd crdHold
       |>.isEmpty)
-  check ctx "an unfit follower crowned after the wait is reported NOT LOSS-FREE"
-    ((K8sReconciler.refillHoldEffects holdState
+  let logText := fun (effs : List K8sReconciler.FlareEffect) => String.intercalate "\n" (effs.filterMap fun
+    | .Log m => some m
+    | _ => none)
+  let expiredEffs := K8sReconciler.refillHoldEffects holdState
       (K8sReconciler.promoteMasterlessPartitions holdState activationCrd ["f"] [] ["f"] ["f"] true [0]) activationCrd
-      { crdHold with livePodKeys := ["f"], dataBearingKeys := ["f"] }).length == 1)
+      { crdHold with livePodKeys := ["f"], dataBearingKeys := ["f"], followHoldExpiredParts := [0] }
+  check ctx "an unfit follower crowned after the wait is reported NOT LOSS-FREE with the EXPIRY reason (accepted-loss policy)"
+    (expiredEffs.length == 1 && containsSub (logText expiredEffs) "EXPIRED" && !containsSub (logText expiredEffs) "READ empty")
+  let emptyEffs := K8sReconciler.refillHoldEffects back
+      (K8sReconciler.promoteMasterlessPartition back 0 ["m", "f"] [] ["f"] ["f"] true ["m"]) activationCrd
+      { crdHold with livePodKeys := ["m", "f"], dataBearingKeys := ["f"], knownEmptyKeys := ["m"] }
+  check ctx "an unfit follower crowned because the ex-master was READ empty is reported with THAT reason"
+    (emptyEffs.length == 1 && containsSub (logText emptyEffs) "READ empty" && !containsSub (logText emptyEffs) "EXPIRED")
   check ctx "a FIT follower is crowned at once with the hold on"
     (masterOf (K8sReconciler.promoteMasterlessPartition holdState 0 ["f"] [] ["f"] [] true) == some "f")
 

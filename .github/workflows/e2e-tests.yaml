@@ -82,7 +82,7 @@ jobs:
             {"group":"failover-data","suites":"replace-nodes,failover-during-replication,data-survival-failover,pvc-data-survival,backup-restore,continuous-replication-enable,continuous-replication-multipart-enable"},
             {"group":"breaker-migration","suites":"circuit-breaker,operator-restart,blue-green-migration,continuous-replication-lag-hold-expiry"},
             {"group":"authority","suites":"topology-authority,resync-failure-self-demote,snapshot-push-seed,partition-reduction,continuous-replication-lag-hold"},
-            {"group":"repair","suites":"replica-repair,prepare-evidence,native-metrics"},
+            {"group":"repair","suites":"replica-repair,prepare-evidence,native-metrics,continuous-replication-upgrade"},
             {"group":"continuous-replication","suites":"continuous-replication,continuous-replication-scale,continuous-replication-sustained,continuous-replication-outage,continuous-replication-outage-tmpfs"}
           ]'
           all=$(echo "$default" | jq -r '[.[].suites] | join(",")')

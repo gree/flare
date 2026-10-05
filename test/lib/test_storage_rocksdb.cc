@@ -1616,6 +1616,7 @@ void test_swap_in_snapshot_refuses_checkpoint_without_source_epoch() {
 	storage_rocksdb* master = make_rocksdb(wal_master_dir);
 	storage_rocksdb* slave  = make_rocksdb(wal_slave_dir);
 	cut_assert_equal_int(0, storage_set_string(master, "k", "v"));
+	cut_assert_equal_int(0, storage_set_string(slave, "own", "mine"));
 
 	string cp_path;
 	uint64_t cp_seq = 0;
@@ -1653,6 +1654,20 @@ void test_swap_in_snapshot_refuses_checkpoint_without_source_epoch() {
 	// Refused: the identity did not move, and the node is not left claiming
 	// a cursor for a history it cannot name.
 	cut_assert_equal_string(before.c_str(), slave->get_incarnation().c_str());
+	// Refused BEFORE the swap (pf-dev rc56 -> rc64, 2026-10-05): the local DB
+	// is untouched — its own key is there, the source's is not. A refusal
+	// after the swap left the source's full copy in place and the fallback
+	// dump wrote a second one (OOM on tmpfs).
+	string out;
+	cut_assert_equal_int(0, storage_get_string(slave, "own", out));
+	cut_assert_equal_string("mine", out.c_str());
+	cut_assert_operator(storage_get_string(slave, "k", out), !=, 0);
+	// and the staging copy can be removed (the client does it on refusal)
+	struct stat st;
+	cut_assert_equal_int(0, stat(staging.c_str(), &st));
+	cut_assert_equal_int(0, slave->remove_snapshot_staging(staging));
+	cut_assert_operator(stat(staging.c_str(), &st), !=, 0);
+	cut_assert_operator(slave->remove_snapshot_staging(string(wal_slave_dir) + "/flare.rocksdb"), <, 0);
 
 	drop_rocksdb(master, wal_master_dir);
 	drop_rocksdb(slave,  wal_slave_dir);

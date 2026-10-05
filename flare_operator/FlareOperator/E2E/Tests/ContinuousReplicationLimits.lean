@@ -1056,6 +1056,94 @@ def rebuildTmpfsSuite : TestSuite := {
   ]
 }
 
+-- ─── upgrade from the deployed release, on tmpfs = memory limit ───────────
+
+-- pf-dev's 2026-10-05 roll in miniature: rc56 (no source epochs) rolled to
+-- the build under test on tmpfs whose size equals the memory limit. The new
+-- replica's snapshot from the old master carries no source epoch and is
+-- refused; that refusal used to happen AFTER the swap, leaving the source's
+-- copy in place for the fallback full dump to write a second one: OOM-killed
+-- on every retry, the roll stuck.
+private def upgradeCfg : ClusterConfig := {
+  name := "cont-repl-upgrade"
+  «namespace» := "flare-cont-repl-upgrade"
+  partitions := 1
+  replicas := 2
+  operatorName := "flare-operator"
+  debugPod := "debug-cont-repl-upgrade"
+  storageBackend := "rocksdb"
+  useTmpfs := true
+  tmpfsSize := "384Mi"
+  flaredMemoryLimit := "384Mi"
+  flaredMemoryRequest := "256Mi"
+  extraFlaredConf := "rocksdb-block-cache-size-mb = 16\nrocksdb-write-buffer-size-mb = 4"
+  flaredImageOverride := some "ghcr.io/gree/flare-node-rocksdb:0.1.0-rc56"
+  operatorImageOverride := some "ghcr.io/gree/flare-operator:0.1.0-rc56"
+}
+
+def upgradeSuite : TestSuite := {
+  name := "continuous-replication-upgrade"
+  setup := do
+    deployCluster upgradeCfg
+    IO.sleep 60000
+  teardown := cleanupCluster upgradeCfg
+  onFailure := dumpClusterDiagnostics upgradeCfg.«namespace» s!"app={upgradeCfg.operatorName}"
+  tests :=
+    let c : Ctx := { cfg := upgradeCfg }
+    [
+    { name := "upgrade from rc56 (the deployed release) to this build on tmpfs = memory limit: the roll completes with no container restart; the new replica refuses the old master's epoch-less snapshot BEFORE the swap and rebuilds by full dump; data equal; writes work after"
+      run := do
+        match ← c.pair with
+        | .error e => return .fail e
+        | .ok (mPod, mIp, sPod, sIp) =>
+          let w0 ← writeKeys upgradeCfg.debugPod upgradeCfg.«namespace» mIp upgradeCfg.flarePort "old" 50
+          let big ← c.bulkWriteRandom mIp "rnd" 2400 50000
+          if w0 != 50 || big < 2400 then return .fail s!"writes on rc56: stored {w0}/50 and {big}/2400 random"
+          if !(← convergedItems c mIp sIp "rc56: replica matches the master") then
+            return .fail s!"rc56: items master={← c.currItems mIp} replica={← c.currItems sIp}"
+          let items0 ← c.currItems mIp
+          IO.eprintln s!"# rc56 cluster: master {mPod}, replica {sPod}; items {items0} (~120 MB incompressible) in a 384Mi tmpfs/memory limit"
+          -- roll to the build under test: operator first, then the StatefulSet
+          let ns := upgradeCfg.«namespace»
+          discard <| kubectl ["set", "image", s!"deployment/{upgradeCfg.operatorName}", "-n", ns, "flare-operator=flare-operator:test"]
+          match ← kubectl ["set", "image", s!"statefulset/{upgradeCfg.name}-nodes", "-n", ns, "flared=flare-node-rocksdb:test"] with
+          | .error e => return .fail s!"set image failed: {e}"
+          | .ok _ => pure ()
+          let t0 ← IO.monoMsNow
+          let done ← waitForCondition "both flared pods run the new build and are Ready" 1200 do
+            match ← kubectl ["get", "pods", "-n", ns, "-l", s!"app=flare,cluster={upgradeCfg.name}", "-o", "jsonpath={range .items[*]}{.spec.containers[0].image}={.status.containerStatuses[0].ready} {end}"] with
+            | .ok o =>
+              let es := (o.trim.splitOn " ").filter (· != "")
+              return es.length == 2 && es.all (· == "flare-node-rocksdb:test=true")
+            | .error _ => return false
+          let rollS := ((← IO.monoMsNow) - t0) / 1000
+          let r0 ← c.restartCount s!"{upgradeCfg.name}-nodes-0"
+          let r1 ← c.restartCount s!"{upgradeCfg.name}-nodes-1"
+          let refusedBefore ← do
+            let mut seen := false
+            for pod in [s!"{upgradeCfg.name}-nodes-0", s!"{upgradeCfg.name}-nodes-1"] do
+              match ← kubectl ["logs", "-n", ns, pod, "--tail=20000"] with
+              | .ok o => if containsSubstr o "refusing BEFORE the swap" then seen := true
+              | .error _ => pure ()
+            pure seen
+          IO.eprintln s!"# roll: done={done} in {rollS}s; container restarts nodes-0={r0} nodes-1={r1}; epoch-less snapshot refused before the swap={refusedBefore}"
+          if !done then return .fail s!"the roll did not complete within 20 min (restarts nodes-0={r0} nodes-1={r1})"
+          if r0 + r1 > 0 then return .fail s!"flared containers restarted during the roll (nodes-0={r0} nodes-1={r1}): two copies did not fit"
+          if !refusedBefore then return .fail "the new replica never logged refusing the old master's snapshot before the swap (path not exercised)"
+          match ← c.pair with
+          | .error e => return .fail s!"after the roll: {e}"
+          | .ok (_, mIp2, _, sIp2) =>
+            if !(← convergedItems c mIp2 sIp2 "after the roll: replica matches the master") then
+              return .fail s!"after the roll: items master={← c.currItems mIp2} replica={← c.currItems sIp2}"
+            if (← c.currItems mIp2) != items0 then return .fail s!"items changed across the roll: {items0} → {← c.currItems mIp2}"
+            if let some bad ← sampleEqual c mIp2 sIp2 [("old", 50)] then return .fail s!"value mismatch after the roll: {bad}"
+            let w1 ← writeKeys upgradeCfg.debugPod ns mIp2 upgradeCfg.flarePort "new" 20
+            IO.eprintln s!"# after the roll: items {← c.currItems mIp2}; writes on the new build stored {w1}/20"
+            if w1 != 20 then return .fail s!"writes after the roll: stored {w1}/20"
+            return .pass }
+  ]
+}
+
 -- ─── two partitions: enablement and the lag hold are per partition ───────
 
 /-- (masterPod, masterIp, replicaPod, replicaIp) of partition `p`, the replica

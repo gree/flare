@@ -1545,6 +1545,15 @@ int storage_rocksdb::remove_snapshot_checkpoint(const string& path) {
 	return remove_tree(path);
 }
 
+int storage_rocksdb::remove_snapshot_staging(const string& path) {
+	// Only ever remove our own receive staging dir.
+	if (path != this->_data_dir + "/snapshot.recv.tmp") {
+		log_err("refusing to remove non-staging path [%s]", path.c_str());
+		return -1;
+	}
+	return remove_tree(path);
+}
+
 int storage_rocksdb::prepare_snapshot_staging(string& out_dir) {
 	const string path = this->_data_dir + "/snapshot.recv.tmp";
 	remove_tree(path);
@@ -1614,9 +1623,22 @@ int storage_rocksdb::swap_in_snapshot(const string& staging_dir, uint64_t checkp
 		}
 		string tmp;
 		rocksdb::Status gs = probe->Get(rocksdb::ReadOptions(), storage_rocksdb::kReplMasterIdKey, &tmp);
+		// The SOURCE EPOCH check belongs HERE, before the point of no return.
+		// It used to run after the rename: a checkpoint from a source that
+		// predates epochs (pf-dev rc56 master -> rc64 replica, 2026-10-05) was
+		// refused only once it had REPLACED the local DB, so the replica kept
+		// the source's full copy, the fallback truncate (a key-by-key delete
+		// on RocksDB) freed no space, the full dump wrote a second copy, and
+		// the pod was OOM-killed on every retry.
+		string epoch;
+		rocksdb::Status es = probe->Get(rocksdb::ReadOptions(), storage_rocksdb::kReplSourceEpochKey, &epoch);
 		close_read_only(probe, probe_handles);
 		if (!gs.ok() && !gs.IsNotFound()) {
 			log_err("swap_in_snapshot: staged checkpoint failed verification (read: %s) -> refusing swap", gs.ToString().c_str());
+			return -1;
+		}
+		if (!es.ok() || epoch.empty()) {
+			log_err("swap_in_snapshot: the staged checkpoint carries no source epoch (a source older than continuous replication?) -> refusing BEFORE the swap; the local DB is untouched and the caller falls back to the full dump", 0);
 			return -1;
 		}
 	}

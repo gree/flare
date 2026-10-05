@@ -74,13 +74,26 @@ structure ClusterConfig where
       a replacement) needs to be observable. 0 = no hook (fast pod deletes, the
       default for most suites). Mirrors the chart's cluster.drainSeconds. -/
   drainSeconds : Nat := 0
+  /-- Run a RELEASED flared / operator image instead of the locally built
+      `:test` one (pulled, IfNotPresent). The upgrade suite starts on the
+      deployed release and rolls to the build under test. -/
+  flaredImageOverride : Option String := none
+  operatorImageOverride : Option String := none
   deriving Repr
 
 /-- Image tag used for the flared container in this cluster. -/
 def ClusterConfig.flaredImage (cfg : ClusterConfig) : String :=
-  match cfg.storageBackend with
-  | "rocksdb" => "flare-node-rocksdb:test"
-  | _ => "flare-node:test"
+  match cfg.flaredImageOverride with
+  | some i => i
+  | none =>
+    match cfg.storageBackend with
+    | "rocksdb" => "flare-node-rocksdb:test"
+    | _ => "flare-node:test"
+
+/-- `Never` for the locally loaded `:test` images, `IfNotPresent` for a
+    released image that kind must pull. -/
+def pullPolicyFor (override : Option String) : String :=
+  if override.isSome then "IfNotPresent" else "Never"
 
 /-- Generate a unique namespace name using timestamp to avoid test conflicts.
     Format: {baseName}-{timestamp-ms}
@@ -165,8 +178,8 @@ spec:
       serviceAccountName: flare-operator
       containers:
         - name: flare-operator
-          image: flare-operator:test
-          imagePullPolicy: Never
+          image: {cfg.operatorImageOverride.getD "flare-operator:test"}
+          imagePullPolicy: {pullPolicyFor cfg.operatorImageOverride}
           args:
             - \"--namespace\"
             - \"{ns}\"
@@ -301,7 +314,7 @@ spec:
       containers:
         - name: flared
           image: {image}
-          imagePullPolicy: Never
+          imagePullPolicy: {pullPolicyFor cfg.flaredImageOverride}
           command: [\"sh\", \"-c\", \"{prep} && exec flared --config=/etc/flared/extra.conf --data-dir {dataDir} --server-port {cfg.flarePort} --index-server-name {operatorSvc} --index-server-port {cfg.operatorPort} {storageFlag} --metrics-server-port 9150 --stderr\"]{preStopBlock}
           # Same allocator setting as the chart (cluster.mallocArenaMax,
           # default 2). Without it glibc keeps up to 8 arenas per core and the

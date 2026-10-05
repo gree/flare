@@ -401,12 +401,17 @@ int op_repl_snapshot::_run_client() {
 	}
 
 	if (r < 0) {
-		log_warning("snapshot bootstrap failed mid-stream (received=%llu bytes) -> caller falls back to full dump",
+		log_warning("snapshot bootstrap failed mid-stream (received=%llu bytes) -> removing the partial staging copy; caller falls back to full dump",
 			(unsigned long long)received);
+		rdb->remove_snapshot_staging(staging);
 		return -1;
 	}
 
 	if (rdb->swap_in_snapshot(staging, cp_seq) < 0) {
+		// Refused (verification, unidentified history) or failed: the staged
+		// copy must not stay on disk next to the full dump that follows — on
+		// tmpfs that is two copies in RAM.
+		rdb->remove_snapshot_staging(staging);
 		return -1;
 	}
 	log_notice("snapshot bootstrap: swapped in %llu bytes, replication cursor at %llu",

@@ -364,6 +364,9 @@ public:
 	// Prepare (wipe + mkdir) the receive-side staging dir and return its
 	// path. Kept inside storage so callers never hand-construct DB paths.
 	int prepare_snapshot_staging(string& out_dir);
+	// Remove the receive staging dir (after a failed or refused bootstrap, so
+	// the fallback full dump does not run next to an abandoned copy).
+	int remove_snapshot_staging(const string& path);
 
 	virtual type get_type() {
 		return this->_type;

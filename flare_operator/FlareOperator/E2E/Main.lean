@@ -78,6 +78,7 @@ def main (args : List String) : IO UInt32 :=
     Tests.ContinuousReplicationLimits.multiEnableSuite,
     Tests.ContinuousReplicationLimits.multiHoldSuite,
     Tests.ContinuousReplicationLimits.rebuildTmpfsSuite,
+    Tests.ContinuousReplicationLimits.upgradeSuite,
     Tests.ContinuousReplicationLimits.scaleSuite,
     Tests.ContinuousReplicationLimits.sustainedSuite,
     Tests.ContinuousReplicationLimits.outageSuite,

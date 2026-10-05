@@ -1103,9 +1103,19 @@ def upgradeSuite : TestSuite := {
             return .fail s!"rc56: items master={← c.currItems mIp} replica={← c.currItems sIp}"
           let items0 ← c.currItems mIp
           IO.eprintln s!"# rc56 cluster: master {mPod}, replica {sPod}; items {items0} (~120 MB incompressible) in a 384Mi tmpfs/memory limit"
-          -- roll to the build under test: operator first, then the StatefulSet
+          -- roll to the build under test: operator first, and wait for it.
+          -- flared exits at startup when it cannot register with the operator
+          -- (cluster.cc startup_node), so rolling both at once crash-looped the
+          -- new replica until the new operator was up (CI 37265042480: exit
+          -- 255 three times, not a data problem). On pf-dev the operator was
+          -- Ready ~40 s before the replica rolled (60 s drain).
           let ns := upgradeCfg.«namespace»
           discard <| kubectl ["set", "image", s!"deployment/{upgradeCfg.operatorName}", "-n", ns, "flare-operator=flare-operator:test"]
+          if !(← kubectlRolloutStatus s!"deployment/{upgradeCfg.operatorName}" ns 240) then
+            return .fail "the operator did not roll to the build under test"
+          let opUp ← waitForCondition "the new operator answers node sync" 120 do
+            return !(← c.nodeView).isEmpty
+          if !opUp then return .fail "the new operator never answered node sync"
           match ← kubectl ["set", "image", s!"statefulset/{upgradeCfg.name}-nodes", "-n", ns, "flared=flare-node-rocksdb:test"] with
           | .error e => return .fail s!"set image failed: {e}"
           | .ok _ => pure ()
@@ -1119,6 +1129,10 @@ def upgradeSuite : TestSuite := {
           let rollS := ((← IO.monoMsNow) - t0) / 1000
           let r0 ← c.restartCount s!"{upgradeCfg.name}-nodes-0"
           let r1 ← c.restartCount s!"{upgradeCfg.name}-nodes-1"
+          let oomKilled ← do
+            match ← kubectl ["get", "pods", "-n", ns, "-l", s!"app=flare,cluster={upgradeCfg.name}", "-o", "jsonpath={range .items[*]}{.metadata.name}={.status.containerStatuses[0].lastState.terminated.reason} {end}"] with
+            | .ok o => pure (containsSubstr o "OOMKilled", o.trim)
+            | .error _ => pure (false, "?")
           let refusedBefore ← do
             let mut seen := false
             for pod in [s!"{upgradeCfg.name}-nodes-0", s!"{upgradeCfg.name}-nodes-1"] do
@@ -1126,7 +1140,8 @@ def upgradeSuite : TestSuite := {
               | .ok o => if containsSubstr o "refusing BEFORE the swap" then seen := true
               | .error _ => pure ()
             pure seen
-          IO.eprintln s!"# roll: done={done} in {rollS}s; container restarts nodes-0={r0} nodes-1={r1}; epoch-less snapshot refused before the swap={refusedBefore}"
+          IO.eprintln s!"# roll: done={done} in {rollS}s; container restarts nodes-0={r0} nodes-1={r1}; last termination reasons [{oomKilled.2}]; epoch-less snapshot refused before the swap={refusedBefore}"
+          if oomKilled.1 then return .fail s!"a flared container was OOMKilled during the roll ({oomKilled.2}): two copies did not fit"
           if !done then return .fail s!"the roll did not complete within 20 min (restarts nodes-0={r0} nodes-1={r1})"
           if r0 + r1 > 0 then return .fail s!"flared containers restarted during the roll (nodes-0={r0} nodes-1={r1}): two copies did not fit"
           if !refusedBefore then return .fail "the new replica never logged refusing the old master's snapshot before the swap (path not exercised)"

@@ -137,7 +137,7 @@ structure PodEvidence where
     `seen` needs one positive sign; `provenEmpty` needs every sign to be
     observed and empty; anything else is `unknown`. -/
 def history (leaseMarker : Except String (Option String)) (podsListed : Bool)
-    (pods : List PodEvidence) (expectedPods : Nat) : History :=
+    (pods : List PodEvidence) (expectedPods : Nat) (clusterMissing : Bool := false) : History :=
   match leaseMarker with
   | .ok (some v) => .seen s!"the Lease records a persisted node map (version {v})"
   | _ =>
@@ -148,6 +148,12 @@ def history (leaseMarker : Except String (Option String)) (podsListed : Bool)
       | .error e => .unknown s!"the Lease could not be read ({e})"
       | .ok _ =>
         if !podsListed then .unknown "the flared pods could not be listed"
+        -- Nothing exists to lose: the FlareCluster is confirmed ABSENT (a
+        -- NotFound, not a failed read) and no flared pod exists at all.
+        -- (An operator installed before its cluster, e.g. a chart smoke
+        -- deploy.) A missing CR WITH pods stays unknown: they may hold data.
+        else if clusterMissing && pods.isEmpty then
+          .provenEmpty "no FlareCluster and no flared pod exist: nothing to lose"
         else if expectedPods == 0 then .unknown "the FlareCluster spec (expected pod count) is not known"
         else if pods.length < expectedPods then .unknown s!"only {pods.length} of {expectedPods} flared pods exist"
         else

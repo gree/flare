@@ -274,18 +274,27 @@ private def nodeMapHistory (crName ns leaseName : String) : IO (NodeMapRecovery.
   let marker : Except String (Option String) ← match ← kubectl ["get", "lease", leaseName, "-n", ns, "-o",
       "jsonpath={.metadata.annotations.flare\\.gree\\.net/node-map-persisted}"] with
     | .ok v => pure (.ok (if v.trim.isEmpty then none else some v.trim))
-    | .error e => pure (.error e)
+    | .error e =>
+      IO.eprintln s!"[flare-operator] node map history: the Lease could not be read ({e})"
+      pure (.error e)
   -- uid | approval | partitions | replicas, in one read
-  let (expected, approved) ← match ← kubectl ["get", "flarecluster", crName, "-n", ns, "-o",
+  let (expected, approved, clusterMissing) ← match ← kubectl ["get", "flarecluster", crName, "-n", ns, "-o",
       "jsonpath={.metadata.uid}|{.metadata.annotations.flare\\.gree\\.net/first-build-approved}|{.spec.partitions}|{.spec.replicas}"] with
     | .ok out =>
       match out.trim.splitOn "|" with
       | [uid, appr, p, r] =>
-        pure ((p.trim.toNat?.getD 0) * (r.trim.toNat?.getD 0), !uid.trim.isEmpty && appr.trim == uid.trim)
-      | _ => pure (0, false)
-    | .error _ => pure (0, false)
+        pure ((p.trim.toNat?.getD 0) * (r.trim.toNat?.getD 0), !uid.trim.isEmpty && appr.trim == uid.trim, false)
+      | _ =>
+        IO.eprintln s!"[flare-operator] node map history: unexpected FlareCluster read [{out.trim}]"
+        pure (0, false, false)
+    | .error e =>
+      let missing : Bool := decide ((e.splitOn "(NotFound)").length > 1)
+      IO.eprintln s!"[flare-operator] node map history: FlareCluster {crName} {if missing then "does not exist" else s!"could not be read ({e})"}"
+      pure (0, false, missing)
   match ← Bridge.listFlaredPodsE crName ns with
-  | .error _ => return (NodeMapRecovery.history marker false [] expected, approved)
+  | .error e =>
+    IO.eprintln s!"[flare-operator] node map history: flared pods could not be listed ({e})"
+    return (NodeMapRecovery.history marker false [] expected clusterMissing, approved)
   | .ok pods =>
     let mut ev : List NodeMapRecovery.PodEvidence := []
     for p in pods do
@@ -295,7 +304,7 @@ private def nodeMapHistory (crName ns leaseName : String) : IO (NodeMapRecovery.
                        nodeMapVersion := statNat out "node_map_version",
                        currItems := statNat out "curr_items" }]
       | .error _ => ev := ev ++ [{ name := p.name, ready := p.ready }]
-    let h := NodeMapRecovery.history marker true ev expected
+    let h := NodeMapRecovery.history marker true ev expected clusterMissing
     IO.eprintln s!"[flare-operator] node map history: {repr h}; first build approved for this FlareCluster: {approved}"
     return (h, approved)
 

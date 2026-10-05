@@ -83,12 +83,13 @@ protected:
 	const uint64_t		_max_response_bytes;
 	const int			_poll_interval_usec;
 	const int			_batch_delay_usec;
+	uint64_t	_follow_generation;	// D7: refused once the follower is stopped
 
 public:
 	handler_wal_follower(shared_thread t, cluster* cl, storage* st,
 		string source_name, int source_port,
 		uint64_t max_batches, uint64_t max_response_bytes, int poll_interval_usec,
-		int batch_delay_usec = 0);
+		int batch_delay_usec = 0, uint64_t follow_generation = 0);
 	virtual ~handler_wal_follower();
 
 	virtual int run();

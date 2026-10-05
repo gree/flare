@@ -96,7 +96,7 @@ if ENABLE_KYOTOCABINET
 test_storage_kch_la_SOURCES	= test_storage_kch.cc common_storage_tests.cc
 endif
 if ENABLE_ROCKSDB
-test_storage_rocksdb_la_SOURCES	= test_storage_rocksdb.cc common_storage_tests.cc
+test_storage_rocksdb_la_SOURCES	= test_storage_rocksdb.cc common_storage_tests.cc connection_iostream.cc
 endif
 test_key_resolver_modular_la_SOURCES	= test_key_resolver_modular.cc
 test_op_la_SOURCES	= test_op.cc connection_iostream.cc

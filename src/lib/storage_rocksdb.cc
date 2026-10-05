@@ -134,6 +134,9 @@ storage_rocksdb::storage_rocksdb(
 	_wal_sync_crc_mismatch(0),
 	_wal_fallback_to_dump(0),
 	_expire_reaped(0),
+	_lazy_expiry_delete(false),
+	_follow_generation(0),
+	_expire_filtered(0),
 	_snapshot_bootstrap(0),
 	_corruption_detected(0),
 	_hard_reset(0),
@@ -1086,7 +1089,12 @@ int storage_rocksdb::get(entry& e, result& r, int b) {
 		// bypass the WAL and diverge the followers). version_equal so a delete is
 		// skipped if the key was re-set between the read and here. e already holds
 		// the current header (version/expire) from _unserialize_header above.
-		if (expired) {
+		if (expired && !this->_lazy_expiry_delete) {
+			// Not the partition master: the value is hidden (not_found
+			// above) but stays on disk; the master's delete arrives through
+			// the replication stream.
+			this->_expire_filtered.incr();
+		} else if (expired) {
 			result r_remove;
 			// behavior_skip_timestamp so remove() reports result_deleted rather
 			// than result_not_found for the (known-expired) entry it deletes.
@@ -2370,10 +2378,15 @@ bool storage_rocksdb::is_capable(capability c) {
 
 // WAL replication methods
 uint64_t storage_rocksdb::get_latest_sequence_number() {
-	if (this->_db == NULL) {
-		return 0;
-	}
-	return this->_db->GetLatestSequenceNumber();
+	// D6: callers are outside storage's own locks (stats, features, the WAL
+	// server, promotion); a DB handle swap (snapshot swap, hard_reset,
+	// truncate) holds the whole-lock for write, so read it under the
+	// whole-lock to never touch a handle being replaced. Internal callers
+	// (set/remove) read _db directly under their own locks.
+	pthread_rwlock_rdlock(&this->_mutex_wholelock);
+	uint64_t v = (this->_db == NULL) ? 0 : this->_db->GetLatestSequenceNumber();
+	pthread_rwlock_unlock(&this->_mutex_wholelock);
+	return v;
 }
 
 int storage_rocksdb::get_updates_since(uint64_t seq_number, vector<pair<uint64_t, rocksdb::WriteBatch>>& updates,
@@ -2381,6 +2394,17 @@ int storage_rocksdb::get_updates_since(uint64_t seq_number, vector<pair<uint64_t
 	if (more != NULL) {
 		*more = false;
 	}
+	// D6: hold the whole-lock for READ while the iterator lives, so a DB
+	// handle swap (snapshot swap, hard_reset, truncate: whole-lock WRITE)
+	// can never free the handle under it. Writers also take it for read,
+	// so serving a follower does not block writes; the read is bounded by
+	// max_batches/max_bytes. The lock is released on every return path
+	// (the RAII guard), after the iterator is destroyed.
+	struct wholelock_reader {
+		pthread_rwlock_t* l;
+		explicit wholelock_reader(pthread_rwlock_t* x) : l(x) { pthread_rwlock_rdlock(l); }
+		~wholelock_reader() { pthread_rwlock_unlock(l); }
+	} guard(&this->_mutex_wholelock);
 	if (this->_db == NULL) {
 		return -1;
 	}
@@ -2930,7 +2954,8 @@ uint64_t storage_rocksdb::get_repl_tombstones() {
 
 int storage_rocksdb::apply_wal_batch(const string& source_epoch, const string& incarnation,
 		uint64_t base_seq, const rocksdb::WriteBatch& batch,
-		uint64_t& applied, uint64_t& skipped, apply_outcome& refusal) {
+		uint64_t& applied, uint64_t& skipped, apply_outcome& refusal,
+		uint64_t follow_generation) {
 	applied = 0;
 	skipped = 0;
 	refusal = apply_applied;
@@ -2970,6 +2995,12 @@ int storage_rocksdb::apply_wal_batch(const string& source_epoch, const string& i
 		const string local_incarnation = this->get_incarnation();
 		if (local_incarnation.empty() || (!incarnation.empty() && incarnation != local_incarnation)) {
 			refusal = apply_refused_incarnation;
+			break;
+		}
+		// D7: a follower stopped asynchronously may still be finishing a
+		// slice after its successor started; checked under the apply lock.
+		if (follow_generation != 0 && follow_generation != this->get_follow_generation()) {
+			refusal = apply_refused_stale_follower;
 			break;
 		}
 		const uint64_t cursor = this->get_repl_last_lsn();

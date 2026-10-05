@@ -285,6 +285,7 @@ int op_stats::_send_stats(thread_pool* req_tp, thread_pool* other_tp, storage* s
 			_send_stat("rocksdb_wal_sync_crc_mismatch"      , rdb->get_wal_sync_crc_mismatch());
 			_send_stat("rocksdb_wal_fallback_to_dump"       , rdb->get_wal_fallback_to_dump());
 			_send_stat("rocksdb_expire_reaped"              , rdb->get_expire_reaped());
+			_send_stat("rocksdb_expire_filtered"            , rdb->get_expire_filtered());
 			_send_stat("rocksdb_snapshot_bootstrap"         , rdb->get_snapshot_bootstrap());
 			_send_stat("rocksdb_corruption_detected"        , rdb->get_corruption_detected());
 			_send_stat("rocksdb_hard_reset"                 , rdb->get_hard_reset());

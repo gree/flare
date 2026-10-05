@@ -30,6 +30,7 @@
 #include <handler_wal_follower.h>
 #include <op_repl_sync_wal.h>
 #include "mock_storage.h"
+#include "connection_iostream.h"
 
 #include <limits>
 #include <sys/stat.h>
@@ -1093,10 +1094,12 @@ namespace {
 	}
 }
 
-// A get() landing on an expired entry returns NOT_FOUND *and* physically
-// removes it (mirrors storage_tch) so its space is reclaimed.
+// On the partition MASTER a get() landing on an expired entry returns
+// NOT_FOUND *and* physically removes it (mirrors storage_tch) so its space is
+// reclaimed; the delete reaches replicas through the WAL.
 void test_expire_lazy_delete_on_get() {
 	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	s->set_lazy_expiry_delete(true);   // the cluster sets this for a master
 
 	// expire=1 => 1970, always past relative to the live timestamp.
 	cut_assert_equal_int(0, storage_set_string_expire(s, "k", "v", 1));
@@ -1109,6 +1112,27 @@ void test_expire_lazy_delete_on_get() {
 	cut_assert_equal_int(0, static_cast<int>(s->count()));           // physically gone
 	cut_assert_equal_int(1, static_cast<int>(s->get_expire_reaped()));
 
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// D1 (WSTR-0 audit): on a node that is NOT the partition master (the default
+// until the cluster says otherwise) the expired value is hidden but the entry
+// stays: a replica must not change its data by its own clock outside the
+// replication history. The master's delete arrives through the stream.
+void test_expire_replica_filters_without_deleting() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	cut_assert_false(s->get_lazy_expiry_delete());
+	cut_assert_equal_int(0, storage_set_string_expire(s, "k", "v", 1));
+	string out;
+	cut_assert_equal_int(-1, storage_get_string(s, "k", out));       // hidden
+	cut_assert_equal_int(1, static_cast<int>(s->count()));           // still present
+	cut_assert_equal_int(0, static_cast<int>(s->get_expire_reaped()));
+	cut_assert_equal_int(1, static_cast<int>(s->get_expire_filtered()));
+	// promoted to master: the next read deletes it
+	s->set_lazy_expiry_delete(true);
+	cut_assert_equal_int(-1, storage_get_string(s, "k", out));
+	cut_assert_equal_int(0, static_cast<int>(s->count()));
+	cut_assert_equal_int(1, static_cast<int>(s->get_expire_reaped()));
 	drop_rocksdb(s, wal_master_dir);
 }
 
@@ -1674,6 +1698,49 @@ void test_swap_in_snapshot_drops_source_rebuild_evidence() {
 	drop_rocksdb(slave,  wal_slave_dir);
 }
 
+// D2 (WSTR-0 audit): a FOLLOW reply that carries a batch but no EPOCH line
+// is refused — no data and no cursor change (the verbatim apply is for
+// reconstruction only).
+void test_follow_reply_without_epoch_is_refused() {
+	storage_rocksdb* s = make_rocksdb(wal_slave_dir);
+	cut_assert_equal_int(0, storage_set_string(s, "keep", "v"));
+	const uint64_t cursor0 = s->get_repl_last_lsn();
+	std::string reply = "LSN 5\r\nBATCH 12 0\r\n";
+	reply += std::string(12, '\0');
+	reply += "\r\nEND\r\n";
+	shared_connection c(new connection_sstream(reply));
+	op_repl_sync_wal op(c, s);
+	cut_assert_equal_int(-1, op.run_client_follow(4, s->get_master_id(), s->get_source_epoch(), s->get_incarnation(), 10, 1 << 20));
+	cut_assert_equal_int(op_repl_sync_wal::client_no_epoch, op.get_client_result());
+	cppcut_assert_equal(cursor0, s->get_repl_last_lsn());
+	cut_assert_equal_int(1, static_cast<int>(s->count()));
+	cppcut_assert_equal(static_cast<uint64_t>(0), op.get_applied());
+	drop_rocksdb(s, wal_slave_dir);
+}
+
+// D3: malformed, overflowing or out-of-range numbers in a reply are protocol
+// errors with nothing applied — never an exception, never a huge allocation.
+void test_follow_reply_bad_numbers_are_protocol_errors() {
+	storage_rocksdb* s = make_rocksdb(wal_slave_dir);
+	const char* replies[] = {
+		"EPOCH e 10\r\nLSN 99999999999999999999999\r\nBATCH 12 0\r\n",   // LSN overflow
+		"EPOCH e 10\r\nLSN 5\r\nBATCH 5000000000 0\r\n",                   // over 1 GiB
+		"EPOCH e 10\r\nLSN 5\r\nBATCH 3 0\r\nabc\r\n",                   // below a WriteBatch header
+		"EPOCH e 10\r\nLSN 5\r\nBATCH abc 0\r\n",                          // not a number
+		"EPOCH e 10\r\nLSN x\r\n",                                           // not a number
+	};
+	const uint64_t cursor0 = s->get_repl_last_lsn();
+	for (size_t i = 0; i < sizeof(replies) / sizeof(replies[0]); i++) {
+		shared_connection c(new connection_sstream(replies[i]));
+		op_repl_sync_wal op(c, s);
+		cut_assert_equal_int(-1, op.run_client_follow(4, s->get_master_id(), "e", s->get_incarnation(), 10, 1 << 20));
+		cut_assert_equal_int(op_repl_sync_wal::client_protocol_error, op.get_client_result());
+		cppcut_assert_equal(cursor0, s->get_repl_last_lsn());
+		cppcut_assert_equal(static_cast<uint64_t>(0), op.get_applied());
+	}
+	drop_rocksdb(s, wal_slave_dir);
+}
+
 // A generation that cannot be persisted must leave the node UNAVAILABLE for
 // replication, not advertising the old identity over changed data.
 void test_generation_persist_failure_is_fail_closed() {
@@ -1918,6 +1985,34 @@ namespace {
 		cut_assert_true(g.found);
 		return g.value;
 	}
+}
+
+// D7 (WSTR-0 audit): a follower stopped asynchronously may still finish its
+// slice after its successor started. Its batches carry the generation it was
+// started with; once the generation moves they are refused under the apply
+// lock with nothing written, while the current generation applies.
+void test_apply_refuses_a_stopped_followers_generation() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	const string epoch = s->get_source_epoch();
+	const string inc = s->get_incarnation();
+	cut_assert_equal_int(0, s->set_repl_last_lsn(9));
+	storage_rocksdb* scratch = make_rocksdb(wal_slave_dir);
+	rocksdb::WriteBatch b;
+	b.Put(rocksdb::Slice("k"), rocksdb::Slice(serialized_entry(scratch, "k", "v")));
+	const uint64_t old_gen = s->bump_follow_generation();
+	const uint64_t new_gen = s->bump_follow_generation();   // stop + restart
+	uint64_t applied = 0, skipped = 0;
+	storage_rocksdb::apply_outcome refusal;
+	cut_assert_equal_int(-1, s->apply_wal_batch(epoch, inc, 10, b, applied, skipped, refusal, old_gen));
+	cppcut_assert_equal(storage_rocksdb::apply_refused_stale_follower, refusal);
+	cppcut_assert_equal(static_cast<uint64_t>(9), s->get_repl_last_lsn());
+	string out;
+	cut_assert_equal_int(-1, storage_get_string(s, "k", out));
+	cut_assert_equal_int(0, s->apply_wal_batch(epoch, inc, 10, b, applied, skipped, refusal, new_gen));
+	cut_assert_equal_int(0, storage_get_string(s, "k", out));
+	cut_assert_equal_string("v", out.c_str());
+	drop_rocksdb(scratch, wal_slave_dir);
+	drop_rocksdb(s, wal_master_dir);
 }
 
 // A newer value arrives by forwarding; the WAL then delivers an older change

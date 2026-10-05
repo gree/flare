@@ -333,6 +333,13 @@ public:
 	virtual int advance_source_epoch(const char* reason = "unspecified") { (void)reason; return 0; }
 	virtual int advance_incarnation() { return 0; }
 	virtual int regenerate_master_id() { return 0; }
+	// Whether get() may physically delete an entry it finds expired (only the
+	// partition master; see storage_rocksdb). Backends without replication
+	// ordering ignore it.
+	virtual void set_lazy_expiry_delete(bool on) { (void)on; }
+	// D7: a new follow generation (stop/start of the WAL follower); 0 = the
+	// backend has no continuous follower.
+	virtual uint64_t bump_follow_generation() { return 0; }
 
 	static inline int option_cast(string s, option& r) {
 		if (s == "") {

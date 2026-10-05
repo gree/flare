@@ -69,7 +69,8 @@ public:
 		apply_skipped_superseded,	// the key already holds this or a newer change
 		apply_refused_cursor,		// at or below the applied position: already decided
 		apply_refused_session,		// different source history, or generations unavailable
-		apply_refused_incarnation,	// issued against a copy this node no longer is
+		apply_refused_incarnation,
+		apply_refused_stale_follower,	// D7: from a follower that was stopped (overlap after an async stop)	// issued against a copy this node no longer is
 		apply_refused_gap,			// the batch does not continue the applied position: the history between is GONE (or was never served) — rebuild, not retry
 		apply_error,				// storage failure; nothing was written
 	};
@@ -205,6 +206,15 @@ protected:
 	// Total entries physically reaped by the background expire crawler
 	// (reap_expired) plus the lazy delete-on-get path. Monotonic.
 	AtomicCounter _expire_reaped;
+	// D1 (WSTR-0 audit): physically delete an entry found expired by get()
+	// only on the partition MASTER (its delete reaches replicas through the
+	// WAL). A replica filters the expired value but never deletes it by its
+	// own clock — that would change its data outside the replication
+	// history. Off until the cluster says this node is a master.
+	volatile bool _lazy_expiry_delete;
+	uint64_t _follow_generation;
+	// Expired entries hidden from a read but NOT deleted (replica side).
+	AtomicCounter _expire_filtered;
 
 	// Completed snapshot bootstraps on this node (slave side: a physical
 	// checkpoint reseed replaced the logical full dump). Monotonic.
@@ -417,7 +427,13 @@ public:
 	// `refusal` then says why and nothing was written.
 	int apply_wal_batch(const string& source_epoch, const string& incarnation,
 		uint64_t base_seq, const rocksdb::WriteBatch& batch,
-		uint64_t& applied, uint64_t& skipped, apply_outcome& refusal);
+		uint64_t& applied, uint64_t& skipped, apply_outcome& refusal,
+		uint64_t follow_generation = 0);
+	// D7: every stop/start of the follower bumps the generation; a batch
+	// carrying an older non-zero generation is refused under the apply lock,
+	// so a stopped follower that is still finishing its slice writes nothing.
+	virtual uint64_t bump_follow_generation() { return __sync_add_and_fetch(&this->_follow_generation, 1); }
+	uint64_t get_follow_generation() { return __sync_add_and_fetch(&this->_follow_generation, 0); }
 
 	// Drop tombstones the applied position has passed (design §3.5). Bounded
 	// and resumable: called from inside the applier's window, never as a
@@ -506,6 +522,9 @@ public:
 	uint64_t get_wal_sync_crc_mismatch()      { return this->_wal_sync_crc_mismatch.fetch(); }
 	uint64_t get_wal_fallback_to_dump()       { return this->_wal_fallback_to_dump.fetch(); }
 	uint64_t get_expire_reaped()              { return this->_expire_reaped.fetch(); }
+	virtual void set_lazy_expiry_delete(bool on) { this->_lazy_expiry_delete = on; }
+	bool get_lazy_expiry_delete() const       { return this->_lazy_expiry_delete; }
+	uint64_t get_expire_filtered()            { return this->_expire_filtered.fetch(); }
 	uint64_t get_snapshot_bootstrap()         { return this->_snapshot_bootstrap.fetch(); }
 	void incr_snapshot_bootstrap()            { this->_snapshot_bootstrap.incr(); }
 	uint64_t get_corruption_detected()        { return this->_corruption_detected.fetch(); }

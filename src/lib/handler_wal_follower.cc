@@ -40,7 +40,7 @@ namespace flare {
 handler_wal_follower::handler_wal_follower(shared_thread t, cluster* cl, storage* st,
 		string source_name, int source_port,
 		uint64_t max_batches, uint64_t max_response_bytes, int poll_interval_usec,
-		int batch_delay_usec):
+		int batch_delay_usec, uint64_t follow_generation):
 		thread_handler(t),
 		_cluster(cl),
 		_storage(st),
@@ -49,7 +49,8 @@ handler_wal_follower::handler_wal_follower(shared_thread t, cluster* cl, storage
 		_max_batches(max_batches),
 		_max_response_bytes(max_response_bytes),
 		_poll_interval_usec(poll_interval_usec),
-		_batch_delay_usec(batch_delay_usec) {
+		_batch_delay_usec(batch_delay_usec),
+		_follow_generation(follow_generation) {
 }
 
 handler_wal_follower::~handler_wal_follower() {
@@ -223,6 +224,7 @@ int handler_wal_follower::_follow_once(bool& more) {
 	op->set_max_batch_bytes(rdb->get_wal_max_batch_bytes());
 	op->set_wal_sync_bwlimit(rdb->get_wal_sync_bwlimit());
 	op->set_wal_sync_interval(rdb->get_wal_sync_interval());
+	op->set_follow_generation(this->_follow_generation);
 	const int rc = op->run_client_follow(cursor, master_id, epoch, incarnation,
 		this->_max_batches, this->_max_response_bytes);
 	const int client_result = static_cast<int>(op->get_client_result());

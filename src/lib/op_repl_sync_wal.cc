@@ -33,6 +33,12 @@ namespace flare {
 /**
  *	ctor for op_repl_sync_wal
  */
+// D3: bounds for a batch announced on the wire. A WriteBatch has a 12-byte
+// header; 1 GiB is far above any batch flared writes and keeps the size
+// within readsize()'s int.
+const size_t op_repl_sync_wal::kMinWireBatchBytes = 12;
+const size_t op_repl_sync_wal::kMaxWireBatchBytes = static_cast<size_t>(1) << 30;
+
 op_repl_sync_wal::op_repl_sync_wal(shared_connection c, storage* st):
 		op(c, "repl_sync_wal"),
 		_storage(st),
@@ -48,7 +54,9 @@ op_repl_sync_wal::op_repl_sync_wal(shared_connection c, storage* st):
 		_more_available(false),
 		_applied(0),
 		_skipped(0),
-		_server_latest_lsn(0) {
+		_server_latest_lsn(0),
+		_follow_mode(false),
+		_follow_generation(0) {
 }
 
 /**
@@ -389,6 +397,7 @@ int op_repl_sync_wal::run_client_follow(uint64_t lsn, const string& master_id,
 		uint64_t max_batches, uint64_t max_response_bytes) {
 	this->_client_epoch = expected_epoch;
 	this->_incarnation = incarnation;
+	this->_follow_mode = true;
 	this->_max_batches = max_batches;
 	this->_max_response_bytes = max_response_bytes;
 	this->_applied = 0;
@@ -518,10 +527,30 @@ int op_repl_sync_wal::_parse_text_client_parameters() {
 		}
 		if (strcmp(q, "LSN") == 0) {
 			n += util::next_digit(p+n, q, sizeof(q));
-			uint64_t lsn = boost::lexical_cast<uint64_t>(q);
+			// D3: a malformed or overflowing number is a protocol error, never
+			// an exception out of the follower thread.
+			uint64_t lsn = 0;
+			try {
+				if (q[0] == '\0') throw boost::bad_lexical_cast();
+				lsn = boost::lexical_cast<uint64_t>(q);
+			} catch (boost::bad_lexical_cast&) {
+				log_err("malformed LSN line [%s] -> protocol error, nothing applied", p);
+				delete[] p;
+				this->_client_result = client_protocol_error;
+				return -1;
+			}
 			log_debug("received LSN %llu", lsn);
 
 			delete[] p;
+
+			// D2: in FOLLOW mode a source that did not identify its history
+			// (no EPOCH line before the first batch) is refused: no data and
+			// no cursor change. The verbatim apply is for reconstruction only.
+			if (this->_follow_mode && this->_server_epoch.empty()) {
+				log_err("follow reply carries a batch (LSN %llu) but no EPOCH line -> refusing to apply anything", (unsigned long long)lsn);
+				this->_client_result = client_no_epoch;
+				return -1;
+			}
 
 			// Read BATCH line
 			if (this->_connection->readline(&p) < 0) {
@@ -537,7 +566,25 @@ int op_repl_sync_wal::_parse_text_client_parameters() {
 			}
 
 			n += util::next_digit(p+n, q, sizeof(q));
-			size_t batch_size = boost::lexical_cast<size_t>(q);
+			// D3: parse guarded; sizes outside [WriteBatch header, 1 GiB] are
+			// refused before any allocation (readsize() takes an int).
+			size_t batch_size = 0;
+			try {
+				if (q[0] == '\0') throw boost::bad_lexical_cast();
+				batch_size = boost::lexical_cast<size_t>(q);
+			} catch (boost::bad_lexical_cast&) {
+				log_err("malformed BATCH size [%s] -> protocol error, nothing applied", q);
+				delete[] p;
+				this->_client_result = client_protocol_error;
+				return -1;
+			}
+			if (batch_size < kMinWireBatchBytes || batch_size > kMaxWireBatchBytes) {
+				log_err("BATCH size %zu outside [%zu, %zu] -> protocol error, nothing applied",
+					batch_size, kMinWireBatchBytes, kMaxWireBatchBytes);
+				delete[] p;
+				this->_client_result = client_protocol_error;
+				return -1;
+			}
 
 			// Optional CRC-32 (3rd token; absent from older masters -> no
 			// verification, same compat scheme as the snapshot FILE header).
@@ -609,7 +656,7 @@ int op_repl_sync_wal::_parse_text_client_parameters() {
 				uint64_t applied = 0, skipped = 0;
 				storage_rocksdb::apply_outcome refusal = storage_rocksdb::apply_applied;
 				result = rocksdb->apply_wal_batch(this->_server_epoch, this->_incarnation,
-					lsn, batch, applied, skipped, refusal);
+					lsn, batch, applied, skipped, refusal, this->_follow_generation);
 				this->_applied += applied;
 				this->_skipped += skipped;
 				if (result < 0) {

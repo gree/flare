@@ -1720,6 +1720,9 @@ int cluster::stop_wal_follower() {
 		}
 		this->_wal_follower_thread.reset();
 		this->_wal_follower_source.clear();
+		// D7: the stopped handler may still finish a slice (async stop); a new
+		// generation makes its applies refused under the apply lock.
+		this->_storage->bump_follow_generation();
 		if (stats_object != NULL) {
 			stats_object->follow_set_state(stats::follow_idle, "stopped");
 		}
@@ -1782,9 +1785,10 @@ int cluster::_reconcile_wal_follower_locked() {
 	int port = 0;
 	this->from_node_key(source_key, host, port);
 	shared_thread t = this->_other_thread_pool->get(thread_pool::thread_type_wal_follower);
+	const uint64_t follow_generation = this->_storage->bump_follow_generation();
 	handler_wal_follower* h = new handler_wal_follower(t, this, this->_storage, host, port,
 		this->_wal_follow_max_batches, this->_wal_follow_max_bytes, this->_wal_follow_poll_interval_usec,
-		this->_wal_follow_batch_delay_usec);
+		this->_wal_follow_batch_delay_usec, follow_generation);
 	this->_wal_follower_thread = t;
 	this->_wal_follower_source = source_key;
 	log_notice("starting continuous replication follower (source=%s, max_batches=%llu, max_bytes=%llu, poll=%dus, batch_delay=%dus)",
@@ -1819,6 +1823,10 @@ int cluster::_shift_node_role(string node_key, role old_role, int old_partition,
 		// we do not have to care about other nodes (maybe?)
 		return 0;
 	}
+	// D1: only the partition master deletes an expired entry when a read
+	// finds it; a replica only hides it (its own clock must not change its
+	// data outside the replication history).
+	this->_storage->set_lazy_expiry_delete(new_role == role_master);
 	if (new_role == role_proxy) {
 		// we do not have to care about anything in this case, too (maybe?)
 		return 0;

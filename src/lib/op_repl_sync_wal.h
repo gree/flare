@@ -90,8 +90,15 @@ protected:
 	uint64_t	_applied;
 	uint64_t	_skipped;
 	uint64_t	_server_latest_lsn;
+	// Set by run_client_follow: a reply without an EPOCH line is refused
+	// (never applied verbatim) in follow mode (D2).
+	bool		_follow_mode;
+	uint64_t	_follow_generation;	// D7: 0 = not checked
 
 public:
+	void set_follow_generation(uint64_t g) { this->_follow_generation = g; }
+	static const size_t kMinWireBatchBytes;
+	static const size_t kMaxWireBatchBytes;
 	op_repl_sync_wal(shared_connection c, storage* st);
 	virtual ~op_repl_sync_wal();
 

@@ -1485,6 +1485,22 @@ private def ruleSwap (resource toName : String) : IO (Except String String) := d
       | .ok res => kubectl ["patch", "clusterrole", "flare-operator", "--type=json", "-p",
           ("[{\"op\":\"replace\",\"path\":\"/rules/" ++ toString i ++ "/resources\",\"value\":" ++ res.trim ++ "}]")]
 
+/-- (pvc name, uid, bound volume) of every PVC in the namespace. -/
+private def pvcIdentities (ns : String) : IO (List (String × String × String)) := do
+  match ← kubectl ["get", "pvc", "-n", ns, "-o", "jsonpath={range .items[*]}{.metadata.name}|{.metadata.uid}|{.spec.volumeName}{\"\\n\"}{end}"] with
+  | .ok o => return (o.splitOn "\n").filterMap fun l =>
+      match l.trim.splitOn "|" with
+      | [n, u, v] => if n.trim.isEmpty then none else some (n.trim, u.trim, v.trim)
+      | _ => none
+  | .error _ => return []
+
+/-- Every `pfx_i` (i < n) reads back as `val_i` on the node at `ip`. -/
+private def allKeysOn (c : Ctx) (ip pfx : String) (n : Nat) : IO (Option String) := do
+  for i in [0:n] do
+    let v ← memcachedGet c.cfg.debugPod c.cfg.«namespace» ip c.cfg.flarePort s!"{pfx}_{i}"
+    if v != some s!"val_{i}" then return some s!"{pfx}_{i} = {v}"
+  return none
+
 def clusterInitSuite : TestSuite := {
   name := "cluster-init"
   setup := do
@@ -1512,6 +1528,23 @@ def clusterInitSuite : TestSuite := {
         if !ready then return .fail "the waiting operator is not Ready"
         if decided then return .fail "the operator made a node-map decision without a FlareCluster"
         if cmExists then return .fail "a node map was persisted without a FlareCluster"
+        return .pass },
+
+    { name := "SAF-09 waiting is re-evaluated every observation: NotFound (Ready) → the FlareCluster unreadable (not Ready, not treated as absent) → NotFound again (Ready again); still no decision"
+      run := do
+        match ← ruleSwap "flareclusters" "flareclusters-e2e-revoked" with
+        | .error e => return .fail s!"could not revoke flareclusters: {e}"
+        | .ok _ => pure ()
+        let notReady ← waitForCondition "the operator turns not-Ready on a failed CR read" 120 do
+          return !(← c.opReady) && containsSubstr (← c.opLog 400) "NOT treated as absent"
+        discard <| ruleSwap "flareclusters-e2e-revoked" "flareclusters"
+        let readyAgain ← waitForCondition "NotFound again: Ready again" 120 do c.opReady
+        let log ← c.opLog 2000
+        let decided := containsSubstr log "node map:" || containsSubstr log "loaded "
+        IO.eprintln s!"# transition: not-Ready on the failed read={notReady}; Ready again on NotFound={readyAgain}; decision logged={decided}"
+        if !notReady then return .fail "a failed FlareCluster read did not make the waiting operator not-Ready"
+        if !readyAgain then return .fail "the operator did not return to Ready when the FlareCluster read NotFound again"
+        if decided then return .fail "the waiting operator made a node-map decision"
         return .pass },
 
     { name := "SAF-09 the cluster then appears with a first-build approval: the operator examines it, builds it fresh, and the cluster serves writes"
@@ -1547,8 +1580,9 @@ def clusterInitSuite : TestSuite := {
           discard <| kubectl ["delete", "flarecluster", initCfg.name, "-n", ns, "--wait=true"]
           discard <| kubectl ["delete", "configmap", cmName, "-n", ns]
           discard <| kubectl ["annotate", "lease", s!"{initCfg.name}-operator-lease", "-n", ns, "flare.gree.net/node-map-persisted-"]
-          let pvcs := ((← kubectl ["get", "pvc", "-n", ns, "-o", "name"]).toOption.getD "").trim
-          IO.eprintln s!"# CR, StatefulSet, map and Lease marker gone; PVCs left: {pvcs.replace "\n" " "}"
+          let pvcs ← pvcIdentities ns
+          IO.eprintln s!"# CR, StatefulSet, map and Lease marker gone; PVCs left: {pvcs}"
+          if pvcs.length < initCfg.replicas then return .fail s!"precondition: the PVCs did not survive ({pvcs})"
           discard <| kubectl ["scale", "deployment", initCfg.operatorName, "-n", ns, "--replicas=1"]
           let waiting ← waitForCondition "the operator waits for the CR again" 180 do
             return containsSubstr (← c.opLog 400) "WAITING: FlareCluster"
@@ -1567,14 +1601,29 @@ def clusterInitSuite : TestSuite := {
           if ready then return .fail "the operator became Ready (took control) without its map or an approval"
           if cmBack then return .fail "a node map was written without a decision"
           discard <| kubectl ["create", "configmap", cmName, "-n", ns, s!"--from-literal=nodeMap={saved}"]
-          let back ← waitForCondition "the operator loads the restored map and every key is back" 480 do
+          let back ← waitForCondition "the operator loads the restored map and both copies are back" 480 do
             if !(← c.opReady) then return false
             match ← c.pair with
             | .ok (_, m2, _, s2) => return (← c.currItems m2) == items && (← c.currItems s2) == items
             | .error _ => return false
-          IO.eprintln s!"# restored map: every key back={back} (expected {items})"
           if !back then return .fail "the data on the old PVCs did not come back with the restored map"
-          return .pass },
+          -- the SAME volumes were reused (not new empty ones)
+          let pvcsAfter ← pvcIdentities ns
+          let claims := ((← kubectl ["get", "pods", "-n", ns, "-l", s!"app=flare,cluster={initCfg.name}", "-o", "jsonpath={range .items[*]}{.spec.volumes[?(@.name==\"data\")].persistentVolumeClaim.claimName} {end}"]).toOption.getD "").trim
+          let reused := pvcs.all (pvcsAfter.contains ·) && pvcsAfter.length == pvcs.length
+          IO.eprintln s!"# PVCs before {pvcs}; after {pvcsAfter}; pods claim [{claims}]; same UIDs and volumes={reused}"
+          if !reused then return .fail s!"the recreated pods are not on the surviving PVCs (before {pvcs}, after {pvcsAfter})"
+          if !(pvcs.all fun (n, _, _) => containsSubstr claims n) then return .fail s!"the pods do not claim the surviving PVCs ({claims})"
+          -- every key and value, on both copies
+          match ← c.pair with
+          | .error e => return .fail e
+          | .ok (_, m2, _, s2) =>
+            let onM ← allKeysOn c m2 "init" 30
+            let onS ← allKeysOn c s2 "init" 30
+            IO.eprintln s!"# all 30 keys and values: master {onM.getD "ok"}, replica {onS.getD "ok"}"
+            if let some bad := onM then return .fail s!"a key or value did not survive on the master: {bad}"
+            if let some bad := onS then return .fail s!"a key or value did not survive on the replica: {bad}"
+            return .pass },
 
     { name := "SAF-09 read failures are not absence: with the FlareCluster unreadable (RBAC) the operator neither WAITs as if absent nor becomes Ready; with the pod list unreadable and the map missing it never starts fresh"
       run := do
@@ -1599,23 +1648,43 @@ def clusterInitSuite : TestSuite := {
         if readyA then return .fail "the operator became Ready with its FlareCluster unreadable"
         let backA ← waitForCondition "the operator recovers once the CR is readable" 300 do c.opReady
         if !backA then return .fail "the operator did not recover after the CR became readable"
-        -- (b) the pod list cannot be read while the map is missing
+        -- (b) map missing + pod list unreadable. The Lease marker decides
+        -- what the right answer is: with it the cluster provably ran (halt);
+        -- without it the past is unobservable (retry). Never fresh either way.
+        let leaseName := s!"{initCfg.name}-operator-lease"
+        let markerNow : IO String := do
+          return ((← kubectlGetJsonpath "lease" leaseName ns "{.metadata.annotations.flare\\.gree\\.net/node-map-persisted}").toOption.getD "").trim
+        let marker0 ← markerNow
+        if marker0.isEmpty then return .fail "precondition: the Lease carries no persisted-map marker"
         if !(← c.scaleOp 0) then return .fail "could not stop the operator"
         discard <| kubectl ["delete", "configmap", cmName', "-n", ns]
         match ← ruleSwap "pods" "pods-e2e-revoked" with
         | .error e => return .fail s!"could not revoke pods: {e}"
         | .ok _ => pure ()
+        -- (b1) marker present → halt
         discard <| kubectl ["scale", "deployment", initCfg.operatorName, "-n", ns, "--replicas=1"]
-        let retried ← waitForCondition "the operator retries (history unknown)" 120 do
-          return containsSubstr (← c.opLogsAll) "node map: retrying"
+        let halted ← waitForCondition "with the marker the operator halts (the cluster ran before)" 120 do
+          return containsSubstr (← c.opLogsAll) "the cluster ran before"
+        let freshB1 := containsSubstr (← c.opLogsAll) "node map: starting fresh"
+        IO.eprintln s!"# (b1) marker [{marker0}] + map missing + pods unreadable: halted={halted} started fresh={freshB1}"
+        if freshB1 then discard <| ruleSwap "pods-e2e-revoked" "pods"; return .fail "map missing with the marker present: the operator started fresh"
+        if !halted then discard <| ruleSwap "pods-e2e-revoked" "pods"; return .fail "map missing with the marker present: the operator did not halt"
+        -- (b2) marker removed (confirmed) → unknown → retry
+        if !(← c.scaleOp 0) then return .fail "could not stop the operator"
+        discard <| kubectl ["annotate", "lease", leaseName, "-n", ns, "flare.gree.net/node-map-persisted-"]
+        let marker1 ← markerNow
+        if !marker1.isEmpty then discard <| ruleSwap "pods-e2e-revoked" "pods"; return .fail s!"precondition: the Lease marker could not be removed ({marker1})"
+        discard <| kubectl ["scale", "deployment", initCfg.operatorName, "-n", ns, "--replicas=1"]
+        let retried ← waitForCondition "without the marker the operator retries (history unknown)" 120 do
+          return containsSubstr (← c.opLogsAll) "cannot be told from a loss"
         IO.sleep 20000
         let logsB ← c.opLogsAll
         let freshB := containsSubstr logsB "node map: starting fresh"
         discard <| ruleSwap "pods-e2e-revoked" "pods"
         discard <| kubectl ["create", "configmap", cmName', "-n", ns, s!"--from-literal=nodeMap={saved}"]
-        IO.eprintln s!"# pod list unreadable + map missing: retried={retried} started fresh={freshB}"
+        IO.eprintln s!"# (b2) marker removed + map missing + pods unreadable: retried={retried} started fresh={freshB}"
         if freshB then return .fail "an unreadable pod list let the operator start fresh"
-        if !retried then return .fail "the operator did not retry with an unreadable pod list"
+        if !retried then return .fail "without the marker and with the pod list unreadable, the operator did not retry as undecidable"
         let backB ← waitForCondition "the operator recovers with the map restored" 300 do c.opReady
         if !backB then return .fail "the operator did not recover after the pod list became readable"
         return .pass }

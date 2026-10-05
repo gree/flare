@@ -2380,20 +2380,23 @@ def main (args : List String) : IO Unit := do
   let mut crPresent := false
   let mut waitingLogged := false
   while !crPresent do
+    -- Health follows EVERY observation; only the log line is de-duplicated
+    -- (review 2026-10-05: NotFound -> error -> NotFound left it not-Ready).
     match ← kubectl ["get", "flarecluster", crName, "-n", ns, "-o", "jsonpath={.metadata.uid}"] with
     | .ok uid =>
       if uid.trim.isEmpty then
+        healthStatus.setLeader true     -- not Ready: no usable observation
         IO.eprintln s!"[flare-operator] FlareCluster {crName}: read returned no UID; retrying (not treated as absent)"
       else crPresent := true
     | .error e =>
       if (e.splitOn "(NotFound)").length > 1 then
+        healthStatus.setLeader false    -- Ready while waiting (no index to serve)
         if !waitingLogged then
           IO.eprintln s!"[flare-operator] WAITING: FlareCluster {crName} does not exist; the operator is running (Ready) but initialises and controls nothing until it does"
           waitingLogged := true
-          healthStatus.setLeader false  -- Ready while waiting (no index to serve)
       else
-        IO.eprintln s!"[flare-operator] FlareCluster {crName} could not be read ({e}); retrying — NOT treated as absent"
         healthStatus.setLeader true     -- not Ready: the TCP index is not up
+        IO.eprintln s!"[flare-operator] FlareCluster {crName} could not be read ({e}); retrying — NOT treated as absent"
     if !crPresent then
       IO.sleep 5000
       if !(← tryAcquireOrRenew leaseName ns identity) then

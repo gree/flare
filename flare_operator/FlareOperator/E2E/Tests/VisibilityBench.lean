@@ -152,8 +152,14 @@ spec:
         name: vis-bench-script
 "
 
-private def harnessExec (args : List String) : IO (Except String String) :=
-  kubectl (["exec", "-n", ns, "vis-harness", "--"] ++ args)
+/-- `kubectl exec` into the harness pod WITHOUT the shared kubectl wrapper's
+    30 s wall (CI 37376718731: every measurement was killed at 30 s); bounded
+    by its own one-hour wall instead. -/
+private def harnessExec (args : List String) : IO (Except String String) := do
+  let out ← IO.Process.output { cmd := "timeout", args := (#["-k", "10", "3600", "kubectl", "exec", "-n", ns, "vis-harness", "--"] ++ args.toArray) }
+  if out.stderr.trim != "" then IO.eprintln out.stderr.trim
+  if out.exitCode == 0 then return .ok out.stdout
+  else return .error s!"kubectl exec failed ({out.exitCode}): {out.stderr.trim}"
 
 private def deployRedis (profile : String) : IO Bool := do
   discard <| kubectl ["delete", "statefulset", "redis-primary", "redis-replica", "-n", ns, "--ignore-not-found", "--wait=true"]
@@ -333,7 +339,7 @@ def visibilityBenchSuite : TestSuite := {
       run := skipUnlessOn (redisArm "redis-mem" "mem") },
     { name := "comparison report (absolute values and deltas; no tolerance applied)"
       run := skipUnlessOn do
-        match ← hostCmd "sh" ["-c", s!"python3 ../bench/visibility/report.py {outDir} > {outDir}/report.md && cat {outDir}/report.md"] with
+        match ← hostCmd "sh" ["-c", s!"mkdir -p {outDir} && python3 ../bench/visibility/report.py {outDir} > {outDir}/report.md && cat {outDir}/report.md"] with
         | .ok o => IO.eprintln o; return .pass
         | .error e => return .fail e }
   ]

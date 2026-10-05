@@ -383,6 +383,27 @@ private def operatorLogsAll : IO String := do
       | .error _ => pure ()
   return acc
 
+/-- The operator's index port (12120) accepts a connection on any operator
+    pod. While the node map is undecided it must not: no flared can register
+    and no topology can be served. Readiness is NOT this signal — a restarted
+    operator is briefly a standby, and a standby is Ready by design. -/
+private def indexServing : IO Bool := do
+  match ← kubectl ["get", "pods", "-n", cfg.«namespace», "-l", s!"app={cfg.operatorName}", "-o", "jsonpath={.items[*].status.podIP}"] with
+  | .error _ => return false
+  | .ok ips =>
+    for ip in (ips.trim.splitOn " ").filter (· != "") do
+      match ← execInDebugPod cfg.debugPod cfg.«namespace» s!"nc -z -w 2 {ip} {cfg.operatorPort} && echo OPEN || echo CLOSED" with
+      | .ok o => if containsSubstr o "OPEN" then return true
+      | .error _ => pure ()
+    return false
+
+/-- Sample `indexServing` for `secs` seconds; true if it was ever open. -/
+private def indexEverServed (secs : Nat) : IO Bool := do
+  for _ in [0:secs / 3] do
+    if ← indexServing then return true
+    IO.sleep 3000
+  return false
+
 private def operatorReady : IO Bool := do
   match ← kubectl ["get", "pods", "-n", cfg.«namespace», "-l", s!"app={cfg.operatorName}", "-o", "jsonpath={.items[*].status.containerStatuses[0].ready}"] with
   | .ok o => return o.trim == "true"
@@ -1010,13 +1031,20 @@ def suite : TestSuite := {
             -- give them time to be recreated, not to become readable
             IO.sleep 15000
           let (undecided, ready) ← restartUnder fault "cannot be told from a loss" 150
+          -- CI 37278389267: "ready" was true here — the undecided operator
+          -- exits (code 2) and restarts, and the restarted process is briefly
+          -- a standby, which is Ready by design. What must hold is that it
+          -- never serves the index, never starts fresh, writes no map.
+          let served ← indexEverServed 60
           let logs ← operatorLogsAll
           let fresh := containsSubstr logs "node map: starting fresh"
+          let mapWritten := (← readNodeMap).isSome
           let historyLine := ((logs.splitOn "\n").find? (containsSubstr · "node map history:")).getD "(none)"
-          IO.eprintln s!"# compound: undecided logged={undecided} started fresh={fresh} ready={ready}\n# {historyLine.trim}"
+          IO.eprintln s!"# compound: undecided logged={undecided} started fresh={fresh} index ever served={served} map written={mapWritten} (readiness observed {ready}: a restarted standby is Ready by design)\n# {historyLine.trim}"
           if fresh then return .fail "the operator started from an empty map although the past could not be observed"
           if !undecided then return .fail "the operator did not report that a first build cannot be told from a loss"
-          if ready then return .fail "the operator became Ready without its node map"
+          if served then return .fail "the operator served the index without its node map"
+          if mapWritten then return .fail "a node map was written without a decision"
           match ← writeNodeMap saved with
           | .error e => return .fail s!"could not restore the ConfigMap: {e}"
           | .ok _ => pure ()

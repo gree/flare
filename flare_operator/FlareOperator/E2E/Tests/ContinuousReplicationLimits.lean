@@ -1451,6 +1451,21 @@ private def initCfg : ClusterConfig := {
   deferClusterCr := true
 }
 
+/-- The operator's index port accepts a connection (sampled for `secs`). A
+    retrying operator exits and restarts and is briefly a Ready standby, so
+    readiness cannot show "took control"; an open index port can. -/
+private def Ctx.indexEverServed (c : Ctx) (secs : Nat) : IO Bool := do
+  for _ in [0:secs / 3] do
+    match ← kubectl ["get", "pods", "-n", c.cfg.«namespace», "-l", s!"app={c.cfg.operatorName}", "-o", "jsonpath={.items[*].status.podIP}"] with
+    | .ok ips =>
+      for ip in (ips.trim.splitOn " ").filter (· != "") do
+        match ← execInDebugPod c.cfg.debugPod c.cfg.«namespace» s!"nc -z -w 2 {ip} {c.cfg.operatorPort} && echo OPEN || echo CLOSED" with
+        | .ok o => if containsSubstr o "OPEN" then return true
+        | .error _ => pure ()
+    | .error _ => pure ()
+    IO.sleep 3000
+  return false
+
 private def Ctx.opReady (c : Ctx) : IO Bool := do
   match ← kubectl ["get", "pods", "-n", c.cfg.«namespace», "-l", s!"app={c.cfg.operatorName}", "-o", "jsonpath={.items[*].status.containerStatuses[0].ready}"] with
   | .ok o => return o.trim == "true"
@@ -1594,15 +1609,15 @@ def clusterInitSuite : TestSuite := {
           deployDeferredCluster initCfg false
           let undecided ← waitForCondition "the operator refuses to tell a first build from a loss" 180 do
             return containsSubstr (← c.opLogsAll) "cannot be told from a loss"
-          IO.sleep 30000
+          let served ← c.indexEverServed 60
           let logs ← c.opLogsAll
           let fresh := containsSubstr logs "node map: starting fresh"
           let ready ← c.opReady
           let cmBack := (← kubectlGetJsonpath "configmap" cmName ns "{.metadata.name}").toOption.isSome
-          IO.eprintln s!"# CR recreated without approval: waited first={waiting}; undecided={undecided}; started fresh={fresh}; operator ready={ready}; a node map was written={cmBack}"
+          IO.eprintln s!"# CR recreated without approval: waited first={waiting}; undecided={undecided}; started fresh={fresh}; index ever served={served}; a node map was written={cmBack} (readiness observed {ready}: a restarted standby is Ready by design)"
           if fresh then return .fail "the operator initialised a cluster over old PVCs without approval"
           if !undecided then return .fail "the operator did not report that it cannot tell a first build from a loss"
-          if ready then return .fail "the operator became Ready (took control) without its map or an approval"
+          if served then return .fail "the operator served the index (took control) without its map or an approval"
           if cmBack then return .fail "a node map was written without a decision"
           discard <| kubectl ["create", "configmap", cmName, "-n", ns, s!"--from-literal=nodeMap={saved}"]
           let back ← waitForCondition "the operator loads the restored map and both copies are back" 480 do

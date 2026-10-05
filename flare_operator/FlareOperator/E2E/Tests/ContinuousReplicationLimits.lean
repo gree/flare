@@ -1620,19 +1620,38 @@ def clusterInitSuite : TestSuite := {
           if !(pvcs.all fun (n, _, _) => containsSubstr claims n) then return .fail s!"the pods do not claim the surviving PVCs ({claims})"
           -- every key and value, on both copies. A GET on the replica can be
           -- proxied to the master, so the replica's reads count as LOCAL only
-          -- if the master served no get meanwhile (its cmd_get unchanged).
+          -- if: the master's cmd_get was READ both times and did not move;
+          -- the master is the same process (pod UID and flared boot id
+          -- unchanged — a restart would reset the counter); and the master
+          -- and the replica read did not change roles or pods meanwhile.
           match ← c.pair with
           | .error e => return .fail e
-          | .ok (_, m2, _, s2) =>
+          | .ok (mPodR, m2, sPodR, s2) =>
             let onM ← allKeysOn c m2 "init" 30
-            let getsBefore := (← c.statNat m2 "cmd_get").getD 0
+            let mUid0 ← c.podUid mPodR
+            let sUid0 ← c.podUid sPodR
+            let mBoot0 ← c.statNat m2 "reconstruction_boot_id"
+            let gets0 ← c.statNat m2 "cmd_get"
             let onS ← allKeysOn c s2 "init" 30
-            let getsAfter := (← c.statNat m2 "cmd_get").getD 0
-            let servedLocally := getsAfter == getsBefore
-            IO.eprintln s!"# all 30 keys and values: master {onM.getD "ok"}, replica {onS.getD "ok"} (replica reads local: master cmd_get {getsBefore} -> {getsAfter})"
+            let gets1 ← c.statNat m2 "cmd_get"
+            let mBoot1 ← c.statNat m2 "reconstruction_boot_id"
+            let mUid1 ← c.podUid mPodR
+            let sUid1 ← c.podUid sPodR
+            let rolesAfter ← c.pair
+            let sameRoles := match rolesAfter with
+              | .ok (m', _, s', _) => m' == mPodR && s' == sPodR
+              | .error _ => false
+            let sameMaster := mUid0.isSome && mUid0 == mUid1 && mBoot0.isSome && mBoot0 == mBoot1
+            let sameReplica := sUid0.isSome && sUid0 == sUid1
+            let countersRead := gets0.isSome && gets1.isSome
+            let servedLocally := countersRead && gets0 == gets1
+            IO.eprintln s!"# all 30 keys and values: master {onM.getD "ok"}, replica {onS.getD "ok"}; master cmd_get {gets0} -> {gets1}; master uid {mUid0} -> {mUid1}, boot {mBoot0} -> {mBoot1}; replica uid {sUid0} -> {sUid1}; roles unchanged={sameRoles}"
             if let some bad := onM then return .fail s!"a key or value did not survive on the master: {bad}"
             if let some bad := onS then return .fail s!"a key or value did not survive (read through the replica): {bad}"
-            if !servedLocally then return .fail s!"the replica's reads were served by the master (cmd_get {getsBefore} -> {getsAfter}): no evidence the replica's local copy matches"
+            if !countersRead then return .fail s!"the master's cmd_get could not be read before and after ({gets0} -> {gets1}): no evidence of local reads"
+            if !sameMaster then return .fail s!"the master changed process during the reads (uid {mUid0} -> {mUid1}, boot {mBoot0} -> {mBoot1}): its counter is not comparable"
+            if !sameReplica || !sameRoles then return .fail s!"the read target or the master changed during the reads (replica uid {sUid0} -> {sUid1}, roles unchanged={sameRoles})"
+            if !servedLocally then return .fail s!"the replica's reads were served by the master (cmd_get {gets0} -> {gets1}): no evidence the replica's local copy matches"
             return .pass },
 
     { name := "SAF-09 read failures are not absence: with the FlareCluster unreadable (RBAC) the operator neither WAITs as if absent nor becomes Ready; with the pod list unreadable and the map missing it never starts fresh"

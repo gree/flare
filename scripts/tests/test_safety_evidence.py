@@ -64,10 +64,42 @@ class EvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "reviewer"):
             safety.validate(self.data, ROOT)
 
-    def test_production_approval_needs_review_and_ci(self):
+    def test_production_approval_needs_a_candidate(self):
         c = self.data["controls"][0]
         c["status"]["production_approved"] = {"state": "yes", "by": "release owner", "date": "2026-10-05", "note": "x"}
+        with self.assertRaisesRegex(ValueError, "needs a release candidate"):
+            safety.validate(self.data, ROOT)
+
+    def test_production_approval_needs_review_and_ci(self):
+        head = subprocess.check_output(["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True).strip()
+        self.data["candidate"] = {"commit": head, "label": "test"}
+        for control in self.data["controls"]:
+            safety.derive_status(control, self.data["candidate"], ROOT)
+        c = self.data["controls"][0]
+        c["status"]["production_approved"] = {"state": "yes", "by": "release owner", "date": "2026-10-05", "note": "x", "commit": head}
         with self.assertRaisesRegex(ValueError, "requires reviewed=yes and ci_passed=yes"):
+            safety.validate(self.data, ROOT)
+
+    def test_ci_counts_only_runs_at_the_candidate(self):
+        head = subprocess.check_output(["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True).strip()
+        cand = {"commit": head, "label": "test"}
+        c = self.data["controls"][0]
+        # every check passed — but at a revision that is not the candidate
+        c["runs"] = [dict(self.run_record(check=k["id"], commit="1" * 40)) for k in c["checks"]]
+        self.assertEqual(safety.ci_stage(c, cand, ROOT)[0], "no")
+        # the same passes recorded for the candidate's head count
+        c["runs"] = [dict(self.run_record(check=k["id"], commit="1" * 40), head=head) for k in c["checks"]]
+        self.assertEqual(safety.ci_stage(c, cand, ROOT)[0], "yes")
+        # without a candidate nothing counts
+        self.assertEqual(safety.ci_stage(c, None, ROOT)[0], "no")
+
+    def test_review_must_be_of_the_candidate(self):
+        head = subprocess.check_output(["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True).strip()
+        self.data["candidate"] = {"commit": head, "label": "test"}
+        for control in self.data["controls"]:
+            safety.derive_status(control, self.data["candidate"], ROOT)
+        self.data["controls"][0]["status"]["reviewed"] = {"state": "yes", "by": "reviewer", "commit": "2" * 40, "date": "2026-10-05"}
+        with self.assertRaisesRegex(ValueError, "review of the release candidate"):
             safety.validate(self.data, ROOT)
 
     def test_verified_needs_execution_evidence(self):
@@ -81,7 +113,7 @@ class EvidenceTests(unittest.TestCase):
         c = self.data["controls"][0]
         c["verification"] = "verified"
         c["runs"] = [self.run_record(check=k["id"]) for k in c["checks"]]
-        safety.derive_status(c)   # what --write does after recording runs
+        safety.derive_status(c, self.data.get("candidate"), ROOT)   # what --write does after recording runs
         safety.validate(self.data, ROOT)
 
     def test_branch_sha_missing_report_and_static_evidence_rejected(self):
@@ -172,7 +204,7 @@ class EvidenceTests(unittest.TestCase):
         new["controls"][0]["review"]["note"] = "Revalidated clarified scope on new revision."
         new["controls"][0]["runs"].extend(self.run_record(check=k["id"], commit="2" * 40)
                                           for k in new["controls"][0]["checks"])
-        safety.derive_status(new["controls"][0])   # what --write does after recording runs
+        safety.derive_status(new["controls"][0], new.get("candidate"), ROOT)   # what --write does after recording runs
         safety.validate(new, ROOT)
         safety.check_impact(old, new, set())
 

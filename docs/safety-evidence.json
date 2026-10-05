@@ -1378,11 +1378,12 @@
       },
       "status": {
         "implemented": {
-          "state": "partial"
+          "state": "partial",
+          "source": "declared"
         },
         "ci_passed": {
-          "state": "partial",
-          "evidence": "4/5 checks' latest recorded run passed"
+          "state": "no",
+          "evidence": "no release candidate set (0/5 checks counted)"
         },
         "reviewed": {
           "state": "no",
@@ -1470,11 +1471,12 @@
       },
       "status": {
         "implemented": {
-          "state": "yes"
+          "state": "yes",
+          "source": "declared"
         },
         "ci_passed": {
-          "state": "yes",
-          "evidence": "1/1 checks' latest recorded run passed"
+          "state": "no",
+          "evidence": "no release candidate set (0/1 checks counted)"
         },
         "reviewed": {
           "state": "no",
@@ -2244,11 +2246,12 @@
       },
       "status": {
         "implemented": {
-          "state": "partial"
+          "state": "partial",
+          "source": "declared"
         },
         "ci_passed": {
-          "state": "yes",
-          "evidence": "3/3 checks' latest recorded run passed"
+          "state": "no",
+          "evidence": "no release candidate set (0/3 checks counted)"
         },
         "reviewed": {
           "state": "no",
@@ -3042,11 +3045,12 @@
       },
       "status": {
         "implemented": {
-          "state": "partial"
+          "state": "partial",
+          "source": "declared"
         },
         "ci_passed": {
-          "state": "partial",
-          "evidence": "5/6 checks' latest recorded run passed"
+          "state": "no",
+          "evidence": "no release candidate set (0/6 checks counted)"
         },
         "reviewed": {
           "state": "no",
@@ -3333,11 +3337,12 @@
       },
       "status": {
         "implemented": {
-          "state": "partial"
+          "state": "partial",
+          "source": "declared"
         },
         "ci_passed": {
-          "state": "yes",
-          "evidence": "3/3 checks' latest recorded run passed"
+          "state": "no",
+          "evidence": "no release candidate set (0/3 checks counted)"
         },
         "reviewed": {
           "state": "no",
@@ -3863,11 +3868,12 @@
       },
       "status": {
         "implemented": {
-          "state": "partial"
+          "state": "partial",
+          "source": "declared"
         },
         "ci_passed": {
-          "state": "yes",
-          "evidence": "5/5 checks' latest recorded run passed"
+          "state": "no",
+          "evidence": "no release candidate set (0/5 checks counted)"
         },
         "reviewed": {
           "state": "no",
@@ -3908,7 +3914,8 @@
       "residual_risks": [
         "Parallel string lists conflate observations; nodeName is unused; Ready does not prove data health.",
         "FINDING 2026-10-02 (CI 36914077401, functional, fixed; PR run 36918285987 green incl. prepare-evidence): the NotReady streak that turns a present-but-NotReady pod into a dead node was counted regardless of the node's state. A node is NotReady for its whole Prepare/reconstruction (sync-gated readiness), so it carried a long streak and was declared dead in the very pass it became Active, before its pod could observe the activation. Seen in prepare-evidence: PREPARE-REPAIR activated the slave, the wall-clock grace ended 124 s in, and the next pass failed the slave over (it was masked before by the longer cycle-based grace and by the breaker tripping at 1 of 2). Fix: K8sReconciler.unreadyStreaks counts only while the node is an Active master/slave in the committed map; a Prepare node's streak restarts at 0. Three unit cases.",
-        "2026-10-05 SAF-08 audit (docs/reports/2026-10-05-saf08-copy-identity-audit.md): apart from the empty-master delete (UID precondition), no delete or promote decision bound its evidence to a pod UID or flared process; protection was only the re-registration (regEpoch) merge, which misses a replaced pod that has not registered yet. Fixed: (a) an Active slave whose pod is not Ready is not a promotion candidate in failover, drain, refill or the zombie guard (readiness is sync-gated, so a same-name replacement is never Ready before it registers); (b) replica-repair demotion is deferred unless the partition's CURRENT master is known to hold data, and the demotion is an atomic re-check of the entry (regEpoch); (c) PREPARE-REPAIR re-reads the slave's boot id just before activating and requires an unchanged regEpoch. Open: the self-heal's validated successor is not pinned for the following drain; stuck-Down restart deletes by name on stale state; data-bearing evidence is not UID-bound and all-probes-failed can crown an empty lastMasterOf holder; the first follow reading after an operator restart is never marked as a process change; the zone-repair swap. CI pending."
+        "2026-10-05 SAF-08 audit (docs/reports/2026-10-05-saf08-copy-identity-audit.md): apart from the empty-master delete (UID precondition), no delete or promote decision bound its evidence to a pod UID or flared process; protection was only the re-registration (regEpoch) merge, which misses a replaced pod that has not registered yet. Fixed: (a) an Active slave whose pod is not Ready is not a promotion candidate in failover, drain, refill or the zombie guard (readiness is sync-gated, so a same-name replacement is never Ready before it registers); (b) replica-repair demotion is deferred unless the partition's CURRENT master is known to hold data, and the demotion is an atomic re-check of the entry (regEpoch); (c) PREPARE-REPAIR re-reads the slave's boot id just before activating and requires an unchanged regEpoch. Open: the self-heal's validated successor is not pinned for the following drain; stuck-Down restart deletes by name on stale state; data-bearing evidence is not UID-bound and all-probes-failed can crown an empty lastMasterOf holder; the first follow reading after an operator restart is never marked as a process change; the zone-repair swap. CI pending.",
+        "2026-10-05 review corrections: (a) Readiness is a snapshot, not identity — excluding NotReady candidates closes the window BEFORE a replacement registers, not a restart/replacement AFTER the observation; now every node a pass promotes must still be the incarnation observed in that pass (pod UID and flared container restart count, from the pod list) when the commit happens, else the pass is dropped and not persisted (commitChecked; test seam FLARE_TEST_PROMOTION_BARRIER). (b) The empty-master self-heal's UID precondition protects the delete target only; the surviving successor's incarnation is now bracketed around its fresh stats and must be stable, and the validated successor is pinned for the following drain while its pod stays that incarnation. (c) Repair demotion: the source's stats are bracketed by its incarnation and the atomic update requires the partition's master entry (key and regEpoch) unchanged. (d) An EMPTY repair source is accepted only under the replica's own lineage (rocksdb_master_id: deleted to empty), otherwise deferred — neither 'empty is safe to rebuild from' nor 'empty is never a source'. CI pending."
       ],
       "code": [
         {
@@ -3956,7 +3963,7 @@
         {
           "id": "CHECK-07-identity",
           "kind": "scenario",
-          "procedure": "SAF-08 copy identity (audit docs/reports/2026-10-05-saf08-copy-identity-audit.md). E2E copy-identity (1p x 3r PVC, legacy replication, drain 20 s): (1) a slave is force-deleted with the node cordoned so its same-name replacement stays Pending while the map says Active, then the master is drained — the replaced pod must never be master, the healthy slave must take over with every key, and the operator must log the replaced pod as withheld; (2) a slave's flared is killed -9 (same pod, new process) and the master is drained at once — that slave must not be promoted, the other takes over with every key (the restart-to-registration window is short: an outcome guard).",
+          "procedure": "SAF-08 copy identity (audit docs/reports/2026-10-05-saf08-copy-identity-audit.md). E2E copy-identity (1p x 3r PVC, legacy replication, drain 20 s): (1) a slave is force-deleted with the node cordoned so its same-name replacement stays Pending while the map says Active, then the master is drained — the replaced pod must never be master, the healthy slave must take over with every key, and the operator must log the replaced pod as withheld; (2) a slave's flared is killed -9 (same pod, new process) and the master is drained at once — that slave must not be promoted, the other takes over with every key (the restart-to-registration window is short: an outcome guard). Post-observation (promotion barrier FLARE_TEST_PROMOTION_BARRIER): (3) the pass that chose a successor is held after its observations, that successor's flared is killed, and on release the operator must log PROMOTION ABORTED for it and a later pass promote a valid copy with every key; (4) the same with the chosen successor replaced under the same name (node cordoned): aborted, the other slave takes over; (5) every key deleted on the master while one replica misses the deletes: the repair resolves by rebuilding the replica to empty (same lineage), not deferred forever.",
           "references": [
             {
               "path": "flare_operator/FlareOperator/E2E/Tests/ContinuousReplicationLimits.lean",
@@ -3980,11 +3987,12 @@
       },
       "status": {
         "implemented": {
-          "state": "partial"
+          "state": "partial",
+          "source": "declared"
         },
         "ci_passed": {
           "state": "no",
-          "evidence": "0/2 checks' latest recorded run passed"
+          "evidence": "no release candidate set (0/2 checks counted)"
         },
         "reviewed": {
           "state": "no",
@@ -4063,11 +4071,12 @@
       },
       "status": {
         "implemented": {
-          "state": "yes"
+          "state": "yes",
+          "source": "declared"
         },
         "ci_passed": {
           "state": "no",
-          "evidence": "0/1 checks' latest recorded run passed"
+          "evidence": "no release candidate set (0/1 checks counted)"
         },
         "reviewed": {
           "state": "no",
@@ -4486,11 +4495,12 @@
       },
       "status": {
         "implemented": {
-          "state": "partial"
+          "state": "partial",
+          "source": "declared"
         },
         "ci_passed": {
-          "state": "yes",
-          "evidence": "1/1 checks' latest recorded run passed"
+          "state": "no",
+          "evidence": "no release candidate set (0/1 checks counted)"
         },
         "reviewed": {
           "state": "no",
@@ -4568,11 +4578,12 @@
       },
       "status": {
         "implemented": {
-          "state": "partial"
+          "state": "partial",
+          "source": "declared"
         },
         "ci_passed": {
           "state": "no",
-          "evidence": "0/1 checks' latest recorded run passed"
+          "evidence": "no release candidate set (0/1 checks counted)"
         },
         "reviewed": {
           "state": "no",
@@ -4664,11 +4675,12 @@
       },
       "status": {
         "implemented": {
-          "state": "partial"
+          "state": "partial",
+          "source": "declared"
         },
         "ci_passed": {
           "state": "no",
-          "evidence": "0/1 checks' latest recorded run passed"
+          "evidence": "no release candidate set (0/1 checks counted)"
         },
         "reviewed": {
           "state": "no",
@@ -4745,11 +4757,12 @@
       },
       "status": {
         "implemented": {
-          "state": "partial"
+          "state": "partial",
+          "source": "declared"
         },
         "ci_passed": {
           "state": "no",
-          "evidence": "0/1 checks' latest recorded run passed"
+          "evidence": "no release candidate set (0/1 checks counted)"
         },
         "reviewed": {
           "state": "no",
@@ -4835,11 +4848,12 @@
       },
       "status": {
         "implemented": {
-          "state": "partial"
+          "state": "partial",
+          "source": "declared"
         },
         "ci_passed": {
           "state": "no",
-          "evidence": "0/1 checks' latest recorded run passed"
+          "evidence": "no release candidate set (0/1 checks counted)"
         },
         "reviewed": {
           "state": "no",
@@ -4910,11 +4924,12 @@
       },
       "status": {
         "implemented": {
-          "state": "partial"
+          "state": "partial",
+          "source": "declared"
         },
         "ci_passed": {
           "state": "no",
-          "evidence": "0/1 checks' latest recorded run passed"
+          "evidence": "no release candidate set (0/1 checks counted)"
         },
         "reviewed": {
           "state": "no",
@@ -5090,11 +5105,12 @@
       },
       "status": {
         "implemented": {
-          "state": "partial"
+          "state": "partial",
+          "source": "declared"
         },
         "ci_passed": {
-          "state": "yes",
-          "evidence": "1/1 checks' latest recorded run passed"
+          "state": "no",
+          "evidence": "no release candidate set (0/1 checks counted)"
         },
         "reviewed": {
           "state": "no",
@@ -5805,11 +5821,12 @@
       },
       "status": {
         "implemented": {
-          "state": "partial"
+          "state": "partial",
+          "source": "declared"
         },
         "ci_passed": {
-          "state": "partial",
-          "evidence": "5/6 checks' latest recorded run passed"
+          "state": "no",
+          "evidence": "no release candidate set (0/6 checks counted)"
         },
         "reviewed": {
           "state": "no",
@@ -6214,11 +6231,12 @@
       },
       "status": {
         "implemented": {
-          "state": "yes"
+          "state": "yes",
+          "source": "declared"
         },
         "ci_passed": {
-          "state": "yes",
-          "evidence": "2/2 checks' latest recorded run passed"
+          "state": "no",
+          "evidence": "no release candidate set (0/2 checks counted)"
         },
         "reviewed": {
           "state": "no",
@@ -7101,11 +7119,12 @@
       },
       "status": {
         "implemented": {
-          "state": "yes"
+          "state": "yes",
+          "source": "declared"
         },
         "ci_passed": {
-          "state": "yes",
-          "evidence": "6/6 checks' latest recorded run passed"
+          "state": "no",
+          "evidence": "no release candidate set (0/6 checks counted)"
         },
         "reviewed": {
           "state": "no",
@@ -7221,11 +7240,12 @@
       },
       "status": {
         "implemented": {
-          "state": "partial"
+          "state": "partial",
+          "source": "declared"
         },
         "ci_passed": {
-          "state": "yes",
-          "evidence": "1/1 checks' latest recorded run passed"
+          "state": "no",
+          "evidence": "no release candidate set (0/1 checks counted)"
         },
         "reviewed": {
           "state": "no",
@@ -7639,11 +7659,12 @@
       },
       "status": {
         "implemented": {
-          "state": "yes"
+          "state": "yes",
+          "source": "declared"
         },
         "ci_passed": {
-          "state": "yes",
-          "evidence": "2/2 checks' latest recorded run passed"
+          "state": "no",
+          "evidence": "no release candidate set (0/2 checks counted)"
         },
         "reviewed": {
           "state": "no",

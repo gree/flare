@@ -62,56 +62,97 @@ def referenced_paths(control):
 
 IMPL_STAGE = {"gap": "no", "partial": "partial", "implemented": "yes"}
 
+# Paths whose change cannot alter what a test exercised. A run at revision X
+# counts for candidate C only if X == C or every path changed between them
+# is one of these (verified with git; an unknown revision never counts).
+DOCS_ONLY = re.compile(r"^(docs/.*|[^/]*\.md|.*/[^/]*\.md)$")
+_equiv_cache = {}
 
-def ci_stage(control):
-    """CI stage, DERIVED from recorded runs: the latest result of every check.
-    yes = every check's latest recorded run passed; partial = some; no = none."""
+
+def equivalent(root, rev, candidate):
+    """rev and candidate are the same revision, or differ in docs only."""
+    if not rev or not candidate:
+        return False
+    if rev == candidate:
+        return True
+    key = (rev, candidate)
+    if key not in _equiv_cache:
+        try:
+            changed = git(root, "diff", "--name-only", rev, candidate).split()
+            _equiv_cache[key] = all(DOCS_ONLY.match(p) for p in changed)
+        except (subprocess.CalledProcessError, OSError):
+            _equiv_cache[key] = False
+    return _equiv_cache[key]
+
+
+def ci_stage(control, candidate=None, root=None):
+    """CI stage for the release CANDIDATE, derived from recorded runs: a run
+    counts only if the revision it tested (its `head`, else its `commit`) is
+    the candidate or a docs-only equivalent of it. yes = every check's latest
+    such run passed; partial = some; no = none."""
     ids = [k["id"] for k in control["checks"]]
+    if not candidate:
+        return "no", f"no release candidate set (0/{len(ids)} checks counted)"
     latest = {}
     for run in control["runs"]:
-        latest[run["check"]] = run["result"]
+        tested = run.get("head") or run["commit"]
+        if equivalent(root, tested, candidate["commit"]):
+            latest[run["check"]] = run["result"]
     passed = [i for i in ids if latest.get(i) == "pass"]
     state = "yes" if ids and len(passed) == len(ids) else ("partial" if passed else "no")
-    return state, f"{len(passed)}/{len(ids)} checks' latest recorded run passed"
+    return state, (f"{len(passed)}/{len(ids)} checks pass at candidate {candidate.get('label', '?')} "
+                   f"({candidate['commit'][:10]}) or a docs-only equivalent")
 
 
-def derive_status(control):
-    """The two derived stages, written by --write and required by the check."""
+def derive_status(control, candidate=None, root=None):
+    """The derived stage (CI) and the transcribed one (implemented), written by
+    --write and required by the check. `implemented` is NOT computed: it is the
+    hand-set implementation field, labelled as declared."""
     status = control.setdefault("status", {})
-    status["implemented"] = {"state": IMPL_STAGE[control["implementation"]]}
-    state, evidence = ci_stage(control)
+    status["implemented"] = {"state": IMPL_STAGE[control["implementation"]], "source": "declared"}
+    state, evidence = ci_stage(control, candidate, root)
     status["ci_passed"] = {"state": state, "evidence": evidence}
     status.setdefault("reviewed", {"state": "no", "note": "no independent review recorded (the review field holds change-impact notes)"})
     status.setdefault("production_approved", {"state": "no", "note": "not approved for production"})
 
 
-def validate_status(c, label):
+def validate_status(c, label, candidate=None, root=None):
     st = c.get("status")
     require(isinstance(st, dict) and set(st) == {"implemented", "ci_passed", "reviewed", "production_approved"},
             f"{label}: status needs implemented/ci_passed/reviewed/production_approved (run --write)")
-    require(st["implemented"]["state"] == IMPL_STAGE[c["implementation"]],
+    require(st["implemented"] == {"state": IMPL_STAGE[c["implementation"]], "source": "declared"},
             f"{label}: status.implemented does not match implementation (run --write)")
-    state, evidence = ci_stage(c)
+    state, evidence = ci_stage(c, candidate, root)
     require(st["ci_passed"] == {"state": state, "evidence": evidence},
-            f"{label}: status.ci_passed must be derived from the runs (run --write)")
+            f"{label}: status.ci_passed must be derived from the runs at the candidate (run --write)")
     rv = st["reviewed"]
     require(rv["state"] in ("no", "yes"), f"{label}: invalid reviewed state")
     if rv["state"] == "yes":
         require(nonempty(rv.get("by", "")) and SHA.fullmatch(str(rv.get("commit", ""))),
                 f"{label}: reviewed=yes needs the reviewer (role) and the full reviewed commit SHA")
         date(rv["date"])
+        require(candidate is not None and equivalent(root, rv["commit"], candidate["commit"]),
+                f"{label}: reviewed=yes must be a review of the release candidate (or a docs-only equivalent)")
     ap = st["production_approved"]
     require(ap["state"] in ("no", "yes"), f"{label}: invalid production_approved state")
     if ap["state"] == "yes":
+        require(candidate is not None, f"{label}: production approval needs a release candidate")
         require(rv["state"] == "yes" and state == "yes",
                 f"{label}: production approval requires reviewed=yes and ci_passed=yes")
         require(nonempty(ap.get("by", "")) and nonempty(ap.get("note", "")),
                 f"{label}: production approval needs the approver (role) and a note")
+        require(ap.get("commit") == candidate["commit"],
+                f"{label}: production approval must name the candidate commit")
         date(ap["date"])
 
 
 def validate(data, root):
     require(data["schema_version"] == 1, "unsupported schema_version")
+    candidate = data.get("candidate")
+    if candidate is not None:
+        require(isinstance(candidate, dict) and SHA.fullmatch(str(candidate.get("commit", "")))
+                and nonempty(candidate.get("label", "")),
+                "candidate needs a full commit SHA and a label")
     require(data["hazards"] == [f"H{x}" for x in range(1, 7)], "expected H1–H6")
     hazards = set(data["hazards"])
     uca_ids = unique(data["ucas"], r"UCA-\d{2}", "UCA")
@@ -169,6 +210,9 @@ def validate(data, root):
             date(run["date"])
             require(nonempty(run["command"]), f"{label}: run needs command/procedure")
             require(run["result"] in ("pass", "fail", "skip"), f"{label}: invalid result")
+            if "head" in run:
+                require(isinstance(run["head"], str) and SHA.fullmatch(run["head"]),
+                        f"{label}: run head must be the full tested branch SHA")
             report = run["report"]
             require(nonempty(report), f"{label}: run needs durable report")
             if report.startswith("https://"):
@@ -184,7 +228,7 @@ def validate(data, root):
             latest = passing.get(c["runs"][-1]["commit"], {}) if c["runs"] else {}
             require(all(latest.get(k) == "pass" for k in check_ids),
                     f"{label}: verified requires all checks passing on one tested revision")
-        validate_status(c, label)
+        validate_status(c, label, candidate, root)
     unique(all_checks, r"CHECK-\d{2}(?:-[a-z0-9]+)?", "check")
     require(covered == uca_ids, "every UCA needs at least one control")
     return ev_ids
@@ -196,7 +240,7 @@ def cell(value):
 
 def render(data):
     lines = [BEGIN, "", "<!-- Generated from safety-evidence.json; do not edit this table. -->",
-             "| Evidence / constraint | Bounded claim | Hazards / UCA | Implemented | CI passed | Reviewed | Production approved | Verification | Code / candidate check |",
+             "| Evidence / constraint | Bounded claim | Hazards / UCA | Implemented (declared) | CI passed at candidate | Reviewed | Production approved | Verification | Code / candidate check |",
              "|---|---|---|---|---|---|---|---|---|"]
     for c in data["controls"]:
         ids = f"<a id=\"{c['id'].lower()}\"></a>{c['id']} / {c['constraint']['id']}"
@@ -207,7 +251,8 @@ def render(data):
         if c["checks"][0]["references"]:
             refs.append(f"[check](../{c['checks'][0]['references'][0]['path']})")
         st = c["status"]
-        ci = f"{st['ci_passed']['state']} ({st['ci_passed']['evidence'].split(' ')[0]})"
+        ev = st["ci_passed"]["evidence"]
+        ci = f"{st['ci_passed']['state']} ({'no candidate' if ev.startswith('no release candidate') else ev.split(' ')[0]})"
         lines.append("| " + " | ".join(map(cell, [ids, c["constraint"]["text"], links,
                       st["implemented"]["state"], ci, st["reviewed"]["state"],
                       st["production_approved"]["state"], c["verification"], ", ".join(refs)])) + " |")
@@ -272,7 +317,7 @@ def main():
             # The implemented and CI stages are derived, never hand-set: the
             # register cannot claim a CI pass its runs do not record.
             for control in data["controls"]:
-                derive_status(control)
+                derive_status(control, data.get("candidate"), root)
             (root / REGISTER).write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
         validate(data, root)
         document = root / STPA

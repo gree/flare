@@ -456,6 +456,20 @@ def dumpOperatorLogs (cfg : ClusterConfig) : IO Unit := do
   for line in logs.splitOn "\n" do
     IO.eprintln s!"#   {line}"
 
+/-- SAF-09: approve the first build of this (new) FlareCluster, bound to
+    its own UID — what a person does once at a real first install. Without
+    it a fresh cluster's operator cannot tell a first build from a loss
+    (flared does not answer before the operator serves) and waits. -/
+def approveFirstBuild (cfg : ClusterConfig) : IO Unit := do
+  for _ in [0:10] do
+    let out ← IO.Process.output { cmd := "kubectl", args := #["get", "flarecluster", cfg.name, "-n", cfg.«namespace», "-o", "jsonpath={.metadata.uid}"] }
+    let uid := out.stdout.trim
+    if out.exitCode == 0 && !uid.isEmpty then
+      let r ← IO.Process.output { cmd := "kubectl", args := #["annotate", "flarecluster", cfg.name, "-n", cfg.«namespace», "--overwrite", s!"flare.gree.net/first-build-approved={uid}"] }
+      if r.exitCode == 0 then return
+    IO.sleep 2000
+  IO.eprintln s!"# WARNING: could not approve the first build of {cfg.name}"
+
 /-- Deploy a full cluster: namespace → CRD/RBAC → FlareCluster CR → partition services →
     debug pod → empty ConfigMap → operator → StatefulSet -/
 def deployCluster (cfg : ClusterConfig) : IO Unit := do
@@ -512,6 +526,7 @@ def deployCluster (cfg : ClusterConfig) : IO Unit := do
 
   -- Create FlareCluster CR
   applyYaml (flareClusterCrdYaml cfg)
+  approveFirstBuild cfg
 
   -- Create partition services
   for i in List.range cfg.partitions do
@@ -610,6 +625,7 @@ def deploySecondCluster (cfg : ClusterConfig) : IO Unit := do
 
   -- Create FlareCluster CR
   applyYaml (flareClusterCrdYaml cfg)
+  approveFirstBuild cfg
 
   -- Create partition services
   for i in List.range cfg.partitions do

@@ -15,9 +15,11 @@
     * the read FAILED (API error, timeout)    → retry; never start fresh
     * the map is present but INVALID          → halt (a human decides)
     * the map is missing or empty, and
-        - nothing shows the cluster ever ran  → first build: start fresh
+        - the cluster is PROVEN new           → first build: start fresh
         - something shows it ran              → halt: an actual loss
-        - the evidence cannot be read         → retry
+        - the past cannot be observed         → retry, unless a first build
+          of THIS FlareCluster was approved by annotation (its own UID)
+  Not observing the past is never read as "no past" (review 2026-10-05).
   `reset` (FLARE_NODE_MAP_RESET=1) lets a human deliberately accept a fresh
   start where the decision would halt; it never overrides a failed read.
   Automatic reconstruction of a lost map is NOT done here (later work).
@@ -35,11 +37,14 @@ inductive Read where
   | failed (why : String)
   deriving Repr, BEq
 
-/-- Evidence that this cluster ran before (independent of the ConfigMap). -/
+/-- Evidence about a previous incarnation (independent of the ConfigMap).
+    "Could not observe the past" is NOT "there was no past": every failed or
+    incomplete observation is `unknown` (review 2026-10-05). -/
 inductive History where
-  /-- Nothing shows a previous incarnation: no marker on the Lease, and every
-      flared pod that could be read reports no node map and no data. -/
-  | none (detail : String)
+  /-- Positive proof of a new cluster: the Lease was read and carries no
+      marker, and EVERY expected flared pod answered stats with node map
+      version 0 and 0 items. -/
+  | provenEmpty (detail : String)
   | seen (why : String)
   | unknown (why : String)
   deriving Repr, BEq
@@ -82,20 +87,26 @@ def validate (data : String) : Except String FlareClusterState :=
         else if !nodes.isEmpty && version == 0 then .error "nodes present with version 0"
         else .ok { FlareClusterState.default with nodeMap := nodes, nodeMapVersion := version }
 
-private def missing (what : String) (h : History) (reset : Bool) : Decision :=
+private def missing (what : String) (h : History) (reset firstBuildApproved : Bool) : Decision :=
   match h with
-  | .none detail => .fresh s!"first build: the node map is {what} and nothing shows a previous incarnation ({detail})"
-  | .unknown why => .retry s!"the node map is {what} and first build cannot be told from loss: {why}"
+  | .provenEmpty detail => .fresh s!"first build: the node map is {what} and the cluster is proven new ({detail})"
+  | .unknown why =>
+    if firstBuildApproved then
+      .fresh s!"first build APPROVED by annotation (flare.gree.net/first-build-approved = this FlareCluster's UID): the node map is {what} and the past could not be observed ({why})"
+    else .retry s!"the node map is {what} and a first build cannot be told from a loss: {why}. Restore the ConfigMap, or approve a first build of THIS FlareCluster: kubectl annotate flarecluster <name> flare.gree.net/first-build-approved=<its metadata.uid> (RUNBOOK #node-map-lost)"
   | .seen why =>
     if reset then .fresh s!"FLARE_NODE_MAP_RESET=1: starting from an EMPTY map although it is {what} and the cluster ran before ({why})"
     else .halt s!"the node map is {what} but the cluster ran before ({why}): refusing to start from an empty map. Restore the ConfigMap, or set FLARE_NODE_MAP_RESET=1 to accept a fresh start (RUNBOOK #node-map-lost)"
 
-def decide (r : Read) (h : History) (reset : Bool) : Decision :=
+/-- `firstBuildApproved`: the FlareCluster carries
+    flare.gree.net/first-build-approved equal to its own metadata.uid. It
+    only resolves `unknown`; it never overrides `seen` or a failed read. -/
+def decide (r : Read) (h : History) (reset : Bool) (firstBuildApproved : Bool := false) : Decision :=
   match r with
   | .failed why => .retry s!"reading the node map failed: {why}"
-  | .notFound => missing "missing" h reset
+  | .notFound => missing "missing" h reset firstBuildApproved
   | .present data =>
-    if data.trim.isEmpty then missing "empty" h reset
+    if data.trim.isEmpty then missing "empty" h reset firstBuildApproved
     else
       match validate data with
       | .ok s => .load s
@@ -112,31 +123,36 @@ def classifyRead (result : Except String String) : Read :=
     if (e.splitOn "(NotFound)").length > 1 then .notFound
     else .failed e
 
-/-- One flared pod's stats, as far as they bear on history. -/
+/-- One flared pod's stats, as far as they bear on history. `none` = not
+    observed (stats unreadable, or the field missing from the reply). -/
 structure PodEvidence where
   name : String
   ready : Bool
-  /-- `none` = stats could not be read. -/
   nodeMapVersion : Option Nat := none
   currItems : Option Nat := none
 
-/-- Combine the Lease marker and the pods' stats into History. A pod that is
-    not Ready and cannot be read gives no evidence either way (on a first
-    build flared exits until the operator serves, so its stats are
-    unreadable); a Ready pod that cannot be read leaves the answer unknown. -/
-def history (leaseMarker : Option String) (podsListed : Bool) (pods : List PodEvidence) : History :=
+/-- Combine the Lease marker and the pods' stats into History.
+    `leaseMarker`: `.ok none` = Lease read, no marker; `.error` = not read.
+    `expectedPods`: partitions x replicas from the FlareCluster spec.
+    `seen` needs one positive sign; `provenEmpty` needs every sign to be
+    observed and empty; anything else is `unknown`. -/
+def history (leaseMarker : Except String (Option String)) (podsListed : Bool)
+    (pods : List PodEvidence) (expectedPods : Nat) : History :=
   match leaseMarker with
-  | some v => .seen s!"the Lease records a persisted node map (version {v})"
-  | none =>
-    if !podsListed then .unknown "the flared pods could not be listed"
-    else
-      match pods.find? (fun p => p.nodeMapVersion.getD 0 > 0 || p.currItems.getD 0 > 0) with
-      | some p => .seen s!"pod {p.name} reports node map version {p.nodeMapVersion.getD 0} and {p.currItems.getD 0} items"
-      | none =>
-        match pods.find? (fun p => p.ready && p.nodeMapVersion.isNone) with
-        | some p => .unknown s!"Ready pod {p.name} did not answer stats"
-        | none =>
-          let unread := (pods.filter (·.nodeMapVersion.isNone)).length
-          .none s!"{pods.length} pod(s), {unread} not Ready and unread, none with a node map or data"
+  | .ok (some v) => .seen s!"the Lease records a persisted node map (version {v})"
+  | _ =>
+    match pods.find? (fun p => p.nodeMapVersion.getD 0 > 0 || p.currItems.getD 0 > 0) with
+    | some p => .seen s!"pod {p.name} reports node map version {p.nodeMapVersion.getD 0} and {p.currItems.getD 0} items"
+    | none =>
+      match leaseMarker with
+      | .error e => .unknown s!"the Lease could not be read ({e})"
+      | .ok _ =>
+        if !podsListed then .unknown "the flared pods could not be listed"
+        else if expectedPods == 0 then .unknown "the FlareCluster spec (expected pod count) is not known"
+        else if pods.length < expectedPods then .unknown s!"only {pods.length} of {expectedPods} flared pods exist"
+        else
+          match pods.find? (fun p => p.nodeMapVersion.isNone || p.currItems.isNone) with
+          | some p => .unknown s!"pod {p.name} did not report its node map version and item count{if p.ready then "" else " (not Ready)"}"
+          | none => .provenEmpty s!"no Lease marker; all {pods.length} pods report node map version 0 and 0 items"
 
 end FlareOperator.NodeMapRecovery

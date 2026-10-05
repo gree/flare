@@ -991,6 +991,42 @@ def suite : TestSuite := {
           let after ← readNodeMap
           IO.eprintln s!"# readable again: operator back={back}; map kept={(before.map (·.length)) == (after.map (·.length)) || after.isSome}"
           if !back then return .fail "the operator did not load the map once it was readable"
+          return .pass },
+    { name := "SAF-09 compound failure: the map is deleted, the Lease marker is gone and every flared pod is restarting while the operator is down — the past cannot be observed, so the operator retries and never starts fresh (the first-build approval was consumed); restoring the map brings it back"
+      run := do
+        match ← readNodeMap with
+        | none => return .fail "precondition: no persisted node map"
+        | some saved =>
+          let approval ← match ← kubectlGetJsonpath "flarecluster" cfg.name cfg.«namespace» "{.metadata.annotations.flare\\.gree\\.net/first-build-approved}" with
+            | .ok v => pure v.trim
+            | .error _ => pure ""
+          IO.eprintln s!"# first-build approval still on the FlareCluster: [{approval}] (must be consumed after the first persist)"
+          if !approval.isEmpty then return .fail "the first-build approval was not consumed after the first persisted map: it would authorize a fresh start after any later loss"
+          let fault : IO Unit := do
+            discard <| kubectl ["delete", "configmap", nodeMapCm, "-n", cfg.«namespace»]
+            discard <| kubectl ["annotate", "lease", leaseName, "-n", cfg.«namespace», "flare.gree.net/node-map-persisted-"]
+            discard <| kubectl ["delete", "pod", "-n", cfg.«namespace», "-l", s!"app=flare,cluster={cfg.name}", "--wait=false"]
+            -- the replacements start and cannot register (no operator):
+            -- give them time to be recreated, not to become readable
+            IO.sleep 15000
+          let (undecided, ready) ← restartUnder fault "cannot be told from a loss" 150
+          let logs ← operatorLogsAll
+          let fresh := containsSubstr logs "node map: starting fresh"
+          let historyLine := ((logs.splitOn "\n").find? (containsSubstr · "node map history:")).getD "(none)"
+          IO.eprintln s!"# compound: undecided logged={undecided} started fresh={fresh} ready={ready}\n# {historyLine.trim}"
+          if fresh then return .fail "the operator started from an empty map although the past could not be observed"
+          if !undecided then return .fail "the operator did not report that a first build cannot be told from a loss"
+          if ready then return .fail "the operator became Ready without its node map"
+          match ← writeNodeMap saved with
+          | .error e => return .fail s!"could not restore the ConfigMap: {e}"
+          | .ok _ => pure ()
+          let back ← waitForCondition "the operator loads the restored map and is Ready" 360 do
+            return (← operatorReady) && containsSubstr (← kubectlLogsLabel s!"app={cfg.operatorName}" cfg.«namespace» 3000) "loaded "
+          IO.eprintln s!"# restored: operator back={back}"
+          if !back then return .fail "the operator did not come back on the restored map"
+          let applied ← waitForCondition "topology applied after the restore" 300 do
+            return (← topologyApplied).toOption.isSome
+          if !applied then return .fail "topology not applied after the restore"
           return .pass }
   ]
 }

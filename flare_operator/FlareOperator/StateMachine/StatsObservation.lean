@@ -73,10 +73,21 @@ def parseCurrItems (out : String) : Items := parseStat out "curr_items"
     possibly passes or an operator restart ago; rebuilding from an empty or
     unreadable master would replace a data-bearing copy with nothing.
     `none` = proceed, `some reason` = defer (the request stays pending). -/
-def repairSourceVerdict (master : Items) : Option String :=
+def repairSourceVerdict (master : Items) (masterLineage replicaLineage : Option String := none) : Option String :=
   match master with
   | .unknown => some "the current master's item count is unknown (unreadable stats); not rebuilding a replica from it"
-  | .known 0 => some "the current master holds 0 keys; rebuilding the replica from it would empty it"
+  | .known 0 =>
+    -- EMPTY is not by itself "lost": a master whose every key was deleted
+    -- legitimately is the SAME history the replica follows (same RocksDB
+    -- lineage, rocksdb_master_id), and rebuilding to empty is correct —
+    -- refusing it forever would leave the repair unresolved (e.g. the last
+    -- delete never reached the replica). A wiped or replaced master carries
+    -- a NEW lineage: rebuilding from it would replace data with nothing.
+    match masterLineage, replicaLineage with
+    | some m, some r =>
+      if !m.isEmpty && m == r then none
+      else some s!"the current master holds 0 keys under a different history (lineage {m}, replica follows {r}): an empty copy that lost its data, not a deleted-to-empty one; not rebuilding the replica from it"
+    | _, _ => some "the current master holds 0 keys and its history cannot be compared with the replica's (lineage unreadable or not RocksDB); not rebuilding the replica from it"
   | .known _ => none
 
 /-- What to do about a (master, slave) item comparison for the empty-master

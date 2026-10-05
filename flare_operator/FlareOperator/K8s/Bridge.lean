@@ -44,6 +44,11 @@ structure PodInfo where
       detection won't fire — but the operator must drain it (promote a
       replacement, demote it to a live proxy) BEFORE it exits. -/
   terminating : Bool := false
+  /-- SAF-08 incarnation: the pod UID and the flared container's restart
+      count (a restarted flared is a container restart). "" / none when not
+      observed. -/
+  uid : String := ""
+  restarts : Option Nat := none
   deriving Repr, BEq
 
 /-- Convert a PodInfo to a node key matching the FQDN used by flared for registration.
@@ -137,18 +142,21 @@ def listFlaredPodsE (crName ns : String) : IO (Except String (List PodInfo)) := 
     -- existence filters like [?(@.metadata.deletionTimestamp)] are unreliable, so
     -- we don't filter server-side.) A non-terminating pod emits just its name
     -- (empty timestamp collapses on trim) → one token → not terminating.
+    -- '|'-separated so an empty field (no restartCount while Pending, no
+    -- deletionTimestamp) keeps every column in place.
     let termResult ← retryConservative s!"list terminating pods for {crName}" do
       kubectl ["get", "pods", "-n", ns, "-l", s!"app=flare,cluster={crName}",
-               "-o", "jsonpath={range .items[*]}{.metadata.name} {.metadata.deletionTimestamp}{\"\\n\"}{end}"]
-    let termNames : List String := match termResult with
+               "-o", "jsonpath={range .items[*]}{.metadata.name}|{.metadata.uid}|{.status.containerStatuses[0].restartCount}|{.metadata.deletionTimestamp}{\"\\n\"}{end}"]
+    let rows : List (String × String × Option Nat × Bool) := match termResult with
       | .ok out => out.splitOn "\n" |>.filterMap fun line =>
-          match line.trim.splitOn " " |>.filter (· != "") with
-          | [_name]      => none            -- name only, no timestamp → alive
-          | name :: _ :: _ => some name     -- name + timestamp token → Terminating
-          | []           => none
+          match line.trim.splitOn "|" with
+          | [name, uid, rc, ts] => some (name.trim, uid.trim, rc.trim.toNat?, !ts.trim.isEmpty)
+          | _ => none
       | .error _ => []
     return .ok <| pods.map fun p =>
-      if termNames.contains p.name then { p with terminating := true } else p
+      match rows.find? (·.1 == p.name) with
+      | some (_, uid, rc, term) => { p with terminating := term, uid := uid, restarts := rc }
+      | none => p
 
 /-- Node keys of pods that are Terminating (have a deletionTimestamp). -/
 def terminatingPodKeys (pods : List PodInfo) : List String :=

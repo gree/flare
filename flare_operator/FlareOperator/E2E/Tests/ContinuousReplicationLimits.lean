@@ -1183,6 +1183,7 @@ private def identityCfg : ClusterConfig := {
   storageBackend := "rocksdb"
   usePvc := true
   drainSeconds := 20
+  operatorEnv := [("FLARE_TEST_PROMOTION_BARRIER", "/tmp/saf08")]
 }
 
 /-- (master pod, [slave pods]) of P0 from the operator's map, Active only. -/
@@ -1213,6 +1214,42 @@ private def Ctx.watchMaster (c : Ctx) (secs : Nat) (stopWhen : String → Bool) 
       if stopWhen m then break
     | none => pure ()
   return seen
+
+private def Ctx.opExec (c : Ctx) (cmd : String) : IO (Except String String) := do
+  let pods ← getPodNames s!"app={c.cfg.operatorName}" c.cfg.«namespace»
+  match pods.head? with
+  | none => return .error "no operator pod"
+  | some pod => kubectl ["exec", "-n", c.cfg.«namespace», pod, "--", "sh", "-c", cmd]
+
+/-- Arm the one-shot promotion barrier, trigger `act`, and return the keys
+    the held pass was about to promote (none if it never reached it). -/
+private def Ctx.holdPromotion (c : Ctx) (act : IO Unit) : IO (Option (List String)) := do
+  discard <| c.opExec "mkdir -p /tmp/saf08 && rm -f /tmp/saf08/promote-* && touch /tmp/saf08/promote-arm"
+  act
+  let mut keys : Option (List String) := none
+  for _ in [0:90] do
+    IO.sleep 2000
+    match ← c.opExec "cat /tmp/saf08/promote-reached 2>/dev/null" with
+    | .ok o =>
+      let ks := (o.splitOn "\n").map String.trim |>.filter (· != "")
+      if !ks.isEmpty then keys := some ks; break
+    | .error _ => pure ()
+  return keys
+
+private def Ctx.releasePromotion (c : Ctx) : IO Unit := do
+  discard <| c.opExec "touch /tmp/saf08/promote-release"
+
+private def Ctx.threeInSync (c : Ctx) : IO (Option (String × String × String × Nat)) := do
+  for _ in [0:90] do
+    match ← c.p0Roles with
+    | (some m, [a, b]) =>
+      let n ← c.currItems ((← getPodIp m c.cfg.«namespace»).getD "")
+      let na ← c.currItems ((← getPodIp a c.cfg.«namespace»).getD "")
+      let nb ← c.currItems ((← getPodIp b c.cfg.«namespace»).getD "")
+      if n > 0 && na == n && nb == n then return some (m, a, b, n)
+    | _ => pure ()
+    IO.sleep 4000
+  return none
 
 def identitySuite : TestSuite := {
   name := "copy-identity"
@@ -1304,7 +1341,99 @@ def identitySuite : TestSuite := {
             return nv == items && nm == items
           if !healed then return .fail "the restarted and drained pods did not converge on the new master"
           return .pass
-        | roles => return .fail s!"precondition: expected one master and two Active slaves, got {roles.1}/{roles.2}" }
+        | roles => return .fail s!"precondition: expected one master and two Active slaves, got {roles.1}/{roles.2}" },
+    { name := "SAF-08 restart AFTER observation: the pass that chose a successor is held after its observations; that successor's flared is killed; on release the promotion is ABORTED (incarnation changed) and nothing is committed; a later pass promotes a valid copy with every key"
+      run := do
+        match ← c.threeInSync with
+        | none => return .fail "precondition: one master and two in-sync Active slaves"
+        | some (m, _, _, items) =>
+          let held ← c.holdPromotion (do discard <| kubectl ["delete", "pod", m, "-n", ns, "--wait=false"])
+          match held with
+          | none => c.releasePromotion; return .fail "the promotion barrier was never reached"
+          | some keys =>
+            let target := podOf (keys.head!)
+            let rc0 ← c.restartCount target
+            match ← c.killFlaredIn target with
+            | .error e => c.releasePromotion; return .fail s!"could not kill flared in {target}: {e}"
+            | .ok o => IO.eprintln s!"# held promotion of {keys}; kill -9 in {target}: {o.trim}"
+            let restarted ← waitForCondition s!"{target}'s flared restarted" 60 do
+              return (← c.restartCount target) > rc0
+            c.releasePromotion
+            let aborted ← waitForCondition "the operator aborts the held promotion" 60 do
+              return ((← c.opLog 3000).splitOn "\n").any fun l => containsSubstr l "PROMOTION ABORTED" && containsSubstr l target
+            let seen ← c.watchMaster 180 (fun x => x != m)
+            let newMaster := seen.getLast?.getD "?"
+            let newItems ← c.currItems ((← getPodIp newMaster ns).getD "")
+            IO.eprintln s!"# restarted={restarted}; aborted={aborted}; masters seen {seen}; new master items {newItems} (expected {items})"
+            if !restarted then return .fail s!"{target}'s flared did not restart"
+            if !aborted then return .fail s!"the promotion of {target} was not aborted after its flared restarted"
+            if newItems != items then return .fail s!"the new master {newMaster} holds {newItems} of {items} keys"
+            let healed ← waitForCondition "the drained pod returns and the copies match" 480 do
+              return (← c.threeInSync).isSome
+            if !healed then return .fail "the cluster did not converge after the aborted promotion"
+            return .pass },
+
+    { name := "SAF-08 replacement AFTER observation: the pass that chose a successor is held; that successor's pod is replaced under the same name (node cordoned, replacement Pending); on release the promotion is ABORTED; the other slave takes over with every key"
+      run := do
+        match ← c.threeInSync with
+        | none => return .fail "precondition: one master and two in-sync Active slaves"
+        | some (m, a, b, items) =>
+          let held ← c.holdPromotion (do discard <| kubectl ["delete", "pod", m, "-n", ns, "--wait=false"])
+          match held with
+          | none => c.releasePromotion; return .fail "the promotion barrier was never reached"
+          | some keys =>
+            let target := podOf (keys.head!)
+            let other := if target == a then b else a
+            discard <| kubectl ["cordon", kindNode]
+            discard <| kubectl ["delete", "pod", target, "-n", ns, "--grace-period=0", "--force", "--wait=false"]
+            let replaced ← waitForCondition s!"{target} is replaced under the same name" 60 do
+              match ← kubectlGetJsonpath "pod" target ns "{.status.phase}" with
+              | .ok ph => return ph.trim == "Pending"
+              | .error _ => return false
+            c.releasePromotion
+            let aborted ← waitForCondition "the operator aborts the held promotion" 60 do
+              return ((← c.opLog 3000).splitOn "\n").any fun l => containsSubstr l "PROMOTION ABORTED" && containsSubstr l target
+            let seen ← c.watchMaster 180 (fun x => x != m && x != target)
+            let otherItems ← c.currItems ((← getPodIp other ns).getD "")
+            discard <| kubectl ["uncordon", kindNode]
+            IO.eprintln s!"# held promotion of {keys}; {target} replaced={replaced}; aborted={aborted}; masters seen {seen}; {other} items {otherItems} (expected {items})"
+            if !replaced then return .fail s!"{target} was not replaced"
+            if !aborted then return .fail s!"the promotion of the replaced {target} was not aborted"
+            if seen.contains target then return .fail s!"the replaced {target} was promoted"
+            if seen.getLast? != some other then return .fail s!"expected {other} to take over, masters seen {seen}"
+            if otherItems != items then return .fail s!"{other} holds {otherItems} of {items} keys"
+            let healed ← waitForCondition "the replaced and drained pods return and the copies match" 480 do
+              return (← c.threeInSync).isSome
+            if !healed then return .fail "the cluster did not converge"
+            return .pass },
+
+    { name := "SAF-08 legitimate empty master: every key is deleted on the master while one replica misses the deletes (forwards cut); the repair request is NOT deferred forever — the master is empty under the SAME history, so the replica is rebuilt to empty"
+      run := do
+        match ← c.threeInSync with
+        | none => return .fail "precondition: one master and two in-sync Active slaves"
+        | some (m, a, _, items) =>
+          let mIp := (← getPodIp m ns).getD ""
+          let aIp := (← getPodIp a ns).getD ""
+          let drops0 := (← c.statNat mIp "proxy_write_dropped").getD 0
+          match ← cutForwards mIp aIp with
+          | .error e => return .fail e
+          | .ok () => pure ()
+          -- delete every key the suite wrote (prefix id_), on the master
+          let del ← c.deleteKeys mIp "id" 0 60
+          let mItems ← c.currItems mIp
+          let dropped ← waitForCondition "the master counts the dropped deletes" 120 do
+            return ((← c.statNat mIp "proxy_write_dropped").getD 0) > drops0
+          healForwards mIp aIp
+          IO.eprintln s!"# deleted {del} keys on {m} (items now {mItems}); drops counted={dropped}; {a} still holds {← c.currItems aIp}"
+          if mItems != 0 then return .fail s!"precondition: the master still holds {mItems} keys (had {items})"
+          if !dropped then return .fail "precondition: the master never counted dropped forwards"
+          let resolved ← waitForCondition "the repair rebuilds the replica to empty and the ledger closes" 600 do
+            return (← c.currItems aIp) == 0 && (← c.ledgerDests).isEmpty
+          let log ← c.opLog 200000
+          let deferredEmpty := (log.splitOn "\n").any fun l => containsSubstr l "replica repair DEFERRED" && containsSubstr l "holds 0 keys"
+          IO.eprintln s!"# repair resolved={resolved}; replica items {← c.currItems aIp}; ledger {← c.ledgerDests}; deferred as an empty source={deferredEmpty}"
+          if !resolved then return .fail s!"the repair did not resolve (replica items {← c.currItems aIp}, ledger {← c.ledgerDests}, deferred as empty={deferredEmpty})"
+          return .pass }
   ]
 }
 

@@ -1574,15 +1574,19 @@ def clusterInitSuite : TestSuite := {
           let items ← c.currItems mIp
           let saved := ((← kubectlGetJsonpath "configmap" cmName ns "{.data.nodeMap}").toOption.getD "").trim
           if !synced || saved.isEmpty then return .fail s!"precondition: data in sync and a persisted map (items {items}, map saved={!saved.isEmpty})"
+          -- PVC identity captured NOW, while the original data is on them
+          let pvcs ← pvcIdentities ns
+          if pvcs.length < initCfg.replicas || pvcs.any (fun (_, u, v) => u.isEmpty || v.isEmpty) then
+            return .fail s!"precondition: every PVC needs a UID and a bound volume while it holds the data ({pvcs})"
           if !(← c.scaleOp 0) then return .fail "could not stop the operator"
           -- the CR and the pods go, the PVCs stay
           discard <| kubectl ["delete", "statefulset", s!"{initCfg.name}-nodes", "-n", ns, "--wait=true"]
           discard <| kubectl ["delete", "flarecluster", initCfg.name, "-n", ns, "--wait=true"]
           discard <| kubectl ["delete", "configmap", cmName, "-n", ns]
           discard <| kubectl ["annotate", "lease", s!"{initCfg.name}-operator-lease", "-n", ns, "flare.gree.net/node-map-persisted-"]
-          let pvcs ← pvcIdentities ns
-          IO.eprintln s!"# CR, StatefulSet, map and Lease marker gone; PVCs left: {pvcs}"
-          if pvcs.length < initCfg.replicas then return .fail s!"precondition: the PVCs did not survive ({pvcs})"
+          let pvcsAfterDelete ← pvcIdentities ns
+          IO.eprintln s!"# CR, StatefulSet, map and Lease marker gone; PVCs with the data {pvcs}; after the deletion {pvcsAfterDelete}"
+          if !(pvcs.all (pvcsAfterDelete.contains ·)) then return .fail s!"the PVCs that held the data did not survive the deletion (before {pvcs}, after {pvcsAfterDelete})"
           discard <| kubectl ["scale", "deployment", initCfg.operatorName, "-n", ns, "--replicas=1"]
           let waiting ← waitForCondition "the operator waits for the CR again" 180 do
             return containsSubstr (← c.opLog 400) "WAITING: FlareCluster"
@@ -1614,15 +1618,21 @@ def clusterInitSuite : TestSuite := {
           IO.eprintln s!"# PVCs before {pvcs}; after {pvcsAfter}; pods claim [{claims}]; same UIDs and volumes={reused}"
           if !reused then return .fail s!"the recreated pods are not on the surviving PVCs (before {pvcs}, after {pvcsAfter})"
           if !(pvcs.all fun (n, _, _) => containsSubstr claims n) then return .fail s!"the pods do not claim the surviving PVCs ({claims})"
-          -- every key and value, on both copies
+          -- every key and value, on both copies. A GET on the replica can be
+          -- proxied to the master, so the replica's reads count as LOCAL only
+          -- if the master served no get meanwhile (its cmd_get unchanged).
           match ← c.pair with
           | .error e => return .fail e
           | .ok (_, m2, _, s2) =>
             let onM ← allKeysOn c m2 "init" 30
+            let getsBefore := (← c.statNat m2 "cmd_get").getD 0
             let onS ← allKeysOn c s2 "init" 30
-            IO.eprintln s!"# all 30 keys and values: master {onM.getD "ok"}, replica {onS.getD "ok"}"
+            let getsAfter := (← c.statNat m2 "cmd_get").getD 0
+            let servedLocally := getsAfter == getsBefore
+            IO.eprintln s!"# all 30 keys and values: master {onM.getD "ok"}, replica {onS.getD "ok"} (replica reads local: master cmd_get {getsBefore} -> {getsAfter})"
             if let some bad := onM then return .fail s!"a key or value did not survive on the master: {bad}"
-            if let some bad := onS then return .fail s!"a key or value did not survive on the replica: {bad}"
+            if let some bad := onS then return .fail s!"a key or value did not survive (read through the replica): {bad}"
+            if !servedLocally then return .fail s!"the replica's reads were served by the master (cmd_get {getsBefore} -> {getsAfter}): no evidence the replica's local copy matches"
             return .pass },
 
     { name := "SAF-09 read failures are not absence: with the FlareCluster unreadable (RBAC) the operator neither WAITs as if absent nor becomes Ready; with the pod list unreadable and the map missing it never starts fresh"

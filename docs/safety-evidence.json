@@ -5177,7 +5177,8 @@
         "2026-10-03 (PR run 37103800886): enablement after a purged WAL PASS. Legacy PVC cluster, 4 MB write buffer, WAL TTL 60 s, ~60 MB written: on enabling following the replica went idle → needs_rebuild(lsn_purged) → idle(stopped) → following, rebuilt exactly once (reconstruction_started 1→2), 1300 items equal, sampled values equal, master unchanged. Confirms RUNBOOK #enable-follow: on a cluster whose WAL no longer reaches back to the replica's last copy, enablement costs one rebuild per replica.",
         "2026-10-03 (PR run 37107011336): live enablement on 2p x 2r PASS — both replicas idle → following, no rebuild on either (WAL still covered their copy positions), each with its own partition's source epoch; 500 keys (P0 238, P1 262), each replica equal to its master, sampled values equal, masters unchanged.",
         "2026-10-05 (PR run 37268848902 on 05564e6, attempt 1), classification PENDING: enablement after a purged WAL failed — the replica declared needs_rebuild(lsn_purged) and the operator logged it UNFIT, but no rebuild started within 420 s (reconstruction_started 1→1). The same test passed on 9b11cc3, 467e947 and fa92582. The 80-line diagnostic tail no longer showed whether the operator requested the rebuild or a ledger gate held it; the test now prints the operator's REPLICA REPAIR / ledger lines and the ledger on failure. The failed leg was re-run on the same commit.",
-        "2026-10-05 tracing the enable-purged failure (PR run 37268848902), HYPOTHESIS with a fix, not yet confirmed by CI: a follower's needs_rebuild declaration was turned into a rebuild request only inside the drop-observation block, which runs once per stats probe slot (FLARE_STATS_PROBE_INTERVAL_MS, default 300 s; the enable-purged suite does not shorten it). Depending on where the declaration fell in the slot, the request came up to 5 min late, and demote + reseat + reconstruction then had to fit in the rest of the 420 s window — consistent with an occasional failure. As a product issue: a replica that cannot resume sat with its reads withheld for up to 5 extra minutes. The request now happens in the per-pass ledger step from that pass's classification, against the partition's current master, so the plan acts in the same pass. The failing run's diagnostics could not show the operator's decision (80-line tail), and the test now prints the repair decisions on failure; a recurrence would refute or confirm this."
+        "2026-10-05 tracing the enable-purged failure (PR run 37268848902), HYPOTHESIS with a fix, not yet confirmed by CI: a follower's needs_rebuild declaration was turned into a rebuild request only inside the drop-observation block, which runs once per stats probe slot (FLARE_STATS_PROBE_INTERVAL_MS, default 300 s; the enable-purged suite does not shorten it). Depending on where the declaration fell in the slot, the request came up to 5 min late, and demote + reseat + reconstruction then had to fit in the rest of the 420 s window — consistent with an occasional failure. As a product issue: a replica that cannot resume sat with its reads withheld for up to 5 extra minutes. The request now happens in the per-pass ledger step from that pass's classification, against the partition's current master, so the plan acts in the same pass. The failing run's diagnostics could not show the operator's decision (80-line tail), and the test now prints the repair decisions on failure; a recurrence would refute or confirm this.",
+        "2026-10-05 (PR run 37268848902 attempt 2, same revision): the enable-purged test PASSED on re-run (idle → needs_rebuild(lsn_purged) → idle(stopped) → following, one rebuild, 1300 items equal). Recorded as a pass that shows the failure is not constant — NOT as a root cause or as 'intermittent harness'. The failure of attempt 1 stays unexplained; the leading hypothesis is the 300 s probe-slot latency of the rebuild request (fixed in 3b0345d), to be confirmed on the new SHA by the time and path from declaration to ledger request to reconstruction start."
       ],
       "code": [
         {
@@ -5810,6 +5811,15 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request — PR #144 merge revision of 05564e6, attempt 1; topology leg FAILED continuous-replication-enable-purged (other legs green)",
           "result": "fail",
           "report": "docs/reports/2026-10-05-ci-37268848902-topology-job.log"
+        },
+        {
+          "check": "CHECK-16-enablepurged",
+          "commit": "2f974651848df855096eeca9aaf44527d8f9c57d",
+          "head": "05564e697bd72bd96b116b0e483d12f909b5baa9",
+          "date": "2026-10-05",
+          "command": "GitHub Actions e2e-tests.yaml pull_request — PR #144 merge revision of 05564e6, attempt 2 (re-run of the failed topology leg only)",
+          "result": "pass",
+          "report": "docs/reports/2026-10-05-ci-37268848902-attempt2-topology-job.log"
         }
       ],
       "tasks": [

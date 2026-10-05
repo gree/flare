@@ -248,6 +248,9 @@ initialize leaderSinceMsRef : IO.Ref Nat ← IO.mkRef 0
 /-- SAF-09: the Lease already carries the persisted-map marker. -/
 initialize nodeMapMarkedRef : IO.Ref Bool ← IO.mkRef false
 
+/-- SAF-09: the first-build approval was read back as absent (consumed). -/
+initialize approvalConsumedRef : IO.Ref Bool ← IO.mkRef false
+
 /-- SAF-08: the incarnation (pod UID, flared container restart count) of
     every flared pod as observed at this pass's pod list, by node key. -/
 initialize podIdentityRef : IO.Ref (List (String × (String × Option Nat))) ← IO.mkRef []
@@ -296,24 +299,35 @@ private def nodeMapHistory (crName ns leaseName : String) : IO (NodeMapRecovery.
     IO.eprintln s!"[flare-operator] node map history: {repr h}; first build approved for this FlareCluster: {approved}"
     return (h, approved)
 
-/-- Record on the Lease that a node map has been persisted (once per
-    process). A later leader that finds the ConfigMap missing reads this as
-    "the cluster ran before" (SAF-09). -/
+/-- Record on the Lease that a node map has been persisted, and consume a
+    first-build approval, each retried on every persist until it is
+    CONFIRMED. A later leader that finds the ConfigMap missing reads the
+    marker as "the cluster ran before" (SAF-09); an approval left behind
+    would re-authorize a fresh start after a later loss, so "consumed" means
+    the annotation was read back as absent, not that a removal was sent. -/
 private def markNodeMapPersisted (crName ns : String) (version : Nat) : IO Unit := do
-  if (← nodeMapMarkedRef.get) then return
-  match ← kubectl ["annotate", "lease", s!"{crName}-operator-lease", "-n", ns, "--overwrite",
-      s!"flare.gree.net/node-map-persisted={version}"] with
-  | .ok _ =>
-    nodeMapMarkedRef.set true
-    -- A first-build approval is ONE-SHOT: once a map exists it is consumed,
-    -- so a later loss with an unobservable past is never read as approved.
-    match ← kubectl ["annotate", "flarecluster", crName, "-n", ns, "flare.gree.net/first-build-approved-"] with
-    | .ok _ => pure ()
-    | .error e =>
-      if !((e.splitOn "not found").length > 1) then
-        IO.eprintln s!"[flare-operator] warning: could not consume the first-build approval on {crName} ({e})"
-  | .error e => IO.eprintln s!"[flare-operator] warning: could not mark the Lease with the persisted node map ({e}); retried on the next persist"
-
+  if !(← nodeMapMarkedRef.get) then
+    match ← kubectl ["annotate", "lease", s!"{crName}-operator-lease", "-n", ns, "--overwrite",
+        s!"flare.gree.net/node-map-persisted={version}"] with
+    | .ok _ => nodeMapMarkedRef.set true
+    | .error e => IO.eprintln s!"[flare-operator] warning: could not mark the Lease with the persisted node map ({e}); retried on the next persist"
+  if !(← approvalConsumedRef.get) then
+    let readApproval : IO (Except String String) :=
+      kubectl ["get", "flarecluster", crName, "-n", ns, "-o",
+        "jsonpath={.metadata.annotations.flare\\.gree\\.net/first-build-approved}"]
+    match ← readApproval with
+    | .ok v =>
+      if v.trim.isEmpty then approvalConsumedRef.set true
+      else
+        discard <| kubectl ["annotate", "flarecluster", crName, "-n", ns, "flare.gree.net/first-build-approved-"]
+        match ← readApproval with
+        | .ok v2 =>
+          if v2.trim.isEmpty then
+            approvalConsumedRef.set true
+            IO.eprintln s!"[flare-operator] first-build approval on {crName} consumed (a node map now exists)"
+          else IO.eprintln s!"[flare-operator] CRITICAL: the first-build approval on {crName} is still present after removal; it would authorize a fresh start after a later loss — retried on the next persist (RUNBOOK #node-map-lost)"
+        | .error e => IO.eprintln s!"[flare-operator] warning: could not confirm the first-build approval was consumed ({e}); retried on the next persist"
+    | .error e => IO.eprintln s!"[flare-operator] warning: could not read the first-build approval ({e}); retried on the next persist"
 
 /-- When each partition was first seen without a master (monotonic ms),
     for the failover-lag hold's wait budget. Cleared once it has one. -/
@@ -1076,8 +1090,10 @@ private def commitChecked (stateRef : IO.Ref FlareClusterState) (ver : Nat) (ucs
     for k in promoted do
       let obs := observed.lookup k
       let now ← podIdentityNow (extractPodName k) ns
+      -- Identity needs BOTH halves observed both times: a missing restart
+      -- count on both sides is not evidence of the same process.
       let same := match obs, now with
-        | some (u0, r0), some (u1, r1) => !u0.isEmpty && u0 == u1 && r0 == r1
+        | some (u0, some r0), some (u1, some r1) => !u0.isEmpty && u0 == u1 && r0 == r1
         | _, _ => false
       if !same then
         IO.eprintln s!"[flare-operator] CRITICAL: PROMOTION ABORTED for {k}: its pod changed after it was observed (observed {obs}, now {now}) — a restarted or replaced copy is not promoted on the old one's standing; nothing from this pass is committed, the next pass re-decides"
@@ -1385,7 +1401,10 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
                 let mStats ← Bridge.queryPodStats mPodName ns "stats"
                 let rStats ← Bridge.queryPodStats (extractPodName rn.serverName) ns "stats"
                 let idAfter ← podIdentityNow mPodName ns
-                if idBefore.isNone || idBefore != idAfter then
+                let srcStable := match idBefore, idAfter with
+                  | some (u0, some r0), some (u1, some r1) => !u0.isEmpty && u0 == u1 && r0 == r1
+                  | _, _ => false
+                if !srcStable then
                   pure (some s!"the source master's pod changed during the read ({idBefore} -> {idAfter})")
                 else match mStats with
                   | .ok out =>
@@ -2007,7 +2026,9 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
                   | .notInMode _ | .eligible _ => true
                   | _ => false
                 let uidStable := match uidBefore, uidAfter with | some a, some b => a == b | _, _ => false
-                let succStable := sIdBefore.isSome && sIdBefore == sIdAfter
+                let succStable := match sIdBefore, sIdAfter with
+                  | some (u0, some r0), some (u1, some r1) => !u0.isEmpty && u0 == u1 && r0 == r1
+                  | _, _ => false
                 if !succStable then
                   IO.eprintln s!"[flare-operator] EMPTY-MASTER SELF-HEAL: successor {sKey} changed during the revalidation reads (incarnation {sIdBefore} -> {sIdAfter}); not deleting"
                 let holdsLease ← do

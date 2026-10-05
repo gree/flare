@@ -69,6 +69,20 @@ def getFlareClusterCRD (crName ns : String) : IO (Except String FlareClusterView
   retry s!"fetch CRD {crName}" do
     getFlareCluster crName ns
 
+/-- Parse the single-response pod list (see listFlaredPodsE). A row whose
+    column count is wrong is dropped rather than guessed. -/
+def parsePodRows (ns output : String) : List PodInfo :=
+  (output.splitOn "\n").filterMap fun line =>
+    match line.trim.splitOn "|" with
+    | [name, ip, ready, hostname, subdomain, nodeName, uid, rc, ts] =>
+      if name.trim.isEmpty then none
+      else some {
+        name := name.trim, ip := ip.trim, port := 12121,
+        hostname := hostname.trim, subdomain := subdomain.trim, «namespace» := ns,
+        ready := ready.trim == "True", nodeName := nodeName.trim,
+        terminating := !ts.trim.isEmpty, uid := uid.trim, restarts := rc.trim.toNat? }
+    | _ => none
+
 /-- List flared pods matching the cluster label selector.
     Returns typed PodInfo list instead of raw tuples.
     Uses retry logic for resilience against transient API failures.
@@ -76,87 +90,19 @@ def getFlareClusterCRD (crName ns : String) : IO (Except String FlareClusterView
     kubectl get pods -n <ns> -l app=flare,cluster=<crName>
     -o jsonpath='{range .items[*]}{.metadata.name} {.status.podIP} 12121 {.status.conditions[?(.type=="Ready")].status}{\n}{end}' -/
 def listFlaredPodsE (crName ns : String) : IO (Except String (List PodInfo)) := do
+  -- ONE response for every field (SAF-08, review 2026-10-05): Ready, UID,
+  -- container restart count and deletionTimestamp used to come from two
+  -- list calls joined by pod name, so a pod replaced under the same name
+  -- between them combined the OLD pod's Ready with the NEW pod's UID. One
+  -- jsonpath over the same items is one consistent snapshot per pod.
+  -- '|'-separated so an empty field (no IP while Pending, no restartCount,
+  -- no deletionTimestamp) keeps every column in place.
   let result ← retryConservative s!"list pods for {crName}" do
     kubectl ["get", "pods", "-n", ns, "-l", s!"app=flare,cluster={crName}",
-             "-o", "jsonpath={range .items[*]}{.metadata.name} {.status.podIP} 12121 {.status.conditions[?(.type==\"Ready\")].status} {.spec.hostname} {.spec.subdomain} {.spec.nodeName}{\"\\n\"}{end}"]
+             "-o", "jsonpath={range .items[*]}{.metadata.name}|{.status.podIP}|{.status.conditions[?(.type==\"Ready\")].status}|{.spec.hostname}|{.spec.subdomain}|{.spec.nodeName}|{.metadata.uid}|{.status.containerStatuses[0].restartCount}|{.metadata.deletionTimestamp}{\"\\n\"}{end}"]
   match result with
   | .error e => return .error e
-  | .ok output =>
-    let lines := output.splitOn "\n" |>.filter (· != "")
-    let pods := lines.filterMap fun line =>
-      let parts := line.splitOn " "
-      match parts with
-      | [podName, ip, portStr, readyStr, hostname, subdomain, nodeName] =>
-        match portStr.trim.toNat? with
-        | some port => some {
-            name := podName.trim
-            ip := ip.trim
-            port := port
-            hostname := hostname.trim
-            subdomain := subdomain.trim
-            «namespace» := ns
-            ready := readyStr.trim == "True"
-            nodeName := nodeName.trim
-          }
-        | none => none
-      | [podName, ip, portStr, readyStr, hostname, subdomain] =>
-        match portStr.trim.toNat? with
-        | some port => some {
-            name := podName.trim
-            ip := ip.trim
-            port := port
-            hostname := hostname.trim
-            subdomain := subdomain.trim
-            «namespace» := ns
-            ready := readyStr.trim == "True"
-          }
-        | none => none
-      | [podName, ip, portStr, readyStr] =>
-        match portStr.trim.toNat? with
-        | some port => some {
-            name := podName.trim
-            ip := ip.trim
-            port := port
-            «namespace» := ns
-            ready := readyStr.trim == "True"
-          }
-        | none => none
-      | [podName, ip, portStr] =>
-        match portStr.trim.toNat? with
-        | some port => some {
-            name := podName.trim
-            ip := ip.trim
-            port := port
-            «namespace» := ns
-            ready := true
-          }
-        | none => none
-      | _ => none
-    -- Second, lightweight query for Terminating pods (those with a
-    -- deletionTimestamp). Kept SEPARATE from the positional space-split parse
-    -- above: an empty deletionTimestamp emitted inline would collapse adjacent
-    -- spaces and shift every field. Best-effort — on error, no pod is marked
-    -- terminating (falls back to the pre-drain behaviour, never a false drain).
-    -- List name + deletionTimestamp for EVERY pod and decide in code: a pod is
-    -- Terminating iff its deletionTimestamp is non-empty. (kubectl jsonpath
-    -- existence filters like [?(@.metadata.deletionTimestamp)] are unreliable, so
-    -- we don't filter server-side.) A non-terminating pod emits just its name
-    -- (empty timestamp collapses on trim) → one token → not terminating.
-    -- '|'-separated so an empty field (no restartCount while Pending, no
-    -- deletionTimestamp) keeps every column in place.
-    let termResult ← retryConservative s!"list terminating pods for {crName}" do
-      kubectl ["get", "pods", "-n", ns, "-l", s!"app=flare,cluster={crName}",
-               "-o", "jsonpath={range .items[*]}{.metadata.name}|{.metadata.uid}|{.status.containerStatuses[0].restartCount}|{.metadata.deletionTimestamp}{\"\\n\"}{end}"]
-    let rows : List (String × String × Option Nat × Bool) := match termResult with
-      | .ok out => out.splitOn "\n" |>.filterMap fun line =>
-          match line.trim.splitOn "|" with
-          | [name, uid, rc, ts] => some (name.trim, uid.trim, rc.trim.toNat?, !ts.trim.isEmpty)
-          | _ => none
-      | .error _ => []
-    return .ok <| pods.map fun p =>
-      match rows.find? (·.1 == p.name) with
-      | some (_, uid, rc, term) => { p with terminating := term, uid := uid, restarts := rc }
-      | none => p
+  | .ok output => return .ok (parsePodRows ns output)
 
 /-- Node keys of pods that are Terminating (have a deletionTimestamp). -/
 def terminatingPodKeys (pods : List PodInfo) : List String :=

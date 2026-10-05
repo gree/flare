@@ -24,6 +24,7 @@ import FlareOperator.StateMachine.StatsObservation
 import FlareOperator.StateMachine.FollowEvidence
 import FlareOperator.StateMachine.K8sReconciler
 import FlareOperator.StateMachine.NodeMapRecovery
+import FlareOperator.K8s.Bridge
 
 open FlareOperator.K8s
 open FlareOperator.ReplicaRepair
@@ -1040,6 +1041,17 @@ def checkRepairSource (ctx : Ctx) : IO Unit := do
       && !ok (StatsObservation.repairSourceVerdict (.known 0) (some "") (some ""))
       && !ok (StatsObservation.repairSourceVerdict (.known 0)))
 
+def checkPodRows (ctx : Ctx) : IO Unit := do
+  let out := "n-0|10.0.0.1|True|n-0|svc|node-a|uid-A|2|\nn-1||False|n-1|svc||uid-B||\nn-2|10.0.0.3|True|n-2|svc|node-a|uid-C|0|2026-10-05T00:00:00Z\nbroken|row\n"
+  let pods := FlareOperator.K8s.Bridge.parsePodRows "ns" out
+  let find := fun (n : String) => pods.find? (·.name == n)
+  check ctx "SAF-08 pod list: Ready, UID and restart count come from the SAME row"
+    ((find "n-0").map (fun p => (p.ready, p.uid, p.restarts, p.terminating)) == some (true, "uid-A", some 2, false))
+  check ctx "SAF-08 pod list: a Pending pod (no IP, no restart count) keeps its columns aligned; the count stays unobserved"
+    ((find "n-1").map (fun p => (p.ready, p.ip, p.uid, p.restarts, p.nodeName)) == some (false, "", "uid-B", none, ""))
+  check ctx "SAF-08 pod list: a deletionTimestamp marks the pod Terminating; a malformed row is dropped"
+    ((find "n-2").map (·.terminating) == some true && pods.length == 3)
+
 def run : IO UInt32 := do
   let ctx : Ctx := { failures := ← IO.mkRef [], count := ← IO.mkRef 0 }
   checkObserve ctx
@@ -1067,6 +1079,7 @@ def run : IO UInt32 := do
   checkExMasterReturn ctx
   checkNodeMapRecovery ctx
   checkRepairSource ctx
+  checkPodRows ctx
   let failures ← ctx.failures.get
   let n ← ctx.count.get
   IO.println s!"1..{n}"

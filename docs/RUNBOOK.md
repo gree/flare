@@ -399,7 +399,9 @@ At startup the operator reads `<cluster>-node-map` (ConfigMap) and decides
 | Log line | Meaning | The operator |
 |---|---|---|
 | `loaded N nodes from ConfigMap` | normal | runs |
-| `node map: starting fresh — first build ...` | no map, and nothing shows the cluster ran before | runs |
+| `node map: starting fresh — first build: ... proven new` | no map; the Lease was read without a marker AND every expected flared pod reports node map 0 and 0 items | runs |
+| `node map: starting fresh — first build APPROVED by annotation` | no map, the past could not be observed, and this FlareCluster carries a first-build approval | runs, then consumes the approval |
+| `node map: retrying ... cannot be told from a loss` | no map, and the past could not be observed (Lease unreadable, a pod unreadable or missing a field, fewer pods than the spec) | retries 12 × 5 s, then exits 2; never starts fresh |
 | `node map: retrying in 5 s ... reading the node map failed` | API error, timeout or forbidden | retries 12 × 5 s, then exits 2 (the pod restarts) |
 | `CRITICAL: the node map is missing but the cluster ran before` | the map is gone while the Lease marker or a flared pod shows history | exits 3, stays down |
 | `CRITICAL: the persisted node map is invalid` | content does not parse strictly | exits 3, stays down |
@@ -419,6 +421,27 @@ applied.
    every partition's master afterwards (`node sync`). A version gap with
    flared is handled by the leadership generation (SAF-09). The reset never
    overrides a failed read.
+
+**First install, and approving a first build.** On a brand-new cluster
+flared cannot answer stats until the operator serves, so the operator cannot
+prove the cluster is new and waits in the "cannot be told from a loss" state.
+Approve the first build of THIS FlareCluster, bound to its own UID:
+
+```bash
+kubectl annotate flarecluster <name> -n <ns> \
+  flare.gree.net/first-build-approved=$(kubectl get flarecluster <name> -n <ns> -o jsonpath='{.metadata.uid}')
+```
+
+- The approval is one-shot. Once the first map is persisted, the operator
+  removes the annotation and reads it back. If the annotation is still
+  there, it logs CRITICAL and retries on every persist.
+- A recreated FlareCluster has a new UID, so an old approval does not apply
+  to it.
+- An approval never overrides history the operator *can* see. If the map is
+  missing while the Lease marker or a pod shows the cluster ran, the operator
+  halts; only `FLARE_NODE_MAP_RESET=1` accepts a fresh start then.
+- Blue/green migration approves the target cluster it provisions. The E2E
+  setup approves each cluster it deploys.
 
 Automatic reconstruction of a lost map from the nodes is not implemented yet.
 

@@ -1437,6 +1437,191 @@ def identitySuite : TestSuite := {
   ]
 }
 
+-- ─── SAF-09: running the operator vs initialising a data cluster ─────────
+
+private def initCfg : ClusterConfig := {
+  name := "cluster-init"
+  «namespace» := "flare-cluster-init"
+  partitions := 1
+  replicas := 2
+  operatorName := "flare-operator"
+  debugPod := "debug-cluster-init"
+  storageBackend := "rocksdb"
+  usePvc := true
+  deferClusterCr := true
+}
+
+private def Ctx.opReady (c : Ctx) : IO Bool := do
+  match ← kubectl ["get", "pods", "-n", c.cfg.«namespace», "-l", s!"app={c.cfg.operatorName}", "-o", "jsonpath={.items[*].status.containerStatuses[0].ready}"] with
+  | .ok o => return o.trim == "true"
+  | .error _ => return false
+
+/-- Current + previous container logs of the operator pod(s). -/
+private def Ctx.opLogsAll (c : Ctx) : IO String := do
+  let pods ← getPodNames s!"app={c.cfg.operatorName}" c.cfg.«namespace»
+  let mut acc := ""
+  for pod in pods do
+    for extra in [[], ["--previous"]] do
+      match ← kubectl (["logs", "-n", c.cfg.«namespace», pod, "--tail=4000"] ++ extra) with
+      | .ok o => acc := acc ++ o
+      | .error _ => pure ()
+  return acc
+
+private def Ctx.scaleOp (c : Ctx) (n : Nat) : IO Bool := do
+  discard <| kubectl ["scale", "deployment", c.cfg.operatorName, "-n", c.cfg.«namespace», s!"--replicas={n}"]
+  waitForCondition s!"operator scaled to {n}" 180 do
+    return (← getPodNames s!"app={c.cfg.operatorName}" c.cfg.«namespace»).length == n
+
+/-- Swap one resource in the ClusterRole rule that grants it, both ways. -/
+private def ruleSwap (resource toName : String) : IO (Except String String) := do
+  match ← hostCmd "sh" ["-c", s!"kubectl get clusterrole flare-operator -o json | jq -r '.rules | to_entries[] | select(.value.resources | index(\"{resource}\")) | .key' | head -1"] with
+  | .error e => return .error e
+  | .ok idx =>
+    match idx.trim.toNat? with
+    | none => return .error s!"no ClusterRole rule grants {resource}"
+    | some i =>
+      match ← hostCmd "sh" ["-c", s!"kubectl get clusterrole flare-operator -o json | jq -c '.rules[{i}].resources | map(if . == \"{resource}\" then \"{toName}\" else . end)'"] with
+      | .error e => return .error e
+      | .ok res => kubectl ["patch", "clusterrole", "flare-operator", "--type=json", "-p",
+          ("[{\"op\":\"replace\",\"path\":\"/rules/" ++ toString i ++ "/resources\",\"value\":" ++ res.trim ++ "}]")]
+
+def clusterInitSuite : TestSuite := {
+  name := "cluster-init"
+  setup := do
+    deployCluster initCfg
+  teardown := do
+    discard <| ruleSwap "flareclusters-e2e-revoked" "flareclusters"
+    discard <| ruleSwap "pods-e2e-revoked" "pods"
+    cleanupCluster initCfg
+  onFailure := dumpClusterDiagnostics initCfg.«namespace» s!"app={initCfg.operatorName}"
+  tests :=
+    let c : Ctx := { cfg := initCfg }
+    let ns := initCfg.«namespace»
+    let cmName := s!"{initCfg.name}-node-map"
+    [
+    { name := "SAF-09 operator before its cluster: with no FlareCluster and no pods the operator is Ready and WAITING — it makes no node-map decision and creates no node map"
+      run := do
+        let waiting ← waitForCondition "the operator logs WAITING" 120 do
+          return containsSubstr (← c.opLog 400) "WAITING: FlareCluster"
+        let ready ← c.opReady
+        let log ← c.opLog 400
+        let decided := containsSubstr log "node map:" || containsSubstr log "loaded "
+        let cmExists := (← kubectlGetJsonpath "configmap" cmName ns "{.metadata.name}").toOption.isSome
+        IO.eprintln s!"# no CR: waiting={waiting} ready={ready} node-map decision logged={decided} node-map ConfigMap exists={cmExists}"
+        if !waiting then return .fail "the operator did not enter the waiting state"
+        if !ready then return .fail "the waiting operator is not Ready"
+        if decided then return .fail "the operator made a node-map decision without a FlareCluster"
+        if cmExists then return .fail "a node map was persisted without a FlareCluster"
+        return .pass },
+
+    { name := "SAF-09 the cluster then appears with a first-build approval: the operator examines it, builds it fresh, and the cluster serves writes"
+      run := do
+        deployDeferredCluster initCfg true
+        let built ← waitForCondition "first build approved and the cluster serves" 300 do
+          let log ← c.opLog 3000
+          if !(containsSubstr log "first build APPROVED") then return false
+          match ← c.pair with
+          | .ok (_, mIp, _, _) => return (← writeKeys initCfg.debugPod ns mIp initCfg.flarePort "init" 30) == 30
+          | .error _ => return false
+        let approvalLeft := ((← kubectlGetJsonpath "flarecluster" initCfg.name ns "{.metadata.annotations.flare\\.gree\\.net/first-build-approved}").toOption.getD "").trim
+        IO.eprintln s!"# cluster appeared: built and serving={built}; approval left on the CR=[{approvalLeft}]"
+        if !built then return .fail "the approved first build did not come up and serve writes"
+        let consumed ← waitForCondition "the approval is consumed" 120 do
+          return ((← kubectlGetJsonpath "flarecluster" initCfg.name ns "{.metadata.annotations.flare\\.gree\\.net/first-build-approved}").toOption.getD "x").trim.isEmpty
+        if !consumed then return .fail "the first-build approval was not consumed after the map was persisted"
+        return .pass },
+
+    { name := "SAF-09 old PVCs survive the CR and pods: the CR is recreated WITHOUT approval while the map and the Lease marker are gone — the operator never initialises or re-assigns; restoring the map recovers every key"
+      run := do
+        match ← c.pair with
+        | .error e => return .fail e
+        | .ok (_, mIp, _, sIp) =>
+          let synced ← waitForCondition "both copies hold the keys" 120 do
+            return (← c.currItems mIp) ≥ 30 && (← c.currItems sIp) == (← c.currItems mIp)
+          let items ← c.currItems mIp
+          let saved := ((← kubectlGetJsonpath "configmap" cmName ns "{.data.nodeMap}").toOption.getD "").trim
+          if !synced || saved.isEmpty then return .fail s!"precondition: data in sync and a persisted map (items {items}, map saved={!saved.isEmpty})"
+          if !(← c.scaleOp 0) then return .fail "could not stop the operator"
+          -- the CR and the pods go, the PVCs stay
+          discard <| kubectl ["delete", "statefulset", s!"{initCfg.name}-nodes", "-n", ns, "--wait=true"]
+          discard <| kubectl ["delete", "flarecluster", initCfg.name, "-n", ns, "--wait=true"]
+          discard <| kubectl ["delete", "configmap", cmName, "-n", ns]
+          discard <| kubectl ["annotate", "lease", s!"{initCfg.name}-operator-lease", "-n", ns, "flare.gree.net/node-map-persisted-"]
+          let pvcs := ((← kubectl ["get", "pvc", "-n", ns, "-o", "name"]).toOption.getD "").trim
+          IO.eprintln s!"# CR, StatefulSet, map and Lease marker gone; PVCs left: {pvcs.replace "\n" " "}"
+          discard <| kubectl ["scale", "deployment", initCfg.operatorName, "-n", ns, "--replicas=1"]
+          let waiting ← waitForCondition "the operator waits for the CR again" 180 do
+            return containsSubstr (← c.opLog 400) "WAITING: FlareCluster"
+          -- recreate the CR and the StatefulSet with NO approval
+          deployDeferredCluster initCfg false
+          let undecided ← waitForCondition "the operator refuses to tell a first build from a loss" 180 do
+            return containsSubstr (← c.opLogsAll) "cannot be told from a loss"
+          IO.sleep 30000
+          let logs ← c.opLogsAll
+          let fresh := containsSubstr logs "node map: starting fresh"
+          let ready ← c.opReady
+          let cmBack := (← kubectlGetJsonpath "configmap" cmName ns "{.metadata.name}").toOption.isSome
+          IO.eprintln s!"# CR recreated without approval: waited first={waiting}; undecided={undecided}; started fresh={fresh}; operator ready={ready}; a node map was written={cmBack}"
+          if fresh then return .fail "the operator initialised a cluster over old PVCs without approval"
+          if !undecided then return .fail "the operator did not report that it cannot tell a first build from a loss"
+          if ready then return .fail "the operator became Ready (took control) without its map or an approval"
+          if cmBack then return .fail "a node map was written without a decision"
+          discard <| kubectl ["create", "configmap", cmName, "-n", ns, s!"--from-literal=nodeMap={saved}"]
+          let back ← waitForCondition "the operator loads the restored map and every key is back" 480 do
+            if !(← c.opReady) then return false
+            match ← c.pair with
+            | .ok (_, m2, _, s2) => return (← c.currItems m2) == items && (← c.currItems s2) == items
+            | .error _ => return false
+          IO.eprintln s!"# restored map: every key back={back} (expected {items})"
+          if !back then return .fail "the data on the old PVCs did not come back with the restored map"
+          return .pass },
+
+    { name := "SAF-09 read failures are not absence: with the FlareCluster unreadable (RBAC) the operator neither WAITs as if absent nor becomes Ready; with the pod list unreadable and the map missing it never starts fresh"
+      run := do
+        let cmName' := cmName
+        let saved := ((← kubectlGetJsonpath "configmap" cmName' ns "{.data.nodeMap}").toOption.getD "").trim
+        if saved.isEmpty then return .fail "precondition: no persisted map"
+        -- (a) the FlareCluster cannot be read
+        if !(← c.scaleOp 0) then return .fail "could not stop the operator"
+        match ← ruleSwap "flareclusters" "flareclusters-e2e-revoked" with
+        | .error e => return .fail s!"could not revoke flareclusters: {e}"
+        | .ok _ => pure ()
+        discard <| kubectl ["scale", "deployment", initCfg.operatorName, "-n", ns, "--replicas=1"]
+        let notAbsent ← waitForCondition "the operator reports the CR unreadable (not absent)" 120 do
+          return containsSubstr (← c.opLogsAll) "NOT treated as absent"
+        let logsA ← c.opLogsAll
+        let waitedA := containsSubstr logsA "WAITING: FlareCluster"
+        let readyA ← c.opReady
+        discard <| ruleSwap "flareclusters-e2e-revoked" "flareclusters"
+        IO.eprintln s!"# CR unreadable: reported not-absent={notAbsent} waited as absent={waitedA} ready={readyA}"
+        if !notAbsent then return .fail "an unreadable FlareCluster was not reported as a failed read"
+        if waitedA then return .fail "an unreadable FlareCluster was treated as absent"
+        if readyA then return .fail "the operator became Ready with its FlareCluster unreadable"
+        let backA ← waitForCondition "the operator recovers once the CR is readable" 300 do c.opReady
+        if !backA then return .fail "the operator did not recover after the CR became readable"
+        -- (b) the pod list cannot be read while the map is missing
+        if !(← c.scaleOp 0) then return .fail "could not stop the operator"
+        discard <| kubectl ["delete", "configmap", cmName', "-n", ns]
+        match ← ruleSwap "pods" "pods-e2e-revoked" with
+        | .error e => return .fail s!"could not revoke pods: {e}"
+        | .ok _ => pure ()
+        discard <| kubectl ["scale", "deployment", initCfg.operatorName, "-n", ns, "--replicas=1"]
+        let retried ← waitForCondition "the operator retries (history unknown)" 120 do
+          return containsSubstr (← c.opLogsAll) "node map: retrying"
+        IO.sleep 20000
+        let logsB ← c.opLogsAll
+        let freshB := containsSubstr logsB "node map: starting fresh"
+        discard <| ruleSwap "pods-e2e-revoked" "pods"
+        discard <| kubectl ["create", "configmap", cmName', "-n", ns, s!"--from-literal=nodeMap={saved}"]
+        IO.eprintln s!"# pod list unreadable + map missing: retried={retried} started fresh={freshB}"
+        if freshB then return .fail "an unreadable pod list let the operator start fresh"
+        if !retried then return .fail "the operator did not retry with an unreadable pod list"
+        let backB ← waitForCondition "the operator recovers with the map restored" 300 do c.opReady
+        if !backB then return .fail "the operator did not recover after the pod list became readable"
+        return .pass }
+  ]
+}
+
 -- ─── two partitions: enablement and the lag hold are per partition ───────
 
 /-- (masterPod, masterIp, replicaPod, replicaIp) of partition `p`, the replica

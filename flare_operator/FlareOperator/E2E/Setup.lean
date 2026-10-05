@@ -74,6 +74,10 @@ structure ClusterConfig where
       a replacement) needs to be observable. 0 = no hook (fast pod deletes, the
       default for most suites). Mirrors the chart's cluster.drainSeconds. -/
   drainSeconds : Nat := 0
+  /-- Deploy the operator WITHOUT its FlareCluster and StatefulSet (they come
+      later through `deployDeferredCluster`): the operator-before-cluster
+      install the SAF-09 waiting state exists for. -/
+  deferClusterCr : Bool := false
   /-- Run a RELEASED flared / operator image instead of the locally built
       `:test` one (pulled, IfNotPresent). The upgrade suite starts on the
       deployed release and rolls to the build under test. -/
@@ -524,9 +528,10 @@ def deployCluster (cfg : ClusterConfig) : IO Unit := do
   applyYaml (serviceAccountYaml cfg)
   applyYaml (clusterRoleBindingYaml cfg)
 
-  -- Create FlareCluster CR
-  applyYaml (flareClusterCrdYaml cfg)
-  approveFirstBuild cfg
+  -- Create FlareCluster CR (unless the test adds it later)
+  if !cfg.deferClusterCr then
+    applyYaml (flareClusterCrdYaml cfg)
+    approveFirstBuild cfg
 
   -- Create partition services
   for i in List.range cfg.partitions do
@@ -609,7 +614,17 @@ def deployCluster (cfg : ClusterConfig) : IO Unit := do
     throw (IO.userError s!"ConfigMap {cmName} not found: {e}")
 
   -- Deploy StatefulSet
-  IO.eprintln s!"# Deploying StatefulSet..."
+  if cfg.deferClusterCr then
+    IO.eprintln "# FlareCluster and StatefulSet deferred (deployDeferredCluster)"
+  else
+    IO.eprintln s!"# Deploying StatefulSet..."
+    applyYaml (statefulSetYaml cfg)
+
+/-- Create the FlareCluster (optionally approving its first build) and the
+    StatefulSet of a cluster deployed with `deferClusterCr`. -/
+def deployDeferredCluster (cfg : ClusterConfig) (approve : Bool := true) : IO Unit := do
+  applyYaml (flareClusterCrdYaml cfg)
+  if approve then approveFirstBuild cfg
   applyYaml (statefulSetYaml cfg)
 
 /-- Deploy a second cluster for inter-cluster replication tests. -/

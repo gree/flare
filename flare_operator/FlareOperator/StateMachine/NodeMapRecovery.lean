@@ -148,12 +148,11 @@ def history (leaseMarker : Except String (Option String)) (podsListed : Bool)
       | .error e => .unknown s!"the Lease could not be read ({e})"
       | .ok _ =>
         if !podsListed then .unknown "the flared pods could not be listed"
-        -- Nothing exists to lose: the FlareCluster is confirmed ABSENT (a
-        -- NotFound, not a failed read) and no flared pod exists at all.
-        -- (An operator installed before its cluster, e.g. a chart smoke
-        -- deploy.) A missing CR WITH pods stays unknown: they may hold data.
-        else if clusterMissing && pods.isEmpty then
-          .provenEmpty "no FlareCluster and no flared pod exist: nothing to lose"
+        -- An ABSENT FlareCluster proves nothing about data: PVCs can outlive
+        -- the CR and the pods (review 2026-10-05). The operator does not even
+        -- reach this decision without a CR (it waits); `clusterMissing` only
+        -- keeps the reason explicit.
+        else if clusterMissing then .unknown "the FlareCluster does not exist (absence proves nothing: PVCs may hold data)"
         else if expectedPods == 0 then .unknown "the FlareCluster spec (expected pod count) is not known"
         else if pods.length < expectedPods then .unknown s!"only {pods.length} of {expectedPods} flared pods exist"
         else

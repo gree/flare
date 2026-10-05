@@ -381,7 +381,8 @@
         "SAF-09 scope (2026-10-02): the durable authority is the operator's own persisted node map. If that ConfigMap is deleted or restored from an older copy, a new leader again starts from the Lease count alone; the check/send race of a deposed leader inside one pass (already a residual) is unchanged; per-node applied generation is observed by the topology audit, not persisted.",
         "2026-10-05 (SAF-09, user priority: tell failure, invalid content, loss and first build apart before any automatic restore): every startup failure used to 'start fresh' — an API error or a missing ConfigMap both logged 'no persisted state found, starting fresh', and a map that did not parse was loaded leniently (bad lines dropped, missing version = 0). Now NodeMapRecovery.decide: valid → load; read failed → retry 12 × 5 s, then exit 2 (pod restarts); invalid → CRITICAL, exit 3; missing/empty + no history → first build; missing/empty + history → CRITICAL, exit 3; evidence unreadable → retry. History = a Lease annotation flare.gree.net/node-map-persisted (written once per process after the first successful persist) or any flared pod reporting a node map version or data. FLARE_NODE_MAP_RESET=1 deliberately accepts a fresh start for the halt cases, never for a failed read (RUNBOOK #node-map-lost). While the operator is halted, flared keeps serving with its last map. Not covered: automatic reconstruction of a lost map; per-node applied generation persisted; a Lease AND ConfigMap lost while every pod restarted reads as a first build. CI pending.",
         "2026-10-05 review round 2 (implemented, NOT CI-verified): the first-build approval is consumed independently of the Lease marker and retried on every persist until it is READ BACK as absent; a removal that does not take logs CRITICAL each persist. RUNBOOK #node-map-lost documents the approval command, its one-shot rule and its UID binding.",
-        "2026-10-05 (PR run 37276016227 on 87495a0), classified as FUNCTIONAL — a regression introduced by the SAF-09 Unknown rework and caught by CI: every leg's shared setup installs the chart's operator (namespace flare-system, cluster 'default') with NO FlareCluster and NO flared pods and waits for it to be Ready. With the map missing, the CR read failed (NotFound) and the expected pod count was unknown, so the operator retried, exited and was never Ready; setup timed out in all 8 legs. Before the rework it started fresh. Fix: a FlareCluster confirmed ABSENT (NotFound, not a failed read) with NO flared pod at all and the Lease read without a marker is proven empty (nothing exists to lose); a missing CR with pods stays unknown. The CR, Lease and pod-list read errors are now logged instead of discarded (the failing run did not show the kubectl error)."
+        "2026-10-05 (PR run 37276016227 on 87495a0), classified as FUNCTIONAL — a regression introduced by the SAF-09 Unknown rework and caught by CI: every leg's shared setup installs the chart's operator (namespace flare-system, cluster 'default') with NO FlareCluster and NO flared pods and waits for it to be Ready. With the map missing, the CR read failed (NotFound) and the expected pod count was unknown, so the operator retried, exited and was never Ready; setup timed out in all 8 legs. Before the rework it started fresh. Fix: a FlareCluster confirmed ABSENT (NotFound, not a failed read) with NO flared pod at all and the Lease read without a marker is proven empty (nothing exists to lose); a missing CR with pods stays unknown. The CR, Lease and pod-list read errors are now logged instead of discarded (the failing run did not show the kubectl error).",
+        "2026-10-05 review round 3: 'no CR and no pods = nothing to lose' was WRONG (cfb7f02) — PVCs with old data can outlive the CR and the pods, and the Lease marker can be gone too. Replaced (implemented, NOT CI-verified) by separating operator RUNNING from cluster INITIALISATION: with the FlareCluster confirmed absent (NotFound) the operator keeps its lease, reports Ready and WAITS — no node-map decision, no index, no control; only when the CR exists are the persisted map, the history and the first-build approval examined, under the unchanged rules (a recreated CR over old PVCs has a new UID, so no approval applies). A failed CR read is never absence: the operator stays not-Ready and retries. NodeMapRecovery.history no longer proves anything from a missing CR. Lease-read failure is covered by unit cases only (revoking leases would break leader election in E2E)."
       ],
       "code": [
         {
@@ -531,6 +532,21 @@
             {
               "path": "flare_operator/FlareOperator/E2E/Tests/TopologyAuthority.lean",
               "symbol": "restartUnder"
+            }
+          ]
+        },
+        {
+          "id": "CHECK-01-init",
+          "kind": "scenario",
+          "procedure": "SAF-09 operator vs cluster initialisation. E2E cluster-init (1p x 2r PVC, operator deployed before its cluster): (1) no FlareCluster and no pods — the operator is Ready and WAITING, makes no node-map decision and persists no node map; (2) the CR then appears with a first-build approval — the operator examines it, builds it, the cluster serves writes, and the approval is consumed; (3) the CR, StatefulSet, map and Lease marker are deleted while the PVCs stay, then the CR and StatefulSet are recreated WITHOUT approval — the operator must never start fresh, never become Ready and write no map; restoring the map brings every key back; (4) with flareclusters unreadable (RBAC) the operator must report a failed read, not WAIT as if absent, and not become Ready; with pods unreadable and the map missing it must retry and never start fresh.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/ContinuousReplicationLimits.lean",
+              "symbol": "clusterInitSuite"
+            },
+            {
+              "path": "flare_operator/FlareOperator/E2E/Setup.lean",
+              "symbol": "deployDeferredCluster"
             }
           ]
         }
@@ -1395,7 +1411,7 @@
         },
         "ci_passed": {
           "state": "no",
-          "evidence": "no release candidate set (0/5 checks counted)"
+          "evidence": "no release candidate set (0/6 checks counted)"
         },
         "reviewed": {
           "state": "no",

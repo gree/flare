@@ -1021,8 +1021,8 @@ def checkNodeMapRecovery (ctx : Ctx) : IO Unit := do
     (isUnk (NodeMapRecovery.history (.ok none) true [p "a" true (some 0) none, p "b" true (some 0) (some 0)] 2))
   check ctx "SAF-09 history: a NotReady unreadable pod is unknown (all flared restarting is not a new cluster)"
     (isUnk (NodeMapRecovery.history (.ok none) true [p "a" false none none, p "b" false none none] 2))
-  check ctx "SAF-09 history: no FlareCluster (NotFound) and no flared pods = nothing to lose (proven new); a missing CR WITH pods is unknown"
-    (isNew (NodeMapRecovery.history (.ok none) true [] 0 true)
+  check ctx "SAF-09 history: no FlareCluster and no flared pods is NOT proven new (PVCs may hold data); a missing CR with pods is unknown too"
+    (isUnk (NodeMapRecovery.history (.ok none) true [] 0 true)
       && isUnk (NodeMapRecovery.history (.ok none) true [p "a" false none none] 0 true)
       && isUnk (NodeMapRecovery.history (.error "x") true [] 0 true))
   check ctx "SAF-09 history: fewer pods than the spec expects is unknown; no spec is unknown; no pod list is unknown"

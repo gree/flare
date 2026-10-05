@@ -2368,6 +2368,41 @@ def main (args : List String) : IO Unit := do
   -- Initialize shared state
   let stateRef ← IO.mkRef FlareClusterState.default
 
+  -- SAF-09 (review 2026-10-05): running the operator and initialising a data
+  -- cluster are separate. With NO FlareCluster (a confirmed NotFound) the
+  -- operator WAITS: it keeps its lease and reports Ready (an operator
+  -- installed before its cluster, e.g. the chart's own smoke deploy), but it
+  -- makes no node-map decision, serves no index and controls nothing.
+  -- "No CR and no pods" is NOT "nothing to lose": PVCs with old data can
+  -- outlive both. Only once the CR exists is the persisted map, the history
+  -- and the first-build approval examined. A failed read is never taken for
+  -- absence: the operator stays not-Ready and keeps retrying.
+  let mut crPresent := false
+  let mut waitingLogged := false
+  while !crPresent do
+    match ← kubectl ["get", "flarecluster", crName, "-n", ns, "-o", "jsonpath={.metadata.uid}"] with
+    | .ok uid =>
+      if uid.trim.isEmpty then
+        IO.eprintln s!"[flare-operator] FlareCluster {crName}: read returned no UID; retrying (not treated as absent)"
+      else crPresent := true
+    | .error e =>
+      if (e.splitOn "(NotFound)").length > 1 then
+        if !waitingLogged then
+          IO.eprintln s!"[flare-operator] WAITING: FlareCluster {crName} does not exist; the operator is running (Ready) but initialises and controls nothing until it does"
+          waitingLogged := true
+          healthStatus.setLeader false  -- Ready while waiting (no index to serve)
+      else
+        IO.eprintln s!"[flare-operator] FlareCluster {crName} could not be read ({e}); retrying — NOT treated as absent"
+        healthStatus.setLeader true     -- not Ready: the TCP index is not up
+    if !crPresent then
+      IO.sleep 5000
+      if !(← tryAcquireOrRenew leaseName ns identity) then
+        IO.eprintln "[flare-operator] LOST LEASE while waiting for the FlareCluster -- exiting"
+        IO.Process.exit 1
+  if waitingLogged then
+    IO.eprintln s!"[flare-operator] FlareCluster {crName} appeared: examining its persisted map, history and first-build approval before taking control"
+  healthStatus.setLeader true
+
   -- SAF-09: load the persisted node map, telling a failed read, invalid
   -- content, an actual loss and a first build apart
   -- (StateMachine/NodeMapRecovery). Before, every failure "started fresh".

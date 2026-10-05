@@ -80,6 +80,7 @@ def main (args : List String) : IO UInt32 :=
     Tests.ContinuousReplicationLimits.rebuildTmpfsSuite,
     Tests.ContinuousReplicationLimits.upgradeSuite,
     Tests.ContinuousReplicationLimits.identitySuite,
+    Tests.ContinuousReplicationLimits.clusterInitSuite,
     Tests.ContinuousReplicationLimits.scaleSuite,
     Tests.ContinuousReplicationLimits.sustainedSuite,
     Tests.ContinuousReplicationLimits.outageSuite,

@@ -23,6 +23,7 @@ import FlareOperator.StateMachine.SyncEvidence
 import FlareOperator.StateMachine.StatsObservation
 import FlareOperator.StateMachine.FollowEvidence
 import FlareOperator.StateMachine.K8sReconciler
+import FlareOperator.StateMachine.NodeMapRecovery
 
 open FlareOperator.K8s
 open FlareOperator.ReplicaRepair
@@ -954,6 +955,67 @@ def checkExMasterReturn (ctx : Ctx) : IO Unit := do
   check ctx "a slave that activates under an Active master drops its lastMasterOf marker"
     ((sa.lookupNode "m:12121").map (·.lastMasterOf) == some (-1))
 
+def nmGood : String := "version=4294967304\nh:12121 role=0 state=0 partition=0 thread=16 balance=100\ni:12121 role=1 state=0 partition=0 thread=17 balance=50"
+
+def kindOf (d : NodeMapRecovery.Decision) : String := d.kind
+
+def checkNodeMapRecovery (ctx : Ctx) : IO Unit := do
+  let open_ := NodeMapRecovery.History.none "0 pods"
+  let ran := NodeMapRecovery.History.seen "lease marker"
+  let unk := NodeMapRecovery.History.unknown "pod unreadable"
+  -- present and valid: load, whatever the evidence
+  check ctx "SAF-09: a valid persisted map is loaded (version and nodes kept)"
+    (match NodeMapRecovery.decide (.present nmGood) ran false with
+     | .load st => st.nodeMapVersion == 4294967304 && st.nodeMap.length == 2
+     | _ => false)
+  -- a failed read never starts fresh, even with reset
+  check ctx "SAF-09: a failed read is retried, never treated as absent (reset does not override)"
+    (kindOf (NodeMapRecovery.decide (.failed "timeout") open_ false) == "retry"
+      && kindOf (NodeMapRecovery.decide (.failed "timeout") ran true) == "retry")
+  -- missing: first build vs loss vs unknown
+  check ctx "SAF-09: missing map + no history = first build (fresh)"
+    (kindOf (NodeMapRecovery.decide .notFound open_ false) == "fresh")
+  check ctx "SAF-09: missing map + history = actual loss (halt); reset accepts a fresh start"
+    (kindOf (NodeMapRecovery.decide .notFound ran false) == "halt"
+      && kindOf (NodeMapRecovery.decide .notFound ran true) == "fresh")
+  check ctx "SAF-09: missing map + unreadable evidence = retry"
+    (kindOf (NodeMapRecovery.decide .notFound unk false) == "retry"
+      && kindOf (NodeMapRecovery.decide .notFound unk true) == "retry")
+  check ctx "SAF-09: an EMPTY map is treated like a missing one"
+    (kindOf (NodeMapRecovery.decide (.present "  \n") open_ false) == "fresh"
+      && kindOf (NodeMapRecovery.decide (.present "") ran false) == "halt")
+  -- invalid content halts instead of loading leniently
+  for (bad, why) in [("h:12121 role=0 state=0 partition=0", "no version line"),
+                     ("version=7\nversion=8\nh:12121 role=0 state=0 partition=0", "two version lines"),
+                     ("version=x\nh:12121 role=0 state=0 partition=0", "unreadable version"),
+                     ("version=7\nh:12121 role=9 state=0 partition=0", "a line that does not parse"),
+                     ("version=7\nh:12121 role=0 state=0 partition=0\nh:12121 role=1 state=0 partition=0", "duplicate keys"),
+                     ("version=0\nh:12121 role=0 state=0 partition=0", "nodes at version 0")] do
+    check ctx s!"SAF-09: an invalid map ({why}) halts, never loads partially"
+      (kindOf (NodeMapRecovery.decide (.present bad) ran false) == "halt"
+        && kindOf (NodeMapRecovery.decide (.present bad) open_ false) == "halt")
+  check ctx "SAF-09: reset accepts discarding an invalid map"
+    (kindOf (NodeMapRecovery.decide (.present "version=x") ran true) == "fresh")
+  -- read classification
+  check ctx "SAF-09: only NotFound counts as absent"
+    (NodeMapRecovery.classifyRead (.error "Error from server (NotFound): configmaps \"x\" not found") == .notFound
+      && NodeMapRecovery.classifyRead (.error "Unable to connect to the server: dial tcp: i/o timeout") == .failed "Unable to connect to the server: dial tcp: i/o timeout"
+      && NodeMapRecovery.classifyRead (.ok "x") == .present "x")
+  -- history
+  let p (n : String) (r : Bool) (v i : Option Nat) : NodeMapRecovery.PodEvidence := { name := n, ready := r, nodeMapVersion := v, currItems := i }
+  check ctx "SAF-09 history: a Lease marker alone is enough"
+    (match NodeMapRecovery.history (some "17") false [] with | .seen _ => true | _ => false)
+  check ctx "SAF-09 history: a pod with a node map version or data shows a previous incarnation"
+    ((match NodeMapRecovery.history none true [p "a" true (some 0) (some 0), p "b" true (some 9) (some 0)] with | .seen _ => true | _ => false)
+      && (match NodeMapRecovery.history none true [p "a" false (some 0) (some 5)] with | .seen _ => true | _ => false))
+  check ctx "SAF-09 history: a Ready pod that does not answer leaves it unknown"
+    (match NodeMapRecovery.history none true [p "a" true none none] with | .unknown _ => true | _ => false)
+  check ctx "SAF-09 history: first build — no pods, or pods not Ready and unread (flared waits for the operator)"
+    ((match NodeMapRecovery.history none true [] with | .none _ => true | _ => false)
+      && (match NodeMapRecovery.history none true [p "a" false none none, p "b" true (some 0) (some 0)] with | .none _ => true | _ => false))
+  check ctx "SAF-09 history: pods that cannot be listed leave it unknown"
+    (match NodeMapRecovery.history none false [] with | .unknown _ => true | _ => false)
+
 def run : IO UInt32 := do
   let ctx : Ctx := { failures := ← IO.mkRef [], count := ← IO.mkRef 0 }
   checkObserve ctx
@@ -979,6 +1041,7 @@ def run : IO UInt32 := do
   checkReactivation ctx
   checkFailoverLagHold ctx
   checkExMasterReturn ctx
+  checkNodeMapRecovery ctx
   let failures ← ctx.failures.get
   let n ← ctx.count.get
   IO.println s!"1..{n}"

@@ -950,7 +950,16 @@ def enablePurgedSuite : TestSuite := {
           let recon1 := (← c.statNat sIp "reconstruction_started").getD 0
           let purgedSeen := (← states.get).any (containsSubstr · "lsn_purged")
           IO.eprintln s!"# follow on: states seen {← states.get}; lsn_purged seen={purgedSeen}; reconstruction_started {recon0}→{recon1}; following={following}"
-          if !following then return .fail s!"expected one rebuild then following; states {← states.get}, reconstruction_started {recon0}→{recon1}"
+          if !following then
+            -- CI 37268848902: needs_rebuild declared, no rebuild in 420 s,
+            -- and the 80-line diagnostic tail no longer showed the
+            -- operator's repair decisions. Print them here.
+            let repairLines := ((← c.opLog 200000).splitOn "\n").filter (fun l =>
+              containsSubstr l "REPLICA REPAIR" || containsSubstr l "replica repair" || containsSubstr l "ledger"
+                || containsSubstr l "demot" || containsSubstr l "reseat" || containsSubstr l "CIRCUIT BREAKER")
+            IO.eprintln s!"# operator repair decisions ({repairLines.length} line(s)):\n{String.intercalate "\n" (repairLines.reverse.take 25).reverse}"
+            IO.eprintln s!"# ledger: dests={← c.ledgerDests}"
+            return .fail s!"expected one rebuild then following; states {← states.get}, reconstruction_started {recon0}→{recon1}"
           if !(← convergedItems c mIp sIp "after the rebuild: replica matches the master") then
             return .fail s!"after the rebuild: items master={← c.currItems mIp} replica={← c.currItems sIp}"
           if let some bad ← sampleEqual c mIp sIp [("legacy", 100)] then return .fail s!"value mismatch: {bad}"

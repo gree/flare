@@ -28,6 +28,7 @@ import FlareOperator.StateMachine.ReplicaRepair
 import FlareOperator.StateMachine.SyncEvidence
 import FlareOperator.StateMachine.StatsObservation
 import FlareOperator.StateMachine.FollowEvidence
+import FlareOperator.StateMachine.NodeMapRecovery
 import FlareOperator.Kubectl
 import FlareOperator.Server.TcpServer
 import FlareOperator.Server.TopologyBroadcast
@@ -243,6 +244,43 @@ initialize persistedVersionRef : IO.Ref Nat ← IO.mkRef 0
 /-- Monotonic time (ms) at which this process entered leader mode; the
     startup grace is measured from it in wall-clock seconds. -/
 initialize leaderSinceMsRef : IO.Ref Nat ← IO.mkRef 0
+
+/-- SAF-09: the Lease already carries the persisted-map marker. -/
+initialize nodeMapMarkedRef : IO.Ref Bool ← IO.mkRef false
+
+/-- SAF-09 evidence of a previous incarnation (StateMachine/NodeMapRecovery):
+    the Lease's persisted-map marker, and each flared pod's own node map
+    version and item count. -/
+private def nodeMapHistory (crName ns leaseName : String) : IO NodeMapRecovery.History := do
+  let marker ← match ← kubectl ["get", "lease", leaseName, "-n", ns, "-o",
+      "jsonpath={.metadata.annotations.flare\\.gree\\.net/node-map-persisted}"] with
+    | .ok v => pure (if v.trim.isEmpty then none else some v.trim)
+    | .error _ => pure none
+  match ← Bridge.listFlaredPodsE crName ns with
+  | .error _ => return NodeMapRecovery.history marker false []
+  | .ok pods =>
+    let mut ev : List NodeMapRecovery.PodEvidence := []
+    for p in pods do
+      match ← Bridge.queryPodStats p.name ns "stats" with
+      | .ok out =>
+        ev := ev ++ [{ name := p.name, ready := p.ready,
+                       nodeMapVersion := some ((statNat out "node_map_version").getD 0),
+                       currItems := some ((statNat out "curr_items").getD 0) }]
+      | .error _ => ev := ev ++ [{ name := p.name, ready := p.ready }]
+    let h := NodeMapRecovery.history marker true ev
+    IO.eprintln s!"[flare-operator] node map history: {repr h}"
+    return h
+
+/-- Record on the Lease that a node map has been persisted (once per
+    process). A later leader that finds the ConfigMap missing reads this as
+    "the cluster ran before" (SAF-09). -/
+private def markNodeMapPersisted (crName ns : String) (version : Nat) : IO Unit := do
+  if (← nodeMapMarkedRef.get) then return
+  match ← kubectl ["annotate", "lease", s!"{crName}-operator-lease", "-n", ns, "--overwrite",
+      s!"flare.gree.net/node-map-persisted={version}"] with
+  | .ok _ => nodeMapMarkedRef.set true
+  | .error e => IO.eprintln s!"[flare-operator] warning: could not mark the Lease with the persisted node map ({e}); retried on the next persist"
+
 
 /-- When each partition was first seen without a master (monotonic ms),
     for the failover-lag hold's wait budget. Cleared once it has one. -/
@@ -794,6 +832,7 @@ private def executeEffects (effects : List K8sReconciler.FlareEffect)
       | .ok () =>
         let v := (FlareClusterState.fromNodeMapData data).nodeMapVersion
         persistedVersionRef.modify (max v)
+        markNodeMapPersisted crName ns v
       | .error e => IO.eprintln s!"[flare-operator] warning: failed to update ConfigMap: {e}"
 
     | .SendSighup _podNames =>
@@ -2073,13 +2112,25 @@ def main (args : List String) : IO Unit := do
   -- Initialize shared state
   let stateRef ← IO.mkRef FlareClusterState.default
 
-  -- Try to load persisted state from ConfigMap
+  -- SAF-09: load the persisted node map, telling a failed read, invalid
+  -- content, an actual loss and a first build apart
+  -- (StateMachine/NodeMapRecovery). Before, every failure "started fresh".
   let cmName := s!"{crName}-node-map"
-  match ← readFlaredConfigMap cmName ns with
-  | .error _ => IO.eprintln s!"[flare-operator] no persisted state found, starting fresh"
-  | .ok data =>
-    if data.trim != "" then
-      let loaded := FlareClusterState.fromNodeMapData data
+  let reset := (← IO.getEnv "FLARE_NODE_MAP_RESET") == some "1"
+  let mut nmAttempt := 0
+  let mut nmSettled := false
+  while !nmSettled do
+    nmAttempt := nmAttempt + 1
+    let read := NodeMapRecovery.classifyRead (← readFlaredConfigMap cmName ns)
+    -- Evidence is only needed when the map is not a valid one.
+    let needsHistory := match read with
+      | .present d => d.trim.isEmpty || (NodeMapRecovery.validate d).toOption.isNone
+      | .notFound => true
+      | .failed _ => false
+    let hist ← if needsHistory then nodeMapHistory crName ns s!"{crName}-operator-lease"
+      else pure (NodeMapRecovery.History.none "not needed")
+    match NodeMapRecovery.decide read hist reset with
+    | .load loaded =>
       -- MIGRATION: maps persisted by pre-thread operators load every node at
       -- the shared default 16, which collapses flared's per-destination proxy
       -- pools into one (misrouted forwards/relays). Re-number duplicates once;
@@ -2088,6 +2139,19 @@ def main (args : List String) : IO Unit := do
       let loaded := loaded.rebuildPartitionMap
       stateRef.set loaded
       IO.eprintln s!"[flare-operator] loaded {loaded.nodeMap.length} nodes from ConfigMap (resuming at broadcast version {loaded.nodeMapVersion})"
+      nmSettled := true
+    | .fresh why =>
+      IO.eprintln s!"[flare-operator] node map: starting fresh — {why}"
+      nmSettled := true
+    | .retry why =>
+      if nmAttempt >= 12 then
+        IO.eprintln s!"[flare-operator] CRITICAL: node map still undecided after {nmAttempt} attempts ({why}); exiting so the pod restarts and tries again — NOT starting from an empty map"
+        IO.Process.exit 2
+      IO.eprintln s!"[flare-operator] node map: retrying in 5 s (attempt {nmAttempt}/12) — {why}"
+      IO.sleep 5000
+    | .halt why =>
+      IO.eprintln s!"[flare-operator] CRITICAL: {why}"
+      IO.Process.exit 3
 
   -- FENCING: fold the leadership generation (Lease spec.leaseTransitions,
   -- bumped on every takeover) into the broadcast version space:

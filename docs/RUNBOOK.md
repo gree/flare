@@ -391,6 +391,37 @@ waits for the ex-master. Writes to the partition fail meanwhile.
 To shorten the outage by hand, accepting the loss, set the variable lower
 and restart the operator.
 
+## Operator will not start: node map missing, invalid or unreadable {#node-map-lost}
+
+At startup the operator reads `<cluster>-node-map` (ConfigMap) and decides
+(SAF-09):
+
+| Log line | Meaning | The operator |
+|---|---|---|
+| `loaded N nodes from ConfigMap` | normal | runs |
+| `node map: starting fresh — first build ...` | no map, and nothing shows the cluster ran before | runs |
+| `node map: retrying in 5 s ... reading the node map failed` | API error, timeout or forbidden | retries 12 × 5 s, then exits 2 (the pod restarts) |
+| `CRITICAL: the node map is missing but the cluster ran before` | the map is gone while the Lease marker or a flared pod shows history | exits 3, stays down |
+| `CRITICAL: the persisted node map is invalid` | content does not parse strictly | exits 3, stays down |
+
+While the operator is down, **flared keeps serving with its last topology**.
+Writes and reads continue. No failover happens and no topology changes are
+applied.
+
+1. **Failed read.** Fix API access or RBAC (`configmaps` get/update in the
+   operator's ClusterRole). The operator then loads the map by itself.
+2. **Missing or invalid map.** Restore the ConfigMap from a copy if you have
+   one (key `nodeMap`, format `version=N` plus one line per node). The
+   operator loads it on its next restart.
+3. **No copy.** Set `FLARE_NODE_MAP_RESET=1` on the operator Deployment to
+   accept a fresh start deliberately, then remove the variable. On a fresh
+   start the operator rebuilds the map from the nodes' registrations: check
+   every partition's master afterwards (`node sync`). A version gap with
+   flared is handled by the leadership generation (SAF-09). The reset never
+   overrides a failed read.
+
+Automatic reconstruction of a lost map from the nodes is not implemented yet.
+
 ## Replacing a node with corrupt data {#replace-corrupt}
 
 To service out a node whose local data looks corrupt and rebuild it from a

@@ -378,7 +378,8 @@
         "The send-reason record (broadcast trigger: ...) is logged with every send and is the attribution evidence; it is derived from the same four values the send condition uses (BroadcastTriggers.any), so it cannot disagree with the branch taken, but it is still a log line rather than a wire capture.",
         "FINDING 2026-10-01 (CI 36831110279, not changed here): the persisted node map (serializeNodeMap) carries no read balance, so a reloaded map has every node at balance 100 until the first reconcile pass re-applies spec.readBalance and the SAF-10c read withholding. The operator answers node add from that in-memory map, and after a takeover the reloaded version is raised to the new generation base, newer than any pod holds. A flared pod that boots in that window adopts a map in which slaves, including WAL followers withheld from reads, carry balance 100, until the first pass pushes the corrected map seconds later. Running pods are not affected: flared requests the map only at boot. Side effect: with any slave weight other than 100, the first pass after a restart always advances the version, so the startup seed is rarely the only republish reason in practice. FIX (2026-10-01, CI pending): serializeNodeMap now persists each node's committed balance (balance=, including the SAF-10c withholding) and parseNodeMapLine restores it; a legacy line without the token loads as master 100 / others 0. Proved by nodeMapVersion_roundtrip (balances 100/0/25) and legacy_line_balance_fallback. The startup-republish E2E uses slave weight 25 again, so it fails if the reload changes the map.",
         "Same-name replacement is staged E2E only for the topology audit probe (UID-bracketed). The follow-evidence stats reads (read/promotion eligibility) are NOT UID-bracketed: they are per-pass and by pod name, so a reply from a pod replaced right after the read is used for that pass. The flared-side local read guard (follow_allows_local_read) and the pass-by-pass re-evaluation bound the effect; a UID bracket there is a possible follow-up, not done. ADDRESSED 2026-10-02 (CI pending) without per-read UID calls: follow-evidence replies carry the flared process boot id; a reply whose process differs from the previous pass is Unknown for that pass (FollowEvidence.markProcessChanges). A replacement within one pass (between the read and the commit) is still not detected.",
-        "SAF-09 scope (2026-10-02): the durable authority is the operator's own persisted node map. If that ConfigMap is deleted or restored from an older copy, a new leader again starts from the Lease count alone; the check/send race of a deposed leader inside one pass (already a residual) is unchanged; per-node applied generation is observed by the topology audit, not persisted."
+        "SAF-09 scope (2026-10-02): the durable authority is the operator's own persisted node map. If that ConfigMap is deleted or restored from an older copy, a new leader again starts from the Lease count alone; the check/send race of a deposed leader inside one pass (already a residual) is unchanged; per-node applied generation is observed by the topology audit, not persisted.",
+        "2026-10-05 (SAF-09, user priority: tell failure, invalid content, loss and first build apart before any automatic restore): every startup failure used to 'start fresh' — an API error or a missing ConfigMap both logged 'no persisted state found, starting fresh', and a map that did not parse was loaded leniently (bad lines dropped, missing version = 0). Now NodeMapRecovery.decide: valid → load; read failed → retry 12 × 5 s, then exit 2 (pod restarts); invalid → CRITICAL, exit 3; missing/empty + no history → first build; missing/empty + history → CRITICAL, exit 3; evidence unreadable → retry. History = a Lease annotation flare.gree.net/node-map-persisted (written once per process after the first successful persist) or any flared pod reporting a node map version or data. FLARE_NODE_MAP_RESET=1 deliberately accepts a fresh start for the halt cases, never for a failed read (RUNBOOK #node-map-lost). While the operator is halted, flared keeps serving with its last map. Not covered: automatic reconstruction of a lost map; per-node applied generation persisted; a Lease AND ConfigMap lost while every pod restarted reads as a first build. CI pending."
       ],
       "code": [
         {
@@ -412,6 +413,14 @@
         {
           "path": "flare_operator/FlareOperator/Server/TopologyBroadcast.lean",
           "symbol": "startupVersion"
+        },
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/NodeMapRecovery.lean",
+          "symbol": "decide"
+        },
+        {
+          "path": "flare_operator/FlareOperator/Main.lean",
+          "symbol": "nodeMapHistory"
         }
       ],
       "call_path": "runReconcileFSMLoop -> commitClusterState -> (post-commit) lease check -> broadcastTopologyToAllPods. The FSM BroadcastTopology effect, which sent the unmerged map without a leadership check, has been removed; the effect constructor no longer exists.",
@@ -501,6 +510,25 @@
             {
               "path": "flare_operator/FlareOperator/E2E/Tests/TopologyAuthority.lean",
               "symbol": "suite"
+            }
+          ]
+        },
+        {
+          "id": "CHECK-01-nodemap",
+          "kind": "scenario",
+          "procedure": "SAF-09 startup node map. flare_unit checkNodeMapRecovery (19 cases): a valid map loads; a failed read retries and is never treated as absent, even with FLARE_NODE_MAP_RESET; missing or empty + no history = first build; missing or empty + history (Lease marker or a flared pod with a node map version or data) = halt; unreadable evidence = retry; six kinds of invalid content halt instead of loading partially; only (NotFound) counts as absent; a not-Ready unreadable pod gives no evidence (first build: flared waits for the operator), a Ready unreadable pod leaves it unknown. E2E topology-authority (3 tests): with the operator stopped, (1) the ConfigMap deleted → on start it halts with the CRITICAL line, never starts fresh or becomes Ready, flared keeps its map version and serves a set; restoring the ConfigMap brings it back; (2) the map corrupted → halt, restore → back; (3) configmaps forbidden by RBAC → it retries and does not start fresh, then loads the existing map once readable.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/StateMachine/NodeMapRecovery.lean",
+              "symbol": "decide"
+            },
+            {
+              "path": "flare_operator/FlareOperator/UnitTests.lean",
+              "symbol": "checkNodeMapRecovery"
+            },
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/TopologyAuthority.lean",
+              "symbol": "restartUnder"
             }
           ]
         }
@@ -1347,6 +1375,23 @@
         "commit": "cc8cebb6d1a2defb47d3ed5b7b4c065134a99ce6",
         "date": "2026-10-02",
         "note": "Run 36901004232: SAF-09 E2E — persisted version 8589934593 (generation 2); after the Lease was deleted and the operator replaced, the Lease count restarted at 1 and the new leader took generation 3 (max(1, 2+1)); both pods moved 8589934593 -> 12884901888 and the topology applied. Under the previous rule the generation would have been 1, below what the pods held. One run. PARTIAL / UNVERIFIED unchanged."
+      },
+      "status": {
+        "implemented": {
+          "state": "partial"
+        },
+        "ci_passed": {
+          "state": "partial",
+          "evidence": "4/5 checks' latest recorded run passed"
+        },
+        "reviewed": {
+          "state": "no",
+          "note": "no independent review recorded (the review field holds change-impact notes)"
+        },
+        "production_approved": {
+          "state": "no",
+          "note": "not approved for production"
+        }
       }
     },
     {
@@ -1422,6 +1467,23 @@
         "commit": "5e7a3df871fd667412b1623b3074b5b8849c2939",
         "date": "2026-09-22",
         "note": "2026-09-30 production-observability increment on 4a516e6 plus working tree: Changed shared metrics/test/runbook surfaces only: topology summary cannot authorize promotion, deletion, rebuild or data-repair completion. This control's runtime decision path is unchanged. 174 unit checks, 3 Helm rendering checks and operator build pass. Prometheus evaluation and runtime CI pending; no EV promoted. See docs/PRODUCTION-READINESS.md and docs/reports/2026-09-30-topology-monitoring.md. Previous: 2026-09-27 applied-topology audit on 87f1728 plus working tree: Observations only request the existing committed-map send; uniqueness normalization is unchanged. Probe budgets are 2s/3s/2s plus kill grace; scale latency unmeasured. 165 unit checks and operator/E2E builds pass; runtime CI pending. See docs/reports/2026-09-27-topology-observation.md. Verification unchanged. Previous: 2026-09-27 SAF-09 increment on 92a46c4 plus working tree: Retries use finalState after commit; no additional topology constructor or pre-commit send path is introduced. Merge/uniqueness rules unchanged. 154 unit checks pass; runtime CI pending. See docs/reports/2026-09-27-topology-delivery-retry.md. Verification unchanged. Previous: 2026-09-27 working-tree review on 41db502: Only configuration/logging changed in Main; committed-map normalization and its uniqueness proof are unchanged. New runtime evidence pending CI; verification unchanged. Previous review: SAF-10 (PR #144): Main.lean and K8sReconciler.lean changed (eligibility probe, read withholding, candidate shaping, PodListResponse fields). The at-most-one-master merge (mergeClusterState, demoteDuplicateMasters) and its theorems are untouched; withholdReads rewrites balance only (withholdReads_keys). PARTIAL / UNVERIFIED unchanged."
+      },
+      "status": {
+        "implemented": {
+          "state": "yes"
+        },
+        "ci_passed": {
+          "state": "yes",
+          "evidence": "1/1 checks' latest recorded run passed"
+        },
+        "reviewed": {
+          "state": "no",
+          "note": "no independent review recorded (the review field holds change-impact notes)"
+        },
+        "production_approved": {
+          "state": "no",
+          "note": "not approved for production"
+        }
       }
     },
     {
@@ -2178,6 +2240,23 @@
         "commit": "e2ca4c6821fa27d935c783aefd814afa3802ff52",
         "date": "2026-09-24",
         "note": "2026-09-30 production-observability increment on 4a516e6 plus working tree: Changed shared metrics/test/runbook surfaces only: topology summary cannot authorize promotion, deletion, rebuild or data-repair completion. This control's runtime decision path is unchanged. 174 unit checks, 3 Helm rendering checks and operator build pass. Prometheus evaluation and runtime CI pending; no EV promoted. See docs/PRODUCTION-READINESS.md and docs/reports/2026-09-30-topology-monitoring.md. Previous: 2026-09-27 applied-topology audit on 87f1728 plus working tree: The new round-robin probe changes delivery feedback only. Unknown/current/ahead samples never authorize deletion, promotion, rebuild, failover or completion of data repair; this control's decision rules are unchanged. Probe budgets are 2s/3s/2s plus kill grace; scale latency unmeasured. 165 unit checks and operator/E2E builds pass; runtime CI pending. See docs/reports/2026-09-27-topology-observation.md. Verification unchanged. Previous: 2026-09-27 SAF-09 increment on 92a46c4 plus working tree: Failed topology pushes no longer clear pending delivery; ledger repair holds benefit from confirmed demotion delivery, but replica data completion rules are unchanged. 154 unit checks pass; runtime CI pending. See docs/reports/2026-09-27-topology-delivery-retry.md. Verification unchanged. Previous: 2026-09-27 working-tree review on 41db502: Repair ledger code is unchanged. Config budgets are retained in migration target specs; no automatic deletion/restart is introduced. The selective read test still demands actual dropped forwarding. New runtime evidence pending CI; verification unchanged. Previous review: CI 36228379804 at 0ed3193: selective routing assertion passed but scenario FAILED in cleanup; corrected cleanup to wait for balance 50 recovery before requesting 0, exposing rather than claiming to fix the SAF-09 retransmission residual. Revised E2E pending. 2026-09-26 follow-up on 3cb1d5a plus working-tree test: Added a selective read-routing E2E; repair ledger production code is unchanged. Dropped forwarding is staged while WAL fetch is blocked, with cleanup in finally. Lean E2E build passed; runtime result pending CI, verification unchanged. Earlier review: Audit follow-up: inspected e2ca4c6 plus working-tree tests/docs. Shared unit/e2e test files gained read-routing and catch-up scheduling checks; the persisted repair ledger and reconstruction transitions are unchanged. See docs/reports/2026-09-24-saf10-audit-followups.md; runs are not attributed to an uncommitted SHA, verification remains unverified. Prior assessment: Runs on this revision: regression suites replica-repair/operator-restart/failover/read-balance/prepare-evidence 30/30 pass; continuous-replication 12/12 pass (second consecutive full pass, run 8). Previous note: ReplicaRepair.FollowReading gained a completeness flag (END seen); unreadable = !complete; flare_unit pins that a complete reply without keys is 'not in the mode' (ordinary repair, hands an owned entry over). Bridge.queryPodStats returns at END instead of waiting out a 3 s timeout, which had made 2-node reconciles take 18-31 s and starved the repair paths. Regression suites (replica-repair, operator-restart, failover, read-balance, prepare-evidence) rerunning on this revision. PARTIAL / UNVERIFIED unchanged."
+      },
+      "status": {
+        "implemented": {
+          "state": "partial"
+        },
+        "ci_passed": {
+          "state": "yes",
+          "evidence": "3/3 checks' latest recorded run passed"
+        },
+        "reviewed": {
+          "state": "no",
+          "note": "no independent review recorded (the review field holds change-impact notes)"
+        },
+        "production_approved": {
+          "state": "no",
+          "note": "not approved for production"
+        }
       }
     },
     {
@@ -2959,6 +3038,23 @@
         "commit": "035096360e75b6041cae45846046baff73deaabf",
         "date": "2026-10-01",
         "note": "Run 36846255460 (merge rev 0350963): first CI execution where the planned promotion went through the graceful drain — follower promoted 10 s after the delete (inside the 30 s preStop), drain logged, guard did not refuse, no NOT-LOSS-FREE line. Earlier CHECK-04-follow passes showed promotion via failover, not the drain. One run. PARTIAL / UNVERIFIED unchanged. Run 36860948511 (merge rev f65a68f): drain promotion again without refusal (second run)."
+      },
+      "status": {
+        "implemented": {
+          "state": "partial"
+        },
+        "ci_passed": {
+          "state": "partial",
+          "evidence": "5/6 checks' latest recorded run passed"
+        },
+        "reviewed": {
+          "state": "no",
+          "note": "no independent review recorded (the review field holds change-impact notes)"
+        },
+        "production_approved": {
+          "state": "no",
+          "note": "not approved for production"
+        }
       }
     },
     {
@@ -3233,6 +3329,23 @@
         "commit": "e2ca4c6821fa27d935c783aefd814afa3802ff52",
         "date": "2026-09-24",
         "note": "2026-09-30 production-observability increment on 4a516e6 plus working tree: Changed shared metrics/test/runbook surfaces only: topology summary cannot authorize promotion, deletion, rebuild or data-repair completion. This control's runtime decision path is unchanged. 174 unit checks, 3 Helm rendering checks and operator build pass. Prometheus evaluation and runtime CI pending; no EV promoted. See docs/PRODUCTION-READINESS.md and docs/reports/2026-09-30-topology-monitoring.md. Previous: 2026-09-27 applied-topology audit on 87f1728 plus working tree: The new round-robin probe changes delivery feedback only. Unknown/current/ahead samples never authorize deletion, promotion, rebuild, failover or completion of data repair; this control's decision rules are unchanged. Probe budgets are 2s/3s/2s plus kill grace; scale latency unmeasured. 165 unit checks and operator/E2E builds pass; runtime CI pending. See docs/reports/2026-09-27-topology-observation.md. Verification unchanged. Previous: 2026-09-27 SAF-09 increment on 92a46c4 plus working tree: Deletion gates unchanged. Added protocol response waits have per-connection and broadcast-wide deadlines to avoid an unbounded reconcile stall. 154 unit checks pass; runtime CI pending. See docs/reports/2026-09-27-topology-delivery-retry.md. Verification unchanged. Previous: 2026-09-27 working-tree review on 41db502: Memory settings explicitly require a planned restart; this patch never invokes deletion or changes survivor checks. New runtime evidence pending CI; verification unchanged. Previous review: Audit follow-up: inspected e2ca4c6 plus working-tree tests/docs. Future timestamps no longer authorize survivor eligibility; deletion still uses the existing gate. New unit checks pass, but no new delete E2E was run. See docs/reports/2026-09-24-saf10-audit-followups.md; runs are not attributed to an uncommitted SHA, verification remains unverified. Prior assessment: Observation-integrity finding from the SAF-10d crash scenario: the item count after a reopen was an estimate blind to WAL-only keys. Fixed in flared (exact scan at open, boot-time O(n), logged). No change to this control's decision logic. PARTIAL / UNVERIFIED unchanged."
+      },
+      "status": {
+        "implemented": {
+          "state": "partial"
+        },
+        "ci_passed": {
+          "state": "yes",
+          "evidence": "3/3 checks' latest recorded run passed"
+        },
+        "reviewed": {
+          "state": "no",
+          "note": "no independent review recorded (the review field holds change-impact notes)"
+        },
+        "production_approved": {
+          "state": "no",
+          "note": "not approved for production"
+        }
       }
     },
     {
@@ -3746,6 +3859,23 @@
         "commit": "b5f1c45c23d75d1f01bf01cc33fa94172cc8c351",
         "date": "2026-09-30",
         "note": "The fixed pvc-data-survival recovery wait (replaced pod UIDs + Ready replicas + master answering stats) passed on its first CI execution (run 36713376306 at merge rev 89b8cdb, wait ended after 21 s, 100/100 keys). The earlier FAIL at 7e979b0 stays recorded as a harness precondition fault. Mechanism untouched. PARTIAL / UNVERIFIED unchanged."
+      },
+      "status": {
+        "implemented": {
+          "state": "partial"
+        },
+        "ci_passed": {
+          "state": "yes",
+          "evidence": "5/5 checks' latest recorded run passed"
+        },
+        "reviewed": {
+          "state": "no",
+          "note": "no independent review recorded (the review field holds change-impact notes)"
+        },
+        "production_approved": {
+          "state": "no",
+          "note": "not approved for production"
+        }
       }
     },
     {
@@ -3826,6 +3956,23 @@
         "commit": "5e7a3df871fd667412b1623b3074b5b8849c2939",
         "date": "2026-09-22",
         "note": "2026-09-30 production-observability increment on 4a516e6 plus working tree: Changed shared metrics/test/runbook surfaces only: topology summary cannot authorize promotion, deletion, rebuild or data-repair completion. This control's runtime decision path is unchanged. 174 unit checks, 3 Helm rendering checks and operator build pass. Prometheus evaluation and runtime CI pending; no EV promoted. See docs/PRODUCTION-READINESS.md and docs/reports/2026-09-30-topology-monitoring.md. Previous: 2026-09-27 applied-topology audit on 87f1728 plus working tree: The new round-robin probe changes delivery feedback only. Unknown/current/ahead samples never authorize deletion, promotion, rebuild, failover or completion of data repair; this control's decision rules are unchanged. Probe budgets are 2s/3s/2s plus kill grace; scale latency unmeasured. 165 unit checks and operator/E2E builds pass; runtime CI pending. See docs/reports/2026-09-27-topology-observation.md. Verification unchanged. Previous: 2026-09-27 SAF-09 increment on 92a46c4 plus working tree: Transport failure schedules retry only; it does not mark recipients dead or trigger failover. Observation/streak decisions unchanged. 154 unit checks pass; runtime CI pending. See docs/reports/2026-09-27-topology-delivery-retry.md. Verification unchanged. Previous: 2026-09-27 working-tree review on 41db502: Memory settings do not alter existence/readiness streaks or lone-master retention. Smaller configured budgets need workload validation. New runtime evidence pending CI; verification unchanged. Previous review: SAF-10 (PR #144): Main.lean/K8sReconciler.lean/Bridge.lean changed for the eligibility probe, read withholding, candidate shaping and the faster stats read. Dead-node detection (detectDeadNodesPure, unhealthy streak) is unchanged; failover candidates are only re-ordered/excluded by follower evidence (shapePromotionCandidates, partitionMap only). PARTIAL / UNVERIFIED unchanged."
+      },
+      "status": {
+        "implemented": {
+          "state": "partial"
+        },
+        "ci_passed": {
+          "state": "no",
+          "evidence": "0/1 checks' latest recorded run passed"
+        },
+        "reviewed": {
+          "state": "no",
+          "note": "no independent review recorded (the review field holds change-impact notes)"
+        },
+        "production_approved": {
+          "state": "no",
+          "note": "not approved for production"
+        }
       }
     },
     {
@@ -3892,6 +4039,23 @@
         "commit": "5e7a3df871fd667412b1623b3074b5b8849c2939",
         "date": "2026-09-22",
         "note": "2026-09-30 production-observability increment on 4a516e6 plus working tree: Changed shared metrics/test/runbook surfaces only: topology summary cannot authorize promotion, deletion, rebuild or data-repair completion. This control's runtime decision path is unchanged. 174 unit checks, 3 Helm rendering checks and operator build pass. Prometheus evaluation and runtime CI pending; no EV promoted. See docs/PRODUCTION-READINESS.md and docs/reports/2026-09-30-topology-monitoring.md. Previous: SAF-10 (PR #144): K8sReconciler.lean changed; the drain guard itself is unchanged, but its candidate list is now shaped: a WAL-mode follower not proven current is excluded from PLANNED promotion, so the guard keeps the master (and reports) in more cases. Exercised by the continuous-replication suite's drain-based promotion test (proven follower promoted). PARTIAL / UNVERIFIED unchanged."
+      },
+      "status": {
+        "implemented": {
+          "state": "yes"
+        },
+        "ci_passed": {
+          "state": "no",
+          "evidence": "0/1 checks' latest recorded run passed"
+        },
+        "reviewed": {
+          "state": "no",
+          "note": "no independent review recorded (the review field holds change-impact notes)"
+        },
+        "production_approved": {
+          "state": "no",
+          "note": "not approved for production"
+        }
       }
     },
     {
@@ -4298,6 +4462,23 @@
         "commit": "80e466bcbb5cabb9505ee9cf7e086e69750e1640",
         "date": "2026-10-01",
         "note": "Run 36812371158 (merge rev 80e466b): the breaker tripped 20 s after the 4->1 scale-down, so CHECK-09 passed. This is the timing-dependent outcome the SAF-11 finding already describes (per-tick dead count; trip needs half the cluster to die inside one tick) and does not close it; the no-trip tally stays at 5 CI occurrences. No code change; the window definition is awaiting the reviewer. PARTIAL / UNVERIFIED unchanged. Run 36816259807 (merge rev b706686) tripped at 5 s; same assessment. Run 36820029377 (merge rev 9dc131f) tripped at 5 s; same assessment. Run 36826494031 (merge rev 6f1edf0) tripped at 5 s; same assessment. Run 36831110279 (merge rev 8ed8f1d) tripped in its leg; same assessment. Run 36835797814 (merge rev 37bcb3e, pre-SAF-11-fix code) tripped at 5 s. Run 36841064685 (merge rev b5bb4a9) is the first run with the SAF-11 count: tripped at 5 s. One run; the no-trip was intermittent, so this alone does not show the fix. Run 36846255460 (merge rev 0350963, SAF-11 count) tripped at 10 s. Run 36860948511 (merge rev f65a68f, SAF-11 count) tripped at 10 s."
+      },
+      "status": {
+        "implemented": {
+          "state": "partial"
+        },
+        "ci_passed": {
+          "state": "yes",
+          "evidence": "1/1 checks' latest recorded run passed"
+        },
+        "reviewed": {
+          "state": "no",
+          "note": "no independent review recorded (the review field holds change-impact notes)"
+        },
+        "production_approved": {
+          "state": "no",
+          "note": "not approved for production"
+        }
       }
     },
     {
@@ -4363,6 +4544,23 @@
         "commit": "5e7a3df871fd667412b1623b3074b5b8849c2939",
         "date": "2026-09-22",
         "note": "2026-09-30 production-observability increment on 4a516e6 plus working tree: Changed shared metrics/test/runbook surfaces only: topology summary cannot authorize promotion, deletion, rebuild or data-repair completion. This control's runtime decision path is unchanged. 174 unit checks, 3 Helm rendering checks and operator build pass. Prometheus evaluation and runtime CI pending; no EV promoted. See docs/PRODUCTION-READINESS.md and docs/reports/2026-09-30-topology-monitoring.md. Previous: 2026-09-27 applied-topology audit on 87f1728 plus working tree: The new round-robin probe changes delivery feedback only. Unknown/current/ahead samples never authorize deletion, promotion, rebuild, failover or completion of data repair; this control's decision rules are unchanged. Probe budgets are 2s/3s/2s plus kill grace; scale latency unmeasured. 165 unit checks and operator/E2E builds pass; runtime CI pending. See docs/reports/2026-09-27-topology-observation.md. Verification unchanged. Previous: 2026-09-27 SAF-09 increment on 92a46c4 plus working tree: No new Pod deletion or restart action. Unconfirmed topology is retried, not converted into destructive repair. 154 unit checks pass; runtime CI pending. See docs/reports/2026-09-27-topology-delivery-retry.md. Verification unchanged. Previous: 2026-09-27 working-tree review on 41db502: No automatic restart is added when memory settings change. Proxy/Down restart decisions remain unchanged. New runtime evidence pending CI; verification unchanged. Previous review: SAF-10 (PR #144): Main.lean/K8sReconciler.lean/Bridge.lean changed (see EV-07); the stuck-Down recovery delete path is unchanged. PARTIAL / UNVERIFIED unchanged."
+      },
+      "status": {
+        "implemented": {
+          "state": "partial"
+        },
+        "ci_passed": {
+          "state": "no",
+          "evidence": "0/1 checks' latest recorded run passed"
+        },
+        "reviewed": {
+          "state": "no",
+          "note": "no independent review recorded (the review field holds change-impact notes)"
+        },
+        "production_approved": {
+          "state": "no",
+          "note": "not approved for production"
+        }
       }
     },
     {
@@ -4442,6 +4640,23 @@
         "commit": "5e7a3df871fd667412b1623b3074b5b8849c2939",
         "date": "2026-09-22",
         "note": "2026-09-30 production-observability increment on 4a516e6 plus working tree: Added fresh-observation topology behind/ahead/unknown gauges, explicit 60s expiry and three diagnostic-only alerts/runbooks; recompare stored numbers with current desired version. No alert invokes recovery. 174 unit checks, 3 Helm rendering checks and operator build pass. Prometheus evaluation and runtime CI pending; no EV promoted. See docs/PRODUCTION-READINESS.md and docs/reports/2026-09-30-topology-monitoring.md. Previous: 2026-09-27 applied-topology audit on 87f1728 plus working tree: Added node-key/UID/version/time diagnostic samples and logs, not exported lag metrics or persistent health certificates. Probe budgets are 2s/3s/2s plus kill grace; scale latency unmeasured. 165 unit checks and operator/E2E builds pass; runtime CI pending. See docs/reports/2026-09-27-topology-observation.md. Verification unchanged. Previous: 2026-09-27 SAF-09 increment on 92a46c4 plus working tree: Broadcast logs distinguish attempts from reply confirmation and retain failures; reachability remains separate from failover decisions. 154 unit checks pass; runtime CI pending. See docs/reports/2026-09-27-topology-delivery-retry.md. Verification unchanged. Previous: 2026-09-27 working-tree review on 41db502: Main logs distinguish writing memory config from live application, which requires restart. Existing health and drain metrics are unchanged. New runtime evidence pending CI; verification unchanged. Previous review: SAF-10 (PR #144): Main.lean gained the continuous-replication eligibility probe and its change-only judgement log lines, and a per-tick probe timing line; existing failure signals unchanged. PARTIAL / UNVERIFIED unchanged."
+      },
+      "status": {
+        "implemented": {
+          "state": "partial"
+        },
+        "ci_passed": {
+          "state": "no",
+          "evidence": "0/1 checks' latest recorded run passed"
+        },
+        "reviewed": {
+          "state": "no",
+          "note": "no independent review recorded (the review field holds change-impact notes)"
+        },
+        "production_approved": {
+          "state": "no",
+          "note": "not approved for production"
+        }
       }
     },
     {
@@ -4506,6 +4721,23 @@
         "commit": "d9d12852a24d8d0e998e1c9faf55202d8e0138c4",
         "date": "2026-09-20",
         "note": "2026-09-30 production-observability increment on 4a516e6 plus working tree: Changed shared metrics/test/runbook surfaces only: topology summary cannot authorize promotion, deletion, rebuild or data-repair completion. This control's runtime decision path is unchanged. 174 unit checks, 3 Helm rendering checks and operator build pass. Prometheus evaluation and runtime CI pending; no EV promoted. See docs/PRODUCTION-READINESS.md and docs/reports/2026-09-30-topology-monitoring.md. Previous: 2026-09-27 applied-topology audit on 87f1728 plus working tree: The new round-robin probe changes delivery feedback only. Unknown/current/ahead samples never authorize deletion, promotion, rebuild, failover or completion of data repair; this control's decision rules are unchanged. Probe budgets are 2s/3s/2s plus kill grace; scale latency unmeasured. 165 unit checks and operator/E2E builds pass; runtime CI pending. See docs/reports/2026-09-27-topology-observation.md. Verification unchanged. Previous: 2026-09-27 SAF-09 increment on 92a46c4 plus working tree: Protocol OK is evidence of node-sync handling, not content equality. Existing data comparisons unchanged. 154 unit checks pass; runtime CI pending. See docs/reports/2026-09-27-topology-delivery-retry.md. Verification unchanged. Previous: 2026-09-27 working-tree review on 41db502: Configuration tests assert admitted CR fields and rendered config, not data equality or live memory consumption; divergence comparison is unchanged. New runtime evidence pending CI; verification unchanged. Previous review: Observation-integrity finding from the SAF-10d crash scenario: the item count after a reopen was an estimate blind to WAL-only keys. Fixed in flared (exact scan at open, boot-time O(n), logged). No change to this control's decision logic. PARTIAL / UNVERIFIED unchanged."
+      },
+      "status": {
+        "implemented": {
+          "state": "partial"
+        },
+        "ci_passed": {
+          "state": "no",
+          "evidence": "0/1 checks' latest recorded run passed"
+        },
+        "reviewed": {
+          "state": "no",
+          "note": "no independent review recorded (the review field holds change-impact notes)"
+        },
+        "production_approved": {
+          "state": "no",
+          "note": "not approved for production"
+        }
       }
     },
     {
@@ -4579,6 +4811,23 @@
         "commit": "c84c8c481fcc4160273e6aa928a45a189c036421",
         "date": "2026-09-24",
         "note": "2026-09-27 working-tree review on 41db502: Added optional CRD/Helm blockCacheSizeMb, writeBufferSizeMb and maxWriteBufferNumber, initial Helm ConfigMap seeding, and migration propagation. These are not an RSS cap and do not resolve async acknowledged-write loss. Runtime RSS/boot validation remains pending. New runtime evidence pending CI; verification unchanged. Previous review: Moved gap → partial: SAF-10 (branch safety/saf-10-wal-replication, PR #144) supplies the design and a working implementation of continuous WAL replication with catch-up semantics, carried by the new controls EV-16..EV-20; this entry keeps the durability claim itself, which is UNCHANGED (asynchronous acknowledgement). Two residuals added: the loss window on master death, and the RocksDB memory floor the scale evaluation surfaced. UNVERIFIED."
+      },
+      "status": {
+        "implemented": {
+          "state": "partial"
+        },
+        "ci_passed": {
+          "state": "no",
+          "evidence": "0/1 checks' latest recorded run passed"
+        },
+        "reviewed": {
+          "state": "no",
+          "note": "no independent review recorded (the review field holds change-impact notes)"
+        },
+        "production_approved": {
+          "state": "no",
+          "note": "not approved for production"
+        }
       }
     },
     {
@@ -4637,6 +4886,23 @@
         "commit": "aaf0b8568b25b1be84c771fc4ea8b1118bee5ff7",
         "date": "2026-09-10",
         "note": "2026-09-27 working-tree review on 41db502: Helm seeds memory options before the first DB open to avoid starting with larger defaults; readiness and pod rollout policies are unchanged. New runtime evidence pending CI; verification unchanged. Previous review: Initial static audit. Existing code and prospective checks are not archived execution evidence; no safety verification is claimed."
+      },
+      "status": {
+        "implemented": {
+          "state": "partial"
+        },
+        "ci_passed": {
+          "state": "no",
+          "evidence": "0/1 checks' latest recorded run passed"
+        },
+        "reviewed": {
+          "state": "no",
+          "note": "no independent review recorded (the review field holds change-impact notes)"
+        },
+        "production_approved": {
+          "state": "no",
+          "note": "not approved for production"
+        }
       }
     },
     {
@@ -4800,6 +5066,23 @@
         "commit": "5e7a3df871fd667412b1623b3074b5b8849c2939",
         "date": "2026-09-22",
         "note": "2026-09-30 production-observability increment on 4a516e6 plus working tree: Added fresh-observation topology behind/ahead/unknown gauges, explicit 60s expiry and three diagnostic-only alerts/runbooks; recompare stored numbers with current desired version. No alert invokes recovery. 174 unit checks, 3 Helm rendering checks and operator build pass. Prometheus evaluation and runtime CI pending; no EV promoted. See docs/PRODUCTION-READINESS.md and docs/reports/2026-09-30-topology-monitoring.md. Previous: 2026-09-27 applied-topology audit on 87f1728 plus working tree: Added node-key/UID/version/time diagnostic samples and logs, not exported lag metrics or persistent health certificates. Probe budgets are 2s/3s/2s plus kill grace; scale latency unmeasured. 165 unit checks and operator/E2E builds pass; runtime CI pending. See docs/reports/2026-09-27-topology-observation.md. Verification unchanged. Previous: 2026-09-27 SAF-09 increment on 92a46c4 plus working tree: Delivery result is aggregate over listed recipients, not a persistent per-Pod applied-generation record; source/data health monitoring unchanged. 154 unit checks pass; runtime CI pending. See docs/reports/2026-09-27-topology-delivery-retry.md. Verification unchanged. Previous: 2026-09-27 working-tree review on 41db502: The read-guard test inspects the replica-local map plus apply counters; monitoring/source attribution production logic is unchanged. New runtime evidence pending CI; verification unchanged. Previous review: SAF-10 (PR #144): Main.lean changed (eligibility probe, read withholding); the follower stats keys (repl_follow_*, repl_applied_lsn, repl_source_lsn*) are new role-aware observations but are not yet exported as metrics with a role label. GAP / UNVERIFIED unchanged."
+      },
+      "status": {
+        "implemented": {
+          "state": "partial"
+        },
+        "ci_passed": {
+          "state": "yes",
+          "evidence": "1/1 checks' latest recorded run passed"
+        },
+        "reviewed": {
+          "state": "no",
+          "note": "no independent review recorded (the review field holds change-impact notes)"
+        },
+        "production_approved": {
+          "state": "no",
+          "note": "not approved for production"
+        }
       }
     },
     {
@@ -4855,7 +5138,8 @@
         "2026-10-03 (PR run 37081571564 on 74db950), classified as HARNESS: every step of the enablement passed and only the final 'no failover lines' filter failed, matching 'detected ' in the grace-period line ('dead-node detection'); the filter now matches 'dead nodes:'. Measured, one run on kind: the legacy replica was idle with repl_last_lsn 4 (from its initial copy; legacy forwards do not advance it) against master latest 204. Identity forwarding on: 100 writes, items equal, cursor still 4. Following on: states idle → following, NO rebuild (reconstruction_started 1→1); it caught up from position 4 to the master's 304 through the WAL, re-applying batches the legacy forwards had already applied, and items and sampled values stayed equal. 100 writes while following, 0 dropped forwards. Rollback: follow off, 50 writes, identity off, 50 writes; items 500 equal, values equal, replica idle, no rebuild; master unchanged. Caveat for production: the catch-up starts from the replica's last copy position, so it needs the master's WAL back to that point; if that WAL was purged the replica will declare lsn_purged and be rebuilt.",
         "2026-10-03 (PR run 37084337267 on 61326a2, all 8 legs green): enablement E2E PASS with the same measurements as 37081571564 (idle → following, no rebuild, catch-up from position 4 to 304, items 500 equal after the rollback, master unchanged, 0 failover/promotion lines). Two runs on kind. Not covered: enablement where the master's WAL since the replica's last copy is already purged (expected: one rebuild per replica, RUNBOOK #enable-follow); a cluster with several partitions.",
         "2026-10-03 (PR run 37103800886): enablement after a purged WAL PASS. Legacy PVC cluster, 4 MB write buffer, WAL TTL 60 s, ~60 MB written: on enabling following the replica went idle → needs_rebuild(lsn_purged) → idle(stopped) → following, rebuilt exactly once (reconstruction_started 1→2), 1300 items equal, sampled values equal, master unchanged. Confirms RUNBOOK #enable-follow: on a cluster whose WAL no longer reaches back to the replica's last copy, enablement costs one rebuild per replica.",
-        "2026-10-03 (PR run 37107011336): live enablement on 2p x 2r PASS — both replicas idle → following, no rebuild on either (WAL still covered their copy positions), each with its own partition's source epoch; 500 keys (P0 238, P1 262), each replica equal to its master, sampled values equal, masters unchanged."
+        "2026-10-03 (PR run 37107011336): live enablement on 2p x 2r PASS — both replicas idle → following, no rebuild on either (WAL still covered their copy positions), each with its own partition's source epoch; 500 keys (P0 238, P1 262), each replica equal to its master, sampled values equal, masters unchanged.",
+        "2026-10-05 (PR run 37268848902 on 05564e6, attempt 1), classification PENDING: enablement after a purged WAL failed — the replica declared needs_rebuild(lsn_purged) and the operator logged it UNFIT, but no rebuild started within 420 s (reconstruction_started 1→1). The same test passed on 9b11cc3, 467e947 and fa92582. The 80-line diagnostic tail no longer showed whether the operator requested the rebuild or a ledger gate held it; the test now prints the operator's REPLICA REPAIR / ledger lines and the ledger on failure. The failed leg was re-run on the same commit."
       ],
       "code": [
         {
@@ -5480,6 +5764,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of 1c861e8; continuous-replication-multipart-enable",
           "result": "pass",
           "report": "docs/reports/2026-10-03-ci-37107011336-failover-data-job.log"
+        },
+        {
+          "check": "CHECK-16-enablepurged",
+          "commit": "2f974651848df855096eeca9aaf44527d8f9c57d",
+          "date": "2026-10-05",
+          "command": "GitHub Actions e2e-tests.yaml pull_request — PR #144 merge revision of 05564e6, attempt 1; topology leg FAILED continuous-replication-enable-purged (other legs green)",
+          "result": "fail",
+          "report": "docs/reports/2026-10-05-ci-37268848902-topology-job.log"
         }
       ],
       "tasks": [
@@ -5489,6 +5781,23 @@
         "commit": "6e757cbbba2c73eb9113d7fc8fd36ba36d124a8f",
         "date": "2026-10-01",
         "note": "Long-outage evaluation complete on CI (runs 1-3): retained-WAL catch-up from the cursor (150 MB, 11 s, no rebuild) and the purge → lsn_purged → snapshot rebuild path (59 s) both observed under a production-shaped 256 MB cap; the cap's enforcement is flush-driven, not time-driven. PARTIAL / UNVERIFIED unchanged; production hardware and tmpfs budgets not measured."
+      },
+      "status": {
+        "implemented": {
+          "state": "partial"
+        },
+        "ci_passed": {
+          "state": "partial",
+          "evidence": "5/6 checks' latest recorded run passed"
+        },
+        "reviewed": {
+          "state": "no",
+          "note": "no independent review recorded (the review field holds change-impact notes)"
+        },
+        "production_approved": {
+          "state": "no",
+          "note": "not approved for production"
+        }
       }
     },
     {
@@ -5881,6 +6190,23 @@
         "commit": "e2ca4c6821fa27d935c783aefd814afa3802ff52",
         "date": "2026-09-24",
         "note": "2026-09-27 applied-topology audit on 87f1728 plus working tree: The new round-robin probe changes delivery feedback only. Unknown/current/ahead samples never authorize deletion, promotion, rebuild, failover or completion of data repair; this control's decision rules are unchanged. Probe budgets are 2s/3s/2s plus kill grace; scale latency unmeasured. 165 unit checks and operator/E2E builds pass; runtime CI pending. See docs/reports/2026-09-27-topology-observation.md. Verification unchanged. Previous: 2026-09-27 SAF-09 increment on 92a46c4 plus working tree: WAL cursor/data atomicity unchanged; read-guard E2E retains its no-cursor-progress assertion. 154 unit checks pass; runtime CI pending. See docs/reports/2026-09-27-topology-delivery-retry.md. Verification unchanged. Previous: 2026-09-27 working-tree review on 41db502: No apply/cursor production change. The read-guard test still refuses success if WAL cursor or forwarded-apply counters advance. New runtime evidence pending CI; verification unchanged. Previous review: CI 36228379804 at 0ed3193: selective routing assertion passed but scenario FAILED in cleanup; corrected cleanup to wait for balance 50 recovery before requesting 0, exposing rather than claiming to fix the SAF-09 retransmission residual. Revised E2E pending. 2026-09-26 follow-up on 3cb1d5a plus working-tree test: The added test samples the applied cursor to exclude WAL-delivered data as the cause of a successful read. No new crash-atomicity evidence or production changes. Lean E2E build passed; runtime result pending CI, verification unchanged. Earlier review: Audit follow-up: inspected e2ca4c6 plus working-tree tests/docs. Only shared test sources changed; atomic data/metadata/cursor write path was not modified. No new crash-consistency claim. See docs/reports/2026-09-24-saf10-audit-followups.md; runs are not attributed to an uncommitted SHA, verification remains unverified. Prior assessment: T4 staged end to end (run 9 failed only on the item COUNT, which exposed the estimate-seeded curr_items after a reopen — fixed in this revision; run 10 passes 13/13). The applied position was consistent with the data in both runs. PARTIAL→IMPLEMENTED unchanged as 'implemented'; UNVERIFIED."
+      },
+      "status": {
+        "implemented": {
+          "state": "yes"
+        },
+        "ci_passed": {
+          "state": "yes",
+          "evidence": "2/2 checks' latest recorded run passed"
+        },
+        "reviewed": {
+          "state": "no",
+          "note": "no independent review recorded (the review field holds change-impact notes)"
+        },
+        "production_approved": {
+          "state": "no",
+          "note": "not approved for production"
+        }
       }
     },
     {
@@ -5920,7 +6246,8 @@
         "2026-10-04, found by reading pf-dev (read-only) and the code: a physical reseed stages the source's copy in snapshot.recv.tmp NEXT TO the replica's own and swaps at the end, so a live rebuild needs room for two copies, with no free-space check. On tmpfs that room is RAM charged to the container's memory cgroup: pf-dev's replica holds 5.6 GB in an 8Gi pod (tmpfs sizeLimit = memory limit = 8Gi, container already at 6.67 GB on the master), so any live rebuild there would be OOM-killed mid-transfer on every retry. Fix: before staging (the truncate window — slave, source reachable and newer; the fallback truncates anyway), flared compares the local copy (+10% +64 MiB) with the space available (filesystem free and, on tmpfs, cgroup memory.max − memory.current − 256 MiB) and, when two copies do not fit, discards the stale copy with hard_reset() first (rocksdb_rebuild_stale_discarded). Cost: during the transfer the replica holds nothing; if the source dies then, that stale copy is no longer a last-resort partial copy. Peak is still one full copy plus flared: a tmpfs sized below ~1.1× data + flared + 256 MiB cannot be rebuilt at all. CI pending.",
         "2026-10-04 (PR run 37135485637 on 467e947, all 8 legs green; nix-linux 37135485646 green): space-aware rebuild PASS. tmpfs = memory limit = 384Mi; the replica held 136 MB (2,550 keys, ~120 MB incompressible). On enabling following it went idle → needs_rebuild(lsn_purged) → following; flared logged 'the new copy will not fit next to ours (local copy 133278373 bytes, available 0 incl. memory headroom on tmpfs) -> discarding this replica's stale copy before staging'; rocksdb_rebuild_stale_discarded 0→1, snapshot bootstraps 1→2, container restarts 0→0; items and sampled values equal; master unchanged. The cgroup-headroom path decided (available 0), not the filesystem free space.",
         "2026-10-05, observed LIVE on pf-dev during the rc56 → rc64 roll (moc2-k8s#9362, test data), classified as FUNCTIONAL (flared, mixed-version upgrade): the new rc64 replica (nodes-1, empty tmpfs) pulled a snapshot from the rc56 master; the checkpoint carries no source epoch (rc56 predates epochs) and swap_in_snapshot refused it — but only AFTER renaming it over the local DB. The replica kept the source's ~5 GB, the fallback truncate (a key-by-key delete) freed no space, the full dump wrote a second copy, and the container was OOMKilled (exit 137) on every retry; on restart the interrupted-restore sentinel discarded the DB and the cycle repeated (2 restarts in 15 min). The StatefulSet roll stalled with nodes-0 still rc56 and serving. No E2E had rolled a running cluster from a released version. Fix: the source-epoch check moved into the read-only pre-swap probe (refused before the point of no return, local DB untouched), and the snapshot client removes its staging dir after any failed or refused bootstrap. E2E continuous-replication-upgrade starts on the released rc56 images and rolls to the build under test on tmpfs = memory limit. CI pending; pf-dev to be fixed by the next rc.",
-        "2026-10-05 (PR run 37265042480 on fa92582), classified as HARNESS: the fix held — the rc-test replica logged 'the staged checkpoint carries no source epoch ... refusing BEFORE the swap; the local DB is untouched', fell back to truncate + full dump (2,450 items), went Active, and the roll completed in 70 s. The test failed its no-restart assertion: the new replica exited 255 about one second after start, three times, then started. The test had rolled the operator and the StatefulSet at the same moment; flared exits at startup when it cannot register with the operator (cluster.cc startup_node, 'failed to connect to index server'), so it crash-looped until the new operator was up. Not OOM (last termination 'Error', exit 255). On pf-dev the operator was Ready ~40 s before the replica rolled (60 s drain). The test now rolls the operator first, waits until it answers node sync, then rolls the StatefulSet, and additionally fails on any OOMKilled termination. Re-run pending."
+        "2026-10-05 (PR run 37265042480 on fa92582), classified as HARNESS: the fix held — the rc-test replica logged 'the staged checkpoint carries no source epoch ... refusing BEFORE the swap; the local DB is untouched', fell back to truncate + full dump (2,450 items), went Active, and the roll completed in 70 s. The test failed its no-restart assertion: the new replica exited 255 about one second after start, three times, then started. The test had rolled the operator and the StatefulSet at the same moment; flared exits at startup when it cannot register with the operator (cluster.cc startup_node, 'failed to connect to index server'), so it crash-looped until the new operator was up. Not OOM (last termination 'Error', exit 255). On pf-dev the operator was Ready ~40 s before the replica rolled (60 s drain). The test now rolls the operator first, waits until it answers node sync, then rolls the StatefulSet, and additionally fails on any OOMKilled termination. Re-run pending.",
+        "2026-10-05 (PR run 37268848902 on 05564e6): upgrade E2E PASS — released rc56 images rolled to the build under test on tmpfs = memory limit = 384Mi in 35 s, operator first; flared container restarts 0/0, no OOMKilled termination; the new replica logged refusing the epoch-less snapshot BEFORE the swap and rebuilt by full dump; 2,450 items kept, 20 new writes stored. This is the path that stalled the pf-dev rc56 → rc64 roll."
       ],
       "code": [
         {
@@ -6733,6 +7060,14 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request — PR #144 merge revision of fa92582; repair leg FAILED continuous-replication-upgrade (the other 7 legs passed; nix-linux 37265042504 green incl. the extended cutter refusal test)",
           "result": "fail",
           "report": "docs/reports/2026-10-05-ci-37265042480-repair-job.log"
+        },
+        {
+          "check": "CHECK-18-upgrade",
+          "commit": "2f974651848df855096eeca9aaf44527d8f9c57d",
+          "date": "2026-10-05",
+          "command": "GitHub Actions e2e-tests.yaml pull_request — PR #144 merge revision of 05564e6, attempt 1; continuous-replication-upgrade in the repair leg (leg green); nix-linux 37268848905 green",
+          "result": "pass",
+          "report": "docs/reports/2026-10-05-ci-37268848902-repair-job.log"
         }
       ],
       "tasks": [
@@ -6742,6 +7077,23 @@
         "commit": "e2ca4c6821fa27d935c783aefd814afa3802ff52",
         "date": "2026-09-24",
         "note": "2026-09-30 production-observability increment on 4a516e6 plus working tree: Changed shared metrics/test/runbook surfaces only: topology summary cannot authorize promotion, deletion, rebuild or data-repair completion. This control's runtime decision path is unchanged. 174 unit checks, 3 Helm rendering checks and operator build pass. Prometheus evaluation and runtime CI pending; no EV promoted. See docs/PRODUCTION-READINESS.md and docs/reports/2026-09-30-topology-monitoring.md. Previous: 2026-09-27 applied-topology audit on 87f1728 plus working tree: The new round-robin probe changes delivery feedback only. Unknown/current/ahead samples never authorize deletion, promotion, rebuild, failover or completion of data repair; this control's decision rules are unchanged. Probe budgets are 2s/3s/2s plus kill grace; scale latency unmeasured. 165 unit checks and operator/E2E builds pass; runtime CI pending. See docs/reports/2026-09-27-topology-observation.md. Verification unchanged. Previous: 2026-09-27 SAF-09 increment on 92a46c4 plus working tree: History loss and reconstruction ownership unchanged. Failed topology delivery remains pending rather than starting a new reconstruction. 154 unit checks pass; runtime CI pending. See docs/reports/2026-09-27-topology-delivery-retry.md. Verification unchanged. Previous: 2026-09-27 working-tree review on 41db502: History-loss classification and repair ownership are unchanged; selective-fault cleanup removes the added operator isolation before recovery. New runtime evidence pending CI; verification unchanged. Previous review: CI 36228379804 at 0ed3193: selective routing assertion passed but scenario FAILED in cleanup; corrected cleanup to wait for balance 50 recovery before requesting 0, exposing rather than claiming to fix the SAF-09 retransmission residual. Revised E2E pending. 2026-09-26 follow-up on 3cb1d5a plus working-tree test: The new selective-fault test keeps the replica role/map intact and restores all firewall rules in finally. No changes to repair ownership logic. Lean E2E build passed; runtime result pending CI, verification unchanged. Earlier review: Audit follow-up: inspected e2ca4c6 plus working-tree tests/docs. Unknown-at-startup read exclusion and the local read guard do not demote the replica, preserving catch-up ownership. needs_rebuild handling is unchanged; amended E2E unexecuted. See docs/reports/2026-09-24-saf10-audit-followups.md; runs are not attributed to an uncommitted SHA, verification remains unverified. Prior assessment: Served-gap handling: op_repl_sync_wal server returns lsn_purged when the oldest served batch is beyond the requested position; storage_rocksdb exposes apply_refused_gap; the follow client maps it to client_lsn_purged (needs_rebuild). Unit: 31 tests / 516 assertions pass incl. the gap test pinning the outcome. The T6 purge suite rerun on this revision is pending; the earlier T6 failures (runs 1-3, CI runs 1-2) were this defect plus a harness escape bug. PARTIAL / UNVERIFIED."
+      },
+      "status": {
+        "implemented": {
+          "state": "yes"
+        },
+        "ci_passed": {
+          "state": "yes",
+          "evidence": "6/6 checks' latest recorded run passed"
+        },
+        "reviewed": {
+          "state": "no",
+          "note": "no independent review recorded (the review field holds change-impact notes)"
+        },
+        "production_approved": {
+          "state": "no",
+          "note": "not approved for production"
+        }
       }
     },
     {
@@ -6845,6 +7197,23 @@
         "commit": "e2ca4c6821fa27d935c783aefd814afa3802ff52",
         "date": "2026-09-24",
         "note": "Audit follow-up: inspected e2ca4c6 plus working-tree tests/docs. Shared test sources extended; ordering, generation and apply-rule production code unchanged. No new replay/deduplication claim. See docs/reports/2026-09-24-saf10-audit-followups.md; runs are not attributed to an uncommitted SHA, verification remains unverified. Prior assessment: Runs on this revision: regression suites replica-repair/operator-restart/failover/read-balance/prepare-evidence 30/30 pass; continuous-replication 12/12 pass (second consecutive full pass, run 8). Previous note: New control from the SAF-10 design (§6); implementation on branch safety/saf-10-wal-replication. Unit evidence to be attached from the RocksDB cutter run on this revision and the flare_unit run; E2E from the continuous-replication suite. Author-run only; nothing verified."
+      },
+      "status": {
+        "implemented": {
+          "state": "partial"
+        },
+        "ci_passed": {
+          "state": "yes",
+          "evidence": "1/1 checks' latest recorded run passed"
+        },
+        "reviewed": {
+          "state": "no",
+          "note": "no independent review recorded (the review field holds change-impact notes)"
+        },
+        "production_approved": {
+          "state": "no",
+          "note": "not approved for production"
+        }
       }
     },
     {
@@ -7246,6 +7615,23 @@
         "commit": "e2ca4c6821fa27d935c783aefd814afa3802ff52",
         "date": "2026-09-24",
         "note": "Audit follow-up: inspected e2ca4c6 plus working-tree tests/docs. Shared test sources extended; positional tombstone GC and its locking are unchanged. No new GC concurrency evidence. See docs/reports/2026-09-24-saf10-audit-followups.md; runs are not attributed to an uncommitted SHA, verification remains unverified. Prior assessment: Runs on this revision: regression suites replica-repair/operator-restart/failover/read-balance/prepare-evidence 30/30 pass; continuous-replication 12/12 pass (second consecutive full pass, run 8). Previous note: New control from the SAF-10 design (§6); implementation on branch safety/saf-10-wal-replication. Unit evidence to be attached from the RocksDB cutter run on this revision and the flare_unit run; E2E from the continuous-replication suite. Author-run only; nothing verified."
+      },
+      "status": {
+        "implemented": {
+          "state": "yes"
+        },
+        "ci_passed": {
+          "state": "yes",
+          "evidence": "2/2 checks' latest recorded run passed"
+        },
+        "reviewed": {
+          "state": "no",
+          "note": "no independent review recorded (the review field holds change-impact notes)"
+        },
+        "production_approved": {
+          "state": "no",
+          "note": "not approved for production"
+        }
       }
     }
   ]

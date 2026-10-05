@@ -358,6 +358,69 @@ private def retryCovers (log : String) (held : Nat) : Bool :=
         | some p, some q => p ≤ held && held ≤ q
         | _, _ => false
 
+-- ─── SAF-09: the persisted node map at startup ───────────────────────────
+
+private def nodeMapCm : String := s!"{cfg.name}-node-map"
+
+private def sh (cmd : String) : IO (Except String String) := do
+  let out ← IO.Process.output { cmd := "sh", args := #["-c", cmd] }
+  if out.exitCode == 0 then return .ok out.stdout else return .error out.stderr
+
+private def scaleOperator (n : Nat) : IO Bool := do
+  discard <| kubectl ["scale", "deployment", cfg.operatorName, "-n", cfg.«namespace», s!"--replicas={n}"]
+  waitForCondition s!"operator scaled to {n}" 180 do
+    let pods ← getPodNames s!"app={cfg.operatorName}" cfg.«namespace»
+    return pods.length == n
+
+/-- Current and previous container logs of every operator pod. -/
+private def operatorLogsAll : IO String := do
+  let pods ← getPodNames s!"app={cfg.operatorName}" cfg.«namespace»
+  let mut acc := ""
+  for pod in pods do
+    for extra in [[], ["--previous"]] do
+      match ← kubectl (["logs", "-n", cfg.«namespace», pod, "--tail=3000"] ++ extra) with
+      | .ok o => acc := acc ++ o
+      | .error _ => pure ()
+  return acc
+
+private def operatorReady : IO Bool := do
+  match ← kubectl ["get", "pods", "-n", cfg.«namespace», "-l", s!"app={cfg.operatorName}", "-o", "jsonpath={.items[*].status.containerStatuses[0].ready}"] with
+  | .ok o => return o.trim == "true"
+  | .error _ => return false
+
+private def readNodeMap : IO (Option String) := do
+  match ← kubectlGetJsonpath "configmap" nodeMapCm cfg.«namespace» "{.data.nodeMap}" with
+  | .ok d => return if d.trim.isEmpty then none else some d
+  | .error _ => return none
+
+/-- Put the node-map ConfigMap back with exactly `data`. -/
+private def writeNodeMap (data : String) : IO (Except String String) := do
+  discard <| kubectl ["delete", "configmap", nodeMapCm, "-n", cfg.«namespace», "--ignore-not-found"]
+  kubectl ["create", "configmap", nodeMapCm, "-n", cfg.«namespace», s!"--from-literal=nodeMap={data}"]
+
+/-- Index of the ClusterRole rule granting configmaps. -/
+private def configmapRuleIndex : IO (Option Nat) := do
+  match ← sh "kubectl get clusterrole flare-operator -o json | jq -r '.rules | to_entries[] | select(.value.resources | index(\"configmaps\")) | .key' | head -1" with
+  | .ok o => return o.trim.toNat?
+  | .error _ => return none
+
+private def setConfigmapResource (i : Nat) (from_ to : String) : IO (Except String String) := do
+  match ← sh s!"kubectl get clusterrole flare-operator -o json | jq -c '.rules[{i}].resources | map(if . == \"{from_}\" then \"{to}\" else . end)'" with
+  | .error e => return .error e
+  | .ok res =>
+    kubectl ["patch", "clusterrole", "flare-operator", "--type=json", "-p",
+      ("[{\"op\":\"replace\",\"path\":\"/rules/" ++ toString i ++ "/resources\",\"value\":" ++ res.trim ++ "}]")]
+
+/-- Stop the operator, apply `fault` to the stored map, start it again, and
+    return (the CRITICAL line seen, whether it ever became Ready). -/
+private def restartUnder (fault : IO Unit) (needle : String) (window : Nat := 120) : IO (Bool × Bool) := do
+  if !(← scaleOperator 0) then return (false, false)
+  fault
+  discard <| kubectl ["scale", "deployment", cfg.operatorName, "-n", cfg.«namespace», "--replicas=1"]
+  let seen ← waitForCondition s!"the operator logs [{needle}]" window do
+    return containsSubstr (← operatorLogsAll) needle
+  return (seen, ← operatorReady)
+
 def suite : TestSuite := {
   name := "topology-authority"
   setup := do
@@ -850,6 +913,84 @@ def suite : TestSuite := {
           -- moving is all this proves.
           if before.all (fun (_, _, b) => b == expected) then
             return .fail s!"precondition: the held change is not visible in the slave balance (before {before}, committed {expected}); the content marker proves nothing"
+          return .pass },
+
+    { name := "SAF-09: the persisted node map is missing at startup while the cluster has history: the operator halts (CRITICAL), never starts from an empty map; flared keeps serving; restoring the ConfigMap brings the operator back on the same map"
+      run := do
+        let settled ← waitForCondition "topology applied before the node-map test" 240 do
+          return (← topologyApplied).toOption.isSome
+        if !settled then return .fail "precondition: topology not applied"
+        match ← readNodeMap with
+        | none => return .fail "precondition: no persisted node map"
+        | some saved =>
+          let ips ← podIps
+          let before ← ips.mapM fun (_, ip) => flaredStat ip "node_map_version"
+          let (halted, ready) ← restartUnder (do discard <| kubectl ["delete", "configmap", nodeMapCm, "-n", cfg.«namespace»])
+            "refusing to start from an empty map"
+          let fresh := containsSubstr (← operatorLogsAll) "node map: starting fresh"
+          -- the data plane keeps its last topology meanwhile
+          let still ← ips.mapM fun (_, ip) => flaredStat ip "node_map_version"
+          let (_, ip0) := ips.head!
+          let served ← memcachedSet cfg.debugPod cfg.«namespace» ip0 cfg.flarePort "nm_probe" "alive"
+          IO.eprintln s!"# map deleted: halted={halted} started fresh={fresh} operator ready={ready}; flared versions {before} -> {still}; set through a flared pod={served}"
+          if fresh then return .fail "the operator started from an empty map although the cluster had history"
+          if !halted then return .fail "the operator did not halt with the CRITICAL line"
+          if ready then return .fail "the operator became Ready without its node map"
+          if still != before then return .fail s!"flared's map changed while the operator was halted ({before} -> {still})"
+          if !served then return .fail "flared stopped serving while the operator was halted"
+          match ← writeNodeMap saved with
+          | .error e => return .fail s!"could not restore the ConfigMap: {e}"
+          | .ok _ => pure ()
+          let back ← waitForCondition "the operator loads the restored map and is Ready" 300 do
+            return (← operatorReady) && containsSubstr (← kubectlLogsLabel s!"app={cfg.operatorName}" cfg.«namespace» 3000) "loaded "
+          IO.eprintln s!"# restored: operator back={back}"
+          if !back then return .fail "the operator did not come back on the restored map"
+          let applied ← waitForCondition "topology applied after the restore" 240 do
+            return (← topologyApplied).toOption.isSome
+          if !applied then return .fail "topology not applied after the restore"
+          return .pass },
+
+    { name := "SAF-09: the persisted node map is corrupt at startup: the operator halts (CRITICAL invalid) instead of loading part of it or starting fresh; restoring it brings the operator back"
+      run := do
+        match ← readNodeMap with
+        | none => return .fail "precondition: no persisted node map"
+        | some saved =>
+          -- drop the version line and break one node line
+          let lines := (saved.splitOn "\n").filter (fun l => !l.startsWith "version=" && l.trim != "")
+          let corrupt := "\n".intercalate (lines.map fun l => l.replace "role=" "role=x")
+          let (halted, ready) ← restartUnder (do discard <| writeNodeMap corrupt) "the persisted node map is invalid"
+          let fresh := containsSubstr (← operatorLogsAll) "node map: starting fresh"
+          IO.eprintln s!"# map corrupted: halted={halted} started fresh={fresh} operator ready={ready}"
+          match ← writeNodeMap saved with
+          | .error e => return .fail s!"could not restore the ConfigMap: {e}"
+          | .ok _ => pure ()
+          if fresh then return .fail "the operator started fresh from a corrupt map"
+          if !halted then return .fail "the operator did not halt on a corrupt map"
+          if ready then return .fail "the operator became Ready on a corrupt map"
+          let back ← waitForCondition "the operator loads the restored map and is Ready" 300 do
+            return (← operatorReady)
+          if !back then return .fail "the operator did not come back on the restored map"
+          return .pass },
+
+    { name := "SAF-09: the node map cannot be read at startup (RBAC forbids configmaps): the operator retries and does not start fresh; once readable it loads the existing map"
+      run := do
+        match ← configmapRuleIndex with
+        | none => return .fail "no ClusterRole rule grants configmaps"
+        | some i =>
+          let before ← readNodeMap
+          let (retried, _) ← restartUnder
+            (do discard <| setConfigmapResource i "configmaps" "configmaps-e2e-revoked")
+            "node map: retrying in 5 s" 90
+          let fresh := containsSubstr (← operatorLogsAll) "node map: starting fresh"
+          discard <| setConfigmapResource i "configmaps-e2e-revoked" "configmaps"
+          IO.eprintln s!"# configmaps forbidden: retried={retried} started fresh={fresh}"
+          if fresh then return .fail "a failed read made the operator start fresh"
+          if !retried then return .fail "the operator did not retry the failed read"
+          let back ← waitForCondition "the operator loads the existing map once readable" 300 do
+            return (← operatorReady) && containsSubstr (← kubectlLogsLabel s!"app={cfg.operatorName}" cfg.«namespace» 3000) "loaded "
+          let after ← readNodeMap
+          IO.eprintln s!"# readable again: operator back={back}; map kept={(before.map (·.length)) == (after.map (·.length)) || after.isSome}"
+          if !back then return .fail "the operator did not load the map once it was readable"
           return .pass }
   ]
 }

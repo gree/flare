@@ -60,6 +60,56 @@ def referenced_paths(control):
         r["path"] for check in control["checks"] for r in check["references"]}
 
 
+IMPL_STAGE = {"gap": "no", "partial": "partial", "implemented": "yes"}
+
+
+def ci_stage(control):
+    """CI stage, DERIVED from recorded runs: the latest result of every check.
+    yes = every check's latest recorded run passed; partial = some; no = none."""
+    ids = [k["id"] for k in control["checks"]]
+    latest = {}
+    for run in control["runs"]:
+        latest[run["check"]] = run["result"]
+    passed = [i for i in ids if latest.get(i) == "pass"]
+    state = "yes" if ids and len(passed) == len(ids) else ("partial" if passed else "no")
+    return state, f"{len(passed)}/{len(ids)} checks' latest recorded run passed"
+
+
+def derive_status(control):
+    """The two derived stages, written by --write and required by the check."""
+    status = control.setdefault("status", {})
+    status["implemented"] = {"state": IMPL_STAGE[control["implementation"]]}
+    state, evidence = ci_stage(control)
+    status["ci_passed"] = {"state": state, "evidence": evidence}
+    status.setdefault("reviewed", {"state": "no", "note": "no independent review recorded (the review field holds change-impact notes)"})
+    status.setdefault("production_approved", {"state": "no", "note": "not approved for production"})
+
+
+def validate_status(c, label):
+    st = c.get("status")
+    require(isinstance(st, dict) and set(st) == {"implemented", "ci_passed", "reviewed", "production_approved"},
+            f"{label}: status needs implemented/ci_passed/reviewed/production_approved (run --write)")
+    require(st["implemented"]["state"] == IMPL_STAGE[c["implementation"]],
+            f"{label}: status.implemented does not match implementation (run --write)")
+    state, evidence = ci_stage(c)
+    require(st["ci_passed"] == {"state": state, "evidence": evidence},
+            f"{label}: status.ci_passed must be derived from the runs (run --write)")
+    rv = st["reviewed"]
+    require(rv["state"] in ("no", "yes"), f"{label}: invalid reviewed state")
+    if rv["state"] == "yes":
+        require(nonempty(rv.get("by", "")) and SHA.fullmatch(str(rv.get("commit", ""))),
+                f"{label}: reviewed=yes needs the reviewer (role) and the full reviewed commit SHA")
+        date(rv["date"])
+    ap = st["production_approved"]
+    require(ap["state"] in ("no", "yes"), f"{label}: invalid production_approved state")
+    if ap["state"] == "yes":
+        require(rv["state"] == "yes" and state == "yes",
+                f"{label}: production approval requires reviewed=yes and ci_passed=yes")
+        require(nonempty(ap.get("by", "")) and nonempty(ap.get("note", "")),
+                f"{label}: production approval needs the approver (role) and a note")
+        date(ap["date"])
+
+
 def validate(data, root):
     require(data["schema_version"] == 1, "unsupported schema_version")
     require(data["hazards"] == [f"H{x}" for x in range(1, 7)], "expected H1–H6")
@@ -134,6 +184,7 @@ def validate(data, root):
             latest = passing.get(c["runs"][-1]["commit"], {}) if c["runs"] else {}
             require(all(latest.get(k) == "pass" for k in check_ids),
                     f"{label}: verified requires all checks passing on one tested revision")
+        validate_status(c, label)
     unique(all_checks, r"CHECK-\d{2}(?:-[a-z0-9]+)?", "check")
     require(covered == uca_ids, "every UCA needs at least one control")
     return ev_ids
@@ -145,8 +196,8 @@ def cell(value):
 
 def render(data):
     lines = [BEGIN, "", "<!-- Generated from safety-evidence.json; do not edit this table. -->",
-             "| Evidence / constraint | Bounded claim | Hazards / UCA | Implementation | Verification | Code / candidate check |",
-             "|---|---|---|---|---|---|"]
+             "| Evidence / constraint | Bounded claim | Hazards / UCA | Implemented | CI passed | Reviewed | Production approved | Verification | Code / candidate check |",
+             "|---|---|---|---|---|---|---|---|---|"]
     for c in data["controls"]:
         ids = f"<a id=\"{c['id'].lower()}\"></a>{c['id']} / {c['constraint']['id']}"
         links = ", ".join(c["hazards"] + c["ucas"])
@@ -155,8 +206,11 @@ def render(data):
             refs.append(f"[code](../{c['code'][0]['path']})")
         if c["checks"][0]["references"]:
             refs.append(f"[check](../{c['checks'][0]['references'][0]['path']})")
+        st = c["status"]
+        ci = f"{st['ci_passed']['state']} ({st['ci_passed']['evidence'].split(' ')[0]})"
         lines.append("| " + " | ".join(map(cell, [ids, c["constraint"]["text"], links,
-                      c["implementation"], c["verification"], ", ".join(refs)])) + " |")
+                      st["implemented"]["state"], ci, st["reviewed"]["state"],
+                      st["production_approved"]["state"], c["verification"], ", ".join(refs)])) + " |")
     return "\n".join(lines + ["", END])
 
 
@@ -208,12 +262,18 @@ def git(root, *args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
-    parser.add_argument("--write", action="store_true", help="regenerate STPA table only")
+    parser.add_argument("--write", action="store_true", help="derive the implemented/CI stages and regenerate the STPA table")
     parser.add_argument("--base", help="base revision to check referenced-file review updates")
     args = parser.parse_args()
     root = args.root.resolve()
     try:
         data = json.loads((root / REGISTER).read_text())
+        if args.write:
+            # The implemented and CI stages are derived, never hand-set: the
+            # register cannot claim a CI pass its runs do not record.
+            for control in data["controls"]:
+                derive_status(control)
+            (root / REGISTER).write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
         validate(data, root)
         document = root / STPA
         updated = sync_document(document.read_text(), data, args.write)

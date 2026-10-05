@@ -52,6 +52,24 @@ class EvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "missing"):
             safety.validate(self.data, ROOT)
 
+    def test_ci_stage_is_derived_not_claimed(self):
+        c = self.data["controls"][0]
+        claimed = "no" if c["status"]["ci_passed"]["state"] == "yes" else "yes"
+        c["status"]["ci_passed"]["state"] = claimed
+        with self.assertRaisesRegex(ValueError, "derived from the runs"):
+            safety.validate(self.data, ROOT)
+
+    def test_review_needs_reviewer_and_commit(self):
+        self.data["controls"][0]["status"]["reviewed"] = {"state": "yes", "date": "2026-10-05"}
+        with self.assertRaisesRegex(ValueError, "reviewer"):
+            safety.validate(self.data, ROOT)
+
+    def test_production_approval_needs_review_and_ci(self):
+        c = self.data["controls"][0]
+        c["status"]["production_approved"] = {"state": "yes", "by": "release owner", "date": "2026-10-05", "note": "x"}
+        with self.assertRaisesRegex(ValueError, "requires reviewed=yes and ci_passed=yes"):
+            safety.validate(self.data, ROOT)
+
     def test_verified_needs_execution_evidence(self):
         self.data["controls"][0]["verification"] = "verified"
         for runs in ([], [self.run_record(result="skip")], [self.run_record(result="fail")]):
@@ -63,6 +81,7 @@ class EvidenceTests(unittest.TestCase):
         c = self.data["controls"][0]
         c["verification"] = "verified"
         c["runs"] = [self.run_record(check=k["id"]) for k in c["checks"]]
+        safety.derive_status(c)   # what --write does after recording runs
         safety.validate(self.data, ROOT)
 
     def test_branch_sha_missing_report_and_static_evidence_rejected(self):
@@ -153,6 +172,7 @@ class EvidenceTests(unittest.TestCase):
         new["controls"][0]["review"]["note"] = "Revalidated clarified scope on new revision."
         new["controls"][0]["runs"].extend(self.run_record(check=k["id"], commit="2" * 40)
                                           for k in new["controls"][0]["checks"])
+        safety.derive_status(new["controls"][0])   # what --write does after recording runs
         safety.validate(new, ROOT)
         safety.check_impact(old, new, set())
 

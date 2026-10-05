@@ -1833,6 +1833,29 @@ private def Ctx.indexSamples (c : Ctx) (secs : Nat) : IO (Bool × Nat × Nat) :=
     IO.sleep 3000
   return (false, closed, missed)
 
+/-- Sample the operator's own /readyz answer (the product signal; the pod's
+    Ready condition lags it by the probe's failure threshold) every 3 s for
+    `secs`: (200 answers, 503 answers, not observed). -/
+private def Ctx.readyzSamples (c : Ctx) (secs : Nat) : IO (Nat × Nat × Nat) := do
+  let mut ok := 0
+  let mut unavailable := 0
+  let mut missed := 0
+  for _ in [0:secs / 3] do
+    match ← kubectl ["get", "pods", "-n", c.cfg.«namespace», "-l", s!"app={c.cfg.operatorName}", "-o", "jsonpath={.items[*].status.podIP}"] with
+    | .ok ips =>
+      match ((ips.trim.splitOn " ").filter (· != "")).head? with
+      | some ip =>
+        match ← execInDebugPod c.cfg.debugPod c.cfg.«namespace» s!"printf 'GET /readyz HTTP/1.0\\r\\n\\r\\n' | nc -w 2 {ip} 8080 | head -1" with
+        | .ok o =>
+          if containsSubstr o " 200" then ok := ok + 1
+          else if containsSubstr o " 503" then unavailable := unavailable + 1
+          else missed := missed + 1
+        | .error _ => missed := missed + 1
+      | none => missed := missed + 1
+    | .error _ => missed := missed + 1
+    IO.sleep 3000
+  return (ok, unavailable, missed)
+
 private def Ctx.opReady (c : Ctx) : IO Bool := do
   match ← kubectl ["get", "pods", "-n", c.cfg.«namespace», "-l", s!"app={c.cfg.operatorName}", "-o", "jsonpath={.items[*].status.containerStatuses[0].ready}"] with
   | .ok o => return o.trim == "true"
@@ -2065,14 +2088,21 @@ def clusterInitSuite : TestSuite := {
         discard <| kubectl ["scale", "deployment", initCfg.operatorName, "-n", ns, "--replicas=1"]
         let notAbsent ← waitForCondition "the operator reports the CR unreadable (not absent)" 120 do
           return containsSubstr (← c.opLogsAll) "NOT treated as absent"
+        -- /readyz is the signal; the pod's Ready condition follows it after
+        -- the probe's failure threshold (3 x 5 s) and still shows the
+        -- standby phase before the lease (a standby is Ready by design) —
+        -- CI 37290297021 sampled it once, too early.
+        let (ok200, n503, missedR) ← c.readyzSamples 30
+        let podNotReady ← waitForCondition "the operator pod turns NotReady" 60 do return !(← c.opReady)
         let logsA ← c.opLogsAll
         let waitedA := containsSubstr logsA "WAITING: FlareCluster"
-        let readyA ← c.opReady
         discard <| ruleSwap "flareclusters-e2e-revoked" "flareclusters"
-        IO.eprintln s!"# CR unreadable: reported not-absent={notAbsent} waited as absent={waitedA} ready={readyA}"
+        IO.eprintln s!"# CR unreadable: reported not-absent={notAbsent} waited as absent={waitedA}; /readyz over 30 s: 200 x{ok200}, 503 x{n503}, not observed x{missedR}; pod NotReady within 60 s={podNotReady}"
         if !notAbsent then return .fail "an unreadable FlareCluster was not reported as a failed read"
         if waitedA then return .fail "an unreadable FlareCluster was treated as absent"
-        if readyA then return .fail "the operator became Ready with its FlareCluster unreadable"
+        if ok200 > 0 then return .fail s!"/readyz answered 200 ({ok200} time(s)) with the FlareCluster unreadable"
+        if n503 == 0 then return .fail s!"/readyz was never observed answering 503 ({missedR} unobserved samples): no evidence of not-Ready"
+        if !podNotReady then return .fail "the operator pod stayed Ready with its FlareCluster unreadable"
         let backA ← waitForCondition "the operator recovers once the CR is readable" 300 do c.opReady
         if !backA then return .fail "the operator did not recover after the CR became readable"
         -- (b) map missing + pod list unreadable. The Lease marker decides

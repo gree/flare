@@ -80,18 +80,32 @@ class EvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "requires reviewed=yes and ci_passed=yes"):
             safety.validate(self.data, ROOT)
 
-    def test_ci_counts_only_runs_at_the_candidate(self):
+    def test_ci_counts_only_ci_runs_of_the_candidate_tree(self):
         head = subprocess.check_output(["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True).strip()
+        tree = subprocess.check_output(["git", "-C", str(ROOT), "rev-parse", "HEAD^{tree}"], text=True).strip()
         cand = {"commit": head, "label": "test"}
         c = self.data["controls"][0]
-        # every check passed — but at a revision that is not the candidate
-        c["runs"] = [dict(self.run_record(check=k["id"], commit="1" * 40)) for k in c["checks"]]
+        url = "https://github.com/example/flare/actions/runs/123"
+        def runs(**extra):
+            return [dict(self.run_record(check=k["id"], commit="1" * 40), **extra) for k in c["checks"]]
+        # passes at an unrelated revision do not count
+        c["runs"] = runs()
         self.assertEqual(safety.ci_stage(c, cand, ROOT)[0], "no")
-        # the same passes recorded for the candidate's head count
-        c["runs"] = [dict(self.run_record(check=k["id"], commit="1" * 40), head=head) for k in c["checks"]]
+        # a branch head alone is not enough: the merge commit may differ
+        c["runs"] = runs(head=head, source="ci", run_url=url)
+        self.assertEqual(safety.ci_stage(c, cand, ROOT)[0], "no")
+        # the tested TREE equal to the candidate's counts — for CI runs only
+        c["runs"] = runs(tree=tree, source="ci", run_url=url)
         self.assertEqual(safety.ci_stage(c, cand, ROOT)[0], "yes")
+        c["runs"] = runs(tree=tree, source="local")
+        self.assertEqual(safety.ci_stage(c, cand, ROOT)[0], "no")
         # without a candidate nothing counts
         self.assertEqual(safety.ci_stage(c, None, ROOT)[0], "no")
+
+    def test_ci_run_needs_actions_url(self):
+        self.data["controls"][0]["runs"].append(dict(self.run_record(), source="ci"))
+        with self.assertRaisesRegex(ValueError, "run_url"):
+            safety.validate(self.data, ROOT)
 
     def test_review_must_be_of_the_candidate(self):
         head = subprocess.check_output(["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True).strip()

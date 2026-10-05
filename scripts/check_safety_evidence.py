@@ -85,23 +85,48 @@ def equivalent(root, rev, candidate):
     return _equiv_cache[key]
 
 
+ACTIONS_URL = re.compile(r"https://github\.com/[^/]+/[^/]+/actions/runs/\d+(?:/attempts/\d+)?")
+_tree_cache = {}
+
+
+def tree_of(root, rev):
+    if rev not in _tree_cache:
+        try:
+            _tree_cache[rev] = git(root, "rev-parse", f"{rev}^{{tree}}").strip()
+        except (subprocess.CalledProcessError, OSError):
+            _tree_cache[rev] = None
+    return _tree_cache[rev]
+
+
+def counts_for(run, candidate, root):
+    """A run counts for the candidate only if it is a CI run (source=ci with
+    an immutable Actions run URL) and the TREE it tested is the candidate's
+    tree — or the tested revision is available locally and differs from the
+    candidate in docs only. A PR job tests a merge commit, so the branch
+    `head` is informational and never enough on its own."""
+    if run.get("source") != "ci" or not ACTIONS_URL.fullmatch(str(run.get("run_url", ""))):
+        return False
+    cand_tree = tree_of(root, candidate["commit"])
+    if run.get("tree") and cand_tree and run["tree"] == cand_tree:
+        return True
+    return equivalent(root, run["commit"], candidate["commit"])
+
+
 def ci_stage(control, candidate=None, root=None):
-    """CI stage for the release CANDIDATE, derived from recorded runs: a run
-    counts only if the revision it tested (its `head`, else its `commit`) is
-    the candidate or a docs-only equivalent of it. yes = every check's latest
-    such run passed; partial = some; no = none."""
+    """CI stage for the release CANDIDATE, derived from recorded runs (see
+    counts_for). yes = every check's latest counting run passed; partial =
+    some; no = none."""
     ids = [k["id"] for k in control["checks"]]
     if not candidate:
         return "no", f"no release candidate set (0/{len(ids)} checks counted)"
     latest = {}
     for run in control["runs"]:
-        tested = run.get("head") or run["commit"]
-        if equivalent(root, tested, candidate["commit"]):
+        if counts_for(run, candidate, root):
             latest[run["check"]] = run["result"]
     passed = [i for i in ids if latest.get(i) == "pass"]
     state = "yes" if ids and len(passed) == len(ids) else ("partial" if passed else "no")
-    return state, (f"{len(passed)}/{len(ids)} checks pass at candidate {candidate.get('label', '?')} "
-                   f"({candidate['commit'][:10]}) or a docs-only equivalent")
+    return state, (f"{len(passed)}/{len(ids)} checks pass in CI runs that tested candidate "
+                   f"{candidate.get('label', '?')} ({candidate['commit'][:10]})'s tree or a docs-only equivalent")
 
 
 def derive_status(control, candidate=None, root=None):
@@ -212,7 +237,15 @@ def validate(data, root):
             require(run["result"] in ("pass", "fail", "skip"), f"{label}: invalid result")
             if "head" in run:
                 require(isinstance(run["head"], str) and SHA.fullmatch(run["head"]),
-                        f"{label}: run head must be the full tested branch SHA")
+                        f"{label}: run head must be a full branch SHA")
+            if "tree" in run:
+                require(isinstance(run["tree"], str) and SHA.fullmatch(run["tree"]),
+                        f"{label}: run tree must be the full tested tree SHA")
+            if "source" in run:
+                require(run["source"] in ("ci", "local"), f"{label}: run source must be ci or local")
+                if run["source"] == "ci":
+                    require(ACTIONS_URL.fullmatch(str(run.get("run_url", ""))),
+                            f"{label}: a ci run needs its immutable GitHub Actions run_url")
             report = run["report"]
             require(nonempty(report), f"{label}: run needs durable report")
             if report.startswith("https://"):

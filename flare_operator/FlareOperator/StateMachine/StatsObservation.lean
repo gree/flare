@@ -73,20 +73,32 @@ def parseCurrItems (out : String) : Items := parseStat out "curr_items"
     possibly passes or an operator restart ago; rebuilding from an empty or
     unreadable master would replace a data-bearing copy with nothing.
     `none` = proceed, `some reason` = defer (the request stays pending). -/
-def repairSourceVerdict (master : Items) (masterLineage replicaLineage : Option String := none) : Option String :=
+def repairSourceVerdict (master : Items) (masterLineage replicaLineage : Option String := none)
+    (masterEpoch replicaEpoch masterEpochReason : Option String := none) : Option String :=
   match master with
   | .unknown => some "the current master's item count is unknown (unreadable stats); not rebuilding a replica from it"
   | .known 0 =>
-    -- EMPTY is not by itself "lost": a master whose every key was deleted
-    -- legitimately is the SAME history the replica follows (same RocksDB
-    -- lineage, rocksdb_master_id), and rebuilding to empty is correct —
-    -- refusing it forever would leave the repair unresolved (e.g. the last
-    -- delete never reached the replica). A wiped or replaced master carries
-    -- a NEW lineage: rebuilding from it would replace data with nothing.
+    -- EMPTY is not by itself "lost", and the RocksDB lineage
+    -- (rocksdb_master_id) alone does not prove a legitimate deletion: a
+    -- promotion can keep master_id while the history changes (cluster.cc
+    -- advances the SOURCE EPOCH for exactly that). Accept an empty source
+    -- only when (a) it is the replica's lineage AND its source epoch is the
+    -- replica's — deleted to empty in the same history — or (b) its epoch
+    -- was advanced by a BULK rewrite (truncate / flush_all: an explicit
+    -- deletion, the legitimate recovery path). An epoch minted by a
+    -- promotion (an empty copy was promoted), by a fresh DB, or for an
+    -- unknown reason defers: rebuilding from it would replace data.
     match masterLineage, replicaLineage with
     | some m, some r =>
-      if !m.isEmpty && m == r then none
-      else some s!"the current master holds 0 keys under a different history (lineage {m}, replica follows {r}): an empty copy that lost its data, not a deleted-to-empty one; not rebuilding the replica from it"
+      if m.isEmpty || m != r then
+        some s!"the current master holds 0 keys under a different lineage ({m} vs the replica's {r}): an empty copy that lost its data, not a deleted-to-empty one; not rebuilding the replica from it"
+      else
+        match masterEpoch, replicaEpoch with
+        | some me, some re =>
+          if !me.isEmpty && me == re then none
+          else if masterEpochReason == some "bulk" then none
+          else some s!"the current master holds 0 keys and its source epoch ({me}) is not the replica's ({re}) and was advanced by {(masterEpochReason.filter (!·.isEmpty)).getD "an unknown event"}, not a bulk rewrite: an empty copy that may have been promoted; not rebuilding the replica from it"
+        | _, _ => some "the current master holds 0 keys and its source epoch cannot be compared with the replica's; not rebuilding the replica from it"
     | _, _ => some "the current master holds 0 keys and its history cannot be compared with the replica's (lineage unreadable or not RocksDB); not rebuilding the replica from it"
   | .known _ => none
 

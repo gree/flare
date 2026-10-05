@@ -84,6 +84,10 @@ public:
 	static const char* const kReplLastLsnKey;
 	static const char* const kReplMasterIdKey;
 	static const char* const kReplSourceEpochKey;
+	// Why the current source epoch was minted: "new" (fresh DB), "promotion",
+	// "bulk" (truncate/flush_all) or "inherited" (snapshot restore). Absent on
+	// DBs written before the reason was recorded (read as unknown).
+	static const char* const kReplSourceEpochReasonKey;
 	static const char* const kReplIncarnationKey;
 	static const char* const kReplRestoreDoneKey;
 
@@ -167,6 +171,7 @@ protected:
 	// Generations (design §3.1). Guarded by _mutex_generations; persisted
 	// under the reserved keys above so they survive a restart unchanged.
 	string _source_epoch;
+	string _source_epoch_reason;
 	string _incarnation;
 	// Set when a generation could not be established or persisted. The
 	// accessors then report "unavailable" and the replication paths refuse:
@@ -448,10 +453,11 @@ public:
 	// reconstruction thread; see _mutex_master_id.
 	string get_master_id() const;
 	string get_source_epoch();
+	string get_source_epoch_reason();
 	string get_incarnation();
 	// Mint, persist and publish a fresh identity. 0 on success; on failure
 	// the generations become UNAVAILABLE (fail closed) and -1 is returned.
-	int advance_source_epoch();
+	int advance_source_epoch(const char* reason = "unspecified");
 	int advance_incarnation();
 	bool generations_broken() const;
 	int set_master_id(const string& id);

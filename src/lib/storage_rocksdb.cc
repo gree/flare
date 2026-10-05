@@ -66,6 +66,7 @@ const char* const storage_rocksdb::kReplLastLsnKey  = "__flare_repl_last_lsn";
 const char* const storage_rocksdb::kReplMasterIdKey = "__flare_repl_master_id";
 // Generations (design §3.1) and the restore completion marker (§3.9(D)).
 const char* const storage_rocksdb::kReplSourceEpochKey = "__flare_repl_source_epoch";
+const char* const storage_rocksdb::kReplSourceEpochReasonKey = "__flare_repl_source_epoch_reason";
 const char* const storage_rocksdb::kReplIncarnationKey = "__flare_repl_incarnation";
 const char* const storage_rocksdb::kReplRestoreDoneKey = "__flare_repl_restore_done";
 // Name of the replication-metadata column family (design §3.7).
@@ -73,7 +74,7 @@ const char* const storage_rocksdb::kReplMetaCfName = "flare_repl_meta";
 
 bool storage_rocksdb::is_reserved_key(const string& key) {
 	return key == kReplLastLsnKey || key == kReplMasterIdKey
-		|| key == kReplSourceEpochKey || key == kReplIncarnationKey
+		|| key == kReplSourceEpochKey || key == kReplSourceEpochReasonKey || key == kReplIncarnationKey
 		|| key == kReplRestoreDoneKey;
 }
 // }}}
@@ -383,6 +384,7 @@ int storage_rocksdb::_load_or_init_generations() {
 	};
 	pthread_rwlock_wrlock(&this->_mutex_generations);
 	int rc = 0;
+	bool minted_epoch_now = false;
 	for (size_t i = 0; i < sizeof(gens) / sizeof(gens[0]); i++) {
 		string value;
 		rocksdb::Status st = this->_db->Get(this->_read_options, gens[i].key, &value);
@@ -401,6 +403,24 @@ int storage_rocksdb::_load_or_init_generations() {
 			break;
 		}
 		*gens[i].slot = minted;
+		if (gens[i].slot == &this->_source_epoch) {
+			minted_epoch_now = true;
+		}
+	}
+	// The epoch's reason: read it back; a freshly minted epoch on a new DB is
+	// "new"; an epoch from before reasons were recorded stays unknown.
+	if (rc == 0) {
+		string why;
+		rocksdb::Status rs = this->_db->Get(this->_read_options, kReplSourceEpochReasonKey, &why);
+		if (rs.ok()) {
+			this->_source_epoch_reason = why;
+		} else if (rs.IsNotFound() && minted_epoch_now) {
+			if (this->_persist_generation(kReplSourceEpochReasonKey, "new") == 0) {
+				this->_source_epoch_reason = "new";
+			}
+		} else {
+			this->_source_epoch_reason = "";
+		}
 	}
 	this->_generations_broken = (rc != 0);
 	const string epoch = this->_source_epoch;
@@ -418,6 +438,13 @@ int storage_rocksdb::_load_or_init_generations() {
 string storage_rocksdb::get_source_epoch() {
 	pthread_rwlock_rdlock(&this->_mutex_generations);
 	string v = this->_generations_broken ? string("") : this->_source_epoch;
+	pthread_rwlock_unlock(&this->_mutex_generations);
+	return v;
+}
+
+string storage_rocksdb::get_source_epoch_reason() {
+	pthread_rwlock_rdlock(&this->_mutex_generations);
+	string v = this->_generations_broken ? string("") : this->_source_epoch_reason;
 	pthread_rwlock_unlock(&this->_mutex_generations);
 	return v;
 }
@@ -446,18 +473,26 @@ bool storage_rocksdb::generations_broken() const {
  *	keep advertising the old one over a changed history. The generations go
  *	UNAVAILABLE, which every replication path refuses on.
  */
-int storage_rocksdb::advance_source_epoch() {
+int storage_rocksdb::advance_source_epoch(const char* reason) {
 	pthread_rwlock_wrlock(&this->_mutex_generations);
 	const string minted = _mint_generation(this->_source_epoch);
 	int r = this->_persist_generation(kReplSourceEpochKey, minted);
 	if (r == 0) {
 		this->_source_epoch = minted;
+		// The reason is evidence, not identity: if it cannot be persisted it is
+		// left UNKNOWN (empty), never guessed, and a repair that needs it defers.
+		const string why = reason != NULL ? reason : "";
+		if (this->_persist_generation(kReplSourceEpochReasonKey, why) == 0) {
+			this->_source_epoch_reason = why;
+		} else {
+			this->_source_epoch_reason = "";
+		}
 	} else {
 		this->_generations_broken = true;
 	}
 	pthread_rwlock_unlock(&this->_mutex_generations);
 	if (r == 0) {
-		log_notice("source epoch advanced to %s (followers of the previous history must rebuild)", minted.c_str());
+		log_notice("source epoch advanced to %s (reason: %s; followers of the previous history must rebuild)", minted.c_str(), reason != NULL ? reason : "");
 	} else {
 		log_err("could not persist the new source epoch: this node's history changed but the identity did not — replication is now UNAVAILABLE here (fail closed)", 0);
 	}
@@ -1249,7 +1284,7 @@ int storage_rocksdb::truncate(int b) {
 	// observe the truncated history still carrying the old epoch. Lock order
 	// is whole-lock -> generations, the same as hard_reset().
 	if (r == 0) {
-		this->advance_source_epoch();
+		this->advance_source_epoch("bulk");
 	}
 
 	if ((b & behavior_skip_lock) == 0) {
@@ -1785,6 +1820,7 @@ int storage_rocksdb::swap_in_snapshot(const string& staging_dir, uint64_t checkp
 			rocksdb::WriteBatch restore;
 			restore.Put(kReplLastLsnKey, lsn_value);
 			restore.Put(kReplSourceEpochKey, inherited_epoch);
+			restore.Put(kReplSourceEpochReasonKey, "inherited");
 			restore.Put(kReplIncarnationKey, next_incarnation);
 			restore.Put(kReplRestoreDoneKey, boost::lexical_cast<string>(checkpoint_seq));
 			rocksdb::Status st = this->_db->Write(wo, &restore);
@@ -1794,6 +1830,7 @@ int storage_rocksdb::swap_in_snapshot(const string& staging_dir, uint64_t checkp
 			}
 			pthread_rwlock_wrlock(&this->_mutex_generations);
 			this->_source_epoch = inherited_epoch;
+			this->_source_epoch_reason = "inherited";
 			this->_incarnation = next_incarnation;
 			this->_generations_broken = false;
 			pthread_rwlock_unlock(&this->_mutex_generations);

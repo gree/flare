@@ -244,6 +244,8 @@ jobs:
           set -euo pipefail
           mkdir -p ci-results
           git rev-parse HEAD > ci-results/tested-sha.txt
+          # the TREE actually tested (a PR run tests a merge commit, not the branch head)
+          git rev-parse 'HEAD^{tree}' > ci-results/tested-tree.txt
           timeout --kill-after=10 120 flare_operator/.lake/build/bin/flare_unit 2>&1 | tee ci-results/flare-unit.log
 
       - name: Create kind cluster
@@ -392,6 +394,8 @@ jobs:
           set -euo pipefail
           mkdir -p ci-results
           git rev-parse HEAD > ci-results/tested-sha.txt
+          # the TREE actually tested (a PR run tests a merge commit, not the branch head)
+          git rev-parse 'HEAD^{tree}' > ci-results/tested-tree.txt
           echo "$EVALUATION" > ci-results/evaluation.txt
           cd flare_operator
           export KUBECONFIG=$HOME/.kube/config

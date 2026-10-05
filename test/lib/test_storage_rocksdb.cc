@@ -1551,6 +1551,28 @@ void test_generations_survive_reopen() {
 	drop_rocksdb(s, wal_master_dir);
 }
 
+// SAF-08 (review 2026-10-05): the epoch records WHY it was minted, so a
+// repair can tell a legitimately emptied source (bulk delete, same history)
+// from an empty copy that was promoted. The reason survives a restart.
+void test_source_epoch_reason_recorded_and_persisted() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	cut_assert_equal_string("new", s->get_source_epoch_reason().c_str());
+	cut_assert_equal_int(0, s->advance_source_epoch("promotion"));
+	cut_assert_equal_string("promotion", s->get_source_epoch_reason().c_str());
+	cut_assert_equal_int(0, storage_set_string(s, "k", "v"));
+	const string before = s->get_source_epoch();
+	cut_assert_equal_int(0, s->truncate(0));
+	cut_assert_equal_string("bulk", s->get_source_epoch_reason().c_str());
+	cut_assert_operator(s->get_source_epoch() != before, ==, true);
+	const string e = s->get_source_epoch();
+	drop_rocksdb_noremove(s);
+
+	s = make_rocksdb(wal_master_dir);
+	cut_assert_equal_string(e.c_str(), s->get_source_epoch().c_str());
+	cut_assert_equal_string("bulk", s->get_source_epoch_reason().c_str());
+	drop_rocksdb(s, wal_master_dir);
+}
+
 // A generation that cannot be persisted must leave the node UNAVAILABLE for
 // replication, not advertising the old identity over changed data.
 void test_generation_persist_failure_is_fail_closed() {

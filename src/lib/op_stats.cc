@@ -251,6 +251,7 @@ int op_stats::_send_stats(thread_pool* req_tp, thread_pool* other_tp, storage* s
 			// Empty means UNAVAILABLE: the node could not establish or persist
 			// its identities and refuses to serve or accept replication.
 			_send_stat("rocksdb_source_epoch"               , rdb->get_source_epoch());
+			_send_stat("rocksdb_source_epoch_reason"        , rdb->get_source_epoch_reason());
 			_send_stat("rocksdb_incarnation"                , rdb->get_incarnation());
 			_send_stat("rocksdb_generations_broken"         , rdb->generations_broken() ? 1 : 0);
 			// Common apply rule (SAF-10b): what each delivery path did.

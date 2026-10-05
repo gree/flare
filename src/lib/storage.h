@@ -327,7 +327,10 @@ public:
 	virtual string get_incarnation() { return ""; }
 	// 0 on success, -1 when the new value could not be persisted. A failure
 	// leaves the node with UNAVAILABLE generations (fail closed).
-	virtual int advance_source_epoch() { return 0; }
+	// `reason` is recorded with the new epoch: "promotion" or "bulk"
+	// (truncate / flush_all). It lets a repair tell a legitimately emptied
+	// source from an empty copy that was promoted (SAF-08).
+	virtual int advance_source_epoch(const char* reason = "unspecified") { (void)reason; return 0; }
 	virtual int advance_incarnation() { return 0; }
 	virtual int regenerate_master_id() { return 0; }
 

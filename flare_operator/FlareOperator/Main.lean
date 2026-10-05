@@ -1409,8 +1409,10 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
                 else match mStats with
                   | .ok out =>
                     let rLineage := match rStats with | .ok ro => statStr ro "rocksdb_master_id" | .error _ => none
+                    let rEpoch := match rStats with | .ok ro => statStr ro "rocksdb_source_epoch" | .error _ => none
                     pure (StatsObservation.repairSourceVerdict (StatsObservation.parseCurrItems out)
-                      (statStr out "rocksdb_master_id") rLineage)
+                      (statStr out "rocksdb_master_id") rLineage
+                      (statStr out "rocksdb_source_epoch") rEpoch (statStr out "rocksdb_source_epoch_reason"))
                   | .error _ => pure (StatsObservation.repairSourceVerdict .unknown)
             match verdict with
             | some why =>

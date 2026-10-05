@@ -1028,17 +1028,26 @@ def checkNodeMapRecovery (ctx : Ctx) : IO Unit := do
 
 def checkRepairSource (ctx : Ctx) : IO Unit := do
   let ok := fun (v : Option String) => v.isNone
+  let v := fun (lm le reason : String) =>
+    StatsObservation.repairSourceVerdict (.known 0) (some lm) (some "L") (some le) (some "E1") (some reason)
   check ctx "SAF-08 repair source: a master holding data is a valid rebuild source"
     (ok (StatsObservation.repairSourceVerdict (.known 5)))
   check ctx "SAF-08 repair source: an unreadable item count defers"
-    (!ok (StatsObservation.repairSourceVerdict .unknown (some "L") (some "L")))
-  check ctx "SAF-08 repair source: an EMPTY master of the SAME history (deleted to empty) is a valid source — the repair resolves"
-    (ok (StatsObservation.repairSourceVerdict (.known 0) (some "lineage-A") (some "lineage-A")))
-  check ctx "SAF-08 repair source: an empty master under a DIFFERENT history (wiped/replaced) defers"
-    (!ok (StatsObservation.repairSourceVerdict (.known 0) (some "lineage-B") (some "lineage-A")))
-  check ctx "SAF-08 repair source: an empty master whose history cannot be compared defers"
-    (!ok (StatsObservation.repairSourceVerdict (.known 0) none (some "lineage-A"))
-      && !ok (StatsObservation.repairSourceVerdict (.known 0) (some "") (some ""))
+    (!ok (StatsObservation.repairSourceVerdict .unknown (some "L") (some "L") (some "E1") (some "E1")))
+  check ctx "SAF-08 repair source: empty, same lineage AND same source epoch (deleted to empty in the same history) is a valid source"
+    (ok (v "L" "E1" "new"))
+  check ctx "SAF-08 repair source: empty, same lineage, epoch advanced by a BULK rewrite (flush_all/truncate) is a valid source"
+    (ok (v "L" "E2" "bulk"))
+  check ctx "SAF-08 repair source: empty, same master_id but epoch advanced by a PROMOTION (an empty copy promoted) defers"
+    (!ok (v "L" "E2" "promotion"))
+  check ctx "SAF-08 repair source: empty, same master_id, epoch changed for an unknown reason (or a fresh/inherited one) defers"
+    (!ok (v "L" "E2" "") && !ok (v "L" "E2" "new") && !ok (v "L" "E2" "inherited")
+      && !ok (StatsObservation.repairSourceVerdict (.known 0) (some "L") (some "L") (some "E2") (some "E1")))
+  check ctx "SAF-08 repair source: empty under a DIFFERENT lineage defers, even after a bulk rewrite"
+    (!ok (v "L2" "E2" "bulk"))
+  check ctx "SAF-08 repair source: empty with an incomparable history (lineage or epoch unreadable) defers"
+    (!ok (StatsObservation.repairSourceVerdict (.known 0) none (some "L"))
+      && !ok (StatsObservation.repairSourceVerdict (.known 0) (some "L") (some "L"))
       && !ok (StatsObservation.repairSourceVerdict (.known 0)))
 
 def checkPodRows (ctx : Ctx) : IO Unit := do

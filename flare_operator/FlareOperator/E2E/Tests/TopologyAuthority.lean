@@ -383,26 +383,39 @@ private def operatorLogsAll : IO String := do
       | .error _ => pure ()
   return acc
 
-/-- The operator's index port (12120) accepts a connection on any operator
-    pod. While the node map is undecided it must not: no flared can register
-    and no topology can be served. Readiness is NOT this signal — a restarted
-    operator is briefly a standby, and a standby is Ready by design. -/
-private def indexServing : IO Bool := do
+/-- One observation of the operator's index port (12120) on every operator
+    pod: `some true` = a probe connected, `some false` = every pod was
+    probed successfully and refused, `none` = NOT OBSERVED (no pod IP, the
+    exec failed, or the probe printed neither). A missed observation is
+    never evidence of a closed port: a sample counts as closed only if the
+    operator's health port (8080, listening from process start) answered in
+    the same probe and 12120 did not. Readiness is not this signal: a
+    restarted operator is briefly a standby, and a standby is Ready. -/
+private def indexState : IO (Option Bool) := do
   match ← kubectl ["get", "pods", "-n", cfg.«namespace», "-l", s!"app={cfg.operatorName}", "-o", "jsonpath={.items[*].status.podIP}"] with
-  | .error _ => return false
+  | .error _ => return none
   | .ok ips =>
-    for ip in (ips.trim.splitOn " ").filter (· != "") do
-      match ← execInDebugPod cfg.debugPod cfg.«namespace» s!"nc -z -w 2 {ip} {cfg.operatorPort} && echo OPEN || echo CLOSED" with
-      | .ok o => if containsSubstr o "OPEN" then return true
-      | .error _ => pure ()
-    return false
+    let ipList := (ips.trim.splitOn " ").filter (· != "")
+    if ipList.isEmpty then return none
+    for ip in ipList do
+      match ← execInDebugPod cfg.debugPod cfg.«namespace» s!"if nc -z -w 2 {ip} 8080; then (nc -z -w 2 {ip} {cfg.operatorPort} && echo OPEN || echo CLOSED); else echo UNREACHABLE; fi" with
+      | .ok o =>
+        if containsSubstr o "OPEN" then return some true
+        else if !containsSubstr o "CLOSED" then return none
+      | .error _ => return none
+    return some false
 
-/-- Sample `indexServing` for `secs` seconds; true if it was ever open. -/
-private def indexEverServed (secs : Nat) : IO Bool := do
+/-- Sample the index for `secs`: (ever open, closed samples, unobserved samples). -/
+private def indexSamples (secs : Nat) : IO (Bool × Nat × Nat) := do
+  let mut closed := 0
+  let mut missed := 0
   for _ in [0:secs / 3] do
-    if ← indexServing then return true
+    match ← indexState with
+    | some true => return (true, closed, missed)
+    | some false => closed := closed + 1
+    | none => missed := missed + 1
     IO.sleep 3000
-  return false
+  return (false, closed, missed)
 
 private def operatorReady : IO Bool := do
   match ← kubectl ["get", "pods", "-n", cfg.«namespace», "-l", s!"app={cfg.operatorName}", "-o", "jsonpath={.items[*].status.containerStatuses[0].ready}"] with
@@ -1035,15 +1048,17 @@ def suite : TestSuite := {
           -- exits (code 2) and restarts, and the restarted process is briefly
           -- a standby, which is Ready by design. What must hold is that it
           -- never serves the index, never starts fresh, writes no map.
-          let served ← indexEverServed 60
+          let (served, closedN, missedN) ← indexSamples 60
           let logs ← operatorLogsAll
           let fresh := containsSubstr logs "node map: starting fresh"
           let mapWritten := (← readNodeMap).isSome
           let historyLine := ((logs.splitOn "\n").find? (containsSubstr · "node map history:")).getD "(none)"
-          IO.eprintln s!"# compound: undecided logged={undecided} started fresh={fresh} index ever served={served} map written={mapWritten} (readiness observed {ready}: a restarted standby is Ready by design)\n# {historyLine.trim}"
+          IO.eprintln s!"# compound: undecided logged={undecided} started fresh={fresh} index ever served={served} (closed in {closedN} observed samples, {missedN} not observed) map written={mapWritten} (readiness observed {ready}: a restarted standby is Ready by design)\n# {historyLine.trim}"
           if fresh then return .fail "the operator started from an empty map although the past could not be observed"
           if !undecided then return .fail "the operator did not report that a first build cannot be told from a loss"
           if served then return .fail "the operator served the index without its node map"
+          -- a closed port must be OBSERVED: an unobserved sample is no evidence
+          if closedN == 0 then return .fail s!"the index was never observed closed ({missedN} unobserved samples): no evidence it was not served"
           if mapWritten then return .fail "a node map was written without a decision"
           match ← writeNodeMap saved with
           | .error e => return .fail s!"could not restore the ConfigMap: {e}"

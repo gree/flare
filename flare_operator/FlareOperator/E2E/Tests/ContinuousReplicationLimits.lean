@@ -1475,20 +1475,35 @@ private def initCfg : ClusterConfig := {
   deferClusterCr := true
 }
 
-/-- The operator's index port accepts a connection (sampled for `secs`). A
-    retrying operator exits and restarts and is briefly a Ready standby, so
-    readiness cannot show "took control"; an open index port can. -/
-private def Ctx.indexEverServed (c : Ctx) (secs : Nat) : IO Bool := do
+/-- Sample the operator's index port for `secs`: (ever open, observed
+    closed, not observed). Only a successful probe that refused counts as
+    closed — and only when the health port (8080) answered in the same probe,
+    so an unreachable pod is not mistaken for a closed index; no pod IP, a
+    failed exec, an unreachable pod or an unparsable reply is NOT observed. -/
+private def Ctx.indexSamples (c : Ctx) (secs : Nat) : IO (Bool × Nat × Nat) := do
+  let mut closed := 0
+  let mut missed := 0
   for _ in [0:secs / 3] do
-    match ← kubectl ["get", "pods", "-n", c.cfg.«namespace», "-l", s!"app={c.cfg.operatorName}", "-o", "jsonpath={.items[*].status.podIP}"] with
-    | .ok ips =>
-      for ip in (ips.trim.splitOn " ").filter (· != "") do
-        match ← execInDebugPod c.cfg.debugPod c.cfg.«namespace» s!"nc -z -w 2 {ip} {c.cfg.operatorPort} && echo OPEN || echo CLOSED" with
-        | .ok o => if containsSubstr o "OPEN" then return true
-        | .error _ => pure ()
-    | .error _ => pure ()
+    let state : Option Bool ← do
+      match ← kubectl ["get", "pods", "-n", c.cfg.«namespace», "-l", s!"app={c.cfg.operatorName}", "-o", "jsonpath={.items[*].status.podIP}"] with
+      | .error _ => pure none
+      | .ok ips =>
+        let ipList := (ips.trim.splitOn " ").filter (· != "")
+        if ipList.isEmpty then pure none
+        else
+          let mut st : Option Bool := some false
+          for ip in ipList do
+            if st == some false then
+              match ← execInDebugPod c.cfg.debugPod c.cfg.«namespace» s!"if nc -z -w 2 {ip} 8080; then (nc -z -w 2 {ip} {c.cfg.operatorPort} && echo OPEN || echo CLOSED); else echo UNREACHABLE; fi" with
+              | .ok o => st := if containsSubstr o "OPEN" then some true else if containsSubstr o "CLOSED" then some false else none
+              | .error _ => st := none
+          pure st
+    match state with
+    | some true => return (true, closed, missed)
+    | some false => closed := closed + 1
+    | none => missed := missed + 1
     IO.sleep 3000
-  return false
+  return (false, closed, missed)
 
 private def Ctx.opReady (c : Ctx) : IO Bool := do
   match ← kubectl ["get", "pods", "-n", c.cfg.«namespace», "-l", s!"app={c.cfg.operatorName}", "-o", "jsonpath={.items[*].status.containerStatuses[0].ready}"] with
@@ -1633,15 +1648,16 @@ def clusterInitSuite : TestSuite := {
           deployDeferredCluster initCfg false
           let undecided ← waitForCondition "the operator refuses to tell a first build from a loss" 180 do
             return containsSubstr (← c.opLogsAll) "cannot be told from a loss"
-          let served ← c.indexEverServed 60
+          let (served, closedN, missedN) ← c.indexSamples 60
           let logs ← c.opLogsAll
           let fresh := containsSubstr logs "node map: starting fresh"
           let ready ← c.opReady
           let cmBack := (← kubectlGetJsonpath "configmap" cmName ns "{.metadata.name}").toOption.isSome
-          IO.eprintln s!"# CR recreated without approval: waited first={waiting}; undecided={undecided}; started fresh={fresh}; index ever served={served}; a node map was written={cmBack} (readiness observed {ready}: a restarted standby is Ready by design)"
+          IO.eprintln s!"# CR recreated without approval: waited first={waiting}; undecided={undecided}; started fresh={fresh}; index ever served={served} (closed in {closedN} observed samples, {missedN} not observed); a node map was written={cmBack} (readiness observed {ready}: a restarted standby is Ready by design)"
           if fresh then return .fail "the operator initialised a cluster over old PVCs without approval"
           if !undecided then return .fail "the operator did not report that it cannot tell a first build from a loss"
           if served then return .fail "the operator served the index (took control) without its map or an approval"
+          if closedN == 0 then return .fail s!"the index was never observed closed ({missedN} unobserved samples): no evidence control was not taken"
           if cmBack then return .fail "a node map was written without a decision"
           discard <| kubectl ["create", "configmap", cmName, "-n", ns, s!"--from-literal=nodeMap={saved}"]
           let back ← waitForCondition "the operator loads the restored map and both copies are back" 480 do

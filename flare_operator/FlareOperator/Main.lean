@@ -1325,6 +1325,26 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
       let led0 ← ledgerRef.get
       let preState ← stateRef.get
       let (led1, voided) := ReplicaRepair.resolve led0 preState
+      -- SAF-10c: a follower that declared needs_rebuild (history purged
+      -- past its position, source epoch changed, integrity failure) takes
+      -- the rebuild path even though no drop was counted for it — requested
+      -- EVERY pass from this pass's classification, against its partition's
+      -- current master, so the plan below can act on it at once.
+      let mut led1 := led1
+      for (key, why) in (← followRef.get).classified.needsRebuild do
+        match preState.lookupNode key with
+        | some n =>
+          if n.role == FlareRole.Slave then
+            match preState.nodeMap.find? (fun kv =>
+                kv.2.role == FlareRole.Master && kv.2.state == FlareState.Active && kv.2.partition == n.partition) with
+            | some (mKey, _) =>
+              let (led', added) := ReplicaRepair.requestRebuild led1 mKey key
+              if added then
+                led1 := led'
+                metrics.replicaRepairRequested.inc
+                IO.eprintln s!"[flare-operator] REPLICA REPAIR requested by the follower: {key} declared needs_rebuild ({why}) — its continuous stream cannot resume from its position, so it takes the rebuild path (demote → hold → reseat → reconstruction) under master {mKey}"
+            | none => pure ()
+        | none => pure ()
       for e in voided do
         IO.eprintln s!"[flare-operator] CRITICAL: replica repair VOIDED for {e.dest}: it is now a MASTER, so the {e.drops} write(s) master {e.masterKey} dropped to it are missing on a primary and demotion cannot recover them"
         metrics.replicaRepairVoided.inc
@@ -1899,21 +1919,11 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
                   IO.eprintln s!"[flare-operator] REPLICA REPAIR requested and HELD: master {mKey} dropped {d} more write(s) to {dest}; its follower state could not be read — held until it can (no demotion on an unreadable probe)"
                 | some false =>
                   IO.eprintln s!"[flare-operator] REPLICA REPAIR requested: master {mKey} dropped {d} more write(s) to {dest} — that replica is behind and nothing else repairs it"
-              -- SAF-10c: a follower of THIS partition that declared
-              -- needs_rebuild (history purged past its position, source
-              -- epoch changed, integrity failure) takes the rebuild path
-              -- even though no drop was ever counted for it. Idempotent
-              -- per node; an owned entry is handed over by advanceOwned.
-              for (key, why) in (← followRef.get).classified.needsRebuild do
-                let samePartition := match finalState.nodeMap.lookup key with
-                  | some n => n.role == FlareRole.Slave && n.partition == mNode.partition
-                  | none => false
-                if samePartition then
-                  let (led', added) := ReplicaRepair.requestRebuild led2 mKey key
-                  if added then
-                    led2 := led'
-                    metrics.replicaRepairRequested.inc
-                    IO.eprintln s!"[flare-operator] REPLICA REPAIR requested by the follower: {key} declared needs_rebuild ({why}) — its continuous stream cannot resume from its position, so it takes the rebuild path (demote → hold → reseat → reconstruction) under master {mKey}"
+              -- (A follower's needs_rebuild declaration is requested in the
+              -- per-pass ledger step, not here: this block runs once per
+              -- probe slot, 300 s by default, which delayed the rebuild of a
+              -- replica that cannot resume by up to five minutes — CI
+              -- 37268848902.)
               if !led0.initialized then
                 IO.eprintln s!"[flare-operator] replica repair ledger initialized from {mKey}: {drops.length} destination counter(s) recorded as baseline, none attributed"
               ledgerRef.set led2

@@ -1521,7 +1521,8 @@
         "Until eb2ba17 the drop observation required the REPLICA's stats read to succeed as well as the master's, so an unreadable replica hid the master's drop counter for its partition (found by the SAF-10d stats-fetch-failure scenario, run 4). Fixed: the observation needs the master's reply only. E2E confirmation pending (run 5).",
         "REGRESSION (found by rerunning replica-repair on tch after SAF-10c, fixed 2379cff): FollowReading treated a complete stats reply WITHOUT follower keys as unreadable, so every drop on a non-RocksDB replica was held as 'follower state unknown' and never repaired. Unknown now means a failed or truncated read only. The rerun of the non-WAL suites on the fix is pending.",
         "2026-10-02 (CI 36882921953), classified as HARNESS: replica-repair test 4 failed 'completion was logged but no demotion was observed'. The operator log shows the new process demoted, saw the demotion confirmed and completed, in that order. The completion wait began only after the new process had finished the whole repair, about 60 s earlier than in the passing runs (55-65 s). Cause in the harness: `kubectl rollout status` returns while the old operator pod is still terminating, so the 'restores the HELD request' check passed on the OLD pod's log; the completion wait then read a 2000-line tail. Tests 5 and 6 failed on preconditions left by 4. Fix: every operator rollout in the suite waits until the previous pod is gone, and the completion wait reads the full log. Re-run 36887321961: replica-repair 15/15; the previous operator pod outlived `rollout status` by 35 s at every rollout, and the HELD-restore check now takes 15 s on the new pod instead of passing at once on the old one.",
-        "2026-10-02 (PR run 37007523101 on b01ff4d), classified as FUNCTIONAL (operator), fixed in 713bf8c: after the kill -9 in continuous-replication test 14 the replica restarted on its PVC, followed and matched the master (items 356/356), but the ledger entry (an ordinary request, no hold) never closed within 300 s. The replica's flared log shows why: its reconstruction finished, then activate_node was refused 30 times as 'node state: transition 0→0 not allowed', the attempt was failed and the whole reconstruction restarted, up to attempt 7. The operator already had the node Active: either its PREPARE-REPAIR activated it from sync evidence while flared was finishing, or an earlier activate was applied and its reply lost. Since the reconstruction never returned success, the 'reconstruction newer than at reseat SUCCEEDED' completion the entry waits for never came. Test 15 (planned promotion, 'did not advance the source epoch') then promoted the same node while it was still inside that retry loop, so it is a consequence of the same defect. Fix: Reconciler.reconcileStep acknowledges an Active/Ready report for a node that is already Active without changing the state (IDEMPOTENT RE-ACTIVATION); Down and other states are still refused. flare_unit checkReactivation (4 cases) and GeneralSafety's CLE proof cover it; re-run PASS: PR run 37014778271 (merge revision 35818b4 of 713bf8c), all 8 legs green, continuous-replication tests 14 and 15 pass and the 'not allowed' refusal does not occur in the leg's log. One passing run does not show the race is gone, only that the fixed path works. The 9 earlier PR runs passed this test, so the race is intermittent."
+        "2026-10-02 (PR run 37007523101 on b01ff4d), classified as FUNCTIONAL (operator), fixed in 713bf8c: after the kill -9 in continuous-replication test 14 the replica restarted on its PVC, followed and matched the master (items 356/356), but the ledger entry (an ordinary request, no hold) never closed within 300 s. The replica's flared log shows why: its reconstruction finished, then activate_node was refused 30 times as 'node state: transition 0→0 not allowed', the attempt was failed and the whole reconstruction restarted, up to attempt 7. The operator already had the node Active: either its PREPARE-REPAIR activated it from sync evidence while flared was finishing, or an earlier activate was applied and its reply lost. Since the reconstruction never returned success, the 'reconstruction newer than at reseat SUCCEEDED' completion the entry waits for never came. Test 15 (planned promotion, 'did not advance the source epoch') then promoted the same node while it was still inside that retry loop, so it is a consequence of the same defect. Fix: Reconciler.reconcileStep acknowledges an Active/Ready report for a node that is already Active without changing the state (IDEMPOTENT RE-ACTIVATION); Down and other states are still refused. flare_unit checkReactivation (4 cases) and GeneralSafety's CLE proof cover it; re-run PASS: PR run 37014778271 (merge revision 35818b4 of 713bf8c), all 8 legs green, continuous-replication tests 14 and 15 pass and the 'not allowed' refusal does not occur in the leg's log. One passing run does not show the race is gone, only that the fixed path works. The 9 earlier PR runs passed this test, so the race is intermittent.",
+        "2026-10-05 SAF-08: a replica-repair demotion rebuilds the copy from the partition's CURRENT master, which may not be the one that counted the drops and was never checked; it is now deferred (request kept) unless that master is known to hold data, and applied with an atomic regEpoch re-check (a TCP re-registration between read and write used to be overwritten)."
       ],
       "code": [
         {
@@ -3906,7 +3907,8 @@
       ],
       "residual_risks": [
         "Parallel string lists conflate observations; nodeName is unused; Ready does not prove data health.",
-        "FINDING 2026-10-02 (CI 36914077401, functional, fixed; PR run 36918285987 green incl. prepare-evidence): the NotReady streak that turns a present-but-NotReady pod into a dead node was counted regardless of the node's state. A node is NotReady for its whole Prepare/reconstruction (sync-gated readiness), so it carried a long streak and was declared dead in the very pass it became Active, before its pod could observe the activation. Seen in prepare-evidence: PREPARE-REPAIR activated the slave, the wall-clock grace ended 124 s in, and the next pass failed the slave over (it was masked before by the longer cycle-based grace and by the breaker tripping at 1 of 2). Fix: K8sReconciler.unreadyStreaks counts only while the node is an Active master/slave in the committed map; a Prepare node's streak restarts at 0. Three unit cases."
+        "FINDING 2026-10-02 (CI 36914077401, functional, fixed; PR run 36918285987 green incl. prepare-evidence): the NotReady streak that turns a present-but-NotReady pod into a dead node was counted regardless of the node's state. A node is NotReady for its whole Prepare/reconstruction (sync-gated readiness), so it carried a long streak and was declared dead in the very pass it became Active, before its pod could observe the activation. Seen in prepare-evidence: PREPARE-REPAIR activated the slave, the wall-clock grace ended 124 s in, and the next pass failed the slave over (it was masked before by the longer cycle-based grace and by the breaker tripping at 1 of 2). Fix: K8sReconciler.unreadyStreaks counts only while the node is an Active master/slave in the committed map; a Prepare node's streak restarts at 0. Three unit cases.",
+        "2026-10-05 SAF-08 audit (docs/reports/2026-10-05-saf08-copy-identity-audit.md): apart from the empty-master delete (UID precondition), no delete or promote decision bound its evidence to a pod UID or flared process; protection was only the re-registration (regEpoch) merge, which misses a replaced pod that has not registered yet. Fixed: (a) an Active slave whose pod is not Ready is not a promotion candidate in failover, drain, refill or the zombie guard (readiness is sync-gated, so a same-name replacement is never Ready before it registers); (b) replica-repair demotion is deferred unless the partition's CURRENT master is known to hold data, and the demotion is an atomic re-check of the entry (regEpoch); (c) PREPARE-REPAIR re-reads the slave's boot id just before activating and requires an unchanged regEpoch. Open: the self-heal's validated successor is not pinned for the following drain; stuck-Down restart deletes by name on stale state; data-bearing evidence is not UID-bound and all-probes-failed can crown an empty lastMasterOf holder; the first follow reading after an operator restart is never marked as a process change; the zone-repair swap. CI pending."
       ],
       "code": [
         {
@@ -3928,6 +3930,10 @@
         {
           "path": "flare_operator/FlareOperator/StateMachine/K8sReconciler.lean",
           "symbol": "unreadyStreaks"
+        },
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/StatsObservation.lean",
+          "symbol": "repairSourceVerdict"
         }
       ],
       "call_path": "ListPods -> executeK8sRequest -> PodListResponse -> detectDeadNodesPure -> unhealthyMastersKept -> failover.",
@@ -3944,6 +3950,21 @@
             {
               "path": "flare_operator/FlareOperator/E2E/Tests/CircuitBreaker.lean",
               "symbol": "suite"
+            }
+          ]
+        },
+        {
+          "id": "CHECK-07-identity",
+          "kind": "scenario",
+          "procedure": "SAF-08 copy identity (audit docs/reports/2026-10-05-saf08-copy-identity-audit.md). E2E copy-identity (1p x 3r PVC, legacy replication, drain 20 s): (1) a slave is force-deleted with the node cordoned so its same-name replacement stays Pending while the map says Active, then the master is drained — the replaced pod must never be master, the healthy slave must take over with every key, and the operator must log the replaced pod as withheld; (2) a slave's flared is killed -9 (same pod, new process) and the master is drained at once — that slave must not be promoted, the other takes over with every key (the restart-to-registration window is short: an outcome guard).",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/ContinuousReplicationLimits.lean",
+              "symbol": "identitySuite"
+            },
+            {
+              "path": "flare_operator/FlareOperator/StateMachine/StatsObservation.lean",
+              "symbol": "repairSourceVerdict"
             }
           ]
         }
@@ -3963,7 +3984,7 @@
         },
         "ci_passed": {
           "state": "no",
-          "evidence": "0/1 checks' latest recorded run passed"
+          "evidence": "0/2 checks' latest recorded run passed"
         },
         "reviewed": {
           "state": "no",

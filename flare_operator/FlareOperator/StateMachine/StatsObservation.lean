@@ -67,6 +67,18 @@ def parseStat (out : String) (key : String) : Items :=
 
 def parseCurrItems (out : String) : Items := parseStat out "curr_items"
 
+/-- SAF-08: may a replica be demoted for repair (its copy is then rebuilt
+    from the partition's CURRENT master)? Only when that master is KNOWN to
+    hold data. The repair request was recorded against an earlier master,
+    possibly passes or an operator restart ago; rebuilding from an empty or
+    unreadable master would replace a data-bearing copy with nothing.
+    `none` = proceed, `some reason` = defer (the request stays pending). -/
+def repairSourceVerdict (master : Items) : Option String :=
+  match master with
+  | .unknown => some "the current master's item count is unknown (unreadable stats); not rebuilding a replica from it"
+  | .known 0 => some "the current master holds 0 keys; rebuilding the replica from it would empty it"
+  | .known _ => none
+
 /-- What to do about a (master, slave) item comparison for the empty-master
     self-heal. -/
 inductive EmptyMasterVerdict where

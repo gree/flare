@@ -800,8 +800,24 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
       for (k, summary) in changed do
         IO.eprintln s!"[flare-operator] CONTINUOUS REPLICATION eligibility {k}: {summary}"
       followRef.set { mem := mem', boots := boots', tick := tr.tick + 1, classified := cls, lastSummary := summaries }
+      -- SAF-08 GHOST SUCCESSOR: the map's Active state belongs to the
+      -- process that registered it. A pod replaced under the same name keeps
+      -- the name (so it passes every "pod exists" check) and the map entry
+      -- stays Active until the new flared registers — and every promotion
+      -- path picked successors from exactly that. Readiness is sync-gated (a
+      -- pod is Ready only once its OWN map says Active), so an Active slave
+      -- whose pod is not Ready this pass is not a promotable copy: excluded
+      -- from failover, drain, refill and the zombie guard like an unfit
+      -- follower. Cost: a slave whose readiness flaps at the moment its
+      -- master dies waits one pass.
+      let readyNow := (pods.filter (fun p => p.ready && !p.terminating)).map Bridge.PodInfo.toNodeKey
+      let notReadyActive := (cs.nodeMap.filter fun kv =>
+          kv.2.role == FlareRole.Slave && kv.2.state == FlareState.Active
+            && podKeys.contains kv.1 && !readyNow.contains kv.1).map Prod.fst
+      if !notReadyActive.isEmpty then
+        IO.eprintln s!"[flare-operator] promotion candidates withheld this pass (Active in the map but the pod is not Ready — possibly replaced under the same name and not yet registered): {notReadyActive}"
       pure (.PodListResponse podKeys (Bridge.podZones pods nodeZones) termKeys dataKeys unhealthyKeys heldKeys
-              cls.unfit cls.unproven cls.ranked)
+              (cls.unfit ++ notReadyActive.filter (!cls.unfit.contains ·)) cls.unproven cls.ranked)
   | .PatchService =>
     -- Service patching happens in executeEffects (PatchService effect)
     -- This just signals completion
@@ -1214,13 +1230,40 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
         match cs.lookupNode rKey with
         | some rn =>
           if rn.role == FlareRole.Slave then
-            let v := cs.nodeMapVersion + 1
-            let demoted : FlareNode :=
-              { rn with role := FlareRole.Proxy, state := FlareState.Active, partition := -1 }
-            stateRef.set { (cs.addNode rKey demoted) with nodeMapVersion := v }
-            led3 := ReplicaRepair.markDemoted led3 e.dest v
-            metrics.replicaResyncs.inc
-            IO.eprintln s!"[flare-operator] REPLICA REPAIR: demoting {rKey} to a live proxy at v{v} — master {e.masterKey} dropped {e.drops} write(s) to it. Held out of assignment until it reports v{v}; then re-seated as Slave/Prepare so flared reconstructs"
+            -- SAF-08: the copy is rebuilt from the partition's CURRENT
+            -- master, which need not be the one that counted the drops. Read
+            -- it now; defer unless it is known to hold data.
+            let srcMaster := cs.nodeMap.find? (fun kv =>
+              kv.2.role == FlareRole.Master && kv.2.state == FlareState.Active && kv.2.partition == rn.partition)
+            let verdict ← match srcMaster with
+              | none => pure (some "the partition has no Active master right now")
+              | some (_, mn) =>
+                match ← Bridge.queryPodStats (extractPodName mn.serverName) ns "stats" with
+                | .ok out => pure (StatsObservation.repairSourceVerdict (StatsObservation.parseCurrItems out))
+                | .error _ => pure (StatsObservation.repairSourceVerdict .unknown)
+            match verdict with
+            | some why =>
+              IO.eprintln s!"[flare-operator] replica repair DEFERRED for {rKey}: {why} (source {(srcMaster.map (·.1)).getD "none"}); the request stays pending"
+            | none =>
+              -- Atomic re-check and demote: a TCP registration may have
+              -- replaced the entry since it was read above (SAF-08).
+              let applied ← stateRef.modifyGet fun cur =>
+                match cur.lookupNode rKey with
+                | some rn2 =>
+                  if rn2.role == FlareRole.Slave && rn2.partition == rn.partition && rn2.regEpoch == rn.regEpoch then
+                    let v := cur.nodeMapVersion + 1
+                    let demoted : FlareNode :=
+                      { rn2 with role := FlareRole.Proxy, state := FlareState.Active, partition := -1 }
+                    (some v, { (cur.addNode rKey demoted) with nodeMapVersion := v })
+                  else (none, cur)
+                | none => (none, cur)
+              match applied with
+              | some v =>
+                led3 := ReplicaRepair.markDemoted led3 e.dest v
+                metrics.replicaResyncs.inc
+                IO.eprintln s!"[flare-operator] REPLICA REPAIR: demoting {rKey} to a live proxy at v{v} — master {e.masterKey} dropped {e.drops} write(s) to it; rebuild source {(srcMaster.map (·.1)).getD "?"} holds data. Held out of assignment until it reports v{v}; then re-seated as Slave/Prepare so flared reconstructs"
+              | none =>
+                IO.eprintln s!"[flare-operator] replica repair: {rKey} changed (re-registered or re-assigned) while the demotion was being decided; leaving the request pending"
           else
             IO.eprintln s!"[flare-operator] replica repair: {rKey} is no longer a Slave; leaving the request pending"
         | none =>
@@ -1506,15 +1549,30 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
           episodes := episodes.map fun e => if e.nodeKey == key then ep' else e
           match verdict with
           | .activate why =>
+            -- SAF-08: the evidence was read from ONE flared process; make
+            -- sure that process is still the one being activated. Re-read
+            -- its boot id now, and apply only if the map entry was not
+            -- re-registered meanwhile (a restarted flared re-registers as
+            -- Slave/Prepare with a new regEpoch and is reconstructing).
+            let bootNow ← match ← Bridge.queryPodStats slavePod ns "stats" with
+              | .ok so2 => pure (statNat so2 "reconstruction_boot_id")
+              | .error _ => pure none
             let crdNow ← crdRef.get
             let ev := Flare.FlareEvent.NodeState node.serverName node.serverPort FlareState.Active
-            let resp ← stateRef.modifyGet fun cs =>
-              let (ns', r) := Reconciler.reconcileStep cs crdNow ev
-              (r, ns')
+            let resp ← if bootNow.isNone || bootNow != reading.bootId then
+                pure (Flare.FlareResponse.ServerError s!"the slave's flared process changed or is unreadable since the evidence was read (boot {reading.bootId} -> {bootNow})")
+              else stateRef.modifyGet fun cs =>
+                if (cs.lookupNode key).map (·.regEpoch) != some node.regEpoch then
+                  (Flare.FlareResponse.ServerError "the node re-registered since the evidence was read", cs)
+                else
+                  let (ns', r) := Reconciler.reconcileStep cs crdNow ev
+                  (r, ns')
             match resp with
             | .OK =>
               IO.eprintln s!"[flare-operator] PREPARE-REPAIR: {key} stuck Prepare {cycles} cycles; {why} -> re-derived Prepare→Active under master {mKey}"
               episodes := episodes.filter (·.nodeKey != key)
+            | .ServerError msg =>
+              IO.eprintln s!"[flare-operator] prepare-repair: {key}: evidence sufficient ({why}) but NOT activating: {msg}; leaving Prepare"
             | _ =>
               IO.eprintln s!"[flare-operator] prepare-repair: {key}: evidence sufficient ({why}) but reconcileStep rejected the re-derived activation; leaving Prepare"
           | .wait reason =>

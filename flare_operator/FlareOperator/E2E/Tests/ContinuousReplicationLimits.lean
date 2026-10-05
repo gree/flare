@@ -1168,6 +1168,146 @@ def upgradeSuite : TestSuite := {
   ]
 }
 
+-- ─── SAF-08: the surviving copy a promotion relies on ─────────────────────
+
+-- 1p x 3r, PVC, legacy replication (no continuous following: in follow mode
+-- an unreadable pod is already "unproven" and kept out of a drain, so only
+-- legacy mode shows the readiness rule), drain window 20 s.
+private def identityCfg : ClusterConfig := {
+  name := "copy-identity"
+  «namespace» := "flare-copy-identity"
+  partitions := 1
+  replicas := 3
+  operatorName := "flare-operator"
+  debugPod := "debug-copy-identity"
+  storageBackend := "rocksdb"
+  usePvc := true
+  drainSeconds := 20
+}
+
+/-- (master pod, [slave pods]) of P0 from the operator's map, Active only. -/
+private def Ctx.p0Roles (c : Ctx) : IO (Option String × List String) := do
+  let entries ← c.nodeView
+  let m := (findMasterFqdn entries 0).map podOf
+  let ss := (entries.filter (fun e => e.role == 1 && e.state == 0 && e.partition == 0)).map (fun e => podOf e.fqdn)
+  return (m, ss)
+
+/-- kill -9 flared in `pod` from the kind node (pid 1 in the pod ignores
+    signals from inside); found by the pod UID in its cgroup. -/
+private def Ctx.killFlaredIn (c : Ctx) (pod : String) : IO (Except String String) := do
+  match ← c.podUid pod with
+  | none => return .error s!"no UID for {pod}"
+  | some uid =>
+    let u2 := uid.replace "-" "_"
+    hostCmd "docker" ["exec", kindNode, "sh", "-c",
+      s!"n=0; for p in $(pgrep -x flared); do if grep -q -e '{uid}' -e '{u2}' /proc/$p/cgroup 2>/dev/null; then kill -9 $p && n=$((n+1)); fi; done; echo killed=$n"]
+
+/-- Watch the P0 master for `secs`: (masters seen in order, final master). -/
+private def Ctx.watchMaster (c : Ctx) (secs : Nat) (stopWhen : String → Bool) : IO (List String) := do
+  let mut seen : List String := []
+  for _ in [0:secs / 2] do
+    IO.sleep 2000
+    match (← c.p0Roles).1 with
+    | some m =>
+      if seen.getLast? != some m then seen := seen ++ [m]
+      if stopWhen m then break
+    | none => pure ()
+  return seen
+
+def identitySuite : TestSuite := {
+  name := "copy-identity"
+  setup := do
+    deployCluster identityCfg
+    IO.sleep 60000
+  teardown := do
+    discard <| kubectl ["uncordon", kindNode]
+    cleanupCluster identityCfg
+  onFailure := dumpClusterDiagnostics identityCfg.«namespace» s!"app={identityCfg.operatorName}"
+  tests :=
+    let c : Ctx := { cfg := identityCfg }
+    let ns := identityCfg.«namespace»
+    [
+    { name := "SAF-08 same-name replacement: a slave replaced under the same name (pod Pending, map still Active) just before the master is drained is never promoted; the healthy slave is, with every key"
+      run := do
+        let graceOver ← waitForCondition "operator past its startup grace period" 240 do
+          return containsSubstr (← c.opLog 400) "grace period over"
+        if !graceOver then return .fail "the operator never logged the end of its startup grace period"
+        match ← c.p0Roles with
+        | (some m, [a, b]) =>
+          let mIp := (← getPodIp m ns).getD ""
+          let w ← writeKeys identityCfg.debugPod ns mIp identityCfg.flarePort "id" 60
+          let synced ← waitForCondition "all three copies hold the keys" 120 do
+            let n ← c.currItems mIp
+            let na ← c.currItems ((← getPodIp a ns).getD "")
+            let nb ← c.currItems ((← getPodIp b ns).getD "")
+            return n == 60 && na == 60 && nb == 60
+          if w != 60 || !synced then return .fail s!"precondition: stored {w}/60, copies not in sync"
+          match ← kubectl ["cordon", kindNode] with
+          | .error e => return .fail s!"could not cordon: {e}"
+          | .ok _ => pure ()
+          discard <| kubectl ["delete", "pod", a, "-n", ns, "--grace-period=0", "--force", "--wait=false"]
+          let pending ← waitForCondition s!"{a} is replaced under the same name and Pending" 60 do
+            match ← kubectlGetJsonpath "pod" a ns "{.status.phase}" with
+            | .ok ph => return ph.trim == "Pending"
+            | .error _ => return false
+          let (_, slavesNow) ← c.p0Roles
+          IO.eprintln s!"# {a} replaced and Pending={pending}; the map still lists Active slaves {slavesNow}"
+          if !pending then discard <| kubectl ["uncordon", kindNode]; return .fail s!"precondition: {a} was not left Pending"
+          discard <| kubectl ["delete", "pod", m, "-n", ns, "--wait=false"]
+          let seen ← c.watchMaster 120 (fun x => x != m)
+          let withheld := ((← c.opLog 200000).splitOn "\n").any fun l =>
+            containsSubstr l "promotion candidates withheld" && containsSubstr l a
+          let newMaster := seen.getLast?
+          let bItems ← c.currItems ((← getPodIp b ns).getD "")
+          IO.eprintln s!"# masters seen {seen}; ghost {a} withheld logged={withheld}; {b} items={bItems}"
+          discard <| kubectl ["uncordon", kindNode]
+          if seen.contains a then return .fail s!"the replaced, not yet registered pod {a} was promoted"
+          if newMaster != some b then return .fail s!"expected {b} to take over, masters seen {seen}"
+          if bItems != 60 then return .fail s!"the new master {b} holds {bItems} of 60 keys"
+          let healed ← waitForCondition "the replaced and the drained pods return and match the new master" 480 do
+            let na ← c.currItems ((← getPodIp a ns).getD "")
+            let nm ← c.currItems ((← getPodIp m ns).getD "")
+            return na == 60 && nm == 60
+          if !healed then return .fail "the returning pods did not converge on the new master"
+          return .pass
+        | roles => return .fail s!"precondition: expected one master and two Active slaves, got {roles.1}/{roles.2}" },
+
+    { name := "SAF-08 process restart: a slave whose flared is killed (same pod, new process) right before the master is drained is not promoted on its old process's standing; the other slave is"
+      run := do
+        match ← c.p0Roles with
+        | (some m, [a, b]) =>
+          let mIp := (← getPodIp m ns).getD ""
+          let synced ← waitForCondition "all three copies match" 180 do
+            let n ← c.currItems mIp
+            let na ← c.currItems ((← getPodIp a ns).getD "")
+            let nb ← c.currItems ((← getPodIp b ns).getD "")
+            return n > 0 && na == n && nb == n
+          if !synced then return .fail "precondition: copies not in sync"
+          let items ← c.currItems mIp
+          -- restart the process of the FIRST successor in map order, so that
+          -- a choice by map order alone would pick it
+          let victim := a
+          let other := b
+          match ← c.killFlaredIn victim with
+          | .error e => return .fail s!"could not kill flared in {victim}: {e}"
+          | .ok o => IO.eprintln s!"# kill -9 flared in {victim}: {o.trim}"
+          discard <| kubectl ["delete", "pod", m, "-n", ns, "--wait=false"]
+          let seen ← c.watchMaster 120 (fun x => x != m)
+          let otherItems ← c.currItems ((← getPodIp other ns).getD "")
+          IO.eprintln s!"# masters seen {seen}; {other} items={otherItems} (expected {items})"
+          if seen.contains victim then return .fail s!"{victim} was promoted although its flared had just restarted"
+          if seen.getLast? != some other then return .fail s!"expected {other} to take over, masters seen {seen}"
+          if otherItems != items then return .fail s!"the new master {other} holds {otherItems} of {items} keys"
+          let healed ← waitForCondition "the restarted and the drained pods converge" 480 do
+            let nv ← c.currItems ((← getPodIp victim ns).getD "")
+            let nm ← c.currItems ((← getPodIp m ns).getD "")
+            return nv == items && nm == items
+          if !healed then return .fail "the restarted and drained pods did not converge on the new master"
+          return .pass
+        | roles => return .fail s!"precondition: expected one master and two Active slaves, got {roles.1}/{roles.2}" }
+  ]
+}
+
 -- ─── two partitions: enablement and the lag hold are per partition ───────
 
 /-- (masterPod, masterIp, replicaPod, replicaIp) of partition `p`, the replica

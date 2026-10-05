@@ -35,6 +35,7 @@ import FlareOperator.E2E.Tests.ContinuousReplicationLimits
 import FlareOperator.E2E.Tests.PrepareEvidence
 import FlareOperator.E2E.Tests.NativeMetrics
 import FlareOperator.E2E.Tests.BlueGreenMigration
+import FlareOperator.E2E.Tests.VisibilityBench
 import FlareOperator.E2E.Tests.SnapshotPushSeed
 import FlareOperator.E2E.Tests.ReadBalance
 
@@ -81,6 +82,7 @@ def main (args : List String) : IO UInt32 :=
     Tests.ContinuousReplicationLimits.upgradeSuite,
     Tests.ContinuousReplicationLimits.identitySuite,
     Tests.ContinuousReplicationLimits.emptySourceSuite,
+    Tests.VisibilityBench.visibilityBenchSuite,
     Tests.ContinuousReplicationLimits.clusterInitSuite,
     Tests.ContinuousReplicationLimits.scaleSuite,
     Tests.ContinuousReplicationLimits.sustainedSuite,

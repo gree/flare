@@ -1655,7 +1655,15 @@ def emptySourceSuite : TestSuite := {
           let log ← c.opLog 200000
           let deferred := (log.splitOn "\n").filter fun l => containsSubstr l "replica repair DEFERRED" && containsSubstr l r
           IO.eprintln s!"# repair resolved={resolved}; {r} items {← c.currItems rIp}; ledger {← c.ledgerDests}; deferral lines for {r}: {deferred.length}{if deferred.isEmpty then "" else "\n# " ++ (deferred.getLast?.getD "")}"
-          if !resolved then return .fail s!"the repair did not resolve ({deferred.length} deferral(s))"
+          if !resolved then
+            -- CI 37296281060: unresolved with an EMPTY ledger and no deferral
+            -- (replica at 2 items); print what the operator decided.
+            let repairLines := (log.splitOn "\n").filter fun l =>
+              containsSubstr l "REPLICA REPAIR" || containsSubstr l "replica repair" || containsSubstr l "ledger"
+                || containsSubstr l r || containsSubstr l "demot"
+            IO.eprintln s!"# operator lines about the repair ({repairLines.length}):\n{String.intercalate "\n" (repairLines.reverse.take 40).reverse}"
+            IO.eprintln s!"# {r} flared log tail:\n{String.intercalate "\n" (((← c.flaredLog r).splitOn "\n").reverse.take 40).reverse}"
+            return .fail s!"the repair did not resolve ({deferred.length} deferral(s))"
           return .pass
         | _ => return .fail "precondition: one master and two slaves" },
 

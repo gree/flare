@@ -3473,7 +3473,8 @@
         "2026-10-03 (PR run 37035470146 on 267a196, all 8 legs green): lag-hold E2E PASS. The follower was 140 positions behind (applied 4 of source 144) and judged unfit; with the ex-master away (node cordoned) it was never promoted and 'partition 0 has NO master' was logged on each pass; after the uncordon the ex-master was master again with all 140 acknowledged items, no NOT LOSS-FREE line was logged for the follower, and the follower rebuilt (reconstruction_started 2) and followed it with 140 items. One run on kind; the wait-expiry and empty-ex-master branches are covered by flare_unit only.",
         "2026-10-03 (PR run 37103800886, all 8 legs green): both release paths of the lag hold PASS end to end. tmpfs: the master pod returned empty, the follower (unfit, applied 4 of source 144) was seated at once and logged NOT LOSS-FREE, and the empty ex-master rebuilt from it and followed (77 items each; the follower kept catching up slowly until the kill, so 140 − 77 acknowledged writes are the accepted asynchronous loss). Wait expiry (60 s, ex-master kept away by a cordon): the hold was logged first and the follower was seated after 117 s, not before 60 s, with NOT LOSS-FREE; the returning ex-master followed it (77 items). The 117 s is the wait plus dead detection plus the masterless clock starting on the pass after the failover: in production, expect the configured wait plus about one minute.",
         "2026-10-03 (PR run 37107011336): per-partition lag hold on 2p x 2r PASS — only P1's follower was cut and behind (applied 6 of source 120) and judged unfit; with P1's master killed and kept away, P1 was held (its follower not promoted, 'partition 1 has NO master' logged) while P0 kept its master and took writes (40 attempted through it: its own 32 keys STORED, P0 items 126→158; the 8 P1 keys failed, as the hold implies); the breaker did not trip (1 of 4 unavailable); P1's ex-master returned as master with all 114 items and no NOT LOSS-FREE line was logged for P1's follower.",
-        "2026-10-05 (PR run 37296281060 on ac49d67; NOT independently reviewed). PRODUCT DEFECT, failover lag bound (CHECK-06-laghold test 25; it had passed in 37283759673 and 37290297021, so it is timing-dependent). While the ex-master was away the hold worked ('NOT promoted while the ex-master is away', logged at ticks 26-28). When the ex-master's pod returned, NodeAdd rejoined it correctly as a Prepare slave of P0 with lastMasterOf kept. In the SAME pass (tick 29) the refill crowned the follower that was 140 positions behind: 'PROMOTION NOT LOSS-FREE … the wait for the ex-master ended or the ex-master came back empty'. The ex-master then rebuilt from it ('ex-master master again=false'). Cause (code): Bridge.dataBearingPodKeys leaves out a pod whose stats probe FAILS ('Best-effort: a pod whose probe fails is simply not listed'), and K8sReconciler.exMasterBackEmpty treats 'live and not listed' as 'came back empty'. A returning ex-master that cannot be read yet (the pass before, the operator logged 'Invalid IP address' for it) therefore ends the hold. Unknown is taken as known-empty; the same pattern affects the refill tier's empty-master guard. Proposed fix (not implemented): the probe returns known-empty and unknown separately; the hold ends only on a KNOWN empty ex-master or on the wait budget; a unit check for 'ex-master live but unreadable keeps the hold', and a seam test delaying the returning ex-master's stats."
+        "2026-10-05 (PR run 37296281060 on ac49d67; NOT independently reviewed). PRODUCT DEFECT, failover lag bound (CHECK-06-laghold test 25; it had passed in 37283759673 and 37290297021, so it is timing-dependent). While the ex-master was away the hold worked ('NOT promoted while the ex-master is away', logged at ticks 26-28). When the ex-master's pod returned, NodeAdd rejoined it correctly as a Prepare slave of P0 with lastMasterOf kept. In the SAME pass (tick 29) the refill crowned the follower that was 140 positions behind: 'PROMOTION NOT LOSS-FREE … the wait for the ex-master ended or the ex-master came back empty'. The ex-master then rebuilt from it ('ex-master master again=false'). Cause (code): Bridge.dataBearingPodKeys leaves out a pod whose stats probe FAILS ('Best-effort: a pod whose probe fails is simply not listed'), and K8sReconciler.exMasterBackEmpty treats 'live and not listed' as 'came back empty'. A returning ex-master that cannot be read yet (the pass before, the operator logged 'Invalid IP address' for it) therefore ends the hold. Unknown is taken as known-empty; the same pattern affects the refill tier's empty-master guard. Proposed fix (not implemented): the probe returns known-empty and unknown separately; the hold ends only on a KNOWN empty ex-master or on the wait budget; a unit check for 'ex-master live but unreadable keeps the hold', and a seam test delaying the returning ex-master's stats.",
+        "2026-10-06 (implemented in 616a010, CI pending; NOT reviewed). Fix for the CI 37296281060 lag-hold defect. The data probe now classifies data-bearing / KNOWN-empty / Unknown. Known-empty requires a complete reply with a well-formed curr_items 0, and the pod's UID and restart count unchanged across the probe; a missing restart count is not a match. No IP, exec/stats failure, or a truncated or malformed reply is Unknown. Observations are per pass and never reused. The hold and the refill tiers no longer treat absence from the data-bearing list as emptiness: exMasterBackEmpty uses only the known-empty list. Unknown never releases the hold. Release by the wait budget is logged as the accepted-loss policy ('EXPIRED'), separately from 'READ empty' and 'hold disabled'. Remaining: the refill's empty-master guard still falls back to crowning the lastMasterOf holder when NO copy in the partition is known to hold data (the original 'no information' behaviour); this favours the newest copy and is not changed here."
       ],
       "code": [
         {
@@ -3507,6 +3508,10 @@
         {
           "path": "src/lib/handler_wal_follower.cc",
           "symbol": "handler_wal_follower::run"
+        },
+        {
+          "path": "flare_operator/FlareOperator/K8s/Bridge.lean",
+          "symbol": "dataPresencePodKeys"
         }
       ],
       "call_path": "NodeAdd rejoin -> Slave/Prepare; FSM failover/RecoveryRefill -> promoteMasterlessPartitions -> promoteMasterlessPartition.",
@@ -3575,6 +3580,25 @@
             {
               "path": "flare_operator/FlareOperator/E2E/Tests/ContinuousReplicationLimits.lean",
               "symbol": "multiHoldSuite"
+            }
+          ]
+        },
+        {
+          "id": "CHECK-06-holdunreadable",
+          "kind": "scenario",
+          "procedure": "Failover lag bound with an UNREADABLE returning ex-master (CI 37296281060 defect). Unit: flare_unit checkFailoverLagHold (unreadable ex-master keeps the hold; a known-empty reading of a non-live pod does not end it; NOT LOSS-FREE reason EXPIRED vs READ empty). E2E continuous-replication-lag-hold-unreadable (repair leg): the follower is cut and judged unfit, the master pod is killed with the node cordoned, the operator's data probe is told (seam FLARE_TEST_STATS_BLOCK) that the returning ex-master cannot be read; for 90 s with the ex-master live and unreadable (>= 3 blocked probe passes) the follower must never be crowned and no NOT LOSS-FREE line may appear; once readable the ex-master is master again with every acknowledged write. The tmpfs suite (ex-master truly empty) must log the reason 'READ empty' and the expiry suite 'EXPIRED'.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/StateMachine/K8sReconciler.lean",
+              "symbol": "exMasterBackEmpty"
+            },
+            {
+              "path": "flare_operator/FlareOperator/K8s/Bridge.lean",
+              "symbol": "dataPresencePodKeys"
+            },
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/ContinuousReplicationLimits.lean",
+              "symbol": "lagHoldUnreadableSuite"
             }
           ]
         }
@@ -3968,7 +3992,7 @@
         },
         "ci_passed": {
           "state": "no",
-          "evidence": "no release candidate set (0/5 checks counted)"
+          "evidence": "no release candidate set (0/6 checks counted)"
         },
         "reviewed": {
           "state": "no",
@@ -4986,7 +5010,8 @@
         "DECISION 2026-10-02 (user): asynchronous durability is accepted for production; RPO = replication lag at master data loss. The lagged-successor E2E records the gap. Client-visible behaviour: flared option read-unavailable-error (CR spec.rocksdb.readUnavailableError, default false) answers SERVER_ERROR instead of a miss when a get cannot be served; enable it where flare is the primary store. op_get change compiled only by the CI image and nix builds; no E2E exercises the option yet.",
         "2026-10-02: E2E for read-unavailable-error added (continuous-replication suite): with replica->master traffic to 12121 rejected and the follower disconnected, a get on the replica must answer SERVER_ERROR with the option on and END (miss) with it off; each switch confirmed by flared's reload notice. CI pending.",
         "2026-10-02 (CI 36938834526), INCONCLUSIVE: the first read-unavailable-error E2E got an EMPTY reply from the replica within nc's 5 s idle timeout (option confirmed on by the reload notice, follower disconnected). Most likely the forward to the master was still retrying with reconnects; the test now waits up to 40 s, times the reply and prints the replica's flared lines on failure. Not recorded as a pass.",
-        "2026-10-02 (CI 36941388055): read-unavailable-error E2E PASS. With replica->master traffic rejected and the follower disconnected, a get on the replica answered 'SERVER_ERROR read unavailable' with the option on and 'END' (miss) with it off. Both replies took 18 s: the forward to the master retries with reconnects before it is given up, so a client whose read timeout is shorter than that sees a timeout instead of either reply. The retry/timeout budget of forwarded reads is not tuned for this case."
+        "2026-10-02 (CI 36941388055): read-unavailable-error E2E PASS. With replica->master traffic rejected and the follower disconnected, a get on the replica answered 'SERVER_ERROR read unavailable' with the option on and 'END' (miss) with it off. Both replies took 18 s: the forward to the master retries with reconnects before it is given up, so a client whose read timeout is shorter than that sees a timeout instead of either reply. The retry/timeout budget of forwarded reads is not tuned for this case.",
+        "2026-10-06 pf-dev observation (operational; NOT a CI result). After the slave nodes-1 was deleted (UID-preconditioned, normal grace) and rebuilt on rc65, the rebuild path was: snapshot from the rc56 master refused BEFORE the swap ('the staged checkpoint carries no source epoch'), then truncate + full dump. Items matched (15,854,750 on both) and there were no restarts. But the slave's tmpfs was at 7.6 GB of 8 GB, of which 4.6 GB was the RocksDB WAL ARCHIVE written by the dump, retained by rocksdb-wal-ttl-seconds 86400 / wal-size-limit-mb 10240, both larger than the pod. Its memory cgroup read 8.42 GB of 8.59 GB. On tmpfs the WAL retention budget counts against the memory limit (UCA-27 on a replica): a full-dump rebuild on tmpfs can leave the replica one burst away from an OOM kill. No action taken (instruction: stop and report). Options for review: size the WAL retention to the tmpfs/memory budget in the CR, or skip archiving the replica's own dump WAL."
       ],
       "code": [
         {
@@ -6121,7 +6146,8 @@
         "RocksDB WriteBatch atomicity holds across the data and metadata column families."
       ],
       "residual_risks": [
-        "The E2E crash lands at whatever boundary the kill hits (~300 ms after the heal); it is not steered to a specific mid-batch point. Recovery is observed through the operator's rejoin (Slave/Prepare, incremental WAL reconstruction from the cursor, activation, follower resume), so the design's 'plain restart resumes with no rebuild' (T16) holds for the data path (no truncate, no dump) but a reconstruction record is produced."
+        "The E2E crash lands at whatever boundary the kill hits (~300 ms after the heal); it is not steered to a specific mid-batch point. Recovery is observed through the operator's rejoin (Slave/Prepare, incremental WAL reconstruction from the cursor, activation, follower resume), so the design's 'plain restart resumes with no rebuild' (T16) holds for the data path (no truncate, no dump) but a reconstruction record is produced.",
+        "2026-10-06 (implemented in f096882, CI pending; NOT reviewed). D6: the WAL server path read the DB handle with no lock (get_updates_since, get_latest_sequence_number) while snapshot swap, hard_reset and truncate replace or reopen it under the whole-lock (write). This is reachable, for example, on a demoted master still serving in-flight follow requests while it is reseeded. Both now hold the whole-lock for read, with RAII on every return path; writers also take it for read, so serving a follower does not block writes. D7: stop_wal_follower is an asynchronous shutdown that does not wait. A stopped handler could finish a slice after its successor started; epoch, incarnation and contiguity do not catch a stale stream from a demoted master still serving the same epoch. Every stop/start now bumps a follow generation, and a batch with an older generation is refused under the apply lock with nothing written. The handler thread's lifetime is unchanged (pooled thread, no awaited join); a blocking stop under the cluster lock was rejected for deadlock risk."
       ],
       "code": [
         {
@@ -7425,7 +7451,8 @@
       ],
       "residual_risks": [
         "Lock-hold time, forwarded-write wait and writer starvation under a far-behind replica are NOT measured (T17 deferred by agreement).",
-        "E2E coexistence scenarios T10-T13 are pinned by unit tests only; the minimal E2E shows forwarding-first then WAL re-delivery skipped."
+        "E2E coexistence scenarios T10-T13 are pinned by unit tests only; the minimal E2E shows forwarding-first then WAL re-delivery skipped.",
+        "2026-10-06 (implemented in f096882, CI pending; first compile in CI; NOT reviewed). Pre-existing defects from the WSTR-0 audit (docs/design-wal-stream-wstr0.md §3), fixed on the CURRENT hybrid path. D1 (an instance of UCA-31): a replica's get() deleted an entry it judged expired by its own clock, outside the replication history; now only the partition master deletes (set on role change); a replica hides the value, counted in rocksdb_expire_filtered. D2: a follow reply with a batch but no EPOCH line was applied verbatim; it is now refused (client_no_epoch) with no data or cursor change. Verbatim apply stays for reconstruction only; legacy reconstruction compatibility is a separate path. D3: unguarded lexical_cast of LSN/BATCH; malformed, overflowing, or out-of-range batch sizes ([12 B, 1 GiB], checked before allocation) are now protocol errors with nothing applied. Not yet addressed: D4 (mid-frame failures leave the client result at its default), D5, D8-D11."
       ],
       "code": [
         {

@@ -60,9 +60,12 @@ pod deletes.
 - **Replacement after observation**: the same, with the chosen successor's
   pod replaced under the same name (node cordoned); the other slave takes
   over.
-- ~~Legitimately emptied master~~ (CI 37283759673: deferred — that replica
-  had caught up by WAL sync after a promotion, so its history could not be
-  proven). Replaced by the `empty-source` suite below.
+- **Legitimately emptied master**: FAILED in CI 37283759673 and 37290297021
+  — a product limitation of those revisions: the repair from a legitimately
+  emptied master was deferred forever (the replica had caught up by WAL sync
+  after a promotion, so its history could not be proven). Addressed by the
+  rebuild evidence below; verification moved to the `empty-source` suite
+  (pending). The old failures stay on record.
 
 ## Empty repair source: rebuild evidence (review round 2026-10-05)
 

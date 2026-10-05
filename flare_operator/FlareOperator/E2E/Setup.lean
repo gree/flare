@@ -193,6 +193,12 @@ spec:
             - containerPort: {cfg.operatorPort}
               name: flare-index
               protocol: TCP{envBlock}
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 5
           resources:
             requests:
               cpu: 100m

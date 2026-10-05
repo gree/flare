@@ -389,8 +389,8 @@ private def operatorLogsAll : IO String := do
     exec failed, or the probe printed neither). A missed observation is
     never evidence of a closed port: a sample counts as closed only if the
     operator's health port (8080, listening from process start) answered in
-    the same probe and 12120 did not. Readiness is not this signal: a
-    restarted operator is briefly a standby, and a standby is Ready. -/
+    the same probe and 12120 did not. Readiness is not this signal: it
+    reports health, not whether the operator has taken control. -/
 private def indexState : IO (Option Bool) := do
   match ← kubectl ["get", "pods", "-n", cfg.«namespace», "-l", s!"app={cfg.operatorName}", "-o", "jsonpath={.items[*].status.podIP}"] with
   | .error _ => return none
@@ -1044,16 +1044,17 @@ def suite : TestSuite := {
             -- give them time to be recreated, not to become readable
             IO.sleep 15000
           let (undecided, ready) ← restartUnder fault "cannot be told from a loss" 150
-          -- CI 37278389267: "ready" was true here — the undecided operator
-          -- exits (code 2) and restarts, and the restarted process is briefly
-          -- a standby, which is Ready by design. What must hold is that it
-          -- never serves the index, never starts fresh, writes no map.
+          -- CI 37278389267: "ready" was true here because the E2E operator
+          -- Deployment had no readiness probe (pod Ready = container
+          -- running; found in CI 37283759673), not because of a standby. What
+          -- must hold is that it never serves the index, never starts fresh,
+          -- writes no map.
           let (served, closedN, missedN) ← indexSamples 60
           let logs ← operatorLogsAll
           let fresh := containsSubstr logs "node map: starting fresh"
           let mapWritten := (← readNodeMap).isSome
           let historyLine := ((logs.splitOn "\n").find? (containsSubstr · "node map history:")).getD "(none)"
-          IO.eprintln s!"# compound: undecided logged={undecided} started fresh={fresh} index ever served={served} (closed in {closedN} observed samples, {missedN} not observed) map written={mapWritten} (readiness observed {ready}: a restarted standby is Ready by design)\n# {historyLine.trim}"
+          IO.eprintln s!"# compound: undecided logged={undecided} started fresh={fresh} index ever served={served} (closed in {closedN} observed samples, {missedN} not observed) map written={mapWritten} (readiness observed {ready}, informational)\n# {historyLine.trim}"
           if fresh then return .fail "the operator started from an empty map although the past could not be observed"
           if !undecided then return .fail "the operator did not report that a first build cannot be told from a loss"
           if served then return .fail "the operator served the index without its node map"

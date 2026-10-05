@@ -1653,7 +1653,7 @@ def clusterInitSuite : TestSuite := {
           let fresh := containsSubstr logs "node map: starting fresh"
           let ready ← c.opReady
           let cmBack := (← kubectlGetJsonpath "configmap" cmName ns "{.metadata.name}").toOption.isSome
-          IO.eprintln s!"# CR recreated without approval: waited first={waiting}; undecided={undecided}; started fresh={fresh}; index ever served={served} (closed in {closedN} observed samples, {missedN} not observed); a node map was written={cmBack} (readiness observed {ready}: a restarted standby is Ready by design)"
+          IO.eprintln s!"# CR recreated without approval: waited first={waiting}; undecided={undecided}; started fresh={fresh}; index ever served={served} (closed in {closedN} observed samples, {missedN} not observed); a node map was written={cmBack} (readiness observed {ready}, informational)"
           if fresh then return .fail "the operator initialised a cluster over old PVCs without approval"
           if !undecided then return .fail "the operator did not report that it cannot tell a first build from a loss"
           if served then return .fail "the operator served the index (took control) without its map or an approval"
@@ -1679,10 +1679,20 @@ def clusterInitSuite : TestSuite := {
           -- the master is the same process (pod UID and flared boot id
           -- unchanged — a restart would reset the counter); and the master
           -- and the replica read did not change roles or pods meanwhile.
+          -- The master is read first under the cluster's own read balance;
+          -- reads are then routed to the replica (master 0 / slave 100) for
+          -- its check, and the spec is restored before the verdict.
           match ← c.pair with
           | .error e => return .fail e
           | .ok (mPodR, m2, sPodR, s2) =>
             let onM ← allKeysOn c m2 "init" 30
+            let balance0 := ((← kubectlGetJsonpath "flarecluster" initCfg.name ns "{.spec.readBalance}").toOption.getD "").trim
+            let routedPatch ← kubectlPatch "flarecluster" initCfg.name ns "{\"spec\":{\"readBalance\":{\"master\":0,\"slave\":100}}}"
+            let routed ← waitForCondition "a GET on the replica is served without the master" 150 do
+              let g0 ← c.statNat m2 "cmd_get"
+              discard <| memcachedGet c.cfg.debugPod c.cfg.«namespace» s2 c.cfg.flarePort "init_0"
+              let g1 ← c.statNat m2 "cmd_get"
+              return g0.isSome && g0 == g1
             let mUid0 ← c.podUid mPodR
             let sUid0 ← c.podUid sPodR
             let mBoot0 ← c.statNat m2 "reconstruction_boot_id"
@@ -1693,6 +1703,11 @@ def clusterInitSuite : TestSuite := {
             let mUid1 ← c.podUid mPodR
             let sUid1 ← c.podUid sPodR
             let rolesAfter ← c.pair
+            let restorePatch := if balance0.isEmpty then "{\"spec\":{\"readBalance\":null}}" else s!"\{\"spec\":\{\"readBalance\":{balance0}}}"
+            let restored ← kubectlPatch "flarecluster" initCfg.name ns restorePatch
+            IO.eprintln s!"# read routing: spec before {if balance0.isEmpty then "(unset)" else balance0}; routed to the replica={routedPatch.isOk}, replica served locally before the check={routed}; restored={restored.isOk}"
+            if let .error e := routedPatch then return .fail s!"could not route reads to the replica: {e}"
+            if let .error e := restored then return .fail s!"could not restore the read balance: {e}"
             let sameRoles := match rolesAfter with
               | .ok (m', _, s', _) => m' == mPodR && s' == sPodR
               | .error _ => false

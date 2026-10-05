@@ -35,6 +35,12 @@ structure ClusterConfig where
   /-- Extra environment for the per-suite operator, as (name, value). Used
       by suites that need a test seam the production default leaves off. -/
   operatorEnv : List (String × String) := []
+  /-- Extra environment for every flared container (test seams such as
+      FLARE_TEST_DISABLE_SNAPSHOT_BOOTSTRAP), as (name, value). -/
+  flaredEnv : List (String × String) := []
+  /-- Extra flared command-line options (e.g. "--reconstruction-bwlimit 128"
+      to make a dump last long enough to interrupt). -/
+  flaredArgs : String := ""
   /-- Persist flared data on a PVC (volumeClaimTemplates) instead of the
       pod-local tmpdir. With a PVC the data directory survives pod
       recreation, so a partition can recover its data even when the master
@@ -234,6 +240,8 @@ def statefulSetYaml (cfg : ClusterConfig) : String :=
   -- with an empty data directory (TCH stores a single `.hdb` file; RocksDB
   -- stores a directory). WITH a PVC the whole point is that data survives
   -- pod recreation, so we only mkdir and never wipe.
+  let flaredEnvLines := String.join (cfg.flaredEnv.map fun (k, v) =>
+    s!"\n            - name: {k}\n              value: \"{v}\"")
   let persistent := cfg.usePvc || cfg.useTmpfs
   let dataDir := if persistent then "/data/flare" else "/tmp/flare"
   -- RESTORE hook (PVC only): if the marker file exists it names a checkpoint
@@ -325,13 +333,13 @@ spec:
         - name: flared
           image: {image}
           imagePullPolicy: {pullPolicyFor cfg.flaredImageOverride}
-          command: [\"sh\", \"-c\", \"{prep} && exec flared --config=/etc/flared/extra.conf --data-dir {dataDir} --server-port {cfg.flarePort} --index-server-name {operatorSvc} --index-server-port {cfg.operatorPort} {storageFlag} --metrics-server-port 9150 --stderr\"]{preStopBlock}
+          command: [\"sh\", \"-c\", \"{prep} && exec flared --config=/etc/flared/extra.conf --data-dir {dataDir} --server-port {cfg.flarePort} --index-server-name {operatorSvc} --index-server-port {cfg.operatorPort} {storageFlag} --metrics-server-port 9150 --stderr {cfg.flaredArgs}\"]{preStopBlock}
           # Same allocator setting as the chart (cluster.mallocArenaMax,
           # default 2). Without it glibc keeps up to 8 arenas per core and the
           # test pods fragment memory in a way production pods do not.
           env:
             - name: MALLOC_ARENA_MAX
-              value: \"2\"
+              value: \"2\"{flaredEnvLines}
           ports:
             - containerPort: {cfg.flarePort}
               name: flare

@@ -894,7 +894,36 @@ private def enablePurgedCfg : ClusterConfig := {
   storageBackend := "rocksdb"
   usePvc := true
   extraFlaredConf := "rocksdb-write-buffer-size-mb = 4\nrocksdb-wal-ttl-seconds = 60\nrocksdb-wal-size-limit-mb = 16"
+  -- Slow ConfigMap propagation, made deterministic: the operator holds every
+  -- rocksdb config write back 45 s, so the replica is read in the OLD mode
+  -- after the follow change (review 2026-10-05).
+  operatorEnv := [("FLARE_TEST_CONF_WRITE_DELAY_SECONDS", "45")]
 }
+
+/-- Seconds of day of a `kubectl logs --timestamps` line (RFC 3339, UTC). -/
+private def logTs (line : String) : Option Float :=
+  match (line.splitOn "T").drop 1 |>.head? with
+  | none => none
+  | some rest =>
+    match (rest.takeWhile (· != 'Z')).splitOn ":" with
+    | [h, m, sec] =>
+      let (whole, frac) := match sec.splitOn "." with
+        | [w, f] => (w, f)
+        | _ => (sec, "0")
+      match h.toNat?, m.toNat?, whole.toNat?, frac.toNat? with
+      | some hh, some mm, some ss, some ff =>
+        some (hh.toFloat * 3600 + mm.toFloat * 60 + ss.toFloat + ff.toFloat / (10 : Float) ^ frac.length.toFloat)
+      | _, _, _, _ => none
+    | _ => none
+
+/-- First line containing `needle` at or after `from` (seconds of day). -/
+private def firstAt (lines : List String) (needle : String) (from_ : Float) : Option (Float × String) :=
+  lines.findSome? fun l =>
+    if containsSubstr l needle then
+      match logTs l with
+      | some t => if t ≥ from_ then some (t, l) else none
+      | none => none
+    else none
 
 private def enablePurgedPatch (identity follow : Bool) : String :=
   s!"\{\"spec\":\{\"rocksdb\":\{\"writeBufferSizeMb\":4,\"walTtlSeconds\":60,\"walSizeLimitMb\":16,\"replIdentityForward\":{identity},\"replFollowEnabled\":{follow},\"replFollowPollIntervalUsec\":200000}}}"
@@ -959,6 +988,36 @@ def enablePurgedSuite : TestSuite := {
             | .ok o => (o.splitOn "\n").filter (fun l => containsSubstr l "REPLICA REPAIR requested by the follower" || containsSubstr l "REPLICA REPAIR: demoting" || containsSubstr l "replica repair DEFERRED" || containsSubstr l "replica repair HELD")
             | .error _ => []
           IO.eprintln s!"# timeline: needs_rebuild first seen at +{(← tDeclared.get)}s, reconstruction started by +{(← tRebuild.get)}s (since follow was enabled)\n# operator repair lines:\n{String.intercalate "\n" (opLines.take 6)}"
+          -- Split timeline (review 2026-10-05): config change → delivered,
+          -- delivered → observed, observed → requested → started.
+          let opAll := match ← kubectl ["logs", "-n", enablePurgedCfg.«namespace», "-l", s!"app={enablePurgedCfg.operatorName}", "--timestamps", "--tail=40000"] with
+            | .ok o => o.splitOn "\n"
+            | .error _ => []
+          let sPodName := match ← c.pair with | .ok (_, _, sp, _) => sp | .error _ => ""
+          let flaredAll := match ← kubectl ["logs", "-n", enablePurgedCfg.«namespace», sPodName, "-c", "flared", "--timestamps", "--tail=40000"] with
+            | .ok o => o.splitOn "\n"
+            | .error _ => []
+          let tChange := firstAt opAll "follow configuration changed to follow on" 0
+          let from0 := (tChange.map (·.1)).getD 0
+          let tRelease := firstAt opAll "TEST SEAM: releasing the held rocksdb config write" from0
+          let tLanded := firstAt opAll "config propagation confirmed" ((tRelease.map (·.1)).getD from0)
+          let tConfirmed := firstAt opAll s!"follow configuration CONFIRMED on {sPodName}" from0
+          let tRequested := firstAt opAll "REPLICA REPAIR requested by the follower" from0
+          let tStarted := (firstAt flaredAll "truncating local storage before full-dump" ((tRequested.map (·.1)).getD from0)).orElse
+            (fun _ => firstAt flaredAll "attempting snapshot bootstrap" ((tRequested.map (·.1)).getD from0))
+          let oldReads : Option Nat := tConfirmed.bind fun (_, l) =>
+            ((l.splitOn "old mode read ").drop 1).head?.bind fun r => (r.takeWhile Char.isDigit).toNat?
+          let gap := fun (a b : Option (Float × String)) => match a, b with
+            | some (x, _), some (y, _) => some (y - x)
+            | _, _ => none
+          IO.eprintln s!"# split timeline (s): change→write released {gap tChange tRelease}; released→delivered (propagation confirmed) {gap tRelease tLanded}; delivered→observed (CONFIRMED) {gap tLanded tConfirmed}; observed→requested {gap tConfirmed tRequested}; requested→reconstruction started {gap tRequested tStarted}; old mode read before confirmation {oldReads} time(s)"
+          let timelineFail : Option String :=
+            if tChange.isNone then some "the operator never logged the follow configuration change"
+            else if tConfirmed.isNone then some s!"the operator never confirmed the follow configuration on {sPodName}"
+            else if (oldReads.getD 0) == 0 then some "precondition: the replica was never read in the OLD mode after the change (the delayed write did not delay)"
+            else if (gap tLanded tConfirmed).any (· > 30) then some s!"observed {gap tLanded tConfirmed} s after the configuration was delivered: back to the long re-read interval"
+            else if (gap tConfirmed tRequested).any (· > 30) then some s!"the repair was requested {gap tConfirmed tRequested} s after the follow mode was observed"
+            else none
           let recon1 := (← c.statNat sIp "reconstruction_started").getD 0
           let purgedSeen := (← states.get).any (containsSubstr · "lsn_purged")
           IO.eprintln s!"# follow on: states seen {← states.get}; lsn_purged seen={purgedSeen}; reconstruction_started {recon0}→{recon1}; following={following}"
@@ -972,6 +1031,7 @@ def enablePurgedSuite : TestSuite := {
             IO.eprintln s!"# operator repair decisions ({repairLines.length} line(s)):\n{String.intercalate "\n" (repairLines.reverse.take 25).reverse}"
             IO.eprintln s!"# ledger: dests={← c.ledgerDests}"
             return .fail s!"expected one rebuild then following; states {← states.get}, reconstruction_started {recon0}→{recon1}"
+          if let some why := timelineFail then return .fail why
           if !(← convergedItems c mIp sIp "after the rebuild: replica matches the master") then
             return .fail s!"after the rebuild: items master={← c.currItems mIp} replica={← c.currItems sIp}"
           if let some bad ← sampleEqual c mIp sIp [("legacy", 100)] then return .fail s!"value mismatch: {bad}"
@@ -1429,34 +1489,302 @@ def identitySuite : TestSuite := {
             let healed ← waitForCondition "the replaced and drained pods return and the copies match" 480 do
               return (← c.threeInSync).isSome
             if !healed then return .fail "the cluster did not converge"
-            return .pass },
+            return .pass }
+  ]
+}
 
-    { name := "SAF-08 legitimate empty master: every key is deleted on the master while one replica misses the deletes (forwards cut); the repair request is NOT deferred forever — the master is empty under the SAME history, so the replica is rebuilt to empty"
+-- ─── SAF-08: an empty repair source, proven by rebuild evidence ──────────
+
+/-- Every rebuild in this suite is a truncate + full dump (no snapshot, no
+    WAL catch-up), throttled so a dump lasts long enough (~50 s for the
+    6.4 MB data set) to be interrupted. -/
+private def emptySourceCfg : ClusterConfig := {
+  name := "empty-source"
+  «namespace» := "flare-empty-source"
+  partitions := 1
+  replicas := 3
+  operatorName := "flare-operator"
+  debugPod := "debug-empty-source"
+  storageBackend := "rocksdb"
+  usePvc := true
+  drainSeconds := 20
+  flaredEnv := [("FLARE_TEST_DISABLE_SNAPSHOT_BOOTSTRAP", "1"), ("FLARE_TEST_DISABLE_WAL_RECONSTRUCTION", "1")]
+  flaredArgs := "--reconstruction-bwlimit 128"
+}
+
+/-- (rebuilt-from master_id, rebuilt-from epoch) of a node: `none` = stats
+    unreadable; `some (none, none)` = no evidence. -/
+private def Ctx.evidence (c : Ctx) (ip : String) : IO (Option (Option String × Option String)) := do
+  match ← c.statsOf ip with
+  | none => return none
+  | some o =>
+    if !containsSubstr o "STAT rocksdb_source_epoch" then return none
+    return some (statVal o "rocksdb_rebuilt_from_master_id", statVal o "rocksdb_rebuilt_from_epoch")
+
+private def Ctx.flaredLog (c : Ctx) (pod : String) (previous : Bool := false) : IO String := do
+  match ← kubectl (["logs", "-n", c.cfg.«namespace», pod, "-c", "flared", "--tail=20000"] ++ (if previous then ["--previous"] else [])) with
+  | .ok o => return o
+  | .error _ => return ""
+
+/-- Lines after the LAST occurrence of `marker` (the whole log if absent). -/
+private def afterLast (log marker : String) : String :=
+  match (log.splitOn marker).getLast? with
+  | some tail => if (log.splitOn marker).length > 1 then tail else log
+  | none => log
+
+/-- Wait until `pod`'s flared logs "starting dump operation" in its current
+    container (a dump is under way). -/
+private def Ctx.waitDumpStart (c : Ctx) (pod : String) (secs : Nat) : IO Bool :=
+  waitForCondition s!"{pod} starts a full dump" secs do
+    let log ← c.flaredLog pod
+    return containsSubstr log "starting dump operation" && !containsSubstr (afterLast log "starting dump operation") "reconstruction via full dump completed"
+
+/-- Sample `ip`'s evidence every 2 s until `pod`'s current flared logs that it
+    recorded evidence (or `secs`). Returns (evidence ever seen BEFORE the
+    recording line, recorded). -/
+private def Ctx.noEvidenceUntilRecorded (c : Ctx) (pod ip : String) (secs : Nat) : IO (List String × Bool) := do
+  let mut early : List String := []
+  for _ in [0:secs / 2] do
+    let recorded := containsSubstr (← c.flaredLog pod) "rebuild evidence recorded"
+    if recorded then return (early, true)
+    match ← c.evidence ip with
+    | some (_, some e) =>
+      -- re-check: the line may have been written between the two reads
+      if !containsSubstr (← c.flaredLog pod) "rebuild evidence recorded" then early := early ++ [e]
+    | _ => pure ()
+    IO.sleep 2000
+  return (early, false)
+
+private def Ctx.newMasterAfter (c : Ctx) (old : String) (secs : Nat) : IO (Option String) := do
+  for _ in [0:secs / 2] do
+    match (← c.p0Roles).1 with
+    | some m => if m != old then return some m
+    | none => pure ()
+    IO.sleep 2000
+  return none
+
+private def Ctx.allInSync (c : Ctx) (n : Nat) (secs : Nat) : IO (Option (String × String × String)) := do
+  for _ in [0:secs / 4] do
+    match ← c.p0Roles with
+    | (some m, [a, b]) =>
+      let ns := c.cfg.«namespace»
+      if (← c.currItems ((← getPodIp m ns).getD "")) == n && (← c.currItems ((← getPodIp a ns).getD "")) == n
+          && (← c.currItems ((← getPodIp b ns).getD "")) == n then return some (m, a, b)
+    | _ => pure ()
+    IO.sleep 4000
+  return none
+
+def emptySourceSuite : TestSuite := {
+  name := "empty-source"
+  setup := do
+    deployCluster emptySourceCfg
+    -- Faults here compose a drained master with a rebuilding replica; the
+    -- breaker is not under test (see the copy-identity suite).
+    discard <| kubectlPatch "flarecluster" emptySourceCfg.name emptySourceCfg.«namespace» "{\"spec\":{\"circuitBreaker\":{\"minUnavailableToTrip\":3}}}"
+    IO.sleep 30000
+  teardown := do
+    for ip in (← getPodIps s!"app=flare,cluster={emptySourceCfg.name}" emptySourceCfg.«namespace») do
+      for ip2 in (← getPodIps s!"app=flare,cluster={emptySourceCfg.name}" emptySourceCfg.«namespace») do
+        if ip != ip2 then
+          for _ in [0:2] do
+            discard <| hostCmd "docker" (["exec", kindNode, "iptables", "-D", "FORWARD"] ++ ruleSpec ip ip2)
+    cleanupCluster emptySourceCfg
+  onFailure := dumpClusterDiagnostics emptySourceCfg.«namespace» s!"app={emptySourceCfg.operatorName}"
+  tests :=
+    let c : Ctx := { cfg := emptySourceCfg }
+    let ns := emptySourceCfg.«namespace»
+    let ip : String → IO String := fun p => do return (← getPodIp p ns).getD ""
+    [
+    { name := "SAF-08 rebuild evidence: after a PROMOTION, the ex-master rejoins and is rebuilt by a clean truncate + full dump; it records the current master's master_id and source epoch (identical at the dump's start and end) — although its own epoch and the master's differ"
       run := do
-        match ← c.threeInSync with
-        | none => return .fail "precondition: one master and two in-sync Active slaves"
-        | some (m, a, _, items) =>
-          let mIp := (← getPodIp m ns).getD ""
-          let aIp := (← getPodIp a ns).getD ""
+        let graceOver ← waitForCondition "operator past its startup grace period" 240 do
+          return containsSubstr (← c.opLog 400) "grace period over"
+        if !graceOver then return .fail "the operator never logged the end of its startup grace period"
+        match ← c.p0Roles with
+        | (some m0, [_, _]) =>
+          let w ← c.bulkWrite (← ip m0) "es" 400 16384
+          if w != 400 then return .fail s!"precondition: stored {w}/400"
+          if (← c.allInSync 400 240).isNone then return .fail "precondition: the copies did not converge on 400 keys"
+          discard <| kubectl ["delete", "pod", m0, "-n", ns, "--wait=false"]
+          let some m1 ← c.newMasterAfter m0 180 | return .fail s!"no successor was promoted after draining {m0}"
+          let some _ ← c.allInSync 400 420 | return .fail s!"the ex-master {m0} did not rejoin with every key"
+          let mIp ← ip m1
+          let rIp ← ip m0
+          let mId ← c.statStr mIp "rocksdb_master_id"
+          let mEpoch ← c.statStr mIp "rocksdb_source_epoch"
+          let mReason ← c.statStr mIp "rocksdb_source_epoch_reason"
+          let rEpoch ← c.statStr rIp "rocksdb_source_epoch"
+          let ev ← c.evidence rIp
+          let log ← c.flaredLog m0
+          let seamDump := containsSubstr log "truncate+full-dump" && containsSubstr log "reconstruction via full dump completed"
+          IO.eprintln s!"# master {m1}: master_id {mId}, epoch {mEpoch} ({mReason}); rebuilt {m0}: own epoch {rEpoch}, evidence {ev}; full dump via the seam={seamDump}"
+          if !seamDump then return .fail s!"precondition: {m0} was not rebuilt by truncate + full dump"
+          if mReason != some "promotion" then return .fail s!"precondition: the master's epoch reason is {mReason}, not promotion"
+          if rEpoch == mEpoch then return .fail "precondition: the replica's own epoch equals the master's (the old rule alone would accept)"
+          if ev != some (mId, mEpoch) then return .fail s!"the rebuilt replica's evidence {ev} is not the master's (master_id {mId}, epoch {mEpoch})"
+          return .pass
+        | _ => return .fail "precondition: one master and two slaves" },
+
+    { name := "SAF-08 legitimately emptied master after a full-dump rebuild: every key is deleted on the (promoted) master while the rebuilt replica misses the deletes; the repair is accepted on the rebuild evidence and the replica is rebuilt to empty — not deferred"
+      run := do
+        match ← c.p0Roles with
+        | (some m, [a, b]) =>
+          let mIp ← ip m
+          let mEpoch ← c.statStr mIp "rocksdb_source_epoch"
+          -- the target: a slave whose evidence names this master's epoch
+          let mut target : Option (String × String) := none
+          for s in [a, b] do
+            let sIp ← ip s
+            if let some (_, some e) ← c.evidence sIp then
+              if some e == mEpoch && target.isNone then target := some (s, sIp)
+          let some (r, rIp) := target | return .fail s!"precondition: no slave carries evidence of the master's epoch {mEpoch}"
           let drops0 := (← c.statNat mIp "proxy_write_dropped").getD 0
-          match ← cutForwards mIp aIp with
+          match ← cutForwards mIp rIp with
           | .error e => return .fail e
           | .ok () => pure ()
-          -- delete every key the suite wrote (prefix id_), on the master
-          let del ← c.deleteKeys mIp "id" 0 60
+          let del ← c.deleteKeys mIp "es" 0 400
           let mItems ← c.currItems mIp
           let dropped ← waitForCondition "the master counts the dropped deletes" 120 do
             return ((← c.statNat mIp "proxy_write_dropped").getD 0) > drops0
-          healForwards mIp aIp
-          IO.eprintln s!"# deleted {del} keys on {m} (items now {mItems}); drops counted={dropped}; {a} still holds {← c.currItems aIp}"
-          if mItems != 0 then return .fail s!"precondition: the master still holds {mItems} keys (had {items})"
+          healForwards mIp rIp
+          IO.eprintln s!"# deleted {del} keys on {m} (items now {mItems}); drops counted={dropped}; {r} still holds {← c.currItems rIp}"
+          if mItems != 0 then return .fail s!"precondition: the master still holds {mItems} keys"
           if !dropped then return .fail "precondition: the master never counted dropped forwards"
           let resolved ← waitForCondition "the repair rebuilds the replica to empty and the ledger closes" 600 do
-            return (← c.currItems aIp) == 0 && (← c.ledgerDests).isEmpty
+            return (← c.currItems rIp) == 0 && (← c.ledgerDests).isEmpty
           let log ← c.opLog 200000
-          let deferredEmpty := (log.splitOn "\n").any fun l => containsSubstr l "replica repair DEFERRED" && containsSubstr l "holds 0 keys"
-          IO.eprintln s!"# repair resolved={resolved}; replica items {← c.currItems aIp}; ledger {← c.ledgerDests}; deferred as an empty source={deferredEmpty}"
-          if !resolved then return .fail s!"the repair did not resolve (replica items {← c.currItems aIp}, ledger {← c.ledgerDests}, deferred as empty={deferredEmpty})"
+          let deferred := (log.splitOn "\n").filter fun l => containsSubstr l "replica repair DEFERRED" && containsSubstr l r
+          IO.eprintln s!"# repair resolved={resolved}; {r} items {← c.currItems rIp}; ledger {← c.ledgerDests}; deferral lines for {r}: {deferred.length}{if deferred.isEmpty then "" else "\n# " ++ (deferred.getLast?.getD "")}"
+          if !resolved then return .fail s!"the repair did not resolve ({deferred.length} deferral(s))"
+          return .pass
+        | _ => return .fail "precondition: one master and two slaves" },
+
+    { name := "SAF-08 rebuild evidence vs a restart mid-dump: a replica that carries evidence is restarted, rebuilds by full dump, and is killed again mid-dump; no evidence is seen from the first dump's start until a dump COMPLETES, and the final evidence names the master's epoch"
+      run := do
+        match ← c.p0Roles with
+        | (some m, [a, b]) =>
+          let mIp ← ip m
+          let w ← c.bulkWrite mIp "es" 400 16384
+          if w != 400 then return .fail s!"precondition: stored {w}/400"
+          if (← c.allInSync 400 300).isNone then return .fail "precondition: the copies did not converge on 400 keys"
+          let mId ← c.statStr mIp "rocksdb_master_id"
+          let mEpoch ← c.statStr mIp "rocksdb_source_epoch"
+          let mut target : Option (String × String) := none
+          for s in [a, b] do
+            let sIp ← ip s
+            if let some (_, some _) ← c.evidence sIp then
+              if target.isNone then target := some (s, sIp)
+          let some (r, rIp) := target | return .fail "precondition: no slave carries rebuild evidence"
+          let ev0 ← c.evidence rIp
+          match ← c.killFlaredIn r with
+          | .error e => return .fail s!"could not kill flared in {r}: {e}"
+          | .ok _ => pure ()
+          if !(← c.waitDumpStart r 180) then return .fail s!"{r} did not start a full dump after its restart"
+          IO.sleep 5000
+          let evMid ← c.evidence (← ip r)
+          match ← c.killFlaredIn r with
+          | .error e => return .fail s!"could not kill flared in {r} mid-dump: {e}"
+          | .ok _ => pure ()
+          IO.sleep 3000
+          let prevLog ← c.flaredLog r true
+          let interrupted := !containsSubstr (afterLast prevLog "starting dump operation") "reconstruction via full dump completed"
+          let recordedEarly := containsSubstr prevLog "rebuild evidence recorded"
+          let (early, recorded) ← c.noEvidenceUntilRecorded r (← ip r) 420
+          let evEnd ← c.evidence (← ip r)
+          let items ← c.currItems (← ip r)
+          IO.eprintln s!"# {r}: evidence before {ev0}; mid-dump {evMid}; dump interrupted by the kill={interrupted}; the killed process recorded evidence={recordedEarly}; evidence seen before a completed dump {early}; recorded after the restart={recorded}; final {evEnd} (master {mId}, {mEpoch}); items {items}"
+          if !interrupted then return .fail "precondition: the second kill did not interrupt a dump"
+          if recordedEarly then return .fail "the interrupted process recorded rebuild evidence"
+          if !(evMid matches some (_, none)) then return .fail s!"evidence was present during the dump: {evMid}"
+          if !early.isEmpty then return .fail s!"evidence was visible before any dump completed: {early}"
+          if !recorded then return .fail "no evidence was recorded after the completed rebuild"
+          if evEnd != some (mId, mEpoch) then return .fail s!"the final evidence {evEnd} does not name the master's (master_id {mId}, epoch {mEpoch})"
+          if items != 400 then return .fail s!"the rebuilt replica holds {items}/400 keys"
+          return .pass
+        | _ => return .fail "precondition: one master and two slaves" },
+
+    { name := "SAF-08 rebuild evidence vs a source change mid-dump: while a replica dumps from the master, the master is drained and another node promoted; the interrupted dump records nothing, and the evidence finally recorded names the NEW master's epoch, never the old one's"
+      run := do
+        match ← c.p0Roles with
+        | (some m, [a, b]) =>
+          let mIp ← ip m
+          let oldEpoch ← c.statStr mIp "rocksdb_source_epoch"
+          let mut target : Option (String × String) := none
+          for s in [a, b] do
+            let sIp ← ip s
+            if let some (_, some _) ← c.evidence sIp then
+              if target.isNone then target := some (s, sIp)
+          let some (r, _) := target | return .fail "precondition: no slave carries rebuild evidence"
+          match ← c.killFlaredIn r with
+          | .error e => return .fail s!"could not kill flared in {r}: {e}"
+          | .ok _ => pure ()
+          if !(← c.waitDumpStart r 180) then return .fail s!"{r} did not start a full dump after its restart"
+          let startLine := ((afterLast (← c.flaredLog r) "starting dump operation").splitOn "\n").head?.getD ""
+          let fromOld := containsSubstr startLine (m ++ ".")
+          discard <| kubectl ["delete", "pod", m, "-n", ns, "--wait=false"]
+          let some m2 ← c.newMasterAfter m 180 | return .fail s!"no successor was promoted after draining {m}"
+          if m2 == r then return .fail s!"precondition: the rebuilding replica {r} itself was promoted"
+          let newEpoch ← c.statStr (← ip m2) "rocksdb_source_epoch"
+          let (early, recorded) ← c.noEvidenceUntilRecorded r (← ip r) 480
+          let log ← c.flaredLog r
+          let completedFromOld := (log.splitOn "\n").any fun l => containsSubstr l "reconstruction via full dump completed" && containsSubstr l (m ++ ".")
+          let evEnd ← c.evidence (← ip r)
+          IO.eprintln s!"# {r} dumped from {m} first={fromOld}; {m} drained, {m2} promoted (epoch {oldEpoch} -> {newEpoch}); evidence seen before a completed dump {early}; recorded={recorded}; a dump from {m} completed={completedFromOld}; final evidence {evEnd}"
+          if !fromOld then return .fail s!"precondition: the dump did not start from the master {m} ({startLine.trim})"
+          if completedFromOld then return .fail s!"precondition: the dump from {m} completed before the drain (not interrupted)"
+          if !early.isEmpty then return .fail s!"evidence was visible before a dump completed: {early}"
+          if !recorded then return .fail "no evidence was recorded after the rebuild from the new master"
+          match evEnd with
+          | some (_, some e) =>
+            if some e == oldEpoch then return .fail s!"the evidence names the OLD master's epoch {e} although its dump was interrupted"
+            if some e != newEpoch then return .fail s!"the evidence {e} is not the new master's epoch {newEpoch}"
+            return .pass
+          | _ => return .fail s!"no final evidence ({evEnd})"
+        | _ => return .fail "precondition: one master and two slaves" },
+
+    { name := "SAF-08 same master_id, different history: the master is drained and a copy promoted (new epoch); its keys are then all deleted while a replica whose evidence names the EARLIER epoch misses them — the repair DEFERS and the replica keeps every key (the rule cannot prove the emptiness legitimate, even though here it was)"
+      run := do
+        match ← c.allInSync 400 480 with
+        | none => return .fail "precondition: the copies did not converge on 400 keys"
+        | some (m, _, _) =>
+          let mIp ← ip m
+          let mId ← c.statStr mIp "rocksdb_master_id"
+          let earlier ← c.statStr mIp "rocksdb_source_epoch"
+          discard <| kubectl ["delete", "pod", m, "-n", ns, "--wait=false"]
+          let some x ← c.newMasterAfter m 180 | return .fail s!"no successor was promoted after draining {m}"
+          let some _ ← c.allInSync 400 480 | return .fail s!"{m} did not rejoin with every key"
+          let xIp ← ip x
+          let xId ← c.statStr xIp "rocksdb_master_id"
+          let xEpoch ← c.statStr xIp "rocksdb_source_epoch"
+          let xReason ← c.statStr xIp "rocksdb_source_epoch_reason"
+          -- the target: a slave other than the drained one, still carrying
+          -- the EARLIER epoch's evidence
+          let mut target : Option (String × String) := none
+          for s in (← c.p0Roles).2 do
+            if s != m then
+              let sIp ← ip s
+              if let some (_, some e) ← c.evidence sIp then
+                if some e == earlier && target.isNone then target := some (s, sIp)
+          let some (y, yIp) := target | return .fail s!"precondition: no slave besides {m} carries evidence of the earlier epoch {earlier}"
+          if xId != mId then return .fail s!"precondition: the promoted master's master_id {xId} differs from the earlier one {mId}"
+          if xReason != some "promotion" || xEpoch == earlier then return .fail s!"precondition: the promoted master's epoch {xEpoch} ({xReason})"
+          let drops0 := (← c.statNat xIp "proxy_write_dropped").getD 0
+          match ← cutForwards xIp yIp with
+          | .error e => return .fail e
+          | .ok () => pure ()
+          let del ← c.deleteKeys xIp "es" 0 400
+          let dropped ← waitForCondition "the master counts the dropped deletes" 120 do
+            return ((← c.statNat xIp "proxy_write_dropped").getD 0) > drops0
+          healForwards xIp yIp
+          let deferredSeen ← waitForCondition s!"the repair of {y} is deferred on the evidence" 240 do
+            let log ← c.opLog 4000
+            return (log.splitOn "\n").any fun l => containsSubstr l "replica repair DEFERRED" && containsSubstr l y && containsSubstr l "holds 0 keys"
+          IO.sleep 60000
+          let yItems ← c.currItems yIp
+          IO.eprintln s!"# promoted {x} (master_id {xId}, epoch {earlier} -> {xEpoch}, {xReason}); deleted {del} on it, drops counted={dropped}; {y} evidence names {earlier}; deferred={deferredSeen}; {y} items after 60 s more: {yItems}; ledger {← c.ledgerDests}"
+          if !dropped then return .fail "precondition: the master never counted dropped forwards"
+          if !deferredSeen then return .fail s!"the repair of {y} from an empty promoted master was not deferred"
+          if yItems != 400 then return .fail s!"{y} lost keys ({yItems}/400): it was rebuilt from the empty promoted master"
           return .pass }
   ]
 }

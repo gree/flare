@@ -3974,7 +3974,8 @@
         "2026-10-05 review corrections: (a) Readiness is a snapshot, not identity — excluding NotReady candidates closes the window BEFORE a replacement registers, not a restart/replacement AFTER the observation; now every node a pass promotes must still be the incarnation observed in that pass (pod UID and flared container restart count, from the pod list) when the commit happens, else the pass is dropped and not persisted (commitChecked; test seam FLARE_TEST_PROMOTION_BARRIER). (b) The empty-master self-heal's UID precondition protects the delete target only; the surviving successor's incarnation is now bracketed around its fresh stats and must be stable, and the validated successor is pinned for the following drain while its pod stays that incarnation. (c) Repair demotion: the source's stats are bracketed by its incarnation and the atomic update requires the partition's master entry (key and regEpoch) unchanged. (d) An EMPTY repair source is accepted only under the replica's own lineage (rocksdb_master_id: deleted to empty), otherwise deferred — neither 'empty is safe to rebuild from' nor 'empty is never a source'. CI pending.",
         "2026-10-05 review round 2 (implemented, NOT CI-verified): (1) Ready, UID, container restart count and deletionTimestamp now come from ONE pod-list response (parsePodRows); before, two list calls joined by pod name could pair an OLD pod's Ready with a NEW pod's UID. Identity needs both halves observed both times — a missing restart count on both sides is no longer a match. Roles: pod UID + container restart count = Kubernetes' view of the copy's incarnation, used to bind promotion/delete/repair decisions; flared's reconstruction_boot_id = flared's own view of its process, used to bind data-plane statements (follow position, completion records). (2) An EMPTY repair source is accepted only with the replica's lineage AND either the replica's source epoch (deleted to empty in the same history) or an epoch advanced by a BULK rewrite; flared now records why each epoch was minted (rocksdb_source_epoch_reason: new / promotion / bulk / inherited; legacy = unknown). An epoch minted by a promotion (an empty copy promoted) or for an unknown reason defers. Unit-tested (flare_unit, cutter test_source_epoch_reason_recorded_and_persisted); E2E covers delete-to-empty (copy-identity) and the flush_all recovery path (continuous-replication bulk test); promotion of an empty copy is not staged in E2E.",
         "2026-10-05 (PR run 37278389267 on cfb7f02), first CI execution of copy-identity, classified as HARNESS: test 1 PASSED (a slave replaced under the same name, Pending, was withheld — logged — and the healthy slave took over with 60/60 keys); test 3 PASSED (the pass that chose a successor was held, that successor's flared was killed, the promotion was ABORTED on release, and a later pass promoted a copy with 60/60). Test 4's product outcome was correct (aborted; the other slave took over with 60/60) but its 'replaced = Pending' precondition was wrong: with OrderedReady the StatefulSet does not recreate the pod while the drained master is terminating, so it was absent — now 'absent or a new UID'. Test 2 checked roles once before the previous test's pods were back (now waits for one master + two in-sync Active slaves). Test 4 also composed two faults at once (drained master + replaced successor = 2 of 3 unavailable), which trips the breaker by design; a tripped breaker holds until a human acts (a Down live node is not re-seated, OrderedReady blocks the next pod, healthy stays 34% < 80%), so test 5 could not start — the suite now raises minUnavailableToTrip to 3 for itself. The breaker's hold-until-human behaviour is unchanged.",
-        "2026-10-05 (PR run 37283759673 on 8ada54f; NOT independently reviewed). copy-identity tests 10-13 PASSED: a same-name replacement and a process restart were never promoted, and the restart and the replacement after observation were each ABORTED at commit with the other slave taking over with every key. These passes ran with the suite's test-only breaker floor (minUnavailableToTrip 3): they are evidence for copy identity ONLY, NOT for recovery under the production breaker setting. Test 14 (legitimately emptied master) FAILED. This is a PRODUCT-RULE limitation, not a harness error. The operator deferred the repair indefinitely, logging 'the current master holds 0 keys and its source epoch (5:34b28a9d-…) is not the replica's (4:31d0ef6c-…) and was advanced by promotion, not a bulk rewrite … the request stays pending' (breaker-migration report). In legacy (non-follow) mode a replica does not adopt the source epoch through dump reconstruction or a promotion, so after ANY earlier promotion in the cluster a deleted-to-empty master cannot be told from an empty promoted copy under the current rule. The behaviour is safe (no rebuild from an unproven empty source) but not live: the replica stays out of sync until a human acts. A design decision is needed (epoch adoption on reconstruction or re-seat vs a human-approved resolution); it is not implemented."
+        "2026-10-05 (PR run 37283759673 on 8ada54f; NOT independently reviewed). copy-identity tests 10-13 PASSED: a same-name replacement and a process restart were never promoted, and the restart and the replacement after observation were each ABORTED at commit with the other slave taking over with every key. These passes ran with the suite's test-only breaker floor (minUnavailableToTrip 3): they are evidence for copy identity ONLY, NOT for recovery under the production breaker setting. Test 14 (legitimately emptied master) FAILED. This is a PRODUCT-RULE limitation, not a harness error. The operator deferred the repair indefinitely, logging 'the current master holds 0 keys and its source epoch (5:34b28a9d-…) is not the replica's (4:31d0ef6c-…) and was advanced by promotion, not a bulk rewrite … the request stays pending' (breaker-migration report). In legacy (non-follow) mode a replica does not adopt the source epoch through dump reconstruction or a promotion, so after ANY earlier promotion in the cluster a deleted-to-empty master cannot be told from an empty promoted copy under the current rule. The behaviour is safe (no rebuild from an unproven empty source) but not live: the replica stays out of sync until a human acts. A design decision is needed (epoch adoption on reconstruction or re-seat vs a human-approved resolution); it is not implemented.",
+        "2026-10-05 review round (implemented, CI pending; NOT reviewed). Decision: option A, conditioned. flared records REBUILD EVIDENCE (__flare_repl_rebuilt_from = source master_id, source epoch, and this node's own epoch at recording) only after a clean truncate + full dump whose source advertised the same non-empty master_id and source epoch in a features probe at the dump's start and a fresh probe at its end. It is a separate reserved key, NOT the source-epoch field: the local source epoch gates forwarded changes (_decide_change), so adopting the source's epoch there would also accept the source's change stream — a claim about position this evidence must not make. The evidence is dropped durably before every rebuild attempt (a rebuild does not start if it cannot be dropped), on every advance of the node's own epoch (promotion, truncate/flush_all), by a snapshot swap (which also drops the source's copied evidence) and by a wiped DB; evidence recorded under another own epoch is ignored at load, so a lost delete cannot resurrect it. Merge dumps, WAL catch-up and master reconstructions record none. The operator accepts an empty source when lineage matches and the replica's evidence names exactly the master's master_id and epoch (StatsObservation.repairSourceVerdict (c)); otherwise the existing rule (same epoch, or a bulk epoch) applies. Limits: a replica that caught up by WAL sync after a promotion, or was restored by snapshot from a different epoch, still defers (safe, not live); option B (a one-shot human approval bound to the target copy and the source history) is NOT implemented; test seams FLARE_TEST_DISABLE_SNAPSHOT_BOOTSTRAP / FLARE_TEST_DISABLE_WAL_RECONSTRUCTION are E2E-only environment variables."
       ],
       "code": [
         {
@@ -4000,6 +4001,18 @@
         {
           "path": "flare_operator/FlareOperator/StateMachine/StatsObservation.lean",
           "symbol": "repairSourceVerdict"
+        },
+        {
+          "path": "src/lib/storage_rocksdb.cc",
+          "symbol": "set_rebuilt_from"
+        },
+        {
+          "path": "src/lib/handler_reconstruction.cc",
+          "symbol": "handler_reconstruction::_run_once"
+        },
+        {
+          "path": "src/lib/op_meta.cc",
+          "symbol": "op_meta::_run_server"
         }
       ],
       "call_path": "ListPods -> executeK8sRequest -> PodListResponse -> detectDeadNodesPure -> unhealthyMastersKept -> failover.",
@@ -4022,7 +4035,7 @@
         {
           "id": "CHECK-07-identity",
           "kind": "scenario",
-          "procedure": "SAF-08 copy identity (audit docs/reports/2026-10-05-saf08-copy-identity-audit.md). E2E copy-identity (1p x 3r PVC, legacy replication, drain 20 s): (1) a slave is force-deleted with the node cordoned so its same-name replacement stays Pending while the map says Active, then the master is drained — the replaced pod must never be master, the healthy slave must take over with every key, and the operator must log the replaced pod as withheld; (2) a slave's flared is killed -9 (same pod, new process) and the master is drained at once — that slave must not be promoted, the other takes over with every key (the restart-to-registration window is short: an outcome guard). Post-observation (promotion barrier FLARE_TEST_PROMOTION_BARRIER): (3) the pass that chose a successor is held after its observations, that successor's flared is killed, and on release the operator must log PROMOTION ABORTED for it and a later pass promote a valid copy with every key; (4) the same with the chosen successor replaced under the same name (node cordoned): aborted, the other slave takes over; (5) every key deleted on the master while one replica misses the deletes: the repair resolves by rebuilding the replica to empty (same lineage), not deferred forever.",
+          "procedure": "SAF-08 copy identity (audit docs/reports/2026-10-05-saf08-copy-identity-audit.md). E2E copy-identity (1p x 3r PVC, legacy replication, drain 20 s): (1) a slave is force-deleted with the node cordoned so its same-name replacement stays Pending while the map says Active, then the master is drained — the replaced pod must never be master, the healthy slave must take over with every key, and the operator must log the replaced pod as withheld; (2) a slave's flared is killed -9 (same pod, new process) and the master is drained at once — that slave must not be promoted, the other takes over with every key (the restart-to-registration window is short: an outcome guard). Post-observation (promotion barrier FLARE_TEST_PROMOTION_BARRIER): (3) the pass that chose a successor is held after its observations, that successor's flared is killed, and on release the operator must log PROMOTION ABORTED for it and a later pass promote a valid copy with every key; (4) the same with the chosen successor replaced under the same name (node cordoned): aborted, the other slave takes over. (The former test 5, a legitimately emptied master, moved to CHECK-07-emptysource: in that scenario the replica had caught up by WAL sync after a promotion, so no full-dump evidence exists and deferring is the intended outcome under the review-2026-10-05 rule.)",
           "references": [
             {
               "path": "flare_operator/FlareOperator/E2E/Tests/ContinuousReplicationLimits.lean",
@@ -4031,6 +4044,25 @@
             {
               "path": "flare_operator/FlareOperator/StateMachine/StatsObservation.lean",
               "symbol": "repairSourceVerdict"
+            }
+          ]
+        },
+        {
+          "id": "CHECK-07-emptysource",
+          "kind": "scenario",
+          "procedure": "SAF-08 empty repair source proven by rebuild evidence (review 2026-10-05). Unit: flare_unit checkRepairSource (empty promoted master accepted only when the replica's rebuild evidence names exactly its master_id AND epoch; an earlier epoch, another lineage, missing or partial evidence defer); cutter test_rebuild_evidence_rule, test_rebuild_evidence_persisted_and_cleared, test_rebuild_evidence_persist_failure, test_swap_in_snapshot_drops_source_rebuild_evidence. E2E empty-source (wal-recovery leg; 1p x 3r PVC, legacy replication, test seams FLARE_TEST_DISABLE_SNAPSHOT_BOOTSTRAP and FLARE_TEST_DISABLE_WAL_RECONSTRUCTION force every rebuild through truncate + full dump, --reconstruction-bwlimit 128 makes a 6.4 MB dump last ~50 s): (1) after a promotion the ex-master rejoins, is rebuilt by full dump and records the current master's master_id and epoch although its own epoch differs; (2) every key deleted on that master while the rebuilt replica misses the deletes: the repair is accepted and the replica rebuilt to empty, not deferred; (3) a replica carrying evidence is restarted and killed again mid-dump: no evidence from the first dump's start until a dump completes, the interrupted process records none, final evidence names the master; (4) the master is drained while a replica dumps from it: the interrupted dump records nothing, the evidence finally names the NEW master's epoch, never the old one; (5) a copy is promoted (new epoch, same master_id) and its keys deleted while a replica whose evidence names the earlier epoch misses them: the repair DEFERS and the replica keeps every key.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/ContinuousReplicationLimits.lean",
+              "symbol": "emptySourceSuite"
+            },
+            {
+              "path": "flare_operator/FlareOperator/StateMachine/StatsObservation.lean",
+              "symbol": "repairSourceVerdict"
+            },
+            {
+              "path": "src/lib/storage_rocksdb.cc",
+              "symbol": "rebuild_evidence_valid"
             }
           ]
         }
@@ -4074,7 +4106,7 @@
         },
         "ci_passed": {
           "state": "no",
-          "evidence": "no release candidate set (0/2 checks counted)"
+          "evidence": "no release candidate set (0/3 checks counted)"
         },
         "reviewed": {
           "state": "no",
@@ -5262,7 +5294,8 @@
         "2026-10-05 tracing the enable-purged failure (PR run 37268848902), HYPOTHESIS with a fix, not yet confirmed by CI: a follower's needs_rebuild declaration was turned into a rebuild request only inside the drop-observation block, which runs once per stats probe slot (FLARE_STATS_PROBE_INTERVAL_MS, default 300 s; the enable-purged suite does not shorten it). Depending on where the declaration fell in the slot, the request came up to 5 min late, and demote + reseat + reconstruction then had to fit in the rest of the 420 s window — consistent with an occasional failure. As a product issue: a replica that cannot resume sat with its reads withheld for up to 5 extra minutes. The request now happens in the per-pass ledger step from that pass's classification, against the partition's current master, so the plan acts in the same pass. The failing run's diagnostics could not show the operator's decision (80-line tail), and the test now prints the repair decisions on failure; a recurrence would refute or confirm this.",
         "2026-10-05 (PR run 37268848902 attempt 2, same revision): the enable-purged test PASSED on re-run (idle → needs_rebuild(lsn_purged) → idle(stopped) → following, one rebuild, 1300 items equal). Recorded as a pass that shows the failure is not constant — NOT as a root cause or as 'intermittent harness'. The failure of attempt 1 stays unexplained; the leading hypothesis is the 300 s probe-slot latency of the rebuild request (fixed in 3b0345d), to be confirmed on the new SHA by the time and path from declaration to ledger request to reconstruction start.",
         "2026-10-05 (PR run 37278389267 on cfb7f02, includes 3b0345d): enable-purged PASSED (idle → needs_rebuild(lsn_purged) → idle(stopped) → following, one rebuild). The fix is NOT yet confirmed: on success the test printed no operator or flared lines, so the time and path from declaration to ledger request to reconstruction start could not be read. The test now always prints that timeline (needs_rebuild first seen, reconstruction started, the operator's REPLICA REPAIR lines with timestamps).",
-        "2026-10-05 (PR run 37283759673 on 8ada54f; NOT independently reviewed). enable-purged PASSED (idle → needs_rebuild(lsn_purged) → idle(stopped) → following, reconstruction_started 1→2, items 1300 equal). Its timeline confirms the PATH: follower declaration → operator 'REPLICA REPAIR requested by the follower … declared needs_rebuild (lsn_purged)' at 09:04:40.12 → demotion to a live proxy at 09:04:40.55 (same pass) → reconstruction. It shows a LATENCY gap. needs_rebuild was first seen by the test at about +80 s after enablement, and the reconstruction started by about +225 s (both coarse, from the test's polling), so the operator request came about 2 minutes after the declaration. Probable cause, not verified: the operator re-probes a node whose follow mode it last saw as off only every FLARE_FOLLOW_PROBE_INTERVAL (30) ticks, about 150 s at 5 s ticks, so it learns of the declaration late. A proposed product fix (forget the remembered follow mode when the follow configuration changes) is NOT implemented. The fix is confirmed for correctness of the path, NOT for request latency."
+        "2026-10-05 (PR run 37283759673 on 8ada54f; NOT independently reviewed). enable-purged PASSED (idle → needs_rebuild(lsn_purged) → idle(stopped) → following, reconstruction_started 1→2, items 1300 equal). Its timeline confirms the PATH: follower declaration → operator 'REPLICA REPAIR requested by the follower … declared needs_rebuild (lsn_purged)' at 09:04:40.12 → demotion to a live proxy at 09:04:40.55 (same pass) → reconstruction. It shows a LATENCY gap. needs_rebuild was first seen by the test at about +80 s after enablement, and the reconstruction started by about +225 s (both coarse, from the test's polling), so the operator request came about 2 minutes after the declaration. Probable cause, not verified: the operator re-probes a node whose follow mode it last saw as off only every FLARE_FOLLOW_PROBE_INTERVAL (30) ticks, about 150 s at 5 s ticks, so it learns of the declaration late. A proposed product fix (forget the remembered follow mode when the follow configuration changes) is NOT implemented. The fix is confirmed for correctness of the path, NOT for request latency.",
+        "2026-10-05 review round (implemented, CI pending; NOT reviewed). Request latency after enablement: the code re-read a node remembered out of the mode only every FLARE_FOLLOW_PROBE_INTERVAL (30) passes, consistent with the ~2 min gap in PR run 37283759673 but not confirmed as its cause (no per-pass timeline then). Now a change of spec.rocksdb.replFollowEnabled puts every non-Down slave on a CONFIRMATION list: it is read every pass until a complete reading shows the wanted mode, for at most FLARE_FOLLOW_CONFIRM_PASSES (default 120) passes, then back to the interval with a WARNING (bounded, never an unlimited fast poll). An unreadable reading is Unknown and spends a pass; nothing else changes — the repair ledger, boot ids and mode memory follow their own rules. Clearing the memory alone was rejected: a re-read before the file reaches the pod would remember the old mode and wait the full interval again. Limits: only the follow flag triggers it (other config changes do not); the first observation after an operator restart starts no confirmation (every node is unread then and probed anyway)."
       ],
       "code": [
         {
@@ -5280,6 +5313,10 @@
         {
           "path": "flare_operator/FlareOperator/StateMachine/ReplicaRepair.lean",
           "symbol": "advanceOwned"
+        },
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/FollowEvidence.lean",
+          "symbol": "stepConfirm"
         }
       ],
       "call_path": "cluster::reconstruct_node -> _reconcile_wal_follower_locked starts handler_wal_follower on an Active RocksDB slave -> run(): op_repl_sync_wal::run_client_follow per poll -> classify(client_result, transport_ok): disconnected -> backoff and reconnect from the cursor; only lsn_purged/epoch_mismatch/master_id_mismatch/lsn_ahead -> needs_rebuild -> stats follow record -> operator (Main ListPods probe / followReadingOf) -> ReplicaRepair.holdOwned / advanceOwned.",
@@ -5355,6 +5392,21 @@
             {
               "path": "flare_operator/FlareOperator/E2E/Tests/ContinuousReplicationLimits.lean",
               "symbol": "multiEnableSuite"
+            }
+          ]
+        },
+        {
+          "id": "CHECK-16-confirm",
+          "kind": "scenario",
+          "procedure": "Follow-configuration confirmation (review 2026-10-05). Unit: flare_unit checkFollowConfirm (a changed node is read every pass although remembered out of the mode; an old-mode reading keeps it pending; an incomplete reading is Unknown; the budget expires back to the interval; a new change restarts a pending node). E2E continuous-replication-enable-purged with the test seam FLARE_TEST_CONF_WRITE_DELAY_SECONDS=45 (the operator holds every rocksdb config write back 45 s, so the replica is read in the OLD mode after the follow change): the operator must log the change and CONFIRMED on the replica with at least one old-mode reading, observed at most 30 s after the configuration was delivered (propagation confirmed) and the repair requested at most 30 s after the observation; the timeline prints change→write released, released→delivered, delivered→observed, observed→requested, requested→reconstruction started.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/StateMachine/FollowEvidence.lean",
+              "symbol": "stepConfirm"
+            },
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/ContinuousReplicationLimits.lean",
+              "symbol": "enablePurgedSuite"
             }
           ]
         }
@@ -5943,7 +5995,7 @@
         },
         "ci_passed": {
           "state": "no",
-          "evidence": "no release candidate set (0/6 checks counted)"
+          "evidence": "no release candidate set (0/7 checks counted)"
         },
         "reviewed": {
           "state": "no",

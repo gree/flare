@@ -25,7 +25,7 @@ pod deletes.
 | 8 | Zombie guard (TCP fast path) | map | none | Bootstrap only; low |
 | 9 | Follow evidence | slave: node key + boot id vs the previous pass | boot change = Unknown for one pass | Open: the first reading after an operator restart is never marked; no re-read before commit |
 | 10 | PREPARE-REPAIR activation | episode by node key; boot id informational | none | Implemented 2026-10-05, CI pending: the slave's boot id is re-read just before applying, and the apply requires an unchanged `regEpoch` (no seam test yet) |
-| 11 | Replica-repair demotion (the copy is rebuilt) | ledger entry by dest; nothing about the source | target still a Slave | Implemented 2026-10-05, CI pending: the source's stats are bracketed by its incarnation; the atomic update requires the partition's master entry (key and regEpoch) to be the one checked; an EMPTY source is accepted only under the replica's own lineage (`rocksdb_master_id`, a deleted-to-empty master), otherwise deferred |
+| 11 | Replica-repair demotion (the copy is rebuilt) | ledger entry by dest; nothing about the source | target still a Slave | Implemented 2026-10-05, CI pending: the source's stats are bracketed by its incarnation; the atomic update requires the partition's master entry (key and regEpoch) to be the one checked; an EMPTY source is accepted only under the replica's own lineage AND (the same source epoch, a bulk epoch, or — review round 2026-10-05 — the replica's REBUILD EVIDENCE naming exactly the master's master_id and epoch), otherwise deferred (CI 37283759673: a replica caught up by WAL sync after a promotion is deferred; evidence implemented, CI pending) |
 | 12 | Repair release / completion | node key + boot id at reseat | yes | Fine |
 | 13 | Zone-repair swap | map | merge only | Open (assumes the remaining Active slave is real; the readiness rule does not reach it) |
 
@@ -60,9 +60,29 @@ pod deletes.
 - **Replacement after observation**: the same, with the chosen successor's
   pod replaced under the same name (node cordoned); the other slave takes
   over.
-- **Legitimately emptied master**: every key deleted on the master while one
-  replica misses the deletes; the repair must resolve by rebuilding that
-  replica to empty (same lineage), not be deferred forever.
+- ~~Legitimately emptied master~~ (CI 37283759673: deferred — that replica
+  had caught up by WAL sync after a promotion, so its history could not be
+  proven). Replaced by the `empty-source` suite below.
+
+## Empty repair source: rebuild evidence (review round 2026-10-05)
+
+A replica records which history it was rebuilt from — the source's
+master_id and source epoch, bound to its own epoch at that moment — only
+after a clean truncate + full dump whose source identity was the same at the
+dump's start and end. The record lives in its own reserved key, not in the
+source-epoch field (that field gates forwarded changes; the evidence must not
+become a position). It is dropped before every rebuild, on every change of
+the node's own history, and by a snapshot swap. The operator accepts an empty
+master as a repair source when the evidence names exactly its master_id and
+epoch.
+
+Suite `empty-source` (truncate + full dump forced by test seams, dumps
+throttled to ~50 s): evidence after a promotion; a legitimately emptied
+master accepted; restart mid-dump leaves no evidence until a dump completes;
+a source change mid-dump never leaves the old source's epoch; evidence naming
+an earlier epoch than a promoted master's is refused (the replica keeps its
+keys). Option B (a one-shot human approval bound to the copy and the source
+history) is not implemented.
 
 ## Not done (follow-up)
 

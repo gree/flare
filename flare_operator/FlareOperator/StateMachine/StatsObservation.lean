@@ -74,7 +74,8 @@ def parseCurrItems (out : String) : Items := parseStat out "curr_items"
     unreadable master would replace a data-bearing copy with nothing.
     `none` = proceed, `some reason` = defer (the request stays pending). -/
 def repairSourceVerdict (master : Items) (masterLineage replicaLineage : Option String := none)
-    (masterEpoch replicaEpoch masterEpochReason : Option String := none) : Option String :=
+    (masterEpoch replicaEpoch masterEpochReason : Option String := none)
+    (rebuiltFromLineage rebuiltFromEpoch : Option String := none) : Option String :=
   match master with
   | .unknown => some "the current master's item count is unknown (unreadable stats); not rebuilding a replica from it"
   | .known 0 =>
@@ -85,9 +86,16 @@ def repairSourceVerdict (master : Items) (masterLineage replicaLineage : Option 
     -- only when (a) it is the replica's lineage AND its source epoch is the
     -- replica's — deleted to empty in the same history — or (b) its epoch
     -- was advanced by a BULK rewrite (truncate / flush_all: an explicit
-    -- deletion, the legitimate recovery path). An epoch minted by a
-    -- promotion (an empty copy was promoted), by a fresh DB, or for an
-    -- unknown reason defers: rebuilding from it would replace data.
+    -- deletion, the legitimate recovery path), or (c) the replica's REBUILD
+    -- EVIDENCE names exactly this master's lineage and epoch: the replica
+    -- was last rebuilt by a clean full dump from this very history (flared
+    -- records it only when the source identity was the same at the dump's
+    -- start and end, and drops it on any later change of its own history),
+    -- and the master has not been re-promoted or replaced since (either
+    -- would have advanced its epoch). The evidence identifies a history; it
+    -- is not a position. An epoch minted by a promotion (an empty copy was
+    -- promoted), by a fresh DB, or for an unknown reason, without (c),
+    -- defers: rebuilding from it would replace data.
     match masterLineage, replicaLineage with
     | some m, some r =>
       if m.isEmpty || m != r then
@@ -97,6 +105,7 @@ def repairSourceVerdict (master : Items) (masterLineage replicaLineage : Option 
         | some me, some re =>
           if !me.isEmpty && me == re then none
           else if masterEpochReason == some "bulk" then none
+          else if !me.isEmpty && rebuiltFromEpoch == some me && rebuiltFromLineage == some m then none
           else some s!"the current master holds 0 keys and its source epoch ({me}) is not the replica's ({re}) and was advanced by {(masterEpochReason.filter (!·.isEmpty)).getD "an unknown event"}, not a bulk rewrite: an empty copy that may have been promoted; not rebuilding the replica from it"
         | _, _ => some "the current master holds 0 keys and its source epoch cannot be compared with the replica's; not rebuilding the replica from it"
     | _, _ => some "the current master holds 0 keys and its history cannot be compared with the replica's (lineage unreadable or not RocksDB); not rebuilding the replica from it"

@@ -69,13 +69,16 @@ const char* const storage_rocksdb::kReplSourceEpochKey = "__flare_repl_source_ep
 const char* const storage_rocksdb::kReplSourceEpochReasonKey = "__flare_repl_source_epoch_reason";
 const char* const storage_rocksdb::kReplIncarnationKey = "__flare_repl_incarnation";
 const char* const storage_rocksdb::kReplRestoreDoneKey = "__flare_repl_restore_done";
+// Rebuild evidence: "<master_id> <source epoch> <own epoch>" — the clean
+// full-dump source, bound to THIS node's own source epoch at recording time.
+const char* const storage_rocksdb::kReplRebuiltFromKey = "__flare_repl_rebuilt_from";
 // Name of the replication-metadata column family (design §3.7).
 const char* const storage_rocksdb::kReplMetaCfName = "flare_repl_meta";
 
 bool storage_rocksdb::is_reserved_key(const string& key) {
 	return key == kReplLastLsnKey || key == kReplMasterIdKey
 		|| key == kReplSourceEpochKey || key == kReplSourceEpochReasonKey || key == kReplIncarnationKey
-		|| key == kReplRestoreDoneKey;
+		|| key == kReplRestoreDoneKey || key == kReplRebuiltFromKey;
 }
 // }}}
 
@@ -422,6 +425,33 @@ int storage_rocksdb::_load_or_init_generations() {
 			this->_source_epoch_reason = "";
 		}
 	}
+	// Rebuild evidence: absent or malformed = none (never guessed). It is
+	// valid only while this node's own epoch is the one it was recorded
+	// under: every change of the local history advances that epoch first, so
+	// evidence whose delete was lost cannot come back after a restart.
+	if (rc == 0) {
+		this->_rebuilt_from_master_id.clear();
+		this->_rebuilt_from_epoch.clear();
+		string ev;
+		rocksdb::Status es = this->_db->Get(this->_read_options, kReplRebuiltFromKey, &ev);
+		if (es.ok()) {
+			vector<string> parts;
+			string::size_type at = 0;
+			while (at <= ev.size()) {
+				string::size_type sp = ev.find(' ', at);
+				if (sp == string::npos) { parts.push_back(ev.substr(at)); break; }
+				parts.push_back(ev.substr(at, sp - at));
+				at = sp + 1;
+			}
+			if (parts.size() == 3 && !parts[0].empty() && !parts[1].empty()
+					&& parts[2] == this->_source_epoch) {
+				this->_rebuilt_from_master_id = parts[0];
+				this->_rebuilt_from_epoch = parts[1];
+			} else {
+				log_notice("rebuild evidence ignored: recorded under another local history or malformed [%s]", ev.c_str());
+			}
+		}
+	}
 	this->_generations_broken = (rc != 0);
 	const string epoch = this->_source_epoch;
 	const string incarnation = this->_incarnation;
@@ -447,6 +477,76 @@ string storage_rocksdb::get_source_epoch_reason() {
 	string v = this->_generations_broken ? string("") : this->_source_epoch_reason;
 	pthread_rwlock_unlock(&this->_mutex_generations);
 	return v;
+}
+
+string storage_rocksdb::get_rebuilt_from_master_id() {
+	pthread_rwlock_rdlock(&this->_mutex_generations);
+	string v = this->_generations_broken ? string("") : this->_rebuilt_from_master_id;
+	pthread_rwlock_unlock(&this->_mutex_generations);
+	return v;
+}
+
+string storage_rocksdb::get_rebuilt_from_epoch() {
+	pthread_rwlock_rdlock(&this->_mutex_generations);
+	string v = this->_generations_broken ? string("") : this->_rebuilt_from_epoch;
+	pthread_rwlock_unlock(&this->_mutex_generations);
+	return v;
+}
+
+/**
+ *	Durably remove the rebuild evidence. The in-memory copy is dropped FIRST
+ *	so a failed delete never leaves this process advertising evidence for a
+ *	copy that is about to change; the caller must not rebuild if this fails
+ *	(the persisted evidence would survive a crash mid-rebuild).
+ */
+int storage_rocksdb::_clear_rebuilt_from_locked() {
+	this->_rebuilt_from_master_id.clear();
+	this->_rebuilt_from_epoch.clear();
+	if (this->_db == NULL) {
+		return -1;
+	}
+	rocksdb::WriteOptions wo;
+	wo.sync = true;
+	rocksdb::Status st = this->_db->Delete(wo, kReplRebuiltFromKey);
+	if (!st.ok()) {
+		log_err("failed to clear the rebuild evidence: %s", st.ToString().c_str());
+		return -1;
+	}
+	return 0;
+}
+
+int storage_rocksdb::clear_rebuilt_from() {
+	pthread_rwlock_wrlock(&this->_mutex_generations);
+	int r = this->_clear_rebuilt_from_locked();
+	pthread_rwlock_unlock(&this->_mutex_generations);
+	return r;
+}
+
+int storage_rocksdb::set_rebuilt_from(const string& master_id, const string& epoch) {
+	if (master_id.empty() || epoch.empty()
+			|| master_id.find(' ') != string::npos || epoch.find(' ') != string::npos) {
+		return -1;
+	}
+	pthread_rwlock_wrlock(&this->_mutex_generations);
+	int r = (this->_generations_broken || this->_source_epoch.empty()) ? -1
+		: this->_persist_generation(kReplRebuiltFromKey, master_id + " " + epoch + " " + this->_source_epoch);
+	if (r == 0) {
+		this->_rebuilt_from_master_id = master_id;
+		this->_rebuilt_from_epoch = epoch;
+	}
+	pthread_rwlock_unlock(&this->_mutex_generations);
+	if (r == 0) {
+		log_notice("rebuild evidence recorded: this copy was rebuilt by a full dump from master_id=%s, source epoch %s (evidence of the history, not of a replication position)", master_id.c_str(), epoch.c_str());
+	}
+	return r;
+}
+
+bool storage_rocksdb::rebuild_evidence_valid(bool truncated, bool dump_ok,
+		const string& start_master_id, const string& start_epoch,
+		const string& end_master_id, const string& end_epoch) {
+	return truncated && dump_ok
+		&& !start_master_id.empty() && !start_epoch.empty()
+		&& start_master_id == end_master_id && start_epoch == end_epoch;
 }
 
 string storage_rocksdb::get_incarnation() {
@@ -479,6 +579,9 @@ int storage_rocksdb::advance_source_epoch(const char* reason) {
 	int r = this->_persist_generation(kReplSourceEpochKey, minted);
 	if (r == 0) {
 		this->_source_epoch = minted;
+		// This node's own history changed: what it was rebuilt from no
+		// longer describes it.
+		this->_clear_rebuilt_from_locked();
 		// The reason is evidence, not identity: if it cannot be persisted it is
 		// left UNKNOWN (empty), never guessed, and a repair that needs it defers.
 		const string why = reason != NULL ? reason : "";
@@ -1823,6 +1926,10 @@ int storage_rocksdb::swap_in_snapshot(const string& staging_dir, uint64_t checkp
 			restore.Put(kReplSourceEpochReasonKey, "inherited");
 			restore.Put(kReplIncarnationKey, next_incarnation);
 			restore.Put(kReplRestoreDoneKey, boost::lexical_cast<string>(checkpoint_seq));
+			// The checkpoint carries the SOURCE's own rebuild evidence, which
+			// says nothing about this copy: drop it (the inherited epoch
+			// already identifies the history).
+			restore.Delete(kReplRebuiltFromKey);
 			rocksdb::Status st = this->_db->Write(wo, &restore);
 			if (!st.ok()) {
 				log_err("swap_in_snapshot: failed to complete the restore batch: %s", st.ToString().c_str());
@@ -1832,6 +1939,8 @@ int storage_rocksdb::swap_in_snapshot(const string& staging_dir, uint64_t checkp
 			this->_source_epoch = inherited_epoch;
 			this->_source_epoch_reason = "inherited";
 			this->_incarnation = next_incarnation;
+			this->_rebuilt_from_master_id.clear();
+			this->_rebuilt_from_epoch.clear();
 			this->_generations_broken = false;
 			pthread_rwlock_unlock(&this->_mutex_generations);
 			log_notice("restore completed (cursor=%llu, source_epoch=%s, incarnation=%s)",

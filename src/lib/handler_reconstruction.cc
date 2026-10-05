@@ -27,6 +27,8 @@
  *	$Id$
  */
 #include "handler_reconstruction.h"
+#include <cstdlib>
+#include <cstring>
 #include "app.h"
 #include "connection_tcp.h"
 #include "op_dump.h"
@@ -187,9 +189,24 @@ int handler_reconstruction::_run_once() {
 	// op_repl_snapshot). On any failure this stays false and the legacy
 	// truncate+dump path runs unchanged.
 	bool via_snapshot = false;
+	// A clean rebuild: the local copy was truncated in THIS attempt, so after
+	// the dump it holds exactly what the source sent (rebuild evidence).
+	bool truncated_for_dump = false;
 
 	if (!via_wal) {
 #ifdef HAVE_LIBROCKSDB
+		// Whatever this copy was rebuilt from before, it is about to change
+		// (snapshot swap, truncate + dump, or a merge dump): drop the rebuild
+		// evidence FIRST and durably, so a failure, a source change or a
+		// restart part-way leaves none. If it cannot be dropped, do not
+		// rebuild (the stale evidence would outlive a partial copy).
+		if (this->_storage->get_type() == storage::type_rocksdb) {
+			storage_rocksdb* erdb = dynamic_cast<storage_rocksdb*>(this->_storage);
+			if (erdb && erdb->clear_rebuilt_from() < 0) {
+				log_err("could not clear the rebuild evidence before rebuilding -> not rebuilding this cycle", 0);
+				return -1;
+			}
+		}
 		// Deletion propagation: op_dump only ships live keys, never
 		// tombstones, and it MERGES into whatever is on disk. A replica
 		// that was down while keys were deleted on the master would keep
@@ -255,6 +272,12 @@ int handler_reconstruction::_run_once() {
 				// Exactly the truncate+full-dump conditions (slave role, source
 				// reachable and strictly newer) — the safe window for a physical
 				// reseed. Try it first; fall back to truncate+dump on failure.
+				// TEST SEAM (E2E only): force the truncate + full-dump path.
+				const char* no_snap = getenv("FLARE_TEST_DISABLE_SNAPSHOT_BOOTSTRAP");
+				if (peer_snapshot_supported && no_snap != NULL && no_snap[0] != '\0' && strcmp(no_snap, "0") != 0) {
+					log_warning("snapshot bootstrap disabled by FLARE_TEST_DISABLE_SNAPSHOT_BOOTSTRAP (test seam) -> truncate+full-dump", 0);
+					peer_snapshot_supported = false;
+				}
 				if (peer_snapshot_supported) {
 					this->_thread->set_op("repl_snapshot");
 					// SPACE-AWARE REBUILD: the reseed stages the source's copy
@@ -315,6 +338,7 @@ int handler_reconstruction::_run_once() {
 #endif
 						return -1;
 					}
+					truncated_for_dump = true;
 				}
 			}
 		}
@@ -376,6 +400,37 @@ int handler_reconstruction::_run_once() {
 				}
 			} else {
 				log_info("peer did not advertise master_id; skipping lineage adoption", 0);
+			}
+		}
+	}
+
+	// REBUILD EVIDENCE: after a clean truncate + full dump, record WHICH
+	// HISTORY this copy was rebuilt from — the source's master_id and source
+	// epoch — but only if a fresh probe at the END shows the same identity
+	// as the probe at the start (a source replaced, restored or re-promoted
+	// mid-dump leaves none). It is evidence of the history only: it is not a
+	// replication position and never proves this copy is in sync.
+	if (!via_wal && !via_snapshot && truncated_for_dump && this->_storage->get_type() == storage::type_rocksdb) {
+		storage_rocksdb* rdb = dynamic_cast<storage_rocksdb*>(this->_storage);
+		if (rdb) {
+			string end_master_id, end_epoch;
+			bool end_wal = false;
+			uint64_t end_lsn = 0;
+			shared_connection ce(new connection_tcp(this->_node_server_name, this->_node_server_port));
+			if (ce->open() == 0) {
+				op_meta* meta = new op_meta(ce, NULL, this->_storage);
+				if (meta->run_client_features(end_wal, end_master_id, end_lsn) == 0) {
+					end_epoch = meta->get_peer_source_epoch();
+				}
+				delete meta;
+			}
+			if (storage_rocksdb::rebuild_evidence_valid(truncated_for_dump, true, peer_master_id, this->_probe_source_epoch, end_master_id, end_epoch)) {
+				if (rdb->set_rebuilt_from(peer_master_id, end_epoch) < 0) {
+					log_warning("could not persist the rebuild evidence; this copy carries none", 0);
+				}
+			} else {
+				log_notice("no rebuild evidence recorded: the source identity was not the same at the start and the end of the dump (master_id %s -> %s, source epoch %s -> %s)",
+					peer_master_id.c_str(), end_master_id.c_str(), this->_probe_source_epoch.c_str(), end_epoch.c_str());
 			}
 		}
 	}
@@ -485,6 +540,7 @@ bool handler_reconstruction::_try_wal_reconstruction(shared_connection c,
 	peer_master_id.clear();
 	peer_latest_lsn = 0;
 	peer_reachable = false;
+	this->_probe_source_epoch.clear();
 #ifdef HAVE_LIBROCKSDB
 	if (this->_storage->get_type() != storage::type_rocksdb) {
 		return false;
@@ -504,10 +560,22 @@ bool handler_reconstruction::_try_wal_reconstruction(shared_connection c,
 		op_meta* meta = new op_meta(c, NULL, this->_storage);
 		int meta_rc = meta->run_client_features(peer_wal_supported, peer_master_id, peer_latest_lsn);
 		peer_snapshot_supported = meta->get_peer_snapshot_supported();
+		this->_probe_source_epoch = meta->get_peer_source_epoch();
 		delete meta;
 		peer_reachable = (meta_rc == 0);
 		if (meta_rc != 0 || !peer_wal_supported) {
 			log_info("master does not support WAL replication -> full dump", 0);
+			return false;
+		}
+	}
+
+	// TEST SEAM (E2E only): force every rebuild of an existing copy through
+	// the full-dump path, so a test can interrupt a dump over a copy that
+	// already carries rebuild evidence.
+	{
+		const char* no_wal = getenv("FLARE_TEST_DISABLE_WAL_RECONSTRUCTION");
+		if (no_wal != NULL && no_wal[0] != '\0' && strcmp(no_wal, "0") != 0) {
+			log_warning("WAL reconstruction disabled by FLARE_TEST_DISABLE_WAL_RECONSTRUCTION (test seam) -> full dump", 0);
 			return false;
 		}
 	}

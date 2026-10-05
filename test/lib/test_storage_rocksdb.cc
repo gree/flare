@@ -1573,6 +1573,107 @@ void test_source_epoch_reason_recorded_and_persisted() {
 	drop_rocksdb(s, wal_master_dir);
 }
 
+// SAF-08 (review 2026-10-05): rebuild evidence is recorded only for a clean
+// rebuild (truncated first) whose dump succeeded from a source whose identity
+// (master_id AND source epoch) was non-empty and unchanged from start to end.
+void test_rebuild_evidence_rule() {
+	cut_assert_true(storage_rocksdb::rebuild_evidence_valid(true, true, "M", "5:a", "M", "5:a"));
+	// the source was re-promoted / restored / bulk-rewritten mid-dump
+	cut_assert_false(storage_rocksdb::rebuild_evidence_valid(true, true, "M", "5:a", "M", "6:b"));
+	// a different lineage answered at the end (source replaced)
+	cut_assert_false(storage_rocksdb::rebuild_evidence_valid(true, true, "M", "5:a", "N", "5:a"));
+	// the end probe failed or the source did not advertise an epoch
+	cut_assert_false(storage_rocksdb::rebuild_evidence_valid(true, true, "M", "5:a", "", ""));
+	cut_assert_false(storage_rocksdb::rebuild_evidence_valid(true, true, "M", "", "M", ""));
+	cut_assert_false(storage_rocksdb::rebuild_evidence_valid(true, true, "", "5:a", "", "5:a"));
+	// a merge dump (no truncate) or a failed dump
+	cut_assert_false(storage_rocksdb::rebuild_evidence_valid(false, true, "M", "5:a", "M", "5:a"));
+	cut_assert_false(storage_rocksdb::rebuild_evidence_valid(true, false, "M", "5:a", "M", "5:a"));
+}
+
+// The evidence survives a restart, is a reserved key (never served, never
+// counted), and is dropped durably by clear, by ANY advance of this node's
+// own source epoch (promotion, truncate) — so a later restart cannot bring
+// it back over a changed copy.
+void test_rebuild_evidence_persisted_and_cleared() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	cut_assert_equal_string("", s->get_rebuilt_from_epoch().c_str());
+	cut_assert_true(storage_rocksdb::is_reserved_key(storage_rocksdb::kReplRebuiltFromKey));
+	cut_assert_equal_int(-1, s->set_rebuilt_from("", "5:a"));
+	cut_assert_equal_int(-1, s->set_rebuilt_from("M", ""));
+	cut_assert_equal_string("", s->get_rebuilt_from_master_id().c_str());
+	cut_assert_equal_int(0, storage_set_string(s, "k", "v"));
+	cut_assert_equal_int(0, s->set_rebuilt_from("M", "5:a"));
+	cut_assert_equal_int(1, static_cast<int>(s->count()));
+	drop_rocksdb_noremove(s);
+
+	s = make_rocksdb(wal_master_dir);
+	cut_assert_equal_string("M", s->get_rebuilt_from_master_id().c_str());
+	cut_assert_equal_string("5:a", s->get_rebuilt_from_epoch().c_str());
+	cut_assert_equal_int(0, s->clear_rebuilt_from());
+	cut_assert_equal_string("", s->get_rebuilt_from_epoch().c_str());
+	drop_rocksdb_noremove(s);
+
+	s = make_rocksdb(wal_master_dir);
+	cut_assert_equal_string("", s->get_rebuilt_from_epoch().c_str());
+	// promotion of this node clears it, durably
+	cut_assert_equal_int(0, s->set_rebuilt_from("M", "5:a"));
+	cut_assert_equal_int(0, s->advance_source_epoch("promotion"));
+	cut_assert_equal_string("", s->get_rebuilt_from_epoch().c_str());
+	drop_rocksdb_noremove(s);
+	s = make_rocksdb(wal_master_dir);
+	cut_assert_equal_string("", s->get_rebuilt_from_epoch().c_str());
+	// a truncate (bulk) clears it too
+	cut_assert_equal_int(0, s->set_rebuilt_from("M", "5:a"));
+	cut_assert_equal_int(0, s->truncate(0));
+	cut_assert_equal_string("", s->get_rebuilt_from_epoch().c_str());
+	drop_rocksdb_noremove(s);
+	s = make_rocksdb(wal_master_dir);
+	cut_assert_equal_string("", s->get_rebuilt_from_master_id().c_str());
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// Evidence that cannot be persisted is never published; a clear that cannot
+// be persisted still drops the in-memory copy and reports failure (the caller
+// then refuses to rebuild).
+void test_rebuild_evidence_persist_failure() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	cut_assert_equal_int(0, s->set_rebuilt_from("M", "5:a"));
+	s->close();
+	cut_assert_equal_int(-1, s->clear_rebuilt_from());
+	cut_assert_equal_string("", s->get_rebuilt_from_epoch().c_str());
+	cut_assert_equal_int(-1, s->set_rebuilt_from("M", "6:b"));
+	cut_assert_equal_string("", s->get_rebuilt_from_epoch().c_str());
+	delete s;
+	s = NULL;
+	cut_remove_path(wal_master_dir, NULL);
+}
+
+// A snapshot restore copies the SOURCE's files, including the source's own
+// rebuild evidence; the restored copy must not inherit it.
+void test_swap_in_snapshot_drops_source_rebuild_evidence() {
+	storage_rocksdb* master = make_rocksdb(wal_master_dir);
+	storage_rocksdb* slave  = make_rocksdb(wal_slave_dir);
+	cut_assert_equal_int(0, storage_set_string(master, "k1", "v1"));
+	cut_assert_equal_int(0, master->set_rebuilt_from("OLD", "1:x"));
+	cut_assert_equal_int(0, slave->set_rebuilt_from("MINE", "2:y"));
+	string cp_path;
+	uint64_t cp_seq = 0;
+	cut_assert_equal_int(0, master->create_snapshot_checkpoint(cp_path, cp_seq));
+	string staging;
+	cut_assert_equal_int(0, slave->prepare_snapshot_staging(staging));
+	cut_assert_equal_int(0, copy_dir_flat(cp_path, staging));
+	cut_assert_equal_int(0, master->remove_snapshot_checkpoint(cp_path));
+	cut_assert_equal_int(0, slave->swap_in_snapshot(staging, cp_seq));
+	cut_assert_equal_string("", slave->get_rebuilt_from_epoch().c_str());
+	cut_assert_equal_string("", slave->get_rebuilt_from_master_id().c_str());
+	drop_rocksdb_noremove(slave);
+	slave = make_rocksdb(wal_slave_dir);
+	cut_assert_equal_string("", slave->get_rebuilt_from_epoch().c_str());
+	drop_rocksdb(master, wal_master_dir);
+	drop_rocksdb(slave,  wal_slave_dir);
+}
+
 // A generation that cannot be persisted must leave the node UNAVAILABLE for
 // replication, not advertising the old identity over changed data.
 void test_generation_persist_failure_is_fail_closed() {

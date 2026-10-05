@@ -1053,6 +1053,44 @@ def checkRepairSource (ctx : Ctx) : IO Unit := do
     (!ok (StatsObservation.repairSourceVerdict (.known 0) none (some "L"))
       && !ok (StatsObservation.repairSourceVerdict (.known 0) (some "L") (some "L"))
       && !ok (StatsObservation.repairSourceVerdict (.known 0)))
+  -- Rebuild evidence (flared rocksdb_rebuilt_from_*): the replica was last
+  -- rebuilt by a clean full dump from (lineage, epoch).
+  let ev := fun (lm le reason : String) (fromId fromEp : Option String) =>
+    StatsObservation.repairSourceVerdict (.known 0) (some lm) (some "L") (some le) (some "E1") (some reason) fromId fromEp
+  check ctx "SAF-08 repair source: empty, promoted epoch, but the replica was REBUILT BY FULL DUMP from exactly this lineage and epoch: valid (deleted to empty since)"
+    (ok (ev "L" "E5" "promotion" (some "L") (some "E5")))
+  check ctx "SAF-08 repair source: the same master_id but a DIFFERENT history (the evidence names an earlier epoch: an empty copy promoted since) defers"
+    (!ok (ev "L" "E6" "promotion" (some "L") (some "E5")))
+  check ctx "SAF-08 repair source: evidence under another lineage, missing, or partial defers"
+    (!ok (ev "L" "E5" "promotion" (some "L2") (some "E5"))
+      && !ok (ev "L" "E5" "promotion" none none)
+      && !ok (ev "L" "E5" "promotion" none (some "E5"))
+      && !ok (ev "L" "E5" "promotion" (some "L") none))
+  check ctx "SAF-08 repair source: evidence never overrides a different lineage of the master itself"
+    (!ok (ev "L2" "E5" "promotion" (some "L2") (some "E5")))
+
+def checkFollowConfirm (ctx : Ctx) : IO Unit := do
+  let off : FollowEvidence.Reading := { complete := true, enabled := some false }
+  let on : FollowEvidence.Reading := { complete := true, enabled := some true }
+  let torn : FollowEvidence.Reading := { complete := false, enabled := some true }
+  let p0 := FollowEvidence.startConfirm [] ["a", "b"] true 3 10
+  check ctx "follow confirm: a changed node is re-read every pass although remembered out of the mode"
+    (FollowEvidence.shouldProbeWith p0 [("a", false)] "a" 11 30
+      && !FollowEvidence.shouldProbe [("a", false)] "a" 11 30
+      && !FollowEvidence.shouldProbeWith p0 [("c", false)] "c" 11 30)
+  let (p1, e1) := FollowEvidence.stepConfirm p0 [("a", some off), ("b", some on)] 11
+  check ctx "follow confirm: the OLD mode keeps it pending (no long wait); the wanted mode confirms"
+    (p1.map (·.key) == ["a"] && (p1.head?.map (·.oldSeen)) == some 1
+      && e1.length == 1 && (match e1 with | [.confirmed c 11] => c.key == "b" | _ => false))
+  let (p2, e2) := FollowEvidence.stepConfirm p1 [("a", some torn)] 12
+  check ctx "follow confirm: an unreadable (incomplete) reading is Unknown — neither confirms nor refutes"
+    (p2.map (·.key) == ["a"] && (p2.head?.map (·.unknownSeen)) == some 1 && e2.isEmpty)
+  let (p3, e3) := FollowEvidence.stepConfirm p2 [] 13
+  check ctx "follow confirm: bounded — the budget expires (no unlimited fast poll) and the interval applies again"
+    (p3.isEmpty && (match e3 with | [.expired c] => c.key == "a" | _ => false)
+      && !FollowEvidence.shouldProbeWith p3 [("a", false)] "a" 14 30)
+  check ctx "follow confirm: a new change restarts a pending node with the new wanted mode"
+    ((FollowEvidence.startConfirm p1 ["a"] false 5 20).map (fun c => (c.key, c.want, c.left)) == [("a", false, 5)])
 
 def checkPodRows (ctx : Ctx) : IO Unit := do
   let out := "n-0|10.0.0.1|True|n-0|svc|node-a|uid-A|2|\nn-1||False|n-1|svc||uid-B||\nn-2|10.0.0.3|True|n-2|svc|node-a|uid-C|0|2026-10-05T00:00:00Z\nbroken|row\n"
@@ -1093,6 +1131,7 @@ def run : IO UInt32 := do
   checkNodeMapRecovery ctx
   checkRepairSource ctx
   checkPodRows ctx
+  checkFollowConfirm ctx
   let failures ← ctx.failures.get
   let n ← ctx.count.get
   IO.println s!"1..{n}"

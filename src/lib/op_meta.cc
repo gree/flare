@@ -45,7 +45,8 @@ op_meta::op_meta(shared_connection c, cluster* cl, storage* st):
 		_storage(st),
 		_meta_key(""),
 		_peer_snapshot_supported(false),
-		_peer_snapshot_push_supported(false) {
+		_peer_snapshot_push_supported(false),
+		_peer_source_epoch("") {
 }
 
 /**
@@ -152,9 +153,15 @@ int op_meta::_run_server() {
 				// handler_reconstruction). Field order is fixed and any
 				// unknown/extra token is ignorable by old clients.
 				char reply[BUFSIZ];
-				snprintf(reply, sizeof(reply), "rocksdb_wal=1 snapshot=1 snapshot_push=1 master_id=%s latest_lsn=%llu",
+				// source_epoch identifies the HISTORY the master serves; a
+				// replica rebuilt by a full dump records it (with master_id)
+				// as evidence of what it was rebuilt from, only if it is the
+				// same at the start and at the end of the dump. Empty when
+				// the generations are unavailable.
+				snprintf(reply, sizeof(reply), "rocksdb_wal=1 snapshot=1 snapshot_push=1 master_id=%s latest_lsn=%llu source_epoch=%s",
 					rdb->get_master_id().c_str(),
-					(unsigned long long)rdb->get_latest_sequence_number());
+					(unsigned long long)rdb->get_latest_sequence_number(),
+					rdb->get_source_epoch().c_str());
 				return this->_send_result(result_ok, reply);
 			}
 			return this->_send_result(result_ok, "rocksdb_wal=1");
@@ -309,6 +316,7 @@ int op_meta::_parse_text_client_features(bool& rocksdb_wal_supported, string& ma
 	rocksdb_wal_supported = false;
 	master_id.clear();
 	latest_lsn = 0;
+	this->_peer_source_epoch.clear();
 
 	// Read response line
 	char* p;
@@ -340,6 +348,8 @@ int op_meta::_parse_text_client_features(bool& rocksdb_wal_supported, string& ma
 				this->_peer_snapshot_push_supported = true;
 			} else if (strncmp(q, "master_id=", 10) == 0) {
 				master_id.assign(q + 10);
+			} else if (strncmp(q, "source_epoch=", 13) == 0) {
+				this->_peer_source_epoch.assign(q + 13);
 			} else if (strncmp(q, "latest_lsn=", 11) == 0) {
 				try {
 					latest_lsn = boost::lexical_cast<uint64_t>(q + 11);

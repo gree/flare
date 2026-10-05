@@ -246,6 +246,69 @@ def shouldProbe (mem : ModeMemory) (key : String) (tick interval : Nat) : Bool :
   | some false => interval == 0 || tick % interval == 0
   | none => true
 
+/-- A follow-configuration change waiting to be CONFIRMED on one node.
+    Remembering "out of the mode" for a node and re-reading it only every
+    `interval` passes is right in steady state, but after the spec changes
+    the node is re-read before the new file reaches it (the kubelet syncs
+    ConfigMaps asynchronously), remembers the OLD mode and would wait a full
+    interval again. So a changed node is re-read every pass until a complete
+    reading shows the wanted mode, for at most `left` passes (bounded: never
+    an unlimited fast poll). An unreadable reading is Unknown: it neither
+    confirms nor refutes, and touches nothing else (repair ledger, boot ids
+    and the mode memory follow their own rules). -/
+structure Confirm where
+  key : String
+  want : Bool
+  /-- Passes left before giving up (back to the interval). -/
+  left : Nat
+  /-- The pass the change was seen. -/
+  since : Nat
+  /-- Complete readings that still showed the OLD mode. -/
+  oldSeen : Nat := 0
+  /-- Readings that could not be read (Unknown). -/
+  unknownSeen : Nat := 0
+  deriving Repr, BEq
+
+/-- Start confirming `want` on `keys` (a change of the desired mode). A key
+    already pending is restarted with the new wanted mode. -/
+def startConfirm (pending : List Confirm) (keys : List String) (want : Bool)
+    (budget tick : Nat) : List Confirm :=
+  pending.filter (fun c => !keys.contains c.key)
+    ++ keys.map fun k => { key := k, want, left := budget, since := tick }
+
+def confirmPending (pending : List Confirm) (key : String) : Bool :=
+  pending.any fun c => c.key == key && c.left > 0
+
+/-- Probe policy with pending confirmations: a pending node is read every
+    pass; otherwise `shouldProbe`. -/
+def shouldProbeWith (pending : List Confirm) (mem : ModeMemory) (key : String)
+    (tick interval : Nat) : Bool :=
+  confirmPending pending key || shouldProbe mem key tick interval
+
+/-- What happened to a pending confirmation this pass. -/
+inductive ConfirmEvent where
+  | confirmed (c : Confirm) (tick : Nat)
+  | expired (c : Confirm)
+  deriving Repr, BEq
+
+/-- Advance the pending confirmations with this pass's readings (`none` for
+    a node not read or not readable). A complete reading in the wanted mode
+    confirms; one in the old mode or an unreadable one keeps it pending and
+    spends one pass; so does a node absent from the readings (Down, or not
+    a slave this pass) — it is Unknown, and the budget still bounds it. -/
+def stepConfirm (pending : List Confirm) (readings : List (String × Option Reading))
+    (tick : Nat) : List Confirm × List ConfirmEvent :=
+  pending.foldl (init := ([], [])) fun (keep, evs) c =>
+    match ((readings.lookup c.key).bind id).bind (·.mode) with
+    | some m =>
+      if m == c.want then (keep, evs ++ [.confirmed c tick])
+      else
+      let c' := { c with oldSeen := c.oldSeen + 1, left := c.left - 1 }
+      if c'.left == 0 then (keep, evs ++ [.expired c']) else (keep ++ [c'], evs)
+    | none =>
+      let c' := { c with unknownSeen := c.unknownSeen + 1, left := c.left - 1 }
+      if c'.left == 0 then (keep, evs ++ [.expired c']) else (keep ++ [c'], evs)
+
 /-- The lists the FSM and the commit path consume. -/
 structure Classified where
   /-- WAL-mode followers proven current for promotion, best first (highest
@@ -378,6 +441,12 @@ structure Tracker where
   classified : Classified := {}
   /-- Last logged summary per node, to log only changes. -/
   lastSummary : List (String × String) := []
+  /-- The desired follow mode last seen in the spec (`none` before the
+      first pass: the first observation starts no confirmation, every node
+      is unread then and probed anyway). -/
+  desired : Option Bool := none
+  /-- Follow-configuration changes not yet confirmed (`Confirm`). -/
+  confirm : List Confirm := []
   deriving Repr
 
 /-- Which judgements changed since the last pass (to log), and the updated

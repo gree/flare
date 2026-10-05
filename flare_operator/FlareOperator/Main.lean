@@ -234,6 +234,14 @@ private def followBoundsFromEnv : IO FollowEvidence.Bounds := do
     last logged judgement per node. -/
 instance : Inhabited FollowEvidence.Tracker := ⟨{}⟩
 initialize followRef : IO.Ref FollowEvidence.Tracker ← IO.mkRef {}
+/-- The follow mode the spec asks for (`spec.rocksdb.replFollowEnabled`,
+    unset = off), refreshed every pass from the CR; `none` until read. -/
+initialize followDesiredRef : IO.Ref (Option Bool) ← IO.mkRef none
+/-- TEST SEAM (`FLARE_TEST_CONF_WRITE_DELAY_SECONDS`): the extra.conf content
+    whose write is being held back, and since when (monotonic ms). Simulates
+    a slow ConfigMap propagation deterministically: the pods keep the OLD
+    file while the operator already wants the new mode. -/
+initialize confWriteDelayRef : IO.Ref (Option (String × Nat)) ← IO.mkRef none
 
 /-- SAF-09: the highest node-map version known to be in the persisted
     `{cr}-node-map` ConfigMap (the durable authority record). Set from the
@@ -443,6 +451,23 @@ private def handleRocksdbConfig (crd : FlareClusterView) (crName ns : String)
       return
   | .error _ =>
     pure ()  -- missing or unreadable; fall through and (re)create it
+  if let some secs := (← IO.getEnv "FLARE_TEST_CONF_WRITE_DELAY_SECONDS").bind (·.toNat?) then
+    let now ← IO.monoMsNow
+    match ← confWriteDelayRef.get with
+    | some (held, since) =>
+      if held != desired then
+        confWriteDelayRef.set (some (desired, now))
+        IO.eprintln s!"[flare-operator] TEST SEAM: holding the rocksdb config write back for {secs}s"
+        return
+      else if now - since < secs * 1000 then
+        return
+      else
+        confWriteDelayRef.set none
+        IO.eprintln s!"[flare-operator] TEST SEAM: releasing the held rocksdb config write"
+    | none =>
+      confWriteDelayRef.set (some (desired, now))
+      IO.eprintln s!"[flare-operator] TEST SEAM: holding the rocksdb config write back for {secs}s"
+      return
   IO.eprintln s!"[flare-operator] reconciling rocksdb config for {crName}"
   match ← updateFlaredRocksdbConfig crName ns rocksdb with
   | .error e =>
@@ -810,6 +835,19 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
       let probeT0 ← IO.monoMsNow
       let bounds ← followBoundsFromEnv
       let probeInterval := ((← IO.getEnv "FLARE_FOLLOW_PROBE_INTERVAL").bind (·.toNat?)).getD 30
+      -- A change of the desired follow mode: every non-Down slave is read
+      -- each pass until it shows the new mode (bounded; see Confirm).
+      let confirmBudget := ((← IO.getEnv "FLARE_FOLLOW_CONFIRM_PASSES").bind (·.toNat?)).getD 120
+      let desiredNow ← followDesiredRef.get
+      let changedTo : Option Bool := match tr.desired, desiredNow with
+        | some d0, some d1 => if d0 != d1 then some d1 else none
+        | _, _ => none
+      let changeKeys := (cs.nodeMap.filter fun kv => kv.2.role == FlareRole.Slave && kv.2.state != FlareState.Down).map Prod.fst
+      let confirm0 := match changedTo with
+        | some d1 => FollowEvidence.startConfirm tr.confirm changeKeys d1 confirmBudget tr.tick
+        | none => tr.confirm
+      if let some d1 := changedTo then
+        IO.eprintln s!"[flare-operator] follow configuration changed to follow {if d1 then "on" else "off"} at tick {tr.tick}: confirming on {changeKeys} every pass until each shows it (at most {confirmBudget} passes)"
       let readyPods := pods.filter (fun p => p.ready && !p.terminating)
       let mut slaveReadings : List (String × Int × Option FollowEvidence.Reading) := []
       for (key, n) in cs.nodeMap do
@@ -817,7 +855,7 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
           match readyPods.find? (fun p => Bridge.PodInfo.toNodeKey p == key) with
           | none => slaveReadings := slaveReadings ++ [(key, n.partition, none)]
           | some p =>
-            if FollowEvidence.shouldProbe tr.mem key tr.tick probeInterval then
+            if FollowEvidence.shouldProbeWith confirm0 tr.mem key tr.tick probeInterval then
               let r ← match ← Bridge.queryPodStats p.name ns "stats" with
                 | .ok out => pure (followReadingFrom out)
                 | .error _ => pure ({} : FollowEvidence.Reading)
@@ -850,12 +888,21 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
       let probeMs := (← IO.monoMsNow) - probeT0
       if probed > 0 || probeMs > 1000 then
         IO.eprintln s!"[flare-operator] continuous-replication probe: {probed} stats read(s) in {probeMs}ms (tick {tr.tick}; in-mode remembered: {(tr.mem.filter (·.2)).length}, out-of-mode remembered: {(tr.mem.filter (!·.2)).length})"
+      let (confirm', confirmEvents) := FollowEvidence.stepConfirm confirm0
+        (slaveReadings.map fun (k, _, r?) => (k, r?)) tr.tick
+      for ev in confirmEvents do
+        match ev with
+        | .confirmed c t =>
+          IO.eprintln s!"[flare-operator] follow configuration CONFIRMED on {c.key}: follow {if c.want then "on" else "off"} read at tick {t}, {t - c.since} pass(es) after the change (old mode read {c.oldSeen} time(s), unreadable {c.unknownSeen})"
+        | .expired c =>
+          IO.eprintln s!"[flare-operator] WARNING: follow configuration NOT confirmed on {c.key} within {confirmBudget} passes (old mode read {c.oldSeen} time(s), unreadable {c.unknownSeen}); back to re-reading it every {probeInterval} passes"
       let (markedReadings, boots') := FollowEvidence.markProcessChanges tr.boots slaveReadings
       let (cls, mem', judged) := FollowEvidence.classify bounds tr.mem markedReadings masterReadings
       let (changed, summaries) := FollowEvidence.changedSummaries tr.lastSummary judged
       for (k, summary) in changed do
         IO.eprintln s!"[flare-operator] CONTINUOUS REPLICATION eligibility {k}: {summary}"
-      followRef.set { mem := mem', boots := boots', tick := tr.tick + 1, classified := cls, lastSummary := summaries }
+      followRef.set { mem := mem', boots := boots', tick := tr.tick + 1, classified := cls, lastSummary := summaries,
+                      desired := desiredNow.orElse (fun _ => tr.desired), confirm := confirm' }
       -- SAF-08 GHOST SUCCESSOR: the map's Active state belongs to the
       -- process that registered it. A pod replaced under the same name keeps
       -- the name (so it passes every "pod exists" check) and the map entry
@@ -1306,6 +1353,7 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
        prevCrd.spec.replicas != crd.spec.replicas then
       IO.eprintln s!"[flare-operator] CRD changed: partitions {prevCrd.spec.partitions}→{crd.spec.partitions}, replicas {prevCrd.spec.replicas}→{crd.spec.replicas}"
     crdRef.set crd
+    followDesiredRef.set (some (crd.spec.rocksdb.replFollowEnabled.getD false))
     metrics.partitionsDesired.set crd.spec.partitions.toFloat
 
     -- 1b. Detect unsafe partition reduction (safety check BEFORE running FSM)
@@ -1419,9 +1467,12 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
                   | .ok out =>
                     let rLineage := match rStats with | .ok ro => statStr ro "rocksdb_master_id" | .error _ => none
                     let rEpoch := match rStats with | .ok ro => statStr ro "rocksdb_source_epoch" | .error _ => none
+                    let rFromId := match rStats with | .ok ro => statStr ro "rocksdb_rebuilt_from_master_id" | .error _ => none
+                    let rFromEpoch := match rStats with | .ok ro => statStr ro "rocksdb_rebuilt_from_epoch" | .error _ => none
                     pure (StatsObservation.repairSourceVerdict (StatsObservation.parseCurrItems out)
                       (statStr out "rocksdb_master_id") rLineage
-                      (statStr out "rocksdb_source_epoch") rEpoch (statStr out "rocksdb_source_epoch_reason"))
+                      (statStr out "rocksdb_source_epoch") rEpoch (statStr out "rocksdb_source_epoch_reason")
+                      rFromId rFromEpoch)
                   | .error _ => pure (StatsObservation.repairSourceVerdict .unknown)
             match verdict with
             | some why =>

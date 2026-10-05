@@ -90,6 +90,7 @@ public:
 	static const char* const kReplSourceEpochReasonKey;
 	static const char* const kReplIncarnationKey;
 	static const char* const kReplRestoreDoneKey;
+	static const char* const kReplRebuiltFromKey;
 
 	// Return true if key is a reserved replication metadata key.
 	static bool is_reserved_key(const string& key);
@@ -173,6 +174,14 @@ protected:
 	string _source_epoch;
 	string _source_epoch_reason;
 	string _incarnation;
+	// Rebuild evidence: the (master_id, source epoch) of the source this
+	// copy was last rebuilt from by a clean truncate + full dump whose source
+	// identity matched at its start and its end. Empty = no evidence. It says
+	// WHICH HISTORY the copy was rebuilt from; it is not a replication
+	// position and not proof of being in sync. Persisted under
+	// kReplRebuiltFromKey, guarded by _mutex_generations.
+	string _rebuilt_from_master_id;
+	string _rebuilt_from_epoch;
 	// Set when a generation could not be established or persisted. The
 	// accessors then report "unavailable" and the replication paths refuse:
 	// serving a changed history under an unchanged token is the failure this
@@ -281,6 +290,7 @@ protected:
 	// disk and could NOT be removed — the caller must not open it.
 	int _discard_incomplete_restore();
 	int _persist_generation(const char* key, const string& value);
+	int _clear_rebuilt_from_locked();
 	// Open/close the DB with both column families, creating the metadata one
 	// if the directory does not have it yet (an older DB, or a checkpoint
 	// taken from a node that never applied a delivery).
@@ -455,6 +465,20 @@ public:
 	string get_source_epoch();
 	string get_source_epoch_reason();
 	string get_incarnation();
+	// Rebuild evidence (see _rebuilt_from_*). clear_rebuilt_from() durably
+	// removes it (0 on success); set_rebuilt_from() durably records it (0 on
+	// success; on failure the evidence stays absent, never half-written).
+	string get_rebuilt_from_master_id();
+	string get_rebuilt_from_epoch();
+	int clear_rebuilt_from();
+	int set_rebuilt_from(const string& master_id, const string& epoch);
+	// The rule for recording it, stated once: only a clean rebuild (the
+	// local copy was truncated first) whose dump succeeded, from a source
+	// that advertised a non-empty identity that did not change between the
+	// start and the end of the dump.
+	static bool rebuild_evidence_valid(bool truncated, bool dump_ok,
+		const string& start_master_id, const string& start_epoch,
+		const string& end_master_id, const string& end_epoch);
 	// Mint, persist and publish a fresh identity. 0 on success; on failure
 	// the generations become UNAVAILABLE (fail closed) and -1 is returned.
 	int advance_source_epoch(const char* reason = "unspecified");

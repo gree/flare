@@ -56,6 +56,8 @@ protected:
 	cluster::role				_role;
 	int									_reconstruction_interval;
 	int									_reconstruction_bwlimit;
+	// Source epoch the master advertised in the pre-dump features probe.
+	string									_probe_source_epoch;
 	// The id this handler was given by stats::reconstruction_begin(); every
 	// completion notification carries it, so a late notification from an
 	// older handler cannot be attributed to a newer reconstruction.

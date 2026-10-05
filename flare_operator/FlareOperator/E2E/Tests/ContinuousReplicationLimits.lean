@@ -1612,6 +1612,7 @@ private def emptySourceCfg : ClusterConfig := {
   drainSeconds := 20
   flaredEnv := [("FLARE_TEST_DISABLE_SNAPSHOT_BOOTSTRAP", "1"), ("FLARE_TEST_DISABLE_WAL_RECONSTRUCTION", "1")]
   flaredArgs := "--reconstruction-bwlimit 128"
+  operatorEnv := [("FLARE_STATS_PROBE_INTERVAL_MS", "15000")]
 }
 
 /-- (rebuilt-from master_id, rebuilt-from epoch) of a node: `none` = stats
@@ -1646,7 +1647,12 @@ private def Ctx.waitDumpStart (c : Ctx) (pod : String) (secs : Nat) : IO Bool :=
     recording line, recorded). -/
 private def Ctx.noEvidenceUntilRecorded (c : Ctx) (pod ip : String) (secs : Nat) : IO (List String × Bool) := do
   let mut early : List String := []
-  for _ in [0:secs / 2] do
+  -- WALL-CLOCK deadline: each iteration makes calls that can each take up to
+  -- 30 s while a pod is unreachable, so an iteration count is no bound (CI
+  -- 37376724850: a "480 s" loop ran past the leg's 75-minute limit).
+  let deadline := (← IO.monoMsNow) + secs * 1000
+  for _ in [0:secs] do
+    if (← IO.monoMsNow) ≥ deadline then break
     let recorded := containsSubstr (← c.flaredLog pod) "rebuild evidence recorded"
     if recorded then return (early, true)
     match ← c.evidence ip with
@@ -1658,7 +1664,9 @@ private def Ctx.noEvidenceUntilRecorded (c : Ctx) (pod ip : String) (secs : Nat)
   return (early, false)
 
 private def Ctx.newMasterAfter (c : Ctx) (old : String) (secs : Nat) : IO (Option String) := do
-  for _ in [0:secs / 2] do
+  let deadline := (← IO.monoMsNow) + secs * 1000
+  for _ in [0:secs] do
+    if (← IO.monoMsNow) ≥ deadline then break
     match (← c.p0Roles).1 with
     | some m => if m != old then return some m
     | none => pure ()
@@ -1666,7 +1674,9 @@ private def Ctx.newMasterAfter (c : Ctx) (old : String) (secs : Nat) : IO (Optio
   return none
 
 private def Ctx.allInSync (c : Ctx) (n : Nat) (secs : Nat) : IO (Option (String × String × String)) := do
-  for _ in [0:secs / 4] do
+  let deadline := (← IO.monoMsNow) + secs * 1000
+  for _ in [0:secs] do
+    if (← IO.monoMsNow) ≥ deadline then break
     match ← c.p0Roles with
     | (some m, [a, b]) =>
       let ns := c.cfg.«namespace»
@@ -1740,6 +1750,13 @@ def emptySourceSuite : TestSuite := {
             if let some (_, some e) ← c.evidence sIp then
               if some e == mEpoch && target.isNone then target := some (s, sIp)
           let some (r, rIp) := target | return .fail s!"precondition: no slave carries evidence of the master's epoch {mEpoch}"
+          -- PRECONDITION (CI 37376724850): the repair ledger takes its first
+          -- observation as BASELINE; drops before it are never attributed (a
+          -- separate product gap, recorded in the ledger). This test is about
+          -- the repair decision, so the drops must come after it.
+          let ledgerReady ← waitForCondition "the repair ledger is initialized (drops after this are attributed)" 420 do
+            return containsSubstr (← c.opLog 200000) "replica repair ledger initialized"
+          if !ledgerReady then return .fail "precondition: the repair ledger was never initialized"
           let drops0 := (← c.statNat mIp "proxy_write_dropped").getD 0
           match ← cutForwards mIp rIp with
           | .error e => return .fail e

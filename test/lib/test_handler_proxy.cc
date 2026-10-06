@@ -298,6 +298,22 @@ namespace test_handler_proxy {
 		cluster::node master = cl->set_node("master", 12121, cluster::role_master, cluster::state_active, 0, 100);
 		cluster::node slave = cl->set_node("localhost", port, cluster::role_slave, cluster::state_active, 0, 50);
 		cl->set_partition(0, master, &slave, 1);
+		// R3: a slave copy that was never validated against its source in
+		// this process answers nothing locally (forwarded to the master; here
+		// no transport target, so enqueue failure — never a local read).
+		{
+			shared_connection c0;
+			op_get op0(c0, cl, NULL);
+			storage::entry e0 = get_entry(" key", storage::parse_type_get);
+			shared_queue_proxy_read q0;
+			cl->clear_node_map();
+			cut_assert_equal_int(cluster::proxy_request_error_enqueue, cl->pre_proxy_read(&op0, e0, NULL, q0));
+			master = cl->set_node("master", 12121, cluster::role_master, cluster::state_active, 0, 100);
+			slave = cl->set_node("localhost", port, cluster::role_slave, cluster::state_active, 0, 50);
+		}
+		// The follow guard below is checked on a copy bound to its source
+		// (as a completed reconstruction binds it), with the map in force.
+		cl->bind_read_source("master:12121", "lineage", "epoch", "test: validated copy");
 		// Keep the stale positive-balance partition, but no transport target:
 		// forced master routing must return enqueue failure, never local read.
 		cl->clear_node_map();

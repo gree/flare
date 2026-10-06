@@ -36,7 +36,7 @@
 |---|------|------|------------|----------------|
 | R1 | 復旧中の欠損応答（cluster-init 29） | C 調査・修正 / U 判定承認 | **未判定** | 失敗：d47fa82 (37419299532)、f082265 (37426714842)、e2fdc27 (37438962871、trace をキー名で対応付けており判定に使えない)。100153c (37445879349)：初期同期の前提条件で失敗し、R1 の証拠なし（前提失敗の原因は未判定。37296281060 と同じ） |
 | R2 | 転送失敗が END（キーなし）になる | U 方針（決定済み）/ C 実装・検証 | **方針：本番は `readUnavailableError: true`**（2026-10-06 決定）。chart の例・values の説明に反映済み。chart の既定値は変えない。pf-dev への適用は別途 | 設定 34e53ac。E2E 試験は追加済み（未実行） |
-| R3 | master 切替中の activation（empty-source 4・6） | C | test 4 は**合格**（時系列判定）。test 6 は**未判定** | 4：e2fdc27 (37438962871)。6：100153c (37445879349) で初めて時系列を取得。順序は R3 の基準で正しい（手で評価）。試験の失敗は map シフト行の欠落によるもので、原因は未判定。activation 点を replica 自身の「node activated」行に変更済み |
+| R3 | master 切替中の activation（empty-source 4・6）→「ソース変更時に再検証」 | C | 方針を採用し実装した（下記）。受入試験（empty-source の R3 試験：旧コピーの activation → 新 map 受理 → 再検証中は転送・明示的エラー → 再構築後にローカル）は追加済みで未実行。test 4 は合格、test 6 は UNDECIDED の事例を記録済み | 4：e2fdc27 (37438962871)。6：100153c (37445879349) で初めて時系列を取得。順序は R3 の基準で正しい（手で評価）。試験の失敗は map シフト行の欠落によるもので、原因は未判定。activation 点を replica 自身の「node activated」行に変更済み |
 | R4 | local read guard（continuous-replication 9） | C | **未判定**（原因不明）。その後の成功では閉じない | 失敗：665bfb8 (37414948177) |
 | R5 | 候補 SHA での全体 Linux CI | C | 未達（候補が未確定） | — |
 | R6 | 遅延の本番要件 | U 要件 / C 測定 | **数値基準は未決**。以前の「100µs くらい」を承認済み SLO として扱わない。§13 の許容値は撤回済み | visbench 37386599657、37392841830（相対値のみ） |
@@ -126,6 +126,40 @@
     切替後の扱いと read が許可されたかを追って判断する。
   - 未判定：map 受理の行や activation の行が無い場合。
 
+#### R3 の実装（採用方針「ソース変更時に再検証する」、2026-10-06）
+
+- flared は、コピーごとの「read ソース束縛」（ソースのノードキー・lineage・
+  source epoch）を持つ。
+  - 束縛するのは source check に合格した時点（activation 要求の前）。束縛は
+    現在の map と同じロックの下で行い、map の master がそのソースのときだけ
+    eligible、そうでなければ revalidating にする。
+  - 新しい master を示す map を受理したら、その map の取り付けと**同じ書き込み
+    ロックの下で** eligible を取り消す。
+  - read の判断は partition map を読んだ後に束縛を読むので、新 map の下で
+    判断された read が旧い適格性を見ることはない。
+- 適格でない slave の read は、その時点の master に転送する。転送できなければ
+  `read-unavailable-error` の設定にかかわらず明示的エラー（SERVER_ERROR）を
+  返す。
+- 再検証スレッドの判定（`source_eligibility.h` の純関数、単体試験 10 件）：
+  - lineage と履歴が一致すれば、新しい master に束縛し直す（eligible）。
+  - lineage または履歴が異なれば `needs_rebuild`。operator が既存の再構築経路
+    で処理する。
+  - 観測できなければコピーを保持して待つ（Unknown を理由に破棄しない）。
+  - lineage を持たないバックエンド（tch）は比べるものがないため、従来どおり
+    map に従う。
+- 昇格の抑止：operator は昇格が起こり得るパスで各 Active slave の
+  `repl_read_source_eligible` を直接読み、0 なら全昇格経路から外す。
+- **方針の帰結（判断が必要）**：昇格は必ず master の epoch を進める
+  （"followers of the previous history must rebuild"）。そのため**フェイル
+  オーバーのたびに、その partition の他の replica は再構築される**。ローカル
+  3 ノードの smoke で確認した（C は needs_rebuild、read は転送）。
+- **残る隙間（判断が必要）**：
+  - master の名前が変わる場合は、map 受理と同時に取り消すので隙間はない。
+  - map の変化を伴わない同名での履歴変更（bulk flush、データを失った再起動など）
+    は、再検証スレッドの定期確認（既定 2 s）で検出する。検出まで最大で間隔＋
+    probe 時間の窓が残る。flush_all は slave にも転送されるので内容は追随する
+    が、データを失った master の再起動は窓の間の read に影響し得る。
+
 ### R4 local read guard（continuous-replication 9）
 
 - **仮説**：未特定。配送を遮断している間に replica の balance が変わった（map が
@@ -176,4 +210,4 @@
 | 2026-10-06 | R1 | 未判定（2 回合格、ただし H3 は未検証） | cd1d9b0 / 37451914041（全体）・37451911169（単独） | 復旧中の probe はすべて正答。ただし replica の balance は 0 で、読み取りはすべて方針どおり master へ転送された。過去の失敗（replica へ読み取りを振った状態で再シード）は再現していない。次は読み取りを replica へ振った状態で復旧中を probe する |
 | 2026-10-06 | R2 | 未判定（試験不具合：ログで確認） | cd1d9b0 / 両 run | 遮断中、転送の再接続（0.5 s × 8 × 最大 4 回）がクライアントの 5 s より長く、遮断を解いた後に転送が成功した。失敗時にクライアントが受け取る応答は未観測。可用性の finding：RST でも失敗まで約 16〜20 s、proxy 接続には connect の期限がない |
 | 2026-10-06 | R3 test 6 | 単独 run は合格。全体 run は UNDECIDED | cd1d9b0 / 37451907614・37451914041 | 全体 run では、旧 master n0 のコピーを v…606 で check して activation し、その後 v…613（n1）を受理した。受理後の再検証・再構築はない。balance 0 なので、この構成ではローカル read なし。node activated は activation 要求の成功の証拠であり、Active map の受理や read 開始の証明ではない |
-| 2026-10-06 | R10 | 未完了 | cd1d9b0 | 全体 CI の他スイートは回帰なし。ただし cutter の単体試験は Linux CI で実行されない（macOS ローカルのみ）。同時起動の 2 pod や同名 Pod の置換の boot id を比べた直接観測もまだない |
+| 2026-10-06 | R10 | 未完了 | cd1d9b0 | 全体 CI の他スイートは回帰なし。**訂正**：cutter の単体試験は Linux CI でも `make check` で実行されている（nix-linux の RocksDB ビルドで `PASS: run-tests.sh`、test_stats_reconstruction のコンパイル・リンクを確認）。ただし試験名ごとの結果はログに出ていなかったため、check phase で名前つきの結果を出すようにした。同名 Pod の置換と 2 pod 間の boot id は cluster-init 29 で直接比較する（未実行） |

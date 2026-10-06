@@ -1721,7 +1721,10 @@ private def emptySourceCfg : ClusterConfig := {
                 -- test 4 attributes the replica's answers (local / proxied)
                 ("FLARE_TEST_READ_TRACE_PREFIX", "es_")]
   flaredArgs := "--reconstruction-bwlimit 256"
-  operatorEnv := [("FLARE_STATS_PROBE_INTERVAL_MS", "15000")]
+  -- FLARE_FOLLOW_PROBE_INTERVAL=1: every slave's stats (R3 eligibility and
+  -- needs_rebuild included) are read EVERY pass, so a rebuild request from a
+  -- source change arrives at a known time, not every 30 passes
+  operatorEnv := [("FLARE_STATS_PROBE_INTERVAL_MS", "15000"), ("FLARE_FOLLOW_PROBE_INTERVAL", "1")]
   -- production read policy (R2), through the CR as production sets it
   readUnavailableError := true
 }
@@ -2403,14 +2406,28 @@ def emptySourceSuite : TestSuite := {
           let some (y, yIp) := target | return .fail s!"precondition: no slave besides {m} carries evidence of the earlier epoch {earlier}"
           if xId != mId then return .fail s!"precondition: the promoted master's master_id {xId} differs from the earlier one {mId}"
           if xReason != some "promotion" || xEpoch == earlier then return .fail s!"precondition: the promoted master's epoch {xEpoch} ({xReason})"
+          -- The replica must REALLY miss the deletes. The master's forwards
+          -- to one replica are serial and a blocked one takes ~16 s to be
+          -- dropped, so healing at the first drop let the queued deletes
+          -- through (CI 37485235664: 396 of 400 reached the replica). Delete
+          -- 396 keys with forwarding intact, then cut, delete the last 4, and
+          -- keep the cut until all 4 forwards are counted as dropped.
+          let delKept ← c.deleteKeys xIp "es" 4 400
+          let synced396 ← waitForCondition s!"{y} applied the 396 replicated deletes" 180 do
+            return (← c.currItems yIp) == 4
           let drops0 := (← c.statNat xIp "proxy_write_dropped").getD 0
           match ← cutForwards xIp yIp with
           | .error e => return .fail e
           | .ok () => pure ()
-          let del ← c.deleteKeys xIp "es" 0 400
-          let dropped ← waitForCondition "the master counts the dropped deletes" 120 do
-            return ((← c.statNat xIp "proxy_write_dropped").getD 0) > drops0
+          let delCut ← c.deleteKeys xIp "es" 0 4
+          let del := delKept + delCut
+          let dropped ← waitForCondition "the master counts all 4 cut deletes as dropped" 240 do
+            return ((← c.statNat xIp "proxy_write_dropped").getD 0) ≥ drops0 + 4
           healForwards xIp yIp
+          let yAfterHeal ← c.currItems yIp
+          if !synced396 || yAfterHeal != 4 then
+            c.windowRecord since9 [y, x] "test 9"
+            return .fail s!"precondition: {y} does not hold exactly the 4 keys whose deletes it missed (396 replicated={synced396}, items after the heal {yAfterHeal}, drops counted={dropped}); the missed-deletes case was not produced"
           -- the dangerous case is an EMPTY source (the pair of test 2's
           -- legitimately emptied one); a source that still holds keys is a
           -- different case and is not judged here (CI 37472022352: 2 keys)
@@ -2423,11 +2440,11 @@ def emptySourceSuite : TestSuite := {
             return (log.splitOn "\n").any fun l => containsSubstr l "replica repair DEFERRED" && containsSubstr l y && containsSubstr l "holds 0 keys"
           IO.sleep 60000
           let yItems ← c.currItems yIp
-          IO.eprintln s!"# promoted {x} (master_id {xId}, epoch {earlier} -> {xEpoch}, {xReason}); deleted {del} on it, drops counted={dropped}; {y} evidence names {earlier}; deferred={deferredSeen}; {y} items after 60 s more: {yItems}; ledger {← c.ledgerDests}"
+          IO.eprintln s!"# promoted {x} (master_id {xId}, epoch {earlier} -> {xEpoch}, {xReason}); deleted {del} on it, drops counted={dropped}; {y} evidence names {earlier}; deferred={deferredSeen}; {y} items after 60 s more: {yItems} (expected the 4 it kept); ledger {← c.ledgerDests}"
           c.windowRecord since9 [y, x] "test 9"
           if !dropped then return .fail "precondition: the master never counted dropped forwards"
           if !deferredSeen then return .fail s!"the repair of {y} from an empty promoted master was not deferred"
-          if yItems != 400 then return .fail s!"{y} lost keys ({yItems}/400): it was rebuilt from the empty promoted master"
+          if yItems != 4 then return .fail s!"{y} lost the copy it kept ({yItems}/4 keys): it was rebuilt from the empty promoted master"
           return .pass },
 
     { name := "R2 production read policy: with readUnavailableError=true in the FlareCluster, a GET a replica cannot forward to its master is an EXPLICIT error to the client (never END), and a key that is really absent is still a miss"
@@ -2676,7 +2693,10 @@ def r3SourceChangeSuite : TestSuite := {
         if !graceOver then return .fail "the operator never logged the end of its startup grace period"
         match ← c.p0Roles with
         | (some m0, [_, _]) =>
-          let w ← c.bulkWrite (← ip m0) "es" 400 1024
+          -- 16 KB values: at the suite's 256 KB/s throttle the dump lasts
+          -- ~25 s, so a dump IN PROGRESS can be observed (1 KB finished
+          -- before the wait saw it: CI 37485241380)
+          let w ← c.bulkWrite (← ip m0) "es" 400 16384
           if w != 400 then return .fail s!"stored {w}/400"
           if (← c.allInSync 400 300).isNone then return .fail "the copies did not converge on 400 keys"
           return .pass

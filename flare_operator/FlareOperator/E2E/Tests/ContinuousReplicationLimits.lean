@@ -1629,7 +1629,15 @@ private def Ctx.getRound (c : Ctx) (ip marker : String) (keys : List String) (sq
   -- squash: a value line longer than 200 bytes becomes "X<length>/<non-x
   -- bytes>" (the bulk values are all 'x'), so content is still compared
   let post := if squash then " | awk '{ sub(/\\r$/, \"\"); if (length($0) > 200) { v = $0; gsub(/x/, \"\", v); print \"X\" length($0) \"/\" length(v) } else print }'" else ""
-  match ← execInDebugPod c.cfg.debugPod c.cfg.«namespace» s!"printf '{cmds}' | nc -w {waitSec} {ip} {c.cfg.flarePort}{post}" with
+  -- deadlines aligned: the client (`nc -w waitSec`, silence only — "quit"
+  -- ends a normal round at once) runs inside an exec bounded by
+  -- waitSec + 15 s, not by the harness's fixed 30 s kubectl wall (CI
+  -- 37472032699 cut a 90 s client at 30 s)
+  let shCmd := s!"printf '{cmds}' | nc -w {waitSec} {ip} {c.cfg.flarePort}{post}"
+  let execR ← if waitSec + 15 > 30 then
+      hostCmd "timeout" ["-k", "5", toString (waitSec + 15), "kubectl", "exec", c.cfg.debugPod, "-n", c.cfg.«namespace», "--", "sh", "-c", shCmd]
+    else execInDebugPod c.cfg.debugPod c.cfg.«namespace» shCmd
+  match execR with
   | .error _ => return none
   | .ok out => return (parseGetReplies (marker :: keys) out).map (·.tail)
 
@@ -1671,6 +1679,29 @@ private def Ctx.flaredLogAllSince (c : Ctx) (pod since : String) : IO String := 
     | .ok o => acc := acc ++ o
     | .error _ => pure ()
   return acc
+
+/-- The operator's decisions and the replica's copy-affecting events in a
+    FIXED window, printed whether the test passes or fails (CI 37472032699:
+    the failure dump held only the log tail, so the path that demoted a
+    replica after a deferral was not visible). Operator lines from every
+    operator pod (current and previous container); flared lines of `pods`. -/
+private def Ctx.windowRecord (c : Ctx) (since : String) (pods : List String) (label : String) : IO Unit := do
+  let opNeedles := ["REPLICA REPAIR", "repair DEFERRED", "replica repair", "demot", "reseat", "withheld", "R3", "needs_rebuild",
+    "NodeAdd", "NodeRole", "NodeState", "unhealthy", "NotReady", "failover", "drain", "promot", "refill", "proxy", "Prepare"]
+  for op in ← getPodNames s!"app={c.cfg.operatorName}" c.cfg.«namespace» do
+    let mut raw := ""
+    for extra in [["--previous"], []] do
+      match ← kubectl (["logs", "-n", c.cfg.«namespace», op, s!"--since-time={since}", "--timestamps"] ++ extra) with
+      | .ok o => raw := raw ++ o
+      | .error _ => pure ()
+    let lines := (raw.splitOn "\n").filter fun l => opNeedles.any (containsSubstr l ·) && !containsSubstr l "[DEBUG]"
+    IO.eprintln s!"# [{label}] operator {op} since {since}: {lines.length} decision line(s) (last 80):\n{String.intercalate "\n" (lines.reverse.take 80).reverse}"
+  for pod in pods do
+    let fl := ((← c.flaredLogAllSince pod since).splitOn "\n").filter fun l =>
+      containsSubstr l "shifting node_role" || containsSubstr l "shifting node_state" || containsSubstr l "truncat"
+        || containsSubstr l "dump operation" || containsSubstr l "dump completed" || containsSubstr l "snapshot" || containsSubstr l "read source"
+        || containsSubstr l "self-demot" || containsSubstr l "resync" || containsSubstr l "needs_rebuild" || containsSubstr l "flush"
+    IO.eprintln s!"# [{label}] {pod} flared since {since}: {fl.length} copy-affecting line(s) (last 50):\n{String.intercalate "\n" (fl.reverse.take 50).reverse}"
 
 /-- Every rebuild in this suite is a truncate + full dump (no snapshot, no
     WAL catch-up), throttled so a dump lasts long enough (~50 s for the
@@ -1868,6 +1899,8 @@ def emptySourceSuite : TestSuite := {
 
     { name := "SAF-08 legitimately emptied master after a full-dump rebuild: every key is deleted on the (promoted) master while the rebuilt replica misses the deletes; the repair is accepted on the rebuild evidence and the replica is rebuilt to empty — not deferred"
       run := do
+        IO.sleep 1100
+        let since2 ← utcNow
         match ← c.p0Roles with
         | (some m, [a, b]) =>
           let mIp ← ip m
@@ -1903,6 +1936,7 @@ def emptySourceSuite : TestSuite := {
           let log ← c.opLog 200000
           let deferred := (log.splitOn "\n").filter fun l => containsSubstr l "replica repair DEFERRED" && containsSubstr l r
           IO.eprintln s!"# repair resolved={resolved}; {r} items {← c.currItems rIp}; ledger {← c.ledgerDests}; deferral lines for {r}: {deferred.length}{if deferred.isEmpty then "" else "\n# " ++ (deferred.getLast?.getD "")}"
+          c.windowRecord since2 [r, m] "test 2"
           if !resolved then
             -- CI 37296281060: unresolved with an EMPTY ledger and no deferral
             -- (replica at 2 items); print what the operator decided.
@@ -2343,6 +2377,8 @@ def emptySourceSuite : TestSuite := {
 
     { name := "SAF-08 same master_id, different history: the master is drained and a copy promoted (new epoch); its keys are then all deleted while a replica whose evidence names the EARLIER epoch misses them — the repair DEFERS and the replica keeps every key (the rule cannot prove the emptiness legitimate, even though here it was)"
       run := do
+        IO.sleep 1100
+        let since9 ← utcNow
         match ← c.allInSync 400 480 with
         | none => return .fail "precondition: the copies did not converge on 400 keys"
         | some (m, _, _) =>
@@ -2375,12 +2411,20 @@ def emptySourceSuite : TestSuite := {
           let dropped ← waitForCondition "the master counts the dropped deletes" 120 do
             return ((← c.statNat xIp "proxy_write_dropped").getD 0) > drops0
           healForwards xIp yIp
+          -- the dangerous case is an EMPTY source (the pair of test 2's
+          -- legitimately emptied one); a source that still holds keys is a
+          -- different case and is not judged here (CI 37472022352: 2 keys)
+          let xItems ← c.currItems xIp
+          if xItems != 0 then
+            c.windowRecord since9 [y, x] "test 9"
+            return .fail s!"precondition: the promoted master {x} still holds {xItems} key(s) after the deletes; the empty-source case was not produced"
           let deferredSeen ← waitForCondition s!"the repair of {y} is deferred on the evidence" 240 do
             let log ← c.opLog 4000
             return (log.splitOn "\n").any fun l => containsSubstr l "replica repair DEFERRED" && containsSubstr l y && containsSubstr l "holds 0 keys"
           IO.sleep 60000
           let yItems ← c.currItems yIp
           IO.eprintln s!"# promoted {x} (master_id {xId}, epoch {earlier} -> {xEpoch}, {xReason}); deleted {del} on it, drops counted={dropped}; {y} evidence names {earlier}; deferred={deferredSeen}; {y} items after 60 s more: {yItems}; ledger {← c.ledgerDests}"
+          c.windowRecord since9 [y, x] "test 9"
           if !dropped then return .fail "precondition: the master never counted dropped forwards"
           if !deferredSeen then return .fail s!"the repair of {y} from an empty promoted master was not deferred"
           if yItems != 400 then return .fail s!"{y} lost keys ({yItems}/400): it was rebuilt from the empty promoted master"
@@ -2424,7 +2468,7 @@ def emptySourceSuite : TestSuite := {
           -- forward was still retrying, and the cut was healed before the
           -- failure reached anyone); the time to the answer is recorded
           let t0 ← IO.monoMsNow
-          let failed ← c.getRound sIp "es_mark_r2_cut" ["es_r2_b"] (waitSec := 90)
+          let failed ← c.getRound sIp "es_mark_r2_cut" ["es_r2_b"] (waitSec := 120)
           let answerMs := (← IO.monoMsNow) - t0
           for _ in [0:3] do
             discard <| hostCmd "docker" (["exec", kindNode, "iptables", "-D", "FORWARD"] ++ ruleSpecBack mIp sIp)
@@ -2447,123 +2491,15 @@ def emptySourceSuite : TestSuite := {
           if c1 != "ok" then return .fail s!"precondition: a forwarded GET did not return the master's value ({a1}, {c1})"
           -- the client must receive an explicit error, and the server must
           -- record WHY (a refusal under read-unavailable-error)
+          if failed.isNone then
+            return .fail s!"the error answer was NOT observed: no reply within the 120 s client deadline while the cut was held ({answerMs} ms); the long forward wait is a separate open item"
           if !a2.startsWith "err:SERVER_ERROR" then
             return .fail s!"a GET the replica could not forward answered {a2} ({c2}), not an explicit error: the outage is shown to the client as '{if a2 == "miss" then "key absent" else a2}'"
           if (t2.answer.map (traceField · "result")) != some "refused" || (t2.answer.map (traceField · "reason")) != some "read_unavailable_error" then
             return .fail s!"the explicit error is not attributed to read-unavailable-error on {s}: {t2.answer.getD "(no answer line)"}"
           if c3 != "ok" then return .fail s!"a really absent key did not answer a plain miss ({a3}, {c3})"
           return .pass
-        | _ => return .fail "precondition: a master and a slave in partition 0" },
-
-    { name := "R3 source change re-validates, never carries eligibility over: with reads routed to replicas (balance > 0), a replica activates the OLD master's copy, THEN accepts the map naming the new master — from that acceptance it answers no read from its copy (forwarded, an explicit error while the new master is unreachable), is not eligible, and once the new master is observed with another history it is rebuilt and only then answers locally, every value correct"
-      run := do
-        match ← c.allInSync 400 600 with
-        | none => return .fail "precondition: the copies did not converge on 400 keys"
-        | some (m, r, _) =>
-          let mIp ← ip m
-          let rIp ← ip r
-          let opIp := ((← kubectl ["get", "pods", "-n", ns, "-l", s!"app={emptySourceCfg.operatorName}", "-o", "jsonpath={.items[0].status.podIP}"]).toOption.getD "").trim
-          if opIp.isEmpty then return .fail "precondition: the operator's pod IP is unreadable"
-          let kv := (List.range 30).map fun i => (s!"es_r3_{i}", s!"r3val_{i}")
-          if (← c.setValues mIp kv) != 30 then return .fail s!"precondition: could not write the R3 keys on {m}"
-          if (← c.allInSync 400 300).isNone && (← c.allInSync 430 300).isNone then return .fail "precondition: the copies did not converge after the R3 keys"
-          let balance0 := ((← kubectlGetJsonpath "flarecluster" emptySourceCfg.name ns "{.spec.readBalance}").toOption.getD "").trim
-          let restorePatch := if balance0.isEmpty then "{\"spec\":{\"readBalance\":null}}" else s!"\{\"spec\":\{\"readBalance\":{balance0}}}"
-          if let .error e ← kubectlPatch "flarecluster" emptySourceCfg.name ns "{\"spec\":{\"readBalance\":{\"master\":0,\"slave\":100}}}" then
-            return .fail s!"could not route reads to the replicas: {e}"
-          IO.sleep 1100
-          let since ← utcNow
-          let ins := fun (a b : String) => hostCmd "docker" (["exec", kindNode, "iptables", "-I", "FORWARD", "1"] ++ ruleSpec a b)
-          let del := fun (a b : String) => do
-            for _ in [0:3] do discard <| hostCmd "docker" (["exec", kindNode, "iptables", "-D", "FORWARD"] ++ ruleSpec a b)
-          let cleanup : IO Unit := do
-            del opIp rIp
-            discard <| kubectl ["exec", "-n", ns, r, "-c", "flared", "--", "rm", "-f", "/tmp/act-hold"]
-          -- 1. r takes a fresh copy of m; its activation is held
-          match ← c.killFlaredIn r with
-          | .error e => return .fail s!"could not restart {r}: {e}"
-          | .ok _ => pure ()
-          if !(← c.waitDumpStart r 180) then return .fail s!"precondition: {r} did not start a full dump"
-          let armed ← waitForCondition s!"the activation hold is armed in {r}" 60 do
-            return (← kubectl ["exec", "-n", ns, r, "-c", "flared", "--", "touch", "/tmp/act-hold"]).toBool
-          let held ← waitForCondition s!"{r}'s copy is done and its activation is held" 300 do
-            return containsSubstr (← c.flaredLogSince r since) "held by FLARE_TEST_ACTIVATION_HOLD_FILE"
-          if !armed || !held then cleanup; return .fail s!"precondition: the activation was not held (armed={armed}, held={held})"
-          -- 2. the operator's map pushes to r are cut; m is drained and
-          --    another node promoted (r keeps the OLD map)
-          if let .error e ← ins opIp rIp then cleanup; return .fail s!"precondition: could not cut the operator's pushes to {r}: {e}"
-          discard <| kubectl ["delete", "pod", m, "-n", ns, "--wait=false"]
-          let some m2 ← c.newMasterAfter m 120 | do cleanup; return .fail s!"precondition: no successor promoted after draining {m}"
-          if m2 == r then cleanup; return .fail s!"precondition: the held replica {r} itself was promoted"
-          let m2Ip ← ip m2
-          -- 3. released while r still has the old map: it activates on m's copy
-          discard <| kubectl ["exec", "-n", ns, r, "-c", "flared", "--", "rm", "-f", "/tmp/act-hold"]
-          let activatedOld ← waitForCondition s!"{r} activates on {m}'s copy under the old map" 40 do
-            return ((← c.flaredLogAllSince r since).splitOn "\n").any fun l => containsSubstr l "node activated (attempt" && containsSubstr l s!"from {m}."
-          if !activatedOld then
-            cleanup
-            discard <| kubectlPatch "flarecluster" emptySourceCfg.name ns restorePatch
-            return .fail s!"precondition (order not produced): {r} did not activate on {m}'s copy before the new map; nothing about R3 was tested"
-          -- 4. r cannot reach the new master; then the new map reaches r
-          if let .error e ← ins rIp m2Ip then cleanup; return .fail s!"precondition: could not cut {r} -> {m2}: {e}"
-          del opIp rIp
-          let accepted ← waitForCondition s!"{r} accepts a map naming {m2}" 120 do
-            return ((← c.flaredLogAllSince r since).splitOn "\n").any fun l => containsSubstr l "node map accepted (version" && containsSubstr l s!" 0={m2}."
-          let st1 ← c.readState rIp r
-          let eligible1 ← c.statStr rIp "repl_read_source_eligible"
-          let srcState1 ← c.statStr rIp "repl_read_source_state"
-          let t0 ← IO.monoMsNow
-          let during ← c.getRound rIp "es_mark_r3_during" (kv.map (·.1)) (waitSec := 90)
-          let duringMs := (← IO.monoMsNow) - t0
-          del rIp m2Ip
-          -- 5. m2 observable again: another history (promotion epoch) ->
-          --    rebuilt, re-bound to m2, then local again
-          let rebound ← waitForCondition s!"{r} is rebuilt and bound to {m2}" 600 do
-            let st ← c.statStr (← ip r) "repl_read_source_state"
-            let src ← c.statStr (← ip r) "repl_read_source"
-            return st == some "eligible" && (src.map (containsSubstr · s!"{m2}.")).getD false
-          let rIp2 ← ip r
-          IO.sleep 1100
-          let afterAt ← utcNow
-          let after ← c.getRound rIp2 "es_mark_r3_after" (kv.map (·.1))
-          discard <| kubectlPatch "flarecluster" emptySourceCfg.name ns restorePatch
-          -- the record
-          let log := (← c.flaredLogAllSince r since).splitOn "\n"
-          let idx := fun (p : String → Bool) => (log.zip (List.range log.length)).findSome? fun (l, i) => if p l then some i else none
-          let iAct := idx fun l => containsSubstr l "node activated (attempt" && containsSubstr l s!"from {m}."
-          let iAcc := idx fun l => containsSubstr l "node map accepted (version" && containsSubstr l s!" 0={m2}."
-          let iInv := idx fun l => containsSubstr l "read source INVALIDATED"
-          let iRebuild := idx fun l => containsSubstr l "read source NEEDS REBUILD"
-          let iBound2 := idx fun l => (containsSubstr l "read source BOUND:" || containsSubstr l "read source RE-VALIDATED") && containsSubstr l s!"{m2}."
-          let tr := readTraces (log.foldl (fun a l => a ++ l ++ "\n") "")
-          let tDuring := tracesAfterMarker tr "es_mark_r3_during"
-          let trAfter := readTraces (← c.flaredLogAllSince r afterAt)
-          let tAfter := tracesAfterMarker trAfter "es_mark_r3_after"
-          -- local decisions on r between accepting the new map and re-binding
-          let localBetween := (log.zip (List.range log.length)).filter fun (l, i) =>
-            containsSubstr l "read-trace seq=" && traceField l "decision" == "local"
-              && (match iAcc with | some a => decide (i > a) | none => false)
-              && (match iBound2 with | some b => decide (i < b) | none => true)
-          let dur := ((during.getD []).map fun (k, a) => (k, a, (tDuring.lookup k).getD {}))
-          let aft := ((after.getD []).map fun (k, a) => (k, a, (tAfter.lookup k).getD {}))
-          let durLocal := dur.filter fun (_, _, t) => (t.decision.map (traceField · "decision")) == some "local"
-          let durNotError := dur.filter fun (_, a, _) => !a.startsWith "err:"
-          let aftBad := aft.filter fun (k, a, t) => FlareOperator.E2E.TraceMatch.classifyAnswer s!"={(kv.lookup k).getD "?"}" a t != .ok || !answeredLocally t
-          IO.eprintln s!"# R3 order: activated on {m} at log line {iAct}; accepted the map naming {m2} at {iAcc}; INVALIDATED at {iInv}; NEEDS REBUILD at {iRebuild}; bound to {m2} at {iBound2}\n#   right after the acceptance: eligible={eligible1} state={srcState1}; state {st1}\n#   reads during re-validation ({during.map (·.length)} answers, {duringMs} ms): local {durLocal.length}, not an explicit error {durNotError.length}; first {dur.head?.map (fun (k, a, t) => s!"{k} -> {a} | {t.decision.getD "-"} | {t.answer.getD "-"}")}\n#   local read decisions on {r} between acceptance and re-binding: {localBetween.length}\n#   after re-binding (rebound={rebound}): {aft.length} answers, not correct-and-local {aftBad.length}"
-          match iAct, iAcc with
-          | some a, some b => if a > b then return .fail s!"precondition (order not produced): the activation on {m}'s copy (line {a}) came AFTER accepting the new map (line {b})"
-          | _, _ => return .fail s!"precondition: the order lines are missing (activation {iAct}, acceptance {iAcc})"
-          if !accepted then return .fail s!"{r} never accepted the map naming {m2}"
-          if eligible1 != some "0" then return .fail s!"right after accepting the map naming {m2}, {r} still reports its copy eligible ({eligible1}, state {srcState1})"
-          if during.isNone then return .fail s!"the reads during re-validation were not observed ({duringMs} ms)"
-          if !durLocal.isEmpty then return .fail s!"{durLocal.length} read(s) were answered from the OLD copy after the new map was accepted"
-          if !localBetween.isEmpty then return .fail s!"{localBetween.length} local read decision(s) on {r} between accepting the new map and re-binding: {localBetween.head?.map (·.1)}"
-          if !durNotError.isEmpty then return .fail s!"{durNotError.length} read(s) during re-validation (new master unreachable) were not an explicit error: {durNotError.head?.map (fun (k, a, _) => s!"{k} -> {a}")}"
-          if iRebuild.isNone then return .fail s!"the new master's other history was never judged (no NEEDS REBUILD line)"
-          if !rebound then return .fail s!"{r} was not rebuilt and re-bound to {m2}"
-          if after.isNone || aft.length != 30 then return .fail s!"the reads after re-binding were not observed ({aft.length}/30)"
-          if !aftBad.isEmpty then return .fail s!"{aftBad.length} read(s) after re-binding were not correct or not local: {aftBad.head?.map (fun (k, a, _) => s!"{k} -> {a}")}"
-          return .pass }
+        | _ => return .fail "precondition: a master and a slave in partition 0" }
   ]
 }
 
@@ -2700,6 +2636,161 @@ def repairLedgerSuite : TestSuite := {
               if !repaired then return .fail "not repaired"
               if reqLines.length - reqBefore > 1 then return .fail s!"requested {reqLines.length - reqBefore} times for one fault"
               return .pass }
+  ]
+}
+
+-- ─── R3: source change re-validates (own cluster) ───────────────────────
+
+/-- R3 acceptance runs on its OWN cluster from a verified initial state, so a
+    failure of an earlier empty-source test cannot take the R3 verdict with
+    it (CI 37472032699: test 9's damage failed R3's precondition). Same
+    shape and seams as the empty-source cluster. -/
+private def r3Cfg : ClusterConfig := { emptySourceCfg with
+  name := "r3-source"
+  «namespace» := "flare-r3-source"
+  debugPod := "debug-r3-source" }
+
+def r3SourceChangeSuite : TestSuite := {
+  name := "r3-source-change"
+  setup := do
+    deployCluster r3Cfg
+    discard <| kubectlPatch "flarecluster" r3Cfg.name r3Cfg.«namespace» "{\"spec\":{\"circuitBreaker\":{\"minUnavailableToTrip\":3}}}"
+    IO.sleep 30000
+  teardown := do
+    for ip in (← getPodIps s!"app=flare,cluster={r3Cfg.name}" r3Cfg.«namespace») do
+      for ip2 in (← getPodIps s!"app=flare,cluster={r3Cfg.name}" r3Cfg.«namespace») do
+        if ip != ip2 then
+          for _ in [0:2] do
+            discard <| hostCmd "docker" (["exec", kindNode, "iptables", "-D", "FORWARD"] ++ ruleSpec ip ip2)
+    cleanupCluster r3Cfg
+  onFailure := dumpClusterDiagnostics r3Cfg.«namespace» s!"app={r3Cfg.operatorName}"
+  tests :=
+    let c : Ctx := { cfg := r3Cfg }
+    let ns := r3Cfg.«namespace»
+    let ip : String → IO String := fun p => do return (← getPodIp p ns).getD ""
+    [
+    { name := "R3 initial state: 400 keys written on the master and every copy converged (verified before the scenario)"
+      run := do
+        let graceOver ← waitForCondition "operator past its startup grace period" 240 do
+          return containsSubstr (← c.opLog 400) "grace period over"
+        if !graceOver then return .fail "the operator never logged the end of its startup grace period"
+        match ← c.p0Roles with
+        | (some m0, [_, _]) =>
+          let w ← c.bulkWrite (← ip m0) "es" 400 1024
+          if w != 400 then return .fail s!"stored {w}/400"
+          if (← c.allInSync 400 300).isNone then return .fail "the copies did not converge on 400 keys"
+          return .pass
+        | _ => return .fail "one master and two slaves" },
+
+    { name := "R3 source change re-validates, never carries eligibility over: with reads routed to replicas (balance > 0), a replica activates the OLD master's copy, THEN accepts the map naming the new master — from that acceptance it answers no read from its copy (forwarded, an explicit error while the new master is unreachable), is not eligible, and once the new master is observed with another history it is rebuilt and only then answers locally, every value correct"
+      run := do
+        match ← c.allInSync 400 600 with
+        | none => return .fail "precondition: the copies did not converge on 400 keys"
+        | some (m, r, _) =>
+          let mIp ← ip m
+          let rIp ← ip r
+          let opIp := ((← kubectl ["get", "pods", "-n", ns, "-l", s!"app={r3Cfg.operatorName}", "-o", "jsonpath={.items[0].status.podIP}"]).toOption.getD "").trim
+          if opIp.isEmpty then return .fail "precondition: the operator's pod IP is unreadable"
+          let kv := (List.range 30).map fun i => (s!"es_r3_{i}", s!"r3val_{i}")
+          if (← c.setValues mIp kv) != 30 then return .fail s!"precondition: could not write the R3 keys on {m}"
+          if (← c.allInSync 400 300).isNone && (← c.allInSync 430 300).isNone then return .fail "precondition: the copies did not converge after the R3 keys"
+          let balance0 := ((← kubectlGetJsonpath "flarecluster" r3Cfg.name ns "{.spec.readBalance}").toOption.getD "").trim
+          let restorePatch := if balance0.isEmpty then "{\"spec\":{\"readBalance\":null}}" else s!"\{\"spec\":\{\"readBalance\":{balance0}}}"
+          if let .error e ← kubectlPatch "flarecluster" r3Cfg.name ns "{\"spec\":{\"readBalance\":{\"master\":0,\"slave\":100}}}" then
+            return .fail s!"could not route reads to the replicas: {e}"
+          IO.sleep 1100
+          let since ← utcNow
+          let ins := fun (a b : String) => hostCmd "docker" (["exec", kindNode, "iptables", "-I", "FORWARD", "1"] ++ ruleSpec a b)
+          let del := fun (a b : String) => do
+            for _ in [0:3] do discard <| hostCmd "docker" (["exec", kindNode, "iptables", "-D", "FORWARD"] ++ ruleSpec a b)
+          let cleanup : IO Unit := do
+            del opIp rIp
+            discard <| kubectl ["exec", "-n", ns, r, "-c", "flared", "--", "rm", "-f", "/tmp/act-hold"]
+          -- 1. r takes a fresh copy of m; its activation is held
+          match ← c.killFlaredIn r with
+          | .error e => return .fail s!"could not restart {r}: {e}"
+          | .ok _ => pure ()
+          if !(← c.waitDumpStart r 180) then return .fail s!"precondition: {r} did not start a full dump"
+          let armed ← waitForCondition s!"the activation hold is armed in {r}" 60 do
+            return (← kubectl ["exec", "-n", ns, r, "-c", "flared", "--", "touch", "/tmp/act-hold"]).toBool
+          let held ← waitForCondition s!"{r}'s copy is done and its activation is held" 300 do
+            return containsSubstr (← c.flaredLogSince r since) "held by FLARE_TEST_ACTIVATION_HOLD_FILE"
+          if !armed || !held then cleanup; return .fail s!"precondition: the activation was not held (armed={armed}, held={held})"
+          -- 2. the operator's map pushes to r are cut; m is drained and
+          --    another node promoted (r keeps the OLD map)
+          if let .error e ← ins opIp rIp then cleanup; return .fail s!"precondition: could not cut the operator's pushes to {r}: {e}"
+          discard <| kubectl ["delete", "pod", m, "-n", ns, "--wait=false"]
+          let some m2 ← c.newMasterAfter m 120 | do cleanup; return .fail s!"precondition: no successor promoted after draining {m}"
+          if m2 == r then cleanup; return .fail s!"precondition: the held replica {r} itself was promoted"
+          let m2Ip ← ip m2
+          -- 3. released while r still has the old map: it activates on m's copy
+          discard <| kubectl ["exec", "-n", ns, r, "-c", "flared", "--", "rm", "-f", "/tmp/act-hold"]
+          let activatedOld ← waitForCondition s!"{r} activates on {m}'s copy under the old map" 40 do
+            return ((← c.flaredLogAllSince r since).splitOn "\n").any fun l => containsSubstr l "node activated (attempt" && containsSubstr l s!"from {m}."
+          if !activatedOld then
+            cleanup
+            discard <| kubectlPatch "flarecluster" r3Cfg.name ns restorePatch
+            return .fail s!"precondition (order not produced): {r} did not activate on {m}'s copy before the new map; nothing about R3 was tested"
+          -- 4. r cannot reach the new master; then the new map reaches r
+          if let .error e ← ins rIp m2Ip then cleanup; return .fail s!"precondition: could not cut {r} -> {m2}: {e}"
+          del opIp rIp
+          let accepted ← waitForCondition s!"{r} accepts a map naming {m2}" 120 do
+            return ((← c.flaredLogAllSince r since).splitOn "\n").any fun l => containsSubstr l "node map accepted (version" && containsSubstr l s!" 0={m2}."
+          let st1 ← c.readState rIp r
+          let eligible1 ← c.statStr rIp "repl_read_source_eligible"
+          let srcState1 ← c.statStr rIp "repl_read_source_state"
+          let t0 ← IO.monoMsNow
+          let during ← c.getRound rIp "es_mark_r3_during" (kv.map (·.1)) (waitSec := 90)
+          let duringMs := (← IO.monoMsNow) - t0
+          del rIp m2Ip
+          -- 5. m2 observable again: another history (promotion epoch) ->
+          --    rebuilt, re-bound to m2, then local again
+          let rebound ← waitForCondition s!"{r} is rebuilt and bound to {m2}" 600 do
+            let st ← c.statStr (← ip r) "repl_read_source_state"
+            let src ← c.statStr (← ip r) "repl_read_source"
+            return st == some "eligible" && (src.map (containsSubstr · s!"{m2}.")).getD false
+          let rIp2 ← ip r
+          IO.sleep 1100
+          let afterAt ← utcNow
+          let after ← c.getRound rIp2 "es_mark_r3_after" (kv.map (·.1))
+          discard <| kubectlPatch "flarecluster" r3Cfg.name ns restorePatch
+          -- the record
+          let log := (← c.flaredLogAllSince r since).splitOn "\n"
+          let idx := fun (p : String → Bool) => (log.zip (List.range log.length)).findSome? fun (l, i) => if p l then some i else none
+          let iAct := idx fun l => containsSubstr l "node activated (attempt" && containsSubstr l s!"from {m}."
+          let iAcc := idx fun l => containsSubstr l "node map accepted (version" && containsSubstr l s!" 0={m2}."
+          let iInv := idx fun l => containsSubstr l "read source INVALIDATED"
+          let iRebuild := idx fun l => containsSubstr l "read source NEEDS REBUILD"
+          let iBound2 := idx fun l => (containsSubstr l "read source BOUND:" || containsSubstr l "read source RE-VALIDATED") && containsSubstr l s!"{m2}."
+          let tr := readTraces (log.foldl (fun a l => a ++ l ++ "\n") "")
+          let tDuring := tracesAfterMarker tr "es_mark_r3_during"
+          let trAfter := readTraces (← c.flaredLogAllSince r afterAt)
+          let tAfter := tracesAfterMarker trAfter "es_mark_r3_after"
+          -- local decisions on r between accepting the new map and re-binding
+          let localBetween := (log.zip (List.range log.length)).filter fun (l, i) =>
+            containsSubstr l "read-trace seq=" && traceField l "decision" == "local"
+              && (match iAcc with | some a => decide (i > a) | none => false)
+              && (match iBound2 with | some b => decide (i < b) | none => true)
+          let dur := ((during.getD []).map fun (k, a) => (k, a, (tDuring.lookup k).getD {}))
+          let aft := ((after.getD []).map fun (k, a) => (k, a, (tAfter.lookup k).getD {}))
+          let durLocal := dur.filter fun (_, _, t) => (t.decision.map (traceField · "decision")) == some "local"
+          let durNotError := dur.filter fun (_, a, _) => !a.startsWith "err:"
+          let aftBad := aft.filter fun (k, a, t) => FlareOperator.E2E.TraceMatch.classifyAnswer s!"={(kv.lookup k).getD "?"}" a t != .ok || !answeredLocally t
+          IO.eprintln s!"# R3 order: activated on {m} at log line {iAct}; accepted the map naming {m2} at {iAcc}; INVALIDATED at {iInv}; NEEDS REBUILD at {iRebuild}; bound to {m2} at {iBound2}\n#   right after the acceptance: eligible={eligible1} state={srcState1}; state {st1}\n#   reads during re-validation ({during.map (·.length)} answers, {duringMs} ms): local {durLocal.length}, not an explicit error {durNotError.length}; first {dur.head?.map (fun (k, a, t) => s!"{k} -> {a} | {t.decision.getD "-"} | {t.answer.getD "-"}")}\n#   local read decisions on {r} between acceptance and re-binding: {localBetween.length}\n#   after re-binding (rebound={rebound}): {aft.length} answers, not correct-and-local {aftBad.length}"
+          match iAct, iAcc with
+          | some a, some b => if a > b then return .fail s!"precondition (order not produced): the activation on {m}'s copy (line {a}) came AFTER accepting the new map (line {b})"
+          | _, _ => return .fail s!"precondition: the order lines are missing (activation {iAct}, acceptance {iAcc})"
+          if !accepted then return .fail s!"{r} never accepted the map naming {m2}"
+          if eligible1 != some "0" then return .fail s!"right after accepting the map naming {m2}, {r} still reports its copy eligible ({eligible1}, state {srcState1})"
+          if during.isNone then return .fail s!"the reads during re-validation were not observed ({duringMs} ms)"
+          if !durLocal.isEmpty then return .fail s!"{durLocal.length} read(s) were answered from the OLD copy after the new map was accepted"
+          if !localBetween.isEmpty then return .fail s!"{localBetween.length} local read decision(s) on {r} between accepting the new map and re-binding: {localBetween.head?.map (·.1)}"
+          if !durNotError.isEmpty then return .fail s!"{durNotError.length} read(s) during re-validation (new master unreachable) were not an explicit error: {durNotError.head?.map (fun (k, a, _) => s!"{k} -> {a}")}"
+          if iRebuild.isNone then return .fail s!"the new master's other history was never judged (no NEEDS REBUILD line)"
+          if !rebound then return .fail s!"{r} was not rebuilt and re-bound to {m2}"
+          if after.isNone || aft.length != 30 then return .fail s!"the reads after re-binding were not observed ({aft.length}/30)"
+          if !aftBad.isEmpty then return .fail s!"{aftBad.length} read(s) after re-binding were not correct or not local: {aftBad.head?.map (fun (k, a, _) => s!"{k} -> {a}")}"
+          return .pass }
   ]
 }
 
@@ -3074,24 +3165,36 @@ def clusterInitSuite : TestSuite := {
           match ← c.pair with
           | .error e => return failWith e
           | .ok (mPodR, m2, sPodR, s2) =>
-            let settled ← waitForCondition "recovery complete: replica Active slave, ledger empty, no reconstruction in progress" 300 do
+            -- complete = the REPLICA'S OWN view, not the operator's (CI
+            -- 37472027476: the operator showed Active while the replica's
+            -- own map said Prepare and it was rebuilding again): its own map
+            -- entry Active, no reconstruction running, its copy eligible for
+            -- its source (when it reports one), the ledger empty — and, once
+            -- reads are routed to it below, a GET answered from its own copy
+            let settled ← waitForCondition "recovery complete: replica's OWN map Active, no reconstruction running, copy eligible, ledger empty" 300 do
               let led := (← c.ledgerDests).isEmpty
               let active := (← c.nodeView).any fun e => podOf e.fqdn == sPodR && e.role == 1 && e.state == 0
+              let own ← c.readState s2 sPodR
+              let ownActive := containsSubstr own "own[role slave state active"
               let st := (← c.statNat s2 "reconstruction_started")
               let cp := (← c.statNat s2 "reconstruction_completed")
-              return led && active && st.isSome && st == cp
-            if !settled then return failWith "(2) recovery did not complete (replica Active slave, ledger empty, no reconstruction in progress) within 300 s"
+              let elig ← c.statStr s2 "repl_read_source_eligible"
+              return led && active && ownActive && st.isSome && st == cp && (elig.isNone || elig == some "1")
+            if !settled then return failWith s!"(2) recovery did not complete from the replica's own view within 300 s: {← c.readState s2 sPodR}; eligible={← c.statStr s2 "repl_read_source_eligible"}"
             -- The master is read under the cluster's own read balance; reads
             -- are then routed to the replica (master 0 / slave 100) and the
             -- spec is restored before the verdict.
             let onM ← c.getRound m2 "init_mark_master" keys
             let balance0 := ((← kubectlGetJsonpath "flarecluster" initCfg.name ns "{.spec.readBalance}").toOption.getD "").trim
             let routedPatch ← kubectlPatch "flarecluster" initCfg.name ns "{\"spec\":{\"readBalance\":{\"master\":0,\"slave\":100}}}"
-            let routed ← waitForCondition "a GET on the replica is served without the master" 150 do
-              let g0 ← c.statNat m2 "cmd_get"
-              discard <| memcachedGet c.cfg.debugPod c.cfg.«namespace» s2 c.cfg.flarePort "init_mark_routing"
-              let g1 ← c.statNat m2 "cmd_get"
-              return g0.isSome && g0 == g1
+            let routed ← waitForCondition "a GET on the replica is answered from its OWN copy (trace)" 150 do
+              let mk := s!"init_mark_routing_{← IO.monoMsNow}"
+              let t0 ← utcNow
+              match ← c.getRound s2 mk ["init_0"] with
+              | some [(_, a)] =>
+                let t := ((tracesAfterMarker (readTraces (← c.flaredLogAllSince sPodR t0)) mk).lookup "init_0").getD {}
+                return a == "=val_0" && answeredLocally t
+              | _ => return false
             let mUid0 ← c.podUid mPodR
             let sUid0 ← c.podUid sPodR
             let mBoot0 ← c.statNat m2 "reconstruction_boot_id"

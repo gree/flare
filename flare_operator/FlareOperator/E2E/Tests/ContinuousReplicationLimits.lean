@@ -25,6 +25,7 @@
 import FlareOperator.E2E.Framework
 import FlareOperator.E2E.Helpers
 import FlareOperator.E2E.Setup
+import FlareOperator.E2E.TraceMatch
 
 namespace FlareOperator.E2E.Tests.ContinuousReplicationLimits
 
@@ -32,6 +33,7 @@ open FlareOperator.E2E
 open FlareOperator.E2E.Helpers
 open FlareOperator.E2E.Setup
 open FlareOperator.Kubectl
+open FlareOperator.E2E.TraceMatch (readTraces traceField tracesAfterMarker KeyTrace answeredLocally numAfter parseGetReplies judgeActivation Activation)
 
 private def kindNode : String := "flare-e2e-control-plane"
 private def podOf (fqdn : String) : String := (fqdn.splitOn ".").head?.getD fqdn
@@ -1627,25 +1629,7 @@ private def Ctx.getRound (c : Ctx) (ip marker : String) (keys : List String) (sq
   let post := if squash then " | awk '{ sub(/\\r$/, \"\"); if (length($0) > 200) { v = $0; gsub(/x/, \"\", v); print \"X\" length($0) \"/\" length(v) } else print }'" else ""
   match ← execInDebugPod c.cfg.debugPod c.cfg.«namespace» s!"printf '{cmds}' | nc -w 5 {ip} {c.cfg.flarePort}{post}" with
   | .error _ => return none
-  | .ok out =>
-    let mut res : Array String := #[]
-    let mut pending : Option String := none
-    let mut expectValue := false
-    for raw in out.splitOn "\n" do
-      let l := (raw.replace "\r" "").trim
-      if expectValue then
-        pending := some ("=" ++ l)
-        expectValue := false
-      else if l.startsWith "VALUE " then expectValue := true
-      else if l == "END" then
-        res := res.push (pending.getD "miss")
-        pending := none
-      else if l.startsWith "SERVER_ERROR" || l.startsWith "CLIENT_ERROR" || l.startsWith "ERROR" then
-        res := res.push s!"err:{l}"
-        pending := none
-    let all := marker :: keys
-    if res.size != all.length then return none
-    return some (all.zip res.toList).tail
+  | .ok out => return (parseGetReplies (marker :: keys) out).map (·.tail)
 
 /-- One snapshot of what a node bases a local answer on: its OWN map entry
     (role/state/balance), map version, follow-guard inputs, reconstruction
@@ -1664,70 +1648,9 @@ private def Ctx.readState (c : Ctx) (ip pod : String) : IO String := do
       "repl_source_lsn_observed_at", "reconstruction_started", "reconstruction_completed", "reconstruction_boot_id", "curr_items"]
     return s!"own[{own}] " ++ String.intercalate " " (keys.map fun k => s!"{k}={(statVal st k).getD "?"}")
 
-/-- flared read-trace lines (FLARE_TEST_READ_TRACE_PREFIX) in `log`, in log
-    order: decision lines ("read-trace seq=") and answer lines
-    ("read-trace-result seq="). Both carry the client connection (`conn=`
-    peer ip:port). `via=` is NOT a reliable filter: a forwarded text GET
-    arrives without its proxy chain (local smoke run), so traces are matched
-    by connection only. -/
-private def readTraces (log : String) : List String :=
-  (log.splitOn "\n").filter fun l => containsSubstr l "read-trace seq=" || containsSubstr l "read-trace-result seq="
-
-/-- Value of `name=` in a trace line. -/
-private def traceField (line name : String) : String :=
-  match (line.splitOn s!" {name}=").drop 1 |>.head? with
-  | some rest => (rest.splitOn " ").head?.getD ""
-  | none => ""
-
-/-- The GETs that followed `marker` on the SAME client connection, up to the
-    next marker on that connection (a reused peer port starts with its own
-    marker): key -> (decision line, answer line). Reads forwarded in from a
-    peer arrive on the peer's connection and are never included; each test
-    connection reads every key once, so (connection, key) is one GET. -/
-private def tracesAfterMarker (traces : List String) (marker : String) : List (String × (Option String × Option String)) := Id.run do
-  let mut conn : Option String := none
-  let mut acc : List (String × (Option String × Option String)) := []
-  for l in traces do
-    let k := traceField l "key"
-    let cn := traceField l "conn"
-    let decision := containsSubstr l "read-trace seq="
-    match conn with
-    | none =>
-      if decision && k == marker && cn != "-" then conn := some cn
-    | some c0 =>
-      if cn == c0 then
-        if containsSubstr k "_mark_" then
-          if decision && k != marker then return acc.reverse
-        else
-          let cur := (acc.lookup k).getD (none, none)
-          let upd := if decision then (if cur.1.isNone then (some l, cur.2) else cur)
-                     else (if cur.2.isNone then (cur.1, some l) else cur)
-          acc := (k, upd) :: acc.filter (·.1 != k)
-  return acc.reverse
-
-/-- One answer, classified with its traces:
-    "ok"          expected value, answer traced;
-    "refused"     an explicit error reply (may be a safety refusal):
-                  availability;
-    "masked-miss" the server recorded the key as UNREADABLE (failed forward,
-                  partition/storage error) yet answered END — to the client
-                  a missing key. Its own finding, never cancelled by a later
-                  complete read (the client already saw "absent");
-    "wrong-local" / "wrong-forwarded"  a real miss or another value on a
-                  normal read, from this node's copy / the node it forwarded
-                  to: data integrity;
-    "untraced"    no answer line: cannot be classified. -/
-private def classifyAnswer (expected answer : String) (tr : Option String × Option String) : String :=
-  if answer.startsWith "err:" then "refused"
-  else match tr.2 with
-    | none => "untraced"
-    | some r =>
-      let res := traceField r "result"
-      if res == "unavailable" then "masked-miss"
-      else if res == "refused" then "refused"
-      else if answer == expected then "ok"
-      else if traceField r "reason" == "local" then "wrong-local"
-      else "wrong-forwarded"
+/-- Answer class label of a GET (TraceMatch.classifyAnswer, unit-tested). -/
+private def classifyAnswer (expected answer : String) (t : KeyTrace) : String :=
+  (FlareOperator.E2E.TraceMatch.classifyAnswer expected answer t).label
 
 /-- Pods of the data cluster: (name, IP), IP-less pods left out. -/
 private def Ctx.dataPods (c : Ctx) : IO (List (String × String)) := do
@@ -1766,6 +1689,8 @@ private def emptySourceCfg : ClusterConfig := {
                 ("FLARE_TEST_READ_TRACE_PREFIX", "es_")]
   flaredArgs := "--reconstruction-bwlimit 256"
   operatorEnv := [("FLARE_STATS_PROBE_INTERVAL_MS", "15000")]
+  -- production read policy (R2), through the CR as production sets it
+  readUnavailableError := true
 }
 
 /-- SET each (key, value) on one connection; the number STORED. -/
@@ -1775,11 +1700,6 @@ private def Ctx.setValues (c : Ctx) (ip : String) (kvs : List (String × String)
   | .ok o => return o.trim.toNat?.getD 0
   | .error _ => return 0
 
-/-- Number after `needle` in `line` (digits only). -/
-private def numAfter (line needle : String) : Option Nat :=
-  match (line.splitOn needle).drop 1 |>.head? with
-  | some rest => (rest.takeWhile Char.isDigit).toNat?
-  | none => none
 
 /-- (rebuilt-from master_id, rebuilt-from epoch) of a node: `none` = stats
     unreadable; `some (none, none)` = no evidence. -/
@@ -2104,9 +2024,6 @@ def emptySourceSuite : TestSuite := {
           let rL := (← c.flaredLogAllSince r since).splitOn "\n"
           let acceptLine := rL.find? fun l => containsSubstr l "node map accepted (version" && containsSubstr l s!" 0={m2}."
           let acceptV := acceptLine.bind (numAfter · "node map accepted (version ")
-          let acceptT := acceptLine.bind logTs
-          let isFrom (l who : String) := containsSubstr l s!" {who}." || containsSubstr l s!"from {who}."
-          let checks := rL.filter (containsSubstr · "activation source check passed")
           let activations := rL.filter (containsSubstr · "node activated (attempt")
           let timeline := rL.filter fun l =>
             containsSubstr l "activation source check passed" || containsSubstr l "node activated (attempt" || containsSubstr l "activation STOPPED"
@@ -2116,18 +2033,16 @@ def emptySourceSuite : TestSuite := {
           IO.eprintln s!"# (a) operator log since {since}: {opFetch}; switch {m} -> {m2}: {switchLine.getD "(no line)"}; first broadcast after it v{switchV}\n# (b) {r} accepted a map with {m2} as master: v{acceptV} at {acceptLine.getD "(no line)"}\n# (c)/(d) {r} timeline since {since} (map lines only where the master changes are relevant; last 60):\n{String.intercalate "\n" (timeline.reverse.take 60).reverse}"
           if !fromOld then return .fail s!"precondition: the dump did not start from the master {m} ({startLine.trim})"
           let some aV := acceptV | return .fail s!"(b) no line shows {r} accepting a map with {m2} as master: the timeline cannot be judged"
-          -- a check of the OLD source made against the map that already named
-          -- the new master is a bug, whatever happened next
-          let staleChecks := checks.filter fun l => isFrom l m && (numAfter l "read at version ").any (· ≥ aV)
-          if !staleChecks.isEmpty then
-            return .fail s!"the OLD source {m} was validated against map v{aV}+ (which names {m2}): {staleChecks.head?.getD ""}"
+          -- the order verdict (TraceMatch.judgeActivation, unit-tested): a
+          -- check of the old source against the new map, or an activation of
+          -- the old copy after accepting it, is a BUG whatever follows
+          let act := judgeActivation rL m m2
           let lastAct := activations.getLast?
-          let actOld := lastAct.any (isFrom · m)
-          let actNew := lastAct.any (isFrom · m2)
-          let actOldAfterAccept := activations.any fun l => isFrom l m &&
-            match logTs l, acceptT with
-            | some t, some t0 => t ≥ t0
-            | _, _ => true
+          IO.eprintln s!"# (c) activation order: {act.describe}"
+          match act with
+          | .bug why => return .fail s!"activation order: {why}"
+          | .undetermined why => return .fail s!"activation order UNDETERMINED (not a pass): {why}"
+          | _ => pure ()
           -- (d) the replica's map now, and every key and value: reads routed
           -- to the replicas and attributed by the trace
           let rIp ← ip r
@@ -2163,19 +2078,19 @@ def emptySourceSuite : TestSuite := {
             for (k, v) in am do
               if some v != expect k then badM2 := badM2 ++ [s!"{k} -> {v}"]
             for (k, v) in ar do
-              let t := (tr.lookup k).getD (none, none)
+              let t := (tr.lookup k).getD {}
               let cls := classifyAnswer ((expect k).getD "?") v t
-              let localAns := (t.2.map (traceField · "reason")) == some "local"
+              let localAns := answeredLocally t
               if cls == "wrong-local" || cls == "wrong-forwarded" then
-                badR := badR ++ [s!"{k} -> {v} ({cls}) decision {t.1.getD "(none)"} answer {t.2.getD "(none)"}"]
+                badR := badR ++ [s!"{k} -> {v} ({cls}) decision {t.decision.getD "(none)"} answer {t.answer.getD "(none)"}"]
               else if cls == "masked-miss" then
-                badR := badR ++ [s!"{k} -> {v} (MASKED MISS: unreadable on the server, END to the client) answer {t.2.getD ""}"]
+                badR := badR ++ [s!"{k} -> {v} (MASKED MISS: unreadable on the server, END to the client) answer {t.answer.getD ""}"]
               else if cls == "refused" then
                 unavailR := unavailR ++ [s!"{k} -> {v} ({cls})"]
-              else if cls == "untraced" || !localAns then
+              else if cls != "ok" || !localAns then
                 notLocal := notLocal + 1
           | _, _ => pure ()
-          IO.eprintln s!"# (c) last activation {lastAct.getD "(none)"}; of the OLD source={actOld} (after accepting v{aV}: {actOldAfterAccept}), of the NEW={actNew}; evidence before a completed dump {early}; recorded={recorded}; final evidence {evEnd} (old epoch {oldEpoch}, new {newEpoch})\n# (d) {r} map now: {rMap}; post-switch writes stored {stPost}/50; converged={converged.isSome}; routed={routedPatch.isOk}/{routed}, restored={restored.isOk}; {m2} answers wrong {badM2.length}; {r} data errors {badR.length}, unavailable/refused {unavailR.length}, correct but not attributed to its local copy {notLocal}/400\n# {String.intercalate "\n# " ((badM2 ++ badR ++ unavailR).take 10)}"
+          IO.eprintln s!"# (c) last activation {lastAct.getD "(none)"} (accepted v{aV}); evidence before a completed dump {early}; recorded={recorded}; final evidence {evEnd} (old epoch {oldEpoch}, new {newEpoch})\n# (d) {r} map now: {rMap}; post-switch writes stored {stPost}/50; converged={converged.isSome}; routed={routedPatch.isOk}/{routed}, restored={restored.isOk}; {m2} answers wrong {badM2.length}; {r} data errors {badR.length}, unavailable/refused {unavailR.length}, correct but not attributed to its local copy {notLocal}/400\n# {String.intercalate "\n# " ((badM2 ++ badR ++ unavailR).take 10)}"
           if let .error e := routedPatch then return .fail s!"could not route reads to the replicas: {e}"
           if let .error e := restored then return .fail s!"could not restore the read balance: {e}"
           if !early.isEmpty then return .fail s!"evidence was visible before a dump completed: {early}"
@@ -2191,15 +2106,12 @@ def emptySourceSuite : TestSuite := {
           let evEpoch := match evEnd with
             | some (_, some e) => some e
             | _ => none
-          if actNew then
+          if act.isPass then
             if evEpoch != newEpoch then return .fail s!"activated on the copy from the new master {m2}, yet the evidence names {evEpoch} (new epoch {newEpoch})"
             return .pass
-          -- activated on the old master's copy: allowed only when that
-          -- activation was decided BEFORE the replica accepted the new map;
-          -- post-switch re-validation and read suppression are then judged
-          -- from the record above, not passed here
-          if actOldAfterAccept then
-            return .fail s!"{r} activated the OLD master {m}'s copy after accepting map v{aV} that names {m2}"
+          -- UNDECIDED: the old master's copy was activated BEFORE the replica
+          -- accepted the new map; post-switch re-validation and read
+          -- suppression are judged from the record above, not passed here
           if evEpoch != oldEpoch then return .fail s!"activated on the old master's copy, yet the evidence names {evEpoch} (old epoch {oldEpoch})"
           return .fail s!"UNDECIDED: {r} activated {m}'s completed copy BEFORE accepting map v{aV} (switch v{switchV}); final keys and values equal the new master's and are read locally — post-switch re-validation and read suppression need a judgment (see the timeline); not counted as a pass"
         | _ => return .fail "precondition: one master and two slaves" },
@@ -2312,6 +2224,17 @@ def emptySourceSuite : TestSuite := {
           let firstHold := ((log.splitOn "\n").filter (containsSubstr · "held by FLARE_TEST_ACTIVATION_HOLD_FILE")).head?.getD ""
           let beforeHold := ((log.splitOn "\n").filter fun l => containsSubstr l "node map accepted" || containsSubstr l "activation source check passed").reverse.take 3 |>.reverse
           IO.eprintln s!"# {r} first hold: {firstHold}\n# {r} last map/check lines of the window (for the versions in force): {String.intercalate " | " beforeHold}\n# {r} timeline after the last hold ({tl.length} line(s), first 60):\n{String.intercalate "\n" (tl.take 60)}"
+          -- the order verdict over the whole window of this process
+          -- (TraceMatch.judgeActivation, unit-tested): BUG / UNDETERMINED
+          -- fail; UNDECIDED (old copy activated BEFORE accepting the new
+          -- map) is not a pass either
+          let act := judgeActivation (log.splitOn "\n") m m2
+          IO.eprintln s!"# {r} activation order: {act.describe}"
+          match act with
+          | .bug why => return .fail s!"activation order: {why}"
+          | .undetermined why => return .fail s!"activation order UNDETERMINED (not a pass): {why}"
+          | .undecided why => return .fail s!"UNDECIDED (not a pass): {why}"
+          | .pass _ => pure ()
           if stopOrSwitch.isNone then return .fail "the old copy's activation was neither stopped nor abandoned for the new source"
           if !rebuilt then return .fail s!"{r} was not rebuilt from the promoted master {m2}"
           if !activeNow then return .fail s!"{r} did not become Active again after its rebuild"
@@ -2454,7 +2377,70 @@ def emptySourceSuite : TestSuite := {
           if !dropped then return .fail "precondition: the master never counted dropped forwards"
           if !deferredSeen then return .fail s!"the repair of {y} from an empty promoted master was not deferred"
           if yItems != 400 then return .fail s!"{y} lost keys ({yItems}/400): it was rebuilt from the empty promoted master"
-          return .pass }
+          return .pass },
+
+    { name := "R2 production read policy: with readUnavailableError=true in the FlareCluster, a GET a replica cannot forward to its master is an EXPLICIT error to the client (never END), and a key that is really absent is still a miss"
+      run := do
+        -- the operator path: the CR setting reached every pod's extra.conf
+        let pods := (← c.dataPods).map (·.1)
+        let mut confs : List String := []
+        for p in pods do
+          match ← kubectl ["exec", "-n", ns, p, "-c", "flared", "--", "sh", "-c", "grep -h read-unavailable-error /etc/flared/extra.conf || echo MISSING"] with
+          | .ok o => confs := confs ++ [s!"{p}: {o.trim}"]
+          | .error e => confs := confs ++ [s!"{p}: unreadable ({e.take 80})"]
+        IO.eprintln s!"# extra.conf on every pod: {confs}"
+        if confs.isEmpty || !(confs.all (containsSubstr · "read-unavailable-error = true")) then
+          return .fail s!"precondition: the CR's readUnavailableError did not reach every pod's extra.conf ({confs})"
+        match ← c.p0Roles with
+        | (some m, s :: _) =>
+          let mIp ← ip m
+          let sIp ← ip s
+          -- its own keys (earlier tests delete the bulk keys on a master)
+          let stored ← c.setValues mIp [("es_r2_a", "r2val_a"), ("es_r2_b", "r2val_b")]
+          if stored != 2 then return .fail s!"precondition: stored {stored}/2 keys on {m}"
+          -- reads on the replica are forwarded to the master (own balance 0)
+          let balance0 := ((← kubectlGetJsonpath "flarecluster" emptySourceCfg.name ns "{.spec.readBalance}").toOption.getD "").trim
+          let restorePatch := if balance0.isEmpty then "{\"spec\":{\"readBalance\":null}}" else s!"\{\"spec\":\{\"readBalance\":{balance0}}}"
+          if let .error e ← kubectlPatch "flarecluster" emptySourceCfg.name ns "{\"spec\":{\"readBalance\":{\"master\":100,\"slave\":0}}}" then
+            return .fail s!"could not route reads to the master: {e}"
+          let since ← utcNow
+          let fwd ← waitForCondition s!"a GET on {s} is forwarded to {m} (trace)" 150 do
+            let mk := s!"es_mark_r2_route_{← IO.monoMsNow}"
+            discard <| c.getRound sIp mk []
+            return (readTraces (← c.flaredLogAllSince s since)).any fun l => traceField l "key" == mk && traceField l "decision" == "proxy"
+          -- 1. forwarding works: the master's value comes back
+          let ok1 ← c.getRound sIp "es_mark_r2_ok" ["es_r2_a"]
+          -- 2. the replica cannot reach the master: explicit error, not END
+          let cutOk ← hostCmd "docker" (["exec", kindNode, "iptables", "-I", "FORWARD", "1"] ++ ruleSpecBack mIp sIp)
+          let failed ← c.getRound sIp "es_mark_r2_cut" ["es_r2_b"]
+          for _ in [0:3] do
+            discard <| hostCmd "docker" (["exec", kindNode, "iptables", "-D", "FORWARD"] ++ ruleSpecBack mIp sIp)
+          -- 3. healed: a key that does not exist is still a miss
+          let absent ← c.getRound sIp "es_mark_r2_absent" ["es_r2_never_written"]
+          discard <| kubectlPatch "flarecluster" emptySourceCfg.name ns restorePatch
+          let tr := readTraces (← c.flaredLogAllSince s since)
+          let t1 := ((tracesAfterMarker tr "es_mark_r2_ok").lookup "es_r2_a").getD {}
+          let t2 := ((tracesAfterMarker tr "es_mark_r2_cut").lookup "es_r2_b").getD {}
+          let t3 := ((tracesAfterMarker tr "es_mark_r2_absent").lookup "es_r2_never_written").getD {}
+          let a1 := ((ok1.bind (·.head?)).map (·.2)).getD "(not observed)"
+          let a2 := ((failed.bind (·.head?)).map (·.2)).getD "(not observed)"
+          let a3 := ((absent.bind (·.head?)).map (·.2)).getD "(not observed)"
+          let c1 := classifyAnswer "=r2val_a" a1 t1
+          let c2 := classifyAnswer "=r2val_b" a2 t2
+          let c3 := classifyAnswer "miss" a3 t3
+          IO.eprintln s!"# R2 on {s} (master {m}): forwarded={fwd}; cut applied={cutOk.isOk}\n#   1 forwarding works: {a1} ({c1}) {t1.answer.getD "(no answer line)"}\n#   2 master unreachable: {a2} ({c2}) {t2.answer.getD "(no answer line)"}\n#   3 absent key: {a3} ({c3}) {t3.answer.getD "(no answer line)"}"
+          if !fwd then return .fail s!"precondition: reads on {s} were not forwarded to {m}"
+          if let .error e := cutOk then return .fail s!"precondition: could not cut {s} -> {m}: {e}"
+          if c1 != "ok" then return .fail s!"precondition: a forwarded GET did not return the master's value ({a1}, {c1})"
+          -- the client must receive an explicit error, and the server must
+          -- record WHY (a refusal under read-unavailable-error)
+          if !a2.startsWith "err:SERVER_ERROR" then
+            return .fail s!"a GET the replica could not forward answered {a2} ({c2}), not an explicit error: the outage is shown to the client as '{if a2 == "miss" then "key absent" else a2}'"
+          if (t2.answer.map (traceField · "result")) != some "refused" || (t2.answer.map (traceField · "reason")) != some "read_unavailable_error" then
+            return .fail s!"the explicit error is not attributed to read-unavailable-error on {s}: {t2.answer.getD "(no answer line)"}"
+          if c3 != "ok" then return .fail s!"a really absent key did not answer a plain miss ({a3}, {c3})"
+          return .pass
+        | _ => return .fail "precondition: a master and a slave in partition 0" }
   ]
 }
 
@@ -2609,6 +2595,9 @@ private def initCfg : ClusterConfig := {
   -- flared logs the local/proxy decision (and the state it used) for
   -- reads of the test's keys: SAF-09 test 29 attributes every answer
   flaredEnv := [("FLARE_TEST_READ_TRACE_PREFIX", "init_")]
+  -- production read policy (R2): an unservable get is SERVER_ERROR, never
+  -- END; in the CR, so the CR recreated in test 29 keeps it
+  readUnavailableError := true
 }
 
 /-- Sample the operator's index port for `secs`: (ever open, observed
@@ -2866,10 +2855,10 @@ def clusterInitSuite : TestSuite := {
           for (pod, marker, t, ans) in probeList do
             let tr := tracesAfterMarker ((traceLogs.lookup pod).getD []) marker
             for (k, a) in ans do
-              let trk := (tr.lookup k).getD (none, none)
+              let trk := (tr.lookup k).getD {}
               let expected := s!"=val_{k.drop 5}"
               let cls := classifyAnswer expected a trk
-              let d := s!"{pod} at {t}: {k} -> {a}; decision {trk.1.getD "(none)"}; answer {trk.2.getD "(none)"}"
+              let d := s!"{pod} at {t}: {k} -> {a}{if trk.ambiguous then " (AMBIGUOUS traces)" else ""}; decision {trk.decision.getD "(none)"}; answer {trk.answer.getD "(none)"}"
               if cls == "ok" then nOk := nOk + 1
               else if cls == "refused" then nRefused := nRefused + 1
               else if cls == "masked-miss" then masked := d :: masked
@@ -2974,13 +2963,13 @@ def clusterInitSuite : TestSuite := {
             let mut postFails : List String := []
             let mut nPostLocal := 0
             for (k, before, a, after) in rows do
-              let trk := (tracesAfterMarker sTraces s!"init_mark_post_{k}").lookup k |>.getD (none, none)
+              let trk := (tracesAfterMarker sTraces s!"init_mark_post_{k}").lookup k |>.getD {}
               let cls := classifyAnswer s!"=val_{k.drop 5}" a trk
-              let localAns := (trk.2.map (traceField · "reason")) == some "local"
+              let localAns := answeredLocally trk
               let label := if cls == "ok" && !localAns then "correct, not answered from its own copy" else cls
               if cls == "ok" && localAns then nPostLocal := nPostLocal + 1
               else
-                IO.eprintln s!"# (2) replica {sPodR} {k} -> {a} ({label})\n#   before:   {before}\n#   decision: {trk.1.getD "(no trace line)"}\n#   answer:   {trk.2.getD "(no trace line)"}\n#   after:    {after}"
+                IO.eprintln s!"# (2) replica {sPodR} {k} -> {a} ({label})\n#   before:   {before}\n#   decision: {trk.decision.getD "(no trace line)"}\n#   answer:   {trk.answer.getD "(no trace line)"}\n#   after:    {after}"
                 postFails := postFails ++ [s!"{k} -> {a} ({label})"]
             let masterBad := match onM with
               | none => some "the master's answers were not observed"

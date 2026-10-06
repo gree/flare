@@ -25,6 +25,7 @@ import FlareOperator.StateMachine.FollowEvidence
 import FlareOperator.StateMachine.K8sReconciler
 import FlareOperator.StateMachine.NodeMapRecovery
 import FlareOperator.K8s.Bridge
+import FlareOperator.E2E.TraceMatch
 
 open FlareOperator.K8s
 open FlareOperator.ReplicaRepair
@@ -1147,6 +1148,113 @@ def checkPodRows (ctx : Ctx) : IO Unit := do
   check ctx "SAF-08 pod list: a deletionTimestamp marks the pod Terminating; a malformed row is dropped"
     ((find "n-2").map (·.terminating) == some true && pods.length == 3)
 
+
+-- ─── E2E evidence harness (TraceMatch): ambiguous input never passes ─────
+
+open FlareOperator.E2E.TraceMatch in
+private def tdec (seq : Nat) (conn key decision reason : String) : String :=
+  s!"[1][NTC][cluster.cc:1544-_trace_read] read-trace seq={seq} conn={conn} key={key} via=client decision={decision} reason={reason} target=n0:12121 partition=0 own_role=slave own_state=active map_version=7 boot_id=1"
+
+private def tans (seq : Nat) (conn key result reason : String) : String :=
+  s!"[1][NTC][cluster.cc:1564-trace_read_result] read-trace-result seq={seq} conn={conn} key={key} via=client result={result} reason={reason}"
+
+open FlareOperator.E2E.TraceMatch in
+private def checkTraceParse (ctx : Ctx) : IO Unit := do
+  let all := ["init_mark_r0", "init_0", "init_1", "init_2"]
+  let out := "END\r\nVALUE init_0 0 5\r\nval_0\r\nEND\r\nSERVER_ERROR read unavailable\r\nEND\r\n"
+  check ctx "trace: replies parsed per key; an explicit error is err:, not a miss"
+    (parseGetReplies all out == some [("init_mark_r0", "miss"), ("init_0", "=val_0"), ("init_1", "err:SERVER_ERROR read unavailable"), ("init_2", "miss")])
+  check ctx "trace: fewer replies than GETs (cut off) is not observed"
+    (parseGetReplies all "END\r\nVALUE init_0 0 5\r\nval_0\r\nEND\r\n" == none)
+  check ctx "trace: a VALUE line without its data and END is not observed"
+    (parseGetReplies ["k"] "VALUE k 0 5\r\n" == none)
+
+open FlareOperator.E2E.TraceMatch in
+private def checkTraceMatch (ctx : Ctx) : IO Unit := do
+  -- round 0 on conn A; a forwarded read of the same key on the peer's
+  -- connection P; round 1 REUSES port A with its own marker
+  let log := String.intercalate "\n" [
+    tdec 1 "10.0.0.9:40000" "init_mark_r0" "local" "slave_guard_allowed", tans 2 "10.0.0.9:40000" "init_mark_r0" "miss" "local",
+    tdec 3 "10.0.0.2:5555" "init_0" "local" "master", tans 4 "10.0.0.2:5555" "init_0" "miss" "local",
+    tdec 5 "10.0.0.9:40000" "init_0" "local" "slave_guard_allowed", tans 6 "10.0.0.9:40000" "init_0" "hit" "local",
+    tdec 7 "10.0.0.9:40000" "init_1" "proxy" "own_slave_balance_0", tans 8 "10.0.0.9:40000" "init_1" "unavailable" "forward_failed",
+    tdec 9 "10.0.0.9:40000" "init_mark_r1" "local" "slave_guard_allowed", tans 10 "10.0.0.9:40000" "init_mark_r1" "miss" "local",
+    tdec 11 "10.0.0.9:40000" "init_0" "local" "slave_guard_allowed", tans 12 "10.0.0.9:40000" "init_0" "miss" "local"]
+  let tr := readTraces log
+  let r0 := tracesAfterMarker tr "init_mark_r0"
+  let r1 := tracesAfterMarker tr "init_mark_r1"
+  let t0 := (r0.lookup "init_0").getD {}
+  let t1 := (r0.lookup "init_1").getD {}
+  let t10 := (r1.lookup "init_0").getD {}
+  check ctx "trace: the same key on another connection (a forwarded read) is not matched"
+    (t0.answer.map (traceField · "seq") == some "6" && !t0.ambiguous)
+  check ctx "trace: a reused port is split at its next marker (round 0 does not take round 1's line)"
+    (r0.length == 2 && t10.answer.map (traceField · "seq") == some "12")
+  check ctx "trace: correct value with a local hit line is ok and local"
+    (classifyAnswer "=val_0" "=val_0" t0 == .ok && answeredLocally t0)
+  check ctx "trace: a failed forward answered END is a MASKED MISS, not ok and not availability"
+    (classifyAnswer "=val_1" "miss" t1 == .maskedMiss)
+  check ctx "trace: a real local miss of a present key is a data error from the own copy"
+    (classifyAnswer "=val_0" "miss" t10 == .wrongLocal)
+  check ctx "trace: an explicit error reply is refused (availability)"
+    (classifyAnswer "=val_0" "err:SERVER_ERROR read unavailable" t0 == .refused)
+  check ctx "trace: a legitimately absent key answered miss is ok"
+    (classifyAnswer "miss" "miss" t10 == .ok)
+  let fwd : KeyTrace := { decision := some (tdec 1 "c" "k" "proxy" "follow_guard"), answer := some (tans 2 "c" "k" "miss" "forwarded") }
+  check ctx "trace: a wrong answer after forwarding is a data error of the forwarded-to node"
+    (classifyAnswer "=v" "miss" fwd == .wrongForwarded)
+
+open FlareOperator.E2E.TraceMatch in
+private def checkTraceAmbiguity (ctx : Ctx) : IO Unit := do
+  let c := "10.0.0.9:40001"
+  let base := [tdec 1 c "init_mark_r0" "local" "x", tdec 2 c "init_0" "local" "slave_guard_allowed"]
+  let dup := readTraces (String.intercalate "\n" (base ++ [tans 3 c "init_0" "hit" "local", tans 4 c "init_0" "hit" "local"]))
+  let missing := readTraces (String.intercalate "\n" base)
+  let truncated := readTraces (String.intercalate "\n" (base ++ ["[1][NTC] read-trace-result seq=3 conn=" ++ c ++ " key=init_0 via=client result=hi"]))
+  let markerTwice := readTraces (String.intercalate "\n" (base ++ [tans 3 c "init_0" "hit" "local", tdec 4 "10.0.0.9:40002" "init_mark_r0" "local" "x"]))
+  let contra := readTraces (String.intercalate "\n" (base ++ [tans 3 c "init_0" "miss" "local"]))
+  let noMarker := readTraces (String.intercalate "\n" [tdec 2 c "init_0" "local" "x", tans 3 c "init_0" "hit" "local"])
+  let cls := fun (tr : List String) (a : String) => classifyAnswer "=val_0" a (((tracesAfterMarker tr "init_mark_r0").lookup "init_0").getD {})
+  check ctx "trace: a duplicated answer line is ambiguous" (cls dup "=val_0" == .ambiguous)
+  check ctx "trace: a missing answer line is untraced" (cls missing "=val_0" == .untraced)
+  check ctx "trace: a truncated answer line is ambiguous" (cls truncated "=val_0" == .ambiguous)
+  check ctx "trace: a marker seen twice makes its round ambiguous" (cls markerTwice "=val_0" == .ambiguous)
+  check ctx "trace: a value reply with a 'miss' answer line contradicts: ambiguous" (cls contra "=val_0" == .ambiguous)
+  check ctx "trace: without its marker no GET is matched (untraced)" (cls noMarker "=val_0" == .untraced)
+  check ctx "trace: none of the ambiguous inputs classifies as ok"
+    ([cls dup "=val_0", cls missing "=val_0", cls truncated "=val_0", cls markerTwice "=val_0", cls contra "=val_0", cls noMarker "=val_0"].all (· != .ok))
+
+open FlareOperator.E2E.TraceMatch in
+private def checkActivationOrder (ctx : Ctx) : IO Unit := do
+  let n := fun (i : Nat) => s!"empty-source-nodes-{i}.empty-source-nodes.flare-empty-source.svc.cluster.local:12121"
+  let acc := fun (v i : Nat) => s!"[NTC] node map accepted (version {v}, 3 entries); own role=slave state=prepare balance=0 partition=0; masters: 0={n i}/active"
+  let dump := fun (i : Nat) => s!"[NTC] starting dump operation (master={n i}, partition=0)"
+  let chk := fun (i v : Nat) => s!"[NTC] activation source check passed (attempt 1): source {n i} is the partition's master in the map read at version {v} (now {v}); copy master_id x, source epoch e"
+  let act := fun (i : Nat) => s!"[NTC] node activated (attempt 1) on the copy from {n i} (map version now 9)"
+  let stop := s!"[WRN] activation STOPPED before attempt 1: the partition's master is now {n 1}, not the source {n 2}"
+  let old := "empty-source-nodes-2"
+  let new := "empty-source-nodes-1"
+  -- CI 37438962871 test 4, shortened
+  let ci := [acc 408 2, dump 2, acc 415 1, stop, dump 1, chk 1 435, act 1, acc 442 1]
+  check ctx "activation: CI 37438962871 (old copy STOPPED after the new map, new copy checked then activated) passes"
+    (judgeActivation ci old new).isPass
+  check ctx "activation: the old copy activated AFTER accepting the new map is a bug"
+    (match judgeActivation [dump 2, acc 415 1, chk 2 410, act 2] old new with | .bug _ => true | _ => false)
+  check ctx "activation: the old source validated against the new map's version is a bug"
+    (match judgeActivation [dump 2, acc 415 1, chk 2 415, act 2] old new with | .bug _ => true | _ => false)
+  check ctx "activation: the old copy activated BEFORE accepting the new map is undecided, not a pass"
+    (match judgeActivation [dump 2, chk 2 408, act 2, acc 415 1] old new with | .undecided _ => true | _ => false)
+  check ctx "activation: no line accepting the new map is undetermined"
+    (match judgeActivation [dump 1, chk 1 435, act 1] old new with | .undetermined _ => true | _ => false)
+  check ctx "activation: activating without a passing check of that copy is a bug"
+    (match judgeActivation [acc 415 1, dump 1, act 1] old new with | .bug _ => true | _ => false)
+  check ctx "activation: a new dump after the last passing check, then activation, is a bug"
+    (match judgeActivation [acc 415 1, dump 1, chk 1 420, dump 1, act 1] old new with | .bug _ => true | _ => false)
+  check ctx "activation: no activation in the window is undetermined"
+    (match judgeActivation [acc 415 1, dump 1, chk 1 420] old new with | .undetermined _ => true | _ => false)
+  check ctx "activation: a passing check without a map version is undetermined"
+    (match judgeActivation [acc 415 1, dump 2, "[NTC] activation source check passed (attempt 1): source " ++ n 2 ++ " is the partition's master", act 1] old new with | .undetermined _ => true | _ => false)
+
 def run : IO UInt32 := do
   let ctx : Ctx := { failures := ← IO.mkRef [], count := ← IO.mkRef 0 }
   checkObserve ctx
@@ -1177,6 +1285,10 @@ def run : IO UInt32 := do
   checkPodRows ctx
   checkFollowConfirm ctx
   checkLedgerObserve ctx
+  checkTraceParse ctx
+  checkTraceMatch ctx
+  checkTraceAmbiguity ctx
+  checkActivationOrder ctx
   let failures ← ctx.failures.get
   let n ← ctx.count.get
   IO.println s!"1..{n}"

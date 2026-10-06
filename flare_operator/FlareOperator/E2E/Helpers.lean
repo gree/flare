@@ -177,6 +177,13 @@ def memcachedGet (debugPod ns targetIp : String) (port : Nat) (key : String) : I
   match ← execInDebugPod debugPod ns cmd with
   | .ok output =>
     let lines := output.splitOn "\n" |>.map String.trim |>.filter (· != "")
+    -- An explicit error is NOT a miss (read-unavailable-error answers
+    -- SERVER_ERROR when a get cannot be served). This helper's callers only
+    -- see "no value", so make the difference visible in the log; tests that
+    -- must tell them apart use TraceMatch.parseGetReplies.
+    if lines.any (fun l => l.startsWith "SERVER_ERROR" || l.startsWith "CLIENT_ERROR" || l.startsWith "ERROR") then
+      IO.eprintln s!"# memcachedGet {key} on {targetIp}: EXPLICIT ERROR (not a miss): {lines.head?.getD ""}"
+      return none
     -- memcached GET response: VALUE <key> <flags> <len>\r\n<data>\r\n
     match lines with
     | _ :: dataLine :: _ =>

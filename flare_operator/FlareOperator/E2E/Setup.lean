@@ -74,6 +74,12 @@ structure ClusterConfig where
       those, and restarting the whole StatefulSet mid-suite churns every
       node through re-registration. -/
   extraFlaredConf : String := ""
+  /-- Put `spec.rocksdb.readUnavailableError: true` in the FlareCluster (the
+      production read policy, R2): the operator renders it into extra.conf
+      and keeps it there; a line in `extraFlaredConf` would be overwritten
+      by the operator's own extra.conf. Part of the CR, so a CR recreated
+      mid-suite keeps it. -/
+  readUnavailableError : Bool := false
   /-- preStop drain window (seconds). >0 adds a `sleep {drainSeconds}` preStop
       hook so flared stays alive+Ready while Terminating — the window the
       operator's graceful drain (demote leaving master to a live proxy, promote
@@ -406,7 +412,8 @@ metadata:
   namespace: {cfg.«namespace»}
 spec:
   partitions: {cfg.partitions}
-  replicas: {cfg.replicas}"
+  replicas: {cfg.replicas}" ++
+  (if cfg.readUnavailableError then "\n  rocksdb:\n    readUnavailableError: true" else "")
 
 /-- Generate partition Service YAML for a single partition. -/
 def partitionServiceYaml (cfg : ClusterConfig) (partIdx : Nat) : String :=

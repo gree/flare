@@ -2210,7 +2210,12 @@ def emptySourceSuite : TestSuite := {
           let idx := fun (p : String → Bool) => (lines.zip (List.range lines.length)).findSome? (fun (l, i) => if p l then some i else none)
           let stopOrSwitch := idx (fun l => containsSubstr l "activation STOPPED" || containsSubstr l "reconstruction source changed")
           let newEvidence := idx (fun l => containsSubstr l "rebuild evidence recorded" && (newEpoch.map (containsSubstr l ·)).getD false)
-          let firstActive := idx (fun l => containsSubstr l s!"node_key={r}." && containsSubstr l "old_state=prepare, new_state=active")
+          -- the activation point is the replica's OWN record of a successful
+          -- activation ("node activated"), logged when activate_node returned;
+          -- its map-shift line (prepare->active) arrives with a later
+          -- broadcast and was absent when the log was read right after the
+          -- operator's map showed Active (CI 37445879349)
+          let firstActive := idx (fun l => containsSubstr l "node activated (attempt" && containsSubstr l s!"from {m2}.")
           IO.eprintln s!"# {r} held after its copy from {m}; {m} drained, {m2} promoted (epoch {newEpoch}); after the hold (line indices): stop/switch {stopOrSwitch}, evidence of the new epoch {newEvidence}, first prepare->active {firstActive}; rebuilt={rebuilt}; items {← c.currItems (← ip r)} vs {← c.currItems (← ip m2)}"
           -- the timeline itself (CI 37438962871 printed only indices): which
           -- map each validation / activation used and when the replica
@@ -2241,7 +2246,7 @@ def emptySourceSuite : TestSuite := {
           match firstActive, newEvidence with
           | some a, some e => if a < e then return .fail s!"{r} became Active (line {a}) BEFORE its copy of the new master was recorded (line {e}): the old copy was activated"
           | some _, none => return .fail s!"{r} became Active but no evidence of the new master's epoch was recorded in the window"
-          | none, _ => return .fail s!"{r} is Active in the map but its own prepare->active is not in the window: the order cannot be proven"
+          | none, _ => return .fail s!"{r} is Active in the map but its own activation on {m2}'s copy is not in the window: the order cannot be proven"
           return .pass },
 
     { name := "activation boundary, SAME NAME NEW HISTORY: while a replica's activation is held, its source (still master, same name) is bulk-rewritten (flush_all: new source epoch); the activation is STOPPED as a history change, not completed on the old copy"

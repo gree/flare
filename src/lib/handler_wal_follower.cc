@@ -36,6 +36,20 @@
 namespace gree {
 namespace flare {
 
+namespace {
+/**
+ *	A connection to a replication source with a CONNECT DEADLINE (3 s, one
+ *	retry): a source pod that vanished without a RST must not block an
+ *	attempt for the kernel's SYN timeout (CI 37407630865).
+ */
+shared_connection bounded_connection(const string& host, int port) {
+	connection_tcp* t = new connection_tcp(host, port);
+	t->set_connect_timeout_ms(3000);
+	t->set_connect_retry_limit(1);
+	return shared_connection(t);
+}
+}	// namespace
+
 // {{{ ctor/dtor
 handler_wal_follower::handler_wal_follower(shared_thread t, cluster* cl, storage* st,
 		string source_name, int source_port,
@@ -214,7 +228,7 @@ int handler_wal_follower::_follow_once(bool& more) {
 		return attempt_needs_rebuild;
 	}
 
-	shared_connection c(new connection_tcp(this->_source_name, this->_source_port));
+	shared_connection c(bounded_connection(this->_source_name, this->_source_port));
 	if (c->open() < 0) {
 		if (stats_object != NULL) stats_object->follow_set_state(stats::follow_disconnected, "peer_unreachable");
 		return attempt_disconnected;

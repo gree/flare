@@ -29,6 +29,7 @@
 #include "handler_reconstruction.h"
 #include <cstdlib>
 #include <cstring>
+#include <sys/stat.h>
 #include "app.h"
 #include "connection_tcp.h"
 #include "op_dump.h"
@@ -42,6 +43,20 @@
 
 namespace gree {
 namespace flare {
+
+namespace {
+/**
+ *	A connection to a replication source with a CONNECT DEADLINE (3 s, one
+ *	retry): a source pod that vanished without a RST must not block an
+ *	attempt for the kernel's SYN timeout (CI 37407630865).
+ */
+shared_connection bounded_connection(const string& host, int port) {
+	connection_tcp* t = new connection_tcp(host, port);
+	t->set_connect_timeout_ms(3000);
+	t->set_connect_retry_limit(1);
+	return shared_connection(t);
+}
+}	// namespace
 
 // {{{ global functions
 // }}}
@@ -58,6 +73,7 @@ handler_reconstruction::handler_reconstruction(shared_thread t, cluster* cl, sto
 		_node_server_port(node_server_port),
 		_copy_dirty(false),
 		_force_clean(false),
+		_attempt_master_id(""),
 		_partition(partition),
 		_partition_size(partition_size),
 		_role(r),
@@ -187,7 +203,7 @@ int handler_reconstruction::_run_once() {
 	}
 #endif
 
-	shared_connection c(new connection_tcp(this->_node_server_name, this->_node_server_port));
+	shared_connection c(bounded_connection(this->_node_server_name, this->_node_server_port));
 	this->_connection = c;
 	if (c->open() < 0) {
 		log_err("failed to connect to node server (name=%s, port=%d)", this->_node_server_name.c_str(), this->_node_server_port);
@@ -214,6 +230,7 @@ int handler_reconstruction::_run_once() {
 	bool peer_reachable = false;
 	bool peer_snapshot_supported = false;
 	bool via_wal = this->_try_wal_reconstruction(c, peer_wal_supported, peer_master_id, peer_latest_lsn, peer_reachable, peer_snapshot_supported);
+	this->_attempt_master_id = peer_master_id;
 
 	// Physical reseed: when the conditions that would justify truncate+full-dump
 	// hold AND the source supports repl_snapshot, pull a checkpoint instead —
@@ -340,7 +357,7 @@ int handler_reconstruction::_run_once() {
 					// ("peer declined snapshot (reply=LSN 19)", observed
 					// live), at worst the per-file raw reads are OFFSET and
 					// shifted garbage gets installed as the live DB.
-					shared_connection cs(new connection_tcp(this->_node_server_name, this->_node_server_port));
+					shared_connection cs(bounded_connection(this->_node_server_name, this->_node_server_port));
 					if (cs->open() < 0) {
 						log_warning("could not open a fresh connection for snapshot bootstrap -> falling back to truncate+full-dump", 0);
 					} else {
@@ -386,7 +403,7 @@ int handler_reconstruction::_run_once() {
 		// an aborted WAL stream (see the snapshot rationale above), and
 		// op_dump's streamed VALUE parsing is just as offset-sensitive.
 		{
-			shared_connection cd(new connection_tcp(this->_node_server_name, this->_node_server_port));
+			shared_connection cd(bounded_connection(this->_node_server_name, this->_node_server_port));
 			if (cd->open() < 0) {
 				log_err("failed to open a fresh connection for the full dump (name=%s, port=%d)", this->_node_server_name.c_str(), this->_node_server_port);
 				return -1;
@@ -467,7 +484,7 @@ int handler_reconstruction::_run_once() {
 			string end_master_id, end_epoch;
 			bool end_wal = false;
 			uint64_t end_lsn = 0;
-			shared_connection ce(new connection_tcp(this->_node_server_name, this->_node_server_port));
+			shared_connection ce(bounded_connection(this->_node_server_name, this->_node_server_port));
 			if (ce->open() == 0) {
 				op_meta* meta = new op_meta(ce, NULL, this->_storage);
 				if (meta->run_client_features(end_wal, end_master_id, end_lsn) == 0) {
@@ -531,18 +548,76 @@ int handler_reconstruction::_run_once() {
 }
 
 /**
+ *	Is the copy's source still valid for activation? See the declaration.
+ */
+bool handler_reconstruction::_source_still_valid(string& why) {
+	if (this->_role != cluster::role_slave) {
+		return true;		// a master's reconstruction is not tied to one source
+	}
+	const string cur = this->_cluster->get_partition_master_key(this->_partition);
+	const string src = this->_cluster->to_node_key(this->_node_server_name, this->_node_server_port);
+	if (cur != src) {
+		why = "the partition's master is now " + (cur.empty() ? string("(none)") : cur) + ", not the source " + src;
+		return false;
+	}
+	if (this->_storage->get_type() != storage::type_rocksdb) {
+		return true;		// no lineage/epoch to compare on this backend
+	}
+	shared_connection c(bounded_connection(this->_node_server_name, this->_node_server_port));
+	if (c->open() < 0) {
+		why = "the source " + src + " cannot be probed (Unknown is not valid)";
+		return false;
+	}
+	op_meta* meta = new op_meta(c, NULL, this->_storage);
+	bool wal = false;
+	string id;
+	uint64_t lsn = 0;
+	int rc = meta->run_client_features(wal, id, lsn);
+	const string epoch = meta->get_peer_source_epoch();
+	delete meta;
+	if (rc != 0) {
+		why = "the source " + src + " did not answer the probe (Unknown is not valid)";
+		return false;
+	}
+	if (id != this->_attempt_master_id || epoch != this->_probe_source_epoch) {
+		why = "the source " + src + " changed history (master_id " + this->_attempt_master_id + " -> " + id
+			+ ", source epoch " + this->_probe_source_epoch + " -> " + epoch + ")";
+		return false;
+	}
+	return true;
+}
+
+/**
  *	activate_node with bounded retry (see the activation comment in
  *	_run_once). ~1 minute of attempts covers any realistic index leader
- *	handover; shutdown requests abort immediately.
+ *	handover; shutdown requests abort immediately. EVERY attempt first
+ *	re-validates the copy's source (_source_still_valid): a master change or
+ *	a same-name source with a new history while activation is retrying stops
+ *	it — the copy is not activated, and the next reconstruction attempt
+ *	starts clean from the current master.
  */
 int handler_reconstruction::_activate_with_retry(bool skip_ready_state) {
 	int rc = -1;
 	for (int i = 0; i < 30; i++) {
-		rc = this->_cluster->activate_node(skip_ready_state);
-		if (rc == 0) {
-			return 0;
+		string why;
+		if (!this->_source_still_valid(why)) {
+			log_warning("activation STOPPED before attempt %d: %s -> the copy is not activated; retrying the reconstruction from the current master with a clean copy", i + 1, why.c_str());
+			this->_force_clean = true;
+			return -1;
 		}
-		log_warning("node activation failed (attempt %d) -> retrying in 2 seconds", i + 1);
+		// TEST SEAM (E2E only): while the named file exists, an activation
+		// attempt fails as if the index server had refused it.
+		const char* hold = getenv("FLARE_TEST_ACTIVATION_HOLD_FILE");
+		struct stat st;
+		if (hold != NULL && hold[0] != '\0' && stat(hold, &st) == 0) {
+			log_warning("node activation failed (attempt %d): held by FLARE_TEST_ACTIVATION_HOLD_FILE (test seam) -> retrying in 2 seconds", i + 1);
+		} else {
+			rc = this->_cluster->activate_node(skip_ready_state);
+			if (rc == 0) {
+				return 0;
+			}
+			log_warning("node activation failed (attempt %d) -> retrying in 2 seconds", i + 1);
+		}
 		for (int j = 0; j < 2; j++) {
 			if (this->_thread->is_shutdown_request()) {
 				log_notice("shutdown requested -> abandoning activation retry", 0);

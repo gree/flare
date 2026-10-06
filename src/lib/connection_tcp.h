@@ -72,6 +72,11 @@ protected:
 	int									_write_buf_chunk_size;
 	int									_connect_retry_limit;
 	int									_connect_retry_wait;	// usec
+	// Opt-in connect deadline (msec; 0 = blocking connect as before). A peer
+	// that vanished without a RST otherwise blocks connect() for the
+	// kernel's SYN timeout on every retry (~15 min for 8 retries, CI
+	// 37407630865: a reconstruction could not re-select its source).
+	int									_connect_timeout_ms;
 
 public:
 	static int read_timeout;												// msec
@@ -122,6 +127,7 @@ public:
 	virtual int set_read_timeout(int timeout) { this->_read_timeout = timeout; return 0; };
 	virtual int get_connect_retry_limit() const { return this->_connect_retry_limit; };
 	virtual int set_connect_retry_limit(int retry_limit) { this->_connect_retry_limit = retry_limit; return 0; };
+	virtual int set_connect_timeout_ms(int ms) { this->_connect_timeout_ms = ms; return 0; };
 
 	int get_errno() const { return this->_errno; };
 	bool is_error() const { return this->_errno != 0 ? true : false; };

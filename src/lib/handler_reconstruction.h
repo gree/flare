@@ -60,6 +60,9 @@ protected:
 	// The next attempt must start from a clean copy (source changed after
 	// the copy was modified): never merge two histories.
 	bool								_force_clean;
+	// The source's lineage as probed at the start of this attempt (with
+	// _probe_source_epoch): what the copy was taken from.
+	string							_attempt_master_id;
 	int									_partition;
 	int									_partition_size;
 	cluster::role				_role;
@@ -81,6 +84,11 @@ public:
 protected:
 	int _run_once();
 	int _activate_with_retry(bool skip_ready_state);
+	// The copy's source is still valid for activation: the partition's master
+	// in the current map is the same node, and a fresh probe shows the same
+	// lineage and source epoch (a same-name source re-promoted, restored or
+	// bulk-rewritten has a new epoch). Unknown (probe failed) is NOT valid.
+	bool _source_still_valid(string& why);
 
 protected:
 	// Try to catch up from the master via incremental WAL sync instead of

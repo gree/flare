@@ -28,6 +28,8 @@
  */
 #include "app.h"
 #include "connection_tcp.h"
+#include <poll.h>
+#include <fcntl.h>
 
 namespace gree {
 namespace flare {
@@ -56,7 +58,8 @@ connection_tcp::connection_tcp(const std::string& host, int port):
 		_write_buf_len(0),
 		_write_buf_chunk_size(0),
 		_connect_retry_limit(connection_tcp::connect_retry_limit),
-		_connect_retry_wait(connection_tcp::connect_retry_wait) {
+		_connect_retry_wait(connection_tcp::connect_retry_wait),
+		_connect_timeout_ms(0) {
 }
 
 /**
@@ -80,7 +83,8 @@ connection_tcp::connection_tcp(int sock, struct sockaddr_in addr):
 		_write_buf_len(0),
 		_write_buf_chunk_size(0),
 		_connect_retry_limit(connection_tcp::connect_retry_limit),
-		_connect_retry_wait(connection_tcp::connect_retry_wait) {
+		_connect_retry_wait(connection_tcp::connect_retry_wait),
+		_connect_timeout_ms(0) {
 }
 
 /**
@@ -104,7 +108,8 @@ connection_tcp::connection_tcp(int sock, struct sockaddr_un addr):
 		_write_buf_len(0),
 		_write_buf_chunk_size(0),
 		_connect_retry_limit(connection_tcp::connect_retry_limit),
-		_connect_retry_wait(connection_tcp::connect_retry_wait) {
+		_connect_retry_wait(connection_tcp::connect_retry_wait),
+		_connect_timeout_ms(0) {
 }
 
 /**
@@ -152,6 +157,44 @@ int connection_tcp::_open(string host, int port) {
 
 	int i;
 	for (i = 0; i < (this->_connect_retry_limit+1); i++) {
+		if (this->_connect_timeout_ms > 0) {
+			// Bounded connect: non-blocking connect + poll(POLLOUT) with a
+			// deadline, then back to blocking mode for the rest of the I/O.
+			int flags = fcntl(this->_sock, F_GETFL, 0);
+			fcntl(this->_sock, F_SETFL, flags | O_NONBLOCK);
+			int rc = connect(this->_sock, (struct sockaddr*)&this->_addr_inet, sizeof(this->_addr_inet));
+			int err = (rc < 0) ? errno : 0;
+			if (rc < 0 && err == EINPROGRESS) {
+				struct pollfd pfd;
+				pfd.fd = this->_sock;
+				pfd.events = POLLOUT;
+				pfd.revents = 0;
+				int pr = poll(&pfd, 1, this->_connect_timeout_ms);
+				if (pr == 1) {
+					socklen_t len = sizeof(err);
+					if (getsockopt(this->_sock, SOL_SOCKET, SO_ERROR, &err, &len) < 0) {
+						err = errno;
+					}
+				} else {
+					err = (pr == 0) ? ETIMEDOUT : errno;
+				}
+			}
+			fcntl(this->_sock, F_SETFL, flags);
+			if (err == 0) {
+				break;
+			}
+			log_warning("connect() failed: %s (%d) within %d msec -> wait for %d usec", util::strerror(err), err, this->_connect_timeout_ms, this->_connect_retry_wait);
+			// a failed connect leaves the socket unusable: start a fresh one
+			::close(this->_sock);
+			this->_sock = socket(AF_INET, SOCK_STREAM, 0);
+			if (this->_sock < 0) {
+				this->_errno = errno;
+				return -1;
+			}
+			usleep(this->_connect_retry_wait);
+			errno = err;
+			continue;
+		}
 		if (connect(this->_sock, (struct sockaddr*)&this->_addr_inet, sizeof(this->_addr_inet)) < 0) {
 			log_warning("connect() failed: %s (%d) -> wait for %d usec", util::strerror(errno), errno, this->_connect_retry_wait);
 			usleep(this->_connect_retry_wait);

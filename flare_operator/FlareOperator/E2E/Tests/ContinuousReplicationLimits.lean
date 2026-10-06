@@ -1629,7 +1629,8 @@ private def emptySourceCfg : ClusterConfig := {
   storageBackend := "rocksdb"
   usePvc := true
   drainSeconds := 20
-  flaredEnv := [("FLARE_TEST_DISABLE_SNAPSHOT_BOOTSTRAP", "1"), ("FLARE_TEST_DISABLE_WAL_RECONSTRUCTION", "1")]
+  flaredEnv := [("FLARE_TEST_DISABLE_SNAPSHOT_BOOTSTRAP", "1"), ("FLARE_TEST_DISABLE_WAL_RECONSTRUCTION", "1"),
+                ("FLARE_TEST_ACTIVATION_HOLD_FILE", "/tmp/act-hold")]
   flaredArgs := "--reconstruction-bwlimit 256"
   operatorEnv := [("FLARE_STATS_PROBE_INTERVAL_MS", "15000")]
 }
@@ -1931,6 +1932,75 @@ def emptySourceSuite : TestSuite := {
             if some e != newEpoch then return .fail s!"the evidence {e} is not the new master's epoch {newEpoch}"
             return .pass
           | _ => return .fail s!"no final evidence ({evEnd})" },
+
+    { name := "activation boundary, MASTER CHANGE: a replica finishes its copy, its first activation attempts are held, and the master is drained meanwhile; the held activation is STOPPED (never activated on the old source) and the replica is rebuilt from the promoted master"
+      run := do
+        match ← c.allInSync 400 600 with
+        | none => return .fail "precondition: the copies did not converge on 400 keys"
+        | some (m, r, _) =>
+          match ← c.killFlaredIn r with
+          | .error e => return .fail s!"could not restart {r}: {e}"
+          | .ok _ => pure ()
+          if !(← c.waitDumpStart r 180) then return .fail s!"{r} did not start a full dump after its restart"
+          let armed ← waitForCondition s!"the activation hold is armed in {r}" 60 do
+            return (← kubectl ["exec", "-n", ns, r, "-c", "flared", "--", "touch", "/tmp/act-hold"]).toBool
+          let held ← waitForCondition s!"{r}'s copy is done and its activation is held" 300 do
+            return containsSubstr (← c.flaredLog r) "held by FLARE_TEST_ACTIVATION_HOLD_FILE"
+          if !armed || !held then
+            discard <| kubectl ["exec", "-n", ns, r, "-c", "flared", "--", "rm", "-f", "/tmp/act-hold"]
+            return .fail s!"precondition: the activation was not held (armed={armed}, held={held})"
+          discard <| kubectl ["delete", "pod", m, "-n", ns, "--wait=false"]
+          let promoted ← c.newMasterAfter m 240
+          discard <| kubectl ["exec", "-n", ns, r, "-c", "flared", "--", "rm", "-f", "/tmp/act-hold"]
+          let some m2 := promoted | return .fail s!"no successor was promoted after draining {m}"
+          if m2 == r then return .fail s!"precondition: the held replica {r} itself was promoted"
+          let newEpoch ← c.statStr (← ip m2) "rocksdb_source_epoch"
+          let stopped ← waitForCondition s!"{r}'s held activation is stopped" 180 do
+            return containsSubstr (← c.flaredLog r) "activation STOPPED"
+          let rebuilt ← waitForCondition s!"{r} is rebuilt from {m2} with evidence of its epoch" 600 do
+            match ← c.evidence (← ip r) with
+            | some (_, some e) => return some e == newEpoch
+            | _ => return false
+          let log ← c.flaredLog r
+          let stopLine := ((log.splitOn "\n").find? (containsSubstr · "activation STOPPED")).getD ""
+          IO.eprintln s!"# {r} held after its copy from {m}; {m} drained, {m2} promoted (epoch {newEpoch}); stopped={stopped}: {stopLine.trim}; rebuilt with evidence of {m2}={rebuilt}; items {← c.currItems (← ip r)} vs {← c.currItems (← ip m2)}"
+          if !stopped then return .fail "the held activation was not stopped after the master changed"
+          if !rebuilt then return .fail s!"{r} was not rebuilt from the promoted master {m2}"
+          return .pass },
+
+    { name := "activation boundary, SAME NAME NEW HISTORY: while a replica's activation is held, its source (still master, same name) is bulk-rewritten (flush_all: new source epoch); the activation is STOPPED as a history change, not completed on the old copy"
+      run := do
+        match ← c.allInSync 400 600 with
+        | none => return .fail "precondition: the copies did not converge on 400 keys"
+        | some (m, r, _) =>
+          let mIp ← ip m
+          let epoch0 ← c.statStr mIp "rocksdb_source_epoch"
+          match ← c.killFlaredIn r with
+          | .error e => return .fail s!"could not restart {r}: {e}"
+          | .ok _ => pure ()
+          if !(← c.waitDumpStart r 180) then return .fail s!"{r} did not start a full dump after its restart"
+          let armed ← waitForCondition s!"the activation hold is armed in {r}" 60 do
+            return (← kubectl ["exec", "-n", ns, r, "-c", "flared", "--", "touch", "/tmp/act-hold"]).toBool
+          let held ← waitForCondition s!"{r}'s copy is done and its activation is held" 300 do
+            return containsSubstr (← c.flaredLog r) "held by FLARE_TEST_ACTIVATION_HOLD_FILE"
+          if !armed || !held then
+            discard <| kubectl ["exec", "-n", ns, r, "-c", "flared", "--", "rm", "-f", "/tmp/act-hold"]
+            return .fail s!"precondition: the activation was not held (armed={armed}, held={held})"
+          discard <| execInDebugPod emptySourceCfg.debugPod ns s!"printf 'flush_all\\r\\n' | nc -w 5 {mIp} {emptySourceCfg.flarePort}"
+          let epoch1 ← c.statStr mIp "rocksdb_source_epoch"
+          let stillMaster := (← c.p0Roles).1 == some m
+          discard <| kubectl ["exec", "-n", ns, r, "-c", "flared", "--", "rm", "-f", "/tmp/act-hold"]
+          let stopped ← waitForCondition s!"{r}'s held activation is stopped as a history change" 180 do
+            let log ← c.flaredLog r
+            return containsSubstr log "activation STOPPED" && containsSubstr log "changed history"
+          IO.eprintln s!"# {m} flush_all while {r}'s activation was held: epoch {epoch0} -> {epoch1}; {m} still master={stillMaster}; stopped as a history change={stopped}"
+          if epoch1 == epoch0 then return .fail "precondition: flush_all did not advance the master's source epoch"
+          if !stillMaster then return .fail s!"precondition: {m} is no longer master (this test is about the SAME source)"
+          if !stopped then return .fail "the held activation was not stopped although the same-name source changed history"
+          -- restore the data set for the next test
+          let w ← c.bulkWrite mIp "es" 400 16384
+          if w != 400 then return .fail s!"could not restore the data set ({w}/400)"
+          return .pass },
 
     { name := "SAF-08 same master_id, different history: the master is drained and a copy promoted (new epoch); its keys are then all deleted while a replica whose evidence names the EARLIER epoch misses them — the repair DEFERS and the replica keeps every key (the rule cannot prove the emptiness legitimate, even though here it was)"
       run := do

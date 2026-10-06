@@ -405,6 +405,9 @@ jobs:
           # is what kills a leg, not timeout-minutes. 75 min per SHARDED leg
           # (longest group ~45 min measured + slack).
           limit=4500
+          # empty-source: 8 tests, each with throttled full dumps (~25 s) and
+          # failovers; it alone needs more than the sharded-leg budget.
+          if [ "$SUITE_GROUP" = empty-source ]; then limit=6600; fi
           # A single-suite manual run (group "custom") takes the profile too;
           # otherwise suites=... with an evaluation silently measured nothing.
           if [ "$SUITE_GROUP" = continuous-replication ] || [ "$SUITE_GROUP" = custom ]; then

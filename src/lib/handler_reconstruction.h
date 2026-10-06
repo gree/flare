@@ -74,6 +74,13 @@ protected:
 	// source is Unknown the retries only re-validate; they never return to a
 	// transfer (WAL, snapshot, dump).
 	bool								_pending_activation;
+	// R3-D: the copy's identity (lineage, history, rebuild evidence) as it was
+	// BEFORE an attempt durably cleared the evidence. The protection rule
+	// judges the copy by it (CI 37538835244: the evidence was gone by the
+	// time of the truncate, so the legitimate empty-source case was refused).
+	// Kept across attempts until the copy is actually replaced.
+	copy_identity						_copy_before;
+	bool								_copy_before_valid;
 	int									_partition;
 	int									_partition_size;
 	cluster::role				_role;

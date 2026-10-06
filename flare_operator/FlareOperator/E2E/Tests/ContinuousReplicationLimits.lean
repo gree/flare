@@ -2955,7 +2955,9 @@ def copyProtectionSuite : TestSuite := {
           let del ← c.deleteKeys xIp "cp" 0 kv.length
           let xEmpty ← waitForCondition s!"{x} is empty" 120 do
             return (← c.currItems xIp) == 0
-          let allDropped ← waitForCondition s!"all {kv.length} deletes to {y} are dropped (none queued)" 400 do
+          -- serial forwards, each dropped only after ~16-36 s of retries
+          -- (CI 37538824780: 400 s was not enough for 8)
+          let allDropped ← waitForCondition s!"all {kv.length} deletes to {y} are dropped (none queued)" 900 do
             return ((← c.statNat xIp "proxy_write_dropped").getD 0) ≥ drops0 + kv.length
           healForwards xIp yIp
           let yHeld ← c.localDump yIp

@@ -1693,6 +1693,20 @@ private def Ctx.newMasterAfter (c : Ctx) (old : String) (secs : Nat) : IO (Optio
     IO.sleep 2000
   return none
 
+/-- The promoted node's epoch AFTER its own promotion advance: the
+    operator's map changes before flared advances the epoch (CI 37414948177:
+    reading it at once gave the pre-promotion value). Waits until it differs
+    from `pre` (the node's epoch before the fault), up to `secs`. -/
+private def Ctx.promotedEpoch (c : Ctx) (pod : String) (pre : Option String) (secs : Nat := 90) : IO (Option String) := do
+  let deadline := (← IO.monoMsNow) + secs * 1000
+  let mut cur : Option String := none
+  for _ in [0:secs] do
+    if (← IO.monoMsNow) ≥ deadline then break
+    cur ← c.statStr ((← getPodIp pod c.cfg.«namespace»).getD "") "rocksdb_source_epoch"
+    if cur.isSome && cur != pre then return cur
+    IO.sleep 2000
+  return none
+
 private def Ctx.allInSync (c : Ctx) (n : Nat) (secs : Nat) : IO (Option (String × String × String)) := do
   let deadline := (← IO.monoMsNow) + secs * 1000
   for _ in [0:secs] do
@@ -1869,10 +1883,13 @@ def emptySourceSuite : TestSuite := {
           if !(← c.waitDumpStart r 180) then return .fail s!"{r} did not start a full dump after its restart"
           let startLine := ((afterLast (← c.flaredLog r) "starting dump operation").splitOn "\n").head?.getD ""
           let fromOld := containsSubstr startLine (m ++ ".")
+          let preA ← c.statStr (← ip a) "rocksdb_source_epoch"
+          let preB ← c.statStr (← ip b) "rocksdb_source_epoch"
           discard <| kubectl ["delete", "pod", m, "-n", ns, "--wait=false"]
           let some m2 ← c.newMasterAfter m 180 | return .fail s!"no successor was promoted after draining {m}"
           if m2 == r then return .fail s!"precondition: the rebuilding replica {r} itself was promoted"
-          let newEpoch ← c.statStr (← ip m2) "rocksdb_source_epoch"
+          let newEpoch ← c.promotedEpoch m2 (if m2 == a then preA else preB)
+          if newEpoch.isNone then return .fail s!"precondition: {m2}'s epoch did not advance after its promotion"
           let (early, recorded) ← c.noEvidenceUntilRecorded r (← ip r) 480
           let log ← c.flaredLog r
           let completedFromOld := (log.splitOn "\n").any fun l => containsSubstr l "reconstruction via full dump completed" && containsSubstr l (m ++ ".")
@@ -1910,6 +1927,7 @@ def emptySourceSuite : TestSuite := {
           -- the source becomes UNREACHABLE: the node is cordoned and the
           -- master pod force-deleted, so its replacement stays Pending until
           -- a successor is promoted
+          let preB ← c.statStr (← ip b) "rocksdb_source_epoch"
           match ← kubectl ["cordon", kindNode] with
           | .error e => return .fail s!"could not cordon {kindNode}: {e}"
           | .ok _ => pure ()
@@ -1918,7 +1936,8 @@ def emptySourceSuite : TestSuite := {
           discard <| kubectl ["uncordon", kindNode]
           let some m2 := promoted | return .fail s!"no successor was promoted after {m} became unreachable"
           if m2 == r then return .fail s!"precondition: the rebuilding replica {r} itself was promoted"
-          let newEpoch ← c.statStr (← ip m2) "rocksdb_source_epoch"
+          let newEpoch ← c.promotedEpoch m2 preB
+          if newEpoch.isNone then return .fail s!"precondition: {m2}'s epoch did not advance after its promotion"
           let (early, recorded) ← c.noEvidenceUntilRecorded r (← ip r) 600
           let log ← c.flaredLog r
           let switched := containsSubstr log "reconstruction source changed" && containsSubstr log (m2 ++ ".")
@@ -1937,7 +1956,7 @@ def emptySourceSuite : TestSuite := {
       run := do
         match ← c.allInSync 400 600 with
         | none => return .fail "precondition: the copies did not converge on 400 keys"
-        | some (m, r, _) =>
+        | some (m, r, other) =>
           match ← c.killFlaredIn r with
           | .error e => return .fail s!"could not restart {r}: {e}"
           | .ok _ => pure ()
@@ -1949,12 +1968,14 @@ def emptySourceSuite : TestSuite := {
           if !armed || !held then
             discard <| kubectl ["exec", "-n", ns, r, "-c", "flared", "--", "rm", "-f", "/tmp/act-hold"]
             return .fail s!"precondition: the activation was not held (armed={armed}, held={held})"
+          let preOther ← c.statStr (← ip other) "rocksdb_source_epoch"
           discard <| kubectl ["delete", "pod", m, "-n", ns, "--wait=false"]
           let promoted ← c.newMasterAfter m 240
           discard <| kubectl ["exec", "-n", ns, r, "-c", "flared", "--", "rm", "-f", "/tmp/act-hold"]
           let some m2 := promoted | return .fail s!"no successor was promoted after draining {m}"
           if m2 == r then return .fail s!"precondition: the held replica {r} itself was promoted"
-          let newEpoch ← c.statStr (← ip m2) "rocksdb_source_epoch"
+          let newEpoch ← c.promotedEpoch m2 preOther
+          if newEpoch.isNone then return .fail s!"precondition: {m2}'s epoch did not advance after its promotion"
           let stopped ← waitForCondition s!"{r}'s held activation is stopped" 180 do
             return containsSubstr (← c.flaredLog r) "activation STOPPED"
           let rebuilt ← waitForCondition s!"{r} is rebuilt from {m2} with evidence of its epoch" 600 do

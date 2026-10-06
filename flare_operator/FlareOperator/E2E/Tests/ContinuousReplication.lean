@@ -647,7 +647,17 @@ def suite : TestSuite := {
             if !dropped then return .fail "write fault did not cause a dropped forward"
             let some head ← statNat mIp "rocksdb_latest_sequence_number" | return .fail "missing master head"
             if head <= cursor then return .fail "no WAL backlog was staged"
-            if (← localBalance) != some "50" then return .fail "map changed: this would only test operator withholding"
+            let balNow ← localBalance
+            if balNow != some "50" then
+              -- CI 37414948177: the replica's own map changed although topology
+              -- delivery was blocked both ways. Unexplained: print what the
+              -- replica holds and what the operator did, do not guess.
+              let nodesOut := match ← execInDebugPod cfg.debugPod cfg.«namespace» s!"printf 'stats nodes\\r\\n' | nc -w 3 {sIp} {cfg.flarePort}" with
+                | .ok o => o
+                | .error e => s!"(unreadable: {e})"
+              let opTail := ((← opLog 400).splitOn "\n").filter (fun l => containsSubstr l "broadcast" || containsSubstr l "topology" || containsSubstr l "withh" || containsSubstr l "eligib" || containsSubstr l "balance")
+              IO.eprintln s!"# replica local balance now {balNow}; its stats nodes:\n{nodesOut}\n# operator topology/eligibility lines:\n{String.intercalate "\n" (opTail.reverse.take 20).reverse}"
+              return .fail s!"map changed ({balNow}) although topology delivery to the replica was blocked: this would only test operator withholding"
             let value ← memcachedGet cfg.debugPod cfg.«namespace» sIp cfg.flarePort key
             let after ← statNat sIp "repl_applied_lsn"
             let forwardedAfter ← statNat sIp "repl_forward_applied"

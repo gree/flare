@@ -6350,7 +6350,8 @@
       "residual_risks": [
         "The E2E crash lands at whatever boundary the kill hits (~300 ms after the heal); it is not steered to a specific mid-batch point. Recovery is observed through the operator's rejoin (Slave/Prepare, incremental WAL reconstruction from the cursor, activation, follower resume), so the design's 'plain restart resumes with no rebuild' (T16) holds for the data path (no truncate, no dump) but a reconstruction record is produced.",
         "2026-10-06 (implemented in f096882, CI pending; NOT reviewed). D6: the WAL server path read the DB handle with no lock (get_updates_since, get_latest_sequence_number) while snapshot swap, hard_reset and truncate replace or reopen it under the whole-lock (write). This is reachable, for example, on a demoted master still serving in-flight follow requests while it is reseeded. Both now hold the whole-lock for read, with RAII on every return path; writers also take it for read, so serving a follower does not block writes. D7: stop_wal_follower is an asynchronous shutdown that does not wait. A stopped handler could finish a slice after its successor started; epoch, incarnation and contiguity do not catch a stale stream from a demoted master still serving the same epoch. Every stop/start now bumps a follow generation, and a batch with an older generation is refused under the apply lock with nothing written. The handler thread's lifetime is unchanged (pooled thread, no awaited join); a blocking stop under the cluster lock was rejected for deadlock risk.",
-        "2026-10-06 (nix-linux run 37386581376 on e1b90cb). The D1-D3/D6/D7 code COMPILES (RocksDB and legacy builds), and the aggregate cutter target passed ('PASS: run-tests.sh'). Individual test names are not visible in that log, so the new tests (expire filtering, no-EPOCH refusal, bad numbers, stale follower generation) are recorded as compiled and inside a passing aggregate, NOT individually observed."
+        "2026-10-06 (nix-linux run 37386581376 on e1b90cb). The D1-D3/D6/D7 code COMPILES (RocksDB and legacy builds), and the aggregate cutter target passed ('PASS: run-tests.sh'). Individual test names are not visible in that log, so the new tests (expire filtering, no-EPOCH refusal, bad numbers, stale follower generation) are recorded as compiled and inside a passing aggregate, NOT individually observed.",
+        "2026-10-06 LOCAL evidence (macOS, not CI; NOT reviewed). The source SHA/tree equal bf088a2, and the macOS compatibility patches recorded in docs/reports/2026-10-06-local-bf088a2-macos/README.md were applied on top, so the build is not the Linux one. make check: 5268 tests, 4149731 assertions, 0 failures/errors/omissions, with every new test passing BY NAME. That includes the deadline tests: the silent peer ended by the per-read timeout (errno -1); the trickling peer by the TOTAL deadline (errno -3); the connect to 192.0.2.1 ended by ETIMEDOUT, i.e. the connect deadline was reached, not omitted. Running these locally found a PRODUCT defect, fixed in bf088a2: a poll shortened by the total deadline reported the per-read timeout. It also found two test defects (std::bind resolved instead of ::bind; SIGPIPE killed the process). The Linux CI run without patches is still required."
       ],
       "code": [
         {
@@ -6707,6 +6708,17 @@
           "command": "GitHub Actions e2e-tests.yaml pull_request (8 legs, all green) — PR #144 merge revision of ea99601; artifact tested-sha.txt",
           "result": "pass",
           "report": "https://github.com/gree/flare/actions/runs/36985417000"
+        },
+        {
+          "commit": "bf088a22b70452d14c0177c63e5979a05a6789e2",
+          "head": "bf088a22b70452d14c0177c63e5979a05a6789e2",
+          "tree": "a656e7860781e248809daaebbdb84248fbdeed01",
+          "date": "2026-10-06",
+          "source": "local",
+          "check": "CHECK-17-unit",
+          "result": "pass",
+          "command": "LOCAL macOS (aarch64) cutter run: source SHA/tree equal bf088a2 WITH macOS compatibility patches applied (C++17, random_shuffle define, malloc.h/sys/vfs.h shims) — not the Linux build; make check: 5268 tests, 0 failures, 0 omissions",
+          "report": "docs/reports/2026-10-06-local-bf088a2-macos/README.md"
         }
       ],
       "tasks": [
@@ -7717,6 +7729,17 @@
           "command": "cutter (reopen_counts|follow|apply_rule|generation|identified_change|snapshot|restore) on /tmp/flare-b17",
           "result": "pass",
           "report": "docs/reports/2026-09-20-saf10-rocksdb-unit-count-seed.txt"
+        },
+        {
+          "commit": "bf088a22b70452d14c0177c63e5979a05a6789e2",
+          "head": "bf088a22b70452d14c0177c63e5979a05a6789e2",
+          "tree": "a656e7860781e248809daaebbdb84248fbdeed01",
+          "date": "2026-10-06",
+          "source": "local",
+          "check": "CHECK-19-unit",
+          "result": "pass",
+          "command": "LOCAL macOS (aarch64) cutter run: source SHA/tree equal bf088a2 WITH macOS compatibility patches applied (C++17, random_shuffle define, malloc.h/sys/vfs.h shims) — not the Linux build; make check: 5268 tests, 0 failures, 0 omissions",
+          "report": "docs/reports/2026-10-06-local-bf088a2-macos/README.md"
         }
       ],
       "tasks": [

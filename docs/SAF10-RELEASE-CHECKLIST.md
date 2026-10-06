@@ -203,6 +203,53 @@
   - 原則（ユーザー指示）：「新 master の履歴が違う」は旧コピーを読ませない根拠で
     あり、破棄してよい根拠ではない。
 
+#### R3-D の実装（2026-10-07、ユーザー承認の範囲。CI 未実行）
+
+- **H1 の扱い**：経路の存在を確認した段階。b9e0742 の損失の原因とは確定しない。
+- **flared の保護点**：`copy_protection.h` の純関数（operator の
+  repairSourceVerdict と同じ規則。単体試験 10 件）。判断は破壊的操作の**直前**
+  に毎回評価し、キャッシュしない。source（項目数・lineage・epoch・理由）と
+  受け手のコピー（項目数・lineage・epoch・再構築の証拠）に結び付ける。
+  - truncate before full dump：拒否ならコピーを保持し、再構築は再試行して待つ。
+  - snapshot swap：swap の直前に評価する。拒否なら受信済みの staging を消し、
+    旧コピーを保持する（新コピーが揃うまで旧コピーは残る）。
+  - 容量確保のための先行破棄：strict。規則に加えて source がキーを持つことを
+    要求する。満たせなければ snapshot を取らず、保護された truncate 経路で
+    再判断する。
+  - Unknown・読み取り失敗：コピーを保持して待つ。
+- **operator**：release（demote → re-seat）時に同じ判定を再評価する。defer
+  なら demote のまま保持し、release しない。
+- **corrupt DB**：削除しない。データディレクトリの `quarantine-<time>-<pid>` に
+  退避して空で開き直す。退避できなければ何も消さず停止する（CRITICAL）。
+- **replica への flush_all**：slave では拒否する（text／binary の両方。binary
+  側は flush-all-enabled の設定も適用していなかったので是正）。正当な flush は
+  master に送る。master の bulk rewrite で履歴が進み、replica は保護された
+  再構築で追随する。**運用上の変更**：ノードごとに flush_all する手順は、
+  replica への送信がエラーになる。
+- **WAL catch-up**：コピーの履歴（再構築の証拠の epoch、なければ自身の
+  source epoch）を送る。source が同じ履歴を名乗らない応答は適用しない。epoch
+  不明なら catch-up をしない。旧版 source（epoch を送らない）とは catch-up
+  せず、保護された再構築に戻る（互換の制限）。
+- **受入試験**（新スイート `copy-protection`、新しいクラスタ、停止点
+  `FLARE_TEST_DESTRUCTIVE_HOLD_FILE` で順序を固定）：
+  - H1 再現：昇格後、master がデータを持つ間に再構築が承認され、破壊的操作の
+    直前で停止する。forward を遮断して master を空にし（全削除の drop を確認、
+    保持中のコピーは不変）、解放する。保護の拒否ログと、元のキー・値の全保持
+    （`dump` で replica 自身のコピーを読む）を確認する。90 s 後も保持している
+    ことで test 9 の期待も兼ねる。
+  - Unknown：停止点で source を読めなくして解放する。truncate なし、キーの欠落
+    なしを確認し、source が読めるようになったら収束する。
+  - test 2（正当な空 master）は empty-source のまま。
+- **残る制限**：
+  - full dump 経路は truncate の後に dump するので、「新コピーを検証するまで
+    旧コピーを保持」にはなっていない。判断は truncate の直前で、dump 中の
+    source の履歴変更は dump の終わりの identity 照合で検出するが、その時点で
+    コピーはもうない。
+  - snapshot swap の保護は E2E では未検証（E2E は snapshot を無効化して
+    truncate 経路を試験している）。
+  - empty-source test 9 は、R3 が昇格直後に旧履歴の replica を再構築するため、
+    前提に到達しない（期待は copy-protection の H1 試験で検証する）。
+
 ### R4 local read guard（continuous-replication 9）
 
 - **仮説**：未特定。配送を遮断している間に replica の balance が変わった（map が

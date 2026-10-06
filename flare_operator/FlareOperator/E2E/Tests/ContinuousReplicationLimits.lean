@@ -2832,6 +2832,205 @@ def r3SourceChangeSuite : TestSuite := {
   ]
 }
 
+-- ─── R3-D: a replica's copy is not destroyed by an unsafe rebuild ─────────
+
+/-- Own cluster (empty-source shape: truncate + full dump only, throttled),
+    with a STOP POINT before every destructive step on a copy
+    (FLARE_TEST_DESTRUCTIVE_HOLD_FILE): the order is fixed by the test, not
+    by timing. Stats are read every pass so a source change is acted on at a
+    known time. -/
+private def copyProtCfg : ClusterConfig := { emptySourceCfg with
+  name := "copy-prot"
+  «namespace» := "flare-copy-prot"
+  debugPod := "debug-copy-prot"
+  flaredEnv := emptySourceCfg.flaredEnv ++ [("FLARE_TEST_DESTRUCTIVE_HOLD_FILE", "/tmp/destructive-hold")] }
+
+/-- Every key and value in the node's OWN storage (`dump`, whatever its role:
+    a Prepare replica forwards GETs, so its copy is read this way). -/
+private def Ctx.localDump (c : Ctx) (ip : String) : IO (Option (List (String × String))) := do
+  match ← hostCmd "timeout" ["-k", "5", "90", "kubectl", "exec", c.cfg.debugPod, "-n", c.cfg.«namespace», "--", "sh", "-c",
+      s!"printf 'dump 0 -1 0 0\\r\\nquit\\r\\n' | nc -w 60 {ip} {c.cfg.flarePort}"] with
+  | .error _ => return none
+  | .ok out =>
+    let mut acc : List (String × String) := []
+    let mut pending : Option String := none
+    let mut ended := false
+    for raw in out.splitOn "\n" do
+      let l := (raw.replace "\r" "").trim
+      match pending with
+      | some k =>
+        acc := (k, l) :: acc
+        pending := none
+      | none =>
+        if l.startsWith "VALUE " then
+          pending := ((l.splitOn " ").drop 1).head?
+        else if l == "END" then ended := true
+    return if ended then some acc.reverse else none
+
+/-- Are all of `kv` present with exactly these values in `dump`? -/
+private def missingFrom (kv : List (String × String)) (dump : List (String × String)) : List String :=
+  kv.filterMap fun (k, v) => if dump.lookup k == some v then none else some s!"{k}={(dump.lookup k).getD "(absent)"}"
+
+def copyProtectionSuite : TestSuite := {
+  name := "copy-protection"
+  setup := do
+    deployCluster copyProtCfg
+    discard <| kubectlPatch "flarecluster" copyProtCfg.name copyProtCfg.«namespace» "{\"spec\":{\"circuitBreaker\":{\"minUnavailableToTrip\":3}}}"
+    IO.sleep 30000
+  teardown := do
+    for ip in (← getPodIps s!"app=flare,cluster={copyProtCfg.name}" copyProtCfg.«namespace») do
+      for ip2 in (← getPodIps s!"app=flare,cluster={copyProtCfg.name}" copyProtCfg.«namespace») do
+        if ip != ip2 then
+          for _ in [0:2] do
+            discard <| hostCmd "docker" (["exec", kindNode, "iptables", "-D", "FORWARD"] ++ ruleSpec ip ip2)
+    cleanupCluster copyProtCfg
+  onFailure := dumpClusterDiagnostics copyProtCfg.«namespace» s!"app={copyProtCfg.operatorName}"
+  tests :=
+    let c : Ctx := { cfg := copyProtCfg }
+    let ns := copyProtCfg.«namespace»
+    let ip : String → IO String := fun p => do return (← getPodIp p ns).getD ""
+    -- 8 keys: while a replica is held in Prepare the master still forwards
+    -- writes to it, and a cut forward takes ~16 s to be dropped; the cut is
+    -- held until EVERY delete is dropped, so the held copy stays as it was
+    let kv := (List.range 8).map fun i => (s!"cp_{i}", s!"cpval_{i}")
+    let hold := fun (pod : String) => do return (← kubectl ["exec", "-n", ns, pod, "-c", "flared", "--", "touch", "/tmp/destructive-hold"]).toBool
+    let release := fun (pod : String) => do discard <| kubectl ["exec", "-n", ns, pod, "-c", "flared", "--", "rm", "-f", "/tmp/destructive-hold"]
+    [
+    { name := "copy-protection initial state: distinct keys and values on the master, every copy converged (verified)"
+      run := do
+        let graceOver ← waitForCondition "operator past its startup grace period" 240 do
+          return containsSubstr (← c.opLog 400) "grace period over"
+        if !graceOver then return .fail "the operator never logged the end of its startup grace period"
+        match ← c.p0Roles with
+        | (some m0, [a, b]) =>
+          if (← c.setValues (← ip m0) kv) != kv.length then return .fail "could not write the keys"
+          let conv ← waitForCondition "every copy holds every key and value" 300 do
+            let mut ok := true
+            for p in [m0, a, b] do
+              match ← c.localDump (← ip p) with
+              | some d => if !(missingFrom kv d).isEmpty then ok := false
+              | none => ok := false
+            return ok
+          if !conv then return .fail "the copies did not converge on every key and value"
+          return .pass
+        | _ => return .fail "one master and two slaves" },
+
+    { name := "H1 reproduction (fixed order): the rebuild of a replica is APPROVED while its new master holds data, the master is then EMPTIED before the destructive step, and only then is the step released — the replica keeps every original key and value; it is not rebuilt from the empty master however long it waits (test 9's expectation)"
+      run := do
+        IO.sleep 1100
+        let since ← utcNow
+        match ← c.p0Roles with
+        | (some m, [a, b]) =>
+          -- the stop point on both slaves (whichever is promoted, the other is the subject)
+          if !(← hold a) || !(← hold b) then return .fail "precondition: could not arm the stop point"
+          discard <| kubectl ["delete", "pod", m, "-n", ns, "--wait=false"]
+          let some x ← c.newMasterAfter m 180 | do release a; release b; return .fail s!"precondition: no successor promoted after draining {m}"
+          let y := if x == a then b else a
+          release x
+          let xIp ← ip x
+          let yIp ← ip y
+          -- (1) the rebuild of y is approved while x holds data, and y's
+          --     reconstruction reaches the stop point
+          let approved ← waitForCondition s!"the rebuild of {y} is approved while {x} holds data" 300 do
+            return ((← c.opLog 4000).splitOn "\n").any fun l => containsSubstr l "REPLICA REPAIR: demoting" && containsSubstr l s!"{y}." && containsSubstr l "holds data"
+          let atStop ← waitForCondition s!"{y}'s destructive step is held at the stop point" 300 do
+            return containsSubstr (← c.flaredLogSince y since) "held by FLARE_TEST_DESTRUCTIVE_HOLD_FILE"
+          if !approved || !atStop then
+            release y
+            c.windowRecord since [y, x] "H1"
+            return .fail s!"precondition (order not produced): approved while the master held data={approved}, stopped before the destructive step={atStop}"
+          let yBefore ← c.localDump yIp
+          -- (2) the master is emptied (forwards to y cut: y's copy must stay
+          --     as it was when the rebuild was approved)
+          let drops0 := (← c.statNat xIp "proxy_write_dropped").getD 0
+          if let .error e ← cutForwards xIp yIp then release y; return .fail e
+          let del ← c.deleteKeys xIp "cp" 0 kv.length
+          let xEmpty ← waitForCondition s!"{x} is empty" 120 do
+            return (← c.currItems xIp) == 0
+          let allDropped ← waitForCondition s!"all {kv.length} deletes to {y} are dropped (none queued)" 400 do
+            return ((← c.statNat xIp "proxy_write_dropped").getD 0) ≥ drops0 + kv.length
+          healForwards xIp yIp
+          let yHeld ← c.localDump yIp
+          if !allDropped || (yHeld.map (fun d => (missingFrom kv d).isEmpty)) != some true then
+            release y
+            return .fail s!"precondition: {y}'s copy did not stay intact while the master was emptied (all deletes dropped={allDropped}, missing {yHeld.map (missingFrom kv ·)})"
+          if !xEmpty then release y; return .fail s!"precondition: {x} not empty after deleting {del}"
+          -- (3) released: the protection decides now
+          release y
+          let refused ← waitForCondition s!"{y}'s protection refuses the empty source" 180 do
+            return ((← c.flaredLogSince y since).splitOn "\n").any fun l => containsSubstr l "copy protection 'truncate before full dump': REFUSE"
+          IO.sleep 90000
+          let yAfter ← c.localDump (← ip y)
+          let log := ((← c.flaredLogSince y since).splitOn "\n")
+          let truncated := log.any (containsSubstr · "truncating storage")
+          c.windowRecord since [y, x] "H1"
+          IO.eprintln s!"# H1: master {m} drained, {x} promoted; {y} approved={approved}, stopped={atStop}; {x} emptied ({del} deletes); released; refusal logged={refused}; truncated={truncated}; {y} copy before {yBefore.map (·.length)} keys, after 90 s more {yAfter.map (·.length)} keys"
+          match yAfter with
+          | none => return .fail s!"{y}'s own copy could not be read after the release"
+          | some d =>
+            let lost := missingFrom kv d
+            if truncated then return .fail s!"{y}'s copy was truncated from the empty master"
+            if !lost.isEmpty then return .fail s!"{y} lost {lost.length} original key(s)/value(s): {lost.take 5}"
+            if !refused then return .fail s!"{y} kept its copy but no refusal by the protection rule was logged (the reason is not shown)"
+            return .pass
+        | _ => return .fail "precondition: one master and two slaves" },
+
+    { name := "Unknown at the same boundary: with the master holding data again, the replica's destructive step is held, the source made UNREADABLE, then released — the copy is kept (Unknown is not 'safe'); once the source is readable the rebuild proceeds and the replica converges on the master's keys and values"
+      run := do
+        IO.sleep 1100
+        let since ← utcNow
+        match ← c.p0Roles with
+        | (some x, _) =>
+          let xIp ← ip x
+          let slavesNow := (← c.nodeView).filter (fun e => e.role == 1) |>.map (fun e => podOf e.fqdn)
+          let ys := slavesNow.filter (· != x)
+          -- the subject: the replica still holding the original copy (H1's y)
+          let mut y? : Option String := none
+          for p in ys do
+            if let some d ← c.localDump (← ip p) then
+              if (missingFrom kv d).isEmpty && y?.isNone then y? := some p
+          let some y := y? | return .fail s!"precondition: no replica besides {x} holds the original copy (H1 must precede)"
+          let yIp ← ip y
+          let kv2 := (List.range 8).map fun i => (s!"cp_{i}", s!"cpnew_{i}")
+          if !(← hold y) then return .fail "precondition: could not arm the stop point"
+          if (← c.setValues xIp kv2) != kv2.length then release y; return .fail s!"precondition: could not write the new values on {x}"
+          let atStop ← waitForCondition s!"{y} reaches the stop point again" 300 do
+            return containsSubstr (← c.flaredLogSince y since) "held by FLARE_TEST_DESTRUCTIVE_HOLD_FILE"
+          if !atStop then release y; return .fail "precondition: the stop point was not reached"
+          -- the source unreadable from y, then released
+          match ← hostCmd "docker" (["exec", kindNode, "iptables", "-I", "FORWARD", "1"] ++ ruleSpec yIp xIp) with
+          | .error e => release y; return .fail s!"precondition: could not cut {y} -> {x}: {e}"
+          | .ok _ => pure ()
+          release y
+          let unknownRefused ← waitForCondition s!"{y} refuses on an Unknown source" 120 do
+            return ((← c.flaredLogSince y since).splitOn "\n").any fun l => containsSubstr l "REFUSE (source unknown: copy kept)"
+          let yDuring ← c.localDump yIp
+          let truncDuring := ((← c.flaredLogSince y since).splitOn "\n").any (containsSubstr · "truncating storage")
+          for _ in [0:3] do
+            discard <| hostCmd "docker" (["exec", kindNode, "iptables", "-D", "FORWARD"] ++ ruleSpec yIp xIp)
+          -- readable again: the source holds keys → the rebuild proceeds
+          let converged ← waitForCondition s!"{y} converges on {x}'s keys and values" 600 do
+            match ← c.localDump (← ip y) with
+            | some d => return (missingFrom kv2 d).isEmpty
+            | none => return false
+          c.windowRecord since [y, x] "Unknown"
+          IO.eprintln s!"# Unknown: {y} held, source {x} cut, released: refusal on Unknown logged={unknownRefused}; copy during {yDuring.map (fun d => (missingFrom kv d).length)} original key(s) missing; converged after the heal={converged}"
+          -- the held copy may already carry the master's NEW values (writes
+          -- are forwarded to a Prepare replica); what must not happen is a
+          -- key going ABSENT or a truncate while the source is Unknown
+          let absent := fun (d : List (String × String)) => kv.filterMap fun (k, _) => if (d.lookup k).isNone then some k else none
+          match yDuring with
+          | none => return .fail s!"{y}'s copy could not be read while the source was unknown"
+          | some d =>
+            if truncDuring then return .fail s!"{y} truncated its copy while the source was Unknown"
+            if !(absent d).isEmpty then return .fail s!"{y} lost keys while the source was Unknown: {(absent d).take 5}"
+            if !unknownRefused then return .fail s!"{y} kept its copy but no Unknown refusal was logged"
+            if !converged then return .fail s!"{y} did not converge on {x} once the source was readable"
+            return .pass
+        | _ => return .fail "precondition: a master" }
+  ]
+}
+
 -- ─── SAF-09: running the operator vs initialising a data cluster ─────────
 
 private def initCfg : ClusterConfig := {

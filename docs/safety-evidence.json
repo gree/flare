@@ -397,7 +397,8 @@
         "2026-10-06 (PR run 37438962871 on e2fdc27; NOT independently reviewed). cluster-init 29 FAILED with the split test. (1) during recovery: 1 probe round observed; its 30 answers were all misses and none could be attributed (marker matching by key name failed). (2) after the strengthened 'recovery complete' (replica Active slave, ledger empty, reconstruction 1/1): master all 30 equal; replica init_0..7 answered 'miss', 22 others correct. The trace lines matched to those 8 misses are NOT theirs: they show map_version=0, own_state=prepare, while the replica's state captured just before the same GET shows node_map_version=8589934632, Active slave, balance 0. This is the mis-attribution the review pointed out: this revision matched GETs to traces by key name. The replica's balance was 0 at the first GETs, so they were likely forwarded, but how a forwarded read of a key the master holds came back 'miss' is UNDETERMINED here. Possible readings include a failed forward answered as END (flared's default answers an unreadable key as a miss). No classification. The next revision matches by client connection and logs each answer (hit / miss / unavailable + reason). Separate finding: flared's boot id (time<<32 ^ pid<<16 ^ unseeded random()) is not unique across pods started in the same second (the matched line's boot id equals the master's), so it identifies restarts within one pod only.",
         "2026-10-06 (PR run 37445879349 on 100153c; NOT independently reviewed). cluster-init 29 FAILED its PRECONDITION before the scenario: 'both copies hold the keys' timed out after 120 s (items 30, map saved). No recovery-time or post-recovery reads were made, so this run gives NO evidence for R1. The same precondition failure occurred in 37296281060. Its cause is UNDETERMINED: the failure dump shows only the replica's later restart. Not classified as harness.",
         "2026-10-06 (cd1d9b0: PR run 37451914041 full, and manual single-suite 37451911169; NOT independently reviewed). cluster-init 29 PASSED in both, with the production read policy (readUnavailableError=true). (1) during recovery: 2 probe rounds observed in each run (2-3 not observed); all 60 answers correct, 0 wrong local / forwarded / unattributable, 0 masked misses, 0 explicit errors. The replica was again reseeded by snapshot after the map restore, as in the earlier failures. (2) after recovery: all 30 keys correct AND answered from the replica's own copy, master cmd_get unchanged, same processes. R1 is NOT closed. During the probes the replica's balance was 0, so every probe read was forwarded to the master by policy. The scenario of the earlier failures (37419299532, 37426714842: reads routed to the replica, slave 100, while it was being reseeded) did not occur, so H3 (a local answer from an incomplete copy) was not exercised. Next: probe recovery with reads routed to the replicas.",
-        "2026-10-07 (b9e0742 = R3 implementation: PR run 37472032699 full, single-suite 37472022352 empty-source and 37472027476 cluster-init, nix-linux 37472032909; NOT independently reviewed). Linux unit tests: 3573 tests, 0 failures, 1 omission; the boot-id test and the 10 R3 decision tests are listed by name as passing. Full run: topology, replication, wal-recovery, failover-data, repair, repair-ledger, breaker-migration and continuous-replication all PASS with R3 (rebuild of the other replicas on every promotion). SAFETY REGRESSION, empty-source 9: the repair of the replica that missed the deletes was DEFERRED by the empty-source rule ('deferred=true'). Within 60 s the ledger was nevertheless empty and the replica had been demoted to proxy, re-added as Prepare, truncated and dumped from the promoted master: 0/400 keys (full run, empty master) and 2/400 (single run, a 2-key master). The demotion did not come through the deferred repair entry. The path is NOT determined: the operator's lines for that window are not in the failure dump (tail only). R3 is the prime suspect (new on this revision). empty-source 2 (previously passing): the legitimately-emptied-master repair was DEFERRED repeatedly ('the current master holds 0 keys and its source epoch 3:… is not the replica's 2:…'); cause not determined. R2 test: the client exec was cut by the harness's 30 s kubectl exec cap (answer after 30004 ms) while the forward was still retrying; it then succeeded after the cut was healed. This is a test bug shown by the log; the failure answer was not observed; a forward to an unreachable master takes MORE than 30 s. R3 acceptance test: precondition failed (copies not converged after test 9); NOT exercised. cluster-init 29: during recovery no answer came from a pod's own copy; after 'recovery complete' (judged from the operator's view) the replica's own map said Prepare (rebuilding again after the master advanced its epoch twice during the map restore) → explicit errors / forwarded answers, no wrong answer. R10: distinct boot ids across the two pods and across the same-name recreation, observed directly (pods started 5 s apart, so not a same-second observation; that case is the unit test)."
+        "2026-10-07 (b9e0742 = R3 implementation: PR run 37472032699 full, single-suite 37472022352 empty-source and 37472027476 cluster-init, nix-linux 37472032909; NOT independently reviewed). Linux unit tests: 3573 tests, 0 failures, 1 omission; the boot-id test and the 10 R3 decision tests are listed by name as passing. Full run: topology, replication, wal-recovery, failover-data, repair, repair-ledger, breaker-migration and continuous-replication all PASS with R3 (rebuild of the other replicas on every promotion). SAFETY REGRESSION, empty-source 9: the repair of the replica that missed the deletes was DEFERRED by the empty-source rule ('deferred=true'). Within 60 s the ledger was nevertheless empty and the replica had been demoted to proxy, re-added as Prepare, truncated and dumped from the promoted master: 0/400 keys (full run, empty master) and 2/400 (single run, a 2-key master). The demotion did not come through the deferred repair entry. The path is NOT determined: the operator's lines for that window are not in the failure dump (tail only). R3 is the prime suspect (new on this revision). empty-source 2 (previously passing): the legitimately-emptied-master repair was DEFERRED repeatedly ('the current master holds 0 keys and its source epoch 3:… is not the replica's 2:…'); cause not determined. R2 test: the client exec was cut by the harness's 30 s kubectl exec cap (answer after 30004 ms) while the forward was still retrying; it then succeeded after the cut was healed. This is a test bug shown by the log; the failure answer was not observed; a forward to an unreachable master takes MORE than 30 s. R3 acceptance test: precondition failed (copies not converged after test 9); NOT exercised. cluster-init 29: during recovery no answer came from a pod's own copy; after 'recovery complete' (judged from the operator's view) the replica's own map said Prepare (rebuilding again after the master advanced its epoch twice during the map restore) → explicit errors / forwarded answers, no wrong answer. R10: distinct boot ids across the two pods and across the same-name recreation, observed directly (pods started 5 s apart, so not a same-second observation; that case is the unit test).",
+        "2026-10-07 (254640b, single-suite runs 37485235664 empty-source / 37485241380 r3-source-change / 37485248060 cluster-init; NOT independently reviewed). R2 test PASSED: with the cut held, a forward to an unreachable master answered SERVER_ERROR after 36103 ms (server: refused, read_unavailable_error), forwarding works, and an absent key is still a miss. The long forward wait is a separate open item. cluster-init PASSED all 5 with the stricter completion condition. empty-source 9 with the window record: the operator only DEFERRED the replica's repair; no demotion, truncate or dump of the replica in the window. The replica lost keys because 396 of the 400 deletes REACHED it: the master's serial forward queue delivered them after the test healed the cut at the first drop (4 drops counted, 4 keys left). The test premise was not produced, so this is not a destroyed copy. The b9e0742 rebuilds (to 0 and 2 keys) remain UNEXPLAINED: those runs had no window record. R3's rebuild request did not fire in this window (non-follow slaves were read every 30 passes). empty-source 2: the target replica was repaired correctly; the ledger kept R3's request for the OTHER replica, whose copy predates the promotion, and the empty-source rule correctly deferred it. This is no safety violation; the replica stays non-eligible while the master is empty (availability). r3-source-change: test bug — 400 x 1 KB at 256 KB/s finished dumping before the wait saw it in progress. Code survey (subagent, not independently verified): of the operator paths that demote a slave to proxy and re-seat it, only replica repair matches test 9; it checks the source only at demotion, not at release/reseat/copy, and accepts any non-zero master count. flared's only guard before truncate/swap is an LSN comparison. Other paths bypass the source check: drain, failover + re-registration, restart boot shift, zone swap, stale map on takeover, space-aware hard_reset, corrupt-DB wipe, interrupted-restore wipe, flush_all to a replica, and WAL catch-up without epoch."
       ],
       "code": [
         {
@@ -1569,6 +1570,20 @@
           "result": "fail",
           "command": "workflow_dispatch single-suite cluster-init on b9e0742; 29 (2): explicit errors (replica in prepare, no_balance); R10 boot ids distinct across pods and the same-name recreation",
           "report": "docs/reports/2026-10-07-ci-37472027476-single-cluster-init-job.log"
+        },
+        {
+          "commit": "254640bde43627437ec0a941a88846c39509c019",
+          "head": "254640bde43627437ec0a941a88846c39509c019",
+          "tree": "d369a35adc4c4a05b059a2e953bdeb182850bb74",
+          "date": "2026-10-07",
+          "source": "ci",
+          "scope": "single-suite",
+          "suites": "cluster-init",
+          "run_url": "https://github.com/gree/flare/actions/runs/37485248060",
+          "check": "CHECK-01-nodemap",
+          "result": "pass",
+          "command": "workflow_dispatch single-suite cluster-init on 254640b (not full CI): all 5 pass; recovery complete judged from the replica's own state and a local GET",
+          "report": "docs/reports/2026-10-07-ci-37485248060-single-cluster-init-job.log"
         }
       ],
       "tasks": [
@@ -4535,6 +4550,34 @@
           "result": "fail",
           "command": "workflow_dispatch single-suite empty-source on b9e0742; 2 FAIL, 9 FAIL (2/400 rebuilt from a 2-key promoted master), 10 R2 not observed, 11 R3 precondition",
           "report": "docs/reports/2026-10-07-ci-37472022352-single-empty-source-job.log"
+        },
+        {
+          "commit": "254640bde43627437ec0a941a88846c39509c019",
+          "head": "254640bde43627437ec0a941a88846c39509c019",
+          "tree": "d369a35adc4c4a05b059a2e953bdeb182850bb74",
+          "date": "2026-10-07",
+          "source": "ci",
+          "scope": "single-suite",
+          "suites": "empty-source",
+          "run_url": "https://github.com/gree/flare/actions/runs/37485235664",
+          "check": "CHECK-07-emptysource",
+          "result": "fail",
+          "command": "workflow_dispatch single-suite empty-source on 254640b (not full CI): 2 fail (ledger holds R3's deferred request for the other replica), 9 fail (premise not produced: 396 of 400 deletes reached the replica after an early heal; no rebuild in the window), R2 test PASS",
+          "report": "docs/reports/2026-10-07-ci-37485235664-single-empty-source-job.log"
+        },
+        {
+          "commit": "254640bde43627437ec0a941a88846c39509c019",
+          "head": "254640bde43627437ec0a941a88846c39509c019",
+          "tree": "d369a35adc4c4a05b059a2e953bdeb182850bb74",
+          "date": "2026-10-07",
+          "source": "ci",
+          "scope": "single-suite",
+          "suites": "r3-source-change",
+          "run_url": "https://github.com/gree/flare/actions/runs/37485241380",
+          "check": "CHECK-07-emptysource",
+          "result": "fail",
+          "command": "workflow_dispatch single-suite r3-source-change on 254640b (not full CI): R3 acceptance precondition failed (the 1 KB dump finished before the wait observed it)",
+          "report": "docs/reports/2026-10-07-ci-37485241380-single-r3-source-change-job.log"
         }
       ],
       "tasks": [

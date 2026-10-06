@@ -160,6 +160,49 @@
     probe 時間の窓が残る。flush_all は slave にも転送されるので内容は追随する
     が、データを失った master の再起動は窓の間の read に影響し得る。
 
+### R3-D 保護対象コピーの破棄（empty-source 9 の安全性の失敗、2026-10-07）
+
+- **事実**：
+  - b9e0742 の 2 run で、DEFER されたはずの replica が空（または 2 キー）の
+    master から truncate＋dump され、コピーを失った（0/400、2/400）。この 2 run
+    には operator の窓ログがない。
+  - 254640b の run では、窓ログの範囲で destructive な操作は起きていない。
+    replica が失ったキーは、早すぎる遮断解除の後に届いた正当な削除だった
+    （前提不成立）。
+- **仮説**（コード調査に基づく。独立確認前）：
+  - H1（最有力）：R3 の needs_rebuild 要求が、昇格直後で master にまだデータ
+    がある時点で承認された。その後 master が空になってから再構築が行われた。
+    source 判定は demote 時だけで、release／reseat／copy の時点では再確認しない。
+  - H2：master に 1 キーでも残っていれば判定は承認する（replica との比較なし）。
+  - H3：drop 要求と R3 要求が別エントリになった（dest の表記違い）。
+  - H4：判定を通らない別経路（drain、failover＋再登録、再起動の boot shift、
+    zone swap、引き継ぎ時の古い map）。
+  - flared 側でも、truncate／snapshot swap の前の保護は LSN の比較だけ。キー数も
+    履歴も見ない。
+- **必要な観測**：
+  - test 9 の窓ログ（operator の全判断と replica の役割変更・truncate・dump）。
+  - 前提の確定：master 0 キー、replica は取り逃した 4 キーを保持。
+  - R3 要求の到着時刻（毎パス読み取り）。
+- **合否条件（受入、対で判定）**：
+  - test 2（正当な空 master：replica の証拠が master の履歴と一致）は再構築して
+    空になる。
+  - test 9（危険な空 master：証拠が以前の履歴）は再構築されず、4 キーを保持し
+    続ける。
+  - 経路ごとの再現試験：遅れて実行される承認済み要求、drain、再起動。
+- **修正案（レビュー待ち・未実装）**：
+  - flared の破壊点（truncate、snapshot swap、`hard_reset` の space-aware
+    discard）の直前で、source を probe し、operator の source 判定と同じ規則を
+    適用する。空、または別の履歴の source を許すのは、再構築の証拠が一致する
+    ときだけ。拒否したらコピーを保持し、Prepare のまま待つ。
+  - 全経路がこの一点を通るため、operator 側の判定漏れ（H1・H3・H4）も含めて
+    塞がる。
+  - operator 側も、release／reseat 時に再確認し、0 か非 0 かだけでなく
+    replica の保持量と比べる。
+  - 未決（ユーザー判断）：破損 DB の `hard_reset`、`flush_all` の replica 受理、
+    epoch を送らない WAL catch-up を同じ規則の対象にするか。
+  - 原則（ユーザー指示）：「新 master の履歴が違う」は旧コピーを読ませない根拠で
+    あり、破棄してよい根拠ではない。
+
 ### R4 local read guard（continuous-replication 9）
 
 - **仮説**：未特定。配送を遮断している間に replica の balance が変わった（map が

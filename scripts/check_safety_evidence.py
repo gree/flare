@@ -103,8 +103,12 @@ def counts_for(run, candidate, root):
     an immutable Actions run URL) and the TREE it tested is the candidate's
     tree — or the tested revision is available locally and differs from the
     candidate in docs only. A PR job tests a merge commit, so the branch
-    `head` is informational and never enough on its own."""
+    `head` is informational and never enough on its own. A SINGLE-SUITE run
+    (scope "single-suite": a manual run of selected suites to investigate one
+    finding) never counts: the candidate's CI stage needs the full matrix."""
     if run.get("source") != "ci" or not ACTIONS_URL.fullmatch(str(run.get("run_url", ""))):
+        return False
+    if run.get("scope", "full") != "full":
         return False
     cand_tree = tree_of(root, candidate["commit"])
     if run.get("tree") and cand_tree and run["tree"] == cand_tree:
@@ -241,6 +245,10 @@ def validate(data, root):
             if "tree" in run:
                 require(isinstance(run["tree"], str) and SHA.fullmatch(run["tree"]),
                         f"{label}: run tree must be the full tested tree SHA")
+            if "scope" in run:
+                require(run["scope"] in ("full", "single-suite"), f"{label}: run scope must be full or single-suite")
+                if run["scope"] == "single-suite":
+                    require(nonempty(run.get("suites", "")), f"{label}: a single-suite run must name its suites")
             if "source" in run:
                 require(run["source"] in ("ci", "local"), f"{label}: run source must be ci or local")
                 if run["source"] == "ci":

@@ -2,7 +2,9 @@ name: E2E Tests
 # The base commit is part of the title so a later docs-only push can check
 # that the previous run was tested against the SAME base (the title is fixed
 # when the run is created; the API's pull_requests[].base is the current one).
-run-name: "E2E Tests (base ${{ github.event.pull_request.base.sha || 'none' }})"
+# A manual run is named as one (single-suite or full) so it is never read as
+# the PR's full check.
+run-name: "${{ github.event_name == 'workflow_dispatch' && format('E2E MANUAL ({0}) on {1}', inputs.suites != '' && format('single-suite: {0}', inputs.suites) || 'full matrix', github.ref_name) || format('E2E Tests (base {0})', github.event.pull_request.base.sha || 'none') }}"
 
 on:
   # Feature branches are covered by their pull_request runs; running the same
@@ -89,7 +91,7 @@ jobs:
           ]'
           all=$(echo "$default" | jq -r '[.[].suites] | join(",")')
           if [ -n "$SUITES_INPUT" ]; then
-            matrix=$(jq -cn --arg s "$SUITES_INPUT" '[{"group":"custom","suites":$s}]')
+            matrix=$(jq -cn --arg s "$SUITES_INPUT" '[{"group":"single-suite","suites":$s}]')
           else
             matrix=$(echo "$default" | jq -c .)
           fi
@@ -169,9 +171,12 @@ jobs:
     needs: plan
     if: needs.plan.outputs.run_e2e == 'true'
     runs-on: ubuntu-latest
+    # PR legs: a newer push cancels the older run of the same leg. MANUAL
+    # runs (investigation of one finding) get a group of their own run id:
+    # a push never cancels them, and they never cancel a PR leg.
     concurrency:
-      group: e2e-${{ github.head_ref || github.ref }}-${{ inputs.evaluation || 'none' }}-${{ matrix.group }}
-      cancel-in-progress: true
+      group: ${{ github.event_name == 'workflow_dispatch' && format('e2e-manual-{0}-{1}', github.run_id, matrix.group) || format('e2e-{0}-{1}-{2}', github.head_ref || github.ref, inputs.evaluation || 'none', matrix.group) }}
+      cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
     timeout-minutes: ${{ inputs.evaluation != '' && inputs.evaluation != 'none' && 240 || 120 }}
     strategy:
       fail-fast: false
@@ -183,6 +188,33 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: recursive
+
+      - name: Record what this leg tests
+        # Evidence: the revision actually checked out (a PR run tests a merge
+        # commit, not the branch head) and the suites selected. A manual
+        # single-suite run is labelled as such: it is NOT the full CI.
+        env:
+          EVENT: ${{ github.event_name }}
+          SUITES: ${{ matrix.suites }}
+          GROUP: ${{ matrix.group }}
+          REF: ${{ github.ref }}
+        run: |
+          sha=$(git rev-parse HEAD)
+          tree=$(git rev-parse 'HEAD^{tree}')
+          scope=full
+          if [ "$GROUP" = single-suite ]; then scope=single-suite; fi
+          {
+            echo "### E2E leg $GROUP"
+            echo "- event: $EVENT, ref: $REF"
+            echo "- checked-out commit: $sha"
+            echo "- tree: $tree"
+            echo "- scope: $scope"
+            echo "- suites: $SUITES"
+            if [ "$scope" = single-suite ]; then
+              echo "- SINGLE-SUITE run: evidence for these suites only, never the full CI of this revision"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "E2E-EVIDENCE commit=$sha tree=$tree scope=$scope event=$EVENT group=$GROUP suites=$SUITES"
 
       - name: Install elan (Lean version manager)
         run: |
@@ -399,6 +431,10 @@ jobs:
           # the TREE actually tested (a PR run tests a merge commit, not the branch head)
           git rev-parse 'HEAD^{tree}' > ci-results/tested-tree.txt
           echo "$EVALUATION" > ci-results/evaluation.txt
+          # scope and suites of this leg (a single-suite run is never full CI)
+          echo "$SUITE_GROUP" > ci-results/group.txt
+          echo "$SUITES" > ci-results/suites.txt
+          if [ "$SUITE_GROUP" = single-suite ]; then echo single-suite; else echo full; fi > ci-results/scope.txt
           cd flare_operator
           export KUBECONFIG=$HOME/.kube/config
           # timeout(1) produces "exit code 124" on expiry — this inner limit
@@ -408,9 +444,11 @@ jobs:
           # empty-source: 8 tests, each with throttled full dumps (~25 s) and
           # failovers; it alone needs more than the sharded-leg budget.
           if [ "$SUITE_GROUP" = empty-source ]; then limit=7000; fi
-          # A single-suite manual run (group "custom") takes the profile too;
+          # a manual single-suite run that includes empty-source gets its budget
+          if [ "$SUITE_GROUP" = single-suite ] && echo ",$SUITES," | grep -q ',empty-source,'; then limit=7000; fi
+          # A single-suite manual run (group "single-suite") takes the profile too;
           # otherwise suites=... with an evaluation silently measured nothing.
-          if [ "$SUITE_GROUP" = continuous-replication ] || [ "$SUITE_GROUP" = custom ]; then
+          if [ "$SUITE_GROUP" = continuous-replication ] || [ "$SUITE_GROUP" = single-suite ]; then
             case "$EVALUATION" in
               sustained) export FLARE_E2E_SUSTAINED=1; limit=10800 ;;
               sustained-cpu2) export FLARE_E2E_SUSTAINED=1 FLARE_E2E_SUSTAINED_CPU=2; limit=10800 ;;

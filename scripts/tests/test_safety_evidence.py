@@ -101,6 +101,19 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(safety.ci_stage(c, cand, ROOT)[0], "no")
         # without a candidate nothing counts
         self.assertEqual(safety.ci_stage(c, None, ROOT)[0], "no")
+        # a SINGLE-SUITE manual run of the same tree never counts as full CI
+        c["runs"] = runs(tree=tree, source="ci", run_url=url, scope="single-suite", suites="empty-source")
+        self.assertEqual(safety.ci_stage(c, cand, ROOT)[0], "no")
+        c["runs"] = runs(tree=tree, source="ci", run_url=url, scope="full")
+        self.assertEqual(safety.ci_stage(c, cand, ROOT)[0], "yes")
+
+    def test_single_suite_run_must_name_its_suites(self):
+        self.data["controls"][0]["runs"].append(dict(self.run_record(), scope="single-suite"))
+        with self.assertRaisesRegex(ValueError, "name its suites"):
+            safety.validate(self.data, ROOT)
+        self.data["controls"][0]["runs"][-1]["scope"] = "partial"
+        with self.assertRaisesRegex(ValueError, "scope must be"):
+            safety.validate(self.data, ROOT)
 
     def test_ci_run_needs_actions_url(self):
         self.data["controls"][0]["runs"].append(dict(self.run_record(), source="ci"))

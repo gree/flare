@@ -48,6 +48,11 @@ stdenv.mkDerivation {
       cat test/test-suite.log || echo "test-suite.log not found"
       exit 1
     }
+    # Evidence in the CI log: the cutter totals, and the tests named by the
+    # release checklist (R3 source eligibility, R10 boot id), by name.
+    echo "=== cutter summary (test/run-tests.sh.log) ==="
+    grep -E 'test\(s\),' test/run-tests.sh.log || echo "no cutter summary line found"
+    grep -E 'test_source_eligibility::|test_boot_ids_differ' test/run-tests.sh.log || echo "named checklist tests not found in the cutter log"
   '';
   installPhase = ''
     make install

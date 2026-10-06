@@ -230,6 +230,11 @@ cluster:
   # dropped and counted (proxy_write_dropped). With continuous replication
   # the follower then fills it from the WAL; without it, the repair path
   # rebuilds the replica. 200000 is about 120 MB.
+  # Production policy (2026-10-06): set readUnavailableError: true, so a get
+  # that cannot be served (forward to the master failed, no partition,
+  # enqueue or storage error) answers SERVER_ERROR instead of END ("key
+  # absent"). Not the chart default yet (default changes are decided
+  # separately); clients must treat SERVER_ERROR as an error, not a miss.
   rocksdb:
     maxTotalThreadQueue: 200000
   # Declarative read-routing policy (CRD spec.readBalance). flared routes

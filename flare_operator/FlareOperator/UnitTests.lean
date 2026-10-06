@@ -26,6 +26,7 @@ import FlareOperator.StateMachine.K8sReconciler
 import FlareOperator.StateMachine.NodeMapRecovery
 import FlareOperator.K8s.Bridge
 import FlareOperator.E2E.TraceMatch
+import FlareOperator.StateMachine.SourceEligibility
 
 open FlareOperator.K8s
 open FlareOperator.ReplicaRepair
@@ -1255,6 +1256,22 @@ private def checkActivationOrder (ctx : Ctx) : IO Unit := do
   check ctx "activation: a passing check without a map version is undetermined"
     (match judgeActivation [acc 415 1, dump 2, "[NTC] activation source check passed (attempt 1): source " ++ n 2 ++ " is the partition's master", act 1] old new with | .undetermined _ => true | _ => false)
 
+-- ─── R3: source eligibility (operator side) ──────────────────────────────
+
+open FlareOperator.SourceEligibility in
+private def checkSourceEligibility (ctx : Ctx) : IO Unit := do
+  check ctx "R3: a slave reporting eligible=0 is withheld from promotion; eligible=1 and unreadable (pre-R3 / no reply) are not"
+    (withheld [("a", some 0), ("b", some 1), ("c", none)] == ["a"])
+  check ctx "R3: a promotion is possible with a masterless partition, a missing pod, an unhealthy node or a terminating master"
+    (promotionRisk true false [] [] [] && promotionRisk false true [] [] []
+      && promotionRisk false false ["x"] [] [] && promotionRisk false false [] ["m"] ["m"])
+  check ctx "R3: a terminating SLAVE alone or a healthy cluster is not a promotion pass"
+    (!promotionRisk false false [] ["s"] ["m"] && !promotionRisk false false [] [] ["m"])
+  check ctx "R3: needs_rebuild becomes a rebuild request with flared's reason; other states do not"
+    (rebuildRequests [("a", some "needs_rebuild", some "history differs"), ("b", some "revalidating", none),
+                      ("c", some "eligible", none), ("d", none, none), ("e", some "needs_rebuild", none)]
+      == [("a", "history differs"), ("e", "the copy's source changed lineage or history")])
+
 def run : IO UInt32 := do
   let ctx : Ctx := { failures := ← IO.mkRef [], count := ← IO.mkRef 0 }
   checkObserve ctx
@@ -1289,6 +1306,7 @@ def run : IO UInt32 := do
   checkTraceMatch ctx
   checkTraceAmbiguity ctx
   checkActivationOrder ctx
+  checkSourceEligibility ctx
   let failures ← ctx.failures.get
   let n ← ctx.count.get
   IO.println s!"1..{n}"

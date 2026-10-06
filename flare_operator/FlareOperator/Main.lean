@@ -36,6 +36,7 @@ import FlareOperator.Metrics.Prometheus
 import FlareOperator.Metrics.HttpServer
 import FlareOperator.Migration.Controller
 import FlareOperator.Health.HealthCheck
+import FlareOperator.StateMachine.SourceEligibility
 
 namespace FlareOperator
 
@@ -185,6 +186,13 @@ private def statNat (out key : String) : Option Nat :=
     | ["STAT", k, v] => if k == key then v.trim.toNat? else none
     | _ => none
 
+/-- The rest of a `STAT key ...` line (values that contain spaces, e.g. a
+    reason). -/
+private def statRest (out key : String) : Option String :=
+  (out.splitOn "\n").findSome? fun line =>
+    let t := line.trim.replace "\r" ""
+    if t.startsWith s!"STAT {key} " then some ((t.drop s!"STAT {key} ".length).trim) else none
+
 /-- A flared `stats` reply is complete only if the END terminator arrived;
     a reply cut short (timeout, reset) lacks it and must not be read as "the
     backend has no such field". -/
@@ -214,6 +222,8 @@ private def followReadingFrom (out : String) : FollowEvidence.Reading :=
     lastProgressAt := statNat out "repl_last_progress_at",
     nodeTime := statNat out "time",
     lastReason := statStr out "repl_follow_last_reason",
+    readSourceState := statStr out "repl_read_source_state",
+    readSourceReason := statRest out "repl_read_source_reason",
     bootId := statNat out "reconstruction_boot_id" }
 
 private def masterReadingFrom (out : String) : FollowEvidence.MasterReading :=
@@ -936,8 +946,12 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
       let (changed, summaries) := FollowEvidence.changedSummaries tr.lastSummary judged
       for (k, summary) in changed do
         IO.eprintln s!"[flare-operator] CONTINUOUS REPLICATION eligibility {k}: {summary}"
+      -- R3: slaves whose copy's source changed lineage or history
+      let sourceRebuild := SourceEligibility.rebuildRequests (slaveReadings.filterMap fun (k, _, r?) =>
+        r?.map fun r => (k, r.readSourceState, r.readSourceReason))
       followRef.set { mem := mem', boots := boots', tick := tr.tick + 1, classified := cls, lastSummary := summaries,
-                      desired := desiredNow.orElse (fun _ => tr.desired), confirm := confirm' }
+                      desired := desiredNow.orElse (fun _ => tr.desired), confirm := confirm',
+                      sourceRebuild := sourceRebuild }
       -- SAF-08 GHOST SUCCESSOR: the map's Active state belongs to the
       -- process that registered it. A pod replaced under the same name keeps
       -- the name (so it passes every "pod exists" check) and the map entry
@@ -955,6 +969,24 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
             && podKeys.contains kv.1 && !readyNow.contains kv.1).map Prod.fst
       if !notReadyActive.isEmpty then
         IO.eprintln s!"[flare-operator] promotion candidates withheld this pass (Active in the map but the pod is not Ready — possibly replaced under the same name and not yet registered): {notReadyActive}"
+      -- R3: on a pass where a promotion can be decided, read every Active
+      -- slave's source eligibility DIRECTLY (not the periodic follow probe):
+      -- a copy whose source changed is not promotable until re-validated.
+      let masterKeysNow := (cs.nodeMap.filter fun kv => kv.2.role == FlareRole.Master).map Prod.fst
+      let mut sourceIneligible : List String := []
+      if SourceEligibility.promotionRisk masterless deadCandidate unhealthyKeys termKeys masterKeysNow then
+        let mut readings : List (String × Option Nat) := []
+        for (key, n) in cs.nodeMap do
+          if n.role == FlareRole.Slave && n.state == FlareState.Active && readyNow.contains key then
+            match pods.find? (fun p => Bridge.PodInfo.toNodeKey p == key) with
+            | some p =>
+              match ← Bridge.queryPodStats p.name ns "stats" with
+              | .ok out => readings := readings ++ [(key, statNat out "repl_read_source_eligible")]
+              | .error _ => readings := readings ++ [(key, none)]
+            | none => pure ()
+        sourceIneligible := SourceEligibility.withheld readings
+        if !sourceIneligible.isEmpty then
+          IO.eprintln s!"[flare-operator] promotion candidates withheld this pass (R3: the copy is not eligible for its partition's current source until re-validated): {sourceIneligible}"
       -- SAF-08: a successor pinned by the empty-master self-heal ranks first
       -- for the drain, but only while its pod is still the incarnation that
       -- was validated; a changed pod drops the pin (and is checked again at
@@ -972,7 +1004,7 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
       pinnedSuccessorRef.set keptPins
       let ranked := pinnedFirst ++ cls.ranked.filter (!pinnedFirst.contains ·)
       pure (.PodListResponse podKeys (Bridge.podZones pods nodeZones) termKeys dataKeys unhealthyKeys heldKeys
-              (cls.unfit ++ notReadyActive.filter (!cls.unfit.contains ·)) cls.unproven ranked knownEmpty)
+              (cls.unfit ++ (notReadyActive ++ sourceIneligible).filter (!cls.unfit.contains ·)) cls.unproven ranked knownEmpty)
   | .PatchService =>
     -- Service patching happens in executeEffects (PatchService effect)
     -- This just signals completion
@@ -1429,7 +1461,11 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
       -- EVERY pass from this pass's classification, against its partition's
       -- current master, so the plan below can act on it at once.
       let mut led1 := led1
-      for (key, why) in (← followRef.get).classified.needsRebuild do
+      let ftr ← followRef.get
+      let rebuildAsks := (ftr.classified.needsRebuild.map fun (k, w) => (k, w, "the follower declared needs_rebuild"))
+        ++ (ftr.sourceRebuild.filter (fun (k, _) => !ftr.classified.needsRebuild.any (·.1 == k))).map fun (k, w) =>
+            (k, w, "R3: the replica reported that its copy's source changed lineage or history (needs_rebuild)")
+      for (key, why, who) in rebuildAsks do
         match preState.lookupNode key with
         | some n =>
           if n.role == FlareRole.Slave then
@@ -1440,7 +1476,7 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
               if added then
                 led1 := led'
                 metrics.replicaRepairRequested.inc
-                IO.eprintln s!"[flare-operator] REPLICA REPAIR requested by the follower: {key} declared needs_rebuild ({why}) — its continuous stream cannot resume from its position, so it takes the rebuild path (demote → hold → reseat → reconstruction) under master {mKey}"
+                IO.eprintln s!"[flare-operator] REPLICA REPAIR requested by the replica: {key} — {who} ({why}); it takes the rebuild path (demote → hold → reseat → reconstruction) under master {mKey}"
             | none => pure ()
         | none => pure ()
       for e in voided do

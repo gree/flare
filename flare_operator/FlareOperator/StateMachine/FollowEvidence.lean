@@ -75,6 +75,10 @@ structure Reading where
   /-- Set by `markProcessChanges`: this reply comes from a different flared
       process than the previous pass's reply for the same node. -/
   processChanged : Bool := false
+  /-- R3: repl_read_source_state (none / eligible / revalidating /
+      needs_rebuild) and its reason (StateMachine/SourceEligibility). -/
+  readSourceState : Option String := none
+  readSourceReason : Option String := none
   deriving Repr, BEq
 
 /-- The partition master's own `stats` reply, typed. -/
@@ -447,6 +451,8 @@ structure Tracker where
   desired : Option Bool := none
   /-- Follow-configuration changes not yet confirmed (`Confirm`). -/
   confirm : List Confirm := []
+  /-- R3: slaves that reported needs_rebuild on this pass's readings. -/
+  sourceRebuild : List (String × String) := []
   deriving Repr
 
 /-- Which judgements changed since the last pass (to log), and the updated

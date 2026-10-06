@@ -33,6 +33,8 @@
 #include <iostream>
 #include <time.h>
 #include <errno.h>
+#include <poll.h>
+#include <signal.h>
 #include <arpa/inet.h>
 
 using namespace gree::flare;
@@ -174,7 +176,12 @@ namespace test_connection_tcp
 			int sfd;
 			unsigned short port;
 			pthread_t th;
-			trickle_server() : sfd(-1), port(0) {
+			bool started;
+			trickle_server() : sfd(-1), port(0), started(false) {
+				// the client may close while this server still writes: a write
+				// to a closed peer must fail with EPIPE, not kill the test
+				// process with SIGPIPE (flared ignores SIGPIPE as well)
+				signal(SIGPIPE, SIG_IGN);
 				sfd = socket(AF_INET, SOCK_STREAM, 0);
 				int on = 1;
 				setsockopt(sfd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
@@ -183,16 +190,25 @@ namespace test_connection_tcp
 				a.sin_family = AF_INET;
 				a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 				a.sin_port = 0;
-				bind(sfd, (struct sockaddr*)&a, sizeof(a));
+				// ::bind, not std::bind (an unqualified bind resolved to
+				// std::bind here and silently bound nothing: port 0)
+				if (::bind(sfd, (struct sockaddr*)&a, sizeof(a)) != 0) return;
 				socklen_t len = sizeof(a);
-				getsockname(sfd, (struct sockaddr*)&a, &len);
+				::getsockname(sfd, (struct sockaddr*)&a, &len);
 				port = ntohs(a.sin_port);
-				listen(sfd, 4);
-				pthread_create(&th, NULL, &trickle_server::run, this);
+				::listen(sfd, 4);
+				started = (pthread_create(&th, NULL, &trickle_server::run, this) == 0);
 			}
 			static void* run(void* p) {
 				trickle_server* self = static_cast<trickle_server*>(p);
-				int c = accept(self->sfd, NULL, NULL);
+				// never block forever: a client that does not come must not
+				// hang the suite in the destructor's join
+				struct pollfd pfd;
+				pfd.fd = self->sfd;
+				pfd.events = POLLIN;
+				pfd.revents = 0;
+				if (poll(&pfd, 1, 10000) != 1) return NULL;
+				int c = ::accept(self->sfd, NULL, NULL);
 				if (c < 0) return NULL;
 				for (int i = 0; i < 20; i++) {		// 6 s of one byte / 300 ms, never a newline
 					if (write(c, "a", 1) != 1) break;
@@ -202,8 +218,8 @@ namespace test_connection_tcp
 				return NULL;
 			}
 			~trickle_server() {
-				pthread_join(th, NULL);
-				close(sfd);
+				if (started) pthread_join(th, NULL);
+				if (sfd >= 0) close(sfd);
 			}
 		};
 	}
@@ -229,16 +245,17 @@ namespace test_connection_tcp
 	void test_connection_tcp_total_deadline_bounds_a_trickling_peer()
 	{
 		trickle_server srv;
+		cut_assert_true(srv.started && srv.port != 0, cut_message("the local trickle server did not start (port %d)", (int)srv.port));
 		connection_tcp* t = new connection_tcp("localhost", srv.port);
 		shared_connection c(t);
 		t->set_read_timeout(1000);			// never fires: a byte arrives every 300 ms
-		cut_assert_equal_int(0, c->open());
+		cut_assert_equal_int(0, c->open(), cut_message("connect to the local trickle server on port %d failed (errno %d)", (int)srv.port, t->get_errno()));
 		t->set_deadline_from_now(1500);
 		char* line = NULL;
 		const uint64_t t0 = mono_ms();
 		cut_assert_equal_int(-1, c->readline(&line));
 		const uint64_t took = mono_ms() - t0;
-		cut_assert_equal_int(-3, t->get_errno());			// the TOTAL deadline ended it
+		cut_assert_equal_int(-3, t->get_errno(), cut_message("readline ended after %llu ms with errno %d", (unsigned long long)took, t->get_errno()));			// the TOTAL deadline ended it
 		cut_assert_operator(took, <, (uint64_t)3000);		// not the 6 s of trickling
 		cut_assert_operator(took, >=, (uint64_t)1400);
 		delete[] line;

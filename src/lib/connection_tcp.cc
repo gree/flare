@@ -294,6 +294,7 @@ int connection_tcp::read(char** p, int expect_len, bool readline, bool& actual) 
 	actual = true;
 	do {
 		int wait_ms = this->_read_timeout;
+		bool deadline_bound = false;	// this poll is shortened by the total deadline
 		if (this->_deadline_ms > 0) {
 			struct timespec ts;
 			clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -308,9 +309,19 @@ int connection_tcp::read(char** p, int expect_len, bool readline, bool& actual) 
 			const uint64_t left = this->_deadline_ms - now;
 			if (left < (uint64_t)wait_ms) {
 				wait_ms = (int)left;
+				deadline_bound = true;
 			}
 		}
 		int n = poll(&ufds, 1, wait_ms);
+		if (n == 0 && deadline_bound) {
+			// the poll ended because the TOTAL deadline ran out, not the
+			// per-read timeout: report it as the deadline (-3)
+			log_info("request deadline exceeded before the reply was complete", 0);
+			this->_errno = -3;
+			delete[] *p;
+			*p = NULL;
+			return -1;
+		}
 		if (n == 0) {
 			log_info("poll() timed out (%0.4f sec)", this->_read_timeout / 1000.0);
 			this->_errno = -1;

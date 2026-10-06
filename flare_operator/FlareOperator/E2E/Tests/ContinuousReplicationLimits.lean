@@ -2615,7 +2615,12 @@ def clusterInitSuite : TestSuite := {
               let selfEntry := match ← execInDebugPod initCfg.debugPod ns s!"printf 'stats nodes\\r\\n' | nc -w 3 {s2} {initCfg.flarePort}" with
                 | .ok o => String.intercalate " " ((o.splitOn "\n").filter (fun l => containsSubstr l (sPodR ++ ".") && (containsSubstr l ":role " || containsSubstr l ":state " || containsSubstr l ":balance ")) |>.map String.trim)
                 | .error e => s!"(unreadable: {e})"
-              IO.eprintln s!"# replica {sPodR} own map entry at the failed read: {selfEntry}"
+              -- the inputs of flared's LOCAL READ GUARD (relevant in WAL mode)
+              let mut guardParts : List String := []
+              for k in ["repl_follow_enabled", "repl_follow_state", "repl_applied_lsn", "repl_source_lsn", "repl_source_lsn_observed_at", "time"] do
+                guardParts := guardParts ++ [s!"{k}={(← c.statStr s2 k).getD "?"}"]
+              let guard := String.intercalate " " guardParts
+              IO.eprintln s!"# replica {sPodR} own map entry at the failed read: {selfEntry}; local read guard inputs: {guard}"
               IO.eprintln s!"# replica {sPodR} lacks {bad} at the read; ledger {← c.ledgerDests}; {recon}; replica boot {← c.statNat s2 "reconstruction_boot_id"}\n# operator lines:\n{String.intercalate "\n" (opLines.reverse.take 25).reverse}\n# replica flared lines:\n{String.intercalate "\n" (fl.reverse.take 25).reverse}"
               let settled ← waitForCondition "the replica settles (ledger empty, Active, no reconstruction in progress)" 300 do
                 let led := (← c.ledgerDests).isEmpty

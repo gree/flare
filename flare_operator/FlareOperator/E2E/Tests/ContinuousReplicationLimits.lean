@@ -2608,6 +2608,14 @@ def clusterInitSuite : TestSuite := {
                 containsSubstr l "truncat" || containsSubstr l "dump operation" || containsSubstr l "full dump completed"
                   || containsSubstr l "shifting node_state" || containsSubstr l "shifting node_role" || containsSubstr l "snapshot"
               let recon := s!"reconstruction_started {← c.statNat s2 "reconstruction_started"} completed {← c.statNat s2 "reconstruction_completed"}"
+              -- Was the replica ALLOWED to answer clients locally at that
+              -- moment? Its OWN map entry (role/state/balance) — a replica in
+              -- prepare or with balance 0 that still served a local miss is a
+              -- finding by itself, whatever the re-read below shows.
+              let selfEntry := match ← execInDebugPod initCfg.debugPod ns s!"printf 'stats nodes\\r\\n' | nc -w 3 {s2} {initCfg.flarePort}" with
+                | .ok o => String.intercalate " " ((o.splitOn "\n").filter (fun l => containsSubstr l (sPodR ++ ".") && (containsSubstr l ":role " || containsSubstr l ":state " || containsSubstr l ":balance ")) |>.map String.trim)
+                | .error e => s!"(unreadable: {e})"
+              IO.eprintln s!"# replica {sPodR} own map entry at the failed read: {selfEntry}"
               IO.eprintln s!"# replica {sPodR} lacks {bad} at the read; ledger {← c.ledgerDests}; {recon}; replica boot {← c.statNat s2 "reconstruction_boot_id"}\n# operator lines:\n{String.intercalate "\n" (opLines.reverse.take 25).reverse}\n# replica flared lines:\n{String.intercalate "\n" (fl.reverse.take 25).reverse}"
               let settled ← waitForCondition "the replica settles (ledger empty, Active, no reconstruction in progress)" 300 do
                 let led := (← c.ledgerDests).isEmpty

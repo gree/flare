@@ -1706,20 +1706,25 @@ private def tracesAfterMarker (traces : List String) (marker : String) : List (S
   return acc.reverse
 
 /-- One answer, classified with its traces:
-    "ok"         expected value, answer traced;
-    "refused"    an explicit error reply (may be a safety refusal);
-    "unavailable" a miss the server itself recorded as UNREADABLE (failed
-                 forward, partition/storage error) — availability, not data;
-    "wrong-local" / "wrong-forwarded"  a real miss or another value, answered
-                 from this node's copy / by the node it forwarded to;
-    "untraced"   no answer line: cannot be classified. -/
+    "ok"          expected value, answer traced;
+    "refused"     an explicit error reply (may be a safety refusal):
+                  availability;
+    "masked-miss" the server recorded the key as UNREADABLE (failed forward,
+                  partition/storage error) yet answered END — to the client
+                  a missing key. Its own finding, never cancelled by a later
+                  complete read (the client already saw "absent");
+    "wrong-local" / "wrong-forwarded"  a real miss or another value on a
+                  normal read, from this node's copy / the node it forwarded
+                  to: data integrity;
+    "untraced"    no answer line: cannot be classified. -/
 private def classifyAnswer (expected answer : String) (tr : Option String × Option String) : String :=
   if answer.startsWith "err:" then "refused"
   else match tr.2 with
     | none => "untraced"
     | some r =>
       let res := traceField r "result"
-      if res == "unavailable" || res == "refused" then "unavailable"
+      if res == "unavailable" then "masked-miss"
+      else if res == "refused" then "refused"
       else if answer == expected then "ok"
       else if traceField r "reason" == "local" then "wrong-local"
       else "wrong-forwarded"
@@ -2078,9 +2083,17 @@ def emptySourceSuite : TestSuite := {
           let converged ← c.allInSync 400 300
           let evEnd ← c.evidence (← ip r)
           -- (a) the operator's switch and the version that carried it
-          let opL := ((match ← kubectl ["logs", "-n", ns, "-l", s!"app={emptySourceCfg.operatorName}", s!"--since-time={since}", "--timestamps", "--tail=-1"] with
-            | .ok o => o
-            | .error _ => "").splitOn "\n")
+          -- per operator pod (a label-selector fetch returned nothing in CI
+          -- 37438962871 although the line was in the pod's log)
+          let mut opRaw := ""
+          let mut opFetch : List String := []
+          for pod in ← getPodNames s!"app={emptySourceCfg.operatorName}" ns do
+            match ← kubectl ["logs", "-n", ns, pod, s!"--since-time={since}", "--timestamps"] with
+            | .ok o =>
+              opRaw := opRaw ++ o
+              opFetch := opFetch ++ [s!"{pod}: {(o.splitOn "\n").length} line(s)"]
+            | .error e => opFetch := opFetch ++ [s!"{pod}: unreadable ({e.take 120})"]
+          let opL := opRaw.splitOn "\n"
           let switchLine := opL.find? fun l => containsSubstr l "promoting replacement" && containsSubstr l (m2 ++ ".")
           let switchT := switchLine.bind logTs
           let switchV := (opL.find? fun l => containsSubstr l "topology changed (v" &&
@@ -2100,7 +2113,7 @@ def emptySourceSuite : TestSuite := {
               || containsSubstr l "activation deferred" || containsSubstr l "reconstruction via full dump completed" || containsSubstr l "rebuild evidence recorded"
               || containsSubstr l "reconstruction source changed" || containsSubstr l "completed but the partition's master is now" || containsSubstr l "starting dump operation"
               || (containsSubstr l "node map accepted" && (containsSubstr l s!"0={m}." || containsSubstr l s!"0={m2}."))
-          IO.eprintln s!"# (a) operator switch {m} -> {m2}: {switchLine.getD "(no line)"}; first broadcast after it v{switchV}\n# (b) {r} accepted a map with {m2} as master: v{acceptV} at {acceptLine.getD "(no line)"}\n# (c)/(d) {r} timeline since {since} (map lines only where the master changes are relevant; last 60):\n{String.intercalate "\n" (timeline.reverse.take 60).reverse}"
+          IO.eprintln s!"# (a) operator log since {since}: {opFetch}; switch {m} -> {m2}: {switchLine.getD "(no line)"}; first broadcast after it v{switchV}\n# (b) {r} accepted a map with {m2} as master: v{acceptV} at {acceptLine.getD "(no line)"}\n# (c)/(d) {r} timeline since {since} (map lines only where the master changes are relevant; last 60):\n{String.intercalate "\n" (timeline.reverse.take 60).reverse}"
           if !fromOld then return .fail s!"precondition: the dump did not start from the master {m} ({startLine.trim})"
           let some aV := acceptV | return .fail s!"(b) no line shows {r} accepting a map with {m2} as master: the timeline cannot be judged"
           -- a check of the OLD source made against the map that already named
@@ -2155,8 +2168,10 @@ def emptySourceSuite : TestSuite := {
               let localAns := (t.2.map (traceField · "reason")) == some "local"
               if cls == "wrong-local" || cls == "wrong-forwarded" then
                 badR := badR ++ [s!"{k} -> {v} ({cls}) decision {t.1.getD "(none)"} answer {t.2.getD "(none)"}"]
-              else if cls == "refused" || cls == "unavailable" then
-                unavailR := unavailR ++ [s!"{k} -> {v} ({cls}) {t.2.getD ""}"]
+              else if cls == "masked-miss" then
+                badR := badR ++ [s!"{k} -> {v} (MASKED MISS: unreadable on the server, END to the client) answer {t.2.getD ""}"]
+              else if cls == "refused" then
+                unavailR := unavailR ++ [s!"{k} -> {v} ({cls})"]
               else if cls == "untraced" || !localAns then
                 notLocal := notLocal + 1
           | _, _ => pure ()
@@ -2170,7 +2185,7 @@ def emptySourceSuite : TestSuite := {
           if onM2.isNone || onR.isNone then return .fail s!"(d) the final reads were not observed ({m2} {onM2.isSome}, {r} {onR.isSome})"
           if !badM2.isEmpty then return .fail s!"(d) the new master {m2} does not hold every key and value ({badM2.length}: {badM2.head?.getD ""})"
           if !badR.isEmpty then return .fail s!"(d) {r}'s copy does not equal the new master's ({badR.length}: {badR.head?.getD ""})"
-          if !unavailR.isEmpty then return .fail s!"(d) availability, not data: {unavailR.length} of {r}'s final reads were refused or unreadable, so its copy is not verified ({unavailR.head?.getD ""})"
+          if !unavailR.isEmpty then return .fail s!"(d) availability, not data: {unavailR.length} of {r}'s final reads got an explicit error, so its copy is not verified ({unavailR.head?.getD ""})"
           if notLocal > 0 then return .fail s!"(d) {notLocal}/400 of {r}'s answers were not attributed to its LOCAL copy: no evidence the copy matches"
           if !containsSubstr rMap s!" 0={m2}." then return .fail s!"(d) {r}'s latest map does not name {m2} as master ({rMap})"
           let evEpoch := match evEnd with
@@ -2285,6 +2300,18 @@ def emptySourceSuite : TestSuite := {
           let newEvidence := idx (fun l => containsSubstr l "rebuild evidence recorded" && (newEpoch.map (containsSubstr l ·)).getD false)
           let firstActive := idx (fun l => containsSubstr l s!"node_key={r}." && containsSubstr l "old_state=prepare, new_state=active")
           IO.eprintln s!"# {r} held after its copy from {m}; {m} drained, {m2} promoted (epoch {newEpoch}); after the hold (line indices): stop/switch {stopOrSwitch}, evidence of the new epoch {newEvidence}, first prepare->active {firstActive}; rebuilt={rebuilt}; items {← c.currItems (← ip r)} vs {← c.currItems (← ip m2)}"
+          -- the timeline itself (CI 37438962871 printed only indices): which
+          -- map each validation / activation used and when the replica
+          -- accepted the map naming {m2}
+          let tl := lines.filter fun l =>
+            containsSubstr l "activation source check passed" || containsSubstr l "node activated (attempt" || containsSubstr l "activation STOPPED"
+              || containsSubstr l "activation deferred" || containsSubstr l "held by FLARE_TEST_ACTIVATION_HOLD_FILE"
+              || containsSubstr l "reconstruction source changed" || containsSubstr l "starting dump operation" || containsSubstr l "reconstruction via full dump completed"
+              || containsSubstr l "rebuild evidence recorded" || containsSubstr l "old_state=prepare, new_state=active"
+              || (containsSubstr l "node map accepted" && (containsSubstr l s!" 0={m}." || containsSubstr l s!" 0={m2}."))
+          let firstHold := ((log.splitOn "\n").filter (containsSubstr · "held by FLARE_TEST_ACTIVATION_HOLD_FILE")).head?.getD ""
+          let beforeHold := ((log.splitOn "\n").filter fun l => containsSubstr l "node map accepted" || containsSubstr l "activation source check passed").reverse.take 3 |>.reverse
+          IO.eprintln s!"# {r} first hold: {firstHold}\n# {r} last map/check lines of the window (for the versions in force): {String.intercalate " | " beforeHold}\n# {r} timeline after the last hold ({tl.length} line(s), first 60):\n{String.intercalate "\n" (tl.take 60)}"
           if stopOrSwitch.isNone then return .fail "the old copy's activation was neither stopped nor abandoned for the new source"
           if !rebuilt then return .fail s!"{r} was not rebuilt from the promoted master {m2}"
           if !activeNow then return .fail s!"{r} did not become Active again after its rebuild"
@@ -2835,7 +2862,7 @@ def clusterInitSuite : TestSuite := {
           let mut nOk := 0
           let mut nOkUntraced := 0
           let mut nRefused := 0
-          let mut nUnavail := 0
+          let mut masked : List String := []
           for (pod, marker, t, ans) in probeList do
             let tr := tracesAfterMarker ((traceLogs.lookup pod).getD []) marker
             for (k, a) in ans do
@@ -2845,20 +2872,23 @@ def clusterInitSuite : TestSuite := {
               let d := s!"{pod} at {t}: {k} -> {a}; decision {trk.1.getD "(none)"}; answer {trk.2.getD "(none)"}"
               if cls == "ok" then nOk := nOk + 1
               else if cls == "refused" then nRefused := nRefused + 1
-              else if cls == "unavailable" then nUnavail := nUnavail + 1
+              else if cls == "masked-miss" then masked := d :: masked
               else if cls == "wrong-local" then wrongLocal := d :: wrongLocal
               else if cls == "wrong-forwarded" then wrongFwd := d :: wrongFwd
               else if a == expected then nOkUntraced := nOkUntraced + 1
               else wrongUntraced := d :: wrongUntraced
-          IO.eprintln s!"# (1) during recovery (since {restoreAt}): {probeList.length} probe rounds observed, {← roundsUnobserved.get} not observed (connection/exchange incomplete). DATA: correct {nOk} (+{nOkUntraced} correct but untraced); WRONG answered from the node's own copy {wrongLocal.length}; wrong after forwarding {wrongFwd.length}; wrong and unattributable {wrongUntraced.length}. AVAILABILITY (not judged here): explicit refusals {nRefused}; misses the server recorded as unreadable {nUnavail}"
+          IO.eprintln s!"# (1) during recovery (since {restoreAt}): {probeList.length} probe rounds observed, {← roundsUnobserved.get} not observed (connection/exchange incomplete). DATA: correct {nOk} (+{nOkUntraced} correct but untraced); WRONG answered from the node's own copy {wrongLocal.length}; wrong after forwarding {wrongFwd.length}; wrong and unattributable {wrongUntraced.length}. MASKED MISSES (unreadable on the server, END to the client) {masked.length}. AVAILABILITY (reported, not judged here): explicit error replies {nRefused}; rounds not observed {← roundsUnobserved.get}"
           for d in (wrongLocal.reverse.take 20) do IO.eprintln s!"#   LOCAL wrong: {d}"
           for d in (wrongFwd.reverse.take 10) do IO.eprintln s!"#   forwarded wrong: {d}"
           for d in (wrongUntraced.reverse.take 10) do IO.eprintln s!"#   unattributable wrong: {d}"
+          for d in (masked.reverse.take 10) do IO.eprintln s!"#   masked miss: {d}"
           let mut fails : List String := []
           if !wrongLocal.isEmpty then
             fails := fails ++ [s!"(1) {wrongLocal.length} LOCAL answer(s) from an incomplete copy during recovery (first: {wrongLocal.getLast?.getD ""})"]
           if !wrongFwd.isEmpty then
             fails := fails ++ [s!"(1) {wrongFwd.length} wrong answer(s) during recovery from the node a read was forwarded to (first: {wrongFwd.getLast?.getD ""})"]
+          if !masked.isEmpty then
+            fails := fails ++ [s!"(1) MASKED MISS: {masked.length} answer(s) during recovery were END to the client although the server could not read the key (first: {masked.getLast?.getD ""})"]
           if !wrongUntraced.isEmpty then
             fails := fails ++ [s!"(1) {wrongUntraced.length} wrong answer(s) during recovery that cannot be attributed (no trace on the connection; first: {wrongUntraced.getLast?.getD ""})"]
           if probeList.isEmpty then

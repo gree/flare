@@ -416,6 +416,28 @@ Readings, with their limits:
    (needs instrumentation); value sizes other than 100 B; a production-like
    CPU/storage profile; tmpfs (production pf-dev) instead of a PVC.
 
+### 12.1 Drained re-run (CI 37392841830) — the baseline to use
+
+Harness fixed (profile-major, a sentinel must reach the replica before every
+run, drain time recorded). Raw data: `docs/reports/visbench-37392841830/`.
+Floor GET RTT p50/p99: flare 178/297 µs, Redis 149/334 µs.
+
+flare-legacy vs redis-aof, both repeats drained, 0 timeouts, worst repeat
+(visibility µs, p95 / p99):
+
+| load | flare-legacy | redis-aof | Δ p95 | Δ p99 | redis-mem (reference) |
+|---|---|---|---|---|---|
+| idle (1/300 ms) | 1123 / 1536 | 915 / 1513 | +208 | +23 | 626 / 1119 |
+| low 100/s | 977 / 1569 | 795 / 1726 | +182 | −157 | 528 / 870 |
+| normal 500/s | 865 / 1434 | 651 / 1265 | +214 | +169 | 491 / 838 |
+| peak 2000/s | 1.4 s / 1.6 s, backlog growing (rep 1) | 821 / 1854 | — capacity — | | 824 / 1905 |
+| 4000/s, 8000/s | 0 visible | p99 2.4 / 7.0 ms | — capacity — | | p99 2.0 / 8.0 ms |
+
+The flare FLOOR control backlogs at 2000/s again (p50 1.46 s, write-ack p99
+88 ms): the peak and saturation rows measure master capacity at 500m CPU, not
+replication. Write-ack p99 at normal load: flare 717 µs, Redis 787 µs.
+The hybrid arm is again INVALID (187,740 GETs reached the master).
+
 ## 13. Proposed numerical tolerances (FOR DECISION; nothing approved)
 
 You have not set tolerances. The following is a proposal to accept, change or

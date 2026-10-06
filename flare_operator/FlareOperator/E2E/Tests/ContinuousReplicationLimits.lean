@@ -2399,6 +2399,17 @@ def multiHoldSuite : TestSuite := {
           let synced ← waitForCondition "P1 replica following" 180 do
             return (← c.statStr s1Ip "repl_follow_state") == some "following"
           if !synced then return .fail "precondition: P1's replica not following"
+          -- PRECONDITION (CI 37392833616): the follower must HOLD P1 data
+          -- before the cut. The hold line lists data-bearing followers only;
+          -- an empty follower is (correctly) never crowned and never listed,
+          -- so with 'replica=0' the test could not tell a hold from nothing.
+          let base ← writeKeys multiHoldCfg.debugPod multiHoldCfg.«namespace» m1Ip multiHoldCfg.flarePort "mpbase" 40
+          let seeded ← waitForCondition "P1's follower holds P1's data before the cut" 180 do
+            let mi ← c.currItems m1Ip
+            let si ← c.currItems s1Ip
+            return mi > 0 && si == mi
+          if base != 40 || !seeded then
+            return .fail s!"precondition: P1's follower does not hold P1's data (stored {base}/40; master {← c.currItems m1Ip}, follower {← c.currItems s1Ip})"
           match ← cutForwards m1Ip s1Ip with
           | .error e => return .fail e
           | .ok () => pure ()

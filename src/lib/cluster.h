@@ -285,6 +285,11 @@ public:
 	int get_partition_size() { return this->_partition_size; };
 	int set_partition_size(int partition_size) { this->_partition_size = partition_size; return 0; };
 	int get_node_partition_map_size();
+	// Node key of the partition's master in the CURRENT map (active map, else
+	// the prepare map); "" when the partition has none. Read under the
+	// partition-map lock; a reconstruction re-reads it every attempt.
+	string get_partition_master_key(int partition);
+	string get_own_node_key() { return this->_node_key; }
 	int set_proxy_concurrency(int proxy_concurrency) { this->_proxy_concurrency = proxy_concurrency; return 0; };
 	int get_reconstruction_interval() { return this->_reconstruction_interval; };
 	int set_reconstruction_interval(int reconstruction_interval) { this->_reconstruction_interval = reconstruction_interval; return 0; };

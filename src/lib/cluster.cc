@@ -1678,6 +1678,18 @@ cluster::proxy_request cluster::post_proxy_write(op_proxy_write* op, bool sync) 
 	return proxy_request_complete;
 }
 
+string cluster::get_partition_master_key(int partition) {
+	string key = "";
+	pthread_rwlock_rdlock(&this->_mutex_node_partition_map);
+	if (this->_node_partition_map.count(partition) > 0) {
+		key = this->_node_partition_map[partition].master.node_key;
+	} else if (this->_node_partition_prepare_map.count(partition) > 0) {
+		key = this->_node_partition_prepare_map[partition].master.node_key;
+	}
+	pthread_rwlock_unlock(&this->_mutex_node_partition_map);
+	return key;
+}
+
 int cluster::get_node_partition_map_size() {
 	pthread_rwlock_rdlock(&this->_mutex_node_partition_map);
 	int partition_size = this->_node_partition_map.size();

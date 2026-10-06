@@ -49,8 +49,17 @@ protected:
 	cluster*						_cluster;
 	storage*						_storage;
 	shared_connection		_connection;
-	const string				_node_server_name;
-	const int						_node_server_port;
+	// The SOURCE: re-selected at the start of every attempt from the current
+	// map (a slave's source is its partition's master).
+	string							_node_server_name;
+	int									_node_server_port;
+	// This handler modified the local copy (truncate or a started dump) and
+	// has not activated: the copy is partial or belongs to the previous
+	// source's history.
+	bool								_copy_dirty;
+	// The next attempt must start from a clean copy (source changed after
+	// the copy was modified): never merge two histories.
+	bool								_force_clean;
 	int									_partition;
 	int									_partition_size;
 	cluster::role				_role;

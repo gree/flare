@@ -1611,7 +1611,7 @@ private def emptySourceCfg : ClusterConfig := {
   usePvc := true
   drainSeconds := 20
   flaredEnv := [("FLARE_TEST_DISABLE_SNAPSHOT_BOOTSTRAP", "1"), ("FLARE_TEST_DISABLE_WAL_RECONSTRUCTION", "1")]
-  flaredArgs := "--reconstruction-bwlimit 128"
+  flaredArgs := "--reconstruction-bwlimit 256"
   operatorEnv := [("FLARE_STATS_PROBE_INTERVAL_MS", "15000")]
 }
 
@@ -1700,6 +1700,7 @@ def emptySourceSuite : TestSuite := {
         if ip != ip2 then
           for _ in [0:2] do
             discard <| hostCmd "docker" (["exec", kindNode, "iptables", "-D", "FORWARD"] ++ ruleSpec ip ip2)
+    discard <| kubectl ["uncordon", kindNode]
     cleanupCluster emptySourceCfg
   onFailure := dumpClusterDiagnostics emptySourceCfg.«namespace» s!"app={emptySourceCfg.operatorName}"
   tests :=
@@ -1857,8 +1858,14 @@ def emptySourceSuite : TestSuite := {
           let completedFromOld := (log.splitOn "\n").any fun l => containsSubstr l "reconstruction via full dump completed" && containsSubstr l (m ++ ".")
           let evEnd ← c.evidence (← ip r)
           IO.eprintln s!"# {r} dumped from {m} first={fromOld}; {m} drained, {m2} promoted (epoch {oldEpoch} -> {newEpoch}); evidence seen before a completed dump {early}; recorded={recorded}; a dump from {m} completed={completedFromOld}; final evidence {evEnd}"
+          let switched := containsSubstr log "reconstruction source changed" || containsSubstr log "completed but the partition's master is now"
           if !fromOld then return .fail s!"precondition: the dump did not start from the master {m} ({startLine.trim})"
-          if completedFromOld then return .fail s!"precondition: the dump from {m} completed before the drain (not interrupted)"
+          -- The old master stays REACHABLE during its 20 s preStop drain: a
+          -- dump from it may complete. It must then be refused at completion
+          -- (re-check), never activated; either way the source is re-selected.
+          if completedFromOld && !containsSubstr log "completed but the partition's master is now" then
+            return .fail s!"a dump from the drained master {m} completed and was not refused at completion"
+          if !switched then return .fail "the reconstruction never re-selected its source (no 'source changed' / completion-refused line)"
           if !early.isEmpty then return .fail s!"evidence was visible before a dump completed: {early}"
           if !recorded then return .fail "no evidence was recorded after the rebuild from the new master"
           match evEnd with
@@ -1868,6 +1875,43 @@ def emptySourceSuite : TestSuite := {
             return .pass
           | _ => return .fail s!"no final evidence ({evEnd})"
         | _ => return .fail "precondition: one master and two slaves" },
+
+    { name := "reconstruction source re-selection, UNREACHABLE old master: while a replica dumps from the master, the master's flared is killed and another node promoted; the rebuild re-selects the new master (not the dead one), completes, and its evidence names the new master's epoch"
+      run := do
+        match ← c.allInSync 400 600 with
+        | none => return .fail "precondition: the copies did not converge on 400 keys"
+        | some (m, a, b) =>
+          let oldEpoch ← c.statStr (← ip m) "rocksdb_source_epoch"
+          let r := a
+          match ← c.killFlaredIn r with
+          | .error e => return .fail s!"could not restart {r}: {e}"
+          | .ok _ => pure ()
+          if !(← c.waitDumpStart r 180) then return .fail s!"{r} did not start a full dump after its restart"
+          -- the source becomes UNREACHABLE: the node is cordoned and the
+          -- master pod force-deleted, so its replacement stays Pending until
+          -- a successor is promoted
+          match ← kubectl ["cordon", kindNode] with
+          | .error e => return .fail s!"could not cordon {kindNode}: {e}"
+          | .ok _ => pure ()
+          discard <| kubectl ["delete", "pod", m, "-n", ns, "--grace-period=0", "--force", "--wait=false"]
+          let promoted ← c.newMasterAfter m 240
+          discard <| kubectl ["uncordon", kindNode]
+          let some m2 := promoted | return .fail s!"no successor was promoted after {m} became unreachable"
+          if m2 == r then return .fail s!"precondition: the rebuilding replica {r} itself was promoted"
+          let newEpoch ← c.statStr (← ip m2) "rocksdb_source_epoch"
+          let (early, recorded) ← c.noEvidenceUntilRecorded r (← ip r) 600
+          let log ← c.flaredLog r
+          let switched := containsSubstr log "reconstruction source changed" && containsSubstr log (m2 ++ ".")
+          let evEnd ← c.evidence (← ip r)
+          IO.eprintln s!"# {r} rebuilding from {m}; {m} killed, {m2} promoted (epoch {oldEpoch} -> {newEpoch}); source re-selected to {m2}={switched}; evidence before completion {early}; recorded={recorded}; final {evEnd}; other slave {b}"
+          if !switched then return .fail s!"the reconstruction did not re-select {m2} as its source"
+          if !early.isEmpty then return .fail s!"evidence was visible before a dump completed: {early}"
+          if !recorded then return .fail "no evidence was recorded after the rebuild from the new master"
+          match evEnd with
+          | some (_, some e) =>
+            if some e != newEpoch then return .fail s!"the evidence {e} is not the new master's epoch {newEpoch}"
+            return .pass
+          | _ => return .fail s!"no final evidence ({evEnd})" },
 
     { name := "SAF-08 same master_id, different history: the master is drained and a copy promoted (new epoch); its keys are then all deleted while a replica whose evidence names the EARLIER epoch misses them — the repair DEFERS and the replica keeps every key (the rule cannot prove the emptiness legitimate, even though here it was)"
       run := do

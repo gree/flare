@@ -56,6 +56,8 @@ handler_reconstruction::handler_reconstruction(shared_thread t, cluster* cl, sto
 		_storage(st),
 		_node_server_name(node_server_name),
 		_node_server_port(node_server_port),
+		_copy_dirty(false),
+		_force_clean(false),
 		_partition(partition),
 		_partition_size(partition_size),
 		_role(r),
@@ -96,7 +98,38 @@ int handler_reconstruction::run() {
 	char source[BUFSIZ];
 	snprintf(source, sizeof(source), "%s:%d", this->_node_server_name.c_str(), this->_node_server_port);
 	for (int attempt = 0; ; attempt++) {
-		result = this->_run_once();
+		// RE-SELECT THE SOURCE every attempt (a slave's source is its
+		// partition's master in the CURRENT map). A handler that kept the
+		// source it was created with retried a drained ex-master for up to
+		// ~30 min and could dump from it after it came back as a non-master
+		// (CI 37386580971, empty-source test 4).
+		if (this->_role == cluster::role_slave) {
+			const string cur = this->_cluster->get_partition_master_key(this->_partition);
+			const string was = this->_cluster->to_node_key(this->_node_server_name, this->_node_server_port);
+			if (cur.empty()) {
+				log_notice("reconstruction attempt %d: partition %d has no master in the current map -> waiting (source unknown, nothing copied)", attempt + 1, this->_partition);
+				result = -1;
+			} else if (cur == this->_cluster->get_own_node_key()) {
+				log_notice("reconstruction abandoned: this node is now the master of partition %d (the role change starts what it needs)", this->_partition);
+				return -1;
+			} else {
+				if (cur != was) {
+					string host;
+					int port = 0;
+					this->_cluster->from_node_key(cur, host, port);
+					log_warning("reconstruction source changed: %s -> %s (attempt %d); any partial copy from the previous source is discarded before the new one is copied", was.c_str(), cur.c_str(), attempt + 1);
+					this->_node_server_name = host;
+					this->_node_server_port = port;
+					snprintf(source, sizeof(source), "%s:%d", host.c_str(), port);
+					if (this->_copy_dirty) {
+						this->_force_clean = true;
+					}
+				}
+				result = this->_run_once();
+			}
+		} else {
+			result = this->_run_once();
+		}
 		if (result == 0) {
 			if (stats_object != NULL) {
 				stats_object->reconstruction_succeeded_from(this->_reconstruction_id, string(source));
@@ -266,7 +299,7 @@ int handler_reconstruction::_run_once() {
 				log_notice("truncate skipped (master reconstruction — local data may be the last copy)", 0);
 			} else if (!peer_reachable) {
 				log_notice("truncate skipped (source unreachable)", 0);
-			} else if (source_not_newer) {
+			} else if (source_not_newer && !this->_force_clean) {
 				log_warning("truncate skipped: source is not newer than local data (source latest_lsn=%llu, local last_lsn=%llu, same_lineage=%d) — refusing to overwrite our copy with an emptier/staler master; merging instead", (unsigned long long)peer_latest_lsn, (unsigned long long)local_lsn, same_lineage ? 1 : 0);
 			} else {
 				// Exactly the truncate+full-dump conditions (slave role, source
@@ -315,6 +348,8 @@ int handler_reconstruction::_run_once() {
 						sp->set_bwlimit(this->_reconstruction_bwlimit);
 						if (sp->run_client() == 0) {
 							via_snapshot = true;
+							this->_copy_dirty = true;
+							this->_force_clean = false;
 							log_notice("snapshot bootstrap succeeded; skipping full dump (cursor and lineage seeded by the swap)", 0);
 						} else {
 							log_warning("snapshot bootstrap failed -> falling back to truncate+full-dump", 0);
@@ -339,6 +374,8 @@ int handler_reconstruction::_run_once() {
 						return -1;
 					}
 					truncated_for_dump = true;
+					this->_copy_dirty = true;
+					this->_force_clean = false;
 				}
 			}
 		}
@@ -357,6 +394,7 @@ int handler_reconstruction::_run_once() {
 			c = cd;
 			this->_connection = c;
 		}
+		this->_copy_dirty = true;
 		op_dump* p = new op_dump(c, this->_cluster, this->_storage);
 
 		p->set_thread(this->_thread);
@@ -401,6 +439,19 @@ int handler_reconstruction::_run_once() {
 			} else {
 				log_info("peer did not advertise master_id; skipping lineage adoption", 0);
 			}
+		}
+	}
+
+	// The source must STILL be this partition's master at completion: a copy
+	// finished from an ex-master must not be activated (the next attempt
+	// re-selects and starts clean).
+	if (this->_role == cluster::role_slave) {
+		const string cur = this->_cluster->get_partition_master_key(this->_partition);
+		const string src = this->_cluster->to_node_key(this->_node_server_name, this->_node_server_port);
+		if (cur != src) {
+			log_warning("reconstruction from %s completed but the partition's master is now %s -> not activating; retrying from the current master with a clean copy", src.c_str(), cur.empty() ? "(none)" : cur.c_str());
+			this->_force_clean = true;
+			return -1;
 		}
 	}
 
@@ -567,6 +618,13 @@ bool handler_reconstruction::_try_wal_reconstruction(shared_connection c,
 			log_info("master does not support WAL replication -> full dump", 0);
 			return false;
 		}
+	}
+
+	// The source changed after this handler modified the copy: never resume
+	// a partial copy of one history from another source's WAL.
+	if (this->_force_clean) {
+		log_notice("WAL reconstruction skipped: the source changed after this copy was modified -> clean full rebuild", 0);
+		return false;
 	}
 
 	// TEST SEAM (E2E only): force every rebuild of an existing copy through

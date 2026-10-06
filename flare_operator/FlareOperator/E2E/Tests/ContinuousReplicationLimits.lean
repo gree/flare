@@ -2760,15 +2760,32 @@ def r3SourceChangeSuite : TestSuite := {
           let eligible1 ← c.statStr rIp "repl_read_source_eligible"
           let srcState1 ← c.statStr rIp "repl_read_source_state"
           let t0 ← IO.monoMsNow
-          let during ← c.getRound rIp "es_mark_r3_during" (kv.map (·.1)) (waitSec := 90)
+          -- 2 keys: each forward to the unreachable master takes ~36 s to
+          -- fail (CI 37485235664), 30 keys did not fit any client window
+          let duringKeys := (kv.take 2).map (·.1)
+          let during ← c.getRound rIp "es_mark_r3_during" duringKeys (waitSec := 150)
           let duringMs := (← IO.monoMsNow) - t0
           del rIp m2Ip
           -- 5. m2 observable again: another history (promotion epoch) ->
           --    rebuilt, re-bound to m2, then local again
-          let rebound ← waitForCondition s!"{r} is rebuilt and bound to {m2}" 600 do
-            let st ← c.statStr (← ip r) "repl_read_source_state"
-            let src ← c.statStr (← ip r) "repl_read_source"
-            return st == some "eligible" && (src.map (containsSubstr · s!"{m2}.")).getD false
+          -- re-bound AND serving: the binding is made at the source check,
+          -- BEFORE activation (CI 37493288883 read it while still Prepare), so
+          -- also require the replica's own map Active and a GET answered from
+          -- its own copy
+          let rebound ← waitForCondition s!"{r} is rebuilt, bound to {m2}, Active in its own map and answering locally" 600 do
+            let rIpNow ← ip r
+            let st ← c.statStr rIpNow "repl_read_source_state"
+            let src ← c.statStr rIpNow "repl_read_source"
+            let own ← c.readState rIpNow r
+            if !(st == some "eligible" && (src.map (containsSubstr · s!"{m2}.")).getD false && containsSubstr own "own[role slave state active") then
+              return false
+            let mk := s!"es_mark_r3_probe_{← IO.monoMsNow}"
+            let t0 ← utcNow
+            match ← c.getRound rIpNow mk ["es_r3_0"] with
+            | some [(_, a)] =>
+              let t := ((tracesAfterMarker (readTraces (← c.flaredLogAllSince r t0)) mk).lookup "es_r3_0").getD {}
+              return a == "=r3val_0" && answeredLocally t
+            | _ => return false
           let rIp2 ← ip r
           IO.sleep 1100
           let afterAt ← utcNow
@@ -2808,6 +2825,7 @@ def r3SourceChangeSuite : TestSuite := {
           if !durNotError.isEmpty then return .fail s!"{durNotError.length} read(s) during re-validation (new master unreachable) were not an explicit error: {durNotError.head?.map (fun (k, a, _) => s!"{k} -> {a}")}"
           if iRebuild.isNone then return .fail s!"the new master's other history was never judged (no NEEDS REBUILD line)"
           if !rebound then return .fail s!"{r} was not rebuilt and re-bound to {m2}"
+          if dur.length != duringKeys.length then return .fail s!"the reads during re-validation were incomplete ({dur.length}/{duringKeys.length})"
           if after.isNone || aft.length != 30 then return .fail s!"the reads after re-binding were not observed ({aft.length}/30)"
           if !aftBad.isEmpty then return .fail s!"{aftBad.length} read(s) after re-binding were not correct or not local: {aftBad.head?.map (fun (k, a, _) => s!"{k} -> {a}")}"
           return .pass }

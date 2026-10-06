@@ -164,18 +164,29 @@ int op_get::_run_server() {
 	// primary store a miss means "the key does not exist", so with the
 	// option on the whole response is SERVER_ERROR instead; a real miss
 	// stays a miss.
-	if (this->_cluster->is_read_unavailable_error()) {
-		bool unavailable = unavailable_keys > 0;
+	// R3: a forward made because this node's copy is not eligible for its
+	// source (strict) is an explicit error when it fails, whatever the
+	// option says: the copy must not stand in for the master, and a miss
+	// would tell the client the key is absent.
+	{
+		const bool option = this->_cluster->is_read_unavailable_error();
+		bool unavailable = option && unavailable_keys > 0;
+		bool strict_failed = false;
 		for (map<string, shared_queue_proxy_read>::iterator qi = q_map.begin(); qi != q_map.end(); qi++) {
+			if (!option && !qi->second->is_strict()) {
+				continue;
+			}
 			qi->second->sync();
 			if (!qi->second->is_success()) {
 				unavailable = true;
+				strict_failed = strict_failed || qi->second->is_strict();
 			}
 		}
 		if (unavailable) {
-			log_warning("get could not be served (%d local key(s) unreadable or a forward failed) -> SERVER_ERROR (read-unavailable-error)", unavailable_keys);
+			log_warning("get could not be served (%d local key(s) unreadable or a forward failed%s) -> SERVER_ERROR (%s)", unavailable_keys,
+				strict_failed ? ", incl. a forward for a non-eligible copy" : "", option ? "read-unavailable-error" : "source not verified");
 			for (list<storage::entry>::iterator it = this->_entry_list.begin(); it != this->_entry_list.end(); it++) {
-				cluster::trace_read_result(this, it->key, "refused", "read_unavailable_error");
+				cluster::trace_read_result(this, it->key, "refused", strict_failed && !option ? "source_unverified_forward_failed" : "read_unavailable_error");
 			}
 			return this->_send_result(result_server_error, "read unavailable");
 		}

@@ -50,6 +50,7 @@
 #include "thread_pool.h"
 #include "key_resolver.h"
 #include "coordinator.h"
+#include "source_eligibility.h"
 
 using namespace std;
 
@@ -219,6 +220,16 @@ protected:
 	int										_wal_follow_poll_interval_usec;
 	int										_wal_follow_batch_delay_usec;
 	shared_thread							_wal_follower_thread;
+	// R3: the source this node's copy is eligible for (source_eligibility.h).
+	// Lock order: the map locks (when held) BEFORE _mutex_read_source; the
+	// binding lock is a leaf. Changed together with the map that invalidates
+	// it, so no read decided under the new map can see the old eligibility.
+	source_binding							_read_source;
+	pthread_mutex_t							_mutex_read_source;
+	pthread_cond_t							_cond_read_source;
+	bool									_read_source_wake;
+	shared_thread							_source_validator_thread;
+	int										_source_check_interval_ms;
 	string									_wal_follower_source;	// node key being followed
 	replication						_replication_type;
 	uint32_t							_proxy_prior_netmask;
@@ -295,6 +306,23 @@ public:
 	// partition-map lock; a reconstruction re-reads it every attempt.
 	string get_partition_master_key(int partition);
 	string get_own_node_key() { return this->_node_key; }
+	// ---- R3: source eligibility of this node's copy ----------------------
+	source_binding get_read_source();
+	// a completed, validated copy (reconstruction activated it)
+	void bind_read_source(const string& source, const string& master_id, const string& source_epoch, const string& reason);
+	// no validated copy any more (a reconstruction started, or the role changed)
+	void reset_read_source(const string& reason);
+	// the validator's decision, applied only if the binding is still the one
+	// it judged (generation) and `current` is still the partition's master
+	bool apply_source_decision(unsigned long long generation, const string& current, source_decision d, const string& reason);
+	// own (role, state, partition) from the current map
+	bool get_own_assignment(role& r, state& st, int& partition);
+	// validator pacing: sleep until woken or `timeout_ms`
+	void wait_source_check(int timeout_ms);
+	void wake_source_validator();
+	int get_source_check_interval_ms() { return this->_source_check_interval_ms; }
+	int set_source_check_interval_ms(int ms) { this->_source_check_interval_ms = ms > 0 ? ms : 2000; return 0; }
+	int start_source_validator();
 	int set_proxy_concurrency(int proxy_concurrency) { this->_proxy_concurrency = proxy_concurrency; return 0; };
 	int get_reconstruction_interval() { return this->_reconstruction_interval; };
 	int set_reconstruction_interval(int reconstruction_interval) { this->_reconstruction_interval = reconstruction_interval; return 0; };
@@ -465,6 +493,8 @@ protected:
 	// current maps. Assumes node_map and node_partition_map are locked by the
 	// caller (it only reads them).
 	int _reconcile_wal_follower_locked();
+	// R3: called with the map write locks held, right after a map is installed
+	void _check_read_source_locked(uint64_t node_map_version);
 	bool _is_local_proxy_request(op_proxy_write* op);
 	string _get_partition_key(string key);
 	int _get_proxy_thread(string node_key, int key_hash, shared_thread& t);

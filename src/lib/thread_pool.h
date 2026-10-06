@@ -55,6 +55,7 @@ public:
 		thread_type_metrics,
 		thread_type_storage_check,
 		thread_type_wal_follower,		// SAF-10b: continuous replication follower
+		thread_type_source_validator,	// R3: re-validates the read source of a slave's copy
 #ifdef ENABLE_MYSQL_REPLICATION
 		thread_type_mysql_replication,
 #endif

@@ -111,6 +111,10 @@ int handler_reconstruction::run() {
 	// forever. Retry here with backoff; every attempt re-resolves and
 	// reconnects from scratch.
 	int result = -1;
+	// R3: a new copy is being taken; no previous validation carries over.
+	if (this->_role == cluster::role_slave) {
+		this->_cluster->reset_read_source("reconstruction started (partition " + boost::lexical_cast<string>(this->_partition) + ")");
+	}
 	// One request = one handler = one reconstruction id; retries inside do
 	// not start a new one. The completion record (id, state, source) is what
 	// a controller reads: cumulative counters cannot tell a failed-then-
@@ -657,10 +661,12 @@ int handler_reconstruction::_activate_with_retry(bool skip_ready_state) {
 		const source_check sc = this->_check_source(why);
 		if (sc == source_changed) {
 			log_warning("activation STOPPED before attempt %d: %s -> the copy is not activated; retrying the reconstruction from the current master with a clean copy", i + 1, why.c_str());
+			if (this->_role == cluster::role_slave) this->_cluster->reset_read_source("activation stopped: " + why);
 			return -2;
 		}
 		if (sc == source_copy_unverified) {
 			log_warning("activation STOPPED before attempt %d: %s -> taking the copy again", i + 1, why.c_str());
+			if (this->_role == cluster::role_slave) this->_cluster->reset_read_source("activation stopped: " + why);
 			return -3;
 		}
 		if (sc == source_unknown) {
@@ -682,6 +688,16 @@ int handler_reconstruction::_activate_with_retry(bool skip_ready_state) {
 			i + 1, this->_cluster->to_node_key(this->_node_server_name, this->_node_server_port).c_str(),
 			(unsigned long long)map_version, (unsigned long long)this->_cluster->get_node_map_version(),
 			this->_attempt_master_id.c_str(), this->_probe_source_epoch.c_str());
+		// R3: bind the copy to the source it was just checked against, BEFORE
+		// asking for activation: harmless while the map still says Prepare
+		// (a Prepare node never answers locally), and it covers an
+		// activation the controller performs itself after this handler gave
+		// up. bind_read_source re-checks against the map in force.
+		if (this->_role == cluster::role_slave) {
+			this->_cluster->bind_read_source(this->_cluster->to_node_key(this->_node_server_name, this->_node_server_port),
+				this->_attempt_master_id, this->_epoch_supported ? this->_probe_source_epoch : string(""),
+				"the copy passed its source check (activation attempt " + boost::lexical_cast<string>(i + 1) + ")");
+		}
 		// TEST SEAM (E2E only): while the named file exists, an activation
 		// attempt fails as if the index server had refused it.
 		const char* hold = getenv("FLARE_TEST_ACTIVATION_HOLD_FILE");
@@ -691,9 +707,9 @@ int handler_reconstruction::_activate_with_retry(bool skip_ready_state) {
 		} else {
 			rc = this->_cluster->activate_node(skip_ready_state);
 			if (rc == 0) {
+				const string src_key = this->_cluster->to_node_key(this->_node_server_name, this->_node_server_port);
 				log_notice("node activated (attempt %d) on the copy from %s (map version now %llu)",
-					i + 1, this->_cluster->to_node_key(this->_node_server_name, this->_node_server_port).c_str(),
-					(unsigned long long)this->_cluster->get_node_map_version());
+					i + 1, src_key.c_str(), (unsigned long long)this->_cluster->get_node_map_version());
 				return 0;
 			}
 			log_warning("node activation failed (attempt %d) -> retrying in 2 seconds", i + 1);

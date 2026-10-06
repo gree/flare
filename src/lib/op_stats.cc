@@ -228,6 +228,17 @@ int op_stats::_send_stats(thread_pool* req_tp, thread_pool* other_tp, storage* s
 	_send_stat("threads"							, stats_object->get_threads(req_tp, other_tp));
 	_send_stat("pool_threads" 				, stats_object->get_pool_threads(req_tp, other_tp));
 	_send_stat("node_map_version"		, cl->get_node_map_version());
+	{
+		// R3: the source this node's copy is eligible for. eligible=0 means
+		// local reads are withdrawn and the node must not be promoted until
+		// it is re-validated; needs_rebuild asks the controller for a rebuild.
+		const source_binding rs = cl->get_read_source();
+		_send_stat("repl_read_source_eligible"       , rs.is_eligible() ? 1 : 0);
+		_send_stat("repl_read_source_state"          , string(source_binding::state_name(rs.st)));
+		_send_stat("repl_read_source"                , rs.source);
+		_send_stat("repl_read_source_epoch"          , rs.source_epoch);
+		_send_stat("repl_read_source_reason"         , rs.reason);
+	}
 
 	// Data-dir filesystem usage (statvfs). On tmpfs clusters this is the RAM
 	// the dataset occupies — the quantity that drives the pod's memory limit —

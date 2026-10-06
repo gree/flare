@@ -266,6 +266,9 @@ int flared::startup(int argc, char **argv) {
 		return -1;
 	}
 #endif
+	// R3: re-validates the read source of this node's copy (idle unless the
+	// node is a slave with a validated copy)
+	this->_cluster->start_source_validator();
 
 	storage::type t = storage::type_tch;
 	storage::type_cast(ini_option_object().get_storage_type(), t);

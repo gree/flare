@@ -1,0 +1,203 @@
+{
+ "harness": "visibility_bench.py",
+ "measurement": "end-to-end visibility: write SEND to first replica observation, one monotonic clock; NOT commit-to-apply",
+ "label": "flare-floor",
+ "proto": "memcache",
+ "write": "10.244.0.10:12121",
+ "read": "10.244.0.10:12121",
+ "value_size": 100,
+ "writers": 4,
+ "observers": 4,
+ "timeout_s": 5.0,
+ "env": {
+  "python": "3.12.15",
+  "host": "vis-harness",
+  "cpus": 4
+ },
+ "floor_get_rtt": {
+  "n": 500,
+  "p50_us": 152.672,
+  "p95_us": 226.821,
+  "p99_us": 273.48127999999997,
+  "max_us": 304.704,
+  "mean_us": 156.13973000000001
+ },
+ "runs": [
+  {
+   "profile": {
+    "kind": "idle",
+    "count": 100,
+    "gap": 0.3,
+    "name": "idle",
+    "repeat": 0
+   },
+   "markers_total": 100,
+   "markers_measured": 100,
+   "visible": 100,
+   "timeouts": 0,
+   "unobserved": 0,
+   "errors": {
+    "write": 0,
+    "read": 0,
+    "set_not_stored": 0
+   },
+   "achieved_write_rate": 3.3332953118815056,
+   "write_ack": {
+    "n": 100,
+    "p50_us": 644.8095000000001,
+    "p95_us": 818.5658,
+    "p99_us": 1045.2066000000002,
+    "max_us": 1087.737,
+    "mean_us": 658.60753
+   },
+   "visibility_upper": {
+    "n": 100,
+    "p50_us": 645.6145,
+    "p95_us": 803.5134499999997,
+    "p99_us": 1010.3076400000016,
+    "max_us": 1317.37,
+    "mean_us": 665.53779
+   },
+   "visibility_lower": {
+    "n": 100,
+    "p50_us": 0.0,
+    "p95_us": 148.33364999999998,
+    "p99_us": 203.18849000000137,
+    "max_us": 470.636,
+    "mean_us": 24.88091
+   },
+   "probes_per_sample": {
+    "mean": 1.17,
+    "max": 3
+   },
+   "scheduler_lag": {
+    "n": 100,
+    "p50_us": 717.2315000000001,
+    "p95_us": 1773.4493499999999,
+    "p99_us": 2037.4379000000001,
+    "max_us": 2039.111,
+    "mean_us": 767.05814
+   },
+   "backlog_max": 0,
+   "backlog_growing": false
+  },
+  {
+   "profile": {
+    "kind": "rate",
+    "rate": 500,
+    "duration": 20,
+    "warmup": 5,
+    "name": "normal",
+    "repeat": 0
+   },
+   "markers_total": 12500,
+   "markers_measured": 10000,
+   "visible": 10000,
+   "timeouts": 0,
+   "unobserved": 0,
+   "errors": {
+    "write": 0,
+    "read": 0,
+    "set_not_stored": 0
+   },
+   "achieved_write_rate": 500.00787936209053,
+   "write_ack": {
+    "n": 10000,
+    "p50_us": 350.3795,
+    "p95_us": 452.62,
+    "p99_us": 662.1307100000001,
+    "max_us": 2433.521,
+    "mean_us": 363.5716847
+   },
+   "visibility_upper": {
+    "n": 10000,
+    "p50_us": 332.8265,
+    "p95_us": 485.4045,
+    "p99_us": 884.66218,
+    "max_us": 2612.869,
+    "mean_us": 355.81953169999997
+   },
+   "visibility_lower": {
+    "n": 10000,
+    "p50_us": 0.0,
+    "p95_us": 0.0,
+    "p99_us": 78.15790000000001,
+    "max_us": 1772.227,
+    "mean_us": 2.9103044999999996
+   },
+   "probes_per_sample": {
+    "mean": 1.0262,
+    "max": 10
+   },
+   "scheduler_lag": {
+    "n": 12500,
+    "p50_us": 583.5155,
+    "p95_us": 1063.6803,
+    "p99_us": 1095.7377000000001,
+    "max_us": 2123.871,
+    "mean_us": 579.99028672
+   },
+   "backlog_max": 1,
+   "backlog_growing": false
+  },
+  {
+   "profile": {
+    "kind": "rate",
+    "rate": 2000,
+    "duration": 20,
+    "warmup": 5,
+    "name": "peak",
+    "repeat": 0
+   },
+   "markers_total": 50000,
+   "markers_measured": 40000,
+   "visible": 40000,
+   "timeouts": 0,
+   "unobserved": 0,
+   "errors": {
+    "write": 0,
+    "read": 0,
+    "set_not_stored": 0
+   },
+   "achieved_write_rate": 1999.9830627200015,
+   "write_ack": {
+    "n": 40000,
+    "p50_us": 26121.6785,
+    "p95_us": 65246.782300000006,
+    "p99_us": 75757.49002000001,
+    "max_us": 123372.739,
+    "mean_us": 28522.592263274997
+   },
+   "visibility_upper": {
+    "n": 40000,
+    "p50_us": 1950770.379,
+    "p95_us": 3468817.6237,
+    "p99_us": 3816722.2168400004,
+    "max_us": 3889601.62,
+    "mean_us": 1996225.9944257499
+   },
+   "visibility_lower": {
+    "n": 40000,
+    "p50_us": 0.0,
+    "p95_us": 0.0,
+    "p99_us": 0.0,
+    "max_us": 0.0,
+    "mean_us": 0.0
+   },
+   "probes_per_sample": {
+    "mean": 1.0,
+    "max": 1
+   },
+   "scheduler_lag": {
+    "n": 50000,
+    "p50_us": 436.337,
+    "p95_us": 1022.0201,
+    "p99_us": 1093.9720399999999,
+    "max_us": 4290.816,
+    "mean_us": 470.35626751999996
+   },
+   "backlog_max": 6552,
+   "backlog_growing": true
+  }
+ ]
+}

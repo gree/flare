@@ -51,14 +51,16 @@ def main():
         fl = a.get("floor_get_rtt", {})
         print("| %s | %s / %s | %s |" % (k, f(fl.get("p50_us")), f(fl.get("p99_us")), a["validity"].replace("|", "/")))
     print("\n## Results per profile and repeat\n")
-    print("| arm | profile | rep | measured | visible | timeouts | vis p50 | vis p95 | vis p99 | vis max | vis-lower p99 | ack p99 | achieved/s | sched-lag p99 | backlog max | growing |")
-    print("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+    print("| arm | profile | rep | drained before (ms) | measured | visible | timeouts | vis p50 | vis p95 | vis p99 | vis max | vis-lower p99 | ack p99 | achieved/s | sched-lag p99 | backlog max | growing |")
+    print("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
     for k, a in arms.items():
         for name, runs in by_profile(a).items():
             for r in runs:
                 v = r["visibility_upper"]
-                print("| %s | %s | %d | %d | %d | %d | %s | %s | %s | %s | %s | %s | %s | %s | %d | %s |" % (
-                    k, name, r["profile"].get("repeat", 0), r["markers_measured"], r["visible"], r["timeouts"],
+                dr = r.get("pre_run_drain_us")
+                drs = "-" if dr is None else ("%.0f%s" % (dr / 1000.0, "" if r.get("pre_run_drained", True) else " NOT DRAINED"))
+                print("| %s | %s | %d | %s | %d | %d | %d | %s | %s | %s | %s | %s | %s | %s | %s | %d | %s |" % (
+                    k, name, r["profile"].get("repeat", 0), drs, r["markers_measured"], r["visible"], r["timeouts"],
                     f(v["p50_us"]), f(v["p95_us"]), f(v["p99_us"]), f(v["max_us"]), f(r["visibility_lower"]["p99_us"]),
                     f(r["write_ack"]["p99_us"]), f(r["achieved_write_rate"]), f(r["scheduler_lag"]["p99_us"]),
                     r["backlog_max"], r["backlog_growing"]))

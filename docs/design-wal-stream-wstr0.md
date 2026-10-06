@@ -368,3 +368,79 @@ Proposed thresholds for CI acceptance (relative, to be confirmed):
    must know per recipient.
 5. Who provides production targets for §9, and may CI run the
    WAL-only+poll arm (it exists only to isolate the transport)?
+
+## 12. Baseline measurement, first run (CI 37386599657, 2026-10-06)
+
+Harness: `bench/visibility/` (README records why the Redis arms are not
+equivalent durability profiles). Raw JSON, validity records and the full
+report: `docs/reports/visbench-37386599657/`. One kind node, 500m CPU /
+512Mi per server pod, 100-byte values, 4 writers, 4 observers, open-loop.
+Visibility = write SEND to first replica observation (upper bound of the
+probe window); NOT commit-to-apply. Relative only; no production claim.
+
+Floor (write and read the same node, GET RTT p50/p99): flare 153/273 µs,
+Redis 151/260 µs. Differences below ~0.3 ms are inside the resolution.
+
+Valid arms, worst repeat, visibility µs (p50 / p95 / p99), timeouts:
+
+| load | redis-aof | redis-mem | flare-legacy (production default) |
+|---|---|---|---|
+| idle (1 write / 300 ms) | 699 / 1205 / 2430, 0 | 510 / 766 / 958, 0 | 855 / 1081 / 1213, 0 (rep 0); **rep 1: 100/100 timeouts** |
+| low 100/s | 368 / 666 / 1419, 0 | 339 / 649 / 1024, 0 | 569 / 975 / 1668, 0 (rep 0); **rep 1: 1221/2000 timeouts** |
+| normal 500/s | 294 / 615 / 1270, 0 | 260 / 518 / 818, 0 | 513 / 834 / 1503, 0 and 494 / 770 / 1457, 0 |
+| peak 2000/s | 450 / 1188 / 2580, 0 | 423 / 764 / 2231, 0 | 28 ms / 66 ms / 83 ms (rep 0); 0.7 s / 1.7 s / 1.9 s, backlog growing (rep 1) |
+| burst 2000 at once | 76 / 100 / 102 ms | 59 / 95 / 96 ms | 1.1 / 1.4 / 1.4 s |
+| 4000/s, 8000/s | p99 2.4 ms / 13.6 ms, 0 timeouts | p99 2.0 / 8.2 ms | **0 visible** (all timeouts), backlog growing |
+
+Readings, with their limits:
+
+1. **At idle–normal load, flare legacy is close to Redis**: normal p95 +0.2 ms,
+   p99 +0.2–0.7 ms against redis-aof. This is near the measurement resolution.
+2. **flare saturates far below Redis here.** The flare FLOOR control (write
+   and read the master, no replication) already backlogs at 2000/s (p50 1.95 s,
+   write-ack p99 76 ms), while Redis sustains 8000/s. At peak and above,
+   flare's numbers measure master capacity at 500m CPU, not replication. This
+   is a capacity finding for review, not a replication-latency one.
+3. **Contaminated repeats:** repeat 1 ran after repeat 0's saturation profiles
+   and inherited their forwarding backlog (legacy idle/low rep 1 timeouts).
+   The harness now runs repeats per profile and drains (a sentinel must be
+   visible on the replica) before every run, recording the drain time.
+4. **The hybrid arm (forwarding + WAL polling) is INVALID** as a replica-local
+   measurement: 174,495 of its GETs reached the master. With follow on,
+   flared's local read guard (`follow_allows_local_read`: applied ≥ source
+   head and an observation ≤ 5 s old) forwards most replica reads to the
+   master. Measuring hybrid replica-local visibility needs a test-only local
+   inspection path. This is also a product observation: with follow on, a
+   replica under steady writes serves few reads locally.
+5. Not yet measured: resource use (CPU/RSS/threads) per arm; commit-to-apply
+   (needs instrumentation); value sizes other than 100 B; a production-like
+   CPU/storage profile; tmpfs (production pf-dev) instead of a PVC.
+
+## 13. Proposed numerical tolerances (FOR DECISION; nothing approved)
+
+You have not set tolerances. The following is a proposal to accept, change or
+reject. It is not a criterion anyone has agreed.
+
+- **Where to compare:** only at loads where NEITHER arm's floor control shows
+  backlog growth in the same environment. Points where a floor backlogs are
+  reported as a capacity comparison, separately.
+- **Visibility vs `redis-aof`, same run, worst repeat per load:**
+  - p95 ≤ Redis p95 + **1.0 ms**;
+  - p99 ≤ Redis p99 + **2.0 ms**;
+  - zero timeouts; no backlog growth.
+
+  Absolute deltas rather than ratios: at sub-millisecond baselines a ratio
+  amplifies noise (a 0.2 ms floor difference is a 1.4× "ratio").
+- **Not worse than today:** WAL-only p95/p99 ≤ flare-legacy's at the same load
+  + the same margins. Removing forwarding must not make visibility worse than
+  the production default.
+- **Write path:** client write-ack p99 within **+10 %** of legacy at the same
+  load (so a slower master cannot make replication look faster).
+- **Significance:** differences under 2× the floor RTT p50 (~0.3 ms) are
+  reported as "not distinguishable". At least 2 drained repeats per point;
+  the WORST repeat counts.
+- **Capacity (separate decision):** the highest offered rate without backlog
+  growth, per arm, in the same environment. A target needs the production
+  write rate and burst, which are not known.
+- **Production gate:** CI kind numbers cannot approve production; the same
+  criteria would be re-run on production-like hardware with your targets.

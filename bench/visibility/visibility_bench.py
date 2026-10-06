@@ -328,6 +328,28 @@ async def run_profile(args, profile):
     }
 
 
+async def drain(args, limit_s=180.0):
+    """Write a unique sentinel and wait until it is visible on the read
+    endpoint (or `limit_s`): returns (microseconds waited, visible)."""
+    w = await Proto.open(args.proto, args.write_host, args.write_port)
+    r = await Proto.open(args.proto, args.read_host, args.read_port)
+    key = b"vb:drain:%d" % now_ns()
+    val = b"drain"
+    t0 = now_ns()
+    w.w.write(w.encode_set(key, val))
+    await w.w.drain()
+    await w.read_set_reply()
+    seen = False
+    while now_ns() - t0 < limit_s * NS:
+        if await r.get(key) == val:
+            seen = True
+            break
+        await asyncio.sleep(0.05)
+    w.close()
+    r.close()
+    return (now_ns() - t0) / 1000.0, seen
+
+
 async def probe_floor(args, n=500):
     """Round-trip time of a GET miss on the read endpoint: the probe cadence
     and therefore the measurement floor/resolution."""
@@ -366,12 +388,20 @@ async def main_async(args):
         "floor_get_rtt": await probe_floor(args),
         "runs": [],
     }
-    for rep in range(args.repeat):
-        for name in args.profiles.split(","):
+    # Profile-major order with a DRAIN between runs: CI 37386599657 ran every
+    # profile per repeat, so repeat 1 started inside repeat 0's saturation
+    # backlog (flare-legacy idle rep 1: 100/100 timeouts). Each run now waits
+    # until a fresh sentinel is visible on the read endpoint; the drain time
+    # is recorded, and a run that starts undrained is marked.
+    for name in args.profiles.split(","):
+        for rep in range(args.repeat):
+            drained_us, drained = await drain(args)
             p = dict(PROFILES[name])
             p["name"] = name
             p["repeat"] = rep
             res = await run_profile(args, p)
+            res["pre_run_drain_us"] = drained_us
+            res["pre_run_drained"] = drained
             out["runs"].append(res)
             print("# %s %s rep%d: vis p50/p99 %s/%s us, ack p99 %s us, timeouts %d, backlog growing %s, achieved %s/s"
                   % (args.label, name, rep, fmt(res["visibility_upper"]["p50_us"]), fmt(res["visibility_upper"]["p99_us"]),

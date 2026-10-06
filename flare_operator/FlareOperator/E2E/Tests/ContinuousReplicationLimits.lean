@@ -1664,10 +1664,14 @@ private def Ctx.readState (c : Ctx) (ip pod : String) : IO String := do
       "repl_source_lsn_observed_at", "reconstruction_started", "reconstruction_completed", "reconstruction_boot_id", "curr_items"]
     return s!"own[{own}] " ++ String.intercalate " " (keys.map fun k => s!"{k}={(statVal st k).getD "?"}")
 
-/-- flared read-trace lines (FLARE_TEST_READ_TRACE_PREFIX) of CLIENT reads
-    in `log`, in log order (reads forwarded in from a peer are dropped). -/
-private def clientTraces (log : String) : List String :=
-  (log.splitOn "\n").filter fun l => containsSubstr l "read-trace key=" && containsSubstr l " via=client "
+/-- flared read-trace lines (FLARE_TEST_READ_TRACE_PREFIX) in `log`, in log
+    order: decision lines ("read-trace seq=") and answer lines
+    ("read-trace-result seq="). Both carry the client connection (`conn=`
+    peer ip:port). `via=` is NOT a reliable filter: a forwarded text GET
+    arrives without its proxy chain (local smoke run), so traces are matched
+    by connection only. -/
+private def readTraces (log : String) : List String :=
+  (log.splitOn "\n").filter fun l => containsSubstr l "read-trace seq=" || containsSubstr l "read-trace-result seq="
 
 /-- Value of `name=` in a trace line. -/
 private def traceField (line name : String) : String :=
@@ -1675,19 +1679,50 @@ private def traceField (line name : String) : String :=
   | some rest => (rest.splitOn " ").head?.getD ""
   | none => ""
 
-/-- For the client reads that FOLLOW the trace of `marker` (up to the next
-    key containing "_mark_"): key -> its trace line (the first after it). -/
-private def tracesAfterMarker (traces : List String) (marker : String) : List (String × String) := Id.run do
-  let mut seen := false
-  let mut acc : List (String × String) := []
+/-- The GETs that followed `marker` on the SAME client connection, up to the
+    next marker on that connection (a reused peer port starts with its own
+    marker): key -> (decision line, answer line). Reads forwarded in from a
+    peer arrive on the peer's connection and are never included; each test
+    connection reads every key once, so (connection, key) is one GET. -/
+private def tracesAfterMarker (traces : List String) (marker : String) : List (String × (Option String × Option String)) := Id.run do
+  let mut conn : Option String := none
+  let mut acc : List (String × (Option String × Option String)) := []
   for l in traces do
     let k := traceField l "key"
-    if k == marker then
-      seen := true
-    else if seen then
-      if containsSubstr k "_mark_" then return acc.reverse
-      if !(acc.any (·.1 == k)) then acc := (k, l) :: acc
+    let cn := traceField l "conn"
+    let decision := containsSubstr l "read-trace seq="
+    match conn with
+    | none =>
+      if decision && k == marker && cn != "-" then conn := some cn
+    | some c0 =>
+      if cn == c0 then
+        if containsSubstr k "_mark_" then
+          if decision && k != marker then return acc.reverse
+        else
+          let cur := (acc.lookup k).getD (none, none)
+          let upd := if decision then (if cur.1.isNone then (some l, cur.2) else cur)
+                     else (if cur.2.isNone then (cur.1, some l) else cur)
+          acc := (k, upd) :: acc.filter (·.1 != k)
   return acc.reverse
+
+/-- One answer, classified with its traces:
+    "ok"         expected value, answer traced;
+    "refused"    an explicit error reply (may be a safety refusal);
+    "unavailable" a miss the server itself recorded as UNREADABLE (failed
+                 forward, partition/storage error) — availability, not data;
+    "wrong-local" / "wrong-forwarded"  a real miss or another value, answered
+                 from this node's copy / by the node it forwarded to;
+    "untraced"   no answer line: cannot be classified. -/
+private def classifyAnswer (expected answer : String) (tr : Option String × Option String) : String :=
+  if answer.startsWith "err:" then "refused"
+  else match tr.2 with
+    | none => "untraced"
+    | some r =>
+      let res := traceField r "result"
+      if res == "unavailable" || res == "refused" then "unavailable"
+      else if answer == expected then "ok"
+      else if traceField r "reason" == "local" then "wrong-local"
+      else "wrong-forwarded"
 
 /-- Pods of the data cluster: (name, IP), IP-less pods left out. -/
 private def Ctx.dataPods (c : Ctx) : IO (List (String × String)) := do
@@ -2089,7 +2124,7 @@ def emptySourceSuite : TestSuite := {
           let routed ← waitForCondition s!"a GET on {r} is answered locally (trace)" 150 do
             let mk := s!"es_mark_route_{← IO.monoMsNow}"
             discard <| c.getRound rIp mk []
-            let tr := clientTraces (← c.flaredLogAllSince r since)
+            let tr := readTraces (← c.flaredLogAllSince r since)
             return tr.any fun l => traceField l "key" == mk && traceField l "decision" == "local"
           let keys := (List.range 400).map fun i => s!"es_{i}"
           let onM2 ← c.getRound m2Ip "es_mark_final_master" keys true
@@ -2098,24 +2133,34 @@ def emptySourceSuite : TestSuite := {
           let onR ← c.getRound rIp "es_mark_final_replica" keys true
           let restorePatch := if balance0.isEmpty then "{\"spec\":{\"readBalance\":null}}" else s!"\{\"spec\":\{\"readBalance\":{balance0}}}"
           let restored ← kubectlPatch "flarecluster" emptySourceCfg.name ns restorePatch
-          let tr := tracesAfterMarker (clientTraces (← c.flaredLogAllSince r readAt)) "es_mark_final_replica"
+          let tr := tracesAfterMarker (readTraces (← c.flaredLogAllSince r readAt)) "es_mark_final_replica"
           let expect (k : String) : Option String :=
             match (k.drop 3).toNat? with
             | some i => if i < 50 then some s!"=pre4_{i}" else if i < 100 then some s!"=post4_{i - 50}" else some "=X16384/0"
             | none => none
           let mut badM2 : List String := []
+          -- data errors (a real miss or another value) are kept apart from
+          -- unavailability (refusal / unreadable) and from answers that
+          -- cannot be attributed
           let mut badR : List String := []
+          let mut unavailR : List String := []
           let mut notLocal := 0
           match onM2, onR with
           | some am, some ar =>
             for (k, v) in am do
               if some v != expect k then badM2 := badM2 ++ [s!"{k} -> {v}"]
             for (k, v) in ar do
-              let dec := ((tr.lookup k).map (traceField · "decision")).getD "untraced"
-              if dec != "local" then notLocal := notLocal + 1
-              if some v != expect k then badR := badR ++ [s!"{k} -> {v} ({dec}) trace {(tr.lookup k).getD "(none)"}"]
+              let t := (tr.lookup k).getD (none, none)
+              let cls := classifyAnswer ((expect k).getD "?") v t
+              let localAns := (t.2.map (traceField · "reason")) == some "local"
+              if cls == "wrong-local" || cls == "wrong-forwarded" then
+                badR := badR ++ [s!"{k} -> {v} ({cls}) decision {t.1.getD "(none)"} answer {t.2.getD "(none)"}"]
+              else if cls == "refused" || cls == "unavailable" then
+                unavailR := unavailR ++ [s!"{k} -> {v} ({cls}) {t.2.getD ""}"]
+              else if cls == "untraced" || !localAns then
+                notLocal := notLocal + 1
           | _, _ => pure ()
-          IO.eprintln s!"# (c) last activation {lastAct.getD "(none)"}; of the OLD source={actOld} (after accepting v{aV}: {actOldAfterAccept}), of the NEW={actNew}; evidence before a completed dump {early}; recorded={recorded}; final evidence {evEnd} (old epoch {oldEpoch}, new {newEpoch})\n# (d) {r} map now: {rMap}; post-switch writes stored {stPost}/50; converged={converged.isSome}; routed={routedPatch.isOk}/{routed}, restored={restored.isOk}; {m2} answers wrong {badM2.length}; {r} answers wrong {badR.length}, not traced local {notLocal}/400\n# {String.intercalate "\n# " ((badM2 ++ badR).take 10)}"
+          IO.eprintln s!"# (c) last activation {lastAct.getD "(none)"}; of the OLD source={actOld} (after accepting v{aV}: {actOldAfterAccept}), of the NEW={actNew}; evidence before a completed dump {early}; recorded={recorded}; final evidence {evEnd} (old epoch {oldEpoch}, new {newEpoch})\n# (d) {r} map now: {rMap}; post-switch writes stored {stPost}/50; converged={converged.isSome}; routed={routedPatch.isOk}/{routed}, restored={restored.isOk}; {m2} answers wrong {badM2.length}; {r} data errors {badR.length}, unavailable/refused {unavailR.length}, correct but not attributed to its local copy {notLocal}/400\n# {String.intercalate "\n# " ((badM2 ++ badR ++ unavailR).take 10)}"
           if let .error e := routedPatch then return .fail s!"could not route reads to the replicas: {e}"
           if let .error e := restored then return .fail s!"could not restore the read balance: {e}"
           if !early.isEmpty then return .fail s!"evidence was visible before a dump completed: {early}"
@@ -2125,6 +2170,7 @@ def emptySourceSuite : TestSuite := {
           if onM2.isNone || onR.isNone then return .fail s!"(d) the final reads were not observed ({m2} {onM2.isSome}, {r} {onR.isSome})"
           if !badM2.isEmpty then return .fail s!"(d) the new master {m2} does not hold every key and value ({badM2.length}: {badM2.head?.getD ""})"
           if !badR.isEmpty then return .fail s!"(d) {r}'s copy does not equal the new master's ({badR.length}: {badR.head?.getD ""})"
+          if !unavailR.isEmpty then return .fail s!"(d) availability, not data: {unavailR.length} of {r}'s final reads were refused or unreadable, so its copy is not verified ({unavailR.head?.getD ""})"
           if notLocal > 0 then return .fail s!"(d) {notLocal}/400 of {r}'s answers were not attributed to its LOCAL copy: no evidence the copy matches"
           if !containsSubstr rMap s!" 0={m2}." then return .fail s!"(d) {r}'s latest map does not name {m2} as master ({rMap})"
           let evEpoch := match evEnd with
@@ -2762,13 +2808,15 @@ def clusterInitSuite : TestSuite := {
           let keys := (List.range 30).map fun i => s!"init_{i}"
           let probes ← IO.mkRef ([] : List (String × String × String × List (String × String)))
           let roundN ← IO.mkRef 0
+          let roundsUnobserved ← IO.mkRef 0
           let back ← waitForCondition "the operator loads the restored map and both copies are back (probing every pod meanwhile)" 480 do
             for (pod, ip) in ← c.dataPods do
               let r ← roundN.modifyGet fun n => (n, n + 1)
               let marker := s!"init_mark_r{r}"
               let t ← utcNow
-              if let some ans ← c.getRound ip marker keys then
-                probes.modify ((pod, marker, t, ans) :: ·)
+              match ← c.getRound ip marker keys with
+              | some ans => probes.modify ((pod, marker, t, ans) :: ·)
+              | none => roundsUnobserved.modify (· + 1)
             if !(← c.opReady) then return false
             match ← c.pair with
             | .ok (_, m2, _, s2) => return (← c.currItems m2) == items && (← c.currItems s2) == items
@@ -2777,33 +2825,42 @@ def clusterInitSuite : TestSuite := {
           let probeList := (← probes.get).reverse
           let mut traceLogs : List (String × List String) := []
           for pod in (probeList.map (·.1)).eraseDups do
-            traceLogs := (pod, clientTraces (← c.flaredLogAllSince pod restoreAt)) :: traceLogs
+            traceLogs := (pod, readTraces (← c.flaredLogAllSince pod restoreAt)) :: traceLogs
+          -- DATA errors (a real miss or another value) are judged; refusals,
+          -- server-recorded unreadable answers and unobserved rounds are
+          -- AVAILABILITY, reported separately and not judged here
           let mut wrongLocal : List String := []
-          let mut wrongOther : List String := []
-          let mut nLocal := 0
-          let mut nProxy := 0
-          let mut nUntraced := 0
-          let mut nErr := 0
+          let mut wrongFwd : List String := []
+          let mut wrongUntraced : List String := []
+          let mut nOk := 0
+          let mut nOkUntraced := 0
+          let mut nRefused := 0
+          let mut nUnavail := 0
           for (pod, marker, t, ans) in probeList do
             let tr := tracesAfterMarker ((traceLogs.lookup pod).getD []) marker
             for (k, a) in ans do
-              let line? := tr.lookup k
-              let dec := (line?.map (traceField · "decision")).getD ""
-              if dec == "local" then nLocal := nLocal + 1
-              else if dec == "proxy" then nProxy := nProxy + 1
-              else nUntraced := nUntraced + 1
-              if a.startsWith "err:" then nErr := nErr + 1
-              else if a != s!"=val_{k.drop 5}" then
-                let d := s!"{pod} at {t}: {k} -> {a}; trace: {line?.getD "(no trace line)"}"
-                if dec == "local" then wrongLocal := d :: wrongLocal else wrongOther := d :: wrongOther
-          IO.eprintln s!"# (1) during recovery (since {restoreAt}): {probeList.length} probe rounds; answers attributed local {nLocal} / proxied {nProxy} / untraced {nUntraced}; refusals {nErr}; WRONG local answers {wrongLocal.length}, wrong proxied or untraced answers {wrongOther.length}"
+              let trk := (tr.lookup k).getD (none, none)
+              let expected := s!"=val_{k.drop 5}"
+              let cls := classifyAnswer expected a trk
+              let d := s!"{pod} at {t}: {k} -> {a}; decision {trk.1.getD "(none)"}; answer {trk.2.getD "(none)"}"
+              if cls == "ok" then nOk := nOk + 1
+              else if cls == "refused" then nRefused := nRefused + 1
+              else if cls == "unavailable" then nUnavail := nUnavail + 1
+              else if cls == "wrong-local" then wrongLocal := d :: wrongLocal
+              else if cls == "wrong-forwarded" then wrongFwd := d :: wrongFwd
+              else if a == expected then nOkUntraced := nOkUntraced + 1
+              else wrongUntraced := d :: wrongUntraced
+          IO.eprintln s!"# (1) during recovery (since {restoreAt}): {probeList.length} probe rounds observed, {← roundsUnobserved.get} not observed (connection/exchange incomplete). DATA: correct {nOk} (+{nOkUntraced} correct but untraced); WRONG answered from the node's own copy {wrongLocal.length}; wrong after forwarding {wrongFwd.length}; wrong and unattributable {wrongUntraced.length}. AVAILABILITY (not judged here): explicit refusals {nRefused}; misses the server recorded as unreadable {nUnavail}"
           for d in (wrongLocal.reverse.take 20) do IO.eprintln s!"#   LOCAL wrong: {d}"
-          for d in (wrongOther.reverse.take 20) do IO.eprintln s!"#   other wrong: {d}"
+          for d in (wrongFwd.reverse.take 10) do IO.eprintln s!"#   forwarded wrong: {d}"
+          for d in (wrongUntraced.reverse.take 10) do IO.eprintln s!"#   unattributable wrong: {d}"
           let mut fails : List String := []
           if !wrongLocal.isEmpty then
             fails := fails ++ [s!"(1) {wrongLocal.length} LOCAL answer(s) from an incomplete copy during recovery (first: {wrongLocal.getLast?.getD ""})"]
-          if !wrongOther.isEmpty then
-            fails := fails ++ [s!"(1) {wrongOther.length} wrong answer(s) during recovery that were proxied or could not be attributed (first: {wrongOther.getLast?.getD ""})"]
+          if !wrongFwd.isEmpty then
+            fails := fails ++ [s!"(1) {wrongFwd.length} wrong answer(s) during recovery from the node a read was forwarded to (first: {wrongFwd.getLast?.getD ""})"]
+          if !wrongUntraced.isEmpty then
+            fails := fails ++ [s!"(1) {wrongUntraced.length} wrong answer(s) during recovery that cannot be attributed (no trace on the connection; first: {wrongUntraced.getLast?.getD ""})"]
           if probeList.isEmpty then
             fails := fails ++ ["(1) no recovery probe round was observed: no evidence about reads during recovery"]
           -- why each copy was (re)built after the map came back: tracked,
@@ -2879,17 +2936,22 @@ def clusterInitSuite : TestSuite := {
             IO.eprintln s!"# read routing: spec before {if balance0.isEmpty then "(unset)" else balance0}; routed to the replica={routedPatch.isOk}, replica served locally before the check={routed}; restored={restored.isOk}"
             if let .error e := routedPatch then return failWith s!"could not route reads to the replica: {e}"
             if let .error e := restored then return failWith s!"could not restore the read balance: {e}"
-            let sTraces := clientTraces (← c.flaredLogAllSince sPodR passAt)
+            let sTraces := readTraces (← c.flaredLogAllSince sPodR passAt)
+            -- the pass needs EVERY replica answer correct AND answered from its
+            -- own copy (answer line reason=local) after recovery completed;
+            -- data errors, unavailability and missing attribution are
+            -- reported under their own labels
             let mut postFails : List String := []
             let mut nPostLocal := 0
             for (k, before, a, after) in rows do
-              let line? := (tracesAfterMarker sTraces s!"init_mark_post_{k}").lookup k
-              let dec := (line?.map (traceField · "decision")).getD ""
-              if dec == "local" then nPostLocal := nPostLocal + 1
-              let ok := a == s!"=val_{k.drop 5}"
-              if !ok || dec != "local" then
-                IO.eprintln s!"# (2) replica {sPodR} {k} -> {a} (decision {if dec.isEmpty then "untraced" else dec})\n#   before: {before}\n#   trace:  {line?.getD "(no trace line)"}\n#   after:  {after}"
-                postFails := postFails ++ [s!"{k} -> {a} ({if dec.isEmpty then "untraced" else dec})"]
+              let trk := (tracesAfterMarker sTraces s!"init_mark_post_{k}").lookup k |>.getD (none, none)
+              let cls := classifyAnswer s!"=val_{k.drop 5}" a trk
+              let localAns := (trk.2.map (traceField · "reason")) == some "local"
+              let label := if cls == "ok" && !localAns then "correct, not answered from its own copy" else cls
+              if cls == "ok" && localAns then nPostLocal := nPostLocal + 1
+              else
+                IO.eprintln s!"# (2) replica {sPodR} {k} -> {a} ({label})\n#   before:   {before}\n#   decision: {trk.1.getD "(no trace line)"}\n#   answer:   {trk.2.getD "(no trace line)"}\n#   after:    {after}"
+                postFails := postFails ++ [s!"{k} -> {a} ({label})"]
             let masterBad := match onM with
               | none => some "the master's answers were not observed"
               | some ans => (ans.find? fun (ka : String × String) => ka.2 != s!"=val_{ka.1.drop 5}").map fun (ka : String × String) => s!"{ka.1} -> {ka.2}"
@@ -2899,11 +2961,11 @@ def clusterInitSuite : TestSuite := {
             let sameMaster := mUid0.isSome && mUid0 == mUid1 && mBoot0.isSome && mBoot0 == mBoot1
             let sameReplica := sUid0.isSome && sUid0 == sUid1
             let countersRead := gets0.isSome && gets1.isSome
-            IO.eprintln s!"# (2) after recovery: master {masterBad.getD "all 30 equal"}; replica traced local {nPostLocal}/30, not equal or not local {postFails.length}; master cmd_get {gets0} -> {gets1}; master uid {mUid0} -> {mUid1}, boot {mBoot0} -> {mBoot1}; replica uid {sUid0} -> {sUid1}; roles unchanged={sameRoles}"
+            IO.eprintln s!"# (2) after recovery: master {masterBad.getD "all 30 equal"}; replica correct AND answered from its own copy {nPostLocal}/30, otherwise {postFails.length}; master cmd_get {gets0} -> {gets1}; master uid {mUid0} -> {mUid1}, boot {mBoot0} -> {mBoot1}; replica uid {sUid0} -> {sUid1}; roles unchanged={sameRoles}"
             if let some (k, before, _, after) := rows.head? then
               IO.eprintln s!"# (2) replica state around the first GET ({k}): before {before}; after {after}"
             if let some bad := masterBad then fails := fails ++ [s!"(2) a key or value is not on the master after recovery: {bad}"]
-            if !postFails.isEmpty then fails := fails ++ [s!"(2) the replica's LOCAL copy does not answer every key equal after recovery ({postFails.length}: {String.intercalate ", " (postFails.take 5)})"]
+            if !postFails.isEmpty then fails := fails ++ [s!"(2) after recovery, not every key was answered correctly from the replica's own copy ({postFails.length}: {String.intercalate ", " (postFails.take 5)})"]
             if !countersRead then fails := fails ++ [s!"(2) the master's cmd_get could not be read before and after ({gets0} -> {gets1})"]
             else if gets0 != gets1 then fails := fails ++ [s!"(2) the master served reads during the replica's check (cmd_get {gets0} -> {gets1})"]
             if !sameMaster then fails := fails ++ [s!"(2) the master changed process during the reads (uid {mUid0} -> {mUid1}, boot {mBoot0} -> {mBoot1})"]

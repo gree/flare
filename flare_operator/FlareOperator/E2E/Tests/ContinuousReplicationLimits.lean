@@ -773,6 +773,23 @@ private def masterPodOf (c : Ctx) : IO (Option String) := do
 private def notLossFreeFor (c : Ctx) (pod : String) : IO Bool := do
   return ((← c.opLog 200000).splitOn "\n").any fun l => containsSubstr l "PROMOTION NOT LOSS-FREE" && containsSubstr l pod
 
+/-- The operator's own `flare_operator_partitions_masterless` gauge (scraped
+    from its /metrics), `none` when it cannot be read. The masterless STATE is
+    detected by this gauge and the FlareMasterMissing alert, independently of
+    the hold's reason log (review 2026-10-06). -/
+private def Ctx.masterlessGauge (c : Ctx) : IO (Option Nat) := do
+  match (← getPodNames s!"app={c.cfg.operatorName}" c.cfg.«namespace»).head? with
+  | none => return none
+  | some pod =>
+    match ← getPodIp pod c.cfg.«namespace» with
+    | none => return none
+    | some ip =>
+      match ← execInDebugPod c.cfg.debugPod c.cfg.«namespace» s!"wget -qO- -T 5 http://{ip}:9090/metrics | grep -E '^flare_operator_partitions_masterless'" with
+      | .error _ => return none
+      | .ok out =>
+        return ((out.splitOn "\n").findSome? fun l =>
+          if l.startsWith "flare_operator_partitions_masterless" then (l.splitOn " ").getLast?.bind (fun v => ((v.trim.splitOn ".").head?).bind (·.toNat?)) else none)
+
 /-- The NOT LOSS-FREE line logged for `pod`, if any (its reason is checked:
     a known-empty ex-master and an expired wait are different reasons). -/
 private def notLossFreeLine (c : Ctx) (pod : String) : IO (Option String) := do
@@ -963,12 +980,14 @@ def lagHoldUnreadableSuite : TestSuite := {
             IO.sleep 2000
             if (← masterPodOf c) == some sPod then crowned := true; break
           passesBlocked := (((← c.opLog 20000).splitOn "\n").filter fun l => containsSubstr l "blocked by test seam" && containsSubstr l mPod).length
+          let gauge ← c.masterlessGauge
           let loudEarly ← notLossFreeFor c sPod
-          IO.eprintln s!"# ex-master {mPod} live and unreadable for 90 s ({passesBlocked} blocked probe passes): follower crowned={crowned}; NOT LOSS-FREE logged={loudEarly}"
+          IO.eprintln s!"# ex-master {mPod} live and unreadable for 90 s ({passesBlocked} blocked probe passes): follower crowned={crowned}; NOT LOSS-FREE logged={loudEarly}; masterless gauge={gauge}"
           discard <| opShell c "rm -f /tmp/stb/stats-block"
           if crowned || loudEarly then
             return .fail s!"the far-behind follower {sPod} was crowned while the returning ex-master could not be read (wait not expired)"
           if passesBlocked < 3 then return .fail s!"precondition: only {passesBlocked} probe pass(es) saw the ex-master blocked"
+          if (gauge.getD 0) < 1 then return .fail s!"the masterless partition was not reported by flare_operator_partitions_masterless (read {gauge})"
           -- readable again: the ex-master holds its data and is re-seated
           let exBack ← waitForCondition "the ex-master is master again once readable" 300 do
             return (← masterPodOf c) == some mPod
@@ -2603,6 +2622,10 @@ def multiHoldSuite : TestSuite := {
             if (findMasterFqdn entries 1).bind (fun f => (f.splitOn ".").head?) == some s1 then promoted := true; break
             if ((← c.opLog 3000).splitOn "\n").any (fun l => containsSubstr l "partition 1 has NO master" && containsSubstr l s1) then
               held := true; break
+          -- the masterless STATE itself is visible as a metric (the alert's
+          -- input), whatever the hold's reason log says
+          let gaugeSeen ← waitForCondition "the operator's masterless gauge reports P1" 120 do
+            return ((← c.masterlessGauge).getD 0) ≥ 1
           -- P0 during P1's hold: same master, accepts writes to its keys
           let p0Before ← c.currItems m0Ip
           let p0w ← writeKeys multiHoldCfg.debugPod multiHoldCfg.«namespace» m0Ip multiHoldCfg.flarePort "p0during" 40
@@ -2613,6 +2636,7 @@ def multiHoldSuite : TestSuite := {
           IO.eprintln s!"# P1 away: follower promoted={promoted}; held={held}; P0 master {p0Master} (was {m0}); P0 items {p0Before}→{p0After} while writing 40 keys through it ({p0w} STORED: keys of P1 fail meanwhile); breaker tripped={tripped}"
           if promoted then return .fail s!"P1's follower {s1} was promoted although it was further behind than the bound"
           if !held then return .fail "P1 was not held (no 'partition 1 has NO master' line)"
+          if !gaugeSeen then return .fail "the masterless partition was not reported by flare_operator_partitions_masterless (the alert's input)"
           if p0Master != some m0 then return .fail s!"P0's master moved during P1's hold ({m0} → {p0Master})"
           if p0After ≤ p0Before then return .fail "P0 took no writes during P1's hold"
           if tripped then return .fail "the circuit breaker tripped on one unavailable node of four"

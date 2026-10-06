@@ -1916,6 +1916,131 @@ def emptySourceSuite : TestSuite := {
   ]
 }
 
+-- ─── SC-03: repair-ledger first window and process identity ─────────────
+
+-- The ledger's FIRST observation of a master's drop counters used to be a
+-- silent baseline (CI 37376724850): drops before it were never repaired.
+-- A slow stats probe (180 s) leaves a wide first window on purpose.
+private def ledgerCfg : ClusterConfig := {
+  name := "repair-ledger"
+  «namespace» := "flare-repair-ledger"
+  partitions := 1
+  replicas := 2
+  operatorName := "flare-operator"
+  debugPod := "debug-repair-ledger"
+  storageBackend := "rocksdb"
+  usePvc := true
+  operatorEnv := [("FLARE_STATS_PROBE_INTERVAL_MS", "180000")]
+}
+
+/-- Cut the master's forwards, write `n` keys through it, wait until the
+    master counts drops, heal. Returns (stored, drops before, drops after). -/
+private def Ctx.dropWrites (c : Ctx) (mIp sIp pfx : String) (n : Nat) : IO (Except String (Nat × Nat × Nat)) := do
+  let d0 := (← c.statNat mIp "proxy_write_dropped").getD 0
+  match ← cutForwards mIp sIp with
+  | .error e => return .error e
+  | .ok () => pure ()
+  let w ← writeKeys c.cfg.debugPod c.cfg.«namespace» mIp c.cfg.flarePort pfx n
+  let counted ← waitForCondition "the master counts dropped replica writes" 180 do
+    return ((← c.statNat mIp "proxy_write_dropped").getD 0) > d0
+  healForwards mIp sIp
+  let d1 := (← c.statNat mIp "proxy_write_dropped").getD 0
+  if !counted then return .error s!"the master never counted drops (stored {w}/{n})"
+  return .ok (w, d0, d1)
+
+private def countLines (log needle : String) : Nat :=
+  ((log.splitOn "\n").filter (containsSubstr · needle)).length
+
+def repairLedgerSuite : TestSuite := {
+  name := "repair-ledger"
+  setup := do
+    deployCluster ledgerCfg
+    IO.sleep 30000
+  teardown := cleanupCluster ledgerCfg
+  onFailure := dumpClusterDiagnostics ledgerCfg.«namespace» s!"app={ledgerCfg.operatorName}"
+  tests :=
+    let c : Ctx := { cfg := ledgerCfg }
+    let ns := ledgerCfg.«namespace»
+    [
+    { name := "SC-03 first window: writes dropped BEFORE the ledger's first observation are requested (possibly unrepaired) and repaired — not absorbed as a baseline"
+      run := do
+        match ← c.pair with
+        | .error e => return .fail e
+        | .ok (_, mIp, sPod, sIp) =>
+          let early := containsSubstr (← c.opLog 200000) "replica repair ledger initialized"
+          if early then return .fail "precondition: the ledger was already initialized before the fault (window missed)"
+          match ← c.dropWrites mIp sIp "fw" 40 with
+          | .error e => return .fail e
+          | .ok (w, d0, d1) =>
+            let stillFresh := !containsSubstr (← c.opLog 200000) "replica repair ledger initialized"
+            IO.eprintln s!"# stored {w}/40 with forwards cut; master drops {d0} -> {d1}; ledger still uninitialized at the fault={stillFresh}"
+            if !stillFresh then return .fail "precondition: the ledger initialized before the drops were counted (the first window was not exercised)"
+            let requested ← waitForCondition "the first observation requests the repair" 300 do
+              return containsSubstr (← c.opLog 200000) "REPLICA REPAIR (first observation)"
+            let repaired ← waitForCondition "the replica is repaired and the ledger closes" 600 do
+              return (← c.currItems sIp) == (← c.currItems mIp) && (← c.ledgerDests).isEmpty
+            let log ← c.opLog 200000
+            IO.eprintln s!"# first-observation request={requested}; repaired={repaired}; {sPod} items {← c.currItems sIp} vs master {← c.currItems mIp}; init line: {((log.splitOn "\n").find? (containsSubstr · "replica repair ledger initialized")).getD "(none)"}"
+            if !requested then return .fail "the drops before the first observation were not requested"
+            if !repaired then return .fail s!"the replica was not repaired (items {← c.currItems sIp} vs {← c.currItems mIp}, ledger {← c.ledgerDests})"
+            return .pass },
+
+    { name := "SC-03 the same cumulative counter is never requested twice, across an operator restart"
+      run := do
+        let before := countLines (← c.opLog 200000) "REPLICA REPAIR"
+        discard <| kubectl ["delete", "pod", "-n", ns, "-l", s!"app={ledgerCfg.operatorName}", "--wait=false"]
+        IO.sleep 20000
+        let restarted ← waitForCondition "the operator is back and past its grace period" 300 do
+          return containsSubstr (← c.opLog 400) "grace period over"
+        -- two probe slots of the restarted operator
+        IO.sleep 400000
+        let log ← c.opLog 200000
+        let again := countLines log "REPLICA REPAIR (first observation)" + countLines log "REPLICA REPAIR requested"
+        IO.eprintln s!"# repair lines before the restart (all containers) {before}; request lines in the restarted operator {again}; ledger {← c.ledgerDests}"
+        if !restarted then return .fail "the operator did not come back"
+        if again > 0 then return .fail s!"the restarted operator requested again from counters already accounted ({again} line(s))"
+        if !(← c.ledgerDests).isEmpty then return .fail "the ledger is not empty"
+        return .pass },
+
+    { name := "SC-03 a RESTARTED master (new flared process, counter reset) has its new drops attributed in full, and nothing is requested twice"
+      run := do
+        match ← c.pair with
+        | .error e => return .fail e
+        | .ok (mPod, mIp0, _, _) =>
+          let boot0 ← c.statNat mIp0 "reconstruction_boot_id"
+          match ← c.killFlaredIn mPod with
+          | .error e => return .fail s!"could not restart the master's flared: {e}"
+          | .ok _ => pure ()
+          IO.sleep 20000
+          -- the master may have failed over; use the pair as it is now
+          let settled ← waitForCondition "a master and an Active slave again" 300 do
+            return (← c.pair).toBool
+          if !settled then return .fail "the cluster did not settle after the master restart"
+          match ← c.pair with
+          | .error e => return .fail e
+          | .ok (_, mIp, sPod, sIp) =>
+            let synced ← waitForCondition "the copies match before the next fault" 600 do
+              return (← c.currItems sIp) == (← c.currItems mIp) && (← c.ledgerDests).isEmpty
+            if !synced then return .fail "precondition: copies not in sync after the restart"
+            let boot1 ← c.statNat mIp "reconstruction_boot_id"
+            let reqBefore := countLines (← c.opLog 200000) "REPLICA REPAIR requested"
+            match ← c.dropWrites mIp sIp "rs" 30 with
+            | .error e => return .fail e
+            | .ok (w, d0, d1) =>
+              let requested ← waitForCondition "the new drops are requested" 420 do
+                return countLines (← c.opLog 200000) "REPLICA REPAIR requested" > reqBefore
+              let repaired ← waitForCondition "repaired and the ledger closes" 600 do
+                return (← c.currItems sIp) == (← c.currItems mIp) && (← c.ledgerDests).isEmpty
+              let log ← c.opLog 200000
+              let reqLines := (log.splitOn "\n").filter (containsSubstr · "REPLICA REPAIR requested")
+              IO.eprintln s!"# master boot {boot0} -> {boot1}; stored {w}/30 with forwards cut; drops {d0} -> {d1}; requested={requested} ({reqLines.length - reqBefore} new line(s)); repaired={repaired}; {sPod} items {← c.currItems sIp} vs {← c.currItems mIp}\n# {(reqLines.getLast?).getD ""}"
+              if !requested then return .fail "the restarted master's drops were not requested"
+              if !repaired then return .fail "not repaired"
+              if reqLines.length - reqBefore > 1 then return .fail s!"requested {reqLines.length - reqBefore} times for one fault"
+              return .pass }
+  ]
+}
+
 -- ─── SAF-09: running the operator vs initialising a data cluster ─────────
 
 private def initCfg : ClusterConfig := {

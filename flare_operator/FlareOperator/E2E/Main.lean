@@ -83,6 +83,7 @@ def main (args : List String) : IO UInt32 :=
     Tests.ContinuousReplicationLimits.identitySuite,
     Tests.ContinuousReplicationLimits.emptySourceSuite,
     Tests.ContinuousReplicationLimits.lagHoldUnreadableSuite,
+    Tests.ContinuousReplicationLimits.repairLedgerSuite,
     Tests.VisibilityBench.visibilityBenchSuite,
     Tests.ContinuousReplicationLimits.clusterInitSuite,
     Tests.ContinuousReplicationLimits.scaleSuite,

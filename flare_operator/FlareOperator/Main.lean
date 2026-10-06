@@ -1999,7 +1999,11 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
             -- Item 4: no accounting on a ledger we could not read.
             if (← ledgerAvailableRef.get) then
               let led0 ← ledgerRef.get
-              let (led1, newDrops) := ReplicaRepair.observe led0 mKey drops
+              -- counters are bound to the master's flared PROCESS (boot id)
+              let mBoot := statNat mo "reconstruction_boot_id"
+              let (led1, newDrops, firstSeen) := ReplicaRepair.observe led0 mKey drops mBoot
+              for dest in firstSeen do
+                IO.eprintln s!"[flare-operator] REPLICA REPAIR (first observation): master {mKey} (boot {mBoot}) already reports dropped writes to {dest} at the ledger's first observation — when they happened, and whether anything repaired them since, is unknown; recorded as a POSSIBLY UNREPAIRED request (same ownership and gates as any request, no immediate demotion)"
               let mut led2 := led1
               for (dest, d) in newDrops do
                 metrics.replicaRepairRequested.inc
@@ -2031,7 +2035,7 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
               -- replica that cannot resume by up to five minutes — CI
               -- 37268848902.)
               if !led0.initialized then
-                IO.eprintln s!"[flare-operator] replica repair ledger initialized from {mKey}: {drops.length} destination counter(s) recorded as baseline, none attributed"
+                IO.eprintln s!"[flare-operator] replica repair ledger initialized from {mKey}: {drops.length} destination counter(s) recorded; {firstSeen.length} with drops kept as possibly unrepaired requests"
               ledgerRef.set led2
               persistLedger crName ns led0 led2 metrics ledgerDirtyRef
           match mOut, sOut with

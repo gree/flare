@@ -120,11 +120,14 @@ structure Ledger where
   entries : List Entry := []
   deriving Repr, BEq
 
-def counterKey (masterKey dest : String) : String := s!"{masterKey}|{dest}"
+def counterKey (masterKey dest : String) (boot : Option Nat := none) : String :=
+  match boot with
+  | some b => s!"{masterKey}|{dest}|{b}"
+  | none => s!"{masterKey}|{dest}"
 
 /-- Outcome of comparing one observed counter to the ledger. -/
 inductive DropDelta where
-  | baseline (n : Nat)           -- first sighting on an uninitialized ledger
+  | firstSighting (n : Nat)      -- first sighting on an uninitialized ledger: n > 0 = possibly unrepaired
   | unchanged
   | increased (by_ : Nat)
   | reset (now : Nat)            -- counter went down: new incarnation, `now` are new drops
@@ -132,26 +135,53 @@ inductive DropDelta where
 
 def classify (prev : Option Nat) (initialized : Bool) (n : Nat) : DropDelta :=
   match prev with
-  | none => if initialized then (if n > 0 then .increased n else .unchanged) else .baseline n
+  | none => if initialized then (if n > 0 then .increased n else .unchanged) else .firstSighting n
   | some p => if n > p then .increased (n - p) else if n < p then .reset n else .unchanged
 
 /-- Fold one master's `proxy_write_dropped[dest]` readings into the ledger.
-    Returns the ledger with counters updated and the (dest, newDrops) pairs
-    that must become or extend requests. A `reset` with `now = 0` is a
-    restart with no drops yet and attributes nothing. -/
+    Returns the ledger with counters updated, the (dest, newDrops) pairs that
+    must become or extend requests, and which of those dests came from a
+    FIRST SIGHTING. A `reset` with `now = 0` is a restart with no drops yet
+    and attributes nothing.
+
+    FIRST SIGHTING (CI 37376724850): the first observation of a fresh ledger
+    used to be a pure baseline, so drops before it were never repaired. A
+    non-zero count seen first is now a request — POSSIBLY unrepaired: the
+    drops happened at an unknown time, perhaps already repaired by other
+    means. It is not a demotion; it goes through the same ownership and gate
+    path as any request. The cost is a possibly unnecessary rebuild after an
+    operator upgrade or a lost status; the alternative is silent divergence.
+
+    PROCESS IDENTITY: counters are keyed by the master's flared boot id when
+    it is known (`boot`). A restarted master starts a new key, so its count is
+    never compared with the old process's (a restart whose count climbed back
+    above the old value was attributed only the difference). Keys of the same
+    master under another boot are dropped; the same cumulative value is never
+    requested twice. -/
 def observe (l : Ledger) (masterKey : String) (observed : List (String × Nat))
-    : Ledger × List (String × Nat) :=
-  let step := fun (acc : Ledger × List (String × Nat)) ((dest, n) : String × Nat) =>
-    let (led, drops) := acc
-    let key := counterKey masterKey dest
+    (boot : Option Nat := none) : Ledger × List (String × Nat) × List String :=
+  -- Forget this master's counters from OTHER processes (another boot id,
+  -- or the boot-less form written before boot ids were recorded). Only when
+  -- the boot is known: without it the old keys are the only reference.
+  let otherProcess := fun (k : String) =>
+    match boot with
+    | some b =>
+      let parts := k.splitOn "|"
+      parts.head? == some masterKey && (parts.length != 3 || parts.getLast? != some (toString b))
+    | none => false
+  let l0 := { l with counters := l.counters.filter (fun (k, _) => !otherProcess k) }
+  let step := fun (acc : Ledger × List (String × Nat) × List String) ((dest, n) : String × Nat) =>
+    let (led, drops, first) := acc
+    let key := counterKey masterKey dest boot
     let delta := classify (led.counters.lookup key) l.initialized n
     let led' := { led with counters := (led.counters.filter (·.1 != key)) ++ [(key, n)] }
     match delta with
-    | .increased d => (led', drops ++ [(dest, d)])
-    | .reset now => if now > 0 then (led', drops ++ [(dest, now)]) else (led', drops)
-    | .baseline _ | .unchanged => (led', drops)
-  let (led, drops) := observed.foldl step (l, [])
-  ({ led with initialized := true }, drops)
+    | .increased d => (led', drops ++ [(dest, d)], first)
+    | .reset now => if now > 0 then (led', drops ++ [(dest, now)], first) else (led', drops, first)
+    | .firstSighting n => if n > 0 then (led', drops ++ [(dest, n)], first ++ [dest]) else (led', drops, first)
+    | .unchanged => (led', drops, first)
+  let (led, drops, first) := observed.foldl step (l0, [], [])
+  ({ led with initialized := true }, drops, first)
 
 /-- Record drops for a destination: a new `requested` entry, or more drops on
     an existing one (whatever its phase — a repair in flight subsumes them,

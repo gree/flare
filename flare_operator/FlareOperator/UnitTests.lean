@@ -58,15 +58,16 @@ def promoted : FlareClusterState :=
 
 def empty : Ledger := {}
 
-/-- Ledger after the first (baseline) observation of 7 drops to the slave. -/
+/-- Ledger after the first observation of 7 drops to the slave (requested as
+    possibly unrepaired since review 2026-10-06; the counter is recorded). -/
 def l1 : Ledger := (observe empty masterKey [(slaveKey, 7)]).1
 
 def drops (l : Ledger) (m : String) (obs : List (String × Nat)) : List (String × Nat) :=
-  (observe l m obs).2
+  (observe l m obs).2.1
 
 def checkObserve (ctx : Ctx) : IO Unit := do
-  check ctx "first observation is a baseline, attributes nothing"
-    (drops empty masterKey [(slaveKey, 7)] == [] && l1.initialized == true)
+  check ctx "first observation of a non-zero count is a POSSIBLY UNREPAIRED request (no longer a silent baseline)"
+    (drops empty masterKey [(slaveKey, 7)] == [(slaveKey, 7)] && l1.initialized == true)
   check ctx "an increase attributes the delta"
     (drops l1 masterKey [(slaveKey, 10)] == [(slaveKey, 3)])
   check ctx "unchanged attributes nothing"
@@ -1086,6 +1087,32 @@ def checkRepairSource (ctx : Ctx) : IO Unit := do
   check ctx "SAF-08 repair source: evidence never overrides a different lineage of the master itself"
     (!ok (ev "L2" "E5" "promotion" (some "L2") (some "E5")))
 
+def checkLedgerObserve (ctx : Ctx) : IO Unit := do
+  let l0 : ReplicaRepair.Ledger := {}
+  -- first observation of a FRESH ledger: non-zero = possibly unrepaired request
+  let (l1, d1, f1) := ReplicaRepair.observe l0 "m" [("r1", 4), ("r2", 0)] (some 7)
+  check ctx "ledger: a non-zero count at the FIRST observation is a request (possibly unrepaired), not a baseline (CI 37376724850)"
+    (d1 == [("r1", 4)] && f1 == ["r1"] && l1.initialized)
+  let (l2, d2, f2) := ReplicaRepair.observe l1 "m" [("r1", 4), ("r2", 0)] (some 7)
+  check ctx "ledger: the same cumulative value is never requested twice"
+    (d2.isEmpty && f2.isEmpty)
+  let (l3, d3, _) := ReplicaRepair.observe l2 "m" [("r1", 6)] (some 7)
+  check ctx "ledger: an increase in the same process attributes only the difference"
+    (d3 == [("r1", 2)])
+  let (l4, d4, f4) := ReplicaRepair.observe l3 "m" [("r1", 9)] (some 8)
+  check ctx "ledger: a RESTARTED master (new boot id) whose count climbed past the old value is attributed its WHOLE count, and its old-process counters are dropped"
+    (d4 == [("r1", 9)] && f4.isEmpty && !(l4.counters.any (fun (k, _) => (k.splitOn "|").getLast? == some "7")))
+  let (_, d5, _) := ReplicaRepair.observe l4 "m" [("r1", 2)] (some 8)
+  check ctx "ledger: a counter that went DOWN in the same process key is a reset: its count is new drops"
+    (d5 == [("r1", 2)])
+  let (lb, db, fb) := ReplicaRepair.observe l0 "m" [("r1", 3)] none
+  let (_, db2, _) := ReplicaRepair.observe lb "m" [("r1", 3)] none
+  check ctx "ledger: without a boot id the counter comparison still works (first sighting requested once)"
+    (db == [("r1", 3)] && fb == ["r1"] && db2.isEmpty)
+  let (_, dz, fz) := ReplicaRepair.observe l0 "m" [("r1", 0)] (some 1)
+  check ctx "ledger: a zero first sighting requests nothing"
+    (dz.isEmpty && fz.isEmpty)
+
 def checkFollowConfirm (ctx : Ctx) : IO Unit := do
   let off : FollowEvidence.Reading := { complete := true, enabled := some false }
   let on : FollowEvidence.Reading := { complete := true, enabled := some true }
@@ -1149,6 +1176,7 @@ def run : IO UInt32 := do
   checkRepairSource ctx
   checkPodRows ctx
   checkFollowConfirm ctx
+  checkLedgerObserve ctx
   let failures ← ctx.failures.get
   let n ← ctx.count.get
   IO.println s!"1..{n}"

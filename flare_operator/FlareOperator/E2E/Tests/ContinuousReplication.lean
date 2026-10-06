@@ -657,6 +657,16 @@ def suite : TestSuite := {
                 | .error e => s!"(unreadable: {e})"
               let opTail := ((← opLog 400).splitOn "\n").filter (fun l => containsSubstr l "broadcast" || containsSubstr l "topology" || containsSubstr l "withh" || containsSubstr l "eligib" || containsSubstr l "balance")
               IO.eprintln s!"# replica local balance now {balNow}; its stats nodes:\n{nodesOut}\n# operator topology/eligibility lines:\n{String.intercalate "\n" (opTail.reverse.take 20).reverse}"
+              -- RECEIVER side: an 'unconfirmed' send may have been APPLIED with
+              -- only the reply lost. The replica's own log shows every map it
+              -- applied (and any balance change), with times.
+              let sPodName := (slave.fqdn.splitOn ".").headD ""
+              let recv := match ← kubectl ["logs", "-n", cfg.«namespace», sPodName, "-c", "flared", "--since=10m", "--timestamps"] with
+                | .ok o => (o.splitOn "\n").filter fun l =>
+                    containsSubstr l "node_balance" || containsSubstr l "reconstructing node map" || containsSubstr l "node map version"
+                      || containsSubstr l "topology" || containsSubstr l "node sync"
+                | .error e => [s!"(replica log unreadable: {e})"]
+              IO.eprintln s!"# replica {sPodName}: maps applied / balance changes in the last 10 min (receiver side):\n{String.intercalate "\n" (recv.reverse.take 30).reverse}"
               return .fail s!"map changed ({balNow}) although topology delivery to the replica was blocked: this would only test operator withholding"
             let value ← memcachedGet cfg.debugPod cfg.«namespace» sIp cfg.flarePort key
             let after ← statNat sIp "repl_applied_lsn"

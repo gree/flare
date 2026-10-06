@@ -1649,6 +1649,27 @@ private def Ctx.flaredLog (c : Ctx) (pod : String) (previous : Bool := false) : 
   | .ok o => return o
   | .error _ => return ""
 
+/-- The flared container's log from a FIXED start time (`--since-time`, no
+    tail limit), with timestamps — a comparison window that cannot lose its
+    start marker to a tail cut. -/
+private def Ctx.flaredLogSince (c : Ctx) (pod since : String) : IO String := do
+  match ← kubectl ["logs", "-n", c.cfg.«namespace», pod, "-c", "flared", s!"--since-time={since}", "--timestamps"] with
+  | .ok o => return o
+  | .error _ => return ""
+
+/-- (pod UID, flared container restart count): the process the log belongs to. -/
+private def Ctx.processId (c : Ctx) (pod : String) : IO (Option (String × String)) := do
+  match ← kubectlGetJsonpath "pod" pod c.cfg.«namespace» "{.metadata.uid}|{.status.containerStatuses[?(@.name==\"flared\")].restartCount}" with
+  | .ok o =>
+    match o.trim.splitOn "|" with
+    | [u, r] => if u.isEmpty || r.isEmpty then return none else return some (u, r)
+    | _ => return none
+  | .error _ => return none
+
+private def utcNow : IO String := do
+  let out ← IO.Process.output { cmd := "date", args := #["-u", "+%Y-%m-%dT%H:%M:%SZ"] }
+  return out.stdout.trim
+
 /-- Lines after the LAST occurrence of `marker` (the whole log if absent). -/
 private def afterLast (log marker : String) : String :=
   match (log.splitOn marker).getLast? with
@@ -1966,10 +1987,16 @@ def emptySourceSuite : TestSuite := {
           | .error e => return .fail s!"could not restart {r}: {e}"
           | .ok _ => pure ()
           if !(← c.waitDumpStart r 180) then return .fail s!"{r} did not start a full dump after its restart"
+          -- FIXED comparison window: the time and the flared process, both
+          -- taken now (after the restart); every check below reads the log
+          -- from this time and requires the same process at the end.
+          let since ← utcNow
+          let proc0 ← c.processId r
+          if proc0.isNone then return .fail s!"precondition: {r}'s process identity could not be read"
           let armed ← waitForCondition s!"the activation hold is armed in {r}" 60 do
             return (← kubectl ["exec", "-n", ns, r, "-c", "flared", "--", "touch", "/tmp/act-hold"]).toBool
           let held ← waitForCondition s!"{r}'s copy is done and its activation is held" 300 do
-            return containsSubstr (← c.flaredLog r) "held by FLARE_TEST_ACTIVATION_HOLD_FILE"
+            return containsSubstr (← c.flaredLogSince r since) "held by FLARE_TEST_ACTIVATION_HOLD_FILE"
           if !armed || !held then
             discard <| kubectl ["exec", "-n", ns, r, "-c", "flared", "--", "rm", "-f", "/tmp/act-hold"]
             return .fail s!"precondition: the activation was not held (armed={armed}, held={held})"
@@ -1992,7 +2019,15 @@ def emptySourceSuite : TestSuite := {
             match ← c.evidence (← ip r) with
             | some (_, some e) => return some e == newEpoch
             | _ => return false
-          let log ← c.flaredLog r
+          -- the replica must actually RECOVER: Active in the operator's map
+          let activeNow ← waitForCondition s!"{r} is Active again" 300 do
+            return (← c.nodeView).any fun e => podOf e.fqdn == r && e.role == 1 && e.state == 0
+          let proc1 ← c.processId r
+          let log ← c.flaredLogSince r since
+          if proc1 != proc0 then
+            return .fail s!"{r}'s flared process changed during the window ({proc0} -> {proc1}): the log order is not comparable"
+          if !containsSubstr log "held by FLARE_TEST_ACTIVATION_HOLD_FILE" then
+            return .fail "the comparison window does not contain the hold marker (log incomplete): the order cannot be proven"
           let tail := afterLast log "held by FLARE_TEST_ACTIVATION_HOLD_FILE"
           let lines := tail.splitOn "\n"
           let idx := fun (p : String → Bool) => (lines.zip (List.range lines.length)).findSome? (fun (l, i) => if p l then some i else none)
@@ -2002,10 +2037,11 @@ def emptySourceSuite : TestSuite := {
           IO.eprintln s!"# {r} held after its copy from {m}; {m} drained, {m2} promoted (epoch {newEpoch}); after the hold (line indices): stop/switch {stopOrSwitch}, evidence of the new epoch {newEvidence}, first prepare->active {firstActive}; rebuilt={rebuilt}; items {← c.currItems (← ip r)} vs {← c.currItems (← ip m2)}"
           if stopOrSwitch.isNone then return .fail "the old copy's activation was neither stopped nor abandoned for the new source"
           if !rebuilt then return .fail s!"{r} was not rebuilt from the promoted master {m2}"
+          if !activeNow then return .fail s!"{r} did not become Active again after its rebuild"
           match firstActive, newEvidence with
           | some a, some e => if a < e then return .fail s!"{r} became Active (line {a}) BEFORE its copy of the new master was recorded (line {e}): the old copy was activated"
-          | some _, none => return .fail s!"{r} became Active but no evidence of the new master's epoch was recorded"
-          | none, _ => pure ()
+          | some _, none => return .fail s!"{r} became Active but no evidence of the new master's epoch was recorded in the window"
+          | none, _ => return .fail s!"{r} is Active in the map but its own prepare->active is not in the window: the order cannot be proven"
           return .pass },
 
     { name := "activation boundary, SAME NAME NEW HISTORY: while a replica's activation is held, its source (still master, same name) is bulk-rewritten (flush_all: new source epoch); the activation is STOPPED as a history change, not completed on the old copy"
@@ -2063,16 +2099,21 @@ def emptySourceSuite : TestSuite := {
           let recon0 := (← c.statNat rIp "reconstruction_started").getD 0
           let logAtHold := (← c.flaredLog r)
           let dumps0 := ((logAtHold.splitOn "\n").filter (containsSubstr · "starting dump operation")).length
-          -- the source becomes UNKNOWN to the replica: its probes to the
-          -- master are rejected (the master stays master and keeps serving)
-          match ← hostCmd "docker" (["exec", kindNode, "iptables", "-I", "FORWARD", "1"] ++ ruleSpec rIp mIp) with
+          -- the source becomes UNKNOWN to the replica: its packets to the
+          -- master are DROPPED (no RST), so each probe's connect must end by
+          -- the CONNECT DEADLINE — the timeout path itself is exercised (the
+          -- master stays master and keeps serving)
+          let dropSpec := ["-s", rIp, "-d", mIp, "-p", "tcp", "--dport", "12121", "-j", "DROP"]
+          match ← hostCmd "docker" (["exec", kindNode, "iptables", "-I", "FORWARD", "1"] ++ dropSpec) with
           | .error e => discard <| kubectl ["exec", "-n", ns, r, "-c", "flared", "--", "rm", "-f", "/tmp/act-hold"]; return .fail e
           | .ok _ => pure ()
           discard <| kubectl ["exec", "-n", ns, r, "-c", "flared", "--", "rm", "-f", "/tmp/act-hold"]
           let manyUnknown ← waitForCondition s!"{r} defers activation on an Unknown source more than 30 times" 900 do
             return (((← c.flaredLog r).splitOn "\n").filter (containsSubstr · "activation deferred")).length > 30
+          let timeoutLines := ((← c.flaredLog r).splitOn "\n").filter fun l =>
+            containsSubstr l "connect() failed" && containsSubstr l "timed out" && containsSubstr l "within 3000 msec"
           for _ in [0:3] do
-            discard <| hostCmd "docker" (["exec", kindNode, "iptables", "-D", "FORWARD"] ++ ruleSpec rIp mIp)
+            discard <| hostCmd "docker" (["exec", kindNode, "iptables", "-D", "FORWARD"] ++ dropSpec)
           let activated ← waitForCondition s!"{r} is activated once the same source answers again" 600 do
             let entries ← c.nodeView
             return entries.any fun e => podOf e.fqdn == r && e.role == 1 && e.state == 0
@@ -2083,7 +2124,9 @@ def emptySourceSuite : TestSuite := {
           let recon1 := (← c.statNat rIp "reconstruction_started").getD 0
           let stopped := containsSubstr log "activation STOPPED"
           IO.eprintln s!"# {r} held after its copy from {m}; probes to {m} blocked: Unknown deferrals {deferred} (>30: {manyUnknown}); activated after unblocking={activated}; dumps {dumps0} -> {dumps1}; truncates after the hold {truncs.length}; reconstruction_started {recon0} -> {recon1}; stopped={stopped}; items {← c.currItems rIp} vs {← c.currItems mIp}"
+          IO.eprintln s!"# connect attempts ended by the 3 s connect DEADLINE: {timeoutLines.length}{if timeoutLines.isEmpty then "" else "\n# " ++ (timeoutLines.headD "")}"
           if !manyUnknown then return .fail "precondition: fewer than 31 Unknown checks were observed"
+          if timeoutLines.isEmpty then return .fail "no connect attempt ended by the connect deadline (the DROP did not exercise the timeout path)"
           if stopped then return .fail "an Unknown source was treated as a change (activation STOPPED)"
           if dumps1 != dumps0 || !truncs.isEmpty || recon1 != recon0 then
             return .fail s!"the completed copy was transferred again while the source was Unknown (dumps {dumps0} -> {dumps1}, truncates {truncs.length}, reconstruction_started {recon0} -> {recon1})"
@@ -2553,7 +2596,40 @@ def clusterInitSuite : TestSuite := {
             let servedLocally := countersRead && gets0 == gets1
             IO.eprintln s!"# all 30 keys and values: master {onM.getD "ok"}, replica {onS.getD "ok"}; master cmd_get {gets0} -> {gets1}; master uid {mUid0} -> {mUid1}, boot {mBoot0} -> {mBoot1}; replica uid {sUid0} -> {sUid1}; roles unchanged={sameRoles}"
             if let some bad := onM then return .fail s!"a key or value did not survive on the master: {bad}"
-            if let some bad := onS then return .fail s!"a key or value did not survive (read through the replica): {bad}"
+            if let some bad := onS then
+              -- CI 37419299532: equal item counts, yet a key missing from the
+              -- replica's LOCAL copy. Separate "read while a repair/rebuild
+              -- was running" from "the content still differs after recovery":
+              -- print the timeline, wait for the replica to settle, read again.
+              let opLines := ((← c.opLog 200000).splitOn "\n").filter fun l =>
+                containsSubstr l "REPLICA REPAIR" || containsSubstr l "first observation" || containsSubstr l "ledger initialized"
+                  || containsSubstr l "demot" || containsSubstr l "reseat" || containsSubstr l (sPodR ++ ".")
+              let fl := ((← c.flaredLog sPodR).splitOn "\n").filter fun l =>
+                containsSubstr l "truncat" || containsSubstr l "dump operation" || containsSubstr l "full dump completed"
+                  || containsSubstr l "shifting node_state" || containsSubstr l "shifting node_role" || containsSubstr l "snapshot"
+              let recon := s!"reconstruction_started {← c.statNat s2 "reconstruction_started"} completed {← c.statNat s2 "reconstruction_completed"}"
+              IO.eprintln s!"# replica {sPodR} lacks {bad} at the read; ledger {← c.ledgerDests}; {recon}; replica boot {← c.statNat s2 "reconstruction_boot_id"}\n# operator lines:\n{String.intercalate "\n" (opLines.reverse.take 25).reverse}\n# replica flared lines:\n{String.intercalate "\n" (fl.reverse.take 25).reverse}"
+              let settled ← waitForCondition "the replica settles (ledger empty, Active, no reconstruction in progress)" 300 do
+                let led := (← c.ledgerDests).isEmpty
+                let active := (← c.nodeView).any fun e => podOf e.fqdn == sPodR && e.role == 1 && e.state == 0
+                let st := (← c.statNat s2 "reconstruction_started")
+                let cp := (← c.statNat s2 "reconstruction_completed")
+                return led && active && st.isSome && st == cp
+              -- reads routed to the replica again (the spec was restored above)
+              discard <| kubectlPatch "flarecluster" initCfg.name ns "{\"spec\":{\"readBalance\":{\"master\":0,\"slave\":100}}}"
+              IO.sleep 15000
+              let again ← allKeysOn c s2 "init" 30
+              let getsA ← c.statNat m2 "cmd_get"
+              let again2 ← allKeysOn c s2 "init" 30
+              let getsB ← c.statNat m2 "cmd_get"
+              IO.eprintln s!"# after settling (settled={settled}): replica local read {again.getD "all 30 present"} / {again2.getD "all 30 present"}; master cmd_get {getsA} -> {getsB}; replica uid {← c.podUid sPodR}"
+              discard <| kubectlPatch "flarecluster" initCfg.name ns restorePatch
+              let local2 := getsA.isSome && getsA == getsB
+              if settled && local2 && again2.isNone then
+                return .fail s!"a key was missing from the replica's local copy DURING the check ({bad}) and present after it settled (local read verified): a read of a copy being repaired (see the timeline above)"
+              if settled && local2 then
+                return .fail s!"the replica's LOCAL copy still differs after it settled ({again2.getD "?"}; first read {bad})"
+              return .fail s!"a key or value did not survive on the replica's LOCAL copy ({bad}); after settling: {again2.getD "present"} (settled={settled}, local read verified={local2})"
             if !countersRead then return .fail s!"the master's cmd_get could not be read before and after ({gets0} -> {gets1}): no evidence of local reads"
             if !sameMaster then return .fail s!"the master changed process during the reads (uid {mUid0} -> {mUid1}, boot {mBoot0} -> {mBoot1}): its counter is not comparable"
             if !sameReplica || !sameRoles then return .fail s!"the read target or the master changed during the reads (replica uid {sUid0} -> {sUid1}, roles unchanged={sameRoles})"

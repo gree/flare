@@ -659,6 +659,17 @@ int connection_tcp::writeline(const char* p) {
 	return n;
 }
 
+string connection_tcp::get_peer() const {
+	if (this->_addr_family != AF_INET || !this->_host.empty()) {
+		return "";
+	}
+	char buf[BUFSIZ];
+	util::inet_ntoa(this->_addr_inet.sin_addr, buf);
+	ostringstream s;
+	s << buf << ":" << ntohs(this->_addr_inet.sin_port);
+	return s.str();
+}
+
 string connection_tcp::get_host() const {
 	if (this->_host.empty() == false) {
 		return this->_host;

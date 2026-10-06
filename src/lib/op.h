@@ -100,6 +100,7 @@ public:
 	int set_proxy(string proxy);
 	int set_proxy(vector<string> proxy) { this->_proxy = proxy; return 0; };
 	inline string get_ident() { return this->_ident; };
+	shared_connection get_connection() { return this->_connection; };
 	int is_proxy_request() { return this->_proxy_request; };
 	bool is_shutdown_request() { return this->_shutdown_request; };
 	result get_result() { return this->_result; };

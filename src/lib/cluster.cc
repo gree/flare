@@ -1478,6 +1478,18 @@ const string& read_trace_prefix() {
 	return prefix;
 }
 
+// Process-wide order of trace lines (log order can interleave threads).
+uint64_t read_trace_next_seq() {
+	static AtomicCounter seq(0);
+	return seq.incr();
+}
+
+// Peer ip:port of the client connection an op arrived on ("" if unknown).
+string connection_peer(op* o) {
+	connection_tcp* ct = dynamic_cast<connection_tcp*>(o->get_connection().get());
+	return ct != NULL ? ct->get_peer() : "";
+}
+
 // Which input of the local read guard refused (or "allowed").
 string follow_guard_reason(const stats::follow_record& r, time_t now) {
 	if (!r.enabled) return "mode_off";
@@ -1514,7 +1526,7 @@ string describe_follow(const stats::follow_record* r) {
  *	between can show here; the partition fields (master, own slave balance)
  *	are the ones the decision used.
  */
-void cluster::_trace_read(const string& key, const string& via, const char* decision, const string& reason, const partition& p, int partition_index, const string& target, const string& follow) {
+void cluster::_trace_read(const string& key, const string& conn, const string& via, const char* decision, const string& reason, const partition& p, int partition_index, const string& target, const string& follow) {
 	const string& prefix = read_trace_prefix();
 	if (prefix.empty() || key.compare(0, prefix.size(), prefix) != 0) {
 		return;
@@ -1524,19 +1536,41 @@ void cluster::_trace_read(const string& key, const string& via, const char* deci
 	for (vector<partition_node>::const_iterator it = p.slave.begin(); it != p.slave.end(); it++) {
 		if (it->node_key == this->_node_key) own_slave_balance = it->node_balance;
 	}
-	log_notice("read-trace key=%s via=%s decision=%s reason=%s target=%s partition=%d partition_master=%s own_slave_balance=%d own_role=%s own_state=%s own_balance=%d own_partition=%d map_version=%llu boot_id=%llu %s",
-		key.c_str(), via.empty() ? "client" : via.c_str(), decision, reason.c_str(), target.c_str(), partition_index, p.master.node_key.c_str(), own_slave_balance,
+	log_notice("read-trace seq=%llu conn=%s key=%s via=%s decision=%s reason=%s target=%s partition=%d partition_master=%s own_slave_balance=%d own_role=%s own_state=%s own_balance=%d own_partition=%d map_version=%llu boot_id=%llu %s",
+		(unsigned long long)read_trace_next_seq(), conn.empty() ? "-" : conn.c_str(), key.c_str(), via.empty() ? "client" : via.c_str(), decision, reason.c_str(), target.c_str(), partition_index, p.master.node_key.c_str(), own_slave_balance,
 		role_cast(self.node_role).c_str(), state_cast(self.node_state).c_str(), self.node_balance, self.node_partition,
 		(unsigned long long)this->get_node_map_version(),
 		(unsigned long long)(stats_object != NULL ? stats_object->get_reconstruction_boot_id() : 0),
 		follow.c_str());
 }
 
+bool cluster::is_read_traced(const string& key) {
+	const string& prefix = read_trace_prefix();
+	return !prefix.empty() && key.compare(0, prefix.size(), prefix) == 0;
+}
+
+void cluster::trace_read_result(op_proxy_read* o, const string& key, const char* result, const char* reason) {
+	if (!is_read_traced(key)) {
+		return;
+	}
+	vector<string> chain = o->get_proxy();
+	string via;
+	for (vector<string>::iterator it = chain.begin(); it != chain.end(); it++) {
+		via += (via.empty() ? "" : ",") + *it;
+	}
+	const string conn = connection_peer(o);
+	log_notice("read-trace-result seq=%llu conn=%s key=%s via=%s result=%s reason=%s",
+		(unsigned long long)read_trace_next_seq(), conn.empty() ? "-" : conn.c_str(), key.c_str(),
+		via.empty() ? "client" : via.c_str(), result, reason);
+}
+
 cluster::proxy_request cluster::pre_proxy_read(op_proxy_read* op, storage::entry& e, void* parameter, shared_queue_proxy_read& q_result) {
 	// TEST SEAM (see _trace_read): the proxy chain that delivered this read,
 	// so a trace of a client read is not confused with a forwarded one.
 	string via;
+	string conn;
 	if (!read_trace_prefix().empty()) {
+		conn = connection_peer(op);
 		vector<string> chain = op->get_proxy();
 		for (vector<string>::iterator it = chain.begin(); it != chain.end(); it++) {
 			via += (via.empty() ? "" : ",") + *it;
@@ -1548,7 +1582,7 @@ cluster::proxy_request cluster::pre_proxy_read(op_proxy_read* op, storage::entry
 		proxy_request r = (*it)->on_pre_proxy_read(op, e, parameter, q_proxy_result);
 		if (r == proxy_request_complete) {
 			q_result = q_proxy_result;
-			if (!read_trace_prefix().empty()) this->_trace_read(e.key, via, "listener", "proxy_event_listener", partition(), -1, "", describe_follow(NULL));
+			if (!read_trace_prefix().empty()) this->_trace_read(e.key, conn, via, "listener", "proxy_event_listener", partition(), -1, "", describe_follow(NULL));
 			return proxy_request_complete;
 		} else if (r == proxy_request_continue) {
 			continue;
@@ -1562,12 +1596,12 @@ cluster::proxy_request cluster::pre_proxy_read(op_proxy_read* op, storage::entry
 	int n = this->_determine_partition(e, p, false, dummy);
 	if (n < 0) {
 		// perhaps no partition available
-		if (!read_trace_prefix().empty()) this->_trace_read(e.key, via, "error", "no_partition", p, n, "", describe_follow(NULL));
+		if (!read_trace_prefix().empty()) this->_trace_read(e.key, conn, via, "error", "no_partition", p, n, "", describe_follow(NULL));
 		return proxy_request_error_partition;
 	}
 
 	if (p.master.node_key == this->_node_key) {
-		if (!read_trace_prefix().empty()) this->_trace_read(e.key, via, "local", "master", p, n, this->_node_key, describe_follow(NULL));
+		if (!read_trace_prefix().empty()) this->_trace_read(e.key, conn, via, "local", "master", p, n, this->_node_key, describe_follow(NULL));
 		return proxy_request_continue;
 	}
 	bool follow_proxy_to_master = false;
@@ -1586,7 +1620,7 @@ cluster::proxy_request cluster::pre_proxy_read(op_proxy_read* op, storage::entry
 						|| follow.source != p.master.node_key);
 			}
 			if (it->node_balance > 0 && !follow_proxy_to_master) {
-				if (!read_trace_prefix().empty()) this->_trace_read(e.key, via, "local", "slave_guard_allowed", p, n, this->_node_key, describe_follow(follow_read ? &follow_seen : NULL));
+				if (!read_trace_prefix().empty()) this->_trace_read(e.key, conn, via, "local", "slave_guard_allowed", p, n, this->_node_key, describe_follow(follow_read ? &follow_seen : NULL));
 				return proxy_request_continue;
 			}
 		}
@@ -1595,7 +1629,7 @@ cluster::proxy_request cluster::pre_proxy_read(op_proxy_read* op, storage::entry
 	// select one (rand() will do)
 	if (p.balance.size() == 0 && !follow_proxy_to_master) {
 		log_err("no node is available for this partition (all balances are set to 0)", 0);
-		if (!read_trace_prefix().empty()) this->_trace_read(e.key, via, "error", "no_balance", p, n, "", describe_follow(follow_read ? &follow_seen : NULL));
+		if (!read_trace_prefix().empty()) this->_trace_read(e.key, conn, via, "error", "no_balance", p, n, "", describe_follow(follow_read ? &follow_seen : NULL));
 		return proxy_request_error_partition;
 	}
 
@@ -1604,7 +1638,7 @@ cluster::proxy_request cluster::pre_proxy_read(op_proxy_read* op, storage::entry
 		// Do not select this stale replica again from an old balance map.
 		// Keep its Slave role so the follower can continue catching up.
 		if (p.master.node_key.empty()) {
-			if (!read_trace_prefix().empty()) this->_trace_read(e.key, via, "error", "follow_guard_no_master", p, n, "", describe_follow(follow_read ? &follow_seen : NULL));
+			if (!read_trace_prefix().empty()) this->_trace_read(e.key, conn, via, "error", "follow_guard_no_master", p, n, "", describe_follow(follow_read ? &follow_seen : NULL));
 			return proxy_request_error_partition;
 		}
 		node_key = p.master.node_key;
@@ -1617,7 +1651,7 @@ cluster::proxy_request cluster::pre_proxy_read(op_proxy_read* op, storage::entry
 	if (!read_trace_prefix().empty()) {
 		const char* why = follow_proxy_to_master ? "follow_guard"
 			: own_slave ? "own_slave_balance_0" : "not_in_partition";
-		this->_trace_read(e.key, via, "proxy", why, p, n, node_key, describe_follow(follow_read ? &follow_seen : NULL));
+		this->_trace_read(e.key, conn, via, "proxy", why, p, n, node_key, describe_follow(follow_read ? &follow_seen : NULL));
 	}
 
 	vector<string> proxy = op->get_proxy();

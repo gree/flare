@@ -125,6 +125,9 @@ public:
 	
 	string get_host() const;
 	int get_port() const;
+	// "ip:port" of the peer of an ACCEPTED inet connection ("" otherwise):
+	// identifies one client connection in diagnostics
+	string get_peer() const;
 	string get_path() const;
 	
 	virtual int get_read_timeout() const { return this->_read_timeout; };

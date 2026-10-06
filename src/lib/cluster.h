@@ -260,6 +260,11 @@ public:
 	proxy_request pre_proxy_read(op_proxy_read* op, storage::entry& e, void* parameter, shared_queue_proxy_read& q);
 	proxy_request pre_proxy_write(op_proxy_write* op, shared_queue_proxy_write& q, uint64_t generic_value = 0);
 	proxy_request post_proxy_write(op_proxy_write* op, bool sync = false);
+	// TEST SEAM (FLARE_TEST_READ_TRACE_PREFIX): is `key` traced, and log the
+	// ANSWER a traced read got (hit / miss / unavailable + why), on the same
+	// connection identity as the decision line.
+	static bool is_read_traced(const string& key);
+	static void trace_read_result(op_proxy_read* o, const string& key, const char* result, const char* reason);
 
 	uint64_t get_node_map_version() {
 		uint64_t node_map_version;
@@ -455,7 +460,7 @@ protected:
 	// TEST SEAM (E2E only): with FLARE_TEST_READ_TRACE_PREFIX set, one log
 	// line per read of a key with that prefix, recording what this process
 	// based the local-or-proxy decision on. Unset (the default): no effect.
-	void _trace_read(const string& key, const string& via, const char* decision, const string& reason, const partition& p, int partition_index, const string& target, const string& follow);
+	void _trace_read(const string& key, const string& conn, const string& via, const char* decision, const string& reason, const partition& p, int partition_index, const string& target, const string& follow);
 	// Start/stop/restart the follower to match this node's role in the
 	// current maps. Assumes node_map and node_partition_map are locked by the
 	// caller (it only reads them).

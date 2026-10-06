@@ -1698,6 +1698,11 @@ private def Ctx.newMasterAfter (c : Ctx) (old : String) (secs : Nat) : IO (Optio
     reading it at once gave the pre-promotion value). Waits until it differs
     from `pre` (the node's epoch before the fault), up to `secs`. -/
 private def Ctx.promotedEpoch (c : Ctx) (pod : String) (pre : Option String) (secs : Nat := 90) : IO (Option String) := do
+  -- The pre-promotion epoch MUST have been read: with `pre = none` any
+  -- readable value would count as "changed" (the earlier false positive).
+  if pre.isNone then
+    IO.eprintln s!"# {pod}: its epoch before the fault could not be read — no comparison"
+    return none
   let deadline := (← IO.monoMsNow) + secs * 1000
   let mut cur : Option String := none
   for _ in [0:secs] do
@@ -1889,7 +1894,7 @@ def emptySourceSuite : TestSuite := {
           let some m2 ← c.newMasterAfter m 180 | return .fail s!"no successor was promoted after draining {m}"
           if m2 == r then return .fail s!"precondition: the rebuilding replica {r} itself was promoted"
           let newEpoch ← c.promotedEpoch m2 (if m2 == a then preA else preB)
-          if newEpoch.isNone then return .fail s!"precondition: {m2}'s epoch did not advance after its promotion"
+          if newEpoch.isNone then return .fail s!"precondition: {m2}'s epoch before the fault was unreadable or did not advance after its promotion"
           let (early, recorded) ← c.noEvidenceUntilRecorded r (← ip r) 480
           let log ← c.flaredLog r
           let completedFromOld := (log.splitOn "\n").any fun l => containsSubstr l "reconstruction via full dump completed" && containsSubstr l (m ++ ".")
@@ -1937,7 +1942,7 @@ def emptySourceSuite : TestSuite := {
           let some m2 := promoted | return .fail s!"no successor was promoted after {m} became unreachable"
           if m2 == r then return .fail s!"precondition: the rebuilding replica {r} itself was promoted"
           let newEpoch ← c.promotedEpoch m2 preB
-          if newEpoch.isNone then return .fail s!"precondition: {m2}'s epoch did not advance after its promotion"
+          if newEpoch.isNone then return .fail s!"precondition: {m2}'s epoch before the fault was unreadable or did not advance after its promotion"
           let (early, recorded) ← c.noEvidenceUntilRecorded r (← ip r) 600
           let log ← c.flaredLog r
           let switched := containsSubstr log "reconstruction source changed" && containsSubstr log (m2 ++ ".")
@@ -1975,7 +1980,7 @@ def emptySourceSuite : TestSuite := {
           let some m2 := promoted | return .fail s!"no successor was promoted after draining {m}"
           if m2 == r then return .fail s!"precondition: the held replica {r} itself was promoted"
           let newEpoch ← c.promotedEpoch m2 preOther
-          if newEpoch.isNone then return .fail s!"precondition: {m2}'s epoch did not advance after its promotion"
+          if newEpoch.isNone then return .fail s!"precondition: {m2}'s epoch before the fault was unreadable or did not advance after its promotion"
           let stopped ← waitForCondition s!"{r}'s held activation is stopped" 180 do
             return containsSubstr (← c.flaredLog r) "activation STOPPED"
           let rebuilt ← waitForCondition s!"{r} is rebuilt from {m2} with evidence of its epoch" 600 do

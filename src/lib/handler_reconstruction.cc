@@ -50,10 +50,14 @@ namespace {
  *	retry): a source pod that vanished without a RST must not block an
  *	attempt for the kernel's SYN timeout (CI 37407630865).
  */
-shared_connection bounded_connection(const string& host, int port) {
+shared_connection bounded_connection(const string& host, int port, int read_timeout_ms = 30000) {
 	connection_tcp* t = new connection_tcp(host, port);
 	t->set_connect_timeout_ms(3000);
 	t->set_connect_retry_limit(1);
+	// Explicit, not inherited: the process-wide default is 600 s outside
+	// the K8s build. A source that accepts the connection and never answers
+	// must not hold an attempt either.
+	t->set_read_timeout(read_timeout_ms);
 	return shared_connection(t);
 }
 }	// namespace
@@ -465,8 +469,14 @@ int handler_reconstruction::_run_once() {
 	if (this->_role == cluster::role_slave) {
 		const string cur = this->_cluster->get_partition_master_key(this->_partition);
 		const string src = this->_cluster->to_node_key(this->_node_server_name, this->_node_server_port);
+		if (cur.empty()) {
+			// Unknown (no master in the current map): not a confirmed change.
+			// The copy is kept; the next attempt checks again.
+			log_warning("reconstruction from %s completed but the partition has no master in the current map -> not activating yet; the copy is kept", src.c_str());
+			return -1;
+		}
 		if (cur != src) {
-			log_warning("reconstruction from %s completed but the partition's master is now %s -> not activating; retrying from the current master with a clean copy", src.c_str(), cur.empty() ? "(none)" : cur.c_str());
+			log_warning("reconstruction from %s completed but the partition's master is now %s -> not activating; retrying from the current master with a clean copy", src.c_str(), cur.c_str());
 			this->_force_clean = true;
 			return -1;
 		}
@@ -484,7 +494,7 @@ int handler_reconstruction::_run_once() {
 			string end_master_id, end_epoch;
 			bool end_wal = false;
 			uint64_t end_lsn = 0;
-			shared_connection ce(bounded_connection(this->_node_server_name, this->_node_server_port));
+			shared_connection ce(bounded_connection(this->_node_server_name, this->_node_server_port, 5000));
 			if (ce->open() == 0) {
 				op_meta* meta = new op_meta(ce, NULL, this->_storage);
 				if (meta->run_client_features(end_wal, end_master_id, end_lsn) == 0) {
@@ -550,23 +560,24 @@ int handler_reconstruction::_run_once() {
 /**
  *	Is the copy's source still valid for activation? See the declaration.
  */
-bool handler_reconstruction::_source_still_valid(string& why) {
+handler_reconstruction::source_check handler_reconstruction::_check_source(string& why) {
 	if (this->_role != cluster::role_slave) {
-		return true;		// a master's reconstruction is not tied to one source
+		return source_valid;		// a master's reconstruction is not tied to one source
 	}
 	const string cur = this->_cluster->get_partition_master_key(this->_partition);
 	const string src = this->_cluster->to_node_key(this->_node_server_name, this->_node_server_port);
 	if (cur != src) {
 		why = "the partition's master is now " + (cur.empty() ? string("(none)") : cur) + ", not the source " + src;
-		return false;
+		return cur.empty() ? source_unknown : source_changed;
 	}
 	if (this->_storage->get_type() != storage::type_rocksdb) {
-		return true;		// no lineage/epoch to compare on this backend
+		return source_valid;		// no lineage/epoch to compare on this backend
 	}
-	shared_connection c(bounded_connection(this->_node_server_name, this->_node_server_port));
+	// a short read deadline: a source that accepts and never answers is Unknown
+	shared_connection c(bounded_connection(this->_node_server_name, this->_node_server_port, 5000));
 	if (c->open() < 0) {
-		why = "the source " + src + " cannot be probed (Unknown is not valid)";
-		return false;
+		why = "the source " + src + " cannot be reached (Unknown: copy kept, checked again)";
+		return source_unknown;
 	}
 	op_meta* meta = new op_meta(c, NULL, this->_storage);
 	bool wal = false;
@@ -576,22 +587,41 @@ bool handler_reconstruction::_source_still_valid(string& why) {
 	const string epoch = meta->get_peer_source_epoch();
 	delete meta;
 	if (rc != 0) {
-		why = "the source " + src + " did not answer the probe (Unknown is not valid)";
-		return false;
+		why = "the source " + src + " did not answer the probe (Unknown: copy kept, checked again)";
+		return source_unknown;
 	}
-	if (id != this->_attempt_master_id || epoch != this->_probe_source_epoch) {
-		why = "the source " + src + " changed history (master_id " + this->_attempt_master_id + " -> " + id
-			+ ", source epoch " + this->_probe_source_epoch + " -> " + epoch + ")";
-		return false;
+	// Compare what was KNOWN when the copy was taken. An older source (mixed
+	// versions: no source_epoch in its features reply) is compared by
+	// lineage only — weaker, but refusing it forever would strand the
+	// replica. A field that was known then and is missing now is Unknown.
+	if (!this->_attempt_master_id.empty()) {
+		if (id.empty()) {
+			why = "the source " + src + " answered without its master_id (Unknown: copy kept, checked again)";
+			return source_unknown;
+		}
+		if (id != this->_attempt_master_id) {
+			why = "the source " + src + " changed lineage (master_id " + this->_attempt_master_id + " -> " + id + ")";
+			return source_changed;
+		}
 	}
-	return true;
+	if (!this->_probe_source_epoch.empty()) {
+		if (epoch.empty()) {
+			why = "the source " + src + " answered without its source epoch (Unknown: copy kept, checked again)";
+			return source_unknown;
+		}
+		if (epoch != this->_probe_source_epoch) {
+			why = "the source " + src + " changed history (source epoch " + this->_probe_source_epoch + " -> " + epoch + ")";
+			return source_changed;
+		}
+	}
+	return source_valid;
 }
 
 /**
  *	activate_node with bounded retry (see the activation comment in
  *	_run_once). ~1 minute of attempts covers any realistic index leader
  *	handover; shutdown requests abort immediately. EVERY attempt first
- *	re-validates the copy's source (_source_still_valid): a master change or
+ *	re-validates the copy's source (_check_source): a CONFIRMED master change or
  *	a same-name source with a new history while activation is retrying stops
  *	it — the copy is not activated, and the next reconstruction attempt
  *	starts clean from the current master.
@@ -600,10 +630,23 @@ int handler_reconstruction::_activate_with_retry(bool skip_ready_state) {
 	int rc = -1;
 	for (int i = 0; i < 30; i++) {
 		string why;
-		if (!this->_source_still_valid(why)) {
+		const source_check sc = this->_check_source(why);
+		if (sc == source_changed) {
 			log_warning("activation STOPPED before attempt %d: %s -> the copy is not activated; retrying the reconstruction from the current master with a clean copy", i + 1, why.c_str());
 			this->_force_clean = true;
 			return -1;
+		}
+		if (sc == source_unknown) {
+			// Unknown is neither valid nor a change: no activation this
+			// attempt, the copy is KEPT, and the source is checked again.
+			log_warning("activation deferred (attempt %d): %s", i + 1, why.c_str());
+			for (int j = 0; j < 2; j++) {
+				if (this->_thread->is_shutdown_request()) {
+					return -1;
+				}
+				sleep(1);
+			}
+			continue;
 		}
 		// TEST SEAM (E2E only): while the named file exists, an activation
 		// attempt fails as if the index server had refused it.

@@ -42,10 +42,14 @@ namespace {
  *	retry): a source pod that vanished without a RST must not block an
  *	attempt for the kernel's SYN timeout (CI 37407630865).
  */
-shared_connection bounded_connection(const string& host, int port) {
+shared_connection bounded_connection(const string& host, int port, int read_timeout_ms = 30000) {
 	connection_tcp* t = new connection_tcp(host, port);
 	t->set_connect_timeout_ms(3000);
 	t->set_connect_retry_limit(1);
+	// Explicit, not inherited: the process-wide default is 600 s outside
+	// the K8s build. A source that accepts the connection and never answers
+	// must not hold an attempt either.
+	t->set_read_timeout(read_timeout_ms);
 	return shared_connection(t);
 }
 }	// namespace

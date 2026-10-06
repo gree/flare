@@ -84,11 +84,19 @@ public:
 protected:
 	int _run_once();
 	int _activate_with_retry(bool skip_ready_state);
-	// The copy's source is still valid for activation: the partition's master
-	// in the current map is the same node, and a fresh probe shows the same
-	// lineage and source epoch (a same-name source re-promoted, restored or
-	// bulk-rewritten has a new epoch). Unknown (probe failed) is NOT valid.
-	bool _source_still_valid(string& why);
+	// Is the copy's source still valid for activation? THREE outcomes:
+	//   source_valid    — same node is the partition's master in the current
+	//                     map, and a fresh probe shows the same lineage and
+	//                     source epoch;
+	//   source_changed  — CONFIRMED otherwise: another master in the map, or
+	//                     the probe answered with another lineage/epoch (a
+	//                     same-name source re-promoted, restored or
+	//                     bulk-rewritten) -> the copy is rebuilt clean;
+	//   source_unknown  — the probe could not be completed (connect/read
+	//                     failure): NOT valid (no activation) and NOT a
+	//                     change (the copy is kept; check again).
+	enum source_check { source_valid, source_changed, source_unknown };
+	source_check _check_source(string& why);
 
 protected:
 	// Try to catch up from the master via incremental WAL sync instead of

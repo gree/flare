@@ -452,6 +452,10 @@ protected:
 	int _check_node_partition(int node_partition, bool& preparing);
 	int _check_node_partition_for_new(int node_partition, bool& preparing);
 	int _determine_partition(storage::entry& e, partition& p, bool include_prepare, bool& is_preprare);
+	// TEST SEAM (E2E only): with FLARE_TEST_READ_TRACE_PREFIX set, one log
+	// line per read of a key with that prefix, recording what this process
+	// based the local-or-proxy decision on. Unset (the default): no effect.
+	void _trace_read(const string& key, const string& via, const char* decision, const string& reason, const partition& p, int partition_index, const string& target, const string& follow);
 	// Start/stop/restart the follower to match this node's role in the
 	// current maps. Assumes node_map and node_partition_map are locked by the
 	// caller (it only reads them).

@@ -653,6 +653,7 @@ int handler_reconstruction::_activate_with_retry(bool skip_ready_state) {
 	int rc = -1;
 	for (int i = 0; i < 30; i++) {
 		string why;
+		const uint64_t map_version = this->_cluster->get_node_map_version();
 		const source_check sc = this->_check_source(why);
 		if (sc == source_changed) {
 			log_warning("activation STOPPED before attempt %d: %s -> the copy is not activated; retrying the reconstruction from the current master with a clean copy", i + 1, why.c_str());
@@ -674,6 +675,13 @@ int handler_reconstruction::_activate_with_retry(bool skip_ready_state) {
 			}
 			continue;
 		}
+		// The decision's inputs, for placing it against a master switch: the
+		// map version read BEFORE the check (a newer map may arrive during
+		// the probe; the next attempt checks against it).
+		log_notice("activation source check passed (attempt %d): source %s is the partition's master in the map read at version %llu (now %llu); copy master_id %s, source epoch %s",
+			i + 1, this->_cluster->to_node_key(this->_node_server_name, this->_node_server_port).c_str(),
+			(unsigned long long)map_version, (unsigned long long)this->_cluster->get_node_map_version(),
+			this->_attempt_master_id.c_str(), this->_probe_source_epoch.c_str());
 		// TEST SEAM (E2E only): while the named file exists, an activation
 		// attempt fails as if the index server had refused it.
 		const char* hold = getenv("FLARE_TEST_ACTIVATION_HOLD_FILE");
@@ -683,6 +691,9 @@ int handler_reconstruction::_activate_with_retry(bool skip_ready_state) {
 		} else {
 			rc = this->_cluster->activate_node(skip_ready_state);
 			if (rc == 0) {
+				log_notice("node activated (attempt %d) on the copy from %s (map version now %llu)",
+					i + 1, this->_cluster->to_node_key(this->_node_server_name, this->_node_server_port).c_str(),
+					(unsigned long long)this->_cluster->get_node_map_version());
 				return 0;
 			}
 			log_warning("node activation failed (attempt %d) -> retrying in 2 seconds", i + 1);

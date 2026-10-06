@@ -1252,6 +1252,25 @@ int cluster::reconstruct_node(vector<node> v, uint64_t node_map_version) {
 
 	this->_set_node_map_version(node_map_version);
 
+	// One line per accepted map: when this process took which master, so a
+	// decision (activation, read) can be placed before or after a switch.
+	{
+		ostringstream masters;
+		for (node_map::iterator it = this->_node_map.begin(); it != this->_node_map.end(); it++) {
+			if (it->second.node_role == role_master) {
+				masters << " " << it->second.node_partition << "=" << it->first << "/" << state_cast(it->second.node_state);
+			}
+		}
+		node_map::iterator me = this->_node_map.find(this->_node_key);
+		log_notice("node map accepted (version %llu, %d entries); own role=%s state=%s balance=%d partition=%d; masters:%s",
+			(unsigned long long)node_map_version, (int)this->_node_map.size(),
+			me != this->_node_map.end() ? role_cast(me->second.node_role).c_str() : "absent",
+			me != this->_node_map.end() ? state_cast(me->second.node_state).c_str() : "absent",
+			me != this->_node_map.end() ? me->second.node_balance : -1,
+			me != this->_node_map.end() ? me->second.node_partition : -1,
+			masters.str().c_str());
+	}
+
 	pthread_rwlock_unlock(&this->_mutex_node_partition_map);
 	pthread_rwlock_unlock(&this->_mutex_node_map);
 
@@ -1452,13 +1471,84 @@ int cluster::add_proxy_event_listener(shared_proxy_event_listener listener) {
  *
  *	@todo fix performance issue
  */
+namespace {
+// Read once per process; "" disables the trace.
+const string& read_trace_prefix() {
+	static const string prefix = getenv("FLARE_TEST_READ_TRACE_PREFIX") != NULL ? getenv("FLARE_TEST_READ_TRACE_PREFIX") : "";
+	return prefix;
+}
+
+// Which input of the local read guard refused (or "allowed").
+string follow_guard_reason(const stats::follow_record& r, time_t now) {
+	if (!r.enabled) return "mode_off";
+	if (r.state != "following") return "state=" + r.state;
+	if (r.source_epoch.empty()) return "no_source_epoch";
+	if (r.source_lsn == 0) return "no_source_position";
+	if (r.applied_lsn < r.source_lsn) return "behind";
+	if (r.source_lsn_observed_at <= 0 || now < r.source_lsn_observed_at) return "no_observation_time";
+	if (now - r.source_lsn_observed_at > 5) return "observation_stale";
+	return "allowed";
+}
+
+// The follow record the guard read, or "follow=unread" when it read none.
+string describe_follow(const stats::follow_record* r) {
+	if (r == NULL) return "follow=unread";
+	time_t now = stats_object != NULL ? stats_object->get_timestamp() : 0;
+	ostringstream s;
+	s << "follow_enabled=" << (r->enabled ? 1 : 0)
+		<< " follow_state=" << r->state
+		<< " follow_source=" << r->source
+		<< " follow_epoch=" << r->source_epoch
+		<< " applied_lsn=" << r->applied_lsn
+		<< " source_lsn=" << r->source_lsn
+		<< " observed_at=" << r->source_lsn_observed_at
+		<< " now=" << now
+		<< " guard=" << follow_guard_reason(*r, now);
+	return s.str();
+}
+}
+
+/**
+ *	TEST SEAM: see cluster.h. The map version and this node's own entry are
+ *	read after the decision under their own locks, so a map installed in
+ *	between can show here; the partition fields (master, own slave balance)
+ *	are the ones the decision used.
+ */
+void cluster::_trace_read(const string& key, const string& via, const char* decision, const string& reason, const partition& p, int partition_index, const string& target, const string& follow) {
+	const string& prefix = read_trace_prefix();
+	if (prefix.empty() || key.compare(0, prefix.size(), prefix) != 0) {
+		return;
+	}
+	node self = this->get_node(this->_node_key);
+	int own_slave_balance = -1;
+	for (vector<partition_node>::const_iterator it = p.slave.begin(); it != p.slave.end(); it++) {
+		if (it->node_key == this->_node_key) own_slave_balance = it->node_balance;
+	}
+	log_notice("read-trace key=%s via=%s decision=%s reason=%s target=%s partition=%d partition_master=%s own_slave_balance=%d own_role=%s own_state=%s own_balance=%d own_partition=%d map_version=%llu boot_id=%llu %s",
+		key.c_str(), via.empty() ? "client" : via.c_str(), decision, reason.c_str(), target.c_str(), partition_index, p.master.node_key.c_str(), own_slave_balance,
+		role_cast(self.node_role).c_str(), state_cast(self.node_state).c_str(), self.node_balance, self.node_partition,
+		(unsigned long long)this->get_node_map_version(),
+		(unsigned long long)(stats_object != NULL ? stats_object->get_reconstruction_boot_id() : 0),
+		follow.c_str());
+}
+
 cluster::proxy_request cluster::pre_proxy_read(op_proxy_read* op, storage::entry& e, void* parameter, shared_queue_proxy_read& q_result) {
+	// TEST SEAM (see _trace_read): the proxy chain that delivered this read,
+	// so a trace of a client read is not confused with a forwarded one.
+	string via;
+	if (!read_trace_prefix().empty()) {
+		vector<string> chain = op->get_proxy();
+		for (vector<string>::iterator it = chain.begin(); it != chain.end(); it++) {
+			via += (via.empty() ? "" : ",") + *it;
+		}
+	}
 	for (vector<shared_proxy_event_listener>::iterator it = this->_fixed_proxy_event_listeners.begin();
 			it != this->_fixed_proxy_event_listeners.end(); it++) {
 		shared_queue_proxy_read q_proxy_result;
 		proxy_request r = (*it)->on_pre_proxy_read(op, e, parameter, q_proxy_result);
 		if (r == proxy_request_complete) {
 			q_result = q_proxy_result;
+			if (!read_trace_prefix().empty()) this->_trace_read(e.key, via, "listener", "proxy_event_listener", partition(), -1, "", describe_follow(NULL));
 			return proxy_request_complete;
 		} else if (r == proxy_request_continue) {
 			continue;
@@ -1472,22 +1562,31 @@ cluster::proxy_request cluster::pre_proxy_read(op_proxy_read* op, storage::entry
 	int n = this->_determine_partition(e, p, false, dummy);
 	if (n < 0) {
 		// perhaps no partition available
+		if (!read_trace_prefix().empty()) this->_trace_read(e.key, via, "error", "no_partition", p, n, "", describe_follow(NULL));
 		return proxy_request_error_partition;
 	}
 
 	if (p.master.node_key == this->_node_key) {
+		if (!read_trace_prefix().empty()) this->_trace_read(e.key, via, "local", "master", p, n, this->_node_key, describe_follow(NULL));
 		return proxy_request_continue;
 	}
 	bool follow_proxy_to_master = false;
+	bool own_slave = false;
+	stats::follow_record follow_seen;
+	bool follow_read = false;
 	for (vector<partition_node>::iterator it = p.slave.begin(); it != p.slave.end(); it++) {
 		if (it->node_key == this->_node_key) {
+			own_slave = true;
 			if (stats_object != NULL) {
 				const stats::follow_record follow = stats_object->get_follow_record();
+				follow_seen = follow;
+				follow_read = true;
 				follow_proxy_to_master = follow.enabled
 					&& (!stats::follow_allows_local_read(follow, stats_object->get_timestamp())
 						|| follow.source != p.master.node_key);
 			}
 			if (it->node_balance > 0 && !follow_proxy_to_master) {
+				if (!read_trace_prefix().empty()) this->_trace_read(e.key, via, "local", "slave_guard_allowed", p, n, this->_node_key, describe_follow(follow_read ? &follow_seen : NULL));
 				return proxy_request_continue;
 			}
 		}
@@ -1496,6 +1595,7 @@ cluster::proxy_request cluster::pre_proxy_read(op_proxy_read* op, storage::entry
 	// select one (rand() will do)
 	if (p.balance.size() == 0 && !follow_proxy_to_master) {
 		log_err("no node is available for this partition (all balances are set to 0)", 0);
+		if (!read_trace_prefix().empty()) this->_trace_read(e.key, via, "error", "no_balance", p, n, "", describe_follow(follow_read ? &follow_seen : NULL));
 		return proxy_request_error_partition;
 	}
 
@@ -1503,7 +1603,10 @@ cluster::proxy_request cluster::pre_proxy_read(op_proxy_read* op, storage::entry
 	if (follow_proxy_to_master) {
 		// Do not select this stale replica again from an old balance map.
 		// Keep its Slave role so the follower can continue catching up.
-		if (p.master.node_key.empty()) return proxy_request_error_partition;
+		if (p.master.node_key.empty()) {
+			if (!read_trace_prefix().empty()) this->_trace_read(e.key, via, "error", "follow_guard_no_master", p, n, "", describe_follow(follow_read ? &follow_seen : NULL));
+			return proxy_request_error_partition;
+		}
 		node_key = p.master.node_key;
 	} else if (p.prior_balance.size() > 0) {
 		node_key = p.prior_balance[rand() % p.prior_balance.size()];
@@ -1511,6 +1614,11 @@ cluster::proxy_request cluster::pre_proxy_read(op_proxy_read* op, storage::entry
 		node_key = p.balance[rand() % p.balance.size()];
 	}
 	log_debug("selected proxy node (node_key=%s)", node_key.c_str());
+	if (!read_trace_prefix().empty()) {
+		const char* why = follow_proxy_to_master ? "follow_guard"
+			: own_slave ? "own_slave_balance_0" : "not_in_partition";
+		this->_trace_read(e.key, via, "proxy", why, p, n, node_key, describe_follow(follow_read ? &follow_seen : NULL));
+	}
 
 	vector<string> proxy = op->get_proxy();
 	proxy.push_back(this->_node_key);

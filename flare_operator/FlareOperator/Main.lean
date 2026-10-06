@@ -756,6 +756,42 @@ private def podIdentityNow (podName ns : String) : IO (Option (String × Option 
     | _ => return none
   | .error _ => return none
 
+/-- R3-D: the repair source check (StatsObservation.repairSourceVerdict),
+    evaluated NOW for replica `key` against its partition's CURRENT master,
+    with the master's stats bracketed by its pod incarnation. `none` =
+    proceed. Used at demotion and again at RELEASE: a decision made at
+    demotion is not reused for a copy that happens later (CI 37493288883). -/
+private def repairVerdictNow (state : FlareClusterState) (key : String) (ns : String) : IO (Option String) := do
+  match state.lookupNode key with
+  | none => return some "the replica is not in the map"
+  | some rn =>
+    let srcMaster := state.nodeMap.find? (fun kv =>
+      kv.2.role == FlareRole.Master && kv.2.state == FlareState.Active && kv.2.partition == rn.partition)
+    match srcMaster with
+    | none => return some "the partition has no Active master right now"
+    | some (_, mn) =>
+      let mPodName := extractPodName mn.serverName
+      let idBefore ← podIdentityNow mPodName ns
+      let mStats ← Bridge.queryPodStats mPodName ns "stats"
+      let rStats ← Bridge.queryPodStats (extractPodName rn.serverName) ns "stats"
+      let idAfter ← podIdentityNow mPodName ns
+      let srcStable := match idBefore, idAfter with
+        | some (u0, some r0), some (u1, some r1) => !u0.isEmpty && u0 == u1 && r0 == r1
+        | _, _ => false
+      if !srcStable then
+        return some s!"the source master's pod changed during the read ({idBefore} -> {idAfter})"
+      match mStats with
+      | .ok out =>
+        let rLineage := match rStats with | .ok ro => statStr ro "rocksdb_master_id" | .error _ => none
+        let rEpoch := match rStats with | .ok ro => statStr ro "rocksdb_source_epoch" | .error _ => none
+        let rFromId := match rStats with | .ok ro => statStr ro "rocksdb_rebuilt_from_master_id" | .error _ => none
+        let rFromEpoch := match rStats with | .ok ro => statStr ro "rocksdb_rebuilt_from_epoch" | .error _ => none
+        return StatsObservation.repairSourceVerdict (StatsObservation.parseCurrItems out)
+          (statStr out "rocksdb_master_id") rLineage
+          (statStr out "rocksdb_source_epoch") rEpoch (statStr out "rocksdb_source_epoch_reason")
+          rFromId rFromEpoch
+      | .error _ => return StatsObservation.repairSourceVerdict .unknown
+
 /-- Execute a K8s API request from the FSM.
     Maps K8sRequest to actual kubectl/K8s.Bridge calls. -/
 private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : String)
@@ -1943,6 +1979,17 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
                                   lastSuccessSource := statStr out "reconstruction_last_success_source",
                                   currentMaster := currentMaster, mapped := mapped }
               | .error _ => pure { mapped := mapped, currentMaster := currentMaster }
+            -- R3-D: the release (demoted → re-seated → reconstruction) is
+            -- decided AGAIN against the master as it is now; a deferral holds
+            -- the replica demoted (its copy kept) instead of releasing it
+            let o ← match e.phase with
+              | .demoted _ =>
+                match ← repairVerdictNow finalState k ns with
+                | some why =>
+                  IO.eprintln s!"[flare-operator] REPLICA REPAIR release HELD for {k}: the source check at release defers ({why}); the replica stays demoted with its copy"
+                  pure { o with reportedVersion := none }
+                | none => pure o
+              | _ => pure o
             obs := obs ++ [(e.dest, o)]
         -- SAF-10c: owned entries first. The follower's own reading decides:
         -- applied past the bar while `following` → closed WITHOUT a rebuild;

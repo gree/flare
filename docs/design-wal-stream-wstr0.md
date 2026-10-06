@@ -438,31 +438,47 @@ The flare FLOOR control backlogs at 2000/s again (p50 1.46 s, write-ack p99
 replication. Write-ack p99 at normal load: flare 717 µs, Redis 787 µs.
 The hybrid arm is again INVALID (187,740 GETs reached the master).
 
-## 13. Proposed numerical tolerances (FOR DECISION; nothing approved)
+## 13. Numerical tolerances: NOT APPROVED (review 2026-10-06)
 
-You have not set tolerances. The following is a proposal to accept, change or
-reject. It is not a criterion anyone has agreed.
+The figures first proposed here (Redis + 1.0 ms p95, + 2.0 ms p99) were
+reviewed and NOT adopted. With Redis p99 around 1.3–1.7 ms they would accept
+more than double the delay, which is not "comparable to Redis", and they are
+far from the 100 µs reference discussed earlier. They are withdrawn. No
+tolerance is approved.
 
-- **Where to compare:** only at loads where NEITHER arm's floor control shows
-  backlog growth in the same environment. Points where a floor backlogs are
-  reported as a capacity comparison, separately.
-- **Visibility vs `redis-aof`, same run, worst repeat per load:**
-  - p95 ≤ Redis p95 + **1.0 ms**;
-  - p99 ≤ Redis p99 + **2.0 ms**;
-  - zero timeouts; no backlog growth.
+What this baseline supports, and no more:
 
-  Absolute deltas rather than ratios: at sub-millisecond baselines a ratio
-  amplifies noise (a 0.2 ms floor difference is a 1.4× "ratio").
-- **Not worse than today:** WAL-only p95/p99 ≤ flare-legacy's at the same load
-  + the same margins. Removing forwarding must not make visibility worse than
-  the production default.
-- **Write path:** client write-ack p99 within **+10 %** of legacy at the same
-  load (so a slower master cannot make replication look faster).
-- **Significance:** differences under 2× the floor RTT p50 (~0.3 ms) are
-  reported as "not distinguishable". At least 2 drained repeats per point;
-  the WORST repeat counts.
-- **Capacity (separate decision):** the highest offered rate without backlog
-  growth, per arm, in the same environment. A target needs the production
-  write rate and burst, which are not known.
-- **Production gate:** CI kind numbers cannot approve production; the same
-  criteria would be re-run on production-like hardware with your targets.
+- At idle–500/s, in this environment, current flare (legacy forwarding) and
+  Redis (AOF, `appendfsync no`) gave close results.
+- It says nothing about WAL-only delivery (not built yet) and nothing about
+  the hybrid arm (not measured validly: its replica reads were proxied).
+- Whether one system is faster at idle–500/s CANNOT be decided from these
+  runs. The basis, instead of the withdrawn "2× floor RTT" rule (which has
+  no statistical grounding):
+  - probe interval: each pending marker is polled once per observer sweep;
+    the hit is recorded at the end of a GET round trip (floor RTT p50
+    0.13–0.18 ms, p99 0.2–0.3 ms), so a sample's visibility time is known
+    only within one probe round trip plus the sweep (the report gives a
+    lower bound beside the upper bound);
+  - repeat variation: two drained repeats per point. For redis-aof the p99
+    at normal load was 1265 µs and 835 µs; for flare-legacy 1434 µs and
+    1330 µs. The spread between repeats of the SAME system (up to ~430 µs
+    at p99) is larger than the flare–Redis differences (−157 to +214 µs);
+  - samples: 100 (idle), 2,000 (low), 10,000 (normal) per repeat. A p99 from
+    100 samples rests on one or two observations; two repeats give no
+    usable confidence interval.
+
+Plan before any tolerance is set:
+
+1. Measure hybrid replica-local visibility correctly (a test-only local read
+   path, kept separate from the production read guard).
+2. Build the WAL streaming prototype, then compare Redis, legacy, hybrid and
+   WAL-only under the same conditions, with enough repeats to give an
+   interval for the difference at each load.
+3. Set final tolerances from measurements on production-like hardware and
+   network, against production targets (write rate, burst, value sizes,
+   acceptable delay) that the release owner supplies.
+
+2000/s and above stays a separate capacity comparison: flare's own floor
+control backlogs there in this environment. If production requires that
+load, a pass at low load does not substitute for it.

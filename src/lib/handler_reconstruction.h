@@ -35,6 +35,7 @@
 #include "thread_handler.h"
 #include "cluster.h"
 #include "storage.h"
+#include "copy_protection.h"
 
 using namespace std;
 
@@ -94,6 +95,15 @@ public:
 protected:
 	int _run_once();
 	int _activate_with_retry(bool skip_ready_state);
+	// R3-D: the protection rule (copy_protection.h) evaluated NOW, right
+	// before a destructive step on this slave's copy. Logs the decision.
+	// strict: a discard BEFORE the replacement is copied also needs a source
+	// that holds keys (the empty-source exceptions do not apply)
+	copy_gate _copy_gate(const char* step, string& why, bool strict = false);
+	// the pre-swap hook given to the snapshot client (true = swap allowed)
+	bool _swap_gate(string& why);
+	// a bounded `stats` read of the source: items and identity
+	static void probe_source_identity(const string& host, int port, copy_identity& out);
 	// Is the copy's source still valid for activation? THREE outcomes:
 	//   source_valid    — same node is the partition's master in the current
 	//                     map, and a fresh probe shows the same lineage and

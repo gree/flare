@@ -407,6 +407,14 @@ int op_repl_snapshot::_run_client() {
 		return -1;
 	}
 
+	if (this->_pre_swap_gate) {
+		string why;
+		if (!this->_pre_swap_gate(why)) {
+			log_warning("snapshot swap REFUSED by copy protection (%s) -> the staged copy is removed and the local copy is kept", why.c_str());
+			rdb->remove_snapshot_staging(staging);
+			return -1;
+		}
+	}
 	if (rdb->swap_in_snapshot(staging, cp_seq) < 0) {
 		// Refused (verification, unidentified history) or failed: the staged
 		// copy must not stay on disk next to the full dump that follows — on

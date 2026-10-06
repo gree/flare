@@ -555,6 +555,11 @@ public:
 	// (only a SLAVE / a reconstructing node), because it discards all local
 	// data unconditionally — reconstruction reseeds it afterwards.
 	int hard_reset();
+	// R3-D: a CORRUPT copy is not proof that nothing valuable is in it. Move
+	// it aside (data dir / quarantine-<time>-<pid>) instead of deleting it,
+	// then reopen empty. If it cannot be moved aside, NOTHING is deleted and
+	// -1 is returned (the caller stops). `moved_to` names where it went.
+	int quarantine_reset(string& moved_to);
 
 protected:
 	// Latch corruption from a write-path status. Returns status.ok() so call

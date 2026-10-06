@@ -46,6 +46,7 @@ noinst_LTLIBRARIES =	\
 	test_op_stats.la	\
 	test_stats_reconstruction.la	\
 	test_source_eligibility.la	\
+	test_copy_protection.la	\
 	test_op_touch.la	\
 	test_op_verbosity.la	\
 	test_op_version.la	\
@@ -134,6 +135,7 @@ test_op_shutdown_la_SOURCES	= test_op_shutdown.cc connection_iostream.cc
 test_op_stats_la_SOURCES	= test_op_stats.cc connection_iostream.cc
 test_stats_reconstruction_la_SOURCES	= test_stats_reconstruction.cc
 test_source_eligibility_la_SOURCES	= test_source_eligibility.cc
+test_copy_protection_la_SOURCES	= test_copy_protection.cc
 test_op_touch_la_SOURCES	= test_op_touch.cc connection_iostream.cc
 test_op_verbosity_la_SOURCES	= test_op_verbosity.cc connection_iostream.cc
 test_op_version_la_SOURCES	= test_op_version.cc connection_iostream.cc

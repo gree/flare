@@ -107,6 +107,11 @@ public:
 	// believes its master has. An empty token means "I have no prior
 	// lineage, treat me as fresh".
 	virtual int run_client(uint64_t lsn, const string& master_id);
+	// R3-D: reconstruction catch-up bound to a HISTORY. The copy's epoch is
+	// sent; the source refuses another history, and nothing is applied
+	// unless the reply identifies the SAME history (an epoch-less reply —
+	// an older source — is refused, never treated as a match).
+	int run_client_reconstruct(uint64_t lsn, const string& master_id, const string& expected_epoch);
 	// Follow-mode entry point. Applies through the COMMON APPLY RULE
 	// (storage_rocksdb::apply_wal_batch), never verbatim, and stops at the
 	// bounds the caller set. Returns 0 when the slice was consumed.

@@ -30,11 +30,13 @@
 #include <cstdlib>
 #include <cstring>
 #include <sys/stat.h>
+#include <boost/bind.hpp>
 #include "app.h"
 #include "connection_tcp.h"
 #include "op_dump.h"
 #include "op_meta.h"
 #include "op_repl_sync_wal.h"
+#include "copy_protection.h"
 #include "op_repl_snapshot.h"
 
 #ifdef HAVE_LIBROCKSDB
@@ -215,9 +217,13 @@ int handler_reconstruction::_run_once() {
 			&& this->_storage->get_type() == storage::type_rocksdb) {
 		storage_rocksdb* rdb = dynamic_cast<storage_rocksdb*>(this->_storage);
 		if (rdb && rdb->is_corrupted()) {
-			log_warning("local storage is corrupted -> hard_reset before reseed (auto Case-A recovery)", 0);
-			if (rdb->hard_reset() < 0) {
-				log_err("hard_reset failed -> retrying reconstruction next cycle", 0);
+			// R3-D: an unreadable copy is not proof that nothing valuable is
+			// in it — move it aside, never delete it; if it cannot be moved,
+			// stop (nothing is deleted)
+			string moved_to;
+			log_warning("local storage is corrupted -> moving it aside (quarantine) before reseed", 0);
+			if (rdb->quarantine_reset(moved_to) < 0) {
+				log_err("CRITICAL: the corrupt copy could not be moved aside; NOT deleting it and NOT reconstructing (operator action needed)", 0);
 				return -1;
 			}
 		}
@@ -363,13 +369,27 @@ int handler_reconstruction::_run_once() {
 						uint64_t local_bytes = rdb->local_copy_bytes();
 						int64_t available = rdb->rebuild_space_available();
 						if (storage_rocksdb::rebuild_must_discard(local_bytes, available)) {
-							log_warning("snapshot bootstrap: the new copy will not fit next to ours (local copy %llu bytes, available %lld incl. memory headroom on tmpfs) -> discarding this replica's stale copy before staging (the source holds the data)",
-								(unsigned long long)local_bytes, (long long)available);
-							if (rdb->hard_reset() == 0) {
-								rdb->incr_rebuild_stale_discarded();
+							// R3-D: the strictest step — the copy would be gone
+							// before the replacement exists. Only with the
+							// protection rule passing AND a source that holds
+							// keys; otherwise no snapshot (the guarded
+							// truncate+dump below decides again).
+							string gwhy;
+							const copy_gate g = this->_copy_gate("discard to free space for a snapshot", gwhy, true);
+							if (copy_gate_allows(g)) {
+								log_warning("snapshot bootstrap: the new copy will not fit next to ours (local copy %llu bytes, available %lld incl. memory headroom on tmpfs) -> discarding this replica's stale copy before staging (protection: %s)",
+									(unsigned long long)local_bytes, (long long)available, gwhy.c_str());
+								if (rdb->hard_reset() == 0) {
+									rdb->incr_rebuild_stale_discarded();
+								}
+							} else {
+								log_warning("snapshot bootstrap skipped: two copies do not fit and discarding this one first is not allowed (%s) -> the guarded truncate+full-dump path decides", gwhy.c_str());
+								peer_snapshot_supported = false;
 							}
 						}
 					}
+				}
+				if (peer_snapshot_supported) {
 					log_notice("attempting snapshot bootstrap (physical reseed + WAL catch-up) instead of truncate+full-dump", 0);
 					// FRESH connection: the WAL sync attempt above may have
 					// aborted MID-STREAM, leaving unread stream bytes on `c`.
@@ -384,6 +404,9 @@ int handler_reconstruction::_run_once() {
 					} else {
 						op_repl_snapshot* sp = new op_repl_snapshot(cs, this->_storage);
 						sp->set_bwlimit(this->_reconstruction_bwlimit);
+						// R3-D: the swap replaces this copy — the protection
+						// rule is evaluated right before it
+						sp->set_pre_swap_gate(boost::bind(&handler_reconstruction::_swap_gate, this, _1));
 						if (sp->run_client() == 0) {
 							via_snapshot = true;
 							this->_copy_dirty = true;
@@ -396,6 +419,12 @@ int handler_reconstruction::_run_once() {
 					}
 				}
 				if (!via_snapshot) {
+					// R3-D: the truncate destroys this copy before the dump
+					// refills it — the protection rule decides right here
+					string gwhy;
+					if (!copy_gate_allows(this->_copy_gate("truncate before full dump", gwhy))) {
+						return -1;
+					}
 					log_notice("truncating local storage before full-dump reconstruction so deletions on the source propagate (WAL sync was unavailable; see previous log line)", 0);
 					if (this->_storage->truncate(0) < 0) {
 						log_err("failed to truncate storage before full dump", 0);
@@ -405,8 +434,11 @@ int handler_reconstruction::_run_once() {
 						// onto the clean empty DB (slave only, guaranteed here).
 						storage_rocksdb* rdb = dynamic_cast<storage_rocksdb*>(this->_storage);
 						if (rdb && rdb->is_corrupted() && this->_role == cluster::role_slave) {
-							log_warning("truncate failed on a corrupted DB -> hard_reset (auto Case-A); reseeding next cycle", 0);
-							rdb->hard_reset();
+							string moved_to;
+							log_warning("truncate failed on a corrupted DB -> moving it aside (quarantine); reseeding next cycle", 0);
+							if (rdb->quarantine_reset(moved_to) < 0) {
+								log_err("CRITICAL: the corrupt copy could not be moved aside; NOT deleting it (operator action needed)", 0);
+							}
 						}
 #endif
 						return -1;
@@ -644,6 +676,135 @@ handler_reconstruction::source_check handler_reconstruction::_check_source(strin
 	return source_valid;
 }
 
+
+/**
+ *	R3-D: read the source's item count and identity with one bounded `stats`
+ *	request (3 s connect, 5 s per read, 8 s in total). Anything incomplete
+ *	leaves `out.known` false (Unknown).
+ */
+void handler_reconstruction::probe_source_identity(const string& host, int port, copy_identity& out) {
+	out = copy_identity();
+	connection_tcp* t = new connection_tcp(host, port);
+	t->set_connect_timeout_ms(3000);
+	t->set_connect_retry_limit(1);
+	t->set_read_timeout(5000);
+	shared_connection c(t);
+	if (c->open() < 0) {
+		return;
+	}
+	t->set_deadline_from_now(8000);
+	const char* req = "stats\r\n";
+	if (c->write(req, strlen(req)) < 0) {
+		return;
+	}
+	bool ended = false;
+	bool items_seen = false;
+	for (int i = 0; i < 2000; i++) {
+		char* p = NULL;
+		if (c->readline(&p) < 0) {
+			break;
+		}
+		string line(p);
+		delete[] p;
+		while (!line.empty() && (line[line.size() - 1] == '\n' || line[line.size() - 1] == '\r')) {
+			line.erase(line.size() - 1);
+		}
+		if (line == "END") {
+			ended = true;
+			break;
+		}
+		if (line.compare(0, 5, "STAT ") != 0) {
+			continue;
+		}
+		const string rest = line.substr(5);
+		const size_t sp = rest.find(' ');
+		if (sp == string::npos) {
+			continue;
+		}
+		const string key = rest.substr(0, sp);
+		const string value = rest.substr(sp + 1);
+		if (key == "curr_items") {
+			try {
+				out.items = boost::lexical_cast<uint64_t>(value);
+				items_seen = true;
+			} catch (boost::bad_lexical_cast&) {
+				return;
+			}
+		} else if (key == "rocksdb_master_id") {
+			out.lineage = value;
+		} else if (key == "rocksdb_source_epoch") {
+			out.epoch = value;
+		} else if (key == "rocksdb_source_epoch_reason") {
+			out.epoch_reason = value;
+		}
+	}
+	out.known = ended && items_seen;
+}
+
+/**
+ *	R3-D: the protection rule, evaluated right before a destructive step on
+ *	this slave's copy. Never cached: every step evaluates it again against the
+ *	source and the copy as they are now. The test stop point holds BEFORE the
+ *	evaluation, so a test can change the source while it holds.
+ */
+copy_gate handler_reconstruction::_copy_gate(const char* step, string& why, bool strict) {
+	// TEST SEAM (E2E only): hold before the evaluation while the file exists
+	const char* hold = getenv("FLARE_TEST_DESTRUCTIVE_HOLD_FILE");
+	struct stat st;
+	bool held = false;
+	while (hold != NULL && hold[0] != '\0' && stat(hold, &st) == 0) {
+		if (!held) {
+			log_warning("destructive step '%s' held by FLARE_TEST_DESTRUCTIVE_HOLD_FILE (test seam); the protection rule is evaluated after the release", step);
+			held = true;
+		}
+		if (this->_thread->is_shutdown_request()) {
+			why = "shutdown requested while held";
+			return gate_refuse_unknown;
+		}
+		sleep(1);
+	}
+	if (held) {
+		log_notice("destructive step '%s' released (test seam)", step);
+	}
+	copy_identity local;
+	local.items = this->_storage->count();
+	local.known = true;
+#ifdef HAVE_LIBROCKSDB
+	storage_rocksdb* rdb = dynamic_cast<storage_rocksdb*>(this->_storage);
+	if (rdb != NULL) {
+		if (rdb->is_corrupted()) {
+			local.known = false;	// an unreadable copy is not an empty one
+		}
+		local.lineage = rdb->get_master_id();
+		local.epoch = rdb->get_source_epoch();
+		local.rebuilt_from_lineage = rdb->get_rebuilt_from_master_id();
+		local.rebuilt_from_epoch = rdb->get_rebuilt_from_epoch();
+	}
+#endif
+	copy_identity source;
+	handler_reconstruction::probe_source_identity(this->_node_server_name, this->_node_server_port, source);
+	copy_gate g = decide_copy_gate(local, source, why);
+	if (strict && g == gate_allow && source.items == 0) {
+		why += "; but this step discards the copy BEFORE the replacement exists, which needs a source that holds keys";
+		g = gate_refuse_unsafe;
+	}
+	const string src = this->_cluster->to_node_key(this->_node_server_name, this->_node_server_port);
+	if (copy_gate_allows(g)) {
+		log_notice("copy protection '%s': %s — %s (source %s: %s%llu keys, epoch %s/%s; this copy: %llu keys, epoch %s, evidence %s)",
+			step, copy_gate_name(g), why.c_str(), src.c_str(), source.known ? "" : "unknown, ", (unsigned long long)source.items,
+			source.epoch.c_str(), source.epoch_reason.c_str(), (unsigned long long)local.items, local.epoch.c_str(), local.rebuilt_from_epoch.c_str());
+	} else {
+		log_warning("copy protection '%s': %s — %s (source %s: %s%llu keys, epoch %s/%s; this copy: %llu keys, epoch %s, evidence %s); the copy is KEPT and the reconstruction waits",
+			step, copy_gate_name(g), why.c_str(), src.c_str(), source.known ? "" : "unknown, ", (unsigned long long)source.items,
+			source.epoch.c_str(), source.epoch_reason.c_str(), (unsigned long long)local.items, local.epoch.c_str(), local.rebuilt_from_epoch.c_str());
+	}
+	return g;
+}
+
+bool handler_reconstruction::_swap_gate(string& why) {
+	return copy_gate_allows(this->_copy_gate("snapshot swap", why));
+}
+
 /**
  *	activate_node with bounded retry (see the activation comment in
  *	_run_once). ~1 minute of attempts covers any realistic index leader
@@ -858,7 +1019,20 @@ bool handler_reconstruction::_try_wal_reconstruction(shared_connection c,
 	wal_op->set_wal_sync_bwlimit(wal_bwlimit);
 	wal_op->set_wal_sync_interval(wal_interval);
 
-	int wal_result = wal_op->run_client(last_lsn, local_master_id);
+	// R3-D: catch-up is bound to the copy's HISTORY. Its token is the
+	// rebuild evidence epoch (a copy taken by full dump), else its own
+	// source epoch (a snapshot-restored copy adopts the source's). Unknown is
+	// never treated as a match: no catch-up, and the guarded rebuild decides.
+	string copy_epoch = rdb->get_rebuilt_from_epoch();
+	if (copy_epoch.empty()) {
+		copy_epoch = rdb->get_source_epoch();
+	}
+	if (copy_epoch.empty()) {
+		log_notice("WAL reconstruction refused: this copy's history is unknown (no epoch) -> no catch-up; the guarded rebuild decides", 0);
+		delete wal_op;
+		return false;
+	}
+	int wal_result = wal_op->run_client_reconstruct(last_lsn, local_master_id, copy_epoch);
 	op_repl_sync_wal::client_result rc = wal_op->get_client_result();
 	delete wal_op;
 

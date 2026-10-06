@@ -38,6 +38,9 @@
 #include <unistd.h>
 #include <sys/types.h>
 #include <dirent.h>
+#include <cerrno>
+#include <cstring>
+#include <cstdio>
 #include <algorithm>
 #include <map>
 #include <vector>
@@ -2230,6 +2233,51 @@ int storage_rocksdb::hard_reset() {
 		// A fresh empty DB has no lineage; repl_last_lsn is 0, so the next
 		// reconstruction takes the clean full/snapshot reseed path.
 		log_notice("hard_reset: wiped and reopened empty DB [%s]; reconstruction will reseed", this->_data_path.c_str());
+		r = 0;
+	} while (false);
+	pthread_rwlock_unlock(&this->_mutex_wholelock);
+	return r;
+}
+
+int storage_rocksdb::quarantine_reset(string& moved_to) {
+	pthread_rwlock_wrlock(&this->_mutex_wholelock);
+	int r = -1;
+	do {
+		ostringstream dst;
+		dst << this->_data_dir << "/quarantine-" << time(NULL) << "-" << getpid();
+		moved_to = dst.str();
+		if (this->_db != NULL) {
+			this->_close_db();
+		}
+		if (rename(this->_data_path.c_str(), moved_to.c_str()) != 0) {
+			const int e = errno;
+			log_err("quarantine_reset: could not move the corrupt DB [%s] aside to [%s]: %s -> NOTHING deleted; reopening it as it is",
+				this->_data_path.c_str(), moved_to.c_str(), strerror(e));
+			rocksdb::Status reopen = this->_open_db(this->_data_path);
+			if (!reopen.ok()) {
+				log_err("quarantine_reset: reopening the corrupt DB failed too: %s (the node stays unusable; operator action needed)", reopen.ToString().c_str());
+				this->_db = NULL;
+			}
+			moved_to.clear();
+			break;
+		}
+		rocksdb::Status status = this->_open_db(this->_data_path);
+		if (!status.ok()) {
+			log_err("quarantine_reset: reopen of an empty DB failed: %s", status.ToString().c_str());
+			this->_db = NULL;
+			if (this->_emergency_reopen_empty("quarantine_reset") != 0) {
+				break;
+			}
+		}
+		this->_curr_items.sub(this->_curr_items.fetch());
+		this->_clear_header_cache();
+		this->_corrupted = false;
+		this->_hard_reset.incr();
+		if (this->_load_or_init_generations() < 0) {
+			log_err("quarantine_reset: could not establish replication generations; replication stays UNAVAILABLE on this node", 0);
+		}
+		log_warning("quarantine_reset: the corrupt DB was MOVED ASIDE to [%s] (kept for inspection, not deleted) and an empty DB opened at [%s]; reconstruction will reseed",
+			moved_to.c_str(), this->_data_path.c_str());
 		r = 0;
 	} while (false);
 	pthread_rwlock_unlock(&this->_mutex_wholelock);

@@ -42,6 +42,7 @@
 #define	OP_REPL_SNAPSHOT_H
 
 #include "op.h"
+#include <boost/function.hpp>
 #include "storage.h"
 
 using namespace std;
@@ -54,12 +55,16 @@ protected:
 	storage*			_storage;
 	uint64_t			_bwlimit;					// KB/s: client's requested cap, sent with the request (0 = no preference)
 	uint64_t			_peer_bwlimit_request;		// KB/s: server side — what the client asked for
+	// R3-D: evaluated right before the swap replaces the local copy; false
+	// refuses the swap (the staged copy is removed, the local copy is kept)
+	boost::function<bool (string&)>	_pre_swap_gate;
 
 public:
 	op_repl_snapshot(shared_connection c, storage* st);
 	virtual ~op_repl_snapshot();
 
 	void set_bwlimit(uint64_t bwlimit) { this->_bwlimit = bwlimit; };
+	void set_pre_swap_gate(boost::function<bool (string&)> g) { this->_pre_swap_gate = g; };
 
 	// Pull the snapshot from the connected source and swap it in as the
 	// local live DB (rocksdb only). Returns 0 on success; on any failure the

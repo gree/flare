@@ -367,6 +367,13 @@ int op_repl_sync_wal::_run_server() {
 #endif
 }
 
+int op_repl_sync_wal::run_client_reconstruct(uint64_t lsn, const string& master_id, const string& expected_epoch) {
+	this->_client_epoch = expected_epoch;
+	this->_follow_mode = false;
+	this->_server_epoch.clear();
+	return this->run_client(lsn, master_id);
+}
+
 int op_repl_sync_wal::_run_client(uint64_t lsn, const string& master_id) {
 	char request[BUFSIZ];
 	const char* id = master_id.empty() ? "-" : master_id.c_str();
@@ -546,8 +553,14 @@ int op_repl_sync_wal::_parse_text_client_parameters() {
 			// D2: in FOLLOW mode a source that did not identify its history
 			// (no EPOCH line before the first batch) is refused: no data and
 			// no cursor change. The verbatim apply is for reconstruction only.
-			if (this->_follow_mode && this->_server_epoch.empty()) {
-				log_err("follow reply carries a batch (LSN %llu) but no EPOCH line -> refusing to apply anything", (unsigned long long)lsn);
+			if ((this->_follow_mode || !this->_client_epoch.empty()) && this->_server_epoch.empty()) {
+				log_err("%s reply carries a batch (LSN %llu) but no EPOCH line -> refusing to apply anything", this->_follow_mode ? "follow" : "catch-up", (unsigned long long)lsn);
+				this->_client_result = client_no_epoch;
+				return -1;
+			}
+			// R3-D: a catch-up bound to a history applies only that history
+			if (!this->_client_epoch.empty() && this->_server_epoch != this->_client_epoch) {
+				log_err("catch-up reply is history %s, not this copy's %s -> refusing to apply anything", this->_server_epoch.c_str(), this->_client_epoch.c_str());
 				this->_client_result = client_no_epoch;
 				return -1;
 			}

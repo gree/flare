@@ -2843,7 +2843,8 @@ private def copyProtCfg : ClusterConfig := { emptySourceCfg with
   name := "copy-prot"
   «namespace» := "flare-copy-prot"
   debugPod := "debug-copy-prot"
-  flaredEnv := emptySourceCfg.flaredEnv ++ [("FLARE_TEST_DESTRUCTIVE_HOLD_FILE", "/tmp/destructive-hold")] }
+  flaredEnv := emptySourceCfg.flaredEnv ++ [("FLARE_TEST_DESTRUCTIVE_HOLD_FILE", "/tmp/destructive-hold"),
+                                            ("FLARE_TEST_RECONSTRUCTION_START_HOLD_FILE", "/tmp/start-hold")] }
 
 /-- Every key and value in the node's OWN storage (`dump`, whatever its role:
     a Prepare replica forwards GETs, so its copy is read this way). -/
@@ -2893,8 +2894,15 @@ def copyProtectionSuite : TestSuite := {
     -- writes to it, and a cut forward takes ~16 s to be dropped; the cut is
     -- held until EVERY delete is dropped, so the held copy stays as it was
     let kv := (List.range 8).map fun i => (s!"cp_{i}", s!"cpval_{i}")
-    let hold := fun (pod : String) => do return (← kubectl ["exec", "-n", ns, pod, "-c", "flared", "--", "touch", "/tmp/destructive-hold"]).toBool
-    let release := fun (pod : String) => do discard <| kubectl ["exec", "-n", ns, pod, "-c", "flared", "--", "rm", "-f", "/tmp/destructive-hold"]
+    -- two stop points: at the START of a reconstruction attempt (before it
+    -- decides catch-up / merge / truncate) and right before the destructive
+    -- step (after that decision, before the protection rule is evaluated)
+    let holdAt := fun (file pod : String) => do return (← kubectl ["exec", "-n", ns, pod, "-c", "flared", "--", "touch", file]).toBool
+    let releaseAt := fun (file pod : String) => do discard <| kubectl ["exec", "-n", ns, pod, "-c", "flared", "--", "rm", "-f", file]
+    let hold := holdAt "/tmp/start-hold"
+    let release := releaseAt "/tmp/start-hold"
+    let holdD := holdAt "/tmp/destructive-hold"
+    let releaseD := releaseAt "/tmp/destructive-hold"
     [
     { name := "copy-protection initial state: distinct keys and values on the master, every copy converged (verified)"
       run := do
@@ -2933,8 +2941,8 @@ def copyProtectionSuite : TestSuite := {
           --     reconstruction reaches the stop point
           let approved ← waitForCondition s!"the rebuild of {y} is approved while {x} holds data" 300 do
             return ((← c.opLog 4000).splitOn "\n").any fun l => containsSubstr l "REPLICA REPAIR: demoting" && containsSubstr l s!"{y}." && containsSubstr l "holds data"
-          let atStop ← waitForCondition s!"{y}'s destructive step is held at the stop point" 300 do
-            return containsSubstr (← c.flaredLogSince y since) "held by FLARE_TEST_DESTRUCTIVE_HOLD_FILE"
+          let atStop ← waitForCondition s!"{y}'s reconstruction is held at its start (before any decision)" 300 do
+            return containsSubstr (← c.flaredLogSince y since) "'reconstruction start' held by FLARE_TEST_RECONSTRUCTION_START_HOLD_FILE"
           if !approved || !atStop then
             release y
             c.windowRecord since [y, x] "H1"
@@ -2992,16 +3000,18 @@ def copyProtectionSuite : TestSuite := {
           let some y := y? | return .fail s!"precondition: no replica besides {x} holds the original copy (H1 must precede)"
           let yIp ← ip y
           let kv2 := (List.range 8).map fun i => (s!"cp_{i}", s!"cpnew_{i}")
-          if !(← hold y) then return .fail "precondition: could not arm the stop point"
-          if (← c.setValues xIp kv2) != kv2.length then release y; return .fail s!"precondition: could not write the new values on {x}"
-          let atStop ← waitForCondition s!"{y} reaches the stop point again" 300 do
-            return containsSubstr (← c.flaredLogSince y since) "held by FLARE_TEST_DESTRUCTIVE_HOLD_FILE"
-          if !atStop then release y; return .fail "precondition: the stop point was not reached"
+          -- the stop point right BEFORE the destructive step: y has
+          -- connected and decided to truncate (the source holds keys again)
+          if !(← holdD y) then return .fail "precondition: could not arm the stop point"
+          if (← c.setValues xIp kv2) != kv2.length then releaseD y; return .fail s!"precondition: could not write the new values on {x}"
+          let atStop ← waitForCondition s!"{y} reaches the stop point before its destructive step" 300 do
+            return containsSubstr (← c.flaredLogSince y since) "'truncate before full dump' held by FLARE_TEST_DESTRUCTIVE_HOLD_FILE"
+          if !atStop then releaseD y; return .fail "precondition: the stop point before the destructive step was not reached"
           -- the source unreadable from y, then released
           match ← hostCmd "docker" (["exec", kindNode, "iptables", "-I", "FORWARD", "1"] ++ ruleSpec yIp xIp) with
-          | .error e => release y; return .fail s!"precondition: could not cut {y} -> {x}: {e}"
+          | .error e => releaseD y; return .fail s!"precondition: could not cut {y} -> {x}: {e}"
           | .ok _ => pure ()
-          release y
+          releaseD y
           let unknownRefused ← waitForCondition s!"{y} refuses on an Unknown source" 120 do
             return ((← c.flaredLogSince y since).splitOn "\n").any fun l => containsSubstr l "REFUSE (source unknown: copy kept)"
           let yDuring ← c.localDump yIp

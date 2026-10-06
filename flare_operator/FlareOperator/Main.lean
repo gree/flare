@@ -761,12 +761,17 @@ private def podIdentityNow (podName ns : String) : IO (Option (String × Option 
     with the master's stats bracketed by its pod incarnation. `none` =
     proceed. Used at demotion and again at RELEASE: a decision made at
     demotion is not reused for a copy that happens later (CI 37493288883). -/
-private def repairVerdictNow (state : FlareClusterState) (key : String) (ns : String) : IO (Option String) := do
+private def repairVerdictNow (state : FlareClusterState) (key : String) (ns : String)
+    (partitionHint : Option Int := none) : IO (Option String) := do
   match state.lookupNode key with
   | none => return some "the replica is not in the map"
   | some rn =>
-    let srcMaster := state.nodeMap.find? (fun kv =>
-      kv.2.role == FlareRole.Master && kv.2.state == FlareState.Active && kv.2.partition == rn.partition)
+    -- A DEMOTED replica is a Proxy (partition -1): its partition is the one
+    -- the request was recorded under (CI 37526413435: reading -1 held every
+    -- repair forever as "no Active master")
+    let part := if rn.partition ≥ 0 then some rn.partition else partitionHint
+    let srcMaster := part.bind fun pt => state.nodeMap.find? (fun kv =>
+      kv.2.role == FlareRole.Master && kv.2.state == FlareState.Active && kv.2.partition == pt)
     match srcMaster with
     | none => return some "the partition has no Active master right now"
     | some (_, mn) =>
@@ -1984,7 +1989,8 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
             -- the replica demoted (its copy kept) instead of releasing it
             let o ← match e.phase with
               | .demoted _ =>
-                match ← repairVerdictNow finalState k ns with
+                let hint := (finalState.lookupNode e.masterKey).map (·.partition) |>.filter (· ≥ 0)
+                match ← repairVerdictNow finalState k ns hint with
                 | some why =>
                   IO.eprintln s!"[flare-operator] REPLICA REPAIR release HELD for {k}: the source check at release defers ({why}); the replica stays demoted with its copy"
                   pure { o with reportedVersion := none }

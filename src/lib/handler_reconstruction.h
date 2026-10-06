@@ -102,6 +102,9 @@ protected:
 	copy_gate _copy_gate(const char* step, string& why, bool strict = false);
 	// the pre-swap hook given to the snapshot client (true = swap allowed)
 	bool _swap_gate(string& why);
+	// TEST SEAMS: hold while the file named by `env` exists (false =
+	// shutdown requested while held)
+	bool _test_hold(const char* env, const char* where);
 	// a bounded `stats` read of the source: items and identity
 	static void probe_source_identity(const string& host, int port, copy_identity& out);
 	// Is the copy's source still valid for activation? THREE outcomes:

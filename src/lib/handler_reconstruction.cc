@@ -204,6 +204,12 @@ int handler_reconstruction::run() {
 int handler_reconstruction::_run_once() {
 	this->_thread->set_peer(this->_node_server_name, this->_node_server_port);
 	this->_thread->set_state("connect");
+	// TEST SEAM: a stop point at the START of the attempt too, before any
+	// decision (catch-up, merge-or-truncate, snapshot), so a test can change
+	// the source while the whole attempt waits (a slave only)
+	if (this->_role == cluster::role_slave && !this->_test_hold("FLARE_TEST_RECONSTRUCTION_START_HOLD_FILE", "reconstruction start")) {
+		return -1;
+	}
 
 #ifdef HAVE_LIBROCKSDB
 	// CORRUPTION SELF-HEAL: a poisoned local DB rejects the truncate that
@@ -749,22 +755,9 @@ void handler_reconstruction::probe_source_identity(const string& host, int port,
  */
 copy_gate handler_reconstruction::_copy_gate(const char* step, string& why, bool strict) {
 	// TEST SEAM (E2E only): hold before the evaluation while the file exists
-	const char* hold = getenv("FLARE_TEST_DESTRUCTIVE_HOLD_FILE");
-	struct stat st;
-	bool held = false;
-	while (hold != NULL && hold[0] != '\0' && stat(hold, &st) == 0) {
-		if (!held) {
-			log_warning("destructive step '%s' held by FLARE_TEST_DESTRUCTIVE_HOLD_FILE (test seam); the protection rule is evaluated after the release", step);
-			held = true;
-		}
-		if (this->_thread->is_shutdown_request()) {
-			why = "shutdown requested while held";
-			return gate_refuse_unknown;
-		}
-		sleep(1);
-	}
-	if (held) {
-		log_notice("destructive step '%s' released (test seam)", step);
+	if (!this->_test_hold("FLARE_TEST_DESTRUCTIVE_HOLD_FILE", step)) {
+		why = "shutdown requested while held";
+		return gate_refuse_unknown;
 	}
 	copy_identity local;
 	local.items = this->_storage->count();
@@ -799,6 +792,26 @@ copy_gate handler_reconstruction::_copy_gate(const char* step, string& why, bool
 			source.epoch.c_str(), source.epoch_reason.c_str(), (unsigned long long)local.items, local.epoch.c_str(), local.rebuilt_from_epoch.c_str());
 	}
 	return g;
+}
+
+bool handler_reconstruction::_test_hold(const char* env, const char* where) {
+	const char* hold = getenv(env);
+	struct stat st;
+	bool held = false;
+	while (hold != NULL && hold[0] != '\0' && stat(hold, &st) == 0) {
+		if (!held) {
+			log_warning("'%s' held by %s (test seam); evaluated after the release", where, env);
+			held = true;
+		}
+		if (this->_thread->is_shutdown_request()) {
+			return false;
+		}
+		sleep(1);
+	}
+	if (held) {
+		log_notice("'%s' released (test seam)", where);
+	}
+	return true;
 }
 
 bool handler_reconstruction::_swap_gate(string& why) {

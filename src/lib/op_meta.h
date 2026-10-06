@@ -49,6 +49,9 @@ protected:
 	bool			_peer_snapshot_push_supported;
 	// Peer's source epoch from its features reply ("" = not advertised).
 	string		_peer_source_epoch;
+	// The reply carried a source_epoch= token at all (an older flared never
+	// sends one: its features reply is complete WITHOUT it).
+	bool			_peer_epoch_token;
 
 public:
 	op_meta(shared_connection c, cluster* cl, storage* st = NULL);
@@ -67,6 +70,7 @@ public:
 	bool get_peer_snapshot_supported() const { return this->_peer_snapshot_supported; };
 	bool get_peer_snapshot_push_supported() const { return this->_peer_snapshot_push_supported; };
 	string get_peer_source_epoch() const { return this->_peer_source_epoch; };
+	bool get_peer_epoch_token() const { return this->_peer_epoch_token; };
 
 protected:
 	virtual int _parse_text_server_parameters();

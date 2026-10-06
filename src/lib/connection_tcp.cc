@@ -59,7 +59,8 @@ connection_tcp::connection_tcp(const std::string& host, int port):
 		_write_buf_chunk_size(0),
 		_connect_retry_limit(connection_tcp::connect_retry_limit),
 		_connect_retry_wait(connection_tcp::connect_retry_wait),
-		_connect_timeout_ms(0) {
+		_connect_timeout_ms(0),
+		_deadline_ms(0) {
 }
 
 /**
@@ -84,7 +85,8 @@ connection_tcp::connection_tcp(int sock, struct sockaddr_in addr):
 		_write_buf_chunk_size(0),
 		_connect_retry_limit(connection_tcp::connect_retry_limit),
 		_connect_retry_wait(connection_tcp::connect_retry_wait),
-		_connect_timeout_ms(0) {
+		_connect_timeout_ms(0),
+		_deadline_ms(0) {
 }
 
 /**
@@ -109,7 +111,8 @@ connection_tcp::connection_tcp(int sock, struct sockaddr_un addr):
 		_write_buf_chunk_size(0),
 		_connect_retry_limit(connection_tcp::connect_retry_limit),
 		_connect_retry_wait(connection_tcp::connect_retry_wait),
-		_connect_timeout_ms(0) {
+		_connect_timeout_ms(0),
+		_deadline_ms(0) {
 }
 
 /**
@@ -137,6 +140,13 @@ connection_tcp::~connection_tcp() {
 /**
  *	open tcp connection_tcp
  */
+int connection_tcp::set_deadline_from_now(int ms) {
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	this->_deadline_ms = (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000 + (uint64_t)(ms > 0 ? ms : 0);
+	return 0;
+}
+
 int connection_tcp::_open(string host, int port) {
 	this->_errno = 0;
 	log_debug("connecting to %s:%d", host.c_str(), port);
@@ -203,8 +213,9 @@ int connection_tcp::_open(string host, int port) {
 		break;
 	}
 	if (i == (this->_connect_retry_limit+1)) {
+		const int last = errno;		// before logging can change it
 		log_err("connect() failed", -1);
-		this->_errno = errno;
+		this->_errno = last;
 		this->close();
 		return -1;
 	}
@@ -282,7 +293,24 @@ int connection_tcp::read(char** p, int expect_len, bool readline, bool& actual) 
 	int len = 0;
 	actual = true;
 	do {
-		int n = poll(&ufds, 1, this->_read_timeout);
+		int wait_ms = this->_read_timeout;
+		if (this->_deadline_ms > 0) {
+			struct timespec ts;
+			clock_gettime(CLOCK_MONOTONIC, &ts);
+			const uint64_t now = (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+			if (now >= this->_deadline_ms) {
+				log_info("request deadline exceeded before the reply was complete", 0);
+				this->_errno = -3;		// distinct: total deadline (-1 = per-read timeout, -2 = peer closed)
+				delete[] *p;
+				*p = NULL;
+				return -1;
+			}
+			const uint64_t left = this->_deadline_ms - now;
+			if (left < (uint64_t)wait_ms) {
+				wait_ms = (int)left;
+			}
+		}
+		int n = poll(&ufds, 1, wait_ms);
 		if (n == 0) {
 			log_info("poll() timed out (%0.4f sec)", this->_read_timeout / 1000.0);
 			this->_errno = -1;

@@ -46,7 +46,8 @@ op_meta::op_meta(shared_connection c, cluster* cl, storage* st):
 		_meta_key(""),
 		_peer_snapshot_supported(false),
 		_peer_snapshot_push_supported(false),
-		_peer_source_epoch("") {
+		_peer_source_epoch(""),
+		_peer_epoch_token(false) {
 }
 
 /**
@@ -317,6 +318,7 @@ int op_meta::_parse_text_client_features(bool& rocksdb_wal_supported, string& ma
 	master_id.clear();
 	latest_lsn = 0;
 	this->_peer_source_epoch.clear();
+	this->_peer_epoch_token = false;
 
 	// Read response line
 	char* p;
@@ -349,6 +351,7 @@ int op_meta::_parse_text_client_features(bool& rocksdb_wal_supported, string& ma
 			} else if (strncmp(q, "master_id=", 10) == 0) {
 				master_id.assign(q + 10);
 			} else if (strncmp(q, "source_epoch=", 13) == 0) {
+				this->_peer_epoch_token = true;
 				this->_peer_source_epoch.assign(q + 13);
 			} else if (strncmp(q, "latest_lsn=", 11) == 0) {
 				try {

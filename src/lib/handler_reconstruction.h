@@ -63,6 +63,16 @@ protected:
 	// The source's lineage as probed at the start of this attempt (with
 	// _probe_source_epoch): what the copy was taken from.
 	string							_attempt_master_id;
+	// The copy-time identity probe was COMPLETE (answered, RocksDB WAL
+	// features, master_id present); only then can the copy be validated.
+	bool								_identity_known;
+	// The copy-time reply carried a source_epoch token. Absent from a
+	// complete reply = an older flared (lineage-only compatibility).
+	bool								_epoch_supported;
+	// A slave copy is COMPLETE and awaits validation + activation. While the
+	// source is Unknown the retries only re-validate; they never return to a
+	// transfer (WAL, snapshot, dump).
+	bool								_pending_activation;
 	int									_partition;
 	int									_partition_size;
 	cluster::role				_role;
@@ -95,7 +105,14 @@ protected:
 	//   source_unknown  — the probe could not be completed (connect/read
 	//                     failure): NOT valid (no activation) and NOT a
 	//                     change (the copy is kept; check again).
-	enum source_check { source_valid, source_changed, source_unknown };
+	//   source_copy_unverified — the copy-time identity was not established
+	//                     (incomplete probe): the copy can never be validated
+	//                     and is taken again (not a confirmed change).
+	enum source_check { source_valid, source_changed, source_unknown, source_copy_unverified };
+	// Validate and activate a completed copy: 0 = activated, -1 = still
+	// pending (Unknown, or activation refused), -2 = confirmed source change
+	// (copy dropped, clean rebuild), -3 = copy unverifiable (taken again).
+	int _activate_pending();
 	source_check _check_source(string& why);
 
 protected:

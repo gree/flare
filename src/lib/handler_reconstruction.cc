@@ -78,6 +78,9 @@ handler_reconstruction::handler_reconstruction(shared_thread t, cluster* cl, sto
 		_copy_dirty(false),
 		_force_clean(false),
 		_attempt_master_id(""),
+		_identity_known(false),
+		_epoch_supported(false),
+		_pending_activation(false),
 		_partition(partition),
 		_partition_size(partition_size),
 		_role(r),
@@ -127,7 +130,8 @@ int handler_reconstruction::run() {
 			const string cur = this->_cluster->get_partition_master_key(this->_partition);
 			const string was = this->_cluster->to_node_key(this->_node_server_name, this->_node_server_port);
 			if (cur.empty()) {
-				log_notice("reconstruction attempt %d: partition %d has no master in the current map -> waiting (source unknown, nothing copied)", attempt + 1, this->_partition);
+				log_notice("reconstruction attempt %d: partition %d has no master in the current map -> waiting (source unknown%s)", attempt + 1, this->_partition,
+					this->_pending_activation ? "; the completed copy is kept" : ", nothing copied");
 				result = -1;
 			} else if (cur == this->_cluster->get_own_node_key()) {
 				log_notice("reconstruction abandoned: this node is now the master of partition %d (the role change starts what it needs)", this->_partition);
@@ -144,8 +148,17 @@ int handler_reconstruction::run() {
 					if (this->_copy_dirty) {
 						this->_force_clean = true;
 					}
+					// a completed copy from the previous source is dropped
+					this->_pending_activation = false;
 				}
-				result = this->_run_once();
+				if (this->_pending_activation) {
+					// COMPLETED copy awaiting validation: re-validate and
+					// activate only; never a new transfer while Unknown.
+					const int pr = this->_activate_pending();
+					result = (pr == 0) ? 0 : -1;
+				} else {
+					result = this->_run_once();
+				}
 			}
 		} else {
 			result = this->_run_once();
@@ -463,25 +476,6 @@ int handler_reconstruction::_run_once() {
 		}
 	}
 
-	// The source must STILL be this partition's master at completion: a copy
-	// finished from an ex-master must not be activated (the next attempt
-	// re-selects and starts clean).
-	if (this->_role == cluster::role_slave) {
-		const string cur = this->_cluster->get_partition_master_key(this->_partition);
-		const string src = this->_cluster->to_node_key(this->_node_server_name, this->_node_server_port);
-		if (cur.empty()) {
-			// Unknown (no master in the current map): not a confirmed change.
-			// The copy is kept; the next attempt checks again.
-			log_warning("reconstruction from %s completed but the partition has no master in the current map -> not activating yet; the copy is kept", src.c_str());
-			return -1;
-		}
-		if (cur != src) {
-			log_warning("reconstruction from %s completed but the partition's master is now %s -> not activating; retrying from the current master with a clean copy", src.c_str(), cur.c_str());
-			this->_force_clean = true;
-			return -1;
-		}
-	}
-
 	// REBUILD EVIDENCE: after a clean truncate + full dump, record WHICH
 	// HISTORY this copy was rebuilt from — the source's master_id and source
 	// epoch — but only if a fresh probe at the END shows the same identity
@@ -525,12 +519,11 @@ int handler_reconstruction::_run_once() {
 	//
 	// The activation op is as vital as the dump itself: if it is lost (a
 	// single-shot send raced an index leader handover — observed live)
-	// nothing else will ever flip this node out of prepare. The map keeps
-	// saying prepare, the LOCAL state agrees, so even the activation
-	// re-announce guard has nothing to re-announce; the node is parked
-	// forever with a completed dataset. Retry with backoff and treat a
-	// persistent failure as a failure of the whole attempt, so the outer
-	// retry loop starts over.
+	// nothing else will ever flip this node out of prepare. Retry with
+	// backoff. A MASTER reconstruction keeps the old behaviour (a failure
+	// fails the attempt). A SLAVE copy is now COMPLETE: it enters the
+	// pending-activation state, and from here on the retries re-validate
+	// and re-activate it — they do not copy again unless the source CHANGED.
 	if (this->_role == cluster::role_master) {
 		int n = this->_cluster->notify_master_reconstruction();
 		log_notice("master reconstruction completed (%d threads left)", n);
@@ -540,11 +533,16 @@ int handler_reconstruction::_run_once() {
 			}
 			this->_cluster->set_activation_pending(true);
 		}
-	} else {
-		// just shift state to ready
-		if (this->_activate_with_retry(true) < 0) {		// true: skip ready state
-			return -1;
-		}
+		return 0;
+	}
+	this->_pending_activation = true;
+	return this->_activate_pending();
+}
+
+int handler_reconstruction::_activate_pending() {
+	const int rc = this->_activate_with_retry(true);		// true: skip ready state
+	if (rc == 0) {
+		this->_pending_activation = false;
 		// Mark the ack as provisional until a node map echoes it back: an
 		// ack from a leader that dies before persisting is worth nothing,
 		// and neither the retry (op succeeded) nor the local-active
@@ -552,9 +550,18 @@ int handler_reconstruction::_run_once() {
 		// map-side anti-entropy in cluster::reconstruct_node clears this
 		// once an accepted map shows us out of prepare.
 		this->_cluster->set_activation_pending(true);
+		return 0;
 	}
-
-	return 0;
+	if (rc == -2) {
+		this->_pending_activation = false;
+		this->_force_clean = true;
+		return -2;
+	}
+	if (rc == -3) {
+		this->_pending_activation = false;
+		return -3;
+	}
+	return -1;		// still pending: the copy is kept
 }
 
 /**
@@ -566,46 +573,56 @@ handler_reconstruction::source_check handler_reconstruction::_check_source(strin
 	}
 	const string cur = this->_cluster->get_partition_master_key(this->_partition);
 	const string src = this->_cluster->to_node_key(this->_node_server_name, this->_node_server_port);
+	if (cur.empty()) {
+		why = "the partition has no master in the current map (Unknown: copy kept, checked again)";
+		return source_unknown;
+	}
 	if (cur != src) {
-		why = "the partition's master is now " + (cur.empty() ? string("(none)") : cur) + ", not the source " + src;
-		return cur.empty() ? source_unknown : source_changed;
+		why = "the partition's master is now " + cur + ", not the source " + src;
+		return source_changed;
 	}
 	if (this->_storage->get_type() != storage::type_rocksdb) {
 		return source_valid;		// no lineage/epoch to compare on this backend
 	}
-	// a short read deadline: a source that accepts and never answers is Unknown
+	// What the copy can be validated against is what was ESTABLISHED when it
+	// was taken. An incomplete copy-time probe is not "nothing to compare".
+	if (!this->_identity_known) {
+		why = "the source's identity was not established when this copy was taken (incomplete probe): the copy cannot be validated";
+		return source_copy_unverified;
+	}
+	if (this->_epoch_supported && this->_probe_source_epoch.empty()) {
+		why = "the source answered without a source epoch value when this copy was taken (generations unavailable): the copy cannot be validated";
+		return source_copy_unverified;
+	}
+	// Identity probe: connect deadline 3 s, per-read 5 s, and a TOTAL
+	// deadline of 8 s for the whole request (a peer that trickles bytes).
 	shared_connection c(bounded_connection(this->_node_server_name, this->_node_server_port, 5000));
 	if (c->open() < 0) {
 		why = "the source " + src + " cannot be reached (Unknown: copy kept, checked again)";
 		return source_unknown;
 	}
+	connection_tcp* ct = dynamic_cast<connection_tcp*>(c.get());
+	if (ct != NULL) {
+		ct->set_deadline_from_now(8000);
+	}
 	op_meta* meta = new op_meta(c, NULL, this->_storage);
 	bool wal = false;
 	string id;
 	uint64_t lsn = 0;
-	int rc = meta->run_client_features(wal, id, lsn);
+	const int rc = meta->run_client_features(wal, id, lsn);
 	const string epoch = meta->get_peer_source_epoch();
+	const bool epoch_token = meta->get_peer_epoch_token();
 	delete meta;
-	if (rc != 0) {
-		why = "the source " + src + " did not answer the probe (Unknown: copy kept, checked again)";
+	if (rc != 0 || !wal || id.empty()) {
+		why = "the source " + src + " did not give a complete identity reply (Unknown: copy kept, checked again)";
 		return source_unknown;
 	}
-	// Compare what was KNOWN when the copy was taken. An older source (mixed
-	// versions: no source_epoch in its features reply) is compared by
-	// lineage only — weaker, but refusing it forever would strand the
-	// replica. A field that was known then and is missing now is Unknown.
-	if (!this->_attempt_master_id.empty()) {
-		if (id.empty()) {
-			why = "the source " + src + " answered without its master_id (Unknown: copy kept, checked again)";
-			return source_unknown;
-		}
-		if (id != this->_attempt_master_id) {
-			why = "the source " + src + " changed lineage (master_id " + this->_attempt_master_id + " -> " + id + ")";
-			return source_changed;
-		}
+	if (id != this->_attempt_master_id) {
+		why = "the source " + src + " changed lineage (master_id " + this->_attempt_master_id + " -> " + id + ")";
+		return source_changed;
 	}
-	if (!this->_probe_source_epoch.empty()) {
-		if (epoch.empty()) {
+	if (this->_epoch_supported) {
+		if (!epoch_token || epoch.empty()) {
 			why = "the source " + src + " answered without its source epoch (Unknown: copy kept, checked again)";
 			return source_unknown;
 		}
@@ -613,7 +630,13 @@ handler_reconstruction::source_check handler_reconstruction::_check_source(strin
 			why = "the source " + src + " changed history (source epoch " + this->_probe_source_epoch + " -> " + epoch + ")";
 			return source_changed;
 		}
+		return source_valid;
 	}
+	// LEGACY COMPATIBILITY (recorded as a weaker guarantee): the copy-time
+	// reply was COMPLETE and carried no source_epoch token at all — an older
+	// flared. Only the lineage can be compared; a re-promotion of the same
+	// lineage is not detected on this path.
+	log_notice("source %s predates source epochs: validated by lineage only (weaker than the history check)", src.c_str());
 	return source_valid;
 }
 
@@ -633,8 +656,11 @@ int handler_reconstruction::_activate_with_retry(bool skip_ready_state) {
 		const source_check sc = this->_check_source(why);
 		if (sc == source_changed) {
 			log_warning("activation STOPPED before attempt %d: %s -> the copy is not activated; retrying the reconstruction from the current master with a clean copy", i + 1, why.c_str());
-			this->_force_clean = true;
-			return -1;
+			return -2;
+		}
+		if (sc == source_copy_unverified) {
+			log_warning("activation STOPPED before attempt %d: %s -> taking the copy again", i + 1, why.c_str());
+			return -3;
 		}
 		if (sc == source_unknown) {
 			// Unknown is neither valid nor a change: no activation this
@@ -669,8 +695,8 @@ int handler_reconstruction::_activate_with_retry(bool skip_ready_state) {
 			sleep(1);
 		}
 	}
-	log_err("node activation failed permanently after retries", 0);
-	return rc;
+	log_err("node activation did not succeed in this round (the copy stays pending; the next round validates it again without copying)", 0);
+	return -1;
 }
 // }}}
 
@@ -710,6 +736,8 @@ bool handler_reconstruction::_try_wal_reconstruction(shared_connection c,
 	peer_latest_lsn = 0;
 	peer_reachable = false;
 	this->_probe_source_epoch.clear();
+	this->_identity_known = false;
+	this->_epoch_supported = false;
 #ifdef HAVE_LIBROCKSDB
 	if (this->_storage->get_type() != storage::type_rocksdb) {
 		return false;
@@ -730,8 +758,10 @@ bool handler_reconstruction::_try_wal_reconstruction(shared_connection c,
 		int meta_rc = meta->run_client_features(peer_wal_supported, peer_master_id, peer_latest_lsn);
 		peer_snapshot_supported = meta->get_peer_snapshot_supported();
 		this->_probe_source_epoch = meta->get_peer_source_epoch();
+		this->_epoch_supported = meta->get_peer_epoch_token();
 		delete meta;
 		peer_reachable = (meta_rc == 0);
+		this->_identity_known = (meta_rc == 0 && peer_wal_supported && !peer_master_id.empty());
 		if (meta_rc != 0 || !peer_wal_supported) {
 			log_info("master does not support WAL replication -> full dump", 0);
 			return false;

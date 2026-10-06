@@ -1981,17 +1981,31 @@ def emptySourceSuite : TestSuite := {
           if m2 == r then return .fail s!"precondition: the held replica {r} itself was promoted"
           let newEpoch ← c.promotedEpoch m2 preOther
           if newEpoch.isNone then return .fail s!"precondition: {m2}'s epoch before the fault was unreadable or did not advance after its promotion"
-          let stopped ← waitForCondition s!"{r}'s held activation is stopped" 180 do
-            return containsSubstr (← c.flaredLog r) "activation STOPPED"
+          -- The old copy must not be activated. Two legitimate ways to see it:
+          -- the held activation is STOPPED (the master changed within its
+          -- attempts), or the attempts ran out first and the next round
+          -- re-selected the source ('reconstruction source changed'; CI
+          -- 37419299532). Either way, the FIRST prepare->active of this
+          -- process after the hold must come after evidence of the NEW
+          -- master's epoch was recorded.
           let rebuilt ← waitForCondition s!"{r} is rebuilt from {m2} with evidence of its epoch" 600 do
             match ← c.evidence (← ip r) with
             | some (_, some e) => return some e == newEpoch
             | _ => return false
           let log ← c.flaredLog r
-          let stopLine := ((log.splitOn "\n").find? (containsSubstr · "activation STOPPED")).getD ""
-          IO.eprintln s!"# {r} held after its copy from {m}; {m} drained, {m2} promoted (epoch {newEpoch}); stopped={stopped}: {stopLine.trim}; rebuilt with evidence of {m2}={rebuilt}; items {← c.currItems (← ip r)} vs {← c.currItems (← ip m2)}"
-          if !stopped then return .fail "the held activation was not stopped after the master changed"
+          let tail := afterLast log "held by FLARE_TEST_ACTIVATION_HOLD_FILE"
+          let lines := tail.splitOn "\n"
+          let idx := fun (p : String → Bool) => (lines.zip (List.range lines.length)).findSome? (fun (l, i) => if p l then some i else none)
+          let stopOrSwitch := idx (fun l => containsSubstr l "activation STOPPED" || containsSubstr l "reconstruction source changed")
+          let newEvidence := idx (fun l => containsSubstr l "rebuild evidence recorded" && (newEpoch.map (containsSubstr l ·)).getD false)
+          let firstActive := idx (fun l => containsSubstr l s!"node_key={r}." && containsSubstr l "old_state=prepare, new_state=active")
+          IO.eprintln s!"# {r} held after its copy from {m}; {m} drained, {m2} promoted (epoch {newEpoch}); after the hold (line indices): stop/switch {stopOrSwitch}, evidence of the new epoch {newEvidence}, first prepare->active {firstActive}; rebuilt={rebuilt}; items {← c.currItems (← ip r)} vs {← c.currItems (← ip m2)}"
+          if stopOrSwitch.isNone then return .fail "the old copy's activation was neither stopped nor abandoned for the new source"
           if !rebuilt then return .fail s!"{r} was not rebuilt from the promoted master {m2}"
+          match firstActive, newEvidence with
+          | some a, some e => if a < e then return .fail s!"{r} became Active (line {a}) BEFORE its copy of the new master was recorded (line {e}): the old copy was activated"
+          | some _, none => return .fail s!"{r} became Active but no evidence of the new master's epoch was recorded"
+          | none, _ => pure ()
           return .pass },
 
     { name := "activation boundary, SAME NAME NEW HISTORY: while a replica's activation is held, its source (still master, same name) is bulk-rewritten (flush_all: new source epoch); the activation is STOPPED as a history change, not completed on the old copy"
@@ -2026,6 +2040,55 @@ def emptySourceSuite : TestSuite := {
           -- restore the data set for the next test
           let w ← c.bulkWrite mIp "es" 400 16384
           if w != 400 then return .fail s!"could not restore the data set ({w}/400)"
+          return .pass },
+
+    { name := "activation boundary, UNKNOWN: a completed copy whose source cannot be probed for more than 30 checks is KEPT (no new transfer); once the same source answers again the copy is activated"
+      run := do
+        match ← c.allInSync 400 600 with
+        | none => return .fail "precondition: the copies did not converge on 400 keys"
+        | some (m, r, _) =>
+          let mIp ← ip m
+          match ← c.killFlaredIn r with
+          | .error e => return .fail s!"could not restart {r}: {e}"
+          | .ok _ => pure ()
+          if !(← c.waitDumpStart r 180) then return .fail s!"{r} did not start a full dump after its restart"
+          let armed ← waitForCondition s!"the activation hold is armed in {r}" 60 do
+            return (← kubectl ["exec", "-n", ns, r, "-c", "flared", "--", "touch", "/tmp/act-hold"]).toBool
+          let held ← waitForCondition s!"{r}'s copy is done and its activation is held" 300 do
+            return containsSubstr (← c.flaredLog r) "held by FLARE_TEST_ACTIVATION_HOLD_FILE"
+          if !armed || !held then
+            discard <| kubectl ["exec", "-n", ns, r, "-c", "flared", "--", "rm", "-f", "/tmp/act-hold"]
+            return .fail s!"precondition: the activation was not held (armed={armed}, held={held})"
+          let rIp ← ip r
+          let recon0 := (← c.statNat rIp "reconstruction_started").getD 0
+          let logAtHold := (← c.flaredLog r)
+          let dumps0 := ((logAtHold.splitOn "\n").filter (containsSubstr · "starting dump operation")).length
+          -- the source becomes UNKNOWN to the replica: its probes to the
+          -- master are rejected (the master stays master and keeps serving)
+          match ← hostCmd "docker" (["exec", kindNode, "iptables", "-I", "FORWARD", "1"] ++ ruleSpec rIp mIp) with
+          | .error e => discard <| kubectl ["exec", "-n", ns, r, "-c", "flared", "--", "rm", "-f", "/tmp/act-hold"]; return .fail e
+          | .ok _ => pure ()
+          discard <| kubectl ["exec", "-n", ns, r, "-c", "flared", "--", "rm", "-f", "/tmp/act-hold"]
+          let manyUnknown ← waitForCondition s!"{r} defers activation on an Unknown source more than 30 times" 900 do
+            return (((← c.flaredLog r).splitOn "\n").filter (containsSubstr · "activation deferred")).length > 30
+          for _ in [0:3] do
+            discard <| hostCmd "docker" (["exec", kindNode, "iptables", "-D", "FORWARD"] ++ ruleSpec rIp mIp)
+          let activated ← waitForCondition s!"{r} is activated once the same source answers again" 600 do
+            let entries ← c.nodeView
+            return entries.any fun e => podOf e.fqdn == r && e.role == 1 && e.state == 0
+          let log ← c.flaredLog r
+          let deferred := ((log.splitOn "\n").filter (containsSubstr · "activation deferred")).length
+          let dumps1 := ((log.splitOn "\n").filter (containsSubstr · "starting dump operation")).length
+          let truncs := ((afterLast log "held by FLARE_TEST_ACTIVATION_HOLD_FILE").splitOn "\n").filter (containsSubstr · "truncating local storage")
+          let recon1 := (← c.statNat rIp "reconstruction_started").getD 0
+          let stopped := containsSubstr log "activation STOPPED"
+          IO.eprintln s!"# {r} held after its copy from {m}; probes to {m} blocked: Unknown deferrals {deferred} (>30: {manyUnknown}); activated after unblocking={activated}; dumps {dumps0} -> {dumps1}; truncates after the hold {truncs.length}; reconstruction_started {recon0} -> {recon1}; stopped={stopped}; items {← c.currItems rIp} vs {← c.currItems mIp}"
+          if !manyUnknown then return .fail "precondition: fewer than 31 Unknown checks were observed"
+          if stopped then return .fail "an Unknown source was treated as a change (activation STOPPED)"
+          if dumps1 != dumps0 || !truncs.isEmpty || recon1 != recon0 then
+            return .fail s!"the completed copy was transferred again while the source was Unknown (dumps {dumps0} -> {dumps1}, truncates {truncs.length}, reconstruction_started {recon0} -> {recon1})"
+          if !activated then return .fail s!"{r} was not activated after the same source answered again"
+          if (← c.currItems rIp) != (← c.currItems mIp) then return .fail "the activated copy does not match the master's item count"
           return .pass },
 
     { name := "SAF-08 same master_id, different history: the master is drained and a copy promoted (new epoch); its keys are then all deleted while a replica whose evidence names the EARLIER epoch misses them — the repair DEFERS and the replica keeps every key (the rule cannot prove the emptiness legitimate, even though here it was)"
@@ -2126,14 +2189,25 @@ def repairLedgerSuite : TestSuite := {
         match ← c.pair with
         | .error e => return .fail e
         | .ok (_, mIp, sPod, sIp) =>
-          let early := containsSubstr (← c.opLog 200000) "replica repair ledger initialized"
-          if early then return .fail "precondition: the ledger was already initialized before the fault (window missed)"
+          -- DETERMINISTIC first window (CI 37419299532: waiting for the probe
+          -- slot raced it). The operator is stopped, the drops happen, the
+          -- persisted ledger is removed (as on a new cluster or a lost
+          -- status), and only then does an operator start: its FIRST
+          -- observation already sees the drops.
+          discard <| kubectl ["scale", "deployment", ledgerCfg.operatorName, "-n", ns, "--replicas=0"]
+          let stoppedOp ← waitForCondition "the operator is stopped" 180 do
+            return (← getPodNames s!"app={ledgerCfg.operatorName}" ns).isEmpty
+          if !stoppedOp then return .fail "precondition: the operator did not stop"
           match ← c.dropWrites mIp sIp "fw" 40 with
-          | .error e => return .fail e
+          | .error e =>
+            discard <| kubectl ["scale", "deployment", ledgerCfg.operatorName, "-n", ns, "--replicas=1"]
+            return .fail e
           | .ok (w, d0, d1) =>
-            let stillFresh := !containsSubstr (← c.opLog 200000) "replica repair ledger initialized"
-            IO.eprintln s!"# stored {w}/40 with forwards cut; master drops {d0} -> {d1}; ledger still uninitialized at the fault={stillFresh}"
-            if !stillFresh then return .fail "precondition: the ledger initialized before the drops were counted (the first window was not exercised)"
+            let cleared ← kubectl ["patch", "flarecluster", ledgerCfg.name, "-n", ns, "--subresource=status", "--type=merge", "-p", "{\"status\":{\"replicaRepairs\":null}}"]
+            let ledgerNow := ((← kubectlGetJsonpath "flarecluster" ledgerCfg.name ns "{.status.replicaRepairs}").toOption.getD "").trim
+            discard <| kubectl ["scale", "deployment", ledgerCfg.operatorName, "-n", ns, "--replicas=1"]
+            IO.eprintln s!"# operator stopped; stored {w}/40 with forwards cut; master drops {d0} -> {d1}; persisted ledger removed={cleared.toBool} (now '{ledgerNow}'); operator started"
+            if !cleared.toBool || !ledgerNow.isEmpty then return .fail "precondition: the persisted ledger could not be removed"
             let requested ← waitForCondition "the first observation requests the repair" 300 do
               return containsSubstr (← c.opLog 200000) "REPLICA REPAIR (first observation)"
             let repaired ← waitForCondition "the replica is repaired and the ledger closes" 600 do

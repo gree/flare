@@ -5,6 +5,7 @@
  *	not to whatever handler is current when a notification arrives.
  */
 #include <cppcutter.h>
+#include <stdlib.h>
 #include <stats.h>
 #include <handler_wal_follower.h>
 
@@ -54,6 +55,29 @@ namespace test_stats_reconstruction {
 		cut_assert_equal_string("none", r.current_state.c_str());
 		cut_assert_equal_int(0, (int)r.last_success_id);
 		cut_assert_true(r.boot_id != 0);
+	}
+
+	// CI 37438962871: two processes started in the same second had the same
+	// boot id (time<<32 ^ pid<<16 ^ unseeded random()). Objects created back
+	// to back in ONE process (same second, same pid, same random() state)
+	// must still differ, and the id must fit the 62-bit range the operator
+	// stores in JSON.
+	void test_boot_ids_differ_within_one_second_and_fit_62_bits() {
+		// A fresh process starts random() from the same unseeded state:
+		// reset it before each construction to reproduce that (with the
+		// old formula all three ids are equal within one second).
+		srandom(1);
+		stats a;
+		srandom(1);
+		stats b;
+		srandom(1);
+		stats c;
+		uint64_t ia = a.get_reconstruction_boot_id();
+		uint64_t ib = b.get_reconstruction_boot_id();
+		uint64_t ic = c.get_reconstruction_boot_id();
+		cut_assert_true(ia != 0 && ib != 0 && ic != 0);
+		cut_assert_true(ia != ib && ib != ic && ia != ic);
+		cut_assert_true(ia < (1ULL << 62) && ib < (1ULL << 62) && ic < (1ULL << 62));
 	}
 
 	void test_begin_allocates_increasing_ids_and_marks_running() {

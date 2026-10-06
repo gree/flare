@@ -28,6 +28,9 @@
  */
 #include "stats.h"
 #include <stdlib.h>
+#include <fcntl.h>
+#include <time.h>
+#include <unistd.h>
 
 namespace gree {
 namespace flare {
@@ -77,11 +80,31 @@ stats::stats():
 	pthread_mutex_init(&this->_mutex_proxy_write_dropped_by_dest, NULL);
 	pthread_mutex_init(&this->_mutex_reconstruction, NULL);
 	pthread_mutex_init(&this->_mutex_follow, NULL);
-	// Random per process; combined with time so two processes started in the
-	// same second still differ. Never persisted.
+	// Unique per process. The operator binds evidence and drop counters to
+	// it per node, so a restarted process must never repeat its
+	// predecessor's value. The former time<<32 ^ pid<<16 ^ random() did:
+	// random() is never seeded and a container's pid repeats, so a restart
+	// within the same second (or two pods started in the same second, CI
+	// 37438962871) gave the same id. Read from the kernel's CSPRNG; if that
+	// fails, mix nanosecond time, pid and an address. Masked to 62 bits so
+	// it stays inside the signed range JSON/Kubernetes integers keep exactly
+	// (the operator stores it in the CR status). Never persisted.
 	{
-		uint64_t r = (uint64_t)time(NULL) << 32;
-		r ^= ((uint64_t)getpid() << 16) ^ (uint64_t)random();
+		uint64_t r = 0;
+		int fd = open("/dev/urandom", O_RDONLY);
+		if (fd >= 0) {
+			if (read(fd, &r, sizeof(r)) != (ssize_t)sizeof(r)) {
+				r = 0;
+			}
+			close(fd);
+		}
+		if (r == 0) {
+			struct timespec ts;
+			clock_gettime(CLOCK_REALTIME, &ts);
+			r = ((uint64_t)ts.tv_sec * 1000000007ULL) ^ ((uint64_t)ts.tv_nsec << 20)
+				^ ((uint64_t)getpid() << 40) ^ (uint64_t)(uintptr_t)this;
+		}
+		r &= 0x3fffffffffffffffULL;
 		if (r == 0) r = 1;
 		this->_reconstruction_boot_id = r;
 	}

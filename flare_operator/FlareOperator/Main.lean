@@ -282,8 +282,8 @@ initialize promotionAbortedRef : IO.Ref Bool ← IO.mkRef false
 
 /-- Copy retention §10: the assignments held last time (logged on change). -/
 initialize rebuildHeldRef : IO.Ref (List String) ← IO.mkRef []
-/-- Decision 2026-10-07 (1): the candidates withheld by R3 on THIS pass
-    (eligible=0, unreadable or incomplete). No promotion of them is committed. -/
+/-- Decision 2026-10-07 (1): the candidates whose R3 reading was UNKNOWN on
+    THIS pass (read failed or incomplete). No promotion of them is committed. -/
 initialize r3WithheldRef : IO.Ref (List String) ← IO.mkRef []
 /-- Copy retention §10 (decision 2026-10-07, item 3): rebuilding nodes whose
     stats say parked with nothing in flight (no transfer, serve or switch). -/
@@ -1143,9 +1143,12 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
               | .error _ => readings := readings ++ [(key, SourceEligibility.classifyReply none)]
             | none => pure ()
         sourceIneligible := SourceEligibility.withheld readings
-        -- decision 2026-10-07 (1): the commit refuses to promote any of these
-        -- on this pass, whatever path chose it (drain, failover, refill)
-        r3WithheldRef.set sourceIneligible
+        -- decision 2026-10-07 (1): the commit refuses to promote a candidate
+        -- whose reading was UNKNOWN (failed / incomplete) on this pass,
+        -- whatever path chose it. eligible=0 keeps the earlier handling (out
+        -- of the normal paths; the masterless refill's logged last resort may
+        -- still seat it) until decided otherwise.
+        r3WithheldRef.set (readings.filterMap fun (k, r) => if r == .unknown then some k else none)
         -- every reading this pass, unreadable ones included: which evidence
         -- a promotion on this pass could stand on (copy-identity 11)
         let shown := readings.map fun (k, e) => s!"{k}={SourceEligibility.readingLabel e}"
@@ -1366,7 +1369,7 @@ private def commitChecked (stateRef : IO.Ref FlareClusterState) (ver : Nat) (ucs
     let r3w ← r3WithheldRef.get
     let blocked := promoted.filter r3w.contains
     if !blocked.isEmpty then
-      IO.eprintln s!"[flare-operator] CRITICAL: PROMOTION ABORTED for {blocked}: R3 withheld it on this pass (not eligible, or its stats could not be read completely) — a copy that cannot be confirmed is not promoted; nothing from this pass is committed, the next pass reads again"
+      IO.eprintln s!"[flare-operator] CRITICAL: PROMOTION ABORTED for {blocked}: its stats could not be read completely on this pass (R3 Unknown) — a copy that cannot be confirmed is not promoted; nothing from this pass is committed, the next pass reads again"
       promotionAbortedRef.set true
       return
     promotionBarrier promoted

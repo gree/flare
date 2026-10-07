@@ -264,6 +264,8 @@ int op_stats::_send_stats(thread_pool* req_tp, thread_pool* other_tp, storage* s
 			_send_stat("rocksdb_source_epoch"               , rdb->get_source_epoch());
 			_send_stat("rocksdb_copy_id"                    , rdb->get_copy_id());
 			_send_stat("rocksdb_copy_identity_consistent"   , rdb->copy_identity_consistent() ? 1 : 0);
+			// design §6: the live copy is the empty copy left by a quarantine
+			_send_stat("rocksdb_quarantined"                , rdb->is_quarantined() ? 1 : 0);
 			// copy retention (design §3, §8, §9): the live copy's size (what a
 			// replica staging a copy of THIS node needs), the reserve, why the
 			// last staged rebuild stopped ("" = not blocked), retained copies

@@ -38,6 +38,7 @@ import FlareOperator.Migration.Controller
 import FlareOperator.Health.HealthCheck
 import FlareOperator.StateMachine.SourceEligibility
 import FlareOperator.StateMachine.RebuildConcurrency
+import FlareOperator.StateMachine.CopyDiscardApproval
 
 namespace FlareOperator
 
@@ -449,6 +450,66 @@ private def updateObservabilityConfigMap (state : FlareClusterState) (crName ns 
 -- Lag Detection
 -- ===========================================================================
 
+/-- Copy retention §7: relay valid FlareCopyDiscardApprovals of THIS cluster
+    to the named pod's flared once and record the result. An approval of
+    another cluster in the namespace is left to its operator. No CRD or no
+    access (older chart): nothing to do. -/
+private def processCopyDiscardApprovals (crName ns : String) : IO Unit := do
+  match ← kubectl ["get", "flarecopydiscardapprovals", "-n", ns, "-o", "json"] with
+  | .error _ => return
+  | .ok out =>
+    match Lean.Json.parse out with
+    | .error _ => return
+    | .ok j =>
+      let items := ((j.getObjValD "items").getArr?.toOption.getD #[]).toList
+      let str := fun (o : Lean.Json) (k : String) => ((o.getObjValD k).getStr?.toOption.getD "")
+      let approvals : List CopyDiscardApproval.Approval := items.filterMap fun it =>
+        let md := it.getObjValD "metadata"
+        let sp := it.getObjValD "spec"
+        let st := it.getObjValD "status"
+        let nm := str md "name"
+        if nm.isEmpty then none else some {
+          name := nm, clusterUID := str sp "clusterUID", podUID := str sp "podUID", copyId := str sp "copyId"
+          requestId := str sp "requestId", operation := str sp "operation", expiresAt := str sp "expiresAt"
+          phase := str st "phase", attempt := (st.getObjValD "attempt").getNat?.toOption.getD 0 }
+      let open_ := approvals.filter fun a => a.phase == "" || a.phase == "Pending"
+      if open_.isEmpty then return
+      let uid := match ← kubectl ["get", "flarecluster", crName, "-n", ns, "-o", "jsonpath={.metadata.uid}"] with
+        | .ok u => u.trim
+        | .error _ => ""
+      if uid.isEmpty then return
+      let pods : List (String × String) := match ← kubectl ["get", "pods", "-n", ns, "-l", s!"app=flare,cluster={crName}", "-o",
+          "jsonpath={range .items[*]}{.metadata.name}={.metadata.uid} {end}"] with
+        | .ok o => (o.trim.splitOn " ").filterMap fun e => match e.splitOn "=" with
+          | [n, u] => some (u, n)
+          | _ => none
+        | .error _ => []
+      let nowOut ← IO.Process.output { cmd := "date", args := #["-u", "+%Y-%m-%dT%H:%M:%SZ"] }
+      let now := nowOut.stdout.trim
+      for a in open_ do
+        let record := fun (phase reason : String) (attempt : Nat) => do
+          let body := Lean.Json.mkObj [("status", Lean.Json.mkObj [("phase", Lean.Json.str phase), ("reason", Lean.Json.str reason),
+            ("attempt", Lean.toJson attempt), ("decidedAt", Lean.Json.str now)])]
+          match ← kubectl ["patch", "flarecopydiscardapproval", a.name, "-n", ns, "--subresource=status", "--type=merge", "-p", body.compress] with
+          | .ok _ => pure ()
+          | .error e => IO.eprintln s!"[flare-operator] COPY DISCARD APPROVAL {a.name}: could not record {phase} ({e}); flared's record answers a repeat"
+        match CopyDiscardApproval.decide a uid now (fun u => pods.lookup u) with
+        | .skip => pure ()
+        | .expire =>
+          IO.eprintln s!"[flare-operator] COPY DISCARD APPROVAL {a.name}: Expired (expiresAt {a.expiresAt}); nothing sent"
+          record "Expired" s!"expired at {a.expiresAt}" a.attempt
+        | .refuse why =>
+          IO.eprintln s!"[flare-operator] COPY DISCARD APPROVAL {a.name}: Refused — {why}; nothing sent"
+          record "Refused" why a.attempt
+        | .send pod =>
+          let out ← Bridge.queryPodStats pod ns s!"copy_discard {a.requestId} {a.operation} {a.copyId}"
+          let reply := match out with
+            | .ok o => CopyDiscardApproval.parseReply o
+            | .error _ => none
+          let (phase, reason) := CopyDiscardApproval.classify reply
+          IO.eprintln s!"[flare-operator] COPY DISCARD APPROVAL {a.name} ({a.operation} of copy {a.copyId} on {pod}, request {a.requestId}): {phase} — {reason}"
+          record phase reason (a.attempt + 1)
+
 private def handleRocksdbConfig (crd : FlareClusterView) (crName ns : String)
     (pendingConfRef : IO.Ref (Option (String × Nat))) : IO Unit := do
   let rocksdb := crd.spec.rocksdb
@@ -793,6 +854,8 @@ private def repairVerdictNow (state : FlareClusterState) (key : String) (ns : St
       | .ok out =>
         if statNat out "rocksdb_copy_identity_consistent" == some 0 then
           return some "the source master's copy identity is inconsistent (reserved key and COPY_ID disagree): not a healthy copy to rebuild from"
+        if statNat out "rocksdb_quarantined" == some 1 then
+          return some "the source master's copy is the empty copy left by a quarantine: not a healthy copy to rebuild from"
         let rLineage := match rStats with | .ok ro => statStr ro "rocksdb_master_id" | .error _ => none
         let rEpoch := match rStats with | .ok ro => statStr ro "rocksdb_source_epoch" | .error _ => none
         let rFromId := match rStats with | .ok ro => statStr ro "rocksdb_rebuilt_from_master_id" | .error _ => none
@@ -1585,6 +1648,8 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
                   | .ok out =>
                     if statNat out "rocksdb_copy_identity_consistent" == some 0 then
                       pure (some "the source master's copy identity is inconsistent (reserved key and COPY_ID disagree): not a healthy copy to rebuild from")
+                    else if statNat out "rocksdb_quarantined" == some 1 then
+                      pure (some "the source master's copy is the empty copy left by a quarantine: not a healthy copy to rebuild from")
                     else
                     let rLineage := match rStats with | .ok ro => statStr ro "rocksdb_master_id" | .error _ => none
                     let rEpoch := match rStats with | .ok ro => statStr ro "rocksdb_source_epoch" | .error _ => none
@@ -2339,6 +2404,8 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
   -- 5. Handle rocksdb config propagation + cluster replication migration
   let crd ← crdRef.get
   handleRocksdbConfig crd crName ns pendingConfRef
+  -- 5-. Copy retention §7: explicit approvals to discard one named copy
+  processCopyDiscardApprovals crName ns
   handleClusterReplication crd (← stateRef.get) migrationRef pendingConfRef masterSnapshotRef driftTickRef metrics crName ns
 
   -- 5a. Blue/green migrations (FlareMigration CRs whose spec.source is this

@@ -28,6 +28,7 @@ import FlareOperator.K8s.Bridge
 import FlareOperator.E2E.TraceMatch
 import FlareOperator.StateMachine.SourceEligibility
 import FlareOperator.StateMachine.RebuildConcurrency
+import FlareOperator.StateMachine.CopyDiscardApproval
 
 open FlareOperator.K8s
 open FlareOperator.ReplicaRepair
@@ -1297,6 +1298,40 @@ private def checkRebuildConcurrency (ctx : Ctx) : IO Unit := do
   check ctx "rebuild concurrency: a master reconstruction is not gated (the partition needs a master)"
     ((gate mBefore mAfter 1 1).held.isEmpty)
 
+-- ─── copy retention §7: discard approvals ───────────────────────────────
+
+open FlareOperator.CopyDiscardApproval in
+private def checkCopyDiscardApproval (ctx : Ctx) : IO Unit := do
+  let a : Approval := {
+    name := "a1"
+    clusterUID := "C"
+    podUID := "P1"
+    copyId := "u:2"
+    requestId := "r1"
+    operation := "discard-retained"
+    expiresAt := "2026-10-08T00:00:00Z" }
+  let pods := fun (u : String) => if u == "P1" then some "nodes-1" else none
+  let now := "2026-10-07T12:00:00Z"
+  check ctx "approval: a valid approval for this cluster's pod is sent to that pod"
+    (CopyDiscardApproval.decide a "C" now pods == .send "nodes-1")
+  check ctx "approval: another cluster's approval is left alone; a decided one is not sent again"
+    (CopyDiscardApproval.decide a "OTHER" now pods == .skip && CopyDiscardApproval.decide { a with phase := "Applied" } "C" now pods == .skip
+      && CopyDiscardApproval.decide { a with phase := "Unknown" } "C" now pods == .skip)
+  check ctx "approval: expired, unknown operation, malformed tokens and a replaced pod are not sent"
+    (CopyDiscardApproval.decide { a with expiresAt := "2026-10-07T11:59:59Z" } "C" now pods == .expire
+      && (match CopyDiscardApproval.decide { a with operation := "legacy-in-place" } "C" now pods with | .refuse _ => true | _ => false)
+      && (match CopyDiscardApproval.decide { a with copyId := "u:2; rm -rf /" } "C" now pods with | .refuse _ => true | _ => false)
+      && (match CopyDiscardApproval.decide { a with podUID := "P2" } "C" now pods with | .refuse _ => true | _ => false)
+      && (match CopyDiscardApproval.decide { a with expiresAt := "2026-10-08" } "C" now pods with | .refuse _ => true | _ => false))
+  check ctx "approval: flared's answer classifies; no complete answer stays Pending (resent; flared answers a repeat from its record)"
+    (CopyDiscardApproval.classify (some "applied") == ("Applied", "applied") && (CopyDiscardApproval.classify (some "already:applied")).1 == "Applied"
+      && (CopyDiscardApproval.classify (some "refused:copy_changed")).1 == "Refused" && (CopyDiscardApproval.classify (some "already:refused:no_such_copy")).1 == "Refused"
+      && (CopyDiscardApproval.classify (some "already:started")).1 == "Unknown" && (CopyDiscardApproval.classify (some "failed")).1 == "Failed"
+      && (CopyDiscardApproval.classify none).1 == "Pending")
+  check ctx "approval: the reply is read only when it ended with END"
+    (CopyDiscardApproval.parseReply "STAT copy_discard_result applied\r\nEND\r\n" == some "applied"
+      && CopyDiscardApproval.parseReply "STAT copy_discard_result applied\r\n" == none)
+
 -- ─── R3: source eligibility (operator side) ──────────────────────────────
 
 open FlareOperator.SourceEligibility in
@@ -1349,6 +1384,7 @@ def run : IO UInt32 := do
   checkActivationOrder ctx
   checkSourceEligibility ctx
   checkRebuildConcurrency ctx
+  checkCopyDiscardApproval ctx
   let failures ← ctx.failures.get
   let n ← ctx.count.get
   IO.println s!"1..{n}"

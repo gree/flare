@@ -65,7 +65,7 @@ libflare_la_SOURCES = \
 	op_repl_snapshot_push.h op_repl_snapshot_push.cc \
 	op_orphan_scan.h op_orphan_scan.cc \
 	op_orphan_purge.h op_orphan_purge.cc \
-	op_backup.h op_backup.cc \
+	op_backup.h op_copy_discard.h op_backup.cc op_copy_discard.cc \
 	op_node_add.h op_node_add.cc \
 	op_node_remove.h op_node_remove.cc \
 	op_node_role.h op_node_role.cc \

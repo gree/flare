@@ -425,4 +425,90 @@ spec:
                   type: integer
                 convergedTicks:
                   type: integer
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: flarecopydiscardapprovals.flare.gree.net
+  annotations:
+    "helm.sh/resource-policy": keep
+    argocd.argoproj.io/sync-options: Prune=false
+spec:
+  group: flare.gree.net
+  names:
+    kind: FlareCopyDiscardApproval
+    listKind: FlareCopyDiscardApprovalList
+    plural: flarecopydiscardapprovals
+    singular: flarecopydiscardapproval
+    shortNames: ["fcda"]
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Operation
+          type: string
+          jsonPath: .spec.operation
+        - name: Copy
+          type: string
+          jsonPath: .spec.copyId
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Reason
+          type: string
+          jsonPath: .status.reason
+      schema:
+        openAPIV3Schema:
+          type: object
+          description: >
+            Copy retention (docs/design-copy-retention.md §7): an explicit,
+            ONE-SHOT approval to discard ONE named copy on ONE pod. It never
+            replaces a copy and never approves an old-source procedure. The
+            operator managing the cluster with spec.clusterUID relays it to
+            the pod with spec.podUID; flared records spec.requestId before
+            deleting anything and never runs the same request id twice.
+          properties:
+            spec:
+              type: object
+              required: ["clusterUID", "podUID", "copyId", "requestId", "operation", "expiresAt"]
+              properties:
+                clusterUID:
+                  type: string
+                  description: metadata.uid of the FlareCluster.
+                podUID:
+                  type: string
+                  description: metadata.uid of the flared pod (a replaced pod does not match).
+                copyId:
+                  type: string
+                  description: >
+                    The copy to discard ("<uuid>:<generation>", stats
+                    rocksdb_copy_id, or the COPY_ID of a retained copy, or the
+                    id in a quarantine-<id> directory name).
+                requestId:
+                  type: string
+                  description: Unique per approval; a repeat is answered from flared's record.
+                operation:
+                  type: string
+                  enum: ["discard-retained", "discard-quarantine", "discard-before-copy"]
+                expiresAt:
+                  type: string
+                  format: date-time
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  description: Pending | Applied | Refused | Expired | Failed | Unknown
+                reason:
+                  type: string
+                attempt:
+                  type: integer
+                observedAt:
+                  type: string
+                decidedAt:
+                  type: string
 {{- end }}

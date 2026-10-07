@@ -1,8 +1,18 @@
 # コピー保持・staging・切替・容量管理の設計（R3-D 残件 + R7）
 
 状態：**設計 第3版（2026-10-07、2 回目のレビュー指摘と命名を反映。実装中）**。
-§12 の 1〜4、§8、7（stats による数え上げを除く）を実装（macOS 単体試験済み、
-Linux CI・E2E は結果待ち）。5（quarantine）・6（承認 CR）は未実装。
+§12 の 1〜7 と §8 を実装（7 の stats による数え上げを除く。macOS 単体試験済み、
+Linux CI・E2E は結果待ち）。
+承認（§7）：CR `FlareCopyDiscardApproval`（v1alpha1、status subresource）。operator は
+自分のクラスタの UID のものだけを扱い、期限・操作・トークン・Pod UID を確かめて
+`copy_discard <requestId> <operation> <copyId>` を一度送り、結果を status に書く。
+flared は `data_dir/approvals.log` に requestId を**削除の前に**記録し（`started`）、
+結果を後に記録する。同じ requestId は二度と実行しない（拒否も消費）。
+`discard-before-copy` は master でも Active の slave でもないノードの live コピーで、
+identity が一致するときだけ。
+quarantine の名前は `quarantine-<copy-id>`。marker は 2 段（`corrupt=<id>` を
+移動前に、`empty=<id>` を空コピー作成後に）。marker を消すのは §8 の条件で
+retained を消すとき（その直前）。
 §10 の例外（数えるが保留しない）：TCP の再登録で自分の partition に戻る
 メンバー、master の再構築、flared の起動時 catch-up。初期構築は例外にしない。
 

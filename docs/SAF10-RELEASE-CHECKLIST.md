@@ -287,8 +287,12 @@
        （純粋関数は対応済み、operator からの入力は未配線）。初期構築も上限の
        対象（例外にしていない）。
      - 単体試験：operator 6 件（flare_unit 319）、flared の送出スロット 1 件。
-       Phase 3・4・7 を一体で検証する E2E は未実行（同時要求 2 replica の試験は
-       未作成）。
+       Phase 3・4・7 を一体で検証する E2E（copy-retention、copy-retention-
+       concurrency）は作成済み・未実行。
+   - Phase 6（承認）：CR `FlareCopyDiscardApproval` と flared `copy_discard`
+     （requestId を削除前に永続記録、重複は記録から応答、拒否も消費）。
+     `discard-before-copy` は master・Active slave では拒否。単体試験（flared
+     2 件、operator 5 件）。E2E（copy-retention 3）は作成済み・未実行。
    - 旧版 source（epoch なし）：`L0 == L1`、切替直前、切替後の 3 点で位置が
      動いていないことを確認したときだけ切り替える。これは観測区間に変化が
      なかった根拠であって、書き込み停止の確認ではない。書き込み停止は外側で
@@ -307,7 +311,13 @@
 2. **snapshot 経路の試験**：swap と、容量確保のための先行破棄は E2E で未検証。
    R7 の固定パス問題の修正と合わせて、両境界で source が変わる／Unknown に
    なる場合も旧コピーを保持することを試験する。
-3. **quarantine の後の扱い**：
+3. **quarantine の後の扱い**（2026-10-07 実装、macOS 単体試験済み、CI 未実行：
+   marker を移動前に永続化、`quarantine-<copy-id>`、1 世代を超えたら
+   `rebuild_blocked=quarantine_full` で停止、隔離後の空コピーは
+   `rocksdb_quarantined=1` で read binding なし・operator の source 判定は
+   defer・R3 で昇格対象外。検証済みの staged 切替で置き換わり、§8 の条件で
+   marker と retained を消す。クラッシュ点（marker のみ、rename 後、空 DB 後）
+   の単体試験あり。E2E は未作成）：
    - 隔離後の空 DB が、健全な空コピーとして read・昇格・修復元に使われない
      ことを確認する。
    - tmpfs では隔離しても容量は空かないので、隔離領域を含めて容量を判定する。

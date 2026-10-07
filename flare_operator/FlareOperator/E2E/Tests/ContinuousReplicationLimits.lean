@@ -4513,6 +4513,82 @@ def copyRetentionSuite : TestSuite := {
           if !notActive then return .fail s!"{a} was Active although its rebuild was blocked"
           if !restored || !converged then return .fail s!"{a} did not rebuild after the reserve was set again (restored={restored})"
           return .pass
+        | _ => return .fail "precondition: a master and a slave" },
+
+    { name := "approvals (§7, §11.3, §11.9): on a replica whose rebuild is stopped, a FlareCopyDiscardApproval naming its copy is applied ONCE (a repeat of the request id is answered from flared's record); one naming the copy it had before is refused (copy_changed); one for another pod UID is refused; an expired one is not sent"
+      run := do
+        IO.sleep 1100
+        match ← c.p0Roles with
+        | (some _, a :: _) =>
+          let ns' := ns
+          let clusterUid := match ← kubectl ["get", "flarecluster", copyRetCfg.name, "-n", ns', "-o", "jsonpath={.metadata.uid}"] with
+            | .ok u => u.trim
+            | .error _ => ""
+          if clusterUid.isEmpty then return .fail "precondition: no FlareCluster UID"
+          -- a stopped rebuild: started without the reserve
+          if !(← c.setBootConf copyRetCfg.extraFlaredConf a "rocksdb-rebuild-reserve-bytes" false) then
+            return .fail "precondition: could not remove the reserve from extra.conf"
+          if let .error e ← c.killFlaredIn a then return .fail s!"precondition: could not restart flared in {a}: {e}"
+          let blocked ← waitForCondition s!"{a} reports rebuild_blocked=reserve_unset" 300 do
+            return (← c.statStr (← ip a) "rebuild_blocked") == some "reserve_unset"
+          if !blocked then return .fail s!"precondition: {a} did not stop its rebuild"
+          let some podUid ← c.podUid a | return .fail s!"precondition: no UID for {a}"
+          let some copy0 ← c.statStr (← ip a) "rocksdb_copy_id" | return .fail s!"precondition: no copy id on {a}"
+          let apply := fun (nm req copyId puid expires : String) => do
+            let yaml := s!"apiVersion: flare.gree.net/v1alpha1
+kind: FlareCopyDiscardApproval
+metadata:
+  name: {nm}
+  namespace: {ns'}
+spec:
+  clusterUID: {clusterUid}
+  podUID: {puid}
+  copyId: \"{copyId}\"
+  requestId: {req}
+  operation: discard-before-copy
+  expiresAt: \"{expires}\""
+            discard <| kubectlApplyStdin yaml
+          let phaseOf := fun (nm : String) => do
+            match ← kubectl ["get", "flarecopydiscardapproval", nm, "-n", ns', "-o", "jsonpath={.status.phase}|{.status.reason}"] with
+            | .ok o => return o.trim
+            | .error _ => return ""
+          let future := "2099-01-01T00:00:00Z"
+          apply "ok-1" "e2e-req-1" copy0 podUid future
+          let applied ← waitForCondition "the approval naming the copy is Applied" 120 do
+            return (← phaseOf "ok-1").startsWith "Applied|"
+          let copy1 := (← c.statStr (← ip a) "rocksdb_copy_id").getD ""
+          -- the same request id again (another object): answered from flared's record, not run again
+          apply "ok-1-again" "e2e-req-1" copy1 podUid future
+          let repeated ← waitForCondition "a repeat of the request id is answered from the record" 120 do
+            return (← phaseOf "ok-1-again") == "Applied|already:applied"
+          let copy2 := (← c.statStr (← ip a) "rocksdb_copy_id").getD ""
+          -- the copy it had before: refused
+          apply "stale-copy" "e2e-req-2" copy0 podUid future
+          let staleRefused ← waitForCondition "an approval naming the previous copy is refused" 120 do
+            return (← phaseOf "stale-copy") == "Refused|refused:copy_changed"
+          -- another pod UID: refused by the operator, nothing sent
+          apply "other-pod" "e2e-req-3" copy2 "00000000-0000-0000-0000-000000000000" future
+          let podRefused ← waitForCondition "an approval for another pod UID is refused" 120 do
+            return (← phaseOf "other-pod").startsWith "Refused|no flared pod"
+          -- expired: not sent
+          apply "expired" "e2e-req-4" copy2 podUid "2000-01-01T00:00:00Z"
+          let expired ← waitForCondition "an expired approval is not sent" 120 do
+            return (← phaseOf "expired").startsWith "Expired|"
+          let copy3 := (← c.statStr (← ip a) "rocksdb_copy_id").getD ""
+          IO.eprintln s!"# {a}: copy {copy0} -> applied={applied} -> {copy1}; repeat answered from the record={repeated}; copy after the repeat {copy2} (unchanged={copy2 == copy1}); stale copy refused={staleRefused}; other pod refused={podRefused}; expired={expired}; copy at the end {copy3}"
+          -- restore the reserve: the replica rebuilds
+          discard <| c.setBootConf (bootFlaredConf copyRetCfg) a "rocksdb-rebuild-reserve-bytes" true
+          discard <| c.killFlaredIn a
+          for nm in ["ok-1", "ok-1-again", "stale-copy", "other-pod", "expired"] do
+            discard <| kubectl ["delete", "flarecopydiscardapproval", nm, "-n", ns', "--ignore-not-found"]
+          if !applied then return .fail "the approval naming the copy was not applied"
+          if copy1 == copy0 then return .fail "the copy did not change although the approval was applied"
+          if !repeated || copy2 != copy1 then return .fail s!"the repeated request id was not answered from the record (copy {copy1} -> {copy2})"
+          if !staleRefused then return .fail "an approval naming the previous copy was not refused"
+          if !podRefused then return .fail "an approval for another pod UID was not refused"
+          if !expired then return .fail "an expired approval was not marked Expired"
+          if copy3 != copy2 then return .fail "a refused or expired approval changed the copy"
+          return .pass
         | _ => return .fail "precondition: a master and a slave" }
   ]
 }

@@ -101,6 +101,8 @@ public:
 	// content in place (truncate) bumps the generation. Mirrored in the copy's
 	// directory as COPY_ID (read by the switch recovery before the DB opens).
 	static const char* const kCopyIdKey;
+	// design §6: in data_dir, written BEFORE a corrupt copy is moved aside
+	static const char* const kQuarantineMarkerFile;
 
 	// Return true if key is a reserved replication metadata key.
 	static bool is_reserved_key(const string& key);
@@ -208,6 +210,8 @@ protected:
 	uint64_t _staged_abandoned = 0;
 	// design §5: a snapshot (serve or push) is being served from this node
 	bool _snapshot_serving = false;
+	// design §6: the live copy is the empty copy left by a quarantine
+	bool _quarantined = false;
 	// the source epoch the staged files carried when opened (a received
 	// checkpoint), read BEFORE generations are initialised; "" = none
 	string _staging_found_epoch;
@@ -330,6 +334,10 @@ protected:
 	// disk and could NOT be removed — the caller must not open it.
 	int _discard_incomplete_restore();
 	void _release_snapshot_serve();
+	// marker present and the live copy is the post-quarantine empty copy (or
+	// the crash came before it was recorded)
+	bool _quarantined_now();
+	int _clear_quarantine_marker(const char* why);
 	// exact count of live (non-reserved) keys -> curr_items; logs `why`
 	void _seed_curr_items_by_scan(const char* why);
 	int _persist_generation(const char* key, const string& value);
@@ -557,6 +565,17 @@ public:
 	string get_rebuild_blocked();
 	void note_staged_result(bool switched);
 	bool is_snapshot_serving();
+	bool is_quarantined() const { return this->_quarantined; }
+	// design §7: an explicit, one-shot approval to discard ONE named copy.
+	// operation: discard-retained | discard-quarantine | discard-before-copy.
+	// request_id is recorded durably BEFORE anything is deleted and with its
+	// result after: the same request id never runs twice (also across a crash
+	// between the two records). discard-before-copy needs `may_discard_live`
+	// (the caller checked this node is neither a master nor an Active slave). `result` is one of
+	// applied, already:<recorded>, refused:<reason>. 0 = answered.
+	int discard_copy(const string& request_id, const string& operation, const string& copy_id,
+		bool may_discard_live, string& result);
+	static const char* const kApprovalsFile;
 	uint64_t get_staged_switched();
 	uint64_t get_staged_abandoned();
 	// The source epoch the staged files carried (received checkpoint), "" if none.

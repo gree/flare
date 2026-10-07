@@ -4316,6 +4316,26 @@
         {
           "path": "flare_operator/FlareOperator/StateMachine/RebuildConcurrency.lean",
           "symbol": "gate"
+        },
+        {
+          "path": "src/lib/storage_rocksdb.cc",
+          "symbol": "storage_rocksdb::quarantine_reset"
+        },
+        {
+          "path": "src/lib/storage_rocksdb.cc",
+          "symbol": "storage_rocksdb::discard_copy"
+        },
+        {
+          "path": "src/lib/op_copy_discard.cc",
+          "symbol": "op_copy_discard::_run_server"
+        },
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/CopyDiscardApproval.lean",
+          "symbol": "decide"
+        },
+        {
+          "path": "flare_operator/FlareOperator/Main.lean",
+          "symbol": "processCopyDiscardApprovals"
         }
       ],
       "call_path": "ListPods -> executeK8sRequest -> PodListResponse -> detectDeadNodesPure -> unhealthyMastersKept -> failover.",
@@ -4389,6 +4409,29 @@
             {
               "path": "flare_operator/FlareOperator/StateMachine/RebuildConcurrency.lean",
               "symbol": "gate"
+            }
+          ]
+        },
+        {
+          "id": "CHECK-07-quarantine",
+          "kind": "scenario",
+          "procedure": "Copy retention phases 5 and 6 (design §6, §7). Quarantine: the marker is durable BEFORE the corrupt copy moves (quarantine-<copy-id>) and BEFORE the empty copy exists; the post-quarantine copy reports rocksdb_quarantined=1, binds no read source, and is a deferred repair source for the operator; one generation (rebuild_blocked=quarantine_full: nothing moved or deleted); a verified staged switch replaces it, and the marker is removed with the retained copy under the §8 conditions. Approvals: FlareCopyDiscardApproval (clusterUID, podUID, copyId, requestId, operation discard-retained | discard-quarantine | discard-before-copy, expiresAt). The operator relays only its own cluster's approvals, refuses unknown operations, malformed tokens and a replaced pod, and marks expired ones without sending them. flared records the requestId durably before deleting anything and answers a repeat from that record (a refusal is consumed too). A live copy is discarded only on a node that is neither master nor Active slave, and only with consistent identity records. Unit (cutter): test_quarantine_marker_crash_points_and_one_generation, test_copy_discard_approval_is_named_and_one_shot, test_copy_discard_frees_the_quarantine_generation; flare_unit checkCopyDiscardApproval. E2E: copy-retention test 3 (applied once, repeat answered from the record, stale copy refused, other pod refused, expired not sent). NOT covered by E2E: a real corruption leading to quarantine.",
+          "references": [
+            {
+              "path": "src/lib/storage_rocksdb.cc",
+              "symbol": "storage_rocksdb::quarantine_reset"
+            },
+            {
+              "path": "src/lib/storage_rocksdb.cc",
+              "symbol": "storage_rocksdb::discard_copy"
+            },
+            {
+              "path": "src/lib/op_copy_discard.cc",
+              "symbol": "op_copy_discard::_run_server"
+            },
+            {
+              "path": "flare_operator/FlareOperator/StateMachine/CopyDiscardApproval.lean",
+              "symbol": "decide"
             }
           ]
         }
@@ -4703,7 +4746,7 @@
         },
         "ci_passed": {
           "state": "no",
-          "evidence": "no release candidate set (0/4 checks counted)"
+          "evidence": "no release candidate set (0/5 checks counted)"
         },
         "reviewed": {
           "state": "no",

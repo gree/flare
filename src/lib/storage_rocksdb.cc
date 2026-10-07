@@ -79,6 +79,8 @@ const char* const storage_rocksdb::kReplRebuiltFromKey = "__flare_repl_rebuilt_f
 // Same format, the evidence of the stored copy while a rebuild is in progress.
 const char* const storage_rocksdb::kReplRebuiltFromSuspendedKey = "__flare_repl_rebuilt_from_suspended";
 const char* const storage_rocksdb::kCopyIdKey = "__flare_copy_id";
+const char* const storage_rocksdb::kQuarantineMarkerFile = "quarantine.marker";
+const char* const storage_rocksdb::kApprovalsFile = "approvals.log";
 // Name of the replication-metadata column family (design §3.7).
 const char* const storage_rocksdb::kReplMetaCfName = "flare_repl_meta";
 
@@ -683,6 +685,7 @@ int storage_rocksdb::switch_to_staging(const string& attempt, const string& expe
 		}
 		this->_tombstone_sweep_cursor.clear();
 		this->_seed_curr_items_by_scan("copy switch");
+		this->_quarantined = this->_quarantined_now();
 		// the latch described the old copy
 		this->_corrupted = false;
 		if (copy_fs::remove_intent(this->_data_dir) < 0) {
@@ -957,6 +960,18 @@ int storage_rocksdb::reap_retained(const string& bound_master_id, const string& 
 				bound_master_id, bound_epoch, bound_eligible, own_active, why)) {
 			report += (report.empty() ? "" : "; ") + attempts[i] + " kept: " + why;
 			continue;
+		}
+		// the live copy is a verified replacement that is bound and Active:
+		// a quarantine marker no longer describes it (removed BEFORE the
+		// retained copy goes, so a crash never leaves the marker orphaned
+		// on a deleted copy's account)
+		if (copy_fs::dir_exists(this->_data_dir) && !this->_quarantined_now()) {
+			string mt;
+			if (copy_fs::read_small_file(this->_data_dir + "/" + kQuarantineMarkerFile, mt) == 0
+					&& this->_clear_quarantine_marker("a verified rebuild replaced the post-quarantine copy and is bound and Active") < 0) {
+				report += (report.empty() ? "" : "; ") + attempts[i] + " kept: the quarantine marker could not be removed";
+				continue;
+			}
 		}
 		if (copy_fs::remove_tree_path(dir) != 0) {
 			log_err("retained copy [%s]: deletion failed part-way (what is left stays; checked again)", dir.c_str());
@@ -1350,6 +1365,13 @@ int storage_rocksdb::open() {
 			this->_copy_identity_consistent = false;
 			log_err("CRITICAL: copy identity INCONSISTENT (reserved key [%s], COPY_ID file [%s]): this copy is not treated as a healthy copy (no approvals, no read binding, not promotable, not a repair source) until a verified rebuild replaces it",
 				has_key ? v.c_str() : "(none)", has_file ? f.c_str() : "(none)");
+		}
+	}
+
+	if (!this->_staging) {
+		this->_quarantined = this->_quarantined_now();
+		if (this->_quarantined) {
+			log_err("CRITICAL: this copy (%s) is the empty copy left by a quarantine (quarantine.marker): it is NOT a healthy copy (no reads, not promotable, not a repair source) until a verified rebuild replaces it", this->get_copy_id().c_str());
 		}
 	}
 
@@ -2864,16 +2886,50 @@ int storage_rocksdb::hard_reset() {
 }
 
 int storage_rocksdb::quarantine_reset(string& moved_to) {
+	moved_to.clear();
+	// design §6: ONE generation. Another quarantine already here: stop and
+	// notify; nothing is moved or deleted (its removal needs an approval).
+	{
+		DIR* d = opendir(this->_data_dir.c_str());
+		if (d != NULL) {
+			struct dirent* e;
+			string found;
+			while ((e = readdir(d)) != NULL) {
+				const string n = e->d_name;
+				if (n.compare(0, 11, "quarantine-") == 0) {
+					found = n;
+					break;
+				}
+			}
+			closedir(d);
+			if (!found.empty()) {
+				this->set_rebuild_blocked("quarantine_full");
+				log_err("CRITICAL: rebuild_blocked=quarantine_full — a quarantined copy [%s] is already kept (one generation); the corrupt copy is NOT moved and NOTHING is deleted (operator action / approval needed)", found.c_str());
+				return -1;
+			}
+		}
+	}
 	pthread_rwlock_wrlock(&this->_mutex_wholelock);
 	int r = -1;
 	do {
-		ostringstream dst;
-		dst << this->_data_dir << "/quarantine-" << time(NULL) << "-" << getpid();
-		moved_to = dst.str();
+		string cid = this->get_copy_id();
+		if (cid.empty()) {
+			ostringstream u;
+			u << "unknown-" << time(NULL) << "-" << getpid();
+			cid = u.str();
+		}
+		// 1. the marker FIRST, durable: from here on, whatever is live after a
+		//    crash is treated as the post-quarantine copy (not a healthy one)
+		if (copy_fs::write_file_durable(this->_data_dir, kQuarantineMarkerFile, "corrupt=" + cid + "\n") < 0) {
+			log_err("quarantine_reset: could not write the quarantine marker -> NOTHING moved", 0);
+			break;
+		}
+		moved_to = this->_data_dir + "/quarantine-" + cid;
 		if (this->_db != NULL) {
 			this->_close_db();
 		}
-		if (rename(this->_data_path.c_str(), moved_to.c_str()) != 0) {
+		// 2. the corrupt copy moves aside (never deleted)
+		if (copy_fs::rename_durable(this->_data_dir, this->_data_path, moved_to) < 0) {
 			const int e = errno;
 			log_err("quarantine_reset: could not move the corrupt DB [%s] aside to [%s]: %s -> NOTHING deleted; reopening it as it is",
 				this->_data_path.c_str(), moved_to.c_str(), strerror(e));
@@ -2885,6 +2941,7 @@ int storage_rocksdb::quarantine_reset(string& moved_to) {
 			moved_to.clear();
 			break;
 		}
+		// 3. a new empty copy
 		rocksdb::Status status = this->_open_db(this->_data_path);
 		if (!status.ok()) {
 			log_err("quarantine_reset: reopen of an empty DB failed: %s", status.ToString().c_str());
@@ -2897,16 +2954,147 @@ int storage_rocksdb::quarantine_reset(string& moved_to) {
 		this->_clear_header_cache();
 		this->_corrupted = false;
 		this->_hard_reset.incr();
-		this->new_copy_identity("reset to an empty copy");
+		this->new_copy_identity("reset to an empty copy after quarantine");
 		if (this->_load_or_init_generations() < 0) {
 			log_err("quarantine_reset: could not establish replication generations; replication stays UNAVAILABLE on this node", 0);
 		}
-		log_warning("quarantine_reset: the corrupt DB was MOVED ASIDE to [%s] (kept for inspection, not deleted) and an empty DB opened at [%s]; reconstruction will reseed",
-			moved_to.c_str(), this->_data_path.c_str());
+		// the marker names the empty copy too: it stays "post-quarantine"
+		// until a verified rebuild replaces it
+		copy_fs::write_file_durable(this->_data_dir, kQuarantineMarkerFile, "corrupt=" + cid + "\nempty=" + this->get_copy_id() + "\n");
+		this->_quarantined = true;
+		log_warning("quarantine_reset: the corrupt DB was MOVED ASIDE to [%s] (kept, not deleted) and an empty copy %s opened; it is NOT a healthy copy (stats rocksdb_quarantined=1: no reads, not promotable, not a repair source) until a verified rebuild replaces it",
+			moved_to.c_str(), this->get_copy_id().c_str());
 		r = 0;
 	} while (false);
 	pthread_rwlock_unlock(&this->_mutex_wholelock);
 	return r;
+}
+
+namespace {
+	// lines "<request id> <state>" of the approvals record; the LAST state wins
+	string approval_state(const string& text, const string& request_id) {
+		string state;
+		string::size_type at = 0;
+		while (at < text.size()) {
+			string::size_type nl = text.find('\n', at);
+			const string line = text.substr(at, nl == string::npos ? string::npos : nl - at);
+			at = nl == string::npos ? text.size() : nl + 1;
+			const string::size_type sp = line.find(' ');
+			if (sp != string::npos && line.compare(0, sp, request_id) == 0 && sp == request_id.size()) {
+				state = line.substr(sp + 1);
+			}
+		}
+		return state;
+	}
+
+	int append_durable(const string& path, const string& line) {
+		FILE* f = fopen(path.c_str(), "a");
+		if (f == NULL) return -1;
+		const bool ok = fputs(line.c_str(), f) >= 0 && fflush(f) == 0 && fsync(fileno(f)) == 0;
+		fclose(f);
+		return ok ? 0 : -1;
+	}
+}
+
+int storage_rocksdb::discard_copy(const string& request_id, const string& operation, const string& copy_id,
+		bool may_discard_live, string& result) {
+	result.clear();
+	if (request_id.empty() || request_id.size() > 128 || request_id.find_first_of(" \t\r\n") != string::npos
+			|| copy_id.empty() || copy_id.find_first_of(" \t\r\n/") != string::npos) {
+		result = "refused:malformed";
+		return 0;
+	}
+	if (operation != "discard-retained" && operation != "discard-quarantine" && operation != "discard-before-copy") {
+		result = "refused:unknown_operation";
+		return 0;
+	}
+	const string ledger = this->_data_dir + "/" + kApprovalsFile;
+	string text;
+	copy_fs::read_small_file(ledger, text);
+	{
+		const string prev = approval_state(text, request_id);
+		if (!prev.empty()) {
+			result = "already:" + prev;		// one-shot: never executed twice
+			return 0;
+		}
+	}
+	// what is named must be exactly what is here, and a healthy copy
+	string target;
+	if (operation == "discard-retained") {
+		const vector<string> rs = this->list_retained();
+		for (size_t i = 0; i < rs.size(); i++) {
+			const string dir = this->_data_dir + "/" + copy_fs::kRetainedPrefix + rs[i];
+			if (copy_fs::read_copy_id(dir) == copy_id) target = dir;
+		}
+	} else if (operation == "discard-quarantine") {
+		const string dir = this->_data_dir + "/quarantine-" + copy_id;
+		if (copy_fs::dir_exists(dir)) target = dir;
+	} else {
+		if (!may_discard_live) {
+			result = "refused:live_copy_of_a_master_or_serving_node";
+		} else if (!this->copy_identity_consistent()) {
+			result = "refused:identity_inconsistent";
+		} else if (this->get_copy_id() != copy_id) {
+			result = "refused:copy_changed";
+		} else {
+			target = this->_data_path;
+		}
+		if (!result.empty()) {
+			append_durable(ledger, request_id + " " + result + "\n");
+			return 0;
+		}
+	}
+	if (target.empty()) {
+		result = "refused:no_such_copy";
+		append_durable(ledger, request_id + " " + result + "\n");
+		return 0;
+	}
+	// recorded BEFORE anything is deleted
+	if (append_durable(ledger, request_id + " started\n") < 0) {
+		result = "refused:approval_record_unwritable";
+		return 0;
+	}
+	int r = -1;
+	if (operation == "discard-before-copy") {
+		r = this->hard_reset();
+	} else {
+		r = copy_fs::remove_tree_path(target);
+		copy_fs::fsync_dir(this->_data_dir);
+		if (r == 0 && operation == "discard-quarantine" && this->get_rebuild_blocked() == "quarantine_full") {
+			this->set_rebuild_blocked("");
+		}
+	}
+	result = r == 0 ? "applied" : "failed";
+	append_durable(ledger, request_id + " " + result + "\n");
+	log_warning("APPROVED copy discard %s: %s of copy %s (%s) -> %s", request_id.c_str(), operation.c_str(), copy_id.c_str(), target.c_str(), result.c_str());
+	return 0;
+}
+
+bool storage_rocksdb::_quarantined_now() {
+	string text;
+	if (copy_fs::read_small_file(this->_data_dir + "/" + kQuarantineMarkerFile, text) < 0) {
+		return false;
+	}
+	const string::size_type e = text.find("empty=");
+	if (e == string::npos) {
+		return true;		// a crash before the empty copy was recorded: whatever is live is that copy
+	}
+	string empty_id = text.substr(e + 6);
+	const string::size_type nl = empty_id.find('\n');
+	if (nl != string::npos) empty_id.erase(nl);
+	return empty_id.empty() || empty_id == this->get_copy_id();
+}
+
+int storage_rocksdb::_clear_quarantine_marker(const char* why) {
+	const string p = this->_data_dir + "/" + kQuarantineMarkerFile;
+	if (unlink(p.c_str()) != 0 && errno != ENOENT) {
+		log_err("could not remove the quarantine marker [%s]: %s", p.c_str(), strerror(errno));
+		return -1;
+	}
+	copy_fs::fsync_dir(this->_data_dir);
+	this->_quarantined = false;
+	log_notice("quarantine marker removed: %s (the quarantined copy itself is kept)", why);
+	return 0;
 }
 
 int storage_rocksdb::reap_expired(time_t now, uint32_t max_scan, const string& after_key,

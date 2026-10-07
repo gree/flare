@@ -2093,6 +2093,161 @@ void test_snapshot_serve_one_at_a_time_in_its_own_dir() {
 	drop_rocksdb(s, wal_master_dir);
 }
 
+// Design §6 / §11.6: the quarantine marker is durable BEFORE the corrupt
+// copy moves and before the empty copy exists; wherever a crash lands, the
+// next open treats the live copy as the post-quarantine copy (not healthy).
+// One generation; a verified staged switch replaces it and the marker goes
+// with the retained copy under the §8 conditions.
+void test_quarantine_marker_crash_points_and_one_generation() {
+	const string d = wal_slave_dir;
+	storage_rocksdb* s = make_rocksdb(wal_slave_dir);
+	storage_set_string(s, "k", "v");
+	const string id0 = s->get_copy_id();
+	string moved;
+	cut_assert_equal_int(0, s->quarantine_reset(moved));
+	cut_assert_true(s->is_quarantined());
+	cut_assert_equal_string((d + "/quarantine-" + id0).c_str(), moved.c_str());
+	cut_assert_equal_int(0, static_cast<int>(s->count()));
+	const string marker = read_file_s(d + "/quarantine.marker");
+	cut_assert_true(marker.find("corrupt=" + id0) != string::npos);
+	cut_assert_true(marker.find("empty=" + s->get_copy_id()) != string::npos);
+	// restart: still the post-quarantine copy
+	drop_rocksdb_noremove(s);
+	s = make_rocksdb(wal_slave_dir);
+	cut_assert_true(s->is_quarantined());
+	// one generation: a second quarantine stops, nothing moves
+	const string id1 = s->get_copy_id();
+	cut_assert_equal_int(-1, s->quarantine_reset(moved));
+	cut_assert_equal_string("quarantine_full", s->get_rebuild_blocked().c_str());
+	cut_assert_equal_string(id1.c_str(), s->get_copy_id().c_str());
+
+	// a verified staged copy replaces it: no longer quarantined; the marker
+	// and the retained (empty) copy go once bound and Active
+	storage_rocksdb* stg = s->open_staging("q1", false);
+	cut_assert_not_null(stg);
+	storage_set_string(stg, "k", "rebuilt");
+	cut_assert_equal_int(0, stg->adopt_history("M", "E", 1));
+	const string nid = stg->get_copy_id();
+	cut_assert_equal_int(0, stg->seal());
+	delete stg;
+	cut_assert_equal_int(0, s->switch_to_staging("q1", nid));
+	cut_assert_false(s->is_quarantined());
+	cut_assert_equal_int(0, s->record_retained("q1", "M", "E"));
+	string report;
+	cut_assert_equal_int(0, s->reap_retained("M", "E", true, false, report));		// not Active yet
+	cut_assert_true(!read_file_s(d + "/quarantine.marker").empty());
+	cut_assert_equal_int(1, s->reap_retained("M", "E", true, true, report));
+	cut_assert_equal_string("", read_file_s(d + "/quarantine.marker").c_str());
+	drop_rocksdb_noremove(s);
+	s = make_rocksdb(wal_slave_dir);
+	cut_assert_false(s->is_quarantined());
+	struct stat st;
+	cut_assert_equal_int(0, stat((d + "/quarantine-" + id0).c_str(), &st));		// the quarantined copy itself is kept
+	drop_rocksdb(s, wal_slave_dir);
+
+	// crash right after the marker (nothing moved yet): the live copy is
+	// treated as the post-quarantine copy
+	s = make_rocksdb(wal_slave_dir);
+	storage_set_string(s, "k", "v");
+	drop_rocksdb_noremove(s);
+	FILE* f = fopen((d + "/quarantine.marker").c_str(), "w");
+	fprintf(f, "corrupt=X:1\n");
+	fclose(f);
+	s = make_rocksdb(wal_slave_dir);
+	cut_assert_true(s->is_quarantined());
+	drop_rocksdb_noremove(s);
+	// crash after the rename, before the empty copy: open creates an empty
+	// copy, still quarantined
+	cut_assert_equal_int(0, rename((d + "/flare.rocksdb").c_str(), (d + "/quarantine-X:1").c_str()));
+	s = make_rocksdb(wal_slave_dir);
+	cut_assert_true(s->is_quarantined());
+	cut_assert_equal_int(0, static_cast<int>(s->count()));
+	drop_rocksdb(s, wal_slave_dir);
+}
+
+// Design §7 / §11.9: an approval names ONE copy and is used once. The
+// request id is recorded before anything is deleted: a repeat (also after a
+// crash between the two records) never runs again; a refused approval is
+// consumed too. The live copy is discarded only on a non-master and only
+// while its identity records agree.
+void test_copy_discard_approval_is_named_and_one_shot() {
+	const string d = wal_slave_dir;
+	storage_rocksdb* s = make_rocksdb(wal_slave_dir);
+	storage_set_string(s, "k", "old");
+	const string old_id = s->get_copy_id();
+	storage_rocksdb* stg = s->open_staging("r1", false);
+	storage_set_string(stg, "k", "new");
+	cut_assert_equal_int(0, stg->adopt_history("M", "E", 1));
+	const string new_id = stg->get_copy_id();
+	cut_assert_equal_int(0, stg->seal());
+	delete stg;
+	cut_assert_equal_int(0, s->switch_to_staging("r1", new_id));
+	string res;
+	// another copy named: refused, and the request is consumed
+	s->discard_copy("req1", "discard-retained", "NOT:1", true, res);
+	cut_assert_equal_string("refused:no_such_copy", res.c_str());
+	s->discard_copy("req1", "discard-retained", old_id, true, res);
+	cut_assert_equal_string("already:refused:no_such_copy", res.c_str());
+	cut_assert_equal_int(1, static_cast<int>(s->list_retained().size()));
+	// the named retained copy: applied once
+	s->discard_copy("req2", "discard-retained", old_id, true, res);
+	cut_assert_equal_string("applied", res.c_str());
+	cut_assert_equal_int(0, static_cast<int>(s->list_retained().size()));
+	s->discard_copy("req2", "discard-retained", old_id, true, res);
+	cut_assert_equal_string("already:applied", res.c_str());
+	// a crash after "started" and before the result: never executed again
+	FILE* f = fopen((d + "/approvals.log").c_str(), "a");
+	fprintf(f, "req3 started\n");
+	fclose(f);
+	s->discard_copy("req3", "discard-before-copy", new_id, true, res);
+	cut_assert_equal_string("already:started", res.c_str());
+	cut_assert_equal_string("new", get_value(s, "k").c_str());
+	// the live copy: not of a master, only the named copy
+	s->discard_copy("req4", "discard-before-copy", new_id, false, res);
+	cut_assert_equal_string("refused:live_copy_of_a_master_or_serving_node", res.c_str());
+	s->discard_copy("req5", "discard-before-copy", old_id, true, res);
+	cut_assert_equal_string("refused:copy_changed", res.c_str());
+	s->discard_copy("req6", "discard-before-copy", new_id, true, res);
+	cut_assert_equal_string("applied", res.c_str());
+	cut_assert_equal_int(0, static_cast<int>(s->count()));
+	cut_assert_true(s->get_copy_id() != new_id);
+	// identity records disagree: the live copy is not discarded by approval
+	const string cur = s->get_copy_id();
+	drop_rocksdb_noremove(s);
+	f = fopen((d + "/flare.rocksdb/COPY_ID").c_str(), "w");
+	fprintf(f, "%s-stale\n", cur.c_str());
+	fclose(f);
+	s = make_rocksdb(wal_slave_dir);
+	s->discard_copy("req7", "discard-before-copy", cur, true, res);
+	cut_assert_equal_string("refused:identity_inconsistent", res.c_str());
+	// the approvals record survives a restart
+	drop_rocksdb_noremove(s);
+	s = make_rocksdb(wal_slave_dir);
+	s->discard_copy("req2", "discard-retained", old_id, true, res);
+	cut_assert_equal_string("already:applied", res.c_str());
+	drop_rocksdb(s, wal_slave_dir);
+}
+
+// The quarantine generation is freed only by an approval naming it.
+void test_copy_discard_frees_the_quarantine_generation() {
+	const string d = wal_slave_dir;
+	storage_rocksdb* s = make_rocksdb(wal_slave_dir);
+	storage_set_string(s, "k", "v");
+	const string id0 = s->get_copy_id();
+	string moved, res;
+	cut_assert_equal_int(0, s->quarantine_reset(moved));
+	cut_assert_equal_int(-1, s->quarantine_reset(moved));
+	cut_assert_equal_string("quarantine_full", s->get_rebuild_blocked().c_str());
+	s->discard_copy("q1", "discard-quarantine", "OTHER:1", true, res);
+	cut_assert_equal_string("refused:no_such_copy", res.c_str());
+	s->discard_copy("q2", "discard-quarantine", id0, true, res);
+	cut_assert_equal_string("applied", res.c_str());
+	cut_assert_equal_string("", s->get_rebuild_blocked().c_str());
+	struct stat st;
+	cut_assert_equal_int(-1, stat((d + "/quarantine-" + id0).c_str(), &st));
+	drop_rocksdb(s, wal_slave_dir);
+}
+
 // An abandoned attempt (a failed dump, a refused gate, a crash) leaves the
 // live copy as it was; a staging directory is never reused, and an
 // unfinished one is removed at the next open.

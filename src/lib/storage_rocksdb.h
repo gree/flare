@@ -95,6 +95,12 @@ public:
 	// R3-D: the evidence of the STORED copy while a rebuild is in progress
 	// (moved here, durably, when an attempt starts; never advertised)
 	static const char* const kReplRebuiltFromSuspendedKey;
+	// Copy retention (docs/design-copy-retention.md §2): the persistent
+	// identity of THIS stored copy, "<uuid>:<generation>". A different copy
+	// (swap, reset, quarantine, a staging copy) gets a new uuid; replacing the
+	// content in place (truncate) bumps the generation. Mirrored in the copy's
+	// directory as COPY_ID (read by the switch recovery before the DB opens).
+	static const char* const kCopyIdKey;
 
 	// Return true if key is a reserved replication metadata key.
 	static bool is_reserved_key(const string& key);
@@ -186,6 +192,7 @@ protected:
 	// kReplRebuiltFromKey, guarded by _mutex_generations.
 	string _rebuilt_from_master_id;
 	string _rebuilt_from_epoch;
+	string _copy_id;
 	string _suspended_from_master_id;
 	string _suspended_from_epoch;
 	// Set when a generation could not be established or persisted. The
@@ -499,6 +506,15 @@ public:
 	// rule can still judge it after a restart. Cleared as soon as the stored
 	// copy changes (truncate, swap, merge dump, a change of the local
 	// history) and replaced when new evidence is recorded. 0 on success.
+	string get_copy_id();
+	// new uuid, generation 1 (a different copy); bump = same uuid, +1
+	int new_copy_identity(const char* why);
+	int bump_copy_generation(const char* why);
+	// Replace the live copy with the verified, durable staging copy
+	// data_dir/staging-<attempt> whose COPY_ID is `expected_new_id` (design
+	// §4.1). The old copy is kept as data_dir/retained-<attempt>. 0 on success;
+	// on failure the live copy is whatever the recovery table restores.
+	int switch_to_staging(const string& attempt, const string& expected_new_id);
 	int suspend_rebuilt_from();
 	int clear_suspended_rebuilt_from();
 	string get_suspended_rebuilt_from_master_id();

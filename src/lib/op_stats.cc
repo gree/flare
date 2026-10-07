@@ -262,6 +262,7 @@ int op_stats::_send_stats(thread_pool* req_tp, thread_pool* other_tp, storage* s
 			// Empty means UNAVAILABLE: the node could not establish or persist
 			// its identities and refuses to serve or accept replication.
 			_send_stat("rocksdb_source_epoch"               , rdb->get_source_epoch());
+			_send_stat("rocksdb_copy_id"                    , rdb->get_copy_id());
 			_send_stat("rocksdb_source_epoch_reason"        , rdb->get_source_epoch_reason());
 			// Rebuild evidence ("" = none): the source a clean full dump came from.
 			_send_stat("rocksdb_rebuilt_from_master_id"     , rdb->get_rebuilt_from_master_id());

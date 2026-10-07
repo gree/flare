@@ -28,6 +28,7 @@
 #include <sys/statvfs.h>
 #include <sys/vfs.h>
 #include "storage_rocksdb.h"
+#include "copy_switch_fs.h"
 #include <time.h>
 
 #include <rocksdb/utilities/checkpoint.h>
@@ -77,13 +78,14 @@ const char* const storage_rocksdb::kReplRestoreDoneKey = "__flare_repl_restore_d
 const char* const storage_rocksdb::kReplRebuiltFromKey = "__flare_repl_rebuilt_from";
 // Same format, the evidence of the stored copy while a rebuild is in progress.
 const char* const storage_rocksdb::kReplRebuiltFromSuspendedKey = "__flare_repl_rebuilt_from_suspended";
+const char* const storage_rocksdb::kCopyIdKey = "__flare_copy_id";
 // Name of the replication-metadata column family (design §3.7).
 const char* const storage_rocksdb::kReplMetaCfName = "flare_repl_meta";
 
 bool storage_rocksdb::is_reserved_key(const string& key) {
 	return key == kReplLastLsnKey || key == kReplMasterIdKey
 		|| key == kReplSourceEpochKey || key == kReplSourceEpochReasonKey || key == kReplIncarnationKey
-		|| key == kReplRestoreDoneKey || key == kReplRebuiltFromKey || key == kReplRebuiltFromSuspendedKey;
+		|| key == kReplRestoreDoneKey || key == kReplRebuiltFromKey || key == kReplRebuiltFromSuspendedKey || key == kCopyIdKey;
 }
 // }}}
 
@@ -560,6 +562,109 @@ int storage_rocksdb::clear_rebuilt_from() {
 	return r;
 }
 
+
+string storage_rocksdb::get_copy_id() {
+	pthread_rwlock_rdlock(&this->_mutex_generations);
+	string v = this->_copy_id;
+	pthread_rwlock_unlock(&this->_mutex_generations);
+	return v;
+}
+
+int storage_rocksdb::new_copy_identity(const char* why) {
+	uuid_t uuid;
+	char buf[37];
+	uuid_generate(uuid);
+	uuid_unparse_lower(uuid, buf);
+	const string id = string(buf) + ":1";
+	pthread_rwlock_wrlock(&this->_mutex_generations);
+	int r = this->_persist_generation(kCopyIdKey, id);
+	if (r == 0) {
+		this->_copy_id = id;
+	}
+	pthread_rwlock_unlock(&this->_mutex_generations);
+	if (r == 0) {
+		r = copy_fs::write_file_durable(this->_data_path, copy_fs::kCopyIdFile, id);
+		log_notice("copy identity: %s (%s)", id.c_str(), why);
+	}
+	return r;
+}
+
+int storage_rocksdb::bump_copy_generation(const char* why) {
+	pthread_rwlock_wrlock(&this->_mutex_generations);
+	string id = this->_copy_id;
+	const size_t c = id.rfind(':');
+	unsigned long long g = 0;
+	if (c != string::npos) {
+		g = strtoull(id.c_str() + c + 1, NULL, 10);
+	}
+	const string next = (c == string::npos ? id : id.substr(0, c)) + ":" + boost::lexical_cast<string>(g + 1);
+	int r = id.empty() ? -1 : this->_persist_generation(kCopyIdKey, next);
+	if (r == 0) {
+		this->_copy_id = next;
+	}
+	pthread_rwlock_unlock(&this->_mutex_generations);
+	if (id.empty()) {
+		return this->new_copy_identity(why);
+	}
+	if (r == 0) {
+		r = copy_fs::write_file_durable(this->_data_path, copy_fs::kCopyIdFile, next);
+		log_notice("copy identity: %s (generation bumped: %s)", next.c_str(), why);
+	}
+	return r;
+}
+
+int storage_rocksdb::switch_to_staging(const string& attempt, const string& expected_new_id) {
+	const string staging = this->_data_dir + "/" + copy_fs::kStagingPrefix + attempt;
+	if (copy_fs::read_copy_id(staging) != expected_new_id) {
+		log_err("switch refused: staging [%s] is not copy %s (found %s)", staging.c_str(), expected_new_id.c_str(),
+			copy_fs::read_copy_id(staging).c_str());
+		return -1;
+	}
+	switch_intent in;
+	in.attempt = attempt;
+	in.old_id = this->get_copy_id();
+	in.new_id = expected_new_id;
+	pthread_rwlock_wrlock(&this->_mutex_wholelock);
+	int r = -1;
+	do {
+		if (this->_db != NULL) {
+			this->_close_db();		// the live copy is durable once closed
+		}
+		if (copy_fs::switch_dirs(this->_data_dir, "flare.rocksdb", in) < 0) {
+			string report;
+			copy_fs::recover(this->_data_dir, "flare.rocksdb", report);
+			log_err("copy switch failed; recovery: %s", report.c_str());
+			this->_open_db(this->_data_path);
+			break;
+		}
+		rocksdb::Status st = this->_open_db(this->_data_path);
+		if (!st.ok()) {
+			log_err("copy switch: the new live copy does not open: %s (intent kept: the next open resolves it)", st.ToString().c_str());
+			this->_db = NULL;
+			break;
+		}
+		string v;
+		rocksdb::Status cs = this->_db->Get(this->_read_options, kCopyIdKey, &v);
+		if (!cs.ok() || v != expected_new_id) {
+			log_err("copy switch: the opened live copy is %s, not %s (intent kept)", v.c_str(), expected_new_id.c_str());
+			break;
+		}
+		this->_copy_id = v;
+		this->_clear_header_cache();
+		if (this->_load_or_init_generations() < 0) {
+			log_err("copy switch: generations of the new live copy could not be loaded", 0);
+		}
+		if (copy_fs::remove_intent(this->_data_dir) < 0) {
+			break;
+		}
+		log_notice("copy switch DONE: live is copy %s; the old copy %s is retained as %s%s", v.c_str(), in.old_id.c_str(),
+			copy_fs::kRetainedPrefix, attempt.c_str());
+		r = 0;
+	} while (false);
+	pthread_rwlock_unlock(&this->_mutex_wholelock);
+	return r;
+}
+
 int storage_rocksdb::suspend_rebuilt_from() {
 	pthread_rwlock_wrlock(&this->_mutex_generations);
 	int r = 0;
@@ -821,6 +926,18 @@ int storage_rocksdb::open() {
 		return -1;
 	}
 
+	// Copy retention (design §4.2): resolve an interrupted switch from what
+	// exists on disk BEFORE the live DB is opened; only then remove the
+	// unfinished staging copies.
+	if (copy_fs::dir_exists(this->_data_dir)) {
+		string report;
+		if (copy_fs::recover(this->_data_dir, "flare.rocksdb", report) < 0) {
+			log_err("storage open refused: the copy switch could not be resolved (%s)", report.c_str());
+			return -1;
+		}
+		copy_fs::cleanup_staging(this->_data_dir);
+	}
+
 	// Never expose a half-restored copy (design §3.9(D)).
 	if (this->_discard_incomplete_restore() < 0) {
 		log_err("storage open refused: an interrupted restore could not be cleaned up", 0);
@@ -882,6 +999,18 @@ int storage_rocksdb::open() {
 	if (this->_load_or_init_generations() < 0) {
 		log_err("failed to initialise replication generations", 0);
 		return -1;
+	}
+	{
+		// the copy identity: load, or mint for a copy that has none yet
+		string v;
+		rocksdb::Status cs = this->_db->Get(this->_read_options, kCopyIdKey, &v);
+		if (cs.ok() && !v.empty()) {
+			this->_copy_id = v;
+			copy_fs::write_file_durable(this->_data_path, copy_fs::kCopyIdFile, v);
+		} else if (this->new_copy_identity("first open of a copy without an identity") < 0) {
+			log_err("failed to initialise the copy identity", 0);
+			return -1;
+		}
 	}
 
 	log_notice("storage open (path=%s, type=%s, master_id=%s, sync_writes=%s, wal_ttl=%llus, wal_size_limit=%lluMB)",
@@ -1503,6 +1632,7 @@ int storage_rocksdb::truncate(int b) {
 	// is whole-lock -> generations, the same as hard_reset().
 	if (r == 0) {
 		this->advance_source_epoch("bulk");
+		this->bump_copy_generation("truncate");
 	}
 
 	if ((b & behavior_skip_lock) == 0) {
@@ -2108,6 +2238,9 @@ int storage_rocksdb::swap_in_snapshot(const string& staging_dir, uint64_t checkp
 		// rocksdb_corrupted=1 (observed live on wg-dev after the rc34 roll).
 		this->_corrupted = false;
 		this->incr_snapshot_bootstrap();
+		// a different copy (the source's checkpoint carries the SOURCE's
+		// identity key): mint this copy's own
+		this->new_copy_identity("snapshot swap");
 		log_notice("snapshot bootstrap complete (seq=%llu, master_id=%s)",
 			(unsigned long long)checkpoint_seq, this->get_master_id().c_str());
 		r = 0;
@@ -2324,6 +2457,7 @@ int storage_rocksdb::hard_reset() {
 		this->_clear_header_cache();
 		this->_corrupted = false;
 		this->_hard_reset.incr();
+		this->new_copy_identity("reset to an empty copy");
 		// The local copy was replaced: deliveries and streams issued against
 		// the previous copy must be refused (design §3.1). hard_reset reopens
 		// the handle directly, so establish the generations here. The DB is
@@ -2377,6 +2511,7 @@ int storage_rocksdb::quarantine_reset(string& moved_to) {
 		this->_clear_header_cache();
 		this->_corrupted = false;
 		this->_hard_reset.incr();
+		this->new_copy_identity("reset to an empty copy");
 		if (this->_load_or_init_generations() < 0) {
 			log_err("quarantine_reset: could not establish replication generations; replication stays UNAVAILABLE on this node", 0);
 		}

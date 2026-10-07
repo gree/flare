@@ -1709,6 +1709,146 @@ void test_suspended_evidence_survives_restart_and_never_readvertises() {
 	drop_rocksdb(s, wal_master_dir);
 }
 
+// Copy retention (design §2, §4): the persistent copy identity and the
+// crash-safe switch from a staging copy.
+namespace {
+	string read_file_s(const string& path) {
+		string out;
+		FILE* f = fopen(path.c_str(), "r");
+		if (!f) return "";
+		char buf[256];
+		size_t n;
+		while ((n = fread(buf, 1, sizeof(buf), f)) > 0) out.append(buf, n);
+		fclose(f);
+		while (!out.empty() && (out[out.size()-1] == '\n')) out.erase(out.size()-1);
+		return out;
+	}
+
+	string get_value(storage_rocksdb* s, const string& key) {
+		storage::entry e;
+		e.key = key;
+		storage::result r;
+		if (s->get(e, r) < 0 || r != storage::result_none) return "(none)";
+		return string(reinterpret_cast<const char*>(e.data.get()), e.size);
+	}
+
+	// a staging copy for attempt `a` in `dir`: built as its own DB in a
+	// sibling dir, closed (durable), moved to dir/staging-<a>
+	string make_staging_copy(const char* dir, const char* a, const string& key, const string& value) {
+		const char sdir[] = "tmp_rocksdb_copy_staging_build";
+		storage_rocksdb* t = make_rocksdb(sdir);
+		storage_set_string(t, key, value);
+		const string id = t->get_copy_id();
+		drop_rocksdb_noremove(t);
+		const string to = string(dir) + "/staging-" + a;
+		cut_assert_equal_int(0, rename((string(sdir) + "/flare.rocksdb").c_str(), to.c_str()));
+		cut_remove_path(sdir, NULL);
+		return id;
+	}
+}
+
+void test_copy_identity_persisted_mirrored_and_bumped() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	const string id = s->get_copy_id();
+	cut_assert_true(!id.empty());
+	cut_assert_true(storage_rocksdb::is_reserved_key(storage_rocksdb::kCopyIdKey));
+	cut_assert_equal_string(id.c_str(), read_file_s(string(wal_master_dir) + "/flare.rocksdb/COPY_ID").c_str());
+	drop_rocksdb_noremove(s);
+	s = make_rocksdb(wal_master_dir);
+	cut_assert_equal_string(id.c_str(), s->get_copy_id().c_str());
+	// a truncate replaces the content in place: same uuid, next generation
+	cut_assert_equal_int(0, s->truncate(0));
+	const string id2 = s->get_copy_id();
+	cut_assert_equal_string(id.substr(0, id.rfind(':')).c_str(), id2.substr(0, id2.rfind(':')).c_str());
+	cut_assert_true(id2 != id);
+	cut_assert_equal_string(id2.c_str(), read_file_s(string(wal_master_dir) + "/flare.rocksdb/COPY_ID").c_str());
+	drop_rocksdb(s, wal_master_dir);
+}
+
+void test_switch_to_staging_retains_the_old_copy() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	storage_set_string(s, "k", "old");
+	const string old_id = s->get_copy_id();
+	const string new_id = make_staging_copy(wal_master_dir, "a1", "k", "new");
+	cut_assert_equal_int(0, s->switch_to_staging("a1", new_id));
+	cut_assert_equal_string(new_id.c_str(), s->get_copy_id().c_str());
+	cut_assert_equal_string("new", get_value(s, "k").c_str());
+	cut_assert_equal_string(old_id.c_str(), read_file_s(string(wal_master_dir) + "/retained-a1/COPY_ID").c_str());
+	cut_assert_equal_string("", read_file_s(string(wal_master_dir) + "/switch.intent").c_str());
+	// a staging copy that is not the named one is refused
+	const string other = make_staging_copy(wal_master_dir, "a2", "k", "x");
+	cut_assert_equal_int(-1, s->switch_to_staging("a2", other + "-not"));
+	cut_assert_equal_string("new", get_value(s, "k").c_str());
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// a crash right after live -> retained (before the staging rename and
+// before the intent phase update): the next open ROLLS BACK
+void test_switch_crash_after_first_rename_rolls_back_at_open() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	storage_set_string(s, "k", "old");
+	const string old_id = s->get_copy_id();
+	drop_rocksdb_noremove(s);
+	const string new_id = make_staging_copy(wal_master_dir, "a1", "k", "new");
+	const string d = wal_master_dir;
+	FILE* f = fopen((d + "/switch.intent").c_str(), "w");
+	fprintf(f, "attempt=a1\nold=%s\nnew=%s\nphase=prepared\n", old_id.c_str(), new_id.c_str());
+	fclose(f);
+	cut_assert_equal_int(0, rename((d + "/flare.rocksdb").c_str(), (d + "/retained-a1").c_str()));
+	s = make_rocksdb(wal_master_dir);
+	cut_assert_equal_string(old_id.c_str(), s->get_copy_id().c_str());
+	cut_assert_equal_string("old", get_value(s, "k").c_str());
+	cut_assert_equal_string("", read_file_s(d + "/switch.intent").c_str());
+	// the unfinished staging copy is removed only AFTER the intent was resolved
+	cut_assert_equal_string("", read_file_s(d + "/staging-a1/COPY_ID").c_str());
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// a crash after staging -> live (intent phase stale): ROLL FORWARD
+void test_switch_crash_after_second_rename_rolls_forward_at_open() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	storage_set_string(s, "k", "old");
+	const string old_id = s->get_copy_id();
+	drop_rocksdb_noremove(s);
+	const string new_id = make_staging_copy(wal_master_dir, "a1", "k", "new");
+	const string d = wal_master_dir;
+	FILE* f = fopen((d + "/switch.intent").c_str(), "w");
+	fprintf(f, "attempt=a1\nold=%s\nnew=%s\nphase=prepared\n", old_id.c_str(), new_id.c_str());
+	fclose(f);
+	cut_assert_equal_int(0, rename((d + "/flare.rocksdb").c_str(), (d + "/retained-a1").c_str()));
+	cut_assert_equal_int(0, rename((d + "/staging-a1").c_str(), (d + "/flare.rocksdb").c_str()));
+	s = make_rocksdb(wal_master_dir);
+	cut_assert_equal_string(new_id.c_str(), s->get_copy_id().c_str());
+	cut_assert_equal_string("new", get_value(s, "k").c_str());
+	cut_assert_equal_string(old_id.c_str(), read_file_s(d + "/retained-a1/COPY_ID").c_str());
+	cut_assert_equal_string("", read_file_s(d + "/switch.intent").c_str());
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// an inconsistent state: the open is REFUSED and nothing is touched
+void test_switch_inconsistent_state_refuses_open() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	const string old_id = s->get_copy_id();
+	drop_rocksdb_noremove(s);
+	const string d = wal_master_dir;
+	FILE* f = fopen((d + "/switch.intent").c_str(), "w");
+	fprintf(f, "attempt=a1\nold=%s\nnew=NEW:1\nphase=new_live\n", old_id.c_str());
+	fclose(f);
+	// live is the old copy, retained also claims... nothing; staging absent,
+	// and a foreign retained copy: not in the table
+	mkdir((d + "/retained-a1").c_str(), 0700);
+	f = fopen((d + "/retained-a1/COPY_ID").c_str(), "w");
+	fprintf(f, "FOREIGN:1\n");
+	fclose(f);
+	storage_rocksdb* t = new storage_rocksdb(wal_master_dir, 32, 4, 16, 4, 2, 86400, 1024);
+	cut_assert_equal_int(-1, t->open());
+	delete t;
+	// nothing touched
+	cut_assert_equal_string("FOREIGN:1", read_file_s(d + "/retained-a1/COPY_ID").c_str());
+	cut_assert_true(read_file_s(d + "/switch.intent").find("attempt=a1") != string::npos);
+	cut_remove_path(wal_master_dir, NULL);
+}
+
 // Evidence that cannot be persisted is never published; a clear that cannot
 // be persisted still drops the in-memory copy and reports failure (the caller
 // then refuses to rebuild).

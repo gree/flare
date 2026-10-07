@@ -51,27 +51,47 @@ structure Decision where
     report a running reconstruction). Deterministic (map order). A held node
     keeps its `before` entry. -/
 def gate (before after : FlareClusterState) (perPartition clusterWide : Nat)
-    (running : List String := []) : Decision := Id.run do
+    (running : List String := []) (parkedIdle : List String := []) : Decision := Id.run do
   let existing := (before.nodeMap.filter fun kv => rebuilding kv.2).map Prod.fst
   let counted := existing ++ (running.filter fun k => !existing.contains k)
   let partOf := fun (k : String) => ((before.lookupNode k).map (·.partition)).getD (-1)
+  -- a PARKED rebuild with nothing left in flight (no transfer, serve or
+  -- switch: read from its stats) gives back its CLUSTER slot; it still holds
+  -- its partition's slot (the same replica is never rebuilt twice)
   let mut admitted : List (String × Int) := counted.map fun k => (k, partOf k)
+  let mut clusterCount : Nat := (counted.filter fun k => !parkedIdle.contains k).length
   let mut nodeMap := after.nodeMap
   let mut held : List (String × String) := []
   for (k, a) in after.nodeMap do
     if newAssignment (before.lookupNode k) a then
       let inPart := (admitted.filter fun (_, p) => p == a.partition).length
-      if admitted.length ≥ clusterWide || inPart ≥ perPartition then
+      if clusterCount ≥ clusterWide || inPart ≥ perPartition then
         let why := if inPart ≥ perPartition
           then s!"partition {a.partition} already has {inPart} rebuild(s) (limit {perPartition})"
-          else s!"the cluster already has {admitted.length} rebuild(s) (limit {clusterWide})"
+          else s!"the cluster already has {clusterCount} running rebuild(s) (limit {clusterWide})"
         match before.lookupNode k with
         | some b => nodeMap := nodeMap.map fun kv => if kv.1 == k then (k, b) else kv
         | none => pure ()
         held := held ++ [(k, why)]
       else
         admitted := admitted ++ [(k, a.partition)]
+        clusterCount := clusterCount + 1
   let st := FlareClusterState.rebuildPartitionMap { after with nodeMap := nodeMap }
   return { state := st, held := held }
+
+/-- Which parked rebuild may be RESUMED now (it takes its slot again): the
+    first parked-idle rebuilding node (map order) when no other rebuild runs
+    in the cluster beyond the limit and none other in its partition. -/
+def resumeCandidate (state : FlareClusterState) (perPartition clusterWide : Nat)
+    (parkedIdle : List String) (running : List String := []) : Option String :=
+  let rebuildingKeys := (state.nodeMap.filter fun kv => rebuilding kv.2).map Prod.fst
+  let counted := rebuildingKeys ++ (running.filter fun k => !rebuildingKeys.contains k)
+  let active := counted.filter fun k => !parkedIdle.contains k
+  if active.length ≥ clusterWide then none
+  else
+    let partOf := fun (k : String) => ((state.lookupNode k).map (·.partition)).getD (-1)
+    parkedIdle.find? fun k =>
+      rebuildingKeys.contains k &&
+        (counted.filter fun o => o != k && partOf o == partOf k).length < perPartition
 
 end FlareOperator.RebuildConcurrency

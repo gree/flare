@@ -226,6 +226,25 @@ string metrics_formatter::format(const stats_list& stats) {
 		}
 	}
 
+	// copy retention: why a staged rebuild stopped (absent = not blocked),
+	// and whether it is parked / running (design §9, §10)
+	{
+		const string* blocked = _lookup(stats, "rebuild_blocked");
+		if (blocked != NULL && !blocked->empty()) {
+			append_header(out, "flare_node_rebuild_blocked_info", "gauge");
+			_append_sample(out, "flare_node_rebuild_blocked_info", "reason=\"" + label_escape(*blocked) + "\"", "1");
+		}
+		const char* passthrough[] = { "rebuild_parked", "rebuild_in_flight" };
+		for (size_t i = 0; i < sizeof(passthrough) / sizeof(passthrough[0]); i++) {
+			const string* v = _lookup(stats, passthrough[i]);
+			if (v != NULL && is_numeric(*v)) {
+				const string name = string("flare_node_") + passthrough[i];
+				append_header(out, name, "gauge");
+				_append_sample(out, name, "", *v);
+			}
+		}
+	}
+
 	// continuous replication, follower side (SAF-10 / EV-15): this replica's
 	// own follow state, so operations compare each replica with its source
 	// instead of inferring from cluster-wide counts. Numeric repl_* stats

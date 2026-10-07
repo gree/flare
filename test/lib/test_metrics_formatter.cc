@@ -97,6 +97,25 @@ namespace test_metrics_formatter
 		cut_assert_true(contains(out, "memcached_commands_total{command=\"set\",status=\"hit\"} 90\n"));
 	}
 
+	// copy retention monitoring: why a rebuild stopped, parked / in flight,
+	// and the bytes the kept copies take
+	void test_rebuild_blocked_and_retained_metrics() {
+		push("rebuild_blocked", "no_space");
+		push("rebuild_parked", "1");
+		push("rebuild_in_flight", "0");
+		push("rocksdb_retained_copies", "2");
+		push("rocksdb_retained_bytes", "4096");
+		string out = metrics_formatter::format(stats);
+		cut_assert_true(contains(out, "flare_node_rebuild_blocked_info{reason=\"no_space\"} 1\n"));
+		cut_assert_true(contains(out, "flare_node_rebuild_parked 1\n"));
+		cut_assert_true(contains(out, "flare_node_rebuild_in_flight 0\n"));
+		cut_assert_true(contains(out, "flare_node_rocksdb_retained_copies 2\n"));
+		cut_assert_true(contains(out, "flare_node_rocksdb_retained_bytes 4096\n"));
+		stats.clear();
+		push("rebuild_blocked", "");
+		cut_assert_false(contains(metrics_formatter::format(stats), "rebuild_blocked_info"));
+	}
+
 	void test_version_label() {
 		push("version", "1.3.4");
 		string out = metrics_formatter::format(stats);

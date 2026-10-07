@@ -208,6 +208,24 @@ protected:
 	string _rebuild_blocked;
 	uint64_t _staged_switched = 0;
 	uint64_t _staged_abandoned = 0;
+	// design §10 (user decision 2026-10-07, item 3): a blocked staged rebuild
+	// is PARKED — no transfer, no automatic retry — until the operator
+	// resumes it (rebuild_resume) when a slot is free; in_flight = a staged
+	// copy, catch-up or switch is running right now
+	bool _rebuild_parked = false;
+	bool _rebuild_in_flight = false;
+	// design §9 / decision 2026-10-07 item 4: measured peaks, so the reserve
+	// is set from measurements (receiver = staged rebuild, source = serve)
+	struct peak_set {
+		uint64_t data_dir_bytes = 0;		// largest size of the whole data dir seen
+		int64_t memory_bytes = -1;			// largest cgroup memory use seen (-1 = not readable)
+		int64_t min_available = -1;			// smallest rebuild_space_available seen (-1 = none)
+		uint64_t start_data_dir_bytes = 0;	// data dir size when the window began
+		uint64_t samples = 0;
+		uint64_t last_sample_ms = 0;
+	};
+	peak_set _peaks_rebuild;
+	peak_set _peaks_serve;
 	// design §5: a snapshot (serve or push) is being served from this node
 	bool _snapshot_serving = false;
 	// design §6: the live copy is the empty copy left by a quarantine
@@ -565,6 +583,18 @@ public:
 	string get_rebuild_blocked();
 	void note_staged_result(bool switched);
 	bool is_snapshot_serving();
+	void set_rebuild_parked(bool b);
+	bool is_rebuild_parked();
+	// true if it was parked (the next attempt re-checks everything)
+	bool resume_rebuild();
+	void set_rebuild_in_flight(bool b);
+	bool is_rebuild_in_flight();
+	// peaks: start a measurement window, sample (at most once a second unless
+	// forced), read. serve = the source side (snapshot / dump being served).
+	void peaks_begin(bool serve);
+	void peaks_sample(bool serve, bool force = false);
+	void peaks_get(bool serve, uint64_t& data_dir_max, int64_t& memory_max, int64_t& min_available,
+		uint64_t& data_dir_start, uint64_t& samples);
 	bool is_quarantined() const { return this->_quarantined; }
 	// design §7: an explicit, one-shot approval to discard ONE named copy.
 	// operation: discard-retained | discard-quarantine | discard-before-copy.
@@ -595,6 +625,9 @@ public:
 	int record_retained(const string& attempt, const string& master_id, const string& epoch);
 	// Names of retained-* directories present (attempt ids).
 	vector<string> list_retained();
+	// bytes under data_dir entries whose name starts with `prefix`
+	// (retained-, quarantine-, staging-): what the copies kept here take
+	uint64_t bytes_with_prefix(const string& prefix);
 	// Design §8: delete every retained copy whose four conditions hold
 	// (record present; live copy id = the one that replaced it and the
 	// identity is consistent; the read source bound eligible to the recorded

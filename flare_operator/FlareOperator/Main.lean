@@ -282,6 +282,12 @@ initialize promotionAbortedRef : IO.Ref Bool ← IO.mkRef false
 
 /-- Copy retention §10: the assignments held last time (logged on change). -/
 initialize rebuildHeldRef : IO.Ref (List String) ← IO.mkRef []
+/-- Copy retention §10 (decision 2026-10-07, item 3): rebuilding nodes whose
+    stats say parked with nothing in flight (no transfer, serve or switch). -/
+initialize parkedIdleRef : IO.Ref (List String) ← IO.mkRef []
+/-- When each node was last resumed (monotonic ms): at most once per 5 min,
+    so a node whose cause did not change is not resumed every pass. -/
+initialize resumedAtRef : IO.Ref (List (String × Nat)) ← IO.mkRef []
 
 /-- SAF-08: a successor the empty-master self-heal validated before deleting
     the master, pinned with its incarnation for the drain that follows:
@@ -509,6 +515,44 @@ private def processCopyDiscardApprovals (crName ns : String) : IO Unit := do
           let (phase, reason) := CopyDiscardApproval.classify reply
           IO.eprintln s!"[flare-operator] COPY DISCARD APPROVAL {a.name} ({a.operation} of copy {a.copyId} on {pod}, request {a.requestId}): {phase} — {reason}"
           record phase reason (a.attempt + 1)
+
+/-- Copy retention §10: read the rebuilding nodes' park state, and resume
+    ONE parked rebuild when its slots are free. A node counts as parked-idle
+    only on a complete stats reply saying parked=1, in_flight=0 and no
+    snapshot being served; anything else (unreadable included) counts as
+    running. -/
+private def refreshParkedRebuilds (stateRef : IO.Ref FlareClusterState) (ns : String) : IO Unit := do
+  let st ← stateRef.get
+  let mut parked : List String := []
+  for (key, n) in st.nodeMap do
+    if RebuildConcurrency.rebuilding n then
+      match ← Bridge.queryPodStats (extractPodName key) ns "stats" with
+      | .ok out =>
+        let complete := (out.splitOn "\n").any fun l => l.trim == "END"
+        if complete && statNat out "rebuild_parked" == some 1 && statNat out "rebuild_in_flight" == some 0
+            && statNat out "rocksdb_snapshot_serving" == some 0 then
+          parked := parked ++ [key]
+      | .error _ => pure ()
+  let prev ← parkedIdleRef.get
+  if parked != prev then
+    IO.eprintln s!"[flare-operator] parked rebuilds (blocked, nothing in flight; their cluster slot is free): {parked}"
+  parkedIdleRef.set parked
+  let nowMs ← IO.monoMsNow
+  let recent := (← resumedAtRef.get).filter fun (_, t) => nowMs < t + 300000
+  resumedAtRef.set recent
+  let eligibleToResume := parked.filter fun k => !(recent.any (·.1 == k))
+  -- nodes in their backoff stay parked (not counted) but are not resumed now
+  let ordered := eligibleToResume ++ parked.filter (!eligibleToResume.contains ·)
+  match (RebuildConcurrency.resumeCandidate st 1 1 ordered).filter (eligibleToResume.contains ·) with
+  | none => pure ()
+  | some k =>
+    resumedAtRef.modify (· ++ [(k, nowMs)])
+    match ← Bridge.queryPodStats (extractPodName k) ns "rebuild_resume" with
+    | .ok out =>
+      if statNat out "rebuild_resumed" == some 1 then
+        IO.eprintln s!"[flare-operator] REBUILD RESUMED: {k} takes the rebuild slot again (it re-checks capacity, source and copy identity)"
+        parkedIdleRef.set (parked.filter (· != k))
+    | .error e => IO.eprintln s!"[flare-operator] rebuild_resume to {k} failed ({e}); it stays parked"
 
 private def handleRocksdbConfig (crd : FlareClusterView) (crName ns : String)
     (pendingConfRef : IO.Ref (Option (String × Nat))) : IO Unit := do
@@ -1331,7 +1375,7 @@ private def commitChecked (stateRef : IO.Ref FlareClusterState) (ver : Nat) (ucs
   -- A NEW Proxy -> Slave(Prepare) assignment beyond that is held (the node
   -- stays a Proxy this pass). Rejoins over TCP and master reconstructions
   -- are not gated (RebuildConcurrency).
-  let gated := RebuildConcurrency.gate cur ucs 1 1
+  let gated := RebuildConcurrency.gate cur ucs 1 1 [] (← parkedIdleRef.get)
   let heldKeys := gated.held.map Prod.fst
   if heldKeys != (← rebuildHeldRef.get) then
     rebuildHeldRef.set heldKeys
@@ -2416,6 +2460,8 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
   handleRocksdbConfig crd crName ns pendingConfRef
   -- 5-. Copy retention §7: explicit approvals to discard one named copy
   processCopyDiscardApprovals crName ns
+  -- §10: parked rebuilds give back their cluster slot; resume one when free
+  refreshParkedRebuilds stateRef ns
   handleClusterReplication crd (← stateRef.get) migrationRef pendingConfRef masterSnapshotRef driftTickRef metrics crName ns
 
   -- 5a. Blue/green migrations (FlareMigration CRs whose spec.source is this

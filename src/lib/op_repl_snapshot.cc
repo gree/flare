@@ -154,7 +154,9 @@ int op_repl_snapshot::_run_server() {
 
 	int r = 0;
 	char* buf = new char[kSnapshotChunkBytes];
+	rdb->peaks_begin(true);		// the measured window of this serve (source side)
 	for (size_t i = 0; i < files.size() && r == 0; i++) {
+		rdb->peaks_sample(true);
 		const string& name = files[i].first;
 		uint64_t size = files[i].second;
 
@@ -218,6 +220,7 @@ int op_repl_snapshot::_run_server() {
 	}
 	delete[] buf;
 
+	rdb->peaks_sample(true, true);
 	rdb->remove_snapshot_checkpoint(cp_path);
 	rdb->enable_file_deletions();
 

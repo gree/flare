@@ -272,7 +272,33 @@ int op_stats::_send_stats(thread_pool* req_tp, thread_pool* other_tp, storage* s
 			_send_stat("rocksdb_copy_bytes"                 , rdb->local_copy_bytes());
 			_send_stat("rocksdb_rebuild_reserve_bytes"      , static_cast<long long>(rdb->get_rebuild_reserve_bytes()));
 			_send_stat("rebuild_blocked"                    , rdb->get_rebuild_blocked());
+			// design §10: parked = blocked and waiting for rebuild_resume (no
+			// automatic retry); in_flight = a staged copy / catch-up / switch
+			// running now; serving = a snapshot is being served from here
+			_send_stat("rebuild_parked"                     , rdb->is_rebuild_parked() ? 1 : 0);
+			{
+				// measured peaks (reserve sizing): receiver = the last staged
+				// rebuild, source = the last serve (snapshot or dump)
+				const char* side[] = { "rebuild", "serve" };
+				for (int k = 0; k < 2; k++) {
+					uint64_t dmax = 0, dstart = 0, n = 0;
+					int64_t mmax = -1, amin = -1;
+					rdb->peaks_get(k == 1, dmax, mmax, amin, dstart, n);
+					const string pre = string("rocksdb_") + side[k] + "_peak_";
+					_send_stat((pre + "data_dir_bytes").c_str(), dmax);
+					_send_stat((pre + "data_dir_start_bytes").c_str(), dstart);
+					_send_stat((pre + "memory_bytes").c_str(), static_cast<long long>(mmax));
+					_send_stat((pre + "min_available_bytes").c_str(), static_cast<long long>(amin));
+					_send_stat((pre + "samples").c_str(), n);
+				}
+			}
+			_send_stat("rebuild_in_flight"                  , rdb->is_rebuild_in_flight() ? 1 : 0);
+			_send_stat("rocksdb_snapshot_serving"           , rdb->is_snapshot_serving() ? 1 : 0);
 			_send_stat("rocksdb_retained_copies"            , static_cast<uint64_t>(rdb->list_retained().size()));
+			// monitoring (decision 2026-10-07, item 2): what the kept copies take
+			_send_stat("rocksdb_retained_bytes"             , rdb->bytes_with_prefix("retained-"));
+			_send_stat("rocksdb_quarantine_bytes"           , rdb->bytes_with_prefix("quarantine-"));
+			_send_stat("rocksdb_staging_bytes"              , rdb->bytes_with_prefix("staging-"));
 			_send_stat("rocksdb_staged_switched"            , rdb->get_staged_switched());
 			_send_stat("rocksdb_staged_abandoned"           , rdb->get_staged_abandoned());
 			_send_stat("rocksdb_source_epoch_reason"        , rdb->get_source_epoch_reason());

@@ -739,6 +739,43 @@ void storage_rocksdb::set_rebuild_blocked(const string& why) {
 	pthread_mutex_unlock(&this->_mutex_rebuild_status);
 }
 
+void storage_rocksdb::set_rebuild_parked(bool b) {
+	pthread_mutex_lock(&this->_mutex_rebuild_status);
+	this->_rebuild_parked = b;
+	pthread_mutex_unlock(&this->_mutex_rebuild_status);
+}
+
+bool storage_rocksdb::is_rebuild_parked() {
+	pthread_mutex_lock(&this->_mutex_rebuild_status);
+	const bool b = this->_rebuild_parked;
+	pthread_mutex_unlock(&this->_mutex_rebuild_status);
+	return b;
+}
+
+bool storage_rocksdb::resume_rebuild() {
+	pthread_mutex_lock(&this->_mutex_rebuild_status);
+	const bool was = this->_rebuild_parked;
+	this->_rebuild_parked = false;
+	pthread_mutex_unlock(&this->_mutex_rebuild_status);
+	if (was) {
+		log_notice("staged rebuild RESUMED by the operator (a slot is free); the next attempt re-checks capacity, source and copy identity", 0);
+	}
+	return was;
+}
+
+void storage_rocksdb::set_rebuild_in_flight(bool b) {
+	pthread_mutex_lock(&this->_mutex_rebuild_status);
+	this->_rebuild_in_flight = b;
+	pthread_mutex_unlock(&this->_mutex_rebuild_status);
+}
+
+bool storage_rocksdb::is_rebuild_in_flight() {
+	pthread_mutex_lock(&this->_mutex_rebuild_status);
+	const bool b = this->_rebuild_in_flight;
+	pthread_mutex_unlock(&this->_mutex_rebuild_status);
+	return b;
+}
+
 string storage_rocksdb::get_rebuild_blocked() {
 	pthread_mutex_lock(&this->_mutex_rebuild_status);
 	string v = this->_rebuild_blocked;
@@ -2178,6 +2215,76 @@ namespace {
 		}
 		return static_cast<int64_t>(v);
 	}
+}
+
+uint64_t storage_rocksdb::bytes_with_prefix(const string& prefix) {
+	uint64_t total = 0;
+	DIR* d = opendir(this->_data_dir.c_str());
+	if (d == NULL) {
+		return 0;
+	}
+	struct dirent* e;
+	vector<string> names;
+	while ((e = readdir(d)) != NULL) {
+		const string n = e->d_name;
+		if (n.size() > prefix.size() && n.compare(0, prefix.size(), prefix) == 0) {
+			names.push_back(n);
+		}
+	}
+	closedir(d);
+	for (size_t i = 0; i < names.size(); i++) {
+		total += tree_bytes(this->_data_dir + "/" + names[i]);
+	}
+	return total;
+}
+
+void storage_rocksdb::peaks_begin(bool serve) {
+	const uint64_t now = tree_bytes(this->_data_dir);
+	pthread_mutex_lock(&this->_mutex_rebuild_status);
+	peak_set& p = serve ? this->_peaks_serve : this->_peaks_rebuild;
+	p = peak_set();
+	p.start_data_dir_bytes = now;
+	pthread_mutex_unlock(&this->_mutex_rebuild_status);
+	this->peaks_sample(serve, true);
+}
+
+void storage_rocksdb::peaks_sample(bool serve, bool force) {
+	struct timeval tv;
+	gettimeofday(&tv, NULL);
+	const uint64_t now_ms = static_cast<uint64_t>(tv.tv_sec) * 1000 + tv.tv_usec / 1000;
+	pthread_mutex_lock(&this->_mutex_rebuild_status);
+	peak_set& p0 = serve ? this->_peaks_serve : this->_peaks_rebuild;
+	const bool skip = !force && p0.last_sample_ms != 0 && now_ms < p0.last_sample_ms + 1000;
+	if (!skip) p0.last_sample_ms = now_ms;
+	pthread_mutex_unlock(&this->_mutex_rebuild_status);
+	if (skip) {
+		return;
+	}
+	const uint64_t dir = tree_bytes(this->_data_dir);
+	int64_t mem = read_cgroup_number("/sys/fs/cgroup/memory.current");
+	if (mem < 0) {
+		mem = read_cgroup_number("/sys/fs/cgroup/memory/memory.usage_in_bytes");
+	}
+	const int64_t avail = this->rebuild_space_available();
+	pthread_mutex_lock(&this->_mutex_rebuild_status);
+	peak_set& p = serve ? this->_peaks_serve : this->_peaks_rebuild;
+	if (dir > p.data_dir_bytes) p.data_dir_bytes = dir;
+	if (mem > p.memory_bytes) p.memory_bytes = mem;
+	if (avail >= 0 && (p.min_available < 0 || avail < p.min_available)) p.min_available = avail;
+	p.samples++;
+	pthread_mutex_unlock(&this->_mutex_rebuild_status);
+}
+
+void storage_rocksdb::peaks_get(bool serve, uint64_t& data_dir_max, int64_t& memory_max, int64_t& min_available,
+		uint64_t& data_dir_start, uint64_t& samples) {
+	pthread_mutex_lock(&this->_mutex_rebuild_status);
+	const peak_set& p = serve ? this->_peaks_serve : this->_peaks_rebuild;
+	data_dir_max = p.data_dir_bytes;
+	memory_max = p.memory_bytes;
+	min_available = p.min_available;
+	data_dir_start = p.start_data_dir_bytes;
+	samples = p.samples;
+	pthread_mutex_unlock(&this->_mutex_rebuild_status);
 }
 
 uint64_t storage_rocksdb::local_copy_bytes() {

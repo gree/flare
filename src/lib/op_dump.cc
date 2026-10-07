@@ -28,6 +28,9 @@
  */
 
 #include "op_dump.h"
+#ifdef HAVE_LIBROCKSDB
+#include "storage_rocksdb.h"
+#endif
 #include "connection_tcp.h"
 #include <inttypes.h>
 
@@ -198,11 +201,20 @@ int op_dump::_run_server() {
 	}
 
 	key_resolver* kr = this->_cluster->get_key_resolver();
+#ifdef HAVE_LIBROCKSDB
+	// measured peaks on the SOURCE while it serves a dump (reserve sizing)
+	storage_rocksdb* peak_rdb = dynamic_cast<storage_rocksdb*>(this->_storage);
+	if (peak_rdb != NULL) peak_rdb->peaks_begin(true);
+	uint64_t served = 0;
+#endif
 
 	storage::entry e;
 	storage::iteration i;
 	while ((i = this->_storage->iter_next(e.key)) == storage::iteration_continue
 			&& this->_thread && !this->_thread->is_shutdown_request()) {
+#ifdef HAVE_LIBROCKSDB
+		if (peak_rdb != NULL && (++served % 1024) == 0) peak_rdb->peaks_sample(true);
+#endif
 		if (this->_partition >= 0) {
 			int key_hash_value = e.get_key_hash_value(this->_cluster->get_key_hash_algorithm());
 			int p = kr->resolve(key_hash_value, this->_partition_size);
@@ -238,6 +250,9 @@ int op_dump::_run_server() {
 		}
 	}
 
+#ifdef HAVE_LIBROCKSDB
+	if (peak_rdb != NULL) peak_rdb->peaks_sample(true, true);
+#endif
 	this->_storage->iter_end();
 
 	if (connection_tcp* ctp = dynamic_cast<connection_tcp*>(this->_connection.get())) {

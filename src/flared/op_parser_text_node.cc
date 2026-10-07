@@ -38,6 +38,7 @@
 #include "op_orphan_purge.h"
 #include "op_backup.h"
 #include "op_copy_discard.h"
+#include "op_rebuild_resume.h"
 
 namespace gree {
 namespace flare {
@@ -147,6 +148,9 @@ op* op_parser_text_node::_determine_op(const char* first, const char* buf, int& 
 			singleton<flared>::instance().get_storage());
 	} else if (strcmp(first, "backup") == 0) {
 		r = new op_backup(this->_connection,
+			singleton<flared>::instance().get_storage());
+	} else if (strcmp(first, "rebuild_resume") == 0) {
+		r = new op_rebuild_resume(this->_connection,
 			singleton<flared>::instance().get_storage());
 	} else if (strcmp(first, "copy_discard") == 0) {
 		r = new op_copy_discard(this->_connection,

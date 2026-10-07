@@ -2290,6 +2290,34 @@ void test_restored_copy_and_switch_over_an_inconsistent_live() {
 	drop_rocksdb(s, wal_slave_dir);
 }
 
+// Design §10 (decision 2026-10-07, item 3): a blocked rebuild is parked until
+// the operator resumes it; in_flight marks a running copy/switch; the bytes
+// the kept copies take are reported.
+void test_rebuild_park_resume_and_kept_copy_bytes() {
+	storage_rocksdb* s = make_rocksdb(wal_slave_dir);
+	cut_assert_false(s->is_rebuild_parked());
+	cut_assert_false(s->resume_rebuild());
+	s->set_rebuild_parked(true);
+	cut_assert_true(s->is_rebuild_parked());
+	cut_assert_true(s->resume_rebuild());
+	cut_assert_false(s->is_rebuild_parked());
+	s->set_rebuild_in_flight(true);
+	cut_assert_true(s->is_rebuild_in_flight());
+	s->set_rebuild_in_flight(false);
+	cut_assert_equal_int(0, static_cast<int>(s->bytes_with_prefix("retained-")));
+	storage_rocksdb* stg = s->open_staging("b1", false);
+	storage_set_string(stg, "k", string(4096, 'x'));
+	cut_assert_equal_int(0, stg->adopt_history("M", "E", 1));
+	const string nid = stg->get_copy_id();
+	cut_assert_equal_int(0, stg->seal());
+	delete stg;
+	cut_assert_operator(s->bytes_with_prefix("staging-"), >, static_cast<uint64_t>(0));
+	cut_assert_equal_int(0, s->switch_to_staging("b1", nid));
+	cut_assert_equal_int(0, static_cast<int>(s->bytes_with_prefix("staging-")));
+	cut_assert_operator(s->bytes_with_prefix("retained-"), >, static_cast<uint64_t>(0));
+	drop_rocksdb(s, wal_slave_dir);
+}
+
 // An abandoned attempt (a failed dump, a refused gate, a crash) leaves the
 // live copy as it was; a staging directory is never reused, and an
 // unfinished one is removed at the next open.

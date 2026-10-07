@@ -178,6 +178,29 @@ int handler_reconstruction::run() {
 			}
 			return 0;
 		}
+#ifdef HAVE_LIBROCKSDB
+		// PARKED (design §10): a blocked staged rebuild waits for the
+		// operator's rebuild_resume; it is not a failed attempt and does not
+		// run toward the give-up below (a resume would then find no handler)
+		{
+			storage_rocksdb* prdb = dynamic_cast<storage_rocksdb*>(this->_storage);
+			if (prdb != NULL && prdb->is_rebuild_parked()) {
+				log_notice("reconstruction PARKED (rebuild_blocked=%s): no transfer and no retry until the operator resumes it (rebuild_resume)", prdb->get_rebuild_blocked().c_str());
+				while (prdb->is_rebuild_parked()) {
+					if (this->_thread->is_shutdown_request()) {
+						log_notice("shutdown requested while parked -> abandoning reconstruction", 0);
+						if (stats_object != NULL) {
+							stats_object->reconstruction_aborted_by_shutdown(this->_reconstruction_id);
+						}
+						return -1;
+					}
+					sleep(1);
+				}
+				attempt = -1;		// a fresh attempt after the resume
+				continue;
+			}
+		}
+#endif
 		if (attempt >= 60) {
 			break;
 		}
@@ -726,10 +749,12 @@ bool handler_reconstruction::_space_watch(string& why) {
 		why = "not a RocksDB storage";
 		return false;
 	}
+	rdb->peaks_sample(false);
 	if (capacity_watch_ok(rdb->get_rebuild_reserve_bytes(), rdb->rebuild_space_available(), why)) {
 		return true;
 	}
 	rdb->set_rebuild_blocked("no_space");
+	rdb->set_rebuild_parked(true);
 	log_err("CRITICAL: rebuild_blocked=no_space — the staging copy is stopped before it eats into the reserve (%s); the live copy is KEPT", why.c_str());
 	return false;
 #else
@@ -813,10 +838,16 @@ int handler_reconstruction::_staged_rebuild(bool snapshot_ok, const string& peer
 	struct blocker {
 		static int stop(storage_rocksdb* r, const char* reason, const string& why) {
 			r->set_rebuild_blocked(reason);
-			log_err("CRITICAL: rebuild_blocked=%s — %s; the live copy is KEPT and nothing is discarded (operator action needed)", reason, why.c_str());
+			r->set_rebuild_parked(true);
+			log_err("CRITICAL: rebuild_blocked=%s — %s; the live copy is KEPT and nothing is discarded; the rebuild is PARKED until the operator resumes it (operator action needed)", reason, why.c_str());
 			return -1;
 		}
 	};
+	// a parked rebuild does nothing (no transfer, no checks) until resumed
+	if (rdb->is_rebuild_parked()) {
+		log_debug("staged rebuild parked (rebuild_blocked=%s): waiting for rebuild_resume", rdb->get_rebuild_blocked().c_str());
+		return -1;
+	}
 
 	// --- may it start? ---------------------------------------------------
 	if (peer_master_id.empty() || (!epoch_bound && !peer_wal_supported)) {
@@ -855,6 +886,13 @@ int handler_reconstruction::_staged_rebuild(bool snapshot_ok, const string& peer
 		log_notice("staged rebuild may start: %s", why.c_str());
 	}
 	rdb->set_rebuild_blocked("");
+	// a staged copy, its catch-up or its switch is running until this returns
+	struct in_flight_guard {
+		storage_rocksdb* r;
+		in_flight_guard(storage_rocksdb* x): r(x) { r->set_rebuild_in_flight(true); }
+		~in_flight_guard() { r->set_rebuild_in_flight(false); }
+	} in_flight(rdb);
+	rdb->peaks_begin(false);		// the measured window of this staged rebuild
 	boost::function<bool (string&)> watch = boost::bind(&handler_reconstruction::_space_watch, this, _1);
 
 	// --- copy into staging ------------------------------------------------
@@ -996,6 +1034,7 @@ int handler_reconstruction::_staged_rebuild(bool snapshot_ok, const string& peer
 			return abandon::now(rdb, stg, attempt, "legacy source: the position is not still L0 right before the switch");
 		}
 	}
+	rdb->peaks_sample(false, true);	// after the catch-up, before the seal
 	const string new_id = stg->get_copy_id();
 	if (stg->seal() < 0) {
 		return abandon::now(rdb, stg, attempt, "the staging copy could not be made durable");
@@ -1047,6 +1086,15 @@ int handler_reconstruction::_staged_rebuild(bool snapshot_ok, const string& peer
 			return blocker::stop(rdb, "legacy_source_writes",
 				"legacy source: the position moved between L0 and after the switch — the write stop was not held, so this copy may miss writes; it is NOT activated (the old copy is retained)");
 		}
+	}
+	rdb->peaks_sample(false, true);
+	{
+		uint64_t dmax = 0, dstart = 0, n = 0;
+		int64_t mmax = -1, amin = -1;
+		rdb->peaks_get(false, dmax, mmax, amin, dstart, n);
+		log_notice("staged rebuild peaks: data dir %llu bytes at most (from %llu: growth %llu), cgroup memory %lld bytes at most, least free %lld bytes, %llu samples (receiver side; reserve sizing, design §9)",
+			(unsigned long long)dmax, (unsigned long long)dstart, (unsigned long long)(dmax > dstart ? dmax - dstart : 0),
+			(long long)mmax, (long long)amin, (unsigned long long)n);
 	}
 	log_notice("staged rebuild DONE: live copy %s (lineage %s, history %s, cursor %llu); the old copy is retained as %s%s",
 		rdb->get_copy_id().c_str(), peer_master_id.c_str(), epoch_bound ? epoch.c_str() : "(legacy)", (unsigned long long)rdb->get_repl_last_lsn(),

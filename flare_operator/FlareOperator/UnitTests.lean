@@ -1297,6 +1297,20 @@ private def checkRebuildConcurrency (ctx : Ctx) : IO Unit := do
   let mAfter := st [("p", holdNode .Master .Prepare 0 "p"), ("x", holdNode .Slave .Prepare 1 "x"), m1]
   check ctx "rebuild concurrency: a master reconstruction is not gated (the partition needs a master)"
     ((gate mBefore mAfter 1 1).held.isEmpty)
+  -- a parked rebuild with nothing in flight gives back its CLUSTER slot only
+  let parkedBefore := st [m0, m1, ("x", holdNode .Slave .Prepare 1 "x"), ("a", holdNode .Proxy .Active (-1) "a"),
+    ("b", holdNode .Proxy .Active (-1) "b")]
+  let parkedAfter := st [m0, m1, ("x", holdNode .Slave .Prepare 1 "x"), ("a", holdNode .Slave .Prepare 0 "a"),
+    ("b", holdNode .Slave .Prepare 1 "b")]
+  check ctx "rebuild concurrency: a parked idle rebuild frees the cluster slot (a in P0 admitted) but not its partition's (b in P1 held)"
+    ((gate parkedBefore parkedAfter 1 1 [] ["x"]).held.map Prod.fst == ["b"]
+      && (gate parkedBefore parkedAfter 1 1).held.map Prod.fst == ["a", "b"])
+  let resumeState := st [m0, m1, ("x", holdNode .Slave .Prepare 1 "x"), ("a", holdNode .Slave .Prepare 0 "a")]
+  check ctx "rebuild concurrency: a parked rebuild is resumed only when no other rebuild runs (it takes its slot again)"
+    (resumeCandidate resumeState 1 1 ["x"] == none
+      && resumeCandidate resumeState 1 1 ["x", "a"] == some "x"
+      && resumeCandidate (st [m0, m1, ("x", holdNode .Slave .Prepare 1 "x")]) 1 1 ["x"] == some "x"
+      && resumeCandidate (st [m0, m1, ("x", holdNode .Slave .Prepare 1 "x")]) 1 1 ["x"] ["y"] == none)
 
 -- ─── copy retention §7: discard approvals ───────────────────────────────
 

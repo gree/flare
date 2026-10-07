@@ -4670,4 +4670,97 @@ def copyRetentionConcurrencySuite : TestSuite := {
   ]
 }
 
+-- ─── reserve sizing by measurement (decision 2026-10-07, item 4) ─────────
+
+/-- Evaluation only (FLARE_E2E_RESERVE_MEASURE=1): measure, on BOTH sides, the
+    peaks of a staged rebuild under write load, so `rebuildReserveBytes` is
+    set from measurements. Sizing from the environment:
+    FLARE_E2E_MEASURE_KEYS / _VALUE_BYTES (data), _RATE (writes/s during the
+    rebuild), _TMPFS=1 (data dir on tmpfs; size/memory from _MEMORY, e.g.
+    "8Gi"). The replica is restarted with its old copy kept (WAL catch-up
+    off), so the staged copy lands NEXT TO the old one — the worst case. -/
+private def measureEnv (k : String) (d : Nat) : IO Nat := do
+  return ((← IO.getEnv k).bind (·.toNat?)).getD d
+
+private def measureCfg : IO ClusterConfig := do
+  let tmpfs := (← IO.getEnv "FLARE_E2E_MEASURE_TMPFS").isSome
+  let mem := (← IO.getEnv "FLARE_E2E_MEASURE_MEMORY").getD "4Gi"
+  return {
+    name := "measure"
+    «namespace» := "flare-measure"
+    partitions := 1
+    replicas := 2
+    operatorName := "flare-operator"
+    debugPod := "debug-measure"
+    storageBackend := "rocksdb"
+    usePvc := !tmpfs
+    pvcSize := "20Gi"
+    useTmpfs := tmpfs
+    tmpfsSize := mem
+    flaredMemoryLimit := mem
+    flaredMemoryRequest := "256Mi"
+    flaredCpuLimit := "2"
+    extraFlaredConf := "rocksdb-block-cache-size-mb = 64\nrocksdb-write-buffer-size-mb = 16"
+    flaredEnv := [("FLARE_TEST_DISABLE_WAL_RECONSTRUCTION", "1")]
+    -- large enough not to stop the measured rebuild; the result says what is needed
+    rebuildReserveBytes := some 1048576 }
+
+def reserveMeasureSuite : TestSuite := {
+  name := "copy-retention-measure"
+  setup := do
+    if (← IO.getEnv "FLARE_E2E_RESERVE_MEASURE").isSome then
+      deployCluster (← measureCfg)
+      IO.sleep 50000
+    else IO.eprintln "# FLARE_E2E_RESERVE_MEASURE unset: the reserve measurement deploys nothing and its test is skipped"
+  teardown := do
+    if (← IO.getEnv "FLARE_E2E_RESERVE_MEASURE").isSome then cleanupCluster (← measureCfg)
+  tests := [
+    { name := "reserve sizing: a staged rebuild (old copy kept) under write load; the receiver's and the source's peaks (data dir growth, cgroup memory, least free) are measured and the reserve they imply is reported — an evaluation, not a pass/fail of the product"
+      run := do
+        if (← IO.getEnv "FLARE_E2E_RESERVE_MEASURE").isNone then return .skip "FLARE_E2E_RESERVE_MEASURE unset (evaluation only)"
+        let cfg ← measureCfg
+        let c : Ctx := { cfg := cfg }
+        let keys ← measureEnv "FLARE_E2E_MEASURE_KEYS" 20000
+        let vbytes ← measureEnv "FLARE_E2E_MEASURE_VALUE_BYTES" 100000
+        let rate ← measureEnv "FLARE_E2E_MEASURE_RATE" 300
+        match ← c.pair with
+        | .error e => return .fail e
+        | .ok (mPod, mIp, sPod, sIp) =>
+          let t0 ← IO.monoMsNow
+          let w ← c.bulkWriteRandom mIp "ms" keys vbytes
+          IO.eprintln s!"# loaded {w}/{keys} values of ~{vbytes} B in {((← IO.monoMsNow) - t0) / 1000}s"
+          if !(← convergedItems c mIp sIp "the replica holds the data set") then return .fail "precondition: the replica did not converge"
+          let srcBytes := (← c.statNat mIp "rocksdb_copy_bytes").getD 0
+          -- a write load during the rebuild: `rate` small updates per second
+          let loadCmd := s!"i=0; end=$(( $(date +%s) + 3600 )); while [ $(date +%s) -lt $end ] && [ ! -f /tmp/stop-load ]; do j=0; while [ $j -lt {rate} ]; do printf 'set ld_%s 0 0 8\\r\\n%08d\\r\\n' $((i % 100000)) $i; i=$((i+1)); j=$((j+1)); done | nc -w 2 {mIp} {cfg.flarePort} >/dev/null; sleep 1; done"
+          discard <| kubectl ["exec", "-n", cfg.«namespace», cfg.debugPod, "--", "rm", "-f", "/tmp/stop-load"]
+          let _ ← IO.asTask (do discard <| execInDebugPod cfg.debugPod cfg.«namespace» loadCmd)
+          IO.sleep 10000
+          if let .error e ← c.killFlaredIn sPod then return .fail s!"precondition: could not restart flared in {sPod}: {e}"
+          let rebuilt ← waitForCondition "the replica switched in a staged copy" 7200 do
+            return ((← c.statNat (← getPodIp sPod cfg.«namespace» |>.map (·.getD "")) "rocksdb_staged_switched").getD 0) ≥ 1
+          discard <| kubectl ["exec", "-n", cfg.«namespace», cfg.debugPod, "--", "touch", "/tmp/stop-load"]
+          let sIp2 := (← getPodIp sPod cfg.«namespace»).getD sIp
+          let r := fun (ip k : String) => do return (← c.statStr ip k).getD "?"
+          let rdMax ← r sIp2 "rocksdb_rebuild_peak_data_dir_bytes"
+          let rdStart ← r sIp2 "rocksdb_rebuild_peak_data_dir_start_bytes"
+          let rMem ← r sIp2 "rocksdb_rebuild_peak_memory_bytes"
+          let rMin ← r sIp2 "rocksdb_rebuild_peak_min_available_bytes"
+          let sdMax ← r mIp "rocksdb_serve_peak_data_dir_bytes"
+          let sdStart ← r mIp "rocksdb_serve_peak_data_dir_start_bytes"
+          let sMem ← r mIp "rocksdb_serve_peak_memory_bytes"
+          let growth := (rdMax.toNat?.getD 0) - (rdStart.toNat?.getD 0)
+          let beyondCopy := growth - srcBytes
+          let srcGrowth := (sdMax.toNat?.getD 0) - (sdStart.toNat?.getD 0)
+          IO.eprintln s!"# RESERVE MEASUREMENT ({if cfg.useTmpfs then s!"tmpfs {cfg.tmpfsSize}" else "PVC"}, {w} x {vbytes} B, {rate} writes/s during the rebuild; master {mPod}, replica {sPod}; rebuilt={rebuilt})"
+          IO.eprintln s!"#   source copy (rocksdb_copy_bytes)            {srcBytes}"
+          IO.eprintln s!"#   receiver data dir: start {rdStart}, peak {rdMax}  -> growth {growth}; beyond one copy of the source {beyondCopy}"
+          IO.eprintln s!"#   receiver cgroup memory peak                  {rMem}; least free seen {rMin}"
+          IO.eprintln s!"#   source (serve) data dir: start {sdStart}, peak {sdMax} -> growth {srcGrowth}; cgroup memory peak {sMem}"
+          IO.eprintln s!"#   => reserve must cover at least the receiver's growth beyond one source copy ({beyondCopy}); on tmpfs also the memory peak above the data"
+          if !rebuilt then return .fail "the measured rebuild did not complete (no measurement)"
+          return .pass }
+  ]
+}
+
 end FlareOperator.E2E.Tests.ContinuousReplicationLimits

@@ -26,7 +26,7 @@ on:
       evaluation:
         description: 'Optional evaluation on the continuous-replication leg (PR runs use none)'
         type: choice
-        options: [none, visibility, sustained, sustained-cpu2, sustained-nrw, outage, outage-tmpfs, scale-2m, scale-6m-mem, scale-6m-mem-cap, scale-2m-cap, scale-15m8]
+        options: [none, reserve-measure, reserve-measure-tmpfs, visibility, sustained, sustained-cpu2, sustained-nrw, outage, outage-tmpfs, scale-2m, scale-6m-mem, scale-6m-mem-cap, scale-2m-cap, scale-15m8]
         default: none
       suites:
         description: 'Optional: run ONLY these suites (comma-separated, e.g. topology-authority) in one leg; empty = full matrix'
@@ -89,7 +89,7 @@ jobs:
             {"group":"breaker-migration","suites":"circuit-breaker,operator-restart,blue-green-migration,continuous-replication-lag-hold-expiry,copy-identity"},
             {"group":"authority","suites":"topology-authority,resync-failure-self-demote,snapshot-push-seed,partition-reduction,continuous-replication-lag-hold,cluster-init"},
             {"group":"repair","suites":"replica-repair,prepare-evidence,native-metrics,continuous-replication-upgrade,continuous-replication-lag-hold-unreadable"},
-            {"group":"continuous-replication","suites":"continuous-replication,continuous-replication-scale,continuous-replication-sustained,continuous-replication-outage,continuous-replication-outage-tmpfs,visibility-bench"}
+            {"group":"continuous-replication","suites":"copy-retention-measure,continuous-replication,continuous-replication-scale,continuous-replication-sustained,continuous-replication-outage,continuous-replication-outage-tmpfs,visibility-bench"}
           ]'
           all=$(echo "$default" | jq -r '[.[].suites] | join(",")')
           if [ -n "$SUITES_INPUT" ]; then
@@ -463,6 +463,8 @@ jobs:
               scale-2m-cap) export FLARE_E2E_SCALE_KEYS=2000000 FLARE_E2E_SCALE_QUEUE_CAP=100000; limit=10800 ;;
               scale-15m8) export FLARE_E2E_SCALE_KEYS=15800000; limit=10800 ;;
               visibility) export FLARE_E2E_VISBENCH=1; limit=7200 ;;
+              reserve-measure) export FLARE_E2E_RESERVE_MEASURE=1 FLARE_E2E_MEASURE_KEYS=20000 FLARE_E2E_MEASURE_VALUE_BYTES=100000 FLARE_E2E_MEASURE_RATE=300; limit=10800 ;;
+              reserve-measure-tmpfs) export FLARE_E2E_RESERVE_MEASURE=1 FLARE_E2E_MEASURE_TMPFS=1 FLARE_E2E_MEASURE_MEMORY=3Gi FLARE_E2E_MEASURE_KEYS=8000 FLARE_E2E_MEASURE_VALUE_BYTES=100000 FLARE_E2E_MEASURE_RATE=300; limit=10800 ;;
               none) ;;
               *) echo "Unknown evaluation profile"; exit 1 ;;
             esac

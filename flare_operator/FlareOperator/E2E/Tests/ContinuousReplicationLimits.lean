@@ -4379,4 +4379,209 @@ private def outageTmpfsCfg : ClusterConfig := {
 def outageTmpfsSuite : TestSuite :=
   mkOutageSuite "continuous-replication-outage-tmpfs" outageTmpfsCfg outageTmpfs "FLARE_E2E_OUTAGE_TMPFS"
 
+-- ─── copy retention: phases 3, 4 and 7 as ONE unit (design §3-§5, §8-§10) ──
+
+/-- 1p x 3r on PVC. Every rebuild of a returning replica is a STAGED copy
+    (WAL catch-up disabled, so a snapshot is staged, verified and switched
+    in), and the snapshot is throttled (128 KB/s) so two transfers overlap. -/
+private def copyRetCfg : ClusterConfig := {
+  name := "copy-ret"
+  «namespace» := "flare-copy-ret"
+  partitions := 1
+  replicas := 3
+  operatorName := "flare-operator"
+  debugPod := "debug-copy-ret"
+  storageBackend := "rocksdb"
+  usePvc := true
+  flaredEnv := [("FLARE_TEST_DISABLE_WAL_RECONSTRUCTION", "1")]
+  extraFlaredConf := "rocksdb-snapshot-bwlimit = 128"
+  operatorEnv := [("FLARE_FOLLOW_PROBE_INTERVAL", "1")]
+}
+
+/-- Lines of `pod`'s flared log since `since` containing `needle`. -/
+private def Ctx.countSince (c : Ctx) (pod since needle : String) : IO Nat := do
+  return ((← c.flaredLogAllSince pod since).splitOn "\n").filter (containsSubstr · needle) |>.length
+
+/-- Number of entries under the node's data dir whose name starts with `pfx`. -/
+private def Ctx.dataDirCount (c : Ctx) (pod pfx : String) : IO (Option Nat) := do
+  match ← kubectl ["exec", "-n", c.cfg.«namespace», pod, "-c", "flared", "--", "sh", "-c",
+      s!"ls -d /data/flare/{pfx}* 2>/dev/null | wc -l"] with
+  | .ok o => return o.trim.toNat?
+  | .error _ => return none
+
+/-- Replace the suite's extra.conf (the operator does not own it: the CR has
+    no rocksdb block) and wait until `pod` sees `expect` in it or not. -/
+private def Ctx.setBootConf (c : Ctx) (content : String) (pod needle : String) (present : Bool) : IO Bool := do
+  let esc := (content.replace "\\" "\\\\").replace "\"" "\\\"" |>.replace "\n" "\\n"
+  match ← kubectl ["patch", "configmap", s!"{c.cfg.name}-config", "-n", c.cfg.«namespace», "--type=merge",
+      "-p", s!"\{\"data\":\{\"extra.conf\":\"{esc}\"}}"] with
+  | .error _ => return false
+  | .ok _ =>
+    waitForCondition s!"{pod} sees the new extra.conf" 180 do
+      match ← kubectl ["exec", "-n", c.cfg.«namespace», pod, "-c", "flared", "--", "cat", "/etc/flared/extra.conf"] with
+      | .ok o => return containsSubstr o needle == present
+      | .error _ => return false
+
+def copyRetentionSuite : TestSuite := {
+  name := "copy-retention"
+  setup := do
+    deployCluster copyRetCfg
+    IO.sleep 30000
+  teardown := cleanupCluster copyRetCfg
+  onFailure := dumpClusterDiagnostics copyRetCfg.«namespace» s!"app={copyRetCfg.operatorName}"
+  tests :=
+    let c : Ctx := { cfg := copyRetCfg }
+    let ns := copyRetCfg.«namespace»
+    let ip : String → IO String := fun p => do return (← getPodIp p ns).getD ""
+    [
+    { name := "two replicas rebuild from the SAME source at once (both restarted): the source serves one snapshot at a time (the second requester is answered busy and WAITS, no dump instead), each copy is staged, verified and switched in, every key and value equals the master's, no serve area is left on the source, and each retained old copy is deleted once its replica is Active and bound"
+      run := do
+        let graceOver ← waitForCondition "operator past its startup grace period" 240 do
+          return containsSubstr (← c.opLog 400) "grace period over"
+        if !graceOver then return .fail "the operator never logged the end of its startup grace period"
+        match ← c.p0Roles with
+        | (some m, [a, b]) =>
+          let w ← c.bulkWrite (← ip m) "cr" 300 8192
+          if w != 300 then return .fail s!"precondition: stored {w}/300"
+          if (← c.allInSync 300 300).isNone then return .fail "precondition: the copies did not converge on 300 keys"
+          let since ← utcNow
+          for p in [a, b] do
+            match ← c.killFlaredIn p with
+            | .error e => return .fail s!"precondition: could not restart flared in {p}: {e}"
+            | .ok _ => pure ()
+          let both ← waitForCondition "both replicas switched in a staged copy and are Active slaves" 900 do
+            let mut ok := true
+            for p in [a, b] do
+              if ((← c.statNat (← ip p) "rocksdb_staged_switched").getD 0) == 0 then ok := false
+            let (m2, ss) ← c.p0Roles
+            return ok && m2 == some m && ss.length == 2
+          let busy ← c.countSince m since "another snapshot is being served from this node (busy)"
+          let waited := (← c.countSince a since "busy): waiting, no dump instead") + (← c.countSince b since "busy): waiting, no dump instead")
+          let serveLeft ← c.dataDirCount m "snapshot.serve."
+          let reaped ← waitForCondition "each replica's retained old copy is deleted" 180 do
+            let mut ok := true
+            for p in [a, b] do
+              if (← c.statNat (← ip p) "rocksdb_retained_copies") != some 0 then ok := false
+            return ok
+          let mD ← c.localDump (← ip m)
+          let aD ← c.localDump (← ip a)
+          let bD ← c.localDump (← ip b)
+          IO.eprintln s!"# {a} and {b} restarted at {since}; both switched in staged copies={both}; source busy refusals {busy}, requesters waiting {waited}; serve areas left on {m}: {serveLeft}; retained copies deleted={reaped}; keys master {mD.map (·.length)}, {a} {aD.map (·.length)}, {b} {bD.map (·.length)}"
+          c.windowRecord since [m, a, b] "copy-retention"
+          if !both then return .fail "the two replicas did not both switch in a staged copy and become Active"
+          if busy == 0 then return .fail "precondition not produced: the two snapshot requests never overlapped (no busy refusal on the source)"
+          if waited == 0 then return .fail "a busy refusal was logged by the source but no requester logged waiting for it"
+          if serveLeft != some 0 then return .fail s!"serve areas left on the source: {serveLeft}"
+          if !reaped then return .fail "a retained old copy was not deleted after its replica became Active and bound"
+          match mD, aD, bD with
+          | some md, some ad, some bd =>
+            let lostA := missingFrom md ad
+            let lostB := missingFrom md bd
+            if !lostA.isEmpty || !lostB.isEmpty then
+              return .fail s!"copies differ from the master: {a} {lostA.take 3}, {b} {lostB.take 3}"
+            return .pass
+          | _, _, _ => return .fail "a local dump could not be read"
+        | _ => return .fail "precondition: one master and two slaves" },
+
+    { name := "capacity (§9): a replica whose flared starts WITHOUT rocksdb-rebuild-reserve-bytes does not rebuild (stats rebuild_blocked=reserve_unset), keeps its copy and is not activated; once the reserve is set again it rebuilds and converges"
+      run := do
+        IO.sleep 1100
+        match ← c.p0Roles with
+        | (some m, a :: _) =>
+          let aIp ← ip a
+          let before ← c.localDump aIp
+          if !(← c.setBootConf copyRetCfg.extraFlaredConf a "rocksdb-rebuild-reserve-bytes" false) then
+            return .fail "precondition: could not remove the reserve from extra.conf"
+          if let .error e ← c.killFlaredIn a then return .fail s!"precondition: could not restart flared in {a}: {e}"
+          let blocked ← waitForCondition s!"{a} reports rebuild_blocked=reserve_unset" 300 do
+            return (← c.statStr (← ip a) "rebuild_blocked") == some "reserve_unset"
+          let during ← c.localDump (← ip a)
+          let (_, ss) ← c.p0Roles
+          let notActive := !ss.contains a
+          -- set it again: the next start rebuilds
+          let restored ← c.setBootConf (bootFlaredConf copyRetCfg) a "rocksdb-rebuild-reserve-bytes" true
+          if let .error e ← c.killFlaredIn a then return .fail s!"could not restart flared in {a} again: {e}"
+          let converged ← waitForCondition s!"{a} rebuilds and is an Active slave again" 600 do
+            let (m2, ss2) ← c.p0Roles
+            return m2 == some m && ss2.contains a && ((← c.statNat (← ip a) "rocksdb_staged_switched").getD 0) ≥ 1
+          IO.eprintln s!"# {a}: blocked reserve_unset={blocked}; keys before {before.map (·.length)}, while blocked {during.map (·.length)}; not Active while blocked={notActive}; reserve restored={restored}; converged={converged}"
+          if !blocked then return .fail s!"{a} did not report rebuild_blocked=reserve_unset"
+          match before, during with
+          | some bd, some dd =>
+            if !(missingFrom bd dd).isEmpty then return .fail s!"{a} lost keys while blocked: {(missingFrom bd dd).take 3}"
+          | _, _ => return .fail s!"{a}'s copy could not be read"
+          if !notActive then return .fail s!"{a} was Active although its rebuild was blocked"
+          if !restored || !converged then return .fail s!"{a} did not rebuild after the reserve was set again (restored={restored})"
+          return .pass
+        | _ => return .fail "precondition: a master and a slave" }
+  ]
+}
+
+/-- 2p x 2r: two rebuilds requested at once in different partitions. The
+    activation is held on every node so the first rebuild stays in Prepare. -/
+private def copyRetConcCfg : ClusterConfig := {
+  name := "copy-ret-conc"
+  «namespace» := "flare-copy-ret-conc"
+  partitions := 2
+  replicas := 2
+  operatorName := "flare-operator"
+  debugPod := "debug-copy-ret-conc"
+  storageBackend := "rocksdb"
+  usePvc := true
+  flaredEnv := [("FLARE_TEST_ACTIVATION_HOLD_FILE", "/tmp/act-hold")]
+  operatorEnv := [("FLARE_FOLLOW_PROBE_INTERVAL", "1")]
+}
+
+def copyRetentionConcurrencySuite : TestSuite := {
+  name := "copy-retention-concurrency"
+  setup := do
+    deployCluster copyRetConcCfg
+    IO.sleep 30000
+  teardown := cleanupCluster copyRetConcCfg
+  onFailure := dumpClusterDiagnostics copyRetConcCfg.«namespace» s!"app={copyRetConcCfg.operatorName}"
+  tests :=
+    let c : Ctx := { cfg := copyRetConcCfg }
+    let ns := copyRetConcCfg.«namespace»
+    [
+    { name := "operator concurrency (§10): both partitions' replicas need a rebuild at once (each master bulk-rewritten); one rebuild runs and the other assignment is HELD (the replica stays a Proxy, REBUILD HELD logged) while the first is in Prepare; released, both rebuild and converge"
+      run := do
+        let graceOver ← waitForCondition "operator past its startup grace period" 240 do
+          return containsSubstr (← c.opLog 400) "grace period over"
+        if !graceOver then return .fail "the operator never logged the end of its startup grace period"
+        match ← c.pairOf 0, ← c.pairOf 1 with
+        | .ok (_, m0Ip, s0, _), .ok (_, m1Ip, s1, _) =>
+          let hold := fun (p : String) => do discard <| kubectl ["exec", "-n", ns, p, "-c", "flared", "--", "touch", "/tmp/act-hold"]
+          let release := fun (p : String) => do discard <| kubectl ["exec", "-n", ns, p, "-c", "flared", "--", "rm", "-f", "/tmp/act-hold"]
+          hold s0
+          hold s1
+          let heldCount := fun (log : String) => ((log.splitOn "\n").filter (containsSubstr · "REBUILD HELD")).length
+          let held0 := heldCount (← c.opLog 6000)
+          -- a new history on both masters, then keys again (a source that
+          -- holds keys: the repair is not deferred by the copy protection)
+          for mIp in [m0Ip, m1Ip] do
+            discard <| execInDebugPod copyRetConcCfg.debugPod ns s!"printf 'flush_all\\r\\n' | nc -w 5 {mIp} {copyRetConcCfg.flarePort}"
+          IO.sleep 2000
+          for mIp in [m0Ip, m1Ip] do
+            discard <| writeKeys copyRetConcCfg.debugPod ns mIp copyRetConcCfg.flarePort "conc" 20
+          let held ← waitForCondition "a second rebuild assignment is held while the first is in Prepare" 600 do
+            let n := heldCount (← c.opLog 6000)
+            let v ← c.nodeView
+            let prep := v.filter (fun e => e.role == 1 && e.state == 1)
+            return n > held0 && prep.length == 1
+          let v ← c.nodeView
+          let prepNow := (v.filter (fun e => e.role == 1 && e.state == 1)).length
+          release s0
+          release s1
+          let converged ← waitForCondition "both replicas rebuild and are Active slaves" 600 do
+            let v ← c.nodeView
+            return (v.filter (fun e => e.role == 1 && e.state == 0)).length == 2
+          let heldLines := ((← c.opLog 6000).splitOn "\n").filter (containsSubstr · "REBUILD HELD")
+          IO.eprintln s!"# held={held}; slaves in Prepare at that moment {prepNow}; converged={converged}\n# {String.intercalate "\n# " (heldLines.take 4)}"
+          if !held then return .fail "no second assignment was held while a rebuild was in Prepare"
+          if !converged then return .fail "the two replicas did not both rebuild once released"
+          return .pass
+        | _, _ => return .fail "precondition: a master and a slave in each partition" }
+  ]
+}
+
 end FlareOperator.E2E.Tests.ContinuousReplicationLimits

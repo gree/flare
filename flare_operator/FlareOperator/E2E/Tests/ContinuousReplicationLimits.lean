@@ -1686,7 +1686,21 @@ def identitySuite : TestSuite := {
             if !replaced then return .fail s!"{target} was not replaced"
             if !aborted then return .fail s!"the promotion of the replaced {target} was not aborted"
             if seen.contains target then return .fail s!"the replaced {target} was promoted"
-            if seen.getLast? != some other then return .fail s!"expected {other} to take over, masters seen {seen}"
+            -- decision 2026-10-07 (1): R3 is not relaxed. If the other slave was
+            -- NOT eligible (R3 reading 0) in this window, the safe outcome is
+            -- that nobody is promoted and the draining master keeps the data;
+            -- otherwise the other slave takes over with every key.
+            if seen.getLast? != some other then
+              let opLog ← c.opLog 6000
+              let otherKey := s!"{other}.{c.cfg.name}-nodes.{ns}.svc.cluster.local:{c.cfg.flarePort}=0"
+              let otherIneligible := (opLog.splitOn "\n").any fun l =>
+                containsSubstr l "R3 readings" && containsSubstr l otherKey
+              let mItems ← c.currItems ((← getPodIp m ns).getD "")
+              let noOtherMaster := seen.all (· == m)
+              IO.eprintln s!"# {other} not promoted: R3 reading 0 logged for it={otherIneligible}; masters seen {seen}; draining {m} kept with {mItems}/{items} keys"
+              if !(otherIneligible && noOtherMaster && mItems == items) then
+                return .fail s!"expected {other} to take over (or, with {other} R3-ineligible, a safe stop with {m} keeping every key); masters seen {seen}"
+              return .pass
             if otherItems != items then return .fail s!"{other} holds {otherItems} of {items} keys"
             let healed ← waitForCondition "the replaced and drained pods return and the copies match" 480 do
               return (← c.threeInSync).isSome

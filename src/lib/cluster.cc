@@ -1176,6 +1176,21 @@ int cluster::reconstruct_node(vector<node> v, uint64_t node_map_version) {
 						log_notice("index map says prepare but local state is active (role/partition unchanged) — keeping active and re-announcing activation", 0);
 						it->node_state = state_active;
 						this->_reannounce_active = true;
+					} else if (node_key == this->_node_key
+							&& it->node_state == state_active
+							&& this->_node_map[node_key].node_state == state_prepare
+							&& !this->_activation_pending
+							&& stats_object != NULL
+							&& stats_object->get_reconstruction_current_state() == "running") {
+						// This node is still building its copy and its own
+						// activation was never acknowledged: a map that says
+						// active is a stale view of this node (e.g. from before
+						// a restart, CI 37572870090), not the echo of an
+						// activation. Becoming active here would also make the
+						// re-announce above report a copy that is not complete.
+						// Stay prepare; the activation decides.
+						log_warning("index map says active but this node's reconstruction is still running and its activation was not acknowledged — staying prepare (the map is a stale view of this node)", 0);
+						it->node_state = state_prepare;
 					} else {
 						node_shift_state tmp = { node_key, this->_node_map[node_key].node_state, it->node_state};
 						shift_state_stack.push(tmp);

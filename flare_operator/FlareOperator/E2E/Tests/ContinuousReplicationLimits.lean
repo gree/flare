@@ -1703,6 +1703,9 @@ def identitySuite : TestSuite := {
             c.releasePromotion
             let aborted ← waitForCondition "the operator aborts the held promotion" 60 do
               return ((← c.opLog 3000).splitOn "\n").any fun l => containsSubstr l "PROMOTION ABORTED" && containsSubstr l target
+            -- the master's copy while it is still draining (its pod goes when
+            -- the drain window ends)
+            let mItemsDraining ← c.currItems ((← getPodIp m ns).getD "")
             let seen ← c.watchMaster 180 (fun x => x != m && x != target)
             let otherItems ← c.currItems ((← getPodIp other ns).getD "")
             discard <| kubectl ["uncordon", kindNode]
@@ -1720,15 +1723,18 @@ def identitySuite : TestSuite := {
               let otherKey := s!"{other}.{c.cfg.name}-nodes.{ns}.svc.cluster.local:{c.cfg.flarePort}=0"
               let otherIneligible := (opLog.splitOn "\n").any fun l =>
                 containsSubstr l "R3 readings" && containsSubstr l otherKey
-              let mItems ← c.currItems ((← getPodIp m ns).getD "")
+              -- after its drain window the master's pod is replaced on the same
+              -- PVC: it must come back with every key (nothing was lost)
+              let back ← waitForCondition s!"the drained {m} returns on its PVC with every key" 300 do
+                return (← c.currItems ((← getPodIp m ns).getD "")) == items
               let noOtherMaster := seen.all (· == m)
               -- no wrong promotion, and the drain did not complete as a handover
               let winLines := ((← c.opLogSince since13).splitOn "\n")
               let wrongPromotion := winLines.any fun l => containsSubstr l "PROMOTION committed"
                 && (containsSubstr l s!"{other}." || containsSubstr l s!"{target}.")
               let drainIncomplete := winLines.any fun l => containsSubstr l "NO promotable successor" && containsSubstr l s!"{m}."
-              IO.eprintln s!"# {other} not promoted: R3 reading 0 logged for it={otherIneligible}; masters seen {seen}; draining {m} kept with {mItems}/{items} keys; promotion of a slave committed={wrongPromotion}; drain incomplete (NO promotable successor for {m})={drainIncomplete}"
-              if !(otherIneligible && noOtherMaster && mItems == items && !wrongPromotion && drainIncomplete) then
+              IO.eprintln s!"# {other} not promoted: R3 reading 0 logged for it={otherIneligible}; masters seen {seen}; {m} held {mItemsDraining}/{items} keys while draining and came back with every key={back}; promotion of a slave committed={wrongPromotion}; drain incomplete (NO promotable successor for {m})={drainIncomplete}"
+              if !(otherIneligible && noOtherMaster && mItemsDraining == items && back && !wrongPromotion && drainIncomplete) then
                 return .fail s!"expected {other} to take over, or — with {other} R3-ineligible — a safe stop: no slave promoted and the drain of {m} logged incomplete, {m} keeping every key; masters seen {seen}"
               return .pass
             if otherItems != items then return .fail s!"{other} holds {otherItems} of {items} keys"

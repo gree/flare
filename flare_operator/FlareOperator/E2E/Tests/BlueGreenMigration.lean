@@ -39,6 +39,9 @@ private def cfg : ClusterConfig := {
   operatorName := "flare-operator-bg"
   debugPod := "debug-bg"
   storageBackend := "rocksdb"
+  -- the migration target copies the source CR's spec.rocksdb: the rebuild
+  -- reserve must be in the CR, or the target's staged rebuilds stop
+  reserveInCr := true
 }
 
 private def targetName : String := "bg-tgt"

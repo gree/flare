@@ -45,7 +45,9 @@ def rocksdbSpecYaml (r : RocksdbConfigSpec) : String :=
     r.walSyncBwlimit.map (s!"    walSyncBwlimit: {·}"),
     r.walSyncInterval.map (s!"    walSyncInterval: {·}"),
     r.snapshotBwlimit.map (s!"    snapshotBwlimit: {·}"),
-    r.flushAllEnabled.map (fun b => s!"    flushAllEnabled: {if b then "true" else "false"}")
+    r.flushAllEnabled.map (fun b => s!"    flushAllEnabled: {if b then "true" else "false"}"),
+    -- copy retention §9: unset, every staged rebuild of the target stops
+    r.rebuildReserveBytes.map (s!"    rebuildReserveBytes: {·}")
   ]
   let lines := fields.filterMap id
   if lines.isEmpty then "" else "\n  rocksdb:\n" ++ String.intercalate "\n" lines
@@ -242,7 +244,7 @@ spec:
           env:
             - name: MALLOC_ARENA_MAX
               value: \"2\"
-          command: [\"sh\", \"-c\", \"if [ -f /data/flare/RESTORE ]; then SRC=$(cat /data/flare/RESTORE) && rm -rf /data/flare/flare.rocksdb && cp -a $SRC /data/flare/flare.rocksdb && rm -f /data/flare/RESTORE; fi; mkdir -p /data/flare; rm -f /data/flare/flared.pid; exec flared --config=/etc/flared/extra.conf --data-dir /data/flare --server-port {p.flarePort} --index-server-name {operatorSvc} --index-server-port {p.operatorPort} --storage-type=rocksdb --metrics-server-port 9150 --stderr\"]
+          command: [\"sh\", \"-c\", \"if [ -f /data/flare/RESTORE ]; then SRC=$(cat /data/flare/RESTORE) && rm -rf /data/flare/flare.rocksdb && cp -a $SRC /data/flare/flare.rocksdb && touch /data/flare/flare.rocksdb/RESTORED && rm -f /data/flare/RESTORE; fi; mkdir -p /data/flare; rm -f /data/flare/flared.pid; exec flared --config=/etc/flared/extra.conf --data-dir /data/flare --server-port {p.flarePort} --index-server-name {operatorSvc} --index-server-port {p.operatorPort} --storage-type=rocksdb --metrics-server-port 9150 --stderr\"]
           lifecycle:
             preStop:
               exec:

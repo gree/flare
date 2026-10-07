@@ -86,6 +86,12 @@ structure ClusterConfig where
       rocksdb block (the operator then owns extra.conf), into the CR too.
       `none` = leave it unset (the reserve_unset test). -/
   rebuildReserveBytes : Option Nat := some e2eRebuildReserveBytes
+  /-- Also put the reserve in the FlareCluster CR (the operator then owns
+      extra.conf, so suite lines in `extraFlaredConf` would be dropped at
+      its first rewrite). Needed where the CR is the source of truth for a
+      cluster the OPERATOR provisions (a blue/green migration target copies
+      the source CR's spec.rocksdb). -/
+  reserveInCr : Bool := false
   /-- preStop drain window (seconds). >0 adds a `sleep {drainSeconds}` preStop
       hook so flared stays alive+Ready while Terminating — the window the
       operator's graceful drain (demote leaving master to a live proxy, promote
@@ -427,8 +433,8 @@ metadata:
 spec:
   partitions: {cfg.partitions}
   replicas: {cfg.replicas}" ++
-  (if cfg.readUnavailableError then
-    "\n  rocksdb:\n    readUnavailableError: true" ++
+  (if cfg.readUnavailableError || cfg.reserveInCr then
+    "\n  rocksdb:" ++ (if cfg.readUnavailableError then "\n    readUnavailableError: true" else "") ++
       (match cfg.rebuildReserveBytes with
        | some n => s!"\n    rebuildReserveBytes: {n}"
        | none => "")

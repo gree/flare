@@ -96,6 +96,15 @@ private def Ctx.currItems (c : Ctx) (ip : String) : IO Nat := return (← c.stat
 private def Ctx.opLog (c : Ctx) (tail : Nat := 1500) : IO String :=
   kubectlLogsLabel s!"app={c.cfg.operatorName}" c.cfg.«namespace» tail
 
+/-- Operator log lines since `since` (RFC 3339), every operator pod. -/
+private def Ctx.opLogSince (c : Ctx) (since : String) : IO String := do
+  let mut acc := ""
+  for op in ← getPodNames s!"app={c.cfg.operatorName}" c.cfg.«namespace» do
+    match ← kubectl ["logs", "-n", c.cfg.«namespace», op, s!"--since-time={since}"] with
+    | .ok o => acc := acc ++ o
+    | .error _ => pure ()
+  return acc
+
 private def Ctx.podUid (c : Ctx) (pod : String) : IO (Option String) := do
   match ← kubectlGetJsonpath "pod" pod c.cfg.«namespace» "{.metadata.uid}" with
   | .ok o => return some o.trim
@@ -1213,6 +1222,22 @@ private def Ctx.bulkWriteRandom (c : Ctx) (ip pfx : String) (count bytes : Nat) 
   | .ok o => return ((o.trim.splitOn "\n").getLast?.getD "0").trim.toNat?.getD 0
   | .error _ => return 0
 
+/-- Chunked load for large data sets: 500 keys per connection, a fresh
+    incompressible value per chunk, STORED counted per chunk (one exec per
+    chunk, so no single exec runs into a timeout). -/
+private def Ctx.loadRandomChunked (c : Ctx) (ip pfx : String) (count bytes : Nat) (chunk : Nat := 500) : IO Nat := do
+  let raw := bytes * 3 / 4
+  let mut stored := 0
+  let mut k := 0
+  while k < count do
+    let m := min (max chunk 1) (count - k)
+    let cmd := s!"v=$(head -c {raw} /dev/urandom | base64 | tr -d '\\n'); len=$(printf %s \"$v\" | wc -c); (awk -v s={k} -v m={m} -v v=\"$v\" -v n=\"$len\" 'BEGIN\{for(i=s;i<s+m;i++) printf \"set {pfx}_%d 0 0 %d\\r\\n%s\\r\\n\", i, n, v}'; sleep 3) | nc -w 300 {ip} {c.cfg.flarePort} | grep -c STORED"
+    match ← execInDebugPod c.cfg.debugPod c.cfg.«namespace» cmd with
+    | .ok o => stored := stored + (o.trim.toNat?.getD 0)
+    | .error e => IO.eprintln s!"# load chunk at {k} failed: {e}"
+    k := k + m
+  return stored
+
 def rebuildTmpfsSuite : TestSuite := {
   name := "continuous-replication-rebuild-tmpfs"
   setup := do
@@ -1697,9 +1722,14 @@ def identitySuite : TestSuite := {
                 containsSubstr l "R3 readings" && containsSubstr l otherKey
               let mItems ← c.currItems ((← getPodIp m ns).getD "")
               let noOtherMaster := seen.all (· == m)
-              IO.eprintln s!"# {other} not promoted: R3 reading 0 logged for it={otherIneligible}; masters seen {seen}; draining {m} kept with {mItems}/{items} keys"
-              if !(otherIneligible && noOtherMaster && mItems == items) then
-                return .fail s!"expected {other} to take over (or, with {other} R3-ineligible, a safe stop with {m} keeping every key); masters seen {seen}"
+              -- no wrong promotion, and the drain did not complete as a handover
+              let winLines := ((← c.opLogSince since13).splitOn "\n")
+              let wrongPromotion := winLines.any fun l => containsSubstr l "PROMOTION committed"
+                && (containsSubstr l s!"{other}." || containsSubstr l s!"{target}.")
+              let drainIncomplete := winLines.any fun l => containsSubstr l "NO promotable successor" && containsSubstr l s!"{m}."
+              IO.eprintln s!"# {other} not promoted: R3 reading 0 logged for it={otherIneligible}; masters seen {seen}; draining {m} kept with {mItems}/{items} keys; promotion of a slave committed={wrongPromotion}; drain incomplete (NO promotable successor for {m})={drainIncomplete}"
+              if !(otherIneligible && noOtherMaster && mItems == items && !wrongPromotion && drainIncomplete) then
+                return .fail s!"expected {other} to take over, or — with {other} R3-ineligible — a safe stop: no slave promoted and the drain of {m} logged incomplete, {m} keeping every key; masters seen {seen}"
               return .pass
             if otherItems != items then return .fail s!"{other} holds {otherItems} of {items} keys"
             let healed ← waitForCondition "the replaced and drained pods return and the copies match" 480 do
@@ -4699,9 +4729,16 @@ private def measureEnv (k : String) (d : Nat) : IO Nat := do
 private def measureCfg : IO ClusterConfig := do
   let tmpfs := (← IO.getEnv "FLARE_E2E_MEASURE_TMPFS").isSome
   let mem := (← IO.getEnv "FLARE_E2E_MEASURE_MEMORY").getD "4Gi"
+  -- an isolated environment other than kind names its namespace and the
+  -- images it can pull (decision 2026-10-07 (2): stated before the run)
+  let nsName := (← IO.getEnv "FLARE_E2E_MEASURE_NAMESPACE").getD "flare-measure"
+  let flaredImg := ← IO.getEnv "FLARE_E2E_MEASURE_FLARED_IMAGE"
+  let opImg := ← IO.getEnv "FLARE_E2E_MEASURE_OPERATOR_IMAGE"
   return {
     name := "measure"
-    «namespace» := "flare-measure"
+    «namespace» := nsName
+    flaredImageOverride := flaredImg
+    operatorImageOverride := opImg
     partitions := 1
     replicas := 2
     operatorName := "flare-operator"
@@ -4741,7 +4778,12 @@ def reserveMeasureSuite : TestSuite := {
         | .error e => return .fail e
         | .ok (mPod, mIp, sPod, sIp) =>
           let t0 ← IO.monoMsNow
-          let w ← c.bulkWriteRandom mIp "ms" keys vbytes
+          let chunk ← measureEnv "FLARE_E2E_MEASURE_CHUNK" 500
+          let largeKeys ← measureEnv "FLARE_E2E_MEASURE_LARGE_KEYS" 0
+          let largeBytes ← measureEnv "FLARE_E2E_MEASURE_LARGE_VALUE_BYTES" 8192
+          let w ← c.loadRandomChunked mIp "ms" keys vbytes chunk
+          let wl ← if largeKeys > 0 then c.loadRandomChunked mIp "ml" largeKeys largeBytes (max 1 (chunk / 10)) else pure 0
+          IO.eprintln s!"# large values (blob files): {wl}/{largeKeys} of ~{largeBytes} B"
           IO.eprintln s!"# loaded {w}/{keys} values of ~{vbytes} B in {((← IO.monoMsNow) - t0) / 1000}s"
           if !(← convergedItems c mIp sIp "the replica holds the data set") then return .fail "precondition: the replica did not converge"
           let srcBytes := (← c.statNat mIp "rocksdb_copy_bytes").getD 0
@@ -4750,10 +4792,39 @@ def reserveMeasureSuite : TestSuite := {
           discard <| kubectl ["exec", "-n", cfg.«namespace», cfg.debugPod, "--", "rm", "-f", "/tmp/stop-load"]
           let _ ← IO.asTask (do discard <| execInDebugPod cfg.debugPod cfg.«namespace» loadCmd)
           IO.sleep 10000
-          if let .error e ← c.killFlaredIn sPod then return .fail s!"precondition: could not restart flared in {sPod}: {e}"
+          -- the sampler: both pods at the SAME moments, every 2 s, with the
+          -- kind of each number named (decision 2026-10-07 (2))
+          let sampleCmd := "t=$(date -u +%H:%M:%S); rss=$(grep VmRSS /proc/1/status | awk '{print $2*1024}'); cur=$(cat /sys/fs/cgroup/memory.current 2>/dev/null || cat /sys/fs/cgroup/memory/memory.usage_in_bytes); max=$(cat /sys/fs/cgroup/memory.max 2>/dev/null || cat /sys/fs/cgroup/memory/memory.limit_in_bytes); st=/sys/fs/cgroup/memory.stat; [ -f $st ] || st=/sys/fs/cgroup/memory/memory.stat; inact=$(awk '$1==\"inactive_file\"||$1==\"total_inactive_file\"{print $2; exit}' $st); shm=$(awk '$1==\"shmem\"||$1==\"total_shmem\"{print $2; exit}' $st); app=$(du -sb --apparent-size /data 2>/dev/null | cut -f1); alloc=$(du -sB1 /data 2>/dev/null | cut -f1); dfu=$(df -B1 /data | tail -1 | awk '{print $3\"/\"$2}'); echo \"$t rss=$rss cgroup_current=$cur working_set=$((cur - ${inact:-0})) shmem=$shm cgroup_max=$max data_logical=$app data_allocated=$alloc df_used/size=$dfu\""
+          let mount := fun (pod : String) => do
+            match ← kubectl ["exec", "-n", cfg.«namespace», pod, "-c", "flared", "--", "sh", "-c", "grep ' /data ' /proc/mounts; cat /proc/self/cgroup | head -3"] with
+            | .ok o => return (o.replace "\n" " | ").trim
+            | .error e => return s!"? {e}"
+          IO.eprintln s!"# /data mount and cgroup of {sPod}: {← mount sPod}"
+          IO.eprintln s!"# /data mount and cgroup of {mPod}: {← mount mPod}"
+          let samples ← IO.mkRef ([] : List String)
+          let stopSampler ← IO.mkRef false
+          let sampler ← IO.asTask (do
+            for _ in [0:4000] do
+              if (← stopSampler.get) then break
+              for pod in [sPod, mPod] do
+                match ← kubectl ["exec", "-n", cfg.«namespace», pod, "-c", "flared", "--", "sh", "-c", sampleCmd] with
+                | .ok o => samples.modify (· ++ [s!"{pod} {o.trim}"])
+                | .error _ => pure ()
+              IO.sleep 2000)
+          -- SIGTERM to flared (pid 1): the container restarts, the data dir
+          -- (PVC or emptyDir tmpfs) stays — works outside kind as well
+          match ← kubectl ["exec", "-n", cfg.«namespace», sPod, "-c", "flared", "--", "kill", "-TERM", "1"] with
+          | .error e => return .fail s!"precondition: could not restart flared in {sPod}: {e}"
+          | .ok _ => pure ()
           let rebuilt ← waitForCondition "the replica switched in a staged copy" 7200 do
             return ((← c.statNat (← getPodIp sPod cfg.«namespace» |>.map (·.getD "")) "rocksdb_staged_switched").getD 0) ≥ 1
           discard <| kubectl ["exec", "-n", cfg.«namespace», cfg.debugPod, "--", "touch", "/tmp/stop-load"]
+          IO.sleep 6000
+          stopSampler.set true
+          discard <| IO.wait sampler
+          let all ← samples.get
+          IO.eprintln s!"# SAMPLES ({all.length}, both pods every 2 s; rss = flared VmRSS, cgroup_current = memory.current of the flared container, working_set = current - inactive_file, shmem = tmpfs/shared pages charged to that cgroup, data_logical = du --apparent-size, data_allocated = du -B1, df = filesystem used/size):"
+          for l in all do IO.eprintln s!"#   {l}"
           let sIp2 := (← getPodIp sPod cfg.«namespace»).getD sIp
           let r := fun (ip k : String) => do return (← c.statStr ip k).getD "?"
           let rdMax ← r sIp2 "rocksdb_rebuild_peak_data_dir_bytes"
@@ -4788,6 +4859,85 @@ def reserveMeasureSuite : TestSuite := {
           IO.eprintln s!"#   => the reserve must cover the receiver's growth beyond the new copy ({beyondCopy}) and, on tmpfs, whatever the memory accounting above shows is not in memory.current"
           if !rebuilt then return .fail "the measured rebuild did not complete (no measurement)"
           return .pass }
+  ]
+}
+
+-- ─── R3: an unreadable candidate is not promoted (decision 2026-10-07) ────
+
+/-- 1p x 2r on PVC with a long drain window, so the master stays (Terminating,
+    still serving) while the only slave cannot be read completely. -/
+private def r3UnreadableCfg : ClusterConfig := {
+  name := "r3-unread"
+  «namespace» := "flare-r3-unread"
+  partitions := 1
+  replicas := 2
+  operatorName := "flare-operator"
+  debugPod := "debug-r3-unread"
+  storageBackend := "rocksdb"
+  usePvc := true
+  drainSeconds := 150
+  flaredEnv := [("FLARE_TEST_STATS_FAIL_FILE", "/tmp/stats-fail")]
+}
+
+def r3UnreadableSuite : TestSuite := {
+  name := "r3-unreadable"
+  setup := do
+    deployCluster r3UnreadableCfg
+    IO.sleep 30000
+  teardown := cleanupCluster r3UnreadableCfg
+  onFailure := dumpClusterDiagnostics r3UnreadableCfg.«namespace» s!"app={r3UnreadableCfg.operatorName}"
+  tests :=
+    let c : Ctx := { cfg := r3UnreadableCfg }
+    let ns := r3UnreadableCfg.«namespace»
+    [
+    { name := "R3 Unknown (decision 2026-10-07): while the only slave's stats are INCOMPLETE, the drained master is not replaced (no promotion, the master is kept and its pod has not gone: the drain is incomplete); once the stats are readable again the slave is promoted on a NEW reading taken after the recovery (eligible=1), with every key"
+      run := do
+        let graceOver ← waitForCondition "operator past its startup grace period" 240 do
+          return containsSubstr (← c.opLog 400) "grace period over"
+        if !graceOver then return .fail "the operator never logged the end of its startup grace period"
+        match ← c.pair with
+        | .error e => return .fail e
+        | .ok (mPod, mIp, sPod, sIp) =>
+          let w ← writeKeys r3UnreadableCfg.debugPod ns mIp r3UnreadableCfg.flarePort "ru" 40
+          if w != 40 then return .fail s!"precondition: stored {w}/40"
+          if !(← convergedItems c mIp sIp "the slave holds every key") then return .fail "precondition: the slave did not converge"
+          let sKey := s!"{sPod}.{r3UnreadableCfg.name}-nodes.{ns}.svc.cluster.local:{r3UnreadableCfg.flarePort}"
+          -- the slave's stats become incomplete; then the master is drained
+          discard <| kubectl ["exec", "-n", ns, sPod, "-c", "flared", "--", "touch", "/tmp/stats-fail"]
+          IO.sleep 1100
+          let since ← utcNow
+          discard <| kubectl ["delete", "pod", mPod, "-n", ns, "--wait=false"]
+          let seenUnknown ← c.watchMaster 60 (fun x => x != mPod)
+          let logA ← c.opLog 6000
+          let linesA := (logA.splitOn "\n")
+          let unreadableSeen := linesA.any fun l => containsSubstr l "R3 readings" && containsSubstr l s!"{sKey}=unreadable"
+          let promotedEarly := linesA.any fun l => containsSubstr l "PROMOTION committed" && containsSubstr l sKey
+          let keptLogged := linesA.any fun l => containsSubstr l "NO promotable successor" && containsSubstr l s!"{mPod}."
+          let mPodPresent ← match ← kubectl ["get", "pod", mPod, "-n", ns, "-o", "jsonpath={.metadata.deletionTimestamp}"] with
+            | .ok o => pure (!o.trim.isEmpty)
+            | .error _ => pure false
+          IO.eprintln s!"# {sPod} stats incomplete; {mPod} drained at {since}: masters seen {seenUnknown}; unreadable reading logged={unreadableSeen}; promotion of {sPod} committed={promotedEarly}; master kept (NO promotable successor) logged={keptLogged}; {mPod} still Terminating={mPodPresent}"
+          -- recovery: readable again, then a NEW reading promotes it
+          let recoveredAt ← utcNow
+          discard <| kubectl ["exec", "-n", ns, sPod, "-c", "flared", "--", "rm", "-f", "/tmp/stats-fail"]
+          let seenAfter ← c.watchMaster 120 (fun x => x == sPod)
+          let recLines := ((← c.opLogSince recoveredAt).splitOn "\n")
+          let readIdx := recLines.findIdx? fun l => containsSubstr l "R3 readings" && containsSubstr l s!"{sKey}=1"
+          let promIdx := recLines.findIdx? fun l => containsSubstr l "PROMOTION committed" && containsSubstr l sKey
+          let sItems ← c.currItems sIp
+          IO.eprintln s!"# readable again at {recoveredAt}: masters seen {seenAfter}; new reading eligible=1 at line {readIdx}, promotion at line {promIdx}; {sPod} items {sItems}"
+          c.windowRecord since [sPod] "r3-unreadable"
+          if seenUnknown.contains sPod || promotedEarly then return .fail s!"{sPod} was promoted while its stats could not be read completely"
+          if !unreadableSeen then return .fail "precondition: no pass logged the slave as unreadable"
+          if !keptLogged || !mPodPresent then return .fail s!"the drain did not stay incomplete (master kept logged={keptLogged}, master pod still Terminating={mPodPresent})"
+          match readIdx, promIdx with
+          | some r, some p =>
+            if p < r then return .fail "the promotion came before a new eligible reading"
+          | _, _ => return .fail s!"no promotion on a new reading after the recovery (reading {readIdx}, promotion {promIdx}; masters seen {seenAfter})"
+          if !seenAfter.contains sPod then return .fail s!"{sPod} did not become master after the recovery"
+          if sItems < 40 then return .fail s!"{sPod} holds {sItems} of 40 keys"
+          return .pass
+    }
   ]
 }
 

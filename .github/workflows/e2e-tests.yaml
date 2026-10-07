@@ -83,7 +83,7 @@ jobs:
             {"group":"wal-recovery","suites":"wal-bandwidth-throttle,wal-incremental-sync,wal-purged-fallback,orphan-scan-purge,terminating-pod-handling,continuous-replication-multipart-lag-hold"},
             {"group":"empty-source","suites":"empty-source"},
             {"group":"r3-source","suites":"r3-source-change"},
-            {"group":"copy-protection","suites":"copy-protection,copy-retention,copy-retention-concurrency"},
+            {"group":"copy-protection","suites":"copy-protection,copy-retention,copy-retention-concurrency,r3-unreadable"},
             {"group":"repair-ledger","suites":"repair-ledger"},
             {"group":"failover-data","suites":"replace-nodes,failover-during-replication,data-survival-failover,pvc-data-survival,backup-restore,continuous-replication-enable,continuous-replication-multipart-enable"},
             {"group":"breaker-migration","suites":"circuit-breaker,operator-restart,blue-green-migration,continuous-replication-lag-hold-expiry,copy-identity"},

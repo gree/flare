@@ -1350,8 +1350,18 @@ private def checkCopyDiscardApproval (ctx : Ctx) : IO Unit := do
 
 open FlareOperator.SourceEligibility in
 private def checkSourceEligibility (ctx : Ctx) : IO Unit := do
-  check ctx "R3: a slave reporting eligible=0 is withheld from promotion; eligible=1 and unreadable (pre-R3 / no reply) are not"
-    (withheld [("a", some 0), ("b", some 1), ("c", none)] == ["a"])
+  check ctx "R3: a slave reporting eligible=0 is withheld from promotion; eligible=1 and an explicit pre-R3 reply are not"
+    (withheld [("a", .eligible 0), ("b", .eligible 1), ("c", .legacy)] == ["a"])
+  check ctx "R3 (decision 2026-10-07): an unreadable or incomplete reply is WITHHELD this pass"
+    (withheld [("a", .unknown), ("b", .eligible 1)] == ["a"]
+      && classifyReply none == .unknown
+      && classifyReply (some "STAT repl_read_source_eligible 1\r\n") == .unknown)
+  check ctx "R3: a complete reply is classified by its keys; legacy only when it EXPLICITLY predates R3"
+    (classifyReply (some "STAT repl_read_source_eligible 1\r\nEND\r\n") == .eligible 1
+      && classifyReply (some "STAT repl_read_source_eligible 0\r\nEND\r\n") == .eligible 0
+      && classifyReply (some "STAT curr_items 5\r\nEND\r\n") == .legacy
+      && classifyReply (some "STAT rocksdb_copy_id u:1\r\nEND\r\n") == .unknown
+      && classifyReply (some "STAT repl_read_source_state revalidating\r\nEND\r\n") == .unknown)
   check ctx "R3: a promotion is possible with a masterless partition, a missing pod, an unhealthy node or a terminating master"
     (promotionRisk true false [] [] [] && promotionRisk false true [] [] []
       && promotionRisk false false ["x"] [] [] && promotionRisk false false [] ["m"] ["m"])

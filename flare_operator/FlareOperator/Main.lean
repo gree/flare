@@ -282,6 +282,9 @@ initialize promotionAbortedRef : IO.Ref Bool ← IO.mkRef false
 
 /-- Copy retention §10: the assignments held last time (logged on change). -/
 initialize rebuildHeldRef : IO.Ref (List String) ← IO.mkRef []
+/-- Decision 2026-10-07 (1): the candidates withheld by R3 on THIS pass
+    (eligible=0, unreadable or incomplete). No promotion of them is committed. -/
+initialize r3WithheldRef : IO.Ref (List String) ← IO.mkRef []
 /-- Copy retention §10 (decision 2026-10-07, item 3): rebuilding nodes whose
     stats say parked with nothing in flight (no transfer, serve or switch). -/
 initialize parkedIdleRef : IO.Ref (List String) ← IO.mkRef []
@@ -1128,21 +1131,24 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
       -- a copy whose source changed is not promotable until re-validated.
       let masterKeysNow := (cs.nodeMap.filter fun kv => kv.2.role == FlareRole.Master).map Prod.fst
       let mut sourceIneligible : List String := []
+      r3WithheldRef.set []
       if SourceEligibility.promotionRisk masterless deadCandidate unhealthyKeys termKeys masterKeysNow then
-        let mut readings : List (String × Option Nat) := []
+        let mut readings : List (String × SourceEligibility.Reading) := []
         for (key, n) in cs.nodeMap do
           if n.role == FlareRole.Slave && n.state == FlareState.Active && readyNow.contains key then
             match pods.find? (fun p => Bridge.PodInfo.toNodeKey p == key) with
             | some p =>
               match ← Bridge.queryPodStats p.name ns "stats" with
-              | .ok out => readings := readings ++ [(key, statNat out "repl_read_source_eligible")]
-              | .error _ => readings := readings ++ [(key, none)]
+              | .ok out => readings := readings ++ [(key, SourceEligibility.classifyReply (some out))]
+              | .error _ => readings := readings ++ [(key, SourceEligibility.classifyReply none)]
             | none => pure ()
         sourceIneligible := SourceEligibility.withheld readings
+        -- decision 2026-10-07 (1): the commit refuses to promote any of these
+        -- on this pass, whatever path chose it (drain, failover, refill)
+        r3WithheldRef.set sourceIneligible
         -- every reading this pass, unreadable ones included: which evidence
         -- a promotion on this pass could stand on (copy-identity 11)
-        let shown := readings.map fun (k, e) =>
-          s!"{k}={match e with | some v => toString v | none => "unreadable"}"
+        let shown := readings.map fun (k, e) => s!"{k}={SourceEligibility.readingLabel e}"
         IO.eprintln s!"[flare-operator] R3 readings (a promotion is possible this pass): {shown}"
         if !sourceIneligible.isEmpty then
           IO.eprintln s!"[flare-operator] promotion candidates withheld this pass (R3: the copy is not eligible for its partition's current source until re-validated): {sourceIneligible}"
@@ -1357,6 +1363,12 @@ private def commitChecked (stateRef : IO.Ref FlareClusterState) (ver : Nat) (ucs
   let promoted := (ucs.nodeMap.filter fun kv =>
     kv.2.role == FlareRole.Master && (cur.lookupNode kv.1).map (·.role) != some FlareRole.Master).map Prod.fst
   if !promoted.isEmpty then
+    let r3w ← r3WithheldRef.get
+    let blocked := promoted.filter r3w.contains
+    if !blocked.isEmpty then
+      IO.eprintln s!"[flare-operator] CRITICAL: PROMOTION ABORTED for {blocked}: R3 withheld it on this pass (not eligible, or its stats could not be read completely) — a copy that cannot be confirmed is not promoted; nothing from this pass is committed, the next pass reads again"
+      promotionAbortedRef.set true
+      return
     promotionBarrier promoted
     let observed ← podIdentityRef.get
     for k in promoted do

@@ -24,10 +24,49 @@ namespace FlareOperator.SourceEligibility
 def promotionRisk (masterless deadCandidate : Bool) (unhealthy terminating masters : List String) : Bool :=
   masterless || deadCandidate || !unhealthy.isEmpty || masters.any (terminating.contains ·)
 
-/-- Slaves to withhold from promotion: those whose reply says the copy is
-    not eligible for its source. `none` (unreadable / pre-R3) is not listed. -/
-def withheld (readings : List (String × Option Nat)) : List String :=
-  readings.filterMap fun (k, e) => if e == some 0 then some k else none
+/-- One candidate's R3 reading on this pass (decision 2026-10-07):
+    * `eligible v` — a complete reply carrying repl_read_source_eligible;
+    * `legacy`     — a complete reply from a flared that EXPLICITLY predates R3
+                     (none of the R3 or copy-identity keys): the existing
+                     compatibility rule applies;
+    * `unknown`    — the read failed, the reply was incomplete (no END), or a
+                     build that has R3 did not report it. Withheld this pass. -/
+inductive Reading where
+  | eligible (v : Nat)
+  | legacy
+  | unknown
+  deriving Repr, BEq
+
+/-- Classify a `stats` reply (`none` = the read failed). Each pass reads
+    afresh: nothing from an earlier pass stands in for this one. -/
+def classifyReply (reply : Option String) : Reading :=
+  match reply with
+  | none => .unknown
+  | some out =>
+    let lines := (out.splitOn "\n").map (fun l => (l.replace "\r" "").trim)
+    if !lines.contains "END" then .unknown
+    else
+      let value := fun (k : String) => lines.findSome? fun l =>
+        if l.startsWith s!"STAT {k} " then some (l.drop (s!"STAT {k} ").length) else none
+      match (value "repl_read_source_eligible").bind String.toNat? with
+      | some v => .eligible v
+      | none =>
+        let newerKeys := ["repl_read_source_eligible", "repl_read_source_state", "rocksdb_copy_id",
+          "rocksdb_copy_identity_consistent"]
+        if newerKeys.any (fun k => (value k).isSome) then .unknown else .legacy
+
+/-- Slaves to withhold from promotion on this pass: not eligible, or
+    unreadable / incomplete. A `legacy` reply is not withheld here. -/
+def withheld (readings : List (String × Reading)) : List String :=
+  readings.filterMap fun (k, r) => match r with
+    | .eligible 0 => some k
+    | .unknown => some k
+    | _ => none
+
+def readingLabel : Reading → String
+  | .eligible v => toString v
+  | .legacy => "legacy"
+  | .unknown => "unreadable"
 
 /-- Slaves that reported needs_rebuild, with flared's reason. -/
 def rebuildRequests (readings : List (String × Option String × Option String)) : List (String × String) :=

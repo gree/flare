@@ -28,6 +28,8 @@
  */
 #include "flared.h"
 #include "op_stats_node.h"
+#include <sys/stat.h>
+#include <cstdlib>
 
 namespace gree {
 namespace flare {
@@ -93,6 +95,18 @@ int op_stats_node::_run_server() {
 		this->_send_stats_threads_queue();
 		break;
 	default:
+		{
+			// TEST SEAM (E2E only, decision 2026-10-07): while the file named by
+			// FLARE_TEST_STATS_FAIL_FILE exists, `stats` answers an INCOMPLETE
+			// reply (no END), as a node that cannot be read completely would
+			const char* fail = getenv("FLARE_TEST_STATS_FAIL_FILE");
+			struct stat fsb;
+			if (fail != NULL && fail[0] != '\0' && stat(fail, &fsb) == 0) {
+				this->_send_stat("pid", stats_object->get_pid());
+				log_warning("stats answered INCOMPLETE (no END): held by FLARE_TEST_STATS_FAIL_FILE (test seam)", 0);
+				return -1;
+			}
+		}
 		this->_send_stats(singleton<flared>::instance().get_req_thread_pool(),singleton<flared>::instance().get_other_thread_pool(),
 				singleton<flared>::instance().get_storage(),
 				singleton<flared>::instance().get_cluster());

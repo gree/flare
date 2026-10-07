@@ -4764,14 +4764,28 @@ def reserveMeasureSuite : TestSuite := {
           let sdStart ← r mIp "rocksdb_serve_peak_data_dir_start_bytes"
           let sMem ← r mIp "rocksdb_serve_peak_memory_bytes"
           let growth := (rdMax.toNat?.getD 0) - (rdStart.toNat?.getD 0)
-          let beyondCopy := growth - srcBytes
+          -- the reference is the copy actually staged and switched in (the
+          -- source's rocksdb_copy_bytes also counts its WAL and obsolete files)
+          let newLive := (← c.statNat sIp2 "rocksdb_copy_bytes").getD 0
+          let retainedB := (← c.statNat sIp2 "rocksdb_retained_bytes").getD 0
+          let beyondCopy : Int := Int.ofNat growth - Int.ofNat newLive
+          -- cross-check the memory accounting from inside both pods: does the
+          -- container's memory.current include the tmpfs pages?
+          let inside := fun (pod : String) => do
+            match ← kubectl ["exec", "-n", cfg.«namespace», pod, "-c", "flared", "--", "sh", "-c",
+                "echo current=$(cat /sys/fs/cgroup/memory.current 2>/dev/null || cat /sys/fs/cgroup/memory/memory.usage_in_bytes); echo max=$(cat /sys/fs/cgroup/memory.max 2>/dev/null || cat /sys/fs/cgroup/memory/memory.limit_in_bytes); df -B1 /data | tail -1; du -sb /data 2>/dev/null | cut -f1"] with
+            | .ok o => return (o.replace "\n" " ").trim
+            | .error e => return s!"? ({e})"
           let srcGrowth := (sdMax.toNat?.getD 0) - (sdStart.toNat?.getD 0)
           IO.eprintln s!"# RESERVE MEASUREMENT ({if cfg.useTmpfs then s!"tmpfs {cfg.tmpfsSize}" else "PVC"}, {w} x {vbytes} B, {rate} writes/s during the rebuild; master {mPod}, replica {sPod}; rebuilt={rebuilt})"
           IO.eprintln s!"#   source copy (rocksdb_copy_bytes)            {srcBytes}"
-          IO.eprintln s!"#   receiver data dir: start {rdStart}, peak {rdMax}  -> growth {growth}; beyond one copy of the source {beyondCopy}"
+          IO.eprintln s!"#   receiver data dir: start {rdStart}, peak {rdMax}  -> growth {growth}"
           IO.eprintln s!"#   receiver cgroup memory peak                  {rMem}; least free seen {rMin}"
           IO.eprintln s!"#   source (serve) data dir: start {sdStart}, peak {sdMax} -> growth {srcGrowth}; cgroup memory peak {sMem}"
-          IO.eprintln s!"#   => reserve must cover at least the receiver's growth beyond one source copy ({beyondCopy}); on tmpfs also the memory peak above the data"
+          IO.eprintln s!"#   new live copy on the receiver {newLive}; retained old copy {retainedB}; receiver growth beyond the new copy {beyondCopy}"
+          IO.eprintln s!"#   inside {sPod} now: {← inside sPod}"
+          IO.eprintln s!"#   inside {mPod} now: {← inside mPod}"
+          IO.eprintln s!"#   => the reserve must cover the receiver's growth beyond the new copy ({beyondCopy}) and, on tmpfs, whatever the memory accounting above shows is not in memory.current"
           if !rebuilt then return .fail "the measured rebuild did not complete (no measurement)"
           return .pass }
   ]

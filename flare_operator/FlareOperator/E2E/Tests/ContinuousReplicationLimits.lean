@@ -1259,7 +1259,9 @@ def rebuildTmpfsSuite : TestSuite := {
           if rc1 != rc0 + 1 then return .fail s!"the replica's container restarted beyond the one restart the test caused ({rc0}→{rc1}): the copy did not stop in time"
           if !blocked then return .fail "the rebuild did not stop with rebuild_blocked=no_space"
           if line.isNone then return .fail "no CRITICAL rebuild_blocked=no_space line was logged"
-          if sw1 != sw0 then return .fail s!"a staged copy was switched in although it could not fit ({sw0}→{sw1})"
+          -- the counter belongs to the flared process: the restarted one starts
+          -- at 0, so any switch since the restart shows as ≥ 1
+          if sw1 != 0 then return .fail s!"a staged copy was switched in although it could not fit ({sw1} switch(es) since the restart)"
           if items1 < items0 then return .fail s!"the replica's copy shrank ({items0}→{items1}): something was discarded"
           if left != 0 then return .fail s!"{left} staging/retained director(ies) left on the replica"
           if (← masterPodOf c) != some mPod then return .fail "the master moved"

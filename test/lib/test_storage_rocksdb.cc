@@ -2248,6 +2248,48 @@ void test_copy_discard_frees_the_quarantine_generation() {
 	drop_rocksdb(s, wal_slave_dir);
 }
 
+// A copy put in place by a restore (RESTORED marker from the backup
+// bootstrap / restore hook) is a different copy: a new, consistent identity.
+// Without the marker, key-without-file stays inconsistent; such a live copy
+// is still replaced by a verified staged copy (CI 37578618876 backup-restore:
+// the switch refused 'live ?' forever) and retained under its key's id.
+void test_restored_copy_and_switch_over_an_inconsistent_live() {
+	const string d = wal_slave_dir;
+	storage_rocksdb* s = make_rocksdb(wal_slave_dir);
+	storage_set_string(s, "k", "v");
+	const string id0 = s->get_copy_id();
+	drop_rocksdb_noremove(s);
+	unlink((d + "/flare.rocksdb/COPY_ID").c_str());
+	FILE* f = fopen((d + "/flare.rocksdb/RESTORED").c_str(), "w");
+	fclose(f);
+	s = make_rocksdb(wal_slave_dir);
+	cut_assert_true(s->copy_identity_consistent());
+	cut_assert_true(s->get_copy_id() != id0);
+	struct stat st;
+	cut_assert_equal_int(-1, stat((d + "/flare.rocksdb/RESTORED").c_str(), &st));
+	cut_assert_equal_string("v", get_value(s, "k").c_str());
+	const string id1 = s->get_copy_id();
+	drop_rocksdb_noremove(s);
+	// no marker, no COPY_ID: inconsistent
+	unlink((d + "/flare.rocksdb/COPY_ID").c_str());
+	s = make_rocksdb(wal_slave_dir);
+	cut_assert_false(s->copy_identity_consistent());
+	// a verified staged copy replaces it; the old one is retained under its key's id
+	storage_rocksdb* stg = s->open_staging("i1", false);
+	cut_assert_not_null(stg);
+	storage_set_string(stg, "k", "rebuilt");
+	cut_assert_equal_int(0, stg->adopt_history("M", "E", 1));
+	const string nid = stg->get_copy_id();
+	cut_assert_equal_int(0, stg->seal());
+	delete stg;
+	cut_assert_equal_int(0, s->switch_to_staging("i1", nid));
+	cut_assert_true(s->copy_identity_consistent());
+	cut_assert_equal_string(nid.c_str(), s->get_copy_id().c_str());
+	cut_assert_equal_string(id1.c_str(), read_file_s(d + "/retained-i1/COPY_ID").c_str());
+	cut_assert_equal_string("rebuilt", get_value(s, "k").c_str());
+	drop_rocksdb(s, wal_slave_dir);
+}
+
 // An abandoned attempt (a failed dump, a refused gate, a crash) leaves the
 // live copy as it was; a staging directory is never reused, and an
 // unfinished one is removed at the next open.

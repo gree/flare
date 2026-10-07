@@ -261,7 +261,7 @@ def statefulSetYaml (cfg : ClusterConfig) : String :=
   -- replace the live DB with it and consume the marker, then start flared.
   -- Restore procedure: write the marker on each pod's PVC, delete the pods.
   let prep := if persistent then
-      s!"if [ -f {dataDir}/RESTORE ]; then SRC=$(cat {dataDir}/RESTORE) && rm -rf {dataDir}/flare.rocksdb && cp -a $SRC {dataDir}/flare.rocksdb && rm -f {dataDir}/RESTORE; fi; mkdir -p {dataDir}; rm -f {dataDir}/flared.pid"
+      s!"if [ -f {dataDir}/RESTORE ]; then SRC=$(cat {dataDir}/RESTORE) && rm -rf {dataDir}/flare.rocksdb && cp -a $SRC {dataDir}/flare.rocksdb && touch {dataDir}/flare.rocksdb/RESTORED && rm -f {dataDir}/RESTORE; fi; mkdir -p {dataDir}; rm -f {dataDir}/flared.pid"
     else
       s!"rm -rf {dataDir}/*.hdb {dataDir}/*.hdb.wal {dataDir}/rocksdb && mkdir -p {dataDir} && rm -f {dataDir}/flared.pid"
   let storageFlag := s!"--storage-type={cfg.storageBackend}"
@@ -691,7 +691,9 @@ def deploySecondCluster (cfg : ClusterConfig) : IO Unit := do
   try
     let result ← IO.Process.output {
       cmd := "sh"
-      args := #["-c", s!"kubectl create configmap {cmName} -n {cfg.«namespace»} --from-literal='extra.conf=' 2>/dev/null || true"]
+      -- the boot conf (with the rebuild reserve: unset, every staged
+      -- rebuild stops — CI 37578618876 repl-v2 stuck in Prepare)
+      args := #["-c", s!"kubectl create configmap {cmName} -n {cfg.«namespace»} --from-literal='extra.conf={bootFlaredConf cfg}' 2>/dev/null || true"]
     }
     let _ := result
     pure ()

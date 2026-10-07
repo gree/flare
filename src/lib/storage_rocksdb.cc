@@ -641,6 +641,21 @@ int storage_rocksdb::switch_to_staging(const string& attempt, const string& expe
 	in.attempt = attempt;
 	in.old_id = this->get_copy_id();
 	in.new_id = expected_new_id;
+	if (in.old_id.empty()) {
+		ostringstream u;
+		u << "unidentified-" << time(NULL) << "-" << getpid();
+		in.old_id = u.str();
+	}
+	// A live copy whose identity records disagree (or has no COPY_ID: a
+	// restore that left no marker) is exactly what a verified rebuild
+	// replaces. Name it on disk first, so the switch and its crash recovery
+	// identify it (CI 37578618876 backup-restore: 'live ?' refused forever).
+	if (copy_fs::read_copy_id(this->_data_path) != in.old_id) {
+		log_warning("copy switch: the live copy's COPY_ID file does not name %s (identity inconsistent); naming it before it is retained", in.old_id.c_str());
+		if (copy_fs::write_file_durable(this->_data_path, copy_fs::kCopyIdFile, in.old_id) < 0) {
+			return -1;
+		}
+	}
 	pthread_rwlock_wrlock(&this->_mutex_wholelock);
 	int r = -1;
 	do {
@@ -1344,6 +1359,9 @@ int storage_rocksdb::open() {
 		string f;
 		const bool has_file = copy_fs::read_small_file(this->_data_path + "/" + copy_fs::kCopyIdFile, f) == 0 && !f.empty();
 		const bool has_key = cs.ok() && !v.empty();
+		const string restored_marker = this->_data_path + "/RESTORED";
+		struct stat rst;
+		const bool restored = !this->_staging && stat(restored_marker.c_str(), &rst) == 0;
 		if (this->_staging) {
 			// a staging copy is always a different copy (received checkpoint
 			// files carry the SOURCE's key and no COPY_ID file)
@@ -1351,6 +1369,17 @@ int storage_rocksdb::open() {
 				log_err("failed to give the staging copy an identity", 0);
 				return -1;
 			}
+		} else if (restored) {
+			// put in place by a restore (backup bootstrap, restore hook): a
+			// checkpoint carries the reserved key of the copy it was taken
+			// from and no COPY_ID file. It is a DIFFERENT copy: a new
+			// identity, then the marker goes (a crash in between mints again)
+			if (this->new_copy_identity("restored copy (RESTORED marker)") < 0) {
+				log_err("failed to give the restored copy an identity", 0);
+				return -1;
+			}
+			unlink(restored_marker.c_str());
+			copy_fs::fsync_dir(this->_data_path);
 		} else if (!has_key && !has_file) {
 			if (this->new_copy_identity("first open of a copy without an identity") < 0) {
 				log_err("failed to initialise the copy identity", 0);

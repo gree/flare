@@ -122,6 +122,16 @@ private def Ctx.rssKb (c : Ctx) (pod : String) : IO (Option Nat) := do
   | .ok o => return o.trim.toNat?
   | .error _ => return none
 
+/-- kill -9 flared in `pod` from the kind node (pid 1 in the pod ignores
+    signals from inside); found by the pod UID in its cgroup. -/
+private def Ctx.killFlaredIn (c : Ctx) (pod : String) : IO (Except String String) := do
+  match ← c.podUid pod with
+  | none => return .error s!"no UID for {pod}"
+  | some uid =>
+    let u2 := uid.replace "-" "_"
+    hostCmd "docker" ["exec", kindNode, "sh", "-c",
+      s!"n=0; for p in $(pgrep -x flared); do if grep -q -e '{uid}' -e '{u2}' /proc/$p/cgroup 2>/dev/null; then kill -9 $p && n=$((n+1)); fi; done; echo killed=$n"]
+
 /-- Write `count` keys of `bytes` bytes each (value = repeated 'x'), one
     connection per key, on the master. Returns the number STORED. -/
 private def Ctx.writeBig (c : Ctx) (ip : String) (pfx : String) (count bytes : Nat) : IO Nat := do
@@ -1185,6 +1195,9 @@ private def rebuildTmpfsCfg : ClusterConfig := {
   extraFlaredConf := "rocksdb-block-cache-size-mb = 16\nrocksdb-write-buffer-size-mb = 4\nrocksdb-wal-ttl-seconds = 60\nrocksdb-wal-size-limit-mb = 16"
   -- ~125 MB copy + 128 MiB reserve cannot fit next to the old copy in 384Mi
   rebuildReserveBytes := some 134217728
+  -- a restarted replica rebuilds by a STAGED copy (no WAL catch-up): the
+  -- tmpfs copy survives a container restart, so two copies must fit
+  flaredEnv := [("FLARE_TEST_DISABLE_WAL_RECONSTRUCTION", "1")]
 }
 
 private def rebuildTmpfsPatch (identity follow : Bool) : String :=
@@ -1210,7 +1223,7 @@ def rebuildTmpfsSuite : TestSuite := {
   tests :=
     let c : Ctx := { cfg := rebuildTmpfsCfg }
     [
-    { name := "no room on tmpfs (copy retention §9): a live replica rebuild where the new copy plus the reserve does not fit next to the old one (tmpfs = memory limit, like pf-dev) STOPS and says why (stats rebuild_blocked=no_space); nothing is discarded, no OOM restart, the replica's copy is kept, no staging copy is left behind"
+    { name := "no room on tmpfs (copy retention §9): a restarted replica whose staged copy plus the reserve does not fit next to its old copy (tmpfs = memory limit, like pf-dev) STOPS and says why (stats rebuild_blocked=no_space); nothing is discarded, no OOM restart, the replica's copy is kept, no staging copy is left behind"
       run := do
         match ← c.pair with
         | .error e => return .fail e
@@ -1227,16 +1240,9 @@ def rebuildTmpfsSuite : TestSuite := {
             | .ok o => pure o.trim
             | .error _ => pure "?"
           IO.eprintln s!"# legacy: {big} random values of ~50 kB; replica items {items0}, data dir {data0} MB in a 384Mi tmpfs/memory limit; reserve {rebuildTmpfsCfg.rebuildReserveBytes}; restarts {rc0}; staged switches {sw0}"
-          match ← kubectlPatch "flarecluster" rebuildTmpfsCfg.name rebuildTmpfsCfg.«namespace» (rebuildTmpfsPatch true false) with
-          | .error e => return .fail s!"patch (identity on) failed: {e}"
-          | .ok _ => pure ()
-          if !(← waitForCondition "both nodes reload repl_identity_forward 0 -> 1" 240 do bothReloaded c "repl_identity_forward: 0 -> 1") then
-            return .fail "identity forwarding was not applied on both nodes"
-          match ← kubectlPatch "flarecluster" rebuildTmpfsCfg.name rebuildTmpfsCfg.«namespace» (rebuildTmpfsPatch true true) with
-          | .error e => return .fail s!"patch (follow on) failed: {e}"
-          | .ok _ => pure ()
-          -- the replica's copy predates follow mode: it is rebuilt — and the
-          -- rebuild must stop for lack of room instead of discarding the copy
+          -- the replica's flared restarts (its tmpfs copy stays: a container
+          -- restart keeps the emptyDir) and must rebuild by a staged copy
+          if let .error e ← c.killFlaredIn sPod then return .fail s!"precondition: could not restart flared in {sPod}: {e}"
           let blocked ← waitForCondition "the replica's rebuild stops: rebuild_blocked=no_space" 480 do
             return (← c.statStr sIp "rebuild_blocked") == some "no_space"
           let line := match ← kubectl ["logs", "-n", rebuildTmpfsCfg.«namespace», sPod, "--tail=5000"] with
@@ -1250,7 +1256,7 @@ def rebuildTmpfsSuite : TestSuite := {
             | .ok o => pure (o.trim.toNat?.getD 99)
             | .error _ => pure 99
           IO.eprintln s!"# follow on: blocked={blocked}; replica restarts {rc0}→{rc1}; items {items0}→{items1}; staged switches {sw0}→{sw1}; staging/retained dirs left {left}\n# {line.getD "(no rebuild_blocked line)"}"
-          if rc1 != rc0 then return .fail s!"the replica's container restarted ({rc0}→{rc1}): the copy did not stop in time"
+          if rc1 != rc0 + 1 then return .fail s!"the replica's container restarted beyond the one restart the test caused ({rc0}→{rc1}): the copy did not stop in time"
           if !blocked then return .fail "the rebuild did not stop with rebuild_blocked=no_space"
           if line.isNone then return .fail "no CRITICAL rebuild_blocked=no_space line was logged"
           if sw1 != sw0 then return .fail s!"a staged copy was switched in although it could not fit ({sw0}→{sw1})"
@@ -1442,16 +1448,6 @@ private def Ctx.p0Roles (c : Ctx) : IO (Option String × List String) := do
   let m := (findMasterFqdn entries 0).map podOf
   let ss := (entries.filter (fun e => e.role == 1 && e.state == 0 && e.partition == 0)).map (fun e => podOf e.fqdn)
   return (m, ss)
-
-/-- kill -9 flared in `pod` from the kind node (pid 1 in the pod ignores
-    signals from inside); found by the pod UID in its cgroup. -/
-private def Ctx.killFlaredIn (c : Ctx) (pod : String) : IO (Except String String) := do
-  match ← c.podUid pod with
-  | none => return .error s!"no UID for {pod}"
-  | some uid =>
-    let u2 := uid.replace "-" "_"
-    hostCmd "docker" ["exec", kindNode, "sh", "-c",
-      s!"n=0; for p in $(pgrep -x flared); do if grep -q -e '{uid}' -e '{u2}' /proc/$p/cgroup 2>/dev/null; then kill -9 $p && n=$((n+1)); fi; done; echo killed=$n"]
 
 /-- Watch the P0 master for `secs`: (masters seen in order, final master). -/
 private def Ctx.watchMaster (c : Ctx) (secs : Nat) (stopWhen : String → Bool) : IO (List String) := do

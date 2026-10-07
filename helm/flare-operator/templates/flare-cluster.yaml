@@ -338,6 +338,9 @@ spec:
                 echo "backup-bootstrap: CURRENT names missing $M -> backup mirror is torn, refusing"
                 exit 1
               fi
+              # a restored copy is a DIFFERENT copy: flared gives it a new
+              # identity at open (copy retention §2)
+              touch "$DATA/flare.rocksdb.restore/RESTORED"
               mv "$DATA/flare.rocksdb.restore" "$DATA/flare.rocksdb"
               echo "backup-bootstrap: seeded from $SRC (age ${AGE}s)"
           env:

@@ -83,7 +83,6 @@ handler_reconstruction::handler_reconstruction(shared_thread t, cluster* cl, sto
 		_identity_known(false),
 		_epoch_supported(false),
 		_pending_activation(false),
-		_copy_before_valid(false),
 		_partition(partition),
 		_partition_size(partition_size),
 		_role(r),
@@ -286,16 +285,11 @@ int handler_reconstruction::_run_once() {
 		// rebuild (the stale evidence would outlive a partial copy).
 		if (this->_storage->get_type() == storage::type_rocksdb) {
 			storage_rocksdb* erdb = dynamic_cast<storage_rocksdb*>(this->_storage);
-			// R3-D: remember what this copy IS before its evidence is dropped
-			if (erdb && !this->_copy_before_valid) {
-				this->_copy_before.lineage = erdb->get_master_id();
-				this->_copy_before.epoch = erdb->get_source_epoch();
-				this->_copy_before.rebuilt_from_lineage = erdb->get_rebuilt_from_master_id();
-				this->_copy_before.rebuilt_from_epoch = erdb->get_rebuilt_from_epoch();
-				this->_copy_before_valid = true;
-			}
-			if (erdb && erdb->clear_rebuilt_from() < 0) {
-				log_err("could not clear the rebuild evidence before rebuilding -> not rebuilding this cycle", 0);
+			// R3-D: the advertised evidence is withdrawn, but kept durably as
+			// the evidence of the STORED copy (survives a restart) until that
+			// copy changes; the protection rule judges the copy by it
+			if (erdb && erdb->suspend_rebuilt_from() < 0) {
+				log_err("could not withdraw the rebuild evidence before rebuilding -> not rebuilding this cycle", 0);
 				return -1;
 			}
 		}
@@ -424,7 +418,8 @@ int handler_reconstruction::_run_once() {
 						sp->set_pre_swap_gate(boost::bind(&handler_reconstruction::_swap_gate, this, _1));
 						if (sp->run_client() == 0) {
 							via_snapshot = true;
-							this->_copy_before_valid = false;	// the copy was replaced
+							// the stored copy was replaced
+							if (rdb != NULL) rdb->clear_suspended_rebuilt_from();
 							this->_copy_dirty = true;
 							this->_force_clean = false;
 							log_notice("snapshot bootstrap succeeded; skipping full dump (cursor and lineage seeded by the swap)", 0);
@@ -460,7 +455,6 @@ int handler_reconstruction::_run_once() {
 						return -1;
 					}
 					truncated_for_dump = true;
-					this->_copy_before_valid = false;	// the copy was replaced
 					this->_copy_dirty = true;
 					this->_force_clean = false;
 				}
@@ -482,6 +476,14 @@ int handler_reconstruction::_run_once() {
 			this->_connection = c;
 		}
 		this->_copy_dirty = true;
+#ifdef HAVE_LIBROCKSDB
+		// R3-D: a MERGING dump (no truncate) changes the stored copy too; its
+		// suspended evidence no longer describes it
+		if (!truncated_for_dump && this->_storage->get_type() == storage::type_rocksdb) {
+			storage_rocksdb* mrdb = dynamic_cast<storage_rocksdb*>(this->_storage);
+			if (mrdb != NULL) mrdb->clear_suspended_rebuilt_from();
+		}
+#endif
 		op_dump* p = new op_dump(c, this->_cluster, this->_storage);
 
 		p->set_thread(this->_thread);
@@ -779,16 +781,14 @@ copy_gate handler_reconstruction::_copy_gate(const char* step, string& why, bool
 		if (rdb->is_corrupted()) {
 			local.known = false;	// an unreadable copy is not an empty one
 		}
-		if (this->_copy_before_valid) {
-			// the identity of the data actually stored, captured before
-			// this attempt dropped the evidence; the item count is current
-			local.lineage = this->_copy_before.lineage;
-			local.epoch = this->_copy_before.epoch;
-			local.rebuilt_from_lineage = this->_copy_before.rebuilt_from_lineage;
-			local.rebuilt_from_epoch = this->_copy_before.rebuilt_from_epoch;
-		} else {
-			local.lineage = rdb->get_master_id();
-			local.epoch = rdb->get_source_epoch();
+		local.lineage = rdb->get_master_id();
+		local.epoch = rdb->get_source_epoch();
+		// the evidence of the STORED copy: suspended while a rebuild is in
+		// progress (persisted, so a restart does not lose it), otherwise the
+		// advertised one
+		local.rebuilt_from_lineage = rdb->get_suspended_rebuilt_from_master_id();
+		local.rebuilt_from_epoch = rdb->get_suspended_rebuilt_from_epoch();
+		if (local.rebuilt_from_lineage.empty() || local.rebuilt_from_epoch.empty()) {
 			local.rebuilt_from_lineage = rdb->get_rebuilt_from_master_id();
 			local.rebuilt_from_epoch = rdb->get_rebuilt_from_epoch();
 		}

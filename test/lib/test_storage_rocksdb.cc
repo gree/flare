@@ -1657,6 +1657,58 @@ void test_rebuild_evidence_persisted_and_cleared() {
 	drop_rocksdb(s, wal_master_dir);
 }
 
+// R3-D: a rebuild attempt withdraws the advertised evidence but keeps it,
+// durably and separately, as the evidence of the STORED copy — so the
+// protection rule can still judge the copy after a restart. It never comes
+// back as advertised evidence, and it is gone once the copy changes.
+void test_suspended_evidence_survives_restart_and_never_readvertises() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	cut_assert_true(storage_rocksdb::is_reserved_key(storage_rocksdb::kReplRebuiltFromSuspendedKey));
+	cut_assert_equal_int(0, storage_set_string(s, "k", "v"));
+	cut_assert_equal_int(0, s->set_rebuilt_from("M", "5:a"));
+	cut_assert_equal_int(0, s->suspend_rebuilt_from());
+	// not advertised while the rebuild runs
+	cut_assert_equal_string("", s->get_rebuilt_from_epoch().c_str());
+	cut_assert_equal_string("M", s->get_suspended_rebuilt_from_master_id().c_str());
+	cut_assert_equal_string("5:a", s->get_suspended_rebuilt_from_epoch().c_str());
+	// a second attempt (nothing advertised) keeps the stored copy's record
+	cut_assert_equal_int(0, s->suspend_rebuilt_from());
+	cut_assert_equal_string("5:a", s->get_suspended_rebuilt_from_epoch().c_str());
+	drop_rocksdb_noremove(s);
+
+	// restart: still the stored copy's record, still NOT advertised
+	s = make_rocksdb(wal_master_dir);
+	cut_assert_equal_string("", s->get_rebuilt_from_epoch().c_str());
+	cut_assert_equal_string("M", s->get_suspended_rebuilt_from_master_id().c_str());
+	cut_assert_equal_string("5:a", s->get_suspended_rebuilt_from_epoch().c_str());
+	// new evidence (a completed clean rebuild) replaces it
+	cut_assert_equal_int(0, s->set_rebuilt_from("N", "6:b"));
+	cut_assert_equal_string("", s->get_suspended_rebuilt_from_epoch().c_str());
+	drop_rocksdb_noremove(s);
+	s = make_rocksdb(wal_master_dir);
+	cut_assert_equal_string("", s->get_suspended_rebuilt_from_epoch().c_str());
+	cut_assert_equal_string("6:b", s->get_rebuilt_from_epoch().c_str());
+
+	// the stored copy changes (a truncate advances the local history): gone
+	cut_assert_equal_int(0, s->suspend_rebuilt_from());
+	cut_assert_equal_string("6:b", s->get_suspended_rebuilt_from_epoch().c_str());
+	cut_assert_equal_int(0, s->truncate(0));
+	cut_assert_equal_string("", s->get_suspended_rebuilt_from_epoch().c_str());
+	drop_rocksdb_noremove(s);
+	s = make_rocksdb(wal_master_dir);
+	cut_assert_equal_string("", s->get_suspended_rebuilt_from_epoch().c_str());
+	cut_assert_equal_string("", s->get_rebuilt_from_epoch().c_str());
+
+	// an explicit clear (a merging dump) drops it durably
+	cut_assert_equal_int(0, s->set_rebuilt_from("M", "7:c"));
+	cut_assert_equal_int(0, s->suspend_rebuilt_from());
+	cut_assert_equal_int(0, s->clear_suspended_rebuilt_from());
+	drop_rocksdb_noremove(s);
+	s = make_rocksdb(wal_master_dir);
+	cut_assert_equal_string("", s->get_suspended_rebuilt_from_epoch().c_str());
+	drop_rocksdb(s, wal_master_dir);
+}
+
 // Evidence that cannot be persisted is never published; a clear that cannot
 // be persisted still drops the in-memory copy and reports failure (the caller
 // then refuses to rebuild).

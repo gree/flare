@@ -75,13 +75,15 @@ const char* const storage_rocksdb::kReplRestoreDoneKey = "__flare_repl_restore_d
 // Rebuild evidence: "<master_id> <source epoch> <own epoch>" — the clean
 // full-dump source, bound to THIS node's own source epoch at recording time.
 const char* const storage_rocksdb::kReplRebuiltFromKey = "__flare_repl_rebuilt_from";
+// Same format, the evidence of the stored copy while a rebuild is in progress.
+const char* const storage_rocksdb::kReplRebuiltFromSuspendedKey = "__flare_repl_rebuilt_from_suspended";
 // Name of the replication-metadata column family (design §3.7).
 const char* const storage_rocksdb::kReplMetaCfName = "flare_repl_meta";
 
 bool storage_rocksdb::is_reserved_key(const string& key) {
 	return key == kReplLastLsnKey || key == kReplMasterIdKey
 		|| key == kReplSourceEpochKey || key == kReplSourceEpochReasonKey || key == kReplIncarnationKey
-		|| key == kReplRestoreDoneKey || key == kReplRebuiltFromKey;
+		|| key == kReplRestoreDoneKey || key == kReplRebuiltFromKey || key == kReplRebuiltFromSuspendedKey;
 }
 // }}}
 
@@ -457,6 +459,31 @@ int storage_rocksdb::_load_or_init_generations() {
 				log_notice("rebuild evidence ignored: recorded under another local history or malformed [%s]", ev.c_str());
 			}
 		}
+		this->_suspended_from_master_id.clear();
+		this->_suspended_from_epoch.clear();
+		string sv;
+		rocksdb::Status ss = this->_db->Get(this->_read_options, kReplRebuiltFromSuspendedKey, &sv);
+		if (ss.ok()) {
+			vector<string> parts;
+			string::size_type at = 0;
+			while (at <= sv.size()) {
+				string::size_type sp = sv.find(' ', at);
+				if (sp == string::npos) { parts.push_back(sv.substr(at)); break; }
+				parts.push_back(sv.substr(at, sp - at));
+				at = sp + 1;
+			}
+			// valid only under the local history it was recorded under: a
+			// truncate / swap / promotion advanced that history and the
+			// stored copy is no longer the one it describes
+			if (parts.size() == 3 && !parts[0].empty() && !parts[1].empty()
+					&& parts[2] == this->_source_epoch) {
+				this->_suspended_from_master_id = parts[0];
+				this->_suspended_from_epoch = parts[1];
+				log_notice("suspended rebuild evidence of the stored copy restored (rebuild in progress): master_id=%s, source epoch %s", parts[0].c_str(), parts[1].c_str());
+			} else {
+				log_notice("suspended rebuild evidence ignored: recorded under another local history or malformed [%s]", sv.c_str());
+			}
+		}
 	}
 	this->_generations_broken = (rc != 0);
 	const string epoch = this->_source_epoch;
@@ -508,12 +535,17 @@ string storage_rocksdb::get_rebuilt_from_epoch() {
 int storage_rocksdb::_clear_rebuilt_from_locked() {
 	this->_rebuilt_from_master_id.clear();
 	this->_rebuilt_from_epoch.clear();
+	this->_suspended_from_master_id.clear();
+	this->_suspended_from_epoch.clear();
 	if (this->_db == NULL) {
 		return -1;
 	}
 	rocksdb::WriteOptions wo;
 	wo.sync = true;
-	rocksdb::Status st = this->_db->Delete(wo, kReplRebuiltFromKey);
+	rocksdb::WriteBatch wb;
+	wb.Delete(kReplRebuiltFromKey);
+	wb.Delete(kReplRebuiltFromSuspendedKey);
+	rocksdb::Status st = this->_db->Write(wo, &wb);
 	if (!st.ok()) {
 		log_err("failed to clear the rebuild evidence: %s", st.ToString().c_str());
 		return -1;
@@ -528,6 +560,70 @@ int storage_rocksdb::clear_rebuilt_from() {
 	return r;
 }
 
+int storage_rocksdb::suspend_rebuilt_from() {
+	pthread_rwlock_wrlock(&this->_mutex_generations);
+	int r = 0;
+	const string mid = this->_rebuilt_from_master_id;
+	const string ep = this->_rebuilt_from_epoch;
+	// the advertised evidence goes FIRST in memory (as clear_rebuilt_from)
+	this->_rebuilt_from_master_id.clear();
+	this->_rebuilt_from_epoch.clear();
+	if (this->_db == NULL) {
+		r = -1;
+	} else {
+		rocksdb::WriteOptions wo;
+		wo.sync = true;
+		rocksdb::WriteBatch wb;
+		wb.Delete(kReplRebuiltFromKey);
+		if (!mid.empty() && !ep.empty() && !this->_source_epoch.empty()) {
+			// atomically: advertised -> suspended (same format and binding)
+			wb.Put(kReplRebuiltFromSuspendedKey, mid + " " + ep + " " + this->_source_epoch);
+		}
+		rocksdb::Status st = this->_db->Write(wo, &wb);
+		if (!st.ok()) {
+			log_err("failed to suspend the rebuild evidence: %s", st.ToString().c_str());
+			r = -1;
+		} else if (!mid.empty() && !ep.empty()) {
+			this->_suspended_from_master_id = mid;
+			this->_suspended_from_epoch = ep;
+		}
+		// with no advertised evidence, an earlier attempt's suspended record
+		// (same stored copy, same local history) stays as it is
+	}
+	pthread_rwlock_unlock(&this->_mutex_generations);
+	return r;
+}
+
+int storage_rocksdb::clear_suspended_rebuilt_from() {
+	pthread_rwlock_wrlock(&this->_mutex_generations);
+	this->_suspended_from_master_id.clear();
+	this->_suspended_from_epoch.clear();
+	int r = -1;
+	if (this->_db != NULL) {
+		rocksdb::WriteOptions wo;
+		wo.sync = true;
+		rocksdb::Status st = this->_db->Delete(wo, kReplRebuiltFromSuspendedKey);
+		r = st.ok() ? 0 : -1;
+		if (!st.ok()) log_err("failed to clear the suspended rebuild evidence: %s", st.ToString().c_str());
+	}
+	pthread_rwlock_unlock(&this->_mutex_generations);
+	return r;
+}
+
+string storage_rocksdb::get_suspended_rebuilt_from_master_id() {
+	pthread_rwlock_rdlock(&this->_mutex_generations);
+	string v = this->_generations_broken ? string("") : this->_suspended_from_master_id;
+	pthread_rwlock_unlock(&this->_mutex_generations);
+	return v;
+}
+
+string storage_rocksdb::get_suspended_rebuilt_from_epoch() {
+	pthread_rwlock_rdlock(&this->_mutex_generations);
+	string v = this->_generations_broken ? string("") : this->_suspended_from_epoch;
+	pthread_rwlock_unlock(&this->_mutex_generations);
+	return v;
+}
+
 int storage_rocksdb::set_rebuilt_from(const string& master_id, const string& epoch) {
 	if (master_id.empty() || epoch.empty()
 			|| master_id.find(' ') != string::npos || epoch.find(' ') != string::npos) {
@@ -539,6 +635,14 @@ int storage_rocksdb::set_rebuilt_from(const string& master_id, const string& epo
 	if (r == 0) {
 		this->_rebuilt_from_master_id = master_id;
 		this->_rebuilt_from_epoch = epoch;
+		// the stored copy is now the one this evidence describes
+		this->_suspended_from_master_id.clear();
+		this->_suspended_from_epoch.clear();
+		if (this->_db != NULL) {
+			rocksdb::WriteOptions wo;
+			wo.sync = true;
+			this->_db->Delete(wo, kReplRebuiltFromSuspendedKey);
+		}
 	}
 	pthread_rwlock_unlock(&this->_mutex_generations);
 	if (r == 0) {

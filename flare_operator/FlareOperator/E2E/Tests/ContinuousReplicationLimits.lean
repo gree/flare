@@ -1368,6 +1368,42 @@ def upgradeSuite : TestSuite := {
 -- 1p x 3r, PVC, legacy replication (no continuous following: in follow mode
 -- an unreadable pod is already "unproven" and kept out of a drain, so only
 -- legacy mode shows the readiness rule), drain window 20 s.
+private def utcNow : IO String := do
+  let out ← IO.Process.output { cmd := "date", args := #["-u", "+%Y-%m-%dT%H:%M:%SZ"] }
+  return out.stdout.trim
+
+/-- Container logs (previous + current) since a fixed time, with timestamps. -/
+private def Ctx.flaredLogAllSince (c : Ctx) (pod since : String) : IO String := do
+  let mut acc := ""
+  for extra in [["--previous"], []] do
+    match ← kubectl (["logs", "-n", c.cfg.«namespace», pod, "-c", "flared", s!"--since-time={since}", "--timestamps"] ++ extra) with
+    | .ok o => acc := acc ++ o
+    | .error _ => pure ()
+  return acc
+
+/-- The operator's decisions and the replica's copy-affecting events in a
+    FIXED window, printed whether the test passes or fails (CI 37472032699:
+    the failure dump held only the log tail, so the path that demoted a
+    replica after a deferral was not visible). Operator lines from every
+    operator pod (current and previous container); flared lines of `pods`. -/
+private def Ctx.windowRecord (c : Ctx) (since : String) (pods : List String) (label : String) : IO Unit := do
+  let opNeedles := ["REPLICA REPAIR", "repair DEFERRED", "replica repair", "demot", "reseat", "withheld", "R3", "needs_rebuild",
+    "NodeAdd", "NodeRole", "NodeState", "unhealthy", "NotReady", "failover", "drain", "promot", "refill", "proxy", "Prepare"]
+  for op in ← getPodNames s!"app={c.cfg.operatorName}" c.cfg.«namespace» do
+    let mut raw := ""
+    for extra in [["--previous"], []] do
+      match ← kubectl (["logs", "-n", c.cfg.«namespace», op, s!"--since-time={since}", "--timestamps"] ++ extra) with
+      | .ok o => raw := raw ++ o
+      | .error _ => pure ()
+    let lines := (raw.splitOn "\n").filter fun l => opNeedles.any (containsSubstr l ·) && !containsSubstr l "[DEBUG]"
+    IO.eprintln s!"# [{label}] operator {op} since {since}: {lines.length} decision line(s) (last 80):\n{String.intercalate "\n" (lines.reverse.take 80).reverse}"
+  for pod in pods do
+    let fl := ((← c.flaredLogAllSince pod since).splitOn "\n").filter fun l =>
+      containsSubstr l "shifting node_role" || containsSubstr l "shifting node_state" || containsSubstr l "truncat"
+        || containsSubstr l "dump operation" || containsSubstr l "dump completed" || containsSubstr l "snapshot" || containsSubstr l "read source"
+        || containsSubstr l "self-demot" || containsSubstr l "resync" || containsSubstr l "needs_rebuild" || containsSubstr l "flush"
+    IO.eprintln s!"# [{label}] {pod} flared since {since}: {fl.length} copy-affecting line(s) (last 50):\n{String.intercalate "\n" (fl.reverse.take 50).reverse}"
+
 private def identityCfg : ClusterConfig := {
   name := "copy-identity"
   «namespace» := "flare-copy-identity"
@@ -1578,12 +1614,25 @@ def identitySuite : TestSuite := {
 
     { name := "SAF-08 replacement AFTER observation: the pass that chose a successor is held; that successor's pod is replaced under the same name (node cordoned, replacement Pending); on release the promotion is ABORTED; the other slave takes over with every key"
       run := do
+        IO.sleep 1100
+        let since13 ← utcNow
         match ← c.threeInSync with
         | none => return .fail "precondition: one master and two in-sync Active slaves"
         | some (m, a, b, items) =>
+          -- each node's OWN view at the start (CI 37547974017: the other
+          -- slave was Prepare when the promotion was needed; why is the question)
+          let mut own : List String := []
+          for p in [m, a, b] do
+            match ← getPodIp p ns with
+            | some pip =>
+              match ← execInDebugPod c.cfg.debugPod ns s!"printf 'stats\\r\\n' | nc -w 3 {pip} {c.cfg.flarePort} | grep -E 'repl_read_source_state|reconstruction_current_state|reconstruction_started|reconstruction_completed'; printf 'stats nodes\\r\\n' | nc -w 3 {pip} {c.cfg.flarePort} | grep -E '{p}[.].*:(role|state) '" with
+              | .ok o => own := own ++ [s!"{p}: {String.intercalate " " ((o.splitOn "\n").map String.trim |>.filter (· != ""))}"]
+              | .error e => own := own ++ [s!"{p}: unreadable ({e.take 60})"]
+            | none => own := own ++ [s!"{p}: no IP"]
+          IO.eprintln s!"# test 13 start, each node's own view: {own}"
           let held ← c.holdPromotion (do discard <| kubectl ["delete", "pod", m, "-n", ns, "--wait=false"])
           match held with
-          | none => c.releasePromotion; return .fail "the promotion barrier was never reached"
+          | none => c.releasePromotion; c.windowRecord since13 [a, b] "copy-identity 13"; return .fail "the promotion barrier was never reached"
           | some keys =>
             let target := podOf (keys.head!)
             let other := if target == a then b else a
@@ -1604,6 +1653,7 @@ def identitySuite : TestSuite := {
             let otherItems ← c.currItems ((← getPodIp other ns).getD "")
             discard <| kubectl ["uncordon", kindNode]
             IO.eprintln s!"# held promotion of {keys}; {target} replaced={replaced}; aborted={aborted}; masters seen {seen}; {other} items {otherItems} (expected {items})"
+            c.windowRecord since13 [other, target, m] "copy-identity 13"
             if !replaced then return .fail s!"{target} was not replaced"
             if !aborted then return .fail s!"the promotion of the replaced {target} was not aborted"
             if seen.contains target then return .fail s!"the replaced {target} was promoted"
@@ -1671,38 +1721,6 @@ private def Ctx.dataPods (c : Ctx) : IO (List (String × String)) := do
       | _ => none
   | .error _ => return []
 
-/-- Container logs (previous + current) since a fixed time, with timestamps. -/
-private def Ctx.flaredLogAllSince (c : Ctx) (pod since : String) : IO String := do
-  let mut acc := ""
-  for extra in [["--previous"], []] do
-    match ← kubectl (["logs", "-n", c.cfg.«namespace», pod, "-c", "flared", s!"--since-time={since}", "--timestamps"] ++ extra) with
-    | .ok o => acc := acc ++ o
-    | .error _ => pure ()
-  return acc
-
-/-- The operator's decisions and the replica's copy-affecting events in a
-    FIXED window, printed whether the test passes or fails (CI 37472032699:
-    the failure dump held only the log tail, so the path that demoted a
-    replica after a deferral was not visible). Operator lines from every
-    operator pod (current and previous container); flared lines of `pods`. -/
-private def Ctx.windowRecord (c : Ctx) (since : String) (pods : List String) (label : String) : IO Unit := do
-  let opNeedles := ["REPLICA REPAIR", "repair DEFERRED", "replica repair", "demot", "reseat", "withheld", "R3", "needs_rebuild",
-    "NodeAdd", "NodeRole", "NodeState", "unhealthy", "NotReady", "failover", "drain", "promot", "refill", "proxy", "Prepare"]
-  for op in ← getPodNames s!"app={c.cfg.operatorName}" c.cfg.«namespace» do
-    let mut raw := ""
-    for extra in [["--previous"], []] do
-      match ← kubectl (["logs", "-n", c.cfg.«namespace», op, s!"--since-time={since}", "--timestamps"] ++ extra) with
-      | .ok o => raw := raw ++ o
-      | .error _ => pure ()
-    let lines := (raw.splitOn "\n").filter fun l => opNeedles.any (containsSubstr l ·) && !containsSubstr l "[DEBUG]"
-    IO.eprintln s!"# [{label}] operator {op} since {since}: {lines.length} decision line(s) (last 80):\n{String.intercalate "\n" (lines.reverse.take 80).reverse}"
-  for pod in pods do
-    let fl := ((← c.flaredLogAllSince pod since).splitOn "\n").filter fun l =>
-      containsSubstr l "shifting node_role" || containsSubstr l "shifting node_state" || containsSubstr l "truncat"
-        || containsSubstr l "dump operation" || containsSubstr l "dump completed" || containsSubstr l "snapshot" || containsSubstr l "read source"
-        || containsSubstr l "self-demot" || containsSubstr l "resync" || containsSubstr l "needs_rebuild" || containsSubstr l "flush"
-    IO.eprintln s!"# [{label}] {pod} flared since {since}: {fl.length} copy-affecting line(s) (last 50):\n{String.intercalate "\n" (fl.reverse.take 50).reverse}"
-
 /-- Every rebuild in this suite is a truncate + full dump (no snapshot, no
     WAL catch-up), throttled so a dump lasts long enough (~50 s for the
     6.4 MB data set) to be interrupted. -/
@@ -1767,10 +1785,6 @@ private def Ctx.processId (c : Ctx) (pod : String) : IO (Option (String × Strin
     | [u, r] => if u.isEmpty || r.isEmpty then return none else return some (u, r)
     | _ => return none
   | .error _ => return none
-
-private def utcNow : IO String := do
-  let out ← IO.Process.output { cmd := "date", args := #["-u", "+%Y-%m-%dT%H:%M:%SZ"] }
-  return out.stdout.trim
 
 /-- Lines after the LAST occurrence of `marker` (the whole log if absent). -/
 private def afterLast (log marker : String) : String :=
@@ -2378,75 +2392,18 @@ def emptySourceSuite : TestSuite := {
           if (← c.currItems rIp) != (← c.currItems mIp) then return .fail "the activated copy does not match the master's item count"
           return .pass },
 
-    { name := "SAF-08 same master_id, different history: the master is drained and a copy promoted (new epoch); its keys are then all deleted while a replica whose evidence names the EARLIER epoch misses them — the repair DEFERS and the replica keeps every key (the rule cannot prove the emptiness legitimate, even though here it was)"
-      run := do
-        IO.sleep 1100
-        let since9 ← utcNow
-        match ← c.allInSync 400 480 with
-        | none => return .fail "precondition: the copies did not converge on 400 keys"
-        | some (m, _, _) =>
-          let mIp ← ip m
-          let mId ← c.statStr mIp "rocksdb_master_id"
-          let earlier ← c.statStr mIp "rocksdb_source_epoch"
-          discard <| kubectl ["delete", "pod", m, "-n", ns, "--wait=false"]
-          let some x ← c.newMasterAfter m 180 | return .fail s!"no successor was promoted after draining {m}"
-          let some _ ← c.allInSync 400 480 | return .fail s!"{m} did not rejoin with every key"
-          let xIp ← ip x
-          let xId ← c.statStr xIp "rocksdb_master_id"
-          let xEpoch ← c.statStr xIp "rocksdb_source_epoch"
-          let xReason ← c.statStr xIp "rocksdb_source_epoch_reason"
-          -- the target: a slave other than the drained one, still carrying
-          -- the EARLIER epoch's evidence
-          let mut target : Option (String × String) := none
-          for s in (← c.p0Roles).2 do
-            if s != m then
-              let sIp ← ip s
-              if let some (_, some e) ← c.evidence sIp then
-                if some e == earlier && target.isNone then target := some (s, sIp)
-          let some (y, yIp) := target | return .fail s!"precondition: no slave besides {m} carries evidence of the earlier epoch {earlier}"
-          if xId != mId then return .fail s!"precondition: the promoted master's master_id {xId} differs from the earlier one {mId}"
-          if xReason != some "promotion" || xEpoch == earlier then return .fail s!"precondition: the promoted master's epoch {xEpoch} ({xReason})"
-          -- The replica must REALLY miss the deletes. The master's forwards
-          -- to one replica are serial and a blocked one takes ~16 s to be
-          -- dropped, so healing at the first drop let the queued deletes
-          -- through (CI 37485235664: 396 of 400 reached the replica). Delete
-          -- 396 keys with forwarding intact, then cut, delete the last 4, and
-          -- keep the cut until all 4 forwards are counted as dropped.
-          let delKept ← c.deleteKeys xIp "es" 4 400
-          let synced396 ← waitForCondition s!"{y} applied the 396 replicated deletes" 180 do
-            return (← c.currItems yIp) == 4
-          let drops0 := (← c.statNat xIp "proxy_write_dropped").getD 0
-          match ← cutForwards xIp yIp with
-          | .error e => return .fail e
-          | .ok () => pure ()
-          let delCut ← c.deleteKeys xIp "es" 0 4
-          let del := delKept + delCut
-          let dropped ← waitForCondition "the master counts all 4 cut deletes as dropped" 240 do
-            return ((← c.statNat xIp "proxy_write_dropped").getD 0) ≥ drops0 + 4
-          healForwards xIp yIp
-          let yAfterHeal ← c.currItems yIp
-          if !synced396 || yAfterHeal != 4 then
-            c.windowRecord since9 [y, x] "test 9"
-            return .fail s!"precondition: {y} does not hold exactly the 4 keys whose deletes it missed (396 replicated={synced396}, items after the heal {yAfterHeal}, drops counted={dropped}); the missed-deletes case was not produced"
-          -- the dangerous case is an EMPTY source (the pair of test 2's
-          -- legitimately emptied one); a source that still holds keys is a
-          -- different case and is not judged here (CI 37472022352: 2 keys)
-          let xItems ← c.currItems xIp
-          if xItems != 0 then
-            c.windowRecord since9 [y, x] "test 9"
-            return .fail s!"precondition: the promoted master {x} still holds {xItems} key(s) after the deletes; the empty-source case was not produced"
-          let deferredSeen ← waitForCondition s!"the repair of {y} is deferred on the evidence" 240 do
-            let log ← c.opLog 4000
-            return (log.splitOn "\n").any fun l => containsSubstr l "replica repair DEFERRED" && containsSubstr l y && containsSubstr l "holds 0 keys"
-          IO.sleep 60000
-          let yItems ← c.currItems yIp
-          IO.eprintln s!"# promoted {x} (master_id {xId}, epoch {earlier} -> {xEpoch}, {xReason}); deleted {del} on it, drops counted={dropped}; {y} evidence names {earlier}; deferred={deferredSeen}; {y} items after 60 s more: {yItems} (expected the 4 it kept); ledger {← c.ledgerDests}"
-          c.windowRecord since9 [y, x] "test 9"
-          if !dropped then return .fail "precondition: the master never counted dropped forwards"
-          if !deferredSeen then return .fail s!"the repair of {y} from an empty promoted master was not deferred"
-          if yItems != 4 then return .fail s!"{y} lost the copy it kept ({yItems}/4 keys): it was rebuilt from the empty promoted master"
-          return .pass },
-
+    -- RETIRED (2026-10-07, user decision): "SAF-08 same master_id, different
+    -- history" — the replica whose evidence names the EARLIER epoch must keep
+    -- its copy when the promoted master is emptied. Under R3 such a replica is
+    -- rebuilt right after the promotion, so the test's precondition cannot be
+    -- reached (37493280795, 37547969798). Its history: b9e0742 rebuilt the
+    -- replica from an empty / 2-key promoted master (0/400 and 2/400; the cause
+    -- of THOSE losses is NOT established), 254640b did not produce its premise
+    -- (queued deletes reached the replica). Its expectation is carried by the
+    -- copy-protection suite's H1 reproduction (fixed order: approved while the
+    -- master holds data, master emptied, released → copy kept, every key and
+    -- value), which also covers a long wait afterwards. The code is in git
+    -- history (9bb08db and earlier).
     { name := "R2 production read policy: with readUnavailableError=true in the FlareCluster, a GET a replica cannot forward to its master is an EXPLICIT error to the client (never END), and a key that is really absent is still a miss"
       run := do
         -- the operator path: the CR setting reached every pod's extra.conf

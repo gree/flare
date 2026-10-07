@@ -92,6 +92,9 @@ public:
 	static const char* const kReplIncarnationKey;
 	static const char* const kReplRestoreDoneKey;
 	static const char* const kReplRebuiltFromKey;
+	// R3-D: the evidence of the STORED copy while a rebuild is in progress
+	// (moved here, durably, when an attempt starts; never advertised)
+	static const char* const kReplRebuiltFromSuspendedKey;
 
 	// Return true if key is a reserved replication metadata key.
 	static bool is_reserved_key(const string& key);
@@ -183,6 +186,8 @@ protected:
 	// kReplRebuiltFromKey, guarded by _mutex_generations.
 	string _rebuilt_from_master_id;
 	string _rebuilt_from_epoch;
+	string _suspended_from_master_id;
+	string _suspended_from_epoch;
 	// Set when a generation could not be established or persisted. The
 	// accessors then report "unavailable" and the replication paths refuse:
 	// serving a changed history under an unchanged token is the failure this
@@ -488,6 +493,16 @@ public:
 	string get_rebuilt_from_epoch();
 	int clear_rebuilt_from();
 	int set_rebuilt_from(const string& master_id, const string& epoch);
+	// R3-D: a rebuild attempt starts — the evidence stops being advertised
+	// (no evidence is visible while the copy may change) but is kept,
+	// durably and separately, as what the STORED copy is, so the protection
+	// rule can still judge it after a restart. Cleared as soon as the stored
+	// copy changes (truncate, swap, merge dump, a change of the local
+	// history) and replaced when new evidence is recorded. 0 on success.
+	int suspend_rebuilt_from();
+	int clear_suspended_rebuilt_from();
+	string get_suspended_rebuilt_from_master_id();
+	string get_suspended_rebuilt_from_epoch();
 	// The rule for recording it, stated once: only a clean rebuild (the
 	// local copy was truncated first) whose dump succeeded, from a source
 	// that advertised a non-empty identity that did not change between the

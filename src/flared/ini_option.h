@@ -120,6 +120,7 @@ private:
 	int				_rocksdb_wal_sync_bwlimit;
 	int				_rocksdb_wal_sync_interval;
 	int				_rocksdb_backup_keep;
+	long long		_rocksdb_rebuild_reserve_bytes;
 	int				_rocksdb_snapshot_bwlimit;
 	// Administrative gate for the (unauthenticated) flush_all op.
 	bool			_flush_all_enabled;
@@ -279,6 +280,7 @@ public:
 	int get_rocksdb_wal_sync_bwlimit() { return this->_rocksdb_wal_sync_bwlimit; }
 	int get_rocksdb_wal_sync_interval() { return this->_rocksdb_wal_sync_interval; }
 	int get_rocksdb_backup_keep() { return this->_rocksdb_backup_keep; }
+	long long get_rocksdb_rebuild_reserve_bytes() { return this->_rocksdb_rebuild_reserve_bytes; }
 	int get_rocksdb_snapshot_bwlimit() { return this->_rocksdb_snapshot_bwlimit; }
 	bool is_flush_all_enabled() { return this->_flush_all_enabled; }
 	bool is_repl_identity_forward() { return this->_repl_identity_forward; }

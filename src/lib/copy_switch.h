@@ -101,6 +101,64 @@ inline switch_recovery decide_switch_recovery(const switch_intent& in, const swi
 	return recovery_stop;
 }
 
+/**
+ *	What a retained copy records about the copy that replaced it (written
+ *	after the switch, design §8): "<new copy-id> <master_id> <source epoch>".
+ */
+struct retained_record {
+	std::string		replaced_by;
+	std::string		master_id;
+	std::string		epoch;
+};
+
+inline bool parse_retained_record(const std::string& text, retained_record& r) {
+	r = retained_record();
+	const std::string::size_type a = text.find(' ');
+	if (a == std::string::npos) return false;
+	const std::string::size_type b = text.find(' ', a + 1);
+	if (b == std::string::npos) return false;
+	r.replaced_by = text.substr(0, a);
+	r.master_id = text.substr(a + 1, b - a - 1);
+	r.epoch = text.substr(b + 1);
+	return !r.replaced_by.empty() && !r.master_id.empty() && !r.epoch.empty()
+		&& r.epoch.find(' ') == std::string::npos;
+}
+
+/**
+ *	Design §8: a retained copy may be deleted automatically only when ALL
+ *	hold; otherwise it needs an explicit approval (§7).
+ *	  1. its attempt was verified (the record exists: it is written only after
+ *	     a verified switch),
+ *	  2. the live copy is the one that replaced it, and its identity records
+ *	     agree,
+ *	  3. the read source is bound ELIGIBLE to the recorded lineage and history,
+ *	  4. this replica is Active in its OWN map.
+ */
+inline bool retained_deletable(bool has_record, const retained_record& r,
+		const std::string& live_id, bool live_consistent,
+		const std::string& bound_master_id, const std::string& bound_epoch, bool bound_eligible,
+		bool own_active, std::string& why) {
+	if (!has_record) {
+		why = "no record of a verified switch (approval needed)";
+		return false;
+	}
+	if (!live_consistent || live_id != r.replaced_by) {
+		why = "the live copy " + live_id + (live_consistent ? "" : " (identity inconsistent)")
+			+ " is not the copy " + r.replaced_by + " that replaced it";
+		return false;
+	}
+	if (!bound_eligible || bound_master_id != r.master_id || bound_epoch != r.epoch) {
+		why = "the read source is not bound eligible to " + r.master_id + "/" + r.epoch;
+		return false;
+	}
+	if (!own_active) {
+		why = "this replica is not Active in its own map";
+		return false;
+	}
+	why = "verified, live, bound and Active";
+	return true;
+}
+
 }	// namespace flare
 }	// namespace gree
 

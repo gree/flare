@@ -1126,8 +1126,8 @@ def enablePurgedSuite : TestSuite := {
           let tLanded := firstAt opAll "config propagation confirmed" ((tRelease.map (·.1)).getD from0)
           let tConfirmed := firstAt opAll s!"follow configuration CONFIRMED on {sPodName}" from0
           let tRequested := firstAt opAll "REPLICA REPAIR requested by the follower" from0
-          let tStarted := (firstAt flaredAll "truncating local storage before full-dump" ((tRequested.map (·.1)).getD from0)).orElse
-            (fun _ => firstAt flaredAll "attempting snapshot bootstrap" ((tRequested.map (·.1)).getD from0))
+          let tStarted := (firstAt flaredAll "staged rebuild may start" ((tRequested.map (·.1)).getD from0)).orElse
+            (fun _ => firstAt flaredAll "rebuild_blocked=" ((tRequested.map (·.1)).getD from0))
           let oldReads : Option Nat := tConfirmed.bind fun (_, l) =>
             ((l.splitOn "old mode read ").drop 1).head?.bind fun r => (r.takeWhile Char.isDigit).toNat?
           let gap := fun (a b : Option (Float × String)) => match a, b with
@@ -1183,10 +1183,12 @@ private def rebuildTmpfsCfg : ClusterConfig := {
   flaredMemoryLimit := "384Mi"
   flaredMemoryRequest := "256Mi"
   extraFlaredConf := "rocksdb-block-cache-size-mb = 16\nrocksdb-write-buffer-size-mb = 4\nrocksdb-wal-ttl-seconds = 60\nrocksdb-wal-size-limit-mb = 16"
+  -- ~125 MB copy + 128 MiB reserve cannot fit next to the old copy in 384Mi
+  rebuildReserveBytes := some 134217728
 }
 
 private def rebuildTmpfsPatch (identity follow : Bool) : String :=
-  s!"\{\"spec\":\{\"rocksdb\":\{\"blockCacheSizeMb\":16,\"writeBufferSizeMb\":4,\"walTtlSeconds\":60,\"walSizeLimitMb\":16,\"replIdentityForward\":{identity},\"replFollowEnabled\":{follow},\"replFollowPollIntervalUsec\":200000}}}"
+  s!"\{\"spec\":\{\"rocksdb\":\{\"rebuildReserveBytes\":134217728,\"blockCacheSizeMb\":16,\"writeBufferSizeMb\":4,\"walTtlSeconds\":60,\"walSizeLimitMb\":16,\"replIdentityForward\":{identity},\"replFollowEnabled\":{follow},\"replFollowPollIntervalUsec\":200000}}}"
 
 /-- `count` keys of one INCOMPRESSIBLE value (random bytes, base64) of about
     `bytes` each, in one exec. RocksDB compresses per block, so a repeated
@@ -1208,7 +1210,7 @@ def rebuildTmpfsSuite : TestSuite := {
   tests :=
     let c : Ctx := { cfg := rebuildTmpfsCfg }
     [
-    { name := "space-aware rebuild on tmpfs: a live replica rebuild where two copies do not fit (tmpfs = memory limit, like pf-dev) discards the stale copy before staging; the rebuild succeeds without an OOM restart and the data is equal"
+    { name := "no room on tmpfs (copy retention §9): a live replica rebuild where the new copy plus the reserve does not fit next to the old one (tmpfs = memory limit, like pf-dev) STOPS and says why (stats rebuild_blocked=no_space); nothing is discarded, no OOM restart, the replica's copy is kept, no staging copy is left behind"
       run := do
         match ← c.pair with
         | .error e => return .fail e
@@ -1218,15 +1220,13 @@ def rebuildTmpfsSuite : TestSuite := {
           if w0 != 50 || big < 2400 then return .fail s!"legacy writes: stored {w0}/50 and {big}/2400 random"
           if !(← convergedItems c mIp sIp "legacy: replica matches the master") then
             return .fail s!"legacy: items master={← c.currItems mIp} replica={← c.currItems sIp}"
-          IO.sleep 90000
-          let big2 ← c.bulkWriteRandom mIp "rnd2" 100 50000
           let rc0 ← c.restartCount sPod
-          let disc0 := (← c.statNat sIp "rocksdb_rebuild_stale_discarded").getD 0
-          let snap0 := (← c.statNat sIp "rocksdb_snapshot_bootstrap").getD 0
+          let items0 ← c.currItems sIp
+          let sw0 := (← c.statNat sIp "rocksdb_staged_switched").getD 0
           let data0 ← match ← kubectl ["exec", "-n", rebuildTmpfsCfg.«namespace», sPod, "--", "sh", "-c", "du -sm /data | cut -f1"] with
             | .ok o => pure o.trim
             | .error _ => pure "?"
-          IO.eprintln s!"# legacy: {big}+{big2} random values of ~50 kB; items {← c.currItems mIp}; replica data dir {data0} MB in a 384Mi tmpfs/memory limit; restarts {rc0}; discarded {disc0}; snapshot bootstraps {snap0}"
+          IO.eprintln s!"# legacy: {big} random values of ~50 kB; replica items {items0}, data dir {data0} MB in a 384Mi tmpfs/memory limit; reserve {rebuildTmpfsCfg.rebuildReserveBytes}; restarts {rc0}; staged switches {sw0}"
           match ← kubectlPatch "flarecluster" rebuildTmpfsCfg.name rebuildTmpfsCfg.«namespace» (rebuildTmpfsPatch true false) with
           | .error e => return .fail s!"patch (identity on) failed: {e}"
           | .ok _ => pure ()
@@ -1235,27 +1235,28 @@ def rebuildTmpfsSuite : TestSuite := {
           match ← kubectlPatch "flarecluster" rebuildTmpfsCfg.name rebuildTmpfsCfg.«namespace» (rebuildTmpfsPatch true true) with
           | .error e => return .fail s!"patch (follow on) failed: {e}"
           | .ok _ => pure ()
-          let states ← IO.mkRef ([] : List String)
-          let following ← waitForCondition "the replica is rebuilt and follows" 480 do
-            let st := (← c.statStr sIp "repl_follow_state").getD "?"
-            let reason := (← c.statStr sIp "repl_follow_last_reason").getD ""
-            let entry := if reason.isEmpty then st else s!"{st}({reason})"
-            states.modify fun l => if l.getLast? == some entry then l else l ++ [entry]
-            return st == "following" && (← c.statNat sIp "rocksdb_snapshot_bootstrap").getD 0 > snap0
-          let rc1 ← c.restartCount sPod
-          let disc1 := (← c.statNat sIp "rocksdb_rebuild_stale_discarded").getD 0
-          let snap1 := (← c.statNat sIp "rocksdb_snapshot_bootstrap").getD 0
-          let discLine := match ← kubectl ["logs", "-n", rebuildTmpfsCfg.«namespace», sPod, "--tail=5000"] with
-            | .ok o => (o.splitOn "\n").find? (containsSubstr · "will not fit next to ours")
+          -- the replica's copy predates follow mode: it is rebuilt — and the
+          -- rebuild must stop for lack of room instead of discarding the copy
+          let blocked ← waitForCondition "the replica's rebuild stops: rebuild_blocked=no_space" 480 do
+            return (← c.statStr sIp "rebuild_blocked") == some "no_space"
+          let line := match ← kubectl ["logs", "-n", rebuildTmpfsCfg.«namespace», sPod, "--tail=5000"] with
+            | .ok o => (o.splitOn "\n").find? (containsSubstr · "rebuild_blocked=no_space")
             | .error _ => none
-          IO.eprintln s!"# follow on: states {← states.get}; following={following}; replica restarts {rc0}→{rc1}; stale copy discarded {disc0}→{disc1}; snapshot bootstraps {snap0}→{snap1}\n# {discLine.getD "(no discard line)"}"
-          if rc1 != rc0 then return .fail s!"the replica's container restarted during the rebuild ({rc0}→{rc1}): two copies did not fit"
-          if disc1 != disc0 + 1 then return .fail s!"expected the stale copy to be discarded once before staging ({disc0}→{disc1})"
-          if !following then return .fail s!"the replica was not rebuilt by snapshot and following (states {← states.get})"
-          if !(← convergedItems c mIp sIp "after the rebuild: replica matches the master") then
-            return .fail s!"after the rebuild: items master={← c.currItems mIp} replica={← c.currItems sIp}"
-          if let some bad ← sampleEqual c mIp sIp [("legacy", 50)] then return .fail s!"value mismatch: {bad}"
-          if (← masterPodOf c) != some mPod then return .fail "the master moved during the rebuild"
+          IO.sleep 60000
+          let rc1 ← c.restartCount sPod
+          let items1 ← c.currItems sIp
+          let sw1 := (← c.statNat sIp "rocksdb_staged_switched").getD 0
+          let left ← match ← kubectl ["exec", "-n", rebuildTmpfsCfg.«namespace», sPod, "--", "sh", "-c", "ls -d /data/staging-* /data/retained-* 2>/dev/null | wc -l"] with
+            | .ok o => pure (o.trim.toNat?.getD 99)
+            | .error _ => pure 99
+          IO.eprintln s!"# follow on: blocked={blocked}; replica restarts {rc0}→{rc1}; items {items0}→{items1}; staged switches {sw0}→{sw1}; staging/retained dirs left {left}\n# {line.getD "(no rebuild_blocked line)"}"
+          if rc1 != rc0 then return .fail s!"the replica's container restarted ({rc0}→{rc1}): the copy did not stop in time"
+          if !blocked then return .fail "the rebuild did not stop with rebuild_blocked=no_space"
+          if line.isNone then return .fail "no CRITICAL rebuild_blocked=no_space line was logged"
+          if sw1 != sw0 then return .fail s!"a staged copy was switched in although it could not fit ({sw0}→{sw1})"
+          if items1 < items0 then return .fail s!"the replica's copy shrank ({items0}→{items1}): something was discarded"
+          if left != 0 then return .fail s!"{left} staging/retained director(ies) left on the replica"
+          if (← masterPodOf c) != some mPod then return .fail "the master moved"
           return .pass }
   ]
 }
@@ -1263,11 +1264,11 @@ def rebuildTmpfsSuite : TestSuite := {
 -- ─── upgrade from the deployed release, on tmpfs = memory limit ───────────
 
 -- pf-dev's 2026-10-05 roll in miniature: rc56 (no source epochs) rolled to
--- the build under test on tmpfs whose size equals the memory limit. The new
--- replica's snapshot from the old master carries no source epoch and is
--- refused; that refusal used to happen AFTER the swap, leaving the source's
--- copy in place for the fallback full dump to write a second one: OOM-killed
--- on every retry, the roll stuck.
+-- the build under test on tmpfs whose size equals the memory limit. The roll
+-- used to get stuck (two copies, OOM on every retry). With copy retention the
+-- new replica builds a staged copy of the epoch-less master by the LEGACY rule
+-- (the position must not move from L0 until after the switch: no writes
+-- during the roll) and switches it in; nothing is discarded.
 private def upgradeCfg : ClusterConfig := {
   name := "cont-repl-upgrade"
   «namespace» := "flare-cont-repl-upgrade"
@@ -1281,6 +1282,10 @@ private def upgradeCfg : ClusterConfig := {
   flaredMemoryLimit := "384Mi"
   flaredMemoryRequest := "256Mi"
   extraFlaredConf := "rocksdb-block-cache-size-mb = 16\nrocksdb-write-buffer-size-mb = 4"
+  -- rc56 flared does not know rocksdb-rebuild-reserve-bytes and refuses to
+  -- START with an unknown option: it is set through the CR after the
+  -- operator rolled (the upgrade procedure), never at rc56's boot
+  rebuildReserveBytes := none
   flaredImageOverride := some "ghcr.io/gree/flare-node-rocksdb:0.1.0-rc56"
   operatorImageOverride := some "ghcr.io/gree/flare-operator:0.1.0-rc56"
 }
@@ -1295,7 +1300,7 @@ def upgradeSuite : TestSuite := {
   tests :=
     let c : Ctx := { cfg := upgradeCfg }
     [
-    { name := "upgrade from rc56 (the deployed release) to this build on tmpfs = memory limit: the roll completes with no container restart; the new replica refuses the old master's epoch-less snapshot BEFORE the swap and rebuilds by full dump; data equal; writes work after"
+    { name := "upgrade from rc56 (the deployed release) to this build on tmpfs = memory limit, by the release procedure (operator first, then spec.rocksdb.rebuildReserveBytes, then flared): the roll completes with no container restart; the new replica copies the epoch-less master by the LEGACY staged rule (position unchanged from L0 through the switch, no writes during the roll) and switches it in; data equal; writes work after"
       run := do
         match ← c.pair with
         | .error e => return .fail e
@@ -1320,6 +1325,17 @@ def upgradeSuite : TestSuite := {
           let opUp ← waitForCondition "the new operator answers node sync" 120 do
             return !(← c.nodeView).isEmpty
           if !opUp then return .fail "the new operator never answered node sync"
+          -- the release procedure: the reserve goes into the CR once the new
+          -- operator runs; the rc56 pods refuse that reload (unknown option)
+          -- and keep running; the new pods boot with it
+          match ← kubectlPatch "flarecluster" upgradeCfg.name ns s!"\{\"spec\":\{\"rocksdb\":\{\"rebuildReserveBytes\":{e2eRebuildReserveBytes},\"blockCacheSizeMb\":16,\"writeBufferSizeMb\":4}}}" with
+          | .error e => return .fail s!"patch (rebuildReserveBytes) failed: {e}"
+          | .ok _ => pure ()
+          let confHas ← waitForCondition "the operator writes the reserve into extra.conf" 180 do
+            match ← kubectl ["get", "configmap", s!"{upgradeCfg.name}-config", "-n", ns, "-o", "jsonpath={.data.extra\\.conf}"] with
+            | .ok o => return containsSubstr o "rocksdb-rebuild-reserve-bytes"
+            | .error _ => return false
+          if !confHas then return .fail "the operator did not render rebuildReserveBytes into extra.conf"
           match ← kubectl ["set", "image", s!"statefulset/{upgradeCfg.name}-nodes", "-n", ns, "flared=flare-node-rocksdb:test"] with
           | .error e => return .fail s!"set image failed: {e}"
           | .ok _ => pure ()
@@ -1337,18 +1353,21 @@ def upgradeSuite : TestSuite := {
             match ← kubectl ["get", "pods", "-n", ns, "-l", s!"app=flare,cluster={upgradeCfg.name}", "-o", "jsonpath={range .items[*]}{.metadata.name}={.status.containerStatuses[0].lastState.terminated.reason} {end}"] with
             | .ok o => pure (containsSubstr o "OOMKilled", o.trim)
             | .error _ => pure (false, "?")
-          let refusedBefore ← do
+          let (legacyPath, legacyDone) ← do
             let mut seen := false
+            let mut doneSeen := false
             for pod in [s!"{upgradeCfg.name}-nodes-0", s!"{upgradeCfg.name}-nodes-1"] do
               match ← kubectl ["logs", "-n", ns, pod, "--tail=20000"] with
-              | .ok o => if containsSubstr o "refusing BEFORE the swap" then seen := true
+              | .ok o =>
+                if containsSubstr o "legacy source (no source epoch)" then seen := true
+                if containsSubstr o "staged rebuild DONE" && containsSubstr o "history (legacy)" then doneSeen := true
               | .error _ => pure ()
-            pure seen
-          IO.eprintln s!"# roll: done={done} in {rollS}s; container restarts nodes-0={r0} nodes-1={r1}; last termination reasons [{oomKilled.2}]; epoch-less snapshot refused before the swap={refusedBefore}"
+            pure (seen, doneSeen)
+          IO.eprintln s!"# roll: done={done} in {rollS}s; container restarts nodes-0={r0} nodes-1={r1}; last termination reasons [{oomKilled.2}]; legacy staged rule used={legacyPath}, legacy copy switched in={legacyDone}"
           if oomKilled.1 then return .fail s!"a flared container was OOMKilled during the roll ({oomKilled.2}): two copies did not fit"
           if !done then return .fail s!"the roll did not complete within 20 min (restarts nodes-0={r0} nodes-1={r1})"
           if r0 + r1 > 0 then return .fail s!"flared containers restarted during the roll (nodes-0={r0} nodes-1={r1}): two copies did not fit"
-          if !refusedBefore then return .fail "the new replica never logged refusing the old master's snapshot before the swap (path not exercised)"
+          if !legacyPath || !legacyDone then return .fail s!"the new replica did not copy the epoch-less master by the legacy staged rule (used={legacyPath}, switched in={legacyDone})"
           match ← c.pair with
           | .error e => return .fail s!"after the roll: {e}"
           | .ok (_, mIp2, _, sIp2) =>
@@ -1721,8 +1740,9 @@ private def Ctx.dataPods (c : Ctx) : IO (List (String × String)) := do
       | _ => none
   | .error _ => return []
 
-/-- Every rebuild in this suite is a truncate + full dump (no snapshot, no
-    WAL catch-up), throttled so a dump lasts long enough (~50 s for the
+/-- Every rebuild in this suite is a STAGED full dump (no snapshot, no WAL
+    catch-up; copy retention: the copy is built next to the old one and
+    switched in), throttled so a dump lasts long enough (~50 s for the
     6.4 MB data set) to be interrupted. -/
 private def emptySourceCfg : ClusterConfig := {
   name := "empty-source"
@@ -1884,7 +1904,7 @@ def emptySourceSuite : TestSuite := {
     let ns := emptySourceCfg.«namespace»
     let ip : String → IO String := fun p => do return (← getPodIp p ns).getD ""
     [
-    { name := "SAF-08 rebuild evidence: after a PROMOTION, the ex-master rejoins and is rebuilt by a clean truncate + full dump; it records the current master's master_id and source epoch (identical at the dump's start and end) — although its own epoch and the master's differ"
+    { name := "SAF-08 rebuild evidence: after a PROMOTION, the ex-master rejoins and is rebuilt by a STAGED full dump (verified, switched in); it records the current master's master_id and source epoch (identical at the dump's start and end), and the staged copy follows that history"
       run := do
         let graceOver ← waitForCondition "operator past its startup grace period" 240 do
           return containsSubstr (← c.opLog 400) "grace period over"
@@ -1905,12 +1925,15 @@ def emptySourceSuite : TestSuite := {
           let rEpoch ← c.statStr rIp "rocksdb_source_epoch"
           let ev ← c.evidence rIp
           let log ← c.flaredLog m0
-          let seamDump := containsSubstr log "truncate+full-dump" && containsSubstr log "reconstruction via full dump completed"
-          IO.eprintln s!"# master {m1}: master_id {mId}, epoch {mEpoch} ({mReason}); rebuilt {m0}: own epoch {rEpoch}, evidence {ev}; full dump via the seam={seamDump}"
-          if !seamDump then return .fail s!"precondition: {m0} was not rebuilt by truncate + full dump"
+          let seamDump := containsSubstr log "-> staged full dump" && containsSubstr log "reconstruction via full dump completed into staging"
+            && containsSubstr log "staged rebuild DONE"
+          IO.eprintln s!"# master {m1}: master_id {mId}, epoch {mEpoch} ({mReason}); rebuilt {m0}: own epoch {rEpoch}, evidence {ev}; staged full dump via the seam={seamDump}"
+          if !seamDump then return .fail s!"precondition: {m0} was not rebuilt by a staged full dump"
           if mReason != some "promotion" then return .fail s!"precondition: the master's epoch reason is {mReason}, not promotion"
-          if rEpoch == mEpoch then return .fail "precondition: the replica's own epoch equals the master's (the old rule alone would accept)"
           if ev != some (mId, mEpoch) then return .fail s!"the rebuilt replica's evidence {ev} is not the master's (master_id {mId}, epoch {mEpoch})"
+          -- copy retention: the staged copy follows the history it was
+          -- verified against (like a snapshot), so its own epoch is the master's
+          if rEpoch != mEpoch then return .fail s!"the staged copy's own epoch {rEpoch} is not the history it was verified against ({mEpoch})"
           return .pass
         | _ => return .fail "precondition: one master and two slaves" },
 
@@ -2791,8 +2814,8 @@ def r3SourceChangeSuite : TestSuite := {
 
 -- ─── R3-D: a replica's copy is not destroyed by an unsafe rebuild ─────────
 
-/-- Own cluster (empty-source shape: truncate + full dump only, throttled),
-    with a STOP POINT before every destructive step on a copy
+/-- Own cluster (empty-source shape: staged full dump only, throttled),
+    with a STOP POINT before every step that replaces a copy
     (FLARE_TEST_DESTRUCTIVE_HOLD_FILE): the order is fixed by the test, not
     by timing. Stats are read every pass so a source change is acted on at a
     known time. -/
@@ -2925,7 +2948,7 @@ def copyProtectionSuite : TestSuite := {
           -- (3) released: the protection decides now
           release y
           let refused ← waitForCondition s!"{y}'s protection refuses the empty source" 180 do
-            return ((← c.flaredLogSince y since).splitOn "\n").any fun l => containsSubstr l "copy protection 'truncate before full dump': REFUSE"
+            return ((← c.flaredLogSince y since).splitOn "\n").any fun l => containsSubstr l "copy protection 'switch to the verified staging copy': REFUSE"
           IO.sleep 90000
           let yAfter ← c.localDump (← ip y)
           let log := ((← c.flaredLogSince y since).splitOn "\n")
@@ -2959,12 +2982,13 @@ def copyProtectionSuite : TestSuite := {
           let some y := y? | return .fail s!"precondition: no replica besides {x} holds the original copy (H1 must precede)"
           let yIp ← ip y
           let kv2 := (List.range 8).map fun i => (s!"cp_{i}", s!"cpnew_{i}")
-          -- the stop point right BEFORE the destructive step: y has
-          -- connected and decided to truncate (the source holds keys again)
+          -- the stop point right BEFORE the step that replaces y's copy: y has
+          -- built and verified a staging copy (the source holds keys again)
+          -- and holds before the protection rule decides the switch
           if !(← holdD y) then return .fail "precondition: could not arm the stop point"
           if (← c.setValues xIp kv2) != kv2.length then releaseD y; return .fail s!"precondition: could not write the new values on {x}"
           let atStop ← waitForCondition s!"{y} reaches the stop point before its destructive step" 300 do
-            return containsSubstr (← c.flaredLogSince y since) "'truncate before full dump' held by FLARE_TEST_DESTRUCTIVE_HOLD_FILE"
+            return containsSubstr (← c.flaredLogSince y since) "'switch to the verified staging copy' held by FLARE_TEST_DESTRUCTIVE_HOLD_FILE"
           if !atStop then releaseD y; return .fail "precondition: the stop point before the destructive step was not reached"
           -- the source unreadable from y, then released
           match ← hostCmd "docker" (["exec", kindNode, "iptables", "-I", "FORWARD", "1"] ++ ruleSpec yIp xIp) with

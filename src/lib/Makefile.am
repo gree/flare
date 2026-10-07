@@ -34,7 +34,7 @@ libflare_la_SOURCES = \
 	handler_source_validator.h handler_source_validator.cc \
 	source_eligibility.h \
 	copy_protection.h \
-	copy_switch.h copy_switch_fs.h copy_switch.cc \
+	copy_switch.h copy_switch_fs.h copy_switch.cc copy_capacity.h \
 	htonll.h \
 	key_resolver.h key_resolver.cc \
 	key_resolver_modular.h key_resolver_modular.cc \

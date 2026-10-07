@@ -80,6 +80,12 @@ structure ClusterConfig where
       by the operator's own extra.conf. Part of the CR, so a CR recreated
       mid-suite keeps it. -/
   readUnavailableError : Bool := false
+  /-- Copy retention (§9): `rocksdb-rebuild-reserve-bytes` for the suite's
+      flared. Unset stops every staged rebuild, so suites set it: baked into
+      the initial extra.conf (pods boot with it) and, when the CR carries a
+      rocksdb block (the operator then owns extra.conf), into the CR too.
+      `none` = leave it unset (the reserve_unset test). -/
+  rebuildReserveBytes : Option Nat := some e2eRebuildReserveBytes
   /-- preStop drain window (seconds). >0 adds a `sleep {drainSeconds}` preStop
       hook so flared stays alive+Ready while Terminating — the window the
       operator's graceful drain (demote leaving master to a live proxy, promote
@@ -403,6 +409,14 @@ spec:
           configMap:
             name: {cluster}-config{tmpfsVolume}{pvcTemplates}"
 
+/-- The extra.conf pods boot with: the suite's lines plus the rebuild reserve. -/
+def bootFlaredConf (cfg : ClusterConfig) : String :=
+  match cfg.rebuildReserveBytes with
+  | some n =>
+    let line := s!"rocksdb-rebuild-reserve-bytes = {n}"
+    if cfg.extraFlaredConf.isEmpty then line else cfg.extraFlaredConf ++ "\n" ++ line
+  | none => cfg.extraFlaredConf
+
 /-- Generate FlareCluster CRD YAML. -/
 def flareClusterCrdYaml (cfg : ClusterConfig) : String :=
   s!"apiVersion: flare.gree.net/v1alpha1
@@ -413,7 +427,12 @@ metadata:
 spec:
   partitions: {cfg.partitions}
   replicas: {cfg.replicas}" ++
-  (if cfg.readUnavailableError then "\n  rocksdb:\n    readUnavailableError: true" else "")
+  (if cfg.readUnavailableError then
+    "\n  rocksdb:\n    readUnavailableError: true" ++
+      (match cfg.rebuildReserveBytes with
+       | some n => s!"\n    rebuildReserveBytes: {n}"
+       | none => "")
+   else "")
 
 /-- Generate partition Service YAML for a single partition. -/
 def partitionServiceYaml (cfg : ClusterConfig) (partIdx : Nat) : String :=
@@ -565,7 +584,7 @@ def deployCluster (cfg : ClusterConfig) : IO Unit := do
   -- file.  Using direct kubectl (not `sh -c`) so failures are visible.
   let cmName := s!"{cfg.name}-config"
   match ← kubectl ["create", "configmap", cmName, "-n", cfg.«namespace»,
-                    s!"--from-literal=extra.conf={cfg.extraFlaredConf}"] with
+                    s!"--from-literal=extra.conf={bootFlaredConf cfg}"] with
   | .ok _ => pure ()
   | .error e =>
     -- "AlreadyExists" is fine; anything else is a real failure we want to see.

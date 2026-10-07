@@ -198,6 +198,18 @@ spec:
                         7, dynamic). On tmpfs the checkpoints live in RAM and
                         hardlink-pin compacted-away SSTs — set 1-2 there or
                         they balloon past the live DB size and OOM the pod.
+                    rebuildReserveBytes:
+                      type: integer
+                      minimum: 0
+                      description: >-
+                        Copy retention: bytes kept free besides the staging
+                        copy while a replica rebuilds (compaction, WAL
+                        catch-up, quarantine). UNSET = staged rebuilds STOP
+                        (stats rebuild_blocked=reserve_unset); there is no
+                        default until the R7 load test measures one. A
+                        rebuild needs the source's copy size plus this free
+                        under the data dir (on tmpfs also within the memory
+                        limit). flared rocksdb-rebuild-reserve-bytes, dynamic.
                 circuitBreaker:
                   type: object
                   description: >-

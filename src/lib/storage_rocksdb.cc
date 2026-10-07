@@ -167,6 +167,7 @@ storage_rocksdb::storage_rocksdb(
 	pthread_rwlock_init(&this->_repl_apply_lock, NULL);
 	pthread_mutex_init(&this->_orphan_scan_mutex, NULL);
 	pthread_rwlock_init(&this->_mutex_master_id, NULL);
+	pthread_mutex_init(&this->_mutex_rebuild_status, NULL);
 	this->_data_path = this->_data_dir + "/flare.rocksdb";
 	this->_setup_rocksdb_options();
 }
@@ -184,6 +185,7 @@ storage_rocksdb::~storage_rocksdb() {
 	pthread_mutex_destroy(&this->_resync_failure_mutex);
 	pthread_mutex_destroy(&this->_orphan_scan_mutex);
 	pthread_rwlock_destroy(&this->_mutex_master_id);
+	pthread_mutex_destroy(&this->_mutex_rebuild_status);
 }
 // }}}
 
@@ -671,6 +673,18 @@ int storage_rocksdb::switch_to_staging(const string& attempt, const string& expe
 		if (this->_load_or_init_generations() < 0) {
 			log_err("copy switch: generations of the new live copy could not be loaded", 0);
 		}
+		{
+			string mid;
+			if (this->_db->Get(this->_read_options, kReplMasterIdKey, &mid).ok() && !mid.empty()) {
+				pthread_rwlock_wrlock(&this->_mutex_master_id);
+				this->_master_id = mid;
+				pthread_rwlock_unlock(&this->_mutex_master_id);
+			}
+		}
+		this->_tombstone_sweep_cursor.clear();
+		this->_seed_curr_items_by_scan("copy switch");
+		// the latch described the old copy
+		this->_corrupted = false;
 		if (copy_fs::remove_intent(this->_data_dir) < 0) {
 			break;
 		}
@@ -680,6 +694,280 @@ int storage_rocksdb::switch_to_staging(const string& attempt, const string& expe
 	} while (false);
 	pthread_rwlock_unlock(&this->_mutex_wholelock);
 	return r;
+}
+
+void storage_rocksdb::_seed_curr_items_by_scan(const char* why) {
+	uint64_t exact = 0;
+	rocksdb::ReadOptions ro = this->_read_options;
+	ro.fill_cache = false;
+	rocksdb::Iterator* it = this->_db->NewIterator(ro);
+	for (it->SeekToFirst(); it->Valid(); it->Next()) {
+		if (!is_reserved_key(it->key().ToString())) {
+			exact++;
+		}
+	}
+	const bool ok = it->status().ok();
+	delete it;
+	this->_curr_items.sub(this->_curr_items.fetch());
+	if (ok && exact > 0) {
+		this->_curr_items.add(exact);
+	}
+	log_notice("curr_items seeded by an exact scan (%s): %llu live key(s)%s", why, (unsigned long long)exact, ok ? "" : " (scan FAILED -> 0)");
+}
+
+void storage_rocksdb::set_rebuild_blocked(const string& why) {
+	pthread_mutex_lock(&this->_mutex_rebuild_status);
+	this->_rebuild_blocked = why;
+	pthread_mutex_unlock(&this->_mutex_rebuild_status);
+}
+
+string storage_rocksdb::get_rebuild_blocked() {
+	pthread_mutex_lock(&this->_mutex_rebuild_status);
+	string v = this->_rebuild_blocked;
+	pthread_mutex_unlock(&this->_mutex_rebuild_status);
+	return v;
+}
+
+void storage_rocksdb::note_staged_result(bool switched) {
+	pthread_mutex_lock(&this->_mutex_rebuild_status);
+	if (switched) this->_staged_switched++; else this->_staged_abandoned++;
+	pthread_mutex_unlock(&this->_mutex_rebuild_status);
+}
+
+uint64_t storage_rocksdb::get_staged_switched() {
+	pthread_mutex_lock(&this->_mutex_rebuild_status);
+	uint64_t v = this->_staged_switched;
+	pthread_mutex_unlock(&this->_mutex_rebuild_status);
+	return v;
+}
+
+uint64_t storage_rocksdb::get_staged_abandoned() {
+	pthread_mutex_lock(&this->_mutex_rebuild_status);
+	uint64_t v = this->_staged_abandoned;
+	pthread_mutex_unlock(&this->_mutex_rebuild_status);
+	return v;
+}
+
+string storage_rocksdb::new_attempt_id() {
+	uuid_t uuid;
+	char buf[37];
+	uuid_generate(uuid);
+	uuid_unparse_lower(uuid, buf);
+	// short and filesystem-safe; unique enough per data_dir
+	return string(buf).substr(0, 8) + string(buf).substr(9, 4);
+}
+
+int storage_rocksdb::make_staging_dir(const string& attempt, string& path) {
+	if (this->_staging || attempt.empty() || attempt.find('/') != string::npos) {
+		return -1;
+	}
+	path = this->_data_dir + "/" + copy_fs::kStagingPrefix + attempt;
+	if (copy_fs::dir_exists(path)) {
+		log_err("staging: [%s] already exists; refusing to reuse it", path.c_str());
+		return -1;
+	}
+	if (mkdir(path.c_str(), 0700) != 0) {
+		log_err("staging: cannot create [%s]: %s", path.c_str(), util::strerror(errno));
+		return -1;
+	}
+	if (!copy_fs::same_device(this->_data_dir, path)) {
+		log_err("staging: [%s] is not on the data dir's filesystem (the switch would not be atomic)", path.c_str());
+		copy_fs::remove_tree_path(path);
+		return -1;
+	}
+	return copy_fs::fsync_dir(this->_data_dir);
+}
+
+storage_rocksdb* storage_rocksdb::open_staging(const string& attempt, bool existing_files) {
+	if (this->_staging || attempt.empty() || attempt.find('/') != string::npos) {
+		return NULL;
+	}
+	string path = this->_data_dir + "/" + copy_fs::kStagingPrefix + attempt;
+	if (!existing_files) {
+		if (this->make_staging_dir(attempt, path) < 0) {
+			return NULL;
+		}
+	} else if (!copy_fs::dir_exists(path) || !copy_fs::same_device(this->_data_dir, path)) {
+		log_err("staging: [%s] does not exist or is not on the data dir's filesystem", path.c_str());
+		return NULL;
+	}
+	// A small cache and write buffer: the staging copy is written, not
+	// served, and on tmpfs its memory counts against the pod as well.
+	storage_rocksdb* s = new storage_rocksdb(this->_data_dir, this->_mutex_slot_size, this->_header_cache_size,
+		8, std::min<uint64_t>(this->_write_buffer_size_mb, 32), 2,
+		this->_wal_ttl_seconds, this->_wal_size_limit_mb, false);
+	s->_staging = true;
+	s->_data_path = path;
+	if (s->open() < 0) {
+		log_err("staging: the copy at [%s] does not open", path.c_str());
+		delete s;
+		return NULL;
+	}
+	log_notice("staging copy opened at [%s] (copy %s, %s)", path.c_str(), s->get_copy_id().c_str(),
+		existing_files ? "received files" : "new and empty");
+	return s;
+}
+
+int storage_rocksdb::adopt_history(const string& master_id, const string& epoch, uint64_t cursor) {
+	if (!this->_staging || this->_db == NULL || master_id.empty()) {
+		return -1;
+	}
+	const string adopted = epoch.empty() ? this->get_source_epoch() : epoch;
+	if (adopted.empty()) {
+		return -1;
+	}
+	pthread_rwlock_wrlock(&this->_mutex_wholelock);
+	int r = -1;
+	do {
+		// inherited replication metadata (a checkpoint carries the source's)
+		// is expressed in another sequence space: start from an empty family
+		if (this->_cf_meta != NULL) {
+			rocksdb::Status ds = this->_db->DropColumnFamily(this->_cf_meta);
+			this->_db->DestroyColumnFamilyHandle(this->_cf_meta);
+			this->_cf_meta = NULL;
+			if (!ds.ok()) {
+				log_err("staging: could not drop the inherited replication metadata: %s", ds.ToString().c_str());
+				break;
+			}
+		}
+		rocksdb::ColumnFamilyHandle* fresh = NULL;
+		rocksdb::Status cs = this->_db->CreateColumnFamily(rocksdb::ColumnFamilyOptions(this->_options), kReplMetaCfName, &fresh);
+		if (!cs.ok()) {
+			log_err("staging: could not recreate the replication metadata family: %s", cs.ToString().c_str());
+			break;
+		}
+		this->_cf_meta = fresh;
+		this->_tombstone_sweep_cursor.clear();
+		const string next_incarnation = _mint_generation(this->get_incarnation());
+		rocksdb::WriteBatch b;
+		b.Put(kReplMasterIdKey, master_id);
+		b.Put(kReplLastLsnKey, boost::lexical_cast<string>(cursor));
+		b.Put(kReplSourceEpochKey, adopted);
+		b.Put(kReplSourceEpochReasonKey, epoch.empty() ? "new" : "inherited");
+		b.Put(kReplIncarnationKey, next_incarnation);
+		b.Delete(kReplRebuiltFromKey);
+		b.Delete(kReplRebuiltFromSuspendedKey);
+		b.Delete(kReplRestoreDoneKey);
+		rocksdb::WriteOptions wo;
+		wo.sync = true;
+		rocksdb::Status st = this->_db->Write(wo, &b);
+		if (!st.ok()) {
+			log_err("staging: could not record the adopted history: %s", st.ToString().c_str());
+			break;
+		}
+		pthread_rwlock_wrlock(&this->_mutex_master_id);
+		this->_master_id = master_id;
+		pthread_rwlock_unlock(&this->_mutex_master_id);
+		pthread_rwlock_wrlock(&this->_mutex_generations);
+		this->_source_epoch = adopted;
+		this->_source_epoch_reason = epoch.empty() ? "new" : "inherited";
+		this->_incarnation = next_incarnation;
+		this->_rebuilt_from_master_id.clear();
+		this->_rebuilt_from_epoch.clear();
+		this->_suspended_from_master_id.clear();
+		this->_suspended_from_epoch.clear();
+		this->_generations_broken = false;
+		pthread_rwlock_unlock(&this->_mutex_generations);
+		r = 0;
+	} while (false);
+	pthread_rwlock_unlock(&this->_mutex_wholelock);
+	if (r == 0) {
+		this->_seed_curr_items_by_scan("staging adopted a history");
+		log_notice("staging copy %s follows master_id %s, source epoch %s from %llu", this->get_copy_id().c_str(),
+			master_id.c_str(), epoch.empty() ? "(none: legacy source; own epoch kept)" : epoch.c_str(), (unsigned long long)cursor);
+	}
+	return r;
+}
+
+int storage_rocksdb::seal() {
+	if (!this->_staging || this->_db == NULL) {
+		return -1;
+	}
+	rocksdb::FlushOptions fo;
+	fo.wait = true;
+	rocksdb::Status f1 = this->_db->Flush(fo, this->_cf_default);
+	rocksdb::Status f2 = this->_cf_meta != NULL ? this->_db->Flush(fo, this->_cf_meta) : rocksdb::Status::OK();
+	rocksdb::Status w = this->_db->FlushWAL(true);
+	if (!f1.ok() || !f2.ok() || !w.ok()) {
+		log_err("staging: the copy could not be made durable (flush %s / %s, wal %s)", f1.ToString().c_str(),
+			f2.ToString().c_str(), w.ToString().c_str());
+		return -1;
+	}
+	this->close();
+	if (copy_fs::fsync_dir(this->_data_path) < 0 || copy_fs::fsync_dir(this->_data_dir) < 0) {
+		return -1;
+	}
+	return 0;
+}
+
+int storage_rocksdb::remove_staging(const string& attempt) {
+	if (attempt.empty() || attempt.find('/') != string::npos) {
+		return -1;
+	}
+	const string path = this->_data_dir + "/" + copy_fs::kStagingPrefix + attempt;
+	if (copy_fs::remove_tree_path(path) != 0) {
+		log_err("staging: could not remove [%s]", path.c_str());
+		return -1;
+	}
+	copy_fs::fsync_dir(this->_data_dir);
+	log_notice("staging copy [%s] removed (attempt abandoned; the live copy is unchanged)", path.c_str());
+	return 0;
+}
+
+int storage_rocksdb::record_retained(const string& attempt, const string& master_id, const string& epoch) {
+	const string dir = this->_data_dir + "/" + copy_fs::kRetainedPrefix + attempt;
+	if (!copy_fs::dir_exists(dir) || master_id.empty() || epoch.empty()) {
+		return -1;
+	}
+	return copy_fs::write_file_durable(dir, copy_fs::kRetainedRecordFile,
+		this->get_copy_id() + " " + master_id + " " + epoch);
+}
+
+vector<string> storage_rocksdb::list_retained() {
+	vector<string> out;
+	DIR* d = opendir(this->_data_dir.c_str());
+	if (d == NULL) {
+		return out;
+	}
+	struct dirent* e;
+	const size_t plen = strlen(copy_fs::kRetainedPrefix);
+	while ((e = readdir(d)) != NULL) {
+		const string n = e->d_name;
+		if (n.size() > plen && n.compare(0, plen, copy_fs::kRetainedPrefix) == 0
+				&& copy_fs::dir_exists(this->_data_dir + "/" + n)) {
+			out.push_back(n.substr(plen));
+		}
+	}
+	closedir(d);
+	return out;
+}
+
+int storage_rocksdb::reap_retained(const string& bound_master_id, const string& bound_epoch, bool bound_eligible, bool own_active, string& report) {
+	report.clear();
+	int removed = 0;
+	const vector<string> attempts = this->list_retained();
+	for (size_t i = 0; i < attempts.size(); i++) {
+		const string dir = this->_data_dir + "/" + copy_fs::kRetainedPrefix + attempts[i];
+		string text;
+		retained_record rec;
+		const bool has = copy_fs::read_small_file(dir + "/" + copy_fs::kRetainedRecordFile, text) == 0
+			&& parse_retained_record(text, rec);
+		string why;
+		if (!retained_deletable(has, rec, this->get_copy_id(), this->copy_identity_consistent(),
+				bound_master_id, bound_epoch, bound_eligible, own_active, why)) {
+			report += (report.empty() ? "" : "; ") + attempts[i] + " kept: " + why;
+			continue;
+		}
+		if (copy_fs::remove_tree_path(dir) != 0) {
+			log_err("retained copy [%s]: deletion failed part-way (what is left stays; checked again)", dir.c_str());
+			report += (report.empty() ? "" : "; ") + attempts[i] + " deletion failed";
+			continue;
+		}
+		copy_fs::fsync_dir(this->_data_dir);
+		removed++;
+		log_notice("retained copy [%s] deleted (%s)", dir.c_str(), why.c_str());
+	}
+	return removed;
 }
 
 int storage_rocksdb::suspend_rebuilt_from() {
@@ -946,17 +1234,21 @@ int storage_rocksdb::open() {
 	// Copy retention (design §4.2): resolve an interrupted switch from what
 	// exists on disk BEFORE the live DB is opened; only then remove the
 	// unfinished staging copies.
-	if (copy_fs::dir_exists(this->_data_dir)) {
+	if (!this->_staging && copy_fs::dir_exists(this->_data_dir)) {
 		string report;
 		if (copy_fs::recover(this->_data_dir, "flare.rocksdb", report) < 0) {
 			log_err("storage open refused: the copy switch could not be resolved (%s)", report.c_str());
 			return -1;
 		}
 		copy_fs::cleanup_staging(this->_data_dir);
+		// no transfer of the previous process survives it: its serve and
+		// receive areas are removed (design §5)
+		copy_fs::remove_prefixed(this->_data_dir, "snapshot.serve.");
+		copy_fs::remove_prefixed(this->_data_dir, "snapshot.recv.");
 	}
 
 	// Never expose a half-restored copy (design §3.9(D)).
-	if (this->_discard_incomplete_restore() < 0) {
+	if (!this->_staging && this->_discard_incomplete_restore() < 0) {
 		log_err("storage open refused: an interrupted restore could not be cleaned up", 0);
 		return -1;
 	}
@@ -1006,6 +1298,15 @@ int storage_rocksdb::open() {
 		}
 	}
 
+	// A staging copy made from received checkpoint files: what history do
+	// those files carry? Read BEFORE generations are initialised (that would
+	// mint one for a copy that has none).
+	if (this->_staging) {
+		string e;
+		rocksdb::Status es = this->_db->Get(this->_read_options, kReplSourceEpochKey, &e);
+		this->_staging_found_epoch = es.ok() ? e : string("");
+	}
+
 	// Establish this DB's master identity token. Must succeed; otherwise
 	// the WAL replication subsystem cannot detect cross-lineage sync
 	// attempts, so we fail closed.
@@ -1028,7 +1329,14 @@ int storage_rocksdb::open() {
 		string f;
 		const bool has_file = copy_fs::read_small_file(this->_data_path + "/" + copy_fs::kCopyIdFile, f) == 0 && !f.empty();
 		const bool has_key = cs.ok() && !v.empty();
-		if (!has_key && !has_file) {
+		if (this->_staging) {
+			// a staging copy is always a different copy (received checkpoint
+			// files carry the SOURCE's key and no COPY_ID file)
+			if (this->new_copy_identity("staging copy") < 0) {
+				log_err("failed to give the staging copy an identity", 0);
+				return -1;
+			}
+		} else if (!has_key && !has_file) {
 			if (this->new_copy_identity("first open of a copy without an identity") < 0) {
 				log_err("failed to initialise the copy identity", 0);
 				return -1;
@@ -1845,8 +2153,9 @@ int64_t storage_rocksdb::rebuild_space_available() {
 		}
 		// cgroup v1 reports "no limit" as a huge number: treat as unlimited.
 		if (limit > 0 && used >= 0 && limit < (static_cast<int64_t>(1) << 60)) {
-			const int64_t margin = static_cast<int64_t>(256) << 20;	// flared's own growth during the transfer
-			int64_t headroom = limit - used - margin;
+			// no fixed margin: flared's own growth during the copy is part of
+			// the configured reserve (rocksdb-rebuild-reserve-bytes, design §9)
+			int64_t headroom = limit - used;
 			if (headroom < 0) {
 				headroom = 0;
 			}
@@ -1856,16 +2165,6 @@ int64_t storage_rocksdb::rebuild_space_available() {
 		}
 	}
 	return avail;
-}
-
-bool storage_rocksdb::rebuild_must_discard(uint64_t local_bytes, int64_t available) {
-	if (available < 0 || local_bytes == 0) {
-		return false;	// unknown, or nothing to discard
-	}
-	// The incoming copy is estimated at the local copy's size plus 10% and a
-	// 64 MiB allowance for MANIFEST/WAL/OPTIONS.
-	const uint64_t need = local_bytes + local_bytes / 10 + (static_cast<uint64_t>(64) << 20);
-	return static_cast<uint64_t>(available) < need;
 }
 
 string storage_rocksdb::_restore_pending_path() const {
@@ -1910,17 +2209,29 @@ int storage_rocksdb::create_snapshot_checkpoint(string& out_path, uint64_t& out_
 		return -1;
 	}
 
-	// Private staging area, sibling of the DB dir. Never under backups/ so
-	// the backup pruner cannot race it. Wipe any leftover from a previous
-	// aborted stream, then let CreateCheckpoint create the dir itself (it
-	// requires the target to not exist).
-	const string path = this->_data_dir + "/snapshot.serve.tmp";
-	remove_tree(path);
+	// COPY RETENTION (design §5): ONE serve at a time per source (a snapshot
+	// to a replica or a push), each in its own directory
+	// snapshot.serve.<request> — never a shared fixed path another transfer
+	// could recreate under a running one. -2 = busy (the caller answers
+	// "busy" and the requester waits). The slot is released by
+	// remove_snapshot_checkpoint(), which every caller runs on every exit.
+	pthread_mutex_lock(&this->_mutex_rebuild_status);
+	if (this->_snapshot_serving) {
+		pthread_mutex_unlock(&this->_mutex_rebuild_status);
+		log_notice("snapshot serve refused: another snapshot is being served from this node (busy)", 0);
+		return -2;
+	}
+	this->_snapshot_serving = true;
+	pthread_mutex_unlock(&this->_mutex_rebuild_status);
+	// Sibling of the DB dir, never under backups/ (the pruner cannot race
+	// it); CreateCheckpoint creates the dir itself (it must not exist).
+	const string path = this->_data_dir + "/snapshot.serve." + new_attempt_id();
 
 	rocksdb::Checkpoint* cp = NULL;
 	rocksdb::Status s = rocksdb::Checkpoint::Create(this->_db, &cp);
 	if (!s.ok() || cp == NULL) {
 		log_err("Checkpoint::Create failed: %s", s.ToString().c_str());
+		this->_release_snapshot_serve();
 		return -1;
 	}
 
@@ -1934,6 +2245,7 @@ int storage_rocksdb::create_snapshot_checkpoint(string& out_path, uint64_t& out_
 	if (!s.ok()) {
 		log_err("CreateCheckpoint(%s) failed: %s", path.c_str(), s.ToString().c_str());
 		remove_tree(path);
+		this->_release_snapshot_serve();
 		return -1;
 	}
 
@@ -1976,13 +2288,30 @@ int storage_rocksdb::enable_file_deletions() {
 }
 
 int storage_rocksdb::remove_snapshot_checkpoint(const string& path) {
-	// Only ever remove our own staging dir — refuse anything else so a bug
-	// in the caller cannot escalate into deleting the live DB.
-	if (path != this->_data_dir + "/snapshot.serve.tmp") {
+	// Only ever remove a serve dir of our own — refuse anything else so a
+	// bug in the caller cannot escalate into deleting the live DB.
+	const string prefix = this->_data_dir + "/snapshot.serve.";
+	if (path.size() <= prefix.size() || path.compare(0, prefix.size(), prefix) != 0
+			|| path.find('/', prefix.size()) != string::npos) {
 		log_err("refusing to remove non-staging path [%s]", path.c_str());
 		return -1;
 	}
-	return remove_tree(path);
+	const int r = remove_tree(path);
+	this->_release_snapshot_serve();
+	return r;
+}
+
+void storage_rocksdb::_release_snapshot_serve() {
+	pthread_mutex_lock(&this->_mutex_rebuild_status);
+	this->_snapshot_serving = false;
+	pthread_mutex_unlock(&this->_mutex_rebuild_status);
+}
+
+bool storage_rocksdb::is_snapshot_serving() {
+	pthread_mutex_lock(&this->_mutex_rebuild_status);
+	const bool b = this->_snapshot_serving;
+	pthread_mutex_unlock(&this->_mutex_rebuild_status);
+	return b;
 }
 
 int storage_rocksdb::remove_snapshot_staging(const string& path) {

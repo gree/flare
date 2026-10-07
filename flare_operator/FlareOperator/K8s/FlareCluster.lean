@@ -165,6 +165,14 @@ structure RocksdbConfigSpec where
       only with continuous replication (the follower repairs from the WAL).
       flared: `noreply-window-limit` (dynamic; 0 = off). -/
   noreplyWindowLimit : Option Nat := none
+  /-- Copy retention (docs/design-copy-retention.md §9): bytes kept free
+      besides the staging copy while a replica rebuilds (compaction, the WAL
+      catch-up, quarantine). UNSET = staged rebuilds STOP (stats
+      `rebuild_blocked=reserve_unset`): no default is assumed until the R7
+      load test measures one. A rebuild needs the source's copy size plus
+      this, free under the data dir (tmpfs: also within the memory limit).
+      flared: `rocksdb-rebuild-reserve-bytes` (dynamic, SIGHUP). -/
+  rebuildReserveBytes : Option Nat := none
   deriving Repr, BEq
 
 /-- True when at least one rocksdb field has been set by the user. -/
@@ -175,7 +183,7 @@ def RocksdbConfigSpec.hasAny (r : RocksdbConfigSpec) : Bool :=
   r.walSyncBwlimit.isSome || r.walSyncInterval.isSome || r.snapshotBwlimit.isSome ||
   r.flushAllEnabled.isSome || r.backupKeep.isSome || r.readUnavailableError.isSome ||
   r.replIdentityForward.isSome || r.replFollowEnabled.isSome || r.replFollowPollIntervalUsec.isSome ||
-  r.maxTotalThreadQueue.isSome || r.noreplyWindowLimit.isSome
+  r.maxTotalThreadQueue.isSome || r.noreplyWindowLimit.isSome || r.rebuildReserveBytes.isSome
 
 /-- Render the rocksdb spec as `extra.conf` lines (one per set field).
     Returns an empty string when no fields are set. Lines are joined with "\n";
@@ -224,6 +232,9 @@ def RocksdbConfigSpec.toExtraConf (r : RocksdbConfigSpec) : String :=
     | none => lines
   let lines := match r.backupKeep with
     | some n => lines ++ [s!"rocksdb-backup-keep = {n}"]
+    | none => lines
+  let lines := match r.rebuildReserveBytes with
+    | some n => lines ++ [s!"rocksdb-rebuild-reserve-bytes = {n}"]
     | none => lines
   let lines := match r.readUnavailableError with
     | some b =>

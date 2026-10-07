@@ -312,6 +312,7 @@ public:
 	void bind_read_source(const string& source, const string& master_id, const string& source_epoch, const string& reason);
 	// no validated copy any more (a reconstruction started, or the role changed)
 	void reset_read_source(const string& reason);
+	storage* get_storage() { return this->_storage; }
 	// the validator's decision, applied only if the binding is still the one
 	// it judged (generation) and `current` is still the partition's master
 	bool apply_source_decision(unsigned long long generation, const string& current, source_decision d, const string& reason);

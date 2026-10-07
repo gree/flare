@@ -21,6 +21,8 @@ static const char* const kCopyIdFile = "COPY_ID";
 static const char* const kIntentFile = "switch.intent";
 static const char* const kStagingPrefix = "staging-";
 static const char* const kRetainedPrefix = "retained-";
+// in retained-<attempt>: what replaced it (design §8)
+static const char* const kRetainedRecordFile = "REPLACED_BY";
 
 int fsync_dir(const string& dir);
 // tmp file + fsync + rename + fsync(dir)
@@ -45,6 +47,9 @@ int recover(const string& data_dir, const string& live_name, string& report);
 // After recover(): remove every staging copy (unfinished attempts). Refuses
 // while an intent is present. Returns the number removed, -1 on refusal.
 int cleanup_staging(const string& data_dir);
+// Remove every entry of data_dir whose name starts with `prefix`. Returns the
+// number removed.
+int remove_prefixed(const string& data_dir, const string& prefix);
 
 // Steps 1-3 of the switch (the caller has made the new copy durable, closed
 // the live DB, and opens + checks the new live and removes the intent after).

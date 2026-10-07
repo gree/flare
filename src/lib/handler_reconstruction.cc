@@ -38,10 +38,13 @@
 #include "op_repl_sync_wal.h"
 #include "copy_protection.h"
 #include "op_repl_snapshot.h"
+#include "copy_capacity.h"
 
 #ifdef HAVE_LIBROCKSDB
 #include "storage_rocksdb.h"
+#include "copy_switch_fs.h"
 #endif
+#include <sstream>
 
 namespace gree {
 namespace flare {
@@ -265,16 +268,8 @@ int handler_reconstruction::_run_once() {
 	bool via_wal = this->_try_wal_reconstruction(c, peer_wal_supported, peer_master_id, peer_latest_lsn, peer_reachable, peer_snapshot_supported);
 	this->_attempt_master_id = peer_master_id;
 
-	// Physical reseed: when the conditions that would justify truncate+full-dump
-	// hold AND the source supports repl_snapshot, pull a checkpoint instead —
-	// pre-compacted files at network speed, no write-path WAL churn on the
-	// receiver, lineage + replication cursor seeded exactly by the swap (see
-	// op_repl_snapshot). On any failure this stays false and the legacy
-	// truncate+dump path runs unchanged.
-	bool via_snapshot = false;
-	// A clean rebuild: the local copy was truncated in THIS attempt, so after
-	// the dump it holds exactly what the source sent (rebuild evidence).
-	bool truncated_for_dump = false;
+	// the copy was replaced by a verified staging copy (design §3)
+	bool via_staging = false;
 
 	if (!via_wal) {
 #ifdef HAVE_LIBROCKSDB
@@ -298,22 +293,13 @@ int handler_reconstruction::_run_once() {
 		// that was down while keys were deleted on the master would keep
 		// those keys and, once Active, serve them (slaves serve reads) —
 		// a stale-read resurrection. So for a SLAVE with a reachable live
-		// source we replace local data with a clean truncate before the
-		// full dump. Safe because:
-		//  - the node is in Prepare with balance 0 for the whole
-		//    reconstruction; it serves no reads until activation, so the
-		//    empty window is never observable;
-		//  - a crash mid-dump leaves it in Prepare and reconstruction
-		//    re-runs — it was stale anyway, and an empty retry beats
-		//    serving resurrected keys;
-		//  - storage_rocksdb::truncate preserves the __flare_repl_master_id
-		//    lineage token and resets __flare_repl_last_lsn to 0, which is
-		//    exactly right — the post-dump seeding below re-seeds the LSN
-		//    from the pre-dump probe (peer_latest_lsn);
-		//  - it also clears any orphan keys left by a previous assignment.
-		// tch/tcb keep the legacy merge behavior (no lineage/LSN machinery).
+		// source the copy is REPLACED: since copy retention (design §3) the
+		// replacement is built in a staging copy next to this one, verified
+		// and switched in, and this copy is retained — it is never truncated
+		// or discarded first. tch/tcb keep the legacy merge behavior (no
+		// lineage/LSN machinery).
 		//
-		// TWO cases MUST NOT truncate, or we destroy the only good copy:
+		// THREE cases do not replace the copy (they merge into it):
 		//  1. MASTER reconstruction — a node being promoted to master may
 		//     have NO live source (its predecessor is dead, which is why it
 		//     is becoming master) and its local data may be the last copy.
@@ -349,120 +335,38 @@ int handler_reconstruction::_run_once() {
 				&& (peer_latest_lsn == 0 || (same_lineage && peer_latest_lsn < local_lsn));
 
 			if (this->_role != cluster::role_slave) {
-				log_notice("truncate skipped (master reconstruction — local data may be the last copy)", 0);
+				log_notice("copy not replaced (master reconstruction — local data may be the last copy): merging", 0);
 			} else if (!peer_reachable) {
-				log_notice("truncate skipped (source unreachable)", 0);
+				log_notice("copy not replaced (source unreachable): merging", 0);
 			} else if (source_not_newer && !this->_force_clean) {
 				log_warning("truncate skipped: source is not newer than local data (source latest_lsn=%llu, local last_lsn=%llu, same_lineage=%d) — refusing to overwrite our copy with an emptier/staler master; merging instead", (unsigned long long)peer_latest_lsn, (unsigned long long)local_lsn, same_lineage ? 1 : 0);
 			} else {
-				// Exactly the truncate+full-dump conditions (slave role, source
-				// reachable and strictly newer) — the safe window for a physical
-				// reseed. Try it first; fall back to truncate+dump on failure.
-				// TEST SEAM (E2E only): force the truncate + full-dump path.
+				// Exactly the conditions under which this replica's copy is
+				// replaced (slave, source reachable and strictly newer, or a
+				// clean rebuild after a source change). COPY RETENTION (design
+				// §3): the replacement is built NEXT TO this copy, verified and
+				// switched in; this copy is retained, never truncated or
+				// discarded first. No room, no reserve, or an unverifiable
+				// source: the rebuild STOPS and says why (stats rebuild_blocked).
+				// TEST SEAM (E2E only): force the full-dump path.
 				const char* no_snap = getenv("FLARE_TEST_DISABLE_SNAPSHOT_BOOTSTRAP");
 				if (peer_snapshot_supported && no_snap != NULL && no_snap[0] != '\0' && strcmp(no_snap, "0") != 0) {
-					log_warning("snapshot bootstrap disabled by FLARE_TEST_DISABLE_SNAPSHOT_BOOTSTRAP (test seam) -> truncate+full-dump", 0);
+					log_warning("snapshot bootstrap disabled by FLARE_TEST_DISABLE_SNAPSHOT_BOOTSTRAP (test seam) -> staged full dump", 0);
 					peer_snapshot_supported = false;
 				}
-				if (peer_snapshot_supported) {
-					this->_thread->set_op("repl_snapshot");
-					// SPACE-AWARE REBUILD: the reseed stages the source's copy
-					// NEXT TO ours and swaps at the end, so it needs room for
-					// two copies. On tmpfs that is RAM under the memory limit:
-					// a 5.6 GB replica in an 8Gi pod would be OOM-killed
-					// mid-transfer on every retry. Our copy is about to be
-					// replaced anyway (this is the truncate window: slave,
-					// source reachable and newer — the fallback truncates it
-					// too), so when two do not fit, drop it first.
-					if (rdb != NULL) {
-						uint64_t local_bytes = rdb->local_copy_bytes();
-						int64_t available = rdb->rebuild_space_available();
-						if (storage_rocksdb::rebuild_must_discard(local_bytes, available)) {
-							// R3-D: the strictest step — the copy would be gone
-							// before the replacement exists. Only with the
-							// protection rule passing AND a source that holds
-							// keys; otherwise no snapshot (the guarded
-							// truncate+dump below decides again).
-							string gwhy;
-							const copy_gate g = this->_copy_gate("discard to free space for a snapshot", gwhy, true);
-							if (copy_gate_allows(g)) {
-								log_warning("snapshot bootstrap: the new copy will not fit next to ours (local copy %llu bytes, available %lld incl. memory headroom on tmpfs) -> discarding this replica's stale copy before staging (protection: %s)",
-									(unsigned long long)local_bytes, (long long)available, gwhy.c_str());
-								if (rdb->hard_reset() == 0) {
-									rdb->incr_rebuild_stale_discarded();
-								}
-							} else {
-								log_warning("snapshot bootstrap skipped: two copies do not fit and discarding this one first is not allowed (%s) -> the guarded truncate+full-dump path decides", gwhy.c_str());
-								peer_snapshot_supported = false;
-							}
-						}
-					}
+				// (the live copy changes only at the switch: _staged_rebuild
+				// marks it dirty there, never for a stopped or abandoned attempt)
+				if (this->_staged_rebuild(peer_snapshot_supported, peer_master_id, peer_latest_lsn, peer_wal_supported) < 0) {
+					return -1;
 				}
-				if (peer_snapshot_supported) {
-					log_notice("attempting snapshot bootstrap (physical reseed + WAL catch-up) instead of truncate+full-dump", 0);
-					// FRESH connection: the WAL sync attempt above may have
-					// aborted MID-STREAM, leaving unread stream bytes on `c`.
-					// Reusing it desynchronizes the snapshot protocol — at
-					// best the client misreads a stale line as the reply
-					// ("peer declined snapshot (reply=LSN 19)", observed
-					// live), at worst the per-file raw reads are OFFSET and
-					// shifted garbage gets installed as the live DB.
-					shared_connection cs(bounded_connection(this->_node_server_name, this->_node_server_port));
-					if (cs->open() < 0) {
-						log_warning("could not open a fresh connection for snapshot bootstrap -> falling back to truncate+full-dump", 0);
-					} else {
-						op_repl_snapshot* sp = new op_repl_snapshot(cs, this->_storage);
-						sp->set_bwlimit(this->_reconstruction_bwlimit);
-						// R3-D: the swap replaces this copy — the protection
-						// rule is evaluated right before it
-						sp->set_pre_swap_gate(boost::bind(&handler_reconstruction::_swap_gate, this, _1));
-						if (sp->run_client() == 0) {
-							via_snapshot = true;
-							// the stored copy was replaced
-							if (rdb != NULL) rdb->clear_suspended_rebuilt_from();
-							this->_copy_dirty = true;
-							this->_force_clean = false;
-							log_notice("snapshot bootstrap succeeded; skipping full dump (cursor and lineage seeded by the swap)", 0);
-						} else {
-							log_warning("snapshot bootstrap failed -> falling back to truncate+full-dump", 0);
-						}
-						delete sp;
-					}
-				}
-				if (!via_snapshot) {
-					// R3-D: the truncate destroys this copy before the dump
-					// refills it — the protection rule decides right here
-					string gwhy;
-					if (!copy_gate_allows(this->_copy_gate("truncate before full dump", gwhy))) {
-						return -1;
-					}
-					log_notice("truncating local storage before full-dump reconstruction so deletions on the source propagate (WAL sync was unavailable; see previous log line)", 0);
-					if (this->_storage->truncate(0) < 0) {
-						log_err("failed to truncate storage before full dump", 0);
-#ifdef HAVE_LIBROCKSDB
-						// A truncate that fails because the DB is corrupt would
-						// loop forever; wipe it and let the NEXT cycle reseed
-						// onto the clean empty DB (slave only, guaranteed here).
-						storage_rocksdb* rdb = dynamic_cast<storage_rocksdb*>(this->_storage);
-						if (rdb && rdb->is_corrupted() && this->_role == cluster::role_slave) {
-							string moved_to;
-							log_warning("truncate failed on a corrupted DB -> moving it aside (quarantine); reseeding next cycle", 0);
-							if (rdb->quarantine_reset(moved_to) < 0) {
-								log_err("CRITICAL: the corrupt copy could not be moved aside; NOT deleting it (operator action needed)", 0);
-							}
-						}
-#endif
-						return -1;
-					}
-					truncated_for_dump = true;
-					this->_copy_dirty = true;
-					this->_force_clean = false;
-				}
+				via_staging = true;
+				this->_force_clean = false;
 			}
 		}
 #endif
 
-		if (!via_snapshot) {
+		if (!via_staging) {
+		// a MERGING dump (see above: master, unreachable or not-newer source)
 		// FRESH connection for the dump as well: `c` may carry residue from
 		// an aborted WAL stream (see the snapshot rationale above), and
 		// op_dump's streamed VALUE parsing is just as offset-sensitive.
@@ -479,7 +383,7 @@ int handler_reconstruction::_run_once() {
 #ifdef HAVE_LIBROCKSDB
 		// R3-D: a MERGING dump (no truncate) changes the stored copy too; its
 		// suspended evidence no longer describes it
-		if (!truncated_for_dump && this->_storage->get_type() == storage::type_rocksdb) {
+		if (this->_storage->get_type() == storage::type_rocksdb) {
 			storage_rocksdb* mrdb = dynamic_cast<storage_rocksdb*>(this->_storage);
 			if (mrdb != NULL) mrdb->clear_suspended_rebuilt_from();
 		}
@@ -502,7 +406,7 @@ int handler_reconstruction::_run_once() {
 		delete p;
 		log_notice("reconstruction via full dump completed (master=%s:%d, partition=%d, partition_size=%d, interval=%d, bwlimit=%d)",
 				   this->_node_server_name.c_str(), this->_node_server_port, this->_partition, this->_partition_size, this->_reconstruction_interval, this->_reconstruction_bwlimit);
-		}	// !via_snapshot
+		}	// !via_staging
 	}
 
 #ifdef HAVE_LIBROCKSDB
@@ -515,7 +419,7 @@ int handler_reconstruction::_run_once() {
 	// lineage already matched by construction — that was a precondition.)
 	// We reuse the master_id captured by _try_wal_reconstruction's pre-dump
 	// probe rather than re-probing.
-	if (!via_wal && !via_snapshot && this->_storage->get_type() == storage::type_rocksdb) {
+	if (!via_wal && !via_staging && this->_storage->get_type() == storage::type_rocksdb) {
 		storage_rocksdb* rdb = dynamic_cast<storage_rocksdb*>(this->_storage);
 		if (rdb) {
 			if (!peer_master_id.empty()) {
@@ -531,41 +435,13 @@ int handler_reconstruction::_run_once() {
 		}
 	}
 
-	// REBUILD EVIDENCE: after a clean truncate + full dump, record WHICH
-	// HISTORY this copy was rebuilt from — the source's master_id and source
-	// epoch — but only if a fresh probe at the END shows the same identity
-	// as the probe at the start (a source replaced, restored or re-promoted
-	// mid-dump leaves none). It is evidence of the history only: it is not a
-	// replication position and never proves this copy is in sync.
-	if (!via_wal && !via_snapshot && truncated_for_dump && this->_storage->get_type() == storage::type_rocksdb) {
-		storage_rocksdb* rdb = dynamic_cast<storage_rocksdb*>(this->_storage);
-		if (rdb) {
-			string end_master_id, end_epoch;
-			bool end_wal = false;
-			uint64_t end_lsn = 0;
-			shared_connection ce(bounded_connection(this->_node_server_name, this->_node_server_port, 5000));
-			if (ce->open() == 0) {
-				op_meta* meta = new op_meta(ce, NULL, this->_storage);
-				if (meta->run_client_features(end_wal, end_master_id, end_lsn) == 0) {
-					end_epoch = meta->get_peer_source_epoch();
-				}
-				delete meta;
-			}
-			if (storage_rocksdb::rebuild_evidence_valid(truncated_for_dump, true, peer_master_id, this->_probe_source_epoch, end_master_id, end_epoch)) {
-				if (rdb->set_rebuilt_from(peer_master_id, end_epoch) < 0) {
-					log_warning("could not persist the rebuild evidence; this copy carries none", 0);
-				}
-			} else {
-				log_notice("no rebuild evidence recorded: the source identity was not the same at the start and the end of the dump (master_id %s -> %s, source epoch %s -> %s)",
-					peer_master_id.c_str(), end_master_id.c_str(), this->_probe_source_epoch.c_str(), end_epoch.c_str());
-			}
-		}
-	}
+	// REBUILD EVIDENCE is recorded only by the staged path (a verified
+	// replacement, _staged_rebuild); a merging dump carries none.
 
 	// Seed the replication cursor from the master's pre-dump latest_lsn so
 	// the NEXT reconstruction can use incremental WAL sync. Runs after the
 	// master_id adoption above so the lineage check inside passes.
-	if (!via_wal && !via_snapshot) {
+	if (!via_wal && !via_staging) {
 		this->_seed_repl_lsn_after_dump(c, peer_wal_supported, peer_latest_lsn);
 	}
 #endif
@@ -718,6 +594,7 @@ void handler_reconstruction::probe_source_identity(const string& host, int port,
 	}
 	bool ended = false;
 	bool items_seen = false;
+	bool copy_bytes_seen = false;
 	for (int i = 0; i < 2000; i++) {
 		char* p = NULL;
 		if (c->readline(&p) < 0) {
@@ -755,9 +632,17 @@ void handler_reconstruction::probe_source_identity(const string& host, int port,
 			out.epoch = value;
 		} else if (key == "rocksdb_source_epoch_reason") {
 			out.epoch_reason = value;
+		} else if (key == "rocksdb_copy_bytes" || (key == "data_dir_used_bytes" && !copy_bytes_seen)) {
+			try {
+				out.copy_bytes = boost::lexical_cast<uint64_t>(value);
+				out.size_known = true;
+				if (key == "rocksdb_copy_bytes") copy_bytes_seen = true;
+			} catch (boost::bad_lexical_cast&) {
+			}
 		}
 	}
 	out.known = ended && items_seen;
+	if (!ended) out.size_known = false;
 }
 
 /**
@@ -834,8 +719,342 @@ bool handler_reconstruction::_test_hold(const char* env, const char* where) {
 	return true;
 }
 
-bool handler_reconstruction::_swap_gate(string& why) {
-	return copy_gate_allows(this->_copy_gate("snapshot swap", why));
+bool handler_reconstruction::_space_watch(string& why) {
+#ifdef HAVE_LIBROCKSDB
+	storage_rocksdb* rdb = dynamic_cast<storage_rocksdb*>(this->_storage);
+	if (rdb == NULL) {
+		why = "not a RocksDB storage";
+		return false;
+	}
+	if (capacity_watch_ok(rdb->get_rebuild_reserve_bytes(), rdb->rebuild_space_available(), why)) {
+		return true;
+	}
+	rdb->set_rebuild_blocked("no_space");
+	log_err("CRITICAL: rebuild_blocked=no_space — the staging copy is stopped before it eats into the reserve (%s); the live copy is KEPT", why.c_str());
+	return false;
+#else
+	why = "not compiled with RocksDB";
+	return false;
+#endif
+}
+
+#ifdef HAVE_LIBROCKSDB
+namespace {
+	// One bounded features probe of the source: master_id, position, epoch.
+	bool probe_position(const string& host, int port, storage* st, string& master_id, uint64_t& lsn, string& epoch) {
+		master_id.clear();
+		epoch.clear();
+		lsn = 0;
+		shared_connection c(bounded_connection(host, port, 5000));
+		if (c->open() < 0) {
+			return false;
+		}
+		op_meta* meta = new op_meta(c, NULL, st);
+		bool wal = false;
+		const int rc = meta->run_client_features(wal, master_id, lsn);
+		epoch = meta->get_peer_source_epoch();
+		delete meta;
+		return rc == 0 && wal && !master_id.empty();
+	}
+
+	// Bring `target` from its cursor to at least `l1`, applying ONLY history
+	// `epoch` (refused otherwise), contiguous and in order (a gap is refused
+	// by the apply rule). Bounded: a slice that makes no progress fails.
+	bool catch_up_to(const string& host, int port, storage_rocksdb* target, storage_rocksdb* settings,
+			const string& master_id, const string& epoch, uint64_t l1, int bwlimit, int interval, string& why) {
+		for (int round = 0; round < 1000; round++) {
+			const uint64_t from = target->get_repl_last_lsn();
+			if (from >= l1) {
+				return true;
+			}
+			shared_connection c(bounded_connection(host, port));
+			if (c->open() < 0) {
+				why = "the source cannot be reached for the catch-up";
+				return false;
+			}
+			op_repl_sync_wal* w = new op_repl_sync_wal(c, target);
+			w->set_max_batch_bytes(settings->get_wal_max_batch_bytes());
+			w->set_wal_sync_bwlimit(settings->get_wal_sync_bwlimit() != 0 ? settings->get_wal_sync_bwlimit() : bwlimit);
+			w->set_wal_sync_interval(settings->get_wal_sync_interval() != 0 ? settings->get_wal_sync_interval() : interval);
+			const int r = w->run_client_reconstruct(from, master_id, epoch);
+			const op_repl_sync_wal::client_result cr = w->get_client_result();
+			delete w;
+			if (r != 0 || cr != op_repl_sync_wal::client_success) {
+				ostringstream o;
+				o << "the catch-up from " << from << " toward " << l1 << " failed (client result " << static_cast<int>(cr)
+					<< (cr == op_repl_sync_wal::client_lsn_purged ? ": purged history" : "")
+					<< (cr == op_repl_sync_wal::client_no_epoch || cr == op_repl_sync_wal::client_epoch_mismatch ? ": another history" : "") << ")";
+				why = o.str();
+				return false;
+			}
+			if (target->get_repl_last_lsn() <= from) {
+				ostringstream o;
+				o << "the catch-up made no progress at " << from << " (target " << l1 << ")";
+				why = o.str();
+				return false;
+			}
+		}
+		why = "the catch-up did not reach its target in 1000 slices";
+		return false;
+	}
+}
+#endif
+
+int handler_reconstruction::_staged_rebuild(bool snapshot_ok, const string& peer_master_id, uint64_t l0, bool peer_wal_supported) {
+#ifdef HAVE_LIBROCKSDB
+	storage_rocksdb* rdb = dynamic_cast<storage_rocksdb*>(this->_storage);
+	if (rdb == NULL) {
+		return -1;
+	}
+	const string& host = this->_node_server_name;
+	const int port = this->_node_server_port;
+	const string epoch = this->_probe_source_epoch;
+	const bool epoch_bound = this->_epoch_supported && !epoch.empty();
+	struct blocker {
+		static int stop(storage_rocksdb* r, const char* reason, const string& why) {
+			r->set_rebuild_blocked(reason);
+			log_err("CRITICAL: rebuild_blocked=%s — %s; the live copy is KEPT and nothing is discarded (operator action needed)", reason, why.c_str());
+			return -1;
+		}
+	};
+
+	// --- may it start? ---------------------------------------------------
+	if (peer_master_id.empty() || (!epoch_bound && !peer_wal_supported)) {
+		return blocker::stop(rdb, "source_unverifiable",
+			"the source gives no lineage or no replication position: a staged copy of it cannot be verified (design §3.2)");
+	}
+	if (!epoch_bound) {
+		// a source older than continuous replication: no epoch-bound catch-up,
+		// so a copy is only taken when the position does not move from L0 to
+		// after the switch — evidence for that interval only; the write stop
+		// itself must be held OUTSIDE until this node is Active (design §3.2)
+		log_warning("legacy source (no source epoch): the staged copy is accepted only if the source position stays at %llu until after the switch — the WRITE STOP MUST BE HELD OUTSIDE until this replica is Active", (unsigned long long)l0);
+		snapshot_ok = false;	// a checkpoint without an epoch is refused anyway
+	}
+	{
+		const vector<string> retained = rdb->list_retained();
+		if (!retained.empty()) {
+			return blocker::stop(rdb, "retained_present",
+				"a retained copy (" + retained[0] + ") is still here and only one generation is kept: it is deleted when its conditions hold (design §8) or by an explicit approval");
+		}
+	}
+	copy_identity src;
+	handler_reconstruction::probe_source_identity(host, port, src);
+	{
+		uint64_t need = 0;
+		string why;
+		const capacity_verdict v = decide_rebuild_capacity(rdb->get_rebuild_reserve_bytes(), src.size_known, src.copy_bytes,
+			rdb->rebuild_space_available(), need, why);
+		if (v != capacity_ok) {
+			return blocker::stop(rdb, capacity_verdict_name(v), why);
+		}
+		log_notice("staged rebuild may start: %s", why.c_str());
+	}
+	rdb->set_rebuild_blocked("");
+	boost::function<bool (string&)> watch = boost::bind(&handler_reconstruction::_space_watch, this, _1);
+
+	// --- copy into staging ------------------------------------------------
+	string attempt = storage_rocksdb::new_attempt_id();
+	storage_rocksdb* stg = NULL;
+	uint64_t start_lsn = l0;
+	bool used_snapshot = false;
+	struct abandon {
+		static int now(storage_rocksdb* r, storage_rocksdb*& s, const string& a, const string& why) {
+			if (s != NULL) {
+				delete s;
+				s = NULL;
+			}
+			r->remove_staging(a);
+			r->note_staged_result(false);
+			log_warning("staged rebuild ABANDONED (%s): the staging copy is removed and the live copy is unchanged", why.c_str());
+			return -1;
+		}
+	};
+	if (snapshot_ok) {
+		string dir;
+		if (rdb->make_staging_dir(attempt, dir) == 0) {
+			this->_thread->set_op("repl_snapshot");
+			shared_connection cs(bounded_connection(host, port));
+			bool received = false;
+			bool busy = false;
+			uint64_t cp_seq = 0;
+			string cp_master_id;
+			if (cs->open() == 0) {
+				op_repl_snapshot* sp = new op_repl_snapshot(cs, this->_storage);
+				sp->set_bwlimit(this->_reconstruction_bwlimit);
+				sp->set_receive_dir(dir);
+				sp->set_space_watch(watch);
+				received = sp->run_client() == 0;
+				busy = sp->is_busy();
+				cp_seq = sp->get_received_seq();
+				cp_master_id = sp->get_received_master_id();
+				delete sp;
+			}
+			if (received) {
+				stg = rdb->open_staging(attempt, true);
+			}
+			string why;
+			if (stg == NULL) {
+				why = received ? "the received checkpoint does not open" : "the snapshot transfer failed";
+			} else if (stg->get_staging_found_epoch() != epoch) {
+				why = "the checkpoint carries history " + stg->get_staging_found_epoch() + ", not the probed " + epoch;
+			} else if (stg->get_master_id() != peer_master_id) {
+				why = "the checkpoint carries lineage " + stg->get_master_id() + ", not the probed " + peer_master_id;
+			} else if (stg->adopt_history(peer_master_id, epoch, cp_seq) < 0) {
+				why = "the checkpoint's history could not be adopted";
+			}
+			if (!why.empty()) {
+				abandon::now(rdb, stg, attempt, busy ? "the source is serving another snapshot (busy): waiting, no dump instead" : why);
+				if (busy || rdb->get_rebuild_blocked() == "no_space") {
+					return -1;
+				}
+				log_notice("falling back to a staged full dump", 0);
+				attempt = storage_rocksdb::new_attempt_id();
+			} else {
+				start_lsn = cp_seq;
+				used_snapshot = true;
+				log_notice("staged snapshot: checkpoint sequence %llu (attempt %s, copy %s)", (unsigned long long)cp_seq,
+					attempt.c_str(), stg->get_copy_id().c_str());
+			}
+		}
+	}
+	if (stg == NULL) {
+		stg = rdb->open_staging(attempt, false);
+		if (stg == NULL) {
+			return abandon::now(rdb, stg, attempt, "the staging copy could not be created");
+		}
+		if (stg->adopt_history(peer_master_id, epoch_bound ? epoch : string(""), l0) < 0) {
+			return abandon::now(rdb, stg, attempt, "the staging copy could not adopt the source's lineage");
+		}
+		shared_connection cd(bounded_connection(host, port));
+		if (cd->open() < 0) {
+			return abandon::now(rdb, stg, attempt, "no connection for the dump");
+		}
+		op_dump* p = new op_dump(cd, this->_cluster, stg);
+		p->set_thread(this->_thread);
+		p->set_strict(true);
+		p->set_space_watch(watch);
+		this->_thread->set_state("execute");
+		this->_thread->set_op(p->get_ident());
+		log_notice("starting dump operation into staging copy %s (attempt %s; master=%s:%d, partition=%d, partition_size=%d, L0=%llu)",
+			stg->get_copy_id().c_str(), attempt.c_str(), host.c_str(), port, this->_partition, this->_partition_size, (unsigned long long)l0);
+		const int dr = p->run_client(this->_reconstruction_interval, this->_partition, this->_partition_size, this->_reconstruction_bwlimit);
+		const bool complete = dr == 0 && p->is_completed();
+		const uint64_t items = p->get_items();
+		delete p;
+		if (!complete) {
+			return abandon::now(rdb, stg, attempt, "the dump did not complete (no END marker, a store failure, the space watch, or shutdown)");
+		}
+		log_notice("reconstruction via full dump completed into staging (%llu items received)", (unsigned long long)items);
+	}
+
+	// --- fixed target L1, same lineage and history -----------------------
+	string end_master_id, end_epoch;
+	uint64_t l1 = 0;
+	if (!probe_position(host, port, this->_storage, end_master_id, l1, end_epoch)) {
+		return abandon::now(rdb, stg, attempt, "the source could not be probed after the copy (Unknown)");
+	}
+	if (end_master_id != peer_master_id || end_epoch != (epoch_bound ? epoch : end_epoch)) {
+		return abandon::now(rdb, stg, attempt, "the source's identity changed during the copy (master_id " + peer_master_id + " -> "
+			+ end_master_id + ", epoch " + epoch + " -> " + end_epoch + ")");
+	}
+	if (epoch_bound) {
+		string why;
+		this->_thread->set_op("repl_sync_wal");
+		if (!catch_up_to(host, port, stg, rdb, peer_master_id, epoch, l1, this->_reconstruction_bwlimit, this->_reconstruction_interval, why)) {
+			return abandon::now(rdb, stg, attempt, why);
+		}
+		log_notice("staging copy caught up to the fixed target L1=%llu (from %llu, history %s): cursor %llu",
+			(unsigned long long)l1, (unsigned long long)start_lsn, epoch.c_str(), (unsigned long long)stg->get_repl_last_lsn());
+	} else if (l1 != l0) {
+		return abandon::now(rdb, stg, attempt, "legacy source: the position moved during the copy (L0 " + boost::lexical_cast<string>(l0)
+			+ ", L1 " + boost::lexical_cast<string>(l1) + "): writes were not stopped");
+	}
+
+	// --- verify, then the protection rule right before the switch --------
+	if (!stg->copy_identity_consistent() || stg->get_master_id() != peer_master_id
+			|| (epoch_bound && (stg->get_source_epoch() != epoch || stg->get_repl_last_lsn() < l1))) {
+		return abandon::now(rdb, stg, attempt, "the staging copy failed its final check (identity, lineage, history or position)");
+	}
+	log_notice("staging copy %s verified: lineage %s, history %s, position %llu >= L1 %llu; %llu keys (source reported %llu%s; counts are not a criterion)",
+		stg->get_copy_id().c_str(), peer_master_id.c_str(), epoch_bound ? epoch.c_str() : "(legacy)", (unsigned long long)stg->get_repl_last_lsn(),
+		(unsigned long long)l1, (unsigned long long)stg->count(), (unsigned long long)src.items, src.known ? "" : ", unknown");
+	{
+		string gwhy;
+		if (!copy_gate_allows(this->_copy_gate("switch to the verified staging copy", gwhy))) {
+			return abandon::now(rdb, stg, attempt, "copy protection: " + gwhy);
+		}
+	}
+	if (!epoch_bound) {
+		string m, e;
+		uint64_t now_lsn = 0;
+		if (!probe_position(host, port, this->_storage, m, now_lsn, e) || m != peer_master_id || now_lsn != l0) {
+			return abandon::now(rdb, stg, attempt, "legacy source: the position is not still L0 right before the switch");
+		}
+	}
+	const string new_id = stg->get_copy_id();
+	if (stg->seal() < 0) {
+		return abandon::now(rdb, stg, attempt, "the staging copy could not be made durable");
+	}
+	delete stg;
+	stg = NULL;
+
+	// --- switch (the old copy is retained) --------------------------------
+	if (rdb->switch_to_staging(attempt, new_id) < 0) {
+		if (rdb->get_copy_id() != new_id) {
+			return abandon::now(rdb, stg, attempt, "the switch did not complete (the live copy is the old one)");
+		}
+		rdb->note_staged_result(false);
+		this->_copy_dirty = true;
+		log_err("the switch to copy %s did not finish cleanly; nothing is activated (the next open resolves the intent)", new_id.c_str());
+		return -1;
+	}
+	rdb->note_staged_result(true);
+	// the live copy is now the new one (from this source's history)
+	this->_copy_dirty = true;
+	if (used_snapshot) {
+		rdb->incr_snapshot_bootstrap();
+	}
+	if (rdb->record_retained(attempt, peer_master_id, epoch_bound ? epoch : string("")) < 0) {
+		log_warning("the retained copy %s%s has no record of what replaced it: it is kept until an explicit approval", copy_fs::kRetainedPrefix, attempt.c_str());
+	}
+	if (epoch_bound && rdb->set_rebuilt_from(peer_master_id, epoch) < 0) {
+		log_warning("could not persist the rebuild evidence; this copy carries none", 0);
+	}
+
+	// --- after the switch: catch up (epoch bound) / position check (legacy)
+	if (epoch_bound) {
+		string m, e, why;
+		uint64_t now_lsn = 0;
+		if (!probe_position(host, port, this->_storage, m, now_lsn, e) || m != peer_master_id || e != epoch) {
+			log_warning("after the switch the source could not be confirmed (Unknown or changed): not activated; the next attempt resumes from cursor %llu",
+				(unsigned long long)rdb->get_repl_last_lsn());
+			return -1;
+		}
+		if (!catch_up_to(host, port, rdb, rdb, peer_master_id, epoch, now_lsn, this->_reconstruction_bwlimit, this->_reconstruction_interval, why)) {
+			log_warning("after the switch the catch-up failed (%s): not activated; the next attempt resumes from cursor %llu", why.c_str(),
+				(unsigned long long)rdb->get_repl_last_lsn());
+			return -1;
+		}
+	} else {
+		string m, e;
+		uint64_t now_lsn = 0;
+		if (!probe_position(host, port, this->_storage, m, now_lsn, e) || m != peer_master_id || now_lsn != l0) {
+			return blocker::stop(rdb, "legacy_source_writes",
+				"legacy source: the position moved between L0 and after the switch — the write stop was not held, so this copy may miss writes; it is NOT activated (the old copy is retained)");
+		}
+	}
+	log_notice("staged rebuild DONE: live copy %s (lineage %s, history %s, cursor %llu); the old copy is retained as %s%s",
+		rdb->get_copy_id().c_str(), peer_master_id.c_str(), epoch_bound ? epoch.c_str() : "(legacy)", (unsigned long long)rdb->get_repl_last_lsn(),
+		copy_fs::kRetainedPrefix, attempt.c_str());
+	return 0;
+#else
+	(void)snapshot_ok;
+	(void)peer_master_id;
+	(void)l0;
+	(void)peer_wal_supported;
+	return -1;
+#endif
 }
 
 /**

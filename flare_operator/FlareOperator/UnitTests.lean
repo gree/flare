@@ -27,6 +27,7 @@ import FlareOperator.StateMachine.NodeMapRecovery
 import FlareOperator.K8s.Bridge
 import FlareOperator.E2E.TraceMatch
 import FlareOperator.StateMachine.SourceEligibility
+import FlareOperator.StateMachine.RebuildConcurrency
 
 open FlareOperator.K8s
 open FlareOperator.ReplicaRepair
@@ -1256,6 +1257,46 @@ private def checkActivationOrder (ctx : Ctx) : IO Unit := do
   check ctx "activation: a passing check without a map version is undetermined"
     (match judgeActivation [acc 415 1, dump 2, "[NTC] activation source check passed (attempt 1): source " ++ n 2 ++ " is the partition's master", act 1] old new with | .undetermined _ => true | _ => false)
 
+-- ─── copy retention §10: rebuild concurrency ──────────────────────────────
+
+open FlareOperator.RebuildConcurrency in
+private def checkRebuildConcurrency (ctx : Ctx) : IO Unit := do
+  let st := fun (l : List (String × FlareNode)) => ({ nodeMap := l } : FlareClusterState).rebuildPartitionMap
+  let m0 := ("m0", holdNode .Master .Active 0 "m0")
+  let m1 := ("m1", holdNode .Master .Active 1 "m1")
+  let before := st [m0, m1, ("a", holdNode .Proxy .Active (-1) "a"), ("b", holdNode .Proxy .Active (-1) "b"),
+    ("c", holdNode .Proxy .Active (-1) "c")]
+  -- the pass assigns three proxies as rebuilding slaves at once
+  let after := st [m0, m1, ("a", holdNode .Slave .Prepare 0 "a"), ("b", holdNode .Slave .Prepare 0 "b"),
+    ("c", holdNode .Slave .Prepare 1 "c")]
+  let d := gate before after 1 1
+  check ctx "rebuild concurrency: one new rebuild is admitted, the others stay Proxy (cluster limit 1)"
+    (d.held.map Prod.fst == ["b", "c"]
+      && ((d.state.lookupNode "a").map (·.role)) == some FlareRole.Slave
+      && ((d.state.lookupNode "b").map (·.role)) == some FlareRole.Proxy
+      && ((d.state.lookupNode "c").map (·.role)) == some FlareRole.Proxy
+      && ((d.state.lookupPartition 0).map (·.slaves)) == some ["a"])
+  let d2 := gate before after 1 2
+  check ctx "rebuild concurrency: per partition 1 — a second rebuild in the same partition is held, another partition's is admitted"
+    (d2.held.map Prod.fst == ["b"] && ((d2.state.lookupNode "c").map (·.role)) == some FlareRole.Slave)
+  let busy := st [m0, m1, ("x", holdNode .Slave .Prepare 1 "x"), ("a", holdNode .Proxy .Active (-1) "a")]
+  let busyAfter := st [m0, m1, ("x", holdNode .Slave .Prepare 1 "x"), ("a", holdNode .Slave .Prepare 0 "a")]
+  check ctx "rebuild concurrency: a rebuild already in the map counts (also after an operator restart: the map is persisted)"
+    ((gate busy busyAfter 1 1).held.map Prod.fst == ["a"])
+  let idle := st [m0, m1, ("a", holdNode .Proxy .Active (-1) "a")]
+  let idleAfter := st [m0, m1, ("a", holdNode .Slave .Prepare 0 "a")]
+  check ctx "rebuild concurrency: a node reporting a running reconstruction in its stats counts as well"
+    ((gate idle idleAfter 1 1 ["y"]).held.map Prod.fst == ["a"] && (gate idle idleAfter 1 1).held.isEmpty)
+  -- not gated: a rejoining member (Slave before) and a master reconstruction
+  let rejoinBefore := st [m0, m1, ("x", holdNode .Slave .Prepare 1 "x"), ("r", holdNode .Slave .Down 0 "r")]
+  let rejoinAfter := st [m0, m1, ("x", holdNode .Slave .Prepare 1 "x"), ("r", holdNode .Slave .Prepare 0 "r")]
+  check ctx "rebuild concurrency: a rejoining Slave is never turned back into a Proxy (it may hold the only data)"
+    ((gate rejoinBefore rejoinAfter 1 1).held.isEmpty)
+  let mBefore := st [("p", holdNode .Proxy .Active (-1) "p"), ("x", holdNode .Slave .Prepare 1 "x"), m1]
+  let mAfter := st [("p", holdNode .Master .Prepare 0 "p"), ("x", holdNode .Slave .Prepare 1 "x"), m1]
+  check ctx "rebuild concurrency: a master reconstruction is not gated (the partition needs a master)"
+    ((gate mBefore mAfter 1 1).held.isEmpty)
+
 -- ─── R3: source eligibility (operator side) ──────────────────────────────
 
 open FlareOperator.SourceEligibility in
@@ -1307,6 +1348,7 @@ def run : IO UInt32 := do
   checkTraceAmbiguity ctx
   checkActivationOrder ctx
   checkSourceEligibility ctx
+  checkRebuildConcurrency ctx
   let failures ← ctx.failures.get
   let n ← ctx.count.get
   IO.println s!"1..{n}"

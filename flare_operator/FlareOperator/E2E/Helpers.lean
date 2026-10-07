@@ -33,9 +33,26 @@ def kubectlApplyStdin (yaml : String) : IO (Except String String) := do
 def kubectlDelete (resource : String) (name ns : String) : IO Unit := do
   let _ ← kubectl ["delete", resource, name, "-n", ns, "--ignore-not-found"]
 
+/-- Copy retention (§9): the rebuild reserve E2E clusters run with. Unset,
+    every staged rebuild stops (rebuild_blocked=reserve_unset). -/
+def e2eRebuildReserveBytes : Nat := 67108864
+
+/-- A FlareCluster patch that sets `spec.rocksdb` makes the operator rewrite
+    extra.conf from the CR alone, so the reserve baked into the boot-time
+    extra.conf would be gone at the next pod start: such a patch carries the
+    reserve too, unless it sets one itself. -/
+def withRebuildReserve (resource patchJson : String) : String :=
+  let has := fun (n : String) => (patchJson.splitOn n).length > 1
+  if resource != "flarecluster" || has "rebuildReserveBytes" then patchJson
+  else if has "\"rocksdb\":{}" then
+    patchJson.replace "\"rocksdb\":{}" s!"\"rocksdb\":\{\"rebuildReserveBytes\":{e2eRebuildReserveBytes}}"
+  else if has "\"rocksdb\":{" then
+    patchJson.replace "\"rocksdb\":{" s!"\"rocksdb\":\{\"rebuildReserveBytes\":{e2eRebuildReserveBytes},"
+  else patchJson
+
 /-- Patch a K8s resource with JSON merge patch. -/
 def kubectlPatch (resource name ns patchJson : String) : IO (Except String String) :=
-  kubectl ["patch", resource, name, "-n", ns, "--type=merge", "-p", patchJson]
+  kubectl ["patch", resource, name, "-n", ns, "--type=merge", "-p", withRebuildReserve resource patchJson]
 
 /-- Wait for a resource to be ready using kubectl wait. -/
 def kubectlWaitReady (resource ns : String) (timeoutSec : Nat) : IO Bool := do

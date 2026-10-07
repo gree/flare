@@ -37,6 +37,7 @@ import FlareOperator.Metrics.HttpServer
 import FlareOperator.Migration.Controller
 import FlareOperator.Health.HealthCheck
 import FlareOperator.StateMachine.SourceEligibility
+import FlareOperator.StateMachine.RebuildConcurrency
 
 namespace FlareOperator
 
@@ -277,6 +278,9 @@ initialize podIdentityRef : IO.Ref (List (String × (String × Option Nat))) ←
     incarnation changed after it was observed; nothing from this pass is
     committed or persisted. Reset at the start of every pass. -/
 initialize promotionAbortedRef : IO.Ref Bool ← IO.mkRef false
+
+/-- Copy retention §10: the assignments held last time (logged on change). -/
+initialize rebuildHeldRef : IO.Ref (List String) ← IO.mkRef []
 
 /-- SAF-08: a successor the empty-master self-heal validated before deleting
     the master, pinned with its incarnation for the drain that follows:
@@ -1255,7 +1259,17 @@ private def commitChecked (stateRef : IO.Ref FlareClusterState) (ver : Nat) (ucs
         IO.eprintln s!"[flare-operator] CRITICAL: PROMOTION ABORTED for {k}: its pod changed after it was observed (observed {obs}, now {now}) — a restarted or replaced copy is not promoted on the old one's standing; nothing from this pass is committed, the next pass re-decides"
         promotionAbortedRef.set true
         return
-  let _ ← commitClusterState stateRef ver ucs rb standby withheld
+  -- Copy retention §10: one rebuild per partition and one in the cluster.
+  -- A NEW Proxy -> Slave(Prepare) assignment beyond that is held (the node
+  -- stays a Proxy this pass). Rejoins over TCP and master reconstructions
+  -- are not gated (RebuildConcurrency).
+  let gated := RebuildConcurrency.gate cur ucs 1 1
+  let heldKeys := gated.held.map Prod.fst
+  if heldKeys != (← rebuildHeldRef.get) then
+    rebuildHeldRef.set heldKeys
+    for (k, why) in gated.held do
+      IO.eprintln s!"[flare-operator] REBUILD HELD: {k} stays a Proxy for now — {why} (copy retention: one rebuild per partition and per cluster)"
+  let _ ← commitClusterState stateRef ver gated.state rb standby withheld
   pure ()
 
 /-- FSM driver loop helper.

@@ -1429,24 +1429,9 @@ void test_analyze_checkpoint_streams_key_expire_size() {
 	drop_rocksdb(s, wal_master_dir);
 }
 
-// SPACE-AWARE REBUILD (2026-10-04): a reseed stages the new copy next to the
-// old one. The rule drops the stale copy only when two do not fit; unknown
-// space or an empty local copy never discard.
-void test_rebuild_must_discard_rule() {
-	const uint64_t MB = 1024ULL * 1024ULL;
-	// 5.6 GB local copy with 1.3 GB of headroom (the pf-dev case): discard.
-	cut_assert_true(storage_rocksdb::rebuild_must_discard(5600 * MB, static_cast<int64_t>(1300 * MB)));
-	// plenty of room: keep the copy until the swap
-	cut_assert_false(storage_rocksdb::rebuild_must_discard(100 * MB, static_cast<int64_t>(1000 * MB)));
-	// need = local + 10% + 64 MiB: exactly at the edge keeps, one byte short discards
-	const uint64_t local = 100 * MB;
-	const int64_t need = static_cast<int64_t>(local + local / 10 + 64 * MB);
-	cut_assert_false(storage_rocksdb::rebuild_must_discard(local, need));
-	cut_assert_true(storage_rocksdb::rebuild_must_discard(local, need - 1));
-	// unknown space, or nothing local: never discard
-	cut_assert_false(storage_rocksdb::rebuild_must_discard(5600 * MB, -1));
-	cut_assert_false(storage_rocksdb::rebuild_must_discard(0, 0));
-}
+// SPACE-AWARE REBUILD (2026-10-04) used to discard the stale copy when two
+// did not fit. Copy retention (design §9) replaced that rule: no room stops
+// the rebuild (copy_capacity.h, test_copy_switch); nothing is discarded.
 
 // The inputs of the rule are real: a DB with data has a non-zero local copy,
 // and the space reading is known on a normal filesystem.
@@ -1906,6 +1891,242 @@ void test_switch_inconsistent_state_refuses_open() {
 	cut_assert_true(read_file_s(d + "/switch.intent").find("attempt=a1") != string::npos);
 	cut_remove_path(wal_master_dir, NULL);
 }
+
+// Copy retention phase 3 (design §3.2): a staged copy of a source that keeps
+// changing while it is copied. The dump reads keys one at a time (not one
+// point in time) while the source updates, deletes, re-creates and sets
+// expiries; the epoch-bound replay of (L0, L1] then brings the staging copy
+// to exactly the source's state at L1 — every key, value and expiry,
+// including keys that never changed. The switch keeps the old copy, and the
+// retained copy is deleted only under the §8 conditions.
+namespace {
+	struct entry_view {
+		bool found;
+		string value;
+		time_t expire;
+		uint32_t flag;
+	};
+
+	entry_view view(storage* s, const string& key) {
+		entry_view v;
+		storage::entry e;
+		e.key = key;
+		storage::result r;
+		v.found = s->get(e, r, 0) == 0 && r != storage::result_not_found;
+		v.expire = v.found ? e.expire : 0;
+		v.flag = v.found ? e.flag : 0;
+		if (v.found) v.value.assign(reinterpret_cast<const char*>(e.data.get()), e.size);
+		return v;
+	}
+
+	// what op_dump's client does with one VALUE line: store the entry as sent
+	void dump_one(storage* src, storage* dst, const string& key) {
+		storage::entry e;
+		e.key = key;
+		storage::result r;
+		if (src->get(e, r, 0) < 0 || r == storage::result_not_found) {
+			return;		// gone by the time the iterator reached it
+		}
+		storage::result w;
+		cut_assert_equal_int(0, dst->set(e, w, storage::behavior_dump));
+	}
+
+	int set_with(storage* s, const string& key, const string& value, time_t expire, uint32_t flag) {
+		storage::entry e;
+		e.key = key;
+		e.flag = flag;
+		e.expire = expire;
+		e.version = 0;
+		e.size = value.size();
+		shared_byte data(new uint8_t[value.size()]);
+		memcpy(data.get(), value.data(), value.size());
+		e.data = data;
+		storage::result r;
+		return s->set(e, r, 0);
+	}
+
+	string kname(int i) {
+		char b[16];
+		snprintf(b, sizeof(b), "k%03d", i);
+		return b;
+	}
+}
+
+void test_staged_dump_then_replay_matches_the_source_and_switches() {
+	storage_rocksdb* src = make_rocksdb(wal_master_dir);
+	storage_rocksdb* live = make_rocksdb(wal_slave_dir);
+	storage_set_string(live, "k000", "stale-local");
+	storage_set_string(live, "only-local", "stale");
+	const string live_id = live->get_copy_id();
+	for (int i = 0; i < 60; i++) {
+		cut_assert_equal_int(0, storage_set_string(src, kname(i), "v0"));
+	}
+	const time_t future = time(NULL) + 3600;
+	const uint64_t l0 = src->get_latest_sequence_number();
+	const string epoch = src->get_source_epoch();
+	const string mid = src->get_master_id();
+
+	storage_rocksdb* stg = live->open_staging("t1", false);
+	cut_assert_not_null(stg);
+	cut_assert_true(stg->is_staging());
+	cut_assert_true(stg->get_copy_id() != live_id);
+	cut_assert_equal_int(0, stg->adopt_history(mid, epoch, l0));
+	cut_assert_equal_string(epoch.c_str(), stg->get_source_epoch().c_str());
+
+	// the "dump": key by key, with the source changing in between
+	for (int i = 0; i < 60; i++) {
+		if (i == 10) {
+			storage_set_string(src, kname(40), "v1");			// updated before it is dumped
+			storage_remove_key(src, kname(5));					// deleted after it was dumped
+			storage_remove_key(src, kname(6));					// deleted and re-created after
+			storage_set_string(src, kname(6), "v2");
+			storage_set_string(src, kname(45), "tmp");			// updated then deleted before dumped
+			storage_remove_key(src, kname(45));
+			set_with(src, kname(7), "v3", future, 7);			// expiry and flags change after dumped
+			set_with(src, kname(50), "v3", future, 9);			// ... and before dumped
+			storage_set_string(src, "new-key", "v4");			// created (beyond the iterator)
+		}
+		dump_one(src, stg, kname(i));
+	}
+	storage_set_string(src, kname(1), "v5");					// after the dump, before L1
+	storage_remove_key(src, kname(2));
+	const uint64_t l1 = src->get_latest_sequence_number();
+	cut_assert_true(l1 > l0);
+
+	// the epoch-bound replay of (L0, L1]: a batch of ANOTHER history is refused
+	vector<pair<uint64_t, rocksdb::WriteBatch> > updates;
+	cut_assert_equal_int(0, src->get_updates_since(l0 + 1, updates));
+	cut_assert_true(!updates.empty());
+	{
+		uint64_t a = 0, k = 0;
+		storage_rocksdb::apply_outcome why = storage_rocksdb::apply_applied;
+		cut_assert_equal_int(-1, stg->apply_wal_batch("other-epoch", "", updates[0].first, updates[0].second, a, k, why));
+	}
+	for (size_t i = 0; i < updates.size(); i++) {
+		uint64_t a = 0, k = 0;
+		storage_rocksdb::apply_outcome why = storage_rocksdb::apply_applied;
+		cut_assert_equal_int(0, stg->apply_wal_batch(epoch, "", updates[i].first, updates[i].second, a, k, why));
+	}
+	cut_assert_true(stg->get_repl_last_lsn() >= l1);
+
+	// every key the source has (or does not have) at L1 is the same in staging
+	vector<string> keys;
+	for (int i = 0; i < 60; i++) keys.push_back(kname(i));
+	keys.push_back("new-key");
+	for (size_t i = 0; i < keys.size(); i++) {
+		const entry_view a = view(src, keys[i]);
+		const entry_view b = view(stg, keys[i]);
+		cut_assert_equal_boolean(a.found, b.found, cut_message("key %s", keys[i].c_str()));
+		cut_assert_equal_string(a.value.c_str(), b.value.c_str(), cut_message("key %s", keys[i].c_str()));
+		cut_assert_equal_int(static_cast<int>(a.expire), static_cast<int>(b.expire), cut_message("key %s", keys[i].c_str()));
+		cut_assert_equal_int(static_cast<int>(a.flag), static_cast<int>(b.flag), cut_message("key %s", keys[i].c_str()));
+	}
+	cut_assert_equal_string("v0", view(stg, kname(20)).value.c_str());		// never changed: present
+	cut_assert_false(view(stg, kname(5)).found);
+	cut_assert_equal_string("v2", view(stg, kname(6)).value.c_str());
+	cut_assert_false(view(stg, kname(45)).found);
+	cut_assert_false(view(stg, "only-local").found);							// nothing of the old copy
+
+	// the live copy was never touched while staging was built
+	cut_assert_equal_string("stale-local", view(live, "k000").value.c_str());
+
+	// seal, switch: the old copy is retained, the new one is live
+	const string new_id = stg->get_copy_id();
+	cut_assert_equal_int(0, stg->seal());
+	delete stg;
+	cut_assert_equal_int(0, live->switch_to_staging("t1", new_id));
+	cut_assert_equal_string(new_id.c_str(), live->get_copy_id().c_str());
+	cut_assert_true(live->copy_identity_consistent());
+	cut_assert_equal_string(mid.c_str(), live->get_master_id().c_str());
+	cut_assert_equal_string(epoch.c_str(), live->get_source_epoch().c_str());
+	cut_assert_true(live->get_repl_last_lsn() >= l1);
+	cut_assert_equal_string("v5", view(live, kname(1)).value.c_str());
+	cut_assert_equal_int(static_cast<int>(src->count()), static_cast<int>(live->count()));
+	cut_assert_equal_int(0, live->record_retained("t1", mid, epoch));
+	cut_assert_equal_int(1, static_cast<int>(live->list_retained().size()));
+
+	// §8: deleted only when all four conditions hold
+	string report;
+	cut_assert_equal_int(0, live->reap_retained(mid, epoch, true, false, report));		// not Active
+	cut_assert_equal_int(0, live->reap_retained(mid, "E2", true, true, report));		// other history
+	cut_assert_equal_int(0, live->reap_retained(mid, epoch, false, true, report));		// not eligible
+	cut_assert_equal_int(1, static_cast<int>(live->list_retained().size()));
+	cut_assert_equal_int(1, live->reap_retained(mid, epoch, true, true, report));
+	cut_assert_equal_int(0, static_cast<int>(live->list_retained().size()));
+
+	// the switched-in copy survives a restart unchanged
+	drop_rocksdb_noremove(live);
+	live = make_rocksdb(wal_slave_dir);
+	cut_assert_equal_string(new_id.c_str(), live->get_copy_id().c_str());
+	cut_assert_true(live->copy_identity_consistent());
+	cut_assert_equal_string("v2", view(live, kname(6)).value.c_str());
+	drop_rocksdb(live, wal_slave_dir);
+	drop_rocksdb(src, wal_master_dir);
+}
+
+// Design §5: one snapshot serve (or push) at a time per source, each in its
+// own directory; a second request is answered busy; the slot is released by
+// the removal; leftovers of a previous process are removed at open.
+void test_snapshot_serve_one_at_a_time_in_its_own_dir() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	storage_set_string(s, "k", "v");
+	string p1, p2, p3;
+	uint64_t q1 = 0, q2 = 0, q3 = 0;
+	cut_assert_equal_int(0, s->create_snapshot_checkpoint(p1, q1));
+	cut_assert_true(s->is_snapshot_serving());
+	cut_assert_true(p1.find("/snapshot.serve.") != string::npos);
+	cut_assert_equal_int(-2, s->create_snapshot_checkpoint(p2, q2));		// busy
+	cut_assert_equal_int(-1, s->remove_snapshot_checkpoint(string(wal_master_dir) + "/flare.rocksdb"));
+	cut_assert_true(s->is_snapshot_serving());							// a refused removal releases nothing
+	cut_assert_equal_int(0, s->remove_snapshot_checkpoint(p1));
+	cut_assert_false(s->is_snapshot_serving());
+	cut_assert_equal_int(0, s->create_snapshot_checkpoint(p3, q3));
+	cut_assert_true(p3 != p1);
+	// a crash while serving: the directory is left; the next open removes it
+	drop_rocksdb_noremove(s);
+	struct stat st;
+	cut_assert_equal_int(0, stat(p3.c_str(), &st));
+	s = make_rocksdb(wal_master_dir);
+	cut_assert_equal_int(-1, stat(p3.c_str(), &st));
+	cut_assert_false(s->is_snapshot_serving());
+	cut_assert_equal_string("v", view(s, "k").value.c_str());
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// An abandoned attempt (a failed dump, a refused gate, a crash) leaves the
+// live copy as it was; a staging directory is never reused, and an
+// unfinished one is removed at the next open.
+void test_staging_abandoned_and_left_over() {
+	storage_rocksdb* live = make_rocksdb(wal_slave_dir);
+	storage_set_string(live, "k", "mine");
+	const string id = live->get_copy_id();
+	storage_rocksdb* stg = live->open_staging("t2", false);
+	cut_assert_not_null(stg);
+	storage_set_string(stg, "k", "partial");
+	cut_assert_null(live->open_staging("t2", false));		// never reused
+	delete stg;
+	cut_assert_equal_int(0, live->remove_staging("t2"));
+	cut_assert_equal_string("mine", view(live, "k").value.c_str());
+	cut_assert_equal_string(id.c_str(), live->get_copy_id().c_str());
+	// a crash while staging (no intent): the next open removes the leftover
+	stg = live->open_staging("t3", false);
+	cut_assert_not_null(stg);
+	delete stg;
+	drop_rocksdb_noremove(live);
+	struct stat st;
+	cut_assert_equal_int(0, stat((string(wal_slave_dir) + "/staging-t3").c_str(), &st));
+	live = make_rocksdb(wal_slave_dir);
+	cut_assert_equal_int(-1, stat((string(wal_slave_dir) + "/staging-t3").c_str(), &st));
+	cut_assert_equal_string("mine", view(live, "k").value.c_str());
+	// a retained copy without a record (crash between switch and record, or a
+	// legacy source) is never deleted automatically
+	mkdir((string(wal_slave_dir) + "/retained-old").c_str(), 0700);
+	string report;
+	cut_assert_equal_int(0, live->reap_retained("M", "E", true, true, report));
+	cut_assert_equal_int(1, static_cast<int>(live->list_retained().size()));
+	drop_rocksdb(live, wal_slave_dir);
+}
+
 
 // Evidence that cannot be persisted is never published; a clear that cannot
 // be persisted still drops the in-memory copy and reports failure (the caller

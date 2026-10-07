@@ -101,8 +101,16 @@ protected:
 	// strict: a discard BEFORE the replacement is copied also needs a source
 	// that holds keys (the empty-source exceptions do not apply)
 	copy_gate _copy_gate(const char* step, string& why, bool strict = false);
-	// the pre-swap hook given to the snapshot client (true = swap allowed)
-	bool _swap_gate(string& why);
+	// COPY RETENTION (docs/design-copy-retention.md §3): build the replacement
+	// in data_dir/staging-<attempt> (snapshot, else full dump) next to the
+	// live copy, bring it to the fixed target L1 by a WAL catch-up bound to
+	// the source's history, verify it, switch it in (the old copy is
+	// RETAINED), record it and catch up. 0 = the verified copy is live;
+	// -1 = stopped or failed with the live copy unchanged, or switched but
+	// not yet caught up (the next attempt resumes from its cursor).
+	int _staged_rebuild(bool snapshot_ok, const string& peer_master_id, uint64_t l0, bool peer_wal_supported);
+	// the space watch while a staging copy grows (false = stop the copy)
+	bool _space_watch(string& why);
 	// TEST SEAMS: hold while the file named by `env` exists (false =
 	// shutdown requested while held)
 	bool _test_hold(const char* env, const char* where);

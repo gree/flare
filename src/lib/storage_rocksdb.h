@@ -194,6 +194,23 @@ protected:
 	string _rebuilt_from_epoch;
 	string _copy_id;
 	bool _copy_identity_consistent = false;
+	// COPY RETENTION (design §3): this instance is a staging copy at
+	// data_dir/staging-<attempt>, not the live one. It is never in the map,
+	// never read, never a source; only the switch makes it live.
+	bool _staging = false;
+	// capacity (design §9): spec.rocksdb.rebuildReserveBytes; -1 = unset
+	// (staged rebuilds stop). Why the last staged rebuild stopped ("" = not
+	// blocked), for stats.
+	int64_t _rebuild_reserve_bytes = -1;
+	pthread_mutex_t _mutex_rebuild_status;
+	string _rebuild_blocked;
+	uint64_t _staged_switched = 0;
+	uint64_t _staged_abandoned = 0;
+	// design §5: a snapshot (serve or push) is being served from this node
+	bool _snapshot_serving = false;
+	// the source epoch the staged files carried when opened (a received
+	// checkpoint), read BEFORE generations are initialised; "" = none
+	string _staging_found_epoch;
 	string _suspended_from_master_id;
 	string _suspended_from_epoch;
 	// Set when a generation could not be established or persisted. The
@@ -312,6 +329,9 @@ protected:
 	// 0: nothing to do or discarded cleanly. -1: a half-restored DB is on
 	// disk and could NOT be removed — the caller must not open it.
 	int _discard_incomplete_restore();
+	void _release_snapshot_serve();
+	// exact count of live (non-reserved) keys -> curr_items; logs `why`
+	void _seed_curr_items_by_scan(const char* why);
 	int _persist_generation(const char* key, const string& value);
 	int _clear_rebuilt_from_locked();
 	// Open/close the DB with both column families, creating the metadata one
@@ -519,6 +539,49 @@ public:
 	// §4.1). The old copy is kept as data_dir/retained-<attempt>. 0 on success;
 	// on failure the live copy is whatever the recovery table restores.
 	int switch_to_staging(const string& attempt, const string& expected_new_id);
+	// --- staging (design §3) ---
+	// A new attempt id (also names staging-/retained- directories).
+	static string new_attempt_id();
+	// Open a separate instance on data_dir/staging-<attempt>: a NEW empty
+	// directory (existing_files=false; refused if it exists) or the files a
+	// snapshot transfer just wrote there (existing_files=true). It always gets
+	// a new copy identity. NULL on failure (nothing left behind for a new dir).
+	storage_rocksdb* open_staging(const string& attempt, bool existing_files);
+	// Create the EMPTY directory data_dir/staging-<attempt> (refused if it
+	// exists or is on another filesystem), for a transfer to write into.
+	int make_staging_dir(const string& attempt, string& path);
+	bool is_staging() const { return this->_staging; }
+	void set_rebuild_reserve_bytes(int64_t b) { this->_rebuild_reserve_bytes = b; }
+	int64_t get_rebuild_reserve_bytes() const { return this->_rebuild_reserve_bytes; }
+	void set_rebuild_blocked(const string& why);
+	string get_rebuild_blocked();
+	void note_staged_result(bool switched);
+	bool is_snapshot_serving();
+	uint64_t get_staged_switched();
+	uint64_t get_staged_abandoned();
+	// The source epoch the staged files carried (received checkpoint), "" if none.
+	string get_staging_found_epoch() const { return this->_staging_found_epoch; }
+	// Staging only: this copy follows (master_id, epoch) from `cursor` on
+	// (epoch "" = a source without epochs: the copy keeps its own) —
+	// drops inherited replication metadata and rebuild evidence, mints a new
+	// incarnation, one synced batch. 0 on success.
+	int adopt_history(const string& master_id, const string& epoch, uint64_t cursor);
+	// Staging only: flush, sync the WAL, close, fsync the copy's directory
+	// and data_dir. After this the copy is durable and closed. 0 on success.
+	int seal();
+	// Remove data_dir/staging-<attempt> (an abandoned attempt). 0 on success.
+	int remove_staging(const string& attempt);
+	// After a switch: record in retained-<attempt> what replaced it (the new
+	// copy id and the source it was verified against). Durable. 0 on success.
+	int record_retained(const string& attempt, const string& master_id, const string& epoch);
+	// Names of retained-* directories present (attempt ids).
+	vector<string> list_retained();
+	// Design §8: delete every retained copy whose four conditions hold
+	// (record present; live copy id = the one that replaced it and the
+	// identity is consistent; the read source bound eligible to the recorded
+	// lineage and history; this replica Active in its own map). Returns the
+	// number removed; `report` says why each one was kept.
+	int reap_retained(const string& bound_master_id, const string& bound_epoch, bool bound_eligible, bool own_active, string& report);
 	int suspend_rebuilt_from();
 	int clear_suspended_rebuilt_from();
 	string get_suspended_rebuilt_from_master_id();
@@ -571,12 +634,12 @@ public:
 	// that room is RAM counted against the container's memory limit.
 	// Bytes of the local DB directory (the estimate of the incoming copy).
 	uint64_t local_copy_bytes();
-	// Bytes a staging copy may use: free space under the data dir and, when
-	// the data dir is tmpfs, the cgroup memory headroom minus a safety margin
-	// for flared's own growth. -1 = unknown (no decision possible).
+	// Bytes free for a staging copy: free space under the data dir and, when
+	// the data dir is tmpfs, the smaller of that and the cgroup memory
+	// headroom (limit - current usage, which includes the tmpfs pages and
+	// flared). No fixed margin: the configured reserve covers flared's growth.
+	// -1 = unknown (no decision possible).
 	int64_t rebuild_space_available();
-	// Pure rule: must the stale local copy be discarded before staging?
-	static bool rebuild_must_discard(uint64_t local_bytes, int64_t available);
 	// True once a Corruption status has been seen on a write path; latched
 	// until a successful hard_reset()/reopen clears it.
 	bool is_corrupted()                       { return this->_corrupted; }

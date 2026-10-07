@@ -332,6 +332,7 @@ int flared::startup(int argc, char **argv) {
 				ini_option_object().get_rocksdb_wal_sync_interval());
 			rdb->set_backup_keep(
 				ini_option_object().get_rocksdb_backup_keep());
+			rdb->set_rebuild_reserve_bytes(ini_option_object().get_rocksdb_rebuild_reserve_bytes());
 			rdb->set_snapshot_bwlimit(
 				ini_option_object().get_rocksdb_snapshot_bwlimit());
 			this->_storage = rdb;
@@ -536,6 +537,7 @@ int flared::reload() {
 			ini_option_object().get_rocksdb_wal_sync_interval());
 		rdb->set_backup_keep(
 			ini_option_object().get_rocksdb_backup_keep());
+		rdb->set_rebuild_reserve_bytes(ini_option_object().get_rocksdb_rebuild_reserve_bytes());
 		rdb->set_snapshot_bwlimit(
 			ini_option_object().get_rocksdb_snapshot_bwlimit());
 	}

@@ -262,6 +262,48 @@
 
    設計は R7 の snapshot 固定パス問題と合わせ、コピーの保持・切替・容量判定を
    一まとまりで行う（9bb08db の CI 完了後）。
+
+   **実装の状況（2026-10-07、design-copy-retention.md §12 の 3・4 と §8）**：
+   staging への full dump／snapshot、`L0`→`L1` の epoch 付き再生、切替前の
+   検証と保護規則、切替（旧コピーは retained）、切替後の catch-up、§8 の 4 条件
+   での retained 削除、容量判定（`rebuildReserveBytes`、未設定なら停止）と
+   コピー中の監視を実装した。slave のコピーを置き換える経路から truncate と
+   容量確保のための先行破棄はなくなった（master の再構築と、source が新しく
+   ない／到達できない場合のマージは従来どおり）。
+   - 記録：「**実装済み、macOS の単体試験済み**（dump 中の更新・削除・再作成・
+     期限変更を含む再生の一致、切替、retained の削除条件、容量規則）。Linux CI
+     と受入 E2E は結果待ち」。
+   - Phase 7（同時数）：flared は snapshot の送出（push を含む）を source ごとに
+     1 に制限し、要求ごとの `snapshot.serve.<id>` を使う。2 件目は `busy` を
+     返し、受け手は dump に切り替えずに待つ。起動時に前のプロセスの送出領域を
+     消す。operator は reconcile の**新しい** Proxy→Slave(Prepare) 割り当てを、
+     partition ごとに 1・クラスタ全体で 1 を超えるなら保留する（Proxy のまま、
+     `REBUILD HELD` を記録）。数えるのは map の Slave/Prepare（永続なので
+     operator の再起動後も数え直せる）。
+     - 例外（数えるが保留しない）：TCP で再登録して自分の partition に戻る
+       メンバー（唯一のデータを持ち得る。Proxy にすると過去にデータを失った）、
+       master の再構築、flared の起動時 catch-up。
+     - 未実装：stats の `reconstruction_current_state=running` による数え上げ
+       （純粋関数は対応済み、operator からの入力は未配線）。初期構築も上限の
+       対象（例外にしていない）。
+     - 単体試験：operator 6 件（flare_unit 319）、flared の送出スロット 1 件。
+       Phase 3・4・7 を一体で検証する E2E は未実行（同時要求 2 replica の試験は
+       未作成）。
+   - 旧版 source（epoch なし）：`L0 == L1`、切替直前、切替後の 3 点で位置が
+     動いていないことを確認したときだけ切り替える。これは観測区間に変化が
+     なかった根拠であって、書き込み停止の確認ではない。書き込み停止は外側で
+     replica の Active まで維持する（運用手順）。切替後に位置が動いていたら
+     `rebuild_blocked=legacy_source_writes` で停止し、activation しない。
+   - 残る制限：
+     - retained が残っている間（§8 の条件が揃う前、epoch のない source、
+       記録の書き込み前のクラッシュ）は次の staged 再構築が
+       `rebuild_blocked=retained_present` で止まる。削除は承認（Phase 6、未実装）。
+     - 新しい live を開けない切替失敗では、このプロセスでは storage が使えない
+       （次の起動時に intent から復旧する）。
+     - 切替後の catch-up と転送の競合（identity 転送が OFF のとき、転送された
+       新しい値の後に古い WAL を再生し得る）は、既存の WAL catch-up と同じ。
+     - snapshot push（クラスタ間の seed、宛先 master）は従来どおりその場で
+       置き換える。移設先（破棄可能）でのみ使う。
 2. **snapshot 経路の試験**：swap と、容量確保のための先行破棄は E2E で未検証。
    R7 の固定パス問題の修正と合わせて、両境界で source が変わる／Unknown に
    なる場合も旧コピーを保持することを試験する。
@@ -274,6 +316,17 @@
    - replica への flush_all 拒否は意図的な互換性変更。
    - 旧版 source との WAL catch-up を止めた。混在バージョンで、保護された
      再構築が完了することまで確認する。
+   - **`spec.rocksdb.rebuildReserveBytes` が未設定なら staged 再構築は止まる**
+     （`rebuild_blocked=reserve_unset`）。値は R7 で決める（E2E は 64 MiB）。
+   - staged 再構築は、source のコピーの大きさ＋予約分の空きを要する（tmpfs では
+     メモリ上限の中で）。足りなければ破棄せず止まる（`rebuild_blocked=no_space`）。
+     tmpfs の固定 256 MB マージンは廃止し、予約分に含める。
+   - **混在バージョンの手順**：旧 flared は `rocksdb-rebuild-reserve-bytes` を
+     知らず、その行のある extra.conf では**起動しない**（reload は拒否して動き
+     続ける）。手順：operator を更新 → CR に `rebuildReserveBytes` を設定 →
+     flared を更新。この間に旧 flared が再起動すると起動に失敗する。
+   - 旧版 source からの staged コピーは、外側で書き込みを止め、replica の
+     Active まで維持する。
 5. **旧 test 9（2026-10-07 実行対象から退役。ユーザー判断）**：H1 試験
    （copy-protection）が期待を引き継ぐ。過去の損失（b9e0742）の原因は未確定の
    まま。コードは git 履歴（9bb08db 以前）にあり、試験ファイルに退役の注記がある。
@@ -332,3 +385,4 @@
 | 2026-10-06 | R2 | 未判定（試験不具合：ログで確認） | cd1d9b0 / 両 run | 遮断中、転送の再接続（0.5 s × 8 × 最大 4 回）がクライアントの 5 s より長く、遮断を解いた後に転送が成功した。失敗時にクライアントが受け取る応答は未観測。可用性の finding：RST でも失敗まで約 16〜20 s、proxy 接続には connect の期限がない |
 | 2026-10-06 | R3 test 6 | 単独 run は合格。全体 run は UNDECIDED | cd1d9b0 / 37451907614・37451914041 | 全体 run では、旧 master n0 のコピーを v…606 で check して activation し、その後 v…613（n1）を受理した。受理後の再検証・再構築はない。balance 0 なので、この構成ではローカル read なし。node activated は activation 要求の成功の証拠であり、Active map の受理や read 開始の証明ではない |
 | 2026-10-06 | R10 | 未完了 | cd1d9b0 | 全体 CI の他スイートは回帰なし。**訂正**：cutter の単体試験は Linux CI でも `make check` で実行されている（nix-linux の RocksDB ビルドで `PASS: run-tests.sh`、test_stats_reconstruction のコンパイル・リンクを確認）。ただし試験名ごとの結果はログに出ていなかったため、check phase で名前つきの結果を出すようにした。同名 Pod の置換と 2 pod 間の boot id は cluster-init 29 で直接比較する（未実行） |
+| 2026-10-07 | r3-source 2・empty-source 6（前提不成立「保持中の replica が昇格」） | r3-source 2：製品不具合（flared）、修正済み・CI 未実行。empty-source 6：原因未確定 | 2e182f3 / 37572870090 | r3-source：再起動して truncate＋dump 中の replica が、自分を active とする map（v…312）を受理して prepare→active に遷移し、再告知で operator の map も Active（v…321）になり、drain の後継に選ばれた。修正：自分の再構築中で activation が未確認なら map の active を受理しない（単体試験は修正なしで FAIL、修正ありで PASS）。operator の map が Active だった理由は未確定（ログ非保持）。empty-source 6 は同じ文言だが、その時間帯のログがない |

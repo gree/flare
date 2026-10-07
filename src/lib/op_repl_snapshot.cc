@@ -47,7 +47,9 @@ op_repl_snapshot::op_repl_snapshot(shared_connection c, storage* st):
 		op(c, "repl_snapshot"),
 		_storage(st),
 		_bwlimit(0),
-		_peer_bwlimit_request(0) {
+		_peer_bwlimit_request(0),
+		_received_seq(0),
+		_busy(false) {
 }
 
 op_repl_snapshot::~op_repl_snapshot() {
@@ -98,9 +100,11 @@ int op_repl_snapshot::_run_server() {
 	if (rdb->disable_file_deletions() < 0) {
 		return this->_send_result(result_server_error, "pin_failed");
 	}
-	if (rdb->create_snapshot_checkpoint(cp_path, cp_seq) < 0) {
+	const int cr = rdb->create_snapshot_checkpoint(cp_path, cp_seq);
+	if (cr < 0) {
 		rdb->enable_file_deletions();
-		return this->_send_result(result_server_error, "checkpoint_failed");
+		// one serve per source (design §5): the requester waits and retries
+		return this->_send_result(result_server_error, cr == -2 ? "busy" : "checkpoint_failed");
 	}
 
 	// Enumerate the checkpoint's regular files (checkpoints are flat).
@@ -269,7 +273,9 @@ int op_repl_snapshot::_run_client() {
 	char q[BUFSIZ];
 	int n = util::next_word(p, q, sizeof(q));
 	if (strcmp(q, "SNAPSHOT") != 0) {
-		log_warning("peer declined snapshot (reply=%s)", p);
+		// "SERVER_ERROR busy": the source is serving another snapshot
+		this->_busy = strcmp(q, "SERVER_ERROR") == 0 && strstr(p, "busy") != NULL;
+		log_warning("peer declined snapshot (reply=%s)%s", p, this->_busy ? " — busy: wait and retry" : "");
 		delete[] p;
 		return -1;
 	}
@@ -294,7 +300,9 @@ int op_repl_snapshot::_run_client() {
 	delete[] p;
 
 	string staging;
-	if (rdb->prepare_snapshot_staging(staging) < 0) {
+	if (!this->_receive_dir.empty()) {
+		staging = this->_receive_dir;		// created (empty) by the caller, removed by it on failure
+	} else if (rdb->prepare_snapshot_staging(staging) < 0) {
 		return -1;
 	}
 
@@ -303,7 +311,16 @@ int op_repl_snapshot::_run_client() {
 
 	int r = 0;
 	uint64_t received = 0;
+	uint64_t watched = 0;
 	for (uint64_t i = 0; i < nfiles && r == 0; i++) {
+		if (this->_space_watch) {
+			string why;
+			if (!this->_space_watch(why)) {
+				log_err("snapshot transfer stopped by the space watch (received=%llu bytes): %s", (unsigned long long)received, why.c_str());
+				r = -1;
+				break;
+			}
+		}
 		if (this->_connection->readline(&p) < 0) {
 			r = -1;
 			break;
@@ -373,6 +390,16 @@ int op_repl_snapshot::_run_client() {
 				break;
 			}
 			got_total += want;
+			watched += want;
+			if (this->_space_watch && watched >= kSpaceWatchBytes) {
+				watched = 0;
+				string why;
+				if (!this->_space_watch(why)) {
+					log_err("snapshot transfer stopped by the space watch (file %s): %s", name.c_str(), why.c_str());
+					r = -1;
+					break;
+				}
+			}
 		}
 		fclose(fp);
 		received += got_total;
@@ -403,8 +430,18 @@ int op_repl_snapshot::_run_client() {
 	if (r < 0) {
 		log_warning("snapshot bootstrap failed mid-stream (received=%llu bytes) -> removing the partial staging copy; caller falls back to full dump",
 			(unsigned long long)received);
-		rdb->remove_snapshot_staging(staging);
+		if (this->_receive_dir.empty()) {
+			rdb->remove_snapshot_staging(staging);
+		}
 		return -1;
+	}
+	if (!this->_receive_dir.empty()) {
+		// staged only: the caller opens, verifies and switches
+		this->_received_seq = cp_seq;
+		this->_received_master_id = peer_master_id;
+		log_notice("snapshot received into [%s]: %llu bytes, checkpoint sequence %llu", staging.c_str(),
+			(unsigned long long)received, (unsigned long long)cp_seq);
+		return 0;
 	}
 
 	if (this->_pre_swap_gate) {

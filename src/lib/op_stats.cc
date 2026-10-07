@@ -264,6 +264,15 @@ int op_stats::_send_stats(thread_pool* req_tp, thread_pool* other_tp, storage* s
 			_send_stat("rocksdb_source_epoch"               , rdb->get_source_epoch());
 			_send_stat("rocksdb_copy_id"                    , rdb->get_copy_id());
 			_send_stat("rocksdb_copy_identity_consistent"   , rdb->copy_identity_consistent() ? 1 : 0);
+			// copy retention (design §3, §8, §9): the live copy's size (what a
+			// replica staging a copy of THIS node needs), the reserve, why the
+			// last staged rebuild stopped ("" = not blocked), retained copies
+			_send_stat("rocksdb_copy_bytes"                 , rdb->local_copy_bytes());
+			_send_stat("rocksdb_rebuild_reserve_bytes"      , static_cast<long long>(rdb->get_rebuild_reserve_bytes()));
+			_send_stat("rebuild_blocked"                    , rdb->get_rebuild_blocked());
+			_send_stat("rocksdb_retained_copies"            , static_cast<uint64_t>(rdb->list_retained().size()));
+			_send_stat("rocksdb_staged_switched"            , rdb->get_staged_switched());
+			_send_stat("rocksdb_staged_abandoned"           , rdb->get_staged_abandoned());
 			_send_stat("rocksdb_source_epoch_reason"        , rdb->get_source_epoch_reason());
 			// Rebuild evidence ("" = none): the source a clean full dump came from.
 			_send_stat("rocksdb_rebuilt_from_master_id"     , rdb->get_rebuilt_from_master_id());

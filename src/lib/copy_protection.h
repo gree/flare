@@ -40,7 +40,11 @@ struct copy_identity {
 	std::string		epoch_reason;		// rocksdb_source_epoch_reason (source only)
 	std::string		rebuilt_from_lineage;	// rebuild evidence (replica only)
 	std::string		rebuilt_from_epoch;
-	copy_identity(): known(false), items(0) {}
+	// copy retention (§9): the size of the source's live copy (rocksdb_copy_bytes),
+	// else its whole data dir (data_dir_used_bytes: an upper bound)
+	bool			size_known;
+	uint64_t		copy_bytes;
+	copy_identity(): known(false), items(0), size_known(false), copy_bytes(0) {}
 };
 
 enum copy_gate {

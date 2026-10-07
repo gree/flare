@@ -6,6 +6,9 @@
 #include "handler_source_validator.h"
 #include "connection_tcp.h"
 #include "op_meta.h"
+#ifdef HAVE_LIBROCKSDB
+#include "storage_rocksdb.h"
+#endif
 
 namespace gree {
 namespace flare {
@@ -69,6 +72,22 @@ void handler_source_validator::_check_once() {
 		return;
 	}
 	const source_binding b = this->_cluster->get_read_source();
+#ifdef HAVE_LIBROCKSDB
+	// COPY RETENTION (design §8): a retained old copy is deleted only when
+	// its attempt was verified, the live copy is the one that replaced it,
+	// the read source is bound eligible to the recorded history, and this
+	// replica is Active in its OWN map. Otherwise it stays (approval).
+	{
+		storage_rocksdb* rdb = dynamic_cast<storage_rocksdb*>(this->_cluster->get_storage());
+		if (rdb != NULL && !rdb->list_retained().empty()) {
+			string report;
+			rdb->reap_retained(b.master_id, b.source_epoch, b.st == source_binding::eligible, st == cluster::state_active, report);
+			if (!report.empty()) {
+				log_info("retained copies kept: %s", report.c_str());
+			}
+		}
+	}
+#endif
 	if (b.st == source_binding::none || b.st == source_binding::needs_rebuild) {
 		return;
 	}

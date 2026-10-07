@@ -99,6 +99,7 @@ ini_option::ini_option():
 		_rocksdb_wal_sync_bwlimit(default_rocksdb_wal_sync_bwlimit),
 		_rocksdb_wal_sync_interval(default_rocksdb_wal_sync_interval),
 		_rocksdb_backup_keep(default_rocksdb_backup_keep),
+		_rocksdb_rebuild_reserve_bytes(-1),
 		_rocksdb_snapshot_bwlimit(default_rocksdb_snapshot_bwlimit),
 		_flush_all_enabled(default_flush_all_enabled),
 		_repl_identity_forward(default_repl_identity_forward),
@@ -457,6 +458,9 @@ int ini_option::load() {
 		if (opt_var_map.count("rocksdb-backup-keep")) {
 			this->_rocksdb_backup_keep = opt_var_map["rocksdb-backup-keep"].as<int>();
 		}
+		if (opt_var_map.count("rocksdb-rebuild-reserve-bytes")) {
+			this->_rocksdb_rebuild_reserve_bytes = opt_var_map["rocksdb-rebuild-reserve-bytes"].as<long long>();
+		}
 
 		if (opt_var_map.count("rocksdb-snapshot-bwlimit")) {
 			this->_rocksdb_snapshot_bwlimit = opt_var_map["rocksdb-snapshot-bwlimit"].as<int>();
@@ -608,6 +612,10 @@ int ini_option::reload() {
 		if (opt_var_map.count("rocksdb-backup-keep")) {
 			log_notice("  rocksdb_backup_keep: %d -> %d", this->_rocksdb_backup_keep, opt_var_map["rocksdb-backup-keep"].as<int>());
 			this->_rocksdb_backup_keep = opt_var_map["rocksdb-backup-keep"].as<int>();
+		}
+		if (opt_var_map.count("rocksdb-rebuild-reserve-bytes")) {
+			log_notice("  rocksdb_rebuild_reserve_bytes: %lld -> %lld", this->_rocksdb_rebuild_reserve_bytes, opt_var_map["rocksdb-rebuild-reserve-bytes"].as<long long>());
+			this->_rocksdb_rebuild_reserve_bytes = opt_var_map["rocksdb-rebuild-reserve-bytes"].as<long long>();
 		}
 
 		if (opt_var_map.count("rocksdb-snapshot-bwlimit")) {
@@ -918,6 +926,7 @@ int ini_option::_setup_config_option(program_options::options_description& optio
 		("rocksdb-wal-max-batch-bytes",		program_options::value<uint64_t>(),	"max size of a single replicated RocksDB WriteBatch; batches beyond this abort WAL sync and fall back to full dump (default 16MB, 0 disables, rocksdb only)")
 		("rocksdb-wal-sync-bwlimit",			program_options::value<int>(),		"bandwidth limit in KB/s for WAL incremental sync; 0 inherits reconstruction-bwlimit (default 0, rocksdb only)")
 		("rocksdb-wal-sync-interval",			program_options::value<int>(),		"inter-batch delay in usec for WAL incremental sync; 0 inherits reconstruction-interval (default 0, rocksdb only)")
+		("rocksdb-rebuild-reserve-bytes",		program_options::value<long long>(),	"bytes kept free besides the staging copy during a rebuild (compaction, WAL catch-up, quarantine). UNSET = staged rebuilds STOP (stats rebuild_blocked=reserve_unset); no default is assumed (dynamic, rocksdb only)")
 		("rocksdb-backup-keep",					program_options::value<int>(),		"number of on-disk named backups (checkpoints) to retain under data-dir/backups/; oldest pruned by name order (default 7, dynamic, rocksdb only)")
 		("rocksdb-snapshot-bwlimit",			program_options::value<int>(),		"bandwidth cap in KB/s for serving a snapshot-bootstrap stream (repl_snapshot); 0 = unlimited (default 32768 = ~256 Mbps, dynamic, rocksdb only)")
 		("flush-all-enabled",					program_options::value<bool>(),		"administrative gate for the flush_all op; false refuses it with SERVER_ERROR (default true, dynamic)")

@@ -231,6 +231,33 @@ int cleanup_staging(const string& data_dir) {
 	return removed;
 }
 
+int remove_prefixed(const string& data_dir, const string& prefix) {
+	DIR* d = ::opendir(data_dir.c_str());
+	if (d == NULL) {
+		return 0;
+	}
+	vector<string> victims;
+	struct dirent* e;
+	while ((e = ::readdir(d)) != NULL) {
+		const string n = e->d_name;
+		if (n.size() > prefix.size() && n.compare(0, prefix.size(), prefix) == 0) {
+			victims.push_back(data_dir + "/" + n);
+		}
+	}
+	::closedir(d);
+	int removed = 0;
+	for (vector<string>::iterator it = victims.begin(); it != victims.end(); it++) {
+		if (remove_tree_path(*it) == 0) {
+			removed++;
+			log_notice("removed [%s] left by a previous process", it->c_str());
+		}
+	}
+	if (removed > 0) {
+		fsync_dir(data_dir);
+	}
+	return removed;
+}
+
 int remove_tree_path(const string& path) {
 	struct stat st;
 	if (::lstat(path.c_str(), &st) != 0) {

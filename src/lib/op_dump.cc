@@ -45,7 +45,10 @@ op_dump::op_dump(shared_connection c, cluster* cl, storage* st):
 		_wait(0),
 		_partition(-1),
 		_partition_size(0),
-		_bwlimitter() {
+		_bwlimitter(),
+		_strict(false),
+		_completed(false),
+		_items(0) {
 }
 
 /**
@@ -284,6 +287,7 @@ int op_dump::_parse_text_client_parameters() {
 		if (strcmp(p, "END\n") == 0) {
 			delete[] p;
 			log_notice("found delimiter, dump completed (items=%d)", items);
+			this->_completed = true;
 			break;
 		}
 
@@ -319,12 +323,28 @@ int op_dump::_parse_text_client_parameters() {
 
 		storage::result r;
 		if (this->_storage->set(e, r, storage::behavior_dump) < 0) {
+			if (this->_strict) {
+				log_err("storing a dumped key failed (key=%s, items=%d) -> the copy is incomplete; dump FAILED", e.key.c_str(), items);
+				return -1;
+			}
 			log_warning("something is going wrong while storing data -> continue processing", 0);
 			// nop
 		}
 		items++;
+		this->_items = items;
+		if (this->_space_watch && (static_cast<uint64_t>(items) % kSpaceWatchItems) == 0) {
+			string why;
+			if (!this->_space_watch(why)) {
+				log_err("dump stopped by the space watch after %d item(s): %s", items, why.c_str());
+				return -1;
+			}
+		}
 	}
 
+	if (this->_strict && !this->_completed) {
+		log_err("dump ended without the source's END marker (items=%d) -> incomplete", items);
+		return -1;
+	}
 	return 0;
 }
 // }}}

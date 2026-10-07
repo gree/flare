@@ -1095,6 +1095,11 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
               | .error _ => readings := readings ++ [(key, none)]
             | none => pure ()
         sourceIneligible := SourceEligibility.withheld readings
+        -- every reading this pass, unreadable ones included: which evidence
+        -- a promotion on this pass could stand on (copy-identity 11)
+        let shown := readings.map fun (k, e) =>
+          s!"{k}={match e with | some v => toString v | none => "unreadable"}"
+        IO.eprintln s!"[flare-operator] R3 readings (a promotion is possible this pass): {shown}"
         if !sourceIneligible.isEmpty then
           IO.eprintln s!"[flare-operator] promotion candidates withheld this pass (R3: the copy is not eligible for its partition's current source until re-validated): {sourceIneligible}"
       -- SAF-08: a successor pinned by the empty-master self-heal ranks first
@@ -1332,6 +1337,11 @@ private def commitChecked (stateRef : IO.Ref FlareClusterState) (ver : Nat) (ucs
     rebuildHeldRef.set heldKeys
     for (k, why) in gated.held do
       IO.eprintln s!"[flare-operator] REBUILD HELD: {k} stays a Proxy for now — {why} (copy retention: one rebuild per partition and per cluster)"
+  let promotedNow := (gated.state.nodeMap.filter fun kv =>
+    kv.2.role == FlareRole.Master && (cur.lookupNode kv.1).map (·.role) != some FlareRole.Master).map Prod.fst
+  if !promotedNow.isEmpty then
+    let observed ← podIdentityRef.get
+    IO.eprintln s!"[flare-operator] PROMOTION committed: {promotedNow.map fun k => s!"{k} (pod incarnation observed {observed.lookup k})"}"
   let _ ← commitClusterState stateRef ver gated.state rb standby withheld
   pure ()
 

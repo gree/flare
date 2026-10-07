@@ -1415,7 +1415,7 @@ private def Ctx.flaredLogAllSince (c : Ctx) (pod since : String) : IO String := 
     operator pod (current and previous container); flared lines of `pods`. -/
 private def Ctx.windowRecord (c : Ctx) (since : String) (pods : List String) (label : String) : IO Unit := do
   let opNeedles := ["REPLICA REPAIR", "repair DEFERRED", "replica repair", "demot", "reseat", "withheld", "R3", "needs_rebuild",
-    "NodeAdd", "NodeRole", "NodeState", "unhealthy", "NotReady", "failover", "drain", "promot", "refill", "proxy", "Prepare"]
+    "NodeAdd", "NodeRole", "NodeState", "unhealthy", "NotReady", "failover", "drain", "promot", "PROMOT", "refill", "proxy", "Prepare"]
   for op in ← getPodNames s!"app={c.cfg.operatorName}" c.cfg.«namespace» do
     let mut raw := ""
     for extra in [["--previous"], []] do
@@ -1429,6 +1429,8 @@ private def Ctx.windowRecord (c : Ctx) (since : String) (pods : List String) (la
       containsSubstr l "shifting node_role" || containsSubstr l "shifting node_state" || containsSubstr l "truncat"
         || containsSubstr l "dump operation" || containsSubstr l "dump completed" || containsSubstr l "snapshot" || containsSubstr l "read source"
         || containsSubstr l "self-demot" || containsSubstr l "resync" || containsSubstr l "needs_rebuild" || containsSubstr l "flush"
+        || containsSubstr l "activat" || containsSubstr l "WAL" || containsSubstr l "storage open" || containsSubstr l "staged"
+        || containsSubstr l "node map accepted"
     IO.eprintln s!"# [{label}] {pod} flared since {since}: {fl.length} copy-affecting line(s) (last 50):\n{String.intercalate "\n" (fl.reverse.take 50).reverse}"
 
 private def identityCfg : ClusterConfig := {
@@ -1581,6 +1583,8 @@ def identitySuite : TestSuite := {
           -- a choice by map order alone would pick it
           let victim := a
           let other := b
+          IO.sleep 1100
+          let sinceKill ← utcNow
           match ← c.killFlaredIn victim with
           | .error e => return .fail s!"could not kill flared in {victim}: {e}"
           | .ok o => IO.eprintln s!"# kill -9 flared in {victim}: {o.trim}"
@@ -1588,7 +1592,15 @@ def identitySuite : TestSuite := {
           let seen ← c.watchMaster 120 (fun x => x != m)
           let otherItems ← c.currItems ((← getPodIp other ns).getD "")
           IO.eprintln s!"# masters seen {seen}; {other} items={otherItems} (expected {items})"
-          if seen.contains victim then return .fail s!"{victim} was promoted although its flared had just restarted"
+          -- the record, pass or fail: which evidence did a promotion stand on?
+          -- (the operator's R3 readings and PROMOTION line, the restarted
+          -- node's own catch-up / source check / activation / binding)
+          c.windowRecord sinceKill [victim, other] "copy-identity 11"
+          if seen.contains victim then
+            let fl := (← c.flaredLogAllSince victim sinceKill).splitOn "\n"
+            let firstAt := fun (needle : String) => (fl.find? (containsSubstr · needle)).map (·.take 30)
+            IO.eprintln s!"# {victim} new process since {sinceKill}: storage open {firstAt "storage open"}; source check passed {firstAt "activation source check passed"}; node activated {firstAt "node activated"}; read source BOUND {firstAt "read source BOUND"}"
+            return .fail s!"{victim} was promoted although its flared had just restarted (see the record above: whether its NEW process had caught up, passed its source check, activated and bound before the PROMOTION line)"
           if seen.getLast? != some other then return .fail s!"expected {other} to take over, masters seen {seen}"
           if otherItems != items then return .fail s!"the new master {other} holds {otherItems} of {items} keys"
           let healed ← waitForCondition "the restarted and the drained pods converge" 480 do

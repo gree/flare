@@ -193,6 +193,7 @@ protected:
 	string _rebuilt_from_master_id;
 	string _rebuilt_from_epoch;
 	string _copy_id;
+	bool _copy_identity_consistent = false;
 	string _suspended_from_master_id;
 	string _suspended_from_epoch;
 	// Set when a generation could not be established or persisted. The
@@ -507,6 +508,9 @@ public:
 	// copy changes (truncate, swap, merge dump, a change of the local
 	// history) and replaced when new evidence is recorded. 0 on success.
 	string get_copy_id();
+	// false: the reserved key and COPY_ID disagree (or the second write
+	// failed) — not a normal healthy copy (design §2)
+	bool copy_identity_consistent();
 	// new uuid, generation 1 (a different copy); bump = same uuid, +1
 	int new_copy_identity(const char* why);
 	int bump_copy_generation(const char* why);

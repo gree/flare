@@ -887,7 +887,16 @@ int handler_reconstruction::_activate_with_retry(bool skip_ready_state) {
 		// (a Prepare node never answers locally), and it covers an
 		// activation the controller performs itself after this handler gave
 		// up. bind_read_source re-checks against the map in force.
-		if (this->_role == cluster::role_slave) {
+#ifdef HAVE_LIBROCKSDB
+		storage_rocksdb* idrdb = dynamic_cast<storage_rocksdb*>(this->_storage);
+		const bool identity_ok = idrdb == NULL || idrdb->copy_identity_consistent();
+#else
+		const bool identity_ok = true;
+#endif
+		if (!identity_ok) {
+			log_warning("read source NOT bound: this copy's identity is inconsistent (reserved key and COPY_ID disagree); reads stay forwarded until a verified rebuild", 0);
+		}
+		if (this->_role == cluster::role_slave && identity_ok) {
 			this->_cluster->bind_read_source(this->_cluster->to_node_key(this->_node_server_name, this->_node_server_port),
 				this->_attempt_master_id, this->_epoch_supported ? this->_probe_source_epoch : string(""),
 				"the copy passed its source check (activation attempt " + boost::lexical_cast<string>(i + 1) + ")");

@@ -787,6 +787,8 @@ private def repairVerdictNow (state : FlareClusterState) (key : String) (ns : St
         return some s!"the source master's pod changed during the read ({idBefore} -> {idAfter})"
       match mStats with
       | .ok out =>
+        if statNat out "rocksdb_copy_identity_consistent" == some 0 then
+          return some "the source master's copy identity is inconsistent (reserved key and COPY_ID disagree): not a healthy copy to rebuild from"
         let rLineage := match rStats with | .ok ro => statStr ro "rocksdb_master_id" | .error _ => none
         let rEpoch := match rStats with | .ok ro => statStr ro "rocksdb_source_epoch" | .error _ => none
         let rFromId := match rStats with | .ok ro => statStr ro "rocksdb_rebuilt_from_master_id" | .error _ => none
@@ -1567,6 +1569,9 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
                   pure (some s!"the source master's pod changed during the read ({idBefore} -> {idAfter})")
                 else match mStats with
                   | .ok out =>
+                    if statNat out "rocksdb_copy_identity_consistent" == some 0 then
+                      pure (some "the source master's copy identity is inconsistent (reserved key and COPY_ID disagree): not a healthy copy to rebuild from")
+                    else
                     let rLineage := match rStats with | .ok ro => statStr ro "rocksdb_master_id" | .error _ => none
                     let rEpoch := match rStats with | .ok ro => statStr ro "rocksdb_source_epoch" | .error _ => none
                     let rFromId := match rStats with | .ok ro => statStr ro "rocksdb_rebuilt_from_master_id" | .error _ => none

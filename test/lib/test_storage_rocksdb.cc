@@ -1765,6 +1765,64 @@ void test_copy_identity_persisted_mirrored_and_bumped() {
 	drop_rocksdb(s, wal_master_dir);
 }
 
+// The two identity records disagree (a crash between the reserved-key write
+// and the COPY_ID write, either order): NOT a normal healthy copy.
+void test_copy_identity_records_disagree_is_inconsistent() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	cut_assert_true(s->copy_identity_consistent());
+	const string id = s->get_copy_id();
+	drop_rocksdb_noremove(s);
+	const string file = string(wal_master_dir) + "/flare.rocksdb/COPY_ID";
+	// the key moved to a new generation, the file still names the old one
+	FILE* f = fopen(file.c_str(), "w");
+	fprintf(f, "%s-stale\n", id.c_str());
+	fclose(f);
+	s = make_rocksdb(wal_master_dir);
+	cut_assert_false(s->copy_identity_consistent());
+	drop_rocksdb_noremove(s);
+	// the file is missing while the key exists
+	unlink(file.c_str());
+	s = make_rocksdb(wal_master_dir);
+	cut_assert_false(s->copy_identity_consistent());
+	// a successful generation move (a truncate replaces the content) makes
+	// both records agree again
+	cut_assert_equal_int(0, s->truncate(0));
+	cut_assert_true(s->copy_identity_consistent());
+	drop_rocksdb_noremove(s);
+	s = make_rocksdb(wal_master_dir);
+	cut_assert_true(s->copy_identity_consistent());
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// The generation moves BEFORE the truncate deletes anything: a truncate that
+// fails part-way has already left the old generation behind, so an approval
+// for the old generation can never apply to the changed content.
+void test_truncate_moves_the_generation_before_deleting() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	storage_set_string(s, "k", "v");
+	const string before = s->get_copy_id();
+	cut_assert_equal_int(0, s->truncate(0));
+	const string after = s->get_copy_id();
+	cut_assert_true(after != before);
+	cut_assert_equal_string(after.c_str(), read_file_s(string(wal_master_dir) + "/flare.rocksdb/COPY_ID").c_str());
+	// a truncate stopped right after the identity moved (the state a crash
+	// there leaves): the data is still there, but the copy already carries
+	// the NEXT generation — the old generation never names changed content
+	storage_set_string(s, "k2", "v2");
+	const string before2 = s->get_copy_id();
+	setenv("FLARE_TEST_TRUNCATE_STOP_AFTER_IDENTITY", "1", 1);
+	cut_assert_equal_int(-1, s->truncate(0));
+	unsetenv("FLARE_TEST_TRUNCATE_STOP_AFTER_IDENTITY");
+	const string moved = s->get_copy_id();
+	cut_assert_true(moved != before2);
+	cut_assert_equal_int(1, static_cast<int>(s->count()));
+	drop_rocksdb_noremove(s);
+	s = make_rocksdb(wal_master_dir);
+	cut_assert_equal_string(moved.c_str(), s->get_copy_id().c_str());
+	cut_assert_true(s->copy_identity_consistent());
+	drop_rocksdb(s, wal_master_dir);
+}
+
 void test_switch_to_staging_retains_the_old_copy() {
 	storage_rocksdb* s = make_rocksdb(wal_master_dir);
 	storage_set_string(s, "k", "old");

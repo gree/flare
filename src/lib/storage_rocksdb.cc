@@ -570,6 +570,13 @@ string storage_rocksdb::get_copy_id() {
 	return v;
 }
 
+bool storage_rocksdb::copy_identity_consistent() {
+	pthread_rwlock_rdlock(&this->_mutex_generations);
+	bool b = this->_copy_identity_consistent;
+	pthread_rwlock_unlock(&this->_mutex_generations);
+	return b;
+}
+
 int storage_rocksdb::new_copy_identity(const char* why) {
 	uuid_t uuid;
 	char buf[37];
@@ -586,6 +593,9 @@ int storage_rocksdb::new_copy_identity(const char* why) {
 		r = copy_fs::write_file_durable(this->_data_path, copy_fs::kCopyIdFile, id);
 		log_notice("copy identity: %s (%s)", id.c_str(), why);
 	}
+	pthread_rwlock_wrlock(&this->_mutex_generations);
+	this->_copy_identity_consistent = (r == 0);
+	pthread_rwlock_unlock(&this->_mutex_generations);
 	return r;
 }
 
@@ -610,6 +620,9 @@ int storage_rocksdb::bump_copy_generation(const char* why) {
 		r = copy_fs::write_file_durable(this->_data_path, copy_fs::kCopyIdFile, next);
 		log_notice("copy identity: %s (generation bumped: %s)", next.c_str(), why);
 	}
+	pthread_rwlock_wrlock(&this->_mutex_generations);
+	this->_copy_identity_consistent = (r == 0);
+	pthread_rwlock_unlock(&this->_mutex_generations);
 	return r;
 }
 
@@ -650,6 +663,10 @@ int storage_rocksdb::switch_to_staging(const string& attempt, const string& expe
 			break;
 		}
 		this->_copy_id = v;
+		{
+			string f;
+			this->_copy_identity_consistent = copy_fs::read_small_file(this->_data_path + "/" + copy_fs::kCopyIdFile, f) == 0 && f == v;
+		}
 		this->_clear_header_cache();
 		if (this->_load_or_init_generations() < 0) {
 			log_err("copy switch: generations of the new live copy could not be loaded", 0);
@@ -1002,14 +1019,29 @@ int storage_rocksdb::open() {
 	}
 	{
 		// the copy identity: load, or mint for a copy that has none yet
+		// The two records (reserved key, COPY_ID file) are both updated
+		// BEFORE the content changes. A copy whose records disagree (a
+		// crash between the two writes) is NOT a normal healthy copy: it is
+		// flagged inconsistent until a verified rebuild replaces it.
 		string v;
 		rocksdb::Status cs = this->_db->Get(this->_read_options, kCopyIdKey, &v);
-		if (cs.ok() && !v.empty()) {
+		string f;
+		const bool has_file = copy_fs::read_small_file(this->_data_path + "/" + copy_fs::kCopyIdFile, f) == 0 && !f.empty();
+		const bool has_key = cs.ok() && !v.empty();
+		if (!has_key && !has_file) {
+			if (this->new_copy_identity("first open of a copy without an identity") < 0) {
+				log_err("failed to initialise the copy identity", 0);
+				return -1;
+			}
+			this->_copy_identity_consistent = true;
+		} else if (has_key && has_file && v == f) {
 			this->_copy_id = v;
-			copy_fs::write_file_durable(this->_data_path, copy_fs::kCopyIdFile, v);
-		} else if (this->new_copy_identity("first open of a copy without an identity") < 0) {
-			log_err("failed to initialise the copy identity", 0);
-			return -1;
+			this->_copy_identity_consistent = true;
+		} else {
+			this->_copy_id = has_key ? v : f;
+			this->_copy_identity_consistent = false;
+			log_err("CRITICAL: copy identity INCONSISTENT (reserved key [%s], COPY_ID file [%s]): this copy is not treated as a healthy copy (no approvals, no read binding, not promotable, not a repair source) until a verified rebuild replaces it",
+				has_key ? v.c_str() : "(none)", has_file ? f.c_str() : "(none)");
 		}
 	}
 
@@ -1581,6 +1613,32 @@ int storage_rocksdb::truncate(int b) {
 		return -1;
 	}
 
+	// Copy retention (design §2): the copy identity moves to its next
+	// generation BEFORE anything is deleted, so a crash part-way never leaves
+	// the old generation naming changed content (an approval for the old
+	// generation must not apply to it). If it cannot be recorded, no truncate.
+	if (this->bump_copy_generation("truncate (before deleting)") < 0) {
+		log_err("truncate refused: the copy identity could not move to its next generation", 0);
+		if ((b & behavior_skip_lock) == 0) {
+			this->_mutex_slot_unlock_all();
+			pthread_rwlock_unlock(&this->_mutex_wholelock);
+		}
+		return -1;
+	}
+	// TEST SEAM (unit tests only): stop right after the identity moved and
+	// before anything is deleted — the state a crash at that point leaves
+	{
+		const char* seam = getenv("FLARE_TEST_TRUNCATE_STOP_AFTER_IDENTITY");
+		if (seam != NULL && seam[0] != '\0' && strcmp(seam, "0") != 0) {
+			log_warning("truncate stopped after the identity moved (FLARE_TEST_TRUNCATE_STOP_AFTER_IDENTITY test seam)", 0);
+			if ((b & behavior_skip_lock) == 0) {
+				this->_mutex_slot_unlock_all();
+				pthread_rwlock_unlock(&this->_mutex_wholelock);
+			}
+			return -1;
+		}
+	}
+
 	int r = 0;
 
 	// Full table scan delete (RocksDB doesn't have fast truncate).
@@ -1632,7 +1690,6 @@ int storage_rocksdb::truncate(int b) {
 	// is whole-lock -> generations, the same as hard_reset().
 	if (r == 0) {
 		this->advance_source_epoch("bulk");
-		this->bump_copy_generation("truncate");
 	}
 
 	if ((b & behavior_skip_lock) == 0) {

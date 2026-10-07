@@ -1,6 +1,6 @@
 # コピー保持・staging・切替・容量管理の設計（R3-D 残件 + R7）
 
-状態：**設計案 第2版（2026-10-07、レビュー指摘を反映。未実装）**。
+状態：**設計 第3版（2026-10-07、2 回目のレビュー指摘と命名を反映。実装中）**。
 
 固定された方針（ユーザー、2026-10-07）：
 
@@ -60,55 +60,77 @@ data_dir/
   **epoch に結び付いた** WAL catch-up を行う（同じ epoch を名乗らない応答、
   欠番、purge 済みなら失敗）。
 
-### 3.2 full dump（コピー中の変更を取りこぼさない）
+### 3.2 full dump（コピー中の変更を取りこぼさない、途中状態を公開しない）
 
-- dump は point-in-time ではない。そこで：
-  1. dump の開始前に、source の位置 `L0` と epoch `E` を記録する（既存の
-     features probe）。
-  2. dump を staging に書く。
-  3. dump の後、staging に対して `L0` から source の現在位置まで、epoch `E` に
-     結び付いた WAL catch-up を行う。dump 中の書き込みは、すべて WAL にある
-     （適用は冪等）。
-  4. source の identity（lineage と epoch）が開始時と終了時で同じこと（既存の
-     照合）。
-- **旧版 source**（epoch に結び付いた WAL catch-up を提供しない）では、
-  コピー中の変更を取りこぼさないことを保証できない。この場合、オンライン
-  再構築とは同等に扱わない：
-  - 既定では停止して通知する（旧コピー保持、Prepare のまま）。
-  - 運用手順：その partition への書き込みを止めて再構築するか、明示的な承認
-    （§7）で、旧来の in-place 経路（保護規則つき）を使う。
+「適用は冪等」だけでは足りない。dump に新しい値が含まれていても、古い WAL を
+再生している途中では一時的に巻き戻る。そこで以下を**すべて**条件にする。
+
+1. dump の開始前に、source の位置 `L0` と epoch `E` を記録する。
+2. dump を staging に書く。
+3. dump の完了後に、追いつく**目標位置 `L1`** を source から確定する
+   （epoch `E` のまま）。
+4. `L0` の次から `L1` まで、同じ履歴（epoch `E`）の WAL を**欠落なく順序どおり**
+   staging に適用する。
+5. その間、staging は read・昇格・修復元に**一切使わない**。staging は live の
+   外にあり、map にも binding にも現れない。§4 の切替より前には誰も読めない。
+6. 次のどれかなら検証失敗とし、staging を捨てて旧コピーを保持する：WAL の
+   purge（欠番）、epoch の変更、不完全な dump（完了マーカーなし）、source の
+   identity の不一致、`L1` まで到達できない。
+7. **期間中に変更されなかったキーを取りこぼさない**こと：op_dump の server が
+   単一の iterator で全キーを走査し、完了マーカーまで送ることを前提にし、
+   試験で確かめる（§11）。
+
+（任意の改善：dump の server が自分の iterator の snapshot sequence `Ld` を
+送れば、`Ld` から再生でき、巻き戻りが起きない。旧版 source は送らないので、
+基本は `L0` から再生する。）
+
+**旧版 source**（epoch に結び付いた WAL catch-up を提供しない）：承認による
+免除はしない。**書き込みが止まっていることを確認できる手順**でだけ扱う。
+- dump の前後で source の位置と epoch が変わらないこと（`L0 == L1`、同じ
+  epoch）を確認できたときだけ、その dump を整合したコピーとして受け入れる
+  （WAL の再生は不要）。
+- 位置を読めない source（LSN を提供しない）では確認できないので停止する。
+- 書き込みを止めるのは運用手順で行う（リリースノートと運用手順に記載）。
 
 ### 3.3 切替前の最終確認
 
 - 保護規則（`copy_protection.h`）を、切替の直前にもう一度評価する。
 - 件数は記録するが、合否には使わない。
 
-## 4. 切替（クラッシュに耐える 2 相、同期順序を固定）
+## 4. 切替（クラッシュに耐える、状態から復旧を判断する）
 
-`switch.intent` の内容：attempt-id、フェーズ、旧コピー（live）の copy-id、
-新コピー（staging）の copy-id、retained のディレクトリ名。
+### 4.1 手順と同期順序
 
-| フェーズ | 操作（この順） | 同期 |
-|---|---|---|
-| PREPARED | intent を一時ファイルに書く → fsync → `switch.intent` に rename | `data_dir` を fsync |
-| LIVE_RETAINED | live の DB を閉じる → `flare.rocksdb` を `retained-<id>` に rename → intent のフェーズを更新 | rename の後に `data_dir` を fsync、intent の更新でも fsync |
-| NEW_LIVE | `staging-<id>` を `flare.rocksdb` に rename → intent を更新 | 同上 |
-| OPENED | 新しい live を開き、`COPY_ID` が intent の新コピーと一致することを確認 → intent を更新 | 同上 |
-| DONE | intent を削除 | `data_dir` を fsync |
+0. **新コピーを永続化する**：staging の DB を flush して閉じ、WAL を sync し、
+   staging ディレクトリの全ファイルとディレクトリ自体を fsync する。
+   `staging-<id>/COPY_ID` を書いて fsync する。ここまで終わってから 1 に進む。
+1. intent を一時ファイルに書いて fsync し、`switch.intent` に rename し、
+   `data_dir` を fsync する（PREPARED）。
+2. live の DB を閉じ、`flare.rocksdb` を `retained-<id>` に rename し、
+   `data_dir` を fsync する。
+3. `staging-<id>` を `flare.rocksdb` に rename し、`data_dir` を fsync する。
+4. 新しい live を開き、`COPY_ID` が intent の新コピーと一致することを確認する。
+5. intent を削除し、`data_dir` を fsync する。
 
-**起動時の手順（この順。staging の掃除は最後）**：
+intent のフェーズ欄は診断用。**復旧はフェーズに頼らず、実在するディレクトリと
+copy-id から判断する**（intent の更新前に落ちても判断できるように）。
 
-1. `switch.intent` があれば、**先に解決する**：
-   - PREPARED、または LIVE_RETAINED で live がまだある：何もしていない状態に
-     戻す（intent を削除）。
-   - LIVE_RETAINED で live がない：`retained-<id>` を `flare.rocksdb` に戻す
-     （ロールバック）。
-   - NEW_LIVE／OPENED：`flare.rocksdb` の `COPY_ID` を確認する。新コピーなら
-     完了させる。旧コピーなら NEW_LIVE が反映されていないので、ロールバック
-     する。どちらでもなければ停止して通知する（CRITICAL）。
-2. その後、intent が参照していない `staging-*` を削除する（未完成のコピーで、
-   source から取り直せる）。
-3. `retained-*` は §8 の条件を満たすまで残す。
+### 4.2 起動時の復旧（intent を先に解決し、staging の掃除は最後）
+
+intent があるとき、intent の旧 ID を O、新 ID を N とする。L・R・S は
+`flare.rocksdb`・`retained-<id>`・`staging-<id>` の実在とその `COPY_ID`：
+
+| L | R | S | 意味 | 処置 |
+|---|---|---|---|---|
+| O | なし | N | 手順 2 の前 | 切り替えていない。intent を削除（attempt は中止） |
+| なし | O | N | 手順 2 の後、3 の前 | ロールバック：R を L に戻す → intent を削除 |
+| N | O | なし | 手順 3 の後 | 前進：L を開いて N を確認 → intent を削除 |
+| N | なし | なし | retained が消えている | 停止して通知（CRITICAL。retained は §8 の前に消えてはならない） |
+| その他（O も N も見つからない、ID の重複・不一致など） | | | 不整合 | 停止して通知（CRITICAL）。何も消さない |
+
+- 各 rename は原子的で、`data_dir` の fsync の後に永続化される。どの rename の
+  前後で落ちても、上の表のどれかの状態になる。
+- intent の解決が終わってから、intent が参照していない `staging-*` を削除する。
 
 ## 5. 送り手（snapshot serve、R7）
 
@@ -140,18 +162,30 @@ data_dir/
   行う。
 - 隔離は `is_corrupted` を検出したときだけ。
 
-## 7. 明示的な承認（Kubernetes：CR）
+## 7. 明示的な承認（Kubernetes：CR `FlareCopyDiscardApproval`）
 
-- 新しい CR（例：`FlareCopyDiscardApproval`）。RBAC で作成権限を絞る。
-  - spec：対象 Pod UID、copy-id、要求 ID、操作（`discard-retained`、
-    `discard-before-copy`（容量不足時）、`legacy-in-place-rebuild`（旧版
-    source）、`discard-quarantine`）。
-  - status：受理／拒否、理由、消費した時刻、実行結果。
-- operator は対象の Pod UID と copy-id が**今**一致するときだけ flared に渡す。
-  flared も、保存中のコピーの copy-id と一致するときだけ実行する。
-- 一回限り：消費したら再利用しない。対象のコピーが変われば（世代が増えれば）
-  失効する。
-- 承認は容量と運用の判断だけを上書きする。保護規則（安全）は上書きしない。
+- RBAC で作成権限を絞る。承認できるのは**特定のコピーの破棄だけ**。整合性の
+  保証は免除しない（旧版 source の in-place 再構築は対象外：§3.2）。
+- spec：
+  - `clusterUID`、`podUID`、`copyId`、`requestId`
+  - `operation`：`discard-retained` ／ `discard-before-copy`（容量不足のとき、
+    特定のコピーを先に捨てる） ／ `discard-quarantine`
+  - `expiresAt`（有効期限）
+- status：`phase`（Accepted／Running／Completed／Rejected）、理由、対象の
+  attempt、各時刻。
+- operator は clusterUID・Pod UID・copy-id が**今**一致し、期限内のときだけ
+  flared に渡す。flared も、保存中のコピーの copy-id と一致するときだけ実行する。
+- **一回限りの実行を flared 側でも永続的に重複排除する**：
+  1. 実行前に `requestId` を data_dir の承認記録へ "started" として書いて
+     fsync する。
+  2. 実行する。
+  3. "done" と結果を書いて fsync する。
+
+  同じ `requestId` が再び届いたら、記録を見て応答し、再実行しない。"started"
+  だけが残っていれば、対象のコピーが実在するかで実行済みを判断する（破棄済みなら
+  done にする）。これで、実行後・status 保存前に落ちても再実行しない。
+- コピーが変われば（世代が増えれば）、承認は失効する。承認は容量と運用の判断
+  だけを上書きし、保護規則（安全）は上書きしない。
 
 ## 8. 旧コピー（retained）の削除条件
 
@@ -170,8 +204,11 @@ data_dir/
 - 判定：これから増える量 ＋ 予約分 ≤ 使える空き。
   - 増える量：staging の見込み（source の `rocksdb_data_bytes`、R7 で計測して
     係数を決める）＋ WAL catch-up の見込み。
-  - 予約分：設定値（compaction・WAL・quarantine の予算）。根拠のない既定値は
-    置かない。算定できない（source の量を読めない、設定がない）なら停止する。
+  - 予約分：CR の `spec.rocksdb.rebuildReserveBytes`（compaction・WAL・
+    quarantine の予算）。値は R7 の負荷試験で決める（未決）。
+  - **未設定なら再構築は止まる**（`rebuild_blocked=reserve_unset`）。source の量を
+    読めないときも止まる。リリースノートに明記する（既存のクラスタは、設定する
+    まで再構築しない）。
 - hard link：checkpoint と snapshot は SST を共有し得る。共有分は増える量に
   入れない。数えるのは新たに書かれるファイルだけ。
 - tmpfs：ファイルシステムの空きと、cgroup のメモリの余裕（上限 − 現在の使用量。
@@ -183,19 +220,31 @@ data_dir/
 
 ## 10. operator
 
-- 同時数：再構築は partition ごとに 1、クラスタ全体でも 1。repair ledger の
-  永続フェーズ（demoted／reseated）から数えるので、operator の再起動後も
-  実行中の処理を数える。
+- 同時数：再構築は partition ごとに 1、クラスタ全体でも 1。**repair ledger だけ
+  では数えない**：初期構築、再起動後の再登録（rejoin）、re-seat、ledger に
+  載らない flared 自身の再構築も含める必要がある。
+  - 数える対象：map で Slave/Prepare のノード、および stats で
+    `reconstruction_current_state=running` を報告するノード。どちらも operator の
+    再起動後に読み直せる（map は永続、stats は各ノードのもの）。
+  - 制御点：ノードを Slave/Prepare に割り当てるすべての経路（autoAssign、rejoin、
+    re-seat、zone swap、初期構築）で、上限に達していれば Proxy のまま待たせる。
+    flared は map が Prepare を指示したときにだけ再構築を始めるので、割り当ての
+    制御で flared 自身の再構築も数えられる（例外を見つけたら列挙する）。
+  - 初期構築（空クラスタ）は上限の対象外にするかを、実装時に明記する（データが
+    ない段階の直列化は不要）。
 - 隔離中・再構築停止中のノードを昇格候補から外す。アラートを出す。
 - release／re-seat 時の再確認は維持する（実装済み）。
 
 ## 11. 試験（停止点で順序を固定する）
 
-1. full dump の staging：dump 中に書き込みを続け、WAL catch-up の後に全キー・
-   値が source と一致する。dump 中に source の epoch を変えたら、切り替えず
-   旧コピーを保持する。
-2. 切替の各フェーズでの kill → 起動時に intent を先に解決し、ロールバックか
-   完了の一貫した状態になる。staging の掃除は intent の解決の後。
+1. full dump の staging：dump 中に**更新・削除・再作成・期限切れ**を続け、
+   `L1` までの再生の後に全キー・値（期限を含む）が source と一致する。dump 中に
+   変更されなかったキーも全部ある。purge・epoch の変更・不完全な dump では
+   切り替えず、旧コピーを保持する。staging が途中で read・昇格・修復元に
+   使われない。
+2. 切替の**各 rename の前後・intent 更新の前後**での kill → 起動時に、実在する
+   ディレクトリと copy-id から §4.2 の表のとおりに復旧する。staging の掃除は
+   intent の解決の後。
 3. 容量不足（開始時とコピー中）→ 停止・通知・旧コピー保持。copy-id と
    Pod UID が一致する承認だけが一度だけ通る。コピーが変わった後の承認は失効。
 4. snapshot の同時要求（2 replica）→ source ごとに 1 に直列化され、互いを
@@ -204,12 +253,18 @@ data_dir/
    保持する。
 6. quarantine：marker の後・rename の後・空 DB 作成の後の各点で kill しても、
    次の起動で空コピーが健全扱いされない。1 世代の上限で停止する。
-7. 混在バージョン：旧版 source ではオンライン再構築をせず、停止・通知し、
-   承認（または書き込み停止の手順）で進む。
+7. 混在バージョン：旧版 source ではオンライン再構築をせず、停止・通知する。
+   書き込み停止を確認できたとき（`L0 == L1`）だけ進む。承認では進まない。
+9. 承認の重複排除：実行後・status 保存前に落としても、同じ `requestId` で
+   再実行しない。期限切れ・copy-id の不一致・クラスタ／Pod UID の不一致は拒否。
 8. 旧コピーの削除：§8 の 4 条件のどれかが欠けたら削除しない。
 
-## 12. 残る判断（実装前に必要なもの）
+## 12. 実装の順序
 
-- `FlareCopyDiscardApproval` の名前と、spec・status の項目（§7 の案で
-  よいか）。
-- 予約分の設定項目の名前と、R7 の負荷試験の手順。
+1. コピーの identity（ID・世代、`COPY_ID`、stats）。
+2. 切替と起動時の復旧（§4、純粋な判定表を単体試験）。
+3. full dump と snapshot の staging 化、`L0`／`L1` の再生と検証（§3）。
+4. 容量（§9、`rebuildReserveBytes`、コピー中の監視）。
+5. quarantine（§6）。
+6. 承認 CR と flared の重複排除（§7）。
+7. snapshot serve の分離と同時数（§5）、operator の同時数（§10）。

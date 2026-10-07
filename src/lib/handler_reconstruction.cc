@@ -832,10 +832,14 @@ int handler_reconstruction::_staged_rebuild(bool snapshot_ok, const string& peer
 		snapshot_ok = false;	// a checkpoint without an epoch is refused anyway
 	}
 	{
+		// Retained copies are NOT a generation limit (only quarantine is,
+		// design §6): they stay until §8 or an approval, and the space they
+		// take is already reflected in what the filesystem reports as free —
+		// the capacity check below decides (CI 37578618876: a one-retained
+		// limit blocked a replica's second rebuild forever).
 		const vector<string> retained = rdb->list_retained();
 		if (!retained.empty()) {
-			return blocker::stop(rdb, "retained_present",
-				"a retained copy (" + retained[0] + ") is still here and only one generation is kept: it is deleted when its conditions hold (design §8) or by an explicit approval");
+			log_notice("staged rebuild: %zu retained copy(ies) kept here (deleted under the §8 conditions or by an approval); their space counts in the capacity check", retained.size());
 		}
 	}
 	copy_identity src;

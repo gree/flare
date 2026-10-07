@@ -299,9 +299,12 @@
      replica の Active まで維持する（運用手順）。切替後に位置が動いていたら
      `rebuild_blocked=legacy_source_writes` で停止し、activation しない。
    - 残る制限：
-     - retained が残っている間（§8 の条件が揃う前、epoch のない source、
-       記録の書き込み前のクラッシュ）は次の staged 再構築が
-       `rebuild_blocked=retained_present` で止まる。削除は承認（Phase 6、未実装）。
+     - retained は世代で制限しない（世代上限は quarantine のみ）。容量の判定に
+       含まれる。§8 の条件は「live がその retained を置き換えたコピー」なので、
+       切替が 2 回続くと古い方の retained は自動では消えず、承認が要る
+       （運用上の負担。自動削除の条件を広げるかは判断事項）。
+       （37578618876 で、私が加えた retained 1 世代の制限が replica の 2 回目の
+       再構築を止め続けた。設計にない制限だったので削除した。）
      - 新しい live を開けない切替失敗では、このプロセスでは storage が使えない
        （次の起動時に intent から復旧する）。
      - 切替後の catch-up と転送の競合（identity 転送が OFF のとき、転送された

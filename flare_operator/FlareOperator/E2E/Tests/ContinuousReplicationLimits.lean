@@ -5091,12 +5091,21 @@ def promotionReasonsSuite : TestSuite := {
           if w != 60 then return .fail s!"precondition: stored {w}/60"
           if !(← convergedItems c mIp sIp "the follower holds every key") then return .fail "precondition: the follower did not converge"
           let sKey := s!"{sPod}.{promotionReasonsCfg.name}-nodes.{ns}.svc.cluster.local:{promotionReasonsCfg.flarePort}"
-          -- the follower rebuilds (staged, WAL catch-up off) and holds at the
-          -- switch: a copy is in flight
+          -- the follower must REBUILD (CI 37740298550: a restart on its PVC
+          -- only resumed following — a still-following copy needs no
+          -- rebuild): a new history on the master (flush_all), then keys
+          -- again (a source holding keys: the copy protection does not defer
+          -- the repair). The follower builds a staged copy (WAL catch-up off)
+          -- and holds at the switch: a copy is in flight.
           discard <| kubectl ["exec", "-n", ns, sPod, "-c", "flared", "--", "touch", "/tmp/dhold"]
-          if let .error e ← c.killFlaredIn sPod then return .fail s!"precondition: could not restart flared in {sPod}: {e}"
           let since ← utcNow
-          let held ← waitForCondition s!"{sPod}'s staged copy is held in flight at the switch" 300 do
+          discard <| execInDebugPod promotionReasonsCfg.debugPod ns s!"printf 'flush_all\\r\\n' | nc -w 5 {mIp} {promotionReasonsCfg.flarePort}"
+          IO.sleep 2000
+          let w2 ← writeKeys promotionReasonsCfg.debugPod ns mIp promotionReasonsCfg.flarePort "pr2" 60
+          if w2 != 60 then
+            discard <| kubectl ["exec", "-n", ns, sPod, "-c", "flared", "--", "rm", "-f", "/tmp/dhold"]
+            return .fail s!"precondition: stored {w2}/60 after the new history"
+          let held ← waitForCondition s!"{sPod}'s staged copy is held in flight at the switch" 600 do
             return containsSubstr (← c.flaredLogSince sPod since) "'switch to the verified staging copy' held by FLARE_TEST_DESTRUCTIVE_HOLD_FILE"
           if !held then
             discard <| kubectl ["exec", "-n", ns, sPod, "-c", "flared", "--", "rm", "-f", "/tmp/dhold"]

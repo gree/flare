@@ -544,22 +544,17 @@ private def rebuildObservations (st : FlareClusterState) (ns : String) : IO (Lis
   let mut obs : List (String × RebuildConcurrency.Obs) := []
   for (key, _) in st.nodeMap do
     let pod := extractPodName key
-    -- NotFound is absence; any other failure (forbidden, timeout) is unknown
-    let found : Option Bool ← match ← kubectl ["get", "pod", pod, "-n", ns, "-o", "jsonpath={.metadata.uid}"] with
-      | .ok uid => pure (if uid.trim.isEmpty then none else some true)
-      | .error e => pure (if containsSubstr e "NotFound" || containsSubstr e "not found" then some false else none)
-    let o ← match found with
-      | some true =>
+    -- absent ONLY on an empty --ignore-not-found answer; any failure
+    -- (forbidden, timeout) is unknown
+    let found : Option Bool ← match ← kubectl ["get", "pod", pod, "-n", ns, "--ignore-not-found=true", "-o", "jsonpath={.metadata.uid}"] with
+      | .ok uid => pure (some !uid.trim.isEmpty)
+      | .error _ => pure none
+    let reply ← if found == some true then
         match ← Bridge.queryPodStats pod ns "stats" with
-        | .ok out =>
-          let complete := (out.splitOn "\n").any fun l => l.trim == "END"
-          let rs := (out.splitOn "\n").findSome? fun l =>
-            let t := (l.replace "\r" "").trim
-            if t.startsWith "STAT reconstruction_current_state " then some (t.drop "STAT reconstruction_current_state ".length) else none
-          pure (RebuildConcurrency.obsOf found complete (statNat out "rebuild_parked" == some 1)
-            (statNat out "rebuild_in_flight" == some 1) (statNat out "rocksdb_snapshot_serving" == some 1) (rs == some "running"))
-        | .error _ => pure RebuildConcurrency.Obs.unknown
-      | _ => pure (RebuildConcurrency.obsOf found false false false false false)
+        | .ok out => pure (some out)
+        | .error _ => pure none
+      else pure none
+    let o := RebuildConcurrency.obsOfReply found reply
     obs := obs ++ [(key, o)]
   let unk := obs.filterMap fun (k, o) => if o == .unknown then some k else none
   if !unk.isEmpty then

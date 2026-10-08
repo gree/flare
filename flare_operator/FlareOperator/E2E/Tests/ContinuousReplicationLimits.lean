@@ -2380,9 +2380,21 @@ def emptySourceSuite : TestSuite := {
           let preOther ← c.statStr (← ip other) "rocksdb_source_epoch"
           discard <| kubectl ["delete", "pod", m, "-n", ns, "--wait=false"]
           let promoted ← c.newMasterAfter m 240
+          let some m2 := promoted
+            | discard <| kubectl ["exec", "-n", ns, r, "-c", "flared", "--", "rm", "-f", "/tmp/act-hold"]
+              return .fail s!"no successor was promoted after draining {m}"
+          -- review round 3: release the hold only once the REPLICA itself has
+          -- accepted a map naming {m2} (the operator's map alone is not that),
+          -- held before it and not activated before it
+          -- (the log is read and judged right before the release)
+          let acceptedHeld ← waitForCondition s!"{r} accepts the map naming {m2} while its activation is still held" 180 do
+            let ls := (← c.flaredLogSince r since).splitOn "\n"
+            return (FlareOperator.E2E.TraceMatch.heldAcrossNewMap ls m2).isNone
           discard <| kubectl ["exec", "-n", ns, r, "-c", "flared", "--", "rm", "-f", "/tmp/act-hold"]
-          let some m2 := promoted | return .fail s!"no successor was promoted after draining {m}"
           if m2 == r then return .fail s!"precondition: the held replica {r} itself was promoted"
+          if !acceptedHeld then
+            let why := (FlareOperator.E2E.TraceMatch.heldAcrossNewMap ((← c.flaredLogSince r since).splitOn "\n") m2).getD "?"
+            return .fail s!"PRECONDITION NOT MET (this run says nothing about the behaviour after the new map): {why}"
           let newEpoch ← c.promotedEpoch m2 preOther
           if newEpoch.isNone then return .fail s!"precondition: {m2}'s epoch before the fault was unreadable or did not advance after its promotion"
           -- The old copy must not be activated. Two legitimate ways to see it:
@@ -2433,6 +2445,8 @@ def emptySourceSuite : TestSuite := {
           -- (TraceMatch.judgeActivation, unit-tested): BUG / UNDETERMINED
           -- fail; UNDECIDED (old copy activated BEFORE accepting the new
           -- map) is not a pass either
+          if let some why := FlareOperator.E2E.TraceMatch.heldAcrossNewMap (log.splitOn "\n") m2 then
+            return .fail s!"PRECONDITION NOT MET over the whole window (not a safety result): {why}"
           let act := judgeActivation (log.splitOn "\n") m m2
           IO.eprintln s!"# {r} activation order: {act.describe}"
           match act with

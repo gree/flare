@@ -52,15 +52,53 @@ inductive Obs where
   | unknown         -- the pod or its stats could not be read: a rebuild is not ruled out
   deriving Repr, BEq
 
-def obsOf (podFound : Option Bool) (complete parked inFlight serving running : Bool) : Obs :=
+/-- One stat flag as read: explicit 0, explicit 1, missing, or present but invalid. -/
+inductive Flag where
+  | zero | one | missing | invalid
+  deriving Repr, BEq
+
+private def statValue (lines : List String) (k : String) : Option String :=
+  lines.findSome? fun l =>
+    if l.startsWith s!"STAT {k} " then some (l.drop (s!"STAT {k} ").length)
+    else if l == s!"STAT {k}" then some "" else none
+
+def flagOf (lines : List String) (k : String) : Flag :=
+  match statValue lines k with
+  | none => .missing
+  | some "0" => .zero
+  | some "1" => .one
+  | some _ => .invalid
+
+/-- The fresh observation from ONE stats reply, keeping missing and invalid
+    apart from an explicit 0 (review round 3). `podFound`: `some false` =
+    confirmed absent (an empty `--ignore-not-found` answer), `none` = the pod
+    lookup failed. Parked-idle ONLY on an explicit parked=1, in_flight=0 and
+    snapshot_serving=0; parked=1 with either of the others missing or invalid
+    is unknown (a slot is never given back on a guess). -/
+def obsOfReply (podFound : Option Bool) (reply : Option String) : Obs :=
   match podFound with
   | some false => .absent
   | none => .unknown
   | some true =>
-    if !complete then .unknown
-    else if parked && !inFlight && !serving then .parkedIdle
-    else if running || inFlight then .running
-    else .idle
+    match reply with
+    | none => .unknown
+    | some out =>
+      let lines := (out.splitOn "\n").map (fun l => (l.replace "\r" "").trim)
+      if !lines.contains "END" then .unknown else
+      let parked := flagOf lines "rebuild_parked"
+      let inFlight := flagOf lines "rebuild_in_flight"
+      let serving := flagOf lines "rocksdb_snapshot_serving"
+      let rs := statValue lines "reconstruction_current_state"
+      let rsValid := match rs with
+        | none => true
+        | some v => ["none", "running", "succeeded", "failed", "aborted"].contains v
+      if parked == .invalid || inFlight == .invalid || serving == .invalid || !rsValid then .unknown
+      else if parked == .one then
+        if inFlight == .one || serving == .one then .running
+        else if inFlight == .zero && serving == .zero then .parkedIdle
+        else .unknown
+      else if inFlight == .one || rs == some "running" then .running
+      else .idle
 
 /-- Combine an OLDER parked list with FRESH observations. A fresh running or
     unknown reading wins over an older "parked" (the slot is not given back

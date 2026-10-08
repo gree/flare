@@ -1238,6 +1238,15 @@ private def checkActivationOrder (ctx : Ctx) : IO Unit := do
   let act := fun (i : Nat) => s!"[NTC] node activated (attempt 1) on the copy from {n i} (map version now 9)"
   let stop := s!"[WRN] activation STOPPED before attempt 1: the partition's master is now {n 1}, not the source {n 2}"
   let old := "empty-source-nodes-2"
+  let hold := "[NTC] activation attempt 1 held by FLARE_TEST_ACTIVATION_HOLD_FILE"
+  let newPodName := "empty-source-nodes-1"
+  check ctx "activation precondition (review round 3): held, then the new map accepted, then STOPPED (no held line after the acceptance is needed) — holds"
+    (heldAcrossNewMap [dump 2, hold, hold, acc 415 1, stop] newPodName == none)
+  check ctx "activation precondition (review round 3): the CI 37731207056 shape (activated on the old map, then accepted), no hold before the acceptance, no acceptance — NOT met"
+    ((heldAcrossNewMap [dump 2, hold, chk 2 410, act 2, acc 415 1] newPodName).isSome
+      && (heldAcrossNewMap [dump 2, acc 415 1, hold] newPodName).isSome
+      && (heldAcrossNewMap [dump 2, hold] newPodName).isSome
+      && (heldAcrossNewMap [dump 2, acc 415 1] newPodName).isSome)
   let new := "empty-source-nodes-1"
   -- CI 37438962871 test 4, shortened
   let ci := [acc 408 2, dump 2, acc 415 1, stop, dump 1, chk 1 435, act 1, acc 442 1]
@@ -1305,14 +1314,25 @@ private def checkRebuildConcurrency (ctx : Ctx) : IO Unit := do
     (resumeCandidate parkState 1 1 ["x"] ["z"] == none && resumeCandidate parkState 1 1 ["x"] [] == some "x")
   -- round 2: contradictory observations — a FRESH running / unknown reading
   -- wins over an older parked one; a fresh parked-idle reading frees the slot
-  check ctx "rebuild concurrency (round 2): a fresh read decides together — parked+idle is parked (even though its reconstruction reports running); NotFound is absent; an unreadable pod or stats is unknown"
-    (obsOf (some true) true true false false true == .parkedIdle
-      && obsOf (some true) true false false false true == .running
-      && obsOf (some true) true true true false true == .running
-      && obsOf (some false) false false false false false == .absent
-      && obsOf none false false false false false == .unknown
-      && obsOf (some true) false false false false false == .unknown
-      && obsOf (some true) true false false false false == .idle)
+  let rep := fun (body : String) => some (body ++ "END\r\n")
+  check ctx "rebuild concurrency (review round 3): parked=1 with in_flight / snapshot_serving MISSING is unknown (not parked-idle) — the reviewer's reply"
+    (obsOfReply (some true) (rep "STAT rebuild_parked 1\r\nSTAT reconstruction_current_state running\r\n") == .unknown
+      && obsOfReply (some true) (rep "STAT rebuild_parked 1\r\nSTAT rebuild_in_flight 0\r\nSTAT reconstruction_current_state running\r\n") == .unknown)
+  check ctx "rebuild concurrency (review round 3): parked=1 with in_flight / serving INVALID is unknown; an explicit 0 for both is parked-idle"
+    (obsOfReply (some true) (rep "STAT rebuild_parked 1\r\nSTAT rebuild_in_flight x\r\nSTAT rocksdb_snapshot_serving 0\r\n") == .unknown
+      && obsOfReply (some true) (rep "STAT rebuild_parked 1\r\nSTAT rebuild_in_flight 0\r\nSTAT rocksdb_snapshot_serving 2\r\n") == .unknown
+      && obsOfReply (some true) (rep "STAT rebuild_parked yes\r\nSTAT rebuild_in_flight 0\r\nSTAT rocksdb_snapshot_serving 0\r\n") == .unknown
+      && obsOfReply (some true) (rep "STAT rebuild_parked 1\r\nSTAT rebuild_in_flight 0\r\nSTAT rocksdb_snapshot_serving 0\r\nSTAT reconstruction_current_state running\r\n") == .parkedIdle)
+  check ctx "rebuild concurrency (review round 3): running / in flight / idle; an invalid reconstruction state is unknown; absent only when confirmed; no reply or no END is unknown"
+    (obsOfReply (some true) (rep "STAT reconstruction_current_state running\r\n") == .running
+      && obsOfReply (some true) (rep "STAT rebuild_parked 1\r\nSTAT rebuild_in_flight 1\r\n") == .running
+      && obsOfReply (some true) (rep "STAT rebuild_in_flight 1\r\n") == .running
+      && obsOfReply (some true) (rep "STAT reconstruction_current_state succeeded\r\nSTAT rebuild_parked 0\r\n") == .idle
+      && obsOfReply (some true) (rep "STAT reconstruction_current_state walking\r\n") == .unknown
+      && obsOfReply (some false) none == .absent
+      && obsOfReply none none == .unknown
+      && obsOfReply (some true) none == .unknown
+      && obsOfReply (some true) (some "STAT rebuild_parked 0\r\n") == .unknown)
   check ctx "rebuild concurrency (round 2): an older parked key re-read as running or unknown is NOT subtracted; one re-read as parked-idle is; one not re-read keeps its standing"
     (reconcile ["x", "y", "w"] [("x", .running), ("y", .unknown), ("v", .parkedIdle)] == (["x", "y"], ["w", "v"]))
   let pBefore := st [m0, m1, ("x", holdNode .Slave .Prepare 1 "x"), ("a", holdNode .Proxy .Active (-1) "a")]

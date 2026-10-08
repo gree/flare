@@ -213,4 +213,24 @@ def judgeActivation (lines : List String) (oldPod newPod : String) : Activation 
     else return .undecided s!"{oldPod}'s completed copy was activated BEFORE accepting map v{aV} (log line {ai} < {acceptAt}); re-validation and read suppression after the switch need a judgment"
   | none => return .undetermined "no activation"
 
+/-- The PRECONDITION of the master-change activation test (review round 3,
+    CI 37731207056 empty-source 6), judged on the replica's log read
+    IMMEDIATELY BEFORE the hold is released (and again on the whole window):
+    the replica accepted the map naming `newPod`; its activation was held
+    before that (a held attempt precedes the acceptance); and no activation
+    precedes the acceptance. A held attempt is not required AFTER the
+    acceptance: the next attempt's source check sees the new master and is
+    STOPPED instead of held. `none` = the precondition holds; `some why` =
+    it does not (the run then says nothing about the behaviour after the new
+    map). -/
+def heldAcrossNewMap (lines : List String) (newPod : String) : Option String := Id.run do
+  let idx := lines.zip (List.range lines.length)
+  let some (_, acceptAt) := idx.find? fun (l, _) => contains l "node map accepted (version" && contains l s!" 0={newPod}."
+    | return some s!"the replica never logged accepting a map that names {newPod}"
+  if !(idx.any fun (l, i) => contains l "held by FLARE_TEST_ACTIVATION_HOLD_FILE" && i < acceptAt) then
+    return some s!"no held activation attempt precedes the acceptance of the map naming {newPod} (line {acceptAt})"
+  match idx.find? fun (l, i) => contains l "node activated (attempt" && i < acceptAt with
+  | some (l, i) => return some s!"an activation (line {i}) precedes the acceptance of the map naming {newPod}: {l}"
+  | none => return none
+
 end FlareOperator.E2E.TraceMatch

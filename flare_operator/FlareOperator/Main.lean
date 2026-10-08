@@ -1467,11 +1467,51 @@ private def commitChecked (stateRef : IO.Ref FlareClusterState) (ver : Nat) (ucs
     -- THIS pass, whose pod, flared process and copy are still the ones read
     preCommitBarrier promoted
     let ev ← promotionEvidenceRef.get
-    -- the reason check applies on the passes that read the candidates (a
-    -- promotion-risk pass). Other passes (a first build, a new partition's
-    -- first master) promote no copy that held a partition's data.
+    -- review 2026-10-08: no pass-type bypass. The ONLY exception is the
+    -- first master of a partition no copy has held (first build, a new
+    -- partition). Any other promotion is of an existing copy and needs a
+    -- valid observation from THIS pass: the reading pass's evidence, or —
+    -- on a pass that did not read the candidates — a read and a
+    -- classification made here, at commit.
     let riskPass ← promotionRiskPassRef.get
-    for k in promoted.filter (fun _ => riskPass) do
+    let members := cur.nodeMap.map fun (_, n) =>
+      (n.role == FlareRole.Master || n.role == FlareRole.Slave, n.partition, n.lastMasterOf)
+    let mut checked : List String := []
+    for k in promoted do
+      let part := ((ucs.lookupNode k).map (·.partition)).getD (-1)
+      let wasProxyOrNew := match cur.lookupNode k with
+        | none => true
+        | some n => n.role == FlareRole.Proxy
+      if PromotionEvidence.firstMasterOfNewPartition wasProxyOrNew members part then
+        IO.eprintln s!"[flare-operator] promotion of {k}: the first master of partition {part}, which no copy has held (the explicit exception: nothing to read)"
+      else if !riskPass then
+        let podNow ← podIdentityNow (extractPodName k) ns
+        let ready := match ← kubectl ["get", "pod", extractPodName k, "-n", ns, "-o",
+            "jsonpath={.status.conditions[?(@.type==\"Ready\")].status}"] with
+          | .ok o => o.trim == "True"
+          | .error _ => false
+        let replyNow ← match ← Bridge.queryPodStats (extractPodName k) ns "stats" with
+          | .ok out => pure (some out)
+          | .error _ => pure none
+        let n? := cur.lookupNode k
+        let hist := (← masterHistoryRef.get).lookup part
+        let obs : PromotionEvidence.Observed := {
+          mapPrepare := (n?.map (·.state)) == some FlareState.Prepare
+          mapActive := (n?.map (·.state)) == some FlareState.Active
+          podReady := ready
+          partitionHasMaster := cur.nodeMap.any fun kv => kv.2.role == FlareRole.Master && kv.2.partition == part
+          lastMasterHistory := hist
+          isLastMasterHolder := (n?.map (·.lastMasterOf)) == some part }
+        let cls := PromotionEvidence.classify replyNow obs
+        IO.eprintln s!"[flare-operator] PROMOTION EVIDENCE (read at commit, a pass that did not read the candidates): {k}={cls.label}"
+        if podNow.isNone || !PromotionEvidence.commitTimeAllows cls then
+          IO.eprintln s!"[flare-operator] CRITICAL: PROMOTION ABORTED for {k}: an existing copy promoted on a pass that did not read it, read at commit as {cls.label}{if podNow.isNone then " (pod unreadable)" else ""} — nothing from this pass is committed, the next pass reads again"
+          promotionAbortedRef.set true
+          return
+        checked := checked ++ [k]
+    for k in promoted.filter (fun k => riskPass && !checked.contains k && !(PromotionEvidence.firstMasterOfNewPartition
+        (match cur.lookupNode k with | none => true | some n => n.role == FlareRole.Proxy) members
+        (((ucs.lookupNode k).map (·.partition)).getD (-1)))) do
       let entry := ev.find? (·.1 == k)
       let podNow ← podIdentityNow (extractPodName k) ns
       let replyNow ← match ← Bridge.queryPodStats (extractPodName k) ns "stats" with

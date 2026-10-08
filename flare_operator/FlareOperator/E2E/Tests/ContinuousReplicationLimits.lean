@@ -1590,7 +1590,7 @@ def identitySuite : TestSuite := {
           return .pass
         | roles => return .fail s!"precondition: expected one master and two Active slaves, got {roles.1}/{roles.2}" },
 
-    { name := "SAF-08 process restart: a slave whose flared is killed (same pod, new process) right before the master is drained is not promoted on its old process's standing; the other slave is"
+    { name := "SAF-08 process restart: a slave whose flared is killed (same pod, new process) right before the master is drained is promoted only on its NEW process's own fresh evidence (eligible, read after it activated and bound, not rebuilding, re-checked at commit) and then serves every key and value; otherwise the other slave takes over"
       run := do
         -- the previous test's pods must be back as Active slaves first
         discard <| c.threeInSync
@@ -1603,6 +1603,14 @@ def identitySuite : TestSuite := {
             let nb ← c.currItems ((← getPodIp b ns).getD "")
             return n > 0 && na == n && nb == n
           if !synced then return .fail "precondition: copies not in sync"
+          -- marker values, checked on whichever copy becomes master
+          let markers := (List.range 10).map fun i => (s!"t11_{i}", s!"v11_{i}_{c.cfg.name}")
+          for (k, v) in markers do
+            discard <| memcachedSet c.cfg.debugPod ns mIp c.cfg.flarePort k v
+          let synced2 ← waitForCondition "all three copies match after the markers" 120 do
+            let n ← c.currItems mIp
+            return n > 0 && (← c.currItems ((← getPodIp a ns).getD "")) == n && (← c.currItems ((← getPodIp b ns).getD "")) == n
+          if !synced2 then return .fail "precondition: copies not in sync after the markers"
           let items ← c.currItems mIp
           -- restart the process of the FIRST successor in map order, so that
           -- a choice by map order alone would pick it
@@ -1621,13 +1629,48 @@ def identitySuite : TestSuite := {
           -- (the operator's R3 readings and PROMOTION line, the restarted
           -- node's own catch-up / source check / activation / binding)
           c.windowRecord sinceKill [victim, other] "copy-identity 11"
+          let newMaster := seen.getLast?.getD "?"
+          -- review 2026-10-08: a restarted node MAY be promoted — judged by
+          -- the evidence, not by the restart: fresh (read after its NEW
+          -- process activated and bound), eligible (not rebuilding, not
+          -- lagging), re-checked at commit, and every key and value served
+          let valuesOk ← do
+            let ip := (← getPodIp newMaster ns).getD ""
+            let mut bad : List String := []
+            for (k, v) in markers do
+              let got ← memcachedGet c.cfg.debugPod ns ip c.cfg.flarePort k
+              if got != some v then bad := bad ++ [s!"{k}={got}"]
+            pure bad
           if seen.contains victim then
             let fl := (← c.flaredLogAllSince victim sinceKill).splitOn "\n"
             let firstAt := fun (needle : String) => (fl.find? (containsSubstr · needle)).map (·.take 30)
-            IO.eprintln s!"# {victim} new process since {sinceKill}: storage open {firstAt "storage open"}; source check passed {firstAt "activation source check passed"}; node activated {firstAt "node activated"}; read source BOUND {firstAt "read source BOUND"}"
-            return .fail s!"{victim} was promoted although its flared had just restarted (see the record above: whether its NEW process had caught up, passed its source check, activated and bound before the PROMOTION line)"
+            let activatedAt := firstAt "node activated"
+            let boundAt := firstAt "read source BOUND"
+            let ts := fun (l : String) => (l.splitOn " ").head?.getD ""
+            let opLines := (← c.opLogSince sinceKill).splitOn "\n"
+            let vKey := s!"{victim}.{c.cfg.name}-nodes.{ns}.svc.cluster.local:{c.cfg.flarePort}"
+            let committedAt := (opLines.find? fun l => containsSubstr l "PROMOTION committed" && containsSubstr l vKey).map ts
+            -- the reading that stood: the last PROMOTION EVIDENCE for it before the commit
+            let readings := opLines.filter fun l => containsSubstr l "PROMOTION EVIDENCE" && containsSubstr l vKey
+              && (committedAt.map fun x => decide (ts l ≤ x)).getD false
+            let lastReading := readings.getLast?
+            let readEligible := (lastReading.map fun l => containsSubstr l s!"{vKey}=eligible").getD false
+            let readAt := lastReading.map ts
+            let fresh := match readAt, activatedAt, boundAt with
+              | some r, some a, some b => decide (a.trim ≤ r) && decide (b.trim ≤ r)
+              | _, _, _ => false
+            let abortedAfter := opLines.any fun l => containsSubstr l "PROMOTION ABORTED" && containsSubstr l vKey
+              && (committedAt.map fun x => decide (ts l > x)).getD false
+            let vItems ← c.currItems ((← getPodIp victim ns).getD "")
+            IO.eprintln s!"# {victim} (restarted) promoted: new process activated {activatedAt}, bound {boundAt}; reading before the commit at {readAt}: eligible={readEligible}, fresh (after activation and binding)={fresh}; committed at {committedAt}; items {vItems}/{items}; marker values wrong {valuesOk}"
+            if !readEligible then return .fail s!"{victim} was promoted without an ELIGIBLE reading of its new process before the commit"
+            if !fresh then return .fail s!"{victim}'s reading predates its new process's activation or binding (activated {activatedAt}, bound {boundAt}, read {readAt})"
+            if abortedAfter then return .fail "an abort was logged for it after the commit"
+            if vItems != items || !valuesOk.isEmpty then return .fail s!"the promoted {victim} holds {vItems}/{items} keys; wrong values {valuesOk}"
+            return .pass
           if seen.getLast? != some other then return .fail s!"expected {other} to take over, masters seen {seen}"
           if otherItems != items then return .fail s!"the new master {other} holds {otherItems} of {items} keys"
+          if !valuesOk.isEmpty then return .fail s!"the new master {other} serves wrong marker values {valuesOk}"
           let healed ← waitForCondition "the restarted and the drained pods converge" 480 do
             let nv ← c.currItems ((← getPodIp victim ns).getD "")
             let nm ← c.currItems ((← getPodIp m ns).getD "")

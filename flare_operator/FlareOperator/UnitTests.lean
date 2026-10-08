@@ -1399,6 +1399,16 @@ private def checkPromotionEvidence (ctx : Ctx) : IO Unit := do
       && cls (some "STAT repl_read_source_eligible 1\r\nSTAT repl_read_source_state eligible\r\nSTAT curr_items 60\r\nEND\r\n") obs == .eligible
       && (match cls (some "STAT repl_read_source_eligible 0\r\nSTAT repl_read_source_state none\r\nSTAT curr_items 60\r\nEND\r\n") { obs with mapPrepare := true, mapActive := false } with | .unknown _ => true | _ => false)
       && (match cls (some "STAT repl_read_source_eligible 0\r\nSTAT repl_read_source_state needs_rebuild\r\nSTAT curr_items 60\r\nEND\r\n") obs with | .forbidden _ => true | _ => false))
+  check ctx "promotion by reason (review 2026-10-08): the ONLY unread promotion is the first master of a partition no copy has held"
+    (PromotionEvidence.firstMasterOfNewPartition true [(true, 0, -1), (true, 0, -1)] 1
+      && !PromotionEvidence.firstMasterOfNewPartition true [(true, 0, -1), (true, 1, -1)] 1
+      && !PromotionEvidence.firstMasterOfNewPartition true [(true, 0, -1), (false, -1, 1)] 1
+      && !PromotionEvidence.firstMasterOfNewPartition false [(true, 0, -1)] 1
+      && !PromotionEvidence.firstMasterOfNewPartition true [] (-1))
+  check ctx "promotion by reason: an existing copy read at commit passes only as a normal promotion (not lagging, forbidden or unknown)"
+    (PromotionEvidence.commitTimeAllows .eligible && PromotionEvidence.commitTimeAllows .legacy
+      && !PromotionEvidence.commitTimeAllows .lagging && !PromotionEvidence.commitTimeAllows (.forbidden "x")
+      && !PromotionEvidence.commitTimeAllows (.unknown "x"))
   let b := PromotionEvidence.bindingOf (some "uid-1") (reply "")
   check ctx "promotion by reason: the commit refuses when the pod, the flared process or the copy changed since the reading, or it was not read"
     ((PromotionEvidence.commitAllows (some .eligible) b b).1

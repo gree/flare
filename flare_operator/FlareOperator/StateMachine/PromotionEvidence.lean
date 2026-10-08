@@ -176,6 +176,23 @@ def reclassifyAllows (passClass fresh : Class) : Bool × String :=
   else if fresh != passClass then (false, s!"its class changed after it was read ({passClass.label} -> {fresh.label})")
   else (true, fresh.label)
 
+/-- The ONE explicit exception to reading a candidate before its promotion
+    (review 2026-10-08): the first master of a partition that no copy has
+    held — the node was a Proxy (or new) and, in the map before the pass, no
+    node is a master or slave of that partition and none is its ex-master.
+    `members` = (master-or-slave, partition, lastMasterOf) of every node. -/
+def firstMasterOfNewPartition (wasProxyOrNew : Bool) (members : List (Bool × Int × Int)) (p : Int) : Bool :=
+  wasProxyOrNew && p ≥ 0 &&
+    !(members.any fun (ms, part, lm) => (ms && part == p) || lm == p)
+
+/-- An existing copy promoted on a pass that did not read the candidates is
+    read and classified AT COMMIT; only a normal promotion passes there
+    (a lagging copy is seated only by the masterless last resort, which is a
+    reading pass). -/
+def commitTimeAllows : Class → Bool
+  | .eligible | .legacy | .empty => true
+  | _ => false
+
 /-- Evidence bound to what it was read from; the commit re-reads these. -/
 structure Binding where
   podUid : Option String

@@ -675,6 +675,12 @@ private def persistHistory (crName ns : String) (st : AuthoritativeHistory.Store
       IO.eprintln s!"[flare-operator] CRITICAL: the authoritative history record is corrupt / foreign / unreadable: it is NOT overwritten (an operator inspects and deletes it; RUNBOOK #history-record)"
       return false
   | none => pure ()
+  -- TEST SEAM (FLARE_TEST_HISTORY_WRITE_OK_FILE): until that file exists,
+  -- every history write fails exactly as a refused API write would
+  if let some f ← IO.getEnv "FLARE_TEST_HISTORY_WRITE_OK_FILE" then
+    if !(← System.FilePath.pathExists f) then
+      IO.eprintln s!"[flare-operator] CRITICAL: the authoritative history could not be persisted (FLARE_TEST_HISTORY_WRITE_OK_FILE absent: writes refused); the change is NOT applied (decided again on the next pass)"
+      return false
   let rv ← historyRvRef.get
   let body := String.intercalate "\n" ((AuthoritativeHistory.serialize st).splitOn "\n" |>.map (fun l => "    " ++ l))
   let meta := if rv.isEmpty then "" else s!"\n  resourceVersion: \"{rv}\""
@@ -712,8 +718,14 @@ private def ensureHistoryStore (crName ns : String) (partitions : Nat) : IO Bool
       else pure false
     | _ => pure false
   let ok := AuthoritativeHistory.mapMayBePersisted persisted nodeMapPresent written
-  if ok then historyEnsuredRef.set true
-  else IO.eprintln s!"[flare-operator] CRITICAL: the first-build history record is not written yet: this pass does not proceed (no node map is persisted before it)"
+  if ok then
+    historyEnsuredRef.set true
+    registrationGateRef.set none
+  else
+    -- nothing is persisted or handed out before the record exists: the pass
+    -- returns, and `node add` is refused (no role, no map)
+    registrationGateRef.set (some "the first-build history record is not written yet")
+    IO.eprintln s!"[flare-operator] CRITICAL: the first-build history record is not written yet: this pass does not proceed (no node map is persisted, no registration answered)"
   return ok
 
 private def seenOf (podUid : String) (reply : Option String) : AuthoritativeHistory.Seen :=
@@ -3309,6 +3321,9 @@ def main (args : List String) : IO Unit := do
       nmSettled := true
     | .fresh why =>
       IO.eprintln s!"[flare-operator] node map: starting fresh — {why}"
+      -- a fresh start answers no `node add` until the first pass has written
+      -- the first-build history record (ensureHistoryStore opens the gate)
+      registrationGateRef.set (some "a fresh start: the first-build history record is not written yet")
       nmSettled := true
     | .retry why =>
       if nmAttempt >= 12 then

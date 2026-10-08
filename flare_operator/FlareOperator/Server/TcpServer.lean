@@ -33,6 +33,12 @@ open Std.Net (SocketAddress SocketAddressV4 IPv4Addr)
 -- Server State
 -- ===========================================================================
 
+/-- Registration gate (docs/design-authoritative-history.md): `some why` while a
+    FIRST BUILD's history record is not written yet — `node add` is then
+    answered with an error (no role, no map handed out) and flared retries.
+    `none` = open (set by Main once the record exists). -/
+initialize registrationGateRef : IO.Ref (Option String) ← IO.mkRef none
+
 /-- Encapsulates the shared mutable state for the TCP server.
     All fields are IO.Ref for thread-safe access from concurrent handlers.
     The CRD ref is read-only from the TCP server's perspective (updated
@@ -154,7 +160,14 @@ def handleConnection (sock : Socket) (state : ServerState) : IO Unit := do
             else pure false
           | none => pure false
         | _ => pure false
-      let (newState, response) ← if dropForTest then do
+      let gate ← registrationGateRef.get
+      let gated := match event, gate with
+        | .NodeAdd .., some _ => true
+        | _, _ => false
+      let (newState, response) ← if gated then do
+          IO.eprintln s!"[flare-operator] node add REFUSED (no role, no map): {gate.getD ""}"
+          pure ((← state.clusterState.get), (FlareResponse.ServerError s!"registration closed: {gate.getD ""}" : FlareResponse))
+        else if dropForTest then do
           pure ((← state.clusterState.get), (FlareResponse.OK : FlareResponse))
         else state.clusterState.modifyGet fun cs =>
           let (newState, resp) := reconcileStep cs crd event

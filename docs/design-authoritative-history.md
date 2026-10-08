@@ -216,3 +216,25 @@ in that partition), an unwritable record during bulk and during an intent.
 Still not covered (residual): flared itself does not know the authoritative
 history when it picks a reconstruction source or switches copies; the window in
 step 3 relies on the forwarded request failing.
+
+## Verification map (status 2026-10-09; nothing here is reviewed)
+
+Status words: **implemented** (code exists) / **local** (run on the author's
+machine: Lean unit checks only) / **CI** (run in Linux CI) / **reviewed**.
+An unexecuted test is never counted as evidence of a fix.
+
+| Fix | Test | Boundary checked | Status |
+|---|---|---|---|
+| P1-1 the persisted map is the COMMITTED one; aborts stop it | E2E history-tracking (1): the persisted node map carries the transition id and names the replica master; the record adopts it | Main commit -> node-map ConfigMap -> history record | implemented; not run |
+| P1-1 abort leaves the persisted map unchanged | E2E history-tracking (3b): with the record unwritable the promotion aborts and the persisted map does NOT name the replica master | Main commit -> node-map ConfigMap | implemented; not run |
+| P1-2 restart with the new format | unit: committed map -> serializeNodeMap -> strict validate -> restored map -> resolveIntent; malformed transition rejected | pure (the same functions Main uses) | local |
+| P1-2 / operator restart | E2E history-tracking (1) (operator restarted between the lag and the promotion) and (5) (operator restarted after the intent, before the map commit: the intent is dropped as uncommitted) | real restart, persisted map + record | implemented; not run |
+| first build: record write fails | E2E history-firstbuild: while writes are refused no history record, NO node map, the operator hands out no map (node sync empty), `node add` refused; after writes are allowed the record is created no later than the map, adopted as first build, writes acknowledged and replicated | Main ensureHistoryStore -> registration gate (TCP) -> node-map ConfigMap | implemented; not run |
+| first build gate | unit mapMayBePersisted | pure | local |
+| P1-3 legal empty master repairs / an empty other copy does not | unit P1-3 pair (verified bulk allowed; other copy / other history / non-bulk record refused); unit pair D (empty DB new copy: no re-bind, no bulk, rebuild refused); E2E history-tracking (R) (empty process under the master's name never seated; the replica's data kept; the ex-master rebuilt from it); the existing empty-source suites | pure + Main rebuild gate + refill | unit local; E2E not run |
+| same-copy restart recovers | unit pair C (re-bind, rebuild allowed); existing PVC suites (pvc-survival, copy-identity 11) restart with the same copy | pure + Main | unit local; E2E not run |
+| partial / quarantine / unknown never promoted | unit (classifier, needs_rebuild (2), P1-4 seenOfReply health); E2E history-tracking (2) (part-way), promotion-reasons | pure + Main | unit local; E2E not run |
+| P1-4 capability | unit seenOfReply (legacy only without newer keys; partial / invalid / no UID unreadable; running / parked / partial unhealthy) | pure (Main calls it) | local |
+| P1-5 intent fresh read | the code path (reclassifyAllows / commitTimeAllows + binding) — no dedicated E2E | Main commit | implemented; not run |
+| P1-6 bulk receipt | C++ test_bulk_receipt_normal_failed_write_and_crash_before_epoch: return values (0 / -1 / -1) AND the state after reopen (receipt present, pending absent / finalised at reopen / no receipt, pending kept) for: normal, receipt write failing after the epoch, crash before the epoch | storage_rocksdb truncate + open | implemented; NOT compiled locally (CI) |
+| supplements | unit keepTransitions, begin / resolve record checks | pure | local |

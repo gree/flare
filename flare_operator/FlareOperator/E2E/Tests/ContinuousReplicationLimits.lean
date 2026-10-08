@@ -5598,4 +5598,63 @@ def historyHeldSuite : TestSuite := {
   ]
 }
 
+/-- A first build whose history record cannot be written (seam: history
+    writes refused until /tmp/histok exists in the operator pod). -/
+private def historyFirstBuildEnv : List (String × String) := [("FLARE_STATS_PROBE_INTERVAL_MS", "15000"), ("FLARE_TEST_HISTORY_WRITE_OK_FILE", "/tmp/histok")]
+private def historyFirstBuildCfg : ClusterConfig := { historyCfg with name := "hist-fb", «namespace» := "flare-hist-fb", debugPod := "debug-hist-fb", operatorEnv := historyFirstBuildEnv }
+
+private def creationOf (ns kind name : String) : IO (Option String) := do
+  match ← kubectl ["get", kind, name, "-n", ns, "-o", "jsonpath={.metadata.creationTimestamp}"] with
+  | .ok t => return if t.trim.isEmpty then none else some t.trim
+  | .error _ => return none
+
+def historyFirstBuildSuite : TestSuite := {
+  name := "history-firstbuild"
+  setup := deployCluster historyFirstBuildCfg
+  teardown := cleanupCluster historyFirstBuildCfg
+  onFailure := dumpClusterDiagnostics historyFirstBuildCfg.«namespace» s!"app={historyFirstBuildCfg.operatorName}"
+  tests :=
+    let c : Ctx := { cfg := historyFirstBuildCfg }
+    let ns := historyFirstBuildCfg.«namespace»
+    [
+    { name := "first build, the history record cannot be written: NO node map is persisted, NO registration is answered (no role, no map handed out); once writes are allowed the record is created FIRST, then the map, and the cluster serves"
+      run := do
+        IO.sleep 75000
+        let histNow ← creationOf ns "configmap" s!"{historyFirstBuildCfg.name}-history"
+        let mapNow ← creationOf ns "configmap" s!"{historyFirstBuildCfg.name}-node-map"
+        let view ← c.nodeView
+        let log ← c.opLog 4000
+        let refused := containsSubstr log "node add REFUSED"
+        let reported := containsSubstr log "first-build history record is not written yet"
+        IO.eprintln s!"# while history writes fail: history record={histNow}; node map={mapNow}; operator map nodes={view.length}; node add refused={refused}; reported={reported}"
+        if histNow.isSome then return .fail "a history record exists although writes were refused"
+        if mapNow.isSome then return .fail "a node map was persisted before the first-build history record"
+        if !view.isEmpty then return .fail s!"the operator handed out a map / roles ({view.length} nodes) before the history record existed"
+        if !refused || !reported then return .fail "the refusal (node add / pass) was not logged"
+        -- writes allowed ("permissions restored")
+        if let .error e ← c.opExec "touch /tmp/histok" then return .fail s!"could not allow history writes: {e}"
+        let served ← waitForCondition "the cluster is built and serves (master, replica)" 600 do
+          match ← c.pair with
+          | .ok _ => return true
+          | .error _ => return false
+        if !served then return .fail "the cluster was not built after history writes were allowed"
+        let some ht ← creationOf ns "configmap" s!"{historyFirstBuildCfg.name}-history" | return .fail "no history record after recovery"
+        let some mt ← creationOf ns "configmap" s!"{historyFirstBuildCfg.name}-node-map" | return .fail "no node map after recovery"
+        let rec ← historyText c
+        IO.eprintln s!"# after recovery: history created {ht}; node map created {mt}; record [{rec.take 200}]"
+        if decide (ht > mt) then return .fail s!"the node map ({mt}) was created before the history record ({ht})"
+        let recorded ← waitForCondition "the record shows a first build" 180 do
+          return containsSubstr (← historyText c) " first-build "
+        if !recorded then return .fail "the record was not adopted as a first build"
+        match ← c.pair with
+        | .error e => return .fail e
+        | .ok (_, mIp, _, sIp) =>
+          let w ← writeKeys historyFirstBuildCfg.debugPod ns mIp historyFirstBuildCfg.flarePort "fb" 10
+          if w != 10 then return .fail s!"the master acknowledged {w}/10"
+          let conv ← waitForCondition "the replica holds the writes" 180 do return (← c.currItems sIp) == (← c.currItems mIp)
+          if !conv then return .fail "the replica did not converge"
+          return .pass }
+  ]
+}
+
 end FlareOperator.E2E.Tests.ContinuousReplicationLimits

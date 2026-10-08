@@ -107,6 +107,21 @@ structure ClusterConfig where
       deployed release and rolls to the build under test. -/
   flaredImageOverride : Option String := none
   operatorImageOverride : Option String := none
+  /-- A shared, real cluster (the reserve measurement, decision 2026-10-08):
+      bind the operator's ServiceAccount with a namespaced RoleBinding to this
+      EXISTING ClusterRole instead of a ClusterRoleBinding to `flare-operator`;
+      nothing cluster-scoped is created, checked for or deleted. -/
+  roleBindingTo : Option String := none
+  /-- Pin every pod of the suite (operator, flared, debug) to this node
+      (`kubernetes.io/hostname`). -/
+  nodeHost : Option String := none
+  /-- A ResourceQuota `hard:` block (YAML lines, 4-space indent) for the
+      namespace, plus a LimitRange so pods without explicit resources get
+      requests = limits from `limitDefaults` (cpu, memory). -/
+  quotaHard : Option String := none
+  limitDefaults : String × String := ("500m", "256Mi")
+  flaredCpuRequest : String := "100m"
+  debugImage : String := "busybox:1.36"
   deriving Repr
 
 /-- Image tag used for the flared container in this cluster. -/
@@ -168,6 +183,55 @@ subjects:
     name: flare-operator
     namespace: {ns}"
 
+/-- `nodeSelector` pinning a pod spec to `cfg.nodeHost` (empty when unset). -/
+def nodeSelectorBlock (cfg : ClusterConfig) (indent : Nat) : String :=
+  match cfg.nodeHost with
+  | none => ""
+  | some h =>
+    let pad := String.mk (List.replicate indent ' ')
+    s!"\n{pad}nodeSelector:\n{pad}  kubernetes.io/hostname: \"{h}\""
+
+/-- Namespaced RoleBinding to an existing ClusterRole (no cluster-scoped object). -/
+def roleBindingYaml (cfg : ClusterConfig) (clusterRole : String) : String :=
+  s!"apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: flare-operator
+  namespace: {cfg.«namespace»}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {clusterRole}
+subjects:
+  - kind: ServiceAccount
+    name: flare-operator
+    namespace: {cfg.«namespace»}"
+
+def quotaYaml (cfg : ClusterConfig) (hard : String) : String :=
+  s!"apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: measure-caps
+  namespace: {cfg.«namespace»}
+spec:
+  hard:
+{hard}
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: measure-defaults
+  namespace: {cfg.«namespace»}
+spec:
+  limits:
+    - type: Container
+      default:
+        cpu: {cfg.limitDefaults.1}
+        memory: {cfg.limitDefaults.2}
+      defaultRequest:
+        cpu: {cfg.limitDefaults.1}
+        memory: {cfg.limitDefaults.2}"
+
 /-- Generate operator Deployment + Service YAML.
 
     The memory LIMIT is a ceiling, not a reservation: 256Mi is enough for
@@ -203,7 +267,7 @@ spec:
       labels:
         app: {name}
     spec:
-      serviceAccountName: flare-operator
+      serviceAccountName: flare-operator{nodeSelectorBlock cfg 6}
       containers:
         - name: flare-operator
           image: {cfg.operatorImageOverride.getD "flare-operator:test"}
@@ -346,7 +410,7 @@ spec:
         app: flare
         cluster: {cluster}
     spec:
-      terminationGracePeriodSeconds: {graceSeconds}
+      terminationGracePeriodSeconds: {graceSeconds}{nodeSelectorBlock cfg 6}
       containers:
         - name: flared
           image: {image}
@@ -405,7 +469,7 @@ spec:
             failureThreshold: 3
           resources:
             requests:
-              cpu: 100m
+              cpu: {cfg.flaredCpuRequest}
               memory: {cfg.flaredMemoryRequest}
             limits:
               cpu: {cfg.flaredCpuLimit}
@@ -562,7 +626,8 @@ def deployCluster (cfg : ClusterConfig) : IO Unit := do
   if !crdReady then
     throw (IO.userError "FlareCluster CRD not established — is the chart installed? \
       (helm template helm/flare-operator --set fullnameOverride=flare-operator --include-crds | kubectl apply -f -)")
-  let roleReady ← waitForCondition "ClusterRole flare-operator present" 60 do
+  if let some hard := cfg.quotaHard then applyYaml (quotaYaml cfg hard)
+  let roleReady ← if cfg.roleBindingTo.isSome then pure true else waitForCondition "ClusterRole flare-operator present" 60 do
     match ← kubectl ["get", "clusterrole", "flare-operator", "-o", "jsonpath={.metadata.name}"] with
     | .ok name => return name.trim == "flare-operator"
     | .error _ => return false
@@ -572,7 +637,9 @@ def deployCluster (cfg : ClusterConfig) : IO Unit := do
   -- Create ServiceAccount and ClusterRoleBinding in test namespace
   -- (not using deploy/rbac.yaml which is hardcoded for flare-system namespace)
   applyYaml (serviceAccountYaml cfg)
-  applyYaml (clusterRoleBindingYaml cfg)
+  match cfg.roleBindingTo with
+  | some role => applyYaml (roleBindingYaml cfg role)
+  | none => applyYaml (clusterRoleBindingYaml cfg)
 
   -- Create FlareCluster CR (unless the test adds it later)
   if !cfg.deferClusterCr then
@@ -611,12 +678,15 @@ def deployCluster (cfg : ClusterConfig) : IO Unit := do
     throw (IO.userError s!"ConfigMap {cmName} missing after create")
 
   -- Create debug pod (direct kubectl so errors are visible)
-  match ← kubectl ["run", cfg.debugPod, s!"--namespace={cfg.«namespace»}",
-                    "--image=busybox:1.36", "--restart=Never", "--command", "--",
+  let overrides := match cfg.nodeHost with
+    | some h => [s!"--overrides=\{\"spec\":\{\"nodeSelector\":\{\"kubernetes.io/hostname\":\"{h}\"}}}"]
+    | none => []
+  match ← kubectl (["run", cfg.debugPod, s!"--namespace={cfg.«namespace»}",
+                    s!"--image={cfg.debugImage}", "--restart=Never"] ++ overrides ++ ["--command", "--",
                     -- 1 day, not 1 h: the scale evaluation's load ran past an
                     -- hour and every chunk after 3573 s failed with
                     -- "container not found" (manual run 36899086870).
-                    "sleep", "86400"] with
+                    "sleep", "86400"]) with
   | .ok _ => pure ()
   | .error e =>
     if containsSubstr e "AlreadyExists" then pure ()
@@ -745,8 +815,9 @@ def cleanupCluster (cfg : ClusterConfig) : IO Unit := do
     for i in List.range (cfg.partitions * cfg.replicas) do
       kubectlDelete "pvc" s!"data-{cfg.name}-nodes-{i}" ns
   -- Delete ClusterRoleBinding (cluster-scoped resource)
-  let bindingName := s!"flare-operator-{ns}"
-  let _ ← kubectl ["delete", "clusterrolebinding", bindingName, "--ignore-not-found"]
+  if cfg.roleBindingTo.isNone then
+    let bindingName := s!"flare-operator-{ns}"
+    let _ ← kubectl ["delete", "clusterrolebinding", bindingName, "--ignore-not-found"]
   -- Delete debug pod
   let _ ← kubectl ["delete", "pod", cfg.debugPod, "-n", ns,
                     "--force", "--grace-period=0", "--ignore-not-found"]

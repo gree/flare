@@ -4753,6 +4753,20 @@ private def measureCfg : IO ClusterConfig := do
   let nsName := (← IO.getEnv "FLARE_E2E_MEASURE_NAMESPACE").getD "flare-measure"
   let flaredImg := ← IO.getEnv "FLARE_E2E_MEASURE_FLARED_IMAGE"
   let opImg := ← IO.getEnv "FLARE_E2E_MEASURE_OPERATOR_IMAGE"
+  -- a shared real cluster (decision 2026-10-08, environment A): a namespaced
+  -- RoleBinding to an existing ClusterRole, every pod pinned to one node,
+  -- the namespace capped by a ResourceQuota, memory requested = limited
+  let role := ← IO.getEnv "FLARE_E2E_MEASURE_CLUSTER_ROLE"
+  let node := ← IO.getEnv "FLARE_E2E_MEASURE_NODE"
+  let memReq := (← IO.getEnv "FLARE_E2E_MEASURE_MEMORY_REQUEST").getD "256Mi"
+  let cpu := (← IO.getEnv "FLARE_E2E_MEASURE_CPU").getD "2"
+  let quota := ← IO.getEnv "FLARE_E2E_MEASURE_QUOTA"   -- e.g. "requests.cpu=12,limits.memory=34Gi,..."
+  let quotaHard := quota.map fun q => String.intercalate "\n" ((q.splitOn ",").filterMap fun kv =>
+    match kv.splitOn "=" with
+    | [k, v] => some s!"    {k.trim}: \"{v.trim}\""
+    | _ => none)
+  let bw := (← IO.getEnv "FLARE_E2E_MEASURE_BWLIMIT_KBPS").getD ""
+  let bwConf := if bw.isEmpty then "" else s!"\nreconstruction-bwlimit = {bw}\nrocksdb-snapshot-bwlimit = {bw}"
   return {
     name := "measure"
     «namespace» := nsName
@@ -4768,9 +4782,14 @@ private def measureCfg : IO ClusterConfig := do
     useTmpfs := tmpfs
     tmpfsSize := mem
     flaredMemoryLimit := mem
-    flaredMemoryRequest := "256Mi"
-    flaredCpuLimit := "2"
-    extraFlaredConf := "rocksdb-block-cache-size-mb = 64\nrocksdb-write-buffer-size-mb = 16"
+    flaredMemoryRequest := memReq
+    flaredCpuLimit := cpu
+    flaredCpuRequest := if role.isSome then cpu else "100m"
+    roleBindingTo := role
+    nodeHost := node
+    quotaHard := quotaHard
+    debugImage := (← IO.getEnv "FLARE_E2E_MEASURE_DEBUG_IMAGE").getD "busybox:1.36"
+    extraFlaredConf := "rocksdb-block-cache-size-mb = 64\nrocksdb-write-buffer-size-mb = 16" ++ bwConf
     flaredEnv := [("FLARE_TEST_DISABLE_WAL_RECONSTRUCTION", "1")]
     -- large enough not to stop the measured rebuild; the result says what is needed
     rebuildReserveBytes := some 1048576 }

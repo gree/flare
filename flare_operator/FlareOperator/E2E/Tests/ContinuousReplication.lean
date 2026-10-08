@@ -1141,7 +1141,21 @@ def suite : TestSuite := {
           IO.eprintln s!"# ex-master {mPod}: state={← statStr mIp2 "repl_follow_state"} epoch={← statStr mIp2 "repl_follow_source_epoch"} (new master {epoch1}); items new-master={← currItems sIp} ex-master={← currItems mIp2}"
           if !rejoined then return .fail "the ex-master did not come back following the new master's epoch"
           let stored ← writeKeys cfg.debugPod cfg.«namespace» sIp cfg.flarePort "post_failover" 10
-          if stored != 10 then return .fail s!"stored only {stored}/10 on the new master"
+          if stored != 10 then
+            -- CI 37770467697: 0/10 and the new master stopped confirming maps.
+            -- Record the raw reply, its own state and each flared thread's
+            -- kernel wait (a lock wait shows as futex)
+            let raw := match ← execInDebugPod cfg.debugPod cfg.«namespace» s!"printf 'set post_failover_probe 0 0 1\\r\\nx\\r\\n' | nc -w 5 {sIp} {cfg.flarePort}" with
+              | .ok o => o.trim
+              | .error e => s!"(error: {e})"
+            let st := fun (k : String) => do return (← statStr sIp k).getD "?"
+            IO.eprintln s!"# new master {sPod} after {stored}/10: raw set reply [{raw}]; node_map_version {← st "node_map_version"}; rocksdb_source_epoch {← st "rocksdb_source_epoch"}; promotion_refused {← st "promotion_refused"}; repl_follow_state {← st "repl_follow_state"}; reconstruction_current_state {← st "reconstruction_current_state"}"
+            let threads := match ← kubectl ["exec", "-n", cfg.«namespace», sPod, "-c", "flared", "--", "sh", "-c",
+                "for t in /proc/1/task/*; do echo \"$(basename $t) $(cat $t/comm) $(awk '{print $3}' $t/stat) $(cat $t/wchan 2>/dev/null)\"; done"] with
+              | .ok o => o
+              | .error e => s!"(error: {e})"
+            IO.eprintln s!"# {sPod} flared threads (tid comm state wchan):\n{threads}"
+            return .fail s!"stored only {stored}/10 on the new master"
           let caught ← waitForCondition "new writes reach the ex-master as a follower" 90 do
             return (← currItems mIp2) == (← currItems sIp)
           if !caught then return .fail s!"items new-master={← currItems sIp} ex-master={← currItems mIp2}"
@@ -1165,9 +1179,18 @@ def suite : TestSuite := {
           -- Write continuously until the newcomer reports following (or the
           -- budget runs out), so the copy is taken under load.
           let mut batches := 0
+          -- only ACKNOWLEDGED writes count (CI 37770467697: the master
+          -- acknowledged none, its items stayed 356, and the test still
+          -- sampled an unacknowledged key as "missing")
+          let mut acked := 0
+          let mut lastAcked : Option String := none
           let mut newIp : Option String := none
           for i in [0:90] do
-            let _ ← writeKeys cfg.debugPod cfg.«namespace» mIp cfg.flarePort s!"t1_{i}" 20
+            for j in List.range 20 do
+              let key := s!"t1_{i}_{j}"
+              if ← memcachedSet cfg.debugPod cfg.«namespace» mIp cfg.flarePort key s!"val_{j}" then
+                acked := acked + 1
+                lastAcked := some key
             batches := batches + 1
             match ← getPodIp newPod cfg.«namespace» with
             | none => pure ()
@@ -1183,14 +1206,15 @@ def suite : TestSuite := {
             return (← currItems nIp) == (← currItems mIp) && (← currItems mIp) > 0
           let mEpoch ← statStr mIp "rocksdb_source_epoch"
           let nEpoch ← statStr nIp "repl_follow_source_epoch"
-          IO.eprintln s!"# newcomer {newPod}: {batches} batches of 20 written during its copy; state={← statStr nIp "repl_follow_state"} epoch={nEpoch} (master {mEpoch}); items master={← currItems mIp} newcomer={← currItems nIp}; reconstruction_completed={← statNat nIp "reconstruction_completed"} wal_applied={← statNat nIp "repl_wal_applied"}"
+          IO.eprintln s!"# newcomer {newPod}: {batches} batches of 20 attempted during its copy, {acked} acknowledged by the master (last {lastAcked}); state={← statStr nIp "repl_follow_state"} epoch={nEpoch} (master {mEpoch}); items master={← currItems mIp} newcomer={← currItems nIp}; reconstruction_completed={← statNat nIp "reconstruction_completed"} wal_applied={← statNat nIp "repl_wal_applied"}"
           if !following then return .fail s!"the newcomer never followed (state {← statStr nIp "repl_follow_state"}, reason {← statStr nIp "repl_follow_last_reason"})"
           if !caught then return .fail s!"items master={← currItems mIp} newcomer={← currItems nIp}"
           if nEpoch != mEpoch then return .fail s!"newcomer follows epoch {nEpoch}, master is at {mEpoch}"
-          -- Sampled content from the LAST batch written (during the copy).
-          let last := batches - 1
-          match ← execInDebugPod cfg.debugPod cfg.«namespace» s!"printf 'get t1_{last}_19\\r\\n' | nc -w 3 {nIp} {cfg.flarePort}" with
-          | .ok o => if !(containsSubstr o "VALUE") then return .fail s!"the last key written during the copy is missing on the newcomer: {o.trim.take 80}"
+          -- Sampled content: the LAST key the master ACKNOWLEDGED during the copy
+          let some lastKey := lastAcked
+            | return .fail s!"PRECONDITION NOT MET: the master acknowledged none of the {batches * 20} writes during the copy (no write to check on the newcomer)"
+          match ← execInDebugPod cfg.debugPod cfg.«namespace» s!"printf 'get {lastKey}\\r\\n' | nc -w 3 {nIp} {cfg.flarePort}" with
+          | .ok o => if !(containsSubstr o "VALUE") then return .fail s!"the last ACKNOWLEDGED key written during the copy ({lastKey}) is missing on the newcomer: {o.trim.take 80}"
           | .error e => return .fail e
           return .pass }
   ]

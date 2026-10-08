@@ -170,6 +170,7 @@ storage_rocksdb::storage_rocksdb(
 	pthread_mutex_init(&this->_orphan_scan_mutex, NULL);
 	pthread_rwlock_init(&this->_mutex_master_id, NULL);
 	pthread_mutex_init(&this->_mutex_rebuild_status, NULL);
+	pthread_mutex_init(&this->_mutex_switch_unresolved, NULL);
 	this->_data_path = this->_data_dir + "/flare.rocksdb";
 	this->_setup_rocksdb_options();
 }
@@ -188,6 +189,7 @@ storage_rocksdb::~storage_rocksdb() {
 	pthread_mutex_destroy(&this->_orphan_scan_mutex);
 	pthread_rwlock_destroy(&this->_mutex_master_id);
 	pthread_mutex_destroy(&this->_mutex_rebuild_status);
+	pthread_mutex_destroy(&this->_mutex_switch_unresolved);
 }
 // }}}
 
@@ -638,20 +640,32 @@ int storage_rocksdb::bump_copy_generation(const char* why) {
 	return r;
 }
 
+bool storage_rocksdb::switch_unresolved_snapshot(string& why) {
+	pthread_mutex_lock(&this->_mutex_switch_unresolved);
+	const bool b = this->_switch_unresolved;
+	why = b ? this->_switch_unresolved_why : string("");
+	pthread_mutex_unlock(&this->_mutex_switch_unresolved);
+	return b;
+}
+
 void storage_rocksdb::_mark_switch_unresolved(const string& why) {
+	// the latch FIRST (every guard reads it), then the identity
+	pthread_mutex_lock(&this->_mutex_switch_unresolved);
+	this->_switch_unresolved_why = why;
+	this->_switch_unresolved = true;
+	pthread_mutex_unlock(&this->_mutex_switch_unresolved);
 	pthread_rwlock_wrlock(&this->_mutex_generations);
 	this->_copy_identity_consistent = false;
 	pthread_rwlock_unlock(&this->_mutex_generations);
-	this->_switch_unresolved_why = why;
-	this->_switch_unresolved = true;
 	log_err("CRITICAL: copy switch UNRESOLVED: %s — the DB stays closed, nothing is created, reset or removed, and this copy is not a healthy copy (no reads, not a source, not promotable) until the next start resolves the switch intent", why.c_str());
 }
 
 bool storage_rocksdb::_refuse_if_switch_unresolved(const char* who) {
-	if (!this->_switch_unresolved) {
+	string why;
+	if (!this->switch_unresolved_snapshot(why)) {
 		return false;
 	}
-	log_err("%s refused: the copy switch is unresolved (%s)", who, this->_switch_unresolved_why.c_str());
+	log_err("%s refused: the copy switch is unresolved (%s)", who, why.c_str());
 	return true;
 }
 
@@ -868,6 +882,9 @@ int storage_rocksdb::make_staging_dir(const string& attempt, string& path) {
 	if (this->_staging || attempt.empty() || attempt.find('/') != string::npos) {
 		return -1;
 	}
+	if (this->_refuse_if_switch_unresolved("make_staging_dir")) {
+		return -1;		// no new copy while a switch is unresolved (review P1)
+	}
 	path = this->_data_dir + "/" + copy_fs::kStagingPrefix + attempt;
 	if (copy_fs::dir_exists(path)) {
 		log_err("staging: [%s] already exists; refusing to reuse it", path.c_str());
@@ -887,6 +904,9 @@ int storage_rocksdb::make_staging_dir(const string& attempt, string& path) {
 
 storage_rocksdb* storage_rocksdb::open_staging(const string& attempt, bool existing_files) {
 	if (this->_staging || attempt.empty() || attempt.find('/') != string::npos) {
+		return NULL;
+	}
+	if (this->_refuse_if_switch_unresolved("open_staging")) {
 		return NULL;
 	}
 	string path = this->_data_dir + "/" + copy_fs::kStagingPrefix + attempt;
@@ -1010,6 +1030,9 @@ int storage_rocksdb::seal() {
 int storage_rocksdb::remove_staging(const string& attempt) {
 	if (attempt.empty() || attempt.find('/') != string::npos) {
 		return -1;
+	}
+	if (this->_refuse_if_switch_unresolved("remove_staging")) {
+		return -1;		// the staging copy may be what the intent needs (review P1)
 	}
 	const string path = this->_data_dir + "/" + copy_fs::kStagingPrefix + attempt;
 	if (copy_fs::remove_tree_path(path) != 0) {
@@ -1288,9 +1311,12 @@ int storage_rocksdb::regenerate_master_id() {
  *	families are not all listed, so a single place has to know about them.
  */
 rocksdb::Status storage_rocksdb::_open_db(const string& path) {
-	if (this->_switch_unresolved) {
-		// never create a DB where the live copy may be missing (review P1)
-		return rocksdb::Status::Aborted("copy switch unresolved: " + this->_switch_unresolved_why);
+	{
+		string why;
+		if (this->switch_unresolved_snapshot(why)) {
+			// never create a DB where the live copy may be missing (review P1)
+			return rocksdb::Status::Aborted("copy switch unresolved: " + why);
+		}
 	}
 	vector<string> existing;
 	rocksdb::Status ls = rocksdb::DB::ListColumnFamilies(rocksdb::DBOptions(this->_options), path, &existing);
@@ -3326,8 +3352,9 @@ bool storage_rocksdb::is_copy_partial() {
 }
 
 bool storage_rocksdb::promotion_forbidden(string& why) {
-	if (this->is_switch_unresolved()) {
-		why = "a copy switch is unresolved (" + this->get_switch_unresolved_why() + ")";
+	string sw;
+	if (this->switch_unresolved_snapshot(sw)) {
+		why = "a copy switch is unresolved (" + sw + ")";
 	} else if (this->is_rebuild_in_flight()) {
 		why = "a copy is being rebuilt (transfer or switch in flight)";
 	} else if (this->is_rebuild_parked()) {

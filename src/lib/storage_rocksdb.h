@@ -235,7 +235,9 @@ protected:
 	// Until the next start resolves it: no reopen / create, no further switch,
 	// no destructive reset, not a healthy copy (no reads, not a source, not
 	// promotable). Never cleared in this process.
-	volatile bool _switch_unresolved = false;
+	// a LEAF lock: nothing else is taken while it is held (lock order)
+	pthread_mutex_t _mutex_switch_unresolved;
+	bool _switch_unresolved = false;
 	string _switch_unresolved_why;
 	void _mark_switch_unresolved(const string& why);
 	bool _refuse_if_switch_unresolved(const char* who);
@@ -605,8 +607,9 @@ public:
 	void peaks_get(bool serve, uint64_t& data_dir_max, int64_t& memory_max, int64_t& min_available,
 		uint64_t& data_dir_start, uint64_t& samples);
 	bool is_quarantined() const { return this->_quarantined; }
-	bool is_switch_unresolved() const { return this->_switch_unresolved; }
-	string get_switch_unresolved_why() const { return this->_switch_unresolved ? this->_switch_unresolved_why : string(""); }
+	// one synchronized snapshot of the flag and its reason
+	bool switch_unresolved_snapshot(string& why);
+	bool is_switch_unresolved() { string w; return this->switch_unresolved_snapshot(w); }
 	bool promotion_forbidden(std::string& why);
 	// decision 2026-10-08: data_dir/copy.partial — the live copy is being (or
 	// was left) changed part-way by a merging dump. Written durably BEFORE the

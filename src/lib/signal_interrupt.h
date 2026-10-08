@@ -9,7 +9,8 @@
  *	block on itself, and every thread that logged or allocated after it with
  *	it (review 2026-10-08: a candidate for CI 37770467697, where a promoted
  *	node stopped right after 'stopping continuous replication follower'; not
- *	established as that run's cause). The handler only counts.
+ *	established as that run's cause). The handler does nothing: the delivery
+ *	itself is the interrupt. It touches no shared state and no errno.
  */
 #ifndef	SIGNAL_INTERRUPT_H
 #define	SIGNAL_INTERRUPT_H
@@ -19,10 +20,6 @@
 namespace gree {
 namespace flare {
 
-// how many SIGUSR1 interrupts were received (read from a normal thread)
-long sigusr1_received_count();
-
-// the SIGUSR1 handler: async-signal-safe (no logging, no allocation, errno kept)
 extern "C" void sigusr1_interrupt_handler(int sig);
 
 }	// namespace flare

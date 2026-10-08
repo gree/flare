@@ -2437,6 +2437,13 @@ void check_unresolved_switch(bool after_rename) {
 	// the same process neither retries nor resets
 	cut_assert_equal_int(-1, s->switch_to_staging("u1", nid));
 	cut_assert_equal_int(-1, s->hard_reset());
+	// no new copy in this process, and the intent's staging copy cannot be
+	// removed through the storage API either
+	cut_assert_null(s->open_staging("u2", false));
+	string p2;
+	cut_assert_equal_int(-1, s->make_staging_dir("u3", p2));
+	cut_assert_equal_int(-1, s->remove_staging("u1"));
+	cut_assert_not_equal_int(0, ::stat((dir + "/staging-u2").c_str(), &st));
 	if (!after_rename) {
 		cut_assert_not_equal_int(0, ::stat((dir + "/flare.rocksdb").c_str(), &st));
 	}

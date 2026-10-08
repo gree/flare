@@ -1071,7 +1071,9 @@ int handler_reconstruction::_staged_rebuild(bool snapshot_ok, const string& peer
 			// (removed) here. The next start resolves the intent.
 			rdb->note_staged_result(false);
 			this->_copy_dirty = true;
-			log_err("the switch to copy %s is UNRESOLVED (%s): the staging copy is kept, nothing is activated", new_id.c_str(), rdb->get_switch_unresolved_why().c_str());
+			string sw;
+			rdb->switch_unresolved_snapshot(sw);
+			log_err("the switch to copy %s is UNRESOLVED (%s): the staging copy is kept, nothing is activated", new_id.c_str(), sw.c_str());
 			return -1;
 		}
 		if (rdb->get_copy_id() != new_id) {

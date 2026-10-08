@@ -30,6 +30,7 @@ import FlareOperator.E2E.Helpers
 import FlareOperator.E2E.PromotionTimeline
 import FlareOperator.StateMachine.SourceEligibility
 import FlareOperator.StateMachine.RebuildConcurrency
+import FlareOperator.StateMachine.AuthoritativeHistory
 import FlareOperator.StateMachine.CopyDiscardApproval
 import FlareOperator.StateMachine.PromotionEvidence
 
@@ -1298,6 +1299,67 @@ private def checkActivationOrder (ctx : Ctx) : IO Unit := do
   check ctx "activation: a passing check without a map version is undetermined"
     (match judgeActivation [acc 415 1, dump 2, "[NTC] activation source check passed (attempt 1): source " ++ n 2 ++ " is the partition's master", act 1] old new with | .undetermined _ => true | _ => false)
 
+-- ─── authoritative history (user direction 2026-10-09) ───────────────────
+
+open FlareOperator.AuthoritativeHistory in
+private def checkAuthoritativeHistory (ctx : Ctx) : IO Unit := do
+  let bM : Binding := ⟨"uid-m", "boot-m", "copy-m"⟩
+  let bS : Binding := ⟨"uid-s", "boot-s", "copy-s"⟩
+  let h2 : Hist := ⟨"M", "2:e"⟩
+  let rec0 : Record := { gen := 3, hist := h2, holder := "m", binding := bM, since := "t0", reason := "promotion" }
+  let st : Store := { clusterUid := "cu", parts := [(0, .known rec0)] }
+  let ob := fun (b : Binding) (h : Hist) (empty : Bool) => ({ binding := b, hist := h, position := 7, healthy := true, empty := empty, seenAt := "t1" } : Obs)
+  -- (1) the ex-master returns EMPTY under the same name: a new boot / copy and
+  -- a new history; it is NOT the recorded holder's binding
+  let emptyBack := ob ⟨"uid-m2", "boot-m2", "copy-m2"⟩ ⟨"M2", "5:fresh"⟩ true
+  check ctx "history: an empty ex-master returning under the same name (new boot / copy, new history) does NOT replace the record (bulk needs the holder's own binding)"
+    ((bulk st 0 "m" emptyBack "t2").1 == st && (bulk st 0 "m" emptyBack "t2").2 == .none)
+  check ctx "history: the recorded holder, same binding, advancing its own history (flush_all) is the next generation (bulk)"
+    (match bulk st 0 "m" (ob bM ⟨"M", "3:bulk"⟩ false) "t2" with
+     | (s', .recorded 0 r _) => r.gen == 4 && r.reason == "bulk" && s'.recorded 0 == some ⟨"M", "3:bulk"⟩
+     | _ => false)
+  check ctx "history: another node's new history is only an observation (rejoining), never adopted"
+    ((bulk st 0 "s" (ob bS ⟨"S", "9:x"⟩ false) "t2").1 == st && rejoining st 0 emptyBack && !rejoining st 0 (ob bS h2 false))
+  -- (2) promotion: intent -> commit -> the target's new epoch WITH THE SAME BINDING
+  let i : Intent := { partition := 0, kind := "promotion", target := "s", binding := bS, fromGen := 3, fromHist := some h2, mapVersionBefore := 10 }
+  let withI := beginIntent st i
+  check ctx "history: a promotion intent is resolved to the next generation only when the commit happened and the target, SAME binding, reports a new history"
+    (match resolveIntent withI i 11 true (some (ob bS ⟨"M", "4:promo"⟩ false)) "t3" with
+     | (s', .recorded 0 r _) => r.gen == 4 && r.holder == "s" && s'.intentFor 0 == none
+     | _ => false)
+  check ctx "history: the commit never happened (map not past 'before', or the target not master there) = the intent is dropped, the record unchanged"
+    ((match resolveIntent withI i 10 true none "t3" with | (s', .intentDropped 0 _) => s'.recorded 0 == some h2 && s'.intentFor 0 == none | _ => false)
+      && (match resolveIntent withI i 12 false none "t3" with | (_, .intentDropped 0 _) => true | _ => false))
+  check ctx "history: the target restarted / was replaced before its new history was seen = HELD (never adopted); the same history yet = wait"
+    ((match resolveIntent withI i 11 true (some (ob ⟨"uid-s", "boot-s2", "copy-s"⟩ ⟨"M", "4:promo"⟩ false)) "t3" with | (_, .held 0 _) => true | _ => false)
+      && (resolveIntent withI i 11 true (some (ob bS h2 false)) "t3").2 == .none)
+  -- (3) rebuild direction
+  check ctx "history: a rebuild may run only from the authoritative history (or the pending promotion's target); never from the empty returned copy"
+    ((rebuildSourceAllowed st 0 "m" (some (ob bM h2 false))).1
+      && !(rebuildSourceAllowed st 0 "m" (some emptyBack)).1
+      && !(rebuildSourceAllowed st 0 "m" none).1
+      && (rebuildSourceAllowed withI 0 "s" (some (ob bS h2 false))).1
+      && !(rebuildSourceAllowed withI 0 "m" (some (ob bM h2 false))).1
+      && !(rebuildSourceAllowed { clusterUid := "cu", parts := [(0, .unknown "x")] } 0 "m" (some (ob bM h2 false))).1)
+  -- (4) adoption (upgrade) is guarded; unknown is never first build
+  let unk : Store := { clusterUid := "cu", parts := [(0, .unknown "no record")] }
+  check ctx "history: adoption takes an Active, healthy master — not an EMPTY one while another copy holds data, not an inactive one"
+    ((match adopt unk 0 "m" (ob bM h2 false) true false "t" with | (s', .recorded 0 _ _) => s'.recorded 0 == some h2 | _ => false)
+      && (match adopt unk 0 "m" emptyBack true true "t" with | (s', .held 0 _) => s'.recorded 0 == none | _ => false)
+      && (match adopt unk 0 "m" (ob bM h2 false) false false "t" with | (_, .held 0 _) => true | _ => false))
+  check ctx "history: load — absent WITH a node map, unreadable, corrupt, truncated or another cluster's record = every partition UNKNOWN; absent with no node map = first build"
+    ((load "cu" 2 (some none) true).recorded 0 == none && (load "cu" 2 (some none) true).part 1 != none
+      && (load "cu" 2 none false).part 0 != none
+      && (load "cu" 2 (some (some "garbage")) false).part 0 != none
+      && (load "cu" 2 (some (some ((serialize st).replace "\nend" ""))) false).part 0 != none
+      && (load "other" 1 (some (some (serialize st))) false).recorded 0 == none
+      && (load "cu" 2 (some none) false).parts.isEmpty)
+  check ctx "history: serialize / parse round trip (record, intent, observation)"
+    (let full := { withI with obs := [("s", ob bS h2 false)] }
+     parse (serialize full) == some full && load "cu" 1 (some (some (serialize full))) true == full)
+  check ctx "history: a decision uses the new store only when its write SUCCEEDED"
+    (afterWrite st withI true == withI && afterWrite st withI false == st)
+
 -- ─── copy retention §10: rebuild concurrency ──────────────────────────────
 
 open FlareOperator.RebuildConcurrency in
@@ -1633,6 +1695,7 @@ def run : IO UInt32 := do
   checkActivationOrder ctx
   checkSourceEligibility ctx
   checkRebuildConcurrency ctx
+  checkAuthoritativeHistory ctx
   checkCopyDiscardApproval ctx
   checkPromotionEvidence ctx
   let failures ← ctx.failures.get

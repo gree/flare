@@ -1622,12 +1622,15 @@ def identitySuite : TestSuite := {
           if !synced then return .fail "precondition: copies not in sync"
           -- marker values, checked on whichever copy becomes master
           let markers := (List.range 10).map fun i => (s!"t11_{i}", s!"v11_{i}_{c.cfg.name}")
+          let mut acked := 0
           for (k, v) in markers do
-            discard <| memcachedSet c.cfg.debugPod ns mIp c.cfg.flarePort k v
+            if ← memcachedSet c.cfg.debugPod ns mIp c.cfg.flarePort k v then acked := acked + 1
+          if acked != markers.length then return .fail s!"precondition: the master {m} acknowledged {acked}/{markers.length} marker writes"
           let synced2 ← waitForCondition "all three copies match after the markers" 120 do
             let n ← c.currItems mIp
             return n > 0 && (← c.currItems ((← getPodIp a ns).getD "")) == n && (← c.currItems ((← getPodIp b ns).getD "")) == n
-          if !synced2 then return .fail "precondition: copies not in sync after the markers"
+          if !synced2 then
+            return .fail s!"precondition: copies not in sync after the markers (items {m}={← c.currItems mIp} {a}={← c.currItems ((← getPodIp a ns).getD "")} {b}={← c.currItems ((← getPodIp b ns).getD "")}; follow state {a}={← c.statStr ((← getPodIp a ns).getD "") "repl_follow_state"} {b}={← c.statStr ((← getPodIp b ns).getD "") "repl_follow_state"})"
           let items ← c.currItems mIp
           -- restart the process of the FIRST successor in map order, so that
           -- a choice by map order alone would pick it

@@ -636,15 +636,30 @@ def suite : TestSuite := {
                 (← statStr sIp "repl_follow_state") == some "following" &&
                 (← statNat sIp "repl_applied_lsn") == (← statNat mIp "rocksdb_latest_sequence_number")
             if !ready then return .fail "positive local balance / caught-up precondition not reached"
-            -- R4: the replica's map version when the precondition held, and
-            -- when the rules took effect (to order any later map change)
-            let verAtReady ← statNat sIp "node_map_version"
+            -- R4 (CI 37740298550): the replica accepted a balance-0 map (an
+            -- unconfirmed send being retried) BETWEEN the balance read and the
+            -- rules. The precondition is a STABLE snapshot — version, balance
+            -- 50, the same version — and it is confirmed again once the rules
+            -- are in force; otherwise the run says nothing about the guard.
+            let snapshot : IO (Option Nat) := do
+              let v1 ← statNat sIp "node_map_version"
+              let b ← localBalance
+              let v2 ← statNat sIp "node_map_version"
+              return if v1.isSome && v1 == v2 && b == some "50" then v1 else none
+            let stable ← waitForCondition "a stable snapshot: the same map version around a balance-50 read" 60 do
+              return (← snapshot).isSome
+            let verAtReady ← snapshot
             let readyAt ← utcNow
+            if !stable || verAtReady.isNone then return .fail "PRECONDITION NOT MET: no stable balance-50 snapshot of the replica's own map"
             for spec in topologyRules ++ readGuardRules mIp sIp do
               match ← hostCmd "docker" (["exec", kindNode, "iptables", "-I", "FORWARD", "1"] ++ spec.drop 1) with
               | .error e => return .fail e
               | .ok _ => pure ()
             let rulesAt ← utcNow
+            -- confirmed AFTER the rules are in force: the same version, still 50
+            let verAfterRules ← snapshot
+            if verAfterRules != verAtReady then
+              return .fail s!"PRECONDITION NOT MET (not a guard result): the replica's map changed around the moment the rules took effect (version {verAtReady} at the precondition, snapshot after the rules {verAfterRules}); a map in flight before the fault"
             let disconnected ← waitForCondition "WAL requests actually rejected" 90 do
               return (← statStr sIp "repl_follow_state") == some "disconnected"
             if !disconnected then return .fail "selective WAL fault did not reach disconnected state"
@@ -684,7 +699,7 @@ def suite : TestSuite := {
               let counters := match ← hostCmd "docker" ["exec", kindNode, "iptables", "-L", "FORWARD", "-v", "-n", "-x"] with
                 | .ok o => ((o.splitOn "\n").filter fun l => operatorIps.any (containsSubstr l ·)) |> String.intercalate "\n"
                 | .error e => s!"(unreadable: {e})"
-              IO.eprintln s!"# R4 timeline: precondition held at {readyAt} with replica map version {verAtReady}; operator<->replica rules in force from {rulesAt}; replica map version now {← statNat sIp "node_map_version"}\n# operator<->replica REJECT rule counters (packets bytes):\n{counters}"
+              IO.eprintln s!"# R4 timeline: stable precondition snapshot at {readyAt}: replica map version {verAtReady}; operator<->replica rules in force from {rulesAt}; snapshot right after the rules: version {verAfterRules} (balance 50); replica map version now {← statNat sIp "node_map_version"}\n# operator<->replica REJECT rule counters (packets bytes):\n{counters}"
               return .fail s!"map changed ({balNow}) although topology delivery to the replica was blocked: this would only test operator withholding"
             let value ← memcachedGet cfg.debugPod cfg.«namespace» sIp cfg.flarePort key
             let after ← statNat sIp "repl_applied_lsn"

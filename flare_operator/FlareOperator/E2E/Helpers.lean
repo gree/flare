@@ -163,20 +163,26 @@ def waitForCondition (desc : String) (timeoutSec : Nat) (check : IO Bool) : IO B
 -- String helpers
 -- ===========================================================================
 
-/-- Check if needle is a substring of haystack. -/
+/-- Check if needle is a substring of haystack. Compares bytes in place
+    (`String.substrEq`) at each character position: O(n·m) without copying.
+    The previous version took `haystack.drop i` at every position — a copy
+    of the rest of the string each time, quadratic in the log size — and a
+    growing flared log made each wait check slower (CI 37740298550
+    copy-protection: checks of 11, 17, 27, 46, 88, 196 s). -/
 def containsSubstr (haystack needle : String) : Bool :=
-  let hLen := haystack.length
-  let nLen := needle.length
-  if nLen > hLen then false
+  let nb := needle.endPos.byteIdx
+  let hb := haystack.endPos.byteIdx
+  if nb == 0 then true
+  else if nb > hb then false
   else
-    let rec go (i : Nat) (fuel : Nat) : Bool :=
+    let rec go (p : String.Pos) (fuel : Nat) : Bool :=
       match fuel with
       | 0 => false
       | fuel + 1 =>
-        if i + nLen > hLen then false
-        else if (haystack.drop i).startsWith needle then true
-        else go (i + 1) fuel
-    go 0 (hLen + 1)
+        if p.byteIdx + nb > hb then false
+        else if haystack.substrEq p needle 0 nb then true
+        else go (haystack.next p) fuel
+    go 0 (hb + 1)
 
 -- ===========================================================================
 -- TCP/protocol helpers (via kubectl exec in debug pod)

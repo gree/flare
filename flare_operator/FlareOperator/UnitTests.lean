@@ -1239,6 +1239,12 @@ private def checkActivationOrder (ctx : Ctx) : IO Unit := do
   let act := fun (i : Nat) => s!"[NTC] node activated (attempt 1) on the copy from {n i} (map version now 9)"
   let stop := s!"[WRN] activation STOPPED before attempt 1: the partition's master is now {n 1}, not the source {n 2}"
   let old := "empty-source-nodes-2"
+  check ctx "containsSubstr (linear rewrite): same answers — empty needle, start, end, absent, longer needle, multibyte text"
+    (FlareOperator.E2E.Helpers.containsSubstr "abc" "" && FlareOperator.E2E.Helpers.containsSubstr "abc" "ab"
+      && FlareOperator.E2E.Helpers.containsSubstr "abc" "bc" && !FlareOperator.E2E.Helpers.containsSubstr "abc" "bd"
+      && !FlareOperator.E2E.Helpers.containsSubstr "ab" "abc" && FlareOperator.E2E.Helpers.containsSubstr "再構築 held by X" "held by"
+      && FlareOperator.E2E.Helpers.containsSubstr "a再b" "再b" && !FlareOperator.E2E.Helpers.containsSubstr "a再b" "再c"
+      && FlareOperator.E2E.Helpers.containsSubstr "aaab" "aab")
   check ctx "waitForCondition (review): a check starts only before the deadline; a hold AFTER it is late (not OK); at the deadline OK still counts; a miss at or after it is a timeout"
     (FlareOperator.E2E.Helpers.mayStartCheck 999 1000 && !FlareOperator.E2E.Helpers.mayStartCheck 1000 1000
       && FlareOperator.E2E.Helpers.waitStep true 1000 1000 == .ok

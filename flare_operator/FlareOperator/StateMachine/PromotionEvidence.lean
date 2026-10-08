@@ -51,7 +51,11 @@ def Class.promotable : Class → Bool
   | .eligible | .lagging | .legacy | .empty => true
   | _ => false
 
-/-- The parsed stats of one candidate (`none` fields = not reported). -/
+/-- The parsed stats of one candidate (`none` fields = not reported).
+    A field that IS reported with a value outside its domain is listed in
+    `invalid` (review 2026-10-08): an END line says the reply is complete,
+    not that its contents are valid, and an invalid value is never read as
+    an unreported one. -/
 structure Stats where
   complete : Bool := false
   eligible : Option Nat := none
@@ -68,42 +72,86 @@ structure Stats where
   bootId : Option String := none
   copyId : Option String := none
   items : Option Nat := none
+  /-- reported keys whose value is not valid for them -/
+  invalid : List String := []
+  /-- at least one key that a pre-R3 flared never reports is present -/
+  newFormat : Bool := false
   deriving Repr
+
+/-- Keys only a newer flared reports (R3, copy identity, copy retention). -/
+def newFormatKeys : List String :=
+  ["repl_read_source_eligible", "repl_read_source_state", "rocksdb_copy_identity_consistent",
+   "rocksdb_quarantined", "rocksdb_copy_partial", "rebuild_in_flight", "rebuild_parked",
+   "rocksdb_copy_id", "rocksdb_master_id", "rocksdb_source_epoch", "rocksdb_rebuilt_from_epoch"]
 
 def parseStats (out : String) : Stats :=
   let lines := (out.splitOn "\n").map (fun l => (l.replace "\r" "").trim)
   let value := fun (k : String) => lines.findSome? fun l =>
-    if l.startsWith s!"STAT {k} " then some (l.drop (s!"STAT {k} ").length) else none
-  let nat := fun (k : String) => (value k).bind String.toNat?
+    if l.startsWith s!"STAT {k} " then some (l.drop (s!"STAT {k} ").length)
+    else if l == s!"STAT {k}" then some "" else none
+  -- (parsed, reported-but-invalid)
+  let flag := fun (k : String) => match value k with
+    | none => ((none : Option Nat), false)
+    | some v => if v == "0" then (some 0, false) else if v == "1" then (some 1, false) else (none, true)
+  let nat := fun (k : String) => match value k with
+    | none => ((none : Option Nat), false)
+    | some v => match v.toNat? with
+      | some n => (some n, false)
+      | none => (none, true)
+  let enum := fun (k : String) (allowed : List String) => match value k with
+    | none => ((none : Option String), false)
+    | some v => if allowed.contains v then (some v, false) else (none, true)
+  let el := flag "repl_read_source_eligible"
+  let ss := enum "repl_read_source_state" ["none", "eligible", "revalidating", "needs_rebuild"]
+  let ic := flag "rocksdb_copy_identity_consistent"
+  let qu := flag "rocksdb_quarantined"
+  let cp := flag "rocksdb_copy_partial"
+  let fl := flag "rebuild_in_flight"
+  let pk := flag "rebuild_parked"
+  let rc := enum "reconstruction_current_state" ["none", "running", "succeeded", "failed", "aborted"]
+  let it := nat "curr_items"
+  let named := [("repl_read_source_eligible", el.2), ("repl_read_source_state", ss.2),
+    ("rocksdb_copy_identity_consistent", ic.2), ("rocksdb_quarantined", qu.2), ("rocksdb_copy_partial", cp.2),
+    ("rebuild_in_flight", fl.2), ("rebuild_parked", pk.2), ("reconstruction_current_state", rc.2), ("curr_items", it.2)]
   { complete := lines.contains "END"
-    eligible := nat "repl_read_source_eligible"
-    sourceState := value "repl_read_source_state"
-    identityConsistent := nat "rocksdb_copy_identity_consistent"
-    quarantined := nat "rocksdb_quarantined"
-    copyPartial := nat "rocksdb_copy_partial"
-    inFlight := nat "rebuild_in_flight"
-    parked := nat "rebuild_parked"
-    reconstruction := value "reconstruction_current_state"
+    eligible := el.1, sourceState := ss.1, identityConsistent := ic.1, quarantined := qu.1
+    copyPartial := cp.1, inFlight := fl.1, parked := pk.1, reconstruction := rc.1
     masterId := value "rocksdb_master_id"
     sourceEpoch := value "rocksdb_source_epoch"
     rebuiltFromEpoch := (value "rocksdb_rebuilt_from_epoch").filter (!·.isEmpty)
     bootId := value "reconstruction_boot_id"
     copyId := value "rocksdb_copy_id"
-    items := nat "curr_items" }
+    items := it.1
+    invalid := named.filterMap fun (k, bad) => if bad then some k else none
+    newFormat := newFormatKeys.any fun k => (value k).isSome }
 
 /-- The history this copy holds: its rebuild evidence's epoch, else its own. -/
 def Stats.copyEpoch (s : Stats) : Option String :=
   s.rebuiltFromEpoch.orElse fun _ => s.sourceEpoch
 
-/-- An explicit pre-R3 flared: none of the R3 / copy-retention keys. -/
-def Stats.isLegacy (s : Stats) : Bool :=
-  s.eligible.isNone && s.sourceState.isNone && s.identityConsistent.isNone && s.copyId.isNone
+/-- An explicit pre-R3 flared: NONE of the newer keys. A reply carrying any
+    of them is never downgraded to this. -/
+def Stats.isLegacy (s : Stats) : Bool := !s.newFormat
 
-/-- A backend without copy evidence (not RocksDB: no copy identity, no
-    master id, no source epoch). R3 may be reported, but none of the
-    copy-level reasons can be read; the same narrow rule as legacy applies. -/
+/-- A backend without copy evidence (not RocksDB): R3 may be reported, but
+    none of the copy-level keys are. -/
 def Stats.noCopyEvidence (s : Stats) : Bool :=
   s.copyId.isNone && s.identityConsistent.isNone && s.masterId.isNone && s.sourceEpoch.isNone
+    && s.quarantined.isNone && s.copyPartial.isNone && s.inFlight.isNone && s.parked.isNone
+
+/-- A known forbidden marker, whatever the backend or format (checked before
+    any compatibility rule). -/
+def Stats.forbiddenMarker (s : Stats) (partitionHasMaster : Bool) : Option String :=
+  if s.identityConsistent == some 0 then some "copy identity records disagree"
+  else if s.quarantined == some 1 then some "the empty copy left by a quarantine"
+  else if s.copyPartial == some 1 then some "a merging dump left the copy part-way"
+  else if s.inFlight == some 1 then some "a copy is being rebuilt (transfer or switch in flight)"
+  else if s.parked == some 1 then some "a rebuild is parked part-way (its copy was never completed)"
+  else if s.reconstruction == some "running" then some "a reconstruction is running on it"
+  else if s.sourceState == some "needs_rebuild" then some "R3: confirmed different history"
+  else if s.sourceState == some "revalidating" && partitionHasMaster then
+    some "R3: history being re-validated against the present master"
+  else none
 
 /-- What the operator knows besides the stats. -/
 structure Observed where
@@ -124,26 +172,21 @@ def classify (reply : Option String) (o : Observed) : Class :=
   | some out =>
     let s := parseStats out
     if !s.complete then .unknown "stats incomplete"
-    else if s.isLegacy then
+    else if !s.invalid.isEmpty then .unknown s!"invalid value(s) reported for {s.invalid}"
+    else match s.forbiddenMarker o.partitionHasMaster with
+    | some why => .forbidden why
+    | none =>
+    if s.isLegacy then
       -- no markers to trust: only the map, the pod and the reconstruction say
-      if s.items == some 0 && s.reconstruction != some "running" then .empty
-      else if o.mapActive && !o.mapPrepare && o.podReady && s.reconstruction != some "running" then .legacy
+      if s.items == some 0 then .empty
+      else if o.mapActive && !o.mapPrepare && o.podReady then .legacy
       else .unknown "a pre-R3 flared that is not Active, Ready and idle"
     else if s.noCopyEvidence then
-      if s.sourceState == some "needs_rebuild" then .forbidden "R3: confirmed different history"
+      if s.sourceState == some "revalidating" then .unknown "re-validating with no master, and no copy evidence to tell its history"
       else if s.eligible == some 1 && o.mapActive && !o.mapPrepare then .eligible
-      else if s.items == some 0 && s.reconstruction != some "running" then .empty
-      else if o.mapActive && !o.mapPrepare && o.podReady && s.reconstruction != some "running" then .legacy
+      else if s.items == some 0 then .empty
+      else if o.mapActive && !o.mapPrepare && o.podReady then .legacy
       else .unknown "a backend without copy evidence that is not Active, Ready and idle"
-    else if s.identityConsistent == some 0 then .forbidden "copy identity records disagree"
-    else if s.quarantined == some 1 then .forbidden "the empty copy left by a quarantine"
-    else if s.copyPartial == some 1 then .forbidden "a merging dump left the copy part-way"
-    else if s.inFlight == some 1 then .forbidden "a copy is being rebuilt (transfer or switch in flight)"
-    else if s.parked == some 1 then .forbidden "a rebuild is parked part-way (its copy was never completed)"
-    else if s.reconstruction == some "running" then .forbidden "a reconstruction is running on it"
-    else if s.sourceState == some "needs_rebuild" then .forbidden "R3: confirmed different history"
-    else if s.sourceState == some "revalidating" && o.partitionHasMaster then
-      .forbidden "R3: history being re-validated against the present master"
     else if s.sourceState == some "revalidating" then
       -- the master went while it was re-validating: its going is NOT
       -- evidence. Only a copy proven to be the RECORDED last master's

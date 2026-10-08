@@ -1289,6 +1289,19 @@ private def checkRebuildConcurrency (ctx : Ctx) : IO Unit := do
   let idleAfter := st [m0, m1, ("a", holdNode .Slave .Prepare 0 "a")]
   check ctx "rebuild concurrency: a node reporting a running reconstruction in its stats counts as well"
     ((gate idle idleAfter 1 1 ["y"]).held.map Prod.fst == ["a"] && (gate idle idleAfter 1 1).held.isEmpty)
+  -- R7 (review 2026-10-08): a member the MAP has Active but whose stats
+  -- report a running reconstruction counts — for the cluster and for its
+  -- partition — and stops new assignments and resumes
+  let actBefore := st [m0, m1, ("z", holdNode .Slave .Active 1 "z"), ("a", holdNode .Proxy .Active (-1) "a")]
+  let actAfter := st [m0, m1, ("z", holdNode .Slave .Active 1 "z"), ("a", holdNode .Slave .Prepare 0 "a")]
+  let samePartAfter := st [m0, m1, ("z", holdNode .Slave .Active 1 "z"), ("a", holdNode .Slave .Prepare 1 "a")]
+  check ctx "rebuild concurrency (R7): a map=Active member running a reconstruction holds another partition's new assignment (cluster limit 1)"
+    ((gate actBefore actAfter 1 1 ["z"]).held.map Prod.fst == ["a"] && (gate actBefore actAfter 1 1).held.isEmpty)
+  check ctx "rebuild concurrency (R7): ... and its own partition's new assignment even with room in the cluster (partition limit 1)"
+    ((gate actBefore samePartAfter 1 2 ["z"]).held.map Prod.fst == ["a"] && (gate actBefore samePartAfter 1 2).held.isEmpty)
+  let parkState := st [m0, m1, ("x", holdNode .Slave .Prepare 0 "x"), ("z", holdNode .Slave .Active 1 "z")]
+  check ctx "rebuild concurrency (R7): a parked rebuild is NOT resumed while a map=Active member runs a reconstruction"
+    (resumeCandidate parkState 1 1 ["x"] ["z"] == none && resumeCandidate parkState 1 1 ["x"] [] == some "x")
   -- not gated: a rejoining member (Slave before) and a master reconstruction
   let rejoinBefore := st [m0, m1, ("x", holdNode .Slave .Prepare 1 "x"), ("r", holdNode .Slave .Down 0 "r")]
   let rejoinAfter := st [m0, m1, ("x", holdNode .Slave .Prepare 1 "x"), ("r", holdNode .Slave .Prepare 0 "r")]
@@ -1393,7 +1406,7 @@ private def checkPromotionEvidence (ctx : Ctx) : IO Unit := do
     (cls (some "STAT curr_items 60\r\nEND\r\n") { obs with mapActive := true, podReady := true } == .legacy
       && (match cls (some "STAT curr_items 60\r\nEND\r\n") { obs with mapPrepare := true, mapActive := false } with | .unknown _ => true | _ => false)
       && (match cls (some "STAT curr_items 60\r\nEND\r\n") { obs with podReady := false } with | .unknown _ => true | _ => false)
-      && (match cls (some "STAT curr_items 60\r\nSTAT reconstruction_current_state running\r\nEND\r\n") obs with | .unknown _ => true | _ => false))
+      && (match cls (some "STAT curr_items 60\r\nSTAT reconstruction_current_state running\r\nEND\r\n") obs with | .forbidden _ => true | _ => false))
   check ctx "promotion by reason: a backend without copy evidence (tch) is decided by the narrow legacy rule, not held as unknown"
     (cls (some "STAT repl_read_source_eligible 0\r\nSTAT repl_read_source_state none\r\nSTAT curr_items 60\r\nEND\r\n") { obs with lastMasterHistory := none } == .legacy
       && cls (some "STAT repl_read_source_eligible 1\r\nSTAT repl_read_source_state eligible\r\nSTAT curr_items 60\r\nEND\r\n") obs == .eligible
@@ -1409,6 +1422,24 @@ private def checkPromotionEvidence (ctx : Ctx) : IO Unit := do
     (PromotionEvidence.commitTimeAllows .eligible && PromotionEvidence.commitTimeAllows .legacy
       && !PromotionEvidence.commitTimeAllows .lagging && !PromotionEvidence.commitTimeAllows (.forbidden "x")
       && !PromotionEvidence.commitTimeAllows (.unknown "x"))
+  -- review 2026-10-08 (counterexamples run with lake env lean --stdin)
+  let rv := { mapPrepare := false, mapActive := true, podReady := true, partitionHasMaster := false, lastMasterHistory := none : PromotionEvidence.Observed }
+  check ctx "promotion by reason (review CE-a): quarantined / part-way markers are FORBIDDEN before any legacy rule (not legacy)"
+    (match cls (some "STAT rocksdb_quarantined 1\r\nSTAT rocksdb_copy_partial 1\r\nSTAT curr_items 60\r\nEND\r\n") rv with | .forbidden _ => true | _ => false)
+  check ctx "promotion by reason (review CE-b): a running reconstruction is FORBIDDEN even with eligible=1 and no copy evidence (tch)"
+    (match cls (some "STAT repl_read_source_eligible 1\r\nSTAT repl_read_source_state eligible\r\nSTAT reconstruction_current_state running\r\nSTAT curr_items 60\r\nEND\r\n") rv with | .forbidden _ => true | _ => false)
+  check ctx "promotion by reason (review CE-c): a reported but INVALID value is UNKNOWN, not read as unreported"
+    (match cls (some "STAT repl_read_source_eligible 1\r\nSTAT repl_read_source_state eligible\r\nSTAT rocksdb_copy_id copy-1\r\nSTAT rocksdb_copy_identity_consistent invalid\r\nSTAT rocksdb_copy_partial invalid\r\nSTAT curr_items 60\r\nEND\r\n") rv with | .unknown _ => true | _ => false)
+  check ctx "promotion by reason: an invalid eligible / state / items / running value is UNKNOWN; a parked rebuild is FORBIDDEN on tch and legacy-shaped replies too"
+    ((match cls (some "STAT repl_read_source_eligible yes\r\nSTAT curr_items 60\r\nEND\r\n") rv with | .unknown _ => true | _ => false)
+      && (match cls (some "STAT repl_read_source_eligible 1\r\nSTAT repl_read_source_state bogus\r\nSTAT curr_items 60\r\nEND\r\n") rv with | .unknown _ => true | _ => false)
+      && (match cls (some "STAT repl_read_source_eligible 1\r\nSTAT repl_read_source_state eligible\r\nSTAT curr_items x\r\nEND\r\n") rv with | .unknown _ => true | _ => false)
+      && (match cls (some "STAT repl_read_source_eligible 1\r\nSTAT reconstruction_current_state walking\r\nSTAT curr_items 60\r\nEND\r\n") rv with | .unknown _ => true | _ => false)
+      && (match cls (some "STAT repl_read_source_eligible 1\r\nSTAT repl_read_source_state eligible\r\nSTAT rebuild_parked 1\r\nSTAT curr_items 60\r\nEND\r\n") rv with | .forbidden _ => true | _ => false)
+      && (match cls (some "STAT rebuild_in_flight 1\r\nSTAT curr_items 60\r\nEND\r\n") rv with | .forbidden _ => true | _ => false))
+  check ctx "promotion by reason: a reply with ANY newer key is never downgraded to legacy (a lone rocksdb_copy_id is not legacy)"
+    (cls (some "STAT rocksdb_copy_id c:1\r\nSTAT curr_items 60\r\nEND\r\n") rv != .legacy
+      && cls (some "STAT curr_items 60\r\nEND\r\n") rv == .legacy)
   let b := PromotionEvidence.bindingOf (some "uid-1") (reply "")
   check ctx "promotion by reason: the commit refuses when the pod, the flared process or the copy changed since the reading, or it was not read"
     ((PromotionEvidence.commitAllows (some .eligible) b b).1

@@ -532,6 +532,35 @@ private def processCopyDiscardApprovals (crName ns : String) : IO Unit := do
           IO.eprintln s!"[flare-operator] COPY DISCARD APPROVAL {a.name} ({a.operation} of copy {a.copyId} on {pod}, request {a.requestId}): {phase} — {reason}"
           record phase reason (a.attempt + 1)
 
+/-- R7 (review 2026-10-08): the nodes rebuilding NOW by their own stats,
+    whatever the map says (an Active member catching up at boot, a master
+    reconstruction): `reconstruction_current_state=running` or a copy in
+    flight. Every mapped node whose pod exists is read; a pod that exists but
+    cannot be read completely is counted (fail closed: a rebuild that cannot
+    be ruled out). Read only when a decision needs it (a new assignment, a
+    resume). -/
+private def runningRebuildKeys (st : FlareClusterState) (ns : String) : IO (List String) := do
+  let mut running : List String := []
+  let mut unreadable : List String := []
+  for (key, _) in st.nodeMap do
+    let pod := extractPodName key
+    match ← kubectl ["get", "pod", pod, "-n", ns, "-o", "jsonpath={.metadata.uid}"] with
+    | .ok uid =>
+      if uid.trim.isEmpty then continue
+      match ← Bridge.queryPodStats pod ns "stats" with
+      | .ok out =>
+        let complete := (out.splitOn "\n").any fun l => l.trim == "END"
+        let rs := (out.splitOn "\n").findSome? fun l =>
+          let t := (l.replace "\r" "").trim
+          if t.startsWith "STAT reconstruction_current_state " then some (t.drop "STAT reconstruction_current_state ".length) else none
+        if !complete then unreadable := unreadable ++ [key]
+        else if rs == some "running" || statNat out "rebuild_in_flight" == some 1 then running := running ++ [key]
+      | .error _ => unreadable := unreadable ++ [key]
+    | .error _ => pure ()
+  if !unreadable.isEmpty then
+    IO.eprintln s!"[flare-operator] rebuild concurrency: stats unreadable for {unreadable} — counted as running (a rebuild there cannot be ruled out)"
+  return running ++ unreadable
+
 /-- Copy retention §10: read the rebuilding nodes' park state, and resume
     ONE parked rebuild when its slots are free. A node counts as parked-idle
     only on a complete stats reply saying parked=1, in_flight=0 and no
@@ -559,7 +588,8 @@ private def refreshParkedRebuilds (stateRef : IO.Ref FlareClusterState) (ns : St
   let eligibleToResume := parked.filter fun k => !(recent.any (·.1 == k))
   -- nodes in their backoff stay parked (not counted) but are not resumed now
   let ordered := eligibleToResume ++ parked.filter (!eligibleToResume.contains ·)
-  match (RebuildConcurrency.resumeCandidate st 1 1 ordered).filter (eligibleToResume.contains ·) with
+  let running ← if eligibleToResume.isEmpty then pure [] else runningRebuildKeys st ns
+  match (RebuildConcurrency.resumeCandidate st 1 1 ordered running).filter (eligibleToResume.contains ·) with
   | none => pure ()
   | some k =>
     resumedAtRef.modify (· ++ [(k, nowMs)])
@@ -1556,7 +1586,14 @@ private def commitChecked (stateRef : IO.Ref FlareClusterState) (ver : Nat) (ucs
   -- A NEW Proxy -> Slave(Prepare) assignment beyond that is held (the node
   -- stays a Proxy this pass). Rejoins over TCP and master reconstructions
   -- are not gated (RebuildConcurrency).
-  let gated := RebuildConcurrency.gate cur ucs 1 1 [] (← parkedIdleRef.get)
+  -- R7: count what the nodes' own stats report running too (map=Active
+  -- members catching up, reconstructions the map does not show) — read only
+  -- when this pass makes a new assignment
+  let needsGate := ucs.nodeMap.any fun (k, a) => RebuildConcurrency.newAssignment (cur.lookupNode k) a
+  let running ← if needsGate then runningRebuildKeys cur ns else pure []
+  if needsGate && !running.isEmpty then
+    IO.eprintln s!"[flare-operator] rebuild concurrency: running by their own stats: {running}"
+  let gated := RebuildConcurrency.gate cur ucs 1 1 running (← parkedIdleRef.get)
   let heldKeys := gated.held.map Prod.fst
   if heldKeys != (← rebuildHeldRef.get) then
     rebuildHeldRef.set heldKeys

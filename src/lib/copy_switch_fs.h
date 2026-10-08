@@ -52,6 +52,10 @@ file_status stat_path_status(const string& path, string* error = NULL);
 // Deterministic under root, where permission changes do not take effect.
 void set_read_fault_for_test(const string& suffix, int err, bool partial = false);
 void clear_read_faults_for_test();
+// TEST SEAM: rename_durable() FROM a path ending with `suffix` fails with
+// `err` — before the rename, or (`after_rename`) after it, as a failed fsync
+// of the directory. Cleared by clear_read_faults_for_test().
+void set_rename_fault_for_test(const string& suffix, int err, bool after_rename = false);
 bool dir_exists(const string& path);
 bool same_device(const string& a, const string& b);
 // "" = no such directory, "?" = directory without a readable COPY_ID

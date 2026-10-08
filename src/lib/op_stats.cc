@@ -298,6 +298,7 @@ int op_stats::_send_stats(thread_pool* req_tp, thread_pool* other_tp, storage* s
 				}
 			}
 			_send_stat("rebuild_in_flight"                  , rdb->is_rebuild_in_flight() ? 1 : 0);
+			_send_stat("rocksdb_switch_unresolved"          , rdb->is_switch_unresolved() ? 1 : 0);
 			_send_stat("rocksdb_snapshot_serving"           , rdb->is_snapshot_serving() ? 1 : 0);
 			_send_stat("rocksdb_retained_copies"            , static_cast<uint64_t>(rdb->list_retained().size()));
 			// monitoring (decision 2026-10-07, item 2): what the kept copies take

@@ -638,7 +638,27 @@ int storage_rocksdb::bump_copy_generation(const char* why) {
 	return r;
 }
 
+void storage_rocksdb::_mark_switch_unresolved(const string& why) {
+	pthread_rwlock_wrlock(&this->_mutex_generations);
+	this->_copy_identity_consistent = false;
+	pthread_rwlock_unlock(&this->_mutex_generations);
+	this->_switch_unresolved_why = why;
+	this->_switch_unresolved = true;
+	log_err("CRITICAL: copy switch UNRESOLVED: %s — the DB stays closed, nothing is created, reset or removed, and this copy is not a healthy copy (no reads, not a source, not promotable) until the next start resolves the switch intent", why.c_str());
+}
+
+bool storage_rocksdb::_refuse_if_switch_unresolved(const char* who) {
+	if (!this->_switch_unresolved) {
+		return false;
+	}
+	log_err("%s refused: the copy switch is unresolved (%s)", who, this->_switch_unresolved_why.c_str());
+	return true;
+}
+
 int storage_rocksdb::switch_to_staging(const string& attempt, const string& expected_new_id) {
+	if (this->_refuse_if_switch_unresolved("switch_to_staging")) {
+		return -1;
+	}
 	const string staging = this->_data_dir + "/" + copy_fs::kStagingPrefix + attempt;
 	if (copy_fs::read_copy_id(staging) != expected_new_id) {
 		log_err("switch refused: staging [%s] is not copy %s (found %s)", staging.c_str(), expected_new_id.c_str(),
@@ -671,22 +691,38 @@ int storage_rocksdb::switch_to_staging(const string& attempt, const string& expe
 			this->_close_db();		// the live copy is durable once closed
 		}
 		if (copy_fs::switch_dirs(this->_data_dir, "flare.rocksdb", in) < 0) {
+			// review P1: reopen ONLY when recovery succeeded AND the live
+			// directory on disk is the old copy again (a rollback / abort that
+			// really happened); an in-memory copy id proves nothing
 			string report;
-			copy_fs::recover(this->_data_dir, "flare.rocksdb", report);
-			log_err("copy switch failed; recovery: %s", report.c_str());
-			this->_open_db(this->_data_path);
+			const int rr = copy_fs::recover(this->_data_dir, "flare.rocksdb", report);
+			const string live_now = copy_fs::read_copy_id(this->_data_path);
+			log_err("copy switch failed; recovery (%d): %s; live directory now [%s]", rr, report.c_str(), live_now.c_str());
+			if (rr == 0 && live_now == in.old_id) {
+				rocksdb::Status ro = this->_open_db(this->_data_path);
+				if (!ro.ok()) {
+					this->_db = NULL;
+					this->_mark_switch_unresolved("the restored old copy " + in.old_id + " does not open: " + ro.ToString());
+				}
+			} else {
+				this->_db = NULL;
+				this->_mark_switch_unresolved("after a failed switch the live directory is [" + live_now + "], not the old copy " + in.old_id
+					+ (rr == 0 ? string("") : string("; recovery refused: ") + report));
+			}
 			break;
 		}
 		rocksdb::Status st = this->_open_db(this->_data_path);
 		if (!st.ok()) {
-			log_err("copy switch: the new live copy does not open: %s (intent kept: the next open resolves it)", st.ToString().c_str());
 			this->_db = NULL;
+			this->_mark_switch_unresolved("the new live copy does not open: " + st.ToString() + " (intent kept: the next open resolves it)");
 			break;
 		}
 		string v;
 		rocksdb::Status cs = this->_db->Get(this->_read_options, kCopyIdKey, &v);
 		if (!cs.ok() || v != expected_new_id) {
-			log_err("copy switch: the opened live copy is %s, not %s (intent kept)", v.c_str(), expected_new_id.c_str());
+			this->_close_db();
+			this->_db = NULL;
+			this->_mark_switch_unresolved("the opened live copy is " + v + ", not " + expected_new_id + " (intent kept)");
 			break;
 		}
 		this->_copy_id = v;
@@ -1252,6 +1288,10 @@ int storage_rocksdb::regenerate_master_id() {
  *	families are not all listed, so a single place has to know about them.
  */
 rocksdb::Status storage_rocksdb::_open_db(const string& path) {
+	if (this->_switch_unresolved) {
+		// never create a DB where the live copy may be missing (review P1)
+		return rocksdb::Status::Aborted("copy switch unresolved: " + this->_switch_unresolved_why);
+	}
 	vector<string> existing;
 	rocksdb::Status ls = rocksdb::DB::ListColumnFamilies(rocksdb::DBOptions(this->_options), path, &existing);
 	bool has_meta = false;
@@ -2560,6 +2600,9 @@ namespace {
 }
 
 int storage_rocksdb::swap_in_snapshot(const string& staging_dir, uint64_t checkpoint_seq) {
+	if (this->_refuse_if_switch_unresolved("swap_in_snapshot")) {
+		return -1;
+	}
 	// STRUCTURAL VERIFICATION before the point of no return: open the staged
 	// checkpoint read-only (parses MANIFEST + replays its WAL) and touch one
 	// key. The per-file CRC in the transfer protocol catches transport
@@ -2979,6 +3022,9 @@ void storage_rocksdb::_prune_named_backups(int keep) {
 }
 
 int storage_rocksdb::_emergency_reopen_empty(const char* who) {
+	if (this->_refuse_if_switch_unresolved(who)) {
+		return -1;
+	}
 	// Last-ditch recovery for a failed reopen (typically ENOSPC on a full
 	// data dir — observed live: hourly backup checkpoints hardlink-pinned
 	// compacted-away SSTs until a tmpfs hit 100%, and the post-crash reopen
@@ -3005,6 +3051,9 @@ int storage_rocksdb::_emergency_reopen_empty(const char* who) {
 }
 
 int storage_rocksdb::hard_reset() {
+	if (this->_refuse_if_switch_unresolved("hard_reset")) {
+		return -1;
+	}
 	// In-process Case-A: discard the (corrupt) local DB entirely and reopen
 	// empty. Same teardown/reopen as swap_in_snapshot, minus the staging
 	// swap — reconstruction reseeds the data afterwards. The caller guarantees
@@ -3053,6 +3102,9 @@ int storage_rocksdb::hard_reset() {
 
 int storage_rocksdb::quarantine_reset(string& moved_to) {
 	moved_to.clear();
+	if (this->_refuse_if_switch_unresolved("quarantine_reset")) {
+		return -1;
+	}
 	// design §6: ONE generation. Another quarantine already here: stop and
 	// notify; nothing is moved or deleted (its removal needs an approval).
 	{
@@ -3274,7 +3326,9 @@ bool storage_rocksdb::is_copy_partial() {
 }
 
 bool storage_rocksdb::promotion_forbidden(string& why) {
-	if (this->is_rebuild_in_flight()) {
+	if (this->is_switch_unresolved()) {
+		why = "a copy switch is unresolved (" + this->get_switch_unresolved_why() + ")";
+	} else if (this->is_rebuild_in_flight()) {
 		why = "a copy is being rebuilt (transfer or switch in flight)";
 	} else if (this->is_rebuild_parked()) {
 		why = "a rebuild is parked part-way (its copy was never completed)";

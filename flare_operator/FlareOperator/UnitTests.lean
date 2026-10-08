@@ -1501,6 +1501,9 @@ private def checkPromotionEvidence (ctx : Ctx) : IO Unit := do
   check ctx "promotion by reason: a reply with ANY newer key is never downgraded to legacy (a lone rocksdb_copy_id is not legacy)"
     (cls (some "STAT rocksdb_copy_id c:1\r\nSTAT curr_items 60\r\nEND\r\n") rv != .legacy
       && cls (some "STAT curr_items 60\r\nEND\r\n") rv == .legacy)
+  check ctx "promotion by reason (review P1): an unresolved copy switch is FORBIDDEN; an invalid value for it is unknown"
+    ((match cls (reply "STAT repl_read_source_eligible 1\r\nSTAT repl_read_source_state eligible\r\nSTAT rocksdb_switch_unresolved 1\r\n") obs with | .forbidden _ => true | _ => false)
+      && (match cls (reply "STAT repl_read_source_eligible 1\r\nSTAT repl_read_source_state eligible\r\nSTAT rocksdb_switch_unresolved x\r\n") obs with | .unknown _ => true | _ => false))
   -- round 2: the real older RocksDB formats stay legacy
   let rc56 := "STAT curr_items 60\r\nSTAT rocksdb_master_id old-master-id\r\nSTAT rocksdb_repl_last_lsn 12\r\nSTAT rocksdb_latest_sequence_number 12\r\nEND\r\n"
   let rc65 := "STAT curr_items 60\r\nSTAT reconstruction_boot_id 9\r\nSTAT reconstruction_current_state succeeded\r\nSTAT rocksdb_master_id old-master-id\r\nSTAT rocksdb_source_epoch 2:e\r\nSTAT rocksdb_incarnation 1\r\nEND\r\n"

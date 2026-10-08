@@ -1065,6 +1065,15 @@ int handler_reconstruction::_staged_rebuild(bool snapshot_ok, const string& peer
 
 	// --- switch (the old copy is retained) --------------------------------
 	if (rdb->switch_to_staging(attempt, new_id) < 0) {
+		if (rdb->is_switch_unresolved()) {
+			// review P1: the live copy on disk is not proven to be the old one;
+			// the staging copy may be the only good copy — never abandoned
+			// (removed) here. The next start resolves the intent.
+			rdb->note_staged_result(false);
+			this->_copy_dirty = true;
+			log_err("the switch to copy %s is UNRESOLVED (%s): the staging copy is kept, nothing is activated", new_id.c_str(), rdb->get_switch_unresolved_why().c_str());
+			return -1;
+		}
 		if (rdb->get_copy_id() != new_id) {
 			return abandon::now(rdb, stg, attempt, "the switch did not complete (the live copy is the old one)");
 		}

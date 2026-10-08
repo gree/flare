@@ -2399,6 +2399,77 @@ void test_unreadable_switch_intent_refuses_open_and_touches_nothing() {
 	cut_remove_path(wal_slave_dir, NULL);
 }
 
+// Review P1 (running switch): the live copy is already retained, the next
+// rename fails, and the intent cannot be read during recovery. Nothing is
+// created where the live copy was; retained / staging / intent stay; the
+// copy is not healthy; the same process does not retry or reset.
+storage_rocksdb* staged_ready(const char* dir, string& nid) {
+	storage_rocksdb* s = make_rocksdb(dir);
+	storage_set_string(s, "k1", "old");
+	storage_rocksdb* stg = s->open_staging("u1", false);
+	storage_set_string(stg, "k1", "new");
+	cut_assert_equal_int(0, stg->adopt_history("M", "E", 1));
+	nid = stg->get_copy_id();
+	cut_assert_equal_int(0, stg->seal());
+	delete stg;
+	return s;
+}
+
+void check_unresolved_switch(bool after_rename) {
+	string nid;
+	storage_rocksdb* s = staged_ready(wal_slave_dir, nid);
+	const string dir = wal_slave_dir;
+	copy_fs::set_rename_fault_for_test("/staging-u1", EIO, after_rename);
+	copy_fs::set_read_fault_for_test(copy_fs::kIntentFile, EIO);
+	cut_assert_equal_int(-1, s->switch_to_staging("u1", nid));
+	cut_assert_true(s->is_switch_unresolved());
+	struct stat st;
+	if (!after_rename) {
+		// no DB was created where the live copy was
+		cut_assert_not_equal_int(0, ::stat((dir + "/flare.rocksdb").c_str(), &st));
+		cut_assert_equal_int(0, ::stat((dir + "/staging-u1/COPY_ID").c_str(), &st));
+	}
+	cut_assert_equal_int(0, ::stat((dir + "/retained-u1").c_str(), &st));
+	cut_assert_equal_int(0, ::stat((dir + "/" + copy_fs::kIntentFile).c_str(), &st));
+	string why;
+	cut_assert_true(s->promotion_forbidden(why));
+	cut_assert_false(s->copy_identity_consistent());
+	// the same process neither retries nor resets
+	cut_assert_equal_int(-1, s->switch_to_staging("u1", nid));
+	cut_assert_equal_int(-1, s->hard_reset());
+	if (!after_rename) {
+		cut_assert_not_equal_int(0, ::stat((dir + "/flare.rocksdb").c_str(), &st));
+	}
+	cut_assert_equal_int(0, ::stat((dir + "/retained-u1").c_str(), &st));
+	copy_fs::clear_read_faults_for_test();
+	delete s;
+	// the next start resolves it from what is on disk
+	storage_rocksdb* t = new storage_rocksdb(dir, 32, 4, 16, 4, 2, 86400, 1024);
+	cut_assert_equal_int(0, t->open());
+	cut_assert_false(t->is_switch_unresolved());
+	delete t;
+	cut_remove_path(wal_slave_dir, NULL);
+}
+
+void test_running_switch_rename_fails_and_intent_unreadable_stays_unresolved() { check_unresolved_switch(false); }
+void test_running_switch_fsync_fails_after_rename_and_intent_unreadable_stays_unresolved() { check_unresolved_switch(true); }
+
+// recovery succeeds and the live directory IS the old copy again: reopened
+void test_running_switch_rename_fails_with_readable_intent_rolls_back_and_reopens() {
+	string nid;
+	storage_rocksdb* s = staged_ready(wal_slave_dir, nid);
+	const string old = s->get_copy_id();
+	copy_fs::set_rename_fault_for_test("/staging-u1", EIO);
+	cut_assert_equal_int(-1, s->switch_to_staging("u1", nid));
+	copy_fs::clear_read_faults_for_test();
+	cut_assert_false(s->is_switch_unresolved());
+	cut_assert_equal_string(old.c_str(), s->get_copy_id().c_str());
+	string out;
+	cut_assert_equal_int(0, storage_get_string(s, "k1", out));
+	cut_assert_equal_string("old", out.c_str());
+	drop_rocksdb(s, wal_slave_dir);
+}
+
 // An abandoned attempt (a failed dump, a refused gate, a crash) leaves the
 // live copy as it was; a staging directory is never reused, and an
 // unfinished one is removed at the next open.

@@ -76,6 +76,7 @@ struct read_fault {
 	bool partial;
 };
 vector<read_fault> g_read_faults;
+vector<read_fault> g_rename_faults;	// partial = after the rename
 
 bool ends_with(const string& s, const string& suffix) {
 	return s.size() >= suffix.size() && s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
@@ -101,6 +102,15 @@ void set_read_fault_for_test(const string& suffix, int err, bool partial) {
 
 void clear_read_faults_for_test() {
 	g_read_faults.clear();
+	g_rename_faults.clear();
+}
+
+void set_rename_fault_for_test(const string& suffix, int err, bool after_rename) {
+	read_fault f;
+	f.suffix = suffix;
+	f.err = err;
+	f.partial = after_rename;
+	g_rename_faults.push_back(f);
 }
 
 file_status read_small_file_status(const string& path, string& out, string* error) {
@@ -236,6 +246,17 @@ int remove_intent(const string& data_dir) {
 }
 
 int rename_durable(const string& data_dir, const string& from, const string& to) {
+	for (size_t i = 0; i < g_rename_faults.size(); i++) {
+		if (ends_with(from, g_rename_faults[i].suffix)) {
+			if (g_rename_faults[i].partial && ::rename(from.c_str(), to.c_str()) != 0) {
+				return -1;
+			}
+			log_err("copy switch: rename [%s] -> [%s] failed (injected%s): %s", from.c_str(), to.c_str(),
+				g_rename_faults[i].partial ? ", after the rename: directory fsync" : "", strerror(g_rename_faults[i].err));
+			errno = g_rename_faults[i].err;
+			return -1;
+		}
+	}
 	if (::rename(from.c_str(), to.c_str()) != 0) {
 		log_err("copy switch: rename [%s] -> [%s] failed: %s", from.c_str(), to.c_str(), strerror(errno));
 		return -1;

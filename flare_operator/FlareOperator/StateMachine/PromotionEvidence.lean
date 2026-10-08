@@ -65,6 +65,7 @@ structure Stats where
   copyPartial : Option Nat := none
   inFlight : Option Nat := none
   parked : Option Nat := none
+  switchUnresolved : Option Nat := none
   reconstruction : Option String := none
   masterId : Option String := none
   sourceEpoch : Option String := none
@@ -86,7 +87,7 @@ structure Stats where
 def newFormatKeys : List String :=
   ["repl_read_source_eligible", "repl_read_source_state", "rocksdb_copy_identity_consistent",
    "rocksdb_quarantined", "rocksdb_copy_partial", "rebuild_in_flight", "rebuild_parked",
-   "rocksdb_copy_id", "rocksdb_rebuilt_from_epoch"]
+   "rocksdb_copy_id", "rocksdb_rebuilt_from_epoch", "rocksdb_switch_unresolved"]
 
 def parseStats (out : String) : Stats :=
   let lines := (out.splitOn "\n").map (fun l => (l.replace "\r" "").trim)
@@ -112,14 +113,15 @@ def parseStats (out : String) : Stats :=
   let cp := flag "rocksdb_copy_partial"
   let fl := flag "rebuild_in_flight"
   let pk := flag "rebuild_parked"
+  let su := flag "rocksdb_switch_unresolved"
   let rc := enum "reconstruction_current_state" ["none", "running", "succeeded", "failed", "aborted"]
   let it := nat "curr_items"
   let named := [("repl_read_source_eligible", el.2), ("repl_read_source_state", ss.2),
     ("rocksdb_copy_identity_consistent", ic.2), ("rocksdb_quarantined", qu.2), ("rocksdb_copy_partial", cp.2),
-    ("rebuild_in_flight", fl.2), ("rebuild_parked", pk.2), ("reconstruction_current_state", rc.2), ("curr_items", it.2)]
+    ("rebuild_in_flight", fl.2), ("rebuild_parked", pk.2), ("rocksdb_switch_unresolved", su.2), ("reconstruction_current_state", rc.2), ("curr_items", it.2)]
   { complete := lines.contains "END"
     eligible := el.1, sourceState := ss.1, identityConsistent := ic.1, quarantined := qu.1
-    copyPartial := cp.1, inFlight := fl.1, parked := pk.1, reconstruction := rc.1
+    copyPartial := cp.1, inFlight := fl.1, parked := pk.1, switchUnresolved := su.1, reconstruction := rc.1
     masterId := value "rocksdb_master_id"
     sourceEpoch := value "rocksdb_source_epoch"
     rebuiltFromEpoch := (value "rocksdb_rebuilt_from_epoch").filter (!·.isEmpty)
@@ -141,12 +143,13 @@ def Stats.isLegacy (s : Stats) : Bool := !s.newFormat
     none of the copy-level capability keys are. -/
 def Stats.noCopyEvidence (s : Stats) : Bool :=
   s.copyId.isNone && s.identityConsistent.isNone
-    && s.quarantined.isNone && s.copyPartial.isNone && s.inFlight.isNone && s.parked.isNone
+    && s.quarantined.isNone && s.copyPartial.isNone && s.inFlight.isNone && s.parked.isNone && s.switchUnresolved.isNone
 
 /-- A known forbidden marker, whatever the backend or format (checked before
     any compatibility rule). -/
 def Stats.forbiddenMarker (s : Stats) (partitionHasMaster : Bool) : Option String :=
-  if s.identityConsistent == some 0 then some "copy identity records disagree"
+  if s.switchUnresolved == some 1 then some "a copy switch is unresolved (live copy not proven)"
+  else if s.identityConsistent == some 0 then some "copy identity records disagree"
   else if s.quarantined == some 1 then some "the empty copy left by a quarantine"
   else if s.copyPartial == some 1 then some "a merging dump left the copy part-way"
   else if s.inFlight == some 1 then some "a copy is being rebuilt (transfer or switch in flight)"

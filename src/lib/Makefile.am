@@ -35,6 +35,7 @@ libflare_la_SOURCES = \
 	source_eligibility.h \
 	copy_protection.h \
 	copy_switch.h copy_switch_fs.h copy_switch.cc copy_capacity.h \
+	signal_interrupt.h signal_interrupt.cc \
 	htonll.h \
 	key_resolver.h key_resolver.cc \
 	key_resolver_modular.h key_resolver_modular.cc \

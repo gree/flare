@@ -88,3 +88,70 @@ protection and promotion refusal stay in place.
   from the empty copy); the same with the operator RESTARTED and with a leader
   change between the intent and the adoption; the same shape with a partial copy
   (not promoted after the wait); an unreadable ex-master (not treated as empty).
+
+---
+
+## Review 2026-10-09 (061cd2b / cfd36f1): NOT production-ready — response plan
+
+Six defects found by static review. The plan for each; implementation follows,
+each fixed by a counterexample test (pure AND at Main's persistence /
+distribution boundary with injected failures).
+
+1. **Re-adoption of Unknown.** `adopt` adopted from the current master whatever
+   the unknown reason, `replace` could overwrite a corrupt / foreign record, and an
+   unreadable replica dropped out of `obs` (so `otherHasData` could be false and an
+   empty master adopted). Plan: the unknown reason is a CODE — `absent`,
+   `unreadable`, `corrupt`, `foreign`. A corrupt or foreign record is never
+   overwritten or adopted automatically (CRITICAL; an operator deletes it and
+   approves). An absent record with a node map is adopted only with an explicit
+   MIGRATION APPROVAL (FlareCluster annotation
+   `flare.gree.net/history-adoption-approved=<metadata.uid>`). To keep first builds
+   automatic, the store is created (origin `first-build`) BEFORE the first node map
+   is persisted, so a later "absent" can only be a migration or a loss. Adoption
+   needs EVERY copy of the partition observed in that pass: an unobserved copy is
+   never treated as empty.
+2. **Stale source observations.** The rebuild gate used the persisted `obs` cache,
+   ignored health, and treated a pending intent's target as allowed without any
+   history check. Plan: at the commit boundary the source is read FRESH (pod UID,
+   boot id, copy id, history, health, items) and must be the RECORD's holder
+   binding with the record's history, healthy and not empty unless the record is
+   empty. A pending intent permits nothing: rebuild assignments of that partition
+   are held until it is resolved. On the real path (flared choosing the map
+   master as its reconstruction source, and the switch), flared has no notion of
+   the authoritative history; that check is NOT implemented there and is recorded
+   as a residual (flared's own copy protection stays).
+3. **Bulk could never be tracked.** `truncate` / `flush_all` bump the copy id
+   (`uuid:N` → `uuid:N+1`) and advance the epoch with reason `bulk`, so "same
+   binding" never held. Plan: the bulk transition requires the SAME pod UID and boot
+   id, a copy id of the SAME uuid with generation exactly N+1, the reported epoch
+   reason `bulk`, and a new epoch; the record then takes the new copy id. Anything
+   else (another uuid, a new boot) stays an observation.
+4. **tch and older flared.** Observations required master_id / epoch / copy id,
+   and the rebuild gate and promotion intents applied to every backend, so a tch
+   cluster or an rc56 / rc65 upgrade could hold forever. Plan: an explicit
+   CAPABILITY per partition (`tracked` when every copy reports copy id, boot id,
+   master_id and epoch; `untracked: <why>` otherwise — non-RocksDB backend or an
+   older flared). Untracked partitions keep the previous behaviour (no intent, no
+   history gate), logged once; the tch suites and the upgrade suite stay as they are.
+5. **Intent recovery.** `beginIntent` overwrote a pending intent, commits did not
+   refuse while one was pending, resolution accepted any later map version with
+   the target as master and ignored health, and HELD was only a log line. Plan: an
+   intent carries an id, the EXPECTED map version of its commit, fromGen /
+   fromHist and the target binding; a new promotion in a partition with a pending
+   intent is refused (until that intent is resolved or proven not committed);
+   resolution requires the persisted map version to reach the expected one with the
+   target master THERE, the target healthy with the same binding and a new
+   history; HELD is persisted as the partition state (promotions and rebuilds of
+   that partition refused, CRITICAL, RUNBOOK) — not only logged. The window where
+   the target's binding changes between the commit and the adoption is fixed by an
+   E2E that kills its flared in that window.
+6. **Strict parser.** Duplicate part / intent / cluster lines, flags other than 0/1,
+   unknown kind / reason, gen 0 and empty tokens were accepted. Plan: any of these
+   makes the whole record CORRUPT (unknown, never adopted); no "last one wins".
+
+Failure-injection tests at Main's boundary (E2E, CI only): a corrupt record, a
+foreign record, an absent record with a node map (held until the migration
+approval), an intent persisted and the operator restarted before the map commit
+(the intent is proven not committed and dropped), the target's flared killed
+between the commit and the adoption (HELD persisted, nothing promoted or rebuilt
+in that partition), an unwritable record during bulk and during an intent.

@@ -5230,4 +5230,182 @@ def promotionPrecommitSuite : TestSuite := {
   ]
 }
 
+-- ─── authoritative history tracking (user direction 2026-10-09) ───────────
+
+/-- Pod-local data (no PVC, no tmpfs): a replaced ex-master comes back EMPTY
+    under the same name — the case the operator must track
+    (docs/design-authoritative-history.md). -/
+private def historyCfg : ClusterConfig := {
+  name := "hist-track"
+  «namespace» := "flare-hist-track"
+  partitions := 1
+  replicas := 2
+  operatorName := "flare-operator"
+  debugPod := "debug-hist-track"
+  storageBackend := "rocksdb"
+  extraFlaredConf := flags
+  operatorEnv := [("FLARE_STATS_PROBE_INTERVAL_MS", "15000")]
+}
+
+private def restartOperator (c : Ctx) : IO Bool := do
+  discard <| kubectl ["delete", "pod", "-l", s!"app={c.cfg.operatorName}", "-n", c.cfg.«namespace», "--wait=false"]
+  IO.sleep 5000
+  kubectlRolloutStatus s!"deployment/{c.cfg.operatorName}" c.cfg.«namespace» 240
+
+private def historyRecorded (c : Ctx) : IO Bool := do
+  match ← kubectl ["get", "configmap", s!"{c.cfg.name}-history", "-n", c.cfg.«namespace», "-o", "jsonpath={.data.record}"] with
+  | .ok r => return containsSubstr r "part 0 known"
+  | .error _ => return false
+
+private def historyText (c : Ctx) : IO String := do
+  match ← kubectl ["get", "configmap", s!"{c.cfg.name}-history", "-n", c.cfg.«namespace», "-o", "jsonpath={.data.record}"] with
+  | .ok r => return r
+  | .error e => return s!"(unreadable: {e})"
+
+def historyTrackingSuite : TestSuite := {
+  name := "history-tracking"
+  setup := do
+    deployCluster historyCfg
+    IO.sleep 50000
+  teardown := cleanupCluster historyCfg
+  onFailure := dumpClusterDiagnostics historyCfg.«namespace» s!"app={historyCfg.operatorName}"
+  tests :=
+    let c : Ctx := { cfg := historyCfg }
+    let ns := historyCfg.«namespace»
+    [
+    { name := "(1) the ex-master comes back EMPTY; only the lagging healthy replica holds the data; the operator is RESTARTED in between: the replica is promoted (NOT LOSS-FREE) from the PERSISTED history, keeps every key and value it held, accepts new writes, and the ex-master is rebuilt FROM it (never the reverse)"
+      run := do
+        let recorded ← waitForCondition "the partition's authoritative history is persisted" 240 do historyRecorded c
+        if !recorded then return .fail "precondition: no authoritative history persisted"
+        match ← c.pair with
+        | .error e => return .fail e
+        | .ok (mPod, mIp, sPod, sIp) =>
+          let base := (List.range 30).map fun i => (s!"hb_{i}", s!"vb_{i}")
+          for (k, v) in base do
+            if !(← memcachedSet historyCfg.debugPod ns mIp historyCfg.flarePort k v) then return .fail s!"precondition: {k} not acknowledged"
+          let conv ← waitForCondition "the replica holds every base key locally" 120 do
+            match ← c.localDump sIp with
+            | some d => return (missingFrom base d).isEmpty
+            | none => return false
+          if !conv then return .fail "precondition: the replica did not converge"
+          let some d0 ← c.localDump sIp | return .fail "precondition: the replica's own copy could not be read"
+          match ← cut mIp sIp with
+          | .error e => return .fail e
+          | .ok () => pure ()
+          IO.sleep 2000
+          let lag ← writeKeys historyCfg.debugPod ns mIp historyCfg.flarePort "hl" 20
+          IO.eprintln s!"# under the cut: {lag}/20 acknowledged on {mPod} only; replica holds {d0.length}"
+          -- the operator restarts: the decision must come from the PERSISTED record
+          let opBack ← restartOperator c
+          if !opBack then heal mIp sIp; return .fail "precondition: the operator did not come back"
+          let t0 ← utcNow
+          discard <| kubectl ["delete", "pod", mPod, "-n", ns, "--grace-period=0", "--force", "--wait=false"]
+          heal mIp sIp
+          let promoted ← waitForCondition "the lagging replica is promoted" 420 do
+            return (← masterPodOf c) == some sPod
+          let log ← c.opLogSince t0
+          let lagging := containsSubstr log s!"{sPod}." && containsSubstr log "=lagging"
+          let unrecorded := (log.splitOn "\n").any fun l => containsSubstr l "PROMOTION EVIDENCE" && containsSubstr l "the last master's history was not recorded"
+          IO.eprintln s!"# promoted={promoted}; classified lagging={lagging}; 'not recorded' after the restart={unrecorded}; history: {(← historyText c).take 300}"
+          if !promoted then return .fail "the lagging replica holding the only data was not promoted"
+          if !(← notLossFreeFor c sPod) then return .fail "the promotion of the lagging replica was not logged NOT LOSS-FREE"
+          if unrecorded then return .fail "after the restart the operator judged without the persisted history ('not recorded')"
+          -- every key the replica held is kept; new writes are accepted
+          let some d1 ← c.localDump sIp | return .fail "the new master's own copy could not be read"
+          let lost := missingFrom d0 d1
+          if !lost.isEmpty then return .fail s!"the promoted replica lost {lost.length} key(s) it held: {lost.take 5}"
+          let fresh := (List.range 10).map fun i => (s!"hn_{i}", s!"vn_{i}")
+          for (k, v) in fresh do
+            if !(← memcachedSet historyCfg.debugPod ns sIp historyCfg.flarePort k v) then return .fail s!"the new master did not acknowledge {k}"
+          -- the ex-master is rebuilt FROM the replica: it ends up with the replica's data
+          let rebuilt ← waitForCondition "the returned ex-master holds the new master's data (rebuilt from it)" 480 do
+            match ← getPodIp mPod ns with
+            | none => return false
+            | some ip =>
+              match ← c.localDump ip with
+              | some d => return (missingFrom (d0 ++ fresh) d).isEmpty
+              | none => return false
+          if !rebuilt then return .fail "the returned ex-master was not rebuilt from the promoted replica"
+          let some d2 ← c.localDump sIp | return .fail "the new master's own copy could not be read after the rebuild"
+          if !(missingFrom (d0 ++ fresh) d2).isEmpty then return .fail "the new master lost data after the ex-master returned (a reverse rebuild?)"
+          return .pass },
+
+    { name := "(2) the same shape with a PART-WAY copy (copy.partial) on the replica: not promoted, not even after the wait; logged FORBIDDEN; promoted once the marker is gone"
+      run := do
+        match ← c.pair with
+        | .error e => return .fail e
+        | .ok (mPod, mIp, sPod, sIp) =>
+          let w ← writeKeys historyCfg.debugPod ns mIp historyCfg.flarePort "h2b" 20
+          if w != 20 then return .fail s!"precondition: {w}/20 acknowledged"
+          let conv ← waitForCondition "the replica converges" 180 do return (← c.currItems sIp) == (← c.currItems mIp)
+          if !conv then return .fail "precondition: the replica did not converge"
+          discard <| kubectl ["exec", "-n", ns, sPod, "-c", "flared", "--", "touch", "/tmp/flare/copy.partial"]
+          match ← cut mIp sIp with
+          | .error e => return .fail e
+          | .ok () => pure ()
+          discard <| writeKeys historyCfg.debugPod ns mIp historyCfg.flarePort "h2l" 10
+          let t0 ← utcNow
+          discard <| kubectl ["delete", "pod", mPod, "-n", ns, "--grace-period=0", "--force", "--wait=false"]
+          heal mIp sIp
+          let seen ← c.watchMaster 240 (fun x => x == sPod)
+          let log ← c.opLogSince t0
+          let forbidden := (log.splitOn "\n").any fun l => containsSubstr l "PROMOTION EVIDENCE" && containsSubstr l s!"{sPod}." && containsSubstr l "part-way"
+          IO.eprintln s!"# part-way replica: masters seen {seen}; FORBIDDEN part-way logged={forbidden}"
+          discard <| kubectl ["exec", "-n", ns, sPod, "-c", "flared", "--", "rm", "-f", "/tmp/flare/copy.partial"]
+          if seen.contains sPod then return .fail "a part-way copy was promoted"
+          if !forbidden then return .fail "the part-way copy was not logged FORBIDDEN"
+          let after ← waitForCondition "with the marker gone the replica is promoted" 300 do return (← masterPodOf c) == some sPod
+          if !after then return .fail "the replica was not promoted after its marker was removed (the hold was not only the marker)"
+          return .pass },
+
+    { name := "(3a) a history write that FAILS is not applied: with the record unwritable, the holder's flush_all (a new history) leaves the persisted record as it was; deleting the record makes it UNKNOWN and it is re-adopted from the healthy master (never a first build)"
+      run := do
+        let some m ← masterPodOf c | return .fail "precondition: no master"
+        let mIp := (← getPodIp m ns).getD ""
+        let ok ← waitForCondition "a recorded history" 120 do historyRecorded c
+        if !ok then return .fail "precondition: no recorded history"
+        let before ← historyText c
+        match ← kubectl ["patch", "configmap", s!"{historyCfg.name}-history", "-n", ns, "--type", "merge", "-p", "{\"immutable\":true}"] with
+        | .error e => return .fail s!"precondition: could not make the record immutable: {e}"
+        | .ok _ => pure ()
+        let t0 ← utcNow
+        discard <| execInDebugPod historyCfg.debugPod ns s!"printf 'flush_all\\r\\n' | nc -w 5 {mIp} {historyCfg.flarePort}"
+        IO.sleep 45000
+        let after ← historyText c
+        let failed := containsSubstr (← c.opLogSince t0) "the authoritative history could not be persisted"
+        IO.eprintln s!"# record before [{before.take 120}] after [{after.take 120}]; write failure logged={failed}"
+        if after != before then return .fail "the record changed although it was unwritable"
+        if !failed then return .fail "no failed history write was logged (the bulk change was not attempted?)"
+        discard <| kubectl ["delete", "configmap", s!"{historyCfg.name}-history", "-n", ns]
+        let t1 ← utcNow
+        let readopted ← waitForCondition "the record is re-adopted from the healthy master" 180 do historyRecorded c
+        let log ← c.opLogSince t1
+        IO.eprintln s!"# re-adopted={readopted}; history: {(← historyText c).take 200}"
+        if !readopted then return .fail "the deleted record was not re-adopted from the healthy master"
+        if containsSubstr log "first build:" then return .fail "a deleted record was treated as a FIRST BUILD"
+        return .pass },
+
+    { name := "(3b) a promotion whose history INTENT cannot be persisted is aborted: nothing is committed (last test: the cluster is left without a master)"
+      run := do
+        match ← c.pair with
+        | .error e => return .fail e
+        | .ok (mPod, _, sPod, _) =>
+          let ok ← waitForCondition "a recorded history" 120 do historyRecorded c
+          if !ok then return .fail "precondition: no recorded history"
+          match ← kubectl ["patch", "configmap", s!"{historyCfg.name}-history", "-n", ns, "--type", "merge", "-p", "{\"immutable\":true}"] with
+          | .error e => return .fail s!"precondition: could not make the record immutable: {e}"
+          | .ok _ => pure ()
+          let t0 ← utcNow
+          discard <| kubectl ["delete", "pod", mPod, "-n", ns, "--grace-period=0", "--force", "--wait=false"]
+          let seen ← c.watchMaster 120 (fun x => x == sPod)
+          let log ← c.opLogSince t0
+          let aborted := containsSubstr log "the history intent could not be persisted"
+          let committed := (log.splitOn "\n").any fun l => containsSubstr l "PROMOTION committed" && containsSubstr l s!"{sPod}."
+          IO.eprintln s!"# intent unwritable: masters seen {seen}; abort logged={aborted}; promotion committed={committed}"
+          if seen.contains sPod || committed then return .fail "a promotion was committed although its history intent could not be persisted"
+          if !aborted then return .fail "no aborted promotion was logged (the failover was not attempted?)"
+          return .pass }
+  ]
+}
+
 end FlareOperator.E2E.Tests.ContinuousReplicationLimits

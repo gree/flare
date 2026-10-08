@@ -268,10 +268,10 @@ def classify (reply : Option String) (o : Observed) : Class :=
         if cm == mid && ce == ep then .lagging
         else .unknown s!"its history ({cm}/{ce}) is not the last master's ({mid}/{ep})"
       | none, _, _ =>
-        -- no record (e.g. the operator restarted after the master went):
-        -- only the ex-master's own copy is known to be that history
-        if o.isLastMasterHolder then .lagging
-        else .unknown "the last master's history was not recorded"
+        -- no authoritative record (unknown / not yet adopted): held. The
+        -- ex-master holder is NOT presumed to be that history — it may be
+        -- the one that came back empty (docs/design-authoritative-history.md)
+        .unknown "the last master's history was not recorded"
       | _, _, _ => .unknown "the copy does not report its history"
 
 /-- At commit the candidate is CLASSIFIED AGAIN from a fresh read: the same

@@ -830,6 +830,7 @@ def cleanupCluster (cfg : ClusterConfig) : IO Unit := do
   kubectlDelete "service" cfg.operatorName ns
   kubectlDelete "configmap" s!"{cfg.name}-config" ns
   kubectlDelete "configmap" s!"{cfg.name}-node-map" ns
+  kubectlDelete "configmap" s!"{cfg.name}-history" ns
   kubectlDelete "lease" s!"{cfg.name}-operator-lease" ns
   for i in List.range cfg.partitions do
     kubectlDelete "service" s!"{cfg.name}-{i}" ns

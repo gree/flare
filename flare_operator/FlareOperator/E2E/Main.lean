@@ -92,6 +92,7 @@ def main (args : List String) : IO UInt32 :=
     Tests.ContinuousReplicationLimits.promotionPrecommitSuite,
     Tests.RestoreIsolated.suite,
     Tests.RestoreIsolated.repeatSuite,
+    Tests.ContinuousReplicationLimits.historyTrackingSuite,
     Tests.ContinuousReplicationLimits.reserveMeasureSuite,
     Tests.ContinuousReplicationLimits.lagHoldUnreadableSuite,
     Tests.ContinuousReplicationLimits.repairLedgerSuite,

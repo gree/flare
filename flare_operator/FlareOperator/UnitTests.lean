@@ -1545,10 +1545,10 @@ private def checkPromotionEvidence (ctx : Ctx) : IO Unit := do
       && !(PromotionEvidence.reclassifyAllows .lagging (cls (some ((base.replace "rebuild_in_flight 0" "rebuild_in_flight 1") ++ "STAT repl_read_source_eligible 0\r\nEND\r\n")) obs)).1
       && !(PromotionEvidence.reclassifyAllows .eligible (cls (reply "STAT repl_read_source_state revalidating\r\nSTAT repl_read_source_eligible 0\r\n") obs)).1
       && !(PromotionEvidence.reclassifyAllows .eligible .lagging).1)
-  check ctx "promotion by reason: another history, or no record of the last master's, is UNKNOWN (held); the ex-master's own copy is known"
+  check ctx "promotion by reason: another history, or no record of the last master's, is UNKNOWN (held) — the ex-master's own copy is NOT presumed known (it may have come back empty)"
     ((match cls (some ((base.replace "rocksdb_source_epoch 2:e" "rocksdb_source_epoch 9:x") ++ "STAT repl_read_source_eligible 0\r\nEND\r\n")) obs with | .unknown _ => true | _ => false)
       && (match cls (reply "STAT repl_read_source_eligible 0\r\n") { obs with lastMasterHistory := none } with | .unknown _ => true | _ => false)
-      && cls (reply "STAT repl_read_source_eligible 0\r\n") { obs with lastMasterHistory := none, isLastMasterHolder := true } == .lagging)
+      && (match cls (reply "STAT repl_read_source_eligible 0\r\n") { obs with lastMasterHistory := none, isLastMasterHolder := true } with | .unknown _ => true | _ => false))
   check ctx "promotion by reason: unreadable or incomplete is UNKNOWN; a bound eligible Active copy is ELIGIBLE"
     ((match cls none obs with | .unknown _ => true | _ => false)
       && (match cls (some base) obs with | .unknown _ => true | _ => false)

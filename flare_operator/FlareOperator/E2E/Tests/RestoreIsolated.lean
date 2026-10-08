@@ -114,7 +114,7 @@ private def localCopy : IO String := do
     `mode`: "restore" (RESTORE marker: the restore hook swaps it in and marks
     it RESTORED), "incomplete" (the same, one SST removed), "identity" (placed
     directly as the live copy with a COPY_ID that disagrees with its key). -/
-private def seedPvc (c : ClusterConfig) (i : Nat) (mode : String) (srcDir : String := "") : IO (Except String Unit) := do
+private def seedPvc (c : ClusterConfig) (i : Nat) (mode : String) (srcDir : String := "") : IO (Except String String) := do
   let ns := c.«namespace»
   let pvc := s!"data-{c.name}-nodes-{i}"
   let helper := s!"seed-{c.name}-{i}"
@@ -159,13 +159,16 @@ spec:
   | .ok _ => pure ()
   let script := match mode with
     | "restore" => s!"echo {dataDir}/backups/{backupName} > {dataDir}/RESTORE"
-    | "incomplete" => s!"f=$(ls {dataDir}/backups/{backupName}/*.sst | head -1) && rm -f $f && echo removed $f && echo {dataDir}/backups/{backupName} > {dataDir}/RESTORE"
+    | "incomplete" => s!"f=$(ls {dataDir}/backups/{backupName}/*.sst | head -1) && [ -n \"$f\" ] && rm -f $f && [ ! -e $f ] && echo REMOVED $f && echo {dataDir}/backups/{backupName} > {dataDir}/RESTORE"
     | _ => s!"cp -a {dataDir}/backups/{backupName} {dataDir}/flare.rocksdb && echo mismatch-{c.name}:1 > {dataDir}/flare.rocksdb/COPY_ID"
-  match ← kubectl ["exec", "-n", ns, helper, "--", "sh", "-c", script] with
-  | .error e => return .error s!"seed script on {helper}: {e}"
-  | .ok o => IO.eprintln s!"# seeded {pvc} ({mode}): {o.trim}"
+  let out ← match ← kubectl ["exec", "-n", ns, helper, "--", "sh", "-c", script] with
+    | .error e => return .error s!"seed script on {helper}: {e}"
+    | .ok o => pure o.trim
+  IO.eprintln s!"# seeded {pvc} ({mode}): {out}"
   discard <| kubectl ["delete", "pod", helper, "-n", ns, "--wait=true", "--timeout=60s"]
-  return .ok ()
+  if mode == "incomplete" && !containsSubstr out "REMOVED " then
+    return .error s!"the SST file was not shown removed on {pvc} ({out})"
+  return .ok out
 
 private def seedCluster (c : ClusterConfig) (mode : String) (srcDir : String := "") : IO (Except String Unit) := do
   discard <| kubectl ["create", "namespace", c.«namespace»]
@@ -175,14 +178,74 @@ private def seedCluster (c : ClusterConfig) (mode : String) (srcDir : String := 
     | .ok _ => pure ()
   return .ok ()
 
-/-- Observe `c` for `secs`: every master seen in the operator's map. -/
-private def mastersSeen (c : ClusterConfig) (secs : Nat) : IO (List String) := do
+
+/-- Observe `c` for `secs`: (samples, samples in which the operator's map was
+    READ with entries, masters seen). A sample that could not read the map is
+    no evidence of "no master" (review: an observation failure is not a pass). -/
+private def observeMasters (c : ClusterConfig) (secs : Nat) : IO (Nat × Nat × List String) := do
   let mut seen : List String := []
+  let mut samples := 0
+  let mut observed := 0
   for _ in [0:secs / 5] do
-    if let some m ← masterPod c then
-      if !seen.contains m then seen := seen ++ [m]
+    samples := samples + 1
+    let raw ← operatorTcpCmd c.debugPod c.«namespace» c.operatorName c.operatorPort "node sync"
+    let entries := parseNodeSync raw
+    if !entries.isEmpty then
+      observed := observed + 1
+      if let some m := findMasterPod entries 0 then
+        if !seen.contains m then seen := seen ++ [m]
     IO.sleep 5000
-  return seen
+  return (samples, observed, seen)
+
+/-- A replica's OWN copy (the `dump` op reads local storage; never a proxied value). -/
+private def localDump (c : ClusterConfig) (ip : String) : IO (Option (List (String × String))) := do
+  let out ← IO.Process.output { cmd := "timeout", args := #["-k", "5", "90", "kubectl", "exec", c.debugPod, "-n", c.«namespace», "--", "sh", "-c",
+      s!"printf 'dump 0 -1 0 0\\r\\nquit\\r\\n' | nc -w 60 {ip} {c.flarePort}"] }
+  if out.exitCode != 0 then return none
+  let mut acc : List (String × String) := []
+  let mut pending : Option String := none
+  let mut ended := false
+  for raw in out.stdout.splitOn "\n" do
+    let l := (raw.replace "\r" "").trim
+    match pending with
+    | some k =>
+      acc := (k, l) :: acc
+      pending := none
+    | none =>
+      if l.startsWith "VALUE " then
+        pending := ((l.splitOn " ").drop 1).head?
+      else if l == "END" then ended := true
+  return if ended then some acc.reverse else none
+
+/-- Every flared log line (previous and current containers) of `c`'s pods. -/
+private def podLogs (c : ClusterConfig) : IO String := do
+  let mut acc := ""
+  for p in podsOf c do
+    for extra in [["--previous"], []] do
+      match ← kubectl (["logs", "-n", c.«namespace», p, "-c", "flared", "--tail=-1"] ++ extra) with
+      | .ok o => acc := acc ++ o
+      | .error _ => pure ()
+  return acc
+
+private def operatorLog (c : ClusterConfig) : IO String := do
+  match ← kubectl ["logs", "-n", c.«namespace», "-l", s!"app={c.operatorName}", "--tail=-1"] with
+  | .ok o => return o
+  | .error _ => return ""
+
+private def deployOrFail (c : ClusterConfig) : IO (Except String Unit) := do
+  try
+    deployCluster c
+    return .ok ()
+  catch e => return .error s!"deploying {c.name} failed: {e}"
+
+/-- The observation of a negative case: complete (every sample read the map)
+    or a failure. -/
+private def negativeObservation (c : ClusterConfig) (secs : Nat) : IO (Except String (List String)) := do
+  let (samples, observed, seen) ← observeMasters c secs
+  IO.eprintln s!"# {c.name}: {observed}/{samples} samples read the operator's map; masters seen {seen}"
+  if samples == 0 || observed != samples then
+    return .error s!"the operator's map was read in only {observed}/{samples} samples: no evidence either way (not a pass)"
+  return .ok seen
 
 def suite : TestSuite := {
   name := "restore-isolated"
@@ -226,7 +289,7 @@ def suite : TestSuite := {
     { name := "[harness RESTORE hook path, not backupBootstrap] restore into an ISOLATED new cluster (PVCs seeded before its first boot): a master, every key and value, and a write after the restore acknowledged and replicated"
       run := do
         if let .error e ← seedCluster posCfg "restore" then return .fail s!"precondition: {e}"
-        deployCluster posCfg
+        if let .error e ← deployOrFail posCfg then return .fail e
         let mastered ← waitForCondition "the restored cluster has a master" 300 do
           return (← masterPod posCfg).isSome
         if !mastered then return .fail "the restored cluster got no master"
@@ -240,32 +303,60 @@ def suite : TestSuite := {
         let stored ← writeKeys posCfg.debugPod posCfg.«namespace» ip posCfg.flarePort "after" 10
         if stored != 10 then return .fail s!"the restored master acknowledged {stored}/10 writes after the restore"
         let other := ((podsOf posCfg).filter (· != m)).head?.getD ""
-        let replicated ← waitForCondition "the write after the restore reaches the other copy" 180 do
+        -- every key and value on the replica's OWN copy (dump reads local
+        -- storage; a GET there may be proxied to the master)
+        let expected := (List.range nKeys).map (fun i => (s!"rst_{i}", s!"val_{i}")) ++ (List.range 10).map (fun i => (s!"after_{i}", s!"val_{i}"))
+        let mut lastMissing : List String := []
+        let replicated ← waitForCondition "every key and value, including the writes after the restore, on the other copy's own storage" 180 do
           let oip := (← getPodIp other posCfg.«namespace»).getD ""
-          return (← getCurrItems posCfg.debugPod posCfg.«namespace» oip posCfg.flarePort) == nKeys + 10
-        if !replicated then return .fail s!"the write after the restore did not reach {other}"
+          match ← localDump posCfg oip with
+          | none => return false
+          | some d =>
+            let miss := expected.filterMap fun (k, v) => if d.lookup k == some v then none else some s!"{k}={(d.lookup k).getD "(absent)"}"
+            return miss.isEmpty
+        if !replicated then
+          let oip := (← getPodIp other posCfg.«namespace»).getD ""
+          let d ← localDump posCfg oip
+          lastMissing := match d with
+            | none => ["(the local dump could not be read)"]
+            | some d => expected.filterMap fun (k, v) => if d.lookup k == some v then none else some s!"{k}={(d.lookup k).getD "(absent)"}"
+          return .fail s!"the other copy {other} does not hold every key and value locally: {lastMissing.take 8}"
         return .pass },
 
     { name := "[harness RESTORE hook path] an INCOMPLETE backup (an SST file missing) restored into an isolated new cluster is not promoted"
       run := do
         if let .error e ← seedCluster incCfg "incomplete" then return .fail s!"precondition: {e}"
-        deployCluster incCfg
-        let seen ← mastersSeen incCfg 180
-        IO.eprintln s!"# incomplete backup: masters seen in 180 s {seen}"
+        if let .error e ← deployOrFail incCfg then return .fail e
+        let seen ← match ← negativeObservation incCfg 180 with
+          | .error e => return .fail e
+          | .ok s => pure s
         if !seen.isEmpty then
           let mut detail : List String := []
           for p in seen do
             let ip := (← getPodIp p incCfg.«namespace»).getD ""
             detail := detail ++ [s!"{p} items={← getCurrItems incCfg.debugPod incCfg.«namespace» ip incCfg.flarePort}"]
           return .fail s!"a copy restored from an incomplete backup was made master: {detail}"
+        -- the product's own reason: flared refused to open the restored copy
+        let logs ← podLogs incCfg
+        if !containsSubstr logs "RocksDB::Open() failed" then
+          return .fail "not promoted, but no flared refusal to open the incomplete copy ('RocksDB::Open() failed') was logged: the reason is not shown"
         return .pass },
 
     { name := "[copy placed directly, no hook] an IDENTITY-INCONSISTENT restored copy (COPY_ID != the reserved key) does not act as a master: never mapped as master, or flared refuses it (promotion_refused=1) and acknowledges no write"
       run := do
         if let .error e ← seedCluster idCfg "identity" then return .fail s!"precondition: {e}"
-        deployCluster idCfg
-        let seen ← mastersSeen idCfg 120
-        IO.eprintln s!"# identity-inconsistent copies: masters seen {seen}"
+        if let .error e ← deployOrFail idCfg then return .fail e
+        -- the tamper took effect: flared itself reports the identity inconsistent
+        let inconsistent ← waitForCondition "both restored copies report their identity inconsistent" 180 do
+          let mut all := true
+          for p in podsOf idCfg do
+            let ip := (← getPodIp p idCfg.«namespace»).getD ""
+            if (← statOf idCfg ip "rocksdb_copy_identity_consistent") != some "0" then all := false
+          return all
+        if !inconsistent then return .fail "precondition: the restored copies do not report rocksdb_copy_identity_consistent 0"
+        let seen ← match ← negativeObservation idCfg 120 with
+          | .error e => return .fail e
+          | .ok s => pure s
         for p in seen do
           let ip := (← getPodIp p idCfg.«namespace»).getD ""
           let refused ← statOf idCfg ip "promotion_refused"
@@ -273,11 +364,15 @@ def suite : TestSuite := {
           IO.eprintln s!"# {p}: promotion_refused={refused}; rocksdb_copy_identity_consistent={← statOf idCfg ip "rocksdb_copy_identity_consistent"}; write acknowledged={acked}"
           if refused != some "1" || acked then
             return .fail s!"{p} acts as a master over an identity-inconsistent copy (promotion_refused={refused}, write acknowledged={acked})"
+        -- the product's own reason, from the operator or flared
+        let reason := containsSubstr (← operatorLog idCfg) "copy identity records disagree"
+          || containsSubstr (← podLogs idCfg) "PROMOTION REFUSED"
+        if !reason then return .fail "not acting as master, but neither the operator ('copy identity records disagree') nor flared ('PROMOTION REFUSED') logged the reason"
         return .pass },
 
     { name := "[harness RESTORE hook path] a backup of ANOTHER partition (P1 of a two-partition source) restored into a one-partition cluster is not promoted — a failure here is a PRODUCT GAP (no partition check), not weakened"
       run := do
-        deployCluster src2Cfg
+        if let .error e ← deployOrFail src2Cfg then return .fail s!"precondition: {e}"
         IO.sleep 30000
         let ns2 := src2Cfg.«namespace»
         let entries ← nodeView src2Cfg
@@ -298,11 +393,14 @@ def suite : TestSuite := {
         | .error e => return .fail s!"precondition: copying P1's checkpoint out: {e}"
         | .ok _ => pure ()
         if let .error e ← seedCluster partCfg "restore" "p1" then return .fail s!"precondition: {e}"
-        deployCluster partCfg
-        let seen ← mastersSeen partCfg 180
-        IO.eprintln s!"# other-partition backup: masters seen {seen}"
+        if let .error e ← deployOrFail partCfg then return .fail e
+        let seen ← match ← negativeObservation partCfg 180 with
+          | .error e => return .fail e
+          | .ok s => pure s
         if !seen.isEmpty then
           return .fail s!"PRODUCT GAP: a copy holding only partition 1's slice ({p1Items} of {nKeys} keys) of a two-partition cluster was made the master of a one-partition cluster ({seen}); the restore does not check the partition"
+        let reason := containsSubstr (← operatorLog partCfg) "partition" && containsSubstr (← operatorLog partCfg) "restore"
+        if !reason then return .fail "not promoted, but no partition refusal was logged: the reason is UNEXPLAINED (not evidence of a partition check)"
         return .pass },
 
     { name := "the SOURCE cluster and its backup are unchanged by every restore (items, history, pod UIDs, backup content hash)"
@@ -330,6 +428,8 @@ private def repCfg : ClusterConfig := {
   drainSeconds := 30
 }
 
+private def localDumpRep (ip : String) : IO (Option (List (String × String))) := localDump repCfg ip
+
 def repeatSuite : TestSuite := {
   name := "promotion-repeat"
   setup := do
@@ -345,36 +445,62 @@ def repeatSuite : TestSuite := {
           return containsSubstr (← kubectlLogsLabel s!"app={repCfg.operatorName}" ns 200000) "grace period over"
         if !graceOver then return .fail "precondition: the operator never ended its startup grace period"
         IO.sleep 10000
+        -- the operator's committed map version (fresh each time it is read)
+        let desired : IO (Option Nat) := do
+          match ← kubectlGetJsonpath "flarecluster" repCfg.name ns "{.metadata.annotations.flare\\.gree\\.net/node-map-persisted}" with
+          | .ok v => return v.trim.toNat?
+          | .error _ => return none
+        let ver := fun (ip : String) => do return ((← statOf repCfg ip "node_map_version").bind String.toNat?)
+        let mut acked : List (String × String) := []
         for round in List.range 4 do
           let some m ← masterPod repCfg | return .fail s!"round {round}: no master"
           let s := ((podsOf repCfg).filter (· != m)).head?.getD ""
           let mIp := (← getPodIp m ns).getD ""
-          let pre ← writeKeys repCfg.debugPod ns mIp repCfg.flarePort s!"r{round}_pre" 10
-          if pre != 10 then return .fail s!"round {round}: the master {m} acknowledged {pre}/10 before the promotion"
+          let pre := (List.range 10).map fun i => (s!"r{round}_pre_{i}", s!"v{round}p{i}")
+          for (k, v) in pre do
+            if !(← memcachedSet repCfg.debugPod ns mIp repCfg.flarePort k v) then
+              return .fail s!"round {round}: the master {m} did not acknowledge {k} before the promotion"
+          acked := acked ++ pre
           let caught ← waitForCondition s!"round {round}: {s} holds every key" 120 do
             let sIp := (← getPodIp s ns).getD ""
             return (← getCurrItems repCfg.debugPod ns sIp repCfg.flarePort) == (← getCurrItems repCfg.debugPod ns mIp repCfg.flarePort)
           if !caught then return .fail s!"round {round}: {s} did not catch up before the promotion"
           let sIp := (← getPodIp s ns).getD ""
-          let v0 := ((← statOf repCfg sIp "node_map_version").bind String.toNat?).getD 0
+          let some v0 ← ver sIp | return .fail s!"round {round}: precondition: {s}'s node_map_version could not be read"
           discard <| kubectl ["delete", "pod", m, "-n", ns, "--wait=false"]
           let promoted ← waitForCondition s!"round {round}: {s} is promoted" 180 do
             return (← masterPod repCfg) == some s
           if !promoted then return .fail s!"round {round}: {s} was not promoted after {m} was deleted"
-          let post ← writeKeys repCfg.debugPod ns sIp repCfg.flarePort s!"r{round}_post" 10
-          if post != 10 then
-            return .fail s!"round {round}: the NEW master {s} acknowledged {post}/10 writes (node_map_version {← statOf repCfg sIp "node_map_version"}, promotion_refused {← statOf repCfg sIp "promotion_refused"})"
-          let converged ← waitForCondition s!"round {round}: the maps converge and the ex-master follows {s}" 480 do
-            match ← getPodIp m ns with
-            | none => return false
-            | some ip =>
-              let vs := ((← statOf repCfg sIp "node_map_version").bind String.toNat?).getD 0
-              let vm := ((← statOf repCfg ip "node_map_version").bind String.toNat?).getD 0
-              return vs > v0 && vs == vm && (← statOf repCfg ip "repl_follow_state") == some "following"
+          let post := (List.range 10).map fun i => (s!"r{round}_post_{i}", s!"v{round}q{i}")
+          for (k, v) in post do
+            if !(← memcachedSet repCfg.debugPod ns sIp repCfg.flarePort k v) then
+              return .fail s!"round {round}: the NEW master {s} did not acknowledge {k} (node_map_version {← statOf repCfg sIp "node_map_version"}, promotion_refused {← statOf repCfg sIp "promotion_refused"})"
+          acked := acked ++ post
+          -- both nodes on the operator's committed version (read fresh), past
+          -- the promotion, and the ex-master following the new master
+          let converged ← waitForCondition s!"round {round}: both nodes on the operator's committed map, past the promotion; the ex-master follows {s}" 480 do
+            match ← getPodIp m ns, ← desired with
+            | some ip, some d =>
+              let vs ← ver sIp
+              let vm ← ver ip
+              return vs == some d && vm == some d && d > v0 && (← statOf repCfg ip "repl_follow_state") == some "following"
+            | _, _ => return false
           if !converged then
             let mIp2 := (← getPodIp m ns).getD ""
-            return .fail s!"round {round}: maps did not converge (new master {s} v{← statOf repCfg sIp "node_map_version"} (was v{v0}), ex-master {m} v{← statOf repCfg mIp2 "node_map_version"} follow {← statOf repCfg mIp2 "repl_follow_state"})"
-          IO.eprintln s!"# round {round}: {m} -> {s}; 10/10 acknowledged on the new master; maps converged past v{v0}"
+            return .fail s!"round {round}: maps did not converge (operator committed v{← desired}; new master {s} v{← ver sIp} (was v{v0}); ex-master {m} v{← ver mIp2}, follow {← statOf repCfg mIp2 "repl_follow_state"})"
+          -- every acknowledged value so far, on BOTH copies' own storage
+          for p in [s, m] do
+            let pip := (← getPodIp p ns).getD ""
+            let ok ← waitForCondition s!"round {round}: {p} holds every acknowledged value locally" 120 do
+              match ← localDumpRep pip with
+              | none => return false
+              | some d => return acked.all fun (k, v) => d.lookup k == some v
+            if !ok then
+              let missing := match ← localDumpRep pip with
+                | none => ["(the local dump could not be read)"]
+                | some d => acked.filterMap fun (k, v) => if d.lookup k == some v then none else some s!"{k}={(d.lookup k).getD "(absent)"}"
+              return .fail s!"round {round}: {p} lacks acknowledged values locally: {missing.take 8}"
+          IO.eprintln s!"# round {round}: {m} -> {s}; 10/10 acknowledged before and after; both nodes on the committed map (past v{v0}); {acked.length} acknowledged values on both copies"
         return .pass }
   ]
 }

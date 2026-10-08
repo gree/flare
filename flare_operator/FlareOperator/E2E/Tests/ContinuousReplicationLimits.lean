@@ -457,7 +457,14 @@ def limitsSuite : TestSuite := {
               || containsSubstr l "detected " || containsSubstr l "CIRCUIT BREAKER")
           IO.eprintln s!"# failover: promoted={promoted}; NOT LOSS-FREE logged={notLossFree}; items old master={mItems} new master={newItems} (gap {gap})"
           IO.eprintln s!"# operator promotion path:\n{String.intercalate "\n" (pathLines.reverse.take 8).reverse}"
-          if !promoted then return .fail "the lagged follower was not promoted: the partition stayed without a master"
+          if !promoted then
+            -- which source R3 compared the copy with, and why (CI 37777862552:
+            -- FORBIDDEN 'confirmed different history' with no record of it)
+            let st := fun (k : String) => do return (← c.statStr sIp k).getD "?"
+            IO.eprintln s!"# lagged follower {sPod}: repl_read_source_state {← st "repl_read_source_state"}; repl_read_source {← st "repl_read_source"}; repl_read_source_epoch {← st "repl_read_source_epoch"}; repl_read_source_reason [{← st "repl_read_source_reason"}]; repl_follow_state {← st "repl_follow_state"}; repl_follow_last_reason {← st "repl_follow_last_reason"}; own rocksdb_master_id {← st "rocksdb_master_id"}; rocksdb_source_epoch {← st "rocksdb_source_epoch"}; rocksdb_rebuilt_from_epoch {← st "rocksdb_rebuilt_from_epoch"}"
+            let ev := (log.splitOn "\n").filter (fun l => containsSubstr l "PROMOTION EVIDENCE" || containsSubstr l "PROMOTION ABORTED")
+            IO.eprintln s!"# operator evidence (last 6):\n{String.intercalate "\n" (ev.reverse.take 6).reverse}"
+            return .fail "the lagged follower was not promoted: the partition stayed without a master"
           -- The guarantee is: NO warning => the follower was proven within
           -- the promotion bound (FLARE_FOLLOW_PROMOTE_LAG, default 100
           -- positions), so at most that much is lost silently. CI

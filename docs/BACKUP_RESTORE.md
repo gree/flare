@@ -88,7 +88,23 @@ KVS this is normally acceptable; if you need a hard cut, quiesce writes first.
 
 ## Restore
 
-### Case A — single-partition cluster (partitions=1): fully supported, e2e-tested
+> **NOT SUPPORTED ON THE CURRENT SAF-10 CANDIDATE (branch
+> `safety/saf-10-wal-replication`, from the reason-based promotion change
+> ce8d661 / f9289aa on).** Do not run Case A or B on a cluster whose operator
+> is built from this branch. The restored copies come back with the history
+> of the backup; the operator holds the partition's LAST master history (for
+> example the one a `flush_all` created) and, by design, does not promote a
+> copy of a different history. The partition then stays **without a master**
+> (CI: eb7bc43, run 37770467697, failover-data job 113288583371 —
+> `backup-restore` test 24 failed, "PROMOTION ABORTED … unknown (its history
+> … is not the last master's …)" repeated, no master after 180 s). There is no
+> step in this procedure that adopts the restored history explicitly; until
+> one is designed and approved (release checklist R8), these steps are valid
+> only for an operator release that predates that change. Do NOT work around
+> it by restarting the operator (that only erases the operator's record of
+> the last history).
+
+### Case A — single-partition cluster (partitions=1): ~~fully supported, e2e-tested~~ NOT supported on the SAF-10 candidate (see above)
 
 1. Pick the restore point: `kubectl exec <pod> -- ls /data/flare/backups`
 2. On EVERY pod of the cluster, write the marker:
@@ -100,12 +116,18 @@ KVS this is normally acceptable; if you need a hard cut, quiesce writes first.
    kubectl delete pod <pod-0> <pod-1> --force --grace-period=0
    ```
 4. The StatefulSet recreates the pods; the startup hook swaps the checkpoint
-   in; the operator re-elects a master. Verify with key sampling before
-   re-enabling traffic.
+   in; on releases that predate the SAF-10 reason-based promotion the
+   operator re-elects a master. **On the SAF-10 candidate it does NOT: the
+   partition stays without a master (see the notice above).** Verify with key
+   sampling before re-enabling traffic.
+   - Also note: this hook copies the checkpoint WITHOUT a `RESTORED` marker,
+     so the restored copy keeps the copy identity it had when the backup was
+     taken (the object-storage bootstrap path adds the marker).
 
 This flow is exercised end-to-end by the `backup-restore` e2e suite
 (write → checkpoint → flush_all on all replicas → marker → pod deletion →
-per-key exact-value verification).
+per-key exact-value verification). That suite FAILS on the SAF-10 candidate
+(eb7bc43, run 37770467697): it is not evidence that the flow works there.
 
 ### Case B — restore from object storage (PVC also lost)
 
@@ -127,8 +149,13 @@ the partition you are restoring:
    (For a dated restore, sync from `…/<cluster>/snapshots/<DATE>/p<N>/`.)
 3. Continue with Case A steps 2–4 (write the `RESTORE` marker naming
    `/data/flare/backups/<name>`, delete the pods, let the startup hook swap it in).
+   **The same limitation applies: not supported on the SAF-10 candidate (see
+   the notice at the top of "Restore").**
 
 ### Case C — multi-partition cluster: MANUAL, read this first
+
+> Not supported on the SAF-10 candidate either: step 1 is the Case A restore
+> (see the notice at the top of "Restore").
 
 **Known limitation**: role/partition assignment is registration-order based.
 After a full-cluster restart, the first pod to register becomes P0 master,

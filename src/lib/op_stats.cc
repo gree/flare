@@ -34,6 +34,7 @@
 #include "storage_rocksdb.h"
 #endif
 #include <malloc.h>
+#include <sstream>
 
 namespace gree {
 namespace flare {
@@ -299,6 +300,21 @@ int op_stats::_send_stats(thread_pool* req_tp, thread_pool* other_tp, storage* s
 			}
 			_send_stat("rebuild_in_flight"                  , rdb->is_rebuild_in_flight() ? 1 : 0);
 			_send_stat("rocksdb_switch_unresolved"          , rdb->is_switch_unresolved() ? 1 : 0);
+			{
+				// receipts of completed bulks: "pred>succ@epoch;..." (one line)
+				string chain = rdb->get_bulk_chain();
+				string flat;
+				istringstream in(chain);
+				string l;
+				while (getline(in, l)) {
+					istringstream f(l);
+					string pr, su, ep;
+					if (f >> pr >> su >> ep) {
+						flat += (flat.empty() ? "" : ";") + pr + ">" + su + "@" + ep;
+					}
+				}
+				_send_stat("rocksdb_bulk_chain"                 , flat.empty() ? string("-") : flat);
+			}
 			_send_stat("rocksdb_snapshot_serving"           , rdb->is_snapshot_serving() ? 1 : 0);
 			_send_stat("rocksdb_retained_copies"            , static_cast<uint64_t>(rdb->list_retained().size()));
 			// monitoring (decision 2026-10-07, item 2): what the kept copies take

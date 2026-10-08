@@ -1303,62 +1303,129 @@ private def checkActivationOrder (ctx : Ctx) : IO Unit := do
 
 open FlareOperator.AuthoritativeHistory in
 private def checkAuthoritativeHistory (ctx : Ctx) : IO Unit := do
-  let bM : Binding := ⟨"uid-m", "boot-m", "copy-m"⟩
-  let bS : Binding := ⟨"uid-s", "boot-s", "copy-s"⟩
+  let bM : Binding := ⟨"uid-m", "boot-m", "u1:3"⟩
+  let bS : Binding := ⟨"uid-s", "boot-s", "u2:1"⟩
   let h2 : Hist := ⟨"M", "2:e"⟩
   let rec0 : Record := { gen := 3, hist := h2, holder := "m", binding := bM, since := "t0", reason := "promotion" }
-  let st : Store := { clusterUid := "cu", parts := [(0, .known rec0)] }
-  let ob := fun (b : Binding) (h : Hist) (empty : Bool) => ({ binding := b, hist := h, position := 7, healthy := true, empty := empty, seenAt := "t1" } : Obs)
-  -- (1) the ex-master returns EMPTY under the same name: a new boot / copy and
-  -- a new history; it is NOT the recorded holder's binding
-  let emptyBack := ob ⟨"uid-m2", "boot-m2", "copy-m2"⟩ ⟨"M2", "5:fresh"⟩ true
-  check ctx "history: an empty ex-master returning under the same name (new boot / copy, new history) does NOT replace the record (bulk needs the holder's own binding)"
-    ((bulk st 0 "m" emptyBack "t2").1 == st && (bulk st 0 "m" emptyBack "t2").2 == .none)
-  check ctx "history: the recorded holder, same binding, advancing its own history (flush_all) is the next generation (bulk)"
-    (match bulk st 0 "m" (ob bM ⟨"M", "3:bulk"⟩ false) "t2" with
-     | (s', .recorded 0 r _) => r.gen == 4 && r.reason == "bulk" && s'.recorded 0 == some ⟨"M", "3:bulk"⟩
+  let st : Store := { clusterUid := "cu", parts := [(0, .known rec0 none)] }
+  let modern := fun (b : Binding) (h : Hist) (empty : Bool) => Seen.modern b h true empty [] ""
+  -- (1) establishing a record
+  let fresh : Store := { clusterUid := "cu", origin := "first-build" }
+  let absent := load "cu" 1 (some none) true
+  let cs := [("m", modern bM h2 false), ("s", modern bS h2 false)]
+  check ctx "history (1): first build only in a store CREATED as a first build; an absent record with a node map only with the migration approval"
+    ((match establish fresh 0 (some "m") cs false "t" with | (_, .recorded 0 r _) => r.reason == "first-build" | _ => false)
+      && (establish absent 0 (some "m") cs false "t").2 == .none
+      && (match establish absent 0 (some "m") cs true "t" with | (_, .recorded 0 r _) => r.reason == "adopted" | _ => false))
+  check ctx "history (1): a corrupt, foreign or unreadable record is NEVER adopted, approved or not, and never written back"
+    ((establish (load "cu" 1 (some (some "garbage")) false) 0 (some "m") cs true "t").2 == .none
+      && (establish (load "cu" 1 (some (some (serialize { st with clusterUid := "other" }))) false) 0 (some "m") cs true "t").2 == .none
+      && (establish (load "cu" 1 none false) 0 (some "m") cs true "t").2 == .none
+      && !writable (load "cu" 1 (some (some "garbage")) false) && !writable (load "cu" 1 none false) && writable absent)
+  check ctx "history (1): an UNREADABLE copy is never treated as empty: no adoption until every copy is observed; an empty master while another copy has data or cannot be read is not adopted"
+    ((match establish fresh 0 (some "m") [("m", modern bM h2 false), ("s", .unreadable)] false "t" with | (_, .held 0 _) => true | _ => false)
+      && (match establish fresh 0 (some "m") [("m", modern bM h2 true), ("s", modern bS h2 false)] false "t" with | (_, .held 0 _) => true | _ => false)
+      && othersHaveData [("m", modern bM h2 true), ("s", .unreadable)] "m")
+  -- (4) capability
+  check ctx "history (4): UNTRACKED only when every copy was observed completely and none is modern; one legacy copy beside a modern one does not untrack; a known partition is never downgraded"
+    ((match establish fresh 0 (some "m") [("m", .legacy), ("s", .legacy)] false "t" with | (s', .untracked 0 _) => !s'.tracked 0 | _ => false)
+      && (match establish fresh 0 (some "m") [("m", .legacy), ("s", .unreadable)] false "t" with | (s', .held 0 _) => s'.tracked 0 | _ => false)
+      && (match establish fresh 0 (some "m") [("m", modern bM h2 false), ("s", .legacy)] false "t" with | (s', .recorded 0 _ _) => s'.tracked 0 | _ => false)
+      && (establish st 0 (some "m") [("m", .legacy), ("s", .legacy)] true "t").1 == st)
+  check ctx "history (4): an APPROVED untracked partition becomes tracked once EVERY copy is modern; a mix, or no approval, stays untracked"
+    (let un : Store := { clusterUid := "cu", parts := [(0, .untracked "rc56")] }
+     (match establish un 0 (some "m") cs true "t" with | (s', .recorded 0 r _) => s'.tracked 0 && r.reason == "adopted" | _ => false)
+       && (establish un 0 (some "m") [("m", modern bM h2 false), ("s", .legacy)] true "t").1 == un
+       && (establish un 0 (some "m") cs false "t").1 == un)
+  -- (3) bulk
+  let bM2 : Binding := ⟨"uid-m", "boot-m", "u1:4"⟩
+  let bM3 : Binding := ⟨"uid-m", "boot-m", "u1:5"⟩
+  let h3 : Hist := ⟨"M", "3:bulk"⟩
+  check ctx "history (3): bulk is adopted only through flared's persisted chain recorded-copy -> current copy, ending at its epoch with reason bulk"
+    ((match bulk st 0 "m" (Seen.modern bM2 h3 true false [⟨"u1:3", "u1:4", "3:bulk"⟩] "bulk") "t" with
+      | (s', .recorded 0 r _) => r.gen == 4 && r.binding.copyId == "u1:4" && s'.recorded 0 == some h3 | _ => false)
+      && (match bulk st 0 "m" (Seen.modern bM3 ⟨"M", "4:b2"⟩ true false [⟨"u1:3", "u1:4", "3:bulk"⟩, ⟨"u1:4", "u1:5", "4:b2"⟩] "bulk") "t" with
+          | (_, .recorded 0 r _) => r.binding.copyId == "u1:5" | _ => false))
+  check ctx "history (3): the same uuid with N+1 WITHOUT a chain, a gap in the chain (two flushes, one link missing), or a chain not ending at the epoch / reason bulk = a HOLD beside the RETAINED record, never adopted"
+    ((match bulk st 0 "m" (Seen.modern bM2 h3 true false [] "bulk") "t" with | (s', .held 0 _) => s'.recorded 0 == some h2 && (s'.held 0).isSome | _ => false)
+      && (match bulk st 0 "m" (Seen.modern bM3 ⟨"M", "4:b2"⟩ true false [⟨"u1:4", "u1:5", "4:b2"⟩] "bulk") "t" with | (_, .held 0 _) => true | _ => false)
+      && (match bulk st 0 "m" (Seen.modern bM2 h3 true false [⟨"u1:3", "u1:4", "3:bulk"⟩] "promotion") "t" with | (_, .held 0 _) => true | _ => false))
+  check ctx "history (3): the ex-master back with an EMPTY DB (new boot / copy, another history) is no bulk of the holder: nothing changes"
+    ((bulk st 0 "m" (Seen.modern ⟨"uid-m2", "boot-m2", "u9:1"⟩ ⟨"M2", "5:fresh"⟩ true true [] "new") "t").1 == st)
+  -- (5) intents
+  let i : Intent := { id := "t-11", partition := 0, kind := "promotion", target := "s", binding := bS, fromGen := 3, fromHist := h2, expectedVersion := 11 }
+  let some withI := beginIntent st i | check ctx "history (5): beginIntent on a known partition" false
+  check ctx "history (5): a second intent while one is pending, or an intent on an unknown partition, is REFUSED"
+    ((beginIntent withI { i with id := "t-12", target := "m" }).isNone && (beginIntent absent i).isNone)
+  check ctx "history (5): resolved ONLY when the PERSISTED map carries the intent id: the target master there, same binding, healthy, a new history"
+    (match resolveIntent withI i 12 ["t-11"] true (modern bS ⟨"M", "4:promo"⟩ false) "t" with
+     | (s', .recorded 0 r _) => r.gen == 4 && r.holder == "s" && s'.intentFor 0 == none | _ => false)
+  check ctx "history (5): a later map WITHOUT the id (another update after an uncommitted intent) never completes it: dropped once the expected version is reached, waited for before"
+    ((match resolveIntent withI i 12 ["t-10"] true (modern bS ⟨"M", "4:promo"⟩ false) "t" with | (s', .intentDropped 0 _) => s'.recorded 0 == some h2 | _ => false)
+      && (resolveIntent withI i 10 [] true (modern bS h2 false) "t").2 == .none)
+  check ctx "history (5): carried, but the target is not master there, changed binding, or unhealthy = a HOLD persisted beside the retained record: rebuilds and new intents refused (not only a log)"
+    ((match resolveIntent withI i 12 ["t-11"] false (modern bS ⟨"M", "4:p"⟩ false) "t" with | (s', .held 0 _) => s'.recorded 0 == some h2 && (s'.held 0).isSome && (rebuildAllowed s' 0 "m" (modern bM h2 false) (modern bS h2 false)).1 == false && (beginIntent s' i).isNone | _ => false)
+      && (match resolveIntent withI i 12 ["t-11"] true (modern ⟨"uid-s", "boot-s2", "u2:1"⟩ ⟨"M", "4:p"⟩ false) "t" with | (_, .held 0 _) => true | _ => false)
+      && (match resolveIntent withI i 12 ["t-11"] true (Seen.modern bS ⟨"M", "4:p"⟩ false false [] "") "t" with | (_, .held 0 _) => true | _ => false))
+  -- (2) rebuild source, fresh reads
+  check ctx "history (2): a rebuild copies only from the RECORD's holder (its COPY — a restarted process with the same copy is fine, another copy is not — its history, healthy); never while an intent is pending; never from an empty source onto data or an unreadable target"
+    ((rebuildAllowed st 0 "m" (modern bM h2 false) (modern bS h2 false)).1
+      && (rebuildAllowed st 0 "m" (modern ⟨"uid-m", "boot-m2", "u1:3"⟩ h2 false) (modern bS h2 false)).1
+      && !(rebuildAllowed st 0 "m" (modern ⟨"uid-m", "boot-m2", "u9:1"⟩ h2 false) (modern bS h2 false)).1
+      && !(rebuildAllowed st 0 "m" (modern bM ⟨"M2", "5:fresh"⟩ false) (modern bS h2 false)).1
+      && !(rebuildAllowed st 0 "m" (Seen.modern bM h2 false false [] "") (modern bS h2 false)).1
+      && !(rebuildAllowed st 0 "m" .unreadable (modern bS h2 false)).1
+      && !(rebuildAllowed withI 0 "s" (modern bS h2 false) (modern bM h2 false)).1
+      && !(rebuildAllowed st 0 "m" (modern bM h2 true) (modern bS h2 false)).1
+      && !(rebuildAllowed st 0 "m" (modern bM h2 true) .unreadable).1
+      && (rebuildAllowed st 0 "m" (modern bM h2 true) (modern bS h2 true)).1
+      && !(rebuildAllowed absent 0 "m" (modern bM h2 false) (modern bS h2 false)).1
+      && (rebuildAllowed { clusterUid := "cu", parts := [(0, .untracked "tch")] } 0 "m" .legacy .legacy).1)
+  -- the four paired cases (review 2026-10-09)
+  let hold1 := bulk st 0 "m" (Seen.modern bM2 h2 true false [] "bulk") "t"
+  check ctx "history pair A: a bulk seen PART-WAY (copy N+1, no receipt yet) keeps the record and holds; the receipt arriving on a later pass adopts it and LIFTS the hold"
+    ((hold1.1.recorded 0 == some h2 && (hold1.1.held 0).isSome && !(rebuildAllowed hold1.1 0 "m" (modern bM h2 false) (modern bS h2 false)).1)
+      && (match bulk hold1.1 0 "m" (Seen.modern bM2 h3 true false [⟨"u1:3", "u1:4", "3:bulk"⟩] "bulk") "t" with
+          | (s', .recorded 0 r _) => r.gen == 4 && s'.held 0 == none | _ => false))
+  check ctx "history pair B: a bulk that CRASHED part-way and restarted (new boot, copy N+1, the old epoch, no receipt) stays held with the record retained — never adopted, never forgotten"
+    (let crashed := Seen.modern ⟨"uid-m", "boot-m2", "u1:4"⟩ h2 true false [] "promotion"
+     let (s', c) := bulk st 0 "m" crashed "t"
+     s'.recorded 0 == some h2 && (s'.held 0).isSome && (match c with | .held 0 _ => true | _ => false)
+       && (rebind s' 0 "m" crashed).1 == s')
+  check ctx "history pair C: a NORMAL restart (same copy id and history, new boot / pod UID, healthy) re-binds the holder; rebuilds from it are allowed again"
+    (let restarted := modern ⟨"uid-m9", "boot-m9", "u1:3"⟩ h2 false
+     match rebind st 0 "m" restarted with
+     | (s', .recorded 0 r _) => r.binding.bootId == "boot-m9" && r.gen == 3 && (rebuildAllowed s' 0 "m" restarted (modern bS h2 false)).1
      | _ => false)
-  check ctx "history: another node's new history is only an observation (rejoining), never adopted"
-    ((bulk st 0 "s" (ob bS ⟨"S", "9:x"⟩ false) "t2").1 == st && rejoining st 0 emptyBack && !rejoining st 0 (ob bS h2 false))
-  -- (2) promotion: intent -> commit -> the target's new epoch WITH THE SAME BINDING
-  let i : Intent := { partition := 0, kind := "promotion", target := "s", binding := bS, fromGen := 3, fromHist := some h2, mapVersionBefore := 10 }
-  let withI := beginIntent st i
-  check ctx "history: a promotion intent is resolved to the next generation only when the commit happened and the target, SAME binding, reports a new history"
-    (match resolveIntent withI i 11 true (some (ob bS ⟨"M", "4:promo"⟩ false)) "t3" with
-     | (s', .recorded 0 r _) => r.gen == 4 && r.holder == "s" && s'.intentFor 0 == none
-     | _ => false)
-  check ctx "history: the commit never happened (map not past 'before', or the target not master there) = the intent is dropped, the record unchanged"
-    ((match resolveIntent withI i 10 true none "t3" with | (s', .intentDropped 0 _) => s'.recorded 0 == some h2 && s'.intentFor 0 == none | _ => false)
-      && (match resolveIntent withI i 12 false none "t3" with | (_, .intentDropped 0 _) => true | _ => false))
-  check ctx "history: the target restarted / was replaced before its new history was seen = HELD (never adopted); the same history yet = wait"
-    ((match resolveIntent withI i 11 true (some (ob ⟨"uid-s", "boot-s2", "copy-s"⟩ ⟨"M", "4:promo"⟩ false)) "t3" with | (_, .held 0 _) => true | _ => false)
-      && (resolveIntent withI i 11 true (some (ob bS h2 false)) "t3").2 == .none)
-  -- (3) rebuild direction
-  check ctx "history: a rebuild may run only from the authoritative history (or the pending promotion's target); never from the empty returned copy"
-    ((rebuildSourceAllowed st 0 "m" (some (ob bM h2 false))).1
-      && !(rebuildSourceAllowed st 0 "m" (some emptyBack)).1
-      && !(rebuildSourceAllowed st 0 "m" none).1
-      && (rebuildSourceAllowed withI 0 "s" (some (ob bS h2 false))).1
-      && !(rebuildSourceAllowed withI 0 "m" (some (ob bM h2 false))).1
-      && !(rebuildSourceAllowed { clusterUid := "cu", parts := [(0, .unknown "x")] } 0 "m" (some (ob bM h2 false))).1)
-  -- (4) adoption (upgrade) is guarded; unknown is never first build
-  let unk : Store := { clusterUid := "cu", parts := [(0, .unknown "no record")] }
-  check ctx "history: adoption takes an Active, healthy master — not an EMPTY one while another copy holds data, not an inactive one"
-    ((match adopt unk 0 "m" (ob bM h2 false) true false "t" with | (s', .recorded 0 _ _) => s'.recorded 0 == some h2 | _ => false)
-      && (match adopt unk 0 "m" emptyBack true true "t" with | (s', .held 0 _) => s'.recorded 0 == none | _ => false)
-      && (match adopt unk 0 "m" (ob bM h2 false) false false "t" with | (_, .held 0 _) => true | _ => false))
-  check ctx "history: load — absent WITH a node map, unreadable, corrupt, truncated or another cluster's record = every partition UNKNOWN; absent with no node map = first build"
-    ((load "cu" 2 (some none) true).recorded 0 == none && (load "cu" 2 (some none) true).part 1 != none
-      && (load "cu" 2 none false).part 0 != none
-      && (load "cu" 2 (some (some "garbage")) false).part 0 != none
-      && (load "cu" 2 (some (some ((serialize st).replace "\nend" ""))) false).part 0 != none
-      && (load "other" 1 (some (some (serialize st))) false).recorded 0 == none
-      && (load "cu" 2 (some none) false).parts.isEmpty)
-  check ctx "history: serialize / parse round trip (record, intent, observation)"
-    (let full := { withI with obs := [("s", ob bS h2 false)] }
-     parse (serialize full) == some full && load "cu" 1 (some (some (serialize full))) true == full)
+  check ctx "history pair D: an EMPTY DB under the same name (another copy id and history) never re-binds and is no bulk: the record stays, rebuilds from it are refused"
+    (let emptyNew := modern ⟨"uid-m9", "boot-m9", "u9:1"⟩ ⟨"M9", "7:new"⟩ true
+     (rebind st 0 "m" emptyNew).1 == st && (bulk st 0 "m" emptyNew "t").1 == st
+       && !(rebuildAllowed st 0 "m" emptyNew (modern bS h2 false)).1)
+  -- (6) strict parser
+  let full := { withI with origin := "first-build" }
+  let txt := serialize full
+  check ctx "history (6): round trip; duplicates (cluster, origin, part, intent), unknown reason / kind / code, gen 0, empty tokens, no end = the whole record CORRUPT"
+    (parse txt == some full
+      && parse (txt.replace "end" "part 0 untracked x\nend") == none
+      && parse (txt.replace "end" "cluster cu\nend") == none
+      && parse (txt.replace "end" "origin -\nend") == none
+      && parse (txt.replace "end" ((txt.splitOn "\n").filter (·.startsWith "intent") |>.headD "" |>.replace "t-11" "t-99") ++ "\nend") == none
+      && parse (txt.replace " promotion -\n" " invented -\n") == none
+      && (txt.splitOn " promotion -\n").length == 2
+      && parse (txt.replace "part 0 known 3 " "part 0 known 0 ") == none
+      && parse (txt.replace "cluster cu" "cluster  cu") == none
+      && parse (txt.replace "\nend" "") == none
+      && parse (txt.replace "unknown" "unknown") == some full
+      && (load "cu" 1 (some (some (txt.replace "part 0 known 3 " "part 0 known 0 "))) false).recorded 0 == none)
   check ctx "history: a decision uses the new store only when its write SUCCEEDED"
     (afterWrite st withI true == withI && afterWrite st withI false == st)
+  -- the classifier wires REJOINING: another history than the authoritative one is never a candidate
+  let b := "STAT rocksdb_copy_identity_consistent 1\r\nSTAT rocksdb_quarantined 0\r\nSTAT rocksdb_copy_partial 0\r\nSTAT rebuild_in_flight 0\r\nSTAT rocksdb_copy_id u:1\r\nSTAT reconstruction_boot_id 7\r\nSTAT rocksdb_master_id M2\r\nSTAT rocksdb_source_epoch 5:fresh\r\n"
+  let o : PromotionEvidence.Observed := { mapPrepare := false, mapActive := true, podReady := true, partitionHasMaster := false, lastMasterHistory := some ("M", "2:e") }
+  check ctx "classifier: a REJOINING copy (another history than the authoritative one) is FORBIDDEN — empty, eligible to its current source, or not"
+    ((match PromotionEvidence.classify (some (b ++ "STAT curr_items 0\r\nSTAT repl_read_source_eligible 0\r\nEND\r\n")) o with | .forbidden _ => true | _ => false)
+      && (match PromotionEvidence.classify (some (b ++ "STAT curr_items 9\r\nSTAT repl_read_source_eligible 1\r\nSTAT repl_read_source_state eligible\r\nEND\r\n")) o with | .forbidden _ => true | _ => false)
+      && (match PromotionEvidence.classify (some (b ++ "STAT curr_items 0\r\nSTAT repl_read_source_eligible 0\r\nEND\r\n")) { o with lastMasterHistory := none } with | .empty => true | _ => false))
 
 -- ─── copy retention §10: rebuild concurrency ──────────────────────────────
 
@@ -1535,7 +1602,7 @@ private def checkPromotionEvidence (ctx : Ctx) : IO Unit := do
     ((match cls (reply "STAT repl_read_source_state revalidating\r\nSTAT repl_read_source_eligible 0\r\n") { obs with partitionHasMaster := true } with | .forbidden _ => true | _ => false)
       && cls (reply "STAT repl_read_source_state revalidating\r\nSTAT repl_read_source_eligible 0\r\n") obs == .lagging
       && (match cls (reply "STAT repl_read_source_state revalidating\r\nSTAT repl_read_source_eligible 0\r\n") { obs with lastMasterHistory := none, isLastMasterHolder := true } with | .unknown _ => true | _ => false)
-      && (match cls (some ((base.replace "rocksdb_source_epoch 2:e" "rocksdb_source_epoch 9:x") ++ "STAT repl_read_source_state revalidating\r\nSTAT repl_read_source_eligible 0\r\nEND\r\n")) obs with | .unknown _ => true | _ => false))
+      && (match cls (some ((base.replace "rocksdb_source_epoch 2:e" "rocksdb_source_epoch 9:x") ++ "STAT repl_read_source_state revalidating\r\nSTAT repl_read_source_eligible 0\r\nEND\r\n")) obs with | .forbidden _ => true | _ => false))
   check ctx "promotion by reason: a parked rebuild or a running reconstruction is FORBIDDEN (the copy was never completed)"
     ((match cls (reply "STAT repl_read_source_eligible 0\r\nSTAT rebuild_parked 1\r\n") obs with | .forbidden _ => true | _ => false)
       && (match cls (reply "STAT repl_read_source_eligible 0\r\nSTAT reconstruction_current_state running\r\n") obs with | .forbidden _ => true | _ => false))
@@ -1546,7 +1613,7 @@ private def checkPromotionEvidence (ctx : Ctx) : IO Unit := do
       && !(PromotionEvidence.reclassifyAllows .eligible (cls (reply "STAT repl_read_source_state revalidating\r\nSTAT repl_read_source_eligible 0\r\n") obs)).1
       && !(PromotionEvidence.reclassifyAllows .eligible .lagging).1)
   check ctx "promotion by reason: another history, or no record of the last master's, is UNKNOWN (held) — the ex-master's own copy is NOT presumed known (it may have come back empty)"
-    ((match cls (some ((base.replace "rocksdb_source_epoch 2:e" "rocksdb_source_epoch 9:x") ++ "STAT repl_read_source_eligible 0\r\nEND\r\n")) obs with | .unknown _ => true | _ => false)
+    ((match cls (some ((base.replace "rocksdb_source_epoch 2:e" "rocksdb_source_epoch 9:x") ++ "STAT repl_read_source_eligible 0\r\nEND\r\n")) obs with | .forbidden _ => true | _ => false)
       && (match cls (reply "STAT repl_read_source_eligible 0\r\n") { obs with lastMasterHistory := none } with | .unknown _ => true | _ => false)
       && (match cls (reply "STAT repl_read_source_eligible 0\r\n") { obs with lastMasterHistory := none, isLastMasterHolder := true } with | .unknown _ => true | _ => false))
   check ctx "promotion by reason: unreadable or incomplete is UNKNOWN; a bound eligible Active copy is ELIGIBLE"

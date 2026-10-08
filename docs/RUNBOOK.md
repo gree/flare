@@ -858,6 +858,45 @@ progress as well. A zero count is not proof of data equality or safe promotion.
 These signals must not automatically cause failover, promotion, Pod deletion
 or data reconstruction. Missing observations are not proof of node failure.
 
+## Authoritative history record {#history-record}
+
+The operator keeps each partition's accepted history in the ConfigMap
+`<cluster>-history` (docs/design-authoritative-history.md). It never adopts or
+overwrites a record it cannot trust:
+
+- **corrupt / unreadable / foreign** (another FlareCluster uid — e.g. the CR was
+  recreated): the operator logs CRITICAL "record is not usable" and holds
+  promotions and rebuilds of the cluster. Inspect the record; if it is not
+  needed, delete it, then give the migration approval below.
+- **absent with a node map** (an operator release without the record, or a lost
+  record): nothing is adopted automatically. Approve the migration for THIS
+  cluster, after checking that every copy is healthy and the current master
+  holds the data:
+
+  ```
+  uid=$(kubectl -n <ns> get flarecluster <cluster> -o jsonpath='{.metadata.uid}')
+  kubectl -n <ns> annotate flarecluster <cluster> --overwrite flare.gree.net/history-adoption-approved=$uid
+  ```
+
+  The record is then adopted from the current master once every copy of the
+  partition has been observed (an empty master while another copy holds data,
+  or any copy unreadable, is never adopted).
+
+## A partition held by its history {#history-held}
+
+`part N known ... <hold>` in the record (and CRITICAL "is HELD" on a
+promotion): the retained record is kept, and promotions, new intents and
+rebuilds of that partition are refused until the hold is resolved.
+
+- **bulk part-way** (flush_all / truncate seen before its receipt): it lifts by
+  itself when flared's receipt arrives (`rocksdb_bulk_chain`). If it does not
+  (the bulk crashed part-way), the holder's copy is not provably the recorded
+  one: decide from the data, not from the record.
+- **intent held** (the promotion target restarted / was replaced, is unhealthy,
+  or is not master in the committed map): the target's new history was never
+  adopted. Inspect the target's copy; the resolution is an operator decision
+  (remove the hold only after the partition's data is understood).
+
 ## Known limits (do not be surprised by)
 
 - Selective network partition (pod alive, TCP to operator blocked) is

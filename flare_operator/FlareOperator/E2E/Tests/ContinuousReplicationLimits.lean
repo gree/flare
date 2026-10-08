@@ -1382,6 +1382,16 @@ def upgradeSuite : TestSuite := {
           let opUp ← waitForCondition "the new operator answers node sync" 120 do
             return !(← c.nodeView).isEmpty
           if !opUp then return .fail "the new operator never answered node sync"
+          -- the release procedure (docs/design-authoritative-history.md): an
+          -- operator WITHOUT a history record upgrading -> the explicit
+          -- MIGRATION APPROVAL for this cluster (an absent record with a node
+          -- map is never adopted automatically)
+          match ← kubectl ["get", "flarecluster", upgradeCfg.name, "-n", ns, "-o", "jsonpath={.metadata.uid}"] with
+          | .error e => return .fail s!"reading the cluster uid failed: {e}"
+          | .ok uid =>
+            match ← kubectl ["annotate", "flarecluster", upgradeCfg.name, "-n", ns, "--overwrite", s!"flare.gree.net/history-adoption-approved={uid.trim}"] with
+            | .error e => return .fail s!"the migration approval could not be set: {e}"
+            | .ok _ => pure ()
           -- the release procedure: the reserve goes into the CR once the new
           -- operator runs; the rc56 pods refuse that reload (unknown option)
           -- and keep running; the new pods boot with it
@@ -3432,6 +3442,14 @@ def clusterInitSuite : TestSuite := {
           IO.sleep 1100
           let restoreAt ← utcNow
           discard <| kubectl ["create", "configmap", cmName, "-n", ns, s!"--from-literal=nodeMap={saved}"]
+          -- the CR was RECREATED (a new uid): the old cluster's history
+          -- record is FOREIGN and is never adopted automatically. The recovery
+          -- procedure removes it and gives the migration approval for THIS
+          -- cluster (docs/design-authoritative-history.md)
+          discard <| kubectl ["delete", "configmap", s!"{initCfg.name}-history", "-n", ns, "--ignore-not-found=true"]
+          match ← kubectl ["get", "flarecluster", initCfg.name, "-n", ns, "-o", "jsonpath={.metadata.uid}"] with
+          | .ok uid => discard <| kubectl ["annotate", "flarecluster", initCfg.name, "-n", ns, "--overwrite", s!"flare.gree.net/history-adoption-approved={uid.trim}"]
+          | .error e => return .fail s!"precondition: the recreated cluster's uid could not be read: {e}"
           let keys := (List.range 30).map fun i => s!"init_{i}"
           let probes ← IO.mkRef ([] : List (String × String × String × List (String × String)))
           let roundN ← IO.mkRef 0
@@ -5244,8 +5262,14 @@ private def historyCfg : ClusterConfig := {
   debugPod := "debug-hist-track"
   storageBackend := "rocksdb"
   extraFlaredConf := flags
-  operatorEnv := [("FLARE_STATS_PROBE_INTERVAL_MS", "15000")]
+  operatorEnv := [("FLARE_STATS_PROBE_INTERVAL_MS", "15000"), ("FLARE_TEST_POSTINTENT_BARRIER", "/tmp/postintent"),
+                  ("FLARE_TEST_HOLD_RESOLVE_FILE", "/tmp/holdresolve")]
 }
+
+private def approveAdoption (c : Ctx) : IO (Except String String) := do
+  match ← kubectl ["get", "flarecluster", c.cfg.name, "-n", c.cfg.«namespace», "-o", "jsonpath={.metadata.uid}"] with
+  | .error e => return .error e
+  | .ok uid => kubectl ["annotate", "flarecluster", c.cfg.name, "-n", c.cfg.«namespace», "--overwrite", s!"flare.gree.net/history-adoption-approved={uid.trim}"]
 
 private def restartOperator (c : Ctx) : IO Bool := do
   discard <| kubectl ["delete", "pod", "-l", s!"app={c.cfg.operatorName}", "-n", c.cfg.«namespace», "--wait=false"]
@@ -5358,6 +5382,53 @@ def historyTrackingSuite : TestSuite := {
           if !after then return .fail "the replica was not promoted after its marker was removed (the hold was not only the marker)"
           return .pass },
 
+    { name := "(R) an EMPTY process under the master's name registers BEFORE the operator sees the master die (its flared killed: the container restarts with no data): it is never seated as master; the replica holding the data is; every key it held stays; the ex-master is rebuilt from it"
+      run := do
+        let ok ← waitForCondition "a recorded history" 180 do historyRecorded c
+        if !ok then return .fail "precondition: no recorded history"
+        match ← c.pair with
+        | .error e => return .fail e
+        | .ok (mPod, mIp, sPod, sIp) =>
+          let base := (List.range 20).map fun i => (s!"hr_{i}", s!"vr_{i}")
+          for (k, v) in base do
+            if !(← memcachedSet historyCfg.debugPod ns mIp historyCfg.flarePort k v) then return .fail s!"precondition: {k} not acknowledged"
+          let conv ← waitForCondition "the replica holds every key" 120 do
+            match ← c.localDump sIp with
+            | some d => return (missingFrom base d).isEmpty
+            | none => return false
+          if !conv then return .fail "precondition: the replica did not converge"
+          let some d0 ← c.localDump sIp | return .fail "precondition: the replica's own copy could not be read"
+          let t0 ← utcNow
+          match ← c.killFlaredIn mPod with
+          | .error e => return .fail s!"could not kill flared in {mPod}: {e}"
+          | .ok _ => pure ()
+          -- watch: the empty same-named process must never be master
+          let mut emptyMaster := false
+          let mut seated := false
+          for _ in [0:60] do
+            if let some m := ← masterPodOf c then
+              if m == mPod then
+                let ip := (← getPodIp mPod ns).getD ""
+                if (← c.currItems ip) == 0 then emptyMaster := true
+              if m == sPod then seated := true
+            if seated then break
+            IO.sleep 5000
+          let log ← c.opLogSince t0
+          IO.eprintln s!"# empty re-registration: empty master seen={emptyMaster}; replica seated={seated}; evidence for {mPod}: {((log.splitOn "\n").filter (fun l => containsSubstr l "PROMOTION EVIDENCE" && containsSubstr l s!"{mPod}.")).take 2}"
+          if emptyMaster then return .fail "the EMPTY process under the master's name was seated as master"
+          if !seated then return .fail "the replica holding the data was not seated"
+          let some d1 ← c.localDump sIp | return .fail "the new master's own copy could not be read"
+          if !(missingFrom d0 d1).isEmpty then return .fail s!"the promoted replica lost keys: {(missingFrom d0 d1).take 5}"
+          let rebuilt ← waitForCondition "the ex-master is rebuilt from the replica" 480 do
+            match ← getPodIp mPod ns with
+            | none => return false
+            | some ip =>
+              match ← c.localDump ip with
+              | some d => return (missingFrom d0 d).isEmpty
+              | none => return false
+          if !rebuilt then return .fail "the ex-master was not rebuilt from the replica"
+          return .pass },
+
     { name := "(3a) a history write that FAILS is not applied: with the record unwritable, the holder's flush_all (a new history) leaves the persisted record as it was; deleting the record makes it UNKNOWN and it is re-adopted from the healthy master (never a first build)"
       run := do
         let some m ← masterPodOf c | return .fail "precondition: no master"
@@ -5377,13 +5448,68 @@ def historyTrackingSuite : TestSuite := {
         if after != before then return .fail "the record changed although it was unwritable"
         if !failed then return .fail "no failed history write was logged (the bulk change was not attempted?)"
         discard <| kubectl ["delete", "configmap", s!"{historyCfg.name}-history", "-n", ns]
+        -- an ABSENT record with a node map is a migration or a loss: NOT
+        -- adopted until the explicit migration approval
+        IO.sleep 45000
+        let early ← historyRecorded c
+        if early then return .fail "a deleted record was re-adopted WITHOUT the migration approval"
+        match ← approveAdoption c with
+        | .error e => return .fail s!"could not set the migration approval: {e}"
+        | .ok _ => pure ()
         let t1 ← utcNow
-        let readopted ← waitForCondition "the record is re-adopted from the healthy master" 180 do historyRecorded c
+        let readopted ← waitForCondition "with the approval the record is adopted from the healthy master" 180 do historyRecorded c
         let log ← c.opLogSince t1
-        IO.eprintln s!"# re-adopted={readopted}; history: {(← historyText c).take 200}"
-        if !readopted then return .fail "the deleted record was not re-adopted from the healthy master"
-        if containsSubstr log "first build:" then return .fail "a deleted record was treated as a FIRST BUILD"
+        IO.eprintln s!"# adopted after approval={readopted}; history: {(← historyText c).take 200}"
+        if !readopted then return .fail "the record was not adopted after the migration approval"
+        if containsSubstr log "first-build from" || !containsSubstr (← historyText c) " adopted " then return .fail "the deleted record was treated as a FIRST BUILD (or not as an adoption)"
         return .pass },
+
+    { name := "(4) a CORRUPT record is never adopted or overwritten: it stays as it is and the operator reports it; promotions of its partition are held"
+      run := do
+        let ok ← waitForCondition "a recorded history" 120 do historyRecorded c
+        if !ok then return .fail "precondition: no recorded history"
+        match ← kubectl ["patch", "configmap", s!"{historyCfg.name}-history", "-n", ns, "--type", "merge", "-p", "{\"data\":{\"record\":\"cluster x\\nformat 2\\ngarbage\\nend\"}}"] with
+        | .error e => return .fail s!"precondition: could not corrupt the record: {e}"
+        | .ok _ => pure ()
+        let t0 ← utcNow
+        IO.sleep 45000
+        let after ← historyText c
+        let reported := containsSubstr (← c.opLogSince t0) "record is not usable"
+        IO.eprintln s!"# corrupt record after 45 s: [{after.take 80}]; reported={reported}"
+        if !containsSubstr after "garbage" then return .fail "the corrupt record was overwritten"
+        if !reported then return .fail "the corrupt record was not reported"
+        -- recovery is an operator action: delete it (the approval is still set)
+        discard <| kubectl ["delete", "configmap", s!"{historyCfg.name}-history", "-n", ns]
+        let back ← waitForCondition "after deletion (approval set) the record is adopted again" 180 do historyRecorded c
+        if !back then return .fail "the record was not adopted after the corrupt one was deleted"
+        return .pass },
+
+    { name := "(5) an intent persisted and the operator RESTARTED before the map commit: the intent is proven uncommitted (the persisted map reaches its version without its id) and dropped; the record is unchanged by it"
+      run := do
+        let ok ← waitForCondition "a recorded history" 120 do historyRecorded c
+        if !ok then return .fail "precondition: no recorded history"
+        match ← c.pair with
+        | .error e => return .fail e
+        | .ok (mPod, _, _, _) =>
+          if let .error e ← c.opExec "mkdir -p /tmp/postintent && rm -f /tmp/postintent/reached /tmp/postintent/release && touch /tmp/postintent/arm" then
+            return .fail s!"precondition: could not arm the post-intent barrier: {e}"
+          discard <| kubectl ["delete", "pod", mPod, "-n", ns, "--grace-period=0", "--force", "--wait=false"]
+          let reached ← waitForCondition "a promotion intent is persisted and the pass held before its map commit" 300 do
+            match ← c.opExec "cat /tmp/postintent/reached 2>/dev/null || true" with
+            | .ok o => return !o.trim.isEmpty
+            | .error _ => return false
+          if !reached then return .fail "precondition: no intent reached the post-intent barrier"
+          let intentLine := ((← historyText c).splitOn "\n").filter (·.startsWith "intent ")
+          let t0 ← utcNow
+          if !(← restartOperator c) then return .fail "the operator did not come back"
+          let dropped ← waitForCondition "the new operator drops the uncommitted intent" 300 do
+            return containsSubstr (← c.opLogSince t0) "that commit never happened"
+          IO.eprintln s!"# intent before the restart {intentLine}; dropped as uncommitted={dropped}"
+          if intentLine.isEmpty then return .fail "precondition: no intent was in the record at the barrier"
+          if !dropped then return .fail "the uncommitted intent was not dropped (or was completed)"
+          let healed ← waitForCondition "the cluster has a master again" 420 do return (← masterPodOf c).isSome
+          if !healed then return .fail "no master after the restarted operator dropped the intent"
+          return .pass },
 
     { name := "(3b) a promotion whose history INTENT cannot be persisted is aborted: nothing is committed (last test: the cluster is left without a master)"
       run := do
@@ -5404,6 +5530,49 @@ def historyTrackingSuite : TestSuite := {
           IO.eprintln s!"# intent unwritable: masters seen {seen}; abort logged={aborted}; promotion committed={committed}"
           if seen.contains sPod || committed then return .fail "a promotion was committed although its history intent could not be persisted"
           if !aborted then return .fail "no aborted promotion was logged (the failover was not attempted?)"
+          return .pass }
+  ]
+}
+
+/-- A separate cluster for the HELD case (it leaves its partition held). -/
+private def historyHeldCfg : ClusterConfig := { historyCfg with name := "hist-held", «namespace» := "flare-hist-held", debugPod := "debug-hist-held" }
+
+def historyHeldSuite : TestSuite := {
+  name := "history-held"
+  setup := do
+    deployCluster historyHeldCfg
+    IO.sleep 50000
+  teardown := cleanupCluster historyHeldCfg
+  onFailure := dumpClusterDiagnostics historyHeldCfg.«namespace» s!"app={historyHeldCfg.operatorName}"
+  tests :=
+    let c : Ctx := { cfg := historyHeldCfg }
+    let ns := historyHeldCfg.«namespace»
+    [
+    { name := "(6) the promotion target's flared is replaced (empty) between the map commit and the adoption: the partition is HELD (persisted beside the record), never adopted; no promotion follows in that partition"
+      run := do
+        let ok ← waitForCondition "a recorded history" 180 do historyRecorded c
+        if !ok then return .fail "precondition: no recorded history"
+        match ← c.pair with
+        | .error e => return .fail e
+        | .ok (mPod, _, sPod, _) =>
+          discard <| c.opExec "touch /tmp/holdresolve"
+          let t0 ← utcNow
+          discard <| kubectl ["delete", "pod", mPod, "-n", ns, "--grace-period=0", "--force", "--wait=false"]
+          let committed ← waitForCondition "the promotion of the follower is committed (intent pending)" 300 do
+            return ((← c.opLogSince t0).splitOn "\n").any fun l => containsSubstr l "PROMOTION committed" && containsSubstr l s!"{sPod}."
+          if !committed then discard <| c.opExec "rm -f /tmp/holdresolve"; return .fail "precondition: the promotion was not committed"
+          match ← c.killFlaredIn sPod with
+          | .error e => discard <| c.opExec "rm -f /tmp/holdresolve"; return .fail s!"could not restart {sPod}: {e}"
+          | .ok _ => pure ()
+          IO.sleep 15000
+          discard <| c.opExec "rm -f /tmp/holdresolve"
+          let held ← waitForCondition "the partition is HELD beside its record" 180 do
+            let t ← historyText c
+            return ((t.splitOn "\n").any fun l => l.startsWith "part 0 known" && !l.endsWith " -")
+          let rec ← historyText c
+          IO.eprintln s!"# after the target was replaced: held={held}; record [{rec.take 300}]"
+          if !held then return .fail "the replaced target did not leave the partition HELD"
+          if containsSubstr rec " promotion -" && containsSubstr rec sPod then return .fail "the replaced target was adopted as the holder"
           return .pass }
   ]
 }

@@ -85,7 +85,7 @@ jobs:
             {"group":"r3-source","suites":"r3-source-change"},
             {"group":"copy-protection","suites":"copy-protection,copy-retention,copy-retention-concurrency,r3-unreadable,promotion-reasons,promotion-precommit"},
             {"group":"repair-ledger","suites":"repair-ledger"},
-            {"group":"restore-promotion","suites":"restore-isolated,promotion-repeat,history-tracking"},
+            {"group":"restore-promotion","suites":"restore-isolated,promotion-repeat,history-tracking,history-held"},
             {"group":"failover-data","suites":"replace-nodes,failover-during-replication,data-survival-failover,pvc-data-survival,backup-restore,continuous-replication-enable,continuous-replication-multipart-enable"},
             {"group":"breaker-migration","suites":"circuit-breaker,operator-restart,blue-green-migration,continuous-replication-lag-hold-expiry,copy-identity"},
             {"group":"authority","suites":"topology-authority,resync-failure-self-demote,snapshot-push-seed,partition-reduction,continuous-replication-lag-hold,cluster-init"},

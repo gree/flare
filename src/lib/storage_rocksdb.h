@@ -89,6 +89,8 @@ public:
 	// "bulk" (truncate/flush_all) or "inherited" (snapshot restore). Absent on
 	// DBs written before the reason was recorded (read as unknown).
 	static const char* const kReplSourceEpochReasonKey;
+	static const char* const kBulkChainKey;
+	static const size_t kBulkChainKeep = 8;
 	static const char* const kReplIncarnationKey;
 	static const char* const kReplRestoreDoneKey;
 	static const char* const kReplRebuiltFromKey;
@@ -240,6 +242,7 @@ protected:
 	bool _switch_unresolved = false;
 	string _switch_unresolved_why;
 	void _mark_switch_unresolved(const string& why);
+	int _record_bulk_link(const string& pred, const string& succ, const string& epoch);
 	bool _refuse_if_switch_unresolved(const char* who);
 	// the source epoch the staged files carried when opened (a received
 	// checkpoint), read BEFORE generations are initialised; "" = none
@@ -610,6 +613,8 @@ public:
 	// one synchronized snapshot of the flag and its reason
 	bool switch_unresolved_snapshot(string& why);
 	bool is_switch_unresolved() { string w; return this->switch_unresolved_snapshot(w); }
+	// receipts of completed bulks, "<pred> <succ> <epoch>" per line
+	string get_bulk_chain();
 	bool promotion_forbidden(std::string& why);
 	// decision 2026-10-08: data_dir/copy.partial — the live copy is being (or
 	// was left) changed part-way by a merging dump. Written durably BEFORE the

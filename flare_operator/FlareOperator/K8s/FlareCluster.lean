@@ -350,6 +350,10 @@ structure FlareClusterState where
   nodeMapVersion : Nat := 0
   partitionSize : Nat := 1024
   keyHashAlgorithm : String := "simple"
+  /-- Ids of the history transitions (promotion intents) committed with this
+      map, the last 16 (docs/design-authoritative-history.md): the persisted
+      map PROVES which intent's commit happened. -/
+  transitions : List String := []
   deriving Repr
 
 namespace FlareClusterState
@@ -456,7 +460,7 @@ def serializeNodeMap (state : FlareClusterState) : String :=
   -- the void until it out-counts the previous incarnation — observed live
   -- as a cluster that could not converge for hours after an operator
   -- replacement (flared at v10280, fresh operator at v189).
-  s!"version={state.nodeMapVersion}\n" ++ "\n".intercalate lines
+  s!"version={state.nodeMapVersion}\n" ++ "\n".intercalate (lines ++ state.transitions.map (s!"transition={·}"))
 
 /-- Rebuild FlareClusterState from serialized ConfigMap data. -/
 def fromNodeMapData (data : String) : FlareClusterState :=
@@ -464,7 +468,8 @@ def fromNodeMapData (data : String) : FlareClusterState :=
   let version := (lines.findSome? fun l =>
     if l.startsWith "version=" then (l.drop "version=".length).toNat? else none).getD 0
   let nodes := lines.filterMap parseNodeMapLine
-  { FlareClusterState.default with nodeMap := nodes, nodeMapVersion := version }
+  let transitions := lines.filterMap fun l => if l.startsWith "transition=" then some (l.drop "transition=".length) else none
+  { FlareClusterState.default with nodeMap := nodes, nodeMapVersion := version, transitions := transitions }
 
 /-- One-shot migration for node maps persisted by operators that hardcoded
     threadType 16 for every node: flared keys its per-destination proxy

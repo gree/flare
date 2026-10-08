@@ -79,6 +79,11 @@ const char* const storage_rocksdb::kReplRebuiltFromKey = "__flare_repl_rebuilt_f
 // Same format, the evidence of the stored copy while a rebuild is in progress.
 const char* const storage_rocksdb::kReplRebuiltFromSuspendedKey = "__flare_repl_rebuilt_from_suspended";
 const char* const storage_rocksdb::kCopyIdKey = "__flare_copy_id";
+// Receipts of COMPLETED bulks (truncate / flush_all): "<pred copy> <succ copy>
+// <new epoch>" per line, the last kBulkChainKeep, written only AFTER the new
+// epoch was recorded (docs/design-authoritative-history.md: the operator
+// adopts a bulk of the authoritative holder only through this chain).
+const char* const storage_rocksdb::kBulkChainKey = "__flare_bulk_chain";
 const char* const storage_rocksdb::kQuarantineMarkerFile = "quarantine.marker";
 const char* const storage_rocksdb::kApprovalsFile = "approvals.log";
 // Name of the replication-metadata column family (design §3.7).
@@ -87,7 +92,8 @@ const char* const storage_rocksdb::kReplMetaCfName = "flare_repl_meta";
 bool storage_rocksdb::is_reserved_key(const string& key) {
 	return key == kReplLastLsnKey || key == kReplMasterIdKey
 		|| key == kReplSourceEpochKey || key == kReplSourceEpochReasonKey || key == kReplIncarnationKey
-		|| key == kReplRestoreDoneKey || key == kReplRebuiltFromKey || key == kReplRebuiltFromSuspendedKey || key == kCopyIdKey;
+		|| key == kReplRestoreDoneKey || key == kReplRebuiltFromKey || key == kReplRebuiltFromSuspendedKey || key == kCopyIdKey
+		|| key == kBulkChainKey;
 }
 // }}}
 
@@ -343,6 +349,46 @@ int storage_rocksdb::set_master_id(const string& id) {
 	this->_master_id = id;
 	pthread_rwlock_unlock(&this->_mutex_master_id);
 	log_notice("master id updated (old=%s, new=%s)", old_id.c_str(), id.c_str());
+	return 0;
+}
+
+string storage_rocksdb::get_bulk_chain() {
+	if (this->_db == NULL) {
+		return "";
+	}
+	string v;
+	if (!this->_db->Get(this->_read_options, kBulkChainKey, &v).ok()) {
+		return "";
+	}
+	return v;
+}
+
+int storage_rocksdb::_record_bulk_link(const string& pred, const string& succ, const string& epoch) {
+	if (pred.empty() || succ.empty() || epoch.empty()) {
+		log_err("bulk receipt NOT recorded (pred [%s], succ [%s], epoch [%s])", pred.c_str(), succ.c_str(), epoch.c_str());
+		return -1;
+	}
+	vector<string> lines;
+	{
+		istringstream in(this->get_bulk_chain());
+		string l;
+		while (getline(in, l)) {
+			if (!l.empty()) lines.push_back(l);
+		}
+	}
+	lines.push_back(pred + " " + succ + " " + epoch);
+	while (lines.size() > kBulkChainKeep) {
+		lines.erase(lines.begin());
+	}
+	ostringstream out;
+	for (size_t i = 0; i < lines.size(); i++) {
+		out << lines[i] << "\n";
+	}
+	if (this->_persist_generation(kBulkChainKey, out.str()) < 0) {
+		log_err("bulk receipt %s -> %s could not be persisted (the operator holds the partition until it can prove the bulk)", pred.c_str(), succ.c_str());
+		return -1;
+	}
+	log_notice("bulk receipt: copy %s -> %s, epoch %s", pred.c_str(), succ.c_str(), epoch.c_str());
 	return 0;
 }
 
@@ -2109,6 +2155,7 @@ int storage_rocksdb::truncate(int b) {
 	// generation BEFORE anything is deleted, so a crash part-way never leaves
 	// the old generation naming changed content (an approval for the old
 	// generation must not apply to it). If it cannot be recorded, no truncate.
+	const string bulk_pred_copy = this->get_copy_id();
 	if (this->bump_copy_generation("truncate (before deleting)") < 0) {
 		log_err("truncate refused: the copy identity could not move to its next generation", 0);
 		if ((b & behavior_skip_lock) == 0) {
@@ -2181,7 +2228,11 @@ int storage_rocksdb::truncate(int b) {
 	// observe the truncated history still carrying the old epoch. Lock order
 	// is whole-lock -> generations, the same as hard_reset().
 	if (r == 0) {
-		this->advance_source_epoch("bulk");
+		// the receipt only once the new epoch is recorded: a crash before it
+		// leaves the new copy id WITHOUT a receipt (the operator holds)
+		if (this->advance_source_epoch("bulk") == 0) {
+			this->_record_bulk_link(bulk_pred_copy, this->get_copy_id(), this->get_source_epoch());
+		}
 	}
 
 	if ((b & behavior_skip_lock) == 0) {

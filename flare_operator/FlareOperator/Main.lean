@@ -598,27 +598,29 @@ private def refreshParkedRebuilds (stateRef : IO.Ref FlareClusterState) (ns : St
     | .error e => IO.eprintln s!"[flare-operator] rebuild_resume to {k} failed ({e}); it stays parked"
 
 /-- The partition's AUTHORITATIVE history (docs/design-authoritative-history.md),
-    reloaded from its ConfigMap at every pass: an operator restart or a new
-    leader decides from what is persisted, never from memory. `none` until the
-    first load of this process. -/
+    reloaded from its ConfigMap at every use: an operator restart or a new
+    leader decides from what is persisted, never from memory. -/
 initialize historyStoreRef : IO.Ref (Option AuthoritativeHistory.Store) ← IO.mkRef none
 initialize historyRvRef : IO.Ref String ← IO.mkRef ""
+initialize historyApprovedRef : IO.Ref Bool ← IO.mkRef false
 initialize historyObsAtRef : IO.Ref Nat ← IO.mkRef 0
 initialize historyCrRef : IO.Ref String ← IO.mkRef ""
+/-- (lease name, this pod's identity): every history write re-checks the lease. -/
+initialize historyLeaseRef : IO.Ref (String × String) ← IO.mkRef ("", "")
 
 private def historyCm (crName : String) : String := s!"{crName}-history"
 
-/-- The recorded (authoritative) history of partition `p`, from the persisted
+private def utcNowIso : IO String := do
+  let out ← IO.Process.output { cmd := "date", args := #["-u", "+%Y-%m-%dT%H:%M:%SZ"] }
+  return out.stdout.trim
+
+/-- The recorded (authoritative) history of partition `p`, from the loaded
     store: what "the same history" means for a lagging copy. -/
 private def recordedHistory (p : Int) : IO (Option (String × String)) := do
   if p < 0 then return none
   match ← historyStoreRef.get with
   | none => return none
   | some st => return (st.recorded p.toNat).map fun h => (h.masterId, h.epoch)
-
-private def utcNowIso : IO String := do
-  let out ← IO.Process.output { cmd := "date", args := #["-u", "+%Y-%m-%dT%H:%M:%SZ"] }
-  return out.stdout.trim
 
 /-- (persisted text: some (some t) present / some none absent / none unreadable, resourceVersion) -/
 private def readHistory (crName ns : String) : IO (Option (Option String) × String) := do
@@ -631,28 +633,48 @@ private def readHistory (crName ns : String) : IO (Option (Option String) × Str
     if containsSubstr e "NotFound" || containsSubstr e "not found" then return (some none, "")
     return (none, "")
 
-/-- Load the persisted store for this pass. -/
+/-- Load the persisted store (and the migration approval) for this use. -/
 private def loadHistory (crName ns : String) (partitions : Nat) : IO (Option AuthoritativeHistory.Store) := do
-  let uid ← match ← kubectl ["get", "flarecluster", crName, "-n", ns, "-o", "jsonpath={.metadata.uid}"] with
-    | .ok u => pure u.trim
-    | .error _ => pure ""
+  let (uid, approval) ← match ← kubectl ["get", "flarecluster", crName, "-n", ns, "-o",
+      "jsonpath={.metadata.uid}|{.metadata.annotations.flare\\.gree\\.net/history-adoption-approved}"] with
+    | .ok u =>
+      match u.trim.splitOn "|" with
+      | [a, b] => pure (a.trim, b.trim)
+      | _ => pure ("", "")
+    | .error _ => pure ("", "")
   if uid.isEmpty then return none
   let (persisted, rv) ← readHistory crName ns
-  -- a node map present (or unknown) means the cluster existed before: a
-  -- missing record is then Unknown, never a first build
+  -- a node map present (or not readable) means the cluster existed before: a
+  -- missing record is then ABSENT (migration approval needed), never a first build
   let nodeMapPresent ← match ← kubectl ["get", "configmap", s!"{crName}-node-map", "-n", ns, "-o", "jsonpath={.metadata.name}"] with
     | .ok _ => pure true
     | .error e => pure !(containsSubstr e "NotFound" || containsSubstr e "not found")
   historyRvRef.set rv
   historyCrRef.set crName
+  historyApprovedRef.set (approval == uid)
   let st := AuthoritativeHistory.load uid partitions persisted nodeMapPresent
   historyStoreRef.set (some st)
   return some st
 
-/-- Persist the store (create, or replace with the resourceVersion read with
-    it: a stale writer — e.g. a previous leader — gets a conflict). true only
+/-- Persist the store: only while THIS pod holds the lease (resourceVersion
+    alone is no leader fencing), never over a corrupt / foreign / unreadable
+    record, create or replace with the resourceVersion read with it. true only
     when the write succeeded. -/
 private def persistHistory (crName ns : String) (st : AuthoritativeHistory.Store) : IO Bool := do
+  let (leaseName, identity) ← historyLeaseRef.get
+  let leader ← if leaseName.isEmpty then pure false else
+    match ← getLease leaseName ns with
+    | .ok lease => pure (lease.holderIdentity == identity && !lease.expired)
+    | .error _ => pure false
+  if !leader then
+    IO.eprintln s!"[flare-operator] CRITICAL: the authoritative history is NOT written: this pod does not hold a valid lease"
+    return false
+  match ← historyStoreRef.get with
+  | some loaded =>
+    if !AuthoritativeHistory.writable loaded then
+      IO.eprintln s!"[flare-operator] CRITICAL: the authoritative history record is corrupt / foreign / unreadable: it is NOT overwritten (an operator inspects and deletes it; RUNBOOK #history-record)"
+      return false
+  | none => pure ()
   let rv ← historyRvRef.get
   let body := String.intercalate "\n" ((AuthoritativeHistory.serialize st).splitOn "\n" |>.map (fun l => "    " ++ l))
   let meta := if rv.isEmpty then "" else s!"\n  resourceVersion: \"{rv}\""
@@ -671,92 +693,144 @@ private def persistHistory (crName ns : String) (st : AuthoritativeHistory.Store
     IO.eprintln s!"[flare-operator] CRITICAL: the authoritative history could not be persisted ({e.take 200}); the change is NOT applied (decided again on the next pass)"
     return false
 
-/-- One copy's observation, from one stats reply (none = not observable). -/
-private def observationOf (podUid : String) (out : String) (now : String) : Option AuthoritativeHistory.Obs :=
-  let s := PromotionEvidence.parseStats out
-  match s.complete, s.masterId, s.copyEpoch, s.bootId, s.copyId with
-  | true, some mid, some ep, some boot, some cid =>
-    if mid.isEmpty || ep.isEmpty || !s.invalid.isEmpty then none else
-    let healthy := s.identityConsistent == some 1 && s.quarantined != some 1 && s.copyPartial != some 1
-      && s.corrupted != some 1 && s.switchUnresolved != some 1
-    let pos := (statNat out "repl_applied_lsn").getD ((statNat out "rocksdb_latest_sequence_number").getD 0)
-    some { binding := ⟨podUid, boot, cid⟩, hist := ⟨mid, ep⟩, position := pos, healthy := healthy,
-           empty := s.items == some 0, seenAt := now }
-  | _, _, _, _, _ => none
+/-- A first build: create the (empty, origin first-build) record BEFORE the
+    first node map is persisted, so a later absent record can only mean a
+    migration or a loss. Called at the start of every pass until it exists. -/
+initialize historyEnsuredRef : IO.Ref Bool ← IO.mkRef false
+private def ensureHistoryStore (crName ns : String) (partitions : Nat) : IO Unit := do
+  if ← historyEnsuredRef.get then return
+  let some st ← loadHistory crName ns partitions | return
+  let (persisted, _) ← readHistory crName ns
+  match persisted with
+  | some (some _) => historyEnsuredRef.set true
+  | some none =>
+    if st.origin == "first-build" then
+      if ← persistHistory crName ns st then
+        IO.eprintln s!"[flare-operator] AUTHORITATIVE HISTORY: created for a first build (before the first node map)"
+        historyEnsuredRef.set true
+    else historyEnsuredRef.set true   -- absent with a map: stays absent (migration approval)
+  | none => pure ()
 
-/-- Every 15 s: observe each copy, then apply ONLY the allowed transitions
-    (resolve a pending intent; the holder's own bulk; first-build / guarded
-    adoption). A new observation never replaces the record. Applied only when
-    the write succeeded. -/
+/-- ONE copy as seen from one stats reply (none = the read failed). -/
+private def seenOf (podUid : String) (reply : Option String) : AuthoritativeHistory.Seen :=
+  match reply with
+  | none => .unreadable
+  | some out =>
+    let s := PromotionEvidence.parseStats out
+    if !s.complete || !s.invalid.isEmpty then .unreadable
+    else
+      match s.masterId, s.copyEpoch, s.bootId, s.copyId with
+      | some mid, some ep, some boot, some cid =>
+        if mid.isEmpty || ep.isEmpty || boot.isEmpty || cid.isEmpty || podUid.isEmpty then .unreadable else
+        let healthy := s.identityConsistent == some 1 && s.quarantined != some 1 && s.copyPartial != some 1
+          && s.corrupted != some 1 && s.switchUnresolved != some 1
+        let chainRaw := ((out.splitOn "\n").findSome? fun l =>
+          let t := (l.replace "\r" "").trim
+          if t.startsWith "STAT rocksdb_bulk_chain " then some (t.drop "STAT rocksdb_bulk_chain ".length) else none).getD "-"
+        let chain := if chainRaw == "-" then [] else (chainRaw.splitOn ";").filterMap fun e =>
+          match e.splitOn ">" with
+          | [pr, rest] =>
+            match rest.splitOn "@" with
+            | [su, epo] => some ({ pred := pr, succ := su, epoch := epo } : AuthoritativeHistory.Link)
+            | _ => none
+          | _ => none
+        let reason := ((out.splitOn "\n").findSome? fun l =>
+          let t := (l.replace "\r" "").trim
+          if t.startsWith "STAT rocksdb_source_epoch_reason " then some (t.drop "STAT rocksdb_source_epoch_reason ".length) else none).getD ""
+        .modern ⟨podUid, boot, cid⟩ ⟨mid, ep⟩ healthy (s.items == some 0) chain reason
+      | _, _, _, _ => .legacy
+
+/-- A FRESH read of one node: its pod UID and its stats (never a cache). -/
+private def seeFresh (key ns : String) : IO AuthoritativeHistory.Seen := do
+  let pod := extractPodName key
+  let uid ← match ← kubectl ["get", "pod", pod, "-n", ns, "--ignore-not-found=true", "-o", "jsonpath={.metadata.uid}"] with
+    | .ok u => pure u.trim
+    | .error _ => pure ""
+  if uid.isEmpty then return .unreadable
+  let reply ← match ← Bridge.queryPodStats pod ns "stats" with
+    | .ok o => pure (some o)
+    | .error _ => pure none
+  return seenOf uid reply
+
+/-- The persisted node map: (version, transition ids, its state). -/
+private def persistedNodeMap (crName ns : String) : IO (Option FlareClusterState) := do
+  match ← kubectl ["get", "configmap", s!"{crName}-node-map", "-n", ns, "-o", "jsonpath={.data.nodeMap}"] with
+  | .ok d => return some (FlareClusterState.fromNodeMapData d)
+  | .error _ => return none
+
+/-- Every pass while a partition is not settled, else every 15 s: observe each
+    copy FRESH, then apply ONLY the allowed transitions (resolve a pending
+    intent from the PERSISTED map; re-bind the holder after a normal restart;
+    the holder's proven bulk; first build / approved adoption / untracked).
+    Applied only when the write succeeded. -/
 private def observeHistory (stateRef : IO.Ref FlareClusterState) (crName ns : String) (partitions : Nat) : IO Unit := do
   let nowMs ← IO.monoMsNow
-  -- every 15 s; every pass while a partition has no recorded history (a first
-  -- build waits for it: its rebuild assignments are held until then)
-  let unrecorded := match ← historyStoreRef.get with
+  let unsettled := match ← historyStoreRef.get with
     | none => true
-    | some st => (List.range partitions).any fun p => (st.recorded p).isNone
-  if !unrecorded && nowMs - (← historyObsAtRef.get) < 15000 && (← historyObsAtRef.get) != 0 then return
+    | some st => (List.range partitions).any fun p => (st.recorded p).isNone || (st.intentFor p).isSome || (st.held p).isSome
+  if !unsettled && nowMs - (← historyObsAtRef.get) < 15000 && (← historyObsAtRef.get) != 0 then return
   historyObsAtRef.set nowMs
   let some st0 ← loadHistory crName ns partitions | return
+  if !AuthoritativeHistory.writable st0 then
+    IO.eprintln s!"[flare-operator] CRITICAL: the authoritative history record is not usable ({repr (st0.parts.map (·.2))}); promotions and rebuilds of its partitions are held"
+    return
   let st ← stateRef.get
   let now ← utcNowIso
-  let mut obs : List (String × AuthoritativeHistory.Obs) := []
+  let approved ← historyApprovedRef.get
+  let mut seen : List (String × AuthoritativeHistory.Seen) := []
   for (key, _) in st.nodeMap do
-    let pod := extractPodName key
-    let uid ← match ← kubectl ["get", "pod", pod, "-n", ns, "--ignore-not-found=true", "-o", "jsonpath={.metadata.uid}"] with
-      | .ok u => pure u.trim
-      | .error _ => pure ""
-    if uid.isEmpty then continue
-    match ← Bridge.queryPodStats pod ns "stats" with
-    | .ok out =>
-      if let some o := observationOf uid out now then obs := obs ++ [(key, o)]
-    | .error _ => pure ()
-  let mut store : AuthoritativeHistory.Store := { st0 with obs := (st0.obs.filter fun (k, _) => !(obs.any (·.1 == k))) ++ obs }
+    seen := seen ++ [(key, ← seeFresh key ns)]
+  let persisted ← persistedNodeMap crName ns
+  let mut store := st0
   let mut changes : List String := []
   for p in List.range partitions do
+    let copies := seen.filter fun (k, _) => ((st.lookupNode k).map (fun n => n.partition == Int.ofNat p || n.lastMasterOf == Int.ofNat p)).getD false
     let masterKey := (st.nodeMap.find? fun kv => kv.2.role == FlareRole.Master && kv.2.state == FlareState.Active && kv.2.partition == Int.ofNat p).map Prod.fst
+    let note := fun (c : AuthoritativeHistory.Change) (chs : List String) => match c with
+      | .recorded _ _ why => chs ++ [s!"p{p}: {why}"]
+      | .intentDropped _ why => chs ++ [s!"p{p}: intent dropped: {why}"]
+      | .held _ why => chs ++ [s!"p{p}: HELD: {why}"]
+      | .untracked _ why => chs ++ [s!"p{p}: {why}"]
+      | .none => chs
+    -- TEST SEAM (FLARE_TEST_HOLD_RESOLVE_FILE): while the file exists, pending
+    -- intents are not resolved (the window between commit and adoption)
+    let holdResolve ← match ← IO.getEnv "FLARE_TEST_HOLD_RESOLVE_FILE" with
+      | some f => System.FilePath.pathExists f
+      | none => pure false
     match store.intentFor p with
+    | some _ =>
+      if holdResolve then
+        IO.eprintln s!"[flare-operator] TEST SEAM: intent resolution of p{p} held (FLARE_TEST_HOLD_RESOLVE_FILE)"
+    | none => pure ()
+    match (if holdResolve then none else store.intentFor p) with
     | some i =>
-      let isMaster := (st.lookupNode i.target).map (fun n => n.role == FlareRole.Master && n.partition == Int.ofNat p) |>.getD false
-      let (s', c) := AuthoritativeHistory.resolveIntent store i (← persistedVersionRef.get) isMaster (obs.lookup i.target) now
-      store := s'
-      match c with
-      | .recorded _ _ why => changes := changes ++ [s!"p{p}: {why}"]
-      | .intentDropped _ why => changes := changes ++ [s!"p{p}: intent dropped: {why}"]
-      | .held _ why => IO.eprintln s!"[flare-operator] CRITICAL: partition {p} history HELD: {why} (promotions of this partition stay held)"
-      | .none => pure ()
-    | none =>
-      match masterKey with
+      match persisted with
       | none => pure ()
-      | some m =>
-        match obs.lookup m with
-        | none => pure ()
-        | some mo =>
-          match store.part p with
-          | some (.known _) =>
-            let (s', c) := AuthoritativeHistory.bulk store p m mo now
-            store := s'
-            if let .recorded _ _ why := c then changes := changes ++ [s!"p{p}: {why}"]
-          | _ =>
-            let others := obs.filter fun (k, _) => k != m && (((st.lookupNode k).map (fun n => n.partition == Int.ofNat p || n.lastMasterOf == Int.ofNat p)).getD false)
-            let otherHasData := others.any fun (_, o) => !o.empty
-            let firstBuild := store.part p == none
-            let (s', c) := AuthoritativeHistory.adopt store p m mo true otherHasData now
-            store := s'
-            match c with
-            | .recorded _ r why =>
-              if firstBuild then store := store.setPart p (.known { r with reason := "first-build" })
-              changes := changes ++ [s!"p{p}: {if firstBuild then "first build: " else ""}{why}"]
-            | .held _ why => IO.eprintln s!"[flare-operator] partition {p} history not adopted: {why}"
-            | _ => pure ()
-  -- observations are persisted with the transitions, or when a copy's
-  -- binding / history / health changed, or at most every 60 s otherwise
-  let material := obs.any fun (k, o) => match st0.obs.lookup k with
-    | some o0 => o0.binding != o.binding || o0.hist != o.hist || o0.healthy != o.healthy || o0.empty != o.empty
-    | none => true
-  if !changes.isEmpty || material || store.parts != st0.parts || store.intents != st0.intents then
+      | some pm =>
+        let there := (pm.lookupNode i.target).map (fun n => n.role == FlareRole.Master && n.partition == Int.ofNat p) |>.getD false
+        let (s', c) := AuthoritativeHistory.resolveIntent store i pm.nodeMapVersion pm.transitions there
+          ((seen.lookup i.target).getD .unreadable) now
+        store := s'
+        changes := note c changes
+    | none =>
+      match store.part p with
+      | some (.known r _) =>
+        let holderSeen := (seen.lookup r.holder).getD .unreadable
+        let (s1, c1) := AuthoritativeHistory.rebind store p r.holder holderSeen
+        store := s1
+        changes := note c1 changes
+        let (s2, c2) := AuthoritativeHistory.bulk store p r.holder holderSeen now
+        store := s2
+        changes := note c2 changes
+      | _ =>
+        let (s', c) := AuthoritativeHistory.establish store p masterKey copies approved now
+        store := s'
+        changes := note c changes
+  if store != st0 then
     if ← persistHistory crName ns store then
       for c in changes do IO.eprintln s!"[flare-operator] AUTHORITATIVE HISTORY: {c}"
+  else
+    for c in changes do IO.eprintln s!"[flare-operator] authoritative history (unchanged): {c}"
 
 private def handleRocksdbConfig (crd : FlareClusterView) (crName ns : String)
     (pendingConfRef : IO.Ref (Option (String × Nat))) : IO Unit := do
@@ -1719,52 +1793,6 @@ private def commitChecked (stateRef : IO.Ref FlareClusterState) (ver : Nat) (ucs
         IO.eprintln s!"[flare-operator] CRITICAL: PROMOTION ABORTED for {k}: its pod changed after it was observed (observed {obs}, now {now}) — a restarted or replaced copy is not promoted on the old one's standing; nothing from this pass is committed, the next pass re-decides"
         promotionAbortedRef.set true
         return
-    -- AUTHORITATIVE HISTORY (docs/design-authoritative-history.md): an
-    -- intent for every promotion of an existing copy, PERSISTED BEFORE the
-    -- map commit; a failed write or an unknown history aborts the commit.
-    -- The first master of a partition no copy held needs none (first build).
-    let crName ← historyCrRef.get
-    let members2 := cur.nodeMap.map fun (_, n) =>
-      (n.role == FlareRole.Master || n.role == FlareRole.Slave, n.partition, n.lastMasterOf)
-    let existing := promoted.filter fun k =>
-      !PromotionEvidence.firstMasterOfNewPartition
-        (match cur.lookupNode k with | none => true | some n => n.role == FlareRole.Proxy) members2
-        (((ucs.lookupNode k).map (·.partition)).getD (-1))
-    if !existing.isEmpty then
-      let parts := (ucs.nodeMap.filter fun kv => (existing.contains kv.1)).map fun kv => kv.2.partition
-      let nParts := max (parts.foldl (fun a p => max a (p.toNat + 1)) 0) ((cur.nodeMap.foldl (fun a kv => max a (kv.2.partition + 1)) (0 : Int)).toNat)
-      let loaded ← if crName.isEmpty then pure none else loadHistory crName ns nParts
-      match loaded with
-      | none =>
-        IO.eprintln s!"[flare-operator] CRITICAL: PROMOTION ABORTED for {existing}: the authoritative history could not be loaded — nothing from this pass is committed"
-        promotionAbortedRef.set true
-        return
-      | some st0 =>
-        let mut st := st0
-        for k in existing do
-          let p := (((ucs.lookupNode k).map (·.partition)).getD (-1))
-          match (if p < 0 then none else st.part p.toNat) with
-          | some (.known rec) =>
-            let pod := extractPodName k
-            let uid := ((← podIdentityNow pod ns).map (·.1)).getD ""
-            let b := PromotionEvidence.bindingOf (some uid) (match ← Bridge.queryPodStats pod ns "stats" with | .ok o => some o | .error _ => none)
-            if uid.isEmpty || b.bootId.isNone || b.copyId.isNone then
-              IO.eprintln s!"[flare-operator] CRITICAL: PROMOTION ABORTED for {k}: its binding (pod / boot / copy) could not be read for the history intent — nothing from this pass is committed"
-              promotionAbortedRef.set true
-              return
-            let before ← persistedVersionRef.get
-            let bnd : AuthoritativeHistory.Binding := ⟨uid, b.bootId.getD "", b.copyId.getD ""⟩
-            let it : AuthoritativeHistory.Intent := { partition := p.toNat, kind := "promotion", target := k, binding := bnd, fromGen := rec.gen, fromHist := some rec.hist, mapVersionBefore := before }
-            st := AuthoritativeHistory.beginIntent st it
-          | other =>
-            IO.eprintln s!"[flare-operator] CRITICAL: PROMOTION ABORTED for {k}: partition {p}'s authoritative history is {match other with | some (.unknown w) => s!"unknown ({w})" | _ => "not recorded"} — held (never treated as a first build or as empty)"
-            promotionAbortedRef.set true
-            return
-        if !(← persistHistory crName ns st) then
-          IO.eprintln s!"[flare-operator] CRITICAL: PROMOTION ABORTED for {existing}: the history intent could not be persisted — nothing from this pass is committed"
-          promotionAbortedRef.set true
-          return
-        IO.eprintln s!"[flare-operator] AUTHORITATIVE HISTORY: promotion intent persisted for {existing} (before the map commit)"
   -- Copy retention §10: one rebuild per partition and one in the cluster.
   -- A NEW Proxy -> Slave(Prepare) assignment beyond that is held (the node
   -- stays a Proxy this pass). Rejoins over TCP and master reconstructions
@@ -1783,25 +1811,96 @@ private def commitChecked (stateRef : IO.Ref FlareClusterState) (ver : Nat) (ucs
     rebuildHeldRef.set heldKeys
     for (k, why) in gated.held do
       IO.eprintln s!"[flare-operator] REBUILD HELD: {k} stays a Proxy for now — {why} (copy retention: one rebuild per partition and per cluster)"
-  -- AUTHORITATIVE HISTORY: a NEW rebuild assignment copies from its
-  -- partition's master; held unless that master holds the authoritative
-  -- history (no reverse rebuild from an empty / other-history copy)
+  -- AUTHORITATIVE HISTORY (docs/design-authoritative-history.md), at the
+  -- commit boundary, with the store reloaded and every node read FRESH:
+  --  * a NEW rebuild assignment copies from its partition master: held unless
+  --    that master is the record's holder (its copy and history), healthy, no
+  --    intent pending, no hold, and not empty onto a copy that holds data;
+  --  * every promotion of an EXISTING copy in a tracked partition needs the
+  --    partition KNOWN, no hold, no pending intent; its intent (id, expected
+  --    version) is PERSISTED before this commit and the committed map carries
+  --    the id. A failed write, an unknown history or an unreadable binding
+  --    aborts the whole commit.
+  let crName ← historyCrRef.get
+  let nParts := ((cur.nodeMap ++ ucs.nodeMap).foldl (fun a kv => max a (kv.2.partition + 1)) (0 : Int)).toNat
+  let store ← if crName.isEmpty then pure none else loadHistory crName ns nParts
   let gated ← do
-    let store ← historyStoreRef.get
     let mut nodeMap := gated.state.nodeMap
     for (k, a) in gated.state.nodeMap do
       if RebuildConcurrency.newAssignment (cur.lookupNode k) a && a.partition ≥ 0 then
         let src := (gated.state.nodeMap.find? fun kv => kv.2.role == FlareRole.Master && kv.2.partition == a.partition).map Prod.fst
-        let (ok, why) := match store, src with
-          | some st, some m => AuthoritativeHistory.rebuildSourceAllowed st a.partition.toNat m (st.obs.lookup m)
-          | none, _ => (false, "the authoritative history is not loaded")
-          | _, none => (false, "the partition has no master to rebuild from")
+        let (ok, why) ← match store, src with
+          | some st, some m =>
+            if !AuthoritativeHistory.writable st then pure (false, "the history record is not usable")
+            else pure (AuthoritativeHistory.rebuildAllowed st a.partition.toNat m (← seeFresh m ns) (← seeFresh k ns))
+          | none, _ => pure (false, "the authoritative history could not be loaded")
+          | _, none => pure (false, "the partition has no master to rebuild from")
         if !ok then
           IO.eprintln s!"[flare-operator] REBUILD HELD (history): {k} is not assigned a rebuild from {src} — {why}"
           match cur.lookupNode k with
           | some b => nodeMap := nodeMap.map fun kv => if kv.1 == k then (k, b) else kv
           | none => pure ()
     pure { gated with state := FlareClusterState.rebuildPartitionMap { gated.state with nodeMap := nodeMap } }
+  let promotedFinal := (gated.state.nodeMap.filter fun kv =>
+    kv.2.role == FlareRole.Master && (cur.lookupNode kv.1).map (·.role) != some FlareRole.Master).map Prod.fst
+  let membersH := cur.nodeMap.map fun (_, n) => (n.role == FlareRole.Master || n.role == FlareRole.Slave, n.partition, n.lastMasterOf)
+  let existingH := promotedFinal.filter fun k =>
+    !PromotionEvidence.firstMasterOfNewPartition
+      (match cur.lookupNode k with | none => true | some n => n.role == FlareRole.Proxy) membersH
+      (((gated.state.lookupNode k).map (·.partition)).getD (-1))
+  let mut transitionIds : List String := []
+  if !existingH.isEmpty then
+    match store with
+    | none =>
+      IO.eprintln s!"[flare-operator] CRITICAL: PROMOTION ABORTED for {existingH}: the authoritative history could not be loaded — nothing from this pass is committed"
+      return
+    | some st0 =>
+      let mut st := st0
+      for k in existingH do
+        let p := (((gated.state.lookupNode k).map (·.partition)).getD (-1))
+        if p < 0 then continue
+        if !st.tracked p.toNat then continue   -- untracked partition: previous behaviour
+        match st.part p.toNat with
+        | some (.known rec none) =>
+          match ← seeFresh k ns with
+          | .modern b _ _ _ _ _ =>
+            let iid := s!"t{gated.state.nodeMapVersion}-p{p}-{(← IO.monoNanosNow) % 1000000}"
+            let it : AuthoritativeHistory.Intent := { id := iid, partition := p.toNat, kind := "promotion", target := k, binding := b, fromGen := rec.gen, fromHist := rec.hist, expectedVersion := gated.state.nodeMapVersion }
+            match AuthoritativeHistory.beginIntent st it with
+            | some st' =>
+              st := st'
+              transitionIds := transitionIds ++ [iid]
+            | none =>
+              IO.eprintln s!"[flare-operator] CRITICAL: PROMOTION ABORTED for {k}: partition {p} already has a pending history intent — nothing from this pass is committed"
+              return
+          | _ =>
+            IO.eprintln s!"[flare-operator] CRITICAL: PROMOTION ABORTED for {k}: its copy (pod / boot / copy / history) could not be read for the history intent — nothing from this pass is committed"
+            return
+        | some (.known _ (some hold)) =>
+          IO.eprintln s!"[flare-operator] CRITICAL: PROMOTION ABORTED for {k}: partition {p} is HELD ({hold}) — RUNBOOK #history-held"
+          return
+        | other =>
+          IO.eprintln s!"[flare-operator] CRITICAL: PROMOTION ABORTED for {k}: partition {p}'s authoritative history is {match other with | some (.unknown c w) => s!"{c.label} ({w})" | _ => "not recorded"} — held (never treated as a first build or as empty)"
+          return
+      if !transitionIds.isEmpty then
+        if !(← persistHistory crName ns st) then
+          IO.eprintln s!"[flare-operator] CRITICAL: PROMOTION ABORTED for {existingH}: the history intent could not be persisted — nothing from this pass is committed"
+          return
+        IO.eprintln s!"[flare-operator] AUTHORITATIVE HISTORY: promotion intent(s) {transitionIds} persisted for {existingH} (before the map commit)"
+  let gated := { gated with state := { gated.state with transitions := ((cur.transitions ++ transitionIds).reverse.take 16).reverse } }
+  -- TEST SEAM (FLARE_TEST_POSTINTENT_BARRIER, a directory; inert without it):
+  -- stop AFTER the intent is persisted and BEFORE the map commit (an operator
+  -- restart in this window must leave the intent provably uncommitted)
+  if !transitionIds.isEmpty then
+    if let some dir ← IO.getEnv "FLARE_TEST_POSTINTENT_BARRIER" then
+      let arm : System.FilePath := dir ++ "/arm"
+      if ← arm.pathExists then
+        IO.eprintln s!"[flare-operator] TEST BARRIER: holding after the history intent {transitionIds}, before the map commit"
+        try IO.FS.writeFile (dir ++ "/reached") (String.intercalate "\n" transitionIds ++ "\n") catch _ => pure ()
+        try IO.FS.removeFile arm catch _ => pure ()
+        for _ in [0:1200] do
+          if ← (System.FilePath.mk (dir ++ "/release")).pathExists then break
+          IO.sleep 100
   let promotedNow := (gated.state.nodeMap.filter fun kv =>
     kv.2.role == FlareRole.Master && (cur.lookupNode kv.1).map (·.role) != some FlareRole.Master).map Prod.fst
   if !promotedNow.isEmpty then
@@ -2005,6 +2104,8 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
        prevCrd.spec.replicas != crd.spec.replicas then
       IO.eprintln s!"[flare-operator] CRD changed: partitions {prevCrd.spec.partitions}→{crd.spec.partitions}, replicas {prevCrd.spec.replicas}→{crd.spec.replicas}"
     crdRef.set crd
+    -- the authoritative history exists BEFORE the first node map is persisted
+    ensureHistoryStore crName ns crd.spec.partitions
     followDesiredRef.set (some (crd.spec.rocksdb.replFollowEnabled.getD false))
     metrics.partitionsDesired.set crd.spec.partitions.toFloat
 
@@ -3043,6 +3144,7 @@ def main (args : List String) : IO Unit := do
         IO.eprintln s!"[flare-operator] WARNING: FlareCluster '{otherName}' exists in namespace '{ns}' but this operator only manages '{crName}' (clusterName in the helm values). It will be IGNORED — deploy a second operator release or fix clusterName."
 
   let leaseName := s!"{crName}-operator-lease"
+  historyLeaseRef.set (leaseName, identity)
 
   -- The health server must be up BEFORE the follower loop: a standby
   -- replica (replicaCount > 1) blocks in phase 1 indefinitely, and with no

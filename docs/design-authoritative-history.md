@@ -155,3 +155,64 @@ approval), an intent persisted and the operator restarted before the map commit
 (the intent is proven not committed and dropped), the target's flared killed
 between the commit and the adoption (HELD persisted, nothing promoted or rebuilt
 in that partition), an unwritable record during bulk and during an intent.
+
+## Implementation after the plan review (2026-10-09)
+
+- **Hold beside the record.** `Part.known record hold`: a bulk seen part-way
+  (copy id N+1 without its receipt), a crash between the copy-id bump and the
+  receipt, or an intent whose target changed / is unhealthy / is not master in
+  the committing map sets a HOLD next to the RETAINED record (never Unknown). The
+  gates (promotion, rebuild, new intents) are closed while it stands; the same
+  transition's receipt lifts it (bulk); an intent hold needs an operator
+  (RUNBOOK #history-held).
+- **Bulk receipt.** flared persists, in the DB and only after the new epoch is
+  recorded, `pred succ epoch` per completed truncate / flush_all (the last 8),
+  exported as `rocksdb_bulk_chain`. The operator follows the chain link by link
+  from the recorded copy to the current one (two bulks between observations are
+  followed, never assumed); same pod and boot, reason `bulk`, healthy.
+- **Restart re-bind.** The holder restarted normally (same copy id, same
+  history, healthy; new boot id or pod UID) is re-bound; the rebuild and
+  promotion gates compare the COPY id and the history, not the process. An empty
+  DB has a new copy id: never re-bound, rejoining.
+- **Capability.** From complete replies only: modern / legacy / unreadable per
+  node. Untracked only when every copy was observed and none is modern; an
+  approved untracked partition becomes tracked once every copy is modern; a
+  tracked partition is never downgraded; Unknown holds.
+- **Intent proof.** Each promotion of an existing copy in a tracked partition
+  persists an intent (id, expected map version, fromGen / fromHist, the
+  target's binding read fresh) BEFORE the commit; the committed node map
+  carries the id (`transition=` lines, the last 16). Resolution needs the
+  PERSISTED map to carry the id; the persisted map reaching the expected version
+  without it = that commit never happened (dropped). One pending intent per
+  partition.
+- **Lease.** Every history write re-checks the lease (holder = this pod, not
+  expired); a corrupt / foreign / unreadable record is never written back.
+- **First build vs migration.** The store is created (origin first-build) at
+  the start of the first pass, before any node map is persisted. Afterwards an
+  absent record with a node map needs the FlareCluster annotation
+  `flare.gree.net/history-adoption-approved=<metadata.uid>`.
+
+## Registration timeline (the existing path, verified in the code)
+
+1. A master's process dies and comes back under the same name (a container
+   restart: the pod-local DB is empty; a new copy id and a new epoch).
+2. flared listens early but serves only after `startup_node` (`node add`) gave
+   it the operator's map.
+3. The operator's `NodeAdd` (Reconciler.lean) rejoins a key that already holds a
+   partition slot as **Slave/Prepare** with `lastMasterOf` (it is not kept as
+   master). Other nodes may still route to it as master until the next
+   broadcast; its own map names no master for the partition, so it forwards
+   and fails instead of answering from its empty copy (no write is acknowledged
+   by it; a read is an error or a miss per readUnavailableError — R2).
+4. The partition is masterless: a promotion-risk pass reads every non-master.
+   **Previously** the refill could re-seat the `lastMasterOf` holder by data
+   presence alone. **Now** the classifier (wired `rejoining`) marks a copy of
+   another history than the authoritative record FORBIDDEN, the refill
+   hard-excludes it, and the commit re-reads it fresh and aborts.
+5. The replica of the recorded history (eligible, or lagging as the last
+   resort) is promoted through an intent; the empty ex-master is rebuilt FROM it
+   (the rebuild gate requires the record's holder as the source).
+
+Still not covered (residual): flared itself does not know the authoritative
+history when it picks a reconstruction source or switches copies; the window in
+step 3 relies on the forwarded request failing.

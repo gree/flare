@@ -239,7 +239,17 @@ def classify (reply : Option String) (o : Observed) : Class :=
     else match s.forbiddenMarker o.partitionHasMaster with
     | some why => .forbidden why
     | none =>
-    if s.sourceState == some "needs_rebuild" then needsRebuildClass s o
+    -- REJOINING (docs/design-authoritative-history.md): with an authoritative
+    -- record, a copy that reports ANOTHER history (e.g. the ex-master back
+    -- with an empty DB and a new epoch) is never a master candidate, empty
+    -- or not, eligible to its current source or not. R3 needs_rebuild has its
+    -- own rule (it compares the copy with the record itself).
+    let rejoining := match o.lastMasterHistory, s.masterId, s.copyEpoch with
+      | some (mid, ep), some cm, some ce => cm != mid || ce != ep
+      | _, _, _ => false
+    if rejoining && s.sourceState != some "needs_rebuild" then
+      .forbidden s!"rejoining: the copy holds {s.masterId}/{s.copyEpoch}, not the authoritative history"
+    else if s.sourceState == some "needs_rebuild" then needsRebuildClass s o
     else if s.isLegacy then
       -- no markers to trust: only the map, the pod and the reconstruction say
       if s.items == some 0 then .empty

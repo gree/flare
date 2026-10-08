@@ -41,7 +41,7 @@
 | R5 | 候補 SHA での全体 Linux CI | C | 未達（候補が未確定） | — |
 | R6 | 遅延の本番要件 | U 要件 / C 測定 | **数値基準は未決**。以前の「100µs くらい」を承認済み SLO として扱わない。§13 の許容値は撤回済み | visbench 37386599657、37392841830（相対値のみ） |
 | R7 | 容量・復旧評価（tmpfs）＋**同時再構築**（本番前の対応対象） | U 方針 / C 測定・実装 | 未着手。pf-dev nodes-0 7.33GB/8GB（blob 2.69GB、GC 無効）。**snapshot の固定パス共有（2026-10-07 追記）**：master の snapshot serve は固定パス `snapshot.serve.tmp` を作り直すだけで直列化していない。同時に複数の再構築が来ると、互いの転送を壊し得る。容量だけでなく再構築の正しさに関わる。直列化か要求ごとの分離、安全な後始末を実装し、同時要求を試験する（test 9 の修正とは別に扱う）。operator には同時再構築の上限がない | — |
-| R8 | リリース運用（upgrade／rollback／backup restore／アラート／カナリア、pf-dev リハーサル） | U（C 補助） | 未着手。pf-dev の master 更新は保留 | — |
+| R8 | リリース運用（upgrade／rollback／backup restore／アラート／カナリア、pf-dev リハーサル） | U（C 補助） | 未着手。pf-dev の master 更新は保留。**復元ブロッカー（2026-10-08）**：理由別昇格の導入後、backup-restore 24 が復元後に master を選べない（復元した copy の履歴 epoch 2 ≠ operator が記録した last master の履歴 epoch 3＝flush_all 後）。手順（BACKUP_RESTORE Case A）に「復元した履歴を明示的に採用する」点がない。設計（復元の明示承認）を決めるまで未解決。通常 failover の一致規則は緩めない | 失敗：eb7bc43 (37770467697、failover-data job 113288583371) |
 | R9 | 承認 | U | R1〜R8・R10 の判定を候補 SHA に対してレビューする。PR #144 のマージと本番変更は別に指示する | — |
 | R10 | flared boot id の一意性（旧 D1） | C | **修正の検証は完了**（ユーザー判断 2026-10-07）。同秒・同 pid・同 random 状態の単体試験が Linux CI で名前つきで合格（旧コードでは macOS で FAIL）。E2E でも 2 pod 間と同名置換の前後で異なる値を直接観測した。**独立レビューは未実施（レビュー済みとは記録しない）** | 38e0954（修正）／ b9e0742：nix-linux 37472032909（名前つき合格）、cluster-init 37472027476（直接観測） |
 

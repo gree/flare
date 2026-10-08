@@ -1238,6 +1238,15 @@ private def checkActivationOrder (ctx : Ctx) : IO Unit := do
   let act := fun (i : Nat) => s!"[NTC] node activated (attempt 1) on the copy from {n i} (map version now 9)"
   let stop := s!"[WRN] activation STOPPED before attempt 1: the partition's master is now {n 1}, not the source {n 2}"
   let old := "empty-source-nodes-2"
+  -- R4 receiver filter (review): flared's real versioned line (cluster.cc
+  -- log_notice format) and the older lines are kept; unrelated lines are not
+  let realAccept := "2026-10-06T10:11:12.123456789Z [140239964415680][NTC][cluster.cc:1289-_reconstruct_node_partition_map] node map accepted (version 4294967390, 3 entries); own role=slave state=active balance=50 partition=0; masters: 0=continuous-replication-nodes-0.continuous-replication-nodes.flare-continuous-replication.svc.cluster.local:12121/active"
+  check ctx "R4 receiver filter: the versioned 'node map accepted' line is kept (it was dropped before), with node_balance / node sync / role shift lines; an unrelated line is not"
+    (receiverMapLine realAccept
+      && receiverMapLine "[NTC] shifting node_role (node_key=x, old_role=slave, old_partition=0, new_role=master, new_partition=0)"
+      && receiverMapLine "[NTC] node_balance changed 50 -> 0"
+      && receiverMapLine "[NTC] read source BOUND to m (epoch e)"
+      && !receiverMapLine "[NTC] storage open")
   let hold := "[NTC] activation attempt 1 held by FLARE_TEST_ACTIVATION_HOLD_FILE"
   let newPodName := "empty-source-nodes-1"
   check ctx "activation precondition (review round 3): held, then the new map accepted, then STOPPED (no held line after the acceptance is needed) — holds"

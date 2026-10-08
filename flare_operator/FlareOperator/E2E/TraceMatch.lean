@@ -233,4 +233,13 @@ def heldAcrossNewMap (lines : List String) (newPod : String) : Option String := 
   | some (l, i) => return some s!"an activation (line {i}) precedes the acceptance of the map naming {newPod}: {l}"
   | none => return none
 
+/-- R4 (continuous-replication 9) receiver-side evidence: the replica's
+    own lines about the maps it applied and its role / balance / read source.
+    Includes flared's versioned `node map accepted (version …); own …;
+    masters: …` line (cluster.cc), which an earlier filter dropped. -/
+def receiverMapLine (l : String) : Bool :=
+  contains l "node map accepted (version" || contains l "node_balance" || contains l "reconstructing node map"
+    || contains l "node map version" || contains l "topology" || contains l "node sync"
+    || contains l "shifting node_role" || contains l "shifting node_state" || contains l "read source"
+
 end FlareOperator.E2E.TraceMatch

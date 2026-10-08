@@ -29,6 +29,7 @@
 import FlareOperator.E2E.Framework
 import FlareOperator.E2E.Helpers
 import FlareOperator.E2E.Setup
+import FlareOperator.E2E.TraceMatch
 
 namespace FlareOperator.E2E.Tests.ContinuousReplication
 
@@ -36,6 +37,10 @@ open FlareOperator.E2E
 open FlareOperator.E2E.Helpers
 open FlareOperator.E2E.Setup
 open FlareOperator.Kubectl
+
+private def utcNow : IO String := do
+  let out ← IO.Process.output { cmd := "date", args := #["-u", "+%Y-%m-%dT%H:%M:%SZ"] }
+  return out.stdout.trim
 
 private def cfg : ClusterConfig := {
   name := "cont-repl"
@@ -603,6 +608,8 @@ def suite : TestSuite := {
 
     { name := "local read guard: stale positive balance proxies a missing value to the master while WAL remains blocked"
       run := do
+        -- R4: the fixed start of this test's observation window
+        let testStart ← utcNow
         match ← pair with
         | .error e => return .fail e
         | .ok (_, mIp, sPod, sIp) =>
@@ -629,10 +636,15 @@ def suite : TestSuite := {
                 (← statStr sIp "repl_follow_state") == some "following" &&
                 (← statNat sIp "repl_applied_lsn") == (← statNat mIp "rocksdb_latest_sequence_number")
             if !ready then return .fail "positive local balance / caught-up precondition not reached"
+            -- R4: the replica's map version when the precondition held, and
+            -- when the rules took effect (to order any later map change)
+            let verAtReady ← statNat sIp "node_map_version"
+            let readyAt ← utcNow
             for spec in topologyRules ++ readGuardRules mIp sIp do
               match ← hostCmd "docker" (["exec", kindNode, "iptables", "-I", "FORWARD", "1"] ++ spec.drop 1) with
               | .error e => return .fail e
               | .ok _ => pure ()
+            let rulesAt ← utcNow
             let disconnected ← waitForCondition "WAL requests actually rejected" 90 do
               return (← statStr sIp "repl_follow_state") == some "disconnected"
             if !disconnected then return .fail "selective WAL fault did not reach disconnected state"
@@ -655,18 +667,24 @@ def suite : TestSuite := {
               let nodesOut := match ← execInDebugPod cfg.debugPod cfg.«namespace» s!"printf 'stats nodes\\r\\n' | nc -w 3 {sIp} {cfg.flarePort}" with
                 | .ok o => o
                 | .error e => s!"(unreadable: {e})"
-              let opTail := ((← opLog 400).splitOn "\n").filter (fun l => containsSubstr l "broadcast" || containsSubstr l "topology" || containsSubstr l "withh" || containsSubstr l "eligib" || containsSubstr l "balance")
-              IO.eprintln s!"# replica local balance now {balNow}; its stats nodes:\n{nodesOut}\n# operator topology/eligibility lines:\n{String.intercalate "\n" (opTail.reverse.take 20).reverse}"
+              -- R4: every relevant line since the test started (no tail cut)
+              let opSince := match ← kubectl ["logs", "-n", cfg.«namespace», "-l", s!"app={cfg.operatorName}", s!"--since-time={testStart}", "--timestamps", "--tail=-1"] with
+                | .ok o => o
+                | .error e => s!"(operator log unreadable: {e})"
+              let opTail := (opSince.splitOn "\n").filter (fun l => containsSubstr l "broadcast" || containsSubstr l "topology" || containsSubstr l "withh" || containsSubstr l "eligib" || containsSubstr l "balance" || containsSubstr l "node map" || containsSubstr l "unconfirmed")
+              IO.eprintln s!"# replica local balance now {balNow}; its stats nodes:\n{nodesOut}\n# operator topology/eligibility lines since {testStart} ({opTail.length}):\n{String.intercalate "\n" opTail}"
               -- RECEIVER side: an 'unconfirmed' send may have been APPLIED with
               -- only the reply lost. The replica's own log shows every map it
               -- applied (and any balance change), with times.
               let sPodName := (slave.fqdn.splitOn ".").headD ""
-              let recv := match ← kubectl ["logs", "-n", cfg.«namespace», sPodName, "-c", "flared", "--since=10m", "--timestamps"] with
-                | .ok o => (o.splitOn "\n").filter fun l =>
-                    containsSubstr l "node_balance" || containsSubstr l "reconstructing node map" || containsSubstr l "node map version"
-                      || containsSubstr l "topology" || containsSubstr l "node sync"
+              let recv := match ← kubectl ["logs", "-n", cfg.«namespace», sPodName, "-c", "flared", s!"--since-time={testStart}", "--timestamps", "--tail=-1"] with
+                | .ok o => (o.splitOn "\n").filter FlareOperator.E2E.TraceMatch.receiverMapLine
                 | .error e => [s!"(replica log unreadable: {e})"]
-              IO.eprintln s!"# replica {sPodName}: maps applied / balance changes in the last 10 min (receiver side):\n{String.intercalate "\n" (recv.reverse.take 30).reverse}"
+              IO.eprintln s!"# replica {sPodName}: maps applied / role, balance, read-source changes since {testStart} (receiver side, {recv.length} line(s), all):\n{String.intercalate "\n" recv}"
+              let counters := match ← hostCmd "docker" ["exec", kindNode, "iptables", "-L", "FORWARD", "-v", "-n", "-x"] with
+                | .ok o => ((o.splitOn "\n").filter fun l => operatorIps.any (containsSubstr l ·)) |> String.intercalate "\n"
+                | .error e => s!"(unreadable: {e})"
+              IO.eprintln s!"# R4 timeline: precondition held at {readyAt} with replica map version {verAtReady}; operator<->replica rules in force from {rulesAt}; replica map version now {← statNat sIp "node_map_version"}\n# operator<->replica REJECT rule counters (packets bytes):\n{counters}"
               return .fail s!"map changed ({balNow}) although topology delivery to the replica was blocked: this would only test operator withholding"
             let value ← memcachedGet cfg.debugPod cfg.«namespace» sIp cfg.flarePort key
             let after ← statNat sIp "repl_applied_lsn"

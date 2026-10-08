@@ -99,6 +99,12 @@ def Stats.copyEpoch (s : Stats) : Option String :=
 def Stats.isLegacy (s : Stats) : Bool :=
   s.eligible.isNone && s.sourceState.isNone && s.identityConsistent.isNone && s.copyId.isNone
 
+/-- A backend without copy evidence (not RocksDB: no copy identity, no
+    master id, no source epoch). R3 may be reported, but none of the
+    copy-level reasons can be read; the same narrow rule as legacy applies. -/
+def Stats.noCopyEvidence (s : Stats) : Bool :=
+  s.copyId.isNone && s.identityConsistent.isNone && s.masterId.isNone && s.sourceEpoch.isNone
+
 /-- What the operator knows besides the stats. -/
 structure Observed where
   mapPrepare : Bool          -- the map has it in Prepare
@@ -123,6 +129,12 @@ def classify (reply : Option String) (o : Observed) : Class :=
       if s.items == some 0 && s.reconstruction != some "running" then .empty
       else if o.mapActive && !o.mapPrepare && o.podReady && s.reconstruction != some "running" then .legacy
       else .unknown "a pre-R3 flared that is not Active, Ready and idle"
+    else if s.noCopyEvidence then
+      if s.sourceState == some "needs_rebuild" then .forbidden "R3: confirmed different history"
+      else if s.eligible == some 1 && o.mapActive && !o.mapPrepare then .eligible
+      else if s.items == some 0 && s.reconstruction != some "running" then .empty
+      else if o.mapActive && !o.mapPrepare && o.podReady && s.reconstruction != some "running" then .legacy
+      else .unknown "a backend without copy evidence that is not Active, Ready and idle"
     else if s.identityConsistent == some 0 then .forbidden "copy identity records disagree"
     else if s.quarantined == some 1 then .forbidden "the empty copy left by a quarantine"
     else if s.copyPartial == some 1 then .forbidden "a merging dump left the copy part-way"

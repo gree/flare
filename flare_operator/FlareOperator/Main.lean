@@ -289,6 +289,10 @@ initialize r3WithheldRef : IO.Ref (List String) ← IO.mkRef []
 /-- Decision 2026-10-08: this pass's promotion evidence per candidate — its
     class (by reason) and what it was read from (pod UID, boot id, copy id). -/
 initialize promotionEvidenceRef : IO.Ref (List (String × PromotionEvidence.Class × PromotionEvidence.Binding)) ← IO.mkRef []
+/-- Whether this pass read and classified the candidates (a promotion-risk pass). -/
+initialize promotionRiskPassRef : IO.Ref Bool ← IO.mkRef false
+/-- Last time the masters' history was read (monotonic ms). -/
+initialize masterHistoryReadAtRef : IO.Ref Nat ← IO.mkRef 0
 /-- What the operator observed of each candidate on that pass (to classify it again at commit). -/
 initialize promotionObservedRef : IO.Ref (List (String × PromotionEvidence.Observed)) ← IO.mkRef []
 /-- partition → (master_id, source epoch) of its master, recorded while the
@@ -570,6 +574,10 @@ private def refreshParkedRebuilds (stateRef : IO.Ref FlareClusterState) (ns : St
     source epoch) while the master is readable — the reference for "the same
     history" when it is gone. Unreadable: the record is kept as it was. -/
 private def refreshMasterHistory (stateRef : IO.Ref FlareClusterState) (ns : String) : IO Unit := do
+  -- every 15 s, not every pass: each read is an exec per master
+  let now ← IO.monoMsNow
+  if now - (← masterHistoryReadAtRef.get) < 15000 && (← masterHistoryReadAtRef.get) != 0 then return
+  masterHistoryReadAtRef.set now
   let st ← stateRef.get
   for (key, n) in st.nodeMap do
     if n.role == FlareRole.Master && n.state == FlareState.Active && n.partition ≥ 0 then
@@ -1160,6 +1168,7 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
       r3WithheldRef.set []
       promotionEvidenceRef.set []
       promotionObservedRef.set []
+      promotionRiskPassRef.set false
       if SourceEligibility.promotionRisk masterless deadCandidate unhealthyKeys termKeys masterKeysNow then
         let mut readings : List (String × SourceEligibility.Reading) := []
         let mut evidence : List (String × PromotionEvidence.Class × PromotionEvidence.Binding) := []
@@ -1192,6 +1201,7 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
             | none => pure ()
         promotionEvidenceRef.set evidence
         promotionObservedRef.set observedFor
+        promotionRiskPassRef.set true
         if !evidence.isEmpty then
           IO.eprintln s!"[flare-operator] PROMOTION EVIDENCE (by reason, this pass): {evidence.map fun (k, c, _) => s!"{k}={c.label}"}"
         sourceIneligible := SourceEligibility.withheld readings
@@ -1457,7 +1467,11 @@ private def commitChecked (stateRef : IO.Ref FlareClusterState) (ver : Nat) (ucs
     -- THIS pass, whose pod, flared process and copy are still the ones read
     preCommitBarrier promoted
     let ev ← promotionEvidenceRef.get
-    for k in promoted do
+    -- the reason check applies on the passes that read the candidates (a
+    -- promotion-risk pass). Other passes (a first build, a new partition's
+    -- first master) promote no copy that held a partition's data.
+    let riskPass ← promotionRiskPassRef.get
+    for k in promoted.filter (fun _ => riskPass) do
       let entry := ev.find? (·.1 == k)
       let podNow ← podIdentityNow (extractPodName k) ns
       let replyNow ← match ← Bridge.queryPodStats (extractPodName k) ns "stats" with

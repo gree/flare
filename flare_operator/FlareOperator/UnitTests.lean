@@ -1394,6 +1394,11 @@ private def checkPromotionEvidence (ctx : Ctx) : IO Unit := do
       && (match cls (some "STAT curr_items 60\r\nEND\r\n") { obs with mapPrepare := true, mapActive := false } with | .unknown _ => true | _ => false)
       && (match cls (some "STAT curr_items 60\r\nEND\r\n") { obs with podReady := false } with | .unknown _ => true | _ => false)
       && (match cls (some "STAT curr_items 60\r\nSTAT reconstruction_current_state running\r\nEND\r\n") obs with | .unknown _ => true | _ => false))
+  check ctx "promotion by reason: a backend without copy evidence (tch) is decided by the narrow legacy rule, not held as unknown"
+    (cls (some "STAT repl_read_source_eligible 0\r\nSTAT repl_read_source_state none\r\nSTAT curr_items 60\r\nEND\r\n") { obs with lastMasterHistory := none } == .legacy
+      && cls (some "STAT repl_read_source_eligible 1\r\nSTAT repl_read_source_state eligible\r\nSTAT curr_items 60\r\nEND\r\n") obs == .eligible
+      && (match cls (some "STAT repl_read_source_eligible 0\r\nSTAT repl_read_source_state none\r\nSTAT curr_items 60\r\nEND\r\n") { obs with mapPrepare := true, mapActive := false } with | .unknown _ => true | _ => false)
+      && (match cls (some "STAT repl_read_source_eligible 0\r\nSTAT repl_read_source_state needs_rebuild\r\nSTAT curr_items 60\r\nEND\r\n") obs with | .forbidden _ => true | _ => false))
   let b := PromotionEvidence.bindingOf (some "uid-1") (reply "")
   check ctx "promotion by reason: the commit refuses when the pod, the flared process or the copy changed since the reading, or it was not read"
     ((PromotionEvidence.commitAllows (some .eligible) b b).1

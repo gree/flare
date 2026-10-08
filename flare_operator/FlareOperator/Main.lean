@@ -532,34 +532,39 @@ private def processCopyDiscardApprovals (crName ns : String) : IO Unit := do
           IO.eprintln s!"[flare-operator] COPY DISCARD APPROVAL {a.name} ({a.operation} of copy {a.copyId} on {pod}, request {a.requestId}): {phase} — {reason}"
           record phase reason (a.attempt + 1)
 
-/-- R7 (review 2026-10-08): the nodes rebuilding NOW by their own stats,
+/-- R7 (review 2026-10-08; round 2): each mapped node's FRESH observation
+    from one stats read, the nodes rebuilding NOW by their own stats,
     whatever the map says (an Active member catching up at boot, a master
     reconstruction): `reconstruction_current_state=running` or a copy in
     flight. Every mapped node whose pod exists is read; a pod that exists but
     cannot be read completely is counted (fail closed: a rebuild that cannot
     be ruled out). Read only when a decision needs it (a new assignment, a
     resume). -/
-private def runningRebuildKeys (st : FlareClusterState) (ns : String) : IO (List String) := do
-  let mut running : List String := []
-  let mut unreadable : List String := []
+private def rebuildObservations (st : FlareClusterState) (ns : String) : IO (List (String × RebuildConcurrency.Obs)) := do
+  let mut obs : List (String × RebuildConcurrency.Obs) := []
   for (key, _) in st.nodeMap do
     let pod := extractPodName key
-    match ← kubectl ["get", "pod", pod, "-n", ns, "-o", "jsonpath={.metadata.uid}"] with
-    | .ok uid =>
-      if uid.trim.isEmpty then continue
-      match ← Bridge.queryPodStats pod ns "stats" with
-      | .ok out =>
-        let complete := (out.splitOn "\n").any fun l => l.trim == "END"
-        let rs := (out.splitOn "\n").findSome? fun l =>
-          let t := (l.replace "\r" "").trim
-          if t.startsWith "STAT reconstruction_current_state " then some (t.drop "STAT reconstruction_current_state ".length) else none
-        if !complete then unreadable := unreadable ++ [key]
-        else if rs == some "running" || statNat out "rebuild_in_flight" == some 1 then running := running ++ [key]
-      | .error _ => unreadable := unreadable ++ [key]
-    | .error _ => pure ()
-  if !unreadable.isEmpty then
-    IO.eprintln s!"[flare-operator] rebuild concurrency: stats unreadable for {unreadable} — counted as running (a rebuild there cannot be ruled out)"
-  return running ++ unreadable
+    -- NotFound is absence; any other failure (forbidden, timeout) is unknown
+    let found : Option Bool ← match ← kubectl ["get", "pod", pod, "-n", ns, "-o", "jsonpath={.metadata.uid}"] with
+      | .ok uid => pure (if uid.trim.isEmpty then none else some true)
+      | .error e => pure (if containsSubstr e "NotFound" || containsSubstr e "not found" then some false else none)
+    let o ← match found with
+      | some true =>
+        match ← Bridge.queryPodStats pod ns "stats" with
+        | .ok out =>
+          let complete := (out.splitOn "\n").any fun l => l.trim == "END"
+          let rs := (out.splitOn "\n").findSome? fun l =>
+            let t := (l.replace "\r" "").trim
+            if t.startsWith "STAT reconstruction_current_state " then some (t.drop "STAT reconstruction_current_state ".length) else none
+          pure (RebuildConcurrency.obsOf found complete (statNat out "rebuild_parked" == some 1)
+            (statNat out "rebuild_in_flight" == some 1) (statNat out "rocksdb_snapshot_serving" == some 1) (rs == some "running"))
+        | .error _ => pure RebuildConcurrency.Obs.unknown
+      | _ => pure (RebuildConcurrency.obsOf found false false false false false)
+    obs := obs ++ [(key, o)]
+  let unk := obs.filterMap fun (k, o) => if o == .unknown then some k else none
+  if !unk.isEmpty then
+    IO.eprintln s!"[flare-operator] rebuild concurrency: {unk} could not be read — counted as running (a rebuild there cannot be ruled out)"
+  return obs
 
 /-- Copy retention §10: read the rebuilding nodes' park state, and resume
     ONE parked rebuild when its slots are free. A node counts as parked-idle
@@ -588,8 +593,9 @@ private def refreshParkedRebuilds (stateRef : IO.Ref FlareClusterState) (ns : St
   let eligibleToResume := parked.filter fun k => !(recent.any (·.1 == k))
   -- nodes in their backoff stay parked (not counted) but are not resumed now
   let ordered := eligibleToResume ++ parked.filter (!eligibleToResume.contains ·)
-  let running ← if eligibleToResume.isEmpty then pure [] else runningRebuildKeys st ns
-  match (RebuildConcurrency.resumeCandidate st 1 1 ordered running).filter (eligibleToResume.contains ·) with
+  let (running, parkedNow) ← if eligibleToResume.isEmpty then pure ([], parked)
+    else pure (RebuildConcurrency.reconcile parked (← rebuildObservations st ns))
+  match (RebuildConcurrency.resumeCandidate st 1 1 (ordered.filter parkedNow.contains) running).filter (eligibleToResume.contains ·) with
   | none => pure ()
   | some k =>
     resumedAtRef.modify (· ++ [(k, nowMs)])
@@ -1233,7 +1239,7 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
         promotionObservedRef.set observedFor
         promotionRiskPassRef.set true
         if !evidence.isEmpty then
-          IO.eprintln s!"[flare-operator] PROMOTION EVIDENCE (by reason, this pass): {evidence.map fun (k, c, _) => s!"{k}={c.label}"}"
+          IO.eprintln s!"[flare-operator] PROMOTION EVIDENCE (by reason, this pass): {evidence.map fun (k, c, b) => s!"{k}={c.label} [boot {b.bootId.getD "?"}]"}"
         sourceIneligible := SourceEligibility.withheld readings
         -- decision 2026-10-07 (1): the commit refuses to promote a candidate
         -- whose reading was UNKNOWN (failed / incomplete) on this pass,
@@ -1533,7 +1539,7 @@ private def commitChecked (stateRef : IO.Ref FlareClusterState) (ver : Nat) (ucs
           lastMasterHistory := hist
           isLastMasterHolder := (n?.map (·.lastMasterOf)) == some part }
         let cls := PromotionEvidence.classify replyNow obs
-        IO.eprintln s!"[flare-operator] PROMOTION EVIDENCE (read at commit, a pass that did not read the candidates): {k}={cls.label}"
+        IO.eprintln s!"[flare-operator] PROMOTION EVIDENCE (read at commit, a pass that did not read the candidates): {k}={cls.label} [boot {(PromotionEvidence.bindingOf none replyNow).bootId.getD "?"}]"
         if podNow.isNone || !PromotionEvidence.commitTimeAllows cls then
           IO.eprintln s!"[flare-operator] CRITICAL: PROMOTION ABORTED for {k}: an existing copy promoted on a pass that did not read it, read at commit as {cls.label}{if podNow.isNone then " (pod unreadable)" else ""} — nothing from this pass is committed, the next pass reads again"
           promotionAbortedRef.set true
@@ -1590,10 +1596,11 @@ private def commitChecked (stateRef : IO.Ref FlareClusterState) (ver : Nat) (ucs
   -- members catching up, reconstructions the map does not show) — read only
   -- when this pass makes a new assignment
   let needsGate := ucs.nodeMap.any fun (k, a) => RebuildConcurrency.newAssignment (cur.lookupNode k) a
-  let running ← if needsGate then runningRebuildKeys cur ns else pure []
+  let (running, parkedNow) ← if needsGate then pure (RebuildConcurrency.reconcile (← parkedIdleRef.get) (← rebuildObservations cur ns))
+    else pure ([], ← parkedIdleRef.get)
   if needsGate && !running.isEmpty then
-    IO.eprintln s!"[flare-operator] rebuild concurrency: running by their own stats: {running}"
-  let gated := RebuildConcurrency.gate cur ucs 1 1 running (← parkedIdleRef.get)
+    IO.eprintln s!"[flare-operator] rebuild concurrency: running (or unreadable) by a fresh read: {running}; parked: {parkedNow}"
+  let gated := RebuildConcurrency.gate cur ucs 1 1 running parkedNow
   let heldKeys := gated.held.map Prod.fst
   if heldKeys != (← rebuildHeldRef.get) then
     rebuildHeldRef.set heldKeys

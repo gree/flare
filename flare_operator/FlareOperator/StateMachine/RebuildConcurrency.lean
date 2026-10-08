@@ -41,6 +41,37 @@ def newAssignment (before? : Option FlareNode) (after : FlareNode) : Bool :=
     | none => false          -- registered in this very pass (TCP): not the reconcile's assignment
     | some b => b.role == FlareRole.Proxy
 
+/-- One FRESH observation of a node, from a single stats read (review round
+    2): a parked rebuild still reports its reconstruction as running (its
+    thread waits inside it), so "running" and "parked" are decided together. -/
+inductive Obs where
+  | absent          -- the pod is confirmed NotFound
+  | idle
+  | running         -- a reconstruction running or a copy in flight, not parked-idle
+  | parkedIdle      -- parked, nothing in flight, not serving
+  | unknown         -- the pod or its stats could not be read: a rebuild is not ruled out
+  deriving Repr, BEq
+
+def obsOf (podFound : Option Bool) (complete parked inFlight serving running : Bool) : Obs :=
+  match podFound with
+  | some false => .absent
+  | none => .unknown
+  | some true =>
+    if !complete then .unknown
+    else if parked && !inFlight && !serving then .parkedIdle
+    else if running || inFlight then .running
+    else .idle
+
+/-- Combine an OLDER parked list with FRESH observations. A fresh running or
+    unknown reading wins over an older "parked" (the slot is not given back
+    on a stale reading); a fresh parked-idle reading counts as parked; a key
+    not read now keeps its older standing. -/
+def reconcile (oldParked : List String) (fresh : List (String × Obs)) : List String × List String :=
+  let running := fresh.filterMap fun (k, o) => if o == .running || o == .unknown then some k else none
+  let freshParked := fresh.filterMap fun (k, o) => if o == .parkedIdle then some k else none
+  let keptOld := oldParked.filter fun k => !(fresh.any (·.1 == k))
+  (running, (keptOld ++ freshParked).eraseDups)
+
 structure Decision where
   state : FlareClusterState
   /-- (node key, why it was held) -/
@@ -51,7 +82,9 @@ structure Decision where
     report a running reconstruction). Deterministic (map order). A held node
     keeps its `before` entry. -/
 def gate (before after : FlareClusterState) (perPartition clusterWide : Nat)
-    (running : List String := []) (parkedIdle : List String := []) : Decision := Id.run do
+    (running : List String := []) (parkedIdle' : List String := []) : Decision := Id.run do
+  -- a key observed running (or unknown) is never subtracted as parked
+  let parkedIdle := parkedIdle'.filter (!running.contains ·)
   let existing := (before.nodeMap.filter fun kv => rebuilding kv.2).map Prod.fst
   let counted := existing ++ (running.filter fun k => !existing.contains k)
   let partOf := fun (k : String) => ((before.lookupNode k).map (·.partition)).getD (-1)
@@ -83,7 +116,8 @@ def gate (before after : FlareClusterState) (perPartition clusterWide : Nat)
     first parked-idle rebuilding node (map order) when no other rebuild runs
     in the cluster beyond the limit and none other in its partition. -/
 def resumeCandidate (state : FlareClusterState) (perPartition clusterWide : Nat)
-    (parkedIdle : List String) (running : List String := []) : Option String :=
+    (parkedIdle' : List String) (running : List String := []) : Option String :=
+  let parkedIdle := parkedIdle'.filter (!running.contains ·)
   let rebuildingKeys := (state.nodeMap.filter fun kv => rebuilding kv.2).map Prod.fst
   let counted := rebuildingKeys ++ (running.filter fun k => !rebuildingKeys.contains k)
   let active := counted.filter fun k => !parkedIdle.contains k

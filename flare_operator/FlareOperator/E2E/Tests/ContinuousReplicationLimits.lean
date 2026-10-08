@@ -24,6 +24,7 @@
 -/
 import FlareOperator.E2E.Framework
 import FlareOperator.E2E.Helpers
+import FlareOperator.E2E.PromotionTimeline
 import FlareOperator.E2E.Setup
 import FlareOperator.E2E.TraceMatch
 
@@ -104,6 +105,22 @@ private def Ctx.opLogSince (c : Ctx) (since : String) : IO String := do
     | .ok o => acc := acc ++ o
     | .error _ => pure ()
   return acc
+
+/-- The operator's log since `since` WITH real timestamps (one per line). -/
+private def Ctx.opLogTsSince (c : Ctx) (since : String) : IO String := do
+  let mut acc := ""
+  for op in ← getPodNames s!"app={c.cfg.operatorName}" c.cfg.«namespace» do
+    match ← kubectl ["logs", "-n", c.cfg.«namespace», op, s!"--since-time={since}", "--timestamps"] with
+    | .ok o => acc := acc ++ o
+    | .error _ => pure ()
+  return acc
+
+/-- The CURRENT flared container's log only, with timestamps (no
+    `--previous`: an earlier process's lines are not evidence about this one). -/
+private def Ctx.flaredLogCurrent (c : Ctx) (pod : String) : IO String := do
+  match ← kubectl ["logs", "-n", c.cfg.«namespace», pod, "-c", "flared", "--timestamps"] with
+  | .ok o => return o
+  | .error _ => return ""
 
 private def Ctx.podUid (c : Ctx) (pod : String) : IO (Option String) := do
   match ← kubectlGetJsonpath "pod" pod c.cfg.«namespace» "{.metadata.uid}" with
@@ -1590,7 +1607,7 @@ def identitySuite : TestSuite := {
           return .pass
         | roles => return .fail s!"precondition: expected one master and two Active slaves, got {roles.1}/{roles.2}" },
 
-    { name := "SAF-08 process restart: a slave whose flared is killed (same pod, new process) right before the master is drained is promoted only on its NEW process's own fresh evidence (eligible, read after it activated and bound, not rebuilding, re-checked at commit) and then serves every key and value; otherwise the other slave takes over"
+    { name := "SAF-08 process restart: a slave whose flared is killed (same pod, new process) right before the master is drained is promoted only on its NEW process's own fresh evidence (eligible, read from its boot id after it activated and bound, at or before the commit, by timestamped logs) and then holds the item count and the 10 marker values; otherwise the other slave takes over (item count and marker values)"
       run := do
         -- the previous test's pods must be back as Active slaves first
         discard <| c.threeInSync
@@ -1616,6 +1633,7 @@ def identitySuite : TestSuite := {
           -- a choice by map order alone would pick it
           let victim := a
           let other := b
+          let rc0 ← c.restartCount victim
           IO.sleep 1100
           let sinceKill ← utcNow
           match ← c.killFlaredIn victim with
@@ -1642,31 +1660,21 @@ def identitySuite : TestSuite := {
               if got != some v then bad := bad ++ [s!"{k}={got}"]
             pure bad
           if seen.contains victim then
-            let fl := (← c.flaredLogAllSince victim sinceKill).splitOn "\n"
-            let firstAt := fun (needle : String) => (fl.find? (containsSubstr · needle)).map (·.take 30)
-            let activatedAt := firstAt "node activated"
-            let boundAt := firstAt "read source BOUND"
-            let ts := fun (l : String) => (l.splitOn " ").head?.getD ""
-            let opLines := (← c.opLogSince sinceKill).splitOn "\n"
-            let vKey := s!"{victim}.{c.cfg.name}-nodes.{ns}.svc.cluster.local:{c.cfg.flarePort}"
-            let committedAt := (opLines.find? fun l => containsSubstr l "PROMOTION committed" && containsSubstr l vKey).map ts
-            -- the reading that stood: the last PROMOTION EVIDENCE for it before the commit
-            let readings := opLines.filter fun l => containsSubstr l "PROMOTION EVIDENCE" && containsSubstr l vKey
-              && (committedAt.map fun x => decide (ts l ≤ x)).getD false
-            let lastReading := readings.getLast?
-            let readEligible := (lastReading.map fun l => containsSubstr l s!"{vKey}=eligible").getD false
-            let readAt := lastReading.map ts
-            let fresh := match readAt, activatedAt, boundAt with
-              | some r, some a, some b => decide (a.trim ≤ r) && decide (b.trim ≤ r)
-              | _, _, _ => false
-            let abortedAfter := opLines.any fun l => containsSubstr l "PROMOTION ABORTED" && containsSubstr l vKey
-              && (committedAt.map fun x => decide (ts l > x)).getD false
-            let vItems ← c.currItems ((← getPodIp victim ns).getD "")
-            IO.eprintln s!"# {victim} (restarted) promoted: new process activated {activatedAt}, bound {boundAt}; reading before the commit at {readAt}: eligible={readEligible}, fresh (after activation and binding)={fresh}; committed at {committedAt}; items {vItems}/{items}; marker values wrong {valuesOk}"
-            if !readEligible then return .fail s!"{victim} was promoted without an ELIGIBLE reading of its new process before the commit"
-            if !fresh then return .fail s!"{victim}'s reading predates its new process's activation or binding (activated {activatedAt}, bound {boundAt}, read {readAt})"
-            if abortedAfter then return .fail "an abort was logged for it after the commit"
-            if vItems != items || !valuesOk.isEmpty then return .fail s!"the promoted {victim} holds {vItems}/{items} keys; wrong values {valuesOk}"
+            -- the promoted process must be the one restarted by the kill
+            -- (exactly one restart since) and still running: its CURRENT
+            -- container log and its boot id are that process's
+            let rcNow ← c.restartCount victim
+            let vIp := (← getPodIp victim ns).getD ""
+            let bootNow := (← c.statStr vIp "reconstruction_boot_id").getD ""
+            let verdict := FlareOperator.E2E.PromotionTimeline.judge (← c.opLogTsSince sinceKill) (← c.flaredLogCurrent victim)
+              s!"{victim}.{c.cfg.name}-nodes.{ns}.svc.cluster.local:{c.cfg.flarePort}" bootNow
+            let vItems ← c.currItems vIp
+            IO.eprintln s!"# {victim} (restarted) promoted: restarts {rc0} -> {rcNow}; boot now {bootNow}; evidence {match verdict with | .ok m => m | .error e => s!"REJECTED: {e}"}; items {vItems}/{items}; marker values wrong {valuesOk}"
+            if rcNow != rc0 + 1 then return .fail s!"precondition: {victim} restarted {rcNow - rc0} time(s) since the kill (expected exactly 1): its current process may not be the promoted one"
+            if bootNow.isEmpty then return .fail s!"could not read {victim}'s boot id"
+            if let .error e := verdict then return .fail s!"{victim} was promoted without fresh eligible evidence of its new process: {e}"
+            -- what is checked is the item count and the 10 marker values (not every value)
+            if vItems != items || !valuesOk.isEmpty then return .fail s!"the promoted {victim} holds {vItems}/{items} keys; wrong marker values {valuesOk}"
             return .pass
           if seen.getLast? != some other then return .fail s!"expected {other} to take over, masters seen {seen}"
           if otherItems != items then return .fail s!"the new master {other} holds {otherItems} of {items} keys"

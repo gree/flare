@@ -26,6 +26,7 @@ import FlareOperator.StateMachine.K8sReconciler
 import FlareOperator.StateMachine.NodeMapRecovery
 import FlareOperator.K8s.Bridge
 import FlareOperator.E2E.TraceMatch
+import FlareOperator.E2E.PromotionTimeline
 import FlareOperator.StateMachine.SourceEligibility
 import FlareOperator.StateMachine.RebuildConcurrency
 import FlareOperator.StateMachine.CopyDiscardApproval
@@ -1302,6 +1303,24 @@ private def checkRebuildConcurrency (ctx : Ctx) : IO Unit := do
   let parkState := st [m0, m1, ("x", holdNode .Slave .Prepare 0 "x"), ("z", holdNode .Slave .Active 1 "z")]
   check ctx "rebuild concurrency (R7): a parked rebuild is NOT resumed while a map=Active member runs a reconstruction"
     (resumeCandidate parkState 1 1 ["x"] ["z"] == none && resumeCandidate parkState 1 1 ["x"] [] == some "x")
+  -- round 2: contradictory observations — a FRESH running / unknown reading
+  -- wins over an older parked one; a fresh parked-idle reading frees the slot
+  check ctx "rebuild concurrency (round 2): a fresh read decides together — parked+idle is parked (even though its reconstruction reports running); NotFound is absent; an unreadable pod or stats is unknown"
+    (obsOf (some true) true true false false true == .parkedIdle
+      && obsOf (some true) true false false false true == .running
+      && obsOf (some true) true true true false true == .running
+      && obsOf (some false) false false false false false == .absent
+      && obsOf none false false false false false == .unknown
+      && obsOf (some true) false false false false false == .unknown
+      && obsOf (some true) true false false false false == .idle)
+  check ctx "rebuild concurrency (round 2): an older parked key re-read as running or unknown is NOT subtracted; one re-read as parked-idle is; one not re-read keeps its standing"
+    (reconcile ["x", "y", "w"] [("x", .running), ("y", .unknown), ("v", .parkedIdle)] == (["x", "y"], ["w", "v"]))
+  let pBefore := st [m0, m1, ("x", holdNode .Slave .Prepare 1 "x"), ("a", holdNode .Proxy .Active (-1) "a")]
+  let pAfter := st [m0, m1, ("x", holdNode .Slave .Prepare 1 "x"), ("a", holdNode .Slave .Prepare 0 "a")]
+  check ctx "rebuild concurrency (round 2): a key both parked (stale) and running (fresh) holds the cluster slot; it is not resumed"
+    ((gate pBefore pAfter 1 1 ["x"] ["x"]).held.map Prod.fst == ["a"]
+      && (gate pBefore pAfter 1 1 [] ["x"]).held.isEmpty
+      && resumeCandidate pBefore 1 1 ["x"] ["x"] == none)
   -- not gated: a rejoining member (Slave before) and a master reconstruction
   let rejoinBefore := st [m0, m1, ("x", holdNode .Slave .Prepare 1 "x"), ("r", holdNode .Slave .Down 0 "r")]
   let rejoinAfter := st [m0, m1, ("x", holdNode .Slave .Prepare 1 "x"), ("r", holdNode .Slave .Prepare 0 "r")]
@@ -1440,6 +1459,36 @@ private def checkPromotionEvidence (ctx : Ctx) : IO Unit := do
   check ctx "promotion by reason: a reply with ANY newer key is never downgraded to legacy (a lone rocksdb_copy_id is not legacy)"
     (cls (some "STAT rocksdb_copy_id c:1\r\nSTAT curr_items 60\r\nEND\r\n") rv != .legacy
       && cls (some "STAT curr_items 60\r\nEND\r\n") rv == .legacy)
+  -- round 2: the real older RocksDB formats stay legacy
+  let rc56 := "STAT curr_items 60\r\nSTAT rocksdb_master_id old-master-id\r\nSTAT rocksdb_repl_last_lsn 12\r\nSTAT rocksdb_latest_sequence_number 12\r\nEND\r\n"
+  let rc65 := "STAT curr_items 60\r\nSTAT reconstruction_boot_id 9\r\nSTAT reconstruction_current_state succeeded\r\nSTAT rocksdb_master_id old-master-id\r\nSTAT rocksdb_source_epoch 2:e\r\nSTAT rocksdb_incarnation 1\r\nEND\r\n"
+  check ctx "promotion by reason (review round 2): a v0.1.0-rc56 / rc65-shaped RocksDB reply (master id, source epoch, reconstruction state — no R3 or copy-retention key) is LEGACY when Active, Ready, idle"
+    (cls (some rc56) rv == .legacy && cls (some "STAT rocksdb_master_id old-master-id\r\nSTAT curr_items 60\r\nEND\r\n") rv == .legacy
+      && cls (some rc65) rv == .legacy)
+  check ctx "promotion by reason (review round 2): ... but an rc65 reply with a running reconstruction is FORBIDDEN, and Prepare / NotReady stay unknown"
+    ((match cls (some (rc65.replace "succeeded" "running")) rv with | .forbidden _ => true | _ => false)
+      && (match cls (some rc65) { rv with mapPrepare := true, mapActive := false } with | .unknown _ => true | _ => false)
+      && (match cls (some rc65) { rv with podReady := false } with | .unknown _ => true | _ => false))
+  -- round 2: the restarted-promotion timeline (copy-identity 11), pure
+  let vk := "n-0.c-nodes.ns.svc.cluster.local:12121"
+  let opOk := s!"2026-10-08T04:31:10.865924356Z [flare-operator] PROMOTION EVIDENCE (by reason, this pass): [{vk}=eligible [boot 77]]\n2026-10-08T04:31:19.227312668Z [flare-operator] PROMOTION committed: [{vk} (pod incarnation)]\n"
+  let flOk := "2026-10-08T04:31:08.269441822Z [NTC] storage open\n2026-10-08T04:31:08.271249906Z [NTC] read source BOUND to m\n2026-10-08T04:31:08.272974136Z [NTC] node activated\n"
+  let tl := fun (o f b : String) => match FlareOperator.E2E.PromotionTimeline.judge o f vk b with | .ok _ => true | .error _ => false
+  check ctx "timeline (review round 2): fresh eligible evidence of the current process, read after its activation and binding and before the commit, passes"
+    (tl opOk flOk "77")
+  check ctx "timeline (review round 2): lines WITHOUT timestamps are not accepted"
+    (!tl s!"[flare-operator] PROMOTION EVIDENCE (by reason, this pass): [{vk}=eligible [boot 77]]\n[flare-operator] PROMOTION committed: [{vk}]\n" flOk "77"
+      && !tl opOk "[NTC] read source BOUND to m\n[NTC] node activated\n" "77")
+  check ctx "timeline (review round 2): a reading logged only AFTER the commit is not accepted"
+    (!tl s!"2026-10-08T04:31:19.227312668Z [flare-operator] PROMOTION committed: [{vk}]\n2026-10-08T04:31:20.000000000Z [flare-operator] PROMOTION EVIDENCE (by reason, this pass): [{vk}=eligible [boot 77]]\n" flOk "77")
+  check ctx "timeline (review round 2): an activation/binding AFTER the reading (the reading was of an earlier process), a missing activation, or another boot id is not accepted"
+    (!tl opOk "2026-10-08T04:31:12.000000000Z [NTC] read source BOUND to m\n2026-10-08T04:31:12.100000000Z [NTC] node activated\n" "77"
+      && !tl opOk "2026-10-08T04:31:08.271249906Z [NTC] read source BOUND to m\n" "77"
+      && !tl opOk flOk "78")
+  check ctx "timeline (review round 2): timestamps of different precision compare as instants, not as text"
+    (FlareOperator.E2E.PromotionTimeline.parseTs "2026-10-08T04:31:08.5Z x" == some ("2026-10-08T04:31:08.500000000", "x")
+      && FlareOperator.E2E.PromotionTimeline.parseTs "[flare-operator] x" == none
+      && FlareOperator.E2E.PromotionTimeline.parseTs "2026-10-08T04:31:08Z x" == some ("2026-10-08T04:31:08.000000000", "x"))
   let b := PromotionEvidence.bindingOf (some "uid-1") (reply "")
   check ctx "promotion by reason: the commit refuses when the pod, the flared process or the copy changed since the reading, or it was not read"
     ((PromotionEvidence.commitAllows (some .eligible) b b).1

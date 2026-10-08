@@ -78,11 +78,15 @@ structure Stats where
   newFormat : Bool := false
   deriving Repr
 
-/-- Keys only a newer flared reports (R3, copy identity, copy retention). -/
+/-- CAPABILITY markers: keys only an R3 / copy-retention flared reports.
+    History fields an older RocksDB flared already reported are NOT markers
+    (review round 2: v0.1.0-rc56 reports rocksdb_master_id; rc65 also
+    rocksdb_source_epoch and reconstruction_current_state) — a reply with only
+    those is still the older format. -/
 def newFormatKeys : List String :=
   ["repl_read_source_eligible", "repl_read_source_state", "rocksdb_copy_identity_consistent",
    "rocksdb_quarantined", "rocksdb_copy_partial", "rebuild_in_flight", "rebuild_parked",
-   "rocksdb_copy_id", "rocksdb_master_id", "rocksdb_source_epoch", "rocksdb_rebuilt_from_epoch"]
+   "rocksdb_copy_id", "rocksdb_rebuilt_from_epoch"]
 
 def parseStats (out : String) : Stats :=
   let lines := (out.splitOn "\n").map (fun l => (l.replace "\r" "").trim)
@@ -134,9 +138,9 @@ def Stats.copyEpoch (s : Stats) : Option String :=
 def Stats.isLegacy (s : Stats) : Bool := !s.newFormat
 
 /-- A backend without copy evidence (not RocksDB): R3 may be reported, but
-    none of the copy-level keys are. -/
+    none of the copy-level capability keys are. -/
 def Stats.noCopyEvidence (s : Stats) : Bool :=
-  s.copyId.isNone && s.identityConsistent.isNone && s.masterId.isNone && s.sourceEpoch.isNone
+  s.copyId.isNone && s.identityConsistent.isNone
     && s.quarantined.isNone && s.copyPartial.isNone && s.inFlight.isNone && s.parked.isNone
 
 /-- A known forbidden marker, whatever the backend or format (checked before

@@ -95,23 +95,41 @@ def kubectlLogsLabel (label ns : String) (tail : Nat) : IO String := do
 -- Polling
 -- ===========================================================================
 
-/-- Wait for a condition, polling every 5s. Returns true if condition met. -/
+/-- Wait until `check` holds, for at most `timeoutSec` seconds of REAL
+    (monotonic) time (CI 37731207056: the elapsed time used to count only the
+    5 s sleeps, so slow checks stretched a "300 s" wait far beyond 300 s).
+    The deadline is tested between checks; a single check is bounded only by
+    the subprocess timeouts it uses itself (every `kubectl` call: 30 s + 5 s
+    kill; a check calling an unbounded subprocess can still overrun by that
+    much). Each check slower than 10 s, and on a timeout the last kubectl
+    failure seen during the wait, are logged — to tell "the condition never
+    held" from "it could not be observed". -/
 def waitForCondition (desc : String) (timeoutSec : Nat) (check : IO Bool) : IO Bool := do
   IO.eprintln s!"# Waiting for: {desc} (timeout: {timeoutSec}s)"
-  let rec loop (elapsed : Nat) (fuel : Nat) : IO Bool := do
-    match fuel with
-    | 0 => return false
-    | fuel + 1 =>
-      if elapsed >= timeoutSec then
-        IO.eprintln s!"#   TIMEOUT after {timeoutSec}s waiting for: {desc}"
-        return false
-      let ok ← try check catch _ => pure false
-      if ok then
-        IO.eprintln s!"#   OK after {elapsed}s"
-        return true
-      IO.sleep 5000
-      loop (elapsed + 5) fuel
-  loop 0 (timeoutSec / 5 + 1)
+  let start ← IO.monoMsNow
+  let deadline := start + timeoutSec * 1000
+  let (seq0, _) ← FlareOperator.Kubectl.lastKubectlFailure.get
+  let mut checks := 0
+  let mut slowest := 0
+  repeat
+    let t0 ← IO.monoMsNow
+    let ok ← try check catch _ => pure false
+    let t1 ← IO.monoMsNow
+    checks := checks + 1
+    let dur := t1 - t0
+    if dur > slowest then slowest := dur
+    if dur > 10000 then
+      let (seq, last) ← FlareOperator.Kubectl.lastKubectlFailure.get
+      IO.eprintln s!"#   slow check #{checks}: {dur / 1000}s{if seq != seq0 then s!" (last kubectl failure: {last})" else ""}"
+    if ok then
+      IO.eprintln s!"#   OK after {(t1 - start) / 1000}s"
+      return true
+    if t1 >= deadline then
+      let (seq, last) ← FlareOperator.Kubectl.lastKubectlFailure.get
+      IO.eprintln s!"#   TIMEOUT after {(t1 - start) / 1000}s (limit {timeoutSec}s; {checks} check(s), slowest {slowest / 1000}s) waiting for: {desc}{if seq != seq0 then s!"; last kubectl failure during the wait: {last}" else "; no kubectl failure during the wait"}"
+      return false
+    IO.sleep 5000
+  return false
 
 -- ===========================================================================
 -- String helpers

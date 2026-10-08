@@ -10,6 +10,13 @@ namespace FlareOperator.Kubectl
 
 open FlareOperator.K8s
 
+/-- The latest kubectl failure (sequence number, description), for waits
+    that need to report why their checks could not observe anything. -/
+initialize lastKubectlFailure : IO.Ref (Nat × String) ← IO.mkRef (0, "")
+
+private def noteFailure (msg : String) : IO Unit :=
+  lastKubectlFailure.modify fun (n, _) => (n + 1, msg)
+
 /-- Run kubectl with given arguments and return stdout or error. -/
 def kubectl (args : List String) : IO (Except String String) := do
   try
@@ -41,10 +48,15 @@ def kubectl (args : List String) : IO (Except String String) := do
     if result.exitCode == 0 then
       return .ok result.stdout
     else if result.exitCode == 124 && !selfBounded then
-      return .error s!"kubectl timed out after 30s (args: {args.take 3})"
+      let m := s!"kubectl timed out after 30s (args: {args.take 4})"
+      noteFailure m
+      return .error m
     else
-      return .error s!"kubectl failed (exit {result.exitCode}): {result.stderr}"
+      let m := s!"kubectl failed (exit {result.exitCode}): {result.stderr}"
+      noteFailure s!"{m.take 300} (args: {args.take 4})"
+      return .error m
   catch e =>
+    noteFailure s!"kubectl error: {e} (args: {args.take 4})"
     return .error s!"kubectl error: {e}"
 
 /-- Apply a manifest to the cluster by writing it to a temp file and running

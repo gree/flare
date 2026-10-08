@@ -115,6 +115,12 @@ structure ClusterConfig where
   /-- Pin every pod of the suite (operator, flared, debug) to this node
       (`kubernetes.io/hostname`). -/
   nodeHost : Option String := none
+  /-- When no existing node is named: keep every pod off these nodes (e.g.
+      the nodes holding another cluster's data pods) and inside this node
+      pool (`label=value`); the flared pods are co-located (required pod
+      affinity), so at most ONE added node can satisfy them. -/
+  avoidNodes : List String := []
+  nodePool : Option String := none
   /-- A ResourceQuota `hard:` block (YAML lines, 4-space indent) for the
       namespace, plus a LimitRange so pods without explicit resources get
       requests = limits from `limitDefaults` (cpu, memory). -/
@@ -190,6 +196,21 @@ def nodeSelectorBlock (cfg : ClusterConfig) (indent : Nat) : String :=
   | some h =>
     let pad := String.mk (List.replicate indent ' ')
     s!"\n{pad}nodeSelector:\n{pad}  kubernetes.io/hostname: \"{h}\""
+
+/-- Required node affinity (pool In, hostname NotIn avoidNodes) and, for the
+    flared pods, required co-location with each other. Empty when unset. -/
+def placementBlock (cfg : ClusterConfig) (indent : Nat) (colocateLabel : Option String) : String :=
+  if cfg.nodeHost.isSome || (cfg.avoidNodes.isEmpty && cfg.nodePool.isNone) then "" else
+  let pad := String.mk (List.replicate indent ' ')
+  let pool := match cfg.nodePool.map (·.splitOn "=") with
+    | some [k, v] => s!"\n{pad}            - key: {k}\n{pad}              operator: In\n{pad}              values: [\"{v}\"]"
+    | _ => ""
+  let avoid := if cfg.avoidNodes.isEmpty then "" else
+    s!"\n{pad}            - key: kubernetes.io/hostname\n{pad}              operator: NotIn\n{pad}              values: [{String.intercalate ", " (cfg.avoidNodes.map fun n => s!"\"{n}\"")}]"
+  let coloc := match colocateLabel with
+    | some sel => s!"\n{pad}  podAffinity:\n{pad}    requiredDuringSchedulingIgnoredDuringExecution:\n{pad}      - labelSelector:\n{pad}          matchLabels:\n{pad}            cluster: {sel}\n{pad}        topologyKey: kubernetes.io/hostname"
+    | none => ""
+  s!"\n{pad}affinity:\n{pad}  nodeAffinity:\n{pad}    requiredDuringSchedulingIgnoredDuringExecution:\n{pad}      nodeSelectorTerms:\n{pad}        - matchExpressions:{pool}{avoid}{coloc}"
 
 /-- Namespaced RoleBinding to an existing ClusterRole (no cluster-scoped object). -/
 def roleBindingYaml (cfg : ClusterConfig) (clusterRole : String) : String :=
@@ -267,7 +288,7 @@ spec:
       labels:
         app: {name}
     spec:
-      serviceAccountName: flare-operator{nodeSelectorBlock cfg 6}
+      serviceAccountName: flare-operator{nodeSelectorBlock cfg 6}{placementBlock cfg 6 none}
       containers:
         - name: flare-operator
           image: {cfg.operatorImageOverride.getD "flare-operator:test"}
@@ -410,7 +431,7 @@ spec:
         app: flare
         cluster: {cluster}
     spec:
-      terminationGracePeriodSeconds: {graceSeconds}{nodeSelectorBlock cfg 6}
+      terminationGracePeriodSeconds: {graceSeconds}{nodeSelectorBlock cfg 6}{placementBlock cfg 6 (some cluster)}
       containers:
         - name: flared
           image: {image}
@@ -680,7 +701,10 @@ def deployCluster (cfg : ClusterConfig) : IO Unit := do
   -- Create debug pod (direct kubectl so errors are visible)
   let overrides := match cfg.nodeHost with
     | some h => [s!"--overrides=\{\"spec\":\{\"nodeSelector\":\{\"kubernetes.io/hostname\":\"{h}\"}}}"]
-    | none => []
+    | none =>
+      if cfg.avoidNodes.isEmpty then [] else
+      let vals := String.intercalate "," (cfg.avoidNodes.map fun n => s!"\"{n}\"")
+      [s!"--overrides=\{\"spec\":\{\"affinity\":\{\"nodeAffinity\":\{\"requiredDuringSchedulingIgnoredDuringExecution\":\{\"nodeSelectorTerms\":[\{\"matchExpressions\":[\{\"key\":\"kubernetes.io/hostname\",\"operator\":\"NotIn\",\"values\":[{vals}]}]}]}}}}}"]
   match ← kubectl (["run", cfg.debugPod, s!"--namespace={cfg.«namespace»}",
                     s!"--image={cfg.debugImage}", "--restart=Never"] ++ overrides ++ ["--command", "--",
                     -- 1 day, not 1 h: the scale evaluation's load ran past an

@@ -4787,6 +4787,8 @@ private def measureCfg : IO ClusterConfig := do
     flaredCpuRequest := if role.isSome then cpu else "100m"
     roleBindingTo := role
     nodeHost := node
+    avoidNodes := ((← IO.getEnv "FLARE_E2E_MEASURE_AVOID_NODES").getD "").splitOn "," |>.map (·.trim) |>.filter (!·.isEmpty)
+    nodePool := ← IO.getEnv "FLARE_E2E_MEASURE_NODE_POOL"
     quotaHard := quotaHard
     debugImage := (← IO.getEnv "FLARE_E2E_MEASURE_DEBUG_IMAGE").getD "busybox:1.36"
     extraFlaredConf := "rocksdb-block-cache-size-mb = 64\nrocksdb-write-buffer-size-mb = 16" ++ bwConf

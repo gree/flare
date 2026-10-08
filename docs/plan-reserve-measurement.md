@@ -1,6 +1,6 @@
 # rebuildReserveBytes の実測計画（移設先の隔離環境）
 
-状態：**A を承認済み（2026-10-08、ユーザー）。作成前の提示（費用・期限・削除対象）待ち。クラスタには何も作っていない。**
+状態：**A を承認済み（2026-10-08、ユーザー）。レビュー指摘3点（配置、8Gi 条件、8時間上限）を反映した計画の承認待ち。クラスタには何も作っていない。**
 承認範囲：追加ノード最大1台、対象は `flare-reserve-test` のみ、専用タグの GHCR 公開と digest 固定、pf-dev の read-only stats／対象ディレクトリの du。全キー走査と既存環境の変更はしない。
 決定（2026-10-07）：測定は、作り直す移設先クラスタを Web 未接続の検証環境として
 使う。投入元と現行サービスは触らない。最初は生成データ。実データの初期投入とは
@@ -19,29 +19,51 @@
 | 論理（du --apparent） / 実割当（du -B1） | 5.71 / 5.79 GB | 3.51 / 3.55 GB |
 | tmpfs（8 GiB） 使用 | 68% | 42% |
 
-- 件数は同じでも blob が 4.5 倍違う：nodes-0 の blob には GC されていない古い値が残っている（nodes-1 は 2 日前に再構築）。**送り手のコピーの大きさは、生きているデータ量ではなく、ゴミを含んだ大きさ**になる（staged 再構築の容量判定は送り手のコピーの大きさを使う）。
-- 推定（近似条件としてのみ記録。値サイズの分布ではない）：SST 平均 ≈ 2.75 GB / 15.86M ≈ 173 B／キー、生きた blob ≈ 0.62 GB。
+- 件数は同じでも blob の量が 4.5 倍違う（2.81 vs 0.62 GB）。nodes-1 は 2 日前に再構築されている。差の一部は GC されていない古い値と**推定**するが、2 台の比較だけでは差のすべてを garbage とは断定できない（内訳は未確認）。
+- **容量の見積もりには実使用量を使う**（送り手のコピーの大きさ＝du の実割当、nodes-0 で 5.79 GB）。staged 再構築の容量判定も送り手のコピーの大きさを使う。
+- 推定（近似条件としてのみ記録。値サイズの分布ではない）：SST 平均 ≈ 2.75 GB / 15.86M ≈ 173 B／キー、blob 0.62–2.81 GB。
 - 以前の記録（7.3 GB）は古い。
 
-**生成データ**：15.86M キー × 約 170 B ＋ blob 用の 4 KB 値 約 150k 件（≈ 0.62 GB）。加えて、blob のゴミが溜まった送り手（nodes-0 相当、約 5.7 GB）を再現するため、大きい値を 4 回上書きする段階を 1 回入れる。
+**生成データ**：15.86M キー × 約 170 B ＋ blob 用の 4 KB 値 約 150k 件（≈ 0.62 GB）。加えて、送り手の実使用量を nodes-0 と同程度（約 5.8 GB）にするため、大きい値を上書きする段階を入れる（再現するのは実使用量であり、nodes-0 の内訳ではない）。
 
-**配置**：`10.163.224.6`（プール np-q50mfoyg、SA5.8XLARGE64＝32 vCPU／64 GB、現在 autoscaler の削除候補、pf-dev の Pod なし、他は pet-qa の web 1 Pod と DaemonSet）に全 Pod を nodeSelector で固定。このノードが既に消えていれば、同じプールに autoscaler が 1 台追加する（プール上限 10、現在 4）。pf-dev のデータ Pod があるノード（.11、.96.29）と、pf-dev の operator がいる .7 には置かない。
+**配置（実行のたびに、作成の直前に読み取りで決める）**
+
+1. 除外するノード＝pf-dev のデータ Pod（`flare-pf-dev-nodes-*`）がいるノード（現在 `10.163.224.11`、`10.163.96.29`）。実行直前に読み直す。
+2. 既存の適格ノード：プール `np-q50mfoyg` の中で、除外ノード以外、Ready、`allocatable − requests` が測定の requests（下表）以上のもの。現在の候補は `10.163.224.6`（32 vCPU／64 GB、autoscaler の削除候補、pf-dev の Pod なし）。あれば `FLARE_E2E_MEASURE_NODE` でそのノードに固定する。
+3. 既存の適格ノードがない（`.6` が消えた等）：固定はせず、`FLARE_E2E_MEASURE_NODE_POOL`（プール）と `FLARE_E2E_MEASURE_AVOID_NODES`（除外ノード）の必須の nodeAffinity で作る。flared の 2 Pod は必須の podAffinity で同じノードに置くので、autoscaler が追加するのは **最大 1 台**（2 Pod 目は 1 Pod 目と同じノードにしか置けない）。追加されたノードの名前・プール・pf-dev の Pod がないことを確認して記録する。
+4. 置かれたノードが条件を満たさなければ、測定を始めずに namespace を削除する。
 
 **上限（namespace の ResourceQuota と LimitRange）**
 
 | 項目 | 上限 |
 |---|---|
 | requests.cpu / limits.cpu | 10 / 10 |
-| requests.memory / limits.memory | 36Gi / 36Gi（flared 2 × 16Gi、request＝limit、operator 1Gi、debug） |
+| requests.memory / limits.memory | 36Gi / 36Gi（16Gi 評価：flared 2 × 16Gi、request＝limit、operator 1Gi、debug） |
 | requests.storage / PVC 数 | 40Gi / 2（PVC 版のみ。cbs） |
 | pods | 6 |
 | ネットワーク | flared の `reconstruction-bwlimit`／`rocksdb-snapshot-bwlimit` = 32768 KB/s。両 Pod が同じノードなので、再構築の通信はノードの NIC を通らない。外向きはイメージ pull と API のみ |
 
-**実行の流れ（各回の後に namespace を削除）**：tmpfs 16Gi → tmpfs 8Gi（pf-dev と同じ形。no_space で止まることの確認） → PVC 20Gi。
+**実行の流れ（各回の後に namespace を削除）。2 つの評価を分ける**
 
-**想定費用**：追加ノードの稼働時間 最大 **8 時間**（SA5.8XLARGE64 の従量課金。単価は公開ページで確認できず、**コンソールでの確認が必要**）。CBS 2×20Gi を数時間。`.6` が削除候補のまま残っているのを使う場合、その分だけ autoscaler による削除が遅れる。
+| 評価 | tmpfs | コンテナの memory limit | request | 目的 |
+|---|---|---|---|---|
+| R1：16Gi 評価 | 16Gi | 16Gi | 16Gi | 再構築の両側のピークと reserve の候補を測る（pf-dev とは違う条件） |
+| R2：pf-dev の 8Gi 構成 | 8Gi | **8Gi** | 7Gi（pf-dev と同じ） | pf-dev と同じ条件で何が起きるか（no_space で止まるか、OOM か）を確認する |
+| R3：PVC 20Gi | なし（PVC） | 16Gi | 16Gi | ディスクの場合の比較 |
 
-**終了期限**：**2026-10-09 18:00 JST** までに測定を終え、namespace を削除し、ノードの解放（autoscaler の縮小、または追加分の削除）を確認する。それまでに終わらなくても、その時点で削除する。
+R1 の成功は 8Gi 構成の承認ではない。R2 の結果を見て、移設先のメモリを増やすか、保存方式を変えるかを決める。
+
+**時間と費用の上限（両方を適用）**：測定開始（最初のオブジェクト作成）から**最大 8 時間**、かつ終了期限まで。追加ノードの稼働時間は最大 **8 時間**（SA5.8XLARGE64 の従量課金。単価は公開ページで確認できず、**コンソールでの確認が必要**）。CBS 2×20Gi を数時間。`.6` が削除候補のまま残っているのを使う場合、その分だけ autoscaler による削除が遅れる。
+
+**終了期限**：**2026-10-09 18:00 JST**、または開始から 8 時間の早い方。終わっていなくても、その時点で止めて削除する。
+
+**終了手順**
+1. 削除の前にログを退避する（試験の出力、サンプル、各 Pod の flared と operator のログ、`kubectl get events`、配置したノード名）→ `docs/reports/` に保存。
+2. namespace `flare-reserve-test` を削除する。
+3. 確認：namespace が消えた、PVC と（その PVC に紐づいた）PV が残っていない、CBS ディスクが残っていない（PV の volumeHandle で確認）、測定の Pod がどのノードにも残っていない（＝測定がノードを引き留めていない）。
+4. 共有ノードを手動で削除する操作はしない。ノードの縮小は autoscaler に任せ、測定の Pod がなくなったことだけを確認して記録する。
+
+**pf-dev への追加の読み取り（承認待ち、未実施）**：cgroup のメモリ使用量・上限・内訳（memory.current／memory.max／memory.stat）、flared の RSS、`/data` の mount と `df`。短時間・低頻度（例：数回）、設定変更・全キー走査・flush・compaction はしない。
 
 **削除対象**：namespace `flare-reserve-test`（中の Deployment、StatefulSet、Service、ConfigMap、Lease、RoleBinding、ServiceAccount、ResourceQuota、LimitRange、FlareCluster `measure`、debug Pod、PVC）。CRD、ClusterRole、他の namespace、pf-dev には触らない。GHCR の専用タグは測定記録のため残す（削除する場合は指示による）。
 

@@ -1447,7 +1447,28 @@ private def checkPromotionEvidence (ctx : Ctx) : IO Unit := do
     ((match cls (some ((base.replace "rocksdb_copy_partial 0" "rocksdb_copy_partial 1") ++ "END\r\n")) obs with | .forbidden _ => true | _ => false)
       && (match cls (some ((base.replace "rocksdb_copy_identity_consistent 1" "rocksdb_copy_identity_consistent 0") ++ "END\r\n")) obs with | .forbidden _ => true | _ => false)
       && (match cls (some ((base.replace "rocksdb_quarantined 0" "rocksdb_quarantined 1") ++ "END\r\n")) obs with | .forbidden _ => true | _ => false)
-      && (match cls (reply "STAT repl_read_source_state needs_rebuild\r\nSTAT repl_read_source_eligible 0\r\n") obs with | .forbidden _ => true | _ => false))
+      && (match cls (reply "STAT repl_read_source_state needs_rebuild\r\nSTAT repl_read_source_eligible 0\r\n") { obs with partitionHasMaster := true } with | .forbidden _ => true | _ => false))
+  -- user decision 2026-10-09: the ex-master came back EMPTY; the healthy
+  -- copy of the recorded history, merely behind, is the one to promote
+  let nr := fun (extra : String) => reply ("STAT repl_read_source_state needs_rebuild\r\nSTAT repl_read_source_eligible 0\r\n" ++ extra)
+  let vsEmpty := "STAT repl_read_source_reason history differs: copy 2:e, master n-0.svc:12121 5:fresh\r\n"
+  check ctx "needs_rebuild (1): R3 compared the copy with a DIFFERENT, later history (the empty returning ex-master); the copy is the recorded last master's: LAGGING (last resort, NOT LOSS-FREE)"
+    (cls (nr vsEmpty) obs == .lagging
+      && cls (nr "STAT repl_read_source_reason lineage differs: copy M, master n-0.svc:12121 Z\r\n") obs == .lagging)
+  check ctx "needs_rebuild (2): the same shape with an unhealthy or unfinished copy stays FORBIDDEN (partial, quarantine, identity, switch unresolved, in flight, parked, running, corrupted, follow apply error)"
+    ([("rocksdb_copy_partial 0", "rocksdb_copy_partial 1"), ("rocksdb_quarantined 0", "rocksdb_quarantined 1"),
+      ("rocksdb_copy_identity_consistent 1", "rocksdb_copy_identity_consistent 0"), ("rebuild_in_flight 0", "rebuild_in_flight 1")].all (fun (a, b) =>
+        match cls (some ((base.replace a b) ++ "STAT repl_read_source_state needs_rebuild\r\n" ++ vsEmpty ++ "END\r\n")) obs with | .forbidden _ => true | _ => false)
+      && ["STAT rocksdb_switch_unresolved 1\r\n", "STAT rebuild_parked 1\r\n", "STAT reconstruction_current_state running\r\n",
+          "STAT rocksdb_corrupted 1\r\n", "STAT repl_follow_last_reason apply_error\r\n", "STAT repl_follow_last_reason generations_unavailable\r\n"].all (fun x =>
+        match cls (nr (vsEmpty ++ x)) obs with | .forbidden _ => true | _ => false))
+  check ctx "needs_rebuild: compared with the RECORDED history itself, or the copy is not the recorded history = FORBIDDEN (a real divergence)"
+    ((match cls (nr "STAT repl_read_source_reason history differs: copy 2:e, master n-1.svc:12121 2:e\r\n") obs with | .forbidden _ => true | _ => false)
+      && (match cls (some ((base.replace "rocksdb_source_epoch 2:e" "rocksdb_source_epoch 1:old") ++ "STAT repl_read_source_state needs_rebuild\r\n" ++ vsEmpty ++ "END\r\n")) obs with | .forbidden _ => true | _ => false))
+  check ctx "needs_rebuild: no recorded history, or a reason that does not name what was compared = UNKNOWN (held), never empty or lagging"
+    ((match cls (nr vsEmpty) { obs with lastMasterHistory := none, isLastMasterHolder := true } with | .unknown _ => true | _ => false)
+      && (match cls (nr "STAT repl_read_source_reason something else\r\n") obs with | .unknown _ => true | _ => false)
+      && (match cls (nr "") obs with | .unknown _ => true | _ => false))
   check ctx "promotion by reason: re-validation against a PRESENT master is forbidden; the master's going does not turn it into a pass — only the RECORDED last master's history is lagging"
     ((match cls (reply "STAT repl_read_source_state revalidating\r\nSTAT repl_read_source_eligible 0\r\n") { obs with partitionHasMaster := true } with | .forbidden _ => true | _ => false)
       && cls (reply "STAT repl_read_source_state revalidating\r\nSTAT repl_read_source_eligible 0\r\n") obs == .lagging

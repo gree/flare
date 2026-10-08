@@ -66,6 +66,9 @@ structure Stats where
   inFlight : Option Nat := none
   parked : Option Nat := none
   switchUnresolved : Option Nat := none
+  corrupted : Option Nat := none
+  readSourceReason : Option String := none
+  followReason : Option String := none
   reconstruction : Option String := none
   masterId : Option String := none
   sourceEpoch : Option String := none
@@ -114,14 +117,17 @@ def parseStats (out : String) : Stats :=
   let fl := flag "rebuild_in_flight"
   let pk := flag "rebuild_parked"
   let su := flag "rocksdb_switch_unresolved"
+  let co := flag "rocksdb_corrupted"
   let rc := enum "reconstruction_current_state" ["none", "running", "succeeded", "failed", "aborted"]
   let it := nat "curr_items"
   let named := [("repl_read_source_eligible", el.2), ("repl_read_source_state", ss.2),
     ("rocksdb_copy_identity_consistent", ic.2), ("rocksdb_quarantined", qu.2), ("rocksdb_copy_partial", cp.2),
-    ("rebuild_in_flight", fl.2), ("rebuild_parked", pk.2), ("rocksdb_switch_unresolved", su.2), ("reconstruction_current_state", rc.2), ("curr_items", it.2)]
+    ("rebuild_in_flight", fl.2), ("rebuild_parked", pk.2), ("rocksdb_switch_unresolved", su.2), ("rocksdb_corrupted", co.2), ("reconstruction_current_state", rc.2), ("curr_items", it.2)]
   { complete := lines.contains "END"
     eligible := el.1, sourceState := ss.1, identityConsistent := ic.1, quarantined := qu.1
-    copyPartial := cp.1, inFlight := fl.1, parked := pk.1, switchUnresolved := su.1, reconstruction := rc.1
+    copyPartial := cp.1, inFlight := fl.1, parked := pk.1, switchUnresolved := su.1, corrupted := co.1, reconstruction := rc.1
+    readSourceReason := value "repl_read_source_reason"
+    followReason := value "repl_follow_last_reason"
     masterId := value "rocksdb_master_id"
     sourceEpoch := value "rocksdb_source_epoch"
     rebuiltFromEpoch := (value "rocksdb_rebuilt_from_epoch").filter (!·.isEmpty)
@@ -155,7 +161,9 @@ def Stats.forbiddenMarker (s : Stats) (partitionHasMaster : Bool) : Option Strin
   else if s.inFlight == some 1 then some "a copy is being rebuilt (transfer or switch in flight)"
   else if s.parked == some 1 then some "a rebuild is parked part-way (its copy was never completed)"
   else if s.reconstruction == some "running" then some "a reconstruction is running on it"
-  else if s.sourceState == some "needs_rebuild" then some "R3: confirmed different history"
+  else if s.corrupted == some 1 then some "the copy is flagged corrupted"
+  else if s.sourceState == some "needs_rebuild" && partitionHasMaster then
+    some "R3: confirmed different history against the present master"
   else if s.sourceState == some "revalidating" && partitionHasMaster then
     some "R3: history being re-validated against the present master"
   else none
@@ -173,6 +181,54 @@ structure Observed where
       master's copy -/
   isLastMasterHolder : Bool := false
 
+/-- R3's reason names WHAT it compared the copy with: "history differs:
+    copy E1, master K E2" or "lineage differs: copy X, master K Y".
+    (kind, the copy's value, the compared master's key, its value). -/
+def parseR3Reason (reason : String) : Option (String × String × String × String) :=
+  let kind := if reason.startsWith "history differs: copy " then some "history"
+    else if reason.startsWith "lineage differs: copy " then some "lineage" else none
+  kind.bind fun k =>
+    let rest := reason.drop (if k == "history" then "history differs: copy ".length else "lineage differs: copy ".length)
+    match rest.splitOn ", master " with
+    | [copyVal, masterPart] =>
+      match (masterPart.trim.splitOn " ").filter (!·.isEmpty) with
+      | [mkey, mval] => some (k, copyVal.trim, mkey, mval)
+      | _ => none
+    | _ => none
+
+/-- Follow-side reasons that say the copy itself is not healthy (as opposed to
+    "could not continue from this source"): never bypassed. -/
+def unhealthyFollowReasons : List String := ["apply_error", "generations_unavailable", "no_position"]
+
+/-- R3 needs_rebuild with the partition WITHOUT a master (user decision
+    2026-10-09: an ex-master that returned EMPTY must not condemn the healthy,
+    merely-behind copy that holds the last master's data). R3 compared the copy
+    with the master its map named at that time; that is "lagging" only when:
+      * the copy's own history is the RECORDED last master's (no record = unknown);
+      * R3's reason names what it compared with, and that is NOT the recorded
+        last master's history (a different, later history — e.g. the empty
+        returning ex-master); comparing with the recorded history = a real
+        divergence = FORBIDDEN;
+      * the follow side reports nothing that says the copy is unhealthy.
+    Corruption, partial, quarantine, identity, switch, in-flight, parked and
+    running markers were already checked (forbiddenMarker). -/
+def needsRebuildClass (s : Stats) (o : Observed) : Class :=
+  match o.lastMasterHistory with
+  | none => .unknown "R3 needs_rebuild, and the last master's history was not recorded"
+  | some (mid, ep) =>
+    if s.masterId != some mid || s.copyEpoch != some ep then
+      .forbidden s!"R3: confirmed different history (the copy is {s.masterId}/{s.copyEpoch}, the recorded last master {mid}/{ep})"
+    else if (s.followReason.map (unhealthyFollowReasons.contains ·)).getD false then
+      .forbidden s!"R3 needs_rebuild and the follow side reports {s.followReason.getD "?"}"
+    else
+      match s.readSourceReason.bind parseR3Reason with
+      | none => .unknown s!"R3 needs_rebuild with a reason that does not name what it compared with ({s.readSourceReason.getD "none"})"
+      | some (kind, _, mkey, mval) =>
+        let comparedIsRecorded := if kind == "history" then mval == ep else mval == mid
+        if comparedIsRecorded then
+          .forbidden s!"R3: confirmed different {kind} against the recorded last master's ({mkey} {mval})"
+        else .lagging
+
 def classify (reply : Option String) (o : Observed) : Class :=
   match reply with
   | none => .unknown "stats unreadable"
@@ -183,7 +239,8 @@ def classify (reply : Option String) (o : Observed) : Class :=
     else match s.forbiddenMarker o.partitionHasMaster with
     | some why => .forbidden why
     | none =>
-    if s.isLegacy then
+    if s.sourceState == some "needs_rebuild" then needsRebuildClass s o
+    else if s.isLegacy then
       -- no markers to trust: only the map, the pod and the reconstruction say
       if s.items == some 0 then .empty
       else if o.mapActive && !o.mapPrepare && o.podReady then .legacy

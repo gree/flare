@@ -597,6 +597,14 @@ int storage_rocksdb::new_copy_identity(const char* why) {
 		r = copy_fs::write_file_durable(this->_data_path, copy_fs::kCopyIdFile, id);
 		log_notice("copy identity: %s (%s)", id.c_str(), why);
 	}
+	// a DIFFERENT copy is live now (swap, switch, reset): a partial marker
+	// left by a merge described the copy that is gone
+	if (r == 0 && !this->_staging) {
+		struct stat pst;
+		if (::stat((this->_data_dir + "/copy.partial").c_str(), &pst) == 0) {
+			this->clear_copy_partial("a different copy replaced the partially changed one");
+		}
+	}
 	pthread_rwlock_wrlock(&this->_mutex_generations);
 	this->_copy_identity_consistent = (r == 0);
 	pthread_rwlock_unlock(&this->_mutex_generations);
@@ -701,6 +709,14 @@ int storage_rocksdb::switch_to_staging(const string& attempt, const string& expe
 		this->_tombstone_sweep_cursor.clear();
 		this->_seed_curr_items_by_scan("copy switch");
 		this->_quarantined = this->_quarantined_now();
+		{
+			// the verified staged copy replaced the live one: a partial marker
+			// left by an earlier merge described the copy that is now retained
+			struct stat pst;
+			if (::stat((this->_data_dir + "/copy.partial").c_str(), &pst) == 0) {
+				this->clear_copy_partial("a verified staged copy replaced the partially changed one");
+			}
+		}
 		// the latch described the old copy
 		this->_corrupted = false;
 		if (copy_fs::remove_intent(this->_data_dir) < 0) {
@@ -3204,6 +3220,30 @@ int storage_rocksdb::discard_copy(const string& request_id, const string& operat
 	append_durable(ledger, request_id + " " + result + "\n");
 	log_warning("APPROVED copy discard %s: %s of copy %s (%s) -> %s", request_id.c_str(), operation.c_str(), copy_id.c_str(), target.c_str(), result.c_str());
 	return 0;
+}
+
+int storage_rocksdb::mark_copy_partial(const char* why) {
+	if (copy_fs::write_file_durable(this->_data_dir, "copy.partial", string(why) + "\n") < 0) {
+		return -1;
+	}
+	log_notice("copy marked PARTIAL (%s): not promotable until the change completes", why);
+	return 0;
+}
+
+int storage_rocksdb::clear_copy_partial(const char* why) {
+	const string p = this->_data_dir + "/copy.partial";
+	if (unlink(p.c_str()) != 0 && errno != ENOENT) {
+		log_err("could not remove the partial-copy marker [%s]: %s", p.c_str(), strerror(errno));
+		return -1;
+	}
+	copy_fs::fsync_dir(this->_data_dir);
+	log_notice("copy no longer partial (%s)", why);
+	return 0;
+}
+
+bool storage_rocksdb::is_copy_partial() {
+	struct stat st;
+	return ::stat((this->_data_dir + "/copy.partial").c_str(), &st) == 0;
 }
 
 bool storage_rocksdb::_quarantined_now() {

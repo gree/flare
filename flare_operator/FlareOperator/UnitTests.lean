@@ -29,6 +29,7 @@ import FlareOperator.E2E.TraceMatch
 import FlareOperator.StateMachine.SourceEligibility
 import FlareOperator.StateMachine.RebuildConcurrency
 import FlareOperator.StateMachine.CopyDiscardApproval
+import FlareOperator.StateMachine.PromotionEvidence
 
 open FlareOperator.K8s
 open FlareOperator.ReplicaRepair
@@ -1346,6 +1347,51 @@ private def checkCopyDiscardApproval (ctx : Ctx) : IO Unit := do
     (CopyDiscardApproval.parseReply "STAT copy_discard_result applied\r\nEND\r\n" == some "applied"
       && CopyDiscardApproval.parseReply "STAT copy_discard_result applied\r\n" == none)
 
+-- ─── promotion by reason (decision 2026-10-08) ────────────────────────────
+
+private def checkPromotionEvidence (ctx : Ctx) : IO Unit := do
+  let base := "STAT rocksdb_copy_identity_consistent 1\r\nSTAT rocksdb_quarantined 0\r\nSTAT rocksdb_copy_partial 0\r\nSTAT rebuild_in_flight 0\r\nSTAT rocksdb_copy_id u:1\r\nSTAT reconstruction_boot_id 7\r\nSTAT curr_items 60\r\nSTAT rocksdb_master_id M\r\nSTAT rocksdb_source_epoch 2:e\r\n"
+  let reply := fun (extra : String) => some (base ++ extra ++ "END\r\n")
+  let obs : PromotionEvidence.Observed := {
+    mapPrepare := false, mapActive := true, podReady := true, partitionHasMaster := false
+    lastMasterHistory := some ("M", "2:e") }
+  let cls := fun (r : Option String) (o : PromotionEvidence.Observed) => PromotionEvidence.classify r o
+  -- the PAIR: the same copy, the same history; only whether a copy is in flight differs
+  check ctx "promotion by reason: a healthy copy of the last master's history, merely behind (R3 not bound) is LAGGING — a last resort may seat it"
+    (cls (reply "STAT repl_read_source_eligible 0\r\nSTAT repl_read_source_state none\r\n") { obs with mapPrepare := true, mapActive := false } == .lagging)
+  check ctx "promotion by reason: the same copy while a rebuild is in flight is FORBIDDEN, wait or not"
+    (match cls (some ((base.replace "rebuild_in_flight 0" "rebuild_in_flight 1") ++ "STAT repl_read_source_eligible 0\r\nSTAT repl_read_source_state none\r\nEND\r\n")) { obs with mapPrepare := true, mapActive := false } with
+      | .forbidden _ => true | _ => false)
+  check ctx "promotion by reason: a merging dump left part-way, identity disagreement, quarantine, needs_rebuild are FORBIDDEN"
+    ((match cls (some ((base.replace "rocksdb_copy_partial 0" "rocksdb_copy_partial 1") ++ "END\r\n")) obs with | .forbidden _ => true | _ => false)
+      && (match cls (some ((base.replace "rocksdb_copy_identity_consistent 1" "rocksdb_copy_identity_consistent 0") ++ "END\r\n")) obs with | .forbidden _ => true | _ => false)
+      && (match cls (some ((base.replace "rocksdb_quarantined 0" "rocksdb_quarantined 1") ++ "END\r\n")) obs with | .forbidden _ => true | _ => false)
+      && (match cls (reply "STAT repl_read_source_state needs_rebuild\r\nSTAT repl_read_source_eligible 0\r\n") obs with | .forbidden _ => true | _ => false))
+  check ctx "promotion by reason: re-validation against a PRESENT master is forbidden; with the master gone the history decides"
+    ((match cls (reply "STAT repl_read_source_state revalidating\r\nSTAT repl_read_source_eligible 0\r\n") { obs with partitionHasMaster := true } with | .forbidden _ => true | _ => false)
+      && cls (reply "STAT repl_read_source_state revalidating\r\nSTAT repl_read_source_eligible 0\r\n") obs == .lagging)
+  check ctx "promotion by reason: another history, or no record of the last master's, is UNKNOWN (held); the ex-master's own copy is known"
+    ((match cls (some ((base.replace "rocksdb_source_epoch 2:e" "rocksdb_source_epoch 9:x") ++ "STAT repl_read_source_eligible 0\r\nEND\r\n")) obs with | .unknown _ => true | _ => false)
+      && (match cls (reply "STAT repl_read_source_eligible 0\r\n") { obs with lastMasterHistory := none } with | .unknown _ => true | _ => false)
+      && cls (reply "STAT repl_read_source_eligible 0\r\n") { obs with lastMasterHistory := none, isLastMasterHolder := true } == .lagging)
+  check ctx "promotion by reason: unreadable or incomplete is UNKNOWN; a bound eligible Active copy is ELIGIBLE"
+    ((match cls none obs with | .unknown _ => true | _ => false)
+      && (match cls (some base) obs with | .unknown _ => true | _ => false)
+      && cls (reply "STAT repl_read_source_eligible 1\r\nSTAT repl_read_source_state eligible\r\n") obs == .eligible)
+  check ctx "promotion by reason: LEGACY is not unconditional — Prepare, NotReady or a running reconstruction is not legacy-promotable"
+    (cls (some "STAT curr_items 60\r\nEND\r\n") { obs with mapActive := true, podReady := true } == .legacy
+      && (match cls (some "STAT curr_items 60\r\nEND\r\n") { obs with mapPrepare := true, mapActive := false } with | .unknown _ => true | _ => false)
+      && (match cls (some "STAT curr_items 60\r\nEND\r\n") { obs with podReady := false } with | .unknown _ => true | _ => false)
+      && (match cls (some "STAT curr_items 60\r\nSTAT reconstruction_current_state running\r\nEND\r\n") obs with | .unknown _ => true | _ => false))
+  let b := PromotionEvidence.bindingOf (some "uid-1") (reply "")
+  check ctx "promotion by reason: the commit refuses when the pod, the flared process or the copy changed since the reading, or it was not read"
+    ((PromotionEvidence.commitAllows (some .eligible) b b).1
+      && !(PromotionEvidence.commitAllows (some .eligible) b { b with podUid := some "uid-2" }).1
+      && !(PromotionEvidence.commitAllows (some .eligible) b { b with bootId := some "8" }).1
+      && !(PromotionEvidence.commitAllows (some .eligible) b { b with copyId := some "u:2" }).1
+      && !(PromotionEvidence.commitAllows none b b).1
+      && !(PromotionEvidence.commitAllows (some (.forbidden "x")) b b).1)
+
 -- ─── R3: source eligibility (operator side) ──────────────────────────────
 
 open FlareOperator.SourceEligibility in
@@ -1409,6 +1455,7 @@ def run : IO UInt32 := do
   checkSourceEligibility ctx
   checkRebuildConcurrency ctx
   checkCopyDiscardApproval ctx
+  checkPromotionEvidence ctx
   let failures ← ctx.failures.get
   let n ← ctx.count.get
   IO.println s!"1..{n}"

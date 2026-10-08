@@ -411,7 +411,23 @@ int handler_reconstruction::_run_once() {
 			if (mrdb != NULL) mrdb->clear_suspended_rebuilt_from();
 		}
 #endif
+#ifdef HAVE_LIBROCKSDB
+		// decision 2026-10-08: a merging dump changes the live copy key by
+		// key. The PARTIAL marker is durable BEFORE the first change and is
+		// removed only once the dump completed (END) and its follow-up
+		// (lineage, cursor) is recorded: a copy left part-way (failure, crash)
+		// is never promoted, not even as a last resort.
+		if (this->_storage->get_type() == storage::type_rocksdb) {
+			storage_rocksdb* prdb = dynamic_cast<storage_rocksdb*>(this->_storage);
+			if (prdb != NULL && prdb->mark_copy_partial("merging full dump") < 0) {
+				log_err("the partial-copy marker could not be written -> not changing the copy", 0);
+				return -1;
+			}
+		}
+#endif
 		op_dump* p = new op_dump(c, this->_cluster, this->_storage);
+		// every key must be stored and the END marker seen (else partial)
+		p->set_strict(true);
 
 		p->set_thread(this->_thread);
 		this->_thread->set_state("execute");
@@ -466,6 +482,11 @@ int handler_reconstruction::_run_once() {
 	// master_id adoption above so the lineage check inside passes.
 	if (!via_wal && !via_staging) {
 		this->_seed_repl_lsn_after_dump(c, peer_wal_supported, peer_latest_lsn);
+		// the merging dump completed and its follow-up is recorded
+		if (this->_storage->get_type() == storage::type_rocksdb) {
+			storage_rocksdb* prdb = dynamic_cast<storage_rocksdb*>(this->_storage);
+			if (prdb != NULL) prdb->clear_copy_partial("merging full dump completed");
+		}
 	}
 #endif
 

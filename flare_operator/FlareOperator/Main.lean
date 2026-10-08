@@ -39,6 +39,7 @@ import FlareOperator.Health.HealthCheck
 import FlareOperator.StateMachine.SourceEligibility
 import FlareOperator.StateMachine.RebuildConcurrency
 import FlareOperator.StateMachine.CopyDiscardApproval
+import FlareOperator.StateMachine.PromotionEvidence
 
 namespace FlareOperator
 
@@ -285,6 +286,12 @@ initialize rebuildHeldRef : IO.Ref (List String) ← IO.mkRef []
 /-- Decision 2026-10-07 (1): the candidates whose R3 reading was UNKNOWN on
     THIS pass (read failed or incomplete). No promotion of them is committed. -/
 initialize r3WithheldRef : IO.Ref (List String) ← IO.mkRef []
+/-- Decision 2026-10-08: this pass's promotion evidence per candidate — its
+    class (by reason) and what it was read from (pod UID, boot id, copy id). -/
+initialize promotionEvidenceRef : IO.Ref (List (String × PromotionEvidence.Class × PromotionEvidence.Binding)) ← IO.mkRef []
+/-- partition → (master_id, source epoch) of its master, recorded while the
+    master was readable: what "the same history" means for a lagging copy. -/
+initialize masterHistoryRef : IO.Ref (List (Int × (String × String))) ← IO.mkRef []
 /-- Copy retention §10 (decision 2026-10-07, item 3): rebuilding nodes whose
     stats say parked with nothing in flight (no transfer, serve or switch). -/
 initialize parkedIdleRef : IO.Ref (List String) ← IO.mkRef []
@@ -556,6 +563,23 @@ private def refreshParkedRebuilds (stateRef : IO.Ref FlareClusterState) (ns : St
         IO.eprintln s!"[flare-operator] REBUILD RESUMED: {k} takes the rebuild slot again (it re-checks capacity, source and copy identity)"
         parkedIdleRef.set (parked.filter (· != k))
     | .error e => IO.eprintln s!"[flare-operator] rebuild_resume to {k} failed ({e}); it stays parked"
+
+/-- Decision 2026-10-08: record each partition's master history (master_id,
+    source epoch) while the master is readable — the reference for "the same
+    history" when it is gone. Unreadable: the record is kept as it was. -/
+private def refreshMasterHistory (stateRef : IO.Ref FlareClusterState) (ns : String) : IO Unit := do
+  let st ← stateRef.get
+  for (key, n) in st.nodeMap do
+    if n.role == FlareRole.Master && n.state == FlareState.Active && n.partition ≥ 0 then
+      match ← Bridge.queryPodStats (extractPodName key) ns "stats" with
+      | .ok out =>
+        let s := PromotionEvidence.parseStats out
+        match s.complete, s.masterId, s.sourceEpoch with
+        | true, some mid, some ep =>
+          if !mid.isEmpty && !ep.isEmpty then
+            masterHistoryRef.modify fun h => (h.filter (·.1 != n.partition)) ++ [(n.partition, (mid, ep))]
+        | _, _, _ => pure ()
+      | .error _ => pure ()
 
 private def handleRocksdbConfig (crd : FlareClusterView) (crName ns : String)
     (pendingConfRef : IO.Ref (Option (String × Nat))) : IO Unit := do
@@ -1132,16 +1156,38 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
       let masterKeysNow := (cs.nodeMap.filter fun kv => kv.2.role == FlareRole.Master).map Prod.fst
       let mut sourceIneligible : List String := []
       r3WithheldRef.set []
+      promotionEvidenceRef.set []
       if SourceEligibility.promotionRisk masterless deadCandidate unhealthyKeys termKeys masterKeysNow then
         let mut readings : List (String × SourceEligibility.Reading) := []
+        let mut evidence : List (String × PromotionEvidence.Class × PromotionEvidence.Binding) := []
+        let history ← masterHistoryRef.get
+        -- decision 2026-10-08: EVERY live non-master candidate is read and
+        -- classified by reason (Prepare and NotReady ones included: a last
+        -- resort must not reach a copy nobody looked at)
         for (key, n) in cs.nodeMap do
-          if n.role == FlareRole.Slave && n.state == FlareState.Active && readyNow.contains key then
+          if n.role != FlareRole.Master then
             match pods.find? (fun p => Bridge.PodInfo.toNodeKey p == key) with
             | some p =>
-              match ← Bridge.queryPodStats p.name ns "stats" with
-              | .ok out => readings := readings ++ [(key, SourceEligibility.classifyReply (some out))]
-              | .error _ => readings := readings ++ [(key, SourceEligibility.classifyReply none)]
+              let reply ← match ← Bridge.queryPodStats p.name ns "stats" with
+                | .ok out => pure (some out)
+                | .error _ => pure none
+              if n.role == FlareRole.Slave && n.state == FlareState.Active && readyNow.contains key then
+                readings := readings ++ [(key, SourceEligibility.classifyReply reply)]
+              let part : Int := if n.partition ≥ 0 then n.partition else n.lastMasterOf
+              let hasMaster := cs.nodeMap.any fun kv => kv.2.role == FlareRole.Master && kv.2.partition == part
+              let obs : PromotionEvidence.Observed := {
+                mapPrepare := n.state == FlareState.Prepare
+                mapActive := n.state == FlareState.Active
+                podReady := readyNow.contains key
+                partitionHasMaster := hasMaster
+                lastMasterHistory := history.lookup part
+                isLastMasterHolder := part ≥ 0 && n.lastMasterOf == part }
+              let cls := PromotionEvidence.classify reply obs
+              evidence := evidence ++ [(key, cls, PromotionEvidence.bindingOf (some p.uid) reply)]
             | none => pure ()
+        promotionEvidenceRef.set evidence
+        if !evidence.isEmpty then
+          IO.eprintln s!"[flare-operator] PROMOTION EVIDENCE (by reason, this pass): {evidence.map fun (k, c, _) => s!"{k}={c.label}"}"
         sourceIneligible := SourceEligibility.withheld readings
         -- decision 2026-10-07 (1): the commit refuses to promote a candidate
         -- whose reading was UNKNOWN (failed / incomplete) on this pass,
@@ -1149,6 +1195,13 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
         -- of the normal paths; the masterless refill's logged last resort may
         -- still seat it) until decided otherwise.
         r3WithheldRef.set (readings.filterMap fun (k, r) => if r == .unknown then some k else none)
+        -- not a normal promotion: anything other than eligible / legacy /
+        -- empty is out of the normal paths (the refill's last resort may still
+        -- choose a lagging copy; the commit decides by reason)
+        let notNormal := evidence.filterMap fun (k, c, _) => match c with
+          | .eligible | .legacy | .empty => none
+          | _ => some k
+        sourceIneligible := sourceIneligible ++ notNormal.filter (!sourceIneligible.contains ·)
         -- every reading this pass, unreadable ones included: which evidence
         -- a promotion on this pass could stand on (copy-identity 11)
         let shown := readings.map fun (k, e) => s!"{k}={SourceEligibility.readingLabel e}"
@@ -1372,6 +1425,23 @@ private def commitChecked (stateRef : IO.Ref FlareClusterState) (ver : Nat) (ucs
       IO.eprintln s!"[flare-operator] CRITICAL: PROMOTION ABORTED for {blocked}: its stats could not be read completely on this pass (R3 Unknown) — a copy that cannot be confirmed is not promoted; nothing from this pass is committed, the next pass reads again"
       promotionAbortedRef.set true
       return
+    -- decision 2026-10-08: promote only a candidate classified promotable on
+    -- THIS pass, whose pod, flared process and copy are still the ones read
+    let ev ← promotionEvidenceRef.get
+    for k in promoted do
+      let entry := ev.find? (·.1 == k)
+      let podNow ← podIdentityNow (extractPodName k) ns
+      let replyNow ← match ← Bridge.queryPodStats (extractPodName k) ns "stats" with
+        | .ok out => pure (some out)
+        | .error _ => pure none
+      let now := PromotionEvidence.bindingOf (podNow.map (·.1)) replyNow
+      let (ok, why) := PromotionEvidence.commitAllows (entry.map (·.2.1)) ((entry.map (·.2.2)).getD { podUid := none, bootId := none, copyId := none }) now
+      if !ok then
+        IO.eprintln s!"[flare-operator] CRITICAL: PROMOTION ABORTED for {k}: {why} — nothing from this pass is committed, the next pass reads again"
+        promotionAbortedRef.set true
+        return
+      if (entry.map (·.2.1)) == some .lagging then
+        IO.eprintln s!"[flare-operator] PROMOTION of a LAGGING copy (same history as the last master, behind it): {k} — a last resort, NOT a safe promotion; writes it never received are lost"
     promotionBarrier promoted
     let observed ← podIdentityRef.get
     for k in promoted do
@@ -2477,6 +2547,8 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
   processCopyDiscardApprovals crName ns
   -- §10: parked rebuilds give back their cluster slot; resume one when free
   refreshParkedRebuilds stateRef ns
+  -- decision 2026-10-08: each partition's master history, while readable
+  refreshMasterHistory stateRef ns
   handleClusterReplication crd (← stateRef.get) migrationRef pendingConfRef masterSnapshotRef driftTickRef metrics crName ns
 
   -- 5a. Blue/green migrations (FlareMigration CRs whose spec.source is this

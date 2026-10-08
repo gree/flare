@@ -2318,6 +2318,34 @@ void test_rebuild_park_resume_and_kept_copy_bytes() {
 	drop_rocksdb(s, wal_slave_dir);
 }
 
+// Decision 2026-10-08: the partial-copy marker is durable before the first
+// change, survives a crash part-way, and goes only on success or when a
+// different (verified) copy replaces the partial one.
+void test_copy_partial_marker_survives_a_crash_and_clears_on_replacement() {
+	storage_rocksdb* s = make_rocksdb(wal_slave_dir);
+	cut_assert_false(s->is_copy_partial());
+	cut_assert_equal_int(0, s->mark_copy_partial("merging full dump"));
+	storage_set_string(s, "k1", "v1");		// the merge changed something, then the process died
+	drop_rocksdb_noremove(s);
+	s = make_rocksdb(wal_slave_dir);
+	cut_assert_true(s->is_copy_partial());
+	// success clears it
+	cut_assert_equal_int(0, s->clear_copy_partial("merging full dump completed"));
+	cut_assert_false(s->is_copy_partial());
+	// left partial again, then a verified staged copy replaces it
+	cut_assert_equal_int(0, s->mark_copy_partial("merging full dump"));
+	storage_rocksdb* stg = s->open_staging("p1", false);
+	cut_assert_true(s->is_copy_partial());		// staging does not touch the live copy's marker
+	storage_set_string(stg, "k1", "full");
+	cut_assert_equal_int(0, stg->adopt_history("M", "E", 1));
+	const string nid = stg->get_copy_id();
+	cut_assert_equal_int(0, stg->seal());
+	delete stg;
+	cut_assert_equal_int(0, s->switch_to_staging("p1", nid));
+	cut_assert_false(s->is_copy_partial());
+	drop_rocksdb(s, wal_slave_dir);
+}
+
 // An abandoned attempt (a failed dump, a refused gate, a crash) leaves the
 // live copy as it was; a staging directory is never reused, and an
 // unfinished one is removed at the next open.

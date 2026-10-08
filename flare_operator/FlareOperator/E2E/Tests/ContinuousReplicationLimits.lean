@@ -4951,4 +4951,82 @@ def r3UnreadableSuite : TestSuite := {
   ]
 }
 
+-- ─── promotion by reason: the forbidden half of the pair (decision 2026-10-08) ──
+
+/-- The partner of continuous-replication-lag-hold-expiry test 9 (a LAGGING
+    copy of the same history is seated after the 60 s wait, NOT LOSS-FREE):
+    the same shape and the same wait, but the follower's copy is being
+    REBUILT (a staged copy held in flight) when the master goes. -/
+private def promotionReasonsCfg : ClusterConfig := {
+  name := "prom-reasons"
+  «namespace» := "flare-prom-reasons"
+  partitions := 1
+  replicas := 2
+  operatorName := "flare-operator"
+  debugPod := "debug-prom-reasons"
+  storageBackend := "rocksdb"
+  usePvc := true
+  extraFlaredConf := holdFlags
+  flaredEnv := [("FLARE_TEST_DISABLE_WAL_RECONSTRUCTION", "1"), ("FLARE_TEST_DESTRUCTIVE_HOLD_FILE", "/tmp/dhold")]
+  operatorEnv := [("FLARE_FOLLOW_FAILOVER_MAX_LAG", "20"), ("FLARE_FOLLOW_FAILOVER_WAIT_SECONDS", "60")]
+}
+
+def promotionReasonsSuite : TestSuite := {
+  name := "promotion-reasons"
+  setup := do
+    deployCluster promotionReasonsCfg
+    IO.sleep 30000
+  teardown := do
+    discard <| kubectl ["uncordon", kindNode]
+    cleanupCluster promotionReasonsCfg
+  onFailure := dumpClusterDiagnostics promotionReasonsCfg.«namespace» s!"app={promotionReasonsCfg.operatorName}"
+  tests :=
+    let c : Ctx := { cfg := promotionReasonsCfg }
+    let ns := promotionReasonsCfg.«namespace»
+    [
+    { name := "promotion by reason (the pair of lag-hold-expiry 9): a follower whose copy is being REBUILT (staged copy in flight) when the master goes is NOT seated, not even after the 60 s wait; it is logged FORBIDDEN and every attempt to promote it is aborted"
+      run := do
+        let graceOver ← waitForCondition "operator past its startup grace period" 240 do
+          return containsSubstr (← c.opLog 400) "grace period over"
+        if !graceOver then return .fail "the operator never logged the end of its startup grace period"
+        match ← c.pair with
+        | .error e => return .fail e
+        | .ok (mPod, mIp, sPod, sIp) =>
+          let w ← writeKeys promotionReasonsCfg.debugPod ns mIp promotionReasonsCfg.flarePort "pr" 60
+          if w != 60 then return .fail s!"precondition: stored {w}/60"
+          if !(← convergedItems c mIp sIp "the follower holds every key") then return .fail "precondition: the follower did not converge"
+          let sKey := s!"{sPod}.{promotionReasonsCfg.name}-nodes.{ns}.svc.cluster.local:{promotionReasonsCfg.flarePort}"
+          -- the follower rebuilds (staged, WAL catch-up off) and holds at the
+          -- switch: a copy is in flight
+          discard <| kubectl ["exec", "-n", ns, sPod, "-c", "flared", "--", "touch", "/tmp/dhold"]
+          if let .error e ← c.killFlaredIn sPod then return .fail s!"precondition: could not restart flared in {sPod}: {e}"
+          let since ← utcNow
+          let held ← waitForCondition s!"{sPod}'s staged copy is held in flight at the switch" 300 do
+            return containsSubstr (← c.flaredLogSince sPod since) "'switch to the verified staging copy' held by FLARE_TEST_DESTRUCTIVE_HOLD_FILE"
+          if !held then
+            discard <| kubectl ["exec", "-n", ns, sPod, "-c", "flared", "--", "rm", "-f", "/tmp/dhold"]
+            return .fail "precondition: the follower's rebuild never reached the held switch"
+          let inFlight := (← c.statNat (← getPodIp sPod ns |>.map (·.getD "")) "rebuild_in_flight").getD 0
+          -- the master goes and stays away (node cordoned) past the 60 s wait
+          match ← kubectl ["cordon", kindNode] with
+          | .error e => return .fail s!"could not cordon {kindNode}: {e}"
+          | .ok _ => pure ()
+          let t0 ← utcNow
+          discard <| kubectl ["delete", "pod", mPod, "-n", ns, "--grace-period=0", "--force", "--wait=false"]
+          let seen ← c.watchMaster 150 (fun x => x == sPod)
+          let lines := (← c.opLogSince t0).splitOn "\n"
+          let forbiddenLogged := lines.any fun l => containsSubstr l "PROMOTION EVIDENCE" && containsSubstr l s!"{sKey}=FORBIDDEN"
+          let promoted := lines.any fun l => containsSubstr l "PROMOTION committed" && containsSubstr l sKey
+          let aborts := (lines.filter fun l => containsSubstr l "PROMOTION ABORTED" && containsSubstr l sKey).length
+          IO.eprintln s!"# {sPod} rebuild in flight (stat {inFlight}); {mPod} gone at {t0} and kept away 150 s (> 60 s wait): masters seen {seen}; FORBIDDEN logged={forbiddenLogged}; promotion committed={promoted}; promotions aborted {aborts}"
+          c.windowRecord t0 [sPod] "promotion-reasons"
+          discard <| kubectl ["uncordon", kindNode]
+          discard <| kubectl ["exec", "-n", ns, sPod, "-c", "flared", "--", "rm", "-f", "/tmp/dhold"]
+          if inFlight != 1 then return .fail s!"precondition: the follower did not report its rebuild in flight (rebuild_in_flight {inFlight})"
+          if seen.contains sPod || promoted then return .fail s!"{sPod} was seated while its copy was being rebuilt"
+          if !forbiddenLogged then return .fail "the follower was not classified FORBIDDEN (being rebuilt)"
+          return .pass }
+  ]
+}
+
 end FlareOperator.E2E.Tests.ContinuousReplicationLimits

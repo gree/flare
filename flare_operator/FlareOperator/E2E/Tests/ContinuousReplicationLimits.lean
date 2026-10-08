@@ -1723,9 +1723,13 @@ def identitySuite : TestSuite := {
               let otherKey := s!"{other}.{c.cfg.name}-nodes.{ns}.svc.cluster.local:{c.cfg.flarePort}=0"
               let otherIneligible := (opLog.splitOn "\n").any fun l =>
                 containsSubstr l "R3 readings" && containsSubstr l otherKey
-              -- after its drain window the master's pod is replaced on the same
-              -- PVC: it must come back with every key (nothing was lost)
-              let back ← waitForCondition s!"the drained {m} returns on its PVC with every key" 300 do
+              -- storage (decision 2026-10-08): this suite's data dir is a PVC
+              -- (identityCfg.usePvc), so a pod replaced after its drain window
+              -- comes back with its copy. A memory-backed emptyDir loses it on
+              -- pod replacement: there the expectation does not apply.
+              if !c.cfg.usePvc then
+                return .fail "this check assumes PVC storage (a memory-backed emptyDir is lost on pod replacement)"
+              let back ← waitForCondition s!"the drained {m} returns on its PVC (persistent) with every key" 300 do
                 return (← c.currItems ((← getPodIp m ns).getD "")) == items
               let noOtherMaster := seen.all (· == m)
               -- no wrong promotion, and the drain did not complete as a handover

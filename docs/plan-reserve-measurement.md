@@ -5,17 +5,57 @@
 使う。投入元と現行サービスは触らない。最初は生成データ。実データの初期投入とは
 分ける。tmpfs の差の内訳を確認するまで reserve は未決。
 
-## 1. 実行先（実行前に確定する。空欄のままでは実行しない）
+## 1. 実行先（候補。2026-10-08 に変更なしの確認で作成。承認前は何も作らない）
 
-| 項目 | 値 |
-|---|---|
-| kube context | （ユーザーが指定） |
-| namespace（測定専用、新規） | （ユーザーが指定。既存のものは使わない） |
-| 破棄対象 | その namespace 内で試験が作るものだけ：FlareCluster `measure`、StatefulSet `measure-nodes`、Deployment `flare-operator`、Service／ConfigMap／Lease／PVC（`data-measure-nodes-*`）、debug pod、ClusterRoleBinding `flare-operator-<namespace>`（クラスタスコープはこれ 1 つ） |
-| 破棄しないもの | 投入元クラスタ、現行サービス、他の namespace、CRD、ClusterRole `flare-operator` |
-| 前提（クラスタスコープ、既存のものを使う） | CRD（FlareCluster ほか）と ClusterRole `flare-operator` がこのブランチの chart 版で入っていること。入っていなければ導入は別手順で承認を得る |
-| イメージ | このブランチから作ったイメージを、移設先が pull できるレジストリに置く（公開先・タグは別途承認）。`FLARE_E2E_MEASURE_FLARED_IMAGE`／`FLARE_E2E_MEASURE_OPERATOR_IMAGE` で指定 |
-| Web 接続 | なし（クライアントに提供しない、Service を外部公開しない） |
+確認したこと（すべて読み取りのみ）：context 一覧、namespace、CRD、ClusterRole、
+StorageClass、ノードの割当・使用量、pf-dev の Pod 配置と構成、イメージ。
+
+| 項目 | 候補 | 確認結果 |
+|---|---|---|
+| kube context | `gree-tc-tc-wg-dev-cluster-01`（既存の開発クラスタ） | pf-dev（namespace `pf-dev`）が同じクラスタにある |
+| namespace | 新規 `flare-reserve-test` | 存在しない（NotFound） |
+| CRD | 既存のまま使う（変更しない） | `flareclusters`／`flaremigrations` あり。`flarecopydiscardapprovals` はない（測定に不要）。既存 CRD に `rebuildReserveBytes` がないので、reserve は CR ではなく extra.conf で渡す |
+| RBAC | **namespace 内の RoleBinding** で既存 ClusterRole `flare-pf-dev-flare-operator` を参照（ClusterRole は変更しない。ClusterRoleBinding は作らない＝クラスタ全体の権限を与えない） | `flare-operator` という ClusterRole はない。nodes の読み取り権限がないので operator はゾーン配置を無効にして動く（警告ログのみ） |
+| イメージ | このブランチの測定時点の commit から `publish-images` で専用タグを発行し、**digest で固定**（ghcr.io/gree への発行は承認が必要） | pf-dev は ghcr.io/gree の rc56／rc65 を pull している |
+| ストレージ | tmpfs（`emptyDir medium: Memory`、pf-dev と同じ方式）。PVC 版は cbs（`Delete`）を 2×20Gi | pf-dev は tmpfs 8Gi・limit 8Gi・request 7Gi |
+| 配置 | pf-dev の Pod と同じノードに置かない（podAntiAffinity）。プール `np-q50mfoyg`（32 CPU／56 GiB） | 下記の容量の問題あり |
+
+**必要な容量と影響（pf-dev 相当、tmpfs）**
+
+- データ約 7.3 GB。staged 再構築では受け手に旧コピーと新コピーが並ぶので、受け手の
+  上限は約 2×7.3 GB＋予約分＝**18 Gi 程度**。送り手 8 Gi。合計の request は約
+  27 GiB（operator・debug を含む）。
+- pf-dev と同じ 8 Gi の形では staged 再構築は no_space で止まる（それ自体が結果の
+  一つ。pf-dev の形では旧コピー保持の再構築ができない）。
+- pf-dev の Pod がないノードは `10.163.224.7`（pf-dev の operator と他 namespace の
+  Pod）。memory request は既に約 66%（40/60 GB）で、空きは約 20 GB。**27 GiB は
+  入らない**。`10.163.224.6` は autoscaler の削除対象（taint あり）。
+- 選択肢：
+  - A（推奨）：プールに 1 ノード増える（autoscaler）ことを許容し、pf-dev の Pod と
+    別ノードに置く。pf-dev のノードには何も置かない。費用は測定時間分。
+  - B：`10.163.224.7` の空き（約 20 GB）に収まる半分の規模（約 3.7 GB）。pf-dev
+    相当ではない（外挿になる）。
+  - C：eklet（サーバーレスの仮想ノード）。pf-dev のノードから完全に分離できるが、
+    cgroup・tmpfs の計上が pf-dev と同じとは限らず、tmpfs の差の確認には向かない。
+- pf-dev への負荷：データ Pod は別ノード、通信は namespace 内のみ、測定の operator
+  は自分の namespace だけを見る（RoleBinding も namespace 内）。A では pf-dev の
+  ノードの CPU・メモリ・ネットワークを使わない。
+
+**作成するオブジェクト（すべて `flare-reserve-test` 内）**：Namespace、
+ServiceAccount `flare-operator`、RoleBinding（→ 既存 ClusterRole）、ConfigMap
+`measure-config`／`measure-node-map`、Lease、Deployment／Service `flare-operator`、
+Service `measure-nodes`／`measure-0`、StatefulSet `measure-nodes`（Pod 2）、
+FlareCluster `measure`、debug Pod、PVC（PVC 版のみ）。
+
+**削除**：測定後に namespace `flare-reserve-test` を削除（中のオブジェクトと PVC が
+消える）。**削除しないもの**：CRD、ClusterRole、他の namespace、pf-dev。
+
+**value-size 分布**：`stats` で取れるのは件数（curr_items）と SST の合計
+（`bytes` = rocksdb.total-sst-files-size）だけで、分布は取れない。Pod 内の `du`
+（SST と blob ファイルの合計）で、inline と blob（4 KB 以上の値）の比率は分かる。
+分布そのものは全件走査が要るので、行わない（必要なら別途相談）。生成データは
+「件数・平均の大きさ・blob の比率」を合わせた 2 種類の大きさの混合にする。
+pf-dev への読み取り（`stats` と `du` のみ、変更なし）も承認後に行う。
 
 ## 2. 生成データ（pf-dev 相当）
 

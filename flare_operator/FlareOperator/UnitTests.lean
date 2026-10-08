@@ -1368,7 +1368,7 @@ private def checkAuthoritativeHistory (ctx : Ctx) : IO Unit := do
       && (match resolveIntent withI i 12 ["t-11"] true (modern ⟨"uid-s", "boot-s2", "u2:1"⟩ ⟨"M", "4:p"⟩ false) "t" with | (_, .held 0 _) => true | _ => false)
       && (match resolveIntent withI i 12 ["t-11"] true (Seen.modern bS ⟨"M", "4:p"⟩ false false [] "") "t" with | (_, .held 0 _) => true | _ => false))
   -- (2) rebuild source, fresh reads
-  check ctx "history (2): a rebuild copies only from the RECORD's holder (its COPY — a restarted process with the same copy is fine, another copy is not — its history, healthy); never while an intent is pending; never from an empty source onto data or an unreadable target"
+  check ctx "history (2): a rebuild copies only from the RECORD's holder (its COPY — a restarted process with the same copy is fine, another copy is not — its history, healthy); never while an intent is pending; an empty source only as the recorded copy (CI 37834294217)"
     ((rebuildAllowed st 0 "m" (modern bM h2 false) (modern bS h2 false)).1
       && (rebuildAllowed st 0 "m" (modern ⟨"uid-m", "boot-m2", "u1:3"⟩ h2 false) (modern bS h2 false)).1
       && !(rebuildAllowed st 0 "m" (modern ⟨"uid-m", "boot-m2", "u9:1"⟩ h2 false) (modern bS h2 false)).1
@@ -1376,8 +1376,8 @@ private def checkAuthoritativeHistory (ctx : Ctx) : IO Unit := do
       && !(rebuildAllowed st 0 "m" (Seen.modern bM h2 false false [] "") (modern bS h2 false)).1
       && !(rebuildAllowed st 0 "m" .unreadable (modern bS h2 false)).1
       && !(rebuildAllowed withI 0 "s" (modern bS h2 false) (modern bM h2 false)).1
-      && !(rebuildAllowed st 0 "m" (modern bM h2 true) (modern bS h2 false)).1
-      && !(rebuildAllowed st 0 "m" (modern bM h2 true) .unreadable).1
+      && (rebuildAllowed st 0 "m" (modern bM h2 true) (modern bS h2 false)).1
+      && !(rebuildAllowed st 0 "m" (modern bM2 h2 true) (modern bS h2 false)).1
       && (rebuildAllowed st 0 "m" (modern bM h2 true) (modern bS h2 true)).1
       && !(rebuildAllowed absent 0 "m" (modern bM h2 false) (modern bS h2 false)).1
       && (rebuildAllowed { clusterUid := "cu", parts := [(0, .untracked "tch")] } 0 "m" .legacy .legacy).1)
@@ -1419,11 +1419,14 @@ private def checkAuthoritativeHistory (ctx : Ctx) : IO Unit := do
       && (load "cu" 1 (some (some (txt.replace "part 0 known 3 " "part 0 known 0 "))) false).recorded 0 == none)
   -- review of aea6cfd
   let bulkRec : Store := { clusterUid := "cu", parts := [(0, .known { rec0 with reason := "bulk" } none)] }
-  check ctx "history P1-3: an EMPTY source over a target with data is allowed only when the record is a VERIFIED bulk (empty-source 2: replicas follow a legal flush_all); otherwise refused"
+  check ctx "history P1-3 (CI 37834294217): an EMPTY source that IS the recorded copy with the recorded history is the authoritative state (a proven bulk or plain deletes: empty-source 2); an empty OTHER copy or history is refused, whatever the target"
     ((rebuildAllowed bulkRec 0 "m" (modern bM h2 true) (modern bS h2 false)).1
-      && !(rebuildAllowed st 0 "m" (modern bM h2 true) (modern bS h2 false)).1
+      && (rebuildAllowed st 0 "m" (modern bM h2 true) (modern bS h2 false)).1
+      && (rebuildAllowed st 0 "m" (modern bM h2 true) .unreadable).1
       && !(rebuildAllowed bulkRec 0 "m" (modern ⟨"uid-m", "boot-m", "u9:1"⟩ h2 true) (modern bS h2 false)).1
-      && !(rebuildAllowed bulkRec 0 "m" (modern bM ⟨"M", "9:z"⟩ true) (modern bS h2 false)).1)
+      && !(rebuildAllowed st 0 "m" (modern ⟨"uid-m", "boot-m", "u9:1"⟩ h2 true) (modern bS h2 false)).1
+      && !(rebuildAllowed bulkRec 0 "m" (modern bM ⟨"M", "9:z"⟩ true) (modern bS h2 false)).1
+      && !(rebuildAllowed st 0 "m" (modern bM ⟨"M", "9:z"⟩ true) (modern bS h2 false)).1)
   let full := "STAT rocksdb_copy_identity_consistent 1\r\nSTAT rocksdb_quarantined 0\r\nSTAT rocksdb_copy_partial 0\r\nSTAT rebuild_in_flight 0\r\nSTAT rocksdb_copy_id u1:3\r\nSTAT reconstruction_boot_id boot-m\r\nSTAT rocksdb_master_id M\r\nSTAT rocksdb_source_epoch 2:e\r\nSTAT curr_items 5\r\n"
   check ctx "history P1-4: LEGACY only without ANY newer key; a modern reply missing a needed key, invalid or without a pod UID is UNREADABLE; running / parked / partial are unhealthy"
     (seenOfReply "uid-m" (some "STAT curr_items 5\r\nSTAT rocksdb_master_id M\r\nEND\r\n") == .legacy
@@ -1432,11 +1435,23 @@ private def checkAuthoritativeHistory (ctx : Ctx) : IO Unit := do
       && seenOfReply "" (some (full ++ "END\r\n")) == .unreadable
       && seenOfReply "uid-m" (some full) == .unreadable
       && seenOfReply "uid-m" (some (full ++ "END\r\n")) == Seen.modern bM h2 true false [] ""
+      -- CI 37834294217: a non-RocksDB flared reports R3 but NO copy key = no copy evidence (legacy), not unreadable
+      && seenOfReply "uid-m" (some "STAT curr_items 5\r\nSTAT repl_read_source_eligible 1\r\nSTAT repl_read_source_state eligible\r\nSTAT repl_read_source_reason ok\r\nEND\r\n") == .legacy
+      && seenOfReply "uid-m" (some "STAT curr_items 5\r\nSTAT repl_read_source_state eligible\r\nSTAT rebuild_in_flight 0\r\nEND\r\n") == .unreadable
+      && seenOfReply "uid-m" (some "STAT curr_items 5\r\nSTAT repl_read_source_state eligible\r\nSTAT rocksdb_master_id M\r\nEND\r\n") == .unreadable
+      && seenOfReply "uid-m" (some "STAT curr_items 5\r\nSTAT repl_read_source_state eligible\r\n") == .unreadable
+      && seenOfReply "uid-m" (some "STAT curr_items 5\r\nSTAT repl_read_source_state bogus\r\nEND\r\n") == .unreadable
       && (match seenOfReply "uid-m" (some (full ++ "STAT reconstruction_current_state running\r\nEND\r\n")) with | .modern _ _ healthy _ _ _ => !healthy | _ => false)
       && (match seenOfReply "uid-m" (some (full ++ "STAT rebuild_parked 1\r\nEND\r\n")) with | .modern _ _ healthy _ _ _ => !healthy | _ => false)
       && (match seenOfReply "uid-m" (some ((full.replace "rocksdb_copy_partial 0" "rocksdb_copy_partial 1") ++ "END\r\n")) with | .modern _ _ healthy _ _ _ => !healthy | _ => false)
       && (match seenOfReply "uid-m" (some (full ++ "STAT rocksdb_bulk_chain u1:2>u1:3@2:e\r\nSTAT rocksdb_source_epoch_reason bulk\r\nEND\r\n")) with
           | .modern _ _ _ _ chain reason => chain == [⟨"u1:2", "u1:3", "2:e"⟩] && reason == "bulk" | _ => false))
+  let tchReply := "STAT curr_items 5\r\nSTAT repl_read_source_eligible 1\r\nSTAT repl_read_source_state eligible\r\nSTAT repl_read_source_reason ok\r\nEND\r\n"
+  check ctx "history (CI 37834294217): a first build of a non-RocksDB cluster (R3 keys, no copy key) becomes UNTRACKED (previous behaviour), so its rebuilds are not held as 'not recorded'"
+    (let copies := [("m", seenOfReply "uid-m" (some tchReply)), ("s", seenOfReply "uid-s" (some tchReply))]
+     match establish fresh 0 (some "m") copies false "t" with
+     | (s', .untracked 0 _) => (rebuildAllowed s' 0 "m" ((copies.lookup "m").getD .unreadable) ((copies.lookup "s").getD .unreadable)).1
+     | _ => false)
   check ctx "history (supplement): an intent whose fromGen / fromHist is not the CURRENT record is refused; a record changed under a pending intent = HOLD at resolution"
     ((beginIntent st { i with fromGen := 2 }).isNone && (beginIntent st { i with fromHist := ⟨"M", "1:old"⟩ }).isNone
       && (match resolveIntent (withI.setPart 0 (.known { rec0 with gen := 9 } none)) i 12 ["t-11"] true (modern bS ⟨"M", "4:p"⟩ false) "t" with | (_, .held 0 _) => true | _ => false))

@@ -275,9 +275,9 @@ def resolveIntent (s : Store) (i : Intent) (persistedVersion : Nat) (persistedId
 /-- May a rebuild copy from `sourceKey` onto the target? `source` and
     `target` are FRESH reads at the commit boundary. Only the RECORD's holder
     with its binding and history, healthy; never while an intent is pending or
-    the partition is held / unknown; never from an empty source onto a target
-    that holds data or cannot be read. -/
-def rebuildAllowed (s : Store) (p : Nat) (sourceKey : String) (source target : Seen) : Bool × String :=
+    the partition is held / unknown. An empty source is allowed only as that
+    recorded copy (an empty other copy is a different copy id / history). -/
+def rebuildAllowed (s : Store) (p : Nat) (sourceKey : String) (source _target : Seen) : Bool × String :=
   if !s.tracked p then (true, "untracked partition (previous behaviour)")
   else if (s.intentFor p).isSome then (false, "a promotion of the partition is pending")
   else
@@ -285,18 +285,18 @@ def rebuildAllowed (s : Store) (p : Nat) (sourceKey : String) (source target : S
     | some (.known _ (some hold)) => (false, s!"the partition is held: {hold}")
     | some (.known r none) =>
       match source with
-      | .modern b h healthy empty _ _ =>
+      | .modern b h healthy _ _ _ =>
         -- the SAME copy as recorded (a restarted process re-binds; a new pod
         -- UID / boot alone is not a different copy); fresh history and health
         if sourceKey != r.holder || b.copyId != r.binding.copyId then (false, s!"{sourceKey} is not the recorded holder ({r.holder}) with its copy")
         else if h != r.hist then (false, s!"{sourceKey} holds another history than the record")
         else if !healthy then (false, s!"{sourceKey} reports an unhealthy copy")
-        else if empty && r.reason != "bulk" && (match target with | .modern _ _ _ e _ _ => !e | _ => true) then
-          -- an empty source is the authoritative state ONLY when the record is
-          -- a VERIFIED bulk (flush_all / truncate proven by flared's receipt):
-          -- the target must follow it to empty. Otherwise an empty copy over
-          -- a target holding data is a loss, never a source.
-          (false, s!"{sourceKey} is EMPTY and the target holds data (or cannot be read), and the record is not a verified bulk: no reverse rebuild")
+        -- emptiness alone decides nothing here: the recorded copy with the
+        -- recorded history IS the authoritative state, however it became
+        -- empty (deletes, or a bulk proven by flared's receipt chain); an
+        -- empty OTHER copy (a new DB = a new copy id / history) is refused
+        -- above (CI 37834294217, empty-source 2: an emptied master's
+        -- replicas must follow it)
         else (true, "the authoritative holder")
       | _ => (false, s!"{sourceKey} was not observed as a modern copy")
     | some (.unknown c w) => (false, s!"the partition's history is {c.label} ({w})")
@@ -406,6 +406,13 @@ def seenOfReply (podUid : String) (reply : Option String) : Seen :=
     let s := PromotionEvidence.parseStats out
     if !s.complete || !s.invalid.isEmpty then .unreadable
     else if !s.newFormat then .legacy
+    -- a complete, valid reply WITHOUT any copy key: a backend that keeps no
+    -- copy evidence (flared emits every `rocksdb_*` / rebuild key only for a
+    -- RocksDB store; R3 keys alone are not copy evidence) = no copy evidence,
+    -- as an older flared (CI 37834294217: such clusters were read as
+    -- unreadable and their history never established)
+    else if s.inFlight.isNone && s.parked.isNone
+        && !((out.splitOn "\n").any fun l => ((l.replace "\r" "").trim).startsWith "STAT rocksdb_") then .legacy
     else
       match s.masterId, s.copyEpoch, s.bootId, s.copyId with
       | some mid, some ep, some boot, some cid =>

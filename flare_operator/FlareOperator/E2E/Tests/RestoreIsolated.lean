@@ -188,8 +188,14 @@ private def observeMasters (c : ClusterConfig) (secs : Nat) : IO (Nat × Nat × 
   let mut observed := 0
   for _ in [0:secs / 5] do
     samples := samples + 1
-    let raw ← operatorTcpCmd c.debugPod c.«namespace» c.operatorName c.operatorPort "node sync"
-    let entries := parseNodeSync raw
+    -- a sample slot counts only when the map WAS read in it; a transient read
+    -- failure is retried inside the slot (up to 3 reads, CI 37834294217:
+    -- 35/36), never skipped — every slot must still be observed
+    let mut entries := []
+    for _ in [0:3] do
+      if entries.isEmpty then
+        entries := parseNodeSync (← operatorTcpCmd c.debugPod c.«namespace» c.operatorName c.operatorPort "node sync")
+        if entries.isEmpty then IO.sleep 1000
     if !entries.isEmpty then
       observed := observed + 1
       if let some m := findMasterPod entries 0 then
@@ -445,10 +451,16 @@ def repeatSuite : TestSuite := {
           return containsSubstr (← kubectlLogsLabel s!"app={repCfg.operatorName}" ns 200000) "grace period over"
         if !graceOver then return .fail "precondition: the operator never ended its startup grace period"
         IO.sleep 10000
-        -- the operator's committed map version (fresh each time it is read)
+        -- the operator's committed map version (fresh each time it is read):
+        -- the `version=` line of the PERSISTED node map. CI 37834294217 read a
+        -- FlareCluster annotation that is never written (vnone); the Lease's
+        -- node-map-persisted marker is set once, at the first persist, so it
+        -- is not the current version either.
         let desired : IO (Option Nat) := do
-          match ← kubectlGetJsonpath "flarecluster" repCfg.name ns "{.metadata.annotations.flare\\.gree\\.net/node-map-persisted}" with
-          | .ok v => return v.trim.toNat?
+          match ← kubectlGetJsonpath "configmap" s!"{repCfg.name}-node-map" ns "{.data.nodeMap}" with
+          | .ok d => return ((d.splitOn "\n").findSome? fun l =>
+              let t := l.trim
+              if t.startsWith "version=" then (t.drop "version=".length).toNat? else none)
           | .error _ => return none
         let ver := fun (ip : String) => do return ((← statOf repCfg ip "node_map_version").bind String.toNat?)
         let mut acked : List (String × String) := []

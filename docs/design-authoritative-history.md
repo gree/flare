@@ -217,7 +217,7 @@ Still not covered (residual): flared itself does not know the authoritative
 history when it picks a reconstruction source or switches copies; the window in
 step 3 relies on the forwarded request failing.
 
-## Verification map (status 2026-10-09; nothing here is reviewed)
+## Verification map (status 2026-10-09 after CI 741d0c5; nothing here is reviewed)
 
 Status words: **implemented** (code exists) / **local** (run on the author's
 machine: Lean unit checks only) / **CI** (run in Linux CI) / **reviewed**.
@@ -225,16 +225,37 @@ An unexecuted test is never counted as evidence of a fix.
 
 | Fix | Test | Boundary checked | Status |
 |---|---|---|---|
-| P1-1 the persisted map is the COMMITTED one; aborts stop it | E2E history-tracking (1): the persisted node map carries the transition id and names the replica master; the record adopts it | Main commit -> node-map ConfigMap -> history record | implemented; not run |
-| P1-1 abort leaves the persisted map unchanged | E2E history-tracking (3b): with the record unwritable the promotion aborts and the persisted map does NOT name the replica master | Main commit -> node-map ConfigMap | implemented; not run |
+| P1-1 the persisted map is the COMMITTED one; aborts stop it | E2E history-tracking (1): the persisted node map carries the transition id and names the replica master; the record adopts it | Main commit -> node-map ConfigMap -> history record | CI 741d0c5: (1) PASSED |
+| P1-1 abort leaves the persisted map unchanged | E2E history-tracking (3b): with the record unwritable the promotion aborts and the persisted map does NOT name the replica master | Main commit -> node-map ConfigMap | CI 741d0c5: (3b) FAILED on its precondition (no Active P0 master) after (R) — unexplained |
 | P1-2 restart with the new format | unit: committed map -> serializeNodeMap -> strict validate -> restored map -> resolveIntent; malformed transition rejected | pure (the same functions Main uses) | local |
-| P1-2 / operator restart | E2E history-tracking (1) (operator restarted between the lag and the promotion) and (5) (operator restarted after the intent, before the map commit: the intent is dropped as uncommitted) | real restart, persisted map + record | implemented; not run |
-| first build: record write fails | E2E history-firstbuild: while writes are refused no history record, NO node map, the operator hands out no map (node sync empty), `node add` refused; after writes are allowed the record is created no later than the map, adopted as first build, writes acknowledged and replicated | Main ensureHistoryStore -> registration gate (TCP) -> node-map ConfigMap | implemented; not run |
+| P1-2 / operator restart | E2E history-tracking (1) (operator restarted between the lag and the promotion) and (5) (operator restarted after the intent, before the map commit: the intent is dropped as uncommitted) | real restart, persisted map + record | CI 741d0c5: (1) PASSED; (5) FAILED on its precondition (no intent reached the barrier) — unexplained |
+| first build: record write fails | E2E history-firstbuild: while writes are refused no history record, NO node map, the operator hands out no map (node sync empty), `node add` refused; after writes are allowed the record is created no later than the map, adopted as first build, writes acknowledged and replicated | Main ensureHistoryStore -> registration gate (TCP) -> node-map ConfigMap | CI 741d0c5: PASSED (test 16; group failed for other tests) |
 | first build gate | unit mapMayBePersisted | pure | local |
-| P1-3 legal empty master repairs / an empty other copy does not | unit P1-3 pair (verified bulk allowed; other copy / other history / non-bulk record refused); unit pair D (empty DB new copy: no re-bind, no bulk, rebuild refused); E2E history-tracking (R) (empty process under the master's name never seated; the replica's data kept; the ex-master rebuilt from it); the existing empty-source suites | pure + Main rebuild gate + refill | unit local; E2E not run |
+| P1-3 legal empty master repairs / an empty other copy does not | unit P1-3 pair, CORRECTED after CI 741d0c5 (the recorded copy with the recorded history is allowed when empty whatever the record's reason — plain deletes included, empty-source 2; an empty other copy / other history refused); unit pair D (empty DB new copy: no re-bind, no bulk, rebuild refused); E2E history-tracking (R) (empty process under the master's name never seated; the replica's data kept; the ex-master rebuilt from it); the existing empty-source suites | pure + Main rebuild gate + refill | unit local (corrected); CI 741d0c5: (R) FAILED (cause not established, sampling fixed), empty-source 2 FAILED on the rule now corrected |
 | same-copy restart recovers | unit pair C (re-bind, rebuild allowed); existing PVC suites (pvc-survival, copy-identity 11) restart with the same copy | pure + Main | unit local; E2E not run |
-| partial / quarantine / unknown never promoted | unit (classifier, needs_rebuild (2), P1-4 seenOfReply health); E2E history-tracking (2) (part-way), promotion-reasons | pure + Main | unit local; E2E not run |
-| P1-4 capability | unit seenOfReply (legacy only without newer keys; partial / invalid / no UID unreadable; running / parked / partial unhealthy) | pure (Main calls it) | local |
+| partial / quarantine / unknown never promoted | unit (classifier, needs_rebuild (2), P1-4 seenOfReply health); E2E history-tracking (2) (part-way), promotion-reasons | pure + Main | unit local; CI 741d0c5: (2) PASSED |
+| P1-4 capability | unit seenOfReply (legacy only without newer keys; partial / invalid / no UID unreadable; running / parked / partial unhealthy); after CI 741d0c5: a complete reply with R3 keys but NO copy key (non-RocksDB backend) = no copy evidence -> untracked, composed with establish + rebuildAllowed | pure (Main calls it) | local; the regression it fixes was found BY CI 741d0c5 (not yet re-run) |
 | P1-5 intent fresh read | the code path (reclassifyAllows / commitTimeAllows + binding) — no dedicated E2E | Main commit | implemented; not run |
-| P1-6 bulk receipt | C++ test_bulk_receipt_normal_failed_write_and_crash_before_epoch: return values (0 / -1 / -1) AND the state after reopen (receipt present, pending absent / finalised at reopen / no receipt, pending kept) for: normal, receipt write failing after the epoch, crash before the epoch | storage_rocksdb truncate + open | implemented; NOT compiled locally (CI) |
+| P1-6 bulk receipt | C++ test_bulk_receipt_normal_failed_write_and_crash_before_epoch: return values (0 / -1 / -1) AND the state after reopen (receipt present, pending absent / finalised at reopen / no receipt, pending kept) for: normal, receipt write failing after the epoch, crash before the epoch | storage_rocksdb truncate + open | compiled in CI 741d0c5 (nix-linux success, 0 failures) but the totals equal b253fc0's, so its EXECUTION is not shown: the next run prints it by name |
 | supplements | unit keepTransitions, begin / resolve record checks | pure | local |
+
+### CI 741d0c5 (E2E 37834294217) — what it showed
+
+- Regression (fixed, not yet re-run): non-RocksDB clusters read as unreadable ->
+  no record -> every rebuild held ('not recorded'): breaker-migration, repair,
+  topology, failover-data, authority failures were slave-assignment deadlocks.
+- Regression (fixed, not yet re-run): empty-source 2 (master emptied by deletes)
+  refused by the empty-source rule; 3-8 failed on its preconditions.
+- Passed in CI on the real Main path: history-tracking (1) (empty ex-master,
+  lagging replica promoted across an operator restart from the persisted
+  history) and (2) (part-way copy forbidden, promoted once the marker is gone).
+- Also PASSED in that run (CI, real Main path, NOT reviewed): (3a) failed
+  history write not applied, (4) corrupt record never adopted / overwritten,
+  (6) promotion target replaced before adoption -> HELD, and history-firstbuild
+  16 (record write refused: no node map, no registration answered; after the
+  permission returns, record no later than the map, writes replicated). The
+  group as a whole failed, so these are single-test CI results; they are
+  re-run with the fixes.
+- restore-promotion harness defects: 35/36 sampling, wrong object for the
+  committed version (both fixed); (R) cause not established (sampling fixed to
+  real reads); (5) / (3b) precondition failures after (R) — unexplained.

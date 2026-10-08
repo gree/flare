@@ -159,7 +159,7 @@ def othersHaveData (copies : List (String × Seen)) (k : String) : Bool :=
 /-- First build / migration adoption / untracked, from a partition's copies.
     `approved`: the FlareCluster carries the migration approval for its uid. -/
 def establish (s : Store) (p : Nat) (masterKey : Option String) (copies : List (String × Seen))
-    (approved : Bool) (now : String) : Store × Change :=
+    (approved : Bool) (now : String) (lastMaster : Option String := none) : Store × Change :=
   let state := s.part p
   let adoptable := match state with
     | none => s.origin == "first-build"
@@ -175,7 +175,28 @@ def establish (s : Store) (p : Nat) (masterKey : Option String) (copies : List (
      .untracked p "no modern copy: untracked (previous behaviour)")
   else
     match masterKey with
-    | none => (s, .held p "no master to take the history from")
+    | none =>
+      -- an APPROVED adoption with no master in the map (a restored map whose
+      -- master re-registered as a replica: SAF-09 recovery, CI 0db2229
+      -- authority 29): adopted only when the history is unambiguous — every
+      -- copy modern, healthy, and holding the SAME history — and exactly one
+      -- copy was the partition's last master (it becomes the holder).
+      -- Anything else stays held: choosing between histories is the record's
+      -- job, never a guess.
+      let modern := copies.filterMap fun (k, x) => match x with
+        | .modern b h healthy _ _ _ => some (k, b, h, healthy)
+        | _ => none
+      let hists := (modern.map fun (_, _, h, _) => h).eraseDups
+      match state, lastMaster, hists with
+      | some (.unknown .absent _), some lm, [h] =>
+        if modern.length != copies.length || !(modern.all fun (_, _, _, ok) => ok) then
+          (s, .held p "no master, and not every copy is a healthy modern copy")
+        else match modern.find? (fun (k, _, _, _) => k == lm) with
+          | some (_, b, _, _) =>
+            let r : Record := { gen := 1, hist := h, holder := lm, binding := b, since := now, reason := "adopted" }
+            (s.setPart p (.known r none), .recorded p r s!"adopted (approved, no master in the map) from the last master {lm}: every copy holds the same history")
+          | none => (s, .held p s!"no master, and the last master {lm} is not an observed copy")
+      | _, _, _ => (s, .held p "no master to take the history from (an approved adoption without a master needs one history on every copy and exactly one last master)")
     | some m =>
       match copies.lookup m with
       | some (.modern b h healthy empty _ _) =>
@@ -271,6 +292,44 @@ def resolveIntent (s : Store) (i : Intent) (persistedVersion : Nat) (persistedId
         let r : Record := { gen := i.fromGen + 1, hist := h, holder := i.target, binding := b, since := now, reason := "promotion" }
         (clear (s.setPart i.partition (.known r none)), .recorded i.partition r s!"{i.id} adopted as generation {r.gen}")
     | _ => (s, .none)
+
+/-- What one observation pass must READ for partition `p` — only what the
+    transition that can apply needs (CI 0db2229 local / 741d0c5: reading every
+    node every pass made passes outlast the 15 s lease): the intent's target;
+    the record's holder (re-bind, bulk); every copy only while a record can be
+    ESTABLISHED (the same conditions as `establish`); nothing otherwise. -/
+inductive Need where
+  | nothing
+  | target (key : String)
+  | holder (key : String)
+  | copies
+  deriving Repr, BEq
+
+def need (s : Store) (p : Nat) (approved : Bool) : Need :=
+  match s.intentFor p with
+  | some i => .target i.target
+  | none =>
+    match s.part p with
+    | some (.known r _) => .holder r.holder
+    | none => if s.origin == "first-build" then .copies else .nothing
+    | some (.unknown .absent _) => if approved then .copies else .nothing
+    | some (.untracked _) => if approved then .copies else .nothing
+    | _ => .nothing
+
+/-- Observed every pass (else every 15 s): a pending intent, a hold, or a
+    record that can still be established. -/
+def urgent (s : Store) (p : Nat) (approved : Bool) : Bool :=
+  match need s p approved with
+  | .copies | .target _ => true
+  | .holder _ => (s.held p).isSome
+  | .nothing => false
+
+/-- Whether `rebuildAllowed` looks at the source at all (a known record, no
+    hold, no intent); otherwise the decision needs no read. -/
+def rebuildNeedsSource (s : Store) (p : Nat) : Bool :=
+  s.tracked p && (s.intentFor p).isNone && match s.part p with
+    | some (.known _ none) => true
+    | _ => false
 
 /-- May a rebuild copy from `sourceKey` onto the target? `source` and
     `target` are FRESH reads at the commit boundary. Only the RECORD's holder

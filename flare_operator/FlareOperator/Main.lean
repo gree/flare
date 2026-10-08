@@ -633,6 +633,9 @@ private def readHistory (crName ns : String) : IO (Option (Option String) × Str
     if containsSubstr e "NotFound" || containsSubstr e "not found" then return (some none, "")
     return (none, "")
 
+/-- When the store was last loaded (monotonic ms; 0 = never). -/
+initialize historyLoadedAtRef : IO.Ref Nat ← IO.mkRef 0
+
 /-- Load the persisted store (and the migration approval) for this use. -/
 private def loadHistory (crName ns : String) (partitions : Nat) : IO (Option AuthoritativeHistory.Store) := do
   let (uid, approval) ← match ← kubectl ["get", "flarecluster", crName, "-n", ns, "-o",
@@ -646,7 +649,9 @@ private def loadHistory (crName ns : String) (partitions : Nat) : IO (Option Aut
   let (persisted, rv) ← readHistory crName ns
   -- a node map present (or not readable) means the cluster existed before: a
   -- missing record is then ABSENT (migration approval needed), never a first build
-  let nodeMapPresent ← match ← kubectl ["get", "configmap", s!"{crName}-node-map", "-n", ns, "-o", "jsonpath={.metadata.name}"] with
+  -- (read only when the record is absent: it decides nothing otherwise)
+  let nodeMapPresent ← if persisted != some none then pure true else
+    match ← kubectl ["get", "configmap", s!"{crName}-node-map", "-n", ns, "-o", "jsonpath={.metadata.name}"] with
     | .ok _ => pure true
     | .error e => pure !(containsSubstr e "NotFound" || containsSubstr e "not found")
   historyRvRef.set rv
@@ -654,6 +659,7 @@ private def loadHistory (crName ns : String) (partitions : Nat) : IO (Option Aut
   historyApprovedRef.set (approval == uid)
   let st := AuthoritativeHistory.load uid partitions persisted nodeMapPresent
   historyStoreRef.set (some st)
+  historyLoadedAtRef.set (← IO.monoMsNow)
   return some st
 
 /-- Persist the store: only while THIS pod holds the lease (resourceVersion
@@ -699,12 +705,30 @@ private def persistHistory (crName ns : String) (st : AuthoritativeHistory.Store
     IO.eprintln s!"[flare-operator] CRITICAL: the authoritative history could not be persisted ({e.take 200}); the change is NOT applied (decided again on the next pass)"
     return false
 
+/-- Run a history step and log its duration when it took over 1 s (the
+    history reads are kubectl round trips inside the pass; a pass longer than
+    the 15 s lease fences the operator — local run 0db2229). -/
+private def timedHistory {α : Type} (what : String) (act : IO α) : IO α := do
+  let t0 ← IO.monoMsNow
+  let r ← act
+  let dt := (← IO.monoMsNow) - t0
+  if dt > 1000 then IO.eprintln s!"[flare-operator] history timing: {what} took {dt}ms"
+  return r
+
 /-- A first build: create the (empty, origin first-build) record BEFORE the
     first node map is persisted, so a later absent record can only mean a
     migration or a loss. Called at the start of every pass until it exists. -/
 initialize historyEnsuredRef : IO.Ref Bool ← IO.mkRef false
 private def ensureHistoryStore (crName ns : String) (partitions : Nat) : IO Bool := do
-  if ← historyEnsuredRef.get then return true
+  if ← historyEnsuredRef.get then
+    -- EVERY pass loads the record before anything classifies a candidate
+    -- (CI 0db2229, history (5): after an operator restart the store was
+    -- loaded only by observeHistory, late in the pass; a pass whose promotion
+    -- aborted returned before it, so every candidate stayed 'not recorded'
+    -- and the failover never happened). A failed load clears it: a stale
+    -- record is never used (unknown = held).
+    if (← loadHistory crName ns partitions).isNone then historyStoreRef.set none
+    return true
   let some st ← loadHistory crName ns partitions | return false
   let (persisted, _) ← readHistory crName ns
   let nodeMapPresent := st.origin != "first-build"
@@ -779,26 +803,41 @@ private def persistedNodeMap (crName ns : String) : IO (Option FlareClusterState
     Applied only when the write succeeded. -/
 private def observeHistory (stateRef : IO.Ref FlareClusterState) (crName ns : String) (partitions : Nat) : IO Unit := do
   let nowMs ← IO.monoMsNow
-  let unsettled := match ← historyStoreRef.get with
-    | none => true
-    | some st => (List.range partitions).any fun p => (st.recorded p).isNone || (st.intentFor p).isSome || (st.held p).isSome
-  if !unsettled && nowMs - (← historyObsAtRef.get) < 15000 && (← historyObsAtRef.get) != 0 then return
-  historyObsAtRef.set nowMs
-  let some st0 ← loadHistory crName ns partitions | return
+  let approved0 ← historyApprovedRef.get
+  let periodic := nowMs - (← historyObsAtRef.get) ≥ 15000 || (← historyObsAtRef.get) == 0
+  let urgentParts := match ← historyStoreRef.get with
+    | none => List.range partitions
+    | some st => (List.range partitions).filter fun p => AuthoritativeHistory.urgent st p approved0
+  if !periodic && urgentParts.isEmpty then return
+  if periodic then historyObsAtRef.set nowMs
+  -- the record loaded at the start of this pass (< 5 s), else a new read
+  let cached ← historyStoreRef.get
+  let loadedAt ← historyLoadedAtRef.get
+  let some st0 ← (if cached.isSome && loadedAt != 0 && (← IO.monoMsNow) - loadedAt < 5000 then pure cached
+    else loadHistory crName ns partitions) | return
   if !AuthoritativeHistory.writable st0 then
     IO.eprintln s!"[flare-operator] CRITICAL: the authoritative history record is not usable ({repr (st0.parts.map (·.2))}); promotions and rebuilds of its partitions are held"
     return
   let st ← stateRef.get
   let now ← utcNowIso
   let approved ← historyApprovedRef.get
+  -- this pass's partitions: every one on the 15 s period, else the urgent ones
+  let parts := if periodic then List.range partitions
+    else (List.range partitions).filter fun p => AuthoritativeHistory.urgent st0 p approved
+  let copiesOf := fun (p : Nat) => (st.nodeMap.filter fun (_, n) => n.partition == Int.ofNat p || n.lastMasterOf == Int.ofNat p).map Prod.fst
+  -- read ONLY the copies a partition's transition needs (each node at most once)
+  let wanted := parts.foldl (fun acc p => match AuthoritativeHistory.need st0 p approved with
+    | .copies => acc ++ copiesOf p
+    | .target k | .holder k => acc ++ [k]
+    | .nothing => acc) ([] : List String)
   let mut seen : List (String × AuthoritativeHistory.Seen) := []
-  for (key, _) in st.nodeMap do
+  for key in wanted.eraseDups do
     seen := seen ++ [(key, ← seeFresh key ns)]
-  let persisted ← persistedNodeMap crName ns
+  let persisted ← if parts.any (fun p => (st0.intentFor p).isSome) then persistedNodeMap crName ns else pure none
   let mut store := st0
   let mut changes : List String := []
-  for p in List.range partitions do
-    let copies := seen.filter fun (k, _) => ((st.lookupNode k).map (fun n => n.partition == Int.ofNat p || n.lastMasterOf == Int.ofNat p)).getD false
+  for p in parts do
+    let copies := seen.filter fun (k, _) => (copiesOf p).contains k
     let masterKey := (st.nodeMap.find? fun kv => kv.2.role == FlareRole.Master && kv.2.state == FlareState.Active && kv.2.partition == Int.ofNat p).map Prod.fst
     let note := fun (c : AuthoritativeHistory.Change) (chs : List String) => match c with
       | .recorded _ _ why => chs ++ [s!"p{p}: {why}"]
@@ -837,7 +876,10 @@ private def observeHistory (stateRef : IO.Ref FlareClusterState) (crName ns : St
         store := s2
         changes := note c2 changes
       | _ =>
-        let (s', c) := AuthoritativeHistory.establish store p masterKey copies approved now
+        -- the unique copy the map marks as the partition's last master
+        let lastMasters := (st.nodeMap.filter fun (_, n) => n.lastMasterOf == Int.ofNat p).map Prod.fst
+        let lastMaster := match lastMasters with | [k] => some k | _ => none
+        let (s', c) := AuthoritativeHistory.establish store p masterKey copies approved now lastMaster
         store := s'
         changes := note c changes
   if store != st0 then
@@ -1841,7 +1883,17 @@ private def commitChecked (stateRef : IO.Ref FlareClusterState) (ver : Nat) (ucs
   --    aborts the whole commit.
   let crName ← historyCrRef.get
   let nParts := ((cur.nodeMap ++ ucs.nodeMap).foldl (fun a kv => max a (kv.2.partition + 1)) (0 : Int)).toNat
-  let store ← if crName.isEmpty then pure none else loadHistory crName ns nParts
+  -- The record as loaded at the start of THIS pass (ensureHistoryStore; our
+  -- own writes update it) is used for the rebuild gate; a commit that
+  -- promotes, or a copy older than 5 s, reads it again. Reading it on every
+  -- commit cost ~1 s each, 7-8 commits a pass (local run, 0db2229+timing):
+  -- passes outlasted the 15 s lease and every history write was fenced.
+  let promotes := gated.state.nodeMap.any fun kv =>
+    kv.2.role == FlareRole.Master && (cur.lookupNode kv.1).map (·.role) != some FlareRole.Master
+  let fresh := (← IO.monoMsNow) - (← historyLoadedAtRef.get) < 5000 && (← historyLoadedAtRef.get) != 0
+  let store ← if crName.isEmpty then pure none
+    else if !promotes && fresh then historyStoreRef.get
+    else timedHistory "commit: loadHistory" (loadHistory crName ns nParts)
   let gated ← do
     let mut nodeMap := gated.state.nodeMap
     for (k, a) in gated.state.nodeMap do
@@ -1850,7 +1902,11 @@ private def commitChecked (stateRef : IO.Ref FlareClusterState) (ver : Nat) (ucs
         let (ok, why) ← match store, src with
           | some st, some m =>
             if !AuthoritativeHistory.writable st then pure (false, "the history record is not usable")
-            else pure (AuthoritativeHistory.rebuildAllowed st a.partition.toNat m (← seeFresh m ns) (← seeFresh k ns))
+            -- read the source FRESH only when the record decides on it (no
+            -- read for an untracked / unknown / held partition)
+            else
+              let srcSeen ← if AuthoritativeHistory.rebuildNeedsSource st a.partition.toNat then seeFresh m ns else pure .unreadable
+              pure (AuthoritativeHistory.rebuildAllowed st a.partition.toNat m srcSeen .unreadable)
           | none, _ => pure (false, "the authoritative history could not be loaded")
           | _, none => pure (false, "the partition has no master to rebuild from")
         if !ok then
@@ -2154,7 +2210,7 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
       IO.eprintln s!"[flare-operator] CRD changed: partitions {prevCrd.spec.partitions}→{crd.spec.partitions}, replicas {prevCrd.spec.replicas}→{crd.spec.replicas}"
     crdRef.set crd
     -- the authoritative history exists BEFORE the first node map is persisted
-    if !(← ensureHistoryStore crName ns crd.spec.partitions) then return
+    if !(← timedHistory "ensureHistoryStore" (ensureHistoryStore crName ns crd.spec.partitions)) then return
     followDesiredRef.set (some (crd.spec.rocksdb.replFollowEnabled.getD false))
     metrics.partitionsDesired.set crd.spec.partitions.toFloat
 
@@ -3034,7 +3090,7 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
   -- §10: parked rebuilds give back their cluster slot; resume one when free
   refreshParkedRebuilds stateRef ns
   -- the partitions' authoritative history: observed, transitions only
-  observeHistory stateRef crName ns crd.spec.partitions
+  timedHistory "observeHistory" (observeHistory stateRef crName ns crd.spec.partitions)
   handleClusterReplication crd (← stateRef.get) migrationRef pendingConfRef masterSnapshotRef driftTickRef metrics crName ns
 
   -- 5a. Blue/green migrations (FlareMigration CRs whose spec.source is this

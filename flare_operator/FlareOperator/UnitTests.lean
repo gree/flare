@@ -1452,6 +1452,29 @@ private def checkAuthoritativeHistory (ctx : Ctx) : IO Unit := do
      match establish fresh 0 (some "m") copies false "t" with
      | (s', .untracked 0 _) => (rebuildAllowed s' 0 "m" ((copies.lookup "m").getD .unreadable) ((copies.lookup "s").getD .unreadable)).1
      | _ => false)
+  check ctx "history (cost, CI 741d0c5 / local 0db2229 lease loss): a pass reads only what can change the record — every copy only while a record can be established; the holder of a known record; an intent's target; nothing for untracked / unknown without approval, and those are not observed every pass"
+    (need fresh 0 false == .copies && urgent fresh 0 false
+      && need { clusterUid := "cu" } 0 false == .nothing
+      && need st 0 false == .holder "m" && !urgent st 0 false
+      && need withI 0 false != .copies && urgent withI 0 false
+      && need { clusterUid := "cu", parts := [(0, .untracked "tch")] } 0 false == .nothing
+      && need { clusterUid := "cu", parts := [(0, .untracked "tch")] } 0 true == .copies
+      && need absent 0 false == .nothing && need absent 0 true == .copies
+      && !urgent { clusterUid := "cu", parts := [(0, .untracked "tch")] } 0 false
+      && rebuildNeedsSource st 0 && !rebuildNeedsSource withI 0
+      && !rebuildNeedsSource { clusterUid := "cu", parts := [(0, .untracked "tch")] } 0
+      && !rebuildNeedsSource absent 0)
+  check ctx "history (CI 0db2229 authority 29): an APPROVED adoption with no master in the map adopts only an unambiguous history (every copy healthy, modern, the same history, one last master = holder); never without approval, never on differing histories / an unhealthy or unreadable copy / no or several last masters"
+    (let same := [("m", modern bM h2 false), ("s", modern bS h2 false)]
+     (match establish absent 0 none same true "t" (some "m") with
+       | (s', .recorded 0 r _) => r.holder == "m" && r.reason == "adopted" && s'.recorded 0 == some h2 | _ => false)
+     && (establish absent 0 none same false "t" (some "m")).2 == .none
+     && (match establish absent 0 none [("m", modern bM h2 false), ("s", modern bS ⟨"M", "9:z"⟩ false)] true "t" (some "m") with | (_, .held 0 _) => true | _ => false)
+     && (match establish absent 0 none [("m", modern bM h2 false), ("s", .unreadable)] true "t" (some "m") with | (_, .held 0 _) => true | _ => false)
+     && (match establish absent 0 none [("m", Seen.modern bM h2 false false [] ""), ("s", modern bS h2 false)] true "t" (some "m") with | (_, .held 0 _) => true | _ => false)
+     && (match establish absent 0 none same true "t" none with | (_, .held 0 _) => true | _ => false)
+     && (match establish absent 0 none same true "t" (some "x") with | (_, .held 0 _) => true | _ => false)
+     && (match establish fresh 0 none same false "t" (some "m") with | (_, .held 0 _) => true | _ => false))
   check ctx "history (supplement): an intent whose fromGen / fromHist is not the CURRENT record is refused; a record changed under a pending intent = HOLD at resolution"
     ((beginIntent st { i with fromGen := 2 }).isNone && (beginIntent st { i with fromHist := ⟨"M", "1:old"⟩ }).isNone
       && (match resolveIntent (withI.setPart 0 (.known { rec0 with gen := 9 } none)) i 12 ["t-11"] true (modern bS ⟨"M", "4:p"⟩ false) "t" with | (_, .held 0 _) => true | _ => false))

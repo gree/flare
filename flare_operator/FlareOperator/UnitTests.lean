@@ -26,6 +26,7 @@ import FlareOperator.StateMachine.K8sReconciler
 import FlareOperator.StateMachine.NodeMapRecovery
 import FlareOperator.K8s.Bridge
 import FlareOperator.E2E.TraceMatch
+import FlareOperator.E2E.Helpers
 import FlareOperator.E2E.PromotionTimeline
 import FlareOperator.StateMachine.SourceEligibility
 import FlareOperator.StateMachine.RebuildConcurrency
@@ -1238,6 +1239,12 @@ private def checkActivationOrder (ctx : Ctx) : IO Unit := do
   let act := fun (i : Nat) => s!"[NTC] node activated (attempt 1) on the copy from {n i} (map version now 9)"
   let stop := s!"[WRN] activation STOPPED before attempt 1: the partition's master is now {n 1}, not the source {n 2}"
   let old := "empty-source-nodes-2"
+  check ctx "waitForCondition (review): a check starts only before the deadline; a hold AFTER it is late (not OK); at the deadline OK still counts; a miss at or after it is a timeout"
+    (FlareOperator.E2E.Helpers.mayStartCheck 999 1000 && !FlareOperator.E2E.Helpers.mayStartCheck 1000 1000
+      && FlareOperator.E2E.Helpers.waitStep true 1000 1000 == .ok
+      && FlareOperator.E2E.Helpers.waitStep true 1001 1000 == .late
+      && FlareOperator.E2E.Helpers.waitStep false 1000 1000 == .timeout
+      && FlareOperator.E2E.Helpers.waitStep false 999 1000 == .again)
   -- R4 receiver filter (review): flared's real versioned line (cluster.cc
   -- log_notice format) and the older lines are kept; unrelated lines are not
   let realAccept := "2026-10-06T10:11:12.123456789Z [140239964415680][NTC][cluster.cc:1289-_reconstruct_node_partition_map] node map accepted (version 4294967390, 3 entries); own role=slave state=active balance=50 partition=0; masters: 0=continuous-replication-nodes-0.continuous-replication-nodes.flare-continuous-replication.svc.cluster.local:12121/active"

@@ -95,15 +95,34 @@ def kubectlLogsLabel (label ns : String) (tail : Nat) : IO String := do
 -- Polling
 -- ===========================================================================
 
+/-- One decision of `waitForCondition`, pure (unit tested). Times are
+    monotonic milliseconds. A check is only STARTED before the deadline; a
+    check that holds only AFTER the deadline is `late`, which the wait
+    reports as a timeout (not a success). -/
+inductive WaitStep where
+  | ok | late | timeout | again
+  deriving Repr, BEq
+
+/-- Before a check: may it start? -/
+def mayStartCheck (now deadline : Nat) : Bool := now < deadline
+
+/-- After a check that ended at `ended`. -/
+def waitStep (ok : Bool) (ended deadline : Nat) : WaitStep :=
+  if ok then (if ended ≤ deadline then .ok else .late)
+  else if ended ≥ deadline then .timeout else .again
+
 /-- Wait until `check` holds, for at most `timeoutSec` seconds of REAL
     (monotonic) time (CI 37731207056: the elapsed time used to count only the
     5 s sleeps, so slow checks stretched a "300 s" wait far beyond 300 s).
-    The deadline is tested between checks; a single check is bounded only by
-    the subprocess timeouts it uses itself (every `kubectl` call: 30 s + 5 s
-    kill; a check calling an unbounded subprocess can still overrun by that
-    much). Each check slower than 10 s, and on a timeout the last kubectl
-    failure seen during the wait, are logged — to tell "the condition never
-    held" from "it could not be observed". -/
+    A check is started only before the deadline, and a check that holds only
+    after it counts as a TIMEOUT (logged as late) — so an OK is a success
+    within the limit. The call can still return up to one check's duration
+    after the deadline: a check is bounded only by the subprocess timeouts it
+    uses itself (every `kubectl` call: 30 s + 5 s kill; a check calling an
+    unbounded subprocess can overrun by that much). Each check slower than
+    10 s, and on a timeout the last kubectl failure seen during the wait, are
+    logged — to tell "the condition never held" from "it could not be
+    observed". -/
 def waitForCondition (desc : String) (timeoutSec : Nat) (check : IO Bool) : IO Bool := do
   IO.eprintln s!"# Waiting for: {desc} (timeout: {timeoutSec}s)"
   let start ← IO.monoMsNow
@@ -111,8 +130,14 @@ def waitForCondition (desc : String) (timeoutSec : Nat) (check : IO Bool) : IO B
   let (seq0, _) ← FlareOperator.Kubectl.lastKubectlFailure.get
   let mut checks := 0
   let mut slowest := 0
+  let timeoutLine := fun (now checks slowest : Nat) (extra : String) => do
+    let (seq, last) ← FlareOperator.Kubectl.lastKubectlFailure.get
+    IO.eprintln s!"#   TIMEOUT after {(now - start) / 1000}s (limit {timeoutSec}s; {checks} check(s), slowest {slowest / 1000}s){extra} waiting for: {desc}{if seq != seq0 then s!"; last kubectl failure during the wait: {last}" else "; no kubectl failure during the wait"}"
   repeat
     let t0 ← IO.monoMsNow
+    if !mayStartCheck t0 deadline then
+      timeoutLine t0 checks slowest ""
+      return false
     let ok ← try check catch _ => pure false
     let t1 ← IO.monoMsNow
     checks := checks + 1
@@ -121,14 +146,17 @@ def waitForCondition (desc : String) (timeoutSec : Nat) (check : IO Bool) : IO B
     if dur > 10000 then
       let (seq, last) ← FlareOperator.Kubectl.lastKubectlFailure.get
       IO.eprintln s!"#   slow check #{checks}: {dur / 1000}s{if seq != seq0 then s!" (last kubectl failure: {last})" else ""}"
-    if ok then
+    match waitStep ok t1 deadline with
+    | .ok =>
       IO.eprintln s!"#   OK after {(t1 - start) / 1000}s"
       return true
-    if t1 >= deadline then
-      let (seq, last) ← FlareOperator.Kubectl.lastKubectlFailure.get
-      IO.eprintln s!"#   TIMEOUT after {(t1 - start) / 1000}s (limit {timeoutSec}s; {checks} check(s), slowest {slowest / 1000}s) waiting for: {desc}{if seq != seq0 then s!"; last kubectl failure during the wait: {last}" else "; no kubectl failure during the wait"}"
+    | .late =>
+      timeoutLine t1 checks slowest s!"; the condition held only at {(t1 - start) / 1000}s, AFTER the limit (late, not a success)"
       return false
-    IO.sleep 5000
+    | .timeout =>
+      timeoutLine t1 checks slowest ""
+      return false
+    | .again => IO.sleep 5000
   return false
 
 -- ===========================================================================

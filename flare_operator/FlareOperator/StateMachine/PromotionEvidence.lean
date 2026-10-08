@@ -60,6 +60,7 @@ structure Stats where
   quarantined : Option Nat := none
   copyPartial : Option Nat := none
   inFlight : Option Nat := none
+  parked : Option Nat := none
   reconstruction : Option String := none
   masterId : Option String := none
   sourceEpoch : Option String := none
@@ -81,6 +82,7 @@ def parseStats (out : String) : Stats :=
     quarantined := nat "rocksdb_quarantined"
     copyPartial := nat "rocksdb_copy_partial"
     inFlight := nat "rebuild_in_flight"
+    parked := nat "rebuild_parked"
     reconstruction := value "reconstruction_current_state"
     masterId := value "rocksdb_master_id"
     sourceEpoch := value "rocksdb_source_epoch"
@@ -125,9 +127,20 @@ def classify (reply : Option String) (o : Observed) : Class :=
     else if s.quarantined == some 1 then .forbidden "the empty copy left by a quarantine"
     else if s.copyPartial == some 1 then .forbidden "a merging dump left the copy part-way"
     else if s.inFlight == some 1 then .forbidden "a copy is being rebuilt (transfer or switch in flight)"
+    else if s.parked == some 1 then .forbidden "a rebuild is parked part-way (its copy was never completed)"
+    else if s.reconstruction == some "running" then .forbidden "a reconstruction is running on it"
     else if s.sourceState == some "needs_rebuild" then .forbidden "R3: confirmed different history"
     else if s.sourceState == some "revalidating" && o.partitionHasMaster then
       .forbidden "R3: history being re-validated against the present master"
+    else if s.sourceState == some "revalidating" then
+      -- the master went while it was re-validating: its going is NOT
+      -- evidence. Only a copy proven to be the RECORDED last master's
+      -- history (not the unrecorded ex-master fallback) is merely lagging.
+      match o.lastMasterHistory, s.masterId, s.copyEpoch with
+      | some (mid, ep), some cm, some ce =>
+        if cm == mid && ce == ep then .lagging
+        else .unknown s!"re-validating, and its history ({cm}/{ce}) is not the recorded last master's ({mid}/{ep})"
+      | _, _, _ => .unknown "re-validating when the master went, and the last master's history was not recorded"
     else if s.eligible == some 1 && o.mapActive && !o.mapPrepare then .eligible
     else if (s.items == some 0) && s.copyPartial == some 0 && s.inFlight != some 1 then .empty
     else
@@ -141,6 +154,15 @@ def classify (reply : Option String) (o : Observed) : Class :=
         if o.isLastMasterHolder then .lagging
         else .unknown "the last master's history was not recorded"
       | _, _, _ => .unknown "the copy does not report its history"
+
+/-- At commit the candidate is CLASSIFIED AGAIN from a fresh read: the same
+    process and copy can still start a rebuild or a re-validation after the
+    pass read it. The fresh class must be the one the pass decided on (an
+    eligible copy that became lagging was chosen as eligible: abort). -/
+def reclassifyAllows (passClass fresh : Class) : Bool × String :=
+  if !fresh.promotable then (false, s!"its state changed after it was read: now {fresh.label}")
+  else if fresh != passClass then (false, s!"its class changed after it was read ({passClass.label} -> {fresh.label})")
+  else (true, fresh.label)
 
 /-- Evidence bound to what it was read from; the commit re-reads these. -/
 structure Binding where

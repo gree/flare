@@ -1630,6 +1630,10 @@ cluster::proxy_request cluster::pre_proxy_read(op_proxy_read* op, storage::entry
 		return proxy_request_error_partition;
 	}
 
+	if (p.master.node_key == this->_node_key && this->_promotion_refused) {
+		if (!read_trace_prefix().empty()) this->_trace_read(e.key, conn, via, "error", "promotion_refused", p, n, "", describe_follow(NULL));
+		return proxy_request_error_partition;
+	}
 	if (p.master.node_key == this->_node_key) {
 		if (!read_trace_prefix().empty()) this->_trace_read(e.key, conn, via, "local", "master", p, n, this->_node_key, describe_follow(NULL));
 		return proxy_request_continue;
@@ -1752,6 +1756,10 @@ cluster::proxy_request cluster::pre_proxy_write(op_proxy_write* op, shared_queue
 	// like fresh client writes instead.
 	bool local_proxy_request = this->_is_local_proxy_request(op);
 
+	if (p.master.node_key == this->_node_key && this->_promotion_refused) {
+		// decision 2026-10-08: a master over a forbidden copy accepts nothing
+		return proxy_request_error_partition;
+	}
 	if (p.master.node_key == this->_node_key || (local_proxy_request && is_prepare && p_prepare.master.node_key == this->_node_key)) {
 		// should be write at this node
 		return proxy_request_continue;
@@ -2238,6 +2246,24 @@ int cluster::_shift_node_role(string node_key, role old_role, int old_partition,
 	// finds it; a replica only hides it (its own clock must not change its
 	// data outside the replication history).
 	this->_storage->set_lazy_expiry_delete(new_role == role_master);
+	if (new_role != role_master && this->_promotion_refused) {
+		log_notice("promotion refusal lifted: no longer a master (new_role=%s)", cluster::role_cast(new_role).c_str());
+		this->_promotion_refused = false;
+	}
+	// decision 2026-10-08: flared refuses, on its own, to act as a master
+	// over a copy it knows is not fit (the operator classifies by reason and
+	// aborts such a commit; this is the last line if the state changed after
+	// that check). No new source epoch is started over it; reads and writes
+	// for its partitions fail (pre_proxy_read / pre_proxy_write).
+	if (new_role == role_master && old_role != role_master && this->_storage != NULL) {
+		string why;
+		if (this->_storage->promotion_forbidden(why)) {
+			this->_promotion_refused_why = why;
+			this->_promotion_refused = true;
+			log_err("CRITICAL: PROMOTION REFUSED by this node: %s — it serves no reads or writes as master until the map takes the role away", why.c_str());
+			return 0;
+		}
+	}
 	if (new_role == role_proxy) {
 		// we do not have to care about anything in this case, too (maybe?)
 		return 0;

@@ -228,6 +228,9 @@ int op_stats::_send_stats(thread_pool* req_tp, thread_pool* other_tp, storage* s
 	_send_stat("threads"							, stats_object->get_threads(req_tp, other_tp));
 	_send_stat("pool_threads" 				, stats_object->get_pool_threads(req_tp, other_tp));
 	_send_stat("node_map_version"		, cl->get_node_map_version());
+	// decision 2026-10-08: the map made this node a master over a copy it
+	// refuses to serve (0 = not refused)
+	_send_stat("promotion_refused"		, cl->is_promotion_refused() ? 1 : 0);
 	{
 		// R3: the source this node's copy is eligible for. eligible=0 means
 		// local reads are withdrawn and the node must not be promoted until

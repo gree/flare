@@ -289,6 +289,8 @@ initialize r3WithheldRef : IO.Ref (List String) ← IO.mkRef []
 /-- Decision 2026-10-08: this pass's promotion evidence per candidate — its
     class (by reason) and what it was read from (pod UID, boot id, copy id). -/
 initialize promotionEvidenceRef : IO.Ref (List (String × PromotionEvidence.Class × PromotionEvidence.Binding)) ← IO.mkRef []
+/-- What the operator observed of each candidate on that pass (to classify it again at commit). -/
+initialize promotionObservedRef : IO.Ref (List (String × PromotionEvidence.Observed)) ← IO.mkRef []
 /-- partition → (master_id, source epoch) of its master, recorded while the
     master was readable: what "the same history" means for a lagging copy. -/
 initialize masterHistoryRef : IO.Ref (List (Int × (String × String))) ← IO.mkRef []
@@ -1157,9 +1159,11 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
       let mut sourceIneligible : List String := []
       r3WithheldRef.set []
       promotionEvidenceRef.set []
+      promotionObservedRef.set []
       if SourceEligibility.promotionRisk masterless deadCandidate unhealthyKeys termKeys masterKeysNow then
         let mut readings : List (String × SourceEligibility.Reading) := []
         let mut evidence : List (String × PromotionEvidence.Class × PromotionEvidence.Binding) := []
+        let mut observedFor : List (String × PromotionEvidence.Observed) := []
         let history ← masterHistoryRef.get
         -- decision 2026-10-08: EVERY live non-master candidate is read and
         -- classified by reason (Prepare and NotReady ones included: a last
@@ -1184,8 +1188,10 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
                 isLastMasterHolder := part ≥ 0 && n.lastMasterOf == part }
               let cls := PromotionEvidence.classify reply obs
               evidence := evidence ++ [(key, cls, PromotionEvidence.bindingOf (some p.uid) reply)]
+              observedFor := observedFor ++ [(key, obs)]
             | none => pure ()
         promotionEvidenceRef.set evidence
+        promotionObservedRef.set observedFor
         if !evidence.isEmpty then
           IO.eprintln s!"[flare-operator] PROMOTION EVIDENCE (by reason, this pass): {evidence.map fun (k, c, _) => s!"{k}={c.label}"}"
         sourceIneligible := SourceEligibility.withheld readings
@@ -1406,6 +1412,28 @@ private def promotionBarrier (keys : List String) : IO Unit := do
       try IO.FS.removeFile release catch _ => pure ()
       try IO.FS.removeFile (dir ++ "/promote-reached") catch _ => pure ()
 
+/-- Test seam (`FLARE_TEST_PRECOMMIT_BARRIER`, a directory; inert without
+    it): stops a pass that is about to promote AFTER its candidates were read
+    and classified and BEFORE the commit re-reads them, so a test can change a
+    candidate's state in that window. Same protocol as preSendBarrier: engages
+    only when `<dir>/arm` exists, writes the promoted keys to `<dir>/reached`,
+    disarms, waits for `<dir>/release` at most 120 s. -/
+private def preCommitBarrier (promoted : List String) : IO Unit := do
+  match ← IO.getEnv "FLARE_TEST_PRECOMMIT_BARRIER" with
+  | none => pure ()
+  | some dir =>
+    let arm : System.FilePath := dir ++ "/arm"
+    if !(← arm.pathExists) then return
+    let release : System.FilePath := dir ++ "/release"
+    IO.eprintln s!"[flare-operator] TEST BARRIER: holding before the promotion commit re-reads {promoted}"
+    try IO.FS.writeFile (dir ++ "/reached") (String.intercalate "\n" promoted ++ "\n") catch _ => pure ()
+    try IO.FS.removeFile arm catch _ => pure ()
+    for _ in [0:1200] do
+      if (← release.pathExists) then break
+      IO.sleep 100
+    IO.eprintln s!"[flare-operator] TEST BARRIER: released before the promotion commit"
+
+
 /-- SAF-08: commit the FSM's state only if every node it PROMOTES is still
     the incarnation that was observed this pass. Readiness and stats are
     snapshots; a flared restart or a same-name replacement after them would
@@ -1427,6 +1455,7 @@ private def commitChecked (stateRef : IO.Ref FlareClusterState) (ver : Nat) (ucs
       return
     -- decision 2026-10-08: promote only a candidate classified promotable on
     -- THIS pass, whose pod, flared process and copy are still the ones read
+    preCommitBarrier promoted
     let ev ← promotionEvidenceRef.get
     for k in promoted do
       let entry := ev.find? (·.1 == k)
@@ -1438,6 +1467,19 @@ private def commitChecked (stateRef : IO.Ref FlareClusterState) (ver : Nat) (ucs
       let (ok, why) := PromotionEvidence.commitAllows (entry.map (·.2.1)) ((entry.map (·.2.2)).getD { podUid := none, bootId := none, copyId := none }) now
       if !ok then
         IO.eprintln s!"[flare-operator] CRITICAL: PROMOTION ABORTED for {k}: {why} — nothing from this pass is committed, the next pass reads again"
+        promotionAbortedRef.set true
+        return
+      -- the identity alone does not keep the reason: the same process and
+      -- copy may have started a rebuild or a re-validation since it was read
+      match entry, (← promotionObservedRef.get).lookup k with
+      | some (_, passCls, _), some obs =>
+        let (ok2, why2) := PromotionEvidence.reclassifyAllows passCls (PromotionEvidence.classify replyNow obs)
+        if !ok2 then
+          IO.eprintln s!"[flare-operator] CRITICAL: PROMOTION ABORTED for {k}: {why2} — nothing from this pass is committed, the next pass reads again"
+          promotionAbortedRef.set true
+          return
+      | _, _ =>
+        IO.eprintln s!"[flare-operator] CRITICAL: PROMOTION ABORTED for {k}: no observation of it on this pass to classify it again — nothing from this pass is committed"
         promotionAbortedRef.set true
         return
       if (entry.map (·.2.1)) == some .lagging then

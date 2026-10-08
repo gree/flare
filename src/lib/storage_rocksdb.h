@@ -596,6 +596,7 @@ public:
 	void peaks_get(bool serve, uint64_t& data_dir_max, int64_t& memory_max, int64_t& min_available,
 		uint64_t& data_dir_start, uint64_t& samples);
 	bool is_quarantined() const { return this->_quarantined; }
+	bool promotion_forbidden(std::string& why);
 	// decision 2026-10-08: data_dir/copy.partial — the live copy is being (or
 	// was left) changed part-way by a merging dump. Written durably BEFORE the
 	// first change, removed only on confirmed success; survives a crash.

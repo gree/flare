@@ -193,6 +193,11 @@ protected:
 	pthread_rwlock_t			_mutex_node_partition_map;
 
 	string								_node_key;
+	// decision 2026-10-08: set when the map made this node a master while its
+	// copy was in a forbidden state; it then serves no reads or writes as
+	// that master (fail closed) until the map takes the role away
+	volatile bool					_promotion_refused = false;
+	string								_promotion_refused_why;
 	string								_server_name;
 	int										_server_port;
 
@@ -306,6 +311,8 @@ public:
 	// partition-map lock; a reconstruction re-reads it every attempt.
 	string get_partition_master_key(int partition);
 	string get_own_node_key() { return this->_node_key; }
+	bool is_promotion_refused() { return this->_promotion_refused; }
+	string get_promotion_refused_why() { return this->_promotion_refused ? this->_promotion_refused_why : string(""); }
 	// ---- R3: source eligibility of this node's copy ----------------------
 	source_binding get_read_source();
 	// a completed, validated copy (reconstruction activated it)

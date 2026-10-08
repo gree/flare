@@ -3246,6 +3246,23 @@ bool storage_rocksdb::is_copy_partial() {
 	return ::stat((this->_data_dir + "/copy.partial").c_str(), &st) == 0;
 }
 
+bool storage_rocksdb::promotion_forbidden(string& why) {
+	if (this->is_rebuild_in_flight()) {
+		why = "a copy is being rebuilt (transfer or switch in flight)";
+	} else if (this->is_rebuild_parked()) {
+		why = "a rebuild is parked part-way (its copy was never completed)";
+	} else if (this->is_copy_partial()) {
+		why = "a merging dump left the copy part-way (copy.partial)";
+	} else if (this->is_quarantined()) {
+		why = "the empty copy left by a quarantine";
+	} else if (!this->copy_identity_consistent()) {
+		why = "copy identity records disagree";
+	} else {
+		return false;
+	}
+	return true;
+}
+
 bool storage_rocksdb::_quarantined_now() {
 	string text;
 	if (copy_fs::read_small_file(this->_data_dir + "/" + kQuarantineMarkerFile, text) < 0) {

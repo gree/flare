@@ -5029,4 +5029,80 @@ def promotionReasonsSuite : TestSuite := {
   ]
 }
 
+/-- Promotion by reason, the commit window: the candidate was read and found
+    LAGGING (the lag-hold-expiry 9 shape), then — same process, same copy —
+    its copy turns part-way (copy.partial) before the commit. The commit
+    classifies it again and aborts; once the marker is gone it is seated. -/
+private def precommitCfg : ClusterConfig := {
+  holdExpiryCfg with
+  name := "prom-precommit"
+  «namespace» := "flare-prom-precommit"
+  debugPod := "debug-prom-precommit"
+  operatorEnv := holdExpiryCfg.operatorEnv ++ [("FLARE_TEST_PRECOMMIT_BARRIER", "/tmp/precommit")]
+}
+
+def promotionPrecommitSuite : TestSuite := {
+  name := "promotion-precommit"
+  setup := do
+    deployCluster precommitCfg
+    IO.sleep 30000
+  teardown := do
+    discard <| kubectl ["uncordon", kindNode]
+    cleanupCluster precommitCfg
+  onFailure := dumpClusterDiagnostics precommitCfg.«namespace» s!"app={precommitCfg.operatorName}"
+  tests :=
+    let c : Ctx := { cfg := precommitCfg }
+    let ns := precommitCfg.«namespace»
+    [
+    { name := "promotion by reason, read then changed: a follower read as LAGGING whose copy turns part-way (same process, same copy) before the commit is NOT promoted — the commit classifies it again and aborts; with the marker gone it is seated"
+      run := do
+        match ← lagPrepare c with
+        | .error e => return .fail e
+        | .ok (mPod, mIp, sPod, sIp, _, _) =>
+          let sKey := s!"{sPod}.{precommitCfg.name}-nodes.{ns}.svc.cluster.local:{precommitCfg.flarePort}"
+          if let .error e ← c.opExec "mkdir -p /tmp/precommit && rm -f /tmp/precommit/reached /tmp/precommit/release && touch /tmp/precommit/arm" then
+            healForwards mIp sIp; return .fail s!"could not arm the pre-commit barrier: {e}"
+          let bootBefore ← c.statStr sIp "reconstruction_boot_id"
+          match ← kubectl ["cordon", kindNode] with
+          | .error e => healForwards mIp sIp; return .fail s!"could not cordon {kindNode}: {e}"
+          | .ok _ => pure ()
+          let t0 ← utcNow
+          discard <| kubectl ["delete", "pod", mPod, "-n", ns, "--grace-period=0", "--force", "--wait=false"]
+          healForwards mIp sIp
+          let reached ← waitForCondition "a promotion of the follower is held before its commit" 300 do
+            match ← c.opExec "cat /tmp/precommit/reached 2>/dev/null || true" with
+            | .ok o => return containsSubstr o sKey
+            | .error _ => return false
+          let lagRead := ((← c.opLogSince t0).splitOn "\n").any fun l =>
+            containsSubstr l "PROMOTION EVIDENCE" && containsSubstr l s!"{sKey}=lagging"
+          if !reached then
+            discard <| c.opExec "touch /tmp/precommit/release"
+            discard <| kubectl ["uncordon", kindNode]
+            return .fail s!"no promotion of {sPod} reached the commit (read as lagging: {lagRead})"
+          -- the window: same flared process, same copy; the copy turns part-way
+          discard <| kubectl ["exec", "-n", ns, sPod, "-c", "flared", "--", "touch", "/data/flare/copy.partial"]
+          let bootMid ← c.statStr sIp "reconstruction_boot_id"
+          discard <| c.opExec "touch /tmp/precommit/release"
+          let aborted ← waitForCondition "the commit aborts the follower's promotion" 60 do
+            return ((← c.opLogSince t0).splitOn "\n").any fun l =>
+              containsSubstr l "PROMOTION ABORTED" && containsSubstr l sKey && containsSubstr l "changed after it was read"
+          IO.sleep 15000
+          let lines := (← c.opLogSince t0).splitOn "\n"
+          let committedEarly := lines.any fun l => containsSubstr l "PROMOTION committed" && containsSubstr l sKey
+          let masterNow ← masterPodOf c
+          IO.eprintln s!"# read as lagging={lagRead}; held before commit={reached}; same flared across the window={bootBefore == bootMid} ({bootBefore}); aborted by reason={aborted}; committed while part-way={committedEarly}; master now={masterNow}"
+          discard <| kubectl ["exec", "-n", ns, sPod, "-c", "flared", "--", "rm", "-f", "/data/flare/copy.partial"]
+          let seated ← waitForCondition "the follower is seated once its copy is no longer part-way" 300 do
+            return (← masterPodOf c) == some sPod
+          discard <| kubectl ["uncordon", kindNode]
+          IO.eprintln s!"# marker removed: follower seated={seated}"
+          if !lagRead then return .fail "precondition: the follower was not read as LAGGING before the commit"
+          if bootBefore != bootMid || bootBefore.isNone then return .fail s!"precondition: flared changed across the window ({bootBefore} -> {bootMid}); the identity check, not the reason, would decide"
+          if committedEarly || masterNow == some sPod then return .fail s!"{sPod} was promoted while its copy was part-way"
+          if !aborted then return .fail "the commit did not abort by reason (no 'changed after it was read')"
+          if !seated then return .fail "the follower was not seated after its marker was removed (the abort was not only the state)"
+          return .pass }
+  ]
+}
+
 end FlareOperator.E2E.Tests.ContinuousReplicationLimits

@@ -1367,9 +1367,20 @@ private def checkPromotionEvidence (ctx : Ctx) : IO Unit := do
       && (match cls (some ((base.replace "rocksdb_copy_identity_consistent 1" "rocksdb_copy_identity_consistent 0") ++ "END\r\n")) obs with | .forbidden _ => true | _ => false)
       && (match cls (some ((base.replace "rocksdb_quarantined 0" "rocksdb_quarantined 1") ++ "END\r\n")) obs with | .forbidden _ => true | _ => false)
       && (match cls (reply "STAT repl_read_source_state needs_rebuild\r\nSTAT repl_read_source_eligible 0\r\n") obs with | .forbidden _ => true | _ => false))
-  check ctx "promotion by reason: re-validation against a PRESENT master is forbidden; with the master gone the history decides"
+  check ctx "promotion by reason: re-validation against a PRESENT master is forbidden; the master's going does not turn it into a pass — only the RECORDED last master's history is lagging"
     ((match cls (reply "STAT repl_read_source_state revalidating\r\nSTAT repl_read_source_eligible 0\r\n") { obs with partitionHasMaster := true } with | .forbidden _ => true | _ => false)
-      && cls (reply "STAT repl_read_source_state revalidating\r\nSTAT repl_read_source_eligible 0\r\n") obs == .lagging)
+      && cls (reply "STAT repl_read_source_state revalidating\r\nSTAT repl_read_source_eligible 0\r\n") obs == .lagging
+      && (match cls (reply "STAT repl_read_source_state revalidating\r\nSTAT repl_read_source_eligible 0\r\n") { obs with lastMasterHistory := none, isLastMasterHolder := true } with | .unknown _ => true | _ => false)
+      && (match cls (some ((base.replace "rocksdb_source_epoch 2:e" "rocksdb_source_epoch 9:x") ++ "STAT repl_read_source_state revalidating\r\nSTAT repl_read_source_eligible 0\r\nEND\r\n")) obs with | .unknown _ => true | _ => false))
+  check ctx "promotion by reason: a parked rebuild or a running reconstruction is FORBIDDEN (the copy was never completed)"
+    ((match cls (reply "STAT repl_read_source_eligible 0\r\nSTAT rebuild_parked 1\r\n") obs with | .forbidden _ => true | _ => false)
+      && (match cls (reply "STAT repl_read_source_eligible 0\r\nSTAT reconstruction_current_state running\r\n") obs with | .forbidden _ => true | _ => false))
+  check ctx "promotion by reason: at commit the candidate is classified AGAIN — the same process and copy turning forbidden, or eligible turning lagging, aborts"
+    ((PromotionEvidence.reclassifyAllows .eligible .eligible).1
+      && (PromotionEvidence.reclassifyAllows .lagging .lagging).1
+      && !(PromotionEvidence.reclassifyAllows .lagging (cls (some ((base.replace "rebuild_in_flight 0" "rebuild_in_flight 1") ++ "STAT repl_read_source_eligible 0\r\nEND\r\n")) obs)).1
+      && !(PromotionEvidence.reclassifyAllows .eligible (cls (reply "STAT repl_read_source_state revalidating\r\nSTAT repl_read_source_eligible 0\r\n") obs)).1
+      && !(PromotionEvidence.reclassifyAllows .eligible .lagging).1)
   check ctx "promotion by reason: another history, or no record of the last master's, is UNKNOWN (held); the ex-master's own copy is known"
     ((match cls (some ((base.replace "rocksdb_source_epoch 2:e" "rocksdb_source_epoch 9:x") ++ "STAT repl_read_source_eligible 0\r\nEND\r\n")) obs with | .unknown _ => true | _ => false)
       && (match cls (reply "STAT repl_read_source_eligible 0\r\n") { obs with lastMasterHistory := none } with | .unknown _ => true | _ => false)

@@ -333,6 +333,10 @@ public:
 	virtual int advance_source_epoch(const char* reason = "unspecified") { (void)reason; return 0; }
 	virtual int advance_incarnation() { return 0; }
 	virtual int regenerate_master_id() { return 0; }
+	// decision 2026-10-08 (flared's own refusal): true when this copy must not
+	// serve as a master — being rebuilt, left part-way, quarantined, copy
+	// identity records disagree. Non-RocksDB backends never refuse.
+	virtual bool promotion_forbidden(std::string& why) { (void)why; return false; }
 	// Whether get() may physically delete an entry it finds expired (only the
 	// partition master; see storage_rocksdb). Backends without replication
 	// ordering ignore it.

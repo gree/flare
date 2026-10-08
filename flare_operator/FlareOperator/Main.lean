@@ -1272,7 +1272,8 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
       pinnedSuccessorRef.set keptPins
       let ranked := pinnedFirst ++ cls.ranked.filter (!pinnedFirst.contains ·)
       pure (.PodListResponse podKeys (Bridge.podZones pods nodeZones) termKeys dataKeys unhealthyKeys heldKeys
-              (cls.unfit ++ (notReadyActive ++ sourceIneligible).filter (!cls.unfit.contains ·)) cls.unproven ranked knownEmpty)
+              (cls.unfit ++ (notReadyActive ++ sourceIneligible).filter (!cls.unfit.contains ·)) cls.unproven ranked knownEmpty
+              ((← promotionEvidenceRef.get).filterMap fun (k, c, _) => if c.promotable then none else some k))
   | .PatchService =>
     -- Service patching happens in executeEffects (PatchService effect)
     -- This just signals completion

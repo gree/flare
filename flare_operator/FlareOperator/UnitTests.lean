@@ -632,6 +632,10 @@ def checkFollowShaping (ctx : Ctx) : IO Unit := do
     (let noMaster : FlareClusterState := { s3 with nodeMap := s3.nodeMap.filter (·.1 != "m") }
      let refilled := K8sReconciler.promoteMasterlessPartition noMaster 0 ["s1", "s2", "s3"] [] [] ["s1"]
      (refilled.nodeMap.find? (fun kv => kv.2.role == FlareRole.Master)).map (·.1) == some "s2")
+  check ctx "the masterless refill passes over a BLOCKED (not promotable) Active slave and seats the next one (blocked is a hard exclusion, unlike unfit)"
+    (let noMaster : FlareClusterState := { s3 with nodeMap := s3.nodeMap.filter (·.1 != "m") }
+     let refilled := K8sReconciler.promoteMasterlessPartition noMaster 0 ["s1", "s2", "s3"] [] [] [] false [] ["s1"]
+     (refilled.nodeMap.find? (fun kv => kv.2.role == FlareRole.Master)).map (·.1) == some "s2")
   check ctx "classify reports a follower that declared needs_rebuild, with flared's reason"
     (let r := { fr "needs_rebuild" 1000 with lastReason := some "epoch_mismatch" }
      (FollowEvidence.classify fb [] [("d", 0, some r)] [(0, fm)]).1.needsRebuild == [("d", "epoch_mismatch")])
@@ -909,6 +913,9 @@ def checkFailoverLagHold (ctx : Ctx) : IO Unit := do
     (masterOf (K8sReconciler.promoteMasterlessPartition holdState 0 ["f"] [] ["f"] ["f"]) == some "f")
   check ctx "lag hold on, ex-master away: the unfit follower is NOT crowned; the partition stays masterless"
     (masterOf (K8sReconciler.promoteMasterlessPartition holdState 0 ["f"] [] ["f"] ["f"] true) == none)
+  check ctx "refill (CI 37777862552 pvc-survival): a key whose evidence is not promotable is never chosen in ANY tier; the refill takes the next candidate instead of starving the partition"
+    (masterOf (K8sReconciler.promoteMasterlessPartition holdState 0 ["f"] [] ["f"] [] false [] ["f"]) == none
+      && masterOf (K8sReconciler.promoteMasterlessPartition holdState 0 ["f"] [] ["f"] [] false [] []) == some "f")
   check ctx "the held partition is reported with its follower"
     (K8sReconciler.heldForExMaster (K8sReconciler.promoteMasterlessPartition holdState 0 ["f"] [] ["f"] ["f"] true)
       activationCrd ["f"] ["f"] ["f"] == [(0, ["f"])])

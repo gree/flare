@@ -5099,7 +5099,18 @@ def promotionReasonsSuite : TestSuite := {
           -- and holds at the switch: a copy is in flight.
           discard <| kubectl ["exec", "-n", ns, sPod, "-c", "flared", "--", "touch", "/tmp/dhold"]
           let since ← utcNow
-          discard <| execInDebugPod promotionReasonsCfg.debugPod ns s!"printf 'flush_all\\r\\n' | nc -w 5 {mIp} {promotionReasonsCfg.flarePort}"
+          -- evidence that the intended history change HAPPENED, before any
+          -- long wait (review): flush_all answered OK and the master's source
+          -- epoch was read before and after and advanced
+          let epoch0 ← c.statStr mIp "rocksdb_source_epoch"
+          let flushReply := match ← execInDebugPod promotionReasonsCfg.debugPod ns s!"printf 'flush_all\\r\\n' | nc -w 5 {mIp} {promotionReasonsCfg.flarePort}" with
+            | .ok o => o.trim
+            | .error e => s!"(error: {e})"
+          let epoch1 ← c.statStr mIp "rocksdb_source_epoch"
+          IO.eprintln s!"# new history on {mPod}: flush_all -> {flushReply}; source epoch {epoch0} -> {epoch1}"
+          if flushReply != "OK" || epoch0.isNone || epoch1.isNone || epoch0 == epoch1 then
+            discard <| kubectl ["exec", "-n", ns, sPod, "-c", "flared", "--", "rm", "-f", "/tmp/dhold"]
+            return .fail s!"precondition: no new history on the master (flush_all -> {flushReply}; epoch {epoch0} -> {epoch1})"
           IO.sleep 2000
           let w2 ← writeKeys promotionReasonsCfg.debugPod ns mIp promotionReasonsCfg.flarePort "pr2" 60
           if w2 != 60 then

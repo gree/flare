@@ -38,6 +38,8 @@
 #include <pthread.h>
 #include <unistd.h>
 #include <dirent.h>
+#include <cerrno>
+#include <copy_switch_fs.h>
 #include <rocksdb/db.h>
 #include <rocksdb/options.h>
 
@@ -2344,6 +2346,57 @@ void test_copy_partial_marker_survives_a_crash_and_clears_on_replacement() {
 	cut_assert_equal_int(0, s->switch_to_staging("p1", nid));
 	cut_assert_false(s->is_copy_partial());
 	drop_rocksdb(s, wal_slave_dir);
+}
+
+// Review 2026-10-08 P1: a marker or intent that cannot be read is never
+// "absent". Deterministic injection (works under root too).
+void test_unreadable_quarantine_and_partial_markers_fail_closed() {
+	storage_rocksdb* s = make_rocksdb(wal_slave_dir);
+	string why;
+	cut_assert_false(s->is_quarantined());
+	cut_assert_false(s->promotion_forbidden(why));
+	drop_rocksdb_noremove(s);
+	// the quarantine marker cannot be read at open: treated as quarantined
+	copy_fs::set_read_fault_for_test("quarantine.marker", EIO);
+	s = make_rocksdb(wal_slave_dir);
+	copy_fs::clear_read_faults_for_test();
+	cut_assert_true(s->is_quarantined());
+	cut_assert_true(s->promotion_forbidden(why));
+	drop_rocksdb_noremove(s);
+	// copy.partial cannot be checked: treated as part-way, not promotable
+	s = make_rocksdb(wal_slave_dir);
+	cut_assert_false(s->is_copy_partial());
+	copy_fs::set_read_fault_for_test("copy.partial", EACCES);
+	cut_assert_true(s->is_copy_partial());
+	cut_assert_true(s->promotion_forbidden(why));
+	copy_fs::clear_read_faults_for_test();
+	cut_assert_false(s->is_copy_partial());
+	drop_rocksdb(s, wal_slave_dir);
+}
+
+void test_unreadable_switch_intent_refuses_open_and_touches_nothing() {
+	storage_rocksdb* s = make_rocksdb(wal_slave_dir);
+	storage_set_string(s, "k", "v");
+	drop_rocksdb_noremove(s);
+	const string dir = wal_slave_dir;
+	::mkdir((dir + "/staging-a1").c_str(), 0700);
+	copy_fs::write_file_durable(dir + "/staging-a1", copy_fs::kCopyIdFile, "NEW:1\n");
+	switch_intent in;
+	in.attempt = "a1";
+	in.old_id = "OLD:3";
+	in.new_id = "NEW:1";
+	in.phase = "prepared";
+	cut_assert_equal_int(0, copy_fs::write_intent(dir, in));
+	copy_fs::set_read_fault_for_test(copy_fs::kIntentFile, EIO);
+	storage_rocksdb* t = new storage_rocksdb(dir, 32, 4, 16, 4, 2, 86400, 1024);
+	cut_assert_equal_int(-1, t->open());
+	delete t;
+	copy_fs::clear_read_faults_for_test();
+	struct stat st;
+	cut_assert_equal_int(0, ::stat((dir + "/staging-a1/COPY_ID").c_str(), &st));
+	cut_assert_equal_int(0, ::stat((dir + "/" + copy_fs::kIntentFile).c_str(), &st));
+	cut_assert_equal_int(0, ::stat((dir + "/flare.rocksdb").c_str(), &st));
+	cut_remove_path(wal_slave_dir, NULL);
 }
 
 // An abandoned attempt (a failed dump, a refused gate, a crash) leaves the

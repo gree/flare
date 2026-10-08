@@ -1323,7 +1323,12 @@ int storage_rocksdb::open() {
 			log_err("storage open refused: the copy switch could not be resolved (%s)", report.c_str());
 			return -1;
 		}
-		copy_fs::cleanup_staging(this->_data_dir);
+		if (copy_fs::cleanup_staging(this->_data_dir) < 0) {
+			// an intent still present or UNREADABLE: nothing is removed, and
+			// the live DB is not opened over an unresolved switch (review P1)
+			log_err("storage open refused: staging copies could not be cleaned up safely (switch intent present or unreadable)", 0);
+			return -1;
+		}
 		// no transfer of the previous process survives it: its serve and
 		// receive areas are removed (design §5)
 		copy_fs::remove_prefixed(this->_data_dir, "snapshot.serve.");
@@ -1410,7 +1415,10 @@ int storage_rocksdb::open() {
 		string v;
 		rocksdb::Status cs = this->_db->Get(this->_read_options, kCopyIdKey, &v);
 		string f;
-		const bool has_file = copy_fs::read_small_file(this->_data_path + "/" + copy_fs::kCopyIdFile, f) == 0 && !f.empty();
+		string ferr;
+		const copy_fs::file_status fs = copy_fs::read_small_file_status(this->_data_path + "/" + copy_fs::kCopyIdFile, f, &ferr);
+		const bool file_unreadable = fs == copy_fs::file_error;
+		const bool has_file = fs == copy_fs::file_present && !f.empty();
 		const bool has_key = cs.ok() && !v.empty();
 		const string restored_marker = this->_data_path + "/RESTORED";
 		struct stat rst;
@@ -1422,6 +1430,12 @@ int storage_rocksdb::open() {
 				log_err("failed to give the staging copy an identity", 0);
 				return -1;
 			}
+		} else if (file_unreadable) {
+			// the COPY_ID file exists but cannot be read (review P1): never
+			// minted over, never assumed absent — not a healthy copy
+			this->_copy_id = has_key ? v : string("");
+			this->_copy_identity_consistent = false;
+			log_err("CRITICAL: the COPY_ID file could not be read (%s): this copy is not treated as a healthy copy (no approvals, no read binding, not promotable, not a repair source); no new identity is minted", ferr.c_str());
 		} else if (restored) {
 			// put in place by a restore (backup bootstrap, restore hook): a
 			// checkpoint carries the reserved key of the copy it was taken
@@ -3162,7 +3176,13 @@ int storage_rocksdb::discard_copy(const string& request_id, const string& operat
 	}
 	const string ledger = this->_data_dir + "/" + kApprovalsFile;
 	string text;
-	copy_fs::read_small_file(ledger, text);
+	string lerr;
+	if (copy_fs::read_small_file_status(ledger, text, &lerr) == copy_fs::file_error) {
+		// the one-shot record cannot be read: an approval could run twice
+		log_err("copy_discard refused: the approvals ledger could not be read (%s)", lerr.c_str());
+		result = "refused:ledger_unreadable";
+		return 0;
+	}
 	{
 		const string prev = approval_state(text, request_id);
 		if (!prev.empty()) {
@@ -3242,8 +3262,15 @@ int storage_rocksdb::clear_copy_partial(const char* why) {
 }
 
 bool storage_rocksdb::is_copy_partial() {
-	struct stat st;
-	return ::stat((this->_data_dir + "/copy.partial").c_str(), &st) == 0;
+	// absent only on ENOENT; a marker that cannot be checked counts as present
+	// (fail closed: the copy is not offered as complete) (review P1)
+	string err;
+	const copy_fs::file_status st = copy_fs::stat_path_status(this->_data_dir + "/copy.partial", &err);
+	if (st == copy_fs::file_error) {
+		log_err("copy.partial could not be checked (%s): the copy is treated as part-way", err.c_str());
+		return true;
+	}
+	return st == copy_fs::file_present;
 }
 
 bool storage_rocksdb::promotion_forbidden(string& why) {
@@ -3265,8 +3292,17 @@ bool storage_rocksdb::promotion_forbidden(string& why) {
 
 bool storage_rocksdb::_quarantined_now() {
 	string text;
-	if (copy_fs::read_small_file(this->_data_dir + "/" + kQuarantineMarkerFile, text) < 0) {
+	string err;
+	const copy_fs::file_status ms = copy_fs::read_small_file_status(this->_data_dir + "/" + kQuarantineMarkerFile, text, &err);
+	if (ms == copy_fs::file_absent) {
 		return false;
+	}
+	if (ms == copy_fs::file_error) {
+		// a marker that cannot be read is NOT "no quarantine" (review P1): the
+		// copy is treated as quarantined (no read binding, not promotable, not
+		// a source) until the marker can be read
+		log_err("quarantine marker could not be read (%s): the copy is treated as quarantined", err.c_str());
+		return true;
 	}
 	const string::size_type e = text.find("empty=");
 	if (e == string::npos) {

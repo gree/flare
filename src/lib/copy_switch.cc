@@ -69,23 +69,103 @@ int write_file_durable(const string& dir, const string& name, const string& cont
 	return fsync_dir(dir);
 }
 
-int read_small_file(const string& path, string& out) {
+namespace {
+struct read_fault {
+	string suffix;
+	int err;
+	bool partial;
+};
+vector<read_fault> g_read_faults;
+
+bool ends_with(const string& s, const string& suffix) {
+	return s.size() >= suffix.size() && s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
+const read_fault* fault_for(const string& path) {
+	for (size_t i = 0; i < g_read_faults.size(); i++) {
+		if (ends_with(path, g_read_faults[i].suffix)) {
+			return &g_read_faults[i];
+		}
+	}
+	return NULL;
+}
+}
+
+void set_read_fault_for_test(const string& suffix, int err, bool partial) {
+	read_fault f;
+	f.suffix = suffix;
+	f.err = err;
+	f.partial = partial;
+	g_read_faults.push_back(f);
+}
+
+void clear_read_faults_for_test() {
+	g_read_faults.clear();
+}
+
+file_status read_small_file_status(const string& path, string& out, string* error) {
 	out.clear();
+	const read_fault* fault = fault_for(path);
+	if (fault != NULL && !fault->partial) {
+		if (error != NULL) *error = string("open: ") + strerror(fault->err) + " (injected)";
+		return fault->err == ENOENT ? file_absent : file_error;
+	}
 	FILE* f = ::fopen(path.c_str(), "r");
 	if (f == NULL) {
-		return -1;
+		const int e = errno;
+		if (e == ENOENT) {
+			return file_absent;
+		}
+		if (error != NULL) *error = string("open: ") + strerror(e);
+		return file_error;
 	}
 	char buf[4096];
 	size_t n;
+	bool too_large = false;
 	while ((n = ::fread(buf, 1, sizeof(buf), f)) > 0) {
 		out.append(buf, n);
-		if (out.size() > 65536) break;
+		if (out.size() > kSmallFileLimit) {
+			too_large = true;
+			break;
+		}
 	}
+	const bool read_error = ::ferror(f) != 0 || (fault != NULL && fault->partial);
+	const int e = errno;
 	::fclose(f);
+	if (too_large || read_error) {
+		if (error != NULL) {
+			*error = too_large ? "larger than the small-file limit (not returned truncated)"
+				: (fault != NULL ? string("read: ") + strerror(fault->err) + " part-way (injected)" : string("read: ") + strerror(e) + " part-way");
+		}
+		out.clear();
+		return file_error;
+	}
 	while (!out.empty() && (out[out.size() - 1] == '\n' || out[out.size() - 1] == '\r')) {
 		out.erase(out.size() - 1);
 	}
-	return 0;
+	return file_present;
+}
+
+int read_small_file(const string& path, string& out) {
+	return read_small_file_status(path, out) == file_present ? 0 : -1;
+}
+
+file_status stat_path_status(const string& path, string* error) {
+	const read_fault* fault = fault_for(path);
+	if (fault != NULL) {
+		if (error != NULL) *error = string("stat: ") + strerror(fault->err) + " (injected)";
+		return fault->err == ENOENT ? file_absent : file_error;
+	}
+	struct stat st;
+	if (::stat(path.c_str(), &st) == 0) {
+		return file_present;
+	}
+	const int e = errno;
+	if (e == ENOENT) {
+		return file_absent;
+	}
+	if (error != NULL) *error = string("stat: ") + strerror(e);
+	return file_error;
 }
 
 bool dir_exists(const string& path) {
@@ -102,11 +182,17 @@ bool same_device(const string& a, const string& b) {
 }
 
 string read_copy_id(const string& dir) {
-	if (!dir_exists(dir)) {
+	// "" only when the directory is confirmed absent; any other failure to
+	// look is "?" (unknown), never "no such copy" (review P1)
+	const file_status ds = stat_path_status(dir);
+	if (ds == file_absent) {
 		return "";
 	}
+	if (ds == file_error || !dir_exists(dir)) {
+		return "?";
+	}
 	string id;
-	if (read_small_file(dir + "/" + kCopyIdFile, id) < 0 || id.empty()) {
+	if (read_small_file_status(dir + "/" + kCopyIdFile, id) != file_present || id.empty()) {
 		return "?";
 	}
 	return id;
@@ -160,8 +246,18 @@ int rename_durable(const string& data_dir, const string& from, const string& to)
 int recover(const string& data_dir, const string& live_name, string& report) {
 	report.clear();
 	string text;
-	if (read_small_file(data_dir + "/" + kIntentFile, text) < 0) {
+	string err;
+	switch (read_small_file_status(data_dir + "/" + kIntentFile, text, &err)) {
+	case file_absent:
 		return 0;	// no intent: nothing to recover
+	case file_error:
+		// an intent that cannot be read is NOT "no intent" (review P1): the
+		// live copy may already be retained and the new one still staged
+		report = "the switch intent could not be read (" + err + "): STOP (nothing touched)";
+		log_err("copy switch recovery: %s", report.c_str());
+		return -1;
+	default:
+		break;
 	}
 	switch_intent in;
 	if (!parse_intent(text, in)) {
@@ -201,8 +297,14 @@ int cleanup_staging(const string& data_dir) {
 	// Only after the intent was resolved (recover() returned 0 and removed it):
 	// every staging copy left is an unfinished attempt.
 	string text;
-	if (read_small_file(data_dir + "/" + kIntentFile, text) == 0) {
+	string err;
+	const file_status is = read_small_file_status(data_dir + "/" + kIntentFile, text, &err);
+	if (is == file_present) {
 		log_err("copy switch: an intent is still present; staging copies are NOT removed", 0);
+		return -1;
+	}
+	if (is == file_error) {
+		log_err("copy switch: the intent could not be read (%s); staging copies are NOT removed", err.c_str());
 		return -1;
 	}
 	DIR* d = ::opendir(data_dir.c_str());

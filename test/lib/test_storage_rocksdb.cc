@@ -2477,6 +2477,48 @@ void test_running_switch_rename_fails_with_readable_intent_rolls_back_and_reopen
 	drop_rocksdb(s, wal_slave_dir);
 }
 
+// Review P1-6: the receipt of a bulk (truncate / flush_all) is written with
+// the epoch's completion, atomically replacing a durable pending marker; a
+// failed write is never reported as success; a crash at either boundary is
+// recovered (receipt finalised at open) or stays visibly unproven.
+void test_bulk_receipt_normal_failed_write_and_crash_before_epoch() {
+	// normal
+	storage_rocksdb* s = make_rocksdb(wal_slave_dir);
+	storage_set_string(s, "k", "v");
+	const string c0 = s->get_copy_id();
+	cut_assert_equal_int(0, s->truncate(0));
+	const string c1 = s->get_copy_id();
+	cut_assert_not_equal_string(c0.c_str(), c1.c_str());
+	cut_assert_false(s->has_bulk_pending());
+	cut_assert_true(s->get_bulk_chain().find(c0 + " " + c1 + " " + s->get_source_epoch()) != string::npos);
+	// the receipt write fails: truncate reports failure, the pending marker
+	// stays, and the next open finalises the receipt (the epoch did advance)
+	setenv("FLARE_TEST_BULK_RECEIPT_FAIL", "1", 1);
+	cut_assert_equal_int(-1, s->truncate(0));
+	unsetenv("FLARE_TEST_BULK_RECEIPT_FAIL");
+	const string c2 = s->get_copy_id();
+	cut_assert_true(s->has_bulk_pending());
+	cut_assert_true(s->get_bulk_chain().find(c1 + " " + c2) == string::npos);
+	drop_rocksdb_noremove(s);
+	s = make_rocksdb(wal_slave_dir);
+	cut_assert_false(s->has_bulk_pending());
+	cut_assert_true(s->get_bulk_chain().find(c1 + " " + c2 + " " + s->get_source_epoch()) != string::npos);
+	// a crash after the copy id moved and BEFORE the epoch advanced: no receipt,
+	// not after a reopen either (the bulk is not proven complete)
+	const string e2 = s->get_source_epoch();
+	setenv("FLARE_TEST_TRUNCATE_STOP_AFTER_IDENTITY", "1", 1);
+	cut_assert_equal_int(-1, s->truncate(0));
+	unsetenv("FLARE_TEST_TRUNCATE_STOP_AFTER_IDENTITY");
+	const string c3 = s->get_copy_id();
+	cut_assert_true(s->has_bulk_pending());
+	drop_rocksdb_noremove(s);
+	s = make_rocksdb(wal_slave_dir);
+	cut_assert_equal_string(e2.c_str(), s->get_source_epoch().c_str());
+	cut_assert_true(s->has_bulk_pending());
+	cut_assert_true(s->get_bulk_chain().find(" " + c3 + " ") == string::npos);
+	drop_rocksdb(s, wal_slave_dir);
+}
+
 // An abandoned attempt (a failed dump, a refused gate, a crash) leaves the
 // live copy as it was; a staging directory is never reused, and an
 // unfinished one is removed at the next open.

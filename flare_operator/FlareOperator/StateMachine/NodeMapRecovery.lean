@@ -69,7 +69,11 @@ def Decision.kind : Decision → String
 def validate (data : String) : Except String FlareClusterState :=
   let lines := (data.splitOn "\n").map String.trim |>.filter (· != "")
   let versionLines := lines.filter (·.startsWith "version=")
-  let nodeLines := lines.filter (fun l => !l.startsWith "version=")
+  -- history transition ids (docs/design-authoritative-history.md): one
+  -- non-empty token each, no duplicates
+  let transitionLines := lines.filter (·.startsWith "transition=")
+  let transitionIds := transitionLines.map (·.drop "transition=".length)
+  let nodeLines := lines.filter (fun l => !l.startsWith "version=" && !l.startsWith "transition=")
   if lines.isEmpty then .error "no content"
   else if versionLines.length != 1 then
     .error s!"expected exactly one version= line, found {versionLines.length}"
@@ -85,7 +89,9 @@ def validate (data : String) : Except String FlareClusterState :=
         let keys := nodes.map (·.1)
         if keys.length != keys.eraseDups.length then .error "duplicate node keys"
         else if !nodes.isEmpty && version == 0 then .error "nodes present with version 0"
-        else .ok { FlareClusterState.default with nodeMap := nodes, nodeMapVersion := version }
+        else if transitionIds.any (fun t => t.isEmpty || (t.splitOn " ").length != 1) then .error "a transition= line is empty or not one token"
+        else if transitionIds.length != transitionIds.eraseDups.length then .error "duplicate transition ids"
+        else .ok { FlareClusterState.default with nodeMap := nodes, nodeMapVersion := version, transitions := transitionIds }
 
 private def missing (what : String) (h : History) (reset firstBuildApproved : Bool) : Decision :=
   match h with

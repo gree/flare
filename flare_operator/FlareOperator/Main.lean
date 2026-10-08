@@ -697,48 +697,27 @@ private def persistHistory (crName ns : String) (st : AuthoritativeHistory.Store
     first node map is persisted, so a later absent record can only mean a
     migration or a loss. Called at the start of every pass until it exists. -/
 initialize historyEnsuredRef : IO.Ref Bool ← IO.mkRef false
-private def ensureHistoryStore (crName ns : String) (partitions : Nat) : IO Unit := do
-  if ← historyEnsuredRef.get then return
-  let some st ← loadHistory crName ns partitions | return
+private def ensureHistoryStore (crName ns : String) (partitions : Nat) : IO Bool := do
+  if ← historyEnsuredRef.get then return true
+  let some st ← loadHistory crName ns partitions | return false
   let (persisted, _) ← readHistory crName ns
-  match persisted with
-  | some (some _) => historyEnsuredRef.set true
-  | some none =>
-    if st.origin == "first-build" then
-      if ← persistHistory crName ns st then
-        IO.eprintln s!"[flare-operator] AUTHORITATIVE HISTORY: created for a first build (before the first node map)"
-        historyEnsuredRef.set true
-    else historyEnsuredRef.set true   -- absent with a map: stays absent (migration approval)
-  | none => pure ()
+  let nodeMapPresent := st.origin != "first-build"
+  let written ← match persisted with
+    | some none =>
+      if st.origin == "first-build" then
+        if ← persistHistory crName ns st then
+          IO.eprintln s!"[flare-operator] AUTHORITATIVE HISTORY: created for a first build (before the first node map)"
+          pure true
+        else pure false
+      else pure false
+    | _ => pure false
+  let ok := AuthoritativeHistory.mapMayBePersisted persisted nodeMapPresent written
+  if ok then historyEnsuredRef.set true
+  else IO.eprintln s!"[flare-operator] CRITICAL: the first-build history record is not written yet: this pass does not proceed (no node map is persisted before it)"
+  return ok
 
-/-- ONE copy as seen from one stats reply (none = the read failed). -/
 private def seenOf (podUid : String) (reply : Option String) : AuthoritativeHistory.Seen :=
-  match reply with
-  | none => .unreadable
-  | some out =>
-    let s := PromotionEvidence.parseStats out
-    if !s.complete || !s.invalid.isEmpty then .unreadable
-    else
-      match s.masterId, s.copyEpoch, s.bootId, s.copyId with
-      | some mid, some ep, some boot, some cid =>
-        if mid.isEmpty || ep.isEmpty || boot.isEmpty || cid.isEmpty || podUid.isEmpty then .unreadable else
-        let healthy := s.identityConsistent == some 1 && s.quarantined != some 1 && s.copyPartial != some 1
-          && s.corrupted != some 1 && s.switchUnresolved != some 1
-        let chainRaw := ((out.splitOn "\n").findSome? fun l =>
-          let t := (l.replace "\r" "").trim
-          if t.startsWith "STAT rocksdb_bulk_chain " then some (t.drop "STAT rocksdb_bulk_chain ".length) else none).getD "-"
-        let chain := if chainRaw == "-" then [] else (chainRaw.splitOn ";").filterMap fun e =>
-          match e.splitOn ">" with
-          | [pr, rest] =>
-            match rest.splitOn "@" with
-            | [su, epo] => some ({ pred := pr, succ := su, epoch := epo } : AuthoritativeHistory.Link)
-            | _ => none
-          | _ => none
-        let reason := ((out.splitOn "\n").findSome? fun l =>
-          let t := (l.replace "\r" "").trim
-          if t.startsWith "STAT rocksdb_source_epoch_reason " then some (t.drop "STAT rocksdb_source_epoch_reason ".length) else none).getD ""
-        .modern ⟨podUid, boot, cid⟩ ⟨mid, ep⟩ healthy (s.items == some 0) chain reason
-      | _, _, _, _ => .legacy
+  AuthoritativeHistory.seenOfReply podUid reply
 
 /-- A FRESH read of one node: its pod UID and its stats (never a cache). -/
 private def seeFresh (key ns : String) : IO AuthoritativeHistory.Seen := do
@@ -750,7 +729,30 @@ private def seeFresh (key ns : String) : IO AuthoritativeHistory.Seen := do
   let reply ← match ← Bridge.queryPodStats pod ns "stats" with
     | .ok o => pure (some o)
     | .error _ => pure none
+  -- the pod must still be the one read before the stats (same UID)
+  let uid2 ← match ← kubectl ["get", "pod", pod, "-n", ns, "--ignore-not-found=true", "-o", "jsonpath={.metadata.uid}"] with
+    | .ok u => pure u.trim
+    | .error _ => pure ""
+  if uid2 != uid then return .unreadable
   return seenOf uid reply
+
+/-- A FRESH read of one node for a decision: (pod UID, the stats reply), the
+    UID read before and after (`none` = not the same pod / not readable). -/
+private def readFresh (key ns : String) : IO (Option (String × String)) := do
+  let pod := extractPodName key
+  let u1 ← match ← kubectl ["get", "pod", pod, "-n", ns, "--ignore-not-found=true", "-o", "jsonpath={.metadata.uid}"] with
+    | .ok u => pure u.trim
+    | .error _ => pure ""
+  if u1.isEmpty then return none
+  let reply ← match ← Bridge.queryPodStats pod ns "stats" with
+    | .ok o => pure (some o)
+    | .error _ => pure none
+  let u2 ← match ← kubectl ["get", "pod", pod, "-n", ns, "--ignore-not-found=true", "-o", "jsonpath={.metadata.uid}"] with
+    | .ok u => pure u.trim
+    | .error _ => pure ""
+  match reply with
+  | some r => if u1 == u2 then return some (u1, r) else return none
+  | none => return none
 
 /-- The persisted node map: (version, transition ids, its state). -/
 private def persistedNodeMap (crName ns : String) : IO (Option FlareClusterState) := do
@@ -1506,10 +1508,14 @@ private def executeEffects (effects : List K8sReconciler.FlareEffect)
       | .ok () => pure ()
       | .error e => IO.eprintln s!"[flare-operator] warning: failed to patch service {svcName}: {e}"
 
-    | .UpdateConfigMap data =>
+    | .UpdateConfigMap _candidate =>
       if (← promotionAbortedRef.get) then
-        IO.eprintln "[flare-operator] node map NOT persisted this pass: its promotion was aborted (SAF-08)"
+        IO.eprintln "[flare-operator] node map NOT persisted this pass: its promotion was aborted (SAF-08 / history)"
         continue
+      -- the COMMITTED map (commitChecked's result: gates applied, transition
+      -- ids attached) is the only source of what is persisted — never the
+      -- FSM's candidate (review P1-1)
+      let data := serializeNodeMap (← _stateRef.get)
       -- Write node map to observability ConfigMap (Main.lean:174-178)
       let cmName := s!"{crName}-node-map"
       match ← updateFlaredConfigMap cmName ns data with
@@ -1853,6 +1859,7 @@ private def commitChecked (stateRef : IO.Ref FlareClusterState) (ver : Nat) (ucs
     match store with
     | none =>
       IO.eprintln s!"[flare-operator] CRITICAL: PROMOTION ABORTED for {existingH}: the authoritative history could not be loaded — nothing from this pass is committed"
+      promotionAbortedRef.set true
       return
     | some st0 =>
       let mut st := st0
@@ -1862,8 +1869,30 @@ private def commitChecked (stateRef : IO.Ref FlareClusterState) (ver : Nat) (ucs
         if !st.tracked p.toNat then continue   -- untracked partition: previous behaviour
         match st.part p.toNat with
         | some (.known rec none) =>
-          match ← seeFresh k ns with
-          | .modern b _ _ _ _ _ =>
+          -- the fresh read that makes the intent is CLASSIFIED again and bound
+          -- to the evidence that chose this candidate (review P1-5)
+          let fresh ← readFresh k ns
+          let passEv := (← promotionEvidenceRef.get).find? (·.1 == k)
+          let obsK := (← promotionObservedRef.get).lookup k
+          let n? := cur.lookupNode k
+          let obsNow : PromotionEvidence.Observed := obsK.getD {
+            mapPrepare := (n?.map (·.state)) == some FlareState.Prepare, mapActive := (n?.map (·.state)) == some FlareState.Active,
+            podReady := true, partitionHasMaster := false, lastMasterHistory := some (rec.hist.masterId, rec.hist.epoch) }
+          let freshCls := PromotionEvidence.classify (fresh.map (·.2)) obsNow
+          let consistent := match passEv with
+            | some (_, passCls, b0) =>
+              (PromotionEvidence.reclassifyAllows passCls freshCls).1
+                && b0 == PromotionEvidence.bindingOf (fresh.map (·.1)) (fresh.map (·.2))
+            | none => PromotionEvidence.commitTimeAllows freshCls
+          let seenK := match fresh with
+            | some (u, r) => seenOf u (some r)
+            | none => .unreadable
+          if !consistent then
+            IO.eprintln s!"[flare-operator] CRITICAL: PROMOTION ABORTED for {k}: its fresh read at the history intent is {freshCls.label}, not the reading that chose it — nothing from this pass is committed"
+            promotionAbortedRef.set true
+            return
+          match seenK with
+          | .modern b _ true _ _ _ =>
             let iid := s!"t{gated.state.nodeMapVersion}-p{p}-{(← IO.monoNanosNow) % 1000000}"
             let it : AuthoritativeHistory.Intent := { id := iid, partition := p.toNat, kind := "promotion", target := k, binding := b, fromGen := rec.gen, fromHist := rec.hist, expectedVersion := gated.state.nodeMapVersion }
             match AuthoritativeHistory.beginIntent st it with
@@ -1872,22 +1901,30 @@ private def commitChecked (stateRef : IO.Ref FlareClusterState) (ver : Nat) (ucs
               transitionIds := transitionIds ++ [iid]
             | none =>
               IO.eprintln s!"[flare-operator] CRITICAL: PROMOTION ABORTED for {k}: partition {p} already has a pending history intent — nothing from this pass is committed"
+              promotionAbortedRef.set true
               return
           | _ =>
-            IO.eprintln s!"[flare-operator] CRITICAL: PROMOTION ABORTED for {k}: its copy (pod / boot / copy / history) could not be read for the history intent — nothing from this pass is committed"
+            IO.eprintln s!"[flare-operator] CRITICAL: PROMOTION ABORTED for {k}: its fresh copy at the history intent is not a modern, HEALTHY copy (unreadable / legacy / unhealthy) — nothing from this pass is committed"
+            promotionAbortedRef.set true
             return
         | some (.known _ (some hold)) =>
           IO.eprintln s!"[flare-operator] CRITICAL: PROMOTION ABORTED for {k}: partition {p} is HELD ({hold}) — RUNBOOK #history-held"
+          promotionAbortedRef.set true
           return
         | other =>
           IO.eprintln s!"[flare-operator] CRITICAL: PROMOTION ABORTED for {k}: partition {p}'s authoritative history is {match other with | some (.unknown c w) => s!"{c.label} ({w})" | _ => "not recorded"} — held (never treated as a first build or as empty)"
+          promotionAbortedRef.set true
           return
       if !transitionIds.isEmpty then
         if !(← persistHistory crName ns st) then
           IO.eprintln s!"[flare-operator] CRITICAL: PROMOTION ABORTED for {existingH}: the history intent could not be persisted — nothing from this pass is committed"
+          promotionAbortedRef.set true
           return
         IO.eprintln s!"[flare-operator] AUTHORITATIVE HISTORY: promotion intent(s) {transitionIds} persisted for {existingH} (before the map commit)"
-  let gated := { gated with state := { gated.state with transitions := ((cur.transitions ++ transitionIds).reverse.take 16).reverse } }
+  -- the last 16 ids, but NEVER an id whose intent is still pending (dropping
+  -- it would make a real commit look like it never happened)
+  let pendingIds := ((← historyStoreRef.get).map (fun st => st.intents.map (·.id))).getD []
+  let gated := { gated with state := { gated.state with transitions := AuthoritativeHistory.keepTransitions (cur.transitions ++ transitionIds) pendingIds } }
   -- TEST SEAM (FLARE_TEST_POSTINTENT_BARRIER, a directory; inert without it):
   -- stop AFTER the intent is persisted and BEFORE the map commit (an operator
   -- restart in this window must leave the intent provably uncommitted)
@@ -2105,7 +2142,7 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
       IO.eprintln s!"[flare-operator] CRD changed: partitions {prevCrd.spec.partitions}→{crd.spec.partitions}, replicas {prevCrd.spec.replicas}→{crd.spec.replicas}"
     crdRef.set crd
     -- the authoritative history exists BEFORE the first node map is persisted
-    ensureHistoryStore crName ns crd.spec.partitions
+    if !(← ensureHistoryStore crName ns crd.spec.partitions) then return
     followDesiredRef.set (some (crd.spec.rocksdb.replFollowEnabled.getD false))
     metrics.partitionsDesired.set crd.spec.partitions.toFloat
 

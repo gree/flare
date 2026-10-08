@@ -5281,6 +5281,15 @@ private def historyRecorded (c : Ctx) : IO Bool := do
   | .ok r => return containsSubstr r "part 0 known"
   | .error _ => return false
 
+private def nodeMapText (c : Ctx) : IO String := do
+  match ← kubectl ["get", "configmap", s!"{c.cfg.name}-node-map", "-n", c.cfg.«namespace», "-o", "jsonpath={.data.nodeMap}"] with
+  | .ok r => return r
+  | .error e => return s!"(unreadable: {e})"
+
+/-- The persisted node map names `pod` master (role=0) of any partition. -/
+private def persistedMaster (c : Ctx) (pod : String) : IO Bool := do
+  return ((← nodeMapText c).splitOn "\n").any fun l => l.startsWith s!"{pod}." && containsSubstr l "role=0 "
+
 private def historyText (c : Ctx) : IO String := do
   match ← kubectl ["get", "configmap", s!"{c.cfg.name}-history", "-n", c.cfg.«namespace», "-o", "jsonpath={.data.record}"] with
   | .ok r => return r
@@ -5334,6 +5343,16 @@ def historyTrackingSuite : TestSuite := {
           if !promoted then return .fail "the lagging replica holding the only data was not promoted"
           if !(← notLossFreeFor c sPod) then return .fail "the promotion of the lagging replica was not logged NOT LOSS-FREE"
           if unrecorded then return .fail "after the restart the operator judged without the persisted history ('not recorded')"
+          -- the PERSISTED map carries the promotion's transition id and names the
+          -- replica master; the record adopted it as the next generation
+          let mapTxt ← nodeMapText c
+          let ids := (mapTxt.splitOn "\n").filterMap fun l => if l.startsWith "transition=" then some (l.drop "transition=".length) else none
+          let adopted ← waitForCondition "the record adopts the promotion (holder = the replica)" 120 do
+            let t ← historyText c
+            return (t.splitOn "\n").any fun l => l.startsWith "part 0 known" && containsSubstr l s!"{sPod}." && containsSubstr l " promotion "
+          IO.eprintln s!"# persisted map transition ids {ids}; replica master there={← persistedMaster c sPod}; record adopted={adopted}"
+          if ids.isEmpty || !(← persistedMaster c sPod) then return .fail "the persisted map does not carry the promotion's transition id / the replica as master"
+          if !adopted then return .fail "the record did not adopt the promotion"
           -- every key the replica held is kept; new writes are accepted
           let some d1 ← c.localDump sIp | return .fail "the new master's own copy could not be read"
           let lost := missingFrom d0 d1
@@ -5529,6 +5548,8 @@ def historyTrackingSuite : TestSuite := {
           let committed := (log.splitOn "\n").any fun l => containsSubstr l "PROMOTION committed" && containsSubstr l s!"{sPod}."
           IO.eprintln s!"# intent unwritable: masters seen {seen}; abort logged={aborted}; promotion committed={committed}"
           if seen.contains sPod || committed then return .fail "a promotion was committed although its history intent could not be persisted"
+          -- the PERSISTED map is unchanged by the aborted pass: the replica is not master there
+          if ← persistedMaster c sPod then return .fail "the persisted node map names the replica master although the promotion was aborted"
           if !aborted then return .fail "no aborted promotion was logged (the failover was not attempted?)"
           return .pass }
   ]

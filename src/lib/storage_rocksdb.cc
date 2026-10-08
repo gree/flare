@@ -84,6 +84,9 @@ const char* const storage_rocksdb::kCopyIdKey = "__flare_copy_id";
 // epoch was recorded (docs/design-authoritative-history.md: the operator
 // adopts a bulk of the authoritative holder only through this chain).
 const char* const storage_rocksdb::kBulkChainKey = "__flare_bulk_chain";
+// A bulk in progress: "<pred copy> <epoch before>", written BEFORE the copy id
+// moves; replaced by the receipt (one atomic batch) once the epoch advanced.
+const char* const storage_rocksdb::kBulkPendingKey = "__flare_bulk_pending";
 const char* const storage_rocksdb::kQuarantineMarkerFile = "quarantine.marker";
 const char* const storage_rocksdb::kApprovalsFile = "approvals.log";
 // Name of the replication-metadata column family (design §3.7).
@@ -93,7 +96,7 @@ bool storage_rocksdb::is_reserved_key(const string& key) {
 	return key == kReplLastLsnKey || key == kReplMasterIdKey
 		|| key == kReplSourceEpochKey || key == kReplSourceEpochReasonKey || key == kReplIncarnationKey
 		|| key == kReplRestoreDoneKey || key == kReplRebuiltFromKey || key == kReplRebuiltFromSuspendedKey || key == kCopyIdKey
-		|| key == kBulkChainKey;
+		|| key == kBulkChainKey || key == kBulkPendingKey;
 }
 // }}}
 
@@ -363,9 +366,20 @@ string storage_rocksdb::get_bulk_chain() {
 	return v;
 }
 
-int storage_rocksdb::_record_bulk_link(const string& pred, const string& succ, const string& epoch) {
-	if (pred.empty() || succ.empty() || epoch.empty()) {
+/**
+ *	The receipt of a completed bulk: append "<pred> <succ> <epoch>" to the
+ *	chain (the last kBulkChainKeep) and remove the pending marker in ONE
+ *	synced batch. -1 when it could not be written (the pending marker stays;
+ *	recover_bulk_pending() finalises it at the next open).
+ */
+int storage_rocksdb::_finalize_bulk_receipt(const string& pred, const string& succ, const string& epoch) {
+	if (this->_db == NULL || pred.empty() || succ.empty() || epoch.empty()) {
 		log_err("bulk receipt NOT recorded (pred [%s], succ [%s], epoch [%s])", pred.c_str(), succ.c_str(), epoch.c_str());
+		return -1;
+	}
+	const char* seam = getenv("FLARE_TEST_BULK_RECEIPT_FAIL");
+	if (seam != NULL && seam[0] != '\0' && strcmp(seam, "0") != 0) {
+		log_err("bulk receipt NOT recorded (FLARE_TEST_BULK_RECEIPT_FAIL test seam)", 0);
 		return -1;
 	}
 	vector<string> lines;
@@ -384,11 +398,53 @@ int storage_rocksdb::_record_bulk_link(const string& pred, const string& succ, c
 	for (size_t i = 0; i < lines.size(); i++) {
 		out << lines[i] << "\n";
 	}
-	if (this->_persist_generation(kBulkChainKey, out.str()) < 0) {
-		log_err("bulk receipt %s -> %s could not be persisted (the operator holds the partition until it can prove the bulk)", pred.c_str(), succ.c_str());
+	rocksdb::WriteBatch batch;
+	batch.Put(kBulkChainKey, out.str());
+	batch.Delete(kBulkPendingKey);
+	rocksdb::WriteOptions wo;
+	wo.sync = true;
+	rocksdb::Status st = this->_db->Write(wo, &batch);
+	if (!st.ok()) {
+		log_err("bulk receipt %s -> %s could not be persisted: %s (finalised at the next open)", pred.c_str(), succ.c_str(), st.ToString().c_str());
 		return -1;
 	}
 	log_notice("bulk receipt: copy %s -> %s, epoch %s", pred.c_str(), succ.c_str(), epoch.c_str());
+	return 0;
+}
+
+/**
+ *	At open: a pending bulk whose epoch HAS advanced since (another epoch, the
+ *	reason bulk, the copy id moved) completed — its receipt is finalised. One
+ *	whose epoch did not advance (a crash before) stays pending: no receipt, the
+ *	operator holds the partition. 1 finalised, 0 nothing to do / left pending,
+ *	-1 the receipt could not be written.
+ */
+bool storage_rocksdb::has_bulk_pending() {
+	if (this->_db == NULL) return false;
+	string v;
+	return this->_db->Get(this->_read_options, kBulkPendingKey, &v).ok() && !v.empty();
+}
+
+int storage_rocksdb::recover_bulk_pending() {
+	if (this->_db == NULL) return 0;
+	string v;
+	if (!this->_db->Get(this->_read_options, kBulkPendingKey, &v).ok() || v.empty()) {
+		return 0;
+	}
+	istringstream in(v);
+	string pred, before;
+	if (!(in >> pred >> before)) {
+		log_err("bulk pending record is malformed [%s]: left as it is (no receipt)", v.c_str());
+		return 0;
+	}
+	const string now_copy = this->get_copy_id();
+	const string now_epoch = this->get_source_epoch();
+	if (now_copy != pred && !now_epoch.empty() && now_epoch != before && this->get_source_epoch_reason() == "bulk") {
+		log_notice("bulk pending %s -> %s completed before a crash: finalising its receipt", pred.c_str(), now_copy.c_str());
+		return this->_finalize_bulk_receipt(pred, now_copy, now_epoch) < 0 ? -1 : 1;
+	}
+	log_warning("bulk pending from copy %s did not complete (epoch %s, reason %s): no receipt (the operator holds the partition)",
+		pred.c_str(), now_epoch.c_str(), this->get_source_epoch_reason().c_str());
 	return 0;
 }
 
@@ -1583,6 +1639,10 @@ int storage_rocksdb::open() {
 		}
 	}
 
+	if (!this->_staging) {
+		this->recover_bulk_pending();
+	}
+
 	log_notice("storage open (path=%s, type=%s, master_id=%s, sync_writes=%s, wal_ttl=%llus, wal_size_limit=%lluMB)",
 		this->_data_path.c_str(), storage::type_cast(this->_type).c_str(), this->get_master_id().c_str(),
 		this->_sync_writes ? "true" : "false",
@@ -2156,6 +2216,17 @@ int storage_rocksdb::truncate(int b) {
 	// the old generation naming changed content (an approval for the old
 	// generation must not apply to it). If it cannot be recorded, no truncate.
 	const string bulk_pred_copy = this->get_copy_id();
+	// the bulk is recorded as PENDING before the copy id moves: a crash at any
+	// later point is recoverable (finalised at open once the epoch advanced)
+	// or stays visibly unproven (no receipt: the operator holds)
+	if (this->_persist_generation(kBulkPendingKey, bulk_pred_copy + " " + this->get_source_epoch()) < 0) {
+		log_err("truncate refused: the bulk could not be recorded as pending", 0);
+		if ((b & behavior_skip_lock) == 0) {
+			this->_mutex_slot_unlock_all();
+			pthread_rwlock_unlock(&this->_mutex_wholelock);
+		}
+		return -1;
+	}
 	if (this->bump_copy_generation("truncate (before deleting)") < 0) {
 		log_err("truncate refused: the copy identity could not move to its next generation", 0);
 		if ((b & behavior_skip_lock) == 0) {
@@ -2230,8 +2301,10 @@ int storage_rocksdb::truncate(int b) {
 	if (r == 0) {
 		// the receipt only once the new epoch is recorded: a crash before it
 		// leaves the new copy id WITHOUT a receipt (the operator holds)
-		if (this->advance_source_epoch("bulk") == 0) {
-			this->_record_bulk_link(bulk_pred_copy, this->get_copy_id(), this->get_source_epoch());
+		if (this->advance_source_epoch("bulk") < 0) {
+			r = -1;			// fail closed: the bulk is NOT complete (no receipt)
+		} else if (this->_finalize_bulk_receipt(bulk_pred_copy, this->get_copy_id(), this->get_source_epoch()) < 0) {
+			r = -1;			// the epoch advanced; the receipt is finalised at the next open
 		}
 	}
 

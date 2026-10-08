@@ -1417,6 +1417,49 @@ private def checkAuthoritativeHistory (ctx : Ctx) : IO Unit := do
       && parse (txt.replace "\nend" "") == none
       && parse (txt.replace "unknown" "unknown") == some full
       && (load "cu" 1 (some (some (txt.replace "part 0 known 3 " "part 0 known 0 "))) false).recorded 0 == none)
+  -- review of aea6cfd
+  let bulkRec : Store := { clusterUid := "cu", parts := [(0, .known { rec0 with reason := "bulk" } none)] }
+  check ctx "history P1-3: an EMPTY source over a target with data is allowed only when the record is a VERIFIED bulk (empty-source 2: replicas follow a legal flush_all); otherwise refused"
+    ((rebuildAllowed bulkRec 0 "m" (modern bM h2 true) (modern bS h2 false)).1
+      && !(rebuildAllowed st 0 "m" (modern bM h2 true) (modern bS h2 false)).1
+      && !(rebuildAllowed bulkRec 0 "m" (modern ⟨"uid-m", "boot-m", "u9:1"⟩ h2 true) (modern bS h2 false)).1
+      && !(rebuildAllowed bulkRec 0 "m" (modern bM ⟨"M", "9:z"⟩ true) (modern bS h2 false)).1)
+  let full := "STAT rocksdb_copy_identity_consistent 1\r\nSTAT rocksdb_quarantined 0\r\nSTAT rocksdb_copy_partial 0\r\nSTAT rebuild_in_flight 0\r\nSTAT rocksdb_copy_id u1:3\r\nSTAT reconstruction_boot_id boot-m\r\nSTAT rocksdb_master_id M\r\nSTAT rocksdb_source_epoch 2:e\r\nSTAT curr_items 5\r\n"
+  check ctx "history P1-4: LEGACY only without ANY newer key; a modern reply missing a needed key, invalid or without a pod UID is UNREADABLE; running / parked / partial are unhealthy"
+    (seenOfReply "uid-m" (some "STAT curr_items 5\r\nSTAT rocksdb_master_id M\r\nEND\r\n") == .legacy
+      && seenOfReply "uid-m" (some ((full.replace "STAT rocksdb_copy_id u1:3\r\n" "") ++ "END\r\n")) == .unreadable
+      && seenOfReply "uid-m" (some (full ++ "STAT rebuild_parked x\r\nEND\r\n")) == .unreadable
+      && seenOfReply "" (some (full ++ "END\r\n")) == .unreadable
+      && seenOfReply "uid-m" (some full) == .unreadable
+      && seenOfReply "uid-m" (some (full ++ "END\r\n")) == Seen.modern bM h2 true false [] ""
+      && (match seenOfReply "uid-m" (some (full ++ "STAT reconstruction_current_state running\r\nEND\r\n")) with | .modern _ _ healthy _ _ _ => !healthy | _ => false)
+      && (match seenOfReply "uid-m" (some (full ++ "STAT rebuild_parked 1\r\nEND\r\n")) with | .modern _ _ healthy _ _ _ => !healthy | _ => false)
+      && (match seenOfReply "uid-m" (some ((full.replace "rocksdb_copy_partial 0" "rocksdb_copy_partial 1") ++ "END\r\n")) with | .modern _ _ healthy _ _ _ => !healthy | _ => false)
+      && (match seenOfReply "uid-m" (some (full ++ "STAT rocksdb_bulk_chain u1:2>u1:3@2:e\r\nSTAT rocksdb_source_epoch_reason bulk\r\nEND\r\n")) with
+          | .modern _ _ _ _ chain reason => chain == [⟨"u1:2", "u1:3", "2:e"⟩] && reason == "bulk" | _ => false))
+  check ctx "history (supplement): an intent whose fromGen / fromHist is not the CURRENT record is refused; a record changed under a pending intent = HOLD at resolution"
+    ((beginIntent st { i with fromGen := 2 }).isNone && (beginIntent st { i with fromHist := ⟨"M", "1:old"⟩ }).isNone
+      && (match resolveIntent (withI.setPart 0 (.known { rec0 with gen := 9 } none)) i 12 ["t-11"] true (modern bS ⟨"M", "4:p"⟩ false) "t" with | (_, .held 0 _) => true | _ => false))
+  check ctx "history (supplement): a pending intent's id is NEVER dropped from the committed map (the last 16 otherwise)"
+    (let many := (List.range 30).map (s!"t{·}")
+     keepTransitions many ["t3"] == ["t3"] ++ (many.drop 14) && (keepTransitions many []).length == 16)
+  check ctx "history (supplement): a first build persists no node map until its history record is written; an unreadable record blocks it too"
+    (!mapMayBePersisted (some none) false false && mapMayBePersisted (some none) false true
+      && mapMayBePersisted (some none) true false && !mapMayBePersisted none true true && mapMayBePersisted (some (some "x")) false false)
+  -- the minimal integration: commit -> persisted map -> operator restart (strict
+  -- validation) -> restored map -> resolution
+  let nS : FlareNode := { serverName := "s", serverPort := 12121, role := .Master, state := .Active, partition := 0 }
+  let nM : FlareNode := { serverName := "m", serverPort := 12121, role := .Slave, state := .Prepare, partition := 0 }
+  let committed : FlareClusterState := { FlareClusterState.default with nodeMapVersion := 12, nodeMap := [("s:12121", nS), ("m:12121", nM)], transitions := keepTransitions ["t-11"] ["t-11"] }
+  let restored := FlareOperator.NodeMapRecovery.validate (FlareClusterState.serializeNodeMap committed)
+  check ctx "history P1-2 (integration): a committed map with a transition id survives the persisted format and the STRICT startup validation; the restored map resolves the intent"
+    (match restored with
+     | .ok pm => pm.transitions == ["t-11"] && pm.nodeMapVersion == 12
+         && (match resolveIntent withI i pm.nodeMapVersion pm.transitions ((pm.lookupNode "s:12121").map (·.role) == some .Master) (modern bS ⟨"M", "4:p"⟩ false) "t" with
+             | (_, .recorded 0 r _) => r.holder == "s" | _ => false)
+     | .error _ => false)
+  check ctx "history P1-2: a malformed transition line is rejected by the strict validation"
+    (match FlareOperator.NodeMapRecovery.validate ((FlareClusterState.serializeNodeMap committed) ++ "\ntransition=t-11") with | .error _ => true | .ok _ => false)
   check ctx "history: a decision uses the new store only when its write SUCCEEDED"
     (afterWrite st withI true == withI && afterWrite st withI false == st)
   -- the classifier wires REJOINING: another history than the authoritative one is never a candidate

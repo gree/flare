@@ -20,6 +20,8 @@
   completely; a tracked partition is never downgraded.
 -/
 
+import FlareOperator.StateMachine.PromotionEvidence
+
 namespace FlareOperator.AuthoritativeHistory
 
 structure Binding where
@@ -242,7 +244,8 @@ def rebind (s : Store) (p : Nat) (key : String) (seen : Seen) : Store × Change 
     pending, or when the partition is not KNOWN. -/
 def beginIntent (s : Store) (i : Intent) : Option Store :=
   match s.part i.partition, s.intentFor i.partition with
-  | some (.known _ none), none => some { s with intents := s.intents ++ [i] }
+  | some (.known r none), none =>
+    if i.fromGen == r.gen && i.fromHist == r.hist then some { s with intents := s.intents ++ [i] } else none
   | _, _ => none
 
 /-- Resolve from the PERSISTED map (its version and the transition ids it
@@ -262,6 +265,8 @@ def resolveIntent (s : Store) (i : Intent) (persistedVersion : Nat) (persistedId
       if b != i.binding then hold s!"{i.target} changed (pod / boot / copy) before its new history was observed"
       else if !healthy then hold s!"{i.target} reports an unhealthy copy"
       else if h == i.fromHist then (s, .none)
+      else if !(match s.part i.partition with | some (.known rc _) => rc.gen == i.fromGen && rc.hist == i.fromHist | _ => false) then
+        hold "the record changed under the pending intent (its generation / history is not the intent's)"
       else
         let r : Record := { gen := i.fromGen + 1, hist := h, holder := i.target, binding := b, since := now, reason := "promotion" }
         (clear (s.setPart i.partition (.known r none)), .recorded i.partition r s!"{i.id} adopted as generation {r.gen}")
@@ -286,8 +291,12 @@ def rebuildAllowed (s : Store) (p : Nat) (sourceKey : String) (source target : S
         if sourceKey != r.holder || b.copyId != r.binding.copyId then (false, s!"{sourceKey} is not the recorded holder ({r.holder}) with its copy")
         else if h != r.hist then (false, s!"{sourceKey} holds another history than the record")
         else if !healthy then (false, s!"{sourceKey} reports an unhealthy copy")
-        else if empty && (match target with | .modern _ _ _ e _ _ => !e | _ => true) then
-          (false, s!"{sourceKey} is EMPTY and the target holds data (or cannot be read): no reverse rebuild")
+        else if empty && r.reason != "bulk" && (match target with | .modern _ _ _ e _ _ => !e | _ => true) then
+          -- an empty source is the authoritative state ONLY when the record is
+          -- a VERIFIED bulk (flush_all / truncate proven by flared's receipt):
+          -- the target must follow it to empty. Otherwise an empty copy over
+          -- a target holding data is a loss, never a source.
+          (false, s!"{sourceKey} is EMPTY and the target holds data (or cannot be read), and the record is not a verified bulk: no reverse rebuild")
         else (true, "the authoritative holder")
       | _ => (false, s!"{sourceKey} was not observed as a modern copy")
     | some (.unknown c w) => (false, s!"the partition's history is {c.label} ({w})")
@@ -384,6 +393,51 @@ def load (clusterUid : String) (partitions : Nat) (persisted : Option (Option St
     | some st =>
       if st.clusterUid != clusterUid then allUnknown .foreign s!"the history record belongs to another cluster ({st.clusterUid})"
       else st
+
+/-- ONE copy as seen from one stats reply (`none` = the read failed). LEGACY
+    only for a complete reply with NONE of the newer keys; a reply with some
+    of them but not every one needed, an invalid value, or a missing pod UID
+    is UNREADABLE (Unknown); health is the classifier's own rule (any
+    forbidden marker, an inconsistent identity = unhealthy). -/
+def seenOfReply (podUid : String) (reply : Option String) : Seen :=
+  match reply with
+  | none => .unreadable
+  | some out =>
+    let s := PromotionEvidence.parseStats out
+    if !s.complete || !s.invalid.isEmpty then .unreadable
+    else if !s.newFormat then .legacy
+    else
+      match s.masterId, s.copyEpoch, s.bootId, s.copyId with
+      | some mid, some ep, some boot, some cid =>
+        if mid.isEmpty || ep.isEmpty || boot.isEmpty || cid.isEmpty || podUid.isEmpty then .unreadable else
+        let healthy := s.identityConsistent == some 1 && (s.forbiddenMarker false).isNone
+        let stat := fun (k : String) => ((out.splitOn "\n").findSome? fun l =>
+          let t := (l.replace "\r" "").trim
+          if t.startsWith s!"STAT {k} " then some (t.drop (s!"STAT {k} ").length) else none)
+        let chainRaw := (stat "rocksdb_bulk_chain").getD "-"
+        let chain := if chainRaw == "-" then [] else (chainRaw.splitOn ";").filterMap fun e =>
+          match e.splitOn ">" with
+          | [pr, rest] =>
+            match rest.splitOn "@" with
+            | [su, epo] => some ({ pred := pr, succ := su, epoch := epo } : Link)
+            | _ => none
+          | _ => none
+        .modern ⟨podUid, boot, cid⟩ ⟨mid, ep⟩ healthy (s.items == some 0) chain ((stat "rocksdb_source_epoch_reason").getD "")
+      | _, _, _, _ => .unreadable
+
+/-- The transition ids a committed map carries: the last 16, and EVERY id whose
+    intent is still pending (never dropped before it is resolved). -/
+def keepTransitions (all pending : List String) : List String :=
+  let recent := (all.reverse.take 16).reverse
+  all.filter (fun t => recent.contains t || pending.contains t)
+
+/-- Whether a pass may go on to persist a node map: a FIRST BUILD (no record,
+    no node map) only once its first-build record has been written. -/
+def mapMayBePersisted (persisted : Option (Option String)) (nodeMapPresent firstBuildWritten : Bool) : Bool :=
+  match persisted with
+  | some none => nodeMapPresent || firstBuildWritten
+  | none => false
+  | some (some _) => true
 
 /-- A store loaded from a CORRUPT / FOREIGN / UNREADABLE record is never written
     back (an operator inspects and deletes it). -/

@@ -882,6 +882,16 @@ overwrites a record it cannot trust:
   partition has been observed (an empty master while another copy holds data,
   or any copy unreadable, is never adopted).
 
+### Rolling the operator back past the history record
+
+The node map now carries `transition=<id>` lines. An older operator's strict
+startup validation rejects them (it halts with "node line does not parse").
+Do NOT delete the node map to roll back. Roll back only when no history
+intent is pending (`intent` lines absent from `<cluster>-history`), with this
+operator stopped: remove ONLY the `transition=` lines from the `nodeMap` data of
+`<cluster>-node-map`, then deploy the older operator. Going forward again
+needs the migration approval (#history-record).
+
 ## A partition held by its history {#history-held}
 
 `part N known ... <hold>` in the record (and CRITICAL "is HELD" on a

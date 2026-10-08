@@ -1737,9 +1737,18 @@ def identitySuite : TestSuite := {
               let wrongPromotion := winLines.any fun l => containsSubstr l "PROMOTION committed"
                 && (containsSubstr l s!"{other}." || containsSubstr l s!"{target}.")
               let drainIncomplete := winLines.any fun l => containsSubstr l "NO promotable successor" && containsSubstr l s!"{m}."
-              IO.eprintln s!"# {other} not promoted: R3 reading 0 logged for it={otherIneligible}; masters seen {seen}; {m} held {mItemsDraining}/{items} keys while draining and came back with every key={back}; promotion of a slave committed={wrongPromotion}; drain incomplete (NO promotable successor for {m})={drainIncomplete}"
-              if !(otherIneligible && noOtherMaster && mItemsDraining == items && back && !wrongPromotion && drainIncomplete) then
-                return .fail s!"expected {other} to take over, or — with {other} R3-ineligible — a safe stop: no slave promoted and the drain of {m} logged incomplete, {m} keeping every key; masters seen {seen}"
+              -- the other slave may be unfit for another LOGGED reason than R3 0
+              -- (CI 37717620315: it was under an R3 repair rebuild — demoted
+              -- to a proxy — when the drain came): a repair of it, or a
+              -- reason-based reading that is not a normal promotion
+              let otherFqdn := s!"{other}.{c.cfg.name}-nodes.{ns}.svc.cluster.local:{c.cfg.flarePort}"
+              let otherRepaired := winLines.any fun l => containsSubstr l "REPLICA REPAIR: demoting" && containsSubstr l otherFqdn
+              let otherNotNormal := winLines.any fun l => containsSubstr l "PROMOTION EVIDENCE"
+                && (containsSubstr l s!"{otherFqdn}=FORBIDDEN" || containsSubstr l s!"{otherFqdn}=unknown" || containsSubstr l s!"{otherFqdn}=lagging")
+              let otherUnfit := otherIneligible || otherRepaired || otherNotNormal
+              IO.eprintln s!"# {other} not promoted: R3 reading 0 logged for it={otherIneligible}; repaired (rebuild) in the window={otherRepaired}; reason-based reading not a normal promotion={otherNotNormal}; masters seen {seen}; {m} held {mItemsDraining}/{items} keys while draining and came back with every key={back}; promotion of a slave committed={wrongPromotion}; drain incomplete (NO promotable successor for {m})={drainIncomplete}"
+              if !(otherUnfit && noOtherMaster && mItemsDraining == items && back && !wrongPromotion && drainIncomplete) then
+                return .fail s!"expected {other} to take over, or — with {other} logged unfit (R3 0, under repair, or not a normal promotion by reason) — a safe stop: no slave promoted and the drain of {m} logged incomplete, {m} keeping every key; masters seen {seen}"
               return .pass
             if otherItems != items then return .fail s!"{other} holds {otherItems} of {items} keys"
             let healed ← waitForCondition "the replaced and drained pods return and the copies match" 480 do

@@ -38,6 +38,7 @@ import FlareOperator.E2E.Tests.BlueGreenMigration
 import FlareOperator.E2E.Tests.VisibilityBench
 import FlareOperator.E2E.Tests.SnapshotPushSeed
 import FlareOperator.E2E.Tests.ReadBalance
+import FlareOperator.E2E.Tests.RestoreIsolated
 
 open FlareOperator.E2E
 
@@ -89,6 +90,8 @@ def main (args : List String) : IO UInt32 :=
     Tests.ContinuousReplicationLimits.r3UnreadableSuite,
     Tests.ContinuousReplicationLimits.promotionReasonsSuite,
     Tests.ContinuousReplicationLimits.promotionPrecommitSuite,
+    Tests.RestoreIsolated.suite,
+    Tests.RestoreIsolated.repeatSuite,
     Tests.ContinuousReplicationLimits.reserveMeasureSuite,
     Tests.ContinuousReplicationLimits.lagHoldUnreadableSuite,
     Tests.ContinuousReplicationLimits.repairLedgerSuite,

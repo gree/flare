@@ -840,6 +840,13 @@ private def observeHistory (stateRef : IO.Ref FlareClusterState) (crName ns : St
   let persisted ← if parts.any (fun p => (st0.intentFor p).isSome) then persistedNodeMap crName ns else pure none
   let mut store := st0
   let mut changes : List String := []
+  -- on the 15 s period: every partition WITHOUT a record, with its state, the
+  -- approval and what this pass read for it (CI 28761ff authority 29: a
+  -- partition stayed 'not recorded' and no reason was logged at all)
+  if periodic then
+    for p in List.range partitions do
+      if (st0.recorded p).isNone then
+        IO.eprintln s!"[flare-operator] history state p{p}: {repr (st0.part p)}; approved={approved}; need={repr (AuthoritativeHistory.need st0 p approved)}; read={(seen.filter fun (k, _) => (copiesOf p).contains k).map fun (k, x) => s!"{k}={match x with | .modern _ h healthy empty _ _ => s!"modern {h.masterId}/{h.epoch} healthy={healthy} empty={empty}" | .legacy => "legacy" | .unreadable => "unreadable"}"}"
   for p in parts do
     let copies := seen.filter fun (k, _) => (copiesOf p).contains k
     let masterKey := (st.nodeMap.find? fun kv => kv.2.role == FlareRole.Master && kv.2.state == FlareState.Active && kv.2.partition == Int.ofNat p).map Prod.fst

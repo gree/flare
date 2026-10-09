@@ -188,10 +188,29 @@ def containsSubstr (haystack needle : String) : Bool :=
 -- TCP/protocol helpers (via kubectl exec in debug pod)
 -- ===========================================================================
 
+/-- The COMPLETE logs of every pod in `ns` (all containers, timestamps, the
+    previous container too) into $FLARE_E2E_LOG_DIR/<ns>/ — uploaded with the
+    CI results. The printed tails below lost the decisive windows (CI 28761ff:
+    history (5)'s 240 s, authority 29's adoption). No-op without the variable. -/
+def saveFullLogs (ns : String) : IO Unit := do
+  let some root ← IO.getEnv "FLARE_E2E_LOG_DIR" | return
+  let dir := s!"{root}/{ns}"
+  discard <| IO.Process.output { cmd := "mkdir", args := #["-p", dir] }
+  let pods ← match ← kubectl ["get", "pods", "-n", ns, "-o", "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}"] with
+    | .ok o => pure ((o.splitOn "\n").map String.trim |>.filter (!·.isEmpty))
+    | .error _ => pure []
+  for pod in pods do
+    for (suffix, extra) in [("", ([] : List String)), (".previous", ["--previous"])] do
+      match ← kubectl (["logs", "-n", ns, pod, "--all-containers", "--timestamps", "--tail=-1"] ++ extra) with
+      | .ok out => if !out.isEmpty then IO.FS.writeFile s!"{dir}/{pod}{suffix}.log" out
+      | .error _ => pure ()
+  IO.eprintln s!"# full logs of {pods.length} pod(s) in {ns} saved under {dir}"
+
 /-- Dump the suite's operator + flared logs (call from TestSuite.onFailure:
     per-suite operators are deleted in teardown, so the CI end-of-run dump
     can never capture the failing suite's logs — this hook point can). -/
 def dumpClusterDiagnostics (ns : String) (operatorLabel : String := "app=flare-operator") : IO Unit := do
+  saveFullLogs ns
   -- NOTE: suites with a custom operatorName MUST pass their own label
   -- (s!"app={cfg.operatorName}") — the default matches nothing there and the
   -- operator-log block comes back silently empty (bit us on a real failure).

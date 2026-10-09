@@ -76,6 +76,10 @@ structure Stats where
   bootId : Option String := none
   copyId : Option String := none
   items : Option Nat := none
+  /-- restore provenance: the partition / routing layout the copy's data
+      belongs to (`rocksdb_partition_binding`, "-" = not bound) -/
+  partitionBinding : Option String := none
+  restoredUnverified : Option Nat := none
   /-- reported keys whose value is not valid for them -/
   invalid : List String := []
   /-- at least one key that a pre-R3 flared never reports is present -/
@@ -120,9 +124,10 @@ def parseStats (out : String) : Stats :=
   let co := flag "rocksdb_corrupted"
   let rc := enum "reconstruction_current_state" ["none", "running", "succeeded", "failed", "aborted"]
   let it := nat "curr_items"
+  let ru := flag "rocksdb_restored_unverified"
   let named := [("repl_read_source_eligible", el.2), ("repl_read_source_state", ss.2),
     ("rocksdb_copy_identity_consistent", ic.2), ("rocksdb_quarantined", qu.2), ("rocksdb_copy_partial", cp.2),
-    ("rebuild_in_flight", fl.2), ("rebuild_parked", pk.2), ("rocksdb_switch_unresolved", su.2), ("rocksdb_corrupted", co.2), ("reconstruction_current_state", rc.2), ("curr_items", it.2)]
+    ("rebuild_in_flight", fl.2), ("rebuild_parked", pk.2), ("rocksdb_switch_unresolved", su.2), ("rocksdb_corrupted", co.2), ("reconstruction_current_state", rc.2), ("curr_items", it.2), ("rocksdb_restored_unverified", ru.2)]
   { complete := lines.contains "END"
     eligible := el.1, sourceState := ss.1, identityConsistent := ic.1, quarantined := qu.1
     copyPartial := cp.1, inFlight := fl.1, parked := pk.1, switchUnresolved := su.1, corrupted := co.1, reconstruction := rc.1
@@ -134,6 +139,8 @@ def parseStats (out : String) : Stats :=
     bootId := value "reconstruction_boot_id"
     copyId := value "rocksdb_copy_id"
     items := it.1
+    partitionBinding := value "rocksdb_partition_binding"
+    restoredUnverified := ru.1
     invalid := named.filterMap fun (k, bad) => if bad then some k else none
     newFormat := newFormatKeys.any fun k => (value k).isSome }
 
@@ -180,6 +187,9 @@ structure Observed where
   /-- it is the partition's ex-master (lastMasterOf): its copy IS the last
       master's copy -/
   isLastMasterHolder : Bool := false
+  /-- the partition binding the map would give it as the master of its
+      partition (`bindingFor`); `none` = not checked -/
+  expectedBinding : Option String := none
 
 /-- R3's reason names WHAT it compared the copy with: "history differs:
     copy E1, master K E2" or "lineage differs: copy X, master K Y".
@@ -229,6 +239,46 @@ def needsRebuildClass (s : Stats) (o : Observed) : Class :=
           .forbidden s!"R3: confirmed different {kind} against the recorded last master's ({mkey} {mval})"
         else .lagging
 
+/-- The binding flared records for partition `p` of a cluster of `n`
+    partitions under the layout this operator serves (META: partition-size,
+    jenkins, modular, hint 1, virtual 4096) — the same text flared builds
+    (cluster::_partition_binding_for). -/
+def bindingFor (p n size : Nat) : String :=
+  s!"v1 partition={p} partitions={n} size={size} hash=jenkins resolver=modular hint=1 virtual=4096"
+
+/-- "v1 k=v ..." -> the fields; `none` = malformed (as flared's parser). -/
+def parseBinding (b : String) : Option (List (String × String)) :=
+  match b.splitOn " " with
+  | "v1" :: rest =>
+    let kvs := rest.filterMap fun t => match t.splitOn "=" with
+      | [k, v] => if k.isEmpty || v.isEmpty then none else some (k, v)
+      | _ => none
+    let need := ["partition", "partitions", "size", "hash", "resolver", "hint", "virtual"]
+    if kvs.length == rest.length && kvs.length == need.length
+        && need.all (fun k => (kvs.filter (·.1 == k)).length == 1) then some kvs else none
+  | _ => none
+
+/-- Restore provenance (restore-isolated 5), the operator's mirror of flared's
+    own refusal: a RESTORED copy only for exactly its binding (an unbound
+    restored copy cannot be verified); any bound copy never for another
+    partition index or routing rule. A live copy may follow a change of the
+    partition COUNT. -/
+def bindingConflict (binding : Option String) (restored : Option Nat) (expected : String) : Option String :=
+  let b := binding.filter (fun x => !x.isEmpty && x != "-")
+  match restored, b with
+  | some 1, none => some "a RESTORED copy without a partition binding (a backup taken before partition bindings): its partition and routing layout cannot be verified"
+  | some 1, some x =>
+    if x == expected then none else some s!"a RESTORED copy bound to [{x}] is assigned [{expected}]: another partition or routing layout"
+  | _, none => none
+  | _, some x =>
+    match parseBinding x, parseBinding expected with
+    | some c, some w =>
+      match ["partition", "size", "hash", "resolver", "hint", "virtual"].find? (fun k => c.lookup k != w.lookup k) with
+      | some k => some s!"the copy is bound to [{x}] and is assigned [{expected}]: {k} differs"
+      | none => none
+    | none, _ => some s!"the copy's partition binding is malformed [{x}]"
+    | _, none => some s!"the expected partition binding is malformed [{expected}]"
+
 def classify (reply : Option String) (o : Observed) : Class :=
   match reply with
   | none => .unknown "stats unreadable"
@@ -238,6 +288,9 @@ def classify (reply : Option String) (o : Observed) : Class :=
     else if !s.invalid.isEmpty then .unknown s!"invalid value(s) reported for {s.invalid}"
     else match s.forbiddenMarker o.partitionHasMaster with
     | some why => .forbidden why
+    | none =>
+    match o.expectedBinding.bind (bindingConflict s.partitionBinding s.restoredUnverified) with
+    | some why => .forbidden s!"restore provenance: {why}"
     | none =>
     -- REJOINING (docs/design-authoritative-history.md): with an authoritative
     -- record, a copy that reports ANOTHER history (e.g. the ex-master back

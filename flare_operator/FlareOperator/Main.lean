@@ -633,6 +633,10 @@ private def readHistory (crName ns : String) : IO (Option (Option String) × Str
     if containsSubstr e "NotFound" || containsSubstr e "not found" then return (some none, "")
     return (none, "")
 
+/-- The partition count the CR asks for (restore provenance: the layout a
+    candidate's binding must match). -/
+initialize desiredPartitionsRef : IO.Ref Nat ← IO.mkRef 0
+
 /-- When the store was last loaded (monotonic ms; 0 = never). -/
 initialize historyLoadedAtRef : IO.Ref Nat ← IO.mkRef 0
 
@@ -1484,13 +1488,15 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
                 readings := readings ++ [(key, SourceEligibility.classifyReply reply)]
               let part : Int := if n.partition ≥ 0 then n.partition else n.lastMasterOf
               let hasMaster := cs.nodeMap.any fun kv => kv.2.role == FlareRole.Master && kv.2.partition == part
+              let nPartsB ← desiredPartitionsRef.get
               let obs : PromotionEvidence.Observed := {
                 mapPrepare := n.state == FlareState.Prepare
                 mapActive := n.state == FlareState.Active
                 podReady := readyNow.contains key
                 partitionHasMaster := hasMaster
                 lastMasterHistory := ← recordedHistory part
-                isLastMasterHolder := part ≥ 0 && n.lastMasterOf == part }
+                isLastMasterHolder := part ≥ 0 && n.lastMasterOf == part
+                expectedBinding := if part ≥ 0 then some (PromotionEvidence.bindingFor part.toNat nPartsB cs.partitionSize) else none }
               let cls := PromotionEvidence.classify reply obs
               evidence := evidence ++ [(key, cls, PromotionEvidence.bindingOf (some p.uid) reply)]
               observedFor := observedFor ++ [(key, obs)]
@@ -1784,7 +1790,27 @@ private def commitChecked (stateRef : IO.Ref FlareClusterState) (ver : Nat) (ucs
         | none => true
         | some n => n.role == FlareRole.Proxy
       if PromotionEvidence.firstMasterOfNewPartition wasProxyOrNew members part then
-        IO.eprintln s!"[flare-operator] promotion of {k}: the first master of partition {part}, which no copy has held (the explicit exception: nothing to read)"
+        -- no copy of the partition has been mastered (nothing of its history
+        -- to read), but the candidate's OWN copy may be a restored copy of
+        -- another partition / routing layout (restore-isolated 5): read it
+        let replyNow ← match ← Bridge.queryPodStats (extractPodName k) ns "stats" with
+          | .ok out => pure (some out)
+          | .error _ => pure none
+        let expected := PromotionEvidence.bindingFor part.toNat (← desiredPartitionsRef.get) cur.partitionSize
+        match replyNow with
+        | none =>
+          IO.eprintln s!"[flare-operator] CRITICAL: PROMOTION ABORTED for {k}: the first master of partition {part}, but its copy could not be read (restore provenance unknown) — nothing from this pass is committed, the next pass reads again"
+          promotionAbortedRef.set true
+          return
+        | some out =>
+          let st := PromotionEvidence.parseStats out
+          match (if st.complete then PromotionEvidence.bindingConflict st.partitionBinding st.restoredUnverified expected else some "stats incomplete") with
+          | some why =>
+            IO.eprintln s!"[flare-operator] CRITICAL: PROMOTION ABORTED for {k}: the first master of partition {part} — restore provenance: {why} — nothing from this pass is committed"
+            promotionAbortedRef.set true
+            return
+          | none =>
+            IO.eprintln s!"[flare-operator] promotion of {k}: the first master of partition {part}, which no copy has held (its own copy read: binding {st.partitionBinding.getD "-"}, restored {st.restoredUnverified.getD 0})"
       else if !riskPass then
         let podNow ← podIdentityNow (extractPodName k) ns
         let ready := match ← kubectl ["get", "pod", extractPodName k, "-n", ns, "-o",
@@ -1796,13 +1822,15 @@ private def commitChecked (stateRef : IO.Ref FlareClusterState) (ver : Nat) (ucs
           | .error _ => pure none
         let n? := cur.lookupNode k
         let hist ← recordedHistory part
+        let nPartsB ← desiredPartitionsRef.get
         let obs : PromotionEvidence.Observed := {
           mapPrepare := (n?.map (·.state)) == some FlareState.Prepare
           mapActive := (n?.map (·.state)) == some FlareState.Active
           podReady := ready
           partitionHasMaster := cur.nodeMap.any fun kv => kv.2.role == FlareRole.Master && kv.2.partition == part
           lastMasterHistory := hist
-          isLastMasterHolder := (n?.map (·.lastMasterOf)) == some part }
+          isLastMasterHolder := (n?.map (·.lastMasterOf)) == some part
+          expectedBinding := if part ≥ 0 then some (PromotionEvidence.bindingFor part.toNat nPartsB cur.partitionSize) else none }
         let cls := PromotionEvidence.classify replyNow obs
         IO.eprintln s!"[flare-operator] PROMOTION EVIDENCE (read at commit, a pass that did not read the candidates): {k}={cls.label} [boot {(PromotionEvidence.bindingOf none replyNow).bootId.getD "?"}]"
         if podNow.isNone || !PromotionEvidence.commitTimeAllows cls then
@@ -2209,6 +2237,7 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
        prevCrd.spec.replicas != crd.spec.replicas then
       IO.eprintln s!"[flare-operator] CRD changed: partitions {prevCrd.spec.partitions}→{crd.spec.partitions}, replicas {prevCrd.spec.replicas}→{crd.spec.replicas}"
     crdRef.set crd
+    desiredPartitionsRef.set crd.spec.partitions
     -- the authoritative history exists BEFORE the first node map is persisted
     if !(← timedHistory "ensureHistoryStore" (ensureHistoryStore crName ns crd.spec.partitions)) then return
     followDesiredRef.set (some (crd.spec.rocksdb.replFollowEnabled.getD false))

@@ -1301,6 +1301,49 @@ private def checkActivationOrder (ctx : Ctx) : IO Unit := do
 
 -- ─── authoritative history (user direction 2026-10-09) ───────────────────
 
+open PromotionEvidence in
+/-- Restore provenance (restore-isolated 5): the binding the operator expects
+    is the one flared builds from the META the operator serves; a restored
+    copy only for exactly its binding, an unbound restored copy never; a bound
+    live copy never for another partition index / routing rule, but across a
+    partition COUNT change. -/
+private def checkRestoreProvenance (ctx : Ctx) : IO Unit := do
+  let (_, metaResp) := Reconciler.reconcileStep FlareClusterState.default { metadata := { name := "c" }, spec := { partitions := 1, replicas := 2 } } .Meta
+  let metaLines := match metaResp with | .End ls => ls | _ => []
+  check ctx "restore provenance: bindingFor uses exactly the routing layout the operator serves in META (size / jenkins / modular / hint 1 / virtual 4096)"
+    (metaLines.contains s!"META partition-size {FlareClusterState.default.partitionSize}"
+      && metaLines.contains "META key-hash-algorithm jenkins" && metaLines.contains "META partition-type modular"
+      && metaLines.contains "META partition-modular-hint 1" && metaLines.contains "META partition-modular-virtual 4096"
+      && bindingFor 0 1 1024 == "v1 partition=0 partitions=1 size=1024 hash=jenkins resolver=modular hint=1 virtual=4096"
+      && (parseBinding (bindingFor 3 4 1024)).isSome
+      && (parseBinding "v1 partition=0").isNone && (parseBinding "v2 partition=0 partitions=1 size=1024 hash=jenkins resolver=modular hint=1 virtual=4096").isNone
+      && (parseBinding "v1 partition=0 partition=0 size=1024 hash=jenkins resolver=modular hint=1 virtual=4096").isNone)
+  let p0n1 := bindingFor 0 1 1024
+  let p1n2 := bindingFor 1 2 1024
+  let p0n2 := bindingFor 0 2 1024
+  check ctx "restore provenance: a RESTORED copy only for exactly its binding (P1 of 2 into a 1-partition P0: refused; same partition, another count: refused; unbound: refused); live copies: never another partition or rule, across a count change allowed, unbound allowed"
+    ((bindingConflict (some p1n2) (some 1) p0n1).isSome
+      && (bindingConflict (some p0n2) (some 1) p0n1).isSome
+      && (bindingConflict (some "-") (some 1) p0n1).isSome
+      && (bindingConflict none (some 1) p0n1).isSome
+      && (bindingConflict (some p0n1) (some 1) p0n1).isNone
+      && (bindingConflict (some p1n2) (some 0) p0n1).isSome
+      && (bindingConflict (some (p0n1.replace "jenkins" "simple")) (some 0) p0n1).isSome
+      && (bindingConflict (some p0n2) (some 0) p0n1).isNone
+      && (bindingConflict (some "-") (some 0) p0n1).isNone
+      && (bindingConflict none none p0n1).isNone
+      && (bindingConflict (some "garbage") (some 0) p0n1).isSome)
+  let base := "STAT curr_items 25\r\nSTAT repl_read_source_eligible 1\r\nSTAT repl_read_source_state eligible\r\nSTAT rocksdb_copy_identity_consistent 1\r\nSTAT rocksdb_quarantined 0\r\nSTAT rocksdb_copy_partial 0\r\nSTAT rebuild_in_flight 0\r\nSTAT rocksdb_copy_id u1:2\r\nSTAT rocksdb_master_id M\r\nSTAT rocksdb_source_epoch 2:e\r\n"
+  let obs : Observed := { mapPrepare := false, mapActive := true, podReady := true, partitionHasMaster := false, lastMasterHistory := none, expectedBinding := some p0n1 }
+  let cls := fun (extra : String) => classify (some (base ++ extra ++ "END\r\n")) obs
+  check ctx "restore provenance in the classifier: another partition's restored copy is FORBIDDEN (before any history rule); its own restored copy is not forbidden for that reason; an invalid restored flag is unknown"
+    ((match cls s!"STAT rocksdb_partition_binding {p1n2}\r\nSTAT rocksdb_restored_unverified 1\r\n" with | .forbidden w => (w.splitOn "restore provenance").length > 1 | _ => false)
+      && (match cls "STAT rocksdb_partition_binding -\r\nSTAT rocksdb_restored_unverified 1\r\n" with | .forbidden _ => true | _ => false)
+      && (match cls s!"STAT rocksdb_partition_binding {p0n1}\r\nSTAT rocksdb_restored_unverified 1\r\n" with | .forbidden w => (w.splitOn "restore provenance").length == 1 | _ => true)
+      && (match cls s!"STAT rocksdb_partition_binding {p1n2}\r\nSTAT rocksdb_restored_unverified 0\r\n" with | .forbidden _ => true | _ => false)
+      && (match cls "STAT rocksdb_restored_unverified x\r\n" with | .unknown _ => true | _ => false)
+      && (match classify (some (base ++ s!"STAT rocksdb_partition_binding {p1n2}\r\nSTAT rocksdb_restored_unverified 1\r\nEND\r\n")) { obs with expectedBinding := none } with | .forbidden w => (w.splitOn "restore provenance").length == 1 | _ => true))
+
 open FlareOperator.AuthoritativeHistory in
 private def checkAuthoritativeHistory (ctx : Ctx) : IO Unit := do
   let bM : Binding := ⟨"uid-m", "boot-m", "u1:3"⟩
@@ -1844,6 +1887,7 @@ def run : IO UInt32 := do
   checkSourceEligibility ctx
   checkRebuildConcurrency ctx
   checkAuthoritativeHistory ctx
+  checkRestoreProvenance ctx
   checkCopyDiscardApproval ctx
   checkPromotionEvidence ctx
   let failures ← ctx.failures.get

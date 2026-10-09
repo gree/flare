@@ -340,7 +340,10 @@ def suite : TestSuite := {
           let mut detail : List String := []
           for p in seen do
             let ip := (← getPodIp p incCfg.«namespace»).getD ""
-            detail := detail ++ [s!"{p} items={← getCurrItems incCfg.debugPod incCfg.«namespace» ip incCfg.flarePort}"]
+            -- a REAL read (none = flared did not answer; getCurrItems turned a
+            -- failed read into 0, CI f37a5b4/807ae59) and the restarts
+            let restarts := ((← kubectlGetJsonpath "pod" p incCfg.«namespace» "{.status.containerStatuses[0].restartCount}").toOption.getD "?").trim
+            detail := detail ++ [s!"{p} items={← statOf incCfg ip "curr_items"} restarts={restarts}"]
           -- CI f37a5b4: an EMPTY master (items=0) after two passing runs. Say
           -- whether the restored copy was ever refused (the seed took effect)
           -- or flared opened a fresh DB (the seed did not: a harness failure)

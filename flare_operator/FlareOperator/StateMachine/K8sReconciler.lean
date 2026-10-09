@@ -1608,6 +1608,17 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
       let stateWithMasters := promoteMasterlessPartitions stateWithProxies crd s.livePodKeys s.standbyNodeKeys s.dataBearingKeys s.followUnfitKeys
         s.followHoldEnabled s.followHoldExpiredParts s.knownEmptyKeys s.promotionBlockedKeys
       let holdEffects := refillHoldEffects stateWithProxies stateWithMasters crd s
+      -- a partition still masterless after the refill: what the refill saw
+      -- for each of its copies (CI 807ae59, history (5): a replica on the
+      -- recorded history was neither crowned nor held for 300 s and nothing
+      -- said why)
+      let stillMasterless := (List.range crd.spec.partitions).filter fun p =>
+        !FlareOperator.Reconciler.hasMasterForPartition stateWithMasters p
+      let inputEffects := stillMasterless.map fun p =>
+        let copies := stateWithMasters.nodeMap.filter fun (_, n) => n.partition == Int.ofNat p || n.lastMasterOf == Int.ofNat p
+        let desc := copies.map fun (k, n) =>
+          s!"{k}: role={n.role.toNat} state={n.state.toNat} lastMasterOf={n.lastMasterOf} live={s.livePodKeys.contains k} dataBearing={s.dataBearingKeys.contains k} knownEmpty={s.knownEmptyKeys.contains k} unfit={s.followUnfitKeys.contains k} blocked={s.promotionBlockedKeys.contains k}"
+        FlareEffect.Log s!"[flare-operator] masterless refill inputs p{p} (hold {s.followHoldEnabled}, expired {s.followHoldExpiredParts.contains p}): {desc}"
       -- Persistent-violation detection: a partition whose copies all sit in
       -- one zone survives spread constraints (they place pods, not roles).
       -- Phase 1 warns; automated repair (slave migration) is future work.
@@ -1632,7 +1643,7 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
         | none => (stateWithMasters, [])
       ({ s with reconcileStep := .AfterUpdateConfigMap,
                 updatedClusterState := some stateFinal }, none,
-       holdEffects ++ warnEffects ++ repairEffects)
+       holdEffects ++ inputEffects ++ warnEffects ++ repairEffects)
     | _, _ =>
       ({ s with reconcileStep := .Error "missing cluster state or CRD at AfterAssignRoles" }, none, [])
 

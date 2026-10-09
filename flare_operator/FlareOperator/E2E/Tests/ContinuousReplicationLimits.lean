@@ -5317,6 +5317,24 @@ private def onRecordedHistory (c : Ctx) (ip : String) : IO (Bool × String) := d
     | _, _, _ => false
   return (ok, s!"record {recHist}; copy {mid}/{ep} (rebuilt-from {rebuilt}, own {own})")
 
+/-- Wait until the replica holds the recorded history, logging every ~30 s
+    WHY it does not yet (CI 28761ff: (5) waited 240 s after a re-adoption while
+    the replica stayed on the previous history, and the window's logs were
+    not kept): the replica's R3 state / reason, its reconstruction state, and
+    the operator's latest rebuild / history lines. -/
+private def waitOnRecordedHistory (c : Ctx) (label ip : String) (secs : Nat) : IO Bool := do
+  let n ← IO.mkRef 0
+  waitForCondition s!"{label}: the replica holds the recorded history (promotable)" secs do
+    let ok := (← onRecordedHistory c ip).1
+    let i ← n.modifyGet fun i => (i, i + 1)
+    if !ok && i % 6 == 0 then
+      let (_, why) ← onRecordedHistory c ip
+      let st := fun (k : String) => do return s!"{k}={← c.statStr ip k}"
+      let r3 ← [ "repl_read_source_state", "repl_read_source_reason", "repl_follow_state", "reconstruction_current_state", "rebuild_in_flight", "rebuild_parked"].mapM st
+      let ops := ((← c.opLog 400).splitOn "\n").filter (fun l => containsSubstr l "REBUILD" || containsSubstr l "HISTORY" || containsSubstr l "history" || containsSubstr l "repair" || containsSubstr l "rebuild")
+      IO.eprintln s!"# {label} wait {i}: {why}; replica {r3}; operator: {(ops.reverse.take 5).reverse}"
+    return ok
+
 def historyTrackingSuite : TestSuite := {
   name := "history-tracking"
   setup := do
@@ -5541,7 +5559,7 @@ def historyTrackingSuite : TestSuite := {
         match ← c.pair with
         | .error e => return .fail e
         | .ok (mPod, _, _, sIp) =>
-          let onRec ← waitForCondition "the replica holds the recorded history (promotable)" 240 do return (← onRecordedHistory c sIp).1
+          let onRec ← waitOnRecordedHistory c "(5)" sIp 240
           let (_, why) ← onRecordedHistory c sIp
           IO.eprintln s!"# (5) precondition: {why}"
           if !onRec then return .fail s!"precondition: the replica does not hold the recorded history ({why}): no promotion can be attempted"
@@ -5583,7 +5601,7 @@ def historyTrackingSuite : TestSuite := {
         | .ok (mPod, _, sPod, sIp) =>
           let ok ← waitForCondition "a recorded history" 120 do historyRecorded c
           if !ok then return .fail "precondition: no recorded history"
-          let onRec ← waitForCondition "the replica holds the recorded history (promotable)" 240 do return (← onRecordedHistory c sIp).1
+          let onRec ← waitOnRecordedHistory c "(3b)" sIp 240
           let (_, why) ← onRecordedHistory c sIp
           IO.eprintln s!"# (3b) precondition: {why}"
           if !onRec then return .fail s!"precondition: the replica does not hold the recorded history ({why}): the abort could not be told from a refusal"

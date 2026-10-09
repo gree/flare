@@ -5295,6 +5295,28 @@ private def historyText (c : Ctx) : IO String := do
   | .ok r => return r
   | .error e => return s!"(unreadable: {e})"
 
+/-- Whether the copy at `ip` holds partition 0's RECORDED history (the
+    classifier's "same history"), with both sides for the log: the record's
+    (master id, epoch) and the copy's (rocksdb_master_id, rebuilt-from epoch
+    or its own source epoch). A precondition of the promotion tests (CI
+    948ecf3: (5) ran with a replica on another history and timed out without
+    saying so). -/
+private def onRecordedHistory (c : Ctx) (ip : String) : IO (Bool × String) := do
+  let rec_ := ((← historyText c).splitOn "\n").find? (·.startsWith "part 0 known ")
+  let recHist := match rec_ with
+    | some l => match l.splitOn " " with
+      | _ :: _ :: _ :: _ :: mid :: ep :: _ => some (mid, ep)
+      | _ => none
+    | none => none
+  let mid ← c.statStr ip "rocksdb_master_id"
+  let rebuilt ← c.statStr ip "rocksdb_rebuilt_from_epoch"
+  let own ← c.statStr ip "rocksdb_source_epoch"
+  let ep := match rebuilt with | some e => if e.isEmpty then own else some e | none => own
+  let ok := match recHist, mid, ep with
+    | some (rm, re), some m, some e => rm == m && re == e
+    | _, _, _ => false
+  return (ok, s!"record {recHist}; copy {mid}/{ep} (rebuilt-from {rebuilt}, own {own})")
+
 def historyTrackingSuite : TestSuite := {
   name := "history-tracking"
   setup := do
@@ -5518,7 +5540,11 @@ def historyTrackingSuite : TestSuite := {
         if !ok then return .fail "precondition: no recorded history"
         match ← c.pair with
         | .error e => return .fail e
-        | .ok (mPod, _, _, _) =>
+        | .ok (mPod, _, _, sIp) =>
+          let onRec ← waitForCondition "the replica holds the recorded history (promotable)" 240 do return (← onRecordedHistory c sIp).1
+          let (_, why) ← onRecordedHistory c sIp
+          IO.eprintln s!"# (5) precondition: {why}"
+          if !onRec then return .fail s!"precondition: the replica does not hold the recorded history ({why}): no promotion can be attempted"
           if let .error e ← c.opExec "mkdir -p /tmp/postintent && rm -f /tmp/postintent/reached /tmp/postintent/release && touch /tmp/postintent/arm" then
             return .fail s!"precondition: could not arm the post-intent barrier: {e}"
           discard <| kubectl ["delete", "pod", mPod, "-n", ns, "--grace-period=0", "--force", "--wait=false"]
@@ -5543,9 +5569,13 @@ def historyTrackingSuite : TestSuite := {
       run := do
         match ← c.pair with
         | .error e => return .fail e
-        | .ok (mPod, _, sPod, _) =>
+        | .ok (mPod, _, sPod, sIp) =>
           let ok ← waitForCondition "a recorded history" 120 do historyRecorded c
           if !ok then return .fail "precondition: no recorded history"
+          let onRec ← waitForCondition "the replica holds the recorded history (promotable)" 240 do return (← onRecordedHistory c sIp).1
+          let (_, why) ← onRecordedHistory c sIp
+          IO.eprintln s!"# (3b) precondition: {why}"
+          if !onRec then return .fail s!"precondition: the replica does not hold the recorded history ({why}): the abort could not be told from a refusal"
           match ← kubectl ["patch", "configmap", s!"{historyCfg.name}-history", "-n", ns, "--type", "merge", "-p", "{\"immutable\":true}"] with
           | .error e => return .fail s!"precondition: could not make the record immutable: {e}"
           | .ok _ => pure ()

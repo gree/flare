@@ -138,6 +138,31 @@ int op_set::_run_server() {
 	// storage i/o
 	storage::result r_storage;
 	int retcode;
+	// SAF-10b stage 3: a forwarded change that carries a replication identity
+	// goes through the COMMON APPLY RULE, so it is ordered against the copy
+	// of itself that the WAL stream will deliver, instead of overwriting
+	// whatever is there. Anything else — a client write, an older source, a
+	// backend without an identity — takes the path it always took.
+	if (!this->_entry.repl_tag.empty() && this->is_proxy_request()) {
+		storage_access_info info = { this->_thread };
+		time_watcher_scoped_observer ob(info);
+		const int applied = this->_storage->apply_identified_change(this->_entry.repl_tag, this->_entry, false);
+		switch (applied) {
+			case storage::identified_applied:
+				stats_object->increment_total_items();
+				return this->_send_result(result_stored);
+			case storage::identified_skipped:
+				// This copy already holds this change or a newer one: the
+				// source is not ahead of us, so this is a success for it.
+				return this->_send_result(result_stored);
+			case storage::identified_refused:
+				return this->_send_result(result_server_error, "replication identity refused");
+			case storage::identified_error:
+				return this->_send_result(result_server_error, "i/o error");
+			default:
+				break;		// identified_unsupported: fall through
+		}
+	}
 	{
 		storage_access_info info = { this->_thread };
 		time_watcher_scoped_observer ob(info);
@@ -196,6 +221,12 @@ int op_set::_run_client(storage::entry& e) {
 	}
 	if (e.option & storage::option_async) {
 		offset += snprintf(request+offset, request_len-offset, " %s", storage::option_cast(storage::option_async).c_str());
+	}
+	// SAF-10b: the source's replication identity, last on the line so an
+	// unknown trailing token is the only thing an older parser would see —
+	// and it is only ever sent when the feature is on cluster-wide.
+	if (!e.repl_tag.empty()) {
+		offset += snprintf(request+offset, request_len-offset, " rl=%s", e.repl_tag.c_str());
 	}
 	offset += snprintf(request+offset, request_len-offset, "%s", line_delimiter);
 	memcpy(request+offset, e.data.get(), e.size);

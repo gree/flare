@@ -1,0 +1,40 @@
+# SAF-10b stage 2, review fixes — generation checks inside the applying section, live-key accounting, DB lifetime
+# host: local darwin arm64, nix devShell
+# build: ~/git/flare/configure --with-rocksdb=<rocksdb-8.3.2> CXXFLAGS="-std=c++17 -g -O0 -D_LIBCPP_ENABLE_CXX17_REMOVED_RANDOM_SHUFFLE -D_LIBCPP_ENABLE_CXX17_REMOVED_AUTO_PTR"
+# command: cutter --keep-opening-modules -v v -s test -n "<filter>" test/lib
+# date: 2026-09-18
+# NOTE ON SCOPE: RocksDB unit tests only; the non-RocksDB cutter suite is recorded separately and does not compile these paths.
+
+=== what was fixed (self-audit of the stage-2 code) ===
+1. The incarnation was read BEFORE the applying section on the forwarded path, so a delivery admitted against the
+   previous copy could be written onto the new one; the WAL path did not check it at all, although a stream is
+   long-lived and outlives a restore. Both now check inside the section that holds the DB handle alive.
+2. The forwarded path wrote data without maintaining curr_items at all, and the WAL path probed existence per
+   change, so a key created twice (or created and deleted) inside one batch was counted twice. Both now use an
+   in-batch existence overlay, alongside the ordering overlay.
+3. An EMPTY batch claimed the position base_seq, i.e. a sequence it never carried.
+4. collect_tombstones() and get_repl_tombstones() touched the DB handle without the whole-lock, which is what a
+   snapshot swap, a hard reset or a close takes in write mode before destroying it — a use-after-free window
+   against exactly the operations this design adds.
+
+=== new tests ===
+test_apply_rule_metadata_only_batch_advances_position     pass   a batch of metadata-family entries applies no data, yet its entries are numbered and the position moves past them
+test_apply_rule_empty_batch_does_not_move_position        pass   an empty batch covers no sequence and claims none
+test_apply_rule_curr_items_matches_real_key_count         pass   curr_items equals an independent iteration after both paths, including a key written twice and a key created-then-deleted in ONE batch
+test_apply_rule_incarnation_checked_against_the_current_copy  pass   a delivery for the previous copy is refused on both paths after the copy was replaced
+test_apply_rule_concurrent_forwarded_and_wal              pass   4 threads of forwarded changes against the same keys while the applier delivers its own batches: the count never drifts from the key space, the position moves only by the applier, and every contended key ends at the highest label offered
+
+=== results ===
+stage 1 + stage 2 set (filter /(apply_rule|generation|restore|order_label|truncate_advances|refuses_checkpoint)/):
+  24 test(s), 293 assertion(s), 0 failure(s), 0 error(s) — 100% passed
+whole RocksDB-related set (adds hard_reset, snapshot, backup, expire, wal, phaseA/C, corruption, analyze):
+  67 test(s), 793 assertion(s), 0 failure(s), 0 error(s) — 100% passed
+
+=== NOT executed / deferred by agreement ===
+* Lock-hold time and writer starvation bounds (design §3.8, acceptance T17): deferred to a later stage, as agreed.
+  The concurrency test above exercises contention for correctness, not for latency bounds.
+* No E2E: nothing is wired to the wire protocol until stage 3.
+* The full cutter suite in one run: network-dependent modules hang on this host; the RocksDB module is run by name
+  filter, and the complete suite runs in CI (nix-linux, test-flare-rocksdb).
+* Reminder from the previous report: the cutter modules statically embed libflare objects, so `make -C test/lib clean`
+  is required after a header change or members are read at stale offsets.

@@ -44,6 +44,11 @@ structure PodInfo where
       detection won't fire — but the operator must drain it (promote a
       replacement, demote it to a live proxy) BEFORE it exits. -/
   terminating : Bool := false
+  /-- SAF-08 incarnation: the pod UID and the flared container's restart
+      count (a restarted flared is a container restart). "" / none when not
+      observed. -/
+  uid : String := ""
+  restarts : Option Nat := none
   deriving Repr, BEq
 
 /-- Convert a PodInfo to a node key matching the FQDN used by flared for registration.
@@ -64,6 +69,20 @@ def getFlareClusterCRD (crName ns : String) : IO (Except String FlareClusterView
   retry s!"fetch CRD {crName}" do
     getFlareCluster crName ns
 
+/-- Parse the single-response pod list (see listFlaredPodsE). A row whose
+    column count is wrong is dropped rather than guessed. -/
+def parsePodRows (ns output : String) : List PodInfo :=
+  (output.splitOn "\n").filterMap fun line =>
+    match line.trim.splitOn "|" with
+    | [name, ip, ready, hostname, subdomain, nodeName, uid, rc, ts] =>
+      if name.trim.isEmpty then none
+      else some {
+        name := name.trim, ip := ip.trim, port := 12121,
+        hostname := hostname.trim, subdomain := subdomain.trim, «namespace» := ns,
+        ready := ready.trim == "True", nodeName := nodeName.trim,
+        terminating := !ts.trim.isEmpty, uid := uid.trim, restarts := rc.trim.toNat? }
+    | _ => none
+
 /-- List flared pods matching the cluster label selector.
     Returns typed PodInfo list instead of raw tuples.
     Uses retry logic for resilience against transient API failures.
@@ -71,84 +90,19 @@ def getFlareClusterCRD (crName ns : String) : IO (Except String FlareClusterView
     kubectl get pods -n <ns> -l app=flare,cluster=<crName>
     -o jsonpath='{range .items[*]}{.metadata.name} {.status.podIP} 12121 {.status.conditions[?(.type=="Ready")].status}{\n}{end}' -/
 def listFlaredPodsE (crName ns : String) : IO (Except String (List PodInfo)) := do
+  -- ONE response for every field (SAF-08, review 2026-10-05): Ready, UID,
+  -- container restart count and deletionTimestamp used to come from two
+  -- list calls joined by pod name, so a pod replaced under the same name
+  -- between them combined the OLD pod's Ready with the NEW pod's UID. One
+  -- jsonpath over the same items is one consistent snapshot per pod.
+  -- '|'-separated so an empty field (no IP while Pending, no restartCount,
+  -- no deletionTimestamp) keeps every column in place.
   let result ← retryConservative s!"list pods for {crName}" do
     kubectl ["get", "pods", "-n", ns, "-l", s!"app=flare,cluster={crName}",
-             "-o", "jsonpath={range .items[*]}{.metadata.name} {.status.podIP} 12121 {.status.conditions[?(.type==\"Ready\")].status} {.spec.hostname} {.spec.subdomain} {.spec.nodeName}{\"\\n\"}{end}"]
+             "-o", "jsonpath={range .items[*]}{.metadata.name}|{.status.podIP}|{.status.conditions[?(.type==\"Ready\")].status}|{.spec.hostname}|{.spec.subdomain}|{.spec.nodeName}|{.metadata.uid}|{.status.containerStatuses[0].restartCount}|{.metadata.deletionTimestamp}{\"\\n\"}{end}"]
   match result with
   | .error e => return .error e
-  | .ok output =>
-    let lines := output.splitOn "\n" |>.filter (· != "")
-    let pods := lines.filterMap fun line =>
-      let parts := line.splitOn " "
-      match parts with
-      | [podName, ip, portStr, readyStr, hostname, subdomain, nodeName] =>
-        match portStr.trim.toNat? with
-        | some port => some {
-            name := podName.trim
-            ip := ip.trim
-            port := port
-            hostname := hostname.trim
-            subdomain := subdomain.trim
-            «namespace» := ns
-            ready := readyStr.trim == "True"
-            nodeName := nodeName.trim
-          }
-        | none => none
-      | [podName, ip, portStr, readyStr, hostname, subdomain] =>
-        match portStr.trim.toNat? with
-        | some port => some {
-            name := podName.trim
-            ip := ip.trim
-            port := port
-            hostname := hostname.trim
-            subdomain := subdomain.trim
-            «namespace» := ns
-            ready := readyStr.trim == "True"
-          }
-        | none => none
-      | [podName, ip, portStr, readyStr] =>
-        match portStr.trim.toNat? with
-        | some port => some {
-            name := podName.trim
-            ip := ip.trim
-            port := port
-            «namespace» := ns
-            ready := readyStr.trim == "True"
-          }
-        | none => none
-      | [podName, ip, portStr] =>
-        match portStr.trim.toNat? with
-        | some port => some {
-            name := podName.trim
-            ip := ip.trim
-            port := port
-            «namespace» := ns
-            ready := true
-          }
-        | none => none
-      | _ => none
-    -- Second, lightweight query for Terminating pods (those with a
-    -- deletionTimestamp). Kept SEPARATE from the positional space-split parse
-    -- above: an empty deletionTimestamp emitted inline would collapse adjacent
-    -- spaces and shift every field. Best-effort — on error, no pod is marked
-    -- terminating (falls back to the pre-drain behaviour, never a false drain).
-    -- List name + deletionTimestamp for EVERY pod and decide in code: a pod is
-    -- Terminating iff its deletionTimestamp is non-empty. (kubectl jsonpath
-    -- existence filters like [?(@.metadata.deletionTimestamp)] are unreliable, so
-    -- we don't filter server-side.) A non-terminating pod emits just its name
-    -- (empty timestamp collapses on trim) → one token → not terminating.
-    let termResult ← retryConservative s!"list terminating pods for {crName}" do
-      kubectl ["get", "pods", "-n", ns, "-l", s!"app=flare,cluster={crName}",
-               "-o", "jsonpath={range .items[*]}{.metadata.name} {.metadata.deletionTimestamp}{\"\\n\"}{end}"]
-    let termNames : List String := match termResult with
-      | .ok out => out.splitOn "\n" |>.filterMap fun line =>
-          match line.trim.splitOn " " |>.filter (· != "") with
-          | [_name]      => none            -- name only, no timestamp → alive
-          | name :: _ :: _ => some name     -- name + timestamp token → Terminating
-          | []           => none
-      | .error _ => []
-    return .ok <| pods.map fun p =>
-      if termNames.contains p.name then { p with terminating := true } else p
+  | .ok output => return .ok (parsePodRows ns output)
 
 /-- Node keys of pods that are Terminating (have a deletionTimestamp). -/
 def terminatingPodKeys (pods : List PodInfo) : List String :=
@@ -187,6 +141,59 @@ def podUid (podName ns : String) : IO (Option String) := do
   match ← kubectl ["get", "pod", podName, "-n", ns, "-o", "jsonpath={.metadata.uid}"] with
   | .ok out => let u := out.trim; return (if u.isEmpty then none else some u)
   | .error _ => return none
+
+/-- Short-budget, read-only API calls for the round-robin topology audit.
+    Do not inherit the generic kubectl 30-second budget three times per pass. -/
+private def topologyProbeCommand (seconds : Nat) (args : Array String) : IO (Option String) := do
+  try
+    let r ← IO.Process.output {
+      cmd := "timeout"
+      args := #["-k", "1", toString seconds, "kubectl"] ++ args }
+    return if r.exitCode == 0 then some r.stdout else none
+  catch _ => return none
+
+/-- TEST SEAM (SAF-08 / CHECK-01-observation E2E). Unset in production, this
+    is one getEnv per probe. When `FLARE_TEST_PROBE_BARRIER` names a
+    directory and `<dir>/probe-arm-<pod>` exists, the probe of THAT pod stops
+    after its first UID read: it writes the UID it read to
+    `<dir>/probe-reached`, removes the arm file, and waits for
+    `<dir>/probe-release` (at most 30 s, so a stale arm file cannot wedge the
+    loop that also renews the lease). The E2E replaces the pod under the same
+    name while the probe is held, which is the race the UID bracket exists
+    for. -/
+private def probeBarrier (podName uid : String) : IO Unit := do
+  match ← IO.getEnv "FLARE_TEST_PROBE_BARRIER" with
+  | none => pure ()
+  | some dir =>
+    let arm : System.FilePath := dir ++ s!"/probe-arm-{podName}"
+    if !(← arm.pathExists) then pure ()
+    else
+      let reached : System.FilePath := dir ++ "/probe-reached"
+      let release : System.FilePath := dir ++ "/probe-release"
+      IO.eprintln s!"[flare-operator] TEST SEAM: topology probe of {podName} held after the first UID read (uid={uid})"
+      try IO.FS.writeFile reached s!"{uid}\n" catch _ => pure ()
+      try IO.FS.removeFile arm catch _ => pure ()
+      let mut released := false
+      for _ in [0:300] do        -- 300 x 100ms = 30s ceiling
+        if (← release.pathExists) then
+          released := true
+          break
+        IO.sleep 100
+      IO.eprintln s!"[flare-operator] TEST SEAM: topology probe of {podName} {if released then "released" else "timed out after 30s"}"
+      try IO.FS.removeFile release catch _ => pure ()
+      try IO.FS.removeFile reached catch _ => pure ()
+
+/-- Bracket a stats reply with Pod UID reads. No cached result is reused.
+    Command payload is fixed; pod/namespace are separate argv elements. -/
+def topologyProbe (podName ns : String) : IO (Option String × Option String × Option String) := do
+  let args := #["get", "pod", podName, "-n", ns, "-o", "jsonpath={.metadata.uid}"]
+  let before := (← topologyProbeCommand 2 args).map String.trim
+  if before.isNone || before == some "" then return (none, none, none)
+  probeBarrier podName (before.getD "")
+  let reply ← topologyProbeCommand 3 #["exec", "-n", ns, podName, "--", "bash", "-c",
+    "exec 3<>/dev/tcp/localhost/12121; printf 'stats\\r\\n' >&3; while IFS= read -r line; do printf '%s\\n' \"$line\"; case \"$line\" in END*) break;; esac; done <&3; exec 3>&-"]
+  let after := (← topologyProbeCommand 2 args).map String.trim
+  return (before, after, reply)
 
 /-- The shell command that deletes a pod with the observed UID as an API-side
     PRECONDITION (DeleteOptions.preconditions.uid), so the apiserver itself
@@ -446,29 +453,44 @@ def writeRepairLedger (crName ns : String) (l : ReplicaRepair.Ledger) : IO (Exce
 
 /-- Query flared stats via kubectl exec and bash /dev/tcp. -/
 def queryPodStats (podName ns : String) (statsCmd : String) : IO (Except String String) :=
-  execInPod podName ns ["bash", "-c", s!"exec 3<>/dev/tcp/localhost/12121; printf '{statsCmd}\\r\\n' >&3; timeout 3 cat <&3; exec 3>&-"]
+  -- Read until the END line and return at once; the connection would stay
+  -- open (memcached protocol), so a plain `cat` always ran into its 3 s
+  -- timeout and every stats probe cost ≥3 s of reconcile time. The overall
+  -- deadline stays (timeout 3), so a hung or silent flared still bounds it.
+  execInPod podName ns ["bash", "-c", s!"exec 3<>/dev/tcp/localhost/12121; printf '{statsCmd}\\r\\n' >&3; timeout 3 bash -c 'while IFS= read -r line; do printf \"%s\\n\" \"$line\"; case \"$line\" in END*) break;; esac; done' <&3; exec 3>&-"]
 
-/-- Node keys of pods whose flared reports curr_items > 0 (a bounded stats
-    probe per pod: `timeout 3` inside the exec). Feeds the masterless
-    refill's empty-master guard — an ex-master that came back EMPTY must not
-    be crowned over a data-bearing copy. Best-effort: a pod whose probe
-    fails is simply not listed (the guard treats "no data-bearing nodes" as
-    "no information" and falls back to the old behavior), so a stats hiccup
-    can never brick the refill. -/
-def dataBearingPodKeys (pods : List PodInfo) (ns : String) : IO (List String) := do
+/-- What a bounded stats probe (`timeout 3` inside the exec) says about a
+    pod's data: `(hasData, knownEmpty)`. A pod lands in `knownEmpty` ONLY when
+    the reply was complete (ended with END) and carried a well-formed
+    `curr_items 0`. A pod that could not be read — no IP yet, exec or stats
+    failure, truncated or malformed reply, or listed in `blocked` (test seam)
+    — is in NEITHER list: Unknown is never emptiness (CI 37296281060). The
+    caller binds `knownEmpty` to the pod incarnation it listed. -/
+def dataPresencePodKeys (pods : List PodInfo) (ns : String) (alsoProbe : List String := [])
+    (blocked : List String := []) : IO (List String × List String) := do
   let mut keys : List String := []
+  let mut empty : List String := []
   for pod in pods do
-    if pod.ready || pod.terminating then
+    -- `alsoProbe`: node keys read even while NotReady. A returning ex-master
+    -- stays NotReady in Prepare (sync-gated readiness) although its PVC
+    -- holds the partition's newest copy; without reading it the refill took
+    -- it for empty (failover-lag hold, 2026-10-03).
+    if (pod.ready || pod.terminating || alsoProbe.contains pod.toNodeKey) && !blocked.contains pod.name then
       match ← queryPodStats pod.name ns "stats" with
       | .ok out =>
-        let hasData := out.splitOn "\n" |>.any fun line =>
-          match (line.trim.splitOn " ").filter (· != "") with
-          | ["STAT", "curr_items", v] => (v.trim.toNat?.getD 0) > 0
-          | _ => false
-        if hasData then
-          keys := keys ++ [pod.toNodeKey]
+        let lines := out.splitOn "\n" |>.map (fun l => l.trim.replace "\r" "")
+        let complete := lines.any (· == "END")
+        let items : Option Nat := lines.findSome? fun line =>
+          match (line.splitOn " ").filter (· != "") with
+          | ["STAT", "curr_items", v] => v.toNat?
+          | _ => none
+        match items with
+        | some n =>
+          if n > 0 then keys := keys ++ [pod.toNodeKey]
+          else if complete then empty := empty ++ [pod.toNodeKey]
+        | none => pure ()
       | .error _ => pure ()
-  return keys
+  return (keys, empty)
 
 /-- LEVEL-TRIGGERED replication reconciliation: for every flared pod whose
     MOUNTED extra.conf already carries `needle` but whose RUNTIME state

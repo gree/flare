@@ -35,6 +35,26 @@
       suppressed version.
   A receiver whose version does not move is never accepted as evidence on
   its own: a crash, a timeout, or an exit before the check look the same.
+
+  SAME-NAME REPLACEMENT (SAF-08). The topology audit brackets each stats
+  reply with two Pod UID reads. A test seam (FLARE_TEST_PROBE_BARRIER) holds
+  the probe of one pod after its first UID read; the test replaces that pod
+  under the same name, releases the probe, and requires the reply to be
+  judged Unknown, then requires a later probe to observe the new pod as
+  current (Unknown clears by fresh evidence, it does not stick).
+
+  STARTUP REPUBLISH (SAF-09). The last test holds a committed pass before
+  its send and replaces the operator while it is held, so the map is
+  persisted and never sent. The fresh process seeds its pending flag with
+  the committed version on startup; that seed must deliver the map on its
+  own. Two other things could also send and would hide a missing seed: a
+  version change in the first pass, and the topology audit marking a behind
+  pod as pending. The test turns the audit off (FLARE_TEST_TOPOLOGY_AUDIT_OFF,
+  a test-only seam) and requires the first send's logged trigger record to
+  be pending-only, then requires every pod to adopt the withheld read-balance
+  weight, not just the version. The takeover test above does not show this:
+  its final check accepts any map that names the same master, which the old
+  map already did.
 -/
 import FlareOperator.E2E.Framework
 import FlareOperator.E2E.Helpers
@@ -59,7 +79,7 @@ private def cfg : ClusterConfig := {
   replicas := 2
   operatorName := "flare-operator"
   debugPod := "debug-topo-auth"
-  operatorEnv := [("FLARE_TEST_PRESEND_BARRIER", barrierDir)]
+  operatorEnv := [("FLARE_TEST_PRESEND_BARRIER", barrierDir), ("FLARE_TEST_PROBE_BARRIER", barrierDir)]
 }
 
 private def numPods : Nat := cfg.partitions * cfg.replicas
@@ -276,6 +296,164 @@ private def stopOnePassBeforeLeaseCheck (weight : Nat) : IO (Except String Nat) 
     match held with
     | none => return .error "no pass reached the pre-send barrier within 90s; the stop position was never hit, so nothing below would prove anything"
     | some v => return .ok v
+
+/-- The slave's balance as one flared pod sees it in its own map (`stats
+    nodes`), or none if the pod does not list a slave. This is the CONTENT
+    marker for the startup-republish test: the held change is a read-balance
+    weight, so a pod that still shows the old weight has not applied the
+    withheld map, whatever its version says. -/
+private def flaredSlaveBalance (targetIp : String) : IO (Option Nat) := do
+  let cmd := s!"printf 'stats nodes\\r\\n' | nc -w 3 {targetIp} {cfg.flarePort}"
+  match ← execInDebugPod cfg.debugPod cfg.«namespace» cmd with
+  | .error _ => return none
+  | .ok output =>
+    let lines := (output.splitOn "\n").map (fun l => (l.trim.replace "\r" ""))
+    let slaveKey := lines.findSome? fun t =>
+      if t.startsWith "STAT " && (t.endsWith ":role slave") then
+        some ((t.drop 5).dropRight ":role slave".length)
+      else none
+    match slaveKey with
+    | none => return none
+    | some k =>
+      return lines.findSome? fun t =>
+        if t.startsWith s!"STAT {k}:balance " then (t.drop s!"STAT {k}:balance ".length).trim.toNat?
+        else none
+
+/-- The first `broadcast trigger:` record and the first broadcast line of a
+    log, in order of appearance. -/
+private def firstSend (log : String) : Option (String × String) :=
+  let lines := log.splitOn "\n"
+  let trig := lines.find? (containsSubstr · "broadcast trigger: ")
+  let send := lines.find? (containsSubstr · "), broadcasting")
+  match trig, send with
+  | some t, some b =>
+    some (((t.splitOn "broadcast trigger: ").getLast!).trim, b.trim)
+  | _, _ => none
+
+/-- "resuming at broadcast version N" from the operator's startup log. -/
+private def resumedVersion (log : String) : Option Nat :=
+  (log.splitOn "\n").findSome? fun l =>
+    match (l.splitOn "resuming at broadcast version ").getLast? with
+    | some rest => if containsSubstr l "resuming at broadcast version " then
+        (rest.takeWhile Char.isDigit).toNat? else none
+    | none => none
+
+private def podIps : IO (List (String × String)) := do
+  let pods ← getPodNames s!"app=flare,cluster={cfg.name}" cfg.«namespace»
+  pods.filterMapM fun p => do return (← getPodIp p cfg.«namespace»).map (p, ·)
+
+/-- Some `retrying an unconfirmed topology send (pending vP; publishing vQ)`
+    line with P ≤ held ≤ Q: a retry whose pending flag was set no later than
+    the withheld pass and whose published map subsumes it. -/
+private def retryCovers (log : String) (held : Nat) : Bool :=
+  (log.splitOn "\n").any fun l =>
+    match (l.splitOn "retrying an unconfirmed topology send (pending v").getLast? with
+    | none => false
+    | some rest =>
+      if !containsSubstr l "retrying an unconfirmed topology send (pending v" then false
+      else
+        let p := (rest.takeWhile Char.isDigit).toNat?
+        let q := ((rest.splitOn "publishing v").getLast?.map (·.takeWhile Char.isDigit)).bind (·.toNat?)
+        match p, q with
+        | some p, some q => p ≤ held && held ≤ q
+        | _, _ => false
+
+-- ─── SAF-09: the persisted node map at startup ───────────────────────────
+
+private def nodeMapCm : String := s!"{cfg.name}-node-map"
+
+private def sh (cmd : String) : IO (Except String String) := do
+  let out ← IO.Process.output { cmd := "sh", args := #["-c", cmd] }
+  if out.exitCode == 0 then return .ok out.stdout else return .error out.stderr
+
+private def scaleOperator (n : Nat) : IO Bool := do
+  discard <| kubectl ["scale", "deployment", cfg.operatorName, "-n", cfg.«namespace», s!"--replicas={n}"]
+  waitForCondition s!"operator scaled to {n}" 180 do
+    let pods ← getPodNames s!"app={cfg.operatorName}" cfg.«namespace»
+    return pods.length == n
+
+/-- Current and previous container logs of every operator pod. -/
+private def operatorLogsAll : IO String := do
+  let pods ← getPodNames s!"app={cfg.operatorName}" cfg.«namespace»
+  let mut acc := ""
+  for pod in pods do
+    for extra in [[], ["--previous"]] do
+      match ← kubectl (["logs", "-n", cfg.«namespace», pod, "--tail=3000"] ++ extra) with
+      | .ok o => acc := acc ++ o
+      | .error _ => pure ()
+  return acc
+
+/-- One observation of the operator's index port (12120) on every operator
+    pod: `some true` = a probe connected, `some false` = every pod was
+    probed successfully and refused, `none` = NOT OBSERVED (no pod IP, the
+    exec failed, or the probe printed neither). A missed observation is
+    never evidence of a closed port: a sample counts as closed only if the
+    operator's health port (8080, listening from process start) answered in
+    the same probe and 12120 did not. Readiness is not this signal: it
+    reports health, not whether the operator has taken control. -/
+private def indexState : IO (Option Bool) := do
+  match ← kubectl ["get", "pods", "-n", cfg.«namespace», "-l", s!"app={cfg.operatorName}", "-o", "jsonpath={.items[*].status.podIP}"] with
+  | .error _ => return none
+  | .ok ips =>
+    let ipList := (ips.trim.splitOn " ").filter (· != "")
+    if ipList.isEmpty then return none
+    for ip in ipList do
+      match ← execInDebugPod cfg.debugPod cfg.«namespace» s!"if nc -z -w 2 {ip} 8080; then (nc -z -w 2 {ip} {cfg.operatorPort} && echo OPEN || echo CLOSED); else echo UNREACHABLE; fi" with
+      | .ok o =>
+        if containsSubstr o "OPEN" then return some true
+        else if !containsSubstr o "CLOSED" then return none
+      | .error _ => return none
+    return some false
+
+/-- Sample the index for `secs`: (ever open, closed samples, unobserved samples). -/
+private def indexSamples (secs : Nat) : IO (Bool × Nat × Nat) := do
+  let mut closed := 0
+  let mut missed := 0
+  for _ in [0:secs / 3] do
+    match ← indexState with
+    | some true => return (true, closed, missed)
+    | some false => closed := closed + 1
+    | none => missed := missed + 1
+    IO.sleep 3000
+  return (false, closed, missed)
+
+private def operatorReady : IO Bool := do
+  match ← kubectl ["get", "pods", "-n", cfg.«namespace», "-l", s!"app={cfg.operatorName}", "-o", "jsonpath={.items[*].status.containerStatuses[0].ready}"] with
+  | .ok o => return o.trim == "true"
+  | .error _ => return false
+
+private def readNodeMap : IO (Option String) := do
+  match ← kubectlGetJsonpath "configmap" nodeMapCm cfg.«namespace» "{.data.nodeMap}" with
+  | .ok d => return if d.trim.isEmpty then none else some d
+  | .error _ => return none
+
+/-- Put the node-map ConfigMap back with exactly `data`. -/
+private def writeNodeMap (data : String) : IO (Except String String) := do
+  discard <| kubectl ["delete", "configmap", nodeMapCm, "-n", cfg.«namespace», "--ignore-not-found"]
+  kubectl ["create", "configmap", nodeMapCm, "-n", cfg.«namespace», s!"--from-literal=nodeMap={data}"]
+
+/-- Index of the ClusterRole rule granting configmaps. -/
+private def configmapRuleIndex : IO (Option Nat) := do
+  match ← sh "kubectl get clusterrole flare-operator -o json | jq -r '.rules | to_entries[] | select(.value.resources | index(\"configmaps\")) | .key' | head -1" with
+  | .ok o => return o.trim.toNat?
+  | .error _ => return none
+
+private def setConfigmapResource (i : Nat) (from_ to : String) : IO (Except String String) := do
+  match ← sh s!"kubectl get clusterrole flare-operator -o json | jq -c '.rules[{i}].resources | map(if . == \"{from_}\" then \"{to}\" else . end)'" with
+  | .error e => return .error e
+  | .ok res =>
+    kubectl ["patch", "clusterrole", "flare-operator", "--type=json", "-p",
+      ("[{\"op\":\"replace\",\"path\":\"/rules/" ++ toString i ++ "/resources\",\"value\":" ++ res.trim ++ "}]")]
+
+/-- Stop the operator, apply `fault` to the stored map, start it again, and
+    return (the CRITICAL line seen, whether it ever became Ready). -/
+private def restartUnder (fault : IO Unit) (needle : String) (window : Nat := 120) : IO (Bool × Bool) := do
+  if !(← scaleOperator 0) then return (false, false)
+  fault
+  discard <| kubectl ["scale", "deployment", cfg.operatorName, "-n", cfg.«namespace», "--replicas=1"]
+  let seen ← waitForCondition s!"the operator logs [{needle}]" window do
+    return containsSubstr (← operatorLogsAll) needle
+  return (seen, ← operatorReady)
 
 def suite : TestSuite := {
   name := "topology-authority"
@@ -516,15 +694,384 @@ def suite : TestSuite := {
               -- the flag as the only reason that pass sent (in a live
               -- cluster the version often moves by itself). Recorded as a
               -- residual in the register rather than papered over here.
-              if !containsSubstr log2 s!"retrying a suppressed topology send (suppressed v{held}" then
-                return .fail s!"the survivor caught up, but no publishing pass named the suppressed v{held}: the withheld map was not what the retry carried"
+              -- The pending flag keeps the EARLIEST outstanding version and a
+              -- retry publishes the LATEST committed map (TopologyBroadcast:
+              -- pendingTopologyAfterAttempt). So the retry that covers v{held}
+              -- names some pending vP ≤ held and publishes some vQ ≥ held. P
+              -- is below held when an earlier send was already outstanding:
+              -- CI 36731888436, where this pass was the restarted process's
+              -- first, so its startup seed (v…306) was still pending when the
+              -- fence withheld v…307, and the retry published v…308.
+              if !(retryCovers log2 held) then
+                return .fail s!"the survivor caught up, but no retry line covers the suppressed v{held} (pending ≤ {held} ≤ publishing): the withheld map was not what the retry carried"
               let back ← waitForCondition "topology re-applied after the lease is recreated" 240 do
                 return (← topologyApplied).toOption.isSome
               if !back then
                 match ← topologyApplied with
                 | .error why => return .fail s!"topology was not re-applied after the lease was recreated: {why}"
                 | .ok _ => return .fail "topology check flapped"
-              return .pass }
+              return .pass },
+
+    { name := "SAF-09: the Lease is deleted and the operator replaced; the new leader's generation is above the persisted record's even though the Lease count restarted, and its maps are accepted"
+      run := do
+        let settled ← waitForCondition "topology applied before the generation test" 240 do
+          return (← topologyApplied).toOption.isSome
+        if !settled then return .fail "precondition: topology not applied before the test"
+        let persistedVersion : IO (Option Nat) := do
+          match ← kubectlGetJsonpath "configmap" s!"{cfg.name}-node-map" cfg.«namespace» "{.data.nodeMap}" with
+          | .ok d => return (d.splitOn "\n").findSome? fun l =>
+              if l.startsWith "version=" then (l.drop "version=".length).trim.toNat? else none
+          | .error _ => return none
+        match ← persistedVersion with
+        | none => return .fail "precondition: no persisted node-map version"
+        | some vP =>
+        let ips ← podIps
+        let before ← ips.mapM fun (_, ip) => flaredStat ip "node_map_version"
+        IO.eprintln s!"# persisted version {vP} (generation {vP / 4294967296}); pods at {before}"
+        let opPods0 ← getPodNames s!"app={cfg.operatorName}" cfg.«namespace»
+        -- Delete the Lease and replace the operator: the new process finds no
+        -- Lease, creates one, and its Lease count starts again.
+        discard <| kubectl ["delete", "lease", leaseName, "-n", cfg.«namespace»]
+        discard <| kubectl ["delete", "pod", "-n", cfg.«namespace», "-l", s!"app={cfg.operatorName}", "--wait=false"]
+        let replaced ← waitForCondition "the operator pod is replaced and the old one is gone" 240 do
+          let now ← getPodNames s!"app={cfg.operatorName}" cfg.«namespace»
+          return !now.isEmpty && !now.any (opPods0.contains ·)
+        if !replaced then return .fail "precondition: the operator pod was not replaced"
+        let genLine : IO (Option String) := do
+          let log ← kubectlLogsLabel s!"app={cfg.operatorName}" cfg.«namespace» 3000
+          return ((log.splitOn "\n").find? (containsSubstr · "leadership generation ")).map String.trim
+        let logged ← waitForCondition "the new leader logs its generation" 180 do
+          return (← genLine).isSome
+        let line := (← genLine).getD ""
+        IO.eprintln s!"# {line}"
+        if !logged then return .fail "the new leader never logged its generation"
+        let num := fun (key : String) =>
+          ((line.splitOn key).getLast?.map (fun r => r.takeWhile Char.isDigit)).bind (·.toNat?)
+        match num "leadership generation ", num "lease transitions " with
+        | some g, some t =>
+          if g ≤ vP / 4294967296 then
+            return .fail s!"the new leader's generation {g} is not above the persisted generation {vP / 4294967296} (lease transitions {t}): it could rank below maps already issued"
+          -- Its maps must actually be accepted: a change made now reaches
+          -- every pod at a version above what they held.
+          match ← triggerTopologyChange 45 with
+          | .error e => return .fail s!"could not trigger a topology change: {e}"
+          | .ok _ => pure ()
+          let accepted ← waitForCondition "every pod accepts the new leader's map" 180 do
+            let now ← ips.mapM fun (_, ip) => flaredStat ip "node_map_version"
+            return now.all fun v => match v with | some n => n ≥ g * 4294967296 | none => false
+          let after ← ips.mapM fun (_, ip) => flaredStat ip "node_map_version"
+          IO.eprintln s!"# generation {g} (lease transitions {t}); pods {before} -> {after}"
+          if !accepted then return .fail s!"the pods did not accept the new leader's maps: {before} -> {after}"
+          let back ← waitForCondition "topology applied under the new leader" 240 do
+            return (← topologyApplied).toOption.isSome
+          if !back then return .fail "topology not applied under the new leader"
+          return .pass
+        | _, _ => return .fail s!"could not parse the generation line: {line}" },
+
+    { name := "same-name Pod replacement during the topology probe: the probe is held after its first UID read, the pod is replaced under the same name, and the reply is judged Unknown (never current or behind); the new pod is later observed current"
+      run := do
+        let settled ← waitForCondition "topology applied before the replacement test" 240 do
+          return (← topologyApplied).toOption.isSome
+        if !settled then return .fail "precondition: topology not applied before the test"
+        let entries ← nodeView
+        match entries.find? (·.role == 1) with
+        | none => return .fail "precondition: no slave in the operator's view"
+        | some sl =>
+        let pod := (sl.fqdn.splitOn ".").headD sl.fqdn
+        let uidOf : IO (Option String) := do
+          match ← kubectlGetJsonpath "pod" pod cfg.«namespace» "{.metadata.uid}" with
+          | .ok u => return (if u.trim.isEmpty then none else some u.trim)
+          | .error _ => return none
+        match ← uidOf with
+        | none => return .fail s!"precondition: no UID for {pod}"
+        | some uid0 =>
+        let release : IO Unit := do
+          discard <| opExec s!"touch {barrierDir}/probe-release"
+          for _ in [0:40] do
+            match ← opExec s!"test -f {barrierDir}/probe-reached && echo held || echo free" with
+            | .ok out => if containsSubstr out "free" then break
+            | .error _ => break
+            IO.sleep 500
+        match ← opExec s!"mkdir -p {barrierDir} && rm -f {barrierDir}/probe-reached {barrierDir}/probe-release && touch {barrierDir}/probe-arm-{pod}" with
+        | .error e => return .fail s!"could not arm the probe barrier: {e}"
+        | .ok _ => pure ()
+        -- The audit probes one node per pass, round robin, so the slave's
+        -- turn comes within a few passes.
+        let mut heldUid : Option String := none
+        for _ in [0:90] do
+          match ← opExec s!"cat {barrierDir}/probe-reached 2>/dev/null || true" with
+          | .ok out => if !out.trim.isEmpty then heldUid := some out.trim
+          | .error _ => pure ()
+          if heldUid.isSome then break
+          IO.sleep 1000
+        match heldUid with
+        | none =>
+          discard <| opExec s!"rm -f {barrierDir}/probe-arm-{pod}"
+          return .fail s!"the probe of {pod} never reached the hold within 90 s; nothing below would prove anything"
+        | some h =>
+        if h != uid0 then
+          release
+          return .fail s!"the held probe read uid {h}, not {pod}'s uid {uid0}"
+        IO.eprintln s!"# probe of {pod} held after reading uid {uid0}; replacing the pod under the same name"
+        discard <| kubectl ["delete", "pod", pod, "-n", cfg.«namespace», "--grace-period=0", "--force", "--wait=false"]
+        -- Release as soon as the replacement exists: the hold blocks the
+        -- loop that renews the 15 s lease.
+        let mut uid1 : Option String := none
+        for _ in [0:40] do
+          let u ← uidOf
+          if u.isSome && u != some uid0 then
+            uid1 := u
+            break
+          IO.sleep 500
+        release
+        match uid1 with
+        | none => return .fail s!"precondition: {pod} was not replaced under the same name within 20 s"
+        | some newUid =>
+        IO.eprintln s!"# {pod} replaced: uid {uid0} -> {newUid}; probe released"
+        let verdictLine : IO (Option String) := do
+          let log ← kubectlLogsLabel s!"app={cfg.operatorName}" cfg.«namespace» 3000
+          let lines := log.splitOn "\n"
+          let after := lines.dropWhile (fun l => !containsSubstr l s!"TEST SEAM: topology probe of {pod} released")
+          return (after.find? (fun l => containsSubstr l s!"[TopologyAudit] node={pod}.")).map String.trim
+        let judged ← waitForCondition "the held probe's verdict is logged" 30 do
+          return (← verdictLine).isSome
+        let line := (← verdictLine).getD ""
+        IO.eprintln s!"# verdict of the held probe: {line}"
+        if !judged then
+          return .fail "no audit line for the held probe after its release"
+        if !containsSubstr line "verdict=unknown" then
+          return .fail s!"the probe bracketed by two different UIDs was not judged Unknown: {line}"
+        -- Control: once the replacement has registered, the audit observes
+        -- it normally. Unknown must clear by a fresh observation, not stick.
+        let current ← waitForCondition "the replaced pod is observed current by a later probe" 240 do
+          let log ← kubectlLogsLabel s!"app={cfg.operatorName}" cfg.«namespace» 3000
+          return (log.splitOn "\n").any (fun l =>
+            containsSubstr l s!"[TopologyAudit] node={pod}." && containsSubstr l newUid && containsSubstr l "verdict=current")
+        if !current then
+          return .fail s!"the replaced pod {pod} (uid {newUid}) was never observed current afterwards"
+        let back ← waitForCondition "topology applied after the replacement" 240 do
+          return (← topologyApplied).toOption.isSome
+        if !back then return .fail "topology was not re-applied after the replacement"
+        return .pass },
+
+    { name := "startup republish alone: a map committed but never sent (operator replaced while the pass is held before the send) reaches every pod from the fresh process's first pass, topology audit off"
+      run := do
+        -- Precondition: the previous test leaves a re-created lease and a
+        -- converged map. Start from the same place every time.
+        let settled ← waitForCondition "topology applied before the startup-republish test" 240 do
+          return (← topologyApplied).toOption.isSome
+        if !settled then return .fail "precondition: topology not applied before the test"
+        let ips ← podIps
+        if ips.length < numPods then return .fail s!"precondition: {ips.length}/{numPods} flared pods have an IP"
+        let before ← ips.mapM fun (pod, ip) => do
+          return (pod, ← flaredStat ip "node_map_version", ← flaredSlaveBalance ip)
+        IO.eprintln s!"# before: {before}"
+        let opPods0 ← getPodNames s!"app={cfg.operatorName}" cfg.«namespace»
+        -- Slave weight 25, on purpose. Before the node map persisted each
+        -- node's balance, a reloaded map had every node at 100 and the first
+        -- pass, re-applying spec.readBalance, saw a changed map and advanced
+        -- the version (CI 36831110279: first send versionMoved=true), a
+        -- second reason to send. With balance persisted the reload changes
+        -- nothing, so the startup seed is the only reason left; a weight
+        -- other than 100 keeps this test a regression guard for that. The
+        -- previous test leaves the weight at 80, so the content marker moves.
+        match ← stopOnePassBeforeLeaseCheck 25 with
+        | .error e => ensureBarrierClear; return .fail e
+        | .ok held =>
+          IO.eprintln s!"# pass held at the pre-send point with version {held}; replacing the operator (rollout with FLARE_TEST_TOPOLOGY_AUDIT_OFF=1) while it is held"
+          -- The held pass is committed and persisted but has not sent. Lease
+          -- renewal runs in the same loop, so the held process stops
+          -- renewing; the new pod takes the lease once it expires, and the
+          -- old process, if its barrier times out first, finds a foreign
+          -- holder and fences. Either way it never sends.
+          let persisted ← kubectlGetJsonpath "configmap" s!"{cfg.name}-node-map" cfg.«namespace» "{.metadata.resourceVersion}"
+          IO.eprintln s!"# node-map ConfigMap resourceVersion at hold: {persisted.toOption.getD "?"}"
+          match ← kubectl ["set", "env", s!"deployment/{cfg.operatorName}", "-n", cfg.«namespace», "FLARE_TEST_TOPOLOGY_AUDIT_OFF=1"] with
+          | .error e => ensureBarrierClear; return .fail s!"could not roll the operator: {e}"
+          | .ok _ => pure ()
+          let rolled ← kubectlRolloutStatus s!"deployment/{cfg.operatorName}" cfg.«namespace» 300
+          -- `rollout status` returns once the NEW pod is available, and the
+          -- operator reports Ready before it holds the lease, so the old pod
+          -- can still be terminating here (CI 36826494031). Wait for it to be
+          -- gone: until then the label selects both pods and the log read
+          -- below would mix the two processes.
+          let oldGone ← waitForCondition "the old operator pod is gone" 180 do
+            let now ← getPodNames s!"app={cfg.operatorName}" cfg.«namespace»
+            return !now.isEmpty && !now.any (opPods0.contains ·)
+          let opPods1 ← getPodNames s!"app={cfg.operatorName}" cfg.«namespace»
+          IO.eprintln s!"# operator pods before {opPods0}, after {opPods1} (rollout complete={rolled})"
+          if !rolled || !oldGone then
+            return .fail s!"precondition: operator was not replaced (rollout complete={rolled}, pods before {opPods0}, after {opPods1})"
+          let sent ← waitForCondition "the fresh operator's first broadcast" 180 do
+            let log ← kubectlLogsLabel s!"app={cfg.operatorName}" cfg.«namespace» 3000
+            return (firstSend log).isSome
+          let log ← kubectlLogsLabel s!"app={cfg.operatorName}" cfg.«namespace» 3000
+          if !sent then
+            let tail := String.intercalate "\n" ((log.splitOn "\n").reverse.take 40).reverse
+            IO.eprintln s!"# fresh operator tail:\n{tail}"
+            return .fail "the fresh operator never broadcast within 180s"
+          if !containsSubstr log "TEST SEAM: topology audit disabled" then
+            return .fail "precondition: the fresh operator does not report the audit seam; a behind recipient could have triggered the send"
+          if containsSubstr log "[TopologyAudit] node=" then
+            return .fail "precondition: the topology audit ran in the fresh operator despite the seam"
+          match resumedVersion log with
+          | none => return .fail "the fresh operator did not report resuming from the persisted map"
+          | some r =>
+          if r < held then
+            return .fail s!"the fresh operator resumed at v{r}, below the held v{held}: the held map was not persisted before the send"
+          match firstSend log with
+          | none => return .fail "unreachable: first send vanished"
+          | some (trig, line) =>
+          IO.eprintln s!"# resumed at v{r}; first send: [{trig}] {line}"
+          -- Startup republish ALONE: the pending flag is the only reason, and
+          -- with the audit off the startup seed is the only thing that sets
+          -- it in a fresh process.
+          let pendingOnly := containsSubstr trig "versionMoved=false" &&
+            containsSubstr trig "repairHeld=0" && containsSubstr trig "activeNotReady=0" &&
+            !containsSubstr trig "pending=none"
+          if !pendingOnly then
+            return .fail s!"the fresh operator's first send is not attributable to the startup republish alone: [{trig}]"
+          let x := (((trig.splitOn "pending=v").getLast!).takeWhile Char.isDigit).toNat!
+          if !containsSubstr line s!"(v{x} → v{x}), broadcasting" then
+            return .fail s!"trigger names pending v{x} but the broadcast line is {line}"
+          let expected := (← nodeView).find? (·.role == 1) |>.map (·.balance)
+          let applied ← waitForCondition "every pod adopts the republished map" 60 do
+            let now ← ips.mapM fun (_, ip) => do return (← flaredStat ip "node_map_version", ← flaredSlaveBalance ip)
+            return now.all fun (v, b) => v == some x && b == expected
+          let after ← ips.mapM fun (pod, ip) => do
+            return (pod, ← flaredStat ip "node_map_version", ← flaredSlaveBalance ip)
+          IO.eprintln s!"# after: {after}; committed slave balance {expected}"
+          if !applied then
+            return .fail s!"not every pod applied the republished v{x} with slave balance {expected}: {after}"
+          -- The content must actually have changed, otherwise the version
+          -- moving is all this proves.
+          if before.all (fun (_, _, b) => b == expected) then
+            return .fail s!"precondition: the held change is not visible in the slave balance (before {before}, committed {expected}); the content marker proves nothing"
+          return .pass },
+
+    { name := "SAF-09: the persisted node map is missing at startup while the cluster has history: the operator halts (CRITICAL), never starts from an empty map; flared keeps serving; restoring the ConfigMap brings the operator back on the same map"
+      run := do
+        let settled ← waitForCondition "topology applied before the node-map test" 240 do
+          return (← topologyApplied).toOption.isSome
+        if !settled then return .fail "precondition: topology not applied"
+        match ← readNodeMap with
+        | none => return .fail "precondition: no persisted node map"
+        | some saved =>
+          let ips ← podIps
+          let before ← ips.mapM fun (_, ip) => flaredStat ip "node_map_version"
+          let (halted, ready) ← restartUnder (do discard <| kubectl ["delete", "configmap", nodeMapCm, "-n", cfg.«namespace»])
+            "refusing to start from an empty map"
+          let fresh := containsSubstr (← operatorLogsAll) "node map: starting fresh"
+          -- the data plane keeps its last topology meanwhile
+          let still ← ips.mapM fun (_, ip) => flaredStat ip "node_map_version"
+          let (_, ip0) := ips.head!
+          let served ← memcachedSet cfg.debugPod cfg.«namespace» ip0 cfg.flarePort "nm_probe" "alive"
+          IO.eprintln s!"# map deleted: halted={halted} started fresh={fresh} operator ready={ready}; flared versions {before} -> {still}; set through a flared pod={served}"
+          if fresh then return .fail "the operator started from an empty map although the cluster had history"
+          if !halted then return .fail "the operator did not halt with the CRITICAL line"
+          if ready then return .fail "the operator became Ready without its node map"
+          if still != before then return .fail s!"flared's map changed while the operator was halted ({before} -> {still})"
+          if !served then return .fail "flared stopped serving while the operator was halted"
+          match ← writeNodeMap saved with
+          | .error e => return .fail s!"could not restore the ConfigMap: {e}"
+          | .ok _ => pure ()
+          let back ← waitForCondition "the operator loads the restored map and is Ready" 300 do
+            return (← operatorReady) && containsSubstr (← kubectlLogsLabel s!"app={cfg.operatorName}" cfg.«namespace» 3000) "loaded "
+          IO.eprintln s!"# restored: operator back={back}"
+          if !back then return .fail "the operator did not come back on the restored map"
+          let applied ← waitForCondition "topology applied after the restore" 240 do
+            return (← topologyApplied).toOption.isSome
+          if !applied then return .fail "topology not applied after the restore"
+          return .pass },
+
+    { name := "SAF-09: the persisted node map is corrupt at startup: the operator halts (CRITICAL invalid) instead of loading part of it or starting fresh; restoring it brings the operator back"
+      run := do
+        match ← readNodeMap with
+        | none => return .fail "precondition: no persisted node map"
+        | some saved =>
+          -- drop the version line and break one node line
+          let lines := (saved.splitOn "\n").filter (fun l => !l.startsWith "version=" && l.trim != "")
+          let corrupt := "\n".intercalate (lines.map fun l => l.replace "role=" "role=x")
+          let (halted, ready) ← restartUnder (do discard <| writeNodeMap corrupt) "the persisted node map is invalid"
+          let fresh := containsSubstr (← operatorLogsAll) "node map: starting fresh"
+          IO.eprintln s!"# map corrupted: halted={halted} started fresh={fresh} operator ready={ready}"
+          match ← writeNodeMap saved with
+          | .error e => return .fail s!"could not restore the ConfigMap: {e}"
+          | .ok _ => pure ()
+          if fresh then return .fail "the operator started fresh from a corrupt map"
+          if !halted then return .fail "the operator did not halt on a corrupt map"
+          if ready then return .fail "the operator became Ready on a corrupt map"
+          let back ← waitForCondition "the operator loads the restored map and is Ready" 300 do
+            return (← operatorReady)
+          if !back then return .fail "the operator did not come back on the restored map"
+          return .pass },
+
+    { name := "SAF-09: the node map cannot be read at startup (RBAC forbids configmaps): the operator retries and does not start fresh; once readable it loads the existing map"
+      run := do
+        match ← configmapRuleIndex with
+        | none => return .fail "no ClusterRole rule grants configmaps"
+        | some i =>
+          let before ← readNodeMap
+          let (retried, _) ← restartUnder
+            (do discard <| setConfigmapResource i "configmaps" "configmaps-e2e-revoked")
+            "node map: retrying in 5 s" 90
+          let fresh := containsSubstr (← operatorLogsAll) "node map: starting fresh"
+          discard <| setConfigmapResource i "configmaps-e2e-revoked" "configmaps"
+          IO.eprintln s!"# configmaps forbidden: retried={retried} started fresh={fresh}"
+          if fresh then return .fail "a failed read made the operator start fresh"
+          if !retried then return .fail "the operator did not retry the failed read"
+          let back ← waitForCondition "the operator loads the existing map once readable" 300 do
+            return (← operatorReady) && containsSubstr (← kubectlLogsLabel s!"app={cfg.operatorName}" cfg.«namespace» 3000) "loaded "
+          let after ← readNodeMap
+          IO.eprintln s!"# readable again: operator back={back}; map kept={(before.map (·.length)) == (after.map (·.length)) || after.isSome}"
+          if !back then return .fail "the operator did not load the map once it was readable"
+          return .pass },
+    { name := "SAF-09 compound failure: the map is deleted, the Lease marker is gone and every flared pod is restarting while the operator is down — the past cannot be observed, so the operator retries and never starts fresh (the first-build approval was consumed); restoring the map brings it back"
+      run := do
+        match ← readNodeMap with
+        | none => return .fail "precondition: no persisted node map"
+        | some saved =>
+          let approval ← match ← kubectlGetJsonpath "flarecluster" cfg.name cfg.«namespace» "{.metadata.annotations.flare\\.gree\\.net/first-build-approved}" with
+            | .ok v => pure v.trim
+            | .error _ => pure ""
+          IO.eprintln s!"# first-build approval still on the FlareCluster: [{approval}] (must be consumed after the first persist)"
+          if !approval.isEmpty then return .fail "the first-build approval was not consumed after the first persisted map: it would authorize a fresh start after any later loss"
+          let fault : IO Unit := do
+            discard <| kubectl ["delete", "configmap", nodeMapCm, "-n", cfg.«namespace»]
+            discard <| kubectl ["annotate", "lease", leaseName, "-n", cfg.«namespace», "flare.gree.net/node-map-persisted-"]
+            discard <| kubectl ["delete", "pod", "-n", cfg.«namespace», "-l", s!"app=flare,cluster={cfg.name}", "--wait=false"]
+            -- the replacements start and cannot register (no operator):
+            -- give them time to be recreated, not to become readable
+            IO.sleep 15000
+          let (undecided, ready) ← restartUnder fault "cannot be told from a loss" 150
+          -- CI 37278389267: "ready" was true here because the E2E operator
+          -- Deployment had no readiness probe (pod Ready = container
+          -- running; found in CI 37283759673), not because of a standby. What
+          -- must hold is that it never serves the index, never starts fresh,
+          -- writes no map.
+          let (served, closedN, missedN) ← indexSamples 60
+          let logs ← operatorLogsAll
+          let fresh := containsSubstr logs "node map: starting fresh"
+          let mapWritten := (← readNodeMap).isSome
+          let historyLine := ((logs.splitOn "\n").find? (containsSubstr · "node map history:")).getD "(none)"
+          IO.eprintln s!"# compound: undecided logged={undecided} started fresh={fresh} index ever served={served} (closed in {closedN} observed samples, {missedN} not observed) map written={mapWritten} (readiness observed {ready}, informational)\n# {historyLine.trim}"
+          if fresh then return .fail "the operator started from an empty map although the past could not be observed"
+          if !undecided then return .fail "the operator did not report that a first build cannot be told from a loss"
+          if served then return .fail "the operator served the index without its node map"
+          -- a closed port must be OBSERVED: an unobserved sample is no evidence
+          if closedN == 0 then return .fail s!"the index was never observed closed ({missedN} unobserved samples): no evidence it was not served"
+          if mapWritten then return .fail "a node map was written without a decision"
+          match ← writeNodeMap saved with
+          | .error e => return .fail s!"could not restore the ConfigMap: {e}"
+          | .ok _ => pure ()
+          let back ← waitForCondition "the operator loads the restored map and is Ready" 360 do
+            return (← operatorReady) && containsSubstr (← kubectlLogsLabel s!"app={cfg.operatorName}" cfg.«namespace» 3000) "loaded "
+          IO.eprintln s!"# restored: operator back={back}"
+          if !back then return .fail "the operator did not come back on the restored map"
+          let applied ← waitForCondition "topology applied after the restore" 300 do
+            return (← topologyApplied).toOption.isSome
+          if !applied then return .fail "topology not applied after the restore"
+          return .pass }
   ]
 }
 

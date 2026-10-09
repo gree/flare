@@ -97,6 +97,25 @@ namespace test_metrics_formatter
 		cut_assert_true(contains(out, "memcached_commands_total{command=\"set\",status=\"hit\"} 90\n"));
 	}
 
+	// copy retention monitoring: why a rebuild stopped, parked / in flight,
+	// and the bytes the kept copies take
+	void test_rebuild_blocked_and_retained_metrics() {
+		push("rebuild_blocked", "no_space");
+		push("rebuild_parked", "1");
+		push("rebuild_in_flight", "0");
+		push("rocksdb_retained_copies", "2");
+		push("rocksdb_retained_bytes", "4096");
+		string out = metrics_formatter::format(stats);
+		cut_assert_true(contains(out, "flare_node_rebuild_blocked_info{reason=\"no_space\"} 1\n"));
+		cut_assert_true(contains(out, "flare_node_rebuild_parked 1\n"));
+		cut_assert_true(contains(out, "flare_node_rebuild_in_flight 0\n"));
+		cut_assert_true(contains(out, "flare_node_rocksdb_retained_copies 2\n"));
+		cut_assert_true(contains(out, "flare_node_rocksdb_retained_bytes 4096\n"));
+		stats.clear();
+		push("rebuild_blocked", "");
+		cut_assert_false(contains(metrics_formatter::format(stats), "rebuild_blocked_info"));
+	}
+
 	void test_version_label() {
 		push("version", "1.3.4");
 		string out = metrics_formatter::format(stats);
@@ -157,6 +176,29 @@ namespace test_metrics_formatter
 	void test_absent_stats_emit_nothing() {
 		string out = metrics_formatter::format(stats);
 		cut_assert_equal_string("", out.c_str());
+	}
+
+	// EV-15: the replica's own follow state, lag and source
+	void test_repl_follow_metrics() {
+		push("repl_follow_enabled", "1");
+		push("repl_follow_source", "m-0.svc:12121");
+		push("repl_follow_source_epoch", "3:ab\"c");
+		push("repl_follow_state", "following");
+		push("repl_applied_lsn", "900");
+		push("repl_source_lsn", "1000");
+		string out = metrics_formatter::format(stats);
+		cut_assert_true(contains(out, "flare_node_repl_follow_enabled 1\n"));
+		cut_assert_true(contains(out, "flare_node_repl_applied_lsn 900\n"));
+		cut_assert_true(contains(out, "flare_node_repl_follow_lag 100\n"));
+		cut_assert_true(contains(out, "flare_node_repl_follow_info{state=\"following\",source=\"m-0.svc:12121\",epoch=\"3:ab\\\"c\"} 1\n"));
+	}
+
+	// an applied position ahead of the reported source never yields a negative lag
+	void test_repl_follow_lag_never_negative() {
+		push("repl_applied_lsn", "1200");
+		push("repl_source_lsn", "1000");
+		string out = metrics_formatter::format(stats);
+		cut_assert_true(contains(out, "flare_node_repl_follow_lag 0\n"));
 	}
 }
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 autoindent

@@ -1,0 +1,53 @@
+# === Suite: continuous-replication-scale ===
+# Deploying cluster 'cont-repl-scale' in namespace 'flare-cont-repl-scale'
+# Waiting for: namespace flare-cont-repl-scale not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-cont-repl-scale (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap cont-repl-scale-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting 50s grace period for operator reconciliation...
+# chunk at 1000000 failed: kubectl failed (exit 1): command terminated with exit code 1
+
+# chunk at 1100000 failed: kubectl timed out after 30s (args: [exec, debug-cont-repl-scale, -n])
+# chunk at 1200000 failed: kubectl timed out after 30s (args: [exec, debug-cont-repl-scale, -n])
+# chunk at 1300000 failed: kubectl timed out after 30s (args: [exec, debug-cont-repl-scale, -n])
+# chunk at 1400000 failed: kubectl timed out after 30s (args: [exec, debug-cont-repl-scale, -n])
+# chunk at 1500000 failed: kubectl timed out after 30s (args: [exec, debug-cont-repl-scale, -n])
+# chunk at 1600000 failed: kubectl timed out after 30s (args: [exec, debug-cont-repl-scale, -n])
+# chunk at 1700000 failed: kubectl timed out after 30s (args: [exec, debug-cont-repl-scale, -n])
+# chunk at 1800000 failed: kubectl timed out after 30s (args: [exec, debug-cont-repl-scale, -n])
+# chunk at 1900000 failed: kubectl timed out after 30s (args: [exec, debug-cont-repl-scale, -n])
+# scale follow: state=idle reason=shutdown applied=102259 source_lsn=971272 master latest=2999574 items master=1358892 replica=1360286 wal_applied=0 wal_skipped=102655 decode_refused=0 forward_applied=639525 forward_skipped=0
+# scale follow: state=idle reason=shutdown applied=102259 source_lsn=971272 master latest=3351211 items master=1515800 replica=1517074 wal_applied=0 wal_skipped=102655 decode_refused=0 forward_applied=639525 forward_skipped=0
+# scale follow: state=idle reason=shutdown applied=102259 source_lsn=971272 master latest=3464878 items master=1539525 replica=1539525 wal_applied=0 wal_skipped=102655 decode_refused=0 forward_applied=639525 forward_skipped=0
+# scale follow: state=idle reason=shutdown applied=102259 source_lsn=971272 master latest=3522763 items master=1539525 replica=1539525 wal_applied=0 wal_skipped=102655 decode_refused=0 forward_applied=639525 forward_skipped=0
+# scale follow: state=idle reason=shutdown applied=102259 source_lsn=971272 master latest=3577078 items master=1539525 replica=1539525 wal_applied=0 wal_skipped=102655 decode_refused=0 forward_applied=639525 forward_skipped=0
+# scale follow: state=idle reason=shutdown applied=102259 source_lsn=971272 master latest=3628588 items master=1539525 replica=1539525 wal_applied=0 wal_skipped=102655 decode_refused=0 forward_applied=639525 forward_skipped=0
+# scale follow: the applied position has not moved for 5 min — stopping the wait
+# scale load: 971268/2000000 STORED in 393084 ms; master items=1539525 replica=1539525; follower converged=false 359844 ms after the load ended; applied=(some 102259) wal_applied=(some 0) forward_applied=(some 639525)
+#   reason: loaded only 971268/2000000
+# killed=1
+# Waiting for: replica restarted and Ready (timeout: 600s)
+#   TIMEOUT after 600s waiting for: replica restarted and Ready
+# Waiting for: follower following again with equal items (timeout: 900s)
+#   TIMEOUT after 900s waiting for: follower following again with equal items
+# boot scan: [140737454126464][NTC][storage_rocksdb.cc:598-open] curr_items seeded by an exact scan: 1539525 live key(s) in 1503 ms
+# after the restart: ready=false; following+equal=false; items master=1539525 replica=0; wal_fallback_to_dump=none reconstruction_completed=none
+#   reason: the replica did not come back Ready
+# probe timing lines: 164; max 4461 ms; 'reconcile slow' lines: 228; last: or] continuous-replication probe: 2 stats read(s) in 1941ms (tick 227; in-mode remembered: 2, out-of-mode remembered: 0)
+# --- diagnostics for failing suite 'continuous-replication-scale' ---
+# Cleaning up cluster 'cont-repl-scale'
+# Tests: 3, Failures: 2
+# RESULT: FAIL
+1..3
+not ok 1 - scale: load FLARE_E2E_SCALE_KEYS keys (pipelined) and let the follower converge
+not ok 2 - scale: exact key scan at open (kill -9 on the PVC-backed replica) — duration recorded
+ok 3 - scale: operator probe cost at this size — recorded from the operator's own timing lines
+EXIT=1

@@ -31,6 +31,7 @@
 #include "mock_storage.h"
 
 #include <cppcutter.h>
+#include <time.h>
 
 using namespace std;
 using namespace gree::flare;
@@ -121,7 +122,20 @@ namespace test_handler_dump_replication {
 		return t;
 	}
 
-	void response_dump(string response, int key_id, int data_size = 0) {
+	// monotonic microseconds, not truncated wall-clock milliseconds: with
+	// truncation a correct run of, for example, 500.4 ms (a hypothetical
+	// value — the failing run's elapsed time was not recorded) reads as 500
+	// and fails "> 500"
+	static long now_usec() {
+		struct timespec ts;
+		clock_gettime(CLOCK_MONOTONIC, &ts);
+		return ts.tv_sec * 1000000L + ts.tv_nsec / 1000L;
+	}
+
+	// `before_ack_usec`: the monotonic time taken right BEFORE the reply is
+	// sent — the handler can start its wait as soon as it has the reply, so
+	// only a time taken before sending is causally before that wait
+	void response_dump(string response, int key_id, int data_size = 0, long* before_ack_usec = NULL) {
 		int size = 5;
 		string data = "VALUE\n";
 		if (data_size > 0) {
@@ -136,6 +150,9 @@ namespace test_handler_dump_replication {
 			char *p, *q;
 			cs[0]->readline(&p);
 			cs[0]->readline(&q);
+			if (before_ack_usec != NULL) {
+				*before_ack_usec = now_usec();
+			}
 			cs[0]->writeline(response.c_str());
 			string req = "set key" + boost::lexical_cast<string>(key_id) + " 0 0 " + boost::lexical_cast<string>(size) + "\n";
 			cut_assert_equal_string(req.c_str(), p);
@@ -145,13 +162,6 @@ namespace test_handler_dump_replication {
 		}
 	}
 
-	long get_elapsed_msec(timeval& start_tv) {
-		static const long one_sec = 1000000L;
-		struct timeval end_tv;
-		gettimeofday(&end_tv, NULL);
-		long elapsed_usec = ((end_tv.tv_sec - start_tv.tv_sec) * one_sec + (end_tv.tv_usec - start_tv.tv_usec));
-		return elapsed_usec / 1000;
-	}
 
 	void test_run_success_single_partition() {
 		// prepare
@@ -199,22 +209,30 @@ namespace test_handler_dump_replication {
 		cl->set_partition(0, master);
 		cl->set_reconstruction_interval(100 * 1000); // 100 msecs
 		prepare_storage(5);
-		struct timeval start_tv;
-		gettimeofday(&start_tv, NULL);
+		const long start_usec = now_usec();
 
 		// execute
 		shared_thread t = start_handler();
+		long before_first_ack = 0;
 		for (int i = 0; i < 5; i++) {
-			response_dump("STORED", i);
+			response_dump("STORED", i, 0, i == 0 ? &before_first_ack : NULL);
 		}
+		// the throttle's invariant: after each reply the handler sleeps at
+		// least the interval (100 ms) before sending the next set, so from
+		// just BEFORE the first reply until request 4 has arrived there are at
+		// least 4 x 100 ms (usleep sleeps at least what it is asked; exactly
+		// 400 ms is correct). The start point precedes the first wait
+		// causally: it is taken before the reply that lets the handler go on.
+		long gap_usec = now_usec() - before_first_ack;
+		cut_assert_operator(gap_usec, >=, 4 * 100 * 1000L);
 
 		usleep(100 * 1000); // waiting for completion of sleep of last key
 
-		long elapsed_msec = get_elapsed_msec(start_tv);
-		// Lower bound proves the throttle actually slept; the upper bound only
-		// guards against a gross overshoot. 1000ms was too tight for a loaded
-		// CI runner (observed 1003ms — a 3.5ms scheduling wobble, not a bug).
-		cut_assert_true(elapsed_msec > 500 && elapsed_msec < 2000);
+		long elapsed_usec = now_usec() - start_usec;
+		// the upper bound only guards against a gross overshoot (1000 ms was
+		// too tight for a loaded CI runner: 1003 ms observed)
+		cut_assert_operator(elapsed_usec, >=, 500 * 1000L);
+		cut_assert_operator(elapsed_usec, <, 2000 * 1000L);
 
 		usleep(100 * 1000); // waiting for dump completed
 		cut_assert_equal_boolean(false, t->is_running());
@@ -227,8 +245,7 @@ namespace test_handler_dump_replication {
 		cl->set_partition(0, master);
 		cl->set_reconstruction_bwlimit(1); // 1 KB
 		prepare_storage(5, 100); // 5 keys * 500 Bytes ("VALUE") / 1 KBytes = about 500 msecs
-		struct timeval start_tv;
-		gettimeofday(&start_tv, NULL);
+		const long start_usec = now_usec();
 
 		// execute
 		shared_thread t = start_handler();
@@ -237,11 +254,13 @@ namespace test_handler_dump_replication {
 		}
 
 		usleep(200 * 1000); // waiting for dump completed
-		long elapsed_msec = get_elapsed_msec(start_tv);
-		// Lower bound proves the throttle actually slept; the upper bound only
-		// guards against a gross overshoot. 1000ms was too tight for a loaded
-		// CI runner (observed 1003ms — a 3.5ms scheduling wobble, not a bug).
-		cut_assert_true(elapsed_msec > 500 && elapsed_msec < 2000);
+		long elapsed_usec = now_usec() - start_usec;
+		// Lower bound proves the throttle actually slept (500 ms exactly is
+		// correct, so >=, in microseconds); the upper bound only guards against
+		// a gross overshoot (1000 ms was too tight for a loaded CI runner).
+		// Both values are printed on failure.
+		cut_assert_operator(elapsed_usec, >=, 500 * 1000L);
+		cut_assert_operator(elapsed_usec, <, 2000 * 1000L);
 
 		usleep(100 * 1000);
 		cut_assert_equal_boolean(false, t->is_running());

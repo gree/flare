@@ -72,6 +72,15 @@ protected:
 	int									_write_buf_chunk_size;
 	int									_connect_retry_limit;
 	int									_connect_retry_wait;	// usec
+	// Opt-in connect deadline (msec; 0 = blocking connect as before). A peer
+	// that vanished without a RST otherwise blocks connect() for the
+	// kernel's SYN timeout on every retry (~15 min for 8 retries, CI
+	// 37407630865: a reconstruction could not re-select its source).
+	int									_connect_timeout_ms;
+	// Opt-in TOTAL deadline for this connection's reads (monotonic msec,
+	// 0 = none). The per-read timeout bounds a silent peer; this bounds a
+	// peer that trickles bytes, for short requests such as an identity probe.
+	uint64_t						_deadline_ms;
 
 public:
 	static int read_timeout;												// msec
@@ -116,12 +125,18 @@ public:
 	
 	string get_host() const;
 	int get_port() const;
+	// "ip:port" of the peer of an ACCEPTED inet connection ("" otherwise):
+	// identifies one client connection in diagnostics
+	string get_peer() const;
 	string get_path() const;
 	
 	virtual int get_read_timeout() const { return this->_read_timeout; };
 	virtual int set_read_timeout(int timeout) { this->_read_timeout = timeout; return 0; };
 	virtual int get_connect_retry_limit() const { return this->_connect_retry_limit; };
 	virtual int set_connect_retry_limit(int retry_limit) { this->_connect_retry_limit = retry_limit; return 0; };
+	virtual int set_connect_timeout_ms(int ms) { this->_connect_timeout_ms = ms; return 0; };
+	// Whole-request deadline, `ms` from now (applies to every read after it).
+	virtual int set_deadline_from_now(int ms);
 
 	int get_errno() const { return this->_errno; };
 	bool is_error() const { return this->_errno != 0 ? true : false; };

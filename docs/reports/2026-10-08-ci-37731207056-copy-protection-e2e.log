@@ -1,0 +1,465 @@
+# === Suite: copy-protection ===
+# Deploying cluster 'copy-prot' in namespace 'flare-copy-prot'
+# Waiting for: namespace flare-copy-prot not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-copy-prot (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap copy-prot-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting for: operator past its startup grace period (timeout: 240s)
+#   OK after 80s
+# Waiting for: every copy holds every key and value (timeout: 300s)
+#   OK after 0s
+# Waiting for: the rebuild of copy-prot-nodes-1 is approved while copy-prot-nodes-2 holds data (timeout: 300s)
+#   OK after 15s
+# Waiting for: copy-prot-nodes-1's reconstruction is held at its start (before any decision) (timeout: 300s)
+#   OK after 10s
+# fault: rejecting forwards 10.244.0.14 → 10.244.0.12:12121 (the replica's fetches stay up)
+# Waiting for: copy-prot-nodes-2 is empty (timeout: 120s)
+#   OK after 0s
+# Waiting for: all 8 deletes to copy-prot-nodes-1 are dropped (none queued) (timeout: 900s)
+#   OK after 95s
+# fault cleared: forwards 10.244.0.14 → 10.244.0.12 again
+# Waiting for: copy-prot-nodes-1's protection refuses the empty source (timeout: 180s)
+#   OK after 5s
+# [H1] operator flare-operator-bf458556-kjmbw since 2026-10-08T05:34:27Z: 43 decision line(s) (last 80):
+2026-10-08T05:34:35.462218127Z [flare-operator] PROMOTION EVIDENCE (by reason, this pass): [copy-prot-nodes-2.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121=eligible, copy-prot-nodes-1.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121=eligible]
+2026-10-08T05:34:35.462239459Z [flare-operator] R3 readings (a promotion is possible this pass): [copy-prot-nodes-2.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121=1, copy-prot-nodes-1.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121=1]
+2026-10-08T05:34:35.462248632Z [flare-operator] graceful drain: demoting Terminating node(s) to live proxy + promoting replacement(s): [copy-prot-nodes-0.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121]
+2026-10-08T05:34:35.707933475Z [flare-operator] PROMOTION committed: [copy-prot-nodes-2.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121 (pod incarnation observed (some (0c655121-74c0-4a59-ab2c-d7760326c292, (some 0))))]
+2026-10-08T05:34:36.518484768Z [flare-operator] broadcast trigger: versionMoved=true pending=v4294967312 repairHeld=0 activeNotReady=0
+2026-10-08T05:34:49.429237397Z [flare-operator] REPLICA REPAIR requested by the replica: copy-prot-nodes-1.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121 — R3: the replica reported that its copy's source changed lineage or history (needs_rebuild) (history differs: copy 2:b71c3e31-9457-4b8f-9313-f9263f84991d, master copy-prot-nodes-2.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121 3:c70e7ec5-dd4e-4ed2-b62d-68850328cf0e); it takes the rebuild path (demote → hold → reseat → reconstruction) under master copy-prot-nodes-2.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121
+2026-10-08T05:34:49.613649026Z [TRACE] Event: NodeAdd copy-prot-nodes-0.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121 | Result: Proxy | Reason: all partitions full
+2026-10-08T05:34:49.822268613Z [flare-operator] REPLICA REPAIR: demoting copy-prot-nodes-1.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121 to a live proxy at v4294967314 — master copy-prot-nodes-2.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121 dropped 0 write(s) to it; rebuild source copy-prot-nodes-2.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121 holds data. Held out of assignment until it reports v4294967314; then re-seated as Slave/Prepare so flared reconstructs
+2026-10-08T05:34:51.213137257Z [flare-operator] broadcast trigger: versionMoved=true pending=v4294967319 repairHeld=1 activeNotReady=0
+2026-10-08T05:34:51.422943538Z [TRACE] Event: NodeState copy-prot-nodes-0.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121 | Result: Prepare->Active | Reason: reconstruction complete
+2026-10-08T05:34:52.041005405Z [flare-operator] REPLICA REPAIR: copy-prot-nodes-1.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121 confirmed the demotion (demoted@4294967314); released to assignment — the next pass re-seats it as Slave/Prepare and flared reconstructs
+2026-10-08T05:34:58.041504284Z [flare-operator] CONTINUOUS REPLICATION eligibility copy-prot-nodes-0.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121: reads unknown: not probed this pass; promotion unknown: not probed this pass
+2026-10-08T05:34:58.041526367Z [flare-operator] promotion candidates withheld this pass (Active in the map but the pod is not Ready — possibly replaced under the same name and not yet registered): [copy-prot-nodes-0.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121]
+2026-10-08T05:34:59.132883789Z [flare-operator] broadcast trigger: versionMoved=true pending=v4294967325 repairHeld=0 activeNotReady=1
+2026-10-08T05:35:07.229756264Z [flare-operator] broadcast trigger: versionMoved=true pending=v4294967332 repairHeld=0 activeNotReady=0
+2026-10-08T05:35:14.945453627Z [flare-operator] broadcast trigger: versionMoved=true pending=v4294967339 repairHeld=0 activeNotReady=0
+2026-10-08T05:35:22.734095979Z [flare-operator] broadcast trigger: versionMoved=true pending=v4294967346 repairHeld=0 activeNotReady=0
+2026-10-08T05:35:30.447959223Z [flare-operator] broadcast trigger: versionMoved=true pending=v4294967353 repairHeld=0 activeNotReady=0
+2026-10-08T05:35:31.255477814Z [flare-operator] REPLICA REPAIR requested: master copy-prot-nodes-2.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121 dropped 2 more write(s) to copy-prot-nodes-1.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121 — that replica is behind and nothing else repairs it
+2026-10-08T05:35:38.632802557Z [flare-operator] broadcast trigger: versionMoved=true pending=v4294967360 repairHeld=0 activeNotReady=0
+2026-10-08T05:35:46.422158890Z [flare-operator] broadcast trigger: versionMoved=true pending=v4294967367 repairHeld=0 activeNotReady=0
+2026-10-08T05:35:47.229592875Z [flare-operator] REPLICA REPAIR requested: master copy-prot-nodes-2.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121 dropped 2 more write(s) to copy-prot-nodes-1.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121 — that replica is behind and nothing else repairs it
+2026-10-08T05:35:54.424680915Z [flare-operator] broadcast trigger: versionMoved=true pending=v4294967374 repairHeld=0 activeNotReady=0
+2026-10-08T05:36:02.139701573Z [flare-operator] broadcast trigger: versionMoved=true pending=v4294967381 repairHeld=0 activeNotReady=0
+2026-10-08T05:36:02.955230261Z [flare-operator] REPLICA REPAIR requested: master copy-prot-nodes-2.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121 dropped 2 more write(s) to copy-prot-nodes-1.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121 — that replica is behind and nothing else repairs it
+2026-10-08T05:36:10.418727347Z [flare-operator] broadcast trigger: versionMoved=true pending=v4294967388 repairHeld=0 activeNotReady=0
+2026-10-08T05:36:18.038918551Z [flare-operator] broadcast trigger: versionMoved=true pending=v4294967395 repairHeld=0 activeNotReady=0
+2026-10-08T05:36:25.894584540Z [flare-operator] broadcast trigger: versionMoved=true pending=v4294967402 repairHeld=0 activeNotReady=0
+2026-10-08T05:36:33.540235637Z [flare-operator] broadcast trigger: versionMoved=true pending=v4294967409 repairHeld=0 activeNotReady=0
+2026-10-08T05:36:34.373789781Z [flare-operator] REPLICA REPAIR requested: master copy-prot-nodes-2.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121 dropped 1 more write(s) to copy-prot-nodes-1.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121 — that replica is behind and nothing else repairs it
+2026-10-08T05:36:41.819999348Z [flare-operator] broadcast trigger: versionMoved=true pending=v4294967416 repairHeld=0 activeNotReady=0
+2026-10-08T05:36:42.634195109Z [flare-operator] REPLICA REPAIR requested: master copy-prot-nodes-2.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121 dropped 1 more write(s) to copy-prot-nodes-1.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121 — that replica is behind and nothing else repairs it
+2026-10-08T05:36:49.947339673Z [flare-operator] broadcast trigger: versionMoved=true pending=v4294967423 repairHeld=0 activeNotReady=0
+2026-10-08T05:36:57.617610661Z [flare-operator] broadcast trigger: versionMoved=true pending=v4294967430 repairHeld=0 activeNotReady=0
+2026-10-08T05:37:05.735764737Z [flare-operator] broadcast trigger: versionMoved=true pending=v4294967437 repairHeld=0 activeNotReady=0
+2026-10-08T05:37:13.387942371Z [flare-operator] broadcast trigger: versionMoved=true pending=v4294967444 repairHeld=0 activeNotReady=0
+2026-10-08T05:37:21.316611079Z [flare-operator] broadcast trigger: versionMoved=true pending=v4294967451 repairHeld=0 activeNotReady=0
+2026-10-08T05:37:29.288941269Z [flare-operator] broadcast trigger: versionMoved=true pending=v4294967458 repairHeld=0 activeNotReady=0
+2026-10-08T05:37:37.488018705Z [flare-operator] broadcast trigger: versionMoved=true pending=v4294967465 repairHeld=0 activeNotReady=0
+2026-10-08T05:37:45.138367068Z [flare-operator] broadcast trigger: versionMoved=true pending=v4294967472 repairHeld=0 activeNotReady=0
+2026-10-08T05:37:53.042354203Z [flare-operator] broadcast trigger: versionMoved=true pending=v4294967479 repairHeld=0 activeNotReady=0
+2026-10-08T05:38:00.692305252Z [flare-operator] broadcast trigger: versionMoved=true pending=v4294967486 repairHeld=0 activeNotReady=0
+2026-10-08T05:38:08.789074833Z [flare-operator] broadcast trigger: versionMoved=true pending=v4294967493 repairHeld=0 activeNotReady=0
+# [H1] copy-prot-nodes-1 flared since 2026-10-08T05:34:27Z: 108 copy-affecting line(s) (last 50):
+2026-10-08T05:36:54.401753341Z [140200586229440][WRN][handler_reconstruction.cc:1306-_try_wal_reconstruction] WAL reconstruction disabled by FLARE_TEST_DISABLE_WAL_RECONSTRUCTION (test seam) -> full dump
+2026-10-08T05:36:54.402209220Z [140200586229440][WRN][handler_reconstruction.cc:377-_run_once] snapshot bootstrap disabled by FLARE_TEST_DISABLE_SNAPSHOT_BOOTSTRAP (test seam) -> staged full dump
+2026-10-08T05:36:54.402954136Z [140200586229440][NTC][handler_reconstruction.cc:907-_staged_rebuild] staged rebuild may start: need 67226493 bytes (source copy 117629 + reserve 67108864), available 83049017344
+2026-10-08T05:36:54.425880908Z [140200586229440][NTC][storage_rocksdb.cc:1460-open] storage open (path=/data/flare/staging-831097abde59, type=rocksdb, master_id=d477aefc-908d-49d1-a279-a87320a912a0, sync_writes=false, wal_ttl=86400s, wal_size_limit=10240MB)
+2026-10-08T05:36:54.430113367Z [140200586229440][NTC][handler_reconstruction.cc:1002-_staged_rebuild] starting dump operation into staging copy 013e76c5-c6e3-4e59-9a23-f934241bb655:1 (attempt 831097abde59; master=copy-prot-nodes-2.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121, partition=0, partition_size=1, L0=35)
+2026-10-08T05:36:54.430528711Z [140200586229440][NTC][op_dump.cc:304-_parse_text_client_parameters] found delimiter, dump completed (items=0)
+2026-10-08T05:36:54.430536973Z [140200586229440][NTC][handler_reconstruction.cc:1011-_staged_rebuild] reconstruction via full dump completed into staging (0 items received)
+2026-10-08T05:36:54.430986297Z [140200586229440][NTC][handler_reconstruction.cc:1030-_staged_rebuild] staging copy caught up to the fixed target L1=35 (from 35, history 3:c70e7ec5-dd4e-4ed2-b62d-68850328cf0e): cursor 35
+2026-10-08T05:36:54.430991545Z [140200586229440][NTC][handler_reconstruction.cc:1042-_staged_rebuild] staging copy 013e76c5-c6e3-4e59-9a23-f934241bb655:1 verified: lineage ca32563a-ed52-4ce3-a60f-c5ebe74fad14, history 3:c70e7ec5-dd4e-4ed2-b62d-68850328cf0e, position 35 >= L1 35; 0 keys (source reported 0; counts are not a criterion)
+2026-10-08T05:36:54.433280838Z [140200586229440][WRN][handler_reconstruction.cc:932-now] staged rebuild ABANDONED (copy protection: the source holds 0 keys and its history (3:c70e7ec5-dd4e-4ed2-b62d-68850328cf0e, advanced by promotion) is not this copy's (2:b71c3e31-9457-4b8f-9313-f9263f84991d): an empty copy that may have been promoted must not replace data): the staging copy is removed and the live copy is unchanged
+2026-10-08T05:36:57.816644481Z [140200586364608][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967430, 3 entries); own role=slave state=prepare balance=0 partition=0; masters: 0=copy-prot-nodes-2.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121/active
+2026-10-08T05:37:05.933306480Z [140200586364608][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967437, 3 entries); own role=slave state=prepare balance=0 partition=0; masters: 0=copy-prot-nodes-2.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121/active
+2026-10-08T05:37:10.435302473Z [140200586229440][WRN][handler_reconstruction.cc:1306-_try_wal_reconstruction] WAL reconstruction disabled by FLARE_TEST_DISABLE_WAL_RECONSTRUCTION (test seam) -> full dump
+2026-10-08T05:37:10.438245041Z [140200586229440][WRN][handler_reconstruction.cc:377-_run_once] snapshot bootstrap disabled by FLARE_TEST_DISABLE_SNAPSHOT_BOOTSTRAP (test seam) -> staged full dump
+2026-10-08T05:37:10.438954660Z [140200586229440][NTC][handler_reconstruction.cc:907-_staged_rebuild] staged rebuild may start: need 67226493 bytes (source copy 117629 + reserve 67108864), available 83049000960
+2026-10-08T05:37:10.447471637Z [140200586229440][NTC][storage_rocksdb.cc:1460-open] storage open (path=/data/flare/staging-9dbd3b8d40c6, type=rocksdb, master_id=7abeb76d-75e1-45eb-9b54-e26ee8f3e04c, sync_writes=false, wal_ttl=86400s, wal_size_limit=10240MB)
+2026-10-08T05:37:10.451125517Z [140200586229440][NTC][handler_reconstruction.cc:1002-_staged_rebuild] starting dump operation into staging copy 9e330292-0026-4e68-b5a4-26de4e68e288:1 (attempt 9dbd3b8d40c6; master=copy-prot-nodes-2.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121, partition=0, partition_size=1, L0=35)
+2026-10-08T05:37:10.451523595Z [140200586229440][NTC][op_dump.cc:304-_parse_text_client_parameters] found delimiter, dump completed (items=0)
+2026-10-08T05:37:10.451531387Z [140200586229440][NTC][handler_reconstruction.cc:1011-_staged_rebuild] reconstruction via full dump completed into staging (0 items received)
+2026-10-08T05:37:10.451931889Z [140200586229440][NTC][handler_reconstruction.cc:1030-_staged_rebuild] staging copy caught up to the fixed target L1=35 (from 35, history 3:c70e7ec5-dd4e-4ed2-b62d-68850328cf0e): cursor 35
+2026-10-08T05:37:10.451937597Z [140200586229440][NTC][handler_reconstruction.cc:1042-_staged_rebuild] staging copy 9e330292-0026-4e68-b5a4-26de4e68e288:1 verified: lineage ca32563a-ed52-4ce3-a60f-c5ebe74fad14, history 3:c70e7ec5-dd4e-4ed2-b62d-68850328cf0e, position 35 >= L1 35; 0 keys (source reported 0; counts are not a criterion)
+2026-10-08T05:37:10.454278687Z [140200586229440][WRN][handler_reconstruction.cc:932-now] staged rebuild ABANDONED (copy protection: the source holds 0 keys and its history (3:c70e7ec5-dd4e-4ed2-b62d-68850328cf0e, advanced by promotion) is not this copy's (2:b71c3e31-9457-4b8f-9313-f9263f84991d): an empty copy that may have been promoted must not replace data): the staging copy is removed and the live copy is unchanged
+2026-10-08T05:37:13.544350673Z [140200586364608][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967444, 3 entries); own role=slave state=prepare balance=0 partition=0; masters: 0=copy-prot-nodes-2.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121/active
+2026-10-08T05:37:21.506177206Z [140200586364608][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967451, 3 entries); own role=slave state=prepare balance=0 partition=0; masters: 0=copy-prot-nodes-2.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121/active
+2026-10-08T05:37:29.445941258Z [140200586364608][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967458, 3 entries); own role=slave state=prepare balance=0 partition=0; masters: 0=copy-prot-nodes-2.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121/active
+2026-10-08T05:37:37.644096964Z [140200586364608][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967465, 3 entries); own role=slave state=prepare balance=0 partition=0; masters: 0=copy-prot-nodes-2.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121/active
+2026-10-08T05:37:40.457242090Z [140200586229440][WRN][handler_reconstruction.cc:1306-_try_wal_reconstruction] WAL reconstruction disabled by FLARE_TEST_DISABLE_WAL_RECONSTRUCTION (test seam) -> full dump
+2026-10-08T05:37:40.457657103Z [140200586229440][WRN][handler_reconstruction.cc:377-_run_once] snapshot bootstrap disabled by FLARE_TEST_DISABLE_SNAPSHOT_BOOTSTRAP (test seam) -> staged full dump
+2026-10-08T05:37:40.458431337Z [140200586229440][NTC][handler_reconstruction.cc:907-_staged_rebuild] staged rebuild may start: need 67226493 bytes (source copy 117629 + reserve 67108864), available 83048960000
+2026-10-08T05:37:40.466406709Z [140200586229440][NTC][storage_rocksdb.cc:1460-open] storage open (path=/data/flare/staging-c54922ad16fd, type=rocksdb, master_id=b6196566-7a8d-4e2b-8da4-0423754aacb6, sync_writes=false, wal_ttl=86400s, wal_size_limit=10240MB)
+2026-10-08T05:37:40.469828164Z [140200586229440][NTC][handler_reconstruction.cc:1002-_staged_rebuild] starting dump operation into staging copy cfb6c3a4-74f1-4293-b357-67925f49af36:1 (attempt c54922ad16fd; master=copy-prot-nodes-2.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121, partition=0, partition_size=1, L0=35)
+2026-10-08T05:37:40.470136876Z [140200586229440][NTC][op_dump.cc:304-_parse_text_client_parameters] found delimiter, dump completed (items=0)
+2026-10-08T05:37:40.470142294Z [140200586229440][NTC][handler_reconstruction.cc:1011-_staged_rebuild] reconstruction via full dump completed into staging (0 items received)
+2026-10-08T05:37:40.470531553Z [140200586229440][NTC][handler_reconstruction.cc:1030-_staged_rebuild] staging copy caught up to the fixed target L1=35 (from 35, history 3:c70e7ec5-dd4e-4ed2-b62d-68850328cf0e): cursor 35
+2026-10-08T05:37:40.470539685Z [140200586229440][NTC][handler_reconstruction.cc:1042-_staged_rebuild] staging copy cfb6c3a4-74f1-4293-b357-67925f49af36:1 verified: lineage ca32563a-ed52-4ce3-a60f-c5ebe74fad14, history 3:c70e7ec5-dd4e-4ed2-b62d-68850328cf0e, position 35 >= L1 35; 0 keys (source reported 0; counts are not a criterion)
+2026-10-08T05:37:40.472688495Z [140200586229440][WRN][handler_reconstruction.cc:932-now] staged rebuild ABANDONED (copy protection: the source holds 0 keys and its history (3:c70e7ec5-dd4e-4ed2-b62d-68850328cf0e, advanced by promotion) is not this copy's (2:b71c3e31-9457-4b8f-9313-f9263f84991d): an empty copy that may have been promoted must not replace data): the staging copy is removed and the live copy is unchanged
+2026-10-08T05:37:45.333640874Z [140200586364608][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967472, 3 entries); own role=slave state=prepare balance=0 partition=0; masters: 0=copy-prot-nodes-2.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121/active
+2026-10-08T05:37:53.239396290Z [140200586364608][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967479, 3 entries); own role=slave state=prepare balance=0 partition=0; masters: 0=copy-prot-nodes-2.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121/active
+2026-10-08T05:38:00.852327551Z [140200586364608][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967486, 3 entries); own role=slave state=prepare balance=0 partition=0; masters: 0=copy-prot-nodes-2.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121/active
+2026-10-08T05:38:08.951111815Z [140200586364608][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967493, 3 entries); own role=slave state=prepare balance=0 partition=0; masters: 0=copy-prot-nodes-2.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121/active
+2026-10-08T05:38:10.475658730Z [140200586229440][WRN][handler_reconstruction.cc:1306-_try_wal_reconstruction] WAL reconstruction disabled by FLARE_TEST_DISABLE_WAL_RECONSTRUCTION (test seam) -> full dump
+2026-10-08T05:38:10.476348694Z [140200586229440][WRN][handler_reconstruction.cc:377-_run_once] snapshot bootstrap disabled by FLARE_TEST_DISABLE_SNAPSHOT_BOOTSTRAP (test seam) -> staged full dump
+2026-10-08T05:38:10.477572398Z [140200586229440][NTC][handler_reconstruction.cc:907-_staged_rebuild] staged rebuild may start: need 67226493 bytes (source copy 117629 + reserve 67108864), available 83048923136
+2026-10-08T05:38:10.487732162Z [140200586229440][NTC][storage_rocksdb.cc:1460-open] storage open (path=/data/flare/staging-9c4095c22b5f, type=rocksdb, master_id=c7991edf-3401-4469-9828-2844c94a1c71, sync_writes=false, wal_ttl=86400s, wal_size_limit=10240MB)
+2026-10-08T05:38:10.492250705Z [140200586229440][NTC][handler_reconstruction.cc:1002-_staged_rebuild] starting dump operation into staging copy 373145f8-bcf2-44d5-91e7-28a84c288a40:1 (attempt 9c4095c22b5f; master=copy-prot-nodes-2.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121, partition=0, partition_size=1, L0=35)
+2026-10-08T05:38:10.492684296Z [140200586229440][NTC][op_dump.cc:304-_parse_text_client_parameters] found delimiter, dump completed (items=0)
+2026-10-08T05:38:10.492692358Z [140200586229440][NTC][handler_reconstruction.cc:1011-_staged_rebuild] reconstruction via full dump completed into staging (0 items received)
+2026-10-08T05:38:10.493212586Z [140200586229440][NTC][handler_reconstruction.cc:1030-_staged_rebuild] staging copy caught up to the fixed target L1=35 (from 35, history 3:c70e7ec5-dd4e-4ed2-b62d-68850328cf0e): cursor 35
+2026-10-08T05:38:10.493218445Z [140200586229440][NTC][handler_reconstruction.cc:1042-_staged_rebuild] staging copy 373145f8-bcf2-44d5-91e7-28a84c288a40:1 verified: lineage ca32563a-ed52-4ce3-a60f-c5ebe74fad14, history 3:c70e7ec5-dd4e-4ed2-b62d-68850328cf0e, position 35 >= L1 35; 0 keys (source reported 0; counts are not a criterion)
+2026-10-08T05:38:10.496118321Z [140200586229440][WRN][handler_reconstruction.cc:932-now] staged rebuild ABANDONED (copy protection: the source holds 0 keys and its history (3:c70e7ec5-dd4e-4ed2-b62d-68850328cf0e, advanced by promotion) is not this copy's (2:b71c3e31-9457-4b8f-9313-f9263f84991d): an empty copy that may have been promoted must not replace data): the staging copy is removed and the live copy is unchanged
+# [H1] copy-prot-nodes-2 flared since 2026-10-08T05:34:27Z: 36 copy-affecting line(s) (last 50):
+2026-10-08T05:34:36.716691831Z [139709488281280][NTC][cluster.cc:2239-_shift_node_role] shifting node_role (node_key=copy-prot-nodes-0.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121, old_role=master, old_partition=0, new_role=proxy, new_partition=-1)
+2026-10-08T05:34:36.716693854Z [139709488281280][NTC][cluster.cc:2239-_shift_node_role] shifting node_role (node_key=copy-prot-nodes-2.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121, old_role=slave, old_partition=0, new_role=master, new_partition=0)
+2026-10-08T05:34:36.717831485Z [139709488281280][NTC][cluster.cc:2035-_check_read_source_locked] read source INVALIDATED (local reads and promotion eligibility withdrawn until re-validated): no longer a slave
+2026-10-08T05:34:36.717835491Z [139709488281280][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967312, 3 entries); own role=master state=active balance=100 partition=0; masters: 0=copy-prot-nodes-2.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121/active
+2026-10-08T05:34:51.392616274Z [139709488686784][NTC][cluster.cc:2222-_shift_node_state] shifting node_state (node_key=copy-prot-nodes-0.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121, old_state=active, new_state=prepare)
+2026-10-08T05:34:51.392623224Z [139709488686784][NTC][cluster.cc:2239-_shift_node_role] shifting node_role (node_key=copy-prot-nodes-1.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121, old_role=slave, old_partition=0, new_role=proxy, new_partition=-1)
+2026-10-08T05:34:51.392626849Z [139709488686784][NTC][cluster.cc:2239-_shift_node_role] shifting node_role (node_key=copy-prot-nodes-0.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121, old_role=proxy, old_partition=-1, new_role=slave, new_partition=0)
+2026-10-08T05:34:51.392632297Z [139709488686784][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967319, 3 entries); own role=master state=active balance=100 partition=0; masters: 0=copy-prot-nodes-2.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121/active
+2026-10-08T05:34:59.328959056Z [139709488686784][NTC][cluster.cc:2222-_shift_node_state] shifting node_state (node_key=copy-prot-nodes-0.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121, old_state=prepare, new_state=active)
+2026-10-08T05:34:59.328965355Z [139709488686784][NTC][cluster.cc:2222-_shift_node_state] shifting node_state (node_key=copy-prot-nodes-1.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121, old_state=active, new_state=prepare)
+2026-10-08T05:34:59.328968359Z [139709488686784][NTC][cluster.cc:2239-_shift_node_role] shifting node_role (node_key=copy-prot-nodes-1.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121, old_role=proxy, old_partition=-1, new_role=slave, new_partition=0)
+2026-10-08T05:34:59.328971113Z [139709488686784][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967325, 3 entries); own role=master state=active balance=100 partition=0; masters: 0=copy-prot-nodes-2.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121/active
+2026-10-08T05:35:07.433275805Z [139709488686784][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967332, 3 entries); own role=master state=active balance=100 partition=0; masters: 0=copy-prot-nodes-2.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121/active
+2026-10-08T05:35:15.144261066Z [139709488686784][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967339, 3 entries); own role=master state=active balance=100 partition=0; masters: 0=copy-prot-nodes-2.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121/active
+2026-10-08T05:35:22.931403934Z [139709488686784][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967346, 3 entries); own role=master state=active balance=100 partition=0; masters: 0=copy-prot-nodes-2.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121/active
+2026-10-08T05:35:30.646191553Z [139709488686784][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967353, 3 entries); own role=master state=active balance=100 partition=0; masters: 0=copy-prot-nodes-2.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121/active
+2026-10-08T05:35:38.828307557Z [139709488686784][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967360, 3 entries); own role=master state=active balance=100 partition=0; masters: 0=copy-prot-nodes-2.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121/active
+2026-10-08T05:35:46.614169015Z [139709488686784][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967367, 3 entries); own role=master state=active balance=100 partition=0; masters: 0=copy-prot-nodes-2.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121/active
+2026-10-08T05:35:54.621902923Z [139709488686784][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967374, 3 entries); own role=master state=active balance=100 partition=0; masters: 0=copy-prot-nodes-2.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121/active
+2026-10-08T05:36:02.338117162Z [139709488686784][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967381, 3 entries); own role=master state=active balance=100 partition=0; masters: 0=copy-prot-nodes-2.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121/active
+2026-10-08T05:36:10.558225915Z [139709488686784][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967388, 3 entries); own role=master state=active balance=100 partition=0; masters: 0=copy-prot-nodes-2.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121/active
+2026-10-08T05:36:18.233543309Z [139709488686784][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967395, 3 entries); own role=master state=active balance=100 partition=0; masters: 0=copy-prot-nodes-2.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121/active
+2026-10-08T05:36:26.051163081Z [139709488686784][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967402, 3 entries); own role=master state=active balance=100 partition=0; masters: 0=copy-prot-nodes-2.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121/active
+2026-10-08T05:36:33.740099002Z [139709488686784][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967409, 3 entries); own role=master state=active balance=100 partition=0; masters: 0=copy-prot-nodes-2.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121/active
+2026-10-08T05:36:42.015992837Z [139709488416448][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967416, 3 entries); own role=master state=active balance=100 partition=0; masters: 0=copy-prot-nodes-2.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121/active
+2026-10-08T05:36:50.142453266Z [139709488416448][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967423, 3 entries); own role=master state=active balance=100 partition=0; masters: 0=copy-prot-nodes-2.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121/active
+2026-10-08T05:36:57.816492246Z [139709488416448][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967430, 3 entries); own role=master state=active balance=100 partition=0; masters: 0=copy-prot-nodes-2.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121/active
+2026-10-08T05:37:05.933321097Z [139709488416448][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967437, 3 entries); own role=master state=active balance=100 partition=0; masters: 0=copy-prot-nodes-2.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121/active
+2026-10-08T05:37:13.544245257Z [139709488416448][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967444, 3 entries); own role=master state=active balance=100 partition=0; masters: 0=copy-prot-nodes-2.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121/active
+2026-10-08T05:37:21.506344693Z [139709488416448][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967451, 3 entries); own role=master state=active balance=100 partition=0; masters: 0=copy-prot-nodes-2.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121/active
+2026-10-08T05:37:29.446131549Z [139709488416448][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967458, 3 entries); own role=master state=active balance=100 partition=0; masters: 0=copy-prot-nodes-2.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121/active
+2026-10-08T05:37:37.644063014Z [139709488416448][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967465, 3 entries); own role=master state=active balance=100 partition=0; masters: 0=copy-prot-nodes-2.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121/active
+2026-10-08T05:37:45.333840143Z [139709488416448][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967472, 3 entries); own role=master state=active balance=100 partition=0; masters: 0=copy-prot-nodes-2.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121/active
+2026-10-08T05:37:53.239181768Z [139709488416448][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967479, 3 entries); own role=master state=active balance=100 partition=0; masters: 0=copy-prot-nodes-2.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121/active
+2026-10-08T05:38:00.852208645Z [139709488416448][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967486, 3 entries); own role=master state=active balance=100 partition=0; masters: 0=copy-prot-nodes-2.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121/active
+2026-10-08T05:38:08.951429645Z [139709488416448][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967493, 3 entries); own role=master state=active balance=100 partition=0; masters: 0=copy-prot-nodes-2.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121/active
+# H1: master copy-prot-nodes-0 drained, copy-prot-nodes-2 promoted; copy-prot-nodes-1 approved=true, stopped=true; copy-prot-nodes-2 emptied (8 deletes); released; refusal logged=true; truncated=false; copy-prot-nodes-1 copy before (some 8) keys, after 90 s more (some 8) keys
+# Waiting for: copy-prot-nodes-1 reaches the stop point before its destructive step (timeout: 300s)
+#   OK after 25s
+# Waiting for: copy-prot-nodes-1 refuses on an Unknown source (timeout: 120s)
+#   OK after 5s
+# Waiting for: copy-prot-nodes-1 converges on copy-prot-nodes-2's keys and values (timeout: 600s)
+#   OK after 0s
+# [Unknown] operator flare-operator-bf458556-kjmbw since 2026-10-08T05:38:18Z: 4 decision line(s) (last 80):
+2026-10-08T05:38:24.617853179Z [flare-operator] broadcast trigger: versionMoved=true pending=v4294967507 repairHeld=0 activeNotReady=0
+2026-10-08T05:38:32.246205265Z [flare-operator] broadcast trigger: versionMoved=true pending=v4294967514 repairHeld=0 activeNotReady=0
+2026-10-08T05:38:40.340916710Z [flare-operator] broadcast trigger: versionMoved=true pending=v4294967521 repairHeld=0 activeNotReady=0
+2026-10-08T05:38:47.941174930Z [flare-operator] broadcast trigger: versionMoved=true pending=v4294967528 repairHeld=0 activeNotReady=0
+# [Unknown] copy-prot-nodes-1 flared since 2026-10-08T05:38:18Z: 14 copy-affecting line(s) (last 50):
+2026-10-08T05:38:24.817846960Z [140200585959104][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967507, 3 entries); own role=slave state=prepare balance=0 partition=0; masters: 0=copy-prot-nodes-2.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121/active
+2026-10-08T05:38:32.444718244Z [140200585959104][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967514, 3 entries); own role=slave state=prepare balance=0 partition=0; masters: 0=copy-prot-nodes-2.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121/active
+2026-10-08T05:38:40.499415231Z [140200586229440][WRN][handler_reconstruction.cc:1306-_try_wal_reconstruction] WAL reconstruction disabled by FLARE_TEST_DISABLE_WAL_RECONSTRUCTION (test seam) -> full dump
+2026-10-08T05:38:40.499817906Z [140200586229440][WRN][handler_reconstruction.cc:377-_run_once] snapshot bootstrap disabled by FLARE_TEST_DISABLE_SNAPSHOT_BOOTSTRAP (test seam) -> staged full dump
+2026-10-08T05:38:40.500485943Z [140200586229440][NTC][handler_reconstruction.cc:907-_staged_rebuild] staged rebuild may start: need 67226981 bytes (source copy 118117 + reserve 67108864), available 83048718336
+2026-10-08T05:38:40.508929351Z [140200586229440][NTC][storage_rocksdb.cc:1460-open] storage open (path=/data/flare/staging-2638a889214b, type=rocksdb, master_id=737d41f1-cb69-4bba-8794-eb28b73b8c15, sync_writes=false, wal_ttl=86400s, wal_size_limit=10240MB)
+2026-10-08T05:38:40.512674094Z [140200586229440][NTC][handler_reconstruction.cc:1002-_staged_rebuild] starting dump operation into staging copy 032fd24c-1fcf-4d13-9d88-bd772e063581:1 (attempt 2638a889214b; master=copy-prot-nodes-2.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121, partition=0, partition_size=1, L0=43)
+2026-10-08T05:38:40.513121290Z [140200586229440][NTC][op_dump.cc:304-_parse_text_client_parameters] found delimiter, dump completed (items=8)
+2026-10-08T05:38:40.513132276Z [140200586229440][NTC][handler_reconstruction.cc:1011-_staged_rebuild] reconstruction via full dump completed into staging (8 items received)
+2026-10-08T05:38:40.513559403Z [140200586229440][NTC][handler_reconstruction.cc:1030-_staged_rebuild] staging copy caught up to the fixed target L1=43 (from 43, history 3:c70e7ec5-dd4e-4ed2-b62d-68850328cf0e): cursor 43
+2026-10-08T05:38:40.513566954Z [140200586229440][NTC][handler_reconstruction.cc:1042-_staged_rebuild] staging copy 032fd24c-1fcf-4d13-9d88-bd772e063581:1 verified: lineage ca32563a-ed52-4ce3-a60f-c5ebe74fad14, history 3:c70e7ec5-dd4e-4ed2-b62d-68850328cf0e, position 43 >= L1 43; 8 keys (source reported 8; counts are not a criterion)
+2026-10-08T05:38:40.535097281Z [140200585959104][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967521, 3 entries); own role=slave state=prepare balance=0 partition=0; masters: 0=copy-prot-nodes-2.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121/active
+2026-10-08T05:38:45.516929058Z [140200586229440][WRN][handler_reconstruction.cc:932-now] staged rebuild ABANDONED (copy protection: the source's item count and identity could not be read): the staging copy is removed and the live copy is unchanged
+2026-10-08T05:38:48.139448781Z [140200585959104][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967528, 3 entries); own role=slave state=prepare balance=0 partition=0; masters: 0=copy-prot-nodes-2.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121/active
+# [Unknown] copy-prot-nodes-2 flared since 2026-10-08T05:38:18Z: 4 copy-affecting line(s) (last 50):
+2026-10-08T05:38:24.818097851Z [139709488416448][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967507, 3 entries); own role=master state=active balance=100 partition=0; masters: 0=copy-prot-nodes-2.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121/active
+2026-10-08T05:38:32.444953726Z [139709488416448][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967514, 3 entries); own role=master state=active balance=100 partition=0; masters: 0=copy-prot-nodes-2.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121/active
+2026-10-08T05:38:40.535185371Z [139709488416448][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967521, 3 entries); own role=master state=active balance=100 partition=0; masters: 0=copy-prot-nodes-2.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121/active
+2026-10-08T05:38:48.139435125Z [139709488416448][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967528, 3 entries); own role=master state=active balance=100 partition=0; masters: 0=copy-prot-nodes-2.copy-prot-nodes.flare-copy-prot.svc.cluster.local:12121/active
+# Unknown: copy-prot-nodes-1 held, source copy-prot-nodes-2 cut, released: refusal on Unknown logged=true; copy during (some 8) original key(s) missing; converged after the heal=true
+# Cleaning up cluster 'copy-prot'
+# === Suite: copy-retention ===
+# Deploying cluster 'copy-ret' in namespace 'flare-copy-ret'
+# Waiting for: namespace flare-copy-ret not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-copy-ret (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap copy-ret-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting for: operator past its startup grace period (timeout: 240s)
+#   OK after 80s
+# Waiting for: both replicas switched in a staged copy and are Active slaves (timeout: 900s)
+#   OK after 50s
+# Waiting for: each replica's retained old copy is deleted (timeout: 180s)
+#   OK after 5s
+# copy-ret-nodes-2 and copy-ret-nodes-1 restarted at 2026-10-08T05:41:28Z; both switched in staged copies=true; source busy refusals 4, requesters waiting 4; serve areas left on copy-ret-nodes-0: (some 0); retained copies deleted=true; keys master (some 300), copy-ret-nodes-2 (some 300), copy-ret-nodes-1 (some 300)
+# [copy-retention] operator flare-operator-6976696d97-vjrl9 since 2026-10-08T05:41:28Z: 15 decision line(s) (last 80):
+2026-10-08T05:41:29.675992294Z [TRACE] Event: NodeAdd copy-ret-nodes-2.copy-ret-nodes.flare-copy-ret.svc.cluster.local:12121 | Result: Slave P0 (Prepare) | Reason: partition needed slave
+2026-10-08T05:41:29.676665188Z [TRACE] Event: NodeAdd copy-ret-nodes-1.copy-ret-nodes.flare-copy-ret.svc.cluster.local:12121 | Result: Slave P0 (Prepare) | Reason: partition needed slave
+2026-10-08T05:41:30.944108642Z [flare-operator] broadcast trigger: versionMoved=true pending=v4294967320 repairHeld=0 activeNotReady=0
+2026-10-08T05:41:38.580422126Z [flare-operator] broadcast trigger: versionMoved=true pending=v4294967327 repairHeld=0 activeNotReady=0
+2026-10-08T05:41:46.430326233Z [flare-operator] broadcast trigger: versionMoved=true pending=v4294967334 repairHeld=0 activeNotReady=0
+2026-10-08T05:41:52.027574559Z [TRACE] Event: NodeState copy-ret-nodes-2.copy-ret-nodes.flare-copy-ret.svc.cluster.local:12121 | Result: Prepare->Active | Reason: reconstruction complete
+2026-10-08T05:41:52.882321735Z [flare-operator] promotion candidates withheld this pass (Active in the map but the pod is not Ready — possibly replaced under the same name and not yet registered): [copy-ret-nodes-2.copy-ret-nodes.flare-copy-ret.svc.cluster.local:12121]
+2026-10-08T05:41:54.041287805Z [flare-operator] broadcast trigger: versionMoved=true pending=v4294967342 repairHeld=0 activeNotReady=1
+2026-10-08T05:42:01.856448158Z [flare-operator] broadcast trigger: versionMoved=true pending=v4294967349 repairHeld=0 activeNotReady=0
+2026-10-08T05:42:02.428134558Z [flare-operator] replica repair ledger initialized from copy-ret-nodes-0.copy-ret-nodes.flare-copy-ret.svc.cluster.local:12121: 0 destination counter(s) recorded; 0 with drops kept as possibly unrepaired requests
+2026-10-08T05:42:09.837780608Z [flare-operator] broadcast trigger: versionMoved=true pending=v4294967356 repairHeld=0 activeNotReady=0
+2026-10-08T05:42:17.635138682Z [flare-operator] broadcast trigger: versionMoved=true pending=v4294967363 repairHeld=0 activeNotReady=0
+2026-10-08T05:42:21.761150862Z [TRACE] Event: NodeState copy-ret-nodes-1.copy-ret-nodes.flare-copy-ret.svc.cluster.local:12121 | Result: Prepare->Active | Reason: reconstruction complete
+2026-10-08T05:42:24.046475852Z [flare-operator] promotion candidates withheld this pass (Active in the map but the pod is not Ready — possibly replaced under the same name and not yet registered): [copy-ret-nodes-1.copy-ret-nodes.flare-copy-ret.svc.cluster.local:12121]
+2026-10-08T05:42:24.807583430Z [flare-operator] broadcast trigger: versionMoved=false pending=v4294967364 repairHeld=0 activeNotReady=1
+# [copy-retention] copy-ret-nodes-0 flared since 2026-10-08T05:41:28Z: 22 copy-affecting line(s) (last 50):
+2026-10-08T05:41:29.898050659Z [139997245306560][NTC][storage_rocksdb.cc:2395-create_snapshot_checkpoint] snapshot serve refused: another snapshot is being served from this node (busy)
+2026-10-08T05:41:29.916735667Z [139997244630720][NTC][storage_rocksdb.cc:2428-create_snapshot_checkpoint] snapshot checkpoint created (path=/data/flare/snapshot.serve.bf6549032d35, seq=309)
+2026-10-08T05:41:29.916751030Z [139997244630720][NTC][op_repl_snapshot.cc:149-_run_server] snapshot stream bwlimit: 128 KB/s (server=128, requested=0; 0=unlimited)
+2026-10-08T05:41:31.137375238Z [139997245306560][NTC][cluster.cc:2222-_shift_node_state] shifting node_state (node_key=copy-ret-nodes-2.copy-ret-nodes.flare-copy-ret.svc.cluster.local:12121, old_state=active, new_state=prepare)
+2026-10-08T05:41:31.137377341Z [139997245306560][NTC][cluster.cc:2222-_shift_node_state] shifting node_state (node_key=copy-ret-nodes-1.copy-ret-nodes.flare-copy-ret.svc.cluster.local:12121, old_state=active, new_state=prepare)
+2026-10-08T05:41:31.137402308Z [139997245306560][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967320, 3 entries); own role=master state=active balance=100 partition=0; masters: 0=copy-ret-nodes-0.copy-ret-nodes.flare-copy-ret.svc.cluster.local:12121/active
+2026-10-08T05:41:31.900859563Z [139997245306560][NTC][storage_rocksdb.cc:2395-create_snapshot_checkpoint] snapshot serve refused: another snapshot is being served from this node (busy)
+2026-10-08T05:41:35.904133274Z [139997245306560][NTC][storage_rocksdb.cc:2395-create_snapshot_checkpoint] snapshot serve refused: another snapshot is being served from this node (busy)
+2026-10-08T05:41:38.780060302Z [139997245306560][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967327, 3 entries); own role=master state=active balance=100 partition=0; masters: 0=copy-ret-nodes-0.copy-ret-nodes.flare-copy-ret.svc.cluster.local:12121/active
+2026-10-08T05:41:43.908013230Z [139997245306560][NTC][storage_rocksdb.cc:2395-create_snapshot_checkpoint] snapshot serve refused: another snapshot is being served from this node (busy)
+2026-10-08T05:41:46.630246836Z [139997245306560][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967334, 3 entries); own role=master state=active balance=100 partition=0; masters: 0=copy-ret-nodes-0.copy-ret-nodes.flare-copy-ret.svc.cluster.local:12121/active
+2026-10-08T05:41:51.715030247Z [139997244630720][NTC][op_repl_snapshot.cc:236-_run_server] snapshot streamed to peer (files=6, seq=309)
+2026-10-08T05:41:54.237550931Z [139997245576896][NTC][cluster.cc:2222-_shift_node_state] shifting node_state (node_key=copy-ret-nodes-2.copy-ret-nodes.flare-copy-ret.svc.cluster.local:12121, old_state=prepare, new_state=active)
+2026-10-08T05:41:54.237753861Z [139997245576896][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967342, 3 entries); own role=master state=active balance=100 partition=0; masters: 0=copy-ret-nodes-0.copy-ret-nodes.flare-copy-ret.svc.cluster.local:12121/active
+2026-10-08T05:41:59.929837243Z [139997245576896][NTC][storage_rocksdb.cc:2428-create_snapshot_checkpoint] snapshot checkpoint created (path=/data/flare/snapshot.serve.489c31329643, seq=309)
+2026-10-08T05:41:59.929852956Z [139997245576896][NTC][op_repl_snapshot.cc:149-_run_server] snapshot stream bwlimit: 128 KB/s (server=128, requested=0; 0=unlimited)
+2026-10-08T05:42:01.997424239Z [139997244630720][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967349, 3 entries); own role=master state=active balance=100 partition=0; masters: 0=copy-ret-nodes-0.copy-ret-nodes.flare-copy-ret.svc.cluster.local:12121/active
+2026-10-08T05:42:10.034977541Z [139997244630720][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967356, 3 entries); own role=master state=active balance=100 partition=0; masters: 0=copy-ret-nodes-0.copy-ret-nodes.flare-copy-ret.svc.cluster.local:12121/active
+2026-10-08T05:42:17.830329163Z [139997244630720][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967363, 3 entries); own role=master state=active balance=100 partition=0; masters: 0=copy-ret-nodes-0.copy-ret-nodes.flare-copy-ret.svc.cluster.local:12121/active
+2026-10-08T05:42:21.726216458Z [139997245576896][NTC][op_repl_snapshot.cc:236-_run_server] snapshot streamed to peer (files=6, seq=309)
+2026-10-08T05:42:25.003358351Z [139997245441728][NTC][cluster.cc:2222-_shift_node_state] shifting node_state (node_key=copy-ret-nodes-1.copy-ret-nodes.flare-copy-ret.svc.cluster.local:12121, old_state=prepare, new_state=active)
+2026-10-08T05:42:25.003360464Z [139997245441728][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967364, 3 entries); own role=master state=active balance=100 partition=0; masters: 0=copy-ret-nodes-0.copy-ret-nodes.flare-copy-ret.svc.cluster.local:12121/active
+# [copy-retention] copy-ret-nodes-2 flared since 2026-10-08T05:41:28Z: 28 copy-affecting line(s) (last 50):
+2026-10-08T05:41:29.691663719Z [140589085580416][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 0, 3 entries); own role=slave state=prepare balance=0 partition=0; masters: 0=copy-ret-nodes-0.copy-ret-nodes.flare-copy-ret.svc.cluster.local:12121/active
+2026-10-08T05:41:29.691789484Z [140589085580416][NTC][cluster.cc:2121-start_source_validator] starting read source validator (interval=2000ms)
+2026-10-08T05:41:29.893968087Z [140589085580416][NTC][storage_rocksdb.cc:1460-open] storage open (path=/data/flare/flare.rocksdb, type=rocksdb, master_id=aa3c32e0-f2c1-4068-aa39-d07460b70da5, sync_writes=false, wal_ttl=86400s, wal_size_limit=10240MB)
+2026-10-08T05:41:29.893994396Z [140589085580416][NTC][cluster.cc:2239-_shift_node_role] shifting node_role (node_key=copy-ret-nodes-2.copy-ret-nodes.flare-copy-ret.svc.cluster.local:12121, old_role=proxy, old_partition=-1, new_role=slave, new_partition=0)
+2026-10-08T05:41:29.894854888Z [140589051868864][WRN][handler_reconstruction.cc:1306-_try_wal_reconstruction] WAL reconstruction disabled by FLARE_TEST_DISABLE_WAL_RECONSTRUCTION (test seam) -> full dump
+2026-10-08T05:41:29.896165714Z [140589051868864][NTC][handler_reconstruction.cc:907-_staged_rebuild] staged rebuild may start: need 69644096 bytes (source copy 2535232 + reserve 67108864), available 83038289920
+2026-10-08T05:41:29.917224319Z [140589051868864][NTC][op_repl_snapshot.cc:312-_run_client] snapshot bootstrap: receiving 6 files (seq=309, source master_id=aa3c32e0-f2c1-4068-aa39-d07460b70da5)
+2026-10-08T05:41:31.137473974Z [140589051193024][NTC][cluster.cc:2222-_shift_node_state] shifting node_state (node_key=copy-ret-nodes-1.copy-ret-nodes.flare-copy-ret.svc.cluster.local:12121, old_state=active, new_state=prepare)
+2026-10-08T05:41:31.137478881Z [140589051193024][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967320, 3 entries); own role=slave state=prepare balance=0 partition=0; masters: 0=copy-ret-nodes-0.copy-ret-nodes.flare-copy-ret.svc.cluster.local:12121/active
+2026-10-08T05:41:38.779977300Z [140589051193024][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967327, 3 entries); own role=slave state=prepare balance=0 partition=0; masters: 0=copy-ret-nodes-0.copy-ret-nodes.flare-copy-ret.svc.cluster.local:12121/active
+2026-10-08T05:41:46.630256230Z [140589051193024][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967334, 3 entries); own role=slave state=prepare balance=0 partition=0; masters: 0=copy-ret-nodes-0.copy-ret-nodes.flare-copy-ret.svc.cluster.local:12121/active
+2026-10-08T05:41:51.715005351Z [140589051868864][NTC][op_repl_snapshot.cc:445-_run_client] snapshot received into [/data/flare/staging-f867fe863678]: 2495724 bytes, checkpoint sequence 309
+2026-10-08T05:41:51.775571679Z [140589051868864][NTC][storage_rocksdb.cc:1460-open] storage open (path=/data/flare/staging-f867fe863678, type=rocksdb, master_id=aa3c32e0-f2c1-4068-aa39-d07460b70da5, sync_writes=false, wal_ttl=86400s, wal_size_limit=10240MB)
+2026-10-08T05:41:51.848278711Z [140589051868864][NTC][handler_reconstruction.cc:979-_staged_rebuild] staged snapshot: checkpoint sequence 309 (attempt f867fe863678, copy 1a605364-86c7-4fdd-bc2f-7f3aa42c2418:1)
+2026-10-08T05:41:51.849147855Z [140589051868864][NTC][handler_reconstruction.cc:1030-_staged_rebuild] staging copy caught up to the fixed target L1=309 (from 309, history 2:01efa435-b830-44ef-8a99-abb7b717df49): cursor 309
+2026-10-08T05:41:51.849171670Z [140589051868864][NTC][handler_reconstruction.cc:1042-_staged_rebuild] staging copy 1a605364-86c7-4fdd-bc2f-7f3aa42c2418:1 verified: lineage aa3c32e0-f2c1-4068-aa39-d07460b70da5, history 2:01efa435-b830-44ef-8a99-abb7b717df49, position 309 >= L1 309; 300 keys (source reported 300; counts are not a criterion)
+2026-10-08T05:41:52.025966999Z [140589051868864][NTC][handler_reconstruction.cc:1116-_staged_rebuild] staged rebuild peaks: data dir 7699687 bytes at most (from 5102551: growth 2597136), cgroup memory 27172864 bytes at most, least free 83033239552 bytes, 5 samples (receiver side; reserve sizing, design §9)
+2026-10-08T05:41:52.025973518Z [140589051868864][NTC][handler_reconstruction.cc:1120-_staged_rebuild] staged rebuild DONE: live copy 1a605364-86c7-4fdd-bc2f-7f3aa42c2418:1 (lineage aa3c32e0-f2c1-4068-aa39-d07460b70da5, history 2:01efa435-b830-44ef-8a99-abb7b717df49, cursor 309); the old copy is retained as retained-f867fe863678
+2026-10-08T05:41:52.026377880Z [140589051868864][NTC][handler_reconstruction.cc:1173-_activate_with_retry] activation source check passed (attempt 1): source copy-ret-nodes-0.copy-ret-nodes.flare-copy-ret.svc.cluster.local:12121 is the partition's master in the map read at version 4294967334 (now 4294967334); copy master_id aa3c32e0-f2c1-4068-aa39-d07460b70da5, source epoch 2:01efa435-b830-44ef-8a99-abb7b717df49
+2026-10-08T05:41:52.026403198Z [140589051868864][NTC][cluster.cc:1960-bind_read_source] read source BOUND: copy-ret-nodes-0.copy-ret-nodes.flare-copy-ret.svc.cluster.local:12121 (master_id aa3c32e0-f2c1-4068-aa39-d07460b70da5, source epoch 2:01efa435-b830-44ef-8a99-abb7b717df49): the copy passed its source check (activation attempt 1)
+2026-10-08T05:41:52.027737890Z [140589051868864][NTC][handler_reconstruction.cc:1206-_activate_with_retry] node activated (attempt 1) on the copy from copy-ret-nodes-0.copy-ret-nodes.flare-copy-ret.svc.cluster.local:12121 (map version now 4294967334)
+2026-10-08T05:41:54.237556344Z [140589051193024][NTC][cluster.cc:2222-_shift_node_state] shifting node_state (node_key=copy-ret-nodes-2.copy-ret-nodes.flare-copy-ret.svc.cluster.local:12121, old_state=prepare, new_state=active)
+2026-10-08T05:41:54.237558367Z [140589051193024][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967342, 3 entries); own role=slave state=active balance=0 partition=0; masters: 0=copy-ret-nodes-0.copy-ret-nodes.flare-copy-ret.svc.cluster.local:12121/active
+2026-10-08T05:42:01.997620715Z [140589051193024][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967349, 3 entries); own role=slave state=active balance=0 partition=0; masters: 0=copy-ret-nodes-0.copy-ret-nodes.flare-copy-ret.svc.cluster.local:12121/active
+2026-10-08T05:42:10.034993004Z [140589051193024][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967356, 3 entries); own role=slave state=active balance=0 partition=0; masters: 0=copy-ret-nodes-0.copy-ret-nodes.flare-copy-ret.svc.cluster.local:12121/active
+2026-10-08T05:42:17.830356087Z [140589051193024][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967363, 3 entries); own role=slave state=active balance=0 partition=0; masters: 0=copy-ret-nodes-0.copy-ret-nodes.flare-copy-ret.svc.cluster.local:12121/active
+2026-10-08T05:42:25.003291282Z [140589051193024][NTC][cluster.cc:2222-_shift_node_state] shifting node_state (node_key=copy-ret-nodes-1.copy-ret-nodes.flare-copy-ret.svc.cluster.local:12121, old_state=prepare, new_state=active)
+2026-10-08T05:42:25.003294827Z [140589051193024][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967364, 3 entries); own role=slave state=active balance=0 partition=0; masters: 0=copy-ret-nodes-0.copy-ret-nodes.flare-copy-ret.svc.cluster.local:12121/active
+# [copy-retention] copy-ret-nodes-1 flared since 2026-10-08T05:41:28Z: 43 copy-affecting line(s) (last 50):
+2026-10-08T05:41:29.708138976Z [140244717137024][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 0, 3 entries); own role=slave state=prepare balance=0 partition=0; masters: 0=copy-ret-nodes-0.copy-ret-nodes.flare-copy-ret.svc.cluster.local:12121/active
+2026-10-08T05:41:29.708269299Z [140244717137024][NTC][cluster.cc:2121-start_source_validator] starting read source validator (interval=2000ms)
+2026-10-08T05:41:29.893480246Z [140244717137024][NTC][storage_rocksdb.cc:1460-open] storage open (path=/data/flare/flare.rocksdb, type=rocksdb, master_id=aa3c32e0-f2c1-4068-aa39-d07460b70da5, sync_writes=false, wal_ttl=86400s, wal_size_limit=10240MB)
+2026-10-08T05:41:29.893487127Z [140244717137024][NTC][cluster.cc:2239-_shift_node_role] shifting node_role (node_key=copy-ret-nodes-1.copy-ret-nodes.flare-copy-ret.svc.cluster.local:12121, old_role=proxy, old_partition=-1, new_role=slave, new_partition=0)
+2026-10-08T05:41:29.894992461Z [140244683425472][WRN][handler_reconstruction.cc:1306-_try_wal_reconstruction] WAL reconstruction disabled by FLARE_TEST_DISABLE_WAL_RECONSTRUCTION (test seam) -> full dump
+2026-10-08T05:41:29.896405869Z [140244683425472][NTC][handler_reconstruction.cc:907-_staged_rebuild] staged rebuild may start: need 69644096 bytes (source copy 2535232 + reserve 67108864), available 83038289920
+2026-10-08T05:41:29.897654664Z [140244683425472][WRN][op_repl_snapshot.cc:281-_run_client] peer declined snapshot (reply=SERVER_ERROR busy
+2026-10-08T05:41:29.898039132Z [140244683425472][WRN][handler_reconstruction.cc:932-now] staged rebuild ABANDONED (the source is serving another snapshot (busy): waiting, no dump instead): the staging copy is removed and the live copy is unchanged
+2026-10-08T05:41:31.137336240Z [140244682749632][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967320, 3 entries); own role=slave state=prepare balance=0 partition=0; masters: 0=copy-ret-nodes-0.copy-ret-nodes.flare-copy-ret.svc.cluster.local:12121/active
+2026-10-08T05:41:31.898940778Z [140244683425472][WRN][handler_reconstruction.cc:1306-_try_wal_reconstruction] WAL reconstruction disabled by FLARE_TEST_DISABLE_WAL_RECONSTRUCTION (test seam) -> full dump
+2026-10-08T05:41:31.900087172Z [140244683425472][NTC][handler_reconstruction.cc:907-_staged_rebuild] staged rebuild may start: need 72132614 bytes (source copy 5023750 + reserve 67108864), available 83034714112
+2026-10-08T05:41:31.900919231Z [140244683425472][WRN][op_repl_snapshot.cc:281-_run_client] peer declined snapshot (reply=SERVER_ERROR busy
+2026-10-08T05:41:31.901200867Z [140244683425472][WRN][handler_reconstruction.cc:932-now] staged rebuild ABANDONED (the source is serving another snapshot (busy): waiting, no dump instead): the staging copy is removed and the live copy is unchanged
+2026-10-08T05:41:35.902228389Z [140244683425472][WRN][handler_reconstruction.cc:1306-_try_wal_reconstruction] WAL reconstruction disabled by FLARE_TEST_DISABLE_WAL_RECONSTRUCTION (test seam) -> full dump
+2026-10-08T05:41:35.903298405Z [140244683425472][NTC][handler_reconstruction.cc:907-_staged_rebuild] staged rebuild may start: need 72133081 bytes (source copy 5024217 + reserve 67108864), available 83034705920
+2026-10-08T05:41:35.904159543Z [140244683425472][WRN][op_repl_snapshot.cc:281-_run_client] peer declined snapshot (reply=SERVER_ERROR busy
+2026-10-08T05:41:35.904427068Z [140244683425472][WRN][handler_reconstruction.cc:932-now] staged rebuild ABANDONED (the source is serving another snapshot (busy): waiting, no dump instead): the staging copy is removed and the live copy is unchanged
+2026-10-08T05:41:38.780014805Z [140244682749632][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967327, 3 entries); own role=slave state=prepare balance=0 partition=0; masters: 0=copy-ret-nodes-0.copy-ret-nodes.flare-copy-ret.svc.cluster.local:12121/active
+2026-10-08T05:41:43.905739771Z [140244683425472][WRN][handler_reconstruction.cc:1306-_try_wal_reconstruction] WAL reconstruction disabled by FLARE_TEST_DISABLE_WAL_RECONSTRUCTION (test seam) -> full dump
+2026-10-08T05:41:43.907150965Z [140244683425472][NTC][handler_reconstruction.cc:907-_staged_rebuild] staged rebuild may start: need 72133337 bytes (source copy 5024473 + reserve 67108864), available 83034693632
+2026-10-08T05:41:43.908034030Z [140244683425472][WRN][op_repl_snapshot.cc:281-_run_client] peer declined snapshot (reply=SERVER_ERROR busy
+2026-10-08T05:41:43.924201222Z [140244683425472][WRN][handler_reconstruction.cc:932-now] staged rebuild ABANDONED (the source is serving another snapshot (busy): waiting, no dump instead): the staging copy is removed and the live copy is unchanged
+2026-10-08T05:41:46.630301141Z [140244682749632][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967334, 3 entries); own role=slave state=prepare balance=0 partition=0; masters: 0=copy-ret-nodes-0.copy-ret-nodes.flare-copy-ret.svc.cluster.local:12121/active
+2026-10-08T05:41:54.237738078Z [140244682749632][NTC][cluster.cc:2222-_shift_node_state] shifting node_state (node_key=copy-ret-nodes-2.copy-ret-nodes.flare-copy-ret.svc.cluster.local:12121, old_state=prepare, new_state=active)
+2026-10-08T05:41:54.237741453Z [140244682749632][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967342, 3 entries); own role=slave state=prepare balance=0 partition=0; masters: 0=copy-ret-nodes-0.copy-ret-nodes.flare-copy-ret.svc.cluster.local:12121/active
+2026-10-08T05:41:59.926228645Z [140244683425472][WRN][handler_reconstruction.cc:1306-_try_wal_reconstruction] WAL reconstruction disabled by FLARE_TEST_DISABLE_WAL_RECONSTRUCTION (test seam) -> full dump
+2026-10-08T05:41:59.927518797Z [140244683425472][NTC][handler_reconstruction.cc:907-_staged_rebuild] staged rebuild may start: need 72134342 bytes (source copy 5025478 + reserve 67108864), available 83109593088
+2026-10-08T05:41:59.929994681Z [140244683425472][NTC][op_repl_snapshot.cc:312-_run_client] snapshot bootstrap: receiving 6 files (seq=309, source master_id=aa3c32e0-f2c1-4068-aa39-d07460b70da5)
+2026-10-08T05:42:01.997473116Z [140244682749632][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967349, 3 entries); own role=slave state=prepare balance=0 partition=0; masters: 0=copy-ret-nodes-0.copy-ret-nodes.flare-copy-ret.svc.cluster.local:12121/active
+2026-10-08T05:42:10.034999233Z [140244682749632][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967356, 3 entries); own role=slave state=prepare balance=0 partition=0; masters: 0=copy-ret-nodes-0.copy-ret-nodes.flare-copy-ret.svc.cluster.local:12121/active
+2026-10-08T05:42:17.830234403Z [140244682749632][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967363, 3 entries); own role=slave state=prepare balance=0 partition=0; masters: 0=copy-ret-nodes-0.copy-ret-nodes.flare-copy-ret.svc.cluster.local:12121/active
+2026-10-08T05:42:21.726202392Z [140244683425472][NTC][op_repl_snapshot.cc:445-_run_client] snapshot received into [/data/flare/staging-7ff43f992662]: 2495724 bytes, checkpoint sequence 309
+2026-10-08T05:42:21.734790061Z [140244683425472][NTC][storage_rocksdb.cc:1460-open] storage open (path=/data/flare/staging-7ff43f992662, type=rocksdb, master_id=aa3c32e0-f2c1-4068-aa39-d07460b70da5, sync_writes=false, wal_ttl=86400s, wal_size_limit=10240MB)
+2026-10-08T05:42:21.740538155Z [140244683425472][NTC][handler_reconstruction.cc:979-_staged_rebuild] staged snapshot: checkpoint sequence 309 (attempt 7ff43f992662, copy 1d437dbc-d400-4d63-8096-2330401e1f35:1)
+2026-10-08T05:42:21.741181410Z [140244683425472][NTC][handler_reconstruction.cc:1030-_staged_rebuild] staging copy caught up to the fixed target L1=309 (from 309, history 2:01efa435-b830-44ef-8a99-abb7b717df49): cursor 309
+2026-10-08T05:42:21.741187329Z [140244683425472][NTC][handler_reconstruction.cc:1042-_staged_rebuild] staging copy 1d437dbc-d400-4d63-8096-2330401e1f35:1 verified: lineage aa3c32e0-f2c1-4068-aa39-d07460b70da5, history 2:01efa435-b830-44ef-8a99-abb7b717df49, position 309 >= L1 309; 300 keys (source reported 300; counts are not a criterion)
+2026-10-08T05:42:21.755683509Z [140244683425472][NTC][handler_reconstruction.cc:1116-_staged_rebuild] staged rebuild peaks: data dir 7699845 bytes at most (from 5108702: growth 2591143), cgroup memory 28364800 bytes at most, least free 83065892864 bytes, 5 samples (receiver side; reserve sizing, design §9)
+2026-10-08T05:42:21.755690409Z [140244683425472][NTC][handler_reconstruction.cc:1120-_staged_rebuild] staged rebuild DONE: live copy 1d437dbc-d400-4d63-8096-2330401e1f35:1 (lineage aa3c32e0-f2c1-4068-aa39-d07460b70da5, history 2:01efa435-b830-44ef-8a99-abb7b717df49, cursor 309); the old copy is retained as retained-7ff43f992662
+2026-10-08T05:42:21.756121216Z [140244683425472][NTC][handler_reconstruction.cc:1173-_activate_with_retry] activation source check passed (attempt 1): source copy-ret-nodes-0.copy-ret-nodes.flare-copy-ret.svc.cluster.local:12121 is the partition's master in the map read at version 4294967363 (now 4294967363); copy master_id aa3c32e0-f2c1-4068-aa39-d07460b70da5, source epoch 2:01efa435-b830-44ef-8a99-abb7b717df49
+2026-10-08T05:42:21.756127075Z [140244683425472][NTC][cluster.cc:1960-bind_read_source] read source BOUND: copy-ret-nodes-0.copy-ret-nodes.flare-copy-ret.svc.cluster.local:12121 (master_id aa3c32e0-f2c1-4068-aa39-d07460b70da5, source epoch 2:01efa435-b830-44ef-8a99-abb7b717df49): the copy passed its source check (activation attempt 1)
+2026-10-08T05:42:21.761310864Z [140244683425472][NTC][handler_reconstruction.cc:1206-_activate_with_retry] node activated (attempt 1) on the copy from copy-ret-nodes-0.copy-ret-nodes.flare-copy-ret.svc.cluster.local:12121 (map version now 4294967363)
+2026-10-08T05:42:25.003522208Z [140244682749632][NTC][cluster.cc:2222-_shift_node_state] shifting node_state (node_key=copy-ret-nodes-1.copy-ret-nodes.flare-copy-ret.svc.cluster.local:12121, old_state=prepare, new_state=active)
+2026-10-08T05:42:25.003525513Z [140244682749632][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967364, 3 entries); own role=slave state=active balance=0 partition=0; masters: 0=copy-ret-nodes-0.copy-ret-nodes.flare-copy-ret.svc.cluster.local:12121/active
+# Waiting for: copy-ret-nodes-1 sees the new extra.conf (timeout: 180s)
+#   OK after 65s
+# Waiting for: copy-ret-nodes-1 reports rebuild_blocked=reserve_unset (timeout: 300s)
+#   OK after 20s
+# Waiting for: copy-ret-nodes-1 sees the new extra.conf (timeout: 180s)
+#   OK after 80s
+# Waiting for: copy-ret-nodes-1 rebuilds and is an Active slave again (timeout: 600s)
+#   OK after 55s
+# copy-ret-nodes-1: blocked reserve_unset=true; keys before (some 300), while blocked (some 300); not Active while blocked=true; reserve restored=true; converged=true
+# Waiting for: copy-ret-nodes-1 sees the new extra.conf (timeout: 180s)
+#   OK after 5s
+# Waiting for: copy-ret-nodes-1 reports rebuild_blocked=reserve_unset (timeout: 300s)
+#   OK after 50s
+# Waiting for: the approval naming the copy is Applied (timeout: 120s)
+#   OK after 10s
+# Waiting for: a repeat of the request id is answered from the record (timeout: 120s)
+#   OK after 5s
+# Waiting for: an approval naming the previous copy is refused (timeout: 120s)
+#   OK after 10s
+# Waiting for: an approval for another pod UID is refused (timeout: 120s)
+#   OK after 5s
+# Waiting for: an expired approval is not sent (timeout: 120s)
+#   OK after 10s
+# copy-ret-nodes-1: copy 6b6d0731-594c-4c19-b853-d79dd9bb4397:1 -> applied=true -> 9a217f00-91a1-46af-8ad1-e58120309b53:1; repeat answered from the record=true; copy after the repeat 9a217f00-91a1-46af-8ad1-e58120309b53:1 (unchanged=true); stale copy refused=true; other pod refused=true; expired=true; copy at the end 9a217f00-91a1-46af-8ad1-e58120309b53:1
+# Waiting for: copy-ret-nodes-1 sees the new extra.conf (timeout: 180s)
+#   OK after 40s
+# Cleaning up cluster 'copy-ret'
+# === Suite: copy-retention-concurrency ===
+# Deploying cluster 'copy-ret-conc' in namespace 'flare-copy-ret-conc'
+# Waiting for: namespace flare-copy-ret-conc not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-copy-ret-conc (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap copy-ret-conc-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting for: operator past its startup grace period (timeout: 240s)
+#   OK after 70s
+# Waiting for: a second rebuild assignment is held while the first is in Prepare (timeout: 600s)
+#   OK after 15s
+# Waiting for: both replicas rebuild and are Active slaves (timeout: 600s)
+#   OK after 10s
+# held=true; slaves in Prepare at that moment 1; converged=true
+# [flare-operator] REBUILD HELD: copy-ret-conc-nodes-2.copy-ret-conc-nodes.flare-copy-ret-conc.svc.cluster.local:12121 stays a Proxy for now — the cluster already has 1 running rebuild(s) (limit 1) (copy retention: one rebuild per partition and per cluster)
+# Cleaning up cluster 'copy-ret-conc'
+# === Suite: r3-unreadable ===
+# Deploying cluster 'r3-unread' in namespace 'flare-r3-unread'
+# Waiting for: namespace flare-r3-unread not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-r3-unread (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap r3-unread-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting for: operator past its startup grace period (timeout: 240s)
+#   OK after 80s
+# Waiting for: the slave holds every key (timeout: 180s)
+#   OK after 0s
+# r3-unread-nodes-1 stats incomplete; r3-unread-nodes-0 drained at 2026-10-08T05:53:41Z: masters seen [r3-unread-nodes-0]; unreadable reading logged=true; promotion of r3-unread-nodes-1 committed=false; master kept (NO promotable successor) logged=true; r3-unread-nodes-0 still Terminating=true
+# readable again at 2026-10-08T05:54:44Z: masters seen [r3-unread-nodes-0, r3-unread-nodes-1]; new reading eligible=1 at line (some 7), promotion at line (some 9); r3-unread-nodes-1 items 40
+# [r3-unreadable] operator flare-operator-5b897fc76f-b8zfv since 2026-10-08T05:53:41Z: 35 decision line(s) (last 80):
+2026-10-08T05:53:51.266705503Z [flare-operator] PROMOTION EVIDENCE (by reason, this pass): [r3-unread-nodes-1.r3-unread-nodes.flare-r3-unread.svc.cluster.local:12121=unknown (stats incomplete)]
+2026-10-08T05:53:51.266727064Z [flare-operator] R3 readings (a promotion is possible this pass): [r3-unread-nodes-1.r3-unread-nodes.flare-r3-unread.svc.cluster.local:12121=unreadable]
+2026-10-08T05:53:51.266729929Z [flare-operator] promotion candidates withheld this pass (R3: the copy is not eligible for its partition's current source until re-validated): [r3-unread-nodes-1.r3-unread-nodes.flare-r3-unread.svc.cluster.local:12121]
+2026-10-08T05:53:51.267353585Z [flare-operator] graceful drain: demoting Terminating node(s) to live proxy + promoting replacement(s): [r3-unread-nodes-0.r3-unread-nodes.flare-r3-unread.svc.cluster.local:12121]
+2026-10-08T05:53:51.267359203Z [flare-operator] CRITICAL: draining master r3-unread-nodes-0.r3-unread-nodes.flare-r3-unread.svc.cluster.local:12121 has NO promotable successor — kept as master until its grace period expires; the partition then loses its only data-bearing node (tmpfs: rewind to last S3 backup on reseed). Operator cannot recover this. See RUNBOOK #drain-no-successor
+2026-10-08T05:53:54.856333141Z [flare-operator] broadcast trigger: versionMoved=false pending=none repairHeld=0 activeNotReady=1
+2026-10-08T05:54:04.273323988Z [flare-operator] PROMOTION EVIDENCE (by reason, this pass): [r3-unread-nodes-1.r3-unread-nodes.flare-r3-unread.svc.cluster.local:12121=unknown (stats incomplete)]
+2026-10-08T05:54:04.273341484Z [flare-operator] R3 readings (a promotion is possible this pass): [r3-unread-nodes-1.r3-unread-nodes.flare-r3-unread.svc.cluster.local:12121=unreadable]
+2026-10-08T05:54:04.273345731Z [flare-operator] promotion candidates withheld this pass (R3: the copy is not eligible for its partition's current source until re-validated): [r3-unread-nodes-1.r3-unread-nodes.flare-r3-unread.svc.cluster.local:12121]
+2026-10-08T05:54:04.273355655Z [flare-operator] graceful drain: demoting Terminating node(s) to live proxy + promoting replacement(s): [r3-unread-nodes-0.r3-unread-nodes.flare-r3-unread.svc.cluster.local:12121]
+2026-10-08T05:54:04.273358039Z [flare-operator] CRITICAL: draining master r3-unread-nodes-0.r3-unread-nodes.flare-r3-unread.svc.cluster.local:12121 has NO promotable successor — kept as master until its grace period expires; the partition then loses its only data-bearing node (tmpfs: rewind to last S3 backup on reseed). Operator cannot recover this. See RUNBOOK #drain-no-successor
+2026-10-08T05:54:05.005830862Z [flare-operator] broadcast trigger: versionMoved=false pending=none repairHeld=0 activeNotReady=1
+2026-10-08T05:54:14.280252080Z [flare-operator] PROMOTION EVIDENCE (by reason, this pass): [r3-unread-nodes-1.r3-unread-nodes.flare-r3-unread.svc.cluster.local:12121=unknown (stats incomplete)]
+2026-10-08T05:54:14.280277197Z [flare-operator] R3 readings (a promotion is possible this pass): [r3-unread-nodes-1.r3-unread-nodes.flare-r3-unread.svc.cluster.local:12121=unreadable]
+2026-10-08T05:54:14.280281443Z [flare-operator] promotion candidates withheld this pass (R3: the copy is not eligible for its partition's current source until re-validated): [r3-unread-nodes-1.r3-unread-nodes.flare-r3-unread.svc.cluster.local:12121]
+2026-10-08T05:54:14.280293220Z [flare-operator] graceful drain: demoting Terminating node(s) to live proxy + promoting replacement(s): [r3-unread-nodes-0.r3-unread-nodes.flare-r3-unread.svc.cluster.local:12121]
+2026-10-08T05:54:14.280297366Z [flare-operator] CRITICAL: draining master r3-unread-nodes-0.r3-unread-nodes.flare-r3-unread.svc.cluster.local:12121 has NO promotable successor — kept as master until its grace period expires; the partition then loses its only data-bearing node (tmpfs: rewind to last S3 backup on reseed). Operator cannot recover this. See RUNBOOK #drain-no-successor
+2026-10-08T05:54:17.843788394Z [flare-operator] broadcast trigger: versionMoved=false pending=none repairHeld=0 activeNotReady=1
+2026-10-08T05:54:27.173604159Z [flare-operator] PROMOTION EVIDENCE (by reason, this pass): [r3-unread-nodes-1.r3-unread-nodes.flare-r3-unread.svc.cluster.local:12121=unknown (stats incomplete)]
+2026-10-08T05:54:27.173634844Z [flare-operator] R3 readings (a promotion is possible this pass): [r3-unread-nodes-1.r3-unread-nodes.flare-r3-unread.svc.cluster.local:12121=unreadable]
+2026-10-08T05:54:27.173637078Z [flare-operator] promotion candidates withheld this pass (R3: the copy is not eligible for its partition's current source until re-validated): [r3-unread-nodes-1.r3-unread-nodes.flare-r3-unread.svc.cluster.local:12121]
+2026-10-08T05:54:27.173643818Z [flare-operator] graceful drain: demoting Terminating node(s) to live proxy + promoting replacement(s): [r3-unread-nodes-0.r3-unread-nodes.flare-r3-unread.svc.cluster.local:12121]
+2026-10-08T05:54:27.173645901Z [flare-operator] CRITICAL: draining master r3-unread-nodes-0.r3-unread-nodes.flare-r3-unread.svc.cluster.local:12121 has NO promotable successor — kept as master until its grace period expires; the partition then loses its only data-bearing node (tmpfs: rewind to last S3 backup on reseed). Operator cannot recover this. See RUNBOOK #drain-no-successor
+2026-10-08T05:54:27.937027105Z [flare-operator] broadcast trigger: versionMoved=false pending=none repairHeld=0 activeNotReady=1
+2026-10-08T05:54:37.282800315Z [flare-operator] PROMOTION EVIDENCE (by reason, this pass): [r3-unread-nodes-1.r3-unread-nodes.flare-r3-unread.svc.cluster.local:12121=unknown (stats incomplete)]
+2026-10-08T05:54:37.282825763Z [flare-operator] R3 readings (a promotion is possible this pass): [r3-unread-nodes-1.r3-unread-nodes.flare-r3-unread.svc.cluster.local:12121=unreadable]
+2026-10-08T05:54:37.282828657Z [flare-operator] promotion candidates withheld this pass (R3: the copy is not eligible for its partition's current source until re-validated): [r3-unread-nodes-1.r3-unread-nodes.flare-r3-unread.svc.cluster.local:12121]
+2026-10-08T05:54:37.282836859Z [flare-operator] graceful drain: demoting Terminating node(s) to live proxy + promoting replacement(s): [r3-unread-nodes-0.r3-unread-nodes.flare-r3-unread.svc.cluster.local:12121]
+2026-10-08T05:54:37.282839563Z [flare-operator] CRITICAL: draining master r3-unread-nodes-0.r3-unread-nodes.flare-r3-unread.svc.cluster.local:12121 has NO promotable successor — kept as master until its grace period expires; the partition then loses its only data-bearing node (tmpfs: rewind to last S3 backup on reseed). Operator cannot recover this. See RUNBOOK #drain-no-successor
+2026-10-08T05:54:40.855135904Z [flare-operator] broadcast trigger: versionMoved=false pending=none repairHeld=0 activeNotReady=1
+2026-10-08T05:54:47.182977721Z [flare-operator] PROMOTION EVIDENCE (by reason, this pass): [r3-unread-nodes-1.r3-unread-nodes.flare-r3-unread.svc.cluster.local:12121=eligible]
+2026-10-08T05:54:47.183003269Z [flare-operator] R3 readings (a promotion is possible this pass): [r3-unread-nodes-1.r3-unread-nodes.flare-r3-unread.svc.cluster.local:12121=1]
+2026-10-08T05:54:47.183018341Z [flare-operator] graceful drain: demoting Terminating node(s) to live proxy + promoting replacement(s): [r3-unread-nodes-0.r3-unread-nodes.flare-r3-unread.svc.cluster.local:12121]
+2026-10-08T05:54:47.426486016Z [flare-operator] PROMOTION committed: [r3-unread-nodes-1.r3-unread-nodes.flare-r3-unread.svc.cluster.local:12121 (pod incarnation observed (some (6389543d-ba55-469c-ac3f-5ac49f53e386, (some 0))))]
+2026-10-08T05:54:48.151291653Z [flare-operator] broadcast trigger: versionMoved=true pending=v4294967305 repairHeld=0 activeNotReady=0
+# [r3-unreadable] r3-unread-nodes-1 flared since 2026-10-08T05:53:41Z: 9 copy-affecting line(s) (last 50):
+2026-10-08T05:53:55.051262015Z [140250774894272][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967304, 2 entries); own role=slave state=active balance=0 partition=0; masters: 0=r3-unread-nodes-0.r3-unread-nodes.flare-r3-unread.svc.cluster.local:12121/active
+2026-10-08T05:54:05.154607670Z [140250774894272][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967304, 2 entries); own role=slave state=active balance=0 partition=0; masters: 0=r3-unread-nodes-0.r3-unread-nodes.flare-r3-unread.svc.cluster.local:12121/active
+2026-10-08T05:54:18.042618127Z [140250776217280][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967304, 2 entries); own role=slave state=active balance=0 partition=0; masters: 0=r3-unread-nodes-0.r3-unread-nodes.flare-r3-unread.svc.cluster.local:12121/active
+2026-10-08T05:54:28.135800068Z [140250775029440][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967304, 2 entries); own role=slave state=active balance=0 partition=0; masters: 0=r3-unread-nodes-0.r3-unread-nodes.flare-r3-unread.svc.cluster.local:12121/active
+2026-10-08T05:54:41.048086226Z [140250776217280][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967304, 2 entries); own role=slave state=active balance=0 partition=0; masters: 0=r3-unread-nodes-0.r3-unread-nodes.flare-r3-unread.svc.cluster.local:12121/active
+2026-10-08T05:54:48.346030370Z [140250776487616][NTC][cluster.cc:2239-_shift_node_role] shifting node_role (node_key=r3-unread-nodes-0.r3-unread-nodes.flare-r3-unread.svc.cluster.local:12121, old_role=master, old_partition=0, new_role=proxy, new_partition=-1)
+2026-10-08T05:54:48.346032613Z [140250776487616][NTC][cluster.cc:2239-_shift_node_role] shifting node_role (node_key=r3-unread-nodes-1.r3-unread-nodes.flare-r3-unread.svc.cluster.local:12121, old_role=slave, old_partition=0, new_role=master, new_partition=0)
+2026-10-08T05:54:48.346800913Z [140250776487616][NTC][cluster.cc:2035-_check_read_source_locked] read source INVALIDATED (local reads and promotion eligibility withdrawn until re-validated): no longer a slave
+2026-10-08T05:54:48.346803687Z [140250776487616][NTC][cluster.cc:1289-reconstruct_node] node map accepted (version 4294967305, 2 entries); own role=master state=active balance=100 partition=0; masters: 0=r3-unread-nodes-1.r3-unread-nodes.flare-r3-unread.svc.cluster.local:12121/active
+# Cleaning up cluster 'r3-unread'
+# === Suite: promotion-reasons ===
+# Deploying cluster 'prom-reasons' in namespace 'flare-prom-reasons'
+# Waiting for: namespace flare-prom-reasons not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-prom-reasons (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap prom-reasons-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting for: operator past its startup grace period (timeout: 240s)
+#   OK after 75s
+# Waiting for: the follower holds every key (timeout: 180s)
+#   OK after 0s
+# Waiting for: prom-reasons-nodes-1's staged copy is held in flight at the switch (timeout: 300s)

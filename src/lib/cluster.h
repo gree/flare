@@ -50,6 +50,7 @@
 #include "thread_pool.h"
 #include "key_resolver.h"
 #include "coordinator.h"
+#include "source_eligibility.h"
 
 using namespace std;
 
@@ -192,6 +193,11 @@ protected:
 	pthread_rwlock_t			_mutex_node_partition_map;
 
 	string								_node_key;
+	// decision 2026-10-08: set when the map made this node a master while its
+	// copy was in a forbidden state; it then serves no reads or writes as
+	// that master (fail closed) until the map takes the role away
+	volatile bool					_promotion_refused = false;
+	string								_promotion_refused_why;
 	string								_server_name;
 	int										_server_port;
 
@@ -212,9 +218,28 @@ protected:
 	int										_proxy_concurrency;
 	int										_reconstruction_interval;
 	int										_reconstruction_bwlimit;
+	bool									_repl_identity_forward;
+	bool									_wal_follow_enabled;
+	uint64_t								_wal_follow_max_batches;
+	uint64_t								_wal_follow_max_bytes;
+	int										_wal_follow_poll_interval_usec;
+	int										_wal_follow_batch_delay_usec;
+	shared_thread							_wal_follower_thread;
+	// R3: the source this node's copy is eligible for (source_eligibility.h).
+	// Lock order: the map locks (when held) BEFORE _mutex_read_source; the
+	// binding lock is a leaf. Changed together with the map that invalidates
+	// it, so no read decided under the new map can see the old eligibility.
+	source_binding							_read_source;
+	pthread_mutex_t							_mutex_read_source;
+	pthread_cond_t							_cond_read_source;
+	bool									_read_source_wake;
+	shared_thread							_source_validator_thread;
+	int										_source_check_interval_ms;
+	string									_wal_follower_source;	// node key being followed
 	replication						_replication_type;
 	uint32_t							_proxy_prior_netmask;
 	uint32_t							_max_total_thread_queue;
+	bool								_read_unavailable_error;
 
 	list<shared_proxy_event_listener>			_proxy_event_listeners;
 	vector<shared_proxy_event_listener>		_fixed_proxy_event_listeners;
@@ -251,6 +276,11 @@ public:
 	proxy_request pre_proxy_read(op_proxy_read* op, storage::entry& e, void* parameter, shared_queue_proxy_read& q);
 	proxy_request pre_proxy_write(op_proxy_write* op, shared_queue_proxy_write& q, uint64_t generic_value = 0);
 	proxy_request post_proxy_write(op_proxy_write* op, bool sync = false);
+	// TEST SEAM (FLARE_TEST_READ_TRACE_PREFIX): is `key` traced, and log the
+	// ANSWER a traced read got (hit / miss / unavailable + why), on the same
+	// connection identity as the decision line.
+	static bool is_read_traced(const string& key);
+	static void trace_read_result(op_proxy_read* o, const string& key, const char* result, const char* reason);
 
 	uint64_t get_node_map_version() {
 		uint64_t node_map_version;
@@ -276,10 +306,62 @@ public:
 	int get_partition_size() { return this->_partition_size; };
 	int set_partition_size(int partition_size) { this->_partition_size = partition_size; return 0; };
 	int get_node_partition_map_size();
+	// Node key of the partition's master in the CURRENT map (active map, else
+	// the prepare map); "" when the partition has none. Read under the
+	// partition-map lock; a reconstruction re-reads it every attempt.
+	string get_partition_master_key(int partition);
+	string get_own_node_key() { return this->_node_key; }
+	bool is_promotion_refused() { return this->_promotion_refused; }
+	string get_promotion_refused_why() { return this->_promotion_refused ? this->_promotion_refused_why : string(""); }
+	// ---- R3: source eligibility of this node's copy ----------------------
+	source_binding get_read_source();
+	// a completed, validated copy (reconstruction activated it)
+	void bind_read_source(const string& source, const string& master_id, const string& source_epoch, const string& reason);
+	// no validated copy any more (a reconstruction started, or the role changed)
+	void reset_read_source(const string& reason);
+	storage* get_storage() { return this->_storage; }
+	// the validator's decision, applied only if the binding is still the one
+	// it judged (generation) and `current` is still the partition's master
+	bool apply_source_decision(unsigned long long generation, const string& current, source_decision d, const string& reason);
+	// own (role, state, partition) from the current map
+	bool get_own_assignment(role& r, state& st, int& partition);
+	// validator pacing: sleep until woken or `timeout_ms`
+	void wait_source_check(int timeout_ms);
+	void wake_source_validator();
+	int get_source_check_interval_ms() { return this->_source_check_interval_ms; }
+	int set_source_check_interval_ms(int ms) { this->_source_check_interval_ms = ms > 0 ? ms : 2000; return 0; }
+	int start_source_validator();
 	int set_proxy_concurrency(int proxy_concurrency) { this->_proxy_concurrency = proxy_concurrency; return 0; };
 	int get_reconstruction_interval() { return this->_reconstruction_interval; };
 	int set_reconstruction_interval(int reconstruction_interval) { this->_reconstruction_interval = reconstruction_interval; return 0; };
 	int get_reconstruction_bwlimit() { return this->_reconstruction_bwlimit; };
+	// SAF-10b stage 3: when set, a forwarded write carries the source's
+	// replication identity ("rl=<epoch>/<label>") and the destination applies
+	// it through the common rule instead of a plain local set. OFF by default:
+	// a node that predates the tag would reject the request outright, so this
+	// may only be turned on once every node in the cluster understands it.
+	int set_repl_identity_forward(bool b) { this->_repl_identity_forward = b; return 0; };
+	bool get_repl_identity_forward() { return this->_repl_identity_forward; };
+
+	// CONTINUOUS REPLICATION lifecycle (SAF-10c). When enabled, a node that is
+	// an ACTIVE SLAVE on a RocksDB backend runs one follower against its
+	// partition's master, started and stopped from the node map: it is
+	// (re)evaluated after every accepted map, and on every change of this
+	// flag. OFF by default; the follower applies only through the common
+	// rule, so it is safe to enable only once repl-identity-forward is on
+	// cluster-wide as well.
+	int set_wal_follow_enabled(bool b);
+	bool get_wal_follow_enabled() { return this->_wal_follow_enabled; };
+	int set_wal_follow_limits(uint64_t max_batches, uint64_t max_bytes, int poll_interval_usec,
+			int batch_delay_usec = 0) {
+		this->_wal_follow_max_batches = max_batches;
+		this->_wal_follow_max_bytes = max_bytes;
+		this->_wal_follow_poll_interval_usec = poll_interval_usec;
+		this->_wal_follow_batch_delay_usec = batch_delay_usec;
+		return 0;
+	};
+	// Stop the follower (shutdown path).
+	int stop_wal_follower();
 	int set_reconstruction_bwlimit(int reconstruction_bwlimit) { this->_reconstruction_bwlimit = reconstruction_bwlimit; return 0; };
 	replication get_replication_type() { return this->_replication_type; };
 	int set_replication_type(string replication_type) { cluster::replication_cast(replication_type, this->_replication_type); return 0; };
@@ -293,6 +375,8 @@ public:
 	};
 	uint32_t get_max_total_thread_queue() { return this->_max_total_thread_queue; };
 	uint32_t set_max_total_thread_queue(uint32_t max_total_thread_queue) { this->_max_total_thread_queue = max_total_thread_queue; return 0; };
+	bool is_read_unavailable_error() { return this->_read_unavailable_error; };
+	void set_read_unavailable_error(bool b) { this->_read_unavailable_error = b; };
 
 #ifdef ENABLE_MYSQL_REPLICATION
 	int set_mysql_replication(bool mysql_replication) { this->_mysql_replication = mysql_replication; return 0; };
@@ -409,6 +493,16 @@ protected:
 	int _check_node_partition(int node_partition, bool& preparing);
 	int _check_node_partition_for_new(int node_partition, bool& preparing);
 	int _determine_partition(storage::entry& e, partition& p, bool include_prepare, bool& is_preprare);
+	// TEST SEAM (E2E only): with FLARE_TEST_READ_TRACE_PREFIX set, one log
+	// line per read of a key with that prefix, recording what this process
+	// based the local-or-proxy decision on. Unset (the default): no effect.
+	void _trace_read(const string& key, const string& conn, const string& via, const char* decision, const string& reason, const partition& p, int partition_index, const string& target, const string& follow);
+	// Start/stop/restart the follower to match this node's role in the
+	// current maps. Assumes node_map and node_partition_map are locked by the
+	// caller (it only reads them).
+	int _reconcile_wal_follower_locked();
+	// R3: called with the map write locks held, right after a map is installed
+	void _check_read_source_locked(uint64_t node_map_version);
 	bool _is_local_proxy_request(op_proxy_write* op);
 	string _get_partition_key(string key);
 	int _get_proxy_thread(string node_key, int key_hash, shared_thread& t);

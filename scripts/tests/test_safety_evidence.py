@@ -52,6 +52,83 @@ class EvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "missing"):
             safety.validate(self.data, ROOT)
 
+    def test_ci_stage_is_derived_not_claimed(self):
+        c = self.data["controls"][0]
+        claimed = "no" if c["status"]["ci_passed"]["state"] == "yes" else "yes"
+        c["status"]["ci_passed"]["state"] = claimed
+        with self.assertRaisesRegex(ValueError, "derived from the runs"):
+            safety.validate(self.data, ROOT)
+
+    def test_review_needs_reviewer_and_commit(self):
+        self.data["controls"][0]["status"]["reviewed"] = {"state": "yes", "date": "2026-10-05"}
+        with self.assertRaisesRegex(ValueError, "reviewer"):
+            safety.validate(self.data, ROOT)
+
+    def test_production_approval_needs_a_candidate(self):
+        c = self.data["controls"][0]
+        c["status"]["production_approved"] = {"state": "yes", "by": "release owner", "date": "2026-10-05", "note": "x"}
+        with self.assertRaisesRegex(ValueError, "needs a release candidate"):
+            safety.validate(self.data, ROOT)
+
+    def test_production_approval_needs_review_and_ci(self):
+        head = subprocess.check_output(["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True).strip()
+        self.data["candidate"] = {"commit": head, "label": "test"}
+        for control in self.data["controls"]:
+            safety.derive_status(control, self.data["candidate"], ROOT)
+        c = self.data["controls"][0]
+        c["status"]["production_approved"] = {"state": "yes", "by": "release owner", "date": "2026-10-05", "note": "x", "commit": head}
+        with self.assertRaisesRegex(ValueError, "requires reviewed=yes and ci_passed=yes"):
+            safety.validate(self.data, ROOT)
+
+    def test_ci_counts_only_ci_runs_of_the_candidate_tree(self):
+        head = subprocess.check_output(["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True).strip()
+        tree = subprocess.check_output(["git", "-C", str(ROOT), "rev-parse", "HEAD^{tree}"], text=True).strip()
+        cand = {"commit": head, "label": "test"}
+        c = self.data["controls"][0]
+        url = "https://github.com/example/flare/actions/runs/123"
+        def runs(**extra):
+            return [dict(self.run_record(check=k["id"], commit="1" * 40), **extra) for k in c["checks"]]
+        # passes at an unrelated revision do not count
+        c["runs"] = runs()
+        self.assertEqual(safety.ci_stage(c, cand, ROOT)[0], "no")
+        # a branch head alone is not enough: the merge commit may differ
+        c["runs"] = runs(head=head, source="ci", run_url=url)
+        self.assertEqual(safety.ci_stage(c, cand, ROOT)[0], "no")
+        # the tested TREE equal to the candidate's counts — for CI runs only
+        c["runs"] = runs(tree=tree, source="ci", run_url=url)
+        self.assertEqual(safety.ci_stage(c, cand, ROOT)[0], "yes")
+        c["runs"] = runs(tree=tree, source="local")
+        self.assertEqual(safety.ci_stage(c, cand, ROOT)[0], "no")
+        # without a candidate nothing counts
+        self.assertEqual(safety.ci_stage(c, None, ROOT)[0], "no")
+        # a SINGLE-SUITE manual run of the same tree never counts as full CI
+        c["runs"] = runs(tree=tree, source="ci", run_url=url, scope="single-suite", suites="empty-source")
+        self.assertEqual(safety.ci_stage(c, cand, ROOT)[0], "no")
+        c["runs"] = runs(tree=tree, source="ci", run_url=url, scope="full")
+        self.assertEqual(safety.ci_stage(c, cand, ROOT)[0], "yes")
+
+    def test_single_suite_run_must_name_its_suites(self):
+        self.data["controls"][0]["runs"].append(dict(self.run_record(), scope="single-suite"))
+        with self.assertRaisesRegex(ValueError, "name its suites"):
+            safety.validate(self.data, ROOT)
+        self.data["controls"][0]["runs"][-1]["scope"] = "partial"
+        with self.assertRaisesRegex(ValueError, "scope must be"):
+            safety.validate(self.data, ROOT)
+
+    def test_ci_run_needs_actions_url(self):
+        self.data["controls"][0]["runs"].append(dict(self.run_record(), source="ci"))
+        with self.assertRaisesRegex(ValueError, "run_url"):
+            safety.validate(self.data, ROOT)
+
+    def test_review_must_be_of_the_candidate(self):
+        head = subprocess.check_output(["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True).strip()
+        self.data["candidate"] = {"commit": head, "label": "test"}
+        for control in self.data["controls"]:
+            safety.derive_status(control, self.data["candidate"], ROOT)
+        self.data["controls"][0]["status"]["reviewed"] = {"state": "yes", "by": "reviewer", "commit": "2" * 40, "date": "2026-10-05"}
+        with self.assertRaisesRegex(ValueError, "review of the release candidate"):
+            safety.validate(self.data, ROOT)
+
     def test_verified_needs_execution_evidence(self):
         self.data["controls"][0]["verification"] = "verified"
         for runs in ([], [self.run_record(result="skip")], [self.run_record(result="fail")]):
@@ -62,7 +139,8 @@ class EvidenceTests(unittest.TestCase):
     def test_complete_passing_record_is_structurally_valid(self):
         c = self.data["controls"][0]
         c["verification"] = "verified"
-        c["runs"] = [self.run_record()]
+        c["runs"] = [self.run_record(check=k["id"]) for k in c["checks"]]
+        safety.derive_status(c, self.data.get("candidate"), ROOT)   # what --write does after recording runs
         safety.validate(self.data, ROOT)
 
     def test_branch_sha_missing_report_and_static_evidence_rejected(self):
@@ -146,11 +224,14 @@ class EvidenceTests(unittest.TestCase):
     def test_verified_impact_accepts_complete_new_evidence(self):
         old = copy.deepcopy(self.data)
         old["controls"][0]["verification"] = "verified"
-        old["controls"][0]["runs"] = [self.run_record()]
+        old["controls"][0]["runs"] = [self.run_record(check=k["id"])
+                                       for k in old["controls"][0]["checks"]]
         new = copy.deepcopy(old)
         new["controls"][0]["constraint"]["text"] += " Clarified scope."
         new["controls"][0]["review"]["note"] = "Revalidated clarified scope on new revision."
-        new["controls"][0]["runs"].append(self.run_record(commit="2" * 40))
+        new["controls"][0]["runs"].extend(self.run_record(check=k["id"], commit="2" * 40)
+                                          for k in new["controls"][0]["checks"])
+        safety.derive_status(new["controls"][0], new.get("candidate"), ROOT)   # what --write does after recording runs
         safety.validate(new, ROOT)
         safety.check_impact(old, new, set())
 

@@ -28,6 +28,9 @@
  */
 
 #include "op_dump.h"
+#ifdef HAVE_LIBROCKSDB
+#include "storage_rocksdb.h"
+#endif
 #include "connection_tcp.h"
 #include <inttypes.h>
 
@@ -45,7 +48,10 @@ op_dump::op_dump(shared_connection c, cluster* cl, storage* st):
 		_wait(0),
 		_partition(-1),
 		_partition_size(0),
-		_bwlimitter() {
+		_bwlimitter(),
+		_strict(false),
+		_completed(false),
+		_items(0) {
 }
 
 /**
@@ -195,11 +201,20 @@ int op_dump::_run_server() {
 	}
 
 	key_resolver* kr = this->_cluster->get_key_resolver();
+#ifdef HAVE_LIBROCKSDB
+	// measured peaks on the SOURCE while it serves a dump (reserve sizing)
+	storage_rocksdb* peak_rdb = dynamic_cast<storage_rocksdb*>(this->_storage);
+	if (peak_rdb != NULL) peak_rdb->peaks_begin(true);
+	uint64_t served = 0;
+#endif
 
 	storage::entry e;
 	storage::iteration i;
 	while ((i = this->_storage->iter_next(e.key)) == storage::iteration_continue
 			&& this->_thread && !this->_thread->is_shutdown_request()) {
+#ifdef HAVE_LIBROCKSDB
+		if (peak_rdb != NULL && (++served % 1024) == 0) peak_rdb->peaks_sample(true);
+#endif
 		if (this->_partition >= 0) {
 			int key_hash_value = e.get_key_hash_value(this->_cluster->get_key_hash_algorithm());
 			int p = kr->resolve(key_hash_value, this->_partition_size);
@@ -235,6 +250,9 @@ int op_dump::_run_server() {
 		}
 	}
 
+#ifdef HAVE_LIBROCKSDB
+	if (peak_rdb != NULL) peak_rdb->peaks_sample(true, true);
+#endif
 	this->_storage->iter_end();
 
 	if (connection_tcp* ctp = dynamic_cast<connection_tcp*>(this->_connection.get())) {
@@ -284,6 +302,7 @@ int op_dump::_parse_text_client_parameters() {
 		if (strcmp(p, "END\n") == 0) {
 			delete[] p;
 			log_notice("found delimiter, dump completed (items=%d)", items);
+			this->_completed = true;
 			break;
 		}
 
@@ -319,12 +338,28 @@ int op_dump::_parse_text_client_parameters() {
 
 		storage::result r;
 		if (this->_storage->set(e, r, storage::behavior_dump) < 0) {
+			if (this->_strict) {
+				log_err("storing a dumped key failed (key=%s, items=%d) -> the copy is incomplete; dump FAILED", e.key.c_str(), items);
+				return -1;
+			}
 			log_warning("something is going wrong while storing data -> continue processing", 0);
 			// nop
 		}
 		items++;
+		this->_items = items;
+		if (this->_space_watch && (static_cast<uint64_t>(items) % kSpaceWatchItems) == 0) {
+			string why;
+			if (!this->_space_watch(why)) {
+				log_err("dump stopped by the space watch after %d item(s): %s", items, why.c_str());
+				return -1;
+			}
+		}
 	}
 
+	if (this->_strict && !this->_completed) {
+		log_err("dump ended without the source's END marker (items=%d) -> incomplete", items);
+		return -1;
+	}
 	return 0;
 }
 // }}}

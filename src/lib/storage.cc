@@ -178,6 +178,17 @@ int storage::entry::parse(const char*p, parse_type t) {
 			// option
 			n += util::next_word(p+n, q, sizeof(q));
 			while (q[0]) {
+				// Replication identity of a forwarded change (SAF-10b): not
+				// an option, and recognised before the option cast so an
+				// older build's "unknown option" path is never reached for
+				// it — a node that does not understand it is never sent it
+				// (the sender only adds it when the feature is enabled).
+				if (strncmp(q, "rl=", 3) == 0) {
+					this->repl_tag = q + 3;
+					log_debug("storing replication tag [%s]", this->repl_tag.c_str());
+					n += util::next_word(p+n, q, sizeof(q));
+					continue;
+				}
 				storage::option r = storage::option_none;
 				if (storage::option_cast(q, r) < 0) {
 					log_debug("unknown option [%s] (cast failed)", q);

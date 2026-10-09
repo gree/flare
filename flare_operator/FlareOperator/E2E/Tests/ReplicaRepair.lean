@@ -258,8 +258,11 @@ private def awaitRepair (masterIp slaveIp : String)
   -- of looking for them in the final snapshot.
   let sawDemote ← IO.mkRef false
   let sawConfirm ← IO.mkRef false
+  -- Whole current log, not a tail: if the repair finished before the wait
+  -- started, the demotion line must still be in the snapshot that shows
+  -- the completion (CI 36882921953 saw completion without it).
   let done ← waitForCondition "operator records REPLICA REPAIR COMPLETE" budget do
-    let l ← opLog 2000
+    let l ← opLog 200000
     if containsSubstr l "REPLICA REPAIR: demoting" then sawDemote.set true
     if containsSubstr l "confirmed the demotion" then sawConfirm.set true
     return containsSubstr l "REPLICA REPAIR COMPLETE"
@@ -324,17 +327,34 @@ private def patchLedgerRaw (raw : String) : IO (Except String String) :=
   kubectl ["patch", "flarecluster", cfg.name, "-n", cfg.«namespace», "--subresource=status",
            "--type=merge", "-p", s!"\{\"status\":\{\"replicaRepairs\":{raw}}}"]
 
-private def setGate (closed : Bool) : IO (Except String Unit) := do
-  let arg := if closed then "FLARE_RESYNC_ON_DROP=0" else "FLARE_RESYNC_ON_DROP-"
-  match ← kubectl ["set", "env", s!"deployment/{cfg.operatorName}", "-n", cfg.«namespace», arg] with
+/-- Run an action that rolls the operator Deployment, wait for the rollout,
+    then wait until none of the operator pods present BEFORE the action
+    remain. `kubectl rollout status` returns once the new pod is available,
+    and the operator reports Ready before it holds the lease, so the old pod
+    can still be terminating; until it is gone `kubectl logs -l` mixes both
+    processes. CI 36882921953: "restarted operator restores the HELD
+    request" passed on the OLD pod's log, and the completion wait started
+    after the new process had already finished the whole repair. -/
+private def rolloutSettled (action : IO (Except String String)) : IO (Except String Unit) := do
+  let label := s!"app={cfg.operatorName}"
+  let before ← getPodNames label cfg.«namespace»
+  match ← action with
   | .error e => return .error e
   | .ok _ =>
-    if ← kubectlRolloutStatus s!"deployment/{cfg.operatorName}" cfg.«namespace» 240 then return .ok ()
-    else return .error "operator rollout did not complete"
+    if !(← kubectlRolloutStatus s!"deployment/{cfg.operatorName}" cfg.«namespace» 240) then
+      return .error "operator rollout did not complete"
+    let gone ← waitForCondition "the previous operator pod is gone" 180 do
+      let now ← getPodNames label cfg.«namespace»
+      return !now.isEmpty && !now.any (before.contains ·)
+    if gone then return .ok ()
+    else return .error s!"the previous operator pod(s) {before} did not go away within 180 s"
+
+private def setGate (closed : Bool) : IO (Except String Unit) := do
+  let arg := if closed then "FLARE_RESYNC_ON_DROP=0" else "FLARE_RESYNC_ON_DROP-"
+  rolloutSettled (kubectl ["set", "env", s!"deployment/{cfg.operatorName}", "-n", cfg.«namespace», arg])
 
 private def restartOperator : IO Bool := do
-  discard <| kubectl ["rollout", "restart", s!"deployment/{cfg.operatorName}", "-n", cfg.«namespace»]
-  kubectlRolloutStatus s!"deployment/{cfg.operatorName}" cfg.«namespace» 240
+  return (← rolloutSettled (kubectl ["rollout", "restart", s!"deployment/{cfg.operatorName}", "-n", cfg.«namespace»])).toBool
 
 def suite : TestSuite := {
   name := "replica-repair"
@@ -425,11 +445,9 @@ def suite : TestSuite := {
         | .error e => return .fail e
         | .ok (_, mIp, _, sIp) =>
           -- Close the gate by restarting the operator with resync disabled.
-          match ← kubectl ["set", "env", s!"deployment/{cfg.operatorName}", "-n", cfg.«namespace», "FLARE_RESYNC_ON_DROP=0"] with
-          | .error e => return .fail s!"could not set the gate: {e}"
+          match ← setGate true with
+          | .error e => return .fail s!"could not close the gate: {e}"
           | .ok _ => pure ()
-          if !(← kubectlRolloutStatus s!"deployment/{cfg.operatorName}" cfg.«namespace» 240) then
-            return .fail "operator rollout with FLARE_RESYNC_ON_DROP=0 did not complete"
           let restored ← waitForCondition "restarted operator restores the ledger from status" 120 do
             return containsSubstr (← opLog) "replica repair ledger restored from status"
           if !restored then
@@ -466,11 +484,9 @@ def suite : TestSuite := {
             -- from status and finish it without any further drop.
             let s0 := (← flaredStat sIp "reconstruction_started").getD 0
             let c0 := (← flaredStat sIp "reconstruction_completed").getD 0
-            match ← kubectl ["set", "env", s!"deployment/{cfg.operatorName}", "-n", cfg.«namespace», "FLARE_RESYNC_ON_DROP-"] with
+            match ← setGate false with
             | .error e => return .fail s!"could not open the gate: {e}"
             | .ok _ => pure ()
-            if !(← kubectlRolloutStatus s!"deployment/{cfg.operatorName}" cfg.«namespace» 240) then
-              return .fail "operator rollout with the gate open did not complete"
             let restored2 ← waitForCondition "restarted operator restores the HELD request" 120 do
               let l ← opLog
               return containsSubstr l "replica repair ledger restored from status" && containsSubstr l "requested"

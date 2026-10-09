@@ -448,7 +448,10 @@ int thread::enqueue(shared_thread_queue& q, const uint32_t max_total_thread_queu
 	}
 	pthread_mutex_unlock(&this->_mutex_queue);
 	if (max_total_thread_queue > 0 && size >= max_total_thread_queue) {
-		log_err("too many thread queues [%u]", size);
+		static AtomicCounter rejected(0);
+		if (rejected.incr() % 1000 == 1) {
+			log_err("too many thread queues [%u] (max-total-thread-queue reached; logged every 1000th rejection)", size);
+		}
 		return -1;
 	}
 	pthread_cond_signal(&this->_cond_queue);

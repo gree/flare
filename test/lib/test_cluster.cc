@@ -118,6 +118,7 @@ namespace test_cluster
 		using cluster::_save;
 		using cluster::_node_map;
 		using cluster::_thread_type;
+		using cluster::_type;
 	};
 
 	void test_deserialization_skip() {
@@ -244,6 +245,45 @@ namespace test_cluster
 		cppcut_assert_equal(0, cluster.reconstruct_node(v, ver));    // allow higher version
 		cppcut_assert_equal(0, cluster.reconstruct_node(v, ver));    // allow the same version
 		cppcut_assert_equal(-1, cluster.reconstruct_node(v, ver-1)); // deny lower version
+	}
+
+	cluster::node mk(const char* name, int port, cluster::role r, cluster::state st, int part) {
+		cluster::node n;
+		n.node_server_name = name;
+		n.node_server_port = port;
+		n.node_role = r;
+		n.node_state = st;
+		n.node_partition = part;
+		n.node_balance = 0;
+		n.node_thread_type = 16;
+		return n;
+	}
+
+	// CI 37572870090: a restarted replica, still building its copy, accepted a
+	// map that (from a stale view) said it was active, became active locally
+	// and re-announced an activation for a copy that was not complete. While
+	// its own reconstruction runs and its activation was not acknowledged, a
+	// map saying active leaves it prepare; the echo of an acknowledged
+	// activation is accepted.
+	void test_stale_active_map_while_reconstructing_stays_prepare()
+	{
+		const std::string _tmp_dir = tmp_dir + std::string("/stale_active");
+		mkdir(_tmp_dir.c_str(), 0700);
+		cluster_test cluster(_tmp_dir);
+		cluster._type = cluster::type_node;		// the self-node rules apply to a node
+		uint64_t ver = cluster.get_node_map_version() + 10;
+		vector<cluster::node> v;
+		v.push_back(mk("master", 12121, cluster::role_master, cluster::state_active, 0));
+		v.push_back(mk("localhost", 11211, cluster::role_slave, cluster::state_prepare, 0));
+		cppcut_assert_equal(0, cluster.reconstruct_node(v, ver));
+		stats_object->reconstruction_begin();
+		v[1].node_state = cluster::state_active;
+		cppcut_assert_equal(0, cluster.reconstruct_node(v, ++ver));
+		cut_assert_equal_int(cluster::state_prepare, cluster.get_node("localhost", 11211).node_state);
+		// the activation was acknowledged: the map's echo is accepted
+		cluster.set_activation_pending(true);
+		cppcut_assert_equal(0, cluster.reconstruct_node(v, ++ver));
+		cut_assert_equal_int(cluster::state_active, cluster.get_node("localhost", 11211).node_state);
 	}
 }
 

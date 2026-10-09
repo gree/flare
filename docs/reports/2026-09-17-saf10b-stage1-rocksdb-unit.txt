@@ -1,0 +1,37 @@
+# SAF-10b stage 1 — RocksDB unit tests for the generation identities, the order label and the all-or-nothing restore
+# tested revision: (working tree at 27f6909d7ad95e25dde6f498d5d0caf95e56b504 + the stage-1 review fixes, committed as the next commit)
+# host: local darwin arm64, nix devShell
+# build: ~/git/flare/configure --with-rocksdb=<rocksdb-8.3.2> CXXFLAGS="-std=c++17 -g -O0 -D_LIBCPP_ENABLE_CXX17_REMOVED_RANDOM_SHUFFLE -D_LIBCPP_ENABLE_CXX17_REMOVED_AUTO_PTR"
+#   (the C++17 flag is required by rocksdb 8.3.2's headers; the two libc++ compatibility defines restore std::random_shuffle / std::auto_ptr, which this tree still uses. No source change was made for the build.)
+# command: cutter --keep-opening-modules -v v -s test -n "<filter>" test/lib
+# date: 2026-09-17
+# NOTE ON SCOPE OF THIS EVIDENCE: these are the RocksDB unit tests for this change. The non-RocksDB cutter suite (nix build .#flare) is recorded SEPARATELY and is not evidence for the RocksDB code paths — it does not compile them.
+
+=== new tests (filter: /(generation|restore|order_label|truncate_advances|refuses_checkpoint)/) ===
+test_generations_survive_reopen                                     pass   a plain reopen keeps both identities (a restart is not a history change)
+test_generation_epoch_unique_across_sequential_promotions           pass   two copies promoted in turn advertise DIFFERENT source epochs
+test_generation_incarnation_unique_across_repeated_hard_reset       pass   each hard reset mints a new incarnation (and a new source epoch)
+test_generation_persist_failure_is_fail_closed                      pass   a failed persist leaves the generations UNAVAILABLE, not the old value
+test_restore_sentinel_discards_half_restored_copy                   pass   a sentinel left by an interrupted restore discards that copy at open
+test_restore_sentinel_unremovable_refuses_open                      pass   a sentinel that cannot be cleared refuses open instead of discarding the next good restore
+test_swap_in_snapshot_refuses_checkpoint_without_source_epoch       pass   an unidentifiable history is refused, and the incarnation does not move
+test_restore_inherits_epoch_and_mints_incarnation                   pass   restore twice: epoch inherited from the source, incarnation fresh each time, sentinel cleared
+test_truncate_advances_source_epoch                                 pass   a bulk rewrite changes the history identity
+test_order_label_strictly_monotonic_per_key                         pass   the delete following a set carries a strictly greater label (the resurrection counterexample)
+RESULT: 10 test(s), 66 assertion(s), 0 failure(s), 0 error(s) — 100% passed
+
+=== regression batch (filter: /(hard_reset|swap_in_snapshot|repl_last_lsn|truncate|snapshot_bootstrap|validate_batch|phaseA|analyze_checkpoint)/) ===
+RESULT: 23 test(s), 335 assertion(s), 0 failure(s), 0 error(s) — 100% passed
+(includes the pre-existing test_snapshot_bootstrap_checkpoint_swap_and_wal_catchup, test_swap_in_snapshot_clears_corruption_latch, test_phaseA_* lineage tests, test_set_repl_last_lsn_survives_reopen and the tcb/tch truncate tests)
+
+=== NOT executed here ===
+* The full cutter suite in one run: the network-dependent modules hang on this host, so the RocksDB module was run by name filter. The complete suite runs in CI (nix-linux, test-flare-rocksdb).
+* No E2E: stage 1 changes no apply path, so there is nothing end-to-end to observe yet.
+
+=== separate record: non-RocksDB cutter suite ===
+# command: nix build .#flare     (nix/default.nix doCheck -> make check -> test/run-tests.sh)
+# result: pass ("# ERROR: 0")
+# date: 2026-09-17
+# This build does NOT compile storage_rocksdb.cc or the RocksDB test module. It covers the
+# backend-independent changes only (storage.h entry field and virtuals, cluster.cc, op_stats.cc
+# outside the rocksdb block) and is recorded here to keep it distinct from the evidence above.

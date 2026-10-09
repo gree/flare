@@ -95,6 +95,16 @@ protected:
 	//   last_success_id   id of the last handler that succeeded;
 	//   last_success_source  master host:port that handler copied from.
 	pthread_mutex_t _mutex_reconstruction;
+	pthread_mutex_t _mutex_follow;
+	bool _follow_enabled;
+	string _follow_source;
+	string _follow_source_epoch;
+	int _follow_state;
+	string _follow_last_reason;
+	uint64_t _follow_applied_lsn;
+	uint64_t _follow_source_lsn;
+	time_t _follow_source_lsn_observed_at;
+	time_t _follow_last_progress_at;
 	uint64_t _reconstruction_boot_id;
 	uint64_t _reconstruction_current_id;
 	int _reconstruction_current_state;
@@ -152,6 +162,49 @@ public:
 	};
 	/// One consistent snapshot under a single lock (for `stats`).
 	reconstruction_record get_reconstruction_record();
+
+	// ---- CONTINUOUS REPLICATION, follower side (SAF-10b stage 3b) --------
+	// What the operator needs to tell "following" from "connected" and from
+	// "caught up" (design §5.1). Every field is read as ONE snapshot: a
+	// position without the time it was observed, or a state without a
+	// reason, cannot be acted on.
+	enum follow_state {
+		follow_idle = 0,		// not following: this node is not a WAL-mode replica
+		follow_initial_sync,	// has a copy, still catching up for the first time
+		follow_following,		// connected and applying
+		follow_disconnected,	// lost the connection; RESUMES from the position, never a rebuild by itself
+		follow_needs_rebuild,	// history gone, source epoch changed, or a batch could not be decoded
+		follow_error,			// storage or protocol failure; retried
+	};
+	struct follow_record {
+		bool     enabled;				// the mode is on for this node
+		string   source;				// peer being followed, empty when idle
+		string   source_epoch;			// the history the position belongs to
+		string   state;
+		string   last_reason;			// why the last reconnect or rebuild
+		uint64_t applied_lsn;			// contiguously applied position
+		uint64_t source_lsn;			// the master's position...
+		time_t   source_lsn_observed_at;	// ...and when that was observed
+		time_t   last_progress_at;		// last time the position advanced
+	};
+	follow_record get_follow_record();
+	// Local read guard, independent of delayed operator/map delivery. A WAL
+	// replica only serves locally after reaching its last observed head.
+	// This is not a linearizable-read guarantee: the source can write again.
+	static bool follow_allows_local_read(const follow_record& r, time_t now) {
+		return !r.enabled || (r.state == "following" && !r.source_epoch.empty()
+			&& r.source_lsn > 0 && r.applied_lsn >= r.source_lsn
+			&& r.source_lsn_observed_at > 0 && now >= r.source_lsn_observed_at
+			&& now - r.source_lsn_observed_at <= 5);
+	}
+	// Transitions. follow_note_progress() is the only one that moves the
+	// applied position, and it is called after the position was durably
+	// recorded, never before.
+	int follow_set_state(follow_state st, const string& reason);
+	int follow_set_source(const string& source, const string& source_epoch);
+	int follow_note_progress(uint64_t applied_lsn);
+	int follow_note_source_position(uint64_t source_lsn);
+	int follow_set_enabled(bool enabled);
 	uint64_t get_reconstruction_boot_id();
 	uint64_t get_reconstruction_current_id();
 	string get_reconstruction_current_state();

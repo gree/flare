@@ -32,6 +32,14 @@ structure TestSuite where
       failing suite's operator/flared logs still exist. -/
   onFailure : IO Unit := pure ()
 
+/-- A TAP result line, flushed at once and echoed to stderr (CI 37731207056:
+    stdout was buffered and every result of a run killed by its time limit
+    was lost; e2e.log carries stderr). -/
+def emitResult (line : String) : IO Unit := do
+  IO.println line
+  (← IO.getStdout).flush
+  IO.eprintln s!"# RESULT {line}"
+
 /-- Run a single suite, TAP output to stderr, return (total, failures) -/
 def runSuite (suite : TestSuite) (startIndex : Nat) : IO (Nat × Nat) := do
   IO.eprintln s!"# === Suite: {suite.name} ==="
@@ -43,7 +51,7 @@ def runSuite (suite : TestSuite) (startIndex : Nat) : IO (Nat × Nat) := do
     let mut idx := startIndex
     for tc in suite.tests do
       idx := idx + 1
-      IO.println s!"not ok {idx} - {tc.name} # setup failed"
+      emitResult s!"not ok {idx} - {tc.name} # setup failed"
     try suite.teardown catch _ => pure ()
     return (suite.tests.length, suite.tests.length)
 
@@ -57,15 +65,15 @@ def runSuite (suite : TestSuite) (startIndex : Nat) : IO (Nat × Nat) := do
       let result ← tc.run
       match result with
       | .pass =>
-        IO.println s!"ok {idx} - {tc.name}"
+        emitResult s!"ok {idx} - {tc.name}"
       | .fail reason =>
-        IO.println s!"not ok {idx} - {tc.name}"
+        emitResult s!"not ok {idx} - {tc.name}"
         IO.eprintln s!"#   reason: {reason}"
         failures := failures + 1
       | .skip reason =>
-        IO.println s!"ok {idx} - {tc.name} # SKIP {reason}"
+        emitResult s!"ok {idx} - {tc.name} # SKIP {reason}"
     catch e =>
-      IO.println s!"not ok {idx} - {tc.name}"
+      emitResult s!"not ok {idx} - {tc.name}"
       IO.eprintln s!"#   exception: {e}"
       failures := failures + 1
 

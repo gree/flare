@@ -125,3 +125,24 @@ It does not run evidence commands or certify their conclusions. A reviewer must
 check that the guard is reached on the live path and that failures or concurrent
 repairs cannot bypass it. Documentation-only edits need these checks, not an
 unrelated full E2E run. Operator runtime changes still need their relevant tests.
+
+### CI-first runtime validation
+
+Prefer CI for full cutter and kind E2E runs; keep local feedback to focused
+tests and static checks. The E2E workflow builds and runs `flare_unit`, then
+runs the five E2E shards. The `nix-linux` workflow tests both legacy and RocksDB
+builds. Result artifacts retain the checked-out SHA and command logs for 30 days;
+copy durable evidence into the register/reports before artifacts expire.
+
+For longer evaluations, manually run **E2E Tests** on the intended branch and
+select `evaluation`: `sustained`, `scale-2m`, or `scale-15m8`. The selected
+evaluation is enabled only on the continuous-replication shard; the other
+shards still run normally. `none` (the PR default) skips opt-in evaluations.
+A skipped evaluation is not a passing performance result. Large profiles may
+exceed hosted-runner resources; report that outcome rather than treating it as
+production capacity evidence. These runs do not measure T17 lock contention.
+
+Workflow changes must first reach the remote branch before CI can test them.
+Attach the run URL, actual tested SHA (PR checkout may be a merge revision),
+profile and results to the evidence register; CI green does not itself promote
+an EV to `verified`.

@@ -1,4 +1,10 @@
 name: E2E Tests
+# The base commit is part of the title so a later docs-only push can check
+# that the previous run was tested against the SAME base (the title is fixed
+# when the run is created; the API's pull_requests[].base is the current one).
+# A manual run is named as one (single-suite or full) so it is never read as
+# the PR's full check.
+run-name: "${{ github.event_name == 'workflow_dispatch' && format('E2E MANUAL ({0}) on {1}', inputs.suites != '' && format('single-suite: {0}', inputs.suites) || 'full matrix', github.ref_name) || format('E2E Tests (base {0})', github.event.pull_request.base.sha || 'none') }}"
 
 on:
   # Feature branches are covered by their pull_request runs; running the same
@@ -11,33 +17,174 @@ on:
     branches:
       - flare-operator
       - master
+      # Stacked safety PRs (base = another safety/* branch, so the diff is
+      # only the new work) must still run the E2E matrix.
+      - 'safety/**'
+  # Manual run of a branch (e.g. re-running a leg for evidence).
+  workflow_dispatch:
+    inputs:
+      evaluation:
+        description: 'Optional evaluation on the continuous-replication leg (PR runs use none)'
+        type: choice
+        options: [none, reserve-measure, reserve-measure-tmpfs, visibility, sustained, sustained-cpu2, sustained-nrw, outage, outage-tmpfs, scale-2m, scale-6m-mem, scale-6m-mem-cap, scale-2m-cap, scale-15m8]
+        default: none
+      suites:
+        description: 'Optional: run ONLY these suites (comma-separated, e.g. topology-authority) in one leg; empty = full matrix'
+        type: string
+        default: ''
 
-concurrency:
-  group: e2e-${{ github.workflow }}-${{ github.head_ref || github.ref }}
-  cancel-in-progress: true
+permissions:
+  contents: read
+
+# Concurrency is per LEG (on the e2e-test job), not per workflow: a
+# docs-only push creates a run whose legs are skipped, and a workflow-level
+# group with cancel-in-progress would have cancelled the running matrix of
+# the previous code push for nothing.
 
 jobs:
-  e2e-test:
+  plan:
     runs-on: ubuntu-latest
-    # The serial suite grew past 2.5h, so it is SHARDED into parallel matrix
-    # legs (each leg: ~30 min setup + its suite group). Groups are balanced
-    # by measured suite duration — circuit-breaker (~22 min) and blue-green
-    # (~15 min) anchor their own leg. Rebalance by editing the lists; add
-    # new suites to a group or `flare_e2e --list` drifts from reality (the
-    # aggregate job below fails if a suite is left out of every group).
-    timeout-minutes: 120
+    permissions:
+      contents: read
+      actions: read   # read the previous run's conclusion and title
+    outputs:
+      run_e2e: ${{ steps.plan.outputs.run_e2e }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+      all_suites: ${{ steps.plan.outputs.all_suites }}
+      prev_run: ${{ steps.plan.outputs.prev_run }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Decide what to run
+        id: plan
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          ACTION: ${{ github.event.action }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.event.pull_request.head.sha }}
+          SUITES_INPUT: ${{ inputs.suites }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Legs balanced by measured suite time (CI 36846255460, minutes):
+          # each ~10-16 min of tests, so wall-clock ~= setup + 16 min. The
+          # longest single suites (replica-repair 11.5, continuous-replication
+          # 10.7) bound it from below. The union must equal `flare_e2e --list`
+          # (checked in every leg). Evaluation profiles run in the
+          # continuous-replication leg only.
+          default='[
+            {"group":"topology","suites":"failover,read-balance,scale-out-master,scale-out-slave,scale-in-slave,scale-in-master,continuous-replication-enable-purged"},
+            {"group":"replication","suites":"cluster-replication,wal-retention-config,strict-durability,continuous-replication-purge,continuous-replication-limits,continuous-replication-lag-hold-tmpfs,continuous-replication-rebuild-tmpfs"},
+            {"group":"wal-recovery","suites":"wal-bandwidth-throttle,wal-incremental-sync,wal-purged-fallback,orphan-scan-purge,terminating-pod-handling,continuous-replication-multipart-lag-hold"},
+            {"group":"empty-source","suites":"empty-source"},
+            {"group":"r3-source","suites":"r3-source-change"},
+            {"group":"copy-protection","suites":"copy-protection,copy-retention,copy-retention-concurrency,r3-unreadable,promotion-reasons,promotion-precommit"},
+            {"group":"repair-ledger","suites":"repair-ledger"},
+            {"group":"restore-promotion","suites":"restore-isolated,promotion-repeat,history-tracking,history-held,history-firstbuild"},
+            {"group":"failover-data","suites":"replace-nodes,failover-during-replication,data-survival-failover,pvc-data-survival,backup-restore,continuous-replication-enable,continuous-replication-multipart-enable"},
+            {"group":"breaker-migration","suites":"circuit-breaker,operator-restart,blue-green-migration,continuous-replication-lag-hold-expiry,copy-identity"},
+            {"group":"authority","suites":"topology-authority,resync-failure-self-demote,snapshot-push-seed,partition-reduction,continuous-replication-lag-hold,cluster-init"},
+            {"group":"repair","suites":"replica-repair,prepare-evidence,native-metrics,continuous-replication-upgrade,continuous-replication-lag-hold-unreadable"},
+            {"group":"continuous-replication","suites":"copy-retention-measure,continuous-replication,continuous-replication-scale,continuous-replication-sustained,continuous-replication-outage,continuous-replication-outage-tmpfs,visibility-bench"}
+          ]'
+          all=$(echo "$default" | jq -r '[.[].suites] | join(",")')
+          if [ -n "$SUITES_INPUT" ]; then
+            matrix=$(jq -cn --arg s "$SUITES_INPUT" '[{"group":"single-suite","suites":$s}]')
+          else
+            matrix=$(echo "$default" | jq -c .)
+          fi
+          # Skip the matrix only when ALL of these hold, otherwise run it:
+          #  1. this push (before..after) touched nothing but docs/ or *.md;
+          #     the pull_request paths filter cannot tell, it looks at the
+          #     whole PR diff;
+          #  2. the run for the previous push (head = before) completed with
+          #     conclusion success, so a docs push never turns a failing or
+          #     unfinished PR head green;
+          #  3. that run was for the same base commit (from its title), so
+          #     the merge revision has no base change the earlier run did
+          #     not test.
+          # A skipped earlier run satisfies 2 and 3 only because it met the
+          # same rule, so the chain always ends at a run that tested this code.
+          run_e2e=true
+          prev_run=""
+          reason="not a docs-only push"
+          if [ "$EVENT" = pull_request ] && [ "$ACTION" = synchronize ] && [ -n "$BEFORE" ] \
+             && files=$(git diff --name-only "$BEFORE" "$AFTER" 2>/dev/null) && [ -n "$files" ] \
+             && ! echo "$files" | grep -qvE '^docs/|\.md$'; then
+            prev=$(gh api "repos/$REPO/actions/workflows/e2e-tests.yaml/runs?head_sha=$BEFORE&event=pull_request&per_page=20" \
+              --jq '[.workflow_runs[] | select(.status == "completed")] | sort_by(.created_at) | last | select(. != null) | "\(.conclusion)\t\(.id)\t\(.display_title)"' 2>/dev/null || true)
+            p_concl=$(printf '%s' "$prev" | cut -f1)
+            p_id=$(printf '%s' "$prev" | cut -f2)
+            p_title=$(printf '%s' "$prev" | cut -f3-)
+            if [ -z "$prev" ]; then
+              reason="docs-only push, but no completed run found for the previous head $BEFORE"
+            elif [ "$p_concl" != success ]; then
+              reason="docs-only push, but the previous run $p_id concluded $p_concl"
+            elif [ -z "$BASE" ] || ! printf '%s' "$p_title" | grep -qF "base $BASE"; then
+              reason="docs-only push, but the previous run $p_id was not for base $BASE (title: $p_title)"
+            else
+              run_e2e=false
+              prev_run="$p_id"
+              reason="docs-only push; previous run $p_id on $BEFORE passed against the same base $BASE"
+            fi
+          fi
+          if [ "$run_e2e" = true ]; then
+            echo "::notice::E2E runs: $reason"
+          else
+            echo "::notice::E2E NOT RUN: $reason"
+          fi
+          echo "### E2E plan: run=$run_e2e" >> "$GITHUB_STEP_SUMMARY"
+          echo "$reason" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "run_e2e=$run_e2e"
+            echo "matrix=$matrix"
+            echo "all_suites=$all"
+            echo "prev_run=$prev_run"
+          } >> "$GITHUB_OUTPUT"
+          echo "run_e2e=$run_e2e"; echo "matrix=$matrix"
+
+  # Make a skip visible on the PR: without this job a docs-only run is just
+  # "success" and reads as if the tests had passed on this commit.
+  e2e-not-run:
+    needs: plan
+    if: needs.plan.outputs.run_e2e == 'false'
+    # Static name: GitHub shows a skipped job's name unevaluated, so an
+    # expression here appeared as a raw ${{ }} on every code push. The run
+    # that covers the commit is named in this job's summary and notice.
+    name: "E2E NOT RUN (docs-only push)"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Explain the skip
+        env:
+          PREV: ${{ needs.plan.outputs.prev_run }}
+        run: |
+          {
+            echo "### E2E NOT RUN on this commit"
+            echo "This push changed only docs/ or *.md. The previous push's run $PREV passed against the same base, and the code under test is unchanged since then."
+            echo "Evidence for this commit is that run, not this one."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice::E2E NOT RUN on this commit; see run $PREV"
+
+  e2e-test:
+    needs: plan
+    if: needs.plan.outputs.run_e2e == 'true'
+    runs-on: ubuntu-latest
+    # PR legs: a newer push cancels the older run of the same leg. MANUAL
+    # runs (investigation of one finding) get a group of their own run id:
+    # a push never cancels them, and they never cancel a PR leg.
+    concurrency:
+      group: ${{ github.event_name == 'workflow_dispatch' && format('e2e-manual-{0}-{1}', github.run_id, matrix.group) || format('e2e-{0}-{1}-{2}', github.head_ref || github.ref, inputs.evaluation || 'none', matrix.group) }}
+      cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+    timeout-minutes: ${{ inputs.evaluation != '' && inputs.evaluation != 'none' && 240 || 120 }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - group: topology
-            suites: "failover,read-balance,scale-out-master,scale-out-slave,scale-in-slave,scale-in-master"
-          - group: replication
-            suites: "replace-nodes,cluster-replication,partition-reduction,wal-retention-config,strict-durability,snapshot-push-seed"
-          - group: wal-recovery
-            suites: "wal-bandwidth-throttle,wal-incremental-sync,wal-purged-fallback,resync-failure-self-demote,orphan-scan-purge,terminating-pod-handling,failover-during-replication,data-survival-failover,pvc-data-survival,backup-restore"
-          - group: breaker-migration
-            suites: "circuit-breaker,operator-restart,topology-authority,replica-repair,prepare-evidence,native-metrics,blue-green-migration"
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
     name: e2e-test (${{ matrix.group }})
     steps:
       - name: Checkout
@@ -45,28 +192,61 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Record what this leg tests
+        # Evidence: the revision actually checked out (a PR run tests a merge
+        # commit, not the branch head) and the suites selected. A manual
+        # single-suite run is labelled as such: it is NOT the full CI.
+        env:
+          EVENT: ${{ github.event_name }}
+          SUITES: ${{ matrix.suites }}
+          GROUP: ${{ matrix.group }}
+          REF: ${{ github.ref }}
+        run: |
+          sha=$(git rev-parse HEAD)
+          tree=$(git rev-parse 'HEAD^{tree}')
+          scope=full
+          if [ "$GROUP" = single-suite ]; then scope=single-suite; fi
+          {
+            echo "### E2E leg $GROUP"
+            echo "- event: $EVENT, ref: $REF"
+            echo "- checked-out commit: $sha"
+            echo "- tree: $tree"
+            echo "- scope: $scope"
+            echo "- suites: $SUITES"
+            if [ "$scope" = single-suite ]; then
+              echo "- SINGLE-SUITE run: evidence for these suites only, never the full CI of this revision"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "E2E-EVIDENCE commit=$sha tree=$tree scope=$scope event=$EVENT group=$GROUP suites=$SUITES"
+
       - name: Install elan (Lean version manager)
         run: |
-          curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf | sh -s -- -y
+          curl --retry 5 --retry-delay 3 --retry-all-errors https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf | sh -s -- -y
           echo "$HOME/.elan/bin" >> $GITHUB_PATH
 
       - name: Install kind
         run: |
-          curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.24.0/kind-linux-amd64
+          curl --retry 5 --retry-delay 3 --retry-all-errors -fLo ./kind https://kind.sigs.k8s.io/dl/v0.24.0/kind-linux-amd64
           chmod +x ./kind
           sudo mv ./kind /usr/local/bin/kind
 
       - name: Install kubectl
         run: |
-          curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          curl --retry 5 --retry-delay 3 --retry-all-errors -fLO "https://dl.k8s.io/release/$(curl --retry 5 --retry-delay 3 --retry-all-errors -fL -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
           chmod +x kubectl
           sudo mv kubectl /usr/local/bin/kubectl
 
       - name: Install helm
         run: |
-          curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+          curl --retry 5 --retry-delay 3 --retry-all-errors -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
 
-      - name: Build Lean operator
+      - name: Test Helm startup memory configuration
+        # Helm is installed above; test startup ConfigMap seeding before builds.
+        # Full runtime/config admission tests run in the replication shard.
+        # Keep this a separate step so a render failure cannot hide in a pipe.
+        run: python3 -m unittest discover -s scripts/tests -p 'test_helm_memory.py'
+
+      - name: Build Lean operator and tests
         run: |
           cd flare_operator
           # SEPARATE invocations on purpose. Naming the library and an
@@ -81,6 +261,7 @@ jobs:
           build_all() {
             lake build FlareOperator \
               && lake build flare_operator \
+              && lake build flare_unit \
               && lake build flare_e2e
           }
           # Retry once from a CLEAN tree. The runner's clang also dies with
@@ -94,14 +275,98 @@ jobs:
             build_all
           }
 
+      - name: Run pure safety tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ci-results
+          git rev-parse HEAD > ci-results/tested-sha.txt
+          # the TREE actually tested (a PR run tests a merge commit, not the branch head)
+          git rev-parse 'HEAD^{tree}' > ci-results/tested-tree.txt
+          timeout --kill-after=10 120 flare_operator/.lake/build/bin/flare_unit 2>&1 | tee ci-results/flare-unit.log
+
       - name: Create kind cluster
         run: kind create cluster --name flare-e2e --wait 120s
 
-      - name: Build Docker images
+      # The two flared images are C++ builds (~3 min each) whose builder
+      # stage copies only the C++ build inputs, so their layers are cached
+      # in the GitHub Actions cache and reused while those inputs are
+      # unchanged. One leg writes the cache; the others only read it, so
+      # eight legs do not upload the same layers. The operator image (~1
+      # min) is built uncached, as before: it pulls the current stable
+      # kubectl, which a cache would freeze.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # One retry: even a cached build resolves the base image's manifest
+      # from Docker Hub, which returned HTTP 503 once (PR run 36866790112).
+      - name: Build flare-node image (cached)
+        id: build_flare_node
+        continue-on-error: true
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.flare-node
+          tags: flare-node:test
+          load: true
+          cache-from: type=gha,scope=flare-node
+          cache-to: ${{ matrix.group == 'topology' && 'type=gha,mode=max,scope=flare-node' || '' }}
+
+      - name: Wait before retrying flare-node
+        if: steps.build_flare_node.outcome == 'failure'
+        run: sleep 30
+
+      - name: Build flare-node image (cached, retry)
+        if: steps.build_flare_node.outcome == 'failure'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.flare-node
+          tags: flare-node:test
+          load: true
+          cache-from: type=gha,scope=flare-node
+          cache-to: ${{ matrix.group == 'topology' && 'type=gha,mode=max,scope=flare-node' || '' }}
+
+      # One retry: even a cached build resolves the base image's manifest
+      # from Docker Hub, which returned HTTP 503 once (PR run 36866790112).
+      - name: Build flare-node-rocksdb image (cached)
+        id: build_flare_node_rocksdb
+        continue-on-error: true
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.flare-node-rocksdb
+          tags: flare-node-rocksdb:test
+          load: true
+          cache-from: type=gha,scope=flare-node-rocksdb
+          cache-to: ${{ matrix.group == 'topology' && 'type=gha,mode=max,scope=flare-node-rocksdb' || '' }}
+
+      - name: Wait before retrying flare-node-rocksdb
+        if: steps.build_flare_node_rocksdb.outcome == 'failure'
+        run: sleep 30
+
+      - name: Build flare-node-rocksdb image (cached, retry)
+        if: steps.build_flare_node_rocksdb.outcome == 'failure'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.flare-node-rocksdb
+          tags: flare-node-rocksdb:test
+          load: true
+          cache-from: type=gha,scope=flare-node-rocksdb
+          cache-to: ${{ matrix.group == 'topology' && 'type=gha,mode=max,scope=flare-node-rocksdb' || '' }}
+
+      # Retried: the builder downloads the Lean toolchain from
+      # releases.lean-lang.org, which returned HTTP 504 once (manual run
+      # 36864650674). A real build error fails all three attempts.
+      - name: Build operator image
         run: |
-          docker build -t flare-operator:test -f Dockerfile.operator .
-          docker build -t flare-node:test -f Dockerfile.flare-node .
-          docker build -t flare-node-rocksdb:test -f Dockerfile.flare-node-rocksdb .
+          for attempt in 1 2 3; do
+            docker build -t flare-operator:test -f Dockerfile.operator . && exit 0
+            echo "::warning::operator image build failed (attempt $attempt/3); retrying in 30 s"
+            sleep 30
+          done
+          exit 1
 
       - name: Load images into kind
         run: |
@@ -157,20 +422,72 @@ jobs:
           kubectl logs -n flare-system -l app=flare-operator --tail=50
 
       - name: Run E2E tests (${{ matrix.group }})
+        shell: bash
+        env:
+          EVALUATION: ${{ inputs.evaluation || 'none' }}
+          SUITE_GROUP: ${{ matrix.group }}
+          SUITES: ${{ matrix.suites }}
         run: |
+          set -euo pipefail
+          mkdir -p ci-results
+          git rev-parse HEAD > ci-results/tested-sha.txt
+          # the TREE actually tested (a PR run tests a merge commit, not the branch head)
+          git rev-parse 'HEAD^{tree}' > ci-results/tested-tree.txt
+          echo "$EVALUATION" > ci-results/evaluation.txt
+          # scope and suites of this leg (a single-suite run is never full CI)
+          echo "$SUITE_GROUP" > ci-results/group.txt
+          echo "$SUITES" > ci-results/suites.txt
+          if [ "$SUITE_GROUP" = single-suite ]; then echo single-suite; else echo full; fi > ci-results/scope.txt
           cd flare_operator
           export KUBECONFIG=$HOME/.kube/config
           # timeout(1) produces "exit code 124" on expiry — this inner limit
           # is what kills a leg, not timeout-minutes. 75 min per SHARDED leg
           # (longest group ~45 min measured + slack).
-          timeout 4500 .lake/build/bin/flare_e2e --filter "${{ matrix.suites }}"
+          limit=4500
+          # empty-source: 8 tests, each with throttled full dumps (~25 s) and
+          # failovers; it alone needs more than the sharded-leg budget.
+          if [ "$SUITE_GROUP" = empty-source ]; then limit=7000; fi
+          # a manual single-suite run that includes empty-source gets its budget
+          if [ "$SUITE_GROUP" = single-suite ] && echo ",$SUITES," | grep -q ',empty-source,'; then limit=7000; fi
+          # A single-suite manual run (group "single-suite") takes the profile too;
+          # otherwise suites=... with an evaluation silently measured nothing.
+          if [ "$SUITE_GROUP" = continuous-replication ] || [ "$SUITE_GROUP" = single-suite ]; then
+            case "$EVALUATION" in
+              sustained) export FLARE_E2E_SUSTAINED=1; limit=10800 ;;
+              sustained-cpu2) export FLARE_E2E_SUSTAINED=1 FLARE_E2E_SUSTAINED_CPU=2; limit=10800 ;;
+              sustained-nrw) export FLARE_E2E_SUSTAINED=1 FLARE_E2E_SUSTAINED_CPU=2 FLARE_E2E_SUSTAINED_NRW=16; limit=10800 ;;
+              outage) export FLARE_E2E_OUTAGE=1; limit=10800 ;;
+              outage-tmpfs) export FLARE_E2E_OUTAGE_TMPFS=1; limit=10800 ;;
+              scale-2m) export FLARE_E2E_SCALE_KEYS=2000000; limit=10800 ;;
+              scale-6m-mem) export FLARE_E2E_SCALE_KEYS=6000000 FLARE_E2E_SCALE_MEMORY_ONLY=1; limit=5400 ;;
+              scale-6m-mem-cap) export FLARE_E2E_SCALE_KEYS=6000000 FLARE_E2E_SCALE_MEMORY_ONLY=1 FLARE_E2E_SCALE_QUEUE_CAP=200000; limit=5400 ;;
+              scale-2m-cap) export FLARE_E2E_SCALE_KEYS=2000000 FLARE_E2E_SCALE_QUEUE_CAP=100000; limit=10800 ;;
+              scale-15m8) export FLARE_E2E_SCALE_KEYS=15800000; limit=10800 ;;
+              visibility) export FLARE_E2E_VISBENCH=1; limit=7200 ;;
+              reserve-measure) export FLARE_E2E_RESERVE_MEASURE=1 FLARE_E2E_MEASURE_KEYS=20000 FLARE_E2E_MEASURE_VALUE_BYTES=100000 FLARE_E2E_MEASURE_RATE=300; limit=10800 ;;
+              reserve-measure-tmpfs) export FLARE_E2E_RESERVE_MEASURE=1 FLARE_E2E_MEASURE_TMPFS=1 FLARE_E2E_MEASURE_MEMORY=3Gi FLARE_E2E_MEASURE_KEYS=8000 FLARE_E2E_MEASURE_VALUE_BYTES=100000 FLARE_E2E_MEASURE_RATE=300; limit=10800 ;;
+              none) ;;
+              *) echo "Unknown evaluation profile"; exit 1 ;;
+            esac
+          fi
+          timeout --kill-after=30 "$limit" .lake/build/bin/flare_e2e --filter "$SUITES" 2>&1 | tee ../ci-results/e2e.log
+
+      - name: Preserve tested revision and results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-${{ matrix.group }}-${{ inputs.evaluation || 'none' }}-${{ github.run_attempt }}
+          path: ci-results/
+          retention-days: 30
 
       - name: Verify every suite is assigned to a shard
         run: |
           cd flare_operator
           # Union of the matrix groups must equal --list, or a new suite
           # silently never runs. Kept in ONE place here; compare as sets.
-          ALL_GROUPS="failover,read-balance,scale-out-master,scale-out-slave,scale-in-slave,scale-in-master,replace-nodes,cluster-replication,partition-reduction,wal-retention-config,strict-durability,snapshot-push-seed,wal-bandwidth-throttle,wal-incremental-sync,wal-purged-fallback,resync-failure-self-demote,orphan-scan-purge,terminating-pod-handling,failover-during-replication,data-survival-failover,pvc-data-survival,backup-restore,circuit-breaker,operator-restart,topology-authority,replica-repair,prepare-evidence,native-metrics,blue-green-migration"
+          # Single source: the plan job's default matrix. A custom
+          # (suites=...) run still checks the full list.
+          ALL_GROUPS="${{ needs.plan.outputs.all_suites }}"
           LISTED=$(.lake/build/bin/flare_e2e --list | sed -n 's/^  \([a-z0-9-]*\) (.*/\1/p' | sort)
           GROUPED=$(echo "$ALL_GROUPS" | tr ',' '\n' | sort)
           if ! diff <(echo "$LISTED") <(echo "$GROUPED"); then

@@ -37,6 +37,8 @@
 #include "op_orphan_scan.h"
 #include "op_orphan_purge.h"
 #include "op_backup.h"
+#include "op_copy_discard.h"
+#include "op_rebuild_resume.h"
 
 namespace gree {
 namespace flare {
@@ -116,6 +118,7 @@ op* op_parser_text_node::_determine_op(const char* first, const char* buf, int& 
 	} else if (strcmp(first, "flush_all") == 0) {
 		op_flush_all* fa = new op_flush_all(this->_connection, singleton<flared>::instance().get_storage());
 		fa->set_flush_all_enabled(ini_option_object().is_flush_all_enabled());
+		fa->set_cluster(singleton<flared>::instance().get_cluster());
 		r = fa;
 	} else if (strcmp(first, "kill") == 0) {
 		r = new op_kill(this->_connection, singleton<flared>::instance().get_req_thread_pool(), singleton<flared>::instance().get_other_thread_pool());
@@ -145,6 +148,13 @@ op* op_parser_text_node::_determine_op(const char* first, const char* buf, int& 
 			singleton<flared>::instance().get_storage());
 	} else if (strcmp(first, "backup") == 0) {
 		r = new op_backup(this->_connection,
+			singleton<flared>::instance().get_storage());
+	} else if (strcmp(first, "rebuild_resume") == 0) {
+		r = new op_rebuild_resume(this->_connection,
+			singleton<flared>::instance().get_storage());
+	} else if (strcmp(first, "copy_discard") == 0) {
+		r = new op_copy_discard(this->_connection,
+			singleton<flared>::instance().get_cluster(),
 			singleton<flared>::instance().get_storage());
 	} else {
 		r = new op_error(this->_connection);

@@ -1,0 +1,59 @@
+# === Suite: continuous-replication-purge ===
+# Deploying cluster 'cont-repl-purge' in namespace 'flare-cont-repl-purge'
+# Waiting for: namespace flare-cont-repl-purge not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-cont-repl-purge (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap cont-repl-purge-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting 50s grace period for operator reconciliation...
+# Waiting for: replica following and matching (timeout: 120s)
+#   OK after 0s
+# following: state=(some following) applied=(some 24) master latest=(some 24)
+# fault: rejecting 10.244.0.8 ⇄ 10.244.0.9:12121 on flare-e2e-control-plane (both directions)
+# under the cut: 40/40 keys of 100 kB written (master latest 64, replica applied 24); waited 8 s for the WAL purge
+# fault cleared: 10.244.0.8 ⇄ 10.244.0.9 forwards again
+# Waiting for: follower declares needs_rebuild with reason lsn_purged (timeout: 120s)
+#   TIMEOUT after 120s waiting for: follower declares needs_rebuild with reason lsn_purged
+# after the heal: follower state=error reason=apply_error applied=(some 24) items master=60 replica=60
+#   reason: expected needs_rebuild/lsn_purged, got error/apply_error
+# --- diagnostics for failing suite 'continuous-replication-purge' ---
+# Cleaning up cluster 'cont-repl-purge'
+# === Suite: continuous-replication-limits ===
+# Deploying cluster 'cont-repl-limits' in namespace 'flare-cont-repl-limits'
+# Waiting for: namespace flare-cont-repl-limits not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-cont-repl-limits (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap cont-repl-limits-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting 50s grace period for operator reconciliation...
+# Waiting for: replica following and matching (timeout: 120s)
+#   OK after 0s
+# fault: rejecting 10.244.0.12 ⇄ 10.244.0.13:12121 on flare-e2e-control-plane (both directions)
+# backlog under the cut: 300/300 keys of 50 kB, 100/100 deleted; master latest 424, replica applied 24; master RSS 46424 kB → 75992 kB
+# fault cleared: 10.244.0.12 ⇄ 10.244.0.13 forwards again
+# Waiting for: tombstones collected once the position passed the deletes (timeout: 120s)
+#   OK after 0s
+# drain: converged=true; applied 24→424 (master 424); largest 1 s advance 400 seq; master RSS max 75992 kB (growth 29568 kB); tombstones max 0 → now 0 (collected=true); wal_applied=(some 0) tombstones_dropped=(some 100); items master=220 replica=220; reconstruction_started 1→1
+# Cleaning up cluster 'cont-repl-limits'
+# Tests: 4, Failures: 1
+# RESULT: FAIL
+1..4
+ok 1 - precondition: both flags on, retention knobs baked, replica following
+not ok 2 - T6: history purged while cut → the follower declares needs_rebuild (lsn_purged), never synchronised; the operator rebuilds it; it follows again
+ok 3 - precondition: replica following
+ok 4 - T9: a 15 MB backlog with deletes is drained in bounded chunks; master RSS growth measured; tombstones return to zero by position (SC-20)
+EXIT=1

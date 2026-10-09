@@ -60,6 +60,21 @@ namespace flare {
 class storage_rocksdb : public storage {
 public:
 	// Error codes for WAL operations
+	// Outcome of the COMMON APPLY RULE (design §3.3). Both delivery paths —
+	// op-level forwarding and the WAL stream — go through it, so a change
+	// that is not strictly newer than what the key already has is never
+	// applied, whichever path carried it.
+	enum apply_outcome {
+		apply_applied = 0,			// written
+		apply_skipped_superseded,	// the key already holds this or a newer change
+		apply_refused_cursor,		// at or below the applied position: already decided
+		apply_refused_session,		// different source history, or generations unavailable
+		apply_refused_incarnation,
+		apply_refused_stale_follower,	// D7: from a follower that was stopped (overlap after an async stop)	// issued against a copy this node no longer is
+		apply_refused_gap,			// the batch does not continue the applied position: the history between is GONE (or was never served) — rebuild, not retry
+		apply_error,				// storage failure; nothing was written
+	};
+
 	static const int ERR_LSN_PURGED       = -1;
 	static const int ERR_LSN_INVALID      = -2;
 	static const int ERR_LSN_AHEAD        = -3;  // slave's LSN > master's latest
@@ -69,6 +84,28 @@ public:
 	// Defined in the .cc so they link once across TUs.
 	static const char* const kReplLastLsnKey;
 	static const char* const kReplMasterIdKey;
+	static const char* const kReplSourceEpochKey;
+	// Why the current source epoch was minted: "new" (fresh DB), "promotion",
+	// "bulk" (truncate/flush_all) or "inherited" (snapshot restore). Absent on
+	// DBs written before the reason was recorded (read as unknown).
+	static const char* const kReplSourceEpochReasonKey;
+	static const char* const kBulkChainKey;
+	static const char* const kBulkPendingKey;
+	static const size_t kBulkChainKeep = 8;
+	static const char* const kReplIncarnationKey;
+	static const char* const kReplRestoreDoneKey;
+	static const char* const kReplRebuiltFromKey;
+	// R3-D: the evidence of the STORED copy while a rebuild is in progress
+	// (moved here, durably, when an attempt starts; never advertised)
+	static const char* const kReplRebuiltFromSuspendedKey;
+	// Copy retention (docs/design-copy-retention.md §2): the persistent
+	// identity of THIS stored copy, "<uuid>:<generation>". A different copy
+	// (swap, reset, quarantine, a staging copy) gets a new uuid; replacing the
+	// content in place (truncate) bumps the generation. Mirrored in the copy's
+	// directory as COPY_ID (read by the switch recovery before the DB opens).
+	static const char* const kCopyIdKey;
+	// design §6: in data_dir, written BEFORE a corrupt copy is moved aside
+	static const char* const kQuarantineMarkerFile;
 
 	// Return true if key is a reserved replication metadata key.
 	static bool is_reserved_key(const string& key);
@@ -91,6 +128,37 @@ protected:
 	static const type _type = storage::type_rocksdb;
 
 	rocksdb::DB* _db;
+	// REPLICATION METADATA column family (design §3.7): one row per key that
+	// a delivery has been applied to, holding the source epoch, the order
+	// label and whether that label was a delete (a tombstone). Kept out of
+	// the default column family so it never shows up in iteration, dumps,
+	// counts or the key space, and so it can be dropped wholesale when this
+	// copy is replaced. Written ONLY by the apply paths — a master's own
+	// client writes do not need it, and a demoted master rebuilds anyway.
+	rocksdb::ColumnFamilyHandle* _cf_default;
+	rocksdb::ColumnFamilyHandle* _cf_meta;
+	// Serialization between the two delivery paths (design §3.8). The WAL
+	// applier takes this EXCLUSIVELY for decode->decide->write->GC; a
+	// forwarded change takes it SHARED and additionally the key's slot lock.
+	// Lock order everywhere: _repl_apply_lock -> _mutex_wholelock -> slot
+	// locks in ascending index.
+	pthread_rwlock_t _repl_apply_lock;
+	AtomicCounter _repl_forward_applied;
+	AtomicCounter _repl_forward_skipped;
+	AtomicCounter _repl_wal_applied;
+	AtomicCounter _repl_wal_skipped;
+	AtomicCounter _repl_decode_refused;
+	// T17 (2026-10-02): _repl_apply_lock hold and wait times, diagnostic
+	// only. The follower applies a WAL batch holding the lock EXCLUSIVELY;
+	// forwarded (live) writes take it SHARED and wait while a batch applies.
+	AtomicCounter _repl_apply_lock_count;
+	AtomicCounter _repl_apply_lock_hold_us;
+	uint64_t _repl_apply_lock_hold_us_max;
+	uint64_t _repl_apply_lock_wait_us_max;
+	uint64_t _repl_forward_lock_wait_us_max;
+	AtomicCounter _repl_tombstones_dropped;
+	// Resume point for the chunked tombstone sweep.
+	string _tombstone_sweep_cursor;
 	rocksdb::Options _options;
 	rocksdb::WriteOptions _write_options;
 	rocksdb::ReadOptions _read_options;
@@ -116,6 +184,78 @@ protected:
 	// not atomic.
 	mutable pthread_rwlock_t _mutex_master_id;
 	string _master_id;
+	// Generations (design §3.1). Guarded by _mutex_generations; persisted
+	// under the reserved keys above so they survive a restart unchanged.
+	string _source_epoch;
+	string _source_epoch_reason;
+	string _incarnation;
+	// Rebuild evidence: the (master_id, source epoch) of the source this
+	// copy was last rebuilt from by a clean truncate + full dump whose source
+	// identity matched at its start and its end. Empty = no evidence. It says
+	// WHICH HISTORY the copy was rebuilt from; it is not a replication
+	// position and not proof of being in sync. Persisted under
+	// kReplRebuiltFromKey, guarded by _mutex_generations.
+	string _rebuilt_from_master_id;
+	string _rebuilt_from_epoch;
+	string _copy_id;
+	bool _copy_identity_consistent = false;
+	// COPY RETENTION (design §3): this instance is a staging copy at
+	// data_dir/staging-<attempt>, not the live one. It is never in the map,
+	// never read, never a source; only the switch makes it live.
+	bool _staging = false;
+	// capacity (design §9): spec.rocksdb.rebuildReserveBytes; -1 = unset
+	// (staged rebuilds stop). Why the last staged rebuild stopped ("" = not
+	// blocked), for stats.
+	int64_t _rebuild_reserve_bytes = -1;
+	pthread_mutex_t _mutex_rebuild_status;
+	string _rebuild_blocked;
+	uint64_t _staged_switched = 0;
+	uint64_t _staged_abandoned = 0;
+	// design §10 (user decision 2026-10-07, item 3): a blocked staged rebuild
+	// is PARKED — no transfer, no automatic retry — until the operator
+	// resumes it (rebuild_resume) when a slot is free; in_flight = a staged
+	// copy, catch-up or switch is running right now
+	bool _rebuild_parked = false;
+	bool _rebuild_in_flight = false;
+	// design §9 / decision 2026-10-07 item 4: measured peaks, so the reserve
+	// is set from measurements (receiver = staged rebuild, source = serve)
+	struct peak_set {
+		uint64_t data_dir_bytes = 0;		// largest size of the whole data dir seen
+		int64_t memory_bytes = -1;			// largest cgroup memory use seen (-1 = not readable)
+		int64_t min_available = -1;			// smallest rebuild_space_available seen (-1 = none)
+		uint64_t start_data_dir_bytes = 0;	// data dir size when the window began
+		uint64_t samples = 0;
+		uint64_t last_sample_ms = 0;
+	};
+	peak_set _peaks_rebuild;
+	peak_set _peaks_serve;
+	// design §5: a snapshot (serve or push) is being served from this node
+	bool _snapshot_serving = false;
+	// design §6: the live copy is the empty copy left by a quarantine
+	bool _quarantined = false;
+	// review P1: a copy switch that failed and could not be PROVEN resolved
+	// on disk (recovery refused, or the live directory is not the old copy).
+	// Until the next start resolves it: no reopen / create, no further switch,
+	// no destructive reset, not a healthy copy (no reads, not a source, not
+	// promotable). Never cleared in this process.
+	// a LEAF lock: nothing else is taken while it is held (lock order)
+	pthread_mutex_t _mutex_switch_unresolved;
+	bool _switch_unresolved = false;
+	string _switch_unresolved_why;
+	void _mark_switch_unresolved(const string& why);
+	int _finalize_bulk_receipt(const string& pred, const string& succ, const string& epoch);
+	bool _refuse_if_switch_unresolved(const char* who);
+	// the source epoch the staged files carried when opened (a received
+	// checkpoint), read BEFORE generations are initialised; "" = none
+	string _staging_found_epoch;
+	string _suspended_from_master_id;
+	string _suspended_from_epoch;
+	// Set when a generation could not be established or persisted. The
+	// accessors then report "unavailable" and the replication paths refuse:
+	// serving a changed history under an unchanged token is the failure this
+	// guards against.
+	bool _generations_broken;
+	mutable pthread_rwlock_t _mutex_generations;
 
 	// WAL replication observability counters. Read-only after increment;
 	// exposed to `stats` via getter methods below. Incrementing happens
@@ -133,6 +273,15 @@ protected:
 	// Total entries physically reaped by the background expire crawler
 	// (reap_expired) plus the lazy delete-on-get path. Monotonic.
 	AtomicCounter _expire_reaped;
+	// D1 (WSTR-0 audit): physically delete an entry found expired by get()
+	// only on the partition MASTER (its delete reaches replicas through the
+	// WAL). A replica filters the expired value but never deletes it by its
+	// own clock — that would change its data outside the replication
+	// history. Off until the cluster says this node is a master.
+	volatile bool _lazy_expiry_delete;
+	uint64_t _follow_generation;
+	// Expired entries hidden from a read but NOT deleted (replica side).
+	AtomicCounter _expire_filtered;
 
 	// Completed snapshot bootstraps on this node (slave side: a physical
 	// checkpoint reseed replaced the logical full dump). Monotonic.
@@ -148,6 +297,7 @@ protected:
 	// instead of discovering it on a client write.
 	AtomicCounter _corruption_detected;
 	AtomicCounter _hard_reset;
+	AtomicCounter _rebuild_stale_discarded;
 	volatile bool _corrupted;
 
 	// Live (non-reserved) key count, maintained incrementally so `stats`
@@ -209,6 +359,46 @@ protected:
 	// Load or generate the master identity token. Called from open() after
 	// the DB handle is ready. Returns 0 on success, -1 on fatal I/O error.
 	int _load_or_generate_master_id();
+	// Load both generations, initialising them to 1 on a fresh DB. Called
+	// from open() after the master id.
+	int _load_or_init_generations();
+	string _restore_pending_path() const;
+	// 0: nothing to do or discarded cleanly. -1: a half-restored DB is on
+	// disk and could NOT be removed — the caller must not open it.
+	int _discard_incomplete_restore();
+	void _release_snapshot_serve();
+	// marker present and the live copy is the post-quarantine empty copy (or
+	// the crash came before it was recorded)
+	bool _quarantined_now();
+	int _clear_quarantine_marker(const char* why);
+	// exact count of live (non-reserved) keys -> curr_items; logs `why`
+	void _seed_curr_items_by_scan(const char* why);
+	int _persist_generation(const char* key, const string& value);
+	int _clear_rebuilt_from_locked();
+	// Open/close the DB with both column families, creating the metadata one
+	// if the directory does not have it yet (an older DB, or a checkpoint
+	// taken from a node that never applied a delivery).
+	rocksdb::Status _open_db(const string& path);
+	// Per-key replication metadata (design §3.7): "<epoch>|<label>|<0|1>".
+	struct repl_meta {
+		string   epoch;
+		uint64_t label;
+		bool     deleted;
+		repl_meta(): label(0), deleted(false) {}
+	};
+	// 0: found. 1: absent. -1: read error.
+	int _read_repl_meta(const string& key, repl_meta& out);
+	void _stage_repl_meta(rocksdb::WriteBatch& batch, const string& key,
+		const string& epoch, uint64_t label, bool deleted);
+	// The rule itself, with no I/O: given what the key already carries, may a
+	// change with (epoch,label) be applied?
+	apply_outcome _decide_change(const string& epoch, uint64_t label,
+		bool have_meta, const repl_meta& current, uint64_t applied_cursor);
+	void _close_db();
+	static const char* const kReplMetaCfName;
+	// "<n>:<uuid>": n is monotonic within this DB and for humans; the uuid
+	// makes the value unique across DBs and across repeated resets.
+	static string _mint_generation(const string& previous);
 
 public:
 	storage_rocksdb(
@@ -273,6 +463,9 @@ public:
 	// Prepare (wipe + mkdir) the receive-side staging dir and return its
 	// path. Kept inside storage so callers never hand-construct DB paths.
 	int prepare_snapshot_staging(string& out_dir);
+	// Remove the receive staging dir (after a failed or refused bootstrap, so
+	// the fallback full dump does not run next to an abandoned copy).
+	int remove_snapshot_staging(const string& path);
 
 	virtual type get_type() {
 		return this->_type;
@@ -281,7 +474,67 @@ public:
 
 	// RocksDB-specific methods for WAL replication
 	uint64_t get_latest_sequence_number();
-	int get_updates_since(uint64_t seq_number, vector<pair<uint64_t, rocksdb::WriteBatch>>& updates);
+	// Read WAL updates from a sequence. max_batches/max_bytes bound what is
+	// materialised: without them the whole backlog of a far-behind reader is
+	// pulled into memory before a single byte is sent (design §4, condition
+	// 7). 0 means unbounded, which is what the reconstruction path still
+	// asks for. `more` says whether the iterator had further updates.
+	int get_updates_since(uint64_t seq_number, vector<pair<uint64_t, rocksdb::WriteBatch>>& updates,
+		uint64_t max_batches = 0, uint64_t max_bytes = 0, bool* more = NULL);
+	// ---- COMMON APPLY RULE (design §3.3, §3.4, §3.5, §3.8) ----------------
+	// Forwarded delivery of ONE change. Takes the apply lock in SHARED mode
+	// plus this key's slot lock: forwarded changes stay concurrent with one
+	// another and serialized per key, but never overlap the WAL applier's
+	// window. The applied position is read INSIDE that section.
+	virtual int apply_identified_change(const string& tag, entry& e, bool is_delete);
+
+	apply_outcome apply_forwarded_change(const string& source_epoch,
+		const string& incarnation, uint64_t label, entry& e, bool is_delete);
+
+	// WAL delivery of one fetched batch, identified by the sequence RocksDB
+	// gave it. Takes the apply lock EXCLUSIVELY, decodes the batch into
+	// changes, decides each against the key's metadata and the earlier
+	// changes of the same batch, and commits the survivors, their metadata,
+	// the tombstone updates AND the new cursor in one WriteBatch — so a
+	// crash between applying and recording the position cannot happen.
+	// Returns 0 on success (counts filled), -1 when the batch was refused;
+	// `refusal` then says why and nothing was written.
+	int apply_wal_batch(const string& source_epoch, const string& incarnation,
+		uint64_t base_seq, const rocksdb::WriteBatch& batch,
+		uint64_t& applied, uint64_t& skipped, apply_outcome& refusal,
+		uint64_t follow_generation = 0);
+	// D7: every stop/start of the follower bumps the generation; a batch
+	// carrying an older non-zero generation is refused under the apply lock,
+	// so a stopped follower that is still finishing its slice writes nothing.
+	virtual uint64_t bump_follow_generation() { return __sync_add_and_fetch(&this->_follow_generation, 1); }
+	uint64_t get_follow_generation() { return __sync_add_and_fetch(&this->_follow_generation, 0); }
+
+	// Drop tombstones the applied position has passed (design §3.5). Bounded
+	// and resumable: called from inside the applier's window, never as a
+	// long sweep. Returns how many were dropped.
+	uint64_t collect_tombstones(uint64_t budget = 256);
+private:
+	// Same, with _repl_apply_lock already held exclusively.
+	uint64_t _collect_tombstones_locked(uint64_t budget);
+public:
+	uint64_t get_repl_tombstones();
+	// Test-only accessor: lets a unit test build a batch that targets the
+	// replication-metadata family, which is what a source that has applied
+	// deliveries carries in its own WAL.
+	rocksdb::ColumnFamilyHandle* debug_meta_cf() { return this->_cf_meta; }
+
+	uint64_t get_repl_forward_applied()   { return this->_repl_forward_applied.fetch(); }
+	uint64_t get_repl_forward_skipped()   { return this->_repl_forward_skipped.fetch(); }
+	uint64_t get_repl_wal_applied()       { return this->_repl_wal_applied.fetch(); }
+	uint64_t get_repl_wal_skipped()       { return this->_repl_wal_skipped.fetch(); }
+	uint64_t get_repl_decode_refused()    { return this->_repl_decode_refused.fetch(); }
+	uint64_t get_repl_apply_lock_count()   { return this->_repl_apply_lock_count.fetch(); }
+	uint64_t get_repl_apply_lock_hold_us() { return this->_repl_apply_lock_hold_us.fetch(); }
+	uint64_t get_repl_apply_lock_hold_us_max()   { return __sync_fetch_and_add(&this->_repl_apply_lock_hold_us_max, 0); }
+	uint64_t get_repl_apply_lock_wait_us_max()   { return __sync_fetch_and_add(&this->_repl_apply_lock_wait_us_max, 0); }
+	uint64_t get_repl_forward_lock_wait_us_max() { return __sync_fetch_and_add(&this->_repl_forward_lock_wait_us_max, 0); }
+	uint64_t get_repl_tombstones_dropped(){ return this->_repl_tombstones_dropped.fetch(); }
+
 	int apply_batch(const rocksdb::WriteBatch& batch);
 	int apply_batch_with_lsn(const rocksdb::WriteBatch& batch, uint64_t master_lsn);
 	static bool validate_batch_rep(const rocksdb::WriteBatch& batch);
@@ -299,6 +552,133 @@ public:
 	// reference) because the token can be rewritten concurrently by the
 	// reconstruction thread; see _mutex_master_id.
 	string get_master_id() const;
+	string get_source_epoch();
+	string get_source_epoch_reason();
+	string get_incarnation();
+	// Rebuild evidence (see _rebuilt_from_*). clear_rebuilt_from() durably
+	// removes it (0 on success); set_rebuilt_from() durably records it (0 on
+	// success; on failure the evidence stays absent, never half-written).
+	string get_rebuilt_from_master_id();
+	string get_rebuilt_from_epoch();
+	int clear_rebuilt_from();
+	int set_rebuilt_from(const string& master_id, const string& epoch);
+	// R3-D: a rebuild attempt starts — the evidence stops being advertised
+	// (no evidence is visible while the copy may change) but is kept,
+	// durably and separately, as what the STORED copy is, so the protection
+	// rule can still judge it after a restart. Cleared as soon as the stored
+	// copy changes (truncate, swap, merge dump, a change of the local
+	// history) and replaced when new evidence is recorded. 0 on success.
+	string get_copy_id();
+	// false: the reserved key and COPY_ID disagree (or the second write
+	// failed) — not a normal healthy copy (design §2)
+	bool copy_identity_consistent();
+	// new uuid, generation 1 (a different copy); bump = same uuid, +1
+	int new_copy_identity(const char* why);
+	int bump_copy_generation(const char* why);
+	// Replace the live copy with the verified, durable staging copy
+	// data_dir/staging-<attempt> whose COPY_ID is `expected_new_id` (design
+	// §4.1). The old copy is kept as data_dir/retained-<attempt>. 0 on success;
+	// on failure the live copy is whatever the recovery table restores.
+	int switch_to_staging(const string& attempt, const string& expected_new_id);
+	// --- staging (design §3) ---
+	// A new attempt id (also names staging-/retained- directories).
+	static string new_attempt_id();
+	// Open a separate instance on data_dir/staging-<attempt>: a NEW empty
+	// directory (existing_files=false; refused if it exists) or the files a
+	// snapshot transfer just wrote there (existing_files=true). It always gets
+	// a new copy identity. NULL on failure (nothing left behind for a new dir).
+	storage_rocksdb* open_staging(const string& attempt, bool existing_files);
+	// Create the EMPTY directory data_dir/staging-<attempt> (refused if it
+	// exists or is on another filesystem), for a transfer to write into.
+	int make_staging_dir(const string& attempt, string& path);
+	bool is_staging() const { return this->_staging; }
+	void set_rebuild_reserve_bytes(int64_t b) { this->_rebuild_reserve_bytes = b; }
+	int64_t get_rebuild_reserve_bytes() const { return this->_rebuild_reserve_bytes; }
+	void set_rebuild_blocked(const string& why);
+	string get_rebuild_blocked();
+	void note_staged_result(bool switched);
+	bool is_snapshot_serving();
+	void set_rebuild_parked(bool b);
+	bool is_rebuild_parked();
+	// true if it was parked (the next attempt re-checks everything)
+	bool resume_rebuild();
+	void set_rebuild_in_flight(bool b);
+	bool is_rebuild_in_flight();
+	// peaks: start a measurement window, sample (at most once a second unless
+	// forced), read. serve = the source side (snapshot / dump being served).
+	void peaks_begin(bool serve);
+	void peaks_sample(bool serve, bool force = false);
+	void peaks_get(bool serve, uint64_t& data_dir_max, int64_t& memory_max, int64_t& min_available,
+		uint64_t& data_dir_start, uint64_t& samples);
+	bool is_quarantined() const { return this->_quarantined; }
+	// one synchronized snapshot of the flag and its reason
+	bool switch_unresolved_snapshot(string& why);
+	bool is_switch_unresolved() { string w; return this->switch_unresolved_snapshot(w); }
+	// receipts of completed bulks, "<pred> <succ> <epoch>" per line
+	string get_bulk_chain();
+	int recover_bulk_pending();
+	bool has_bulk_pending();
+	bool promotion_forbidden(std::string& why);
+	// decision 2026-10-08: data_dir/copy.partial — the live copy is being (or
+	// was left) changed part-way by a merging dump. Written durably BEFORE the
+	// first change, removed only on confirmed success; survives a crash.
+	int mark_copy_partial(const char* why);
+	int clear_copy_partial(const char* why);
+	bool is_copy_partial();
+	// design §7: an explicit, one-shot approval to discard ONE named copy.
+	// operation: discard-retained | discard-quarantine | discard-before-copy.
+	// request_id is recorded durably BEFORE anything is deleted and with its
+	// result after: the same request id never runs twice (also across a crash
+	// between the two records). discard-before-copy needs `may_discard_live`
+	// (the caller checked this node is neither a master nor an Active slave). `result` is one of
+	// applied, already:<recorded>, refused:<reason>. 0 = answered.
+	int discard_copy(const string& request_id, const string& operation, const string& copy_id,
+		bool may_discard_live, string& result);
+	static const char* const kApprovalsFile;
+	uint64_t get_staged_switched();
+	uint64_t get_staged_abandoned();
+	// The source epoch the staged files carried (received checkpoint), "" if none.
+	string get_staging_found_epoch() const { return this->_staging_found_epoch; }
+	// Staging only: this copy follows (master_id, epoch) from `cursor` on
+	// (epoch "" = a source without epochs: the copy keeps its own) —
+	// drops inherited replication metadata and rebuild evidence, mints a new
+	// incarnation, one synced batch. 0 on success.
+	int adopt_history(const string& master_id, const string& epoch, uint64_t cursor);
+	// Staging only: flush, sync the WAL, close, fsync the copy's directory
+	// and data_dir. After this the copy is durable and closed. 0 on success.
+	int seal();
+	// Remove data_dir/staging-<attempt> (an abandoned attempt). 0 on success.
+	int remove_staging(const string& attempt);
+	// After a switch: record in retained-<attempt> what replaced it (the new
+	// copy id and the source it was verified against). Durable. 0 on success.
+	int record_retained(const string& attempt, const string& master_id, const string& epoch);
+	// Names of retained-* directories present (attempt ids).
+	vector<string> list_retained();
+	// bytes under data_dir entries whose name starts with `prefix`
+	// (retained-, quarantine-, staging-): what the copies kept here take
+	uint64_t bytes_with_prefix(const string& prefix);
+	// Design §8: delete every retained copy whose four conditions hold
+	// (record present; live copy id = the one that replaced it and the
+	// identity is consistent; the read source bound eligible to the recorded
+	// lineage and history; this replica Active in its own map). Returns the
+	// number removed; `report` says why each one was kept.
+	int reap_retained(const string& bound_master_id, const string& bound_epoch, bool bound_eligible, bool own_active, string& report);
+	int suspend_rebuilt_from();
+	int clear_suspended_rebuilt_from();
+	string get_suspended_rebuilt_from_master_id();
+	string get_suspended_rebuilt_from_epoch();
+	// The rule for recording it, stated once: only a clean rebuild (the
+	// local copy was truncated first) whose dump succeeded, from a source
+	// that advertised a non-empty identity that did not change between the
+	// start and the end of the dump.
+	static bool rebuild_evidence_valid(bool truncated, bool dump_ok,
+		const string& start_master_id, const string& start_epoch,
+		const string& end_master_id, const string& end_epoch);
+	// Mint, persist and publish a fresh identity. 0 on success; on failure
+	// the generations become UNAVAILABLE (fail closed) and -1 is returned.
+	int advance_source_epoch(const char* reason = "unspecified");
+	int advance_incarnation();
+	bool generations_broken() const;
 	int set_master_id(const string& id);
 	// Mint and persist a brand-new master_id (fresh UUID). Called at
 	// promotion to master when this node carries a replication cursor from a
@@ -321,10 +701,26 @@ public:
 	uint64_t get_wal_sync_crc_mismatch()      { return this->_wal_sync_crc_mismatch.fetch(); }
 	uint64_t get_wal_fallback_to_dump()       { return this->_wal_fallback_to_dump.fetch(); }
 	uint64_t get_expire_reaped()              { return this->_expire_reaped.fetch(); }
+	virtual void set_lazy_expiry_delete(bool on) { this->_lazy_expiry_delete = on; }
+	bool get_lazy_expiry_delete() const       { return this->_lazy_expiry_delete; }
+	uint64_t get_expire_filtered()            { return this->_expire_filtered.fetch(); }
 	uint64_t get_snapshot_bootstrap()         { return this->_snapshot_bootstrap.fetch(); }
 	void incr_snapshot_bootstrap()            { this->_snapshot_bootstrap.incr(); }
 	uint64_t get_corruption_detected()        { return this->_corruption_detected.fetch(); }
 	uint64_t get_hard_reset()                 { return this->_hard_reset.fetch(); }
+	uint64_t get_rebuild_stale_discarded()    { return this->_rebuild_stale_discarded.fetch(); }
+	void incr_rebuild_stale_discarded()       { this->_rebuild_stale_discarded.incr(); }
+	// SPACE-AWARE REBUILD. A physical reseed stages the incoming copy next to
+	// the local one, so a rebuild in place needs room for two copies; on tmpfs
+	// that room is RAM counted against the container's memory limit.
+	// Bytes of the local DB directory (the estimate of the incoming copy).
+	uint64_t local_copy_bytes();
+	// Bytes free for a staging copy: free space under the data dir and, when
+	// the data dir is tmpfs, the smaller of that and the cgroup memory
+	// headroom (limit - current usage, which includes the tmpfs pages and
+	// flared). No fixed margin: the configured reserve covers flared's growth.
+	// -1 = unknown (no decision possible).
+	int64_t rebuild_space_available();
 	// True once a Corruption status has been seen on a write path; latched
 	// until a successful hard_reset()/reopen clears it.
 	bool is_corrupted()                       { return this->_corrupted; }
@@ -338,6 +734,11 @@ public:
 	// (only a SLAVE / a reconstructing node), because it discards all local
 	// data unconditionally — reconstruction reseeds it afterwards.
 	int hard_reset();
+	// R3-D: a CORRUPT copy is not proof that nothing valuable is in it. Move
+	// it aside (data dir / quarantine-<time>-<pid>) instead of deleting it,
+	// then reopen empty. If it cannot be moved aside, NOTHING is deleted and
+	// -1 is returned (the caller stops). `moved_to` names where it went.
+	int quarantine_reset(string& moved_to);
 
 protected:
 	// Latch corruption from a write-path status. Returns status.ok() so call

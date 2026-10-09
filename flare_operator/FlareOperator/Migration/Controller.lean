@@ -228,6 +228,15 @@ private def execAction (mig : MigCR) (crName ns : String) (act : MigAction)
         match ← applyManifest m with
         | .error e => return .error s!"target provisioning failed: {e}"
         | .ok () => pure ()
+      -- SAF-09: provisioning IS the decision to build a new cluster, so it
+      -- approves the target's first build — bound to the target
+      -- FlareCluster's own UID (a recreated CR is not approved).
+      match ← kubectl ["get", "flarecluster", target, "-n", ns, "-o", "jsonpath={.metadata.uid}"] with
+      | .ok uid =>
+        if !uid.trim.isEmpty then
+          discard <| kubectl ["annotate", "flarecluster", target, "-n", ns, "--overwrite",
+            s!"flare.gree.net/first-build-approved={uid.trim}"]
+      | .error e => IO.eprintln s!"[flare-operator] migration: could not approve the first build of {target} ({e}); its operator will wait for approval"
       return .ok s!"target cluster {target} provisioned ({plan.partitions}p x {plan.replicas}r, image {plan.flaredImage})"
   | .startDuplicate =>
     let dest := s!"{target}-nodes.{ns}.svc.cluster.local"

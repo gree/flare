@@ -45,6 +45,10 @@ noinst_LTLIBRARIES =	\
 	test_op_shutdown.la	\
 	test_op_stats.la	\
 	test_stats_reconstruction.la	\
+	test_source_eligibility.la	\
+	test_copy_protection.la	\
+	test_copy_switch.la	\
+	test_signal_interrupt.la	\
 	test_op_touch.la	\
 	test_op_verbosity.la	\
 	test_op_version.la	\
@@ -96,7 +100,7 @@ if ENABLE_KYOTOCABINET
 test_storage_kch_la_SOURCES	= test_storage_kch.cc common_storage_tests.cc
 endif
 if ENABLE_ROCKSDB
-test_storage_rocksdb_la_SOURCES	= test_storage_rocksdb.cc common_storage_tests.cc
+test_storage_rocksdb_la_SOURCES	= test_storage_rocksdb.cc common_storage_tests.cc connection_iostream.cc mock_storage.cc
 endif
 test_key_resolver_modular_la_SOURCES	= test_key_resolver_modular.cc
 test_op_la_SOURCES	= test_op.cc connection_iostream.cc
@@ -132,6 +136,10 @@ test_op_show_la_SOURCES	= test_op_show.cc connection_iostream.cc
 test_op_shutdown_la_SOURCES	= test_op_shutdown.cc connection_iostream.cc
 test_op_stats_la_SOURCES	= test_op_stats.cc connection_iostream.cc
 test_stats_reconstruction_la_SOURCES	= test_stats_reconstruction.cc
+test_source_eligibility_la_SOURCES	= test_source_eligibility.cc
+test_copy_protection_la_SOURCES	= test_copy_protection.cc
+test_copy_switch_la_SOURCES	= test_copy_switch.cc
+test_signal_interrupt_la_SOURCES	= test_signal_interrupt.cc
 test_op_touch_la_SOURCES	= test_op_touch.cc connection_iostream.cc
 test_op_verbosity_la_SOURCES	= test_op_verbosity.cc connection_iostream.cc
 test_op_version_la_SOURCES	= test_op_version.cc connection_iostream.cc

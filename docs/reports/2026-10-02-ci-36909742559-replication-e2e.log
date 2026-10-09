@@ -1,0 +1,335 @@
+# === Suite: cluster-replication ===
+# Cleaning up cluster 'repl-v1'
+# Cleaning up cluster 'repl-v2'
+# Deploying cluster 'repl-v1' in namespace 'flare-repl-v1'
+# Waiting for: namespace flare-repl-v1 not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-repl-v1 (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap repl-v1-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting for StatefulSet repl-v1-nodes to be ready...
+# Waiting for: all 4 pods ready (timeout: 180s)
+#   OK after 0s
+# Waiting for: 4 nodes registered (timeout: 300s)
+#   OK after 0s
+# Waiting 50s grace period for operator reconciliation...
+# Checking operator activity...
+# --- Operator logs (flare-operator-repl-v1) ---
+#   [flare-operator] continuous-replication probe: 1 stats read(s) in 170ms (tick 7; in-mode remembered: 0, out-of-mode remembered: 1)
+#   [flare-operator] grace period: 65s remaining
+#   [TopologyAudit] node=repl-v1-nodes-2.repl-v1-nodes.flare-repl-v1.svc.cluster.local:12121 uid=(some 769145f7-deff-42da-8d1c-de8f43897b9b) desired=4294967318 reported=(some 4294967318) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1823ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 58s remaining
+#   [TopologyAudit] node=repl-v1-nodes-1.repl-v1-nodes.flare-repl-v1.svc.cluster.local:12121 uid=(some 7f647fea-364e-43e7-8874-748a1dfe2272) desired=4294967318 reported=(some 4294967318) verdict=current
+#   [flare-operator] replica repair ledger initialized from repl-v1-nodes-1.repl-v1-nodes.flare-repl-v1.svc.cluster.local:12121: 0 destination counter(s) recorded as baseline, none attributed
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 2794ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 50s remaining
+#   [TopologyAudit] node=repl-v1-nodes-0.repl-v1-nodes.flare-repl-v1.svc.cluster.local:12121 uid=(some c2106a8a-d919-4186-a6e2-78015be3cd2e) desired=4294967318 reported=(some 4294967318) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1714ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 43s remaining
+#   [TopologyAudit] node=repl-v1-nodes-3.repl-v1-nodes.flare-repl-v1.svc.cluster.local:12121 uid=(some 2e61a1c8-1c24-4a90-9767-66bf0214f5c0) desired=4294967318 reported=(some 4294967318) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1728ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 36s remaining
+#   [TopologyAudit] node=repl-v1-nodes-2.repl-v1-nodes.flare-repl-v1.svc.cluster.local:12121 uid=(some 769145f7-deff-42da-8d1c-de8f43897b9b) desired=4294967318 reported=(some 4294967318) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1805ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 29s remaining
+#   [TopologyAudit] node=repl-v1-nodes-1.repl-v1-nodes.flare-repl-v1.svc.cluster.local:12121 uid=(some 7f647fea-364e-43e7-8874-748a1dfe2272) desired=4294967318 reported=(some 4294967318) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1781ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 22s remaining
+#   [TopologyAudit] node=repl-v1-nodes-0.repl-v1-nodes.flare-repl-v1.svc.cluster.local:12121 uid=(some c2106a8a-d919-4186-a6e2-78015be3cd2e) desired=4294967318 reported=(some 4294967318) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 2098ms (nodes=4 M=2 S=2 D=0 P=0)
+#   
+# Deploying second cluster 'repl-v2'
+# Waiting for StatefulSet repl-v2-nodes to be ready...
+# Waiting for: all 2 pods ready (timeout: 180s)
+#   OK after 0s
+# Waiting for: 2 nodes registered (timeout: 300s)
+#   OK after 0s
+# Waiting 50s grace period for operator reconciliation...
+# Checking operator activity...
+# --- Operator logs (flare-operator-repl-v2) ---
+#   [DEBUG] Sending response: NODE repl-v2-nodes-1.repl-v2-nodes.flare-repl-v2.svc.cluster.local 12121 1 0 0 0 17 | NODE repl-v2-nodes-0.repl-v2-nodes.flare-repl-v2.svc.cluster.local 12121 0 0 0 100 16 | END | 
+#   [flare-operator] continuous-replication probe: 1 stats read(s) in 163ms (tick 5; in-mode remembered: 0, out-of-mode remembered: 0)
+#   [flare-operator] grace period: 82s remaining
+#   [TopologyAudit] node=repl-v2-nodes-0.repl-v2-nodes.flare-repl-v2.svc.cluster.local:12121 uid=(some cb5720c5-923e-40bf-9f44-de2b661acf7e) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 2012ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 75s remaining
+#   [TopologyAudit] node=repl-v2-nodes-1.repl-v2-nodes.flare-repl-v2.svc.cluster.local:12121 uid=(some 2c7a2d39-e2ea-4f66-b0d4-a0f8fff527cf) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1805ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 68s remaining
+#   [TopologyAudit] node=repl-v2-nodes-0.repl-v2-nodes.flare-repl-v2.svc.cluster.local:12121 uid=(some cb5720c5-923e-40bf-9f44-de2b661acf7e) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 2092ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 60s remaining
+#   [TopologyAudit] node=repl-v2-nodes-1.repl-v2-nodes.flare-repl-v2.svc.cluster.local:12121 uid=(some 2c7a2d39-e2ea-4f66-b0d4-a0f8fff527cf) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1719ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 53s remaining
+#   [TopologyAudit] node=repl-v2-nodes-0.repl-v2-nodes.flare-repl-v2.svc.cluster.local:12121 uid=(some cb5720c5-923e-40bf-9f44-de2b661acf7e) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1809ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 46s remaining
+#   [TopologyAudit] node=repl-v2-nodes-1.repl-v2-nodes.flare-repl-v2.svc.cluster.local:12121 uid=(some 2c7a2d39-e2ea-4f66-b0d4-a0f8fff527cf) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1628ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 39s remaining
+#   [TopologyAudit] node=repl-v2-nodes-0.repl-v2-nodes.flare-repl-v2.svc.cluster.local:12121 uid=(some cb5720c5-923e-40bf-9f44-de2b661acf7e) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1888ms (nodes=2 M=1 S=1 D=0 P=0)
+#   
+# wrote 30/30 shrink keys + 1 canary to v1 (2 partitions)
+# Waiting for: migrationPhase=Dumping (timeout: 60s)
+#   OK after 5s
+# Waiting for: extra.conf has cluster-replication=true (timeout: 60s)
+#   OK after 0s
+# Waiting for: stats cluster_replication on/duplicate (timeout: 120s)
+#   OK after 75s
+# Waiting for: all 30 keys on v2 (timeout: 180s)
+#   OK after 0s
+# v2 after shrink: 30/30 keys present, 0 mismatched
+# Waiting for: migrationPhase=Forwarding (timeout: 120s)
+#   OK after 10s
+# Waiting for: extra.conf mode=forward (timeout: 60s)
+#   OK after 0s
+# Cleaning up cluster 'repl-v1'
+# Cleaning up cluster 'repl-v2'
+# === Suite: wal-retention-config ===
+# Cleaning up cluster 'wal-retention'
+# Deploying cluster 'wal-retention' in namespace 'flare-wal-retention'
+# Waiting for: namespace flare-wal-retention not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-wal-retention (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap wal-retention-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting for StatefulSet wal-retention-nodes to be ready...
+# Waiting for: all 4 pods ready (timeout: 180s)
+#   OK after 0s
+# Waiting for: 4 nodes registered (timeout: 300s)
+#   OK after 0s
+# Waiting 50s grace period for operator reconciliation...
+# Checking operator activity...
+# --- Operator logs (flare-operator-wal-retention) ---
+#   [flare-operator] topology changed (v4294967313 → v4294967313), broadcasting
+#   [TopologyBroadcast] Broadcasting node sync v4294967313 (4 nodes) to 4 pods
+#   [TcpClient] node sync v4294967313 to 10.244.0.21:12121: reply-confirmed=true
+#   [TcpClient] node sync v4294967313 to 10.244.0.20:12121: reply-confirmed=true
+#   [TcpClient] node sync v4294967313 to 10.244.0.22:12121: reply-confirmed=true
+#   [TcpClient] node sync v4294967313 to 10.244.0.19:12121: reply-confirmed=true
+#   [TopologyBroadcast] Broadcast attempt complete (v4294967313); all targets reply-confirmed=true
+#   [flare-operator] replica repair ledger initialized from wal-retention-nodes-2.wal-retention-nodes.flare-wal-retention.svc.cluster.local:12121: 0 destination counter(s) recorded as baseline, none attributed
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 3525ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 66s remaining
+#   [TopologyAudit] node=wal-retention-nodes-1.wal-retention-nodes.flare-wal-retention.svc.cluster.local:12121 uid=(some 04b38e09-4d91-475d-a35e-477875b4a723) desired=4294967313 reported=(some 4294967313) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1722ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 59s remaining
+#   [TopologyAudit] node=wal-retention-nodes-2.wal-retention-nodes.flare-wal-retention.svc.cluster.local:12121 uid=(some 1552e6cf-5a97-4df4-8f26-632ead799046) desired=4294967313 reported=(some 4294967313) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1767ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 52s remaining
+#   [TopologyAudit] node=wal-retention-nodes-0.wal-retention-nodes.flare-wal-retention.svc.cluster.local:12121 uid=(some 25cc46bd-1f47-436c-a8cd-730237936a8d) desired=4294967313 reported=(some 4294967313) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1743ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 45s remaining
+#   [TopologyAudit] node=wal-retention-nodes-3.wal-retention-nodes.flare-wal-retention.svc.cluster.local:12121 uid=(some eb4eaf1a-b8b1-4074-8413-e2552608e654) desired=4294967313 reported=(some 4294967313) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 2030ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 38s remaining
+#   [TopologyAudit] node=wal-retention-nodes-1.wal-retention-nodes.flare-wal-retention.svc.cluster.local:12121 uid=(some 04b38e09-4d91-475d-a35e-477875b4a723) desired=4294967313 reported=(some 4294967313) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1715ms (nodes=4 M=2 S=2 D=0 P=0)
+#   
+# Cleaning up cluster 'wal-retention'
+# === Suite: strict-durability ===
+# Cleaning up cluster 'strict-durability'
+# Deploying cluster 'strict-durability' in namespace 'flare-strict-dur'
+# Waiting for: namespace flare-strict-dur not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-strict-dur (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap strict-durability-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting for StatefulSet strict-durability-nodes to be ready...
+# Waiting for: all 4 pods ready (timeout: 180s)
+#   OK after 0s
+# Waiting for: 4 nodes registered (timeout: 300s)
+#   OK after 0s
+# Waiting 50s grace period for operator reconciliation...
+# Checking operator activity...
+# --- Operator logs (flare-operator-strict-dur) ---
+#   [flare-operator] broadcast trigger: versionMoved=false pending=v4294967313 repairHeld=0 activeNotReady=0
+#   [flare-operator] topology changed (v4294967313 → v4294967313), broadcasting
+#   [TopologyBroadcast] Broadcasting node sync v4294967313 (4 nodes) to 4 pods
+#   [TcpClient] node sync v4294967313 to 10.244.0.28:12121: reply-confirmed=true
+#   [TcpClient] node sync v4294967313 to 10.244.0.27:12121: reply-confirmed=true
+#   [TcpClient] node sync v4294967313 to 10.244.0.26:12121: reply-confirmed=true
+#   [TcpClient] node sync v4294967313 to 10.244.0.25:12121: reply-confirmed=true
+#   [TopologyBroadcast] Broadcast attempt complete (v4294967313); all targets reply-confirmed=true
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 2966ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 74s remaining
+#   [TopologyAudit] node=strict-durability-nodes-3.strict-durability-nodes.flare-strict-dur.svc.cluster.local:12121 uid=(some 41d7a4a5-0486-4875-ab9e-cd0626e1773b) desired=4294967313 reported=(some 4294967313) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1822ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 67s remaining
+#   [TopologyAudit] node=strict-durability-nodes-1.strict-durability-nodes.flare-strict-dur.svc.cluster.local:12121 uid=(some 1f6b9fc0-eea6-46ab-ad64-62c08b72ac37) desired=4294967313 reported=(some 4294967313) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1724ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 60s remaining
+#   [TopologyAudit] node=strict-durability-nodes-2.strict-durability-nodes.flare-strict-dur.svc.cluster.local:12121 uid=(some d1e4bbd2-272f-41bc-a386-c1a0cb96b84d) desired=4294967313 reported=(some 4294967313) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1789ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 53s remaining
+#   [TopologyAudit] node=strict-durability-nodes-0.strict-durability-nodes.flare-strict-dur.svc.cluster.local:12121 uid=(some 956b54fe-8cb1-48f7-8e06-0074050b7a30) desired=4294967313 reported=(some 4294967313) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 2101ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 46s remaining
+#   [TopologyAudit] node=strict-durability-nodes-3.strict-durability-nodes.flare-strict-dur.svc.cluster.local:12121 uid=(some 41d7a4a5-0486-4875-ab9e-cd0626e1773b) desired=4294967313 reported=(some 4294967313) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1801ms (nodes=4 M=2 S=2 D=0 P=0)
+#   
+# Cleaning up cluster 'strict-durability'
+# === Suite: continuous-replication-purge ===
+# Deploying cluster 'cont-repl-purge' in namespace 'flare-cont-repl-purge'
+# Waiting for: namespace flare-cont-repl-purge not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-cont-repl-purge (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap cont-repl-purge-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting 50s grace period for operator reconciliation...
+# Waiting for: replica following and matching (timeout: 120s)
+#   OK after 0s
+# following: state=(some following) applied=(some 24) master latest=(some 24)
+# fault: rejecting 10.244.0.31 ⇄ 10.244.0.32:12121 on flare-e2e-control-plane (both directions)
+# under the cut: 40/40 keys of 100 kB written (master latest 64, replica applied 24); waited 8 s for the WAL purge
+# fault cleared: 10.244.0.31 ⇄ 10.244.0.32 forwards again
+# Waiting for: follower declares needs_rebuild with reason lsn_purged (timeout: 120s)
+#   OK after 0s
+# after the heal: follower state=needs_rebuild reason=lsn_purged applied=(some 24) items master=60 replica=60 decode_refused=(some 0)
+# --- replica follower lines (filtered) ---
+[139746767877824][NTC][stats.cc:276-follow_set_state] replication follow state: disconnected — peer_unreachable
+[139746767877824][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+[139746767877824][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+[139746767877824][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+[139746767877824][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+[139746767877824][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+[139746767877824][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+[139746767877824][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+[139746767877824][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+[139746767877824][WRN][connection_tcp.cc:156-_open] connect() failed: Connection refused (111) -> wait for 500000 usec
+[139746767877824][NTC][op_repl_sync_wal.cc:472-_parse_text_client_parameters] master reports lsn_purged -> full dump required
+[139746767877824][NTC][stats.cc:276-follow_set_state] replication follow state: needs_rebuild — lsn_purged
+
+# --- master WAL-serve lines (filtered) ---
+[140355593590464][NTC][op_repl_sync_wal.cc:242-_run_server] LSN 24 is no longer served: the oldest WAL batch available is 45 -> lsn_purged (slave needs a rebuild)
+
+# Waiting for: operator files a repair request for the follower (timeout: 150s)
+#   OK after 15s
+# Waiting for: follower reconstructed and following at the master's position (timeout: 480s)
+#   OK after 20s
+# triggers: master dropped 0→0 forward(s); drop-route request logged=false; follower-route request logged=true; most ledger entries at once=1
+# rebuild: requested=true; reconstruction_started 1→2; state=(some following); items master=60 replica=60; wal_fallback_to_dump=(some 1) snapshot_bootstrap=(some 2); pod uid 479ea629-945a-4bc3-8275-ac9319cdfad6→479ea629-945a-4bc3-8275-ac9319cdfad6
+# Waiting for: ledger empty (timeout: 240s)
+#   OK after 0s
+# after the ledger emptied (+30 s): reconstruction_started 1→2, completed 1→2
+# NOTE: the master counted no dropped forwards during the cut; only the follower route fired, so this run does not show the concurrent case
+# Cleaning up cluster 'cont-repl-purge'
+# === Suite: continuous-replication-limits ===
+# Deploying cluster 'cont-repl-limits' in namespace 'flare-cont-repl-limits'
+# Waiting for: namespace flare-cont-repl-limits not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-cont-repl-limits (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap cont-repl-limits-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting 50s grace period for operator reconciliation...
+# Waiting for: replica following and matching (timeout: 120s)
+#   OK after 0s
+# fault: rejecting 10.244.0.35 ⇄ 10.244.0.36:12121 on flare-e2e-control-plane (both directions)
+# backlog under the cut: 300/300 keys of 50 kB, 100/100 deleted; master latest 424, replica applied 24; master RSS 33780 kB → 63736 kB
+# fault cleared: 10.244.0.35 ⇄ 10.244.0.36 forwards again
+# Waiting for: tombstones collected once the position passed the deletes (timeout: 120s)
+#   OK after 0s
+# drain: converged=true; applied 24→424 (master 424); largest 1 s advance 400 seq; master RSS max 63736 kB (growth 29956 kB); tombstones max 100 → now 0 (collected=true); wal_applied=(some 0) tombstones_dropped=(some 100); items master=220 replica=220; reconstruction_started 1→1
+# fault: rejecting 10.244.0.35 ⇄ 10.244.0.36:12121 on flare-e2e-control-plane (both directions)
+# under the cut: stored 50/50 on the master; items master=270 replica=220
+# fault cleared: 10.244.0.35 ⇄ 10.244.0.36 forwards again
+# Waiting for: failover promotes the lagged follower (timeout: 240s)
+#   OK after 10s
+# failover: promoted=true; NOT LOSS-FREE logged=false; items old master=270 new master=222 (gap 48)
+#   reason: the lagged follower was promoted without the NOT LOSS-FREE line
+# --- diagnostics for failing suite 'continuous-replication-limits' ---
+# Cleaning up cluster 'cont-repl-limits'
+# Tests: 27, Failures: 1
+# RESULT: FAIL
+1..27
+ok 1 - write test data to v1
+ok 2 - trigger cluster replication via CRD patch
+ok 3 - migrationPhase transitions to Dumping
+ok 4 - ConfigMap contains cluster-replication settings
+ok 5 - flared stats report the APPLIED replication state (drift observable)
+ok 6 - all 30 keys migrate to v2 via the duplicate-mode dump
+ok 7 - v2 slave converges too (foreign-marked stream not hoarded)
+ok 8 - user patches mode=forward to advance
+ok 9 - migrationPhase transitions to Forwarding
+ok 10 - ConfigMap updated to forward mode
+ok 11 - disable renders an explicit cluster-replication = false (not removal)
+ok 12 - pre-flight: ConfigMap exists with extra.conf key
+ok 13 - patch spec.rocksdb.walTtlSeconds is propagated to ConfigMap
+ok 14 - patch spec.rocksdb.walSizeLimitMb is propagated to ConfigMap
+ok 15 - updating walTtlSeconds triggers re-render
+ok 16 - memory knobs survive CR admission and reach extra.conf (restart required)
+ok 17 - flared is running with RocksDB backend
+ok 18 - pre-flight: ConfigMap exists with extra.conf key
+ok 19 - patch spec.rocksdb.syncWrites=true is propagated
+ok 20 - patching syncWrites=false cleanly replaces stale value
+ok 21 - syncWrites + walTtlSeconds coexist in extra.conf
+ok 22 - flared is running with RocksDB backend
+ok 23 - precondition: both flags on, retention knobs baked, replica following
+ok 24 - T6: history purged while cut → the follower declares needs_rebuild (lsn_purged), never synchronised; the operator rebuilds it; it follows again
+ok 25 - precondition: replica following
+ok 26 - T9: a 15 MB backlog with deletes is drained in bounded chunks; master RSS growth measured; tombstones return to zero by position (SC-20)
+not ok 27 - lagged successor: the master is lost while its follower is cut off and behind; failover promotes it as not loss-free, logs that, and the gap is the writes it never received

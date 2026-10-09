@@ -28,6 +28,9 @@
  */
 #include "stats.h"
 #include <stdlib.h>
+#include <fcntl.h>
+#include <time.h>
+#include <unistd.h>
 
 namespace gree {
 namespace flare {
@@ -49,6 +52,12 @@ stats::stats():
 		_reconstruction_started(0),
 		_reconstruction_completed(0),
 		_reconstruction_failed(0),
+		_follow_enabled(false),
+		_follow_state(follow_idle),
+		_follow_applied_lsn(0),
+		_follow_source_lsn(0),
+		_follow_source_lsn_observed_at(0),
+		_follow_last_progress_at(0),
 		_reconstruction_boot_id(0),
 		_reconstruction_current_id(0),
 		_reconstruction_current_state(0),
@@ -70,11 +79,32 @@ stats::stats():
 		_total_thread_queue(0) {
 	pthread_mutex_init(&this->_mutex_proxy_write_dropped_by_dest, NULL);
 	pthread_mutex_init(&this->_mutex_reconstruction, NULL);
-	// Random per process; combined with time so two processes started in the
-	// same second still differ. Never persisted.
+	pthread_mutex_init(&this->_mutex_follow, NULL);
+	// Unique per process. The operator binds evidence and drop counters to
+	// it per node, so a restarted process must never repeat its
+	// predecessor's value. The former time<<32 ^ pid<<16 ^ random() did:
+	// random() is never seeded and a container's pid repeats, so a restart
+	// within the same second (or two pods started in the same second, CI
+	// 37438962871) gave the same id. Read from the kernel's CSPRNG; if that
+	// fails, mix nanosecond time, pid and an address. Masked to 62 bits so
+	// it stays inside the signed range JSON/Kubernetes integers keep exactly
+	// (the operator stores it in the CR status). Never persisted.
 	{
-		uint64_t r = (uint64_t)time(NULL) << 32;
-		r ^= ((uint64_t)getpid() << 16) ^ (uint64_t)random();
+		uint64_t r = 0;
+		int fd = open("/dev/urandom", O_RDONLY);
+		if (fd >= 0) {
+			if (read(fd, &r, sizeof(r)) != (ssize_t)sizeof(r)) {
+				r = 0;
+			}
+			close(fd);
+		}
+		if (r == 0) {
+			struct timespec ts;
+			clock_gettime(CLOCK_REALTIME, &ts);
+			r = ((uint64_t)ts.tv_sec * 1000000007ULL) ^ ((uint64_t)ts.tv_nsec << 20)
+				^ ((uint64_t)getpid() << 40) ^ (uint64_t)(uintptr_t)this;
+		}
+		r &= 0x3fffffffffffffffULL;
 		if (r == 0) r = 1;
 		this->_reconstruction_boot_id = r;
 	}
@@ -228,6 +258,85 @@ int stats::reconstruction_aborted_by_shutdown(uint64_t id) {
 	pthread_mutex_unlock(&this->_mutex_reconstruction);
 	return 0;
 }
+namespace {
+	const char* _follow_state_name(int st) {
+		switch (st) {
+			case stats::follow_initial_sync:  return "initial_sync";
+			case stats::follow_following:     return "following";
+			case stats::follow_disconnected:  return "disconnected";
+			case stats::follow_needs_rebuild: return "needs_rebuild";
+			case stats::follow_error:         return "error";
+			default:                          return "idle";
+		}
+	}
+}
+
+stats::follow_record stats::get_follow_record() {
+	follow_record r;
+	pthread_mutex_lock(&this->_mutex_follow);
+	r.enabled = this->_follow_enabled;
+	r.source = this->_follow_source;
+	r.source_epoch = this->_follow_source_epoch;
+	r.state = _follow_state_name(this->_follow_state);
+	r.last_reason = this->_follow_last_reason;
+	r.applied_lsn = this->_follow_applied_lsn;
+	r.source_lsn = this->_follow_source_lsn;
+	r.source_lsn_observed_at = this->_follow_source_lsn_observed_at;
+	r.last_progress_at = this->_follow_last_progress_at;
+	pthread_mutex_unlock(&this->_mutex_follow);
+	return r;
+}
+
+int stats::follow_set_state(follow_state st, const string& reason) {
+	pthread_mutex_lock(&this->_mutex_follow);
+	const bool changed = (this->_follow_state != static_cast<int>(st));
+	this->_follow_state = st;
+	if (!reason.empty() || st == follow_following || st == follow_idle) {
+		this->_follow_last_reason = reason;
+	}
+	pthread_mutex_unlock(&this->_mutex_follow);
+	if (changed) {
+		log_notice("replication follow state: %s%s%s", _follow_state_name(st),
+			reason.empty() ? "" : " — ", reason.c_str());
+	}
+	return 0;
+}
+
+int stats::follow_set_source(const string& source, const string& source_epoch) {
+	pthread_mutex_lock(&this->_mutex_follow);
+	this->_follow_source = source;
+	this->_follow_source_epoch = source_epoch;
+	pthread_mutex_unlock(&this->_mutex_follow);
+	return 0;
+}
+
+int stats::follow_note_progress(uint64_t applied_lsn) {
+	pthread_mutex_lock(&this->_mutex_follow);
+	if (applied_lsn > this->_follow_applied_lsn) {
+		this->_follow_applied_lsn = applied_lsn;
+		this->_follow_last_progress_at = this->get_timestamp();
+	}
+	pthread_mutex_unlock(&this->_mutex_follow);
+	return 0;
+}
+
+int stats::follow_set_enabled(bool enabled) {
+	pthread_mutex_lock(&this->_mutex_follow);
+	this->_follow_enabled = enabled;
+	pthread_mutex_unlock(&this->_mutex_follow);
+	return 0;
+}
+
+int stats::follow_note_source_position(uint64_t source_lsn) {
+	pthread_mutex_lock(&this->_mutex_follow);
+	this->_follow_source_lsn = source_lsn;
+	// A position without the time it was observed cannot be acted on, so the
+	// two are always written together.
+	this->_follow_source_lsn_observed_at = this->get_timestamp();
+	pthread_mutex_unlock(&this->_mutex_follow);
+	return 0;
+}
+
 stats::reconstruction_record stats::get_reconstruction_record() {
 	reconstruction_record r;
 	pthread_mutex_lock(&this->_mutex_reconstruction);

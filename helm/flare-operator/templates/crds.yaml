@@ -99,6 +99,21 @@ spec:
                     cluster ConfigMap when explicitly set. See
                     ROCKSDB_REPLICATION.md for semantics.
                   properties:
+                    blockCacheSizeMb:
+                      type: integer
+                      minimum: 1
+                      maximum: 1048576
+                      description: Block cache size in MiB (rocksdb-block-cache-size-mb). Requires flared restart; not a total memory limit.
+                    writeBufferSizeMb:
+                      type: integer
+                      minimum: 1
+                      maximum: 1048576
+                      description: Per-memtable size in MiB (rocksdb-write-buffer-size-mb). Requires flared restart; each column family has write buffers.
+                    maxWriteBufferNumber:
+                      type: integer
+                      minimum: 2
+                      maximum: 2147483647
+                      description: Maximum write buffers per column family (rocksdb-max-write-buffer-number). Requires flared restart.
                     walTtlSeconds:
                       type: integer
                       minimum: 0
@@ -133,6 +148,47 @@ spec:
                     flushAllEnabled:
                       type: boolean
                       description: Administrative gate for the unauthenticated flush_all op (flared flush-all-enabled; false = refuse with SERVER_ERROR; hot-toggleable)
+                    replIdentityForward:
+                      type: boolean
+                      description: >-
+                        Continuous replication: forward writes with their
+                        source identity (flared repl-identity-forward).
+                        Enable on every node before replFollowEnabled.
+                    replFollowEnabled:
+                      type: boolean
+                      description: >-
+                        Continuous replication: run a WAL follower on each
+                        active RocksDB slave (flared repl-follow-enabled;
+                        dynamic). Declare here: the operator rewrites
+                        extra.conf from this spec.
+                    maxTotalThreadQueue:
+                      type: integer
+                      minimum: 0
+                      description: >-
+                        Upper bound on queued proxy requests (forwards to
+                        replicas included); 0 = unbounded. At the bound a
+                        forward is dropped and counted, and the follower
+                        fills it from the WAL (flared max-total-thread-queue)
+                    noreplyWindowLimit:
+                      type: integer
+                      minimum: 0
+                      description: >-
+                        Pipeline forwards to replicas, N-1 without waiting for
+                        a reply (flared noreply-window-limit; 0 = off). A
+                        failure inside the window is not counted as a drop:
+                        enable only with replFollowEnabled.
+                    replFollowPollIntervalUsec:
+                      type: integer
+                      minimum: 1000
+                      description: Follower poll interval in microseconds (flared repl-follow-poll-interval-usec)
+                    readUnavailableError:
+                      type: boolean
+                      description: >-
+                        Answer SERVER_ERROR instead of a miss when a get
+                        cannot be served (forward to the master failed, no
+                        partition, enqueue or storage error). Enable where
+                        flare is the primary store (flared
+                        read-unavailable-error; default false; hot-toggleable)
                     backupKeep:
                       type: integer
                       minimum: 1
@@ -142,6 +198,18 @@ spec:
                         7, dynamic). On tmpfs the checkpoints live in RAM and
                         hardlink-pin compacted-away SSTs — set 1-2 there or
                         they balloon past the live DB size and OOM the pod.
+                    rebuildReserveBytes:
+                      type: integer
+                      minimum: 0
+                      description: >-
+                        Copy retention: bytes kept free besides the staging
+                        copy while a replica rebuilds (compaction, WAL
+                        catch-up, quarantine). UNSET = staged rebuilds STOP
+                        (stats rebuild_blocked=reserve_unset); there is no
+                        default until the R7 load test measures one. A
+                        rebuild needs the source's copy size plus this free
+                        under the data dir (on tmpfs also within the memory
+                        limit). flared rocksdb-rebuild-reserve-bytes, dynamic.
                 circuitBreaker:
                   type: object
                   description: >-
@@ -171,6 +239,13 @@ spec:
                       description: >-
                         Auto-resume when healthy capacity returns (default
                         true). false holds the trip until an operator restart.
+                    minUnavailableToTrip:
+                      type: integer
+                      minimum: 1
+                      description: >-
+                        Fewest unavailable nodes that can trip the breaker
+                        (default 2): a single failed node never pauses
+                        failover, so 1 master + 1 slave clusters fail over.
             status:
               type: object
               properties:
@@ -350,4 +425,90 @@ spec:
                   type: integer
                 convergedTicks:
                   type: integer
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: flarecopydiscardapprovals.flare.gree.net
+  annotations:
+    "helm.sh/resource-policy": keep
+    argocd.argoproj.io/sync-options: Prune=false
+spec:
+  group: flare.gree.net
+  names:
+    kind: FlareCopyDiscardApproval
+    listKind: FlareCopyDiscardApprovalList
+    plural: flarecopydiscardapprovals
+    singular: flarecopydiscardapproval
+    shortNames: ["fcda"]
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Operation
+          type: string
+          jsonPath: .spec.operation
+        - name: Copy
+          type: string
+          jsonPath: .spec.copyId
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Reason
+          type: string
+          jsonPath: .status.reason
+      schema:
+        openAPIV3Schema:
+          type: object
+          description: >
+            Copy retention (docs/design-copy-retention.md §7): an explicit,
+            ONE-SHOT approval to discard ONE named copy on ONE pod. It never
+            replaces a copy and never approves an old-source procedure. The
+            operator managing the cluster with spec.clusterUID relays it to
+            the pod with spec.podUID; flared records spec.requestId before
+            deleting anything and never runs the same request id twice.
+          properties:
+            spec:
+              type: object
+              required: ["clusterUID", "podUID", "copyId", "requestId", "operation", "expiresAt"]
+              properties:
+                clusterUID:
+                  type: string
+                  description: metadata.uid of the FlareCluster.
+                podUID:
+                  type: string
+                  description: metadata.uid of the flared pod (a replaced pod does not match).
+                copyId:
+                  type: string
+                  description: >
+                    The copy to discard ("<uuid>:<generation>", stats
+                    rocksdb_copy_id, or the COPY_ID of a retained copy, or the
+                    id in a quarantine-<id> directory name).
+                requestId:
+                  type: string
+                  description: Unique per approval; a repeat is answered from flared's record.
+                operation:
+                  type: string
+                  enum: ["discard-retained", "discard-quarantine", "discard-before-copy"]
+                expiresAt:
+                  type: string
+                  format: date-time
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  description: Pending | Applied | Refused | Expired | Failed | Unknown
+                reason:
+                  type: string
+                attempt:
+                  type: integer
+                observedAt:
+                  type: string
+                decidedAt:
+                  type: string
 {{- end }}

@@ -30,11 +30,15 @@ import FlareOperator.E2E.Tests.CircuitBreaker
 import FlareOperator.E2E.Tests.OperatorRestart
 import FlareOperator.E2E.Tests.TopologyAuthority
 import FlareOperator.E2E.Tests.ReplicaRepair
+import FlareOperator.E2E.Tests.ContinuousReplication
+import FlareOperator.E2E.Tests.ContinuousReplicationLimits
 import FlareOperator.E2E.Tests.PrepareEvidence
 import FlareOperator.E2E.Tests.NativeMetrics
 import FlareOperator.E2E.Tests.BlueGreenMigration
+import FlareOperator.E2E.Tests.VisibilityBench
 import FlareOperator.E2E.Tests.SnapshotPushSeed
 import FlareOperator.E2E.Tests.ReadBalance
+import FlareOperator.E2E.Tests.RestoreIsolated
 
 open FlareOperator.E2E
 
@@ -65,6 +69,41 @@ def main (args : List String) : IO UInt32 :=
     Tests.OperatorRestart.suite,
     Tests.TopologyAuthority.suite,
     Tests.ReplicaRepair.suite,
+    Tests.ContinuousReplication.suite,
+    Tests.ContinuousReplicationLimits.purgeSuite,
+    Tests.ContinuousReplicationLimits.limitsSuite,
+    Tests.ContinuousReplicationLimits.lagHoldSuite,
+    Tests.ContinuousReplicationLimits.enableSuite,
+    Tests.ContinuousReplicationLimits.lagHoldTmpfsSuite,
+    Tests.ContinuousReplicationLimits.lagHoldExpirySuite,
+    Tests.ContinuousReplicationLimits.enablePurgedSuite,
+    Tests.ContinuousReplicationLimits.multiEnableSuite,
+    Tests.ContinuousReplicationLimits.multiHoldSuite,
+    Tests.ContinuousReplicationLimits.rebuildTmpfsSuite,
+    Tests.ContinuousReplicationLimits.upgradeSuite,
+    Tests.ContinuousReplicationLimits.identitySuite,
+    Tests.ContinuousReplicationLimits.emptySourceSuite,
+    Tests.ContinuousReplicationLimits.r3SourceChangeSuite,
+    Tests.ContinuousReplicationLimits.copyProtectionSuite,
+    Tests.ContinuousReplicationLimits.copyRetentionSuite,
+    Tests.ContinuousReplicationLimits.copyRetentionConcurrencySuite,
+    Tests.ContinuousReplicationLimits.r3UnreadableSuite,
+    Tests.ContinuousReplicationLimits.promotionReasonsSuite,
+    Tests.ContinuousReplicationLimits.promotionPrecommitSuite,
+    Tests.RestoreIsolated.suite,
+    Tests.RestoreIsolated.repeatSuite,
+    Tests.ContinuousReplicationLimits.historyTrackingSuite,
+    Tests.ContinuousReplicationLimits.historyHeldSuite,
+    Tests.ContinuousReplicationLimits.historyFirstBuildSuite,
+    Tests.ContinuousReplicationLimits.reserveMeasureSuite,
+    Tests.ContinuousReplicationLimits.lagHoldUnreadableSuite,
+    Tests.ContinuousReplicationLimits.repairLedgerSuite,
+    Tests.VisibilityBench.visibilityBenchSuite,
+    Tests.ContinuousReplicationLimits.clusterInitSuite,
+    Tests.ContinuousReplicationLimits.scaleSuite,
+    Tests.ContinuousReplicationLimits.sustainedSuite,
+    Tests.ContinuousReplicationLimits.outageSuite,
+    Tests.ContinuousReplicationLimits.outageTmpfsSuite,
     Tests.PrepareEvidence.suite,
     Tests.NativeMetrics.suite,
     Tests.BlueGreenMigration.suite,

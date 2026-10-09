@@ -35,6 +35,12 @@ structure ClusterConfig where
   /-- Extra environment for the per-suite operator, as (name, value). Used
       by suites that need a test seam the production default leaves off. -/
   operatorEnv : List (String × String) := []
+  /-- Extra environment for every flared container (test seams such as
+      FLARE_TEST_DISABLE_SNAPSHOT_BOOTSTRAP), as (name, value). -/
+  flaredEnv : List (String × String) := []
+  /-- Extra flared command-line options (e.g. "--reconstruction-bwlimit 128"
+      to make a dump last long enough to interrupt). -/
+  flaredArgs : String := ""
   /-- Persist flared data on a PVC (volumeClaimTemplates) instead of the
       pod-local tmpdir. With a PVC the data directory survives pod
       recreation, so a partition can recover its data even when the master
@@ -42,6 +48,22 @@ structure ClusterConfig where
       never cover. Mirrors the production example
       helm/flare-operator/examples/flare-cluster-persistent.yaml. -/
   usePvc : Bool := false
+  /-- Keep flared data on tmpfs: a memory-backed emptyDir (medium: Memory)
+      mounted where the PVC would be. Mirrors a production tmpfs cluster:
+      the data counts against the pod's memory, survives a container
+      restart inside the pod, and is gone when the pod is deleted.
+      Mutually exclusive with usePvc. -/
+  useTmpfs : Bool := false
+  tmpfsSize : String := "2Gi"
+  /-- flared container memory limit / request. The default fits the small
+      E2E datasets; the scale evaluation raises it (RocksDB's block cache
+      plus a 64 MB write buffer OOM-killed a 512Mi master under a 2M-key
+      load). -/
+  flaredMemoryLimit : String := "512Mi"
+  /-- flared container CPU limit. 500m on CI; evaluations raise it to tell
+      CPU throttling apart from protocol limits. -/
+  flaredCpuLimit : String := "500m"
+  flaredMemoryRequest : String := "256Mi"
   /-- PVC size request (only used when usePvc). Kind's default storage
       class (local-path) ignores the size, so keep it small. -/
   pvcSize : String := "1Gi"
@@ -52,19 +74,75 @@ structure ClusterConfig where
       those, and restarting the whole StatefulSet mid-suite churns every
       node through re-registration. -/
   extraFlaredConf : String := ""
+  /-- Put `spec.rocksdb.readUnavailableError: true` in the FlareCluster (the
+      production read policy, R2): the operator renders it into extra.conf
+      and keeps it there; a line in `extraFlaredConf` would be overwritten
+      by the operator's own extra.conf. Part of the CR, so a CR recreated
+      mid-suite keeps it. -/
+  readUnavailableError : Bool := false
+  /-- Copy retention (§9): `rocksdb-rebuild-reserve-bytes` for the suite's
+      flared. Unset stops every staged rebuild, so suites set it: baked into
+      the initial extra.conf (pods boot with it) and, when the CR carries a
+      rocksdb block (the operator then owns extra.conf), into the CR too.
+      `none` = leave it unset (the reserve_unset test). -/
+  rebuildReserveBytes : Option Nat := some e2eRebuildReserveBytes
+  /-- Also put the reserve in the FlareCluster CR (the operator then owns
+      extra.conf, so suite lines in `extraFlaredConf` would be dropped at
+      its first rewrite). Needed where the CR is the source of truth for a
+      cluster the OPERATOR provisions (a blue/green migration target copies
+      the source CR's spec.rocksdb). -/
+  reserveInCr : Bool := false
   /-- preStop drain window (seconds). >0 adds a `sleep {drainSeconds}` preStop
       hook so flared stays alive+Ready while Terminating — the window the
       operator's graceful drain (demote leaving master to a live proxy, promote
       a replacement) needs to be observable. 0 = no hook (fast pod deletes, the
       default for most suites). Mirrors the chart's cluster.drainSeconds. -/
   drainSeconds : Nat := 0
+  /-- Deploy the operator WITHOUT its FlareCluster and StatefulSet (they come
+      later through `deployDeferredCluster`): the operator-before-cluster
+      install the SAF-09 waiting state exists for. -/
+  deferClusterCr : Bool := false
+  /-- Run a RELEASED flared / operator image instead of the locally built
+      `:test` one (pulled, IfNotPresent). The upgrade suite starts on the
+      deployed release and rolls to the build under test. -/
+  flaredImageOverride : Option String := none
+  operatorImageOverride : Option String := none
+  /-- A shared, real cluster (the reserve measurement, decision 2026-10-08):
+      bind the operator's ServiceAccount with a namespaced RoleBinding to this
+      EXISTING ClusterRole instead of a ClusterRoleBinding to `flare-operator`;
+      nothing cluster-scoped is created, checked for or deleted. -/
+  roleBindingTo : Option String := none
+  /-- Pin every pod of the suite (operator, flared, debug) to this node
+      (`kubernetes.io/hostname`). -/
+  nodeHost : Option String := none
+  /-- When no existing node is named: keep every pod off these nodes (e.g.
+      the nodes holding another cluster's data pods) and inside this node
+      pool (`label=value`); the flared pods are co-located (required pod
+      affinity), so at most ONE added node can satisfy them. -/
+  avoidNodes : List String := []
+  nodePool : Option String := none
+  /-- A ResourceQuota `hard:` block (YAML lines, 4-space indent) for the
+      namespace, plus a LimitRange so pods without explicit resources get
+      requests = limits from `limitDefaults` (cpu, memory). -/
+  quotaHard : Option String := none
+  limitDefaults : String × String := ("500m", "256Mi")
+  flaredCpuRequest : String := "100m"
+  debugImage : String := "busybox:1.36"
   deriving Repr
 
 /-- Image tag used for the flared container in this cluster. -/
 def ClusterConfig.flaredImage (cfg : ClusterConfig) : String :=
-  match cfg.storageBackend with
-  | "rocksdb" => "flare-node-rocksdb:test"
-  | _ => "flare-node:test"
+  match cfg.flaredImageOverride with
+  | some i => i
+  | none =>
+    match cfg.storageBackend with
+    | "rocksdb" => "flare-node-rocksdb:test"
+    | _ => "flare-node:test"
+
+/-- `Never` for the locally loaded `:test` images, `IfNotPresent` for a
+    released image that kind must pull. -/
+def pullPolicyFor (override : Option String) : String :=
+  if override.isSome then "IfNotPresent" else "Never"
 
 /-- Generate a unique namespace name using timestamp to avoid test conflicts.
     Format: {baseName}-{timestamp-ms}
@@ -111,6 +189,70 @@ subjects:
     name: flare-operator
     namespace: {ns}"
 
+/-- `nodeSelector` pinning a pod spec to `cfg.nodeHost` (empty when unset). -/
+def nodeSelectorBlock (cfg : ClusterConfig) (indent : Nat) : String :=
+  match cfg.nodeHost with
+  | none => ""
+  | some h =>
+    let pad := String.mk (List.replicate indent ' ')
+    s!"\n{pad}nodeSelector:\n{pad}  kubernetes.io/hostname: \"{h}\""
+
+/-- Required node affinity (pool In, hostname NotIn avoidNodes) and, for the
+    flared pods, required co-location with each other. Empty when unset. -/
+def placementBlock (cfg : ClusterConfig) (indent : Nat) (colocateLabel : Option String) : String :=
+  if cfg.nodeHost.isSome || (cfg.avoidNodes.isEmpty && cfg.nodePool.isNone) then "" else
+  let pad := String.mk (List.replicate indent ' ')
+  let pool := match cfg.nodePool.map (·.splitOn "=") with
+    | some [k, v] => s!"\n{pad}            - key: {k}\n{pad}              operator: In\n{pad}              values: [\"{v}\"]"
+    | _ => ""
+  let avoid := if cfg.avoidNodes.isEmpty then "" else
+    s!"\n{pad}            - key: kubernetes.io/hostname\n{pad}              operator: NotIn\n{pad}              values: [{String.intercalate ", " (cfg.avoidNodes.map fun n => s!"\"{n}\"")}]"
+  let coloc := match colocateLabel with
+    | some sel => s!"\n{pad}  podAffinity:\n{pad}    requiredDuringSchedulingIgnoredDuringExecution:\n{pad}      - labelSelector:\n{pad}          matchLabels:\n{pad}            cluster: {sel}\n{pad}        topologyKey: kubernetes.io/hostname"
+    | none => ""
+  s!"\n{pad}affinity:\n{pad}  nodeAffinity:\n{pad}    requiredDuringSchedulingIgnoredDuringExecution:\n{pad}      nodeSelectorTerms:\n{pad}        - matchExpressions:{pool}{avoid}{coloc}"
+
+/-- Namespaced RoleBinding to an existing ClusterRole (no cluster-scoped object). -/
+def roleBindingYaml (cfg : ClusterConfig) (clusterRole : String) : String :=
+  s!"apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: flare-operator
+  namespace: {cfg.«namespace»}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {clusterRole}
+subjects:
+  - kind: ServiceAccount
+    name: flare-operator
+    namespace: {cfg.«namespace»}"
+
+def quotaYaml (cfg : ClusterConfig) (hard : String) : String :=
+  s!"apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: measure-caps
+  namespace: {cfg.«namespace»}
+spec:
+  hard:
+{hard}
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: measure-defaults
+  namespace: {cfg.«namespace»}
+spec:
+  limits:
+    - type: Container
+      default:
+        cpu: {cfg.limitDefaults.1}
+        memory: {cfg.limitDefaults.2}
+      defaultRequest:
+        cpu: {cfg.limitDefaults.1}
+        memory: {cfg.limitDefaults.2}"
+
 /-- Generate operator Deployment + Service YAML.
 
     The memory LIMIT is a ceiling, not a reservation: 256Mi is enough for
@@ -146,11 +288,11 @@ spec:
       labels:
         app: {name}
     spec:
-      serviceAccountName: flare-operator
+      serviceAccountName: flare-operator{nodeSelectorBlock cfg 6}{placementBlock cfg 6 none}
       containers:
         - name: flare-operator
-          image: flare-operator:test
-          imagePullPolicy: Never
+          image: {cfg.operatorImageOverride.getD "flare-operator:test"}
+          imagePullPolicy: {pullPolicyFor cfg.operatorImageOverride}
           args:
             - \"--namespace\"
             - \"{ns}\"
@@ -160,6 +302,12 @@ spec:
             - containerPort: {cfg.operatorPort}
               name: flare-index
               protocol: TCP{envBlock}
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 5
           resources:
             requests:
               cpu: 100m
@@ -195,13 +343,16 @@ def statefulSetYaml (cfg : ClusterConfig) : String :=
   -- with an empty data directory (TCH stores a single `.hdb` file; RocksDB
   -- stores a directory). WITH a PVC the whole point is that data survives
   -- pod recreation, so we only mkdir and never wipe.
-  let dataDir := if cfg.usePvc then "/data/flare" else "/tmp/flare"
+  let flaredEnvLines := String.join (cfg.flaredEnv.map fun (k, v) =>
+    s!"\n            - name: {k}\n              value: \"{v}\"")
+  let persistent := cfg.usePvc || cfg.useTmpfs
+  let dataDir := if persistent then "/data/flare" else "/tmp/flare"
   -- RESTORE hook (PVC only): if the marker file exists it names a checkpoint
   -- directory (created by the flared `backup` op, a complete RocksDB dir);
   -- replace the live DB with it and consume the marker, then start flared.
   -- Restore procedure: write the marker on each pod's PVC, delete the pods.
-  let prep := if cfg.usePvc then
-      s!"if [ -f {dataDir}/RESTORE ]; then SRC=$(cat {dataDir}/RESTORE) && rm -rf {dataDir}/flare.rocksdb && cp -a $SRC {dataDir}/flare.rocksdb && rm -f {dataDir}/RESTORE; fi; mkdir -p {dataDir}; rm -f {dataDir}/flared.pid"
+  let prep := if persistent then
+      s!"if [ -f {dataDir}/RESTORE ]; then SRC=$(cat {dataDir}/RESTORE) && rm -rf {dataDir}/flare.rocksdb && cp -a $SRC {dataDir}/flare.rocksdb && touch {dataDir}/flare.rocksdb/RESTORED && rm -f {dataDir}/RESTORE; fi; mkdir -p {dataDir}; rm -f {dataDir}/flared.pid"
     else
       s!"rm -rf {dataDir}/*.hdb {dataDir}/*.hdb.wal {dataDir}/rocksdb && mkdir -p {dataDir} && rm -f {dataDir}/flared.pid"
   let storageFlag := s!"--storage-type={cfg.storageBackend}"
@@ -215,9 +366,14 @@ def statefulSetYaml (cfg : ClusterConfig) : String :=
               exec:
                 command: [\"sh\", \"-c\", \"sleep {cfg.drainSeconds}\"]"
     else ""
-  let pvcMount := if cfg.usePvc then "
+  let pvcMount := if persistent then "
             - name: data
               mountPath: /data" else ""
+  let tmpfsVolume := if cfg.useTmpfs && !cfg.usePvc then s!"
+        - name: data
+          emptyDir:
+            medium: Memory
+            sizeLimit: {cfg.tmpfsSize}" else ""
   let pvcTemplates := if cfg.usePvc then s!"
   volumeClaimTemplates:
     - metadata:
@@ -275,12 +431,18 @@ spec:
         app: flare
         cluster: {cluster}
     spec:
-      terminationGracePeriodSeconds: {graceSeconds}
+      terminationGracePeriodSeconds: {graceSeconds}{nodeSelectorBlock cfg 6}{placementBlock cfg 6 (some cluster)}
       containers:
         - name: flared
           image: {image}
-          imagePullPolicy: Never
-          command: [\"sh\", \"-c\", \"{prep} && exec flared --config=/etc/flared/extra.conf --data-dir {dataDir} --server-port {cfg.flarePort} --index-server-name {operatorSvc} --index-server-port {cfg.operatorPort} {storageFlag} --metrics-server-port 9150 --stderr\"]{preStopBlock}
+          imagePullPolicy: {pullPolicyFor cfg.flaredImageOverride}
+          command: [\"sh\", \"-c\", \"{prep} && exec flared --config=/etc/flared/extra.conf --data-dir {dataDir} --server-port {cfg.flarePort} --index-server-name {operatorSvc} --index-server-port {cfg.operatorPort} {storageFlag} --metrics-server-port 9150 --stderr {cfg.flaredArgs}\"]{preStopBlock}
+          # Same allocator setting as the chart (cluster.mallocArenaMax,
+          # default 2). Without it glibc keeps up to 8 arenas per core and the
+          # test pods fragment memory in a way production pods do not.
+          env:
+            - name: MALLOC_ARENA_MAX
+              value: \"2\"{flaredEnvLines}
           ports:
             - containerPort: {cfg.flarePort}
               name: flare
@@ -328,15 +490,23 @@ spec:
             failureThreshold: 3
           resources:
             requests:
-              cpu: 100m
-              memory: 256Mi
+              cpu: {cfg.flaredCpuRequest}
+              memory: {cfg.flaredMemoryRequest}
             limits:
-              cpu: 500m
-              memory: 512Mi
+              cpu: {cfg.flaredCpuLimit}
+              memory: {cfg.flaredMemoryLimit}
       volumes:
         - name: flared-config
           configMap:
-            name: {cluster}-config{pvcTemplates}"
+            name: {cluster}-config{tmpfsVolume}{pvcTemplates}"
+
+/-- The extra.conf pods boot with: the suite's lines plus the rebuild reserve. -/
+def bootFlaredConf (cfg : ClusterConfig) : String :=
+  match cfg.rebuildReserveBytes with
+  | some n =>
+    let line := s!"rocksdb-rebuild-reserve-bytes = {n}"
+    if cfg.extraFlaredConf.isEmpty then line else cfg.extraFlaredConf ++ "\n" ++ line
+  | none => cfg.extraFlaredConf
 
 /-- Generate FlareCluster CRD YAML. -/
 def flareClusterCrdYaml (cfg : ClusterConfig) : String :=
@@ -347,7 +517,13 @@ metadata:
   namespace: {cfg.«namespace»}
 spec:
   partitions: {cfg.partitions}
-  replicas: {cfg.replicas}"
+  replicas: {cfg.replicas}" ++
+  (if cfg.readUnavailableError || cfg.reserveInCr then
+    "\n  rocksdb:" ++ (if cfg.readUnavailableError then "\n    readUnavailableError: true" else "") ++
+      (match cfg.rebuildReserveBytes with
+       | some n => s!"\n    rebuildReserveBytes: {n}"
+       | none => "")
+   else "")
 
 /-- Generate partition Service YAML for a single partition. -/
 def partitionServiceYaml (cfg : ClusterConfig) (partIdx : Nat) : String :=
@@ -415,6 +591,20 @@ def dumpOperatorLogs (cfg : ClusterConfig) : IO Unit := do
   for line in logs.splitOn "\n" do
     IO.eprintln s!"#   {line}"
 
+/-- SAF-09: approve the first build of this (new) FlareCluster, bound to
+    its own UID — what a person does once at a real first install. Without
+    it a fresh cluster's operator cannot tell a first build from a loss
+    (flared does not answer before the operator serves) and waits. -/
+def approveFirstBuild (cfg : ClusterConfig) : IO Unit := do
+  for _ in [0:10] do
+    let out ← IO.Process.output { cmd := "kubectl", args := #["get", "flarecluster", cfg.name, "-n", cfg.«namespace», "-o", "jsonpath={.metadata.uid}"] }
+    let uid := out.stdout.trim
+    if out.exitCode == 0 && !uid.isEmpty then
+      let r ← IO.Process.output { cmd := "kubectl", args := #["annotate", "flarecluster", cfg.name, "-n", cfg.«namespace», "--overwrite", s!"flare.gree.net/first-build-approved={uid}"] }
+      if r.exitCode == 0 then return
+    IO.sleep 2000
+  IO.eprintln s!"# WARNING: could not approve the first build of {cfg.name}"
+
 /-- Deploy a full cluster: namespace → CRD/RBAC → FlareCluster CR → partition services →
     debug pod → empty ConfigMap → operator → StatefulSet -/
 def deployCluster (cfg : ClusterConfig) : IO Unit := do
@@ -457,7 +647,8 @@ def deployCluster (cfg : ClusterConfig) : IO Unit := do
   if !crdReady then
     throw (IO.userError "FlareCluster CRD not established — is the chart installed? \
       (helm template helm/flare-operator --set fullnameOverride=flare-operator --include-crds | kubectl apply -f -)")
-  let roleReady ← waitForCondition "ClusterRole flare-operator present" 60 do
+  if let some hard := cfg.quotaHard then applyYaml (quotaYaml cfg hard)
+  let roleReady ← if cfg.roleBindingTo.isSome then pure true else waitForCondition "ClusterRole flare-operator present" 60 do
     match ← kubectl ["get", "clusterrole", "flare-operator", "-o", "jsonpath={.metadata.name}"] with
     | .ok name => return name.trim == "flare-operator"
     | .error _ => return false
@@ -467,10 +658,14 @@ def deployCluster (cfg : ClusterConfig) : IO Unit := do
   -- Create ServiceAccount and ClusterRoleBinding in test namespace
   -- (not using deploy/rbac.yaml which is hardcoded for flare-system namespace)
   applyYaml (serviceAccountYaml cfg)
-  applyYaml (clusterRoleBindingYaml cfg)
+  match cfg.roleBindingTo with
+  | some role => applyYaml (roleBindingYaml cfg role)
+  | none => applyYaml (clusterRoleBindingYaml cfg)
 
-  -- Create FlareCluster CR
-  applyYaml (flareClusterCrdYaml cfg)
+  -- Create FlareCluster CR (unless the test adds it later)
+  if !cfg.deferClusterCr then
+    applyYaml (flareClusterCrdYaml cfg)
+    approveFirstBuild cfg
 
   -- Create partition services
   for i in List.range cfg.partitions do
@@ -483,7 +678,7 @@ def deployCluster (cfg : ClusterConfig) : IO Unit := do
   -- file.  Using direct kubectl (not `sh -c`) so failures are visible.
   let cmName := s!"{cfg.name}-config"
   match ← kubectl ["create", "configmap", cmName, "-n", cfg.«namespace»,
-                    s!"--from-literal=extra.conf={cfg.extraFlaredConf}"] with
+                    s!"--from-literal=extra.conf={bootFlaredConf cfg}"] with
   | .ok _ => pure ()
   | .error e =>
     -- "AlreadyExists" is fine; anything else is a real failure we want to see.
@@ -504,9 +699,18 @@ def deployCluster (cfg : ClusterConfig) : IO Unit := do
     throw (IO.userError s!"ConfigMap {cmName} missing after create")
 
   -- Create debug pod (direct kubectl so errors are visible)
-  match ← kubectl ["run", cfg.debugPod, s!"--namespace={cfg.«namespace»}",
-                    "--image=busybox:1.36", "--restart=Never", "--command", "--",
-                    "sleep", "3600"] with
+  let overrides := match cfg.nodeHost with
+    | some h => [s!"--overrides=\{\"spec\":\{\"nodeSelector\":\{\"kubernetes.io/hostname\":\"{h}\"}}}"]
+    | none =>
+      if cfg.avoidNodes.isEmpty then [] else
+      let vals := String.intercalate "," (cfg.avoidNodes.map fun n => s!"\"{n}\"")
+      [s!"--overrides=\{\"spec\":\{\"affinity\":\{\"nodeAffinity\":\{\"requiredDuringSchedulingIgnoredDuringExecution\":\{\"nodeSelectorTerms\":[\{\"matchExpressions\":[\{\"key\":\"kubernetes.io/hostname\",\"operator\":\"NotIn\",\"values\":[{vals}]}]}]}}}}}"]
+  match ← kubectl (["run", cfg.debugPod, s!"--namespace={cfg.«namespace»}",
+                    s!"--image={cfg.debugImage}", "--restart=Never"] ++ overrides ++ ["--command", "--",
+                    -- 1 day, not 1 h: the scale evaluation's load ran past an
+                    -- hour and every chunk after 3573 s failed with
+                    -- "container not found" (manual run 36899086870).
+                    "sleep", "86400"]) with
   | .ok _ => pure ()
   | .error e =>
     if containsSubstr e "AlreadyExists" then pure ()
@@ -550,7 +754,17 @@ def deployCluster (cfg : ClusterConfig) : IO Unit := do
     throw (IO.userError s!"ConfigMap {cmName} not found: {e}")
 
   -- Deploy StatefulSet
-  IO.eprintln s!"# Deploying StatefulSet..."
+  if cfg.deferClusterCr then
+    IO.eprintln "# FlareCluster and StatefulSet deferred (deployDeferredCluster)"
+  else
+    IO.eprintln s!"# Deploying StatefulSet..."
+    applyYaml (statefulSetYaml cfg)
+
+/-- Create the FlareCluster (optionally approving its first build) and the
+    StatefulSet of a cluster deployed with `deferClusterCr`. -/
+def deployDeferredCluster (cfg : ClusterConfig) (approve : Bool := true) : IO Unit := do
+  applyYaml (flareClusterCrdYaml cfg)
+  if approve then approveFirstBuild cfg
   applyYaml (statefulSetYaml cfg)
 
 /-- Deploy a second cluster for inter-cluster replication tests. -/
@@ -566,6 +780,7 @@ def deploySecondCluster (cfg : ClusterConfig) : IO Unit := do
 
   -- Create FlareCluster CR
   applyYaml (flareClusterCrdYaml cfg)
+  approveFirstBuild cfg
 
   -- Create partition services
   for i in List.range cfg.partitions do
@@ -576,7 +791,9 @@ def deploySecondCluster (cfg : ClusterConfig) : IO Unit := do
   try
     let result ← IO.Process.output {
       cmd := "sh"
-      args := #["-c", s!"kubectl create configmap {cmName} -n {cfg.«namespace»} --from-literal='extra.conf=' 2>/dev/null || true"]
+      -- the boot conf (with the rebuild reserve: unset, every staged
+      -- rebuild stops — CI 37578618876 repl-v2 stuck in Prepare)
+      args := #["-c", s!"kubectl create configmap {cmName} -n {cfg.«namespace»} --from-literal='extra.conf={bootFlaredConf cfg}' 2>/dev/null || true"]
     }
     let _ := result
     pure ()
@@ -586,7 +803,7 @@ def deploySecondCluster (cfg : ClusterConfig) : IO Unit := do
   try
     let result ← IO.Process.output {
       cmd := "sh"
-      args := #["-c", s!"kubectl run {cfg.debugPod} --namespace={cfg.«namespace»} --image=busybox:1.36 --restart=Never --command -- sleep 3600 2>/dev/null || true"]
+      args := #["-c", s!"kubectl run {cfg.debugPod} --namespace={cfg.«namespace»} --image=busybox:1.36 --restart=Never --command -- sleep 86400 2>/dev/null || true"]
     }
     let _ := result
     pure ()
@@ -613,6 +830,7 @@ def cleanupCluster (cfg : ClusterConfig) : IO Unit := do
   kubectlDelete "service" cfg.operatorName ns
   kubectlDelete "configmap" s!"{cfg.name}-config" ns
   kubectlDelete "configmap" s!"{cfg.name}-node-map" ns
+  kubectlDelete "configmap" s!"{cfg.name}-history" ns
   kubectlDelete "lease" s!"{cfg.name}-operator-lease" ns
   for i in List.range cfg.partitions do
     kubectlDelete "service" s!"{cfg.name}-{i}" ns
@@ -622,8 +840,9 @@ def cleanupCluster (cfg : ClusterConfig) : IO Unit := do
     for i in List.range (cfg.partitions * cfg.replicas) do
       kubectlDelete "pvc" s!"data-{cfg.name}-nodes-{i}" ns
   -- Delete ClusterRoleBinding (cluster-scoped resource)
-  let bindingName := s!"flare-operator-{ns}"
-  let _ ← kubectl ["delete", "clusterrolebinding", bindingName, "--ignore-not-found"]
+  if cfg.roleBindingTo.isNone then
+    let bindingName := s!"flare-operator-{ns}"
+    let _ ← kubectl ["delete", "clusterrolebinding", bindingName, "--ignore-not-found"]
   -- Delete debug pod
   let _ ← kubectl ["delete", "pod", cfg.debugPod, "-n", ns,
                     "--force", "--grace-period=0", "--ignore-not-found"]

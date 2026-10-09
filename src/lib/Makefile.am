@@ -30,6 +30,12 @@ libflare_la_SOURCES = \
 	handler_monitor.h handler_monitor.cc \
 	handler_proxy.h handler_proxy.cc \
 	handler_reconstruction.h handler_reconstruction.cc \
+	handler_wal_follower.h handler_wal_follower.cc \
+	handler_source_validator.h handler_source_validator.cc \
+	source_eligibility.h \
+	copy_protection.h \
+	copy_switch.h copy_switch_fs.h copy_switch.cc copy_capacity.h \
+	signal_interrupt.h signal_interrupt.cc \
 	htonll.h \
 	key_resolver.h key_resolver.cc \
 	key_resolver_modular.h key_resolver_modular.cc \
@@ -60,7 +66,7 @@ libflare_la_SOURCES = \
 	op_repl_snapshot_push.h op_repl_snapshot_push.cc \
 	op_orphan_scan.h op_orphan_scan.cc \
 	op_orphan_purge.h op_orphan_purge.cc \
-	op_backup.h op_backup.cc \
+	op_backup.h op_copy_discard.h op_rebuild_resume.h op_backup.cc op_copy_discard.cc op_rebuild_resume.cc \
 	op_node_add.h op_node_add.cc \
 	op_node_remove.h op_node_remove.cc \
 	op_node_role.h op_node_role.cc \

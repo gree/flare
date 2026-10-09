@@ -1,0 +1,203 @@
+{
+ "harness": "visibility_bench.py",
+ "measurement": "end-to-end visibility: write SEND to first replica observation, one monotonic clock; NOT commit-to-apply",
+ "label": "redis-floor",
+ "proto": "redis",
+ "write": "10.244.0.16:6379",
+ "read": "10.244.0.16:6379",
+ "value_size": 100,
+ "writers": 4,
+ "observers": 4,
+ "timeout_s": 5.0,
+ "env": {
+  "python": "3.12.15",
+  "host": "vis-harness",
+  "cpus": 4
+ },
+ "floor_get_rtt": {
+  "n": 500,
+  "p50_us": 151.29500000000002,
+  "p95_us": 200.68655,
+  "p99_us": 260.3307799999999,
+  "max_us": 474.914,
+  "mean_us": 148.526192
+ },
+ "runs": [
+  {
+   "profile": {
+    "kind": "idle",
+    "count": 100,
+    "gap": 0.3,
+    "name": "idle",
+    "repeat": 0
+   },
+   "markers_total": 100,
+   "markers_measured": 100,
+   "visible": 100,
+   "timeouts": 0,
+   "unobserved": 0,
+   "errors": {
+    "write": 0,
+    "read": 0,
+    "set_not_stored": 0
+   },
+   "achieved_write_rate": 3.3332516495887,
+   "write_ack": {
+    "n": 100,
+    "p50_us": 528.704,
+    "p95_us": 830.46845,
+    "p99_us": 1525.5756700000043,
+    "max_us": 2333.581,
+    "mean_us": 579.52218
+   },
+   "visibility_upper": {
+    "n": 100,
+    "p50_us": 583.0875000000001,
+    "p95_us": 866.9317,
+    "p99_us": 1538.5269200000012,
+    "max_us": 1786.712,
+    "mean_us": 627.54198
+   },
+   "visibility_lower": {
+    "n": 100,
+    "p50_us": 0.0,
+    "p95_us": 0.0,
+    "p99_us": 0.0,
+    "max_us": 0.0,
+    "mean_us": 0.0
+   },
+   "probes_per_sample": {
+    "mean": 1.0,
+    "max": 1
+   },
+   "scheduler_lag": {
+    "n": 100,
+    "p50_us": 733.3254999999999,
+    "p95_us": 1211.7685499999998,
+    "p99_us": 2203.33208,
+    "max_us": 2225.813,
+    "mean_us": 771.0811
+   },
+   "backlog_max": 0,
+   "backlog_growing": false
+  },
+  {
+   "profile": {
+    "kind": "rate",
+    "rate": 500,
+    "duration": 20,
+    "warmup": 5,
+    "name": "normal",
+    "repeat": 0
+   },
+   "markers_total": 12500,
+   "markers_measured": 10000,
+   "visible": 10000,
+   "timeouts": 0,
+   "unobserved": 0,
+   "errors": {
+    "write": 0,
+    "read": 0,
+    "set_not_stored": 0
+   },
+   "achieved_write_rate": 499.9956440273483,
+   "write_ack": {
+    "n": 10000,
+    "p50_us": 224.9385,
+    "p95_us": 480.89554999999984,
+    "p99_us": 705.9367300000004,
+    "max_us": 11703.989,
+    "mean_us": 271.4742603
+   },
+   "visibility_upper": {
+    "n": 10000,
+    "p50_us": 283.634,
+    "p95_us": 504.5375499999997,
+    "p99_us": 794.3175300000016,
+    "max_us": 13331.133,
+    "mean_us": 320.3788439
+   },
+   "visibility_lower": {
+    "n": 10000,
+    "p50_us": 0.0,
+    "p95_us": 0.0,
+    "p99_us": 0.0,
+    "max_us": 0.0,
+    "mean_us": 0.0
+   },
+   "probes_per_sample": {
+    "mean": 1.0,
+    "max": 1
+   },
+   "scheduler_lag": {
+    "n": 12500,
+    "p50_us": 589.491,
+    "p95_us": 1064.3398,
+    "p99_us": 1114.26505,
+    "max_us": 3956.719,
+    "mean_us": 593.68605232
+   },
+   "backlog_max": 2,
+   "backlog_growing": false
+  },
+  {
+   "profile": {
+    "kind": "rate",
+    "rate": 2000,
+    "duration": 20,
+    "warmup": 5,
+    "name": "peak",
+    "repeat": 0
+   },
+   "markers_total": 50000,
+   "markers_measured": 40000,
+   "visible": 40000,
+   "timeouts": 0,
+   "unobserved": 0,
+   "errors": {
+    "write": 0,
+    "read": 0,
+    "set_not_stored": 0
+   },
+   "achieved_write_rate": 1999.9438263734023,
+   "write_ack": {
+    "n": 40000,
+    "p50_us": 358.129,
+    "p95_us": 735.8880000000003,
+    "p99_us": 1108.3537100000015,
+    "max_us": 4324.518,
+    "mean_us": 389.72129915
+   },
+   "visibility_upper": {
+    "n": 40000,
+    "p50_us": 448.54449999999997,
+    "p95_us": 791.63005,
+    "p99_us": 1299.4823000000013,
+    "max_us": 5488.968,
+    "mean_us": 469.76664397499997
+   },
+   "visibility_lower": {
+    "n": 40000,
+    "p50_us": 0.0,
+    "p95_us": 0.0,
+    "p99_us": 0.0,
+    "max_us": 121.138,
+    "mean_us": 0.016112625
+   },
+   "probes_per_sample": {
+    "mean": 1.000225,
+    "max": 2
+   },
+   "scheduler_lag": {
+    "n": 50000,
+    "p50_us": 324.968,
+    "p95_us": 1068.7300500000001,
+    "p99_us": 1109.5482200000001,
+    "max_us": 3875.531,
+    "mean_us": 436.04046229999994
+   },
+   "backlog_max": 9,
+   "backlog_growing": false
+  }
+ ]
+}

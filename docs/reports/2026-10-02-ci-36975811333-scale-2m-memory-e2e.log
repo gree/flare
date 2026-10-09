@@ -1,0 +1,56 @@
+# === Suite: continuous-replication-scale ===
+# Deploying cluster 'cont-repl-scale' in namespace 'flare-cont-repl-scale'
+# Waiting for: namespace flare-cont-repl-scale not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-cont-repl-scale (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap cont-repl-scale-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting 50s grace period for operator reconciliation...
+# load at 0: stored so far 20000; master RSS=42444kB heap in-use=25781kB heap free=1931kB restarts=0 thread_queue=0 items=20000; replica applied=11224 forward_applied=9226 RSS=36636kB heap in-use=21492kB
+# load at 500000: stored so far 520000; master RSS=183596kB heap in-use=116908kB heap free=51834kB restarts=0 thread_queue=0 items=520000; replica applied=256534 forward_applied=433607 RSS=114028kB heap in-use=104792kB
+# load at 1000000: stored so far 1020000; master RSS=228644kB heap in-use=136858kB heap free=75885kB restarts=0 thread_queue=0 items=1020000; replica applied=387604 forward_applied=870846 RSS=73456kB heap in-use=58355kB
+# load at 1500000: stored so far 1520000; master RSS=329412kB heap in-use=272380kB heap free=41525kB restarts=0 thread_queue=0 items=1520000; replica applied=482719 forward_applied=1238195 RSS=146864kB heap in-use=135532kB
+# scale follow: state=following reason= applied=564319 source_lsn=2000004 master latest=2000004 items master=2000000 replica=1607886 wal_applied=6322 wal_skipped=568880 decode_refused=0 forward_applied=1621748 forward_skipped=6322
+# scale follow: state=following reason= applied=617359 source_lsn=2000004 master latest=2000004 items master=2000000 replica=1830106 wal_applied=6322 wal_skipped=622569 decode_refused=0 forward_applied=1845164 forward_skipped=6322
+# scale follow: state=following reason= applied=679069 source_lsn=2000004 master latest=2000004 items master=2000000 replica=2000000 wal_applied=6322 wal_skipped=684109 decode_refused=0 forward_applied=1993678 forward_skipped=6322
+# scale follow: state=following reason= applied=763984 source_lsn=2000004 master latest=2000004 items master=2000000 replica=2000000 wal_applied=6322 wal_skipped=768333 decode_refused=0 forward_applied=1993678 forward_skipped=6322
+# scale follow: state=following reason= applied=894289 source_lsn=2000004 master latest=2000004 items master=2000000 replica=2000000 wal_applied=6322 wal_skipped=914473 decode_refused=0 forward_applied=1993678 forward_skipped=6322
+# scale follow: state=following reason= applied=1131949 source_lsn=2000004 master latest=2000004 items master=2000000 replica=2000000 wal_applied=6322 wal_skipped=1148761 decode_refused=0 forward_applied=1993678 forward_skipped=6322
+# scale follow: state=following reason= applied=1288264 source_lsn=2000004 master latest=2000004 items master=2000000 replica=2000000 wal_applied=6322 wal_skipped=1297381 decode_refused=0 forward_applied=1993678 forward_skipped=6322
+# scale follow: state=following reason= applied=1400974 source_lsn=2000004 master latest=2000004 items master=2000000 replica=2000000 wal_applied=6322 wal_skipped=1410125 decode_refused=0 forward_applied=1993678 forward_skipped=6322
+# scale follow: state=following reason= applied=1499404 source_lsn=2000004 master latest=2000004 items master=2000000 replica=2000000 wal_applied=6322 wal_skipped=1509965 decode_refused=0 forward_applied=1993678 forward_skipped=6322
+# scale follow: state=following reason= applied=1590184 source_lsn=2000004 master latest=2000004 items master=2000000 replica=2000000 wal_applied=6322 wal_skipped=1598797 decode_refused=0 forward_applied=1993678 forward_skipped=6322
+# scale follow: state=following reason= applied=1731964 source_lsn=2000004 master latest=2000004 items master=2000000 replica=2000000 wal_applied=6322 wal_skipped=1752254 decode_refused=0 forward_applied=1993678 forward_skipped=6322
+# scale follow: state=following reason= applied=1960444 source_lsn=2000004 master latest=2000004 items master=2000000 replica=2000000 wal_applied=6322 wal_skipped=1978748 decode_refused=0 forward_applied=1993678 forward_skipped=6322
+# scale follow: state=following reason= applied=2000004 source_lsn=2000004 master latest=2000004 items master=2000000 replica=2000000 wal_applied=6322 wal_skipped=2001783 decode_refused=0 forward_applied=1993678 forward_skipped=6322
+# scale load: 2000000/2000000 STORED in 622607 ms; master items=2000000 replica=2000000; follower converged=true 1108734 ms after the load ended; applied=(some 2000004) wal_applied=(some 6322) forward_applied=(some 1993678)
+# master cont-repl-scale-nodes-0: restartCount 0→0; last termination reason: 
+# --- replica follower lifecycle (filtered) ---
+[140341662217920][NTC][cluster.cc:1804-_shift_node_role] shifting node_role (node_key=cont-repl-scale-nodes-1.cont-repl-scale-nodes.flare-cont-repl-scale.svc.cluster.local:12121, old_role=proxy, old_partition=-1, new_role=slave, new_partition=0)
+[140341662217920][NTC][cluster.cc:1779-_reconcile_wal_follower_locked] starting continuous replication follower (source=cont-repl-scale-nodes-0.cont-repl-scale-nodes.flare-cont-repl-scale.svc.cluster.local:12121, max_batches=256, max_bytes=4194304, poll=200000us)
+[140341662082752][NTC][stats.cc:276-follow_set_state] replication follow state: initial_sync
+[140341662082752][NTC][stats.cc:276-follow_set_state] replication follow state: following
+
+# scale load: master items grew by 2000000 (loader saw 2000000 STORED)
+# killed=1
+# Waiting for: replica restarted and Ready (timeout: 600s)
+#   OK after 20s
+# Waiting for: follower following again with equal items (timeout: 900s)
+#   OK after 0s
+# boot scan: [140607920872576][NTC][storage_rocksdb.cc:617-open] curr_items seeded by an exact scan: 2000000 live key(s) in 940 ms
+# after the restart: ready=true; following+equal=true; items master=2000000 replica=2000000; wal_fallback_to_dump=(some 0) reconstruction_completed=(some 1)
+# probe timing lines: 176; max 3404 ms; 'reconcile slow' lines: 180; last: or] continuous-replication probe: 2 stats read(s) in 2741ms (tick 181; in-mode remembered: 1, out-of-mode remembered: 0)
+# Cleaning up cluster 'cont-repl-scale'
+# Tests: 3, Failures: 0
+# RESULT: PASS
+1..3
+ok 1 - scale: load FLARE_E2E_SCALE_KEYS keys (pipelined) and let the follower converge
+ok 2 - scale: exact key scan at open (kill -9 on the PVC-backed replica) — duration recorded
+ok 3 - scale: operator probe cost at this size — recorded from the operator's own timing lines

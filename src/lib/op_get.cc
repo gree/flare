@@ -116,6 +116,10 @@ int op_get::_run_server() {
 	map<string, shared_queue_proxy_read> q_map;
 	// Results
 	map<string, storage::result> r_map;
+	// keys answered as "not found" only because they could not be read
+	int unavailable_keys = 0;
+	// TEST SEAM (read trace): why each such key could not be read
+	map<string, const char*> unavailable_reason;
 
 	for (list<storage::entry>::iterator it = this->_entry_list.begin(); it != this->_entry_list.end(); it++) {
 		stats_object->increment_cmd_get();
@@ -127,9 +131,13 @@ int op_get::_run_server() {
 		} else if (r_proxy == cluster::proxy_request_error_enqueue) {
 			log_warning("proxy error (key=%s) -> continue processing (pretending not found)", it->key.c_str());
 			r_map[it->key] = storage::result_not_found;
+			unavailable_keys++;
+			unavailable_reason[it->key] = "proxy_enqueue_error";
 		} else if (r_proxy == cluster::proxy_request_error_partition) {
 			log_warning("partition error (key=%s) -> continue processing (pretending not found)", it->key.c_str());
 			r_map[it->key] = storage::result_not_found;
+			unavailable_keys++;
+			unavailable_reason[it->key] = "partition_error";
 		} else {
 			// storage i/o
 			storage::result r_storage;
@@ -142,9 +150,45 @@ int op_get::_run_server() {
 			if (retcode < 0) {
 				log_warning("storage i/o error (key=%s) -> continue processing (pretending not found)", it->key.c_str());
 				r_map[it->key] = storage::result_not_found;
+				unavailable_keys++;
+				unavailable_reason[it->key] = "storage_error";
 				continue;
 			}
 			r_map[it->key] = r_storage;
+		}
+	}
+
+	// read-unavailable-error (2026-10-02): a key that could not be READ
+	// (forward failed, no partition, enqueue or storage error) has been
+	// answered as a miss ("pretending not found"). Where flare is the
+	// primary store a miss means "the key does not exist", so with the
+	// option on the whole response is SERVER_ERROR instead; a real miss
+	// stays a miss.
+	// R3: a forward made because this node's copy is not eligible for its
+	// source (strict) is an explicit error when it fails, whatever the
+	// option says: the copy must not stand in for the master, and a miss
+	// would tell the client the key is absent.
+	{
+		const bool option = this->_cluster->is_read_unavailable_error();
+		bool unavailable = option && unavailable_keys > 0;
+		bool strict_failed = false;
+		for (map<string, shared_queue_proxy_read>::iterator qi = q_map.begin(); qi != q_map.end(); qi++) {
+			if (!option && !qi->second->is_strict()) {
+				continue;
+			}
+			qi->second->sync();
+			if (!qi->second->is_success()) {
+				unavailable = true;
+				strict_failed = strict_failed || qi->second->is_strict();
+			}
+		}
+		if (unavailable) {
+			log_warning("get could not be served (%d local key(s) unreadable or a forward failed%s) -> SERVER_ERROR (%s)", unavailable_keys,
+				strict_failed ? ", incl. a forward for a non-eligible copy" : "", option ? "read-unavailable-error" : "source not verified");
+			for (list<storage::entry>::iterator it = this->_entry_list.begin(); it != this->_entry_list.end(); it++) {
+				cluster::trace_read_result(this, it->key, "refused", strict_failed && !option ? "source_unverified_forward_failed" : "read_unavailable_error");
+			}
+			return this->_send_result(result_server_error, "read unavailable");
 		}
 	}
 
@@ -154,6 +198,11 @@ int op_get::_run_server() {
 			q->sync();
 			storage::entry& e = q->get_entry();
 			_send_entry(e);
+			if (cluster::is_read_traced(it->key)) {
+				cluster::trace_read_result(this, it->key,
+					!q->is_success() ? "unavailable" : e.is_data_available() ? "hit" : "miss",
+					!q->is_success() ? "forward_failed" : "forwarded");
+			}
 			if (e.is_data_available()) {
 				stats_object->increment_get_hits();
 			} else {
@@ -164,11 +213,22 @@ int op_get::_run_server() {
 			stats_object->increment_get_misses();
 		} else if (r_map[it->key] == storage::result_not_found) {
 			_send_entry(*it);
+			if (cluster::is_read_traced(it->key)) {
+				map<string, const char*>::iterator u = unavailable_reason.find(it->key);
+				if (u != unavailable_reason.end()) {
+					cluster::trace_read_result(this, it->key, "unavailable", u->second);
+				} else {
+					cluster::trace_read_result(this, it->key, "miss", "local");
+				}
+			}
 			stats_object->increment_get_misses();
 		} else {
 			// for safety
 			// op like "get key1 key1" will cause segfault
 			_send_entry(*it);
+			if (cluster::is_read_traced(it->key)) {
+				cluster::trace_read_result(this, it->key, it->is_data_available() ? "hit" : "miss", "local");
+			}
 			if (it->is_data_available()) {
 				stats_object->increment_get_hits();
 			} else {

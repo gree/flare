@@ -216,7 +216,27 @@ cluster:
   # (S3 already holds the history; a local checkpoint on a RAM disk is not a
   # durable restore point anyway). E.g. {walSizeLimitMb: 512, walTtlSeconds:
   # 3600, backupKeep: 1}.
-  rocksdb: {}
+  # Startup-only memory knobs, for example:
+  # rocksdb: {blockCacheSizeMb: 64, writeBufferSizeMb: 16, maxWriteBufferNumber: 3}
+  # These are NOT an RSS cap: allow for all column families, compaction,
+  # replication, process overhead and tmpfs if used. SIGHUP cannot apply them;
+  # wait for extra.conf propagation, then use a planned safe restart/migration.
+  # The operator does not automatically delete/restart data pods for this change.
+  # maxTotalThreadQueue bounds the proxy requests flared buffers, forwards to
+  # replicas included. Unbounded (flared's own default 0), a master whose
+  # follower is slower than the write rate buffered every pending forward,
+  # about 600 B each. That was 1.7 GB at 6M keys in the scale evaluation
+  # (2026-10-02), until the pod was OOM-killed. At the bound a forward is
+  # dropped and counted (proxy_write_dropped). With continuous replication
+  # the follower then fills it from the WAL; without it, the repair path
+  # rebuilds the replica. 200000 is about 120 MB.
+  # Production policy (2026-10-06): set readUnavailableError: true, so a get
+  # that cannot be served (forward to the master failed, no partition,
+  # enqueue or storage error) answers SERVER_ERROR instead of END ("key
+  # absent"). Not the chart default yet (default changes are decided
+  # separately); clients must treat SERVER_ERROR as an error, not a miss.
+  rocksdb:
+    maxTotalThreadQueue: 200000
   # Declarative read-routing policy (CRD spec.readBalance). flared routes
   # reads by balance weight; the operator normalizes every node map to this
   # policy, so manual flare-admin balance edits are reverted — change this

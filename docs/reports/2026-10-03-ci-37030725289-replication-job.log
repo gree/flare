@@ -1,0 +1,261 @@
+﻿2026-10-02T15:58:47.0389574Z Current runner version: '2.337.0'
+2026-10-02T15:58:47.0405832Z ##[group]Runner Image Provisioner
+2026-10-02T15:58:47.0406453Z Hosted Compute Agent
+2026-10-02T15:58:47.0406883Z Version: 20260901.588
+2026-10-02T15:58:47.0407305Z Commit: f88ec8081b781fac6c440065ac7ff9e710ce3d0b
+2026-10-02T15:58:47.0408064Z Build Date: 2026-09-01T19:56:44Z
+2026-10-02T15:58:47.0408533Z Worker ID: {07a1863c-b02f-4521-aa63-92c8e55dc1f4}
+2026-10-02T15:58:47.0409016Z Azure Region: centralus
+2026-10-02T15:58:47.0409420Z ##[endgroup]
+2026-10-02T15:58:47.0410711Z ##[group]Operating System
+2026-10-02T15:58:47.0411120Z Ubuntu
+2026-10-02T15:58:47.0411498Z 24.04.5
+2026-10-02T15:58:47.0411843Z LTS
+2026-10-02T15:58:47.0412193Z ##[endgroup]
+2026-10-02T15:58:47.0412571Z ##[group]Runner Image
+2026-10-02T15:58:47.0413001Z Image: ubuntu-24.04
+2026-10-02T15:58:47.0413398Z Version: 20260927.320.1
+2026-10-02T15:58:47.0414259Z Included Software: https://github.com/actions/runner-images/blob/ubuntu24/20260927.320/images/ubuntu/Ubuntu2404-Readme.md
+2026-10-02T15:58:47.0415324Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260927.320
+2026-10-02T15:58:47.0415951Z ##[endgroup]
+2026-10-02T15:58:47.0416743Z ##[group]GITHUB_TOKEN Permissions
+2026-10-02T15:58:47.0418552Z Contents: read
+2026-10-02T15:58:47.0418982Z Metadata: read
+2026-10-02T15:58:47.0419374Z ##[endgroup]
+2026-10-02T15:58:47.0420803Z Secret source: Actions
+2026-10-02T15:58:47.0421453Z Cache mode: write
+2026-10-02T15:58:47.0421921Z Prepare workflow directory
+2026-10-02T15:58:47.0679169Z Prepare all required actions
+2026-10-02T15:58:47.0713921Z Getting action download info
+2026-10-02T15:58:47.3484694Z Download action repository 'actions/checkout@v4' (SHA:11d5960a326750d5838078e36cf38b85af677262)
+2026-10-02T15:58:48.1568074Z Download action repository 'docker/setup-buildx-action@v3' (SHA:8d2750c68a42422c14e847fe6c8ac0403b4cbd6f)
+2026-10-02T15:58:48.8100589Z Download action repository 'docker/build-push-action@v6' (SHA:10e90e3645eae34f1e60eeb005ba3a3d33f178e8)
+2026-10-02T15:58:49.4469509Z Download action repository 'actions/upload-artifact@v4' (SHA:ea165f8d65b6e75b540449e92b4886f43607fa02)
+2026-10-02T15:58:49.7428284Z Complete job name: e2e-test (replication)
+2026-10-02T15:58:49.7987918Z ##[group]Run actions/checkout@v4
+2026-10-02T15:58:49.7988522Z with:
+2026-10-02T15:58:49.7988781Z   submodules: recursive
+2026-10-02T15:58:49.7989123Z   repository: gree/flare
+2026-10-02T15:58:49.7991249Z   token: ***
+2026-10-02T15:58:49.7991519Z   ssh-strict: true
+2026-10-02T15:58:49.7991771Z   ssh-user: git
+2026-10-02T15:58:49.7992015Z   persist-credentials: true
+2026-10-02T15:58:49.7992335Z   clean: true
+2026-10-02T15:58:49.7992599Z   sparse-checkout-cone-mode: true
+2026-10-02T15:58:49.7992885Z   fetch-depth: 1
+2026-10-02T15:58:49.7993160Z   fetch-tags: false
+2026-10-02T15:58:49.7993416Z   show-progress: true
+2026-10-02T15:58:49.7993736Z   lfs: false
+2026-10-02T15:58:49.7993980Z   set-safe-directory: true
+2026-10-02T15:58:49.7994261Z   allow-unsafe-pr-checkout: false
+2026-10-02T15:58:49.7994709Z ##[endgroup]
+2026-10-02T15:58:49.8856370Z Syncing repository: gree/flare
+2026-10-02T15:58:49.8858559Z ##[group]Getting Git version info
+2026-10-02T15:58:49.8859319Z Working directory is '/home/runner/work/flare/flare'
+2026-10-02T15:58:49.8860267Z [command]/usr/bin/git version
+2026-10-02T15:58:49.9133845Z git version 2.55.0
+2026-10-02T15:58:49.9148487Z ##[endgroup]
+2026-10-02T15:58:49.9159289Z Temporarily overriding HOME='/home/runner/work/_temp/4fd683cc-ce93-4690-8000-83ba978d6ff7' before making global git config changes
+2026-10-02T15:58:49.9160860Z Adding repository directory to the temporary git global config as a safe directory
+2026-10-02T15:58:49.9163895Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/flare/flare
+2026-10-02T15:58:49.9209533Z Deleting the contents of '/home/runner/work/flare/flare'
+2026-10-02T15:58:49.9215023Z ##[group]Initializing the repository
+2026-10-02T15:58:49.9219630Z [command]/usr/bin/git init /home/runner/work/flare/flare
+2026-10-02T15:58:49.9992114Z hint: Using 'master' as the name for the initial branch. This default branch name
+2026-10-02T15:58:49.9993508Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+2026-10-02T15:58:49.9994404Z hint: to use in all of your new repositories, which will suppress this warning,
+2026-10-02T15:58:49.9995118Z hint: call:
+2026-10-02T15:58:49.9996109Z hint:
+2026-10-02T15:58:49.9996887Z hint: 	git config --global init.defaultBranch <name>
+2026-10-02T15:58:49.9997392Z hint:
+2026-10-02T15:58:49.9997945Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+2026-10-02T15:58:49.9998528Z hint: 'development'. The just-created branch can be renamed via this command:
+2026-10-02T15:58:49.9999002Z hint:
+2026-10-02T15:58:49.9999260Z hint: 	git branch -m <name>
+2026-10-02T15:58:49.9999542Z hint:
+2026-10-02T15:58:49.9999865Z hint: Disable this message with "git config set advice.defaultBranchName false"
+2026-10-02T15:58:50.0000361Z Initialized empty Git repository in /home/runner/work/flare/flare/.git/
+2026-10-02T15:58:50.0002400Z [command]/usr/bin/git remote add origin https://github.com/gree/flare
+2026-10-02T15:58:50.0516515Z ##[endgroup]
+2026-10-02T15:58:50.0517403Z ##[group]Disabling automatic garbage collection
+2026-10-02T15:58:50.0521886Z [command]/usr/bin/git config --local gc.auto 0
+2026-10-02T15:58:50.0550967Z ##[endgroup]
+2026-10-02T15:58:50.0551696Z ##[group]Setting up auth
+2026-10-02T15:58:50.0558757Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-10-02T15:58:50.0586271Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-10-02T15:58:50.1068752Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-10-02T15:58:50.1095890Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-10-02T15:58:50.1258847Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+2026-10-02T15:58:50.1283942Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+2026-10-02T15:58:50.1444432Z [command]/usr/bin/git config --local http.https://github.com/.extraheader AUTHORIZATION: basic ***
+2026-10-02T15:58:50.1478037Z ##[endgroup]
+2026-10-02T15:58:50.1478790Z ##[group]Fetching the repository
+2026-10-02T15:58:50.1488300Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin +5a8e658b805ed8ad93e1208ff753a1f9be398644:refs/remotes/pull/144/merge
+2026-10-02T15:58:51.5366163Z From https://github.com/gree/flare
+2026-10-02T15:58:51.5366975Z  * [new ref]         5a8e658b805ed8ad93e1208ff753a1f9be398644 -> pull/144/merge
+2026-10-02T15:58:51.5369239Z ##[endgroup]
+2026-10-02T15:58:51.5369912Z ##[group]Determining the checkout info
+2026-10-02T15:58:51.5372730Z ##[endgroup]
+2026-10-02T15:58:51.5387045Z [command]/usr/bin/git sparse-checkout disable
+2026-10-02T15:58:51.5748937Z [command]/usr/bin/git config --local --unset-all extensions.worktreeConfig
+2026-10-02T15:58:51.5773071Z ##[group]Checking out the ref
+2026-10-02T15:58:51.5779035Z [command]/usr/bin/git checkout --progress --force refs/remotes/pull/144/merge
+2026-10-02T15:58:51.6392584Z Note: switching to 'refs/remotes/pull/144/merge'.
+2026-10-02T15:58:51.6393336Z 
+2026-10-02T15:58:51.6393596Z You are in 'detached HEAD' state. You can look around, make experimental
+2026-10-02T15:58:51.6394227Z changes and commit them, and you can discard any commits you make in this
+2026-10-02T15:58:51.6394870Z state without impacting any branches by switching back to a branch.
+2026-10-02T15:58:51.6395216Z 
+2026-10-02T15:58:51.6395546Z If you want to create a new branch to retain commits you create, you may
+2026-10-02T15:58:51.6396122Z do so (now or later) by using -c with the switch command. Example:
+2026-10-02T15:58:51.6396645Z 
+2026-10-02T15:58:51.6396859Z   git switch -c <new-branch-name>
+2026-10-02T15:58:51.6397107Z 
+2026-10-02T15:58:51.6397249Z Or undo this operation with:
+2026-10-02T15:58:51.6397685Z 
+2026-10-02T15:58:51.6397838Z   git switch -
+2026-10-02T15:58:51.6398076Z 
+2026-10-02T15:58:51.6398302Z Turn off this advice by setting config variable advice.detachedHead to false
+2026-10-02T15:58:51.6398601Z 
+2026-10-02T15:58:51.6398894Z HEAD is now at 5a8e658 Merge 79bf29c5defee6680fcdaa4bac17b38daca93ad2 into a8763cbe11106f2b7f88d1e6bbc6a7657a8be51f
+2026-10-02T15:58:51.6419910Z ##[endgroup]
+2026-10-02T15:58:51.6420717Z ##[group]Setting up auth for fetching submodules
+2026-10-02T15:58:51.6421556Z [command]/usr/bin/git config --global http.https://github.com/.extraheader AUTHORIZATION: basic ***
+2026-10-02T15:58:51.6447876Z [command]/usr/bin/git config --global --unset-all url.https://github.com/.insteadOf
+2026-10-02T15:58:51.6473006Z [command]/usr/bin/git config --global --add url.https://github.com/.insteadOf git@github.com:
+2026-10-02T15:58:51.6598267Z [command]/usr/bin/git config --global --add url.https://github.com/.insteadOf org-331743@github.com:
+2026-10-02T15:58:51.6620913Z ##[endgroup]
+2026-10-02T15:58:51.6621326Z ##[group]Fetching submodules
+2026-10-02T15:58:51.6624578Z [command]/usr/bin/git submodule sync --recursive
+2026-10-02T15:58:51.6783420Z [command]/usr/bin/git -c protocol.version=2 submodule update --init --force --depth=1 --recursive
+2026-10-02T15:58:51.6945138Z [command]/usr/bin/git submodule foreach --recursive git config --local gc.auto 0
+2026-10-02T15:58:51.7096758Z ##[endgroup]
+2026-10-02T15:58:51.7097689Z ##[group]Persisting credentials for submodules
+2026-10-02T15:58:51.7102543Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'url\.https\:\/\/github\.com\/\.insteadOf' && git config --local --unset-all 'url.https://github.com/.insteadOf' || :"
+2026-10-02T15:58:51.7260563Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local 'http.https://github.com/.extraheader' 'AUTHORIZATION: basic ***' && git config --local --show-origin --name-only --get-regexp remote.origin.url"
+2026-10-02T15:58:51.7418202Z [command]/usr/bin/git submodule foreach --recursive git config --local --add 'url.https://github.com/.insteadOf' 'git@github.com:'
+2026-10-02T15:58:51.7570155Z [command]/usr/bin/git submodule foreach --recursive git config --local --add 'url.https://github.com/.insteadOf' 'org-331743@github.com:'
+2026-10-02T15:58:51.7723028Z ##[endgroup]
+2026-10-02T15:58:51.7759894Z [command]/usr/bin/git log -1 --format=%H
+2026-10-02T15:58:51.7778694Z 5a8e658b805ed8ad93e1208ff753a1f9be398644
+2026-10-02T15:58:51.8365894Z ##[group]Run curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf | sh -s -- -y
+2026-10-02T15:58:51.8366651Z [36;1mcurl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf | sh -s -- -y[0m
+2026-10-02T15:58:51.8367145Z [36;1mecho "$HOME/.elan/bin" >> $GITHUB_PATH[0m
+2026-10-02T15:58:51.8531561Z shell: /usr/bin/bash -e {0}
+2026-10-02T15:58:51.8531862Z ##[endgroup]
+2026-10-02T15:58:51.9291105Z info: downloading installer
+2026-10-02T15:58:53.0837014Z info: default toolchain set to 'stable'
+2026-10-02T15:58:53.1522411Z ##[group]Run curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.24.0/kind-linux-amd64
+2026-10-02T15:58:53.1522914Z [36;1mcurl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.24.0/kind-linux-amd64[0m
+2026-10-02T15:58:53.1523281Z [36;1mchmod +x ./kind[0m
+2026-10-02T15:58:53.1523599Z [36;1msudo mv ./kind /usr/local/bin/kind[0m
+2026-10-02T15:58:53.1559786Z shell: /usr/bin/bash -e {0}
+2026-10-02T15:58:53.1560068Z ##[endgroup]
+2026-10-02T15:58:53.1686853Z   % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+2026-10-02T15:58:53.1687360Z                                  Dload  Upload   Total   Spent    Left  Speed
+2026-10-02T15:58:53.1687687Z 
+2026-10-02T15:58:53.3248382Z   0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
+2026-10-02T15:58:53.3249248Z 100    97  100    97    0     0    621      0 --:--:-- --:--:-- --:--:--   621
+2026-10-02T15:58:53.4435829Z 
+2026-10-02T15:58:53.4437428Z   0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
+2026-10-02T15:58:53.4761849Z 
+2026-10-02T15:58:53.4762677Z   0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
+2026-10-02T15:58:53.4767062Z curl: (35) Recv failure: Connection reset by peer
+2026-10-02T15:58:53.4800411Z ##[error]Process completed with exit code 35.
+2026-10-02T15:58:53.4953123Z ##[group]Run actions/upload-artifact@v4
+2026-10-02T15:58:53.4953409Z with:
+2026-10-02T15:58:53.4953643Z   name: e2e-replication-none-1
+2026-10-02T15:58:53.4953911Z   path: ci-results/
+2026-10-02T15:58:53.4954152Z   retention-days: 30
+2026-10-02T15:58:53.4954386Z   if-no-files-found: warn
+2026-10-02T15:58:53.4954654Z   compression-level: 6
+2026-10-02T15:58:53.4954890Z   overwrite: false
+2026-10-02T15:58:53.4955181Z   include-hidden-files: false
+2026-10-02T15:58:53.4955452Z ##[endgroup]
+2026-10-02T15:58:53.6205822Z (node:2287) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+2026-10-02T15:58:53.6206858Z (Use `node --trace-deprecation ...` to show where the warning was created)
+2026-10-02T15:58:53.6231923Z ##[warning]No files were found with the provided path: ci-results/. No artifacts will be uploaded.
+2026-10-02T15:58:53.6324533Z ##[group]Run # Suites run their own operator in per-suite namespaces (flare-*),
+2026-10-02T15:58:53.6325093Z [36;1m# Suites run their own operator in per-suite namespaces (flare-*),[0m
+2026-10-02T15:58:53.6325498Z [36;1m# so dump every one of them — a fixed -n flare-system misses the[0m
+2026-10-02T15:58:53.6325975Z [36;1m# namespace of the suite that actually failed.[0m
+2026-10-02T15:58:53.6326356Z [36;1mfor ns in $(kubectl get ns -o name | sed 's|namespace/||' | grep '^flare-'); do[0m
+2026-10-02T15:58:53.6326865Z [36;1m  echo "=== Operator Logs ($ns) ==="[0m
+2026-10-02T15:58:53.6327283Z [36;1m  kubectl logs -n "$ns" -l app=flare-operator --tail=300 --prefix || true[0m
+2026-10-02T15:58:53.6327908Z [36;1m  echo "=== flared Logs ($ns, tail 100 each) ==="[0m
+2026-10-02T15:58:53.6328345Z [36;1m  kubectl logs -n "$ns" -l app=flare --tail=100 --prefix || true[0m
+2026-10-02T15:58:53.6328688Z [36;1mdone[0m
+2026-10-02T15:58:53.6361950Z shell: /usr/bin/bash -e {0}
+2026-10-02T15:58:53.6362417Z ##[endgroup]
+2026-10-02T15:59:00.8533781Z E1002 15:59:00.852684    2305 memcache.go:381] "Couldn't get current server API group list" err="Get \"http://localhost:8080/api?timeout=32s\": dial tcp [::1]:8080: connect: connection refused"
+2026-10-02T15:59:00.8537388Z E1002 15:59:00.853610    2305 memcache.go:381] "Couldn't get current server API group list" err="Get \"http://localhost:8080/api?timeout=32s\": dial tcp [::1]:8080: connect: connection refused"
+2026-10-02T15:59:00.8551226Z E1002 15:59:00.854944    2305 memcache.go:381] "Couldn't get current server API group list" err="Get \"http://localhost:8080/api?timeout=32s\": dial tcp [::1]:8080: connect: connection refused"
+2026-10-02T15:59:00.8552789Z E1002 15:59:00.855200    2305 memcache.go:381] "Couldn't get current server API group list" err="Get \"http://localhost:8080/api?timeout=32s\": dial tcp [::1]:8080: connect: connection refused"
+2026-10-02T15:59:00.8566664Z E1002 15:59:00.856550    2305 memcache.go:381] "Couldn't get current server API group list" err="Get \"http://localhost:8080/api?timeout=32s\": dial tcp [::1]:8080: connect: connection refused"
+2026-10-02T15:59:00.8576356Z The connection to the server localhost:8080 was refused - did you specify the right host or port?
+2026-10-02T15:59:00.8611587Z ##[group]Run echo "=== All Namespaces ==="
+2026-10-02T15:59:00.8611925Z [36;1mecho "=== All Namespaces ==="[0m
+2026-10-02T15:59:00.8612181Z [36;1mkubectl get ns || true[0m
+2026-10-02T15:59:00.8612463Z [36;1mecho ""[0m
+2026-10-02T15:59:00.8612690Z [36;1mecho "=== All Pods ==="[0m
+2026-10-02T15:59:00.8613063Z [36;1mkubectl get pods --all-namespaces || true[0m
+2026-10-02T15:59:00.8613355Z [36;1mecho ""[0m
+2026-10-02T15:59:00.8613587Z [36;1mecho "=== Events (all namespaces) ==="[0m
+2026-10-02T15:59:00.8613940Z [36;1mkubectl get events --all-namespaces --sort-by='.lastTimestamp' || true[0m
+2026-10-02T15:59:00.8614294Z [36;1mecho ""[0m
+2026-10-02T15:59:00.8614516Z [36;1mecho "=== FlareCluster CRs ==="[0m
+2026-10-02T15:59:00.8614867Z [36;1mkubectl get flareclusters --all-namespaces -o yaml || true[0m
+2026-10-02T15:59:00.8647689Z shell: /usr/bin/bash -e {0}
+2026-10-02T15:59:00.8647999Z ##[endgroup]
+2026-10-02T15:59:00.8741021Z === All Namespaces ===
+2026-10-02T15:59:00.9831607Z E1002 15:59:00.982966    2315 memcache.go:381] "Couldn't get current server API group list" err="Get \"http://localhost:8080/api?timeout=32s\": dial tcp [::1]:8080: connect: connection refused"
+2026-10-02T15:59:00.9833985Z E1002 15:59:00.983267    2315 memcache.go:381] "Couldn't get current server API group list" err="Get \"http://localhost:8080/api?timeout=32s\": dial tcp [::1]:8080: connect: connection refused"
+2026-10-02T15:59:00.9848516Z E1002 15:59:00.984708    2315 memcache.go:381] "Couldn't get current server API group list" err="Get \"http://localhost:8080/api?timeout=32s\": dial tcp [::1]:8080: connect: connection refused"
+2026-10-02T15:59:00.9850165Z E1002 15:59:00.984936    2315 memcache.go:381] "Couldn't get current server API group list" err="Get \"http://localhost:8080/api?timeout=32s\": dial tcp [::1]:8080: connect: connection refused"
+2026-10-02T15:59:00.9866977Z E1002 15:59:00.986558    2315 memcache.go:381] "Couldn't get current server API group list" err="Get \"http://localhost:8080/api?timeout=32s\": dial tcp [::1]:8080: connect: connection refused"
+2026-10-02T15:59:00.9867896Z The connection to the server localhost:8080 was refused - did you specify the right host or port?
+2026-10-02T15:59:00.9877140Z 
+2026-10-02T15:59:00.9877798Z === All Pods ===
+2026-10-02T15:59:01.0149590Z E1002 15:59:01.014784    2321 memcache.go:381] "Couldn't get current server API group list" err="Get \"http://localhost:8080/api?timeout=32s\": dial tcp [::1]:8080: connect: connection refused"
+2026-10-02T15:59:01.0152023Z E1002 15:59:01.015067    2321 memcache.go:381] "Couldn't get current server API group list" err="Get \"http://localhost:8080/api?timeout=32s\": dial tcp [::1]:8080: connect: connection refused"
+2026-10-02T15:59:01.0165098Z E1002 15:59:01.016385    2321 memcache.go:381] "Couldn't get current server API group list" err="Get \"http://localhost:8080/api?timeout=32s\": dial tcp [::1]:8080: connect: connection refused"
+2026-10-02T15:59:01.0167415Z E1002 15:59:01.016639    2321 memcache.go:381] "Couldn't get current server API group list" err="Get \"http://localhost:8080/api?timeout=32s\": dial tcp [::1]:8080: connect: connection refused"
+2026-10-02T15:59:01.0180904Z E1002 15:59:01.017981    2321 memcache.go:381] "Couldn't get current server API group list" err="Get \"http://localhost:8080/api?timeout=32s\": dial tcp [::1]:8080: connect: connection refused"
+2026-10-02T15:59:01.0181764Z The connection to the server localhost:8080 was refused - did you specify the right host or port?
+2026-10-02T15:59:01.0188648Z 
+2026-10-02T15:59:01.0188955Z === Events (all namespaces) ===
+2026-10-02T15:59:01.0454111Z E1002 15:59:01.045265    2327 memcache.go:381] "Couldn't get current server API group list" err="Get \"http://localhost:8080/api?timeout=32s\": dial tcp [::1]:8080: connect: connection refused"
+2026-10-02T15:59:01.0456721Z E1002 15:59:01.045511    2327 memcache.go:381] "Couldn't get current server API group list" err="Get \"http://localhost:8080/api?timeout=32s\": dial tcp [::1]:8080: connect: connection refused"
+2026-10-02T15:59:01.0533734Z E1002 15:59:01.053241    2327 memcache.go:381] "Couldn't get current server API group list" err="Get \"http://localhost:8080/api?timeout=32s\": dial tcp [::1]:8080: connect: connection refused"
+2026-10-02T15:59:01.0539455Z E1002 15:59:01.053777    2327 memcache.go:381] "Couldn't get current server API group list" err="Get \"http://localhost:8080/api?timeout=32s\": dial tcp [::1]:8080: connect: connection refused"
+2026-10-02T15:59:01.0547365Z E1002 15:59:01.054620    2327 memcache.go:381] "Couldn't get current server API group list" err="Get \"http://localhost:8080/api?timeout=32s\": dial tcp [::1]:8080: connect: connection refused"
+2026-10-02T15:59:01.0558504Z The connection to the server localhost:8080 was refused - did you specify the right host or port?
+2026-10-02T15:59:01.0567968Z 
+2026-10-02T15:59:01.0568305Z === FlareCluster CRs ===
+2026-10-02T15:59:01.0903309Z E1002 15:59:01.090144    2333 memcache.go:381] "Couldn't get current server API group list" err="Get \"http://localhost:8080/api?timeout=32s\": dial tcp [::1]:8080: connect: connection refused"
+2026-10-02T15:59:01.0905816Z E1002 15:59:01.090482    2333 memcache.go:381] "Couldn't get current server API group list" err="Get \"http://localhost:8080/api?timeout=32s\": dial tcp [::1]:8080: connect: connection refused"
+2026-10-02T15:59:01.0920461Z E1002 15:59:01.091903    2333 memcache.go:381] "Couldn't get current server API group list" err="Get \"http://localhost:8080/api?timeout=32s\": dial tcp [::1]:8080: connect: connection refused"
+2026-10-02T15:59:01.0922179Z E1002 15:59:01.092130    2333 memcache.go:381] "Couldn't get current server API group list" err="Get \"http://localhost:8080/api?timeout=32s\": dial tcp [::1]:8080: connect: connection refused"
+2026-10-02T15:59:01.0935215Z E1002 15:59:01.093417    2333 memcache.go:381] "Couldn't get current server API group list" err="Get \"http://localhost:8080/api?timeout=32s\": dial tcp [::1]:8080: connect: connection refused"
+2026-10-02T15:59:01.0935939Z The connection to the server localhost:8080 was refused - did you specify the right host or port?
+2026-10-02T15:59:01.0973351Z ##[group]Run kind delete cluster --name flare-e2e
+2026-10-02T15:59:01.0973700Z [36;1mkind delete cluster --name flare-e2e[0m
+2026-10-02T15:59:01.1005188Z shell: /usr/bin/bash -e {0}
+2026-10-02T15:59:01.1005462Z ##[endgroup]
+2026-10-02T15:59:02.4475836Z Deleting cluster "flare-e2e" ...
+2026-10-02T15:59:02.5654681Z Post job cleanup.
+2026-10-02T15:59:02.6281009Z [command]/usr/bin/git version
+2026-10-02T15:59:02.6313296Z git version 2.55.0
+2026-10-02T15:59:02.6342935Z Temporarily overriding HOME='/home/runner/work/_temp/3c6ff13d-621b-48eb-b86d-34a0111246fd' before making global git config changes
+2026-10-02T15:59:02.6343899Z Adding repository directory to the temporary git global config as a safe directory
+2026-10-02T15:59:02.6347565Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/flare/flare
+2026-10-02T15:59:02.6445174Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-10-02T15:59:02.6468649Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-10-02T15:59:02.6640713Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-10-02T15:59:02.6657755Z http.https://github.com/.extraheader
+2026-10-02T15:59:02.6664821Z [command]/usr/bin/git config --local --unset-all http.https://github.com/.extraheader
+2026-10-02T15:59:02.6739697Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-10-02T15:59:02.6895907Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+2026-10-02T15:59:02.6917641Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+2026-10-02T15:59:02.7159950Z Cleaning up orphan processes
+2026-10-02T15:59:02.7333243Z ##[warning]Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@v4, actions/upload-artifact@v4. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/

@@ -9,6 +9,12 @@ metadata:
 spec:
   partitions: 4
   replicas: 2
+  # Production policy (2026-10-06): a get that cannot be served (forward to
+  # the master failed, no partition, enqueue or storage error) answers
+  # SERVER_ERROR instead of END, so an outage is never shown to clients as
+  # "key absent". Clients must treat SERVER_ERROR as an error, not a miss.
+  rocksdb:
+    readUnavailableError: true
 
 ---
 apiVersion: v1

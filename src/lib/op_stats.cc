@@ -33,6 +33,8 @@
 #ifdef HAVE_LIBROCKSDB
 #include "storage_rocksdb.h"
 #endif
+#include <malloc.h>
+#include <sstream>
 
 namespace gree {
 namespace flare {
@@ -130,6 +132,21 @@ int op_stats::_send_stats(thread_pool* req_tp, thread_pool* other_tp, storage* s
 
 	_send_stat("pid"									, stats_object->get_pid());
 	_send_stat("uptime" 							, stats_object->get_uptime());
+	// Queued proxy requests (forwards to replicas, proxied reads). Only
+	// `stats threads queue` carried it before, so plain `stats` readers saw
+	// nothing while millions of forwards were queued (2026-10-02).
+	_send_stat("total_thread_queue"					, stats_object->get_total_thread_queue());
+#if defined(__GLIBC__) && (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 33))
+	{
+		// Heap accounting (2026-10-02): in-use bytes grow on a leak, free
+		// bytes held by the allocator grow on fragmentation. Both are
+		// needed to tell them apart when RSS rises with the data.
+		struct mallinfo2 mi = ::mallinfo2();
+		_send_stat("malloc_in_use_bytes"			, static_cast<uint64_t>(mi.uordblks + mi.hblkhd));
+		_send_stat("malloc_free_bytes"				, static_cast<uint64_t>(mi.fordblks));
+		_send_stat("malloc_arena_bytes"				, static_cast<uint64_t>(mi.arena));
+	}
+#endif
 	_send_stat("time" 								, stats_object->get_timestamp());
 	_send_stat("version"							, stats_object->get_version());
 	_send_stat("pointer_size" 				, stats_object->get_pointer_size());
@@ -181,6 +198,21 @@ int op_stats::_send_stats(thread_pool* req_tp, thread_pool* other_tp, storage* s
 		_send_stat("reconstruction_last_success_id"		, rr.last_success_id);
 		_send_stat("reconstruction_last_success_source"	, rr.last_success_source);
 	}
+	{
+		// Continuous replication, follower side (SAF-10b). ONE snapshot: a
+		// position without the time it was observed, or a state without a
+		// reason, cannot be acted on (design §5.1).
+		stats::follow_record fr = stats_object->get_follow_record();
+		_send_stat("repl_follow_enabled"                , fr.enabled ? 1 : 0);
+		_send_stat("repl_follow_source"                 , fr.source);
+		_send_stat("repl_follow_source_epoch"           , fr.source_epoch);
+		_send_stat("repl_follow_state"                  , fr.state);
+		_send_stat("repl_follow_last_reason"            , fr.last_reason);
+		_send_stat("repl_applied_lsn"                   , fr.applied_lsn);
+		_send_stat("repl_source_lsn"                    , fr.source_lsn);
+		_send_stat("repl_source_lsn_observed_at"        , static_cast<uint64_t>(fr.source_lsn_observed_at));
+		_send_stat("repl_last_progress_at"              , static_cast<uint64_t>(fr.last_progress_at));
+	}
 	_send_stat("incr_hits"						, stats_object->get_incr_hits());
 	_send_stat("incr_misses"					, stats_object->get_incr_misses());
 	_send_stat("decr_hits"						, stats_object->get_decr_hits());
@@ -197,6 +229,20 @@ int op_stats::_send_stats(thread_pool* req_tp, thread_pool* other_tp, storage* s
 	_send_stat("threads"							, stats_object->get_threads(req_tp, other_tp));
 	_send_stat("pool_threads" 				, stats_object->get_pool_threads(req_tp, other_tp));
 	_send_stat("node_map_version"		, cl->get_node_map_version());
+	// decision 2026-10-08: the map made this node a master over a copy it
+	// refuses to serve (0 = not refused)
+	_send_stat("promotion_refused"		, cl->is_promotion_refused() ? 1 : 0);
+	{
+		// R3: the source this node's copy is eligible for. eligible=0 means
+		// local reads are withdrawn and the node must not be promoted until
+		// it is re-validated; needs_rebuild asks the controller for a rebuild.
+		const source_binding rs = cl->get_read_source();
+		_send_stat("repl_read_source_eligible"       , rs.is_eligible() ? 1 : 0);
+		_send_stat("repl_read_source_state"          , string(source_binding::state_name(rs.st)));
+		_send_stat("repl_read_source"                , rs.source);
+		_send_stat("repl_read_source_epoch"          , rs.source_epoch);
+		_send_stat("repl_read_source_reason"         , rs.reason);
+	}
 
 	// Data-dir filesystem usage (statvfs). On tmpfs clusters this is the RAM
 	// the dataset occupies — the quantity that drives the pod's memory limit —
@@ -214,6 +260,92 @@ int op_stats::_send_stats(thread_pool* req_tp, thread_pool* other_tp, storage* s
 		storage_rocksdb* rdb = dynamic_cast<storage_rocksdb*>(st);
 		if (rdb) {
 			_send_stat("rocksdb_master_id"                  , rdb->get_master_id());
+			// Generations (SAF-10, design §3.1): the source epoch identifies
+			// the history a follower reads; the incarnation identifies this
+			// node's own copy. Neither moves on a plain process restart.
+			// Empty means UNAVAILABLE: the node could not establish or persist
+			// its identities and refuses to serve or accept replication.
+			_send_stat("rocksdb_source_epoch"               , rdb->get_source_epoch());
+			_send_stat("rocksdb_copy_id"                    , rdb->get_copy_id());
+			_send_stat("rocksdb_copy_identity_consistent"   , rdb->copy_identity_consistent() ? 1 : 0);
+			// design §6: the live copy is the empty copy left by a quarantine
+			_send_stat("rocksdb_quarantined"                , rdb->is_quarantined() ? 1 : 0);
+			// decision 2026-10-08: changed part-way by a merging dump (durable)
+			_send_stat("rocksdb_copy_partial"               , rdb->is_copy_partial() ? 1 : 0);
+			// copy retention (design §3, §8, §9): the live copy's size (what a
+			// replica staging a copy of THIS node needs), the reserve, why the
+			// last staged rebuild stopped ("" = not blocked), retained copies
+			_send_stat("rocksdb_copy_bytes"                 , rdb->local_copy_bytes());
+			_send_stat("rocksdb_rebuild_reserve_bytes"      , static_cast<long long>(rdb->get_rebuild_reserve_bytes()));
+			_send_stat("rebuild_blocked"                    , rdb->get_rebuild_blocked());
+			// design §10: parked = blocked and waiting for rebuild_resume (no
+			// automatic retry); in_flight = a staged copy / catch-up / switch
+			// running now; serving = a snapshot is being served from here
+			_send_stat("rebuild_parked"                     , rdb->is_rebuild_parked() ? 1 : 0);
+			{
+				// measured peaks (reserve sizing): receiver = the last staged
+				// rebuild, source = the last serve (snapshot or dump)
+				const char* side[] = { "rebuild", "serve" };
+				for (int k = 0; k < 2; k++) {
+					uint64_t dmax = 0, dstart = 0, n = 0;
+					int64_t mmax = -1, amin = -1;
+					rdb->peaks_get(k == 1, dmax, mmax, amin, dstart, n);
+					const string pre = string("rocksdb_") + side[k] + "_peak_";
+					_send_stat((pre + "data_dir_bytes").c_str(), dmax);
+					_send_stat((pre + "data_dir_start_bytes").c_str(), dstart);
+					_send_stat((pre + "memory_bytes").c_str(), static_cast<long long>(mmax));
+					_send_stat((pre + "min_available_bytes").c_str(), static_cast<long long>(amin));
+					_send_stat((pre + "samples").c_str(), n);
+				}
+			}
+			_send_stat("rebuild_in_flight"                  , rdb->is_rebuild_in_flight() ? 1 : 0);
+			_send_stat("rocksdb_switch_unresolved"          , rdb->is_switch_unresolved() ? 1 : 0);
+			{
+				// receipts of completed bulks: "pred>succ@epoch;..." (one line)
+				string chain = rdb->get_bulk_chain();
+				string flat;
+				istringstream in(chain);
+				string l;
+				while (getline(in, l)) {
+					istringstream f(l);
+					string pr, su, ep;
+					if (f >> pr >> su >> ep) {
+						flat += (flat.empty() ? "" : ";") + pr + ">" + su + "@" + ep;
+					}
+				}
+				_send_stat("rocksdb_bulk_chain"                 , flat.empty() ? string("-") : flat);
+			}
+			_send_stat("rocksdb_snapshot_serving"           , rdb->is_snapshot_serving() ? 1 : 0);
+			_send_stat("rocksdb_retained_copies"            , static_cast<uint64_t>(rdb->list_retained().size()));
+			// monitoring (decision 2026-10-07, item 2): what the kept copies take
+			_send_stat("rocksdb_retained_bytes"             , rdb->bytes_with_prefix("retained-"));
+			_send_stat("rocksdb_quarantine_bytes"           , rdb->bytes_with_prefix("quarantine-"));
+			_send_stat("rocksdb_staging_bytes"              , rdb->bytes_with_prefix("staging-"));
+			_send_stat("rocksdb_staged_switched"            , rdb->get_staged_switched());
+			_send_stat("rocksdb_staged_abandoned"           , rdb->get_staged_abandoned());
+			_send_stat("rocksdb_source_epoch_reason"        , rdb->get_source_epoch_reason());
+			// Rebuild evidence ("" = none): the source a clean full dump came from.
+			_send_stat("rocksdb_rebuilt_from_master_id"     , rdb->get_rebuilt_from_master_id());
+			_send_stat("rocksdb_rebuilt_from_epoch"         , rdb->get_rebuilt_from_epoch());
+			_send_stat("rocksdb_incarnation"                , rdb->get_incarnation());
+			_send_stat("rocksdb_generations_broken"         , rdb->generations_broken() ? 1 : 0);
+			// Common apply rule (SAF-10b): what each delivery path did.
+			// repl_wal_skipped moving while repl_forward_applied moves is the
+			// healthy signal of coexistence — the WAL re-delivering changes
+			// that forwarding already applied.
+			_send_stat("repl_forward_applied"               , rdb->get_repl_forward_applied());
+			_send_stat("repl_forward_skipped"               , rdb->get_repl_forward_skipped());
+			_send_stat("repl_wal_applied"                   , rdb->get_repl_wal_applied());
+			_send_stat("repl_wal_skipped"                   , rdb->get_repl_wal_skipped());
+			_send_stat("repl_decode_refused"                , rdb->get_repl_decode_refused());
+			// T17: apply-lock timing (microseconds; maxima since start)
+			_send_stat("repl_apply_lock_count"              , rdb->get_repl_apply_lock_count());
+			_send_stat("repl_apply_lock_hold_us_total"      , rdb->get_repl_apply_lock_hold_us());
+			_send_stat("repl_apply_lock_hold_us_max"        , rdb->get_repl_apply_lock_hold_us_max());
+			_send_stat("repl_apply_lock_wait_us_max"        , rdb->get_repl_apply_lock_wait_us_max());
+			_send_stat("repl_forward_lock_wait_us_max"      , rdb->get_repl_forward_lock_wait_us_max());
+			_send_stat("repl_tombstones_dropped"            , rdb->get_repl_tombstones_dropped());
+			_send_stat("repl_tombstones"                    , rdb->get_repl_tombstones());
 			_send_stat("rocksdb_repl_last_lsn"              , rdb->get_repl_last_lsn());
 			_send_stat("rocksdb_latest_sequence_number"     , rdb->get_latest_sequence_number());
 			_send_stat("rocksdb_wal_sync_success"           , rdb->get_wal_sync_success());
@@ -225,9 +357,11 @@ int op_stats::_send_stats(thread_pool* req_tp, thread_pool* other_tp, storage* s
 			_send_stat("rocksdb_wal_sync_crc_mismatch"      , rdb->get_wal_sync_crc_mismatch());
 			_send_stat("rocksdb_wal_fallback_to_dump"       , rdb->get_wal_fallback_to_dump());
 			_send_stat("rocksdb_expire_reaped"              , rdb->get_expire_reaped());
+			_send_stat("rocksdb_expire_filtered"            , rdb->get_expire_filtered());
 			_send_stat("rocksdb_snapshot_bootstrap"         , rdb->get_snapshot_bootstrap());
 			_send_stat("rocksdb_corruption_detected"        , rdb->get_corruption_detected());
 			_send_stat("rocksdb_hard_reset"                 , rdb->get_hard_reset());
+			_send_stat("rocksdb_rebuild_stale_discarded"    , rdb->get_rebuild_stale_discarded());
 			_send_stat("rocksdb_corrupted"                  , rdb->is_corrupted() ? 1 : 0);
 			_send_stat("rocksdb_resync_failure_count"       , rdb->get_resync_failure_count());
 			_send_stat("rocksdb_resync_failure_threshold"   , rdb->get_resync_failure_threshold());

@@ -42,6 +42,7 @@
 #define	OP_REPL_SNAPSHOT_H
 
 #include "op.h"
+#include <boost/function.hpp>
 #include "storage.h"
 
 using namespace std;
@@ -54,12 +55,31 @@ protected:
 	storage*			_storage;
 	uint64_t			_bwlimit;					// KB/s: client's requested cap, sent with the request (0 = no preference)
 	uint64_t			_peer_bwlimit_request;		// KB/s: server side — what the client asked for
+	// R3-D: evaluated right before the swap replaces the local copy; false
+	// refuses the swap (the staged copy is removed, the local copy is kept)
+	boost::function<bool (string&)>	_pre_swap_gate;
+	// COPY RETENTION (design §3.1): receive into this EXISTING empty
+	// directory (data_dir/staging-<attempt>) and stop there — no gate, no
+	// swap; the caller verifies and switches. "" = the legacy swap.
+	string				_receive_dir;
+	uint64_t			_received_seq;
+	bool				_busy;		// the source answered busy (one serve at a time)
+	string				_received_master_id;
+	// checked between files and every kSpaceWatchBytes; false stops the transfer
+	boost::function<bool (string&)>	_space_watch;
 
 public:
 	op_repl_snapshot(shared_connection c, storage* st);
 	virtual ~op_repl_snapshot();
 
 	void set_bwlimit(uint64_t bwlimit) { this->_bwlimit = bwlimit; };
+	void set_pre_swap_gate(boost::function<bool (string&)> g) { this->_pre_swap_gate = g; };
+	void set_receive_dir(const string& d) { this->_receive_dir = d; };
+	void set_space_watch(boost::function<bool (string&)> w) { this->_space_watch = w; };
+	uint64_t get_received_seq() const { return this->_received_seq; };
+	bool is_busy() const { return this->_busy; };
+	string get_received_master_id() const { return this->_received_master_id; };
+	static const uint64_t kSpaceWatchBytes = 64ULL << 20;
 
 	// Pull the snapshot from the connected source and swap it in as the
 	// local live DB (rocksdb only). Returns 0 on success; on any failure the

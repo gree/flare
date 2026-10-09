@@ -5452,6 +5452,13 @@ def historyTrackingSuite : TestSuite := {
         | .error e => return .fail e
         | .ok (mPod, mIp, sPod, sIp) =>
           let base := (List.range 20).map fun i => (s!"hr_{i}", s!"vr_{i}")
+          -- the master must SERVE before the base writes: the operator's map
+          -- can name a new master a moment before the nodes accept that map
+          -- (manual run 37900698596: (2) ended as the map named the new
+          -- master; this test's first write arrived before it took over)
+          let serving ← waitForCondition s!"the master {mPod} acknowledges writes" 60 do
+            memcachedSet historyCfg.debugPod ns mIp historyCfg.flarePort "hr_probe" "x"
+          if !serving then return .fail s!"precondition: the master {mPod} did not acknowledge a write within 60 s"
           for (k, v) in base do
             if !(← memcachedSet historyCfg.debugPod ns mIp historyCfg.flarePort k v) then return .fail s!"precondition: {k} not acknowledged"
           let conv ← waitForCondition "the replica holds every key" 120 do

@@ -1277,8 +1277,8 @@ int cluster::reconstruct_node(vector<node> v, uint64_t node_map_version) {
 	this->_check_read_source_locked(node_map_version);
 
 	// restore provenance: an ACTIVE slave records the map's binding (a live
-	// copy is bound the first time it is Active; a rebuilt copy re-bound). A
-	// conflict is logged (its reads stay gated by R3; it is not a master).
+	// copy is re-bound to where the map puts it). A RESTORED copy of another
+	// partition is logged (its reads stay gated by R3; it is not a master).
 	{
 		node_map::iterator me = this->_node_map.find(this->_node_key);
 		if (me != this->_node_map.end() && me->second.node_role == role_slave
@@ -2297,9 +2297,13 @@ int cluster::_shift_node_role(string node_key, role old_role, int old_partition,
 			log_err("CRITICAL: PROMOTION REFUSED by this node: %s — it serves no reads or writes as master until the map takes the role away", why.c_str());
 			return 0;
 		}
-		// restore provenance (restore-isolated 5): a copy whose data belongs
-		// to another partition or routing layout — or a restored copy that
-		// cannot show which — never serves as this partition's master
+	}
+	// restore provenance (restore-isolated 5): a RESTORED copy of another
+	// partition or routing layout — or one that cannot show which — never
+	// serves as this partition's master; also when a master is moved to
+	// another partition (a live copy is only re-bound)
+	if (new_role == role_master && (old_role != role_master || old_partition != new_partition) && this->_storage != NULL) {
+		string why;
 		const string want = this->_partition_binding_for(new_partition);
 		const int b = this->_storage->check_partition_binding(want, true, why);
 		if (b != 0) {

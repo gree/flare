@@ -352,7 +352,7 @@ def statefulSetYaml (cfg : ClusterConfig) : String :=
   -- replace the live DB with it and consume the marker, then start flared.
   -- Restore procedure: write the marker on each pod's PVC, delete the pods.
   let prep := if persistent then
-      s!"flare-restore-hook {dataDir} || exit 1; mkdir -p {dataDir}; rm -f {dataDir}/flared.pid"
+      s!"if [ -f {dataDir}/RESTORE ]; then flare-restore-hook {dataDir} || exit 1; fi; mkdir -p {dataDir}; rm -f {dataDir}/flared.pid"
     else
       s!"rm -rf {dataDir}/*.hdb {dataDir}/*.hdb.wal {dataDir}/rocksdb && mkdir -p {dataDir} && rm -f {dataDir}/flared.pid"
   let storageFlag := s!"--storage-type={cfg.storageBackend}"

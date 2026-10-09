@@ -877,6 +877,19 @@ int storage_rocksdb::switch_to_staging(const string& attempt, const string& expe
 		}
 		// the latch described the old copy
 		this->_corrupted = false;
+		{
+			// the staged copy was received from a source: not a RESTORED copy
+			// (a source's flag must not travel), re-bound when it is Active
+			rocksdb::WriteOptions bwo;
+			bwo.sync = true;
+			rocksdb::WriteBatch bb;
+			bb.Delete(kRestoredUnverifiedKey);
+			bb.Delete(kPartitionBindingKey);
+			rocksdb::Status bs = this->_db->Write(bwo, &bb);
+			if (!bs.ok()) {
+				log_err("copy switch: the source's partition binding / restored flag could not be cleared: %s", bs.ToString().c_str());
+			}
+		}
 		if (copy_fs::remove_intent(this->_data_dir) < 0) {
 			break;
 		}
@@ -2966,6 +2979,11 @@ int storage_rocksdb::swap_in_snapshot(const string& staging_dir, uint64_t checkp
 			// says nothing about this copy: drop it (the inherited epoch
 			// already identifies the history).
 			restore.Delete(kReplRebuiltFromKey);
+			// nor do the source's partition binding or restored flag (this
+			// copy is bound again when the map makes it Active; a replicated
+			// copy is not a restored one)
+			restore.Delete(kPartitionBindingKey);
+			restore.Delete(kRestoredUnverifiedKey);
 			rocksdb::Status st = this->_db->Write(wo, &restore);
 			if (!st.ok()) {
 				log_err("swap_in_snapshot: failed to complete the restore batch: %s", st.ToString().c_str());
@@ -3074,50 +3092,42 @@ bool storage_rocksdb::parse_partition_binding(const string& b, std::map<string, 
 	return !first && out.size() == sizeof(need) / sizeof(need[0]);
 }
 
+// _db is replaced under the whole-DB write lock (copy switch, snapshot swap,
+// quarantine): every access here holds the read lock (review of 3b5f2b4)
 string storage_rocksdb::get_partition_binding() {
 	string v;
-	if (this->_db == NULL || !this->_db->Get(this->_read_options, kPartitionBindingKey, &v).ok()) {
-		return string("");
-	}
-	return v;
+	pthread_rwlock_rdlock(&this->_mutex_wholelock);
+	const bool ok = this->_db != NULL && this->_db->Get(this->_read_options, kPartitionBindingKey, &v).ok();
+	pthread_rwlock_unlock(&this->_mutex_wholelock);
+	return ok ? v : string("");
 }
 
 bool storage_rocksdb::is_restored_unverified() {
 	string v;
-	if (this->_db == NULL) {
-		return false;
+	pthread_rwlock_rdlock(&this->_mutex_wholelock);
+	bool r = false;
+	if (this->_db != NULL) {
+		rocksdb::Status st = this->_db->Get(this->_read_options, kRestoredUnverifiedKey, &v);
+		// an unreadable flag is NOT "verified": treated as set
+		r = st.ok() ? v == "1" : !st.IsNotFound();
 	}
-	rocksdb::Status st = this->_db->Get(this->_read_options, kRestoredUnverifiedKey, &v);
-	// an unreadable flag is NOT "verified": treated as set
-	return st.ok() ? v == "1" : !st.IsNotFound();
-}
-
-int storage_rocksdb::drop_partition_binding(const char* why) {
-	if (this->_db == NULL) {
-		return -1;
-	}
-	rocksdb::WriteOptions wo;
-	wo.sync = true;
-	rocksdb::WriteBatch wb;
-	wb.Delete(kPartitionBindingKey);
-	wb.Delete(kRestoredUnverifiedKey);
-	rocksdb::Status st = this->_db->Write(wo, &wb);
-	if (!st.ok()) {
-		log_err("failed to drop the partition binding (%s): %s", why, st.ToString().c_str());
-		return -1;
-	}
-	log_notice("partition binding dropped (%s)", why);
-	return 0;
+	pthread_rwlock_unlock(&this->_mutex_wholelock);
+	return r;
 }
 
 /**
- *	Restore provenance (restore-isolated 5): a copy put in place by a restore
- *	serves as a master only of the partition, under the routing layout, its
- *	data was taken from; a backup without a binding (taken before bindings,
- *	or not by flared) cannot be verified and is refused. A live (not
- *	restored) copy is bound the first time a map makes it Active; it then
- *	follows the cluster's partition COUNT (a repartition keeps the partition
- *	index and the routing rule), but never another partition index or rule.
+ *	Restore provenance (restore-isolated 5). A copy put in place by a restore
+ *	(RESTORED marker, `__flare_restored_unverified`) serves as a master only of
+ *	the partition, under the routing rule (partition-size, hash, resolver,
+ *	hint, virtual), its binding names; a restored copy without a binding (a
+ *	backup taken before bindings, or not by flared) cannot be verified and is
+ *	refused. The partition COUNT is not compared: flared's count of the map's
+ *	Active partitions is not a stable fact (Prepare partitions are not in it;
+ *	review of 3b5f2b4) — whether a backup taken at another count may be
+ *	restored is a separate decision.
+ *	A LIVE (not restored) copy is never refused here: its partition is the
+ *	operator's decision (history, rebuilds); its binding is just (re)recorded
+ *	from the map, so that its checkpoints carry where their data belongs.
  *	Returns 0 allowed (recorded), 1 refused (`why`), -1 unreadable/unwritable.
  */
 int storage_rocksdb::check_partition_binding(const string& want, bool as_master, string& why) {
@@ -3126,75 +3136,79 @@ int storage_rocksdb::check_partition_binding(const string& want, bool as_master,
 		why = "the assigned binding is malformed [" + want + "]";
 		return -1;
 	}
-	if (this->_db == NULL) {
-		why = "the DB is closed";
-		return -1;
-	}
-	string cur;
-	rocksdb::Status cs = this->_db->Get(this->_read_options, kPartitionBindingKey, &cur);
-	if (!cs.ok() && !cs.IsNotFound()) {
-		why = "the partition binding could not be read: " + cs.ToString();
-		return -1;
-	}
-	string flag;
-	rocksdb::Status fs = this->_db->Get(this->_read_options, kRestoredUnverifiedKey, &flag);
-	if (!fs.ok() && !fs.IsNotFound()) {
-		why = "the restored-copy flag could not be read: " + fs.ToString();
-		return -1;
-	}
-	const bool restored = fs.ok() && flag == "1";
-	const bool bound = cs.ok() && !cur.empty();
-	std::map<string, string> c;
-	if (bound && !parse_partition_binding(cur, c)) {
-		why = "this copy's partition binding is malformed [" + cur + "]";
-		return 1;
-	}
-	rocksdb::WriteOptions wo;
-	wo.sync = true;
-	if (restored) {
-		if (!bound) {
-			why = "a RESTORED copy without a partition binding (a backup taken before partition bindings, or not a flared checkpoint): its partition and routing layout cannot be verified";
-			return 1;
+	pthread_rwlock_rdlock(&this->_mutex_wholelock);
+	int r = 0;
+	do {
+		if (this->_db == NULL) {
+			why = "the DB is closed";
+			r = -1;
+			break;
 		}
-		if (cur != want) {
-			why = "a RESTORED copy bound to [" + cur + "] is assigned [" + want + "]: another partition or routing layout";
-			return 1;
+		string cur;
+		rocksdb::Status cs = this->_db->Get(this->_read_options, kPartitionBindingKey, &cur);
+		if (!cs.ok() && !cs.IsNotFound()) {
+			why = "the partition binding could not be read: " + cs.ToString();
+			r = -1;
+			break;
 		}
-		if (as_master) {
-			rocksdb::Status ds = this->_db->Delete(wo, kRestoredUnverifiedKey);
+		string flag;
+		rocksdb::Status fs = this->_db->Get(this->_read_options, kRestoredUnverifiedKey, &flag);
+		if (!fs.ok() && !fs.IsNotFound()) {
+			why = "the restored-copy flag could not be read: " + fs.ToString();
+			r = -1;
+			break;
+		}
+		const bool restored = fs.ok() && flag == "1";
+		const bool bound = cs.ok() && !cur.empty();
+		rocksdb::WriteOptions wo;
+		wo.sync = true;
+		if (restored) {
+			std::map<string, string> c;
+			if (!bound) {
+				why = "a RESTORED copy without a partition binding (a backup taken before partition bindings): its partition and routing layout cannot be verified";
+				r = 1;
+				break;
+			}
+			if (!parse_partition_binding(cur, c)) {
+				why = "a RESTORED copy with a malformed partition binding [" + cur + "]";
+				r = 1;
+				break;
+			}
+			static const char* const rule[] = { "partition", "size", "hash", "resolver", "hint", "virtual" };
+			for (size_t i = 0; i < sizeof(rule) / sizeof(rule[0]) && r == 0; i++) {
+				if (c[rule[i]] != w[rule[i]]) {
+					why = string("a RESTORED copy bound to [") + cur + "] is assigned [" + want + "]: " + rule[i] + " differs (another partition or routing layout)";
+					r = 1;
+				}
+			}
+			if (r != 0 || !as_master) {
+				break;
+			}
+			// verified as the master of its own partition: no longer a restored
+			// copy; the binding follows the map from now on
+			rocksdb::WriteBatch vb;
+			vb.Delete(kRestoredUnverifiedKey);
+			vb.Put(kPartitionBindingKey, want);
+			rocksdb::Status ds = this->_db->Write(wo, &vb);
 			if (!ds.ok()) {
 				why = "the restored-copy flag could not be cleared: " + ds.ToString();
-				return -1;
+				r = -1;
+				break;
 			}
-			log_notice("restored copy VERIFIED as the master of its own partition and routing layout [%s]", cur.c_str());
+			log_notice("restored copy VERIFIED as the master of its own partition and routing rule [%s]", cur.c_str());
+			break;
 		}
-		return 0;
-	}
-	if (!bound) {
-		if (this->_persist_generation(kPartitionBindingKey, want) < 0) {
-			why = "the partition binding could not be recorded";
-			return -1;
+		if (!bound || cur != want) {
+			if (this->_persist_generation(kPartitionBindingKey, want) < 0) {
+				why = "the partition binding could not be recorded";
+				r = -1;
+				break;
+			}
+			log_notice("partition binding recorded [%s]%s%s%s", want.c_str(), bound ? " (was [" : "", bound ? cur.c_str() : "", bound ? "])" : "");
 		}
-		log_notice("partition binding recorded [%s]", want.c_str());
-		return 0;
-	}
-	static const char* const rule[] = { "partition", "size", "hash", "resolver", "hint", "virtual" };
-	for (size_t i = 0; i < sizeof(rule) / sizeof(rule[0]); i++) {
-		if (c[rule[i]] != w[rule[i]]) {
-			why = string("this copy is bound to [") + cur + "] and is assigned [" + want + "]: " + rule[i] + " differs";
-			return 1;
-		}
-	}
-	if (c["partitions"] != w["partitions"]) {
-		// a live copy follows a repartition of its own partition
-		if (this->_persist_generation(kPartitionBindingKey, want) < 0) {
-			why = "the partition binding could not be updated";
-			return -1;
-		}
-		log_notice("partition binding updated for a partition count change [%s] -> [%s]", cur.c_str(), want.c_str());
-	}
-	(void)as_master;
-	return 0;
+	} while (false);
+	pthread_rwlock_unlock(&this->_mutex_wholelock);
+	return r;
 }
 
 int storage_rocksdb::checkpoint_binding(const string& dir, string& binding, bool& restored_unverified) {

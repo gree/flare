@@ -631,9 +631,6 @@ public:
 	// "" = no binding recorded (or unreadable: see the -1 of the check)
 	string get_partition_binding();
 	bool is_restored_unverified();
-	// the content is being replaced by a rebuild: the old binding and the
-	// restored flag no longer describe it (0 on success)
-	int drop_partition_binding(const char* why);
 	// "partition=<p>" ... fields of a binding; false when malformed
 	static bool parse_partition_binding(const string& b, std::map<string, string>& out);
 	// a checkpoint's binding, read-only (flared --checkpoint-binding)

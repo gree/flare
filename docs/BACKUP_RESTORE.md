@@ -60,37 +60,55 @@ Components:
 
 ## Restore provenance (partition binding)
 
-Every RocksDB copy records which partition, under which routing layout, its
+Every RocksDB copy records which partition, under which routing rule, its
 data belongs to — the reserved key `__flare_partition_binding`
 (`v1 partition=<p> partitions=<n> size=<s> hash=<a> resolver=<t> hint=<h>
-virtual=<v>`, `stats`: `rocksdb_partition_binding`). flared writes it when the
-node map first makes the copy Active (master or slave); a rebuild drops it and
-the rebuilt copy is bound again when it becomes Active. A live copy follows a
-change of the partition COUNT of its own partition, never another partition
-index or routing rule. The binding travels inside every checkpoint and backup.
+virtual=<v>`, `stats`: `rocksdb_partition_binding`). flared (re)records it
+whenever the node map makes a LIVE copy a master or an Active slave — a live
+copy's partition is the operator's decision, so it is never refused for its
+binding; a completed full dump, a staged copy switch and a snapshot swap drop
+the old one (the new content is bound when it becomes Active). The binding
+travels inside every checkpoint and backup. `partitions=<n>` is informational
+and never compared: flared's count of the map's Active partitions is not a
+stable fact (Prepare partitions are not in it).
 
 Checked at three points, before anything serves the restored data:
 
 1. **Before the live copy is replaced** (`flare-restore-hook`): the backup must
    carry a binding (`flared --checkpoint-binding <dir>`, read-only); when the
-   live copy is bound too, both must name the same partition and routing rule.
-   Refused -> the live copy is kept and served, the marker becomes
-   `RESTORE.refused` (+ `.reason`); with no live copy the pod does not start.
+   live copy is bound and readable, both must name the same partition and
+   routing rule (an unreadable — corrupt — live copy is replaced). Refused ->
+   the live copy is kept and served, the marker becomes `RESTORE.refused`
+   (+ `.reason`); with no live copy the pod does not start. The chart runs the
+   hook only when a `RESTORE` marker exists.
    (The hook still REPLACES the live copy without keeping it once the check
    passes — keeping it is the separate in-place design, not implemented.)
 2. **When the map makes the restored copy a master** (flared): a `RESTORED`
-   copy (`rocksdb_restored_unverified 1`) serves as a master only of exactly
-   the binding it carries — partition, count and routing layout; an unbound
-   restored copy (a backup from before bindings) is refused. Refused ->
-   `promotion_refused 1`, no reads or writes as master. Verified -> the flag
-   is cleared, durably.
+   copy (`rocksdb_restored_unverified 1`) serves as a master only of the
+   partition and routing rule its binding names; an unbound restored copy (a
+   backup from before bindings) is refused. Refused -> `promotion_refused 1`,
+   no reads or writes as master. Verified -> the flag is cleared, durably. A
+   restored copy is also no longer "restored" once a completed rebuild, a
+   staged switch or a snapshot swap replaced its content (an ABANDONED rebuild
+   attempt does not clear it).
 3. **When the operator promotes an existing copy, or seats the first master of
    a new partition from the FSM** (the classifier, `restore provenance: …`):
    the same rule, as an abort. (The first master of a brand-new cluster is
    seated by `node add` without a read; there point 2 is the guard.)
 
 Old backups (taken before bindings) are refused by points 1 and 2 on this
-release. See RUNBOOK.md#restore-refused.
+release. **Rollout hazard:** `backupBootstrap` seeds from `latest/p0/` with a
+`RESTORED` marker; until a backup has been taken by the new release, a full
+restart that bootstraps from an OLD backup leaves the partition without a
+usable master (flared refuses the unbound restored copy). Take a backup with
+the new release before relying on bootstrap (compatibility policy for old
+backups: pending a decision). See RUNBOOK.md#restore-refused.
+
+Not implemented (known gaps): a master that refuses this way is still in the
+map and is NOT counted by `flare_operator_partitions_masterless` /
+`FlareMasterMissing`; the partition COUNT of a backup is not compared with the
+cluster's (pending a decision); the hook replaces a live copy without keeping
+it once the check passes (in-place restore with retention, plan I).
 
 ## Taking a backup
 

@@ -259,25 +259,24 @@ def parseBinding (b : String) : Option (List (String × String)) :=
   | _ => none
 
 /-- Restore provenance (restore-isolated 5), the operator's mirror of flared's
-    own refusal: a RESTORED copy only for exactly its binding (an unbound
-    restored copy cannot be verified); any bound copy never for another
-    partition index or routing rule. A live copy may follow a change of the
-    partition COUNT. -/
+    own refusal: a RESTORED copy only for its binding's partition and routing
+    rule (size / hash / resolver / hint / virtual; the partition COUNT is not
+    compared — flared's count is not a stable fact); an unbound restored copy
+    cannot be verified. A LIVE copy is never in conflict: its partition is the
+    operator's decision, its binding only follows the map. -/
 def bindingConflict (binding : Option String) (restored : Option Nat) (expected : String) : Option String :=
   let b := binding.filter (fun x => !x.isEmpty && x != "-")
   match restored, b with
   | some 1, none => some "a RESTORED copy without a partition binding (a backup taken before partition bindings): its partition and routing layout cannot be verified"
   | some 1, some x =>
-    if x == expected then none else some s!"a RESTORED copy bound to [{x}] is assigned [{expected}]: another partition or routing layout"
-  | _, none => none
-  | _, some x =>
     match parseBinding x, parseBinding expected with
     | some c, some w =>
       match ["partition", "size", "hash", "resolver", "hint", "virtual"].find? (fun k => c.lookup k != w.lookup k) with
-      | some k => some s!"the copy is bound to [{x}] and is assigned [{expected}]: {k} differs"
+      | some k => some s!"a RESTORED copy bound to [{x}] is assigned [{expected}]: {k} differs (another partition or routing layout)"
       | none => none
-    | none, _ => some s!"the copy's partition binding is malformed [{x}]"
+    | none, _ => some s!"a RESTORED copy with a malformed partition binding [{x}]"
     | _, none => some s!"the expected partition binding is malformed [{expected}]"
+  | _, _ => none
 
 def classify (reply : Option String) (o : Observed) : Class :=
   match reply with

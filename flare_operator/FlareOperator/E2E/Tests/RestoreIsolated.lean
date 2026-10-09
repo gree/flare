@@ -421,8 +421,8 @@ def suite : TestSuite := {
           let ip := (← getPodIp p partCfg.«namespace»).getD ""
           let b ← statOf partCfg ip "rocksdb_partition_binding"
           IO.eprintln s!"# {p}: rocksdb_partition_binding={b}; rocksdb_restored_unverified={← statOf partCfg ip "rocksdb_restored_unverified"}; promotion_refused={← statOf partCfg ip "promotion_refused"}"
-          if !((b.getD "").startsWith "v1 partition=1 partitions=2 ") then
-            return .fail s!"precondition: {p} does not report the backup's binding (P1 of 2): {b} — the provenance did not travel with the backup"
+          if !((b.getD "").startsWith "v1 partition=1 ") then
+            return .fail s!"precondition: {p} does not report the backup's binding (partition 1): {b} — the provenance did not travel with the backup"
         -- the PRODUCT decision (same criterion as the identity-inconsistent
         -- case): never mapped as master, or — the first master of a new
         -- cluster is mapped by `node add` without a read — flared refuses to

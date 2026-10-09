@@ -505,9 +505,11 @@ and the data dir has `RESTORE.refused` + `RESTORE.refused.reason`; or flared
 logs `PROMOTION REFUSED by this node: … RESTORED copy …` and `stats` shows
 `promotion_refused 1`, `rocksdb_restored_unverified 1`.
 
-Meaning: the backup is not the data of the partition / routing layout it was
+Meaning: the backup is not the data of the partition / routing rule it was
 put into (`rocksdb_partition_binding` names where it came from), or it was taken
-before partition bindings existed and cannot be verified. With a live copy the
+before partition bindings existed and cannot be verified (after an upgrade:
+take a backup with the new release first — a `backupBootstrap` from an older
+backup is refused the same way). With a live copy the
 hook kept it and flared serves it; without one the pod does not start (the
 marker stays). Nothing was replaced.
 

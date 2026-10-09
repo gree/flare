@@ -395,7 +395,8 @@ spec:
               # refused restore keeps the live copy (RESTORE.refused). The same
               # script (in the flared image) runs in the E2E harness.
               # See docs/BACKUP_RESTORE.md.
-              flare-restore-hook /data/flare || exit 1
+              # (only with a marker: an image without the hook still starts)
+              if [ -f /data/flare/RESTORE ]; then flare-restore-hook /data/flare || exit 1; fi
               mkdir -p /data/flare
               # A stale flared.pid survives unclean container death on a persistent
               # data dir and used to wedge restarts (pid-1 self-check; fixed in

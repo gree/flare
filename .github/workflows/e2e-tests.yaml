@@ -246,6 +246,9 @@ jobs:
         # Keep this a separate step so a render failure cannot hide in a pipe.
         run: python3 -m unittest discover -s scripts/tests -p 'test_helm_memory.py'
 
+      - name: Test the restore hook (provenance check before replacement)
+        run: python3 -m unittest discover -s scripts/tests -p 'test_restore_hook.py'
+
       - name: Build Lean operator and tests
         run: |
           cd flare_operator

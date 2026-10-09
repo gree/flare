@@ -94,6 +94,32 @@ private def Ctx.statStr (c : Ctx) (ip key : String) : IO (Option String) := do
 
 private def Ctx.currItems (c : Ctx) (ip : String) : IO Nat := return (← c.statNat ip "curr_items").getD 0
 
+/-- Every key and value in the node's OWN storage (`dump`, whatever its role:
+    a Prepare replica forwards GETs, so its copy is read this way). -/
+private def Ctx.localDump (c : Ctx) (ip : String) : IO (Option (List (String × String))) := do
+  match ← hostCmd "timeout" ["-k", "5", "90", "kubectl", "exec", c.cfg.debugPod, "-n", c.cfg.«namespace», "--", "sh", "-c",
+      s!"printf 'dump 0 -1 0 0\\r\\nquit\\r\\n' | nc -w 60 {ip} {c.cfg.flarePort}"] with
+  | .error _ => return none
+  | .ok out =>
+    let mut acc : List (String × String) := []
+    let mut pending : Option String := none
+    let mut ended := false
+    for raw in out.splitOn "\n" do
+      let l := (raw.replace "\r" "").trim
+      match pending with
+      | some k =>
+        acc := (k, l) :: acc
+        pending := none
+      | none =>
+        if l.startsWith "VALUE " then
+          pending := ((l.splitOn " ").drop 1).head?
+        else if l == "END" then ended := true
+    return if ended then some acc.reverse else none
+
+/-- Are all of `kv` present with exactly these values in `dump`? -/
+private def missingFrom (kv : List (String × String)) (dump : List (String × String)) : List String :=
+  kv.filterMap fun (k, v) => if dump.lookup k == some v then none else some s!"{k}={(dump.lookup k).getD "(absent)"}"
+
 private def Ctx.opLog (c : Ctx) (tail : Nat := 1500) : IO String :=
   kubectlLogsLabel s!"app={c.cfg.operatorName}" c.cfg.«namespace» tail
 
@@ -1695,7 +1721,24 @@ def identitySuite : TestSuite := {
             if bootNow.isEmpty then return .fail s!"could not read {victim}'s boot id"
             if let .error e := verdict then return .fail s!"{victim} was promoted without fresh eligible evidence of its new process: {e}"
             -- what is checked is the item count and the 10 marker values (not every value)
-            if vItems != items || !valuesOk.isEmpty then return .fail s!"the promoted {victim} holds {vItems}/{items} keys; wrong marker values {valuesOk}"
+            if vItems != items || !valuesOk.isEmpty then
+              -- WHICH keys differ (run 37908698742: 70/70 keys yet a marker
+              -- missing): the promoted copy's own keys against every marker,
+              -- and the raw answer to a GET of each missing marker
+              let dump ← c.localDump vIp
+              let missingLocal := match dump with
+                | some d => (missingFrom markers d)
+                | none => ["(the promoted copy could not be dumped)"]
+              let mut raws : List String := []
+              for (k, _) in markers do
+                if missingLocal.contains k then
+                  let r ← execInDebugPod c.cfg.debugPod ns s!"printf 'get {k}\\r\\n' | nc -w 3 {vIp} {c.cfg.flarePort}"
+                  raws := raws ++ [s!"{k}: {(r.toOption.getD "(no reply)").trim}"]
+              let extra := match dump with
+                | some d => (d.map Prod.fst).filter (fun (key : String) => key.startsWith "t11_" && !((markers.map Prod.fst).contains key))
+                | none => []
+              IO.eprintln s!"# promoted {victim}: dump has {(dump.map List.length).getD 0} key(s); markers missing in its OWN copy {missingLocal}; raw GET {raws}; unexpected t11_ keys {extra}"
+              return .fail s!"the promoted {victim} holds {vItems}/{items} keys; wrong marker values {valuesOk}; missing in its own copy {missingLocal}"
             return .pass
           if seen.getLast? != some other then return .fail s!"expected {other} to take over, masters seen {seen}"
           if otherItems != items then return .fail s!"the new master {other} holds {otherItems} of {items} keys"
@@ -2984,32 +3027,6 @@ private def copyProtCfg : ClusterConfig := { emptySourceCfg with
   debugPod := "debug-copy-prot"
   flaredEnv := emptySourceCfg.flaredEnv ++ [("FLARE_TEST_DESTRUCTIVE_HOLD_FILE", "/tmp/destructive-hold"),
                                             ("FLARE_TEST_RECONSTRUCTION_START_HOLD_FILE", "/tmp/start-hold")] }
-
-/-- Every key and value in the node's OWN storage (`dump`, whatever its role:
-    a Prepare replica forwards GETs, so its copy is read this way). -/
-private def Ctx.localDump (c : Ctx) (ip : String) : IO (Option (List (String × String))) := do
-  match ← hostCmd "timeout" ["-k", "5", "90", "kubectl", "exec", c.cfg.debugPod, "-n", c.cfg.«namespace», "--", "sh", "-c",
-      s!"printf 'dump 0 -1 0 0\\r\\nquit\\r\\n' | nc -w 60 {ip} {c.cfg.flarePort}"] with
-  | .error _ => return none
-  | .ok out =>
-    let mut acc : List (String × String) := []
-    let mut pending : Option String := none
-    let mut ended := false
-    for raw in out.splitOn "\n" do
-      let l := (raw.replace "\r" "").trim
-      match pending with
-      | some k =>
-        acc := (k, l) :: acc
-        pending := none
-      | none =>
-        if l.startsWith "VALUE " then
-          pending := ((l.splitOn " ").drop 1).head?
-        else if l == "END" then ended := true
-    return if ended then some acc.reverse else none
-
-/-- Are all of `kv` present with exactly these values in `dump`? -/
-private def missingFrom (kv : List (String × String)) (dump : List (String × String)) : List String :=
-  kv.filterMap fun (k, v) => if dump.lookup k == some v then none else some s!"{k}={(dump.lookup k).getD "(absent)"}"
 
 def copyProtectionSuite : TestSuite := {
   name := "copy-protection"

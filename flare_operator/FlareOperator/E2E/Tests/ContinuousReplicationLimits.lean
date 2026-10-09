@@ -1674,6 +1674,11 @@ def identitySuite : TestSuite := {
             let n ← c.currItems mIp
             return n > 0 && (← c.currItems ((← getPodIp a ns).getD "")) == n && (← c.currItems ((← getPodIp b ns).getD "")) == n
           if !synced2 then
+            -- the KEYS, not the counters (curr_items and the keys disagreed in
+            -- run 37908698742): which markers each copy's own dump holds
+            for p in [m, a, b] do
+              let d ← c.localDump ((← getPodIp p ns).getD "")
+              IO.eprintln s!"# after the markers {p}: dump {(d.map List.length).getD 0} key(s), curr_items {← c.currItems ((← getPodIp p ns).getD "")}; markers missing in its own copy {(d.map (missingFrom markers)).getD ["(no dump)"]}"
             return .fail s!"precondition: copies not in sync after the markers (items {m}={← c.currItems mIp} {a}={← c.currItems ((← getPodIp a ns).getD "")} {b}={← c.currItems ((← getPodIp b ns).getD "")}; follow state {a}={← c.statStr ((← getPodIp a ns).getD "") "repl_follow_state"} {b}={← c.statStr ((← getPodIp b ns).getD "") "repl_follow_state"})"
           let items ← c.currItems mIp
           -- restart the process of the FIRST successor in map order, so that

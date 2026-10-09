@@ -428,7 +428,12 @@ def suite : TestSuite := {
           let b ← statOf partCfg ip "rocksdb_partition_binding"
           IO.eprintln s!"# {p}: rocksdb_partition_binding={b}; rocksdb_restored_unverified={← statOf partCfg ip "rocksdb_restored_unverified"}; promotion_refused={← statOf partCfg ip "promotion_refused"}"
           if !((b.getD "").startsWith "v1 partition=1 ") then
-            return .fail s!"precondition: {p} does not report the backup's binding (partition 1): {b} — the provenance did not travel with the backup"
+            return .fail s!"{p} does not report the backup's binding (partition 1): {b} — the provenance did not travel with the backup, or a rebuild from the refusing copy LAUNDERED it into a copy bound to partition 0 (CI 37888498369)"
+          -- and it is still an UNVERIFIED restored copy (a rebuild from another
+          -- restored copy would have cleared the flag: laundering)
+          let ru ← statOf partCfg ip "rocksdb_restored_unverified"
+          if ru != some "1" then
+            return .fail s!"{p} is no longer an unverified restored copy (rocksdb_restored_unverified={ru}): its partition-1 data may have been laundered into a verified copy"
         -- the PRODUCT decision (same criterion as the identity-inconsistent
         -- case): never mapped as master, or — the first master of a new
         -- cluster is mapped by `node add` without a read — flared refuses to

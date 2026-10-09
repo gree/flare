@@ -272,6 +272,14 @@ int op_stats::_send_stats(thread_pool* req_tp, thread_pool* other_tp, storage* s
 			_send_stat("rocksdb_quarantined"                , rdb->is_quarantined() ? 1 : 0);
 			// decision 2026-10-08: changed part-way by a merging dump (durable)
 			_send_stat("rocksdb_copy_partial"               , rdb->is_copy_partial() ? 1 : 0);
+			// restore provenance: the partition / routing layout this copy's
+			// data belongs to ("-" = not bound yet) and whether it is a
+			// restored copy not yet accepted as that partition's master
+			{
+				const string pb = rdb->get_partition_binding();
+				_send_stat("rocksdb_partition_binding"      , pb.empty() ? string("-") : pb);
+			}
+			_send_stat("rocksdb_restored_unverified"        , rdb->is_restored_unverified() ? 1 : 0);
 			// copy retention (design §3, §8, §9): the live copy's size (what a
 			// replica staging a copy of THIS node needs), the reserve, why the
 			// last staged rebuild stopped ("" = not blocked), retained copies

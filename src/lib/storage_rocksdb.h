@@ -36,6 +36,7 @@
 #endif // HAVE_STDINT_H
 
 #include <cstdio>
+#include <map>
 #include <rocksdb/db.h>
 #include <rocksdb/options.h>
 #include <rocksdb/table.h>
@@ -91,6 +92,13 @@ public:
 	static const char* const kReplSourceEpochReasonKey;
 	static const char* const kBulkChainKey;
 	static const char* const kBulkPendingKey;
+	// Partition binding: "v1 partition=<p> partitions=<n> size=<s> hash=<a>
+	// resolver=<t> hint=<h> virtual=<v>" — the partition and the routing
+	// layout whose keys this copy holds. Travels inside every checkpoint.
+	static const char* const kPartitionBindingKey;
+	// "1" while a RESTORED copy has not been accepted as a master of the
+	// partition its binding names (set at the open that consumed RESTORED).
+	static const char* const kRestoredUnverifiedKey;
 	static const size_t kBulkChainKeep = 8;
 	static const char* const kReplIncarnationKey;
 	static const char* const kReplRestoreDoneKey;
@@ -619,6 +627,17 @@ public:
 	int recover_bulk_pending();
 	bool has_bulk_pending();
 	bool promotion_forbidden(std::string& why);
+	int check_partition_binding(const std::string& want, bool as_master, std::string& why);
+	// "" = no binding recorded (or unreadable: see the -1 of the check)
+	string get_partition_binding();
+	bool is_restored_unverified();
+	// the content is being replaced by a rebuild: the old binding and the
+	// restored flag no longer describe it (0 on success)
+	int drop_partition_binding(const char* why);
+	// "partition=<p>" ... fields of a binding; false when malformed
+	static bool parse_partition_binding(const string& b, std::map<string, string>& out);
+	// a checkpoint's binding, read-only (flared --checkpoint-binding)
+	static int checkpoint_binding(const string& dir, string& binding, bool& restored_unverified);
 	// decision 2026-10-08: data_dir/copy.partial — the live copy is being (or
 	// was left) changed part-way by a merging dump. Written durably BEFORE the
 	// first change, removed only on confirmed success; survives a crash.

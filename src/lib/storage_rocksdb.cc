@@ -87,6 +87,11 @@ const char* const storage_rocksdb::kBulkChainKey = "__flare_bulk_chain";
 // A bulk in progress: "<pred copy> <epoch before>", written BEFORE the copy id
 // moves; replaced by the receipt (one atomic batch) once the epoch advanced.
 const char* const storage_rocksdb::kBulkPendingKey = "__flare_bulk_pending";
+// Partition binding and the restored-copy flag (restore provenance: a copy
+// restored from a backup serves as a master only of the partition, under the
+// routing layout, its data was taken from).
+const char* const storage_rocksdb::kPartitionBindingKey = "__flare_partition_binding";
+const char* const storage_rocksdb::kRestoredUnverifiedKey = "__flare_restored_unverified";
 const char* const storage_rocksdb::kQuarantineMarkerFile = "quarantine.marker";
 const char* const storage_rocksdb::kApprovalsFile = "approvals.log";
 // Name of the replication-metadata column family (design §3.7).
@@ -96,7 +101,8 @@ bool storage_rocksdb::is_reserved_key(const string& key) {
 	return key == kReplLastLsnKey || key == kReplMasterIdKey
 		|| key == kReplSourceEpochKey || key == kReplSourceEpochReasonKey || key == kReplIncarnationKey
 		|| key == kReplRestoreDoneKey || key == kReplRebuiltFromKey || key == kReplRebuiltFromSuspendedKey || key == kCopyIdKey
-		|| key == kBulkChainKey || key == kBulkPendingKey;
+		|| key == kBulkChainKey || key == kBulkPendingKey
+		|| key == kPartitionBindingKey || key == kRestoredUnverifiedKey;
 }
 // }}}
 
@@ -1229,6 +1235,11 @@ int storage_rocksdb::suspend_rebuilt_from() {
 		wo.sync = true;
 		rocksdb::WriteBatch wb;
 		wb.Delete(kReplRebuiltFromKey);
+		// NOT the partition binding / restored flag: an attempt that is
+		// abandoned leaves the STORED copy as it was (copy retention), and a
+		// restored copy of another partition must stay unverified — they go
+		// only when the content IS replaced (set_rebuilt_from; a staging
+		// switch replaces the whole DB, the source's binding with it)
 		if (!mid.empty() && !ep.empty() && !this->_source_epoch.empty()) {
 			// atomically: advertised -> suspended (same format and binding)
 			wb.Put(kReplRebuiltFromSuspendedKey, mid + " " + ep + " " + this->_source_epoch);
@@ -1295,7 +1306,12 @@ int storage_rocksdb::set_rebuilt_from(const string& master_id, const string& epo
 		if (this->_db != NULL) {
 			rocksdb::WriteOptions wo;
 			wo.sync = true;
-			this->_db->Delete(wo, kReplRebuiltFromSuspendedKey);
+			rocksdb::WriteBatch wb;
+			wb.Delete(kReplRebuiltFromSuspendedKey);
+			// a rebuilt copy holds the SOURCE's data: re-bound at activation
+			wb.Delete(kPartitionBindingKey);
+			wb.Delete(kRestoredUnverifiedKey);
+			this->_db->Write(wo, &wb);
 		}
 	}
 	pthread_rwlock_unlock(&this->_mutex_generations);
@@ -1613,6 +1629,14 @@ int storage_rocksdb::open() {
 				log_err("failed to give the restored copy an identity", 0);
 				return -1;
 			}
+			// restore provenance: until a map makes it the master of the
+			// partition (and routing layout) its binding names, it is not
+			// verified — durably, BEFORE the marker goes
+			if (this->_persist_generation(kRestoredUnverifiedKey, "1") < 0) {
+				log_err("failed to record the restored copy as unverified", 0);
+				return -1;
+			}
+			log_notice("restored copy: partition binding [%s] — it serves as a master only of that partition under that routing layout", this->get_partition_binding().c_str());
 			unlink(restored_marker.c_str());
 			copy_fs::fsync_dir(this->_data_path);
 		} else if (!has_key && !has_file) {
@@ -3015,6 +3039,200 @@ int storage_rocksdb::swap_in_snapshot(const string& staging_dir, uint64_t checkp
 
 	pthread_rwlock_unlock(&this->_mutex_wholelock);
 	return r;
+}
+
+bool storage_rocksdb::parse_partition_binding(const string& b, std::map<string, string>& out) {
+	out.clear();
+	string::size_type at = 0;
+	bool first = true;
+	while (at < b.size()) {
+		string::size_type sp = b.find(' ', at);
+		const string tok = b.substr(at, sp == string::npos ? string::npos : sp - at);
+		at = sp == string::npos ? b.size() : sp + 1;
+		if (tok.empty()) {
+			return false;
+		}
+		if (first) {
+			if (tok != "v1") {
+				return false;
+			}
+			first = false;
+			continue;
+		}
+		string::size_type eq = tok.find('=');
+		if (eq == string::npos || eq == 0 || eq + 1 >= tok.size() || out.count(tok.substr(0, eq)) > 0) {
+			return false;
+		}
+		out[tok.substr(0, eq)] = tok.substr(eq + 1);
+	}
+	static const char* const need[] = { "partition", "partitions", "size", "hash", "resolver", "hint", "virtual" };
+	for (size_t i = 0; i < sizeof(need) / sizeof(need[0]); i++) {
+		if (out.count(need[i]) == 0) {
+			return false;
+		}
+	}
+	return !first && out.size() == sizeof(need) / sizeof(need[0]);
+}
+
+string storage_rocksdb::get_partition_binding() {
+	string v;
+	if (this->_db == NULL || !this->_db->Get(this->_read_options, kPartitionBindingKey, &v).ok()) {
+		return string("");
+	}
+	return v;
+}
+
+bool storage_rocksdb::is_restored_unverified() {
+	string v;
+	if (this->_db == NULL) {
+		return false;
+	}
+	rocksdb::Status st = this->_db->Get(this->_read_options, kRestoredUnverifiedKey, &v);
+	// an unreadable flag is NOT "verified": treated as set
+	return st.ok() ? v == "1" : !st.IsNotFound();
+}
+
+int storage_rocksdb::drop_partition_binding(const char* why) {
+	if (this->_db == NULL) {
+		return -1;
+	}
+	rocksdb::WriteOptions wo;
+	wo.sync = true;
+	rocksdb::WriteBatch wb;
+	wb.Delete(kPartitionBindingKey);
+	wb.Delete(kRestoredUnverifiedKey);
+	rocksdb::Status st = this->_db->Write(wo, &wb);
+	if (!st.ok()) {
+		log_err("failed to drop the partition binding (%s): %s", why, st.ToString().c_str());
+		return -1;
+	}
+	log_notice("partition binding dropped (%s)", why);
+	return 0;
+}
+
+/**
+ *	Restore provenance (restore-isolated 5): a copy put in place by a restore
+ *	serves as a master only of the partition, under the routing layout, its
+ *	data was taken from; a backup without a binding (taken before bindings,
+ *	or not by flared) cannot be verified and is refused. A live (not
+ *	restored) copy is bound the first time a map makes it Active; it then
+ *	follows the cluster's partition COUNT (a repartition keeps the partition
+ *	index and the routing rule), but never another partition index or rule.
+ *	Returns 0 allowed (recorded), 1 refused (`why`), -1 unreadable/unwritable.
+ */
+int storage_rocksdb::check_partition_binding(const string& want, bool as_master, string& why) {
+	std::map<string, string> w;
+	if (!parse_partition_binding(want, w)) {
+		why = "the assigned binding is malformed [" + want + "]";
+		return -1;
+	}
+	if (this->_db == NULL) {
+		why = "the DB is closed";
+		return -1;
+	}
+	string cur;
+	rocksdb::Status cs = this->_db->Get(this->_read_options, kPartitionBindingKey, &cur);
+	if (!cs.ok() && !cs.IsNotFound()) {
+		why = "the partition binding could not be read: " + cs.ToString();
+		return -1;
+	}
+	string flag;
+	rocksdb::Status fs = this->_db->Get(this->_read_options, kRestoredUnverifiedKey, &flag);
+	if (!fs.ok() && !fs.IsNotFound()) {
+		why = "the restored-copy flag could not be read: " + fs.ToString();
+		return -1;
+	}
+	const bool restored = fs.ok() && flag == "1";
+	const bool bound = cs.ok() && !cur.empty();
+	std::map<string, string> c;
+	if (bound && !parse_partition_binding(cur, c)) {
+		why = "this copy's partition binding is malformed [" + cur + "]";
+		return 1;
+	}
+	rocksdb::WriteOptions wo;
+	wo.sync = true;
+	if (restored) {
+		if (!bound) {
+			why = "a RESTORED copy without a partition binding (a backup taken before partition bindings, or not a flared checkpoint): its partition and routing layout cannot be verified";
+			return 1;
+		}
+		if (cur != want) {
+			why = "a RESTORED copy bound to [" + cur + "] is assigned [" + want + "]: another partition or routing layout";
+			return 1;
+		}
+		if (as_master) {
+			rocksdb::Status ds = this->_db->Delete(wo, kRestoredUnverifiedKey);
+			if (!ds.ok()) {
+				why = "the restored-copy flag could not be cleared: " + ds.ToString();
+				return -1;
+			}
+			log_notice("restored copy VERIFIED as the master of its own partition and routing layout [%s]", cur.c_str());
+		}
+		return 0;
+	}
+	if (!bound) {
+		if (this->_persist_generation(kPartitionBindingKey, want) < 0) {
+			why = "the partition binding could not be recorded";
+			return -1;
+		}
+		log_notice("partition binding recorded [%s]", want.c_str());
+		return 0;
+	}
+	static const char* const rule[] = { "partition", "size", "hash", "resolver", "hint", "virtual" };
+	for (size_t i = 0; i < sizeof(rule) / sizeof(rule[0]); i++) {
+		if (c[rule[i]] != w[rule[i]]) {
+			why = string("this copy is bound to [") + cur + "] and is assigned [" + want + "]: " + rule[i] + " differs";
+			return 1;
+		}
+	}
+	if (c["partitions"] != w["partitions"]) {
+		// a live copy follows a repartition of its own partition
+		if (this->_persist_generation(kPartitionBindingKey, want) < 0) {
+			why = "the partition binding could not be updated";
+			return -1;
+		}
+		log_notice("partition binding updated for a partition count change [%s] -> [%s]", cur.c_str(), want.c_str());
+	}
+	(void)as_master;
+	return 0;
+}
+
+int storage_rocksdb::checkpoint_binding(const string& dir, string& binding, bool& restored_unverified) {
+#ifdef HAVE_LIBROCKSDB
+	binding.clear();
+	restored_unverified = false;
+	rocksdb::DB* db = NULL;
+	rocksdb::Options opt;
+	opt.create_if_missing = false;
+	vector<rocksdb::ColumnFamilyHandle*> cf_handles;
+	rocksdb::Status s = open_read_only_all_cfs(opt, dir, &db, cf_handles);
+	if (!s.ok()) {
+		log_err("checkpoint_binding: OpenForReadOnly(%s) failed: %s", dir.c_str(), s.ToString().c_str());
+		return -1;
+	}
+	rocksdb::ReadOptions ro;
+	string v;
+	rocksdb::Status bs = db->Get(ro, kPartitionBindingKey, &v);
+	int r = 0;
+	if (bs.ok()) {
+		binding = v;
+	} else if (!bs.IsNotFound()) {
+		log_err("checkpoint_binding: binding unreadable in %s: %s", dir.c_str(), bs.ToString().c_str());
+		r = -1;
+	}
+	string f;
+	rocksdb::Status fs = db->Get(ro, kRestoredUnverifiedKey, &f);
+	if (fs.ok()) {
+		restored_unverified = f == "1";
+	} else if (!fs.IsNotFound()) {
+		r = -1;
+	}
+	close_read_only(db, cf_handles);
+	return r;
+#else
+	(void)dir; (void)binding; (void)restored_unverified;
+	return -1;
+#endif
 }
 
 int storage_rocksdb::analyze_checkpoint(const string& dir, FILE* out) {

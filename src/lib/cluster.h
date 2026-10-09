@@ -482,6 +482,10 @@ public:
 protected:
 	int _shift_node_state(string node_key, state old_state, state new_state);
 	int _shift_node_role(string node_key, role old_role, int old_partition, role new_role, int new_partition);
+	// restore provenance: the binding the accepted map gives this node in
+	// `partition` ("v1 partition=.. partitions=.. size=.. hash=.. resolver=..
+	// hint=.. virtual=.."); assumes the partition map is locked
+	string _partition_binding_for(int partition);
 	int _enqueue(shared_thread_queue q, string node_key, int key_hash, bool sync = false);
 	int _enqueue(shared_thread_queue q, thread_pool::thread_type t, bool sync);
 	int _broadcast(shared_thread_queue q, bool sync, vector<string> prior_node_key, string exclude_node_key = "");

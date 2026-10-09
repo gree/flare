@@ -738,6 +738,26 @@ int main(int argc, char **argv) {
 	// expire / value-length analysis against an S3 backup checkpoint, OFF the
 	// serving cluster. See docs/BACKUP_RESTORE.md.
 	for (int i = 1; i + 1 < argc; i++) {
+		// OFFLINE: `flared --checkpoint-binding <dir>` prints the partition
+		// binding a RocksDB directory (checkpoint or live copy) carries —
+		// "binding <v1 ...|->" and "restored_unverified <0|1>" — read-only.
+		// The restore hook compares the backup's with the live copy's BEFORE
+		// it replaces anything (docs/BACKUP_RESTORE.md). Exit 0 read, 2 not.
+		if (strcmp(argv[i], "--checkpoint-binding") == 0) {
+#ifdef HAVE_LIBROCKSDB
+			std::string b;
+			bool ru = false;
+			if (gree::flare::storage_rocksdb::checkpoint_binding(argv[i + 1], b, ru) < 0) {
+				fprintf(stderr, "checkpoint-binding: %s could not be read\n", argv[i + 1]);
+				return 2;
+			}
+			printf("binding %s\nrestored_unverified %d\n", b.empty() ? "-" : b.c_str(), ru ? 1 : 0);
+			return 0;
+#else
+			fprintf(stderr, "flared built without RocksDB; --checkpoint-binding unavailable\n");
+			return 2;
+#endif
+		}
 		if (strcmp(argv[i], "--analyze-checkpoint") == 0) {
 #ifdef HAVE_LIBROCKSDB
 			gree::flare::storage_rocksdb st(argv[i + 1], 1, 0);

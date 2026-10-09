@@ -2519,6 +2519,138 @@ void test_bulk_receipt_normal_failed_write_and_crash_before_epoch() {
 	drop_rocksdb(s, wal_slave_dir);
 }
 
+// Restore provenance (restore-isolated 5): a live copy is bound to the
+// partition / routing layout the map first makes it Active in, follows a
+// change of the partition COUNT, and refuses another partition index or
+// routing rule; a malformed assignment is an error, not a pass.
+void test_partition_binding_live_copy() {
+	const string p0n1 = "v1 partition=0 partitions=1 size=1024 hash=jenkins resolver=modular hint=1 virtual=4096";
+	const string p0n2 = "v1 partition=0 partitions=2 size=1024 hash=jenkins resolver=modular hint=1 virtual=4096";
+	const string p1n2 = "v1 partition=1 partitions=2 size=1024 hash=jenkins resolver=modular hint=1 virtual=4096";
+	const string p0n2h = "v1 partition=0 partitions=2 size=1024 hash=simple resolver=modular hint=1 virtual=4096";
+	storage_rocksdb* s = make_rocksdb(wal_slave_dir);
+	storage_set_string(s, "k", "v");
+	string why;
+	cut_assert_equal_string("", s->get_partition_binding().c_str());
+	cut_assert_false(s->is_restored_unverified());
+	cut_assert_equal_int(0, s->check_partition_binding(p0n1, true, why));
+	cut_assert_equal_string(p0n1.c_str(), s->get_partition_binding().c_str());
+	// a repartition of its own partition: followed
+	cut_assert_equal_int(0, s->check_partition_binding(p0n2, true, why));
+	cut_assert_equal_string(p0n2.c_str(), s->get_partition_binding().c_str());
+	// another partition index / routing rule: refused, binding unchanged
+	cut_assert_equal_int(1, s->check_partition_binding(p1n2, true, why));
+	cut_assert_true(why.find("partition differs") != string::npos);
+	cut_assert_equal_int(1, s->check_partition_binding(p0n2h, false, why));
+	cut_assert_true(why.find("hash differs") != string::npos);
+	cut_assert_equal_string(p0n2.c_str(), s->get_partition_binding().c_str());
+	// malformed / incomplete assignments are errors
+	cut_assert_equal_int(-1, s->check_partition_binding("v1 partition=0", true, why));
+	cut_assert_equal_int(-1, s->check_partition_binding("v2 partition=0 partitions=1 size=1024 hash=jenkins resolver=modular hint=1 virtual=4096", true, why));
+	// durable, and the binding is a reserved key (not user data)
+	drop_rocksdb_noremove(s);
+	s = make_rocksdb(wal_slave_dir);
+	cut_assert_equal_string(p0n2.c_str(), s->get_partition_binding().c_str());
+	cut_assert_true(storage_rocksdb::is_reserved_key("__flare_partition_binding"));
+	cut_assert_true(storage_rocksdb::is_reserved_key("__flare_restored_unverified"));
+	// a rebuild ATTEMPT starting leaves the stored copy (and its binding) as
+	// it is; a COMPLETED full dump replaces the content: the binding goes
+	cut_assert_equal_int(0, s->suspend_rebuilt_from());
+	cut_assert_equal_string(p0n2.c_str(), s->get_partition_binding().c_str());
+	cut_assert_equal_int(0, s->set_rebuilt_from("M", "2:e"));
+	cut_assert_equal_string("", s->get_partition_binding().c_str());
+	drop_rocksdb(s, wal_slave_dir);
+}
+
+namespace {
+	// what the restore hook / backup bootstrap does: the live copy replaced by
+	// the checkpoint, RESTORED marker, flared opens it
+	storage_rocksdb* restore_into(const string& dir, const string& checkpoint) {
+		const string live = dir + "/flare.rocksdb";
+		cut_assert_equal_int(0, system(("rm -rf '" + live + "' && cp -a '" + checkpoint + "' '" + live + "' && touch '" + live + "/RESTORED'").c_str()));
+		return make_rocksdb(dir.c_str());
+	}
+}
+
+// A RESTORED copy serves as a master ONLY of the partition and routing layout
+// its binding names (another partition — P1 of a two-partition cluster put
+// into a one-partition cluster — or another count is refused); a backup
+// WITHOUT a binding is refused; the verified state is durable; the binding
+// can be read from a checkpoint without opening it read-write.
+void test_partition_binding_restored_copy() {
+	const string p1n2 = "v1 partition=1 partitions=2 size=1024 hash=jenkins resolver=modular hint=1 virtual=4096";
+	const string p0n1 = "v1 partition=0 partitions=1 size=1024 hash=jenkins resolver=modular hint=1 virtual=4096";
+	const string p1n3 = "v1 partition=1 partitions=3 size=1024 hash=jenkins resolver=modular hint=1 virtual=4096";
+	const string d = wal_slave_dir;
+	string why;
+	// a bound copy (P1 of 2), backed up
+	storage_rocksdb* s = make_rocksdb(wal_slave_dir);
+	storage_set_string(s, "k", "v");
+	cut_assert_equal_int(0, s->check_partition_binding(p1n2, true, why));
+	string bound_ckpt;
+	cut_assert_equal_int(0, s->create_named_backup("bound", bound_ckpt));
+	// an unbound copy (a backup from before bindings), backed up
+	drop_rocksdb(s, wal_slave_dir);
+	s = make_rocksdb(wal_slave_dir);
+	storage_set_string(s, "k", "old");
+	string unbound_ckpt;
+	cut_assert_equal_int(0, s->create_named_backup("unbound", unbound_ckpt));
+	// keep both checkpoints outside the data dir
+	const string keep = d + "-keep";
+	cut_assert_equal_int(0, system(("rm -rf '" + keep + "' && mkdir -p '" + keep + "' && cp -a '" + bound_ckpt + "' '" + keep + "/bound' && cp -a '" + unbound_ckpt + "' '" + keep + "/unbound'").c_str()));
+	drop_rocksdb_noremove(s);
+	// read-only inspection (the hook's pre-replacement check)
+	string b;
+	bool ru = true;
+	cut_assert_equal_int(0, storage_rocksdb::checkpoint_binding(keep + "/bound", b, ru));
+	cut_assert_equal_string(p1n2.c_str(), b.c_str());
+	cut_assert_false(ru);
+	cut_assert_equal_int(0, storage_rocksdb::checkpoint_binding(keep + "/unbound", b, ru));
+	cut_assert_equal_string("", b.c_str());
+	cut_assert_equal_int(-1, storage_rocksdb::checkpoint_binding(keep + "/absent", b, ru));
+	// restored P1-of-2 into a one-partition cluster's P0: refused
+	s = restore_into(d, keep + "/bound");
+	cut_assert_true(s->is_restored_unverified());
+	cut_assert_equal_int(1, s->check_partition_binding(p0n1, true, why));
+	cut_assert_true(why.find("RESTORED copy bound to") != string::npos);
+	// the same partition under another partition count: refused too
+	cut_assert_equal_int(1, s->check_partition_binding(p1n3, true, why));
+	// as a slave: refused (logged by the caller), the flag stays
+	cut_assert_equal_int(1, s->check_partition_binding(p0n1, false, why));
+	cut_assert_true(s->is_restored_unverified());
+	// its own partition and layout as a master: verified, durably
+	cut_assert_equal_int(0, s->check_partition_binding(p1n2, true, why));
+	cut_assert_false(s->is_restored_unverified());
+	drop_rocksdb_noremove(s);
+	s = make_rocksdb(wal_slave_dir);
+	cut_assert_false(s->is_restored_unverified());
+	cut_assert_equal_string("v", get_value(s, "k").c_str());
+	drop_rocksdb_noremove(s);
+	// a backup WITHOUT a binding: refused as a master (cannot be verified),
+	// and the refusal survives a reopen
+	s = restore_into(d, keep + "/unbound");
+	cut_assert_true(s->is_restored_unverified());
+	cut_assert_equal_int(1, s->check_partition_binding(p0n1, true, why));
+	cut_assert_true(why.find("without a partition binding") != string::npos);
+	drop_rocksdb_noremove(s);
+	s = make_rocksdb(wal_slave_dir);
+	cut_assert_true(s->is_restored_unverified());
+	cut_assert_equal_int(1, s->check_partition_binding(p0n1, true, why));
+	cut_assert_equal_string("", s->get_partition_binding().c_str());
+	// an ABANDONED rebuild attempt must not launder it: still unverified
+	cut_assert_equal_int(0, s->suspend_rebuilt_from());
+	cut_assert_true(s->is_restored_unverified());
+	cut_assert_equal_int(1, s->check_partition_binding(p0n1, true, why));
+	// a COMPLETED full dump replaced the content: flag and binding go, the
+	// next Active assignment binds it
+	cut_assert_equal_int(0, s->set_rebuilt_from("M", "2:e"));
+	cut_assert_false(s->is_restored_unverified());
+	cut_assert_equal_int(0, s->check_partition_binding(p0n1, false, why));
+	cut_assert_equal_string(p0n1.c_str(), s->get_partition_binding().c_str());
+	drop_rocksdb(s, wal_slave_dir);
+	cut_remove_path(keep.c_str(), NULL);
+}
+
 // An abandoned attempt (a failed dump, a refused gate, a crash) leaves the
 // live copy as it was; a staging directory is never reused, and an
 // unfinished one is removed at the next open.

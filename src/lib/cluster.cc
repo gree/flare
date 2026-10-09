@@ -1276,6 +1276,21 @@ int cluster::reconstruct_node(vector<node> v, uint64_t node_map_version) {
 	// under this map can never see the previous source's eligibility.
 	this->_check_read_source_locked(node_map_version);
 
+	// restore provenance: an ACTIVE slave records the map's binding (a live
+	// copy is bound the first time it is Active; a rebuilt copy re-bound). A
+	// conflict is logged (its reads stay gated by R3; it is not a master).
+	{
+		node_map::iterator me = this->_node_map.find(this->_node_key);
+		if (me != this->_node_map.end() && me->second.node_role == role_slave
+				&& me->second.node_state == state_active && me->second.node_partition >= 0 && this->_storage != NULL) {
+			string why;
+			const string want = this->_partition_binding_for(me->second.node_partition);
+			if (this->_storage->check_partition_binding(want, false, why) != 0) {
+				log_err("CRITICAL: this Active slave's copy does not match the map's partition binding: %s", why.c_str());
+			}
+		}
+	}
+
 	// One line per accepted map: when this process took which master, so a
 	// decision (activation, read) can be placed before or after a switch.
 	{
@@ -2235,6 +2250,25 @@ int cluster::_shift_node_state(string node_key, state old_state, state new_state
  *
  *	assumes that node_map and node_partition_map is already write locked
  */
+string cluster::_partition_binding_for(int partition) {
+	int hint = 0;
+	int virt = 0;
+	string resolver = "unknown";
+	if (this->_key_resolver != NULL) {
+		resolver = key_resolver::type_cast(this->_key_resolver->get_type());
+		key_resolver_modular* m = dynamic_cast<key_resolver_modular*>(this->_key_resolver);
+		if (m != NULL) {
+			hint = m->get_hint();
+			virt = m->get_virtual();
+		}
+	}
+	ostringstream b;
+	b << "v1 partition=" << partition << " partitions=" << this->_node_partition_map.size()
+		<< " size=" << this->_partition_size << " hash=" << storage::hash_algorithm_cast(this->_key_hash_algorithm)
+		<< " resolver=" << resolver << " hint=" << hint << " virtual=" << virt;
+	return b.str();
+}
+
 int cluster::_shift_node_role(string node_key, role old_role, int old_partition, role new_role, int new_partition) {
 	log_notice("shifting node_role (node_key=%s, old_role=%s, old_partition=%d, new_role=%s, new_partition=%d)", node_key.c_str(), cluster::role_cast(old_role).c_str(), old_partition, cluster::role_cast(new_role).c_str(), new_partition);
 
@@ -2261,6 +2295,17 @@ int cluster::_shift_node_role(string node_key, role old_role, int old_partition,
 			this->_promotion_refused_why = why;
 			this->_promotion_refused = true;
 			log_err("CRITICAL: PROMOTION REFUSED by this node: %s — it serves no reads or writes as master until the map takes the role away", why.c_str());
+			return 0;
+		}
+		// restore provenance (restore-isolated 5): a copy whose data belongs
+		// to another partition or routing layout — or a restored copy that
+		// cannot show which — never serves as this partition's master
+		const string want = this->_partition_binding_for(new_partition);
+		const int b = this->_storage->check_partition_binding(want, true, why);
+		if (b != 0) {
+			this->_promotion_refused_why = (b < 0 ? string("the partition binding could not be checked: ") : string("")) + why;
+			this->_promotion_refused = true;
+			log_err("CRITICAL: PROMOTION REFUSED by this node: %s — it serves no reads or writes as master until the map takes the role away", this->_promotion_refused_why.c_str());
 			return 0;
 		}
 	}

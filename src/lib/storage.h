@@ -337,6 +337,12 @@ public:
 	// serve as a master — being rebuilt, left part-way, quarantined, copy
 	// identity records disagree. Non-RocksDB backends never refuse.
 	virtual bool promotion_forbidden(std::string& why) { (void)why; return false; }
+	// Partition binding (restore provenance): which partition, under which
+	// routing layout, this copy's data belongs to. `want` is the binding the
+	// accepted node map gives it. Returns 0 (allowed / recorded), 1 (refused:
+	// `why` says why), -1 (could not be read or written). Backends without
+	// copy evidence allow everything.
+	virtual int check_partition_binding(const std::string& want, bool as_master, std::string& why) { (void)want; (void)as_master; (void)why; return 0; }
 	// Whether get() may physically delete an entry it finds expired (only the
 	// partition master; see storage_rocksdb). Backends without replication
 	// ordering ignore it.

@@ -5322,9 +5322,12 @@ private def onRecordedHistory (c : Ctx) (ip : String) : IO (Bool × String) := d
     the replica stayed on the previous history, and the window's logs were
     not kept): the replica's R3 state / reason, its reconstruction state, and
     the operator's latest rebuild / history lines. -/
-private def waitOnRecordedHistory (c : Ctx) (label ip : String) (secs : Nat) : IO Bool := do
+private def waitOnRecordedHistory (c : Ctx) (label pod : String) (secs : Nat) : IO Bool := do
   let n ← IO.mkRef 0
   waitForCondition s!"{label}: the replica holds the recorded history (promotable)" secs do
+    -- the pod's CURRENT address (a restart moves it: CI 37893780448 (3b) read
+    -- a stale IP after the stuck-Down restart and saw no stats at all)
+    let ip := (← getPodIp pod c.cfg.«namespace»).getD ""
     let ok := (← onRecordedHistory c ip).1
     let i ← n.modifyGet fun i => (i, i + 1)
     if !ok && i % 6 == 0 then
@@ -5558,10 +5561,10 @@ def historyTrackingSuite : TestSuite := {
         if !ok then return .fail "precondition: no recorded history"
         match ← c.pair with
         | .error e => return .fail e
-        | .ok (_, _, _, sIp) =>
+        | .ok (_, _, sPod, _) =>
           let t0 ← IO.monoMsNow
-          let onRec ← waitOnRecordedHistory c "recovery" sIp 240
-          let (_, why) ← onRecordedHistory c sIp
+          let onRec ← waitOnRecordedHistory c "recovery" sPod 240
+          let (_, why) ← onRecordedHistory c ((← getPodIp sPod ns).getD "")
           IO.eprintln s!"# recovery: on the recorded history={onRec} after {((← IO.monoMsNow) - t0) / 1000} s; {why}"
           if !onRec then return .fail s!"the replica was not rebuilt onto the re-adopted history within 240 s ({why})"
           return .pass },
@@ -5573,8 +5576,8 @@ def historyTrackingSuite : TestSuite := {
         | .ok (mPod, _, sPod, sIp) =>
           let ok ← waitForCondition "a recorded history" 120 do historyRecorded c
           if !ok then return .fail "precondition: no recorded history"
-          let onRec ← waitOnRecordedHistory c "(3b)" sIp 240
-          let (_, why) ← onRecordedHistory c sIp
+          let onRec ← waitOnRecordedHistory c "(3b)" sPod 240
+          let (_, why) ← onRecordedHistory c ((← getPodIp sPod ns).getD "")
           IO.eprintln s!"# (3b) precondition: {why}"
           if !onRec then return .fail s!"precondition: the replica does not hold the recorded history ({why}): the abort could not be told from a refusal"
           match ← kubectl ["patch", "configmap", s!"{historyCfg.name}-history", "-n", ns, "--type", "merge", "-p", "{\"immutable\":true}"] with
@@ -5663,9 +5666,9 @@ def historyIntentSuite : TestSuite := {
         if !ok then return .fail "precondition: no recorded history"
         match ← c.pair with
         | .error e => return .fail e
-        | .ok (mPod, _, _, sIp) =>
-          let onRec ← waitOnRecordedHistory c "(5)" sIp 240
-          let (_, why) ← onRecordedHistory c sIp
+        | .ok (mPod, _, sPod, _) =>
+          let onRec ← waitOnRecordedHistory c "(5)" sPod 240
+          let (_, why) ← onRecordedHistory c ((← getPodIp sPod ns).getD "")
           IO.eprintln s!"# (5) precondition: {why}"
           if !onRec then return .fail s!"precondition: the replica does not hold the recorded history ({why}): no promotion can be attempted"
           if let .error e ← c.opExec "mkdir -p /tmp/postintent && rm -f /tmp/postintent/reached /tmp/postintent/release && touch /tmp/postintent/arm" then

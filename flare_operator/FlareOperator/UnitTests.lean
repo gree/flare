@@ -776,6 +776,20 @@ private def checkBreakerUnavailable (ctx : Ctx) : IO Unit := do
       && (List.range 6).foldl (fun acc _ => K8sReconciler.unreadyStreaks acc [k "c"] stAct (K8sReconciler.rejoinedAfterDown [] stAct)) [] == [(k "c", 6)]
       -- other nodes keep their streak
       && K8sReconciler.unreadyStreaks [(k "b", 5), (k "c", 6)] [k "b", k "c"] stAct [k "c"] == [(k "b", 6), (k "c", 1)])
+  -- CI 37899958227 history (3b): a partition emptied by a flush_all; the master
+  -- died, the ex-master came back with a new (empty) DB and is FORBIDDEN
+  -- (blocked); the replica is Active, known empty, "unfit" (it follows no one:
+  -- there is no master) and not blocked. It was never seated.
+  let emptyPart := cs [node "x" .Slave .Prepare, node "r" .Slave .Active]
+  let emptyPart := { emptyPart with nodeMap := emptyPart.nodeMap.map fun (kk, n) => if kk == k "x" then (kk, { n with lastMasterOf := 0 }) else (kk, n) }
+  let live := [k "x", k "r"]
+  let seated := fun (st : FlareClusterState) => (st.nodeMap.find? fun kv => kv.2.role == FlareRole.Master).map Prod.fst
+  check ctx "masterless refill: an EMPTY partition whose ex-master came back read empty seats the known-empty, unblocked Active slave even though it is 'unfit' (it follows no one); never a blocked copy, never when any copy holds data, never on an unread (not known empty) copy, never while the ex-master was not read empty"
+    (seated (K8sReconciler.promoteMasterlessPartition emptyPart 0 live [] [] [k "r"] true [k "x", k "r"] [k "x"]) == some (k "r")
+      && seated (K8sReconciler.promoteMasterlessPartition emptyPart 0 live [] [] [k "r"] true [k "x", k "r"] [k "x", k "r"]) == none
+      && seated (K8sReconciler.promoteMasterlessPartition emptyPart 0 live [] [k "x"] [k "r"] true [k "r"] [k "x"]) == none
+      && seated (K8sReconciler.promoteMasterlessPartition emptyPart 0 live [] [] [k "r"] true [k "x"] [k "x"]) == none
+      && seated (K8sReconciler.promoteMasterlessPartition emptyPart 0 live [] [] [k "r"] true [k "r"] [k "x"]) == none)
   check ctx "one long-Down node in eight (12%) does not trip"
     (!trips big [] ((List.range 7).map fun i => k s!"n{i}"))
 

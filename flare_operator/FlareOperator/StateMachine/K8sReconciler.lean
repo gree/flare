@@ -1295,6 +1295,20 @@ def promoteMasterlessPartition (state : FlareClusterState) (pIdx : Nat)
           && !blockedKeys.contains key
           && !(holdUnfit && excludedKeys.contains key
                 && !exMasterBackEmpty state pIdx livePodKeys knownEmptyKeys)))
+      -- An EMPTY partition: no copy holds data and the ex-master came back
+      -- READ empty — an Active slave KNOWN empty that the history evidence
+      -- does not block is seated: nothing can be lost. Without this tier the
+      -- partition stayed masterless for ever: the slave is "unfit" only
+      -- because it follows no one (there is no master), and the last resort
+      -- above needs a data-bearing copy (CI 37899958227, history (3b): a
+      -- partition emptied by a flush_all whose master died). Positive
+      -- evidence only (read empty, not blocked): an unread copy is not empty.
+      |>.orElse (fun _ =>
+        if partitionHasData || !exMasterBackEmpty state pIdx livePodKeys knownEmptyKeys then none
+        else state.nodeMap.find? (fun (key, n) =>
+          n.role == FlareRole.Slave && n.state == FlareState.Active
+            && n.partition == Int.ofNat pIdx && livePodKeys.contains key
+            && knownEmptyKeys.contains key && !blockedKeys.contains key))
     match candidate with
     | some kv =>
       state.addNode kv.1 { kv.2 with

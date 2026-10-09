@@ -5552,46 +5552,18 @@ def historyTrackingSuite : TestSuite := {
         if !back then return .fail "the record was not adopted after the corrupt one was deleted"
         return .pass },
 
-    { name := "(5) an intent persisted and the operator RESTARTED before the map commit: the intent is proven uncommitted (the persisted map reaches its version without its id) and dropped; the record is unchanged by it"
+    { name := "(after 3a / 4) recovery: once the record is re-adopted at the holder's new (bulk) history, the replica that held the previous history is rebuilt onto it within 240 s — the bound is not raised; the wait logs why while it is not (CI 28761ff: it took > 240 s, cause not established)"
       run := do
         let ok ← waitForCondition "a recorded history" 120 do historyRecorded c
         if !ok then return .fail "precondition: no recorded history"
         match ← c.pair with
         | .error e => return .fail e
-        | .ok (mPod, _, _, sIp) =>
-          let onRec ← waitOnRecordedHistory c "(5)" sIp 240
+        | .ok (_, _, _, sIp) =>
+          let t0 ← IO.monoMsNow
+          let onRec ← waitOnRecordedHistory c "recovery" sIp 240
           let (_, why) ← onRecordedHistory c sIp
-          IO.eprintln s!"# (5) precondition: {why}"
-          if !onRec then return .fail s!"precondition: the replica does not hold the recorded history ({why}): no promotion can be attempted"
-          if let .error e ← c.opExec "mkdir -p /tmp/postintent && rm -f /tmp/postintent/reached /tmp/postintent/release && touch /tmp/postintent/arm" then
-            return .fail s!"precondition: could not arm the post-intent barrier: {e}"
-          discard <| kubectl ["delete", "pod", mPod, "-n", ns, "--grace-period=0", "--force", "--wait=false"]
-          let checks ← IO.mkRef 0
-          let reached ← waitForCondition "a promotion intent is persisted and the pass held before its map commit" 300 do
-            -- every ~30 s: why no promotion yet (CI f37a5b4: 300 s with none,
-            -- and the operator log of that window was not kept)
-            let n ← checks.modifyGet fun n => (n, n + 1)
-            if n % 6 == 0 then
-              let ip := (← getPodIp mPod ns).getD ""
-              let items ← c.statNat ip "curr_items"
-              let ready := ((← kubectlGetJsonpath "pod" mPod ns "{.status.conditions[?(@.type==\"Ready\")].status}").toOption.getD "?").trim
-              let last := ((← c.opLog 400).splitOn "\n").filter (fun l => containsSubstr l "NO master" || containsSubstr l "NOT LOSS-FREE"
-                || containsSubstr l "PROMOTION EVIDENCE" || containsSubstr l "withheld" || containsSubstr l "ABORTED" || containsSubstr l "REBUILD HELD")
-              IO.eprintln s!"# (5) wait {n}: ex-master {mPod} ready={ready} curr_items={items}; operator: {(last.reverse.take 4).reverse}"
-            match ← c.opExec "cat /tmp/postintent/reached 2>/dev/null || true" with
-            | .ok o => return !o.trim.isEmpty
-            | .error _ => return false
-          if !reached then return .fail "precondition: no intent reached the post-intent barrier (the promotion did not happen; see the (5) wait lines)"
-          let intentLine := ((← historyText c).splitOn "\n").filter (·.startsWith "intent ")
-          let t0 ← utcNow
-          if !(← restartOperator c) then return .fail "the operator did not come back"
-          let dropped ← waitForCondition "the new operator drops the uncommitted intent" 300 do
-            return containsSubstr (← c.opLogSince t0) "that commit never happened"
-          IO.eprintln s!"# intent before the restart {intentLine}; dropped as uncommitted={dropped}"
-          if intentLine.isEmpty then return .fail "precondition: no intent was in the record at the barrier"
-          if !dropped then return .fail "the uncommitted intent was not dropped (or was completed)"
-          let healed ← waitForCondition "the cluster has a master again" 420 do return (← masterPodOf c).isSome
-          if !healed then return .fail "no master after the restarted operator dropped the intent"
+          IO.eprintln s!"# recovery: on the recorded history={onRec} after {((← IO.monoMsNow) - t0) / 1000} s; {why}"
+          if !onRec then return .fail s!"the replica was not rebuilt onto the re-adopted history within 240 s ({why})"
           return .pass },
 
     { name := "(3b) a promotion whose history INTENT cannot be persisted is aborted: nothing is committed (last test: the cluster is left without a master)"
@@ -5669,6 +5641,66 @@ def historyHeldSuite : TestSuite := {
 /-- A first build whose history record cannot be written (seam: history
     writes refused until /tmp/histok exists in the operator pod). -/
 private def historyFirstBuildEnv : List (String × String) := [("FLARE_STATS_PROBE_INTERVAL_MS", "15000"), ("FLARE_TEST_HISTORY_WRITE_OK_FILE", "/tmp/histok")]
+/-- history (5) on its OWN fresh cluster: the intent persisted, the operator
+    restarted before the map commit (CI 741d0c5 .. 28761ff never reached it:
+    the shared cluster's earlier tests left its replica on another history). -/
+private def historyIntentCfg : ClusterConfig := { historyCfg with name := "hist-intent", «namespace» := "flare-hist-intent", debugPod := "debug-hist-intent" }
+
+def historyIntentSuite : TestSuite := {
+  name := "history-intent-restart"
+  setup := do
+    deployCluster historyIntentCfg
+    IO.sleep 50000
+  teardown := cleanupCluster historyIntentCfg
+  onFailure := dumpClusterDiagnostics historyIntentCfg.«namespace» s!"app={historyIntentCfg.operatorName}"
+  tests :=
+    let c : Ctx := { cfg := historyIntentCfg }
+    let ns := historyIntentCfg.«namespace»
+    [
+    { name := "(5) an intent persisted and the operator RESTARTED before the map commit: the intent is proven uncommitted (the persisted map reaches its version without its id) and dropped; the record is unchanged by it"
+      run := do
+        let ok ← waitForCondition "a recorded history" 120 do historyRecorded c
+        if !ok then return .fail "precondition: no recorded history"
+        match ← c.pair with
+        | .error e => return .fail e
+        | .ok (mPod, _, _, sIp) =>
+          let onRec ← waitOnRecordedHistory c "(5)" sIp 240
+          let (_, why) ← onRecordedHistory c sIp
+          IO.eprintln s!"# (5) precondition: {why}"
+          if !onRec then return .fail s!"precondition: the replica does not hold the recorded history ({why}): no promotion can be attempted"
+          if let .error e ← c.opExec "mkdir -p /tmp/postintent && rm -f /tmp/postintent/reached /tmp/postintent/release && touch /tmp/postintent/arm" then
+            return .fail s!"precondition: could not arm the post-intent barrier: {e}"
+          discard <| kubectl ["delete", "pod", mPod, "-n", ns, "--grace-period=0", "--force", "--wait=false"]
+          let checks ← IO.mkRef 0
+          let reached ← waitForCondition "a promotion intent is persisted and the pass held before its map commit" 300 do
+            -- every ~30 s: why no promotion yet (CI f37a5b4: 300 s with none,
+            -- and the operator log of that window was not kept)
+            let n ← checks.modifyGet fun n => (n, n + 1)
+            if n % 6 == 0 then
+              let ip := (← getPodIp mPod ns).getD ""
+              let items ← c.statNat ip "curr_items"
+              let ready := ((← kubectlGetJsonpath "pod" mPod ns "{.status.conditions[?(@.type==\"Ready\")].status}").toOption.getD "?").trim
+              let last := ((← c.opLog 400).splitOn "\n").filter (fun l => containsSubstr l "NO master" || containsSubstr l "NOT LOSS-FREE"
+                || containsSubstr l "PROMOTION EVIDENCE" || containsSubstr l "withheld" || containsSubstr l "ABORTED" || containsSubstr l "REBUILD HELD")
+              IO.eprintln s!"# (5) wait {n}: ex-master {mPod} ready={ready} curr_items={items}; operator: {(last.reverse.take 4).reverse}"
+            match ← c.opExec "cat /tmp/postintent/reached 2>/dev/null || true" with
+            | .ok o => return !o.trim.isEmpty
+            | .error _ => return false
+          if !reached then return .fail "precondition: no intent reached the post-intent barrier (the promotion did not happen; see the (5) wait lines)"
+          let intentLine := ((← historyText c).splitOn "\n").filter (·.startsWith "intent ")
+          let t0 ← utcNow
+          if !(← restartOperator c) then return .fail "the operator did not come back"
+          let dropped ← waitForCondition "the new operator drops the uncommitted intent" 300 do
+            return containsSubstr (← c.opLogSince t0) "that commit never happened"
+          IO.eprintln s!"# intent before the restart {intentLine}; dropped as uncommitted={dropped}"
+          if intentLine.isEmpty then return .fail "precondition: no intent was in the record at the barrier"
+          if !dropped then return .fail "the uncommitted intent was not dropped (or was completed)"
+          let healed ← waitForCondition "the cluster has a master again" 420 do return (← masterPodOf c).isSome
+          if !healed then return .fail "no master after the restarted operator dropped the intent"
+          return .pass }
+  ]
+}
+
 private def historyFirstBuildCfg : ClusterConfig := { historyCfg with name := "hist-fb", «namespace» := "flare-hist-fb", debugPod := "debug-hist-fb", operatorEnv := historyFirstBuildEnv }
 
 private def creationOf (ns kind name : String) : IO (Option String) := do

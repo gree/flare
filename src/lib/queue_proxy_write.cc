@@ -143,6 +143,23 @@ int queue_proxy_write::run(shared_connection c) {
 
 	this->_success = true;
 	this->_result = p->get_result();
+	// DIAGNOSTIC (copy-identity 11, manual run 37899958227: 10 forwarded writes
+	// acknowledged by the master never reached a replica, with no drop logged
+	// or counted): the replica ANSWERED, but not with a success — its answer
+	// was ignored here. Logged (rate-limited) with the destination; no change
+	// of behaviour (whether such an answer is a drop is not decided yet).
+	if (this->_result != op::result_stored && this->_result != op::result_deleted
+			&& this->_result != op::result_touched && this->_result != op::result_ok
+			&& this->_result != op::result_not_found) {
+		static AtomicCounter unexpected_logged(0);
+		if (unexpected_logged.incr() % 100 == 1) {
+			const connection_tcp* ctp = dynamic_cast<const connection_tcp*>(c.get());
+			log_warning("proxy write ANSWERED but not stored by the replica (dest=%s:%d, op=%s, key=%s, version=%u, result=%s) — the replica may now miss this write (logged 1 in 100)",
+				ctp ? ctp->get_host().c_str() : "?", ctp ? ctp->get_port() : 0,
+				this->_op_ident.c_str(), this->_entry.key.c_str(), this->_entry.version,
+				op::result_cast(this->_result).c_str());
+		}
+	}
 	// :(
 	log_debug("result: %s:%d", p->get_ident().c_str(), this->_result);
 	if ((p->get_ident() == "incr" || p->get_ident() == "decr") && this->_result == op::result_stored) {

@@ -192,9 +192,9 @@ def containsSubstr (haystack needle : String) : Bool :=
     previous container too) into $FLARE_E2E_LOG_DIR/<ns>/ — uploaded with the
     CI results. The printed tails below lost the decisive windows (CI 28761ff:
     history (5)'s 240 s, authority 29's adoption). No-op without the variable. -/
-def saveFullLogs (ns : String) : IO Unit := do
+def saveFullLogs (ns : String) (label : String := "") : IO Unit := do
   let some root ← IO.getEnv "FLARE_E2E_LOG_DIR" | return
-  let dir := s!"{root}/{ns}"
+  let dir := if label.isEmpty then s!"{root}/{ns}" else s!"{root}/{ns}/{label}"
   discard <| IO.Process.output { cmd := "mkdir", args := #["-p", dir] }
   let pods ← match ← kubectl ["get", "pods", "-n", ns, "-o", "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}"] with
     | .ok o => pure ((o.splitOn "\n").map String.trim |>.filter (!·.isEmpty))

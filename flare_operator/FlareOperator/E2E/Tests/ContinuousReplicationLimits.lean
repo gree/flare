@@ -1575,6 +1575,7 @@ def identitySuite : TestSuite := {
     discard <| kubectl ["uncordon", kindNode]
     cleanupCluster identityCfg
   onFailure := dumpClusterDiagnostics identityCfg.«namespace» s!"app={identityCfg.operatorName}"
+  afterEach := fun i => saveFullLogs identityCfg.«namespace» s!"after-test-{i}"
   tests :=
     let c : Ctx := { cfg := identityCfg }
     let ns := identityCfg.«namespace»
@@ -5345,6 +5346,7 @@ def historyTrackingSuite : TestSuite := {
     IO.sleep 50000
   teardown := cleanupCluster historyCfg
   onFailure := dumpClusterDiagnostics historyCfg.«namespace» s!"app={historyCfg.operatorName}"
+  afterEach := fun i => saveFullLogs historyCfg.«namespace» s!"after-test-{i}"
   tests :=
     let c : Ctx := { cfg := historyCfg }
     let ns := historyCfg.«namespace»
@@ -5457,7 +5459,14 @@ def historyTrackingSuite : TestSuite := {
           -- (manual run 37900698596: (2) ended as the map named the new
           -- master; this test's first write arrived before it took over)
           let serving ← waitForCondition s!"the master {mPod} acknowledges writes" 60 do
-            memcachedSet historyCfg.debugPod ns mIp historyCfg.flarePort "hr_probe" "x"
+            let ok ← memcachedSet historyCfg.debugPod ns mIp historyCfg.flarePort "hr_probe" "x"
+            if !ok then
+              -- WHY it does not take the write (run 37900698596: not established)
+              let raw ← execInDebugPod historyCfg.debugPod ns s!"printf 'set hr_probe 0 0 1\\r\\nx\\r\\n' | nc -w 3 {mIp} {historyCfg.flarePort}"
+              let st := fun (k : String) => do return s!"{k}={← c.statStr mIp k}"
+              let view ← ["node_map_version", "promotion_refused", "reconstruction_boot_id", "repl_read_source_state"].mapM st
+              IO.eprintln s!"# (R) probe write to {mPod} ({mIp}) refused: raw reply {(raw.toOption.getD "(no reply)").trim}; its view {view}"
+            return ok
           if !serving then return .fail s!"precondition: the master {mPod} did not acknowledge a write within 60 s"
           for (k, v) in base do
             if !(← memcachedSet historyCfg.debugPod ns mIp historyCfg.flarePort k v) then return .fail s!"precondition: {k} not acknowledged"
@@ -5766,5 +5775,102 @@ def historyFirstBuildSuite : TestSuite := {
           return .pass }
   ]
 }
+
+/-- copy-identity 11 (manual run 37899958227): 10 writes the master
+    acknowledged while a just-restarted replica was rebuilding never reached
+    it, with nothing dropped, logged or repaired. A DETERMINISTIC replay of the
+    rebuild's boundaries: holds on the replica's PVC (they survive its flared
+    restart) stop it at reconstruction start, at the switch (after its staging
+    copy caught up to the fixed target and was verified) and at activation;
+    one batch of writes is acknowledged by the master in each window. No
+    continuous follow (as copy-identity). -/
+private def fwdWindowCfg : ClusterConfig := {
+  name := "fwd-window"
+  «namespace» := "flare-fwd-window"
+  partitions := 1
+  replicas := 2
+  operatorName := "flare-operator"
+  debugPod := "debug-fwd-window"
+  storageBackend := "rocksdb"
+  usePvc := true
+  drainSeconds := 20
+  flaredEnv := [("FLARE_TEST_RECONSTRUCTION_START_HOLD_FILE", "/data/hold-start"),
+                ("FLARE_TEST_DESTRUCTIVE_HOLD_FILE", "/data/hold-switch"),
+                ("FLARE_TEST_ACTIVATION_HOLD_FILE", "/data/hold-act")]
+}
+
+def forwardWindowSuite : TestSuite := {
+  name := "forward-window"
+  setup := do
+    deployCluster fwdWindowCfg
+    IO.sleep 40000
+  teardown := cleanupCluster fwdWindowCfg
+  onFailure := dumpClusterDiagnostics fwdWindowCfg.«namespace» s!"app={fwdWindowCfg.operatorName}"
+  afterEach := fun i => saveFullLogs fwdWindowCfg.«namespace» s!"after-test-{i}"
+  tests :=
+    let c : Ctx := { cfg := fwdWindowCfg }
+    let ns := fwdWindowCfg.«namespace»
+    [
+    { name := "writes the master acknowledges while a restarted replica rebuilds — before its snapshot (W0), after its catch-up target before the switch (W1), after the switch before Active (W2) — are ALL on the replica once it is Active, or a drop / repair is recorded for them (never a silent loss)"
+      run := do
+        match ← c.pair with
+        | .error e => return .fail s!"precondition: {e}"
+        | .ok (m, mIp, r, _) =>
+          let base := (List.range 30).map fun i => (s!"fb_{i}", s!"vb_{i}")
+          for (k, v) in base do
+            if !(← memcachedSet fwdWindowCfg.debugPod ns mIp fwdWindowCfg.flarePort k v) then return .fail s!"precondition: {k} not acknowledged"
+          let synced ← waitForCondition "the replica holds every base key" 120 do
+            match ← c.localDump ((← getPodIp r ns).getD "") with
+            | some d => return (missingFrom base d).isEmpty
+            | none => return false
+          if !synced then return .fail "precondition: the replica did not converge"
+          let dropped0 ← c.statNat mIp "proxy_write_dropped"
+          -- arm every hold on the replica's PVC, then restart its flared
+          let hold := fun (f : String) (on : Bool) => kubectl ["exec", "-n", ns, r, "-c", "flared", "--", "sh", "-c", if on then s!"touch /data/{f}" else s!"rm -f /data/{f}"]
+          for f in ["hold-start", "hold-switch", "hold-act"] do
+            if let .error e ← hold f true then return .fail s!"precondition: arming {f}: {e}"
+          let since ← utcNow
+          match ← c.killFlaredIn r with
+          | .error e => return .fail s!"could not restart {r}: {e}"
+          | .ok _ => pure ()
+          let logHas := fun (needle : String) => do return containsSubstr (← c.flaredLogSince r since) needle
+          let atStart ← waitForCondition "the replica's reconstruction is held at its start" 240 do logHas "held by FLARE_TEST_RECONSTRUCTION_START_HOLD_FILE"
+          if !atStart then return .fail "precondition: the rebuild was not held at its start"
+          let w0 := (List.range 5).map fun i => (s!"fw0_{i}", s!"v0_{i}")
+          for (k, v) in w0 do
+            if !(← memcachedSet fwdWindowCfg.debugPod ns mIp fwdWindowCfg.flarePort k v) then return .fail s!"W0 {k} not acknowledged by the master"
+          discard <| hold "hold-start" false
+          let atSwitch ← waitForCondition "the staging copy is caught up and held before the switch" 240 do logHas "held by FLARE_TEST_DESTRUCTIVE_HOLD_FILE"
+          if !atSwitch then return .fail "precondition: the rebuild was not held before its switch"
+          let w1 := (List.range 5).map fun i => (s!"fw1_{i}", s!"v1_{i}")
+          for (k, v) in w1 do
+            if !(← memcachedSet fwdWindowCfg.debugPod ns mIp fwdWindowCfg.flarePort k v) then return .fail s!"W1 {k} not acknowledged by the master"
+          discard <| hold "hold-switch" false
+          let atAct ← waitForCondition "the switched copy's activation is held" 240 do logHas "held by FLARE_TEST_ACTIVATION_HOLD_FILE"
+          if !atAct then return .fail "precondition: the activation was not held"
+          let w2 := (List.range 5).map fun i => (s!"fw2_{i}", s!"v2_{i}")
+          for (k, v) in w2 do
+            if !(← memcachedSet fwdWindowCfg.debugPod ns mIp fwdWindowCfg.flarePort k v) then return .fail s!"W2 {k} not acknowledged by the master"
+          discard <| hold "hold-act" false
+          let active ← waitForCondition "the replica is Active in the operator's map" 180 do
+            return (← c.p0Roles).2.contains r
+          IO.sleep 15000
+          let rIp := (← getPodIp r ns).getD ""
+          let some d ← c.localDump rIp | return .fail "the replica's own copy could not be read"
+          let missing := fun (ws : List (String × String)) => missingFrom ws d
+          let dropped1 ← c.statNat mIp "proxy_write_dropped"
+          let mlog := (← kubectl ["logs", "-n", ns, m, "-c", "flared", s!"--since-time={since}"]).toOption.getD ""
+          let notStored := containsSubstr mlog "ANSWERED but not stored"
+          let olog ← c.opLogSince since
+          let repair := containsSubstr olog "REPLICA REPAIR" || containsSubstr olog "replica divergence"
+          IO.eprintln s!"# forward window on {r} (master {m}): Active={active}; missing W0={missing w0} W1={missing w1} W2={missing w2}; base missing={missing base}; master proxy_write_dropped {dropped0} -> {dropped1}; 'answered but not stored' logged={notStored}; repair/divergence logged={repair}"
+          let lost := missing w0 ++ missing w1 ++ missing w2 ++ missing base
+          if lost.isEmpty then return .pass
+          if dropped1 != dropped0 || notStored || repair then
+            return .fail s!"writes acknowledged by the master are missing on the replica ({lost}) — RECORDED (drop counter {dropped0} -> {dropped1}, not-stored warning {notStored}, repair {repair}); the repair must still bring them back"
+          return .fail s!"SILENT LOSS: writes acknowledged by the master are missing on the replica ({lost}) with no drop, warning or repair recorded" }
+  ]
+}
+
 
 end FlareOperator.E2E.Tests.ContinuousReplicationLimits

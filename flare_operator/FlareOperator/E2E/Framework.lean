@@ -31,6 +31,10 @@ structure TestSuite where
       end-of-run log dump finds nothing; this is the only point where the
       failing suite's operator/flared logs still exist. -/
   onFailure : IO Unit := pure ()
+  /-- Runs after EVERY test with its TAP index (pass or fail): e.g. a log
+      snapshot, so a pod replaced by a later test does not take the logs of
+      an earlier failure with it (manual run 37900698596). -/
+  afterEach : Nat → IO Unit := fun _ => pure ()
 
 /-- A TAP result line, flushed at once and echoed to stderr (CI 37731207056:
     stdout was buffered and every result of a run killed by its time limit
@@ -76,6 +80,7 @@ def runSuite (suite : TestSuite) (startIndex : Nat) : IO (Nat × Nat) := do
       emitResult s!"not ok {idx} - {tc.name}"
       IO.eprintln s!"#   exception: {e}"
       failures := failures + 1
+    try suite.afterEach idx catch e => IO.eprintln s!"# afterEach hook failed: {e}"
 
   if failures > 0 then
     try

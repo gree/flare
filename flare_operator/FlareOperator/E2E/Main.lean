@@ -95,6 +95,7 @@ def main (args : List String) : IO UInt32 :=
     Tests.ContinuousReplicationLimits.historyTrackingSuite,
     Tests.ContinuousReplicationLimits.historyHeldSuite,
     Tests.ContinuousReplicationLimits.historyIntentSuite,
+    Tests.ContinuousReplicationLimits.forwardWindowSuite,
     Tests.ContinuousReplicationLimits.historyFirstBuildSuite,
     Tests.ContinuousReplicationLimits.reserveMeasureSuite,
     Tests.ContinuousReplicationLimits.lagHoldUnreadableSuite,

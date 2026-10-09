@@ -524,6 +524,12 @@ def registerFreshNode (state : FlareClusterState) (crd : FlareClusterView)
     let lines := nodeList.map serializeNode
     (newState, .End (lines.map String.trim))
 
+/-- The nodes whose state went Active -> Prepare between `before` and `after`
+    (a re-registration demoted them: their Active membership ended). -/
+def leftActive (before after : FlareClusterState) : List String :=
+  (before.nodeMap.filter fun (k, n) =>
+    n.state == FlareState.Active && (after.lookupNode k).map (·.state) == some FlareState.Prepare).map Prod.fst
+
 /-- Pure reconcile step: process a FlareEvent against the current state. -/
 def reconcileStep (state : FlareClusterState) (crd : FlareClusterView)
     (event : FlareEvent) : FlareClusterState × FlareResponse :=

@@ -790,6 +790,16 @@ private def checkBreakerUnavailable (ctx : Ctx) : IO Unit := do
       && seated (K8sReconciler.promoteMasterlessPartition emptyPart 0 live [] [k "x"] [k "r"] true [k "r"] [k "x"]) == none
       && seated (K8sReconciler.promoteMasterlessPartition emptyPart 0 live [] [] [k "r"] true [k "x"] [k "x"]) == none
       && seated (K8sReconciler.promoteMasterlessPartition emptyPart 0 live [] [] [k "r"] true [k "r"] [k "x"]) == none)
+  -- CI 37908698742: the re-registration demoted c (Active -> Prepare) DURING pass
+  -- A after its ListPods counted 6, c was Active again before pass B: never Down
+  -- at a commit. The left-Active key restarts the window (old: 7, dead again).
+  check ctx "NotReady streaks: a node that LEFT its Active membership (Active -> Prepare) between two ListPods starts a fresh window (old: 6 -> 7, dead again; new: 1); without such a transition the streak carries (a wedged process is still declared dead)"
+    (let crd1 : FlareClusterView := { metadata := { name := "c" }, spec := { partitions := 1, replicas := 3 } }
+     let (afterAdd, _) := Reconciler.reconcileStep stAct crd1 (.NodeAdd "c" 12121)
+     Reconciler.leftActive stAct afterAdd == [k "c"]
+     && Reconciler.leftActive stAct stAct == []
+     && K8sReconciler.unreadyStreaks [(k "c", 6)] [k "c"] stAct (K8sReconciler.rejoinedAfterDown [] stAct ++ Reconciler.leftActive stAct afterAdd) == [(k "c", 1)]
+     && K8sReconciler.unreadyStreaks [(k "c", 6)] [k "c"] stAct (K8sReconciler.rejoinedAfterDown [] stAct) == [(k "c", 7)])
   check ctx "one long-Down node in eight (12%) does not trip"
     (!trips big [] ((List.range 7).map fun i => k s!"n{i}"))
 

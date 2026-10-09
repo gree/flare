@@ -1309,7 +1309,12 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
       let notReadyKeys := (pods.filter (fun p => !p.ready && !p.terminating)).map Bridge.PodInfo.toNodeKey
       -- a node Down in the last committed map that is a member again now
       -- (it rejoined) starts its NotReady window again
-      let fresh := K8sReconciler.rejoinedAfterDown (← downAtCommitRef.get) (← stateRef.get)
+      -- ... and one that LEFT its Active membership (Active -> Prepare through
+      -- a re-registration) since the last ListPods: the window between two
+      -- ListPods can hide the Prepare (CI 37908698742: demoted during pass A,
+      -- Active again before pass B, old streak 6 -> 7, dead again)
+      let leftActive ← leftActiveRef.modifyGet fun l => (l, [])
+      let fresh := K8sReconciler.rejoinedAfterDown (← downAtCommitRef.get) (← stateRef.get) ++ leftActive
       let newUnready := K8sReconciler.unreadyStreaks prevUnready notReadyKeys (← stateRef.get) fresh
       unreadyCyclesRef.set newUnready
       let unhealthyKeys := (newUnready.filter (fun kv => kv.2 ≥ unreadyDeadCycles)).map Prod.fst

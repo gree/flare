@@ -5794,7 +5794,12 @@ private def fwdWindowCfg : ClusterConfig := {
   storageBackend := "rocksdb"
   usePvc := true
   drainSeconds := 20
-  flaredEnv := [("FLARE_TEST_RECONSTRUCTION_START_HOLD_FILE", "/data/hold-start"),
+  -- the STAGED path (snapshot -> catch-up to a fixed target -> switch), as in
+  -- copy-identity 11 (its history had moved); with WAL reconstruction the
+  -- same-history restart catches up without a staging copy or a switch
+  -- (manual run 37908698742) — that path is a separate case
+  flaredEnv := [("FLARE_TEST_DISABLE_WAL_RECONSTRUCTION", "1"),
+                ("FLARE_TEST_RECONSTRUCTION_START_HOLD_FILE", "/data/hold-start"),
                 ("FLARE_TEST_DESTRUCTIVE_HOLD_FILE", "/data/hold-switch"),
                 ("FLARE_TEST_ACTIVATION_HOLD_FILE", "/data/hold-act")]
 }

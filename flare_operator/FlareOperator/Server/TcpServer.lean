@@ -38,6 +38,10 @@ open Std.Net (SocketAddress SocketAddressV4 IPv4Addr)
     answered with an error (no role, no map handed out) and flared retries.
     `none` = open (set by Main once the record exists). -/
 initialize registrationGateRef : IO.Ref (Option String) ← IO.mkRef none
+/-- Node keys whose state went Active -> Prepare through this server since the
+    reconcile loop last drained it (a lost Active membership: the NotReady
+    streak of the old membership ends; CI 37908698742). -/
+initialize leftActiveRef : IO.Ref (List String) ← IO.mkRef []
 
 /-- Encapsulates the shared mutable state for the TCP server.
     All fields are IO.Ref for thread-safe access from concurrent handlers.
@@ -169,9 +173,16 @@ def handleConnection (sock : Socket) (state : ServerState) : IO Unit := do
           pure ((← state.clusterState.get), (FlareResponse.ServerError s!"registration closed: {gate.getD ""}" : FlareResponse))
         else if dropForTest then do
           pure ((← state.clusterState.get), (FlareResponse.OK : FlareResponse))
-        else state.clusterState.modifyGet fun cs =>
-          let (newState, resp) := reconcileStep cs crd event
-          ((newState, resp), newState)
+        else do
+          let r ← state.clusterState.modifyGet fun cs =>
+            let (newState, resp) := reconcileStep cs crd event
+            -- a node whose state went Active -> Prepare here lost its Active
+            -- membership (a re-registration demotes it; it must rebuild)
+            let demoted := Reconciler.leftActive cs newState
+            ((newState, resp, demoted), newState)
+          let (newState, resp, demoted) := r
+          if !demoted.isEmpty then leftActiveRef.modify fun l => l ++ demoted.filter (!l.contains ·)
+          pure (newState, resp)
       -- Trace logging + register socket after first NodeAdd
       match event with
       | .Meta =>

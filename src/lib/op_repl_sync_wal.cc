@@ -173,6 +173,11 @@ int op_repl_sync_wal::_run_server() {
 		log_err("failed to cast storage to storage_rocksdb", 0);
 		return this->_send_result(result_server_error, "internal_error");
 	}
+	// restore provenance: an unverified RESTORED copy is not a replication source
+	if (rocksdb->is_restored_unverified()) {
+		log_warning("repl_sync_wal refused: this copy is an unverified RESTORED copy", 0);
+		return this->_send_result(result_server_error, "restored_unverified");
+	}
 
 	// Master identity token check. A slave that is following a
 	// different lineage (split-brain, restored from backup, synced

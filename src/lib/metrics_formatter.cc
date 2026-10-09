@@ -85,6 +85,11 @@ const command_mapping memcached_commands[] = {
 const stat_mapping flared_gauges[] = {
 	{ "node_map_version",   "flared_node_map_version",                 "gauge"   },
 	{ "proxy_write_dropped",     "flare_node_proxy_write_dropped",     "counter" },
+	// 1 = the node map makes this node a master but it REFUSES to serve as one
+	// (a copy it knows is unfit, or a restored copy of another partition):
+	// writes to its partition fail. A confirmed refusal, read from the node
+	// itself; an unreachable node is not this (no sample: `up` says it).
+	{ "promotion_refused",       "flare_node_promotion_refused",       "gauge"   },
 	{ "reconstruction_started",   "flare_node_reconstruction_started_total",   "counter" },
 	{ "reconstruction_completed", "flare_node_reconstruction_completed_total", "counter" },
 	{ "reconstruction_failed",    "flare_node_reconstruction_failed_total",    "counter" },

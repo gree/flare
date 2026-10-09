@@ -104,9 +104,13 @@ usable master (flared refuses the unbound restored copy). Take a backup with
 the new release before relying on bootstrap (compatibility policy for old
 backups: pending a decision). See RUNBOOK.md#restore-refused.
 
-Not implemented (known gaps): a master that refuses this way is still in the
-map and is NOT counted by `flare_operator_partitions_masterless` /
-`FlareMasterMissing`; the partition COUNT of a backup is not compared with the
+A master that refuses this way stays in the map (not counted by
+`flare_operator_partitions_masterless`); it raises `FlareMasterRefusesToServe`
+(`flare_node_promotion_refused`, read from the node itself). An unverified
+restored copy also refuses to be a replication source (dump / snapshot / WAL),
+so its data cannot be copied into a replica that the map then binds as its own.
+
+Not implemented (known gaps): the partition COUNT of a backup is not compared with the
 cluster's (pending a decision); the hook replaces a live copy without keeping
 it once the check passes (in-place restore with retention, plan I).
 

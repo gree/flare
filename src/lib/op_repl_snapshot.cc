@@ -90,6 +90,12 @@ int op_repl_snapshot::_run_server() {
 	if (rdb == NULL) {
 		return this->_send_result(result_server_error, "internal_error");
 	}
+	// restore provenance: an unverified RESTORED copy is not a replication source: its data may belong to another partition / routing layout (a
+	// copy of it would come out bound to the map, laundering the restore)
+	if (rdb->is_restored_unverified()) {
+		log_warning("repl_snapshot refused: this copy is an unverified RESTORED copy", 0);
+		return this->_send_result(result_server_error, "restored_unverified");
+	}
 
 	string cp_path;
 	uint64_t cp_seq = 0;

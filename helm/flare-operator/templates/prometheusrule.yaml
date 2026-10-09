@@ -278,6 +278,22 @@ spec:
         # (hard_reset + reseed); the fastest manual trigger is `kubectl delete
         # pod <that pod>`. A MASTER needs a promotion decision (its data may be
         # the last copy) — page. Runbook: docs/RUNBOOK.md#storage-corruption
+        # A node the map makes MASTER refuses to serve as one (it knows its
+        # copy is unfit, or it is a restored copy of another partition):
+        # writes to that partition fail although the map has a master, so
+        # FlareMasterMissing does not fire. Read from the node itself (a
+        # confirmed refusal); an unreachable node has no sample here (`up`).
+        # Observation only: nothing is promoted or removed because of it.
+        # Runbook: docs/RUNBOOK.md#master-refuses
+        - alert: FlareMasterRefusesToServe
+          expr: flare_node_promotion_refused == 1
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Flare pod {{`{{ $labels.pod }}`}}: mapped as master but refuses to serve (writes to its partition fail)"
+            runbook: docs/RUNBOOK.md#master-refuses
+
         - alert: FlareStorageCorruption
           expr: flare_node_rocksdb_corrupted == 1
           for: 1m

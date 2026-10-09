@@ -189,6 +189,15 @@ int op_dump::_run_server() {
 	if (!this->_thread) {
 		return this->_send_result(result_server_error, "thread not set");
 	}
+#ifdef HAVE_LIBROCKSDB
+	// restore provenance: an unverified RESTORED copy is not a replication source (a rebuild by dump would carry its data into a copy bound to the map)
+	if (storage_rocksdb* prov = dynamic_cast<storage_rocksdb*>(this->_storage)) {
+		if (prov->is_restored_unverified()) {
+			log_warning("dump refused: this copy is an unverified RESTORED copy", 0);
+			return this->_send_result(result_server_error, "restored_unverified");
+		}
+	}
+#endif
 
 	if (this->_storage->iter_begin() < 0) {
 		return this->_send_result(result_server_error, "database busy");

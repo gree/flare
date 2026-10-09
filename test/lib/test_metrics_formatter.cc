@@ -116,6 +116,21 @@ namespace test_metrics_formatter
 		cut_assert_false(contains(metrics_formatter::format(stats), "rebuild_blocked_info"));
 	}
 
+	// a node the map made master that refuses to serve as one: exported as a
+	// confirmed refusal (0 / 1); the restored-copy flag passes through too
+	void test_promotion_refused_and_restored_unverified() {
+		push("promotion_refused", "1");
+		push("rocksdb_restored_unverified", "1");
+		string out = metrics_formatter::format(stats);
+		cut_assert_true(contains(out, "flare_node_promotion_refused 1\n"));
+		cut_assert_true(contains(out, "flare_node_rocksdb_restored_unverified 1\n"));
+		stats.clear();
+		push("promotion_refused", "0");
+		cut_assert_true(contains(metrics_formatter::format(stats), "flare_node_promotion_refused 0\n"));
+		stats.clear();
+		cut_assert_false(contains(metrics_formatter::format(stats), "flare_node_promotion_refused"));
+	}
+
 	void test_version_label() {
 		push("version", "1.3.4");
 		string out = metrics_formatter::format(stats);

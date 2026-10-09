@@ -76,6 +76,22 @@ A partition has no Active master → its key range takes no writes.
 3. Verify recovery: `node sync` shows an Active master per partition AND a
    test write succeeds through it.
 
+## FlareMasterRefusesToServe (critical) {#master-refuses}
+
+Meaning: the node map makes this pod a master, but flared refuses to act as
+one (`stats`: `promotion_refused 1`; flared log `PROMOTION REFUSED by this
+node: <reason>`). Reads and writes for its partition fail. `FlareMasterMissing`
+does NOT fire (the map has a master). The value is read from the node itself;
+an unreachable node is not reported here (see `up` / FlareNodeUnhealthy).
+
+Reasons (in the log): the copy is being rebuilt / parked / part-way /
+quarantined / its identity records disagree, or a RESTORED copy of another
+partition / without a partition binding (RUNBOOK#restore-refused).
+
+Do: read the reason. A transient one (a rebuild finishing) clears when the
+node is re-mapped; a restored copy of the wrong partition needs the right
+backup. Nothing is promoted or removed automatically because of this alert.
+
 ## FlareCircuitBreakerTripped (critical) {#circuit-breaker}
 
 ≥ the configured fraction (default 50%) of Active nodes died at once —
@@ -519,9 +535,10 @@ partition — check `flared --checkpoint-binding <dir>` on it), remove the
 restorable on this release (take a new backup). Do NOT delete
 `__flare_partition_binding` or edit the marker to force it: that is exactly the
 mix-up the check prevents (keys of another partition served as this one's).
-Note: a master that refuses this way is NOT counted by
-`flare_operator_partitions_masterless` (known gap) — writes to the partition
-fail meanwhile.
+A master that refuses this way is not counted by
+`flare_operator_partitions_masterless`; it raises FlareMasterRefusesToServe
+(`flare_node_promotion_refused`) instead — writes to the partition fail
+meanwhile.
 
 ## Enabling continuous replication on an existing cluster {#enable-follow}
 

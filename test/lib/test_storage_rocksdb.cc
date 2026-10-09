@@ -2583,16 +2583,22 @@ void test_partition_binding_restored_copy() {
 	cut_assert_equal_int(0, s->check_partition_binding(p1n2, true, why));
 	string bound_ckpt;
 	cut_assert_equal_int(0, s->create_named_backup("bound", bound_ckpt));
+	// keep the checkpoints outside the data dir (copied BEFORE the dir goes)
+	const string keep = d + "-keep";
+	const int kept_bound = system(("rm -rf '" + keep + "' && mkdir -p '" + keep + "' && cp -a '" + bound_ckpt + "' '" + keep + "/bound'").c_str());
 	// an unbound copy (a backup from before bindings), backed up
 	drop_rocksdb(s, wal_slave_dir);
+	cut_assert_equal_int(0, kept_bound);
 	s = make_rocksdb(wal_slave_dir);
 	storage_set_string(s, "k", "old");
 	string unbound_ckpt;
-	cut_assert_equal_int(0, s->create_named_backup("unbound", unbound_ckpt));
-	// keep both checkpoints outside the data dir
-	const string keep = d + "-keep";
-	cut_assert_equal_int(0, system(("rm -rf '" + keep + "' && mkdir -p '" + keep + "' && cp -a '" + bound_ckpt + "' '" + keep + "/bound' && cp -a '" + unbound_ckpt + "' '" + keep + "/unbound'").c_str()));
+	const int made_unbound = s->create_named_backup("unbound", unbound_ckpt);
+	const int kept_unbound = made_unbound == 0 ? system(("cp -a '" + unbound_ckpt + "' '" + keep + "/unbound'").c_str()) : -1;
+	// close BEFORE asserting: a failed assertion must not leave the shared
+	// test directory locked for the tests that follow
 	drop_rocksdb_noremove(s);
+	cut_assert_equal_int(0, made_unbound);
+	cut_assert_equal_int(0, kept_unbound);
 	// read-only inspection (the hook's pre-replacement check)
 	string b;
 	bool ru = true;

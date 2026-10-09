@@ -1,0 +1,71 @@
+#!/bin/sh
+# flare-restore-hook <data-dir>
+#
+# The RESTORE hook of a flared pod (docs/BACKUP_RESTORE.md), run before flared
+# starts. If <data-dir>/RESTORE names a checkpoint directory, the live copy is
+# replaced by it — but only after the restore provenance check, BEFORE anything
+# is removed:
+#   * the backup must carry a partition binding (flared records the partition
+#     and routing layout a copy's data belongs to; a backup taken before
+#     bindings cannot be verified and is refused);
+#   * when the live copy is bound too, the backup must be bound to the SAME
+#     partition and routing rule (the partition COUNT may differ: flared checks
+#     the full binding against the node map before the restored copy serves as
+#     a master).
+# A refused restore keeps the live copy, renames the marker RESTORE.refused
+# (with RESTORE.refused.reason) and lets flared start on the live copy; with
+# NO live copy it exits non-zero (flared is not started as an empty node).
+# A restored copy gets the RESTORED marker: flared gives it a new copy identity
+# and keeps it unverified until a map makes it the master of the partition its
+# binding names.
+#
+# Shipped in the flared images; the chart and the E2E harness both call it, so
+# the tested hook is the product hook.
+
+D="$1"
+M="$D/RESTORE"
+LIVE="$D/flare.rocksdb"
+[ -n "$D" ] || { echo "flare-restore-hook: usage: flare-restore-hook <data-dir>" >&2; exit 2; }
+[ -f "$M" ] || exit 0
+
+refuse() {
+	printf '%s\n' "$1" > "$D/RESTORE.refused.reason"
+	if [ -d "$LIVE" ] && [ -n "$(ls -A "$LIVE" 2>/dev/null)" ]; then
+		echo "flare-restore-hook: CRITICAL: RESTORE REFUSED: $1 — the live copy is kept and served; the marker is renamed RESTORE.refused" >&2
+		mv -f "$M" "$D/RESTORE.refused"
+		exit 0
+	fi
+	# no live copy: starting flared would bring up an EMPTY node as if the
+	# restore had produced it — the pod fails instead (the marker stays, so
+	# every restart refuses the same way until an operator acts)
+	echo "flare-restore-hook: CRITICAL: RESTORE REFUSED: $1 — there is no live copy to keep: flared is NOT started (the marker stays)" >&2
+	exit 1
+}
+
+# the binding line of `flared --checkpoint-binding`, without the partition count
+rule_of() {
+	printf '%s\n' "$1" | tr ' ' '\n' | grep -v '^partitions=' | tr '\n' ' '
+}
+
+SRC=$(cat "$M")
+[ -n "$SRC" ] && [ -d "$SRC" ] || refuse "the named checkpoint [$SRC] does not exist"
+
+SB=$(flared --checkpoint-binding "$SRC") || refuse "the backup [$SRC] could not be read to check its partition binding"
+SRC_B=$(printf '%s\n' "$SB" | sed -n 's/^binding //p')
+if [ -z "$SRC_B" ] || [ "$SRC_B" = "-" ]; then
+	refuse "the backup [$SRC] carries no partition binding (taken before partition bindings): its partition and routing layout cannot be verified"
+fi
+
+if [ -d "$LIVE" ] && [ -n "$(ls -A "$LIVE" 2>/dev/null)" ]; then
+	LB=$(flared --checkpoint-binding "$LIVE") || refuse "the live copy could not be read to compare its partition binding"
+	LIVE_B=$(printf '%s\n' "$LB" | sed -n 's/^binding //p')
+	if [ -n "$LIVE_B" ] && [ "$LIVE_B" != "-" ] && [ "$(rule_of "$LIVE_B")" != "$(rule_of "$SRC_B")" ]; then
+		refuse "the backup is bound to [$SRC_B] and the live copy to [$LIVE_B]: another partition or routing layout"
+	fi
+fi
+
+rm -rf "$LIVE" && cp -a "$SRC" "$LIVE" && touch "$LIVE/RESTORED" && rm -f "$M" || {
+	echo "flare-restore-hook: CRITICAL: the restore from [$SRC] failed part-way" >&2
+	exit 1
+}
+echo "flare-restore-hook: restored from [$SRC] (binding [$SRC_B]); flared verifies it against the node map before it serves as a master"

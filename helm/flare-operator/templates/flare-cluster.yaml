@@ -389,14 +389,13 @@ spec:
             - |
               {{- if $c.persistence.enabled }}
               # Restore hook: if /data/flare/RESTORE names a checkpoint dir
-              # (created by the flared `backup` op), swap it in before start.
+              # (created by the flared `backup` op), swap it in before start —
+              # only after the restore provenance check (the backup's partition
+              # binding against the live copy's, BEFORE anything is removed); a
+              # refused restore keeps the live copy (RESTORE.refused). The same
+              # script (in the flared image) runs in the E2E harness.
               # See docs/BACKUP_RESTORE.md.
-              if [ -f /data/flare/RESTORE ]; then
-                SRC=$(cat /data/flare/RESTORE)
-                rm -rf /data/flare/flare.rocksdb
-                cp -a "$SRC" /data/flare/flare.rocksdb
-                rm -f /data/flare/RESTORE
-              fi
+              flare-restore-hook /data/flare || exit 1
               mkdir -p /data/flare
               # A stale flared.pid survives unclean container death on a persistent
               # data dir and used to wedge restarts (pid-1 self-check; fixed in

@@ -79,6 +79,9 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /build/install/usr/local/ /usr/local/
+# The RESTORE hook (restore provenance check before the live copy is
+# replaced); the chart and the E2E harness both call this same script.
+COPY scripts/flare-restore-hook /usr/local/bin/flare-restore-hook
 
 EXPOSE 12121
 

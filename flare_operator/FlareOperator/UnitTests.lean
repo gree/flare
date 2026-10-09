@@ -756,20 +756,26 @@ private def checkBreakerUnavailable (ctx : Ctx) : IO Unit := do
   check ctx "NotReady streaks: a node that turns Ready drops out"
     (K8sReconciler.unreadyStreaks [(k "c", 4)] [] stAct == [])
   -- CI 37893780448 (history recovery after (3a)/(4)): pass A declared c dead at
-  -- streak 6 and committed Down at its END; c re-registered (node add, a fresh
-  -- process) BETWEEN the passes, so pass B saw it Active and NotReady again.
-  -- Without the re-registration the old streak carried over (7 >= 6: dead
-  -- again, Down until the 60-tick stuck-Down restart, ~7 min).
-  check ctx "NotReady streaks: a node that RE-REGISTERED since the last pass starts a fresh window (old: 6 -> 7, declared dead again; new: 1)"
-    (let carried := K8sReconciler.unreadyStreaks [(k "c", 6)] [k "c"] stAct
-     let fresh := K8sReconciler.unreadyStreaks [(k "c", 6)] [k "c"] stAct [k "c"]
+  -- streak 6 and committed Down at its END; c re-registered BETWEEN the passes,
+  -- so pass B saw it Active and NotReady again. Carrying the old streak: 7 >= 6,
+  -- dead again, Down until the 60-tick stuck-Down restart (~7 min).
+  let stDownC := cs [node "a" .Master .Active, node "b" .Slave .Active, node "c" .Slave .Down]
+  check ctx "NotReady streaks: a node Down in the LAST COMMITTED map that rejoined starts a fresh window (old: 6 -> 7, dead again; new: 1)"
+    (let fresh := K8sReconciler.rejoinedAfterDown [k "c"] stAct
+     let carried := K8sReconciler.unreadyStreaks [(k "c", 6)] [k "c"] stAct
+     let rejoined := K8sReconciler.unreadyStreaks [(k "c", 6)] [k "c"] stAct fresh
      let unhealthy := fun (l : List (String × Nat)) => (l.filter (·.2 ≥ 6)).map Prod.fst
-     carried == [(k "c", 7)]
+     fresh == [k "c"] && carried == [(k "c", 7)]
        && K8sReconciler.detectDeadNodesPure stAct [k "a", k "b", k "c"] (unhealthy carried) == [k "c"]
-       && fresh == [(k "c", 1)]
-       && K8sReconciler.detectDeadNodesPure stAct [k "a", k "b", k "c"] (unhealthy fresh) == []
-       -- other nodes keep their streak
-       && K8sReconciler.unreadyStreaks [(k "b", 5), (k "c", 6)] [k "b", k "c"] stAct [k "c"] == [(k "b", 6), (k "c", 1)])
+       && rejoined == [(k "c", 1)]
+       && K8sReconciler.detectDeadNodesPure stAct [k "a", k "b", k "c"] (unhealthy rejoined) == [])
+  -- review of 65427ae: a node-add event / re-registration is NOT the evidence
+  check ctx "NotReady streaks: no reset without a committed Down (a duplicate node add, a reconnect, a wedged or crash-looping process is still declared dead after 6 NotReady passes); still Down = no reset; nothing after an operator restart"
+    (K8sReconciler.rejoinedAfterDown [] stAct == []
+      && K8sReconciler.rejoinedAfterDown [k "c"] stDownC == []
+      && (List.range 6).foldl (fun acc _ => K8sReconciler.unreadyStreaks acc [k "c"] stAct (K8sReconciler.rejoinedAfterDown [] stAct)) [] == [(k "c", 6)]
+      -- other nodes keep their streak
+      && K8sReconciler.unreadyStreaks [(k "b", 5), (k "c", 6)] [k "b", k "c"] stAct [k "c"] == [(k "b", 6), (k "c", 1)])
   check ctx "one long-Down node in eight (12%) does not trip"
     (!trips big [] ((List.range 7).map fun i => k s!"n{i}"))
 

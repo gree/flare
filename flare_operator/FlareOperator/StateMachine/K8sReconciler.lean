@@ -1146,6 +1146,20 @@ theorem breakerUnavailable_ge_dead (state : FlareClusterState) (deadKeys livePod
     deadKeys.length ≤ (breakerUnavailableKeys state deadKeys livePodKeys).length := by
   simp [breakerUnavailableKeys]
 
+/-- The nodes whose NotReady window starts again: Down in the map committed at
+    the end of the LAST pass and no longer Down now — they rejoined (a new
+    membership; the streak that ended in Down is over). Evidence from the
+    committed map, not from a `node add` event (a duplicate add or a reconnect
+    without Down never resets; a crash-looping node is still declared dead on
+    every cycle; nothing carries over an operator restart). Review of 65427ae;
+    CI 37893780448: the re-registration fell between two passes, so no pass
+    saw the node Down at ListPods and its old streak 6 became 7 — dead again,
+    Down until the 60-tick stuck-Down restart (~7 min). -/
+def rejoinedAfterDown (downAtLastCommit : List String) (state : FlareClusterState) : List String :=
+  downAtLastCommit.filter fun k => match state.lookupNode k with
+    | some n => n.state != FlareState.Down
+    | none => false
+
 /-- NotReady streaks, counted only while the node is an Active master or
     slave in the committed map. A node in Prepare is NotReady by design (the
     readiness probe turns green only once flared's own map says it is
@@ -1156,17 +1170,13 @@ theorem breakerUnavailable_ge_dead (state : FlareClusterState) (deadKeys livePod
     slave, the next pass failed it over). Nodes not in the map, proxies and
     Down nodes are not counted either; dead detection ignores them. -/
 def unreadyStreaks (prev : List (String × Nat)) (notReady : List String)
-    (state : FlareClusterState) (reregistered : List String := []) : List (String × Nat) :=
+    (state : FlareClusterState) (fresh : List String := []) : List (String × Nat) :=
   notReady.filterMap fun k =>
     match state.lookupNode k with
     | some n =>
-      -- a node that RE-REGISTERED since the last pass is a fresh flared
-      -- process: its NotReady window starts again. The streak that declared
-      -- the old process dead must not carry over (CI 37893780448: a node
-      -- re-registered between two passes, so no pass ever saw it Down; the old
-      -- streak 6 became 7 on its first Active pass, it was declared dead again
-      -- and stayed Down until the 60-tick stuck-Down restart, ~7 min)
-      let before := if reregistered.contains k then 0 else (prev.lookup k).getD 0
+      -- a node that REJOINED after a committed Down starts its NotReady
+      -- window again (rejoinedAfterDown)
+      let before := if fresh.contains k then 0 else (prev.lookup k).getD 0
       if n.state == FlareState.Active && (n.role == FlareRole.Master || n.role == FlareRole.Slave)
       then some (k, before + 1) else none
     | none => none

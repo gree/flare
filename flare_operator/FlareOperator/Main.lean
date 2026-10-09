@@ -637,6 +637,10 @@ private def readHistory (crName ns : String) : IO (Option (Option String) × Str
     candidate's binding must match). -/
 initialize desiredPartitionsRef : IO.Ref Nat ← IO.mkRef 0
 
+/-- The nodes Down in the map committed at the end of the last pass (a node
+    that rejoins after it starts its NotReady window again). -/
+initialize downAtCommitRef : IO.Ref (List String) ← IO.mkRef []
+
 /-- When the store was last loaded (monotonic ms; 0 = never). -/
 initialize historyLoadedAtRef : IO.Ref Nat ← IO.mkRef 0
 
@@ -1303,8 +1307,10 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
       let unreadyDeadCycles := ((← IO.getEnv "FLARE_UNREADY_DEAD_CYCLES").bind (·.toNat?)).getD 6
       let prevUnready ← unreadyCyclesRef.get
       let notReadyKeys := (pods.filter (fun p => !p.ready && !p.terminating)).map Bridge.PodInfo.toNodeKey
-      let rereg ← reregisteredRef.modifyGet fun l => (l, [])
-      let newUnready := K8sReconciler.unreadyStreaks prevUnready notReadyKeys (← stateRef.get) rereg
+      -- a node Down in the last committed map that is a member again now
+      -- (it rejoined) starts its NotReady window again
+      let fresh := K8sReconciler.rejoinedAfterDown (← downAtCommitRef.get) (← stateRef.get)
+      let newUnready := K8sReconciler.unreadyStreaks prevUnready notReadyKeys (← stateRef.get) fresh
       unreadyCyclesRef.set newUnready
       let unhealthyKeys := (newUnready.filter (fun kv => kv.2 ≥ unreadyDeadCycles)).map Prod.fst
       for (k, n) in newUnready do
@@ -3071,6 +3077,7 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
   let unreadyNow ← unreadyCyclesRef.get
   let unreadyDeadCycles := ((← IO.getEnv "FLARE_UNREADY_DEAD_CYCLES").bind (·.toNat?)).getD 6
   metrics.unhealthyNodes.set (unreadyNow.filter (fun kv => kv.2 ≥ unreadyDeadCycles)).length.toFloat
+  downAtCommitRef.set ((finalState.nodeMap.filter fun kv => kv.2.state == FlareState.Down).map Prod.fst)
   let downPresent := finalState.nodeMap.filter (fun kv =>
     kv.2.state == FlareState.Down && podKeysNow.contains kv.1)
   metrics.stuckDownNodes.set downPresent.length.toFloat

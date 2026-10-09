@@ -341,7 +341,13 @@ def suite : TestSuite := {
           for p in seen do
             let ip := (← getPodIp p incCfg.«namespace»).getD ""
             detail := detail ++ [s!"{p} items={← getCurrItems incCfg.debugPod incCfg.«namespace» ip incCfg.flarePort}"]
-          return .fail s!"a copy restored from an incomplete backup was made master: {detail}"
+          -- CI f37a5b4: an EMPTY master (items=0) after two passing runs. Say
+          -- whether the restored copy was ever refused (the seed took effect)
+          -- or flared opened a fresh DB (the seed did not: a harness failure)
+          let logs ← podLogs incCfg
+          let refusedOpen := containsSubstr logs "RocksDB::Open() failed"
+          let freshDb := containsSubstr logs "replication generations (source_epoch=1:"
+          return .fail s!"a copy restored from an incomplete backup was made master: {detail}; flared refused the restored copy at some point={refusedOpen}; a FRESH DB was minted (generation 1)={freshDb}"
         -- the product's own reason: flared refused to open the restored copy
         let logs ← podLogs incCfg
         if !containsSubstr logs "RocksDB::Open() failed" then

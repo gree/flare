@@ -5548,11 +5548,22 @@ def historyTrackingSuite : TestSuite := {
           if let .error e ← c.opExec "mkdir -p /tmp/postintent && rm -f /tmp/postintent/reached /tmp/postintent/release && touch /tmp/postintent/arm" then
             return .fail s!"precondition: could not arm the post-intent barrier: {e}"
           discard <| kubectl ["delete", "pod", mPod, "-n", ns, "--grace-period=0", "--force", "--wait=false"]
+          let checks ← IO.mkRef 0
           let reached ← waitForCondition "a promotion intent is persisted and the pass held before its map commit" 300 do
+            -- every ~30 s: why no promotion yet (CI f37a5b4: 300 s with none,
+            -- and the operator log of that window was not kept)
+            let n ← checks.modifyGet fun n => (n, n + 1)
+            if n % 6 == 0 then
+              let ip := (← getPodIp mPod ns).getD ""
+              let items ← c.statNat ip "curr_items"
+              let ready := ((← kubectlGetJsonpath "pod" mPod ns "{.status.conditions[?(@.type==\"Ready\")].status}").toOption.getD "?").trim
+              let last := ((← c.opLog 400).splitOn "\n").filter (fun l => containsSubstr l "NO master" || containsSubstr l "NOT LOSS-FREE"
+                || containsSubstr l "PROMOTION EVIDENCE" || containsSubstr l "withheld" || containsSubstr l "ABORTED" || containsSubstr l "REBUILD HELD")
+              IO.eprintln s!"# (5) wait {n}: ex-master {mPod} ready={ready} curr_items={items}; operator: {(last.reverse.take 4).reverse}"
             match ← c.opExec "cat /tmp/postintent/reached 2>/dev/null || true" with
             | .ok o => return !o.trim.isEmpty
             | .error _ => return false
-          if !reached then return .fail "precondition: no intent reached the post-intent barrier"
+          if !reached then return .fail "precondition: no intent reached the post-intent barrier (the promotion did not happen; see the (5) wait lines)"
           let intentLine := ((← historyText c).splitOn "\n").filter (·.startsWith "intent ")
           let t0 ← utcNow
           if !(← restartOperator c) then return .fail "the operator did not come back"

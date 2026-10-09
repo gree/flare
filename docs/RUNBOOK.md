@@ -498,6 +498,29 @@ Monitoring: alert when `time() - rocksdb_last_backup_epoch` exceeds twice
 the backup interval (exposed via flared `stats`; needs a memcached
 exporter).
 
+### A restore refused for its provenance {#restore-refused}
+
+Symptoms: the pod log has `flare-restore-hook: CRITICAL: RESTORE REFUSED: …`
+and the data dir has `RESTORE.refused` + `RESTORE.refused.reason`; or flared
+logs `PROMOTION REFUSED by this node: … RESTORED copy …` and `stats` shows
+`promotion_refused 1`, `rocksdb_restored_unverified 1`.
+
+Meaning: the backup is not the data of the partition / routing layout it was
+put into (`rocksdb_partition_binding` names where it came from), or it was taken
+before partition bindings existed and cannot be verified. With a live copy the
+hook kept it and flared serves it; without one the pod does not start (the
+marker stays). Nothing was replaced.
+
+Do: pick the backup of the right partition (`<cluster>/latest/p<N>/` keyed by
+partition — check `flared --checkpoint-binding <dir>` on it), remove the
+`RESTORE.refused*` files, and restore again. A backup without a binding is not
+restorable on this release (take a new backup). Do NOT delete
+`__flare_partition_binding` or edit the marker to force it: that is exactly the
+mix-up the check prevents (keys of another partition served as this one's).
+Note: a master that refuses this way is NOT counted by
+`flare_operator_partitions_masterless` (known gap) — writes to the partition
+fail meanwhile.
+
 ## Enabling continuous replication on an existing cluster {#enable-follow}
 
 Rehearsed by E2E `continuous-replication-enable` (a legacy cluster switched

@@ -353,8 +353,11 @@ def suite : TestSuite := {
           return .fail s!"a copy restored from an incomplete backup was made master: {detail}; flared refused the restored copy at some point={refusedOpen}; a FRESH DB was minted (generation 1)={freshDb}"
         -- the product's own reason: flared refused to open the restored copy
         let logs ← podLogs incCfg
-        if !containsSubstr logs "RocksDB::Open() failed" then
-          return .fail "not promoted, but no flared refusal to open the incomplete copy ('RocksDB::Open() failed') was logged: the reason is not shown"
+        -- the product's reason: the restore hook refused the unreadable backup
+        -- before replacing anything (no live copy: the pod does not start),
+        -- or flared refused to open it
+        if !(containsSubstr logs "RESTORE REFUSED" || containsSubstr logs "RocksDB::Open() failed") then
+          return .fail "not promoted, but neither the restore hook ('RESTORE REFUSED') nor flared ('RocksDB::Open() failed') logged a refusal of the incomplete copy: the reason is not shown"
         return .pass },
 
     { name := "[copy placed directly, no hook] an IDENTITY-INCONSISTENT restored copy (COPY_ID != the reserved key) does not act as a master: never mapped as master, or flared refuses it (promotion_refused=1) and acknowledges no write"
@@ -385,7 +388,7 @@ def suite : TestSuite := {
         if !reason then return .fail "not acting as master, but neither the operator ('copy identity records disagree') nor flared ('PROMOTION REFUSED') logged the reason"
         return .pass },
 
-    { name := "[harness RESTORE hook path] a backup of ANOTHER partition (P1 of a two-partition source) restored into a one-partition cluster is not promoted — a failure here is a PRODUCT GAP (no partition check), not weakened"
+    { name := "[harness RESTORE hook path] a backup of ANOTHER partition (P1 of a two-partition source) restored into a one-partition cluster does not act as its master (never mapped, or flared refuses it for its partition binding) — a failure here is a PRODUCT GAP"
       run := do
         if let .error e ← deployOrFail src2Cfg then return .fail s!"precondition: {e}"
         IO.sleep 30000
@@ -412,10 +415,69 @@ def suite : TestSuite := {
         let seen ← match ← negativeObservation partCfg 180 with
           | .error e => return .fail e
           | .ok s => pure s
-        if !seen.isEmpty then
-          return .fail s!"PRODUCT GAP: a copy holding only partition 1's slice ({p1Items} of {nKeys} keys) of a two-partition cluster was made the master of a one-partition cluster ({seen}); the restore does not check the partition"
-        let reason := containsSubstr (← operatorLog partCfg) "partition" && containsSubstr (← operatorLog partCfg) "restore"
-        if !reason then return .fail "not promoted, but no partition refusal was logged: the reason is UNEXPLAINED (not evidence of a partition check)"
+        -- the provenance travelled with the backup: every restored copy
+        -- reports P1-of-2's binding and is an UNVERIFIED restored copy
+        for p in podsOf partCfg do
+          let ip := (← getPodIp p partCfg.«namespace»).getD ""
+          let b ← statOf partCfg ip "rocksdb_partition_binding"
+          IO.eprintln s!"# {p}: rocksdb_partition_binding={b}; rocksdb_restored_unverified={← statOf partCfg ip "rocksdb_restored_unverified"}; promotion_refused={← statOf partCfg ip "promotion_refused"}"
+          if !((b.getD "").startsWith "v1 partition=1 partitions=2 ") then
+            return .fail s!"precondition: {p} does not report the backup's binding (P1 of 2): {b} — the provenance did not travel with the backup"
+        -- the PRODUCT decision (same criterion as the identity-inconsistent
+        -- case): never mapped as master, or — the first master of a new
+        -- cluster is mapped by `node add` without a read — flared refuses to
+        -- act as master over it (promotion_refused=1, no write acknowledged)
+        -- and says why (restore provenance)
+        for p in seen do
+          let ip := (← getPodIp p partCfg.«namespace»).getD ""
+          let refused ← statOf partCfg ip "promotion_refused"
+          let acked ← memcachedSet partCfg.debugPod partCfg.«namespace» ip partCfg.flarePort "probe" "x"
+          IO.eprintln s!"# {p} mapped as master: promotion_refused={refused}; write acknowledged={acked}"
+          if refused != some "1" || acked then
+            return .fail s!"PRODUCT GAP: {p}, holding only partition 1's slice ({p1Items} of {nKeys} keys) of a two-partition cluster, ACTS as the master of a one-partition cluster (promotion_refused={refused}, write acknowledged={acked})"
+        let logs ← podLogs partCfg
+        let opLog ← operatorLog partCfg
+        let reason := (containsSubstr logs "PROMOTION REFUSED" && containsSubstr logs "RESTORED copy bound to")
+          || containsSubstr opLog "restore provenance"
+        if !reason then return .fail "not acting as master, but neither flared ('PROMOTION REFUSED … RESTORED copy bound to') nor the operator ('restore provenance') logged the partition reason: UNEXPLAINED"
+        return .pass },
+
+    { name := "[product RESTORE hook, in place] a RESTORE marker naming ANOTHER partition's backup (P1's checkpoint on P0's pod) is refused BEFORE the live copy is replaced: the pod comes back serving its own data, the marker is renamed RESTORE.refused with the reason"
+      run := do
+        let ns2 := src2Cfg.«namespace»
+        let entries ← nodeView src2Cfg
+        let some p0 := findMasterPod entries 0 | return .fail "precondition: no P0 master in the two-partition source (test 5 deploys it)"
+        let p0Ip := (← getPodIp p0 ns2).getD ""
+        let some before := (← statOf src2Cfg p0Ip "curr_items").bind String.toNat? | return .fail "precondition: P0's items could not be read"
+        let live ← statOf src2Cfg p0Ip "rocksdb_partition_binding"
+        if !((live.getD "").startsWith "v1 partition=0 ") then return .fail s!"precondition: P0 is not bound to partition 0 ({live})"
+        -- P1's checkpoint (copied out by test 5) placed on P0's PVC, and the marker
+        match ← kubectl ["cp", s!"{← localCopy}/p1/{backupName}", s!"{ns2}/{p0}:{dataDir}/backups/other-p1", "-c", "flared"] with
+        | .error e => return .fail s!"precondition: placing P1's checkpoint on {p0}: {e}"
+        | .ok _ => pure ()
+        if let .error e ← kubectl ["exec", "-n", ns2, p0, "-c", "flared", "--", "sh", "-c", s!"echo {dataDir}/backups/other-p1 > {dataDir}/RESTORE"] then
+          return .fail s!"precondition: writing the RESTORE marker: {e}"
+        discard <| kubectl ["delete", "pod", p0, "-n", ns2, "--wait=false"]
+        let back ← waitForCondition s!"{p0} is back and answers stats" 240 do
+          match ← getPodIp p0 ns2 with
+          | some ip => return (← statOf src2Cfg ip "curr_items").isSome
+          | none => return false
+        if !back then return .fail s!"{p0} did not come back after the refused restore"
+        let ip := (← getPodIp p0 ns2).getD ""
+        let after := (← statOf src2Cfg ip "curr_items").bind String.toNat?
+        let bound ← statOf src2Cfg ip "rocksdb_partition_binding"
+        let restored ← statOf src2Cfg ip "rocksdb_restored_unverified"
+        let files ← kubectl ["exec", "-n", ns2, p0, "-c", "flared", "--", "sh", "-c", s!"ls {dataDir}; cat {dataDir}/RESTORE.refused.reason 2>/dev/null"]
+        let logs ← kubectl ["logs", "-n", ns2, p0, "-c", "flared", "--tail=-1"]
+        IO.eprintln s!"# after the refused restore: items {before} -> {after}; binding {bound}; restored_unverified {restored}; data dir: {files.toOption.getD "?"}"
+        if after != some before then return .fail s!"the live copy changed (items {before} -> {after}): the restore was not refused before the replacement"
+        if !((bound.getD "").startsWith "v1 partition=0 ") || restored != some "0" then
+          return .fail s!"the live copy is not the one it was (binding {bound}, restored_unverified {restored})"
+        let entriesNow := ((files.toOption.getD "").splitOn "\n").map String.trim
+        if !entriesNow.contains "RESTORE.refused" || entriesNow.contains "RESTORE" then
+          return .fail s!"the marker was not renamed RESTORE.refused: {files.toOption.getD "?"}"
+        if !containsSubstr (logs.toOption.getD "") "RESTORE REFUSED" then
+          return .fail "the hook's refusal ('RESTORE REFUSED') is not in the pod log"
         return .pass },
 
     { name := "the SOURCE cluster and its backup are unchanged by every restore (items, history, pod UIDs, backup content hash)"

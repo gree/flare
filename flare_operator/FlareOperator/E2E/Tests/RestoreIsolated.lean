@@ -191,12 +191,18 @@ private def observeMasters (c : ClusterConfig) (secs : Nat) : IO (Nat × Nat × 
     -- a sample slot counts only when the map WAS read in it; a transient read
     -- failure is retried inside the slot (up to 3 reads, CI 37834294217:
     -- 35/36), never skipped — every slot must still be observed
+    -- a COMPLETE reply (ended by END) is an observation even when the map is
+    -- empty (no flared registered: e.g. a refused restore leaves the pods
+    -- unstarted — CI 37888498369 counted that as 0/36 observed)
     let mut entries := []
+    let mut complete := false
     for _ in [0:3] do
-      if entries.isEmpty then
-        entries := parseNodeSync (← operatorTcpCmd c.debugPod c.«namespace» c.operatorName c.operatorPort "node sync")
-        if entries.isEmpty then IO.sleep 1000
-    if !entries.isEmpty then
+      if !complete then
+        let raw ← operatorTcpCmd c.debugPod c.«namespace» c.operatorName c.operatorPort "node sync"
+        entries := parseNodeSync raw
+        complete := ((raw.splitOn "\n").map (fun l => (l.replace "\r" "").trim)).contains "END"
+        if !complete then IO.sleep 1000
+    if complete then
       observed := observed + 1
       if let some m := findMasterPod entries 0 then
         if !seen.contains m then seen := seen ++ [m]
@@ -435,6 +441,12 @@ def suite : TestSuite := {
           IO.eprintln s!"# {p} mapped as master: promotion_refused={refused}; write acknowledged={acked}"
           if refused != some "1" || acked then
             return .fail s!"PRODUCT GAP: {p}, holding only partition 1's slice ({p1Items} of {nKeys} keys) of a two-partition cluster, ACTS as the master of a one-partition cluster (promotion_refused={refused}, write acknowledged={acked})"
+          -- the availability signal (FlareMasterRefusesToServe): the node's own
+          -- /metrics reports the confirmed refusal
+          let metrics ← execInDebugPod partCfg.debugPod partCfg.«namespace» s!"wget -qO- -T 5 http://{ip}:9150/metrics | grep -E '^flare_node_(promotion_refused|rocksdb_restored_unverified) '"
+          IO.eprintln s!"# {p} /metrics: {metrics.toOption.getD "(unreadable)"}"
+          if !containsSubstr (metrics.toOption.getD "") "flare_node_promotion_refused 1" then
+            return .fail s!"{p} refuses to serve as master but its /metrics does not report flare_node_promotion_refused 1 (the alert's input): {metrics.toOption.getD "(unreadable)"}"
         let logs ← podLogs partCfg
         let opLog ← operatorLog partCfg
         let reason := (containsSubstr logs "PROMOTION REFUSED" && containsSubstr logs "RESTORED copy bound to")
@@ -452,6 +464,7 @@ def suite : TestSuite := {
         let live ← statOf src2Cfg p0Ip "rocksdb_partition_binding"
         if !((live.getD "").startsWith "v1 partition=0 ") then return .fail s!"precondition: P0 is not bound to partition 0 ({live})"
         -- P1's checkpoint (copied out by test 5) placed on P0's PVC, and the marker
+        discard <| kubectl ["exec", "-n", ns2, p0, "-c", "flared", "--", "mkdir", "-p", s!"{dataDir}/backups"]
         match ← kubectl ["cp", s!"{← localCopy}/p1/{backupName}", s!"{ns2}/{p0}:{dataDir}/backups/other-p1", "-c", "flared"] with
         | .error e => return .fail s!"precondition: placing P1's checkpoint on {p0}: {e}"
         | .ok _ => pure ()

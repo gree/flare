@@ -1303,7 +1303,8 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
       let unreadyDeadCycles := ((← IO.getEnv "FLARE_UNREADY_DEAD_CYCLES").bind (·.toNat?)).getD 6
       let prevUnready ← unreadyCyclesRef.get
       let notReadyKeys := (pods.filter (fun p => !p.ready && !p.terminating)).map Bridge.PodInfo.toNodeKey
-      let newUnready := K8sReconciler.unreadyStreaks prevUnready notReadyKeys (← stateRef.get)
+      let rereg ← reregisteredRef.modifyGet fun l => (l, [])
+      let newUnready := K8sReconciler.unreadyStreaks prevUnready notReadyKeys (← stateRef.get) rereg
       unreadyCyclesRef.set newUnready
       let unhealthyKeys := (newUnready.filter (fun kv => kv.2 ≥ unreadyDeadCycles)).map Prod.fst
       for (k, n) in newUnready do

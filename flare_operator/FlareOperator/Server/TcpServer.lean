@@ -38,6 +38,9 @@ open Std.Net (SocketAddress SocketAddressV4 IPv4Addr)
     answered with an error (no role, no map handed out) and flared retries.
     `none` = open (set by Main once the record exists). -/
 initialize registrationGateRef : IO.Ref (Option String) ← IO.mkRef none
+/-- Node keys whose `node add` was answered since the reconcile loop last
+    drained this (a fresh flared process: its NotReady streak restarts). -/
+initialize reregisteredRef : IO.Ref (List String) ← IO.mkRef []
 
 /-- Encapsulates the shared mutable state for the TCP server.
     All fields are IO.Ref for thread-safe access from concurrent handlers.
@@ -178,6 +181,7 @@ def handleConnection (sock : Socket) (state : ServerState) : IO Unit := do
         IO.eprintln s!"[TRACE] Event: Meta | CRD partitions={crd.spec.partitions} replicas={crd.spec.replicas} | State partitionSize={newState.partitionSize} | Returning partition-size {newState.partitionSize}"
       | .NodeAdd serverName serverPort =>
         let nodeKey := FlareClusterState.toNodeKey serverName serverPort
+        if !gated then reregisteredRef.modify fun l => if l.contains nodeKey then l else l ++ [nodeKey]
         match newState.lookupNode nodeKey with
         | some node =>
           if node.role == FlareRole.Master then

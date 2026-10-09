@@ -1156,12 +1156,19 @@ theorem breakerUnavailable_ge_dead (state : FlareClusterState) (deadKeys livePod
     slave, the next pass failed it over). Nodes not in the map, proxies and
     Down nodes are not counted either; dead detection ignores them. -/
 def unreadyStreaks (prev : List (String × Nat)) (notReady : List String)
-    (state : FlareClusterState) : List (String × Nat) :=
+    (state : FlareClusterState) (reregistered : List String := []) : List (String × Nat) :=
   notReady.filterMap fun k =>
     match state.lookupNode k with
     | some n =>
+      -- a node that RE-REGISTERED since the last pass is a fresh flared
+      -- process: its NotReady window starts again. The streak that declared
+      -- the old process dead must not carry over (CI 37893780448: a node
+      -- re-registered between two passes, so no pass ever saw it Down; the old
+      -- streak 6 became 7 on its first Active pass, it was declared dead again
+      -- and stayed Down until the 60-tick stuck-Down restart, ~7 min)
+      let before := if reregistered.contains k then 0 else (prev.lookup k).getD 0
       if n.state == FlareState.Active && (n.role == FlareRole.Master || n.role == FlareRole.Slave)
-      then some (k, (prev.lookup k).getD 0 + 1) else none
+      then some (k, before + 1) else none
     | none => none
 
 /-- Pure draining-node detection: a node whose pod is Terminating

@@ -110,3 +110,19 @@ stated. Production / pf-dev: no change, none approved.
 - Old-backup compatibility and partition-count choice: **awaiting the user's
   decision**. pf-dev / production changes, environment creation: **not approved**.
 - History-record write Conflict source; (R) earlier failure: not established.
+
+## 6. Round 2026-10-11 — review list (candidate `3123bd5`, full CI 38072338837 / nix 38072344816)
+
+Each row: change → test that FAILS on the old code (control) → result on the new code → residuals.
+Nothing below is independently reviewed.
+
+| # | SHA | Change | Fails on old code | New code | Residuals |
+|---|---|---|---|---|---|
+| F1 | `026c4c2` `69e789e` `aa4f0f4` | proxy connect deadline (3 s, 1 retry, re-resolve per open); fail-fast counted drop only after a TIMED-OUT open | `test_proxy_write_to_an_unanswering_address_is_a_counted_drop_within_seconds` (controls 38054462382, 38058625697, 38061497949: "neither sent nor dropped within 20 s") | 38058611462, 38062701272: pass | DNS resolution time and a connected-but-silent peer are not bounded by the deadline (read timeout: see F4) |
+| F2 | `fbc9501` | drops counted ONLY for post-proxy forwards: pre-proxy (client → master) failure not counted (was, on retry exhaustion); skipped-to-proxy counted; abandoned at thread shutdown counted per destination | 5 tests: reconnect after a timed-out open; pre-proxy unanswering / refused master not counted; skipped-to-proxy counted; abandoned counted (control 38061497949: all fail, both backends) | 38062701272 (after the test-timing fix `40aa977`): pass | a forced shutdown counts abandoned forwards only in the thread destructor (later); skipped / abandoned forwards are COUNTED, i.e. repaired by a rebuild, not delivered |
+| F3 | `865e3ae` | CRITICAL for drops to a destination outside this cluster (cross-cluster replication); RUNBOOK #foreign-drops | — (log only) | — | **neither operator repairs cross-cluster drops** (open) |
+| F4 | `11ab634` | one read-timeout rule at startup and reload (explicit wins; k8s 30 s; classic net_read_timeout) | none runnable (the shared function is new; the defect is the old `flared.cc:504`, by reading) | `test_effective_read_timeout_is_the_same_rule_at_startup_and_reload`: pass (38062701272) | `flared::reload()` itself not exercised by a test |
+| F5 | `7875d28` `c1c9bbc` | operator reads every Active master's drop counters every pass; completion needs a fresh reading | unit boundary checks (drop after the completing read, master boot change, lost status write, drop after the ledger emptied) | flare_unit 421 | detection only; not a claim of no loss |
+| F6 | `4e229dd` | masterless refill prefers the recorded history holder within a tier | history-masterless (c) failed on `91ba62b` (38040348416) | 38043914126, 38060663630: pass | — |
+| R1 | `e70043a` `cb5bb44` `9655fbd` `99c9c3c` `ef58309` | IN-PLACE restore keeps the live copy: capacity check, prepared next to the live copy, switched in at open by the existing copy switch, replaced copy retained without a record (never reaped) | the old hook replaced the live copy (`rm -rf` + `cp -a`): no runnable control | hook tests 13 (CI, none skipped); C++ 4 (38062701272); E2E restore-isolated 38069285176: refusal (6) after a REAL restart, accepted (7): 25 backup items live, new identity, retained copy with the old identity, kept 60 s, verified, write acknowledged | open decisions (old backups, auto-deletion, tmpfs capacity policy, rollback authority); a live copy without a readable COPY_ID refuses to open (manual procedure) |
+| T1 | `ef58309` | restore-isolated waits for a NEW pod UID after deleting a pod | test 6 passed on the OLD pod (38066520694) — earlier passes of test 6 are not evidence | 38069285176: pass with a real restart | — |

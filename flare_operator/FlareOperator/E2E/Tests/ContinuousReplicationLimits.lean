@@ -5792,11 +5792,15 @@ def historyFirstBuildSuite : TestSuite := {
         if !refused || !reported then return .fail "the refusal (node add / pass) was not logged"
         -- writes allowed ("permissions restored")
         if let .error e ← c.opExec "touch /tmp/histok" then return .fail s!"could not allow history writes: {e}"
-        let served ← waitForCondition "the cluster is built and serves (master, replica)" 600 do
-          match ← c.pair with
-          | .ok _ => return true
-          | .error _ => return false
-        if !served then return .fail "the cluster was not built after history writes were allowed"
+        -- a REPLICA = an Active slave of P0 (Ctx.pair takes any second node: in
+        -- CI 38081479454 it accepted a proxy and the test went on to write to a
+        -- master that had no replica)
+        let served ← waitForCondition "the cluster is built and serves (an Active P0 master and an Active P0 slave)" 600 do
+          let es ← c.nodeView
+          return (findMasterFqdn es 0).isSome && es.any (fun e => e.role == 1 && e.state == 0 && e.partition == 0)
+        if !served then
+          let log := ((← c.opLog 3000).splitOn "\n").filter (fun l => containsSubstr l "REBUILD HELD" || containsSubstr l "SKIPPED" || containsSubstr l "DURING the send")
+          return .fail s!"no Active P0 slave within 600 s after history writes were allowed: node view {repr (← c.nodeView)}; operator: {(log.reverse.take 3).reverse}"
         let some ht ← creationOf ns "configmap" s!"{historyFirstBuildCfg.name}-history" | return .fail "no history record after recovery"
         let some mt ← creationOf ns "configmap" s!"{historyFirstBuildCfg.name}-node-map" | return .fail "no node map after recovery"
         let rec ← historyText c

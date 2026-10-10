@@ -949,6 +949,58 @@ rebuilds of that partition are refused until the hold is resolved.
   adopted. Inspect the target's copy; the resolution is an operator decision
   (remove the hold only after the partition's data is understood).
 
+## A partition with no master and no history record {#history-held-masterless}
+
+Seen as: `CRITICAL: partition N has NO master and its history is HELD: <reason>`
+(repeated every 15 s while it stands), after a node map was restored without a
+history record. A typical cause is a FlareCluster recreated (a new uid, the old
+record removed as foreign) with the map restored: every pod re-registers, so the
+restored map's master becomes a replica marked `lastMasterOf=N`.
+
+With the migration approval (#history-record) the operator recovers BY ITSELF
+only when the history is unambiguous:
+
+- every copy of the partition was read completely,
+- every copy is a healthy RocksDB copy holding the SAME history (master id and
+  epoch: `rocksdb_master_id`, `rocksdb_source_epoch` in `stats`),
+- exactly one copy is marked as the partition's last master.
+
+It then records the history from that copy and promotes as usual. Anything else
+is HELD on purpose: choosing between histories decides which data survives, and
+the operator never guesses. The CRITICAL line names the reason and every copy
+with its history:
+
+| Reason (in the line) | What to do |
+|---|---|
+| `not every copy of the partition was observed completely` | A copy cannot be read (its pod is down, or the operator lacks access, e.g. RBAC). Restore access; the hold lifts by itself once every copy is read. |
+| `no master to take the history from (... one history on every copy and exactly one last master)` | The copies hold DIFFERENT histories, or the map marks no / several last masters. A person decides — below. |
+| `no master, and not every copy is a healthy modern copy` | A copy is quarantined, partial or an older flared. Fix or replace that copy first. |
+| `no master, and the last master <key> is not an observed copy` | The map's last master is not among the partition's copies now. A person decides — below. |
+
+**Choosing the copy to keep** (only for a held partition with no master):
+
+1. From the CRITICAL line and each pod's `stats`, decide which copy holds the
+   data the partition must keep (its history, `curr_items`, the time it last
+   served as master). The other copies will be rebuilt from it — their data
+   that is not in the chosen copy is lost.
+2. Keep the migration approval in place, and name the copy for THIS cluster:
+
+   ```
+   uid=$(kubectl -n <ns> get flarecluster <cluster> -o jsonpath='{.metadata.uid}')
+   kubectl -n <ns> annotate flarecluster <cluster> --overwrite \
+     flare.gree.net/history-adopt-holder=$uid/<partition>/<pod name or node key>
+   ```
+
+3. The operator adopts the chosen copy's history (`AUTHORITATIVE HISTORY: pN:
+   adopted from <copy>, CHOSEN by a person`), removes the annotation (a choice
+   is used once), and promotes it; the other copies rejoin and are rebuilt
+   from it.
+
+The choice is REFUSED (the hold stays, with the reason in the line) when any
+copy is unreadable, the named copy is not a copy of the partition, it is
+unhealthy, or it is EMPTY while another copy holds data. It has no effect on a
+partition that has a master or a record.
+
 ## Known limits (do not be surprised by)
 
 - Selective network partition (pod alive, TCP to operator blocked) is

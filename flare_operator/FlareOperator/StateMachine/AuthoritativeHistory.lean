@@ -208,6 +208,31 @@ def establish (s : Store) (p : Nat) (masterKey : Option String) (copies : List (
           (s.setPart p (.known r none), .recorded p r s!"{reason} from the master {m}")
       | _ => (s, .held p s!"the master {m} is not a modern, observed copy")
 
+/-- A PERSON chose the copy to keep for a partition HELD with NO master
+    (annotation `flare.gree.net/history-adopt-holder` =
+    `<cluster uid>/<partition>/<node key or pod>`, RUNBOOK
+    #history-held-masterless): the copies hold different histories, or the
+    map names no single last master — a choice the operator never makes by
+    itself. Adopted only while the record is ABSENT, there is no master, every
+    copy was observed completely, and the chosen copy is a healthy modern copy
+    that is not empty while another copy holds data; anything else stays held
+    with the reason. Never reached without the migration approval (the copies
+    are read only then). -/
+def adoptChosen (s : Store) (p : Nat) (masterKey : Option String) (copies : List (String × Seen))
+    (chosen : String) (now : String) : Store × Change :=
+  match s.part p, masterKey with
+  | some (.unknown .absent _), none =>
+    if !allObserved copies then (s, .held p s!"the chosen copy {chosen} is not adopted: not every copy of the partition was observed completely")
+    else match copies.lookup chosen with
+      | some (.modern b h healthy empty _ _) =>
+        if !healthy then (s, .held p s!"the chosen copy {chosen} reports an unhealthy copy")
+        else if empty && othersHaveData copies chosen then (s, .held p s!"the chosen copy {chosen} is EMPTY while another copy holds data")
+        else
+          let r : Record := { gen := 1, hist := h, holder := chosen, binding := b, since := now, reason := "adopted" }
+          (s.setPart p (.known r none), .recorded p r s!"adopted from {chosen}, CHOSEN by a person (no master in the map; the operator does not choose between histories)")
+      | _ => (s, .held p s!"the chosen copy {chosen} is not a modern, observed copy of the partition")
+  | _, _ => (s, .none)
+
 /-- Follow flared's chain from `fromCopy` to `toCopy`; the epoch of the last
     link. `none` = not provable (a gap, a cycle, or a copy not reached). -/
 def walkChain (chain : List Link) (fromCopy toCopy : String) : Option String := Id.run do

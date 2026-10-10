@@ -1424,6 +1424,26 @@ private def checkAuthority29Transitions (ctx : Ctx) : IO Unit := do
           match establish absentStore 0 none [("a:12121", sa), ("b:12121", sbSame)] true "t" (lastMasterOf twoLast) with | (_, .held 0 _) => true | _ => false)
       && (match establish absentStore 0 none [("a:12121", sa), ("b:12121", .unreadable)] true "t" (lastMasterOf s2) with | (_, .held 0 _) => true | _ => false)
       && (match establish absentStore 0 none [("a:12121", sa), ("b:12121", sbSame)] true "t" (lastMasterOf s2) with | (_, .recorded 0 _ _) => true | _ => false))
+  -- the HOLD's recovery (RUNBOOK #history-held-masterless): a PERSON names the
+  -- copy to keep; the operator never picks one by itself
+  let differing := [("a:12121", sa), ("b:12121", sbOther)]
+  let twoLast := ({ nodeMap := [mk "a" .Slave .Prepare 0, mk "b" .Slave .Prepare 0] } : FlareClusterState)
+  let emptyB := seenOfReply "ub" (some ((stats "M" "9:new" "cb:9" "bb").replace "STAT curr_items 30" "STAT curr_items 0"))
+  check ctx "authority 29 hold recovery: a copy CHOSEN by a person (differing histories, or two last masters) is adopted with its own history as the holder; the held states before the choice stay held"
+    ((match adoptChosen absentStore 0 none differing "b:12121" "t" with
+        | (s', .recorded 0 r _) => r.holder == "b:12121" && r.hist == ⟨"M", "1:old"⟩ && s'.recorded 0 == some ⟨"M", "1:old"⟩ | _ => false)
+      && (match establish absentStore 0 none [("a:12121", sa), ("b:12121", sbSame)] true "t" (lastMasterOf twoLast) with
+          | (st', .held 0 _) => (match adoptChosen st' 0 none [("a:12121", sa), ("b:12121", sbSame)] "a:12121" "t" with
+              | (_, .recorded 0 r _) => r.holder == "a:12121" | _ => false)
+          | _ => false))
+  check ctx "authority 29 hold recovery REFUSED (stays held, reason given): a copy not read, a chosen copy not among the copies, an unhealthy or EMPTY chosen copy while another holds data; no effect with a master in the map or a known record"
+    ((match adoptChosen absentStore 0 none [("a:12121", sa), ("b:12121", .unreadable)] "a:12121" "t" with | (_, .held 0 _) => true | _ => false)
+      && (match adoptChosen absentStore 0 none differing "c:12121" "t" with | (_, .held 0 _) => true | _ => false)
+      && (match adoptChosen absentStore 0 none [("a:12121", sa), ("b:12121", emptyB)] "b:12121" "t" with | (_, .held 0 w) => (w.splitOn "EMPTY").length > 1 | _ => false)
+      && (match adoptChosen absentStore 0 none [("a:12121", sa), ("b:12121", seenOfReply "ub" (some ((stats "M" "1:old" "cb:1" "bb").replace "rocksdb_quarantined 0" "rocksdb_quarantined 1")))] "b:12121" "t" with | (_, .held 0 _) => true | _ => false)
+      && (adoptChosen absentStore 0 (some "a:12121") differing "b:12121" "t").2 == .none
+      && (match adoptChosen absentStore 0 none differing "b:12121" "t" with
+          | (s', _) => (adoptChosen s' 0 none differing "a:12121" "t").2 == .none))
 
 open FlareOperator.AuthoritativeHistory in
 private def checkAuthoritativeHistory (ctx : Ctx) : IO Unit := do

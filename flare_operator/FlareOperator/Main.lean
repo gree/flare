@@ -603,6 +603,13 @@ private def refreshParkedRebuilds (stateRef : IO.Ref FlareClusterState) (ns : St
 initialize historyStoreRef : IO.Ref (Option AuthoritativeHistory.Store) ← IO.mkRef none
 initialize historyRvRef : IO.Ref String ← IO.mkRef ""
 initialize historyApprovedRef : IO.Ref Bool ← IO.mkRef false
+/-- A person's choice of the copy to keep for a partition held with no master
+    (`flare.gree.net/history-adopt-holder` = `<uid>/<partition>/<node key or
+    pod>`, for THIS cluster's uid only): (partition, node key or pod). -/
+initialize historyChosenRef : IO.Ref (Option (Nat × String)) ← IO.mkRef none
+/-- The last masterless-hold reason logged per partition (CRITICAL on change
+    and every 15 s, not every pass). -/
+initialize historyHeldLoggedRef : IO.Ref (List (Nat × String)) ← IO.mkRef []
 initialize historyObsAtRef : IO.Ref Nat ← IO.mkRef 0
 initialize historyCrRef : IO.Ref String ← IO.mkRef ""
 /-- (lease name, this pod's identity): every history write re-checks the lease. -/
@@ -646,14 +653,18 @@ initialize historyLoadedAtRef : IO.Ref Nat ← IO.mkRef 0
 
 /-- Load the persisted store (and the migration approval) for this use. -/
 private def loadHistory (crName ns : String) (partitions : Nat) : IO (Option AuthoritativeHistory.Store) := do
-  let (uid, approval) ← match ← kubectl ["get", "flarecluster", crName, "-n", ns, "-o",
-      "jsonpath={.metadata.uid}|{.metadata.annotations.flare\\.gree\\.net/history-adoption-approved}"] with
+  let (uid, approval, chosen) ← match ← kubectl ["get", "flarecluster", crName, "-n", ns, "-o",
+      "jsonpath={.metadata.uid}|{.metadata.annotations.flare\\.gree\\.net/history-adoption-approved}|{.metadata.annotations.flare\\.gree\\.net/history-adopt-holder}"] with
     | .ok u =>
       match u.trim.splitOn "|" with
-      | [a, b] => pure (a.trim, b.trim)
-      | _ => pure ("", "")
-    | .error _ => pure ("", "")
+      | [a, b, c] => pure (a.trim, b.trim, c.trim)
+      | _ => pure ("", "", "")
+    | .error _ => pure ("", "", "")
   if uid.isEmpty then return none
+  -- <uid>/<partition>/<node key or pod>: another cluster's uid is ignored
+  historyChosenRef.set (match chosen.splitOn "/" with
+    | [u, p, k] => if u == uid && !k.isEmpty then p.toNat?.map (·, k) else none
+    | _ => none)
   let (persisted, rv) ← readHistory crName ns
   -- a node map present (or not readable) means the cluster existed before: a
   -- missing record is then ABSENT (migration approval needed), never a first build
@@ -844,6 +855,7 @@ private def observeHistory (stateRef : IO.Ref FlareClusterState) (crName ns : St
   let persisted ← if parts.any (fun p => (st0.intentFor p).isSome) then persistedNodeMap crName ns else pure none
   let mut store := st0
   let mut changes : List String := []
+  let mut chosenUsed := false
   -- on the 15 s period: every partition WITHOUT a record, with its state, the
   -- approval and what this pass read for it (CI 28761ff authority 29: a
   -- partition stayed 'not recorded' and no reason was logged at all)
@@ -895,11 +907,39 @@ private def observeHistory (stateRef : IO.Ref FlareClusterState) (crName ns : St
         let lastMasters := (st.nodeMap.filter fun (_, n) => n.lastMasterOf == Int.ofNat p).map Prod.fst
         let lastMaster := match lastMasters with | [k] => some k | _ => none
         let (s', c) := AuthoritativeHistory.establish store p masterKey copies approved now lastMaster
+        -- HELD with no master: a person may name the copy to keep (RUNBOOK
+        -- #history-held-masterless); the operator never chooses by itself
+        let chosen := match ← historyChosenRef.get with
+          | some (cp, k) => if cp == p then (copies.map Prod.fst).find? (fun key => key == k || key.startsWith s!"{k}.") else none
+          | none => none
+        let (s', c) := match c, masterKey, chosen with
+          | .held _ _, none, some k =>
+            let (s2, c2) := AuthoritativeHistory.adoptChosen store p masterKey copies k now
+            if c2 == .none then (s', c) else (s2, c2)
+          | _, _, _ => (s', c)
+        if let AuthoritativeHistory.Change.recorded _ _ _ := c then
+          if chosen.isSome then chosenUsed := true
         store := s'
         changes := note c changes
+        -- a masterless hold is visible as CRITICAL with its reason and the
+        -- recovery procedure (on a change of reason, and every 15 s)
+        match c, masterKey with
+        | AuthoritativeHistory.Change.held _ why, none =>
+          let last := (← historyHeldLoggedRef.get).lookup p
+          if periodic || last != some why then
+            historyHeldLoggedRef.modify fun l => (p, why) :: l.filter (·.1 != p)
+            IO.eprintln s!"[flare-operator] CRITICAL: partition {p} has NO master and its history is HELD: {why}. Nothing is adopted or promoted automatically; the copies seen: {copies.map fun ((k, x) : String × AuthoritativeHistory.Seen) => s!"{k}={match x with | .modern _ h healthy empty _ _ => s!"history {h.masterId}/{h.epoch} healthy={healthy} empty={empty}" | .legacy => "legacy" | .unreadable => "unreadable"}"}; lastMasterOf={lastMasters}. Recovery: RUNBOOK #history-held-masterless"
+        | _, _ => historyHeldLoggedRef.modify fun l => l.filter (·.1 != p)
   if store != st0 then
     if ← persistHistory crName ns store then
       for c in changes do IO.eprintln s!"[flare-operator] AUTHORITATIVE HISTORY: {c}"
+      -- a person's choice is used ONCE: removed after the record is written,
+      -- so a later loss never re-applies a stale choice
+      if chosenUsed then
+        historyChosenRef.set none
+        match ← kubectl ["annotate", "flarecluster", crName, "-n", ns, "flare.gree.net/history-adopt-holder-"] with
+        | .ok _ => IO.eprintln s!"[flare-operator] the history-adopt-holder choice on {crName} was used and removed"
+        | .error e => IO.eprintln s!"[flare-operator] warning: could not remove the used history-adopt-holder choice ({e}); it names an adopted partition and is ignored while the record is known"
   else
     for c in changes do IO.eprintln s!"[flare-operator] authoritative history (unchanged): {c}"
 

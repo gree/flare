@@ -995,6 +995,33 @@ rebuilds of that partition are refused until the hold is resolved.
   adopted. Inspect the target's copy; the resolution is an operator decision
   (remove the hold only after the partition's data is understood).
 
+### The recorded master moved to a new epoch in place {#history-holder-reseated}
+
+Symptom: the master IS the record's holder (`part N known <gen> <masterId>
+<epoch> <holder> ...`), but its `rocksdb_source_epoch` is newer than the
+recorded epoch, and every replica of the partition is logged
+`REBUILD HELD (history): ... holds another history than the record` — the
+replicas stay proxies, so **the master accepts writes with no replica**.
+Seen in CI 38081479454: a stale node map made the master leave its role and
+be re-seated (a new epoch, same copy) right after the first-build record was
+taken. The operator does not re-adopt this by itself (a new epoch on the
+holder is only an observation unless it is a proven bulk).
+
+Recovery — only after checking that the master holds the partition's data
+(items, a sample of keys) and no other copy holds more:
+
+1. Save the record: `kubectl -n <ns> get configmap <cluster>-history -o yaml > history-<date>.yaml`.
+2. Delete the record: `kubectl -n <ns> delete configmap <cluster>-history`
+   (EVERY partition of the cluster becomes Unknown/absent; their promotions
+   and rebuilds stay held until each is re-adopted from its own master).
+3. Give the migration approval (#history-record). The record is re-adopted
+   from the current master once every copy was observed, and the replicas'
+   rebuilds are assigned (the delete → re-adopt path is exercised by
+   history-tracking (3a); this exact state's recovery is NOT exercised).
+
+Do not delete the record while a promotion intent is pending (`intent` lines)
+or while the master's copy is in doubt — stop and keep the evidence.
+
 ## A partition with no master and no history record {#history-held-masterless}
 
 Seen as: `CRITICAL: partition N has NO master and its history is HELD: <reason>`

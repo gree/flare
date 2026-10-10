@@ -662,6 +662,16 @@ private def readHistory (crName ns : String) : IO (Option (Option String) × Str
     candidate's binding must match). -/
 initialize desiredPartitionsRef : IO.Ref Nat ← IO.mkRef 0
 
+/-- Each partition's Active master as seen by the last follow probe pass: a
+    slave of a partition whose master CHANGED is read at once (a promotion
+    advances the history, its surviving slaves declare needs_rebuild — read
+    only every FLARE_FOLLOW_PROBE_INTERVAL passes before, run 38037230581). -/
+initialize probeMastersRef : IO.Ref (List (Int × String)) ← IO.mkRef []
+/-- (partition, last tick to read its slaves every pass) after its master
+    changed: flared's validator declares needs_rebuild ~2 s after the map, so
+    one read on the next pass could miss it. -/
+initialize probeForcedUntilRef : IO.Ref (List (Int × Nat)) ← IO.mkRef []
+
 /-- The nodes Down in the map committed at the end of the last pass (a node
     that rejoins after it starts its NotReady window again). -/
 initialize downAtCommitRef : IO.Ref (List String) ← IO.mkRef []
@@ -1486,13 +1496,25 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
       if let some d1 := changedTo then
         IO.eprintln s!"[flare-operator] follow configuration changed to follow {if d1 then "on" else "off"} at tick {tr.tick}: confirming on {changeKeys} every pass until each shows it (at most {confirmBudget} passes)"
       let readyPods := pods.filter (fun p => p.ready && !p.terminating)
+      let mastersNow : List (Int × String) := cs.nodeMap.filterMap fun (k, n) =>
+        if n.role == FlareRole.Master && n.state == FlareState.Active then some (n.partition, k) else none
+      let mastersBefore ← probeMastersRef.get
+      probeMastersRef.set mastersNow
+      let movedNow := mastersNow.filterMap fun (part, b) => match mastersBefore.lookup part with
+        | some a => if a != b then some part else none
+        | none => if mastersBefore.isEmpty then none else some part
+      let forced := ((← probeForcedUntilRef.get).filter (·.2 ≥ tr.tick)) ++ movedNow.map (·, tr.tick + 5)
+      probeForcedUntilRef.set forced
+      if !movedNow.isEmpty then
+        IO.eprintln s!"[flare-operator] master changed on partition(s) {movedNow}: their slaves are read every pass for 5 passes (a promotion's surviving slave declares needs_rebuild)"
+      let masterMoved := fun (part : Int) => forced.any (·.1 == part)
       let mut slaveReadings : List (String × Int × Option FollowEvidence.Reading) := []
       for (key, n) in cs.nodeMap do
         if n.role == FlareRole.Slave && n.state != FlareState.Down then
           match readyPods.find? (fun p => Bridge.PodInfo.toNodeKey p == key) with
           | none => slaveReadings := slaveReadings ++ [(key, n.partition, none)]
           | some p =>
-            if FollowEvidence.shouldProbeWith confirm0 tr.mem key tr.tick probeInterval then
+            if FollowEvidence.shouldProbeWith confirm0 tr.mem key tr.tick probeInterval || masterMoved n.partition then
               let r ← match ← Bridge.queryPodStats p.name ns "stats" with
                 | .ok out => pure (followReadingFrom out)
                 | .error _ => pure ({} : FollowEvidence.Reading)

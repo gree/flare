@@ -88,6 +88,18 @@ protected:
 
 public:
 	static int read_timeout;												// msec
+	static const int k8s_default_read_timeout_ms = 30 * 1000;
+	// The read timeout flared applies, at startup AND on every reload: an
+	// explicitly configured net-read-timeout wins; otherwise the k8s build uses
+	// 30 s and the classic build the option's default. (A reload used to set
+	// net_read_timeout unconditionally: in the k8s build a SIGHUP turned 30 s
+	// into 600 s.)
+	static int effective_read_timeout_ms(bool k8s_build, bool explicitly_set, int net_read_timeout_sec) {
+		if (explicitly_set || !k8s_build) {
+			return net_read_timeout_sec * 1000;
+		}
+		return k8s_default_read_timeout_ms;
+	};
 	static const int connect_retry_limit = 8;
 	static const int connect_retry_wait = 500*1000;	// usec
 	static const int write_timeout = 10*1000;				// msec

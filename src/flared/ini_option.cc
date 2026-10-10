@@ -57,6 +57,7 @@ ini_option::ini_option():
 #endif
 		_noreply_window_limit(default_noreply_window_limit),
 		_net_read_timeout(default_net_read_timeout),
+		_net_read_timeout_set(false),
 		_proxy_concurrency(default_proxy_concurrency),
 		_reconstruction_interval(default_reconstruction_interval),
 		_reconstruction_bwlimit(default_reconstruction_bwlimit),
@@ -267,6 +268,7 @@ int ini_option::load() {
 
 		if (opt_var_map.count("net-read-timeout")) {
 			this->_net_read_timeout = opt_var_map["net-read-timeout"].as<int>();
+			this->_net_read_timeout_set = true;
 		}
 
 		if (opt_var_map.count("proxy-concurrency")) {
@@ -572,6 +574,7 @@ int ini_option::reload() {
 		if (opt_var_map.count("net-read-timeout")) {
 			log_notice("  net_read_timeout:       %d -> %d", this->_net_read_timeout, opt_var_map["net-read-timeout"].as<int>());
 			this->_net_read_timeout = opt_var_map["net-read-timeout"].as<int>();
+			this->_net_read_timeout_set = true;
 		}
 
 		if (opt_var_map.count("reconstruction-interval")) {

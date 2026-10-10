@@ -282,6 +282,20 @@ namespace test_connection_tcp
 		cut_assert_operator(took, <, (uint64_t)5000);		// 2 tries x 1 s + retry wait
 	}
 
+	// the read timeout flared applies at startup AND on reload (one rule):
+	// a SIGHUP used to turn the k8s build's 30 s into net_read_timeout (600 s)
+	void test_effective_read_timeout_is_the_same_rule_at_startup_and_reload()
+	{
+		// k8s build, not configured: 30 s (whatever the option default says)
+		cut_assert_equal_int(30000, connection_tcp::effective_read_timeout_ms(true, false, 600));
+		// k8s build, configured explicitly: the configured value (also 600 when asked for)
+		cut_assert_equal_int(5000, connection_tcp::effective_read_timeout_ms(true, true, 5));
+		cut_assert_equal_int(600000, connection_tcp::effective_read_timeout_ms(true, true, 600));
+		// classic build: net_read_timeout (default 600 s, or as configured)
+		cut_assert_equal_int(600000, connection_tcp::effective_read_timeout_ms(false, false, 600));
+		cut_assert_equal_int(10000, connection_tcp::effective_read_timeout_ms(false, true, 10));
+	}
+
 	void teardown()
 	{
 		delete stats_object;

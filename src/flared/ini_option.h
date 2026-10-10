@@ -67,6 +67,7 @@ private:
 #endif
 	int					_noreply_window_limit;
 	int					_net_read_timeout;
+	bool				_net_read_timeout_set;
 	int					_proxy_concurrency;
 	int					_reconstruction_interval;
 	int					_reconstruction_bwlimit;
@@ -237,6 +238,8 @@ public:
 #endif
 	int get_noreply_window_limit() { return this->_noreply_window_limit; };
 	int get_net_read_timeout() { return this->_net_read_timeout; };
+	// net-read-timeout was given explicitly (config file or command line)
+	bool is_net_read_timeout_set() { return this->_net_read_timeout_set; };
 	int get_proxy_concurrency() { return this->_proxy_concurrency; };
 	int get_reconstruction_interval() { return this->_reconstruction_interval; };
 	int get_reconstruction_bwlimit() { return this->_reconstruction_bwlimit; };

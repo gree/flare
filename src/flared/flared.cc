@@ -58,6 +58,17 @@
 namespace gree {
 namespace flare {
 
+namespace {
+bool flared_k8s_build() {
+#ifdef ENABLE_K8S_OPERATOR
+	return true;
+#else
+	return false;
+#endif
+}
+}	// anonymous namespace
+
+
 // This variable is set by main thread.
 static volatile sig_atomic_t reload_request = 0;
 
@@ -200,13 +211,10 @@ int flared::startup(int argc, char **argv) {
 	}
 
 	// application objects
-#ifdef ENABLE_K8S_OPERATOR
-	// In K8s operator mode, reduce read timeout for faster failover detection.
-	// The Lean 4 operator on :12120 responds much faster than the legacy flarei.
-	connection_tcp::read_timeout = 30 * 1000;		// 30s (vs default 600s)
-#else
-	connection_tcp::read_timeout = ini_option_object().get_net_read_timeout() * 1000;		// -> msec
-#endif
+	// In K8s operator mode the read timeout is 30 s unless net-read-timeout is
+	// set explicitly (faster failover detection); the same rule on reload.
+	connection_tcp::read_timeout = connection_tcp::effective_read_timeout_ms(flared_k8s_build(),
+		ini_option_object().is_net_read_timeout_set(), ini_option_object().get_net_read_timeout());
 	this->_server = new server();
 	this->_server->set_back_log(ini_option_object().get_back_log());
 	if (this->_server->listen(ini_option_object().get_server_port()) < 0) {
@@ -500,8 +508,12 @@ int flared::reload() {
 	singleton<logger>::instance().close();
 	singleton<logger>::instance().open(this->_ident, ini_option_object().get_log_facility(), ini_option_object().get_log_stderr());
 
-	// net_read_timeout
-	connection_tcp::read_timeout = ini_option_object().get_net_read_timeout() * 1000;	// -> msec
+	// net_read_timeout — the SAME rule as at startup (this used to apply
+	// net_read_timeout unconditionally: a SIGHUP in the k8s build turned the
+	// 30 s read timeout into 600 s)
+	connection_tcp::read_timeout = connection_tcp::effective_read_timeout_ms(flared_k8s_build(),
+		ini_option_object().is_net_read_timeout_set(), ini_option_object().get_net_read_timeout());
+	log_notice("  read timeout:           %d ms", connection_tcp::read_timeout);
 
 	//  index_servers
 	this->_cluster->set_index_servers(ini_option_object().get_index_servers());

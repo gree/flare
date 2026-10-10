@@ -514,6 +514,35 @@ Monitoring: alert when `time() - rocksdb_last_backup_epoch` exceeds twice
 the backup interval (exposed via flared `stats`; needs a memcached
 exporter).
 
+### An in-place restore keeps the copy it replaces {#restore-in-place}
+
+A restore into a pod that has a live copy does NOT remove it:
+
+1. The hook (`flare-restore-hook`) checks provenance and **capacity**: the
+   backup's size plus a reserve (`FLARE_RESTORE_RESERVE_BYTES`, default 64 MiB)
+   must be free in the data dir. On tmpfs that is memory — room for two copies.
+   Not enough = refused (`RESTORE.refused.reason`), the live copy is served.
+2. It copies the backup next to the live copy (`restore-incoming-<ts>`, then
+   `staging-restore-<ts>`) and names it in `RESTORE.switch`. An incomplete
+   `restore-incoming-*` (a copy that failed) is left in place — remove it by
+   hand once you have checked it.
+3. flared, at start, switches it in with the copy switch: the live copy becomes
+   `retained-restore-<ts>`. Log: `in-place restore ... RETAINED as ...`.
+4. The retained copy is **never deleted automatically** (it has no switch
+   record). Discard it only with a `FlareCopyDiscardApproval` after the
+   restored copy is verified (master of its partition, data checked).
+
+Stops (nothing moved or removed, CRITICAL in the log): `RESTORE.switch`
+naming a copy that does not exist (renamed `RESTORE.switch.failed`, the live
+copy is served); a live copy whose `COPY_ID` cannot be read (flared does not
+start — move the live copy aside by hand, or remove `RESTORE.switch` to keep
+it). A crash during the switch is resolved at the next start from what exists
+on disk.
+
+Open decisions (not implemented; fail-closed until decided): whether a
+verified restore may ever delete its retained copy automatically; who may roll
+an in-place restore back; old backups without a partition binding (refused).
+
 ### A restore refused for its provenance {#restore-refused}
 
 Symptoms: the pod log has `flare-restore-hook: CRITICAL: RESTORE REFUSED: …`

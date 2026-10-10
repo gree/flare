@@ -996,10 +996,19 @@ with its history:
    is used once), and promotes it; the other copies rejoin and are rebuilt
    from it.
 
-The choice is REFUSED (the hold stays, with the reason in the line) when any
-copy is unreadable, the named copy is not a copy of the partition, it is
-unhealthy, or it is EMPTY while another copy holds data. It has no effect on a
-partition that has a master or a record.
+A choice is evaluated ONCE and then removed, whatever the outcome — so a
+choice can never wait and apply later to a copy that has changed since:
+
+- REFUSED (CRITICAL `the history-adopt-holder choice ... was REFUSED: <reason>`;
+  the hold stays) when any copy is unreadable, the name matches no copy of the
+  partition (a typo, a wrong port), the chosen copy is unhealthy, or it is
+  EMPTY while another copy holds data. Fix the cause, check the copies again,
+  and annotate again.
+- REMOVED without effect when the partition is not held without a master (it
+  has a master or a record), or the migration approval is missing (a
+  separate CRITICAL says so).
+- If the removal itself fails, the choice is NOT applied again and the removal
+  is retried (CRITICAL `could not remove the history-adopt-holder choice`).
 
 ## Known limits (do not be surprised by)
 

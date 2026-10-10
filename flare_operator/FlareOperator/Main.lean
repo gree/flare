@@ -610,6 +610,24 @@ initialize historyChosenRef : IO.Ref (Option (Nat × String)) ← IO.mkRef none
 /-- The last masterless-hold reason logged per partition (CRITICAL on change
     and every 15 s, not every pass). -/
 initialize historyHeldLoggedRef : IO.Ref (List (Nat × String)) ← IO.mkRef []
+/-- A choice was evaluated (adopted or refused) but its removal is not yet
+    confirmed: the annotation still read back is NOT applied again, and its
+    removal is retried on every load (a choice is used once). -/
+initialize historyChoiceConsumedRef : IO.Ref Bool ← IO.mkRef false
+
+/-- Remove the person's choice (used or refused); true when confirmed. A
+    failed removal keeps the choice consumed and is retried on every load. -/
+private def removeHistoryChoice (crName ns why : String) : IO Bool := do
+  historyChosenRef.set none
+  match ← kubectl ["annotate", "flarecluster", crName, "-n", ns, "flare.gree.net/history-adopt-holder-"] with
+  | .ok _ =>
+    historyChoiceConsumedRef.set false
+    IO.eprintln s!"[flare-operator] the history-adopt-holder choice on {crName} was removed: {why}"
+    return true
+  | .error e =>
+    historyChoiceConsumedRef.set true
+    IO.eprintln s!"[flare-operator] CRITICAL: could not remove the history-adopt-holder choice on {crName} ({e}); it is NOT applied again and its removal is retried ({why})"
+    return false
 initialize historyObsAtRef : IO.Ref Nat ← IO.mkRef 0
 initialize historyCrRef : IO.Ref String ← IO.mkRef ""
 /-- (lease name, this pod's identity): every history write re-checks the lease. -/
@@ -661,10 +679,15 @@ private def loadHistory (crName ns : String) (partitions : Nat) : IO (Option Aut
       | _ => pure ("", "", "")
     | .error _ => pure ("", "", "")
   if uid.isEmpty then return none
-  -- <uid>/<partition>/<node key or pod>: another cluster's uid is ignored
-  historyChosenRef.set (match chosen.splitOn "/" with
-    | [u, p, k] => if u == uid && !k.isEmpty then p.toNat?.map (·, k) else none
-    | _ => none)
+  -- <uid>/<partition>/<node key or pod>: another cluster's uid is ignored; a
+  -- choice already evaluated is never applied again (its removal is retried)
+  if chosen.isEmpty then historyChoiceConsumedRef.set false
+  if !chosen.isEmpty && (← historyChoiceConsumedRef.get) then
+    discard <| removeHistoryChoice crName ns "already evaluated (retrying the removal)"
+  else
+    historyChosenRef.set (match chosen.splitOn "/" with
+      | [u, p, k] => if u == uid && !k.isEmpty then p.toNat?.map (·, k) else none
+      | _ => none)
   let (persisted, rv) ← readHistory crName ns
   -- a node map present (or not readable) means the cluster existed before: a
   -- missing record is then ABSENT (migration approval needed), never a first build
@@ -895,6 +918,10 @@ private def observeHistory (stateRef : IO.Ref FlareClusterState) (crName ns : St
     | none =>
       match store.part p with
       | some (.known r _) =>
+        -- a choice on a RECORDED partition never applies; a later loss of the
+        -- record must not find it waiting
+        if let some (cp, _) := ← historyChosenRef.get then
+          if cp == p then discard <| removeHistoryChoice crName ns s!"partition {p} has a history record (a choice applies only without one)"
         let holderSeen := (seen.lookup r.holder).getD .unreadable
         let (s1, c1) := AuthoritativeHistory.rebind store p r.holder holderSeen
         store := s1
@@ -909,18 +936,35 @@ private def observeHistory (stateRef : IO.Ref FlareClusterState) (crName ns : St
         let (s', c) := AuthoritativeHistory.establish store p masterKey copies approved now lastMaster
         -- HELD with no master: a person may name the copy to keep (RUNBOOK
         -- #history-held-masterless); the operator never chooses by itself
-        let chosen := match ← historyChosenRef.get with
-          | some (cp, k) => if cp == p then (copies.map Prod.fst).find? (fun key => key == k || key.startsWith s!"{k}.") else none
+        let choice := match ← historyChosenRef.get with
+          | some (cp, k) => if cp == p then some k else none
           | none => none
-        let (s', c) := match c, masterKey, chosen with
-          | .held _ _, none, some k =>
-            let (s2, c2) := AuthoritativeHistory.adoptChosen store p masterKey copies k now
-            if c2 == .none then (s', c) else (s2, c2)
+        let chosen := choice.bind fun k => (copies.map Prod.fst).find? (fun key => key == k || key.startsWith s!"{k}.")
+        let heldMasterless := match c, masterKey with
+          | AuthoritativeHistory.Change.held _ _, none => true
+          | _, _ => false
+        let (s', c) := match heldMasterless, choice, chosen with
+          | true, some _, some k => AuthoritativeHistory.adoptChosen store p masterKey copies k now
+          | true, some k, none => (s', AuthoritativeHistory.Change.held p s!"the chosen copy {k} (history-adopt-holder) is not a copy of partition {p} (copies {copies.map Prod.fst})")
           | _, _, _ => (s', c)
-        if let AuthoritativeHistory.Change.recorded _ _ _ := c then
-          if chosen.isSome then chosenUsed := true
+        -- a choice is evaluated ONCE: adopted (removed after the record is
+        -- written) or refused / not applicable (removed now, with the reason)
+        if let some k := choice then
+          match heldMasterless, c with
+          | true, AuthoritativeHistory.Change.recorded _ _ _ => chosenUsed := true
+          | true, AuthoritativeHistory.Change.held _ why =>
+            IO.eprintln s!"[flare-operator] CRITICAL: the history-adopt-holder choice {k} for partition {p} was REFUSED: {why} — fix the cause and choose again (RUNBOOK #history-held-masterless)"
+            discard <| removeHistoryChoice crName ns s!"refused: {why}"
+          | _, _ =>
+            discard <| removeHistoryChoice crName ns s!"partition {p} is not held without a master (a choice applies only there)"
         store := s'
         changes := note c changes
+        -- no record, no master and NO migration approval: nothing is read or
+        -- adopted at all — say so (the approval is the first step)
+        if masterKey.isNone && c == .none && !approved then
+          if let some (AuthoritativeHistory.Part.unknown .absent _) := store.part p then
+            if periodic then
+              IO.eprintln s!"[flare-operator] CRITICAL: partition {p} has NO master and NO history record, and the migration approval is missing: nothing is adopted or promoted. Recovery: RUNBOOK #history-record, then #history-held-masterless"
         -- a masterless hold is visible as CRITICAL with its reason and the
         -- recovery procedure (on a change of reason, and every 15 s)
         match c, masterKey with
@@ -936,10 +980,7 @@ private def observeHistory (stateRef : IO.Ref FlareClusterState) (crName ns : St
       -- a person's choice is used ONCE: removed after the record is written,
       -- so a later loss never re-applies a stale choice
       if chosenUsed then
-        historyChosenRef.set none
-        match ← kubectl ["annotate", "flarecluster", crName, "-n", ns, "flare.gree.net/history-adopt-holder-"] with
-        | .ok _ => IO.eprintln s!"[flare-operator] the history-adopt-holder choice on {crName} was used and removed"
-        | .error e => IO.eprintln s!"[flare-operator] warning: could not remove the used history-adopt-holder choice ({e}); it names an adopted partition and is ignored while the record is known"
+        discard <| removeHistoryChoice crName ns "used: the chosen copy's history is recorded"
   else
     for c in changes do IO.eprintln s!"[flare-operator] authoritative history (unchanged): {c}"
 

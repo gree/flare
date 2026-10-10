@@ -743,8 +743,14 @@ namespace test_handler_proxy {
 		shared_queue_proxy_write pre = get_proxy_queue_write();
 		shared_thread_queue tpre = pre;
 		cut_assert_equal_int(0, t->enqueue(tpre));
-		t->shutdown(false, false);
-		cut_assert_equal_int((int)dropped0 + 3, (int)stats_object->get_proxy_write_dropped());
+		// a GRACEFUL shutdown, as node removal does (cluster.cc): the thread
+		// notifies, THEN cleans its queue (thread_run) — so wait for the count
+		// (bounded) instead of reading it the instant shutdown() returns
+		t->shutdown(true, false);
+		for (int w = 0; w < 50 && stats_object->get_proxy_write_dropped() < dropped0 + 3; w++) {
+			usleep(100 * 1000);
+		}
+		cut_assert_equal_int((int)dropped0 + 3, (int)stats_object->get_proxy_write_dropped(), cut_message("the queued post-proxy forwards were not counted within 5 s of the shutdown"));
 		map<string, uint64_t> by = stats_object->get_proxy_write_dropped_by_dest();
 		cut_assert_equal_int(3, (int)by["abandoned.example:12121"]);
 	}

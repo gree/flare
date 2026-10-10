@@ -614,6 +614,8 @@ initialize historyHeldLoggedRef : IO.Ref (List (Nat × String)) ← IO.mkRef []
     confirmed: the annotation still read back is NOT applied again, and its
     removal is retried on every load (a choice is used once). -/
 initialize historyChoiceConsumedRef : IO.Ref Bool ← IO.mkRef false
+/-- Repair-ledger destinations that are not nodes of this cluster (last logged set). -/
+initialize foreignDropDestsRef : IO.Ref (List String) ← IO.mkRef []
 
 /-- Remove the person's choice (used or refused); true when confirmed. A
     failed removal keeps the choice consumed and is retried on every load. -/
@@ -2414,6 +2416,16 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
       let led0 ← ledgerRef.get
       let preState ← stateRef.get
       let (led1, voided) := ReplicaRepair.resolve led0 preState
+      -- drops counted to a destination that is NOT a node of this cluster
+      -- (cross-cluster replication forwards to the other cluster's nodes):
+      -- nothing here can repair it and the other cluster's operator never
+      -- reads this master's counter — say so (on a change of the set)
+      let foreign := (led1.entries.filter fun (e : ReplicaRepair.Entry) =>
+        e.nodeKey.isNone && (ReplicaRepair.resolveKey preState e.dest).isNone).map fun e => s!"{e.dest} ({e.drops} drop(s) by {e.masterKey})"
+      if foreign != (← foreignDropDestsRef.get) then
+        foreignDropDestsRef.set foreign
+        if !foreign.isEmpty then
+          IO.eprintln s!"[flare-operator] CRITICAL: writes were dropped to destination(s) outside this cluster: {foreign} — typically cross-cluster replication; NOT repaired automatically by this operator or the destination's. See RUNBOOK #foreign-drops"
       -- SAF-10c: a follower that declared needs_rebuild (history purged
       -- past its position, source epoch changed, integrity failure) takes
       -- the rebuild path even though no drop was counted for it — requested

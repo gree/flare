@@ -1010,6 +1010,22 @@ choice can never wait and apply later to a copy that has changed since:
 - If the removal itself fails, the choice is NOT applied again and the removal
   is retried (CRITICAL `could not remove the history-adopt-holder choice`).
 
+## Writes dropped to a destination outside this cluster {#foreign-drops}
+
+Seen as: `CRITICAL: writes were dropped to destination(s) outside this cluster`.
+A master counts every write it acknowledged but could not deliver to a
+downstream copy (`proxy_write_dropped[<host:port>]` in its `stats`). When that
+destination is not a node of this cluster — cross-cluster replication to
+another cluster — this operator cannot repair it, and the destination cluster's
+operator never reads this master's counter.
+
+- The destination cluster's copy lacks those writes until it is rebuilt.
+- Decide from the destination's data: rebuild the affected destination from
+  this cluster (the cross-cluster seeding procedure), or accept the gap.
+- The entry stays in this cluster's repair ledger
+  (`status.replicaRepairs`) as unresolved; it is evidence, not a request this
+  operator will act on.
+
 ## Known limits (do not be surprised by)
 
 - Selective network partition (pod alive, TCP to operator blocked) is

@@ -2937,7 +2937,40 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
           | .handedOver =>
             IO.eprintln s!"[flare-operator] REPLICA REPAIR handed over: {who}'s follower explicitly no longer owns it (needs_rebuild or mode off); the demote → hold → reseat path takes it from here"
           | .keep => pure ()
-        let (led1, steps) := ReplicaRepair.advance ledOwned obs
+        -- The master's drop counters, read on EVERY pass while a repair is in
+        -- flight for one of its destinations: the slot observation below runs
+        -- every 300 s, and forward-window-steps 38043715395 completed a repair
+        -- 26 s after its only reading — 35 later drops (one after the
+        -- catch-up's end) were never seen, so the late-drop requeue could not
+        -- fire. A master that cannot be read holds its destinations this pass
+        -- (no completion without a fresh count).
+        let mut ledFresh := ledOwned
+        let mut unreadMasters : List String := []
+        for mKey in ((ledOwned.entries.filter fun (e : ReplicaRepair.Entry) => !e.owned && e.phase != .requested).map (·.masterKey)).eraseDups do
+          match ← Bridge.queryPodStats (extractPodName mKey) ns "stats" with
+          | .ok mo =>
+            let drops := (mo.splitOn "\n").filterMap fun line =>
+              match (line.trim.splitOn " ").filter (· != "") with
+              | ["STAT", k, v] =>
+                if k.startsWith "proxy_write_dropped[" && k.endsWith "]" then
+                  match v.trim.toNat? with
+                  | some n => some ((k.drop "proxy_write_dropped[".length).dropRight 1, n)
+                  | none => none
+                else none
+              | _ => none
+            let (l1, newDrops, _) := ReplicaRepair.observe ledFresh mKey drops (statNat mo "reconstruction_boot_id")
+            let mut l2 := l1
+            for (dest, d) in newDrops do
+              l2 := ReplicaRepair.request l2 mKey dest d
+              metrics.replicaRepairRequested.inc
+              IO.eprintln s!"[flare-operator] REPLICA REPAIR: master {mKey} dropped {d} more write(s) to {dest} while a repair is in flight (its counter is read every pass until the repair completes)"
+            ledFresh := l2
+          | .error _ =>
+            unreadMasters := unreadMasters ++ [mKey]
+        let heldDests := (ledFresh.entries.filter fun (e : ReplicaRepair.Entry) => unreadMasters.contains e.masterKey).map (·.dest)
+        if !heldDests.isEmpty then
+          IO.eprintln s!"[flare-operator] REPLICA REPAIR: the master's drop counter could not be read for {heldDests}; their repair does not advance this pass (no completion without a fresh count)"
+        let (led1, steps) := ReplicaRepair.advance ledFresh (obs.filter fun (d, _) => !heldDests.contains d)
         for (e, st) in steps do
           let who := e.nodeKey.getD e.dest
           match st with

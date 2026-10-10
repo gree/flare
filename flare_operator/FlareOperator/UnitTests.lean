@@ -271,6 +271,14 @@ def checkAdvanceComplete (ctx : Ctx) : IO Unit := do
     (stLate.map (·.2) == [.completedRequeued] && firstPhase lReq == some .requested
       && firstDrops lReq == some 2 && (lReq.entries.head?.bind (·.currentIdAtReseat)) == none
       && firstNodeKey lReq == some slaveKey)
+  -- forward-window-steps 38043715395: the drop counter read on the pass that
+  -- decides completion (Main reads it every pass while a repair is in flight)
+  -- turns a would-be completion into a requeue; no reading = no step at all
+  let (lObs, newD, _) := observe lRel masterKey [(slaveKey, 1000)] none
+  let lObs2 := newD.foldl (fun l (d, n) => request l masterKey d n) lObs
+  check ctx "repair in flight: drops observed on the completing pass requeue it (late drop after the catch-up's end); an entry with no observation this pass does not advance"
+    (!newD.isEmpty && ((advance lObs2 [(slaveKey, doneObs)]).2.map (·.2)) == [.completedRequeued]
+      && (advance lRel []).2.isEmpty && (advance lRel []).1.entries.length == lRel.entries.length)
   check ctx "a node that became MASTER while reseated is voided"
     (stepsOf lRel (obs (some 12) (some 100) (some 2) (some "succeeded") (some 2) (some masterKey) (some masterKey) (some (.Master, .Active))) == [.voided])
   let lNoBase : Ledger := { lRel with entries := lRel.entries.map fun e => { e with bootIdAtReseat := none, currentIdAtReseat := none } }

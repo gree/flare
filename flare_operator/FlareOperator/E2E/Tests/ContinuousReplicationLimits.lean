@@ -5998,4 +5998,281 @@ def forwardWalSuite : TestSuite := {
   ]
 }
 
+
+/-- copy-identity 11, STEP-WISE (review 2026-10-10). The failing fixture's
+    differences from the controlled replays are added one at a time, in the
+    order of the failing run's complete logs (37916480803):
+    (S1) 3 replicas, a slave's flared restarted;
+    (S2) + a promotion just before: the master is drained, a slave is
+         promoted, and the ex-master rejoins Proxy -> Prepare slave by a staged
+         rebuild — in that run the copy that lacked markers was such an
+         ex-master, which had activated itself (10:38:39.14) but was still
+         Prepare in the map (until 10:38:45.87) when the markers were
+         acknowledged (10:38:42.98-43.59);
+    (S3) + the other slave replaced under the same name at the same moment
+         (copy-identity 10's fixture).
+    A writer in the debug pod acknowledges one marker every ~0.2 s through the
+    whole sequence; afterwards every copy's OWN keys (dump) are compared with
+    every acknowledged marker, and each missing marker is placed on a merged
+    timeline (writer ACK, map acceptances, snapshot, switch, activation, map
+    Active, promotion). Keys and counters are judged apart. -/
+private def fwdStepCfg : ClusterConfig := {
+  name := "fwd-step"
+  «namespace» := "flare-fwd-step"
+  partitions := 1
+  replicas := 3
+  operatorName := "flare-operator"
+  debugPod := "debug-fwd-step"
+  storageBackend := "rocksdb"
+  usePvc := true
+  drainSeconds := 20
+}
+
+/-- The marker writer, run detached in the debug pod: one `set` per ~0.2 s to
+    the IP in /tmp/w.target, each reply logged with the pod's uptime (busybox
+    `date` has no sub-second field). The ANCHOR line ties uptime to the wall
+    clock at a second boundary. Stops when /tmp/w.stop exists. -/
+private def writerScript (pfx : String) (port : Nat) : String :=
+  "rm -f /tmp/w.stop; : > /tmp/w.acks\n" ++
+  "s0=$(date -u +%s); while [ \"$(date -u +%s)\" = \"$s0\" ]; do :; done\n" ++
+  "echo \"ANCHOR $(date -u +%s) $(cut -d' ' -f1 /proc/uptime)\" >> /tmp/w.acks\n" ++
+  "i=0\n" ++
+  "while [ ! -f /tmp/w.stop ]; do\n" ++
+  "  T=$(cat /tmp/w.target); k=" ++ pfx ++ "_$i; v=v" ++ pfx ++ "_$i\n" ++
+  "  r=$(printf 'set %s 0 0 %s\\r\\n%s\\r\\nquit\\r\\n' \"$k\" \"${#v}\" \"$v\" | nc -w 2 \"$T\" " ++ toString port ++ " | head -1 | tr -d '\\r')\n" ++
+  "  echo \"W $i $(cut -d' ' -f1 /proc/uptime) $T $k $v ${r:-NOREPLY}\" >> /tmp/w.acks\n" ++
+  "  i=$((i+1)); sleep 0.2\n" ++
+  "done\n"
+
+/-- "1234.56" -> 123456 (hundredths of a second). -/
+private def parseCenti (s : String) : Option Nat :=
+  match s.splitOn "." with
+  | [a, b] => do
+    let x ← a.toNat?
+    let y ← (b.take 2).toNat?
+    return x * 100 + (if b.length == 1 then y * 10 else y)
+  | [a] => (a.toNat?).map (· * 100)
+  | _ => none
+
+private def pad2 (n : Nat) : String := if n < 10 then s!"0{n}" else toString n
+
+/-- Hundredths since the epoch -> "HH:MM:SS.cc" (UTC), the prefix of a log
+    timestamp, so writer and log events sort on one key. -/
+private def todOfCenti (c : Nat) : String :=
+  let t := c % 8640000
+  s!"{pad2 (t / 360000)}:{pad2 ((t / 6000) % 60)}:{pad2 ((t / 100) % 60)}.{pad2 (t % 100)}"
+
+/-- One acknowledged (or refused) marker write. -/
+private structure MarkerAck where
+  i : Nat
+  tod : String
+  target : String
+  key : String
+  value : String
+  reply : String
+
+private def parseAcks (raw : String) : List MarkerAck := Id.run do
+  let lines := (raw.splitOn "\n").map String.trim
+  let mut anchor : Option (Nat × Nat) := none
+  let mut out : List MarkerAck := []
+  for l in lines do
+    let ws := (l.splitOn " ").filter (· != "")
+    match ws with
+    | ["ANCHOR", e, u] =>
+      match e.toNat?, parseCenti u with
+      | some e, some u => anchor := some (e * 100, u)
+      | _, _ => pure ()
+    | "W" :: i :: u :: t :: k :: v :: rest =>
+      let tod := match anchor, parseCenti u with
+        | some (e, u0), some u1 => todOfCenti (e + u1 - u0)
+        | _, _ => "??:??:??.??"
+      out := out ++ [{ i := i.toNat?.getD 0, tod, target := t, key := k, value := v, reply := String.intercalate " " rest }]
+    | _ => pure ()
+  return out
+
+/-- (time of day, line) of a log line with a kubectl `--timestamps` prefix. -/
+private def todOfLogLine (l : String) : Option (String × String) :=
+  match l.splitOn " " with
+  | ts :: rest =>
+    if ts.length > 22 && ts.get ⟨10⟩ == 'T' then some ((ts.drop 11).take 11, String.intercalate " " rest) else none
+  | _ => none
+
+private def Ctx.p0RolesStep (c : Ctx) : IO (Option String × List String) := do
+  let entries ← c.nodeView
+  let m := (findMasterFqdn entries 0).map podOf
+  let ss := (entries.filter (fun e => e.role == 1 && e.state == 0 && e.partition == 0)).map (fun e => podOf e.fqdn)
+  return (m, ss)
+
+/-- One master, two Active slaves, every pod Ready, and both slaves' own
+    copies hold every key and value of the master's. -/
+private def Ctx.threeEqual (c : Ctx) (secs : Nat) : IO (Option (String × String × String)) := do
+  let ns := c.cfg.«namespace»
+  for _ in [0:secs / 5] do
+    match ← c.p0RolesStep with
+    | (some m, [a, b]) =>
+      if (← c.ready m) && (← c.ready a) && (← c.ready b) then
+        let md ← c.localDump ((← getPodIp m ns).getD "")
+        let ad ← c.localDump ((← getPodIp a ns).getD "")
+        let bd ← c.localDump ((← getPodIp b ns).getD "")
+        match md, ad, bd with
+        | some md, some ad, some bd =>
+          if (missingFrom md ad).isEmpty && (missingFrom md bd).isEmpty then return some (m, a, b)
+        | _, _, _ => pure ()
+    | _ => pure ()
+    IO.sleep 5000
+  return none
+
+/-- Every pod's flared lines (previous + current container) and the
+    operator's lines that place a marker: map acceptances, snapshot, switch,
+    activation, state/role shifts, promotion, node add/state, broadcasts. -/
+private def Ctx.stepEvents (c : Ctx) (since : String) (pods : List String) : IO (List (String × String)) := do
+  let ns := c.cfg.«namespace»
+  let flNeedles := ["node map accepted", "copy switch DONE", "node activated", "snapshot received", "snapshot streamed",
+    "staged rebuild DONE", "via WAL incremental sync", "storage open (", "ANSWERED but not stored", "shifting node_state",
+    "shifting node_role", "dump completed", "truncat", "node_thread_type", "proxy write", "promotion", "flared version"]
+  let opNeedles := ["PROMOT", "Event: NodeAdd", "Event: NodeState", "Event: NodeRole", "Broadcasting node sync", "declared dead", "drain"]
+  let mut ev : List (String × String) := []
+  for pod in pods do
+    for extra in [["--previous"], []] do
+      match ← kubectl (["logs", "-n", ns, pod, "-c", "flared", s!"--since-time={since}", "--timestamps"] ++ extra) with
+      | .ok o =>
+        for l in o.splitOn "\n" do
+          if flNeedles.any (containsSubstr l ·) then
+            if let some (t, rest) := todOfLogLine l then ev := ev ++ [(t, s!"{pod}: {(rest.drop 40).take 220}")]
+      | .error _ => pure ()
+  for op in ← getPodNames s!"app={c.cfg.operatorName}" ns do
+    match ← kubectl ["logs", "-n", ns, op, s!"--since-time={since}", "--timestamps"] with
+    | .ok o =>
+      for l in o.splitOn "\n" do
+        if opNeedles.any (containsSubstr l ·) && !containsSubstr l "[DEBUG]" then
+          if let some (t, rest) := todOfLogLine l then ev := ev ++ [(t, s!"operator: {rest.take 220}")]
+    | .error _ => pure ()
+  return ev
+
+/-- Run one step: precondition (three equal copies) -> writer on -> `fault` ->
+    follow the master (re-target the writer), until every pod is Ready and
+    the map shows one master and two Active slaves (at least `minSecs` after
+    the fault) -> 10 s more writes -> writer off -> 15 s -> compare. -/
+private def Ctx.forwardStep (c : Ctx) (label : String) (minSecs : Nat) (uncordonOnNewMaster : Bool)
+    (fault : String → String → String → IO (Except String Unit)) : IO TestResult := do
+  let ns := c.cfg.«namespace»
+  let dbg := c.cfg.debugPod
+  let some (m, a, b) ← c.threeEqual 300 | return .fail "precondition: one master, two Active slaves, all Ready, slaves holding the master's keys"
+  let pods := [m, a, b]
+  let mIp := (← getPodIp m ns).getD ""
+  let mut ipPod : List (String × String) := [(mIp, m)]
+  let since ← utcNow
+  discard <| execInDebugPod dbg ns s!"echo {mIp} > /tmp/w.target"
+  let script := writerScript label c.cfg.flarePort
+  if let .error e ← execInDebugPod dbg ns s!"cat > /tmp/w.sh <<'EOF_W'\n{script}EOF_W\nnohup sh /tmp/w.sh > /dev/null 2>&1 &" then
+    return .fail s!"could not start the marker writer: {e}"
+  IO.sleep 3000
+  IO.eprintln s!"# [{label}] master {m}, slaves {a} {b}; writer on (target {mIp}) since {since}"
+  if let .error e ← fault m a b then
+    discard <| execInDebugPod dbg ns "touch /tmp/w.stop"
+    discard <| kubectl ["uncordon", kindNode]
+    return .fail s!"fault injection: {e}"
+  let tFault ← IO.monoMsNow
+  let mut cur := m
+  let mut masters := [m]
+  let mut settled := false
+  for _ in [0:180] do
+    IO.sleep 2000
+    let (mm, ss) ← c.p0RolesStep
+    if let some m2 := mm then
+      if m2 != cur then
+        cur := m2
+        masters := masters ++ [m2]
+        if uncordonOnNewMaster then discard <| kubectl ["uncordon", kindNode]
+      -- the master's IP, re-read every check (a pod replaced under its name moves)
+      if let some ip ← getPodIp m2 ns then
+        if !(ipPod.any (·.1 == ip)) then ipPod := ipPod ++ [(ip, m2)]
+        discard <| execInDebugPod dbg ns s!"echo {ip} > /tmp/w.target"
+      if (← IO.monoMsNow) - tFault >= minSecs * 1000 && ss.length == 2 then
+        let allReady ← pods.allM fun p => c.ready p
+        if allReady then settled := true; break
+  IO.sleep 10000
+  discard <| execInDebugPod dbg ns "touch /tmp/w.stop"
+  discard <| kubectl ["uncordon", kindNode]
+  IO.sleep 15000
+  let acks := parseAcks ((← execInDebugPod dbg ns "cat /tmp/w.acks").toOption.getD "")
+  let stored := acks.filter (·.reply == "STORED")
+  let refused := acks.filter (·.reply != "STORED")
+  let podOfIp := fun (ip : String) => ((ipPod.find? (·.1 == ip)).map (·.2)).getD ip
+  -- per copy: its OWN keys against every acknowledged marker; counters apart
+  let mut missingBy : List (String × List MarkerAck) := []
+  let mut copyLines : List String := []
+  for p in pods do
+    let ip := (← getPodIp p ns).getD ""
+    let d ← c.localDump ip
+    let miss := match d with
+      | some d => stored.filter fun w => d.lookup w.key != some w.value
+      | none => stored
+    missingBy := missingBy ++ [(p, miss)]
+    let ci ← c.currItems ip
+    let st := fun (k : String) => do return ((← c.statStr ip k).getD "-")
+    copyLines := copyLines ++ [s!"{p}: keys {(d.map List.length).getD 0} (dumpable {d.isSome}), curr_items {ci}, boot {← st "reconstruction_boot_id"}, copy {← st "rocksdb_copy_id"}, history {← st "rocksdb_source_epoch"}, cursor {← st "repl_applied_lsn"}, follow {← st "repl_follow_state"}; acknowledged markers missing {(miss.map (·.key))}"]
+  IO.eprintln s!"# [{label}] masters seen {masters}; settled={settled}; writes {acks.length}: acknowledged {stored.length}, not acknowledged {refused.length} (first {(refused.take 5).map fun w => s!"{w.key}@{w.tod}={w.reply}"})"
+  for l in copyLines do IO.eprintln s!"# [{label}] {l}"
+  -- the merged timeline: every event, the first/last acknowledged marker,
+  -- every refused and every missing marker
+  let missingKeys := (missingBy.foldl (fun acc (_, ms) => acc ++ ms.map (·.key)) []).eraseDups
+  let ev ← c.stepEvents since pods
+  let wev := acks.filterMap fun w =>
+    let lack := (missingBy.filter fun (_, ms) => ms.any (·.key == w.key)).map (·.1)
+    if missingKeys.contains w.key then some (w.tod, s!"WRITER {w.key} -> {podOfIp w.target}: {w.reply}; MISSING on {lack}")
+    else if w.reply != "STORED" then some (w.tod, s!"writer {w.key} -> {podOfIp w.target}: {w.reply}")
+    else if some w.key == (stored.head?.map (·.key)) || some w.key == (stored.getLast?.map (·.key)) then some (w.tod, s!"writer {w.key} -> {podOfIp w.target}: STORED (first/last acknowledged)")
+    else none
+  let tl := (ev ++ wev).toArray.qsort (fun x y => decide (x.1 < y.1))
+  IO.eprintln s!"# [{label}] timeline ({tl.size} line(s), UTC time of day):\n{String.intercalate "\n" (tl.toList.map fun (t, l) => s!"#   {t} {l}")}"
+  if !settled then return .fail s!"[{label}] the cluster did not return to one master and two Active, Ready slaves (masters seen {masters})"
+  if stored.isEmpty then return .fail s!"[{label}] no marker was acknowledged"
+  let lost := missingBy.filter fun (_, ms) => !ms.isEmpty
+  if !lost.isEmpty then
+    return .fail s!"[{label}] KEYS: acknowledged markers missing in a copy's own keys: {lost.map fun ((p, ms) : String × List MarkerAck) => (p, ms.map fun (w : MarkerAck) => s!"{w.key}@{w.tod} via {podOfIp w.target}")}"
+  return .pass
+
+def forwardStepSuite : TestSuite := {
+  name := "forward-window-steps"
+  setup := do
+    deployCluster fwdStepCfg
+    -- S3 composes two faults (2 of 3 unavailable trips the breaker by design,
+    -- as in copy-identity): the breaker is not under test here
+    discard <| kubectlPatch "flarecluster" fwdStepCfg.name fwdStepCfg.«namespace» "{\"spec\":{\"circuitBreaker\":{\"minUnavailableToTrip\":3}}}"
+    IO.sleep 60000
+  teardown := do
+    discard <| kubectl ["uncordon", kindNode]
+    cleanupCluster fwdStepCfg
+  onFailure := dumpClusterDiagnostics fwdStepCfg.«namespace» s!"app={fwdStepCfg.operatorName}"
+  afterEach := fun i => saveFullLogs fwdStepCfg.«namespace» s!"after-test-{i}"
+  tests :=
+    let c : Ctx := { cfg := fwdStepCfg }
+    let ns := fwdStepCfg.«namespace»
+    [
+    { name := "S1 (3 replicas): markers acknowledged every ~0.2 s while a slave's flared is restarted are all in every copy's own keys once the slave is Active again"
+      run := c.forwardStep "s1" 20 false fun _ a _ => do
+        match ← c.killFlaredIn a with
+        | .error e => return .error s!"could not kill flared in {a}: {e}"
+        | .ok o => IO.eprintln s!"# [s1] kill -9 flared in {a}: {o.trim}"; return .ok () },
+    { name := "S2 (+ promotion just before): the master is drained, a slave promoted, the ex-master rejoins Proxy -> Prepare slave (staged); markers acknowledged throughout are all in every copy's own keys"
+      run := c.forwardStep "s2" 40 false fun m _ _ => do
+        match ← kubectl ["delete", "pod", m, "-n", ns, "--wait=false"] with
+        | .error e => return .error s!"could not drain {m}: {e}"
+        | .ok _ => IO.eprintln s!"# [s2] master {m} deleted (drain)"; return .ok () },
+    { name := "S3 (+ concurrent replacement): a slave replaced under the same name (Pending) and the master drained at once (copy-identity 10's fixture); markers acknowledged throughout are all in every copy's own keys"
+      run := c.forwardStep "s3" 40 true fun m a _ => do
+        if let .error e ← kubectl ["cordon", kindNode] then return .error s!"could not cordon: {e}"
+        discard <| kubectl ["delete", "pod", a, "-n", ns, "--grace-period=0", "--force", "--wait=false"]
+        let pending ← waitForCondition s!"{a} is replaced under the same name and Pending" 60 do
+          match ← kubectlGetJsonpath "pod" a ns "{.status.phase}" with
+          | .ok ph => return ph.trim == "Pending"
+          | .error _ => return false
+        if !pending then return .error s!"{a} was not left Pending"
+        match ← kubectl ["delete", "pod", m, "-n", ns, "--wait=false"] with
+        | .error e => return .error s!"could not drain {m}: {e}"
+        | .ok _ => IO.eprintln s!"# [s3] {a} replaced (Pending), master {m} deleted (drain)"; return .ok () }
+  ]
+}
+
 end FlareOperator.E2E.Tests.ContinuousReplicationLimits

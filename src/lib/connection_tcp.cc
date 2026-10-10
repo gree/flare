@@ -46,7 +46,13 @@ uint64_t monotonic_ms_now() {
 
 int connection_tcp::open() {
 	const int r = this->_open(this->get_host(), this->get_port());
-	this->_open_failed_at_ms = r < 0 ? monotonic_ms_now() : 0;
+	// only an open that TIMED OUT (a destination that does not answer SYNs)
+	// is stamped: that is the expensive failure a sender must not queue
+	// behind. A refused connect or a failed lookup is fast to retry, and a
+	// destination that comes straight back must be reached again at once
+	// (test_handler_proxy::test_proxy_state_machine_for_node_state hung on
+	// 69e789e, which stamped every failure)
+	this->_open_failed_at_ms = (r < 0 && this->_errno == ETIMEDOUT) ? monotonic_ms_now() : 0;
 	return r;
 }
 

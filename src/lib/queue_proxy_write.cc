@@ -84,7 +84,7 @@ int queue_proxy_write::run(shared_connection c) {
 #endif
 
 	// FAIL FAST (forward-window-steps 38048708017): the destination's
-	// connection is down and failed to open moments ago — count this forward
+	// connection is down and its last open TIMED OUT moments ago — count this forward
 	// as dropped now (the repair path sees it) instead of queueing it behind
 	// another bounded connect; a later forward tries to connect again.
 	if (connection_tcp* fctp = dynamic_cast<connection_tcp*>(c.get())) {
@@ -102,7 +102,7 @@ int queue_proxy_write::run(shared_connection c) {
 			}
 			static AtomicCounter fast_logged(0);
 			if (fast_logged.incr() % 100 == 1) {
-				log_err("proxy write DROPPED at once (dest=%s, op=%s, key=%s, version=%u): the connection failed to open %d ms ago or less — counted; replica diverges until it is repaired (logged 1 in 100)",
+				log_err("proxy write DROPPED at once (dest=%s, op=%s, key=%s, version=%u): the connection's last open timed out %d ms ago or less — counted; replica diverges until it is repaired (logged 1 in 100)",
 						dest, this->_op_ident.c_str(), this->_entry.key.c_str(), this->_entry.version, handler_proxy::proxy_fail_fast_window_ms);
 			}
 			return -1;

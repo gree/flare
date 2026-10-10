@@ -178,6 +178,14 @@ int op_stats::_send_stats(thread_pool* req_tp, thread_pool* other_tp, storage* s
 			_send_stat(key, it->second);
 		}
 	}
+	{
+		map<string, uint64_t> diag = stats_object->get_diag();
+		for (map<string, uint64_t>::const_iterator it = diag.begin(); it != diag.end(); it++) {
+			char key[BUFSIZ];
+			snprintf(key, sizeof(key), "diag[%s]", it->first.c_str());
+			_send_stat(key, it->second);
+		}
+	}
 	_send_stat("delete_misses"				, stats_object->get_delete_misses());
 	// Reconstruction lifecycle (see stats.h): a controller that requested a
 	// resync reads these back to tell "started and finished" from "never

@@ -72,6 +72,15 @@ protected:
 	// touched after four failed retries).
 	pthread_mutex_t _mutex_proxy_write_dropped_by_dest;
 	map<string, uint64_t> _proxy_write_dropped_by_dest;
+	// DIAGNOSTIC (copy-identity 11, forward-window-steps 38040471950: writes
+	// the master acknowledged after a rejoining replica's staged switch never
+	// reached its copy, with no drop, skip or not-stored logged): where each
+	// forward went, by name ("fwd_enqueued:<dest>", "fwd_answered:<dest>:<result>",
+	// "fwd_skipped_as_proxy:<dest>", "recv_proxied:...") — only when
+	// FLARE_TEST_FORWARD_DIAG is set (a mutex per forward otherwise).
+	bool _diag_enabled;
+	pthread_mutex_t _mutex_diag;
+	map<string, uint64_t> _diag;
 	// Reconstruction lifecycle of THIS node, counted once per request (a
 	// request is one handler_reconstruction; its internal retries are not
 	// separate requests). "started" is what a controller compares against
@@ -139,6 +148,9 @@ public:
 	inline int increment_get_misses()            { this->_get_misses.incr();return 0; };
 	inline int increment_proxy_write_dropped()   { this->_proxy_write_dropped.incr();return 0; };
 	int increment_proxy_write_dropped(const string& dest);
+	bool diag_enabled() const { return this->_diag_enabled; };
+	void diag_incr(const string& name);
+	map<string, uint64_t> get_diag();
 	inline int increment_reconstruction_started()   { this->_reconstruction_started.incr();return 0; };
 	inline int increment_reconstruction_completed() { this->_reconstruction_completed.incr();return 0; };
 	inline int increment_reconstruction_failed()    { this->_reconstruction_failed.incr();return 0; };

@@ -143,6 +143,12 @@ int queue_proxy_write::run(shared_connection c) {
 
 	this->_success = true;
 	this->_result = p->get_result();
+	if (stats_object->diag_enabled() && this->_post_proxy) {
+		if (const connection_tcp* ctp = dynamic_cast<const connection_tcp*>(c.get())) {
+			stats_object->diag_incr("fwd_answered:" + ctp->get_host() + ":" + boost::lexical_cast<string>(ctp->get_port())
+				+ ":" + boost::lexical_cast<string>(static_cast<int>(this->_result)));
+		}
+	}
 	// DIAGNOSTIC (copy-identity 11, manual run 37899958227: 10 forwarded writes
 	// acknowledged by the master never reached a replica, with no drop logged
 	// or counted): the replica ANSWERED, but not with a success — its answer

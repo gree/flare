@@ -26,6 +26,8 @@
  *
  *	$Id$
  */
+#include "app.h"
+#include <boost/lexical_cast.hpp>
 #include "handler_proxy.h"
 #include "connection_tcp.h"
 #include "queue_proxy_read.h"
@@ -114,6 +116,9 @@ int handler_proxy::run() {
 				}
 			}
 			log_notice("skipped proxy request is [ident=%s, key=%s]", q->get_ident().c_str(), key.c_str());
+			if (stats_object->diag_enabled()) {
+				stats_object->diag_incr("fwd_skipped_as_proxy:" + this->_node_server_name + ":" + boost::lexical_cast<string>(this->_node_server_port));
+			}
 		} else {
 			this->_process_queue(q);
 			if (this->_skip_proxy) {

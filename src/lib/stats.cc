@@ -78,6 +78,8 @@ stats::stats():
 		_bytes_written(0),
 		_total_thread_queue(0) {
 	pthread_mutex_init(&this->_mutex_proxy_write_dropped_by_dest, NULL);
+	pthread_mutex_init(&this->_mutex_diag, NULL);
+	this->_diag_enabled = getenv("FLARE_TEST_FORWARD_DIAG") != NULL;
 	pthread_mutex_init(&this->_mutex_reconstruction, NULL);
 	pthread_mutex_init(&this->_mutex_follow, NULL);
 	// Unique per process. The operator binds evidence and drop counters to
@@ -115,6 +117,7 @@ stats::stats():
  */
 stats::~stats() {
 	pthread_mutex_destroy(&this->_mutex_proxy_write_dropped_by_dest);
+	pthread_mutex_destroy(&this->_mutex_diag);
 	pthread_mutex_destroy(&this->_mutex_reconstruction);
 }
 // }}}
@@ -362,6 +365,22 @@ int stats::increment_proxy_write_dropped(const string& dest) {
 	this->_proxy_write_dropped_by_dest[dest]++;
 	pthread_mutex_unlock(&this->_mutex_proxy_write_dropped_by_dest);
 	return 0;
+}
+
+void stats::diag_incr(const string& name) {
+	if (!this->_diag_enabled) {
+		return;
+	}
+	pthread_mutex_lock(&this->_mutex_diag);
+	this->_diag[name]++;
+	pthread_mutex_unlock(&this->_mutex_diag);
+}
+
+map<string, uint64_t> stats::get_diag() {
+	pthread_mutex_lock(&this->_mutex_diag);
+	map<string, uint64_t> r = this->_diag;
+	pthread_mutex_unlock(&this->_mutex_diag);
+	return r;
 }
 
 map<string, uint64_t> stats::get_proxy_write_dropped_by_dest() {

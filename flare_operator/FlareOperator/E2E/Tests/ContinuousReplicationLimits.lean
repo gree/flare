@@ -6026,6 +6026,10 @@ private def fwdStepCfg : ClusterConfig := {
   storageBackend := "rocksdb"
   usePvc := true
   drainSeconds := 20
+  -- per-destination forward counters (stats diag[...]): where each forward
+  -- went — enqueued / answered (result) / skipped as proxy on the master,
+  -- received / stored on the replica (38040471950: nothing logged)
+  flaredEnv := [("FLARE_TEST_FORWARD_DIAG", "1")]
 }
 
 /-- The marker writer, run detached in the debug pod: one `set` per ~0.2 s to
@@ -6214,6 +6218,13 @@ private def Ctx.forwardStep (c : Ctx) (label : String) (minSecs : Nat) (uncordon
     copyLines := copyLines ++ [s!"{p}: keys {(d.map List.length).getD 0} (dumpable {d.isSome}), curr_items {ci}, boot {← st "reconstruction_boot_id"}, copy {← st "rocksdb_copy_id"}, history {← st "rocksdb_source_epoch"}, cursor {← st "repl_applied_lsn"}, follow {← st "repl_follow_state"}; acknowledged markers missing {(miss.map (·.key))}"]
   IO.eprintln s!"# [{label}] masters seen {masters}; settled={settled}; writes {acks.length}: acknowledged {stored.length}, not acknowledged {refused.length} (first {(refused.take 5).map fun w => s!"{w.key}@{w.tod}={w.reply}"})"
   for l in copyLines do IO.eprintln s!"# [{label}] {l}"
+  -- where the forwards went (cumulative per process; a restarted node starts at 0)
+  for p in pods do
+    let st := (← c.statsOf ((← getPodIp p ns).getD "")).getD ""
+    let diag := (st.splitOn "\n").filterMap fun l =>
+      let t := (l.replace "\r" "").trim
+      if t.startsWith "STAT diag[" then some (t.drop 5) else none
+    IO.eprintln s!"# [{label}] {p} forward diagnostics: {diag}"
   -- the merged timeline: every event, the first/last acknowledged marker,
   -- every refused and every missing marker
   let missingKeys := (missingBy.foldl (fun acc (_, ms) => acc ++ ms.map (·.key)) []).eraseDups

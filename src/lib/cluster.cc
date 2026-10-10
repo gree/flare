@@ -1867,6 +1867,9 @@ cluster::proxy_request cluster::post_proxy_write(op_proxy_write* op, bool sync) 
 			}
 			continue;
 		}
+		if (stats_object->diag_enabled()) {
+			stats_object->diag_incr("fwd_enqueued:" + it->node_key);
+		}
 	}
 #ifdef ENABLE_MYSQL_REPLICATION
 	if (this->_mysql_replication) {

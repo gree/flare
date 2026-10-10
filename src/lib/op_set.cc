@@ -26,6 +26,7 @@
  *
  *	$Id$
  */
+#include <boost/lexical_cast.hpp>
 #include "app.h"
 #include "op_set.h"
 #include "queue_proxy_write.h"
@@ -116,6 +117,9 @@ int op_set::_run_server() {
 	// pre-proxy (proxy if node is not master in request-partition)
 	shared_queue_proxy_write q;
 	cluster::proxy_request r_proxy = this->_cluster->pre_proxy_write(this, q);
+	if (stats_object->diag_enabled() && this->is_proxy_request()) {
+		stats_object->diag_incr("recv_proxied_set:pre=" + boost::lexical_cast<string>(static_cast<int>(r_proxy)));
+	}
 	if (r_proxy == cluster::proxy_request_complete) {
 		if (this->_entry.option & storage::option_noreply) {
 			// we should not access variable "q"
@@ -167,6 +171,10 @@ int op_set::_run_server() {
 		storage_access_info info = { this->_thread };
 		time_watcher_scoped_observer ob(info);
 		retcode = this->_storage->set(this->_entry, r_storage, this->_behavior);
+	}
+	if (stats_object->diag_enabled() && this->is_proxy_request()) {
+		stats_object->diag_incr("recv_proxied_set:local rc=" + boost::lexical_cast<string>(retcode)
+			+ " result=" + boost::lexical_cast<string>(static_cast<int>(r_storage)));
 	}
 	if (retcode < 0) {
 		return this->_send_result(result_server_error, "i/o error");

@@ -2,9 +2,9 @@
 # flare-restore-hook <data-dir>
 #
 # The RESTORE hook of a flared pod (docs/BACKUP_RESTORE.md), run before flared
-# starts. If <data-dir>/RESTORE names a checkpoint directory, the live copy is
-# replaced by it — but only after the restore provenance check, BEFORE anything
-# is removed:
+# starts. If <data-dir>/RESTORE names a checkpoint directory, it becomes the
+# live copy — the previous live copy is KEPT (retained, never deleted
+# automatically) — after the restore provenance check and a capacity check:
 #   * the backup must carry a partition binding (flared records the partition
 #     and routing layout a copy's data belongs to; a backup taken before
 #     bindings cannot be verified and is refused);
@@ -71,8 +71,43 @@ if [ -d "$LIVE" ] && [ -n "$(ls -A "$LIVE" 2>/dev/null)" ]; then
 	fi
 fi
 
-rm -rf "$LIVE" && cp -a "$SRC" "$LIVE" && touch "$LIVE/RESTORED" && rm -f "$M" || {
-	echo "flare-restore-hook: CRITICAL: the restore from [$SRC] failed part-way" >&2
+# CAPACITY: the backup's size plus a reserve must fit in the data dir (next
+# to the live copy, which is kept); otherwise nothing is replaced. On tmpfs
+# the data dir is memory: a restore needs room for both copies.
+RESERVE=${FLARE_RESTORE_RESERVE_BYTES:-67108864}
+NEED=$(( $(du -sk "$SRC" | awk '{print $1}') * 1024 + RESERVE ))
+FREE=$(( $(df -Pk "$D" | awk 'NR==2{print $4}') * 1024 ))
+if [ "$FREE" -lt "$NEED" ]; then
+	refuse "not enough space for the restored copy (need $NEED bytes incl. a reserve of $RESERVE, free $FREE)"
+fi
+
+if ! [ -d "$LIVE" ] || [ -z "$(ls -A "$LIVE" 2>/dev/null)" ]; then
+	# no live copy: nothing to keep
+	cp -a "$SRC" "$LIVE" && touch "$LIVE/RESTORED" && rm -f "$M" || {
+		echo "flare-restore-hook: CRITICAL: the restore from [$SRC] failed part-way (there was no live copy)" >&2
+		exit 1
+	}
+	echo "flare-restore-hook: restored from [$SRC] (binding [$SRC_B]); flared verifies it against the node map before it serves as a master"
+	exit 0
+fi
+
+# IN PLACE, KEEPING THE LIVE COPY (docs/plan-inplace-restore-retention.md):
+# the backup is copied NEXT TO the live copy and named in RESTORE.switch;
+# flared switches it in at start with the existing copy switch and keeps the
+# live copy as retained-restore-<ts> — never deleted automatically. Nothing
+# is removed here: an incomplete copy (restore-incoming-*) is left in place.
+TS=$(date +%s)
+INC="$D/restore-incoming-$TS"
+if ! cp -a "$SRC" "$INC"; then
+	refuse "the backup [$SRC] could not be copied next to the live copy (an incomplete copy may remain as $INC; it is not removed)"
+fi
+touch "$INC/RESTORED"
+UUID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || echo "$TS-$$")
+printf '%s:1\n' "$UUID" > "$INC/COPY_ID"
+sync
+mv "$INC" "$D/staging-restore-$TS" && printf 'restore-%s\n' "$TS" > "$D/RESTORE.switch.tmp" \
+	&& mv "$D/RESTORE.switch.tmp" "$D/RESTORE.switch" && sync && rm -f "$M" || {
+	echo "flare-restore-hook: CRITICAL: the restore from [$SRC] could not be prepared; the live copy is untouched" >&2
 	exit 1
 }
-echo "flare-restore-hook: restored from [$SRC] (binding [$SRC_B]); flared verifies it against the node map before it serves as a master"
+echo "flare-restore-hook: restore from [$SRC] (binding [$SRC_B]) prepared as staging-restore-$TS; flared switches it in at start and RETAINS the live copy as retained-restore-$TS"

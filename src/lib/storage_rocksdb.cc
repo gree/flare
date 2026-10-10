@@ -1520,6 +1520,12 @@ int storage_rocksdb::open() {
 			log_err("storage open refused: the copy switch could not be resolved (%s)", report.c_str());
 			return -1;
 		}
+		// an in-place restore the hook prepared: switched in with the live
+		// copy RETAINED, before the unfinished staging copies are removed
+		if (this->_apply_restore_switch() < 0) {
+			log_err("storage open refused: the prepared in-place restore could not be applied safely (nothing was removed)", 0);
+			return -1;
+		}
 		if (copy_fs::cleanup_staging(this->_data_dir) < 0) {
 			// an intent still present or UNREADABLE: nothing is removed, and
 			// the live DB is not opened over an unresolved switch (review P1)
@@ -2593,6 +2599,94 @@ string storage_rocksdb::_restore_pending_path() const {
  *	source's data with our replication metadata unset. Wipe it and come up
  *	empty; reconstruction reseeds. Returns true when it wiped.
  */
+/**
+ *	In-place restore (docs/plan-inplace-restore-retention.md, RUNBOOK
+ *	#restore-in-place): the restore hook copied the backup NEXT TO the live
+ *	copy as staging-<attempt> (with the RESTORED marker and a fresh COPY_ID)
+ *	and named it in RESTORE.switch. Here, after an interrupted switch was
+ *	resolved and before staging copies are cleaned up, the EXISTING copy
+ *	switch puts it in place: intent -> live renamed retained-<attempt> ->
+ *	staging renamed live. No retained record is written, so the replaced copy
+ *	is NEVER deleted automatically (only through a FlareCopyDiscardApproval).
+ *	Nothing is removed on any path; an inconsistent state refuses to open.
+ */
+int storage_rocksdb::_apply_restore_switch() {
+	const string marker = this->_data_dir + "/RESTORE.switch";
+	string text;
+	if (copy_fs::read_small_file_status(marker, text, NULL) != copy_fs::file_present) {
+		return 0;
+	}
+	string attempt = text;
+	while (!attempt.empty() && (attempt[attempt.size() - 1] == '\n' || attempt[attempt.size() - 1] == '\r' || attempt[attempt.size() - 1] == ' ')) {
+		attempt.erase(attempt.size() - 1);
+	}
+	bool name_ok = attempt.compare(0, 8, "restore-") == 0 && attempt.size() > 8;
+	for (size_t i = 0; i < attempt.size() && name_ok; i++) {
+		const char c = attempt[i];
+		name_ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-';
+	}
+	if (!name_ok) {
+		log_err("CRITICAL: in-place restore: RESTORE.switch names [%s], not a restore attempt — nothing is switched or removed", attempt.c_str());
+		return -1;
+	}
+	const string staging = this->_data_dir + "/staging-" + attempt;
+	const string retained = this->_data_dir + "/retained-" + attempt;
+	const string live = this->_data_dir + "/flare.rocksdb";
+	if (!copy_fs::dir_exists(staging)) {
+		if (copy_fs::dir_exists(retained)) {
+			// the switch completed before a crash removed the marker
+			unlink(marker.c_str());
+			copy_fs::fsync_dir(this->_data_dir);
+			log_notice("in-place restore %s: already switched (the replaced copy is retained as %s); marker removed", attempt.c_str(), retained.c_str());
+			return 0;
+		}
+		log_err("CRITICAL: in-place restore %s: the prepared copy %s does not exist — the live copy is kept as it is; the marker is renamed RESTORE.switch.failed", attempt.c_str(), staging.c_str());
+		rename(marker.c_str(), (marker + ".failed").c_str());
+		copy_fs::fsync_dir(this->_data_dir);
+		return 0;
+	}
+	const string new_id = copy_fs::read_copy_id(staging);
+	if (new_id.empty() || new_id == "?") {
+		log_err("CRITICAL: in-place restore %s: the prepared copy has no readable COPY_ID — nothing is switched or removed", attempt.c_str());
+		return -1;
+	}
+	if (!copy_fs::dir_exists(live)) {
+		// no live copy: nothing to retain
+		if (copy_fs::rename_durable(this->_data_dir, staging, live) < 0) {
+			log_err("CRITICAL: in-place restore %s: the prepared copy could not be put in place", attempt.c_str());
+			return -1;
+		}
+		unlink(marker.c_str());
+		copy_fs::fsync_dir(this->_data_dir);
+		log_notice("in-place restore %s: there was no live copy; the restored copy is in place", attempt.c_str());
+		return 0;
+	}
+	const string old_id = copy_fs::read_copy_id(live);
+	if (old_id.empty() || old_id == "?" || old_id == new_id) {
+		log_err("CRITICAL: in-place restore %s: the live copy's identity [%s] cannot be told from the prepared one [%s] — nothing is switched or removed (the live copy is kept)",
+			attempt.c_str(), old_id.c_str(), new_id.c_str());
+		return -1;
+	}
+	switch_intent in;
+	in.attempt = attempt;
+	in.old_id = old_id;
+	in.new_id = new_id;
+	if (copy_fs::switch_dirs(this->_data_dir, "flare.rocksdb", in) < 0) {
+		// the intent (if written) is resolved by recover() at the next open
+		log_err("CRITICAL: in-place restore %s: the switch failed part-way; the next open resolves it from what exists on disk", attempt.c_str());
+		return -1;
+	}
+	if (copy_fs::remove_intent(this->_data_dir) < 0) {
+		log_err("CRITICAL: in-place restore %s: switched, but the intent could not be removed; the next open resolves it", attempt.c_str());
+		return -1;
+	}
+	unlink(marker.c_str());
+	copy_fs::fsync_dir(this->_data_dir);
+	log_notice("in-place restore %s: the restored copy %s is live; the replaced copy %s is RETAINED as %s — never deleted automatically (FlareCopyDiscardApproval to discard it)",
+		attempt.c_str(), new_id.c_str(), old_id.c_str(), retained.c_str());
+	return 0;
+}
+
 int storage_rocksdb::_discard_incomplete_restore() {
 	const string pending = this->_restore_pending_path();
 	struct stat sb;

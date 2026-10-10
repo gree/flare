@@ -374,6 +374,9 @@ protected:
 	// 0: nothing to do or discarded cleanly. -1: a half-restored DB is on
 	// disk and could NOT be removed — the caller must not open it.
 	int _discard_incomplete_restore();
+	// in-place restore (docs/plan-inplace-restore-retention.md): the switch
+	// the restore hook prepared (RESTORE.switch naming staging-<attempt>)
+	int _apply_restore_switch();
 	void _release_snapshot_serve();
 	// marker present and the live copy is the post-quarantine empty copy (or
 	// the crash came before it was recorded)

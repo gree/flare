@@ -1827,6 +1827,97 @@ void test_switch_to_staging_retains_the_old_copy() {
 	drop_rocksdb(s, wal_master_dir);
 }
 
+// IN-PLACE RESTORE (docs/plan-inplace-restore-retention.md): the hook left
+// staging-restore-<ts> (RESTORED marker) named in RESTORE.switch; the open
+// switches it in and RETAINS the live copy, with no record (never reaped)
+namespace {
+	void write_s(const string& path, const string& text) {
+		FILE* f = fopen(path.c_str(), "w");
+		cut_assert_not_null(f);
+		fputs(text.c_str(), f);
+		fclose(f);
+	}
+	// a prepared in-place restore: staging-restore-1 holding k=restored
+	string prepare_restore(const char* dir) {
+		const string id = make_staging_copy(dir, "restore-1", "k", "restored");
+		write_s(string(dir) + "/staging-restore-1/RESTORED", "");
+		write_s(string(dir) + "/RESTORE.switch", "restore-1\n");
+		return id;
+	}
+}
+
+void test_in_place_restore_switches_in_and_retains_the_live_copy() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	storage_set_string(s, "k", "live");
+	const string old_id = s->get_copy_id();
+	drop_rocksdb_noremove(s);
+	const string d = wal_master_dir;
+	prepare_restore(wal_master_dir);
+	s = make_rocksdb(wal_master_dir);
+	cut_assert_equal_string("restored", get_value(s, "k").c_str());
+	cut_assert_true(s->is_restored_unverified());
+	cut_assert_equal_string(old_id.c_str(), read_file_s(d + "/retained-restore-1/COPY_ID").c_str());
+	cut_assert_equal_string("", read_file_s(d + "/RESTORE.switch").c_str());
+	cut_assert_equal_string("", read_file_s(d + "/switch.intent").c_str());
+	// the retained copy has no record: the reaper keeps it even when every
+	// other condition favours deletion (bound eligible, own Active)
+	string rep;
+	cut_assert_equal_int(0, s->reap_retained("any-master", "any-epoch", true, true, rep));
+	cut_assert_true(rep.find("no record") != string::npos);
+	struct stat st;
+	cut_assert_equal_int(0, stat((d + "/retained-restore-1").c_str(), &st));
+	drop_rocksdb(s, wal_master_dir);
+}
+
+void test_in_place_restore_interrupted_after_the_first_rename_completes_at_the_next_open() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	storage_set_string(s, "k", "live");
+	const string old_id = s->get_copy_id();
+	drop_rocksdb_noremove(s);
+	const string d = wal_master_dir;
+	const string new_id = prepare_restore(wal_master_dir);
+	// the state a crash leaves after live -> retained, before staging -> live
+	write_s(d + "/switch.intent", "attempt=restore-1\nold=" + old_id + "\nnew=" + new_id + "\nphase=prepared\n");
+	cut_assert_equal_int(0, rename((d + "/flare.rocksdb").c_str(), (d + "/retained-restore-1").c_str()));
+	s = make_rocksdb(wal_master_dir);
+	// recovery rolled back, then the prepared restore was switched in again
+	cut_assert_equal_string("restored", get_value(s, "k").c_str());
+	cut_assert_equal_string(old_id.c_str(), read_file_s(d + "/retained-restore-1/COPY_ID").c_str());
+	cut_assert_equal_string("", read_file_s(d + "/RESTORE.switch").c_str());
+	drop_rocksdb(s, wal_master_dir);
+}
+
+void test_in_place_restore_naming_a_missing_copy_keeps_the_live_copy() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	storage_set_string(s, "k", "live");
+	drop_rocksdb_noremove(s);
+	const string d = wal_master_dir;
+	write_s(d + "/RESTORE.switch", "restore-9\n");
+	s = make_rocksdb(wal_master_dir);
+	cut_assert_equal_string("live", get_value(s, "k").c_str());
+	cut_assert_equal_string("", read_file_s(d + "/RESTORE.switch").c_str());
+	cut_assert_equal_string("restore-9", read_file_s(d + "/RESTORE.switch.failed").c_str());
+	drop_rocksdb(s, wal_master_dir);
+}
+
+void test_in_place_restore_over_a_live_copy_without_identity_refuses_and_moves_nothing() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	storage_set_string(s, "k", "live");
+	drop_rocksdb_noremove(s);
+	const string d = wal_master_dir;
+	unlink((d + "/flare.rocksdb/COPY_ID").c_str());
+	prepare_restore(wal_master_dir);
+	storage_rocksdb* t = new storage_rocksdb(wal_master_dir, 32, 4, 16, 4, 2, 86400, 1024);
+	cut_assert_equal_int(-1, t->open());
+	delete t;
+	struct stat st;
+	cut_assert_equal_int(0, stat((d + "/staging-restore-1").c_str(), &st));
+	cut_assert_equal_int(0, stat((d + "/flare.rocksdb").c_str(), &st));
+	cut_assert_true(stat((d + "/retained-restore-1").c_str(), &st) != 0);
+	cut_assert_equal_string("restore-1", read_file_s(d + "/RESTORE.switch").c_str());
+	cut_remove_path(wal_master_dir, NULL);
+}
+
 // a crash right after live -> retained (before the staging rename and
 // before the intent phase update): the next open ROLLS BACK
 void test_switch_crash_after_first_rename_rolls_back_at_open() {

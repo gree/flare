@@ -1389,6 +1389,43 @@ private def checkRestoreProvenance (ctx : Ctx) : IO Unit := do
       && (match classify (some (base ++ s!"STAT rocksdb_partition_binding {p1n2}\r\nSTAT rocksdb_restored_unverified 1\r\nEND\r\n")) { obs with expectedBinding := none } with | .forbidden w => (w.splitOn "restore provenance").length == 1 | _ => true))
 
 open FlareOperator.AuthoritativeHistory in
+/-- authority 29 as a PURE state transition (restored map -> both pods
+    re-register -> history adoption -> classification), through the real
+    functions. It states WHEN the recovery is automatic and when it is held
+    (safe, needs a human); it is NOT a claim about why the CI failure happened. -/
+private def checkAuthority29Transitions (ctx : Ctx) : IO Unit := do
+  let crd2 : FlareClusterView := { metadata := { name := "ci" }, spec := { partitions := 1, replicas := 2 } }
+  let mk := fun (n : String) (r : FlareRole) (st : FlareState) (lmo : Int) =>
+    (s!"{n}:12121", ({ serverName := n, serverPort := 12121, role := r, state := st, partition := 0, lastMasterOf := lmo } : FlareNode))
+  let restored := ({ nodeMap := [mk "a" .Master .Active (-1), mk "b" .Slave .Active (-1)] } : FlareClusterState).rebuildPartitionMap
+  let (s1, _) := Reconciler.reconcileStep restored crd2 (.NodeAdd "a" 12121)
+  let (s2, _) := Reconciler.reconcileStep s1 crd2 (.NodeAdd "b" 12121)
+  let node := fun (st : FlareClusterState) (n : String) => st.lookupNode s!"{n}:12121"
+  check ctx "authority 29 transition: after both pods re-register the restored map has NO master; both copies are Slave/Prepare; exactly the ex-master carries lastMasterOf"
+    ((s2.nodeMap.all fun (_, n) => n.role == FlareRole.Slave && n.state == FlareState.Prepare)
+      && ((node s2 "a").map (·.lastMasterOf)) == some 0 && ((node s2 "b").map (·.lastMasterOf)) == some (-1))
+  let stats := fun (mid ep cid boot : String) =>
+    s!"STAT curr_items 30\r\nSTAT reconstruction_boot_id {boot}\r\nSTAT repl_read_source_eligible 0\r\nSTAT repl_read_source_state revalidating\r\nSTAT repl_read_source_reason the master went\r\nSTAT rocksdb_copy_identity_consistent 1\r\nSTAT rocksdb_quarantined 0\r\nSTAT rocksdb_copy_partial 0\r\nSTAT rebuild_in_flight 0\r\nSTAT rebuild_parked 0\r\nSTAT rocksdb_switch_unresolved 0\r\nSTAT rocksdb_copy_id {cid}\r\nSTAT rocksdb_master_id {mid}\r\nSTAT rocksdb_source_epoch {ep}\r\nEND\r\n"
+  let absentStore := load "uid" 1 (some none) true
+  let sa := seenOfReply "ua" (some (stats "M" "2:e" "ca:1" "ba"))
+  let sbSame := seenOfReply "ub" (some (stats "M" "2:e" "cb:1" "bb"))
+  let sbOther := seenOfReply "ub" (some (stats "M" "1:old" "cb:1" "bb"))
+  let lastMasterOf := fun (st : FlareClusterState) => match (st.nodeMap.filter fun (_, n) => n.lastMasterOf == 0).map Prod.fst with | [x] => some x | _ => none
+  let obs := fun (h : Option (String × String)) => ({ mapPrepare := true, mapActive := false, podReady := false, partitionHasMaster := false, lastMasterHistory := h } : PromotionEvidence.Observed)
+  check ctx "authority 29 transition: AUTOMATIC recovery when every copy is read and holds ONE history, with the approval: the record is adopted from the last master, and then the copies classify as promotable (lagging, same history) instead of 'not recorded'"
+    ((match establish absentStore 0 none [("a:12121", sa), ("b:12121", sbSame)] true "t" (lastMasterOf s2) with
+        | (_, .recorded 0 r _) => r.holder == "a:12121" && r.hist == ⟨"M", "2:e"⟩ | _ => false)
+      && (PromotionEvidence.classify (some (stats "M" "2:e" "cb:1" "bb")) (obs (some ("M", "2:e")))).label == "lagging (same history)"
+      && (PromotionEvidence.classify (some (stats "M" "2:e" "cb:1" "bb")) (obs none)).promotable == false)
+  check ctx "authority 29 transition: HELD (safe; a human decides) — differing histories, no approval, two last masters (a map saved while a demoted ex-master was still Prepare); HELD only until read — an unreadable copy (RBAC) is adopted once it is read again"
+    ((match establish absentStore 0 none [("a:12121", sa), ("b:12121", sbOther)] true "t" (lastMasterOf s2) with | (_, .held 0 _) => true | _ => false)
+      && (establish absentStore 0 none [("a:12121", sa), ("b:12121", sbSame)] false "t" (lastMasterOf s2)).2 == .none
+      && (let twoLast := ({ nodeMap := [mk "a" .Slave .Prepare 0, mk "b" .Slave .Prepare 0] } : FlareClusterState)
+          match establish absentStore 0 none [("a:12121", sa), ("b:12121", sbSame)] true "t" (lastMasterOf twoLast) with | (_, .held 0 _) => true | _ => false)
+      && (match establish absentStore 0 none [("a:12121", sa), ("b:12121", .unreadable)] true "t" (lastMasterOf s2) with | (_, .held 0 _) => true | _ => false)
+      && (match establish absentStore 0 none [("a:12121", sa), ("b:12121", sbSame)] true "t" (lastMasterOf s2) with | (_, .recorded 0 _ _) => true | _ => false))
+
+open FlareOperator.AuthoritativeHistory in
 private def checkAuthoritativeHistory (ctx : Ctx) : IO Unit := do
   let bM : Binding := ⟨"uid-m", "boot-m", "u1:3"⟩
   let bS : Binding := ⟨"uid-s", "boot-s", "u2:1"⟩
@@ -1931,6 +1968,7 @@ def run : IO UInt32 := do
   checkSourceEligibility ctx
   checkRebuildConcurrency ctx
   checkAuthoritativeHistory ctx
+  checkAuthority29Transitions ctx
   checkRestoreProvenance ctx
   checkCopyDiscardApproval ctx
   checkPromotionEvidence ctx

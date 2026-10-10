@@ -5900,4 +5900,92 @@ def forwardWindowSuite : TestSuite := {
 }
 
 
+/-- copy-identity 11 on the WAL INCREMENTAL path (manual run 37908698742: the
+    killed replica caught up by WAL incremental sync and was promoted holding
+    70 keys with a marker missing). A controlled replay with key-level
+    evidence at every step — counters and keys are judged SEPARATELY (they
+    disagreed in that run). log_info is compiled out, so the evidence is the
+    copies' own keys (dump), their curr_items, the replica's cursor and the
+    catch-up path its log names. -/
+private def fwdWalCfg : ClusterConfig := { fwdWindowCfg with name := "fwd-wal", «namespace» := "flare-fwd-wal", debugPod := "debug-fwd-wal", flaredEnv := [] }
+
+/-- (keys missing on the replica, values that differ, replica counter, replica
+    dump size, master counter, master dump size) — keys and counters apart. -/
+private def compareCopies (c : Ctx) (mIp rIp : String) : IO (Option (List String × List String × Nat × Nat × Nat × Nat)) := do
+  let some md ← c.localDump mIp | return none
+  let some rd ← c.localDump rIp | return none
+  let missing := (md.map Prod.fst).filter fun k => (rd.lookup k).isNone
+  let wrong := md.filterMap fun (k, v) => match rd.lookup k with
+    | some v2 => if v2 != v then some k else none
+    | none => none
+  return some (missing, wrong, (← c.currItems rIp), rd.length, (← c.currItems mIp), md.length)
+
+def forwardWalSuite : TestSuite := {
+  name := "forward-window-wal"
+  setup := do
+    deployCluster fwdWalCfg
+    IO.sleep 40000
+  teardown := cleanupCluster fwdWalCfg
+  onFailure := dumpClusterDiagnostics fwdWalCfg.«namespace» s!"app={fwdWalCfg.operatorName}"
+  afterEach := fun i => saveFullLogs fwdWalCfg.«namespace» s!"after-test-{i}"
+  tests :=
+    let c : Ctx := { cfg := fwdWalCfg }
+    let ns := fwdWalCfg.«namespace»
+    let restartAndCompare := fun (label : String) (killAfter : Option Nat) => do
+      match ← c.pair with
+      | .error e => return TestResult.fail s!"precondition: {e}"
+      | .ok (m, mIp, r, _) =>
+        let base := (List.range 30).map fun i => (s!"{label}b_{i}", s!"vb_{i}")
+        for (k, v) in base do
+          if !(← memcachedSet fwdWalCfg.debugPod ns mIp fwdWalCfg.flarePort k v) then return .fail s!"precondition: {k} not acknowledged"
+        let synced ← waitForCondition "the replica holds every base key" 120 do
+          match ← compareCopies c mIp ((← getPodIp r ns).getD "") with
+          | some (miss, wrong, _, _, _, _) => return miss.isEmpty && wrong.isEmpty
+          | none => return false
+        if !synced then return .fail "precondition: the replica did not converge on the base keys"
+        let markers := (List.range 10).map fun i => (s!"{label}m_{i}", s!"vm_{i}_{label}")
+        let since ← utcNow
+        let mut acked := 0
+        let mut killedAt : Option Nat := none
+        for (i, (k, v)) in markers.enum do
+          if killAfter == some i then
+            match ← c.killFlaredIn r with
+            | .error e => return .fail s!"could not restart {r}: {e}"
+            | .ok _ => killedAt := some i
+          if ← memcachedSet fwdWalCfg.debugPod ns mIp fwdWalCfg.flarePort k v then acked := acked + 1
+        if acked != markers.length then return .fail s!"precondition: the master acknowledged {acked}/{markers.length} markers"
+        let rIp0 := (← getPodIp r ns).getD ""
+        let before ← compareCopies c mIp rIp0
+        let cursor0 ← c.statStr rIp0 "repl_applied_lsn"
+        IO.eprintln s!"# {label} before the restart: (missing, wrong, replica counter, replica keys, master counter, master keys) = {before}; replica cursor {cursor0}"
+        if killedAt.isNone then
+          match ← c.killFlaredIn r with
+          | .error e => return .fail s!"could not restart {r}: {e}"
+          | .ok _ => pure ()
+        let active ← waitForCondition "the restarted replica is Active again" 240 do
+          return (← c.p0Roles).2.contains r
+        IO.sleep 10000
+        let rIp := (← getPodIp r ns).getD ""
+        let after ← compareCopies c mIp rIp
+        let cursor1 ← c.statStr rIp "repl_applied_lsn"
+        let flog ← c.flaredLogSince r since
+        let path := if containsSubstr flog "via WAL incremental sync completed" then "WAL incremental sync"
+          else if containsSubstr flog "staged rebuild DONE" then "staged rebuild" else "unknown"
+        IO.eprintln s!"# {label} after the restart (killed after marker {killedAt.getD 10}): Active={active}; catch-up path {path}; (missing, wrong, replica counter, replica keys, master counter, master keys) = {after}; replica cursor {cursor0} -> {cursor1}"
+        match after with
+        | none => return .fail "the copies could not be dumped after the restart"
+        | some (miss, wrong, rc, rk, mc, mk) =>
+          if !miss.isEmpty || !wrong.isEmpty then
+            return .fail s!"KEYS: the replica lacks {miss} / holds other values for {wrong} after its restart ({path}); counters r={rc} m={mc}, keys r={rk} m={mk}"
+          if rc != rk || mc != mk then
+            return .fail s!"COUNTERS only: every key and value matches, but curr_items disagrees with the keys (replica {rc} vs {rk}, master {mc} vs {mk})"
+          return .pass
+    [
+    { name := "WAL incremental path, restart AFTER the writes: every key and value the master acknowledged is on the restarted replica, and each copy's curr_items equals its keys (keys and counters judged apart)"
+      run := restartAndCompare "t1" none },
+    { name := "WAL incremental path, restart DURING the writes (killed after the 3rd of 10): every acknowledged key and value is on the replica once it is Active again; counters equal keys"
+      run := restartAndCompare "t2" (some 3) }
+  ]
+}
+
 end FlareOperator.E2E.Tests.ContinuousReplicationLimits

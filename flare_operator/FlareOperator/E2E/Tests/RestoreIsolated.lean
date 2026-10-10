@@ -110,6 +110,24 @@ private def localCopy : IO String := do
   let pid ← IO.Process.getPID
   return s!"/tmp/flare-rst-{pid}"
 
+/-- The pod's UID ("" when it cannot be read). -/
+private def podUidOf (pod ns : String) : IO String := do
+  return ((← kubectlGetJsonpath "pod" pod ns "{.metadata.uid}").toOption.getD "").trim
+
+/-- Delete `pod` and wait until a NEW pod (another UID) under its name answers
+    stats — the old pod answers until it is gone, so "answers stats" alone
+    passed before the restart happened (restore-isolated 6, run 38066520694). -/
+private def restartAndWait (c : ClusterConfig) (pod : String) (secs : Nat) : IO Bool := do
+  let ns := c.«namespace»
+  let uid0 ← podUidOf pod ns
+  discard <| kubectl ["delete", "pod", pod, "-n", ns, "--wait=false"]
+  waitForCondition s!"{pod} replaced by a new pod that answers stats" secs do
+    let uid ← podUidOf pod ns
+    if uid.isEmpty || uid == uid0 then return false
+    match ← getPodIp pod ns with
+    | some ip => return (← statOf c ip "curr_items").isSome
+    | none => return false
+
 /-- Seed one PVC of `c` with the source checkpoint through a helper pod.
     `mode`: "restore" (RESTORE marker: the restore hook swaps it in and marks
     it RESTORED), "incomplete" (the same, one SST removed), "identity" (placed
@@ -475,12 +493,8 @@ def suite : TestSuite := {
         | .ok _ => pure ()
         if let .error e ← kubectl ["exec", "-n", ns2, p0, "-c", "flared", "--", "sh", "-c", s!"echo {dataDir}/backups/other-p1 > {dataDir}/RESTORE"] then
           return .fail s!"precondition: writing the RESTORE marker: {e}"
-        discard <| kubectl ["delete", "pod", p0, "-n", ns2, "--wait=false"]
-        let back ← waitForCondition s!"{p0} is back and answers stats" 240 do
-          match ← getPodIp p0 ns2 with
-          | some ip => return (← statOf src2Cfg ip "curr_items").isSome
-          | none => return false
-        if !back then return .fail s!"{p0} did not come back after the refused restore"
+        let back ← restartAndWait src2Cfg p0 240
+        if !back then return .fail s!"{p0} was not replaced by a new pod answering stats after the refused restore"
         let ip := (← getPodIp p0 ns2).getD ""
         let after := (← statOf src2Cfg ip "curr_items").bind String.toNat?
         let bound ← statOf src2Cfg ip "rocksdb_partition_binding"
@@ -501,6 +515,12 @@ def suite : TestSuite := {
     { name := "[product RESTORE hook, in place, ACCEPTED] P0's own backup restored over its live copy: the restored copy is live (the backup's items, a new identity), the replaced copy is KEPT as retained-restore-* (its identity), not reaped, and the restored copy becomes verified and serves writes"
       run := do
         let ns2 := src2Cfg.«namespace»
+        -- the previous test restarted P0's pod: wait until it is P0's master again
+        let mastered ← waitForCondition "a P0 master answering stats in the two-partition source" 300 do
+          match findMasterPod (← nodeView src2Cfg) 0 with
+          | some p => return (← statOf src2Cfg ((← getPodIp p ns2).getD "") "curr_items").isSome
+          | none => return false
+        if !mastered then return .fail "precondition: no P0 master in the two-partition source within 300 s"
         let entries ← nodeView src2Cfg
         let some p0 := findMasterPod entries 0 | return .fail "precondition: no P0 master in the two-partition source"
         let p0Ip := (← getPodIp p0 ns2).getD ""
@@ -515,12 +535,8 @@ def suite : TestSuite := {
         if moved <= atBackup then return .fail s!"precondition: no extra write landed on P0 ({atBackup} -> {moved})"
         if let .error e ← kubectl ["exec", "-n", ns2, p0, "-c", "flared", "--", "sh", "-c", s!"echo {dataDir}/backups/inplace-p0 > {dataDir}/RESTORE"] then
           return .fail s!"precondition: writing the RESTORE marker: {e}"
-        discard <| kubectl ["delete", "pod", p0, "-n", ns2, "--wait=false"]
-        let back ← waitForCondition s!"{p0} is back and answers stats" 300 do
-          match ← getPodIp p0 ns2 with
-          | some ip => return (← statOf src2Cfg ip "curr_items").isSome
-          | none => return false
-        if !back then return .fail s!"{p0} did not come back after the in-place restore"
+        let back ← restartAndWait src2Cfg p0 300
+        if !back then return .fail s!"{p0} was not replaced by a new pod answering stats after the in-place restore"
         let ip := (← getPodIp p0 ns2).getD ""
         let after := (← statOf src2Cfg ip "curr_items").bind String.toNat?
         let newId := ((← statOf src2Cfg ip "rocksdb_copy_id").getD "").trim

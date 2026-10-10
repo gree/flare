@@ -126,3 +126,15 @@ Nothing below is independently reviewed.
 | F6 | `4e229dd` | masterless refill prefers the recorded history holder within a tier | history-masterless (c) failed on `91ba62b` (38040348416) | 38043914126, 38060663630: pass | — |
 | R1 | `e70043a` `cb5bb44` `9655fbd` `99c9c3c` `ef58309` | IN-PLACE restore keeps the live copy: capacity check, prepared next to the live copy, switched in at open by the existing copy switch, replaced copy retained without a record (never reaped) | the old hook replaced the live copy (`rm -rf` + `cp -a`): no runnable control | hook tests 13 (CI, none skipped); C++ 4 (38062701272); E2E restore-isolated 38069285176: refusal (6) after a REAL restart, accepted (7): 25 backup items live, new identity, retained copy with the old identity, kept 60 s, verified, write acknowledged | open decisions (old backups, auto-deletion, tmpfs capacity policy, rollback authority); a live copy without a readable COPY_ID refuses to open (manual procedure) |
 | T1 | `ef58309` | restore-isolated waits for a NEW pod UID after deleting a pod | test 6 passed on the OLD pod (38066520694) — earlier passes of test 6 are not evidence | 38069285176: pass with a real restart | — |
+
+### 6.1 Full candidate CI on `3123bd5` — NOT green
+
+- nix-linux 38072344816: passed (both backends).
+- E2E full matrix 38072338837: 13 of 14 groups passed; `repair` failed 2 of 17:
+
+| Test | Failure | Cause (from logs) | Fix | Residual |
+|---|---|---|---|---|
+| replica-repair 4 (SAF-05 gated) | drops 6 → 7 "after the heal" | test baseline race: gated_2's last connect 18:02:52.338 (rule in place), rule removed 52.38, drop counted 52.838; no later drop; repair completed | `b9ddced`: baseline after the counter is unchanged 10 s | that F1 made the race visible is likely, not established |
+| continuous-replication-upgrade 9 (rc56 → build) | no P0 master after the roll | approval first evaluated after nodes-1's roll began → never `untracked`; mixed copies HELD; master back empty (tmpfs) → promotion ABORTED (history absent) | `77f9b3b`: test waits for `part 0 untracked`; RUNBOOK #history-record roll gate + stop + recovery | why it passed on 28761ff not established (no pod logs); the recovery (#history-held-masterless) not exercised for this state; a real rc56 upgrade rolled early has the same outcome |
+
+Targeted re-run 38078770419 (`77f9b3b`) pending; a new candidate needs another full run.

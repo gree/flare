@@ -150,6 +150,29 @@ private def droppedByMaster (masterIp : String) : IO Nat := do
 private def opLog (tail : Nat := 600) : IO String :=
   kubectlLogsLabel s!"app={cfg.operatorName}" cfg.«namespace» tail
 
+/-- The master's drop counter once it has stopped moving after `heal`: a
+    forward of the burst can still be inside its last connect attempt when the
+    rule is removed (one open is bounded by ~2 x 3 s + 0.5 s), and its drop
+    lands after the heal. CI 38072338837 (3123bd5): gated_2's last connect was
+    refused at 18:02:52.338, the rule was removed at 52.38, the drop was
+    counted at 52.838 — after the baseline was read (6), so "the repair cost a
+    drop" (7) blamed the repair for the burst's own drop. Unchanged for 10 s
+    (longer than one open), at most 60 s. -/
+private def settledDrops (masterIp : String) : IO Nat := do
+  let mut last ← droppedByMaster masterIp
+  let mut stableMs := 0
+  let mut waitedMs := 0
+  while stableMs < 10000 && waitedMs < 60000 do
+    IO.sleep 2000
+    waitedMs := waitedMs + 2000
+    let now ← droppedByMaster masterIp
+    if now == last then stableMs := stableMs + 2000 else
+      IO.eprintln s!"# drop counter still moving after the heal: {last} → {now}"
+      last := now
+      stableMs := 0
+  if stableMs < 10000 then IO.eprintln s!"# drop counter did not settle within 60 s (last {last})"
+  return last
+
 /-- One operator metric value (counters render as integers). -/
 private def operatorMetric (name : String) : IO (Option Nat) := do
   let ips ← getPodIps s!"app={cfg.operatorName}" cfg.«namespace»
@@ -459,7 +482,7 @@ def suite : TestSuite := {
             heal mIp sIp
             if burst.gapWhileCut == 0 then
               return .fail "the gated burst left no local gap on the slave: nothing to hold"
-            let dAfterHeal ← droppedByMaster mIp
+            let dAfterHeal ← settledDrops mIp
             let held ← waitForCondition "operator HOLDS the repair (gate closed)" 150 do
               return containsSubstr (← opLog) "replica repair HELD"
             if !held then

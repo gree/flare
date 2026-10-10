@@ -6345,10 +6345,14 @@ private def Ctx.masterlessFixture (c : Ctx) (label : String) (edit : String → 
 /-- A HELD masterless partition: CRITICAL with the reason and the RUNBOOK
     anchor, no record, no master — for `secs` after the hold is first seen. -/
 private def Ctx.expectMasterlessHold (c : Ctx) (label : String) (since : String) (needle : String) : IO (Except String String) := do
-  let seenHold ← waitForCondition s!"[{label}] the operator reports the masterless hold" 240 do
-    return containsSubstr (← c.opLogSince since) "has NO master and its history is HELD"
-  let log ← c.opLogSince since
-  let line := ((log.splitOn "\n").filter fun l => containsSubstr l "has NO master and its history is HELD").getLast?.getD ""
+  -- the hold can first be 'not every copy observed' while a restarted copy
+  -- is still unreadable (run 38037626448): wait for THIS case's reason
+  let holdLines := fun (log : String) => (log.splitOn "\n").filter fun l => containsSubstr l "has NO master and its history is HELD"
+  let seenHold ← waitForCondition s!"[{label}] the operator reports the masterless hold naming '{needle}'" 300 do
+    return (holdLines (← c.opLogSince since)).any (containsSubstr · needle)
+  let all := holdLines (← c.opLogSince since)
+  IO.eprintln s!"# [{label}] hold reasons in order: {(all.map fun l => ((l.splitOn "is HELD: ").getD 1 "").takeWhile (· != '.')).eraseDups}"
+  let line := ((all.filter (containsSubstr · needle)).getLast?).getD (all.getLast?.getD "")
   IO.eprintln s!"# [{label}] hold line: {line}"
   if !seenHold then return .error s!"[{label}] no masterless-hold CRITICAL was logged (record now: {← historyText c})"
   if !containsSubstr line needle then return .error s!"[{label}] the hold reason does not name '{needle}': {line}"

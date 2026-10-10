@@ -1664,9 +1664,16 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
           IO.eprintln s!"[flare-operator] pinned successor {k} dropped: its pod is no longer the validated incarnation ({sid} -> {nowId})"
       pinnedSuccessorRef.set keptPins
       let ranked := pinnedFirst ++ cls.ranked.filter (!pinnedFirst.contains ·)
+      let nPartsHolders ← desiredPartitionsRef.get
       pure (.PodListResponse podKeys (Bridge.podZones pods nodeZones) termKeys dataKeys unhealthyKeys heldKeys
               (cls.unfit ++ (notReadyActive ++ sourceIneligible).filter (!cls.unfit.contains ·)) cls.unproven ranked knownEmpty
-              ((← promotionEvidenceRef.get).filterMap fun (k, c, _) => if c.promotable then none else some k))
+              ((← promotionEvidenceRef.get).filterMap fun (k, c, _) => if c.promotable then none else some k)
+              (match ← historyStoreRef.get with
+                | some st => (List.range nPartsHolders).filterMap fun p =>
+                    match st.part p with
+                    | some (.known r _) => some (p, r.holder)
+                    | _ => none
+                | none => []))
   | .PatchService =>
     -- Service patching happens in executeEffects (PatchService effect)
     -- This just signals completion

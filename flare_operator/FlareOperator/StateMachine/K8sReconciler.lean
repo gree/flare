@@ -81,7 +81,7 @@ inductive FlareReconcileStep where
 /-- Responses from the K8s API server. -/
 inductive K8sResponse where
   | CRDResponse (crd : Option FlareClusterView)
-  | PodListResponse (pods : List String) (zones : List (String × String)) (terminating : List String) (dataBearing : List String) (unhealthy : List String) (repairHeld : List String) (followUnfit : List String) (followUnproven : List String) (followRanked : List String) (knownEmpty : List String) (promotionBlocked : List String)
+  | PodListResponse (pods : List String) (zones : List (String × String)) (terminating : List String) (dataBearing : List String) (unhealthy : List String) (repairHeld : List String) (followUnfit : List String) (followUnproven : List String) (followRanked : List String) (knownEmpty : List String) (promotionBlocked : List String) (historyHolders : List (Nat × String))
   | PatchResponse (success : Bool)
   | NoResponse
   deriving Repr
@@ -180,6 +180,11 @@ structure FlareReconcileState where
       ANY tier (the commit would abort them; choosing them only starves the
       partition of a promotable copy). Empty on a pass that read nothing. -/
   promotionBlockedKeys : List String := []
+  /-- Each partition's RECORDED history holder (the authoritative history's
+      copy): among the candidates of one refill tier it is preferred — a
+      person's choice (RUNBOOK #history-held-masterless) or the adopted last
+      master must not lose to map order (history-masterless (c), 38040348416). -/
+  historyHolders : List (Nat × String) := []
   /-- Partitions whose wait for a returning ex-master is OVER (masterless for
       longer than FLARE_FOLLOW_FAILOVER_WAIT_SECONDS, set by Main). In every
       other partition the refill's data-bearing last resort does not crown a
@@ -1243,9 +1248,15 @@ def promoteMasterlessPartition (state : FlareClusterState) (pIdx : Nat)
     (livePodKeys : List String) (standbyKeys : List String := [])
     (dataBearingKeys : List String := []) (excludedKeys : List String := [])
     (holdUnfit : Bool := false) (knownEmptyKeys : List String := [])
-    (blockedKeys : List String := []) : FlareClusterState :=
+    (blockedKeys : List String := []) (preferKey : Option String := none) : FlareClusterState :=
   if FlareOperator.Reconciler.hasMasterForPartition state pIdx then state
   else
+    -- within ONE tier, the recorded history holder first (it still has to
+    -- satisfy that tier's own condition); then map order as before
+    let pick := fun (pred : String × FlareNode → Bool) =>
+      (match preferKey with
+        | some k => state.nodeMap.find? (fun (kv : String × FlareNode) => kv.1 == k && pred kv)
+        | none => none).orElse (fun _ => state.nodeMap.find? pred)
     -- SAF-10c: `excludedKeys` are followers KNOWN to hold an unusable copy
     -- (StateMachine/FollowEvidence); they are not "in sync" whatever their
     -- map state says. The data-bearing last-resort tiers below are left as
@@ -1262,9 +1273,9 @@ def promoteMasterlessPartition (state : FlareClusterState) (pIdx : Nat)
     let candidate :=
       -- standby slaves are the refill choice of LAST resort (availability
       -- still wins over locality when only standby copies survive).
-      ((state.nodeMap.find? (fun kv => isActiveSlave kv && !standbyKeys.contains kv.1)).orElse
-        (fun _ => state.nodeMap.find? isActiveSlave)).orElse
-      (fun _ => state.nodeMap.find? (fun (key, n) =>
+      ((pick (fun kv => isActiveSlave kv && !standbyKeys.contains kv.1)).orElse
+        (fun _ => pick isActiveSlave)).orElse
+      (fun _ => pick (fun (key, n) =>
         n.lastMasterOf == Int.ofNat pIdx && n.state != FlareState.Down
           && livePodKeys.contains key && !blockedKeys.contains key
           -- EMPTY-MASTER GUARD: the lastMasterOf holder is only "the newest
@@ -1288,7 +1299,7 @@ def promoteMasterlessPartition (state : FlareClusterState) (pIdx : Nat)
       -- when the ex-master is back WITHOUT data (nothing left to wait for)
       -- or when Main's wait budget for the partition runs out
       -- (`holdUnfit` false); either way the crowning is logged NOT LOSS-FREE.
-      |>.orElse (fun _ => state.nodeMap.find? (fun (key, n) =>
+      |>.orElse (fun _ => pick (fun (key, n) =>
         (n.partition == Int.ofNat pIdx || n.lastMasterOf == Int.ofNat pIdx)
           && n.state != FlareState.Down && n.role != FlareRole.Master
           && livePodKeys.contains key && dataBearingKeys.contains key
@@ -1305,7 +1316,7 @@ def promoteMasterlessPartition (state : FlareClusterState) (pIdx : Nat)
       -- evidence only (read empty, not blocked): an unread copy is not empty.
       |>.orElse (fun _ =>
         if partitionHasData || !exMasterBackEmpty state pIdx livePodKeys knownEmptyKeys then none
-        else state.nodeMap.find? (fun (key, n) =>
+        else pick (fun (key, n) =>
           n.role == FlareRole.Slave && n.state == FlareState.Active
             && n.partition == Int.ofNat pIdx && livePodKeys.contains key
             && knownEmptyKeys.contains key && !blockedKeys.contains key))
@@ -1321,10 +1332,11 @@ def promoteMasterlessPartitions (state : FlareClusterState) (crd : FlareClusterV
     (livePodKeys : List String) (standbyKeys : List String := [])
     (dataBearingKeys : List String := []) (excludedKeys : List String := [])
     (holdEnabled : Bool := false) (holdExpiredParts : List Nat := [])
-    (knownEmptyKeys : List String := []) (blockedKeys : List String := []) : FlareClusterState :=
+    (knownEmptyKeys : List String := []) (blockedKeys : List String := [])
+    (holders : List (Nat × String) := []) : FlareClusterState :=
   (List.range crd.spec.partitions).foldl
     (fun s pIdx => promoteMasterlessPartition s pIdx livePodKeys standbyKeys dataBearingKeys excludedKeys
-      (holdEnabled && !holdExpiredParts.contains pIdx) knownEmptyKeys blockedKeys) state
+      (holdEnabled && !holdExpiredParts.contains pIdx) knownEmptyKeys blockedKeys (holders.lookup pIdx)) state
 
 /-- Partitions left masterless because the refill held an unfit follower
     (see `promoteMasterlessPartition`): (partition, held follower keys). -/
@@ -1462,7 +1474,7 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
 
   | .AfterListPods =>
     match resp with
-    | .PodListResponse pods zones terminating dataBearing unhealthy repairHeld followUnfit followUnproven followRanked knownEmpty promotionBlocked =>
+    | .PodListResponse pods zones terminating dataBearing unhealthy repairHeld followUnfit followUnproven followRanked knownEmpty promotionBlocked historyHolders =>
       -- CRITICAL: Check grace period (Main.lean:355-359)
       if s.graceCycles > 0 then
         -- Still in startup grace period - skip dead node detection AND drain
@@ -1477,6 +1489,7 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
                   repairHeldKeys := repairHeld,
                   followUnfitKeys := followUnfit,
                   promotionBlockedKeys := promotionBlocked,
+                  historyHolders := historyHolders,
                   followUnprovenKeys := followUnproven,
                   followRankedKeys := followRanked,
                   drainNodeKeys := [],
@@ -1501,6 +1514,7 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
                   repairHeldKeys := repairHeld,
                   followUnfitKeys := followUnfit,
                   promotionBlockedKeys := promotionBlocked,
+                  historyHolders := historyHolders,
                   followUnprovenKeys := followUnproven,
                   followRankedKeys := followRanked,
                   drainNodeKeys := drainKeys,
@@ -1637,7 +1651,7 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
       -- replicas re-registered as Slave/Prepare, so no proxy exists for
       -- autoAssign and no Down entry exists for failover).
       let stateWithMasters := promoteMasterlessPartitions stateWithProxies crd s.livePodKeys s.standbyNodeKeys s.dataBearingKeys s.followUnfitKeys
-        s.followHoldEnabled s.followHoldExpiredParts s.knownEmptyKeys s.promotionBlockedKeys
+        s.followHoldEnabled s.followHoldExpiredParts s.knownEmptyKeys s.promotionBlockedKeys s.historyHolders
       let holdEffects := refillHoldEffects stateWithProxies stateWithMasters crd s
       -- a partition still masterless after the refill: what the refill saw
       -- for each of its copies (CI 807ae59, history (5): a replica on the
@@ -1780,7 +1794,7 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
         if failoverKeys.isEmpty then clusterState
         else handleFailoverWithPromotion clusterState.rebuildPartitionMap failoverKeys
       let recovered := promoteMasterlessPartitions afterFailover crd s.livePodKeys [] s.dataBearingKeys s.followUnfitKeys
-        s.followHoldEnabled s.followHoldExpiredParts s.knownEmptyKeys s.promotionBlockedKeys
+        s.followHoldEnabled s.followHoldExpiredParts s.knownEmptyKeys s.promotionBlockedKeys s.historyHolders
       let refilled := (List.range crd.spec.partitions).filter (fun p =>
         !FlareOperator.Reconciler.hasMasterForPartition afterFailover p
           && FlareOperator.Reconciler.hasMasterForPartition recovered p)
@@ -1874,12 +1888,12 @@ theorem flareReconcileStep_decreases_measure (resp : K8sResponse)
       cases crd with
       | some c => left; simp [flareReconcileCore, h, flareReconcileMeasure]
       | none => right; simp [flareReconcileCore, h, flareReconcileTerminalBool]
-    | PodListResponse _ _ _ _ _ _ _ _ _ _ _ => right; simp [flareReconcileCore, h, flareReconcileTerminalBool]
+    | PodListResponse _ _ _ _ _ _ _ _ _ _ _ _ => right; simp [flareReconcileCore, h, flareReconcileTerminalBool]
     | PatchResponse _ => right; simp [flareReconcileCore, h, flareReconcileTerminalBool]
     | NoResponse => right; simp [flareReconcileCore, h, flareReconcileTerminalBool]
   | AfterListPods =>
     cases resp with
-    | PodListResponse pods zones terminating dataBearing unhealthy repairHeld followUnfit followUnproven followRanked knownEmpty promotionBlocked =>
+    | PodListResponse pods zones terminating dataBearing unhealthy repairHeld followUnfit followUnproven followRanked knownEmpty promotionBlocked historyHolders =>
       simp only [flareReconcileCore, h]
       split <;> (left; simp [flareReconcileMeasure])
     | CRDResponse _ => right; simp [flareReconcileCore, h, flareReconcileTerminalBool]

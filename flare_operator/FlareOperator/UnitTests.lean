@@ -962,6 +962,15 @@ def checkFailoverLagHold (ctx : Ctx) : IO Unit := do
   check ctx "refill (CI 37777862552 pvc-survival): a key whose evidence is not promotable is never chosen in ANY tier; the refill takes the next candidate instead of starving the partition"
     (masterOf (K8sReconciler.promoteMasterlessPartition holdState 0 ["f"] [] ["f"] [] false [] ["f"]) == none
       && masterOf (K8sReconciler.promoteMasterlessPartition holdState 0 ["f"] [] ["f"] [] false [] []) == some "f")
+  -- history-masterless (c), 38040348416: two copies marked lastMasterOf, the
+  -- record's holder (a person's choice) is "b", map order puts "a" first
+  let twoLast : FlareClusterState :=
+    ({ holdState with nodeMap := [("a", holdNode .Slave .Prepare 0 "a" 0), ("b", holdNode .Slave .Prepare 0 "b" 0)] }).rebuildPartitionMap
+  check ctx "refill: within a tier the RECORDED history holder is preferred over map order; without a holder the order is as before; a holder the tier refuses (blocked) is not chosen for being the holder"
+    (masterOf (K8sReconciler.promoteMasterlessPartition twoLast 0 ["a", "b"] [] ["a", "b"] [] false [] [] (some "b")) == some "b"
+      && masterOf (K8sReconciler.promoteMasterlessPartition twoLast 0 ["a", "b"] [] ["a", "b"] [] false [] []) == some "a"
+      && masterOf (K8sReconciler.promoteMasterlessPartition twoLast 0 ["a", "b"] [] ["a", "b"] [] false [] ["b"] (some "b")) == some "a"
+      && masterOf (K8sReconciler.promoteMasterlessPartitions twoLast activationCrd ["a", "b"] [] ["a", "b"] [] false [] [] [] [(0, "b")]) == some "b")
   check ctx "the held partition is reported with its follower"
     (K8sReconciler.heldForExMaster (K8sReconciler.promoteMasterlessPartition holdState 0 ["f"] [] ["f"] ["f"] true)
       activationCrd ["f"] ["f"] ["f"] == [(0, ["f"])])

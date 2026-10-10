@@ -30,9 +30,16 @@ stated. Production / pf-dev: no change, none approved.
 
 ### 2.2 The queue after a failed open
 - `queue_proxy_write::run` (src/lib/queue_proxy_write.cc): if the connection is
-  down AND its last `open()` failed less than 2 s ago
-  (`connection_tcp::open_failed_within`, stamped in `connection_tcp::open()`),
-  the forward is dropped at once instead of trying another connect.
+  down AND its last `open()` **timed out** less than 2 s ago
+  (`connection_tcp::open_failed_within`, stamped in `connection_tcp::open()`
+  only when `_errno == ETIMEDOUT`), the forward is dropped at once instead of
+  queueing behind another connect that would time out.
+- A **refused** connect or a **failed lookup** does NOT arm it: those fail fast
+  by themselves, and a destination that comes straight back must be reached
+  again at once. The first version (`69e789e`) armed it on every failure and
+  hung `test_handler_proxy::test_proxy_state_machine_for_node_state` (node
+  down → back → the next forward must reconnect): nix-linux 38054441657 timed
+  out; reproduced locally; fixed in `aa4f0f4`.
 - Otherwise the existing loop: up to `max_retry` (4) attempts, each re-opening a
   down connection (each open bounded as above) → worst case ~26 s for one
   forward, after which the forwards behind it within 2 s of that failure drop
@@ -74,7 +81,7 @@ stated. Production / pf-dev: no change, none approved.
 
 | Test | On the fix | On the old behaviour (control) |
 |---|---|---|
-| C++ `test_handler_proxy::test_proxy_write_to_an_unanswering_address_is_a_counted_drop_within_seconds` (listener with a full accept queue: Linux drops further SYNs) | nix-linux 38054441657 (`69e789e`) — pending | 38054462382 (`211155b` = fix disabled): **FAILED on both backends** (legacy 3607 tests / RocksDB 5338 tests, 1 failure each = this test): "the forward was neither sent nor dropped within 20 s (it queued behind a hanging connect)" — the intended counterexample, not a regression |
+| C++ `test_handler_proxy::test_proxy_write_to_an_unanswering_address_is_a_counted_drop_within_seconds` (listener with a full accept queue: Linux drops further SYNs) | 38054441657 (`69e789e`): TIMEOUT — a hang in `test_proxy_state_machine_for_node_state` caused by the too-broad fail-fast; re-run on `aa4f0f4`: 38058611462 — pending; control re-run 38058625697 (`d513bd5`) — pending | 38054462382 (`211155b` = fix disabled): **FAILED on both backends** (legacy 3607 tests / RocksDB 5338 tests, 1 failure each = this test): "the forward was neither sent nor dropped within 20 s (it queued behind a hanging connect)" — the intended counterexample, not a regression |
 | C++ `test_proxy_write_to_down_node` (existing) | must still pass (pre-proxy: failure returned, not counted) | — |
 | E2E forward-window-steps | 38051853624 PASSED S1–S3 (S2 did not hit the stall) | 38048708017 S2 stall (see §1) |
 | flare_unit drop accounting (4 checks) | 421 passed locally | — |
@@ -89,7 +96,7 @@ stated. Production / pf-dev: no change, none approved.
 | `4e229dd` | refill prefers the recorded holder | — |
 | `7875d28` `c1c9bbc` | Main: drop counters per pass | one stats read per Active master per pass. |
 | `7d9d9c1` | forward diagnostics (off by default) | diagnostic only. |
-| `026c4c2` `69e789e` | proxy connect deadline + fail-fast counted drop + C++ test | §2.1 not-covered items; §2.4 stranded forwards. |
+| `026c4c2` `69e789e` `aa4f0f4` | proxy connect deadline + fail-fast counted drop (timed-out opens only) + C++ test | §2.1 not-covered items; §2.4 stranded forwards. |
 | `1526ae2` `2d4215d` `f585848` `22312ad` | E2E suites | — |
 
 ## 5. Open items (production readiness), unchanged boundaries

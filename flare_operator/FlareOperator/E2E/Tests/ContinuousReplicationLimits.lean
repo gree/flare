@@ -5944,6 +5944,8 @@ def forwardWalSuite : TestSuite := {
           | none => return false
         if !synced then return .fail "precondition: the replica did not converge on the base keys"
         let markers := (List.range 10).map fun i => (s!"{label}m_{i}", s!"vm_{i}_{label}")
+        -- the replica's process BEFORE any marker (T2 kills it mid-way)
+        let boot0 ← c.statStr ((← getPodIp r ns).getD "") "reconstruction_boot_id"
         let since ← utcNow
         let mut acked := 0
         let mut killedAt : Option Nat := none
@@ -5962,13 +5964,21 @@ def forwardWalSuite : TestSuite := {
           match ← c.killFlaredIn r with
           | .error e => return .fail s!"could not restart {r}: {e}"
           | .ok _ => pure ()
-        let active ← waitForCondition "the restarted replica is Active again" 240 do
-          return (← c.p0Roles).2.contains r
+        -- a NEW process (another boot id), Active in the map and readable:
+        -- the map can still list the killed process as Active (run 38031573851)
+        let active ← waitForCondition "the restarted replica runs a new process, is Active and can be dumped" 240 do
+          let ip := (← getPodIp r ns).getD ""
+          let boot ← c.statStr ip "reconstruction_boot_id"
+          if boot.isNone || boot == boot0 || boot0.isNone then return false
+          if !(← c.p0Roles).2.contains r then return false
+          return (← c.localDump ip).isSome
         IO.sleep 10000
         let rIp := (← getPodIp r ns).getD ""
         let after ← compareCopies c mIp rIp
         let cursor1 ← c.statStr rIp "repl_applied_lsn"
         let flog ← c.flaredLogSince r since
+        let walLines := (flog.splitOn "\n").filter fun l => containsSubstr l "WAL incremental sync" || containsSubstr l "WAL sync completed"
+        IO.eprintln s!"# {label} the replica's catch-up lines: {walLines.map fun l => (l.drop 30).take 200}"
         let path := if containsSubstr flog "via WAL incremental sync completed" then "WAL incremental sync"
           else if containsSubstr flog "staged rebuild DONE" then "staged rebuild" else "unknown"
         IO.eprintln s!"# {label} after the restart (killed after marker {killedAt.getD 10}): Active={active}; catch-up path {path}; (missing, wrong, replica counter, replica keys, master counter, master keys) = {after}; replica cursor {cursor0} -> {cursor1}"

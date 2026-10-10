@@ -6241,7 +6241,41 @@ private def Ctx.forwardStep (c : Ctx) (label : String) (minSecs : Nat) (uncordon
   if stored.isEmpty then return .fail s!"[{label}] no marker was acknowledged"
   let lost := missingBy.filter fun (_, ms) => !ms.isEmpty
   if !lost.isEmpty then
-    return .fail s!"[{label}] KEYS: acknowledged markers missing in a copy's own keys: {lost.map fun ((p, ms) : String × List MarkerAck) => (p, ms.map fun (w : MarkerAck) => s!"{w.key}@{w.tod} via {podOfIp w.target}")}"
+    let initial := s!"[{label}] KEYS: acknowledged markers missing in a copy's own keys: {lost.map fun ((p, ms) : String × List MarkerAck) => (p, ms.map fun (w : MarkerAck) => s!"{w.key}@{w.tod} via {podOfIp w.target}")}"
+    IO.eprintln s!"# {initial} — INITIAL mismatch, kept as the verdict"
+    -- A SEPARATE final comparison (it never erases the initial one): wait for
+    -- convergence EVIDENCE — no repair-ledger entry names a lacking copy, the
+    -- master's drop counters read twice in a row unchanged (fresh), the
+    -- lacking pods Ready — then compare the same markers again
+    let lacking := lost.map (·.1)
+    let mut finalNote := "convergence evidence not reached within 420 s"
+    let mut prevDrops : Option String := none
+    for _ in [0:42] do
+      IO.sleep 10000
+      let ledger ← c.ledgerDests
+      let inLedger := lacking.filter fun p => ledger.any (fun d => d.startsWith s!"{p}.")
+      let (mm, _) ← c.p0RolesStep
+      let dropsNow ← match mm with
+        | some m => do
+          let st := (← c.statsOf ((← getPodIp m ns).getD "")).getD ""
+          pure (some (String.intercalate "," (((st.splitOn "\n").filter (containsSubstr · "proxy_write_dropped[")).map String.trim)))
+        | none => pure none
+      let ready ← lacking.allM fun p => c.ready p
+      let stable := dropsNow.isSome && dropsNow == prevDrops
+      prevDrops := dropsNow
+      IO.eprintln s!"# [{label}] convergence check: ledger entries for {inLedger}; master drop counters {dropsNow.getD "(unreadable)"} stable={stable}; lacking pods Ready={ready}"
+      if inLedger.isEmpty && stable && ready then
+        let mut still : List (String × List String) := []
+        for (p, ms) in lost do
+          match ← c.localDump ((← getPodIp p ns).getD "") with
+          | some d => still := still ++ [(p, (ms.filter fun w => d.lookup w.key != some w.value).map (·.key))]
+          | none => still := still ++ [(p, ["(not dumpable)"])]
+        let remaining := still.filter fun (_, ks) => !ks.isEmpty
+        finalNote := if remaining.isEmpty then "every initially missing marker is present now (repaired AFTER the first comparison)"
+          else s!"STILL MISSING after convergence evidence: {remaining}"
+        break
+    IO.eprintln s!"# [{label}] FINAL comparison: {finalNote}"
+    return .fail s!"{initial}; final comparison: {finalNote}"
   return .pass
 
 def forwardStepSuite : TestSuite := {

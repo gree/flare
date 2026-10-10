@@ -953,6 +953,23 @@ overwrites a record it cannot trust:
   partition has been observed (an empty master while another copy holds data,
   or any copy unreadable, is never adopted).
 
+  **Upgrading flared from a release without copy evidence (rc56 / older):**
+  roll the flared pods only AFTER every partition shows its decision in
+  `<cluster>-history` — `part N untracked` (every copy still on the old
+  flared) or `part N known`:
+
+  ```
+  kubectl -n <ns> get configmap <cluster>-history -o jsonpath='{.data.record}' | grep '^part '
+  ```
+
+  Rolled earlier, a partition whose copies are mixed (a new replica, the old
+  master) is HELD ("the master ... is not a modern, observed copy"), and when
+  the master's own roll brings it back empty (tmpfs) the replica's promotion
+  is ABORTED ("authoritative history is absent"): the partition has NO master
+  and writes to it fail (CI 38072338837). Stop the roll there. Recovery:
+  name the replica that holds the data — #history-held-masterless (that
+  recovery is NOT yet exercised by a test for this mixed-version state).
+
 ### Rolling the operator back past the history record
 
 The node map now carries `transition=<id>` lines. An older operator's strict

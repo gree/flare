@@ -1418,6 +1418,24 @@ def upgradeSuite : TestSuite := {
             match ← kubectl ["annotate", "flarecluster", upgradeCfg.name, "-n", ns, "--overwrite", s!"flare.gree.net/history-adoption-approved={uid.trim}"] with
             | .error e => return .fail s!"the migration approval could not be set: {e}"
             | .ok _ => pure ()
+          -- the release procedure (RUNBOOK #history-record): flared is rolled
+          -- only AFTER the operator decided the approved partition while every
+          -- copy is still rc56 ('part 0 untracked' in <cluster>-history). Once
+          -- one copy runs the new build the legacy master can no longer be
+          -- adopted, and the master's own roll (empty on tmpfs) leaves the
+          -- partition HELD with no master — CI 38072338837 (3123bd5): the
+          -- approval was first evaluated at 18:13:41.89, after nodes-1's roll
+          -- began at 18:13:41.27, so the promotion of the rolled replica was
+          -- ABORTED ('authoritative history is absent') for the rest of the test.
+          let decided ← waitForCondition "the operator decided the approved partition (part 0 untracked) before flared rolls" 120 do
+            match ← kubectl ["get", "configmap", s!"{upgradeCfg.name}-history", "-n", ns, "-o", "jsonpath={.data.record}"] with
+            | .ok r => return containsSubstr r "part 0 untracked"
+            | .error _ => return false
+          if !decided then
+            let rec_ ← match ← kubectl ["get", "configmap", s!"{upgradeCfg.name}-history", "-n", ns, "-o", "jsonpath={.data.record}"] with
+              | .ok r => pure r
+              | .error e => pure s!"(unreadable: {e})"
+            return .fail s!"the approved migration was not decided within 120 s on rc56 copies (history record: {rec_})"
           -- the release procedure: the reserve goes into the CR once the new
           -- operator runs; the rc56 pods refuse that reload (unknown option)
           -- and keep running; the new pods boot with it

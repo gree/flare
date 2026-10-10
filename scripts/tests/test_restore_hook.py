@@ -40,6 +40,14 @@ class RestoreHook(unittest.TestCase):
         self._write(self.bak, "data", "bak")
 
     def tearDown(self):
+        # a copy that failed part-way can leave unreadable directories (the
+        # failed-copy test): make everything removable first
+        for root, dirs, _ in os.walk(self.tmp, topdown=True):
+            for d in dirs:
+                try:
+                    os.chmod(os.path.join(root, d), 0o755)
+                except OSError:
+                    pass
         shutil.rmtree(self.tmp)
 
     def _write(self, d, name, text):

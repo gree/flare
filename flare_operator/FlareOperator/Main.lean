@@ -2994,6 +2994,85 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
         ledgerRef.set led1
         persistLedger crName ns led0 led1 metrics ledgerDirtyRef
 
+  -- DROPPED REPLICA WRITES → the repair ledger (SC-03), from the
+  -- MASTER's stats alone. This must not depend on the replica's
+  -- stats being readable: an unreadable replica hid the master's
+  -- drop counter for the whole partition (found by the SAF-10d
+  -- stats-fetch-failure scenario), so a drop seen while the replica
+  -- could not be probed was never even recorded.
+  let observeDrops : String → String → IO Unit := fun mKey mo => do
+    -- DROPPED REPLICA WRITES → the repair ledger (SC-03). The master
+    -- reports, per destination, how many replica writes it gave up
+    -- forwarding; live replication has no per-write acknowledgement,
+    -- so this is the only signal that a replica is quietly behind.
+    -- Here we only OBSERVE: deltas become repair requests. What
+    -- happens to a request — hold, demote, confirm, re-seat,
+    -- complete — is decided in StateMachine/ReplicaRepair.lean and
+    -- applied in parts 1 and 2 of this pass. A counter that went
+    -- DOWN is a restarted master whose count is entirely new drops.
+    let drops := (mo.splitOn "\n").filterMap fun line =>
+      match (line.trim.splitOn " ").filter (· != "") with
+      | ["STAT", k, v] =>
+        if k.startsWith "proxy_write_dropped[" && k.endsWith "]" then
+          let dest := (k.drop "proxy_write_dropped[".length).dropRight 1
+          match v.trim.toNat? with
+          | some n => some (dest, n)
+          | none => none
+        else none
+      | _ => none
+    -- Item 4: no accounting on a ledger we could not read.
+    if (← ledgerAvailableRef.get) then
+      let led0 ← ledgerRef.get
+      -- counters are bound to the master's flared PROCESS (boot id)
+      let mBoot := statNat mo "reconstruction_boot_id"
+      let (led1, newDrops, firstSeen) := ReplicaRepair.observe led0 mKey drops mBoot
+      for dest in firstSeen do
+        IO.eprintln s!"[flare-operator] REPLICA REPAIR (first observation): master {mKey} (boot {mBoot}) already reports dropped writes to {dest} at the ledger's first observation — when they happened, and whether anything repaired them since, is unknown; recorded as a POSSIBLY UNREPAIRED request (same ownership and gates as any request, no immediate demotion)"
+      let mut led2 := led1
+      for (dest, d) in newDrops do
+        metrics.replicaRepairRequested.inc
+        led2 := ReplicaRepair.request led2 mKey dest d
+        -- SAF-10c: if the destination runs a continuous follower, the
+        -- follower OWNS this repair (design §5.4). Record the request,
+        -- hold it with a visible reason and the position it must
+        -- reach — the master's latest sequence now, which the dropped
+        -- write is at or below — and start no reconstruction. The
+        -- reading is the destination's own stats, never an
+        -- assumption; unreadable stats do not claim ownership.
+        let fr ← followReadingOf finalState dest ns
+        let bar := statNat mo "rocksdb_latest_sequence_number"
+        let barEpoch := statStr mo "rocksdb_source_epoch"
+        match ReplicaRepair.ownershipAtRequest fr with
+        | some true =>
+          led2 := ReplicaRepair.holdOwned led2 dest bar barEpoch
+          IO.eprintln s!"[flare-operator] REPLICA REPAIR requested and HELD: master {mKey} dropped {d} more write(s) to {dest}; that replica's continuous follower ({fr.state.getD "?"}) owns the repair — it must apply past {bar.getD 0} in epoch {barEpoch.getD "?"} before this closes; no reconstruction is started"
+        | none =>
+          -- Unknown is Unknown: neither demote nor close. Hold with
+          -- the reason and let a readable pass decide.
+          led2 := ReplicaRepair.holdOwned led2 dest bar barEpoch "follower state unknown (stats unreadable)"
+          IO.eprintln s!"[flare-operator] REPLICA REPAIR requested and HELD: master {mKey} dropped {d} more write(s) to {dest}; its follower state could not be read — held until it can (no demotion on an unreadable probe)"
+        | some false =>
+          IO.eprintln s!"[flare-operator] REPLICA REPAIR requested: master {mKey} dropped {d} more write(s) to {dest} — that replica is behind and nothing else repairs it"
+      -- (A follower's needs_rebuild declaration is requested in the
+      -- per-pass ledger step, not here: this block runs once per
+      -- probe slot, 300 s by default, which delayed the rebuild of a
+      -- replica that cannot resume by up to five minutes — CI
+      -- 37268848902.)
+      if !led0.initialized then
+        IO.eprintln s!"[flare-operator] replica repair ledger initialized from {mKey}: {drops.length} destination counter(s) recorded; {firstSeen.length} with drops kept as possibly unrepaired requests"
+      ledgerRef.set led2
+      persistLedger crName ns led0 led2 metrics ledgerDirtyRef
+  -- every pass (not only on the 300 s probe slot): a drop recorded by a
+  -- master is a replica that is now behind; reading it once per slot left a
+  -- rejoined replica Active without 126 acknowledged writes for the rest of
+  -- forward-window-steps S3 (38046122938) — no request, no rebuild
+  let slotNow := (← IO.monoMsNow) / max 1000 (((← IO.getEnv "FLARE_STATS_PROBE_INTERVAL_MS").bind (·.toNat?)).getD 300000)
+  if slotNow == (← probeSlotRef.get) then
+    for (mKey, mNode) in finalState.nodeMap do
+      if mNode.role == FlareRole.Master && mNode.state == FlareState.Active then
+        match ← Bridge.queryPodStats (extractPodName mNode.serverName) ns "stats" with
+        | .ok mo => observeDrops mKey mo
+        | .error e => IO.eprintln s!"[flare-operator] master {mKey} stats unreadable this pass ({e}): its drop counter is read again next pass"
   -- Stats probe cadence. 5 minutes in production; the harness shortens it
   -- (FLARE_STATS_PROBE_INTERVAL_MS) so a repair can be watched in minutes.
   let probeIntervalMs := max 1000 (((← IO.getEnv "FLARE_STATS_PROBE_INTERVAL_MS").bind (·.toNat?)).getD 300000)
@@ -3015,77 +3094,9 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
         | some (sKey, sNode) =>
           let mOut ← Bridge.queryPodStats (extractPodName mNode.serverName) ns "stats"
           let sOut ← Bridge.queryPodStats (extractPodName sNode.serverName) ns "stats"
-          -- DROPPED REPLICA WRITES → the repair ledger (SC-03), from the
-          -- MASTER's stats alone. This must not depend on the replica's
-          -- stats being readable: an unreadable replica hid the master's
-          -- drop counter for the whole partition (found by the SAF-10d
-          -- stats-fetch-failure scenario), so a drop seen while the replica
-          -- could not be probed was never even recorded.
-          let observeDrops : String → IO Unit := fun mo => do
-            -- DROPPED REPLICA WRITES → the repair ledger (SC-03). The master
-            -- reports, per destination, how many replica writes it gave up
-            -- forwarding; live replication has no per-write acknowledgement,
-            -- so this is the only signal that a replica is quietly behind.
-            -- Here we only OBSERVE: deltas become repair requests. What
-            -- happens to a request — hold, demote, confirm, re-seat,
-            -- complete — is decided in StateMachine/ReplicaRepair.lean and
-            -- applied in parts 1 and 2 of this pass. A counter that went
-            -- DOWN is a restarted master whose count is entirely new drops.
-            let drops := (mo.splitOn "\n").filterMap fun line =>
-              match (line.trim.splitOn " ").filter (· != "") with
-              | ["STAT", k, v] =>
-                if k.startsWith "proxy_write_dropped[" && k.endsWith "]" then
-                  let dest := (k.drop "proxy_write_dropped[".length).dropRight 1
-                  match v.trim.toNat? with
-                  | some n => some (dest, n)
-                  | none => none
-                else none
-              | _ => none
-            -- Item 4: no accounting on a ledger we could not read.
-            if (← ledgerAvailableRef.get) then
-              let led0 ← ledgerRef.get
-              -- counters are bound to the master's flared PROCESS (boot id)
-              let mBoot := statNat mo "reconstruction_boot_id"
-              let (led1, newDrops, firstSeen) := ReplicaRepair.observe led0 mKey drops mBoot
-              for dest in firstSeen do
-                IO.eprintln s!"[flare-operator] REPLICA REPAIR (first observation): master {mKey} (boot {mBoot}) already reports dropped writes to {dest} at the ledger's first observation — when they happened, and whether anything repaired them since, is unknown; recorded as a POSSIBLY UNREPAIRED request (same ownership and gates as any request, no immediate demotion)"
-              let mut led2 := led1
-              for (dest, d) in newDrops do
-                metrics.replicaRepairRequested.inc
-                led2 := ReplicaRepair.request led2 mKey dest d
-                -- SAF-10c: if the destination runs a continuous follower, the
-                -- follower OWNS this repair (design §5.4). Record the request,
-                -- hold it with a visible reason and the position it must
-                -- reach — the master's latest sequence now, which the dropped
-                -- write is at or below — and start no reconstruction. The
-                -- reading is the destination's own stats, never an
-                -- assumption; unreadable stats do not claim ownership.
-                let fr ← followReadingOf finalState dest ns
-                let bar := statNat mo "rocksdb_latest_sequence_number"
-                let barEpoch := statStr mo "rocksdb_source_epoch"
-                match ReplicaRepair.ownershipAtRequest fr with
-                | some true =>
-                  led2 := ReplicaRepair.holdOwned led2 dest bar barEpoch
-                  IO.eprintln s!"[flare-operator] REPLICA REPAIR requested and HELD: master {mKey} dropped {d} more write(s) to {dest}; that replica's continuous follower ({fr.state.getD "?"}) owns the repair — it must apply past {bar.getD 0} in epoch {barEpoch.getD "?"} before this closes; no reconstruction is started"
-                | none =>
-                  -- Unknown is Unknown: neither demote nor close. Hold with
-                  -- the reason and let a readable pass decide.
-                  led2 := ReplicaRepair.holdOwned led2 dest bar barEpoch "follower state unknown (stats unreadable)"
-                  IO.eprintln s!"[flare-operator] REPLICA REPAIR requested and HELD: master {mKey} dropped {d} more write(s) to {dest}; its follower state could not be read — held until it can (no demotion on an unreadable probe)"
-                | some false =>
-                  IO.eprintln s!"[flare-operator] REPLICA REPAIR requested: master {mKey} dropped {d} more write(s) to {dest} — that replica is behind and nothing else repairs it"
-              -- (A follower's needs_rebuild declaration is requested in the
-              -- per-pass ledger step, not here: this block runs once per
-              -- probe slot, 300 s by default, which delayed the rebuild of a
-              -- replica that cannot resume by up to five minutes — CI
-              -- 37268848902.)
-              if !led0.initialized then
-                IO.eprintln s!"[flare-operator] replica repair ledger initialized from {mKey}: {drops.length} destination counter(s) recorded; {firstSeen.length} with drops kept as possibly unrepaired requests"
-              ledgerRef.set led2
-              persistLedger crName ns led0 led2 metrics ledgerDirtyRef
           match mOut, sOut with
           | .ok mo, .ok so =>
-            observeDrops mo
+            observeDrops mKey mo
             let items := fun (out : String) =>
               ((out.splitOn "
 " |>.filterMap fun line =>
@@ -3203,7 +3214,7 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
               newStreaks := newStreaks.filter (·.1 != mKey)
           | .ok mo, .error e =>
             IO.eprintln s!"[flare-operator] replica {sKey} stats unreadable this pass ({e}); the master's drop counter is still observed"
-            observeDrops mo
+            observeDrops mKey mo
             newStreaks := newStreaks.filter (·.1 != mKey)
           | _, _ => pure ()
         | none => pure ()

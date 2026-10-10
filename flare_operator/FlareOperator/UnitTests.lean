@@ -279,6 +279,34 @@ def checkAdvanceComplete (ctx : Ctx) : IO Unit := do
   check ctx "repair in flight: drops observed on the completing pass requeue it (late drop after the catch-up's end); an entry with no observation this pass does not advance"
     (!newD.isEmpty && ((advance lObs2 [(slaveKey, doneObs)]).2.map (·.2)) == [.completedRequeued]
       && (advance lRel []).2.isEmpty && (advance lRel []).1.entries.length == lRel.entries.length)
+  -- boundaries of the drop accounting (review 2026-10-10, after 38046122938):
+  -- every case ends in a REQUEST for the dest, never in silence
+  let reqDrops := fun (l : Ledger) => (l.entries.find? (·.dest == slaveKey)).map (·.drops)
+  let feed := fun (l : Ledger) (n : Nat) (boot : Option Nat) =>
+    let (l1, nd, _) := observe l masterKey [(slaveKey, n)] boot
+    nd.foldl (fun acc (d, k) => request acc masterKey d k) l1
+  -- (1) read at 37, the repair completes on that reading, the 38th drop lands
+  --     after the read: the next pass's read re-creates the request
+  let l37 := feed { lRel with counters := [], entries := [], initialized := true } 37 (some 7)
+  let lClosed := (advance (feed lRel 0 (some 7)) [(slaveKey, doneObs)]).1
+  let lAfter := feed (feed lClosed 37 (some 7)) 38 (some 7)
+  check ctx "drop accounting (1): a drop after the reading that completed the repair is requested on the next reading (the closed entry is re-created with the increment)"
+    (reqDrops l37 == some 37 && lClosed.entries.isEmpty && reqDrops lAfter == some 38)
+  -- (2) the master's flared restarts (new boot): its counter restarts at 0
+  --     and counts up — those are new drops, not a decrease to ignore
+  let lBoot := feed (feed { lRel with counters := [], entries := [], initialized := true } 37 (some 7)) 5 (some 8)
+  check ctx "drop accounting (2): a master restart (new boot id, counter 37 -> 5) attributes the 5 new drops; the old process's counter is forgotten"
+    (reqDrops lBoot == some 42 && !(lBoot.counters.any fun (k, _) => k.endsWith "|7"))
+  -- (3) the ledger write to status FAILED and the operator restarted: the
+  --     ledger read back is OLDER (counter 30) or EMPTY (never initialized)
+  let lOld := feed { lRel with counters := [(counterKey masterKey slaveKey (some 7), 30)], entries := [], initialized := true } 38 (some 7)
+  let (lEmpty0, _, firstE) := observe ({} : Ledger) masterKey [(slaveKey, 38)] (some 7)
+  check ctx "drop accounting (3): after a lost status write the older ledger requests the difference (8); an empty ledger keeps all 38 as a POSSIBLY UNREPAIRED request (first sighting), never a baseline"
+    (reqDrops lOld == some 8 && firstE == [slaveKey] && lEmpty0.initialized)
+  -- (4) a drop right after the ledger emptied (all entries closed)
+  let lEmptyEntries := { lRel with entries := [], counters := [(counterKey masterKey slaveKey (some 7), 37)], initialized := true }
+  check ctx "drop accounting (4): one drop right after the last entry closed creates a new request of 1"
+    (reqDrops (feed lEmptyEntries 38 (some 7)) == some 1)
   check ctx "a node that became MASTER while reseated is voided"
     (stepsOf lRel (obs (some 12) (some 100) (some 2) (some "succeeded") (some 2) (some masterKey) (some masterKey) (some (.Master, .Active))) == [.voided])
   let lNoBase : Ledger := { lRel with entries := lRel.entries.map fun e => { e with bootIdAtReseat := none, currentIdAtReseat := none } }

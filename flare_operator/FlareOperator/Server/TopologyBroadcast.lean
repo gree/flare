@@ -41,6 +41,20 @@ def pendingTopologyAfterAttempt (previous : Option Nat) (version : Nat)
     (confirmed : Bool) : Option Nat :=
   if confirmed then none else some (previous.getD version)
 
+/-- A pass may send the map it read only while the LIVE map still carries that
+    version. A registration answered by the TCP server between the pass's read
+    and its send advances the live map (`addNode` bumps the version) while the
+    pass's snapshot omits the new node; the new node holds its registration
+    reply as version 0, so it ACCEPTS the older snapshot and removes itself.
+    CI 38081479454 (history-firstbuild): the master registered at
+    21:08:55.80, the retried 0-node v4294967296 reached it at 55.95, it left
+    its role, was re-seated at 21:09:04 with a NEW source epoch, and the
+    first-build record (taken at the old epoch) then held every rebuild of
+    the replica for the rest of the test. When this is false the send is
+    skipped and stays pending: the next pass publishes the live map. -/
+def snapshotStillLive (snapshotVersion liveVersion : Nat) : Bool :=
+  snapshotVersion == liveVersion
+
 /-! ## Durable authority (SAF-09)
 
 The broadcast version carries the leadership generation in its high 32 bits

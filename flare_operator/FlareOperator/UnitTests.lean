@@ -851,6 +851,11 @@ private def checkTopologyDelivery (ctx : Ctx) : IO Unit := do
     (FlareOperator.Server.pendingTopologyAfterAttempt (some 100) 110 false == some 100)
   check ctx "confirmed latest map clears pending delivery"
     (FlareOperator.Server.pendingTopologyAfterAttempt (some 100) 110 true == none)
+  -- CI 38081479454: a registration between the pass's read and its send
+  check ctx "a pass's snapshot is sent only while the live map still has its version"
+    (FlareOperator.Server.snapshotStillLive 4294967296 4294967296)
+  check ctx "a snapshot older than the live map (a node registered meanwhile) is not sent"
+    (!FlareOperator.Server.snapshotStillLive 4294967296 4294967297)
   let trig := fun (moved : Bool) (pending : Option Nat) (held active : Nat) =>
     ({ versionMoved := moved, pending, repairHeld := held, activeNotReady := active } :
       FlareOperator.Server.BroadcastTriggers)

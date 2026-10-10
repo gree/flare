@@ -2713,7 +2713,14 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
         | .error e =>
           IO.eprintln s!"[flare-operator] PERSIST FENCE: could not persist v{finalVersion} ({e}); suppressing the broadcast, held for retry"
           pure false
+    -- the snapshot read at the top of this step must still be the live map:
+    -- a concurrent registration (TCP server) advanced it otherwise, and the
+    -- snapshot would remove the new node from its own map (snapshotStillLive)
+    let liveVersion := (← stateRef.get).nodeMapVersion
     if !persisted then
+      pendingBroadcastRef.modify fun p => match p with | some v => some v | none => some finalVersion
+    else if stillLeader && !snapshotStillLive finalVersion liveVersion then
+      IO.eprintln s!"[flare-operator] topology send of v{finalVersion} SKIPPED: the live map moved to v{liveVersion} during this pass (a concurrent registration); the older snapshot would remove the new node from its own map — the next pass publishes the live map"
       pendingBroadcastRef.modify fun p => match p with | some v => some v | none => some finalVersion
     else if stillLeader then
       -- Logged whenever a suppressed send is outstanding, whether or not
@@ -2739,6 +2746,11 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
           IO.eprintln s!"[flare-operator] CRITICAL: lease holder changed to '{l.holderIdentity}' DURING a topology broadcast (v{finalVersion}); a map may have been published without authority. Recipients that already saw a newer version rejected it; others did not."
       | .error e =>
         IO.eprintln s!"[flare-operator] warning: could not confirm lease ownership after broadcasting v{finalVersion}: {e}"
+      -- the residual window: a registration DURING the send. Not prevented
+      -- (no lock between the TCP server and the broadcast); made visible.
+      let afterVersion := (← stateRef.get).nodeMapVersion
+      if !snapshotStillLive finalVersion afterVersion then
+        IO.eprintln s!"[flare-operator] WARNING: the live map moved to v{afterVersion} DURING the send of v{finalVersion}: a node registered in that window may have taken the older map (and left its role) until the next pass publishes v{afterVersion}"
       pendingBroadcastRef.set (pendingTopologyAfterAttempt pendingBefore finalVersion confirmed)
       if !confirmed then
         IO.eprintln s!"[flare-operator] topology delivery unconfirmed (v{finalVersion}); retained for retry through the lease fence"

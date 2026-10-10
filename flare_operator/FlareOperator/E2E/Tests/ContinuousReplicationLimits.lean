@@ -6275,4 +6275,185 @@ def forwardStepSuite : TestSuite := {
   ]
 }
 
+
+/-- authority 29, TARGETED (review 2026-10-10): a node map restored without a
+    history record, the pods re-registered so the map has NO master (the
+    restored master is a replica marked lastMasterOf). Three cases kept apart:
+    (a) SAME history on both copies, a pods-RBAC outage during the recovery,
+        then access restored -> adopted from the unique last master and
+        promoted AUTOMATICALLY, every key kept; nothing adopted while a copy
+        could not be read;
+    (b) DIFFERENT histories (the replica's copy wiped while the operator was
+        away: it returns with its own history) -> HELD explicitly (CRITICAL
+        with the reason and RUNBOOK #history-held-masterless), nothing
+        promoted; then the documented recovery (a person names the copy to
+        keep) adopts it, removes the choice and the cluster serves every key;
+    (c) TWO last masters in the restored map -> HELD the same way, then the
+        same recovery.
+    Not a claim about why the earlier authority 29 run failed (cause NOT
+    established). PVC-backed so copies survive the pod restarts. -/
+private def masterlessCfg : ClusterConfig := {
+  name := "hist-masterless"
+  «namespace» := "flare-hist-masterless"
+  partitions := 1
+  replicas := 2
+  operatorName := "flare-operator"
+  debugPod := "debug-hist-masterless"
+  storageBackend := "rocksdb"
+  usePvc := true
+  extraFlaredConf := flags
+}
+
+private def masterlessUid (c : Ctx) : IO String := do
+  return ((← kubectl ["get", "flarecluster", c.cfg.name, "-n", c.cfg.«namespace», "-o", "jsonpath={.metadata.uid}"]).toOption.getD "").trim
+
+/-- The fixture of every case, up to the operator's return: keys on both
+    copies -> operator stopped -> map saved -> `prepare` (wipe / edit) ->
+    record removed, map restored (`edit` applied), migration approval -> both
+    data pods restarted (they re-register into the restored map) -> operator
+    started. Returns (ex-master pod, replica pod) and the time of the start. -/
+private def Ctx.masterlessFixture (c : Ctx) (label : String) (edit : String → String → String → String)
+    (prepare : String → String → IO (Except String Unit)) (beforeStart : IO (Except String Unit)) :
+    IO (Except String (String × String × String)) := do
+  let ns := c.cfg.«namespace»
+  let ok ← waitForCondition "a P0 master, a replica and a recorded history" 300 do
+    return (← historyRecorded c) && (← c.pair).toBool
+  if !ok then return .error s!"precondition: no recorded history / pair ({← historyText c})"
+  let .ok (m, mIp, r, rIp) ← c.pair | return .error "precondition: no pair"
+  let w ← writeKeys c.cfg.debugPod ns mIp c.cfg.flarePort label 30
+  if w != 30 then return .error s!"precondition: {w}/30 keys stored"
+  let synced ← waitForCondition "the replica holds every key" 120 do return (← allKeysOn c rIp label 30).isNone
+  if !synced then return .error "precondition: the replica did not converge"
+  if !(← c.scaleOp 0) then return .error "could not stop the operator"
+  let saved := (← nodeMapText c).trim
+  if saved.isEmpty || saved.startsWith "(unreadable" then return .error s!"precondition: no persisted map ({saved})"
+  if let .error e ← prepare m r then return .error e
+  let restored := edit saved m r
+  discard <| kubectl ["delete", "configmap", s!"{c.cfg.name}-history", "-n", ns, "--ignore-not-found=true"]
+  discard <| kubectl ["delete", "configmap", s!"{c.cfg.name}-node-map", "-n", ns, "--ignore-not-found=true"]
+  if let .error e ← kubectl ["create", "configmap", s!"{c.cfg.name}-node-map", "-n", ns, s!"--from-literal=nodeMap={restored}"] then
+    return .error s!"could not restore the node map: {e}"
+  if let .error e ← approveAdoption c then return .error s!"could not give the migration approval: {e}"
+  discard <| kubectl ["delete", "pod", m, r, "-n", ns, "--wait=false"]
+  IO.sleep 5000
+  if let .error e ← beforeStart then return .error e
+  let since ← utcNow
+  discard <| kubectl ["scale", "deployment", c.cfg.operatorName, "-n", ns, "--replicas=1"]
+  IO.eprintln s!"# [{label}] ex-master {m}, replica {r}; restored map:\n{restored}\n# [{label}] operator started {since}"
+  return .ok (m, r, since)
+
+/-- A HELD masterless partition: CRITICAL with the reason and the RUNBOOK
+    anchor, no record, no master — for `secs` after the hold is first seen. -/
+private def Ctx.expectMasterlessHold (c : Ctx) (label : String) (since : String) (needle : String) : IO (Except String String) := do
+  let seenHold ← waitForCondition s!"[{label}] the operator reports the masterless hold" 240 do
+    return containsSubstr (← c.opLogSince since) "has NO master and its history is HELD"
+  let log ← c.opLogSince since
+  let line := ((log.splitOn "\n").filter fun l => containsSubstr l "has NO master and its history is HELD").getLast?.getD ""
+  IO.eprintln s!"# [{label}] hold line: {line}"
+  if !seenHold then return .error s!"[{label}] no masterless-hold CRITICAL was logged (record now: {← historyText c})"
+  if !containsSubstr line needle then return .error s!"[{label}] the hold reason does not name '{needle}': {line}"
+  if !containsSubstr line "RUNBOOK #history-held-masterless" then return .error s!"[{label}] the hold line does not point to the recovery procedure"
+  -- the hold stands: no record adopted, no master for a while
+  IO.sleep 45000
+  let rec_ ← historyRecorded c
+  let master := (← c.nodeView) |> (findMasterFqdn · 0)
+  IO.eprintln s!"# [{label}] 45 s into the hold: record known={rec_}; P0 master={master}"
+  if rec_ then return .error s!"[{label}] a history was adopted without a person's choice: {← historyText c}"
+  if master.isSome then return .error s!"[{label}] a master was promoted while the history was held: {master}"
+  return .ok line
+
+/-- The RUNBOOK #history-held-masterless procedure: name the copy to keep;
+    then it is adopted (CHOSEN), the choice is removed, it is promoted, and
+    both copies serve every key. -/
+private def Ctx.recoverByChoice (c : Ctx) (label : String) (since keep other : String) : IO TestResult := do
+  let ns := c.cfg.«namespace»
+  let uid ← masterlessUid c
+  if let .error e ← kubectl ["annotate", "flarecluster", c.cfg.name, "-n", ns, "--overwrite", s!"flare.gree.net/history-adopt-holder={uid}/0/{keep}"] then
+    return .fail s!"[{label}] could not annotate the choice: {e}"
+  let adopted ← waitForCondition s!"[{label}] the chosen copy is adopted" 180 do
+    return containsSubstr (← c.opLogSince since) "CHOSEN by a person"
+  let gone ← waitForCondition s!"[{label}] the used choice is removed" 60 do
+    return ((← kubectlGetJsonpath "flarecluster" c.cfg.name ns "{.metadata.annotations.flare\\.gree\\.net/history-adopt-holder}").toOption.getD "").trim.isEmpty
+  let served ← waitForCondition s!"[{label}] {keep} is master and both copies hold every key" 480 do
+    match ← c.pair with
+    | .ok (m2, mIp, _, rIp) => return m2 == keep && (← allKeysOn c mIp label 30).isNone && (← allKeysOn c rIp label 30).isNone
+    | .error _ => return false
+  IO.eprintln s!"# [{label}] recovery by choice of {keep}: adopted={adopted} choice removed={gone} served={served}; record {← historyText c}"
+  if !adopted then return .fail s!"[{label}] the chosen copy {keep} was not adopted"
+  if !gone then return .fail s!"[{label}] the used choice was not removed"
+  if !served then return .fail s!"[{label}] after the choice, {keep} did not become master with every key on both copies ({other} rebuilt from it)"
+  return .pass
+
+def historyMasterlessSuite : TestSuite := {
+  name := "history-masterless"
+  setup := do
+    deployCluster masterlessCfg
+    IO.sleep 40000
+  teardown := do
+    discard <| ruleSwap "pods-e2e-revoked" "pods"
+    cleanupCluster masterlessCfg
+  onFailure := dumpClusterDiagnostics masterlessCfg.«namespace» s!"app={masterlessCfg.operatorName}"
+  afterEach := fun i => saveFullLogs masterlessCfg.«namespace» s!"after-test-{i}"
+  tests :=
+    let c : Ctx := { cfg := masterlessCfg }
+    let ns := masterlessCfg.«namespace»
+    [
+    { name := "(a) SAME history + a pods-RBAC outage during the recovery: nothing is adopted while the copies cannot be read; once access returns the history is adopted from the unique last master and it is promoted AUTOMATICALLY with every key"
+      run := do
+        match ← c.masterlessFixture "hma" (fun saved _ _ => saved) (fun _ _ => return .ok ())
+            (do match ← ruleSwap "pods" "pods-e2e-revoked" with
+                | .error e => return .error s!"could not revoke pods: {e}"
+                | .ok _ => return .ok ()) with
+        | .error e => discard <| ruleSwap "pods-e2e-revoked" "pods"; return .fail e
+        | .ok (m, r, since) =>
+          IO.sleep 60000
+          let recDuring ← historyRecorded c
+          let logDuring ← c.opLogSince since
+          IO.eprintln s!"# [hma] after 60 s of pods-RBAC outage: record known={recDuring}; operator log lines {(logDuring.splitOn "\n").length}"
+          discard <| ruleSwap "pods-e2e-revoked" "pods"
+          if recDuring then return .fail "a history was adopted while the pods could not be read"
+          let adopted ← waitForCondition "the history is adopted from the last master" 300 do
+            return containsSubstr (← c.opLogSince since) "from the last master"
+          let served ← waitForCondition s!"{m} or {r} is master and both copies hold every key" 480 do
+            match ← c.pair with
+            | .ok (_, mIp, _, rIp) => return (← allKeysOn c mIp "hma" 30).isNone && (← allKeysOn c rIp "hma" 30).isNone
+            | .error _ => return false
+          let log ← c.opLogSince since
+          let lines := (log.splitOn "\n").filter fun l => containsSubstr l "AUTHORITATIVE HISTORY" || containsSubstr l "history state p0" || containsSubstr l "is HELD" || containsSubstr l "PROMOT"
+          IO.eprintln s!"# [hma] adopted={adopted} served={served}; record {← historyText c}; history/promotion lines (last 30):\n{String.intercalate "\n" (lines.reverse.take 30).reverse}"
+          if !adopted then return .fail "with one history and one last master, the history was not adopted after access returned"
+          if !served then return .fail "after adoption, no master served every key on both copies"
+          return .pass },
+    { name := "(b) DIFFERENT histories (the replica's copy wiped while the operator was away): HELD explicitly — CRITICAL with the reason and the RUNBOOK procedure, no record, no master; the documented choice of the copy to keep then recovers every key"
+      run := do
+        let wipe := fun (_ : String) (r : String) => do
+          match ← kubectl ["exec", "-n", ns, r, "-c", "flared", "--", "sh", "-c", "rm -rf /data/flare/flare.rocksdb /data/flare/staging-* /data/flare/retained-*"] with
+          | .error e => return Except.error s!"could not wipe {r}'s copy: {e}"
+          | .ok _ =>
+            match ← c.killFlaredIn r with
+            | .error e => return .error s!"could not restart {r}: {e}"
+            | .ok _ => return .ok ()
+        match ← c.masterlessFixture "hmb" (fun saved _ _ => saved) wipe (return .ok ()) with
+        | .error e => return .fail e
+        | .ok (m, r, since) =>
+          match ← c.expectMasterlessHold "hmb" since "no master to take the history from" with
+          | .error e => return .fail e
+          | .ok _ => c.recoverByChoice "hmb" since m r },
+    { name := "(c) TWO last masters in the restored map (one history): HELD explicitly — CRITICAL with the reason and the RUNBOOK procedure, no record, no master; the documented choice of the copy to keep then recovers every key"
+      run := do
+        let twoLast := fun (saved : String) (_ : String) (r : String) =>
+          String.intercalate "\n" ((saved.splitOn "\n").map fun l =>
+            if l.startsWith s!"{r}." && !containsSubstr l "lastMasterOf=" then l ++ " lastMasterOf=0" else l)
+        match ← c.masterlessFixture "hmc" twoLast (fun _ _ => return .ok ()) (return .ok ()) with
+        | .error e => return .fail e
+        | .ok (m, r, since) =>
+          match ← c.expectMasterlessHold "hmc" since "no master to take the history from" with
+          | .error e =>
+            -- whether the fixture produced two last masters at all
+            IO.eprintln s!"# [hmc] persisted map now:\n{← nodeMapText c}"
+            return .fail e
+          | .ok _ => c.recoverByChoice "hmc" since m r }
+  ]
+}
+
 end FlareOperator.E2E.Tests.ContinuousReplicationLimits

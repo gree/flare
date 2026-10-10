@@ -98,6 +98,7 @@ def main (args : List String) : IO UInt32 :=
     Tests.ContinuousReplicationLimits.forwardWindowSuite,
     Tests.ContinuousReplicationLimits.forwardWalSuite,
     Tests.ContinuousReplicationLimits.forwardStepSuite,
+    Tests.ContinuousReplicationLimits.historyMasterlessSuite,
     Tests.ContinuousReplicationLimits.historyFirstBuildSuite,
     Tests.ContinuousReplicationLimits.reserveMeasureSuite,
     Tests.ContinuousReplicationLimits.lagHoldUnreadableSuite,

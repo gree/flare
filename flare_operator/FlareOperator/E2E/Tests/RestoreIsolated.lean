@@ -498,6 +498,59 @@ def suite : TestSuite := {
           return .fail "the hook's refusal ('RESTORE REFUSED') is not in the pod log"
         return .pass },
 
+    { name := "[product RESTORE hook, in place, ACCEPTED] P0's own backup restored over its live copy: the restored copy is live (the backup's items, a new identity), the replaced copy is KEPT as retained-restore-* (its identity), not reaped, and the restored copy becomes verified and serves writes"
+      run := do
+        let ns2 := src2Cfg.«namespace»
+        let entries ← nodeView src2Cfg
+        let some p0 := findMasterPod entries 0 | return .fail "precondition: no P0 master in the two-partition source"
+        let p0Ip := (← getPodIp p0 ns2).getD ""
+        match ← execInDebugPod src2Cfg.debugPod ns2 s!"printf 'backup inplace-p0\\r\\n' | nc -w 10 {p0Ip} {src2Cfg.flarePort}" with
+        | .ok o => IO.eprintln s!"# backup on {p0}: {o.trim}"
+        | .error e => return .fail s!"precondition: backup on {p0}: {e}"
+        let some atBackup := (← statOf src2Cfg p0Ip "curr_items").bind String.toNat? | return .fail "precondition: P0's items could not be read"
+        let oldId := ((← statOf src2Cfg p0Ip "rocksdb_copy_id").getD "").trim
+        -- the live copy moves past the backup
+        discard <| writeKeys src2Cfg.debugPod ns2 p0Ip src2Cfg.flarePort "after_backup" 20
+        let some moved := (← statOf src2Cfg p0Ip "curr_items").bind String.toNat? | return .fail "precondition: P0's items could not be read after the extra writes"
+        if moved <= atBackup then return .fail s!"precondition: no extra write landed on P0 ({atBackup} -> {moved})"
+        if let .error e ← kubectl ["exec", "-n", ns2, p0, "-c", "flared", "--", "sh", "-c", s!"echo {dataDir}/backups/inplace-p0 > {dataDir}/RESTORE"] then
+          return .fail s!"precondition: writing the RESTORE marker: {e}"
+        discard <| kubectl ["delete", "pod", p0, "-n", ns2, "--wait=false"]
+        let back ← waitForCondition s!"{p0} is back and answers stats" 300 do
+          match ← getPodIp p0 ns2 with
+          | some ip => return (← statOf src2Cfg ip "curr_items").isSome
+          | none => return false
+        if !back then return .fail s!"{p0} did not come back after the in-place restore"
+        let ip := (← getPodIp p0 ns2).getD ""
+        let after := (← statOf src2Cfg ip "curr_items").bind String.toNat?
+        let newId := ((← statOf src2Cfg ip "rocksdb_copy_id").getD "").trim
+        let files ← kubectl ["exec", "-n", ns2, p0, "-c", "flared", "--", "sh", "-c", s!"ls {dataDir}; for d in {dataDir}/retained-restore-*; do echo \"$d $(cat $d/COPY_ID 2>/dev/null)\"; done"]
+        let logs := (← kubectl ["logs", "-n", ns2, p0, "-c", "flared", "--tail=-1"]).toOption.getD ""
+        let listing := files.toOption.getD ""
+        IO.eprintln s!"# in-place restore on {p0}: items {atBackup} at the backup, {moved} live, {after} after; copy {oldId} -> {newId}; data dir:\n{listing}"
+        if after != some atBackup then return .fail s!"the live copy does not hold the backup's {atBackup} items (now {after})"
+        if newId.isEmpty || newId == oldId then return .fail s!"the restored copy kept the old identity ({oldId} -> {newId})"
+        let entriesNow := (listing.splitOn "\n").map String.trim
+        if entriesNow.contains "RESTORE" || entriesNow.contains "RESTORE.switch" then return .fail s!"a restore marker is left behind: {listing}"
+        let retainedLine := (listing.splitOn "\n").find? (fun l => containsSubstr l "/retained-restore-")
+        match retainedLine with
+        | none => return .fail s!"the replaced copy was not retained (no retained-restore-*): {listing}"
+        | some l => if !containsSubstr l oldId then return .fail s!"the retained copy is not the replaced one ({l}; expected {oldId})"
+        if !(containsSubstr logs "in-place restore" && containsSubstr logs "RETAINED") then
+          return .fail "flared did not log the in-place switch ('in-place restore ... RETAINED')"
+        -- the retained copy has no switch record: never reaped
+        IO.sleep 60000
+        let still ← kubectl ["exec", "-n", ns2, p0, "-c", "flared", "--", "sh", "-c", s!"ls -d {dataDir}/retained-restore-*"]
+        if (still.toOption.getD "").trim.isEmpty then return .fail "the retained copy was deleted within 60 s (it must wait for an approval)"
+        -- the restored copy is verified once the map makes it P0's master, and serves
+        let verified ← waitForCondition s!"{p0}'s restored copy is verified and acknowledges a write" 240 do
+          let ip2 := (← getPodIp p0 ns2).getD ""
+          return (← statOf src2Cfg ip2 "rocksdb_restored_unverified") == some "0"
+            && (← memcachedSet src2Cfg.debugPod ns2 ip2 src2Cfg.flarePort "inplace_probe" "x")
+        let unv ← statOf src2Cfg ((← getPodIp p0 ns2).getD "") "rocksdb_restored_unverified"
+        if !verified then return .fail s!"the restored copy was not verified as P0's master or acknowledged no write (restored_unverified {unv})"
+        return .pass },
+
     { name := "the SOURCE cluster and its backup are unchanged by every restore (items, history, pod UIDs, backup content hash)"
       run := do
         let before ← IO.FS.readFile s!"{← localCopy}/fingerprint"

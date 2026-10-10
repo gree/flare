@@ -550,7 +550,8 @@ namespace test_handler_proxy {
 		shared_queue_proxy_write q = get_proxy_queue_write();
 		q->set_post_proxy(true);
 		q->sync_ref();
-		t->enqueue(q);
+		shared_thread_queue tq = q;
+		t->enqueue(tq);
 		sync_args a;
 		a.q = q;
 		a.done = false;

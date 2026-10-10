@@ -38,6 +38,7 @@
 #include <netinet/in.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <errno.h>
 #include <cppcutter.h>
 
 #include "logger.h"
@@ -518,29 +519,75 @@ namespace test_handler_proxy {
 		return NULL;
 	}
 
-	void test_proxy_write_to_an_unanswering_address_is_a_counted_drop_within_seconds() {
+
+
+	// a loopback listener whose accept queue is full (Linux drops further
+	// SYNs: a connect to it times out); returns its port, fds in `fds`
+	int make_unanswering_listener(vector<int>& fds) {
 		int lfd = socket(AF_INET, SOCK_STREAM, 0);
-		cut_assert_true(lfd >= 0);
+		cut_assert_true(lfd >= 0, cut_message("socket() failed: errno %d", errno));
+		fds.push_back(lfd);
 		struct sockaddr_in addr;
 		memset(&addr, 0, sizeof(addr));
 		addr.sin_family = AF_INET;
 		addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 		addr.sin_port = 0;
-		cut_assert_equal_int(0, bind(lfd, (struct sockaddr*)&addr, sizeof(addr)));
-		cut_assert_equal_int(0, listen(lfd, 0));
+		int one = 1;
+		cut_assert_equal_int(0, setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one)), cut_message("setsockopt failed: errno %d", errno));
+		cut_assert_equal_int(0, bind(lfd, (struct sockaddr*)&addr, sizeof(addr)), cut_message("bind failed: errno %d", errno));
+		cut_assert_equal_int(0, listen(lfd, 0), cut_message("listen failed: errno %d", errno));
 		socklen_t len = sizeof(addr);
-		getsockname(lfd, (struct sockaddr*)&addr, &len);
-		const int bh_port = ntohs(addr.sin_port);
-		// fill the accept queue (never accepted)
-		vector<int> fillers;
-		for (int i = 0; i < 4; i++) {
+		cut_assert_equal_int(0, getsockname(lfd, (struct sockaddr*)&addr, &len), cut_message("getsockname failed: errno %d", errno));
+		cut_assert_true(ntohs(addr.sin_port) > 0, cut_message("no port assigned"));
+		for (int k = 0; k < 4; k++) {
 			int f = socket(AF_INET, SOCK_STREAM, 0);
-			fcntl(f, F_SETFL, fcntl(f, F_GETFL, 0) | O_NONBLOCK);
-			connect(f, (struct sockaddr*)&addr, sizeof(addr));
-			fillers.push_back(f);
+			cut_assert_true(f >= 0, cut_message("filler socket() failed: errno %d", errno));
+			fds.push_back(f);
+			cut_assert_equal_int(0, fcntl(f, F_SETFL, fcntl(f, F_GETFL, 0) | O_NONBLOCK), cut_message("fcntl failed: errno %d", errno));
+			const int cr = connect(f, (struct sockaddr*)&addr, sizeof(addr));
+			cut_assert_true(cr == 0 || errno == EINPROGRESS, cut_message("filler connect failed: errno %d", errno));
 		}
 		usleep(300 * 1000);
+		return ntohs(addr.sin_port);
+	}
 
+	// enqueue `q` on `t` and wait at most `limit_ms` for its sync; true when it finished
+	bool run_with_watchdog(shared_thread t, shared_queue_proxy_write q, int limit_ms, vector<int>& release, pthread_t& th, sync_args& a) {
+		q->sync_ref();
+		shared_thread_queue tq = q;
+		t->enqueue(tq);
+		a.q = q;
+		a.done = false;
+		const int pc = pthread_create(&th, NULL, run_sync, &a);
+		if (pc != 0) {
+			// no watchdog thread: the forward cannot be waited for safely —
+			// release anything that could hang and FAIL (never a silent pass)
+			for (size_t k = 0; k < release.size(); k++) {
+				::close(release[k]);
+			}
+			release.clear();
+			cut_fail("pthread_create failed (%d): the watchdog could not start", pc);
+		}
+		int waited = 0;
+		while (!a.done && waited < limit_ms) {
+			usleep(100 * 1000);
+			waited += 100;
+		}
+		const bool finished = a.done;
+		if (!finished) {
+			// release a connect still hanging (pending SYNs get a RST)
+			for (size_t k = 0; k < release.size(); k++) {
+				::close(release[k]);
+			}
+			release.clear();
+		}
+		pthread_join(th, NULL);
+		return finished;
+	}
+
+	void test_proxy_write_to_an_unanswering_address_is_a_counted_drop_within_seconds() {
+		vector<int> fds;
+		const int bh_port = make_unanswering_listener(fds);
 		cluster::node n = cl->set_node("127.0.0.1", bh_port, cluster::role_slave, cluster::state_active);
 		shared_thread t = tp->get(n.node_thread_type);
 		handler_proxy* h = new handler_proxy(t, cl, "127.0.0.1", bh_port);
@@ -549,30 +596,157 @@ namespace test_handler_proxy {
 		const uint64_t dropped0 = stats_object->get_proxy_write_dropped();
 		shared_queue_proxy_write q = get_proxy_queue_write();
 		q->set_post_proxy(true);
-		q->sync_ref();
-		shared_thread_queue tq = q;
-		t->enqueue(tq);
-		sync_args a;
-		a.q = q;
-		a.done = false;
 		pthread_t th;
-		pthread_create(&th, NULL, run_sync, &a);
-		int waited_ms = 0;
-		while (!a.done && waited_ms < 20000) {
-			usleep(100 * 1000);
-			waited_ms += 100;
+		sync_args a;
+		const bool finished = run_with_watchdog(t, q, 20000, fds, th, a);
+		for (size_t k = 0; k < fds.size(); k++) {
+			::close(fds[k]);
 		}
-		const bool finished = a.done;
-		// release a connect still hanging on the old behaviour (pending SYNs
-		// get a RST once the listener is gone), then clean up
-		::close(lfd);
-		for (size_t i = 0; i < fillers.size(); i++) {
-			::close(fillers[i]);
-		}
-		pthread_join(th, NULL);
 		cut_assert_true(finished, cut_message("the forward was neither sent nor dropped within 20 s (it queued behind a hanging connect)"));
 		cut_assert_equal_boolean(false, q->is_success());
 		cut_assert_true(stats_object->get_proxy_write_dropped() > dropped0, cut_message("the failed forward was not counted as a drop"));
+	}
+
+	// after a TIMED-OUT open was counted as a drop, a later forward (past the
+	// fail-fast window) reconnects as soon as the destination answers
+	void test_after_a_timed_out_open_a_later_forward_reconnects_once_the_destination_answers() {
+		vector<int> fds;
+		const int bh_port = make_unanswering_listener(fds);
+		cluster::node n = cl->set_node("127.0.0.1", bh_port, cluster::role_slave, cluster::state_active);
+		shared_thread t = tp->get(n.node_thread_type);
+		handler_proxy* h = new handler_proxy(t, cl, "127.0.0.1", bh_port);
+		t->trigger(h, true, false);
+
+		const uint64_t dropped0 = stats_object->get_proxy_write_dropped();
+		shared_queue_proxy_write q1 = get_proxy_queue_write();
+		q1->set_post_proxy(true);
+		pthread_t th;
+		sync_args a;
+		const bool f1 = run_with_watchdog(t, q1, 20000, fds, th, a);
+		const uint64_t dropped1 = stats_object->get_proxy_write_dropped();
+		// the destination comes back on the same port
+		for (size_t k = 0; k < fds.size(); k++) {
+			::close(fds[k]);
+		}
+		fds.clear();
+		server* back = new server();
+		const int lr = back->listen(bh_port);
+		usleep((handler_proxy::proxy_fail_fast_window_ms + 500) * 1000);	// past the fail-fast window
+		shared_queue_proxy_write q2 = get_proxy_queue_write();
+		q2->set_post_proxy(true);
+		q2->sync_ref();
+		shared_thread_queue tq2 = q2;
+		t->enqueue(tq2);
+		vector<shared_connection_tcp> bcs;
+		for (int r = 0; r < 100 && bcs.size() == 0; r++) {
+			bcs = back->wait();
+			if (bcs.size() == 0) usleep(100 * 1000);
+		}
+		if (bcs.size() > 0) {
+			bcs[0]->writeline("STORED");
+		}
+		q2->sync();
+		const bool ok2 = q2->is_success();
+		for (size_t k = 0; k < bcs.size(); k++) {
+			bcs[k]->close();
+		}
+		back->close();
+		delete back;
+		cut_assert_true(f1, cut_message("the first forward was neither sent nor dropped within 20 s"));
+		cut_assert_true(dropped1 > dropped0, cut_message("the timed-out forward was not counted"));
+		cut_assert_equal_int(0, lr);
+		cut_assert_true(bcs.size() > 0, cut_message("no reconnect after the destination came back"));
+		cut_assert_true(ok2, cut_message("the forward after the reconnect did not succeed"));
+		cut_assert_equal_int((int)dropped1, (int)stats_object->get_proxy_write_dropped());
+	}
+
+	// a client write forwarded TO a master (pre-proxy) through an address that
+	// times out fails for the client and is NOT counted as a replica drop
+	void test_pre_proxy_write_to_an_unanswering_address_fails_without_a_replica_drop() {
+		vector<int> fds;
+		const int bh_port = make_unanswering_listener(fds);
+		cluster::node n = cl->set_node("127.0.0.1", bh_port, cluster::role_master, cluster::state_active);
+		shared_thread t = tp->get(n.node_thread_type);
+		handler_proxy* h = new handler_proxy(t, cl, "127.0.0.1", bh_port);
+		t->trigger(h, true, false);
+
+		const uint64_t dropped0 = stats_object->get_proxy_write_dropped();
+		shared_queue_proxy_write q = get_proxy_queue_write();		// pre-proxy (post_proxy false)
+		pthread_t th;
+		sync_args a;
+		const bool finished = run_with_watchdog(t, q, 20000, fds, th, a);
+		for (size_t k = 0; k < fds.size(); k++) {
+			::close(fds[k]);
+		}
+		cut_assert_true(finished, cut_message("the client write was neither answered nor failed within 20 s"));
+		cut_assert_equal_boolean(false, q->is_success());
+		cut_assert_equal_int((int)dropped0, (int)stats_object->get_proxy_write_dropped());
+	}
+
+	// the same for a REFUSED master connection (retries exhausted): the client
+	// hears the failure, no replica drop is counted (it was, before)
+	void test_pre_proxy_write_to_a_refused_master_is_not_a_replica_drop() {
+		cluster::node n = cl->set_node("localhost", port, cluster::role_master, cluster::state_active);
+		shared_thread t = start_handler_proxy(n.node_thread_type);
+		s->close();
+		const uint64_t dropped0 = stats_object->get_proxy_write_dropped();
+		shared_queue_proxy_write q = get_proxy_queue_write();
+		proxy_request_to_down_node(t, q);
+		cut_assert_equal_boolean(false, q->is_success());
+		cut_assert_equal_int((int)dropped0, (int)stats_object->get_proxy_write_dropped());
+	}
+
+	// a forward to a replica whose role became PROXY is skipped: counted as a
+	// drop when it was a post-proxy forward, not when it was a client write
+	void test_post_proxy_forward_skipped_to_a_proxy_is_a_counted_drop() {
+		cluster::node n = cl->set_node("localhost", port, cluster::role_proxy, cluster::state_active);
+		shared_thread t = start_handler_proxy(n.node_thread_type);
+		const uint64_t dropped0 = stats_object->get_proxy_write_dropped();
+		shared_queue_proxy_write pre = get_proxy_queue_write();
+		proxy_request(t, pre, "STORED");
+		cut_assert_equal_boolean(false, pre->is_success());
+		cut_assert_equal_int((int)dropped0, (int)stats_object->get_proxy_write_dropped());
+		shared_queue_proxy_write post = get_proxy_queue_write();
+		post->set_post_proxy(true);
+		post->sync_ref();
+		shared_thread_queue tq = post;
+		t->enqueue(tq);
+		post->sync();
+		cut_assert_equal_boolean(false, post->is_success());
+		cut_assert_equal_int((int)dropped0 + 1, (int)stats_object->get_proxy_write_dropped());
+	}
+
+	// forwards still QUEUED when their thread shuts down are counted as drops
+	// (post-proxy) — they vanished without a trace before; client writes are not
+	// a handler that never dequeues: its queue stays as it is until shutdown
+	struct idle_handler : public thread_handler {
+		idle_handler(shared_thread t): thread_handler(t) {};
+		int run() {
+			while (this->_thread->is_shutdown_request() == thread::shutdown_request_none) {
+				usleep(10 * 1000);
+			}
+			return 0;
+		};
+	};
+
+	void test_forwards_abandoned_at_thread_shutdown_are_counted() {
+		shared_thread t = tp->get(42);
+		t->trigger(new idle_handler(t), true, false);
+		t->set_peer("abandoned.example", 12121);
+		const uint64_t dropped0 = stats_object->get_proxy_write_dropped();
+		for (int k = 0; k < 3; k++) {
+			shared_queue_proxy_write q = get_proxy_queue_write();
+			q->set_post_proxy(true);
+			shared_thread_queue tq = q;
+			cut_assert_equal_int(0, t->enqueue(tq));
+		}
+		shared_queue_proxy_write pre = get_proxy_queue_write();
+		shared_thread_queue tpre = pre;
+		cut_assert_equal_int(0, t->enqueue(tpre));
+		t->shutdown(false, false);
+		cut_assert_equal_int((int)dropped0 + 3, (int)stats_object->get_proxy_write_dropped());
+		map<string, uint64_t> by = stats_object->get_proxy_write_dropped_by_dest();
+		cut_assert_equal_int(3, (int)by["abandoned.example:12121"]);
 	}
 }
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 noexpandtab autoindent

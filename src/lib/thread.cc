@@ -26,6 +26,7 @@
  *
  *	$Id$
  */
+#include <boost/lexical_cast.hpp>
 #include "app.h"
 #include "thread.h"
 #include "thread_pool.h"
@@ -120,6 +121,17 @@ thread::thread(thread_pool* t):
 }
 
 /**
+ *	"host:port" of this thread's peer (empty when it has none)
+ */
+string thread::_abandon_dest() {
+	pthread_rwlock_rdlock(&this->_mutex_info);
+	string r = this->_info.peer_name.empty() ? string("")
+		: this->_info.peer_name + ":" + boost::lexical_cast<string>(this->_info.peer_port);
+	pthread_rwlock_unlock(&this->_mutex_info);
+	return r;
+}
+
+/**
  *	dtor for thread
  */
 thread::~thread() {
@@ -127,6 +139,7 @@ thread::~thread() {
 		log_warning("thread has not-yet-processing queues [size=%d] -> clean up and unref()", this->_thread_queue.size());
 		while (this->_thread_queue.size() > 0) {
 			shared_thread_queue q = this->_thread_queue.front();
+			q->on_abandoned(this->_abandon_dest());
 			q->sync_unref();
 			this->_thread_queue.pop();
 			stats_object->decrement_total_thread_queue();
@@ -292,6 +305,7 @@ int thread::clean(bool& is_pool) {
 		log_warning("thread has not-yet-processing queues [size=%d] -> clean up and unref()", this->_thread_queue.size());
 		while (this->_thread_queue.size() > 0) {
 			shared_thread_queue q = this->_thread_queue.front();
+			q->on_abandoned(this->_abandon_dest());
 			q->sync_unref();
 			this->_thread_queue.pop();
 			stats_object->decrement_total_thread_queue();

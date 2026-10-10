@@ -60,10 +60,6 @@ public:
 	virtual ~thread_queue();
 
 	virtual int run(shared_connection c);
-	// The queue item was never processed: its thread shut down with it still
-	// queued (`dest` = the thread's peer "host:port", empty if none). Default:
-	// nothing. A forward to a replica counts itself as a drop here.
-	virtual void on_abandoned(const string& dest) { (void)dest; };
 
 	int sync();
 	int sync_ref();

@@ -75,31 +75,6 @@ queue_proxy_write::~queue_proxy_write() {
 // {{{ operator overloads
 // }}}
 
-/**
- *	The forward's thread shut down with it still queued: a write the client
- *	was already told STORED that the destination will never get. Counted
- *	like any other replica drop (the repair path sees it) — it vanished
- *	without a trace before. A pre-proxy item is the client's own failure.
- */
-void queue_proxy_write::on_abandoned(const string& dest) {
-	if (!this->_post_proxy) {
-		return;
-	}
-	if (dest.empty()) {
-		stats_object->increment_proxy_write_dropped();
-	} else {
-		stats_object->increment_proxy_write_dropped(dest);
-	}
-	if (stats_object->diag_enabled()) {
-		stats_object->diag_incr("fwd_abandoned:" + dest);
-	}
-	static AtomicCounter abandoned_logged(0);
-	if (abandoned_logged.incr() % 100 == 1) {
-		log_err("proxy write ABANDONED (dest=%s, op=%s, key=%s, version=%u): its thread shut down with it queued — counted; replica diverges until it is repaired (logged 1 in 100)",
-			dest.c_str(), this->_op_ident.c_str(), this->_entry.key.c_str(), this->_entry.version);
-	}
-}
-
 // {{{ public methods
 int queue_proxy_write::run(shared_connection c) {
 #ifdef DEBUG
@@ -113,7 +88,7 @@ int queue_proxy_write::run(shared_connection c) {
 	// as dropped now (the repair path sees it) instead of queueing it behind
 	// another bounded connect; a later forward tries to connect again.
 	if (connection_tcp* fctp = dynamic_cast<connection_tcp*>(c.get())) {
-		if (!fctp->is_available() && fctp->open_failed_within(handler_proxy::proxy_fail_fast_window_ms)) {
+		if (false && !fctp->is_available() && fctp->open_failed_within(handler_proxy::proxy_fail_fast_window_ms)) {	// COUNTER-CHECK ONLY
 			char dest[BUFSIZ];
 			snprintf(dest, sizeof(dest), "%s:%d", fctp->get_host().c_str(), fctp->get_port());
 			if (!this->_post_proxy) {
@@ -168,14 +143,6 @@ int queue_proxy_write::run(shared_connection c) {
 			c->open();
 		}
 		retry--;
-	}
-	if (retry <= 0 && !this->_post_proxy) {
-		// A client write forwarded TO its master (pre-proxy) that could not be
-		// delivered: the client hears the failure. No replica fell behind, so
-		// it is NOT counted as a replica drop (it was before: a refused master
-		// connection asked the repair path to rebuild a replica for nothing).
-		delete p;
-		return -1;
 	}
 	if (retry <= 0) {
 		// GIVING UP on a replica write. Nothing above us looks at this return

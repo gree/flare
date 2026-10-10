@@ -74,8 +74,7 @@ int handler_proxy::run() {
 	// to it queued behind — not sent, not answered, not counted as dropped.
 	// Bounded like the other replication connections; the host is resolved
 	// again on every open.
-	ctp->set_connect_timeout_ms(proxy_connect_timeout_ms);
-	ctp->set_connect_retry_limit(proxy_connect_retry_limit);
+	// COUNTER-CHECK ONLY: the pre-fix connection (blocking connect, 8 retries)
 	shared_connection c(ctp);
 	this->_connection = c;
 	if (c->open() < 0) {
@@ -122,13 +121,6 @@ int handler_proxy::run() {
 				shared_queue_proxy_write r = boost::dynamic_pointer_cast<queue_proxy_write, thread_queue>(q);
 				if (r) {
 					key = r->get_entry().key;
-					// a forward to a replica that is not delivered because the
-					// destination became a proxy: a write the client was told
-					// STORED that this copy will not get — counted as a drop so
-					// the repair path takes it (it was only a notice before)
-					if (r->is_post_proxy()) {
-						stats_object->increment_proxy_write_dropped(this->_node_server_name + ":" + boost::lexical_cast<string>(this->_node_server_port));
-					}
 				}
 			}
 			log_notice("skipped proxy request is [ident=%s, key=%s]", q->get_ident().c_str(), key.c_str());

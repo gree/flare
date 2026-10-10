@@ -131,7 +131,6 @@ public:
 	unsigned int get_id() { return this->_id; };
 	pthread_t get_thread_id() { return this->_thread_id; };
 	int get_type() { return this->_info.type; };
-	string _abandon_dest();
 	int set_peer(string host, int port) { pthread_rwlock_wrlock(&this->_mutex_info); this->_info.peer_name = host; this->_info.peer_port = port; pthread_rwlock_unlock(&this->_mutex_info); return 0; };
 	int set_op(string op) { pthread_rwlock_wrlock(&this->_mutex_info); this->_info.op = op; pthread_rwlock_unlock(&this->_mutex_info); return 0; };
 	string get_state() { pthread_rwlock_rdlock(&this->_mutex_info); string s = this->_info.state; pthread_rwlock_unlock(&this->_mutex_info); return s; };

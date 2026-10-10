@@ -4023,17 +4023,91 @@ private:
 };
 }	// anonymous namespace
 
+namespace {
+// The user keys a replicated batch writes (reserved keys included: they share
+// the slot of their own key hash, never a user key's lock).
+class batch_key_collector : public rocksdb::WriteBatch::Handler {
+public:
+	std::vector<std::string> keys;
+	rocksdb::Status PutCF(uint32_t, const rocksdb::Slice& key, const rocksdb::Slice&) override { keys.push_back(key.ToString()); return rocksdb::Status::OK(); }
+	rocksdb::Status DeleteCF(uint32_t, const rocksdb::Slice& key) override { keys.push_back(key.ToString()); return rocksdb::Status::OK(); }
+	rocksdb::Status SingleDeleteCF(uint32_t, const rocksdb::Slice& key) override { keys.push_back(key.ToString()); return rocksdb::Status::OK(); }
+};
+}	// anonymous namespace
+
+/**
+ *	A replicated batch (WAL incremental sync, snapshot push catch-up) is applied
+ *	under the SAME locks as set()/remove(): the whole-DB read lock and the slot
+ *	locks of every key it writes, taken in index order (set() takes one slot,
+ *	so no cycle). Without them a forwarded set() of the same key could run
+ *	between the batch's existence check and its write: both counted the key
+ *	(curr_items above the keys), and the batch touched _db while a copy switch
+ *	could replace it. Returns the slot indices to release.
+ */
+std::vector<int> storage_rocksdb::_lock_batch_slots(const rocksdb::WriteBatch& batch) {
+	batch_key_collector c;
+	const_cast<rocksdb::WriteBatch&>(batch).Iterate(&c);
+	std::vector<int> idx;
+	for (size_t i = 0; i < c.keys.size(); i++) {
+		storage::entry e;
+		e.key = c.keys[i];
+		idx.push_back(e.get_key_hash_value(hash_algorithm_murmur) % this->_mutex_slot_size);
+	}
+	std::sort(idx.begin(), idx.end());
+	idx.erase(std::unique(idx.begin(), idx.end()), idx.end());
+	pthread_rwlock_rdlock(&this->_mutex_wholelock);
+	for (size_t i = 0; i < idx.size(); i++) {
+		pthread_rwlock_wrlock(&this->_mutex_slot[idx[i]]);
+	}
+	return idx;
+}
+
+void storage_rocksdb::_unlock_batch_slots(const std::vector<int>& idx) {
+	for (size_t i = idx.size(); i > 0; i--) {
+		pthread_rwlock_unlock(&this->_mutex_slot[idx[i - 1]]);
+	}
+	pthread_rwlock_unlock(&this->_mutex_wholelock);
+}
+
+namespace {
+// TEST SEAM (FLARE_TEST_APPLY_PAUSE_FILE): a replicated batch stops between its
+// existence check and its write while the file exists; "<file>.reached" says
+// it got there (the concurrency test of apply_batch_with_lsn vs set()).
+void test_apply_pause() {
+	const char* f = getenv("FLARE_TEST_APPLY_PAUSE_FILE");
+	if (f == NULL || f[0] == '\0') {
+		return;
+	}
+	struct stat st;
+	if (stat(f, &st) != 0) {
+		return;
+	}
+	const std::string reached = std::string(f) + ".reached";
+	FILE* r = fopen(reached.c_str(), "w");
+	if (r != NULL) {
+		fclose(r);
+	}
+	while (stat(f, &st) == 0) {
+		usleep(10000);
+	}
+}
+}	// anonymous namespace
+
 int storage_rocksdb::apply_batch(const rocksdb::WriteBatch& batch) {
+	const std::vector<int> slots = this->_lock_batch_slots(batch);
 	if (this->_db == NULL) {
+		this->_unlock_batch_slots(slots);
 		return -1;
 	}
 	// O(1) curr_items bookkeeping for the replica path: replicated batches
 	// bypass set()/remove(), so walk the batch for its live-key delta first.
 	curr_items_delta_handler h(this->_db, &this->_read_options);
 	const_cast<rocksdb::WriteBatch&>(batch).Iterate(&h);
+	test_apply_pause();
 	// WriteBatch is passed as const reference, but Write() needs non-const pointer
 	rocksdb::WriteBatch* batch_ptr = const_cast<rocksdb::WriteBatch*>(&batch);
 	rocksdb::Status status = this->_db->Write(this->_write_options, batch_ptr);
+	this->_unlock_batch_slots(slots);
 	if (!status.ok()) {
 		log_err("WriteBatch apply failed: %s", status.ToString().c_str());
 		return -1;
@@ -4670,6 +4744,13 @@ int storage_rocksdb::apply_wal_batch(const string& source_epoch, const string& i
 }
 
 int storage_rocksdb::apply_batch_with_lsn(const rocksdb::WriteBatch& batch, uint64_t master_lsn) {
+	const std::vector<int> slots = this->_lock_batch_slots(batch);
+	const int r = this->_apply_batch_with_lsn_locked(batch, master_lsn);
+	this->_unlock_batch_slots(slots);
+	return r;
+}
+
+int storage_rocksdb::_apply_batch_with_lsn_locked(const rocksdb::WriteBatch& batch, uint64_t master_lsn) {
 	if (this->_db == NULL) {
 		return -1;
 	}
@@ -4692,6 +4773,7 @@ int storage_rocksdb::apply_batch_with_lsn(const rocksdb::WriteBatch& batch, uint
 	// excluded by the handler).
 	curr_items_delta_handler h(this->_db, &this->_read_options);
 	merged.Iterate(&h);
+	test_apply_pause();
 
 	rocksdb::Status status = this->_db->Write(this->_write_options, &merged);
 	if (!this->_note_write_status(status, "apply_batch_with_lsn")) {

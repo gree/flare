@@ -545,6 +545,10 @@ public:
 
 	int apply_batch(const rocksdb::WriteBatch& batch);
 	int apply_batch_with_lsn(const rocksdb::WriteBatch& batch, uint64_t master_lsn);
+	// the slot locks of a replicated batch (same order as set())
+	std::vector<int> _lock_batch_slots(const rocksdb::WriteBatch& batch);
+	void _unlock_batch_slots(const std::vector<int>& idx);
+	int _apply_batch_with_lsn_locked(const rocksdb::WriteBatch& batch, uint64_t master_lsn);
 	static bool validate_batch_rep(const rocksdb::WriteBatch& batch);
 	uint64_t get_repl_last_lsn();
 	// Durably overwrite the replication cursor (kReplLastLsnKey). Used to

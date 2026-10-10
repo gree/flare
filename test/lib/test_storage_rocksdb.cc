@@ -3020,6 +3020,69 @@ namespace {
 	}
 }
 
+namespace {
+	struct apply_args { storage_rocksdb* s; rocksdb::WriteBatch* b; int rc; };
+	void* run_apply(void* a) {
+		apply_args* x = static_cast<apply_args*>(a);
+		x->rc = x->s->apply_batch_with_lsn(*x->b, 7);
+		return NULL;
+	}
+	struct set_args { storage_rocksdb* s; int rc; };
+	void* run_set(void* a) {
+		set_args* x = static_cast<set_args*>(a);
+		x->rc = storage_set_string(x->s, "race", "forwarded");
+		return NULL;
+	}
+}
+
+// copy-identity 11 investigation (2026-10-10): a replicated batch (WAL
+// incremental sync of a Prepare replica) and a forwarded set() of the SAME key
+// run concurrently. The batch is stopped between its existence check and its
+// write (FLARE_TEST_APPLY_PAUSE_FILE); the set() is issued meanwhile. Without
+// the slot locks both saw the key absent and both counted it (curr_items 2 for
+// one key); with them the set() waits for the batch, finds the key, and the
+// counter stays equal to the keys.
+void test_replicated_batch_and_a_concurrent_set_count_one_key_once() {
+	storage_rocksdb* scratch = make_rocksdb(wal_master_dir);
+	const string value = serialized_entry(scratch, "race", "replicated");
+	drop_rocksdb(scratch, wal_master_dir);
+	storage_rocksdb* s = make_rocksdb(wal_slave_dir);
+	const string pause = string(wal_slave_dir) + "-apply-pause";
+	const string reached = pause + ".reached";
+	unlink(reached.c_str());
+	FILE* f = fopen(pause.c_str(), "w");
+	cut_assert_not_null(f);
+	fclose(f);
+	setenv("FLARE_TEST_APPLY_PAUSE_FILE", pause.c_str(), 1);
+	rocksdb::WriteBatch b;
+	b.Put("race", value);
+	apply_args aa = { s, &b, -9 };
+	pthread_t ta;
+	cut_assert_equal_int(0, pthread_create(&ta, NULL, run_apply, &aa));
+	struct stat st;
+	for (int i = 0; i < 500 && stat(reached.c_str(), &st) != 0; i++) {
+		usleep(10000);
+	}
+	const bool paused = stat(reached.c_str(), &st) == 0;
+	set_args sa = { s, -9 };
+	pthread_t tb;
+	cut_assert_equal_int(0, pthread_create(&tb, NULL, run_set, &sa));
+	usleep(300000);		// the old code completed the set() here
+	unlink(pause.c_str());
+	pthread_join(ta, NULL);
+	pthread_join(tb, NULL);
+	unsetenv("FLARE_TEST_APPLY_PAUSE_FILE");
+	unlink(reached.c_str());
+	const uint32_t counted = s->count();
+	const string got = get_value(s, "race");
+	drop_rocksdb(s, wal_slave_dir);
+	cut_assert_true(paused);
+	cut_assert_equal_int(0, aa.rc);
+	cut_assert_equal_int(0, sa.rc);
+	cut_assert_equal_int(1, (int)counted);
+	cut_assert_equal_string("forwarded", got.c_str());
+}
+
 // D7 (WSTR-0 audit): a follower stopped asynchronously may still finish its
 // slice after its successor started. Its batches carry the generation it was
 // started with; once the generation moves they are refused under the apply

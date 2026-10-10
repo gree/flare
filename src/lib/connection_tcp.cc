@@ -36,6 +36,24 @@ namespace flare {
 
 int connection_tcp::read_timeout = 10*60*1000;
 
+namespace {
+uint64_t monotonic_ms_now() {
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+}	// anonymous namespace
+
+int connection_tcp::open() {
+	const int r = this->_open(this->get_host(), this->get_port());
+	this->_open_failed_at_ms = r < 0 ? monotonic_ms_now() : 0;
+	return r;
+}
+
+bool connection_tcp::open_failed_within(int ms) const {
+	return this->_open_failed_at_ms > 0 && monotonic_ms_now() - this->_open_failed_at_ms < (uint64_t)ms;
+}
+
 // {{{ ctor/dtor
 /**
  *	ctor for connection_tcp
@@ -60,7 +78,8 @@ connection_tcp::connection_tcp(const std::string& host, int port):
 		_connect_retry_limit(connection_tcp::connect_retry_limit),
 		_connect_retry_wait(connection_tcp::connect_retry_wait),
 		_connect_timeout_ms(0),
-		_deadline_ms(0) {
+		_deadline_ms(0),
+		_open_failed_at_ms(0) {
 }
 
 /**
@@ -86,7 +105,8 @@ connection_tcp::connection_tcp(int sock, struct sockaddr_in addr):
 		_connect_retry_limit(connection_tcp::connect_retry_limit),
 		_connect_retry_wait(connection_tcp::connect_retry_wait),
 		_connect_timeout_ms(0),
-		_deadline_ms(0) {
+		_deadline_ms(0),
+		_open_failed_at_ms(0) {
 }
 
 /**
@@ -112,7 +132,8 @@ connection_tcp::connection_tcp(int sock, struct sockaddr_un addr):
 		_connect_retry_limit(connection_tcp::connect_retry_limit),
 		_connect_retry_wait(connection_tcp::connect_retry_wait),
 		_connect_timeout_ms(0),
-		_deadline_ms(0) {
+		_deadline_ms(0),
+		_open_failed_at_ms(0) {
 }
 
 /**

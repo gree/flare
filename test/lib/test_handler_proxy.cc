@@ -34,6 +34,10 @@
 #include "server.h"
 #include "op_get.h"
 
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <fcntl.h>
+#include <pthread.h>
 #include <cppcutter.h>
 
 #include "logger.h"
@@ -500,6 +504,74 @@ namespace test_handler_proxy {
 		q = get_proxy_queue_write();
 		proxy_request(t, q, "STORED");
 		cut_assert_equal_boolean(false, q->is_success());
+	}
+
+	// A destination whose address takes SYNs but never answers (a replaced
+	// pod's old IP, forward-window-steps 38048708017): reproduced with a
+	// listener whose accept queue is full — Linux drops further SYNs, so a
+	// blocking connect hangs for the kernel's SYN timeout (~130 s) per attempt.
+	struct sync_args { shared_queue_proxy_write q; volatile bool done; };
+	void* run_sync(void* a) {
+		sync_args* x = static_cast<sync_args*>(a);
+		x->q->sync();
+		x->done = true;
+		return NULL;
+	}
+
+	void test_proxy_write_to_an_unanswering_address_is_a_counted_drop_within_seconds() {
+		int lfd = socket(AF_INET, SOCK_STREAM, 0);
+		cut_assert_true(lfd >= 0);
+		struct sockaddr_in addr;
+		memset(&addr, 0, sizeof(addr));
+		addr.sin_family = AF_INET;
+		addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+		addr.sin_port = 0;
+		cut_assert_equal_int(0, bind(lfd, (struct sockaddr*)&addr, sizeof(addr)));
+		cut_assert_equal_int(0, listen(lfd, 0));
+		socklen_t len = sizeof(addr);
+		getsockname(lfd, (struct sockaddr*)&addr, &len);
+		const int bh_port = ntohs(addr.sin_port);
+		// fill the accept queue (never accepted)
+		vector<int> fillers;
+		for (int i = 0; i < 4; i++) {
+			int f = socket(AF_INET, SOCK_STREAM, 0);
+			fcntl(f, F_SETFL, fcntl(f, F_GETFL, 0) | O_NONBLOCK);
+			connect(f, (struct sockaddr*)&addr, sizeof(addr));
+			fillers.push_back(f);
+		}
+		usleep(300 * 1000);
+
+		cluster::node n = cl->set_node("127.0.0.1", bh_port, cluster::role_slave, cluster::state_active);
+		shared_thread t = tp->get(n.node_thread_type);
+		handler_proxy* h = new handler_proxy(t, cl, "127.0.0.1", bh_port);
+		t->trigger(h, true, false);
+
+		const uint64_t dropped0 = stats_object->get_proxy_write_dropped();
+		shared_queue_proxy_write q = get_proxy_queue_write();
+		q->set_post_proxy(true);
+		q->sync_ref();
+		t->enqueue(q);
+		sync_args a;
+		a.q = q;
+		a.done = false;
+		pthread_t th;
+		pthread_create(&th, NULL, run_sync, &a);
+		int waited_ms = 0;
+		while (!a.done && waited_ms < 20000) {
+			usleep(100 * 1000);
+			waited_ms += 100;
+		}
+		const bool finished = a.done;
+		// release a connect still hanging on the old behaviour (pending SYNs
+		// get a RST once the listener is gone), then clean up
+		::close(lfd);
+		for (size_t i = 0; i < fillers.size(); i++) {
+			::close(fillers[i]);
+		}
+		pthread_join(th, NULL);
+		cut_assert_true(finished, cut_message("the forward was neither sent nor dropped within 20 s (it queued behind a hanging connect)"));
+		cut_assert_equal_boolean(false, q->is_success());
+		cut_assert_true(stats_object->get_proxy_write_dropped() > dropped0, cut_message("the failed forward was not counted as a drop"));
 	}
 }
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 noexpandtab autoindent

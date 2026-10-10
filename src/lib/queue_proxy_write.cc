@@ -29,6 +29,7 @@
 #include "queue_proxy_write.h"
 
 #include <boost/lexical_cast.hpp>
+#include "handler_proxy.h"
 #include "app.h"
 #include "connection_tcp.h"
 #include "op_proxy_write.h"
@@ -81,6 +82,32 @@ int queue_proxy_write::run(shared_connection c) {
 		log_debug("proxy request (write) (host=%s, port=%d, op=%s, key=%s, version=%u)", ctp->get_host().c_str(), ctp->get_port(), this->_op_ident.c_str(), this->_entry.key.c_str(), this->_entry.version);
 	}
 #endif
+
+	// FAIL FAST (forward-window-steps 38048708017): the destination's
+	// connection is down and failed to open moments ago — count this forward
+	// as dropped now (the repair path sees it) instead of queueing it behind
+	// another bounded connect; a later forward tries to connect again.
+	if (connection_tcp* fctp = dynamic_cast<connection_tcp*>(c.get())) {
+		if (!fctp->is_available() && fctp->open_failed_within(handler_proxy::proxy_fail_fast_window_ms)) {
+			char dest[BUFSIZ];
+			snprintf(dest, sizeof(dest), "%s:%d", fctp->get_host().c_str(), fctp->get_port());
+			if (!this->_post_proxy) {
+				// a client write forwarded TO the master: the client hears the
+				// failure (no replica fell behind, nothing to count)
+				return -1;
+			}
+			stats_object->increment_proxy_write_dropped(string(dest));
+			if (stats_object->diag_enabled()) {
+				stats_object->diag_incr(string("fwd_dropped_fast:") + dest);
+			}
+			static AtomicCounter fast_logged(0);
+			if (fast_logged.incr() % 100 == 1) {
+				log_err("proxy write DROPPED at once (dest=%s, op=%s, key=%s, version=%u): the connection failed to open %d ms ago or less — counted; replica diverges until it is repaired (logged 1 in 100)",
+						dest, this->_op_ident.c_str(), this->_entry.key.c_str(), this->_entry.version, handler_proxy::proxy_fail_fast_window_ms);
+			}
+			return -1;
+		}
+	}
 
 	op_proxy_write* p = this->_get_op(this->_op_ident, c);
 	if (p == NULL) {

@@ -67,7 +67,16 @@ int handler_proxy::run() {
 	this->_thread->set_peer(this->_node_server_name, this->_node_server_port);
 	this->_thread->set_state("connect");
 
-	shared_connection c(new connection_tcp(this->_node_server_name, this->_node_server_port));
+	connection_tcp* ctp = new connection_tcp(this->_node_server_name, this->_node_server_port);
+	// The live write path: a destination that does not answer SYNs (a
+	// replaced pod's old address, forward-window-steps 38048708017) blocked
+	// a blocking connect ~130 s per attempt x 8 retries, and every forward
+	// to it queued behind — not sent, not answered, not counted as dropped.
+	// Bounded like the other replication connections; the host is resolved
+	// again on every open.
+	ctp->set_connect_timeout_ms(proxy_connect_timeout_ms);
+	ctp->set_connect_retry_limit(proxy_connect_retry_limit);
+	shared_connection c(ctp);
 	this->_connection = c;
 	if (c->open() < 0) {
 		log_err("failed to connect to node server [name=%s, port=%d]", this->_node_server_name.c_str(), this->_node_server_port);

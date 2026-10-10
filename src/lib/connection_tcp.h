@@ -81,6 +81,10 @@ protected:
 	// 0 = none). The per-read timeout bounds a silent peer; this bounds a
 	// peer that trickles bytes, for short requests such as an identity probe.
 	uint64_t						_deadline_ms;
+	// When the last open() FAILED (monotonic msec, 0 = the last open
+	// succeeded or none failed): lets a sender fail fast instead of queueing
+	// behind another connect to a destination that is not reachable.
+	uint64_t						_open_failed_at_ms;
 
 public:
 	static int read_timeout;												// msec
@@ -94,7 +98,9 @@ public:
 	connection_tcp(int sock, struct sockaddr_un addr);
 	virtual ~connection_tcp();
 
-	virtual int open() { return this->_open(this->get_host(), this->get_port()); };
+	virtual int open();
+	// true when the last open() failed less than `ms` ago
+	bool open_failed_within(int ms) const;
 	virtual int read(char** p, int expect_len, bool readline, bool& actual);
 	virtual int readline(char** p);
 	virtual int readsize(int expect_len, char** p);

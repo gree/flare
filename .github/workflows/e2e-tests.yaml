@@ -250,6 +250,9 @@ jobs:
       - name: Test the restore hook (provenance check before replacement)
         run: python3 -m unittest discover -s scripts/tests -p 'test_restore_hook.py'
 
+      - name: Test verification V (offline copy comparator, deterministic fixtures)
+        run: python3 -m unittest discover -s scripts/tests -p 'test_verify_copy.py'
+
       - name: Build Lean operator and tests
         run: |
           cd flare_operator

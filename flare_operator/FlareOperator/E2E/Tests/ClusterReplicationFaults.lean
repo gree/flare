@@ -228,7 +228,9 @@ def suite : TestSuite := {
     deploySecondCluster cfgDst
     let s2 ← waitForStable cfgDst 50
     if !s2 then throw (IO.userError "destination cluster did not stabilize")
-  onFailure := dumpClusterDiagnostics cfgSrc.«namespace» s!"app={cfgSrc.operatorName}"
+  onFailure := do
+    dumpClusterDiagnostics cfgSrc.«namespace» s!"app={cfgSrc.operatorName}"
+    dumpClusterDiagnostics cfgDst.«namespace» s!"app={cfgDst.operatorName}"
   teardown := do
     discard <| kubectl ["delete", "service", lateSvcName, "-n", cfgDst.«namespace», "--ignore-not-found"]
     cleanupCluster cfgSrc
@@ -368,7 +370,21 @@ def suite : TestSuite := {
           | none => return false
           | some ip => return (← readKey cfgDst ip "rst_pre_9").isSome
         let t1 ← IO.monoMsNow
-        if !back then return .fail "the destination master did not come back within 300 s"
+        if !back then
+          -- what the restarted destination did with its data
+          let dl ← kubectlLogs dPod cfgDst.«namespace» 3000
+          let keep := (dl.splitOn "\n").filter fun l =>
+            containsSubstr l "data_dir" || containsSubstr l "snapshot" || containsSubstr l "copy" || containsSubstr l "COPY"
+              || containsSubstr l "binding" || containsSubstr l "restored" || containsSubstr l "open" || containsSubstr l "CRITICAL"
+              || containsSubstr l "ERR" || containsSubstr l "node map accepted"
+          IO.eprintln s!"# restarted destination {dPod} log (filtered, last 60): {keep.reverse.take 60 |>.reverse |>.map String.trim}"
+          match ← getPodIp dPod cfgDst.«namespace» with
+          | some ip => IO.eprintln s!"# destination stats: {← creplStats ip}; curr_items {← getCurrItems cfgDst.debugPod cfgDst.«namespace» ip cfgDst.flarePort}"
+          | none => pure ()
+          match ← kubectl ["exec", dPod, "-n", cfgDst.«namespace», "--", "sh", "-c", "ls -la /tmp/flare /tmp/flare/* 2>&1 | head -60; df -h /tmp/flare"] with
+          | .ok o => IO.eprintln s!"# destination data dir: {o}"
+          | .error e => IO.eprintln s!"# destination data dir unreadable: {e}"
+          return .fail "the destination master did not come back within 300 s"
         let some dIp2 ← masterIp cfgDst | return .fail "no destination master after the restart"
         let itemsAfter ← getCurrItems cfgDst.debugPod cfgDst.«namespace» dIp2 cfgDst.flarePort
         IO.eprintln s!"# destination back after ~{(t1 - t0) / 1000} s at {dIp2}; curr_items {itemsBefore} before, {itemsAfter} on return (an EMPTY return would not be detected by anything: no source-side check exists)"

@@ -883,6 +883,8 @@ Procedure (ordered; every step a human act):
    is NOT approved; `scripts/flare_v_capture_kind.py` refuses any context
    but kind.
 3. Only on MATCH: set `spec.forwardApproval` to the printed approval line.
+   One use: the line a switch was issued with is recorded in
+   `status.forwardApprovalConsumed` and refused again.
 4. Keep writes stopped until the phase is **AwaitingCutover**: after the
    source applied forward mode the operator checks the same approval again;
    a write in between holds the migration in Forwarding ("re-run V and set a
@@ -891,6 +893,23 @@ Procedure (ordered; every step a human act):
 
 `status.message` names the condition that holds. Nothing here repairs a
 difference or re-seeds; R (repair) stays a separate, approved procedure.
+
+### Cross-cluster seed without snapshot push (opt-in) {#cross-cluster-per-key-only}
+
+`spec.clusterReplication.snapshotPush: false` makes every cross-cluster
+seed a per-key merge dump: the destination keeps its own history, so a
+destination master restart is an ordinary restart (with a snapshot push the
+destination takes the source's history and, today, stays masterless after a
+restart — review-cross-cluster §10/§13, unresolved). Default unchanged
+(true). Set it together with `enabled: true` (it is read when a seed starts;
+a running seed is not affected). Needs a flared that knows
+`cluster-replication-snapshot-push`: an older flared rejects the config.
+Check: source stat `cluster_replication_snapshot_push off`, seed state
+`completed_dump`, `cluster_replication[seed_snapshot_push_disabled]` moved,
+destination `rocksdb_snapshot_bootstrap` unchanged. Costs: a slower seed
+and `dump` on the source master (reaps expired keys, takes the iteration
+slot and the whole-DB read lock for the seed). Choosing it for a real move
+is a decision that has not been made.
 
 ### Abort after the forward switch {#migration-forward-abort}
 

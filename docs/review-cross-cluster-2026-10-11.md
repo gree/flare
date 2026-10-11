@@ -704,6 +704,92 @@ with writes stopped the sequence numbers did not move between captures
 expiry; a store with expiring keys reaps in the background and moves the
 position (the approval then goes stale — fail-closed, not measured).
 
+## 15. Fifth round (2026-10-12): opt-in per-key-only switch, one-use approval, capture resources
+
+### 15.1 Opt-in switch: `spec.clusterReplication.snapshotPush: false`
+
+Makes the per-key-only option possible; NOT a decision to use it, and the
+snapshot-push history problem (§10, §13; faults T4/T5) stays open.
+
+- flared `cluster-replication-snapshot-push` (bool, default true; reload:
+  absent = true). Read by the cross-cluster seed handler
+  (handler_dump_replication) when a seed STARTS: with false it never sends
+  `repl_snapshot_push`, logs it, counts
+  `cluster_replication[seed_snapshot_push_disabled]`, and runs the per-key
+  merge dump. Stat `cluster_replication_snapshot_push on|off` while
+  replication runs. In-cluster replica snapshots (`repl_snapshot`, slave
+  reseed) are a different path and do not read it.
+- Operator: `snapshotPush` (default true) renders NOTHING (the replication
+  block is byte-for-byte the old one — unit check); false renders
+  `cluster-replication-snapshot-push = false`. The desired-config check now
+  includes the switch, so a toggle re-renders once.
+- Hazard: an older flared rejects a config with an unknown key
+  (program_options, allow_unregistered off) — opting in needs a flared with
+  this option.
+- E2E `cluster-replication-per-key-only` (cross-cluster group): a failed
+  seed (port closed) → `failed_connect`, `seed_completed` unchanged,
+  destination untouched; a seed into a FRESH destination (one that would
+  accept a push) → `completed_dump`, `seed_snapshot_push_disabled` moved,
+  destination `rocksdb_snapshot_bootstrap` 0 and master id / copy id / epoch
+  unchanged; V (kind capture) MATCH over every key, value, flag, absolute
+  expire and version, keys deleted before and after the seed absent; the
+  destination master restarted (PVC kept) comes back as master with the same
+  history and V MATCHes again after more changes; a source slave started
+  empty still reseeds by snapshot. No C++ unit test: the handler tests use a
+  non-RocksDB mock storage, where the push path never runs — the E2E is the
+  test. Old-code comparison: the existing faults T4/T5 (push accepted →
+  masterless after restart).
+
+### 15.2 Approval: one use
+
+`status.forwardApprovalConsumed` records the approval line in the same
+status patch that issues the switch (a failed action does not consume it);
+in Duplicating the same line is refused "(one use)". Forwarding's post-apply
+recheck uses that line itself. Proof: `forwardHold_none` /
+`migStep_forward_requires_approval_and_evidence` now also conclude the
+approval is not the consumed one. Units 482. The status patch and the CR
+patch are two writes: an operator crash between issuing the switch and the
+status patch leaves the phase Duplicating with the source already patched to
+forward — the next tick's check sees the same positions and re-issues the
+(idempotent) switch with the same approval; it is consumed then. Not a
+reuse across attempts (the attempt id differs).
+
+### 15.3 What keeps writes stopped, and what is checked fresh
+
+| step | who | checked by the operator |
+|---|---|---|
+| stop client writes | a person, outside the operator | no (a premise; only positions not moving are seen) |
+| capture + V MATCH | a person, kind driver only | the line names attempt + every master's identity/position after the scan |
+| set forwardApproval | a person | parsed; MATCH only; one use |
+| switch tick | operator | fresh read of every source AND target master: identity, position, clock (age ≤ 3600 s); unreadable = held |
+| forward applied | operator | the SAME check again before AwaitingCutover; a moved position = held in Forwarding |
+| resume writes | a person, after AwaitingCutover | no longer consulted |
+
+### 15.4 Capture resources (what is guaranteed, what is not)
+
+| | guaranteed by code | not guaranteed |
+|---|---|---|
+| concurrency | ONE serve per node (`_snapshot_serving`); another `repl_snapshot` / push gets "SERVER_ERROR busy" (the driver fails, it does not wait) | a capture delays a concurrent replica reseed (it waits busy) |
+| interrupted transfer | the failed write removes the checkpoint and re-enables file deletions; at the next open every `snapshot.serve.*` is removed | the release happens at the NEXT write: the throttle sleeps after each 1 MiB chunk, so it can lag the reader by a chunk's sleep; a reader that stays connected but stops reading is NOT bounded (connection_tcp's write poll loops without a deadline) — only the client bounds it (driver: `timeout 120` in the pod) |
+| space | checkpoint = hard links (same fs) + copied MANIFEST/OPTIONS | no reserve is consulted before it (not implemented); compaction during the transfer turns the links into pinned space — memory on tmpfs |
+| load | forced memtable flush; the transfer throttled by `rocksdb-snapshot-bwlimit` (min with the requested value) | no capacity measurement; only the kind suite below |
+
+E2E `v-capture-resources` (r3-source group, kind, one 1×1 node, 3000 ×
+200 B random values): a throttled serve takes the slot (one serve dir), a
+capture started meanwhile is refused busy, the slot and directory are
+released after the reader leaves (time printed); a capture under a
+concurrent 3000-set write load: every write acknowledged, both write times
+printed, released afterwards. Not a load test of any real size.
+
+### 15.5 CI plan for the candidate
+
+Targeted first (single-suite dispatch): cluster-replication-per-key-only,
+v-capture-resources, blue-green-migration; nix-linux (C++ compile + cutter).
+Then ONE full matrix on the pinned candidate. Known failures excluded from
+any "green" claim and listed by name: cluster-replication-faults T4/T5
+(snapshot-push authority, X4). Comparison with c9b59ed keeps executed
+passes and skips separate (273 / 22 there).
+
 ## UNKNOWN
 
 - whether a blocking connect to a black-holed LB address reaches the

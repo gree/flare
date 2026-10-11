@@ -212,14 +212,48 @@ namespace test_handler_cluster_replication {
 		cut_assert_equal_boolean(true, t->is_shutdown_request());
 	}
 
+	// The first connect fails: the thread STAYS (it used to return and leave
+	// the pool while the replication stayed started — every later forward was
+	// then an uncounted "no available thread" drop; cross-cluster audit
+	// 2026-10-11). A forward to the unreachable destination is counted as
+	// dropped; once the destination listens, the next forward is delivered.
 	void test_run_failure_unreachable_connection() {
 		// execute
 		shared_thread t = start_handler(false);
 
 		// assert
 		sleep(6);  // waiting for connection failure
-		cut_assert_equal_boolean(false, t->is_running());
-		cut_assert_equal_string("", t->get_state().c_str());
+		cut_assert_equal_boolean(true, t->is_running());
+		cut_assert_equal_string("wait", t->get_state().c_str());
+
+		storage::entry e = get_entry(" key 0 0 5 3", storage::parse_type_set, "VALUE");
+		vector<string> proxy;
+		shared_queue_proxy_write q(new queue_proxy_write(NULL, NULL, proxy, e, "set"));
+		q->set_post_proxy(true);
+		q->sync_ref();
+		t->enqueue(q);
+		q->sync();  // all retries done
+		cut_assert_equal_boolean(false, q->is_success());
+		cut_assert_equal_int(1, (int)stats_object->get_proxy_write_dropped());
+
+		s->listen(port);
+		storage::entry e2 = get_entry(" key2 0 0 5 3", storage::parse_type_set, "VALUE");
+		shared_queue_proxy_write q2(new queue_proxy_write(NULL, NULL, proxy, e2, "set"));
+		q2->set_post_proxy(true);
+		q2->sync_ref();
+		t->enqueue(q2);
+		cs = s->wait();
+		cut_assert_equal_int(1, (int)cs.size());
+		char *p, *v;
+		cs[0]->readline(&p);
+		cs[0]->readline(&v);
+		cut_assert_equal_string("set key2 0 0 5 3\n", p);
+		cs[0]->writeline("STORED");
+		delete[] p;
+		delete[] v;
+		q2->sync();
+		cut_assert_equal_boolean(true, q2->is_success());
+		cut_assert_equal_int(1, (int)stats_object->get_proxy_write_dropped());
 	}
 }
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 noexpandtab autoindent

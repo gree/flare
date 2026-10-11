@@ -231,7 +231,7 @@ namespace test_handler_cluster_replication {
 		shared_queue_proxy_write q(new queue_proxy_write(NULL, NULL, proxy, e, "set"));
 		q->set_post_proxy(true);
 		q->sync_ref();
-		t->enqueue(q);
+		enqueue(t, q);
 		q->sync();  // all retries done
 		cut_assert_equal_boolean(false, q->is_success());
 		cut_assert_equal_int(1, (int)stats_object->get_proxy_write_dropped());
@@ -241,7 +241,7 @@ namespace test_handler_cluster_replication {
 		shared_queue_proxy_write q2(new queue_proxy_write(NULL, NULL, proxy, e2, "set"));
 		q2->set_post_proxy(true);
 		q2->sync_ref();
-		t->enqueue(q2);
+		enqueue(t, q2);
 		cs = s->wait();
 		cut_assert_equal_int(1, (int)cs.size());
 		char *p, *v;

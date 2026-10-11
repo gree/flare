@@ -15,6 +15,7 @@
 -/
 import Lean.Data.Json
 import FlareOperator.Migration.Provision
+import FlareOperator.Migration.Types
 import FlareOperator.Server.TopologyBroadcast
 import FlareOperator.Server.PublicationGate
 import FlareOperator.StateMachine.TopologyObservation
@@ -2015,6 +2016,78 @@ private def checkSourceEligibility (ctx : Ctx) : IO Unit := do
                       ("c", some "eligible", none), ("d", none, none), ("e", some "needs_rebuild", none)]
       == [("a", "history differs"), ("e", "the copy's source changed lineage or history")])
 
+open FlareOperator.Migration in
+/-- FlareMigration forward gate (2026-10-11): equal key counts alone moved
+    Duplicating → Forwarding, the first client-visible step (the source then
+    proxies every client read/write to the target). -/
+def checkMigrationForwardGate (ctx : Ctx) : IO Unit := do
+  let open_ := FlareOperator.Migration.MigPhase.Duplicating
+  let spec : FlareOperator.Migration.MigSpec := { source := "s", target := { name := "t" } }
+  let mk (pod : String) (rep : Bool) (loss sc : Nat) (st : String) (boot : Nat := 1000) (uid : String := s!"{pod}-uid")
+      : FlareOperator.Migration.SrcCounters :=
+    { pod, podUid := uid, boot, replicating := rep, loss, seedCompleted := sc, seedState := st }
+  let base := [mk "m0" false 3 0 "none", mk "m1" false 0 0 "none"]
+  let done := [mk "m0" true 3 1 "completed_dump", mk "m1" true 0 1 "completed_snapshot_push"]
+  -- the old behaviour, now refused: converged counts, nothing else
+  check ctx "migration: equal counts alone (no seed evidence, loss unknown, no approval) do NOT switch to forward"
+    ((migStep spec open_ { convergedTicks := 6, sourceKeys := 10, targetKeys := 10 }).2 == .none)
+  check ctx "migration: counts + seed + clean loss but NO approveForward → held (counts are not a verification)"
+    ((migStep spec open_ { convergedTicks := 6, seedCompleted := true, loss := .clean }).2 == .none)
+  check ctx "migration: counts + seed + clean loss + approveForward → switchForward"
+    (migStep { spec with approveForward := true } open_ { convergedTicks := 6, seedCompleted := true, loss := .clean }
+      == (.Forwarding, .switchForward))
+  check ctx "migration: approved, but loss counted since the attempt → held"
+    ((migStep { spec with approveForward := true } open_ { convergedTicks := 6, seedCompleted := true, loss := .lost 1 }).2 == .none)
+  check ctx "migration: approved, but loss Unknown → held"
+    ((migStep { spec with approveForward := true } open_ { convergedTicks := 6, seedCompleted := true, loss := .unknown "x" }).2 == .none)
+  check ctx "migration: approved, clean, but seed not completed → held"
+    ((migStep { spec with approveForward := true } open_ { convergedTicks := 6, loss := .clean }).2 == .none)
+  -- loss over the whole attempt
+  check ctx "migration loss: unchanged counters over the attempt → clean"
+    (lossVerdict base (some done) == .clean)
+  check ctx "migration loss: a counter moved (also one counted during the seed) → lost n"
+    (lossVerdict base (some [mk "m0" true 5 1 "completed_dump", mk "m1" true 1 1 "completed_dump"]) == .lost 3)
+  check ctx "migration loss: no baseline → Unknown"
+    (match lossVerdict [] (some done) with | .unknown _ => true | _ => false)
+  check ctx "migration loss: baseline read while replication was already on → Unknown"
+    (match lossVerdict [mk "m0" true 3 0 "none", mk "m1" false 0 0 "none"] (some done) with | .unknown _ => true | _ => false)
+  check ctx "migration loss: a source master restarted (start time moved) → Unknown, not clean"
+    (match lossVerdict base (some [mk "m0" true 0 1 "completed_dump" (boot := 2000), mk "m1" true 0 1 "completed_dump"]) with
+      | .unknown _ => true | _ => false)
+  check ctx "migration loss: pod replaced (same name, new UID) → Unknown"
+    (match lossVerdict base (some [mk "m0" true 3 1 "completed_dump" (uid := "new"), mk "m1" true 0 1 "completed_dump"]) with
+      | .unknown _ => true | _ => false)
+  check ctx "migration loss: a counter went down → Unknown"
+    (match lossVerdict base (some [mk "m0" true 2 1 "completed_dump", mk "m1" true 0 1 "completed_dump"]) with
+      | .unknown _ => true | _ => false)
+  check ctx "migration loss: a master unreadable → Unknown"
+    (match lossVerdict base none with | .unknown _ => true | _ => false)
+  check ctx "migration loss: start time within rounding (±1 s) is the same process"
+    (lossVerdict base (some [mk "m0" true 3 1 "completed_dump" (boot := 1001), mk "m1" true 0 1 "completed_dump" (boot := 999)]) == .clean)
+  -- seed of THIS attempt
+  check ctx "migration seed: completed on every master, counter above the baseline → completed"
+    (seedCompletedSince base (some done))
+  check ctx "migration seed: state completed_* from an EARLIER attempt (counter not above the baseline) → not completed"
+    (!seedCompletedSince [mk "m0" false 3 1 "completed_dump", mk "m1" false 0 1 "completed_dump"] (some done))
+  check ctx "migration seed: one master failed_transfer → not completed"
+    (!seedCompletedSince base (some [mk "m0" true 3 1 "completed_dump", mk "m1" true 0 1 "failed_transfer"]))
+  check ctx "migration seed: restarted master → not completed"
+    (!seedCompletedSince base (some [mk "m0" true 3 1 "completed_dump" (boot := 5000), mk "m1" true 0 1 "completed_dump"]))
+  -- dwell counted only while Duplicating
+  check ctx "migration dwell: 0 = 0 during Provisioning does not pre-load converged ticks"
+    (nextConvergedTicks .Provisioning 5 (some 0) (some 0) == 0
+      && nextConvergedTicks .Duplicating 5 (some 0) (some 0) == 6
+      && nextConvergedTicks .Duplicating 5 (some 3) (some 2) == 0
+      && nextConvergedTicks .Duplicating 5 none (some 2) == 0)
+  -- abort after the forward switch
+  check ctx "migration: abort in Forwarding / AwaitingCutover is refused (the target holds acknowledged writes)"
+    ((migStep { spec with abort := true } .Forwarding {}).2 != .doAbort
+      && (migStep { spec with abort := true } .AwaitingCutover {}).2 != .doAbort
+      && (migStep { spec with abort := true } .Duplicating {}).2 == .doAbort)
+  check ctx "migration baseline: serialize/parse round trip; malformed → none"
+    (parseBaseline (serializeBaseline base) == some base && parseBaseline "m0 u x 0 1 2 none" == none
+      && parseBaseline "" == some [])
+
 def run : IO UInt32 := do
   let ctx : Ctx := { failures := ← IO.mkRef [], count := ← IO.mkRef 0 }
   checkObserve ctx
@@ -2056,6 +2129,7 @@ def run : IO UInt32 := do
   checkRestoreProvenance ctx
   checkCopyDiscardApproval ctx
   checkPromotionEvidence ctx
+  checkMigrationForwardGate ctx
   let failures ← ctx.failures.get
   let n ← ctx.count.get
   IO.println s!"1..{n}"

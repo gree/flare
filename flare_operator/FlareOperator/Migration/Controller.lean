@@ -38,6 +38,9 @@ structure MigCR where
   spec : MigSpec
   phase : MigPhase
   convergedTicks : Nat
+  /-- status.attemptBaseline: the source masters' counters read at the tick
+      that enabled duplication (before it), serialized. -/
+  attemptBaseline : String := ""
 
 private def parseMigJson (j : Lean.Json) : Option MigCR := do
   let name ← (j.getObjVal? "metadata" |>.toOption) >>= fun m =>
@@ -65,6 +68,7 @@ private def parseMigJson (j : Lean.Json) : Option MigCR := do
         drainSeconds := getNat targetObj "drainSeconds" 60
       }
       paused := getBool spec "paused"
+      approveForward := getBool spec "approveForward"
       approveCutover := getBool spec "approveCutover"
       approveRetire := getBool spec "approveRetire"
       abort := getBool spec "abort"
@@ -72,6 +76,7 @@ private def parseMigJson (j : Lean.Json) : Option MigCR := do
     }
     phase := ((status.getObjValD "phase" |>.getStr?.toOption).bind MigPhase.fromString).getD .Pending
     convergedTicks := getNat status "convergedTicks" 0
+    attemptBaseline := getStr status "attemptBaseline" ""
   }
 
 /-- List FlareMigrations in the namespace whose spec.source is `crName`. -/
@@ -86,9 +91,10 @@ def listMigrations (crName ns : String) : IO (List MigCR) := do
       return items.toList.filterMap parseMigJson |>.filter (·.spec.source == crName)
 
 def patchStatus (mig : MigCR) (ns : String) (phase : MigPhase)
-    (obs : MigObs) (message : String) : IO Unit := do
+    (obs : MigObs) (message : String) (baseline : String) : IO Unit := do
   let progress := s!"{obs.targetKeys}/{obs.sourceKeys} keys on target"
-  let patch := s!"\{\"status\":\{\"phase\":\"{phase.toString}\",\"message\":\"{message}\",\"progress\":\"{progress}\",\"sourceKeys\":{obs.sourceKeys},\"targetKeys\":{obs.targetKeys},\"convergedTicks\":{obs.convergedTicks}}}"
+  let esc := fun (x : String) => (Lean.Json.str x).compress
+  let patch := s!"\{\"status\":\{\"phase\":\"{phase.toString}\",\"message\":{esc message},\"progress\":\"{progress}\",\"sourceKeys\":{obs.sourceKeys},\"targetKeys\":{obs.targetKeys},\"convergedTicks\":{obs.convergedTicks},\"attemptBaseline\":{esc baseline}}}"
   match ← kubectl ["patch", "flaremigration", mig.name, "-n", ns,
                    "--subresource=status", "--type=merge", "-p", patch] with
   | .error e => IO.eprintln s!"[migration] warning: status patch failed: {e}"
@@ -142,24 +148,68 @@ private def totalMasterKeys (cluster ns : String) : IO (Option Nat) := do
       | some n => total := total + n
   return some total
 
-def gatherObs (mig : MigCR) (crName ns : String) : IO MigObs := do
+/-- One source master's gate counters; `none` when anything is unreadable. -/
+private def srcCountersOf (pod ns : String) : IO (Option SrcCounters) := do
+  let uid ← match ← kubectl ["get", "pod", pod, "-n", ns, "-o", "jsonpath={.metadata.uid}"] with
+    | .ok u => pure u.trim
+    | .error _ => pure ""
+  if uid.isEmpty then return none
+  match ← queryPodStats pod ns "stats" with
+  | .error _ => return none
+  | .ok out =>
+    let lines := (out.splitOn "\n").map (fun l => l.trim.replace "\r" "")
+    if !lines.contains "END" then return none
+    let stat := fun (name : String) => lines.findSome? fun t =>
+      if t.startsWith s!"STAT {name} " then some (t.drop s!"STAT {name} ".length).trim else none
+    let nat := fun (name : String) => (stat name).bind (·.toNat?)
+    -- every cluster_replication[...] counter that means a write did not land
+    let crLoss := lines.foldl (fun acc t =>
+      if t.startsWith "STAT cluster_replication[" then
+        let inner := ((t.drop "STAT cluster_replication[".length).splitOn "]").headD ""
+        let v := ((t.splitOn " ").getLast?.bind (·.toNat?)).getD 0
+        if inner.startsWith "forward_dropped_" || inner.startsWith "forward_failed_"
+            || inner.startsWith "forward_missing_" || inner == "seed_failed" then acc + v else acc
+      else acc) 0
+    match nat "time", nat "uptime", nat "proxy_write_dropped", stat "cluster_replication" with
+    | some t, some up, some dropped, some rep =>
+      return some {
+        pod, podUid := uid, boot := t - up, replicating := rep == "on"
+        loss := dropped + crLoss
+        seedCompleted := ((stat "cluster_replication[seed_completed]").bind (·.toNat?)).getD 0
+        seedState := (stat "cluster_replication_seed").getD "none" }
+    | _, _, _, _ => return none
+
+/-- Counters of every source partition master; `none` if any is unreadable
+    or there is no master. -/
+def sourceCounters (crName ns : String) : IO (Option (List SrcCounters)) := do
+  let masters ← clusterMasters crName ns
+  if masters.isEmpty then return none
+  let mut out : List SrcCounters := []
+  for pod in masters do
+    match ← srcCountersOf pod ns with
+    | none => return none
+    | some c => out := out ++ [c]
+  return some out
+
+def gatherObs (mig : MigCR) (crName ns : String) : IO (MigObs × Option (List SrcCounters)) := do
   let ready ← targetReady mig.spec.target ns
   let srcKeys ← totalMasterKeys crName ns
   let tgtKeys ← totalMasterKeys mig.spec.target.name ns
-  let converged : Bool := match srcKeys, tgtKeys with
-    | some s, some t => decide (t ≥ s)
-    | _, _ => false
+  let counters ← sourceCounters crName ns
+  let baseline := (parseBaseline mig.attemptBaseline).getD []
   let forwardApplied ← do
     match ← readFlaredExtraConf crName ns with
     | .ok conf => pure (containsSubstr conf "cluster-replication-mode = forward")
     | .error _ => pure false
-  return {
+  return ({
     targetReady := ready
     sourceKeys := srcKeys.getD 0
     targetKeys := tgtKeys.getD 0
-    convergedTicks := if converged then mig.convergedTicks + 1 else 0
+    convergedTicks := nextConvergedTicks mig.phase mig.convergedTicks srcKeys tgtKeys
     sourceForwardApplied := forwardApplied
-  }
+    seedCompleted := seedCompletedSince baseline counters
+    loss := lossVerdict baseline counters
+  }, counters)
 
 /-! ## Actions -/
 
@@ -285,7 +335,7 @@ def tick (crName ns : String) : IO Unit := do
     if mig.phase.terminal && !mig.spec.abort then
       pure ()  -- nothing to do, and don't spam status
     else
-      let obs ← gatherObs mig crName ns
+      let (obs, counters) ← gatherObs mig crName ns
       let (phase', action) := migStep mig.spec mig.phase obs
       let msg ← do
         match ← execAction mig crName ns action with
@@ -299,6 +349,24 @@ def tick (crName ns : String) : IO Unit := do
       -- (e.g. Provisioning marked done with nothing created). Stay put and
       -- retry next tick; only publish the observation refresh.
       let publishPhase := if msg.startsWith "action failed" then mig.phase else phase'
-      patchStatus mig ns publishPhase obs msg
+      -- The attempt baseline is read in the tick that enables duplication,
+      -- BEFORE the enable, and kept once recorded (a retried enable must not
+      -- move it past writes already forwarded). Unreadable → empty → the
+      -- loss verdict stays Unknown for this attempt (held; recreate it).
+      let baseline :=
+        if action == .startDuplicate && mig.attemptBaseline.isEmpty then
+          (counters.map serializeBaseline).getD ""
+        else mig.attemptBaseline
+      let msg := if msg.isEmpty && mig.spec.abort && mig.phase.abortRefused && !mig.phase.terminal then
+          "abort REFUSED: the forward switch was issued — the target holds acknowledged writes the source does not; deleting it would lose them (RUNBOOK #migration-forward-abort)"
+        else msg
+      let msg := if msg.isEmpty && publishPhase == .Duplicating then
+          ((forwardHold mig.spec obs).map (s!"holding before the forward switch: " ++ ·)).getD ""
+        else msg
+      if publishPhase == .Duplicating && action == .none && phase' == mig.phase then
+        if let some why := forwardHold mig.spec obs then
+          if mig.convergedTicks < convergenceDwellTicks && obs.convergedTicks ≥ convergenceDwellTicks then
+            IO.eprintln s!"[migration] {mig.name}: counts converged but the forward switch is held: {why}"
+      patchStatus mig ns publishPhase obs msg baseline
 
 end FlareOperator.Migration.Controller

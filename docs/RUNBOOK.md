@@ -832,11 +832,51 @@ spec:
 
 Phases (watch `kubectl get fmig`): Provisioning → Duplicating (with equal
 partition counts the initial transfer is a physical snapshot push; rc33) →
-Forwarding → **AwaitingCutover** (park; set `spec.approveCutover: true`) →
+**held before the forward switch** (set `spec.approveForward: true` after
+verification V — #migration-forward-gate) → Forwarding →
+**AwaitingCutover** (park; set `spec.approveCutover: true`) →
 CutOver (Service selector flip, same LB/IP) → **AwaitingRetire** (park; set
 `spec.approveRetire: true`) → Retired (source STS+CR deleted, PVCs kept).
 `spec.paused: true` freezes any phase; `spec.abort: true` rolls back
-(refused after cutover). All gates are machine-checked (Migration/Types.lean).
+(refused once the forward switch was issued — #migration-forward-abort).
+All gates are machine-checked (Migration/Types.lean).
+
+### The forward switch is client-visible {#migration-forward-gate}
+
+Forwarding is NOT a bookkeeping step: from it on the source flared runs in
+forward mode — every client read and write that reaches the source is
+proxied synchronously to the target and answered from it; the source's own
+copy stops changing (cluster_replication.cc on_pre_proxy_read/write,
+op_set/op_delete/op_incr). Until 2026-10-11 the operator switched as soon
+as the target's summed `curr_items` ≥ the source's for 6 ticks — a key
+COUNT, which equal counts with wrong values, missing deletes or a seed that
+never ran also pass.
+
+Now the switch needs ALL of, for THIS attempt (status.attemptBaseline is
+read before duplication is enabled):
+- key counts converged for 6 ticks, counted only while Duplicating;
+- every source master: `cluster_replication_seed` completed_* and its
+  `cluster_replication[seed_completed]` above the baseline, same process;
+- loss over the WHOLE attempt (seed included): `proxy_write_dropped` and
+  every `cluster_replication[forward_dropped_*|forward_failed_*|
+  forward_missing_*|seed_failed]` unchanged since the baseline. A restart,
+  a replaced pod, a counter that went down, an unreadable master, or a
+  baseline read while replication was already on → **Unknown → held**
+  (recreate the migration; nothing is inferred). `proxy_write_dropped`
+  also counts in-cluster drops — a hold may be conservative;
+- `spec.approveForward: true`, set by a human after verification V
+  (docs/review-cross-cluster-2026-10-11.md §8, `scripts/flare_verify_copy.py`).
+
+`status.message` names the condition that holds. Nothing here repairs a
+difference or re-seeds; R (repair) stays a separate, approved procedure.
+
+### Abort after the forward switch {#migration-forward-abort}
+
+Refused in Forwarding and AwaitingCutover (before: allowed). doAbort
+deletes the target, which by then holds writes the source acknowledged in
+forward mode and does not have — an abort there would lose them. There is
+no automated way back from forward; a human decision (and a procedure that
+first moves the target's writes back) is needed.
 
 **Post-migration handoff (rc35+, mostly automatic):** target resources are
 born with helm adoption metadata, so the ONE manual step is the GitOps

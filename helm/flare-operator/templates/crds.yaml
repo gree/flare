@@ -383,6 +383,20 @@ spec:
                   description: >
                     Freeze the migration at its current phase. No actions are
                     taken while true; flip back to false to resume.
+                approveForward:
+                  type: boolean
+                  default: false
+                  description: >
+                    Human gate for the forward switch (Duplicating ->
+                    Forwarding), the first client-visible step: from then on
+                    the source proxies every client read and write to the
+                    target, and abort is refused. Required IN ADDITION to the
+                    operator's own evidence (key counts converged, this
+                    attempt's seed completed on every source master, no loss
+                    counter moved since the attempt began). Set it only after
+                    verification V of this attempt (RUNBOOK
+                    #migration-forward-gate); equal counts are not a
+                    verification.
                 approveCutover:
                   type: boolean
                   default: false
@@ -401,8 +415,9 @@ spec:
                   default: false
                   description: >
                     Roll the migration back: stop replication, delete the
-                    target cluster. Refused after cutover (the external
-                    Service already points at the target).
+                    target cluster. Refused once the forward switch was
+                    issued (Forwarding and later): the target then holds
+                    acknowledged writes the source does not.
                 externalService:
                   type: string
                   default: ""
@@ -425,6 +440,13 @@ spec:
                   type: integer
                 convergedTicks:
                   type: integer
+                attemptBaseline:
+                  type: string
+                  description: >
+                    Source masters' counters read before duplication was
+                    enabled (pod, pod UID, start time, replicating, loss,
+                    seed_completed, seed state). The forward gate compares
+                    against it; a restart or reset makes the loss Unknown.
 ---
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition

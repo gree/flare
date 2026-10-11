@@ -136,8 +136,36 @@ def suite : TestSuite := {
           if ← waitForPhase "Duplicating" 300 then return .pass
           else return .fail s!"stuck before Duplicating (phase={← migPhase})" },
 
-    { name := "counts converge and source flips to forward (phase AwaitingCutover)"
+    -- 2026-10-11: equal key counts alone used to switch the source to
+    -- forward (the first client-visible step). Now it needs this attempt's
+    -- seed completed, no loss since the attempt began, AND approveForward.
+    { name := "counts converge and the seed completes, but WITHOUT approveForward the source is NOT switched to forward (counts are not a verification)"
       run := do
+        let msgOf : IO String := do
+          match ← kubectlGetJsonpath "flaremigration" migName cfg.«namespace» "{.status.message}" with
+          | .ok m => return m.trim
+          | .error _ => return ""
+        let satisfied ← waitForCondition "the automated forward evidence is satisfied (held only for the approval)" 300 do
+          return containsSubstr (← msgOf) "NOT a verification"
+        let m ← msgOf
+        let baseline ← kubectlGetJsonpath "flaremigration" migName cfg.«namespace» "{.status.attemptBaseline}"
+        IO.eprintln s!"# status.message: {m}; attemptBaseline: {baseline}"
+        if !satisfied then
+          return .fail s!"the automated forward evidence was never satisfied (phase {← migPhase}): {m}"
+        IO.sleep 20000
+        let p ← migPhase
+        let mode ← kubectlGetJsonpath "flarecluster" cfg.name cfg.«namespace» "{.spec.clusterReplication.mode}"
+        if p != "Duplicating" then return .fail s!"left Duplicating without approveForward: phase {p}"
+        match mode with
+        | .ok md => if md.trim != "duplicate" then return .fail s!"the source was switched to mode {md.trim} without approveForward"
+        | .error e => return .fail s!"could not read the source mode: {e}"
+        return .pass },
+
+    { name := "approveForward → the source flips to forward (phase AwaitingCutover)"
+      run := do
+        match ← kubectlPatch "flaremigration" migName cfg.«namespace» "{\"spec\":{\"approveForward\":true}}" with
+        | .error e => return .fail s!"approveForward patch failed: {e}"
+        | .ok _ => pure ()
         if ← waitForPhase "AwaitingCutover" 300 then return .pass
         else return .fail s!"never reached AwaitingCutover (phase={← migPhase})" },
 

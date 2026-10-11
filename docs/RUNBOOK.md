@@ -1016,8 +1016,16 @@ Recovery — only after checking that the master holds the partition's data
    and rebuilds stay held until each is re-adopted from its own master).
 3. Give the migration approval (#history-record). The record is re-adopted
    from the current master once every copy was observed, and the replicas'
-   rebuilds are assigned (the delete → re-adopt path is exercised by
-   history-tracking (3a); this exact state's recovery is NOT exercised).
+   rebuilds are assigned. Exercised: history-tracking (3a) brings the master
+   to another history than the record (flush_all while the record cannot be
+   written) and logs this section's symptom before the recovery (CI
+   38099482037: 10 `REBUILD HELD (history)` lines), then deletes the record
+   and gives the approval; the record is re-adopted, and the next test
+   requires the replica rebuilt onto it within 240 s (passed). NOT exercised:
+   the same recovery after a re-seat with a new epoch (how this section's
+   state arose in CI 38081479454) — no deterministic reproduction; the
+   operator path from the symptom on is the same. Step 1 (saving the record)
+   is not exercised.
 
 Do not delete the record while a promotion intent is pending (`intent` lines)
 or while the master's copy is in doubt — stop and keep the evidence.

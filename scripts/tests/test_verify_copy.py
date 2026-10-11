@@ -83,7 +83,7 @@ class Fixture:
                             ("dst-post", self.dst_post), ("attempt-baseline", self.baseline)):
             args += [f"--{flag}", self._w(f"{flag}.json", json.dumps({"nodes": nodes}))]
         rep = os.path.join(self.tmp, "report.json")
-        code = V.main(args + ["--report", rep])
+        code = V.main(args + ["--report", rep, "--attempt-id", getattr(self, "attempt_id", "s0 s0-uid 1 0 0 0 none")])
         with open(rep) as f:
             return code, json.load(f)
 
@@ -278,6 +278,37 @@ class VerifyCopyTest(unittest.TestCase):
                 self.f.src_pre = [node("s0", over)]
                 self.f.src_post = [node("s0", over, time=T1)]
                 self.assertVerdict(2, "UNKNOWN", "did not complete a seed")
+
+    # ---- same key count, wrong content (a count gate would pass these) ----
+    def test_same_count_with_one_wrong_value_is_different(self):
+        self.f.dst = {"d0": dump(item("a", "1"), item("b", "WRONG"), item("c", "3"))}
+        r = self.assertVerdict(1, "DIFFERENT")
+        self.assertEqual(r["comparison"]["different"], 1)
+
+    def test_same_count_with_a_missed_delete_and_a_missing_key_is_different(self):
+        # source deleted b and wrote d; the destination missed both: 3 = 3
+        self.f.src = {"s0": dump(item("a", "1"), item("c", "3"), item("d", "4"))}
+        r = self.assertVerdict(1, "DIFFERENT")
+        self.assertEqual((r["comparison"]["missing"], r["comparison"]["extra"]), (1, 1))
+
+    # ---- binding: what a MATCH is about -----------------------------------
+    def test_match_carries_the_binding_of_attempt_nodes_copy_history_position(self):
+        self.f.attempt_id = "s0 s0-uid 999000 0 0 0 none"
+        r = self.assertVerdict(0, "MATCH")
+        b = r["binding"]
+        self.assertTrue(b.startswith("attempt=s0 s0-uid 999000 0 0 0 none|src=s0,s0-uid,"), b)
+        self.assertIn("mid-a,copy-a:1,1:ep-a,500", b)
+        self.assertIn("|dst=d0,d0-uid,", b)
+
+    def test_binding_differs_for_another_attempt_or_position(self):
+        _, r1 = self.f.run()
+        self.f.attempt_id = "another attempt"
+        _, r2 = self.f.run()
+        self.f.src_post = [node("s0", {"rocksdb_latest_sequence_number": "501"}, time=T1)]
+        self.f.src_pre = [node("s0", {"rocksdb_latest_sequence_number": "501"})]
+        self.f.attempt_id = "s0 s0-uid 1 0 0 0 none"
+        _, r3 = self.f.run()
+        self.assertEqual(len({r1["binding"], r2["binding"], r3["binding"]}), 3)
 
     def test_streaming_reader_is_lazy(self):
         p = os.path.join(self._td.name, "lazy.dump")

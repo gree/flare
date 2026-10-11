@@ -243,6 +243,64 @@ structure MigObs where
     of stable convergence. -/
 def convergenceDwellTicks : Nat := 6
 
+/-- One partition master's identity and position, as bound by a V report. -/
+structure NodeIdent where
+  pod : String
+  podUid : String
+  boot : Nat
+  masterId : String
+  copyId : String
+  epoch : String
+  seq : String
+  deriving Repr, BEq, Inhabited
+
+def NodeIdent.parse (s : String) : Option NodeIdent :=
+  match s.splitOn "," with
+  | [pod, uid, boot, mid, copy, ep, seq] => do
+    let b ← boot.toNat?
+    some { pod, podUid := uid, boot := b, masterId := mid, copyId := copy, epoch := ep, seq }
+  | _ => none
+
+/-- `attempt=<id>|src=<node>;..|dst=<node>;..` (scripts/flare_verify_copy.py
+    binding_line). `none` when malformed. -/
+def parseBinding (s : String) : Option (String × List NodeIdent × List NodeIdent) :=
+  match s.splitOn "|" with
+  | [a, sr, ds] =>
+    if !(a.startsWith "attempt=" && sr.startsWith "src=" && ds.startsWith "dst=") then none
+    else do
+      let nodes := fun (x : String) => ((x.drop 4).splitOn ";").filter (· != "") |>.mapM NodeIdent.parse
+      some ((a.drop 8), ← nodes sr, ← nodes ds)
+  | _ => none
+
+private def identHold (side : String) (bound now : List NodeIdent) : Option String :=
+  if bound.isEmpty then some s!"{side}: the verification binds no node"
+  else if bound.length != now.length then
+    some s!"{side}: {bound.length} masters verified, {now.length} now"
+  else bound.findSome? fun b =>
+    match now.find? (·.pod == b.pod) with
+    | none => some s!"{side} {b.pod}: not a master now"
+    | some n =>
+      if n.podUid != b.podUid || !(b.boot + 2 ≥ n.boot && n.boot + 2 ≥ b.boot) then
+        some s!"{side} {b.pod}: restarted or replaced since the verification"
+      else if n.masterId != b.masterId || n.epoch != b.epoch then
+        some s!"{side} {b.pod}: history changed since the verification"
+      else if n.copyId != b.copyId then
+        some s!"{side} {b.pod}: copy changed since the verification"
+      else if n.seq != b.seq then
+        some s!"{side} {b.pod}: position moved since the verification (a write, a reap, a re-seed)"
+      else none
+
+/-- The forward switch may use a V result only while the live masters are
+    exactly what it verified, in this attempt. NOT wired into migStep yet
+    (approveForward is a boolean; the operator does not read target
+    identities) — recorded as not implemented. -/
+def forwardBindingHold (binding attemptNow : String) (srcNow dstNow : List NodeIdent) : Option String :=
+  match parseBinding binding with
+  | none => some "verification binding unreadable"
+  | some (att, src, dst) =>
+    if att != attemptNow then some "the verification belongs to another attempt (stale or reused)"
+    else (identHold "source" src srcNow).orElse fun _ => identHold "target" dst dstNow
+
 /-- Why the forward switch is held, or `none` when every condition holds. -/
 def forwardHold (spec : MigSpec) (obs : MigObs) : Option String :=
   if obs.convergedTicks < convergenceDwellTicks then

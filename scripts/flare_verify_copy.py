@@ -41,6 +41,18 @@ INDETERMINATE, counted, and forces UNKNOWN. Items present on both sides are
 compared exactly (value bytes, flags, absolute expire, version). Near-expiry
 keys are never silently excluded.
 
+Binding: the report carries `binding`, one canonical line naming WHAT was
+verified — the attempt (`--attempt-id`, the FlareMigration's
+status.attemptBaseline verbatim) and, per partition master on each side as
+read AFTER the scan: pod, pod UID, process start, master id, copy id, copy
+epoch, sequence number. A MATCH says nothing about any other attempt, node,
+copy, history or position: the forward switch must be refused when the live
+nodes no longer equal the binding (a write after the scan moves the
+sequence number; a restart moves the start; a re-seed moves copy/history;
+a new attempt has another baseline). The operator does NOT check this yet
+(approveForward is a boolean) — recorded as not implemented; the pure check
+exists (Migration/Types.lean forwardBindingHold, unit-tested).
+
 What it does NOT check: that each key lies in the partition its stream
 claims (the server-side `dump` filter is trusted); that writes were stopped
 by the clients (the caller's premise — this tool only sees mutation
@@ -309,6 +321,21 @@ def compare(src_items, dst_items, src_window, dst_window, skew, keep=50):
     return res
 
 
+def node_binding(pod, n):
+    st = n["stats"]
+    return ",".join([pod, n["pod_uid"], str(boot_of(st)), st["rocksdb_master_id"], st["rocksdb_copy_id"],
+                     epoch_of(st) or "", st["rocksdb_latest_sequence_number"]])
+
+
+def binding_line(attempt_id, src_post, dst_post):
+    """Canonical: attempt=<id>|src=<node>;..|dst=<node>;.. (nodes sorted by
+    pod; node = pod,uid,start,master_id,copy_id,epoch,sequence). The same
+    format is parsed by the operator's pure check (Migration/Types.lean)."""
+    src = ";".join(node_binding(p, src_post[p]) for p in sorted(src_post))
+    dst = ";".join(node_binding(p, dst_post[p]) for p in sorted(dst_post))
+    return f"attempt={attempt_id}|src={src}|dst={dst}"
+
+
 def verify(args):
     report = {"verdict": "UNKNOWN", "problems": [], "attempt_loss": None, "comparison": None,
               "note": "reports and refuses only; changes nothing"}
@@ -335,6 +362,10 @@ def verify(args):
         problems.append(f"server time unreadable: {e}")
         return report, 2
     report["windows"] = {"source": src_w, "destination": dst_w, "skew_s": skew}
+    try:
+        report["binding"] = binding_line(args.attempt_id, src_post, dst_post)
+    except KeyError as e:
+        problems.append(f"binding: identity stat missing ({e})")
     try:
         cmp = compare(merged(args.src_dump, "source"), merged(args.dst_dump, "destination"), src_w, dst_w, skew)
     except (StreamError, OSError) as e:
@@ -367,6 +398,8 @@ def main(argv=None):
     ap.add_argument("--dst-dump", action="append", required=True)
     for n in ("src-pre", "src-post", "dst-pre", "dst-post", "attempt-baseline"):
         ap.add_argument(f"--{n}", required=True)
+    ap.add_argument("--attempt-id", required=True,
+                    help="the FlareMigration's status.attemptBaseline, verbatim (binds the result to this attempt)")
     ap.add_argument("--extra-skew", type=int, default=0, help="seconds added to the measured clock skew bound")
     ap.add_argument("--report", help="write the JSON report here (default: stdout)")
     args = ap.parse_args(argv)

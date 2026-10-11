@@ -2084,6 +2084,32 @@ def checkMigrationForwardGate (ctx : Ctx) : IO Unit := do
     ((migStep { spec with abort := true } .Forwarding {}).2 != .doAbort
       && (migStep { spec with abort := true } .AwaitingCutover {}).2 != .doAbort
       && (migStep { spec with abort := true } .Duplicating {}).2 == .doAbort)
+  -- the V binding (pure; not wired into the controller yet)
+  let attempt := "s0 s0-uid 1791724878 0 0 0 none"
+  let sN : NodeIdent := { pod := "s0", podUid := "s0-uid", boot := 1000, masterId := "mid-a", copyId := "copy-a:1", epoch := "1:ep-a", seq := "500" }
+  let dN : NodeIdent := { pod := "d0", podUid := "d0-uid", boot := 2000, masterId := "mid-a", copyId := "copy-d:1", epoch := "1:ep-a", seq := "700" }
+  let bind := s!"attempt={attempt}|src=s0,s0-uid,1000,mid-a,copy-a:1,1:ep-a,500|dst=d0,d0-uid,2000,mid-a,copy-d:1,1:ep-a,700"
+  check ctx "V binding: live masters equal to what was verified, same attempt → no hold"
+    (forwardBindingHold bind attempt [sN] [dN] == none)
+  check ctx "V binding: a verification from another attempt (stale, or the approval reused) → hold"
+    ((forwardBindingHold bind "s0 s0-uid 1791799999 0 0 0 none" [sN] [dN]).isSome)
+  check ctx "V binding: a write after the scan (source position moved) → hold"
+    ((forwardBindingHold bind attempt [{ sN with seq := "501" }] [dN]).isSome)
+  check ctx "V binding: a write on the target after the scan → hold"
+    ((forwardBindingHold bind attempt [sN] [{ dN with seq := "701" }]).isSome)
+  check ctx "V binding: source restarted after the scan → hold"
+    ((forwardBindingHold bind attempt [{ sN with boot := 1500 }] [dN]).isSome)
+  check ctx "V binding: target replaced (new pod UID) after the scan → hold"
+    ((forwardBindingHold bind attempt [sN] [{ dN with podUid := "new" }]).isSome)
+  check ctx "V binding: target re-seeded (copy / history changed) → hold"
+    ((forwardBindingHold bind attempt [sN] [{ dN with copyId := "copy-e:1" }]).isSome
+      && (forwardBindingHold bind attempt [sN] [{ dN with masterId := "mid-z" }]).isSome)
+  check ctx "V binding: a master added or missing → hold"
+    ((forwardBindingHold bind attempt [sN, { sN with pod := "s1" }] [dN]).isSome
+      && (forwardBindingHold bind attempt [] [dN]).isSome)
+  check ctx "V binding: malformed → hold"
+    ((forwardBindingHold "attempt=x|src=|dst=" attempt [sN] [dN]).isSome
+      && (forwardBindingHold "garbage" attempt [sN] [dN]).isSome)
   check ctx "migration baseline: serialize/parse round trip; malformed → none"
     (parseBaseline (serializeBaseline base) == some base && parseBaseline "m0 u x 0 1 2 none" == none
       && parseBaseline "" == some [])

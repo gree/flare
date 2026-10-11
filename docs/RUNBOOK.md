@@ -1114,14 +1114,26 @@ docs/review-cross-cluster-2026-10-11.md):
   after the seed means the destination lacks acknowledged writes: **do not
   cut over.** A destination that restarted empty is NOT detected by any
   counter — check its item count against the source.
-- Uncounted losses remain: a destination that answers without storing
-  (SERVER_ERROR behind a load balancer, an older version) and a seed whose
-  first connect failed (no seed at all). Verify the destination's contents
-  against the source with writes quiesced before a cutover.
+- Since 4024a6c a destination's non-success answer is counted too, per op
+  (`cluster_replication[forward_failed_<op>_<result>]`); `set NOT_STORED` and
+  `delete NOT_FOUND` are idempotent answers and are NOT counted
+  (`forward_noop_*`); `touch NOT_FOUND` (`forward_missing_*`) means the
+  destination lacks a key the source holds — a divergence signal. A forward
+  with no answer is retried for up to 120 s before it is counted
+  (`forward_dropped_retries`; later ones `forward_dropped_down` until the
+  destination answers again).
+- The seed's state is `cluster_replication_seed` on each source master:
+  anything but `completed_snapshot_push` / `completed_dump` means the
+  destination does NOT hold the data that existed before the enable
+  (`failed_connect`: never started; `failed_transfer`: partly copied).
+- Verify the destination's contents against the source with writes stopped
+  before a cutover — counts and drop counters say how many, never which
+  keys (procedure V in docs/review-cross-cluster-2026-10-11.md §7.5).
 - The only repair is a full re-seed: wipe the destination partition, then
   `spec.clusterReplication.enabled` false → true (snapshot-push refuses a
-  destination holding more than 4096 items; the merge dump never deletes).
-  Wiping is destructive and is NOT exercised by a test.
+  destination holding more than 4096 items; the merge dump never deletes
+  and aborts on a populated destination — §7.4). Wiping is destructive,
+  needs an explicit approval, and is NOT exercised end to end.
 
 ## Known limits (do not be surprised by)
 

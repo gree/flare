@@ -52,7 +52,8 @@ cluster_replication::cluster_replication(thread_pool* tp):
 		_server_port(0),
 		_concurrency(0),
 		_started(false),
-		_mode (mode_duplicate) {
+		_mode (mode_duplicate),
+		_snapshot_push(true) {
 	pthread_mutex_init(&this->_mutex_started, NULL);
 }
 
@@ -269,7 +270,7 @@ cluster::proxy_request cluster_replication::on_post_proxy_write(op_proxy_write* 
 int cluster_replication::_start_dump_replication(string server_name, int server_port, storage* st, cluster* cl) {
 	log_notice("start to replicate the dump of storage", 0);
 	shared_thread t = this->_thread_pool->get(thread_pool::thread_type_dump_replication);
-	handler_dump_replication* h = new handler_dump_replication(t, cl, st, server_name, server_port);
+	handler_dump_replication* h = new handler_dump_replication(t, cl, st, server_name, server_port, this->_snapshot_push);
 	t->trigger(h);
 	return 0;
 }

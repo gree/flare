@@ -33,6 +33,8 @@ import FlareOperator.E2E.Tests.ReadTimeoutReload
 import FlareOperator.E2E.Tests.ClusterReplicationFaults
 import FlareOperator.E2E.Tests.ClusterReplicationReseed
 import FlareOperator.E2E.Tests.ClusterReplicationRestartDump
+import FlareOperator.E2E.Tests.ClusterReplicationPerKeyOnly
+import FlareOperator.E2E.Tests.VCaptureResources
 import FlareOperator.E2E.Tests.ReplicaRepair
 import FlareOperator.E2E.Tests.ContinuousReplication
 import FlareOperator.E2E.Tests.ContinuousReplicationLimits
@@ -76,6 +78,8 @@ def main (args : List String) : IO UInt32 :=
     Tests.ClusterReplicationFaults.suite,
     Tests.ClusterReplicationReseed.suite,
     Tests.ClusterReplicationRestartDump.suite,
+    Tests.ClusterReplicationPerKeyOnly.suite,
+    Tests.VCaptureResources.suite,
     Tests.ReplicaRepair.suite,
     Tests.ContinuousReplication.suite,
     Tests.ContinuousReplicationLimits.purgeSuite,

@@ -316,7 +316,7 @@ def renderFlaredExtraConf (rocksdb : RocksdbConfigSpec)
         s!"cluster-replication-server-port = {r.port}",
         s!"cluster-replication-mode = {r.mode}",
         s!"cluster-replication-concurrency = {r.concurrency}"
-      ]
+      ] ++ (if r.snapshotPush then "" else "\ncluster-replication-snapshot-push = false")
     | none =>
       -- ALWAYS an explicit false, never omission: flared's SIGHUP reload
       -- only updates keys PRESENT in the file (ini_option::reload guards

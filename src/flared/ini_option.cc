@@ -89,6 +89,7 @@ ini_option::ini_option():
 		_cluster_replication_server_port(default_server_port),
 		_cluster_replication_concurrency(default_proxy_concurrency),
 		_cluster_replication_mode(""),
+		_cluster_replication_snapshot_push(true),
 		_rocksdb_block_cache_size_mb(default_rocksdb_block_cache_size_mb),
 		_rocksdb_write_buffer_size_mb(default_rocksdb_write_buffer_size_mb),
 		_rocksdb_max_write_buffer_number(default_rocksdb_max_write_buffer_number),
@@ -425,6 +426,13 @@ int ini_option::load() {
 		} else {
 			this->_cluster_replication_mode = cluster_replication::mode_cast(cluster_replication::mode_duplicate);
 		}
+
+		// Opt-in: false = a cross-cluster seed never tries a snapshot push
+		// (the per-key merge dump only; the destination keeps its own
+		// history). Default true (unchanged). In-cluster replica snapshots
+		// (repl_snapshot reseed) are a different path and are not affected.
+		this->_cluster_replication_snapshot_push = opt_var_map.count("cluster-replication-snapshot-push")
+			? opt_var_map["cluster-replication-snapshot-push"].as<bool>() : true;
 
 		if (opt_var_map.count("rocksdb-block-cache-size-mb")) {
 			this->_rocksdb_block_cache_size_mb = opt_var_map["rocksdb-block-cache-size-mb"].as<uint64_t>();
@@ -836,6 +844,17 @@ int ini_option::reload() {
 			this->_cluster_replication_mode = opt_var_map["cluster-replication-mode"].as<string>();
 		}
 
+		{
+			// absent = the default (true): every reload states it fully
+			bool sp = opt_var_map.count("cluster-replication-snapshot-push")
+				? opt_var_map["cluster-replication-snapshot-push"].as<bool>() : true;
+			if (sp != this->_cluster_replication_snapshot_push) {
+				log_notice("  cluster_replication_snapshot_push: %s -> %s",
+						this->_cluster_replication_snapshot_push ? "true" : "false", sp ? "true" : "false");
+			}
+			this->_cluster_replication_snapshot_push = sp;
+		}
+
 	} catch (int e) {
 		ostringstream ss;
 		ss << option << endl;
@@ -919,6 +938,7 @@ int ini_option::_setup_config_option(program_options::options_description& optio
 		("cluster-replication-server-port",	program_options::value<int>(),		"destination server port to replicate over cluster (dynamic)")
 		("cluster-replication-concurrency",	program_options::value<int>(),		"concurrency to replicate over cluster")
 		("cluster-replication-mode",				program_options::value<string>(),	"cluster replication mode (write, read, both) (write)")
+		("cluster-replication-snapshot-push",	program_options::value<bool>(),		"cross-cluster seed may use a snapshot push (default true; false = per-key dump only, the destination keeps its history)")
 		("rocksdb-block-cache-size-mb",		program_options::value<uint64_t>(),	"RocksDB block cache size in MB (default 512, rocksdb only)")
 		("rocksdb-write-buffer-size-mb",	program_options::value<uint64_t>(),	"RocksDB memtable write buffer size in MB (default 64, rocksdb only)")
 		("rocksdb-max-write-buffer-number",	program_options::value<int>(),		"RocksDB max number of memtables (default 3, rocksdb only)")

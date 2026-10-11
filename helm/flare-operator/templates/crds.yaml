@@ -64,6 +64,17 @@ spec:
                     concurrency:
                       type: integer
                       default: 2
+                    snapshotPush:
+                      type: boolean
+                      description: >-
+                        Opt-in false: a cross-cluster seed never uses a
+                        snapshot push — per-key merge dump only, the
+                        destination keeps its own history. Unset/true renders
+                        nothing (unchanged). In-cluster replica snapshots are
+                        not affected. Needs a flared that knows
+                        cluster-replication-snapshot-push (an older flared
+                        rejects a config with an unknown key). Read when a
+                        seed starts.
                 readBalance:
                   type: object
                   description: >-
@@ -452,6 +463,11 @@ spec:
                   type: integer
                 convergedTicks:
                   type: integer
+                forwardApprovalConsumed:
+                  type: string
+                  description: >
+                    The forwardApproval a forward switch was issued with
+                    (one use: the same line is refused again).
                 attemptId:
                   type: string
                   description: >

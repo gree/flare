@@ -122,6 +122,7 @@ int op_stats_node::_run_server() {
 				this->_send_stat("cluster_replication", repl->is_started() ? "on" : "off");
 				if (repl->is_started()) {
 					this->_send_stat("cluster_replication_mode", cluster_replication::mode_cast(repl->get_mode()));
+					this->_send_stat("cluster_replication_snapshot_push", repl->get_snapshot_push() ? "on" : "off");
 					char repl_dest[BUFSIZ];
 					snprintf(repl_dest, sizeof(repl_dest), "%s:%d", repl->get_server_name().c_str(), repl->get_server_port());
 					this->_send_stat("cluster_replication_destination", repl_dest);

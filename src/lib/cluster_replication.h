@@ -59,6 +59,7 @@ private:
 	int								_concurrency;
 	bool							_started;
 	mode							_mode;
+	bool							_snapshot_push;
 	pthread_mutex_t		_mutex_started;
 
 public:
@@ -70,6 +71,10 @@ public:
 	int stop();
 
 	int set_mode(mode m) { this->_mode = m; return 0; };
+	// cross-cluster seed may try a snapshot push (default true). Read when a
+	// seed STARTS: a change does not affect a seed already running.
+	void set_snapshot_push(bool b) { this->_snapshot_push = b; };
+	bool get_snapshot_push() { return this->_snapshot_push; };
 	mode get_mode() { return this->_mode; };
 	string get_server_name() { return this->_server_name; };
 	int get_server_port() { return this->_server_port; };

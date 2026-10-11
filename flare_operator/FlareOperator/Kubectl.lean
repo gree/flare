@@ -108,6 +108,7 @@ private def getFlareClusterFromJson (json : Lean.Json) (name ns : String)
     port := replObj.getObjValD "port" |>.getNat?.toOption |>.getD 12121
     mode := replObj.getObjValD "mode" |>.getStr?.toOption |>.getD "duplicate"
     concurrency := replObj.getObjValD "concurrency" |>.getNat?.toOption |>.getD 2
+    snapshotPush := replObj.getObjValD "snapshotPush" |>.getBool?.toOption |>.getD true
   }
   let rocksdbObj := spec.getObjValD "rocksdb"
   let rocksdb : RocksdbConfigSpec := {

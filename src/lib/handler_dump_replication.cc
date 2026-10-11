@@ -51,12 +51,13 @@ namespace flare {
 /**
  *	ctor for handler_dump_replication
  */
-handler_dump_replication::handler_dump_replication(shared_thread t, cluster* cl, storage* st, string server_name, int server_port):
+handler_dump_replication::handler_dump_replication(shared_thread t, cluster* cl, storage* st, string server_name, int server_port, bool snapshot_push):
 		thread_handler(t),
 		_cluster(cl),
 		_storage(st),
 		_replication_server_name(server_name),
 		_replication_server_port(server_port),
+		_snapshot_push(snapshot_push),
 		_bwlimitter() {
 }
 
@@ -182,7 +183,14 @@ int handler_dump_replication::run() {
 	// failure falls through to the legacy merge dump below, unchanged.
 	bool via_snapshot_push = false;
 #ifdef HAVE_LIBROCKSDB
-	if (peer_snapshot_push_supported && this->_storage->get_type() == storage::type_rocksdb) {
+	if (peer_snapshot_push_supported && !this->_snapshot_push) {
+		// cluster-replication-snapshot-push = false (opt-in): never replace
+		// the destination's copy; the per-key merge dump below keeps the
+		// destination's own history.
+		log_notice("snapshot push disabled by config (cluster-replication-snapshot-push=false) -> per-key dump", 0);
+		stats_object->crepl_incr("seed_snapshot_push_disabled");
+	}
+	if (peer_snapshot_push_supported && this->_snapshot_push && this->_storage->get_type() == storage::type_rocksdb) {
 		cluster::node self = this->_cluster->get_node(this->_cluster->get_server_name(), this->_cluster->get_server_port());
 		int sp_partition = self.node_partition;
 		int sp_partition_size = this->_cluster->get_node_partition_map_size();

@@ -49,6 +49,7 @@ protected:
 	storage*									_storage;
 	const string							_replication_server_name;
 	const int									_replication_server_port;
+	const bool									_snapshot_push;
 	shared_connection					_connection;
 	bwlimitter								_bwlimitter;
 
@@ -62,7 +63,7 @@ public:
 	static int seed_connect_attempts;
 	static int seed_retry_base_ms;
 
-	handler_dump_replication(shared_thread t, cluster* cl, storage* st, string server_name, int server_port);
+	handler_dump_replication(shared_thread t, cluster* cl, storage* st, string server_name, int server_port, bool snapshot_push = true);
 	virtual ~handler_dump_replication();
 
 	virtual int run();

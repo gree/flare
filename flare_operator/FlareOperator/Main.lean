@@ -1171,8 +1171,11 @@ private def handleClusterReplication
   let desiredMode := if repl.mode == "forward" then "forward" else "duplicate"
   let desiredPhase := if desiredMode == "forward" then MigrationPhase.Forwarding else MigrationPhase.Dumping
   let needle := s!"cluster-replication-mode = {desiredMode}"
+  -- the opt-in snapshot-push switch is part of the desired config too (a
+  -- toggle re-renders once; it is read by flared when a seed STARTS)
   let alreadyDesired ← match ← readFlaredExtraConf crName ns with
-    | .ok data => pure (containsSubstr data needle)
+    | .ok data => pure (containsSubstr data needle
+        && containsSubstr data "cluster-replication-snapshot-push = false" == !repl.snapshotPush)
     | .error _ => pure false
   if alreadyDesired then
     -- Config already carries the desired mode → no rewrite, no SIGHUP storm

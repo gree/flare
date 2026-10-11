@@ -2091,6 +2091,12 @@ def checkMigrationForwardGate (ctx : Ctx) : IO Unit := do
   check ctx "approval golden: the comparator's MATCH line parses and holds against the masters it names"
     (approvalHold golden { attemptId := "mig-uid/123", srcIdent := some [gS], dstIdent := some [gD], now := some 1800000100 } == none
       && (approvalHold golden { attemptId := "mig-uid/124", srcIdent := some [gS], dstIdent := some [gD], now := some 1800000100 }).isSome)
+  check ctx "approval: one use — the approval a forward switch was already issued with is refused in Duplicating"
+    ((migStep withA open_ { ok with consumedApproval := appr }).2 == .none
+      && ((forwardHold withA { ok with consumedApproval := appr }).getD "").endsWith "(one use)"
+      && (migStep withA open_ { ok with consumedApproval := "v=1|verdict=MATCH|verified_at=1|other" }).2 == .switchForward)
+  check ctx "approval: Forwarding re-checks the consumed approval itself (consumption does not block the post-apply check)"
+    ((migStep withA .Forwarding { ok with sourceForwardApplied := true, consumedApproval := appr }).1 == .AwaitingCutover)
   -- post-apply recheck (the switch window)
   check ctx "Forwarding: forward applied and the approval still matches → AwaitingCutover"
     ((migStep withA .Forwarding { ok with sourceForwardApplied := true }).1 == .AwaitingCutover)
@@ -2171,6 +2177,18 @@ def checkMigrationForwardGate (ctx : Ctx) : IO Unit := do
     (parseBaseline (serializeBaseline base) == some base && parseBaseline "m0 u x 0 1 2 none" == none
       && parseBaseline "" == some [])
 
+open FlareOperator.K8s.Bridge in
+/-- Opt-in cross-cluster snapshot-push switch (default unchanged). -/
+def checkSnapshotPushSwitch (ctx : Ctx) : IO Unit := do
+  let r : FlareOperator.K8s.ClusterReplicationSpec := { enabled := true, serverName := "dst", mode := "duplicate" }
+  let dflt := renderFlaredExtraConf {} (some r)
+  check ctx "snapshot-push switch: default renders exactly the old replication block (no new line)"
+    (dflt == "cluster-replication = true\ncluster-replication-server-name = dst\ncluster-replication-server-port = 12121\ncluster-replication-mode = duplicate\ncluster-replication-concurrency = 2")
+  check ctx "snapshot-push switch: opt-in false renders cluster-replication-snapshot-push = false"
+    (renderFlaredExtraConf {} (some { r with snapshotPush := false }) == dflt ++ "\ncluster-replication-snapshot-push = false")
+  check ctx "snapshot-push switch: replication off renders only the explicit false (the switch is not rendered)"
+    (renderFlaredExtraConf {} none == "cluster-replication = false")
+
 def run : IO UInt32 := do
   let ctx : Ctx := { failures := ← IO.mkRef [], count := ← IO.mkRef 0 }
   checkObserve ctx
@@ -2213,6 +2231,7 @@ def run : IO UInt32 := do
   checkCopyDiscardApproval ctx
   checkPromotionEvidence ctx
   checkMigrationForwardGate ctx
+  checkSnapshotPushSwitch ctx
   let failures ← ctx.failures.get
   let n ← ctx.count.get
   IO.println s!"1..{n}"

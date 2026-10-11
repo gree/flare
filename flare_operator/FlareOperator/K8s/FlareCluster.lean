@@ -84,6 +84,12 @@ structure ClusterReplicationSpec where
   port : Nat := 12121
   mode : String := "duplicate"  -- "duplicate" or "forward"
   concurrency : Nat := 2
+  /-- Opt-in `false`: a cross-cluster seed never uses a snapshot push (per-key
+      merge dump only; the destination keeps its own history). Default
+      `true` renders nothing (config unchanged). Needs a flared that knows
+      `cluster-replication-snapshot-push`: an older flared rejects a config
+      file with an unknown key. -/
+  snapshotPush : Bool := true
   deriving Repr, BEq
 
 /-! ## RocksDB Storage Backend Configuration

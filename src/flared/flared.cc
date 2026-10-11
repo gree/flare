@@ -424,6 +424,7 @@ int flared::startup(int argc, char **argv) {
 	cluster_replication::mode m = cluster_replication::mode_duplicate;
 	if (cluster_replication::mode_cast(ini_option_object().get_cluster_replication_mode(), m) >= 0) {
 		this->_cluster_replication->set_mode(m);
+		this->_cluster_replication->set_snapshot_push(ini_option_object().is_cluster_replication_snapshot_push());
 	} else {
 		return -1;
 	}
@@ -608,6 +609,7 @@ int flared::reload() {
 	cluster_replication::mode m = cluster_replication::mode_duplicate;
 	if (cluster_replication::mode_cast(ini_option_object().get_cluster_replication_mode(), m) >= 0) {
 		this->_cluster_replication->set_mode(m);
+		this->_cluster_replication->set_snapshot_push(ini_option_object().is_cluster_replication_snapshot_push());
 		if (ini_option_object().is_cluster_replication()) {
 			string cl_repl_server_name = ini_option_object().get_cluster_replication_server_name();
 			int cl_repl_server_port = ini_option_object().get_cluster_replication_server_port();

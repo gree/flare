@@ -280,6 +280,10 @@ structure MigObs where
   dstIdent : Option (List NodeIdent) := none
   /-- The source masters' own clock this tick (largest `time` stat). -/
   now : Option Nat := none
+  /-- status.forwardApprovalConsumed: the approval line a forward switch was
+      already issued with (recorded in the same status patch as the
+      switch). Empty = none used. -/
+  consumedApproval : String := ""
   deriving Repr, BEq
 
 /-- Convergence dwell: how many consecutive converged ticks are required
@@ -370,6 +374,8 @@ def forwardHold (spec : MigSpec) (obs : MigObs) : Option String :=
       if spec.forwardApproval.isEmpty then
         some ((if spec.approveForward then "approveForward is a boolean and is NOT accepted as a verification; " else "")
           ++ s!"counts, seed and loss counters satisfied — NOT a verification: stop writes, run V for attempt {obs.attemptId} and set spec.forwardApproval to the approval line it prints for a MATCH")
+      else if !obs.consumedApproval.isEmpty && spec.forwardApproval.trim == obs.consumedApproval.trim then
+        some "forwardApproval refused: this approval was already used for a forward switch (one use)"
       else (approvalHold spec.forwardApproval obs).map ("forwardApproval refused: " ++ ·)
 
 /-- Why Forwarding may not advance to AwaitingCutover: forward mode not yet
@@ -486,7 +492,8 @@ theorem migStep_no_abort_after_forward (spec : MigSpec) (phase : MigPhase) (obs 
 
 theorem forwardHold_none (spec : MigSpec) (obs : MigObs) (h : forwardHold spec obs = none) :
     approvalHold spec.forwardApproval obs = none ∧ obs.seedCompleted = true ∧ obs.loss = .clean ∧
-      convergenceDwellTicks ≤ obs.convergedTicks := by
+      convergenceDwellTicks ≤ obs.convergedTicks ∧
+      ¬ (obs.consumedApproval.isEmpty = false ∧ spec.forwardApproval.trim = obs.consumedApproval.trim) := by
   unfold forwardHold at h
   split at h
   · simp at h
@@ -499,7 +506,10 @@ theorem forwardHold_none (spec : MigSpec) (obs : MigObs) (h : forwardHold spec o
       · rename_i hl
         split at h
         · simp at h
-        · refine ⟨by simpa using h, by simpa using hs, hl, by omega⟩
+        · split at h
+          · simp at h
+          · rename_i hcons
+            refine ⟨by simpa using h, by simpa using hs, hl, by omega, by simpa using hcons⟩
 
 /-- The approval check passes only for a parsed MATCH line whose binding
     names this tick's attempt and equals the live masters. -/
@@ -530,7 +540,8 @@ theorem approvalHold_none (approval : String) (obs : MigObs)
 theorem migStep_forward_requires_approval_and_evidence (spec : MigSpec) (phase : MigPhase)
     (obs : MigObs) (h : (migStep spec phase obs).2 = .switchForward) :
     approvalHold spec.forwardApproval obs = none ∧ obs.seedCompleted = true ∧ obs.loss = .clean ∧
-      convergenceDwellTicks ≤ obs.convergedTicks := by
+      convergenceDwellTicks ≤ obs.convergedTicks ∧
+      ¬ (obs.consumedApproval.isEmpty = false ∧ spec.forwardApproval.trim = obs.consumedApproval.trim) := by
   apply forwardHold_none
   by_cases hp : spec.paused
   · simp [migStep, hp] at h

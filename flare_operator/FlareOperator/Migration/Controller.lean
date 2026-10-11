@@ -46,6 +46,8 @@ structure MigCR where
       refused). -/
   attemptId : String := ""
   uid : String := ""
+  /-- status.forwardApprovalConsumed (one use). -/
+  consumedApproval : String := ""
 
 private def parseMigJson (j : Lean.Json) : Option MigCR := do
   let name ← (j.getObjVal? "metadata" |>.toOption) >>= fun m =>
@@ -84,6 +86,7 @@ private def parseMigJson (j : Lean.Json) : Option MigCR := do
     convergedTicks := getNat status "convergedTicks" 0
     attemptBaseline := getStr status "attemptBaseline" ""
     attemptId := getStr status "attemptId" ""
+    consumedApproval := getStr status "forwardApprovalConsumed" ""
     uid := ((j.getObjVal? "metadata" |>.toOption) >>= fun m =>
       (m.getObjVal? "uid" |>.toOption) >>= fun u => u.getStr?.toOption).getD ""
   }
@@ -100,10 +103,10 @@ def listMigrations (crName ns : String) : IO (List MigCR) := do
       return items.toList.filterMap parseMigJson |>.filter (·.spec.source == crName)
 
 def patchStatus (mig : MigCR) (ns : String) (phase : MigPhase)
-    (obs : MigObs) (message : String) (baseline attemptId : String) : IO Unit := do
+    (obs : MigObs) (message : String) (baseline attemptId consumed : String) : IO Unit := do
   let progress := s!"{obs.targetKeys}/{obs.sourceKeys} keys on target"
   let esc := fun (x : String) => (Lean.Json.str x).compress
-  let patch := s!"\{\"status\":\{\"phase\":\"{phase.toString}\",\"message\":{esc message},\"progress\":\"{progress}\",\"sourceKeys\":{obs.sourceKeys},\"targetKeys\":{obs.targetKeys},\"convergedTicks\":{obs.convergedTicks},\"attemptBaseline\":{esc baseline},\"attemptId\":{esc attemptId}}}"
+  let patch := s!"\{\"status\":\{\"phase\":\"{phase.toString}\",\"message\":{esc message},\"progress\":\"{progress}\",\"sourceKeys\":{obs.sourceKeys},\"targetKeys\":{obs.targetKeys},\"convergedTicks\":{obs.convergedTicks},\"attemptBaseline\":{esc baseline},\"attemptId\":{esc attemptId},\"forwardApprovalConsumed\":{esc consumed}}}"
   match ← kubectl ["patch", "flaremigration", mig.name, "-n", ns,
                    "--subresource=status", "--type=merge", "-p", patch] with
   | .error e => IO.eprintln s!"[migration] warning: status patch failed: {e}"
@@ -260,6 +263,7 @@ def gatherObs (mig : MigCR) (crName ns : String) : IO (MigObs × Option (List Sr
     seedCompleted := seedCompletedSince baseline counters
     loss := lossVerdict baseline counters
     attemptId := mig.attemptId
+    consumedApproval := mig.consumedApproval
     srcIdent := srcId.map (·.1)
     dstIdent := dstId.map (·.1)
     now := srcId.map (·.2)
@@ -430,6 +434,11 @@ def tick (crName ns : String) : IO Unit := do
         if let some why := forwardHold mig.spec obs then
           if mig.convergedTicks < convergenceDwellTicks && obs.convergedTicks ≥ convergenceDwellTicks then
             IO.eprintln s!"[migration] {mig.name}: counts converged but the forward switch is held: {why}"
-      patchStatus mig ns publishPhase obs msg baseline attemptId
+      -- one use: the approval a switch was issued with is recorded with the
+      -- phase change (a failed action does not consume it)
+      let consumed :=
+        if action == .switchForward && !msg.startsWith "action failed" then mig.spec.forwardApproval
+        else mig.consumedApproval
+      patchStatus mig ns publishPhase obs msg baseline attemptId consumed
 
 end FlareOperator.Migration.Controller

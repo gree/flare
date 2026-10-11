@@ -99,6 +99,7 @@ private:
 	int					_cluster_replication_server_port;
 	int					_cluster_replication_concurrency;
 	string			_cluster_replication_mode;
+	bool				_cluster_replication_snapshot_push;
 
 	// RocksDB backend tuning (ignored when storage-type != rocksdb).
 	uint64_t		_rocksdb_block_cache_size_mb;
@@ -271,6 +272,7 @@ public:
 	int get_cluster_replication_server_port() { return this->_cluster_replication_server_port; }
 	int get_cluster_replication_concurrency() { return this->_cluster_replication_concurrency; };
 	string get_cluster_replication_mode() { return this->_cluster_replication_mode; }
+	bool is_cluster_replication_snapshot_push() { return this->_cluster_replication_snapshot_push; }
 
 	uint64_t get_rocksdb_block_cache_size_mb() { return this->_rocksdb_block_cache_size_mb; }
 	uint64_t get_rocksdb_write_buffer_size_mb() { return this->_rocksdb_write_buffer_size_mb; }

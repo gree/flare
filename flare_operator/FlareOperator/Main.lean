@@ -2773,12 +2773,14 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
                 IO.eprintln s!"[flare-operator] CRITICAL: lease holder changed to '{l.holderIdentity}' DURING a topology broadcast (v{finalVersion}); a map may have been published without authority. Recipients that already saw a newer version rejected it; others did not."
             | .error e =>
               IO.eprintln s!"[flare-operator] warning: could not confirm lease ownership after broadcasting v{finalVersion}: {e}"
-            -- registrations wait for this send (PublicationGate); a `node state` /
-            -- `node role` report is not held and can still move the live map
-            -- while the send is out — made visible, not prevented.
+            -- registrations wait for this send (PublicationGate); a `node state`
+            -- activation is not held and can still move the live map while the
+            -- send is out — made visible (with what moved it), not prevented.
             let afterVersion := (← stateRef.get).nodeMapVersion
             if !snapshotStillLive finalVersion afterVersion then
-              IO.eprintln s!"[flare-operator] WARNING: the live map moved to v{afterVersion} DURING the send of v{finalVersion} (not a registration — those wait for the send; a node state/role report): the next pass publishes v{afterVersion}"
+              let moves ← tcpMapMovesBetween finalVersion afterVersion
+              let src := if moves.isEmpty then "no TCP report recorded for it — moved by this process" else "; ".intercalate moves
+              IO.eprintln s!"[flare-operator] WARNING: the live map moved to v{afterVersion} DURING the send of v{finalVersion}: {src}. The next pass publishes v{afterVersion}"
             pendingBroadcastRef.set (pendingTopologyAfterAttempt pendingBefore finalVersion confirmed)
             if !confirmed then
               IO.eprintln s!"[flare-operator] topology delivery unconfirmed (v{finalVersion}); retained for retry through the lease fence"

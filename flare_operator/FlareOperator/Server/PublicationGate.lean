@@ -22,8 +22,15 @@
   and a registration that cannot begin waits on the send's completion
   promise, bounded by `registrationWaitCeilingMs`.
 
-  NOT covered: `node state` / `node role` reports during a send still move
-  the live map (logged after the send as before).
+  NOT held: a `node state` activation (Prepare → Active / Ready) during a
+  send still moves the live map — flared sends it from inside its sync
+  handler, so holding it would stall the send. It only ever moves a node
+  FORWARD, and the next send goes out only after this one, so no recipient
+  sees a node go back; the activating node itself keeps Active when the
+  older map arrives (flared cluster::reconstruct_node anti-entropy). Every
+  map move a TCP report makes is recorded (`recordTcpMapMove`) so the
+  DURING-the-send warning names its source. (`node role` and `node remove`
+  are refused in K8s mode and move nothing.)
 -/
 
 namespace FlareOperator.Server
@@ -127,6 +134,22 @@ def beginRegistrationWaiting (who : String) : IO Unit := do
       let remaining := registrationWaitCeilingMs - elapsed
       let timer ← IO.asTask (prio := .dedicated) (do IO.sleep remaining.toUInt32; pure false)
       discard <| IO.waitAny [p.resultD true, timer.map (fun _ => false)]
+
+/-- Map moves made by TCP reports, newest first (bounded): which report
+    moved the live map to which version, and whether a send was out. -/
+initialize tcpMapMovesRef : IO.Ref (List (Nat × String)) ← IO.mkRef []
+
+def recordTcpMapMove (version : Nat) (what : String) : IO Unit := do
+  let g ← publicationGateRef.get
+  let during := match g.sending with
+    | some v => s!" — while v{v} was being sent"
+    | none => ""
+  tcpMapMovesRef.modify fun l => ((version, what ++ during) :: l).take 32
+
+/-- The recorded moves to versions in (lo, hi], oldest first. -/
+def tcpMapMovesBetween (lo hi : Nat) : IO (List String) := do
+  let l ← tcpMapMovesRef.get
+  return (l.filter fun (v, _) => lo < v && v ≤ hi).reverse.map fun (v, w) => s!"v{v} {w}"
 
 def endRegistrationGate : IO Unit :=
   publicationGateRef.modify PublicationGate.endRegistration

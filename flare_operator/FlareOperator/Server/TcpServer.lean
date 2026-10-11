@@ -187,15 +187,30 @@ def handleConnection (sock : Socket) (state : ServerState) : IO Unit := do
               | _ => ""
             beginRegistrationWaiting who
           let r ← try
-              state.clusterState.modifyGet fun cs =>
+              let r ← state.clusterState.modifyGet fun cs =>
                 let (newState, resp) := reconcileStep cs crd event
                 -- a node whose state went Active -> Prepare here lost its Active
                 -- membership (a re-registration demotes it; it must rebuild)
                 let demoted := Reconciler.leftActive cs newState
-                ((newState, resp, demoted), newState)
+                ((newState, resp, demoted, cs), newState)
+              -- name what moved the live map (read by the DURING-the-send
+              -- warning); recorded while the gate still says whether a send
+              -- is out
+              let (newState, _, _, before) := r
+              if newState.nodeMapVersion != before.nodeMapVersion then
+                let what := match event with
+                  | .NodeAdd n p => s!"node add {FlareClusterState.toNodeKey n p} (registration)"
+                  | .NodeState n p st =>
+                    let k := FlareClusterState.toNodeKey n p
+                    let was := (before.lookupNode k).map (fun x => repr x.state |>.pretty) |>.getD "?"
+                    let now := (newState.lookupNode k).map (fun x => repr x.state |>.pretty) |>.getD "?"
+                    s!"node state {k} {repr st |>.pretty}: {was} → {now} (activation)"
+                  | _ => "a TCP report"
+                recordTcpMapMove newState.nodeMapVersion what
+              pure r
             finally
               if registering then endRegistrationGate
-          let (newState, resp, demoted) := r
+          let (newState, resp, demoted, _) := r
           if !demoted.isEmpty then leftActiveRef.modify fun l => l ++ demoted.filter (!l.contains ·)
           pure (newState, resp)
       -- Trace logging + register socket after first NodeAdd

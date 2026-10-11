@@ -689,8 +689,20 @@ stays unapproved.
 
 ## 14. Fourth-round runs
 
-Pending at the time of writing: the dispatched runs are recorded here when
-they finish (failures and skips kept separate).
+| run | code | result |
+|---|---|---|
+| 38145285059 full E2E | cb3d763 | all groups success except cross-cluster: faults T4 FAIL (destination master not back in 300 s: "no node partition for this slave … deactivating" — the known X4 authority gap), T5 FAIL (comparison not reached); faults T1–T3, reseed T6, restart-dump 3/3 pass. Not a harness failure, not a new cause |
+| 38145287548 nix-linux | cb3d763 | success |
+| 38179719906 blue-green (single suite) | 7c1de36 | **14/14 pass**: held without approval; boolean held ("NOT accepted"); real capture with one target value altered → DIFFERENT (compared 60, different 1), no approval line; real MATCH then one source write → held "position moved"; fresh MATCH edited to another attempt → held; the same fresh MATCH → AwaitingCutover (the post-apply recheck passed: no position moved while forward mode was applied), then cutover / retire as before |
+| 38179722077 nix-linux | 7c1de36 | success; RocksDB build 5360 tests 0 failures, `test_dump_checkpoint_point_in_time_and_side_effect_free` ran (keys=3 seq=8); the non-RocksDB build does not contain it (expected) |
+
+Observed in the kind captures (hypotheses before the run held there):
+with writes stopped the sequence numbers did not move between captures
+(source 42/42, target 70) — one extra write moved exactly one source master
+(42→43) and the target (70→71); a checkpoint + decode did not move them
+(pre/post stability passed). This is one kind run with keys without
+expiry; a store with expiring keys reaps in the background and moves the
+position (the approval then goes stale — fail-closed, not measured).
 
 ## UNKNOWN
 

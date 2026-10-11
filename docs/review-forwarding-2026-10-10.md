@@ -130,7 +130,7 @@ Nothing below is independently reviewed.
 ### 6.1 Full candidate CI on `3123bd5` — NOT green
 
 - nix-linux 38072344816: passed (both backends).
-- E2E full matrix 38072338837: 13 of 14 groups passed; `repair` failed 2 of 17:
+- E2E full matrix 38072338837: 12 of 13 groups passed; `repair` failed 2 of 17:
 
 | Test | Failure | Cause (from logs) | Fix | Residual |
 |---|---|---|---|---|

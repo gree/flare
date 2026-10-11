@@ -1107,6 +1107,22 @@ operator never reads this master's counter.
   (`status.replicaRepairs`) as unresolved; it is evidence, not a request this
   operator will act on.
 
+Before an ingest or a cutover that relies on the follow (see
+docs/review-cross-cluster-2026-10-11.md):
+
+- Any increase of the source masters' `proxy_write_dropped[<destination>]`
+  after the seed means the destination lacks acknowledged writes: **do not
+  cut over.** A destination that restarted empty is NOT detected by any
+  counter — check its item count against the source.
+- Uncounted losses remain: a destination that answers without storing
+  (SERVER_ERROR behind a load balancer, an older version) and a seed whose
+  first connect failed (no seed at all). Verify the destination's contents
+  against the source with writes quiesced before a cutover.
+- The only repair is a full re-seed: wipe the destination partition, then
+  `spec.clusterReplication.enabled` false → true (snapshot-push refuses a
+  destination holding more than 4096 items; the merge dump never deletes).
+  Wiping is destructive and is NOT exercised by a test.
+
 ## Known limits (do not be surprised by)
 
 - Selective network partition (pod alive, TCP to operator blocked) is

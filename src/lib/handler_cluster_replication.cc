@@ -64,9 +64,15 @@ int handler_cluster_replication::run() {
 			   this->_replication_server_name, this->_replication_server_port));
 	this->_connection = c;
 	if (c->open() < 0) {
-		log_err("failed to connect to cluster replication destination server (name=%s, port=%d)",
+		// The thread STAYS (it used to return here: it left the pool for good
+		// while the replication stayed 'started', so a destination that was
+		// unreachable at start — e.g. its name not yet in DNS — made every
+		// later forward an uncounted "no available thread" drop until a
+		// restart or a disable/enable). Each queued forward reconnects on its
+		// own (queue_proxy_write::run) and is counted as dropped while the
+		// destination stays unreachable.
+		log_err("failed to connect to cluster replication destination server (name=%s, port=%d) — the forwarding thread stays; each forward reconnects",
 				   this->_replication_server_name.c_str(), this->_replication_server_port);
-		return -1;
 	}
 
 	for (;;) {

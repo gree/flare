@@ -27,6 +27,7 @@
  *	$Id$
  */
 #include "cluster_replication.h"
+#include "app.h"
 #include "handler_cluster_replication.h"
 #include "handler_dump_replication.h"
 #include "logger.h"
@@ -234,6 +235,19 @@ cluster::proxy_request cluster_replication::on_post_proxy_write(op_proxy_write* 
 
 		int key_hash_value = e.get_key_hash_value(storage::hash_algorithm_murmur);
 		if (this->_enqueue(q, key_hash_value, false) < 0) {
+			// The client was (or will be) answered by the local write; this
+			// change now never reaches the destination cluster. It used to be
+			// a log_notice only, invisible to the drop counter the operator
+			// reads (cross-cluster audit 2026-10-11, path (i)/(ii)): count it
+			// under the destination, like a forward that exhausted its retries.
+			char dest[BUFSIZ];
+			snprintf(dest, sizeof(dest), "%s:%d", this->_server_name.c_str(), this->_server_port);
+			stats_object->increment_proxy_write_dropped(string(dest));
+			static AtomicCounter unqueued_logged(0);
+			if (unqueued_logged.incr() % 100 == 1) {
+				log_err("cluster replication write DROPPED before it was queued (dest=%s, key=%s, version=%u): no forwarding thread took it — counted (logged 1 in 100)",
+						dest, e.key.c_str(), e.version);
+			}
 			return cluster::proxy_request_continue;
 		}
 	}

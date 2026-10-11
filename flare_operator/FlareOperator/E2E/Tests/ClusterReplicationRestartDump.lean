@@ -196,12 +196,22 @@ def suite : TestSuite := {
         | .error e => return .fail s!"could not enable replication: {e}"
         | .ok _ => pure ()
         let mut seed : Option String := none
-        for _ in [0:100] do
+        for i in [0:100] do
           seed ← statOf cfgSrc sIp "cluster_replication_seed"
+          if seed.isNone && i ≥ 10 then break
           if let some st := seed then
             if st.startsWith "completed" || st.startsWith "failed" || st == "interrupted" then break
           IO.sleep 3000
-        IO.eprintln s!"# seed state {seed}; destination snapshot_bootstrap {← statOf cfgDst dIp0 "rocksdb_snapshot_bootstrap"}"
+        let boot := ((← statOf cfgDst dIp0 "rocksdb_snapshot_bootstrap").bind (·.toNat?)).getD 0
+        -- code without the seed-state stat (the old-code control): the
+        -- source's "dump replication completed" log line, and no snapshot
+        -- bootstrap on the destination
+        if seed.isNone then
+          let ok ← waitForCondition "the source logged a completed per-key dump" 300 do
+            let l ← kubectlLogsLabel s!"app=flare,cluster={cfgSrc.name}" cfgSrc.«namespace» 3000
+            return containsSubstr l "dump replication completed"
+          if ok && boot == 0 then seed := some "completed_dump"
+        IO.eprintln s!"# seed state {seed}; destination snapshot_bootstrap {boot}"
         if seed != some "completed_dump" then
           return .fail s!"precondition: the seed did not complete by per-key dump (state {seed}) — the fixture did not isolate the merge-dump path"
         let flowing ← waitForCondition "the seeded keys are on the destination" 120 do

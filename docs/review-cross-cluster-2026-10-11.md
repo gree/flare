@@ -80,7 +80,7 @@ the mechanisms allow is a full re-seed:
 
 | fault | test | state |
 |---|---|---|
-| destination name unresolvable at enable | `cluster-replication-faults` (32dffd4): every acknowledged write is on the destination or counted; writes after the name resolves arrive | old code 32dffd4 / fix c2971d4 — CI pending |
+| destination name unresolvable at enable | `cluster-replication-faults` (32dffd4): every acknowledged write is on the destination or counted; writes after the name resolves arrive | old code 32dffd4, 38099336800: FAILED — 10 + 20 acknowledged, 0 arrived, drop counter 0 → 0 (silent loss of every write); fix c2971d4, 38099346715: passed — the 10 written while unresolvable counted (0 → 10), the 20 after it resolved all arrived; cluster-replication 1-11 and snapshot-push-seed 13-18 still pass |
 | normal connection break | write tagged keys during Forwarding, cut the connection (NetworkPolicy / kill), require arrived-or-counted per key | NOT written |
 | destination restart (empty on return) | write during the restart, require arrived-or-counted, and detection of the empty return | NOT written; the empty-return detection does not exist |
 | repair (R1) | after R1, all tagged keys on destination master AND slave, a key deleted during the fault absent | NOT written (no repair) |

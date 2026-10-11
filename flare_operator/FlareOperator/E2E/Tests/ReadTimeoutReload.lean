@@ -44,12 +44,29 @@ private def sh (cmd : String) : IO (Except String String) := do
   if out.exitCode == 0 then return .ok out.stdout else return .error out.stderr
 
 /-- Seconds until flared closes a connection that sent `get k` without the
-    line end, from the debug pod; `capSec` when it was not seen closing. -/
-private def closeAfterPartialCommand (ip : String) : IO (Option Nat) := do
-  let cmd := s!"s=$(date +%s); (printf 'get k'; sleep {capSec + 10}) | timeout {capSec} nc {ip} {cfg.flarePort} >/dev/null 2>&1; echo $(( $(date +%s) - s ))"
-  match ← execInDebugPod cfg.debugPod cfg.«namespace» cmd with
-  | .error _ => return none
-  | .ok out => return ((out.trim.splitOn "\n").getLast?.bind (·.trim.toNat?))
+    line end; `capSec` when it was not seen closing.
+
+    Runs INSIDE the flared pod (bash /dev/tcp; `cat` ends exactly at the
+    server's close), detached, writing its result to a file that is polled
+    with short execs: the E2E kubectl wrapper kills any call after 30 s
+    (Kubectl.lean), and busybox nc in the debug pod did not report the
+    close (CI 38099188121 / 38099186230: no measurement in either case,
+    not even the 8 s one). -/
+private def closeAfterPartialCommand (_ip : String) : IO (Option Nat) := do
+  let inner := s!"exec 3<>/dev/tcp/127.0.0.1/{cfg.flarePort}; printf \"get k\" >&3; s=$(date +%s); timeout {capSec} cat <&3 >/dev/null; echo $(( $(date +%s) - s )) > /tmp/rto.out"
+  let start := s!"rm -f /tmp/rto.out; setsid -f bash -c '{inner}' </dev/null >/dev/null 2>&1; echo started"
+  match ← kubectl ["exec", pod, "-n", cfg.«namespace», "--", "bash", "-c", start] with
+  | .error e =>
+    IO.eprintln s!"# measurement could not start: {e}"
+    return none
+  | .ok _ => pure ()
+  for _ in [0:(capSec + 20) / 2] do
+    IO.sleep 2000
+    match ← kubectl ["exec", pod, "-n", cfg.«namespace», "--", "cat", "/tmp/rto.out"] with
+    | .ok out =>
+      if let some n := out.trim.toNat? then return some n
+    | .error _ => pure ()
+  return none
 
 /-- `read timeout: N ms` lines flared printed (one per start / reload). -/
 private def readTimeoutLines (log : String) : List Nat :=

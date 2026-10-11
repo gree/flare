@@ -17,6 +17,9 @@
   that 1 in 100 and lost the write (silent loss, E2E 38120285667). 5345666
   resends it within a 120 s window.
 
+  The destination's operator is held (scaled to 0) from before the delete
+  until 45 s after it, so the restarted flared listens without a role.
+
   Three verdicts, separate tests:
     1. arrived or counted (every acknowledged change on the destination, or
        the drop counter moved by at least that many);
@@ -209,8 +212,23 @@ def suite : TestSuite := {
         let itemsBefore ← getCurrItems cfgDst.debugPod cfgDst.«namespace» dIp0 cfgDst.flarePort
         let d0 ← statNat cfgSrc sIp "proxy_write_dropped"
         let r0 ← statNat cfgSrc sIp "cluster_replication[forward_server_error_retried]"
+        -- Hold the destination's operator while its master restarts: the
+        -- restarted flared then listens WITHOUT a role (no node map) and
+        -- answers forwards SERVER_ERROR "no partition available" until the
+        -- operator is back — the window the resend must ride out. Run
+        -- 38140445297 without the hold: the destination was back in 22 s and
+        -- never answered SERVER_ERROR (resend not exercised).
+        match ← kubectl ["scale", "deployment", cfgDst.operatorName, "-n", cfgDst.«namespace», "--replicas=0"] with
+        | .error e => return .fail s!"could not hold the destination operator: {e}"
+        | .ok _ => pure ()
+        let _ ← waitForCondition "the destination operator is down" 90 do
+          match ← kubectl ["get", "pods", "-n", cfgDst.«namespace», "-l", s!"app={cfgDst.operatorName}", "-o", "name"] with
+          | .ok o => return o.trim.isEmpty
+          | .error _ => return false
         match ← kubectl ["delete", "pod", dPod, "-n", cfgDst.«namespace», "--grace-period=0", "--force", "--wait=false"] with
-        | .error e => return .fail s!"could not delete {dPod}: {e}"
+        | .error e =>
+          discard <| kubectl ["scale", "deployment", cfgDst.operatorName, "-n", cfgDst.«namespace», "--replicas=1"]
+          return .fail s!"could not delete {dPod}: {e}"
         | .ok _ => pure ()
         let t0 ← IO.monoMsNow
         let mut newKeys : List String := []
@@ -224,6 +242,16 @@ def suite : TestSuite := {
           else if j < 10 then
             if !(← setSrc sIp s!"rst_pre_{j}" s!"u{j}") then unacked := unacked ++ [s!"rst_pre_{j}"]
           IO.sleep 1000
+        -- release the operator 45 s after the delete (well inside the 120 s
+        -- resend window, after the restarted flared is listening)
+        let held := ((← IO.monoMsNow) - t0) / 1000
+        if held < 45 then IO.sleep ((45 - held) * 1000).toUInt32
+        let dpLog ← kubectlLogs dPod cfgDst.«namespace» 400
+        let roleless := (dpLog.splitOn "\n").filter fun l => containsSubstr l "no partition" || containsSubstr l "SERVER_ERROR"
+        IO.eprintln s!"# held the destination operator {((← IO.monoMsNow) - t0) / 1000} s; restarted flared lines about no partition: {roleless.length}"
+        match ← kubectl ["scale", "deployment", cfgDst.operatorName, "-n", cfgDst.«namespace», "--replicas=1"] with
+        | .error e => return .fail s!"could not release the destination operator: {e}"
+        | .ok _ => pure ()
         if !unacked.isEmpty then
           return .fail s!"the source did not acknowledge {unacked} — the premise does not hold"
         let back ← waitForCondition "the destination master answers again" 300 do

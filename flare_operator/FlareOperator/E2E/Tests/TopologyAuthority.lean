@@ -1101,6 +1101,16 @@ def suite : TestSuite := {
           restore
           return .fail "the slowed reconstruction setting never reached the slave's mount"
         let uid0 ← podUid victim
+        -- only what the OTHER nodes log from here on belongs to this test
+        -- (38120559531: an earlier restart's legitimate Active → Prepare on
+        -- re-registration was read as a rollback)
+        let others := entries.filterMap fun e =>
+          let pod := (e.fqdn.splitOn ".").headD e.fqdn
+          if pod == victim then none else some pod
+        let baseline ← others.mapM fun pod => do
+          match ← kubectl ["logs", pod, "-n", cfg.«namespace»] with
+          | .ok l => pure (pod, (l.splitOn "\n").length)
+          | .error _ => pure (pod, 0)
         discard <| kubectl ["delete", "pod", victim, "-n", cfg.«namespace», "--grace-period=0", "--force", "--wait=false"]
         -- the new process registered and is copying
         let copying ← waitForCondition s!"the restarted {victim} is reconstructing" 180 do
@@ -1131,9 +1141,19 @@ def suite : TestSuite := {
         | none => ensureInSendClear; restore; return .fail "no pass reached the insend barrier within 60 s"
         | some v =>
           IO.eprintln s!"# pass held at v{v} while {victim} copies; waiting for its activation"
-          let activated ← waitForCondition s!"{victim}'s activation acknowledged while v{v} is held" 100 do
-            let opLog ← kubectlLogsLabel s!"app={cfg.operatorName}" cfg.«namespace» 400
-            return (opLog.splitOn "\n").any (fun l => containsSubstr l s!"Event: NodeState {victim}" && containsSubstr l "Prepare->Active")
+          -- the order needs the slave still Prepare when the pass is held:
+          -- the held map then lists it Prepare
+          let prepAtHold := (← nodeView).any (fun e => (e.fqdn.splitOn ".").headD e.fqdn == victim && e.state == 1)
+          if !prepAtHold then
+            releaseInSend
+            ensureInSendClear
+            restore
+            return .fail s!"{victim} was no longer Prepare when v{v} was held — the order under test was not reached"
+          -- the activation is applied when the operator's LIVE view (its TCP
+          -- server answers while the pass is held) shows the slave Active;
+          -- a log-tail match read an earlier restart's trace (38120559531)
+          let activated ← waitForCondition s!"{victim}'s activation applied (live view Active) while v{v} is held" 100 do
+            return (← nodeView).any (fun e => (e.fqdn.splitOn ".").headD e.fqdn == victim && e.state == 0)
           let stillHeld := (← inSendHeldVersion) == some v
           releaseInSend
           ensureInSendClear
@@ -1153,15 +1173,23 @@ def suite : TestSuite := {
           IO.eprintln s!"# {victim}: anti-entropy lines {kept.length}; active->prepare shifts {shiftedBack.length}"
           if !shiftedBack.isEmpty then
             return .fail s!"{victim} went back from Active to Prepare after the older map arrived: {shiftedBack.take 3}"
-          -- no other node took it back either
-          for e in entries do
-            let pod := (e.fqdn.splitOn ".").headD e.fqdn
-            if pod != victim then
-              let l ← kubectlLogs pod cfg.«namespace» 4000
-              let back := (l.splitOn "\n").filter (fun x =>
-                containsSubstr x "shifting node_state" && containsSubstr x victim && containsSubstr x "old_state=active" && containsSubstr x "new_state=prepare")
+          -- no other node took it back either: in what each logged since the
+          -- test began, a re-registration's Active → Prepare is expected; an
+          -- Active → Prepare AFTER a Prepare → Active is the rollback
+          for (pod, n0) in baseline do
+            let l ← match ← kubectl ["logs", pod, "-n", cfg.«namespace»] with
+              | .ok l => pure l
+              | .error _ => pure ""
+            let seg := ((l.splitOn "\n").drop n0).filter (fun x =>
+              containsSubstr x "shifting node_state" && containsSubstr x victim)
+            let up := seg.findIdx? (fun x => containsSubstr x "old_state=prepare" && containsSubstr x "new_state=active")
+            IO.eprintln s!"# {pod} shifts of {victim} since the test began: {seg.map (fun x => ((x.splitOn "old_state=").getLast!).trim)}"
+            match up with
+            | none => pure ()
+            | some i =>
+              let back := (seg.drop (i + 1)).filter (fun x => containsSubstr x "old_state=active" && containsSubstr x "new_state=prepare")
               if !back.isEmpty then
-                return .fail s!"{pod} took {victim} back from Active to Prepare: {back.take 3}"
+                return .fail s!"{pod} took {victim} back from Active to Prepare after it had seen it Active: {back.take 3}"
           let some vIp ← getPodIp victim cfg.«namespace» | return .fail "no IP for the victim after the release"
           let started ← do
             let cmd := s!"printf 'stats\\r\\n' | nc -w 3 {vIp} {cfg.flarePort}"

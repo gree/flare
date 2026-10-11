@@ -45,6 +45,9 @@ private def cfgSrc : ClusterConfig := {
   operatorName := "flare-operator-crp-src"
   debugPod := "debug-crp"
   storageBackend := "rocksdb"
+  -- a slave started empty rebuilds staged: the reserve must be in the CR
+  -- (38183117517: "rebuild_blocked=reserve_unset", parked)
+  reserveInCr := true
 }
 
 private def cfgDst : ClusterConfig := {
@@ -82,6 +85,13 @@ private def statOf (cfg : ClusterConfig) (ip name : String) : IO (Option String)
 private def statNat (cfg : ClusterConfig) (ip name : String) : IO Nat :=
   return ((← statOf cfg ip name).bind (·.toNat?)).getD 0
 
+/-- master id / copy id of a node — the lineage a seed must not change. The
+    epoch is printed but NOT compared across a restart: a re-promotion
+    advances it by design ("source epoch advanced … reason: promotion",
+    38183117517). -/
+private def lineage (cfg : ClusterConfig) (ip : String) : IO String := do
+  return s!"master_id={(← statOf cfg ip "rocksdb_master_id").getD "?"} copy_id={(← statOf cfg ip "rocksdb_copy_id").getD "?"}"
+
 /-- master id / copy id / epoch of a node — the history a seed must not change. -/
 private def identity (cfg : ClusterConfig) (ip : String) : IO String := do
   let ep ← match ← statOf cfg ip "rocksdb_rebuilt_from_epoch" with
@@ -98,10 +108,20 @@ private def srcCmd (ip cmd : String) : IO String := do
 private def patchRepl (json : String) : IO (Except String String) :=
   kubectlPatch "flarecluster" cfgSrc.name cfgSrc.«namespace» s!"\{\"spec\":\{\"clusterReplication\":{json}}}"
 
-private def waitSeed (ip : String) (done : String → Bool) (timeoutSec : Nat) : IO String := do
-  let _ ← waitForCondition "seed state" timeoutSec do
-    return done ((← statOf cfgSrc ip "cluster_replication_seed").getD "")
+/-- Wait for a NEW seed (seed_started above `started0`) to end in a state
+    `done` accepts — a state left by an earlier seed is not read as this
+    one's (38183117517 read T1's failed_connect in T2). -/
+private def waitSeed (ip : String) (started0 : Nat) (done : String → Bool) (timeoutSec : Nat) : IO String := do
+  let _ ← waitForCondition "a new seed started and ended" timeoutSec do
+    let started ← statNat cfgSrc ip "cluster_replication[seed_started]"
+    return started > started0 && done ((← statOf cfgSrc ip "cluster_replication_seed").getD "")
   return (← statOf cfgSrc ip "cluster_replication_seed").getD "(none)"
+
+/-- The ConfigMap reaches the pod late (kubelet sync): 38183117517 needed
+    ~2 min after the disable. -/
+private def waitReplicationOff (ip : String) : IO Bool :=
+  waitForCondition "replication off on the source master" 300 do
+    return (← statOf cfgSrc ip "cluster_replication") == some "off"
 
 private def scriptsDir : IO String := do
   if ← System.FilePath.pathExists "../scripts/flare_verify_copy.py" then return "../scripts"
@@ -173,6 +193,7 @@ def suite : TestSuite := {
         let some sIp ← masterIp cfgSrc | return .fail "no source master"
         let some dIp ← masterIp cfgDst | return .fail "no destination master"
         let c0 ← statNat cfgSrc sIp "cluster_replication[seed_completed]"
+        let st0 ← statNat cfgSrc sIp "cluster_replication[seed_started]"
         match ← patchRepl s!"\{\"enabled\":true,\"serverName\":\"{dstSvc}\",\"port\":12199,\"mode\":\"duplicate\",\"concurrency\":1,\"snapshotPush\":false}" with
         | .error e => return .fail s!"enable failed: {e}"
         | .ok _ => pure ()
@@ -180,7 +201,7 @@ def suite : TestSuite := {
           let _ ← waitForCondition "the switch is applied (stat off)" 120 do
             return (← statOf cfgSrc sIp "cluster_replication_snapshot_push") == some "off"
           statOf cfgSrc sIp "cluster_replication_snapshot_push"
-        let st ← waitSeed sIp (fun s => s.startsWith "failed" || s.startsWith "completed") 400
+        let st ← waitSeed sIp st0 (fun s => s.startsWith "failed" || s.startsWith "completed") 400
         let c1 ← statNat cfgSrc sIp "cluster_replication[seed_completed]"
         let dItems ← getCurrItems cfgDst.debugPod cfgDst.«namespace» dIp cfgDst.flarePort
         let boot ← statNat cfgDst dIp "rocksdb_snapshot_bootstrap"
@@ -189,8 +210,7 @@ def suite : TestSuite := {
         match ← patchRepl "{\"enabled\":false}" with
         | .error e => return .fail s!"disable failed: {e}"
         | .ok _ => pure ()
-        let off ← waitForCondition "replication off on the source" 120 do
-          return (← statOf cfgSrc sIp "cluster_replication") == some "off"
+        let off ← waitReplicationOff sIp
         if sp != some "off" then return .fail s!"the source does not report the switch off (cluster_replication_snapshot_push {sp})"
         if st != "failed_connect" then return .fail s!"seed state {st}, want failed_connect"
         if c1 != c0 then return .fail s!"seed_completed moved {c0} → {c1} on a failed seed"
@@ -202,9 +222,11 @@ def suite : TestSuite := {
       run := do
         let some sIp ← masterIp cfgSrc | return .fail "no source master"
         let some dIp ← masterIp cfgDst | return .fail "no destination master"
+        -- the data below must not be forwarded by an earlier enable
+        if !(← waitReplicationOff sIp) then return .fail "replication still on before the seed data was written"
         if let some why ← seedData sIp then return .fail s!"source data: {why}"
         let identBefore ← identity cfgDst dIp
-        dstIdentRef.set identBefore
+        dstIdentRef.set (← lineage cfgDst dIp)
         let sd ← scriptsDir
         let some sPod ← masterPod cfgSrc | return .fail "no source master pod"
         let _ ← runProc "rm" ["-rf", s!"{vDir}/baseline"]
@@ -212,10 +234,11 @@ def suite : TestSuite := {
                                              "--out", s!"{vDir}/baseline", sPod]
         if cb != 0 then return .fail s!"baseline stats failed: {eb}"
         let d0 ← statNat cfgSrc sIp "cluster_replication[seed_snapshot_push_disabled]"
+        let st0 ← statNat cfgSrc sIp "cluster_replication[seed_started]"
         match ← patchRepl s!"\{\"enabled\":true,\"serverName\":\"{dstSvc}\",\"port\":{cfgDst.flarePort},\"mode\":\"duplicate\",\"concurrency\":1,\"snapshotPush\":false}" with
         | .error e => return .fail s!"enable failed: {e}"
         | .ok _ => pure ()
-        let st ← waitSeed sIp (fun s => s.startsWith "failed" || s.startsWith "completed") 300
+        let st ← waitSeed sIp st0 (fun s => s.startsWith "failed" || s.startsWith "completed") 400
         let d1 ← statNat cfgSrc sIp "cluster_replication[seed_snapshot_push_disabled]"
         let boot ← statNat cfgDst dIp "rocksdb_snapshot_bootstrap"
         let identAfter ← identity cfgDst dIp
@@ -244,7 +267,7 @@ def suite : TestSuite := {
           if !containsSubstr dump "VALUE crp_5 9 4 " then return .fail "the overwrite (flag 9) is not on the destination"
           return .pass },
 
-    { name := "the destination master restarts (PVC kept) and comes back as master with the SAME history; V MATCHes again after more changes"
+    { name := "the destination master restarts (PVC kept) and comes back as master with the same lineage (master id, copy id; the epoch advances at re-promotion); V MATCHes again after more changes"
       run := do
         let some dPod ← masterPod cfgDst | return .fail "no destination master pod"
         match ← kubectl ["delete", "pod", dPod, "-n", cfgDst.«namespace», "--grace-period=0", "--force", "--wait=false"] with
@@ -257,10 +280,10 @@ def suite : TestSuite := {
           | some ip => return (← statOf cfgDst ip "rocksdb_master_id").isSome
         if !back then return .fail "the destination master did not come back within 300 s (per-key seeded: it keeps its own history)"
         let some dIp ← masterIp cfgDst | return .fail "no destination master after the restart"
-        let identNow ← identity cfgDst dIp
+        let identNow ← lineage cfgDst dIp
         let identBefore ← dstIdentRef.get
-        IO.eprintln s!"# destination after restart: {identNow} (before the seed: {identBefore})"
-        if identNow != identBefore then return .fail s!"history changed across the restart: {identBefore} → {identNow}"
+        IO.eprintln s!"# destination after restart: {← identity cfgDst dIp} (lineage before the seed: {identBefore}; the epoch advances at a re-promotion by design)"
+        if identNow != identBefore then return .fail s!"lineage changed across the restart: {identBefore} → {identNow}"
         let some sIp ← masterIp cfgSrc | return .fail "no source master"
         let _ ← waitForCondition "forwarding resumed (a probe key arrives)" 180 do
           let _ ← srcCmd sIp "set crp_probe 0 0 1\\r\\np\\r\\n"

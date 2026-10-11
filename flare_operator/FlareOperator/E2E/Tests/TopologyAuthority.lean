@@ -1059,6 +1059,133 @@ def suite : TestSuite := {
           if !applied then return .fail s!"topology not applied after {victim} restarted"
           return .pass },
 
+    -- The other writer the gate does not hold: a `node state` activation
+    -- (flared sends it from inside its sync handler, so holding it would
+    -- stall the send). Fixed at the same point: a slave's activation is
+    -- acknowledged while a pass holds a map that still lists it Prepare; the
+    -- release delivers that older map to everyone, the slave included.
+    -- Required: no node takes the slave back from Active (the slave keeps
+    -- Active locally — flared anti-entropy — and nobody else had seen it
+    -- Active yet), it does not rebuild again, the operator ends with it
+    -- Active, and the operator's warning names the activation as the move.
+    { name := "a slave's activation is acknowledged while a pass holds the older map (slave still Prepare in it): after the release no node takes the slave back from Active, it does not rebuild again, and the DURING-the-send warning names the activation"
+      run := do
+        match ← topologyApplied with
+        | .error e => return .fail s!"precondition: {e}"
+        | .ok _ => pure ()
+        let entries ← nodeView
+        let some master := entries.find? (fun e => e.role == 0) | return .fail "precondition: no master"
+        let victim := match entries.find? (fun e => e.role == 1) with
+          | some e => (e.fqdn.splitOn ".").headD e.fqdn
+          | none => ""
+        if victim.isEmpty then return .fail "precondition: no slave in the operator's view"
+        let mPod := (master.fqdn.splitOn ".").headD master.fqdn
+        let some mIp ← getPodIp mPod cfg.«namespace» | return .fail "precondition: no master IP"
+        -- data to copy, and a slow copy: the activation must come while the
+        -- pass is held, after the slave registered (a registration would
+        -- wait for the held send)
+        for i in List.range 100 do
+          discard <| memcachedSet cfg.debugPod cfg.«namespace» mIp cfg.flarePort s!"act_{i}" s!"v{i}"
+        let cm := s!"{cfg.name}-config"
+        let addLine := s!"kubectl get configmap {cm} -n {cfg.«namespace»} -o jsonpath='\{.data.extra\\.conf}' > /tmp/act-extra.conf && printf '\\nreconstruction-interval = 500000\\n' >> /tmp/act-extra.conf && kubectl create configmap {cm} -n {cfg.«namespace»} --from-file=extra.conf=/tmp/act-extra.conf --dry-run=client -o yaml | kubectl apply -f -"
+        let dropLine := s!"kubectl get configmap {cm} -n {cfg.«namespace»} -o jsonpath='\{.data.extra\\.conf}' | grep -v '^reconstruction-interval = 500000$' > /tmp/act-extra.conf; kubectl create configmap {cm} -n {cfg.«namespace»} --from-file=extra.conf=/tmp/act-extra.conf --dry-run=client -o yaml | kubectl apply -f -"
+        match ← sh addLine with
+        | .error e => return .fail s!"could not slow the reconstruction: {e}"
+        | .ok _ => pure ()
+        let restore : IO Unit := do discard <| sh dropLine
+        let mounted ← waitForCondition s!"{victim} sees reconstruction-interval in its extra.conf" 180 do
+          match ← kubectl ["exec", victim, "-n", cfg.«namespace», "--", "cat", "/etc/flared/extra.conf"] with
+          | .ok c => return containsSubstr c "reconstruction-interval = 500000"
+          | .error _ => return false
+        if !mounted then
+          restore
+          return .fail "the slowed reconstruction setting never reached the slave's mount"
+        let uid0 ← podUid victim
+        discard <| kubectl ["delete", "pod", victim, "-n", cfg.«namespace», "--grace-period=0", "--force", "--wait=false"]
+        -- the new process registered and is copying
+        let copying ← waitForCondition s!"the restarted {victim} is reconstructing" 180 do
+          let uid ← podUid victim
+          if uid == "" || uid == uid0 then return false
+          match ← getPodIp victim cfg.«namespace» with
+          | none => return false
+          | some ip =>
+            let cmd := s!"printf 'stats\\r\\n' | nc -w 3 {ip} {cfg.flarePort}"
+            match ← execInDebugPod cfg.debugPod cfg.«namespace» cmd with
+            | .ok o => return containsSubstr o "STAT reconstruction_current_state running"
+            | .error _ => return false
+        if !copying then
+          restore
+          return .fail s!"the restarted {victim} was never seen reconstructing — the order under test was not reached"
+        match ← armInSend with
+        | .error e => restore; return .fail s!"could not arm the insend barrier: {e}"
+        | .ok _ => pure ()
+        match ← triggerTopologyChange 37 with
+        | .error e => ensureInSendClear; restore; return .fail s!"could not trigger a topology change: {e}"
+        | .ok _ => pure ()
+        let mut held : Option Nat := none
+        for _ in [0:60] do
+          held ← inSendHeldVersion
+          if held.isSome then break
+          IO.sleep 1000
+        match held with
+        | none => ensureInSendClear; restore; return .fail "no pass reached the insend barrier within 60 s"
+        | some v =>
+          IO.eprintln s!"# pass held at v{v} while {victim} copies; waiting for its activation"
+          let activated ← waitForCondition s!"{victim}'s activation acknowledged while v{v} is held" 100 do
+            let opLog ← kubectlLogsLabel s!"app={cfg.operatorName}" cfg.«namespace» 400
+            return (opLog.splitOn "\n").any (fun l => containsSubstr l s!"Event: NodeState {victim}" && containsSubstr l "Prepare->Active")
+          let stillHeld := (← inSendHeldVersion) == some v
+          releaseInSend
+          ensureInSendClear
+          restore
+          if !activated || !stillHeld then
+            return .fail s!"the activation did not land while v{v} was held (activated={activated}, still held={stillHeld}) — the order under test was not reached"
+          IO.sleep 20000
+          let vLog ← kubectlLogs victim cfg.«namespace» 4000
+          let maps := acceptedMaps vLog
+          IO.eprintln s!"# {victim} accepted maps (version, line): {maps.map (fun (n, l) => (n, (l.splitOn "own role=").getLast!.take 40))}"
+          -- the victim, once Active in a map it accepted, never accepted a
+          -- later map that shows it Prepare AND took it (a local shift)
+          let shiftedBack := (vLog.splitOn "\n").filter (fun l =>
+            containsSubstr l "shifting node_state" && containsSubstr l victim && containsSubstr l "old_state=active" && containsSubstr l "new_state=prepare")
+          let kept := (vLog.splitOn "\n").filter (fun l =>
+            containsSubstr l "keeping active and re-announcing" || containsSubstr l "re-announcing (anti-entropy)")
+          IO.eprintln s!"# {victim}: anti-entropy lines {kept.length}; active->prepare shifts {shiftedBack.length}"
+          if !shiftedBack.isEmpty then
+            return .fail s!"{victim} went back from Active to Prepare after the older map arrived: {shiftedBack.take 3}"
+          -- no other node took it back either
+          for e in entries do
+            let pod := (e.fqdn.splitOn ".").headD e.fqdn
+            if pod != victim then
+              let l ← kubectlLogs pod cfg.«namespace» 4000
+              let back := (l.splitOn "\n").filter (fun x =>
+                containsSubstr x "shifting node_state" && containsSubstr x victim && containsSubstr x "old_state=active" && containsSubstr x "new_state=prepare")
+              if !back.isEmpty then
+                return .fail s!"{pod} took {victim} back from Active to Prepare: {back.take 3}"
+          let some vIp ← getPodIp victim cfg.«namespace» | return .fail "no IP for the victim after the release"
+          let started ← do
+            let cmd := s!"printf 'stats\\r\\n' | nc -w 3 {vIp} {cfg.flarePort}"
+            match ← execInDebugPod cfg.debugPod cfg.«namespace» cmd with
+            | .ok o => pure ((o.splitOn "\n").findSome? fun x =>
+                let t := x.trim.replace "\r" ""
+                if t.startsWith "STAT reconstruction_started " then (t.drop "STAT reconstruction_started ".length).trim.toNat? else none)
+            | .error _ => pure none
+          IO.eprintln s!"# {victim} reconstruction_started (this process) = {started}"
+          if started != some 1 then
+            return .fail s!"{victim} started {started} reconstructions in this process (expected exactly 1): the older map made it copy again"
+          let active ← waitForCondition s!"the operator holds {victim} Active" 120 do
+            return (← nodeView).any (fun e => (e.fqdn.splitOn ".").headD e.fqdn == victim && e.state == 0)
+          if !active then return .fail s!"the operator does not hold {victim} Active after the release"
+          let opLog ← kubectlLogsLabel s!"app={cfg.operatorName}" cfg.«namespace» 2000
+          let warn := (opLog.splitOn "\n").filter (fun l => containsSubstr l s!"DURING the send of v{v}")
+          IO.eprintln s!"# DURING-the-send warnings for v{v}: {warn.map String.trim}"
+          if !warn.any (fun l => containsSubstr l "(activation)" && containsSubstr l victim) then
+            return .fail s!"the live map moved during the send of v{v} but the warning does not name {victim}'s activation as the source: {warn}"
+          let applied ← waitForCondition "topology applied after the activation test" 300 do
+            return (← topologyApplied).toOption.isSome
+          if !applied then return .fail "topology not applied after the activation test"
+          return .pass },
+
     { name := "SAF-09: the persisted node map is missing at startup while the cluster has history: the operator halts (CRITICAL), never starts from an empty map; flared keeps serving; restoring the ConfigMap brings the operator back on the same map"
       run := do
         let settled ← waitForCondition "topology applied before the node-map test" 240 do

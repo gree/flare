@@ -32,6 +32,7 @@ import FlareOperator.StateMachine.NodeMapRecovery
 import FlareOperator.Kubectl
 import FlareOperator.Server.TcpServer
 import FlareOperator.Server.TopologyBroadcast
+import FlareOperator.Server.PublicationGate
 import FlareOperator.Metrics.Prometheus
 import FlareOperator.Metrics.HttpServer
 import FlareOperator.Migration.Controller
@@ -2724,51 +2725,65 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
         | .error e =>
           IO.eprintln s!"[flare-operator] PERSIST FENCE: could not persist v{finalVersion} ({e}); suppressing the broadcast, held for retry"
           pure false
-    -- the snapshot read at the top of this step must still be the live map:
-    -- a concurrent registration (TCP server) advanced it otherwise, and the
-    -- snapshot would remove the new node from its own map (snapshotStillLive)
-    let liveVersion := (← stateRef.get).nodeMapVersion
     if !persisted then
       pendingBroadcastRef.modify fun p => match p with | some v => some v | none => some finalVersion
-    else if stillLeader && !snapshotStillLive finalVersion liveVersion then
-      IO.eprintln s!"[flare-operator] topology send of v{finalVersion} SKIPPED: the live map moved to v{liveVersion} during this pass (a concurrent registration); the older snapshot would remove the new node from its own map — the next pass publishes the live map"
-      pendingBroadcastRef.modify fun p => match p with | some v => some v | none => some finalVersion
-    else if stillLeader then
-      -- Logged whenever a suppressed send is outstanding, whether or not
-      -- the version also moved: the published map subsumes the withheld
-      -- one either way, and the line names the withheld version so a test
-      -- can tie this send to that suppression. It does NOT claim the send
-      -- would not have happened without the flag — when the version moved
-      -- as well, it would have.
-      if let some suppressedV := pendingBefore then
-        IO.eprintln s!"[flare-operator] retrying an unconfirmed topology send (pending v{suppressedV}; publishing v{finalVersion})"
-      IO.eprintln s!"[flare-operator] broadcast trigger: {triggers.label}"
-      IO.eprintln s!"[flare-operator] topology changed (v{oldVersion} → v{finalVersion}), broadcasting"
-      inSendBarrier finalVersion
-      let confirmed ← broadcastTopologyToAllPods crName ns finalVersion finalState.getNodes
-      recordTopologyBroadcast metrics
-      updateNodeMapVersion metrics finalVersion
-      -- Re-read the lease AFTER the send. This cannot prevent the race
-      -- above, but it turns it from invisible into an incident record: if
-      -- we lost leadership during the broadcast, someone reading these
-      -- logs needs to know a stale map may have gone out.
-      match ← getLease leaseName ns with
-      | .ok l =>
-        if l.holderIdentity != identity then
-          IO.eprintln s!"[flare-operator] CRITICAL: lease holder changed to '{l.holderIdentity}' DURING a topology broadcast (v{finalVersion}); a map may have been published without authority. Recipients that already saw a newer version rejected it; others did not."
-      | .error e =>
-        IO.eprintln s!"[flare-operator] warning: could not confirm lease ownership after broadcasting v{finalVersion}: {e}"
-      -- the residual window: a registration DURING the send. Not prevented
-      -- (no lock between the TCP server and the broadcast); made visible.
-      let afterVersion := (← stateRef.get).nodeMapVersion
-      if !snapshotStillLive finalVersion afterVersion then
-        IO.eprintln s!"[flare-operator] WARNING: the live map moved to v{afterVersion} DURING the send of v{finalVersion}: a node registered in that window may have taken the older map (and left its role) until the next pass publishes v{afterVersion}"
-      pendingBroadcastRef.set (pendingTopologyAfterAttempt pendingBefore finalVersion confirmed)
-      if !confirmed then
-        IO.eprintln s!"[flare-operator] topology delivery unconfirmed (v{finalVersion}); retained for retry through the lease fence"
-    else
+    else if !stillLeader then
       IO.eprintln s!"[flare-operator] LEASE FENCE: not the lease holder anymore — suppressing topology broadcast (v{oldVersion} → v{finalVersion}); held for retry once authority returns"
       pendingBroadcastRef.modify fun p => match p with | some v => some v | none => some finalVersion
+    else
+      -- PublicationGate: from here until the send ends no registration is
+      -- answered (they wait for it), so the check below stays true for the
+      -- whole send. CI 38090211947 hit the window this closes.
+      match ← tryBeginPublication finalVersion with
+      | none =>
+        IO.eprintln s!"[flare-operator] topology send of v{finalVersion} SKIPPED: a registration is being answered; the next pass publishes the live map"
+        pendingBroadcastRef.modify fun p => match p with | some v => some v | none => some finalVersion
+      | some gate =>
+        try
+          -- the snapshot read at the top of this step must still be the live
+          -- map: a registration (TCP server) answered before the gate closed
+          -- advanced it otherwise, and the snapshot would remove the new node
+          -- from its own map (snapshotStillLive)
+          let liveVersion := (← stateRef.get).nodeMapVersion
+          if !snapshotStillLive finalVersion liveVersion then
+            IO.eprintln s!"[flare-operator] topology send of v{finalVersion} SKIPPED: the live map moved to v{liveVersion} during this pass (a concurrent registration); the older snapshot would remove the new node from its own map — the next pass publishes the live map"
+            pendingBroadcastRef.modify fun p => match p with | some v => some v | none => some finalVersion
+          else
+            -- Logged whenever a suppressed send is outstanding, whether or not
+            -- the version also moved: the published map subsumes the withheld
+            -- one either way, and the line names the withheld version so a test
+            -- can tie this send to that suppression. It does NOT claim the send
+            -- would not have happened without the flag — when the version moved
+            -- as well, it would have.
+            if let some suppressedV := pendingBefore then
+              IO.eprintln s!"[flare-operator] retrying an unconfirmed topology send (pending v{suppressedV}; publishing v{finalVersion})"
+            IO.eprintln s!"[flare-operator] broadcast trigger: {triggers.label}"
+            IO.eprintln s!"[flare-operator] topology changed (v{oldVersion} → v{finalVersion}), broadcasting"
+            inSendBarrier finalVersion
+            let confirmed ← broadcastTopologyToAllPods crName ns finalVersion finalState.getNodes
+            recordTopologyBroadcast metrics
+            updateNodeMapVersion metrics finalVersion
+            -- Re-read the lease AFTER the send. This cannot prevent the race
+            -- above, but it turns it from invisible into an incident record: if
+            -- we lost leadership during the broadcast, someone reading these
+            -- logs needs to know a stale map may have gone out.
+            match ← getLease leaseName ns with
+            | .ok l =>
+              if l.holderIdentity != identity then
+                IO.eprintln s!"[flare-operator] CRITICAL: lease holder changed to '{l.holderIdentity}' DURING a topology broadcast (v{finalVersion}); a map may have been published without authority. Recipients that already saw a newer version rejected it; others did not."
+            | .error e =>
+              IO.eprintln s!"[flare-operator] warning: could not confirm lease ownership after broadcasting v{finalVersion}: {e}"
+            -- registrations wait for this send (PublicationGate); a `node state` /
+            -- `node role` report is not held and can still move the live map
+            -- while the send is out — made visible, not prevented.
+            let afterVersion := (← stateRef.get).nodeMapVersion
+            if !snapshotStillLive finalVersion afterVersion then
+              IO.eprintln s!"[flare-operator] WARNING: the live map moved to v{afterVersion} DURING the send of v{finalVersion} (not a registration — those wait for the send; a node state/role report): the next pass publishes v{afterVersion}"
+            pendingBroadcastRef.set (pendingTopologyAfterAttempt pendingBefore finalVersion confirmed)
+            if !confirmed then
+              IO.eprintln s!"[flare-operator] topology delivery unconfirmed (v{finalVersion}); retained for retry through the lease fence"
+        finally
+          endPublication gate
 
   -- 4. Update node counts
   updateNodeCounts metrics finalState

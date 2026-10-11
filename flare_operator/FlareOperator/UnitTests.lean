@@ -16,6 +16,7 @@
 import Lean.Data.Json
 import FlareOperator.Migration.Provision
 import FlareOperator.Server.TopologyBroadcast
+import FlareOperator.Server.PublicationGate
 import FlareOperator.StateMachine.TopologyObservation
 import FlareOperator.Metrics.Prometheus
 import FlareOperator.StateMachine.ReplicaRepair
@@ -856,6 +857,19 @@ private def checkTopologyDelivery (ctx : Ctx) : IO Unit := do
     (FlareOperator.Server.snapshotStillLive 4294967296 4294967296)
   check ctx "a snapshot older than the live map (a node registered meanwhile) is not sent"
     (!FlareOperator.Server.snapshotStillLive 4294967296 4294967297)
+  -- CI 38090211947: a registration DURING the send (PublicationGate)
+  let g0 : FlareOperator.Server.PublicationGate := {}
+  let (sendOk, gS) := g0.beginSend 7
+  check ctx "an idle gate lets a send begin" sendOk
+  check ctx "no registration begins while a send is out" (!(gS.beginRegistration).1)
+  check ctx "a registration begins once the send ended" (gS.endSend.beginRegistration).1
+  let (regOk, gR) := g0.beginRegistration
+  check ctx "an idle gate lets a registration begin" regOk
+  check ctx "no send begins while a registration is being answered" (!(gR.beginSend 7).1)
+  check ctx "two registrations may be answered together" (gR.beginRegistration).1
+  check ctx "a send begins once every registration ended" (gR.endRegistration.beginSend 7).1
+  check ctx "a forced registration (wait ceiling) still blocks the NEXT send"
+    (!((gS.forceRegistration.endSend).beginSend 8).1)
   let trig := fun (moved : Bool) (pending : Option Nat) (held active : Nat) =>
     ({ versionMoved := moved, pending, repairHeld := held, activeNotReady := active } :
       FlareOperator.Server.BroadcastTriggers)

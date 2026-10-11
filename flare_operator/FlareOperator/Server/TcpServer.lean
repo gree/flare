@@ -20,6 +20,7 @@ import Std.Net.Addr
 import FlareOperator.K8s.FlareCluster
 import FlareOperator.Flare.Protocol
 import FlareOperator.StateMachine.Reconciler
+import FlareOperator.Server.PublicationGate
 
 namespace FlareOperator.Server
 
@@ -174,12 +175,26 @@ def handleConnection (sock : Socket) (state : ServerState) : IO Unit := do
         else if dropForTest then do
           pure ((← state.clusterState.get), (FlareResponse.OK : FlareResponse))
         else do
-          let r ← state.clusterState.modifyGet fun cs =>
-            let (newState, resp) := reconcileStep cs crd event
-            -- a node whose state went Active -> Prepare here lost its Active
-            -- membership (a re-registration demotes it; it must rebuild)
-            let demoted := Reconciler.leftActive cs newState
-            ((newState, resp, demoted), newState)
+          -- a registration is never answered while a node-map send is out
+          -- (PublicationGate): the new node holds its reply as version 0 and
+          -- would accept that older map. Only `node add` waits — flared sends
+          -- `node state` from inside its sync handler, so holding it would
+          -- stall the send it waits for.
+          let registering := match event with | .NodeAdd .. => true | _ => false
+          if registering then
+            let who := match event with
+              | .NodeAdd n p => FlareClusterState.toNodeKey n p
+              | _ => ""
+            beginRegistrationWaiting who
+          let r ← try
+              state.clusterState.modifyGet fun cs =>
+                let (newState, resp) := reconcileStep cs crd event
+                -- a node whose state went Active -> Prepare here lost its Active
+                -- membership (a re-registration demotes it; it must rebuild)
+                let demoted := Reconciler.leftActive cs newState
+                ((newState, resp, demoted), newState)
+            finally
+              if registering then endRegistrationGate
           let (newState, resp, demoted) := r
           if !demoted.isEmpty then leftActiveRef.modify fun l => l ++ demoted.filter (!l.contains ·)
           pure (newState, resp)

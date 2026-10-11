@@ -5574,6 +5574,12 @@ def historyTrackingSuite : TestSuite := {
         IO.eprintln s!"# record before [{before.take 120}] after [{after.take 120}]; write failure logged={failed}"
         if after != before then return .fail "the record changed although it was unwritable"
         if !failed then return .fail "no failed history write was logged (the bulk change was not attempted?)"
+        -- RUNBOOK #history-holder-reseated names this symptom (the master holds
+        -- another history than the record); recorded, not asserted, so the
+        -- runbook can say whether this test reached that state before its
+        -- recovery (delete + approval) runs below
+        let heldLines := ((← c.opLogSince t0).splitOn "\n").filter (containsSubstr · "REBUILD HELD (history)")
+        IO.eprintln s!"# runbook state before the recovery: {heldLines.length} 'REBUILD HELD (history)' line(s); first: {(heldLines.head?.getD "(none)").trim.take 220}"
         discard <| kubectl ["delete", "configmap", s!"{historyCfg.name}-history", "-n", ns]
         -- an ABSENT record with a node map is a migration or a loss: NOT
         -- adopted until the explicit migration approval

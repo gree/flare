@@ -346,8 +346,11 @@ namespace test_handler_dump_replication {
 		handler_dump_replication::seed_retry_base_ms = 1500;
 
 		shared_thread t = start_handler(false);
-		usleep(300 * 1000);
+		// one attempt is one open() = 2 connects 0.5 s apart; listen after it
+		// (nix-linux 38120332346: listening at 300 ms let the first attempt in)
+		usleep(1200 * 1000);
 		cut_assert_equal_string("connecting", stats_object->get_crepl_seed_state().c_str());
+		cut_assert_equal_int(1, (int)crepl("seed_connect_attempts"));
 		s->listen(port);
 		cs = s->wait();
 		for (int i = 0; i < 3; i++) {

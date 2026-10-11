@@ -393,10 +393,13 @@ namespace test_handler_cluster_replication {
 	// the retry window (a restart): the forward is delivered, nothing is
 	// dropped — it used to be dropped after 4 quick tries.
 	void test_foreign_rides_out_a_late_destination() {
-		queue_proxy_write::foreign_retry_window_ms = 8000;
+		queue_proxy_write::foreign_retry_window_ms = 20000;
 		shared_thread t = start_handler(false);
 		shared_queue_proxy_write q = enqueue_foreign_set(t, "key");
-		usleep(1500 * 1000);
+		// one attempt is one open() = 2 connects 0.5 s apart (plus the
+		// handler's own first open); listen well after the first attempt
+		// (nix-linux 38120332346: listening at 1.5 s let it in at once)
+		usleep(4000 * 1000);
 		s->listen(port);
 		cs = s->wait();
 		char *p, *v;

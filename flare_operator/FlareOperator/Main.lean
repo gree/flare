@@ -1807,17 +1807,17 @@ private def commitClusterState (stateRef : IO.Ref FlareClusterState)
     Deliberately NOT a second implementation of the send path — the pass
     that resumes here is the same one that goes on to check the lease and
     broadcast. -/
-private def preSendBarrier (version : Nat) : IO Unit := do
+private def fileBarrier (pfx position : String) (version : Nat) : IO Unit := do
   match ← IO.getEnv "FLARE_TEST_PRESEND_BARRIER" with
   | none => pure ()
   | some dir =>
-    let arm : System.FilePath := dir ++ "/arm"
+    let arm : System.FilePath := dir ++ s!"/{pfx}arm"
     if !(← arm.pathExists) then
       pure ()
     else
-      let reached : System.FilePath := dir ++ "/reached"
-      let release : System.FilePath := dir ++ "/release"
-      IO.eprintln s!"[flare-operator] TEST BARRIER: holding before the pre-send lease check (v{version})"
+      let reached : System.FilePath := dir ++ s!"/{pfx}reached"
+      let release : System.FilePath := dir ++ s!"/{pfx}release"
+      IO.eprintln s!"[flare-operator] TEST BARRIER: holding {position} (v{version})"
       try IO.FS.writeFile reached s!"{version}\n" catch _ => pure ()
       try IO.FS.removeFile arm catch _ => pure ()
       let mut released := false
@@ -1832,6 +1832,17 @@ private def preSendBarrier (version : Nat) : IO Unit := do
         IO.eprintln s!"[flare-operator] TEST BARRIER: timed out after 120s; continuing (v{version})"
       try IO.FS.removeFile release catch _ => pure ()
       try IO.FS.removeFile reached catch _ => pure ()
+
+private def preSendBarrier (version : Nat) : IO Unit :=
+  fileBarrier "" "before the pre-send lease check" version
+
+/-- Same protocol with the `insend-` files (`insend-arm`, `insend-reached`,
+    `insend-release`): holds a pass AFTER it has decided to send — the live
+    map was checked against its snapshot — and before the first byte goes
+    out, the window in which a registration used to be answered (CI
+    38090211947). -/
+private def inSendBarrier (version : Nat) : IO Unit :=
+  fileBarrier "insend-" "after the live-map check, before the send" version
 
 /-- TEST SEAM (SAF-08): with FLARE_TEST_PROMOTION_BARRIER=<dir> and
     <dir>/promote-arm present, a pass that is about to commit a promotion
@@ -2733,6 +2744,7 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
         IO.eprintln s!"[flare-operator] retrying an unconfirmed topology send (pending v{suppressedV}; publishing v{finalVersion})"
       IO.eprintln s!"[flare-operator] broadcast trigger: {triggers.label}"
       IO.eprintln s!"[flare-operator] topology changed (v{oldVersion} → v{finalVersion}), broadcasting"
+      inSendBarrier finalVersion
       let confirmed ← broadcastTopologyToAllPods crName ns finalVersion finalState.getNodes
       recordTopologyBroadcast metrics
       updateNodeMapVersion metrics finalVersion

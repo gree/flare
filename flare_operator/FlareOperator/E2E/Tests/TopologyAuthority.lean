@@ -358,6 +358,47 @@ private def retryCovers (log : String) (held : Nat) : Bool :=
         | some p, some q => p ≤ held && held ≤ q
         | _, _ => false
 
+
+-- ─── a registration while a pass is sending ───────────────────────────────
+
+/-- The `insend-` barrier (inSendBarrier in Main.lean): a pass held AFTER its
+    live-map check and before its send. -/
+private def armInSend : IO (Except String String) :=
+  opExec s!"mkdir -p {barrierDir} && rm -f {barrierDir}/insend-reached {barrierDir}/insend-release && touch {barrierDir}/insend-arm"
+
+private def inSendHeldVersion : IO (Option Nat) := do
+  match ← opExec s!"cat {barrierDir}/insend-reached 2>/dev/null || true" with
+  | .error _ => return none
+  | .ok out => return (out.trim.splitOn "\n").head?.bind (·.trim.toNat?)
+
+private def releaseInSend : IO Unit := do
+  discard <| opExec s!"touch {barrierDir}/insend-release"
+  for _ in [0:30] do
+    match ← opExec s!"test -f {barrierDir}/insend-reached && echo held || echo free" with
+    | .ok out => if containsSubstr out "free" then break
+    | .error _ => pure ()
+    IO.sleep 1000
+
+private def ensureInSendClear : IO Unit := do
+  match ← opExec s!"test -f {barrierDir}/insend-reached && echo held || echo free" with
+  | .ok out => if containsSubstr out "held" then releaseInSend
+  | .error _ => pure ()
+  discard <| opExec s!"rm -f {barrierDir}/insend-arm {barrierDir}/insend-release {barrierDir}/insend-reached"
+
+private def podUid (pod : String) : IO String := do
+  match ← kubectlGetJsonpath "pod" pod cfg.«namespace» "{.metadata.uid}" with
+  | .ok u => return u.trim
+  | .error _ => return ""
+
+/-- Versions of every map flared logged as accepted, with the line, in
+    order (`node map accepted (version N, ...)`). -/
+private def acceptedMaps (log : String) : List (Nat × String) :=
+  (log.splitOn "\n").filterMap fun l =>
+    if !containsSubstr l "node map accepted (version " then none
+    else
+      let rest := (l.splitOn "node map accepted (version ").getLast!
+      (rest.takeWhile Char.isDigit).toNat?.map (·, l.trim)
+
 -- ─── SAF-09: the persisted node map at startup ───────────────────────────
 
 private def nodeMapCm : String := s!"{cfg.name}-node-map"
@@ -947,6 +988,75 @@ def suite : TestSuite := {
           -- moving is all this proves.
           if before.all (fun (_, _, b) => b == expected) then
             return .fail s!"precondition: the held change is not visible in the slave balance (before {before}, committed {expected}); the content marker proves nothing"
+          return .pass },
+
+    -- CI 38090211947 logged "the live map moved ... DURING the send": a
+    -- registration answered between a pass's live-map check and its send.
+    -- Fixed here at that exact point (the insend barrier), the registering
+    -- node must never accept the map the held pass carries: it is older than
+    -- the map its own registration produced, and flared holds the
+    -- registration reply as version 0 so it would take any version above 0.
+    { name := "a node registers while a pass is between its live-map check and its send: the registering node never accepts the older map that pass carries (no rollback of its role)"
+      run := do
+        match ← topologyApplied with
+        | .error e => return .fail s!"precondition: {e}"
+        | .ok _ => pure ()
+        let entries ← nodeView
+        let victim := match entries.find? (fun e => e.role == 1) with
+          | some e => (e.fqdn.splitOn ".").headD e.fqdn
+          | none => ""
+        if victim.isEmpty then return .fail "precondition: no slave in the operator's view"
+        let uid0 ← podUid victim
+        match ← armInSend with
+        | .error e => return .fail s!"could not arm the insend barrier: {e}"
+        | .ok _ => pure ()
+        match ← triggerTopologyChange 35 with
+        | .error e => ensureInSendClear; return .fail s!"could not trigger a topology change: {e}"
+        | .ok _ => pure ()
+        let mut held : Option Nat := none
+        for _ in [0:90] do
+          held ← inSendHeldVersion
+          if held.isSome then break
+          IO.sleep 1000
+        match held with
+        | none => ensureInSendClear; return .fail "no pass reached the insend barrier within 90s; the window was never opened"
+        | some v =>
+          IO.eprintln s!"# pass held between its live-map check and its send at v{v}; restarting {victim} so it registers in that window"
+          discard <| kubectl ["delete", "pod", victim, "-n", cfg.«namespace», "--grace-period=0", "--force", "--wait=false"]
+          -- the registration is in the window once EITHER the new process has
+          -- been answered and listens (nothing stopped it) OR the operator
+          -- reports the registration waiting for this send
+          let mut answered := false
+          let mut waited := false
+          for _ in [0:90] do
+            let uid ← podUid victim
+            if uid != "" && uid != uid0 then
+              if containsSubstr (← kubectlLogs victim cfg.«namespace» 2000) "entering running loop" then
+                answered := true
+            let opLog ← kubectlLogsLabel s!"app={cfg.operatorName}" cfg.«namespace» 400
+            if (opLog.splitOn "\n").any (fun l => containsSubstr l s!"registration of {victim}" && containsSubstr l s!"waits for the in-flight node-map send of v{v}") then
+              waited := true
+            if answered || waited then break
+            IO.sleep 1000
+          IO.eprintln s!"# while held: registration answered and listening={answered}; registration waiting for the send={waited}"
+          if !answered && !waited then
+            ensureInSendClear
+            return .fail s!"{victim} neither registered nor waited within 90 s while the pass was held: the window was not exercised"
+          releaseInSend
+          ensureInSendClear
+          IO.sleep 15000
+          let podLog ← kubectlLogs victim cfg.«namespace» 3000
+          let opLog ← kubectlLogsLabel s!"app={cfg.operatorName}" cfg.«namespace» 600
+          let maps := acceptedMaps podLog
+          IO.eprintln s!"# {victim} accepted maps: {maps.map (·.1)}"
+          for (n, l) in maps do
+            if n > 0 && n ≤ v then
+              return .fail s!"{victim} registered after v{v} was decided and then ACCEPTED v{n} (older than the map its registration produced): {l}"
+          if waited && (opLog.splitOn "\n").any (fun l => containsSubstr l "WARNING: registration of" && containsSubstr l victim) then
+            return .fail "the registration gave up waiting (ceiling) while the send was in flight"
+          let applied ← waitForCondition "topology applied after the restart" 300 do
+            return (← topologyApplied).toOption.isSome
+          if !applied then return .fail s!"topology not applied after {victim} restarted"
           return .pass },
 
     { name := "SAF-09: the persisted node map is missing at startup while the cluster has history: the operator halts (CRITICAL), never starts from an empty map; flared keeps serving; restoring the ConfigMap brings the operator back on the same map"

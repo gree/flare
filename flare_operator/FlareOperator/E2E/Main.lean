@@ -29,6 +29,7 @@ import FlareOperator.E2E.Tests.BackupRestore
 import FlareOperator.E2E.Tests.CircuitBreaker
 import FlareOperator.E2E.Tests.OperatorRestart
 import FlareOperator.E2E.Tests.TopologyAuthority
+import FlareOperator.E2E.Tests.ReadTimeoutReload
 import FlareOperator.E2E.Tests.ReplicaRepair
 import FlareOperator.E2E.Tests.ContinuousReplication
 import FlareOperator.E2E.Tests.ContinuousReplicationLimits
@@ -68,6 +69,7 @@ def main (args : List String) : IO UInt32 :=
     Tests.CircuitBreaker.suite,
     Tests.OperatorRestart.suite,
     Tests.TopologyAuthority.suite,
+    Tests.ReadTimeoutReload.suite,
     Tests.ReplicaRepair.suite,
     Tests.ContinuousReplication.suite,
     Tests.ContinuousReplicationLimits.purgeSuite,

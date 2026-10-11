@@ -864,8 +864,30 @@ read before duplication is enabled):
   baseline read while replication was already on → **Unknown → held**
   (recreate the migration; nothing is inferred). `proxy_write_dropped`
   also counts in-cluster drops — a hold may be conservative;
-- `spec.approveForward: true`, set by a human after verification V
-  (docs/review-cross-cluster-2026-10-11.md §8, `scripts/flare_verify_copy.py`).
+- `spec.forwardApproval`: the line verification V prints for a MATCH only
+  (docs/review-cross-cluster-2026-10-11.md §8, §9.1, `scripts/flare_verify_copy.py`):
+  `v=1|verdict=MATCH|verified_at=..|attempt=<status.attemptId>|src=..|dst=..`.
+  The operator re-reads every source and target partition master at the
+  switch and refuses another attempt, any changed pod UID / start time /
+  master id / copy id / epoch / sequence number, an unreadable master, or a
+  verification older than 3600 s. `spec.approveForward: true` (a boolean)
+  is NOT accepted any more — the message says so.
+
+Procedure (ordered; every step a human act):
+1. Stop client writes to the source (outside the operator; the operator
+   cannot observe a fence — it only sees positions not moving).
+2. Capture both sides and run V with `--attempt-id` = `status.attemptId`
+   and the attempt baseline taken before the migration was created.
+   Capture = `repl_snapshot` + `flared --dump-checkpoint` (§12; `dump`
+   changes a master and makes the scan UNKNOWN). Capturing a real cluster
+   is NOT approved; `scripts/flare_v_capture_kind.py` refuses any context
+   but kind.
+3. Only on MATCH: set `spec.forwardApproval` to the printed approval line.
+4. Keep writes stopped until the phase is **AwaitingCutover**: after the
+   source applied forward mode the operator checks the same approval again;
+   a write in between holds the migration in Forwarding ("re-run V and set a
+   new forwardApproval"). Abort is refused there (#migration-forward-abort).
+5. Resume writes after AwaitingCutover.
 
 `status.message` names the condition that holds. Nothing here repairs a
 difference or re-seeds; R (repair) stays a separate, approved procedure.

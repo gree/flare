@@ -19,13 +19,25 @@
       source proxies every client read and write to the target, so the
       target holds acknowledged writes the source does not — deleting it
       would lose them),
-    * the forward switch fires only with `approveForward` AND evidence for
-      THIS attempt: every source master's seed completed after the attempt
-      began, no loss counter moved since the attempt began (Unknown — a
-      restart, a counter reset, an unreadable master, a baseline taken after
-      replication was already on — holds), and the key counts converged.
-      Equal counts alone never advance (2026-10-11: they did, and the
-      forward switch is the first client-visible step).
+    * the forward switch fires only with a verification APPROVAL bound to
+      THIS attempt and to the live masters (`forwardApproval`, the line V
+      prints for a MATCH: attempt id, verification time, and per partition
+      master on both sides pod / pod UID / process start / master id / copy
+      id / copy epoch / sequence number — re-read and compared at the
+      switch) AND evidence for this attempt: every source master's seed
+      completed after the attempt began, no loss counter moved since the
+      attempt began (Unknown — a restart, a counter reset, an unreadable
+      master, a baseline taken after replication was already on — holds),
+      and the key counts converged. Equal counts alone never advance
+      (2026-10-11: they did, and the forward switch is the first
+      client-visible step); a boolean (`approveForward`) is not accepted as
+      a verification,
+    * Forwarding → AwaitingCutover re-checks the same approval once the
+      source applied forward mode: a write (or a restart, re-seed, reap)
+      between the switch-time check and the apply moves a position and
+      holds the migration in Forwarding until a new V MATCH is bound.
+      Writes stay stopped until AwaitingCutover — the write stop is the
+      operator's premise, never observed as a fence.
 -/
 
 import FlareOperator.K8s.FlareCluster
@@ -107,9 +119,14 @@ structure MigSpec where
   source : String
   target : MigTargetSpec
   paused : Bool := false
-  /-- Human gate for the forward switch, given after verification V
-      (docs/review-cross-cluster-2026-10-11.md §7.5) of THIS attempt. -/
+  /-- Obsolete boolean gate: read only to say it is NOT accepted (a manual
+      bool is not a verification). -/
   approveForward : Bool := false
+  /-- The approval line V printed for a MATCH (scripts/flare_verify_copy.py
+      `approval`): `v=1|verdict=MATCH|verified_at=<unix>|attempt=<id>|src=..|dst=..`.
+      Checked against the live masters at the switch and again after the
+      source applied forward mode. -/
+  forwardApproval : String := ""
   approveCutover : Bool := false
   approveRetire : Bool := false
   abort : Bool := false
@@ -212,6 +229,24 @@ def nextConvergedTicks (phase : MigPhase) (prev : Nat) (src tgt : Option Nat) : 
     | some s, some t => if t ≥ s then prev + 1 else 0
     | _, _ => 0
 
+/-- One partition master's identity and position, as bound by a V report. -/
+structure NodeIdent where
+  pod : String
+  podUid : String
+  boot : Nat
+  masterId : String
+  copyId : String
+  epoch : String
+  seq : String
+  deriving Repr, BEq, Inhabited
+
+def NodeIdent.parse (s : String) : Option NodeIdent :=
+  match s.splitOn "," with
+  | [pod, uid, boot, mid, copy, ep, seq] => do
+    let b ← boot.toNat?
+    some { pod, podUid := uid, boot := b, masterId := mid, copyId := copy, epoch := ep, seq }
+  | _ => none
+
 /-- One tick's worth of world state, gathered by the IO layer. -/
 structure MigObs where
   /-- Target FlareCluster exists AND its node map shows every partition with
@@ -236,30 +271,21 @@ structure MigObs where
   seedCompleted : Bool := false
   /-- Loss counters since the attempt began, over the whole attempt. -/
   loss : LossVerdict := .unknown "not observed"
+  /-- status.attemptId: minted when duplication is enabled (CR uid + the
+      attempt baseline); empty before. -/
+  attemptId : String := ""
+  /-- Live identity/position of every source / target partition master,
+      read this tick (`none` = some master unreadable or none). -/
+  srcIdent : Option (List NodeIdent) := none
+  dstIdent : Option (List NodeIdent) := none
+  /-- The source masters' own clock this tick (largest `time` stat). -/
+  now : Option Nat := none
   deriving Repr, BEq
 
 /-- Convergence dwell: how many consecutive converged ticks are required
     before Duplicating advances. At the 5s reconcile interval this is ~30s
     of stable convergence. -/
 def convergenceDwellTicks : Nat := 6
-
-/-- One partition master's identity and position, as bound by a V report. -/
-structure NodeIdent where
-  pod : String
-  podUid : String
-  boot : Nat
-  masterId : String
-  copyId : String
-  epoch : String
-  seq : String
-  deriving Repr, BEq, Inhabited
-
-def NodeIdent.parse (s : String) : Option NodeIdent :=
-  match s.splitOn "," with
-  | [pod, uid, boot, mid, copy, ep, seq] => do
-    let b ← boot.toNat?
-    some { pod, podUid := uid, boot := b, masterId := mid, copyId := copy, epoch := ep, seq }
-  | _ => none
 
 /-- `attempt=<id>|src=<node>;..|dst=<node>;..` (scripts/flare_verify_copy.py
     binding_line). `none` when malformed. -/
@@ -273,7 +299,10 @@ def parseBinding (s : String) : Option (String × List NodeIdent × List NodeIde
   | _ => none
 
 private def identHold (side : String) (bound now : List NodeIdent) : Option String :=
+  let pods := bound.map (·.pod)
   if bound.isEmpty then some s!"{side}: the verification binds no node"
+  else if pods.eraseDups.length != pods.length then
+    some s!"{side}: the verification names a master twice"
   else if bound.length != now.length then
     some s!"{side}: {bound.length} masters verified, {now.length} now"
   else bound.findSome? fun b =>
@@ -290,16 +319,43 @@ private def identHold (side : String) (bound now : List NodeIdent) : Option Stri
         some s!"{side} {b.pod}: position moved since the verification (a write, a reap, a re-seed)"
       else none
 
-/-- The forward switch may use a V result only while the live masters are
-    exactly what it verified, in this attempt. NOT wired into migStep yet
-    (approveForward is a boolean; the operator does not read target
-    identities) — recorded as not implemented. -/
+/-- The binding alone: the live masters must be exactly what V verified, in
+    this attempt. -/
 def forwardBindingHold (binding attemptNow : String) (srcNow dstNow : List NodeIdent) : Option String :=
   match parseBinding binding with
   | none => some "verification binding unreadable"
   | some (att, src, dst) =>
-    if att != attemptNow then some "the verification belongs to another attempt (stale or reused)"
+    if attemptNow.isEmpty then some "this attempt has no id yet (duplication not enabled by this migration)"
+    else if att != attemptNow then some "the verification belongs to another attempt (stale or reused)"
     else (identHold "source" src srcNow).orElse fun _ => identHold "target" dst dstNow
+
+/-- How long a MATCH may be used, on the source masters' clock. Every
+    position must ALSO be unchanged; the age bounds what no position shows
+    (an unobserved counter, a client that kept a connection open). -/
+def approvalMaxAgeSeconds : Nat := 3600
+
+/-- `v=1|verdict=MATCH|verified_at=<unix>|<binding>` → (verified_at, binding).
+    Only a MATCH line parses; DIFFERENT / UNKNOWN never print one. -/
+def parseApproval (s : String) : Option (Nat × String) :=
+  match s.trim.splitOn "|" with
+  | v :: verdict :: at_ :: rest =>
+    if v != "v=1" || verdict != "verdict=MATCH" || !at_.startsWith "verified_at=" then none
+    else ((at_.drop "verified_at=".length).toNat?).map fun t => (t, "|".intercalate rest)
+  | _ => none
+
+/-- Why a V approval cannot be used against this tick's live masters, or
+    `none`. Fail-closed: unreadable masters or clock = held. -/
+def approvalHold (approval : String) (obs : MigObs) : Option String :=
+  match parseApproval approval with
+  | none => some "forwardApproval is not a V MATCH approval line (v=1|verdict=MATCH|verified_at=..|attempt=..|src=..|dst=..)"
+  | some (at_, binding) =>
+    match obs.srcIdent, obs.dstIdent, obs.now with
+    | some src, some dst, some now =>
+      if now + 5 < at_ then some s!"verified_at {at_} is in the future of the source clock ({now})"
+      else if at_ + approvalMaxAgeSeconds < now then
+        some s!"the verification is older than {approvalMaxAgeSeconds} s (verified_at {at_}, now {now}): re-run V"
+      else forwardBindingHold binding obs.attemptId src dst
+    | _, _, _ => some "live master identities or clock unreadable this tick: the approval cannot be checked (held)"
 
 /-- Why the forward switch is held, or `none` when every condition holds. -/
 def forwardHold (spec : MigSpec) (obs : MigObs) : Option String :=
@@ -311,9 +367,18 @@ def forwardHold (spec : MigSpec) (obs : MigObs) : Option String :=
     | .lost n => some s!"{n} writes lost since the attempt began (counted on the source): verification V must list them; cutover path refused"
     | .unknown why => some s!"loss since the attempt began is UNKNOWN ({why}): held"
     | .clean =>
-      if !spec.approveForward then
-        some "counts, seed and loss counters satisfied — NOT a verification: run V (writes stopped, per-key compare) and set spec.approveForward"
-      else none
+      if spec.forwardApproval.isEmpty then
+        some ((if spec.approveForward then "approveForward is a boolean and is NOT accepted as a verification; " else "")
+          ++ s!"counts, seed and loss counters satisfied — NOT a verification: stop writes, run V for attempt {obs.attemptId} and set spec.forwardApproval to the approval line it prints for a MATCH")
+      else (approvalHold spec.forwardApproval obs).map ("forwardApproval refused: " ++ ·)
+
+/-- Why Forwarding may not advance to AwaitingCutover: forward mode not yet
+    applied, or the approval no longer matches the live masters after the
+    apply (a write in the switch window). -/
+def forwardAppliedHold (spec : MigSpec) (obs : MigObs) : Option String :=
+  if !obs.sourceForwardApplied then some "the source has not applied forward mode yet"
+  else (approvalHold spec.forwardApproval obs).map
+    ("after the forward apply the approval no longer matches (keep writes stopped; re-run V and set a new forwardApproval): " ++ ·)
 
 /-! ## Actions -/
 
@@ -351,7 +416,7 @@ def migStep (spec : MigSpec) (phase : MigPhase) (obs : MigObs) : MigPhase × Mig
       if (forwardHold spec obs).isNone then (.Forwarding, .switchForward)
       else (.Duplicating, .none)
     | .Forwarding =>
-      if obs.sourceForwardApplied then (.AwaitingCutover, .none)
+      if (forwardAppliedHold spec obs).isNone then (.AwaitingCutover, .none)
       else (.Forwarding, .none)
     | .AwaitingCutover =>
       if spec.approveCutover then (.CutOver, .doCutover)
@@ -420,7 +485,7 @@ theorem migStep_no_abort_after_forward (spec : MigSpec) (phase : MigPhase) (obs 
       split <;> simp_all
 
 theorem forwardHold_none (spec : MigSpec) (obs : MigObs) (h : forwardHold spec obs = none) :
-    spec.approveForward = true ∧ obs.seedCompleted = true ∧ obs.loss = .clean ∧
+    approvalHold spec.forwardApproval obs = none ∧ obs.seedCompleted = true ∧ obs.loss = .clean ∧
       convergenceDwellTicks ≤ obs.convergedTicks := by
   unfold forwardHold at h
   split at h
@@ -434,16 +499,37 @@ theorem forwardHold_none (spec : MigSpec) (obs : MigObs) (h : forwardHold spec o
       · rename_i hl
         split at h
         · simp at h
-        · rename_i ha
-          refine ⟨by simpa using ha, by simpa using hs, hl, by omega⟩
+        · refine ⟨by simpa using h, by simpa using hs, hl, by omega⟩
+
+/-- The approval check passes only for a parsed MATCH line whose binding
+    names this tick's attempt and equals the live masters. -/
+theorem approvalHold_none (approval : String) (obs : MigObs)
+    (h : approvalHold approval obs = none) :
+    ∃ at_ binding src dst now, parseApproval approval = some (at_, binding) ∧
+      obs.srcIdent = some src ∧ obs.dstIdent = some dst ∧ obs.now = some now ∧
+      at_ ≤ now + 5 ∧ now ≤ at_ + approvalMaxAgeSeconds ∧
+      forwardBindingHold binding obs.attemptId src dst = none := by
+  unfold approvalHold at h
+  split at h
+  · simp at h
+  · rename_i at_ binding hp
+    split at h
+    · rename_i src dst now hs hd hn
+      split at h
+      · simp at h
+      · split at h
+        · simp at h
+        · exact ⟨at_, binding, src, dst, now, hp, hs, hd, hn, by omega, by omega, h⟩
+    · simp at h
 
 /-- The forward switch — the first client-visible step — is issued only with
-    the human approval AND this attempt's evidence: seed completed, loss
-    counters clean over the whole attempt, counts converged. Equal counts
-    alone never issue it. -/
+    a V approval that holds against this tick's live masters in this attempt
+    AND this attempt's evidence: seed completed, loss counters clean over the
+    whole attempt, counts converged. Equal counts alone, or a boolean, never
+    issue it. -/
 theorem migStep_forward_requires_approval_and_evidence (spec : MigSpec) (phase : MigPhase)
     (obs : MigObs) (h : (migStep spec phase obs).2 = .switchForward) :
-    spec.approveForward = true ∧ obs.seedCompleted = true ∧ obs.loss = .clean ∧
+    approvalHold spec.forwardApproval obs = none ∧ obs.seedCompleted = true ∧ obs.loss = .clean ∧
       convergenceDwellTicks ≤ obs.convergedTicks := by
   apply forwardHold_none
   by_cases hp : spec.paused
@@ -451,5 +537,24 @@ theorem migStep_forward_requires_approval_and_evidence (spec : MigSpec) (phase :
   · by_cases ha : spec.abort && !phase.abortRefused && !phase.terminal
     · cases phase <;> simp_all [migStep]
     · cases phase <;> simp_all [migStep] <;> split at h <;> simp_all
+
+/-- Forwarding reaches AwaitingCutover only when the source applied forward
+    mode AND the same approval still holds against the live masters (no
+    write, restart or re-seed in the switch window). -/
+theorem migStep_awaitingCutover_rechecks_approval (spec : MigSpec) (obs : MigObs)
+    (h : (migStep spec .Forwarding obs).1 = .AwaitingCutover) :
+    spec.paused = false ∧ obs.sourceForwardApplied = true ∧ approvalHold spec.forwardApproval obs = none := by
+  by_cases hp : spec.paused
+  · simp [migStep, hp] at h
+  · simp [migStep, hp, MigPhase.abortRefused] at h
+    split at h
+    · rename_i hf
+      unfold forwardAppliedHold at hf
+      split at hf
+      · simp at hf
+      · rename_i hs
+        refine ⟨by simpa using hp, by simpa using hs, ?_⟩
+        cases hh : approvalHold spec.forwardApproval obs <;> simp_all
+    · simp at h
 
 end FlareOperator.Migration

@@ -310,6 +310,39 @@ class VerifyCopyTest(unittest.TestCase):
         _, r3 = self.f.run()
         self.assertEqual(len({r1["binding"], r2["binding"], r3["binding"]}), 3)
 
+    # ---- approval: the only thing the operator accepts --------------------
+    # The same line is parsed by the operator's unit check
+    # (UnitTests.lean "approval golden"): change both together.
+    GOLDEN = ("v=1|verdict=MATCH|verified_at=1800000030|attempt=mig-uid/123"
+              "|src=s0,s0-uid,1799999000,mid-a,copy-a:1,1:ep-a,500"
+              "|dst=d0,d0-uid,1799999000,mid-a,copy-a:1,1:ep-a,500")
+
+    def test_match_prints_the_approval_line_golden(self):
+        self.f.attempt_id = "mig-uid/123"
+        r = self.assertVerdict(0, "MATCH")
+        self.assertEqual(r["approval"], self.GOLDEN)
+
+    def test_no_approval_on_different_or_unknown(self):
+        self.f.dst = {"d0": dump(item("a", "1"), item("b", "WRONG"), item("c", "3"))}
+        r = self.assertVerdict(1, "DIFFERENT")
+        self.assertNotIn("approval", r)
+        self.f.dst = {"d0": dump(item("a", "1"), item("b", "2"), item("c", "3"))}
+        self.f.src_post = [node("s0", {"cmd_set": "11"}, time=T1)]
+        r = self.assertVerdict(2, "UNKNOWN")
+        self.assertNotIn("approval", r)
+
+    def test_checkpoint_capture_with_expired_unreaped_key_on_both_sides_matches(self):
+        # flared --dump-checkpoint keeps expired-unreaped keys with their
+        # absolute expire: identical on both sides = compared exactly
+        x = item("x", "old", expire=T0 - 100)
+        self.f.src = {"s0": dump(item("a", "1"), item("b", "2"), item("c", "3"), x)}
+        self.f.dst = {"d0": dump(item("a", "1"), item("b", "2"), item("c", "3"), x)}
+        self.assertVerdict(0, "MATCH")
+
+    def test_checkpoint_capture_expired_key_reaped_on_one_side_is_indeterminate(self):
+        self.f.src = {"s0": dump(item("a", "1"), item("b", "2"), item("c", "3"), item("x", "old", expire=T0 - 100))}
+        self.assertVerdict(2, "UNKNOWN", "indeterminate")
+
     def test_streaming_reader_is_lazy(self):
         p = os.path.join(self._td.name, "lazy.dump")
         with open(p, "wb") as f:

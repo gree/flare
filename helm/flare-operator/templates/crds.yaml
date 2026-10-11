@@ -387,16 +387,28 @@ spec:
                   type: boolean
                   default: false
                   description: >
-                    Human gate for the forward switch (Duplicating ->
-                    Forwarding), the first client-visible step: from then on
-                    the source proxies every client read and write to the
-                    target, and abort is refused. Required IN ADDITION to the
-                    operator's own evidence (key counts converged, this
-                    attempt's seed completed on every source master, no loss
-                    counter moved since the attempt began). Set it only after
-                    verification V of this attempt (RUNBOOK
-                    #migration-forward-gate); equal counts are not a
-                    verification.
+                    OBSOLETE and NOT accepted: a boolean is not a
+                    verification. The operator only reports that it is set.
+                    Use forwardApproval.
+                forwardApproval:
+                  type: string
+                  description: >
+                    Gate for the forward switch (Duplicating -> Forwarding),
+                    the first client-visible step: from then on the source
+                    proxies every client read and write to the target, and
+                    abort is refused. The approval line verification V
+                    (scripts/flare_verify_copy.py) prints for a MATCH only:
+                    v=1|verdict=MATCH|verified_at=..|attempt=<status.attemptId>|src=..|dst=..
+                    The operator re-reads every source and target partition
+                    master at the switch and again after forward mode is
+                    applied, and refuses another attempt, a changed pod UID,
+                    process start, master id, copy id, epoch or sequence
+                    number, an unreadable master, or a verification older
+                    than an hour. Required IN ADDITION to the operator's own
+                    evidence (counts converged, this attempt's seed
+                    completed, no loss counter moved). Writes stay stopped
+                    from the capture until AwaitingCutover (RUNBOOK
+                    #migration-forward-gate).
                 approveCutover:
                   type: boolean
                   default: false
@@ -440,6 +452,12 @@ spec:
                   type: integer
                 convergedTicks:
                   type: integer
+                attemptId:
+                  type: string
+                  description: >
+                    Id of this attempt (CR uid / hash of attemptBaseline),
+                    minted when duplication is enabled. A V approval must
+                    name it.
                 attemptBaseline:
                   type: string
                   description: >

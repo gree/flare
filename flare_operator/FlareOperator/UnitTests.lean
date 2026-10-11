@@ -2031,17 +2031,78 @@ def checkMigrationForwardGate (ctx : Ctx) : IO Unit := do
   -- the old behaviour, now refused: converged counts, nothing else
   check ctx "migration: equal counts alone (no seed evidence, loss unknown, no approval) do NOT switch to forward"
     ((migStep spec open_ { convergedTicks := 6, sourceKeys := 10, targetKeys := 10 }).2 == .none)
-  check ctx "migration: counts + seed + clean loss but NO approveForward → held (counts are not a verification)"
-    ((migStep spec open_ { convergedTicks := 6, seedCompleted := true, loss := .clean }).2 == .none)
-  check ctx "migration: counts + seed + clean loss + approveForward → switchForward"
-    (migStep { spec with approveForward := true } open_ { convergedTicks := 6, seedCompleted := true, loss := .clean }
-      == (.Forwarding, .switchForward))
+  -- the V approval (bound line) and the live masters this tick
+  let attempt := "mig-uid/123"
+  let sN : NodeIdent := { pod := "s0", podUid := "s0-uid", boot := 1000, masterId := "mid-a", copyId := "copy-a:1", epoch := "1:ep-a", seq := "500" }
+  let dN : NodeIdent := { pod := "d0", podUid := "d0-uid", boot := 2000, masterId := "mid-a", copyId := "copy-d:1", epoch := "1:ep-a", seq := "700" }
+  let bind := s!"attempt={attempt}|src=s0,s0-uid,1000,mid-a,copy-a:1,1:ep-a,500|dst=d0,d0-uid,2000,mid-a,copy-d:1,1:ep-a,700"
+  let appr := s!"v=1|verdict=MATCH|verified_at=5000|{bind}"
+  let ok : MigObs := { convergedTicks := 6, seedCompleted := true, loss := .clean, attemptId := attempt,
+                       srcIdent := some [sN], dstIdent := some [dN], now := some 5100 }
+  let withA := { spec with forwardApproval := appr }
+  check ctx "migration: counts + seed + clean loss but NO approval → held (counts are not a verification)"
+    ((migStep spec open_ ok).2 == .none)
+  check ctx "migration: approveForward=true alone (a boolean) → held, and the hold says it is not accepted"
+    ((migStep { spec with approveForward := true } open_ ok).2 == .none
+      && ((forwardHold { spec with approveForward := true } ok).getD "").startsWith "approveForward is a boolean")
+  check ctx "migration: counts + seed + clean loss + a V MATCH approval equal to the live masters → switchForward"
+    (migStep withA open_ ok == (.Forwarding, .switchForward))
   check ctx "migration: approved, but loss counted since the attempt → held"
-    ((migStep { spec with approveForward := true } open_ { convergedTicks := 6, seedCompleted := true, loss := .lost 1 }).2 == .none)
+    ((migStep withA open_ { ok with loss := .lost 1 }).2 == .none)
   check ctx "migration: approved, but loss Unknown → held"
-    ((migStep { spec with approveForward := true } open_ { convergedTicks := 6, seedCompleted := true, loss := .unknown "x" }).2 == .none)
+    ((migStep withA open_ { ok with loss := .unknown "x" }).2 == .none)
   check ctx "migration: approved, clean, but seed not completed → held"
-    ((migStep { spec with approveForward := true } open_ { convergedTicks := 6, loss := .clean }).2 == .none)
+    ((migStep withA open_ { ok with seedCompleted := false }).2 == .none)
+  -- negatives on the approval itself
+  check ctx "approval: a DIFFERENT / UNKNOWN verdict, another format version or no verified_at → refused"
+    ((migStep { spec with forwardApproval := s!"v=1|verdict=DIFFERENT|verified_at=5000|{bind}" } open_ ok).2 == .none
+      && (migStep { spec with forwardApproval := s!"v=1|verdict=UNKNOWN|verified_at=5000|{bind}" } open_ ok).2 == .none
+      && (migStep { spec with forwardApproval := s!"v=2|verdict=MATCH|verified_at=5000|{bind}" } open_ ok).2 == .none
+      && (migStep { spec with forwardApproval := bind } open_ ok).2 == .none)
+  check ctx "approval: a MATCH from ANOTHER attempt (stale result, or an approval reused on a recreated migration) → refused"
+    ((migStep withA open_ { ok with attemptId := "mig-uid-2/123" }).2 == .none
+      && (migStep withA open_ { ok with attemptId := "" }).2 == .none)
+  check ctx "approval: same count but a WRONG VALUE written on the target after the MATCH (target position moved) → refused"
+    ((migStep withA open_ { ok with dstIdent := some [{ dN with seq := "701" }] }).2 == .none)
+  check ctx "approval: a write on the source after the MATCH → refused"
+    ((migStep withA open_ { ok with srcIdent := some [{ sN with seq := "501" }] }).2 == .none)
+  check ctx "approval: source restarted / target restarted / target pod replaced after the MATCH → refused"
+    ((migStep withA open_ { ok with srcIdent := some [{ sN with boot := 1500 }] }).2 == .none
+      && (migStep withA open_ { ok with dstIdent := some [{ dN with boot := 2600 }] }).2 == .none
+      && (migStep withA open_ { ok with dstIdent := some [{ dN with podUid := "new" }] }).2 == .none)
+  check ctx "approval: target re-seeded (copy / history / epoch changed) after the MATCH → refused"
+    ((migStep withA open_ { ok with dstIdent := some [{ dN with copyId := "copy-e:1" }] }).2 == .none
+      && (migStep withA open_ { ok with dstIdent := some [{ dN with epoch := "2:ep-b" }] }).2 == .none)
+  check ctx "approval: a master unreadable this tick, or no clock → refused (fail closed)"
+    ((migStep withA open_ { ok with dstIdent := none }).2 == .none
+      && (migStep withA open_ { ok with srcIdent := none }).2 == .none
+      && (migStep withA open_ { ok with now := none }).2 == .none)
+  check ctx "approval: older than the max age, or verified in the future of the source clock → refused"
+    ((migStep withA open_ { ok with now := some (5000 + approvalMaxAgeSeconds + 1) }).2 == .none
+      && (migStep withA open_ { ok with now := some 4000 }).2 == .none
+      && (migStep withA open_ { ok with now := some (5000 + approvalMaxAgeSeconds) }).2 == .switchForward)
+  check ctx "approval: a binding naming one master twice cannot cover a second, unverified master → refused"
+    ((migStep { spec with forwardApproval := s!"v=1|verdict=MATCH|verified_at=5000|attempt={attempt}|src=s0,s0-uid,1000,mid-a,copy-a:1,1:ep-a,500;s0,s0-uid,1000,mid-a,copy-a:1,1:ep-a,500|dst=d0,d0-uid,2000,mid-a,copy-d:1,1:ep-a,700" }
+        open_ { ok with srcIdent := some [sN, { sN with pod := "s1" }] }).2 == .none)
+  -- the same line scripts/tests/test_verify_copy.py GOLDEN prints: change both together
+  let golden := "v=1|verdict=MATCH|verified_at=1800000030|attempt=mig-uid/123|src=s0,s0-uid,1799999000,mid-a,copy-a:1,1:ep-a,500|dst=d0,d0-uid,1799999000,mid-a,copy-a:1,1:ep-a,500"
+  let gS : NodeIdent := { pod := "s0", podUid := "s0-uid", boot := 1799999000, masterId := "mid-a", copyId := "copy-a:1", epoch := "1:ep-a", seq := "500" }
+  let gD : NodeIdent := { gS with pod := "d0", podUid := "d0-uid" }
+  check ctx "approval golden: the comparator's MATCH line parses and holds against the masters it names"
+    (approvalHold golden { attemptId := "mig-uid/123", srcIdent := some [gS], dstIdent := some [gD], now := some 1800000100 } == none
+      && (approvalHold golden { attemptId := "mig-uid/124", srcIdent := some [gS], dstIdent := some [gD], now := some 1800000100 }).isSome)
+  -- post-apply recheck (the switch window)
+  check ctx "Forwarding: forward applied and the approval still matches → AwaitingCutover"
+    ((migStep withA .Forwarding { ok with sourceForwardApplied := true }).1 == .AwaitingCutover)
+  check ctx "Forwarding: forward applied but a write landed between the switch check and the apply → stays Forwarding"
+    ((migStep withA .Forwarding { ok with sourceForwardApplied := true, srcIdent := some [{ sN with seq := "502" }] }).1 == .Forwarding
+      && (migStep withA .Forwarding { ok with sourceForwardApplied := true, dstIdent := some [{ dN with seq := "702" }] }).1 == .Forwarding)
+  check ctx "Forwarding: not applied yet → stays Forwarding; a boolean cannot advance it either"
+    ((migStep withA .Forwarding ok).1 == .Forwarding
+      && (migStep { spec with approveForward := true } .Forwarding { ok with sourceForwardApplied := true }).1 == .Forwarding)
+  check ctx "Forwarding: after a hold, a NEW MATCH bound to the current positions advances it"
+    ((migStep { spec with forwardApproval := s!"v=1|verdict=MATCH|verified_at=5050|attempt={attempt}|src=s0,s0-uid,1000,mid-a,copy-a:1,1:ep-a,502|dst=d0,d0-uid,2000,mid-a,copy-d:1,1:ep-a,700" }
+        .Forwarding { ok with sourceForwardApplied := true, srcIdent := some [{ sN with seq := "502" }] }).1 == .AwaitingCutover)
   -- loss over the whole attempt
   check ctx "migration loss: unchanged counters over the attempt → clean"
     (lossVerdict base (some done) == .clean)
@@ -2084,11 +2145,7 @@ def checkMigrationForwardGate (ctx : Ctx) : IO Unit := do
     ((migStep { spec with abort := true } .Forwarding {}).2 != .doAbort
       && (migStep { spec with abort := true } .AwaitingCutover {}).2 != .doAbort
       && (migStep { spec with abort := true } .Duplicating {}).2 == .doAbort)
-  -- the V binding (pure; not wired into the controller yet)
-  let attempt := "s0 s0-uid 1791724878 0 0 0 none"
-  let sN : NodeIdent := { pod := "s0", podUid := "s0-uid", boot := 1000, masterId := "mid-a", copyId := "copy-a:1", epoch := "1:ep-a", seq := "500" }
-  let dN : NodeIdent := { pod := "d0", podUid := "d0-uid", boot := 2000, masterId := "mid-a", copyId := "copy-d:1", epoch := "1:ep-a", seq := "700" }
-  let bind := s!"attempt={attempt}|src=s0,s0-uid,1000,mid-a,copy-a:1,1:ep-a,500|dst=d0,d0-uid,2000,mid-a,copy-d:1,1:ep-a,700"
+  -- the V binding alone
   check ctx "V binding: live masters equal to what was verified, same attempt → no hold"
     (forwardBindingHold bind attempt [sN] [dN] == none)
   check ctx "V binding: a verification from another attempt (stale, or the approval reused) → hold"

@@ -43,15 +43,31 @@ keys are never silently excluded.
 
 Binding: the report carries `binding`, one canonical line naming WHAT was
 verified — the attempt (`--attempt-id`, the FlareMigration's
-status.attemptBaseline verbatim) and, per partition master on each side as
+status.attemptId) and, per partition master on each side as
 read AFTER the scan: pod, pod UID, process start, master id, copy id, copy
 epoch, sequence number. A MATCH says nothing about any other attempt, node,
 copy, history or position: the forward switch must be refused when the live
 nodes no longer equal the binding (a write after the scan moves the
 sequence number; a restart moves the start; a re-seed moves copy/history;
-a new attempt has another baseline). The operator does NOT check this yet
-(approveForward is a boolean) — recorded as not implemented; the pure check
-exists (Migration/Types.lean forwardBindingHold, unit-tested).
+a new attempt has another id).
+
+Approval: ONLY a MATCH also carries `approval`, printed on stderr too:
+  v=1|verdict=MATCH|verified_at=<largest source server time after the scan>|<binding>
+The operator accepts nothing else for the forward switch
+(spec.forwardApproval; Migration/Types.lean approvalHold): it re-reads every
+source and target partition master at the switch and again after the source
+applied forward mode, and refuses another attempt, any changed pod UID /
+process start / master id / copy id / epoch / sequence number, a verification
+older than approvalMaxAgeSeconds on the source clock, or an unreadable master.
+Writes must stay stopped from before the capture until the migration reaches
+AwaitingCutover; a write in between moves a position and voids the approval.
+DIFFERENT and UNKNOWN never print an approval.
+
+Capture: `dump` changes a master (reaps expired keys, moves the sequence
+number) — the scan is then UNKNOWN. A side-effect-free point-in-time capture
+is `repl_snapshot` received with scripts/flare_snapshot_receive.py and decoded
+with `flared --dump-checkpoint` (expired-unreaped keys included with their
+absolute expire; no partition filter: every key the copy holds).
 
 What it does NOT check: that each key lies in the partition its stream
 claims (the server-side `dump` filter is trusted); that writes were stopped
@@ -389,6 +405,8 @@ def verify(args):
         problems.append(f"{cmp['indeterminate']} keys indeterminate near expiry — no zero-difference claim")
         return report, 2
     report["verdict"] = "MATCH"
+    verified_at = max(int(n["stats"]["time"]) for n in src_post.values())
+    report["approval"] = f"v=1|verdict=MATCH|verified_at={verified_at}|{report['binding']}"
     return report, 0
 
 
@@ -399,7 +417,7 @@ def main(argv=None):
     for n in ("src-pre", "src-post", "dst-pre", "dst-post", "attempt-baseline"):
         ap.add_argument(f"--{n}", required=True)
     ap.add_argument("--attempt-id", required=True,
-                    help="the FlareMigration's status.attemptBaseline, verbatim (binds the result to this attempt)")
+                    help="the FlareMigration's status.attemptId (binds the result to this attempt)")
     ap.add_argument("--extra-skew", type=int, default=0, help="seconds added to the measured clock skew bound")
     ap.add_argument("--report", help="write the JSON report here (default: stdout)")
     args = ap.parse_args(argv)
@@ -410,7 +428,9 @@ def main(argv=None):
             f.write(text + "\n")
     else:
         print(text)
-    print(f"verdict: {report['verdict']} — cutover {'MAY proceed (human approval still required)' if code == 0 else 'REFUSED'}", file=sys.stderr)
+    if code == 0:
+        print(f"approval: {report['approval']}", file=sys.stderr)
+    print(f"verdict: {report['verdict']} — cutover {'MAY proceed: a person sets spec.forwardApproval to the approval line, writes still stopped' if code == 0 else 'REFUSED'}", file=sys.stderr)
     return code
 
 

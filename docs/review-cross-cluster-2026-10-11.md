@@ -405,15 +405,36 @@ malformed (9 checks); comparator fixtures: same key count with one wrong
 value, same count with a missed delete + a missing key (both DIFFERENT),
 binding contents and its change with attempt / position.
 
-**Not implemented (connection points):** (a) a CR field carrying the
-binding as the approval (`spec.forwardVerification`), replacing the
-boolean; (b) the controller reading the TARGET masters' identities and
-calling forwardBindingHold in the switch tick; (c) the window between that
-read and the moment flared applies forward mode (patch → render → SIGHUP)
-is not closed — a write in it is not seen by any check; (d) a capture tool
-(capture is not approved anywhere); (e) the operator does not consume an
-approval (a boolean stays true). Until (a)-(b), a MATCH can be followed by
-changes the switch does not detect.
+**Connection points — fourth round (2026-10-12):**
+
+| | before | now | still open |
+|---|---|---|---|
+| (a) what the approval is | `approveForward: true` | `spec.forwardApproval` = the line V prints **only for a MATCH**: `v=1\|verdict=MATCH\|verified_at=<source server time after the scan>\|attempt=<status.attemptId>\|src=<pod,uid,start,master_id,copy_id,epoch,seq>;..\|dst=..`; `approveForward` is read only to say it is NOT accepted | the line is not signed: a person can type one; the operator can only check it against the live masters |
+| attempt | the baseline string | `status.attemptId` = `<FlareMigration uid>/<hash of attemptBaseline>`, minted in the tick that enables duplication, never changed | — |
+| (b) checked at the switch | no | the controller reads every source AND target partition master (pod UID, `time − uptime`, `rocksdb_master_id`, `rocksdb_copy_id`, `rocksdb_rebuilt_from_epoch` / `rocksdb_source_epoch`, `rocksdb_latest_sequence_number`) in the Duplicating tick; `approvalHold` refuses: not a MATCH line / other version, another attempt or no attempt id, a master added / missing / named twice, a restart (start time beyond ±2 s) or replaced pod, master id / epoch / copy id changed, a moved sequence number, older than 3600 s or in the future of the source clock, any master unreadable or no clock (fail-closed) | — |
+| (c) switch window | not seen | the SAME check again once the source applied forward mode: Forwarding → AwaitingCutover only if every position is still the bound one; else held in Forwarding ("re-run V and set a new forwardApproval") | between the check and the apply a write IS forwarded (the source still duplicates), but the switch is already issued and abort is refused: the hold makes it visible, it cannot undo it. Writes must stay stopped from before the capture until AwaitingCutover — the operator's premise, never observed as a fence |
+| (d) capture | none | §12: `repl_snapshot` + `flared --dump-checkpoint` (no reap, point in time), CI-only driver | not approved for any real environment |
+| (e) reuse | a bool stays true | an approval is bound to one attempt id and one set of positions; after the switch the phase moves on and it is never read again; a recreated migration has another uid → another attempt | no explicit "consumed" record |
+| meaning of "resume" | — | after AwaitingCutover the gate is no longer consulted: writes may resume; any write before that voids the approval (positions move) | — |
+
+Proofs: `migStep_forward_requires_approval_and_evidence` now concludes
+`approvalHold spec.forwardApproval obs = none` (not a boolean);
+`approvalHold_none` unpacks it (parsed MATCH, every master readable, age
+bounds, `forwardBindingHold … = none`); new
+`migStep_awaitingCutover_rechecks_approval`. Unit negatives (477 checks):
+no approval; boolean only; DIFFERENT / UNKNOWN / other version / bare
+binding; another attempt and no attempt; same count with a wrong value
+written on the target after the MATCH (target position moved); write on the
+source; source restart, target restart, target pod replaced; target copy /
+epoch changed; unreadable master / no clock; too old / future; a binding
+naming one master twice cannot cover a second; Forwarding held when a write
+lands in the switch window on either side; a new MATCH bound to the new
+positions advances; one GOLDEN line produced by the comparator test and
+parsed by the operator test. E2E (blue-green): a boolean is not accepted; a
+real capture with one target value altered (same key count) → DIFFERENT and
+no approval line; a real MATCH used after one more write → held "position
+moved"; a fresh MATCH edited to name another attempt → held "another
+attempt"; the same fresh MATCH → AwaitingCutover — run listed in §14.
 
 A comparator pass does not prove its inputs: that the captured dumps are
 complete for every partition, that counters not in the snapshot did not
@@ -533,12 +554,143 @@ not exercised and this FAILS); final per-key match.
 | 38142537078 (054e373) | new, destination operator held 45 s | reached | pass: 0 differ, drops 0 → 0 | **pass: SERVER_ERROR resent 2**; applied 30 = enqueued 30 | pass (30/30) |
 | 38142587820 (e526e61 = b939777 tests + 50f65f1 C++) | OLD, operator held | reached (old code has no seed stat: "dump replication completed" log + bootstrap 0) | **FAIL — SILENT LOSS: 29 of 30 differ, 25 counted** (connection failures after 4 retries, "DROPPED after 4 retries" logged) | fails, but meaningless on old code (counter does not exist) | FAIL |
 
-On the old code at least one forward was answered SERVER_ERROR and not
-stored (`rst_post_1 … result=SERVER_ERROR`, logged 1 in 100); that the 4
-uncounted keys are all SERVER_ERROR answers is consistent but not
-established per key. This closes the SERVER_ERROR-resend evidence for a
+Old-code control, attribution (fourth round): the 25 counted drops equal
+the 25 changes written while the destination was down (15 new, 5
+overwrites, 5 deletes; connection refused → "DROPPED after 4 retries"). 29
+differ, so 4 of the 5 post-return keys (`rst_post_*`, written after the
+destination answered `stats` again) were lost UNCOUNTED. Evidence: the
+source logged `rst_post_1 … ANSWERED but not stored … result=SERVER_ERROR`
+(throttled 1 in 100, so only the first is named), the restarted destination
+logged `no partition is available` 5 times, and `forward_server_error_
+retried` does not exist on the old code. So the failure is the targeted
+defect (a SERVER_ERROR answer from a destination that listens without a
+role is neither resent nor counted), not a harness problem; which 4 of the
+5 post keys is not established per key (the failure message lists 10 of the
+29). Note: the old code never answered SERVER_ERROR during the 45 s hold
+("restarted flared lines about no partition: 0" at that moment); the
+answers came after the hold, before the role arrived — on the new code the
+same phase produced 2 resends. This closes the SERVER_ERROR-resend evidence for a
 per-key-seeded destination only. It does NOT close X4: the snapshot-push
 restart (cluster-replication-faults T4/T5) still fails and stays.
+
+## 12. Capture without changing the master (audit, fourth round)
+
+Question: is there an existing read of a master's complete content as one
+point in time that changes nothing? Answer: **no single existing op; two
+existing pieces combine into one with no change on the serving side**
+(code audit, file:line in the audit notes):
+
+| path | point in time? | changes the master? | expired keys | gives flag/version/expire/value? |
+|---|---|---|---|---|
+| `dump` | NO — keys from a snapshot iterator, values read live (`get`, op_dump.cc:237) | YES — reaps each expired key met (WAL write, `rocksdb_latest_sequence_number` and `rocksdb_expire_reaped` move); takes the single iteration slot (concurrent dump / orphan scan / dump-replication seed get "database busy"); holds the whole-DB read lock for the scan (blocks flush_all, copy switch, adopt_history, swap_in_snapshot, resets); the held snapshot pins old versions (space; memory on tmpfs) | hidden (and deleted on a master) | yes |
+| `dump_key`, `orphan_scan`, dump-replication | same as dump | same | — | no values / counts only / pushes sets |
+| `backup <name>` | yes (checkpoint) | YES — prunes old backups to backupKeep−1; pins space (rc47 OOM) | included | files on the pod |
+| **`repl_snapshot`** | **yes** — RocksDB checkpoint at a reported sequence number | no data write, no reap, no iteration slot, lock only briefly; costs: a forced memtable flush, file deletions pinned for the transfer (WAL / old SSTs accumulate), hard links pin space until the stream ends (memory on tmpfs), the single snapshot-serve slot (a concurrent reseed waits "busy"), the transfer (throttled by rocksdb-snapshot-bwlimit) | included with absolute expire | raw RocksDB files |
+| `flared --analyze-checkpoint` (offline) | — | never connects | included | key, expire, size only |
+
+Minimal implementation made (CI-only use):
+- `flared --dump-checkpoint <dir>` (storage_rocksdb::dump_checkpoint, ~70
+  lines): opens a checkpoint READ-ONLY and writes every non-reserved key in
+  the `dump` framing (`VALUE key flag size version expire` + bytes), keys and
+  values from the same checkpoint, expired-unreaped keys included; a value
+  whose size disagrees with its header fails the run (no END). C++ test
+  `test_dump_checkpoint_point_in_time_and_side_effect_free`: a write after
+  the checkpoint is absent, binary value byte-exact, blob value, flag /
+  version / absolute expire kept, an expired key included, reserved keys
+  filtered, the master's `expire_reaped` and latest sequence number
+  unchanged by checkpoint + decode.
+- `scripts/flare_snapshot_receive.py`: receives one `repl_snapshot` stream
+  into an empty directory; refuses an error reply ("busy"), a short file, a
+  CRC-32 mismatch, a suspicious or repeated name, a missing END, a file
+  count that disagrees (10 fixture tests, in CI).
+- `scripts/flare_v_capture_kind.py`: stats before → per master
+  `repl_snapshot` (`quit` pipelined so the connection closes) → receive →
+  copy into the pod's /tmp → `--dump-checkpoint` there → remove → stats
+  after. **Refuses any kube context not named `kind-*`** (checked against
+  the local default context, which is a real cluster: refused, exit 3).
+- Comparator: unchanged framing; expired-unreaped keys present on both
+  sides compare exactly; reaped on one side only → INDETERMINATE → UNKNOWN
+  (2 new fixtures).
+
+Still not guaranteed by this capture: no partition filter (every key the
+copy holds, orphans included — an orphan duplicated across two source
+streams is reported UNKNOWN, never merged); the expiry reference is each
+side's stats time around the capture (the checkpoint's own clock is not
+in the `SNAPSHOT` line); a slow receiver holds the pin longer; refused on a
+restored-unverified copy; whether the forced flush moves the sequence
+number is checked by the C++ test above (hypothesis: it does not), and on
+kind by the pre/post stability check. Load / permission for a real
+environment: `repl_snapshot` is an unauthenticated op on the data port like
+`dump`; the capture costs one checkpoint (space ≈ the live SST + blob set
+until the stream ends, on tmpfs = memory) and one full transfer per master.
+Running it anywhere real is an operational approval that has not been
+given.
+
+## 13. Snapshot-push authority: the failure window of each option, and the one decision
+
+B's "no destination restart between push and approval" is a request to
+the world, not a safeguard. What actually happens if the destination
+master fails in that window, today (code + faults T4/T5): its history
+record is stale; on restart the operator classifies the copy FORBIDDEN
+(rejoining) and the partition stays masterless — the copy is kept on the
+PVC, nothing is promoted, nothing is deleted; the source keeps serving
+clients (duplicate mode) and every forward to the destination is resent
+for 120 s, then counted as dropped (not silent). Recovery under B after a
+human approval: the approval must name the copy actually on the PVC
+(uid / partition / copy id / master id / epoch) — if it is still the pushed
+copy, the operator records `reseed` and promotes it; the drops counted
+while it was down must then be repaired: R is not implemented, so the
+repair is a re-seed — another push, another approval. So B is "safe stop,
+manual recovery, one more seed per failure".
+
+A's windows, stated without "none": (1) approval written, push not
+started → nothing changed; expiry. (2) push streaming / staged, not
+switched → the copy-retention staging is discarded at open (existing,
+tested); old copy and old record still agree. (3) the switch itself: the
+existing copy switch is crash-safe (switch markers; an unresolved switch is
+FORBIDDEN — data kept, held). (4) **switched, receipt not yet durable**:
+the proposal of §10 writes the receipt in a separate batch after the swap —
+a crash there leaves a new copy with no receipt = held masterless, the same
+as B's window. Integration that closes (4): write the receipt INTO the
+staged copy before the switch, so the atomic switch brings copy and
+receipt together (present ⇔ switched), and record the operator side as a
+two-phase intent like promotion (`seed` intent in `<cr>-history` BEFORE the
+push is allowed, resolved when the receipt is observed; a restart of the
+operator resolves the intent against the observed copy, as resolveIntent
+does). Remaining A windows: the intent written but the history ConfigMap
+update conflicting (retry; held meanwhile); a receipt naming another
+attempt / another "from" (held); bugs in the switch on tmpfs vs PVC
+(covered only by the existing copy-retention tests). Every one of these is
+"held, data kept" — not "no window". None of A is implemented.
+
+A third way removes the transition from the move entirely: **seed the
+destination per key only (no snapshot push) for the move.** The destination
+keeps its own history, so a restart is an ordinary master restart — the
+case §11 now passes (0 lost, SERVER_ERROR resent). Costs: seeding speed
+(rc28 measured a SLAVE reseed: 166 s by dump vs 28 s by snapshot, ~5.9x;
+a cross-cluster seed was not measured), and the per-key
+seed runs `dump` on the SOURCE master (reaps, iteration slot, whole-DB read
+lock for the seed's duration — §12). Needs a small flared/operator switch
+to decline pushes (not implemented; today only a destination above 4096
+items declines, which is not a control).
+
+**The one decision:** for the move, may the destination's authoritative
+history change at a snapshot push at all?
+- **No (recommended for the move):** per-key seed only; implement the
+  decline switch; A/B stay unimplemented; X4 stays open as a known failure
+  of a path the move does not use (T4/T5 keep failing, not replaced).
+- **Yes:** then A with receipt-in-staged-copy + operator intent (needs the
+  record-format / compatibility decision: a new reason value is format
+  2 → 3, which an older operator reads as corrupt) — or B as an interim,
+  accepting "safe stop + manual recovery + a re-seed per failure".
+
+Nothing here was adopted; no rule was relaxed; old-backup compatibility
+stays unapproved.
+
+## 14. Fourth-round runs
+
+Pending at the time of writing: the dispatched runs are recorded here when
+they finish (failures and skips kept separate).
 
 ## UNKNOWN
 

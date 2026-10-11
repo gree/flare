@@ -54,39 +54,9 @@ protected:
 	string									_result_message;
 	bool										_post_proxy;
 	uint64_t								_generic_value;
-	// a forward to ANOTHER cluster (cluster_replication): its answer is
-	// classified and counted per op (cross-cluster audit 2026-10-11)
-	bool										_foreign;
-	// the forwarding thread running this item (foreign only): its shutdown
-	// request ends the retry wait
-	shared_thread						_owner;
 
 public:
 	static const int max_retry = 4;
-	// A forward to another cluster keeps trying, with backoff, for this long
-	// before it is dropped (counted): a destination that restarts or a
-	// connection that breaks is ridden out instead of losing every write in
-	// between (cross-cluster audit 2026-10-11 — the 4 quick tries above gave
-	// up within seconds). The thread's later forwards wait behind it, so the
-	// order per key is kept. Tests shorten it.
-	static int foreign_retry_window_ms;
-
-	// What a destination's answer to a forwarded op means for the source.
-	// applied: the destination took this change. noop: it already holds this
-	// change or a newer one (set NOT_STORED: same or newer version; delete
-	// NOT_FOUND: absent already or newer) — a retry or a reordering, not a
-	// loss. missing: a touch found no key, so the destination lacks a key
-	// this source holds alive (an earlier drop, an expiry or a newer delete
-	// there) — not a loss of THIS op, but a divergence signal. failed: any
-	// other answer (SERVER_ERROR, CLIENT_ERROR, ERROR, EXISTS, an answer the
-	// op cannot produce) — the change is not on the destination.
-	enum foreign_answer {
-		foreign_applied = 0,
-		foreign_noop,
-		foreign_missing,
-		foreign_failed,
-	};
-	static foreign_answer classify_foreign_answer(const string& sent_op, op::result r);
 
 	queue_proxy_write(cluster* cl, storage* st, vector<string> proxy, storage::entry entry, string op_ident);
 	virtual ~queue_proxy_write();
@@ -96,9 +66,6 @@ public:
 	string get_result_message() { return this->_result_message; };
 	int set_post_proxy(bool post_proxy) { this->_post_proxy = post_proxy; return 0; };
 	bool is_post_proxy() { return this->_post_proxy; };
-	void set_foreign(bool foreign);
-	bool is_foreign() { return this->_foreign; };
-	void set_owner(shared_thread t) { this->_owner = t; };
 	virtual void on_abandoned(const string& dest);
 	int set_generic_value(uint64_t generic_value) { this->_generic_value = generic_value; return 0; };
 	uint64_t get_generic_value() { return this->_generic_value; };
@@ -107,8 +74,6 @@ public:
 
 protected:
 	op_proxy_write* _get_op(string op_ident, shared_connection c);
-	int _run_foreign(shared_connection c);
-	bool _owner_stopping();
 };
 
 }	// namespace flare

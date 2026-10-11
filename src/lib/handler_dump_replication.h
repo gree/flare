@@ -53,15 +53,6 @@ protected:
 	bwlimitter								_bwlimitter;
 
 public:
-	// The seed's first connect is retried this many times in all, waiting
-	// seed_retry_base_ms, doubling, capped at 60 s, between attempts —
-	// only while NOTHING has been sent (a destination not yet resolvable or
-	// not yet listening). A seed that fails after it started sending is not
-	// retried here: a second pass over a partly written destination is not
-	// the same operation (see run()). Tests shorten both.
-	static int seed_connect_attempts;
-	static int seed_retry_base_ms;
-
 	handler_dump_replication(shared_thread t, cluster* cl, storage* st, string server_name, int server_port);
 	virtual ~handler_dump_replication();
 
@@ -71,8 +62,6 @@ protected:
 
 private:
 	long _sleep_for_bwlimit(int bytes_written, int bwlimit);
-	shared_connection _open_bounded(const string& name, int port);
-	bool _wait_or_shutdown(int ms);
 };
 
 }	// namespace flare

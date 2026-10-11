@@ -28,8 +28,6 @@
  */
 #include "queue_proxy_write.h"
 
-#include <cctype>
-#include <time.h>
 #include <boost/lexical_cast.hpp>
 #include "handler_proxy.h"
 #include "app.h"
@@ -64,8 +62,7 @@ queue_proxy_write::queue_proxy_write(cluster* cl, storage* st, vector<string> pr
 		_result(op::result_none),
 		_result_message(""),
 		_post_proxy(false),
-		_generic_value(0),
-		_foreign(false) {
+		_generic_value(0) {
 }
 
 /**
@@ -93,9 +90,6 @@ void queue_proxy_write::on_abandoned(const string& dest) {
 	} else {
 		stats_object->increment_proxy_write_dropped(dest);
 	}
-	if (this->_foreign) {
-		stats_object->crepl_incr("forward_dropped_abandoned");
-	}
 	if (stats_object->diag_enabled()) {
 		stats_object->diag_incr("fwd_abandoned:" + dest);
 	}
@@ -106,40 +100,8 @@ void queue_proxy_write::on_abandoned(const string& dest) {
 	}
 }
 
-/**
- *	A forward to another cluster. Its answer is always READ: a client's
- *	noreply is not passed on, or the destination's verdict (and a broken
- *	connection) could never be seen and every outcome would look applied.
- */
-void queue_proxy_write::set_foreign(bool foreign) {
-	this->_foreign = foreign;
-	if (foreign) {
-		this->_entry.option &= ~storage::option_noreply;
-	}
-}
-
-queue_proxy_write::foreign_answer queue_proxy_write::classify_foreign_answer(const string& sent_op, op::result r) {
-	if (sent_op == "delete") {
-		if (r == op::result_deleted) return foreign_applied;
-		if (r == op::result_not_found) return foreign_noop;
-		return foreign_failed;
-	}
-	if (sent_op == "touch") {
-		if (r == op::result_touched || r == op::result_ok) return foreign_applied;
-		if (r == op::result_not_found) return foreign_missing;
-		return foreign_failed;
-	}
-	// every other post-proxy op is sent as a versioned set (_get_op)
-	if (r == op::result_stored) return foreign_applied;
-	if (r == op::result_not_stored) return foreign_noop;
-	return foreign_failed;
-}
-
 // {{{ public methods
 int queue_proxy_write::run(shared_connection c) {
-	if (this->_foreign && this->_post_proxy) {
-		return this->_run_foreign(c);
-	}
 #ifdef DEBUG
 	if (const connection_tcp* ctp = dynamic_cast<const connection_tcp*>(c.get())) {
 		log_debug("proxy request (write) (host=%s, port=%d, op=%s, key=%s, version=%u)", ctp->get_host().c_str(), ctp->get_port(), this->_op_ident.c_str(), this->_entry.key.c_str(), this->_entry.version);
@@ -286,174 +248,6 @@ int queue_proxy_write::run(shared_connection c) {
 // }}}
 
 // {{{ protected methods
-int queue_proxy_write::foreign_retry_window_ms = 120 * 1000;
-
-namespace {
-uint64_t foreign_now_ms() {
-	struct timespec ts;
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-	return (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
-}
-}	// anonymous namespace
-
-bool queue_proxy_write::_owner_stopping() {
-	return this->_owner && this->_owner->is_shutdown_request() != thread::shutdown_request_none;
-}
-
-/**
- *	One forward to ANOTHER cluster (cluster_replication), until the
- *	destination answers or the retry window ends.
- *
- *	- The destination answers: classify_foreign_answer decides whether the
- *	  change is there; a failed answer is counted as dropped.
- *	- No answer (connect refused or timed out, name not resolvable, the
- *	  connection broke, the reply did not parse): reconnect and send again
- *	  — a forward applied whose reply was lost comes back NOT_STORED /
- *	  NOT_FOUND, a noop — waiting 1, 2, 4 ... 10 s in between, for
- *	  foreign_retry_window_ms in all; then dropped and counted, and the
- *	  connection is marked given up: later forwards make ONE attempt each
- *	  (counted at once when it fails) until one is delivered, so a dead
- *	  destination does not hold every write for the whole window.
- *	- The thread is asked to stop: the wait ends; the forward is counted.
- */
-int queue_proxy_write::_run_foreign(shared_connection c) {
-	connection_tcp* ctp = dynamic_cast<connection_tcp*>(c.get());
-	char dest[BUFSIZ];
-	snprintf(dest, sizeof(dest), "%s:%d", ctp ? ctp->get_host().c_str() : "?", ctp ? ctp->get_port() : 0);
-
-	op_proxy_write* p = this->_get_op(this->_op_ident, c);
-	if (p == NULL) {
-		stats_object->increment_proxy_write_dropped(string(dest));
-		stats_object->crepl_incr("forward_dropped_unknown_op");
-		return -1;
-	}
-	p->set_proxy(this->_proxy);
-
-	const bool given_up = ctp != NULL && ctp->sender_given_up();
-	const uint64_t started = foreign_now_ms();
-	int wait_ms = 1000;
-	bool answered = false;
-	int attempts = 0;
-	for (;;) {
-		if (!c->is_available()) {
-			c->open();
-		}
-		attempts++;
-		if (c->is_available() && p->run_client(this->_entry) >= 0) {
-			answered = true;
-			// SERVER_ERROR is the destination's TRANSIENT refusal — a node that
-			// restarted and has not got its role back answers it (E2E
-			// cluster-replication-faults restart test on 50f65f1: 21 changes
-			// answered SERVER_ERROR, none stored, none counted). Resending a
-			// versioned change is idempotent, so it is retried like no answer,
-			// within the same window; anything else the destination says is
-			// final.
-			if (p->get_result() != op::result_server_error) {
-				break;
-			}
-		} else {
-			answered = false;
-			// whatever is left on a failed exchange is not trusted: resync
-			c->close();
-		}
-		if (given_up || this->_owner_stopping()
-				|| foreign_now_ms() - started >= (uint64_t)foreign_retry_window_ms) {
-			break;
-		}
-		if (answered) {
-			stats_object->crepl_incr("forward_server_error_retried");
-		}
-		for (int slept = 0; slept < wait_ms && !this->_owner_stopping(); slept += 100) {
-			usleep(100 * 1000);
-		}
-		wait_ms = wait_ms * 2 > 10000 ? 10000 : wait_ms * 2;
-	}
-
-	if (!answered) {
-		delete p;
-		stats_object->increment_proxy_write_dropped(string(dest));
-		if (given_up) {
-			stats_object->crepl_incr("forward_dropped_down");
-			static AtomicCounter down_logged(0);
-			if (down_logged.incr() % 100 == 1) {
-				log_err("cluster replication write DROPPED (dest=%s, op=%s, key=%s, version=%u): the destination is still unreachable after an earlier forward waited out its retry window — counted; the destination diverges until it is repaired (logged 1 in 100)",
-					dest, this->_op_ident.c_str(), this->_entry.key.c_str(), this->_entry.version);
-			}
-		} else {
-			stats_object->crepl_incr(this->_owner_stopping() ? "forward_dropped_stopping" : "forward_dropped_retries");
-			if (ctp != NULL && !this->_owner_stopping()) {
-				ctp->set_sender_given_up(true);
-			}
-			log_err("cluster replication write DROPPED after %d attempts in %llu ms (dest=%s, op=%s, key=%s, version=%u) — counted; later forwards to this destination try once each until one is delivered; the destination diverges until it is repaired",
-				attempts, (unsigned long long)(foreign_now_ms() - started), dest, this->_op_ident.c_str(), this->_entry.key.c_str(), this->_entry.version);
-		}
-		return -1;
-	}
-
-	if (p->get_result() == op::result_server_error) {
-		// refused for the whole window (or once, when already given up):
-		// later forwards try once each, as for a destination that is down
-		if (ctp != NULL && !given_up && !this->_owner_stopping()) {
-			ctp->set_sender_given_up(true);
-		}
-	} else if (given_up && ctp != NULL) {
-		ctp->set_sender_given_up(false);
-		log_notice("cluster replication destination %s answers again — forwards wait out their retry window again", dest);
-	}
-	if (attempts > 1) {
-		stats_object->crepl_incr("forward_retried");
-	}
-	this->_success = true;
-	this->_result = p->get_result();
-	this->_result_message = p->get_result_message();
-
-	// The destination ANSWERED. Whether that answer put the change there
-	// depends on the op (classify_foreign_answer). A failed answer is a drop
-	// like an exhausted retry — counted under the destination, where the
-	// operator and the runbook look — and was only a rate-limited warning
-	// before (audit 2026-10-11).
-	const string sent = p->get_ident();
-	const string rname = op::result_cast(this->_result);
-	string rkey;
-	for (string::const_iterator ci = rname.begin(); ci != rname.end(); ci++) {
-		rkey += (*ci == ' ') ? '_' : static_cast<char>(tolower(*ci));
-	}
-	if (rkey.empty()) {
-		rkey = "none";
-	}
-	switch (classify_foreign_answer(sent, this->_result)) {
-		case foreign_applied:
-			stats_object->crepl_incr("forward_applied");
-			break;
-		case foreign_noop:
-			stats_object->crepl_incr("forward_noop_" + sent + "_" + rkey);
-			break;
-		case foreign_missing: {
-			stats_object->crepl_incr("forward_missing_" + sent + "_" + rkey);
-			static AtomicCounter missing_logged(0);
-			if (missing_logged.incr() % 100 == 1) {
-				log_warning("cluster replication: the destination has no key this source holds alive (dest=%s, op=%s, key=%s, version=%u, result=%s) — an earlier drop, an expiry or a newer delete there; the destination may diverge (logged 1 in 100)",
-					dest, sent.c_str(), this->_entry.key.c_str(), this->_entry.version, rname.c_str());
-			}
-			break;
-		}
-		case foreign_failed:
-		default: {
-			this->_success = false;
-			stats_object->crepl_incr("forward_failed_" + sent + "_" + rkey);
-			stats_object->increment_proxy_write_dropped(string(dest));
-			static AtomicCounter failed_logged(0);
-			if (failed_logged.incr() % 100 == 1) {
-				log_err("cluster replication write NOT STORED by the destination (dest=%s, op=%s, key=%s, version=%u, result=%s %s) — counted as dropped; the destination diverges until it is repaired (logged 1 in 100)",
-					dest, sent.c_str(), this->_entry.key.c_str(), this->_entry.version, rname.c_str(), this->_result_message.c_str());
-			}
-			break;
-		}
-	}
-	delete p;
-	return this->_success ? 0 : -1;
-}
-
 op_proxy_write* queue_proxy_write::_get_op(string op_ident, shared_connection c) {
 	if (op_ident == "set") {
 		return new op_set(c, this->_cluster, this->_storage);

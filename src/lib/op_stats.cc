@@ -186,16 +186,6 @@ int op_stats::_send_stats(thread_pool* req_tp, thread_pool* other_tp, storage* s
 			_send_stat(key, it->second);
 		}
 	}
-	// Cross-cluster replication outcomes and the seed's state (see stats.h).
-	{
-		map<string, uint64_t> crepl = stats_object->get_crepl();
-		for (map<string, uint64_t>::const_iterator it = crepl.begin(); it != crepl.end(); it++) {
-			char key[BUFSIZ];
-			snprintf(key, sizeof(key), "cluster_replication[%s]", it->first.c_str());
-			_send_stat(key, it->second);
-		}
-		_send_stat("cluster_replication_seed", stats_object->get_crepl_seed_state());
-	}
 	_send_stat("delete_misses"				, stats_object->get_delete_misses());
 	// Reconstruction lifecycle (see stats.h): a controller that requested a
 	// resync reads these back to tell "started and finished" from "never

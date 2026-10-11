@@ -307,6 +307,7 @@ namespace test_handler_cluster_replication {
 	// A destination that ANSWERS SERVER_ERROR did not store the write: before,
 	// that was a rate-limited warning and nothing was counted.
 	void test_foreign_server_error_is_counted() {
+		queue_proxy_write::foreign_retry_window_ms = 0;  // the answer is final: no resend
 		shared_thread t = start_handler();
 		forward_set(t, true, " key 0 0 5 3", "SERVER_ERROR proxy error");
 		cut_assert_equal_int(1, (int)stats_object->get_proxy_write_dropped());
@@ -328,6 +329,7 @@ namespace test_handler_cluster_replication {
 	// A client's noreply is not passed on to another cluster: the answer is
 	// read, so a refusal is seen and counted.
 	void test_foreign_noreply_answer_is_read() {
+		queue_proxy_write::foreign_retry_window_ms = 0;  // the answer is final: no resend
 		shared_thread t = start_handler();
 		string line = forward_set(t, true, " key 0 0 5 3 noreply", "SERVER_ERROR i/o error");
 		cut_assert_equal_string("set key 0 0 5 3\n", line.c_str());
@@ -364,6 +366,7 @@ namespace test_handler_cluster_replication {
 	// delete NOT_FOUND: absent already (or newer there) — not a loss;
 	// delete SERVER_ERROR: the key may still be there — counted.
 	void test_foreign_delete_answers() {
+		queue_proxy_write::foreign_retry_window_ms = 0;  // the answer is final: no resend
 		shared_thread t = start_handler();
 		cut_assert_equal_string("delete key 0 3\n", forward_delete(t, "NOT_FOUND").c_str());
 		cut_assert_equal_int(0, (int)stats_object->get_proxy_write_dropped());
@@ -447,6 +450,32 @@ namespace test_handler_cluster_replication {
 		q3->sync();
 		cut_assert_equal_boolean(true, q3->is_success());
 		cut_assert_equal_int(2, (int)stats_object->get_proxy_write_dropped());
+		cut_assert_equal_int(1, (int)crepl("forward_applied"));
+	}
+
+	// SERVER_ERROR is transient (a restarted destination without its role):
+	// resent within the window, and stored the second time — nothing lost,
+	// nothing counted (50f65f1 restart test: 21 such answers, none counted).
+	void test_foreign_server_error_is_retried_within_the_window() {
+		queue_proxy_write::foreign_retry_window_ms = 8000;
+		shared_thread t = start_handler();
+		shared_queue_proxy_write q = enqueue_foreign_set(t, "key");
+		char *p, *v;
+		cs[0]->readline(&p);
+		cs[0]->readline(&v);
+		cs[0]->writeline("SERVER_ERROR no partition available");
+		delete[] p;
+		delete[] v;
+		cs[0]->readline(&p);
+		cs[0]->readline(&v);
+		cut_assert_equal_string("set key 0 0 5 3\n", p);
+		cs[0]->writeline("STORED");
+		delete[] p;
+		delete[] v;
+		q->sync();
+		cut_assert_equal_boolean(true, q->is_success());
+		cut_assert_equal_int(0, (int)stats_object->get_proxy_write_dropped());
+		cut_assert_equal_int(1, (int)crepl("forward_server_error_retried"));
 		cut_assert_equal_int(1, (int)crepl("forward_applied"));
 	}
 }

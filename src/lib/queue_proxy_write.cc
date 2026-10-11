@@ -341,13 +341,27 @@ int queue_proxy_write::_run_foreign(shared_connection c) {
 		attempts++;
 		if (c->is_available() && p->run_client(this->_entry) >= 0) {
 			answered = true;
-			break;
+			// SERVER_ERROR is the destination's TRANSIENT refusal — a node that
+			// restarted and has not got its role back answers it (E2E
+			// cluster-replication-faults restart test on 50f65f1: 21 changes
+			// answered SERVER_ERROR, none stored, none counted). Resending a
+			// versioned change is idempotent, so it is retried like no answer,
+			// within the same window; anything else the destination says is
+			// final.
+			if (p->get_result() != op::result_server_error) {
+				break;
+			}
+		} else {
+			answered = false;
+			// whatever is left on a failed exchange is not trusted: resync
+			c->close();
 		}
-		// whatever is left on a failed exchange is not trusted: resync
-		c->close();
 		if (given_up || this->_owner_stopping()
 				|| foreign_now_ms() - started >= (uint64_t)foreign_retry_window_ms) {
 			break;
+		}
+		if (answered) {
+			stats_object->crepl_incr("forward_server_error_retried");
 		}
 		for (int slept = 0; slept < wait_ms && !this->_owner_stopping(); slept += 100) {
 			usleep(100 * 1000);
@@ -376,7 +390,13 @@ int queue_proxy_write::_run_foreign(shared_connection c) {
 		return -1;
 	}
 
-	if (given_up && ctp != NULL) {
+	if (p->get_result() == op::result_server_error) {
+		// refused for the whole window (or once, when already given up):
+		// later forwards try once each, as for a destination that is down
+		if (ctp != NULL && !given_up && !this->_owner_stopping()) {
+			ctp->set_sender_given_up(true);
+		}
+	} else if (given_up && ctp != NULL) {
 		ctp->set_sender_given_up(false);
 		log_notice("cluster replication destination %s answers again — forwards wait out their retry window again", dest);
 	}

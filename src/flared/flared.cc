@@ -217,14 +217,11 @@ int flared::startup(int argc, char **argv) {
 		ini_option_object().is_net_read_timeout_set(), ini_option_object().get_net_read_timeout());
 	this->_server = new server();
 	this->_server->set_back_log(ini_option_object().get_back_log());
-	if (this->_server->listen(ini_option_object().get_server_port()) < 0) {
+#ifndef ENABLE_K8S_OPERATOR
+	if (this->_listen() < 0) {
 		return -1;
 	}
-	if (ini_option_object().get_server_socket().empty() == false) {
-		if (this->_server->listen(ini_option_object().get_server_socket()) < 0) {
-			return -1;
-		}
-	}
+#endif
 
 	this->_thread_index = new AtomicCounter(1);
 	this->_req_thread_pool = new thread_pool(ini_option_object().get_thread_pool_size(), ini_option_object().get_stack_size(), this->_thread_index);
@@ -266,6 +263,16 @@ int flared::startup(int argc, char **argv) {
 		}
 		if (this->_cluster->startup_node(k8s_index_servers,
 																		 ini_option_object().get_proxy_prior_netmask()) < 0) {
+			return -1;
+		}
+		// Listen only AFTER the registration reply was applied. A node-map
+		// send that reached this process earlier — connected into the listen
+		// backlog while `node add` waited — was applied once the running loop
+		// started, i.e. AFTER the registration reply (held as version 0), so
+		// the older map won (topology-authority test 8, CI 38098999795 with
+		// the operator's PublicationGate). Refused instead, that send stays
+		// unconfirmed and the operator's next pass publishes the live map.
+		if (this->_listen() < 0) {
 			return -1;
 		}
 	}
@@ -491,6 +498,21 @@ int flared::run() {
 		}
 	}
 
+	return 0;
+}
+
+/**
+ *	open the listening sockets (port, and the unix socket when configured)
+ */
+int flared::_listen() {
+	if (this->_server->listen(ini_option_object().get_server_port()) < 0) {
+		return -1;
+	}
+	if (ini_option_object().get_server_socket().empty() == false) {
+		if (this->_server->listen(ini_option_object().get_server_socket()) < 0) {
+			return -1;
+		}
+	}
 	return 0;
 }
 

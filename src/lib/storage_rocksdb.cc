@@ -3421,6 +3421,83 @@ int storage_rocksdb::analyze_checkpoint(const string& dir, FILE* out) {
 #endif
 }
 
+int storage_rocksdb::dump_checkpoint(const string& dir, FILE* out) {
+#ifdef HAVE_LIBROCKSDB
+	// OFFLINE capture decoder for verification V (scripts/flare_verify_copy.py):
+	// opens a checkpoint (e.g. one received from `repl_snapshot`) READ-ONLY and
+	// writes every non-reserved key in the `dump` framing —
+	//   VALUE <key> <flag> <size> <version> <expire>\r\n<size bytes>\r\n ... END\r\n
+	// — keys AND values from the same point in time, in RocksDB key order.
+	// Unlike `dump` on a live master it reaps nothing, takes no iteration slot
+	// and no lock (it never touches a server). Expired-but-unreaped keys are
+	// INCLUDED with their absolute expire (the comparator judges them). No
+	// partition filter: every key the copy holds is written. A value whose
+	// size disagrees with its header is a FAILURE (exit 1, no END): a capture
+	// must never look complete when it is not.
+	rocksdb::DB* db = NULL;
+	rocksdb::Options opt;
+	opt.create_if_missing = false;
+	vector<rocksdb::ColumnFamilyHandle*> cf_handles;
+	rocksdb::Status s = open_read_only_all_cfs(opt, dir, &db, cf_handles);
+	if (!s.ok()) {
+		log_err("dump_checkpoint: OpenForReadOnly(%s) failed: %s", dir.c_str(), s.ToString().c_str());
+		return -1;
+	}
+	rocksdb::ReadOptions ro;
+	ro.fill_cache = false;
+	rocksdb::Iterator* it = db->NewIterator(ro);
+	if (it == NULL) {
+		close_read_only(db, cf_handles);
+		return -1;
+	}
+	uint64_t count = 0;
+	int rc = 0;
+	for (it->SeekToFirst(); it->Valid(); it->Next()) {
+		const string k = it->key().ToString();
+		if (is_reserved_key(k)) {
+			continue;
+		}
+		rocksdb::Slice v = it->value();
+		entry e;
+		if (this->_unserialize_header(reinterpret_cast<const uint8_t*>(v.data()),
+				static_cast<int>(v.size()), e) < 0
+				|| v.size() != static_cast<size_t>(entry::header_size) + e.size) {
+			log_err("dump_checkpoint: malformed value (key length=%zu, value length=%zu)", k.size(), v.size());
+			rc = -1;
+			break;
+		}
+		fprintf(out, "VALUE %s %u %llu %llu %ld\r\n", k.c_str(), e.flag,
+			static_cast<unsigned long long>(e.size), static_cast<unsigned long long>(e.version),
+			static_cast<long>(e.expire));
+		if (e.size > 0 && fwrite(v.data() + entry::header_size, 1, e.size, out) != e.size) {
+			rc = -1;
+			break;
+		}
+		fputs("\r\n", out);
+		count++;
+	}
+	rocksdb::Status its = it->status();
+	rocksdb::SequenceNumber seq = db->GetLatestSequenceNumber();
+	delete it;
+	close_read_only(db, cf_handles);
+	if (rc < 0 || !its.ok()) {
+		log_err("dump_checkpoint: iteration failed: %s", its.ToString().c_str());
+		return -1;
+	}
+	fputs("END\r\n", out);
+	if (fflush(out) != 0) {
+		return -1;
+	}
+	fprintf(stderr, "dump_checkpoint: keys=%llu seq=%llu\n",
+		static_cast<unsigned long long>(count), static_cast<unsigned long long>(seq));
+	return 0;
+#else
+	(void)dir; (void)out;
+	log_warning("dump_checkpoint requested but RocksDB not compiled in", 0);
+	return -1;
+#endif
+}
+
 bool storage_rocksdb::_note_write_status(const rocksdb::Status& status, const char* where) {
 	if (status.ok()) {
 		return true;

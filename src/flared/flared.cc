@@ -792,6 +792,18 @@ int main(int argc, char **argv) {
 			return 2;
 #endif
 		}
+		// OFFLINE: `flared --dump-checkpoint <dir>` writes the checkpoint's
+		// keys and values in the `dump` framing (verification V capture;
+		// read-only, never connects to a server). Exit 0 complete, 1 not.
+		if (strcmp(argv[i], "--dump-checkpoint") == 0) {
+#ifdef HAVE_LIBROCKSDB
+			gree::flare::storage_rocksdb st(argv[i + 1], 1, 0);
+			return st.dump_checkpoint(argv[i + 1], stdout) == 0 ? 0 : 1;
+#else
+			fprintf(stderr, "flared built without RocksDB; --dump-checkpoint unavailable\n");
+			return 1;
+#endif
+		}
 		if (strcmp(argv[i], "--analyze-checkpoint") == 0) {
 #ifdef HAVE_LIBROCKSDB
 			gree::flare::storage_rocksdb st(argv[i + 1], 1, 0);

@@ -1431,6 +1431,67 @@ void test_analyze_checkpoint_streams_key_expire_size() {
 	drop_rocksdb(s, wal_master_dir);
 }
 
+// dump_checkpoint() (verification V capture): a checkpoint decoded offline in
+// the `dump` framing — keys and values from the SAME point in time (a write
+// after the checkpoint is not in it), binary values byte-exact (a value
+// containing "\r\nEND\r\n"), blob values, flag / version / absolute expire,
+// an already-EXPIRED key included (not reaped, not hidden), reserved keys
+// filtered, and the master unchanged: no reap, no sequence movement.
+void test_dump_checkpoint_point_in_time_and_side_effect_free() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	string bin("a\r\nEND\r\nb\0c", 11);
+	cut_assert_equal_int(0, storage_set_string(s, "bin", bin));
+	string big(5000, 'x');
+	cut_assert_equal_int(0, storage_set_string(s, "big", big));       // blob file
+	time_t past = time(NULL) - 100;
+	{
+		storage::entry e;
+		e.key = "expired"; e.flag = 7; e.expire = past; e.version = 0; e.size = 2;
+		shared_byte d(new uint8_t[2]); memcpy(d.get(), "zz", 2); e.data = d;
+		storage::result r;
+		cut_assert_equal_int(0, s->set(e, r, 0));
+	}
+	uint64_t reaped0 = s->get_expire_reaped();
+
+	string cp; uint64_t seq = 0;
+	cut_assert_equal_int(0, s->create_snapshot_checkpoint(cp, seq));
+	uint64_t seq_after_cp = s->get_latest_sequence_number();
+	// after the checkpoint: must NOT appear in the capture
+	cut_assert_equal_int(0, storage_set_string(s, "later", "nope"));
+	cut_assert_equal_int(0, storage_set_string(s, "bin", "overwritten"));
+
+	FILE* f = tmpfile();
+	cut_assert_not_null(f);
+	cut_assert_equal_int(0, s->dump_checkpoint(cp, f));
+	rewind(f);
+	string out; char buf[8192]; size_t n;
+	while ((n = fread(buf, 1, sizeof(buf), f)) > 0) out.append(buf, n);
+	fclose(f);
+
+	cppcut_assert_equal(seq, seq_after_cp);                               // checkpoint moved no position
+	cppcut_assert_equal(reaped0, s->get_expire_reaped());                 // nothing reaped
+	cut_assert_true(out.find("VALUE big 0 5000 ") == 0);                  // first in key order
+	cut_assert_true(out.find("VALUE bin 0 11 ") != string::npos);
+	cut_assert_true(out.find(string("\r\n") + bin + "\r\n") != string::npos);  // binary, byte-exact, OLD value
+	cut_assert_true(out.find(big) != string::npos);
+	char exp_hdr[128];
+	snprintf(exp_hdr, sizeof(exp_hdr), "VALUE expired 7 2 ");
+	size_t ep = out.find(exp_hdr);
+	cut_assert_true(ep != string::npos);                                  // expired key INCLUDED
+	char exp_tail[64];
+	snprintf(exp_tail, sizeof(exp_tail), " %ld\r\nzz\r\n", static_cast<long>(past));
+	cut_assert_true(out.find(exp_tail, ep) != string::npos);              // absolute expire kept
+	cut_assert_true(out.find("later") == string::npos);
+	cut_assert_true(out.find("overwritten") == string::npos);
+	cut_assert_true(out.find("__flare") == string::npos);                 // reserved keys filtered
+	cut_assert_true(out.size() >= 5 && out.compare(out.size() - 5, 5, "END\r\n") == 0);
+	// "big" sorts before "bin": the capture is in key order
+	cut_assert_true(out.find("VALUE big ") < out.find("VALUE bin "));
+
+	s->remove_snapshot_checkpoint(cp);
+	drop_rocksdb(s, wal_master_dir);
+}
+
 // SPACE-AWARE REBUILD (2026-10-04) used to discard the stale copy when two
 // did not fit. Copy retention (design §9) replaced that rule: no room stops
 // the rebuild (copy_capacity.h, test_copy_switch); nothing is discarded.

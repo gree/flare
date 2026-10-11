@@ -444,6 +444,7 @@ public:
 	// checkpoint off the serving cluster, so the expensive full-header scan
 	// never touches production. See docs/BACKUP_RESTORE.md.
 	int analyze_checkpoint(const string& dir, FILE* out);
+	int dump_checkpoint(const string& dir, FILE* out);
 	virtual uint32_t count();
 	virtual uint64_t size();
 	virtual int reap_expired(time_t now, uint32_t max_scan, const string& after_key,

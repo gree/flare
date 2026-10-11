@@ -79,6 +79,8 @@ stats::stats():
 		_total_thread_queue(0) {
 	pthread_mutex_init(&this->_mutex_proxy_write_dropped_by_dest, NULL);
 	pthread_mutex_init(&this->_mutex_diag, NULL);
+	pthread_mutex_init(&this->_mutex_crepl, NULL);
+	this->_crepl_seed_state = "none";
 	this->_diag_enabled = getenv("FLARE_TEST_FORWARD_DIAG") != NULL;
 	pthread_mutex_init(&this->_mutex_reconstruction, NULL);
 	pthread_mutex_init(&this->_mutex_follow, NULL);
@@ -118,6 +120,7 @@ stats::stats():
 stats::~stats() {
 	pthread_mutex_destroy(&this->_mutex_proxy_write_dropped_by_dest);
 	pthread_mutex_destroy(&this->_mutex_diag);
+	pthread_mutex_destroy(&this->_mutex_crepl);
 	pthread_mutex_destroy(&this->_mutex_reconstruction);
 }
 // }}}
@@ -374,6 +377,32 @@ void stats::diag_incr(const string& name) {
 	pthread_mutex_lock(&this->_mutex_diag);
 	this->_diag[name]++;
 	pthread_mutex_unlock(&this->_mutex_diag);
+}
+
+void stats::crepl_incr(const string& name) {
+	pthread_mutex_lock(&this->_mutex_crepl);
+	this->_crepl[name]++;
+	pthread_mutex_unlock(&this->_mutex_crepl);
+}
+
+map<string, uint64_t> stats::get_crepl() {
+	pthread_mutex_lock(&this->_mutex_crepl);
+	map<string, uint64_t> r = this->_crepl;
+	pthread_mutex_unlock(&this->_mutex_crepl);
+	return r;
+}
+
+void stats::set_crepl_seed_state(const string& state) {
+	pthread_mutex_lock(&this->_mutex_crepl);
+	this->_crepl_seed_state = state;
+	pthread_mutex_unlock(&this->_mutex_crepl);
+}
+
+string stats::get_crepl_seed_state() {
+	pthread_mutex_lock(&this->_mutex_crepl);
+	string r = this->_crepl_seed_state;
+	pthread_mutex_unlock(&this->_mutex_crepl);
+	return r;
 }
 
 map<string, uint64_t> stats::get_diag() {

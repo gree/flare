@@ -232,6 +232,7 @@ cluster::proxy_request cluster_replication::on_post_proxy_write(op_proxy_write* 
 		vector<string> proxy = op->get_proxy();
 		shared_queue_proxy_write q(new queue_proxy_write(NULL, NULL, proxy, e, op->get_ident()));
 		q->set_post_proxy(true);
+		q->set_foreign(true);
 
 		int key_hash_value = e.get_key_hash_value(storage::hash_algorithm_murmur);
 		if (this->_enqueue(q, key_hash_value, false) < 0) {
@@ -243,6 +244,7 @@ cluster::proxy_request cluster_replication::on_post_proxy_write(op_proxy_write* 
 			char dest[BUFSIZ];
 			snprintf(dest, sizeof(dest), "%s:%d", this->_server_name.c_str(), this->_server_port);
 			stats_object->increment_proxy_write_dropped(string(dest));
+			stats_object->crepl_incr("forward_dropped_unqueued");
 			static AtomicCounter unqueued_logged(0);
 			if (unqueued_logged.incr() % 100 == 1) {
 				log_err("cluster replication write DROPPED before it was queued (dest=%s, key=%s, version=%u): no forwarding thread took it — counted (logged 1 in 100)",
@@ -250,6 +252,7 @@ cluster::proxy_request cluster_replication::on_post_proxy_write(op_proxy_write* 
 			}
 			return cluster::proxy_request_continue;
 		}
+		stats_object->crepl_incr("forward_enqueued");
 	}
 
 	return cluster::proxy_request_continue;

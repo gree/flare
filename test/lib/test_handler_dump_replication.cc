@@ -89,11 +89,19 @@ namespace test_handler_dump_replication {
 		delete st;
 		delete cl;
 		delete stats_object;
+		handler_dump_replication::seed_connect_attempts = 6;
+		handler_dump_replication::seed_retry_base_ms = 5000;
 
 		if (sigaction(SIGUSR1, &prev_sigusr1_action, NULL) < 0) {
 			log_err("sigaction for %d failed: %s (%d)", SIGUSR1, util::strerror(errno), errno);
 			return;
 		}
+	}
+
+	uint64_t crepl(const string& name) {
+		map<string, uint64_t> m = stats_object->get_crepl();
+		map<string, uint64_t>::const_iterator it = m.find(name);
+		return it == m.end() ? 0 : it->second;
 	}
 
 	void prepare_storage(int item_num, int size = 0) {
@@ -303,19 +311,72 @@ namespace test_handler_dump_replication {
 		cut_assert_equal_string("shutdown", t->get_state().c_str());
 	}
 
+	// The destination never listens: the seed tries a bounded number of
+	// times, then ends in a VISIBLE failed state (it used to end with one
+	// log line and nothing a controller could read; audit 2026-10-11).
 	void test_run_failure_unreachable_connection() {
 		// prepare
 		cluster::node master = cl->set_node("localhost", port, cluster::role_master, cluster::state_active);
 		cl->set_partition(0, master);
 		prepare_storage(3);
+		handler_dump_replication::seed_connect_attempts = 2;
+		handler_dump_replication::seed_retry_base_ms = 100;
 
 		// execute
 		shared_thread t = start_handler(false);
 
 		// assert
-		sleep(6);  // waiting for connection failure
+		sleep(4);  // two bounded attempts against a refused port
 		cut_assert_equal_boolean(false, t->is_running());
 		cut_assert_equal_string("", t->get_state().c_str());
+		cut_assert_equal_string("failed_connect", stats_object->get_crepl_seed_state().c_str());
+		cut_assert_equal_int(2, (int)crepl("seed_connect_attempts"));
+		cut_assert_equal_int(1, (int)crepl("seed_failed"));
+		cut_assert_equal_int(0, (int)crepl("seed_completed"));
+	}
+
+	// The destination starts listening after the first attempt failed (a
+	// Service created a moment after the replication was enabled): the seed
+	// retries — nothing had been sent — and completes.
+	void test_run_seed_retries_until_destination_listens() {
+		cluster::node master = cl->set_node("localhost", port, cluster::role_master, cluster::state_active);
+		cl->set_partition(0, master);
+		prepare_storage(3);
+		handler_dump_replication::seed_connect_attempts = 5;
+		handler_dump_replication::seed_retry_base_ms = 1500;
+
+		shared_thread t = start_handler(false);
+		usleep(300 * 1000);
+		cut_assert_equal_string("connecting", stats_object->get_crepl_seed_state().c_str());
+		s->listen(port);
+		cs = s->wait();
+		for (int i = 0; i < 3; i++) {
+			response_dump("STORED", i);
+		}
+
+		usleep(200 * 1000);
+		cut_assert_equal_boolean(false, t->is_running());
+		cut_assert_equal_string("completed_dump", stats_object->get_crepl_seed_state().c_str());
+		cut_assert_equal_int(1, (int)crepl("seed_completed"));
+		cut_assert(crepl("seed_connect_attempts") >= 2);
+	}
+
+	// A destination that answers but does not store: the seed ends FAILED,
+	// not completed, and is not retried.
+	void test_run_seed_not_stored_is_failed_transfer() {
+		cluster::node master = cl->set_node("localhost", port, cluster::role_master, cluster::state_active);
+		cl->set_partition(0, master);
+		prepare_storage(2);
+
+		shared_thread t = start_handler();
+		response_dump("SERVER_ERROR i/o error", 0);
+		response_dump("STORED", 1);
+
+		usleep(200 * 1000);
+		cut_assert_equal_boolean(false, t->is_running());
+		cut_assert_equal_string("failed_transfer", stats_object->get_crepl_seed_state().c_str());
+		cut_assert_equal_int(1, (int)crepl("seed_failed"));
+		cut_assert_equal_int(1, (int)crepl("seed_connect_attempts"));
 	}
 
 	void test_run_failure_database_busy() {

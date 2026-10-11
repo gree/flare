@@ -81,6 +81,16 @@ protected:
 	bool _diag_enabled;
 	pthread_mutex_t _mutex_diag;
 	map<string, uint64_t> _diag;
+	// CROSS-CLUSTER replication (cluster_replication), always on: what each
+	// forwarded op became on the destination ("forward_applied",
+	// "forward_noop_<op>_<result>", "forward_failed_<op>_<result>",
+	// "forward_dropped_<path>", "forward_enqueued") and the seed's progress,
+	// so a forward that was answered but not stored, and a seed that never
+	// started, are visible (audit 2026-10-11). Cross-cluster forwards are a
+	// network round trip each; one mutex per forward is noise beside it.
+	pthread_mutex_t _mutex_crepl;
+	map<string, uint64_t> _crepl;
+	string _crepl_seed_state;
 	// Reconstruction lifecycle of THIS node, counted once per request (a
 	// request is one handler_reconstruction; its internal retries are not
 	// separate requests). "started" is what a controller compares against
@@ -151,6 +161,10 @@ public:
 	bool diag_enabled() const { return this->_diag_enabled; };
 	void diag_incr(const string& name);
 	map<string, uint64_t> get_diag();
+	void crepl_incr(const string& name);
+	map<string, uint64_t> get_crepl();
+	void set_crepl_seed_state(const string& state);
+	string get_crepl_seed_state();
 	inline int increment_reconstruction_started()   { this->_reconstruction_started.incr();return 0; };
 	inline int increment_reconstruction_completed() { this->_reconstruction_completed.incr();return 0; };
 	inline int increment_reconstruction_failed()    { this->_reconstruction_failed.incr();return 0; };

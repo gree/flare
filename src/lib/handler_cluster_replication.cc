@@ -27,6 +27,8 @@
  *	$Id$
  */
 #include "handler_cluster_replication.h"
+#include "handler_proxy.h"
+#include "queue_proxy_write.h"
 #include "connection_tcp.h"
 
 namespace gree {
@@ -60,8 +62,19 @@ int handler_cluster_replication::run() {
 	this->_thread->set_peer(this->_replication_server_name, this->_replication_server_port);
 	this->_thread->set_state("connect");
 
-	shared_connection c(new connection_tcp(
-			   this->_replication_server_name, this->_replication_server_port));
+	connection_tcp* ctp = new connection_tcp(
+			   this->_replication_server_name, this->_replication_server_port);
+	// Bounded like the in-cluster forwarding connection (handler_proxy): the
+	// default connect is blocking with 8 retries, so a destination that does
+	// not answer SYNs (an LB address with no backend, a black-holed route)
+	// held this thread ~130 s per attempt, up to 9 attempts per open and 4
+	// opens per forward, with every later forward queued behind it — not
+	// sent, not counted. Bounded, a timed-out open makes the next forwards
+	// fail fast (counted) instead. The read side is connection_tcp's read
+	// timeout (30 s in the k8s build unless net-read-timeout is set).
+	ctp->set_connect_timeout_ms(handler_proxy::proxy_connect_timeout_ms);
+	ctp->set_connect_retry_limit(handler_proxy::proxy_connect_retry_limit);
+	shared_connection c(ctp);
 	this->_connection = c;
 	if (c->open() < 0) {
 		// The thread STAYS (it used to return here: it left the pool for good
@@ -110,6 +123,10 @@ int handler_cluster_replication::run() {
 int handler_cluster_replication::_process_queue(shared_thread_queue q) {
 	this->_thread->set_state("execute");
 	this->_thread->set_op(q->get_ident());
+	// a forward's retry wait ends when this thread is asked to stop
+	if (shared_queue_proxy_write w = boost::dynamic_pointer_cast<queue_proxy_write>(q)) {
+		w->set_owner(this->_thread);
+	}
 
 	return q->run(this->_connection);
 }

@@ -28,7 +28,9 @@
  */
 
 #include "handler_dump_replication.h"
+#include "app.h"
 #include "connection_tcp.h"
+#include "handler_proxy.h"
 #include "op_set.h"
 #include "op_repl_snapshot_push.h"
 #include "op_meta.h"
@@ -69,113 +71,107 @@ handler_dump_replication::~handler_dump_replication() {
 // }}}
 
 // {{{ public methods
+int handler_dump_replication::seed_connect_attempts = 6;
+int handler_dump_replication::seed_retry_base_ms = 5000;
+
+/**
+ *	A connection to the destination with a bounded connect (see
+ *	handler_cluster_replication::run): a destination that does not answer
+ *	SYNs must not hold the seed ~130 s per attempt x 9.
+ */
+shared_connection handler_dump_replication::_open_bounded(const string& name, int port) {
+	connection_tcp* ctp = new connection_tcp(name, port);
+	ctp->set_connect_timeout_ms(handler_proxy::proxy_connect_timeout_ms);
+	ctp->set_connect_retry_limit(handler_proxy::proxy_connect_retry_limit);
+	shared_connection c(ctp);
+	if (c->open() < 0) {
+		return shared_connection();
+	}
+	return c;
+}
+
+/** false when a shutdown was requested while waiting */
+bool handler_dump_replication::_wait_or_shutdown(int ms) {
+	for (int waited = 0; waited < ms; waited += 100) {
+		if (this->_thread->is_shutdown_request()) {
+			return false;
+		}
+		usleep(100 * 1000);
+	}
+	return !this->_thread->is_shutdown_request();
+}
+
 int handler_dump_replication::run() {
 	this->_thread->set_peer(this->_replication_server_name, this->_replication_server_port);
 	this->_thread->set_state("connect");
 
-	shared_connection c(new connection_tcp(
-			   this->_replication_server_name, this->_replication_server_port));
-	this->_connection = c;
-	if (c->open() < 0) {
-		log_err("failed to connect to cluster replication server (name=%s, port=%d)",
-				   this->_replication_server_name.c_str(), this->_replication_server_port);
+	// The seed's state is in `stats` (cluster_replication_seed) from here on:
+	// a seed that never started used to leave nothing but one log line, and
+	// the replication stayed "started" (audit 2026-10-11).
+	stats_object->set_crepl_seed_state("connecting");
+	stats_object->crepl_incr("seed_started");
+	shared_connection c;
+	int wait_ms = seed_retry_base_ms;
+	for (int attempt = 1; attempt <= seed_connect_attempts; attempt++) {
+		stats_object->crepl_incr("seed_connect_attempts");
+		c = this->_open_bounded(this->_replication_server_name, this->_replication_server_port);
+		if (c) {
+			break;
+		}
+		log_err("failed to connect to cluster replication server (name=%s, port=%d) — seed attempt %d of %d, nothing sent yet",
+				   this->_replication_server_name.c_str(), this->_replication_server_port, attempt, seed_connect_attempts);
+		if (attempt == seed_connect_attempts) {
+			break;
+		}
+		if (!this->_wait_or_shutdown(wait_ms)) {
+			stats_object->set_crepl_seed_state("interrupted");
+			this->_thread->set_state("shutdown");
+			return -1;
+		}
+		wait_ms = wait_ms * 2 > 60000 ? 60000 : wait_ms * 2;
+	}
+	if (!c) {
+		// Nothing was copied. The forwarding threads still run, so the
+		// destination receives later writes but NOT what existed before —
+		// it is not a copy of this cluster. Re-enabling (enabled false -> true)
+		// starts a new seed.
+		stats_object->set_crepl_seed_state("failed_connect");
+		stats_object->crepl_incr("seed_failed");
+		log_err("CRITICAL: cluster replication SEED NOT STARTED: the destination %s:%d was not reachable in %d attempts — the destination holds no copy of the existing data (re-enable to retry)",
+				   this->_replication_server_name.c_str(), this->_replication_server_port, seed_connect_attempts);
 		return -1;
 	}
+	this->_connection = c;
 
 	this->_thread->set_state("execute");
+	stats_object->set_crepl_seed_state("transferring");
 
-	// Phase 1: Check if WAL replication is possible
 	log_info("dump replication handler starting (dest=%s:%d, storage_type=%s)",
 		this->_replication_server_name.c_str(),
 		this->_replication_server_port,
 		storage::type_cast(this->_storage->get_type()).c_str());
-	bool use_wal_replication = false;
 	bool peer_snapshot_push_supported = false;
 #ifdef HAVE_LIBROCKSDB
-	// Check if local storage is RocksDB
+	// What the destination supports. The answer is used for ONE thing:
+	// whether to try a snapshot push.
+	//
+	// There used to be a "Phase 1" here that asked the DESTINATION for its
+	// WAL since this node's repl_last_lsn (op_repl_sync_wal::run_client) and
+	// applied it to THIS — the source's — storage, then returned without
+	// seeding when that "succeeded". The direction is backwards for a seed:
+	// it writes the destination's history into the source. Its only guard
+	// was the master_id comparison, and a snapshot-push seed copies the
+	// source's files, master_id included — so on the next start() (re-enable,
+	// a source master restart) that guard compares the source's id with
+	// itself (audit 2026-10-11; E2E cluster-replication-reseed fixes that
+	// order). Removed: a seed never applies anything locally.
 	if (this->_storage->get_type() == storage::type_rocksdb) {
-		storage_rocksdb* local_rocksdb = dynamic_cast<storage_rocksdb*>(this->_storage);
-		if (local_rocksdb) {
-			// Query master for WAL support
-			op_meta* meta_op = new op_meta(c, NULL, NULL);
-			bool master_supports_wal = false;
-
-			log_info("checking if master supports RocksDB WAL replication", 0);
-			if (meta_op->run_client_features(master_supports_wal) == 0 && master_supports_wal) {
-				log_info("master supports RocksDB WAL, attempting incremental replication", 0);
-				use_wal_replication = true;
-			} else {
-				log_info("master does not support RocksDB WAL, using full dump replication", 0);
-			}
+		op_meta* meta_op = new op_meta(c, NULL, NULL);
+		bool peer_rocksdb_wal = false;
+		if (meta_op->run_client_features(peer_rocksdb_wal) == 0) {
 			peer_snapshot_push_supported = meta_op->get_peer_snapshot_push_supported();
-			delete meta_op;
 		}
-	}
-
-	// Phase 2: Try WAL-based incremental replication if both sides support it
-	if (use_wal_replication) {
-		this->_thread->set_op("repl_sync_wal");
-		storage_rocksdb* local_rocksdb = dynamic_cast<storage_rocksdb*>(this->_storage);
-
-		// Pass our locally remembered LSN and master identity token to
-		// the peer. The remote end determines whether the request is
-		// compatible with its own lineage (see op_repl_sync_wal).
-		//
-		// NOTE: The direction of this WAL exchange in cluster_replication
-		// mode=duplicate deserves a follow-up audit — the current
-		// integration predates the hardening added in Phase A and the
-		// semantics of "who streams to whom" in push-mode replication
-		// need to be reconciled with the token/lsn_ahead protocol below.
-		// The safety invariants still hold: any classified error falls
-		// back to the non-destructive full dump path.
-		uint64_t last_lsn = local_rocksdb->get_repl_last_lsn();
-		string local_master_id = local_rocksdb->get_master_id();
-		log_info("attempting WAL replication from LSN %llu (master_id=%s)",
-			last_lsn, local_master_id.c_str());
-
-		op_repl_sync_wal* wal_op = new op_repl_sync_wal(c, this->_storage);
-
-		// Configure Phase D throttling. A RocksDB-specific WAL
-		// bandwidth/interval of 0 inherits the cluster-wide
-		// reconstruction settings, so operators who don't need
-		// phase-specific tuning get sensible defaults automatically.
-		wal_op->set_max_batch_bytes(local_rocksdb->get_wal_max_batch_bytes());
-		int wal_bwlimit = local_rocksdb->get_wal_sync_bwlimit();
-		if (wal_bwlimit == 0) {
-			wal_bwlimit = this->_cluster->get_reconstruction_bwlimit();
-		}
-		int wal_interval = local_rocksdb->get_wal_sync_interval();
-		if (wal_interval == 0) {
-			wal_interval = this->_cluster->get_reconstruction_interval();
-		}
-		wal_op->set_wal_sync_bwlimit(wal_bwlimit);
-		wal_op->set_wal_sync_interval(wal_interval);
-
-		int wal_result = wal_op->run_client(last_lsn, local_master_id);
-		op_repl_sync_wal::client_result rc = wal_op->get_client_result();
-		delete wal_op;
-
-		if (wal_result == 0 && rc == op_repl_sync_wal::client_success) {
-			log_notice("WAL replication completed successfully from LSN %llu", last_lsn);
-			return 0;
-		}
-
-		switch (rc) {
-			case op_repl_sync_wal::client_master_id_mismatch:
-				log_warning("WAL sync refused (master_id_mismatch) -> full dump", 0);
-				break;
-			case op_repl_sync_wal::client_lsn_ahead:
-				log_warning("WAL sync refused (lsn_ahead) -> full dump to reset peer", 0);
-				break;
-			case op_repl_sync_wal::client_lsn_purged:
-				log_notice("WAL sync refused (lsn_purged) -> full dump to catch up", 0);
-				break;
-			default:
-				log_warning("WAL replication failed, falling back to full dump replication", 0);
-				break;
-		}
-		local_rocksdb->incr_wal_fallback_to_dump();
-		// Fall through to full dump replication
+		delete meta_op;
 	}
 #endif
 
@@ -196,10 +192,10 @@ int handler_dump_replication::run() {
 			int dest_port = this->_replication_server_port;
 			for (int hops = 0; hops < 3; hops++) {
 				// FRESH connection per attempt: the shared handler connection
-				// may carry residue from the WAL exchange above, and a
-				// redirect needs a different peer anyway.
-				shared_connection cs(new connection_tcp(dest_name, dest_port));
-				if (cs->open() < 0) {
+				// carried the features exchange above, and a redirect needs a
+				// different peer anyway.
+				shared_connection cs = this->_open_bounded(dest_name, dest_port);
+				if (!cs) {
 					log_warning("snapshot push: cannot connect to %s:%d", dest_name.c_str(), dest_port);
 					break;
 				}
@@ -233,6 +229,8 @@ int handler_dump_replication::run() {
 
 	if (!via_snapshot_push && this->_storage->iter_begin() < 0) {
 		log_err("database busy", 0);
+		stats_object->set_crepl_seed_state("failed_busy");
+		stats_object->crepl_incr("seed_failed");
 		return -1;
 	}
 
@@ -323,6 +321,24 @@ int handler_dump_replication::run() {
 		log_err("dump replication FAILED: %llu set(s) not stored by the destination (dest=%s:%d) -> recorded as resync failure",
 				   (unsigned long long)set_failures,
 				   this->_replication_server_name.c_str(), this->_replication_server_port);
+	}
+	// The seed's outcome, for `stats`. "completed_*" says the transfer ran
+	// to its end with every set STORED (or the snapshot push confirmed) —
+	// not that the destination equals this cluster: writes forwarded during
+	// the seed can still have been dropped (counted separately), and a
+	// failed seed is NOT retried here (a destination already partly written
+	// answers NOT_STORED for what it holds, which the dump counts as failed).
+	if (via_snapshot_push) {
+		stats_object->set_crepl_seed_state("completed_snapshot_push");
+		stats_object->crepl_incr("seed_completed");
+	} else if (dump_succeeded) {
+		stats_object->set_crepl_seed_state("completed_dump");
+		stats_object->crepl_incr("seed_completed");
+	} else if (this->_thread->is_shutdown_request()) {
+		stats_object->set_crepl_seed_state("interrupted");
+	} else {
+		stats_object->set_crepl_seed_state("failed_transfer");
+		stats_object->crepl_incr("seed_failed");
 	}
 	if (dump_succeeded) {
 		log_notice("dump replication completed (dest=%s:%d, partition=%d, partition_size=%d, interval=%d, bwlimit=%" PRIu64 ")",

@@ -85,6 +85,11 @@ protected:
 	// succeeded or failed fast — refused, lookup failure): lets a sender fail
 	// fast instead of queueing behind another connect that will time out.
 	uint64_t						_open_failed_at_ms;
+	// the SENDER's own verdict on this destination (cluster replication): a
+	// forward already waited out its whole retry window here, so the next
+	// ones make one attempt each instead of waiting again (see
+	// queue_proxy_write::_run_foreign). Cleared by the first delivery.
+	bool								_sender_given_up;
 
 public:
 	static int read_timeout;												// msec
@@ -113,6 +118,8 @@ public:
 	virtual int open();
 	// true when the last open() timed out less than `ms` ago
 	bool open_failed_within(int ms) const;
+	bool sender_given_up() const { return this->_sender_given_up; };
+	void set_sender_given_up(bool v) { this->_sender_given_up = v; };
 	virtual int read(char** p, int expect_len, bool readline, bool& actual);
 	virtual int readline(char** p);
 	virtual int readsize(int expect_len, char** p);

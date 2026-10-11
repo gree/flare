@@ -85,7 +85,8 @@ connection_tcp::connection_tcp(const std::string& host, int port):
 		_connect_retry_wait(connection_tcp::connect_retry_wait),
 		_connect_timeout_ms(0),
 		_deadline_ms(0),
-		_open_failed_at_ms(0) {
+		_open_failed_at_ms(0),
+		_sender_given_up(false) {
 }
 
 /**
@@ -112,7 +113,8 @@ connection_tcp::connection_tcp(int sock, struct sockaddr_in addr):
 		_connect_retry_wait(connection_tcp::connect_retry_wait),
 		_connect_timeout_ms(0),
 		_deadline_ms(0),
-		_open_failed_at_ms(0) {
+		_open_failed_at_ms(0),
+		_sender_given_up(false) {
 }
 
 /**
@@ -139,7 +141,8 @@ connection_tcp::connection_tcp(int sock, struct sockaddr_un addr):
 		_connect_retry_wait(connection_tcp::connect_retry_wait),
 		_connect_timeout_ms(0),
 		_deadline_ms(0),
-		_open_failed_at_ms(0) {
+		_open_failed_at_ms(0),
+		_sender_given_up(false) {
 }
 
 /**

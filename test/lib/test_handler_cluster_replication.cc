@@ -32,6 +32,7 @@
 #include "storage.h"
 
 #include <cppcutter.h>
+#include <time.h>
 
 using namespace std;
 using namespace gree::flare;
@@ -81,6 +82,7 @@ namespace test_handler_cluster_replication {
 		delete tp;
 		delete thread_idx;
 		delete stats_object;
+		queue_proxy_write::foreign_retry_window_ms = 120 * 1000;
 
 		if (sigaction(SIGUSR1, &prev_sigusr1_action, NULL) < 0) {
 			log_err("sigaction for %d failed: %s (%d)", SIGUSR1, util::strerror(errno), errno);
@@ -254,6 +256,198 @@ namespace test_handler_cluster_replication {
 		q2->sync();
 		cut_assert_equal_boolean(true, q2->is_success());
 		cut_assert_equal_int(1, (int)stats_object->get_proxy_write_dropped());
+	}
+
+	// Cross-cluster answers, op by op (audit 2026-10-11): an idempotent
+	// answer is not a loss, any other non-success answer is.
+	void test_classify_foreign_answer() {
+		cut_assert_equal_int(queue_proxy_write::foreign_applied, queue_proxy_write::classify_foreign_answer("set", op::result_stored));
+		cut_assert_equal_int(queue_proxy_write::foreign_noop, queue_proxy_write::classify_foreign_answer("set", op::result_not_stored));
+		cut_assert_equal_int(queue_proxy_write::foreign_failed, queue_proxy_write::classify_foreign_answer("set", op::result_server_error));
+		cut_assert_equal_int(queue_proxy_write::foreign_failed, queue_proxy_write::classify_foreign_answer("set", op::result_client_error));
+		cut_assert_equal_int(queue_proxy_write::foreign_failed, queue_proxy_write::classify_foreign_answer("set", op::result_error));
+		cut_assert_equal_int(queue_proxy_write::foreign_failed, queue_proxy_write::classify_foreign_answer("set", op::result_exists));
+		cut_assert_equal_int(queue_proxy_write::foreign_failed, queue_proxy_write::classify_foreign_answer("set", op::result_not_found));
+		cut_assert_equal_int(queue_proxy_write::foreign_failed, queue_proxy_write::classify_foreign_answer("set", op::result_none));
+		cut_assert_equal_int(queue_proxy_write::foreign_applied, queue_proxy_write::classify_foreign_answer("delete", op::result_deleted));
+		cut_assert_equal_int(queue_proxy_write::foreign_noop, queue_proxy_write::classify_foreign_answer("delete", op::result_not_found));
+		cut_assert_equal_int(queue_proxy_write::foreign_failed, queue_proxy_write::classify_foreign_answer("delete", op::result_server_error));
+		cut_assert_equal_int(queue_proxy_write::foreign_failed, queue_proxy_write::classify_foreign_answer("delete", op::result_not_stored));
+		cut_assert_equal_int(queue_proxy_write::foreign_applied, queue_proxy_write::classify_foreign_answer("touch", op::result_touched));
+		cut_assert_equal_int(queue_proxy_write::foreign_missing, queue_proxy_write::classify_foreign_answer("touch", op::result_not_found));
+		cut_assert_equal_int(queue_proxy_write::foreign_failed, queue_proxy_write::classify_foreign_answer("touch", op::result_server_error));
+	}
+
+	uint64_t crepl(const string& name) {
+		map<string, uint64_t> m = stats_object->get_crepl();
+		map<string, uint64_t>::const_iterator it = m.find(name);
+		return it == m.end() ? 0 : it->second;
+	}
+
+	// one forwarded set, answered with `response`; returns the request line
+	string forward_set(shared_thread t, bool foreign, const string& input, const string& response) {
+		storage::entry e = get_entry(input, storage::parse_type_set, "VALUE");
+		vector<string> proxy;
+		shared_queue_proxy_write q(new queue_proxy_write(NULL, NULL, proxy, e, "set"));
+		q->set_post_proxy(true);
+		q->set_foreign(foreign);
+		q->sync_ref();
+		enqueue(t, q);
+		char *p, *v;
+		cs[0]->readline(&p);
+		cs[0]->readline(&v);
+		string line(p);
+		cs[0]->writeline(response.c_str());
+		delete[] p;
+		delete[] v;
+		q->sync();
+		return line;
+	}
+
+	// A destination that ANSWERS SERVER_ERROR did not store the write: before,
+	// that was a rate-limited warning and nothing was counted.
+	void test_foreign_server_error_is_counted() {
+		shared_thread t = start_handler();
+		forward_set(t, true, " key 0 0 5 3", "SERVER_ERROR proxy error");
+		cut_assert_equal_int(1, (int)stats_object->get_proxy_write_dropped());
+		cut_assert_equal_int(1, (int)crepl("forward_failed_set_server_error"));
+		cut_assert_equal_int(0, (int)crepl("forward_applied"));
+	}
+
+	// NOT_STORED to a versioned set: the destination holds this version or a
+	// newer one (a retry whose first reply was lost) — not a loss.
+	void test_foreign_not_stored_is_noop() {
+		shared_thread t = start_handler();
+		forward_set(t, true, " key 0 0 5 3", "NOT_STORED");
+		forward_set(t, true, " key 0 0 5 4", "STORED");
+		cut_assert_equal_int(0, (int)stats_object->get_proxy_write_dropped());
+		cut_assert_equal_int(1, (int)crepl("forward_noop_set_not_stored"));
+		cut_assert_equal_int(1, (int)crepl("forward_applied"));
+	}
+
+	// A client's noreply is not passed on to another cluster: the answer is
+	// read, so a refusal is seen and counted.
+	void test_foreign_noreply_answer_is_read() {
+		shared_thread t = start_handler();
+		string line = forward_set(t, true, " key 0 0 5 3 noreply", "SERVER_ERROR i/o error");
+		cut_assert_equal_string("set key 0 0 5 3\n", line.c_str());
+		cut_assert_equal_int(1, (int)stats_object->get_proxy_write_dropped());
+	}
+
+	// In-cluster forwards keep their behaviour (the answer is logged only).
+	void test_in_cluster_server_error_unchanged() {
+		shared_thread t = start_handler();
+		forward_set(t, false, " key 0 0 5 3", "SERVER_ERROR proxy error");
+		cut_assert_equal_int(0, (int)stats_object->get_proxy_write_dropped());
+		cut_assert_equal_int(0, (int)crepl("forward_failed_set_server_error"));
+	}
+
+	string forward_delete(shared_thread t, const string& response) {
+		storage::entry e;
+		e.key = "key";
+		e.version = 3;
+		vector<string> proxy;
+		shared_queue_proxy_write q(new queue_proxy_write(NULL, NULL, proxy, e, "delete"));
+		q->set_post_proxy(true);
+		q->set_foreign(true);
+		q->sync_ref();
+		enqueue(t, q);
+		char *p;
+		cs[0]->readline(&p);
+		string line(p);
+		cs[0]->writeline(response.c_str());
+		delete[] p;
+		q->sync();
+		return line;
+	}
+
+	// delete NOT_FOUND: absent already (or newer there) — not a loss;
+	// delete SERVER_ERROR: the key may still be there — counted.
+	void test_foreign_delete_answers() {
+		shared_thread t = start_handler();
+		cut_assert_equal_string("delete key 0 3\n", forward_delete(t, "NOT_FOUND").c_str());
+		cut_assert_equal_int(0, (int)stats_object->get_proxy_write_dropped());
+		cut_assert_equal_int(1, (int)crepl("forward_noop_delete_not_found"));
+		forward_delete(t, "SERVER_ERROR i/o error");
+		cut_assert_equal_int(1, (int)stats_object->get_proxy_write_dropped());
+		cut_assert_equal_int(1, (int)crepl("forward_failed_delete_server_error"));
+		forward_delete(t, "DELETED");
+		cut_assert_equal_int(1, (int)crepl("forward_applied"));
+	}
+
+	shared_queue_proxy_write enqueue_foreign_set(shared_thread t, const string& key) {
+		storage::entry e = get_entry(" " + key + " 0 0 5 3", storage::parse_type_set, "VALUE");
+		vector<string> proxy;
+		shared_queue_proxy_write q(new queue_proxy_write(NULL, NULL, proxy, e, "set"));
+		q->set_post_proxy(true);
+		q->set_foreign(true);
+		q->sync_ref();
+		enqueue(t, q);
+		return q;
+	}
+
+	// The destination is down when the forward is made and comes up within
+	// the retry window (a restart): the forward is delivered, nothing is
+	// dropped — it used to be dropped after 4 quick tries.
+	void test_foreign_rides_out_a_late_destination() {
+		queue_proxy_write::foreign_retry_window_ms = 8000;
+		shared_thread t = start_handler(false);
+		shared_queue_proxy_write q = enqueue_foreign_set(t, "key");
+		usleep(1500 * 1000);
+		s->listen(port);
+		cs = s->wait();
+		char *p, *v;
+		cs[0]->readline(&p);
+		cs[0]->readline(&v);
+		cut_assert_equal_string("set key 0 0 5 3\n", p);
+		cs[0]->writeline("STORED");
+		delete[] p;
+		delete[] v;
+		q->sync();
+		cut_assert_equal_boolean(true, q->is_success());
+		cut_assert_equal_int(0, (int)stats_object->get_proxy_write_dropped());
+		cut_assert_equal_int(1, (int)crepl("forward_retried"));
+		cut_assert_equal_int(1, (int)crepl("forward_applied"));
+	}
+
+	// The window runs out: that forward is dropped and counted; the next one
+	// makes ONE attempt and is counted at once (a dead destination does not
+	// hold every write for the whole window); once the destination listens,
+	// the next forward is delivered and the wait applies again.
+	void test_foreign_gives_up_then_tries_once_each() {
+		queue_proxy_write::foreign_retry_window_ms = 1500;
+		shared_thread t = start_handler(false);
+		shared_queue_proxy_write q1 = enqueue_foreign_set(t, "key1");
+		q1->sync();
+		cut_assert_equal_boolean(false, q1->is_success());
+		cut_assert_equal_int(1, (int)stats_object->get_proxy_write_dropped());
+		cut_assert_equal_int(1, (int)crepl("forward_dropped_retries"));
+
+		struct timespec t0, t1;
+		clock_gettime(CLOCK_MONOTONIC, &t0);
+		shared_queue_proxy_write q2 = enqueue_foreign_set(t, "key2");
+		q2->sync();
+		clock_gettime(CLOCK_MONOTONIC, &t1);
+		long ms = (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000;
+		cut_assert_equal_boolean(false, q2->is_success());
+		cut_assert_equal_int(2, (int)stats_object->get_proxy_write_dropped());
+		cut_assert_equal_int(1, (int)crepl("forward_dropped_down"));
+		cut_assert(ms < 1500, cut_message("a given-up destination still held the forward %ld ms", ms));
+
+		s->listen(port);
+		shared_queue_proxy_write q3 = enqueue_foreign_set(t, "key3");
+		cs = s->wait();
+		char *p, *v;
+		cs[0]->readline(&p);
+		cs[0]->readline(&v);
+		cut_assert_equal_string("set key3 0 0 5 3\n", p);
+		cs[0]->writeline("STORED");
+		delete[] p;
+		delete[] v;
+		q3->sync();
+		cut_assert_equal_boolean(true, q3->is_success());
+		cut_assert_equal_int(2, (int)stats_object->get_proxy_write_dropped());
+		cut_assert_equal_int(1, (int)crepl("forward_applied"));
 	}
 }
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 noexpandtab autoindent

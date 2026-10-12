@@ -36,6 +36,7 @@
 #include "handler_reaper.h"
 #include "handler_storage_check.h"
 #include "handler_request.h"
+#include "op_repl_snapshot_push.h"
 #ifdef ENABLE_MYSQL_REPLICATION
 # include "handler_mysql_replication.h"
 #endif
@@ -426,6 +427,7 @@ int flared::startup(int argc, char **argv) {
 	if (cluster_replication::mode_cast(ini_option_object().get_cluster_replication_mode(), m) >= 0) {
 		this->_cluster_replication->set_mode(m);
 		this->_cluster_replication->set_snapshot_push(ini_option_object().is_cluster_replication_snapshot_push());
+		op_repl_snapshot_push::accept_push = ini_option_object().is_cluster_replication_snapshot_push();
 	} else {
 		return -1;
 	}
@@ -626,6 +628,7 @@ int flared::reload() {
 	if (cluster_replication::mode_cast(ini_option_object().get_cluster_replication_mode(), m) >= 0) {
 		this->_cluster_replication->set_mode(m);
 		this->_cluster_replication->set_snapshot_push(ini_option_object().is_cluster_replication_snapshot_push());
+		op_repl_snapshot_push::accept_push = ini_option_object().is_cluster_replication_snapshot_push();
 		if (ini_option_object().is_cluster_replication()) {
 			string cl_repl_server_name = ini_option_object().get_cluster_replication_server_name();
 			int cl_repl_server_port = ini_option_object().get_cluster_replication_server_port();

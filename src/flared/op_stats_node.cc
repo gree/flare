@@ -27,6 +27,7 @@
  *	$Id$
  */
 #include "flared.h"
+#include "op_repl_snapshot_push.h"
 #include "op_stats_node.h"
 #include <sys/stat.h>
 #include <cstdlib>
@@ -120,6 +121,9 @@ int op_stats_node::_run_server() {
 			shared_cluster_replication repl = singleton<flared>::instance().get_cluster_replication();
 			if (repl) {
 				this->_send_stat("cluster_replication", repl->is_started() ? "on" : "off");
+				// destination side of the same switch, shown whether or not this
+				// node replicates: does it ACCEPT a snapshot push (item 1, 2026-10-13)
+				this->_send_stat("snapshot_push_accept", op_repl_snapshot_push::accept_push ? "on" : "off");
 				if (repl->is_started()) {
 					this->_send_stat("cluster_replication_mode", cluster_replication::mode_cast(repl->get_mode()));
 					this->_send_stat("cluster_replication_snapshot_push", repl->get_snapshot_push() ? "on" : "off");

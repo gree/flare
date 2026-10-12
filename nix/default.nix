@@ -64,6 +64,8 @@ stdenv.mkDerivation {
     grep -E 'test_in_flight_counts_a_forward_until_it_is_released|test_in_flight_and_outcomes_on_shutdown|test_foreign_outcome_counters_are_the_gate_set|test_enqueue_after_the_handler_returned_is_refused|test_post_proxy_forward_is_not_handed_to_a_reused_thread' test/run-tests.sh.log || echo "in-flight tests NOT found in the cutter log"
     # reseed / dump serve: progress bound, no total deadline (round 8)
     grep -E 'test_reseed_serve_ends_when_the_receiver_stops_reading|test_reseed_serve_to_a_slow_reader_completes_past_several_windows|test_run_server_ends_when_the_receiver_stops_reading|test_final_frame_is_bounded_when_only_it_is_stuck|test_bound_is_off_after_a_complete_dump' test/run-tests.sh.log || echo "serve bound tests NOT found in the cutter log"
+    # per-key-only migration: the destination refuses a snapshot push with the switch off
+    grep -E 'test_switch_off_refuses_an_incoming_push_before_anything_else|test_switch_on_does_not_refuse_by_the_switch' test/run-tests.sh.log || echo "snapshot push switch tests NOT found in the cutter log"
     # T24: the identity/size probe retries with a fresh lookup (round 8)
     grep -E 'test_probe_reaches_a_source_that_answers_only_on_a_later_attempt|test_probe_of_an_unreachable_source_is_unanswered_and_bounded' test/run-tests.sh.log || echo "probe retry tests NOT found in the cutter log"
     grep -E 'test_write_progress_timeout_ends_a_write_to_a_peer_that_stopped_reading|test_write_deadline_ends_a_write_even_with_a_longer_progress_timeout|test_write_bounds_do_not_end_a_write_the_peer_reads|test_capture_capacity_refuses_unknowns_and_short_space' test/run-tests.sh.log || echo "capture guard tests NOT found in the cutter log"

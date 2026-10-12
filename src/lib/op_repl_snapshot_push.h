@@ -98,6 +98,16 @@ public:
 	// checkpoint + WAL tail, so wiping them is safe.
 	static const uint64_t fresh_destination_threshold = 4096;
 
+	// DESTINATION side: does this node accept a snapshot push at all? Set by
+	// flared from `cluster-replication-snapshot-push` at start and on every
+	// reload (one switch: a node with it false neither SENDS a push as a
+	// source nor ACCEPTS one as a destination). The per-key-only seed of the
+	// first cross-cluster migration (user decision 2026-10-13, item 1) must
+	// not enter the push / history-adoption path by configuration, and a
+	// switch honoured only by the source left a fresh destination open to a
+	// push from any other source (default true) or a hand-sent command.
+	static bool accept_push;
+
 protected:
 	cluster*			_cluster;
 	storage*			_storage;

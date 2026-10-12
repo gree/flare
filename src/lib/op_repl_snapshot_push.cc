@@ -43,6 +43,8 @@ namespace flare {
 static const size_t kPushChunkBytes = 1024 * 1024;
 
 // {{{ ctor/dtor
+bool op_repl_snapshot_push::accept_push = true;
+
 op_repl_snapshot_push::op_repl_snapshot_push(shared_connection c, cluster* cl, storage* st):
 		op(c, "repl_snapshot_push"),
 		_cluster(cl),
@@ -117,6 +119,12 @@ int op_repl_snapshot_push::_parse_text_server_parameters() {
  *	freshness, then receive files + WAL tail and swap them in.
  */
 int op_repl_snapshot_push::_run_server() {
+	// refused BEFORE anything else (role routing, relay, freshness): with the
+	// switch off this node takes no push in any role
+	if (!op_repl_snapshot_push::accept_push && false /* OLD BEHAVIOUR (commit A): the switch is not checked here */) {
+		log_notice("declining snapshot push: disabled on this node (cluster-replication-snapshot-push = false)", 0);
+		return this->_send_result(result_server_error, "snapshot_push_disabled");
+	}
 #ifdef HAVE_LIBROCKSDB
 	if (this->_storage == NULL || this->_storage->get_type() != storage::type_rocksdb) {
 		return this->_send_result(result_server_error, "not_rocksdb");

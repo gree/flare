@@ -316,7 +316,36 @@ def suite : TestSuite := {
         let some ip ← getPodIp slave cfgSrc.«namespace» | return .fail "slave has no IP"
         IO.eprintln s!"# source slave {slave}: snapshot_bootstrap {← statNat cfgSrc ip "rocksdb_snapshot_bootstrap"}; source switch stat {← statOf cfgSrc ip "cluster_replication_snapshot_push"}"
         if seen then return .pass
-        return .fail "the source slave did not reseed by snapshot within 300 s (rocksdb_snapshot_bootstrap stayed 0)" }
+        return .fail "the source slave did not reseed by snapshot within 300 s (rocksdb_snapshot_bootstrap stayed 0)" },
+
+    -- item 1 (2026-10-13): the per-key-only migration must not enter the
+    -- push path BY CONFIGURATION on the destination too. The source's switch
+    -- alone left a destination open to a push from any other source or a
+    -- hand-sent command. Here the DESTINATION's CR sets the switch (the
+    -- runbook's setting: replication off there, snapshotPush false) and a
+    -- hand-sent push is refused before anything else (old code: not_fresh
+    -- or, on a fresh destination, accepted).
+    { name := "the destination's own switch (clusterReplication enabled false, snapshotPush false) refuses a hand-sent repl_snapshot_push as snapshot_push_disabled; its data and history are unchanged"
+      run := do
+        let some dIp ← masterIp cfgDst | return .fail "no destination master"
+        let identBefore ← identity cfgDst dIp
+        let items0 ← getCurrItems cfgDst.debugPod cfgDst.«namespace» dIp cfgDst.flarePort
+        match ← kubectlPatch "flarecluster" cfgDst.name cfgDst.«namespace» "{\"spec\":{\"clusterReplication\":{\"enabled\":false,\"snapshotPush\":false}}}" with
+        | .error e => return .fail s!"patch of the destination failed: {e}"
+        | .ok _ => pure ()
+        let off ← waitForCondition "the destination reports snapshot_push_accept off" 180 do
+          return (← statOf cfgDst dIp "snapshot_push_accept") == some "off"
+        if !off then return .fail s!"the destination did not apply the switch (snapshot_push_accept {← statOf cfgDst dIp "snapshot_push_accept"})"
+        let reply ← match ← execInDebugPod cfgDst.debugPod cfgDst.«namespace» s!"printf 'repl_snapshot_push 0 1\\r\\n' | nc -w 10 {dIp} {cfgDst.flarePort}" with
+          | .ok o => pure o.trim
+          | .error e => pure s!"(exec error {e})"
+        let identAfter ← identity cfgDst dIp
+        let items1 ← getCurrItems cfgDst.debugPod cfgDst.«namespace» dIp cfgDst.flarePort
+        IO.eprintln s!"# hand-sent push to the destination master {dIp}: {reply}; destination {identBefore} → {identAfter}; items {items0} → {items1}; snapshot_bootstrap {← statNat cfgDst dIp "rocksdb_snapshot_bootstrap"}"
+        if !containsSubstr reply "SERVER_ERROR snapshot_push_disabled" then
+          return .fail s!"the push was not refused by the destination's switch: {reply}"
+        if identAfter != identBefore || items1 != items0 then return .fail "the destination changed"
+        return .pass }
   ]
 }
 

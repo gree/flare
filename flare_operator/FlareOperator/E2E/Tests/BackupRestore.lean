@@ -104,6 +104,14 @@ private def t24Log (pod : String) : IO String := do
 
 private def t24Count (hay needle : String) : Nat := (hay.splitOn needle).length - 1
 
+/-- Opens that FAILED against `ip` (connection_tcp logs one ERR line ending
+    in "(resolved <ip>) failed" once all its connect retries failed): an
+    open is counted only when it is over (E2E 38253608337: counting the
+    per-connect WRN lines let a trailing line of one cycle pass for the
+    next cycle's probe, which then never used the stale answer). -/
+private def t24FailedOpens (log ip : String) : Nat :=
+  ((log.splitOn "\n").filter fun l => (l.trimRight.endsWith s!"(resolved {ip}) failed")).length
+
 private def t24Fqdn (pod : String) : String := s!"{pod}.{cfg.name}-nodes.{cfg.«namespace»}.svc.cluster.local"
 
 /-- Undo every injection (each step on its own; a failure is printed). -/
@@ -255,9 +263,9 @@ def suite : TestSuite := {
           | .error e => failure := some s!"precondition: stale entry on {slave}: {e}"; break
           discard <| t24Sh slave s!"rm -f {t24Hold}"
           let before := resolvedSeen
-          let used ← waitForCondition "the size probe connected to the black-holed address" 30 do
-            return t24Count (← t24Log slave) s!"(resolved {t24Blackhole})" > before
-          resolvedSeen := t24Count (← t24Log slave) s!"(resolved {t24Blackhole})"
+          let used ← waitForCondition "the size probe's open to the black-holed address failed" 30 do
+            return t24FailedOpens (← t24Log slave) t24Blackhole > before
+          resolvedSeen := t24FailedOpens (← t24Log slave) t24Blackhole
           discard <| t24Sh slave s!"grep -v '^{t24Blackhole} ' /etc/hosts > /tmp/h.t24 && cat /tmp/h.t24 > /etc/hosts"
           cycles := cycles + 1
           if !used then
@@ -273,7 +281,7 @@ def suite : TestSuite := {
           if !again then break
         let staleEnd ← IO.monoMsNow
         t24Cleanup (some slave) master
-        IO.eprintln s!"# T24 repro: {cycles} stale cycle(s) over {(staleEnd - staleStart) / 1000}s; probe connects to {t24Blackhole}: {resolvedSeen}"
+        IO.eprintln s!"# T24 repro: {cycles} stale cycle(s) over {(staleEnd - staleStart) / 1000}s; failed opens to {t24Blackhole}: {resolvedSeen}"
         if let some f := failure then return .fail f
         let recovered ← waitForCondition "the replica rebuilt and Ready after the stale answers ended" 120 do
           let log ← t24Log slave

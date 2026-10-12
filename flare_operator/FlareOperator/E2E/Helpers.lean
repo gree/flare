@@ -239,6 +239,21 @@ def dumpClusterDiagnostics (ns : String) (operatorLabel : String := "app=flare-o
   match ← kubectl ["describe", "pods", "-n", ns, "-l", "app=flare"] with
   | .ok out => for line in out.splitOn "\n" do IO.eprintln s!"# {line}"
   | .error e => IO.eprintln s!"# (describe unavailable: {e})"
+  -- name resolution at failure time (T24, CI 38186142795: a connect to a
+  -- pod name another connection had just reached timed out; which address
+  -- the name gave could not be told afterwards)
+  IO.eprintln s!"# === endpointslices ({ns}) ==="
+  match ← kubectl ["get", "endpointslices", "-n", ns, "-o",
+      "custom-columns=NAME:.metadata.name,ADDRS:.endpoints[*].addresses,HOSTS:.endpoints[*].hostname,READY:.endpoints[*].conditions.ready"] with
+  | .ok out => for line in out.splitOn "\n" do IO.eprintln s!"# {line}"
+  | .error e => IO.eprintln s!"# (endpointslices unavailable: {e})"
+  IO.eprintln "# === coredns (replicas, Corefile) ==="
+  match ← kubectl ["get", "deploy", "coredns", "-n", "kube-system", "-o", "jsonpath={.status.readyReplicas}/{.spec.replicas}"] with
+  | .ok out => IO.eprintln s!"# coredns ready/replicas: {out.trim}"
+  | .error e => IO.eprintln s!"# (coredns unavailable: {e})"
+  match ← kubectl ["get", "configmap", "coredns", "-n", "kube-system", "-o", "jsonpath={.data.Corefile}"] with
+  | .ok out => for line in out.splitOn "\n" do IO.eprintln s!"# {line}"
+  | .error e => IO.eprintln s!"# (Corefile unavailable: {e})"
 
 /-- Execute a command in the debug pod. -/
 def execInDebugPod (debugPod ns cmd : String) : IO (Except String String) := do

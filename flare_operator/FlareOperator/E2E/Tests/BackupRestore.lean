@@ -168,6 +168,18 @@ def suite : TestSuite := {
             | .ok val => return (val.toNat?.getD 0 >= numPods)
             | .error _ => return false
         if !recovered then
+          -- T24 (CI 38186142795): which address each pod's resolver gives for
+          -- every pod name right now (a stale answer vs a path drop)
+          for pod in allPods do
+            for target in allPods do
+              let fqdn := s!"{target}.{cfg.name}-nodes.{cfg.«namespace»}.svc.cluster.local"
+              match ← kubectl ["exec", pod, "-n", cfg.«namespace», "--", "sh", "-c",
+                                s!"for i in 1 2 3 4 5; do getent ahostsv4 {fqdn} | awk 'NR==1\{print $1}'; done | tr '\\n' ' '"] with
+              | .ok out => IO.eprintln s!"# resolve from {pod}: {target} -> {out.trim}"
+              | .error e => IO.eprintln s!"# resolve from {pod}: {target} failed: {e}"
+            match ← getPodIp pod cfg.«namespace» with
+            | some ip => IO.eprintln s!"# pod IP of {pod}: {ip}"
+            | none => pure ()
           return .fail "cluster did not recover within 180s after restore"
         match ← currentP0Master with
         | none => return .fail "no P0 master after restore"

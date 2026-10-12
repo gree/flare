@@ -2037,8 +2037,13 @@ def checkMigrationForwardGate (ctx : Ctx) : IO Unit := do
   let dN : NodeIdent := { pod := "d0", podUid := "d0-uid", boot := 2000, masterId := "mid-a", copyId := "copy-d:1", epoch := "1:ep-a", seq := "700" }
   let bind := s!"attempt={attempt}|src=s0,s0-uid,1000,mid-a,copy-a:1,1:ep-a,500|dst=d0,d0-uid,2000,mid-a,copy-d:1,1:ep-a,700"
   let appr := s!"v=1|verdict=MATCH|verified_at=5000|{bind}"
+  -- every source pod's APPLIED state (any role): duplicate before, forward after
+  let pr (pod mode : String) (settled : Bool := true) (rep : Bool := true) : PodRepl :=
+    { pod, replicating := rep, mode, settled }
+  let dup := some [pr "s0" "duplicate", pr "s1" "duplicate"]
+  let fwd := some [pr "s0" "forward", pr "s1" "forward"]
   let ok : MigObs := { convergedTicks := 6, seedCompleted := true, loss := .clean, attemptId := attempt,
-                       srcIdent := some [sN], dstIdent := some [dN], now := some 5100 }
+                       srcIdent := some [sN], dstIdent := some [dN], now := some 5100, sourcePods := dup }
   let withA := { spec with forwardApproval := appr }
   check ctx "migration: counts + seed + clean loss but NO approval → held (counts are not a verification)"
     ((migStep spec open_ ok).2 == .none)
@@ -2096,19 +2101,39 @@ def checkMigrationForwardGate (ctx : Ctx) : IO Unit := do
       && ((forwardHold withA { ok with consumedApproval := appr }).getD "").endsWith "(one use)"
       && (migStep withA open_ { ok with consumedApproval := "v=1|verdict=MATCH|verified_at=1|other" }).2 == .switchForward)
   check ctx "approval: Forwarding re-checks the consumed approval itself (consumption does not block the post-apply check)"
-    ((migStep withA .Forwarding { ok with sourceForwardApplied := true, consumedApproval := appr }).1 == .AwaitingCutover)
+    ((migStep withA .Forwarding { ok with sourceForwardApplied := true, sourcePods := fwd, consumedApproval := appr }).1 == .AwaitingCutover)
   -- post-apply recheck (the switch window)
   check ctx "Forwarding: forward applied and the approval still matches → AwaitingCutover"
-    ((migStep withA .Forwarding { ok with sourceForwardApplied := true }).1 == .AwaitingCutover)
+    ((migStep withA .Forwarding { ok with sourceForwardApplied := true, sourcePods := fwd }).1 == .AwaitingCutover)
   check ctx "Forwarding: forward applied but a write landed between the switch check and the apply → stays Forwarding"
-    ((migStep withA .Forwarding { ok with sourceForwardApplied := true, srcIdent := some [{ sN with seq := "502" }] }).1 == .Forwarding
-      && (migStep withA .Forwarding { ok with sourceForwardApplied := true, dstIdent := some [{ dN with seq := "702" }] }).1 == .Forwarding)
+    ((migStep withA .Forwarding { ok with sourceForwardApplied := true, sourcePods := fwd, srcIdent := some [{ sN with seq := "502" }] }).1 == .Forwarding
+      && (migStep withA .Forwarding { ok with sourceForwardApplied := true, sourcePods := fwd, dstIdent := some [{ dN with seq := "702" }] }).1 == .Forwarding)
   check ctx "Forwarding: not applied yet → stays Forwarding; a boolean cannot advance it either"
     ((migStep withA .Forwarding ok).1 == .Forwarding
-      && (migStep { spec with approveForward := true } .Forwarding { ok with sourceForwardApplied := true }).1 == .Forwarding)
+      && (migStep { spec with approveForward := true } .Forwarding { ok with sourceForwardApplied := true, sourcePods := fwd }).1 == .Forwarding)
   check ctx "Forwarding: after a hold, a NEW MATCH bound to the current positions advances it"
     ((migStep { spec with forwardApproval := s!"v=1|verdict=MATCH|verified_at=5050|attempt={attempt}|src=s0,s0-uid,1000,mid-a,copy-a:1,1:ep-a,502|dst=d0,d0-uid,2000,mid-a,copy-d:1,1:ep-a,700" }
-        .Forwarding { ok with sourceForwardApplied := true, srcIdent := some [{ sN with seq := "502" }] }).1 == .AwaitingCutover)
+        .Forwarding { ok with sourceForwardApplied := true, sourcePods := fwd, srcIdent := some [{ sN with seq := "502" }] }).1 == .AwaitingCutover)
+  -- the switch window (2026-10-12): forward acts on the pod a client hits;
+  -- the rendered config is not what pods apply
+  check ctx "switch precondition: a source pod not in duplicate mode / not replicating / with forwards in flight / unreadable → no switch"
+    ((migStep withA open_ { ok with sourcePods := some [pr "s0" "duplicate", pr "s1" "forward"] }).2 == .none
+      && (migStep withA open_ { ok with sourcePods := some [pr "s0" "duplicate", pr "s1" "duplicate" (rep := false)] }).2 == .none
+      && (migStep withA open_ { ok with sourcePods := some [pr "s0" "duplicate" (settled := false), pr "s1" "duplicate"] }).2 == .none
+      && (migStep withA open_ { ok with sourcePods := none }).2 == .none
+      && (migStep withA open_ { ok with sourcePods := some [] }).2 == .none
+      && ((forwardHold withA { ok with sourcePods := some [pr "s0" "duplicate", pr "s1" "forward"] }).getD "").startsWith "switch precondition")
+  check ctx "Forwarding: forward RENDERED but a pod still applies duplicate (mixed modes) / forwards in flight / unreadable → stays Forwarding"
+    ((migStep withA .Forwarding { ok with sourceForwardApplied := true, sourcePods := some [pr "s0" "forward", pr "s1" "duplicate"] }).1 == .Forwarding
+      && (migStep withA .Forwarding { ok with sourceForwardApplied := true, sourcePods := some [pr "s0" "forward", pr "s1" "forward" (settled := false)] }).1 == .Forwarding
+      && (migStep withA .Forwarding { ok with sourceForwardApplied := true, sourcePods := none }).1 == .Forwarding
+      && ((forwardAppliedHold withA { ok with sourceForwardApplied := true, sourcePods := some [pr "s0" "forward", pr "s1" "duplicate"] }).getD "").startsWith "forward mode is rendered but not yet applied")
+  let statsReply := "STAT cluster_replication on\r\nSTAT cluster_replication_mode forward\r\nSTAT cluster_replication[forward_enqueued] 10\r\nSTAT cluster_replication[forward_applied] 7\r\nSTAT cluster_replication[forward_noop_delete_not_found] 1\r\nSTAT cluster_replication[forward_failed_set_server_error] 1\r\nSTAT cluster_replication[forward_dropped_down] 1\r\nEND\r\n"
+  check ctx "podReplOf: applied mode and settled = enqueued ≤ applied + noop + missing + failed + dropped; incomplete reply → unreadable"
+    (podReplOf "s0" statsReply == some (pr "s0" "forward")
+      && podReplOf "s0" (statsReply.replace "forward_applied] 7" "forward_applied] 6") == some (pr "s0" "forward" (settled := false))
+      && podReplOf "s0" (statsReply.replace "END\r\n" "") == none
+      && podReplOf "s0" "STAT cluster_replication off\r\nEND\r\n" == some (pr "s0" "" (rep := false)))
   -- loss over the whole attempt
   check ctx "migration loss: unchanged counters over the attempt → clean"
     (lossVerdict base (some done) == .clean)

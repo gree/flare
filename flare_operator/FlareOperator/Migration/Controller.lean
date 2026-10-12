@@ -228,6 +228,24 @@ def clusterIdents (cluster ns : String) : IO (Option (List NodeIdent × Nat)) :=
     | some (n, t) => out := out ++ [n]; now := max now t
   return some (out, now)
 
+/-- Every source pod's APPLIED replication state (any role: forward mode acts
+    on the pod a client connects to). `none` if the list fails, is empty, or
+    any pod's stats are unreadable or incomplete. -/
+def sourcePodsRepl (crName ns : String) : IO (Option (List PodRepl)) := do
+  match ← listFlaredPodsE crName ns with
+  | .error _ => return none
+  | .ok pods =>
+    if pods.isEmpty then return none
+    let mut out : List PodRepl := []
+    for p in pods do
+      match ← queryPodStats p.name ns "stats" with
+      | .error _ => return none
+      | .ok reply =>
+        match podReplOf p.name reply with
+        | none => return none
+        | some r => out := out ++ [r]
+    return some out
+
 /-- Counters of every source partition master; `none` if any is unreadable
     or there is no master. -/
 def sourceCounters (crName ns : String) : IO (Option (List SrcCounters)) := do
@@ -250,6 +268,7 @@ def gatherObs (mig : MigCR) (crName ns : String) : IO (MigObs × Option (List Sr
   let idents? := mig.phase == .Duplicating || mig.phase == .Forwarding
   let srcId ← if idents? then clusterIdents crName ns else pure none
   let dstId ← if idents? then clusterIdents mig.spec.target.name ns else pure none
+  let srcPods ← if idents? then sourcePodsRepl crName ns else pure none
   let forwardApplied ← do
     match ← readFlaredExtraConf crName ns with
     | .ok conf => pure (containsSubstr conf "cluster-replication-mode = forward")
@@ -264,6 +283,7 @@ def gatherObs (mig : MigCR) (crName ns : String) : IO (MigObs × Option (List Sr
     loss := lossVerdict baseline counters
     attemptId := mig.attemptId
     consumedApproval := mig.consumedApproval
+    sourcePods := srcPods
     srcIdent := srcId.map (·.1)
     dstIdent := dstId.map (·.1)
     now := srcId.map (·.2)

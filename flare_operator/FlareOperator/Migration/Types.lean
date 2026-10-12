@@ -247,6 +247,56 @@ def NodeIdent.parse (s : String) : Option NodeIdent :=
     some { pod, podUid := uid, boot := b, masterId := mid, copyId := copy, epoch := ep, seq }
   | _ => none
 
+/-- One source pod's APPLIED cluster-replication state, read live from its
+    stats (not the rendered config). Forward mode acts on the pod a client
+    connects to, whatever its role (cluster_replication.cc on_pre_proxy_*),
+    so EVERY source pod counts, not only the masters. -/
+structure PodRepl where
+  pod : String
+  replicating : Bool
+  /-- `cluster_replication_mode` ("duplicate" / "forward"; "" if absent) -/
+  mode : String
+  /-- every asynchronous (duplicate-mode) forward this process enqueued has
+      a terminal outcome: forward_enqueued ≤ applied + noop + missing +
+      failed + dropped (abandoned / down / unknown op) -/
+  settled : Bool
+  deriving Repr, BEq
+
+/-- The pure part of `sourcePodsRepl`: one pod's stats reply → its applied
+    replication state. `none` when the reply is incomplete (no END). -/
+def podReplOf (pod : String) (out : String) : Option PodRepl :=
+  let lines := (out.splitOn "\n").map (fun l => l.trim.replace "\r" "")
+  if !lines.contains "END" then none
+  else
+    let stat := fun (name : String) => lines.findSome? fun t =>
+      if t.startsWith s!"STAT {name} " then some (t.drop s!"STAT {name} ".length).trim else none
+    let counter := fun (pred : String → Bool) => lines.foldl (fun acc t =>
+      if t.startsWith "STAT cluster_replication[" then
+        let inner := ((t.drop "STAT cluster_replication[".length).splitOn "]").headD ""
+        let v := ((t.splitOn " ").getLast?.bind (·.toNat?)).getD 0
+        if pred inner then acc + v else acc
+      else acc) 0
+    let enqueued := counter (· == "forward_enqueued")
+    let settled := counter fun i =>
+      i == "forward_applied" || i.startsWith "forward_noop_" || i.startsWith "forward_missing_"
+        || i.startsWith "forward_failed_" || i == "forward_dropped_abandoned"
+        || i == "forward_dropped_down" || i == "forward_dropped_unknown_op"
+    some { pod, replicating := stat "cluster_replication" == some "on"
+           mode := (stat "cluster_replication_mode").getD "", settled := enqueued ≤ settled }
+
+/-- Why the source pods do not all apply `want` with nothing in flight
+    (`none` = they do). Unreadable or empty = held (fail closed). -/
+def podsHold (want : String) : Option (List PodRepl) → Option String
+  | none => some "a source pod's live replication state is unreadable (fail closed)"
+  | some [] => some "no source pod listed"
+  | some ps =>
+    match ps.find? (fun p => !p.replicating || p.mode != want) with
+    | some p => some s!"source pod {p.pod} applies {if p.replicating then (if p.mode.isEmpty then "an unreported mode" else p.mode) else "no replication"}; every source pod must apply {want}"
+    | none =>
+      match ps.find? (fun p => !p.settled) with
+      | some p => some s!"source pod {p.pod} still has asynchronous forwards in flight (forward_enqueued above its settled outcomes)"
+      | none => none
+
 /-- One tick's worth of world state, gathered by the IO layer. -/
 structure MigObs where
   /-- Target FlareCluster exists AND its node map shows every partition with
@@ -284,6 +334,9 @@ structure MigObs where
       already issued with (recorded in the same status patch as the
       switch). Empty = none used. -/
   consumedApproval : String := ""
+  /-- Every source pod's APPLIED replication state, read live this tick
+      (`none` = a pod unreadable or the list failed). -/
+  sourcePods : Option (List PodRepl) := none
   deriving Repr, BEq
 
 /-- Convergence dwell: how many consecutive converged ticks are required
@@ -376,15 +429,20 @@ def forwardHold (spec : MigSpec) (obs : MigObs) : Option String :=
           ++ s!"counts, seed and loss counters satisfied — NOT a verification: stop writes, run V for attempt {obs.attemptId} and set spec.forwardApproval to the approval line it prints for a MATCH")
       else if !obs.consumedApproval.isEmpty && spec.forwardApproval.trim == obs.consumedApproval.trim then
         some "forwardApproval refused: this approval was already used for a forward switch (one use)"
-      else (approvalHold spec.forwardApproval obs).map ("forwardApproval refused: " ++ ·)
+      else match approvalHold spec.forwardApproval obs with
+        | some w => some ("forwardApproval refused: " ++ w)
+        | none => (podsHold "duplicate" obs.sourcePods).map
+            ("switch precondition (every source pod in duplicate mode, nothing in flight): " ++ ·)
 
 /-- Why Forwarding may not advance to AwaitingCutover: forward mode not yet
     applied, or the approval no longer matches the live masters after the
     apply (a write in the switch window). -/
 def forwardAppliedHold (spec : MigSpec) (obs : MigObs) : Option String :=
   if !obs.sourceForwardApplied then some "the source has not applied forward mode yet"
-  else (approvalHold spec.forwardApproval obs).map
-    ("after the forward apply the approval no longer matches (keep writes stopped; re-run V and set a new forwardApproval): " ++ ·)
+  else match podsHold "forward" obs.sourcePods with
+    | some w => some ("forward mode is rendered but not yet applied by every source pod (mixed modes: keep writes stopped): " ++ w)
+    | none => (approvalHold spec.forwardApproval obs).map
+        ("after the forward apply the approval no longer matches (keep writes stopped; re-run V and set a new forwardApproval): " ++ ·)
 
 /-! ## Actions -/
 
@@ -493,7 +551,8 @@ theorem migStep_no_abort_after_forward (spec : MigSpec) (phase : MigPhase) (obs 
 theorem forwardHold_none (spec : MigSpec) (obs : MigObs) (h : forwardHold spec obs = none) :
     approvalHold spec.forwardApproval obs = none ∧ obs.seedCompleted = true ∧ obs.loss = .clean ∧
       convergenceDwellTicks ≤ obs.convergedTicks ∧
-      ¬ (obs.consumedApproval.isEmpty = false ∧ spec.forwardApproval.trim = obs.consumedApproval.trim) := by
+      ¬ (obs.consumedApproval.isEmpty = false ∧ spec.forwardApproval.trim = obs.consumedApproval.trim) ∧
+      podsHold "duplicate" obs.sourcePods = none := by
   unfold forwardHold at h
   split at h
   · simp at h
@@ -509,7 +568,11 @@ theorem forwardHold_none (spec : MigSpec) (obs : MigObs) (h : forwardHold spec o
         · split at h
           · simp at h
           · rename_i hcons
-            refine ⟨by simpa using h, by simpa using hs, hl, by omega, by simpa using hcons⟩
+            split at h
+            · simp at h
+            · rename_i ha
+              refine ⟨ha, by simpa using hs, hl, by omega, by simpa using hcons, ?_⟩
+              cases hp : podsHold "duplicate" obs.sourcePods <;> simp_all
 
 /-- The approval check passes only for a parsed MATCH line whose binding
     names this tick's attempt and equals the live masters. -/
@@ -541,7 +604,8 @@ theorem migStep_forward_requires_approval_and_evidence (spec : MigSpec) (phase :
     (obs : MigObs) (h : (migStep spec phase obs).2 = .switchForward) :
     approvalHold spec.forwardApproval obs = none ∧ obs.seedCompleted = true ∧ obs.loss = .clean ∧
       convergenceDwellTicks ≤ obs.convergedTicks ∧
-      ¬ (obs.consumedApproval.isEmpty = false ∧ spec.forwardApproval.trim = obs.consumedApproval.trim) := by
+      ¬ (obs.consumedApproval.isEmpty = false ∧ spec.forwardApproval.trim = obs.consumedApproval.trim) ∧
+      podsHold "duplicate" obs.sourcePods = none := by
   apply forwardHold_none
   by_cases hp : spec.paused
   · simp [migStep, hp] at h
@@ -554,7 +618,8 @@ theorem migStep_forward_requires_approval_and_evidence (spec : MigSpec) (phase :
     write, restart or re-seed in the switch window). -/
 theorem migStep_awaitingCutover_rechecks_approval (spec : MigSpec) (obs : MigObs)
     (h : (migStep spec .Forwarding obs).1 = .AwaitingCutover) :
-    spec.paused = false ∧ obs.sourceForwardApplied = true ∧ approvalHold spec.forwardApproval obs = none := by
+    spec.paused = false ∧ obs.sourceForwardApplied = true ∧ podsHold "forward" obs.sourcePods = none ∧
+      approvalHold spec.forwardApproval obs = none := by
   by_cases hp : spec.paused
   · simp [migStep, hp] at h
   · simp [migStep, hp, MigPhase.abortRefused] at h
@@ -564,8 +629,11 @@ theorem migStep_awaitingCutover_rechecks_approval (spec : MigSpec) (obs : MigObs
       split at hf
       · simp at hf
       · rename_i hs
-        refine ⟨by simpa using hp, by simpa using hs, ?_⟩
-        cases hh : approvalHold spec.forwardApproval obs <;> simp_all
+        split at hf
+        · simp at hf
+        · rename_i hpods
+          refine ⟨by simpa using hp, by simpa using hs, hpods, ?_⟩
+          cases hh : approvalHold spec.forwardApproval obs <;> simp_all
     · simp at h
 
 end FlareOperator.Migration

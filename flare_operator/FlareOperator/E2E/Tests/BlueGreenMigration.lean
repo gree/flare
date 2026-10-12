@@ -27,6 +27,7 @@
 import FlareOperator.E2E.Framework
 import FlareOperator.E2E.Helpers
 import FlareOperator.E2E.Setup
+import FlareOperator.Migration.Types
 
 namespace FlareOperator.E2E.Tests.BlueGreenMigration
 
@@ -46,7 +47,16 @@ private def cfg : ClusterConfig := {
   -- the migration target copies the source CR's spec.rocksdb: the rebuild
   -- reserve must be in the CR, or the target's staged rebuilds stop
   reserveInCr := true
+  -- test seams for the switch window (review 2026-10-12): one source pod
+  -- keeps its replication mode on reload while its file exists; the
+  -- operator stops between the switch's CR patch and its status patch
+  flaredEnv := [("FLARE_TEST_RELOAD_REPL_HOLD_FILE", "/tmp/repl-hold")]
+  operatorEnv := [("FLARE_TEST_MIG_WEDGE_AFTER_SWITCH_FILE", "/tmp/mig-wedge")]
 }
+
+/-- The source pod held in duplicate mode through the switch (any role:
+    forward acts on the pod a client connects to). -/
+private def heldPod : String := s!"{cfg.name}-nodes-1"
 
 private def targetName : String := "bg-tgt"
 private def migName : String := "shrink-2p-to-1p"
@@ -166,6 +176,44 @@ private def patchApproval (line : String) : IO (Except String String) :=
   kubectlPatch "flaremigration" migName cfg.«namespace»
     s!"\{\"spec\":\{\"forwardApproval\":{(Lean.Json.str line).compress}}}"
 
+private def operatorPods : IO (List String) := do
+  match ← kubectl ["get", "pods", "-n", cfg.«namespace», "-l", s!"app={cfg.operatorName}",
+                   "-o", "jsonpath={range .items[*]}{.metadata.name} {.metadata.deletionTimestamp} {.status.phase}{\"\\n\"}{end}"] with
+  | .ok out =>
+    -- running and not being deleted
+    return (out.splitOn "\n").filterMap fun l =>
+      match (l.trim.splitOn " ").filter (!·.isEmpty) with
+      | [n, "Running"] => some n
+      | _ => none
+  | .error _ => return []
+
+private def opExec (cmd : String) : IO (Except String String) := do
+  match (← operatorPods).head? with
+  | none => return .error "no running operator pod"
+  | some pod => kubectl ["exec", "-n", cfg.«namespace», pod, "--", "sh", "-c", cmd]
+
+private def opLogs (pod : String) : IO String := do
+  match ← kubectl ["logs", "-n", cfg.«namespace», pod, "--tail=-1"] with
+  | .ok o => return o
+  | .error _ => return ""
+
+private def podStats (pod : String) : IO (Except String String) := do
+  let some ip ← getPodIp pod cfg.«namespace» | return .error s!"no IP for {pod}"
+  execInDebugPod cfg.debugPod cfg.«namespace» s!"printf 'stats\\r\\n' | nc -w 3 {ip} {cfg.flarePort}"
+
+/-- Every source pod's reply through the operator's own strict reader. -/
+private def sourceRepl : IO (List (String × Except String Migration.PodRepl)) := do
+  let pods ← getPodNames s!"app=flare,cluster={cfg.name}" cfg.«namespace»
+  pods.mapM fun p => do
+    match ← podStats p with
+    | .error e => return (p, .error s!"stats failed: {e}")
+    | .ok out => return (p, Migration.podReplParse p out)
+
+private def showRepl (rs : List (String × Except String Migration.PodRepl)) : String :=
+  ", ".intercalate (rs.map fun (p, r) => match r with
+    | .ok x => s!"{p}: on={x.replicating} mode={x.mode} in_flight={x.inFlight} enqueued={x.enqueued} terminal={x.terminal}"
+    | .error e => s!"{p}: NOT TRUSTED ({e})")
+
 /-- Held in Duplicating with a message containing `needle`, for 20 s. -/
 private def heldWith (needle : String) (timeout : Nat := 60) : IO (Option String) := do
   let seen ← waitForCondition s!"held: {needle}" timeout do
@@ -279,7 +327,7 @@ def suite : TestSuite := {
           | some why => return .fail why
           | none => return .pass },
 
-    { name := "a fresh MATCH naming ANOTHER attempt is refused; the same MATCH for this attempt switches the source to forward (AwaitingCutover)"
+    { name := "a fresh MATCH naming ANOTHER attempt is refused; every source pod's real stats pass the gate's strict reader (nothing in flight); the same MATCH for this attempt issues the switch (operator wedged after the CR patch: status still Duplicating)"
       run := do
         -- let the extra write reach the target and the counts settle
         IO.sleep 15000
@@ -294,11 +342,103 @@ def suite : TestSuite := {
           | .error e => return .fail s!"patch failed: {e}"
           | .ok _ => pure ()
           if let some why ← heldWith "another attempt" then return .fail why
+          -- before the switch: every source pod's REAL reply passes the
+          -- gate's strict reader (gauge present, counters numeric/known,
+          -- no name twice) and shows nothing in flight
+          let pre ← sourceRepl
+          IO.eprintln s!"# source pods before the switch: {showRepl pre}"
+          if pre.isEmpty then return .fail "no source pods listed"
+          if pre.any (fun (_, r) => match r with | .ok x => !x.settled || x.mode != "duplicate" | .error _ => true) then
+            return .fail s!"precondition: a source pod is not trusted, not duplicate or not drained: {showRepl pre}"
+          -- arm the switch-window seams: heldPod keeps duplicate on reload;
+          -- the operator stops after the switch's CR patch
+          if let .error e ← kubectl ["exec", "-n", cfg.«namespace», heldPod, "-c", "flared", "--", "sh", "-c", "touch /tmp/repl-hold"] then
+            return .fail s!"could not arm the reload hold on {heldPod}: {e}"
+          if let .error e ← opExec "touch /tmp/mig-wedge" then
+            return .fail s!"could not arm the operator wedge: {e}"
           match ← patchApproval approval with
           | .error e => return .fail s!"patch failed: {e}"
           | .ok _ => pure ()
-          if ← waitForPhase "AwaitingCutover" 300 then return .pass
-          else return .fail s!"never reached AwaitingCutover (phase={← migPhase}): {← migField "{.status.message}"}" },
+          let some op0 := (← operatorPods).head? | return .fail "no operator pod"
+          let wedged ← waitForCondition "operator wedged after the switch CR patch" 300 do
+            return containsSubstr (← opLogs op0) "TEST SEAM: wedged after the forward switch CR patch"
+          let mode ← kubectlGetJsonpath "flarecluster" cfg.name cfg.«namespace» "{.spec.clusterReplication.mode}"
+          let ph ← migPhase
+          IO.eprintln s!"# wedged={wedged}; source CR mode {repr mode}; status phase {ph}; message {← migField "{.status.message}"}"
+          if !wedged then return .fail s!"the switch was never issued (phase {ph}): {← migField "{.status.message}"}"
+          match mode with
+          | .ok m => if m.trim != "forward" then return .fail s!"wedged but the source CR says mode {m.trim}"
+          | .error e => return .fail s!"source CR mode unreadable: {e}"
+          if ph != "Duplicating" then return .fail s!"precondition: the status was already written (phase {ph})"
+          return .pass },
+
+    -- an operator crash between the CR patch and the status patch, with an
+    -- abort requested meanwhile: the CR already says forward, clients may
+    -- already be on the target — deleting the target would lose writes
+    { name := "operator replaced between the switch's CR patch and its status patch, abort set meanwhile: abort REFUSED, the new operator follows to Forwarding without re-issuing the switch; the target survives"
+      run := do
+        match ← kubectlPatch "flaremigration" migName cfg.«namespace» "{\"spec\":{\"abort\":true}}" with
+        | .error e => return .fail s!"abort patch failed: {e}"
+        | .ok _ => pure ()
+        let ph0 ← migPhase
+        if ph0 != "Duplicating" then return .fail s!"precondition: phase {ph0} before the operator was replaced"
+        let some op0 := (← operatorPods).head? | return .fail "no operator pod"
+        let _ ← kubectl ["delete", "pod", op0, "-n", cfg.«namespace», "--wait=false"]
+        let followed ← waitForCondition "phase Forwarding under the new operator" 300 do
+          let p ← migPhase
+          return p == "Forwarding" || p == "Aborting" || p == "Aborted"
+        let ph ← migPhase
+        let msg ← migField "{.status.message}"
+        let ops ← operatorPods
+        let newLogs ← ops.foldlM (fun acc p => do return acc ++ (← opLogs p)) ""
+        IO.eprintln s!"# after the replacement: phase {ph}; message {msg}; consumed {← migField "{.status.consumedApproval}"}; operator pods {ops}"
+        if !followed then return .fail s!"the new operator did not move the phase in 300 s (phase {ph}): {msg}"
+        if ph != "Forwarding" then return .fail s!"phase {ph}: the abort was honored after the switch"
+        if ops.contains op0 then return .fail s!"the wedged operator {op0} is still the one running"
+        if containsSubstr newLogs "source switched to mode=forward" then
+          return .fail "the new operator RE-ISSUED the switch"
+        -- 30 s more with abort still set: never Aborting, target intact
+        IO.sleep 30000
+        let ph2 ← migPhase
+        if ph2 != "Forwarding" then return .fail s!"left Forwarding with abort set: {ph2} ({← migField "{.status.message}"})"
+        if !containsSubstr (← migField "{.status.message}") "abort REFUSED" then
+          return .fail s!"no abort refusal in the status: {← migField "{.status.message}"}"
+        match ← kubectlGetJsonpath "statefulset" s!"{targetName}-nodes" cfg.«namespace» "{.metadata.name}" with
+        | .error _ => return .fail "the target StatefulSet is gone"
+        | .ok _ => pure ()
+        match ← kubectlPatch "flaremigration" migName cfg.«namespace» "{\"spec\":{\"abort\":false}}" with
+        | .error e => return .fail s!"clearing abort failed: {e}"
+        | .ok _ => return .pass },
+
+    -- the switch window: pods apply the new mode one by one; one that has
+    -- not is a client-visible duplicate-mode pod behind a "switched" source
+    { name := "mixed modes: with one source pod still applying duplicate, the migration holds in Forwarding (never AwaitingCutover); released, it reaches AwaitingCutover"
+      run := do
+        let others ← waitForCondition "every other source pod applies forward" 240 do
+          let rs ← sourceRepl
+          return !rs.isEmpty && rs.all fun (p, r) => match r with
+            | .ok x => if p == heldPod then x.mode == "duplicate" else x.mode == "forward"
+            | .error _ => false
+        let rs ← sourceRepl
+        IO.eprintln s!"# mixed: {showRepl rs}"
+        if !others then return .fail s!"no mixed state: {showRepl rs}"
+        let held ← waitForCondition s!"status names {heldPod} applying duplicate" 120 do
+          return containsSubstr (← migField "{.status.message}") s!"source pod {heldPod} applies duplicate"
+        if !held then return .fail s!"the hold does not name {heldPod}: {← migField "{.status.message}"} (phase {← migPhase})"
+        -- 45 s: the mixed state stays held
+        IO.sleep 45000
+        let ph ← migPhase
+        if ph != "Forwarding" then return .fail s!"advanced with {heldPod} still in duplicate: {ph}"
+        let rs2 ← sourceRepl
+        if !(rs2.any fun (p, r) => p == heldPod && (match r with | .ok x => x.mode == "duplicate" | .error _ => false)) then
+          return .fail s!"{heldPod} left duplicate while held: {showRepl rs2}"
+        -- release: the operator's drift re-SIGHUP applies forward on it
+        if let .error e ← kubectl ["exec", "-n", cfg.«namespace», heldPod, "-c", "flared", "--", "sh", "-c", "rm -f /tmp/repl-hold"] then
+          return .fail s!"could not release {heldPod}: {e}"
+        if ← waitForPhase "AwaitingCutover" 300 then
+          IO.eprintln s!"# released: {showRepl (← sourceRepl)}"
+          return .pass
+        else return .fail s!"never reached AwaitingCutover (phase={← migPhase}): {← migField "{.status.message}"}" },
 
     { name := "every key re-hashed into the 1-partition target (master AND slave)"
       run := do

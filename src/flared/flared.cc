@@ -27,6 +27,7 @@
  *	$Id$
  */
 #include <cstring>
+#include <sys/stat.h>
 #include "signal_interrupt.h"
 #include "flared.h"
 #include "connection_tcp.h"
@@ -606,6 +607,21 @@ int flared::reload() {
 	}
 
 	// cluster replication
+	// TEST SEAM (E2E only, review 2026-10-12): while the file named by
+	// FLARE_TEST_RELOAD_REPL_HOLD_FILE exists, a reload leaves THIS pod's
+	// cluster replication exactly as it is — one pod of a source keeps the
+	// old mode while the others switch, the mixed-mode window of a forward
+	// switch made deterministic (ConfigMap propagation per pod otherwise).
+	{
+		const char* hold = getenv("FLARE_TEST_RELOAD_REPL_HOLD_FILE");
+		struct stat hsb;
+		if (hold != NULL && hold[0] != '\0' && stat(hold, &hsb) == 0) {
+			log_warning("reload: cluster replication left unchanged (mode %s): held by FLARE_TEST_RELOAD_REPL_HOLD_FILE (test seam)",
+					cluster_replication::mode_cast(this->_cluster_replication->get_mode()).c_str());
+			log_notice("process successfully reloaded", 0);
+			return 0;
+		}
+	}
 	cluster_replication::mode m = cluster_replication::mode_duplicate;
 	if (cluster_replication::mode_cast(ini_option_object().get_cluster_replication_mode(), m) >= 0) {
 		this->_cluster_replication->set_mode(m);

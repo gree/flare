@@ -167,6 +167,21 @@ def suite : TestSuite := {
                       "{.status.readyReplicas}" with
             | .ok val => return (val.toNat?.getD 0 >= numPods)
             | .error _ => return false
+        -- T24 evidence on EVERY run, pass or fail (review 2026-10-12: the
+        -- failing run predates the resolved-IP log and later runs dumped
+        -- flared logs only on failure, so no resolved address was ever
+        -- recorded): each pod's connect failures with the address they
+        -- resolved to, its rebuild parks, and the pod IPs to compare with
+        for pod in allPods do
+          match ← kubectl ["logs", pod, "-n", cfg.«namespace», "-c", "flared", "--tail=-1"] with
+          | .ok log =>
+            let hits := (log.splitOn "\n").filter fun l =>
+              containsSubstr l "(resolved " || containsSubstr l "rebuild_blocked" || containsSubstr l "source_size_unknown"
+            IO.eprintln s!"# T24 evidence {pod}: {hits.length} line(s){String.join ((hits.take 20).map ("\n#   " ++ ·))}"
+          | .error e => IO.eprintln s!"# T24 evidence {pod}: logs unreadable ({e})"
+          match ← getPodIp pod cfg.«namespace» with
+          | some ip => IO.eprintln s!"# T24 evidence pod IP of {pod}: {ip}"
+          | none => pure ()
         if !recovered then
           -- T24 (CI 38186142795): which address each pod's resolver gives for
           -- every pod name right now (a stale answer vs a path drop)

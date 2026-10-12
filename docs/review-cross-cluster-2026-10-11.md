@@ -1086,7 +1086,36 @@ possible. That is the user's decision; nothing is implemented.
        The wait is now 180 s.
   - The guarded stalled-reader cut and the crash cleanup are therefore NOT
     yet shown in E2E.
-- E2E 38198924465 (975c217, which also carries 655faa1/f5fd22b): pending.
+- E2E 38198924465 (975c217, which also carries 655faa1/f5fd22b, c989c02 and
+  0b8c976): **success**, 30/30 executed passes and 0 skips.
+  - backup-restore 4/4. T24 did not recur, which does not close T24.
+  - per-key-only 5/5.
+  - v-capture-resources 7/7:
+    - stalled reader: 40000/40000 STORED in batches (21.9 s). The capture
+      was cut with `aborted:no_progress` about 41 s after it started, while
+      the reader was still connected. That is the 30 s progress bound plus
+      the time for the socket buffers to fill. The slot was released and
+      the directory removed.
+    - kill -9 mid-capture (PVC): serving true and 1 directory during the
+      capture; after the restart, 0 directories and curr_items 49000 →
+      49000.
+    - no_space: `capture_refused no_space` with no pin and no directory.
+    - deadline 10 s: cut after about 15 s (`aborted:deadline`).
+    - disconnect: cut about 10 s after the reader left (`aborted:write`).
+    - load: 3000 sets took 2152 ms without a capture and 2198 ms with one.
+      This is one pod and one sample, not a capacity figure.
+  - blue-green 14/14:
+    - the stale MATCH is refused;
+    - the attempt-bound MATCH switches the source, and AwaitingCutover is
+      reached with the per-pod applied-mode gate (G1) in force;
+    - cutover, retire and abort pass.
+  - Not shown in E2E:
+    - G1's mixed-mode hold;
+    - the forwardSeen follow (f5fd22b). Both are covered by units and
+      proofs only.
+  - Observed, not new: in test 10 the ordinary reseed serve (not a
+    capture) released its slot about 52 s after its reader left. Reseed
+    serves stay without the capture bounds (residual).
 
 ## UNKNOWN
 

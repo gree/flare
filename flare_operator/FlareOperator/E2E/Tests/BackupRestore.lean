@@ -36,9 +36,9 @@ private def cfg : ClusterConfig := {
   debugPod := "debug-backup-restore"
   storageBackend := "rocksdb"
   usePvc := true
-  -- T24 reproduction (test 5): a stop point right before the staged
+  -- T24 reproduction (test 4): a stop point right before the staged
   -- rebuild's size probe; the file is on the PVC, so it survives the
-  -- recreation, and is absent in tests 1-4
+  -- recreation, and is absent in tests 1-3
   flaredEnv := [("FLARE_TEST_STAGED_PROBE_HOLD_FILE", "/data/flare/t24-probe-hold")]
 }
 
@@ -190,70 +190,14 @@ def suite : TestSuite := {
             | some v => return .fail s!"expected {keyPrefix}_0 gone after flush_all, still reads '{v}'"
             | none => return .pass },
 
-    -- Test 4: the actual restore — marker + pod deletion; the startup hook
-    -- swaps the checkpoint in. Then EVERY key must read back exactly.
-    { name := s!"all {totalKeys} keys restored from checkpoint after pod recreation"
-      run := do
-        for pod in allPods do
-          match ← kubectl ["exec", pod, "-n", cfg.«namespace», "--", "sh", "-c",
-                            s!"echo {dataDir}/backups/{backupName} > {dataDir}/RESTORE"] with
-          | .ok _ => pure ()
-          | .error e => return .fail s!"failed to write RESTORE marker on {pod}: {e}"
-        -- T24: the addresses BEFORE the recreation, to tell a stale answer
-        -- (an old pod IP) from any other address (38215512251: nodes-1
-        -- resolved nodes-0 to 10.244.0.20 while nodes-0 was at .23)
-        for pod in allPods do
-          match ← getPodIp pod cfg.«namespace» with
-          | some ip => IO.eprintln s!"# T24 evidence pod IP BEFORE recreation of {pod}: {ip}"
-          | none => pure ()
-        let _ ← kubectl (["delete", "pod"] ++ allPods ++
-                         ["-n", cfg.«namespace», "--force", "--grace-period=0"])
-        let recovered ← waitForCondition "cluster recovered after restore" 180 do
-          match ← currentP0Master with
-          | none => return false
-          | some _ =>
-            match ← kubectlGetJsonpath "statefulset" s!"{cfg.name}-nodes" cfg.«namespace»
-                      "{.status.readyReplicas}" with
-            | .ok val => return (val.toNat?.getD 0 >= numPods)
-            | .error _ => return false
-        -- T24 evidence on EVERY run, pass or fail (review 2026-10-12: the
-        -- failing run predates the resolved-IP log and later runs dumped
-        -- flared logs only on failure, so no resolved address was ever
-        -- recorded): each pod's connect failures with the address they
-        -- resolved to, its rebuild parks, and the pod IPs to compare with
-        for pod in allPods do
-          match ← kubectl ["logs", pod, "-n", cfg.«namespace», "-c", "flared", "--tail=-1"] with
-          | .ok log =>
-            let hits := (log.splitOn "\n").filter fun l =>
-              containsSubstr l "(resolved " || containsSubstr l "rebuild_blocked" || containsSubstr l "source_size_unknown"
-            IO.eprintln s!"# T24 evidence {pod}: {hits.length} line(s){String.join ((hits.take 20).map ("\n#   " ++ ·))}"
-          | .error e => IO.eprintln s!"# T24 evidence {pod}: logs unreadable ({e})"
-          match ← getPodIp pod cfg.«namespace» with
-          | some ip => IO.eprintln s!"# T24 evidence pod IP of {pod}: {ip}"
-          | none => pure ()
-        if !recovered then
-          -- T24 (CI 38186142795): which address each pod's resolver gives for
-          -- every pod name right now (a stale answer vs a path drop)
-          for pod in allPods do
-            for target in allPods do
-              let fqdn := s!"{target}.{cfg.name}-nodes.{cfg.«namespace»}.svc.cluster.local"
-              match ← kubectl ["exec", pod, "-n", cfg.«namespace», "--", "sh", "-c",
-                                s!"for i in 1 2 3 4 5; do getent ahostsv4 {fqdn} | awk 'NR==1\{print $1}'; done | tr '\\n' ' '"] with
-              | .ok out => IO.eprintln s!"# resolve from {pod}: {target} -> {out.trim}"
-              | .error e => IO.eprintln s!"# resolve from {pod}: {target} failed: {e}"
-            match ← getPodIp pod cfg.«namespace» with
-            | some ip => IO.eprintln s!"# pod IP of {pod}: {ip}"
-            | none => pure ()
-          return .fail "cluster did not recover within 180s after restore"
-        match ← currentP0Master with
-        | none => return .fail "no P0 master after restore"
-        | some masterPod =>
-          IO.eprintln s!"# P0 master after restore: {masterPod}"
-          match ← getPodIp masterPod cfg.«namespace» with
-          | none => return .fail s!"could not get IP for {masterPod}"
-          | some ip => assertAllKeysSurvive ip },
-
-    -- Test 5 (T24, review 2026-10-12 round 8): a CONTROLLED reproduction of
+    -- Test 4: the restore (marker + pod deletion; the startup hook swaps
+    -- the checkpoint in, every key must read back) WITH T24 reproduced in it.
+    -- E2E 38250389416 ran the reproduction as a SECOND restore after this
+    -- one: the history had moved on, so the operator rightly promoted
+    -- neither copy ("partition 0 has NO master … unfit … waiting for the
+    -- ex-master") and no staged rebuild started — a test design error. The
+    -- first restore is the flow T24 happened in.
+    -- (T24, review 2026-10-12 round 8): a CONTROLLED reproduction of
     -- what T24 showed — the replica's WAL-sync lookups reach the current
     -- master, but the staged rebuild's size probe makes its own lookup and
     -- gets an address that black-holes. The stop point holds the attempt
@@ -264,7 +208,7 @@ def suite : TestSuite := {
     -- identity and history checks (no address pinned, nothing skipped),
     -- within 120 s after the stale answers end — not after the operator's
     -- 5 min resume backoff of a parked rebuild.
-    { name := "T24 reproduction: the size probe's own lookup returns a black-holed address for 40 s while the attempt's other lookups stay current — the replica is rebuilt from the current master (identity and history checked) within 120 s after the stale answers end"
+    { name := s!"restore: all {totalKeys} keys back after pod recreation, with T24 reproduced: the size probe's own lookup returns a black-holed address for 40 s while the attempt's other lookups stay current — the replica is rebuilt from the current master (identity and history checked) within 120 s after the stale answers end"
       run := do
         for pod in allPods do
           match ← t24Sh pod s!"echo {dataDir}/backups/{backupName} > {dataDir}/RESTORE && touch {t24Hold}" with

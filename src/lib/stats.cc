@@ -81,6 +81,7 @@ stats::stats():
 	pthread_mutex_init(&this->_mutex_diag, NULL);
 	pthread_mutex_init(&this->_mutex_crepl, NULL);
 	this->_crepl_seed_state = "none";
+	this->_crepl_in_flight = 0;
 	this->_diag_enabled = getenv("FLARE_TEST_FORWARD_DIAG") != NULL;
 	pthread_mutex_init(&this->_mutex_reconstruction, NULL);
 	pthread_mutex_init(&this->_mutex_follow, NULL);
@@ -388,6 +389,28 @@ void stats::crepl_incr(const string& name) {
 map<string, uint64_t> stats::get_crepl() {
 	pthread_mutex_lock(&this->_mutex_crepl);
 	map<string, uint64_t> r = this->_crepl;
+	pthread_mutex_unlock(&this->_mutex_crepl);
+	return r;
+}
+
+void stats::crepl_in_flight_add() {
+	pthread_mutex_lock(&this->_mutex_crepl);
+	this->_crepl_in_flight++;
+	pthread_mutex_unlock(&this->_mutex_crepl);
+}
+
+void stats::crepl_in_flight_sub() {
+	pthread_mutex_lock(&this->_mutex_crepl);
+	if (this->_crepl_in_flight > 0) {
+		this->_crepl_in_flight--;
+	}
+	pthread_mutex_unlock(&this->_mutex_crepl);
+}
+
+map<string, uint64_t> stats::get_crepl_snapshot(uint64_t& in_flight) {
+	pthread_mutex_lock(&this->_mutex_crepl);
+	map<string, uint64_t> r = this->_crepl;
+	in_flight = this->_crepl_in_flight;
 	pthread_mutex_unlock(&this->_mutex_crepl);
 	return r;
 }

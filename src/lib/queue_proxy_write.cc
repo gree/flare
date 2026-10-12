@@ -65,13 +65,31 @@ queue_proxy_write::queue_proxy_write(cluster* cl, storage* st, vector<string> pr
 		_result_message(""),
 		_post_proxy(false),
 		_generic_value(0),
-		_foreign(false) {
+		_foreign(false),
+		_in_flight(false) {
 }
 
 /**
  *	dtor for queue_proxy_write
  */
 queue_proxy_write::~queue_proxy_write() {
+	if (this->_in_flight) {
+		stats_object->crepl_in_flight_sub();
+	}
+}
+
+/**
+ *	Count this asynchronous cross-cluster forward as in flight until it is
+ *	destroyed. Called once, BEFORE it is queued: a forward that is queued
+ *	but not yet counted as enqueued, or answered but not yet released, is
+ *	still in flight — the counters alone cannot say so (forward_enqueued is
+ *	counted after the queue took it, the outcome before the item is gone).
+ */
+void queue_proxy_write::track_in_flight() {
+	if (!this->_in_flight) {
+		this->_in_flight = true;
+		stats_object->crepl_in_flight_add();
+	}
 }
 // }}}
 

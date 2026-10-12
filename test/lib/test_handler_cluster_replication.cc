@@ -481,5 +481,89 @@ namespace test_handler_cluster_replication {
 		cut_assert_equal_int(1, (int)crepl("forward_server_error_retried"));
 		cut_assert_equal_int(1, (int)crepl("forward_applied"));
 	}
+
+	uint64_t in_flight() {
+		uint64_t n = 0;
+		stats_object->get_crepl_snapshot(n);
+		return n;
+	}
+
+	// the handler drops its reference when its loop moves on
+	bool in_flight_drains_to(uint64_t want) {
+		for (int i = 0; i < 50; i++) {
+			if (in_flight() == want) {
+				return true;
+			}
+			usleep(100 * 1000);
+		}
+		return in_flight() == want;
+	}
+
+	shared_queue_proxy_write tracked_foreign_set(shared_thread t, const string& key) {
+		storage::entry e = get_entry(" " + key + " 0 0 5 3", storage::parse_type_set, "VALUE");
+		vector<string> proxy;
+		shared_queue_proxy_write q(new queue_proxy_write(NULL, NULL, proxy, e, "set"));
+		q->set_post_proxy(true);
+		q->set_foreign(true);
+		q->track_in_flight();
+		q->sync_ref();
+		enqueue(t, q);
+		return q;
+	}
+
+	// The migration switch gate needs "nothing in flight" as a value: a
+	// forward is counted from the moment it is made until it is destroyed,
+	// answered or not — the counters alone read as settled while a forward
+	// was queued but not yet counted as enqueued (review 2026-10-12).
+	void test_in_flight_counts_a_forward_until_it_is_released() {
+		shared_thread t = start_handler();
+		cut_assert_equal_int(0, (int)in_flight());
+		shared_queue_proxy_write q = tracked_foreign_set(t, "key");
+		cut_assert_equal_int(1, (int)in_flight());
+		char *p, *v;
+		cs[0]->readline(&p);
+		cs[0]->readline(&v);
+		cut_assert_equal_int(1, (int)in_flight());
+		cs[0]->writeline("STORED");
+		delete[] p;
+		delete[] v;
+		q->sync();
+		// answered and counted, but this reference keeps it alive
+		cut_assert_equal_int(1, (int)crepl("forward_applied"));
+		cut_assert_equal_int(1, (int)in_flight());
+		q.reset();
+		cut_assert(in_flight_drains_to(0), cut_message("in flight stayed %d after the forward was released", (int)in_flight()));
+		// a second call does not count it twice
+		storage::entry e = get_entry(" key2 0 0 5 3", storage::parse_type_set, "VALUE");
+		vector<string> proxy;
+		shared_queue_proxy_write q2(new queue_proxy_write(NULL, NULL, proxy, e, "set"));
+		q2->track_in_flight();
+		q2->track_in_flight();
+		cut_assert_equal_int(1, (int)in_flight());
+		q2.reset();
+		cut_assert_equal_int(0, (int)in_flight());
+	}
+
+	// Shutdown with one forward running and one queued: each ends with
+	// exactly ONE outcome (stopping, abandoned), and nothing stays in flight
+	// once released — the gate's "enqueued == outcomes when nothing is in
+	// flight" holds on this path.
+	void test_in_flight_and_outcomes_on_shutdown() {
+		queue_proxy_write::foreign_retry_window_ms = 60000;
+		shared_thread t = start_handler(false);
+		shared_queue_proxy_write q1 = tracked_foreign_set(t, "key1");
+		shared_queue_proxy_write q2 = tracked_foreign_set(t, "key2");
+		cut_assert_equal_int(2, (int)in_flight());
+		usleep(500 * 1000);
+		t->shutdown(true, false);
+		q1->sync();
+		q2->sync();
+		cut_assert_equal_int(1, (int)crepl("forward_dropped_stopping"));
+		cut_assert_equal_int(1, (int)crepl("forward_dropped_abandoned"));
+		cut_assert_equal_int(0, (int)crepl("forward_applied"));
+		q1.reset();
+		q2.reset();
+		cut_assert(in_flight_drains_to(0), cut_message("in flight stayed %d after shutdown", (int)in_flight()));
+	}
 }
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 noexpandtab autoindent

@@ -60,6 +60,8 @@ protected:
 	// the forwarding thread running this item (foreign only): its shutdown
 	// request ends the retry wait
 	shared_thread						_owner;
+	// counted in stats' in-flight forwards until this item is destroyed
+	bool										_in_flight;
 
 public:
 	static const int max_retry = 4;
@@ -99,6 +101,7 @@ public:
 	void set_foreign(bool foreign);
 	bool is_foreign() { return this->_foreign; };
 	void set_owner(shared_thread t) { this->_owner = t; };
+	void track_in_flight();
 	virtual void on_abandoned(const string& dest);
 	int set_generic_value(uint64_t generic_value) { this->_generic_value = generic_value; return 0; };
 	uint64_t get_generic_value() { return this->_generic_value; };

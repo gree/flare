@@ -60,6 +60,8 @@ stdenv.mkDerivation {
     grep -E 'test_dump_checkpoint_point_in_time_and_side_effect_free' test/run-tests.sh.log || echo "dump_checkpoint test NOT found in the cutter log"
     # capture guards: write bounds for a connected peer that stops reading,
     # worst-case-pin capacity rule
+    # switch gate: in-flight forwards as a value, one outcome per forward on shutdown
+    grep -E 'test_in_flight_counts_a_forward_until_it_is_released|test_in_flight_and_outcomes_on_shutdown' test/run-tests.sh.log || echo "in-flight tests NOT found in the cutter log"
     grep -E 'test_write_progress_timeout_ends_a_write_to_a_peer_that_stopped_reading|test_write_deadline_ends_a_write_even_with_a_longer_progress_timeout|test_write_bounds_do_not_end_a_write_the_peer_reads|test_capture_capacity_refuses_unknowns_and_short_space' test/run-tests.sh.log || echo "capture guard tests NOT found in the cutter log"
     # CI 37852139711: the RocksDB and the legacy builds reported the SAME
     # totals, so the RocksDB storage module was built but not run. Show what

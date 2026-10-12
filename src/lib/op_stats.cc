@@ -188,12 +188,18 @@ int op_stats::_send_stats(thread_pool* req_tp, thread_pool* other_tp, storage* s
 	}
 	// Cross-cluster replication outcomes and the seed's state (see stats.h).
 	{
-		map<string, uint64_t> crepl = stats_object->get_crepl();
+		// The counters and the in-flight gauge from one moment. The gauge is
+		// ALWAYS sent (0 included): its presence says the counters above
+		// are complete, so an absent counter means 0 — a reply without it
+		// (an older flared) leaves "nothing in flight" unknown.
+		uint64_t in_flight = 0;
+		map<string, uint64_t> crepl = stats_object->get_crepl_snapshot(in_flight);
 		for (map<string, uint64_t>::const_iterator it = crepl.begin(); it != crepl.end(); it++) {
 			char key[BUFSIZ];
 			snprintf(key, sizeof(key), "cluster_replication[%s]", it->first.c_str());
 			_send_stat(key, it->second);
 		}
+		_send_stat("cluster_replication_forward_in_flight", in_flight);
 		_send_stat("cluster_replication_seed", stats_object->get_crepl_seed_state());
 	}
 	_send_stat("delete_misses"				, stats_object->get_delete_misses());

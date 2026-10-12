@@ -91,6 +91,13 @@ protected:
 	pthread_mutex_t _mutex_crepl;
 	map<string, uint64_t> _crepl;
 	string _crepl_seed_state;
+	// Asynchronous cross-cluster forwards that exist right now: counted when
+	// one is made (before it is queued) and uncounted when it is destroyed,
+	// whatever ended it. Kept under _mutex_crepl so a reader gets it and the
+	// counters from ONE moment (get_crepl_snapshot): the migration switch
+	// gate needs "nothing in flight" as a value, not as a difference of
+	// counters read apart (review 2026-10-12).
+	uint64_t _crepl_in_flight;
 	// Reconstruction lifecycle of THIS node, counted once per request (a
 	// request is one handler_reconstruction; its internal retries are not
 	// separate requests). "started" is what a controller compares against
@@ -163,6 +170,9 @@ public:
 	map<string, uint64_t> get_diag();
 	void crepl_incr(const string& name);
 	map<string, uint64_t> get_crepl();
+	void crepl_in_flight_add();
+	void crepl_in_flight_sub();
+	map<string, uint64_t> get_crepl_snapshot(uint64_t& in_flight);
 	void set_crepl_seed_state(const string& state);
 	string get_crepl_seed_state();
 	inline int increment_reconstruction_started()   { this->_reconstruction_started.incr();return 0; };

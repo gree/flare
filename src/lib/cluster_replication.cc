@@ -234,6 +234,7 @@ cluster::proxy_request cluster_replication::on_post_proxy_write(op_proxy_write* 
 		shared_queue_proxy_write q(new queue_proxy_write(NULL, NULL, proxy, e, op->get_ident()));
 		q->set_post_proxy(true);
 		q->set_foreign(true);
+		q->track_in_flight();
 
 		int key_hash_value = e.get_key_hash_value(storage::hash_algorithm_murmur);
 		if (this->_enqueue(q, key_hash_value, false) < 0) {

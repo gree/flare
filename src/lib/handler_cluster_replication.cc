@@ -31,6 +31,8 @@
 #include "queue_proxy_write.h"
 #include "connection_tcp.h"
 
+#include <boost/lexical_cast.hpp>
+
 namespace gree {
 namespace flare {
 
@@ -107,6 +109,11 @@ int handler_cluster_replication::run() {
 		if (this->_thread->is_shutdown_request()) {
 			log_info("thread shutdown request -> breaking loop", 0);
 			this->_thread->set_state("shutdown");
+			// Taken off the queue but never run: the thread's clean-up only
+			// sees what is still queued, so this forward ended with NO
+			// outcome counted (review 2026-10-12: forward_enqueued above its
+			// outcomes for good). Counted like a queued one left behind.
+			q->on_abandoned(this->_replication_server_name + ":" + boost::lexical_cast<string>(this->_replication_server_port));
 			q->sync_unref();
 			break;
 		}

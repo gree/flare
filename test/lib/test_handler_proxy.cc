@@ -754,5 +754,148 @@ namespace test_handler_proxy {
 		map<string, uint64_t> by = stats_object->get_proxy_write_dropped_by_dest();
 		cut_assert_equal_int(3, (int)by["abandoned.example:12121"]);
 	}
+
+	// Review 2026-10-13 [P1] (in-cluster paths): cluster::_enqueue and
+	// _broadcast copy the active map, release its lock and enqueue later; in
+	// between the thread can be cleaned and REUSED for another handler (a
+	// proxy to another node after a map change), whose run opens the queue
+	// again. The hook does exactly that between the copy and the enqueue: the
+	// item must be refused, never handed to the new handler.
+	struct pool_cluster : public mock_cluster {
+		pool_cluster(string name, int port, thread_pool* p): mock_cluster(name, port) {
+			this->_other_thread_pool = p;
+			this->_proxy_concurrency = 1;
+		}
+		int enqueue_node(shared_thread_queue q, string node_key, int key_hash) { return this->_enqueue(q, node_key, key_hash, false); }
+		int enqueue_type(shared_thread_queue q, thread_pool::thread_type type) { return this->_enqueue(q, type, false); }
+		int broadcast(shared_thread_queue q, vector<string> prior) { return this->_broadcast(q, false, prior); }
+	};
+
+	// the second handler: takes what reaches it, counts it and releases a
+	// waiting sender (so the old code fails the count instead of hanging)
+	AtomicCounter* delivered_to_new_handler = NULL;
+	struct recording_handler : public thread_handler {
+		recording_handler(shared_thread t): thread_handler(t) {};
+		int run() {
+			while (this->_thread->is_shutdown_request() == thread::shutdown_request_none) {
+				shared_thread_queue q;
+				if (this->_thread->dequeue(q, 1) == 0 && q) {
+					delivered_to_new_handler->incr();
+					q->sync_unref();
+				}
+			}
+			return 0;
+		};
+	};
+
+	bool reuse_fired = false;
+	int reuse_type = 0;
+	shared_thread reused;
+	void reuse_thread_for_another_handler(thread* t) {
+		if (reuse_fired) {
+			return;
+		}
+		reuse_fired = true;
+		t->shutdown(true, false);
+		for (int i = 0; i < 50 && t->is_running(); i++) {
+			usleep(100 * 1000);
+		}
+		usleep(500 * 1000);		// clean(): back to the pool
+		reused = tp->get(reuse_type);
+		reused->trigger(new recording_handler(reused), true, false);
+		for (int i = 0; i < 50 && !reused->is_running(); i++) {
+			usleep(100 * 1000);
+		}
+	}
+
+	// starts the one idle thread of `type`, runs `enqueue` with the reuse
+	// hook armed, and checks the item was refused and nothing reached the
+	// reused thread
+	template <typename F>
+	void assert_refused_after_reuse(int type, F enqueue, const char* path) {
+		shared_thread old_t = tp->get(type);
+		old_t->trigger(new idle_handler(old_t), true, false);
+		for (int i = 0; i < 50 && !old_t->is_running(); i++) {
+			usleep(100 * 1000);
+		}
+		cut_assert(old_t->is_running());
+		const unsigned int old_id = old_t->get_id();
+		AtomicCounter delivered(0);
+		delivered_to_new_handler = &delivered;
+		reuse_fired = false;
+		reuse_type = type;
+		reused.reset();
+		thread::enqueue_before_lock_hook = reuse_thread_for_another_handler;
+		int r = enqueue();
+		thread::enqueue_before_lock_hook = NULL;
+		cut_assert(reuse_fired, cut_message("%s: the hook did not run (no enqueue was attempted)", path));
+		cut_assert(reused, cut_message("%s: no thread for the second handler", path));
+		cut_assert(reused.get() == old_t.get(), cut_message("%s: the pool gave a new thread, not the cleaned one: the reuse was not reproduced", path));
+		cut_assert(reused->get_id() != old_id, cut_message("%s: the reused thread kept id %u", path, old_id));
+		usleep(300 * 1000);		// the new handler takes anything it was given within 1 s
+		const int got = (int)delivered.fetch();
+		const int queued = (int)reused->get_thread_info().queue_size;
+		cut_notify("%s: reused thread %u -> %u: r=%d taken by the new handler=%d queued=%d total=%d",
+			path, old_id, reused->get_id(), r, got, queued, (int)stats_object->get_total_thread_queue());
+		reused->shutdown(true, false);
+		for (int i = 0; i < 50 && reused->is_running(); i++) {
+			usleep(100 * 1000);
+		}
+		reused.reset();
+		delivered_to_new_handler = NULL;
+		cut_assert_equal_int(0, got + queued, cut_message("%s: the item was handed to the reused thread's new handler", path));
+		cut_assert_equal_int(0, (int)stats_object->get_total_thread_queue());
+	}
+
+	void test_proxy_enqueue_is_not_handed_to_a_reused_thread() {
+		pool_cluster pc("localhost", port, tp);
+		cluster::node n = pc.set_node("localhost", port, cluster::role_master, cluster::state_active);
+		const string node_key = pc.to_node_key("localhost", port);
+		shared_queue_proxy_write q = get_proxy_queue_write();
+		shared_thread_queue tq = q;
+		int r = 0;
+		struct call { pool_cluster* pc; shared_thread_queue tq; string k; int* r;
+			int operator()() { *r = pc->enqueue_node(tq, k, 7); return *r; } };
+		call c = { &pc, tq, node_key, &r };
+		assert_refused_after_reuse(n.node_thread_type, c, "_enqueue(node_key)");
+		cut_assert_equal_int(-1, r);
+	}
+
+	void test_typed_enqueue_is_not_handed_to_a_reused_thread() {
+		pool_cluster pc("localhost", port, tp);
+		shared_queue_proxy_write q = get_proxy_queue_write();
+		shared_thread_queue tq = q;
+		int r = 0;
+		struct call { pool_cluster* pc; shared_thread_queue tq; int* r;
+			int operator()() { *r = pc->enqueue_type(tq, thread_pool::thread_type_controller); return *r; } };
+		call c = { &pc, tq, &r };
+		assert_refused_after_reuse(thread_pool::thread_type_controller, c, "_enqueue(type)");
+		cut_assert_equal_int(-1, r);
+	}
+
+	void test_broadcast_is_not_handed_to_a_reused_thread() {
+		pool_cluster pc("localhost", port, tp);
+		cluster::node n = pc.set_node("localhost", port, cluster::role_master, cluster::state_active);
+		shared_queue_proxy_write q = get_proxy_queue_write();
+		shared_thread_queue tq = q;
+		struct call { pool_cluster* pc; shared_thread_queue tq;
+			int operator()() { vector<string> none; return pc->broadcast(tq, none); } };
+		call c = { &pc, tq };
+		assert_refused_after_reuse(n.node_thread_type, c, "_broadcast");
+	}
+
+	void test_broadcast_to_a_prior_node_is_not_handed_to_a_reused_thread() {
+		pool_cluster pc("localhost", port, tp);
+		cluster::node n = pc.set_node("localhost", port, cluster::role_master, cluster::state_active);
+		vector<string> prior;
+		prior.push_back(pc.to_node_key("localhost", port));
+		shared_queue_proxy_write q = get_proxy_queue_write();
+		shared_thread_queue tq = q;
+		// sync for the prior node: a refused item is unref'd, so sync() returns
+		struct call { pool_cluster* pc; shared_thread_queue tq; vector<string> prior;
+			int operator()() { return pc->broadcast(tq, prior); } };
+		call c = { &pc, tq, prior };
+		assert_refused_after_reuse(n.node_thread_type, c, "_broadcast(prior)");
+	}
 }
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 noexpandtab autoindent

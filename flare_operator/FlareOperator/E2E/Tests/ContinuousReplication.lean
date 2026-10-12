@@ -811,6 +811,203 @@ def suite : TestSuite := {
             if !back then throw (IO.userError "read-unavailable-error cleanup: the replica did not follow again")
     },
 
+    -- PRODUCTION ACCEPTANCE (fixed by the user 2026-10-13, item 4), in ONE
+    -- run: the same master and history, the WAL still retained; BOTH
+    -- replication paths cut (the forward master→replica and the follower's
+    -- repl_sync_wal replica→master); creates, updates and deletes during
+    -- the cut; writes then STOP (the harness issues none; the master's head
+    -- is only observed, not used as the stop); connectivity restored; the
+    -- replica resumes from its APPLIED cursor with no reconstruction (no
+    -- dump, no snapshot reseed, no WAL fallback to dump), no container
+    -- restart and no pod recreation; every key matches. Before it catches up
+    -- no client read on the replica returns its stale copy: with the master
+    -- reachable (phase 1: only the replication paths cut) the read is the
+    -- master's value; with the master unreachable (phase 2: everything
+    -- cut) it is an explicit SERVER_ERROR (read-unavailable-error on,
+    -- production policy R2) — never END and never the old value.
+    -- A kind iptables cut, not an AZ failure: evidence for the network
+    -- partition only.
+    { name := "ACCEPTANCE: both replication paths cut, create/update/delete, writes stopped, healed: resume from the applied cursor with no rebuild / restart / recreation, every key matches; while lagging a replica read is the master's value or SERVER_ERROR, never stale or END"
+      run := do
+        match ← pair with
+        | .error e => return .fail e
+        | .ok (mPod, mIp, sPod, sIp) =>
+          let setOpt := fun (on : Bool) (slave : Nat) => do
+            discard <| kubectlPatch "flarecluster" cfg.name cfg.«namespace» s!"\{\"spec\":\{\"readBalance\":\{\"master\":100,\"slave\":{slave}}}}"
+            kubectlPatch "flarecluster" cfg.name cfg.«namespace»
+              s!"\{\"spec\":\{\"rocksdb\":\{\"replIdentityForward\":true,\"replFollowEnabled\":true,\"replFollowPollIntervalUsec\":200000,\"readUnavailableError\":{if on then "true" else "false"}}}}"
+          -- one raw get: (kind, value, seconds); kind = value | miss | error | other
+          let rawGet := fun (ip key : String) => do
+            let t0 ← IO.monoMsNow
+            let out ← match ← execInDebugPod cfg.debugPod cfg.«namespace» s!"printf 'get {key}\\r\\n' | nc -w 40 {ip} {cfg.flarePort}" with
+              | .ok o => pure o
+              | .error e => pure s!"(exec error {e})"
+            let lines := (out.splitOn "\n").map (fun l => (l.replace "\r" "").trim) |>.filter (· != "")
+            let secs := ((← IO.monoMsNow) - t0) / 1000
+            let r : String × String :=
+              if lines.any (·.startsWith "SERVER_ERROR") then ("error", lines.headD "")
+              else match lines with
+                | h :: v :: _ => if h.startsWith s!"VALUE {key} " then ("value", v) else ("other", out.trim)
+                | ["END"] => ("miss", "")
+                | _ => ("other", out.trim)
+            return (r.1, r.2, secs)
+          let balanceOnReplica : IO (Option Nat) := do
+            return ((← nodeView).find? (fun e => podOf e.fqdn == sPod)).map (·.balance)
+          let reloadSeen := fun (needle : String) => do
+            match ← hostCmd "kubectl" ["logs", "-n", cfg.«namespace», sPod, "--tail=5000"] with
+            | .ok o => return containsSubstr o needle
+            | .error _ => return false
+          try
+            -- ── precondition: production read policy on, replica served (50), following, caught up
+            match ← setOpt true 50 with
+            | .error e => return .fail s!"patch failed: {e}"
+            | .ok _ => pure ()
+            let on ← waitForCondition "replica flared reloads read-unavailable-error = true" 240 do
+              reloadSeen "read_unavailable_error: 0 -> 1"
+            if !on then return .fail "precondition: the replica never reported read_unavailable_error 0 -> 1"
+            -- the base set: acc_0..19 = base_i
+            for i in [0:20] do
+              if !(← memcachedSet cfg.debugPod cfg.«namespace» mIp cfg.flarePort s!"acc_{i}" s!"base_{i}") then
+                return .fail s!"precondition: the master did not store acc_{i}"
+            let ready ← waitForCondition "replica following, caught up, balance 50" 180 do
+              return (← statStr sIp "repl_follow_state") == some "following" &&
+                (← statNat sIp "repl_applied_lsn") == (← statNat mIp "rocksdb_latest_sequence_number") &&
+                (← balanceOnReplica) == some 50
+            if !ready then return .fail s!"precondition: replica not following/caught up with balance 50 (state {← statStr sIp "repl_follow_state"}, balance {← balanceOnReplica})"
+            let uidS0 := (← podUid sPod).getD "?"
+            let uidM0 := (← podUid mPod).getD "?"
+            let rcS0 ← restartCountOf sPod
+            let rcM0 ← restartCountOf mPod
+            let recon0 := (← statNat sIp "reconstruction_started").getD 0
+            let dump0 := (← statNat sIp "rocksdb_wal_fallback_to_dump").getD 0
+            let epoch0 ← statStr mIp "rocksdb_source_epoch"
+            let mid0 ← statStr mIp "rocksdb_master_id"
+            let applied0 := (← statNat sIp "repl_applied_lsn").getD 0
+            let d0 ← droppedByMaster mIp
+            -- expected final content (key → some value | none = deleted)
+            let mut expect : List (String × Option String) := (List.range 20).map fun i => (s!"acc_{i}", some s!"base_{i}")
+            let setExp := fun (xs : List (String × Option String)) (k : String) (v : Option String) =>
+              (xs.filter (·.1 != k)) ++ [(k, v)]
+            -- ── phase 1: replication paths cut, the master still reachable for reads
+            for spec in readGuardRules mIp sIp do
+              match ← hostCmd "docker" (["exec", kindNode, "iptables", "-I", "FORWARD", "1"] ++ spec.drop 1) with
+              | .error e => return .fail e
+              | .ok _ => pure ()
+            let disc ← waitForCondition "phase 1: the follower is disconnected (repl_sync_wal rejected)" 90 do
+              return (← statStr sIp "repl_follow_state") == some "disconnected"
+            if !disc then return .fail "phase 1 precondition: the follower did not disconnect"
+            for i in [0:5] do
+              if !(← memcachedSet cfg.debugPod cfg.«namespace» mIp cfg.flarePort s!"acc_{i}" s!"p1_{i}") then return .fail s!"master did not take the update of acc_{i}"
+              expect := setExp expect s!"acc_{i}" (some s!"p1_{i}")
+            for i in [10:13] do
+              match ← execInDebugPod cfg.debugPod cfg.«namespace» s!"printf 'delete acc_{i}\\r\\n' | nc -w 3 {mIp} {cfg.flarePort}" with
+              | .ok o => if !containsSubstr o "DELETED" then return .fail s!"master did not delete acc_{i}: {o.trim}"
+              | .error e => return .fail e
+              expect := setExp expect s!"acc_{i}" none
+            for i in [0:5] do
+              if !(← memcachedSet cfg.debugPod cfg.«namespace» mIp cfg.flarePort s!"accn_{i}" s!"new_{i}") then return .fail s!"master did not create accn_{i}"
+              expect := setExp expect s!"accn_{i}" (some s!"new_{i}")
+            let p1Drop ← waitForCondition "phase 1: a forwarded write is counted dropped" 120 do
+              return (← droppedByMaster mIp) > d0
+            if !p1Drop then return .fail "phase 1: no dropped forward — the forward path was not cut"
+            let cur1 := (← statNat sIp "repl_applied_lsn").getD 0
+            let head1 := (← statNat mIp "rocksdb_latest_sequence_number").getD 0
+            if head1 <= cur1 then return .fail s!"phase 1: no backlog (head {head1} <= applied {cur1})"
+            let mut bad : List String := []
+            for (k, want) in [("acc_0", some "p1_0"), ("acc_4", some "p1_4"), ("acc_10", none), ("accn_0", some "new_0")] do
+              let (kind, v, s) ← rawGet sIp k
+              IO.eprintln s!"# phase 1 (master reachable, replica lagging: applied {cur1} < head {head1}; replica balance {← balanceOnReplica}): get {k} on the replica -> {kind} {v} [{s}s]"
+              match want, kind with
+              | some w, "value" => if v != w then bad := bad ++ [s!"{k}: {v} (want the master's {w})"]
+              | none, "miss" => pure ()
+              | _, _ => bad := bad ++ [s!"{k}: {kind} {v} (want {want.getD "a miss"})"]
+            if !bad.isEmpty then return .fail s!"phase 1: a lagging replica's read with the master reachable was not the master's answer: {bad}"
+            -- ── phase 2: everything cut (the master unreachable from the replica)
+            match ← cut mIp sIp with
+            | .error e => return .fail e
+            | .ok _ => pure ()
+            for i in [5:10] do
+              if !(← memcachedSet cfg.debugPod cfg.«namespace» mIp cfg.flarePort s!"acc_{i}" s!"p2_{i}") then return .fail s!"master did not take the update of acc_{i}"
+              expect := setExp expect s!"acc_{i}" (some s!"p2_{i}")
+            for i in [13:15] do
+              match ← execInDebugPod cfg.debugPod cfg.«namespace» s!"printf 'delete acc_{i}\\r\\n' | nc -w 3 {mIp} {cfg.flarePort}" with
+              | .ok o => if !containsSubstr o "DELETED" then return .fail s!"master did not delete acc_{i}: {o.trim}"
+              | .error e => return .fail e
+              expect := setExp expect s!"acc_{i}" none
+            -- an update of a key created in phase 1, and a delete of one
+            if !(← memcachedSet cfg.debugPod cfg.«namespace» mIp cfg.flarePort "accn_1" "p2_new_1") then return .fail "master did not update accn_1"
+            expect := setExp expect "accn_1" (some "p2_new_1")
+            match ← execInDebugPod cfg.debugPod cfg.«namespace» s!"printf 'delete accn_2\\r\\n' | nc -w 3 {mIp} {cfg.flarePort}" with
+            | .ok o => if !containsSubstr o "DELETED" then return .fail s!"master did not delete accn_2: {o.trim}"
+            | .error e => return .fail e
+            expect := setExp expect "accn_2" none
+            for i in [5:8] do
+              if !(← memcachedSet cfg.debugPod cfg.«namespace» mIp cfg.flarePort s!"accn_{i}" s!"new_{i}") then return .fail s!"master did not create accn_{i}"
+              expect := setExp expect s!"accn_{i}" (some s!"new_{i}")
+            -- forwarding retries exhausted before the heal (as in "cut"), so
+            -- the gap is carried by the WAL path
+            let mut lastDrops ← droppedByMaster mIp
+            for _ in [0:12] do
+              IO.sleep 10000
+              let now ← droppedByMaster mIp
+              if now == lastDrops then break
+              lastDrops := now
+            for (k, stale) in [("acc_5", "base_5"), ("acc_0", "base_0")] do
+              let (kind, v, s) ← rawGet sIp k
+              IO.eprintln s!"# phase 2 (master unreachable): get {k} on the replica -> {kind} {v} [{s}s]"
+              if kind == "value" && v == stale then bad := bad ++ [s!"{k}: the STALE local value {v}"]
+              else if kind != "error" then bad := bad ++ [s!"{k}: {kind} {v} (want SERVER_ERROR)"]
+            if !bad.isEmpty then return .fail s!"phase 2: a lagging replica with the master unreachable did not answer an explicit error: {bad}"
+            -- ── writes STOP here (none issued below). The head is observed only.
+            let mLatest := (← statNat mIp "rocksdb_latest_sequence_number").getD 0
+            let appliedAtHeal := (← statNat sIp "repl_applied_lsn").getD 0
+            IO.eprintln s!"# writes stopped: master head {mLatest}; replica applied {applied0} -> {cur1} (phase 1) -> {appliedAtHeal} (at the heal); dropped forwards {lastDrops - d0}"
+            if appliedAtHeal < applied0 then return .fail "the applied cursor went BACKWARDS under the cut"
+            heal mIp sIp
+            let caught ← waitForCondition s!"replica applied >= {mLatest}, following, items equal" 300 do
+              return ((← statNat sIp "repl_applied_lsn").getD 0 ≥ mLatest) &&
+                (← statStr sIp "repl_follow_state") == some "following" &&
+                (← currItems sIp) == (← currItems mIp)
+            let headAfter := (← statNat mIp "rocksdb_latest_sequence_number").getD 0
+            let recon1 := (← statNat sIp "reconstruction_started").getD 0
+            let dump1 := (← statNat sIp "rocksdb_wal_fallback_to_dump").getD 0
+            let rcS1 ← restartCountOf sPod
+            let rcM1 ← restartCountOf mPod
+            let uidS1 := (← podUid sPod).getD "?"
+            let uidM1 := (← podUid mPod).getD "?"
+            let epoch1 ← statStr mIp "rocksdb_source_epoch"
+            let mid1 ← statStr mIp "rocksdb_master_id"
+            let mNow := (← pair).toOption.map (·.1)
+            IO.eprintln s!"# after the heal: caught={caught} applied={← statNat sIp "repl_applied_lsn"} head {mLatest}->{headAfter}; state={← statStr sIp "repl_follow_state"} reason={← statStr sIp "repl_follow_last_reason"}; reconstruction_started {recon0}->{recon1}; wal_fallback_to_dump {dump0}->{dump1}; restartCount replica {rcS0}->{rcS1} master {rcM0}->{rcM1}; uid replica {uidS0}->{uidS1} master {uidM0}->{uidM1}; master {mPod}->{mNow}; epoch {epoch0}->{epoch1}; master_id {mid0}->{mid1}"
+            if !caught then return .fail s!"the replica did not catch up from its cursor (state {← statStr sIp "repl_follow_state"}, reason {← statStr sIp "repl_follow_last_reason"})"
+            if headAfter != mLatest then return .fail s!"a write reached the master after the stop ({mLatest} -> {headAfter}): the run is not a stopped-write convergence"
+            if mNow != some mPod || epoch1 != epoch0 || mid1 != mid0 then return .fail "precondition broken: the master or its history changed (this case is the SAME master and history)"
+            if recon1 != recon0 then return .fail s!"a RECONSTRUCTION ran ({recon0}->{recon1})"
+            if dump1 != dump0 then return .fail s!"the WAL path fell back to a DUMP ({dump0}->{dump1})"
+            if (← statStr sIp "repl_follow_last_reason") == some "needs_rebuild" then return .fail "the follower declared needs_rebuild"
+            if rcS1 != rcS0 || rcM1 != rcM0 then return .fail "a container restarted"
+            if uidS1 != uidS0 || uidM1 != uidM0 then return .fail "a pod was recreated"
+            -- every key, on BOTH sides
+            for (k, want) in expect do
+              for (side, ip) in [("master", mIp), ("replica", sIp)] do
+                let (kind, v, _) ← rawGet ip k
+                match want, kind with
+                | some w, "value" => if v != w then bad := bad ++ [s!"{side} {k}: {v} (want {w})"]
+                | none, "miss" => pure ()
+                | _, _ => bad := bad ++ [s!"{side} {k}: {kind} {v} (want {want.getD "absent"})"]
+            IO.eprintln s!"# per-key: {expect.length} keys ({(expect.filter (·.2.isNone)).length} deleted) checked on both sides; mismatches {bad}"
+            if !bad.isEmpty then return .fail s!"content differs after the catch-up: {bad}"
+            let empty ← waitForCondition "ledger closes the counted drops by position" 300 do return (← ledgerDests).isEmpty
+            if !empty then return .fail s!"the ledger still holds {← ledgerDests} ({← ledgerHolds})"
+            return .pass
+          finally
+            heal mIp sIp
+            discard <| setOpt false 0
+            let back ← waitForCondition "acceptance cleanup: the replica follows again" 240 do
+              return (← statStr sIp "repl_follow_state") == some "following"
+            if !back then throw (IO.userError "acceptance cleanup: the replica did not follow again")
+    },
+
     -- T5: repeated disconnections — no loss, no rollback, no resurrection,
     -- and never a rebuild. Three cut/write/heal cycles; after each the
     -- replica converges from its position; sampled keys read locally.

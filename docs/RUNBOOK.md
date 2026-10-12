@@ -887,8 +887,14 @@ Procedure (ordered; every step a human act):
    `status.forwardApprovalConsumed` and refused again.
    The switch is issued only when, in the same tick, EVERY source pod (any
    role) reports `cluster_replication on`, mode `duplicate` and no
-   asynchronous forward in flight (`forward_enqueued` ≤ its settled
-   outcomes); otherwise "switch precondition: …".
+   asynchronous forward in flight: `cluster_replication_forward_in_flight`
+   is 0 AND `cluster_replication[forward_enqueued]` EQUALS the sum of its
+   outcomes (applied, noop_*, missing_*, failed_*, dropped_{abandoned,
+   down, stopping, retries, unknown_op}). Otherwise "switch precondition:
+   …". A reply the operator does not trust holds the switch, and the
+   operator log says why ("replication state not trusted (…)"). Such a reply
+   is incomplete, carries a non-numeric or unknown counter, repeats a name,
+   or lacks the in-flight gauge (a flared older than 4ceabfb).
 4. Keep writes stopped until the phase is **AwaitingCutover**. Pods apply
    forward one by one (ConfigMap + SIGHUP each, up to ~2 min apart); in
    between some pods answer clients from the target and others from the

@@ -1117,6 +1117,180 @@ possible. That is the user's decision; nothing is implemented.
     capture) released its slot about 52 s after its reader left. Reseed
     serves stay without the capture bounds (residual).
 
+## 17. Seventh round (2026-10-12, NOT reviewed)
+
+### 17.1 Switch gate: the per-pod reader (review finding on 655faa1)
+
+**Cause** (review, confirmed by reading and by running the old reader):
+
+- `podReplOf` read a missing or non-numeric counter as 0 (`getD 0`) and
+  called a pod settled when `forward_enqueued <= sum(outcomes)`. A reply of
+  END + `cluster_replication on` + `mode duplicate` alone was therefore
+  settled: Unknown read as drained.
+- Running the 655faa1 reader on the counterexamples:
+
+  | reply | old reader |
+  |---|---|
+  | END + on + duplicate only | settled=true |
+  | `forward_enqueued abc` | settled=true |
+  | outcomes 2 > enqueued 1 | settled=true |
+  | enqueued 2 = `dropped_stopping` 1 + `dropped_retries` 1 | settled=false, for good |
+
+  The last row is a pod that never drains: `forward_dropped_stopping` and
+  `forward_dropped_retries` (queue_proxy_write.cc:383) were missing from the
+  outcome set.
+- Paths from enqueue to an outcome, read in the code:
+  1. `forward_enqueued` is counted AFTER `_enqueue` returns, so a forward
+     already queued but not yet counted read as drained. This is a race.
+  2. handler_cluster_replication: a forward dequeued just before a shutdown
+     request was dropped by `sync_unref` with NO outcome. It was neither run
+     nor abandoned, because the thread clean-up only sees forwards still
+     queued.
+  3. Each `_run_foreign` exit counts exactly one outcome:
+     - `unknown_op`;
+     - when not answered: `down`, `stopping` or `retries`;
+     - when answered: `applied`, `noop_*`, `missing_*` or `failed_*`.
+  4. A queued forward left behind at thread clean-up is counted as
+     `abandoned`.
+  5. `forward_dropped_unqueued` is counted INSTEAD of `forward_enqueued`, so
+     it is not an outcome of an enqueued forward.
+  6. `forward_retried` and `forward_server_error_retried` count attempts.
+  7. The in-cluster `handler_proxy` path, including its skip when the
+     destination is a proxy, does not carry cross-cluster forwards.
+  8. A process crash loses queued forwards with no outcome, and the counters
+     restart at 0. Covered only by V under the write-stop premise (§17.5).
+
+**Fix.**
+
+- 4ceabfb (flared):
+  - `cluster_replication_forward_in_flight` is +1 before queueing and −1 when
+    the item is destroyed, whatever ended it. It is kept under the counters'
+    mutex and sent with them from one snapshot, always, 0 included.
+  - The shutdown-after-dequeue path counts `abandoned`.
+- 60e86e7 (operator): `podReplParse` is strict.
+  - It rejects:
+    - a reply whose last line is not END;
+    - a malformed line;
+    - a name that appears twice;
+    - a non-numeric or unknown counter;
+    - a missing on/off, mode (when on) or in-flight gauge.
+  - An older flared (no gauge) is unknown, so the switch is held.
+  - Outcomes are enumerated.
+  - settled = `in_flight == 0 && enqueued == outcomes`. Either inequality is
+    a disagreement and is held, never "drained".
+
+**Tests that fail on the old code.**
+
+- Units: the counterexamples above plus:
+  - a name appearing twice, END not last, a malformed line;
+  - a gauge that is missing or non-numeric;
+  - in flight > 0 with equal counters;
+  - fewer outcomes than enqueued;
+  - unqueued, retried or server_error_retried not counted as outcomes;
+  - the gate driven by parsed replies (no switch / stays Forwarding).
+  - Total: 491 checks.
+- Cutter:
+  - `test_in_flight_counts_a_forward_until_it_is_released` (counted while
+    alive, answered or not; not counted twice);
+  - `test_in_flight_and_outcomes_on_shutdown` (one forward running, one
+    queued: `stopping` 1 + `abandoned` 1, gauge back to 0).
+- E2E blue-green (ba2d730): every source pod's REAL stats reply goes
+  through the strict reader before the switch.
+
+**Not covered.**
+
+- The shutdown-after-dequeue window is not reachable deterministically from
+  a test, so that fix is backed by reading the code only.
+- A crash still loses queued forwards (path 8).
+- The gauge counts live objects. A leaked item would hold the switch for
+  good. That fails closed, and it is visible in the hold message.
+
+### 17.2 Switch window E2E made deterministic (ba2d730)
+
+Two test seams:
+- flared `FLARE_TEST_RELOAD_REPL_HOLD_FILE`: one pod keeps its replication
+  mode on reload, set per pod by a file.
+- operator `FLARE_TEST_MIG_WEDGE_AFTER_SWITCH_FILE`: the tick stops after
+  the switch's CR patch and before its status patch.
+
+blue-green adds these steps:
+
+1. The approval is patched with both seams armed. The operator wedges, the
+   source CR says `forward`, and the status still says Duplicating.
+2. abort=true is patched and the operator pod is deleted. The new operator
+   must reach Forwarding without logging "source switched to mode=forward"
+   again. Abort must be REFUSED (status message) for 30 s, and the target
+   StatefulSet must still exist.
+3. Mixed modes: every pod applies forward except the held one, which stays
+   duplicate. The status must name it for 45 s and the phase must stay
+   Forwarding. The hold file is then removed; the operator's drift SIGHUP
+   applies forward and the phase reaches AwaitingCutover.
+
+The external write stop between V and AwaitingCutover remains a premise.
+No write fence is implemented or installed.
+
+### 17.3 T24: resolved addresses
+
+- No existing log has a resolved address:
+  - the failing run 38186142795 predates the resolved-IP log (0b8c976);
+  - 38194519561 and 38198924465 dumped flared logs only for failing
+    suites, and backup-restore passed in both.
+- Checked: `(resolved ` occurs 0 times in both run logs, and nothing in
+  the artifacts.
+- ba2d730 makes backup-restore print, on EVERY run, pass or fail, each
+  pod's `connect() … (resolved …)` failures, its `rebuild_blocked` /
+  `source_size_unknown` lines and the pod IPs.
+- Cause: UNDETERMINED. A further pass does not close it.
+
+### 17.4 Capture resource protection: the package for review
+
+- Base 13bde49; implementation 0b8c976; test fixes 975c217.
+- 18 files, +691/−34, in:
+  - connection_tcp (write bounds, resolved IP);
+  - copy_capacity.h;
+  - op_repl_snapshot (guards and bounds);
+  - storage_rocksdb and op_stats (capture stats);
+  - the receiver and driver scripts;
+  - cutter and E2E.
+- Old behaviour:
+  - no reserve or space check before the checkpoint;
+  - an unbounded write poll;
+  - no capture stats.
+- Results:
+  - nix-linux 38194517215 success;
+  - E2E 38194519561 13/16 (three test-design failures, record kept);
+  - E2E 38198924465 30/30 (§16.5).
+- Kind only. Real-environment capture is unapproved.
+
+### 17.5 Reseed serve bounds: can the capture code be reused? (study, not implemented)
+
+- **Write-progress bound** (`set_write_progress_timeout_ms`): reusable
+  as is.
+  - The reseed sender throttles itself (bwlimit), so a reading receiver
+    never waits 30 s.
+  - A cut ends `run_client` with a transfer failure. The receiver then
+    falls back to a staged full dump (handler_reconstruction.cc ~970):
+    only `busy` waits, and `no_space` stops.
+  - So a cut reseed costs a dump; it does not leave the replica unseeded.
+- **Total deadline:** NOT reusable as a constant.
+  - A legitimate reseed takes about copy bytes / bwlimit, so a 600 s cap
+    would cut large ones.
+  - It would need a budget derived from size and bwlimit, with margin, and
+    a retry backoff.
+- **Reserve check and abort below reserve** (`decide_capture_capacity`,
+  `capacity_watch_ok`): reusable. Refusal → dump fallback.
+- **Not checked:**
+  - the dump serve (op_dump) to a stalled peer is equally unbounded;
+  - its open iterator also pins files.
+- Each of these changes in-cluster reseed behaviour on a production path.
+  Proposed for review, not implemented.
+
+### 17.6 Runs
+
+- nix-linux 38215508608 (ba2d730): pending.
+- E2E 38215512251 (ba2d730): pending. Suites: blue-green-migration,
+  backup-restore, cluster-replication, cluster-replication-per-key-only.
+
 ## UNKNOWN
 
 - whether a blocking connect to a black-holed LB address reaches the

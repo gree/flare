@@ -377,11 +377,16 @@ def suite : TestSuite := {
     -- already be on the target — deleting the target would lose writes
     { name := "operator replaced between the switch's CR patch and its status patch, abort set meanwhile: abort REFUSED, the new operator follows to Forwarding without re-issuing the switch; the target survives"
       run := do
+        -- never set abort unless the switch is on the CR: without it the
+        -- abort is legitimate and deletes the target (38215512251 cascade)
+        match ← kubectlGetJsonpath "flarecluster" cfg.name cfg.«namespace» "{.spec.clusterReplication.mode}" with
+        | .ok m => if m.trim != "forward" then return .fail s!"precondition: the switch was not issued (source CR mode {m.trim}); abort not set"
+        | .error e => return .fail s!"precondition: source CR mode unreadable ({e}); abort not set"
+        let ph0 ← migPhase
+        if ph0 != "Duplicating" then return .fail s!"precondition: phase {ph0} before the operator was replaced; abort not set"
         match ← kubectlPatch "flaremigration" migName cfg.«namespace» "{\"spec\":{\"abort\":true}}" with
         | .error e => return .fail s!"abort patch failed: {e}"
         | .ok _ => pure ()
-        let ph0 ← migPhase
-        if ph0 != "Duplicating" then return .fail s!"precondition: phase {ph0} before the operator was replaced"
         let some op0 := (← operatorPods).head? | return .fail "no operator pod"
         let _ ← kubectl ["delete", "pod", op0, "-n", cfg.«namespace», "--wait=false"]
         let followed ← waitForCondition "phase Forwarding under the new operator" 300 do

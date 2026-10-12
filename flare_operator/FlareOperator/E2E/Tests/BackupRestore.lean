@@ -157,6 +157,13 @@ def suite : TestSuite := {
                             s!"echo {dataDir}/backups/{backupName} > {dataDir}/RESTORE"] with
           | .ok _ => pure ()
           | .error e => return .fail s!"failed to write RESTORE marker on {pod}: {e}"
+        -- T24: the addresses BEFORE the recreation, to tell a stale answer
+        -- (an old pod IP) from any other address (38215512251: nodes-1
+        -- resolved nodes-0 to 10.244.0.20 while nodes-0 was at .23)
+        for pod in allPods do
+          match ← getPodIp pod cfg.«namespace» with
+          | some ip => IO.eprintln s!"# T24 evidence pod IP BEFORE recreation of {pod}: {ip}"
+          | none => pure ()
         let _ ← kubectl (["delete", "pod"] ++ allPods ++
                          ["-n", cfg.«namespace», "--force", "--grace-period=0"])
         let recovered ← waitForCondition "cluster recovered after restore" 180 do

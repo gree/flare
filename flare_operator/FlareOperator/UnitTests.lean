@@ -2137,7 +2137,10 @@ def checkMigrationForwardGate (ctx : Ctx) : IO Unit := do
   -- strict stats parsing (review 2026-10-12): the old reader summed
   -- getD-0 counters, so END + on + duplicate alone read as drained
   let st (lines : List String) : String := String.join (lines.map (· ++ "\r\n")) ++ "END\r\n"
-  let sbase := ["STAT pid 7", "STAT cluster_replication on", "STAT cluster_replication_mode duplicate"]
+  -- real flared output carries stats with EMPTY values (E2E 38215512251:
+  -- "STAT repl_follow_source " made every real reply untrusted)
+  let sbase := ["STAT pid 7", "STAT repl_follow_source ", "STAT reconstruction_last_success_source ",
+                "STAT cluster_replication on", "STAT cluster_replication_mode duplicate"]
   let gauge (n : Nat) := s!"STAT cluster_replication_forward_in_flight {n}"
   let cn (k : String) (n : String) := s!"STAT cluster_replication[{k}] {n}"
   let settledOf (out : String) : Option Bool := (podReplOf "s0" out).map PodRepl.settled
@@ -2154,7 +2157,9 @@ def checkMigrationForwardGate (ctx : Ctx) : IO Unit := do
       && podReplOf "s0" (st (sbase ++ ["STAT cluster_replication_forward_in_flight x"])) == none
       && podReplOf "s0" (st ["STAT cluster_replication on", gauge 0]) == none
       && podReplOf "s0" (st [gauge 0]) == none
-      && podReplOf "s0" (st ["STAT cluster_replication maybe", gauge 0]) == none)
+      && podReplOf "s0" (st ["STAT cluster_replication maybe", gauge 0]) == none
+      && podReplOf "s0" (st (sbase ++ [gauge 0, "STAT repl_follow_source x"])) == none
+      && podReplOf "s0" (st ["STAT  cluster_replication on", gauge 0]) == none)
   check ctx "podReplOf: in flight > 0 is never settled, whatever the counters say (queued but not yet counted enqueued; answered but not released)"
     (settledOf (st (sbase ++ [gauge 1])) == some false
       && settledOf (st (sbase ++ [gauge 1, cn "forward_enqueued" "3", cn "forward_applied" "3"])) == some false

@@ -297,7 +297,7 @@ def forwardNonTerminal (name : String) : Bool :=
 /-- The pure part of `sourcePodsRepl`: one pod's stats reply → its applied
     replication state, or why it is not trusted. Strict (review 2026-10-12):
     the reply must end with END and contain only `STAT <name> <value>`
-    lines with no name twice; `cluster_replication` must be on/off, its mode
+    lines (the value may be empty) with no name twice; `cluster_replication` must be on/off, its mode
     present when on, and `cluster_replication_forward_in_flight` present —
     that gauge is sent with the counters from one moment, so with it an
     absent counter is 0; without it (an older flared) nothing is known.
@@ -312,7 +312,9 @@ def podReplParse (pod : String) (out : String) : Except String PodRepl := do
   for t in body do
     match t.splitOn " " with
     | "STAT" :: name :: rest =>
-      if name.isEmpty || rest.isEmpty then throw s!"malformed line '{t}'"
+      -- an EMPTY value is real flared output ("STAT repl_follow_source ",
+      -- trimmed to two words): E2E 38215512251 — rejecting it held every pod
+      if name.isEmpty then throw s!"malformed line '{t}'"
       if seen.contains name then throw s!"stat {name} appears twice"
       seen := name :: seen
       pairs := pairs ++ [(name, " ".intercalate rest)]

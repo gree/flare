@@ -342,6 +342,15 @@ int op_stats::_send_stats(thread_pool* req_tp, thread_pool* other_tp, storage* s
 				_send_stat("rocksdb_bulk_chain"                 , flat.empty() ? string("-") : flat);
 			}
 			_send_stat("rocksdb_snapshot_serving"           , rdb->is_snapshot_serving() ? 1 : 0);
+			{
+				uint64_t cs = 0, cr = 0, ca = 0;
+				string cl;
+				rdb->get_capture_stats(cs, cr, ca, cl);
+				_send_stat("rocksdb_capture_served"             , cs);
+				_send_stat("rocksdb_capture_refused"            , cr);
+				_send_stat("rocksdb_capture_aborted"            , ca);
+				_send_stat("rocksdb_capture_last"               , cl);
+			}
 			_send_stat("rocksdb_retained_copies"            , static_cast<uint64_t>(rdb->list_retained().size()));
 			// monitoring (decision 2026-10-07, item 2): what the kept copies take
 			_send_stat("rocksdb_retained_bytes"             , rdb->bytes_with_prefix("retained-"));

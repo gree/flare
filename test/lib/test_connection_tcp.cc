@@ -36,6 +36,11 @@
 #include <poll.h>
 #include <signal.h>
 #include <arpa/inet.h>
+#include <fcntl.h>
+#include <string.h>
+#include <pthread.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
 
 using namespace gree::flare;
 
@@ -280,6 +285,114 @@ namespace test_connection_tcp
 		}
 		cut_assert_operator(took, >=, (uint64_t)1800);		// two 1 s deadlines
 		cut_assert_operator(took, <, (uint64_t)5000);		// 2 tries x 1 s + retry wait
+	}
+
+	// ---- write bounds (verification capture, 2026-10-12): a peer that stays
+	// connected but never reads used to block write() forever (the poll loop
+	// had no deadline). An accepted, NON-BLOCKING socket as flared's server
+	// side has; the peer connects and never reads.
+	namespace {
+		struct stalled_pair {
+			int lfd, cfd, afd;
+			struct sockaddr_in addr;
+			stalled_pair() : lfd(-1), cfd(-1), afd(-1) {
+				lfd = socket(AF_INET, SOCK_STREAM, 0);
+				memset(&addr, 0, sizeof(addr));
+				addr.sin_family = AF_INET;
+				addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+				addr.sin_port = 0;
+				bind(lfd, (struct sockaddr*)&addr, sizeof(addr));
+				listen(lfd, 1);
+				socklen_t l = sizeof(addr);
+				getsockname(lfd, (struct sockaddr*)&addr, &l);
+				cfd = socket(AF_INET, SOCK_STREAM, 0);
+				int small = 4096;
+				setsockopt(cfd, SOL_SOCKET, SO_RCVBUF, &small, sizeof(small));
+				connect(cfd, (struct sockaddr*)&addr, sizeof(addr));
+				struct sockaddr_in peer;
+				socklen_t pl = sizeof(peer);
+				afd = accept(lfd, (struct sockaddr*)&peer, &pl);
+				fcntl(afd, F_SETFL, fcntl(afd, F_GETFL, 0) | O_NONBLOCK);
+			}
+			~stalled_pair() {
+				if (cfd >= 0) ::close(cfd);
+				if (lfd >= 0) ::close(lfd);
+			}
+		};
+	}
+
+	void test_write_progress_timeout_ends_a_write_to_a_peer_that_stopped_reading()
+	{
+		stalled_pair sp;
+		cut_assert_operator(sp.afd, >=, 0);
+		connection_tcp* t = new connection_tcp(sp.afd, sp.addr);
+		shared_connection c(t);
+		t->set_write_progress_timeout_ms(1500);
+		const int n = 64 << 20;		// far beyond both socket buffers
+		char* buf = new char[n];
+		memset(buf, 'x', n);
+		const uint64_t t0 = mono_ms();
+		cut_assert_equal_int(-1, c->write(buf, n));
+		const uint64_t took = mono_ms() - t0;
+		delete[] buf;
+		cut_assert_equal_int(-4, t->get_errno());
+		cut_assert_operator(took, >=, (uint64_t)1400);
+		cut_assert_operator(took, <, (uint64_t)5000);
+		cut_assert_false(t->is_available());		// closed: the serve ends
+	}
+
+	void test_write_deadline_ends_a_write_even_with_a_longer_progress_timeout()
+	{
+		stalled_pair sp;
+		connection_tcp* t = new connection_tcp(sp.afd, sp.addr);
+		shared_connection c(t);
+		t->set_write_progress_timeout_ms(60000);
+		t->set_write_deadline_from_now(1000);
+		const int n = 64 << 20;
+		char* buf = new char[n];
+		memset(buf, 'x', n);
+		const uint64_t t0 = mono_ms();
+		cut_assert_equal_int(-1, c->write(buf, n));
+		const uint64_t took = mono_ms() - t0;
+		delete[] buf;
+		cut_assert_equal_int(-5, t->get_errno());
+		cut_assert_operator(took, <, (uint64_t)4000);
+		// a later write is refused (the socket is closed)
+		cut_assert_equal_int(-1, c->write("x", 1));
+	}
+
+	void test_write_bounds_do_not_end_a_write_the_peer_reads()
+	{
+		stalled_pair sp;
+		connection_tcp* t = new connection_tcp(sp.afd, sp.addr);
+		shared_connection c(t);
+		t->set_write_progress_timeout_ms(1000);
+		t->set_write_deadline_from_now(30000);
+		const int n = 1 << 20;
+		char* buf = new char[n];
+		memset(buf, 'y', n);
+		// the peer reads in another thread: every byte arrives, no bound fires
+		struct reader {
+			static void* run(void* a) {
+				int fd = *static_cast<int*>(a);
+				char b[65536];
+				long total = 0;
+				while (total < (1 << 20)) {
+					ssize_t r = ::read(fd, b, sizeof(b));
+					if (r <= 0) break;
+					total += r;
+				}
+				return reinterpret_cast<void*>(total);
+			}
+		};
+		pthread_t th;
+		pthread_create(&th, NULL, reader::run, &sp.cfd);
+		cut_assert_equal_int(n, c->write(buf, n));
+		void* got = NULL;
+		pthread_join(th, &got);
+		delete[] buf;
+		cut_assert_equal_int(0, t->get_errno());
+		cut_assert_equal_int(n, static_cast<int>(reinterpret_cast<long>(got)));
 	}
 
 	// the read timeout flared applies at startup AND on reload (one rule):

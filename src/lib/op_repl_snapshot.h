@@ -37,6 +37,20 @@
  *	  nfiles × ( "FILE <name> <size>\r\n" + <size> raw bytes )
  *	  "END\r\n"
  *	Errors: "SERVER_ERROR <msg>\r\n" at any line boundary.
+ *
+ *	VERIFICATION CAPTURE mode (CI-only kind driver, scripts/
+ *	flare_v_capture_kind.py; never used by a reseed):
+ *	  "repl_snapshot <bwlimit> capture [<deadline_sec>]\r\n"
+ *	Before the checkpoint the server refuses ("SERVER_ERROR capture_refused
+ *	<reason>") when a rebuild is in flight on this node, when the reserve,
+ *	this copy's size or the free space (on tmpfs: cgroup memory headroom)
+ *	is unknown, or when free < copy + reserve (the worst-case pin). While
+ *	streaming: a write that makes no progress for kCaptureProgressMs or
+ *	passes the total deadline (min(requested, kCaptureMaxDeadlineSec)) ends
+ *	the serve, and a free-space drop below the reserve aborts it; every exit
+ *	removes the checkpoint and releases the slot. The header carries a 5th
+ *	token "capture" so the driver can refuse a server that ignored the mode.
+ *	A reseed (no "capture" token) is unchanged.
  */
 #ifndef	OP_REPL_SNAPSHOT_H
 #define	OP_REPL_SNAPSHOT_H
@@ -67,6 +81,9 @@ protected:
 	string				_received_master_id;
 	// checked between files and every kSpaceWatchBytes; false stops the transfer
 	boost::function<bool (string&)>	_space_watch;
+	// server side: the request asked for capture mode (see the header)
+	bool				_capture;
+	uint64_t			_capture_deadline_sec;
 
 public:
 	op_repl_snapshot(shared_connection c, storage* st);
@@ -80,6 +97,8 @@ public:
 	bool is_busy() const { return this->_busy; };
 	string get_received_master_id() const { return this->_received_master_id; };
 	static const uint64_t kSpaceWatchBytes = 64ULL << 20;
+	static const int kCaptureProgressMs = 30 * 1000;
+	static const uint64_t kCaptureMaxDeadlineSec = 600;
 
 	// Pull the snapshot from the connected source and swap it in as the
 	// local live DB (rocksdb only). Returns 0 on success; on any failure the

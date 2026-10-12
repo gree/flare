@@ -30,6 +30,8 @@
 #include "connection_tcp.h"
 #include <poll.h>
 #include <fcntl.h>
+#include <arpa/inet.h>
+#include <algorithm>
 
 namespace gree {
 namespace flare {
@@ -85,6 +87,8 @@ connection_tcp::connection_tcp(const std::string& host, int port):
 		_connect_retry_wait(connection_tcp::connect_retry_wait),
 		_connect_timeout_ms(0),
 		_deadline_ms(0),
+		_write_progress_timeout_ms(0),
+		_write_deadline_ms(0),
 		_open_failed_at_ms(0),
 		_sender_given_up(false) {
 }
@@ -113,6 +117,8 @@ connection_tcp::connection_tcp(int sock, struct sockaddr_in addr):
 		_connect_retry_wait(connection_tcp::connect_retry_wait),
 		_connect_timeout_ms(0),
 		_deadline_ms(0),
+		_write_progress_timeout_ms(0),
+		_write_deadline_ms(0),
 		_open_failed_at_ms(0),
 		_sender_given_up(false) {
 }
@@ -141,6 +147,8 @@ connection_tcp::connection_tcp(int sock, struct sockaddr_un addr):
 		_connect_retry_wait(connection_tcp::connect_retry_wait),
 		_connect_timeout_ms(0),
 		_deadline_ms(0),
+		_write_progress_timeout_ms(0),
+		_write_deadline_ms(0),
 		_open_failed_at_ms(0),
 		_sender_given_up(false) {
 }
@@ -174,6 +182,13 @@ int connection_tcp::set_deadline_from_now(int ms) {
 	struct timespec ts;
 	clock_gettime(CLOCK_MONOTONIC, &ts);
 	this->_deadline_ms = (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000 + (uint64_t)(ms > 0 ? ms : 0);
+	return 0;
+}
+
+int connection_tcp::set_write_deadline_from_now(int ms) {
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	this->_write_deadline_ms = (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000 + (uint64_t)(ms > 0 ? ms : 0);
 	return 0;
 }
 
@@ -223,7 +238,16 @@ int connection_tcp::_open(string host, int port) {
 			if (err == 0) {
 				break;
 			}
-			log_warning("connect() failed: %s (%d) within %d msec -> wait for %d usec", util::strerror(err), err, this->_connect_timeout_ms, this->_connect_retry_wait);
+			{
+				// which ADDRESS did not answer (T24, 2026-10-12: a connect to a
+				// name another connection had just reached timed out; the
+				// resolved address was not logged, so a stale DNS answer could
+				// not be told from a path drop)
+				char ip[INET_ADDRSTRLEN] = "?";
+				inet_ntop(AF_INET, &this->_addr_inet.sin_addr, ip, sizeof(ip));
+				log_warning("connect() to %s:%d (resolved %s) failed: %s (%d) within %d msec -> wait for %d usec",
+					host.c_str(), port, ip, util::strerror(err), err, this->_connect_timeout_ms, this->_connect_retry_wait);
+			}
 			// a failed connect leaves the socket unusable: start a fresh one
 			::close(this->_sock);
 			this->_sock = socket(AF_INET, SOCK_STREAM, 0);
@@ -244,7 +268,9 @@ int connection_tcp::_open(string host, int port) {
 	}
 	if (i == (this->_connect_retry_limit+1)) {
 		const int last = errno;		// before logging can change it
-		log_err("connect() failed", -1);
+		char ip[INET_ADDRSTRLEN] = "?";
+		inet_ntop(AF_INET, &this->_addr_inet.sin_addr, ip, sizeof(ip));
+		log_err("connect() to %s:%d (resolved %s) failed", host.c_str(), port, ip);
 		this->_errno = last;
 		this->close();
 		return -1;
@@ -598,8 +624,32 @@ int connection_tcp::write(const char* p, int bufsiz, bool buffered) {
 
 	this->_errno = 0;
 
+	// opt-in write bounds (see _write_progress_timeout_ms): -4 = no progress
+	// for the progress timeout, -5 = the total write deadline passed
+	const bool bounded = this->_write_progress_timeout_ms > 0 || this->_write_deadline_ms > 0;
+	uint64_t last_progress_ms = bounded ? monotonic_ms_now() : 0;
 	int written = 0;
 	while (written < bufsiz) {
+		if (bounded) {
+			const uint64_t now = monotonic_ms_now();
+			int bound_errno = 0;
+			if (this->_write_deadline_ms > 0 && now >= this->_write_deadline_ms) {
+				bound_errno = -5;
+				log_warning("write deadline exceeded (%d of %d bytes written) -> closing socket", written, bufsiz);
+			} else if (this->_write_progress_timeout_ms > 0 && now >= last_progress_ms + (uint64_t)this->_write_progress_timeout_ms) {
+				bound_errno = -4;
+				log_warning("write made no progress for %d msec (peer connected but not reading; %d of %d bytes written) -> closing socket",
+					this->_write_progress_timeout_ms, written, bufsiz);
+			}
+			if (bound_errno != 0) {
+				this->close();
+				this->_errno = bound_errno;
+				delete[] this->_write_buf;
+				this->_write_buf = NULL;
+				this->_write_buf_len = this->_write_buf_chunk_size = 0;
+				return -1;
+			}
+		}
 		int len = ::write(this->_sock, p+written, bufsiz-written);
 		if (len < 0) {
 			if (errno == EAGAIN) {
@@ -608,9 +658,22 @@ int connection_tcp::write(const char* p, int bufsiz, bool buffered) {
 				struct pollfd ufds;
 				ufds.fd = this->_sock;
 				ufds.events = POLLOUT;
-				int n = poll(&ufds, 1, connection_tcp::write_timeout);
+				int wait_ms = connection_tcp::write_timeout;
+				if (bounded) {
+					const uint64_t now = monotonic_ms_now();
+					if (this->_write_progress_timeout_ms > 0) {
+						const uint64_t until = last_progress_ms + (uint64_t)this->_write_progress_timeout_ms;
+						const int left = until > now ? (int)(until - now) : 0;
+						if (left < wait_ms) wait_ms = left;
+					}
+					if (this->_write_deadline_ms > 0) {
+						const int left = this->_write_deadline_ms > now ? (int)min<uint64_t>(this->_write_deadline_ms - now, 0x7fffffff) : 0;
+						if (left < wait_ms) wait_ms = left;
+					}
+				}
+				int n = poll(&ufds, 1, wait_ms);
 				if (n == 0) {
-					log_info("poll() timed out (%0.4f sec)", connection_tcp::write_timeout / 1000.0);
+					log_info("poll() timed out (%0.4f sec)", wait_ms / 1000.0);
 					continue;
 				} else if (n < 0 || !(ufds.revents & (POLLOUT))) {
 					if (errno == EINTR) {
@@ -643,6 +706,9 @@ int connection_tcp::write(const char* p, int bufsiz, bool buffered) {
 		}
 		stats_object->add_bytes_written(len);
 		written += len;
+		if (bounded) {
+			last_progress_ms = monotonic_ms_now();
+		}
 		if (written >= bufsiz) {
 			log_debug("write %d bytes (total %d bytes) -> complete", len, written);
 			break;

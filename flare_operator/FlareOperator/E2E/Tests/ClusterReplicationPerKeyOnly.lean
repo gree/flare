@@ -59,6 +59,8 @@ private def cfgDst : ClusterConfig := {
   debugPod := "debug-crp"
   storageBackend := "rocksdb"
   usePvc := true
+  -- V captures this side too: a capture is refused without the reserve
+  reserveInCr := true
 }
 
 private def dstSvc : String := s!"{cfgDst.name}-nodes.{cfgDst.«namespace»}.svc.cluster.local"

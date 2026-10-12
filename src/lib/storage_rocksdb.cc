@@ -2816,6 +2816,30 @@ void storage_rocksdb::_release_snapshot_serve() {
 	pthread_mutex_unlock(&this->_mutex_rebuild_status);
 }
 
+void storage_rocksdb::note_capture(int outcome, const string& what) {
+	pthread_mutex_lock(&this->_mutex_rebuild_status);
+	if (outcome == 0) {
+		this->_capture_served++;
+		this->_capture_last = "served";
+	} else if (outcome == 1) {
+		this->_capture_refused++;
+		this->_capture_last = "refused:" + what;
+	} else {
+		this->_capture_aborted++;
+		this->_capture_last = "aborted:" + what;
+	}
+	pthread_mutex_unlock(&this->_mutex_rebuild_status);
+}
+
+void storage_rocksdb::get_capture_stats(uint64_t& served, uint64_t& refused, uint64_t& aborted, string& last) {
+	pthread_mutex_lock(&this->_mutex_rebuild_status);
+	served = this->_capture_served;
+	refused = this->_capture_refused;
+	aborted = this->_capture_aborted;
+	last = this->_capture_last;
+	pthread_mutex_unlock(&this->_mutex_rebuild_status);
+}
+
 bool storage_rocksdb::is_snapshot_serving() {
 	pthread_mutex_lock(&this->_mutex_rebuild_status);
 	const bool b = this->_snapshot_serving;

@@ -81,6 +81,13 @@ protected:
 	// 0 = none). The per-read timeout bounds a silent peer; this bounds a
 	// peer that trickles bytes, for short requests such as an identity probe.
 	uint64_t						_deadline_ms;
+	// Opt-in WRITE bounds (0 = none: a peer that stays connected but stops
+	// reading blocks write() forever, as before). progress: the longest a
+	// write may wait without a single byte accepted; deadline: monotonic msec
+	// after which no write is attempted. Used by the verification capture
+	// serve (op_repl_snapshot, capture mode); errno -4 / -5 when they fire.
+	int									_write_progress_timeout_ms;
+	uint64_t						_write_deadline_ms;
 	// When the last open() TIMED OUT (monotonic msec, 0 = the last open
 	// succeeded or failed fast — refused, lookup failure): lets a sender fail
 	// fast instead of queueing behind another connect that will time out.
@@ -162,6 +169,8 @@ public:
 	virtual int set_connect_timeout_ms(int ms) { this->_connect_timeout_ms = ms; return 0; };
 	// Whole-request deadline, `ms` from now (applies to every read after it).
 	virtual int set_deadline_from_now(int ms);
+	virtual int set_write_progress_timeout_ms(int ms) { this->_write_progress_timeout_ms = ms > 0 ? ms : 0; return 0; };
+	virtual int set_write_deadline_from_now(int ms);
 
 	int get_errno() const { return this->_errno; };
 	bool is_error() const { return this->_errno != 0 ? true : false; };

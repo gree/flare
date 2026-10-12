@@ -160,6 +160,20 @@ namespace test_copy_switch {
 		cut_assert_equal_int(capacity_ok, decide_rebuild_capacity(0, true, 100, 100, need, why));
 	}
 
+	// verification capture (2026-10-12): worst-case pin = copy + reserve;
+	// every unknown refuses
+	void test_capture_capacity_refuses_unknowns_and_short_space() {
+		uint64_t need = 0;
+		string why;
+		cut_assert_equal_int(capacity_reserve_unset, decide_capture_capacity(-1, true, 100, 1000000, need, why));
+		cut_assert_equal_int(capacity_source_unknown, decide_capture_capacity(10, false, 0, 1000000, need, why));
+		cut_assert_equal_int(capacity_space_unknown, decide_capture_capacity(10, true, 100, -1, need, why));
+		cut_assert_equal_int(capacity_ok, decide_capture_capacity(50, true, 100, 150, need, why));
+		cut_assert_equal_int(150, static_cast<int>(need));
+		cut_assert_equal_int(capacity_insufficient, decide_capture_capacity(50, true, 100, 149, need, why));
+		cut_assert_equal_string("no_space", capacity_verdict_name(capacity_insufficient));
+	}
+
 	void test_capacity_watch_stops_before_the_reserve() {
 		string why;
 		cut_assert_true(capacity_watch_ok(50, 50, why));

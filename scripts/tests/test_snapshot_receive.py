@@ -11,8 +11,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import flare_snapshot_receive as r  # noqa: E402
 
 
-def stream(files, seq=42, mid="mid-a", announce=None, end=True, crc_fix=None):
-    out = bytearray(f"SNAPSHOT {seq} {mid} {len(files) if announce is None else announce}\r\n".encode())
+def stream(files, seq=42, mid="mid-a", announce=None, end=True, crc_fix=None, mark=""):
+    out = bytearray(f"SNAPSHOT {seq} {mid} {len(files) if announce is None else announce}{mark}\r\n".encode())
     for name, data in files:
         crc = zlib.crc32(data) if crc_fix is None else crc_fix
         out += f"FILE {name} {len(data)} {crc}\r\n".encode() + data
@@ -31,10 +31,26 @@ class Receive(unittest.TestCase):
     def test_complete_stream_binary_files(self):
         files = [("000010.sst", bytes(range(256)) * 3), ("MANIFEST-000005", b"FILE x 1 2\r\nEND\r\n"), ("CURRENT", b"")]
         info = self.run_(stream(files))
-        self.assertEqual(info, {"seq": 42, "master_id": "mid-a", "files": 3, "bytes": 768 + 17})
+        self.assertEqual(info, {"seq": 42, "master_id": "mid-a", "files": 3, "bytes": 768 + 17, "capture": False})
         for name, data in files:
             with open(os.path.join(self.d, name), "rb") as f:
                 self.assertEqual(f.read(), data)
+
+    def test_capture_mode_acknowledged(self):
+        info = r.receive(io.BytesIO(stream([("a.sst", b"x")], mark=" capture")), self.d, require_capture=True)
+        self.assertTrue(info["capture"])
+
+    def test_capture_required_but_not_acknowledged(self):
+        with self.assertRaisesRegex(r.StreamError, "did not acknowledge capture"):
+            r.receive(io.BytesIO(stream([("a.sst", b"x")])), self.d, require_capture=True)
+
+    def test_capture_refused_reply(self):
+        with self.assertRaisesRegex(r.StreamError, "not a snapshot reply"):
+            self.run_(b"SERVER_ERROR capture_refused no_space\r\n")
+
+    def test_unknown_fifth_token(self):
+        with self.assertRaisesRegex(r.StreamError, "not a snapshot reply"):
+            self.run_(stream([("a.sst", b"x")], mark=" other"))
 
     def test_busy_or_error_reply(self):
         with self.assertRaisesRegex(r.StreamError, "not a snapshot reply"):

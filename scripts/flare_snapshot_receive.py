@@ -17,7 +17,16 @@ snapshot-serve slot (a concurrent reseed waits "busy"), and the transfer
 data port like every other: running it against a live cluster is an
 operational decision this tool does not make (used in CI only so far).
 
-Stream: SNAPSHOT <seq> <master_id> <nfiles>\\r\\n
+Capture mode (the request `repl_snapshot <bw> capture [<deadline_sec>]`):
+flared refuses before pinning anything when a rebuild runs on the node or
+when free space (tmpfs: cgroup memory headroom) < copy + reserve or any of
+them is unknown ("SERVER_ERROR capture_refused <reason>"); it bounds the
+serve with a write-progress timeout and a total deadline, aborts on a drop
+below the reserve, and marks the header with a 5th token "capture".
+`--require-capture` refuses a header without it (an older flared that
+ignored the mode served WITHOUT those guards).
+
+Stream: SNAPSHOT <seq> <master_id> <nfiles>[ capture]\\r\\n
         (FILE <name> <size> <crc32>\\r\\n <size raw bytes>)*
         END\\r\\n
 Anything else — an error reply ("SERVER_ERROR busy"), a short file, a CRC
@@ -50,12 +59,16 @@ def _line(f):
             raise StreamError("header line too long (desync)")
 
 
-def receive(f, out_dir):
+def receive(f, out_dir, require_capture=False):
     if not os.path.isdir(out_dir) or os.listdir(out_dir):
         raise StreamError(f"{out_dir}: not an existing empty directory")
     head = _line(f).split(" ")
-    if len(head) != 4 or head[0] != "SNAPSHOT":
+    capture = len(head) == 5 and head[4] == "capture"
+    if len(head) not in (4, 5) or head[0] != "SNAPSHOT" or (len(head) == 5 and not capture):
         raise StreamError(f"not a snapshot reply: {' '.join(head)!r}")
+    if require_capture and not capture:
+        raise StreamError("the server did not acknowledge capture mode (no capture guards): refused")
+    head = head[:4]
     try:
         seq, nfiles = int(head[1]), int(head[3])
     except ValueError:
@@ -90,15 +103,17 @@ def receive(f, out_dir):
         total += size
     if len(seen) != nfiles:
         raise StreamError(f"{len(seen)} files received, SNAPSHOT announced {nfiles}")
-    return {"seq": seq, "master_id": master_id, "files": len(seen), "bytes": total}
+    return {"seq": seq, "master_id": master_id, "files": len(seen), "bytes": total, "capture": capture}
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out", required=True, help="an existing EMPTY directory")
+    ap.add_argument("--require-capture", action="store_true",
+                    help="refuse a reply whose header does not acknowledge capture mode")
     args = ap.parse_args(argv)
     try:
-        info = receive(sys.stdin.buffer, args.out)
+        info = receive(sys.stdin.buffer, args.out, args.require_capture)
     except (StreamError, OSError) as e:
         print(f"snapshot receive FAILED: {e}", file=sys.stderr)
         return 2

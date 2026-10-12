@@ -239,6 +239,12 @@ protected:
 	peak_set _peaks_serve;
 	// design §5: a snapshot (serve or push) is being served from this node
 	bool _snapshot_serving = false;
+	// verification captures (repl_snapshot capture mode): counts and the
+	// last outcome ("-" none, "served", "refused:<why>", "aborted:<why>")
+	uint64_t _capture_served = 0;
+	uint64_t _capture_refused = 0;
+	uint64_t _capture_aborted = 0;
+	string _capture_last = "-";
 	// design §6: the live copy is the empty copy left by a quarantine
 	bool _quarantined = false;
 	// review P1: a copy switch that failed and could not be PROVEN resolved
@@ -614,6 +620,9 @@ public:
 	string get_rebuild_blocked();
 	void note_staged_result(bool switched);
 	bool is_snapshot_serving();
+	// outcome: 0 served, 1 refused, 2 aborted; `what` = reason
+	void note_capture(int outcome, const string& what);
+	void get_capture_stats(uint64_t& served, uint64_t& refused, uint64_t& aborted, string& last);
 	void set_rebuild_parked(bool b);
 	bool is_rebuild_parked();
 	// true if it was parked (the next attempt re-checks everything)

@@ -85,6 +85,42 @@ inline bool capacity_watch_ok(int64_t reserve, int64_t available, std::string& w
 	return available >= reserve;
 }
 
+/**
+ *	May a VERIFICATION CAPTURE (repl_snapshot in capture mode) start on this
+ *	node? A checkpoint is hard links (no copy at creation) plus a forced
+ *	memtable flush, but while it is streamed every file it holds stays
+ *	pinned: in the worst case compaction rewrites the whole copy meanwhile,
+ *	so the pin can grow to the copy's size (on tmpfs that is memory). The
+ *	bound used is that worst case: need = local copy bytes + reserve, which
+ *	must fit in what is available now. Unknown reserve / copy size / free
+ *	space = refuse (a capture is never worth starting on a guess).
+ */
+inline capacity_verdict decide_capture_capacity(int64_t reserve, bool copy_known, uint64_t copy_bytes,
+		int64_t available, uint64_t& need, std::string& why) {
+	need = 0;
+	std::ostringstream w;
+	if (reserve < 0) {
+		why = "rebuildReserveBytes is not set: a capture needs the reserve to bound its pin";
+		return capacity_reserve_unset;
+	}
+	if (!copy_known) {
+		why = "this node's copy size could not be read";
+		return capacity_source_unknown;
+	}
+	if (available < 0) {
+		why = "the free space under the data dir could not be read";
+		return capacity_space_unknown;
+	}
+	need = copy_bytes + static_cast<uint64_t>(reserve);
+	w << "need " << need << " bytes (worst-case pin = copy " << copy_bytes << " + reserve " << reserve
+		<< "), available " << available;
+	why = w.str();
+	if (static_cast<uint64_t>(available) < need) {
+		return capacity_insufficient;
+	}
+	return capacity_ok;
+}
+
 }	// namespace flare
 }	// namespace gree
 

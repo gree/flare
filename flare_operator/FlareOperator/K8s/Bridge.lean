@@ -305,7 +305,7 @@ def confLandedOnAllPods (crName ns needle : String) : IO Bool := do
     the file stays readable. Returns the empty string when neither section has
     anything to emit. -/
 def renderFlaredExtraConf (rocksdb : RocksdbConfigSpec)
-    (repl : Option ClusterReplicationSpec) : String :=
+    (repl : Option ClusterReplicationSpec) (offSnapshotPush : Bool := true) : String :=
   let rocksdbBlock := rocksdb.toExtraConf
   let replBlock := match repl with
     | some r =>
@@ -326,7 +326,11 @@ def renderFlaredExtraConf (rocksdb : RocksdbConfigSpec)
       -- procedure was two-step ("= false" + reload, THEN remove + reload)
       -- for exactly this reason; an always-present explicit value collapses
       -- it into one declarative line.
-      "cluster-replication = false"
+      -- With replication off the snapshot-push switch is still rendered
+      -- when the CR sets it false: flared then REFUSES an incoming push
+      -- (destination side, user decision 2026-10-13 item 1). Default true
+      -- renders nothing (file unchanged).
+      "cluster-replication = false" ++ (if offSnapshotPush then "" else "\ncluster-replication-snapshot-push = false")
   match rocksdbBlock, replBlock with
   | "", r  => r
   | a,  b  => a ++ "\n\n" ++ b
@@ -379,10 +383,11 @@ def updateFlaredReplicationConfig (crName ns : String) (repl : ClusterReplicatio
     overwrite a ConfigMap that may already contain other hand-edited keys
     when the user has not asked for any rocksdb tuning. -/
 def updateFlaredRocksdbConfig (crName ns : String) (rocksdb : RocksdbConfigSpec)
+    (offSnapshotPush : Bool := true)
     : IO (Except String Unit) := do
-  if !rocksdb.hasAny then
+  if !rocksdb.hasAny && offSnapshotPush then
     return .ok ()
-  let content := renderFlaredExtraConf rocksdb none
+  let content := renderFlaredExtraConf rocksdb none offSnapshotPush
   applyExtraConfConfigMap crName ns content
 
 /-- Rewrite {cr}-config with the replication block DISABLED (rocksdb
@@ -392,8 +397,9 @@ def updateFlaredRocksdbConfig (crName ns : String) (rocksdb : RocksdbConfigSpec)
     stops a running replication (reload ignores ABSENT keys, so plain
     removal would leave flared replicating on its stale in-memory true). -/
 def clearFlaredReplicationConfig (crName ns : String) (rocksdb : RocksdbConfigSpec := {})
+    (offSnapshotPush : Bool := true)
     : IO (Except String Unit) :=
-  applyExtraConfConfigMap crName ns (renderFlaredExtraConf rocksdb none)
+  applyExtraConfConfigMap crName ns (renderFlaredExtraConf rocksdb none offSnapshotPush)
 
 /-- Read status.migrationPhase from the FlareCluster CR (None when unset
     or unreadable — safe default: a fresh cluster has no migration). -/

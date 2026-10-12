@@ -129,7 +129,9 @@ spec:
     what the target operator would render anyway (rocksdb passthrough + the
     explicit replication-off line), so the first SIGHUP is a no-op. -/
 def configMapYaml (p : TargetPlan) : String :=
-  let content := FlareOperator.K8s.Bridge.renderFlaredExtraConf p.rocksdb (targetRepl p)
+  -- the same text the target operator renders for its CR (replication off,
+  -- the switch carried when false), so its first reconcile changes nothing
+  let content := FlareOperator.K8s.Bridge.renderFlaredExtraConf p.rocksdb none p.snapshotPush
   let indented := String.intercalate "\n    " (content.splitOn "\n")
   s!"apiVersion: v1
 kind: ConfigMap

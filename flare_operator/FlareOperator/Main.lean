@@ -1001,11 +1001,15 @@ private def handleRocksdbConfig (crd : FlareClusterView) (crName ns : String)
     (pendingConfRef : IO.Ref (Option (String × Nat))) : IO Unit := do
   let rocksdb := crd.spec.rocksdb
   IO.eprintln s!"[DEBUG] handleRocksdbConfig: hasAny={rocksdb.hasAny} walTtl={rocksdb.walTtlSeconds} walSize={rocksdb.walSizeLimitMb} sync={rocksdb.syncWrites}"
-  if !rocksdb.hasAny then
+  -- replication off but snapshotPush false: the switch must reach flared
+  -- (a destination refuses pushes), so the file is written even with no
+  -- rocksdb tuning (05eee82 per-key-only 6: the switch never arrived)
+  let offPush := crd.spec.clusterReplication.snapshotPush
+  if !rocksdb.hasAny && offPush then
     return  -- nothing to do; leave any existing ConfigMap alone
   if crd.spec.clusterReplication.enabled then
     return  -- handleClusterReplication will render both sections together
-  let desired := renderFlaredExtraConf rocksdb none
+  let desired := renderFlaredExtraConf rocksdb none offPush
   -- Skip if the ConfigMap already has exactly this content (avoid SIGHUP storm).
   match ← readFlaredExtraConf crName ns with
   | .ok current =>
@@ -1031,7 +1035,7 @@ private def handleRocksdbConfig (crd : FlareClusterView) (crName ns : String)
       IO.eprintln s!"[flare-operator] TEST SEAM: holding the rocksdb config write back for {secs}s"
       return
   IO.eprintln s!"[flare-operator] reconciling rocksdb config for {crName}"
-  match ← updateFlaredRocksdbConfig crName ns rocksdb with
+  match ← updateFlaredRocksdbConfig crName ns rocksdb offPush with
   | .error e =>
     IO.eprintln s!"[flare-operator] ERROR: failed to write rocksdb config: {e}"
   | .ok () =>
@@ -1113,7 +1117,7 @@ private def handleClusterReplication
       | .ok data => pure (containsSubstr data "cluster-replication = true")
       | .error _ => pure false
     if phase != .None || cmStillEnabled then
-      match ← clearFlaredReplicationConfig crName ns rocksdb with
+      match ← clearFlaredReplicationConfig crName ns rocksdb repl.snapshotPush with
       | .error e =>
         IO.eprintln s!"[flare-operator] ERROR: failed to clear replication config: {e} — retrying next tick"
       | .ok () =>
@@ -1141,7 +1145,7 @@ private def handleClusterReplication
   | some snap =>
     if !sameMasters snap masterSig then
       IO.eprintln s!"[flare-operator] WARNING: master changed during cluster replication (start={snap}, now={masterSig}) — ABORTING migration to avoid an inconsistent target (source failover is NOT blocked; migration auto-restarts once the cluster reconverges, or set enabled=false to stop)"
-      match ← clearFlaredReplicationConfig crName ns rocksdb with
+      match ← clearFlaredReplicationConfig crName ns rocksdb repl.snapshotPush with
       | .error e =>
         IO.eprintln s!"[flare-operator] ERROR: abort could not clear replication config: {e} — retrying next tick"
       | .ok () =>

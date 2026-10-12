@@ -2292,9 +2292,13 @@ def checkSnapshotPushSwitch (ctx : Ctx) : IO Unit := do
     (renderFlaredExtraConf {} none == "cluster-replication = false")
   -- item 1 (2026-10-13): a DESTINATION with replication off but the switch
   -- false renders it (flared then refuses an incoming push)
-  check ctx "snapshot-push switch: a destination block (enabled false, snapshotPush false) renders the switch"
-    (hasSub (renderFlaredExtraConf {} (some { enabled := false, snapshotPush := false })) "cluster-replication = false" &&
-     hasSub (renderFlaredExtraConf {} (some { enabled := false, snapshotPush := false })) "\ncluster-replication-snapshot-push = false")
+  -- (the operator renders a disabled replication through the `none` path
+  -- with the CR's switch: 05eee82 per-key-only 6 showed the switch dropped
+  -- when only the `some` path carried it)
+  check ctx "snapshot-push switch: replication OFF with snapshotPush false renders the switch (destination refuses pushes)"
+    (renderFlaredExtraConf {} none false == "cluster-replication = false\ncluster-replication-snapshot-push = false")
+  check ctx "snapshot-push switch: replication off with the default renders exactly the old line"
+    (renderFlaredExtraConf {} none true == "cluster-replication = false")
   -- FlareMigration gives a per-key-only source's switch to the target
   let plan : FlareOperator.Migration.Provision.TargetPlan := {
     migName := "m", ns := "ns", targetName := "tgt", partitions := 1, replicas := 2,
@@ -2308,9 +2312,10 @@ def checkSnapshotPushSwitch (ctx : Ctx) : IO Unit := do
     (hasSub (FlareOperator.Migration.Provision.flareClusterYaml pk) "\n  clusterReplication:\n    enabled: false\n    snapshotPush: false" &&
      hasSub (FlareOperator.Migration.Provision.configMapYaml pk) "cluster-replication-snapshot-push = false")
   -- the target operator renders the same config from that CR (first SIGHUP a no-op)
-  check ctx "migration target config equals what the target operator renders from the target CR"
+  check ctx "migration target config equals what the target operator renders from the target CR (replication off, switch false)"
     (hasSub (FlareOperator.Migration.Provision.configMapYaml pk)
-      (String.intercalate "\n    " ((renderFlaredExtraConf {} (some { enabled := false, snapshotPush := false })).splitOn "\n")))
+      (String.intercalate "\n    " ((renderFlaredExtraConf {} none false).splitOn "\n")) &&
+     !hasSub (FlareOperator.Migration.Provision.configMapYaml pk) "cluster-replication-server-name")
 
 def run : IO UInt32 := do
   let ctx : Ctx := { failures := ← IO.mkRef [], count := ← IO.mkRef 0 }

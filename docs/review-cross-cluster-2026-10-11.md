@@ -1056,6 +1056,38 @@ needs real-environment capture, which is unapproved.
 Recommendation: (1) + (2), and HMAC only if the RBAC split is not
 possible. That is the user's decision; nothing is implemented.
 
+### 16.5 Sixth-round runs
+
+- nix-linux 38194517215 (0b8c976): success, RocksDB 5364 tests and
+  legacy 3628, 0 failures, 1 omission each. The four new cutter tests ran
+  by name: the stalled peer was cut in 1.51 s and the deadline fired in
+  1.00 s.
+- E2E 38194519561 (0b8c976, 4 suites, targeted): **failure**, 13/16.
+  - backup-restore 4/4 (no T24 recurrence, which does not close T24).
+  - per-key-only 5/5, now with the guarded capture and the decoder pod.
+  - v-capture-resources 6/8:
+    - no_space refused before any pin (`capture_refused no_space`;
+      capture_refused counter 1→2; slot 0, no directory);
+    - total deadline cut at about 10 s (`aborted:deadline`);
+    - disconnect cut about 10 s after the reader left (`aborted:write`);
+    - busy and load as before (3000 sets 2936 ms without a capture vs 3488
+      ms with one, capture=true in the header).
+  - Failures, all three from test design, classified from logs:
+    1. kill -9: the suite had no volume. `/tmp/flare` is the container's own
+       filesystem, and the restarted flared logged "generated new master
+       id" with 0 keys. The capture is not involved. Fixed in 975c217 with
+       a PVC.
+    2. Stalled reader: the 40 MB load ran in one exec past the kubectl
+       wrapper's 30 s wall ("0/40000 STORED in 30004 ms"), so the guard was
+       never exercised. Fixed with ≤4 MB batches.
+    3. blue-green stale MATCH: the 60 s wait expired at "key counts not
+       converged (61/61, 5/6 ticks)". The source was never switched, and
+       the extra write re-runs the dwell before the approval is checked.
+       The wait is now 180 s.
+  - The guarded stalled-reader cut and the crash cleanup are therefore NOT
+    yet shown in E2E.
+- E2E 38198924465 (975c217, which also carries 655faa1/f5fd22b): pending.
+
 ## UNKNOWN
 
 - whether a blocking connect to a black-holed LB address reaches the

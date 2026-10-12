@@ -1350,7 +1350,8 @@ No write fence is implemented or installed.
   - Not shown: whether the follow recorded the approval as consumed. The
     test printed the wrong status field (`consumedApproval`, not
     `forwardApprovalConsumed`). The path is fixed and an assertion added
-    after this run; that is NOT yet run.
+    after this run; E2E 38226570975 (ef7796b, blue-green only) passed 16/16 with it.
+    That run shows `forwardApprovalConsumed` = the MATCH line after the follow.
   - T24: no recurrence (0 connect failures). Pod IPs were .10/.12 before
     the recreation and .13/.14 after. Whether .20 in 38215512251 was an old
     address is still unknown (that run did not record the earlier IPs).

@@ -254,35 +254,102 @@ def NodeIdent.parse (s : String) : Option NodeIdent :=
 structure PodRepl where
   pod : String
   replicating : Bool
-  /-- `cluster_replication_mode` ("duplicate" / "forward"; "" if absent) -/
+  /-- `cluster_replication_mode` ("duplicate" / "forward"; "" if off) -/
   mode : String
-  /-- every asynchronous (duplicate-mode) forward this process enqueued has
-      a terminal outcome: forward_enqueued ≤ applied + noop + missing +
-      failed + dropped (abandoned / down / unknown op) -/
-  settled : Bool
+  /-- `cluster_replication_forward_in_flight`: asynchronous forwards that
+      exist right now (made, not yet destroyed), read with the counters at
+      one moment (stats::get_crepl_snapshot) -/
+  inFlight : Nat
+  /-- `cluster_replication[forward_enqueued]` -/
+  enqueued : Nat
+  /-- the sum of every TERMINAL outcome counter (`forwardTerminal`) -/
+  terminal : Nat
   deriving Repr, BEq
 
+/-- Nothing in flight, and every forward that was queued has exactly one
+    terminal outcome. With nothing in flight the two counters must be EQUAL:
+    more outcomes than forwards (a counter counted twice, or one from
+    another use) or fewer (a path that ends a forward without an outcome)
+    are both a disagreement, never "drained". -/
+def PodRepl.settled (p : PodRepl) : Bool :=
+  p.inFlight == 0 && p.enqueued == p.terminal
+
+/-- Every way an enqueued cross-cluster forward ends (queue_proxy_write.cc
+    _run_foreign / on_abandoned; handler_cluster_replication shutdown after
+    dequeue → on_abandoned). Each forward reaches exactly one of them. -/
+def forwardTerminal (name : String) : Bool :=
+  name == "forward_applied" || name.startsWith "forward_noop_"
+    || name.startsWith "forward_missing_" || name.startsWith "forward_failed_"
+    || name == "forward_dropped_abandoned" || name == "forward_dropped_down"
+    || name == "forward_dropped_stopping" || name == "forward_dropped_retries"
+    || name == "forward_dropped_unknown_op"
+
+/-- Counters known NOT to be an outcome of an enqueued forward:
+    `forward_dropped_unqueued` is counted INSTEAD of forward_enqueued (the
+    queue never took it), the retry counters count attempts, seed_* is the
+    seed. Any other `cluster_replication[...]` name is unknown → the reply is
+    not trusted (a new counter is never silently summed or ignored). -/
+def forwardNonTerminal (name : String) : Bool :=
+  name == "forward_enqueued" || name == "forward_dropped_unqueued"
+    || name == "forward_retried" || name == "forward_server_error_retried"
+    || name.startsWith "seed_"
+
 /-- The pure part of `sourcePodsRepl`: one pod's stats reply → its applied
-    replication state. `none` when the reply is incomplete (no END). -/
+    replication state, or why it is not trusted. Strict (review 2026-10-12):
+    the reply must end with END and contain only `STAT <name> <value>`
+    lines with no name twice; `cluster_replication` must be on/off, its mode
+    present when on, and `cluster_replication_forward_in_flight` present —
+    that gauge is sent with the counters from one moment, so with it an
+    absent counter is 0; without it (an older flared) nothing is known.
+    Every counter must be a number and a known name. -/
+def podReplParse (pod : String) (out : String) : Except String PodRepl := do
+  let lines := ((out.splitOn "\n").map (fun l => (l.replace "\r" "").trim)).filter (!·.isEmpty)
+  if lines.getLast? != some "END" then throw "no END (incomplete reply)"
+  let body := lines.dropLast
+  if body.contains "END" then throw "END before the last line"
+  let mut seen : List String := []
+  let mut pairs : List (String × String) := []
+  for t in body do
+    match t.splitOn " " with
+    | "STAT" :: name :: rest =>
+      if name.isEmpty || rest.isEmpty then throw s!"malformed line '{t}'"
+      if seen.contains name then throw s!"stat {name} appears twice"
+      seen := name :: seen
+      pairs := pairs ++ [(name, " ".intercalate rest)]
+    | _ => throw s!"malformed line '{t}'"
+  let stat := fun (n : String) => (pairs.find? (·.1 == n)).map (·.2)
+  let replicating ← match stat "cluster_replication" with
+    | some "on" => pure true
+    | some "off" => pure false
+    | some v => throw s!"cluster_replication is '{v}'"
+    | none => throw "cluster_replication absent"
+  let mode ← match stat "cluster_replication_mode" with
+    | some m => pure m
+    | none => if replicating then throw "cluster_replication_mode absent while on" else pure ""
+  let inFlight ← match (stat "cluster_replication_forward_in_flight").map String.toNat? with
+    | some (some n) => pure n
+    | some none => throw "cluster_replication_forward_in_flight is not a number"
+    | none => throw "cluster_replication_forward_in_flight absent (older flared: in-flight forwards unknown)"
+  let mut enqueued := 0
+  let mut terminal := 0
+  for (name, v) in pairs do
+    if name.startsWith "cluster_replication[" then
+      let inner := ((name.drop "cluster_replication[".length).splitOn "]")
+      let key ← match inner with
+        | [k, ""] => pure k
+        | _ => throw s!"malformed counter name {name}"
+      let n ← match v.toNat? with
+        | some n => pure n
+        | none => throw s!"counter {key} is '{v}', not a number"
+      if key == "forward_enqueued" then enqueued := n
+      else if forwardTerminal key then terminal := terminal + n
+      else if !forwardNonTerminal key then throw s!"unknown counter {key}"
+  return { pod, replicating, mode, inFlight, enqueued, terminal }
+
 def podReplOf (pod : String) (out : String) : Option PodRepl :=
-  let lines := (out.splitOn "\n").map (fun l => l.trim.replace "\r" "")
-  if !lines.contains "END" then none
-  else
-    let stat := fun (name : String) => lines.findSome? fun t =>
-      if t.startsWith s!"STAT {name} " then some (t.drop s!"STAT {name} ".length).trim else none
-    let counter := fun (pred : String → Bool) => lines.foldl (fun acc t =>
-      if t.startsWith "STAT cluster_replication[" then
-        let inner := ((t.drop "STAT cluster_replication[".length).splitOn "]").headD ""
-        let v := ((t.splitOn " ").getLast?.bind (·.toNat?)).getD 0
-        if pred inner then acc + v else acc
-      else acc) 0
-    let enqueued := counter (· == "forward_enqueued")
-    let settled := counter fun i =>
-      i == "forward_applied" || i.startsWith "forward_noop_" || i.startsWith "forward_missing_"
-        || i.startsWith "forward_failed_" || i == "forward_dropped_abandoned"
-        || i == "forward_dropped_down" || i == "forward_dropped_unknown_op"
-    some { pod, replicating := stat "cluster_replication" == some "on"
-           mode := (stat "cluster_replication_mode").getD "", settled := enqueued ≤ settled }
+  match podReplParse pod out with
+  | .ok r => some r
+  | .error _ => none
 
 /-- Why the source pods do not all apply `want` with nothing in flight
     (`none` = they do). Unreadable or empty = held (fail closed). -/
@@ -293,9 +360,12 @@ def podsHold (want : String) : Option (List PodRepl) → Option String
     match ps.find? (fun p => !p.replicating || p.mode != want) with
     | some p => some s!"source pod {p.pod} applies {if p.replicating then (if p.mode.isEmpty then "an unreported mode" else p.mode) else "no replication"}; every source pod must apply {want}"
     | none =>
-      match ps.find? (fun p => !p.settled) with
-      | some p => some s!"source pod {p.pod} still has asynchronous forwards in flight (forward_enqueued above its settled outcomes)"
-      | none => none
+      match ps.find? (fun p => p.inFlight != 0) with
+      | some p => some s!"source pod {p.pod} has {p.inFlight} asynchronous forward(s) in flight"
+      | none =>
+        match ps.find? (fun p => !p.settled) with
+        | some p => some s!"source pod {p.pod}: nothing in flight but forward_enqueued {p.enqueued} ≠ terminal outcomes {p.terminal} (a forward without an outcome, or an outcome counted twice) — not drained"
+        | none => none
 
 /-- One tick's worth of world state, gathered by the IO layer. -/
 structure MigObs where

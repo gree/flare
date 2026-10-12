@@ -2039,7 +2039,7 @@ def checkMigrationForwardGate (ctx : Ctx) : IO Unit := do
   let appr := s!"v=1|verdict=MATCH|verified_at=5000|{bind}"
   -- every source pod's APPLIED state (any role): duplicate before, forward after
   let pr (pod mode : String) (settled : Bool := true) (rep : Bool := true) : PodRepl :=
-    { pod, replicating := rep, mode, settled }
+    { pod, replicating := rep, mode, inFlight := if settled then 0 else 1, enqueued := 0, terminal := 0 }
   let dup := some [pr "s0" "duplicate", pr "s1" "duplicate"]
   let fwd := some [pr "s0" "forward", pr "s1" "forward"]
   let ok : MigObs := { convergedTicks := 6, seedCompleted := true, loss := .clean, attemptId := attempt,
@@ -2134,12 +2134,59 @@ def checkMigrationForwardGate (ctx : Ctx) : IO Unit := do
       && (migStep { withA with abort := true } open_ { ok with sourcePods := some [pr "s0" "duplicate", pr "s1" "forward"] }).2 != .doAbort
       && (migStep { withA with abort := true } open_ { ok with sourceForwardApplied := true }).2 != .doAbort
       && (migStep { withA with abort := true } open_ ok).2 == .doAbort)
-  let statsReply := "STAT cluster_replication on\r\nSTAT cluster_replication_mode forward\r\nSTAT cluster_replication[forward_enqueued] 10\r\nSTAT cluster_replication[forward_applied] 7\r\nSTAT cluster_replication[forward_noop_delete_not_found] 1\r\nSTAT cluster_replication[forward_failed_set_server_error] 1\r\nSTAT cluster_replication[forward_dropped_down] 1\r\nEND\r\n"
-  check ctx "podReplOf: applied mode and settled = enqueued ≤ applied + noop + missing + failed + dropped; incomplete reply → unreadable"
-    (podReplOf "s0" statsReply == some (pr "s0" "forward")
-      && podReplOf "s0" (statsReply.replace "forward_applied] 7" "forward_applied] 6") == some (pr "s0" "forward" (settled := false))
-      && podReplOf "s0" (statsReply.replace "END\r\n" "") == none
-      && podReplOf "s0" "STAT cluster_replication off\r\nEND\r\n" == some (pr "s0" "" (rep := false)))
+  -- strict stats parsing (review 2026-10-12): the old reader summed
+  -- getD-0 counters, so END + on + duplicate alone read as drained
+  let st (lines : List String) : String := String.join (lines.map (· ++ "\r\n")) ++ "END\r\n"
+  let sbase := ["STAT pid 7", "STAT cluster_replication on", "STAT cluster_replication_mode duplicate"]
+  let gauge (n : Nat) := s!"STAT cluster_replication_forward_in_flight {n}"
+  let cn (k : String) (n : String) := s!"STAT cluster_replication[{k}] {n}"
+  let settledOf (out : String) : Option Bool := (podReplOf "s0" out).map PodRepl.settled
+  check ctx "podReplOf counterexamples that the old reader called drained: no in-flight gauge / non-numeric counter / a name twice / unknown counter / END not last / malformed line → unreadable"
+    (podReplOf "s0" (st sbase) == none
+      && podReplOf "s0" (st (sbase ++ [gauge 0, cn "forward_enqueued" "abc"])) == none
+      && podReplOf "s0" (st (sbase ++ [gauge 0, cn "forward_enqueued" "-1"])) == none
+      && podReplOf "s0" (st (sbase ++ [gauge 0, cn "forward_enqueued" "2", cn "forward_enqueued" "0"])) == none
+      && podReplOf "s0" (st (sbase ++ [gauge 0, gauge 0])) == none
+      && podReplOf "s0" (st (sbase ++ [gauge 0, cn "forward_new_outcome" "1"])) == none
+      && podReplOf "s0" (st (sbase ++ [gauge 0]) ++ "STAT late 1\r\n") == none
+      && podReplOf "s0" ((st (sbase ++ [gauge 0])).replace "END\r\n" "") == none
+      && podReplOf "s0" (st (sbase ++ [gauge 0, "garbage"])) == none
+      && podReplOf "s0" (st (sbase ++ ["STAT cluster_replication_forward_in_flight x"])) == none
+      && podReplOf "s0" (st ["STAT cluster_replication on", gauge 0]) == none
+      && podReplOf "s0" (st [gauge 0]) == none
+      && podReplOf "s0" (st ["STAT cluster_replication maybe", gauge 0]) == none)
+  check ctx "podReplOf: in flight > 0 is never settled, whatever the counters say (queued but not yet counted enqueued; answered but not released)"
+    (settledOf (st (sbase ++ [gauge 1])) == some false
+      && settledOf (st (sbase ++ [gauge 1, cn "forward_enqueued" "3", cn "forward_applied" "3"])) == some false
+      && settledOf (st (sbase ++ [gauge 0])) == some true
+      && settledOf (st (sbase ++ [gauge 0, cn "forward_enqueued" "3", cn "forward_applied" "3"])) == some true)
+  check ctx "podReplOf: every terminal path counts — dropped_stopping / dropped_retries (missing before: such a pod never read as drained) and the rest"
+    (settledOf (st (sbase ++ [gauge 0, cn "forward_enqueued" "2", cn "forward_dropped_stopping" "1", cn "forward_dropped_retries" "1"])) == some true
+      && settledOf (st (sbase ++ [gauge 0, cn "forward_enqueued" "9", cn "forward_applied" "1", cn "forward_noop_set_not_stored" "1",
+           cn "forward_missing_touch_not_found" "1", cn "forward_failed_set_server_error" "1", cn "forward_dropped_abandoned" "1",
+           cn "forward_dropped_down" "1", cn "forward_dropped_stopping" "1", cn "forward_dropped_retries" "1", cn "forward_dropped_unknown_op" "1"])) == some true)
+  check ctx "podReplOf: with nothing in flight the counters must be EQUAL — more outcomes than forwards (double count / foreign counter) or fewer (an unaccounted path) is not drained; non-terminal counters are not outcomes"
+    (settledOf (st (sbase ++ [gauge 0, cn "forward_enqueued" "1", cn "forward_applied" "2"])) == some false
+      && settledOf (st (sbase ++ [gauge 0, cn "forward_enqueued" "2", cn "forward_applied" "1"])) == some false
+      && settledOf (st (sbase ++ [gauge 0, cn "forward_applied" "1"])) == some false
+      && settledOf (st (sbase ++ [gauge 0, cn "forward_enqueued" "1", cn "forward_dropped_unqueued" "1"])) == some false
+      && settledOf (st (sbase ++ [gauge 0, cn "forward_enqueued" "1", cn "forward_retried" "1"])) == some false
+      && settledOf (st (sbase ++ [gauge 0, cn "forward_enqueued" "1", cn "forward_server_error_retried" "1"])) == some false
+      && settledOf (st (sbase ++ [gauge 0, cn "forward_enqueued" "1", cn "forward_applied" "1", cn "seed_completed" "4", cn "forward_dropped_unqueued" "3", cn "forward_retried" "2"])) == some true)
+  check ctx "podReplOf: off needs no mode; mode and gauge read back"
+    (podReplOf "s0" (st ["STAT cluster_replication off", gauge 0]) == some { pod := "s0", replicating := false, mode := "", inFlight := 0, enqueued := 0, terminal := 0 }
+      && (podReplOf "s0" (st (sbase ++ [gauge 2]))).map (·.inFlight) == some 2
+      && (podReplOf "s0" ((st (sbase ++ [gauge 0])).replace "\r\n" "\n")).isSome)
+  -- the gate fed by PARSED replies (the stats path the controller uses)
+  let parsed (outs : List String) : Option (List PodRepl) := outs.mapM (podReplOf "s0")
+  let dupOk := st (sbase ++ [gauge 0, cn "forward_enqueued" "5", cn "forward_applied" "5"])
+  check ctx "switch gate on parsed replies: a pod with a forward in flight, an old-format reply, or disagreeing counters → no switch and stays Forwarding; all drained → switch"
+    ((migStep withA open_ { ok with sourcePods := parsed [dupOk, st (sbase ++ [gauge 1, cn "forward_enqueued" "5", cn "forward_applied" "5"])] }).2 == .none
+      && (migStep withA open_ { ok with sourcePods := parsed [dupOk, st sbase] }).2 == .none
+      && (migStep withA open_ { ok with sourcePods := parsed [dupOk, st (sbase ++ [gauge 0, cn "forward_enqueued" "5", cn "forward_applied" "4"])] }).2 == .none
+      && (migStep withA open_ { ok with sourcePods := parsed [dupOk, dupOk] }).2 != .none
+      && ((podsHold "duplicate" (parsed [st (sbase ++ [gauge 3])])).getD "").endsWith "in flight"
+      && (migStep withA .Forwarding { ok with sourceForwardApplied := true, sourcePods := parsed [st ["STAT cluster_replication on", "STAT cluster_replication_mode forward", gauge 1]] }).1 == .Forwarding)
   -- loss over the whole attempt
   check ctx "migration loss: unchanged counters over the attempt → clean"
     (lossVerdict base (some done) == .clean)

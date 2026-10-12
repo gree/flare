@@ -241,9 +241,11 @@ def sourcePodsRepl (crName ns : String) : IO (Option (List PodRepl)) := do
       match ← queryPodStats p.name ns "stats" with
       | .error _ => return none
       | .ok reply =>
-        match podReplOf p.name reply with
-        | none => return none
-        | some r => out := out ++ [r]
+        match podReplParse p.name reply with
+        | .error why =>
+          IO.eprintln s!"[migration] source pod {p.name}: replication state not trusted ({why}) — switch held"
+          return none
+        | .ok r => out := out ++ [r]
     return some out
 
 /-- Counters of every source partition master; `none` if any is unreadable
@@ -423,6 +425,18 @@ def tick (crName ns : String) : IO Unit := do
           pure s!"action failed (will retry): {e}"
       if phase' != mig.phase || action != .none then
         IO.eprintln s!"[migration] {mig.name}: {mig.phase.toString} -> {phase'.toString} ({repr action}) {msg}"
+      -- TEST SEAM (E2E only, review 2026-10-12): while the file named by
+      -- FLARE_TEST_MIG_WEDGE_AFTER_SWITCH_FILE exists, the tick that issued
+      -- the forward switch stops HERE — after the CR patch, before the
+      -- status patch — so the test can change the spec and replace this
+      -- process at that exact point (a crash in the window, made
+      -- deterministic). A restarted container starts without the file.
+      if action == .switchForward && !msg.startsWith "action failed" then
+        if let some f := (← IO.getEnv "FLARE_TEST_MIG_WEDGE_AFTER_SWITCH_FILE") then
+          if !f.isEmpty && (← System.FilePath.pathExists f) then
+            IO.eprintln s!"[migration] TEST SEAM: wedged after the forward switch CR patch, before the status patch (FLARE_TEST_MIG_WEDGE_AFTER_SWITCH_FILE)"
+            while (← System.FilePath.pathExists f) do
+              IO.sleep 1000
       -- A failed action must not advance the phase, or the FSM skips work
       -- (e.g. Provisioning marked done with nothing created). Stay put and
       -- retry next tick; only publish the observation refresh.

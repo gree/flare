@@ -444,6 +444,14 @@ def forwardAppliedHold (spec : MigSpec) (obs : MigObs) : Option String :=
     | none => (approvalHold spec.forwardApproval obs).map
         ("after the forward apply the approval no longer matches (keep writes stopped; re-run V and set a new forwardApproval): " ++ ·)
 
+/-- The source ALREADY shows the forward switch: forward rendered in its
+    config, or any source pod applying forward. Then clients may already be
+    on the target (a pod in forward mode proxies them there), whatever the
+    recorded phase says — e.g. an operator crash between the CR patch and
+    the status patch left the phase at Duplicating. -/
+def MigObs.forwardSeen (obs : MigObs) : Bool :=
+  obs.sourceForwardApplied || (obs.sourcePods.getD []).any (·.mode == "forward")
+
 /-! ## Actions -/
 
 inductive MigAction where
@@ -467,7 +475,7 @@ def migStep (spec : MigSpec) (phase : MigPhase) (obs : MigObs) : MigPhase × Mig
     (phase, .none)
   -- abort: honored from any phase before the point of no return; refused
   -- after (clients may already be on the target). Terminal phases stay put.
-  else if spec.abort && !phase.abortRefused && !phase.terminal then
+  else if spec.abort && !phase.abortRefused && !obs.forwardSeen && !phase.terminal then
     -- keep issuing the (idempotent) rollback; land on Aborted the tick after
     ((if phase == .Aborting then .Aborted else .Aborting), .doAbort)
   else
@@ -477,7 +485,10 @@ def migStep (spec : MigSpec) (phase : MigPhase) (obs : MigObs) : MigPhase × Mig
       if obs.targetReady then (.Duplicating, .startDuplicate)
       else (.Provisioning, .none)
     | .Duplicating =>
-      if (forwardHold spec obs).isNone then (.Forwarding, .switchForward)
+      -- the switch already reached the source (not recorded): follow it to
+      -- Forwarding WITHOUT re-issuing it; Forwarding's own check decides
+      if obs.forwardSeen then (.Forwarding, .none)
+      else if (forwardHold spec obs).isNone then (.Forwarding, .switchForward)
       else (.Duplicating, .none)
     | .Forwarding =>
       if (forwardAppliedHold spec obs).isNone then (.AwaitingCutover, .none)
@@ -511,10 +522,10 @@ theorem migStep_cutover_requires_approval (spec : MigSpec) (phase : MigPhase) (o
     spec.approveCutover = true := by
   by_cases hp : spec.paused
   · simp [migStep, hp] at h
-  · by_cases ha : spec.abort && !phase.abortRefused && !phase.terminal
+  · by_cases ha : spec.abort && !phase.abortRefused && !obs.forwardSeen && !phase.terminal
     · cases phase <;> simp_all [migStep]
     · cases phase <;> by_cases hc : spec.approveCutover <;>
-        simp_all [migStep, convergenceDwellTicks] <;> split at h <;> simp_all
+        simp_all [migStep, convergenceDwellTicks] <;> split at h <;> (try split at h) <;> simp_all
 
 /-- Retiring (deleting the source cluster) happens only with the user's
     explicit approval. -/
@@ -523,10 +534,10 @@ theorem migStep_retire_requires_approval (spec : MigSpec) (phase : MigPhase) (ob
     spec.approveRetire = true := by
   by_cases hp : spec.paused
   · simp [migStep, hp] at h
-  · by_cases ha : spec.abort && !phase.abortRefused && !phase.terminal
+  · by_cases ha : spec.abort && !phase.abortRefused && !obs.forwardSeen && !phase.terminal
     · cases phase <;> simp_all [migStep]
     · cases phase <;> by_cases hr : spec.approveRetire <;>
-        simp_all [migStep, convergenceDwellTicks] <;> split at h <;> simp_all
+        simp_all [migStep, convergenceDwellTicks] <;> split at h <;> (try split at h) <;> simp_all
 
 /-- Abort is never acted on once the migration is past the point of no
     return: after cutover the external Service already points at the target,
@@ -547,6 +558,23 @@ theorem migStep_no_abort_after_forward (spec : MigSpec) (phase : MigPhase) (obs 
   · simp [migStep, hp]
   · cases phase <;> simp_all [migStep, MigPhase.abortRefused] <;>
       split <;> simp_all
+
+/-- Once the source shows the forward switch (rendered or applied by any
+    pod), abort is never acted on — in ANY phase, including a Duplicating
+    left behind by a crash between the CR patch and the status patch. -/
+theorem migStep_no_abort_once_forward_seen (spec : MigSpec) (phase : MigPhase) (obs : MigObs)
+    (h : obs.forwardSeen = true) (hp : phase ≠ .Aborting) :
+    (migStep spec phase obs).2 ≠ .doAbort := by
+  by_cases hpa : spec.paused
+  · simp [migStep, hpa]
+  · cases phase <;> simp_all [migStep] <;> split <;> simp_all
+
+/-- In Duplicating, a source that already shows forward moves the phase to
+    Forwarding with no action (the switch is not re-issued, and not undone). -/
+theorem migStep_duplicating_follows_seen_forward (spec : MigSpec) (obs : MigObs)
+    (h : obs.forwardSeen = true) (hp : spec.paused = false) :
+    migStep spec .Duplicating obs = (.Forwarding, .none) := by
+  simp [migStep, h, hp]
 
 theorem forwardHold_none (spec : MigSpec) (obs : MigObs) (h : forwardHold spec obs = none) :
     approvalHold spec.forwardApproval obs = none ∧ obs.seedCompleted = true ∧ obs.loss = .clean ∧
@@ -609,9 +637,9 @@ theorem migStep_forward_requires_approval_and_evidence (spec : MigSpec) (phase :
   apply forwardHold_none
   by_cases hp : spec.paused
   · simp [migStep, hp] at h
-  · by_cases ha : spec.abort && !phase.abortRefused && !phase.terminal
+  · by_cases ha : spec.abort && !phase.abortRefused && !obs.forwardSeen && !phase.terminal
     · cases phase <;> simp_all [migStep]
-    · cases phase <;> simp_all [migStep] <;> split at h <;> simp_all
+    · cases phase <;> simp_all [migStep] <;> split at h <;> (try split at h) <;> simp_all
 
 /-- Forwarding reaches AwaitingCutover only when the source applied forward
     mode AND the same approval still holds against the live masters (no

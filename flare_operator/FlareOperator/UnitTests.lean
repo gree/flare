@@ -2128,6 +2128,12 @@ def checkMigrationForwardGate (ctx : Ctx) : IO Unit := do
       && (migStep withA .Forwarding { ok with sourceForwardApplied := true, sourcePods := some [pr "s0" "forward", pr "s1" "forward" (settled := false)] }).1 == .Forwarding
       && (migStep withA .Forwarding { ok with sourceForwardApplied := true, sourcePods := none }).1 == .Forwarding
       && ((forwardAppliedHold withA { ok with sourceForwardApplied := true, sourcePods := some [pr "s0" "forward", pr "s1" "duplicate"] }).getD "").startsWith "forward mode is rendered but not yet applied")
+  check ctx "crash between the CR patch and the status patch: Duplicating with forward rendered OR any pod applying forward → Forwarding, no re-issue; abort refused"
+    (migStep withA open_ { ok with sourceForwardApplied := true } == (.Forwarding, .none)
+      && migStep withA open_ { ok with sourcePods := some [pr "s0" "duplicate", pr "s1" "forward"] } == (.Forwarding, .none)
+      && (migStep { withA with abort := true } open_ { ok with sourcePods := some [pr "s0" "duplicate", pr "s1" "forward"] }).2 != .doAbort
+      && (migStep { withA with abort := true } open_ { ok with sourceForwardApplied := true }).2 != .doAbort
+      && (migStep { withA with abort := true } open_ ok).2 == .doAbort)
   let statsReply := "STAT cluster_replication on\r\nSTAT cluster_replication_mode forward\r\nSTAT cluster_replication[forward_enqueued] 10\r\nSTAT cluster_replication[forward_applied] 7\r\nSTAT cluster_replication[forward_noop_delete_not_found] 1\r\nSTAT cluster_replication[forward_failed_set_server_error] 1\r\nSTAT cluster_replication[forward_dropped_down] 1\r\nEND\r\n"
   check ctx "podReplOf: applied mode and settled = enqueued ≤ applied + noop + missing + failed + dropped; incomplete reply → unreadable"
     (podReplOf "s0" statsReply == some (pr "s0" "forward")

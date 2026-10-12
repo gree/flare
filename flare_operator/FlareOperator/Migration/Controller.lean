@@ -444,6 +444,9 @@ def tick (crName ns : String) : IO Unit := do
       let msg := if msg.isEmpty && mig.spec.abort && mig.phase.abortRefused && !mig.phase.terminal then
           "abort REFUSED: the forward switch was issued — the target holds acknowledged writes the source does not; deleting it would lose them (RUNBOOK #migration-forward-abort)"
         else msg
+      let msg := if msg.isEmpty && mig.phase == .Duplicating && publishPhase == .Forwarding && action == .none then
+          "the source already shows forward mode (switch not recorded, e.g. an operator crash after the CR patch): following it to Forwarding without re-issuing it; abort refused from here"
+        else msg
       let msg := if msg.isEmpty && publishPhase == .Duplicating then
           ((forwardHold mig.spec obs).map (s!"holding before the forward switch: " ++ ·)).getD ""
         else msg
@@ -456,8 +459,11 @@ def tick (crName ns : String) : IO Unit := do
             IO.eprintln s!"[migration] {mig.name}: counts converged but the forward switch is held: {why}"
       -- one use: the approval a switch was issued with is recorded with the
       -- phase change (a failed action does not consume it)
+      -- (also when the phase follows a forward the source already shows: a
+      -- crash between the CR patch and this status patch)
       let consumed :=
-        if action == .switchForward && !msg.startsWith "action failed" then mig.spec.forwardApproval
+        if (action == .switchForward || (mig.phase == .Duplicating && publishPhase == .Forwarding))
+            && !msg.startsWith "action failed" then mig.spec.forwardApproval
         else mig.consumedApproval
       patchStatus mig ns publishPhase obs msg baseline attemptId consumed
 

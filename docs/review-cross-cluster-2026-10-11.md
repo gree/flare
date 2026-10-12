@@ -852,6 +852,210 @@ passes and skips separate (273 / 22 there).
       replica unavailability (park, plus a 5 min resume backoff). Recorded as
       a residual; no behaviour was changed.
 
+## 16. Sixth round (2026-10-12): T24 cause, capture guards, switch window, approval threat model
+
+### 16.1 T24 (backup-restore, 38186142795): cause still UNDETERMINED
+
+The single rerun 38191952092 (efb9abc, same code) passed. That does not
+close T24. The earlier pass 38145285059 took 26 s against 15 s here, which
+fits one park-and-resume cycle; that is unverified, because passing runs
+keep no pod logs.
+
+Established from the failing run's logs (n0/n1 = nodes-0/1 flared, op =
+operator):
+
+- The WAL-sync connection from n1 resolved and reached the NEW nodes-0
+  (10.244.0.60). n0 logged that connection server-side at 00:31:51.634464
+  and at 00:32:00.641611.
+- About 1 ms later, the size probe (`probe_source_identity`, a fresh
+  `connection_tcp`, so a second, separate `getaddrinfo`) got ETIMEDOUT
+  twice per attempt, in two attempts. ETIMEDOUT here means no SYN-ACK,
+  RST or ICMP within 3 s.
+- During the first timeout window the operator's own connection to
+  .60:12121 was reply-confirmed (op 00:31:51.7076), so the listener was
+  accepting. n0 logs no accept, backlog or max_connection error.
+- `util::gethostbyname` copies only the FIRST getaddrinfo result
+  (util.cc:92-113). There is no cache and no nscd. The headless Service has
+  `publishNotReadyAddresses: true`.
+- Both pods were force-deleted together. The old nodes-0 IP was .57.
+
+**Hypothesis (unproven):** the probe's separate lookup returned a stale
+address, most plausibly the old pod's .57, whose SYNs were black-holed.
+Possible mechanisms:
+- per-query CoreDNS replica choice, where a replica holds a cached old
+  answer (`cache 30`);
+- an EndpointSlice briefly holding both addresses, of which flare takes the
+  first.
+
+Not excluded: a drop at the path or iptables level that affects only the
+probe. Getting good-then-bad twice by chance is about 1 in 16.
+
+Added to settle it next time (c989c02, 0b8c976):
+- connect failures log host AND resolved IP;
+- the E2E failure dump adds EndpointSlices (addresses, hostnames, ready)
+  and the CoreDNS replicas and Corefile;
+- backup-restore, on a recovery timeout, resolves every pod name 5× from
+  every pod and prints each pod's IP.
+
+Behaviour is unchanged. Two things are not decided here: reusing the
+WAL connection's address for the probe, and iterating over all addresses.
+
+### 16.2 Capture resource guards (0b8c976)
+
+The kind driver now sends `repl_snapshot 0 capture 120`. flared
+(op_repl_snapshot, capture mode only):
+
+| guard | when | result |
+|---|---|---|
+| a rebuild in flight on the node | before any pin or flush | `capture_refused rebuild_in_flight` |
+| reserve / copy size / free space unknown (tmpfs: cgroup headroom, as for rebuilds) | before | `capture_refused reserve_unset / source_size_unknown / space_unknown` |
+| free < copy + reserve (worst-case pin: compaction may rewrite the whole copy while it is pinned) | before | `capture_refused no_space` |
+| one serve per node | at the checkpoint | `busy` (refused, never queued); the driver captures pods one at a time |
+| peer connected but not reading | while streaming | write-progress timeout 30 s → `aborted:no_progress`; socket closed |
+| total duration | while streaming | min(requested, 600 s) → `aborted:deadline` (checked at the next write: up to one chunk's throttle sleep late) |
+| free space falls below the reserve | while streaming (≤ 1/s) | `aborted:no_space` |
+| any exit | — | checkpoint removed, deletions unpinned, slot freed; at open every `snapshot.serve.*` is removed (crash) |
+
+Other changes in the same commit:
+- The reply header carries the token `capture`. The receiver run with
+  `--require-capture` refuses a server that ignored the mode (an older
+  flared serves WITHOUT the guards).
+- New stats: `rocksdb_capture_{served,refused,aborted,last}`.
+- Decoding runs in a throwaway decoder pod (same image, no data, 50m /
+  64Mi requests). It no longer copies into, or uses CPU and memory in, the
+  captured pod.
+
+Tests:
+- cutter: write bounds ×3 (stalled peer → -4, deadline → -5, a reading
+  peer unaffected) and the capacity rule;
+- receiver: 14 fixtures;
+- E2E v-capture-resources, +5 tests: no_space refused with nothing pinned;
+  a stalled reader cut while still connected; total deadline; disconnect;
+  kill -9 mid-capture leaves no serve directory, with curr_items unchanged.
+
+Not guaranteed:
+- **Reseed serves are unchanged.** A replica's `repl_snapshot` still has no
+  write bound, so a stalled replica is not cut.
+- The bound is conservative. It refuses captures on nodes with less than
+  copy + reserve free.
+- Check-then-act: growth between the check and the checkpoint is covered
+  only by the reserve.
+- The flush itself is not prevented, only gated.
+- No cluster-wide limit beyond the driver's serial loop.
+- Kind only. The load numbers are not capacity measurements.
+
+### 16.3 The switch window: premise, actual gates, client-visible effects (655faa1, f5fd22b)
+
+Facts:
+- Forward mode acts in `on_pre_proxy_read/write` on the pod the client
+  connects to, whatever its role. A forward-mode write is sent to the
+  target synchronously; a read is served from the target.
+- Duplicate mode writes on the source master; `on_post_proxy_write`
+  forwards it asynchronously.
+- The switch is ONE CR patch. Each pod applies it on its own
+  (ConfigMap mount, up to ~2 min, then SIGHUP). `sourceForwardApplied` was
+  read from the ConfigMap, so AwaitingCutover could be reached while pods
+  still ran duplicate.
+
+What a client sees when a write is NOT stopped:
+
+| window | client-visible effect |
+|---|---|
+| after V, before the switch tick | acknowledged on the source, forwarded asynchronously. Not lost, but V no longer covers it. Detected: the source position moves → switch refused |
+| between the switch check and the CR patch | same, detected after the apply (held in Forwarding) |
+| mixed modes (some pods forward) | 1. a write through a forward pod exists on the target only; a read through a duplicate pod returns the OLD value (stale read, not detectable by positions); 2. a write through a duplicate pod reaches the target later and can land AFTER a newer forward-pod write to the same key, so the target keeps the older value. Whether the target's version check rejects it is NOT established; 3. both are detected only as moved positions; neither is undone |
+| all pods forward, before AwaitingCutover | writes go to the target only. Detected (target position moves) → held |
+
+Gates now:
+1. **Before the switch**, in the same tick: every source pod reports
+   `cluster_replication on`, mode `duplicate`, and no forward in flight
+   (`forward_enqueued` ≤ applied + noop + missing + failed + dropped);
+   unreadable = held. This is added to the approval and evidence checks.
+2. **Forwarding → AwaitingCutover**: every source pod REPORTS mode
+   `forward` with nothing in flight, AND the approval still holds against
+   every source and target master.
+3. **A forward the source already shows** (rendered, or any pod applying
+   it) while the phase says Duplicating moves to Forwarding with NO action.
+   This case arises when the operator crashed between the CR patch and the
+   status patch. **Abort is refused in every phase once forward is seen.**
+   Before f5fd22b, abort was still honoured in that Duplicating, which
+   would delete a target holding acknowledged writes. §15.2's "re-issues
+   the switch" no longer applies.
+
+Proofs:
+- `forwardHold_none` and `migStep_forward_requires_approval_and_evidence`
+  now also conclude `podsHold "duplicate" = none`;
+- `migStep_awaitingCutover_rechecks_approval` adds
+  `podsHold "forward" = none`;
+- new: `migStep_no_abort_once_forward_seen` and
+  `migStep_duplicating_follows_seen_forward`.
+
+Units: 486.
+
+The PREMISE is unchanged: **writes stay stopped from before V until
+AwaitingCutover**, held outside the operator. The operator only detects a
+violation through positions. A stale read in the mixed window moves no
+position and is not detected, so the premise is what prevents it.
+
+Safe stop on a detected window write (RUNBOOK #migration-forward-gate):
+- keep writes stopped;
+- do not return the source to duplicate;
+- capture and run V again:
+  - MATCH → new line → advances;
+  - DIFFERENT → a decision on the listed keys (repair R not implemented),
+    held.
+
+No write fence was added to flared. One would be needed to PREVENT
+rather than detect: for example, sources refusing client writes until
+every pod is in forward. It would block writes, so it is not implemented
+without approval and not installed anywhere.
+
+Settledness is counter-based. A non-foreign drop counted under the same
+names could mask an in-flight foreign forward; this was not checked
+against flared's counting paths beyond the review of
+queue_proxy_write.cc:415-450.
+
+### 16.4 The approval line: threat model and minimal measures (proposal, nothing implemented)
+
+| actor / capability | can set `spec.forwardApproval` | can forge a MATCH line | defended by the line's binding |
+|---|---|---|---|
+| operator SA (patch flaremigrations + status, pods/exec) | yes | yes (reads every stat) | no; trusted by construction (it executes the switch) |
+| a person with patch on flaremigrations (cluster/namespace admin; the chart defines no approver role) | yes | yes: every bound value (pod UID, start, master id, copy id, epoch, seq) is readable from `stats` on the unauthenticated data port or the API | no |
+| GitOps (if FlareMigration is managed in git) | whoever merges | yes | no; the line would also have to live in git (and be overwritten on sync) |
+| status writer | only the operator's ClusterRole has `flaremigrations/status` (CRD status subresource) | — | attemptId / consumed cannot be edited through the spec |
+
+What the line DOES defend against (implemented and tested):
+- a stale MATCH (age, moved positions);
+- another attempt (attemptId);
+- a restart, replacement, re-seed or epoch change;
+- a DIFFERENT or UNKNOWN result;
+- a binding that names a master twice;
+- reuse (one use);
+- a tampered capture (V prints no line).
+
+What it does NOT defend against: a person who can patch the spec and
+writes a MATCH line without running V. That is an authorisation problem,
+not an integrity one.
+
+Minimal measures, in order. None needs PKI.
+
+1. **RBAC split.** Only the verifier role may patch FlareMigration (an
+   optional chart Role `flare-migration-approver`). Others get get/list.
+   With GitOps, keep `forwardApproval` out of git
+   (`ignoreDifferences`), or treat a git merge as the approval.
+2. **Audit.** Kubernetes audit log for patches to `flaremigrations`. The
+   operator already logs and records the consumed line.
+3. **Only if (1) cannot be guaranteed:** an HMAC over the line with a key
+   in a Secret readable only by the verifier and the operator. This is a
+   shared secret, not PKI, and protects against people who can patch the
+   CR but not read the Secret.
+
+Running V inside the operator would remove the human channel, but it
+needs real-environment capture, which is unapproved.
+
+Recommendation: (1) + (2), and HMAC only if the RBAC split is not
+possible. That is the user's decision; nothing is implemented.
+
 ## UNKNOWN
 
 - whether a blocking connect to a black-holed LB address reaches the

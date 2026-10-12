@@ -885,11 +885,33 @@ Procedure (ordered; every step a human act):
 3. Only on MATCH: set `spec.forwardApproval` to the printed approval line.
    One use: the line a switch was issued with is recorded in
    `status.forwardApprovalConsumed` and refused again.
-4. Keep writes stopped until the phase is **AwaitingCutover**: after the
-   source applied forward mode the operator checks the same approval again;
-   a write in between holds the migration in Forwarding ("re-run V and set a
-   new forwardApproval"). Abort is refused there (#migration-forward-abort).
+   The switch is issued only when, in the same tick, EVERY source pod (any
+   role) reports `cluster_replication on`, mode `duplicate` and no
+   asynchronous forward in flight (`forward_enqueued` ≤ its settled
+   outcomes); otherwise "switch precondition: …".
+4. Keep writes stopped until the phase is **AwaitingCutover**. Pods apply
+   forward one by one (ConfigMap + SIGHUP each, up to ~2 min apart); in
+   between some pods answer clients from the target and others from the
+   source. With writes stopped both hold the same data; a write in that
+   window can be served from one side only, read stale through the other,
+   or overwritten by an older asynchronous forward. The operator advances
+   only when every pod REPORTS forward (not the rendered config), nothing is
+   in flight, and the approval still holds against the live masters; a
+   moved position holds it in Forwarding ("re-run V and set a new
+   forwardApproval"). It detects such a write — it cannot undo what a
+   client already saw. Abort is refused there (#migration-forward-abort).
 5. Resume writes after AwaitingCutover.
+
+If held in Forwarding by a moved position: keep writes stopped; do NOT set
+the source back to duplicate (pods already in forward hold target-only
+writes); capture both sides again and run V. MATCH → set the new line (it
+advances). DIFFERENT → the listed keys need a decision (repair R is not
+implemented); the migration stays held.
+
+A source that already shows forward (rendered, or any pod applying it)
+while the phase still says Duplicating — e.g. the operator crashed between
+the CR patch and its status patch — moves to Forwarding with no action;
+abort is refused from then on in every phase.
 
 `status.message` names the condition that holds. Nothing here repairs a
 difference or re-seeds; R (repair) stays a separate, approved procedure.

@@ -2277,6 +2277,8 @@ def checkMigrationForwardGate (ctx : Ctx) : IO Unit := do
     (parseBaseline (serializeBaseline base) == some base && parseBaseline "m0 u x 0 1 2 none" == none
       && parseBaseline "" == some [])
 
+private def hasSub (s sub : String) : Bool := (s.splitOn sub).length > 1
+
 open FlareOperator.K8s.Bridge in
 /-- Opt-in cross-cluster snapshot-push switch (default unchanged). -/
 def checkSnapshotPushSwitch (ctx : Ctx) : IO Unit := do
@@ -2288,6 +2290,27 @@ def checkSnapshotPushSwitch (ctx : Ctx) : IO Unit := do
     (renderFlaredExtraConf {} (some { r with snapshotPush := false }) == dflt ++ "\ncluster-replication-snapshot-push = false")
   check ctx "snapshot-push switch: replication off renders only the explicit false (the switch is not rendered)"
     (renderFlaredExtraConf {} none == "cluster-replication = false")
+  -- item 1 (2026-10-13): a DESTINATION with replication off but the switch
+  -- false renders it (flared then refuses an incoming push)
+  check ctx "snapshot-push switch: a destination block (enabled false, snapshotPush false) renders the switch"
+    (hasSub (renderFlaredExtraConf {} (some { enabled := false, snapshotPush := false })) "cluster-replication = false" &&
+     hasSub (renderFlaredExtraConf {} (some { enabled := false, snapshotPush := false })) "\ncluster-replication-snapshot-push = false")
+  -- FlareMigration gives a per-key-only source's switch to the target
+  let plan : FlareOperator.Migration.Provision.TargetPlan := {
+    migName := "m", ns := "ns", targetName := "tgt", partitions := 1, replicas := 2,
+    persistenceSize := "1Gi", drainSeconds := 30, flaredImage := "f", operatorImage := "o",
+    serviceAccount := "sa", rocksdb := {} }
+  let pk := { plan with snapshotPush := false }
+  check ctx "migration target of a default source: no replication block, the target config is the old one"
+    (!hasSub (FlareOperator.Migration.Provision.flareClusterYaml plan) "clusterReplication" &&
+     !hasSub (FlareOperator.Migration.Provision.configMapYaml plan) "snapshot-push")
+  check ctx "migration target of a per-key-only source: CR carries enabled false + snapshotPush false, its first config refuses pushes"
+    (hasSub (FlareOperator.Migration.Provision.flareClusterYaml pk) "\n  clusterReplication:\n    enabled: false\n    snapshotPush: false" &&
+     hasSub (FlareOperator.Migration.Provision.configMapYaml pk) "cluster-replication-snapshot-push = false")
+  -- the target operator renders the same config from that CR (first SIGHUP a no-op)
+  check ctx "migration target config equals what the target operator renders from the target CR"
+    (hasSub (FlareOperator.Migration.Provision.configMapYaml pk)
+      (String.intercalate "\n    " ((renderFlaredExtraConf {} (some { enabled := false, snapshotPush := false })).splitOn "\n")))
 
 def run : IO UInt32 := do
   let ctx : Ctx := { failures := ← IO.mkRef [], count := ← IO.mkRef 0 }

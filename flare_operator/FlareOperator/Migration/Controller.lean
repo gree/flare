@@ -321,10 +321,10 @@ private def buildPlan (mig : MigCR) (crName ns : String) : IO (Except String Tar
     | .ok s => pure (if s.trim.isEmpty then none else some s.trim)
     | .error _ => pure (none : Option String)
   -- rocksdb tuning: inherited from the source CR
-  let rocksdb ← do
+  let (rocksdb, snapshotPush) ← do
     match ← getFlareCluster crName ns with
-    | .ok crd => pure crd.spec.rocksdb
-    | .error _ => pure {}
+    | .ok crd => pure (crd.spec.rocksdb, crd.spec.clusterReplication.snapshotPush)
+    | .error _ => pure ({}, true)
   return .ok {
     migName := mig.name
     ns := ns
@@ -338,6 +338,7 @@ private def buildPlan (mig : MigCR) (crName ns : String) : IO (Except String Tar
     operatorImage := operatorImage
     serviceAccount := sa
     rocksdb := rocksdb
+    snapshotPush := snapshotPush
   }
 
 private def applyManifest (yaml : String) : IO (Except String Unit) := do

@@ -72,6 +72,13 @@ structure TargetPlan where
   operatorImage : String      -- read from the controller's own pod
   serviceAccount : String     -- read from the controller's own pod
   rocksdb : RocksdbConfigSpec -- copied from the source CR
+  /-- The source CR's `clusterReplication.snapshotPush`. `false` (the
+      per-key-only migration, user decision 2026-10-13 item 1) is given to
+      the TARGET as well — replication off there, `snapshotPush: false` — so
+      the target refuses any snapshot push from the moment it starts
+      (flared `cluster-replication-snapshot-push = false`), not only the
+      seed this migration starts. -/
+  snapshotPush : Bool := true
   flarePort : Nat := 12121
   operatorPort : Nat := 12120
 
@@ -96,6 +103,16 @@ def adoptionAnnotations (p : TargetPlan) : String :=
     meta.helm.sh/release-namespace: {p.ns}"
   | none => ""
 
+/-- The target's own replication block: present only for a per-key-only
+    migration (see `TargetPlan.snapshotPush`). -/
+def targetRepl (p : TargetPlan) : Option ClusterReplicationSpec :=
+  if p.snapshotPush then none else some { enabled := false, snapshotPush := false }
+
+def targetReplYaml (p : TargetPlan) : String :=
+  match targetRepl p with
+  | none => ""
+  | some _ => "\n  clusterReplication:\n    enabled: false\n    snapshotPush: false"
+
 def flareClusterYaml (p : TargetPlan) : String :=
   s!"apiVersion: flare.gree.net/v1alpha1
 kind: FlareCluster
@@ -106,13 +123,13 @@ metadata:
     {commonLabels p}{adoptionLabels p}{adoptionAnnotations p}
 spec:
   partitions: {p.partitions}
-  replicas: {p.replicas}{rocksdbSpecYaml p.rocksdb}"
+  replicas: {p.replicas}{rocksdbSpecYaml p.rocksdb}{targetReplYaml p}"
 
 /-- extra.conf seed: flared refuses to start without the file. Content is
     what the target operator would render anyway (rocksdb passthrough + the
     explicit replication-off line), so the first SIGHUP is a no-op. -/
 def configMapYaml (p : TargetPlan) : String :=
-  let content := FlareOperator.K8s.Bridge.renderFlaredExtraConf p.rocksdb none
+  let content := FlareOperator.K8s.Bridge.renderFlaredExtraConf p.rocksdb (targetRepl p)
   let indented := String.intercalate "\n    " (content.splitOn "\n")
   s!"apiVersion: v1
 kind: ConfigMap

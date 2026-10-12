@@ -167,8 +167,8 @@ private def patchApproval (line : String) : IO (Except String String) :=
     s!"\{\"spec\":\{\"forwardApproval\":{(Lean.Json.str line).compress}}}"
 
 /-- Held in Duplicating with a message containing `needle`, for 20 s. -/
-private def heldWith (needle : String) : IO (Option String) := do
-  let seen ← waitForCondition s!"held: {needle}" 60 do
+private def heldWith (needle : String) (timeout : Nat := 60) : IO (Option String) := do
+  let seen ← waitForCondition s!"held: {needle}" timeout do
     return containsSubstr (← migField "{.status.message}") needle
   let m ← migField "{.status.message}"
   if !seen then return some s!"message never said '{needle}': {m} (phase {← migPhase})"
@@ -273,7 +273,9 @@ def suite : TestSuite := {
           match ← patchApproval approval with
           | .error e => return .fail s!"patch failed: {e}"
           | .ok _ => pure ()
-          match ← heldWith "position moved" with
+          -- the extra write re-runs the 6-tick count dwell before the
+          -- approval is even consulted (CI 38194519561: 5/6 ticks at 60 s)
+          match ← heldWith "position moved" (timeout := 180) with
           | some why => return .fail why
           | none => return .pass },
 

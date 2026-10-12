@@ -45,12 +45,15 @@ private def cfg : ClusterConfig := {
   -- a capture needs the reserve (unset = refused); in the CR so the
   -- no-space test can raise it through the operator
   reserveInCr := true
+  -- data on a volume: the kill -9 test restarts the container, whose own
+  -- filesystem (/tmp/flare without a volume) starts empty (CI 38194519561)
+  usePvc := true
 }
 
 private def kindNode : String := "flare-e2e-control-plane"
 
 
-private def dataDir : String := "/tmp/flare"
+private def dataDir : String := "/data/flare"
 
 private def execInPod (pod ns : String) (cmd : List String) : IO (Except String String) :=
   kubectl (["exec", pod, "-n", ns, "--"] ++ cmd)
@@ -76,14 +79,22 @@ private def scriptsDir : IO String := do
   if ← System.FilePath.pathExists "../scripts/flare_v_capture_kind.py" then return "../scripts"
   else return "scripts"
 
-/-- Store `n` keys of `len` random letters (not compressible to nothing) in
-    one pipeline; (STORED count, ms). -/
+/-- Store `n` keys of `len` random letters (not compressible to nothing),
+    in batches of at most 4000 keys / 4 MB per exec (the kubectl wrapper's
+    30 s wall killed one 40 MB pipeline: CI 38194519561); each value is a
+    random window of a random pool. (STORED count, ms). -/
 private def bulkWriteLen (ip keyPrefix : String) (n len : Nat) : IO (Nat × Nat) := do
   let t0 ← IO.monoMsNow
-  let cmd := s!"(awk 'BEGIN\{srand(); for(i=0;i<{n};i++)\{v=\"\"; for(j=0;j<{len};j++) v=v sprintf(\"%c\", 97+int(rand()*26)); printf \"set {keyPrefix}_%d 0 0 {len}\\r\\n%s\\r\\n\", i, v}}'; sleep 2) | nc -w 120 {ip} {cfg.flarePort} | grep -c STORED"
-  let stored ← match ← execInDebugPod cfg.debugPod cfg.«namespace» cmd with
-    | .ok o => pure (o.trim.toNat?.getD 0)
-    | .error _ => pure 0
+  let per := max 1 (min 4000 (4000000 / max len 1))
+  let mut stored := 0
+  let mut start := 0
+  while start < n do
+    let cnt := min per (n - start)
+    let cmd := s!"(awk 'BEGIN\{srand(); p=\"\"; for(j=0;j<{len}+20000;j++) p=p sprintf(\"%c\", 97+int(rand()*26)); for(i={start};i<{start + cnt};i++)\{v=substr(p, 1+int(rand()*20000), {len}); printf \"set {keyPrefix}_%d 0 0 {len}\\r\\n%s\\r\\n\", i, v}}'; sleep 2) | nc -w 20 {ip} {cfg.flarePort} | grep -c STORED"
+    match ← execInDebugPod cfg.debugPod cfg.«namespace» cmd with
+    | .ok o => stored := stored + o.trim.toNat?.getD 0
+    | .error _ => pure ()
+    start := start + cnt
   return (stored, (← IO.monoMsNow) - t0)
 
 private def bulkWrite (ip keyPrefix : String) (n : Nat) : IO (Nat × Nat) :=

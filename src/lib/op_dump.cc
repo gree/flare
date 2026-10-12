@@ -308,9 +308,6 @@ int op_dump::_run_server() {
 	if (bounded != NULL) {
 		bounded->set_tcp_nodelay(nodelay_saved);	// the final frame goes out at once
 	}
-	if (bounded != NULL) {
-		bounded->set_write_progress_timeout_ms(0);	// OLD BEHAVIOUR (commit A): the bound is off before the final frame
-	}
 	if (op_dump::before_final_frame_hook != NULL) {
 		op_dump::before_final_frame_hook();
 	}

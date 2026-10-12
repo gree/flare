@@ -480,7 +480,7 @@ int thread::enqueue(shared_thread_queue& q, const uint32_t max_total_thread_queu
 	// the thread was cleaned and reused for another handler (after a reload,
 	// another destination), would otherwise hand its item to that handler.
 	pthread_mutex_lock(&this->_mutex_queue);
-	if (!this->_queue_open /* OLD BEHAVIOUR (commit A): expected_id not checked */) {
+	if (!this->_queue_open || (expected_id != 0 && this->_queue_owner_id != expected_id)) {
 		const bool reused = this->_queue_open;
 		const unsigned int owner = this->_queue_owner_id;
 		pthread_mutex_unlock(&this->_mutex_queue);

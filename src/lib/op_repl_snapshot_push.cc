@@ -121,7 +121,7 @@ int op_repl_snapshot_push::_parse_text_server_parameters() {
 int op_repl_snapshot_push::_run_server() {
 	// refused BEFORE anything else (role routing, relay, freshness): with the
 	// switch off this node takes no push in any role
-	if (!op_repl_snapshot_push::accept_push && false /* OLD BEHAVIOUR (commit A): the switch is not checked here */) {
+	if (!op_repl_snapshot_push::accept_push) {
 		log_notice("declining snapshot push: disabled on this node (cluster-replication-snapshot-push = false)", 0);
 		return this->_send_result(result_server_error, "snapshot_push_disabled");
 	}

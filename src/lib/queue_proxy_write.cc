@@ -153,6 +153,37 @@ queue_proxy_write::foreign_answer queue_proxy_write::classify_foreign_answer(con
 	return foreign_failed;
 }
 
+/**
+ *	The outcome counter of an ANSWERED forward: forward_applied, or
+ *	forward_{noop,missing,failed}_<sent op>_<answer, lower case>. The sent op
+ *	is set, delete or touch (_get_op sends every other post-proxy op as a
+ *	versioned set, gat as touch), so the names are a closed set — the
+ *	operator's switch gate (Migration/Types.lean forwardTerminal) accepts
+ *	exactly that set and holds on any other name; the cutter test
+ *	test_foreign_outcome_counters_are_the_gate_set pins the two together.
+ */
+string queue_proxy_write::foreign_outcome_counter(const string& sent_op, op::result r) {
+	const string rname = op::result_cast(r);
+	string rkey;
+	for (string::const_iterator ci = rname.begin(); ci != rname.end(); ci++) {
+		rkey += (*ci == ' ') ? '_' : static_cast<char>(tolower(*ci));
+	}
+	if (rkey.empty()) {
+		rkey = "none";
+	}
+	switch (classify_foreign_answer(sent_op, r)) {
+		case foreign_applied:
+			return "forward_applied";
+		case foreign_noop:
+			return "forward_noop_" + sent_op + "_" + rkey;
+		case foreign_missing:
+			return "forward_missing_" + sent_op + "_" + rkey;
+		case foreign_failed:
+		default:
+			return "forward_failed_" + sent_op + "_" + rkey;
+	}
+}
+
 // {{{ public methods
 int queue_proxy_write::run(shared_connection c) {
 	if (this->_foreign && this->_post_proxy) {
@@ -432,22 +463,16 @@ int queue_proxy_write::_run_foreign(shared_connection c) {
 	// before (audit 2026-10-11).
 	const string sent = p->get_ident();
 	const string rname = op::result_cast(this->_result);
-	string rkey;
-	for (string::const_iterator ci = rname.begin(); ci != rname.end(); ci++) {
-		rkey += (*ci == ' ') ? '_' : static_cast<char>(tolower(*ci));
-	}
-	if (rkey.empty()) {
-		rkey = "none";
-	}
+	const string counter = foreign_outcome_counter(sent, this->_result);
 	switch (classify_foreign_answer(sent, this->_result)) {
 		case foreign_applied:
-			stats_object->crepl_incr("forward_applied");
+			stats_object->crepl_incr(counter);
 			break;
 		case foreign_noop:
-			stats_object->crepl_incr("forward_noop_" + sent + "_" + rkey);
+			stats_object->crepl_incr(counter);
 			break;
 		case foreign_missing: {
-			stats_object->crepl_incr("forward_missing_" + sent + "_" + rkey);
+			stats_object->crepl_incr(counter);
 			static AtomicCounter missing_logged(0);
 			if (missing_logged.incr() % 100 == 1) {
 				log_warning("cluster replication: the destination has no key this source holds alive (dest=%s, op=%s, key=%s, version=%u, result=%s) — an earlier drop, an expiry or a newer delete there; the destination may diverge (logged 1 in 100)",
@@ -458,7 +483,7 @@ int queue_proxy_write::_run_foreign(shared_connection c) {
 		case foreign_failed:
 		default: {
 			this->_success = false;
-			stats_object->crepl_incr("forward_failed_" + sent + "_" + rkey);
+			stats_object->crepl_incr(counter);
 			stats_object->increment_proxy_write_dropped(string(dest));
 			static AtomicCounter failed_logged(0);
 			if (failed_logged.incr() % 100 == 1) {

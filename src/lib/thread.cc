@@ -35,6 +35,8 @@
 namespace gree {
 namespace flare {
 
+void (*thread::enqueue_after_check_hook)(thread* t) = NULL;
+
 // {{{ global functions
 void* thread_run(void* p) {
 	thread* tmp = (thread*)p;
@@ -450,6 +452,10 @@ int thread::enqueue(shared_thread_queue& q, const uint32_t max_total_thread_queu
 	if (this->_running == false) {
 		log_warning("trying to enqueue to inactive thread [id=%u, thread_id=%u, ident=%s]", this->_id, this->_thread_id, q->get_ident().c_str());
 		return -1;
+	}
+
+	if (thread::enqueue_after_check_hook != NULL) {
+		thread::enqueue_after_check_hook(this);
 	}
 
 	pthread_mutex_lock(&this->_mutex_queue);

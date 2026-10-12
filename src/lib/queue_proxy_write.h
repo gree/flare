@@ -89,6 +89,7 @@ public:
 		foreign_failed,
 	};
 	static foreign_answer classify_foreign_answer(const string& sent_op, op::result r);
+	static string foreign_outcome_counter(const string& sent_op, op::result r);
 
 	queue_proxy_write(cluster* cl, storage* st, vector<string> proxy, storage::entry entry, string op_ident);
 	virtual ~queue_proxy_write();

@@ -78,6 +78,9 @@ public:
 	};
 
 	static const int			shutdown_timeout = 60;			// sec
+	// test seam: called by enqueue() after its unlocked running check and
+	// before it takes the queue lock (NULL outside tests)
+	static void (*enqueue_after_check_hook)(thread* t);
 
 private:
 	thread_pool*					_thread_pool;

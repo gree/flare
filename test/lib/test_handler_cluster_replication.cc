@@ -33,6 +33,7 @@
 
 #include <cppcutter.h>
 #include <time.h>
+#include <set>
 
 using namespace std;
 using namespace gree::flare;
@@ -528,9 +529,19 @@ namespace test_handler_cluster_replication {
 		delete[] p;
 		delete[] v;
 		q->sync();
-		// answered and counted, but this reference keeps it alive
+		// answered and counted, but this reference keeps it alive — the
+		// very fast queue: on_post_proxy_write counts forward_enqueued only
+		// after _enqueue returns, so one snapshot can hold the outcome and
+		// not yet the enqueue; the gauge says in flight in that same snapshot
 		cut_assert_equal_int(1, (int)crepl("forward_applied"));
 		cut_assert_equal_int(1, (int)in_flight());
+		{
+			uint64_t n = 0;
+			map<string, uint64_t> snap = stats_object->get_crepl_snapshot(n);
+			cut_assert_equal_int(1, (int)n);
+			cut_assert_equal_int(1, (int)snap["forward_applied"]);
+			cut_assert_equal_int(0, (int)snap["forward_enqueued"]);
+		}
 		q.reset();
 		cut_assert(in_flight_drains_to(0), cut_message("in flight stayed %d after the forward was released", (int)in_flight()));
 		// a second call does not count it twice
@@ -578,6 +589,74 @@ namespace test_handler_cluster_replication {
 		q1.reset();
 		q2.reset();
 		cut_assert(in_flight_drains_to(0), cut_message("in flight stayed %d after shutdown", (int)in_flight()));
+	}
+
+	// Every name an answered forward is counted under, over every op it can
+	// be sent as and every answer: exactly the operator gate's closed set
+	// (Migration/Types.lean forwardAnsweredCounters; the same literal is in
+	// its unit check). A new name here holds every switch until the gate
+	// knows it — this test makes that a build failure instead.
+	void test_foreign_outcome_counters_are_the_gate_set() {
+		const char* sent[] = { "set", "delete", "touch" };
+		const op::result answers[] = { op::result_none, op::result_ok, op::result_end, op::result_stored,
+			op::result_not_stored, op::result_exists, op::result_not_found, op::result_deleted, op::result_found,
+			op::result_touched, op::result_error, op::result_client_error, op::result_server_error };
+		set<string> names;
+		for (size_t i = 0; i < sizeof(sent) / sizeof(sent[0]); i++) {
+			for (size_t j = 0; j < sizeof(answers) / sizeof(answers[0]); j++) {
+				names.insert(queue_proxy_write::foreign_outcome_counter(sent[i], answers[j]));
+			}
+		}
+		string joined;
+		for (set<string>::const_iterator it = names.begin(); it != names.end(); it++) {
+			joined += (joined.empty() ? "" : ",") + *it;
+		}
+		cut_assert_equal_string("forward_applied,forward_failed_delete_client_error,forward_failed_delete_end,forward_failed_delete_error,forward_failed_delete_exists,forward_failed_delete_found,forward_failed_delete_none,forward_failed_delete_not_stored,forward_failed_delete_ok,forward_failed_delete_server_error,forward_failed_delete_stored,forward_failed_delete_touched,forward_failed_set_client_error,forward_failed_set_deleted,forward_failed_set_end,forward_failed_set_error,forward_failed_set_exists,forward_failed_set_found,forward_failed_set_none,forward_failed_set_not_found,forward_failed_set_ok,forward_failed_set_server_error,forward_failed_set_touched,forward_failed_touch_client_error,forward_failed_touch_deleted,forward_failed_touch_end,forward_failed_touch_error,forward_failed_touch_exists,forward_failed_touch_found,forward_failed_touch_none,forward_failed_touch_not_stored,forward_failed_touch_server_error,forward_failed_touch_stored,forward_missing_touch_not_found,forward_noop_delete_not_found,forward_noop_set_not_stored", joined.c_str());
+	}
+
+	// enqueue() checked _running WITHOUT the queue lock: a forward pushed
+	// after the handler returned and clean() drained the queue was left on a
+	// pooled thread — never run, never counted, in flight for good (or run
+	// by the next handler the thread gets). The hook stops the thread in
+	// exactly that window.
+	bool hook_fired = false;
+	void stop_thread_before_enqueue_lock(thread* t) {
+		if (hook_fired) {
+			return;
+		}
+		hook_fired = true;
+		t->shutdown(true, false);
+		for (int i = 0; i < 50 && t->is_running(); i++) {
+			usleep(100 * 1000);
+		}
+		// past notify_shutdown: clean() drains the queue right after
+		usleep(500 * 1000);
+	}
+
+	void test_enqueue_after_the_handler_returned_is_refused() {
+		shared_thread t = start_handler(false);
+		cut_assert(t->is_running());
+		storage::entry e = get_entry(" late 0 0 5 3", storage::parse_type_set, "VALUE");
+		vector<string> proxy;
+		shared_queue_proxy_write q(new queue_proxy_write(NULL, NULL, proxy, e, "set"));
+		q->set_post_proxy(true);
+		q->set_foreign(true);
+		q->track_in_flight();
+		shared_thread_queue sq = q;
+		hook_fired = false;
+		thread::enqueue_after_check_hook = stop_thread_before_enqueue_lock;
+		int r = t->enqueue(sq);
+		thread::enqueue_after_check_hook = NULL;
+		cut_assert(hook_fired);
+		cut_notify("enqueue after the handler returned: r=%d queued=%d", r, (int)stats_object->get_total_thread_queue());
+		// refused, so the caller counts forward_dropped_unqueued (not an
+		// enqueued forward) — nothing left behind on the thread
+		cut_assert_equal_int(-1, r);
+		cut_assert_equal_int(0, (int)stats_object->get_total_thread_queue());
+		sq.reset();
+		q.reset();
+		cut_assert_equal_int(0, (int)in_flight());
+		cut_assert_equal_int(0, (int)crepl("forward_dropped_abandoned"));
 	}
 }
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 noexpandtab autoindent

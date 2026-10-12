@@ -2144,6 +2144,7 @@ def checkMigrationForwardGate (ctx : Ctx) : IO Unit := do
   let gauge (n : Nat) := s!"STAT cluster_replication_forward_in_flight {n}"
   let cn (k : String) (n : String) := s!"STAT cluster_replication[{k}] {n}"
   let settledOf (out : String) : Option Bool := (podReplOf "s0" out).map PodRepl.settled
+  let parsed0 (outs : List String) : Option (List PodRepl) := outs.mapM (podReplOf "s0")
   check ctx "podReplOf counterexamples that the old reader called drained: no in-flight gauge / non-numeric counter / a name twice / unknown counter / END not last / malformed line → unreadable"
     (podReplOf "s0" (st sbase) == none
       && podReplOf "s0" (st (sbase ++ [gauge 0, cn "forward_enqueued" "abc"])) == none
@@ -2178,6 +2179,22 @@ def checkMigrationForwardGate (ctx : Ctx) : IO Unit := do
       && settledOf (st (sbase ++ [gauge 0, cn "forward_enqueued" "1", cn "forward_retried" "1"])) == some false
       && settledOf (st (sbase ++ [gauge 0, cn "forward_enqueued" "1", cn "forward_server_error_retried" "1"])) == some false
       && settledOf (st (sbase ++ [gauge 0, cn "forward_enqueued" "1", cn "forward_applied" "1", cn "seed_completed" "4", cn "forward_dropped_unqueued" "3", cn "forward_retried" "2"])) == some true)
+  -- the same literal as the cutter test test_foreign_outcome_counters_are_the_gate_set
+  let answeredLit := "forward_applied,forward_failed_delete_client_error,forward_failed_delete_end,forward_failed_delete_error,forward_failed_delete_exists,forward_failed_delete_found,forward_failed_delete_none,forward_failed_delete_not_stored,forward_failed_delete_ok,forward_failed_delete_server_error,forward_failed_delete_stored,forward_failed_delete_touched,forward_failed_set_client_error,forward_failed_set_deleted,forward_failed_set_end,forward_failed_set_error,forward_failed_set_exists,forward_failed_set_found,forward_failed_set_none,forward_failed_set_not_found,forward_failed_set_ok,forward_failed_set_server_error,forward_failed_set_touched,forward_failed_touch_client_error,forward_failed_touch_deleted,forward_failed_touch_end,forward_failed_touch_error,forward_failed_touch_exists,forward_failed_touch_found,forward_failed_touch_none,forward_failed_touch_not_stored,forward_failed_touch_server_error,forward_failed_touch_stored,forward_missing_touch_not_found,forward_noop_delete_not_found,forward_noop_set_not_stored".splitOn ","
+  check ctx "forwardAnsweredCounters is exactly the 36 names flared's foreign_outcome_counter can produce (literal shared with the cutter test)"
+    (answeredLit.length == 36 && forwardAnsweredCounters.length == 36
+      && answeredLit.all forwardAnsweredCounters.contains && forwardAnsweredCounters.all answeredLit.contains)
+  check ctx "podReplOf: names of a known SHAPE but outside the exact set are unknown → not trusted (no prefix match): an op never sent, an answer that is not a failure for that op, an unknown answer, a new seed counter"
+    (podReplOf "s0" (st (sbase ++ [gauge 0, cn "forward_failed_get_server_error" "1"])) == none
+      && podReplOf "s0" (st (sbase ++ [gauge 0, cn "forward_noop_set_stored" "1"])) == none
+      && podReplOf "s0" (st (sbase ++ [gauge 0, cn "forward_failed_set_stored" "1"])) == none
+      && podReplOf "s0" (st (sbase ++ [gauge 0, cn "forward_failed_set_bogus" "1"])) == none
+      && podReplOf "s0" (st (sbase ++ [gauge 0, cn "forward_missing_set_not_found" "1"])) == none
+      && podReplOf "s0" (st (sbase ++ [gauge 0, cn "seed_new" "1"])) == none
+      && (podReplOf "s0" (st (sbase ++ [gauge 0, cn "forward_failed_touch_not_stored" "1", cn "seed_snapshot_push_disabled" "1"]))).isSome)
+  check ctx "podReplOf: a forward answered and counted BEFORE forward_enqueued is (a very fast queue) reads in flight 1, enqueued 0, outcome 1 → held as in flight, never as 'more outcomes'"
+    (settledOf (st (sbase ++ [gauge 1, cn "forward_applied" "1"])) == some false
+      && ((podsHold "duplicate" (parsed0 [st (sbase ++ [gauge 1, cn "forward_applied" "1"])])).getD "").endsWith "in flight")
   check ctx "podReplOf: off needs no mode; mode and gauge read back"
     (podReplOf "s0" (st ["STAT cluster_replication off", gauge 0]) == some { pod := "s0", replicating := false, mode := "", inFlight := 0, enqueued := 0, terminal := 0 }
       && (podReplOf "s0" (st (sbase ++ [gauge 2]))).map (·.inFlight) == some 2

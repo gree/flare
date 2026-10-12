@@ -274,25 +274,58 @@ structure PodRepl where
 def PodRepl.settled (p : PodRepl) : Bool :=
   p.inFlight == 0 && p.enqueued == p.terminal
 
+/-- The ops a cross-cluster forward is SENT as (queue_proxy_write::_get_op:
+    every post-proxy op but delete/touch goes as a versioned set, gat as
+    touch) and every answer op::result_cast can name, lower case with `_`
+    ("" → none). -/
+def forwardSentOps : List String := ["set", "delete", "touch"]
+def forwardAnswers : List String :=
+  ["none", "ok", "end", "stored", "not_stored", "exists", "not_found", "deleted",
+   "found", "touched", "error", "client_error", "server_error"]
+
+/-- queue_proxy_write::classify_foreign_answer, mirrored: "applied", "noop",
+    "missing" or "failed" for an answer to a sent op. -/
+def forwardAnswerClass (sent answer : String) : String :=
+  if sent == "delete" then
+    if answer == "deleted" then "applied" else if answer == "not_found" then "noop" else "failed"
+  else if sent == "touch" then
+    if answer == "touched" || answer == "ok" then "applied"
+    else if answer == "not_found" then "missing" else "failed"
+  else if answer == "stored" then "applied" else if answer == "not_stored" then "noop" else "failed"
+
+/-- Every counter name an ANSWERED forward can be counted under
+    (queue_proxy_write::foreign_outcome_counter): a closed set of 36 names,
+    forward_applied included — not a prefix. The cutter test
+    test_foreign_outcome_counters_are_the_gate_set and the unit check on
+    this list pin the same literal list. -/
+def forwardAnsweredCounters : List String :=
+  "forward_applied" :: (forwardSentOps.flatMap fun op => forwardAnswers.filterMap fun a =>
+    match forwardAnswerClass op a with
+    | "applied" => none
+    | c => some s!"forward_{c}_{op}_{a}")
+
 /-- Every way an enqueued cross-cluster forward ends (queue_proxy_write.cc
     _run_foreign / on_abandoned; handler_cluster_replication shutdown after
-    dequeue → on_abandoned). Each forward reaches exactly one of them. -/
+    dequeue → on_abandoned). Each forward reaches exactly one of them. An
+    EXACT name set (review 2026-10-12, round 8): a prefix such as
+    forward_failed_* would have summed any future counter of that shape. -/
 def forwardTerminal (name : String) : Bool :=
-  name == "forward_applied" || name.startsWith "forward_noop_"
-    || name.startsWith "forward_missing_" || name.startsWith "forward_failed_"
+  forwardAnsweredCounters.contains name
     || name == "forward_dropped_abandoned" || name == "forward_dropped_down"
     || name == "forward_dropped_stopping" || name == "forward_dropped_retries"
     || name == "forward_dropped_unknown_op"
 
 /-- Counters known NOT to be an outcome of an enqueued forward:
     `forward_dropped_unqueued` is counted INSTEAD of forward_enqueued (the
-    queue never took it), the retry counters count attempts, seed_* is the
-    seed. Any other `cluster_replication[...]` name is unknown → the reply is
-    not trusted (a new counter is never silently summed or ignored). -/
+    queue never took it), the retry counters count attempts, and the seed's
+    five counters (handler_dump_replication.cc). Exact names, no prefix: any
+    other `cluster_replication[...]` name is unknown → the reply is not
+    trusted and the switch holds (a new counter is never silently summed or
+    ignored; flared adding one holds every switch until this list knows it). -/
 def forwardNonTerminal (name : String) : Bool :=
-  name == "forward_enqueued" || name == "forward_dropped_unqueued"
-    || name == "forward_retried" || name == "forward_server_error_retried"
-    || name.startsWith "seed_"
+  [ "forward_enqueued", "forward_dropped_unqueued", "forward_retried",
+    "forward_server_error_retried", "seed_started", "seed_connect_attempts",
+    "seed_failed", "seed_snapshot_push_disabled", "seed_completed" ].contains name
 
 /-- The pure part of `sourcePodsRepl`: one pod's stats reply → its applied
     replication state, or why it is not trusted. Strict (review 2026-10-12):

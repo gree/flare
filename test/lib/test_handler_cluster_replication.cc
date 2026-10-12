@@ -554,10 +554,24 @@ namespace test_handler_cluster_replication {
 		shared_queue_proxy_write q1 = tracked_foreign_set(t, "key1");
 		shared_queue_proxy_write q2 = tracked_foreign_set(t, "key2");
 		cut_assert_equal_int(2, (int)in_flight());
-		usleep(500 * 1000);
+		// q1 must be RUNNING (dequeued, in its retry wait) when the stop
+		// comes: the handler's own first open takes ~1 s against a closed
+		// port, and a stop before that left both queued (nix-linux
+		// 38215508608: stopping 0)
+		bool running = false;
+		for (int i = 0; i < 100 && !running; i++) {
+			running = stats_object->get_total_thread_queue() == 1;
+			if (!running) {
+				usleep(100 * 1000);
+			}
+		}
+		cut_assert(running, cut_message("q1 never dequeued (queue %d)", (int)stats_object->get_total_thread_queue()));
+		usleep(300 * 1000);
 		t->shutdown(true, false);
 		q1->sync();
 		q2->sync();
+		cut_notify("outcomes: stopping=%d abandoned=%d retries=%d down=%d", (int)crepl("forward_dropped_stopping"),
+			(int)crepl("forward_dropped_abandoned"), (int)crepl("forward_dropped_retries"), (int)crepl("forward_dropped_down"));
 		cut_assert_equal_int(1, (int)crepl("forward_dropped_stopping"));
 		cut_assert_equal_int(1, (int)crepl("forward_dropped_abandoned"));
 		cut_assert_equal_int(0, (int)crepl("forward_applied"));

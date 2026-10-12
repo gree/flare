@@ -1287,9 +1287,73 @@ No write fence is implemented or installed.
 
 ### 17.6 Runs
 
-- nix-linux 38215508608 (ba2d730): pending.
-- E2E 38215512251 (ba2d730): pending. Suites: blue-green-migration,
-  backup-restore, cluster-replication, cluster-replication-per-key-only.
+- nix-linux 38215508608 (ba2d730): **failure**.
+  - 3630 tests, 1 failure, 1 omission.
+  - `test_in_flight_counts_a_forward_until_it_is_released` passed.
+  - `test_in_flight_and_outcomes_on_shutdown` failed: stopping 0, expected
+    1, after 1.0 s.
+  - Classification: test timing, inferred from the duration and the
+    handler code. Against a closed port, the handler's own first `open()`
+    takes about 1 s. The stop most likely came before any dequeue, leaving
+    both forwards queued (abandoned at clean-up). The abandoned count was
+    not printed, so this stays an inference until the rerun.
+  - Fixed in df6fbb8: the test waits until the first forward is running,
+    and prints every outcome count.
+- E2E 38215512251 (ba2d730): **failure**.
+  - cluster-replication 11/11, backup-restore 4/4, per-key-only 5/5.
+  - blue-green 7/16. The cause is a product bug in 60e86e7, caught by the
+    new real-stats check. flared sends stats with an EMPTY value
+    (`STAT repl_follow_source `, `STAT reconstruction_last_success_source `).
+    After trimming, these are two-word lines, which the strict reader
+    rejected as malformed on all four source pods. In production this
+    would have held the switch for good: fail closed, but never switching.
+  - Test 28 then set abort while the switch had not been issued. The abort
+    was correctly honored and deleted the target. Tests 29–36 failed as a
+    cascade (30, 31, 32, 34 and 36 failed; 33 and 35 passed).
+  - Fixed in e73d300:
+    - the reader accepts an empty value (units use real empty-value
+      lines; a double space is still rejected);
+    - test 28 sets abort only when the source CR already says forward.
+  - T24 evidence (first ever): backup-restore-nodes-1 connected to
+    nodes-0's name and **resolved 10.244.0.20**, while nodes-0's pod IP was
+    **10.244.0.23**. That gave three ETIMEDOUT opens; the run recovered and
+    passed.
+    - So the resolver DID return an address that was not the pod's
+      current IP.
+    - Still unknown: whether .20 was nodes-0's previous IP (not recorded
+      before the deletion; e73d300 now records it), which code path made
+      the connects, and why the resolver returned it.
+    - The cause is still not closed.
+- nix-linux 38221648313 (e73d300): **success**.
+  - RocksDB build 5366 tests, legacy build 3630 tests; 0 failures and 1
+    omission each.
+  - Both in-flight tests passed. The shutdown test asserts stopping 1,
+    abandoned 1, applied 0 and the gauge back to 0.
+  - cutter prints the notify call, not its formatted values. The earlier
+    "both abandoned" therefore stays an inference.
+- E2E 38221651957 (e73d300): **success**, 20/20 executed passes, 0 skips.
+  - backup-restore 4/4.
+  - blue-green 16/16:
+    - The REAL replies of all four source pods passed the strict reader
+      before the switch: in_flight 0; enqueued = terminal (nodes-0 1=1,
+      others 0=0).
+    - The operator wedged after the CR patch: CR mode forward, status
+      Duplicating.
+    - abort was set and the operator pod replaced. The new operator moved
+      to Forwarding ("following it to Forwarding without re-issuing it;
+      abort refused from here"), with no re-issue line. Abort stayed
+      refused for 30 s and the target survived.
+    - Mixed modes: nodes-1 stayed duplicate while nodes-0/2/3 were
+      forward. The status named it and Forwarding held for 45 s. Released,
+      the phase reached AwaitingCutover. Cutover, retire, self-retire and
+      abort passed.
+  - Not shown: whether the follow recorded the approval as consumed. The
+    test printed the wrong status field (`consumedApproval`, not
+    `forwardApprovalConsumed`). The path is fixed and an assertion added
+    after this run; that is NOT yet run.
+  - T24: no recurrence (0 connect failures). Pod IPs were .10/.12 before
+    the recreation and .13/.14 after. Whether .20 in 38215512251 was an old
+    address is still unknown (that run did not record the earlier IPs).
 
 ## UNKNOWN
 

@@ -396,9 +396,13 @@ def suite : TestSuite := {
         let msg ← migField "{.status.message}"
         let ops ← operatorPods
         let newLogs ← ops.foldlM (fun acc p => do return acc ++ (← opLogs p)) ""
-        IO.eprintln s!"# after the replacement: phase {ph}; message {msg}; consumed {← migField "{.status.consumedApproval}"}; operator pods {ops}"
+        IO.eprintln s!"# after the replacement: phase {ph}; message {msg}; consumed {← migField "{.status.forwardApprovalConsumed}"}; operator pods {ops}"
         if !followed then return .fail s!"the new operator did not move the phase in 300 s (phase {ph}): {msg}"
         if ph != "Forwarding" then return .fail s!"phase {ph}: the abort was honored after the switch"
+        -- the approval the CR patch was issued with is recorded as used on
+        -- the follow too (one use)
+        if (← migField "{.status.forwardApprovalConsumed}").isEmpty then
+          return .fail "the follow did not record the approval as consumed"
         if ops.contains op0 then return .fail s!"the wedged operator {op0} is still the one running"
         if containsSubstr newLogs "source switched to mode=forward" then
           return .fail "the new operator RE-ISSUED the switch"

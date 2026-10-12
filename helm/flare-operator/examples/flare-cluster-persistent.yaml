@@ -15,6 +15,15 @@ spec:
   # "key absent". Clients must treat SERVER_ERROR as an error, not a miss.
   rocksdb:
     readUnavailableError: true
+    # Intra-cluster replication: hybrid (user decision 2026-10-13, item 3) —
+    # the immediate forward to replicas PLUS a continuous WAL follower, so a
+    # replica cut off from its master resumes from its applied position
+    # (no rebuild) while the master's WAL still holds that position. On a NEW
+    # cluster both can be set at creation; on an existing one follow
+    # docs/RUNBOOK.md#enable-follow (identity forwarding on every node first).
+    # Asynchronous: losing a master that holds unreplicated writes loses them.
+    replIdentityForward: true
+    replFollowEnabled: true
 
 ---
 apiVersion: v1

@@ -939,6 +939,130 @@ and `dump` on the source master (reaps expired keys, takes the iteration
 slot and the whole-DB read lock for the seed). Choosing it for a real move
 is a decision that has not been made.
 
+### First cross-cluster move: per-key seed under an explicit write stop {#initial-migration}
+
+Method approved for development and verification (user, 2026-10-13). Not
+approved: any change to a real environment, pf-dev, real data, capture of a
+real cluster, the web switch, or a destructive step. Every step below is a
+human act unless it says the operator does it.
+
+**Seed: per-key only.** The snapshot-push seed and its history adoption
+(A/B, cluster-replication-faults T4/T5 = X4) are OUT of this move; their
+known defects stay open and are not closed by it. The push path is closed by
+configuration on BOTH sides:
+
+| Side | Setting | Check before any seed |
+|------|---------|-----------------------|
+| every source CR that targets the destination | `clusterReplication.snapshotPush: false`, set before or with `enabled: true` (a FlareMigration's `startDuplicate` merge patch keeps it) | source stat `cluster_replication_snapshot_push off` on every source pod |
+| destination CR | `clusterReplication: {enabled: false, snapshotPush: false}` (a FlareMigration provisions this itself when its source has `false`, ee13ef8) | destination stat `snapshot_push_accept off` on every destination pod; a hand-sent `repl_snapshot_push` is answered `SERVER_ERROR snapshot_push_disabled` (be8831d) |
+
+After the seed: `cluster_replication_seed completed_dump`,
+`cluster_replication[seed_snapshot_push_disabled]` moved, destination
+`rocksdb_snapshot_bootstrap` unchanged, destination master id / copy id
+unchanged. Any check not met → set `enabled: false` on the source and stop;
+nothing on the destination is of record yet. A source flared older than
+feec633 does not know `cluster-replication-snapshot-push` (it rejects the
+config line): the destination's refusal still holds (from be8831d), but the
+source's own seed behaviour is then not controlled — decide before such a
+move.
+
+**Write stop: explicit, from before content verification until the switch is
+complete.** flared has no write fence or read-only mode, and the operator
+cannot see a fence (it only sees positions). Unchanged counters are a CHECK
+of the stop, never the stop itself. The automatic write fence is not
+implemented; this runbook does not claim it.
+
+Writers to stop (all of them; a writer not listed here is a reason to stop
+the move):
+
+| Writer | Writes by | Stop by | Confirm by |
+|--------|-----------|---------|------------|
+| Application clients (web, batch, cron, workers) | set/add/replace/cas/append/prepend/incr/decr/delete/touch/gat (+ binary q-variants) | the owner of each client, from an inventory signed off before the window | owner's confirmation per client; then the positions below |
+| People and tools (nc, flare-tools, scripts) | the same commands, `flush_all`, `orphan_purge` | access withdrawn for the window | named in the sign-off |
+| `flush_all` | truncates a master (not mirrored cross-cluster) | `spec.rocksdb.flushAllEnabled: false` on source and destination | reload notice on every pod |
+| Expire reaper (active master) | versioned deletes (mirrored) | **no CR field**; `reap-expired` is a flared option only | its deletes move the source position → the forward gate holds (see gap W1) |
+| Lazy expiry on reads (master) | a read of an expired key deletes it (WAL only, not mirrored) | cannot be stopped while reads continue | moves the position → gate holds (gap W1); V reads a checkpoint, unaffected |
+| Cross-cluster forwarder | the move itself, into the destination | — | `cluster_replication_forward_in_flight 0` and `forward_enqueued` = sum of outcomes on every source pod (the operator checks this at the switch) |
+| Restore / bootstrap / orphan purge / rebuild operations | replace or remove data | none started in the window | no `rebuild_in_flight`, no restore in progress |
+| Anything writing to the DESTINATION directly | — | the destination is not in service before cutover | destination positions move only with the forwarder |
+
+Confirm the stop, all required, before capture/V:
+1. every row's owner has confirmed; the inventory is attached to the record;
+2. over an observation interval, every source master's
+   `rocksdb_latest_sequence_number`, `cmd_set`, `delete_hits+delete_misses`
+   and `curr_items` do not move (corroboration only — a writer the inventory
+   missed that wrote nothing in the interval is not detected);
+3. no forward in flight (row "Cross-cluster forwarder").
+
+Then the forward-switch procedure (#migration-forward-gate): capture + V,
+`forwardApproval` on MATCH only, writes stay stopped until
+**AwaitingCutover**.
+
+Resume writes only when the phase is AwaitingCutover (or, without
+FlareMigration, after clients point at the destination); resumed clients use
+the destination endpoint (a source in forward mode proxies to it).
+
+Abort / roll back:
+- **Before the forward switch** (V DIFFERENT, a check unmet, a hold you do
+  not resolve): set the source's `enabled: false` (or abort the
+  FlareMigration), keep the source as the system of record, resume writes
+  on the source. The destination holds nothing of record; discard it.
+- **Held in Forwarding by a moved position**: keep writes stopped; do not
+  set the source back to duplicate; capture again and run V. MATCH → new
+  approval line; DIFFERENT → stays held; the listed keys need a decision
+  (repair R is not implemented).
+- **After the forward switch**: abort is refused; there is no automated way
+  back (the target holds writes the source acknowledged). A procedure that
+  first moves those writes back does not exist — decide before the move.
+- **After cutover**: the source is stale.
+
+Open for this move (not closed by this runbook):
+- **W1** expiry writes the stop cannot prevent (reaper without a CR switch,
+  lazy expiry on reads). They hold the gate; whether to stop the reaper by
+  a CR field or to accept repeated V is a decision.
+- Capture on a real cluster (V needs it) is not approved; the capture
+  driver refuses any context but kind.
+- No automatic write fence; a NetworkPolicy fence would also cut reads and
+  replication and is not designed.
+
+### Intra-cluster replication after the move: hybrid {#post-migration-hybrid}
+
+The destination runs **hybrid** in-cluster replication: the immediate
+forward to replicas (op proxy) **and** a continuous WAL follower
+(`spec.rocksdb.replIdentityForward: true`, `replFollowEnabled: true`, with
+`readUnavailableError: true`). On a new cluster set all three at creation
+(the chart examples do); on an existing one follow #enable-follow. WAL-only
+streaming and low-latency push are a separate release; recovery from a cut
+is NOT deferred — it is what the follower does.
+
+Do not confuse the two deliveries: the cross-cluster move delivers PER KEY
+(seed dump + mirrored writes, source → destination cluster); in-cluster
+copies are kept by the forward plus the WAL follower (master → its
+replicas).
+
+What is accepted for production (one E2E run, continuous-replication
+"ACCEPTANCE: …", b5b218a): same master and history, WAL still held; both
+paths cut; creates/updates/deletes during the cut; writes stopped; healed →
+the replica resumes from its applied cursor, no reconstruction / dump
+fallback / container restart / pod recreation, every key equal. While it
+lags, a replica read is the master's value when the master is reachable and
+`SERVER_ERROR` when not — never its stale copy, never END. The cut is a kind
+iptables cut: it is evidence for a network partition, not for a real AZ
+failure.
+
+Cases that need a rebuild (recorded separately, not this acceptance):
+WAL retention exceeded (`needs_rebuild`/`lsn_purged`, E2E
+continuous-replication-purge T6, outage phase B), failover to a new master
+(survivors rebuild against the new history, E2E "planned promotion"), copy
+loss (empty or unusable store → full rebuild; tmpfs: data since the last
+backup is lost, #restore-in-place).
+
+**Loss on master loss.** Replication is asynchronous. A master that dies
+holding writes not yet on any replica takes them with it: zero loss is NOT
+guaranteed, and WAL-only streaming would not change that. The default
+last-resort promotion (`FLARE_FOLLOW_FAILOVER_WAIT_SECONDS`, an unfit copy
+promoted after the wait) is LOSSY by design — never describe it as lossless.
+
 ### Abort after the forward switch {#migration-forward-abort}
 
 Refused in Forwarding and AwaitingCutover (before: allowed). doAbort

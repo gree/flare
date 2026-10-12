@@ -320,6 +320,18 @@ spec:
           requests:
             storage: {p.persistenceSize}"
 
+/-- What a target plan takes from the source CR: its rocksdb tuning and its
+    `clusterReplication.snapshotPush`. A source CR that cannot be read (a
+    transient API error, a Forbidden) is UNKNOWN, not a default: the
+    default (`{}`, pushes accepted) would provision a target that accepts a
+    snapshot push from its first start although the source opted out
+    (review 2026-10-13 finding 1). The caller stops the provision (nothing
+    applied) and retries. -/
+def sourceSettings (r : Except String FlareClusterView) : Except String (RocksdbConfigSpec × Bool) :=
+  match r with
+  | .ok crd => .ok (crd.spec.rocksdb, crd.spec.clusterReplication.snapshotPush)
+  | .error e => .error s!"cannot read the source FlareCluster (its snapshotPush switch is unknown): {e}; nothing of the target applied, retried"
+
 /-- Every target manifest, in apply order (config before pods). -/
 def allManifests (p : TargetPlan) : List String :=
   [flareClusterYaml p, configMapYaml p, operatorYaml p, statefulSetYaml p]

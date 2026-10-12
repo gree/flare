@@ -332,10 +332,9 @@ private def buildPlan (mig : MigCR) (crName ns : String) : IO (Except String Tar
       IO.eprintln "[migration] TEST SEAM: the source FlareCluster read is forced to fail (FLARE_TEST_MIG_SOURCE_READ_FAIL_FILE)"
       pure (Except.error "TEST SEAM: forced source FlareCluster read failure")
     else getFlareCluster crName ns
-  let (rocksdb, snapshotPush) ← do
-    match srcRead with
-    | .ok crd => pure (crd.spec.rocksdb, crd.spec.clusterReplication.snapshotPush)
-    | .error _ => pure ({}, true)
+  let (rocksdb, snapshotPush) ← match sourceSettings srcRead with
+    | .ok v => pure v
+    | .error e => return .error e
   return .ok {
     migName := mig.name
     ns := ns

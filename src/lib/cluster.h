@@ -509,7 +509,9 @@ protected:
 	void _check_read_source_locked(uint64_t node_map_version);
 	bool _is_local_proxy_request(op_proxy_write* op);
 	string _get_partition_key(string key);
-	int _get_proxy_thread(string node_key, int key_hash, shared_thread& t);
+	// t_id: the thread's id (map key) in the copy it was found in; pass it to
+	// thread::enqueue so a thread reused since then refuses the item
+	int _get_proxy_thread(string node_key, int key_hash, shared_thread& t, unsigned int& t_id);
 	shared_connection _open_index();
 	shared_connection _open_index_single_server();
 	shared_connection _open_index_redundant();

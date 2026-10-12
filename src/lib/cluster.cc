@@ -2521,15 +2521,18 @@ int cluster::_enqueue(shared_thread_queue q, string node_key, int key_hash, bool
 	log_debug("enqueue (ident=%s, node_key=%s, key_hash=%d)", q->get_ident().c_str(), node_key.c_str(), key_hash);
 
 	shared_thread t;
-	if (this->_get_proxy_thread(node_key, key_hash, t) < 0) {
+	unsigned int t_id = 0;		// the id the thread had in the map copy it was found in
+	if (this->_get_proxy_thread(node_key, key_hash, t, t_id) < 0) {
 		return -1;
 	}
 
 	if (sync) {
 		q->sync_ref();
 	}
-	if (t->enqueue(q, this->_max_total_thread_queue) < 0) {
-		log_warning("enqueue failed (perhaps thread is now exiting?)", 0);
+	// refused if the thread was cleaned and reused (a new id) since it was
+	// found: never handed to the new handler (review 2026-10-13, finding 2)
+	if (t->enqueue(q, this->_max_total_thread_queue, t_id) < 0) {
+		log_warning("enqueue failed (the thread is exiting or was reused)", 0);
 		if (sync) {
 			q->sync_unref();
 		}
@@ -2549,12 +2552,13 @@ int cluster::_enqueue(shared_thread_queue q, thread_pool::thread_type type, bool
 		return -1;
 	}
 	t = it->second;
+	const unsigned int t_id = it->first;
 
 	if (sync) {
 		q->sync_ref();
 	}
-	if (t->enqueue(q) < 0) {
-		log_warning("enqueue failed (perhaps thread is now exiting?)", 0);
+	if (t->enqueue(q, 0, t_id) < 0) {
+		log_warning("enqueue failed (the thread is exiting or was reused)", 0);
 		if (sync) {
 			q->sync_unref();
 		}
@@ -2593,8 +2597,8 @@ int cluster::_broadcast(shared_thread_queue q, bool sync, vector<string> prior_n
 					continue;
 				}
 				q->sync_ref();
-				if (it_local->second->enqueue(q) < 0) {
-					log_warning("enqueue failed (perhaps thread is now exiting?)", 0);
+				if (it_local->second->enqueue(q, 0, it_local->first) < 0) {
+					log_warning("enqueue failed (the thread is exiting or was reused)", 0);
 					q->sync_unref();
 					continue;
 				}
@@ -2626,8 +2630,8 @@ int cluster::_broadcast(shared_thread_queue q, bool sync, vector<string> prior_n
 			if (sync) {
 				q->sync_ref();
 			}
-			if (it_local->second->enqueue(q) < 0) {
-				log_warning("enqueue failed (perhaps thread is now exiting?)", 0);
+			if (it_local->second->enqueue(q, 0, it_local->first) < 0) {
+				log_warning("enqueue failed (the thread is exiting or was reused)", 0);
 				if (sync) {
 					q->sync_unref();
 				}
@@ -3139,7 +3143,7 @@ string cluster::_get_partition_key(string key) {
 	return s;
 }
 
-int cluster::_get_proxy_thread(string node_key, int key_hash, shared_thread& t) {
+int cluster::_get_proxy_thread(string node_key, int key_hash, shared_thread& t, unsigned int& t_id) {
 	int thread_type = 0;
 	pthread_rwlock_rdlock(&this->_mutex_node_map);
 	if (this->_node_map.count(node_key) == 0) {
@@ -3169,6 +3173,7 @@ int cluster::_get_proxy_thread(string node_key, int key_hash, shared_thread& t) 
 	for (thread_pool::local_map::iterator it = m.begin(); it != m.end(); it++) {
 		if (i == index) {
 			t = it->second;
+			t_id = it->first;
 			return 0;
 		}
 		i++;

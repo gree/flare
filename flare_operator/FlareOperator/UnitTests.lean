@@ -2320,6 +2320,21 @@ def checkSnapshotPushSwitch (ctx : Ctx) : IO Unit := do
     (renderFlaredExtraConf {} none false == "cluster-replication = false\ncluster-replication-snapshot-push = false")
   check ctx "snapshot-push switch: replication off with the default renders exactly the old line"
     (renderFlaredExtraConf {} none true == "cluster-replication = false")
+  -- review 2026-10-13 finding 1: an unreadable source CR stops the plan
+  let srcView (push : Bool) : FlareOperator.K8s.FlareClusterView :=
+    { metadata := {}, spec := { clusterReplication := { snapshotPush := push } } }
+  check ctx "migration plan: an UNREADABLE source CR is an error (no default that accepts pushes), not ({}, true)"
+    (match FlareOperator.Migration.Provision.sourceSettings (.error "Forbidden") with
+     | .error e => hasSub e "Forbidden" && hasSub e "nothing of the target applied"
+     | .ok _ => false)
+  check ctx "migration plan: a readable per-key-only source gives the target snapshotPush false"
+    (match FlareOperator.Migration.Provision.sourceSettings (.ok (srcView false)) with
+     | .ok (_, push) => push == false
+     | .error _ => false)
+  check ctx "migration plan: a readable default source gives the target the default"
+    (match FlareOperator.Migration.Provision.sourceSettings (.ok (srcView true)) with
+     | .ok (_, push) => push == true
+     | .error _ => false)
   -- FlareMigration gives a per-key-only source's switch to the target
   let plan : FlareOperator.Migration.Provision.TargetPlan := {
     migName := "m", ns := "ns", targetName := "tgt", partitions := 1, replicas := 2,

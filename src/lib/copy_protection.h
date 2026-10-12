@@ -44,7 +44,11 @@ struct copy_identity {
 	// else its whole data dir (data_dir_used_bytes: an upper bound)
 	bool			size_known;
 	uint64_t		copy_bytes;
-	copy_identity(): known(false), items(0), size_known(false), copy_bytes(0) {}
+	// the source sent a COMPLETE stats reply (source only): false = it could
+	// not be reached or did not finish answering — a transient Unknown,
+	// unlike a reply that came back without the size
+	bool			answered;
+	copy_identity(): known(false), items(0), size_known(false), copy_bytes(0), answered(false) {}
 };
 
 enum copy_gate {

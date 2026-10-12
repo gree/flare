@@ -88,6 +88,11 @@ protected:
 	uint64_t						_reconstruction_id;
 
 public:
+	// R3-D / T24: the source's identity and size by name, a fresh lookup on
+	// each of up to probe_attempts tries (public for the cutter test)
+	static void probe_source_identity(const string& host, int port, copy_identity& out, shared_thread owner = shared_thread());
+	static int probe_attempts;
+	static int probe_retry_wait_ms;
 	handler_reconstruction(shared_thread t, cluster* cl, storage* st, string node_server_name, int node_server_port, int partition, int partition_size, cluster::role r, int reconstruction_interval, int reconstruction_bwlimit);
 	virtual ~handler_reconstruction();
 
@@ -115,7 +120,6 @@ protected:
 	// shutdown requested while held)
 	bool _test_hold(const char* env, const char* where);
 	// a bounded `stats` read of the source: items and identity
-	static void probe_source_identity(const string& host, int port, copy_identity& out);
 	// Is the copy's source still valid for activation? THREE outcomes:
 	//   source_valid    — same node is the partition's master in the current
 	//                     map, and a fresh probe shows the same lineage and

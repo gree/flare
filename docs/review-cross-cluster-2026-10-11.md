@@ -1356,6 +1356,200 @@ No write fence is implemented or installed.
     the recreation and .13/.14 after. Whether .20 in 38215512251 was an old
     address is still unknown (that run did not record the earlier IPs).
 
+## 18. Eighth round (2026-10-12, NOT reviewed)
+
+### 18.1 In-flight gauge and one outcome per forward: every queue path
+
+The gauge is +1 in `track_in_flight()` (before `_enqueue`) and −1 in the
+`queue_proxy_write` destructor (the LAST reference). `on_post_proxy_write`
+holds its own reference until it returns, after `forward_enqueued` (or
+`forward_dropped_unqueued`) was counted, so the gauge cannot reach 0 before
+the enqueue counter moved. The gauge and the counters are read under one
+mutex (`get_crepl_snapshot`).
+
+| path | gauge | counters | evidence |
+|---|---|---|---|
+| enqueue refused: no active thread, thread not running, queue full | +1 then −1 when the caller returns | `dropped_unqueued`, NOT `enqueued`, no outcome | code; gate unit (unqueued is not an outcome) |
+| enqueue raced the handler's exit (`_running` read true, handler returned, `clean()` drained, THEN pushed) | **old code: stayed +1 for good** (left on a pooled thread; or run by the thread's next handler — after a destination change, a forward to the NEW destination) | old: `enqueued`, no outcome ever | **found this round**; fixed (thread `_queue_open` under the queue lock); cutter `test_enqueue_after_the_handler_returned_is_refused` with a seam in exactly that window |
+| very fast queue: answered before `enqueued` is counted | ≥1 until the caller returns | one snapshot can hold outcome 1, enqueued 0 | cutter snapshot assertion in `test_in_flight_counts_a_forward_until_it_is_released`; unit: held as in flight |
+| answered (applied / noop / missing / failed) | −1 when released | exactly one of the 36 answered names | cutter (classify, outcome-name set) |
+| no answer: retries exhausted / destination given up / thread stopping / unknown op | −1 when released | one of dropped_{retries,down,stopping,unknown_op} | cutter (`_run_foreign`) |
+| queued when the thread is cleaned or destroyed | −1 at clean-up | `dropped_abandoned` | cutter shutdown test |
+| dequeued, then the shutdown check | −1 | `dropped_abandoned` (4ceabfb) | code reading only (not reproduced deterministically) |
+| mode change (duplicate ↔ forward) | unchanged | unchanged: `set_mode` touches no queue; a destination change goes through `stop()` → abandoned/stopping | code (flared.cc reload) |
+| exception inside a forward | — | there is no cancellation API (no pthread_cancel); the thread loop catches only `shutdown_request`, so any other exception terminates the process | = crash: queued forwards lost without an outcome; covered only by V under the write stop |
+| process crash | gone with the process | gone | V under the write stop (unchanged residual) |
+
+Answered names are now an EXACT set. The reader matched `forward_noop_*`,
+`forward_missing_*`, `forward_failed_*` and `seed_*` by PREFIX, so
+"unknown counter rejected" was true only outside those prefixes: a future
+`forward_failed_<anything>` would have been summed as an outcome. Now:
+
+- flared builds the name in one place (`queue_proxy_write::foreign_outcome_counter`):
+  sent op ∈ {set, delete, touch} (`_get_op` sends every other post-proxy op
+  as a versioned set, gat as touch) × the 13 `op::result_cast` answers →
+  36 names, `forward_applied` included;
+- the operator accepts exactly those 36 (classify mirrored), the five
+  `forward_dropped_*` outcomes, and an exact non-terminal list
+  (`forward_enqueued`, `forward_dropped_unqueued`, `forward_retried`,
+  `forward_server_error_retried`, the five `seed_*` counters);
+- anything else holds the switch (fail closed). A new flared counter holds
+  every switch until the operator knows it — the cutter test
+  `test_foreign_outcome_counters_are_the_gate_set` and a unit check pin the
+  same 36-name literal, so a drift fails a build instead.
+
+### 18.2 T24: a controlled reproduction, and convergence without pinning an address
+
+What is established (and only this):
+
+- 38215512251: backup-restore-nodes-1 looked up nodes-0's name and
+  connected to 10.244.0.20 while nodes-0's pod IP was 10.244.0.23 (the
+  earlier IPs were not recorded in that run).
+- 38253608337 (7d10856), BEFORE any injection: nodes-1 looked up nodes-0's
+  name and connected to **10.244.0.10 — nodes-0's IP before the
+  recreation** (recorded .10 before, .13 after) — on reconstruction
+  attempts 1 and 2 (two opens, two timed-out connects each), then reached
+  .13 on attempt 3 by `run()`'s retry. In that run the stale answer WAS
+  the previous pod address.
+- Why the resolver returned the previous address (CoreDNS cache, an
+  EndpointSlice still listing it, or something else) stays UNDETERMINED.
+
+Why a single stale answer cost minutes (code, not inference):
+
+- `connection_tcp::_open` resolves the name ONCE per open; its connect
+  retries reuse that address (connection_tcp.cc `_open`).
+- The staged rebuild's size probe (`probe_source_identity`) is one open
+  with one connect retry. One stale answer failed the whole probe.
+- The staged rebuild then PARKED as `source_size_unknown`, which only the
+  operator's `rebuild_resume` ends, at most once per 5 min per node.
+- Every other failed step already retried by itself (`run()`: 2, 4, 8, 16,
+  30 s; a fresh connection, so a fresh lookup, every attempt).
+
+Reproduction (backup-restore test 5, kind only, deterministic):
+
+- A stop point right before the size probe
+  (`FLARE_TEST_STAGED_PROBE_HOLD_FILE`, file on the PVC), so the attempt's
+  own WAL-sync lookups have already reached the current master.
+- While held, the replica's resolver is given a stale answer for the
+  master's name (`/etc/hosts`, first in nsswitch): 192.0.2.10 (TEST-NET-1,
+  never a pod IP), dropped on the kind node (`iptables -t raw … DROP`), so
+  a connect times out as in T24. Released; once the probe has connected to
+  it (its own log line `(resolved 192.0.2.10)`), the entry is removed and
+  the next attempt held again. Repeated for 40 s.
+- Required: the replica rebuilt from the CURRENT master (`staging copy …
+  verified: lineage …, history …` and `staged rebuild DONE`), Ready, every
+  key readable, within 120 s after the stale answers end.
+- On the old probe: FAIL, E2E 38257119887 (a2afc1f): parked twice, not
+  rebuilt within 120 s (§18.5).
+
+The fix (commit after the old-code run):
+
+- The probe makes a fresh connection — so a fresh lookup of the same NAME —
+  when it got no complete reply: up to 3 tries, 1 s then 2 s apart
+  (shutdown ends the wait). Never an address cached or pinned; the source
+  is still chosen by the map, and what it answers is checked as before.
+- A source that did not answer the size probe fails the attempt (retried
+  by `run()`); it no longer parks. A source that ANSWERED without its size
+  still parks (that needs a human or a resume, as before).
+- The copy-gate probe right before the switch gets the same retries, so
+  one stale answer no longer abandons a whole verified staging copy.
+- Cutter: a source that listens only after the first try fails is reached
+  on a later try; a source that never answers ends Unknown and NOT
+  answered within 10 s.
+- Residual: if a lookup stays stale for the whole retry ladder, `run()`
+  gives up after its 60 attempts (~30 min) exactly as for any unreachable
+  source; and the cause of the stale answer is not addressed.
+
+### 18.3 Reseed and dump serve bounds (implemented this round, NOT reviewed)
+
+| | before | now |
+|---|---|---|
+| reseed serve (`repl_snapshot` without `capture`) to a peer that stays connected and stops reading | blocks in write for as long as the connection lives; checkpoint hard links, the file-deletion pin and the one-serve slot (every other reseed: busy) held | a write with no progress for 120 s ends the serve; checkpoint removed, deletions re-enabled, slot freed |
+| `dump` serve, same peer | holds the iterator (on RocksDB a snapshot pinning files) | same 120 s progress bound; iterator released |
+| a slow but reading receiver (bwlimit) | completes | completes: NO total deadline (cutter: runs past several windows) |
+
+Why 120 s: both receivers read while they write, so only a receiver that
+stopped (hung, a disk stalled for minutes, a half-open connection) waits
+that long; a receiver's own space watch ends a copy by closing the
+connection. The sender's bwlimit sleeps are between writes and do not count.
+
+Receiver after a cut (code, unchanged): snapshot → "the snapshot transfer
+failed" → staging removed, live copy unchanged → staged full dump; busy →
+retried later, no dump; a dump without END is never accepted (staged:
+abandoned; merging: the PARTIAL marker stays and `run()` retries).
+
+Residuals: deletions re-enabled is not asserted directly (no getter; same
+cleanup lines as the slot release, which is); a receiver that reads slowly
+forever is not bounded (by design); a human or tool `dump` whose reader
+pauses over 120 s is now cut; checkpoint creation, the CRC pre-read and a
+long dump's iterator memory are not bounded; a partition dump that skips
+keys for a long time is bounded only through its writes. The old code's
+failure of the two stop-reading tests is by reasoning (they cannot compile
+against it: the window is a new static); it was not run.
+
+### 18.4 Review units (what is done, by diff)
+
+1. **Capture resource protection** — 13bde49 → 0b8c976 + 975c217 (18 files,
+   +691/−34). nix-linux 38194517215; E2E 38194519561 (13/16, test design),
+   38198924465 30/30. §17.4.
+2. **Migration switch gate (operator)** — 655faa1, f5fd22b (applied state,
+   follow-not-abort), 60e86e7 + e73d300 (strict reader), 9eb11ee (exact
+   counter set). Units 494; E2E 38221651957, 38226570975.
+3. **In-flight accounting (flared)** — 4ceabfb, df6fbb8, 9eb11ee (outcome
+   names in one place), 6f89f2d (enqueue after the handler returned).
+   §18.1 lists every path.
+4. **Deterministic switch-window E2E** — ba2d730, ef7796b (seams
+   FLARE_TEST_RELOAD_REPL_HOLD_FILE, FLARE_TEST_MIG_WEDGE_AFTER_SWITCH_FILE).
+5. **T24 probe** (this round) and 6. **serve bounds** (this round): §18.2,
+   §18.3.
+
+Not implemented: the write fence (the external write stop stays a
+precondition), RBAC/HMAC on the approval, repair R, A/B, X4, the capture
+partition filter, the cause of T24's stale answer.
+
+Waiting for the user (not approved here): the snapshot / migration method
+(A/B/X4), the approval measures, a real-environment capture and capacity
+evaluation, environments, old-backup compatibility.
+
+### 18.5 Runs (kind / nix only, NOT reviewed)
+
+- nix-linux 38248809605 (9eb11ee, the race test WITHOUT the fix): **failure**,
+  as expected, in both builds (legacy 3632 tests, 2 failures).
+  - `test_enqueue_after_the_handler_returned_is_refused`: `r=0 queued=1` —
+    the forward was pushed onto the thread after its handler returned and
+    clean-up drained it (the old-code evidence).
+  - `test_foreign_server_error_is_counted` (the NEXT test): dropped 2,
+    expected 1. Not predicted. Inferred: the orphaned forward was abandoned
+    (one drop counted) when its thread was destroyed, after the next test's
+    setup. Consistent with: it passed once the fix was in (next item). Not
+    proven otherwise.
+  - `test_foreign_outcome_counters_are_the_gate_set` passed.
+- nix-linux 38250385227 (6f89f2d, race fix + serve bounds): **success**.
+  Legacy 3633, RocksDB 5371; 0 failures, 1 omission each. The race test,
+  the three serve-bound tests and `test_foreign_server_error_is_counted`
+  passed.
+- E2E 38250389416 (6f89f2d, backup-restore only): **failure**. Tests 1-4
+  passed; test 5 failed its PRECONDITION: a second restore after the
+  history moved on → "partition 0 has NO master … unfit … waiting for the
+  ex-master" (operator log), no staged rebuild reached the probe. A test
+  design error; nothing about the probe is shown. Fixed in 7d10856 (the
+  reproduction runs inside the first restore).
+- E2E 38253608337 (7d10856, old probe): **success, but NOT evidence for
+  the old probe.** Cycle 1 used the stale address (failed open, PARKED
+  source_size_unknown, the operator resumed it at once: "a slot is free").
+  Cycle 2 did not: the test counted the per-connect lines, and cycle 1's
+  closing line, logged late, passed for cycle 2's use; the stale entry was
+  removed at once and the second probe resolved the real address. Rebuilt
+  10 s after the stale window, 1 park. A test bug; fixed in a2afc1f (a
+  cycle counts only a failed OPEN). The run also gave the natural
+  stale-answer evidence in §18.2.
+- E2E 38257119887 (a2afc1f, old probe): **failure, the old-code evidence**.
+  Tests 1-3 passed. Test 4: two stale cycles, each probe's open to
+  192.0.2.10 failed (2 failed opens) and each PARKED the rebuild
+  (`source_size_unknown`); the operator resumed the first at once, the
+  second stayed parked; not rebuilt or Ready within 120 s after the stale
+  window ended (timeout at 123 s). As predicted.
+
 ## UNKNOWN
 
 - whether a blocking connect to a black-holed LB address reaches the

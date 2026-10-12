@@ -616,12 +616,50 @@ handler_reconstruction::source_check handler_reconstruction::_check_source(strin
 }
 
 
+namespace {
+	void probe_source_identity_once(const string& host, int port, copy_identity& out);
+}
+
+int handler_reconstruction::probe_attempts = 3;
+int handler_reconstruction::probe_retry_wait_ms = 1000;
+
 /**
- *	R3-D: read the source's item count and identity with one bounded `stats`
+ *	R3-D: read the source's item count and identity with a bounded `stats`
  *	request (3 s connect, 5 s per read, 8 s in total). Anything incomplete
  *	leaves `out.known` false (Unknown).
+ *
+ *	T24 (review 2026-10-12, round 8): a connection resolves the name ONCE
+ *	per open and its connect retries reuse that address, so one stale
+ *	answer (an address that black-holes) failed the whole probe. A probe
+ *	that got no complete reply is made again, each time a FRESH connection
+ *	and so a fresh lookup of the same name (never a pinned address): up to
+ *	probe_attempts, probe_retry_wait_ms, 2x that, ... in between. Still to
+ *	the source by name; what it answers is checked by the caller as before.
  */
-void handler_reconstruction::probe_source_identity(const string& host, int port, copy_identity& out) {
+void handler_reconstruction::probe_source_identity(const string& host, int port, copy_identity& out, shared_thread owner) {
+	int wait_ms = probe_retry_wait_ms;
+	for (int attempt = 1; ; attempt++) {
+		probe_source_identity_once(host, port, out);
+		if (out.answered || attempt >= probe_attempts) {
+			if (!out.answered) {
+				log_warning("the source %s:%d did not answer the identity/size probe in %d attempt(s), each with a fresh lookup (Unknown)", host.c_str(), port, attempt);
+			} else if (attempt > 1) {
+				log_notice("the source %s:%d answered the identity/size probe on attempt %d (a fresh lookup each time)", host.c_str(), port, attempt);
+			}
+			return;
+		}
+		for (int slept = 0; slept < wait_ms; slept += 100) {
+			if (owner && owner->is_shutdown_request()) {
+				return;
+			}
+			usleep(100 * 1000);
+		}
+		wait_ms *= 2;
+	}
+}
+
+namespace {
+void probe_source_identity_once(const string& host, int port, copy_identity& out) {
 	out = copy_identity();
 	connection_tcp* t = new connection_tcp(host, port);
 	t->set_connect_timeout_ms(3000);
@@ -685,9 +723,11 @@ void handler_reconstruction::probe_source_identity(const string& host, int port,
 			}
 		}
 	}
+	out.answered = ended;
 	out.known = ended && items_seen;
 	if (!ended) out.size_known = false;
 }
+}	// namespace
 
 /**
  *	R3-D: the protection rule, evaluated right before a destructive step on
@@ -724,7 +764,7 @@ copy_gate handler_reconstruction::_copy_gate(const char* step, string& why, bool
 	}
 #endif
 	copy_identity source;
-	handler_reconstruction::probe_source_identity(this->_node_server_name, this->_node_server_port, source);
+	handler_reconstruction::probe_source_identity(this->_node_server_name, this->_node_server_port, source, this->_thread);
 	copy_gate g = decide_copy_gate(local, source, why);
 	if (strict && g == gate_allow && source.items == 0) {
 		why += "; but this step discards the copy BEFORE the replacement exists, which needs a source that holds keys";
@@ -901,7 +941,17 @@ int handler_reconstruction::_staged_rebuild(bool snapshot_ok, const string& peer
 		return -1;
 	}
 	copy_identity src;
-	handler_reconstruction::probe_source_identity(host, port, src);
+	handler_reconstruction::probe_source_identity(host, port, src, this->_thread);
+	if (!src.answered) {
+		// T24: an UNREACHABLE source is not a reason to park. Parking waits
+		// for the operator's rebuild_resume (at most once per 5 min a node),
+		// so two timed-out connects to a stale address kept a replica out
+		// for minutes. A failed attempt instead: run() retries it with its
+		// backoff (2, 4, 8, 16, 30 s), every attempt from a fresh lookup.
+		// A source that ANSWERED without its size still parks (below).
+		log_warning("staged rebuild: the source %s:%d did not answer the size probe (unreachable now) — this attempt fails and is retried; not parked", host.c_str(), port);
+		return -1;
+	}
 	{
 		uint64_t need = 0;
 		string why;

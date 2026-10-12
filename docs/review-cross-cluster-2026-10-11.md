@@ -1549,6 +1549,18 @@ evaluation, environments, old-backup compatibility.
   (`source_size_unknown`); the operator resumed the first at once, the
   second stayed parked; not rebuilt or Ready within 120 s after the stale
   window ended (timeout at 123 s). As predicted.
+- nix-linux 38262348303 (76ed011, the probe fix): **success**. Legacy 3635,
+  RocksDB 5373; 0 failures, 1 omission each; both probe tests passed.
+- E2E 38262353210 (76ed011, backup-restore + blue-green-migration):
+  **success**, 20/20 executed passes, 0 skips.
+  - backup-restore 4/4. Test 4: one stale cycle; the probe's first try
+    failed against 192.0.2.10, it "answered the identity/size probe on
+    attempt 3 (a fresh lookup each time)"; 0 parks; the staging copy
+    verified (lineage, history 4:…), "staged rebuild DONE", Ready when the
+    stale window ended, every key read back. No natural stale answer this
+    run.
+  - blue-green 16/16 (strict reader with the exact counter set on real
+    replies; wedge + replacement + abort refused; mixed modes held).
 
 ## UNKNOWN
 

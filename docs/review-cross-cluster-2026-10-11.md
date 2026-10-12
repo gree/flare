@@ -1562,6 +1562,183 @@ evaluation, environments, old-backup compatibility.
   - blue-green 16/16 (strict reader with the exact counter set on real
     replies; wedge + replacement + abort refused; mixed modes held).
 
+## 19. Ninth round (2026-10-13, NOT reviewed): the approved first-move scope
+
+The user approved the METHOD for the first cross-cluster move, for
+development and verification only (2026-10-13). Not approved: real
+environments, pf-dev, real data, paid environments, real capture, the web
+switch, destructive steps, the RBAC/HMAC measures.
+
+### 19.1 Review 2026-10-13 [P1]/[P2]
+
+- **[P1] cause**: `_queue_open` did not tell handler generations apart.
+  `cluster_replication::_enqueue` copies the active map, leaves the lock,
+  then enqueues; a thread reused for another handler in between had its
+  queue open again, so an old forward reached the new handler.
+  **Fix 94f7d39**: `enqueue(q, max, expected_id)` refuses unless the queue
+  is open AND was opened by the run with the id the caller found (both
+  under the queue lock); `_running` is no longer read unlocked there.
+  **Test that fails on the old code**:
+  `test_post_proxy_forward_is_not_handed_to_a_reused_thread` (48771da: the
+  hook reuses the very thread for a handler to another port between the copy
+  and the enqueue; asserts enqueued 0, unqueued 1, nothing queued, in-flight
+  0, no outcome).
+- **[P2] cause**: the dump reset its progress bound before sending END /
+  SERVER_ERROR, so a receiver that stopped reading after the data held the
+  final frame unbounded. **Fix 94f7d39**: the bound stays on through the
+  final frame; a guard restores it (and nodelay) on every return.
+  **Test that fails on the old code**:
+  `test_final_frame_is_bounded_when_only_it_is_stuck` (data flows, only the
+  final frame is stuck; must end with errno −4 within the window, bound 0
+  after return, iterator released); `test_bound_is_off_after_a_complete_dump`
+  for the normal path.
+- Runs: nix-linux 38277313979 on 48771da (old code; hypothesis: exactly
+  these two fail) — see §19.8.
+- Residuals: the same capture-then-enqueue shape exists in cluster.cc's
+  in-cluster proxy paths (`_get_proxy_thread`, `_enqueue`) — NOT changed
+  (open finding). The dump bound also ends a human `dump` whose reader
+  pauses > 120 s.
+
+### 19.2 Full matrix on 9260841 (code = 76ed011): 38267434934
+
+14 E2E jobs. 11 succeeded. Summary lines: 322 tests, 3 failures, 22 skips
+(continuous-replication 17 = the gated outage suites, wal-recovery 3,
+failover-data 1, authority 1) → 297 executed passes. Not a candidate run
+(no candidate was set); NOT green:
+- **cross-cluster 4, 5** (faults: snapshot-push destination restart → "NO
+  master … unfit"): known **X4**, excluded from green, unchanged.
+- **empty-source 8** (activation boundary, UNKNOWN): failed on its
+  precondition "no connect attempt ended by the connect deadline". Cause,
+  from the code and the run: 0b8c976 changed the connect-failure line from
+  `connect() failed: …` to `connect() to <host>:<port> (resolved <ip>)
+  failed: …`; the test still matched the old text. The behaviour it guards
+  held in the same run (31 Unknown deferrals, dumps 1→1, no truncate,
+  activated after unblocking, items 400 = 400). Fixed in c48ccd9 (matches
+  the new format and the master's own address). Classified as a test defect
+  on that evidence; the fixed matcher has not run yet.
+
+### 19.3 Item 1: per-key-only seed, push path closed by configuration
+
+Before: the switch (`snapshotPush: false` → `cluster-replication-snapshot-push
+= false`) was honoured only by the SOURCE's seed. The destination's
+`repl_snapshot_push` server checked only partition count and freshness, so a
+fresh destination took a push from any other source left at the default or
+from a hand-sent command; a FlareMigration target was provisioned without
+any replication block.
+
+- 1a9f013 (tests, check disabled) / **be8831d (fix)**: with the switch off a
+  node refuses every incoming push FIRST (`SERVER_ERROR
+  snapshot_push_disabled`), before routing, relay and freshness. Set by
+  flared at start and on reload; new stat `snapshot_push_accept on|off`
+  (shown whether or not the node replicates). Cutter:
+  `test_switch_off_refuses_an_incoming_push_before_anything_else` (fails on
+  1a9f013), `test_switch_on_does_not_refuse_by_the_switch`. E2E
+  cluster-replication-per-key-only 6: the destination CR
+  `{enabled: false, snapshotPush: false}`, a hand-sent push is refused,
+  data and history unchanged (old code: `not_fresh`).
+- **ee13ef8**: a FlareMigration whose source has `snapshotPush: false`
+  provisions the target with the same block (CR and first extra.conf equal
+  to what the target operator renders). flare_unit 498 (+4). No E2E of a
+  per-key-only FlareMigration yet.
+- A/B and X4 stay open and untouched; the move does not use them.
+
+### 19.4 Item 2: the explicit write stop
+
+docs/RUNBOOK.md#initial-migration (7974102): every writer (clients,
+people/tools, flush_all, reaper, lazy expiry, forwarder, restore/rebuild
+operations, destination), how each is stopped and confirmed, positions as
+corroboration only, resume conditions, abort/rollback before the switch,
+held in Forwarding, after the switch (no way back), after cutover. Not the
+automatic fence (not implemented). New gap found while writing it:
+**W1** — expiry writes (reaper: no CR switch; lazy expiry on reads: cannot
+be stopped while reads continue) move the source position, so the gate
+holds; a CR switch for the reaper or "accept repeated V" is a decision.
+
+### 19.5 Items 3-4: hybrid after the move, and the fixed acceptance
+
+Hybrid = `replIdentityForward` + `replFollowEnabled` (+
+`readUnavailableError`); chart examples now set them (chart defaults
+unchanged); RUNBOOK#post-migration-hybrid.
+
+Acceptance (fixed by the user) against existing tests (all
+continuous-replication, ContinuousReplication.lean; last passing full run
+38267434934 on 9260841):
+
+| Element | Existing coverage | Missing before this round |
+|---------|-------------------|---------------------------|
+| both paths cut (forward + repl_sync_wal) | "cut …" (:321), "repeated cuts" (:817), "replica crash …" (:989): REJECT both directions on the flare port | — |
+| create / update / delete during the cut | "cut …" 10/5/5; "repeated cuts" per cycle | — |
+| writes stop, resume from the APPLIED cursor | "heal …" (:371): applied ≥ master head at the cut, not backwards | a stop the run itself checks (head unchanged after the stop) |
+| no rebuild | `reconstruction_started` unchanged ("heal", "repeated cuts") | `rocksdb_wal_fallback_to_dump` in the same run (only the crash test, which restarts the process) |
+| no Pod recreation / restart | UID unchanged | `restartCount` of replica AND master |
+| same master / history | implicit | master pod, `rocksdb_source_epoch`, `rocksdb_master_id` asserted unchanged |
+| contents match | `curr_items`, 5 updated values, 10 created keys, 2 deletes sampled | every key incl. absent deletes, on master and replica |
+| lagging read: master reachable → proxy | "local read guard" (:609): selective cut, value from the master, cursor not advanced | in the same run as the rest |
+| lagging read: master unreachable → explicit error | "read-unavailable-error" (:742): one direction cut | with both paths cut and the replica lagging, in the same run |
+
+New: **b5b218a** "ACCEPTANCE: …" does all rows in one run (phase 1
+selective cut with reads reachable, phase 2 full cut, both with
+create/update/delete). Not run yet. Unit coverage (cutter):
+`test_follow_local_read_guard_until_caught_up`,
+`test_local_read_guard_disconnect_lag_and_recovery`,
+`test_stale_balance_read_guard_uses_production_routing_and_recovers`,
+`test_follow_disconnect_is_not_a_rebuild`,
+`test_follow_only_unsatisfiable_positions_rebuild`.
+
+Recorded separately as rebuild cases: WAL retention exceeded
+(continuous-replication-purge T6; outage phase B, gated), failover to a new
+master ("planned promotion" :1069), copy loss (no dedicated in-cluster test;
+RUNBOOK restore sections). Evidence class: kind iptables cut = network
+partition evidence; NO real-AZ test exists or is approved.
+
+### 19.6 Item 5: loss
+
+Asynchronous replication: losing a master that holds writes not yet on a
+replica loses them; zero loss is not guaranteed and WAL-only streaming
+would not change it. The last-resort promotion after
+`FLARE_FOLLOW_FAILOVER_WAIT_SECONDS` is lossy ("PROMOTION NOT LOSS-FREE …
+LAST RESORT"). Written into RUNBOOK#post-migration-hybrid and the chart
+example comment.
+
+### 19.7 What is left (finite)
+
+Implementation (C):
+1. cluster.cc capture-then-enqueue (P1 shape in the in-cluster proxy) —
+   open finding, not changed.
+2. E2E of a per-key-only FlareMigration (ee13ef8 is unit-tested only).
+3. W1 reaper switch in the CR — only if the user chooses it.
+
+Verification (C, CI):
+4. old-code runs 48771da (P1/P2) and 1a9f013 (push refusal); the fixes in
+   CI.
+5. first runs of b5b218a (acceptance), c48ccd9 (empty-source 8), per-key-only 6.
+6. the full matrix + nix-linux on ONE pinned candidate (X4 excluded from
+   green, skips listed, not passes).
+
+Operational decisions (U):
+7. writer inventory and owners for the stop; W1 choice.
+8. approval separation: §16.4 proposal — RBAC split (a verifier role that
+   alone may patch FlareMigration; GitOps `ignoreDifferences` or merge =
+   approval) + audit log; HMAC over the approval line (key in a Secret
+   readable only by the verifier and the operator) only if the RBAC split
+   cannot be guaranteed. Needed decisions: who approves, whether the
+   cluster's RBAC/GitOps can hold the split, key custody/rotation if HMAC.
+   Nothing implemented.
+9. production settings (values for hybrid, readUnavailableError, reserve,
+   WAL retention sized to the longest cut to survive), R6 latency numbers.
+10. capacity/performance measurement (tmpfs headroom, WAL retention under a
+   cut, concurrent rebuild) — needs an approved environment.
+11. the unexplained read failures: R1 (cluster-init 29 / authority 29
+   cause), R4 (map change under blocked delivery), 2 unattributed DURING
+   warnings, T24's stale address cause.
+12. restore / rollback / monitoring rehearsal (R8), old-backup
+   compatibility, real capture, environments, A/B/X4 — all awaiting the
+   user.
+
+### 19.8 Runs
+
+- nix-linux 38277313979 (48771da, P1/P2 tests WITHOUT the fixes): pending.
+
 ## UNKNOWN
 
 - whether a blocking connect to a black-holed LB address reaches the

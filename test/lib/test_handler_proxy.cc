@@ -801,6 +801,8 @@ namespace test_handler_proxy {
 			usleep(100 * 1000);
 		}
 		usleep(500 * 1000);		// clean(): back to the pool
+		// another destination: another node's thread type (a fresh copy of
+		// THIS type's active map then no longer contains the thread)
 		reused = tp->get(reuse_type);
 		reused->trigger(new recording_handler(reused), true, false);
 		for (int i = 0; i < 50 && !reused->is_running(); i++) {
@@ -823,7 +825,7 @@ namespace test_handler_proxy {
 		AtomicCounter delivered(0);
 		delivered_to_new_handler = &delivered;
 		reuse_fired = false;
-		reuse_type = type;
+		reuse_type = type + 1000;
 		reused.reset();
 		thread::enqueue_before_lock_hook = reuse_thread_for_another_handler;
 		int r = enqueue();

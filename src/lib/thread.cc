@@ -35,7 +35,7 @@
 namespace gree {
 namespace flare {
 
-void (*thread::enqueue_after_check_hook)(thread* t) = NULL;
+void (*thread::enqueue_before_lock_hook)(thread* t) = NULL;
 
 // {{{ global functions
 void* thread_run(void* p) {
@@ -102,7 +102,8 @@ thread::thread(thread_pool* t):
 		_running(false),
 		_thread_handler(NULL),
 		_is_delete_thread_handler(false),
-		_queue_open(false) {
+		_queue_open(false),
+		_queue_owner_id(0) {
 	this->_info.id = 0;
 	this->_info.thread_id = 0;
 	this->_info.type = 0;
@@ -267,8 +268,12 @@ int thread::run() {
 		return -1;
 	}
 
+	pthread_rwlock_rdlock(&this->_mutex_info);
+	const unsigned int run_id = this->_id;
+	pthread_rwlock_unlock(&this->_mutex_info);
 	pthread_mutex_lock(&this->_mutex_queue);
 	this->_queue_open = true;
+	this->_queue_owner_id = run_id;
 	pthread_mutex_unlock(&this->_mutex_queue);
 	pthread_mutex_lock(&this->_mutex_running);
 	this->_running = true;
@@ -286,6 +291,7 @@ int thread::run() {
 	// destination after a reload). Review 2026-10-12.
 	pthread_mutex_lock(&this->_mutex_queue);
 	this->_queue_open = false;
+	this->_queue_owner_id = 0;
 	pthread_mutex_unlock(&this->_mutex_queue);
 
 	pthread_mutex_lock(&this->_mutex_running);
@@ -461,21 +467,28 @@ int thread::dequeue(shared_thread_queue& q, int timeout) {
 /**
  *	enqueue to current thread queue
  */
-int thread::enqueue(shared_thread_queue& q, const uint32_t max_total_thread_queue) {
+int thread::enqueue(shared_thread_queue& q, const uint32_t max_total_thread_queue, const unsigned int expected_id) {
 	uint32_t size = 0;
-	if (this->_running == false) {
-		log_warning("trying to enqueue to inactive thread [id=%u, thread_id=%u, ident=%s]", this->_id, this->_thread_id, q->get_ident().c_str());
-		return -1;
+	if (thread::enqueue_before_lock_hook != NULL) {
+		thread::enqueue_before_lock_hook(this);
 	}
 
-	if (thread::enqueue_after_check_hook != NULL) {
-		thread::enqueue_after_check_hook(this);
-	}
-
+	// Decided under the queue lock only (review 2026-10-13: the unlocked
+	// _running read is gone). Open = a handler of this thread is running
+	// and takes items; with expected_id, it must be the SAME run the caller
+	// found: a caller that copied the active map, then lost the CPU while
+	// the thread was cleaned and reused for another handler (after a reload,
+	// another destination), would otherwise hand its item to that handler.
 	pthread_mutex_lock(&this->_mutex_queue);
-	if (!this->_queue_open) {
+	if (!this->_queue_open /* OLD BEHAVIOUR (commit A): expected_id not checked */) {
+		const bool reused = this->_queue_open;
+		const unsigned int owner = this->_queue_owner_id;
 		pthread_mutex_unlock(&this->_mutex_queue);
-		log_warning("trying to enqueue to a thread whose handler has returned [id=%u, thread_id=%u, ident=%s]", this->_id, this->_thread_id, q->get_ident().c_str());
+		if (reused) {
+			log_warning("refusing to enqueue: the thread was reused for another handler since the caller found it [expected id=%u, now id=%u, ident=%s]", expected_id, owner, q->get_ident().c_str());
+		} else {
+			log_warning("trying to enqueue to a thread whose handler is not running [id=%u, thread_id=%u, ident=%s]", this->_id, this->_thread_id, q->get_ident().c_str());
+		}
 		return -1;
 	}
 	if (max_total_thread_queue > 0) {

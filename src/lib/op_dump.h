@@ -75,6 +75,9 @@ public:
 	// released). No total deadline: a throttled dump takes as long as it
 	// needs. Tests shorten it.
 	static int serve_progress_timeout_ms;
+	// test seam: called after the iteration ended and before the final
+	// END / SERVER_ERROR frame is sent (NULL outside tests)
+	static void (*before_final_frame_hook)();
 
 protected:
 	virtual int _parse_text_server_parameters();

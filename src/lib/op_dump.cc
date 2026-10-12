@@ -42,6 +42,7 @@ namespace flare {
 // that stopped holds the source's iterator this long; see op_repl_snapshot's
 // reseed_progress_timeout_ms for the same rule.
 int op_dump::serve_progress_timeout_ms = 120 * 1000;
+void (*op_dump::before_final_frame_hook)() = NULL;
 
 // {{{ ctor/dtor
 /**
@@ -211,8 +212,25 @@ int op_dump::_run_server() {
 
 	bool nodelay_saved = false;
 	connection_tcp* bounded = dynamic_cast<connection_tcp*>(this->_connection.get());
+	// The bound stays on until the FINAL frame is sent or failed, and is
+	// taken off (nodelay restored) on every return from here: review
+	// 2026-10-13 — 76ed011 took it off before END/SERVER_ERROR was written,
+	// so a peer that stopped reading after the last data left that one
+	// write waiting without a bound (the handler and connection held).
+	struct serve_bound_guard {
+		connection_tcp* c;
+		bool nodelay;
+		~serve_bound_guard() {
+			if (c != NULL) {
+				c->set_write_progress_timeout_ms(0);	// the connection serves further requests
+				c->set_tcp_nodelay(nodelay);
+			}
+		}
+	} guard = { NULL, false };
 	if (bounded != NULL) {
 		bounded->get_tcp_nodelay(nodelay_saved);
+		guard.c = bounded;
+		guard.nodelay = nodelay_saved;
 		bounded->set_tcp_nodelay(false);
 		// a receiver that stays connected but stops reading used to hold the
 		// iterator for as long as the connection lived (review 2026-10-12,
@@ -279,14 +297,22 @@ int op_dump::_run_server() {
 #endif
 	this->_storage->iter_end();
 
+	if (write_failed) {
+		// the stream is torn: no final frame (the receiver needs END and
+		// treats the dump as incomplete either way)
+		const int e = bounded != NULL ? bounded->get_errno() : 0;
+		log_warning("dump serve ended early (%s): the iterator is released; the receiver's dump is incomplete (no END) and is not accepted as complete",
+			e == -4 ? "no_progress" : "write");
+		return -1;
+	}
 	if (bounded != NULL) {
-		if (write_failed) {
-			const int e = bounded->get_errno();
-			log_warning("dump serve ended early (%s): the iterator is released; the receiver's dump is incomplete (no END) and is not accepted as complete",
-				e == -4 ? "no_progress" : "write");
-		}
-		bounded->set_write_progress_timeout_ms(0);	// the connection serves further requests
-		bounded->set_tcp_nodelay(nodelay_saved);
+		bounded->set_tcp_nodelay(nodelay_saved);	// the final frame goes out at once
+	}
+	if (bounded != NULL) {
+		bounded->set_write_progress_timeout_ms(0);	// OLD BEHAVIOUR (commit A): the bound is off before the final frame
+	}
+	if (op_dump::before_final_frame_hook != NULL) {
+		op_dump::before_final_frame_hook();
 	}
 
 	if (!this->_thread) {

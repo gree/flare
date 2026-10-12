@@ -78,9 +78,9 @@ public:
 	};
 
 	static const int			shutdown_timeout = 60;			// sec
-	// test seam: called by enqueue() after its unlocked running check and
-	// before it takes the queue lock (NULL outside tests)
-	static void (*enqueue_after_check_hook)(thread* t);
+	// test seam: called by enqueue() before it takes the queue lock (NULL
+	// outside tests)
+	static void (*enqueue_before_lock_hook)(thread* t);
 
 private:
 	thread_pool*					_thread_pool;
@@ -110,6 +110,7 @@ private:
 	pthread_mutex_t							_mutex_queue;
 	pthread_cond_t							_cond_queue;
 	bool												_queue_open;		// under _mutex_queue: the handler takes items
+	unsigned int								_queue_owner_id;	// under _mutex_queue: the id (thread_pool map key) of the run that opened it
 
 	pthread_rwlock_t			_mutex_info;
 
@@ -128,7 +129,10 @@ public:
 	int notify_shutdown();
 
 	int dequeue(shared_thread_queue& q, int timeout);
-	int enqueue(shared_thread_queue& q, uint32_t max_total_thread_queue = 0);
+	// expected_id: the id this thread had where the caller found it (the
+	// get_active map key); non-zero = refused unless the queue was opened by
+	// that same run (a thread reused for another handler has a new id)
+	int enqueue(shared_thread_queue& q, uint32_t max_total_thread_queue = 0, unsigned int expected_id = 0);
 	thread_info get_thread_info();
 
 	bool is_myself() { return pthread_self() == this->_thread_id; };

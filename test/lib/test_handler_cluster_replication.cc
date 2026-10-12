@@ -30,6 +30,9 @@
 #include "queue_proxy_write.h"
 #include "server.h"
 #include "storage.h"
+#include "cluster.h"
+#include "cluster_replication.h"
+#include "op_set.h"
 
 #include <cppcutter.h>
 #include <time.h>
@@ -644,9 +647,9 @@ namespace test_handler_cluster_replication {
 		q->track_in_flight();
 		shared_thread_queue sq = q;
 		hook_fired = false;
-		thread::enqueue_after_check_hook = stop_thread_before_enqueue_lock;
+		thread::enqueue_before_lock_hook = stop_thread_before_enqueue_lock;
 		int r = t->enqueue(sq);
-		thread::enqueue_after_check_hook = NULL;
+		thread::enqueue_before_lock_hook = NULL;
 		cut_assert(hook_fired);
 		cut_notify("enqueue after the handler returned: r=%d queued=%d", r, (int)stats_object->get_total_thread_queue());
 		// refused, so the caller counts forward_dropped_unqueued (not an
@@ -657,6 +660,79 @@ namespace test_handler_cluster_replication {
 		q.reset();
 		cut_assert_equal_int(0, (int)in_flight());
 		cut_assert_equal_int(0, (int)crepl("forward_dropped_abandoned"));
+	}
+
+	// Review 2026-10-13 [P1]: the queue being open is not enough.
+	// cluster_replication::_enqueue copies the active map, releases its lock
+	// and enqueues later; in between, the thread can be cleaned and REUSED
+	// for another handler (another destination after a reload), whose run
+	// opens the queue again. The hook does exactly that between the copy and
+	// the enqueue: the forward must be refused and counted as unqueued — not
+	// handed to the new handler and sent to its destination.
+	thread_pool* reuse_pool = NULL;
+	int reuse_port = 0;
+	bool reuse_fired = false;
+	shared_thread reused;
+	void reuse_thread_for_another_destination(thread* t) {
+		if (reuse_fired) {
+			return;
+		}
+		reuse_fired = true;
+		t->shutdown(true, false);
+		for (int i = 0; i < 50 && t->is_running(); i++) {
+			usleep(100 * 1000);
+		}
+		usleep(500 * 1000);		// clean(): back to the pool
+		reused = reuse_pool->get(thread_pool::thread_type_cluster_replication);
+		handler_cluster_replication* h = new handler_cluster_replication(reused, "localhost", reuse_port);
+		reused->trigger(h, true, false);
+	}
+
+	void test_post_proxy_forward_is_not_handed_to_a_reused_thread() {
+		queue_proxy_write::foreign_retry_window_ms = 60000;
+		cluster cl(NULL, NULL, "", 0);
+		cluster_replication cr(tp);
+		cut_assert_equal_int(0, cr.start("localhost", port, 1, NULL, &cl));
+		thread_pool::local_map m = tp->get_active(thread_pool::thread_type_cluster_replication);
+		cut_assert_equal_int(1, (int)m.size());
+		shared_thread old_t = m.begin()->second;
+		const unsigned int old_id = m.begin()->first;
+		for (int i = 0; i < 50 && !old_t->is_running(); i++) {
+			usleep(100 * 1000);
+		}
+		cut_assert(old_t->is_running());
+
+		shared_connection c(new connection_tcp("localhost", 1));
+		op_set o(c, NULL, NULL);
+		o.get_entry() = get_entry(" fk 0 0 5 3", storage::parse_type_set, "VALUE");
+		cluster::node n;
+		n.node_role = cluster::role_master;
+		reuse_pool = tp;
+		reuse_port = port + 1;
+		reuse_fired = false;
+		thread::enqueue_before_lock_hook = reuse_thread_for_another_destination;
+		cr.on_post_proxy_write(&o, n);
+		thread::enqueue_before_lock_hook = NULL;
+
+		cut_assert(reuse_fired);
+		cut_assert(reused, cut_message("no thread for the second handler"));
+		// the reuse really happened: the SAME thread object, a NEW id
+		cut_assert(reused.get() == old_t.get(), cut_message("the pool gave a new thread, not the cleaned one: the reuse was not reproduced"));
+		cut_assert(reused->get_id() != old_id, cut_message("the reused thread kept id %u", old_id));
+		usleep(500 * 1000);
+		cut_notify("reused thread %u -> %u: enqueued=%d unqueued=%d queued=%d in_flight=%d",
+			old_id, reused->get_id(), (int)crepl("forward_enqueued"), (int)crepl("forward_dropped_unqueued"),
+			(int)stats_object->get_total_thread_queue(), (int)in_flight());
+		cut_assert_equal_int(0, (int)crepl("forward_enqueued"));
+		cut_assert_equal_int(1, (int)crepl("forward_dropped_unqueued"));
+		cut_assert_equal_int(0, (int)stats_object->get_total_thread_queue());
+		cut_assert_equal_int(0, (int)in_flight());
+		cut_assert_equal_int(0, (int)crepl("forward_applied"));
+		cut_assert_equal_int(0, (int)crepl("forward_dropped_retries"));
+		cut_assert_equal_int(0, (int)crepl("forward_dropped_stopping"));
+		cut_assert_equal_int(0, (int)crepl("forward_dropped_abandoned"));
+		reused.reset();
+		cr.stop();
 	}
 }
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 noexpandtab autoindent

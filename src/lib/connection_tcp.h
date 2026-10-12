@@ -170,6 +170,7 @@ public:
 	// Whole-request deadline, `ms` from now (applies to every read after it).
 	virtual int set_deadline_from_now(int ms);
 	virtual int set_write_progress_timeout_ms(int ms) { this->_write_progress_timeout_ms = ms > 0 ? ms : 0; return 0; };
+	int get_write_progress_timeout_ms() const { return this->_write_progress_timeout_ms; };
 	virtual int set_write_deadline_from_now(int ms);
 
 	int get_errno() const { return this->_errno; };

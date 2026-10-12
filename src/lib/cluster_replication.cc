@@ -300,11 +300,13 @@ int cluster_replication::_enqueue(shared_thread_queue q, int key_hash_value, boo
 	}
 
 	shared_thread t;
+	unsigned int t_id = 0;		// the id the thread had in this copy of the map
 	int index = key_hash_value % m.size();
 	int i = 0;
 	for (thread_pool::local_map::iterator it = m.begin(); it != m.end(); it++) {
 		if (i == index) {
 			t = it->second;
+			t_id = it->first;
 			break;
 		}
 		i++;
@@ -313,8 +315,10 @@ int cluster_replication::_enqueue(shared_thread_queue q, int key_hash_value, boo
 	if (sync) {
 		q->sync_ref();
 	}
-	if (t->enqueue(q) < 0) {
-		log_warning("enqueue failed (perhaps thread is now exiting?)", 0);
+	// refused if the thread was cleaned and reused (a new id) since the
+	// copy above: the caller counts it as dropped, never a new handler's item
+	if (t->enqueue(q, 0, t_id) < 0) {
+		log_warning("enqueue failed (the thread is exiting or was reused)", 0);
 		if (sync) {
 			q->sync_unref();
 		}

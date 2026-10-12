@@ -790,6 +790,68 @@ any "green" claim and listed by name: cluster-replication-faults T4/T5
 (snapshot-push authority, X4). Comparison with c9b59ed keeps executed
 passes and skips separate (273 / 22 there).
 
+### 15.6 Fifth-round runs on 13bde49 (full matrix, NOT all green)
+
+- c04af30 targeted E2E 38183117517: cluster-replication-per-key-only 0/5,
+  caused by the suite's own design, not the product. The full artifact log
+  shows "snapshot push disabled by config … -> per-key dump". The
+  disable took ~2 min to reach the pod; T2 read T1's stale failed_connect;
+  the epoch advances at re-promotion by design; the source CR had no
+  rebuild reserve. Fixed in 13bde49. v-capture-resources 2/2,
+  blue-green 14/14, nix-linux 38183119735 success.
+- 13bde49 nix-linux 38186144702: success.
+- 13bde49 full matrix E2E 38186142795: conclusion **failure**. Every group
+  tested 13bde49. Executed passes 290, skips 22, failures 3 (c9b59ed:
+  273 / 22; the extra passes are the suites added since, not a like-for-like
+  comparison).
+  - cross-cluster: faults T4/T5 failed. **Known X4**, excluded from any
+    green claim: the destination log repeats "no node partition for this
+    slave … state=1" from 00:32:33 and the master did not come back within
+    300 s. reseed 1/1, restart-dump 3/3 and **per-key-only 5/5** passed:
+    - failed seed: failed_connect, completed 0→0, destination items 0;
+    - seed: completed_dump, seed_snapshot_push_disabled 0→1,
+      snapshot_bootstrap 0, master id / copy id / epoch unchanged;
+    - V MATCH (keys, values, flags, expire, version, deletes);
+    - destination restart: same master id and copy id; the epoch moved
+      2→4 at re-promotion; V MATCH again;
+    - a source slave started empty reseeded by snapshot
+      (snapshot_bootstrap 1) with the switch off.
+  - r3-source (v-capture-resources): busy refused, one serve directory,
+    release ~62 s after the reader left; 3000 sets 2915 ms without vs
+    3238 ms with a concurrent capture, all STORED; capture of 6851 keys.
+    Kind, one node, small data: not a capacity measurement.
+  - breaker-migration (blue-green-migration included): no failure.
+  - **failover-data: backup-restore T24 FAILED, a NEW failure, not known
+    and NOT excluded.** It passed on cb3d763 (38145285059).
+    - What the logs show:
+      - After the in-place restore and pod recreation, nodes-0 became
+        master (epoch 4).
+      - nodes-1 (slave) asked WAL sync and got epoch_mismatch (expected).
+        It then opened a new connection to the same host:port 1 ms later to
+        read the source copy size (`probe_source_identity`, connect timeout
+        3000 ms, retry 1). Both connects failed: "Connection timed out
+        (110)".
+      - The rebuild PARKED with `rebuild_blocked=source_size_unknown`
+        (00:31:58).
+      - The operator resumed it once (00:32:00). It parked again for the
+        same reason (00:32:07).
+      - The operator resumes a node at most once per 5 min (Main.lean,
+        `refreshParkedRebuilds`), so the replica stayed in prepare and was
+        not Ready. The test's 180 s wait ended about 00:34:46.
+    - Attribution:
+      - The cb3d763..13bde49 diff does not touch handler_reconstruction,
+        connection_tcp, the probe or the resume policy. storage_rocksdb only
+        adds `dump_checkpoint`, an offline function. So no code path of
+        the diff is known to be involved.
+      - That is not proof the diff is uninvolved.
+      - **Why a connect to a master that had just answered timed out is
+        UNDETERMINED.** It is not classified as harness: no log shows a
+        harness fault.
+    - What it exposes regardless of the trigger: by design, two transient
+      connect timeouts in the size probe turn into more than 5 min of
+      replica unavailability (park, plus a 5 min resume backoff). Recorded as
+      a residual; no behaviour was changed.
+
 ## UNKNOWN
 
 - whether a blocking connect to a black-holed LB address reaches the

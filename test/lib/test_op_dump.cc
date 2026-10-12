@@ -410,6 +410,8 @@ namespace test_op_dump
 		int final_fd = -1;
 		volatile bool peer_stop = false;
 		volatile bool peer_stopped = false;
+		volatile bool final_hook_reached = false;
+		volatile uint64_t* peer_got = NULL;
 
 		struct dump_peer_reader {
 			int fd;
@@ -436,6 +438,19 @@ namespace test_op_dump
 		};
 
 		void fill_before_final_frame() {
+			// reached only after every data write returned. Let the peer drain
+			// what is already in the socket buffers (nix-linux 38277313979: the
+			// peer was stopped at once and read 48204 of the >= 51200 bytes the
+			// serve had written), then stop it: from here only the final frame
+			// is left to send
+			final_hook_reached = true;
+			uint64_t last = peer_got ? *peer_got : 0;
+			for (int quiet = 0, i = 0; i < 100 && quiet < 5; i++) {
+				usleep(50 * 1000);
+				uint64_t now = peer_got ? *peer_got : 0;
+				quiet = (now == last) ? quiet + 1 : 0;
+				last = now;
+			}
 			peer_stop = true;
 			for (int i = 0; i < 200 && !peer_stopped; i++) {
 				usleep(10 * 1000);
@@ -495,11 +510,13 @@ namespace test_op_dump
 
 		peer_stop = false;
 		peer_stopped = false;
+		final_hook_reached = false;
 		final_fd = afd;
 		op_dump::before_final_frame_hook = fill_before_final_frame;
 		dump_peer_reader rd;
 		rd.fd = cfd;
 		rd.got = 0;
+		peer_got = &rd.got;
 		pthread_t rth;
 		cut_assert_equal_int(0, pthread_create(&rth, NULL, &dump_peer_reader::run, &rd));
 		dump_serve_run sr;
@@ -521,10 +538,13 @@ namespace test_op_dump
 		::close(lfd);
 		op_dump::before_final_frame_hook = NULL;
 		op_dump::serve_progress_timeout_ms = saved;
-		cut_notify("final frame stuck: ended by itself=%d after %llu ms, result %d, errno %d, peer read %llu bytes, bound after return %d",
-			(int)ended_by_itself, (unsigned long long)took, sr.result, t->get_errno(), (unsigned long long)rd.got,
+		peer_got = NULL;
+		cut_notify("final frame stuck: hook reached=%d, ended by itself=%d after %llu ms, result %d, errno %d, peer read %llu bytes, bound after return %d",
+			(int)final_hook_reached, (int)ended_by_itself, (unsigned long long)took, sr.result, t->get_errno(), (unsigned long long)rd.got,
 			t->get_write_progress_timeout_ms());
-		// the data part went through before the final frame got stuck
+		// the data part went through before the final frame got stuck: every
+		// data write returned (the hook is reached only then) and the peer read it
+		cut_assert_true(final_hook_reached, cut_message("the serve never reached the final frame: the data part did not go through"));
 		cut_assert_operator(rd.got, >=, (uint64_t)(50 * 1024));
 		cut_assert_true(ended_by_itself, cut_message("the final frame waited without a bound (not ended within 10 s)"));
 		cut_assert_operator(took, <, (uint64_t)8000);

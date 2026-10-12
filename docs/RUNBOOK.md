@@ -954,7 +954,7 @@ configuration on BOTH sides:
 | Side | Setting | Check before any seed |
 |------|---------|-----------------------|
 | every source CR that targets the destination | `clusterReplication.snapshotPush: false`, set before or with `enabled: true` (a FlareMigration's `startDuplicate` merge patch keeps it) | source stat `cluster_replication_snapshot_push off` on every source pod |
-| destination CR | `clusterReplication: {enabled: false, snapshotPush: false}` (a FlareMigration provisions this itself when its source has `false`, ee13ef8) | destination stat `snapshot_push_accept off` on every destination pod; a hand-sent `repl_snapshot_push` is answered `SERVER_ERROR snapshot_push_disabled` (be8831d) |
+| destination CR | `clusterReplication: {enabled: false, snapshotPush: false}` (a FlareMigration provisions this itself when its source has `false`, ee13ef8; the operator renders the switch with replication off only from be60dbb — an older operator drops it) | destination stat `snapshot_push_accept off` on every destination pod; a hand-sent `repl_snapshot_push` is answered `SERVER_ERROR snapshot_push_disabled` (be8831d) |
 
 After the seed: `cluster_replication_seed completed_dump`,
 `cluster_replication[seed_snapshot_push_disabled]` moved, destination

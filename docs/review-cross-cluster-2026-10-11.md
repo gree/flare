@@ -1592,8 +1592,16 @@ switch, destructive steps, the RBAC/HMAC measures.
   final frame is stuck; must end with errno −4 within the window, bound 0
   after return, iterator released); `test_bound_is_off_after_a_complete_dump`
   for the normal path.
-- Runs: nix-linux 38277313979 on 48771da (old code; hypothesis: exactly
-  these two fail) — see §19.8.
+- Runs: §19.8. Old code (48771da, nix-linux 38277313979): both fail in
+  both builds — P1 `enqueued=1 unqueued=0 queued=1 in_flight=1`; P2's
+  notification "not ended by itself after 10023 ms", but its FIRST failing
+  assertion was the test's own precondition (peer read 48204 < 51200: the
+  hook stopped the peer with bytes still buffered — a test defect, fixed in
+  66d0fd7: the peer drains first and the test asserts the hook was reached).
+  The fixed P2 test was not re-run on the old code. Fixed code (05eee82,
+  nix-linux 38279206031): P1 `enqueued=0 unqueued=1 queued=0 in_flight=0`;
+  P2 "hook reached=1, ended by itself=1 after 2055 ms, errno -4, peer read
+  52490 bytes, bound after return 0".
 - Residuals: the same capture-then-enqueue shape exists in cluster.cc's
   in-cluster proxy paths (`_get_proxy_thread`, `_enqueue`) — NOT changed
   (open finding). The dump bound also ends a human `dump` whose reader
@@ -1615,7 +1623,7 @@ failover-data 1, authority 1) → 297 executed passes. Not a candidate run
   held in the same run (31 Unknown deferrals, dumps 1→1, no truncate,
   activated after unblocking, items 400 = 400). Fixed in c48ccd9 (matches
   the new format and the master's own address). Classified as a test defect
-  on that evidence; the fixed matcher has not run yet.
+  on that evidence; the fixed matcher passed in 38279220151 (9/9).
 
 ### 19.3 Item 1: per-key-only seed, push path closed by configuration
 
@@ -1636,6 +1644,19 @@ any replication block.
   cluster-replication-per-key-only 6: the destination CR
   `{enabled: false, snapshotPush: false}`, a hand-sent push is refused,
   data and history unchanged (old code: `not_fresh`).
+- **be60dbb (found by the first E2E run)**: with `enabled: false` the
+  operator rendered only `cluster-replication = false` and DROPPED the
+  switch, so a destination's `snapshotPush: false` never reached flared
+  (38279209918 on 05eee82: per-key-only 6 "snapshot_push_accept on" after the
+  patch) and the FlareMigration target's provisioned switch would have been
+  overwritten by its own operator. ee13ef8's unit test had compared the seed
+  against the `some` renderer, which the operator does not use for a
+  disabled block. Now the replication-off rendering (rocksdb-only reconcile,
+  clear, the migration seed) carries the switch when false and writes the
+  file even with no rocksdb tuning; the default is unchanged byte for byte.
+  flare_unit 499. Because of this, the E2E never observed the old flared
+  ACCEPTING the push (the operator bug failed the test first); the old-code
+  evidence for the flared check is the cutter test on 05eee82.
 - **ee13ef8**: a FlareMigration whose source has `snapshotPush: false`
   provisions the target with the same block (CR and first extra.conf equal
   to what the target operator renders). flare_unit 498 (+4). No E2E of a
@@ -1678,7 +1699,19 @@ continuous-replication, ContinuousReplication.lean; last passing full run
 
 New: **b5b218a** "ACCEPTANCE: …" does all rows in one run (phase 1
 selective cut with reads reachable, phase 2 full cut, both with
-create/update/delete). Not run yet. Unit coverage (cutter):
+create/update/delete). **Passed** in 38279230679 (05eee82,
+continuous-replication 17/17): phase 1 (applied 158 < head 171) replica
+reads = the master's values (p1_0, p1_4, new_0) and a miss for the deleted
+acc_10; phase 2 = `SERVER_ERROR read unavailable` (4 s) for acc_5 and acc_0;
+writes stopped at head 183 (unchanged after the heal); applied 158 → 183,
+following; reconstruction_started 2→2, wal_fallback_to_dump 1→1 (the 1 is
+from test 7's flush_all rebuild), restartCount 0→0 on both, both UIDs, the
+master pod, epoch and master id unchanged; 28 keys (6 deleted) equal on
+master and replica. Limits of this evidence: the operator's map showed the
+replica at balance 0 during phase 1 (withheld), so the run shows the
+client-visible property, not which layer (operator withholding or the
+replica's own guard) produced it — the guard alone is the "local read
+guard" test; one run, kind. Unit coverage (cutter):
 `test_follow_local_read_guard_until_caught_up`,
 `test_local_read_guard_disconnect_lag_and_recovery`,
 `test_stale_balance_read_guard_uses_production_routing_and_recovers`,
@@ -1709,9 +1742,10 @@ Implementation (C):
 3. W1 reaper switch in the CR — only if the user chooses it.
 
 Verification (C, CI):
-4. old-code runs 48771da (P1/P2) and 1a9f013 (push refusal); the fixes in
-   CI.
-5. first runs of b5b218a (acceptance), c48ccd9 (empty-source 8), per-key-only 6.
+4. done: old-code runs 48771da (P1/P2) and 05eee82 (push refusal, cutter);
+   fixes in CI (05eee82). Open: the fixed P2 test was not re-run on old code.
+5. done: b5b218a acceptance and c48ccd9 empty-source 8 passed (05eee82);
+   per-key-only 6 passed after the operator fix be60dbb (38285744476).
 6. the full matrix + nix-linux on ONE pinned candidate (X4 excluded from
    green, skips listed, not passes).
 
@@ -1735,9 +1769,31 @@ Operational decisions (U):
    compatibility, real capture, environments, A/B/X4 — all awaiting the
    user.
 
-### 19.8 Runs
+### 19.8 Runs (kind / nix only, NOT reviewed, no candidate yet)
 
-- nix-linux 38277313979 (48771da, P1/P2 tests WITHOUT the fixes): pending.
+- nix-linux 38277313979 (48771da, P1/P2 tests WITHOUT the fixes):
+  **failure as predicted** — legacy 3638 / RocksDB 5376 tests, 2 failures
+  each (the P1 and P2 tests; P2 on its precondition first, see §19.1).
+- 05eee82 (P1/P2 fixes + fixed P2 test + acceptance + empty-source matcher;
+  the destination refusal TEMPORARILY disabled, A3):
+  - nix-linux 38279206031: **failure as predicted** — legacy 3640 /
+    RocksDB 5378, 1 failure each:
+    `test_switch_off_refuses_an_incoming_push_before_anything_else` (got
+    `SERVER_ERROR not_compiled` / not refused); P1/P2 tests passed.
+  - E2E 38279209918 per-key-only: 1-5 pass, **6 failed, NOT as predicted**:
+    the switch never reached the destination (operator defect → be60dbb).
+  - E2E 38279220151 empty-source: **9/9** (8 counted 125 connect-deadline
+    lines to the master's address).
+  - E2E 38279230679 continuous-replication: **17/17** incl. ACCEPTANCE.
+- be60dbb (refusal restored f373d68 + operator rendering fix): nix-linux
+  38285740092 **success** (legacy 3640 / RocksDB 5378, 0 failures, 1
+  omission each); E2E 38285744476 per-key-only **6/6** — 6: the hand-sent
+  push answered `SERVER_ERROR snapshot_push_disabled`, destination master
+  id / copy id / epoch and items unchanged.
+- **Candidate pinned: be60dbb** (label `saf10-first-move-c1`; later commits
+  docs only). Final full matrix + nix-linux on it: next. X4 (cluster-
+  replication-faults 4-5) is excluded from green; skips are listed, not
+  counted as passes.
 
 ## UNKNOWN
 

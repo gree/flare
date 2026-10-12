@@ -520,7 +520,8 @@
         "2026-10-12 seventh round (NOT reviewed). The review found that the switch gate's per-pod reader (655faa1) read missing or non-numeric counters as 0 and used enqueued <= outcomes. As a result END + on + duplicate alone, a non-numeric counter, and outcomes > enqueued all read as drained; the old reader was run on these and returned settled=true. dropped_stopping and dropped_retries were not outcomes, so such a pod never drained. enqueued is counted after queueing, which is a race. A forward dequeued just before shutdown had no outcome. Fixed in 4ceabfb (flared in-flight gauge, sent from one snapshot; the dequeue-at-shutdown forward is counted as abandoned) and 60e86e7 (strict reader; settled = gauge 0 AND enqueued == enumerated outcomes; unknown, held). 491 units; cutter in-flight x2. Residuals: a crash loses queued forwards with no outcome (V under the write stop covers this); the shutdown-after-dequeue fix rests on code reading only; a leaked item holds the switch (fail closed). ba2d730 adds test seams (flared reload hold per pod; operator wedge between the CR patch and the status patch) so the mixed-mode hold and the crash + abort refusal run deterministically in E2E (38215512251 pending). The external write stop is still a premise; no write fence. T24: no existing log has a resolved address (the failing run predates the logging; later runs dumped logs only on failure); backup-restore now prints them on every run; the cause is UNDETERMINED. Reseed serve bounds were studied and not implemented: the progress bound is reusable (a cut falls back to a dump), the total deadline needs a size/bwlimit budget, the reserve check is reusable, and op_dump serves are equally unbounded. These would change production reseed behaviour, so they are a proposal only.",
         "2026-10-12 seventh-round runs (NOT reviewed). nix-linux 38215508608 (ba2d730) FAILED test_in_flight_and_outcomes_on_shutdown with stopping 0 after 1.0 s. Inferred cause, from the duration and the handler code: a test timing issue (the stop came before the first dequeue). Fixed in df6fbb8, which waits until the forward is running; the FAIL record stays. E2E 38215512251 (ba2d730) FAILED blue-green: the new real-stats check found a product bug in 60e86e7. Real flared stats with an EMPTY value were rejected as malformed on every pod, which would have held the switch for good. Test 28 then legitimately aborted, and tests 29-36 failed in cascade. Fixed in e73d300 (empty value accepted; abort is set only once the CR says forward). The other suites in that run passed 20/20. T24: in that run nodes-1 resolved nodes-0 to 10.244.0.20 while nodes-0 was at .23 (3 ETIMEDOUT opens, recovered); the cause is still undetermined. nix-linux 38221648313 (e73d300) success; E2E 38221651957 (e73d300) 20/20. The E2E covered: real replies trusted with nothing in flight; the operator wedged after the CR patch, replaced with abort set (follow, no re-issue, abort refused, target kept); and the mixed mode held for 45 s and then reached AwaitingCutover. Consumption on the follow: the first run printed the wrong status field; ef7796b added an assertion, and E2E 38226570975 (blue-green 16/16) shows forwardApprovalConsumed = the MATCH line.",
         "2026-10-12/13 eighth round (NOT reviewed; kind/nix only). (1) In-flight and outcomes, every queue path listed (review §18.1). Found: thread::enqueue read _running without the queue lock, so a forward could be pushed after its handler returned and clean-up drained the queue; it was then never run or counted (in flight for good, holding the switch), or run by the thread's next handler (after a destination change, sent to the NEW destination). Old code: nix-linux 38248809605 (9eb11ee) failed the new test with r=0 queued=1; the next test counted one extra drop, inferred to be the orphan's late abandonment. Fixed in 6f89f2d (_queue_open under the queue lock); nix-linux 38250385227 success. The gate's counter names were prefix matches (forward_noop_/missing_/failed_*, seed_*); now an exact set of 36 answered names + 5 dropped_* + an exact non-terminal list (9eb11ee); cutter and unit pin the same literal; any other name holds the switch. Residuals: an exception other than shutdown terminates the process (= crash: queued forwards lost without an outcome, covered only by V under the write stop); shutdown-after-dequeue still rests on code reading; a new flared counter holds every switch until the operator knows it. (2) T24: established only that the resolver returned a non-current address (38215512251: .20 vs .23) and, in 38253608337, nodes-0's PREVIOUS pod IP (.10, now .13) on two reconstruction attempts; why the resolver returned it is UNDETERMINED. Controlled reproduction (backup-restore test 4: a stale /etc/hosts answer for the size probe only, dropped on the kind node): old probe FAILED (E2E 38257119887: parked twice as source_size_unknown, not rebuilt within 120 s; 38253608337 passed but was invalid, a test counting bug, fixed in a2afc1f; 38250389416 precondition failure, test design). Fixed in 76ed011: the probe retries with a fresh lookup of the same name (3 tries), and an unreachable source fails the attempt (run() retries) instead of parking; no address is pinned, identity and history are checked as before. E2E 38262353210: answered on attempt 3, 0 parks, verified and DONE; nix-linux 38262348303 success. Residual: a lookup stale for the whole retry ladder ends like any unreachable source (run() gives up after 60 attempts, ~30 min); the cause of the stale answer is not addressed. (3) Reseed and dump serves: a write with no progress for 120 s ends the serve (checkpoint removed, deletions re-enabled, slot freed / iterator released); no total deadline (6f89f2d; cutter: stop-reading cut, slow reader completes past several windows). The old-code failure of the stop-reading tests is by reasoning only (they cannot compile against the old code). Residuals: deletions re-enabled is not asserted directly; a reader that reads slowly forever is not bounded (by design); a human or tool dump whose reader pauses over 120 s is now cut; checkpoint creation, the CRC pre-read and iterator memory are not bounded. Unchanged: the write fence is not implemented (the external write stop remains a premise); RBAC/HMAC, repair R, A/B, X4 and the capture partition filter are not implemented; A/B, the migration method, real-environment capture and capacity, environments and old-backup compatibility await the user's decision. No change to production, pf-dev, real data or external environments.",
-        "2026-10-13 (ninth round; user approved the first-move METHOD for development and verification only — no real environment, pf-dev, real data, paid environment, real capture, web switch or destructive step; NOT independently reviewed). Full matrix 38267434934 on 9260841 (code 76ed011): 11/14 jobs; 322 tests, 3 failures, 22 skips (297 executed passes); NOT a candidate run, NOT green: cross-cluster 4-5 = known X4; empty-source 8 failed its precondition because 0b8c976 changed the connect-failure log line and the matcher was not updated (behaviour held in the same run) — matcher fixed in c48ccd9, not run yet. [P1] thread reuse between the active-map copy and enqueue: fix 94f7d39 (enqueue checks the opener's id under the queue lock), old-code test test_post_proxy_forward_is_not_handed_to_a_reused_thread (48771da); [P2] dump final frame unbounded: fix 94f7d39, old-code test test_final_frame_is_bounded_when_only_it_is_stuck; old-code nix-linux 38277313979 in progress. Item 1: the destination's own cluster-replication-snapshot-push = false now refuses any incoming repl_snapshot_push first (be8831d; old-code 1a9f013; cutter + per-key-only 6), FlareMigration provisions the target with the switch when its source has it (ee13ef8, unit only); A/B/X4 untouched. Item 2: RUNBOOK#initial-migration write stop (procedure only, no automatic fence); new gap W1: expiry writes (reaper has no CR switch, lazy expiry on reads) cannot be stopped by the procedure and hold the gate — user decision. Items 3-5: hybrid in chart examples (defaults unchanged); acceptance E2E b5b218a (one run, all elements; not run yet; kind iptables cut, not AZ evidence); asynchronous loss on master loss and the lossy last resort documented. Open, unchanged: cluster.cc capture-then-enqueue shape (in-cluster proxy), R1/authority29 cause, R4 cause, 2 unattributed DURING warnings, T24 stale-address cause, capacity unevaluated, old-backup compatibility unapproved, RBAC/HMAC approval separation not implemented (user decision)."
+        "2026-10-13 (ninth round; user approved the first-move METHOD for development and verification only — no real environment, pf-dev, real data, paid environment, real capture, web switch or destructive step; NOT independently reviewed). Full matrix 38267434934 on 9260841 (code 76ed011): 11/14 jobs; 322 tests, 3 failures, 22 skips (297 executed passes); NOT a candidate run, NOT green: cross-cluster 4-5 = known X4; empty-source 8 failed its precondition because 0b8c976 changed the connect-failure log line and the matcher was not updated (behaviour held in the same run) — matcher fixed in c48ccd9, not run yet. [P1] thread reuse between the active-map copy and enqueue: fix 94f7d39 (enqueue checks the opener's id under the queue lock), old-code test test_post_proxy_forward_is_not_handed_to_a_reused_thread (48771da); [P2] dump final frame unbounded: fix 94f7d39, old-code test test_final_frame_is_bounded_when_only_it_is_stuck; old-code nix-linux 38277313979 in progress. Item 1: the destination's own cluster-replication-snapshot-push = false now refuses any incoming repl_snapshot_push first (be8831d; old-code 1a9f013; cutter + per-key-only 6), FlareMigration provisions the target with the switch when its source has it (ee13ef8, unit only); A/B/X4 untouched. Item 2: RUNBOOK#initial-migration write stop (procedure only, no automatic fence); new gap W1: expiry writes (reaper has no CR switch, lazy expiry on reads) cannot be stopped by the procedure and hold the gate — user decision. Items 3-5: hybrid in chart examples (defaults unchanged); acceptance E2E b5b218a (one run, all elements; not run yet; kind iptables cut, not AZ evidence); asynchronous loss on master loss and the lossy last resort documented. Open, unchanged: cluster.cc capture-then-enqueue shape (in-cluster proxy), R1/authority29 cause, R4 cause, 2 unattributed DURING warnings, T24 stale-address cause, capacity unevaluated, old-backup compatibility unapproved, RBAC/HMAC approval separation not implemented (user decision).",
+        "2026-10-13 (ninth round, runs; NOT independently reviewed): old code 48771da nix-linux 38277313979 failed the P1 and P2 tests in both builds (P2 first on its own precondition — peer stopped with bytes buffered, test fixed in 66d0fd7; its notification showed not ended within 10 s). 05eee82 (fixes; destination push refusal temporarily disabled): nix-linux 38279206031 failed only test_switch_off_refuses_an_incoming_push_before_anything_else (old-code evidence); E2E empty-source 38279220151 9/9, continuous-replication 38279230679 17/17 incl. ACCEPTANCE (one kind run; client-visible property; operator showed the replica withheld to balance 0 during phase 1, so the layer is not isolated); per-key-only 38279209918 6 FAILED: the operator dropped snapshotPush:false when replication is disabled — fixed in be60dbb (the FlareMigration target's switch would also have been overwritten). be60dbb: nix-linux 38285740092 0 failures; per-key-only 38285744476 6/6 (hand-sent push refused). Candidate pinned: be60dbb (saf10-first-move-c1); full matrix not yet run. The fixed P2 test was not re-run on old code."
       ],
       "code": [
         {
@@ -1724,7 +1725,7 @@
         },
         "ci_passed": {
           "state": "no",
-          "evidence": "no release candidate set (0/6 checks counted)"
+          "evidence": "0/6 checks pass in CI runs that tested candidate saf10-first-move-c1 (be60dbb877)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -1817,7 +1818,7 @@
         },
         "ci_passed": {
           "state": "no",
-          "evidence": "no release candidate set (0/1 checks counted)"
+          "evidence": "0/1 checks pass in CI runs that tested candidate saf10-first-move-c1 (be60dbb877)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -2635,7 +2636,7 @@
         },
         "ci_passed": {
           "state": "no",
-          "evidence": "no release candidate set (0/4 checks counted)"
+          "evidence": "0/4 checks pass in CI runs that tested candidate saf10-first-move-c1 (be60dbb877)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -3434,7 +3435,7 @@
         },
         "ci_passed": {
           "state": "no",
-          "evidence": "no release candidate set (0/6 checks counted)"
+          "evidence": "0/6 checks pass in CI runs that tested candidate saf10-first-move-c1 (be60dbb877)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -3726,7 +3727,7 @@
         },
         "ci_passed": {
           "state": "no",
-          "evidence": "no release candidate set (0/3 checks counted)"
+          "evidence": "0/3 checks pass in CI runs that tested candidate saf10-first-move-c1 (be60dbb877)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -4320,7 +4321,7 @@
         },
         "ci_passed": {
           "state": "no",
-          "evidence": "no release candidate set (0/6 checks counted)"
+          "evidence": "0/6 checks pass in CI runs that tested candidate saf10-first-move-c1 (be60dbb877)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -4871,7 +4872,7 @@
         },
         "ci_passed": {
           "state": "no",
-          "evidence": "no release candidate set (0/5 checks counted)"
+          "evidence": "0/5 checks pass in CI runs that tested candidate saf10-first-move-c1 (be60dbb877)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -4955,7 +4956,7 @@
         },
         "ci_passed": {
           "state": "no",
-          "evidence": "no release candidate set (0/1 checks counted)"
+          "evidence": "0/1 checks pass in CI runs that tested candidate saf10-first-move-c1 (be60dbb877)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -5379,7 +5380,7 @@
         },
         "ci_passed": {
           "state": "no",
-          "evidence": "no release candidate set (0/1 checks counted)"
+          "evidence": "0/1 checks pass in CI runs that tested candidate saf10-first-move-c1 (be60dbb877)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -5462,7 +5463,7 @@
         },
         "ci_passed": {
           "state": "no",
-          "evidence": "no release candidate set (0/1 checks counted)"
+          "evidence": "0/1 checks pass in CI runs that tested candidate saf10-first-move-c1 (be60dbb877)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -5569,7 +5570,7 @@
         },
         "ci_passed": {
           "state": "no",
-          "evidence": "no release candidate set (0/1 checks counted)"
+          "evidence": "0/1 checks pass in CI runs that tested candidate saf10-first-move-c1 (be60dbb877)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -5651,7 +5652,7 @@
         },
         "ci_passed": {
           "state": "no",
-          "evidence": "no release candidate set (0/1 checks counted)"
+          "evidence": "0/1 checks pass in CI runs that tested candidate saf10-first-move-c1 (be60dbb877)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -5743,7 +5744,7 @@
         },
         "ci_passed": {
           "state": "no",
-          "evidence": "no release candidate set (0/1 checks counted)"
+          "evidence": "0/1 checks pass in CI runs that tested candidate saf10-first-move-c1 (be60dbb877)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -5819,7 +5820,7 @@
         },
         "ci_passed": {
           "state": "no",
-          "evidence": "no release candidate set (0/1 checks counted)"
+          "evidence": "0/1 checks pass in CI runs that tested candidate saf10-first-move-c1 (be60dbb877)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -6000,7 +6001,7 @@
         },
         "ci_passed": {
           "state": "no",
-          "evidence": "no release candidate set (0/1 checks counted)"
+          "evidence": "0/1 checks pass in CI runs that tested candidate saf10-first-move-c1 (be60dbb877)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -6822,7 +6823,7 @@
         },
         "ci_passed": {
           "state": "no",
-          "evidence": "no release candidate set (0/7 checks counted)"
+          "evidence": "0/7 checks pass in CI runs that tested candidate saf10-first-move-c1 (be60dbb877)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -7246,7 +7247,7 @@
         },
         "ci_passed": {
           "state": "no",
-          "evidence": "no release candidate set (0/2 checks counted)"
+          "evidence": "0/2 checks pass in CI runs that tested candidate saf10-first-move-c1 (be60dbb877)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -8134,7 +8135,7 @@
         },
         "ci_passed": {
           "state": "no",
-          "evidence": "no release candidate set (0/6 checks counted)"
+          "evidence": "0/6 checks pass in CI runs that tested candidate saf10-first-move-c1 (be60dbb877)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -8267,7 +8268,7 @@
         },
         "ci_passed": {
           "state": "no",
-          "evidence": "no release candidate set (0/1 checks counted)"
+          "evidence": "0/1 checks pass in CI runs that tested candidate saf10-first-move-c1 (be60dbb877)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -8686,7 +8687,7 @@
         },
         "ci_passed": {
           "state": "no",
-          "evidence": "no release candidate set (0/2 checks counted)"
+          "evidence": "0/2 checks pass in CI runs that tested candidate saf10-first-move-c1 (be60dbb877)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -8698,5 +8699,9 @@
         }
       }
     }
-  ]
+  ],
+  "candidate": {
+    "commit": "be60dbb8772b9a65a6cc518df7910ee5fdbbf1a4",
+    "label": "saf10-first-move-c1"
+  }
 }

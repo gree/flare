@@ -1769,7 +1769,7 @@ Operational decisions (U):
    compatibility, real capture, environments, A/B/X4 — all awaiting the
    user.
 
-### 19.8 Runs (kind / nix only, NOT reviewed, no candidate yet)
+### 19.8 Runs (kind / nix only, NOT reviewed; candidate be60dbb)
 
 - nix-linux 38277313979 (48771da, P1/P2 tests WITHOUT the fixes):
   **failure as predicted** — legacy 3638 / RocksDB 5376 tests, 2 failures
@@ -1791,9 +1791,29 @@ Operational decisions (U):
   push answered `SERVER_ERROR snapshot_push_disabled`, destination master
   id / copy id / epoch and items unchanged.
 - **Candidate pinned: be60dbb** (label `saf10-first-move-c1`; later commits
-  docs only). Final full matrix + nix-linux on it: next. X4 (cluster-
+  docs only). X4 (cluster-
   replication-faults 4-5) is excluded from green; skips are listed, not
   counted as passes.
+- **Final runs on the candidate** (head 08cbe9b = be60dbb + docs only):
+  - nix-linux 38291691334: **success** — legacy 3640 / RocksDB 5378 tests,
+    0 failures, 0 errors, 1 omission each.
+  - full matrix E2E 38291695432: workflow **failure**, caused only by
+    cross-cluster (cluster-replication-faults) **4 and 5** — reason "the
+    destination master did not come back within 300 s" / "did not record an
+    outcome"; the destination operator logged "no node partition for this
+    slave … deactivating" (23 lines): the known **X4** signature, excluded
+    from green, not fixed (out of scope for the first move).
+  - Every other suite PASS: authority 37 + 1 skip, breaker-migration 29,
+    continuous-replication 17 + 17 skips (evaluation-only benches/scale/
+    reserve; 11 = ACCEPTANCE ok), copy-protection 16, cross-cluster 13 / 15
+    (11, 15 = the per-key-only switch tests ok), empty-source 9,
+    failover-data 25 + 1 skip, r3-source 11, repair 17, repair-ledger 3,
+    replication 29, restore-promotion 22, topology 49, wal-recovery 23 + 3
+    skips.
+  - Totals: **300 executed passes, 22 skips, 2 failures (X4)**. Baseline
+    c9b59ed: 273 executed passes, 22 skips. Skips are not passes.
+  - What this is: one kind run of each test on one pinned tree. It is not
+    review, not approval, not production or AZ evidence.
 
 ## UNKNOWN
 

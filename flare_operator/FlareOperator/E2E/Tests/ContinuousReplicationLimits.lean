@@ -2617,7 +2617,11 @@ def emptySourceSuite : TestSuite := {
           let manyUnknown ← waitForCondition s!"{r} defers activation on an Unknown source more than 30 times" 900 do
             return (((← c.flaredLog r).splitOn "\n").filter (containsSubstr · "activation deferred")).length > 30
           let timeoutLines := ((← c.flaredLog r).splitOn "\n").filter fun l =>
-            containsSubstr l "connect() failed" && containsSubstr l "timed out" && containsSubstr l "within 3000 msec"
+            -- 0b8c976 (T24) logs the host and the RESOLVED address:
+            -- "connect() to <host>:<port> (resolved <ip>) failed: ... within N msec";
+            -- the attempt counted is one to the master's own address
+            containsSubstr l "connect() to " && containsSubstr l s!"(resolved {mIp}) failed:" &&
+              containsSubstr l "timed out" && containsSubstr l "within 3000 msec"
           for _ in [0:3] do
             discard <| hostCmd "docker" (["exec", kindNode, "iptables", "-D", "FORWARD"] ++ dropSpec)
           let activated ← waitForCondition s!"{r} is activated once the same source answers again" 600 do

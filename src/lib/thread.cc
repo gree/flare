@@ -101,7 +101,8 @@ thread::thread(thread_pool* t):
 		_shutdown_request(shutdown_request_none),
 		_running(false),
 		_thread_handler(NULL),
-		_is_delete_thread_handler(false) {
+		_is_delete_thread_handler(false),
+		_queue_open(false) {
 	this->_info.id = 0;
 	this->_info.thread_id = 0;
 	this->_info.type = 0;
@@ -266,6 +267,9 @@ int thread::run() {
 		return -1;
 	}
 
+	pthread_mutex_lock(&this->_mutex_queue);
+	this->_queue_open = true;
+	pthread_mutex_unlock(&this->_mutex_queue);
 	pthread_mutex_lock(&this->_mutex_running);
 	this->_running = true;
 	pthread_mutex_unlock(&this->_mutex_running);
@@ -273,6 +277,16 @@ int thread::run() {
 	log_debug("setting running flag=%d", this->_running);
 
 	this->_thread_handler->run();
+
+	// Closed under the queue lock BEFORE clean() drains it: enqueue() checks
+	// _running without a lock, so an item could otherwise be pushed after
+	// the drain — left on a pooled thread, never run and never counted
+	// (a tracked forward stayed in flight for good), or run by the next
+	// handler this thread is given (a cross-cluster forward sent to a new
+	// destination after a reload). Review 2026-10-12.
+	pthread_mutex_lock(&this->_mutex_queue);
+	this->_queue_open = false;
+	pthread_mutex_unlock(&this->_mutex_queue);
 
 	pthread_mutex_lock(&this->_mutex_running);
 	this->_running = false;
@@ -459,6 +473,11 @@ int thread::enqueue(shared_thread_queue& q, const uint32_t max_total_thread_queu
 	}
 
 	pthread_mutex_lock(&this->_mutex_queue);
+	if (!this->_queue_open) {
+		pthread_mutex_unlock(&this->_mutex_queue);
+		log_warning("trying to enqueue to a thread whose handler has returned [id=%u, thread_id=%u, ident=%s]", this->_id, this->_thread_id, q->get_ident().c_str());
+		return -1;
+	}
 	if (max_total_thread_queue > 0) {
 		size = static_cast<uint32_t>(stats_object->get_total_thread_queue());
 	}

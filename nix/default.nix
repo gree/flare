@@ -62,6 +62,8 @@ stdenv.mkDerivation {
     # worst-case-pin capacity rule
     # switch gate: in-flight forwards as a value, one outcome per forward on shutdown
     grep -E 'test_in_flight_counts_a_forward_until_it_is_released|test_in_flight_and_outcomes_on_shutdown|test_foreign_outcome_counters_are_the_gate_set|test_enqueue_after_the_handler_returned_is_refused' test/run-tests.sh.log || echo "in-flight tests NOT found in the cutter log"
+    # reseed / dump serve: progress bound, no total deadline (round 8)
+    grep -E 'test_reseed_serve_ends_when_the_receiver_stops_reading|test_reseed_serve_to_a_slow_reader_completes_past_several_windows|test_run_server_ends_when_the_receiver_stops_reading' test/run-tests.sh.log || echo "serve bound tests NOT found in the cutter log"
     grep -E 'test_write_progress_timeout_ends_a_write_to_a_peer_that_stopped_reading|test_write_deadline_ends_a_write_even_with_a_longer_progress_timeout|test_write_bounds_do_not_end_a_write_the_peer_reads|test_capture_capacity_refuses_unknowns_and_short_space' test/run-tests.sh.log || echo "capture guard tests NOT found in the cutter log"
     # CI 37852139711: the RocksDB and the legacy builds reported the SAME
     # totals, so the RocksDB storage module was built but not run. Show what

@@ -37,6 +37,12 @@
 namespace gree {
 namespace flare {
 
+// 120 s without one byte accepted: a dump receiver reads continuously
+// (op_dump::_run_client stores each entry as it arrives), so only a receiver
+// that stopped holds the source's iterator this long; see op_repl_snapshot's
+// reseed_progress_timeout_ms for the same rule.
+int op_dump::serve_progress_timeout_ms = 120 * 1000;
+
 // {{{ ctor/dtor
 /**
  *	ctor for op_dump
@@ -204,10 +210,18 @@ int op_dump::_run_server() {
 	}
 
 	bool nodelay_saved = false;
-	if (connection_tcp* ctp = dynamic_cast<connection_tcp*>(this->_connection.get())) {
-		ctp->get_tcp_nodelay(nodelay_saved);
-		ctp->set_tcp_nodelay(false);
+	connection_tcp* bounded = dynamic_cast<connection_tcp*>(this->_connection.get());
+	if (bounded != NULL) {
+		bounded->get_tcp_nodelay(nodelay_saved);
+		bounded->set_tcp_nodelay(false);
+		// a receiver that stays connected but stops reading used to hold the
+		// iterator for as long as the connection lived (review 2026-10-12,
+		// round 8): the progress bound ends the dump instead
+		bounded->set_write_progress_timeout_ms(op_dump::serve_progress_timeout_ms);
+	} else {
+		log_notice("dump serve on a non-TCP connection: its writes are not bounded", 0);
 	}
+	bool write_failed = false;
 
 	key_resolver* kr = this->_cluster->get_key_resolver();
 #ifdef HAVE_LIBROCKSDB
@@ -248,6 +262,7 @@ int op_dump::_run_server() {
 		int n = this->_connection->write(response, response_len);
 		delete[] response;
 		if (n < 0) {
+			write_failed = true;
 			break;
 		}
 
@@ -264,8 +279,14 @@ int op_dump::_run_server() {
 #endif
 	this->_storage->iter_end();
 
-	if (connection_tcp* ctp = dynamic_cast<connection_tcp*>(this->_connection.get())) {
-		ctp->set_tcp_nodelay(nodelay_saved);
+	if (bounded != NULL) {
+		if (write_failed) {
+			const int e = bounded->get_errno();
+			log_warning("dump serve ended early (%s): the iterator is released; the receiver's dump is incomplete (no END) and is not accepted as complete",
+				e == -4 ? "no_progress" : "write");
+		}
+		bounded->set_write_progress_timeout_ms(0);	// the connection serves further requests
+		bounded->set_tcp_nodelay(nodelay_saved);
 	}
 
 	if (!this->_thread) {

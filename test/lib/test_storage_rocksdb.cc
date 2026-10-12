@@ -29,6 +29,13 @@
 #include <storage_rocksdb.h>
 #include <handler_wal_follower.h>
 #include <op_repl_sync_wal.h>
+#include <op_repl_snapshot.h>
+#include <connection_tcp.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <time.h>
 #include "mock_storage.h"
 #include "connection_iostream.h"
 
@@ -3921,6 +3928,201 @@ void test_follow_record_carries_state_reason_and_observation_time() {
 	cut_assert_equal_string("following", r.state.c_str());
 	cut_assert_equal_string("", r.last_reason.c_str());
 	stats_object->follow_set_state(stats::follow_idle, "");
+}
+
+
+// ---------------------------------------------------------------------------
+// RESEED serve bounds (review 2026-10-12, round 8): the non-capture
+// repl_snapshot serve had no write bound — a receiver that stayed connected
+// and stopped reading held the checkpoint, the file-deletion pin and the
+// one-serve slot (every other reseed: busy) for as long as it stayed.
+// ---------------------------------------------------------------------------
+namespace {
+	uint64_t serve_mono_ms() {
+		struct timespec ts;
+		clock_gettime(CLOCK_MONOTONIC, &ts);
+		return (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+	}
+
+	// a server-side (accepted, NON-BLOCKING, as flared's) socket and its peer,
+	// both with small buffers so the serve must wait for the peer's reads
+	struct serve_pair {
+		int lfd, cfd, afd;
+		struct sockaddr_in addr;
+		serve_pair() : lfd(-1), cfd(-1), afd(-1) {
+			lfd = socket(AF_INET, SOCK_STREAM, 0);
+			memset(&addr, 0, sizeof(addr));
+			addr.sin_family = AF_INET;
+			addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+			addr.sin_port = 0;
+			bind(lfd, (struct sockaddr*)&addr, sizeof(addr));
+			listen(lfd, 1);
+			socklen_t l = sizeof(addr);
+			getsockname(lfd, (struct sockaddr*)&addr, &l);
+			cfd = socket(AF_INET, SOCK_STREAM, 0);
+			int small = 4096;
+			setsockopt(cfd, SOL_SOCKET, SO_RCVBUF, &small, sizeof(small));
+			connect(cfd, (struct sockaddr*)&addr, sizeof(addr));
+			struct sockaddr_in peer;
+			socklen_t pl = sizeof(peer);
+			afd = accept(lfd, (struct sockaddr*)&peer, &pl);
+			int sb = 16384;
+			setsockopt(afd, SOL_SOCKET, SO_SNDBUF, &sb, sizeof(sb));
+			fcntl(afd, F_SETFL, fcntl(afd, F_GETFL, 0) | O_NONBLOCK);
+		}
+		void close_peer() { if (cfd >= 0) { ::close(cfd); cfd = -1; } }
+		~serve_pair() {
+			close_peer();
+			if (lfd >= 0) ::close(lfd);
+		}
+	};
+
+	struct serve_op : public op_repl_snapshot {
+		serve_op(shared_connection c, storage* st) : op_repl_snapshot(c, st) {}
+		using op_repl_snapshot::_run_server;
+	};
+
+	struct serve_run {
+		serve_op* op;
+		volatile bool done;
+		int result;
+		pthread_t th;
+		static void* run(void* a) {
+			serve_run* self = static_cast<serve_run*>(a);
+			self->result = self->op->_run_server();
+			self->done = true;
+			return NULL;
+		}
+	};
+
+	// incompressible values: the checkpoint is ~`mb` MB of SST
+	void fill_incompressible(storage_rocksdb* s, int mb) {
+		string v(8192, 'x');
+		unsigned int seed = 12345;
+		for (int i = 0; i < mb * 128; i++) {
+			for (size_t j = 0; j < v.size(); j++) {
+				v[j] = static_cast<char>(rand_r(&seed) & 0xff);
+			}
+			char k[32];
+			snprintf(k, sizeof(k), "big%06d", i);
+			storage_set_string(s, k, v);
+		}
+	}
+
+	string read_line_fd(int fd) {
+		string line;
+		char ch;
+		while (::read(fd, &ch, 1) == 1) {
+			line += ch;
+			if (ch == '\n') break;
+		}
+		return line;
+	}
+
+	int count_serve_dirs(const char* dir) {
+		int n = 0;
+		DIR* d = opendir(dir);
+		if (d == NULL) return -1;
+		struct dirent* ent;
+		while ((ent = readdir(d)) != NULL) {
+			if (string(ent->d_name).compare(0, 15, "snapshot.serve.") == 0) n++;
+		}
+		closedir(d);
+		return n;
+	}
+}
+
+// (a) the receiver reads the header and stops: the serve ends within the
+// progress window and leaves no checkpoint, no pin and no busy slot behind.
+// Old code: the serve blocks in write() until the peer goes away — here
+// until this test's own 10 s guard closes the peer (then: "did not end").
+void test_reseed_serve_ends_when_the_receiver_stops_reading() {
+	storage_rocksdb* m = make_rocksdb(wal_master_dir);
+	fill_incompressible(m, 6);
+	const int saved = op_repl_snapshot::reseed_progress_timeout_ms;
+	op_repl_snapshot::reseed_progress_timeout_ms = 1500;
+	serve_pair sp;
+	cut_assert_operator(sp.afd, >=, 0);
+	connection_tcp* t = new connection_tcp(sp.afd, sp.addr);
+	shared_connection c(t);
+	serve_op* op = new serve_op(c, m);
+	serve_run sr;
+	sr.op = op;
+	sr.done = false;
+	sr.result = 0;
+	const uint64_t t0 = serve_mono_ms();
+	cut_assert_equal_int(0, pthread_create(&sr.th, NULL, &serve_run::run, &sr));
+	const string header = read_line_fd(sp.cfd);		// then never read again
+	while (!sr.done && serve_mono_ms() - t0 < 10000) {
+		usleep(50 * 1000);
+	}
+	const bool ended_by_itself = sr.done;
+	const uint64_t took = serve_mono_ms() - t0;
+	sp.close_peer();		// the guard: unblocks a serve that did not end
+	pthread_join(sr.th, NULL);
+	op_repl_snapshot::reseed_progress_timeout_ms = saved;
+	delete op;
+	cut_notify("reseed serve to a stalled receiver: header '%s', ended by itself=%d after %llu ms, result %d, errno %d",
+		header.c_str(), (int)ended_by_itself, (unsigned long long)took, sr.result, t->get_errno());
+	cut_assert_equal_int(0, (int)header.compare(0, 9, "SNAPSHOT "));
+	cut_assert_true(ended_by_itself, cut_message("the serve did not end within 10 s of a receiver that stopped reading"));
+	cut_assert_equal_int(-1, sr.result);
+	cut_assert_equal_int(-4, t->get_errno());
+	cut_assert_operator(took, <, (uint64_t)8000);
+	// released: no serve directory left, the slot is free
+	cut_assert_false(m->is_snapshot_serving());
+	cut_assert_equal_int(0, count_serve_dirs(wal_master_dir));
+	string cp;
+	uint64_t seq = 0;
+	cut_assert_equal_int(0, m->create_snapshot_checkpoint(cp, seq));		// not -2 (busy)
+	cut_assert_equal_int(0, m->remove_snapshot_checkpoint(cp));
+	drop_rocksdb(m, wal_master_dir);
+}
+
+// (b) a SLOW but reading receiver: the whole serve takes several progress
+// windows and still completes — the bound is on progress, never on the
+// total time (a fixed short deadline would fail every large reseed).
+void test_reseed_serve_to_a_slow_reader_completes_past_several_windows() {
+	storage_rocksdb* m = make_rocksdb(wal_master_dir);
+	fill_incompressible(m, 3);
+	const int saved = op_repl_snapshot::reseed_progress_timeout_ms;
+	op_repl_snapshot::reseed_progress_timeout_ms = 1000;
+	serve_pair sp;
+	connection_tcp* t = new connection_tcp(sp.afd, sp.addr);
+	shared_connection c(t);
+	serve_op* op = new serve_op(c, m);
+	serve_run sr;
+	sr.op = op;
+	sr.done = false;
+	sr.result = 0;
+	const uint64_t t0 = serve_mono_ms();
+	cut_assert_equal_int(0, pthread_create(&sr.th, NULL, &serve_run::run, &sr));
+	// 16 KB every 25 ms (~640 KB/s): never a 1 s gap, far slower than the serve
+	string tail;
+	uint64_t total = 0;
+	char b[16384];
+	while (serve_mono_ms() - t0 < 60000) {
+		ssize_t r = ::read(sp.cfd, b, sizeof(b));
+		if (r <= 0) break;
+		total += r;
+		tail.append(b, r);
+		if (tail.size() > 16) tail.erase(0, tail.size() - 16);
+		// the stream's terminator (a random file byte run matching it is ~2^-40)
+		if (tail.size() >= 5 && tail.compare(tail.size() - 5, 5, "END\r\n") == 0) break;
+		usleep(25 * 1000);
+	}
+	const uint64_t took = serve_mono_ms() - t0;
+	sp.close_peer();
+	pthread_join(sr.th, NULL);
+	op_repl_snapshot::reseed_progress_timeout_ms = saved;
+	delete op;
+	cut_notify("slow reader: %llu bytes in %llu ms, result %d", (unsigned long long)total, (unsigned long long)took, sr.result);
+	cut_assert_equal_int(0, sr.result);
+	cut_assert_operator(took, >, (uint64_t)3000);		// more than three windows
+	cut_assert_true(tail.size() >= 5 && tail.compare(tail.size() - 5, 5, "END\r\n") == 0, cut_message("the stream did not end with END"));
+	cut_assert_false(m->is_snapshot_serving());
+	cut_assert_equal_int(0, count_serve_dirs(wal_master_dir));
+	drop_rocksdb(m, wal_master_dir);
 }
 
 	void teardown()

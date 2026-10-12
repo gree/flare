@@ -31,6 +31,14 @@
 
 #include <app.h>
 #include <op_dump.h>
+#include <connection_tcp.h>
+
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <pthread.h>
+#include <time.h>
 
 using namespace gree::flare;
 
@@ -301,6 +309,94 @@ namespace test_op_dump
 		cut_assert_equal_int(100, op._wait);
 		cut_assert_equal_int(1, op._bwlimitter.get_bwlimit());
 		run_server_test(op, 1, 1024, 100, 1, 100000);
+	}
+
+
+	// ---- serve bound (review 2026-10-12, round 8): a dump receiver that
+	// stays connected but stops reading held the source's iterator (on
+	// RocksDB a snapshot pinning files and memtables; "database busy" for
+	// every other dump) for as long as it stayed connected.
+	namespace {
+		uint64_t dump_mono_ms() {
+			struct timespec ts;
+			clock_gettime(CLOCK_MONOTONIC, &ts);
+			return (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+		}
+
+		struct dump_serve_run {
+			test_op_dump* op;
+			volatile bool done;
+			int result;
+			static void* run(void* a) {
+				dump_serve_run* self = static_cast<dump_serve_run*>(a);
+				self->result = self->op->_run_server();
+				self->done = true;
+				return NULL;
+			}
+		};
+	}
+
+	// Old code: the serve blocks in write() until the peer goes away — here
+	// until this test's 10 s guard closes the peer ("did not end").
+	void test_run_server_ends_when_the_receiver_stops_reading()
+	{
+		int lfd = socket(AF_INET, SOCK_STREAM, 0);
+		struct sockaddr_in addr;
+		memset(&addr, 0, sizeof(addr));
+		addr.sin_family = AF_INET;
+		addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+		bind(lfd, (struct sockaddr*)&addr, sizeof(addr));
+		listen(lfd, 1);
+		socklen_t l = sizeof(addr);
+		getsockname(lfd, (struct sockaddr*)&addr, &l);
+		int cfd = socket(AF_INET, SOCK_STREAM, 0);
+		int small = 4096;
+		setsockopt(cfd, SOL_SOCKET, SO_RCVBUF, &small, sizeof(small));
+		cut_assert_equal_int(0, connect(cfd, (struct sockaddr*)&addr, sizeof(addr)));
+		struct sockaddr_in peer;
+		socklen_t pl = sizeof(peer);
+		int afd = accept(lfd, (struct sockaddr*)&peer, &pl);
+		cut_assert_operator(afd, >=, 0);
+		int sb = 16384;
+		setsockopt(afd, SOL_SOCKET, SO_SNDBUF, &sb, sizeof(sb));
+		fcntl(afd, F_SETFL, fcntl(afd, F_GETFL, 0) | O_NONBLOCK);
+
+		const int saved = op_dump::serve_progress_timeout_ms;
+		op_dump::serve_progress_timeout_ms = 1500;
+		connection_tcp* t = new connection_tcp(afd, addr);
+		shared_connection c(t);
+		cluster cl(NULL, NULL, "", 0);
+		mock_storage st("", 0, 0);
+		AtomicCounter thread_idx(1);
+		thread_pool tp(1, 128, &thread_idx);
+		test_op_dump op(c, &cl, &st);
+		op.set_thread(shared_thread(new gree::flare::thread(&tp)));
+		set_dummy_items(st, 2000, 8192);		// ~16 MB: far beyond both buffers
+
+		dump_serve_run sr;
+		sr.op = &op;
+		sr.done = false;
+		sr.result = 0;
+		pthread_t th;
+		const uint64_t t0 = dump_mono_ms();
+		cut_assert_equal_int(0, pthread_create(&th, NULL, &dump_serve_run::run, &sr));
+		while (!sr.done && dump_mono_ms() - t0 < 10000) {
+			usleep(50 * 1000);
+		}
+		const bool ended_by_itself = sr.done;
+		const uint64_t took = dump_mono_ms() - t0;
+		::close(cfd);		// the guard: unblocks a serve that did not end
+		pthread_join(th, NULL);
+		::close(lfd);
+		op_dump::serve_progress_timeout_ms = saved;
+		cut_notify("dump serve to a stalled receiver: ended by itself=%d after %llu ms, result %d, errno %d",
+			(int)ended_by_itself, (unsigned long long)took, sr.result, t->get_errno());
+		cut_assert_true(ended_by_itself, cut_message("the dump serve did not end within 10 s of a receiver that stopped reading"));
+		cut_assert_operator(took, <, (uint64_t)8000);
+		cut_assert_equal_int(-4, t->get_errno());
+		// the iterator is released: the next dump is not "database busy"
+		cut_assert_equal_int(0, st.iter_begin());
+		st.iter_end();
 	}
 
 	void teardown()

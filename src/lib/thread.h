@@ -109,6 +109,7 @@ private:
 	queue<shared_thread_queue>	_thread_queue;
 	pthread_mutex_t							_mutex_queue;
 	pthread_cond_t							_cond_queue;
+	bool												_queue_open;		// under _mutex_queue: the handler takes items
 
 	pthread_rwlock_t			_mutex_info;
 

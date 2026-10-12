@@ -46,6 +46,14 @@ namespace flare {
 // SST in memory and the bandwidth throttle gets fine-grained sleep points.
 static const size_t kSnapshotChunkBytes = 1024 * 1024;
 
+// 120 s without one byte accepted: the receiver reads the socket
+// continuously while it writes each file (op_repl_snapshot::_run_client),
+// so only a receiver that stopped (hung, its disk stalled for minutes, or a
+// half-open connection) waits that long; its own space watch stops the copy
+// by closing the connection, which ends the serve at once. The sender's
+// bwlimit sleeps are between writes and never count as a stall.
+int op_repl_snapshot::reseed_progress_timeout_ms = 120 * 1000;
+
 // {{{ ctor/dtor
 op_repl_snapshot::op_repl_snapshot(shared_connection c, storage* st):
 		op(c, "repl_snapshot"),
@@ -188,7 +196,26 @@ int op_repl_snapshot::_run_server() {
 		// stops reading ends the serve (and its pin) instead of holding it
 		ctcp->set_write_progress_timeout_ms(kCaptureProgressMs);
 		ctcp->set_write_deadline_from_now(static_cast<int>(this->_capture_deadline_sec * 1000));
+	} else if (!this->_capture) {
+		// RESEED: the progress bound only (review 2026-10-12, round 8). Before,
+		// a receiver that stayed connected without reading held the
+		// checkpoint, the file-deletion pin and the one-serve slot (every
+		// other reseed answered busy) for as long as the connection lived.
+		ctcp = dynamic_cast<connection_tcp*>(this->_connection.get());
+		if (ctcp != NULL) {
+			ctcp->set_write_progress_timeout_ms(op_repl_snapshot::reseed_progress_timeout_ms);
+		} else {
+			log_notice("snapshot serve on a non-TCP connection: its writes are not bounded", 0);
+		}
 	}
+	// why a write failed (capture: recorded; reseed: logged)
+	struct write_fail {
+		static string why(connection_tcp* t) {
+			if (t == NULL) return "write";
+			const int e = t->get_errno();
+			return e == -4 ? "no_progress" : e == -5 ? "deadline" : "write";
+		}
+	};
 
 	// Enumerate the checkpoint's regular files (checkpoints are flat).
 	vector<pair<string, uint64_t> > files;
@@ -219,7 +246,10 @@ int op_repl_snapshot::_run_server() {
 		rdb->remove_snapshot_checkpoint(cp_path);
 		rdb->enable_file_deletions();
 		if (this->_capture) {
-			rdb->note_capture(2, "write");
+			rdb->note_capture(2, write_fail::why(ctcp));
+		} else {
+			log_warning("snapshot serve ended before the first file (%s): checkpoint removed, file deletions re-enabled, slot released",
+				write_fail::why(ctcp).c_str());
 		}
 		return -1;
 	}
@@ -276,6 +306,7 @@ int op_repl_snapshot::_run_server() {
 		snprintf(line, sizeof(line), "FILE %s %llu %u\r\n", name.c_str(), (unsigned long long)size, crc);
 		if (this->_connection->write(line, strlen(line)) < 0) {
 			r = -1;
+			abort_why = write_fail::why(ctcp);
 			break;
 		}
 
@@ -297,10 +328,7 @@ int op_repl_snapshot::_run_server() {
 			}
 			if (this->_connection->write(buf, static_cast<int>(got)) < 0) {
 				r = -1;
-				if (ctcp != NULL) {
-					const int e = ctcp->get_errno();
-					abort_why = e == -4 ? "no_progress" : e == -5 ? "deadline" : "write";
-				}
+				abort_why = write_fail::why(ctcp);
 				break;
 			}
 			sent += got;
@@ -339,18 +367,26 @@ int op_repl_snapshot::_run_server() {
 			rdb->note_capture(2, abort_why.empty() ? "write" : abort_why);
 			log_warning("capture serve ended early (%s): checkpoint removed, slot released",
 				abort_why.empty() ? "write" : abort_why.c_str());
+		} else {
+			log_warning("snapshot serve ended early (%s): checkpoint removed, file deletions re-enabled, slot released; the receiver falls back (staged dump)",
+				abort_why.empty() ? "local_read" : abort_why.c_str());
 		}
 		return -1;
 	}
 
 	if (this->_connection->write("END\r\n", 5) < 0) {
 		if (this->_capture) {
-			rdb->note_capture(2, "write");
+			rdb->note_capture(2, write_fail::why(ctcp));
+		} else {
+			log_warning("snapshot serve: END not delivered (%s); checkpoint already removed, slot released", write_fail::why(ctcp).c_str());
 		}
 		return -1;
 	}
 	if (this->_capture) {
 		rdb->note_capture(0, "");
+	} else if (ctcp != NULL) {
+		// the connection serves further requests: unbounded again
+		ctcp->set_write_progress_timeout_ms(0);
 	}
 	log_notice("snapshot streamed to peer (files=%zu, seq=%llu)", files.size(), (unsigned long long)cp_seq);
 	return 0;

@@ -894,6 +894,12 @@ int handler_reconstruction::_staged_rebuild(bool snapshot_ok, const string& peer
 			log_notice("staged rebuild: %zu retained copy(ies) kept here (deleted under the §8 conditions or by an approval); their space counts in the capacity check", retained.size());
 		}
 	}
+	// TEST SEAM (E2E only, T24): hold right before the size probe, after
+	// this attempt's own connections to the source were made, so a test can
+	// make ONLY the probe's separate lookup stale (what T24 showed)
+	if (!this->_test_hold("FLARE_TEST_STAGED_PROBE_HOLD_FILE", "staged rebuild size probe")) {
+		return -1;
+	}
 	copy_identity src;
 	handler_reconstruction::probe_source_identity(host, port, src);
 	{

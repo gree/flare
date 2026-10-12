@@ -50,7 +50,11 @@
  *	the serve, and a free-space drop below the reserve aborts it; every exit
  *	removes the checkpoint and releases the slot. The header carries a 5th
  *	token "capture" so the driver can refuse a server that ignored the mode.
- *	A reseed (no "capture" token) is unchanged.
+ *
+ *	A RESEED serve (no "capture" token) has the progress bound only
+ *	(reseed_progress_timeout_ms, 120 s): a receiver that stays connected
+ *	but stops reading ends the serve and releases the checkpoint, the pin
+ *	and the slot; there is no total deadline and no capacity refusal.
  */
 #ifndef	OP_REPL_SNAPSHOT_H
 #define	OP_REPL_SNAPSHOT_H
@@ -99,6 +103,12 @@ public:
 	static const uint64_t kSpaceWatchBytes = 64ULL << 20;
 	static const int kCaptureProgressMs = 30 * 1000;
 	static const uint64_t kCaptureMaxDeadlineSec = 600;
+	// RESEED serve (no capture): a write that makes no progress for this
+	// long ends the serve — checkpoint removed, deletions re-enabled, slot
+	// released — instead of pinning them for as long as a receiver stays
+	// connected without reading. NO total deadline: a reseed throttled by
+	// bwlimit takes as long as its size needs. Tests shorten it.
+	static int reseed_progress_timeout_ms;
 
 	// Pull the snapshot from the connected source and swap it in as the
 	// local live DB (rocksdb only). Returns 0 on success; on any failure the

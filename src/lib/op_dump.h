@@ -70,6 +70,11 @@ public:
 	bool is_completed() const { return this->_completed; }
 	uint64_t get_items() const { return this->_items; }
 	static const uint64_t kSpaceWatchItems = 1024;
+	// SERVE side: a write that makes no progress for this long ends the dump
+	// (the iterator — on RocksDB a snapshot pinning files and memtables — is
+	// released). No total deadline: a throttled dump takes as long as it
+	// needs. Tests shorten it.
+	static int serve_progress_timeout_ms;
 
 protected:
 	virtual int _parse_text_server_parameters();

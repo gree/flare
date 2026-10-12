@@ -34,6 +34,7 @@ import FlareOperator.E2E.Tests.ClusterReplicationFaults
 import FlareOperator.E2E.Tests.ClusterReplicationReseed
 import FlareOperator.E2E.Tests.ClusterReplicationRestartDump
 import FlareOperator.E2E.Tests.ClusterReplicationPerKeyOnly
+import FlareOperator.E2E.Tests.MigrationPerKeyOnly
 import FlareOperator.E2E.Tests.VCaptureResources
 import FlareOperator.E2E.Tests.ReplicaRepair
 import FlareOperator.E2E.Tests.ContinuousReplication
@@ -79,6 +80,7 @@ def main (args : List String) : IO UInt32 :=
     Tests.ClusterReplicationReseed.suite,
     Tests.ClusterReplicationRestartDump.suite,
     Tests.ClusterReplicationPerKeyOnly.suite,
+    Tests.MigrationPerKeyOnly.suite,
     Tests.VCaptureResources.suite,
     Tests.ReplicaRepair.suite,
     Tests.ContinuousReplication.suite,

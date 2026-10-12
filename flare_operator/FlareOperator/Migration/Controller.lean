@@ -321,8 +321,19 @@ private def buildPlan (mig : MigCR) (crName ns : String) : IO (Except String Tar
     | .ok s => pure (if s.trim.isEmpty then none else some s.trim)
     | .error _ => pure (none : Option String)
   -- rocksdb tuning: inherited from the source CR
+  -- TEST SEAM (E2E only, review 2026-10-13 finding 1): while the file named
+  -- by FLARE_TEST_MIG_SOURCE_READ_FAIL_FILE exists, the source FlareCluster
+  -- read fails as a transient API error or a Forbidden would. Unset (the
+  -- default): no effect.
+  let forced ← match (← IO.getEnv "FLARE_TEST_MIG_SOURCE_READ_FAIL_FILE") with
+    | some f => if f.isEmpty then pure false else System.FilePath.pathExists f
+    | none => pure false
+  let srcRead ← if forced then do
+      IO.eprintln "[migration] TEST SEAM: the source FlareCluster read is forced to fail (FLARE_TEST_MIG_SOURCE_READ_FAIL_FILE)"
+      pure (Except.error "TEST SEAM: forced source FlareCluster read failure")
+    else getFlareCluster crName ns
   let (rocksdb, snapshotPush) ← do
-    match ← getFlareCluster crName ns with
+    match srcRead with
     | .ok crd => pure (crd.spec.rocksdb, crd.spec.clusterReplication.snapshotPush)
     | .error _ => pure ({}, true)
   return .ok {

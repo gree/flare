@@ -55,6 +55,9 @@ private def cfg : ClusterConfig := {
   extraFlaredConf := "repl-identity-forward = true\nrepl-follow-enabled = true\nrepl-follow-poll-interval-usec = 200000"
   -- A repair must be watchable within a test.
   operatorEnv := [("FLARE_STATS_PROBE_INTERVAL_MS", "15000")]
+  -- the acceptance's final copy check attributes each replica answer to
+  -- its own copy (review 2026-10-13 finding 3)
+  flaredEnv := [("FLARE_TEST_READ_TRACE_PREFIX", "acc")]
   -- PVC-backed data: the crash test (kill -9 of flared) needs the copy to
   -- survive the container restart, and a returning ex-master then carries
   -- its OLD history rather than an empty store (the more realistic case).
@@ -185,6 +188,28 @@ private def readGuardRules (masterIp slaveIp : String) : List (List String) :=
    ["FORWARD", "-d", slaveIp, "-p", "tcp", "--dport", toString cfg.flarePort,
     "-m", "string", "--algo", "bm", "--string", "node sync",
     "-j", "REJECT", "--reject-with", "tcp-reset"]]
+
+/-- One round on `ip` (pod `pod`): GET `marker` (made unique) then every
+    key of `expect`, on ONE connection; the replica's read traces for that
+    connection are matched and judged by TraceMatch.judgeLocalCopy. Needs
+    FLARE_TEST_READ_TRACE_PREFIX = "acc" (cfg). The problems; empty = every
+    key matched from the node's own copy. -/
+private def localCopyRound (pod ip marker : String) (expect : List (String × String)) : IO (List String) := do
+  let mk := s!"{marker}_{← IO.monoMsNow}"
+  let keys := expect.map (·.1)
+  IO.sleep 1100
+  let since ← utcNow
+  IO.sleep 1100
+  let cmds := String.join ((mk :: keys).map fun k => s!"get {k}\\r\\n") ++ "quit\\r\\n"
+  let replies ← match ← execInDebugPod cfg.debugPod cfg.«namespace» s!"printf '{cmds}' | nc -w 5 {ip} {cfg.flarePort}" with
+    | .ok out => pure ((FlareOperator.E2E.TraceMatch.parseGetReplies (mk :: keys) out).map (·.tail))
+    | .error _ => pure none
+  IO.sleep 1000
+  let log ← match ← kubectl ["logs", "-n", cfg.«namespace», pod, "-c", "flared", s!"--since-time={since}", "--tail=-1"] with
+    | .ok o => pure o
+    | .error _ => pure ""
+  let tr := FlareOperator.E2E.TraceMatch.tracesAfterMarker (FlareOperator.E2E.TraceMatch.readTraces log) mk
+  return FlareOperator.E2E.TraceMatch.judgeLocalCopy expect replies tr
 
 private def heal (masterIp slaveIp : String) : IO Unit := do
   for spec in [ruleSpec masterIp slaveIp, ruleSpecBack masterIp slaveIp] ++ readGuardRules masterIp slaveIp do
@@ -987,16 +1012,41 @@ def suite : TestSuite := {
             if (← statStr sIp "repl_follow_last_reason") == some "needs_rebuild" then return .fail "the follower declared needs_rebuild"
             if rcS1 != rcS0 || rcM1 != rcM0 then return .fail "a container restarted"
             if uidS1 != uidS0 || uidM1 != uidM0 then return .fail "a pod was recreated"
-            -- every key, on BOTH sides
+            -- every key on the master (a master answers from its own copy)
             for (k, want) in expect do
-              for (side, ip) in [("master", mIp), ("replica", sIp)] do
-                let (kind, v, _) ← rawGet ip k
-                match want, kind with
-                | some w, "value" => if v != w then bad := bad ++ [s!"{side} {k}: {v} (want {w})"]
-                | none, "miss" => pure ()
-                | _, _ => bad := bad ++ [s!"{side} {k}: {kind} {v} (want {want.getD "absent"})"]
-            IO.eprintln s!"# per-key: {expect.length} keys ({(expect.filter (·.2.isNone)).length} deleted) checked on both sides; mismatches {bad}"
-            if !bad.isEmpty then return .fail s!"content differs after the catch-up: {bad}"
+              let (kind, v, _) ← rawGet mIp k
+              match want, kind with
+              | some w, "value" => if v != w then bad := bad ++ [s!"master {k}: {v} (want {w})"]
+              | none, "miss" => pure ()
+              | _, _ => bad := bad ++ [s!"master {k}: {kind} {v} (want {want.getD "absent"})"]
+            if !bad.isEmpty then return .fail s!"the master does not hold the expected content: {bad}"
+            -- every key on the REPLICA, from its OWN copy (review 2026-10-13
+            -- finding 3): a GET on the replica may be proxied to the master,
+            -- so a correct answer alone says nothing about the copy. Reads go
+            -- to the replica only (readBalance master 0 / slave 100, waited
+            -- for in its map entry), on one connection, and each answer must
+            -- be attributed to the replica's local copy by the read trace
+            -- (TraceMatch.judgeLocalCopy: proxied, refused, untraced or
+            -- ambiguous answers fail, an absent key needs a local miss).
+            let expectR := expect.map fun (k, w) => (k, match w with | some v => s!"={v}" | none => "miss")
+            discard <| kubectlPatch "flarecluster" cfg.name cfg.«namespace» "{\"spec\":{\"readBalance\":{\"master\":0,\"slave\":100}}}"
+            let routed ← waitForCondition "the replica's map entry has balance 100" 180 do
+              return (← balanceOnReplica) == some 100
+            if !routed then return .fail s!"reads could not be routed to the replica (its balance {← balanceOnReplica}): the copy cannot be verified"
+            let problems ← localCopyRound sPod sIp "acc_mark_final" expectR
+            IO.eprintln s!"# per-key: {expect.length} keys ({(expect.filter (·.2.isNone)).length} deleted): master matches; replica problems {problems.length}: {problems.take 10}"
+            if !problems.isEmpty then return .fail s!"the replica's own copy is not verified to match ({problems.length}): {problems.take 5}"
+            -- CONTROL: with reads proxied (slave balance 0) the same check
+            -- must FAIL although every answer is correct — otherwise it
+            -- could not tell a proxied answer from the copy
+            discard <| kubectlPatch "flarecluster" cfg.name cfg.«namespace» "{\"spec\":{\"readBalance\":{\"master\":100,\"slave\":0}}}"
+            let withheld ← waitForCondition "the replica's map entry has balance 0" 180 do
+              return (← balanceOnReplica) == some 0
+            if !withheld then return .fail s!"control precondition: the replica's balance did not go to 0 ({← balanceOnReplica})"
+            let ctl ← localCopyRound sPod sIp "acc_mark_ctl_proxy" expectR
+            let ctlProxied := ctl.length == expect.length && ctl.all (containsSubstr · "NOT from the replica's own copy")
+            IO.eprintln s!"# control (reads proxied): problems {ctl.length}/{expect.length}, all 'not from the own copy' = {ctlProxied}: {ctl.take 3}"
+            if !ctlProxied then return .fail s!"control: with every read proxied the check did not fail on every key as not-local ({ctl.length}/{expect.length}): {ctl.take 5}"
             let empty ← waitForCondition "ledger closes the counted drops by position" 300 do return (← ledgerDests).isEmpty
             if !empty then return .fail s!"the ledger still holds {← ledgerDests} ({← ledgerHolds})"
             return .pass

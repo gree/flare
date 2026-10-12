@@ -140,6 +140,30 @@ def classifyAnswer (expected answer : String) (t : KeyTrace) : Answer :=
 def answeredLocally (t : KeyTrace) : Bool :=
   (t.answer.map (traceField · "reason")) == some "local"
 
+/-- Final copy check of a replica (review 2026-10-13 finding 3). `expect`:
+    every key with "=<value>" or "miss" (absent). `replies`: one round on the
+    replica (`none` = not observed). Every key must be answered as expected
+    AND be attributed to the replica's OWN copy: decision and answer lines
+    both `local`. A proxied answer (availability evidence only), a refusal,
+    an untraced or ambiguous answer, a reply set that is not exactly the
+    expected keys, or an empty `expect` all fail. Returns the problems
+    (empty = the copy matched). -/
+def judgeLocalCopy (expect : List (String × String)) (replies : Option (List (String × String)))
+    (traces : List (String × KeyTrace)) : List String := Id.run do
+  if expect.isEmpty then return ["no keys to check"]
+  let some rs := replies | return ["the replica's final reads were not observed (incomplete exchange)"]
+  if rs.map (·.1) != expect.map (·.1) then return [s!"replies for {rs.map (·.1)} do not match the keys checked {expect.map (·.1)}"]
+  let mut bad : List String := []
+  for ((k, want), (_, got)) in expect.zip rs do
+    let t := (traces.lookup k).getD {}
+    let cls := classifyAnswer want got t
+    let decLocal := (t.decision.map (traceField · "decision")) == some "local"
+    if cls != .ok then
+      bad := bad ++ [s!"{k}: {got} (want {want}) {cls.label}"]
+    else if !(answeredLocally t && decLocal) then
+      bad := bad ++ [s!"{k}: {got} correct but NOT from the replica's own copy (decision {(t.decision.map (traceField · "decision")).getD "(none)"}, answer {(t.answer.map (traceField · "reason")).getD "(none)"})"]
+  return bad
+
 -- ─── activation order ─────────────────────────────────────────────────────
 
 /-- Verdict on a replica's activations around a master switch.

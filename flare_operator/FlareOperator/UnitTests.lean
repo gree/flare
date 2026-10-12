@@ -1327,6 +1327,27 @@ private def checkTraceMatch (ctx : Ctx) : IO Unit := do
   let fwd : KeyTrace := { decision := some (tdec 1 "c" "k" "proxy" "follow_guard"), answer := some (tans 2 "c" "k" "miss" "forwarded") }
   check ctx "trace: a wrong answer after forwarding is a data error of the forwarded-to node"
     (classifyAnswer "=v" "miss" fwd == .wrongForwarded)
+  -- review 2026-10-13 finding 3: the acceptance's final copy check
+  let ex := [("acc_0", "=v0"), ("acc_1", "miss")]
+  let locHit : KeyTrace := { decision := some (tdec 1 "c" "acc_0" "local" "slave_guard_allowed"), answer := some (tans 2 "c" "acc_0" "hit" "local") }
+  let locMiss : KeyTrace := { decision := some (tdec 3 "c" "acc_1" "local" "slave_guard_allowed"), answer := some (tans 4 "c" "acc_1" "miss" "local") }
+  let pxHit : KeyTrace := { decision := some (tdec 1 "c" "acc_0" "proxy" "own_slave_balance_0"), answer := some (tans 2 "c" "acc_0" "hit" "forwarded") }
+  let pxMiss : KeyTrace := { decision := some (tdec 3 "c" "acc_1" "proxy" "own_slave_balance_0"), answer := some (tans 4 "c" "acc_1" "miss" "forwarded") }
+  check ctx "local copy: every key correct and answered from the replica's own copy passes"
+    (judgeLocalCopy ex (some [("acc_0", "=v0"), ("acc_1", "miss")]) [("acc_0", locHit), ("acc_1", locMiss)]).isEmpty
+  check ctx "local copy: correct answers PROXIED to the master fail (availability, not the copy)"
+    ((judgeLocalCopy ex (some [("acc_0", "=v0"), ("acc_1", "miss")]) [("acc_0", pxHit), ("acc_1", pxMiss)]).length == 2)
+  check ctx "local copy: a corrupted local value fails"
+    ((judgeLocalCopy ex (some [("acc_0", "=CORRUPT"), ("acc_1", "miss")]) [("acc_0", locHit), ("acc_1", locMiss)]).length == 1)
+  check ctx "local copy: a deleted key resurrected locally fails"
+    ((judgeLocalCopy ex (some [("acc_0", "=v0"), ("acc_1", "=old")]) [("acc_0", locHit), ("acc_1", { locMiss with answer := some (tans 4 "c" "acc_1" "hit" "local") })]).length == 1)
+  check ctx "local copy: absent == absent WITHOUT a trace is not a pass (None==None)"
+    ((judgeLocalCopy ex (some [("acc_0", "=v0"), ("acc_1", "miss")]) [("acc_0", locHit)]).length == 1)
+  check ctx "local copy: an unobserved round, a short reply set or nothing to check fail closed"
+    (!(judgeLocalCopy ex none []).isEmpty && !(judgeLocalCopy ex (some [("acc_0", "=v0")]) [("acc_0", locHit)]).isEmpty &&
+     !(judgeLocalCopy [] (some []) []).isEmpty)
+  check ctx "local copy: an explicit error is not a match"
+    ((judgeLocalCopy ex (some [("acc_0", "err:SERVER_ERROR x"), ("acc_1", "miss")]) [("acc_0", locHit), ("acc_1", locMiss)]).length == 1)
 
 open FlareOperator.E2E.TraceMatch in
 private def checkTraceAmbiguity (ctx : Ctx) : IO Unit := do

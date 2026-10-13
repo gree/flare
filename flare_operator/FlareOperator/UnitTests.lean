@@ -1348,6 +1348,58 @@ private def checkTraceMatch (ctx : Ctx) : IO Unit := do
      !(judgeLocalCopy [] (some []) []).isEmpty)
   check ctx "local copy: an explicit error is not a match"
     ((judgeLocalCopy ex (some [("acc_0", "err:SERVER_ERROR x"), ("acc_1", "miss")]) [("acc_0", locHit), ("acc_1", locMiss)]).length == 1)
+  -- review 2026-10-13 round 11: ACCEPTANCE's required observation fails
+  -- closed — every field obtained on both sides, a 0 is a value
+  let stS := fun (boot recon dump applied : String) =>
+    s!"STAT pid 1\r\nSTAT curr_items 28\r\nSTAT reconstruction_started {recon}\r\nSTAT reconstruction_boot_id {boot}\r\nSTAT repl_applied_lsn {applied}\r\nSTAT rocksdb_master_id mid-r\r\nSTAT rocksdb_source_epoch 2:e\r\nSTAT rocksdb_copy_id copy-r\r\nSTAT rocksdb_latest_sequence_number {applied}\r\nSTAT rocksdb_wal_fallback_to_dump {dump}\r\nSTAT repl_follow_source_epoch 2:e\r\nEND\r\n"
+  let stM := "STAT curr_items 28\r\nSTAT reconstruction_started 0\r\nSTAT reconstruction_boot_id 77\r\nSTAT repl_applied_lsn 0\r\nSTAT rocksdb_master_id mid-m\r\nSTAT rocksdb_source_epoch 2:e\r\nSTAT rocksdb_copy_id copy-m\r\nSTAT rocksdb_latest_sequence_number 183\r\nSTAT rocksdb_wal_fallback_to_dump 0\r\nEND\r\n"
+  let podS := "uid-s|10.0.0.2|containerd://cs|0"
+  let podM := "uid-m|10.0.0.1|containerd://cm|0"
+  let mk (sStats sPod : Option String) (mStats mPod : Option String) : AccObs :=
+    { replica := NodeObs.parse "10.0.0.2" sStats sPod, master := NodeObs.parse "10.0.0.1" mStats mPod }
+  let o0 := mk (some (stS "55" "2" "1" "158")) (some podS) (some stM) (some podM)
+  let o1 := mk (some (stS "55" "2" "1" "183")) (some podS) (some stM) (some podM)
+  check ctx "acceptance obs: complete, unchanged, cursor forward passes (zeros are values)"
+    ((o0.missing "b").isEmpty && (judgeNoRebuild "b" "a" o0 o1).isEmpty && caughtUp o1 && !caughtUp o0)
+  check ctx "acceptance obs: stats unreadable on BOTH sides is not 'no rebuild' (none == none)"
+    (!(judgeNoRebuild "b" "a" (mk none (some podS) none (some podM)) (mk none (some podS) none (some podM))).isEmpty)
+  check ctx "acceptance obs: pod read failed on both sides (uid/containerID/restartCount) fails"
+    (!(judgeNoRebuild "b" "a" (mk (some (stS "55" "2" "1" "158")) none (some stM) none) (mk (some (stS "55" "2" "1" "183")) none (some stM) none)).isEmpty)
+  -- each required field absent (removed from the reply) fails on its own
+  let fields := ["reconstruction_started", "reconstruction_boot_id", "repl_applied_lsn", "rocksdb_master_id",
+    "rocksdb_source_epoch", "rocksdb_copy_id", "rocksdb_latest_sequence_number", "rocksdb_wal_fallback_to_dump", "curr_items",
+    "repl_follow_source_epoch"]
+  let drop := fun (out f : String) => String.intercalate "\r\n" ((out.splitOn "\r\n").filter (fun l => !l.startsWith s!"STAT {f} "))
+  let eachFails := fields.all fun f =>
+    let after := mk (some (drop (stS "55" "2" "1" "183") f)) (some podS) (some (drop stM f)) (some podM)
+    let replicaOnly := mk (some (drop (stS "55" "2" "1" "183") f)) (some podS) (some stM) (some podM)
+    !(judgeNoRebuild "b" "a" o0 after).isEmpty && !(judgeNoRebuild "b" "a" o0 replicaOnly).isEmpty &&
+      ((judgeNoRebuild "b" "a" o0 replicaOnly).any (fun p => (p.splitOn f).length > 1))
+  check ctx "acceptance obs: every required stats field, when missing, fails and is named"
+    eachFails
+  check ctx "acceptance obs: a reconstruction counter that cannot be read after the rebuild fails (not 'unchanged')"
+    (!(judgeNoRebuild "b" "a" o0 (mk (some (drop (stS "56" "3" "1" "183") "reconstruction_started")) (some podS) (some stM) (some podM))).isEmpty)
+  check ctx "acceptance obs: parse failures fail (non-digit counter, empty identity, garbage pod read)"
+    (!(judgeNoRebuild "b" "a" o0 (mk (some (stS "55" "x2" "1" "183")) (some podS) (some stM) (some podM))).isEmpty &&
+     !(judgeNoRebuild "b" "a" o0 (mk (some ((stS "55" "2" "1" "183").replace "rocksdb_copy_id copy-r" "rocksdb_copy_id ")) (some podS) (some stM) (some podM))).isEmpty &&
+     !(judgeNoRebuild "b" "a" o0 (mk (some (stS "55" "2" "1" "183")) (some "uid-s|10.0.0.2|") (some stM) (some podM))).isEmpty &&
+     !(judgeNoRebuild "b" "a" o0 (mk (some (stS "55" "2" "1" "183")) (some "uid-s|10.0.0.2||0") (some stM) (some podM))).isEmpty &&
+     !(judgeNoRebuild "b" "a" o0 (mk (some (stS "55" "2" "1" "183")) (some "uid-s|10.0.0.2|containerd://cs|-1") (some stM) (some podM))).isEmpty)
+  check ctx "acceptance obs: stats read from another address than the pod's fail (not bound to the pod)"
+    (!(o0.replica.missing.isEmpty && (NodeObs.parse "10.0.0.9" (some (stS "55" "2" "1" "158")) (some podS)).missing.isEmpty))
+  check ctx "acceptance obs: a rebuild, a dump fallback, a new process, a new copy, a restart, a recreation, a history change each fail"
+    (!(judgeNoRebuild "b" "a" o0 (mk (some (stS "55" "3" "1" "183")) (some podS) (some stM) (some podM))).isEmpty &&
+     !(judgeNoRebuild "b" "a" o0 (mk (some (stS "55" "2" "2" "183")) (some podS) (some stM) (some podM))).isEmpty &&
+     !(judgeNoRebuild "b" "a" o0 (mk (some (stS "56" "2" "1" "183")) (some podS) (some stM) (some podM))).isEmpty &&
+     !(judgeNoRebuild "b" "a" o0 (mk (some ((stS "55" "2" "1" "183").replace "copy-r" "copy-r2")) (some podS) (some stM) (some podM))).isEmpty &&
+     !(judgeNoRebuild "b" "a" o0 (mk (some (stS "55" "2" "1" "183")) (some "uid-s|10.0.0.2|containerd://cs2|1") (some stM) (some podM))).isEmpty &&
+     !(judgeNoRebuild "b" "a" o0 (mk (some (stS "55" "2" "1" "183")) (some "uid-s2|10.0.0.2|containerd://cs|0") (some stM) (some podM))).isEmpty &&
+     !(judgeNoRebuild "b" "a" o0 (mk (some (stS "55" "2" "1" "183")) (some podS) (some (stM.replace "2:e" "3:f")) (some podM))).isEmpty &&
+     !(judgeNoRebuild "b" "a" o0 (mk (some (stS "55" "2" "1" "183")) (some podS) (some (stM.replace "mid-m" "mid-x")) (some podM))).isEmpty &&
+     !(judgeNoRebuild "b" "a" o0 (mk (some ((stS "55" "2" "1" "183").replace "repl_follow_source_epoch 2:e" "repl_follow_source_epoch 1:old")) (some podS) (some stM) (some podM))).isEmpty)
+  check ctx "acceptance obs: the cursor going back fails; caughtUp needs both item counts (never none == none)"
+    (!(judgeNoRebuild "b" "a" o1 o0).isEmpty &&
+     !caughtUp (mk (some (drop (stS "55" "2" "1" "183") "curr_items")) (some podS) (some (drop stM "curr_items")) (some podM)))
 
 open FlareOperator.E2E.TraceMatch in
 private def checkTraceAmbiguity (ctx : Ctx) : IO Unit := do

@@ -121,9 +121,11 @@ private def statStr (ip key : String) : IO (Option String) := do
 
 private def currItems (ip : String) : IO Nat := return (← statNat ip "curr_items").getD 0
 
-private def droppedByMaster (ip : String) : IO Nat := do
+/-- Sum of `proxy_write_dropped[*]`; `none` when the stats could not be read
+    or a counter does not parse (never a silent 0). -/
+private def droppedByMasterOpt (ip : String) : IO (Option Nat) := do
   match ← statsOf ip with
-  | none => return 0
+  | none => return none
   | some o =>
     let mut total := 0
     for line in o.splitOn "\n" do
@@ -131,8 +133,10 @@ private def droppedByMaster (ip : String) : IO Nat := do
       if t.startsWith "STAT proxy_write_dropped[" then
         match (t.splitOn " ").getLast? >>= (·.trim.toNat?) with
         | some n => total := total + n
-        | none => pure ()
-    return total
+        | none => return none
+    return some total
+
+private def droppedByMaster (ip : String) : IO Nat := return (← droppedByMasterOpt ip).getD 0
 
 private def opLog (tail : Nat := 800) : IO String :=
   kubectlLogsLabel s!"app={cfg.operatorName}" cfg.«namespace» tail
@@ -210,6 +214,22 @@ private def localCopyRound (pod ip marker : String) (expect : List (String × St
     | .error _ => pure ""
   let tr := FlareOperator.E2E.TraceMatch.tracesAfterMarker (FlareOperator.E2E.TraceMatch.readTraces log) mk
   return FlareOperator.E2E.TraceMatch.judgeLocalCopy expect replies tr
+
+/-- ACCEPTANCE's required observation of one node: ONE stats reply and ONE
+    pod read (UID, IP, flared containerID and restartCount together). A
+    failed read leaves the fields `none` — judged as missing, never 0. -/
+private def observeNode (pod ip : String) : IO FlareOperator.E2E.TraceMatch.NodeObs := do
+  let stats ← statsOf ip
+  let podOut ← match ← kubectlGetJsonpath "pod" pod cfg.«namespace»
+      "{.metadata.uid}|{.status.podIP}|{.status.containerStatuses[?(@.name==\"flared\")].containerID}|{.status.containerStatuses[?(@.name==\"flared\")].restartCount}" with
+    | .ok o => pure (some o)
+    | .error _ => pure none
+  return FlareOperator.E2E.TraceMatch.NodeObs.parse ip stats podOut
+
+private def observePair (mPod mIp sPod sIp : String) : IO FlareOperator.E2E.TraceMatch.AccObs := do
+  let replica ← observeNode sPod sIp
+  let master ← observeNode mPod mIp
+  return { replica, master }
 
 private def heal (masterIp slaveIp : String) : IO Unit := do
   for spec in [ruleSpec masterIp slaveIp, ruleSpecBack masterIp slaveIp] ++ readGuardRules masterIp slaveIp do
@@ -894,21 +914,23 @@ def suite : TestSuite := {
             for i in [0:20] do
               if !(← memcachedSet cfg.debugPod cfg.«namespace» mIp cfg.flarePort s!"acc_{i}" s!"base_{i}") then
                 return .fail s!"precondition: the master did not store acc_{i}"
+            -- Required observations (review 2026-10-13 round 11): every field of
+            -- AccObs must be obtained, at every instant, or the test fails —
+            -- a read failure is never "unchanged" / "no rebuild" / "same
+            -- history"; a number 0 is a value. Observed before the cut,
+            -- after the heal, and after the FINAL local-copy round.
             let ready ← waitForCondition "replica following, caught up, balance 50" 180 do
+              let o ← observePair mPod mIp sPod sIp
               return (← statStr sIp "repl_follow_state") == some "following" &&
-                (← statNat sIp "repl_applied_lsn") == (← statNat mIp "rocksdb_latest_sequence_number") &&
+                FlareOperator.E2E.TraceMatch.caughtUp o &&
                 (← balanceOnReplica) == some 50
             if !ready then return .fail s!"precondition: replica not following/caught up with balance 50 (state {← statStr sIp "repl_follow_state"}, balance {← balanceOnReplica})"
-            let uidS0 := (← podUid sPod).getD "?"
-            let uidM0 := (← podUid mPod).getD "?"
-            let rcS0 ← restartCountOf sPod
-            let rcM0 ← restartCountOf mPod
-            let recon0 := (← statNat sIp "reconstruction_started").getD 0
-            let dump0 := (← statNat sIp "rocksdb_wal_fallback_to_dump").getD 0
-            let epoch0 ← statStr mIp "rocksdb_source_epoch"
-            let mid0 ← statStr mIp "rocksdb_master_id"
-            let applied0 := (← statNat sIp "repl_applied_lsn").getD 0
-            let d0 ← droppedByMaster mIp
+            let obs0 ← observePair mPod mIp sPod sIp
+            let miss0 := obs0.missing "before"
+            IO.eprintln s!"# observation before: {repr obs0}"
+            if !miss0.isEmpty then return .fail s!"precondition: the required observation is incomplete: {miss0}"
+            let applied0 := obs0.replica.applied.getD 0
+            let some d0 ← droppedByMasterOpt mIp | return .fail "precondition: the master's proxy_write_dropped counters could not be read"
             -- expected final content (key → some value | none = deleted)
             let mut expect : List (String × Option String) := (List.range 20).map fun i => (s!"acc_{i}", some s!"base_{i}")
             let setExp := fun (xs : List (String × Option String)) (k : String) (v : Option String) =>
@@ -933,10 +955,10 @@ def suite : TestSuite := {
               if !(← memcachedSet cfg.debugPod cfg.«namespace» mIp cfg.flarePort s!"accn_{i}" s!"new_{i}") then return .fail s!"master did not create accn_{i}"
               expect := setExp expect s!"accn_{i}" (some s!"new_{i}")
             let p1Drop ← waitForCondition "phase 1: a forwarded write is counted dropped" 120 do
-              return (← droppedByMaster mIp) > d0
+              return ((← droppedByMasterOpt mIp).map (fun n => decide (n > d0))) == some true
             if !p1Drop then return .fail "phase 1: no dropped forward — the forward path was not cut"
-            let cur1 := (← statNat sIp "repl_applied_lsn").getD 0
-            let head1 := (← statNat mIp "rocksdb_latest_sequence_number").getD 0
+            let some cur1 ← statNat sIp "repl_applied_lsn" | return .fail "phase 1: the replica's applied cursor could not be read"
+            let some head1 ← statNat mIp "rocksdb_latest_sequence_number" | return .fail "phase 1: the master's head could not be read"
             if head1 <= cur1 then return .fail s!"phase 1: no backlog (head {head1} <= applied {cur1})"
             let mut bad : List String := []
             for (k, want) in [("acc_0", some "p1_0"), ("acc_4", some "p1_4"), ("acc_10", none), ("accn_0", some "new_0")] do
@@ -971,10 +993,11 @@ def suite : TestSuite := {
               expect := setExp expect s!"accn_{i}" (some s!"new_{i}")
             -- forwarding retries exhausted before the heal (as in "cut"), so
             -- the gap is carried by the WAL path
-            let mut lastDrops ← droppedByMaster mIp
+            let some lastDrops0 ← droppedByMasterOpt mIp | return .fail "phase 2: the master's proxy_write_dropped counters could not be read"
+            let mut lastDrops := lastDrops0
             for _ in [0:12] do
               IO.sleep 10000
-              let now ← droppedByMaster mIp
+              let some now ← droppedByMasterOpt mIp | return .fail "phase 2: the master's proxy_write_dropped counters could not be read"
               if now == lastDrops then break
               lastDrops := now
             for (k, stale) in [("acc_5", "base_5"), ("acc_0", "base_0")] do
@@ -984,34 +1007,24 @@ def suite : TestSuite := {
               else if kind != "error" then bad := bad ++ [s!"{k}: {kind} {v} (want SERVER_ERROR)"]
             if !bad.isEmpty then return .fail s!"phase 2: a lagging replica with the master unreachable did not answer an explicit error: {bad}"
             -- ── writes STOP here (none issued below). The head is observed only.
-            let mLatest := (← statNat mIp "rocksdb_latest_sequence_number").getD 0
-            let appliedAtHeal := (← statNat sIp "repl_applied_lsn").getD 0
+            let some mLatest ← statNat mIp "rocksdb_latest_sequence_number" | return .fail "at the stop: the master's head could not be read"
+            let some appliedAtHeal ← statNat sIp "repl_applied_lsn" | return .fail "at the heal: the replica's applied cursor could not be read"
             IO.eprintln s!"# writes stopped: master head {mLatest}; replica applied {applied0} -> {cur1} (phase 1) -> {appliedAtHeal} (at the heal); dropped forwards {lastDrops - d0}"
             if appliedAtHeal < applied0 then return .fail "the applied cursor went BACKWARDS under the cut"
             heal mIp sIp
             let caught ← waitForCondition s!"replica applied >= {mLatest}, following, items equal" 300 do
-              return ((← statNat sIp "repl_applied_lsn").getD 0 ≥ mLatest) &&
-                (← statStr sIp "repl_follow_state") == some "following" &&
-                (← currItems sIp) == (← currItems mIp)
-            let headAfter := (← statNat mIp "rocksdb_latest_sequence_number").getD 0
-            let recon1 := (← statNat sIp "reconstruction_started").getD 0
-            let dump1 := (← statNat sIp "rocksdb_wal_fallback_to_dump").getD 0
-            let rcS1 ← restartCountOf sPod
-            let rcM1 ← restartCountOf mPod
-            let uidS1 := (← podUid sPod).getD "?"
-            let uidM1 := (← podUid mPod).getD "?"
-            let epoch1 ← statStr mIp "rocksdb_source_epoch"
-            let mid1 ← statStr mIp "rocksdb_master_id"
+              let o ← observePair mPod mIp sPod sIp
+              return FlareOperator.E2E.TraceMatch.caughtUp o && (o.replica.applied.map (fun a => decide (a ≥ mLatest))) == some true &&
+                (← statStr sIp "repl_follow_state") == some "following"
+            let obs1 ← observePair mPod mIp sPod sIp
             let mNow := (← pair).toOption.map (·.1)
-            IO.eprintln s!"# after the heal: caught={caught} applied={← statNat sIp "repl_applied_lsn"} head {mLatest}->{headAfter}; state={← statStr sIp "repl_follow_state"} reason={← statStr sIp "repl_follow_last_reason"}; reconstruction_started {recon0}->{recon1}; wal_fallback_to_dump {dump0}->{dump1}; restartCount replica {rcS0}->{rcS1} master {rcM0}->{rcM1}; uid replica {uidS0}->{uidS1} master {uidM0}->{uidM1}; master {mPod}->{mNow}; epoch {epoch0}->{epoch1}; master_id {mid0}->{mid1}"
+            IO.eprintln s!"# after the heal: caught={caught} state={← statStr sIp "repl_follow_state"} reason={← statStr sIp "repl_follow_last_reason"}; master {mPod}->{mNow}; head at the stop {mLatest}; observation {repr obs1}"
             if !caught then return .fail s!"the replica did not catch up from its cursor (state {← statStr sIp "repl_follow_state"}, reason {← statStr sIp "repl_follow_last_reason"})"
-            if headAfter != mLatest then return .fail s!"a write reached the master after the stop ({mLatest} -> {headAfter}): the run is not a stopped-write convergence"
-            if mNow != some mPod || epoch1 != epoch0 || mid1 != mid0 then return .fail "precondition broken: the master or its history changed (this case is the SAME master and history)"
-            if recon1 != recon0 then return .fail s!"a RECONSTRUCTION ran ({recon0}->{recon1})"
-            if dump1 != dump0 then return .fail s!"the WAL path fell back to a DUMP ({dump0}->{dump1})"
+            if mNow != some mPod then return .fail "precondition broken: the master changed (this case is the SAME master and history)"
+            let nr1 := FlareOperator.E2E.TraceMatch.judgeNoRebuild "before" "after the heal" obs0 obs1
+            if !nr1.isEmpty then return .fail s!"no-rebuild / same-history not shown (before -> after the heal): {nr1}"
+            if obs1.master.head != some mLatest then return .fail s!"a write reached the master after the stop ({mLatest} -> {obs1.master.head}): the run is not a stopped-write convergence"
             if (← statStr sIp "repl_follow_last_reason") == some "needs_rebuild" then return .fail "the follower declared needs_rebuild"
-            if rcS1 != rcS0 || rcM1 != rcM0 then return .fail "a container restarted"
-            if uidS1 != uidS0 || uidM1 != uidM0 then return .fail "a pod was recreated"
             -- every key on the master (a master answers from its own copy)
             for (k, want) in expect do
               let (kind, v, _) ← rawGet mIp k
@@ -1047,6 +1060,15 @@ def suite : TestSuite := {
             let ctlProxied := ctl.length == expect.length && ctl.all (containsSubstr · "NOT from the replica's own copy")
             IO.eprintln s!"# control (reads proxied): problems {ctl.length}/{expect.length}, all 'not from the own copy' = {ctlProxied}: {ctl.take 3}"
             if !ctlProxied then return .fail s!"control: with every read proxied the check did not fail on every key as not-local ({ctl.length}/{expect.length}): {ctl.take 5}"
+            -- the observation interval ends AFTER the final local-copy round
+            -- (and its control): same process, copy and history throughout,
+            -- and still no write reached the master
+            let obs2 ← observePair mPod mIp sPod sIp
+            IO.eprintln s!"# observation after the final round: {repr obs2}"
+            let nr2 := FlareOperator.E2E.TraceMatch.judgeNoRebuild "before" "after the final round" obs0 obs2 ++
+              FlareOperator.E2E.TraceMatch.judgeNoRebuild "after the heal" "after the final round" obs1 obs2
+            if !nr2.isEmpty then return .fail s!"no-rebuild / same-history not shown through the final round: {nr2}"
+            if obs2.master.head != some mLatest then return .fail s!"a write reached the master before the final round ended ({mLatest} -> {obs2.master.head})"
             let empty ← waitForCondition "ledger closes the counted drops by position" 300 do return (← ledgerDests).isEmpty
             if !empty then return .fail s!"the ledger still holds {← ledgerDests} ({← ledgerHolds})"
             return .pass

@@ -164,6 +164,128 @@ def judgeLocalCopy (expect : List (String × String)) (replies : Option (List (S
       bad := bad ++ [s!"{k}: {got} correct but NOT from the replica's own copy (decision {(t.decision.map (traceField · "decision")).getD "(none)"}, answer {(t.answer.map (traceField · "reason")).getD "(none)"})"]
   return bad
 
+-- ─── acceptance observation (review 2026-10-13 round 11) ──────────────────
+
+/-- One `STAT <key> <value>` of a stats reply; `none` when absent. -/
+def statField (out : String) (key : String) : Option String :=
+  (out.splitOn "\n").findSome? fun line =>
+    let t := (line.replace "\r" "").trim
+    if t.startsWith s!"STAT {key} " then some ((t.drop s!"STAT {key} ".length).trim) else none
+
+/-- What ACCEPTANCE requires of one node at one instant. Every field is
+    required: `none` = not obtained (read failed, absent, or not parseable)
+    and FAILS; an empty identity is stored as `none`; a number 0 is a value.
+    One stats reply per node (one instant) plus one pod read per node. -/
+structure NodeObs where
+  ip : String              -- the address the stats were read from
+  podIp : Option String    -- the pod's address: binds the stats to the pod
+  uid : Option String      -- pod UID (recreation)
+  container : Option String -- flared containerID (container restart)
+  restarts : Option Nat
+  boot : Option Nat        -- reconstruction_boot_id (this flared process)
+  copyId : Option String   -- rocksdb_copy_id (this node's copy)
+  epoch : Option String    -- rocksdb_source_epoch (the history)
+  masterId : Option String -- rocksdb_master_id
+  recon : Option Nat       -- reconstruction_started
+  dump : Option Nat        -- rocksdb_wal_fallback_to_dump
+  applied : Option Nat     -- repl_applied_lsn
+  head : Option Nat        -- rocksdb_latest_sequence_number
+  items : Option Nat       -- curr_items
+  followEpoch : Option String -- repl_follow_source_epoch (required of the replica only)
+  deriving Repr, BEq
+
+private def nonEmpty (s : Option String) : Option String :=
+  s.bind fun v => let t := v.trim; if t.isEmpty then none else some t
+
+/-- Strict number: anything but plain digits is `none` (never 0). -/
+private def strictNat (s : Option String) : Option Nat :=
+  (nonEmpty s).bind fun v => if v.all Char.isDigit then v.toNat? else none
+
+/-- `stats`: the node's ONE stats reply (`none` = not read). `pod`: the
+    output of the jsonpath `{uid}|{podIP}|{containerID}|{restartCount}` of
+    the flared container (`none` = not read); anything but exactly four
+    fields leaves every pod field `none`. -/
+def NodeObs.parse (ip : String) (stats pod : Option String) : NodeObs :=
+  let st := fun k => stats.bind (statField · k)
+  let parts := (pod.map fun p => (p.trim.splitOn "|")).getD []
+  let pf := fun (i : Nat) => if parts.length == 4 then nonEmpty (parts[i]?) else none
+  { ip, podIp := pf 1, uid := pf 0, container := pf 2,
+    restarts := strictNat (pf 3),
+    boot := strictNat (st "reconstruction_boot_id"),
+    copyId := nonEmpty (st "rocksdb_copy_id"),
+    epoch := nonEmpty (st "rocksdb_source_epoch"),
+    masterId := nonEmpty (st "rocksdb_master_id"),
+    recon := strictNat (st "reconstruction_started"),
+    dump := strictNat (st "rocksdb_wal_fallback_to_dump"),
+    applied := strictNat (st "repl_applied_lsn"),
+    head := strictNat (st "rocksdb_latest_sequence_number"),
+    items := strictNat (st "curr_items"),
+    followEpoch := nonEmpty (st "repl_follow_source_epoch") }
+
+/-- The fields of one node that were not obtained, plus a pod/stats binding
+    failure (the stats came from another address than the pod's). -/
+def NodeObs.missing (o : NodeObs) : List String :=
+  let f := fun (n : String) (present : Bool) => if present then [] else [n]
+  f "podIP" o.podIp.isSome ++ f "uid" o.uid.isSome ++ f "containerID" o.container.isSome ++
+  f "restartCount" o.restarts.isSome ++ f "reconstruction_boot_id" o.boot.isSome ++
+  f "rocksdb_copy_id" o.copyId.isSome ++ f "rocksdb_source_epoch" o.epoch.isSome ++
+  f "rocksdb_master_id" o.masterId.isSome ++ f "reconstruction_started" o.recon.isSome ++
+  f "rocksdb_wal_fallback_to_dump" o.dump.isSome ++ f "repl_applied_lsn" o.applied.isSome ++
+  f "rocksdb_latest_sequence_number" o.head.isSome ++ f "curr_items" o.items.isSome ++
+  (match o.podIp with
+   | some p => if p != o.ip then [s!"stats read from {o.ip} but the pod is at {p}"] else []
+   | none => [])
+
+/-- One observation of the pair: replica and master at (about) one instant. -/
+structure AccObs where
+  replica : NodeObs
+  master : NodeObs
+  deriving Repr, BEq
+
+/-- Everything missing in `o`, labelled (`tag` names the instant). -/
+def AccObs.missing (tag : String) (o : AccObs) : List String :=
+  (o.replica.missing.map (s!"{tag}: replica " ++ ·)) ++
+  (if o.replica.followEpoch.isSome then [] else [s!"{tag}: replica repl_follow_source_epoch"]) ++
+  (o.master.missing.map (s!"{tag}: master " ++ ·))
+
+/-- "No rebuild, no restart, no recreation, same history" between two
+    observations, judged only on COMPLETE observations (a missing field on
+    either side is a failure, never "unchanged"). Same process (boot id,
+    containerID, restartCount, pod UID) and same copy (copy id) for both
+    nodes; same history (master's epoch and master id unchanged; the replica
+    follows the master's epoch at both instants and its own epoch is
+    unchanged); no reconstruction and no dump fallback on the replica;
+    the replica's cursor never goes back. Returns the problems. -/
+def judgeNoRebuild (tag0 tag1 : String) (a b : AccObs) : List String := Id.run do
+  let miss := a.missing tag0 ++ b.missing tag1
+  if !miss.isEmpty then return miss
+  let mut bad : List String := []
+  for (who, x, y) in [("replica", a.replica, b.replica), ("master", a.master, b.master)] do
+    if x.uid != y.uid then bad := bad ++ [s!"{who}: pod recreated ({x.uid} -> {y.uid})"]
+    if x.container != y.container || x.restarts != y.restarts then
+      bad := bad ++ [s!"{who}: container restarted ({x.container}/{x.restarts} -> {y.container}/{y.restarts})"]
+    if x.boot != y.boot then bad := bad ++ [s!"{who}: another flared process (boot id {x.boot} -> {y.boot})"]
+    if x.copyId != y.copyId then bad := bad ++ [s!"{who}: another copy (copy id {x.copyId} -> {y.copyId})"]
+  if a.master.epoch != b.master.epoch || a.master.masterId != b.master.masterId then
+    bad := bad ++ [s!"the master's history changed (epoch {a.master.epoch} -> {b.master.epoch}, master_id {a.master.masterId} -> {b.master.masterId})"]
+  if a.replica.followEpoch != a.master.epoch || b.replica.followEpoch != b.master.epoch then
+    bad := bad ++ [s!"the replica does not follow the master's history ({tag0}: {a.replica.followEpoch} vs {a.master.epoch}; {tag1}: {b.replica.followEpoch} vs {b.master.epoch})"]
+  if a.replica.epoch != b.replica.epoch then
+    bad := bad ++ [s!"the replica's own source epoch changed ({a.replica.epoch} -> {b.replica.epoch})"]
+  if a.replica.recon != b.replica.recon then bad := bad ++ [s!"a RECONSTRUCTION ran ({a.replica.recon} -> {b.replica.recon})"]
+  if a.replica.dump != b.replica.dump then bad := bad ++ [s!"the WAL path fell back to a DUMP ({a.replica.dump} -> {b.replica.dump})"]
+  if (b.replica.applied.getD 0) < (a.replica.applied.getD 0) then
+    bad := bad ++ [s!"the applied cursor went BACKWARDS ({a.replica.applied} -> {b.replica.applied})"]
+  return bad
+
+/-- Caught up at one observation: complete, applied ≥ the master's head and
+    the item counts equal (both obtained; never none == none). -/
+def caughtUp (o : AccObs) : Bool :=
+  (o.missing "x").isEmpty &&
+  (match o.replica.applied, o.master.head, o.replica.items, o.master.items with
+   | some ap, some hd, some si, some mi => ap ≥ hd && si == mi
+   | _, _, _, _ => false)
+
 -- ─── activation order ─────────────────────────────────────────────────────
 
 /-- Verdict on a replica's activations around a master switch.

@@ -1972,10 +1972,28 @@ complete: these, W1, approval separation, capacity and operations stay open.
 ### 20.6 Candidate
 
 - **Candidate pinned: 16921a5** (label `saf10-first-move-c2`; = fixes
-  5e21186 + the fail-closed ACCEPTANCE; later commits docs only). nix-linux
-  and the full matrix are dispatched on the docs head; results to follow.
-  X4 excluded from green; skips listed, not passes; the history-tracking
-  12-16 failure on 5e21186 stays recorded whatever this run shows.
+  5e21186 + the fail-closed ACCEPTANCE; later commits docs only). Runs on
+  the docs head 3d848fb (code = 16921a5):
+  - nix-linux 38338538614: success — legacy 3644 tests / RocksDB 5382,
+    0 failures, 0 errors (1 omission each, as before).
+  - full matrix 38338541303: conclusion failure; 13/14 legs passed.
+    328 tests, 2 failures, 22 skips (authority 1, continuous-replication 17,
+    failover-data 1, wal-recovery 3) = 304 executed passes. The failures are
+    cross-cluster 4 and 5 only = the known X4 (snapshot-push-seeded
+    destination restart), excluded from green, not fixed. cross-cluster 7-15
+    (per-key-only switch, refusal, V on kind) ok. restore-promotion 22/22
+    (history-tracking included); continuous-replication 34 with ACCEPTANCE
+    ok; repair-ledger 7 (migration-per-key-only included).
+  - The history-tracking 12-16 failure on 5e21186 stays recorded with its
+    cause undetermined: not reproduced in 38334475299 or 38338541303, which
+    does not close it.
+  - Green except X4 is CI evidence on kind, not a review, not an approval,
+    not AZ evidence. Baseline c9b59ed stays 273 executed passes / 22 skips.
+- pf-dev preparation (user request 2026-10-13, PR creation only): draft
+  gree-main/moc2-k8s#9563 pins chart/images 0.1.0-rc66 = 16921a5, which is
+  NOT published (no tag, chart, image or digest). Nothing was merged, synced,
+  deleted or applied; publishing rc66 and every execution step stay
+  separately approved.
 - Open (unchanged by this round): W1 (internal expiry writes cannot be
   stopped), approval separation (RBAC/HMAC proposal, user decision),
   capacity, operations, X4, copy corruption controlled at unit level only.

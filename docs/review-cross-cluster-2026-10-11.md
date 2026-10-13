@@ -1815,6 +1815,172 @@ Operational decisions (U):
   - What this is: one kind run of each test on one pinned tree. It is not
     review, not approval, not production or AZ evidence.
 
+## 20. Tenth round (2026-10-13, NOT reviewed): review changes_requested on be60dbb
+
+The review confirmed §19.8 independently (be60dbb→08cbe9b→445dc3d docs only;
+the matrix is NOT green because of cross-cluster 4/5; no CI on 445dc3d
+itself) and raised three findings. The first-move method 1-6 is NOT
+complete: these, W1, approval separation, capacity and operations stay open.
+
+### 20.1 Finding 1 [P1]: FlareMigration provisions on an unreadable source CR
+
+- Cause: `Migration/Controller.lean` `buildPlan` fell back to
+  `({}, snapshotPush = true)` when `getFlareCluster` of the source failed
+  (transient API error, Forbidden). The target was then provisioned with the
+  default switch and accepted pushes from its first start, breaking
+  "push refused from the first start" for a per-key-only source.
+- Test (8c24a88, new suite `migration-per-key-only`, repair-ledger leg):
+  seam `FLARE_TEST_MIG_SOURCE_READ_FAIL_FILE` forces the read to fail.
+  2 = nothing labelled `flare.gree.net/migration` applied while it fails and
+  the provision retried; 3 = after recovery the target CR and extra.conf
+  carry `snapshotPush false`, ConfigMap created before the pod, flared
+  restartCount 0, `snapshot_push_accept off`; 4 = seed by the per-key dump
+  (sources declined the push, `rocksdb_snapshot_bootstrap` 0, own master
+  id, every key).
+- Old code (d2e41a2), E2E 38321569386: **2 and 3 failed as predicted** —
+  2: "target objects were applied while the source CR could not be read:
+  flarecluster pk-tgt, configmap pk-tgt-config, deployment pk-tgt-operator,
+  statefulset pk-tgt-nodes, services" (one seam line, then Provisioning →
+  Duplicating); 3: "target CR snapshotPush is (empty), want false". 1 and 4
+  passed (4: the sources refuse the push by their own switch, so the
+  target's default did not get a push in this run — the hole is the
+  target's acceptance, not exercised by a sender here).
+- Fix 5e21186: `Provision.sourceSettings` makes an unreadable source an
+  error; `buildPlan` returns it, nothing of the target is applied, the tick
+  logs "action failed (will retry)". flare_unit 509 (3 new checks).
+
+### 20.2 Finding 2 [P1]: in-cluster proxy paths enqueue with expected_id 0
+
+- Cause: `cluster::_get_proxy_thread` dropped the active-map key and
+  `_enqueue(node_key)`, `_enqueue(type)` and `_broadcast` (prior and normal
+  loops) called `thread::enqueue(q, max)` with `expected_id = 0`. A thread
+  cleaned and reused by `thread_pool::get` for another handler after the
+  map copy accepted the item, so a forward could go to another destination
+  (reading `get_id` just before enqueue does not close it: the reuse can
+  happen after that read). These are the normal hybrid forward paths, so
+  they are in scope for the move.
+- Tests (cfbde8f, d2e41a2; `test_handler_proxy.cc`): a hook in
+  `thread::enqueue` before the lock shuts the thread down and reuses it for
+  a recording handler of ANOTHER node's type (d2e41a2: with the same type,
+  broadcast's normal loop legitimately reaches the same node's new handler
+  through a fresh map copy — old-code run 38320236628 counted 2 for
+  `_broadcast(prior)`, a test design error, not a product result). Each
+  asserts nothing reached the new handler and nothing stays queued.
+- Old code: nix-linux 38320236628 (cfbde8f) and **38321565890 (d2e41a2)
+  failed the four tests in both builds** (legacy 3644 / RocksDB 5382, 4
+  failures each; every path r=0, taken by the new handler 1).
+- Fix 5e21186: `_get_proxy_thread` returns the map key; all four paths pass
+  it as `expected_id`, so `thread::enqueue` refuses under its queue lock
+  when the owner changed; the callers' existing failure path runs.
+- Audit (grep of `src/` on 5e21186): `thread::enqueue` has five callers —
+  the four cluster.cc paths above and `cluster_replication::_enqueue`
+  (already passing the key); none passes 0 any more. The parameter's
+  default (0 = no check) remains for tests only.
+
+### 20.3 Finding 3 [P2]: ACCEPTANCE's final per-key check did not prove the copy
+
+- Cause: the final check read the replica with `rawGet(sIp)` while the
+  balance was master 100 / slave 50 and not waited for; a GET proxied to
+  the master also passed, so cursor/item equality did not prove the
+  replica's own contents.
+- Change 8c24a88: flared runs with the read trace; the final round routes
+  reads slave 100 and waits for it, uses ONE connection after a marker, and
+  `TraceMatch.judgeLocalCopy` fails closed (no expectation, no reply, key
+  set mismatch, any class other than ok, any key not decided local and
+  answered locally; absent==absent passes only as a traced local miss).
+  Proxied answers count as availability only. Live control: with reads
+  routed to the master the same check must fail on every key.
+- Run (38321569386, d2e41a2): ACCEPTANCE ok — "per-key: 28 keys (6
+  deleted): master matches; replica problems 0"; control "problems 28/28,
+  all 'not from the own copy' = true". continuous-replication 17/17.
+- Unit controls (flare_unit): corrupted value, resurrected delete, proxied,
+  untraced absent, unobserved/short/empty round, explicit error — each must
+  fail. **Residual: copy corruption has a unit-level control only** (no live
+  way to corrupt a replica copy in the E2E).
+
+### 20.4 Runs on the fixes 5e21186 (NOT reviewed)
+
+- nix-linux 38326746977: **success** — legacy 3644 / RocksDB 5382, 0
+  failures (the four reuse tests pass; they failed on d2e41a2, 38321565890).
+  Independently confirmed by the reviewer.
+- Full matrix E2E 38326749833: workflow **failure**. 12 of 14 legs pass:
+  authority 38, breaker-migration 29, continuous-replication 34,
+  copy-protection 16, empty-source 9, failover-data 26, r3-source 11, repair
+  17, **repair-ledger 7 (incl. migration-per-key-only 4/4, the finding-1
+  test)**, replication 29, topology 49, wal-recovery 26 (counts include
+  skips; skips are not passes).
+  - cross-cluster 13/15: faults **4 and 5** — the known X4, excluded from
+    green, not fixed.
+  - **restore-promotion 17/22: history-tracking 12-16 FAILED** (22/22 on
+    be60dbb, 38291695432). NOT a known failure. 13-16 fail their
+    preconditions ("no master", "no recorded history") after 12.
+    - 12: "the replica holding the data was not seated". Just before the
+      kill (01:25:02) the operator demoted the replica to a live proxy: "master
+      dropped 4 write(s) to it" (the writes of test 12, made while the
+      replica was in Prepare after its rebuild at the promotion of test 11).
+      With the master dead, nothing was promotable ("R3: not eligible until
+      re-validated"); the master's history record was then not found.
+    - Relation to 5e21186: **not shown either way**. Evidence against the
+      new refusal: every refusal in `thread::enqueue` and in the callers
+      logs a WRN; the killed master's process logged 10 WRN, all connect()
+      failures at 01:20, none from enqueue. `trigger` is synchronous, so a
+      new proxy thread's id is set before the map copy. The be60dbb run had
+      the same timing (writes while the replica was in Prepare) and no drop.
+    - **Cause UNDETERMINED**: which path counted the 4 drops is not
+      identified — the fail-fast and thread-shutdown (`on_abandoned`) paths
+      count without a log line (an observability gap in itself).
+    - Re-run on 16921a5 (same flared and operator code as 5e21186; only
+      E2E/unit test code differs), E2E 38334475299: history-tracking **7/7**
+      (the same test, numbered 20 there, passed). The failure did not
+      reproduce; it stays recorded, its cause undetermined (one pass does
+      not close it).
+- The candidate is therefore NOT pinned on 5e21186.
+
+### 20.5 Round 11 [P2]: ACCEPTANCE's required observations fail closed (16921a5)
+
+- Gap (no product defect claimed): the "no rebuild / no restart / same
+  history" part of ACCEPTANCE compared Option values (`None == None`),
+  defaulted UID to "?", counters and cursors to 0 and a failed restartCount
+  read to 0; epoch / master id could match as both unread. A run that really
+  rebuilt but could not read the counter afterwards would have passed.
+- Change 16921a5: `TraceMatch.NodeObs` / `AccObs` — per node ONE stats reply
+  and ONE pod read (UID, podIP, flared containerID, restartCount); boot id,
+  copy id, source epoch, master id, reconstruction_started,
+  wal_fallback_to_dump, applied, head, curr_items, and the replica's
+  follow epoch. Unreadable / absent / unparseable / empty identity = missing
+  = FAIL; 0 is a value; the stats must come from the pod's IP.
+  `judgeNoRebuild` judges complete observations only (same process, copy,
+  pod; master history unchanged and followed; no reconstruction or dump
+  fallback; cursor not backwards). Observed before the cut, after the heal
+  and after the final local-copy round and its control. Cursor, head and
+  dropped counters in ACCEPTANCE are read strictly.
+- flare_unit 518 (9 checks): each missing field named; both sides
+  unreadable; pod read failed; counter unreadable after a real rebuild;
+  parse failures; stats not from the pod's address; each change kind;
+  cursor backwards; caughtUp without item counts.
+- Until 16921a5 passes in CI, the earlier ACCEPTANCE passes count for the
+  local-copy match (28 keys) and the proxy control only, NOT for an
+  unconditional "no rebuild / no restart" acceptance.
+- Not changed: the other tests of the suite keep their `getD` defaults
+  (outside this request).
+- Run 38334475299 (16921a5, suites continuous-replication +
+  history-tracking): **24/24**. ACCEPTANCE ok with complete observations
+  before the cut and after the final round (printed in full); per-key 28 keys
+  (6 deleted), replica problems 0; control 28/28 not from the own copy.
+  One kind run; not AZ evidence.
+
+### 20.6 Candidate
+
+- **Candidate pinned: 16921a5** (label `saf10-first-move-c2`; = fixes
+  5e21186 + the fail-closed ACCEPTANCE; later commits docs only). nix-linux
+  and the full matrix are dispatched on the docs head; results to follow.
+  X4 excluded from green; skips listed, not passes; the history-tracking
+  12-16 failure on 5e21186 stays recorded whatever this run shows.
+- Open (unchanged by this round): W1 (internal expiry writes cannot be
+  stopped), approval separation (RBAC/HMAC proposal, user decision),
+  capacity, operations, X4, copy corruption controlled at unit level only.
+  Method 1-6 is NOT complete.
+
 ## UNKNOWN
 
 - whether a blocking connect to a black-holed LB address reaches the

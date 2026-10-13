@@ -37,18 +37,19 @@ run の範囲だけを示す（候補は未固定。R5）。
 | R2 明示的エラー | 設定 34e53ac、chart 例 | empty-source 9（R2）・continuous-replication の read-unavailable-error 試験が 38267434934（9260841）で合格 | なし | 方針のみ決定済み（2026-10-06）。本番設定は未承認 |
 | R3 activation の再検証 | 実装済み | empty-source 1-7 合格、8 は前提条件の照合不具合：38267434934。c48ccd9 で修正し 38279220151（05eee82）で 9/9 | なし | なし |
 | R4 local read guard | 実装済み | 38267434934 で合格。過去の失敗の原因は**未判定**（合格では閉じない） | なし | なし |
-| R5 候補での全体 CI | — | 候補 **be60dbb**（`saf10-first-move-c1`、head 08cbe9b は docs のみ）: nix-linux 38291691334 success（legacy 3640 / RocksDB 5378、0 failures）; 全体 E2E 38291695432 は X4（cross-cluster faults 4-5、既知・green 除外）以外すべて PASS — 実行 300 pass / 22 skip / 2 fail（X4）。review §19.8 | 未 | 未 |
+| R5 候補での全体 CI | — | 候補 **be60dbb**（`saf10-first-move-c1`、head 08cbe9b は docs のみ）: nix-linux 38291691334 success（legacy 3640 / RocksDB 5378、0 failures）; 全体 E2E 38291695432 は X4（cross-cluster faults 4-5、既知・green 除外）以外すべて PASS — 実行 300 pass / 22 skip / 2 fail（X4）。review §19.8。その後のコード変更（5e21186）で候補は無効。5e21186 の全体 E2E 38326749833 は X4 と history-tracking 12-16（**原因未判定**、16921a5 の再実行 38334475299 では再現せず）で失敗。新候補は未固定 | 未 | 未 |
 | R6 遅延要件 | — | 相対値のみ | — | 数値基準**未決**（U） |
 | R7 容量・同時再構築 | 同時再構築は実装（394d664：serve を要求ごとに分離、operator の上限） | 単体・E2E あり（台帳 EV 参照） | なし | 容量評価**未実施**（環境・実 capture 未承認） |
 | R8 リリース運用 | 復元の履歴・provenance は実装（SAF-10） | restore-promotion 22/22・failover-data 26（skip 1）：38267434934 | なし | upgrade／rollback／アラート／カナリア／pf-dev リハーサル**未実施**（未承認）。旧 backup 互換性は**未承認** |
 | R9 承認 | — | — | — | なし |
 | R10 boot id | 修正済み | 37472032909 ほか | **なし** | なし |
-| M1 per-key-only（push 経路を設定で閉じる） | be8831d（宛先も拒否）、ee13ef8（FlareMigration の宛先）、be60dbb（operator が無効時にも switch を出す） | 旧コード 05eee82 で cutter 失敗（38279206031）、be60dbb で nix 合格（38285740092）・per-key-only 6/6（38285744476）。FlareMigration 経路の E2E なし | なし | 方式のみ承認 |
+| M1 per-key-only（push 経路を設定で閉じる） | be8831d（宛先も拒否）、ee13ef8（FlareMigration の宛先）、be60dbb（operator が無効時にも switch を出す） | 旧コード 05eee82 で cutter 失敗（38279206031）、be60dbb で nix 合格（38285740092）・per-key-only 6/6（38285744476）。FlareMigration 経路：旧コード d2e41a2 で migration-per-key-only 2・3 失敗（38321569386）、修正 5e21186 で 4/4（38326749833 の repair-ledger）。ソース CR 読取失敗時は provision しない（指摘1） | なし | 方式のみ承認 |
 | M2 書き込み停止 runbook | 7974102（手順のみ。自動 fence なし。W1 未決） | — | なし | 方式のみ承認。writer の棚卸し・担当は U |
 | M3 移設後 hybrid | 既存機能。chart 例で有効化（既定値は不変） | continuous-replication 33（skip 17）：38267434934 | なし | 方式のみ承認 |
-| M4 受入条件（遮断→再開・不適格 read 停止） | 1 run で全要素を見る試験 b5b218a | 38279230679（05eee82）で合格（1 回、kind の iptables 遮断。AZ 障害の証拠ではない）。対応表は review §19.5 | なし | — |
+| M4 受入条件（遮断→再開・不適格 read 停止） | 1 run で全要素を見る試験 b5b218a | 38279230679（05eee82）で合格（1 回、kind の iptables 遮断。AZ 障害の証拠ではない）。対応表は review §19.5 指摘3（2026-10-13）：最終照合は replica 自身のコピーからの応答を read trace で要求（8c24a88、proxy 対照 28/28）。必須観測の fail-closed（16921a5）は 38334475299 で合格（1 回）。それ以前の合格は「再構築・再起動なし」の無条件な証拠ではない | なし | — |
 | M5 損失の扱い | 文書（非同期、last resort は lossy） | — | — | — |
 | P1/P2（2026-10-13 指摘） | 94f7d39（P2 試験の前提は 66d0fd7 で修正） | 旧コード 48771da（38277313979）で両方失敗（P2 は試験自身の前提で先に失敗）。修正後 05eee82（38279206031）で合格 | 指摘はユーザーの静的レビュー。修正のレビューはなし | — |
+| 指摘1・2（2026-10-13 再レビュー、P1） | 5e21186（buildPlan：ソース CR 読取失敗は error で再試行。cluster.cc：in-cluster proxy 4 経路が取得時の map key を expected_id に渡す） | 旧コード：nix 38321565890（d2e41a2）で再利用 4 試験が両 build で失敗、E2E 38321569386 で migration-per-key-only 2・3 失敗。修正後：nix 38326746977 success（3644/5382、0 failures）、migration-per-key-only 4/4（38326749833） | コード修正はユーザーが確認（2026-10-13）。E2E 全体は未完了の扱い | — |
 
 不明のまま残すもの：authority29 の原因、旧 backup 互換性（未承認）、容量（未評価）、
 帰属不明の DURING 警告 2 件、T24 の原因（resolver が古いアドレスを返す理由）。

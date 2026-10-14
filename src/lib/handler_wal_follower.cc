@@ -162,7 +162,7 @@ int handler_wal_follower::run() {
 		}
 		if (r == attempt_progress && this->_batch_delay_usec > 0) {
 			// Catch-up throttle (repl-follow-batch-delay-usec): pause after
-			// every response that applied something, so a long catch-up does
+			// every response that moved the position, so a long catch-up does
 			// not take the replica's whole I/O budget. The follower stays
 			// connected and its source position stays fresh, so a throttled
 			// backlog is reported as such (the failover lag bound sees it).
@@ -247,7 +247,6 @@ int handler_wal_follower::_follow_once(bool& more) {
 		this->_max_batches, this->_max_response_bytes);
 	const int client_result = static_cast<int>(op->get_client_result());
 	const bool transport_ok = (rc == 0) || (client_result != op_repl_sync_wal::client_protocol_error);
-	const uint64_t applied = op->get_applied();
 	const uint64_t server_lsn = op->get_server_latest_lsn();
 	more = op->get_more_available();
 	delete op;
@@ -262,7 +261,7 @@ int handler_wal_follower::_follow_once(bool& more) {
 		case attempt_progress:
 			if (stats_object != NULL) stats_object->follow_note_progress(rdb->get_repl_last_lsn());
 			if (stats_object != NULL) stats_object->follow_set_state(stats::follow_following, "");
-			return applied > 0 ? attempt_progress : attempt_idle;
+			return slice_outcome(cursor, rdb->get_repl_last_lsn());
 		case attempt_needs_rebuild:
 			if (stats_object != NULL) stats_object->follow_set_state(stats::follow_needs_rebuild, reason_for(client_result));
 			return attempt_needs_rebuild;

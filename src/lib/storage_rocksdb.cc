@@ -4112,7 +4112,7 @@ uint64_t storage_rocksdb::get_latest_sequence_number() {
 }
 
 int storage_rocksdb::get_updates_since(uint64_t seq_number, vector<pair<uint64_t, rocksdb::WriteBatch>>& updates,
-		uint64_t max_batches, uint64_t max_bytes, bool* more) {
+		uint64_t max_batches, uint64_t max_bytes, bool* more, uint64_t applied_through) {
 	if (more != NULL) {
 		*more = false;
 	}
@@ -4156,6 +4156,16 @@ int storage_rocksdb::get_updates_since(uint64_t seq_number, vector<pair<uint64_t
 			break;
 		}
 		rocksdb::BatchResult batch = iter->GetBatch();
+		// A batch whose last sequence is at or before applied_through is one
+		// the reader already holds: skip it without spending the bounds on
+		// it. pf-dev 2026-10-14: a 26.8 MB batch at the follower's position
+		// filled its 4 MB slice by itself on every request, so nothing after
+		// it was ever sent.
+		if (applied_through > 0
+				&& batch.sequence + batch.writeBatchPtr->Count() <= applied_through + 1) {
+			iter->Next();
+			continue;
+		}
 		bytes += batch.writeBatchPtr->Data().size();
 		// Copy the WriteBatch contents since writeBatchPtr is a unique_ptr
 		updates.push_back(std::make_pair(batch.sequence, *batch.writeBatchPtr));

@@ -363,6 +363,45 @@ def suite : TestSuite := {
           if !audited then return .fail "no UID-bound current topology observation reached the operator"
           return .pass },
 
+    -- pf-dev 2026-10-14 (rc66): one value larger than the follower's slice
+    -- budget (repl-follow-max-bytes, 4 MB by default) stopped the follower
+    -- for good. Its position sat at the end of that batch; every slice began
+    -- by re-sending it, spent the budget on it alone and ended with MORE, and
+    -- the follower retried at once — applied position frozen, ~0.45 core per
+    -- node with no writes, until the source purged the WAL.
+    { name := "a value larger than the follow budget: the follower passes it and reaches the master's head; the copies match"
+      run := do
+        match ← pair with
+        | .error e => return .fail e
+        | .ok (_, mIp, _, sIp) =>
+          let size := 5 * 1024 * 1024
+          let cmd := s!"head -c {size} /dev/zero | tr '\\0' x > /tmp/bigvalue && (printf 'set follow_bigvalue 0 0 {size}\\r\\n'; cat /tmp/bigvalue; printf '\\r\\n') | nc -w 15 {mIp} {cfg.flarePort}"
+          let reply ← execInDebugPod cfg.debugPod cfg.«namespace» cmd
+          match reply with
+          | .error e => return .fail s!"could not write the large value: {e}"
+          | .ok o =>
+            if !containsSubstr o "STORED" then return .fail s!"the master did not store the {size}-byte value: {o.trim.take 200}"
+          let stored ← writeKeys cfg.debugPod cfg.«namespace» mIp cfg.flarePort "after_big" 10
+          if stored != 10 then return .fail s!"stored only {stored}/10 after the large value"
+          let head := (← statNat mIp "rocksdb_latest_sequence_number").getD 0
+          let reached ← waitForCondition "the replica's applied position reaches the master's head" 60 do
+            return (← statNat sIp "repl_applied_lsn").getD 0 >= head
+          let applied := (← statNat sIp "repl_applied_lsn").getD 0
+          IO.eprintln s!"# large value: master head {head}; replica applied {applied}; state {← statStr sIp "repl_follow_state"}; wal skipped {← statNat sIp "repl_wal_skipped"}"
+          if !reached then return .fail s!"the follower stopped behind the large value: applied {applied} < head {head} after 60 s"
+          -- a replica read may be proxied to the master, so the copy is
+          -- checked by the replica's own key count
+          let same ← waitForCondition "replica's local items match the master's" 60 do
+            return (← currItems sIp) == (← currItems mIp)
+          if !same then return .fail s!"local items master={← currItems mIp} replica={← currItems sIp}"
+          -- leave the keyspace as the later tests expect it
+          discard <| execInDebugPod cfg.debugPod cfg.«namespace» s!"printf 'delete follow_bigvalue\\r\\n' | nc -w 5 {mIp} {cfg.flarePort}"
+          let head2 := (← statNat mIp "rocksdb_latest_sequence_number").getD 0
+          let reached2 ← waitForCondition "the replica follows the delete" 60 do
+            return (← statNat sIp "repl_applied_lsn").getD 0 >= head2
+          if !reached2 then return .fail s!"the follower did not follow the delete after the large value (applied {← statNat sIp "repl_applied_lsn"} < {head2})"
+          return .pass },
+
     { name := "cut: create, update and delete on the master while the replica is unreachable; then new writes stop"
       run := do
         match ← pair with

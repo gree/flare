@@ -237,8 +237,11 @@ int op_repl_sync_wal::_run_server() {
 	// slice (follow mode) and unbounded for the reconstruction path.
 	vector<pair<uint64_t, rocksdb::WriteBatch>> updates;
 	bool more = false;
+	// The requested LSN is the client's APPLIED position (follower and
+	// catch-up both send get_repl_last_lsn()), so the batch holding it is
+	// not sent again.
 	int result = rocksdb->get_updates_since(this->_lsn, updates,
-		this->_max_batches, this->_max_response_bytes, &more);
+		this->_max_batches, this->_max_response_bytes, &more, this->_lsn);
 
 	if (result == storage_rocksdb::ERR_LSN_PURGED) {
 		log_notice("LSN %llu purged from WAL, slave needs full sync", this->_lsn);

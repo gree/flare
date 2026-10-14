@@ -497,8 +497,13 @@ public:
 	// pulled into memory before a single byte is sent (design §4, condition
 	// 7). 0 means unbounded, which is what the reconstruction path still
 	// asks for. `more` says whether the iterator had further updates.
+	// applied_through (0 = off): the reader already holds every sequence up
+	// to it, so batches ending at or before it are neither returned nor
+	// counted against the bounds (RocksDB starts at the batch HOLDING
+	// seq_number; re-sending it could spend a whole bounded slice).
 	int get_updates_since(uint64_t seq_number, vector<pair<uint64_t, rocksdb::WriteBatch>>& updates,
-		uint64_t max_batches = 0, uint64_t max_bytes = 0, bool* more = NULL);
+		uint64_t max_batches = 0, uint64_t max_bytes = 0, bool* more = NULL,
+		uint64_t applied_through = 0);
 	// ---- COMMON APPLY RULE (design §3.3, §3.4, §3.5, §3.8) ----------------
 	// Forwarded delivery of ONE change. Takes the apply lock in SHARED mode
 	// plus this key's slot lock: forwarded changes stay concurrent with one

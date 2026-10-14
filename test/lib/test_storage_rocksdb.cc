@@ -3837,6 +3837,10 @@ void test_follow_disconnect_is_not_a_rebuild() {
 void test_follow_more_drains_even_when_forwarding_already_applied_slice() {
 	cut_assert_false(handler_wal_follower::retry_immediately(handler_wal_follower::attempt_idle, true));
 	cut_assert_true(handler_wal_follower::retry_immediately(handler_wal_follower::attempt_progress, true));
+	// Progress is the position moving, whether the slice's changes were
+	// applied or skipped as already forwarded.
+	cppcut_assert_equal(handler_wal_follower::attempt_progress, handler_wal_follower::slice_outcome(100, 101));
+	cppcut_assert_equal(handler_wal_follower::attempt_idle, handler_wal_follower::slice_outcome(100, 100));
 	cut_assert_false(handler_wal_follower::retry_immediately(handler_wal_follower::attempt_idle, false));
 	cut_assert_false(handler_wal_follower::retry_immediately(handler_wal_follower::attempt_progress, false));
 	cut_assert_false(handler_wal_follower::retry_immediately(handler_wal_follower::attempt_disconnected, true));

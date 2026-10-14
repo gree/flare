@@ -68,9 +68,16 @@ public:
 	static attempt_outcome classify(int client_result, bool transport_ok);
 	static const char* reason_for(int client_result);
 	// MORE describes backlog, even when every change in the slice was
-	// already delivered by forwarding. Do not poll-sleep while draining it.
+	// already delivered by forwarding: progress means the POSITION moved, so
+	// such a slice drains at once. MORE without progress waits the poll
+	// interval — retrying it at once is a hot loop if the source keeps
+	// cutting the slice before anything new (pf-dev 2026-10-14).
 	static bool retry_immediately(attempt_outcome outcome, bool more) {
-		return more && (outcome == attempt_progress || outcome == attempt_idle);
+		return more && outcome == attempt_progress;
+	}
+	// A successful slice made progress iff it moved the applied position.
+	static attempt_outcome slice_outcome(uint64_t position_before, uint64_t position_after) {
+		return position_after > position_before ? attempt_progress : attempt_idle;
 	}
 
 protected:

@@ -3828,14 +3828,77 @@ void test_follow_disconnect_is_not_a_rebuild() {
 		handler_wal_follower::classify(op_repl_sync_wal::client_lsn_purged, false));
 }
 
+// MORE with progress (the position moved, even if every change in the slice
+// was already delivered by forwarding) drains at once. MORE WITHOUT progress
+// waits the poll interval: pf-dev 2026-10-14, the source re-sent the 26.8 MB
+// batch holding the position, the byte budget cut the slice after it, and
+// "idle + MORE" retried with no sleep — a hot loop at ~0.45 core on each node
+// with no writes at all.
 void test_follow_more_drains_even_when_forwarding_already_applied_slice() {
-	cut_assert_true(handler_wal_follower::retry_immediately(handler_wal_follower::attempt_idle, true));
+	cut_assert_false(handler_wal_follower::retry_immediately(handler_wal_follower::attempt_idle, true));
 	cut_assert_true(handler_wal_follower::retry_immediately(handler_wal_follower::attempt_progress, true));
 	cut_assert_false(handler_wal_follower::retry_immediately(handler_wal_follower::attempt_idle, false));
 	cut_assert_false(handler_wal_follower::retry_immediately(handler_wal_follower::attempt_progress, false));
 	cut_assert_false(handler_wal_follower::retry_immediately(handler_wal_follower::attempt_disconnected, true));
 	cut_assert_false(handler_wal_follower::retry_immediately(handler_wal_follower::attempt_error, true));
 	cut_assert_false(handler_wal_follower::retry_immediately(handler_wal_follower::attempt_needs_rebuild, true));
+}
+
+namespace {
+	struct serving_sync_wal : public op_repl_sync_wal {
+		serving_sync_wal(shared_connection c, storage* st) : op_repl_sync_wal(c, st) { }
+		using op_repl_sync_wal::_parse_text_server_parameters;
+		using op_repl_sync_wal::_run_server;
+	};
+
+	// The LSN of every batch a served slice carries, in order.
+	vector<uint64_t> served_lsns(const string& out) {
+		vector<uint64_t> lsns;
+		size_t pos = 0;
+		while ((pos = out.find("LSN ", pos)) != string::npos) {
+			if (pos == 0 || out[pos - 1] == '\n') {
+				lsns.push_back(strtoull(out.c_str() + pos + 4, NULL, 10));
+			}
+			pos += 4;
+		}
+		return lsns;
+	}
+}
+
+// A follow slice must start AFTER the follower's position. RocksDB begins at
+// the batch holding the requested sequence, and the follower asks with the
+// position it has applied, so that batch is one it already has. pf-dev
+// 2026-10-14: that batch was a 26.8 MB value, the follower's 4 MB budget was
+// spent on it alone, the slice ended with MORE before anything new, and the
+// follower stood at the same position for good (applied 325853 for 52 min,
+// until the source purged it and the replica had to be rebuilt).
+void test_follow_slice_does_not_spend_its_budget_on_the_batch_already_applied() {
+	storage_rocksdb* m = make_rocksdb(wal_master_dir);
+	cut_assert_equal_int(0, storage_set_string(m, "before", "v"));
+	const string big(5 * 1024 * 1024, 'x');		// more than the 4 MB budget
+	cut_assert_equal_int(0, storage_set_string(m, "big", big));
+	const uint64_t position = m->get_latest_sequence_number();	// the follower applied the big batch
+	cut_assert_equal_int(0, storage_set_string(m, "after1", "v"));
+	cut_assert_equal_int(0, storage_set_string(m, "after2", "v"));
+	const uint64_t head = m->get_latest_sequence_number();
+
+	char request[BUFSIZ];
+	snprintf(request, sizeof(request), " %llu - - 256 4194304\r\n", (unsigned long long)position);
+	shared_connection c(new connection_sstream(request));
+	serving_sync_wal op(c, m);
+	cut_assert_equal_int(0, op._parse_text_server_parameters());
+	op._run_server();
+	const string out = static_cast<connection_sstream*>(c.get())->get_output();
+
+	const vector<uint64_t> lsns = served_lsns(out);
+	cut_assert_false(lsns.empty());
+	// Nothing at or before the position is sent again ...
+	cut_assert_operator(lsns.front(), >, position);
+	// ... and the slice reaches the writes after it.
+	cut_assert_operator(lsns.back(), <=, head);
+	cut_assert_operator(lsns.back(), >, position);
+
+	drop_rocksdb(m, wal_master_dir);
 }
 
 void test_follow_local_read_guard_until_caught_up() {

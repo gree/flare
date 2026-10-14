@@ -3891,14 +3891,17 @@ void test_follow_slice_does_not_spend_its_budget_on_the_batch_already_applied() 
 	const string out = static_cast<connection_sstream*>(c.get())->get_output();
 
 	const vector<uint64_t> lsns = served_lsns(out);
+	// Close and remove the store BEFORE asserting: a failed assertion leaves
+	// the test at once, and a store left open on wal_master_dir would break
+	// every later test that opens it (the old-code run 38529234422 hung).
+	drop_rocksdb(m, wal_master_dir);
+
 	cut_assert_false(lsns.empty());
 	// Nothing at or before the position is sent again ...
 	cut_assert_operator(lsns.front(), >, position);
 	// ... and the slice reaches the writes after it.
 	cut_assert_operator(lsns.back(), <=, head);
 	cut_assert_operator(lsns.back(), >, position);
-
-	drop_rocksdb(m, wal_master_dir);
 }
 
 void test_follow_local_read_guard_until_caught_up() {

@@ -18,8 +18,14 @@ namespace test_stats_reconstruction {
 	void setup() { st = new stats(); }
 	void teardown() { delete st; st = NULL; }
 
+	// SC-16: a slice whose values forwarding already supplied still MOVES the
+	// position, so it is progress and MORE is drained at once. Only a slice
+	// that did not move the position waits the poll interval (pf-dev
+	// 2026-10-14: retrying that at once was a hot loop).
 	void test_follow_backlog_does_not_poll_sleep_after_superseded_slice() {
-		cut_assert_true(handler_wal_follower::retry_immediately(handler_wal_follower::attempt_idle, true));
+		cut_assert_true(handler_wal_follower::retry_immediately(
+			handler_wal_follower::slice_outcome(100, 140), true));
+		cut_assert_false(handler_wal_follower::retry_immediately(handler_wal_follower::attempt_idle, true));
 		cut_assert_true(handler_wal_follower::retry_immediately(handler_wal_follower::attempt_progress, true));
 		cut_assert_false(handler_wal_follower::retry_immediately(handler_wal_follower::attempt_idle, false));
 		cut_assert_false(handler_wal_follower::retry_immediately(handler_wal_follower::attempt_error, true));
